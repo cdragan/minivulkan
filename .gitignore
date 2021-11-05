@@ -1,2 +1,5 @@
 minivulkan
 minivulkan.S
+
+# Vim swap files
+.*.swp

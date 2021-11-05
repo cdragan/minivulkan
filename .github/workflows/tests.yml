@@ -11,12 +11,11 @@ jobs:
         os:
           - ubuntu-20.04
 
-  runs-on: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
 
-  timeout-minutes: 2
+    timeout-minutes: 2
 
-  steps:
-    - uses: actions/checkout@v2
-    - name: Test
-      run: make -j$(grep -c ^processor /proc/cpuinfo)
-
+    steps:
+      - uses: actions/checkout@v2
+      - name: Test
+        run: make -j$(grep -c ^processor /proc/cpuinfo)
