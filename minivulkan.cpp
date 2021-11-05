@@ -1,0 +1,113 @@
+#include <stdlib.h>
+#include <unistd.h>
+#include <dlfcn.h>
+#include <xcb/xcb.h>
+
+static xcb_intern_atom_reply_t* intern_atom(xcb_connection_t* conn,
+                                            bool              only_if_exists,
+                                            const char*       str,
+                                            size_t            str_size)
+{
+    const xcb_intern_atom_cookie_t cookie = xcb_intern_atom(conn, only_if_exists, str_size, str);
+
+    return xcb_intern_atom_reply(conn, cookie, nullptr);
+}
+
+static void set_fullscreen(xcb_connection_t* conn,
+                           xcb_window_t      window)
+{
+    static const char net_wm_state[] = "_NET_WM_STATE";
+    xcb_intern_atom_reply_t* const atom_wm_state = intern_atom(conn,
+                                                               false,
+                                                               net_wm_state,
+                                                               sizeof(net_wm_state) - 1);
+
+    static const char net_wm_state_fullscreen[] = "_NET_WM_STATE_FULLSCREEN";
+    xcb_intern_atom_reply_t* const atom_wm_fullscreen = intern_atom(conn,
+                                                                    false,
+                                                                    net_wm_state_fullscreen,
+                                                                    sizeof(net_wm_state_fullscreen) - 1);
+
+    xcb_change_property(conn,
+                        XCB_PROP_MODE_REPLACE,
+                        window,
+                        atom_wm_state->atom,
+                        XCB_ATOM_ATOM,
+                        32,
+                        1,
+                        &atom_wm_fullscreen->atom);
+}
+
+static xcb_connection_t* init_window()
+{
+    xcb_connection_t* const conn = xcb_connect(nullptr, nullptr);
+
+    if (conn) {
+
+        xcb_screen_t* const screen = xcb_setup_roots_iterator(xcb_get_setup(conn)).data;
+
+        const xcb_window_t window = xcb_generate_id(conn);
+
+        uint32_t values[2] = {
+            0,
+            XCB_EVENT_MASK_BUTTON_PRESS | XCB_EVENT_MASK_KEY_PRESS
+        };
+
+        xcb_create_window(conn,
+                          XCB_COPY_FROM_PARENT,
+                          window,
+                          screen->root,
+                          0, 0, 1, 1,
+                          0,
+                          XCB_WINDOW_CLASS_INPUT_OUTPUT,
+                          XCB_COPY_FROM_PARENT,
+                          XCB_CW_BACK_PIXEL | XCB_CW_EVENT_MASK,
+                          values);
+
+        set_fullscreen(conn, window);
+
+        xcb_map_window(conn, window);
+
+        xcb_flush(conn);
+    }
+
+    return conn;
+}
+
+static void* load_vulkan()
+{
+    void* const vulkan = dlopen("libvulkan.so.1", RTLD_NOW);
+    return vulkan;
+}
+
+int main()
+{
+    xcb_connection_t* const conn = init_window();
+
+    if ( ! conn)
+        return EXIT_FAILURE;
+
+    if ( ! load_vulkan())
+        return EXIT_FAILURE;
+
+    bool quit = false;
+
+    while ( ! quit) {
+        xcb_generic_event_t* const event = xcb_wait_for_event(conn);
+
+        if ( ! event)
+            break;
+
+        switch (event->response_type & ~0x80) {
+
+            case XCB_BUTTON_PRESS: // mouse
+            case XCB_KEY_PRESS: // keyboard
+                quit = true;
+                break;
+        }
+
+        //free(event);
+    }
+
+    return EXIT_SUCCESS;
+}
