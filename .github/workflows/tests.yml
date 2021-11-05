@@ -1,0 +1,22 @@
+name: Tests
+
+on:
+  push:
+    branches:
+      - main
+jobs:
+  test:
+    strategy:
+      matrix:
+        os:
+          - ubuntu-20.04
+
+  runs-on: ${{ matrix.os }}
+
+  timeout-minutes: 2
+
+  steps:
+    - uses: actions/checkout@v2
+    - name: Test
+      run: make -j$(grep -c ^processor /proc/cpuinfo)
+
