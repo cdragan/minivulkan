@@ -36,7 +36,7 @@ ifeq ($(UNAME), Linux)
     LDFLAGS += -lxcb -ldl
     ifdef debug
         STRIP = true
-        CFLAGS += -Og
+        CFLAGS += -Og -g
     else
         STRIP = strip
         CFLAGS += -DNDEBUG -Os
@@ -59,7 +59,7 @@ ifeq ($(UNAME), Darwin)
 
     ifdef debug
         STRIP = true
-        CFLAGS += -Og
+        CFLAGS += -Og -g
     else
         STRIP = strip -x
         CFLAGS += -DNDEBUG -Os
@@ -114,7 +114,7 @@ $(out_dir):
 	mkdir -p $(out_dir)
 
 $(out_dir)/minivulkan: $(call OBJ_FROM_SRC, $(src_files))
-	$(LINK) $(LDFLAGS) -o $@ $^
+	$(LINK) -o $@ $^ $(LDFLAGS)
 	$(STRIP) $@
 
 $(out_dir)/$(notdir %.$(o_suffix)): %.c | $(out_dir)

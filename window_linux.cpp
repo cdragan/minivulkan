@@ -1,3 +1,5 @@
+#include "window.h"
+
 #include <stdlib.h>
 #include <unistd.h>
 #include <dlfcn.h>
@@ -6,7 +8,7 @@
 static xcb_intern_atom_reply_t* intern_atom(xcb_connection_t* conn,
                                             bool              only_if_exists,
                                             const char*       str,
-                                            size_t            str_size)
+                                            uint16_t          str_size)
 {
     const xcb_intern_atom_cookie_t cookie = xcb_intern_atom(conn, only_if_exists, str_size, str);
 
@@ -21,6 +23,8 @@ static void set_fullscreen(xcb_connection_t* conn,
                                                                false,
                                                                net_wm_state,
                                                                sizeof(net_wm_state) - 1);
+    if (!atom_wm_state)
+        return;
 
     static const char net_wm_state_fullscreen[] = "_NET_WM_STATE_FULLSCREEN";
     xcb_intern_atom_reply_t* const atom_wm_fullscreen = intern_atom(conn,
