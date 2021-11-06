@@ -3,7 +3,6 @@
 # Sources
 
 src_files += minivulkan.cpp
-src_files += window_macos.m
 
 ##############################################################################
 # Determine target OS
@@ -32,6 +31,8 @@ ifneq ($(UNAME), Windows)
 endif
 
 ifeq ($(UNAME), Linux)
+    src_files += window_linux.m
+
     LDFLAGS += -lxcb -ldl
     ifdef debug
         STRIP = true
@@ -48,6 +49,8 @@ ifeq ($(UNAME), Linux)
 endif
 
 ifeq ($(UNAME), Darwin)
+    src_files += window_macos.m
+
     frameworks += Cocoa
     frameworks += CoreVideo
     frameworks += Quartz
