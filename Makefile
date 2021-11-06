@@ -19,9 +19,10 @@ endif
 # Compiler flags
 
 ifneq ($(UNAME), Windows)
-    CFLAGS += -Wall -Wextra -Wno-unused-parameter -Wunused
+    CFLAGS += -Wall -Wextra -Wno-unused-parameter -Wunused -Wno-missing-field-initializers
     CFLAGS += -Wshadow -Wformat=2 -Wconversion -Wdouble-promotion
 
+    CFLAGS += -fvisibility=hidden
     CFLAGS += -fPIC
 
     CXXFLAGS += -x c++ -std=c++17 -fno-rtti -fno-exceptions
@@ -33,8 +34,6 @@ endif
 
 ifeq ($(UNAME), Linux)
     src_files += window_linux.m
-
-    CFLAGS += -fvisibility=hidden
 
     LDFLAGS += -lxcb -ldl
 
@@ -58,8 +57,6 @@ ifeq ($(UNAME), Darwin)
     frameworks += Cocoa
     frameworks += CoreVideo
     frameworks += Quartz
-
-    CFLAGS += -fvisibility=hidden
 
     LDFLAGS += -fobjc-arc $(addprefix -framework ,$(frameworks))
 
