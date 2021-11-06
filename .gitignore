@@ -1,5 +1,5 @@
-minivulkan
-minivulkan.S
+# Directory with generated files
+Out
 
 # Vim swap files
 .*.swp

@@ -1,0 +1,10 @@
+#!/bin/bash
+
+UNAME=$(uname)
+
+[[ $UNAME = Linux ]] && JOBS=$(grep -c ^processor /proc/cpuinfo)
+[[ $UNAME = Darwin ]] && JOBS=$(sysctl -n hw.ncpu)
+
+echo "Using $JOBS jobs"
+
+make -j $JOBS
