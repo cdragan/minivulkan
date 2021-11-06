@@ -23,7 +23,7 @@ typedef struct
 extern "C" {
 #endif
 
-int create_window(Window* w);
+bool create_window(Window* w);
 
 int event_loop(Window* w);
 

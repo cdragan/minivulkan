@@ -3,6 +3,7 @@
 # Sources
 
 src_files += minivulkan.cpp
+src_files += stdc.cpp
 
 ##############################################################################
 # Determine target OS
@@ -33,7 +34,10 @@ endif
 ifeq ($(UNAME), Linux)
     src_files += window_linux.m
 
+    CFLAGS += -fvisibility=hidden
+
     LDFLAGS += -lxcb -ldl
+
     ifdef debug
         STRIP = true
         CFLAGS += -Og -g
@@ -55,6 +59,8 @@ ifeq ($(UNAME), Darwin)
     frameworks += CoreVideo
     frameworks += Quartz
 
+    CFLAGS += -fvisibility=hidden
+
     LDFLAGS += -fobjc-arc $(addprefix -framework ,$(frameworks))
 
     ifdef debug
@@ -72,7 +78,7 @@ ifeq ($(UNAME), Darwin)
 endif
 
 ifdef VULKAN_SDK
-    CFLAGS += -I$(VULKAN_SDK)/include/vulkan
+    CFLAGS += -I$(VULKAN_SDK)/include
 endif
 
 ##############################################################################

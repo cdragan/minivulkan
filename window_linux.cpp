@@ -42,12 +42,12 @@ static void set_fullscreen(xcb_connection_t* conn,
                         &atom_wm_fullscreen->atom);
 }
 
-int create_window(Window* w)
+bool create_window(Window* w)
 {
     w->conn = xcb_connect(nullptr, nullptr);
 
     if ( ! w->conn)
-        return 1;
+        return false;
 
     xcb_screen_t* const screen = xcb_setup_roots_iterator(xcb_get_setup(w->conn)).data;
 
@@ -75,7 +75,7 @@ int create_window(Window* w)
 
     xcb_flush(w->conn);
 
-    return 0;
+    return true;
 }
 
 int event_loop(Window* w)

@@ -44,7 +44,7 @@ static int macos_draw_frame(void *target);
     - (void)dealloc
     {
         CVDisplayLinkRelease(display_link_);
-        [super dealloc];
+        //[super dealloc];
     }
 
     - (void)loadView
@@ -62,7 +62,7 @@ static int macos_draw_frame(void *target);
 
         self.view.wantsLayer = YES;
 
-        win_->layer_ptr = self.view.layer;
+        win_->layer_ptr = (__bridge void*)self.view.layer;
 
         CVDisplayLinkCreateWithActiveCGDisplays(&display_link_);
         CVDisplayLinkSetOutputCallback(display_link_, &display_link_callback, win_);
@@ -187,7 +187,7 @@ int macos_draw_frame(void *target)
     return 0;
 }
 
-int create_window(Window* w)
+bool create_window(Window* w)
 {
     [NSApplication sharedApplication];
     id delegate = [[AppDelegate alloc]
@@ -200,7 +200,7 @@ int create_window(Window* w)
 
     [delegate createMenu];
 
-    return 0;
+    return true;
 }
 
 int event_loop(Window *w)
