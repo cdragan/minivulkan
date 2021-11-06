@@ -71,6 +71,10 @@ ifeq ($(UNAME), Darwin)
     endif
 endif
 
+ifdef VULKAN_SDK
+    CFLAGS += -I$(VULKAN_SDK)/include/vulkan
+endif
+
 ##############################################################################
 # Directory where generated files are stored
 
