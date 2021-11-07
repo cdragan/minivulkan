@@ -4,22 +4,16 @@
 #import <QuartzCore/CAMetalLayer.h>
 #include "window.h"
 
-static int macos_draw_frame(void *target);
+static bool macos_draw_frame();
 
 @interface VulkanViewController: NSViewController
-    - (id)initWithSize: (NSSize)aSize
-                window: (Window *)aWindow;
+    - (id)initWithSize: (NSSize)aSize;
 @end
 
 @interface VulkanView: NSView
 @end
 
 @interface AppDelegate: NSObject<NSApplicationDelegate>
-    - (id)initWithTitle: (NSString *)title
-                minSize: (NSSize)aMinSize
-                   size: (NSSize)aSize
-                 window: (Window *)aCtx;
-
     - (void)createMenu;
 @end
 
@@ -27,16 +21,13 @@ static int macos_draw_frame(void *target);
     {
         NSSize           size_;
         CVDisplayLinkRef display_link_;
-        Window          *win_;
     }
 
     - (id)initWithSize: (NSSize)aSize
-                window: (Window *)aWindow
     {
         self = [super init];
         if (self) {
             size_ = aSize;
-            win_  = aWindow;
         }
         return self;
     }
@@ -44,7 +35,7 @@ static int macos_draw_frame(void *target);
     - (void)dealloc
     {
         CVDisplayLinkRelease(display_link_);
-        //[super dealloc];
+        [super dealloc];
     }
 
     - (void)loadView
@@ -62,10 +53,8 @@ static int macos_draw_frame(void *target);
 
         self.view.wantsLayer = YES;
 
-        win_->layer_ptr = (__bridge void*)self.view.layer;
-
         CVDisplayLinkCreateWithActiveCGDisplays(&display_link_);
-        CVDisplayLinkSetOutputCallback(display_link_, &display_link_callback, win_);
+        CVDisplayLinkSetOutputCallback(display_link_, &display_link_callback, (__bridge void *)self.view);
         CVDisplayLinkStart(display_link_);
     }
 
@@ -76,7 +65,10 @@ static int macos_draw_frame(void *target);
                                           CVOptionFlags     *flagsOut,
                                           void              *target)
     {
-        if (macos_draw_frame(target)) {
+        NSView *view = (__bridge NSView *)target;
+        //view.layer
+        printf("display %g %g\n", view.frame.size.width, view.frame.size.height);
+        if ( ! macos_draw_frame()) {
             [NSApp terminate: nil];
         }
         return kCVReturnSuccess;
@@ -96,10 +88,10 @@ static int macos_draw_frame(void *target);
         return [CAMetalLayer class];
     }
 
-    - (CALayer*)makeBackingLayer
+    - (CALayer *)makeBackingLayer
     {
         CALayer* layer      = [self.class.layerClass layer];
-        CGSize   view_scale = [self convertSizeToBacking: CGSizeMake(1.0, 1.0)];
+        NSSize   view_scale = [self convertSizeToBacking: NSMakeSize(1, 1)];
         layer.contentsScale = MIN(view_scale.width, view_scale.height);
         return layer;
     }
@@ -108,25 +100,6 @@ static int macos_draw_frame(void *target);
 
 @implementation AppDelegate
     {
-        NSString *title_;
-        NSSize    min_size_;
-        NSSize    size_;
-        Window   *win_;
-    }
-
-    - (id)initWithTitle: (NSString *)aTitle
-                minSize: (NSSize)aMinSize
-                   size: (NSSize)aSize
-                 window: (Window *)aWindow
-    {
-        self = [super init];
-        if (self) {
-            title_    = aTitle;
-            min_size_ = aMinSize;
-            size_     = aSize;
-            win_      = aWindow;
-        }
-        return self;
     }
 
     - (void)createMenu
@@ -150,8 +123,13 @@ static int macos_draw_frame(void *target);
 
     - (void)applicationDidFinishLaunching: (NSNotification *)notification
     {
+        NSRect screen_frame = [[NSScreen mainScreen] frame];
+        NSRect frame_rect   = NSMakeRect(0, 0,
+                                         screen_frame.size.width / 2,
+                                         screen_frame.size.height / 2);
+
         NSWindow *window = [[NSWindow alloc]
-            initWithContentRect: NSMakeRect(0, 0, size_.width, size_.height)
+            initWithContentRect: frame_rect
             styleMask:           (NSWindowStyleMaskTitled |
                                   NSWindowStyleMaskClosable |
                                   NSWindowStyleMaskMiniaturizable |
@@ -161,14 +139,16 @@ static int macos_draw_frame(void *target);
         ];
         [window center];
         [window makeKeyAndOrderFront: nil];
-        window.title   = title_;
-        window.minSize = min_size_;
+        window.title   = @"minivulkan";
+        window.minSize = NSMakeSize(256, 256);
 
-        id view_ctrl = [[VulkanViewController alloc]
-            initWithSize: size_
-            window:       win_
-        ];
+        id view_ctrl = [[VulkanViewController alloc] initWithSize: frame_rect.size];
         window.contentViewController = view_ctrl;
+
+        [window setBackgroundColor: NSColor.blackColor];
+        [window setCollectionBehavior: NSWindowCollectionBehaviorFullScreenPrimary];
+        [window setFrame: screen_frame display: YES];
+        [window toggleFullScreen: self];
     }
 
     - (void)applicationWillTerminate: (NSNotification *)notification
@@ -182,20 +162,15 @@ static int macos_draw_frame(void *target);
 
 @end
 
-int macos_draw_frame(void *target)
+bool macos_draw_frame()
 {
-    return 0;
+    return true;
 }
 
 bool create_window(Window* w)
 {
     [NSApplication sharedApplication];
-    id delegate = [[AppDelegate alloc]
-        initWithTitle: @"minivulkan"
-        minSize:       NSMakeSize(640, 480)
-        size:          NSMakeSize(1024, 768)
-        window:        w
-    ];
+    id delegate = [[AppDelegate alloc] init];
     NSApp.delegate = delegate;
 
     [delegate createMenu];
