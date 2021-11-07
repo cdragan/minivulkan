@@ -93,26 +93,22 @@ asm_suffix = S
 OBJ_FROM_SRC = $(addsuffix .$(o_suffix), $(addprefix $(out_dir)/,$(basename $(notdir $1))))
 
 ##############################################################################
-# Rules
+# Executable
 
-default: $(out_dir)/minivulkan
+exe_name = minivulkan
+
+exe = $(out_dir)/$(exe_name)
 
 ifeq ($(UNAME), Darwin)
+    macos_app_dir = $(out_dir)/$(exe_name).app/Contents/MacOS
 
-    macos_app_dir = $(out_dir)/minivulkan.app/Contents/MacOS
-
-    macos_install_files = Info.plist $(out_dir)/minivulkan
-
-    macos_target_files = $(addprefix $(macos_app_dir)/, $(notdir $(macos_install_files)))
-
-$(macos_app_dir):
-	mkdir -p $@
-
-$(macos_target_files): $(macos_install_files) | $(macos_app_dir)
-	cp $^ $(macos_app_dir)
-
-default: $(macos_target_files)
+    exe = $(macos_app_dir)/$(exe_name)
 endif
+
+##############################################################################
+# Rules
+
+default: $(exe)
 
 clean:
 	rm -rf $(out_dir)
@@ -120,9 +116,21 @@ clean:
 $(out_dir):
 	mkdir -p $(out_dir)
 
-$(out_dir)/minivulkan: $(call OBJ_FROM_SRC, $(src_files))
+$(exe): $(call OBJ_FROM_SRC, $(src_files))
 	$(LINK) -o $@ $^ $(LDFLAGS)
 	$(STRIP) $@
+
+ifeq ($(UNAME), Darwin)
+$(macos_app_dir): | $(out_dir)
+	mkdir -p $(macos_app_dir)
+
+$(exe): | $(macos_app_dir)
+
+default: $(macos_app_dir)/Info.plist
+
+$(macos_app_dir)/Info.plist: Info.plist | $(macos_app_dir)
+	cp $< $@
+endif
 
 $(out_dir)/$(notdir %.$(o_suffix)): %.c | $(out_dir)
 	$(CC) $(CFLAGS) -c -o $@ $<
