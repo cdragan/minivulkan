@@ -2,6 +2,7 @@
 #include <dlfcn.h>
 #include "window.h"
 #include "vulkan_functions.h"
+#include "vulkan_extensions.h"
 #include "stdc.h"
 
 #ifdef NDEBUG
@@ -43,7 +44,7 @@ typedef PFN_vkVoidFunction (*LOAD_FUNCTION)(const char* name);
 static bool load_functions(const char* names, PFN_vkVoidFunction* fn_ptrs, LOAD_FUNCTION load)
 {
     for (;;) {
-        const uint32_t len = strlen(names);
+        const uint32_t len = std::strlen(names);
 
         if ( ! len)
             break;
@@ -122,7 +123,7 @@ static bool init_instance()
     uint32_t num_layer_props = 0;
 
     if (vkEnumerateInstanceLayerProperties) {
-        num_layer_props = sizeof(layer_props) / sizeof(layer_props[0]);
+        num_layer_props = std::array_size(layer_props);
 
         const VkResult res = vkEnumerateInstanceLayerProperties(&num_layer_props, layer_props);
         if (res != VK_SUCCESS && res != VK_INCOMPLETE)
@@ -148,7 +149,7 @@ static bool init_instance()
 
             static VkExtensionProperties ext_props[32];
 
-            uint32_t num_ext_props = sizeof(ext_props) / sizeof(ext_props[0]);
+            uint32_t num_ext_props = std::array_size(ext_props);
 
             const VkResult res = vkEnumerateInstanceExtensionProperties(layer_props[i].layerName,
                                                                         &num_ext_props,
@@ -158,13 +159,13 @@ static bool init_instance()
                     dprintf("    %s\n", ext_props[j].extensionName);
 
                     static const char validation_features_ext[] = "VK_EXT_validation_features";
-                    if (strcmp(ext_props[i].extensionName, validation_features_ext) == 0)
+                    if (std::strcmp(ext_props[i].extensionName, validation_features_ext) == 0)
                         validation_features_str = validation_features_ext;
                 }
             }
 
             static const char validation[] = "VK_LAYER_KHRONOS_validation";
-            if (strcmp(layer_props[i].layerName, validation) == 0) {
+            if (std::strcmp(layer_props[i].layerName, validation) == 0) {
                 validation_str = validation;
                 instance_info.ppEnabledLayerNames = &validation_str;
                 instance_info.enabledLayerCount   = 1;
@@ -208,7 +209,7 @@ static bool find_gpu()
 {
     VkPhysicalDevice phys_devices[16];
 
-    uint32_t count = sizeof(phys_devices) / sizeof(phys_devices[0]);
+    uint32_t count = std::array_size(phys_devices);
 
     const VkResult res = vkEnumeratePhysicalDevices(vk_instance, &count, phys_devices);
 
@@ -223,7 +224,7 @@ static bool find_gpu()
         VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU
     };
 
-    for (uint32_t i_type = 0; i_type < sizeof(seek_types) / sizeof(seek_types[0]); i_type++) {
+    for (uint32_t i_type = 0; i_type < std::array_size(seek_types); i_type++) {
 
         const VkPhysicalDeviceType type = seek_types[i_type];
 
@@ -231,21 +232,151 @@ static bool find_gpu()
             vkGetPhysicalDeviceProperties2(phys_devices[i_dev],
                                            &phys_props);
 
-            if (phys_props.properties.deviceType == type) {
-                vk_phys_dev = phys_devices[i_dev];
-                dprintf("Selected device %u: %s\n", i_dev, phys_props.properties.deviceName);
-                return true;
-            }
+            if (phys_props.properties.deviceType != type)
+                continue;
+
+            vk_phys_dev = phys_devices[i_dev];
+            dprintf("Selected device %u: %s\n", i_dev, phys_props.properties.deviceName);
+            return true;
         }
     }
 
     return false;
 }
 
+static VkDevice    vk_dev            = VK_NULL_HANDLE;
+static VkQueue     vk_queue          = VK_NULL_HANDLE;
+static const char* vk_extensions[16];
+static uint32_t    vk_num_extensions = 0;
+
+static bool get_extensions()
+{
+    VkExtensionProperties extensions[128];
+    uint32_t              num_extensions = std::array_size(extensions);
+
+    const VkResult res = vkEnumerateDeviceExtensionProperties(vk_phys_dev,
+                                                              nullptr,
+                                                              &num_extensions,
+                                                              extensions);
+    if (res != VK_SUCCESS && res != VK_INCOMPLETE)
+        return false;
+
+#ifndef NDEBUG
+    for (uint32_t i = 0; i < num_extensions; i++)
+        dprintf("    %s\n", extensions[i].extensionName);
+#endif
+
+#define REQUIRED "1"
+#define OPTIONAL "0"
+#define X(ext, req) req #ext "\0"
+
+    static const char supported_extensions[] = SUPPORTED_EXTENSIONS;
+
+#undef REQUIRED
+#undef OPTIONAL
+
+    const char* ext = supported_extensions;
+
+    for (;;) {
+        const uint32_t len = std::strlen(ext);
+
+        if ( ! len)
+            break;
+
+        const char req = *(ext++);
+
+        bool found = false;
+        for (uint32_t i = 0; i < num_extensions; i++) {
+            if (std::strcmp(ext, extensions[i].extensionName) == 0) {
+                found = true;
+                break;
+            }
+        }
+
+        if (found)
+            vk_extensions[vk_num_extensions++] = ext;
+        else if (req == '1') {
+            dprintf("Required extension %s not found\n", ext);
+            return false;
+        }
+
+        ext += len;
+    }
+
+    return true;
+}
+
+static bool load_device_functions()
+{
+    return load_functions(vk_device_function_names, vk_device_functions,
+            [](const char* name) -> PFN_vkVoidFunction
+            {
+                return vkGetDeviceProcAddr(vk_dev, name);
+            });
+}
+
 static bool create_device()
 {
     if ( ! find_gpu())
         return false;
+
+    VkQueueFamilyProperties queues[8];
+
+    uint32_t num_queues = std::array_size(queues);
+
+    vkGetPhysicalDeviceQueueFamilyProperties(vk_phys_dev, &num_queues, queues);
+
+    static const float queue_priorities[] = { 1 };
+
+    static constexpr uint32_t no_queue_family = ~0U;
+
+    static VkDeviceQueueCreateInfo queue_create_info = {
+        VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
+        nullptr,
+        0,
+        no_queue_family, // queueFamilyIndex
+        1,               // queueCount
+        queue_priorities
+    };
+
+    for (uint32_t i = 0; i < num_queues; i++) {
+        if (queues[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) {
+            queue_create_info.queueFamilyIndex = i;
+            break;
+        }
+    }
+
+    if (queue_create_info.queueFamilyIndex == no_queue_family)
+        return false;
+
+    if ( ! get_extensions())
+        return false;
+
+    static VkDeviceCreateInfo dev_create_info = {
+        VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
+        nullptr,
+        0,
+        1,
+        &queue_create_info,
+        0,
+        nullptr,
+        vk_num_extensions,
+        vk_extensions,
+        nullptr  // pEnabledFeatures
+    };
+
+    const VkResult res = vkCreateDevice(vk_phys_dev,
+                                        &dev_create_info,
+                                        nullptr,
+                                        &vk_dev);
+
+    if (res != VK_SUCCESS)
+        return false;
+
+    if ( ! load_device_functions())
+        return false;
+
+    vkGetDeviceQueue(vk_dev, queue_create_info.queueFamilyIndex, 0, &vk_queue);
 
     return true;
 }

@@ -1,7 +1,7 @@
 #include "stdc.h"
 #include <assert.h>
 
-uint32_t strlen(const char* name)
+uint32_t std::strlen(const char* name)
 {
     assert(name);
 
@@ -13,7 +13,7 @@ uint32_t strlen(const char* name)
     return static_cast<uint32_t>(end - name);
 }
 
-int strcmp(const char* s1, const char* s2)
+int std::strcmp(const char* s1, const char* s2)
 {
     assert(s1);
     assert(s2);
