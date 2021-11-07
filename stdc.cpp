@@ -15,6 +15,9 @@ uint32_t strlen(const char* name)
 
 int strcmp(const char* s1, const char* s2)
 {
+    assert(s1);
+    assert(s2);
+
     uint8_t c1;
 
     do {
