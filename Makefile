@@ -43,10 +43,11 @@ ifeq ($(UNAME), Linux)
     else
         STRIP = strip
         CFLAGS += -DNDEBUG -Os
+        CFLAGS += -fomit-frame-pointer
         CFLAGS += -ffunction-sections -fdata-sections
         LDFLAGS += -ffunction-sections -fdata-sections
         LDFLAGS += -Wl,--gc-sections -Wl,--as-needed
-        CFLAGS += -flto -fno-fat-lto-objects
+        LTO_CFLAGS += -flto -fno-fat-lto-objects
         LDFLAGS += -flto=auto -fuse-linker-plugin
     endif
 endif
@@ -66,10 +67,11 @@ ifeq ($(UNAME), Darwin)
     else
         STRIP = strip -x
         CFLAGS += -DNDEBUG -Os
+        CFLAGS += -fomit-frame-pointer
         CFLAGS += -ffunction-sections -fdata-sections
         LDFLAGS += -ffunction-sections -fdata-sections
         LDFLAGS += -Wl,-dead_strip
-        CFLAGS += -flto
+        LTO_CFLAGS += -flto
         LDFLAGS += -flto
     endif
 endif
@@ -113,6 +115,8 @@ default: $(exe)
 clean:
 	rm -rf $(out_dir)
 
+asm: $(addprefix $(out_dir)/,$(addsuffix .$(asm_suffix),$(notdir $(filter %.cpp,$(src_files)))))
+
 $(out_dir):
 	mkdir -p $(out_dir)
 
@@ -133,13 +137,13 @@ $(macos_app_dir)/Info.plist: Info.plist | $(macos_app_dir)
 endif
 
 $(out_dir)/$(notdir %.$(o_suffix)): %.c | $(out_dir)
-	$(CC) $(CFLAGS) -c -o $@ $<
+	$(CC) $(CFLAGS) $(LTO_CFLAGS) -c -o $@ $<
 
 $(out_dir)/$(notdir %.$(o_suffix)): %.m | $(out_dir)
-	$(CC) $(CFLAGS) $(OBJCFLAGS) -c -o $@ $<
+	$(CC) $(CFLAGS) $(LTO_CFLAGS) $(OBJCFLAGS) -c -o $@ $<
 
 $(out_dir)/$(notdir %.$(o_suffix)): %.cpp | $(out_dir)
-	$(CXX) $(CFLAGS) $(CXXFLAGS) -c -o $@ $<
+	$(CXX) $(CFLAGS) $(LTO_CFLAGS) $(CXXFLAGS) -c -o $@ $<
 
-$(out_dir)/$(notdir %.$(asm_suffix)): %.cpp | $(out_dir)
-	$(CXX) $(CFLAGS) $(CXXFLAGS) -S -masm=intel -o $@ $<
+$(out_dir)/$(notdir %.$(asm_suffix)): % | $(out_dir)
+	$(CXX) $(CFLAGS) $(CXXFLAGS) -masm=intel -S -o $@ $<
