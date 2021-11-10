@@ -522,9 +522,13 @@ static bool create_swapchain()
 
     res = vkCreateSwapchainKHR(vk_dev, &swapchain_create_info, nullptr, &vk_swapchain);
 
-    // TODO destroy old_swapchain
+    if (res != VK_SUCCESS)
+        return false;
 
-    return res == VK_SUCCESS;
+    if (old_swapchain != VK_NULL_HANDLE)
+        vkDestroySwapchainKHR(vk_dev, old_swapchain, nullptr);
+
+    return true;
 }
 
 bool init_vulkan(Window* w)

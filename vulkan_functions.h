@@ -48,6 +48,7 @@
 #define VK_DEVICE_FUNCTIONS \
     X(vkGetDeviceQueue) \
     X(vkCreateSwapchainKHR) \
+    X(vkDestroySwapchainKHR) \
     X(vkCreateCommandPool)
 
 extern PFN_vkVoidFunction vk_lib_functions[];
@@ -97,4 +98,5 @@ enum e_device_functions {
 
 #define vkGetDeviceQueue                          ((PFN_vkGetDeviceQueue)                          vk_device_functions[   id_vkGetDeviceQueue])
 #define vkCreateSwapchainKHR                      ((PFN_vkCreateSwapchainKHR)                      vk_device_functions[   id_vkCreateSwapchainKHR])
+#define vkDestroySwapchainKHR                     ((PFN_vkDestroySwapchainKHR)                     vk_device_functions[   id_vkDestroySwapchainKHR])
 #define vkCreateCommandPool                       ((PFN_vkCreateCommandPool)                       vk_device_functions[   id_vkCreateCommandPool])
