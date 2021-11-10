@@ -1,5 +1,4 @@
 #include "minivulkan.h"
-#include "vulkan_functions.h"
 
 #include <stdlib.h>
 #include <unistd.h>
@@ -94,9 +93,9 @@ static bool create_window(Window* w)
 
     static const char title[] = "minivulkan";
 
-    xcb_change_property(conn,
+    xcb_change_property(w->connection,
                         XCB_PROP_MODE_REPLACE,
-                        window,
+                        w->window,
                         XCB_ATOM_WM_NAME,
                         XCB_ATOM_STRING,
                         8,
