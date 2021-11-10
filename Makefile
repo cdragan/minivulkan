@@ -51,7 +51,7 @@ ifeq ($(UNAME), Linux)
 
     ifdef debug
         STRIP = true
-        CFLAGS += -Og -g
+        CFLAGS += -O0 -g
     else
         STRIP = strip
         CFLAGS += -DNDEBUG -Os
@@ -75,7 +75,7 @@ ifeq ($(UNAME), Darwin)
 
     ifdef debug
         STRIP = true
-        CFLAGS += -Og -g
+        CFLAGS += -O0 -g
     else
         STRIP = strip -x
         CFLAGS += -DNDEBUG -Os
