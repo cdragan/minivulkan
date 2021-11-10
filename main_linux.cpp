@@ -1,9 +1,32 @@
-#include "window.h"
+#include "minivulkan.h"
+#include "vulkan_functions.h"
 
 #include <stdlib.h>
 #include <unistd.h>
 #include <dlfcn.h>
 #include <xcb/xcb.h>
+
+struct Window
+{
+    xcb_connection_t* connection;
+    xcb_window_t      window;
+};
+
+bool create_surface(struct Window* w)
+{
+    static VkXcbSurfaceCreateInfoKHR surf_create_info = {
+        VK_STRUCTURE_TYPE_XCB_SURFACE_CREATE_INFO_KHR,
+        nullptr,
+        0,
+        w->connection,
+        w->window
+    };
+
+    return vkCreateXcbSurfaceKHR(vk_instance,
+                                 &surf_create_info,
+                                 nullptr,
+                                 &vk_surface) == VK_SUCCESS;
+}
 
 static xcb_intern_atom_reply_t* intern_atom(xcb_connection_t* conn,
                                             bool              only_if_exists,
@@ -42,25 +65,25 @@ static void set_fullscreen(xcb_connection_t* conn,
                         &atom_wm_fullscreen->atom);
 }
 
-bool create_window(Window* w)
+static bool create_window(Window* w)
 {
-    w->conn = xcb_connect(nullptr, nullptr);
+    w->connection = xcb_connect(nullptr, nullptr);
 
-    if ( ! w->conn)
+    if ( ! w->connection)
         return false;
 
-    xcb_screen_t* const screen = xcb_setup_roots_iterator(xcb_get_setup(w->conn)).data;
+    xcb_screen_t* const screen = xcb_setup_roots_iterator(xcb_get_setup(w->connection)).data;
 
-    const xcb_window_t window = xcb_generate_id(w->conn);
+    w->window = xcb_generate_id(w->connection);
 
     uint32_t values[2] = {
         0,
         XCB_EVENT_MASK_BUTTON_PRESS | XCB_EVENT_MASK_KEY_PRESS
     };
 
-    xcb_create_window(w->conn,
+    xcb_create_window(w->connection,
                       XCB_COPY_FROM_PARENT,
-                      window,
+                      w->window,
                       screen->root,
                       0, 0, 1, 1,
                       0,
@@ -69,21 +92,32 @@ bool create_window(Window* w)
                       XCB_CW_BACK_PIXEL | XCB_CW_EVENT_MASK,
                       values);
 
-    set_fullscreen(w->conn, window);
+    static const char title[] = "minivulkan";
 
-    xcb_map_window(w->conn, window);
+    xcb_change_property(conn,
+                        XCB_PROP_MODE_REPLACE,
+                        window,
+                        XCB_ATOM_WM_NAME,
+                        XCB_ATOM_STRING,
+                        8,
+                        sizeof(title) - 1,
+                        title);
 
-    xcb_flush(w->conn);
+    set_fullscreen(w->connection, w->window);
+
+    xcb_map_window(w->connection, w->window);
+
+    xcb_flush(w->connection);
 
     return true;
 }
 
-int event_loop(Window* w)
+static int event_loop(Window* w)
 {
     bool quit = false;
 
     while ( ! quit) {
-        xcb_generic_event_t* const event = xcb_wait_for_event(w->conn);
+        xcb_generic_event_t* const event = xcb_wait_for_event(w->connection);
 
         if ( ! event)
             break;
@@ -100,4 +134,17 @@ int event_loop(Window* w)
     }
 
     return 0;
+}
+
+int main()
+{
+    Window w;
+
+    if ( ! create_window(&w))
+        return 1;
+
+    if ( ! init_vulkan(&w))
+        return 1;
+
+    return event_loop(&w);
 }

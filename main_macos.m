@@ -2,9 +2,28 @@
 #import <AppKit/AppKit.h>
 #import <Cocoa/Cocoa.h>
 #import <QuartzCore/CAMetalLayer.h>
-#include "window.h"
+#include "minivulkan.h"
+
+struct Window
+{
+    CAMetalLayer* layer;
+};
 
 static bool macos_draw_frame();
+
+bool create_surface(struct Window* w)
+{
+    static VkMetalSurfaceCreateInfoEXT surf_create_info = {
+        VK_STRUCTURE_TYPE_METAL_SURFACE_CREATE_INFO_EXT
+    };
+
+    surf_create_info.pLayer = w->layer;
+
+    return vkCreateMetalSurfaceEXT(vk_instance,
+                                   &surf_create_info,
+                                   NULL,
+                                   &vk_surface) == VK_SUCCESS;
+}
 
 @interface VulkanViewController: NSViewController
     - (id)initWithSize: (NSSize)aSize;
@@ -53,6 +72,14 @@ static bool macos_draw_frame();
 
         self.view.wantsLayer = YES;
 
+        struct Window win;
+        win.layer = (__bridge CAMetalLayer *)self.view.layer;
+
+        if ( ! init_vulkan(&win)) {
+            [NSApp terminate: nil];
+            return;
+        }
+
         CVDisplayLinkCreateWithActiveCGDisplays(&display_link_);
         CVDisplayLinkSetOutputCallback(display_link_, &display_link_callback, (__bridge void *)self.view);
         CVDisplayLinkStart(display_link_);
@@ -90,10 +117,29 @@ static bool macos_draw_frame();
 
     - (CALayer *)makeBackingLayer
     {
-        CALayer* layer      = [self.class.layerClass layer];
+        CAMetalLayer* layer      = [self.class.layerClass layer];
         NSSize   view_scale = [self convertSizeToBacking: NSMakeSize(1, 1)];
         layer.contentsScale = MIN(view_scale.width, view_scale.height);
         return layer;
+    }
+
+    - (BOOL)performKeyEquivalent: (NSEvent *)event
+    {
+        const uint32_t key_esc  = 53;
+        const uint32_t key_q    = 12;
+        const uint32_t mods     = NSEventModifierFlagCommand
+                                | NSEventModifierFlagOption
+                                | NSEventModifierFlagControl
+                                | NSEventModifierFlagShift;
+
+        const uint32_t key      = event.keyCode;
+        const uint32_t modifier = event.modifierFlags & mods;
+
+        if ((key == key_esc) || (key == key_q && modifier == NSEventModifierFlagCommand)) {
+            [NSApp terminate: nil];
+        }
+
+        return TRUE;
     }
 
 @end
@@ -142,7 +188,9 @@ static bool macos_draw_frame();
         window.title   = @"minivulkan";
         window.minSize = NSMakeSize(256, 256);
 
-        id view_ctrl = [[VulkanViewController alloc] initWithSize: frame_rect.size];
+        id view_ctrl = [[VulkanViewController alloc]
+            initWithSize: frame_rect.size
+        ];
         window.contentViewController = view_ctrl;
 
         [window setBackgroundColor: NSColor.blackColor];
@@ -167,7 +215,7 @@ bool macos_draw_frame()
     return true;
 }
 
-bool create_window(Window* w)
+int main()
 {
     [NSApplication sharedApplication];
     id delegate = [[AppDelegate alloc] init];
@@ -175,11 +223,7 @@ bool create_window(Window* w)
 
     [delegate createMenu];
 
-    return true;
-}
-
-int event_loop(Window *w)
-{
     [NSApp run];
+
     return 0;
 }

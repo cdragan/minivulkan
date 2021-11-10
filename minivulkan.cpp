@@ -1,7 +1,6 @@
 #include <assert.h>
 #include <dlfcn.h>
-#include "window.h"
-#include "vulkan_functions.h"
+#include "minivulkan.h"
 #include "vulkan_extensions.h"
 #include "stdc.h"
 
@@ -83,7 +82,44 @@ static bool load_global_functions()
             });
 }
 
-static VkInstance vk_instance = VK_NULL_HANDLE;
+static bool enable_extensions(const char*                  supported_extensions,
+                              const VkExtensionProperties* found_extensions,
+                              uint32_t                     num_found_extensions,
+                              const char**                 enabled_extensions,
+                              uint32_t*                    num_enabled_extensions)
+{
+    for (;;) {
+        const uint32_t len = std::strlen(supported_extensions);
+
+        if ( ! len)
+            break;
+
+        const char req = *(supported_extensions++);
+
+        bool found = false;
+        for (uint32_t i = 0; i < num_found_extensions; i++) {
+            if (std::strcmp(supported_extensions, found_extensions[i].extensionName) == 0) {
+                found = true;
+                break;
+            }
+        }
+
+        if (found) {
+            enabled_extensions[*num_enabled_extensions] = supported_extensions;
+            ++*num_enabled_extensions;
+        }
+        else if (req == '1') {
+            dprintf("Required extension %s not found\n", supported_extensions);
+            return false;
+        }
+
+        supported_extensions += len;
+    }
+
+    return true;
+}
+
+VkInstance vk_instance = VK_NULL_HANDLE;
 
 static bool load_instance_functions()
 {
@@ -106,12 +142,48 @@ static bool init_instance()
         VK_API_VERSION_1_2
     };
 
+    static const char* enabled_instance_extensions[16];
+
     static VkInstanceCreateInfo instance_info = {
         VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
         nullptr,
         0,
-        &app_info
+        &app_info,
+        0,
+        nullptr,
+        0,
+        enabled_instance_extensions
     };
+
+    VkExtensionProperties ext_props[32];
+    uint32_t              num_ext_props = std::array_size(ext_props);
+
+    VkResult res = vkEnumerateInstanceExtensionProperties(nullptr, &num_ext_props, ext_props);
+    if (res != VK_SUCCESS && res != VK_INCOMPLETE)
+        return false;
+
+#ifndef NDEBUG
+    for (uint32_t i = 0; i < num_ext_props; i++)
+        dprintf("instance extension %s\n", ext_props[i].extensionName);
+#endif
+
+    // List of extensions declared in vulkan_extensions.h
+#define REQUIRED "1"
+#define OPTIONAL "0"
+#define X(ext, req) req #ext "\0"
+
+    static const char supported_instance_extensions[] = SUPPORTED_INSTANCE_EXTENSIONS;
+
+#undef REQUIRED
+#undef OPTIONAL
+#undef X
+
+    if ( ! enable_extensions(supported_instance_extensions,
+                             ext_props,
+                             num_ext_props,
+                             enabled_instance_extensions,
+                             &instance_info.enabledExtensionCount))
+        return false;
 
 #ifndef NDEBUG
     const PFN_vkEnumerateInstanceLayerProperties vkEnumerateInstanceLayerProperties =
@@ -125,68 +197,65 @@ static bool init_instance()
     if (vkEnumerateInstanceLayerProperties) {
         num_layer_props = std::array_size(layer_props);
 
-        const VkResult res = vkEnumerateInstanceLayerProperties(&num_layer_props, layer_props);
+        res = vkEnumerateInstanceLayerProperties(&num_layer_props, layer_props);
         if (res != VK_SUCCESS && res != VK_INCOMPLETE)
             num_layer_props = 0;
     }
 
-    const PFN_vkEnumerateInstanceExtensionProperties vkEnumerateInstanceExtensionProperties =
-        (PFN_vkEnumerateInstanceExtensionProperties)
-        vkGetInstanceProcAddr(nullptr, "vkEnumerateInstanceExtensionProperties");
-
-    const char* validation_str          = nullptr;
-    const char* validation_features_str = nullptr;
+    const char* validation_str = nullptr;
 
     VkValidationFeaturesEXT validation_features = {
         VK_STRUCTURE_TYPE_VALIDATION_FEATURES_EXT,
         nullptr,
     };
 
-    if (vkEnumerateInstanceExtensionProperties) {
+    for (uint32_t i = 0; i < num_layer_props; i++) {
+        dprintf("layer: %s\n", layer_props[i].layerName);
 
-        for (uint32_t i = 0; i < num_layer_props; i++) {
-            dprintf("layer: %s\n", layer_props[i].layerName);
+        num_ext_props = std::array_size(ext_props);
 
-            static VkExtensionProperties ext_props[32];
+        const char* validation_features_str = nullptr;
 
-            uint32_t num_ext_props = std::array_size(ext_props);
+        res = vkEnumerateInstanceExtensionProperties(layer_props[i].layerName,
+                                                                    &num_ext_props,
+                                                                    ext_props);
+        if (res == VK_SUCCESS || res == VK_INCOMPLETE) {
+            for (uint32_t j = 0; j < num_ext_props; j++) {
+                dprintf("    %s\n", ext_props[j].extensionName);
 
-            const VkResult res = vkEnumerateInstanceExtensionProperties(layer_props[i].layerName,
-                                                                        &num_ext_props,
-                                                                        ext_props);
-            if (res == VK_SUCCESS || res == VK_INCOMPLETE) {
-                for (uint32_t j = 0; j < num_ext_props; j++) {
-                    dprintf("    %s\n", ext_props[j].extensionName);
-
-                    static const char validation_features_ext[] = "VK_EXT_validation_features";
-                    if (std::strcmp(ext_props[i].extensionName, validation_features_ext) == 0)
-                        validation_features_str = validation_features_ext;
-                }
+                static const char validation_features_ext[] = "VK_EXT_validation_features";
+                if (std::strcmp(ext_props[i].extensionName, validation_features_ext) == 0)
+                    validation_features_str = validation_features_ext;
             }
+        }
 
-            static const char validation[] = "VK_LAYER_KHRONOS_validation";
-            if (std::strcmp(layer_props[i].layerName, validation) == 0) {
-                validation_str = validation;
-                instance_info.ppEnabledLayerNames = &validation_str;
-                instance_info.enabledLayerCount   = 1;
+        static const char validation[] = "VK_LAYER_KHRONOS_validation";
+        if (std::strcmp(layer_props[i].layerName, validation) == 0) {
+            validation_str = validation;
+            instance_info.ppEnabledLayerNames = &validation_str;
+            instance_info.enabledLayerCount   = 1;
 
-                if (validation_features_str) {
-                    instance_info.ppEnabledExtensionNames = &validation_features_str;
-                    instance_info.enabledExtensionCount   = 1;
-                    instance_info.pNext                   = &validation_features;
-                }
+            if (validation_features_str &&
+                instance_info.enabledExtensionCount < std::array_size(enabled_instance_extensions)) {
+
+                enabled_instance_extensions[instance_info.enabledExtensionCount] = validation_features_str;
+                ++instance_info.enabledExtensionCount;
+
+                instance_info.pNext = &validation_features;
             }
         }
     }
 #endif
 
-    const VkResult res = vkCreateInstance(&instance_info, nullptr, &vk_instance);
+    res = vkCreateInstance(&instance_info, nullptr, &vk_instance);
 
     if (res != VK_SUCCESS)
         return false;
 
     return load_instance_functions();
 }
+
+VkSurfaceKHR vk_surface = VK_NULL_HANDLE;
 
 static VkPhysicalDevice vk_phys_dev = VK_NULL_HANDLE;
 
@@ -205,13 +274,88 @@ static VkPhysicalDeviceProperties2 phys_props = {
     &vk11_props
 };
 
+static const float queue_priorities[] = { 1 };
+
+static constexpr uint32_t no_queue_family = ~0U;
+
+static VkDeviceQueueCreateInfo queue_create_info = {
+    VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
+    nullptr,
+    0,
+    no_queue_family, // queueFamilyIndex
+    1,               // queueCount
+    queue_priorities
+};
+
+static const VkFormat preferred_output_formats[] = {
+    VK_FORMAT_A2B10G10R10_UNORM_PACK32,
+    VK_FORMAT_A2R10G10B10_UNORM_PACK32,
+    VK_FORMAT_A8B8G8R8_UNORM_PACK32,
+    VK_FORMAT_B8G8R8A8_UNORM,
+    VK_FORMAT_R8G8B8A8_UNORM,
+    VK_FORMAT_B8G8R8_UNORM,
+    VK_FORMAT_R8G8B8_UNORM
+};
+
+static VkSwapchainCreateInfoKHR swapchain_create_info = {
+    VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR,
+    nullptr,
+    0,
+    VK_NULL_HANDLE,
+    0,
+    VK_FORMAT_UNDEFINED,
+    VK_COLOR_SPACE_SRGB_NONLINEAR_KHR,
+    {},
+    1,
+    VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+    VK_SHARING_MODE_EXCLUSIVE,
+    0,
+    nullptr,
+    VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR,
+    VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
+    VK_PRESENT_MODE_FIFO_KHR,
+    VK_FALSE,
+    VK_NULL_HANDLE
+};
+
+static bool find_surface_format(VkPhysicalDevice phys_dev)
+{
+    VkSurfaceFormatKHR formats[32];
+
+    uint32_t num_formats = std::array_size(formats);
+
+    const VkResult res = vkGetPhysicalDeviceSurfaceFormatsKHR(phys_dev,
+                                                              vk_surface,
+                                                              &num_formats,
+                                                              formats);
+    if (res != VK_SUCCESS && res != VK_INCOMPLETE)
+        return false;
+
+    for (uint32_t i_pref = 0; i_pref < std::array_size(preferred_output_formats); i_pref++) {
+
+        const VkFormat pref_format = preferred_output_formats[i_pref];
+
+        for (uint32_t i_cur = 0; i_cur < num_formats; i_cur++) {
+            if (formats[i_cur].format == pref_format) {
+                swapchain_create_info.surface         = vk_surface;
+                swapchain_create_info.imageFormat     = pref_format;
+                swapchain_create_info.imageColorSpace = formats[i_cur].colorSpace;
+                return true;
+            }
+        }
+    }
+
+    return false;
+}
+
 static bool find_gpu()
 {
-    VkPhysicalDevice phys_devices[16];
+    VkPhysicalDevice        phys_devices[8];
+    VkQueueFamilyProperties queues[8];
 
     uint32_t count = std::array_size(phys_devices);
 
-    const VkResult res = vkEnumeratePhysicalDevices(vk_instance, &count, phys_devices);
+    VkResult res = vkEnumeratePhysicalDevices(vk_instance, &count, phys_devices);
 
     if (res != VK_SUCCESS && res != VK_INCOMPLETE)
         return false;
@@ -229,10 +373,38 @@ static bool find_gpu()
         const VkPhysicalDeviceType type = seek_types[i_type];
 
         for (uint32_t i_dev = 0; i_dev < count; i_dev++) {
-            vkGetPhysicalDeviceProperties2(phys_devices[i_dev],
-                                           &phys_props);
+            const VkPhysicalDevice phys_dev = phys_devices[i_dev];
+
+            vkGetPhysicalDeviceProperties2(phys_dev, &phys_props);
 
             if (phys_props.properties.deviceType != type)
+                continue;
+
+            if ( ! find_surface_format(phys_dev))
+                continue;
+
+            uint32_t num_queues = std::array_size(queues);
+            vkGetPhysicalDeviceQueueFamilyProperties(phys_dev, &num_queues, queues);
+
+            uint32_t i_queue;
+
+            for (i_queue = 0; i_queue < num_queues; i_queue++) {
+
+                if ( ! (queues[i_queue].queueFlags & VK_QUEUE_GRAPHICS_BIT))
+                    continue;
+
+                VkBool32 supported = VK_FALSE;
+
+                res = vkGetPhysicalDeviceSurfaceSupportKHR(phys_dev, i_queue, vk_surface, &supported);
+
+                if (res != VK_SUCCESS || ! supported)
+                    continue;
+
+                queue_create_info.queueFamilyIndex = i_queue;
+                break;
+            }
+
+            if (i_queue == num_queues)
                 continue;
 
             vk_phys_dev = phys_devices[i_dev];
@@ -244,12 +416,12 @@ static bool find_gpu()
     return false;
 }
 
-static VkDevice    vk_dev            = VK_NULL_HANDLE;
-static VkQueue     vk_queue          = VK_NULL_HANDLE;
-static const char* vk_extensions[16];
-static uint32_t    vk_num_extensions = 0;
+static VkDevice    vk_dev                   = VK_NULL_HANDLE;
+static VkQueue     vk_queue                 = VK_NULL_HANDLE;
+static const char* vk_device_extensions[16];
+static uint32_t    vk_num_device_extensions = 0;
 
-static bool get_extensions()
+static bool get_device_extensions()
 {
     VkExtensionProperties extensions[128];
     uint32_t              num_extensions = std::array_size(extensions);
@@ -266,44 +438,22 @@ static bool get_extensions()
         dprintf("    %s\n", extensions[i].extensionName);
 #endif
 
+    // List of extensions declared in vulkan_extensions.h
 #define REQUIRED "1"
 #define OPTIONAL "0"
 #define X(ext, req) req #ext "\0"
 
-    static const char supported_extensions[] = SUPPORTED_EXTENSIONS;
+    static const char supported_device_extensions[] = SUPPORTED_DEVICE_EXTENSIONS;
 
 #undef REQUIRED
 #undef OPTIONAL
+#undef X
 
-    const char* ext = supported_extensions;
-
-    for (;;) {
-        const uint32_t len = std::strlen(ext);
-
-        if ( ! len)
-            break;
-
-        const char req = *(ext++);
-
-        bool found = false;
-        for (uint32_t i = 0; i < num_extensions; i++) {
-            if (std::strcmp(ext, extensions[i].extensionName) == 0) {
-                found = true;
-                break;
-            }
-        }
-
-        if (found)
-            vk_extensions[vk_num_extensions++] = ext;
-        else if (req == '1') {
-            dprintf("Required extension %s not found\n", ext);
-            return false;
-        }
-
-        ext += len;
-    }
-
-    return true;
+    return enable_extensions(supported_device_extensions,
+                             extensions,
+                             num_extensions,
+                             vk_device_extensions,
+                             &vk_num_device_extensions);
 }
 
 static bool load_device_functions()
@@ -320,36 +470,7 @@ static bool create_device()
     if ( ! find_gpu())
         return false;
 
-    VkQueueFamilyProperties queues[8];
-
-    uint32_t num_queues = std::array_size(queues);
-
-    vkGetPhysicalDeviceQueueFamilyProperties(vk_phys_dev, &num_queues, queues);
-
-    static const float queue_priorities[] = { 1 };
-
-    static constexpr uint32_t no_queue_family = ~0U;
-
-    static VkDeviceQueueCreateInfo queue_create_info = {
-        VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
-        nullptr,
-        0,
-        no_queue_family, // queueFamilyIndex
-        1,               // queueCount
-        queue_priorities
-    };
-
-    for (uint32_t i = 0; i < num_queues; i++) {
-        if (queues[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) {
-            queue_create_info.queueFamilyIndex = i;
-            break;
-        }
-    }
-
-    if (queue_create_info.queueFamilyIndex == no_queue_family)
-        return false;
-
-    if ( ! get_extensions())
+    if ( ! get_device_extensions())
         return false;
 
     static VkDeviceCreateInfo dev_create_info = {
@@ -360,8 +481,8 @@ static bool create_device()
         &queue_create_info,
         0,
         nullptr,
-        vk_num_extensions,
-        vk_extensions,
+        vk_num_device_extensions,
+        vk_device_extensions,
         nullptr  // pEnabledFeatures
     };
 
@@ -381,27 +502,53 @@ static bool create_device()
     return true;
 }
 
-int main()
+static VkSurfaceCapabilitiesKHR vk_surface_caps;
+
+static VkSwapchainKHR vk_swapchain = VK_NULL_HANDLE;
+
+static bool create_swapchain()
 {
-    Window w;
+    VkResult res = vkGetPhysicalDeviceSurfaceCapabilitiesKHR(vk_phys_dev,
+                                                             vk_surface,
+                                                             &vk_surface_caps);
+    if (res != VK_SUCCESS)
+        return false;
 
-    if ( ! create_window(&w))
-        return 1;
+    VkSwapchainKHR old_swapchain = vk_swapchain;
 
+    swapchain_create_info.minImageCount = std::max(vk_surface_caps.minImageCount, 2U);
+    swapchain_create_info.imageExtent   = vk_surface_caps.currentExtent;
+    swapchain_create_info.oldSwapchain  = old_swapchain;
+
+    //res = vkCreateSwapchainKHR(vk_dev, &swapchain_create_info, nullptr, &vk_swapchain);
+
+    // TODO destroy old_swapchain
+
+    return res == VK_SUCCESS;
+}
+
+bool init_vulkan(Window* w)
+{
     if ( ! load_vulkan())
-        return 1;
+        return false;
 
     if ( ! load_lib_functions())
-        return 1;
+        return false;
 
     if ( ! load_global_functions())
-        return 1;
+        return false;
 
     if ( ! init_instance())
-        return 1;
+        return false;
+
+    if ( ! create_surface(w))
+        return false;
 
     if ( ! create_device())
-        return 1;
+        return false;
 
-    return event_loop(&w);
+    if ( ! create_swapchain())
+        return false;
+
+    return true;
 }

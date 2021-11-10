@@ -1,11 +1,5 @@
 
 ##############################################################################
-# Sources
-
-src_files += minivulkan.cpp
-src_files += stdc.cpp
-
-##############################################################################
 # Determine target OS
 
 UNAME = $(shell uname -s)
@@ -16,25 +10,43 @@ ifneq (,$(filter CYGWIN% MINGW% MSYS%, $(UNAME)))
 endif
 
 ##############################################################################
+# Sources
+
+src_files += minivulkan.cpp
+src_files += stdc.cpp
+
+ifeq ($(UNAME), Linux)
+    src_files += main_linux.m
+endif
+
+ifeq ($(UNAME), Darwin)
+    src_files += main_macos.m
+endif
+
+##############################################################################
 # Compiler flags
 
-ifneq ($(UNAME), Windows)
+ifeq ($(UNAME), Windows)
+else
     CFLAGS += -Wall -Wextra -Wno-unused-parameter -Wunused -Wno-missing-field-initializers
     CFLAGS += -Wshadow -Wformat=2 -Wconversion -Wdouble-promotion
 
     CFLAGS += -fvisibility=hidden
     CFLAGS += -fPIC
 
+    ifdef debug
+        CFLAGS  += -fsanitize=address
+        LDFLAGS += -fsanitize=address
+    endif
+
     CXXFLAGS += -x c++ -std=c++17 -fno-rtti -fno-exceptions
 
-    OBJCFLAGS += -x objective-c
+    OBJCFLAGS += -x objective-c -fno-objc-arc
 
     LINK = $(CXX)
 endif
 
 ifeq ($(UNAME), Linux)
-    src_files += window_linux.m
-
     LDFLAGS += -lxcb -ldl
 
     ifdef debug
@@ -44,22 +56,22 @@ ifeq ($(UNAME), Linux)
         STRIP = strip
         CFLAGS += -DNDEBUG -Os
         CFLAGS += -fomit-frame-pointer
-        CFLAGS += -ffunction-sections -fdata-sections
+
+        CFLAGS  += -ffunction-sections -fdata-sections
         LDFLAGS += -ffunction-sections -fdata-sections
         LDFLAGS += -Wl,--gc-sections -Wl,--as-needed
+
         LTO_CFLAGS += -flto -fno-fat-lto-objects
-        LDFLAGS += -flto=auto -fuse-linker-plugin
+        LDFLAGS    += -flto=auto -fuse-linker-plugin
     endif
 endif
 
 ifeq ($(UNAME), Darwin)
-    src_files += window_macos.m
-
     frameworks += Cocoa
     frameworks += CoreVideo
     frameworks += Quartz
 
-    LDFLAGS += -fobjc-arc $(addprefix -framework ,$(frameworks))
+    LDFLAGS += -fno-objc-arc $(addprefix -framework ,$(frameworks))
 
     ifdef debug
         STRIP = true
@@ -68,11 +80,13 @@ ifeq ($(UNAME), Darwin)
         STRIP = strip -x
         CFLAGS += -DNDEBUG -Os
         CFLAGS += -fomit-frame-pointer
-        CFLAGS += -ffunction-sections -fdata-sections
+
+        CFLAGS  += -ffunction-sections -fdata-sections
         LDFLAGS += -ffunction-sections -fdata-sections
         LDFLAGS += -Wl,-dead_strip
+
         LTO_CFLAGS += -flto
-        LDFLAGS += -flto
+        LDFLAGS    += -flto
     endif
 endif
 
@@ -135,9 +149,6 @@ default: $(macos_app_dir)/Info.plist
 $(macos_app_dir)/Info.plist: Info.plist | $(macos_app_dir)
 	cp $< $@
 endif
-
-$(out_dir)/$(notdir %.$(o_suffix)): %.c | $(out_dir)
-	$(CC) $(CFLAGS) $(LTO_CFLAGS) -c -o $@ $<
 
 $(out_dir)/$(notdir %.$(o_suffix)): %.m | $(out_dir)
 	$(CC) $(CFLAGS) $(LTO_CFLAGS) $(OBJCFLAGS) -c -o $@ $<
