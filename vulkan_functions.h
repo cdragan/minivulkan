@@ -96,5 +96,5 @@ enum e_device_functions {
 #define vkCreateDevice                            ((PFN_vkCreateDevice)                            vk_instance_functions[ id_vkCreateDevice])
 
 #define vkGetDeviceQueue                          ((PFN_vkGetDeviceQueue)                          vk_device_functions[   id_vkGetDeviceQueue])
-#define vkCreateSwapchainKHR                      ((PFN_vkCreateSwapchainKHR)                      vk_instance_functions[ id_vkCreateSwapchainKHR])
+#define vkCreateSwapchainKHR                      ((PFN_vkCreateSwapchainKHR)                      vk_device_functions[   id_vkCreateSwapchainKHR])
 #define vkCreateCommandPool                       ((PFN_vkCreateCommandPool)                       vk_device_functions[   id_vkCreateCommandPool])

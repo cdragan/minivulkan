@@ -520,7 +520,7 @@ static bool create_swapchain()
     swapchain_create_info.imageExtent   = vk_surface_caps.currentExtent;
     swapchain_create_info.oldSwapchain  = old_swapchain;
 
-    //res = vkCreateSwapchainKHR(vk_dev, &swapchain_create_info, nullptr, &vk_swapchain);
+    res = vkCreateSwapchainKHR(vk_dev, &swapchain_create_info, nullptr, &vk_swapchain);
 
     // TODO destroy old_swapchain
 
