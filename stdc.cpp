@@ -33,3 +33,31 @@ int std::strcmp(const char* s1, const char* s2)
 
     return 0;
 }
+
+void std::mem_zero(void* dest_ptr, uint32_t num_bytes)
+{
+    assert(dest_ptr);
+    assert(num_bytes);
+
+    uint8_t* dest_byte = static_cast<uint8_t*>(dest_ptr);
+
+    while (num_bytes--)
+        *(dest_byte++) = 0;
+}
+
+void std::mem_copy(void* dest_ptr, const void* src_ptr, uint32_t num_bytes)
+{
+    assert(dest_ptr);
+    assert(src_ptr);
+    assert(num_bytes);
+
+    uint8_t*       dest_byte = static_cast<uint8_t*>(dest_ptr);
+    const uint8_t* src_byte  = static_cast<const uint8_t*>(src_ptr);
+
+    assert(src_byte + num_bytes <= dest_byte ||
+           dest_byte + num_bytes <= src_byte);
+
+    do
+        *(dest_byte++) = *(src_byte++);
+    while (--num_bytes);
+}
