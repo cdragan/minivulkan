@@ -669,7 +669,7 @@ static bool dummy_draw(uint32_t image_idx)
     static VkImageMemoryBarrier img_barrier = {
         VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
         nullptr,
-        VK_ACCESS_NONE_KHR,
+        0,
         VK_ACCESS_COLOR_ATTACHMENT_READ_BIT,
         VK_IMAGE_LAYOUT_GENERAL,
         VK_IMAGE_LAYOUT_PRESENT_SRC_KHR
