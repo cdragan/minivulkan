@@ -33,6 +33,7 @@ else
 
     CFLAGS += -fvisibility=hidden
     CFLAGS += -fPIC
+    CFLAGS += -MD
 
     ifdef debug
         CFLAGS  += -fsanitize=address
@@ -158,3 +159,7 @@ $(out_dir)/$(notdir %.$(o_suffix)): %.cpp | $(out_dir)
 
 $(out_dir)/$(notdir %.$(asm_suffix)): % | $(out_dir)
 	$(CXX) $(CFLAGS) $(CXXFLAGS) -masm=intel -S -o $@ $<
+
+dep_files = $(addprefix $(out_dir)/, $(addsuffix .d, $(basename $(notdir $(src_files)))))
+
+-include $(dep_files)
