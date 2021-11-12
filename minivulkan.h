@@ -6,11 +6,11 @@ extern VkSurfaceKHR vk_surface;
 struct Window;
 
 #if defined(__APPLE__) && defined(__cplusplus)
-extern "C"
+#   define PORTABLE extern "C"
+#else
+#   define PORTABLE
 #endif
-bool init_vulkan(struct Window* w);
 
-#if defined(__APPLE__) && defined(__cplusplus)
-extern "C"
-#endif
-bool create_surface(struct Window* w);
+PORTABLE bool init_vulkan(struct Window* w);
+PORTABLE bool create_surface(struct Window* w);
+PORTABLE bool draw_frame();

@@ -9,8 +9,6 @@ struct Window
     CAMetalLayer* layer;
 };
 
-static bool macos_draw_frame();
-
 bool create_surface(struct Window* w)
 {
     static VkMetalSurfaceCreateInfoEXT surf_create_info = {
@@ -92,12 +90,11 @@ bool create_surface(struct Window* w)
                                           CVOptionFlags     *flagsOut,
                                           void              *target)
     {
-        NSView *view = (__bridge NSView *)target;
-        //view.layer
-        printf("display %g %g\n", view.frame.size.width, view.frame.size.height);
-        if ( ! macos_draw_frame()) {
+        if ( ! draw_frame()) {
             [NSApp terminate: nil];
+            return kCVReturnError;
         }
+
         return kCVReturnSuccess;
     }
 
@@ -209,11 +206,6 @@ bool create_surface(struct Window* w)
     }
 
 @end
-
-bool macos_draw_frame()
-{
-    return true;
-}
 
 int main()
 {

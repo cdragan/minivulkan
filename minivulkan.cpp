@@ -502,12 +502,69 @@ static bool create_device()
     return true;
 }
 
+enum eSemId {
+    sem_acquire,
+
+    num_semaphores
+};
+
+static VkSemaphore vk_sems[num_semaphores];
+
+static bool create_semaphores()
+{
+    for (uint32_t i = 0; i < std::array_size(vk_sems); i++) {
+
+        static const VkSemaphoreCreateInfo sem_create_info = {
+            VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO
+        };
+
+        const VkResult res = vkCreateSemaphore(vk_dev, &sem_create_info, nullptr, &vk_sems[i]);
+
+        if (res != VK_SUCCESS)
+            return false;
+    }
+
+    return true;
+}
+
+enum eFenceId {
+    fen_acquire,
+
+    num_fences
+};
+
+static VkFence vk_fens[num_fences];
+
+static bool create_fences()
+{
+    for (uint32_t i = 0; i < std::array_size(vk_sems); i++) {
+
+        static const VkFenceCreateInfo fence_create_info = {
+            VK_STRUCTURE_TYPE_FENCE_CREATE_INFO
+        };
+
+        const VkResult res = vkCreateFence(vk_dev, &fence_create_info, nullptr, &vk_fens[i]);
+
+        if (res != VK_SUCCESS)
+            return false;
+    }
+
+    return true;
+}
+
 static VkSurfaceCapabilitiesKHR vk_surface_caps;
 
 static VkSwapchainKHR vk_swapchain = VK_NULL_HANDLE;
 
+static VkImage vk_swapchain_images[8];
+
+// TODO join VkImageLayout with VkImage for state tracking
+static VkImageLayout layout[std::array_size(vk_swapchain_images)];
+
 static bool create_swapchain()
 {
+    dprintf("create_swapchain\n");
+
     VkResult res = vkGetPhysicalDeviceSurfaceCapabilitiesKHR(vk_phys_dev,
                                                              vk_surface,
                                                              &vk_surface_caps);
@@ -527,6 +584,141 @@ static bool create_swapchain()
 
     if (old_swapchain != VK_NULL_HANDLE)
         vkDestroySwapchainKHR(vk_dev, old_swapchain, nullptr);
+
+    uint32_t num_images = std::array_size(vk_swapchain_images);
+
+    res = vkGetSwapchainImagesKHR(vk_dev, vk_swapchain, &num_images, vk_swapchain_images);
+
+    if (res != VK_SUCCESS && res != VK_INCOMPLETE)
+        return false;
+
+    std::mem_zero(&layout, sizeof(layout));
+
+    return true;
+}
+
+static bool dummy_draw(uint32_t image_idx)
+{
+    if (layout[image_idx] == VK_IMAGE_LAYOUT_PRESENT_SRC_KHR)
+        return true;
+
+    dprintf("dummy_draw for image %u\n", image_idx);
+
+    const VkImage image = vk_swapchain_images[image_idx];
+
+    VkResult res;
+
+    static VkCommandPool pool = VK_NULL_HANDLE;
+
+    if (pool == VK_NULL_HANDLE) {
+        static VkCommandPoolCreateInfo create_info = {
+            VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
+            nullptr,
+            VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT
+        };
+
+        create_info.queueFamilyIndex = queue_create_info.queueFamilyIndex;
+
+        res = vkCreateCommandPool(vk_dev,
+                                  &create_info,
+                                  nullptr,
+                                  &pool);
+        if (res != VK_SUCCESS)
+            return false;
+    }
+
+    static VkCommandBuffer bufs[2 * std::array_size(vk_swapchain_images)];
+    static uint32_t        cmd_buf_idx = 0;
+
+    if (bufs[image_idx] == VK_NULL_HANDLE) {
+
+        static VkCommandBufferAllocateInfo alloc_info = {
+            VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+            nullptr,
+            VK_NULL_HANDLE,
+            VK_COMMAND_BUFFER_LEVEL_PRIMARY
+        };
+
+        alloc_info.commandPool        = pool;
+        alloc_info.commandBufferCount = std::array_size(bufs);
+
+        res = vkAllocateCommandBuffers(vk_dev, &alloc_info, bufs);
+
+        if (res != VK_SUCCESS)
+            return false;
+    }
+
+    const VkCommandBuffer buf = bufs[cmd_buf_idx];
+    cmd_buf_idx = (cmd_buf_idx + 1) % std::array_size(bufs);
+
+    res = vkResetCommandBuffer(buf, 0);
+    if (res != VK_SUCCESS)
+        return false;
+
+    static VkCommandBufferBeginInfo begin_info = {
+        VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+        nullptr,
+        VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
+        nullptr
+    };
+
+    res = vkBeginCommandBuffer(buf, &begin_info);
+    if (res != VK_SUCCESS)
+        return false;
+
+    static VkImageMemoryBarrier img_barrier = {
+        VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+        nullptr,
+        VK_ACCESS_NONE_KHR,
+        VK_ACCESS_COLOR_ATTACHMENT_READ_BIT,
+        VK_IMAGE_LAYOUT_GENERAL,
+        VK_IMAGE_LAYOUT_PRESENT_SRC_KHR
+    };
+
+    img_barrier.oldLayout = layout[image_idx];
+    layout[image_idx] = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+
+    img_barrier.srcQueueFamilyIndex         = queue_create_info.queueFamilyIndex;
+    img_barrier.dstQueueFamilyIndex         = queue_create_info.queueFamilyIndex;
+    img_barrier.image                       = image;
+    img_barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    img_barrier.subresourceRange.levelCount = 1;
+    img_barrier.subresourceRange.layerCount = 1;
+
+    vkCmdPipelineBarrier(buf,
+                         VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                         VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                         0,
+                         0,
+                         nullptr,
+                         0,
+                         nullptr,
+                         1,
+                         &img_barrier);
+
+    res = vkEndCommandBuffer(buf);
+
+    if (res != VK_SUCCESS)
+        return false;
+
+    const VkPipelineStageFlags dst_stage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+
+    static VkSubmitInfo submit_info = {
+        VK_STRUCTURE_TYPE_SUBMIT_INFO,
+        nullptr,
+        1,
+        &vk_sems[sem_acquire],
+        &dst_stage,
+        1,
+        &buf,
+        1,
+        &vk_sems[sem_acquire]
+    };
+
+    res = vkQueueSubmit(vk_queue, 1, &submit_info, VK_NULL_HANDLE);
+
+    if (res != VK_SUCCESS)
+        return false;
 
     return true;
 }
@@ -551,7 +743,80 @@ bool init_vulkan(Window* w)
     if ( ! create_device())
         return false;
 
+    if ( ! create_semaphores())
+        return false;
+
+    if ( ! create_fences())
+        return false;
+
     if ( ! create_swapchain())
+        return false;
+
+    return true;
+}
+
+bool draw_frame()
+{
+    static uint64_t frame_idx = 0;
+    uint32_t        image_idx;
+    VkResult        res;
+
+    if (frame_idx++) {
+        res = vkWaitForFences(vk_dev, 1, &vk_fens[fen_acquire], VK_TRUE, 1'000'000'000);
+        if (res != VK_SUCCESS)
+            return false;
+
+        res = vkResetFences(vk_dev, 1, &vk_fens[fen_acquire]);
+        if (res != VK_SUCCESS)
+            return false;
+    }
+
+    for (;;) {
+
+        res = vkAcquireNextImageKHR(vk_dev,
+                                    vk_swapchain,
+                                    1'000'000'000,
+                                    vk_sems[sem_acquire],
+                                    vk_fens[fen_acquire],
+                                    &image_idx);
+        if (res == VK_SUCCESS || res == VK_SUBOPTIMAL_KHR)
+            break;
+
+        if (res != VK_ERROR_OUT_OF_DATE_KHR)
+            return false;
+
+        if ( ! create_swapchain())
+            return false;
+    }
+
+    // TODO draw
+    if ( ! dummy_draw(image_idx))
+        return false;
+
+    dprintf("present frame %llu image %u\n", frame_idx - 1, image_idx);
+
+    static VkPresentInfoKHR present_info = {
+        VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
+        nullptr,
+        1,
+        &vk_sems[sem_acquire],
+        1,
+        &vk_swapchain,
+        nullptr,
+        nullptr
+    };
+
+    present_info.pImageIndices = &image_idx;
+
+    res = vkQueuePresentKHR(vk_queue, &present_info);
+
+    if (res == VK_SUBOPTIMAL_KHR) {
+        if ( ! create_swapchain())
+            return false;
+        res = VK_SUCCESS;
+    }
+
+    if (res != VK_SUCCESS)
         return false;
 
     return true;

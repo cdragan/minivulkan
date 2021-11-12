@@ -49,7 +49,20 @@
     X(vkGetDeviceQueue) \
     X(vkCreateSwapchainKHR) \
     X(vkDestroySwapchainKHR) \
-    X(vkCreateCommandPool)
+    X(vkGetSwapchainImagesKHR) \
+    X(vkAcquireNextImageKHR) \
+    X(vkQueuePresentKHR) \
+    X(vkCreateFence) \
+    X(vkWaitForFences) \
+    X(vkResetFences) \
+    X(vkCreateSemaphore) \
+    X(vkCreateCommandPool) \
+    X(vkAllocateCommandBuffers) \
+    X(vkResetCommandBuffer) \
+    X(vkBeginCommandBuffer) \
+    X(vkEndCommandBuffer) \
+    X(vkCmdPipelineBarrier) \
+    X(vkQueueSubmit)
 
 extern PFN_vkVoidFunction vk_lib_functions[];
 extern PFN_vkVoidFunction vk_global_functions[];
@@ -99,4 +112,17 @@ enum e_device_functions {
 #define vkGetDeviceQueue                          ((PFN_vkGetDeviceQueue)                          vk_device_functions[   id_vkGetDeviceQueue])
 #define vkCreateSwapchainKHR                      ((PFN_vkCreateSwapchainKHR)                      vk_device_functions[   id_vkCreateSwapchainKHR])
 #define vkDestroySwapchainKHR                     ((PFN_vkDestroySwapchainKHR)                     vk_device_functions[   id_vkDestroySwapchainKHR])
+#define vkGetSwapchainImagesKHR                   ((PFN_vkGetSwapchainImagesKHR)                   vk_device_functions[   id_vkGetSwapchainImagesKHR])
+#define vkAcquireNextImageKHR                     ((PFN_vkAcquireNextImageKHR)                     vk_device_functions[   id_vkAcquireNextImageKHR])
+#define vkQueuePresentKHR                         ((PFN_vkQueuePresentKHR)                         vk_device_functions[   id_vkQueuePresentKHR])
+#define vkCreateFence                             ((PFN_vkCreateFence)                             vk_device_functions[   id_vkCreateFence])
+#define vkWaitForFences                           ((PFN_vkWaitForFences)                           vk_device_functions[   id_vkWaitForFences])
+#define vkResetFences                             ((PFN_vkResetFences)                             vk_device_functions[   id_vkResetFences])
+#define vkCreateSemaphore                         ((PFN_vkCreateSemaphore)                         vk_device_functions[   id_vkCreateSemaphore])
 #define vkCreateCommandPool                       ((PFN_vkCreateCommandPool)                       vk_device_functions[   id_vkCreateCommandPool])
+#define vkAllocateCommandBuffers                  ((PFN_vkAllocateCommandBuffers)                  vk_device_functions[   id_vkAllocateCommandBuffers])
+#define vkResetCommandBuffer                      ((PFN_vkResetCommandBuffer)                      vk_device_functions[   id_vkResetCommandBuffer])
+#define vkBeginCommandBuffer                      ((PFN_vkBeginCommandBuffer)                      vk_device_functions[   id_vkBeginCommandBuffer])
+#define vkEndCommandBuffer                        ((PFN_vkEndCommandBuffer)                        vk_device_functions[   id_vkEndCommandBuffer])
+#define vkCmdPipelineBarrier                      ((PFN_vkCmdPipelineBarrier)                      vk_device_functions[   id_vkCmdPipelineBarrier])
+#define vkQueueSubmit                             ((PFN_vkQueueSubmit)                             vk_device_functions[   id_vkQueueSubmit])

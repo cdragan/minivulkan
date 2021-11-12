@@ -116,20 +116,26 @@ static int event_loop(Window* w)
     bool quit = false;
 
     while ( ! quit) {
-        xcb_generic_event_t* const event = xcb_wait_for_event(w->connection);
 
-        if ( ! event)
-            break;
+        for (;;) {
+            xcb_generic_event_t* const event = xcb_poll_for_event(w->connection);
 
-        switch (event->response_type & ~0x80) {
-
-            case XCB_BUTTON_PRESS: // mouse
-            case XCB_KEY_PRESS: // keyboard
-                quit = true;
+            if ( ! event)
                 break;
+
+            switch (event->response_type & ~0x80) {
+
+                case XCB_KEY_PRESS: // keyboard
+                    // TODO detect Esc
+                    quit = true;
+                    break;
+            }
+
+            //free(event);
         }
 
-        //free(event);
+        if ( ! draw_frame())
+            return 1;
     }
 
     return 0;
