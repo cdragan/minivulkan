@@ -11,6 +11,70 @@
 #   define dprintf printf
 #endif
 
+#ifndef NDEBUG
+VkResult check_vk_call(const char* call_str, const char* file, int line, VkResult res)
+{
+    if (res != VK_SUCCESS) {
+        const char* desc = nullptr;
+
+        switch (res) {
+#           define MAKE_ERR_STR(val) case val: desc = #val; break;
+            MAKE_ERR_STR(VK_NOT_READY)
+            MAKE_ERR_STR(VK_TIMEOUT)
+            MAKE_ERR_STR(VK_EVENT_SET)
+            MAKE_ERR_STR(VK_EVENT_RESET)
+            MAKE_ERR_STR(VK_INCOMPLETE)
+            MAKE_ERR_STR(VK_ERROR_OUT_OF_HOST_MEMORY)
+            MAKE_ERR_STR(VK_ERROR_OUT_OF_DEVICE_MEMORY)
+            MAKE_ERR_STR(VK_ERROR_INITIALIZATION_FAILED)
+            MAKE_ERR_STR(VK_ERROR_DEVICE_LOST)
+            MAKE_ERR_STR(VK_ERROR_MEMORY_MAP_FAILED)
+            MAKE_ERR_STR(VK_ERROR_LAYER_NOT_PRESENT)
+            MAKE_ERR_STR(VK_ERROR_EXTENSION_NOT_PRESENT)
+            MAKE_ERR_STR(VK_ERROR_FEATURE_NOT_PRESENT)
+            MAKE_ERR_STR(VK_ERROR_INCOMPATIBLE_DRIVER)
+            MAKE_ERR_STR(VK_ERROR_TOO_MANY_OBJECTS)
+            MAKE_ERR_STR(VK_ERROR_FORMAT_NOT_SUPPORTED)
+            MAKE_ERR_STR(VK_ERROR_FRAGMENTED_POOL)
+            MAKE_ERR_STR(VK_ERROR_UNKNOWN)
+            MAKE_ERR_STR(VK_ERROR_OUT_OF_POOL_MEMORY)
+            MAKE_ERR_STR(VK_ERROR_INVALID_EXTERNAL_HANDLE)
+            MAKE_ERR_STR(VK_ERROR_FRAGMENTATION)
+            MAKE_ERR_STR(VK_ERROR_INVALID_OPAQUE_CAPTURE_ADDRESS)
+            MAKE_ERR_STR(VK_ERROR_SURFACE_LOST_KHR)
+            MAKE_ERR_STR(VK_ERROR_NATIVE_WINDOW_IN_USE_KHR)
+            MAKE_ERR_STR(VK_SUBOPTIMAL_KHR)
+            MAKE_ERR_STR(VK_ERROR_OUT_OF_DATE_KHR)
+#           undef MAKE_ERR_STR
+            default: break;
+        }
+
+        if (desc)
+            dprintf("%s:%d: %s in %s\n", file, line, desc, call_str);
+        else
+            dprintf("%s:%d: error %d in %s\n", file, line, static_cast<int>(res), call_str);
+    }
+
+    return res;
+}
+
+const char* format_string(VkFormat format)
+{
+    switch (format) {
+#define MAKE_STR(fmt) case fmt: return #fmt ;
+        MAKE_STR(VK_FORMAT_A2B10G10R10_UNORM_PACK32)
+        MAKE_STR(VK_FORMAT_A2R10G10B10_UNORM_PACK32)
+        MAKE_STR(VK_FORMAT_A8B8G8R8_UNORM_PACK32)
+        MAKE_STR(VK_FORMAT_B8G8R8A8_UNORM)
+        MAKE_STR(VK_FORMAT_R8G8B8A8_UNORM)
+        MAKE_STR(VK_FORMAT_B8G8R8_UNORM)
+        MAKE_STR(VK_FORMAT_R8G8B8_UNORM)
+        default: break;
+    }
+    return "unrecognized";
+}
+#endif
+
 static void* vulkan_lib = nullptr;
 
 static bool load_vulkan()
@@ -159,8 +223,10 @@ static bool init_instance()
     uint32_t              num_ext_props = std::array_size(ext_props);
 
     VkResult res = vkEnumerateInstanceExtensionProperties(nullptr, &num_ext_props, ext_props);
-    if (res != VK_SUCCESS && res != VK_INCOMPLETE)
+    if (res != VK_SUCCESS && res != VK_INCOMPLETE) {
+        CHK_RES("vkEnumerateInstanceExtensionProperties", res);
         return false;
+    }
 
 #ifndef NDEBUG
     for (uint32_t i = 0; i < num_ext_props; i++)
@@ -247,7 +313,7 @@ static bool init_instance()
     }
 #endif
 
-    res = vkCreateInstance(&instance_info, nullptr, &vk_instance);
+    res = CHK(vkCreateInstance(&instance_info, nullptr, &vk_instance));
 
     if (res != VK_SUCCESS)
         return false;
@@ -340,6 +406,7 @@ static bool find_surface_format(VkPhysicalDevice phys_dev)
                 swapchain_create_info.surface         = vk_surface;
                 swapchain_create_info.imageFormat     = pref_format;
                 swapchain_create_info.imageColorSpace = formats[i_cur].colorSpace;
+                dprintf("found surface format %s\n", format_string(pref_format));
                 return true;
             }
         }
@@ -357,11 +424,15 @@ static bool find_gpu()
 
     VkResult res = vkEnumeratePhysicalDevices(vk_instance, &count, phys_devices);
 
-    if (res != VK_SUCCESS && res != VK_INCOMPLETE)
+    if (res != VK_SUCCESS && res != VK_INCOMPLETE) {
+        CHK_RES("vkEnumeratePhysicalDevices", res);
         return false;
+    }
 
-    if ( ! count)
+    if ( ! count) {
+        dprintf("Found 0 physical devices\n");
         return false;
+    }
 
     const VkPhysicalDeviceType seek_types[] = {
         VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU,
@@ -413,6 +484,7 @@ static bool find_gpu()
         }
     }
 
+    dprintf("Could not find any usable GPUs\n");
     return false;
 }
 
@@ -430,8 +502,10 @@ static bool get_device_extensions()
                                                               nullptr,
                                                               &num_extensions,
                                                               extensions);
-    if (res != VK_SUCCESS && res != VK_INCOMPLETE)
+    if (res != VK_SUCCESS && res != VK_INCOMPLETE) {
+        CHK_RES("vkEnumerateDeviceExtensionProperties", res);
         return false;
+    }
 
 #ifndef NDEBUG
     for (uint32_t i = 0; i < num_extensions; i++)
@@ -486,10 +560,10 @@ static bool create_device()
         nullptr  // pEnabledFeatures
     };
 
-    const VkResult res = vkCreateDevice(vk_phys_dev,
-                                        &dev_create_info,
-                                        nullptr,
-                                        &vk_dev);
+    const VkResult res = CHK(vkCreateDevice(vk_phys_dev,
+                                            &dev_create_info,
+                                            nullptr,
+                                            &vk_dev));
 
     if (res != VK_SUCCESS)
         return false;
@@ -518,7 +592,7 @@ static bool create_semaphores()
             VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO
         };
 
-        const VkResult res = vkCreateSemaphore(vk_dev, &sem_create_info, nullptr, &vk_sems[i]);
+        const VkResult res = CHK(vkCreateSemaphore(vk_dev, &sem_create_info, nullptr, &vk_sems[i]));
 
         if (res != VK_SUCCESS)
             return false;
@@ -543,7 +617,7 @@ static bool create_fences()
             VK_STRUCTURE_TYPE_FENCE_CREATE_INFO
         };
 
-        const VkResult res = vkCreateFence(vk_dev, &fence_create_info, nullptr, &vk_fens[i]);
+        const VkResult res = CHK(vkCreateFence(vk_dev, &fence_create_info, nullptr, &vk_fens[i]));
 
         if (res != VK_SUCCESS)
             return false;
@@ -563,13 +637,13 @@ static VkImageLayout layout[std::array_size(vk_swapchain_images)];
 
 static bool create_swapchain()
 {
-    dprintf("create_swapchain\n");
-
-    VkResult res = vkGetPhysicalDeviceSurfaceCapabilitiesKHR(vk_phys_dev,
-                                                             vk_surface,
-                                                             &vk_surface_caps);
+    VkResult res = CHK(vkGetPhysicalDeviceSurfaceCapabilitiesKHR(vk_phys_dev,
+                                                                 vk_surface,
+                                                                 &vk_surface_caps));
     if (res != VK_SUCCESS)
         return false;
+
+    dprintf("create_swapchain %ux%u\n", vk_surface_caps.currentExtent.width, vk_surface_caps.currentExtent.height);
 
     VkSwapchainKHR old_swapchain = vk_swapchain;
 
@@ -577,7 +651,7 @@ static bool create_swapchain()
     swapchain_create_info.imageExtent   = vk_surface_caps.currentExtent;
     swapchain_create_info.oldSwapchain  = old_swapchain;
 
-    res = vkCreateSwapchainKHR(vk_dev, &swapchain_create_info, nullptr, &vk_swapchain);
+    res = CHK(vkCreateSwapchainKHR(vk_dev, &swapchain_create_info, nullptr, &vk_swapchain));
 
     if (res != VK_SUCCESS)
         return false;
@@ -589,8 +663,10 @@ static bool create_swapchain()
 
     res = vkGetSwapchainImagesKHR(vk_dev, vk_swapchain, &num_images, vk_swapchain_images);
 
-    if (res != VK_SUCCESS && res != VK_INCOMPLETE)
+    if (res != VK_SUCCESS && res != VK_INCOMPLETE) {
+        CHK_RES("vkGetSwapchainImagesKHR", res);
         return false;
+    }
 
     std::mem_zero(&layout, sizeof(layout));
 
@@ -619,10 +695,10 @@ static bool dummy_draw(uint32_t image_idx)
 
         create_info.queueFamilyIndex = queue_create_info.queueFamilyIndex;
 
-        res = vkCreateCommandPool(vk_dev,
-                                  &create_info,
-                                  nullptr,
-                                  &pool);
+        res = CHK(vkCreateCommandPool(vk_dev,
+                                      &create_info,
+                                      nullptr,
+                                      &pool));
         if (res != VK_SUCCESS)
             return false;
     }
@@ -642,7 +718,7 @@ static bool dummy_draw(uint32_t image_idx)
         alloc_info.commandPool        = pool;
         alloc_info.commandBufferCount = std::array_size(bufs);
 
-        res = vkAllocateCommandBuffers(vk_dev, &alloc_info, bufs);
+        res = CHK(vkAllocateCommandBuffers(vk_dev, &alloc_info, bufs));
 
         if (res != VK_SUCCESS)
             return false;
@@ -651,7 +727,7 @@ static bool dummy_draw(uint32_t image_idx)
     const VkCommandBuffer buf = bufs[cmd_buf_idx];
     cmd_buf_idx = (cmd_buf_idx + 1) % std::array_size(bufs);
 
-    res = vkResetCommandBuffer(buf, 0);
+    res = CHK(vkResetCommandBuffer(buf, 0));
     if (res != VK_SUCCESS)
         return false;
 
@@ -662,7 +738,7 @@ static bool dummy_draw(uint32_t image_idx)
         nullptr
     };
 
-    res = vkBeginCommandBuffer(buf, &begin_info);
+    res = CHK(vkBeginCommandBuffer(buf, &begin_info));
     if (res != VK_SUCCESS)
         return false;
 
@@ -696,7 +772,7 @@ static bool dummy_draw(uint32_t image_idx)
                          1,
                          &img_barrier);
 
-    res = vkEndCommandBuffer(buf);
+    res = CHK(vkEndCommandBuffer(buf));
 
     if (res != VK_SUCCESS)
         return false;
@@ -715,7 +791,7 @@ static bool dummy_draw(uint32_t image_idx)
         &vk_sems[sem_acquire]
     };
 
-    res = vkQueueSubmit(vk_queue, 1, &submit_info, VK_NULL_HANDLE);
+    res = CHK(vkQueueSubmit(vk_queue, 1, &submit_info, VK_NULL_HANDLE));
 
     if (res != VK_SUCCESS)
         return false;
@@ -762,11 +838,11 @@ bool draw_frame()
     VkResult        res;
 
     if (frame_idx++) {
-        res = vkWaitForFences(vk_dev, 1, &vk_fens[fen_acquire], VK_TRUE, 1'000'000'000);
+        res = CHK(vkWaitForFences(vk_dev, 1, &vk_fens[fen_acquire], VK_TRUE, 1'000'000'000));
         if (res != VK_SUCCESS)
             return false;
 
-        res = vkResetFences(vk_dev, 1, &vk_fens[fen_acquire]);
+        res = CHK(vkResetFences(vk_dev, 1, &vk_fens[fen_acquire]));
         if (res != VK_SUCCESS)
             return false;
     }
@@ -782,8 +858,10 @@ bool draw_frame()
         if (res == VK_SUCCESS || res == VK_SUBOPTIMAL_KHR)
             break;
 
-        if (res != VK_ERROR_OUT_OF_DATE_KHR)
+        if (res != VK_ERROR_OUT_OF_DATE_KHR) {
+            CHK_RES("vkAcquireNextImageKHR", res);
             return false;
+        }
 
         if ( ! create_swapchain())
             return false;
@@ -816,8 +894,10 @@ bool draw_frame()
         res = VK_SUCCESS;
     }
 
-    if (res != VK_SUCCESS)
+    if (res != VK_SUCCESS) {
+        CHK_RES("vkQueuePresentKHR", res);
         return false;
+    }
 
     return true;
 }
