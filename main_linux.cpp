@@ -91,7 +91,7 @@ static bool create_window(Window* w)
                       XCB_CW_BACK_PIXEL | XCB_CW_EVENT_MASK,
                       values);
 
-    static const char title[] = "minivulkan";
+    static const char title[] = APPNAME;
 
     xcb_change_property(w->connection,
                         XCB_PROP_MODE_REPLACE,

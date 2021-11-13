@@ -1,5 +1,7 @@
 #include "vulkan_functions.h"
 
+#define APPNAME "minivulkan"
+
 extern VkInstance   vk_instance;
 extern VkSurfaceKHR vk_surface;
 

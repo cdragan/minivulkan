@@ -182,7 +182,7 @@ bool create_surface(struct Window* w)
         ];
         [window center];
         [window makeKeyAndOrderFront: nil];
-        window.title   = @"minivulkan";
+        window.title   = @ APPNAME;
         window.minSize = NSMakeSize(256, 256);
 
         id view_ctrl = [[VulkanViewController alloc]
