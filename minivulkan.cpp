@@ -222,11 +222,9 @@ static bool init_instance()
     VkExtensionProperties ext_props[32];
     uint32_t              num_ext_props = std::array_size(ext_props);
 
-    VkResult res = vkEnumerateInstanceExtensionProperties(nullptr, &num_ext_props, ext_props);
-    if (res != VK_SUCCESS && res != VK_INCOMPLETE) {
-        CHK_RES("vkEnumerateInstanceExtensionProperties", res);
+    VkResult res = CHK(vkEnumerateInstanceExtensionProperties(nullptr, &num_ext_props, ext_props));
+    if (res != VK_SUCCESS && res != VK_INCOMPLETE)
         return false;
-    }
 
 #ifndef NDEBUG
     for (uint32_t i = 0; i < num_ext_props; i++)
@@ -422,12 +420,10 @@ static bool find_gpu()
 
     uint32_t count = std::array_size(phys_devices);
 
-    VkResult res = vkEnumeratePhysicalDevices(vk_instance, &count, phys_devices);
+    VkResult res = CHK(vkEnumeratePhysicalDevices(vk_instance, &count, phys_devices));
 
-    if (res != VK_SUCCESS && res != VK_INCOMPLETE) {
-        CHK_RES("vkEnumeratePhysicalDevices", res);
+    if (res != VK_SUCCESS && res != VK_INCOMPLETE)
         return false;
-    }
 
     if ( ! count) {
         dprintf("Found 0 physical devices\n");
@@ -498,14 +494,12 @@ static bool get_device_extensions()
     VkExtensionProperties extensions[128];
     uint32_t              num_extensions = std::array_size(extensions);
 
-    const VkResult res = vkEnumerateDeviceExtensionProperties(vk_phys_dev,
-                                                              nullptr,
-                                                              &num_extensions,
-                                                              extensions);
-    if (res != VK_SUCCESS && res != VK_INCOMPLETE) {
-        CHK_RES("vkEnumerateDeviceExtensionProperties", res);
+    const VkResult res = CHK(vkEnumerateDeviceExtensionProperties(vk_phys_dev,
+                                                                  nullptr,
+                                                                  &num_extensions,
+                                                                  extensions));
+    if (res != VK_SUCCESS && res != VK_INCOMPLETE)
         return false;
-    }
 
 #ifndef NDEBUG
     for (uint32_t i = 0; i < num_extensions; i++)
@@ -661,12 +655,10 @@ static bool create_swapchain()
 
     uint32_t num_images = std::array_size(vk_swapchain_images);
 
-    res = vkGetSwapchainImagesKHR(vk_dev, vk_swapchain, &num_images, vk_swapchain_images);
+    res = CHK(vkGetSwapchainImagesKHR(vk_dev, vk_swapchain, &num_images, vk_swapchain_images));
 
-    if (res != VK_SUCCESS && res != VK_INCOMPLETE) {
-        CHK_RES("vkGetSwapchainImagesKHR", res);
+    if (res != VK_SUCCESS && res != VK_INCOMPLETE)
         return false;
-    }
 
     std::mem_zero(&layout, sizeof(layout));
 
@@ -849,19 +841,17 @@ bool draw_frame()
 
     for (;;) {
 
-        res = vkAcquireNextImageKHR(vk_dev,
-                                    vk_swapchain,
-                                    1'000'000'000,
-                                    vk_sems[sem_acquire],
-                                    vk_fens[fen_acquire],
-                                    &image_idx);
+        res = CHK(vkAcquireNextImageKHR(vk_dev,
+                                        vk_swapchain,
+                                        1'000'000'000,
+                                        vk_sems[sem_acquire],
+                                        vk_fens[fen_acquire],
+                                        &image_idx));
         if (res == VK_SUCCESS || res == VK_SUBOPTIMAL_KHR)
             break;
 
-        if (res != VK_ERROR_OUT_OF_DATE_KHR) {
-            CHK_RES("vkAcquireNextImageKHR", res);
+        if (res != VK_ERROR_OUT_OF_DATE_KHR)
             return false;
-        }
 
         if ( ! create_swapchain())
             return false;
@@ -886,7 +876,7 @@ bool draw_frame()
 
     present_info.pImageIndices = &image_idx;
 
-    res = vkQueuePresentKHR(vk_queue, &present_info);
+    res = CHK(vkQueuePresentKHR(vk_queue, &present_info));
 
     if (res == VK_SUBOPTIMAL_KHR) {
         if ( ! create_swapchain())
@@ -894,10 +884,8 @@ bool draw_frame()
         res = VK_SUCCESS;
     }
 
-    if (res != VK_SUCCESS) {
-        CHK_RES("vkQueuePresentKHR", res);
+    if (res != VK_SUCCESS)
         return false;
-    }
 
     return true;
 }

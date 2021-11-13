@@ -19,9 +19,7 @@ PORTABLE bool draw_frame();
 
 #ifdef NDEBUG
 #   define CHK(call) call
-#   define CHK_RES(call_str, res)
 #else
 #   define CHK(call) check_vk_call(#call, __FILE__, __LINE__, call)
-#   define CHK_RES(call_str, res) check_vk_call(call_str, __FILE__, __LINE__, res)
 VkResult check_vk_call(const char* call_str, const char* file, int line, VkResult res);
 #endif
