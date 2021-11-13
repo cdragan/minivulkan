@@ -115,8 +115,8 @@ bool create_surface(struct Window* w)
     - (CALayer *)makeBackingLayer
     {
         CAMetalLayer* layer      = [self.class.layerClass layer];
-        NSSize   view_scale = [self convertSizeToBacking: NSMakeSize(1, 1)];
-        layer.contentsScale = MIN(view_scale.width, view_scale.height);
+        const NSSize  view_scale = [self convertSizeToBacking: NSMakeSize(1, 1)];
+        layer.contentsScale      = MIN(view_scale.width, view_scale.height);
         return layer;
     }
 
