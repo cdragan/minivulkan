@@ -40,6 +40,16 @@ else
     ifdef debug
         CFLAGS  += -fsanitize=address
         LDFLAGS += -fsanitize=address
+
+        STRIP = true
+        CFLAGS += -O0 -g
+    else
+        CFLAGS += -DNDEBUG -Os
+        CFLAGS += -fomit-frame-pointer
+        CFLAGS += -fno-stack-check -fno-stack-protector -fno-threadsafe-statics
+
+        CFLAGS  += -ffunction-sections -fdata-sections
+        LDFLAGS += -ffunction-sections -fdata-sections
     endif
 
     CXXFLAGS += -x c++ -std=c++17 -fno-rtti -fno-exceptions
@@ -52,16 +62,9 @@ endif
 ifeq ($(UNAME), Linux)
     LDFLAGS += -lxcb -ldl
 
-    ifdef debug
-        STRIP = true
-        CFLAGS += -O0 -g
-    else
+    ifndef
         STRIP = strip
-        CFLAGS += -DNDEBUG -Os
-        CFLAGS += -fomit-frame-pointer
 
-        CFLAGS  += -ffunction-sections -fdata-sections
-        LDFLAGS += -ffunction-sections -fdata-sections
         LDFLAGS += -Wl,--gc-sections -Wl,--as-needed
 
         LTO_CFLAGS += -flto -fno-fat-lto-objects
@@ -76,16 +79,9 @@ ifeq ($(UNAME), Darwin)
 
     LDFLAGS += -fno-objc-arc $(addprefix -framework ,$(frameworks))
 
-    ifdef debug
-        STRIP = true
-        CFLAGS += -O0 -g
-    else
+    ifndef debug
         STRIP = strip -x
-        CFLAGS += -DNDEBUG -Os
-        CFLAGS += -fomit-frame-pointer
 
-        CFLAGS  += -ffunction-sections -fdata-sections
-        LDFLAGS += -ffunction-sections -fdata-sections
         LDFLAGS += -Wl,-dead_strip
 
         LTO_CFLAGS += -flto
