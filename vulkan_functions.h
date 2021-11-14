@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2021 Chris Dragan
+
 #ifdef __APPLE__
 #   define VK_USE_PLATFORM_METAL_EXT
 #endif

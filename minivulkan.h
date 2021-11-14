@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2021 Chris Dragan
+
 #include "vulkan_functions.h"
 
 #define APPNAME "minivulkan"

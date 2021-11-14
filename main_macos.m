@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2021 Chris Dragan
 
 #import <AppKit/AppKit.h>
 #import <Cocoa/Cocoa.h>
