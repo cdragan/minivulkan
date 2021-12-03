@@ -16,6 +16,7 @@ endif
 
 src_files += minivulkan.cpp
 src_files += stdc.cpp
+src_files += vmath.cpp
 
 ifeq ($(UNAME), Linux)
     src_files += main_linux.m
