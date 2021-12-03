@@ -14,7 +14,7 @@ void mem_zero(void* dest_ptr, uint32_t num_bytes);
 void mem_copy(void* dest_ptr, const void* src_ptr, uint32_t num_bytes);
 
 template<typename T, uint32_t N>
-constexpr uint32_t array_size(T (&a)[N])
+constexpr uint32_t array_size(T (&)[N])
 {
     return N;
 }
