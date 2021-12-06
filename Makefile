@@ -15,7 +15,7 @@ endif
 # Sources
 
 src_files += minivulkan.cpp
-src_files += stdc.cpp
+src_files += mstdc.cpp
 src_files += vmath.cpp
 
 ifeq ($(UNAME), Linux)

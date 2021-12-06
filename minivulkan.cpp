@@ -5,7 +5,7 @@
 #include <dlfcn.h>
 #include "minivulkan.h"
 #include "vulkan_extensions.h"
-#include "stdc.h"
+#include "mstdc.h"
 
 #ifdef NDEBUG
 #   define dprintf(...)
@@ -110,7 +110,7 @@ typedef PFN_vkVoidFunction (*LOAD_FUNCTION)(const char* name);
 static bool load_functions(const char* names, PFN_vkVoidFunction* fn_ptrs, LOAD_FUNCTION load)
 {
     for (;;) {
-        const uint32_t len = std::strlen(names);
+        const uint32_t len = mstd::strlen(names);
 
         if ( ! len)
             break;
@@ -156,7 +156,7 @@ static bool enable_extensions(const char*                  supported_extensions,
                               uint32_t*                    num_enabled_extensions)
 {
     for (;;) {
-        const uint32_t len = std::strlen(supported_extensions);
+        const uint32_t len = mstd::strlen(supported_extensions);
 
         if ( ! len)
             break;
@@ -165,7 +165,7 @@ static bool enable_extensions(const char*                  supported_extensions,
 
         bool found = false;
         for (uint32_t i = 0; i < num_found_extensions; i++) {
-            if (std::strcmp(supported_extensions, found_extensions[i].extensionName) == 0) {
+            if (mstd::strcmp(supported_extensions, found_extensions[i].extensionName) == 0) {
                 found = true;
                 break;
             }
@@ -223,7 +223,7 @@ static bool init_instance()
     };
 
     VkExtensionProperties ext_props[32];
-    uint32_t              num_ext_props = std::array_size(ext_props);
+    uint32_t              num_ext_props = mstd::array_size(ext_props);
 
     VkResult res = CHK(vkEnumerateInstanceExtensionProperties(nullptr, &num_ext_props, ext_props));
     if (res != VK_SUCCESS && res != VK_INCOMPLETE)
@@ -262,7 +262,7 @@ static bool init_instance()
     uint32_t num_layer_props = 0;
 
     if (vkEnumerateInstanceLayerProperties) {
-        num_layer_props = std::array_size(layer_props);
+        num_layer_props = mstd::array_size(layer_props);
 
         res = vkEnumerateInstanceLayerProperties(&num_layer_props, layer_props);
         if (res != VK_SUCCESS && res != VK_INCOMPLETE)
@@ -279,7 +279,7 @@ static bool init_instance()
     for (uint32_t i = 0; i < num_layer_props; i++) {
         dprintf("layer: %s\n", layer_props[i].layerName);
 
-        num_ext_props = std::array_size(ext_props);
+        num_ext_props = mstd::array_size(ext_props);
 
         const char* validation_features_str = nullptr;
 
@@ -291,19 +291,19 @@ static bool init_instance()
                 dprintf("    %s\n", ext_props[j].extensionName);
 
                 static const char validation_features_ext[] = "VK_EXT_validation_features";
-                if (std::strcmp(ext_props[i].extensionName, validation_features_ext) == 0)
+                if (mstd::strcmp(ext_props[i].extensionName, validation_features_ext) == 0)
                     validation_features_str = validation_features_ext;
             }
         }
 
         static const char validation[] = "VK_LAYER_KHRONOS_validation";
-        if (std::strcmp(layer_props[i].layerName, validation) == 0) {
+        if (mstd::strcmp(layer_props[i].layerName, validation) == 0) {
             validation_str = validation;
             instance_info.ppEnabledLayerNames = &validation_str;
             instance_info.enabledLayerCount   = 1;
 
             if (validation_features_str &&
-                instance_info.enabledExtensionCount < std::array_size(enabled_instance_extensions)) {
+                instance_info.enabledExtensionCount < mstd::array_size(enabled_instance_extensions)) {
 
                 enabled_instance_extensions[instance_info.enabledExtensionCount] = validation_features_str;
                 ++instance_info.enabledExtensionCount;
@@ -389,7 +389,7 @@ static bool find_surface_format(VkPhysicalDevice phys_dev)
 {
     VkSurfaceFormatKHR formats[32];
 
-    uint32_t num_formats = std::array_size(formats);
+    uint32_t num_formats = mstd::array_size(formats);
 
     const VkResult res = vkGetPhysicalDeviceSurfaceFormatsKHR(phys_dev,
                                                               vk_surface,
@@ -398,7 +398,7 @@ static bool find_surface_format(VkPhysicalDevice phys_dev)
     if (res != VK_SUCCESS && res != VK_INCOMPLETE)
         return false;
 
-    for (uint32_t i_pref = 0; i_pref < std::array_size(preferred_output_formats); i_pref++) {
+    for (uint32_t i_pref = 0; i_pref < mstd::array_size(preferred_output_formats); i_pref++) {
 
         const VkFormat pref_format = preferred_output_formats[i_pref];
 
@@ -421,7 +421,7 @@ static bool find_gpu()
     VkPhysicalDevice        phys_devices[8];
     VkQueueFamilyProperties queues[8];
 
-    uint32_t count = std::array_size(phys_devices);
+    uint32_t count = mstd::array_size(phys_devices);
 
     VkResult res = CHK(vkEnumeratePhysicalDevices(vk_instance, &count, phys_devices));
 
@@ -438,7 +438,7 @@ static bool find_gpu()
         VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU
     };
 
-    for (uint32_t i_type = 0; i_type < std::array_size(seek_types); i_type++) {
+    for (uint32_t i_type = 0; i_type < mstd::array_size(seek_types); i_type++) {
 
         const VkPhysicalDeviceType type = seek_types[i_type];
 
@@ -453,7 +453,7 @@ static bool find_gpu()
             if ( ! find_surface_format(phys_dev))
                 continue;
 
-            uint32_t num_queues = std::array_size(queues);
+            uint32_t num_queues = mstd::array_size(queues);
             vkGetPhysicalDeviceQueueFamilyProperties(phys_dev, &num_queues, queues);
 
             uint32_t i_queue;
@@ -495,7 +495,7 @@ static uint32_t    vk_num_device_extensions = 0;
 static bool get_device_extensions()
 {
     VkExtensionProperties extensions[128];
-    uint32_t              num_extensions = std::array_size(extensions);
+    uint32_t              num_extensions = mstd::array_size(extensions);
 
     const VkResult res = CHK(vkEnumerateDeviceExtensionProperties(vk_phys_dev,
                                                                   nullptr,
@@ -583,7 +583,7 @@ static VkSemaphore vk_sems[num_semaphores];
 
 static bool create_semaphores()
 {
-    for (uint32_t i = 0; i < std::array_size(vk_sems); i++) {
+    for (uint32_t i = 0; i < mstd::array_size(vk_sems); i++) {
 
         static const VkSemaphoreCreateInfo sem_create_info = {
             VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO
@@ -608,7 +608,7 @@ static VkFence vk_fens[num_fences];
 
 static bool create_fences()
 {
-    for (uint32_t i = 0; i < std::array_size(vk_sems); i++) {
+    for (uint32_t i = 0; i < mstd::array_size(vk_sems); i++) {
 
         static const VkFenceCreateInfo fence_create_info = {
             VK_STRUCTURE_TYPE_FENCE_CREATE_INFO
@@ -630,7 +630,7 @@ static VkSwapchainKHR vk_swapchain = VK_NULL_HANDLE;
 static VkImage vk_swapchain_images[8];
 
 // TODO join VkImageLayout with VkImage for state tracking
-static VkImageLayout layout[std::array_size(vk_swapchain_images)];
+static VkImageLayout layout[mstd::array_size(vk_swapchain_images)];
 
 static bool create_swapchain()
 {
@@ -644,7 +644,7 @@ static bool create_swapchain()
 
     VkSwapchainKHR old_swapchain = vk_swapchain;
 
-    swapchain_create_info.minImageCount = std::max(vk_surface_caps.minImageCount, 2U);
+    swapchain_create_info.minImageCount = mstd::max(vk_surface_caps.minImageCount, 2U);
     swapchain_create_info.imageExtent   = vk_surface_caps.currentExtent;
     swapchain_create_info.oldSwapchain  = old_swapchain;
 
@@ -656,14 +656,14 @@ static bool create_swapchain()
     if (old_swapchain != VK_NULL_HANDLE)
         vkDestroySwapchainKHR(vk_dev, old_swapchain, nullptr);
 
-    uint32_t num_images = std::array_size(vk_swapchain_images);
+    uint32_t num_images = mstd::array_size(vk_swapchain_images);
 
     res = CHK(vkGetSwapchainImagesKHR(vk_dev, vk_swapchain, &num_images, vk_swapchain_images));
 
     if (res != VK_SUCCESS && res != VK_INCOMPLETE)
         return false;
 
-    std::mem_zero(&layout, sizeof(layout));
+    mstd::mem_zero(&layout, sizeof(layout));
 
     return true;
 }
@@ -698,7 +698,7 @@ static bool dummy_draw(uint32_t image_idx)
             return false;
     }
 
-    static VkCommandBuffer bufs[2 * std::array_size(vk_swapchain_images)];
+    static VkCommandBuffer bufs[2 * mstd::array_size(vk_swapchain_images)];
     static uint32_t        cmd_buf_idx = 0;
 
     if (bufs[image_idx] == VK_NULL_HANDLE) {
@@ -711,7 +711,7 @@ static bool dummy_draw(uint32_t image_idx)
         };
 
         alloc_info.commandPool        = pool;
-        alloc_info.commandBufferCount = std::array_size(bufs);
+        alloc_info.commandBufferCount = mstd::array_size(bufs);
 
         res = CHK(vkAllocateCommandBuffers(vk_dev, &alloc_info, bufs));
 
@@ -720,7 +720,7 @@ static bool dummy_draw(uint32_t image_idx)
     }
 
     const VkCommandBuffer buf = bufs[cmd_buf_idx];
-    cmd_buf_idx = (cmd_buf_idx + 1) % std::array_size(bufs);
+    cmd_buf_idx = (cmd_buf_idx + 1) % mstd::array_size(bufs);
 
     res = CHK(vkResetCommandBuffer(buf, 0));
     if (res != VK_SUCCESS)

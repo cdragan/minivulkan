@@ -3,7 +3,7 @@
 
 #include <stdint.h>
 
-namespace std {
+namespace mstd {
 
 uint32_t strlen(const char* name);
 

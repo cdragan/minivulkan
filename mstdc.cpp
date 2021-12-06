@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2021 Chris Dragan
 
-#include "stdc.h"
+#include "mstdc.h"
 #include <assert.h>
 
-uint32_t std::strlen(const char* name)
+uint32_t mstd::strlen(const char* name)
 {
     assert(name);
 
@@ -16,7 +16,7 @@ uint32_t std::strlen(const char* name)
     return static_cast<uint32_t>(end - name);
 }
 
-int std::strcmp(const char* s1, const char* s2)
+int mstd::strcmp(const char* s1, const char* s2)
 {
     assert(s1);
     assert(s2);
@@ -37,7 +37,7 @@ int std::strcmp(const char* s1, const char* s2)
     return 0;
 }
 
-void std::mem_zero(void* dest_ptr, uint32_t num_bytes)
+void mstd::mem_zero(void* dest_ptr, uint32_t num_bytes)
 {
     assert(dest_ptr);
     assert(num_bytes);
@@ -48,7 +48,7 @@ void std::mem_zero(void* dest_ptr, uint32_t num_bytes)
         *(dest_byte++) = 0;
 }
 
-void std::mem_copy(void* dest_ptr, const void* src_ptr, uint32_t num_bytes)
+void mstd::mem_copy(void* dest_ptr, const void* src_ptr, uint32_t num_bytes)
 {
     assert(dest_ptr);
     assert(src_ptr);

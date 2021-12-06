@@ -3,7 +3,7 @@
 
 #include "vmath.h"
 #include "vecfloat.h"
-#include "stdc.h"
+#include "mstdc.h"
 #include <cmath>
 
 using namespace vmath;
@@ -213,18 +213,18 @@ quat normalize(const quat& q)
 
 mat4::mat4(const mat3& mtx)
 {
-    std::mem_zero(data, sizeof(data));
+    mstd::mem_zero(data, sizeof(data));
 
-    std::mem_copy(&data[0], &mtx.data[0], sizeof(float) * 3);
-    std::mem_copy(&data[4], &mtx.data[3], sizeof(float) * 3);
-    std::mem_copy(&data[8], &mtx.data[6], sizeof(float) * 3);
+    mstd::mem_copy(&data[0], &mtx.data[0], sizeof(float) * 3);
+    mstd::mem_copy(&data[4], &mtx.data[3], sizeof(float) * 3);
+    mstd::mem_copy(&data[8], &mtx.data[6], sizeof(float) * 3);
 
     a33 = 1;
 }
 
 mat4::mat4(const float* ptr)
 {
-    std::mem_copy(data, ptr, sizeof(data));
+    mstd::mem_copy(data, ptr, sizeof(data));
 }
 
 mat4::mat4(const quat& q)
@@ -236,7 +236,7 @@ mat4 mat4::identity()
 {
     mat4 result;
 
-    std::mem_zero(result.data, sizeof(result.data));
+    mstd::mem_zero(result.data, sizeof(result.data));
 
     result.a00 = 1;
     result.a11 = 1;
@@ -253,7 +253,7 @@ mat4 projection(float aspect, float fov, float near_plane, float far_plane, floa
 
     mat4 result;
 
-    std::mem_zero(result.data, sizeof(result.data));
+    mstd::mem_zero(result.data, sizeof(result.data));
 
     result.a00 = rcp(float1{aspect * fov_tan}).get0();
     result.a11 = -rcp(float1{fov_tan}).get0();
