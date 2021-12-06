@@ -56,6 +56,15 @@ struct float4_base {
         _mm_store_ps(ptr, data);
     }
 
+    void store2(float* ptr) const {
+        _mm_store_sd(reinterpret_cast<double*>(ptr), _mm_castps_pd(data));
+    }
+
+    void store3(float* ptr) const {
+        _mm_store_sd(reinterpret_cast<double*>(ptr), _mm_castps_pd(data));
+        _mm_store_ss(ptr + 2, _mm_shuffle_ps(data, data, 2));
+    }
+
     void store4(float* ptr) const {
         _mm_storeu_ps(ptr, data);
     }
@@ -183,6 +192,14 @@ struct float4: public float4_base {
 
     constexpr float4(float a, float b, float c, float d)
         : float4_base(__m128{a, b, c, d}) { }
+
+    static float4 load_zero() {
+        return float4{_mm_xor_ps(_mm_undefined_ps(), _mm_undefined_ps())};
+    }
+
+    static float4 load2(const float* ptr) {
+        return float4{_mm_castpd_ps(_mm_load_sd(reinterpret_cast<const double*>(ptr)))};
+    }
 
     static float4 load4_aligned(const float* ptr) {
         return float4{_mm_load_ps(ptr)};
@@ -368,6 +385,16 @@ inline float4 hsub(const float4& v1, const float4& v2)
 inline void transpose(float4& a, float4& b, float4& c, float4& d)
 {
     _MM_TRANSPOSE4_PS(a.data, b.data, c.data, d.data);
+}
+
+inline float4 dot_product3(const float4& v1, const float4& v2)
+{
+    return float4{_mm_dp_ps(v1, v2, 0x7F)};
+}
+
+inline float4 dot_product4(const float4& v1, const float4& v2)
+{
+    return float4{_mm_dp_ps(v1, v2, 0xFF)};
 }
 
 } // namespace vmath

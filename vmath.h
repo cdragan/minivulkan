@@ -3,9 +3,17 @@
 
 namespace vmath {
 
-struct float4_base;
+constexpr float pi = 3.141592741012573f;
 
-constexpr float pi = 3.14159265f;
+static inline constexpr float radians(float deg)
+{
+    return deg * 0.017453292384744f;
+}
+
+static inline constexpr float degrees(float rad)
+{
+    return rad * 57.295780181884766f;
+}
 
 template<unsigned dim> struct vec;
 struct quat;
@@ -42,8 +50,6 @@ struct vec<2> {
 
     constexpr explicit vec(const vec4& v);
 
-    vec& operator=(const float4_base& v);
-
     constexpr float& operator[](unsigned i) {
         return data[i];
     }
@@ -62,10 +68,6 @@ struct vec<2> {
 
     constexpr vec operator-() const {
         return vec(-x, -y);
-    }
-
-    constexpr float sum_components() const {
-        return x + y;
     }
 
     constexpr vec& operator+=(const vec& v) {
@@ -136,8 +138,6 @@ struct vec<3> {
 
     constexpr explicit vec(const vec4& v);
 
-    vec& operator=(const float4_base& v);
-
     constexpr float& operator[](unsigned i) {
         return data[i];
     }
@@ -156,10 +156,6 @@ struct vec<3> {
 
     constexpr vec operator-() const {
         return vec(-x, -y, -z);
-    }
-
-    constexpr float sum_components() const {
-        return x + y + z;
     }
 
     vec& operator+=(const vec& v);
@@ -212,8 +208,6 @@ struct vec<4> {
     constexpr vec(const vec3& v, float w)
         : x(v.x), y(v.y), z(v.z), w(w) { }
 
-    vec& operator=(const float4_base& v);
-
     constexpr float& operator[](unsigned i) {
         return data[i];
     }
@@ -222,7 +216,6 @@ struct vec<4> {
         return data[i];
     }
 
-    float sum_components() const;
     vec& operator+=(const vec& v);
     vec& operator-=(const vec& v);
     vec& operator*=(const float c);
@@ -293,7 +286,7 @@ inline vec<dim> operator/(vec<dim> v1, const vec<dim>& v2)
 }
 
 template<unsigned dim>
-float dot(const vec<dim>& v1, const vec<dim>& v2);
+float dot_product(const vec<dim>& v1, const vec<dim>& v2);
 
 struct quat {
     union {
@@ -320,8 +313,6 @@ struct quat {
     explicit quat(const mat3& rot_mtx);
     explicit quat(const mat4& rot_mtx);
 
-    quat& operator=(const float4_base& v);
-
     constexpr float& operator[](unsigned i) {
         return data[i];
     }
@@ -341,6 +332,9 @@ inline quat operator*(quat q1, const quat& q2)
     q1 *= q2;
     return q1;
 }
+
+quat conjugate(const quat& q);
+quat normalize(const quat& q);
 
 struct mat3 {
     union {
@@ -369,16 +363,28 @@ struct mat4 {
     };
 
     mat4() = default;
-
     explicit mat4(const mat3& mtx);
-
     explicit mat4(const float* ptr);
+    explicit mat4(const quat& q);
+    static mat4 identity();
+    static mat4 projection(float aspect, float fov, float near_plane, float far_plane, float depth_bias);
 };
 
 mat4 operator*(const mat4& m1, const mat4& m2);
-
 vec4 operator*(const vec4& v, const mat4& mtx);
-
 vec4 operator*(const mat4& mtx, const vec4& v);
+mat4 transpose(const mat4& mtx);
+mat4 translate(float x, float y, float z);
+mat4 scale(float x, float y, float z);
+
+inline mat4 translate(const vec3& v)
+{
+    return translate(v.x, v.y, v.z);
+}
+
+inline mat4 scale(const vec3& v)
+{
+    return scale(v.x, v.y, v.z);
+}
 
 } // namespace vmath
