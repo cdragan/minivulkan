@@ -37,6 +37,7 @@ else
     CFLAGS += -fvisibility=hidden
     CFLAGS += -fPIC
     CFLAGS += -MD
+    CFLAGS += -msse4.1
 
     ifdef debug
         CFLAGS  += -fsanitize=address
