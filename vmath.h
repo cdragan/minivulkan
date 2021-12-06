@@ -37,11 +37,11 @@ struct vec<2> {
 
     vec() = default;
 
-    constexpr explicit vec(float x)
-        : x(x), y(x) { }
+    constexpr explicit vec(float ax)
+        : x(ax), y(ax) { }
 
-    constexpr vec(float x, float y)
-        : x(x), y(y) { }
+    constexpr vec(float ax, float ay)
+        : x(ax), y(ay) { }
 
     constexpr explicit vec(const float* ptr)
         : x(ptr[0]), y(ptr[1]) { }
@@ -121,11 +121,11 @@ struct vec<3> {
 
     vec() = default;
 
-    constexpr explicit vec(float x)
-        : x(x), y(x), z(x) { }
+    constexpr explicit vec(float ax)
+        : x(ax), y(ax), z(ax) { }
 
-    constexpr vec(float x, float y, float z)
-        : x(x), y(y), z(z) { }
+    constexpr vec(float ax, float ay, float az)
+        : x(ax), y(ay), z(az) { }
 
     constexpr explicit vec(const float* ptr)
         : x(ptr[0]), y(ptr[1]), z(ptr[2]) { }
@@ -133,8 +133,8 @@ struct vec<3> {
     constexpr explicit vec(const vec2& v)
         : x(v.x), y(v.y), z(1) { }
 
-    constexpr explicit vec(const vec2& v, float z)
-        : x(v.x), y(v.y), z(z) { }
+    constexpr explicit vec(const vec2& v, float az)
+        : x(v.x), y(v.y), z(az) { }
 
     constexpr explicit vec(const vec4& v);
 
@@ -181,14 +181,14 @@ struct vec<4> {
 
     vec() = default;
 
-    constexpr explicit vec(float x)
-        : x(x), y(x), z(x), w(x) { }
+    constexpr explicit vec(float ax)
+        : x(ax), y(ax), z(ax), w(ax) { }
 
-    constexpr vec(float x, float y, float z)
-        : x(x), y(y), z(z), w(1) { }
+    constexpr vec(float ax, float ay, float az)
+        : x(ax), y(ay), z(az), w(1) { }
 
-    constexpr vec(float x, float y, float z, float w)
-        : x(x), y(y), z(z), w(w) { }
+    constexpr vec(float ax, float ay, float az, float aw)
+        : x(ax), y(ay), z(az), w(aw) { }
 
     constexpr explicit vec(const float* ptr)
         : x(ptr[0]), y(ptr[1]), z(ptr[2]), w(ptr[3]) { }
@@ -196,17 +196,17 @@ struct vec<4> {
     constexpr explicit vec(const vec2& v)
         : x(v.x), y(v.y), z(0), w(1) { }
 
-    constexpr vec(const vec2& v, float z)
-        : x(v.x), y(v.y), z(z), w(1) { }
+    constexpr vec(const vec2& v, float az)
+        : x(v.x), y(v.y), z(az), w(1) { }
 
-    constexpr vec(const vec2& v, float z, float w)
-        : x(v.x), y(v.y), z(z), w(w) { }
+    constexpr vec(const vec2& v, float az, float aw)
+        : x(v.x), y(v.y), z(az), w(aw) { }
 
     constexpr explicit vec(const vec3& v)
         : x(v.x), y(v.y), z(v.z), w(1) { }
 
-    constexpr vec(const vec3& v, float w)
-        : x(v.x), y(v.y), z(v.z), w(w) { }
+    constexpr vec(const vec3& v, float aw)
+        : x(v.x), y(v.y), z(v.z), w(aw) { }
 
     constexpr float& operator[](unsigned i) {
         return data[i];
@@ -302,8 +302,8 @@ struct quat {
 
     quat() = default;
 
-    constexpr quat(float x, float y, float z, float w)
-        : x(x), y(y), z(z), w(w) { }
+    constexpr quat(float ax, float ay, float az, float aw)
+        : x(ax), y(ay), z(az), w(aw) { }
 
     constexpr explicit quat(const float* ptr)
         : x(ptr[0]), y(ptr[1]), z(ptr[2]), w(ptr[3]) { }
