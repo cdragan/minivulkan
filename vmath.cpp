@@ -8,6 +8,10 @@
 
 using namespace vmath;
 
+namespace {
+    static constexpr float small = 1.0f / (1024 * 1024 * 1024);
+}
+
 vec3& vec3::operator+=(const vec3& v)
 {
     const float4 result = float4::load4_aligned(data) + float4::load4_aligned(v.data);
@@ -31,8 +35,8 @@ vec3& vec3::operator*=(const float c)
 
 vec3& vec3::operator/=(const float c)
 {
-    const float  rc     = rcp(float1{c}).get0();
-    const float4 result = float4::load4_aligned(data) * float4{rc, rc, rc, rc};
+    const float1 rcp_c  = rcp(float1{c});
+    const float4 result = float4::load4_aligned(data) * spread4(rcp_c);
     result.store3(data);
     return *this;
 }
@@ -74,8 +78,8 @@ vec4& vec4::operator*=(const float c)
 
 vec4& vec4::operator/=(const float c)
 {
-    const float  rc     = rcp(float1{c}).get0();
-    const float4 result = float4::load4_aligned(data) * float4{rc, rc, rc, rc};
+    const float1 rcp_c  = rcp(float1{c});
+    const float4 result = float4::load4_aligned(data) * spread4(rcp_c);
     result.store4_aligned(data);
     return *this;
 }
@@ -132,7 +136,15 @@ float vmath::dot_product<4>(const vec<4>& v1, const vec<4>& v2)
 
 quat::quat(const vec3& axis, float angle)
 {
-    // TODO
+    const float4 axis_f4 = float4::load4_aligned(axis.data);
+    const float4 sq_len  = dot_product3(axis_f4, axis_f4);
+    if (sq_len.get0() > small) {
+        const float rcp_len    = rsqrt(float1{sq_len}).get0();
+        const float half_angle = angle * 0.5f;
+        const float scale      = std::sin(half_angle) * rcp_len;
+        (axis_f4 * float4{scale, scale, scale, scale}).store4_aligned(data);
+        w = std::cos(half_angle);
+    }
 }
 
 quat::quat(const vec3& euler_xyz)
@@ -202,12 +214,53 @@ quat normalize(const quat& q)
     const float4 dp  = dot_product4(fq, fq);
 
     if (dp.get0() > 0) {
-        const float rlen = rsqrt(float1{dp}).get0();
-        fq *= float4{rlen, rlen, rlen, rlen};
+        const float1 rcp_len = rsqrt(float1{dp});
+        fq *= spread4(rcp_len);
     }
 
     quat result;
     fq.store4_aligned(result.data);
+    return result;
+}
+
+mat3::mat3(const float* ptr)
+{
+    mstd::mem_copy(data, ptr, sizeof(data));
+}
+
+mat3::mat3(const quat& q)
+{
+    const float4 q2f = float4::load4_aligned(q.data) * float4{2, 2, 2, 2};
+
+    quat q2w;
+    (q2f * float4{q.w, q.w, q.w, q.w}).store4_aligned(q2w.data);
+
+    quat q2x;
+    (q2f * float4{q.x, q.x, q.x, q.x}).store4_aligned(q2x.data);
+
+    quat q2y;
+    (q2f * float4{q.y, q.y, q.y, q.y}).store4_aligned(q2y.data);
+
+    const float z2z = q2f.get2() * q.z;
+
+    (float4{1, q2x.y, q2x.z, q2x.y} - float4{q2y.y + z2z, q2w.z, -q2w.y, -q2w.z}).store4_aligned(&data[0]);
+    (float4{1, q2y.z, q2x.z, q2y.z} - float4{q2x.x + z2z, q2w.x, q2w.y, -q2w.x}).store4_aligned(&data[4]);
+    data[8] = 1 - q2x.x + q2y.y;
+}
+
+void mat3::set_identity()
+{
+    mstd::mem_zero(data, sizeof(data));
+
+    a00 = 1;
+    a11 = 1;
+    a22 = 1;
+}
+
+mat3 mat3::identity()
+{
+    mat3 result;
+    result.set_identity();
     return result;
 }
 
@@ -229,20 +282,39 @@ mat4::mat4(const float* ptr)
 
 mat4::mat4(const quat& q)
 {
-    // TODO
+    const float4 q2f = float4::load4_aligned(q.data) * float4{2, 2, 2, 2};
+
+    quat q2w;
+    (q2f * float4{q.w, q.w, q.w, q.w}).store4_aligned(q2w.data);
+
+    quat q2x;
+    (q2f * float4{q.x, q.x, q.x, q.x}).store4_aligned(q2x.data);
+
+    quat q2y;
+    (q2f * float4{q.y, q.y, q.y, q.y}).store4_aligned(q2y.data);
+
+    const float z2z = q2f.get2() * q.z;
+
+    (float4{1, q2x.y, q2x.z, 0} - float4{q2y.y + z2z, q2w.z, -q2w.y, 0}).store4_aligned(&data[0]);
+    (float4{q2x.y, 1, q2y.z, 0} - float4{-q2w.z, q2x.x + z2z, q2w.x, 0}).store4_aligned(&data[4]);
+    (float4{q2x.z, q2y.z, 1, 0} - float4{q2w.y, -q2w.x, q2x.x + q2y.y, 0}).store4_aligned(&data[8]);
+    float4{0, 0, 0, 1}.store4_aligned(&data[12]);
+}
+
+void mat4::set_identity()
+{
+    mstd::mem_zero(data, sizeof(data));
+
+    a00 = 1;
+    a11 = 1;
+    a22 = 1;
+    a33 = 1;
 }
 
 mat4 mat4::identity()
 {
     mat4 result;
-
-    mstd::mem_zero(result.data, sizeof(result.data));
-
-    result.a00 = 1;
-    result.a11 = 1;
-    result.a22 = 1;
-    result.a33 = 1;
-
+    result.set_identity();
     return result;
 }
 

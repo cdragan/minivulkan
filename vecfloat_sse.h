@@ -245,6 +245,11 @@ struct float4: public float4_base {
     }
 };
 
+inline float4 spread4(const float1& v)
+{
+    return float4{_mm_shuffle_ps(v, v, 0)};
+}
+
 inline float4 operator+(float4 v1, const float4& v2)
 {
     v1 += v2;
@@ -315,6 +320,13 @@ inline float4 operator>(const float4& v1, const float4& v2)
 inline float4 operator>=(const float4& v1, const float4& v2)
 {
     return float4{_mm_cmpge_ps(v1, v2)};
+}
+
+template<int lo_x, int lo_y, int hi_z, int hi_w>
+inline float4 shuffle(const float4& v_lo, const float4& v_hi)
+{
+    constexpr int mask = (lo_x & 3) | ((lo_y & 3) << 2) | ((hi_z & 3) << 4) | ((hi_w & 3) << 6);
+    return float4{_mm_shuffle_ps(v_lo, v_hi, mask)};
 }
 
 inline float4 andnot(const float4& v1, const float4& v2)

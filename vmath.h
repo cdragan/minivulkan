@@ -348,6 +348,10 @@ struct mat3 {
     };
 
     mat3() = default;
+    explicit mat3(const float* ptr);
+    explicit mat3(const quat& q);
+    void set_identity();
+    static mat3 identity();
 };
 
 struct mat4 {
@@ -366,6 +370,7 @@ struct mat4 {
     explicit mat4(const mat3& mtx);
     explicit mat4(const float* ptr);
     explicit mat4(const quat& q);
+    void set_identity();
     static mat4 identity();
     static mat4 projection(float aspect, float fov, float near_plane, float far_plane, float depth_bias);
 };
