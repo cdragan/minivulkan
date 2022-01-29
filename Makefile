@@ -64,7 +64,7 @@ endif
 ifeq ($(UNAME), Linux)
     LDFLAGS += -lxcb -ldl
 
-    ifndef
+    ifndef debug
         STRIP = strip
 
         LDFLAGS += -Wl,--gc-sections -Wl,--as-needed
