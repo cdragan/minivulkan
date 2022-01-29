@@ -20,7 +20,7 @@ jobs:
 
   macos:
     runs-on: macos-latest
-    timeout-minutes: 2
+    timeout-minutes: 3
     steps:
       - uses: actions/checkout@v2
       - name: Cache Vulkan SDK
