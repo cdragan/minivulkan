@@ -75,6 +75,8 @@ struct float4_base {
 };
 
 struct float1: public float4_base {
+    float1() = default;
+
     constexpr explicit float1(__m128 v)
         : float4_base(v) { }
 
@@ -187,6 +189,8 @@ inline float1 max(const float1& v1, const float1& v2)
 }
 
 struct float4: public float4_base {
+    float4() = default;
+
     constexpr explicit float4(__m128 v)
         : float4_base(v) { }
 
@@ -248,6 +252,12 @@ struct float4: public float4_base {
 inline float4 spread4(const float1& v)
 {
     return float4{_mm_shuffle_ps(v, v, 0)};
+}
+
+inline float4 spread4(float v)
+{
+    const float1 fv{v};
+    return float4{_mm_shuffle_ps(fv, fv, 0)};
 }
 
 inline float4 operator+(float4 v1, const float4& v2)

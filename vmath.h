@@ -3,16 +3,22 @@
 
 namespace vmath {
 
-constexpr float pi = 3.141592741012573f;
+constexpr double pi_double  = 3.141592653589793;
+constexpr float  pi         = static_cast<float>(pi_double);
+constexpr float  pi_squared = static_cast<float>(pi_double * pi_double);
+constexpr float  pi_half    = static_cast<float>(pi_double / 2);
+constexpr float  pi_2       = static_cast<float>(pi_double * 2);
 
 static inline constexpr float radians(float deg)
 {
-    return deg * 0.017453292384744f;
+    constexpr float to_rad = static_cast<float>(pi_double / 180.0);
+    return deg * to_rad;
 }
 
 static inline constexpr float degrees(float rad)
 {
-    return rad * 57.295780181884766f;
+    constexpr float to_deg = static_cast<float>(180.0 / pi_double);
+    return rad * to_deg;
 }
 
 template<unsigned dim> struct vec;

@@ -4,12 +4,62 @@
 #include "vmath.h"
 #include "vecfloat.h"
 #include "mstdc.h"
-#include <cmath>
 
 using namespace vmath;
 
 namespace {
     static constexpr float small = 1.0f / (1024 * 1024 * 1024);
+
+    struct sin_cos_result4 {
+        float4 sin;
+        float4 cos;
+    };
+
+    sin_cos_result4 sincos(float4 radians)
+    {
+        sin_cos_result4 result;
+
+        const float4 pi_sq4  = spread4(pi_squared);
+        const float4 rad_sq4 = radians * radians;
+
+        // Bhaskara I's approximation
+        result.cos = (pi_sq4 - spread4(4) * rad_sq4) / (pi_sq4 + rad_sq4);
+        result.sin = sqrt(spread4(1) - result.cos * result.cos);
+
+        return result;
+    }
+
+    struct sin_cos_result {
+        float sin;
+        float cos;
+    };
+
+    sin_cos_result sincos(float radians)
+    {
+        const sin_cos_result4 result4 = sincos(float4{float1{radians}});
+
+        sin_cos_result result;
+        result.cos = result4.cos.get0();
+        result.sin = result4.sin.get0();
+
+        return result;
+    }
+
+    float tan(float radians)
+    {
+        // From Bhaskara I's approximation:
+        // cos(x) = (pi * pi - 4 * x * x) / (pi * pi + x * x)
+        //
+        // sin(x) = sqrt(1 - cos(x) * cos(x))
+        // tan(x) = sin(x) / cos(x)
+        // tan(x) * tan(x) = (1 - cos(x) * cos(x)) / (cos(x) * cos(x))
+        // tan(x) * tan(x) = (1 / (cos(x) * cos(x))) - 1
+        // tan(x) * tan(x) = rcp(sqr(cos(x))) - 1
+        // tan(x) * tan(x) = sqr((pi * pi + x * x) / (pi * pi - 4 * x * x)) - 1
+        const float sq_x = radians * radians;
+        const float rcp_cos = (pi_squared + sq_x) / (pi_squared - 4 * sq_x);
+        return sqrt(float1{rcp_cos * rcp_cos - 1}).get0();
+    }
 }
 
 vec3& vec3::operator+=(const vec3& v)
@@ -139,28 +189,27 @@ quat::quat(const vec3& axis, float angle)
     const float4 axis_f4 = float4::load4_aligned(axis.data);
     const float4 sq_len  = dot_product3(axis_f4, axis_f4);
     if (sq_len.get0() > small) {
-        const float rcp_len    = rsqrt(float1{sq_len}).get0();
-        const float half_angle = angle * 0.5f;
-        const float scale      = std::sin(half_angle) * rcp_len;
+        const float          rcp_len = rsqrt(float1{sq_len}).get0();
+        const sin_cos_result sc_half = sincos(angle * 0.5f);
+        const float          scale   = sc_half.sin * rcp_len;
         (axis_f4 * float4{scale, scale, scale, scale}).store4_aligned(data);
-        w = std::cos(half_angle);
+        w = sc_half.cos;
     }
 }
 
 quat::quat(const vec3& euler_xyz)
 {
-    vec3 r{euler_xyz.x, euler_xyz.y, euler_xyz.z};
-    r *= 0.5f;
-    const vec3 cosr(std::cos(r.x), std::cos(r.y), std::cos(r.z));
-    const vec3 sinr(std::sin(r.x), std::sin(r.y), std::sin(r.z));
+    const sin_cos_result4 sc_half = sincos(float4::load4_aligned(euler_xyz.data) * spread4(0.5f));
+    const float4          sc_xy   = shuffle<0, 1, 0, 2>(sc_half.sin, sc_half.cos);
+    const float4          sc_z    = shuffle<2, 2, 2, 2>(sc_half.sin, sc_half.cos);
 
-    float4 dst1 = float4{sinr.x, cosr.x, cosr.x, cosr.x};
-    dst1       *= float4{cosr.y, sinr.y, cosr.y, cosr.y};
-    dst1       *= float4{cosr.z, cosr.z, sinr.z, cosr.z};
+    float4 dst1 = shuffle<0, 2, 2, 2>(sc_xy, sc_xy);
+    dst1       *= shuffle<3, 1, 3, 3>(sc_xy, sc_xy);
+    dst1       *= shuffle<2, 2, 0, 2>(sc_z,  sc_z);
 
-    float4 dst2 = float4{-cosr.x, sinr.x, -sinr.x, sinr.x};
-    dst2       *= float4{ sinr.y, cosr.y,  sinr.y, sinr.y};
-    dst2       *= float4{ sinr.z, sinr.z,  cosr.z, sinr.z};
+    float4 dst2 = shuffle<2, 0, 0, 0>(sc_xy, sc_xy) ^ float4{float4_base::load_mask(1 << 31, 0, 1 << 31, 0)};
+    dst2       *= shuffle<1, 3, 1, 1>(sc_xy, sc_xy);
+    dst2       *= shuffle<0, 0, 2, 0>(sc_z,  sc_z);
 
     dst1 += dst2;
     dst1.store4_aligned(data);
@@ -320,7 +369,7 @@ mat4 mat4::identity()
 
 mat4 projection(float aspect, float fov, float near_plane, float far_plane, float depth_bias)
 {
-    const float fov_tan = std::tan(radians(fov) * 0.5f);
+    const float fov_tan = tan(radians(fov) * 0.5f);
     const float rrange  = rcp(float1{far_plane - near_plane}).get0();
 
     mat4 result;
