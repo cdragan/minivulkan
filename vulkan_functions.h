@@ -30,6 +30,7 @@
     X(vkGetPhysicalDeviceSurfaceSupportKHR) \
     X(vkGetPhysicalDeviceSurfaceCapabilitiesKHR) \
     X(vkGetPhysicalDeviceSurfaceFormatsKHR) \
+    X(vkGetPhysicalDeviceFormatProperties) \
     X(vkEnumerateDeviceExtensionProperties) \
     X(vkCreateDevice)
 
@@ -65,7 +66,8 @@
     X(vkBeginCommandBuffer) \
     X(vkEndCommandBuffer) \
     X(vkCmdPipelineBarrier) \
-    X(vkQueueSubmit)
+    X(vkQueueSubmit) \
+    X(vkCreateRenderPass)
 
 extern PFN_vkVoidFunction vk_lib_functions[];
 extern PFN_vkVoidFunction vk_global_functions[];
@@ -106,6 +108,7 @@ enum e_device_functions {
 #define vkGetPhysicalDeviceSurfaceSupportKHR      ((PFN_vkGetPhysicalDeviceSurfaceSupportKHR)      vk_instance_functions[ id_vkGetPhysicalDeviceSurfaceSupportKHR])
 #define vkGetPhysicalDeviceSurfaceCapabilitiesKHR ((PFN_vkGetPhysicalDeviceSurfaceCapabilitiesKHR) vk_instance_functions[ id_vkGetPhysicalDeviceSurfaceCapabilitiesKHR])
 #define vkGetPhysicalDeviceSurfaceFormatsKHR      ((PFN_vkGetPhysicalDeviceSurfaceFormatsKHR)      vk_instance_functions[ id_vkGetPhysicalDeviceSurfaceFormatsKHR])
+#define vkGetPhysicalDeviceFormatProperties       ((PFN_vkGetPhysicalDeviceFormatProperties)       vk_instance_functions[ id_vkGetPhysicalDeviceFormatProperties])
 #define vkEnumerateDeviceExtensionProperties      ((PFN_vkEnumerateDeviceExtensionProperties)      vk_instance_functions[ id_vkEnumerateDeviceExtensionProperties])
 #define vkCreateMetalSurfaceEXT                   ((PFN_vkCreateMetalSurfaceEXT)                   vk_instance_functions[ id_vkCreateMetalSurfaceEXT])
 #define vkCreateXcbSurfaceKHR                     ((PFN_vkCreateXcbSurfaceKHR)                     vk_instance_functions[ id_vkCreateXcbSurfaceKHR])
@@ -129,3 +132,4 @@ enum e_device_functions {
 #define vkEndCommandBuffer                        ((PFN_vkEndCommandBuffer)                        vk_device_functions[   id_vkEndCommandBuffer])
 #define vkCmdPipelineBarrier                      ((PFN_vkCmdPipelineBarrier)                      vk_device_functions[   id_vkCmdPipelineBarrier])
 #define vkQueueSubmit                             ((PFN_vkQueueSubmit)                             vk_device_functions[   id_vkQueueSubmit])
+#define vkCreateRenderPass                        ((PFN_vkCreateRenderPass)                        vk_device_functions[   id_vkCreateRenderPass])

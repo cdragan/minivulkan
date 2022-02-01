@@ -354,16 +354,6 @@ static VkDeviceQueueCreateInfo queue_create_info = {
     queue_priorities
 };
 
-static const VkFormat preferred_output_formats[] = {
-    VK_FORMAT_A2B10G10R10_UNORM_PACK32,
-    VK_FORMAT_A2R10G10B10_UNORM_PACK32,
-    VK_FORMAT_A8B8G8R8_UNORM_PACK32,
-    VK_FORMAT_B8G8R8A8_UNORM,
-    VK_FORMAT_R8G8B8A8_UNORM,
-    VK_FORMAT_B8G8R8_UNORM,
-    VK_FORMAT_R8G8B8_UNORM
-};
-
 static VkSwapchainCreateInfoKHR swapchain_create_info = {
     VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR,
     nullptr,
@@ -398,6 +388,16 @@ static bool find_surface_format(VkPhysicalDevice phys_dev)
     if (res != VK_SUCCESS && res != VK_INCOMPLETE)
         return false;
 
+    static const VkFormat preferred_output_formats[] = {
+        VK_FORMAT_A2B10G10R10_UNORM_PACK32,
+        VK_FORMAT_A2R10G10B10_UNORM_PACK32,
+        VK_FORMAT_A8B8G8R8_UNORM_PACK32,
+        VK_FORMAT_B8G8R8A8_UNORM,
+        VK_FORMAT_R8G8B8A8_UNORM,
+        VK_FORMAT_B8G8R8_UNORM,
+        VK_FORMAT_R8G8B8_UNORM
+    };
+
     for (uint32_t i_pref = 0; i_pref < mstd::array_size(preferred_output_formats); i_pref++) {
 
         const VkFormat pref_format = preferred_output_formats[i_pref];
@@ -410,6 +410,24 @@ static bool find_surface_format(VkPhysicalDevice phys_dev)
                 dprintf("found surface format %s\n", format_string(pref_format));
                 return true;
             }
+        }
+    }
+
+    return false;
+}
+
+static bool find_optimal_tiling_format(const VkFormat* preferred_formats,
+                                       uint32_t        num_preferred_formats,
+                                       uint32_t        format_feature_flags,
+                                       VkFormat*       out_format)
+{
+    for (uint32_t i = 0; i < num_preferred_formats; i++) {
+        VkFormatProperties props;
+        vkGetPhysicalDeviceFormatProperties(vk_phys_dev, preferred_formats[i], &props);
+
+        if ((props.optimalTilingFeatures & format_feature_flags) == format_feature_flags) {
+            *out_format = preferred_formats[i];
+            return true;
         }
     }
 
@@ -668,6 +686,93 @@ static bool create_swapchain()
     return true;
 }
 
+static VkRenderPass vk_render_pass = VK_NULL_HANDLE;
+
+static bool create_renderpass()
+{
+    static VkAttachmentDescription attachments[] = {
+        {
+            0, // flags
+            VK_FORMAT_UNDEFINED,
+            VK_SAMPLE_COUNT_1_BIT,
+            VK_ATTACHMENT_LOAD_OP_CLEAR,
+            VK_ATTACHMENT_STORE_OP_STORE,
+            VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+            VK_ATTACHMENT_STORE_OP_DONT_CARE,
+            VK_IMAGE_LAYOUT_GENERAL,
+            VK_IMAGE_LAYOUT_PRESENT_SRC_KHR
+        },
+        {
+            0, // flags
+            VK_FORMAT_UNDEFINED,
+            VK_SAMPLE_COUNT_1_BIT,
+            VK_ATTACHMENT_LOAD_OP_CLEAR,
+            VK_ATTACHMENT_STORE_OP_DONT_CARE,
+            VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+            VK_ATTACHMENT_STORE_OP_DONT_CARE,
+            VK_IMAGE_LAYOUT_GENERAL,
+            VK_IMAGE_LAYOUT_GENERAL
+        }
+    };
+
+    if ( ! find_optimal_tiling_format(&swapchain_create_info.imageFormat,
+                                      1,
+                                      VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT,
+                                      &attachments[0].format)) {
+        dprintf("error: surface format does not support color attachments\n");
+        return false;
+    }
+
+    static const VkFormat depth_formats[] = {
+        VK_FORMAT_D24_UNORM_S8_UINT,
+        VK_FORMAT_D32_SFLOAT
+    };
+    if ( ! find_optimal_tiling_format(depth_formats,
+                                      mstd::array_size(depth_formats),
+                                      VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT,
+                                      &attachments[1].format)) {
+        dprintf("error: could not find any of the required depth formats\n");
+        return false;
+    }
+
+    static const VkAttachmentReference color_att_ref = {
+        0,
+        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
+    };
+    static const VkAttachmentReference depth_att_ref = {
+        1,
+        VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL
+    };
+    static const VkSubpassDescription subpass = {
+        0,          // flags
+        VK_PIPELINE_BIND_POINT_GRAPHICS,
+        0,          // inputAttachmentCount
+        nullptr,    // pInputAttachments
+        1,
+        &color_att_ref,
+        nullptr,    // pResolveAttachments
+        &depth_att_ref,
+        0,          // preserveAttachmentCount
+        nullptr     // pPreserveAttachments
+    };
+    static const VkRenderPassCreateInfo render_pass_info = {
+        VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO,
+        nullptr,    // pNext
+        0,          // flags
+        mstd::array_size(attachments),
+        attachments,
+        1,          // subpassCount
+        &subpass
+    };
+
+    const VkResult res = CHK(vkCreateRenderPass(vk_dev, &render_pass_info, nullptr, &vk_render_pass));
+
+    if (res != VK_SUCCESS)
+        return false;
+
+    return true;
+}
+
 static bool dummy_draw(uint32_t image_idx)
 {
     if (layout[image_idx] == VK_IMAGE_LAYOUT_PRESENT_SRC_KHR)
@@ -768,7 +873,6 @@ static bool dummy_draw(uint32_t image_idx)
                          &img_barrier);
 
     res = CHK(vkEndCommandBuffer(buf));
-
     if (res != VK_SUCCESS)
         return false;
 
@@ -787,7 +891,6 @@ static bool dummy_draw(uint32_t image_idx)
     };
 
     res = CHK(vkQueueSubmit(vk_queue, 1, &submit_info, VK_NULL_HANDLE));
-
     if (res != VK_SUCCESS)
         return false;
 
@@ -821,6 +924,9 @@ bool init_vulkan(Window* w)
         return false;
 
     if ( ! create_swapchain())
+        return false;
+
+    if ( ! create_renderpass())
         return false;
 
     return true;
