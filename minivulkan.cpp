@@ -1054,6 +1054,9 @@ static bool create_render_pass()
         }
     };
 
+#ifdef NDEBUG
+    attachments[0].format = swapchain_create_info.imageFormat;
+#else
     if ( ! find_optimal_tiling_format(&swapchain_create_info.imageFormat,
                                       1,
                                       VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT,
@@ -1061,6 +1064,7 @@ static bool create_render_pass()
         dprintf("error: surface format does not support color attachments\n");
         return false;
     }
+#endif
 
     attachments[1].format = vk_depth_format;
 
