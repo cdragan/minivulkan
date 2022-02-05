@@ -612,12 +612,16 @@ class DeviceMemoryHeap {
     private:
         static bool init_heap_info();
 
+        static uint32_t device_memory_type;
+        static uint32_t host_memory_type;
+
         VkDeviceMemory  memory         = VK_NULL_HANDLE;
         VkDeviceSize    next_free_offs = 0;
         VkDeviceSize    heap_size      = 0;
         bool            host_visible   = false;
-        static uint32_t device_memory_type;
-        static uint32_t host_memory_type;
+        bool            mapped         = false;
+
+        friend class MapBase;
 };
 
 uint32_t DeviceMemoryHeap::device_memory_type = ~0u;
@@ -690,9 +694,6 @@ bool DeviceMemoryHeap::allocate_heap_if_empty(const VkMemoryRequirements& requir
     if (memory != VK_NULL_HANDLE)
         return true;
 
-    if ( ! init_heap_info())
-        return false;
-
     return allocate_heap(mstd::align_up(requirements.size, requirements.alignment));
 }
 
@@ -704,6 +705,8 @@ bool DeviceMemoryHeap::allocate_heap(VkDeviceSize size)
 
     if ( ! init_heap_info())
         return false;
+
+    size = mstd::align_up(size, VkDeviceSize(phys_props.properties.limits.minMemoryMapAlignment));
 
     static VkMemoryAllocateInfo alloc_info = {
         VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
@@ -738,10 +741,12 @@ void DeviceMemoryHeap::free_heap()
 bool DeviceMemoryHeap::allocate_memory(const VkMemoryRequirements& requirements,
                                        VkDeviceSize*               offset)
 {
-    const VkDeviceSize aligned_offs = mstd::align_up(next_free_offs, requirements.alignment);
+    const VkDeviceSize alignment = mstd::align_up(requirements.alignment,
+                                                  VkDeviceSize(phys_props.properties.limits.minMemoryMapAlignment));
+    const VkDeviceSize aligned_offs = mstd::align_up(next_free_offs, alignment);
     assert(next_free_offs || ! aligned_offs);
     assert(aligned_offs >= next_free_offs);
-    assert(aligned_offs % requirements.alignment == 0);
+    assert(aligned_offs % alignment == 0);
 
     if (aligned_offs + requirements.size > heap_size) {
         dprintf("Not enough device memory\n");
@@ -760,27 +765,161 @@ bool DeviceMemoryHeap::allocate_memory(const VkMemoryRequirements& requirements,
 
 static constexpr VkImageLayout initial_layout = VK_IMAGE_LAYOUT_UNDEFINED;
 
-struct Image {
-    VkImage       image  = VK_NULL_HANDLE;
-    VkImageView   view   = VK_NULL_HANDLE;
-    VkImageLayout layout = initial_layout;
-    VkDeviceSize  size   = 0;
+class MapBase {
+    public:
+        MapBase(const MapBase&) = delete;
+        MapBase& operator=(const MapBase&) = delete;
 
-    Image() = default;
-    Image(const Image&) = delete;
-    Image& operator=(const Image&) = delete;
+        bool mapped() const { return mapped_ptr != nullptr; }
+        void unmap();
 
-    operator VkImage() const { return image; }
-    operator VkImageView() const { return view; }
+    protected:
+        MapBase() = default;
+        MapBase(DeviceMemoryHeap* heap, VkDeviceSize offset, VkDeviceSize size);
+        ~MapBase() { unmap(); }
 
-    bool allocate(DeviceMemoryHeap&  heap,
-                  uint32_t           width,
-                  uint32_t           height,
-                  VkFormat           format,
-                  uint32_t           mip_levels,
-                  VkImageAspectFlags aspect,
-                  VkImageUsageFlags  usage);
-    void destroy();
+        void move_from(MapBase& map);
+        void* get_ptr() { return mapped_ptr; }
+        const void* get_ptr() const { return mapped_ptr; }
+        void* get_end_ptr() { return reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(mapped_ptr) + mapped_size); }
+        const void* get_end_ptr() const { return reinterpret_cast<const void*>(reinterpret_cast<uintptr_t>(mapped_ptr) + mapped_size); }
+
+    private:
+        DeviceMemoryHeap* mapped_heap = nullptr;
+        void*             mapped_ptr  = nullptr;
+        VkDeviceSize      mapped_size = 0;
+};
+
+MapBase::MapBase(DeviceMemoryHeap* heap, VkDeviceSize offset, VkDeviceSize size)
+{
+    assert( ! heap->mapped);
+    assert((offset % phys_props.properties.limits.minMemoryMapAlignment) == 0);
+
+    const VkDeviceSize aligned_size = mstd::align_up(size,
+            VkDeviceSize(phys_props.properties.limits.minMemoryMapAlignment));
+
+    void* ptr;
+    const VkResult res = CHK(vkMapMemory(vk_dev, heap->get_memory(), offset, aligned_size, 0, &ptr));
+    if (res == VK_SUCCESS) {
+        mapped_heap = heap;
+        mapped_ptr  = ptr;
+        mapped_size = size;
+    }
+}
+
+void MapBase::unmap()
+{
+    if (mapped_heap) {
+        assert(mapped_ptr);
+        assert(mapped_size);
+        assert(mapped_heap->mapped);
+
+        vkUnmapMemory(vk_dev, mapped_heap->get_memory());
+        mapped_heap->mapped = false;
+
+        mapped_heap = nullptr;
+        mapped_ptr  = nullptr;
+        mapped_size = 0;
+    }
+    else {
+        assert( ! mapped_ptr);
+        assert( ! mapped_size);
+    }
+}
+
+void MapBase::move_from(MapBase& map)
+{
+    unmap();
+
+    mapped_heap = map.mapped_heap;
+    mapped_ptr  = map.mapped_ptr;
+    mapped_size = map.mapped_size;
+
+    map.mapped_heap = nullptr;
+    map.mapped_ptr  = nullptr;
+    map.mapped_size = 0;
+}
+
+template<typename T>
+class Map: public MapBase {
+    public:
+        Map() = default;
+        Map(DeviceMemoryHeap* heap, VkDeviceSize offset, VkDeviceSize size)
+            : MapBase(heap, offset, size) { }
+
+        Map(Map&& map) { move_from(map); }
+        Map& operator=(Map&& map) {
+            move_from(map);
+            return *this;
+        }
+
+        uint32_t size() const { return end() - begin(); }
+
+        T* data() { return static_cast<T*>(get_ptr()); }
+        const T* data() const { return static_cast<const T*>(get_ptr()); }
+
+        operator T*() { return static_cast<T*>(get_ptr()); }
+        operator const T*() const { return static_cast<const T*>(get_ptr()); }
+
+        T& operator[](uintptr_t i) { return static_cast<T*>(get_ptr())[i]; }
+        const T& operator[](uintptr_t i) const { return static_cast<const T*>(get_ptr())[i]; }
+
+        T* begin() { return static_cast<T*>(get_ptr()); }
+        T* end()   { return static_cast<T*>(get_end_ptr()); }
+
+        const T* begin() const { return static_cast<const T*>(get_ptr()); }
+        const T* end()   const { return static_cast<const T*>(get_end_ptr()); }
+
+        const T* cbegin() const { return static_cast<const T*>(get_ptr()); }
+        const T* cend()   const { return static_cast<const T*>(get_end_ptr()); }
+};
+
+class Resource {
+    public:
+        Resource() = default;
+        Resource(const Resource&) = delete;
+        Resource& operator=(const Resource&) = delete;
+
+        template<typename T>
+        Map<T> map() const { return Map<T>(owning_heap, heap_offset, bytes); }
+
+    protected:
+        DeviceMemoryHeap* owning_heap = nullptr;
+        VkDeviceSize      heap_offset = 0;
+        VkDeviceSize      bytes       = 0;
+};
+
+class Image: public Resource {
+    public:
+        VkImageLayout layout = initial_layout;
+
+        Image() = default;
+
+        operator VkImage() const { return image; }
+        operator VkImageView() const { return view; }
+
+        bool allocate(DeviceMemoryHeap&  heap,
+                      uint32_t           width,
+                      uint32_t           height,
+                      VkFormat           format,
+                      uint32_t           mip_levels,
+                      VkImageAspectFlags aspect,
+                      VkImageUsageFlags  usage);
+        void destroy();
+
+        // Used with swapchains
+        void set(VkImage new_image) {
+            assert(image == VK_NULL_HANDLE);
+            image = new_image;
+        }
+        void set(VkImageView new_view) {
+            assert(view == VK_NULL_HANDLE);
+            view = new_view;
+        }
+
+    private:
+        VkImage     image = VK_NULL_HANDLE;
+        VkImageView view  = VK_NULL_HANDLE;
 };
 
 bool Image::allocate(DeviceMemoryHeap&  heap,
@@ -837,11 +976,13 @@ bool Image::allocate(DeviceMemoryHeap&  heap,
     if ( ! heap.allocate_memory(requirements, &offset))
         return false;
 
-    size = requirements.size;
-
     res = CHK(vkBindImageMemory(vk_dev, image, heap.get_memory(), offset));
     if (res != VK_SUCCESS)
         return false;
+
+    owning_heap = &heap;
+    heap_offset = offset;
+    bytes       = requirements.size;
 
     static VkImageViewCreateInfo view_create_info = {
         VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
@@ -879,9 +1020,11 @@ void Image::destroy()
         vkDestroyImageView(vk_dev, view, nullptr);
     if (image)
         vkDestroyImage(vk_dev, image, nullptr);
-    view  = VK_NULL_HANDLE;
-    image = VK_NULL_HANDLE;
-    size  = 0;
+    view        = VK_NULL_HANDLE;
+    image       = VK_NULL_HANDLE;
+    owning_heap = nullptr;
+    heap_offset = 0;
+    bytes       = 0;
 }
 
 class TempHostImage: public Image {
@@ -910,23 +1053,24 @@ TempHostImage::~TempHostImage()
     heap.free_heap();
 }
 
-struct Buffer {
-    VkBuffer     buffer = VK_NULL_HANDLE;
-    VkBufferView view   = VK_NULL_HANDLE;
-    VkDeviceSize size   = 0;
+class Buffer: public Resource {
+    public:
+        Buffer() = default;
+        Buffer(const Buffer&) = delete;
+        Buffer& operator=(const Buffer&) = delete;
 
-    Buffer() = default;
-    Buffer(const Buffer&) = delete;
-    Buffer& operator=(const Buffer&) = delete;
+        operator VkBuffer() const { return buffer; }
+        operator VkBufferView() const { return view; }
 
-    operator VkBuffer() const { return buffer; }
-    operator VkBufferView() const { return view; }
+        bool allocate(DeviceMemoryHeap&  heap,
+                      uint32_t           alloc_size,
+                      VkFormat           format,
+                      VkBufferUsageFlags usage);
+        void destroy();
 
-    bool allocate(DeviceMemoryHeap&  heap,
-                  uint32_t           alloc_size,
-                  VkFormat           format,
-                  VkBufferUsageFlags usage);
-    void destroy();
+    private:
+        VkBuffer     buffer = VK_NULL_HANDLE;
+        VkBufferView view   = VK_NULL_HANDLE;
 };
 
 bool Buffer::allocate(DeviceMemoryHeap&  heap,
@@ -968,11 +1112,13 @@ bool Buffer::allocate(DeviceMemoryHeap&  heap,
     if ( ! heap.allocate_memory(requirements, &offset))
         return false;
 
-    size = requirements.size;
-
     res = CHK(vkBindBufferMemory(vk_dev, buffer, heap.get_memory(), offset));
     if (res != VK_SUCCESS)
         return false;
+
+    owning_heap = &heap;
+    heap_offset = offset;
+    bytes       = requirements.size;
 
     static VkBufferViewCreateInfo view_create_info = {
         VK_STRUCTURE_TYPE_BUFFER_VIEW_CREATE_INFO,
@@ -997,9 +1143,11 @@ void Buffer::destroy()
         vkDestroyBufferView(vk_dev, view, nullptr);
     if (buffer)
         vkDestroyBuffer(vk_dev, buffer, nullptr);
-    buffer = VK_NULL_HANDLE;
-    view   = VK_NULL_HANDLE;
-    size   = 0;
+    buffer      = VK_NULL_HANDLE;
+    view        = VK_NULL_HANDLE;
+    owning_heap = nullptr;
+    heap_offset = 0;
+    bytes       = 0;
 }
 
 class TempHostBuffer: public Buffer {
@@ -1143,8 +1291,9 @@ static bool create_swapchain()
 
     if (old_swapchain != VK_NULL_HANDLE) {
         for (const Image& image : vk_swapchain_images) {
-            if (image.view)
-                vkDestroyImageView(vk_dev, image, nullptr);
+            const VkImageView view = image;
+            if (view)
+                vkDestroyImageView(vk_dev, view, nullptr);
         }
 
         vkDestroySwapchainKHR(vk_dev, old_swapchain, nullptr);
@@ -1162,7 +1311,7 @@ static bool create_swapchain()
 
     for (uint32_t i = 0; i < num_images; i++) {
         Image& image = vk_swapchain_images[i];
-        image.image = images[i];
+        image.set(images[i]);
 
         static VkImageViewCreateInfo view_create_info = {
             VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
@@ -1188,9 +1337,12 @@ static bool create_swapchain()
         view_create_info.image  = image;
         view_create_info.format = swapchain_create_info.imageFormat;
 
-        res = CHK(vkCreateImageView(vk_dev, &view_create_info, nullptr, &vk_swapchain_images[i].view));
+        VkImageView view;
+        res = CHK(vkCreateImageView(vk_dev, &view_create_info, nullptr, &view));
         if (res != VK_SUCCESS)
             return false;
+
+        vk_swapchain_images[i].set(view);
     }
 
     return allocate_depth_buffers(num_images);

@@ -73,6 +73,8 @@
     X(vkDestroyFramebuffer) \
     X(vkAllocateMemory) \
     X(vkFreeMemory) \
+    X(vkMapMemory) \
+    X(vkUnmapMemory) \
     X(vkCreateImage) \
     X(vkDestroyImage) \
     X(vkGetImageMemoryRequirements) \
@@ -155,6 +157,8 @@ enum e_device_functions {
 #define vkDestroyFramebuffer                      ((PFN_vkDestroyFramebuffer)                      vk_device_functions[   id_vkDestroyFramebuffer])
 #define vkAllocateMemory                          ((PFN_vkAllocateMemory)                          vk_device_functions[   id_vkAllocateMemory])
 #define vkFreeMemory                              ((PFN_vkFreeMemory)                              vk_device_functions[   id_vkFreeMemory])
+#define vkMapMemory                              ((PFN_vkMapMemory)                              vk_device_functions[   id_vkMapMemory])
+#define vkUnmapMemory                              ((PFN_vkUnmapMemory)                              vk_device_functions[   id_vkUnmapMemory])
 #define vkCreateImage                             ((PFN_vkCreateImage)                             vk_device_functions[   id_vkCreateImage])
 #define vkDestroyImage                            ((PFN_vkDestroyImage)                            vk_device_functions[   id_vkDestroyImage])
 #define vkGetImageMemoryRequirements              ((PFN_vkGetImageMemoryRequirements)              vk_device_functions[   id_vkGetImageMemoryRequirements])
