@@ -70,6 +70,7 @@
     X(vkQueueSubmit) \
     X(vkCreateRenderPass) \
     X(vkCreateFramebuffer) \
+    X(vkDestroyFramebuffer) \
     X(vkAllocateMemory) \
     X(vkFreeMemory) \
     X(vkCreateImage) \
@@ -145,6 +146,7 @@ enum e_device_functions {
 #define vkQueueSubmit                             ((PFN_vkQueueSubmit)                             vk_device_functions[   id_vkQueueSubmit])
 #define vkCreateRenderPass                        ((PFN_vkCreateRenderPass)                        vk_device_functions[   id_vkCreateRenderPass])
 #define vkCreateFramebuffer                       ((PFN_vkCreateFramebuffer)                       vk_device_functions[   id_vkCreateFramebuffer])
+#define vkDestroyFramebuffer                      ((PFN_vkDestroyFramebuffer)                      vk_device_functions[   id_vkDestroyFramebuffer])
 #define vkAllocateMemory                          ((PFN_vkAllocateMemory)                          vk_device_functions[   id_vkAllocateMemory])
 #define vkFreeMemory                              ((PFN_vkFreeMemory)                              vk_device_functions[   id_vkFreeMemory])
 #define vkCreateImage                             ((PFN_vkCreateImage)                             vk_device_functions[   id_vkCreateImage])

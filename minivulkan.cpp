@@ -1126,6 +1126,20 @@ static bool create_frame_buffer()
     return res == VK_SUCCESS;
 }
 
+static bool update_swapchain_and_frame_buffer()
+{
+    vkDestroyFramebuffer(vk_dev, vk_frame_buffer, nullptr);
+    vk_frame_buffer = VK_NULL_HANDLE;
+
+    if ( ! create_swapchain())
+        return false;
+
+    if ( ! create_frame_buffer())
+        return false;
+
+    return true;
+}
+
 static bool dummy_draw(uint32_t image_idx)
 {
     if (vk_swapchain_images[image_idx].layout == VK_IMAGE_LAYOUT_PRESENT_SRC_KHR)
@@ -1321,7 +1335,7 @@ bool draw_frame()
         if (res != VK_ERROR_OUT_OF_DATE_KHR)
             return false;
 
-        if ( ! create_swapchain())
+        if ( ! update_swapchain_and_frame_buffer())
             return false;
     }
 
@@ -1347,7 +1361,7 @@ bool draw_frame()
     res = CHK(vkQueuePresentKHR(vk_queue, &present_info));
 
     if (res == VK_SUBOPTIMAL_KHR) {
-        if ( ! create_swapchain())
+        if ( ! update_swapchain_and_frame_buffer())
             return false;
         res = VK_SUCCESS;
     }
