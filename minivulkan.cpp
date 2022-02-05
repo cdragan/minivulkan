@@ -764,6 +764,7 @@ struct Image {
     VkImage       image  = VK_NULL_HANDLE;
     VkImageView   view   = VK_NULL_HANDLE;
     VkImageLayout layout = initial_layout;
+    VkDeviceSize  size   = 0;
 
     Image() = default;
     Image(const Image&) = delete;
@@ -836,6 +837,8 @@ bool Image::allocate(DeviceMemoryHeap&  heap,
     if ( ! heap.allocate_memory(requirements, &offset))
         return false;
 
+    size = requirements.size;
+
     res = CHK(vkBindImageMemory(vk_dev, image, heap.get_memory(), offset));
     if (res != VK_SUCCESS)
         return false;
@@ -878,6 +881,7 @@ void Image::destroy()
         vkDestroyImage(vk_dev, image, nullptr);
     view  = VK_NULL_HANDLE;
     image = VK_NULL_HANDLE;
+    size  = 0;
 }
 
 class TempHostImage: public Image {
@@ -909,6 +913,7 @@ TempHostImage::~TempHostImage()
 struct Buffer {
     VkBuffer     buffer = VK_NULL_HANDLE;
     VkBufferView view   = VK_NULL_HANDLE;
+    VkDeviceSize size   = 0;
 
     Buffer() = default;
     Buffer(const Buffer&) = delete;
@@ -918,14 +923,14 @@ struct Buffer {
     operator VkBufferView() const { return view; }
 
     bool allocate(DeviceMemoryHeap&  heap,
-                  uint32_t           size,
+                  uint32_t           alloc_size,
                   VkFormat           format,
                   VkBufferUsageFlags usage);
     void destroy();
 };
 
 bool Buffer::allocate(DeviceMemoryHeap&  heap,
-                      uint32_t           size,
+                      uint32_t           alloc_size,
                       VkFormat           format,
                       VkBufferUsageFlags usage)
 {
@@ -939,7 +944,7 @@ bool Buffer::allocate(DeviceMemoryHeap&  heap,
         1,          // queueFamilyIndexCount
         &queue_create_info.queueFamilyIndex
     };
-    create_info.size  = size;
+    create_info.size  = alloc_size;
     create_info.usage = usage;
 
     VkResult res = CHK(vkCreateBuffer(vk_dev, &create_info, nullptr, &buffer));
@@ -962,6 +967,8 @@ bool Buffer::allocate(DeviceMemoryHeap&  heap,
     VkDeviceSize offset;
     if ( ! heap.allocate_memory(requirements, &offset))
         return false;
+
+    size = requirements.size;
 
     res = CHK(vkBindBufferMemory(vk_dev, buffer, heap.get_memory(), offset));
     if (res != VK_SUCCESS)
@@ -992,6 +999,7 @@ void Buffer::destroy()
         vkDestroyBuffer(vk_dev, buffer, nullptr);
     buffer = VK_NULL_HANDLE;
     view   = VK_NULL_HANDLE;
+    size   = 0;
 }
 
 class TempHostBuffer: public Buffer {
@@ -1001,10 +1009,10 @@ class TempHostBuffer: public Buffer {
         }
         ~TempHostBuffer();
 
-        bool allocate(uint32_t           size,
+        bool allocate(uint32_t           alloc_size,
                       VkFormat           format,
                       VkBufferUsageFlags usage) {
-            return Buffer::allocate(heap, size, format, usage);
+            return Buffer::allocate(heap, alloc_size, format, usage);
         }
 
     private:
