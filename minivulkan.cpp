@@ -890,6 +890,15 @@ class Resource {
         VkDeviceSize      bytes       = 0;
 };
 
+struct ImageInfo {
+    uint32_t           width;
+    uint32_t           height;
+    VkFormat           format;
+    uint32_t           mip_levels;
+    VkImageAspectFlags aspect;
+    VkImageUsageFlags  usage;
+};
+
 class Image: public Resource {
     public:
         VkImageLayout layout = initial_layout;
@@ -899,13 +908,7 @@ class Image: public Resource {
         operator VkImage() const { return image; }
         operator VkImageView() const { return view; }
 
-        bool allocate(DeviceMemoryHeap&  heap,
-                      uint32_t           width,
-                      uint32_t           height,
-                      VkFormat           format,
-                      uint32_t           mip_levels,
-                      VkImageAspectFlags aspect,
-                      VkImageUsageFlags  usage);
+        bool allocate(DeviceMemoryHeap& heap, const ImageInfo& image_info);
         void destroy();
 
         // Used with swapchains
@@ -923,13 +926,7 @@ class Image: public Resource {
         VkImageView view  = VK_NULL_HANDLE;
 };
 
-bool Image::allocate(DeviceMemoryHeap&  heap,
-                     uint32_t           width,
-                     uint32_t           height,
-                     VkFormat           format,
-                     uint32_t           mip_levels,
-                     VkImageAspectFlags aspect,
-                     VkImageUsageFlags  usage)
+bool Image::allocate(DeviceMemoryHeap& heap, const ImageInfo& image_info)
 {
     static VkImageCreateInfo create_info = {
         VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
@@ -948,12 +945,12 @@ bool Image::allocate(DeviceMemoryHeap&  heap,
         &queue_create_info.queueFamilyIndex,
         initial_layout
     };
-    create_info.format        = format;
-    create_info.extent.width  = width;
-    create_info.extent.height = height;
-    create_info.mipLevels     = mip_levels;
+    create_info.format        = image_info.format;
+    create_info.extent.width  = image_info.width;
+    create_info.extent.height = image_info.height;
+    create_info.mipLevels     = image_info.mip_levels;
     create_info.tiling        = heap.is_host_memory() ? VK_IMAGE_TILING_LINEAR : VK_IMAGE_TILING_OPTIMAL;
-    create_info.usage         = usage;
+    create_info.usage         = image_info.usage;
 
     VkResult res = CHK(vkCreateImage(vk_dev, &create_info, nullptr, &image));
     if (res != VK_SUCCESS)
@@ -1008,9 +1005,9 @@ bool Image::allocate(DeviceMemoryHeap&  heap,
         }
     };
     view_create_info.image                       = image;
-    view_create_info.format                      = format;
-    view_create_info.subresourceRange.aspectMask = aspect;
-    view_create_info.subresourceRange.levelCount = mip_levels;
+    view_create_info.format                      = image_info.format;
+    view_create_info.subresourceRange.aspectMask = image_info.aspect;
+    view_create_info.subresourceRange.levelCount = image_info.mip_levels;
 
     res = CHK(vkCreateImageView(vk_dev, &view_create_info, nullptr, &view));
     return res == VK_SUCCESS;
@@ -1036,13 +1033,8 @@ class TempHostImage: public Image {
         }
         ~TempHostImage();
 
-        bool allocate(uint32_t           width,
-                      uint32_t           height,
-                      VkFormat           format,
-                      uint32_t           mip_levels,
-                      VkImageAspectFlags aspect,
-                      VkImageUsageFlags  usage) {
-            return Image::allocate(heap, width, height, format, mip_levels, aspect, usage);
+        bool allocate(const ImageInfo& image_info) {
+            return Image::allocate(heap, image_info);
         }
 
     private:
@@ -1262,9 +1254,20 @@ static bool allocate_depth_buffers(uint32_t num_depth_buffers)
         return false;
 
     for (uint32_t i = 0; i < num_depth_buffers; i++) {
-        if ( ! vk_depth_buffers[i].allocate(depth_buffer_heap, width, height, vk_depth_format, 1,
-                                            VK_IMAGE_ASPECT_DEPTH_BIT,
-                                            VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT))
+
+        static ImageInfo image_info = {
+            0, // width
+            0, // height
+            VK_FORMAT_UNDEFINED,
+            1, // mip_levels
+            VK_IMAGE_ASPECT_DEPTH_BIT,
+            VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT
+        };
+        image_info.width  = width;
+        image_info.height = height;
+        image_info.format = vk_depth_format;
+
+        if ( ! vk_depth_buffers[i].allocate(depth_buffer_heap, image_info))
             return false;
     }
     return true;
