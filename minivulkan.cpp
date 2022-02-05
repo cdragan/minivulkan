@@ -607,7 +607,8 @@ class DeviceMemoryHeap {
         bool allocate_memory(const VkMemoryRequirements& requirements, VkDeviceSize* offset);
 
         VkDeviceMemory  get_memory() const { return memory; }
-        static uint32_t get_memory_type()  { return device_memory_type; }
+        bool            is_host_memory() const { return host_visible; }
+        static uint32_t get_memory_type() { return device_memory_type; }
 
     private:
         static bool init_heap_info();
@@ -951,6 +952,7 @@ bool Image::allocate(DeviceMemoryHeap&  heap,
     create_info.extent.width  = width;
     create_info.extent.height = height;
     create_info.mipLevels     = mip_levels;
+    create_info.tiling        = heap.is_host_memory() ? VK_IMAGE_TILING_LINEAR : VK_IMAGE_TILING_OPTIMAL;
     create_info.usage         = usage;
 
     VkResult res = CHK(vkCreateImage(vk_dev, &create_info, nullptr, &image));
