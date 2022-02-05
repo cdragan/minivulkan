@@ -170,8 +170,8 @@ bool create_surface(struct Window* w)
     {
         NSRect screen_frame = [[NSScreen mainScreen] frame];
         NSRect frame_rect   = NSMakeRect(0, 0,
-                                         screen_frame.size.width / 2,
-                                         screen_frame.size.height / 2);
+                                         screen_frame.size.width,
+                                         screen_frame.size.height);
 
         NSWindow *window = [[NSWindow alloc]
             initWithContentRect: frame_rect
@@ -185,7 +185,7 @@ bool create_surface(struct Window* w)
         [window center];
         [window makeKeyAndOrderFront: nil];
         window.title   = @ APPNAME;
-        window.minSize = NSMakeSize(256, 256);
+        window.minSize = NSMakeSize(512, 384);
 
         id view_ctrl = [[VulkanViewController alloc]
             initWithSize: frame_rect.size
