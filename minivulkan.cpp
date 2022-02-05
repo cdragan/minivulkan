@@ -1,16 +1,19 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2021 Chris Dragan
 
-#include <assert.h>
-#include <dlfcn.h>
 #include "minivulkan.h"
 #include "vulkan_extensions.h"
 #include "mstdc.h"
+#include <assert.h>
+#define __STDC_FORMAT_MACROS
+#include <inttypes.h>
+#include <dlfcn.h>
 
 #ifdef NDEBUG
 #   define dprintf(...)
 #else
 #   include <stdio.h>
+#   include <string.h>
 #   define dprintf printf
 #endif
 
@@ -591,6 +594,259 @@ static bool create_device()
     return true;
 }
 
+class DeviceMemoryHeap {
+    public:
+        DeviceMemoryHeap() = default;
+        DeviceMemoryHeap(const DeviceMemoryHeap&) = delete;
+        DeviceMemoryHeap& operator=(const DeviceMemoryHeap&) = delete;
+
+        bool allocate_heap(VkDeviceSize size);
+        void free_heap();
+        bool allocate_memory(const VkMemoryRequirements& requirements, VkDeviceSize* offset);
+
+        VkDeviceMemory  get_memory() const { return memory; }
+        static uint32_t get_memory_type()  { return device_memory_type; }
+
+    private:
+        static bool init_heap_info();
+
+        VkDeviceMemory  memory         = VK_NULL_HANDLE;
+        VkDeviceSize    next_free_offs = 0;
+        VkDeviceSize    heap_size      = 0;
+        static uint32_t device_memory_type;
+        static uint32_t host_memory_type;
+};
+
+uint32_t DeviceMemoryHeap::device_memory_type = ~0U;
+uint32_t DeviceMemoryHeap::host_memory_type   = ~0U;
+
+static constexpr uint32_t alloc_heap_size = 64u * 1024u * 1024u;
+static DeviceMemoryHeap vk_device_heap;
+
+bool DeviceMemoryHeap::init_heap_info()
+{
+    if (device_memory_type != ~0U)
+        return true;
+
+    VkPhysicalDeviceMemoryProperties mem_props;
+    vkGetPhysicalDeviceMemoryProperties(vk_phys_dev, &mem_props);
+
+    int device_type_index = -1;
+    int host_type_index   = -1;
+
+    dprintf("Memory heaps\n");
+    for (int i = 0; i < static_cast<int>(mem_props.memoryTypeCount); i++) {
+#ifndef NDEBUG
+        static char info[64];
+        info[0] = 0;
+        if (mem_props.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)
+            strcat(info, "device,");
+        if (mem_props.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT)
+            strcat(info, "host_visible,");
+        if (mem_props.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)
+            strcat(info, "host_coherent,");
+        if (mem_props.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_HOST_CACHED_BIT)
+            strcat(info, "host_cached,");
+        dprintf("    type %d, heap %u, flags 0x%x (%s)\n",
+                i,
+                mem_props.memoryTypes[i].heapIndex,
+                mem_props.memoryTypes[i].propertyFlags,
+                info);
+#endif
+
+        if (device_type_index == -1 &&
+            (mem_props.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT))
+            device_type_index = i;
+
+        const uint32_t host_flags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
+                                  | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
+                                  | VK_MEMORY_PROPERTY_HOST_CACHED_BIT;
+        if ((mem_props.memoryTypes[i].propertyFlags & host_flags) == host_flags) {
+            if (host_flags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) {
+                device_type_index = i;
+                host_type_index   = i;
+            }
+            else if (host_type_index == -1)
+                host_type_index = i;
+        }
+    }
+
+    if (host_type_index == -1) {
+        dprintf("Could not find coherent and cached host memory type\n");
+        return false;
+    }
+
+    device_memory_type = (uint32_t)device_type_index;
+    host_memory_type   = (uint32_t)host_type_index;
+
+    return true;
+}
+
+bool DeviceMemoryHeap::allocate_heap(VkDeviceSize size)
+{
+    assert(memory         == VK_NULL_HANDLE);
+    assert(next_free_offs == 0);
+    assert(heap_size      == 0);
+
+    if ( ! init_heap_info())
+        return false;
+
+    static VkMemoryAllocateInfo alloc_info = {
+        VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+        nullptr,
+        0,  // allocationSize
+        0   // memoryTypeIndex
+    };
+    alloc_info.allocationSize  = size;
+    alloc_info.memoryTypeIndex = device_memory_type;
+
+    const VkResult res = CHK(vkAllocateMemory(vk_dev, &alloc_info, nullptr, &memory));
+    if (res != VK_SUCCESS)
+        return false;
+
+    heap_size = size;
+    dprintf("Allocated heap size 0x%" PRIx64 " bytes\n", static_cast<uint64_t>(size));
+
+    return true;
+}
+
+void DeviceMemoryHeap::free_heap()
+{
+    if (memory) {
+        vkFreeMemory(vk_dev, memory, nullptr);
+
+        memory         = VK_NULL_HANDLE;
+        next_free_offs = 0;
+        heap_size      = 0;
+    }
+}
+
+bool DeviceMemoryHeap::allocate_memory(const VkMemoryRequirements& requirements,
+                                       VkDeviceSize*               offset)
+{
+    const VkDeviceSize aligned_offs = mstd::align_up(next_free_offs, requirements.alignment);
+    assert(next_free_offs || ! aligned_offs);
+    assert(aligned_offs >= next_free_offs);
+    assert(aligned_offs % requirements.alignment == 0);
+
+    if (aligned_offs + requirements.size > heap_size) {
+        dprintf("Not enough device memory\n");
+        dprintf("Surface size %" PRIu64 ", used heap size %" PRIu64 ", max heap size %" PRIu64 "\n",
+                static_cast<uint64_t>(requirements.size),
+                static_cast<uint64_t>(aligned_offs),
+                static_cast<uint64_t>(heap_size));
+        return false;
+    }
+
+    *offset        = aligned_offs;
+    next_free_offs = aligned_offs + requirements.size;
+
+    return true;
+}
+
+struct Image {
+    VkImage       image;
+    VkImageView   view;
+    VkImageLayout layout;
+
+    Image() = default;
+    Image(const Image&) = delete;
+    Image& operator=(const Image&) = delete;
+
+    bool allocate(DeviceMemoryHeap&  heap,
+                  uint32_t           width,
+                  uint32_t           height,
+                  VkFormat           format,
+                  uint32_t           mip_levels,
+                  VkImageAspectFlags aspect,
+                  VkImageUsageFlags  usage);
+};
+
+bool Image::allocate(DeviceMemoryHeap&  heap,
+                     uint32_t           width,
+                     uint32_t           height,
+                     VkFormat           format,
+                     uint32_t           mip_levels,
+                     VkImageAspectFlags aspect,
+                     VkImageUsageFlags  usage)
+{
+    constexpr VkImageLayout initial_layout = VK_IMAGE_LAYOUT_UNDEFINED;
+
+    static VkImageCreateInfo create_info = {
+        VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+        nullptr,
+        0,                  // flags
+        VK_IMAGE_TYPE_2D,
+        VK_FORMAT_UNDEFINED,
+        { 0, 0, 1 },        // extent
+        1,                  // mipLevels
+        1,                  // arrayLayers
+        VK_SAMPLE_COUNT_1_BIT,
+        VK_IMAGE_TILING_OPTIMAL,
+        0,                  // usage
+        VK_SHARING_MODE_EXCLUSIVE,
+        1,                  // queueFamilyIndexCount
+        &queue_create_info.queueFamilyIndex,
+        initial_layout
+    };
+    create_info.format        = format;
+    create_info.extent.width  = width;
+    create_info.extent.height = height;
+    create_info.mipLevels     = mip_levels;
+    create_info.usage         = usage;
+
+    VkResult res = CHK(vkCreateImage(vk_dev, &create_info, nullptr, &image));
+    if (res != VK_SUCCESS)
+        return false;
+
+    layout = initial_layout;
+
+    VkMemoryRequirements requirements;
+    vkGetImageMemoryRequirements(vk_dev, image, &requirements);
+
+    if ( ! (requirements.memoryTypeBits & (1u << heap.get_memory_type()))) {
+        dprintf("Device memory does not support requested image type\n");
+        return false;
+    }
+
+    VkDeviceSize offset;
+    if ( ! heap.allocate_memory(requirements, &offset))
+        return false;
+
+    res = CHK(vkBindImageMemory(vk_dev, image, heap.get_memory(), offset));
+    if (res != VK_SUCCESS)
+        return false;
+
+    static VkImageViewCreateInfo view_create_info = {
+        VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+        nullptr,
+        0,                  // flags
+        VK_NULL_HANDLE,     // image
+        VK_IMAGE_VIEW_TYPE_2D,
+        VK_FORMAT_UNDEFINED,
+        {
+            VK_COMPONENT_SWIZZLE_IDENTITY,
+            VK_COMPONENT_SWIZZLE_IDENTITY,
+            VK_COMPONENT_SWIZZLE_IDENTITY,
+            VK_COMPONENT_SWIZZLE_IDENTITY
+        },
+        {
+            0, // aspectMask
+            0, // baseMipLevel
+            1, // levelCount
+            0, // baseArrayLayer
+            1  // layerCount
+        }
+    };
+    view_create_info.image                       = image;
+    view_create_info.format                      = format;
+    view_create_info.subresourceRange.aspectMask = aspect;
+    view_create_info.subresourceRange.levelCount = mip_levels;
+
+    res = CHK(vkCreateImageView(vk_dev, &view_create_info, nullptr, &view));
+    return res == VK_SUCCESS;
+}
+
 enum eSemId {
     sem_acquire,
 
@@ -645,10 +901,53 @@ static VkSurfaceCapabilitiesKHR vk_surface_caps;
 
 static VkSwapchainKHR vk_swapchain = VK_NULL_HANDLE;
 
-static VkImage vk_swapchain_images[8];
+static Image            vk_swapchain_images[8];
+static Image            vk_depth_buffers[mstd::array_size(vk_swapchain_images)];
+static DeviceMemoryHeap depth_buffer_heap;
+static VkFormat         vk_depth_format = VK_FORMAT_UNDEFINED;
 
-// TODO join VkImageLayout with VkImage for state tracking
-static VkImageLayout layout[mstd::array_size(vk_swapchain_images)];
+static bool allocate_depth_buffers(uint32_t num_depth_buffers)
+{
+    for (uint32_t i = 0; i < mstd::array_size(vk_depth_buffers); i++) {
+        Image& image = vk_depth_buffers[i];
+        if (image.view)
+            vkDestroyImageView(vk_dev, image.view, nullptr);
+        if (image.image)
+            vkDestroyImage(vk_dev, image.image, nullptr);
+        image.view  = VK_NULL_HANDLE;
+        image.image = VK_NULL_HANDLE;
+    }
+
+    depth_buffer_heap.free_heap();
+
+    const uint32_t width  = vk_surface_caps.currentExtent.width;
+    const uint32_t height = vk_surface_caps.currentExtent.height;
+
+    static const VkFormat depth_formats[] = {
+        VK_FORMAT_D24_UNORM_S8_UINT,
+        VK_FORMAT_D32_SFLOAT
+    };
+    if ( ! find_optimal_tiling_format(depth_formats,
+                                      mstd::array_size(depth_formats),
+                                      VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT,
+                                      &vk_depth_format)) {
+        dprintf("error: could not find any of the required depth formats\n");
+        return false;
+    }
+
+    const uint32_t heap_size = mstd::align_up(width * height * 4u, 64u * 1024u) * num_depth_buffers;
+
+    if ( ! depth_buffer_heap.allocate_heap(heap_size))
+        return false;
+
+    for (uint32_t i = 0; i < num_depth_buffers; i++) {
+        if ( ! vk_depth_buffers[i].allocate(depth_buffer_heap, width, height, vk_depth_format, 1,
+                                            VK_IMAGE_ASPECT_DEPTH_BIT,
+                                            VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT))
+            return false;
+    }
+    return true;
+}
 
 static bool create_swapchain()
 {
@@ -671,24 +970,64 @@ static bool create_swapchain()
     if (res != VK_SUCCESS)
         return false;
 
-    if (old_swapchain != VK_NULL_HANDLE)
-        vkDestroySwapchainKHR(vk_dev, old_swapchain, nullptr);
+    if (old_swapchain != VK_NULL_HANDLE) {
+        for (const Image& image : vk_swapchain_images) {
+            if (image.view)
+                vkDestroyImageView(vk_dev, image.view, nullptr);
+        }
 
+        vkDestroySwapchainKHR(vk_dev, old_swapchain, nullptr);
+    }
+
+    mstd::mem_zero(&vk_swapchain_images, sizeof(vk_swapchain_images));
+
+    VkImage  images[mstd::array_size(vk_swapchain_images)];
     uint32_t num_images = mstd::array_size(vk_swapchain_images);
 
-    res = CHK(vkGetSwapchainImagesKHR(vk_dev, vk_swapchain, &num_images, vk_swapchain_images));
+    res = CHK(vkGetSwapchainImagesKHR(vk_dev, vk_swapchain, &num_images, images));
 
     if (res != VK_SUCCESS && res != VK_INCOMPLETE)
         return false;
 
-    mstd::mem_zero(&layout, sizeof(layout));
+    for (uint32_t i = 0; i < num_images; i++) {
+        Image& image = vk_swapchain_images[i];
+        image.image = images[i];
 
-    return true;
+        static VkImageViewCreateInfo view_create_info = {
+            VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+            nullptr,
+            0,                  // flags
+            VK_NULL_HANDLE,     // image
+            VK_IMAGE_VIEW_TYPE_2D,
+            VK_FORMAT_UNDEFINED,
+            {
+                VK_COMPONENT_SWIZZLE_IDENTITY,
+                VK_COMPONENT_SWIZZLE_IDENTITY,
+                VK_COMPONENT_SWIZZLE_IDENTITY,
+                VK_COMPONENT_SWIZZLE_IDENTITY
+            },
+            {
+                VK_IMAGE_ASPECT_COLOR_BIT,
+                0,              // baseMipLevel
+                1,              // levelCount
+                0,              // baseArrayLayer
+                1               // layerCount
+            }
+        };
+        view_create_info.image  = vk_swapchain_images[i].image;
+        view_create_info.format = swapchain_create_info.imageFormat;
+
+        res = CHK(vkCreateImageView(vk_dev, &view_create_info, nullptr, &vk_swapchain_images[i].view));
+        if (res != VK_SUCCESS)
+            return false;
+    }
+
+    return allocate_depth_buffers(num_images);
 }
 
 static VkRenderPass vk_render_pass = VK_NULL_HANDLE;
 
-static bool create_renderpass()
+static bool create_render_pass()
 {
     static VkAttachmentDescription attachments[] = {
         {
@@ -723,17 +1062,7 @@ static bool create_renderpass()
         return false;
     }
 
-    static const VkFormat depth_formats[] = {
-        VK_FORMAT_D24_UNORM_S8_UINT,
-        VK_FORMAT_D32_SFLOAT
-    };
-    if ( ! find_optimal_tiling_format(depth_formats,
-                                      mstd::array_size(depth_formats),
-                                      VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT,
-                                      &attachments[1].format)) {
-        dprintf("error: could not find any of the required depth formats\n");
-        return false;
-    }
+    attachments[1].format = vk_depth_format;
 
     static const VkAttachmentReference color_att_ref = {
         0,
@@ -766,21 +1095,45 @@ static bool create_renderpass()
     };
 
     const VkResult res = CHK(vkCreateRenderPass(vk_dev, &render_pass_info, nullptr, &vk_render_pass));
+    return res == VK_SUCCESS;
+}
 
-    if (res != VK_SUCCESS)
-        return false;
+static VkFramebuffer vk_frame_buffer = VK_NULL_HANDLE;
 
-    return true;
+static bool create_frame_buffer()
+{
+    static VkImageView attachments[2];
+
+    static VkFramebufferCreateInfo frame_buffer_info = {
+        VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
+        nullptr,
+        0,                  // flags
+        VK_NULL_HANDLE,     // renderPass
+        mstd::array_size(attachments),
+        attachments,
+        0,                  // width
+        0,                  // height
+        1                   // layers
+    };
+    frame_buffer_info.renderPass = vk_render_pass;
+    frame_buffer_info.width      = vk_surface_caps.currentExtent.width;
+    frame_buffer_info.height     = vk_surface_caps.currentExtent.height;
+
+    attachments[0] = vk_swapchain_images[0].view;
+    attachments[1] = vk_depth_buffers[0].view;
+
+    const VkResult res = CHK(vkCreateFramebuffer(vk_dev, &frame_buffer_info, nullptr, &vk_frame_buffer));
+    return res == VK_SUCCESS;
 }
 
 static bool dummy_draw(uint32_t image_idx)
 {
-    if (layout[image_idx] == VK_IMAGE_LAYOUT_PRESENT_SRC_KHR)
+    if (vk_swapchain_images[image_idx].layout == VK_IMAGE_LAYOUT_PRESENT_SRC_KHR)
         return true;
 
     dprintf("dummy_draw for image %u\n", image_idx);
 
-    const VkImage image = vk_swapchain_images[image_idx];
+    const VkImage image = vk_swapchain_images[image_idx].image;
 
     VkResult res;
 
@@ -851,8 +1204,8 @@ static bool dummy_draw(uint32_t image_idx)
         VK_IMAGE_LAYOUT_PRESENT_SRC_KHR
     };
 
-    img_barrier.oldLayout = layout[image_idx];
-    layout[image_idx] = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+    img_barrier.oldLayout = vk_swapchain_images[image_idx].layout;
+    vk_swapchain_images[image_idx].layout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
 
     img_barrier.srcQueueFamilyIndex         = queue_create_info.queueFamilyIndex;
     img_barrier.dstQueueFamilyIndex         = queue_create_info.queueFamilyIndex;
@@ -917,6 +1270,9 @@ bool init_vulkan(Window* w)
     if ( ! create_device())
         return false;
 
+    if ( ! vk_device_heap.allocate_heap(alloc_heap_size))
+        return false;
+
     if ( ! create_semaphores())
         return false;
 
@@ -926,7 +1282,10 @@ bool init_vulkan(Window* w)
     if ( ! create_swapchain())
         return false;
 
-    if ( ! create_renderpass())
+    if ( ! create_render_pass())
+        return false;
+
+    if ( ! create_frame_buffer())
         return false;
 
     return true;

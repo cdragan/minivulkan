@@ -31,6 +31,7 @@
     X(vkGetPhysicalDeviceSurfaceCapabilitiesKHR) \
     X(vkGetPhysicalDeviceSurfaceFormatsKHR) \
     X(vkGetPhysicalDeviceFormatProperties) \
+    X(vkGetPhysicalDeviceMemoryProperties) \
     X(vkEnumerateDeviceExtensionProperties) \
     X(vkCreateDevice)
 
@@ -67,7 +68,16 @@
     X(vkEndCommandBuffer) \
     X(vkCmdPipelineBarrier) \
     X(vkQueueSubmit) \
-    X(vkCreateRenderPass)
+    X(vkCreateRenderPass) \
+    X(vkCreateFramebuffer) \
+    X(vkAllocateMemory) \
+    X(vkFreeMemory) \
+    X(vkCreateImage) \
+    X(vkDestroyImage) \
+    X(vkGetImageMemoryRequirements) \
+    X(vkBindImageMemory) \
+    X(vkCreateImageView) \
+    X(vkDestroyImageView)
 
 extern PFN_vkVoidFunction vk_lib_functions[];
 extern PFN_vkVoidFunction vk_global_functions[];
@@ -109,6 +119,7 @@ enum e_device_functions {
 #define vkGetPhysicalDeviceSurfaceCapabilitiesKHR ((PFN_vkGetPhysicalDeviceSurfaceCapabilitiesKHR) vk_instance_functions[ id_vkGetPhysicalDeviceSurfaceCapabilitiesKHR])
 #define vkGetPhysicalDeviceSurfaceFormatsKHR      ((PFN_vkGetPhysicalDeviceSurfaceFormatsKHR)      vk_instance_functions[ id_vkGetPhysicalDeviceSurfaceFormatsKHR])
 #define vkGetPhysicalDeviceFormatProperties       ((PFN_vkGetPhysicalDeviceFormatProperties)       vk_instance_functions[ id_vkGetPhysicalDeviceFormatProperties])
+#define vkGetPhysicalDeviceMemoryProperties       ((PFN_vkGetPhysicalDeviceMemoryProperties)       vk_instance_functions[ id_vkGetPhysicalDeviceMemoryProperties])
 #define vkEnumerateDeviceExtensionProperties      ((PFN_vkEnumerateDeviceExtensionProperties)      vk_instance_functions[ id_vkEnumerateDeviceExtensionProperties])
 #define vkCreateMetalSurfaceEXT                   ((PFN_vkCreateMetalSurfaceEXT)                   vk_instance_functions[ id_vkCreateMetalSurfaceEXT])
 #define vkCreateXcbSurfaceKHR                     ((PFN_vkCreateXcbSurfaceKHR)                     vk_instance_functions[ id_vkCreateXcbSurfaceKHR])
@@ -133,3 +144,12 @@ enum e_device_functions {
 #define vkCmdPipelineBarrier                      ((PFN_vkCmdPipelineBarrier)                      vk_device_functions[   id_vkCmdPipelineBarrier])
 #define vkQueueSubmit                             ((PFN_vkQueueSubmit)                             vk_device_functions[   id_vkQueueSubmit])
 #define vkCreateRenderPass                        ((PFN_vkCreateRenderPass)                        vk_device_functions[   id_vkCreateRenderPass])
+#define vkCreateFramebuffer                       ((PFN_vkCreateFramebuffer)                       vk_device_functions[   id_vkCreateFramebuffer])
+#define vkAllocateMemory                          ((PFN_vkAllocateMemory)                          vk_device_functions[   id_vkAllocateMemory])
+#define vkFreeMemory                              ((PFN_vkFreeMemory)                              vk_device_functions[   id_vkFreeMemory])
+#define vkCreateImage                             ((PFN_vkCreateImage)                             vk_device_functions[   id_vkCreateImage])
+#define vkDestroyImage                            ((PFN_vkDestroyImage)                            vk_device_functions[   id_vkDestroyImage])
+#define vkGetImageMemoryRequirements              ((PFN_vkGetImageMemoryRequirements)              vk_device_functions[   id_vkGetImageMemoryRequirements])
+#define vkBindImageMemory                         ((PFN_vkBindImageMemory)                         vk_device_functions[   id_vkBindImageMemory])
+#define vkCreateImageView                         ((PFN_vkCreateImageView)                         vk_device_functions[   id_vkCreateImageView])
+#define vkDestroyImageView                        ((PFN_vkDestroyImageView)                        vk_device_functions[   id_vkDestroyImageView])
