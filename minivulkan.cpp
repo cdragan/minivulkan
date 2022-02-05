@@ -346,7 +346,7 @@ static VkPhysicalDeviceProperties2 phys_props = {
 
 static const float queue_priorities[] = { 1 };
 
-static constexpr uint32_t no_queue_family = ~0U;
+static constexpr uint32_t no_queue_family = ~0u;
 
 static VkDeviceQueueCreateInfo queue_create_info = {
     VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
@@ -600,6 +600,8 @@ class DeviceMemoryHeap {
         DeviceMemoryHeap(const DeviceMemoryHeap&) = delete;
         DeviceMemoryHeap& operator=(const DeviceMemoryHeap&) = delete;
 
+        void make_host_heap() { host_visible = true; }
+        bool allocate_heap_if_empty(const VkMemoryRequirements& requirements);
         bool allocate_heap(VkDeviceSize size);
         void free_heap();
         bool allocate_memory(const VkMemoryRequirements& requirements, VkDeviceSize* offset);
@@ -613,19 +615,20 @@ class DeviceMemoryHeap {
         VkDeviceMemory  memory         = VK_NULL_HANDLE;
         VkDeviceSize    next_free_offs = 0;
         VkDeviceSize    heap_size      = 0;
+        bool            host_visible   = false;
         static uint32_t device_memory_type;
         static uint32_t host_memory_type;
 };
 
-uint32_t DeviceMemoryHeap::device_memory_type = ~0U;
-uint32_t DeviceMemoryHeap::host_memory_type   = ~0U;
+uint32_t DeviceMemoryHeap::device_memory_type = ~0u;
+uint32_t DeviceMemoryHeap::host_memory_type   = ~0u;
 
 static constexpr uint32_t alloc_heap_size = 64u * 1024u * 1024u;
 static DeviceMemoryHeap vk_device_heap;
 
 bool DeviceMemoryHeap::init_heap_info()
 {
-    if (device_memory_type != ~0U)
+    if (device_memory_type != ~0u)
         return true;
 
     VkPhysicalDeviceMemoryProperties mem_props;
@@ -682,6 +685,17 @@ bool DeviceMemoryHeap::init_heap_info()
     return true;
 }
 
+bool DeviceMemoryHeap::allocate_heap_if_empty(const VkMemoryRequirements& requirements)
+{
+    if (memory != VK_NULL_HANDLE)
+        return true;
+
+    if ( ! init_heap_info())
+        return false;
+
+    return allocate_heap(mstd::align_up(requirements.size, requirements.alignment));
+}
+
 bool DeviceMemoryHeap::allocate_heap(VkDeviceSize size)
 {
     assert(memory         == VK_NULL_HANDLE);
@@ -698,7 +712,7 @@ bool DeviceMemoryHeap::allocate_heap(VkDeviceSize size)
         0   // memoryTypeIndex
     };
     alloc_info.allocationSize  = size;
-    alloc_info.memoryTypeIndex = device_memory_type;
+    alloc_info.memoryTypeIndex = host_visible ? host_memory_type : device_memory_type;
 
     const VkResult res = CHK(vkAllocateMemory(vk_dev, &alloc_info, nullptr, &memory));
     if (res != VK_SUCCESS)
@@ -744,14 +758,19 @@ bool DeviceMemoryHeap::allocate_memory(const VkMemoryRequirements& requirements,
     return true;
 }
 
+static constexpr VkImageLayout initial_layout = VK_IMAGE_LAYOUT_UNDEFINED;
+
 struct Image {
-    VkImage       image;
-    VkImageView   view;
-    VkImageLayout layout;
+    VkImage       image  = VK_NULL_HANDLE;
+    VkImageView   view   = VK_NULL_HANDLE;
+    VkImageLayout layout = initial_layout;
 
     Image() = default;
     Image(const Image&) = delete;
     Image& operator=(const Image&) = delete;
+
+    operator VkImage() const { return image; }
+    operator VkImageView() const { return view; }
 
     bool allocate(DeviceMemoryHeap&  heap,
                   uint32_t           width,
@@ -760,6 +779,7 @@ struct Image {
                   uint32_t           mip_levels,
                   VkImageAspectFlags aspect,
                   VkImageUsageFlags  usage);
+    void destroy();
 };
 
 bool Image::allocate(DeviceMemoryHeap&  heap,
@@ -770,8 +790,6 @@ bool Image::allocate(DeviceMemoryHeap&  heap,
                      VkImageAspectFlags aspect,
                      VkImageUsageFlags  usage)
 {
-    constexpr VkImageLayout initial_layout = VK_IMAGE_LAYOUT_UNDEFINED;
-
     static VkImageCreateInfo create_info = {
         VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
         nullptr,
@@ -804,10 +822,15 @@ bool Image::allocate(DeviceMemoryHeap&  heap,
     VkMemoryRequirements requirements;
     vkGetImageMemoryRequirements(vk_dev, image, &requirements);
 
+#ifndef NDEBUG
     if ( ! (requirements.memoryTypeBits & (1u << heap.get_memory_type()))) {
         dprintf("Device memory does not support requested image type\n");
         return false;
     }
+#endif
+
+    if ( ! heap.allocate_heap_if_empty(requirements))
+        return false;
 
     VkDeviceSize offset;
     if ( ! heap.allocate_memory(requirements, &offset))
@@ -845,6 +868,153 @@ bool Image::allocate(DeviceMemoryHeap&  heap,
 
     res = CHK(vkCreateImageView(vk_dev, &view_create_info, nullptr, &view));
     return res == VK_SUCCESS;
+}
+
+void Image::destroy()
+{
+    if (view)
+        vkDestroyImageView(vk_dev, view, nullptr);
+    if (image)
+        vkDestroyImage(vk_dev, image, nullptr);
+    view  = VK_NULL_HANDLE;
+    image = VK_NULL_HANDLE;
+}
+
+class TempHostImage: public Image {
+    public:
+        TempHostImage() {
+            heap.make_host_heap();
+        }
+        ~TempHostImage();
+
+        bool allocate(uint32_t           width,
+                      uint32_t           height,
+                      VkFormat           format,
+                      uint32_t           mip_levels,
+                      VkImageAspectFlags aspect,
+                      VkImageUsageFlags  usage) {
+            return Image::allocate(heap, width, height, format, mip_levels, aspect, usage);
+        }
+
+    private:
+        DeviceMemoryHeap heap;
+};
+
+TempHostImage::~TempHostImage()
+{
+    destroy();
+    heap.free_heap();
+}
+
+struct Buffer {
+    VkBuffer     buffer = VK_NULL_HANDLE;
+    VkBufferView view   = VK_NULL_HANDLE;
+
+    Buffer() = default;
+    Buffer(const Buffer&) = delete;
+    Buffer& operator=(const Buffer&) = delete;
+
+    operator VkBuffer() const { return buffer; }
+    operator VkBufferView() const { return view; }
+
+    bool allocate(DeviceMemoryHeap&  heap,
+                  uint32_t           size,
+                  VkFormat           format,
+                  VkBufferUsageFlags usage);
+    void destroy();
+};
+
+bool Buffer::allocate(DeviceMemoryHeap&  heap,
+                      uint32_t           size,
+                      VkFormat           format,
+                      VkBufferUsageFlags usage)
+{
+    static VkBufferCreateInfo create_info = {
+        VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+        nullptr,
+        0,          // flags
+        0,          // size
+        0,          // usage
+        VK_SHARING_MODE_EXCLUSIVE,
+        1,          // queueFamilyIndexCount
+        &queue_create_info.queueFamilyIndex
+    };
+    create_info.size  = size;
+    create_info.usage = usage;
+
+    VkResult res = CHK(vkCreateBuffer(vk_dev, &create_info, nullptr, &buffer));
+    if (res != VK_SUCCESS)
+        return false;
+
+    VkMemoryRequirements requirements;
+    vkGetBufferMemoryRequirements(vk_dev, buffer, &requirements);
+
+#ifndef NDEBUG
+    if ( ! (requirements.memoryTypeBits & (1u << heap.get_memory_type()))) {
+        dprintf("Device memory does not support requested buffer type\n");
+        return false;
+    }
+#endif
+
+    if ( ! heap.allocate_heap_if_empty(requirements))
+        return false;
+
+    VkDeviceSize offset;
+    if ( ! heap.allocate_memory(requirements, &offset))
+        return false;
+
+    res = CHK(vkBindBufferMemory(vk_dev, buffer, heap.get_memory(), offset));
+    if (res != VK_SUCCESS)
+        return false;
+
+    static VkBufferViewCreateInfo view_create_info = {
+        VK_STRUCTURE_TYPE_BUFFER_VIEW_CREATE_INFO,
+        nullptr,
+        0,                      // flags
+        VK_NULL_HANDLE,         // buffer
+        VK_FORMAT_UNDEFINED,    // format
+        0,                      // offset
+        VK_WHOLE_SIZE           // range
+    };
+    view_create_info.buffer = buffer;
+    view_create_info.format = format;
+    view_create_info.offset = offset;
+
+    res = CHK(vkCreateBufferView(vk_dev, &view_create_info, nullptr, &view));
+    return res == VK_SUCCESS;
+}
+
+void Buffer::destroy()
+{
+    if (view)
+        vkDestroyBufferView(vk_dev, view, nullptr);
+    if (buffer)
+        vkDestroyBuffer(vk_dev, buffer, nullptr);
+    buffer = VK_NULL_HANDLE;
+    view   = VK_NULL_HANDLE;
+}
+
+class TempHostBuffer: public Buffer {
+    public:
+        TempHostBuffer() {
+            heap.make_host_heap();
+        }
+        ~TempHostBuffer();
+
+        bool allocate(uint32_t           size,
+                      VkFormat           format,
+                      VkBufferUsageFlags usage) {
+            return Buffer::allocate(heap, size, format, usage);
+        }
+
+    private:
+        DeviceMemoryHeap heap;
+};
+
+TempHostBuffer::~TempHostBuffer()
+{
+    destroy();
+    heap.free_heap();
 }
 
 enum eSemId {
@@ -908,15 +1078,8 @@ static VkFormat         vk_depth_format = VK_FORMAT_UNDEFINED;
 
 static bool allocate_depth_buffers(uint32_t num_depth_buffers)
 {
-    for (uint32_t i = 0; i < mstd::array_size(vk_depth_buffers); i++) {
-        Image& image = vk_depth_buffers[i];
-        if (image.view)
-            vkDestroyImageView(vk_dev, image.view, nullptr);
-        if (image.image)
-            vkDestroyImage(vk_dev, image.image, nullptr);
-        image.view  = VK_NULL_HANDLE;
-        image.image = VK_NULL_HANDLE;
-    }
+    for (uint32_t i = 0; i < mstd::array_size(vk_depth_buffers); i++)
+        vk_depth_buffers[i].destroy();
 
     depth_buffer_heap.free_heap();
 
@@ -961,7 +1124,7 @@ static bool create_swapchain()
 
     VkSwapchainKHR old_swapchain = vk_swapchain;
 
-    swapchain_create_info.minImageCount = mstd::max(vk_surface_caps.minImageCount, 2U);
+    swapchain_create_info.minImageCount = mstd::max(vk_surface_caps.minImageCount, 2u);
     swapchain_create_info.imageExtent   = vk_surface_caps.currentExtent;
     swapchain_create_info.oldSwapchain  = old_swapchain;
 

@@ -78,7 +78,13 @@
     X(vkGetImageMemoryRequirements) \
     X(vkBindImageMemory) \
     X(vkCreateImageView) \
-    X(vkDestroyImageView)
+    X(vkDestroyImageView) \
+    X(vkCreateBuffer) \
+    X(vkDestroyBuffer) \
+    X(vkCreateBufferView) \
+    X(vkDestroyBufferView) \
+    X(vkGetBufferMemoryRequirements) \
+    X(vkBindBufferMemory)
 
 extern PFN_vkVoidFunction vk_lib_functions[];
 extern PFN_vkVoidFunction vk_global_functions[];
@@ -155,3 +161,9 @@ enum e_device_functions {
 #define vkBindImageMemory                         ((PFN_vkBindImageMemory)                         vk_device_functions[   id_vkBindImageMemory])
 #define vkCreateImageView                         ((PFN_vkCreateImageView)                         vk_device_functions[   id_vkCreateImageView])
 #define vkDestroyImageView                        ((PFN_vkDestroyImageView)                        vk_device_functions[   id_vkDestroyImageView])
+#define vkCreateBuffer                            ((PFN_vkCreateBuffer)                            vk_device_functions[   id_vkCreateBuffer])
+#define vkDestroyBuffer                           ((PFN_vkDestroyBuffer)                           vk_device_functions[   id_vkDestroyBuffer])
+#define vkCreateBufferView                        ((PFN_vkCreateBufferView)                        vk_device_functions[   id_vkCreateBufferView])
+#define vkDestroyBufferView                       ((PFN_vkDestroyBufferView)                       vk_device_functions[   id_vkDestroyBufferView])
+#define vkGetBufferMemoryRequirements             ((PFN_vkGetBufferMemoryRequirements)             vk_device_functions[   id_vkGetBufferMemoryRequirements])
+#define vkBindBufferMemory                        ((PFN_vkBindBufferMemory)                        vk_device_functions[   id_vkBindBufferMemory])
