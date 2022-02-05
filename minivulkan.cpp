@@ -1144,7 +1144,7 @@ static bool create_swapchain()
     if (old_swapchain != VK_NULL_HANDLE) {
         for (const Image& image : vk_swapchain_images) {
             if (image.view)
-                vkDestroyImageView(vk_dev, image.view, nullptr);
+                vkDestroyImageView(vk_dev, image, nullptr);
         }
 
         vkDestroySwapchainKHR(vk_dev, old_swapchain, nullptr);
@@ -1185,7 +1185,7 @@ static bool create_swapchain()
                 1               // layerCount
             }
         };
-        view_create_info.image  = vk_swapchain_images[i].image;
+        view_create_info.image  = image;
         view_create_info.format = swapchain_create_info.imageFormat;
 
         res = CHK(vkCreateImageView(vk_dev, &view_create_info, nullptr, &vk_swapchain_images[i].view));
@@ -1294,8 +1294,8 @@ static bool create_frame_buffer()
     frame_buffer_info.width      = vk_surface_caps.currentExtent.width;
     frame_buffer_info.height     = vk_surface_caps.currentExtent.height;
 
-    attachments[0] = vk_swapchain_images[0].view;
-    attachments[1] = vk_depth_buffers[0].view;
+    attachments[0] = vk_swapchain_images[0];
+    attachments[1] = vk_depth_buffers[0];
 
     const VkResult res = CHK(vkCreateFramebuffer(vk_dev, &frame_buffer_info, nullptr, &vk_frame_buffer));
     return res == VK_SUCCESS;
@@ -1322,7 +1322,7 @@ static bool dummy_draw(uint32_t image_idx)
 
     dprintf("dummy_draw for image %u\n", image_idx);
 
-    const VkImage image = vk_swapchain_images[image_idx].image;
+    const VkImage image = vk_swapchain_images[image_idx];
 
     VkResult res;
 
