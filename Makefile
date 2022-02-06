@@ -27,6 +27,12 @@ ifeq ($(UNAME), Darwin)
 endif
 
 ##############################################################################
+# Shaders
+
+shader_files += shaders/simple.vert
+shader_files += shaders/phong.frag
+
+##############################################################################
 # Compiler flags
 
 ifeq ($(UNAME), Windows)
@@ -95,6 +101,11 @@ ifdef VULKAN_SDK
     CFLAGS += -I$(VULKAN_SDK)/include
 endif
 
+GLSL_FLAGS = -Os -mfmt=c -Werror --target-env=vulkan1.1
+ifdef debug
+    GLSL_FLAGS += -g
+endif
+
 ##############################################################################
 # Directory where generated files are stored
 
@@ -133,7 +144,7 @@ clean:
 asm: $(addprefix $(out_dir)/,$(addsuffix .$(asm_suffix),$(notdir $(filter %.cpp,$(src_files)))))
 
 $(out_dir):
-	mkdir -p $(out_dir)
+	mkdir -p $@
 
 $(exe): $(call OBJ_FROM_SRC, $(src_files))
 	$(LINK) -o $@ $^ $(LDFLAGS)
@@ -151,14 +162,27 @@ $(macos_app_dir)/Info.plist: Info.plist | $(macos_app_dir)
 	cp $< $@
 endif
 
-$(out_dir)/$(notdir %.$(o_suffix)): %.m | $(out_dir)
+$(out_dir)/%.$(o_suffix): %.m | $(out_dir)
 	$(CC) $(CFLAGS) $(LTO_CFLAGS) $(OBJCFLAGS) -c -o $@ $<
 
-$(out_dir)/$(notdir %.$(o_suffix)): %.cpp | $(out_dir)
+$(out_dir)/%.$(o_suffix): %.cpp | $(out_dir)
 	$(CXX) $(CFLAGS) $(LTO_CFLAGS) $(CXXFLAGS) -c -o $@ $<
 
-$(out_dir)/$(notdir %.$(asm_suffix)): % | $(out_dir)
+$(out_dir)/%.$(asm_suffix): % | $(out_dir)
 	$(CXX) $(CFLAGS) $(CXXFLAGS) -masm=intel -S -o $@ $<
+
+$(out_dir)/shaders: | $(out_dir)
+	mkdir -p $@
+
+define GLSL_EXT
+$(out_dir)/shaders/%.$1.h: shaders/%.$1 | $(out_dir)/shaders
+	glslc $(GLSL_FLAGS) -o $$@ $$<
+endef
+
+$(foreach ext, vert frag, $(eval $(call GLSL_EXT,$(ext))))
+
+$(call OBJ_FROM_SRC, minivulkan.cpp): $(addprefix $(out_dir)/,$(addsuffix .h,$(shader_files)))
+$(call OBJ_FROM_SRC, minivulkan.cpp): CFLAGS += -I$(out_dir)/shaders
 
 dep_files = $(addprefix $(out_dir)/, $(addsuffix .d, $(basename $(notdir $(src_files)))))
 
