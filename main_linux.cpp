@@ -134,7 +134,7 @@ static int event_loop(Window* w)
                     break;
             }
 
-            //free(event);
+            free(event);
         }
 
         if ( ! draw_frame())

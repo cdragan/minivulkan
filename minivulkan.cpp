@@ -515,7 +515,7 @@ static uint32_t    vk_num_device_extensions = 0;
 
 static bool get_device_extensions()
 {
-    VkExtensionProperties extensions[128];
+    VkExtensionProperties extensions[256];
     uint32_t              num_extensions = mstd::array_size(extensions);
 
     const VkResult res = CHK(vkEnumerateDeviceExtensionProperties(vk_phys_dev,
@@ -723,7 +723,9 @@ bool DeviceMemoryHeap::allocate_heap(VkDeviceSize size)
         return false;
 
     heap_size = size;
-    dprintf("Allocated heap size 0x%" PRIx64 " bytes\n", static_cast<uint64_t>(size));
+    dprintf("Allocated %s heap size 0x%" PRIx64 " bytes\n",
+            host_visible ? "host" : "device",
+            static_cast<uint64_t>(size));
 
     return true;
 }
@@ -751,7 +753,7 @@ bool DeviceMemoryHeap::allocate_memory(const VkMemoryRequirements& requirements,
 
     if (aligned_offs + requirements.size > heap_size) {
         dprintf("Not enough device memory\n");
-        dprintf("Surface size %" PRIu64 ", used heap size %" PRIu64 ", max heap size %" PRIu64 "\n",
+        dprintf("Surface size 0x%" PRIx64 ", used heap size 0x%" PRIx64 ", max heap size 0x%" PRIx64 "\n",
                 static_cast<uint64_t>(requirements.size),
                 static_cast<uint64_t>(aligned_offs),
                 static_cast<uint64_t>(heap_size));
@@ -1248,7 +1250,8 @@ static bool allocate_depth_buffers(uint32_t num_depth_buffers)
         return false;
     }
 
-    const uint32_t heap_size = mstd::align_up(width * height * 4u, 64u * 1024u) * num_depth_buffers;
+    const uint32_t aligned_pitch = mstd::align_up(width * 4, 4u * 1024u);
+    const uint32_t heap_size     = mstd::align_up(aligned_pitch * height, 64u * 1024u) * num_depth_buffers;
 
     if ( ! depth_buffer_heap.allocate_heap(heap_size))
         return false;
@@ -1307,7 +1310,15 @@ static bool create_swapchain()
     mstd::mem_zero(&vk_swapchain_images, sizeof(vk_swapchain_images));
 
     VkImage  images[mstd::array_size(vk_swapchain_images)];
-    uint32_t num_images = mstd::array_size(vk_swapchain_images);
+    uint32_t num_images = 0;
+
+    res = CHK(vkGetSwapchainImagesKHR(vk_dev, vk_swapchain, &num_images, nullptr));
+
+    if (res != VK_SUCCESS)
+        return false;
+
+    if (num_images > mstd::array_size(vk_swapchain_images))
+        num_images = mstd::array_size(vk_swapchain_images);
 
     res = CHK(vkGetSwapchainImagesKHR(vk_dev, vk_swapchain, &num_images, images));
 
@@ -1985,7 +1996,7 @@ bool draw_frame()
 
     res = CHK(vkQueuePresentKHR(vk_queue, &present_info));
 
-    if (res == VK_SUBOPTIMAL_KHR) {
+    if (res == VK_SUBOPTIMAL_KHR || res == VK_ERROR_OUT_OF_DATE_KHR) {
         if ( ! update_resolution())
             return false;
         res = VK_SUCCESS;
