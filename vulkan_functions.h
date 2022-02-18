@@ -86,7 +86,12 @@
     X(vkCreateBufferView) \
     X(vkDestroyBufferView) \
     X(vkGetBufferMemoryRequirements) \
-    X(vkBindBufferMemory)
+    X(vkBindBufferMemory) \
+    X(vkCreateShaderModule) \
+    X(vkCreateDescriptorSetLayout) \
+    X(vkCreatePipelineLayout) \
+    X(vkCreateGraphicsPipelines) \
+    X(vkDestroyPipeline)
 
 extern PFN_vkVoidFunction vk_lib_functions[];
 extern PFN_vkVoidFunction vk_global_functions[];
@@ -157,8 +162,8 @@ enum e_device_functions {
 #define vkDestroyFramebuffer                      ((PFN_vkDestroyFramebuffer)                      vk_device_functions[   id_vkDestroyFramebuffer])
 #define vkAllocateMemory                          ((PFN_vkAllocateMemory)                          vk_device_functions[   id_vkAllocateMemory])
 #define vkFreeMemory                              ((PFN_vkFreeMemory)                              vk_device_functions[   id_vkFreeMemory])
-#define vkMapMemory                              ((PFN_vkMapMemory)                              vk_device_functions[   id_vkMapMemory])
-#define vkUnmapMemory                              ((PFN_vkUnmapMemory)                              vk_device_functions[   id_vkUnmapMemory])
+#define vkMapMemory                               ((PFN_vkMapMemory)                               vk_device_functions[   id_vkMapMemory])
+#define vkUnmapMemory                             ((PFN_vkUnmapMemory)                             vk_device_functions[   id_vkUnmapMemory])
 #define vkCreateImage                             ((PFN_vkCreateImage)                             vk_device_functions[   id_vkCreateImage])
 #define vkDestroyImage                            ((PFN_vkDestroyImage)                            vk_device_functions[   id_vkDestroyImage])
 #define vkGetImageMemoryRequirements              ((PFN_vkGetImageMemoryRequirements)              vk_device_functions[   id_vkGetImageMemoryRequirements])
@@ -171,3 +176,8 @@ enum e_device_functions {
 #define vkDestroyBufferView                       ((PFN_vkDestroyBufferView)                       vk_device_functions[   id_vkDestroyBufferView])
 #define vkGetBufferMemoryRequirements             ((PFN_vkGetBufferMemoryRequirements)             vk_device_functions[   id_vkGetBufferMemoryRequirements])
 #define vkBindBufferMemory                        ((PFN_vkBindBufferMemory)                        vk_device_functions[   id_vkBindBufferMemory])
+#define vkCreateShaderModule                      ((PFN_vkCreateShaderModule)                      vk_device_functions[   id_vkCreateShaderModule])
+#define vkCreateDescriptorSetLayout               ((PFN_vkCreateDescriptorSetLayout)               vk_device_functions[   id_vkCreateDescriptorSetLayout])
+#define vkCreatePipelineLayout                    ((PFN_vkCreatePipelineLayout)                    vk_device_functions[   id_vkCreatePipelineLayout])
+#define vkCreateGraphicsPipelines                 ((PFN_vkCreateGraphicsPipelines)                 vk_device_functions[   id_vkCreateGraphicsPipelines])
+#define vkDestroyPipeline                         ((PFN_vkDestroyPipeline)                         vk_device_functions[   id_vkDestroyPipeline])

@@ -181,8 +181,8 @@ endef
 
 $(foreach ext, vert frag, $(eval $(call GLSL_EXT,$(ext))))
 
-$(call OBJ_FROM_SRC, minivulkan.cpp): $(addprefix $(out_dir)/,$(addsuffix .h,$(shader_files)))
-$(call OBJ_FROM_SRC, minivulkan.cpp): CFLAGS += -I$(out_dir)/shaders
+$(call OBJ_FROM_SRC, minivulkan.cpp) $(out_dir)/minivulkan.cpp.$(asm_suffix): $(addprefix $(out_dir)/,$(addsuffix .h,$(shader_files)))
+$(call OBJ_FROM_SRC, minivulkan.cpp) $(out_dir)/minivulkan.cpp.$(asm_suffix): CFLAGS += -I$(out_dir)/shaders
 
 dep_files = $(addprefix $(out_dir)/, $(addsuffix .d, $(basename $(notdir $(src_files)))))
 

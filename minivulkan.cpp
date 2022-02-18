@@ -1458,7 +1458,290 @@ static bool create_frame_buffer()
     return res == VK_SUCCESS;
 }
 
-static bool update_swapchain_and_frame_buffer()
+static VkPipelineLayout vk_gr_pipeline_layout = VK_NULL_HANDLE;
+static VkPipeline       vk_gr_pipeline        = VK_NULL_HANDLE;
+
+static const uint32_t simple_vert[] =
+#include "simple.vert.h"
+;
+
+static const uint32_t phong_frag[] =
+#include "phong.frag.h"
+;
+
+#define DEFINE_SHADERS \
+    X(simple_vert) \
+    X(phong_frag)
+
+static const struct {
+    const uint32_t* code;
+    uint32_t        size;
+} spirv[] =
+{
+#define X(shader) { shader, mstd::array_size(shader) },
+    DEFINE_SHADERS
+#undef X
+};
+
+static VkShaderModule shaders[mstd::array_size(spirv)];
+
+static bool load_shaders()
+{
+    for (uint32_t i = 0; i < mstd::array_size(spirv); i++) {
+        static VkShaderModuleCreateInfo create_info = {
+            VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+            nullptr,
+            0,
+            0,
+            nullptr
+        };
+
+        create_info.codeSize = spirv[i].size * sizeof(uint32_t);
+        create_info.pCode    = spirv[i].code;
+
+        const VkResult res = CHK(vkCreateShaderModule(vk_dev, &create_info, nullptr, &shaders[i]));
+        if (res != VK_SUCCESS)
+            return false;
+    }
+
+    return true;
+}
+
+static bool create_pipeline_layouts()
+{
+    static const VkDescriptorSetLayoutBinding create_binding = {
+        0,
+        VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+        1,
+        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+        nullptr
+    };
+
+    static const VkDescriptorSetLayoutCreateInfo create_desc_set_layout = {
+        VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+        nullptr,
+        0, // flags
+        1,
+        &create_binding
+    };
+
+    VkDescriptorSetLayout desc_set_layout;
+    VkResult res = CHK(vkCreateDescriptorSetLayout(vk_dev, &create_desc_set_layout, nullptr, &desc_set_layout));
+    if (res != VK_SUCCESS)
+        return false;
+
+    static VkPipelineLayoutCreateInfo layout_create_info = {
+        VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+        nullptr,
+        0,      // flags
+        1,
+        &desc_set_layout,
+        0,      // pushConstantRangeCount
+        nullptr // pPushConstantRanges
+    };
+
+    res = CHK(vkCreatePipelineLayout(vk_dev, &layout_create_info, nullptr, &vk_gr_pipeline_layout));
+    if (res != VK_SUCCESS)
+        return false;
+
+    return true;
+}
+
+static bool create_graphics_pipelines()
+{
+    if (vk_gr_pipeline != VK_NULL_HANDLE) {
+        vkDestroyPipeline(vk_dev, vk_gr_pipeline, nullptr);
+        vk_gr_pipeline = VK_NULL_HANDLE;
+    }
+
+    static VkPipelineShaderStageCreateInfo shader_stages[] = {
+        {
+            VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+            nullptr,
+            0,          // flags
+            VK_SHADER_STAGE_VERTEX_BIT,
+            nullptr,    // module
+            "main",     // pName
+            nullptr     // pSpecializationInfo
+        },
+        {
+            VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+            nullptr,
+            0,          // flags
+            VK_SHADER_STAGE_FRAGMENT_BIT,
+            nullptr,    // module
+            "main",     // pName
+            nullptr     // pSpecializationInfo
+        }
+    };
+    shader_stages[0].module = shaders[0];
+    shader_stages[1].module = shaders[1];
+
+    struct Vertex {
+        float pos[3];
+        float normal[3];
+    };
+
+    static VkVertexInputBindingDescription vertex_bindings[] = {
+        {
+            0,
+            sizeof(Vertex),
+            VK_VERTEX_INPUT_RATE_VERTEX
+        }
+    };
+
+    static VkVertexInputAttributeDescription vertex_attributes[] = {
+        {
+            0,  // location
+            0,  // binding
+            VK_FORMAT_R32G32B32_SFLOAT,
+            offsetof(Vertex, pos)
+        },
+        {
+            1,  // location
+            0,  // binding
+            VK_FORMAT_R32G32B32_SFLOAT,
+            offsetof(Vertex, normal)
+        }
+    };
+
+    static VkPipelineVertexInputStateCreateInfo vertex_input_state = {
+        VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
+        nullptr,
+        0,  // flags
+        mstd::array_size(vertex_bindings),
+        vertex_bindings,
+        mstd::array_size(vertex_attributes),
+        vertex_attributes
+    };
+
+    static VkPipelineInputAssemblyStateCreateInfo input_assembly_state = {
+        VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
+        nullptr,
+        0,  // flags
+        VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
+        VK_FALSE
+    };
+
+    static VkViewport viewport = {
+        0,      // x
+        0,      // y
+        0,      // width
+        0,      // height
+        0,      // minDepth
+        1       // maxDepth
+    };
+
+    viewport.width  = vk_surface_caps.currentExtent.width;
+    viewport.height = vk_surface_caps.currentExtent.height;
+
+    static VkRect2D scissor = {
+        { 0, 0 },   // offset
+        { 0, 0 }    // extent
+    };
+
+    scissor.extent = vk_surface_caps.currentExtent;
+
+    static VkPipelineViewportStateCreateInfo viewport_state = {
+        VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
+        nullptr,
+        0,  // flags
+        1,
+        &viewport,
+        1,
+        &scissor
+    };
+
+    static VkPipelineRasterizationStateCreateInfo rasterization_state = {
+        VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
+        nullptr,
+        0,          // flags
+        VK_FALSE,   // depthClampEnable
+        VK_FALSE,   // rasterizerDiscardEnable
+        VK_POLYGON_MODE_FILL,
+        VK_CULL_MODE_BACK_BIT,
+        VK_FRONT_FACE_COUNTER_CLOCKWISE,
+        VK_FALSE,   // depthBiasEnable
+        0,          // depthBiasConstantFactor
+        0,          // depthBiasClamp
+        0,          // depthBiasSlopeFactor
+        1           // lineWidth
+    };
+
+    static VkPipelineMultisampleStateCreateInfo multisample_state = {
+        VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
+        nullptr,
+        0,          // flags
+        VK_SAMPLE_COUNT_1_BIT,
+        VK_FALSE,   // sampleShadingEnable
+        0,          // minSampleShading
+        nullptr,    // pSampleMask
+        VK_FALSE,   // alphaToCoverageEnable
+        VK_FALSE    // alphaToOneEnable
+    };
+
+    static VkPipelineDepthStencilStateCreateInfo depth_stencil_state = {
+        VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
+        nullptr,
+        0,          // flags
+        VK_TRUE,    // depthTestEnable
+        VK_TRUE,    // depthWriteEnable
+        VK_COMPARE_OP_LESS_OR_EQUAL,
+        VK_FALSE,   // depthBoundsTestEnable
+        VK_FALSE,   // stencilTestEnable
+        { },        // front
+        { },        // back
+        0,          // minDepthBounds
+        0           // maxDepthBounds
+    };
+
+    static VkPipelineColorBlendAttachmentState color_blend_att = {
+        VK_FALSE,   // blendEnable
+    };
+
+    static VkPipelineColorBlendStateCreateInfo color_blend_state = {
+        VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
+        nullptr,
+        0,          // flags
+        VK_FALSE,   // logicOpEnable
+        VK_LOGIC_OP_CLEAR,
+        1,          // attachmentCount
+        &color_blend_att,
+        { }         // blendConstants
+    };
+
+    static VkGraphicsPipelineCreateInfo pipeline_create_info = {
+        VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
+        nullptr,
+        0,              // flags
+        mstd::array_size(shader_stages),
+        shader_stages,
+        &vertex_input_state,
+        &input_assembly_state,
+        nullptr,        // pTessellationState
+        &viewport_state,
+        &rasterization_state,
+        &multisample_state,
+        &depth_stencil_state,
+        &color_blend_state,
+        nullptr,        // pDynamicState
+        vk_gr_pipeline_layout,
+        vk_render_pass,
+        0,              // subpass
+        VK_NULL_HANDLE, // basePipelineHandle
+        -1              // basePipelineIndex
+    };
+
+    const VkResult res = CHK(vkCreateGraphicsPipelines(vk_dev,
+                                                       VK_NULL_HANDLE,
+                                                       1,
+                                                       &pipeline_create_info,
+                                                       nullptr,
+                                                       &vk_gr_pipeline));
+    return res == VK_SUCCESS;
+}
+
+static bool update_resolution()
 {
     vkDestroyFramebuffer(vk_dev, vk_frame_buffer, nullptr);
     vk_frame_buffer = VK_NULL_HANDLE;
@@ -1467,6 +1750,9 @@ static bool update_swapchain_and_frame_buffer()
         return false;
 
     if ( ! create_frame_buffer())
+        return false;
+
+    if ( ! create_graphics_pipelines())
         return false;
 
     return true;
@@ -1634,6 +1920,15 @@ bool init_vulkan(Window* w)
     if ( ! create_frame_buffer())
         return false;
 
+    if ( ! load_shaders())
+        return false;
+
+    if ( ! create_pipeline_layouts())
+        return false;
+
+    if ( ! create_graphics_pipelines())
+        return false;
+
     return true;
 }
 
@@ -1667,7 +1962,7 @@ bool draw_frame()
         if (res != VK_ERROR_OUT_OF_DATE_KHR)
             return false;
 
-        if ( ! update_swapchain_and_frame_buffer())
+        if ( ! update_resolution())
             return false;
     }
 
@@ -1693,7 +1988,7 @@ bool draw_frame()
     res = CHK(vkQueuePresentKHR(vk_queue, &present_info));
 
     if (res == VK_SUBOPTIMAL_KHR) {
-        if ( ! update_swapchain_and_frame_buffer())
+        if ( ! update_resolution())
             return false;
         res = VK_SUCCESS;
     }
