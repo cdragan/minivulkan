@@ -1630,8 +1630,8 @@ static bool create_graphics_pipelines()
         1       // maxDepth
     };
 
-    viewport.width  = vk_surface_caps.currentExtent.width;
-    viewport.height = vk_surface_caps.currentExtent.height;
+    viewport.width  = static_cast<float>(vk_surface_caps.currentExtent.width);
+    viewport.height = static_cast<float>(vk_surface_caps.currentExtent.height);
 
     static VkRect2D scissor = {
         { 0, 0 },   // offset
@@ -1968,7 +1968,7 @@ bool draw_frame()
     if ( ! dummy_draw(image_idx))
         return false;
 
-    dprintf("present frame %llu image %u\n", frame_idx - 1, image_idx);
+    dprintf("present frame %" PRIu64 " image %u\n", frame_idx - 1, image_idx);
 
     static VkPresentInfoKHR present_info = {
         VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
