@@ -1461,13 +1461,11 @@ static bool create_frame_buffer()
 static VkPipelineLayout vk_gr_pipeline_layout = VK_NULL_HANDLE;
 static VkPipeline       vk_gr_pipeline        = VK_NULL_HANDLE;
 
-static const uint32_t simple_vert[] =
+static
 #include "simple.vert.h"
-;
 
-static const uint32_t phong_frag[] =
+static
 #include "phong.frag.h"
-;
 
 #define DEFINE_SHADERS \
     X(simple_vert) \

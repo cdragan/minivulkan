@@ -101,7 +101,7 @@ ifdef VULKAN_SDK
     CFLAGS += -I$(VULKAN_SDK)/include
 endif
 
-GLSL_FLAGS = -Os -mfmt=c -Werror --target-env=vulkan1.1
+GLSL_FLAGS = -Os --target-env vulkan1.1
 ifdef debug
     GLSL_FLAGS += -g
 endif
@@ -176,7 +176,7 @@ $(out_dir)/shaders: | $(out_dir)
 
 define GLSL_EXT
 $(out_dir)/shaders/%.$1.h: shaders/%.$1 | $(out_dir)/shaders
-	glslc $(GLSL_FLAGS) -o $$@ $$<
+	glslangValidator $(GLSL_FLAGS) --variable-name $$(subst .,_,$$(notdir $$<)) -o $$@ $$<
 endef
 
 $(foreach ext, vert frag, $(eval $(call GLSL_EXT,$(ext))))
