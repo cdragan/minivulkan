@@ -599,11 +599,16 @@ static bool create_device()
 
 class DeviceMemoryHeap {
     public:
+        enum Location {
+            device_memory,
+            host_memory
+        };
+
         DeviceMemoryHeap() = default;
+        DeviceMemoryHeap(Location loc) : host_visible(loc == host_memory) { }
         DeviceMemoryHeap(const DeviceMemoryHeap&) = delete;
         DeviceMemoryHeap& operator=(const DeviceMemoryHeap&) = delete;
 
-        void make_host_heap() { host_visible = true; }
         bool allocate_heap_if_empty(const VkMemoryRequirements& requirements);
         bool allocate_heap(VkDeviceSize size);
         void free_heap();
@@ -1033,9 +1038,7 @@ void Image::destroy()
 
 class TempHostImage: public Image {
     public:
-        TempHostImage() {
-            heap.make_host_heap();
-        }
+        TempHostImage() = default;
         ~TempHostImage();
 
         bool allocate(const ImageInfo& image_info) {
@@ -1043,7 +1046,7 @@ class TempHostImage: public Image {
         }
 
     private:
-        DeviceMemoryHeap heap;
+        DeviceMemoryHeap heap{DeviceMemoryHeap::host_memory};
 };
 
 TempHostImage::~TempHostImage()
@@ -1151,9 +1154,7 @@ void Buffer::destroy()
 
 class TempHostBuffer: public Buffer {
     public:
-        TempHostBuffer() {
-            heap.make_host_heap();
-        }
+        TempHostBuffer() = default;
         ~TempHostBuffer();
 
         bool allocate(uint32_t           alloc_size,
@@ -1163,7 +1164,7 @@ class TempHostBuffer: public Buffer {
         }
 
     private:
-        DeviceMemoryHeap heap;
+        DeviceMemoryHeap heap{DeviceMemoryHeap::host_memory};
 };
 
 TempHostBuffer::~TempHostBuffer()
