@@ -41,3 +41,20 @@ jobs:
           export VULKAN_SDK=`pwd`/vulkansdk-macos-1.2.198.1/macOS
           export PATH="$PATH:$VULKAN_SDK/bin"
           ./runtests
+
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: msys2/setup-msys2@v2
+        with:
+          path-type: inherit
+      - name: Remove link.exe from MSYS2
+        shell: msys2 {0}
+        run: rm -f /bin/link.exe
+      - uses: actions/checkout@v2
+      - name: Test
+        shell: cmd
+        run: |
+          call "C:\Program Files (x86)\Microsoft Visual Studio\2019\Enterprise\VC\Auxiliary\Build\vcvarsall.bat" x86
+          msys2 -c ./runtests
