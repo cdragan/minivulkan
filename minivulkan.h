@@ -2,6 +2,7 @@
 // Copyright (c) 2021 Chris Dragan
 
 #include "vulkan_functions.h"
+#include <stdint.h>
 
 #define APPNAME "minivulkan"
 
@@ -19,6 +20,7 @@ struct Window;
 PORTABLE bool init_vulkan(struct Window* w);
 PORTABLE bool create_surface(struct Window* w);
 PORTABLE bool draw_frame();
+PORTABLE uint64_t get_current_time_ms();
 
 #ifdef NDEBUG
 #   define CHK(call) call

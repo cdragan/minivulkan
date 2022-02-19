@@ -5,6 +5,7 @@
 #import <Cocoa/Cocoa.h>
 #import <QuartzCore/CAMetalLayer.h>
 #include "minivulkan.h"
+#include <time.h>
 
 struct Window
 {
@@ -23,6 +24,20 @@ bool create_surface(struct Window* w)
                                    &surf_create_info,
                                    NULL,
                                    &vk_surface) == VK_SUCCESS;
+}
+
+uint64_t get_current_time_ms()
+{
+    uint64_t time_ms = 0;
+
+    struct timespec ts;
+
+    if ( ! clock_gettime(CLOCK_UPTIME_RAW, &ts)) {
+        time_ms =  (uint64_t)ts.tv_sec * 1000;
+        time_ms += (uint64_t)ts.tv_nsec / 1000000;
+    }
+
+    return time_ms;
 }
 
 @interface VulkanViewController: NSViewController

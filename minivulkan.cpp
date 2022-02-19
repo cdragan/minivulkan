@@ -1960,7 +1960,7 @@ static bool create_cube(Buffer* vertex_buffer, Buffer* index_buffer)
                        indices, sizeof(indices));
 }
 
-static bool dummy_draw(uint32_t image_idx)
+static bool dummy_draw(uint32_t image_idx, uint64_t time_ms)
 {
     static Buffer vertex_buffer;
     static Buffer index_buffer;
@@ -1973,7 +1973,7 @@ static bool dummy_draw(uint32_t image_idx)
     if (vk_swapchain_images[image_idx].layout == VK_IMAGE_LAYOUT_PRESENT_SRC_KHR)
         return true;
 
-    dprintf("dummy_draw for image %u\n", image_idx);
+    dprintf("dummy_draw for image %u at %" PRIu64 " ms\n", image_idx, time_ms);
 
     const VkImage image = vk_swapchain_images[image_idx];
 
@@ -2147,8 +2147,13 @@ bool draw_frame()
             return false;
     }
 
+    const uint64_t  cur_abs_time  = get_current_time_ms();
+    static uint64_t base_abs_time = 0;
+    if ( ! base_abs_time)
+        base_abs_time = cur_abs_time;
+
     // TODO draw
-    if ( ! dummy_draw(image_idx))
+    if ( ! dummy_draw(image_idx, cur_abs_time - base_abs_time))
         return false;
 
     dprintf("present frame %" PRIu64 " image %u\n", frame_idx - 1, image_idx);

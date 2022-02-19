@@ -4,6 +4,7 @@
 #include "minivulkan.h"
 
 #include <stdlib.h>
+#include <time.h>
 #include <unistd.h>
 #include <dlfcn.h>
 #include <xcb/xcb.h>
@@ -28,6 +29,20 @@ bool create_surface(struct Window* w)
                                  &surf_create_info,
                                  nullptr,
                                  &vk_surface) == VK_SUCCESS;
+}
+
+uint64_t get_current_time_ms()
+{
+    uint64_t time_ms = 0;
+
+    struct timespec ts;
+
+    if ( ! clock_gettime(CLOCK_MONOTONIC_RAW, &ts)) {
+        time_ms =  (uint64_t)ts.tv_sec * 1000;
+        time_ms += (uint64_t)ts.tv_nsec / 1'000'000;
+    }
+
+    return time_ms;
 }
 
 static xcb_intern_atom_reply_t* intern_atom(xcb_connection_t* conn,
