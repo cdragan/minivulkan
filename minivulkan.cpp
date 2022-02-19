@@ -573,10 +573,13 @@ static bool create_device()
         &queue_create_info,
         0,
         nullptr,
-        vk_num_device_extensions,
-        vk_device_extensions,
+        0,       // enabledExtensionCount
+        nullptr, // ppEnabledExtensionNames
         nullptr  // pEnabledFeatures
     };
+
+    dev_create_info.enabledExtensionCount   = vk_num_device_extensions;
+    dev_create_info.ppEnabledExtensionNames = vk_device_extensions;
 
     const VkResult res = CHK(vkCreateDevice(vk_phys_dev,
                                             &dev_create_info,
@@ -1534,7 +1537,7 @@ static bool create_pipeline_layouts()
         &create_binding
     };
 
-    VkDescriptorSetLayout desc_set_layout;
+    static VkDescriptorSetLayout desc_set_layout;
     VkResult res = CHK(vkCreateDescriptorSetLayout(vk_dev, &create_desc_set_layout, nullptr, &desc_set_layout));
     if (res != VK_SUCCESS)
         return false;
@@ -1734,12 +1737,15 @@ static bool create_graphics_pipelines()
         &depth_stencil_state,
         &color_blend_state,
         nullptr,        // pDynamicState
-        vk_gr_pipeline_layout,
-        vk_render_pass,
+        VK_NULL_HANDLE, // layout
+        VK_NULL_HANDLE, // renderPass
         0,              // subpass
         VK_NULL_HANDLE, // basePipelineHandle
         -1              // basePipelineIndex
     };
+
+    pipeline_create_info.layout     = vk_gr_pipeline_layout;
+    pipeline_create_info.renderPass = vk_render_pass;
 
     const VkResult res = CHK(vkCreateGraphicsPipelines(vk_dev,
                                                        VK_NULL_HANDLE,
@@ -1818,6 +1824,9 @@ static bool dummy_draw(uint32_t image_idx)
             return false;
     }
 
+    static VkCommandBuffer* cur_buf_ptr = nullptr;
+    cur_buf_ptr = &bufs[cmd_buf_idx];
+
     const VkCommandBuffer buf = bufs[cmd_buf_idx];
     cmd_buf_idx = (cmd_buf_idx + 1) % mstd::array_size(bufs);
 
@@ -1870,7 +1879,7 @@ static bool dummy_draw(uint32_t image_idx)
     if (res != VK_SUCCESS)
         return false;
 
-    const VkPipelineStageFlags dst_stage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+    static const VkPipelineStageFlags dst_stage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
 
     static VkSubmitInfo submit_info = {
         VK_STRUCTURE_TYPE_SUBMIT_INFO,
@@ -1879,10 +1888,12 @@ static bool dummy_draw(uint32_t image_idx)
         &vk_sems[sem_acquire],
         &dst_stage,
         1,
-        &buf,
+        nullptr, // pCommandBuffers
         1,
         &vk_sems[sem_acquire]
     };
+
+    submit_info.pCommandBuffers = cur_buf_ptr;
 
     res = CHK(vkQueueSubmit(vk_queue, 1, &submit_info, VK_NULL_HANDLE));
     if (res != VK_SUCCESS)
