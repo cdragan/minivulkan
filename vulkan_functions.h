@@ -61,13 +61,6 @@
     X(vkWaitForFences) \
     X(vkResetFences) \
     X(vkCreateSemaphore) \
-    X(vkCreateCommandPool) \
-    X(vkAllocateCommandBuffers) \
-    X(vkResetCommandBuffer) \
-    X(vkBeginCommandBuffer) \
-    X(vkEndCommandBuffer) \
-    X(vkCmdPipelineBarrier) \
-    X(vkQueueSubmit) \
     X(vkCreateRenderPass) \
     X(vkCreateFramebuffer) \
     X(vkDestroyFramebuffer) \
@@ -91,7 +84,15 @@
     X(vkCreateDescriptorSetLayout) \
     X(vkCreatePipelineLayout) \
     X(vkCreateGraphicsPipelines) \
-    X(vkDestroyPipeline)
+    X(vkDestroyPipeline) \
+    X(vkCreateCommandPool) \
+    X(vkAllocateCommandBuffers) \
+    X(vkResetCommandBuffer) \
+    X(vkBeginCommandBuffer) \
+    X(vkEndCommandBuffer) \
+    X(vkQueueSubmit) \
+    X(vkCmdPipelineBarrier) \
+    X(vkCmdCopyBuffer)
 
 extern PFN_vkVoidFunction vk_lib_functions[];
 extern PFN_vkVoidFunction vk_global_functions[];
@@ -150,13 +151,6 @@ enum e_device_functions {
 #define vkWaitForFences                           ((PFN_vkWaitForFences)                           vk_device_functions[   id_vkWaitForFences])
 #define vkResetFences                             ((PFN_vkResetFences)                             vk_device_functions[   id_vkResetFences])
 #define vkCreateSemaphore                         ((PFN_vkCreateSemaphore)                         vk_device_functions[   id_vkCreateSemaphore])
-#define vkCreateCommandPool                       ((PFN_vkCreateCommandPool)                       vk_device_functions[   id_vkCreateCommandPool])
-#define vkAllocateCommandBuffers                  ((PFN_vkAllocateCommandBuffers)                  vk_device_functions[   id_vkAllocateCommandBuffers])
-#define vkResetCommandBuffer                      ((PFN_vkResetCommandBuffer)                      vk_device_functions[   id_vkResetCommandBuffer])
-#define vkBeginCommandBuffer                      ((PFN_vkBeginCommandBuffer)                      vk_device_functions[   id_vkBeginCommandBuffer])
-#define vkEndCommandBuffer                        ((PFN_vkEndCommandBuffer)                        vk_device_functions[   id_vkEndCommandBuffer])
-#define vkCmdPipelineBarrier                      ((PFN_vkCmdPipelineBarrier)                      vk_device_functions[   id_vkCmdPipelineBarrier])
-#define vkQueueSubmit                             ((PFN_vkQueueSubmit)                             vk_device_functions[   id_vkQueueSubmit])
 #define vkCreateRenderPass                        ((PFN_vkCreateRenderPass)                        vk_device_functions[   id_vkCreateRenderPass])
 #define vkCreateFramebuffer                       ((PFN_vkCreateFramebuffer)                       vk_device_functions[   id_vkCreateFramebuffer])
 #define vkDestroyFramebuffer                      ((PFN_vkDestroyFramebuffer)                      vk_device_functions[   id_vkDestroyFramebuffer])
@@ -181,3 +175,11 @@ enum e_device_functions {
 #define vkCreatePipelineLayout                    ((PFN_vkCreatePipelineLayout)                    vk_device_functions[   id_vkCreatePipelineLayout])
 #define vkCreateGraphicsPipelines                 ((PFN_vkCreateGraphicsPipelines)                 vk_device_functions[   id_vkCreateGraphicsPipelines])
 #define vkDestroyPipeline                         ((PFN_vkDestroyPipeline)                         vk_device_functions[   id_vkDestroyPipeline])
+#define vkCreateCommandPool                       ((PFN_vkCreateCommandPool)                       vk_device_functions[   id_vkCreateCommandPool])
+#define vkAllocateCommandBuffers                  ((PFN_vkAllocateCommandBuffers)                  vk_device_functions[   id_vkAllocateCommandBuffers])
+#define vkResetCommandBuffer                      ((PFN_vkResetCommandBuffer)                      vk_device_functions[   id_vkResetCommandBuffer])
+#define vkBeginCommandBuffer                      ((PFN_vkBeginCommandBuffer)                      vk_device_functions[   id_vkBeginCommandBuffer])
+#define vkEndCommandBuffer                        ((PFN_vkEndCommandBuffer)                        vk_device_functions[   id_vkEndCommandBuffer])
+#define vkQueueSubmit                             ((PFN_vkQueueSubmit)                             vk_device_functions[   id_vkQueueSubmit])
+#define vkCmdPipelineBarrier                      ((PFN_vkCmdPipelineBarrier)                      vk_device_functions[   id_vkCmdPipelineBarrier])
+#define vkCmdCopyBuffer                           ((PFN_vkCmdCopyBuffer)                           vk_device_functions[   id_vkCmdCopyBuffer])

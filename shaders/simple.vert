@@ -1,7 +1,7 @@
 #version 460 core
 
-layout(location = 0) in  ivec3 pos;
-layout(location = 1) in  ivec3 normal;
+layout(location = 0) in  vec3 pos;
+layout(location = 1) in  vec3 normal;
 
 layout(location = 0) out vec3 out_pos;
 layout(location = 1) out vec3 out_normal;

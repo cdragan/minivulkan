@@ -812,9 +812,10 @@ MapBase::MapBase(DeviceMemoryHeap* heap, VkDeviceSize offset, VkDeviceSize size)
     void* ptr;
     const VkResult res = CHK(vkMapMemory(vk_dev, heap->get_memory(), offset, aligned_size, 0, &ptr));
     if (res == VK_SUCCESS) {
-        mapped_heap = heap;
-        mapped_ptr  = ptr;
-        mapped_size = size;
+        mapped_heap  = heap;
+        mapped_ptr   = ptr;
+        mapped_size  = size;
+        heap->mapped = true;
     }
 }
 
@@ -893,6 +894,8 @@ class Resource {
 
         template<typename T>
         Map<T> map() const { return Map<T>(owning_heap, heap_offset, bytes); }
+
+        bool allocated() const { return !! bytes; }
 
     protected:
         DeviceMemoryHeap* owning_heap = nullptr;
@@ -1122,6 +1125,9 @@ bool Buffer::allocate(DeviceMemoryHeap&  heap,
     heap_offset = offset;
     bytes       = requirements.size;
 
+    if (format == VK_FORMAT_UNDEFINED)
+        return true;
+
     static VkBufferViewCreateInfo view_create_info = {
         VK_STRUCTURE_TYPE_BUFFER_VIEW_CREATE_INFO,
         nullptr,
@@ -1200,6 +1206,7 @@ static bool create_semaphores()
 
 enum eFenceId {
     fen_acquire,
+    fen_copy_to_dev,
 
     num_fences
 };
@@ -1208,7 +1215,7 @@ static VkFence vk_fens[num_fences];
 
 static bool create_fences()
 {
-    for (uint32_t i = 0; i < mstd::array_size(vk_sems); i++) {
+    for (uint32_t i = 0; i < mstd::array_size(vk_fens); i++) {
 
         static const VkFenceCreateInfo fence_create_info = {
             VK_STRUCTURE_TYPE_FENCE_CREATE_INFO
@@ -1560,6 +1567,12 @@ static bool create_pipeline_layouts()
     return true;
 }
 
+struct Vertex {
+    int8_t pos[3];
+    int8_t normal[3];
+    int8_t alignment[2]; // VkPhysicalDevicePortabilitySubsetPropertiesKHR::minVertexInputBindingStrideAlignment
+};
+
 static bool create_graphics_pipelines()
 {
     if (vk_gr_pipeline != VK_NULL_HANDLE) {
@@ -1590,12 +1603,6 @@ static bool create_graphics_pipelines()
     shader_stages[0].module = shaders[0];
     shader_stages[1].module = shaders[1];
 
-    struct Vertex {
-        int8_t pos[3];
-        int8_t normal[3];
-        int8_t alignment[2]; // VkPhysicalDevicePortabilitySubsetPropertiesKHR::minVertexInputBindingStrideAlignment
-    };
-
     static VkVertexInputBindingDescription vertex_bindings[] = {
         {
             0,
@@ -1608,13 +1615,13 @@ static bool create_graphics_pipelines()
         {
             0,  // location
             0,  // binding
-            VK_FORMAT_R8G8B8_SINT,
+            VK_FORMAT_R8G8B8_SNORM,
             offsetof(Vertex, pos)
         },
         {
             1,  // location
             0,  // binding
-            VK_FORMAT_R8G8B8_SINT,
+            VK_FORMAT_R8G8B8_SNORM,
             offsetof(Vertex, normal)
         }
     };
@@ -1646,8 +1653,11 @@ static bool create_graphics_pipelines()
         1       // maxDepth
     };
 
+    // Flip Y coordinate.  The world coordinate system assumes Y going from bottom to top,
+    // but in Vulkan screen-space Y coordinate goes from top to bottom.
+    viewport.y      = static_cast<float>(vk_surface_caps.currentExtent.height);
     viewport.width  = static_cast<float>(vk_surface_caps.currentExtent.width);
-    viewport.height = static_cast<float>(vk_surface_caps.currentExtent.height);
+    viewport.height = -static_cast<float>(vk_surface_caps.currentExtent.height);
 
     static VkRect2D scissor = {
         { 0, 0 },   // offset
@@ -1775,8 +1785,191 @@ static bool update_resolution()
     return true;
 }
 
+struct CommandBuffersBase {
+    VkCommandPool   pool = VK_NULL_HANDLE;
+    VkCommandBuffer bufs[1];
+};
+
+static bool allocate_command_buffers(CommandBuffersBase* bufs, uint32_t num_buffers)
+{
+    assert(bufs->pool == VK_NULL_HANDLE);
+
+    static VkCommandPoolCreateInfo create_info = {
+        VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
+        nullptr,
+        VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT
+    };
+
+    create_info.queueFamilyIndex = queue_create_info.queueFamilyIndex;
+
+    VkResult res = CHK(vkCreateCommandPool(vk_dev,
+                                           &create_info,
+                                           nullptr,
+                                           &bufs->pool));
+    if (res != VK_SUCCESS)
+        return false;
+
+    static VkCommandBufferAllocateInfo alloc_info = {
+        VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+        nullptr,
+        VK_NULL_HANDLE,
+        VK_COMMAND_BUFFER_LEVEL_PRIMARY
+    };
+
+    alloc_info.commandPool        = bufs->pool;
+    alloc_info.commandBufferCount = num_buffers;
+
+    res = CHK(vkAllocateCommandBuffers(vk_dev, &alloc_info, bufs->bufs));
+    return res == VK_SUCCESS;
+}
+
+template<uint32_t num_buffers>
+struct CommandBuffers: public CommandBuffersBase {
+    static uint32_t size() { return num_buffers; }
+
+    private:
+        VkCommandBuffer tail[num_buffers - 1];
+};
+
+template<>
+struct CommandBuffers<1>: public CommandBuffersBase {
+    static uint32_t size() { return 1; }
+};
+
+template<uint32_t num_buffers>
+static bool allocate_command_buffers(CommandBuffers<num_buffers>* bufs)
+{
+    return allocate_command_buffers(bufs, num_buffers);
+}
+
+template<uint32_t num_buffers>
+static bool allocate_command_buffers_if_empty(CommandBuffers<num_buffers>* bufs)
+{
+    if (bufs->pool)
+        return true;
+
+    return allocate_command_buffers(bufs, num_buffers);
+}
+
+static bool fill_buffer(Buffer*            buffer,
+                        VkFormat           format,
+                        VkBufferUsageFlags usage,
+                        const void*        data,
+                        uint32_t           size)
+{
+    if ( ! buffer->allocate(vk_device_heap,
+                            size,
+                            format,
+                            usage | VK_BUFFER_USAGE_TRANSFER_DST_BIT))
+        return false;
+
+    TempHostBuffer host_buffer;
+    if ( ! host_buffer.allocate(size, format, VK_BUFFER_USAGE_TRANSFER_SRC_BIT))
+        return false;
+
+    {
+        Map<uint8_t> map = host_buffer.map<uint8_t>();
+        if ( ! map.mapped())
+            return false;
+
+        mstd::mem_copy(map.data(), data, size);
+    }
+
+    static CommandBuffers<1> aux_cmd_buf;
+
+    if ( ! allocate_command_buffers_if_empty(&aux_cmd_buf))
+        return false;
+
+    VkResult res = CHK(vkResetCommandBuffer(aux_cmd_buf.bufs[0], 0));
+    if (res != VK_SUCCESS)
+        return false;
+
+    static VkCommandBufferBeginInfo begin_info = {
+        VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+        nullptr,
+        VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
+        nullptr
+    };
+
+    res = CHK(vkBeginCommandBuffer(aux_cmd_buf.bufs[0], &begin_info));
+    if (res != VK_SUCCESS)
+        return false;
+
+    static VkBufferCopy copy_region = {
+        0, // srcOffset
+        0, // dstOffset
+        0  // size
+    };
+
+    copy_region.size = size;
+
+    vkCmdCopyBuffer(aux_cmd_buf.bufs[0], host_buffer, *buffer, 1, &copy_region);
+
+    res = CHK(vkEndCommandBuffer(aux_cmd_buf.bufs[0]));
+    if (res != VK_SUCCESS)
+        return false;
+
+    static const VkPipelineStageFlags dst_stage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+
+    static VkSubmitInfo submit_info = {
+        VK_STRUCTURE_TYPE_SUBMIT_INFO,
+        nullptr,
+        0,                  // waitSemaphoreCount
+        nullptr,            // pWaitSemaphored
+        &dst_stage,         // pWaitDstStageMask
+        1,                  // commandBufferCount
+        aux_cmd_buf.bufs,
+        0,                  // signalSemaphoreCount
+        nullptr             // pSignalSemaphores
+    };
+
+    res = CHK(vkQueueSubmit(vk_queue, 1, &submit_info, vk_fens[fen_copy_to_dev]));
+    if (res != VK_SUCCESS)
+        return false;
+
+    res = CHK(vkWaitForFences(vk_dev, 1, &vk_fens[fen_copy_to_dev], VK_TRUE, 1'000'000'000));
+    if (res != VK_SUCCESS)
+        return false;
+
+    res = CHK(vkResetFences(vk_dev, 1, &vk_fens[fen_copy_to_dev]));
+    if (res != VK_SUCCESS)
+        return false;
+
+    return true;
+}
+
+static bool create_cube(Buffer* vertex_buffer, Buffer* index_buffer)
+{
+    static const Vertex vertices[] = {
+        { { -127,  127, 0 }, { 0, 0, -127 }, {} },
+        { {  127,  127, 0 }, { 0, 0, -127 }, {} },
+        { { -127, -127, 0 }, { 0, 0, -127 }, {} },
+        { {  127, -127, 0 }, { 0, 0, -127 }, {} },
+    };
+
+    if ( ! fill_buffer(vertex_buffer, VK_FORMAT_UNDEFINED, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+                       vertices, sizeof(vertices)))
+        return false;
+
+    static const uint16_t indices[] = {
+        2, 3, 0,
+        0, 3, 1
+    };
+
+    return fill_buffer(index_buffer, VK_FORMAT_UNDEFINED, VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
+                       indices, sizeof(indices));
+}
+
 static bool dummy_draw(uint32_t image_idx)
 {
+    static Buffer vertex_buffer;
+    static Buffer index_buffer;
+
+    if ( ! vertex_buffer.allocated()) {
+        if ( ! create_cube(&vertex_buffer, &index_buffer))
+            return false;
+    }
+
     if (vk_swapchain_images[image_idx].layout == VK_IMAGE_LAYOUT_PRESENT_SRC_KHR)
         return true;
 
@@ -1786,51 +1979,17 @@ static bool dummy_draw(uint32_t image_idx)
 
     VkResult res;
 
-    static VkCommandPool pool = VK_NULL_HANDLE;
+    static CommandBuffers<2 * mstd::array_size(vk_swapchain_images)> bufs;
 
-    if (pool == VK_NULL_HANDLE) {
-        static VkCommandPoolCreateInfo create_info = {
-            VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
-            nullptr,
-            VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT
-        };
+    if ( ! allocate_command_buffers_if_empty(&bufs))
+        return false;
 
-        create_info.queueFamilyIndex = queue_create_info.queueFamilyIndex;
-
-        res = CHK(vkCreateCommandPool(vk_dev,
-                                      &create_info,
-                                      nullptr,
-                                      &pool));
-        if (res != VK_SUCCESS)
-            return false;
-    }
-
-    static VkCommandBuffer bufs[2 * mstd::array_size(vk_swapchain_images)];
-    static uint32_t        cmd_buf_idx = 0;
-
-    if (bufs[image_idx] == VK_NULL_HANDLE) {
-
-        static VkCommandBufferAllocateInfo alloc_info = {
-            VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
-            nullptr,
-            VK_NULL_HANDLE,
-            VK_COMMAND_BUFFER_LEVEL_PRIMARY
-        };
-
-        alloc_info.commandPool        = pool;
-        alloc_info.commandBufferCount = mstd::array_size(bufs);
-
-        res = CHK(vkAllocateCommandBuffers(vk_dev, &alloc_info, bufs));
-
-        if (res != VK_SUCCESS)
-            return false;
-    }
-
+    static uint32_t         cmd_buf_idx = 0;
     static VkCommandBuffer* cur_buf_ptr = nullptr;
-    cur_buf_ptr = &bufs[cmd_buf_idx];
+    cur_buf_ptr = &bufs.bufs[cmd_buf_idx];
 
-    const VkCommandBuffer buf = bufs[cmd_buf_idx];
-    cmd_buf_idx = (cmd_buf_idx + 1) % mstd::array_size(bufs);
+    const VkCommandBuffer buf = *cur_buf_ptr;
+    cmd_buf_idx = (cmd_buf_idx + 1) % bufs.size();
 
     res = CHK(vkResetCommandBuffer(buf, 0));
     if (res != VK_SUCCESS)
@@ -1886,13 +2045,13 @@ static bool dummy_draw(uint32_t image_idx)
     static VkSubmitInfo submit_info = {
         VK_STRUCTURE_TYPE_SUBMIT_INFO,
         nullptr,
-        1,
-        &vk_sems[sem_acquire],
-        &dst_stage,
-        1,
-        nullptr, // pCommandBuffers
-        1,
-        &vk_sems[sem_acquire]
+        1,                      // waitSemaphoreCount
+        &vk_sems[sem_acquire],  // pWaitSemaphores
+        &dst_stage,             // pWaitDstStageMask
+        1,                      // commandBufferCount
+        nullptr,                // pCommandBuffers
+        1,                      // signalSemaphoreCount
+        &vk_sems[sem_acquire]   // pSignalSemaphores
     };
 
     submit_info.pCommandBuffers = cur_buf_ptr;
