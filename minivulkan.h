@@ -26,5 +26,5 @@ PORTABLE uint64_t get_current_time_ms();
 #   define CHK(call) call
 #else
 #   define CHK(call) check_vk_call(#call, __FILE__, __LINE__, call)
-VkResult check_vk_call(const char* call_str, const char* file, int line, VkResult res);
+PORTABLE VkResult check_vk_call(const char* call_str, const char* file, int line, VkResult res);
 #endif

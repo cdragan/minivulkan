@@ -1313,6 +1313,16 @@ static bool create_swapchain()
     swapchain_create_info.imageExtent   = vk_surface_caps.currentExtent;
     swapchain_create_info.oldSwapchain  = old_swapchain;
 
+#ifdef _WIN32
+    static VkSurfaceFullScreenExclusiveInfoEXT fullscreen_exclusive_info = {
+        VK_STRUCTURE_TYPE_SURFACE_FULL_SCREEN_EXCLUSIVE_INFO_EXT,
+        nullptr,
+        VK_FULL_SCREEN_EXCLUSIVE_ALLOWED_EXT
+    };
+
+    swapchain_create_info.pNext = &fullscreen_exclusive_info;
+#endif
+
     res = CHK(vkCreateSwapchainKHR(vk_dev, &swapchain_create_info, nullptr, &vk_swapchain));
 
     if (res != VK_SUCCESS)

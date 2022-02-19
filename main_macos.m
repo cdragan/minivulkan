@@ -7,8 +7,7 @@
 #include "minivulkan.h"
 #include <time.h>
 
-struct Window
-{
+struct Window {
     CAMetalLayer* layer;
 };
 
@@ -20,10 +19,11 @@ bool create_surface(struct Window* w)
 
     surf_create_info.pLayer = w->layer;
 
-    return vkCreateMetalSurfaceEXT(vk_instance,
-                                   &surf_create_info,
-                                   NULL,
-                                   &vk_surface) == VK_SUCCESS;
+    const VkResult res = CHK(vkCreateMetalSurfaceEXT(vk_instance,
+                                                     &surf_create_info,
+                                                     NULL,
+                                                     &vk_surface));
+    return res == VK_SUCCESS;
 }
 
 uint64_t get_current_time_ms()

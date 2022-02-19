@@ -26,6 +26,10 @@ ifeq ($(UNAME), Darwin)
     src_files += main_macos.m
 endif
 
+ifeq ($(UNAME), Windows)
+    src_files += main_windows.cpp
+endif
+
 ##############################################################################
 # Shaders
 
@@ -36,6 +40,21 @@ shader_files += shaders/phong.frag
 # Compiler flags
 
 ifeq ($(UNAME), Windows)
+    ifdef debug
+        CFLAGS  += -D_DEBUG -Z7 -MTd
+        LDFLAGS += -debug
+    else
+        CFLAGS  += -O1 -DNDEBUG -Gs4096 -GL -MT
+        LDFLAGS += -ltcg
+    endif
+
+    CFLAGS += -W3
+    CFLAGS += -TP -EHsc
+    CFLAGS += -std:c++17 -Zc:__cplusplus
+    # -Zi -nologo -Gm- -GR- -EHa- -Oi -GS- -Gs9999999 -stack:0x100000,0x100000 kernel32.lib
+
+    LDFLAGS += -nodefaultlib
+    LDFLAGS += -subsystem:windows
 else
     CFLAGS += -Wall -Wextra -Wno-unused-parameter -Wunused -Wno-missing-field-initializers
     CFLAGS += -Wshadow -Wformat=2 -Wconversion -Wdouble-promotion

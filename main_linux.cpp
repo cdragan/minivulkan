@@ -9,8 +9,7 @@
 #include <dlfcn.h>
 #include <xcb/xcb.h>
 
-struct Window
-{
+struct Window {
     xcb_connection_t* connection;
     xcb_window_t      window;
 };
@@ -20,15 +19,19 @@ bool create_surface(struct Window* w)
     static VkXcbSurfaceCreateInfoKHR surf_create_info = {
         VK_STRUCTURE_TYPE_XCB_SURFACE_CREATE_INFO_KHR,
         nullptr,
-        0,
-        w->connection,
-        w->window
+        0,       // flags
+        nullptr, // connection
+        0        // window
     };
 
-    return vkCreateXcbSurfaceKHR(vk_instance,
-                                 &surf_create_info,
-                                 nullptr,
-                                 &vk_surface) == VK_SUCCESS;
+    surf_create_info.connection = w->connection;
+    surf_create_info.window     = w->window;
+
+    const VkResult res = CHK(vkCreateXcbSurfaceKHR(vk_instance,
+                                                   &surf_create_info,
+                                                   nullptr,
+                                                   &vk_surface));
+    return res == VK_SUCCESS;
 }
 
 uint64_t get_current_time_ms()
@@ -38,8 +41,8 @@ uint64_t get_current_time_ms()
     struct timespec ts;
 
     if ( ! clock_gettime(CLOCK_MONOTONIC_RAW, &ts)) {
-        time_ms =  (uint64_t)ts.tv_sec * 1000;
-        time_ms += (uint64_t)ts.tv_nsec / 1'000'000;
+        time_ms =  static_cast<uint64_t>(ts.tv_sec) * 1000;
+        time_ms += static_cast<uint64_t>(ts.tv_nsec) / 1'000'000;
     }
 
     return time_ms;
