@@ -1590,8 +1590,9 @@ static bool create_graphics_pipelines()
     shader_stages[1].module = shaders[1];
 
     struct Vertex {
-        float pos[3];
-        float normal[3];
+        int8_t pos[3];
+        int8_t normal[3];
+        int8_t alignment[2]; // VkPhysicalDevicePortabilitySubsetPropertiesKHR::minVertexInputBindingStrideAlignment
     };
 
     static VkVertexInputBindingDescription vertex_bindings[] = {
@@ -1606,13 +1607,13 @@ static bool create_graphics_pipelines()
         {
             0,  // location
             0,  // binding
-            VK_FORMAT_R32G32B32_SFLOAT,
+            VK_FORMAT_R8G8B8_SINT,
             offsetof(Vertex, pos)
         },
         {
             1,  // location
             0,  // binding
-            VK_FORMAT_R32G32B32_SFLOAT,
+            VK_FORMAT_R8G8B8_SINT,
             offsetof(Vertex, normal)
         }
     };
