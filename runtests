@@ -1,12 +1,16 @@
 #!/bin/bash
 
 # SPDX-License-Identifier: MIT
-# Copyright (c) 2021 Chris Dragan
+# Copyright (c) 2021-2022 Chris Dragan
 
-UNAME=$(uname)
+UNAME=$(uname -s)
 
-[[ $UNAME = Linux ]] && JOBS=$(grep -c ^processor /proc/cpuinfo)
-[[ $UNAME = Darwin ]] && JOBS=$(sysctl -n hw.ncpu)
+case "$UNAME" in
+    Linux)                JOBS=$(grep -c ^processor /proc/cpuinfo) ;;
+    Darwin)               JOBS=$(sysctl -n hw.ncpu) ;;
+    CYGWIN*|MINGW*|MSYS*) JOBS="$NUMBER_OF_PROCESSORS" ;;
+    *)                    JOBS=2 ;;
+esac
 
 echo "Using $JOBS jobs"
 
