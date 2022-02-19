@@ -1230,6 +1230,16 @@ static bool create_fences()
     return true;
 }
 
+bool wait_and_reset_fence(eFenceId fence)
+{
+    VkResult res = CHK(vkWaitForFences(vk_dev, 1, &vk_fens[fence], VK_TRUE, 1'000'000'000));
+    if (res != VK_SUCCESS)
+        return false;
+
+    res = CHK(vkResetFences(vk_dev, 1, &vk_fens[fence]));
+    return res == VK_SUCCESS;
+}
+
 static VkSurfaceCapabilitiesKHR vk_surface_caps;
 
 static VkSwapchainKHR vk_swapchain = VK_NULL_HANDLE;
@@ -1927,15 +1937,7 @@ static bool fill_buffer(Buffer*            buffer,
     if (res != VK_SUCCESS)
         return false;
 
-    res = CHK(vkWaitForFences(vk_dev, 1, &vk_fens[fen_copy_to_dev], VK_TRUE, 1'000'000'000));
-    if (res != VK_SUCCESS)
-        return false;
-
-    res = CHK(vkResetFences(vk_dev, 1, &vk_fens[fen_copy_to_dev]));
-    if (res != VK_SUCCESS)
-        return false;
-
-    return true;
+    return wait_and_reset_fence(fen_copy_to_dev);
 }
 
 static bool create_cube(Buffer* vertex_buffer, Buffer* index_buffer)
@@ -2120,12 +2122,7 @@ bool draw_frame()
     VkResult        res;
 
     if (frame_idx++) {
-        res = CHK(vkWaitForFences(vk_dev, 1, &vk_fens[fen_acquire], VK_TRUE, 1'000'000'000));
-        if (res != VK_SUCCESS)
-            return false;
-
-        res = CHK(vkResetFences(vk_dev, 1, &vk_fens[fen_acquire]));
-        if (res != VK_SUCCESS)
+        if ( ! wait_and_reset_fence(fen_acquire))
             return false;
     }
 
