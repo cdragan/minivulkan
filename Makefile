@@ -48,13 +48,18 @@ ifeq ($(UNAME), Windows)
         LDFLAGS += -ltcg
     endif
 
+    CFLAGS += -nologo
     CFLAGS += -W3
     CFLAGS += -TP -EHsc
     CFLAGS += -std:c++17 -Zc:__cplusplus
     # -Zi -nologo -Gm- -GR- -EHa- -Oi -GS- -Gs9999999 -stack:0x100000,0x100000 kernel32.lib
 
+    LDFLAGS += -nologo
     LDFLAGS += -nodefaultlib
     LDFLAGS += -subsystem:windows
+
+    CXX  = cl.exe
+    LINK = cl.exe
 else
     CFLAGS += -Wall -Wextra -Wno-unused-parameter -Wunused -Wno-missing-field-initializers
     CFLAGS += -Wshadow -Wformat=2 -Wconversion -Wdouble-promotion
