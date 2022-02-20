@@ -14,4 +14,4 @@ esac
 
 echo "Using $JOBS jobs"
 
-make -j $JOBS
+make -j $JOBS -k
