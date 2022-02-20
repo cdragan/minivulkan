@@ -131,7 +131,7 @@ static bool create_window(Window* w)
         }
 
         ws_ex  = WS_EX_APPWINDOW | WS_EX_TOPMOST;
-        ws     = WS_CLIP_SIBLINGS | WS_CLIP_CHILDREN | WS_POPUP;
+        ws     = WS_CLIPSIBLINGS | WS_CLIPCHILDREN | WS_POPUP;
         x      = static_cast<int>(dm.dmPosition.x);
         y      = static_cast<int>(dm.dmPosition.y);
         width  = static_cast<int>(dm.dmPelsWidth);
@@ -139,7 +139,7 @@ static bool create_window(Window* w)
     }
     else {
         ws_ex  = WS_EX_APPWINDOW;
-        ws     = WS_CLIP_SIBLINGS | WS_CLIP_CHILDREN | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
+        ws     = WS_CLIPSIBLINGS | WS_CLIPCHILDREN | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
         x      = CW_USEDEFAULT;
         y      = CW_USEDEFAULT;
         width  = 800;
