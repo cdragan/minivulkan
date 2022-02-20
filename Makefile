@@ -28,6 +28,9 @@ endif
 
 ifeq ($(UNAME), Windows)
     src_files += main_windows.cpp
+    ifndef stdlib
+        src_files += mstdc_windows.cpp
+    endif
 endif
 
 ##############################################################################
@@ -37,29 +40,61 @@ shader_files += shaders/simple.vert
 shader_files += shaders/phong.frag
 
 ##############################################################################
+# Directory where generated files are stored
+
+out_dir = Out
+
+##############################################################################
+# Function for converting source path to object file path
+
+ifeq ($(UNAME), Windows)
+    o_suffix = obj
+else
+    o_suffix = o
+endif
+
+asm_suffix = S
+
+OBJ_FROM_SRC = $(addsuffix .$(o_suffix), $(addprefix $(out_dir)/,$(basename $(notdir $1))))
+
+##############################################################################
 # Compiler flags
 
 ifeq ($(UNAME), Windows)
     ifdef debug
-        CFLAGS  += -D_DEBUG -Z7 -MTd
+        CFLAGS  += -D_DEBUG -Zi -MTd
         LDFLAGS += -debug
     else
-        CFLAGS  += -O1 -DNDEBUG -Gs4096 -GL -MT
+        CFLAGS  += -O1 -Oi -DNDEBUG -GL -MT
         LDFLAGS += -ltcg
     endif
 
+    ifndef stdlib
+        CFLAGS  += -DNOSTDLIB -D_NO_CRT_STDIO_INLINE -Zc:threadSafeInit- -GS- -Gs9999999
+        LDFLAGS += -nodefaultlib -stack:0x100000,0x100000
+    endif
+
     CFLAGS += -nologo
+    CFLAGS += -GR-
     CFLAGS += -W3
-    CFLAGS += -TP -EHsc
+    CFLAGS += -TP -EHa-
+    CFLAGS += -FS
     CFLAGS += -std:c++17 -Zc:__cplusplus
-    # -Zi -nologo -Gm- -GR- -EHa- -Oi -GS- -Gs9999999 -stack:0x100000,0x100000 kernel32.lib
 
     LDFLAGS += -nologo
-    LDFLAGS += -nodefaultlib
     LDFLAGS += -subsystem:windows
+    LDFLAGS += user32.lib kernel32.lib
 
-    CXX  = cl.exe
-    LINK = cl.exe
+    CXX   = cl.exe
+    LINK  = link.exe
+    STRIP = true
+
+    COMPILER_OUTPUT = -Fo:$1
+    LINKER_OUTPUT   = -out:$1
+
+    ifndef debug
+        $(call OBJ_FROM_SRC, mstdc_windows.cpp): CFLAGS += -GL-
+    endif
 else
     CFLAGS += -Wall -Wextra -Wno-unused-parameter -Wunused -Wno-missing-field-initializers
     CFLAGS += -Wshadow -Wformat=2 -Wconversion -Wdouble-promotion
@@ -89,6 +124,9 @@ else
     OBJCFLAGS += -x objective-c -fno-objc-arc
 
     LINK = $(CXX)
+
+    COMPILER_OUTPUT = -o $1
+    LINKER_OUTPUT   = -o $1
 endif
 
 ifeq ($(UNAME), Linux)
@@ -131,20 +169,6 @@ ifdef debug
 endif
 
 ##############################################################################
-# Directory where generated files are stored
-
-out_dir = Out
-
-##############################################################################
-# Function for converting source path to object file path
-
-o_suffix = o
-
-asm_suffix = S
-
-OBJ_FROM_SRC = $(addsuffix .$(o_suffix), $(addprefix $(out_dir)/,$(basename $(notdir $1))))
-
-##############################################################################
 # Executable
 
 exe_name = minivulkan
@@ -155,6 +179,10 @@ ifeq ($(UNAME), Darwin)
     macos_app_dir = $(out_dir)/$(exe_name).app/Contents/MacOS
 
     exe = $(macos_app_dir)/$(exe_name)
+endif
+
+ifeq ($(UNAME), Windows)
+    exe = $(out_dir)/$(exe_name).exe
 endif
 
 ##############################################################################
@@ -171,7 +199,7 @@ $(out_dir):
 	mkdir -p $@
 
 $(exe): $(call OBJ_FROM_SRC, $(src_files))
-	$(LINK) -o $@ $^ $(LDFLAGS)
+	$(LINK) $(call LINKER_OUTPUT,$@) $^ $(LDFLAGS)
 	$(STRIP) $@
 
 ifeq ($(UNAME), Darwin)
@@ -187,13 +215,13 @@ $(macos_app_dir)/Info.plist: Info.plist | $(macos_app_dir)
 endif
 
 $(out_dir)/%.$(o_suffix): %.m | $(out_dir)
-	$(CC) $(CFLAGS) $(LTO_CFLAGS) $(OBJCFLAGS) -c -o $@ $<
+	$(CC) $(CFLAGS) $(LTO_CFLAGS) $(OBJCFLAGS) -c $(call COMPILER_OUTPUT,$@) $<
 
 $(out_dir)/%.$(o_suffix): %.cpp | $(out_dir)
-	$(CXX) $(CFLAGS) $(LTO_CFLAGS) $(CXXFLAGS) -c -o $@ $<
+	$(CXX) $(CFLAGS) $(LTO_CFLAGS) $(CXXFLAGS) -c $(call COMPILER_OUTPUT,$@) $<
 
 $(out_dir)/%.$(asm_suffix): % | $(out_dir)
-	$(CXX) $(CFLAGS) $(CXXFLAGS) -masm=intel -S -o $@ $<
+	$(CXX) $(CFLAGS) $(CXXFLAGS) -masm=intel -S $(call COMPILER_OUTPUT,$@) $<
 
 $(out_dir)/shaders: | $(out_dir)
 	mkdir -p $@

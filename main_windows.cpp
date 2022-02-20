@@ -2,7 +2,9 @@
 // Copyright (c) 2021 Chris Dragan
 
 #include "minivulkan.h"
+#include "mstdc.h"
 
+#define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 
 struct Window {
@@ -23,7 +25,7 @@ bool create_surface(Window* w)
     surf_create_info.hinstance = w->instance;
     surf_create_info.hwnd      = w->window;
 
-    const VkResult res = CHK(vkCreateWin32SurfaceKHR(w->instance,
+    const VkResult res = CHK(vkCreateWin32SurfaceKHR(vk_instance,
                                                      &surf_create_info,
                                                      nullptr,
                                                      &vk_surface));
@@ -47,8 +49,8 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT umsg, WPARAM wparam, LPARAM 
 
         case WM_NCCREATE:
             {
-                const LPARAM w = reinterpret_cast<CREATESTRUCT*>(lparam)->lpCreateParams;
-                SetWindowLongPtr(hwnd, GWLP_USERDATA, static_cast<LONG_PTR>(w));
+                const LPVOID w = reinterpret_cast<CREATESTRUCT*>(lparam)->lpCreateParams;
+                SetWindowLongPtr(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(w));
             }
             [[fallthrough]];
 
@@ -56,9 +58,11 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT umsg, WPARAM wparam, LPARAM 
             return DefWindowProc(hwnd, umsg, wparam, lparam);
 
         case WM_CREATE: {
-            Window* const window = reinterpret_cast<Window*>(GetWindowLongPtr(hwnd, GWLP_USERDATA));
+            Window* const w = reinterpret_cast<Window*>(GetWindowLongPtr(hwnd, GWLP_USERDATA));
 
-            if ( ! init_vulkan(&w))
+            w->window = hwnd;
+
+            if ( ! init_vulkan(w))
                 break;
 
             return 0;
@@ -74,7 +78,7 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT umsg, WPARAM wparam, LPARAM 
             break;
 
         case WM_CHAR:
-            if (wParam == VK_ESCAPE)
+            if (wparam == VK_ESCAPE)
                 break;
             return 0;
     }
@@ -105,29 +109,29 @@ static bool create_window(Window* w)
     wnd_class.hInstance = w->instance;
 
     if ( ! RegisterClass(&wnd_class)) {
-        dprintf("Failed to register window class\n");
+        //dprintf("Failed to register window class\n");
         return false;
     }
 
-    w->window = CreateWindowEx(WS_EX_APPWINDOW,       // dwExStyle
-                               title,                 // lpClassName
-                               title,                 // lpWindowName
-                               WS_OVERLAPPEDWINDOW,   // dwStyle
-                               CW_USEDEFAULT,         // X
-                               CW_USEDEFAULT,         // Y
-                               512,                   // nWidth
-                               384,                   // nHeight
-                               nullptr,               // hWndParent
-                               nullptr,               // hMenu
-                               w->instance,           // hInstance
-                               w);                    // lpParam
+    const HWND hwnd = CreateWindowEx(WS_EX_APPWINDOW,       // dwExStyle
+                                     title,                 // lpClassName
+                                     title,                 // lpWindowName
+                                     WS_OVERLAPPEDWINDOW,   // dwStyle
+                                     CW_USEDEFAULT,         // X
+                                     CW_USEDEFAULT,         // Y
+                                     800,                   // nWidth
+                                     600,                   // nHeight
+                                     nullptr,               // hWndParent
+                                     nullptr,               // hMenu
+                                     w->instance,           // hInstance
+                                     w);                    // lpParam
 
-    if ( ! w->window) {
-        dprintf("Failed to create window\n");
+    if ( ! hwnd) {
+        //dprintf("Failed to create window\n");
         return false;
     }
 
-    ShowWindow(w->window, SW_SHOW);
+    ShowWindow(hwnd, SW_SHOW);
 
     return true;
 }
@@ -144,12 +148,22 @@ static int event_loop(Window* w)
     return 0;
 }
 
+#ifdef NOSTDLIB
 int __stdcall WinMainCRTStartup()
+#else
+int WINAPI WinMain(HINSTANCE hinstance, HINSTANCE hprev_instance, PSTR cmd_line, INT cmd_show)
+#endif
 {
-    Window w;
+    Window w = { };
 
     if ( ! create_window(&w))
         return 1;
 
-    return event_loop(&w);
+    const int ret = event_loop(&w);
+
+#ifdef NOSTDLIB
+    ExitProcess(ret);
+#endif
+
+    return ret;
 }

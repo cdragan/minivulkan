@@ -3,6 +3,15 @@
 
 #include <stdint.h>
 
+// Workaround windows headers
+#ifdef min
+#   undef min
+#endif
+
+#ifdef max
+#   undef max
+#endif
+
 namespace mstd {
 
 uint32_t strlen(const char* name);

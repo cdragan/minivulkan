@@ -7,7 +7,9 @@
 #include <assert.h>
 #define __STDC_FORMAT_MACROS
 #include <inttypes.h>
-#include <dlfcn.h>
+#ifndef _WIN32
+#   include <dlfcn.h>
+#endif
 
 #ifdef NDEBUG
 #   define dprintf(...)
@@ -15,6 +17,11 @@
 #   include <stdio.h>
 #   include <string.h>
 #   define dprintf printf
+#endif
+
+// Workaround Windows headers
+#ifdef OPTIONAL
+#   undef OPTIONAL
 #endif
 
 #ifndef NDEBUG
@@ -81,7 +88,11 @@ const char* format_string(VkFormat format)
 }
 #endif
 
+#ifdef _WIN32
+static HMODULE vulkan_lib = nullptr;
+#else
 static void* vulkan_lib = nullptr;
+#endif
 
 static bool load_vulkan()
 {
@@ -139,7 +150,11 @@ static bool load_lib_functions()
     return load_functions(vk_lib_function_names, vk_lib_functions,
             [](const char* name) -> PFN_vkVoidFunction
             {
+#ifdef _WIN32
+                return reinterpret_cast<PFN_vkVoidFunction>(GetProcAddress(vulkan_lib, name));
+#else
                 return reinterpret_cast<PFN_vkVoidFunction>(dlsym(vulkan_lib, name));
+#endif
             });
 }
 
@@ -639,6 +654,19 @@ uint32_t DeviceMemoryHeap::host_memory_type   = ~0u;
 static constexpr uint32_t alloc_heap_size = 64u * 1024u * 1024u;
 static DeviceMemoryHeap vk_device_heap;
 
+#ifndef NDEBUG
+static void str_append(char* buf, const char* str)
+{
+    while (*buf)
+        ++buf;
+
+    while (*str)
+        *(buf++) = *(str++);
+
+    *buf = 0;
+}
+#endif
+
 bool DeviceMemoryHeap::init_heap_info()
 {
     if (device_memory_type != ~0u)
@@ -656,13 +684,13 @@ bool DeviceMemoryHeap::init_heap_info()
         static char info[64];
         info[0] = 0;
         if (mem_props.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)
-            strcat(info, "device,");
+            str_append(info, "device,");
         if (mem_props.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT)
-            strcat(info, "host_visible,");
+            str_append(info, "host_visible,");
         if (mem_props.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)
-            strcat(info, "host_coherent,");
+            str_append(info, "host_coherent,");
         if (mem_props.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_HOST_CACHED_BIT)
-            strcat(info, "host_cached,");
+            str_append(info, "host_cached,");
         dprintf("    type %d, heap %u, flags 0x%x (%s)\n",
                 i,
                 mem_props.memoryTypes[i].heapIndex,
@@ -918,18 +946,18 @@ class Image: public Resource {
 
         Image() = default;
 
-        operator VkImage() const { return image; }
-        operator VkImageView() const { return view; }
+        VkImage get_image() const { return image; }
+        VkImageView get_view() const { return view; }
 
         bool allocate(DeviceMemoryHeap& heap, const ImageInfo& image_info);
         void destroy();
 
         // Used with swapchains
-        void set(VkImage new_image) {
+        void set_image(VkImage new_image) {
             assert(image == VK_NULL_HANDLE);
             image = new_image;
         }
-        void set(VkImageView new_view) {
+        void set_view(VkImageView new_view) {
             assert(view == VK_NULL_HANDLE);
             view = new_view;
         }
@@ -1064,8 +1092,8 @@ class Buffer: public Resource {
         Buffer(const Buffer&) = delete;
         Buffer& operator=(const Buffer&) = delete;
 
-        operator VkBuffer() const { return buffer; }
-        operator VkBufferView() const { return view; }
+        VkBuffer get_buffer() const { return buffer; }
+        VkBufferView get_view() const { return view; }
 
         bool allocate(DeviceMemoryHeap&  heap,
                       uint32_t           alloc_size,
@@ -1330,7 +1358,7 @@ static bool create_swapchain()
 
     if (old_swapchain != VK_NULL_HANDLE) {
         for (const Image& image : vk_swapchain_images) {
-            const VkImageView view = image;
+            const VkImageView view = image.get_view();
             if (view)
                 vkDestroyImageView(vk_dev, view, nullptr);
         }
@@ -1358,7 +1386,7 @@ static bool create_swapchain()
 
     for (uint32_t i = 0; i < num_images; i++) {
         Image& image = vk_swapchain_images[i];
-        image.set(images[i]);
+        image.set_image(images[i]);
 
         static VkImageViewCreateInfo view_create_info = {
             VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
@@ -1381,7 +1409,7 @@ static bool create_swapchain()
                 1               // layerCount
             }
         };
-        view_create_info.image  = image;
+        view_create_info.image  = image.get_image();
         view_create_info.format = swapchain_create_info.imageFormat;
 
         VkImageView view;
@@ -1389,7 +1417,7 @@ static bool create_swapchain()
         if (res != VK_SUCCESS)
             return false;
 
-        vk_swapchain_images[i].set(view);
+        vk_swapchain_images[i].set_view(view);
     }
 
     return allocate_depth_buffers(num_images);
@@ -1493,8 +1521,8 @@ static bool create_frame_buffer()
     frame_buffer_info.width      = vk_surface_caps.currentExtent.width;
     frame_buffer_info.height     = vk_surface_caps.currentExtent.height;
 
-    attachments[0] = vk_swapchain_images[0];
-    attachments[1] = vk_depth_buffers[0];
+    attachments[0] = vk_swapchain_images[0].get_view();
+    attachments[1] = vk_depth_buffers[0].get_view();
 
     const VkResult res = CHK(vkCreateFramebuffer(vk_dev, &frame_buffer_info, nullptr, &vk_frame_buffer));
     return res == VK_SUCCESS;
@@ -1604,20 +1632,20 @@ static bool create_graphics_pipelines()
         {
             VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
             nullptr,
-            0,          // flags
+            0,              // flags
             VK_SHADER_STAGE_VERTEX_BIT,
-            nullptr,    // module
-            "main",     // pName
-            nullptr     // pSpecializationInfo
+            VK_NULL_HANDLE, // module
+            "main",         // pName
+            nullptr         // pSpecializationInfo
         },
         {
             VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
             nullptr,
-            0,          // flags
+            0,              // flags
             VK_SHADER_STAGE_FRAGMENT_BIT,
-            nullptr,    // module
-            "main",     // pName
-            nullptr     // pSpecializationInfo
+            VK_NULL_HANDLE, // module
+            "main",         // pName
+            nullptr         // pSpecializationInfo
         }
     };
     shader_stages[0].module = shaders[0];
@@ -1845,7 +1873,7 @@ static bool allocate_command_buffers(CommandBuffersBase* bufs, uint32_t num_buff
 
 template<uint32_t num_buffers>
 struct CommandBuffers: public CommandBuffersBase {
-    static uint32_t size() { return num_buffers; }
+    static constexpr uint32_t size() { return num_buffers; }
 
     private:
         VkCommandBuffer tail[num_buffers - 1];
@@ -1853,7 +1881,7 @@ struct CommandBuffers: public CommandBuffersBase {
 
 template<>
 struct CommandBuffers<1>: public CommandBuffersBase {
-    static uint32_t size() { return 1; }
+    static constexpr uint32_t size() { return 1; }
 };
 
 template<uint32_t num_buffers>
@@ -1923,7 +1951,7 @@ static bool fill_buffer(Buffer*            buffer,
 
     copy_region.size = size;
 
-    vkCmdCopyBuffer(aux_cmd_buf.bufs[0], host_buffer, *buffer, 1, &copy_region);
+    vkCmdCopyBuffer(aux_cmd_buf.bufs[0], host_buffer.get_buffer(), buffer->get_buffer(), 1, &copy_region);
 
     res = CHK(vkEndCommandBuffer(aux_cmd_buf.bufs[0]));
     if (res != VK_SUCCESS)
@@ -1987,7 +2015,7 @@ static bool dummy_draw(uint32_t image_idx, uint64_t time_ms)
 
     dprintf("dummy_draw for image %u at %" PRIu64 " ms\n", image_idx, time_ms);
 
-    const VkImage image = vk_swapchain_images[image_idx];
+    const VkImage image = vk_swapchain_images[image_idx].get_image();
 
     VkResult res;
 
