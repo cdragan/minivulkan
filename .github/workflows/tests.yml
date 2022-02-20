@@ -61,7 +61,7 @@ jobs:
         shell: cmd
         run: |
           call "C:\Program Files (x86)\Microsoft Visual Studio\2019\Enterprise\VC\Auxiliary\Build\vcvarsall.bat" x86
-          set
-          rem set PATH="%PATH%;C:\VulkanSDK\1.3.204.0\Bin"
-          rem set VULKAN_SDK="C:\VulkanSDK\1.3.204.0"
+          dir "%VULKAN_SDK%\include"
+          dir "%VULKAN_SDK%\Bin"
+          rem set PATH="%PATH%;%VULKAN_SDK%\Bin"
           msys2 -c ./runtests
