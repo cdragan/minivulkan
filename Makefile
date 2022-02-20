@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: MIT
-# Copyright (c) 2021 Chris Dragan
+# Copyright (c) 2021-2022 Chris Dragan
 
 ##############################################################################
 # Determine target OS
