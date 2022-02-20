@@ -2,6 +2,7 @@
 // Copyright (c) 2021 Chris Dragan
 
 #include "minivulkan.h"
+#include "dprintf.h"
 #include "mstdc.h"
 
 #define WIN32_LEAN_AND_MEAN
@@ -109,25 +110,57 @@ static bool create_window(Window* w)
     wnd_class.hInstance = w->instance;
 
     if ( ! RegisterClass(&wnd_class)) {
-        //dprintf("Failed to register window class\n");
+        dprintf("Failed to register window class\n");
         return false;
     }
 
-    const HWND hwnd = CreateWindowEx(WS_EX_APPWINDOW,       // dwExStyle
+    constexpr bool full_screen = true;
+
+    DWORD ws_ex;
+    DWORD ws;
+    int   x;
+    int   y;
+    int   width;
+    int   height;
+
+    if (full_screen) {
+        DEVMODEA dm;
+        if ( ! EnumDisplaySettings(nullptr, ENUM_CURRENT_SETTINGS, &dm)) {
+            dprintf("Failed to get current video mode\n");
+            return false;
+        }
+
+        ws_ex  = WS_EX_APPWINDOW | WS_EX_TOPMOST;
+        ws     = WS_CLIP_SIBLINGS | WS_CLIP_CHILDREN | WS_POPUP;
+        x      = static_cast<int>(dm.dmPosition.x);
+        y      = static_cast<int>(dm.dmPosition.y);
+        width  = static_cast<int>(dm.dmPelsWidth);
+        height = static_cast<int>(dm.dmPelsHeight);
+    }
+    else {
+        ws_ex  = WS_EX_APPWINDOW;
+        ws     = WS_CLIP_SIBLINGS | WS_CLIP_CHILDREN | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
+        x      = CW_USEDEFAULT;
+        y      = CW_USEDEFAULT;
+        width  = 800;
+        height = 600;
+    }
+
+    const HWND hwnd = CreateWindowEx(ws_ex,                 // dwExStyle
                                      title,                 // lpClassName
                                      title,                 // lpWindowName
-                                     WS_OVERLAPPEDWINDOW,   // dwStyle
-                                     CW_USEDEFAULT,         // X
-                                     CW_USEDEFAULT,         // Y
-                                     800,                   // nWidth
-                                     600,                   // nHeight
+                                     ws,                    // dwStyle
+                                     x,                     // X
+                                     y,                     // Y
+                                     width,                 // nWidth
+                                     height,                // nHeight
                                      nullptr,               // hWndParent
                                      nullptr,               // hMenu
                                      w->instance,           // hInstance
                                      w);                    // lpParam
 
     if ( ! hwnd) {
-        //dprintf("Failed to create window\n");
+        dprintf("Failed to create window\n");
         return false;
     }
 
