@@ -2,21 +2,15 @@
 // Copyright (c) 2021 Chris Dragan
 
 #include "minivulkan.h"
-#include "vulkan_extensions.h"
+#include "dprintf.h"
 #include "mstdc.h"
+#include "vulkan_extensions.h"
+
 #include <assert.h>
 #define __STDC_FORMAT_MACROS
 #include <inttypes.h>
 #ifndef _WIN32
 #   include <dlfcn.h>
-#endif
-
-#ifdef NDEBUG
-#   define dprintf(...)
-#else
-#   include <stdio.h>
-#   include <string.h>
-#   define dprintf printf
 #endif
 
 // Workaround Windows headers
