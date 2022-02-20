@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2021 Chris Dragan
+// Copyright (c) 2021-2022 Chris Dragan
 
 #include "minivulkan.h"
 
@@ -146,10 +146,14 @@ static int event_loop(Window* w)
 
             switch (event->response_type & ~0x80) {
 
-                case XCB_KEY_PRESS: // keyboard
-                    // TODO detect Esc
-                    quit = true;
+                case XCB_KEY_PRESS: { // keyboard
+                    xcb_key_press_event_t* const key_event = reinterpret_cast<xcb_key_press_event_t*>(event);
+                    // TODO decode Esc somehow instead of hardcoding
+                    constexpr uint8_t keycode_esc = 9;
+                    if (key_event->detail == keycode_esc)
+                        quit = true;
                     break;
+                }
             }
 
             free(event);
