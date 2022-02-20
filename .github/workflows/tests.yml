@@ -52,16 +52,24 @@ jobs:
       - name: Remove link.exe from MSYS2
         shell: msys2 {0}
         run: rm -f /bin/link.exe
-      - name: Install Vulkan SDK
-        uses: humbletim/setup-vulkan-sdk@v1.0.3
+      - name: Cache Vulkan SDK
+        id: cache-vulkansdk
+        uses: actions/cache@v1
         with:
-          vulkan-version: 1.3.204.0
+          path: "C:\\VulkanSDK\\1.3.204.0"
+          key: vulkan-sdk-1.3.204.0
+      - name: Setup Vulkan
+        if: steps.cache-vulkansdk.outputs.cache-hit != 'true'
+        shell: ps
+        run: |
+          Invoke-WebRequest -Uri "https://sdk.lunarg.com/sdk/download/1.3.204.0/windows/VulkanSDK-1.3.204.0-Installer.exe" -OutFile VulkanSDK.exe
+          $installer = Start-Process -FilePath VulkanSDK.exe -Wait -PassThru -ArgumentList @("/S");
+          $installer.WaitForExit();
       - uses: actions/checkout@v2
       - name: Test
         shell: cmd
         run: |
-          call "C:\Program Files (x86)\Microsoft Visual Studio\2019\Enterprise\VC\Auxiliary\Build\vcvarsall.bat" x86
-          dir "%VULKAN_SDK%\include"
-          dir "%VULKAN_SDK%\Bin"
-          rem set PATH="%PATH%;%VULKAN_SDK%\Bin"
+          call "C:\\Program Files (x86)\\Microsoft Visual Studio\\2019\\Enterprise\\VC\\Auxiliary\\Build\\vcvarsall.bat" x86
+          set VULKAN_SDK="C:\\VulkanSDK\\1.3.204.0"
+          set PATH="%PATH%;%VULKAN_SDK%\Bin"
           msys2 -c ./runtests
