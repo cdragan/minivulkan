@@ -6,12 +6,14 @@
 #include "mstdc.h"
 #include "vulkan_extensions.h"
 
-#include <assert.h>
-#define __STDC_FORMAT_MACROS
-#include <inttypes.h>
-#ifndef _WIN32
+#ifdef _WIN32
+#   define dlsym GetProcAddress
+#else
 #   include <dlfcn.h>
 #endif
+
+#define __STDC_FORMAT_MACROS
+#include <inttypes.h>
 
 // Workaround Windows headers
 #ifdef OPTIONAL
@@ -94,7 +96,7 @@ static bool load_vulkan()
     vulkan_lib = LoadLibrary("vulkan-1.dll");
 #elif defined(__APPLE__)
     vulkan_lib = dlopen("libvulkan.dylib", RTLD_NOW | RTLD_LOCAL);
-#else
+#elif defined(__linux__)
     vulkan_lib = dlopen("libvulkan.so.1", RTLD_NOW | RTLD_LOCAL);
 #endif
 
@@ -144,11 +146,7 @@ static bool load_lib_functions()
     return load_functions(vk_lib_function_names, vk_lib_functions,
             [](const char* name) -> PFN_vkVoidFunction
             {
-#ifdef _WIN32
-                return reinterpret_cast<PFN_vkVoidFunction>(GetProcAddress(vulkan_lib, name));
-#else
                 return reinterpret_cast<PFN_vkVoidFunction>(dlsym(vulkan_lib, name));
-#endif
             });
 }
 
@@ -266,8 +264,8 @@ static bool init_instance()
 
 #ifndef NDEBUG
     const PFN_vkEnumerateInstanceLayerProperties vkEnumerateInstanceLayerProperties =
-        (PFN_vkEnumerateInstanceLayerProperties)
-        vkGetInstanceProcAddr(nullptr, "vkEnumerateInstanceLayerProperties");
+        reinterpret_cast<PFN_vkEnumerateInstanceLayerProperties>(
+            vkGetInstanceProcAddr(nullptr, "vkEnumerateInstanceLayerProperties"));
 
     static VkLayerProperties layer_props[8];
 
@@ -296,8 +294,8 @@ static bool init_instance()
         const char* validation_features_str = nullptr;
 
         res = vkEnumerateInstanceExtensionProperties(layer_props[i].layerName,
-                                                                    &num_ext_props,
-                                                                    ext_props);
+                                                     &num_ext_props,
+                                                     ext_props);
         if (res == VK_SUCCESS || res == VK_INCOMPLETE) {
             for (uint32_t j = 0; j < num_ext_props; j++) {
                 dprintf("    %s\n", ext_props[j].extensionName);
@@ -389,7 +387,7 @@ static VkSwapchainCreateInfoKHR swapchain_create_info = {
 
 static bool find_surface_format(VkPhysicalDevice phys_dev)
 {
-    VkSurfaceFormatKHR formats[32];
+    VkSurfaceFormatKHR formats[64];
 
     uint32_t num_formats = mstd::array_size(formats);
 
@@ -606,42 +604,6 @@ static bool create_device()
     return true;
 }
 
-class DeviceMemoryHeap {
-    public:
-        enum Location {
-            device_memory,
-            host_memory
-        };
-
-        DeviceMemoryHeap() = default;
-        DeviceMemoryHeap(Location loc) : host_visible(loc == host_memory) { }
-        DeviceMemoryHeap(const DeviceMemoryHeap&) = delete;
-        DeviceMemoryHeap& operator=(const DeviceMemoryHeap&) = delete;
-
-        bool allocate_heap_if_empty(const VkMemoryRequirements& requirements);
-        bool allocate_heap(VkDeviceSize size);
-        void free_heap();
-        bool allocate_memory(const VkMemoryRequirements& requirements, VkDeviceSize* offset);
-
-        VkDeviceMemory  get_memory() const { return memory; }
-        bool            is_host_memory() const { return host_visible; }
-        static uint32_t get_memory_type() { return device_memory_type; }
-
-    private:
-        static bool init_heap_info();
-
-        static uint32_t device_memory_type;
-        static uint32_t host_memory_type;
-
-        VkDeviceMemory  memory         = VK_NULL_HANDLE;
-        VkDeviceSize    next_free_offs = 0;
-        VkDeviceSize    heap_size      = 0;
-        bool            host_visible   = false;
-        bool            mapped         = false;
-
-        friend class MapBase;
-};
-
 uint32_t DeviceMemoryHeap::device_memory_type = ~0u;
 uint32_t DeviceMemoryHeap::host_memory_type   = ~0u;
 
@@ -720,7 +682,7 @@ bool DeviceMemoryHeap::init_heap_info()
     return true;
 }
 
-bool DeviceMemoryHeap::allocate_heap_if_empty(const VkMemoryRequirements& requirements)
+bool DeviceMemoryHeap::allocate_heap_once(const VkMemoryRequirements& requirements)
 {
     if (memory != VK_NULL_HANDLE)
         return true;
@@ -796,33 +758,6 @@ bool DeviceMemoryHeap::allocate_memory(const VkMemoryRequirements& requirements,
     return true;
 }
 
-static constexpr VkImageLayout initial_layout = VK_IMAGE_LAYOUT_UNDEFINED;
-
-class MapBase {
-    public:
-        MapBase(const MapBase&) = delete;
-        MapBase& operator=(const MapBase&) = delete;
-
-        bool mapped() const { return mapped_ptr != nullptr; }
-        void unmap();
-
-    protected:
-        MapBase() = default;
-        MapBase(DeviceMemoryHeap* heap, VkDeviceSize offset, VkDeviceSize size);
-        ~MapBase() { unmap(); }
-
-        void move_from(MapBase& map);
-        void* get_ptr() { return mapped_ptr; }
-        const void* get_ptr() const { return mapped_ptr; }
-        void* get_end_ptr() { return reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(mapped_ptr) + mapped_size); }
-        const void* get_end_ptr() const { return reinterpret_cast<const void*>(reinterpret_cast<uintptr_t>(mapped_ptr) + mapped_size); }
-
-    private:
-        DeviceMemoryHeap* mapped_heap = nullptr;
-        void*             mapped_ptr  = nullptr;
-        VkDeviceSize      mapped_size = 0;
-};
-
 MapBase::MapBase(DeviceMemoryHeap* heap, VkDeviceSize offset, VkDeviceSize size)
 {
     assert( ! heap->mapped);
@@ -874,93 +809,6 @@ void MapBase::move_from(MapBase& map)
     map.mapped_size = 0;
 }
 
-template<typename T>
-class Map: public MapBase {
-    public:
-        Map() = default;
-        Map(DeviceMemoryHeap* heap, VkDeviceSize offset, VkDeviceSize size)
-            : MapBase(heap, offset, size) { }
-
-        Map(Map&& map) { move_from(map); }
-        Map& operator=(Map&& map) {
-            move_from(map);
-            return *this;
-        }
-
-        uint32_t size() const { return end() - begin(); }
-
-        T* data() { return static_cast<T*>(get_ptr()); }
-        const T* data() const { return static_cast<const T*>(get_ptr()); }
-
-        operator T*() { return static_cast<T*>(get_ptr()); }
-        operator const T*() const { return static_cast<const T*>(get_ptr()); }
-
-        T& operator[](uintptr_t i) { return static_cast<T*>(get_ptr())[i]; }
-        const T& operator[](uintptr_t i) const { return static_cast<const T*>(get_ptr())[i]; }
-
-        T* begin() { return static_cast<T*>(get_ptr()); }
-        T* end()   { return static_cast<T*>(get_end_ptr()); }
-
-        const T* begin() const { return static_cast<const T*>(get_ptr()); }
-        const T* end()   const { return static_cast<const T*>(get_end_ptr()); }
-
-        const T* cbegin() const { return static_cast<const T*>(get_ptr()); }
-        const T* cend()   const { return static_cast<const T*>(get_end_ptr()); }
-};
-
-class Resource {
-    public:
-        Resource() = default;
-        Resource(const Resource&) = delete;
-        Resource& operator=(const Resource&) = delete;
-
-        template<typename T>
-        Map<T> map() const { return Map<T>(owning_heap, heap_offset, bytes); }
-
-        bool allocated() const { return !! bytes; }
-
-    protected:
-        DeviceMemoryHeap* owning_heap = nullptr;
-        VkDeviceSize      heap_offset = 0;
-        VkDeviceSize      bytes       = 0;
-};
-
-struct ImageInfo {
-    uint32_t           width;
-    uint32_t           height;
-    VkFormat           format;
-    uint32_t           mip_levels;
-    VkImageAspectFlags aspect;
-    VkImageUsageFlags  usage;
-};
-
-class Image: public Resource {
-    public:
-        VkImageLayout layout = initial_layout;
-
-        Image() = default;
-
-        VkImage get_image() const { return image; }
-        VkImageView get_view() const { return view; }
-
-        bool allocate(DeviceMemoryHeap& heap, const ImageInfo& image_info);
-        void destroy();
-
-        // Used with swapchains
-        void set_image(VkImage new_image) {
-            assert(image == VK_NULL_HANDLE);
-            image = new_image;
-        }
-        void set_view(VkImageView new_view) {
-            assert(view == VK_NULL_HANDLE);
-            view = new_view;
-        }
-
-    private:
-        VkImage     image = VK_NULL_HANDLE;
-        VkImageView view  = VK_NULL_HANDLE;
-};
-
 bool Image::allocate(DeviceMemoryHeap& heap, const ImageInfo& image_info)
 {
     static VkImageCreateInfo create_info = {
@@ -978,7 +826,7 @@ bool Image::allocate(DeviceMemoryHeap& heap, const ImageInfo& image_info)
         VK_SHARING_MODE_EXCLUSIVE,
         1,                  // queueFamilyIndexCount
         &queue_create_info.queueFamilyIndex,
-        initial_layout
+        Image::initial_layout
     };
     create_info.format        = image_info.format;
     create_info.extent.width  = image_info.width;
@@ -991,7 +839,7 @@ bool Image::allocate(DeviceMemoryHeap& heap, const ImageInfo& image_info)
     if (res != VK_SUCCESS)
         return false;
 
-    layout = initial_layout;
+    layout = Image::initial_layout;
 
     VkMemoryRequirements requirements;
     vkGetImageMemoryRequirements(vk_dev, image, &requirements);
@@ -1003,7 +851,7 @@ bool Image::allocate(DeviceMemoryHeap& heap, const ImageInfo& image_info)
     }
 #endif
 
-    if ( ! heap.allocate_heap_if_empty(requirements))
+    if ( ! heap.allocate_heap_once(requirements))
         return false;
 
     VkDeviceSize offset;
@@ -1061,48 +909,8 @@ void Image::destroy()
     bytes       = 0;
 }
 
-class TempHostImage: public Image {
-    public:
-        TempHostImage() = default;
-        ~TempHostImage();
-
-        bool allocate(const ImageInfo& image_info) {
-            return Image::allocate(heap, image_info);
-        }
-
-    private:
-        DeviceMemoryHeap heap{DeviceMemoryHeap::host_memory};
-};
-
-TempHostImage::~TempHostImage()
-{
-    destroy();
-    heap.free_heap();
-}
-
-class Buffer: public Resource {
-    public:
-        Buffer() = default;
-        Buffer(const Buffer&) = delete;
-        Buffer& operator=(const Buffer&) = delete;
-
-        VkBuffer get_buffer() const { return buffer; }
-        VkBufferView get_view() const { return view; }
-
-        bool allocate(DeviceMemoryHeap&  heap,
-                      uint32_t           alloc_size,
-                      VkFormat           format,
-                      VkBufferUsageFlags usage);
-        void destroy();
-
-    private:
-        VkBuffer     buffer = VK_NULL_HANDLE;
-        VkBufferView view   = VK_NULL_HANDLE;
-};
-
 bool Buffer::allocate(DeviceMemoryHeap&  heap,
                       uint32_t           alloc_size,
-                      VkFormat           format,
                       VkBufferUsageFlags usage)
 {
     static VkBufferCreateInfo create_info = {
@@ -1132,7 +940,7 @@ bool Buffer::allocate(DeviceMemoryHeap&  heap,
     }
 #endif
 
-    if ( ! heap.allocate_heap_if_empty(requirements))
+    if ( ! heap.allocate_heap_once(requirements))
         return false;
 
     VkDeviceSize offset;
@@ -1147,9 +955,11 @@ bool Buffer::allocate(DeviceMemoryHeap&  heap,
     heap_offset = offset;
     bytes       = requirements.size;
 
-    if (format == VK_FORMAT_UNDEFINED)
-        return true;
+    return true;
+}
 
+bool Buffer::create_view(VkFormat format)
+{
     static VkBufferViewCreateInfo view_create_info = {
         VK_STRUCTURE_TYPE_BUFFER_VIEW_CREATE_INFO,
         nullptr,
@@ -1161,9 +971,9 @@ bool Buffer::allocate(DeviceMemoryHeap&  heap,
     };
     view_create_info.buffer = buffer;
     view_create_info.format = format;
-    view_create_info.offset = offset;
+    view_create_info.offset = heap_offset;
 
-    res = CHK(vkCreateBufferView(vk_dev, &view_create_info, nullptr, &view));
+    const VkResult res = CHK(vkCreateBufferView(vk_dev, &view_create_info, nullptr, &view));
     return res == VK_SUCCESS;
 }
 
@@ -1180,34 +990,7 @@ void Buffer::destroy()
     bytes       = 0;
 }
 
-class TempHostBuffer: public Buffer {
-    public:
-        TempHostBuffer() = default;
-        ~TempHostBuffer();
-
-        bool allocate(uint32_t           alloc_size,
-                      VkFormat           format,
-                      VkBufferUsageFlags usage) {
-            return Buffer::allocate(heap, alloc_size, format, usage);
-        }
-
-    private:
-        DeviceMemoryHeap heap{DeviceMemoryHeap::host_memory};
-};
-
-TempHostBuffer::~TempHostBuffer()
-{
-    destroy();
-    heap.free_heap();
-}
-
-enum eSemId {
-    sem_acquire,
-
-    num_semaphores
-};
-
-static VkSemaphore vk_sems[num_semaphores];
+VkSemaphore vk_sems[num_semaphores];
 
 static bool create_semaphores()
 {
@@ -1226,14 +1009,7 @@ static bool create_semaphores()
     return true;
 }
 
-enum eFenceId {
-    fen_acquire,
-    fen_copy_to_dev,
-
-    num_fences
-};
-
-static VkFence vk_fens[num_fences];
+VkFence vk_fens[num_fences];
 
 static bool create_fences()
 {
@@ -1827,12 +1603,7 @@ static bool update_resolution()
     return true;
 }
 
-struct CommandBuffersBase {
-    VkCommandPool   pool = VK_NULL_HANDLE;
-    VkCommandBuffer bufs[1];
-};
-
-static bool allocate_command_buffers(CommandBuffersBase* bufs, uint32_t num_buffers)
+bool allocate_command_buffers(CommandBuffersBase* bufs, uint32_t num_buffers)
 {
     assert(bufs->pool == VK_NULL_HANDLE);
 
@@ -1865,64 +1636,9 @@ static bool allocate_command_buffers(CommandBuffersBase* bufs, uint32_t num_buff
     return res == VK_SUCCESS;
 }
 
-template<uint32_t num_buffers>
-struct CommandBuffers: public CommandBuffersBase {
-    static constexpr uint32_t size() { return num_buffers; }
-
-    private:
-        VkCommandBuffer tail[num_buffers - 1];
-};
-
-template<>
-struct CommandBuffers<1>: public CommandBuffersBase {
-    static constexpr uint32_t size() { return 1; }
-};
-
-template<uint32_t num_buffers>
-static bool allocate_command_buffers(CommandBuffers<num_buffers>* bufs)
+static bool reset_and_begin_command_buffer(VkCommandBuffer cmd_buf)
 {
-    return allocate_command_buffers(bufs, num_buffers);
-}
-
-template<uint32_t num_buffers>
-static bool allocate_command_buffers_if_empty(CommandBuffers<num_buffers>* bufs)
-{
-    if (bufs->pool)
-        return true;
-
-    return allocate_command_buffers(bufs, num_buffers);
-}
-
-static bool fill_buffer(Buffer*            buffer,
-                        VkFormat           format,
-                        VkBufferUsageFlags usage,
-                        const void*        data,
-                        uint32_t           size)
-{
-    if ( ! buffer->allocate(vk_device_heap,
-                            size,
-                            format,
-                            usage | VK_BUFFER_USAGE_TRANSFER_DST_BIT))
-        return false;
-
-    TempHostBuffer host_buffer;
-    if ( ! host_buffer.allocate(size, format, VK_BUFFER_USAGE_TRANSFER_SRC_BIT))
-        return false;
-
-    {
-        Map<uint8_t> map = host_buffer.map<uint8_t>();
-        if ( ! map.mapped())
-            return false;
-
-        mstd::mem_copy(map.data(), data, size);
-    }
-
-    static CommandBuffers<1> aux_cmd_buf;
-
-    if ( ! allocate_command_buffers_if_empty(&aux_cmd_buf))
-        return false;
-
-    VkResult res = CHK(vkResetCommandBuffer(aux_cmd_buf.bufs[0], 0));
+    VkResult res = CHK(vkResetCommandBuffer(cmd_buf, 0));
     if (res != VK_SUCCESS)
         return false;
 
@@ -1933,9 +1649,48 @@ static bool fill_buffer(Buffer*            buffer,
         nullptr
     };
 
-    res = CHK(vkBeginCommandBuffer(aux_cmd_buf.bufs[0], &begin_info));
-    if (res != VK_SUCCESS)
+    res = CHK(vkBeginCommandBuffer(cmd_buf, &begin_info));
+    return res == VK_SUCCESS;
+}
+
+bool HostFiller::init(VkDeviceSize heap_size)
+{
+    if ( ! host_heap.allocate_heap(heap_size))
         return false;
+
+    if ( ! allocate_command_buffers(&cmd_buf))
+        return false;
+
+    return reset_and_begin_command_buffer(cmd_buf.bufs[0]);
+}
+
+bool HostFiller::fill_buffer(Buffer*            buffer,
+                             VkBufferUsageFlags usage,
+                             const void*        data,
+                             uint32_t           size)
+{
+    assert(num_buffers < max_buffers);
+
+    if (num_buffers == max_buffers)
+        return false;
+
+    Buffer& host_buffer = buffers[num_buffers++];
+
+    if ( ! buffer->allocate(vk_device_heap,
+                            size,
+                            usage | VK_BUFFER_USAGE_TRANSFER_DST_BIT))
+        return false;
+
+    if ( ! host_buffer.allocate(host_heap, size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT))
+        return false;
+
+    {
+        Map<uint8_t> map = host_buffer.map<uint8_t>();
+        if ( ! map.mapped())
+            return false;
+
+        mstd::mem_copy(map.data(), data, size);
+    }
 
     static VkBufferCopy copy_region = {
         0, // srcOffset
@@ -1945,9 +1700,14 @@ static bool fill_buffer(Buffer*            buffer,
 
     copy_region.size = size;
 
-    vkCmdCopyBuffer(aux_cmd_buf.bufs[0], host_buffer.get_buffer(), buffer->get_buffer(), 1, &copy_region);
+    vkCmdCopyBuffer(cmd_buf.bufs[0], host_buffer.get_buffer(), buffer->get_buffer(), 1, &copy_region);
 
-    res = CHK(vkEndCommandBuffer(aux_cmd_buf.bufs[0]));
+    return true;
+}
+
+bool HostFiller::send_to_gpu()
+{
+    VkResult res = CHK(vkEndCommandBuffer(cmd_buf.bufs[0]));
     if (res != VK_SUCCESS)
         return false;
 
@@ -1960,20 +1720,34 @@ static bool fill_buffer(Buffer*            buffer,
         nullptr,            // pWaitSemaphored
         &dst_stage,         // pWaitDstStageMask
         1,                  // commandBufferCount
-        aux_cmd_buf.bufs,
+        cmd_buf.bufs,
         0,                  // signalSemaphoreCount
         nullptr             // pSignalSemaphores
     };
 
     res = CHK(vkQueueSubmit(vk_queue, 1, &submit_info, vk_fens[fen_copy_to_dev]));
-    if (res != VK_SUCCESS)
+    return res == VK_SUCCESS;
+}
+
+bool HostFiller::wait_until_done()
+{
+    if ( ! wait_and_reset_fence(fen_copy_to_dev))
         return false;
 
-    return wait_and_reset_fence(fen_copy_to_dev);
+    while (num_buffers--)
+        buffers[num_buffers].destroy();
+
+    host_heap.free_heap();
+
+    return true;
 }
 
 static bool create_cube(Buffer* vertex_buffer, Buffer* index_buffer)
 {
+    HostFiller filler;
+    if ( ! filler.init(0x10000))
+        return false;
+
     static const Vertex vertices[] = {
         { { -127,  127, 0 }, { 0, 0, -127 }, {} },
         { {  127,  127, 0 }, { 0, 0, -127 }, {} },
@@ -1981,8 +1755,8 @@ static bool create_cube(Buffer* vertex_buffer, Buffer* index_buffer)
         { {  127, -127, 0 }, { 0, 0, -127 }, {} },
     };
 
-    if ( ! fill_buffer(vertex_buffer, VK_FORMAT_UNDEFINED, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
-                       vertices, sizeof(vertices)))
+    if ( ! filler.fill_buffer(vertex_buffer, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+                              vertices, sizeof(vertices)))
         return false;
 
     static const uint16_t indices[] = {
@@ -1990,8 +1764,12 @@ static bool create_cube(Buffer* vertex_buffer, Buffer* index_buffer)
         0, 3, 1
     };
 
-    return fill_buffer(index_buffer, VK_FORMAT_UNDEFINED, VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
-                       indices, sizeof(indices));
+    if ( ! filler.fill_buffer(index_buffer, VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
+                              indices, sizeof(indices)))
+        return false;
+
+    filler.send_to_gpu();
+    return filler.wait_until_done();
 }
 
 static bool dummy_draw(uint32_t image_idx, uint64_t time_ms)
@@ -2015,7 +1793,7 @@ static bool dummy_draw(uint32_t image_idx, uint64_t time_ms)
 
     static CommandBuffers<2 * mstd::array_size(vk_swapchain_images)> bufs;
 
-    if ( ! allocate_command_buffers_if_empty(&bufs))
+    if ( ! allocate_command_buffers_once(&bufs))
         return false;
 
     static uint32_t         cmd_buf_idx = 0;
@@ -2025,19 +1803,7 @@ static bool dummy_draw(uint32_t image_idx, uint64_t time_ms)
     const VkCommandBuffer buf = *cur_buf_ptr;
     cmd_buf_idx = (cmd_buf_idx + 1) % bufs.size();
 
-    res = CHK(vkResetCommandBuffer(buf, 0));
-    if (res != VK_SUCCESS)
-        return false;
-
-    static VkCommandBufferBeginInfo begin_info = {
-        VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
-        nullptr,
-        VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
-        nullptr
-    };
-
-    res = CHK(vkBeginCommandBuffer(buf, &begin_info));
-    if (res != VK_SUCCESS)
+    if ( ! reset_and_begin_command_buffer(buf))
         return false;
 
     static VkImageMemoryBarrier img_barrier = {
