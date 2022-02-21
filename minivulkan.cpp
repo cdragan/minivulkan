@@ -1588,6 +1588,10 @@ static bool create_graphics_pipelines()
 
 static bool update_resolution()
 {
+    const VkResult res = CHK(vkQueueWaitIdle(vk_queue));
+    if (res != VK_SUCCESS)
+        return false;
+
     vkDestroyFramebuffer(vk_dev, vk_frame_buffer, nullptr);
     vk_frame_buffer = VK_NULL_HANDLE;
 

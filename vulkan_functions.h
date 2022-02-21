@@ -91,6 +91,7 @@
     X(vkBeginCommandBuffer) \
     X(vkEndCommandBuffer) \
     X(vkQueueSubmit) \
+    X(vkQueueWaitIdle) \
     X(vkCmdPipelineBarrier) \
     X(vkCmdCopyBuffer)
 
@@ -181,5 +182,6 @@ enum e_device_functions {
 #define vkBeginCommandBuffer                      ((PFN_vkBeginCommandBuffer)                      vk_device_functions[   id_vkBeginCommandBuffer])
 #define vkEndCommandBuffer                        ((PFN_vkEndCommandBuffer)                        vk_device_functions[   id_vkEndCommandBuffer])
 #define vkQueueSubmit                             ((PFN_vkQueueSubmit)                             vk_device_functions[   id_vkQueueSubmit])
+#define vkQueueWaitIdle                           ((PFN_vkQueueWaitIdle)                           vk_device_functions[   id_vkQueueWaitIdle])
 #define vkCmdPipelineBarrier                      ((PFN_vkCmdPipelineBarrier)                      vk_device_functions[   id_vkCmdPipelineBarrier])
 #define vkCmdCopyBuffer                           ((PFN_vkCmdCopyBuffer)                           vk_device_functions[   id_vkCmdCopyBuffer])
