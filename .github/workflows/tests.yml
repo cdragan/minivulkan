@@ -56,7 +56,7 @@ jobs:
       - name: Install Vulkan SDK
         uses: humbletim/setup-vulkan-sdk@v1.2.0-beta
         with:
-          vulkan-version: 1.3.204.0
+          vulkan-query-version: 1.3.204.0
           vulkan-components: Vulkan-Headers, Vulkan-Loader, Glslang
           vulkan-use-cache: true
       - name: Test
