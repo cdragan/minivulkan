@@ -163,7 +163,10 @@ ifdef VULKAN_SDK
     CFLAGS += -I$(VULKAN_SDK)/include
 endif
 
-GLSL_FLAGS = -Os --target-env vulkan1.1
+GLSL_FLAGS = --target-env vulkan1.1
+ifndef GLSL_NO_OPTIMIZER
+    GLSL_FLAGS += -Os
+endif
 ifdef debug
     GLSL_FLAGS += -g
 endif
