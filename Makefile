@@ -226,9 +226,15 @@ $(out_dir)/%.$(asm_suffix): % | $(out_dir)
 $(out_dir)/shaders: | $(out_dir)
 	mkdir -p $@
 
+ifdef VULKAN_SDK_BIN
+    GLSL_VALIDATOR = $(VULKAN_SDK_BIN)/glslangValidator
+else
+    GLSL_VALIDATOR = glslangValidator
+endif
+
 define GLSL_EXT
 $(out_dir)/shaders/%.$1.h: shaders/%.$1 | $(out_dir)/shaders
-	glslangValidator $(GLSL_FLAGS) --variable-name $$(subst .,_,$$(notdir $$<)) -o $$@ $$<
+	$(GLSL_VALIDATOR) $(GLSL_FLAGS) --variable-name $$(subst .,_,$$(notdir $$<)) -o $$@ $$<
 endef
 
 $(foreach ext, vert frag, $(eval $(call GLSL_EXT,$(ext))))
