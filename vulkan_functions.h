@@ -68,6 +68,7 @@
     X(vkFreeMemory) \
     X(vkMapMemory) \
     X(vkUnmapMemory) \
+    X(vkFlushMappedMemoryRanges) \
     X(vkCreateImage) \
     X(vkDestroyImage) \
     X(vkGetImageMemoryRequirements) \
@@ -92,6 +93,16 @@
     X(vkEndCommandBuffer) \
     X(vkQueueSubmit) \
     X(vkQueueWaitIdle) \
+    X(vkCreateDescriptorPool) \
+    X(vkAllocateDescriptorSets) \
+    X(vkUpdateDescriptorSets) \
+    X(vkCmdBeginRenderPass) \
+    X(vkCmdEndRenderPass) \
+    X(vkCmdBindPipeline) \
+    X(vkCmdBindVertexBuffers) \
+    X(vkCmdBindIndexBuffer) \
+    X(vkCmdBindDescriptorSets) \
+    X(vkCmdDrawIndexed) \
     X(vkCmdPipelineBarrier) \
     X(vkCmdCopyBuffer)
 
@@ -159,6 +170,7 @@ enum e_device_functions {
 #define vkFreeMemory                              ((PFN_vkFreeMemory)                              vk_device_functions[   id_vkFreeMemory])
 #define vkMapMemory                               ((PFN_vkMapMemory)                               vk_device_functions[   id_vkMapMemory])
 #define vkUnmapMemory                             ((PFN_vkUnmapMemory)                             vk_device_functions[   id_vkUnmapMemory])
+#define vkFlushMappedMemoryRanges                 ((PFN_vkFlushMappedMemoryRanges)                 vk_device_functions[   id_vkFlushMappedMemoryRanges])
 #define vkCreateImage                             ((PFN_vkCreateImage)                             vk_device_functions[   id_vkCreateImage])
 #define vkDestroyImage                            ((PFN_vkDestroyImage)                            vk_device_functions[   id_vkDestroyImage])
 #define vkGetImageMemoryRequirements              ((PFN_vkGetImageMemoryRequirements)              vk_device_functions[   id_vkGetImageMemoryRequirements])
@@ -183,5 +195,15 @@ enum e_device_functions {
 #define vkEndCommandBuffer                        ((PFN_vkEndCommandBuffer)                        vk_device_functions[   id_vkEndCommandBuffer])
 #define vkQueueSubmit                             ((PFN_vkQueueSubmit)                             vk_device_functions[   id_vkQueueSubmit])
 #define vkQueueWaitIdle                           ((PFN_vkQueueWaitIdle)                           vk_device_functions[   id_vkQueueWaitIdle])
+#define vkCreateDescriptorPool                    ((PFN_vkCreateDescriptorPool)                    vk_device_functions[   id_vkCreateDescriptorPool])
+#define vkAllocateDescriptorSets                  ((PFN_vkAllocateDescriptorSets)                  vk_device_functions[   id_vkAllocateDescriptorSets])
+#define vkUpdateDescriptorSets                    ((PFN_vkUpdateDescriptorSets)                    vk_device_functions[   id_vkUpdateDescriptorSets])
+#define vkCmdBeginRenderPass                      ((PFN_vkCmdBeginRenderPass)                      vk_device_functions[   id_vkCmdBeginRenderPass])
+#define vkCmdEndRenderPass                        ((PFN_vkCmdEndRenderPass)                        vk_device_functions[   id_vkCmdEndRenderPass])
+#define vkCmdBindPipeline                         ((PFN_vkCmdBindPipeline)                         vk_device_functions[   id_vkCmdBindPipeline])
+#define vkCmdBindVertexBuffers                    ((PFN_vkCmdBindVertexBuffers)                    vk_device_functions[   id_vkCmdBindVertexBuffers])
+#define vkCmdBindIndexBuffer                      ((PFN_vkCmdBindIndexBuffer)                      vk_device_functions[   id_vkCmdBindIndexBuffer])
+#define vkCmdBindDescriptorSets                   ((PFN_vkCmdBindDescriptorSets)                   vk_device_functions[   id_vkCmdBindDescriptorSets])
+#define vkCmdDrawIndexed                          ((PFN_vkCmdDrawIndexed)                          vk_device_functions[   id_vkCmdDrawIndexed])
 #define vkCmdPipelineBarrier                      ((PFN_vkCmdPipelineBarrier)                      vk_device_functions[   id_vkCmdPipelineBarrier])
 #define vkCmdCopyBuffer                           ((PFN_vkCmdCopyBuffer)                           vk_device_functions[   id_vkCmdCopyBuffer])

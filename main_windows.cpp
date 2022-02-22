@@ -84,6 +84,8 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT umsg, WPARAM wparam, LPARAM 
             return 0;
     }
 
+    idle_queue();
+
     PostQuitMessage(0);
     return 0;
 }

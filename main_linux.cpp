@@ -163,6 +163,8 @@ static int event_loop(Window* w)
             return 1;
     }
 
+    idle_queue();
+
     return 0;
 }
 

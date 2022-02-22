@@ -21,6 +21,7 @@ struct Window;
 PORTABLE bool init_vulkan(struct Window* w);
 PORTABLE bool create_surface(struct Window* w);
 PORTABLE bool draw_frame();
+PORTABLE void idle_queue();
 PORTABLE uint64_t get_current_time_ms();
 
 #ifdef NDEBUG
@@ -29,6 +30,10 @@ PORTABLE uint64_t get_current_time_ms();
 #   define CHK(call) check_vk_call(#call, __FILE__, __LINE__, (call))
 PORTABLE VkResult check_vk_call(const char* call_str, const char* file, int line, VkResult res);
 #endif
+
+enum eLimits {
+    max_swapchain_size = 3
+};
 
 enum eSemId {
     sem_acquire,
@@ -39,8 +44,8 @@ enum eSemId {
 extern VkSemaphore vk_sems[num_semaphores];
 
 enum eFenceId {
-    fen_acquire,
-    fen_copy_to_dev,
+    fen_submit,
+    fen_copy_to_dev = fen_submit + max_swapchain_size,
 
     num_fences
 };
@@ -53,11 +58,12 @@ class DeviceMemoryHeap {
     public:
         enum Location {
             device_memory,
-            host_memory
+            host_memory,
+            coherent_memory
         };
 
         DeviceMemoryHeap() = default;
-        DeviceMemoryHeap(Location loc) : host_visible(loc == host_memory) { }
+        DeviceMemoryHeap(Location loc) : memory_location(loc), host_visible(loc == host_memory) { }
         DeviceMemoryHeap(const DeviceMemoryHeap&) = delete;
         DeviceMemoryHeap& operator=(const DeviceMemoryHeap&) = delete;
 
@@ -75,12 +81,14 @@ class DeviceMemoryHeap {
 
         static uint32_t device_memory_type;
         static uint32_t host_memory_type;
+        static uint32_t coherent_memory_type;
 
-        VkDeviceMemory  memory         = VK_NULL_HANDLE;
-        VkDeviceSize    next_free_offs = 0;
-        VkDeviceSize    heap_size      = 0;
-        bool            host_visible   = false;
-        bool            mapped         = false;
+        VkDeviceMemory  memory          = VK_NULL_HANDLE;
+        VkDeviceSize    next_free_offs  = 0;
+        VkDeviceSize    heap_size       = 0;
+        Location        memory_location = device_memory;
+        bool            host_visible    = false;
+        bool            mapped          = false;
 
         friend class MapBase;
 };
@@ -178,16 +186,27 @@ class Image: public Resource {
 
         Image() = default;
 
-        VkImage get_image() const { return image; }
+        const VkImage& get_image() const { return image; }
         VkImageView get_view() const { return view; }
 
         bool allocate(DeviceMemoryHeap& heap, const ImageInfo& image_info);
         void destroy();
 
+        struct Transition {
+            VkPipelineStageFlags src_stage;
+            VkAccessFlags        src_access;
+            VkPipelineStageFlags dest_stage;
+            VkAccessFlags        dest_access;
+            VkImageLayout        new_layout;
+        };
+
+        void set_image_layout(VkCommandBuffer buf, const Transition& transition);
+
         // Used with swapchains
         void set_image(VkImage new_image) {
             assert(image == VK_NULL_HANDLE);
-            image = new_image;
+            image  = new_image;
+            aspect = VK_IMAGE_ASPECT_COLOR_BIT;
         }
         void set_view(VkImageView new_view) {
             assert(view == VK_NULL_HANDLE);
@@ -195,8 +214,9 @@ class Image: public Resource {
         }
 
     private:
-        VkImage     image = VK_NULL_HANDLE;
-        VkImageView view  = VK_NULL_HANDLE;
+        VkImage            image  = VK_NULL_HANDLE;
+        VkImageView        view   = VK_NULL_HANDLE;
+        VkImageAspectFlags aspect = VK_IMAGE_ASPECT_COLOR_BIT;
 };
 
 class Buffer: public Resource {
@@ -205,7 +225,7 @@ class Buffer: public Resource {
         Buffer(const Buffer&) = delete;
         Buffer& operator=(const Buffer&) = delete;
 
-        VkBuffer get_buffer() const { return buffer; }
+        const VkBuffer& get_buffer() const { return buffer; }
         VkBufferView get_view() const { return view; }
 
         bool allocate(DeviceMemoryHeap&  heap,

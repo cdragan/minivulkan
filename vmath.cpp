@@ -367,7 +367,7 @@ mat4 mat4::identity()
     return result;
 }
 
-mat4 projection(float aspect, float fov, float near_plane, float far_plane, float depth_bias)
+mat4 vmath::projection(float aspect, float fov, float near_plane, float far_plane, float depth_bias)
 {
     const float fov_tan = tan(radians(fov) * 0.5f);
     const float rrange  = rcp(float1{far_plane - near_plane}).get0();
@@ -385,7 +385,7 @@ mat4 projection(float aspect, float fov, float near_plane, float far_plane, floa
     return result;
 }
 
-mat4 operator*(const mat4& m1, const mat4& m2)
+mat4 vmath::operator*(const mat4& m1, const mat4& m2)
 {
     mat4 result;
 
@@ -404,7 +404,7 @@ mat4 operator*(const mat4& m1, const mat4& m2)
     return result;
 }
 
-vec4 operator*(const vec4& v, const mat4& mtx)
+vec4 vmath::operator*(const vec4& v, const mat4& mtx)
 {
     float4 dst = float4::load_zero();
 
@@ -418,7 +418,7 @@ vec4 operator*(const vec4& v, const mat4& mtx)
     return result;
 }
 
-vec4 operator*(const mat4& mtx, const vec4& v)
+vec4 vmath::operator*(const mat4& mtx, const vec4& v)
 {
     float4 dst = float4::load_zero();
 
@@ -435,7 +435,7 @@ vec4 operator*(const mat4& mtx, const vec4& v)
     return result;
 }
 
-mat4 transpose(const mat4& mtx)
+mat4 vmath::transpose(const mat4& mtx)
 {
     float4 row[4] = {
         float4::load4_aligned(&mtx.data[0]),
@@ -454,7 +454,7 @@ mat4 transpose(const mat4& mtx)
     return result;
 }
 
-mat4 translate(float x, float y, float z)
+mat4 vmath::translate(float x, float y, float z)
 {
     mat4 result = mat4::identity();
     result.a03 = x;
@@ -463,7 +463,7 @@ mat4 translate(float x, float y, float z)
     return result;
 }
 
-mat4 scale(float x, float y, float z)
+mat4 vmath::scale(float x, float y, float z)
 {
     mat4 result = mat4::identity();
     result.a00 = x;

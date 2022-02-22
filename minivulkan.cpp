@@ -4,6 +4,7 @@
 #include "minivulkan.h"
 #include "dprintf.h"
 #include "mstdc.h"
+#include "vmath.h"
 #include "vulkan_extensions.h"
 
 #ifdef _WIN32
@@ -240,8 +241,10 @@ static bool init_instance()
         return false;
 
 #ifndef NDEBUG
+    if (num_ext_props)
+        dprintf("instance extensions:\n");
     for (uint32_t i = 0; i < num_ext_props; i++)
-        dprintf("instance extension %s\n", ext_props[i].extensionName);
+        dprintf("    %s\n", ext_props[i].extensionName);
 #endif
 
     // List of extensions declared in vulkan_extensions.h
@@ -604,11 +607,15 @@ static bool create_device()
     return true;
 }
 
-uint32_t DeviceMemoryHeap::device_memory_type = ~0u;
-uint32_t DeviceMemoryHeap::host_memory_type   = ~0u;
+uint32_t DeviceMemoryHeap::device_memory_type   = ~0u;
+uint32_t DeviceMemoryHeap::host_memory_type     = ~0u;
+uint32_t DeviceMemoryHeap::coherent_memory_type = ~0u;
 
-static constexpr uint32_t alloc_heap_size = 64u * 1024u * 1024u;
+static constexpr uint32_t alloc_heap_size    = 64u * 1024u * 1024u;
+static constexpr uint32_t coherent_heap_size = 1u * 1024u * 1024u;
+
 static DeviceMemoryHeap vk_device_heap;
+static DeviceMemoryHeap vk_coherent_heap{DeviceMemoryHeap::coherent_memory};
 
 #ifndef NDEBUG
 static void str_append(char* buf, const char* str)
@@ -631,43 +638,67 @@ bool DeviceMemoryHeap::init_heap_info()
     VkPhysicalDeviceMemoryProperties mem_props;
     vkGetPhysicalDeviceMemoryProperties(vk_phys_dev, &mem_props);
 
-    int device_type_index = -1;
-    int host_type_index   = -1;
+    int device_type_index   = -1;
+    int host_type_index     = -1;
+    int coherent_type_index = -1;
+
+    VkDeviceSize device_heap_size = 0;
 
     dprintf("Memory heaps\n");
     for (int i = 0; i < static_cast<int>(mem_props.memoryTypeCount); i++) {
+
+        const VkMemoryType& memory_type    = mem_props.memoryTypes[i];
+        const uint32_t      property_flags = memory_type.propertyFlags;
+        const VkDeviceSize  heap_size      = mem_props.memoryHeaps[memory_type.heapIndex].size;
+
 #ifndef NDEBUG
         static char info[64];
         info[0] = 0;
-        if (mem_props.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)
+        if (property_flags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)
             str_append(info, "device,");
-        if (mem_props.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT)
+        if (property_flags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT)
             str_append(info, "host_visible,");
-        if (mem_props.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)
+        if (property_flags & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)
             str_append(info, "host_coherent,");
-        if (mem_props.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_HOST_CACHED_BIT)
+        if (property_flags & VK_MEMORY_PROPERTY_HOST_CACHED_BIT)
             str_append(info, "host_cached,");
         dprintf("    type %d, heap %u, flags 0x%x (%s)\n",
                 i,
-                mem_props.memoryTypes[i].heapIndex,
-                mem_props.memoryTypes[i].propertyFlags,
+                memory_type.heapIndex,
+                property_flags,
                 info);
 #endif
 
-        if (device_type_index == -1 &&
-            (mem_props.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT))
-            device_type_index = i;
+        if ((property_flags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) &&
+            (heap_size > device_heap_size)) {
 
-        const uint32_t host_flags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
-                                  | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
-                                  | VK_MEMORY_PROPERTY_HOST_CACHED_BIT;
-        if ((mem_props.memoryTypes[i].propertyFlags & host_flags) == host_flags) {
-            if (host_flags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) {
-                device_type_index = i;
-                host_type_index   = i;
-            }
-            else if (host_type_index == -1)
+            device_type_index = i;
+            device_heap_size  = heap_size;
+        }
+
+        constexpr uint32_t host_flags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
+                                      | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
+                                      | VK_MEMORY_PROPERTY_HOST_CACHED_BIT;
+        if ((property_flags & host_flags) == host_flags) {
+            if ((property_flags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) ||
+                (host_type_index == -1))
+
                 host_type_index = i;
+        }
+
+        constexpr uint32_t coherent_flags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
+                                          | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+        if ((property_flags & coherent_flags) == coherent_flags) {
+            if (property_flags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) {
+                if (heap_size >= device_heap_size) {
+                    device_type_index = i;
+                    device_heap_size  = heap_size;
+                }
+
+                coherent_type_index = i;
+            }
+            else if (coherent_type_index == -1)
+                coherent_type_index = i;
         }
     }
 
@@ -676,8 +707,9 @@ bool DeviceMemoryHeap::init_heap_info()
         return false;
     }
 
-    device_memory_type = (uint32_t)device_type_index;
-    host_memory_type   = (uint32_t)host_type_index;
+    device_memory_type   = (uint32_t)device_type_index;
+    host_memory_type     = (uint32_t)host_type_index;
+    coherent_memory_type = (uint32_t)coherent_type_index;
 
     return true;
 }
@@ -699,6 +731,10 @@ bool DeviceMemoryHeap::allocate_heap(VkDeviceSize size)
     if ( ! init_heap_info())
         return false;
 
+    const uint32_t memory_type = (memory_location == device_memory) ? device_memory_type :
+                                 (memory_location == host_memory)   ? host_memory_type   :
+                                                                      coherent_memory_type;
+
     size = mstd::align_up(size, VkDeviceSize(phys_props.properties.limits.minMemoryMapAlignment));
 
     static VkMemoryAllocateInfo alloc_info = {
@@ -708,16 +744,15 @@ bool DeviceMemoryHeap::allocate_heap(VkDeviceSize size)
         0   // memoryTypeIndex
     };
     alloc_info.allocationSize  = size;
-    alloc_info.memoryTypeIndex = host_visible ? host_memory_type : device_memory_type;
+    alloc_info.memoryTypeIndex = memory_type;
 
     const VkResult res = CHK(vkAllocateMemory(vk_dev, &alloc_info, nullptr, &memory));
     if (res != VK_SUCCESS)
         return false;
 
     heap_size = size;
-    dprintf("Allocated %s heap size 0x%" PRIx64 " bytes\n",
-            host_visible ? "host" : "device",
-            static_cast<uint64_t>(size));
+    dprintf("Allocated heap size 0x%" PRIx64 " bytes with memory type %u\n",
+            static_cast<uint64_t>(size), memory_type);
 
     return true;
 }
@@ -865,6 +900,7 @@ bool Image::allocate(DeviceMemoryHeap& heap, const ImageInfo& image_info)
     owning_heap = &heap;
     heap_offset = offset;
     bytes       = requirements.size;
+    aspect      = image_info.aspect;
 
     static VkImageViewCreateInfo view_create_info = {
         VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
@@ -907,6 +943,43 @@ void Image::destroy()
     owning_heap = nullptr;
     heap_offset = 0;
     bytes       = 0;
+}
+
+void Image::set_image_layout(VkCommandBuffer buf, const Transition& transition)
+{
+    static VkImageMemoryBarrier img_barrier = {
+        VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+        nullptr,
+        0,
+        VK_ACCESS_COLOR_ATTACHMENT_READ_BIT,
+        VK_IMAGE_LAYOUT_UNDEFINED,
+        VK_IMAGE_LAYOUT_UNDEFINED
+    };
+
+    img_barrier.oldLayout     = layout;
+    img_barrier.newLayout     = transition.new_layout;
+    img_barrier.srcAccessMask = transition.src_access;
+    img_barrier.dstAccessMask = transition.dest_access;
+
+    layout = transition.new_layout;
+
+    img_barrier.srcQueueFamilyIndex         = queue_create_info.queueFamilyIndex;
+    img_barrier.dstQueueFamilyIndex         = queue_create_info.queueFamilyIndex;
+    img_barrier.image                       = image;
+    img_barrier.subresourceRange.aspectMask = aspect;
+    img_barrier.subresourceRange.levelCount = 1;
+    img_barrier.subresourceRange.layerCount = 1;
+
+    vkCmdPipelineBarrier(buf,
+                         transition.src_stage,
+                         transition.dest_stage,
+                         0,
+                         0,
+                         nullptr,
+                         0,
+                         nullptr,
+                         1,
+                         &img_barrier);
 }
 
 bool Buffer::allocate(DeviceMemoryHeap&  heap,
@@ -1042,8 +1115,8 @@ static VkSurfaceCapabilitiesKHR vk_surface_caps;
 
 static VkSwapchainKHR vk_swapchain = VK_NULL_HANDLE;
 
-static Image            vk_swapchain_images[8];
-static Image            vk_depth_buffers[mstd::array_size(vk_swapchain_images)];
+static Image            vk_swapchain_images[max_swapchain_size];
+static Image            vk_depth_buffers[max_swapchain_size];
 static DeviceMemoryHeap depth_buffer_heap;
 static VkFormat         vk_depth_format = VK_FORMAT_UNDEFINED;
 
@@ -1058,8 +1131,7 @@ static bool allocate_depth_buffers(uint32_t num_depth_buffers)
     const uint32_t height = vk_surface_caps.currentExtent.height;
 
     static const VkFormat depth_formats[] = {
-        VK_FORMAT_D24_UNORM_S8_UINT,
-        VK_FORMAT_D32_SFLOAT
+        VK_FORMAT_D24_UNORM_S8_UINT
     };
     if ( ! find_optimal_tiling_format(depth_formats,
                                       mstd::array_size(depth_formats),
@@ -1082,7 +1154,7 @@ static bool allocate_depth_buffers(uint32_t num_depth_buffers)
             0, // height
             VK_FORMAT_UNDEFINED,
             1, // mip_levels
-            VK_IMAGE_ASPECT_DEPTH_BIT,
+            VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT,
             VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT
         };
         image_info.width  = width;
@@ -1206,8 +1278,8 @@ static bool create_render_pass()
             VK_ATTACHMENT_STORE_OP_STORE,
             VK_ATTACHMENT_LOAD_OP_DONT_CARE,
             VK_ATTACHMENT_STORE_OP_DONT_CARE,
-            VK_IMAGE_LAYOUT_GENERAL,
-            VK_IMAGE_LAYOUT_PRESENT_SRC_KHR
+            VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+            VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
         },
         {
             0, // flags
@@ -1217,8 +1289,8 @@ static bool create_render_pass()
             VK_ATTACHMENT_STORE_OP_DONT_CARE,
             VK_ATTACHMENT_LOAD_OP_DONT_CARE,
             VK_ATTACHMENT_STORE_OP_DONT_CARE,
-            VK_IMAGE_LAYOUT_GENERAL,
-            VK_IMAGE_LAYOUT_GENERAL
+            VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+            VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL
         }
     };
 
@@ -1270,32 +1342,41 @@ static bool create_render_pass()
     return res == VK_SUCCESS;
 }
 
-static VkFramebuffer vk_frame_buffer = VK_NULL_HANDLE;
+static VkFramebuffer vk_frame_buffers[max_swapchain_size];
 
 static bool create_frame_buffer()
 {
-    static VkImageView attachments[2];
+    for (uint32_t i = 0; i < mstd::array_size(vk_frame_buffers); i++) {
 
-    static VkFramebufferCreateInfo frame_buffer_info = {
-        VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
-        nullptr,
-        0,                  // flags
-        VK_NULL_HANDLE,     // renderPass
-        mstd::array_size(attachments),
-        attachments,
-        0,                  // width
-        0,                  // height
-        1                   // layers
-    };
-    frame_buffer_info.renderPass = vk_render_pass;
-    frame_buffer_info.width      = vk_surface_caps.currentExtent.width;
-    frame_buffer_info.height     = vk_surface_caps.currentExtent.height;
+        if ( ! vk_swapchain_images[i].get_image())
+            break;
 
-    attachments[0] = vk_swapchain_images[0].get_view();
-    attachments[1] = vk_depth_buffers[0].get_view();
+        static VkImageView attachments[2];
 
-    const VkResult res = CHK(vkCreateFramebuffer(vk_dev, &frame_buffer_info, nullptr, &vk_frame_buffer));
-    return res == VK_SUCCESS;
+        static VkFramebufferCreateInfo frame_buffer_info = {
+            VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
+            nullptr,
+            0,                  // flags
+            VK_NULL_HANDLE,     // renderPass
+            mstd::array_size(attachments),
+            attachments,
+            0,                  // width
+            0,                  // height
+            1                   // layers
+        };
+        frame_buffer_info.renderPass = vk_render_pass;
+        frame_buffer_info.width      = vk_surface_caps.currentExtent.width;
+        frame_buffer_info.height     = vk_surface_caps.currentExtent.height;
+
+        attachments[0] = vk_swapchain_images[i].get_view();
+        attachments[1] = vk_depth_buffers[i].get_view();
+
+        const VkResult res = CHK(vkCreateFramebuffer(vk_dev, &frame_buffer_info, nullptr, &vk_frame_buffers[i]));
+        if (res != VK_SUCCESS)
+            return false;
+    }
+
+    return true;
 }
 
 static VkPipelineLayout vk_gr_pipeline_layout = VK_NULL_HANDLE;
@@ -1345,6 +1426,8 @@ static bool load_shaders()
     return true;
 }
 
+static VkDescriptorSetLayout vk_desc_set_layout = VK_NULL_HANDLE;
+
 static bool create_pipeline_layouts()
 {
     static const VkDescriptorSetLayoutBinding create_binding = {
@@ -1363,8 +1446,7 @@ static bool create_pipeline_layouts()
         &create_binding
     };
 
-    static VkDescriptorSetLayout desc_set_layout;
-    VkResult res = CHK(vkCreateDescriptorSetLayout(vk_dev, &create_desc_set_layout, nullptr, &desc_set_layout));
+    VkResult res = CHK(vkCreateDescriptorSetLayout(vk_dev, &create_desc_set_layout, nullptr, &vk_desc_set_layout));
     if (res != VK_SUCCESS)
         return false;
 
@@ -1373,7 +1455,7 @@ static bool create_pipeline_layouts()
         nullptr,
         0,      // flags
         1,
-        &desc_set_layout,
+        &vk_desc_set_layout,
         0,      // pushConstantRangeCount
         nullptr // pPushConstantRanges
     };
@@ -1586,14 +1668,25 @@ static bool create_graphics_pipelines()
     return res == VK_SUCCESS;
 }
 
+void idle_queue()
+{
+    if (vk_queue) {
+        dprintf("idling queue\n");
+        CHK(vkQueueWaitIdle(vk_queue));
+    }
+}
+
 static bool update_resolution()
 {
     const VkResult res = CHK(vkQueueWaitIdle(vk_queue));
     if (res != VK_SUCCESS)
         return false;
 
-    vkDestroyFramebuffer(vk_dev, vk_frame_buffer, nullptr);
-    vk_frame_buffer = VK_NULL_HANDLE;
+    for (uint32_t i = 0; i < mstd::array_size(vk_frame_buffers); i++) {
+        if (vk_frame_buffers[i])
+            vkDestroyFramebuffer(vk_dev, vk_frame_buffers[i], nullptr);
+        vk_frame_buffers[i] = VK_NULL_HANDLE;
+    }
 
     if ( ! create_swapchain())
         return false;
@@ -1776,69 +1869,231 @@ static bool create_cube(Buffer* vertex_buffer, Buffer* index_buffer)
     return filler.wait_until_done();
 }
 
-static bool dummy_draw(uint32_t image_idx, uint64_t time_ms)
+static bool dummy_draw(uint32_t image_idx, uint64_t time_ms, VkFence queue_fence)
 {
     static Buffer vertex_buffer;
     static Buffer index_buffer;
+    VkResult      res;
 
     if ( ! vertex_buffer.allocated()) {
         if ( ! create_cube(&vertex_buffer, &index_buffer))
             return false;
     }
 
-    if (vk_swapchain_images[image_idx].layout == VK_IMAGE_LAYOUT_PRESENT_SRC_KHR)
-        return true;
+    // Allocate descriptor set
+    static VkDescriptorSet desc_set[max_swapchain_size] = { VK_NULL_HANDLE };
+    if ( ! desc_set[0]) {
+        static VkDescriptorPoolSize pool_sizes[] = {
+            {
+                VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,      // type
+                mstd::array_size(desc_set)              // descriptorCount
+            }
+        };
 
-    dprintf("dummy_draw for image %u at %" PRIu64 " ms\n", image_idx, time_ms);
+        static VkDescriptorPoolCreateInfo pool_create_info = {
+            VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+            nullptr,
+            0,                                      // flags
+            mstd::array_size(desc_set),             // maxSets
+            mstd::array_size(pool_sizes),
+            pool_sizes
+        };
 
-    const VkImage image = vk_swapchain_images[image_idx].get_image();
+        VkDescriptorPool desc_set_pool;
 
-    VkResult res;
+        res = CHK(vkCreateDescriptorPool(vk_dev, &pool_create_info, nullptr, &desc_set_pool));
+        if (res != VK_SUCCESS)
+            return false;
+
+        static VkDescriptorSetLayout       layouts[max_swapchain_size];
+        static VkDescriptorSetAllocateInfo alloc_info = {
+            VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+            nullptr,
+            VK_NULL_HANDLE,             // descriptorPool
+            mstd::array_size(layouts),  // descriptorSetCount
+            layouts                     // pSetLayouts
+        };
+
+        alloc_info.descriptorPool = desc_set_pool;
+
+        for (uint32_t i = 0; i < mstd::array_size(layouts); i++)
+            layouts[i] = vk_desc_set_layout;
+
+        res = CHK(vkAllocateDescriptorSets(vk_dev, &alloc_info, desc_set));
+        if (res != VK_SUCCESS)
+            return false;
+    }
+
+    // Create shader data
+    static Buffer shader_data;
+    struct UniformBuffer {
+        vmath::mat4 model_view_proj;
+        vmath::mat4 model_view;
+    };
+    static uint32_t     slot_size;
+    static Map<uint8_t> host_shader_data;
+    if ( ! shader_data.allocated()) {
+        slot_size = mstd::align_up(static_cast<uint32_t>(sizeof(UniformBuffer)),
+                                   static_cast<uint32_t>(phys_props.properties.limits.minUniformBufferOffsetAlignment));
+        const uint32_t total_size = slot_size * mstd::array_size(desc_set);
+        if ( ! shader_data.allocate(vk_coherent_heap, total_size, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT))
+            return false;
+
+        host_shader_data = Map<uint8_t>(&vk_coherent_heap, 0, total_size);
+    }
+
+    // Calculate matrices
+    const auto matrices = reinterpret_cast<UniformBuffer*>(&host_shader_data[slot_size * image_idx]);
+    matrices->model_view = vmath::scale(0.25f, 0.25f, 0.25f);
+    const vmath::mat4 proj = vmath::projection(
+            static_cast<float>(vk_surface_caps.currentExtent.width)     // aspect
+                / static_cast<float>(vk_surface_caps.currentExtent.height),
+            30.0f,  // fov
+            0.01f,  // near_plane
+            100.0f, // far_plane
+            0.0f);  // depth_bias
+    matrices->model_view_proj = matrices->model_view * proj;
+
+    // Send matrices to GPU
+    static VkMappedMemoryRange range = {
+        VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE,
+        nullptr,
+        VK_NULL_HANDLE,     // memory
+        0,                  // offset
+        0                   // size
+    };
+    range.memory = vk_coherent_heap.get_memory();
+    range.offset = slot_size * image_idx;
+    range.size   = slot_size;
+    res = CHK(vkFlushMappedMemoryRanges(vk_dev, 1, &range));
+    if (res != VK_SUCCESS)
+        return false;
+
+    // Update descriptor set
+    static VkDescriptorBufferInfo buffer_info = {
+        VK_NULL_HANDLE,     // buffer
+        0,                  // offset
+        0                   // range
+    };
+    buffer_info.buffer = shader_data.get_buffer();
+    buffer_info.offset = slot_size * image_idx;
+    buffer_info.range  = slot_size;
+    static VkWriteDescriptorSet write_desc_sets[] = {
+        {
+            VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+            nullptr,
+            VK_NULL_HANDLE,                     // dstSet
+            0,                                  // dstBinding
+            0,                                  // dstArrayElement
+            1,                                  // descriptorCount
+            VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,  // descriptorType
+            nullptr,                            // pImageInfo
+            &buffer_info,                       // pBufferInfo
+            nullptr                             // pTexelBufferView
+        }
+    };
+    write_desc_sets[0].dstSet = desc_set[image_idx];
+
+    vkUpdateDescriptorSets(vk_dev,
+                           mstd::array_size(write_desc_sets),
+                           write_desc_sets,
+                           0,           // descriptorCopyCount
+                           nullptr);    // pDescriptorCopies
+
+    // Render image
+    dprintf("dummy_draw image %u at %" PRIu64 " ms\n", image_idx, time_ms);
+
+    Image& image = vk_swapchain_images[image_idx];
 
     static CommandBuffers<2 * mstd::array_size(vk_swapchain_images)> bufs;
 
     if ( ! allocate_command_buffers_once(&bufs))
         return false;
 
-    static uint32_t         cmd_buf_idx = 0;
-    static VkCommandBuffer* cur_buf_ptr = nullptr;
-    cur_buf_ptr = &bufs.bufs[cmd_buf_idx];
-
-    const VkCommandBuffer buf = *cur_buf_ptr;
-    cmd_buf_idx = (cmd_buf_idx + 1) % bufs.size();
+    const VkCommandBuffer buf = bufs.bufs[image_idx];
 
     if ( ! reset_and_begin_command_buffer(buf))
         return false;
 
-    static VkImageMemoryBarrier img_barrier = {
-        VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
-        nullptr,
+    static const Image::Transition color_att_init = {
+        VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
         0,
-        VK_ACCESS_COLOR_ATTACHMENT_READ_BIT,
-        VK_IMAGE_LAYOUT_GENERAL,
-        VK_IMAGE_LAYOUT_PRESENT_SRC_KHR
+        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+        VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
+    };
+    image.set_image_layout(buf, color_att_init);
+
+    if (vk_depth_buffers[image_idx].layout != VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL) {
+        static const Image::Transition depth_init = {
+            VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+            0,
+            VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT,
+            VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT,
+            VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL
+        };
+
+        vk_depth_buffers[image_idx].set_image_layout(buf, depth_init);
+    }
+
+    static VkClearValue clear_values[2] = { };
+
+    static VkRenderPassBeginInfo render_pass_info = {
+        VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
+        nullptr,
+        VK_NULL_HANDLE,     // renderPass
+        VK_NULL_HANDLE,     // framebuffer
+        { },
+        mstd::array_size(clear_values),
+        clear_values
     };
 
-    img_barrier.oldLayout = vk_swapchain_images[image_idx].layout;
-    vk_swapchain_images[image_idx].layout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+    render_pass_info.renderPass        = vk_render_pass;
+    render_pass_info.framebuffer       = vk_frame_buffers[image_idx];
+    render_pass_info.renderArea.extent = vk_surface_caps.currentExtent;
 
-    img_barrier.srcQueueFamilyIndex         = queue_create_info.queueFamilyIndex;
-    img_barrier.dstQueueFamilyIndex         = queue_create_info.queueFamilyIndex;
-    img_barrier.image                       = image;
-    img_barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    img_barrier.subresourceRange.levelCount = 1;
-    img_barrier.subresourceRange.layerCount = 1;
+    vkCmdBeginRenderPass(buf, &render_pass_info, VK_SUBPASS_CONTENTS_INLINE);
 
-    vkCmdPipelineBarrier(buf,
-                         VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-                         VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-                         0,
-                         0,
-                         nullptr,
-                         0,
-                         nullptr,
-                         1,
-                         &img_barrier);
+    vkCmdBindPipeline(buf, VK_PIPELINE_BIND_POINT_GRAPHICS, vk_gr_pipeline);
+
+    static const VkDeviceSize vb_offset = 0;
+    vkCmdBindVertexBuffers(buf,
+                           0,   // firstBinding
+                           1,   // bindingCount
+                           &vertex_buffer.get_buffer(),
+                           &vb_offset);
+
+    vkCmdBindIndexBuffer(buf,
+                         index_buffer.get_buffer(),
+                         0,     // offset
+                         VK_INDEX_TYPE_UINT16);
+
+    vkCmdBindDescriptorSets(buf,
+                            VK_PIPELINE_BIND_POINT_GRAPHICS,
+                            vk_gr_pipeline_layout,
+                            0,          // firstSet
+                            1,          // descriptorSetCount
+                            &desc_set[image_idx],
+                            0,          // dynamicOffsetCount
+                            nullptr);   // pDynamicOffsets
+
+    vkCmdDrawIndexed(buf,
+                     6,     // indexCount
+                     1,     // instanceCount
+                     0,     // firstVertex
+                     0,     // vertexOffset
+                     0);    // firstInstance
+
+    vkCmdEndRenderPass(buf);
+
+    static const Image::Transition color_att_present = {
+        VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+        0,
+        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+        VK_ACCESS_COLOR_ATTACHMENT_READ_BIT,
+        VK_IMAGE_LAYOUT_PRESENT_SRC_KHR
+    };
+    image.set_image_layout(buf, color_att_present);
 
     res = CHK(vkEndCommandBuffer(buf));
     if (res != VK_SUCCESS)
@@ -1858,9 +2113,9 @@ static bool dummy_draw(uint32_t image_idx, uint64_t time_ms)
         &vk_sems[sem_acquire]   // pSignalSemaphores
     };
 
-    submit_info.pCommandBuffers = cur_buf_ptr;
+    submit_info.pCommandBuffers = &buf;
 
-    res = CHK(vkQueueSubmit(vk_queue, 1, &submit_info, VK_NULL_HANDLE));
+    res = CHK(vkQueueSubmit(vk_queue, 1, &submit_info, queue_fence));
     if (res != VK_SUCCESS)
         return false;
 
@@ -1888,6 +2143,9 @@ bool init_vulkan(Window* w)
         return false;
 
     if ( ! vk_device_heap.allocate_heap(alloc_heap_size))
+        return false;
+
+    if ( ! vk_coherent_heap.allocate_heap(coherent_heap_size))
         return false;
 
     if ( ! create_semaphores())
@@ -1919,14 +2177,8 @@ bool init_vulkan(Window* w)
 
 bool draw_frame()
 {
-    static uint64_t frame_idx = 0;
-    uint32_t        image_idx;
-    VkResult        res;
-
-    if (frame_idx++) {
-        if ( ! wait_and_reset_fence(fen_acquire))
-            return false;
-    }
+    uint32_t image_idx;
+    VkResult res;
 
     for (;;) {
 
@@ -1934,10 +2186,12 @@ bool draw_frame()
                                         vk_swapchain,
                                         1'000'000'000,
                                         vk_sems[sem_acquire],
-                                        vk_fens[fen_acquire],
+                                        VK_NULL_HANDLE,
                                         &image_idx));
-        if (res == VK_SUCCESS || res == VK_SUBOPTIMAL_KHR)
+        if (res == VK_SUCCESS || res == VK_SUBOPTIMAL_KHR) {
+            assert(image_idx < max_swapchain_size);
             break;
+        }
 
         if (res != VK_ERROR_OUT_OF_DATE_KHR)
             return false;
@@ -1946,16 +2200,23 @@ bool draw_frame()
             return false;
     }
 
+    const eFenceId fen_queue = static_cast<eFenceId>(fen_submit + image_idx);
+    static bool    fence_set[max_swapchain_size];
+    if (fence_set[image_idx]) {
+        if ( ! wait_and_reset_fence(fen_queue))
+            return false;
+    }
+
     const uint64_t  cur_abs_time  = get_current_time_ms();
     static uint64_t base_abs_time = 0;
     if ( ! base_abs_time)
         base_abs_time = cur_abs_time;
 
-    // TODO draw
-    if ( ! dummy_draw(image_idx, cur_abs_time - base_abs_time))
+    if ( ! dummy_draw(image_idx, cur_abs_time - base_abs_time, vk_fens[fen_queue]))
         return false;
+    fence_set[image_idx] = true;
 
-    dprintf("present frame %" PRIu64 " image %u\n", frame_idx - 1, image_idx);
+    dprintf("present image %u\n", image_idx);
 
     static VkPresentInfoKHR present_info = {
         VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
@@ -1972,14 +2233,8 @@ bool draw_frame()
 
     res = CHK(vkQueuePresentKHR(vk_queue, &present_info));
 
-    if (res == VK_SUBOPTIMAL_KHR || res == VK_ERROR_OUT_OF_DATE_KHR) {
-        if ( ! update_resolution())
-            return false;
-        res = VK_SUCCESS;
-    }
+    if (res == VK_SUBOPTIMAL_KHR || res == VK_ERROR_OUT_OF_DATE_KHR)
+        return update_resolution();
 
-    if (res != VK_SUCCESS)
-        return false;
-
-    return true;
+    return res == VK_SUCCESS;
 }

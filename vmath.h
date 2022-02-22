@@ -378,13 +378,13 @@ struct mat4 {
     explicit mat4(const quat& q);
     void set_identity();
     static mat4 identity();
-    static mat4 projection(float aspect, float fov, float near_plane, float far_plane, float depth_bias);
 };
 
 mat4 operator*(const mat4& m1, const mat4& m2);
 vec4 operator*(const vec4& v, const mat4& mtx);
 vec4 operator*(const mat4& mtx, const vec4& v);
 mat4 transpose(const mat4& mtx);
+mat4 projection(float aspect, float fov, float near_plane, float far_plane, float depth_bias);
 mat4 translate(float x, float y, float z);
 mat4 scale(float x, float y, float z);
 
