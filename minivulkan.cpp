@@ -1583,7 +1583,7 @@ static bool create_graphics_pipelines()
         VK_FALSE,   // depthClampEnable
         VK_FALSE,   // rasterizerDiscardEnable
         VK_POLYGON_MODE_FILL,
-        VK_CULL_MODE_BACK_BIT,
+        VK_CULL_MODE_NONE, //VK_CULL_MODE_BACK_BIT,
         VK_FRONT_FACE_COUNTER_CLOCKWISE,
         VK_FALSE,   // depthBiasEnable
         0,          // depthBiasConstantFactor
@@ -1927,8 +1927,10 @@ static bool dummy_draw(uint32_t image_idx, uint64_t time_ms, VkFence queue_fence
     // Create shader data
     static Buffer shader_data;
     struct UniformBuffer {
-        vmath::mat4 model_view_proj;
-        vmath::mat4 model_view;
+        vmath::mat4   model_view_proj;
+        vmath::mat4   model_view;
+        vmath::vec<4> color;
+        vmath::vec<4> lights[1];
     };
     static uint32_t     slot_size;
     static Map<uint8_t> host_shader_data;
@@ -1943,8 +1945,8 @@ static bool dummy_draw(uint32_t image_idx, uint64_t time_ms, VkFence queue_fence
     }
 
     // Calculate matrices
-    const auto matrices = reinterpret_cast<UniformBuffer*>(&host_shader_data[slot_size * image_idx]);
-    matrices->model_view = vmath::scale(0.25f, 0.25f, 0.25f);
+    const auto uniform_data = reinterpret_cast<UniformBuffer*>(&host_shader_data[slot_size * image_idx]);
+    uniform_data->model_view = vmath::translate(0.0f, 0.0f, 10.0f);
     const vmath::mat4 proj = vmath::projection(
             static_cast<float>(vk_surface_caps.currentExtent.width)     // aspect
                 / static_cast<float>(vk_surface_caps.currentExtent.height),
@@ -1952,7 +1954,9 @@ static bool dummy_draw(uint32_t image_idx, uint64_t time_ms, VkFence queue_fence
             0.01f,  // near_plane
             100.0f, // far_plane
             0.0f);  // depth_bias
-    matrices->model_view_proj = matrices->model_view * proj;
+    uniform_data->model_view_proj = uniform_data->model_view * proj;
+    uniform_data->color           = vmath::vec<4>(0.7f, 0.1f, 0.1f, 1.0f);
+    uniform_data->lights[0]       = vmath::vec<4>(10.0f, 10.0f, 10.0f, 1.0f);
 
     // Send matrices to GPU
     static VkMappedMemoryRange range = {
