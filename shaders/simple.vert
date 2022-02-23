@@ -17,7 +17,7 @@ layout(set = 0, binding = 0) uniform data
 
 void main()
 {
-    gl_Position = model_view_proj * vec4(pos, 1);
-    out_pos     = (model_view * vec4(pos, 1)).xyz;
-    out_normal  = mat3(model_view) * normal; // assume uniform scaling, so no inverse transpose
+    gl_Position = vec4(pos, 1) * model_view_proj;
+    out_pos     = (vec4(pos, 1) * model_view).xyz;
+    out_normal  = normal * mat3(model_view); // assume uniform scaling, so no inverse transpose
 }

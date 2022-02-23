@@ -137,7 +137,7 @@ struct vec<3> {
         : x(ptr[0]), y(ptr[1]), z(ptr[2]) { }
 
     constexpr explicit vec(const vec2& v)
-        : x(v.x), y(v.y), z(1) { }
+        : x(v.x), y(v.y), z(0) { }
 
     constexpr explicit vec(const vec2& v, float az)
         : x(v.x), y(v.y), z(az) { }
@@ -346,7 +346,8 @@ struct mat3 {
     union {
         struct {
             alignas(4 * sizeof(float))
-            float a00, a10, a20;
+            float a00;
+            float a10, a20;
             float a01, a11, a21;
             float a02, a12, a22;
         };
@@ -364,7 +365,8 @@ struct mat4 {
     union {
         struct {
             alignas(4 * sizeof(float))
-            float a00, a10, a20, a30;
+            float a00;
+            float a10, a20, a30;
             float a01, a11, a21, a31;
             float a02, a12, a22, a32;
             float a03, a13, a23, a33;

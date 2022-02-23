@@ -15,3 +15,9 @@ esac
 echo "Using $JOBS jobs"
 
 make -j $JOBS -k
+
+make clean
+make -j $JOBS debug=1
+
+make clean
+make -j $JOBS debug=1 stdlib=1 test

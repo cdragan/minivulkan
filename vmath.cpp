@@ -85,8 +85,7 @@ vec3& vec3::operator*=(const float c)
 
 vec3& vec3::operator/=(const float c)
 {
-    const float1 rcp_c  = rcp(float1{c});
-    const float4 result = float4::load4_aligned(data) * spread4(rcp_c);
+    const float4 result = float4::load4_aligned(data) / spread4(c);
     result.store3(data);
     return *this;
 }
@@ -100,7 +99,7 @@ vec3& vec3::operator*=(const vec3& v)
 
 vec3& vec3::operator/=(const vec3& v)
 {
-    const float4 result = float4::load4_aligned(data) * rcp(float4::load4_aligned(v.data));
+    const float4 result = float4::load4_aligned(data) / float4::load4_aligned(v.data);
     result.store3(data);
     return *this;
 }
@@ -128,8 +127,7 @@ vec4& vec4::operator*=(const float c)
 
 vec4& vec4::operator/=(const float c)
 {
-    const float1 rcp_c  = rcp(float1{c});
-    const float4 result = float4::load4_aligned(data) * spread4(rcp_c);
+    const float4 result = float4::load4_aligned(data) / spread4(c);
     result.store4_aligned(data);
     return *this;
 }
@@ -143,19 +141,19 @@ vec4& vec4::operator*=(const vec4& v)
 
 vec4& vec4::operator/=(const vec4& v)
 {
-    const float4 result = float4::load4_aligned(data) * rcp(float4::load4_aligned(v.data));
+    const float4 result = float4::load4_aligned(data) / float4::load4_aligned(v.data);
     result.store4_aligned(data);
     return *this;
 }
 
 bool vec4::operator==(const vec4& v) const
 {
-    return ! (float4::load4_aligned(data) == float4::load4_aligned(v.data)).movemask();
+    return (float4::load4_aligned(data) == float4::load4_aligned(v.data)).movemask() == 0b1111;
 }
 
 bool vec4::operator!=(const vec4& v) const
 {
-    return ! (float4::load4_aligned(data) != float4::load4_aligned(v.data)).movemask();
+    return (float4::load4_aligned(data) == float4::load4_aligned(v.data)).movemask() != 0b1111;
 }
 
 vec4 vec4::operator-() const
@@ -239,12 +237,12 @@ quat& quat::operator*=(const quat& q)
 
 bool quat::operator==(const quat& q) const
 {
-    return ! (float4::load4_aligned(data) == float4::load4_aligned(q.data)).movemask();
+    return (float4::load4_aligned(data) == float4::load4_aligned(q.data)).movemask() == 0b1111;
 }
 
 bool quat::operator!=(const quat& q) const
 {
-    return ! (float4::load4_aligned(data) != float4::load4_aligned(q.data)).movemask();
+    return (float4::load4_aligned(data) == float4::load4_aligned(q.data)).movemask() != 0b1111;
 }
 
 quat quat::operator-() const
@@ -377,7 +375,7 @@ mat4 vmath::projection(float aspect, float fov, float near_plane, float far_plan
     mstd::mem_zero(result.data, sizeof(result.data));
 
     result.a00 = rcp(float1{aspect * fov_tan}).get0();
-    result.a11 = -rcp(float1{fov_tan}).get0();
+    result.a11 = rcp(float1{fov_tan}).get0();
     result.a22 = depth_bias - near_plane * rrange;
     result.a32 = (far_plane * near_plane) * rrange;
     result.a23 = 1;
@@ -391,14 +389,16 @@ mat4 vmath::operator*(const mat4& m1, const mat4& m2)
 
     for (unsigned row_offs = 0; row_offs < 16; ) {
 
+        float* const dest = &result.data[row_offs];
+
         float4 dst_row = float4::load_zero();
 
         for (unsigned col_offs = 0; col_offs < 16; col_offs += 4) {
-            const float c = m1.data[row_offs++];
-            dst_row += float4{c, c, c, c} * float4::load4_aligned(&m2.data[col_offs]);
+            const float c = m2.data[row_offs++];
+            dst_row += float4{c, c, c, c} * float4::load4_aligned(&m1.data[col_offs]);
         }
 
-        dst_row.store4_aligned(&result.data[row_offs]);
+        dst_row.store4_aligned(dest);
     }
 
     return result;
@@ -410,7 +410,10 @@ vec4 vmath::operator*(const vec4& v, const mat4& mtx)
 
     for (unsigned row = 0; row < 4; row++) {
         const float c = v.data[row];
-        dst += float4{c, c, c, c} * float4::load4_aligned(&mtx.data[row * 4]);
+        dst += float4{c, c, c, c} * float4{mtx.data[row],
+                                           mtx.data[row + 4],
+                                           mtx.data[row + 8],
+                                           mtx.data[row + 12]};
     }
 
     vec4 result;
@@ -424,10 +427,7 @@ vec4 vmath::operator*(const mat4& mtx, const vec4& v)
 
     for (unsigned col = 0; col < 4; col++) {
         const float c = v.data[col];
-        dst += float4{c, c, c, c} * float4{mtx.data[col],
-                                           mtx.data[col + 4],
-                                           mtx.data[col + 8],
-                                           mtx.data[col + 12]};
+        dst += float4{c, c, c, c} * float4::load4_aligned(&mtx.data[col * 4]);
     }
 
     vec4 result;
@@ -457,9 +457,9 @@ mat4 vmath::transpose(const mat4& mtx)
 mat4 vmath::translate(float x, float y, float z)
 {
     mat4 result = mat4::identity();
-    result.a03 = x;
-    result.a13 = y;
-    result.a23 = z;
+    result.a30 = x;
+    result.a31 = y;
+    result.a32 = z;
     return result;
 }
 

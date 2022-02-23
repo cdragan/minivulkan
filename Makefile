@@ -33,6 +33,10 @@ ifeq ($(UNAME), Windows)
     endif
 endif
 
+vmath_unit_src_files += mstdc.cpp
+vmath_unit_src_files += vmath.cpp
+vmath_unit_src_files += vmath_unit.cpp
+
 ##############################################################################
 # Shaders
 
@@ -176,16 +180,18 @@ endif
 
 exe_name = minivulkan
 
-exe = $(out_dir)/$(exe_name)
+ifeq ($(UNAME), Windows)
+    exe_suffix = .exe
+else
+    exe_suffix =
+endif
+
+exe = $(out_dir)/$(exe_name)$(exe_suffix)
 
 ifeq ($(UNAME), Darwin)
     macos_app_dir = $(out_dir)/$(exe_name).app/Contents/MacOS
 
     exe = $(macos_app_dir)/$(exe_name)
-endif
-
-ifeq ($(UNAME), Windows)
-    exe = $(out_dir)/$(exe_name).exe
 endif
 
 ##############################################################################
@@ -201,9 +207,13 @@ asm: $(addprefix $(out_dir)/,$(addsuffix .$(asm_suffix),$(notdir $(filter %.cpp,
 $(out_dir):
 	mkdir -p $@
 
-$(exe): $(call OBJ_FROM_SRC, $(src_files))
-	$(LINK) $(call LINKER_OUTPUT,$@) $^ $(LDFLAGS)
-	$(STRIP) $@
+define LINK_RULE
+$1: $$(call OBJ_FROM_SRC, $2)
+	$$(LINK) $$(call LINKER_OUTPUT,$$@) $$^ $$(LDFLAGS)
+	$$(STRIP) $$@
+endef
+
+$(eval $(call LINK_RULE,$(exe),$(src_files)))
 
 ifeq ($(UNAME), Darwin)
 $(macos_app_dir): | $(out_dir)
@@ -244,6 +254,11 @@ $(foreach ext, vert frag, $(eval $(call GLSL_EXT,$(ext))))
 
 $(call OBJ_FROM_SRC, minivulkan.cpp) $(out_dir)/minivulkan.cpp.$(asm_suffix): $(addprefix $(out_dir)/,$(addsuffix .h,$(shader_files)))
 $(call OBJ_FROM_SRC, minivulkan.cpp) $(out_dir)/minivulkan.cpp.$(asm_suffix): CFLAGS += -I$(out_dir)/shaders
+
+$(eval $(call LINK_RULE,$(out_dir)/vmath_unit,$(vmath_unit_src_files)))
+
+test: $(out_dir)/vmath_unit
+	$(out_dir)/vmath_unit
 
 dep_files = $(addprefix $(out_dir)/, $(addsuffix .d, $(basename $(notdir $(src_files)))))
 
