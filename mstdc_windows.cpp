@@ -36,6 +36,11 @@ extern "C" {
         return dest_ptr;
     }
 
+    int _atexit(void (__cdecl *func )(void))
+    {
+        return 0;
+    }
+
 #ifndef NDEBUG
     void _wassert(const wchar_t* message, const wchar_t* filename, unsigned line)
     {
