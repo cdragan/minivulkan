@@ -183,10 +183,14 @@ uint64_t get_current_time_ms()
 
     - (void)applicationDidFinishLaunching: (NSNotification *)notification
     {
+        const bool full_screen = true;
+
         NSRect screen_frame = [[NSScreen mainScreen] frame];
         NSRect frame_rect   = NSMakeRect(0, 0,
                                          screen_frame.size.width,
                                          screen_frame.size.height);
+        if ( ! full_screen)
+            frame_rect = NSMakeRect(0, 0, 800, 600);
 
         NSWindow *window = [[NSWindow alloc]
             initWithContentRect: frame_rect
@@ -207,10 +211,14 @@ uint64_t get_current_time_ms()
         ];
         window.contentViewController = view_ctrl;
 
-        [window setBackgroundColor: NSColor.blackColor];
-        [window setCollectionBehavior: NSWindowCollectionBehaviorFullScreenPrimary];
-        [window setFrame: screen_frame display: YES];
-        [window toggleFullScreen: self];
+        if (full_screen) {
+            [window setBackgroundColor: NSColor.blackColor];
+            [window setCollectionBehavior: NSWindowCollectionBehaviorFullScreenPrimary];
+            [window setFrame: screen_frame display: YES];
+            [window toggleFullScreen: self];
+        }
+        else
+            [NSApp activateIgnoringOtherApps: YES];
     }
 
     - (void)applicationWillTerminate: (NSNotification *)notification
