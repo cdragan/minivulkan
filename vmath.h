@@ -314,7 +314,7 @@ struct quat {
     constexpr explicit quat(const float* ptr)
         : x(ptr[0]), y(ptr[1]), z(ptr[2]), w(ptr[3]) { }
 
-    quat(const vec3& axis, float angle);
+    quat(const vec3& axis, float angle_radians);
     explicit quat(const vec3& euler_xyz);
     explicit quat(const mat3& rot_mtx);
     explicit quat(const mat4& rot_mtx);
@@ -386,7 +386,7 @@ mat4 operator*(const mat4& m1, const mat4& m2);
 vec4 operator*(const vec4& v, const mat4& mtx);
 vec4 operator*(const mat4& mtx, const vec4& v);
 mat4 transpose(const mat4& mtx);
-mat4 projection(float aspect, float fov, float near_plane, float far_plane, float depth_bias);
+mat4 projection(float aspect, float fov_radians, float near_plane, float far_plane, float depth_bias);
 mat4 translate(float x, float y, float z);
 mat4 scale(float x, float y, float z);
 

@@ -17,6 +17,12 @@ namespace {
 
     sin_cos_result4 sincos(float4 radians)
     {
+        const float4 pi4    = spread4(pi);
+        const float4 pi_2_4 = spread4(pi_2);
+        radians += pi4;
+        const float4 int_div = floor(radians / pi_2_4) * pi_2_4;
+        radians = radians - int_div - pi4;
+
         sin_cos_result4 result;
 
         const float4 pi_sq4  = spread4(pi_squared);
@@ -44,7 +50,9 @@ namespace {
 
         return result;
     }
+}
 
+namespace vmath {
     float tan(float radians)
     {
         // From Bhaskara I's approximation:
@@ -182,13 +190,13 @@ float vmath::dot_product<4>(const vec<4>& v1, const vec<4>& v2)
     return dot_product4(float4::load4_aligned(v1.data), float4::load4_aligned(v2.data)).get0();
 }
 
-quat::quat(const vec3& axis, float angle)
+quat::quat(const vec3& axis, float angle_radians)
 {
     const float4 axis_f4 = float4::load4_aligned(axis.data);
     const float4 sq_len  = dot_product3(axis_f4, axis_f4);
     if (sq_len.get0() > small) {
         const float          rcp_len = rsqrt(float1{sq_len}).get0();
-        const sin_cos_result sc_half = sincos(angle * 0.5f);
+        const sin_cos_result sc_half = sincos(angle_radians * 0.5f);
         const float          scale   = sc_half.sin * rcp_len;
         (axis_f4 * float4{scale, scale, scale, scale}).store4_aligned(data);
         w = sc_half.cos;
@@ -365,9 +373,9 @@ mat4 mat4::identity()
     return result;
 }
 
-mat4 vmath::projection(float aspect, float fov, float near_plane, float far_plane, float depth_bias)
+mat4 vmath::projection(float aspect, float fov_radians, float near_plane, float far_plane, float depth_bias)
 {
-    const float fov_tan = tan(radians(fov) * 0.5f);
+    const float fov_tan = vmath::tan(fov_radians * 0.5f);
     const float rrange  = rcp(float1{far_plane - near_plane}).get0();
 
     mat4 result;

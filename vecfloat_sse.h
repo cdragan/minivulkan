@@ -198,7 +198,8 @@ struct float4: public float4_base {
         : float4_base(__m128{a, b, c, d}) { }
 
     static float4 load_zero() {
-        return float4{_mm_xor_ps(_mm_undefined_ps(), _mm_undefined_ps())};
+        const __m128 some = _mm_undefined_ps();
+        return float4{_mm_xor_ps(some, some)};
     }
 
     static float4 load2(const float* ptr) {
@@ -372,6 +373,16 @@ inline float4 min(const float4& v1, const float4& v2)
 inline float4 max(const float4& v1, const float4& v2)
 {
     return float4{_mm_max_ps(v1, v2)};
+}
+
+inline float4 floor(const float4& v)
+{
+    return float4{_mm_floor_ps(v)};
+}
+
+inline float4 ceil(const float4& v)
+{
+    return float4{_mm_ceil_ps(v)};
 }
 
 inline float4 unpacklo(const float4& v1, const float4& v2)

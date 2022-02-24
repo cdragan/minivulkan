@@ -948,7 +948,7 @@ int main()
 
     // projection
     {
-        const vmath::mat4 m = vmath::projection(1, 90, 1, 5, 0);
+        const vmath::mat4 m = vmath::projection(1, vmath::pi_half, 1, 5, 0);
 
         TEST(is_near(m.a00, 1));
         TEST(m.a01 == 0);
