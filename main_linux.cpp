@@ -96,16 +96,21 @@ static bool create_window(Window* w)
 
     w->window = xcb_generate_id(w->connection);
 
-    uint32_t values[2] = {
+    static uint32_t values[2] = {
         0,
         XCB_EVENT_MASK_BUTTON_PRESS | XCB_EVENT_MASK_KEY_PRESS
     };
+
+    constexpr bool full_screen = true;
+
+    constexpr uint16_t width  = full_screen ? 1 : 800;
+    constexpr uint16_t height = full_screen ? 1 : 600;
 
     xcb_create_window(w->connection,
                       XCB_COPY_FROM_PARENT,
                       w->window,
                       screen->root,
-                      0, 0, 1, 1,
+                      0, 0, width, height,
                       0,
                       XCB_WINDOW_CLASS_INPUT_OUTPUT,
                       XCB_COPY_FROM_PARENT,
@@ -123,7 +128,8 @@ static bool create_window(Window* w)
                         sizeof(title) - 1,
                         title);
 
-    set_fullscreen(w->connection, w->window);
+    if (full_screen)
+        set_fullscreen(w->connection, w->window);
 
     xcb_map_window(w->connection, w->window);
 
