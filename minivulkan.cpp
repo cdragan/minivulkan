@@ -1620,7 +1620,15 @@ static bool create_graphics_pipelines()
     };
 
     static VkPipelineColorBlendAttachmentState color_blend_att = {
-        VK_FALSE,   // blendEnable
+        VK_FALSE,               // blendEnable
+        VK_BLEND_FACTOR_ZERO,   // srcColorBlendFactor
+        VK_BLEND_FACTOR_ZERO,   // dstColorBlendFactor
+        VK_BLEND_OP_ADD,        // colorBlendOp
+        VK_BLEND_FACTOR_ZERO,   // srcAlphaBlendFactor
+        VK_BLEND_FACTOR_ZERO,   // dstAlphaBlendFactor
+        VK_BLEND_OP_ADD,        // alphaBlendOp
+                                // colorWriteMask
+        VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT
     };
 
     static VkPipelineColorBlendStateCreateInfo color_blend_state = {
@@ -1869,6 +1877,24 @@ static bool create_cube(Buffer* vertex_buffer, Buffer* index_buffer)
     return filler.wait_until_done();
 }
 
+static constexpr VkClearValue make_clear_color(float r, float g, float b, float a)
+{
+    VkClearValue value = { };
+    value.color.float32[0] = r;
+    value.color.float32[1] = g;
+    value.color.float32[2] = b;
+    value.color.float32[3] = a;
+    return value;
+}
+
+static constexpr VkClearValue make_clear_depth(float depth, uint32_t stencil)
+{
+    VkClearValue value = { };
+    value.depthStencil.depth   = depth;
+    value.depthStencil.stencil = stencil;
+    return value;
+}
+
 static bool dummy_draw(uint32_t image_idx, uint64_t time_ms, VkFence queue_fence)
 {
     static Buffer vertex_buffer;
@@ -1946,15 +1972,18 @@ static bool dummy_draw(uint32_t image_idx, uint64_t time_ms, VkFence queue_fence
 
     // Calculate matrices
     const auto uniform_data = reinterpret_cast<UniformBuffer*>(&host_shader_data[slot_size * image_idx]);
-    uniform_data->model_view = vmath::translate(0.0f, 0.0f, 10.0f);
+    const float angle = vmath::radians(static_cast<float>(time_ms) * 45.0f / 1000.0f);
+    const vmath::mat4 model_view = vmath::mat4(vmath::quat(vmath::vec3(0, 0, 1), angle))
+                                 * vmath::translate(0.0f, 0.0f, 10.0f);
     const vmath::mat4 proj = vmath::projection(
             static_cast<float>(vk_surface_caps.currentExtent.width)     // aspect
                 / static_cast<float>(vk_surface_caps.currentExtent.height),
-            30.0f,  // fov
-            0.01f,  // near_plane
-            100.0f, // far_plane
-            0.0f);  // depth_bias
-    uniform_data->model_view_proj = uniform_data->model_view * proj;
+            vmath::radians(30.0f),  // fov
+            0.01f,                  // near_plane
+            100.0f,                 // far_plane
+            0.0f);                  // depth_bias
+    uniform_data->model_view      = model_view;
+    uniform_data->model_view_proj = model_view * proj;
     uniform_data->color           = vmath::vec<4>(0.7f, 0.1f, 0.1f, 1.0f);
     uniform_data->lights[0]       = vmath::vec<4>(10.0f, 10.0f, 10.0f, 1.0f);
 
@@ -2040,7 +2069,10 @@ static bool dummy_draw(uint32_t image_idx, uint64_t time_ms, VkFence queue_fence
         vk_depth_buffers[image_idx].set_image_layout(buf, depth_init);
     }
 
-    static VkClearValue clear_values[2] = { };
+    static const VkClearValue clear_values[2] = {
+        make_clear_color(0, 0, 0, 0),
+        make_clear_depth(1.0f, 0)
+    };
 
     static VkRenderPassBeginInfo render_pass_info = {
         VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
