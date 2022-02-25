@@ -3,6 +3,7 @@
 
 #include "vmath.h"
 #include "mstdc.h"
+#include "vecfloat.h"
 #include <math.h>
 #include <stdio.h>
 
@@ -10,9 +11,9 @@
 
 static int exit_code = 0;
 
-static bool is_near(float value1, float value2)
+static bool is_near(float value1, float value2, float max_error = 0.0025f)
 {
-    return fabs(value1 - value2) < 0.01f;
+    return fabs(value1 - value2) < max_error;
 }
 
 static void failed(const char* test, const char* file, int line)
@@ -24,12 +25,98 @@ static void failed(const char* test, const char* file, int line)
 
 int main()
 {
-    TEST(is_near(vmath::pi,          3.14f));
-    TEST(is_near(vmath::pi_half,     1.57f));
-    TEST(is_near(vmath::pi_squared,  9.86f));
-    TEST(is_near(vmath::pi_2,        6.28f));
-    TEST(is_near(vmath::radians(60), 1.04f));
-    TEST(is_near(vmath::degrees(1),  57.29f));
+    //////////////////////////////////////////////////////////////////////////////////////////
+    // constants
+
+    TEST(is_near(vmath::pi,          3.141592f));
+    TEST(is_near(vmath::pi_half,     1.570796f));
+    TEST(is_near(vmath::pi_squared,  9.869604f));
+    TEST(is_near(vmath::two_pi,      6.283185f));
+    TEST(is_near(vmath::radians(60), 1.047197f));
+    TEST(is_near(vmath::degrees(1),  57.295779f));
+
+    //////////////////////////////////////////////////////////////////////////////////////////
+    // sincos
+
+    {
+        const vmath::sin_cos_result sc = vmath::sincos(0);
+        TEST(sc.sin == 0);
+        TEST(sc.cos == 1);
+    }
+
+    for (float radians = 0.5f; radians < 7.0f; radians += 0.5f) {
+
+        const float exp_sin = sinf(radians);
+        const float exp_cos = cosf(radians);
+
+        const vmath::sin_cos_result sc = vmath::sincos(radians);
+
+        if ( ! is_near(sc.cos, exp_cos)) {
+            fprintf(stderr, "Error: cos %f is %f but should be %f\n",
+                    static_cast<double>(radians),
+                    static_cast<double>(sc.cos),
+                    static_cast<double>(exp_cos));
+            exit_code = 1;
+        }
+
+        if ( ! is_near(sc.sin, exp_sin)) {
+            fprintf(stderr, "Error: sin %f is %f but should be %f\n",
+                    static_cast<double>(radians),
+                    static_cast<double>(sc.sin),
+                    static_cast<double>(exp_sin));
+            exit_code = 1;
+        }
+    }
+
+    //////////////////////////////////////////////////////////////////////////////////////////
+    // sincos4
+
+    {
+        const vmath::sin_cos_result4 sc = vmath::sincos(vmath::float4::load_zero());
+        TEST(sc.sin[0] == 0);
+        TEST(sc.sin[1] == 0);
+        TEST(sc.sin[2] == 0);
+        TEST(sc.sin[3] == 0);
+        TEST(sc.cos[0] == 1);
+        TEST(sc.cos[1] == 1);
+        TEST(sc.cos[2] == 1);
+        TEST(sc.cos[3] == 1);
+    }
+
+    for (float radians = -6.5f; radians < 7.0f; radians += 2.0f) {
+
+        const float in_radians[4] = { radians, radians + 0.5f, radians + 1.0f, radians + 1.5f };
+
+        const float exp_sin[4] = { sinf(in_radians[0]), sinf(in_radians[1]), sinf(in_radians[2]), sinf(in_radians[3]) };
+        const float exp_cos[4] = { cosf(in_radians[0]), cosf(in_radians[1]), cosf(in_radians[2]), cosf(in_radians[3]) };
+
+        const vmath::sin_cos_result4 sc = vmath::sincos(vmath::float4::load4(in_radians));
+
+        for (int i = 0; i < 4; i++) {
+
+            const float cur_cos = sc.cos[i];
+
+            if ( ! is_near(cur_cos, exp_cos[i])) {
+                fprintf(stderr, "Error: cos %f at position %d is %f but should be %f\n",
+                        static_cast<double>(in_radians[i]),
+                        i,
+                        static_cast<double>(cur_cos),
+                        static_cast<double>(exp_cos[i]));
+                exit_code = 1;
+            }
+
+            const float cur_sin = sc.sin[i];
+
+            if ( ! is_near(cur_sin, exp_sin[i])) {
+                fprintf(stderr, "Error: sin %f at position %d is %f but should be %f\n",
+                        static_cast<double>(in_radians[i]),
+                        i,
+                        static_cast<double>(cur_sin),
+                        static_cast<double>(exp_sin[i]));
+                exit_code = 1;
+            }
+        }
+    }
 
     //////////////////////////////////////////////////////////////////////////////////////////
     // vec2
@@ -950,12 +1037,12 @@ int main()
     {
         const vmath::mat4 m = vmath::projection(1, vmath::pi_half, 1, 5, 0);
 
-        TEST(is_near(m.a00, 1));
+        TEST(is_near(m.a00, 1, 0.005f));
         TEST(m.a01 == 0);
         TEST(m.a02 == 0);
         TEST(m.a03 == 0);
         TEST(m.a10 == 0);
-        TEST(is_near(m.a11, 1));
+        TEST(is_near(m.a11, 1, 0.005f));
         TEST(m.a12 == 0);
         TEST(m.a13 == 0);
         TEST(m.a20 == 0);

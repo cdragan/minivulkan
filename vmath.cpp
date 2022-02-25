@@ -9,47 +9,52 @@ using namespace vmath;
 
 namespace {
     static constexpr float small = 1.0f / (1024 * 1024 * 1024);
+}
 
-    struct sin_cos_result4 {
-        float4 sin;
-        float4 cos;
-    };
+vmath::sin_cos_result4 vmath::sincos(float4 radians)
+{
+    const float4 sign_mask = float4{float4::load_mask(1 << 31, 1 << 31, 1 << 31, 1 << 31)};
 
-    sin_cos_result4 sincos(float4 radians)
-    {
-        const float4 pi4    = spread4(pi);
-        const float4 pi_2_4 = spread4(pi_2);
-        radians += pi4;
-        const float4 int_div = floor(radians / pi_2_4) * pi_2_4;
-        radians = radians - int_div - pi4;
+    // Remove sign, because cos(x) == cos(-x) (for sin(x) we use sin_sign)
+    const float4 abs_radians = abs(radians);
 
-        sin_cos_result4 result;
+    // Function has period of two_pi, so divide modulo two_pi
+    const float4 two_pi4          = spread4(two_pi);
+    const float4 int_div          = floor(abs_radians / two_pi4) * two_pi4;
+    const float4 radians_0_two_pi = abs_radians - int_div;
 
-        const float4 pi_sq4  = spread4(pi_squared);
-        const float4 rad_sq4 = radians * radians;
+    // cos(x) == cos(two_pi - x), so put it in range [0..pi]
+    const float4 radians_0_pi = min(radians_0_two_pi, two_pi4 - radians_0_two_pi);
 
-        // Bhaskara I's approximation
-        result.cos = (pi_sq4 - spread4(4) * rad_sq4) / (pi_sq4 + rad_sq4);
-        result.sin = sqrt(spread4(1) - result.cos * result.cos);
+    // Remember original sign, needed for flipping sin(x) when x<0, because sin(x) == -sin(-x)
+    // The sign on second half of sine wave must also be flipped, because sin(x) == -sin(pi - x)
+    const float4 sin_sign = (radians ^ (radians_0_pi != radians_0_two_pi)) & sign_mask;
 
-        return result;
-    }
+    // Bhaskara I's approximation breaks down at x > pi/2
+    // cos(x) == -cos(pi - x), so put it in range [0..pi/2] and remember the sign flip
+    const float4 radians_0_pi_half = min(radians_0_pi, spread4(pi) - radians_0_pi);
+    const float4 cos_sign = (radians_0_pi != radians_0_pi_half) & sign_mask;
 
-    struct sin_cos_result {
-        float sin;
-        float cos;
-    };
+    const float4 pi_sq4  = spread4(pi_squared);
+    const float4 rad_sq4 = radians_0_pi_half * radians_0_pi_half;
 
-    sin_cos_result sincos(float radians)
-    {
-        const sin_cos_result4 result4 = sincos(float4{float1{radians}});
+    // Bhaskara I's approximation
+    sin_cos_result4 result;
+    result.cos = ((pi_sq4 - spread4(4) * rad_sq4) / (pi_sq4 + rad_sq4)) ^ cos_sign;
+    result.sin = sqrt(spread4(1) - result.cos * result.cos) ^ sin_sign;
 
-        sin_cos_result result;
-        result.cos = result4.cos.get0();
-        result.sin = result4.sin.get0();
+    return result;
+}
 
-        return result;
-    }
+vmath::sin_cos_result vmath::sincos(float radians)
+{
+    const sin_cos_result4 result4 = sincos(float4{float1{radians}});
+
+    sin_cos_result result;
+    result.cos = result4.cos.get0();
+    result.sin = result4.sin.get0();
+
+    return result;
 }
 
 namespace vmath {

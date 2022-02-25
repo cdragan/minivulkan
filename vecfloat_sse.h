@@ -52,6 +52,20 @@ struct float4_base {
         return value;
     }
 
+    float operator[](int idx) const {
+        switch (idx) {
+            case 1:
+                return get1();
+            case 2:
+                return get2();
+            case 3:
+                return get3();
+            default:
+                break;
+        }
+        return get0();
+    }
+
     void store4_aligned(float* ptr) const {
         _mm_store_ps(ptr, data);
     }
