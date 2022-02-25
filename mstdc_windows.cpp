@@ -36,7 +36,7 @@ extern "C" {
         return dest_ptr;
     }
 
-    int _atexit(void (__cdecl *func )(void))
+    int atexit(void (__cdecl *func )(void))
     {
         return 0;
     }
