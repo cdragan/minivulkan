@@ -331,5 +331,12 @@ RETZERO:
         }
     }
 
+    __declspec(naked) void _ultod3()
+    {
+        __asm
+        {
+        }
+    }
+
 #endif
 }
