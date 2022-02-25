@@ -86,7 +86,6 @@ ifeq ($(UNAME), Windows)
     CFLAGS += -std:c++17 -Zc:__cplusplus
 
     LDFLAGS += -nologo
-    LDFLAGS += -subsystem:windows
     LDFLAGS += user32.lib kernel32.lib
 
     CXX   = cl.exe
@@ -192,6 +191,11 @@ ifeq ($(UNAME), Darwin)
     macos_app_dir = $(out_dir)/$(exe_name).app/Contents/MacOS
 
     exe = $(macos_app_dir)/$(exe_name)
+endif
+
+ifeq ($(UNAME), Windows)
+$(exe): LDFLAGS += -subsystem:windows
+$(out_dir)/vmath_unit.$(exe_suffix): LDFLAGS += -subsystem:console
 endif
 
 ##############################################################################
