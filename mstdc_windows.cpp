@@ -11,6 +11,13 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 
+int WINAPI WinMain(HINSTANCE hinstance, HINSTANCE hprev_instance, PSTR cmd_line, INT cmd_show);
+
+int __stdcall WinMainCRTStartup()
+{
+    ExitProcess(WinMain(nullptr, nullptr, nullptr, 0));
+}
+
 extern "C" {
 
     int _fltused;

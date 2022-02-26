@@ -183,22 +183,12 @@ static int event_loop(Window* w)
     return 0;
 }
 
-#ifdef NOSTDLIB
-int __stdcall WinMainCRTStartup()
-#else
 int WINAPI WinMain(HINSTANCE hinstance, HINSTANCE hprev_instance, PSTR cmd_line, INT cmd_show)
-#endif
 {
     Window w = { };
 
     if ( ! create_window(&w))
         return 1;
 
-    const int ret = event_loop(&w);
-
-#ifdef NOSTDLIB
-    ExitProcess(ret);
-#endif
-
-    return ret;
+    return event_loop(&w);
 }
