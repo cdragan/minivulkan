@@ -1583,7 +1583,7 @@ static bool create_graphics_pipelines()
         VK_FALSE,   // depthClampEnable
         VK_FALSE,   // rasterizerDiscardEnable
         VK_POLYGON_MODE_FILL,
-        VK_CULL_MODE_NONE, //VK_CULL_MODE_BACK_BIT,
+        VK_CULL_MODE_BACK_BIT,
         VK_FRONT_FACE_COUNTER_CLOCKWISE,
         VK_FALSE,   // depthBiasEnable
         0,          // depthBiasConstantFactor
@@ -1610,7 +1610,7 @@ static bool create_graphics_pipelines()
         0,          // flags
         VK_TRUE,    // depthTestEnable
         VK_TRUE,    // depthWriteEnable
-        VK_COMPARE_OP_LESS_OR_EQUAL,
+        VK_COMPARE_OP_GREATER_OR_EQUAL,
         VK_FALSE,   // depthBoundsTestEnable
         VK_FALSE,   // stencilTestEnable
         { },        // front
@@ -1854,10 +1854,30 @@ static bool create_cube(Buffer* vertex_buffer, Buffer* index_buffer)
         return false;
 
     static const Vertex vertices[] = {
-        { { -127,  127, 0 }, { 0, 0, -127 }, {} },
-        { {  127,  127, 0 }, { 0, 0, -127 }, {} },
-        { { -127, -127, 0 }, { 0, 0, -127 }, {} },
-        { {  127, -127, 0 }, { 0, 0, -127 }, {} },
+        { { -127,  127, -127 }, {    0,    0, -127 }, {} },
+        { {  127,  127, -127 }, {    0,    0, -127 }, {} },
+        { { -127, -127, -127 }, {    0,    0, -127 }, {} },
+        { {  127, -127, -127 }, {    0,    0, -127 }, {} },
+        { { -127, -127,  127 }, {    0,    0,  127 }, {} },
+        { {  127, -127,  127 }, {    0,    0,  127 }, {} },
+        { { -127,  127,  127 }, {    0,    0,  127 }, {} },
+        { {  127,  127,  127 }, {    0,    0,  127 }, {} },
+        { { -127,  127,  127 }, {    0,  127,    0 }, {} },
+        { {  127,  127,  127 }, {    0,  127,    0 }, {} },
+        { { -127,  127, -127 }, {    0,  127,    0 }, {} },
+        { {  127,  127, -127 }, {    0,  127,    0 }, {} },
+        { { -127, -127, -127 }, {    0, -127,    0 }, {} },
+        { {  127, -127, -127 }, {    0, -127,    0 }, {} },
+        { { -127, -127,  127 }, {    0, -127,    0 }, {} },
+        { {  127, -127,  127 }, {    0, -127,    0 }, {} },
+        { {  127,  127, -127 }, {  127,    0,    0 }, {} },
+        { {  127,  127,  127 }, {  127,    0,    0 }, {} },
+        { {  127, -127, -127 }, {  127,    0,    0 }, {} },
+        { {  127, -127,  127 }, {  127,    0,    0 }, {} },
+        { { -127,  127,  127 }, { -127,    0,    0 }, {} },
+        { { -127,  127, -127 }, { -127,    0,    0 }, {} },
+        { { -127, -127,  127 }, { -127,    0,    0 }, {} },
+        { { -127, -127, -127 }, { -127,    0,    0 }, {} },
     };
 
     if ( ! filler.fill_buffer(vertex_buffer, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
@@ -1866,7 +1886,17 @@ static bool create_cube(Buffer* vertex_buffer, Buffer* index_buffer)
 
     static const uint16_t indices[] = {
         2, 3, 0,
-        0, 3, 1
+        0, 3, 1,
+        6, 7, 4,
+        4, 7, 5,
+        10, 11, 8,
+        8, 11, 9,
+        14, 15, 12,
+        12, 15, 13,
+        18, 19, 16,
+        16, 19, 17,
+        22, 23, 20,
+        20, 23, 21,
     };
 
     if ( ! filler.fill_buffer(index_buffer, VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
@@ -1973,7 +2003,7 @@ static bool dummy_draw(uint32_t image_idx, uint64_t time_ms, VkFence queue_fence
     // Calculate matrices
     const auto uniform_data = reinterpret_cast<UniformBuffer*>(&host_shader_data[slot_size * image_idx]);
     const float angle = vmath::radians(static_cast<float>(time_ms) * 45.0f / 1000.0f);
-    const vmath::mat4 model_view = vmath::mat4(vmath::quat(vmath::vec3(0, 0, 1), angle))
+    const vmath::mat4 model_view = vmath::mat4(vmath::quat(vmath::vec3(0.70710678f, 0.70710678f, 0), angle))
                                  * vmath::translate(0.0f, 0.0f, 10.0f);
     const vmath::mat4 proj = vmath::projection(
             static_cast<float>(vk_surface_caps.currentExtent.width)     // aspect
@@ -1985,7 +2015,7 @@ static bool dummy_draw(uint32_t image_idx, uint64_t time_ms, VkFence queue_fence
     uniform_data->model_view      = model_view;
     uniform_data->model_view_proj = model_view * proj;
     uniform_data->color           = vmath::vec<4>(0.7f, 0.1f, 0.1f, 1.0f);
-    uniform_data->lights[0]       = vmath::vec<4>(10.0f, 10.0f, 10.0f, 1.0f);
+    uniform_data->lights[0]       = vmath::vec<4>(10.0f, 10.0f, -10.0f, 1.0f);
 
     // Send matrices to GPU
     static VkMappedMemoryRange range = {
@@ -2071,7 +2101,7 @@ static bool dummy_draw(uint32_t image_idx, uint64_t time_ms, VkFence queue_fence
 
     static const VkClearValue clear_values[2] = {
         make_clear_color(0, 0, 0, 0),
-        make_clear_depth(1.0f, 0)
+        make_clear_depth(0, 0)
     };
 
     static VkRenderPassBeginInfo render_pass_info = {
@@ -2114,7 +2144,7 @@ static bool dummy_draw(uint32_t image_idx, uint64_t time_ms, VkFence queue_fence
                             nullptr);   // pDynamicOffsets
 
     vkCmdDrawIndexed(buf,
-                     6,     // indexCount
+                     36,    // indexCount
                      1,     // instanceCount
                      0,     // firstVertex
                      0,     // vertexOffset
