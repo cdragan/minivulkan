@@ -8,6 +8,11 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 
+#ifdef ENABLE_GUI
+#   include "imgui/backends/imgui_impl_win32.h"
+extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
+#endif
+
 struct Window {
     HINSTANCE instance;
     HWND      window;
@@ -56,7 +61,11 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT umsg, WPARAM wparam, LPARAM 
             [[fallthrough]];
 
         default:
+#           ifdef ENABLE_GUI
+            return ImGui_ImplWin32_WndProcHandler(hwnd, umsg, wparam, lparam);
+#           else
             return DefWindowProc(hwnd, umsg, wparam, lparam);
+#           endif
 
         case WM_CREATE: {
             Window* const w = reinterpret_cast<Window*>(GetWindowLongPtr(hwnd, GWLP_USERDATA));
@@ -66,10 +75,17 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT umsg, WPARAM wparam, LPARAM 
             if ( ! init_vulkan(w))
                 break;
 
+#           ifdef ENABLE_GUI
+            ImGui_ImplWin32_Init(hwnd);
+#           endif
+
             return 0;
         }
 
         case WM_PAINT:
+#           ifdef ENABLE_GUI
+            ImGui_ImplWin32_NewFrame();
+#           endif
             if ( ! draw_frame())
                 break;
 
@@ -78,10 +94,12 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT umsg, WPARAM wparam, LPARAM 
         case WM_DESTROY:
             break;
 
+#       ifndef ENABLE_GUI
         case WM_CHAR:
             if (wparam == VK_ESCAPE)
                 break;
             return 0;
+#       endif
     }
 
     idle_queue();

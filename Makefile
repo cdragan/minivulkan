@@ -48,6 +48,7 @@ endif
 
 ifeq ($(UNAME), Windows)
     threed_src_files += main_windows.cpp
+    imgui_src_files  += imgui/backends/imgui_impl_win32.cpp
     ifndef stdlib
         lib_src_files += mstdc_windows.cpp
     endif
