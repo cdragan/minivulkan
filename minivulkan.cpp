@@ -3,6 +3,7 @@
 
 #include "minivulkan.h"
 #include "dprintf.h"
+#include "gui.h"
 #include "mstdc.h"
 #include "vmath.h"
 #include "vulkan_extensions.h"
@@ -337,7 +338,7 @@ static bool init_instance()
 
 VkSurfaceKHR vk_surface = VK_NULL_HANDLE;
 
-static VkPhysicalDevice vk_phys_dev = VK_NULL_HANDLE;
+VkPhysicalDevice vk_phys_dev = VK_NULL_HANDLE;
 
 static VkPhysicalDeviceVulkan12Properties vk12_props = {
     VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_PROPERTIES,
@@ -358,14 +359,7 @@ static const float queue_priorities[] = { 1 };
 
 static constexpr uint32_t no_queue_family = ~0u;
 
-static VkDeviceQueueCreateInfo queue_create_info = {
-    VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
-    nullptr,
-    0,
-    no_queue_family, // queueFamilyIndex
-    1,               // queueCount
-    queue_priorities
-};
+uint32_t vk_queue_family_index = no_queue_family;
 
 static VkSwapchainCreateInfoKHR swapchain_create_info = {
     VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR,
@@ -501,7 +495,7 @@ static bool find_gpu()
                 if (res != VK_SUCCESS || ! supported)
                     continue;
 
-                queue_create_info.queueFamilyIndex = i_queue;
+                vk_queue_family_index = i_queue;
                 break;
             }
 
@@ -518,8 +512,8 @@ static bool find_gpu()
     return false;
 }
 
-static VkDevice    vk_dev                   = VK_NULL_HANDLE;
-static VkQueue     vk_queue                 = VK_NULL_HANDLE;
+VkDevice           vk_dev                   = VK_NULL_HANDLE;
+VkQueue            vk_queue                 = VK_NULL_HANDLE;
 static const char* vk_device_extensions[16];
 static uint32_t    vk_num_device_extensions = 0;
 
@@ -575,6 +569,17 @@ static bool create_device()
     if ( ! get_device_extensions())
         return false;
 
+    static VkDeviceQueueCreateInfo queue_create_info = {
+        VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
+        nullptr,
+        0,
+        no_queue_family, // queueFamilyIndex
+        1,               // queueCount
+        queue_priorities
+    };
+
+    queue_create_info.queueFamilyIndex = vk_queue_family_index;
+
     static VkDeviceCreateInfo dev_create_info = {
         VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
         nullptr,
@@ -602,7 +607,7 @@ static bool create_device()
     if ( ! load_device_functions())
         return false;
 
-    vkGetDeviceQueue(vk_dev, queue_create_info.queueFamilyIndex, 0, &vk_queue);
+    vkGetDeviceQueue(vk_dev, vk_queue_family_index, 0, &vk_queue);
 
     return true;
 }
@@ -860,7 +865,7 @@ bool Image::allocate(DeviceMemoryHeap& heap, const ImageInfo& image_info)
         0,                  // usage
         VK_SHARING_MODE_EXCLUSIVE,
         1,                  // queueFamilyIndexCount
-        &queue_create_info.queueFamilyIndex,
+        &vk_queue_family_index,
         Image::initial_layout
     };
     create_info.format        = image_info.format;
@@ -963,8 +968,8 @@ void Image::set_image_layout(VkCommandBuffer buf, const Transition& transition)
 
     layout = transition.new_layout;
 
-    img_barrier.srcQueueFamilyIndex         = queue_create_info.queueFamilyIndex;
-    img_barrier.dstQueueFamilyIndex         = queue_create_info.queueFamilyIndex;
+    img_barrier.srcQueueFamilyIndex         = vk_queue_family_index;
+    img_barrier.dstQueueFamilyIndex         = vk_queue_family_index;
     img_barrier.image                       = image;
     img_barrier.subresourceRange.aspectMask = aspect;
     img_barrier.subresourceRange.levelCount = 1;
@@ -994,7 +999,7 @@ bool Buffer::allocate(DeviceMemoryHeap&  heap,
         0,          // usage
         VK_SHARING_MODE_EXCLUSIVE,
         1,          // queueFamilyIndexCount
-        &queue_create_info.queueFamilyIndex
+        &vk_queue_family_index
     };
     create_info.size  = alloc_size;
     create_info.usage = usage;
@@ -1111,10 +1116,11 @@ bool wait_and_reset_fence(eFenceId fence)
     return res == VK_SUCCESS;
 }
 
-static VkSurfaceCapabilitiesKHR vk_surface_caps;
+VkSurfaceCapabilitiesKHR vk_surface_caps;
 
 static VkSwapchainKHR vk_swapchain = VK_NULL_HANDLE;
 
+uint32_t                vk_num_swapchain_images = 0;
 static Image            vk_swapchain_images[max_swapchain_size];
 static Image            vk_depth_buffers[max_swapchain_size];
 static DeviceMemoryHeap depth_buffer_heap;
@@ -1215,6 +1221,8 @@ static bool create_swapchain()
 
     res = CHK(vkGetSwapchainImagesKHR(vk_dev, vk_swapchain, &num_images, nullptr));
 
+    vk_num_swapchain_images = num_images;
+
     if (res != VK_SUCCESS)
         return false;
 
@@ -1265,7 +1273,7 @@ static bool create_swapchain()
     return allocate_depth_buffers(num_images);
 }
 
-static VkRenderPass vk_render_pass = VK_NULL_HANDLE;
+VkRenderPass vk_render_pass = VK_NULL_HANDLE;
 
 static bool create_render_pass()
 {
@@ -1718,7 +1726,7 @@ bool allocate_command_buffers(CommandBuffersBase* bufs, uint32_t num_buffers)
         VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT
     };
 
-    create_info.queueFamilyIndex = queue_create_info.queueFamilyIndex;
+    create_info.queueFamilyIndex = vk_queue_family_index;
 
     VkResult res = CHK(vkCreateCommandPool(vk_dev,
                                            &create_info,
@@ -1741,7 +1749,7 @@ bool allocate_command_buffers(CommandBuffersBase* bufs, uint32_t num_buffers)
     return res == VK_SUCCESS;
 }
 
-static bool reset_and_begin_command_buffer(VkCommandBuffer cmd_buf)
+bool reset_and_begin_command_buffer(VkCommandBuffer cmd_buf)
 {
     VkResult res = CHK(vkResetCommandBuffer(cmd_buf, 0));
     if (res != VK_SUCCESS)
@@ -1930,6 +1938,9 @@ static bool dummy_draw(uint32_t image_idx, uint64_t time_ms, VkFence queue_fence
     static Buffer vertex_buffer;
     static Buffer index_buffer;
     VkResult      res;
+
+    if ( ! create_gui_frame())
+        return false;
 
     if ( ! vertex_buffer.allocated()) {
         if ( ! create_cube(&vertex_buffer, &index_buffer))
@@ -2150,6 +2161,9 @@ static bool dummy_draw(uint32_t image_idx, uint64_t time_ms, VkFence queue_fence
                      0,     // vertexOffset
                      0);    // firstInstance
 
+    if ( ! send_gui_to_gpu(buf))
+        return false;
+
     vkCmdEndRenderPass(buf);
 
     static const Image::Transition color_att_present = {
@@ -2236,6 +2250,9 @@ bool init_vulkan(Window* w)
         return false;
 
     if ( ! create_graphics_pipelines())
+        return false;
+
+    if ( ! init_gui())
         return false;
 
     return true;

@@ -12,43 +12,6 @@ ifneq (,$(filter CYGWIN% MINGW% MSYS%, $(UNAME)))
 endif
 
 ##############################################################################
-# Sources
-
-src_files += minivulkan.cpp
-src_files += mstdc.cpp
-src_files += vmath.cpp
-
-ifeq ($(UNAME), Linux)
-    src_files += main_linux.m
-endif
-
-ifeq ($(UNAME), Darwin)
-    src_files += main_macos.m
-endif
-
-ifeq ($(UNAME), Windows)
-    src_files += main_windows.cpp
-    ifndef stdlib
-        src_files += mstdc_windows.cpp
-    endif
-endif
-
-vmath_unit_src_files += mstdc.cpp
-vmath_unit_src_files += vmath.cpp
-vmath_unit_src_files += vmath_unit.cpp
-
-##############################################################################
-# Shaders
-
-shader_files += shaders/simple.vert
-shader_files += shaders/phong.frag
-
-##############################################################################
-# Directory where generated files are stored
-
-out_dir = Out
-
-##############################################################################
 # Function for converting source path to object file path
 
 ifeq ($(UNAME), Windows)
@@ -62,9 +25,68 @@ asm_suffix = S
 OBJ_FROM_SRC = $(addsuffix .$(o_suffix), $(addprefix $(out_dir)/,$(basename $(notdir $1))))
 
 ##############################################################################
+# Directory where generated files are stored
+
+out_dir = Out
+
+##############################################################################
+# Sources
+
+lib_src_files += mstdc.cpp
+lib_src_files += vmath.cpp
+
+threed_src_files += minivulkan.cpp
+
+ifeq ($(UNAME), Linux)
+    threed_src_files += main_linux.m
+endif
+
+ifeq ($(UNAME), Darwin)
+    threed_src_files += main_macos.m
+endif
+
+ifeq ($(UNAME), Windows)
+    threed_src_files += main_windows.cpp
+    ifndef stdlib
+        lib_src_files += mstdc_windows.cpp
+    endif
+endif
+
+vmath_unit_src_files += vmath_unit.cpp
+
+imgui_src_files += imgui/imgui.cpp
+imgui_src_files += imgui/imgui_draw.cpp
+imgui_src_files += imgui/imgui_tables.cpp
+imgui_src_files += imgui/imgui_widgets.cpp
+imgui_src_files += imgui/backends/imgui_impl_vulkan.cpp
+imgui_src_files += gui.cpp
+
+all_src_files += $(lib_src_files)
+all_src_files += $(threed_src_files)
+all_src_files += $(vmath_unit_src_files)
+all_src_files += $(imgui_src_files)
+
+all_threed_src_files += $(lib_src_files)
+all_threed_src_files += $(threed_src_files)
+ifdef imgui
+    all_threed_src_files += $(imgui_src_files)
+endif
+
+all_vmath_unit_src_files += $(lib_src_files)
+all_vmath_unit_src_files += $(vmath_unit_src_files)
+
+##############################################################################
+# Shaders
+
+shader_files += shaders/simple.vert
+shader_files += shaders/phong.frag
+
+##############################################################################
 # Compiler flags
 
 ifeq ($(UNAME), Windows)
+    WFLAGS += -W3
+
     ifdef debug
         CFLAGS  += -D_DEBUG -Zi -MTd
         LDFLAGS += -debug
@@ -80,7 +102,6 @@ ifeq ($(UNAME), Windows)
 
     CFLAGS += -nologo
     CFLAGS += -GR-
-    CFLAGS += -W3
     CFLAGS += -TP -EHa-
     CFLAGS += -FS
     CFLAGS += -std:c++17 -Zc:__cplusplus
@@ -99,8 +120,8 @@ ifeq ($(UNAME), Windows)
         $(call OBJ_FROM_SRC, mstdc_windows.cpp): CFLAGS += -GL-
     endif
 else
-    CFLAGS += -Wall -Wextra -Wno-unused-parameter -Wunused -Wno-missing-field-initializers
-    CFLAGS += -Wshadow -Wformat=2 -Wconversion -Wdouble-promotion
+    WFLAGS += -Wall -Wextra -Wno-unused-parameter -Wunused -Wno-missing-field-initializers
+    WFLAGS += -Wshadow -Wformat=2 -Wconversion -Wdouble-promotion
 
     CFLAGS += -fvisibility=hidden
     CFLAGS += -fPIC
@@ -206,7 +227,7 @@ default: $(exe)
 clean:
 	rm -rf $(out_dir)
 
-asm: $(addprefix $(out_dir)/,$(addsuffix .$(asm_suffix),$(notdir $(filter %.cpp,$(src_files)))))
+asm: $(addprefix $(out_dir)/,$(addsuffix .$(asm_suffix),$(notdir $(filter %.cpp,$(all_threed_src_files)))))
 
 $(out_dir):
 	mkdir -p $@
@@ -217,7 +238,35 @@ $1: $$(call OBJ_FROM_SRC, $2)
 	$$(STRIP) $$@
 endef
 
-$(eval $(call LINK_RULE,$(exe),$(src_files)))
+$(eval $(call LINK_RULE,$(exe),$(all_threed_src_files)))
+
+define M_RULE
+$$(call OBJ_FROM_SRC,$1): $1 | $$(out_dir)
+	$$(CC) $$(CFLAGS) $$(LTO_CFLAGS) $$(OBJCFLAGS) -c $$(call COMPILER_OUTPUT,$$@) $$<
+endef
+
+$(foreach file, $(filter %.m, $(all_src_files)), $(eval $(call M_RULE,$(file))))
+
+define CPP_RULE
+$$(call OBJ_FROM_SRC,$1): $1 | $$(out_dir)
+	$$(CXX) $$(CFLAGS) $$(LTO_CFLAGS) $$(CXXFLAGS) -c $$(call COMPILER_OUTPUT,$$@) $$<
+endef
+
+$(foreach file, $(filter %.cpp, $(all_src_files)), $(eval $(call CPP_RULE,$(file))))
+
+define C_RULE
+$$(call OBJ_FROM_SRC,$1): $1 | $$(out_dir)
+	$$(CXX) $$(CFLAGS) $$(CXXFLAGS) -masm=intel -S $$(call COMPILER_OUTPUT,$$@) $$<
+endef
+
+$(foreach file, $(filter %.c, $(all_src_files)), $(eval $(call C_RULE,$(file))))
+
+define ASM_RULE
+$$(call OBJ_FROM_SRC,$1): $1 | $$(out_dir)
+	$$(CXX) $$(CFLAGS) $$(CXXFLAGS) -masm=intel -S $$(call COMPILER_OUTPUT,$$@) $$<
+endef
+
+$(foreach file, $(filter %.c, $(all_src_files)), $(eval $(call ASM_RULE,$(file))))
 
 ifeq ($(UNAME), Darwin)
 $(macos_app_dir): | $(out_dir)
@@ -231,14 +280,13 @@ $(macos_app_dir)/Info.plist: Info.plist | $(macos_app_dir)
 	cp $< $@
 endif
 
-$(out_dir)/%.$(o_suffix): %.m | $(out_dir)
-	$(CC) $(CFLAGS) $(LTO_CFLAGS) $(OBJCFLAGS) -c $(call COMPILER_OUTPUT,$@) $<
+$(foreach file, $(filter-out $(imgui_src_files), $(all_src_files)), $(call OBJ_FROM_SRC, $(file))): CFLAGS += $(WFLAGS)
 
-$(out_dir)/%.$(o_suffix): %.cpp | $(out_dir)
-	$(CXX) $(CFLAGS) $(LTO_CFLAGS) $(CXXFLAGS) -c $(call COMPILER_OUTPUT,$@) $<
+$(foreach file, $(imgui_src_files), $(call OBJ_FROM_SRC, $(file))): CFLAGS += -Iimgui -DIMGUI_IMPL_VULKAN_NO_PROTOTYPES
 
-$(out_dir)/%.$(asm_suffix): % | $(out_dir)
-	$(CXX) $(CFLAGS) $(CXXFLAGS) -masm=intel -S $(call COMPILER_OUTPUT,$@) $<
+ifdef imgui
+    CFLAGS += -DENABLE_GUI=1
+endif
 
 $(out_dir)/shaders: | $(out_dir)
 	mkdir -p $@
@@ -259,11 +307,14 @@ $(foreach ext, vert frag, $(eval $(call GLSL_EXT,$(ext))))
 $(call OBJ_FROM_SRC, minivulkan.cpp) $(out_dir)/minivulkan.cpp.$(asm_suffix): $(addprefix $(out_dir)/,$(addsuffix .h,$(shader_files)))
 $(call OBJ_FROM_SRC, minivulkan.cpp) $(out_dir)/minivulkan.cpp.$(asm_suffix): CFLAGS += -I$(out_dir)/shaders
 
-$(eval $(call LINK_RULE,$(out_dir)/vmath_unit,$(vmath_unit_src_files)))
+$(eval $(call LINK_RULE,$(out_dir)/vmath_unit,$(all_vmath_unit_src_files)))
 
 test: $(out_dir)/vmath_unit
 	$(out_dir)/vmath_unit
 
-dep_files = $(addprefix $(out_dir)/, $(addsuffix .d, $(basename $(notdir $(src_files)))))
+##############################################################################
+# Dependency files
+
+dep_files = $(addprefix $(out_dir)/, $(addsuffix .d, $(basename $(notdir $(all_src_files)))))
 
 -include $(dep_files)

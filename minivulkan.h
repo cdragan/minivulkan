@@ -7,8 +7,15 @@
 
 #define APPNAME "minivulkan"
 
-extern VkInstance   vk_instance;
-extern VkSurfaceKHR vk_surface;
+extern VkInstance               vk_instance;
+extern VkSurfaceKHR             vk_surface;
+extern VkPhysicalDevice         vk_phys_dev;
+extern VkDevice                 vk_dev;
+extern uint32_t                 vk_queue_family_index;
+extern VkQueue                  vk_queue;
+extern uint32_t                 vk_num_swapchain_images;
+extern VkRenderPass             vk_render_pass;
+extern VkSurfaceCapabilitiesKHR vk_surface_caps;
 
 struct Window;
 
@@ -51,6 +58,8 @@ enum eFenceId {
 };
 
 extern VkFence vk_fens[num_fences];
+
+bool wait_and_reset_fence(enum eFenceId fence);
 
 #ifdef __cplusplus
 
@@ -244,6 +253,7 @@ struct CommandBuffersBase {
     VkCommandBuffer bufs[1];
 };
 
+bool reset_and_begin_command_buffer(VkCommandBuffer cmd_buf);
 bool allocate_command_buffers(CommandBuffersBase* bufs, uint32_t num_buffers);
 
 template<uint32_t num_buffers>
