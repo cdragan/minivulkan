@@ -42,7 +42,8 @@ ifeq ($(UNAME), Linux)
 endif
 
 ifeq ($(UNAME), Darwin)
-    threed_src_files += main_macos.m
+    threed_src_files += main_macos.mm
+    imgui_src_files  += imgui/backends/imgui_impl_osx.mm
 endif
 
 ifeq ($(UNAME), Windows)
@@ -145,7 +146,7 @@ else
 
     CXXFLAGS += -x c++ -std=c++17 -fno-rtti -fno-exceptions
 
-    OBJCFLAGS += -x objective-c -fno-objc-arc
+    OBJCXXFLAGS += -x objective-c++ -std=c++17 -fno-objc-arc
 
     LINK = $(CXX)
 
@@ -170,6 +171,10 @@ ifeq ($(UNAME), Darwin)
     frameworks += Cocoa
     frameworks += CoreVideo
     frameworks += Quartz
+
+    ifdef imgui
+        frameworks += GameController
+    endif
 
     LDFLAGS += -fno-objc-arc $(addprefix -framework ,$(frameworks))
 
@@ -240,12 +245,12 @@ endef
 
 $(eval $(call LINK_RULE,$(exe),$(all_threed_src_files)))
 
-define M_RULE
+define MM_RULE
 $$(call OBJ_FROM_SRC,$1): $1 | $$(out_dir)
-	$$(CC) $$(CFLAGS) $$(LTO_CFLAGS) $$(OBJCFLAGS) -c $$(call COMPILER_OUTPUT,$$@) $$<
+	$$(CC) $$(CFLAGS) $$(LTO_CFLAGS) $$(OBJCXXFLAGS) -c $$(call COMPILER_OUTPUT,$$@) $$<
 endef
 
-$(foreach file, $(filter %.m, $(all_src_files)), $(eval $(call M_RULE,$(file))))
+$(foreach file, $(filter %.mm, $(all_src_files)), $(eval $(call MM_RULE,$(file))))
 
 define CPP_RULE
 $$(call OBJ_FROM_SRC,$1): $1 | $$(out_dir)
@@ -282,10 +287,10 @@ endif
 
 $(foreach file, $(filter-out $(imgui_src_files), $(all_src_files)), $(call OBJ_FROM_SRC, $(file))): CFLAGS += $(WFLAGS)
 
-$(foreach file, $(imgui_src_files), $(call OBJ_FROM_SRC, $(file))): CFLAGS += -Iimgui -DIMGUI_IMPL_VULKAN_NO_PROTOTYPES
+$(foreach file, $(imgui_src_files), $(call OBJ_FROM_SRC, $(file))): CFLAGS += -DIMGUI_IMPL_VULKAN_NO_PROTOTYPES
 
 ifdef imgui
-    CFLAGS += -DENABLE_GUI=1
+    CFLAGS += -Iimgui -DENABLE_GUI=1
 endif
 
 $(out_dir)/shaders: | $(out_dir)

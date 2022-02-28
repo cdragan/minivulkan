@@ -5,6 +5,9 @@
 #import <Cocoa/Cocoa.h>
 #import <QuartzCore/CAMetalLayer.h>
 #include "minivulkan.h"
+#ifdef ENABLE_GUI
+#   include "imgui/backends/imgui_impl_osx.h"
+#endif
 #include <time.h>
 
 struct Window {
@@ -95,6 +98,18 @@ uint64_t get_current_time_ms()
             return;
         }
 
+#       ifdef ENABLE_GUI
+        // Enable correct mouse tracking
+        NSTrackingArea *trackingArea =
+            [[NSTrackingArea alloc] initWithRect: NSZeroRect
+                                    options:      NSTrackingMouseMoved | NSTrackingInVisibleRect | NSTrackingActiveAlways
+                                    owner:        self
+                                    userInfo:     nil];
+        [self.view addTrackingArea: trackingArea];
+
+        ImGui_ImplOSX_Init(self.view);
+#       endif
+
         CVDisplayLinkCreateWithActiveCGDisplays(&display_link_);
         CVDisplayLinkSetOutputCallback(display_link_, &display_link_callback, (__bridge void *)self.view);
         CVDisplayLinkStart(display_link_);
@@ -107,6 +122,10 @@ uint64_t get_current_time_ms()
                                           CVOptionFlags     *flagsOut,
                                           void              *target)
     {
+#       ifdef ENABLE_GUI
+        ImGui_ImplOSX_NewFrame((__bridge NSView *)target);
+#       endif
+
         if ( ! draw_frame()) {
             [NSApp terminate: nil];
             return kCVReturnError;
@@ -114,6 +133,22 @@ uint64_t get_current_time_ms()
 
         return kCVReturnSuccess;
     }
+
+#   ifdef ENABLE_GUI
+    - (void)mouseDown:         (NSEvent *)event { ImGui_ImplOSX_HandleEvent(event, self.view); }
+    - (void)rightMouseDown:    (NSEvent *)event { ImGui_ImplOSX_HandleEvent(event, self.view); }
+    - (void)otherMouseDown:    (NSEvent *)event { ImGui_ImplOSX_HandleEvent(event, self.view); }
+    - (void)mouseUp:           (NSEvent *)event { ImGui_ImplOSX_HandleEvent(event, self.view); }
+    - (void)rightMouseUp:      (NSEvent *)event { ImGui_ImplOSX_HandleEvent(event, self.view); }
+    - (void)otherMouseUp:      (NSEvent *)event { ImGui_ImplOSX_HandleEvent(event, self.view); }
+    - (void)mouseMoved:        (NSEvent *)event { ImGui_ImplOSX_HandleEvent(event, self.view); }
+    - (void)mouseDragged:      (NSEvent *)event { ImGui_ImplOSX_HandleEvent(event, self.view); }
+    - (void)rightMouseMoved:   (NSEvent *)event { ImGui_ImplOSX_HandleEvent(event, self.view); }
+    - (void)rightMouseDragged: (NSEvent *)event { ImGui_ImplOSX_HandleEvent(event, self.view); }
+    - (void)otherMouseMoved:   (NSEvent *)event { ImGui_ImplOSX_HandleEvent(event, self.view); }
+    - (void)otherMouseDragged: (NSEvent *)event { ImGui_ImplOSX_HandleEvent(event, self.view); }
+    - (void)scrollWheel:       (NSEvent *)event { ImGui_ImplOSX_HandleEvent(event, self.view); }
+#   endif
 
 @end
 
@@ -137,6 +172,7 @@ uint64_t get_current_time_ms()
         return layer;
     }
 
+#   ifndef ENABLE_GUI
     - (BOOL)performKeyEquivalent: (NSEvent *)event
     {
         const uint32_t key_esc  = 53;
@@ -155,6 +191,7 @@ uint64_t get_current_time_ms()
 
         return TRUE;
     }
+#   endif
 
 @end
 

@@ -3,3 +3,6 @@ Out
 
 # Vim swap files
 .*.swp
+
+# ImGui config file
+imgui.ini
