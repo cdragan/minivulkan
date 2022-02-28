@@ -51,6 +51,11 @@ uint64_t get_current_time_ms()
 
 static LRESULT CALLBACK window_proc(HWND hwnd, UINT umsg, WPARAM wparam, LPARAM lparam)
 {
+#   ifdef ENABLE_GUI
+    if (ImGui_ImplWin32_WndProcHandler(hwnd, umsg, wparam, lparam))
+        return 0;
+#   endif
+
     switch (umsg) {
 
         case WM_NCCREATE:
@@ -61,11 +66,7 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT umsg, WPARAM wparam, LPARAM 
             [[fallthrough]];
 
         default:
-#           ifdef ENABLE_GUI
-            return ImGui_ImplWin32_WndProcHandler(hwnd, umsg, wparam, lparam);
-#           else
             return DefWindowProc(hwnd, umsg, wparam, lparam);
-#           endif
 
         case WM_CREATE: {
             Window* const w = reinterpret_cast<Window*>(GetWindowLongPtr(hwnd, GWLP_USERDATA));
@@ -94,12 +95,10 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT umsg, WPARAM wparam, LPARAM 
         case WM_DESTROY:
             break;
 
-#       ifndef ENABLE_GUI
         case WM_CHAR:
             if (wparam == VK_ESCAPE)
                 break;
             return 0;
-#       endif
     }
 
     idle_queue();
