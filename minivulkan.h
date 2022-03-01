@@ -108,6 +108,7 @@ class MapBase {
         MapBase& operator=(const MapBase&) = delete;
 
         bool mapped() const { return mapped_ptr != nullptr; }
+        bool flush(uint32_t offset, uint32_t size);
         void unmap();
 
     protected:
@@ -122,9 +123,10 @@ class MapBase {
         const void* get_end_ptr() const { return reinterpret_cast<const void*>(reinterpret_cast<uintptr_t>(mapped_ptr) + mapped_size); }
 
     private:
-        DeviceMemoryHeap* mapped_heap = nullptr;
-        void*             mapped_ptr  = nullptr;
-        VkDeviceSize      mapped_size = 0;
+        DeviceMemoryHeap* mapped_heap   = nullptr;
+        void*             mapped_ptr    = nullptr;
+        VkDeviceSize      mapped_offset = 0;
+        VkDeviceSize      mapped_size   = 0;
 };
 
 template<typename T>

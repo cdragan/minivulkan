@@ -809,10 +809,11 @@ MapBase::MapBase(DeviceMemoryHeap* heap, VkDeviceSize offset, VkDeviceSize size)
     void* ptr;
     const VkResult res = CHK(vkMapMemory(vk_dev, heap->get_memory(), offset, aligned_size, 0, &ptr));
     if (res == VK_SUCCESS) {
-        mapped_heap  = heap;
-        mapped_ptr   = ptr;
-        mapped_size  = size;
-        heap->mapped = true;
+        mapped_heap   = heap;
+        mapped_ptr    = ptr;
+        mapped_offset = offset;
+        mapped_size   = size;
+        heap->mapped  = true;
     }
 }
 
@@ -826,14 +827,39 @@ void MapBase::unmap()
         vkUnmapMemory(vk_dev, mapped_heap->get_memory());
         mapped_heap->mapped = false;
 
-        mapped_heap = nullptr;
-        mapped_ptr  = nullptr;
-        mapped_size = 0;
+        mapped_heap   = nullptr;
+        mapped_ptr    = nullptr;
+        mapped_offset = 0;
+        mapped_size   = 0;
     }
     else {
         assert( ! mapped_ptr);
+        assert( ! mapped_offset);
         assert( ! mapped_size);
     }
+}
+
+bool MapBase::flush(uint32_t offset, uint32_t size)
+{
+    assert(mapped_heap);
+    if ( ! mapped_heap)
+        return false;
+
+    assert(offset + size <= mapped_size);
+
+    static VkMappedMemoryRange range = {
+        VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE,
+        nullptr,
+        VK_NULL_HANDLE,     // memory
+        0,                  // offset
+        0                   // size
+    };
+    range.memory = mapped_heap->get_memory();
+    range.offset = mapped_offset + offset;
+    range.size   = size;
+
+    const VkResult res = CHK(vkFlushMappedMemoryRanges(vk_dev, 1, &range));
+    return res == VK_SUCCESS;
 }
 
 void MapBase::move_from(MapBase& map)
@@ -2009,6 +2035,8 @@ static bool dummy_draw(uint32_t image_idx, uint64_t time_ms, VkFence queue_fence
             return false;
 
         host_shader_data = Map<uint8_t>(&vk_coherent_heap, 0, total_size);
+        if ( ! host_shader_data.mapped())
+            return false;
     }
 
     // Calculate matrices
@@ -2029,18 +2057,7 @@ static bool dummy_draw(uint32_t image_idx, uint64_t time_ms, VkFence queue_fence
     uniform_data->lights[0]       = vmath::vec<4>(10.0f, 10.0f, -10.0f, 1.0f);
 
     // Send matrices to GPU
-    static VkMappedMemoryRange range = {
-        VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE,
-        nullptr,
-        VK_NULL_HANDLE,     // memory
-        0,                  // offset
-        0                   // size
-    };
-    range.memory = vk_coherent_heap.get_memory();
-    range.offset = slot_size * image_idx;
-    range.size   = slot_size;
-    res = CHK(vkFlushMappedMemoryRanges(vk_dev, 1, &range));
-    if (res != VK_SUCCESS)
+    if ( ! host_shader_data.flush(slot_size * image_idx, slot_size))
         return false;
 
     // Update descriptor set
