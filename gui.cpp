@@ -127,6 +127,9 @@ bool init_gui()
 static bool construct_gui()
 {
     ImGui::Text("Hello, world!");
+    ImGui::Separator();
+    static float value = 0;
+    ImGui::InputFloat("Value", &value);
     return true;
 }
 
