@@ -38,7 +38,7 @@ lib_src_files += vmath.cpp
 threed_src_files += minivulkan.cpp
 
 ifeq ($(UNAME), Linux)
-    threed_src_files += main_linux.m
+    threed_src_files += main_linux.cpp
 endif
 
 ifeq ($(UNAME), Darwin)
