@@ -98,7 +98,7 @@ uint64_t get_current_time_ms()
             return;
         }
 
-#       ifdef ENABLE_GUI
+        #ifdef ENABLE_GUI
         // Enable correct mouse tracking
         NSTrackingArea *trackingArea =
             [[NSTrackingArea alloc] initWithRect: NSZeroRect
@@ -108,7 +108,7 @@ uint64_t get_current_time_ms()
         [self.view addTrackingArea: trackingArea];
 
         ImGui_ImplOSX_Init(self.view);
-#       endif
+        #endif
 
         CVDisplayLinkCreateWithActiveCGDisplays(&display_link_);
         CVDisplayLinkSetOutputCallback(display_link_, &display_link_callback, (__bridge void *)self.view);
@@ -122,9 +122,9 @@ uint64_t get_current_time_ms()
                                           CVOptionFlags     *flagsOut,
                                           void              *target)
     {
-#       ifdef ENABLE_GUI
+        #ifdef ENABLE_GUI
         ImGui_ImplOSX_NewFrame((__bridge NSView *)target);
-#       endif
+        #endif
 
         if ( ! draw_frame()) {
             [NSApp terminate: nil];
@@ -134,7 +134,7 @@ uint64_t get_current_time_ms()
         return kCVReturnSuccess;
     }
 
-#   ifdef ENABLE_GUI
+    #ifdef ENABLE_GUI
     - (void)mouseDown:         (NSEvent *)event { ImGui_ImplOSX_HandleEvent(event, self.view); }
     - (void)rightMouseDown:    (NSEvent *)event { ImGui_ImplOSX_HandleEvent(event, self.view); }
     - (void)otherMouseDown:    (NSEvent *)event { ImGui_ImplOSX_HandleEvent(event, self.view); }
@@ -148,7 +148,7 @@ uint64_t get_current_time_ms()
     - (void)otherMouseMoved:   (NSEvent *)event { ImGui_ImplOSX_HandleEvent(event, self.view); }
     - (void)otherMouseDragged: (NSEvent *)event { ImGui_ImplOSX_HandleEvent(event, self.view); }
     - (void)scrollWheel:       (NSEvent *)event { ImGui_ImplOSX_HandleEvent(event, self.view); }
-#   endif
+    #endif
 
 @end
 
@@ -172,7 +172,6 @@ uint64_t get_current_time_ms()
         return layer;
     }
 
-#   ifndef ENABLE_GUI
     - (BOOL)performKeyEquivalent: (NSEvent *)event
     {
         const uint32_t key_esc  = 53;
@@ -191,8 +190,6 @@ uint64_t get_current_time_ms()
 
         return TRUE;
     }
-#   endif
-
 @end
 
 @implementation AppDelegate
@@ -220,7 +217,11 @@ uint64_t get_current_time_ms()
 
     - (void)applicationDidFinishLaunching: (NSNotification *)notification
     {
-        const bool full_screen = true;
+        #ifdef ENABLE_GUI
+        constexpr bool full_screen = false;
+        #else
+        constexpr bool full_screen = true;
+        #endif
 
         NSRect screen_frame = [[NSScreen mainScreen] frame];
         NSRect frame_rect   = NSMakeRect(0, 0,

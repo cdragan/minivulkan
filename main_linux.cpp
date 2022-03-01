@@ -101,7 +101,11 @@ static bool create_window(Window* w)
         XCB_EVENT_MASK_BUTTON_PRESS | XCB_EVENT_MASK_KEY_PRESS
     };
 
+    #ifdef ENABLE_GUI
+    constexpr bool full_screen = false;
+    #else
     constexpr bool full_screen = true;
+    #endif
 
     constexpr uint16_t width  = full_screen ? 1 : 800;
     constexpr uint16_t height = full_screen ? 1 : 600;

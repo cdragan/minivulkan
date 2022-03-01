@@ -10,7 +10,7 @@
 
 #ifdef ENABLE_GUI
 #   include "imgui/backends/imgui_impl_win32.h"
-extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
+    extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 #endif
 
 struct Window {
@@ -51,10 +51,10 @@ uint64_t get_current_time_ms()
 
 static LRESULT CALLBACK window_proc(HWND hwnd, UINT umsg, WPARAM wparam, LPARAM lparam)
 {
-#   ifdef ENABLE_GUI
+    #ifdef ENABLE_GUI
     if (ImGui_ImplWin32_WndProcHandler(hwnd, umsg, wparam, lparam))
         return 0;
-#   endif
+    #endif
 
     switch (umsg) {
 
@@ -76,17 +76,17 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT umsg, WPARAM wparam, LPARAM 
             if ( ! init_vulkan(w))
                 break;
 
-#           ifdef ENABLE_GUI
+            #ifdef ENABLE_GUI
             ImGui_ImplWin32_Init(hwnd);
-#           endif
+            #endif
 
             return 0;
         }
 
         case WM_PAINT:
-#           ifdef ENABLE_GUI
+            #ifdef ENABLE_GUI
             ImGui_ImplWin32_NewFrame();
-#           endif
+            #endif
             if ( ! draw_frame())
                 break;
 
@@ -133,7 +133,11 @@ static bool create_window(Window* w)
         return false;
     }
 
+    #ifdef ENABLE_GUI
+    constexpr bool full_screen = false;
+    #else
     constexpr bool full_screen = true;
+    #endif
 
     DWORD ws_ex;
     DWORD ws;
