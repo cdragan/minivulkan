@@ -2075,8 +2075,6 @@ static bool dummy_draw(uint32_t image_idx, uint64_t time_ms, VkFence queue_fence
                            nullptr);    // pDescriptorCopies
 
     // Render image
-    dprintf("dummy_draw image %u at %" PRIu64 " ms\n", image_idx, time_ms);
-
     Image& image = vk_swapchain_images[image_idx];
 
     static CommandBuffers<2 * mstd::array_size(vk_swapchain_images)> bufs;
@@ -2298,8 +2296,6 @@ bool draw_frame()
     if ( ! dummy_draw(image_idx, cur_abs_time - base_abs_time, vk_fens[fen_queue]))
         return false;
     fence_set[image_idx] = true;
-
-    dprintf("present image %u\n", image_idx);
 
     static VkPresentInfoKHR present_info = {
         VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
