@@ -440,6 +440,7 @@ bool ImGui_ImplOSX_Init(NSView* view)
 
     io.SetPlatformImeDataFn = [](ImGuiViewport* viewport, ImGuiPlatformImeData* data) -> void
     {
+        #if 0
         if (data->WantVisible)
         {
             [g_InputContext activate];
@@ -450,6 +451,7 @@ bool ImGui_ImplOSX_Init(NSView* view)
             [g_InputContext invalidateCharacterCoordinates];
             [g_InputContext deactivate];
         }
+        #endif
         [g_KeyEventResponder setImePosX:data->InputPos.x imePosY:data->InputPos.y + data->InputLineHeight];
     };
 
