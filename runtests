@@ -3,6 +3,8 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2021-2022 Chris Dragan
 
+set -euo pipefail
+
 UNAME=$(uname -s)
 
 case "$UNAME" in
