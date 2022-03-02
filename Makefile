@@ -114,9 +114,8 @@ ifeq ($(UNAME), Windows)
     LDFLAGS += -nologo
     LDFLAGS += user32.lib kernel32.lib
 
-    CXX   = cl.exe
-    LINK  = link.exe
-    STRIP = true
+    CXX  = cl.exe
+    LINK = link.exe
 
     COMPILER_OUTPUT = -Fo:$1
     LINKER_OUTPUT   = -out:$1
@@ -137,7 +136,6 @@ else
         CFLAGS  += -fsanitize=address
         LDFLAGS += -fsanitize=address
 
-        STRIP = true
         CFLAGS += -O0 -g
     else
         CFLAGS += -DNDEBUG -Os
@@ -244,7 +242,9 @@ $(out_dir):
 define LINK_RULE
 $1: $$(call OBJ_FROM_SRC, $2)
 	$$(LINK) $$(call LINKER_OUTPUT,$$@) $$^ $$(LDFLAGS)
+ifdef STRIP
 	$$(STRIP) $$@
+endif
 endef
 
 $(eval $(call LINK_RULE,$(exe),$(all_threed_src_files)))
