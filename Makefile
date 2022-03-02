@@ -83,8 +83,9 @@ all_vmath_unit_src_files += $(vmath_unit_src_files)
 ##############################################################################
 # Shaders
 
-shader_files += shaders/simple.vert
-shader_files += shaders/phong.frag
+shader_files += shaders/simple.vert.glsl
+shader_files += shaders/phong.frag.glsl
+shader_files += shaders/bezier_surface.tese.glsl
 
 ##############################################################################
 # Compiler flags
@@ -307,13 +308,13 @@ else
 endif
 
 define GLSL_EXT
-$(out_dir)/shaders/%.$1.h: shaders/%.$1 | $(out_dir)/shaders
+$(out_dir)/shaders/%.$1.h: shaders/%.$1.glsl | $(out_dir)/shaders
 	$(GLSL_VALIDATOR) $(GLSL_FLAGS) --variable-name $$(subst .,_,$$(notdir $$<)) -o $$@ $$<
 endef
 
-$(foreach ext, vert frag, $(eval $(call GLSL_EXT,$(ext))))
+$(foreach ext, vert frag tese, $(eval $(call GLSL_EXT,$(ext))))
 
-$(call OBJ_FROM_SRC, minivulkan.cpp) $(out_dir)/minivulkan.cpp.$(asm_suffix): $(addprefix $(out_dir)/,$(addsuffix .h,$(shader_files)))
+$(call OBJ_FROM_SRC, minivulkan.cpp) $(out_dir)/minivulkan.cpp.$(asm_suffix): $(addprefix $(out_dir)/,$(addsuffix .h,$(basename $(shader_files))))
 $(call OBJ_FROM_SRC, minivulkan.cpp) $(out_dir)/minivulkan.cpp.$(asm_suffix): CFLAGS += -I$(out_dir)/shaders
 
 $(eval $(call LINK_RULE,$(out_dir)/vmath_unit,$(all_vmath_unit_src_files)))

@@ -1422,16 +1422,20 @@ static
 static
 #include "phong.frag.h"
 
+static
+#include "bezier_surface.tese.h"
+
 #define DEFINE_SHADERS \
     X(simple_vert) \
-    X(phong_frag)
+    X(phong_frag) \
+    X(bezier_surface_tese)
 
 static const struct {
     const uint32_t* code;
     uint32_t        size;
 } spirv[] =
 {
-#define X(shader) { shader, mstd::array_size(shader) },
+#define X(shader) { shader##_glsl, mstd::array_size(shader##_glsl) },
     DEFINE_SHADERS
 #undef X
 };
