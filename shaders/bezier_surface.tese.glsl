@@ -5,9 +5,58 @@
 
 layout(quads, ccw, equal_spacing) in;
 
+layout(location = 0) out vec3 out_pos;
+layout(location = 1) out vec3 out_normal;
+
+layout(set = 0, binding = 0) uniform data
+{
+    mat4 model_view_proj;
+    mat4 model_view;
+};
+
+vec3 bezier_curve(vec3 p0, vec3 p1, vec3 p2, vec3 p3, float t)
+{
+    const vec3 p01  = mix(p0, p1, t);
+    const vec3 p12  = mix(p1, p2, t);
+    const vec3 p23  = mix(p2, p3, t);
+    const vec3 p012 = mix(p01, p12, t);
+    const vec3 p123 = mix(p12, p23, t);
+    return mix(p012, p123, t);
+}
+
+vec3 bezier_derivative(vec3 p0, vec3 p1, vec3 p2, vec3 p3, float t)
+{
+    const vec3 p012 = mix(p1 - p0, p2 - p1, t);
+    const vec3 p123 = mix(p2 - p1, p3 - p2, t);
+    return 3 * mix(p012, p123, t);
+}
+
 void main()
 {
-    const vec3 ab = mix(gl_in[0].gl_Position.xyz, gl_in[1].gl_Position.xyz, gl_TessCoord.x);
-    const vec3 cd = mix(gl_in[2].gl_Position.xyz, gl_in[3].gl_Position.xyz, gl_TessCoord.x);
-    gl_Position = vec4(mix(ab, cd, gl_TessCoord.x), 1);
+    vec3 p[4];
+    for (uint i = 0; i < 4; i++) {
+        p[i] = bezier_curve(gl_in[i * 4].gl_Position.xyz,
+                            gl_in[i * 4 + 1].gl_Position.xyz,
+                            gl_in[i * 4 + 2].gl_Position.xyz,
+                            gl_in[i * 4 + 3].gl_Position.xyz,
+                            gl_TessCoord.x);
+    }
+
+    const vec3 obj_pos = bezier_curve(p[0], p[1], p[2], p[3], gl_TessCoord.y);
+    gl_Position        = vec4(obj_pos, 1) * model_view_proj;
+    out_pos            = (vec4(obj_pos, 1) * model_view).xyz;
+
+    const vec3 du = bezier_derivative(p[0], p[1], p[2], p[3], gl_TessCoord.y);
+
+    for (uint i = 0; i < 4; i++) {
+        p[i] = bezier_curve(gl_in[i].gl_Position.xyz,
+                            gl_in[i + 4].gl_Position.xyz,
+                            gl_in[i + 8].gl_Position.xyz,
+                            gl_in[i + 12].gl_Position.xyz,
+                            gl_TessCoord.y);
+    }
+    const vec3 dv = bezier_derivative(p[0], p[1], p[2], p[3], gl_TessCoord.x);
+
+    const vec3 obj_normal = cross(du, dv);
+    out_normal = obj_normal * mat3(model_view); // assume uniform scaling
 }
