@@ -14,6 +14,7 @@ bool send_gui_to_gpu(VkCommandBuffer cmdbuf);
 
 inline bool init_gui() { return true; }
 inline bool create_gui_frame() { return true; }
-inline bool send_gui_to_gpu(VkCommandBuffer cmdbuf) { return true; }
+template<typename T>
+inline bool send_gui_to_gpu(T cmdbuf) { return true; }
 
 #endif
