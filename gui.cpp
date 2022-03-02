@@ -1,11 +1,10 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2021-2022 Chris Dragan
 
+#include "gui.h"
 #include "minivulkan.h"
 #include "mstdc.h"
 #include "dprintf.h"
-#include "imgui/imgui.h"
-#include "imgui/backends/imgui_impl_vulkan.h"
 
 static void check_gui_result(VkResult imgui_error)
 {

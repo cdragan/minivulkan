@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2021-2022 Chris Dragan
 
+#include "gui.h"
 #include "minivulkan.h"
 
 #include <stdlib.h>
@@ -8,10 +9,6 @@
 #include <unistd.h>
 #include <dlfcn.h>
 #include <xcb/xcb.h>
-
-#ifdef ENABLE_GUI
-#   include "imgui/imgui.h"
-#endif
 
 struct Window {
     xcb_connection_t* connection;
