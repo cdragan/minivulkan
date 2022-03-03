@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2021-2022 Chris Dragan
 
+#pragma once
+
 #ifdef __APPLE__
 #   define VK_USE_PLATFORM_METAL_EXT
 #endif
@@ -32,6 +34,7 @@
     X(vkGetPhysicalDeviceSurfaceFormatsKHR) \
     X(vkGetPhysicalDeviceFormatProperties) \
     X(vkGetPhysicalDeviceMemoryProperties) \
+    X(vkGetPhysicalDeviceFeatures2) \
     X(vkEnumerateDeviceExtensionProperties) \
     X(vkCreateDevice)
 
@@ -147,6 +150,7 @@ enum e_device_functions {
 #define vkGetPhysicalDeviceSurfaceFormatsKHR      ((PFN_vkGetPhysicalDeviceSurfaceFormatsKHR)      vk_instance_functions[ id_vkGetPhysicalDeviceSurfaceFormatsKHR])
 #define vkGetPhysicalDeviceFormatProperties       ((PFN_vkGetPhysicalDeviceFormatProperties)       vk_instance_functions[ id_vkGetPhysicalDeviceFormatProperties])
 #define vkGetPhysicalDeviceMemoryProperties       ((PFN_vkGetPhysicalDeviceMemoryProperties)       vk_instance_functions[ id_vkGetPhysicalDeviceMemoryProperties])
+#define vkGetPhysicalDeviceFeatures2              ((PFN_vkGetPhysicalDeviceFeatures2)              vk_instance_functions[ id_vkGetPhysicalDeviceFeatures2])
 #define vkEnumerateDeviceExtensionProperties      ((PFN_vkEnumerateDeviceExtensionProperties)      vk_instance_functions[ id_vkEnumerateDeviceExtensionProperties])
 #define vkCreateMetalSurfaceEXT                   ((PFN_vkCreateMetalSurfaceEXT)                   vk_instance_functions[ id_vkCreateMetalSurfaceEXT])
 #define vkCreateXcbSurfaceKHR                     ((PFN_vkCreateXcbSurfaceKHR)                     vk_instance_functions[ id_vkCreateXcbSurfaceKHR])

@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2021-2022 Chris Dragan
 
+#include "vulkan_functions.h"
+
 #ifdef ENABLE_GUI
 
 #   include "imgui/imgui.h"

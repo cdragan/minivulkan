@@ -283,6 +283,11 @@ quat normalize(const quat& q)
     return result;
 }
 
+mat3::mat3(const mat4& mtx)
+{
+    mstd::mem_copy(&data[0], &mtx.data[0], sizeof(data));
+}
+
 mat3::mat3(const float* ptr)
 {
     mstd::mem_copy(data, ptr, sizeof(data));
@@ -290,6 +295,7 @@ mat3::mat3(const float* ptr)
 
 mat3::mat3(const quat& q)
 {
+    // TODO this is incorrect, it assumed mat3x3, but the layout has changed to mat3x4 (3 columns, 4 rows)
     const float4 q2f = float4::load4_aligned(q.data) * float4{2, 2, 2, 2};
 
     quat q2w;
@@ -324,13 +330,55 @@ mat3 mat3::identity()
     return result;
 }
 
+mat3 vmath::transpose(const mat3& mtx)
+{
+    float4 row[4] = {
+        float4::load4_aligned(&mtx.data[0]),
+        float4::load4_aligned(&mtx.data[4]),
+        float4::load4_aligned(&mtx.data[8]),
+        float4::load_zero()
+    };
+
+    transpose(row[0], row[1], row[2], row[3]);
+
+    mat3 result;
+    row[0].store4_aligned(&result.data[0]);
+    row[1].store4_aligned(&result.data[4]);
+    row[2].store4_aligned(&result.data[8]);
+    return result;
+}
+
+mat3 vmath::inverse(const mat3& mtx)
+{
+    mat3 result;
+    mstd::mem_zero(&result, sizeof(result));
+
+    result.a00 =  (mtx.a11 * mtx.a22 - mtx.a21 * mtx.a12);
+    result.a10 = -(mtx.a10 * mtx.a22 - mtx.a20 * mtx.a12);
+    result.a20 =  (mtx.a10 * mtx.a21 - mtx.a20 * mtx.a11);
+    result.a01 = -(mtx.a01 * mtx.a22 - mtx.a21 * mtx.a02);
+    result.a11 =  (mtx.a00 * mtx.a22 - mtx.a20 * mtx.a02);
+    result.a21 = -(mtx.a00 * mtx.a21 - mtx.a20 * mtx.a01);
+    result.a02 =  (mtx.a01 * mtx.a12 - mtx.a11 * mtx.a02);
+    result.a12 = -(mtx.a00 * mtx.a12 - mtx.a10 * mtx.a02);
+    result.a22 =  (mtx.a00 * mtx.a11 - mtx.a10 * mtx.a01);
+
+    const float det = (mtx.a00 * result.a00) + (mtx.a01 * result.a10) + (mtx.a02 * result.a20);
+
+    const float rdet = 1.0f / det;
+
+    result.a00 *= rdet; result.a01 *= rdet; result.a02 *= rdet;
+    result.a10 *= rdet; result.a11 *= rdet; result.a12 *= rdet;
+    result.a20 *= rdet; result.a21 *= rdet; result.a22 *= rdet;
+    return result;
+
+}
+
 mat4::mat4(const mat3& mtx)
 {
     mstd::mem_zero(data, sizeof(data));
 
-    mstd::mem_copy(&data[0], &mtx.data[0], sizeof(float) * 3);
-    mstd::mem_copy(&data[4], &mtx.data[3], sizeof(float) * 3);
-    mstd::mem_copy(&data[8], &mtx.data[6], sizeof(float) * 3);
+    mstd::mem_copy(data, mtx.data, sizeof(data));
 
     a33 = 1;
 }

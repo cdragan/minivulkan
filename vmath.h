@@ -342,24 +342,30 @@ inline quat operator*(quat q1, const quat& q2)
 quat conjugate(const quat& q);
 quat normalize(const quat& q);
 
+// The storage for mat3 is actually mat3x4 (3 columns, 4 rows) to match
+// how we pass mat3 data to shaders
 struct mat3 {
     union {
         struct {
             alignas(4 * sizeof(float))
             float a00;
-            float a10, a20;
-            float a01, a11, a21;
-            float a02, a12, a22;
+            float a10, a20, a30;
+            float a01, a11, a21, a31;
+            float a02, a12, a22, a32;
         };
-        alignas(4 * sizeof(float)) float data[9];
+        alignas(4 * sizeof(float)) float data[12];
     };
 
     mat3() = default;
+    explicit mat3(const mat4& mtx);
     explicit mat3(const float* ptr);
     explicit mat3(const quat& q);
     void set_identity();
     static mat3 identity();
 };
+
+mat3 transpose(const mat3& mtx);
+mat3 inverse(const mat3& mtx);
 
 struct mat4 {
     union {

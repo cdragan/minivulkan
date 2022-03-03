@@ -561,6 +561,10 @@ static bool load_device_functions()
             });
 }
 
+static VkPhysicalDeviceFeatures2 vk_features = {
+    VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2
+};
+
 static bool create_device()
 {
     if ( ! find_gpu())
@@ -568,6 +572,8 @@ static bool create_device()
 
     if ( ! get_device_extensions())
         return false;
+
+    vkGetPhysicalDeviceFeatures2(vk_phys_dev, &vk_features);
 
     static VkDeviceQueueCreateInfo queue_create_info = {
         VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
@@ -582,7 +588,7 @@ static bool create_device()
 
     static VkDeviceCreateInfo dev_create_info = {
         VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
-        nullptr,
+        &vk_features,
         0,
         1,
         &queue_create_info,
@@ -1413,6 +1419,12 @@ static bool create_frame_buffer()
     return true;
 }
 
+enum WhatGeometry {
+    geom_cube,
+    geom_cubic_patch
+};
+static constexpr WhatGeometry what_geometry = geom_cubic_patch;
+
 static VkPipelineLayout vk_gr_pipeline_layout = VK_NULL_HANDLE;
 static VkPipeline       vk_gr_pipeline        = VK_NULL_HANDLE;
 
@@ -1423,12 +1435,28 @@ static
 #include "phong.frag.h"
 
 static
-#include "bezier_surface.tese.h"
+#include "pass_through.vert.h"
+
+static
+#include "bezier_surface_quadratic.tesc.h"
+
+static
+#include "bezier_surface_quadratic.tese.h"
+
+static
+#include "bezier_surface_cubic.tesc.h"
+
+static
+#include "bezier_surface_cubic.tese.h"
 
 #define DEFINE_SHADERS \
     X(simple_vert) \
     X(phong_frag) \
-    X(bezier_surface_tese)
+    X(pass_through_vert) \
+    X(bezier_surface_quadratic_tesc) \
+    X(bezier_surface_quadratic_tese) \
+    X(bezier_surface_cubic_tesc) \
+    X(bezier_surface_cubic_tese)
 
 static const struct {
     const uint32_t* code;
@@ -1436,6 +1464,12 @@ static const struct {
 } spirv[] =
 {
 #define X(shader) { shader##_glsl, mstd::array_size(shader##_glsl) },
+    DEFINE_SHADERS
+#undef X
+};
+
+enum ShaderIds {
+#define X(shader) shader_##shader,
     DEFINE_SHADERS
 #undef X
 };
@@ -1472,7 +1506,9 @@ static bool create_pipeline_layouts()
         0,
         VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
         1,
-        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT
+            | (what_geometry == geom_cube ? 0
+                    : VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT | VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT),
         nullptr
     };
 
@@ -1511,7 +1547,7 @@ struct Vertex {
     int8_t alignment[2]; // VkPhysicalDevicePortabilitySubsetPropertiesKHR::minVertexInputBindingStrideAlignment
 };
 
-static bool create_graphics_pipelines()
+static bool create_simple_graphics_pipeline()
 {
     if (vk_gr_pipeline != VK_NULL_HANDLE) {
         vkDestroyPipeline(vk_dev, vk_gr_pipeline, nullptr);
@@ -1538,8 +1574,8 @@ static bool create_graphics_pipelines()
             nullptr         // pSpecializationInfo
         }
     };
-    shader_stages[0].module = shaders[0];
-    shader_stages[1].module = shaders[1];
+    shader_stages[0].module = shaders[shader_simple_vert];
+    shader_stages[1].module = shaders[shader_phong_frag];
 
     static VkVertexInputBindingDescription vertex_bindings[] = {
         {
@@ -1712,6 +1748,239 @@ static bool create_graphics_pipelines()
                                                        nullptr,
                                                        &vk_gr_pipeline));
     return res == VK_SUCCESS;
+}
+
+static bool create_cubic_patch_graphics_pipeline()
+{
+    if (vk_gr_pipeline != VK_NULL_HANDLE) {
+        vkDestroyPipeline(vk_dev, vk_gr_pipeline, nullptr);
+        vk_gr_pipeline = VK_NULL_HANDLE;
+    }
+
+    static VkPipelineShaderStageCreateInfo shader_stages[] = {
+        {
+            VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+            nullptr,
+            0,              // flags
+            VK_SHADER_STAGE_VERTEX_BIT,
+            VK_NULL_HANDLE, // module
+            "main",         // pName
+            nullptr         // pSpecializationInfo
+        },
+        {
+            VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+            nullptr,
+            0,              // flags
+            VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT,
+            VK_NULL_HANDLE, // module
+            "main",         // pName
+            nullptr         // pSpecializationInfo
+        },
+        {
+            VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+            nullptr,
+            0,              // flags
+            VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT,
+            VK_NULL_HANDLE, // module
+            "main",         // pName
+            nullptr         // pSpecializationInfo
+        },
+        {
+            VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+            nullptr,
+            0,              // flags
+            VK_SHADER_STAGE_FRAGMENT_BIT,
+            VK_NULL_HANDLE, // module
+            "main",         // pName
+            nullptr         // pSpecializationInfo
+        }
+    };
+    shader_stages[0].module = shaders[shader_pass_through_vert];
+    shader_stages[1].module = shaders[shader_bezier_surface_cubic_tesc];
+    shader_stages[2].module = shaders[shader_bezier_surface_cubic_tese];
+    shader_stages[3].module = shaders[shader_phong_frag];
+
+    static VkVertexInputBindingDescription vertex_bindings[] = {
+        {
+            0,
+            sizeof(Vertex),
+            VK_VERTEX_INPUT_RATE_VERTEX
+        }
+    };
+
+    static VkVertexInputAttributeDescription vertex_attributes[] = {
+        {
+            0,  // location
+            0,  // binding
+            VK_FORMAT_R8G8B8_SNORM,
+            offsetof(Vertex, pos)
+        }
+    };
+
+    static VkPipelineVertexInputStateCreateInfo vertex_input_state = {
+        VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
+        nullptr,
+        0,  // flags
+        mstd::array_size(vertex_bindings),
+        vertex_bindings,
+        mstd::array_size(vertex_attributes),
+        vertex_attributes
+    };
+
+    static VkPipelineInputAssemblyStateCreateInfo input_assembly_state = {
+        VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
+        nullptr,
+        0,  // flags
+        VK_PRIMITIVE_TOPOLOGY_PATCH_LIST,
+        VK_FALSE
+    };
+
+    static VkPipelineTessellationStateCreateInfo tessellation_state = {
+        VK_STRUCTURE_TYPE_PIPELINE_TESSELLATION_STATE_CREATE_INFO,
+        nullptr,
+        0,  // flags
+        16  // patchControlPoints
+    };
+
+    static VkViewport viewport = {
+        0,      // x
+        0,      // y
+        0,      // width
+        0,      // height
+        0,      // minDepth
+        1       // maxDepth
+    };
+
+    // Flip Y coordinate.  The world coordinate system assumes Y going from bottom to top,
+    // but in Vulkan screen-space Y coordinate goes from top to bottom.
+    viewport.y      = static_cast<float>(vk_surface_caps.currentExtent.height);
+    viewport.width  = static_cast<float>(vk_surface_caps.currentExtent.width);
+    viewport.height = -static_cast<float>(vk_surface_caps.currentExtent.height);
+
+    static VkRect2D scissor = {
+        { 0, 0 },   // offset
+        { 0, 0 }    // extent
+    };
+
+    scissor.extent = vk_surface_caps.currentExtent;
+
+    static VkPipelineViewportStateCreateInfo viewport_state = {
+        VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
+        nullptr,
+        0,  // flags
+        1,
+        &viewport,
+        1,
+        &scissor
+    };
+
+    static VkPipelineRasterizationStateCreateInfo rasterization_state = {
+        VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
+        nullptr,
+        0,          // flags
+        VK_FALSE,   // depthClampEnable
+        VK_FALSE,   // rasterizerDiscardEnable
+        VK_POLYGON_MODE_FILL,
+        VK_CULL_MODE_BACK_BIT,
+        VK_FRONT_FACE_COUNTER_CLOCKWISE,
+        VK_FALSE,   // depthBiasEnable
+        0,          // depthBiasConstantFactor
+        0,          // depthBiasClamp
+        0,          // depthBiasSlopeFactor
+        1           // lineWidth
+    };
+
+    static VkPipelineMultisampleStateCreateInfo multisample_state = {
+        VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
+        nullptr,
+        0,          // flags
+        VK_SAMPLE_COUNT_1_BIT,
+        VK_FALSE,   // sampleShadingEnable
+        0,          // minSampleShading
+        nullptr,    // pSampleMask
+        VK_FALSE,   // alphaToCoverageEnable
+        VK_FALSE    // alphaToOneEnable
+    };
+
+    static VkPipelineDepthStencilStateCreateInfo depth_stencil_state = {
+        VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
+        nullptr,
+        0,          // flags
+        VK_TRUE,    // depthTestEnable
+        VK_TRUE,    // depthWriteEnable
+        VK_COMPARE_OP_GREATER_OR_EQUAL,
+        VK_FALSE,   // depthBoundsTestEnable
+        VK_FALSE,   // stencilTestEnable
+        { },        // front
+        { },        // back
+        0,          // minDepthBounds
+        0           // maxDepthBounds
+    };
+
+    static VkPipelineColorBlendAttachmentState color_blend_att = {
+        VK_FALSE,               // blendEnable
+        VK_BLEND_FACTOR_ZERO,   // srcColorBlendFactor
+        VK_BLEND_FACTOR_ZERO,   // dstColorBlendFactor
+        VK_BLEND_OP_ADD,        // colorBlendOp
+        VK_BLEND_FACTOR_ZERO,   // srcAlphaBlendFactor
+        VK_BLEND_FACTOR_ZERO,   // dstAlphaBlendFactor
+        VK_BLEND_OP_ADD,        // alphaBlendOp
+                                // colorWriteMask
+        VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT
+    };
+
+    static VkPipelineColorBlendStateCreateInfo color_blend_state = {
+        VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
+        nullptr,
+        0,          // flags
+        VK_FALSE,   // logicOpEnable
+        VK_LOGIC_OP_CLEAR,
+        1,          // attachmentCount
+        &color_blend_att,
+        { }         // blendConstants
+    };
+
+    static VkGraphicsPipelineCreateInfo pipeline_create_info = {
+        VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
+        nullptr,
+        0,              // flags
+        mstd::array_size(shader_stages),
+        shader_stages,
+        &vertex_input_state,
+        &input_assembly_state,
+        &tessellation_state,
+        &viewport_state,
+        &rasterization_state,
+        &multisample_state,
+        &depth_stencil_state,
+        &color_blend_state,
+        nullptr,        // pDynamicState
+        VK_NULL_HANDLE, // layout
+        VK_NULL_HANDLE, // renderPass
+        0,              // subpass
+        VK_NULL_HANDLE, // basePipelineHandle
+        -1              // basePipelineIndex
+    };
+
+    pipeline_create_info.layout     = vk_gr_pipeline_layout;
+    pipeline_create_info.renderPass = vk_render_pass;
+
+    const VkResult res = CHK(vkCreateGraphicsPipelines(vk_dev,
+                                                       VK_NULL_HANDLE,
+                                                       1,
+                                                       &pipeline_create_info,
+                                                       nullptr,
+                                                       &vk_gr_pipeline));
+    return res == VK_SUCCESS;
+}
+
+static bool create_graphics_pipelines()
+{
+    // TODO unify common parts
+    if (what_geometry == geom_cube)
+        return create_simple_graphics_pipeline();
+    else
+        return create_cubic_patch_graphics_pipeline();
 }
 
 void idle_queue()
@@ -1945,6 +2214,42 @@ static bool create_cube(Buffer* vertex_buffer, Buffer* index_buffer)
     return filler.wait_until_done();
 }
 
+static bool create_cubic_patch(Buffer* vertex_buffer, Buffer* index_buffer)
+{
+    HostFiller filler;
+    if ( ! filler.init(0x10000))
+        return false;
+
+    static const Vertex vertices[] = {
+        { { -127,  127,  127 }, { }, {} },
+        { {  127,  127,  127 }, { }, {} },
+        { {  127, -127,  127 }, { }, {} },
+        { { -127, -127,  127 }, { }, {} },
+        { { -127,  127, -127 }, { }, {} },
+        { {  127,  127, -127 }, { }, {} },
+        { {  127, -127, -127 }, { }, {} },
+        { { -127, -127, -127 }, { }, {} },
+    };
+
+    if ( ! filler.fill_buffer(vertex_buffer, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+                              vertices, sizeof(vertices)))
+        return false;
+
+    static const uint16_t indices[] = {
+        0, 0, 3, 3,
+        0, 1, 2, 3,
+        4, 5, 6, 7,
+        4, 4, 7, 7,
+    };
+
+    if ( ! filler.fill_buffer(index_buffer, VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
+                              indices, sizeof(indices)))
+        return false;
+
+    filler.send_to_gpu();
+    return filler.wait_until_done();
+}
+
 static constexpr VkClearValue make_clear_color(float r, float g, float b, float a)
 {
     VkClearValue value = { };
@@ -1973,8 +2278,14 @@ static bool dummy_draw(uint32_t image_idx, uint64_t time_ms, VkFence queue_fence
         return false;
 
     if ( ! vertex_buffer.allocated()) {
-        if ( ! create_cube(&vertex_buffer, &index_buffer))
-            return false;
+        if (what_geometry == geom_cube) {
+            if ( ! create_cube(&vertex_buffer, &index_buffer))
+                return false;
+        }
+        else if (what_geometry == geom_cubic_patch) {
+            if ( ! create_cubic_patch(&vertex_buffer, &index_buffer))
+                return false;
+        }
     }
 
     // Allocate descriptor set
@@ -2024,10 +2335,11 @@ static bool dummy_draw(uint32_t image_idx, uint64_t time_ms, VkFence queue_fence
     // Create shader data
     static Buffer shader_data;
     struct UniformBuffer {
-        vmath::mat4   model_view_proj;
-        vmath::mat4   model_view;
-        vmath::vec<4> color;
-        vmath::vec<4> lights[1];
+        vmath::mat4 model_view_proj;  // transforms to camera space for rasterization
+        vmath::mat4 model;            // transforms to world space for lighting
+        vmath::mat3 model_normal;     // inverse transpose for transforming normals to world space
+        vmath::vec4 color;            // object color
+        vmath::vec4 lights[1];        // light positions in world space
     };
     static uint32_t     slot_size;
     static Map<uint8_t> host_shader_data;
@@ -2055,10 +2367,11 @@ static bool dummy_draw(uint32_t image_idx, uint64_t time_ms, VkFence queue_fence
             0.01f,                  // near_plane
             100.0f,                 // far_plane
             0.0f);                  // depth_bias
-    uniform_data->model_view      = model_view;
     uniform_data->model_view_proj = model_view * proj;
+    uniform_data->model           = model_view;
+    uniform_data->model_normal    = vmath::transpose(vmath::inverse(vmath::mat3(model_view)));
     uniform_data->color           = vmath::vec<4>(0.7f, 0.1f, 0.1f, 1.0f);
-    uniform_data->lights[0]       = vmath::vec<4>(10.0f, 10.0f, -10.0f, 1.0f);
+    uniform_data->lights[0]       = vmath::vec<4>(5.0f, 5.0f, -5.0f, 1.0f);
 
     // Send matrices to GPU
     if ( ! host_shader_data.flush(slot_size * image_idx, slot_size))
@@ -2173,8 +2486,13 @@ static bool dummy_draw(uint32_t image_idx, uint64_t time_ms, VkFence queue_fence
                             0,          // dynamicOffsetCount
                             nullptr);   // pDynamicOffsets
 
+    constexpr uint32_t index_count =
+        (what_geometry == geom_cube)        ? 36 :
+        (what_geometry == geom_cubic_patch) ? 16 :
+        0;
+
     vkCmdDrawIndexed(buf,
-                     36,    // indexCount
+                     index_count,
                      1,     // instanceCount
                      0,     // firstVertex
                      0,     // vertexOffset

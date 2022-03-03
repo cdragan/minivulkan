@@ -2,21 +2,23 @@
 // Copyright (c) 2021-2022 Chris Dragan
 
 #version 460 core
+#extension GL_EXT_scalar_block_layout: require
 
-layout(location = 0) in  vec3 pos;
-layout(location = 1) in  vec3 normal;
+layout(location = 0) in  vec3 in_pos;
+layout(location = 1) in  vec3 in_normal;
 
 layout(location = 0) out vec4 out_color;
 
 layout(constant_id = 0) const uint num_lights = 1;
 
-layout(set = 0, binding = 0) uniform data
+layout(set = 0, binding = 0, std430) uniform ubo_data
 {
-    mat4 model_view_proj;
-    mat4 model_view;
-    vec4 color;
-    vec4 lights[num_lights > 0 ? num_lights : 1];
-};
+    mat4   model_view_proj;
+    mat4   model;
+    mat3x4 model_normal;
+    vec4   color;
+    vec4   lights[num_lights > 0 ? num_lights : 1];
+} ubo;
 
 float calculate_lighting(vec3 light_pos, vec3 surface_pos, vec3 surface_normal)
 {
@@ -42,14 +44,16 @@ float calculate_lighting(vec3 light_pos, vec3 surface_pos, vec3 surface_normal)
 
 void main()
 {
-    vec3 lit_color = color.xyz;
+    vec3 lit_color = ubo.color.xyz;
 
     if (num_lights > 0) {
 
         float attenuation = 0;
 
+        const vec3 n_normal = normalize(in_normal);
+
         for (uint i = 0; i < num_lights; i++) {
-            attenuation += calculate_lighting(lights[i].xyz, pos, normal);
+            attenuation += calculate_lighting(ubo.lights[i].xyz, in_pos, n_normal);
         }
 
         lit_color = lit_color * attenuation;
