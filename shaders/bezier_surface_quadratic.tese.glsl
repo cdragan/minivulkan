@@ -52,6 +52,6 @@ void main()
     }
     const vec3 dv = bezier_derivative_quadratic(p[0], p[1], p[2], gl_TessCoord.x);
 
-    const vec3 obj_normal = cross(du, dv);
+    const vec3 obj_normal = cross(dv, du);
     out_normal = obj_normal * mat3(ubo.model_normal);
 }

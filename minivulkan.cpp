@@ -1421,9 +1421,10 @@ static bool create_frame_buffer()
 
 enum WhatGeometry {
     geom_cube,
-    geom_cubic_patch
+    geom_cubic_patch,
+    geom_quadratic_patch
 };
-static constexpr WhatGeometry what_geometry = geom_cubic_patch;
+static constexpr WhatGeometry what_geometry = geom_quadratic_patch;
 
 static VkPipelineLayout vk_gr_pipeline_layout = VK_NULL_HANDLE;
 static VkPipeline       vk_gr_pipeline        = VK_NULL_HANDLE;
@@ -1750,7 +1751,7 @@ static bool create_simple_graphics_pipeline()
     return res == VK_SUCCESS;
 }
 
-static bool create_cubic_patch_graphics_pipeline()
+static bool create_patch_graphics_pipeline()
 {
     if (vk_gr_pipeline != VK_NULL_HANDLE) {
         vkDestroyPipeline(vk_dev, vk_gr_pipeline, nullptr);
@@ -1796,8 +1797,14 @@ static bool create_cubic_patch_graphics_pipeline()
         }
     };
     shader_stages[0].module = shaders[shader_pass_through_vert];
-    shader_stages[1].module = shaders[shader_bezier_surface_cubic_tesc];
-    shader_stages[2].module = shaders[shader_bezier_surface_cubic_tese];
+    if (what_geometry == geom_cubic_patch) {
+        shader_stages[1].module = shaders[shader_bezier_surface_cubic_tesc];
+        shader_stages[2].module = shaders[shader_bezier_surface_cubic_tese];
+    }
+    else {
+        shader_stages[1].module = shaders[shader_bezier_surface_quadratic_tesc];
+        shader_stages[2].module = shaders[shader_bezier_surface_quadratic_tese];
+    }
     shader_stages[3].module = shaders[shader_phong_frag];
 
     static VkVertexInputBindingDescription vertex_bindings[] = {
@@ -1839,7 +1846,7 @@ static bool create_cubic_patch_graphics_pipeline()
         VK_STRUCTURE_TYPE_PIPELINE_TESSELLATION_STATE_CREATE_INFO,
         nullptr,
         0,  // flags
-        16  // patchControlPoints
+        (what_geometry == geom_cubic_patch) ? 16 : 9 // patchControlPoints
     };
 
     static VkViewport viewport = {
@@ -1980,7 +1987,7 @@ static bool create_graphics_pipelines()
     if (what_geometry == geom_cube)
         return create_simple_graphics_pipeline();
     else
-        return create_cubic_patch_graphics_pipeline();
+        return create_patch_graphics_pipeline();
 }
 
 void idle_queue()
@@ -2250,6 +2257,41 @@ static bool create_cubic_patch(Buffer* vertex_buffer, Buffer* index_buffer)
     return filler.wait_until_done();
 }
 
+static bool create_quadratic_patch(Buffer* vertex_buffer, Buffer* index_buffer)
+{
+    HostFiller filler;
+    if ( ! filler.init(0x10000))
+        return false;
+
+    static const Vertex vertices[] = {
+        { { -127,  127,  127 }, { }, {} },
+        { {  127,  127,  127 }, { }, {} },
+        { {  127, -127,  127 }, { }, {} },
+        { { -127, -127,  127 }, { }, {} },
+        { { -127,  127, -127 }, { }, {} },
+        { {  127,  127, -127 }, { }, {} },
+        { {  127, -127, -127 }, { }, {} },
+        { { -127, -127, -127 }, { }, {} },
+    };
+
+    if ( ! filler.fill_buffer(vertex_buffer, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+                              vertices, sizeof(vertices)))
+        return false;
+
+    static const uint16_t indices[] = {
+        0, 0, 0,
+        4, 5, 1,
+        7, 6, 2,
+    };
+
+    if ( ! filler.fill_buffer(index_buffer, VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
+                              indices, sizeof(indices)))
+        return false;
+
+    filler.send_to_gpu();
+    return filler.wait_until_done();
+}
+
 static constexpr VkClearValue make_clear_color(float r, float g, float b, float a)
 {
     VkClearValue value = { };
@@ -2284,6 +2326,10 @@ static bool dummy_draw(uint32_t image_idx, uint64_t time_ms, VkFence queue_fence
         }
         else if (what_geometry == geom_cubic_patch) {
             if ( ! create_cubic_patch(&vertex_buffer, &index_buffer))
+                return false;
+        }
+        else if (what_geometry == geom_quadratic_patch) {
+            if ( ! create_quadratic_patch(&vertex_buffer, &index_buffer))
                 return false;
         }
     }
@@ -2487,8 +2533,9 @@ static bool dummy_draw(uint32_t image_idx, uint64_t time_ms, VkFence queue_fence
                             nullptr);   // pDynamicOffsets
 
     constexpr uint32_t index_count =
-        (what_geometry == geom_cube)        ? 36 :
-        (what_geometry == geom_cubic_patch) ? 16 :
+        (what_geometry == geom_cube)            ? 36 :
+        (what_geometry == geom_cubic_patch)     ? 16 :
+        (what_geometry == geom_quadratic_patch) ?  9 :
         0;
 
     vkCmdDrawIndexed(buf,
