@@ -1470,6 +1470,7 @@ static const struct {
 };
 
 enum ShaderIds {
+    no_shader,
 #define X(shader) shader_##shader,
     DEFINE_SHADERS
 #undef X
@@ -1507,9 +1508,10 @@ static bool create_pipeline_layouts()
         0,
         VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
         1,
-        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT
-            | (what_geometry == geom_cube ? 0
-                    : VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT | VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT),
+        VK_SHADER_STAGE_VERTEX_BIT
+            | VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT
+            | VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT
+            | VK_SHADER_STAGE_FRAGMENT_BIT,
         nullptr
     };
 
@@ -1548,7 +1550,16 @@ struct Vertex {
     int8_t alignment[2]; // VkPhysicalDevicePortabilitySubsetPropertiesKHR::minVertexInputBindingStrideAlignment
 };
 
-static bool create_simple_graphics_pipeline()
+struct ShaderInfo {
+    uint8_t                                  shader_ids[4];
+    uint8_t                                  vertex_stride;
+    uint8_t                                  topology;
+    uint8_t                                  patch_control_points;
+    uint8_t                                  num_vertex_attributes;
+    const VkVertexInputAttributeDescription* vertex_attributes;
+};
+
+static bool create_graphics_pipeline(const ShaderInfo& shader_info)
 {
     if (vk_gr_pipeline != VK_NULL_HANDLE) {
         vkDestroyPipeline(vk_dev, vk_gr_pipeline, nullptr);
@@ -1570,200 +1581,6 @@ static bool create_simple_graphics_pipeline()
             nullptr,
             0,              // flags
             VK_SHADER_STAGE_FRAGMENT_BIT,
-            VK_NULL_HANDLE, // module
-            "main",         // pName
-            nullptr         // pSpecializationInfo
-        }
-    };
-    shader_stages[0].module = shaders[shader_simple_vert];
-    shader_stages[1].module = shaders[shader_phong_frag];
-
-    static VkVertexInputBindingDescription vertex_bindings[] = {
-        {
-            0,
-            sizeof(Vertex),
-            VK_VERTEX_INPUT_RATE_VERTEX
-        }
-    };
-
-    static VkVertexInputAttributeDescription vertex_attributes[] = {
-        {
-            0,  // location
-            0,  // binding
-            VK_FORMAT_R8G8B8_SNORM,
-            offsetof(Vertex, pos)
-        },
-        {
-            1,  // location
-            0,  // binding
-            VK_FORMAT_R8G8B8_SNORM,
-            offsetof(Vertex, normal)
-        }
-    };
-
-    static VkPipelineVertexInputStateCreateInfo vertex_input_state = {
-        VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
-        nullptr,
-        0,  // flags
-        mstd::array_size(vertex_bindings),
-        vertex_bindings,
-        mstd::array_size(vertex_attributes),
-        vertex_attributes
-    };
-
-    static VkPipelineInputAssemblyStateCreateInfo input_assembly_state = {
-        VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
-        nullptr,
-        0,  // flags
-        VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
-        VK_FALSE
-    };
-
-    static VkViewport viewport = {
-        0,      // x
-        0,      // y
-        0,      // width
-        0,      // height
-        0,      // minDepth
-        1       // maxDepth
-    };
-
-    // Flip Y coordinate.  The world coordinate system assumes Y going from bottom to top,
-    // but in Vulkan screen-space Y coordinate goes from top to bottom.
-    viewport.y      = static_cast<float>(vk_surface_caps.currentExtent.height);
-    viewport.width  = static_cast<float>(vk_surface_caps.currentExtent.width);
-    viewport.height = -static_cast<float>(vk_surface_caps.currentExtent.height);
-
-    static VkRect2D scissor = {
-        { 0, 0 },   // offset
-        { 0, 0 }    // extent
-    };
-
-    scissor.extent = vk_surface_caps.currentExtent;
-
-    static VkPipelineViewportStateCreateInfo viewport_state = {
-        VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
-        nullptr,
-        0,  // flags
-        1,
-        &viewport,
-        1,
-        &scissor
-    };
-
-    static VkPipelineRasterizationStateCreateInfo rasterization_state = {
-        VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
-        nullptr,
-        0,          // flags
-        VK_FALSE,   // depthClampEnable
-        VK_FALSE,   // rasterizerDiscardEnable
-        VK_POLYGON_MODE_FILL,
-        VK_CULL_MODE_BACK_BIT,
-        VK_FRONT_FACE_COUNTER_CLOCKWISE,
-        VK_FALSE,   // depthBiasEnable
-        0,          // depthBiasConstantFactor
-        0,          // depthBiasClamp
-        0,          // depthBiasSlopeFactor
-        1           // lineWidth
-    };
-
-    static VkPipelineMultisampleStateCreateInfo multisample_state = {
-        VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
-        nullptr,
-        0,          // flags
-        VK_SAMPLE_COUNT_1_BIT,
-        VK_FALSE,   // sampleShadingEnable
-        0,          // minSampleShading
-        nullptr,    // pSampleMask
-        VK_FALSE,   // alphaToCoverageEnable
-        VK_FALSE    // alphaToOneEnable
-    };
-
-    static VkPipelineDepthStencilStateCreateInfo depth_stencil_state = {
-        VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
-        nullptr,
-        0,          // flags
-        VK_TRUE,    // depthTestEnable
-        VK_TRUE,    // depthWriteEnable
-        VK_COMPARE_OP_GREATER_OR_EQUAL,
-        VK_FALSE,   // depthBoundsTestEnable
-        VK_FALSE,   // stencilTestEnable
-        { },        // front
-        { },        // back
-        0,          // minDepthBounds
-        0           // maxDepthBounds
-    };
-
-    static VkPipelineColorBlendAttachmentState color_blend_att = {
-        VK_FALSE,               // blendEnable
-        VK_BLEND_FACTOR_ZERO,   // srcColorBlendFactor
-        VK_BLEND_FACTOR_ZERO,   // dstColorBlendFactor
-        VK_BLEND_OP_ADD,        // colorBlendOp
-        VK_BLEND_FACTOR_ZERO,   // srcAlphaBlendFactor
-        VK_BLEND_FACTOR_ZERO,   // dstAlphaBlendFactor
-        VK_BLEND_OP_ADD,        // alphaBlendOp
-                                // colorWriteMask
-        VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT
-    };
-
-    static VkPipelineColorBlendStateCreateInfo color_blend_state = {
-        VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
-        nullptr,
-        0,          // flags
-        VK_FALSE,   // logicOpEnable
-        VK_LOGIC_OP_CLEAR,
-        1,          // attachmentCount
-        &color_blend_att,
-        { }         // blendConstants
-    };
-
-    static VkGraphicsPipelineCreateInfo pipeline_create_info = {
-        VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
-        nullptr,
-        0,              // flags
-        mstd::array_size(shader_stages),
-        shader_stages,
-        &vertex_input_state,
-        &input_assembly_state,
-        nullptr,        // pTessellationState
-        &viewport_state,
-        &rasterization_state,
-        &multisample_state,
-        &depth_stencil_state,
-        &color_blend_state,
-        nullptr,        // pDynamicState
-        VK_NULL_HANDLE, // layout
-        VK_NULL_HANDLE, // renderPass
-        0,              // subpass
-        VK_NULL_HANDLE, // basePipelineHandle
-        -1              // basePipelineIndex
-    };
-
-    pipeline_create_info.layout     = vk_gr_pipeline_layout;
-    pipeline_create_info.renderPass = vk_render_pass;
-
-    const VkResult res = CHK(vkCreateGraphicsPipelines(vk_dev,
-                                                       VK_NULL_HANDLE,
-                                                       1,
-                                                       &pipeline_create_info,
-                                                       nullptr,
-                                                       &vk_gr_pipeline));
-    return res == VK_SUCCESS;
-}
-
-static bool create_patch_graphics_pipeline()
-{
-    if (vk_gr_pipeline != VK_NULL_HANDLE) {
-        vkDestroyPipeline(vk_dev, vk_gr_pipeline, nullptr);
-        vk_gr_pipeline = VK_NULL_HANDLE;
-    }
-
-    static VkPipelineShaderStageCreateInfo shader_stages[] = {
-        {
-            VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-            nullptr,
-            0,              // flags
-            VK_SHADER_STAGE_VERTEX_BIT,
             VK_NULL_HANDLE, // module
             "main",         // pName
             nullptr         // pSpecializationInfo
@@ -1785,69 +1602,55 @@ static bool create_patch_graphics_pipeline()
             VK_NULL_HANDLE, // module
             "main",         // pName
             nullptr         // pSpecializationInfo
-        },
-        {
-            VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-            nullptr,
-            0,              // flags
-            VK_SHADER_STAGE_FRAGMENT_BIT,
-            VK_NULL_HANDLE, // module
-            "main",         // pName
-            nullptr         // pSpecializationInfo
         }
     };
-    shader_stages[0].module = shaders[shader_pass_through_vert];
-    if (what_geometry == geom_cubic_patch) {
-        shader_stages[1].module = shaders[shader_bezier_surface_cubic_tesc];
-        shader_stages[2].module = shaders[shader_bezier_surface_cubic_tese];
+
+    uint32_t num_stages = 0;
+    for (uint32_t i = 0; i < mstd::array_size(shader_info.shader_ids); i++) {
+        const uint32_t id = shader_info.shader_ids[i];
+        if (id == no_shader)
+            break;
+        shader_stages[i].module = shaders[id - 1];
+        ++num_stages;
     }
-    else {
-        shader_stages[1].module = shaders[shader_bezier_surface_quadratic_tesc];
-        shader_stages[2].module = shaders[shader_bezier_surface_quadratic_tese];
-    }
-    shader_stages[3].module = shaders[shader_phong_frag];
 
     static VkVertexInputBindingDescription vertex_bindings[] = {
         {
-            0,
-            sizeof(Vertex),
+            0, // binding
+            0, // stride
             VK_VERTEX_INPUT_RATE_VERTEX
         }
     };
-
-    static VkVertexInputAttributeDescription vertex_attributes[] = {
-        {
-            0,  // location
-            0,  // binding
-            VK_FORMAT_R8G8B8_SNORM,
-            offsetof(Vertex, pos)
-        }
-    };
+    vertex_bindings[0].stride = shader_info.vertex_stride;
 
     static VkPipelineVertexInputStateCreateInfo vertex_input_state = {
         VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
         nullptr,
-        0,  // flags
+        0,      // flags
         mstd::array_size(vertex_bindings),
         vertex_bindings,
-        mstd::array_size(vertex_attributes),
-        vertex_attributes
+        0,      // vertexAttributeDescriptionCount
+        nullptr // pVertexAttributeDescriptions
     };
+    vertex_input_state.vertexAttributeDescriptionCount = shader_info.num_vertex_attributes;
+    vertex_input_state.pVertexAttributeDescriptions    = shader_info.vertex_attributes;
 
     static VkPipelineInputAssemblyStateCreateInfo input_assembly_state = {
         VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
         nullptr,
         0,  // flags
-        VK_PRIMITIVE_TOPOLOGY_PATCH_LIST,
+        VK_PRIMITIVE_TOPOLOGY_POINT_LIST,
         VK_FALSE
     };
+    input_assembly_state.topology = static_cast<VkPrimitiveTopology>(shader_info.topology);
 
     static VkPipelineTessellationStateCreateInfo tessellation_state = {
         VK_STRUCTURE_TYPE_PIPELINE_TESSELLATION_STATE_CREATE_INFO,
         nullptr,
         0,  // flags
-        (what_geometry == geom_cubic_patch) ? 16 : 9 // patchControlPoints
+        0   // patchControlPoints
     };
+    tessellation_state.patchControlPoints = shader_info.patch_control_points;
 
     static VkViewport viewport = {
         0,      // x
@@ -1951,7 +1754,7 @@ static bool create_patch_graphics_pipeline()
         VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
         nullptr,
         0,              // flags
-        mstd::array_size(shader_stages),
+        num_stages,
         shader_stages,
         &vertex_input_state,
         &input_assembly_state,
@@ -1979,6 +1782,71 @@ static bool create_patch_graphics_pipeline()
                                                        nullptr,
                                                        &vk_gr_pipeline));
     return res == VK_SUCCESS;
+}
+
+static bool create_simple_graphics_pipeline()
+{
+    static const VkVertexInputAttributeDescription vertex_attributes[] = {
+        {
+            0,  // location
+            0,  // binding
+            VK_FORMAT_R8G8B8_SNORM,
+            offsetof(Vertex, pos)
+        },
+        {
+            1,  // location
+            0,  // binding
+            VK_FORMAT_R8G8B8_SNORM,
+            offsetof(Vertex, normal)
+        }
+    };
+
+    static const ShaderInfo shader_info = {
+        {
+            shader_simple_vert,
+            shader_phong_frag
+        },
+        sizeof(Vertex),
+        VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
+        0,
+        mstd::array_size(vertex_attributes),
+        vertex_attributes
+    };
+
+    return create_graphics_pipeline(shader_info);
+}
+
+static bool create_patch_graphics_pipeline()
+{
+    static const VkVertexInputAttributeDescription vertex_attributes[] = {
+        {
+            0,  // location
+            0,  // binding
+            VK_FORMAT_R8G8B8_SNORM,
+            offsetof(Vertex, pos)
+        }
+    };
+
+    static ShaderInfo shader_info = {
+        {
+            shader_pass_through_vert,
+            shader_phong_frag,
+            shader_bezier_surface_cubic_tesc,
+            shader_bezier_surface_cubic_tese
+        },
+        sizeof(Vertex),
+        VK_PRIMITIVE_TOPOLOGY_PATCH_LIST,
+        16,
+        mstd::array_size(vertex_attributes),
+        vertex_attributes
+    };
+    if (what_geometry == geom_quadratic_patch) {
+        shader_info.patch_control_points = 9;
+        shader_info.shader_ids[2]        = shader_bezier_surface_quadratic_tesc;
+        shader_info.shader_ids[3]        = shader_bezier_surface_quadratic_tese;
+    }
+
+    return create_graphics_pipeline(shader_info);
 }
 
 static bool create_graphics_pipelines()
