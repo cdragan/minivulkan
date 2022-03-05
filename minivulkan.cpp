@@ -2132,14 +2132,73 @@ static bool create_quadratic_patch(Buffer* vertex_buffer, Buffer* index_buffer)
         return false;
 
     static const Vertex vertices[] = {
-        { { -127,  127,  127 }, { }, {} },
-        { {  127,  127,  127 }, { }, {} },
-        { {  127, -127,  127 }, { }, {} },
-        { { -127, -127,  127 }, { }, {} },
-        { { -127,  127, -127 }, { }, {} },
-        { {  127,  127, -127 }, { }, {} },
-        { {  127, -127, -127 }, { }, {} },
-        { { -127, -127, -127 }, { }, {} },
+        { { -127,  127, -127 }, {}, {} },
+        { { -100,  127, -127 }, {}, {} },
+        { {  100,  127, -127 }, {}, {} },
+        { {  127,  127, -127 }, {}, {} },
+        { { -127,  100, -127 }, {}, {} },
+        { { -100,  100, -127 }, {}, {} },
+        { {  100,  100, -127 }, {}, {} },
+        { {  127,  100, -127 }, {}, {} },
+        { { -127, -100, -127 }, {}, {} },
+        { { -100, -100, -127 }, {}, {} },
+        { {  100, -100, -127 }, {}, {} },
+        { {  127, -100, -127 }, {}, {} },
+        { { -127, -127, -127 }, {}, {} },
+        { { -100, -127, -127 }, {}, {} },
+        { {  100, -127, -127 }, {}, {} },
+        { {  127, -127, -127 }, {}, {} },
+
+        { { -127,  127, -100 }, {}, {} },
+        { { -100,  127, -100 }, {}, {} },
+        { {  100,  127, -100 }, {}, {} },
+        { {  127,  127, -100 }, {}, {} },
+        { { -127,  100, -100 }, {}, {} },
+        { {                  }, {}, {} }, // unneeded
+        { {                  }, {}, {} }, // unneeded
+        { {  127,  100, -100 }, {}, {} },
+        { { -127, -100, -100 }, {}, {} },
+        { {                  }, {}, {} }, // unneeded
+        { {                  }, {}, {} }, // unneeded
+        { {  127, -100, -100 }, {}, {} },
+        { { -127, -127, -100 }, {}, {} },
+        { { -100, -127, -100 }, {}, {} },
+        { {  100, -127, -100 }, {}, {} },
+        { {  127, -127, -100 }, {}, {} },
+
+        { { -127,  127,  100 }, {}, {} },
+        { { -100,  127,  100 }, {}, {} },
+        { {  100,  127,  100 }, {}, {} },
+        { {  127,  127,  100 }, {}, {} },
+        { { -127,  100,  100 }, {}, {} },
+        { {                  }, {}, {} }, // unneeded
+        { {                  }, {}, {} }, // unneeded
+        { {  127,  100,  100 }, {}, {} },
+        { { -127, -100,  100 }, {}, {} },
+        { {                  }, {}, {} }, // unneeded
+        { {                  }, {}, {} }, // unneeded
+        { {  127, -100,  100 }, {}, {} },
+        { { -127, -127,  100 }, {}, {} },
+        { { -100, -127,  100 }, {}, {} },
+        { {  100, -127,  100 }, {}, {} },
+        { {  127, -127,  100 }, {}, {} },
+
+        { { -127,  127,  127 }, {}, {} },
+        { { -100,  127,  127 }, {}, {} },
+        { {  100,  127,  127 }, {}, {} },
+        { {  127,  127,  127 }, {}, {} },
+        { { -127,  100,  127 }, {}, {} },
+        { { -100,  100,  127 }, {}, {} },
+        { {  100,  100,  127 }, {}, {} },
+        { {  127,  100,  127 }, {}, {} },
+        { { -127, -100,  127 }, {}, {} },
+        { { -100, -100,  127 }, {}, {} },
+        { {  100, -100,  127 }, {}, {} },
+        { {  127, -100,  127 }, {}, {} },
+        { { -127, -127,  127 }, {}, {} },
+        { { -100, -127,  127 }, {}, {} },
+        { {  100, -127,  127 }, {}, {} },
+        { {  127, -127,  127 }, {}, {} },
     };
 
     if ( ! filler.fill_buffer(vertex_buffer, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
@@ -2147,9 +2206,84 @@ static bool create_quadratic_patch(Buffer* vertex_buffer, Buffer* index_buffer)
         return false;
 
     static const uint16_t indices[] = {
-        0, 0, 0,
-        4, 5, 1,
-        7, 6, 2,
+        17, 17, 17, // front left-top
+        16,  0,  1,
+        20,  4,  5,
+        17, 17, 18, // front middle-top
+         1,  1,  2,
+         5,  5,  6,
+        18, 18, 18, // front right-top
+         2,  3, 19,
+         6,  7, 23,
+        20,  4,  5, // front left-middle
+        20,  4,  5,
+        24,  8,  9,
+         5,  5,  6, // front middle
+         5,  5,  6,
+         9,  9, 10,
+         6,  7, 23, // front right-mddile
+         6,  7, 23,
+        10, 11, 27,
+        24,  8,  9, // front left-bottom
+        28, 12, 13,
+        29, 29, 29,
+         9,  9, 10, // front middle-bottom
+        13, 13, 14,
+        29, 29, 30,
+        10, 11, 27, // front right-bottom
+        14, 15, 31,
+        30, 30, 30,
+        36, 36, 20, // left side middle
+        36, 36, 20,
+        40, 40, 24,
+        33, 33, 17, // left side top
+        32, 32, 16,
+        36, 36, 20,
+        40, 40, 24, // left side bottom
+        44, 44, 28,
+        45, 45, 29,
+        33, 33, 34, // top middle
+        33, 33, 34,
+        17, 17, 18,
+        18, 18, 34, // right side top
+        19, 19, 35,
+        23, 23, 39,
+        23, 23, 39, // right side middle
+        23, 23, 39,
+        27, 27, 43,
+        27, 27, 43, // right side bottom
+        31, 31, 47,
+        30, 30, 46,
+        29, 29, 30, // bottom middle
+        45, 45, 46,
+        45, 45, 46,
+        33, 33, 33, // back left-top
+        49, 48, 32,
+        53, 52, 36,
+        34, 34, 33, // back middle-top
+        50, 50, 49,
+        54, 54, 53,
+        34, 34, 34, // back right-top
+        35, 51, 50,
+        39, 55, 54,
+        39, 55, 54, // back right-middle
+        39, 55, 54,
+        43, 59, 58,
+        43, 59, 58, // back right-bottom
+        47, 63, 62,
+        46, 46, 46,
+        45, 45, 46, // back middle-bottom
+        61, 61, 62,
+        57, 57, 58,
+        40, 40, 40, // back left-bottom
+        56, 60, 44,
+        57, 61, 45,
+        57, 57, 53, // back left-middle
+        56, 56, 52,
+        40, 40, 36,
+        54, 54, 53, // back middle
+        54, 54, 53,
+        58, 58, 57,
     };
 
     if ( ! filler.fill_buffer(index_buffer, VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
@@ -2284,7 +2418,7 @@ static bool dummy_draw(uint32_t image_idx, uint64_t time_ms, VkFence queue_fence
     uniform_data->model_view_proj = model_view * proj;
     uniform_data->model           = model_view;
     uniform_data->model_normal    = vmath::transpose(vmath::inverse(vmath::mat3(model_view)));
-    uniform_data->color           = vmath::vec<4>(0.7f, 0.1f, 0.1f, 1.0f);
+    uniform_data->color           = vmath::vec<4>(0.4f, 0.6f, 0.1f, 1.0f);
     uniform_data->lights[0]       = vmath::vec<4>(5.0f, 5.0f, -5.0f, 1.0f);
 
     // Send matrices to GPU
@@ -2403,7 +2537,7 @@ static bool dummy_draw(uint32_t image_idx, uint64_t time_ms, VkFence queue_fence
     constexpr uint32_t index_count =
         (what_geometry == geom_cube)            ? 36 :
         (what_geometry == geom_cubic_patch)     ? 16 :
-        (what_geometry == geom_quadratic_patch) ?  9 :
+        (what_geometry == geom_quadratic_patch) ? 78 * 3 :
         0;
 
     vkCmdDrawIndexed(buf,
