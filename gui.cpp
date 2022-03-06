@@ -122,7 +122,7 @@ bool init_gui()
     return true;
 }
 
-float user_roundedness = 111.0f / 127.0f;
+extern float user_roundedness;
 
 // TODO move this to a separate file
 static bool construct_gui()

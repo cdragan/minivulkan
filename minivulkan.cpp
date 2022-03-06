@@ -2317,7 +2317,7 @@ static constexpr VkClearValue make_clear_depth(float depth, uint32_t stencil)
     return value;
 }
 
-extern float user_roundedness;
+float user_roundedness = 111.0f / 127.0f;
 
 static bool dummy_draw(uint32_t image_idx, uint64_t time_ms, VkFence queue_fence)
 {
