@@ -268,7 +268,7 @@ L8:
         #undef DVSR
     }
 
-   __declspec(naked) void _aulldiv()
+    __declspec(naked) void _aulldiv()
     {
         #define DVND esp + 12 // stack address of dividend (a)
         #define DVSR esp + 20 // stack address of divisor (b)
@@ -473,33 +473,33 @@ L2:
             ;
             cmp     cl, 32
             jae     short MORE32
-            shld    edx,eax,cl
-            shl     eax,cl
+            shld    edx, eax, cl
+            shl     eax, cl
             ret
 
             ;
             ; Handle shifts of between 32 and 63 bits
             ;
 MORE32:
-            mov     edx,eax
-            xor     eax,eax
-            and     cl,31
-            shl     edx,cl
+            mov     edx, eax
+            xor     eax, eax
+            and     cl, 31
+            shl     edx, cl
             ret
 
             ;
             ; return 0 in edx:eax
             ;
 RETZERO:
-            xor     eax,eax
-            xor     edx,edx
+            xor     eax, eax
+            xor     edx, edx
             ret
         }
     }
 
-    uint32_t _ultod3(double value)
+    __declspec(naked) void _ultod3()
     {
-        return static_cast<uint32_t>(_mm_cvttsd_si32(_mm_set_sd(value)));
+        // TODO
     }
 
 #endif
