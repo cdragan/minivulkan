@@ -122,13 +122,14 @@ bool init_gui()
     return true;
 }
 
+float user_roundedness = 111.0f / 127.0f;
+
 // TODO move this to a separate file
 static bool construct_gui()
 {
     ImGui::Text("Hello, world!");
     ImGui::Separator();
-    static float value = 0;
-    ImGui::InputFloat("Value", &value);
+    ImGui::SliderFloat("Roundedness", &user_roundedness, 0.0f, 1.0f);
     return true;
 }
 

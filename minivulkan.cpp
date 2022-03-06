@@ -1439,6 +1439,9 @@ static
 #include "pass_through.vert.h"
 
 static
+#include "rounded_cube.vert.h"
+
+static
 #include "bezier_surface_quadratic.tesc.h"
 
 static
@@ -1454,6 +1457,7 @@ static
     X(simple_vert) \
     X(phong_frag) \
     X(pass_through_vert) \
+    X(rounded_cube_vert) \
     X(bezier_surface_quadratic_tesc) \
     X(bezier_surface_quadratic_tese) \
     X(bezier_surface_cubic_tesc) \
@@ -1842,6 +1846,7 @@ static bool create_patch_graphics_pipeline()
     };
     if (what_geometry == geom_quadratic_patch) {
         shader_info.patch_control_points = 9;
+        shader_info.shader_ids[0]        = shader_rounded_cube_vert;
         shader_info.shader_ids[2]        = shader_bezier_surface_quadratic_tesc;
         shader_info.shader_ids[3]        = shader_bezier_surface_quadratic_tese;
     }
@@ -2133,71 +2138,71 @@ static bool create_quadratic_patch(Buffer* vertex_buffer, Buffer* index_buffer)
 
     static const Vertex vertices[] = {
         { { -127,  127, -127 }, {}, {} },
-        { { -100,  127, -127 }, {}, {} },
-        { {  100,  127, -127 }, {}, {} },
+        { { -111,  127, -127 }, {}, {} },
+        { {  111,  127, -127 }, {}, {} },
         { {  127,  127, -127 }, {}, {} },
-        { { -127,  100, -127 }, {}, {} },
-        { { -100,  100, -127 }, {}, {} },
-        { {  100,  100, -127 }, {}, {} },
-        { {  127,  100, -127 }, {}, {} },
-        { { -127, -100, -127 }, {}, {} },
-        { { -100, -100, -127 }, {}, {} },
-        { {  100, -100, -127 }, {}, {} },
-        { {  127, -100, -127 }, {}, {} },
+        { { -127,  111, -127 }, {}, {} },
+        { { -111,  111, -127 }, {}, {} },
+        { {  111,  111, -127 }, {}, {} },
+        { {  127,  111, -127 }, {}, {} },
+        { { -127, -111, -127 }, {}, {} },
+        { { -111, -111, -127 }, {}, {} },
+        { {  111, -111, -127 }, {}, {} },
+        { {  127, -111, -127 }, {}, {} },
         { { -127, -127, -127 }, {}, {} },
-        { { -100, -127, -127 }, {}, {} },
-        { {  100, -127, -127 }, {}, {} },
+        { { -111, -127, -127 }, {}, {} },
+        { {  111, -127, -127 }, {}, {} },
         { {  127, -127, -127 }, {}, {} },
 
-        { { -127,  127, -100 }, {}, {} },
-        { { -100,  127, -100 }, {}, {} },
-        { {  100,  127, -100 }, {}, {} },
-        { {  127,  127, -100 }, {}, {} },
-        { { -127,  100, -100 }, {}, {} },
+        { { -127,  127, -111 }, {}, {} },
+        { { -111,  127, -111 }, {}, {} },
+        { {  111,  127, -111 }, {}, {} },
+        { {  127,  127, -111 }, {}, {} },
+        { { -127,  111, -111 }, {}, {} },
         { {                  }, {}, {} }, // unneeded
         { {                  }, {}, {} }, // unneeded
-        { {  127,  100, -100 }, {}, {} },
-        { { -127, -100, -100 }, {}, {} },
+        { {  127,  111, -111 }, {}, {} },
+        { { -127, -111, -111 }, {}, {} },
         { {                  }, {}, {} }, // unneeded
         { {                  }, {}, {} }, // unneeded
-        { {  127, -100, -100 }, {}, {} },
-        { { -127, -127, -100 }, {}, {} },
-        { { -100, -127, -100 }, {}, {} },
-        { {  100, -127, -100 }, {}, {} },
-        { {  127, -127, -100 }, {}, {} },
+        { {  127, -111, -111 }, {}, {} },
+        { { -127, -127, -111 }, {}, {} },
+        { { -111, -127, -111 }, {}, {} },
+        { {  111, -127, -111 }, {}, {} },
+        { {  127, -127, -111 }, {}, {} },
 
-        { { -127,  127,  100 }, {}, {} },
-        { { -100,  127,  100 }, {}, {} },
-        { {  100,  127,  100 }, {}, {} },
-        { {  127,  127,  100 }, {}, {} },
-        { { -127,  100,  100 }, {}, {} },
+        { { -127,  127,  111 }, {}, {} },
+        { { -111,  127,  111 }, {}, {} },
+        { {  111,  127,  111 }, {}, {} },
+        { {  127,  127,  111 }, {}, {} },
+        { { -127,  111,  111 }, {}, {} },
         { {                  }, {}, {} }, // unneeded
         { {                  }, {}, {} }, // unneeded
-        { {  127,  100,  100 }, {}, {} },
-        { { -127, -100,  100 }, {}, {} },
+        { {  127,  111,  111 }, {}, {} },
+        { { -127, -111,  111 }, {}, {} },
         { {                  }, {}, {} }, // unneeded
         { {                  }, {}, {} }, // unneeded
-        { {  127, -100,  100 }, {}, {} },
-        { { -127, -127,  100 }, {}, {} },
-        { { -100, -127,  100 }, {}, {} },
-        { {  100, -127,  100 }, {}, {} },
-        { {  127, -127,  100 }, {}, {} },
+        { {  127, -111,  111 }, {}, {} },
+        { { -127, -127,  111 }, {}, {} },
+        { { -111, -127,  111 }, {}, {} },
+        { {  111, -127,  111 }, {}, {} },
+        { {  127, -127,  111 }, {}, {} },
 
         { { -127,  127,  127 }, {}, {} },
-        { { -100,  127,  127 }, {}, {} },
-        { {  100,  127,  127 }, {}, {} },
+        { { -111,  127,  127 }, {}, {} },
+        { {  111,  127,  127 }, {}, {} },
         { {  127,  127,  127 }, {}, {} },
-        { { -127,  100,  127 }, {}, {} },
-        { { -100,  100,  127 }, {}, {} },
-        { {  100,  100,  127 }, {}, {} },
-        { {  127,  100,  127 }, {}, {} },
-        { { -127, -100,  127 }, {}, {} },
-        { { -100, -100,  127 }, {}, {} },
-        { {  100, -100,  127 }, {}, {} },
-        { {  127, -100,  127 }, {}, {} },
+        { { -127,  111,  127 }, {}, {} },
+        { { -111,  111,  127 }, {}, {} },
+        { {  111,  111,  127 }, {}, {} },
+        { {  127,  111,  127 }, {}, {} },
+        { { -127, -111,  127 }, {}, {} },
+        { { -111, -111,  127 }, {}, {} },
+        { {  111, -111,  127 }, {}, {} },
+        { {  127, -111,  127 }, {}, {} },
         { { -127, -127,  127 }, {}, {} },
-        { { -100, -127,  127 }, {}, {} },
-        { {  100, -127,  127 }, {}, {} },
+        { { -111, -127,  127 }, {}, {} },
+        { {  111, -127,  127 }, {}, {} },
         { {  127, -127,  127 }, {}, {} },
     };
 
@@ -2312,6 +2317,8 @@ static constexpr VkClearValue make_clear_depth(float depth, uint32_t stencil)
     return value;
 }
 
+extern float user_roundedness;
+
 static bool dummy_draw(uint32_t image_idx, uint64_t time_ms, VkFence queue_fence)
 {
     static Buffer vertex_buffer;
@@ -2405,9 +2412,9 @@ static bool dummy_draw(uint32_t image_idx, uint64_t time_ms, VkFence queue_fence
 
     // Calculate matrices
     const auto uniform_data = reinterpret_cast<UniformBuffer*>(&host_shader_data[slot_size * image_idx]);
-    const float angle = vmath::radians(static_cast<float>(time_ms) * 45.0f / 1000.0f);
+    const float angle = vmath::radians(static_cast<float>(time_ms) * 15.0f / 1000.0f);
     const vmath::mat4 model_view = vmath::mat4(vmath::quat(vmath::vec3(0.70710678f, 0.70710678f, 0), angle))
-                                 * vmath::translate(0.0f, 0.0f, 10.0f);
+                                 * vmath::translate(0.0f, 0.0f, 7.0f);
     const vmath::mat4 proj = vmath::projection(
             static_cast<float>(vk_surface_caps.currentExtent.width)     // aspect
                 / static_cast<float>(vk_surface_caps.currentExtent.height),
@@ -2418,7 +2425,7 @@ static bool dummy_draw(uint32_t image_idx, uint64_t time_ms, VkFence queue_fence
     uniform_data->model_view_proj = model_view * proj;
     uniform_data->model           = model_view;
     uniform_data->model_normal    = vmath::transpose(vmath::inverse(vmath::mat3(model_view)));
-    uniform_data->color           = vmath::vec<4>(0.4f, 0.6f, 0.1f, 1.0f);
+    uniform_data->color           = vmath::vec<4>(0.4f, 0.6f, 0.1f, user_roundedness);
     uniform_data->lights[0]       = vmath::vec<4>(5.0f, 5.0f, -5.0f, 1.0f);
 
     // Send matrices to GPU

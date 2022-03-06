@@ -2,14 +2,13 @@
 // Copyright (c) 2021-2022 Chris Dragan
 
 #version 460 core
-#extension GL_EXT_scalar_block_layout: require
 
 layout(quads, ccw, equal_spacing) in;
 
 layout(location = 0) out vec3 out_pos;
 layout(location = 1) out vec3 out_normal;
 
-layout(set = 0, binding = 0, std430) uniform ubo_data
+layout(set = 0, binding = 0) uniform ubo_data
 {
     mat4   model_view_proj;
     mat4   model;

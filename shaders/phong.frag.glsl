@@ -2,7 +2,6 @@
 // Copyright (c) 2021-2022 Chris Dragan
 
 #version 460 core
-#extension GL_EXT_scalar_block_layout: require
 
 layout(location = 0) in  vec3 in_pos;
 layout(location = 1) in  vec3 in_normal;
@@ -11,7 +10,7 @@ layout(location = 0) out vec4 out_color;
 
 layout(constant_id = 0) const uint num_lights = 1;
 
-layout(set = 0, binding = 0, std430) uniform ubo_data
+layout(set = 0, binding = 0) uniform ubo_data
 {
     mat4   model_view_proj;
     mat4   model;

@@ -88,6 +88,7 @@ all_vmath_unit_src_files += $(vmath_unit_src_files)
 shader_files += shaders/simple.vert.glsl
 shader_files += shaders/phong.frag.glsl
 shader_files += shaders/pass_through.vert.glsl
+shader_files += shaders/rounded_cube.vert.glsl
 shader_files += shaders/bezier_surface_quadratic.tesc.glsl
 shader_files += shaders/bezier_surface_quadratic.tese.glsl
 shader_files += shaders/bezier_surface_cubic.tesc.glsl
