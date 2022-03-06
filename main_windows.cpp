@@ -162,7 +162,7 @@ static bool create_window(Window* w)
     }
     else {
         ws_ex  = WS_EX_APPWINDOW;
-        ws     = WS_CLIPSIBLINGS | WS_CLIPCHILDREN | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
+        ws     = WS_CLIPSIBLINGS | WS_CLIPCHILDREN | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_THICKFRAME;
         x      = CW_USEDEFAULT;
         y      = CW_USEDEFAULT;
         width  = 800;
@@ -186,6 +186,8 @@ static bool create_window(Window* w)
         dprintf("Failed to create window\n");
         return false;
     }
+
+    dprintf("Created window %ux%u at [%u, %u]\n", width, height, x, y);
 
     ShowWindow(hwnd, SW_SHOW);
 
