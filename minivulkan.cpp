@@ -881,7 +881,7 @@ void MapBase::move_from(MapBase& map)
     map.mapped_size = 0;
 }
 
-bool Image::allocate(DeviceMemoryHeap& heap, const ImageInfo& image_info)
+bool Image::create(const ImageInfo& image_info, VkImageTiling tiling)
 {
     static VkImageCreateInfo create_info = {
         VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
@@ -904,40 +904,45 @@ bool Image::allocate(DeviceMemoryHeap& heap, const ImageInfo& image_info)
     create_info.extent.width  = image_info.width;
     create_info.extent.height = image_info.height;
     create_info.mipLevels     = image_info.mip_levels;
-    create_info.tiling        = heap.is_host_memory() ? VK_IMAGE_TILING_LINEAR : VK_IMAGE_TILING_OPTIMAL;
+    create_info.tiling        = tiling;
     create_info.usage         = image_info.usage;
 
-    VkResult res = CHK(vkCreateImage(vk_dev, &create_info, nullptr, &image));
+    const VkResult res = CHK(vkCreateImage(vk_dev, &create_info, nullptr, &image));
     if (res != VK_SUCCESS)
         return false;
 
-    layout = Image::initial_layout;
+    layout     = Image::initial_layout;
+    format     = image_info.format;
+    aspect     = image_info.aspect;
+    mip_levels = image_info.mip_levels;
 
-    VkMemoryRequirements requirements;
-    vkGetImageMemoryRequirements(vk_dev, image, &requirements);
+    vkGetImageMemoryRequirements(vk_dev, image, &memory_reqs);
 
+    return true;
+}
+
+bool Image::allocate(DeviceMemoryHeap& heap)
+{
 #ifndef NDEBUG
-    if ( ! (requirements.memoryTypeBits & (1u << heap.get_memory_type()))) {
+    if ( ! (memory_reqs.memoryTypeBits & (1u << heap.get_memory_type()))) {
         dprintf("Device memory does not support requested image type\n");
         return false;
     }
 #endif
 
-    if ( ! heap.allocate_heap_once(requirements))
+    if ( ! heap.allocate_heap_once(memory_reqs))
         return false;
 
     VkDeviceSize offset;
-    if ( ! heap.allocate_memory(requirements, &offset))
+    if ( ! heap.allocate_memory(memory_reqs, &offset))
         return false;
 
-    res = CHK(vkBindImageMemory(vk_dev, image, heap.get_memory(), offset));
+    VkResult res = CHK(vkBindImageMemory(vk_dev, image, heap.get_memory(), offset));
     if (res != VK_SUCCESS)
         return false;
 
     owning_heap = &heap;
     heap_offset = offset;
-    bytes       = requirements.size;
-    aspect      = image_info.aspect;
 
     static VkImageViewCreateInfo view_create_info = {
         VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
@@ -955,18 +960,24 @@ bool Image::allocate(DeviceMemoryHeap& heap, const ImageInfo& image_info)
         {
             0, // aspectMask
             0, // baseMipLevel
-            1, // levelCount
+            0, // levelCount
             0, // baseArrayLayer
             1  // layerCount
         }
     };
     view_create_info.image                       = image;
-    view_create_info.format                      = image_info.format;
-    view_create_info.subresourceRange.aspectMask = image_info.aspect;
-    view_create_info.subresourceRange.levelCount = image_info.mip_levels;
+    view_create_info.format                      = format;
+    view_create_info.subresourceRange.aspectMask = aspect;
+    view_create_info.subresourceRange.levelCount = mip_levels;
 
     res = CHK(vkCreateImageView(vk_dev, &view_create_info, nullptr, &view));
     return res == VK_SUCCESS;
+}
+
+bool Image::allocate(DeviceMemoryHeap& heap, const ImageInfo& image_info)
+{
+    const VkImageTiling tiling = heap.is_host_memory() ? VK_IMAGE_TILING_LINEAR : VK_IMAGE_TILING_OPTIMAL;
+    return create(image_info, tiling) && allocate(heap);
 }
 
 void Image::destroy()
@@ -979,7 +990,6 @@ void Image::destroy()
     image       = VK_NULL_HANDLE;
     owning_heap = nullptr;
     heap_offset = 0;
-    bytes       = 0;
 }
 
 void Image::set_image_layout(VkCommandBuffer buf, const Transition& transition)
@@ -1040,21 +1050,20 @@ bool Buffer::allocate(DeviceMemoryHeap&  heap,
     if (res != VK_SUCCESS)
         return false;
 
-    VkMemoryRequirements requirements;
-    vkGetBufferMemoryRequirements(vk_dev, buffer, &requirements);
+    vkGetBufferMemoryRequirements(vk_dev, buffer, &memory_reqs);
 
 #ifndef NDEBUG
-    if ( ! (requirements.memoryTypeBits & (1u << heap.get_memory_type()))) {
+    if ( ! (memory_reqs.memoryTypeBits & (1u << heap.get_memory_type()))) {
         dprintf("Device memory does not support requested buffer type\n");
         return false;
     }
 #endif
 
-    if ( ! heap.allocate_heap_once(requirements))
+    if ( ! heap.allocate_heap_once(memory_reqs))
         return false;
 
     VkDeviceSize offset;
-    if ( ! heap.allocate_memory(requirements, &offset))
+    if ( ! heap.allocate_memory(memory_reqs, &offset))
         return false;
 
     res = CHK(vkBindBufferMemory(vk_dev, buffer, heap.get_memory(), offset));
@@ -1063,7 +1072,6 @@ bool Buffer::allocate(DeviceMemoryHeap&  heap,
 
     owning_heap = &heap;
     heap_offset = offset;
-    bytes       = requirements.size;
 
     return true;
 }
@@ -1097,7 +1105,6 @@ void Buffer::destroy()
     view        = VK_NULL_HANDLE;
     owning_heap = nullptr;
     heap_offset = 0;
-    bytes       = 0;
 }
 
 VkSemaphore vk_sems[num_semaphores];
@@ -1179,11 +1186,7 @@ static bool allocate_depth_buffers(uint32_t num_depth_buffers)
         return false;
     }
 
-    const uint32_t aligned_pitch = mstd::align_up(width * 4, 4u * 1024u);
-    const uint32_t heap_size     = mstd::align_up(aligned_pitch * height, 64u * 1024u) * num_depth_buffers;
-
-    if ( ! depth_buffer_heap.allocate_heap(heap_size))
-        return false;
+    VkDeviceSize heap_size = 0;
 
     for (uint32_t i = 0; i < num_depth_buffers; i++) {
 
@@ -1199,7 +1202,18 @@ static bool allocate_depth_buffers(uint32_t num_depth_buffers)
         image_info.height = height;
         image_info.format = vk_depth_format;
 
-        if ( ! vk_depth_buffers[i].allocate(depth_buffer_heap, image_info))
+        if ( ! vk_depth_buffers[i].create(image_info, VK_IMAGE_TILING_OPTIMAL))
+            return false;
+
+        heap_size += mstd::align_up(vk_depth_buffers[i].size(),
+                                    VkDeviceSize(phys_props.properties.limits.minMemoryMapAlignment));
+    }
+
+    if ( ! depth_buffer_heap.allocate_heap(heap_size))
+        return false;
+
+    for (uint32_t i = 0; i < num_depth_buffers; i++) {
+        if ( ! vk_depth_buffers[i].allocate(depth_buffer_heap))
             return false;
     }
     return true;

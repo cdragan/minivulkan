@@ -170,14 +170,15 @@ class Resource {
         Resource& operator=(const Resource&) = delete;
 
         template<typename T>
-        Map<T> map() const { return Map<T>(owning_heap, heap_offset, bytes); }
+        Map<T> map() const { return Map<T>(owning_heap, heap_offset, memory_reqs.size); }
 
-        bool allocated() const { return !! bytes; }
+        bool allocated() const { return !! memory_reqs.size; }
+        VkDeviceSize size() const { return memory_reqs.size; }
 
     protected:
-        DeviceMemoryHeap* owning_heap = nullptr;
-        VkDeviceSize      heap_offset = 0;
-        VkDeviceSize      bytes       = 0;
+        DeviceMemoryHeap*    owning_heap = nullptr;
+        VkDeviceSize         heap_offset = 0;
+        VkMemoryRequirements memory_reqs = { };
 };
 
 struct ImageInfo {
@@ -200,6 +201,8 @@ class Image: public Resource {
         const VkImage& get_image() const { return image; }
         VkImageView get_view() const { return view; }
 
+        bool create(const ImageInfo& image_info, VkImageTiling tiling);
+        bool allocate(DeviceMemoryHeap& heap);
         bool allocate(DeviceMemoryHeap& heap, const ImageInfo& image_info);
         void destroy();
 
@@ -225,9 +228,11 @@ class Image: public Resource {
         }
 
     private:
-        VkImage            image  = VK_NULL_HANDLE;
-        VkImageView        view   = VK_NULL_HANDLE;
-        VkImageAspectFlags aspect = VK_IMAGE_ASPECT_COLOR_BIT;
+        VkImage            image      = VK_NULL_HANDLE;
+        VkImageView        view       = VK_NULL_HANDLE;
+        VkFormat           format     = VK_FORMAT_UNDEFINED;
+        VkImageAspectFlags aspect     = VK_IMAGE_ASPECT_COLOR_BIT;
+        uint32_t           mip_levels = 0;
 };
 
 class Buffer: public Resource {
