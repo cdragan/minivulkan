@@ -105,8 +105,7 @@ extern "C" {
         #define A esp + 8  // stack address of a
         #define B esp + 16 // stack address of b
 
-        __asm
-        {
+        __asm {
             push    ebx
 
             mov     eax, CRT_HIWORD(A)
@@ -136,8 +135,7 @@ extern "C" {
         #define DVND    esp + 16      // stack address of dividend (a)
         #define DVSR    esp + 24      // stack address of divisor (b)
 
-        __asm
-        {
+        __asm {
             push    edi
             push    esi
             push    ebx
@@ -273,8 +271,7 @@ L8:
         #define DVND esp + 12 // stack address of dividend (a)
         #define DVSR esp + 20 // stack address of divisor (b)
 
-        __asm
-        {
+        __asm {
             push    ebx
             push    esi
 
@@ -368,8 +365,7 @@ L2:
         #define DVND    esp + 8       // stack address of dividend (a)
         #define DVSR    esp + 16      // stack address of divisor (b)
 
-        __asm
-        {
+        __asm {
             push    ebx
 
             ; Now do the divide.  First look to see if the divisor is less than 4194304K.
@@ -460,8 +456,7 @@ L2:
 
     __declspec(naked) void _allshl()
     {
-        __asm
-        {
+        __asm {
             ;
             ; Handle shifts of 64 or more bits (all get 0)
             ;
@@ -497,9 +492,158 @@ RETZERO:
         }
     }
 
+#if 0
+    // Reference implementation of _ultod3
+    static inline uint32_t& low(uint64_t& value)
+    {
+        return reinterpret_cast<uint32_t&>(value);
+    }
+
+    static inline uint32_t& high(uint64_t& value)
+    {
+        return *reinterpret_cast<uint32_t*>(reinterpret_cast<uintptr_t>(&value) + 4);
+    }
+
+    static inline int clz(uint32_t value)
+    {
+#ifdef _MSC_VER
+        unsigned long index;
+        if (_BitScanReverse(&index, value))
+            return 31 - static_cast<uint32_t>(index);
+        else
+            return 32;
+#else
+        return value ? __builtin_clz(value) : 32;
+#endif
+    }
+
+    double ultod3(uint64_t value)
+    {
+        const int top = clz(high(value));
+        int exponent = 63 - top;
+        if (top <= 11) {
+            const int shift = 11 - top;
+            low(value) = (low(value) >> shift) | (high(value) << (32 - shift));
+            high(value) >>= shift;
+        }
+        else if (top < 32) {
+            const int shift = top - 11;
+            high(value) = (high(value) << shift) | (low(value) >> (32 - shift));
+            low(value) <<= shift;
+        }
+        else {
+            const int bottom = clz(low(value));
+            exponent = 31 - bottom;
+            if (bottom <= 11) {
+                const int shift = 11 - bottom;
+                high(value) = low(value) >> shift;
+                low(value) <<= (32 - shift);
+            }
+            else {
+                const int shift = bottom - 11;
+                high(value) = low(value) << shift;
+                low(value) = 0;
+            }
+        }
+
+        high(value) = (high(value) & 0x000F'FFFFu) | ((0x3FFu + exponent) << 20);
+
+        return *reinterpret_cast<double*>(&value);
+    }
+#endif
+
     __declspec(naked) void _ultod3()
     {
-        // TODO
+        #define LOW_VALUE DWORD PTR [esp]
+        __asm {
+            push    ebx
+            push    esi
+            push    edi
+            push    edx                             ; high(value)
+            push    eax                             ; low(value)
+            mov     edi, edx                        ; edi := high(value)
+            bsr     ecx, edi
+            je      no_high_bits
+            mov     eax, 31
+            mov     ebx, 63
+            sub     eax, ecx
+            sub     ebx, eax
+            cmp     eax, 11
+            jg      high_more_than_11_zeroes
+            mov     esi, 11
+            mov     ecx, 32
+            sub     esi, eax
+            mov     edx, edi
+            mov     eax, LOW_VALUE
+            sub     ecx, esi
+            shl     edx, cl
+            mov     ecx, esi
+            shr     eax, cl
+            or      edx, eax
+            shr     edi, cl
+            mov     LOW_VALUE, edx
+            jmp     set_exponent_and_done
+
+    high_more_than_11_zeroes:
+            cmp     eax, 32
+            jge     no_high_bits
+            lea     esi, LOW_VALUE
+            mov     ecx, 32
+            mov     eax, LOW_VALUE
+            sub     ecx, esi
+            mov     edx, eax
+            shr     edx, cl
+            mov     ecx, esi
+            shl     eax, cl
+            shl     edi, cl
+            mov     LOW_VALUE, eax
+            or      edi, edx
+            jmp     set_exponent_and_done
+
+    no_high_bits:
+            mov     edi, LOW_VALUE
+            bsr     eax, edi
+            je      no_low_bits
+            mov     ecx, 31
+            mov     ebx, 31
+            sub     ecx, eax
+            sub     ebx, ecx
+            cmp     ecx, 11
+            jg      low_more_than_11_zeroes
+            mov     edx, 11
+            mov     eax, edi
+            sub     edx, ecx
+            mov     ecx, 32
+            sub     ecx, edx
+            shl     eax, cl
+            mov     ecx, edx
+            mov     LOW_VALUE, eax
+            shr     edi, cl
+            jmp     set_exponent_and_done
+
+    no_low_bits:
+            mov     ecx, 32
+            or      ebx, -1
+    low_more_than_11_zeroes:
+            add     ecx, -11
+            mov     LOW_VALUE, 0
+            shl     edi, cl
+
+    set_exponent_and_done:
+            lea     eax, DWORD PTR [ebx+1023]
+            and     edi, 1048575 ; 000fffffH
+            shl     eax, 20
+            or      eax, edi
+            mov     DWORD PTR [esp+4], eax
+            movsd   xmm0, QWORD PTR [esp]
+
+            add     esp, 8
+            pop     edi
+            pop     esi
+            pop     ebx
+            ret
+        }
+        #undef LOW_VALUE
     }
 
 #endif
