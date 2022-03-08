@@ -1267,13 +1267,13 @@ static bool create_swapchain()
 
     res = CHK(vkGetSwapchainImagesKHR(vk_dev, vk_swapchain, &num_images, nullptr));
 
-    vk_num_swapchain_images = num_images;
-
     if (res != VK_SUCCESS)
         return false;
 
     if (num_images > mstd::array_size(vk_swapchain_images))
         num_images = mstd::array_size(vk_swapchain_images);
+
+    vk_num_swapchain_images = num_images;
 
     res = CHK(vkGetSwapchainImagesKHR(vk_dev, vk_swapchain, &num_images, images));
 
