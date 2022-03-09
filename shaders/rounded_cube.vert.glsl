@@ -3,22 +3,18 @@
 
 #version 460 core
 
+#extension GL_GOOGLE_include_directive: require
+
 layout(location = 0) in vec3 in_pos;
 
-layout(set = 0, binding = 0) uniform ubo_data
-{
-    mat4   model_view_proj;
-    mat4   model;
-    mat3x4 model_normal;
-    vec4   color;
-} ubo;
+#include "ubo_data.glsl"
 
 const float inset_value = 111.0 / 127.0;
 
 float fix(float value)
 {
-    return (value ==  inset_value) ? ubo.color.w :
-           (value == -inset_value) ? -ubo.color.w :
+    return (value ==  inset_value) ? ubo.params.x :
+           (value == -inset_value) ? -ubo.params.x :
            value;
 }
 

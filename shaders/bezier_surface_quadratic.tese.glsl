@@ -3,17 +3,14 @@
 
 #version 460 core
 
+#extension GL_GOOGLE_include_directive: require
+
 layout(quads, ccw, equal_spacing) in;
 
 layout(location = 0) out vec3 out_pos;
 layout(location = 1) out vec3 out_normal;
 
-layout(set = 0, binding = 0) uniform ubo_data
-{
-    mat4   model_view_proj;
-    mat4   model;
-    mat3x4 model_normal;
-} ubo;
+#include "ubo_data.glsl"
 
 vec3 bezier_curve_quadratic(vec3 p0, vec3 p1, vec3 p2, float t)
 {

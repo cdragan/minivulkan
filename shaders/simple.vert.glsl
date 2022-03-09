@@ -2,7 +2,8 @@
 // Copyright (c) 2021-2022 Chris Dragan
 
 #version 460 core
-#extension GL_EXT_scalar_block_layout: require
+
+#extension GL_GOOGLE_include_directive: require
 
 layout(location = 0) in  vec3 in_pos;
 layout(location = 1) in  vec3 in_normal;
@@ -10,12 +11,7 @@ layout(location = 1) in  vec3 in_normal;
 layout(location = 0) out vec3 out_pos;
 layout(location = 1) out vec3 out_normal;
 
-layout(set = 0, binding = 0, std430) uniform ubo_data
-{
-    mat4   model_view_proj;
-    mat4   model;
-    mat3x4 model_normal;
-} ubo;
+#include "ubo_data.glsl"
 
 void main()
 {

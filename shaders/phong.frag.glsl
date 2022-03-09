@@ -3,21 +3,14 @@
 
 #version 460 core
 
+#extension GL_GOOGLE_include_directive: require
+
 layout(location = 0) in  vec3 in_pos;
 layout(location = 1) in  vec3 in_normal;
 
 layout(location = 0) out vec4 out_color;
 
-layout(constant_id = 0) const uint num_lights = 1;
-
-layout(set = 0, binding = 0) uniform ubo_data
-{
-    mat4   model_view_proj;
-    mat4   model;
-    mat3x4 model_normal;
-    vec4   color;
-    vec4   lights[num_lights > 0 ? num_lights : 1];
-} ubo;
+#include "ubo_data.glsl"
 
 float calculate_lighting(vec3 light_pos, vec3 surface_pos, vec3 surface_normal)
 {

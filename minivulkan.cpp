@@ -1577,11 +1577,11 @@ struct ShaderInfo {
     const VkVertexInputAttributeDescription* vertex_attributes;
 };
 
-static bool create_graphics_pipeline(const ShaderInfo& shader_info)
+static bool create_graphics_pipeline(const ShaderInfo& shader_info, VkPipeline* pipeline)
 {
-    if (vk_gr_pipeline != VK_NULL_HANDLE) {
-        vkDestroyPipeline(vk_dev, vk_gr_pipeline, nullptr);
-        vk_gr_pipeline = VK_NULL_HANDLE;
+    if (*pipeline != VK_NULL_HANDLE) {
+        vkDestroyPipeline(vk_dev, *pipeline, nullptr);
+        *pipeline = VK_NULL_HANDLE;
     }
 
     static VkPipelineShaderStageCreateInfo shader_stages[] = {
@@ -1798,7 +1798,7 @@ static bool create_graphics_pipeline(const ShaderInfo& shader_info)
                                                        1,
                                                        &pipeline_create_info,
                                                        nullptr,
-                                                       &vk_gr_pipeline));
+                                                       pipeline));
     return res == VK_SUCCESS;
 }
 
@@ -1831,7 +1831,7 @@ static bool create_simple_graphics_pipeline()
         vertex_attributes
     };
 
-    return create_graphics_pipeline(shader_info);
+    return create_graphics_pipeline(shader_info, &vk_gr_pipeline);
 }
 
 static bool create_patch_graphics_pipeline()
@@ -1865,7 +1865,7 @@ static bool create_patch_graphics_pipeline()
         shader_info.shader_ids[3]        = shader_bezier_surface_quadratic_tese;
     }
 
-    return create_graphics_pipeline(shader_info);
+    return create_graphics_pipeline(shader_info, &vk_gr_pipeline);
 }
 
 static bool create_graphics_pipelines()
@@ -2408,6 +2408,7 @@ static bool dummy_draw(uint32_t image_idx, uint64_t time_ms, VkFence queue_fence
         vmath::mat4 model;            // transforms to world space for lighting
         vmath::mat3 model_normal;     // inverse transpose for transforming normals to world space
         vmath::vec4 color;            // object color
+        vmath::vec4 params;           // shader-specific parameters
         vmath::vec4 lights[1];        // light positions in world space
     };
     static uint32_t     slot_size;
@@ -2439,8 +2440,9 @@ static bool dummy_draw(uint32_t image_idx, uint64_t time_ms, VkFence queue_fence
     uniform_data->model_view_proj = model_view * proj;
     uniform_data->model           = model_view;
     uniform_data->model_normal    = vmath::transpose(vmath::inverse(vmath::mat3(model_view)));
-    uniform_data->color           = vmath::vec<4>(0.4f, 0.6f, 0.1f, user_roundedness);
-    uniform_data->lights[0]       = vmath::vec<4>(5.0f, 5.0f, -5.0f, 1.0f);
+    uniform_data->color           = vmath::vec4(0.4f, 0.6f, 0.1f, 1);
+    uniform_data->params          = vmath::vec4(user_roundedness, 0, 0, 0);
+    uniform_data->lights[0]       = vmath::vec4(5.0f, 5.0f, -5.0f, 1.0f);
 
     // Send matrices to GPU
     if ( ! host_shader_data.flush(slot_size * image_idx, slot_size))
