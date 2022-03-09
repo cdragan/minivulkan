@@ -2331,7 +2331,8 @@ static constexpr VkClearValue make_clear_depth(float depth, uint32_t stencil)
     return value;
 }
 
-float user_roundedness = 111.0f / 127.0f;
+float    user_roundedness = 111.0f / 127.0f;
+uint32_t user_tess_level  = 12;
 
 static bool dummy_draw(uint32_t image_idx, uint64_t time_ms, VkFence queue_fence)
 {
@@ -2441,7 +2442,10 @@ static bool dummy_draw(uint32_t image_idx, uint64_t time_ms, VkFence queue_fence
     uniform_data->model           = model_view;
     uniform_data->model_normal    = vmath::transpose(vmath::inverse(vmath::mat3(model_view)));
     uniform_data->color           = vmath::vec4(0.4f, 0.6f, 0.1f, 1);
-    uniform_data->params          = vmath::vec4(user_roundedness, 0, 0, 0);
+    uniform_data->params          = vmath::vec4(user_roundedness,
+                                                static_cast<float>(user_tess_level),
+                                                0,
+                                                0);
     uniform_data->lights[0]       = vmath::vec4(5.0f, 5.0f, -5.0f, 1.0f);
 
     // Send matrices to GPU

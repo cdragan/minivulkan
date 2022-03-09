@@ -122,7 +122,8 @@ bool init_gui()
     return true;
 }
 
-extern float user_roundedness;
+extern float    user_roundedness;
+extern uint32_t user_tess_level;
 
 // TODO move this to a separate file
 static bool construct_gui()
@@ -130,6 +131,7 @@ static bool construct_gui()
     ImGui::Text("Hello, world!");
     ImGui::Separator();
     ImGui::SliderFloat("Roundedness", &user_roundedness, 0.0f, 1.0f);
+    ImGui::SliderInt("Tessellation Level", reinterpret_cast<int*>(&user_tess_level), 1, 20);
     return true;
 }
 
