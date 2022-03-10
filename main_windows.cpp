@@ -147,18 +147,22 @@ static bool create_window(Window* w)
     int   height;
 
     if (full_screen) {
-        DEVMODEA dm;
-        if ( ! EnumDisplaySettings(nullptr, ENUM_CURRENT_SETTINGS, &dm)) {
+
+        const HMONITOR monitor = MonitorFromWindow(GetDesktopWindow(),
+                                                   MONITOR_DEFAULTTOPRIMARY);
+
+        static MONITORINFO monitor_info = { sizeof(MONITORINFO) };
+        if ( ! GetMonitorInfo(monitor, &monitor_info)) {
             dprintf("Failed to get current video mode\n");
             return false;
         }
 
         ws_ex  = WS_EX_APPWINDOW | WS_EX_TOPMOST;
         ws     = WS_CLIPSIBLINGS | WS_CLIPCHILDREN | WS_POPUP;
-        x      = static_cast<int>(dm.dmPosition.x);
-        y      = static_cast<int>(dm.dmPosition.y);
-        width  = static_cast<int>(dm.dmPelsWidth);
-        height = static_cast<int>(dm.dmPelsHeight);
+        x      = static_cast<int>(monitor_info.rcMonitor.left);
+        y      = static_cast<int>(monitor_info.rcMonitor.top);
+        width  = static_cast<int>(monitor_info.rcMonitor.right  - monitor_info.rcMonitor.left);
+        height = static_cast<int>(monitor_info.rcMonitor.bottom - monitor_info.rcMonitor.top);
     }
     else {
         ws_ex  = WS_EX_APPWINDOW;
