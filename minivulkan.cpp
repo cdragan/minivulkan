@@ -458,7 +458,7 @@ static bool find_gpu()
         return false;
     }
 
-    const VkPhysicalDeviceType seek_types[] = {
+    static const VkPhysicalDeviceType seek_types[] = {
         VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU,
         VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU
     };
