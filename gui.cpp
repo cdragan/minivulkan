@@ -124,6 +124,7 @@ bool init_gui()
 
 extern float    user_roundedness;
 extern uint32_t user_tess_level;
+extern bool     user_wireframe;
 
 // TODO move this to a separate file
 static bool construct_gui()
@@ -132,6 +133,7 @@ static bool construct_gui()
     ImGui::Separator();
     ImGui::SliderFloat("Roundedness", &user_roundedness, 0.0f, 1.0f);
     ImGui::SliderInt("Tessellation Level", reinterpret_cast<int*>(&user_tess_level), 1, 20);
+    ImGui::Checkbox("Wireframe", &user_wireframe);
     return true;
 }
 

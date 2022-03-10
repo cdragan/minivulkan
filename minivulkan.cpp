@@ -1441,7 +1441,7 @@ enum WhatGeometry {
 static constexpr WhatGeometry what_geometry = geom_quadratic_patch;
 
 static VkPipelineLayout vk_gr_pipeline_layout = VK_NULL_HANDLE;
-static VkPipeline       vk_gr_pipeline        = VK_NULL_HANDLE;
+static VkPipeline       vk_gr_pipeline[2];
 
 static
 #include "simple.vert.h"
@@ -1573,6 +1573,7 @@ struct ShaderInfo {
     uint8_t                                  vertex_stride;
     uint8_t                                  topology;
     uint8_t                                  patch_control_points;
+    uint8_t                                  polygon_mode;
     uint8_t                                  num_vertex_attributes;
     const VkVertexInputAttributeDescription* vertex_attributes;
 };
@@ -1718,6 +1719,8 @@ static bool create_graphics_pipeline(const ShaderInfo& shader_info, VkPipeline* 
         1           // lineWidth
     };
 
+    rasterization_state.polygonMode = static_cast<VkPolygonMode>(shader_info.polygon_mode);
+
     static VkPipelineMultisampleStateCreateInfo multisample_state = {
         VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
         nullptr,
@@ -1767,6 +1770,19 @@ static bool create_graphics_pipeline(const ShaderInfo& shader_info, VkPipeline* 
         &color_blend_att,
         { }         // blendConstants
     };
+
+#if 0
+    static VkDynamicState dynamic_states[] = {
+    };
+
+    static VkPipelineDynamicStateCreateInfo dynamic_state = {
+        VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
+        nullptr,
+        0,          // flags
+        mstd::array_size(dynamic_states),
+        dynamic_states
+    };
+#endif
 
     static VkGraphicsPipelineCreateInfo pipeline_create_info = {
         VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
@@ -1819,19 +1835,25 @@ static bool create_simple_graphics_pipeline()
         }
     };
 
-    static const ShaderInfo shader_info = {
+    static ShaderInfo shader_info = {
         {
             shader_simple_vert,
             shader_phong_frag
         },
         sizeof(Vertex),
         VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
-        0,
+        0, // patch_control_points
+        VK_POLYGON_MODE_FILL,
         mstd::array_size(vertex_attributes),
         vertex_attributes
     };
 
-    return create_graphics_pipeline(shader_info, &vk_gr_pipeline);
+    shader_info.polygon_mode = VK_POLYGON_MODE_FILL;
+    if ( ! create_graphics_pipeline(shader_info, &vk_gr_pipeline[0]))
+        return false;
+
+    shader_info.polygon_mode = VK_POLYGON_MODE_LINE;
+    return create_graphics_pipeline(shader_info, &vk_gr_pipeline[1]);
 }
 
 static bool create_patch_graphics_pipeline()
@@ -1854,7 +1876,8 @@ static bool create_patch_graphics_pipeline()
         },
         sizeof(Vertex),
         VK_PRIMITIVE_TOPOLOGY_PATCH_LIST,
-        16,
+        16, // patch_control_points
+        VK_POLYGON_MODE_FILL,
         mstd::array_size(vertex_attributes),
         vertex_attributes
     };
@@ -1865,7 +1888,12 @@ static bool create_patch_graphics_pipeline()
         shader_info.shader_ids[3]        = shader_bezier_surface_quadratic_tese;
     }
 
-    return create_graphics_pipeline(shader_info, &vk_gr_pipeline);
+    shader_info.polygon_mode = VK_POLYGON_MODE_FILL;
+    if ( ! create_graphics_pipeline(shader_info, &vk_gr_pipeline[0]))
+        return false;
+
+    shader_info.polygon_mode = VK_POLYGON_MODE_LINE;
+    return create_graphics_pipeline(shader_info, &vk_gr_pipeline[1]);
 }
 
 static bool create_graphics_pipelines()
@@ -2333,6 +2361,7 @@ static constexpr VkClearValue make_clear_depth(float depth, uint32_t stencil)
 
 float    user_roundedness = 111.0f / 127.0f;
 uint32_t user_tess_level  = 12;
+bool     user_wireframe   = false;
 
 static bool dummy_draw(uint32_t image_idx, uint64_t time_ms, VkFence queue_fence)
 {
@@ -2538,7 +2567,7 @@ static bool dummy_draw(uint32_t image_idx, uint64_t time_ms, VkFence queue_fence
 
     vkCmdBeginRenderPass(buf, &render_pass_info, VK_SUBPASS_CONTENTS_INLINE);
 
-    vkCmdBindPipeline(buf, VK_PIPELINE_BIND_POINT_GRAPHICS, vk_gr_pipeline);
+    vkCmdBindPipeline(buf, VK_PIPELINE_BIND_POINT_GRAPHICS, vk_gr_pipeline[user_wireframe ? 1 : 0]);
 
     static const VkDeviceSize vb_offset = 0;
     vkCmdBindVertexBuffers(buf,
