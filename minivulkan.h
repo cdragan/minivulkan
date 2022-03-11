@@ -19,23 +19,19 @@ extern VkSurfaceCapabilitiesKHR vk_surface_caps;
 
 struct Window;
 
-#if defined(__APPLE__) && defined(__cplusplus)
-#   define PORTABLE extern "C"
-#else
-#   define PORTABLE
-#endif
-
-PORTABLE bool init_vulkan(struct Window* w);
-PORTABLE bool create_surface(struct Window* w);
-PORTABLE bool draw_frame();
-PORTABLE void idle_queue();
-PORTABLE uint64_t get_current_time_ms();
+bool init_vulkan(struct Window* w);
+bool create_surface(struct Window* w);
+bool draw_frame();
+void idle_queue();
+uint64_t get_current_time_ms();
+bool load_sound(uint32_t sound_id, const void* data, uint32_t size);
+bool play_sound(uint32_t sound_id);
 
 #ifdef NDEBUG
 #   define CHK(call) call
 #else
 #   define CHK(call) check_vk_call(#call, __FILE__, __LINE__, (call))
-PORTABLE VkResult check_vk_call(const char* call_str, const char* file, int line, VkResult res);
+VkResult check_vk_call(const char* call_str, const char* file, int line, VkResult res);
 #endif
 
 enum eLimits {

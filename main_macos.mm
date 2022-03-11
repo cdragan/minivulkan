@@ -5,6 +5,7 @@
 #import <Cocoa/Cocoa.h>
 #import <QuartzCore/CAMetalLayer.h>
 #include "minivulkan.h"
+#include "dprintf.h"
 #ifdef ENABLE_GUI
 #   include "imgui/backends/imgui_impl_osx.h"
 #endif
@@ -41,6 +42,35 @@ uint64_t get_current_time_ms()
     }
 
     return time_ms;
+}
+
+struct Sound {
+    NSSound* sounds[1];
+};
+
+static Sound sound;
+
+bool load_sound(uint32_t sound_id, const void* data, uint32_t size)
+{
+    if (sound_id >= sizeof(sound.sounds)) {
+        dprintf("Sound %u doesn't exist\n", sound_id);
+        return false;
+    }
+
+    NSData *sound_data = [NSData dataWithBytes: data
+                                 length:        size];
+    sound.sounds[sound_id] = [[NSSound alloc] initWithData: sound_data];
+    return true;
+}
+
+bool play_sound(uint32_t sound_id)
+{
+    if (sound_id >= sizeof(sound.sounds)) {
+        dprintf("Sound %u doesn't exist\n", sound_id);
+        return false;
+    }
+
+    return !! [sound.sounds[sound_id] play];
 }
 
 @interface VulkanViewController: NSViewController
