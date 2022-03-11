@@ -2,6 +2,7 @@
 // Copyright (c) 2021-2022 Chris Dragan
 
 #import <AppKit/AppKit.h>
+#import <AVFoundation/AVAudioPlayer.h>
 #import <Cocoa/Cocoa.h>
 #import <QuartzCore/CAMetalLayer.h>
 #include "minivulkan.h"
@@ -25,7 +26,7 @@ bool create_surface(struct Window* w)
 
     const VkResult res = CHK(vkCreateMetalSurfaceEXT(vk_instance,
                                                      &surf_create_info,
-                                                     NULL,
+                                                     nullptr,
                                                      &vk_surface));
     return res == VK_SUCCESS;
 }
@@ -45,7 +46,7 @@ uint64_t get_current_time_ms()
 }
 
 struct Sound {
-    NSSound* sounds[1];
+    AVAudioPlayer* sounds[1];
 };
 
 static Sound sound;
@@ -59,7 +60,21 @@ bool load_sound(uint32_t sound_id, const void* data, uint32_t size)
 
     NSData *sound_data = [NSData dataWithBytes: data
                                  length:        size];
-    sound.sounds[sound_id] = [[NSSound alloc] initWithData: sound_data];
+    sound.sounds[sound_id] = [[AVAudioPlayer alloc] initWithData: sound_data
+                                                    error:        nullptr];
+
+    if ( ! sound.sounds[sound_id]) {
+        dprintf("Failed to load sound %u\n", sound_id);
+        return false;
+    }
+
+    dprintf("Sound %u duration %.3f s\n", sound_id, sound.sounds[sound_id].duration);
+
+    if ( ! [sound.sounds[sound_id] prepareToPlay]) {
+        dprintf("Failed to initialize sound %u for playback\n", sound_id);
+        return false;
+    }
+
     return true;
 }
 
@@ -70,7 +85,12 @@ bool play_sound(uint32_t sound_id)
         return false;
     }
 
-    return !! [sound.sounds[sound_id] play];
+    if ( ! [sound.sounds[sound_id] play]) {
+        dprintf("Failed to play sound %u\n", sound_id);
+        return false;
+    }
+
+    return true;
 }
 
 @interface VulkanViewController: NSViewController

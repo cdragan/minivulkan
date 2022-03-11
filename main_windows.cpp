@@ -49,6 +49,18 @@ uint64_t get_current_time_ms()
     return time_100ns / 10'000;
 }
 
+bool load_sound(uint32_t sound_id, const void* data, uint32_t size)
+{
+    // TODO
+    return true;
+}
+
+bool play_sound(uint32_t sound_id)
+{
+    // TODO
+    return true;
+}
+
 static LRESULT CALLBACK window_proc(HWND hwnd, UINT umsg, WPARAM wparam, LPARAM lparam)
 {
     #ifdef ENABLE_GUI

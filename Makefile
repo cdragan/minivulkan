@@ -38,6 +38,7 @@ lib_src_files += mstdc.cpp
 lib_src_files += vmath.cpp
 
 threed_src_files += minivulkan.cpp
+threed_src_files += sound.cpp
 
 ifeq ($(UNAME), Linux)
     threed_src_files += main_linux.cpp
@@ -178,6 +179,7 @@ ifeq ($(UNAME), Linux)
 endif
 
 ifeq ($(UNAME), Darwin)
+    frameworks += AVFoundation
     frameworks += Cocoa
     frameworks += CoreVideo
     frameworks += Quartz

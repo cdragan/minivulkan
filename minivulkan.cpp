@@ -2697,6 +2697,9 @@ bool init_vulkan(Window* w)
     if ( ! init_gui())
         return false;
 
+    if ( ! init_sound())
+        return false;
+
     return true;
 }
 
@@ -2704,6 +2707,13 @@ bool draw_frame()
 {
     uint32_t image_idx;
     VkResult res;
+
+    static bool playing = false;
+    if ( ! playing) {
+        playing = true;
+        if ( ! play_sound(0))
+            return false;
+    }
 
     for (;;) {
 

@@ -20,6 +20,7 @@ extern VkSurfaceCapabilitiesKHR vk_surface_caps;
 struct Window;
 
 bool init_vulkan(struct Window* w);
+bool init_sound();
 bool create_surface(struct Window* w);
 bool draw_frame();
 void idle_queue();
