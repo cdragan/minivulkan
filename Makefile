@@ -126,6 +126,8 @@ ifeq ($(UNAME), Windows)
     LDFLAGS += -nologo
     LDFLAGS += user32.lib kernel32.lib
 
+    SUBSYSTEMFLAGS = -subsystem:console
+
     CXX  = cl.exe
     LINK = link.exe
 
@@ -161,6 +163,8 @@ else
     CXXFLAGS += -x c++ -std=c++17 -fno-rtti -fno-exceptions
 
     OBJCXXFLAGS += -x objective-c++ -std=c++17 -fno-objc-arc
+
+    SUBSYSTEMFLAGS =
 
     LINK = $(CXX)
 
@@ -235,8 +239,7 @@ ifeq ($(UNAME), Darwin)
 endif
 
 ifeq ($(UNAME), Windows)
-$(exe): LDFLAGS += -subsystem:windows
-$(out_dir)/vmath_unit$(exe_suffix): LDFLAGS += -subsystem:console
+$(exe): SUBSYSTEMFLAGS = -subsystem:windows
 endif
 
 ##############################################################################
@@ -254,7 +257,7 @@ $(out_dir):
 
 define LINK_RULE
 $1: $$(call OBJ_FROM_SRC, $2)
-	$$(LINK) $$(call LINKER_OUTPUT,$$@) $$^ $$(LDFLAGS)
+	$$(LINK) $$(call LINKER_OUTPUT,$$@) $$^ $$(LDFLAGS) $$(SUBSYSTEMFLAGS)
 ifdef STRIP
 	$$(STRIP) $$@
 endif
