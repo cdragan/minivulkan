@@ -27,7 +27,7 @@ Ideas which contribute to reduced executable size:
   so make sure you run `vcvarsall.bat x64` (or `x86`) before entering MSYS2 environment.
 * Install Vulkan SDK.
 
-### Compilation
+### Compiling
 
 Use GNU make to compile the sources.
 
