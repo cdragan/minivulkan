@@ -88,6 +88,7 @@
     X(vkCreateDescriptorSetLayout) \
     X(vkCreatePipelineLayout) \
     X(vkCreateGraphicsPipelines) \
+    X(vkCreateComputePipelines) \
     X(vkDestroyPipeline) \
     X(vkCreateCommandPool) \
     X(vkAllocateCommandBuffers) \
@@ -107,7 +108,8 @@
     X(vkCmdBindDescriptorSets) \
     X(vkCmdDrawIndexed) \
     X(vkCmdPipelineBarrier) \
-    X(vkCmdCopyBuffer)
+    X(vkCmdCopyBuffer) \
+    X(vkCmdDispatch)
 
 extern PFN_vkVoidFunction vk_lib_functions[];
 extern PFN_vkVoidFunction vk_global_functions[];
@@ -191,6 +193,7 @@ enum e_device_functions {
 #define vkCreateDescriptorSetLayout               ((PFN_vkCreateDescriptorSetLayout)               vk_device_functions[   id_vkCreateDescriptorSetLayout])
 #define vkCreatePipelineLayout                    ((PFN_vkCreatePipelineLayout)                    vk_device_functions[   id_vkCreatePipelineLayout])
 #define vkCreateGraphicsPipelines                 ((PFN_vkCreateGraphicsPipelines)                 vk_device_functions[   id_vkCreateGraphicsPipelines])
+#define vkCreateComputePipelines                  ((PFN_vkCreateComputePipelines)                  vk_device_functions[   id_vkCreateComputePipelines])
 #define vkDestroyPipeline                         ((PFN_vkDestroyPipeline)                         vk_device_functions[   id_vkDestroyPipeline])
 #define vkCreateCommandPool                       ((PFN_vkCreateCommandPool)                       vk_device_functions[   id_vkCreateCommandPool])
 #define vkAllocateCommandBuffers                  ((PFN_vkAllocateCommandBuffers)                  vk_device_functions[   id_vkAllocateCommandBuffers])
@@ -211,3 +214,4 @@ enum e_device_functions {
 #define vkCmdDrawIndexed                          ((PFN_vkCmdDrawIndexed)                          vk_device_functions[   id_vkCmdDrawIndexed])
 #define vkCmdPipelineBarrier                      ((PFN_vkCmdPipelineBarrier)                      vk_device_functions[   id_vkCmdPipelineBarrier])
 #define vkCmdCopyBuffer                           ((PFN_vkCmdCopyBuffer)                           vk_device_functions[   id_vkCmdCopyBuffer])
+#define vkCmdDispatch                             ((PFN_vkCmdDispatch)                             vk_device_functions[   id_vkCmdDispatch])
