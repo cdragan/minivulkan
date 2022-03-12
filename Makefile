@@ -318,7 +318,7 @@ endif
 spirv_encode = $(out_dir)/spirv_encode$(exe_suffix)
 
 ifeq ($(UNAME), Windows)
-$(spirv_encode): LDFLAGS = $(filter-out -nostdlib,$(LDFLAGS))
+$(spirv_encode): LDFLAGS = $(filter-out -nodefaultlib,$(LDFLAGS))
 endif
 
 $(eval $(call LINK_RULE,$(spirv_encode),$(spirv_encode_src_files)))
