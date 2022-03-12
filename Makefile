@@ -101,6 +101,8 @@ shader_files += shaders/bezier_surface_cubic.tese.glsl
 ##############################################################################
 # Compiler flags
 
+SUBSYSTEMFLAGS =
+
 ifeq ($(UNAME), Windows)
     WFLAGS += -W3
 
@@ -127,8 +129,6 @@ ifeq ($(UNAME), Windows)
 
     LDFLAGS += -nologo
     LDFLAGS += user32.lib kernel32.lib
-
-    SUBSYSTEMFLAGS = -subsystem:console
 
     CXX  = cl.exe
     LINK = link.exe
@@ -168,7 +168,6 @@ else
 
     # For compatibility with MSVC
     LDFLAGS_NODEFAULTLIB =
-    SUBSYSTEMFLAGS =
 
     LINK = $(CXX)
 
@@ -242,10 +241,6 @@ ifeq ($(UNAME), Darwin)
     exe = $(macos_app_dir)/$(exe_name)
 endif
 
-ifeq ($(UNAME), Windows)
-$(exe): SUBSYSTEMFLAGS = -subsystem:windows
-endif
-
 ##############################################################################
 # Rules
 
@@ -266,6 +261,10 @@ ifdef STRIP
 	$$(STRIP) $$@
 endif
 endef
+
+ifeq ($(UNAME), Windows)
+$(exe): SUBSYSTEMFLAGS = -subsystem:windows
+endif
 
 $(eval $(call LINK_RULE,$(exe),$(all_threed_src_files)))
 
@@ -323,6 +322,7 @@ spirv_encode = $(out_dir)/spirv_encode$(exe_suffix)
 
 ifeq ($(UNAME), Windows)
 $(spirv_encode): LDFLAGS_NODEFAULTLIB =
+$(spirv_encode): SUBSYSTEMFLAGS = -subsystem:console
 endif
 
 $(eval $(call LINK_RULE,$(spirv_encode),$(spirv_encode_src_files)))
