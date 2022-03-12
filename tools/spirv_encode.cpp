@@ -17,16 +17,48 @@ static uint32_t read32le(const void* buf)
     return b[0] | (b[1] << 8) | (b[2] << 16) | (b[3] << 24);
 }
 
+// Declare input buffer
+// Input buffer is large enough for any reasonable SPIR-V shader
+static uint8_t input_buf[256 * 1024];
+
+static constexpr uint32_t spirv_header_size = 20;
+
+template<typename T>
+int walk_spirv(size_t num_read, const char* input_filename, T func)
+{
+    const uint8_t*       input = &input_buf[spirv_header_size];
+    const uint8_t* const end   = &input_buf[num_read];
+
+    do {
+        const uint32_t opcode_word = read32le(input);
+        const uint32_t opcode      = opcode_word & 0xFFFFu;
+        const uint32_t word_count  = opcode_word >> 16;
+
+        const uint8_t* const next = input + word_count * 4;
+        if (next > end) {
+            fprintf(stderr, "spirv_encode: instruction word count exceeds SPIR-V size in %s\n", input_filename);
+            return EXIT_FAILURE;
+        }
+
+        if (word_count == 0) {
+            fprintf(stderr, "spirv_encode: invalid word count 0 in %s\n", input_filename);
+            return EXIT_FAILURE;
+        }
+
+        func(opcode, word_count - 1, input + 4);
+
+        input += word_count * 4;
+    } while (input < end);
+
+    return EXIT_SUCCESS;
+}
+
 int main(int argc, char* argv[])
 {
     if (argc != 4) {
         fprintf(stderr, "Usage: spirv_encode <VARIABLE_NAME> <INPUT_FILE> <OUTPUT_FILE>\n");
         return EXIT_FAILURE;
     }
-
-    // Declare input buffer
-    // Input buffer large enough for any reasonable SPIR-V shader
-    static uint8_t input_buf[256 * 1024];
 
     // Open input file
     const char* const input_filename = argv[2];
@@ -85,39 +117,10 @@ int main(int argc, char* argv[])
         return EXIT_FAILURE;
     }
 
-    constexpr uint32_t spirv_header_size = 20;
-
-    const auto walk_spirv = [num_read, input_filename](auto func) -> int {
-        const uint8_t*       input = &input_buf[spirv_header_size];
-        const uint8_t* const end   = &input_buf[num_read];
-
-        do {
-            const uint32_t opcode_word = read32le(input);
-            const uint32_t opcode      = opcode_word & 0xFFFFu;
-            const uint32_t word_count  = opcode_word >> 16;
-
-            const uint8_t* const next = input + word_count * 4;
-            if (next > end) {
-                fprintf(stderr, "spirv_encode: instruction word count exceeds SPIR-V size in %s\n", input_filename);
-                return EXIT_FAILURE;
-            }
-
-            if (word_count == 0) {
-                fprintf(stderr, "spirv_encode: invalid word count 0 in %s\n", input_filename);
-                return EXIT_FAILURE;
-            }
-
-            func(opcode, word_count - 1, input + 4);
-
-            input += word_count * 4;
-        } while (input < end);
-
-        return EXIT_SUCCESS;
-    };
-
     // Count how many opcodes there are in the SPIR-V
     uint32_t total_opcodes = 0;
-    int ret = walk_spirv([&](uint32_t opcode, uint32_t num_operands, const uint8_t* operands) {
+    int ret = walk_spirv(num_read, input_filename,
+                         [&](uint32_t opcode, uint32_t num_operands, const uint8_t* operands) {
         ++total_opcodes;
     });
     if (ret)
@@ -141,28 +144,32 @@ int main(int argc, char* argv[])
     output16(static_cast<uint16_t>(bound));
 
     // Dump low byte of each opcode
-    ret = walk_spirv([&output](uint32_t opcode, uint32_t num_operands, const uint8_t* operands) {
+    ret = walk_spirv(num_read, input_filename,
+                     [&output](uint32_t opcode, uint32_t num_operands, const uint8_t* operands) {
         *(output++) = static_cast<uint8_t>(opcode);
     });
     if (ret)
         return ret;
 
     // Dump high byte of each opcode
-    ret = walk_spirv([&output](uint32_t opcode, uint32_t num_operands, const uint8_t* operands) {
+    ret = walk_spirv(num_read, input_filename,
+                     [&output](uint32_t opcode, uint32_t num_operands, const uint8_t* operands) {
         *(output++) = static_cast<uint8_t>(opcode >> 8);
     });
     if (ret)
         return ret;
 
     // Dump low byte of each number of operands
-    ret = walk_spirv([&output](uint32_t opcode, uint32_t num_operands, const uint8_t* operands) {
+    ret = walk_spirv(num_read, input_filename,
+                     [&output](uint32_t opcode, uint32_t num_operands, const uint8_t* operands) {
         *(output++) = static_cast<uint8_t>(num_operands);
     });
     if (ret)
         return ret;
 
     // Dump high byte of each number of operands
-    ret = walk_spirv([&output](uint32_t opcode, uint32_t num_operands, const uint8_t* operands) {
+    ret = walk_spirv(num_read, input_filename,
+                     [&output](uint32_t opcode, uint32_t num_operands, const uint8_t* operands) {
         *(output++) = static_cast<uint8_t>(num_operands >> 8);
     });
     if (ret)
@@ -170,7 +177,8 @@ int main(int argc, char* argv[])
 
     // Dump operands, one byte at a time
     for (int op_byte = 0; op_byte < 4; op_byte++) {
-        ret = walk_spirv([&output, op_byte](uint32_t opcode, uint32_t num_operands, const uint8_t* operands) {
+        ret = walk_spirv(num_read, input_filename,
+                         [&output, op_byte](uint32_t opcode, uint32_t num_operands, const uint8_t* operands) {
             operands += op_byte;
             const uint8_t* const end = operands + num_operands * 4;
             for (; operands < end; operands += 4)
