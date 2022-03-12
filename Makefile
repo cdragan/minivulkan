@@ -164,7 +164,7 @@ else
 
     CXXFLAGS += -x c++ -std=c++17 -fno-rtti -fno-exceptions
 
-    OBJCXXFLAGS += -x objective-c++ -std=c++17 -fno-objc-arc
+    OBJCXXFLAGS += -x objective-c++ -std=c++17
 
     # For compatibility with MSVC
     LDFLAGS_NODEFAULTLIB =
@@ -198,7 +198,7 @@ ifeq ($(UNAME), Darwin)
         frameworks += GameController
     endif
 
-    LDFLAGS += -fno-objc-arc $(addprefix -framework ,$(frameworks))
+    LDFLAGS += $(addprefix -framework ,$(frameworks))
 
     ifndef debug
         STRIP = strip -x
