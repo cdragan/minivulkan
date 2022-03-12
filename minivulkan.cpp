@@ -1477,12 +1477,8 @@ static
     X(bezier_surface_cubic_tesc) \
     X(bezier_surface_cubic_tese)
 
-static const struct {
-    const uint32_t* code;
-    uint32_t        size;
-} spirv[] =
-{
-#define X(shader) { shader##_glsl, mstd::array_size(shader##_glsl) },
+static uint8_t* const spirv[] = {
+#define X(shader) shader##_glsl,
     DEFINE_SHADERS
 #undef X
 };
@@ -1496,22 +1492,80 @@ enum ShaderIds {
 
 static VkShaderModule shaders[mstd::array_size(spirv)];
 
+static const uint32_t* decode_shader(uint8_t* code, size_t* out_size)
+{
+    uint16_t* header = reinterpret_cast<uint16_t*>(code);
+
+    const uint32_t total_opcodes = *(header++);
+    const uint32_t total_words   = *(header++);
+    const uint32_t version       = *(header++);
+    const uint32_t bound         = *(header++);
+    assert(total_opcodes);
+    assert(total_words > total_opcodes);
+
+    uint8_t* opcodes = reinterpret_cast<uint8_t*>(header);
+
+    constexpr uint32_t spirv_header_words = 5;
+
+    uint32_t* const out_code = reinterpret_cast<uint32_t*>(opcodes + total_words * 4);
+    const uint32_t  size     = (spirv_header_words + total_words) * sizeof(uint32_t);
+
+    // Fill out SPIR-V header
+    out_code[0] = 0x07230203;
+    out_code[1] = version << 8;
+    out_code[3] = bound;
+
+    uint8_t*       output         = reinterpret_cast<uint8_t*>(out_code + 5);
+    const uint8_t* operands       = opcodes + total_opcodes * 4;
+    const uint32_t total_operands = total_words - total_opcodes;
+
+    uint32_t num_left = total_opcodes;
+    do {
+        output[0] = opcodes[0];
+        output[1] = opcodes[total_opcodes];
+
+        const uint32_t num_operands_lo = opcodes[total_opcodes * 2];
+        const uint32_t num_operands_hi = opcodes[total_opcodes * 3];
+        const uint32_t num_operands    = (num_operands_hi << 8) + num_operands_lo;
+
+        reinterpret_cast<uint16_t*>(output)[1] = static_cast<uint16_t>(num_operands + 1);
+        output += 4;
+        ++opcodes;
+
+        const uint8_t* const operands_end = operands + num_operands;
+        for ( ; operands < operands_end; operands++) {
+            output[0] = operands[0];
+            output[1] = operands[total_operands];
+            output[2] = operands[total_operands * 2];
+            output[3] = operands[total_operands * 3];
+            output += 4;
+        }
+    } while (--num_left);
+
+    *out_size = size;
+    return out_code;
+}
+
+static bool load_shader(uint32_t i, uint8_t* code)
+{
+    static VkShaderModuleCreateInfo create_info = {
+        VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+        nullptr,
+        0,
+        0,
+        nullptr
+    };
+
+    create_info.pCode = decode_shader(code, &create_info.codeSize);
+
+    const VkResult res = CHK(vkCreateShaderModule(vk_dev, &create_info, nullptr, &shaders[i]));
+    return res == VK_SUCCESS;
+}
+
 static bool load_shaders()
 {
     for (uint32_t i = 0; i < mstd::array_size(spirv); i++) {
-        static VkShaderModuleCreateInfo create_info = {
-            VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
-            nullptr,
-            0,
-            0,
-            nullptr
-        };
-
-        create_info.codeSize = spirv[i].size * sizeof(uint32_t);
-        create_info.pCode    = spirv[i].code;
-
-        const VkResult res = CHK(vkCreateShaderModule(vk_dev, &create_info, nullptr, &shaders[i]));
-        if (res != VK_SUCCESS)
+        if ( ! load_shader(i, spirv[i]))
             return false;
     }
 

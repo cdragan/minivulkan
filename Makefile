@@ -69,10 +69,13 @@ imgui_src_files += imgui/imgui_widgets.cpp
 imgui_src_files += imgui/backends/imgui_impl_vulkan.cpp
 imgui_src_files += gui.cpp
 
+spirv_encode_src_files += tools/spirv_encode.cpp
+
 all_src_files += $(lib_src_files)
 all_src_files += $(threed_src_files)
 all_src_files += $(vmath_unit_src_files)
 all_src_files += $(imgui_src_files)
+all_src_files += $(spirv_encode_src_files)
 
 all_threed_src_files += $(lib_src_files)
 all_threed_src_files += $(threed_src_files)
@@ -233,7 +236,7 @@ endif
 
 ifeq ($(UNAME), Windows)
 $(exe): LDFLAGS += -subsystem:windows
-$(out_dir)/vmath_unit.$(exe_suffix): LDFLAGS += -subsystem:console
+$(out_dir)/vmath_unit$(exe_suffix): LDFLAGS += -subsystem:console
 endif
 
 ##############################################################################
@@ -304,14 +307,19 @@ $(out_dir)/shaders: | $(out_dir)
 	mkdir -p $@
 
 ifdef VULKAN_SDK_BIN
-    GLSL_VALIDATOR = $(VULKAN_SDK_BIN)/glslangValidator
+    GLSL_VALIDATOR_PREFIX = $(VULKAN_SDK_BIN)/
 else
-    GLSL_VALIDATOR = glslangValidator
+    GLSL_VALIDATOR_PREFIX =
 endif
 
+spirv_encode = $(out_dir)/spirv_encode$(exe_suffix)
+
+$(eval $(call LINK_RULE,$(spirv_encode),$(spirv_encode_src_files)))
+
 define GLSL_EXT
-$(out_dir)/shaders/%.$1.h: shaders/%.$1.glsl | $(out_dir)/shaders
-	$(GLSL_VALIDATOR) $(GLSL_FLAGS) --variable-name $$(subst .,_,$$(notdir $$<)) -o $$@ $$<
+$(out_dir)/shaders/%.$1.h: shaders/%.$1.glsl $(spirv_encode) | $(out_dir)/shaders
+	$(GLSL_VALIDATOR_PREFIX)glslangValidator $(GLSL_FLAGS) -o $$@.spv $$<
+	$(spirv_encode) $$(subst .,_,$$(notdir $$<)) $$@.spv $$@
 endef
 
 $(foreach ext, vert tesc tese geom frag comp, $(eval $(call GLSL_EXT,$(ext))))
@@ -319,10 +327,10 @@ $(foreach ext, vert tesc tese geom frag comp, $(eval $(call GLSL_EXT,$(ext))))
 $(call OBJ_FROM_SRC, minivulkan.cpp) $(out_dir)/minivulkan.cpp.$(asm_suffix): $(addprefix $(out_dir)/,$(addsuffix .h,$(basename $(shader_files))))
 $(call OBJ_FROM_SRC, minivulkan.cpp) $(out_dir)/minivulkan.cpp.$(asm_suffix): CFLAGS += -I$(out_dir)/shaders
 
-$(eval $(call LINK_RULE,$(out_dir)/vmath_unit,$(all_vmath_unit_src_files)))
+$(eval $(call LINK_RULE,$(out_dir)/vmath_unit$(exe_suffix),$(all_vmath_unit_src_files)))
 
-test: $(out_dir)/vmath_unit
-	$(out_dir)/vmath_unit
+test: $(out_dir)/vmath_unit$(exe_suffix)
+	$(out_dir)/vmath_unit$(exe_suffix)
 
 ##############################################################################
 # Dependency files
