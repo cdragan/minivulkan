@@ -4,6 +4,7 @@
 #include <inttypes.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include <string.h>
 
 static uint32_t read32le(const void* buf)
 {
@@ -16,6 +17,31 @@ static uint32_t read32le(const void* buf)
     };
     return b[0] | (b[1] << 8) | (b[2] << 16) | (b[3] << 24);
 }
+
+static int can_remove(uint32_t opcode)
+{
+    // Instructions which have no semantic meaning are safe to remove
+    switch (opcode) {
+        case 0:   // OpNop
+        case 2:   // OpSourceContinued
+        case 3:   // OpSource
+        case 4:   // OpSourceExtension
+        case 5:   // OpName
+        case 6:   // OpMemberName
+        case 7:   // OpString
+        case 8:   // OpLine
+        case 317: // OpNoLine
+        case 330: // OpModuleProcessed
+            return 1;
+
+        default:
+            break;
+    }
+
+    return 0;
+}
+
+static bool opt_remove_unused = false;
 
 // Declare input buffer
 // Input buffer is large enough for any reasonable SPIR-V shader
@@ -34,18 +60,21 @@ int walk_spirv(size_t num_read, const char* input_filename, T func)
         const uint32_t opcode      = opcode_word & 0xFFFFu;
         const uint32_t word_count  = opcode_word >> 16;
 
-        const uint8_t* const next = input + word_count * 4;
-        if (next > end) {
-            fprintf(stderr, "spirv_encode: instruction word count exceeds SPIR-V size in %s\n", input_filename);
-            return EXIT_FAILURE;
-        }
+        if ( ! opt_remove_unused || ! can_remove(opcode)) {
 
-        if (word_count == 0) {
-            fprintf(stderr, "spirv_encode: invalid word count 0 in %s\n", input_filename);
-            return EXIT_FAILURE;
-        }
+            const uint8_t* const next = input + word_count * 4;
+            if (next > end) {
+                fprintf(stderr, "spirv_encode: instruction word count exceeds SPIR-V size in %s\n", input_filename);
+                return EXIT_FAILURE;
+            }
 
-        func(opcode, word_count - 1, input + 4);
+            if (word_count == 0) {
+                fprintf(stderr, "spirv_encode: invalid word count 0 in %s\n", input_filename);
+                return EXIT_FAILURE;
+            }
+
+            func(opcode, word_count - 1, input + 4);
+        }
 
         input += word_count * 4;
     } while (input < end);
@@ -55,8 +84,13 @@ int walk_spirv(size_t num_read, const char* input_filename, T func)
 
 int main(int argc, char* argv[])
 {
+    if (argc == 5 && strcmp(argv[4], "--remove-unused") == 0) {
+        --argc;
+        opt_remove_unused = true;
+    }
+
     if (argc != 4) {
-        fprintf(stderr, "Usage: spirv_encode <VARIABLE_NAME> <INPUT_FILE> <OUTPUT_FILE>\n");
+        fprintf(stderr, "Usage: spirv_encode <VARIABLE_NAME> <INPUT_FILE> <OUTPUT_FILE> [--remove-unused]\n");
         return EXIT_FAILURE;
     }
 
@@ -119,9 +153,11 @@ int main(int argc, char* argv[])
 
     // Count how many opcodes there are in the SPIR-V
     uint32_t total_opcodes = 0;
+    uint32_t total_words   = 0;
     int ret = walk_spirv(num_read, input_filename,
                          [&](uint32_t opcode, uint32_t num_operands, const uint8_t* operands) {
         ++total_opcodes;
+        total_words += 1 + num_operands;
     });
     if (ret)
         return ret;
@@ -139,7 +175,7 @@ int main(int argc, char* argv[])
 
     // Dump header
     output16(static_cast<uint16_t>(total_opcodes));
-    output16(static_cast<uint16_t>((num_read - spirv_header_size) / 4));
+    output16(static_cast<uint16_t>(total_words));
     output16(static_cast<uint16_t>(version >> 8));
     output16(static_cast<uint16_t>(bound));
 
@@ -200,11 +236,11 @@ int main(int argc, char* argv[])
     // Write output buffer to the output file
     const size_t output_size = static_cast<size_t>(output - output_buf);
     const char* const variable_name = argv[1];
-    const auto write_output = [output_size, output_file, variable_name, num_read]() {
+    const auto write_output = [output_size, output_file, variable_name, total_words]() {
         if (fprintf(output_file, "#pragma once\n") < 0)
             return EXIT_FAILURE;
         if (fprintf(output_file, "uint8_t %s[%u] = {\n", variable_name,
-                    static_cast<unsigned>(output_size + num_read)) < 0)
+                    static_cast<unsigned>(output_size + total_words * 4 + spirv_header_size)) < 0)
             return EXIT_FAILURE;
         constexpr uint32_t columns = 16;
         for (uint32_t i = 0; i < output_size; i++) {
