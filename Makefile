@@ -112,9 +112,11 @@ ifeq ($(UNAME), Windows)
         LDFLAGS += -ltcg
     endif
 
-    ifndef stdlib
-        CFLAGS  += -DNOSTDLIB -D_NO_CRT_STDIO_INLINE -Zc:threadSafeInit- -GS- -Gs9999999
-        LDFLAGS += -nodefaultlib -stack:0x100000,0x100000
+    ifdef stdlib
+        LDFLAGS_NODEFAULTLIB =
+    else
+        CFLAGS += -DNOSTDLIB -D_NO_CRT_STDIO_INLINE -Zc:threadSafeInit- -GS- -Gs9999999
+        LDFLAGS_NODEFAULTLIB += -nodefaultlib -stack:0x100000,0x100000
     endif
 
     CFLAGS += -nologo
@@ -164,6 +166,8 @@ else
 
     OBJCXXFLAGS += -x objective-c++ -std=c++17 -fno-objc-arc
 
+    # For compatibility with MSVC
+    LDFLAGS_NODEFAULTLIB =
     SUBSYSTEMFLAGS =
 
     LINK = $(CXX)
@@ -257,7 +261,7 @@ $(out_dir):
 
 define LINK_RULE
 $1: $$(call OBJ_FROM_SRC, $2)
-	$$(LINK) $$(call LINKER_OUTPUT,$$@) $$^ $$(LDFLAGS) $$(SUBSYSTEMFLAGS)
+	$$(LINK) $$(call LINKER_OUTPUT,$$@) $$^ $$(LDFLAGS) $$(SUBSYSTEMFLAGS) $$(LDFLAGS_NODEFAULTLIB)
 ifdef STRIP
 	$$(STRIP) $$@
 endif
@@ -318,7 +322,7 @@ endif
 spirv_encode = $(out_dir)/spirv_encode$(exe_suffix)
 
 ifeq ($(UNAME), Windows)
-$(spirv_encode): LDFLAGS = $(filter-out -nodefaultlib,$(LDFLAGS))
+$(spirv_encode): LDFLAGS_NODEFAULTLIB =
 endif
 
 $(eval $(call LINK_RULE,$(spirv_encode),$(spirv_encode_src_files)))
