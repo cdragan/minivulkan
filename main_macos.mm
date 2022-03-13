@@ -300,6 +300,7 @@ bool play_sound(uint32_t sound_id)
         window.contentViewController = view_ctrl;
 
         if (full_screen) {
+            [NSCursor hide];
             [window setBackgroundColor: NSColor.blackColor];
             [window setCollectionBehavior: NSWindowCollectionBehaviorFullScreenPrimary];
             [window setFrame: screen_frame display: YES];
