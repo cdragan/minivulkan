@@ -84,17 +84,21 @@ int walk_spirv(size_t num_read, const char* input_filename, T func)
 
 int main(int argc, char* argv[])
 {
-    const char usage[] = "Usage: spirv_encode [--remove-unused] <VARIABLE_NAME> <INPUT_FILE> <OUTPUT_FILE>\n";
+    const char usage[] = "Usage: spirv_encode [--remove-unused] [--no-shuffle] <VARIABLE_NAME> <INPUT_FILE> <OUTPUT_FILE>\n";
     if (argc < 4) {
         fprintf(stderr, "%s", usage);
         return EXIT_FAILURE;
     }
+
+    bool opt_shuffle = true;
 
     for (int i = 1; i < argc - 3; i++) {
         const char* const arg = argv[i];
 
         if (strcmp(arg, "--remove-unused") == 0)
             opt_remove_unused = true;
+        else if (strcmp(arg, "--no-shuffle") == 0)
+            opt_shuffle = false;
         else {
             fprintf(stderr, "%s", usage);
             return EXIT_FAILURE;
@@ -172,8 +176,8 @@ int main(int argc, char* argv[])
         return ret;
 
     // Declare output buffer
-    // The size of encoded SPIR-V is the same as input SPIR-V (minus a few bytes)
-    static uint8_t output_buf[sizeof(input_buf)];
+    // The size of encoded SPIR-V is roughly the same as input SPIR-V
+    static uint8_t output_buf[sizeof(input_buf) + 16];
     uint8_t* output = output_buf;
 
     const auto output16 = [&](uint16_t value) {
@@ -186,52 +190,82 @@ int main(int argc, char* argv[])
     memset(output, 0, 8);
     output += 8;
 
-    // Dump header
-    output16(static_cast<uint16_t>(total_opcodes));
-    output16(static_cast<uint16_t>(total_words));
-    output16(static_cast<uint16_t>(version >> 8));
-    output16(static_cast<uint16_t>(bound));
+    if (opt_shuffle) {
 
-    // Dump low byte of each opcode
-    ret = walk_spirv(num_read, input_filename,
-                     [&output](uint32_t opcode, uint32_t num_operands, const uint8_t* operands) {
-        *(output++) = static_cast<uint8_t>(opcode);
-    });
-    if (ret)
-        return ret;
+        // Dump header
+        output16(static_cast<uint16_t>(total_opcodes));
+        output16(static_cast<uint16_t>(total_words));
+        output16(static_cast<uint16_t>(version >> 8));
+        output16(static_cast<uint16_t>(bound));
 
-    // Dump high byte of each opcode
-    ret = walk_spirv(num_read, input_filename,
-                     [&output](uint32_t opcode, uint32_t num_operands, const uint8_t* operands) {
-        *(output++) = static_cast<uint8_t>(opcode >> 8);
-    });
-    if (ret)
-        return ret;
-
-    // Dump low byte of each number of operands
-    ret = walk_spirv(num_read, input_filename,
-                     [&output](uint32_t opcode, uint32_t num_operands, const uint8_t* operands) {
-        *(output++) = static_cast<uint8_t>(num_operands);
-    });
-    if (ret)
-        return ret;
-
-    // Dump high byte of each number of operands
-    ret = walk_spirv(num_read, input_filename,
-                     [&output](uint32_t opcode, uint32_t num_operands, const uint8_t* operands) {
-        *(output++) = static_cast<uint8_t>(num_operands >> 8);
-    });
-    if (ret)
-        return ret;
-
-    // Dump operands, one byte at a time
-    for (int op_byte = 0; op_byte < 4; op_byte++) {
+        // Dump low byte of each opcode
         ret = walk_spirv(num_read, input_filename,
-                         [&output, op_byte](uint32_t opcode, uint32_t num_operands, const uint8_t* operands) {
-            operands += op_byte;
-            const uint8_t* const end = operands + num_operands * 4;
-            for (; operands < end; operands += 4)
-                *(output++) = *operands;
+                         [&output](uint32_t opcode, uint32_t num_operands, const uint8_t* operands) {
+            *(output++) = static_cast<uint8_t>(opcode);
+        });
+        if (ret)
+            return ret;
+
+        // Dump high byte of each opcode
+        ret = walk_spirv(num_read, input_filename,
+                         [&output](uint32_t opcode, uint32_t num_operands, const uint8_t* operands) {
+            *(output++) = static_cast<uint8_t>(opcode >> 8);
+        });
+        if (ret)
+            return ret;
+
+        // Dump low byte of each number of operands
+        ret = walk_spirv(num_read, input_filename,
+                         [&output](uint32_t opcode, uint32_t num_operands, const uint8_t* operands) {
+            *(output++) = static_cast<uint8_t>(num_operands);
+        });
+        if (ret)
+            return ret;
+
+        // Dump high byte of each number of operands
+        ret = walk_spirv(num_read, input_filename,
+                         [&output](uint32_t opcode, uint32_t num_operands, const uint8_t* operands) {
+            *(output++) = static_cast<uint8_t>(num_operands >> 8);
+        });
+        if (ret)
+            return ret;
+
+        // Dump operands, one byte at a time
+        for (int op_byte = 0; op_byte < 4; op_byte++) {
+            ret = walk_spirv(num_read, input_filename,
+                             [&output, op_byte](uint32_t opcode, uint32_t num_operands, const uint8_t* operands) {
+                operands += op_byte;
+                const uint8_t* const end = operands + num_operands * 4;
+                for (; operands < end; operands += 4)
+                    *(output++) = *operands;
+            });
+            if (ret)
+                return ret;
+        }
+    }
+    else {
+
+        // Dump size in words, excluding header
+        output16(static_cast<uint16_t>(total_words));
+        output16(0); // alignment
+
+        // Dump header
+        memcpy(output, input_buf, spirv_header_size);
+        output += spirv_header_size;
+
+        // Dump opcodes and operands
+        ret = walk_spirv(num_read, input_filename,
+                         [&output](uint32_t opcode, uint32_t num_operands, const uint8_t* operands) {
+
+            const uint32_t num_words = num_operands + 1;
+
+            *(output++) = static_cast<uint8_t>(opcode);
+            *(output++) = static_cast<uint8_t>(opcode >> 8);
+            *(output++) = static_cast<uint8_t>(num_words);
+            *(output++) = static_cast<uint8_t>(num_words >> 8);
+
+            memcpy(output, operands, num_operands * sizeof(uint32_t));
+            output += num_operands * sizeof(uint32_t);
         });
         if (ret)
             return ret;

@@ -16,11 +16,24 @@
 
 static const uint32_t* decode_shader(uint8_t* code, size_t* out_size)
 {
-    static uint32_t out_code[64 * 1024];
-
     constexpr uint32_t module_obj_size = 8;
     static_assert(module_obj_size == sizeof(VkShaderModule));
-    uint16_t* header = reinterpret_cast<uint16_t*>(code + module_obj_size);
+
+    // Size of SPIR-V header, in 32-bit words
+    constexpr uint32_t spirv_header_words = 5;
+
+#ifdef NO_SPIRV_SHUFFLE
+
+    const uint16_t* const header = reinterpret_cast<uint16_t*>(code + module_obj_size);
+    const uint32_t num_words = *header;
+    *out_size = (spirv_header_words + num_words) * sizeof(uint32_t);
+    return reinterpret_cast<const uint32_t*>(header + 2);
+
+#else
+
+    static uint32_t out_code[64 * 1024];
+
+    const uint16_t* header = reinterpret_cast<const uint16_t*>(code + module_obj_size);
 
     const uint32_t total_opcodes = *(header++);
     const uint32_t total_words   = *(header++);
@@ -29,9 +42,7 @@ static const uint32_t* decode_shader(uint8_t* code, size_t* out_size)
     assert(total_opcodes);
     assert(total_words > total_opcodes);
 
-    uint8_t* opcodes = reinterpret_cast<uint8_t*>(header);
-
-    constexpr uint32_t spirv_header_words = 5;
+    const uint8_t* opcodes = reinterpret_cast<const uint8_t*>(header);
 
     const uint32_t size = (spirv_header_words + total_words) * sizeof(uint32_t);
     assert(size <= sizeof(out_code));
@@ -41,7 +52,7 @@ static const uint32_t* decode_shader(uint8_t* code, size_t* out_size)
     out_code[1] = version << 8;
     out_code[3] = bound;
 
-    uint8_t*       output         = reinterpret_cast<uint8_t*>(out_code + 5);
+    uint8_t*       output         = reinterpret_cast<uint8_t*>(&out_code[spirv_header_words]);
     const uint8_t* operands       = opcodes + total_opcodes * 4;
     const uint32_t total_operands = total_words - total_opcodes;
 
@@ -70,6 +81,7 @@ static const uint32_t* decode_shader(uint8_t* code, size_t* out_size)
 
     *out_size = size;
     return out_code;
+#endif
 }
 
 VkShaderModule load_shader(uint8_t* shader)

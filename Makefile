@@ -225,6 +225,10 @@ ifdef debug
 else
     GLSL_ENCODE_FLAGS += --remove-unused
 endif
+ifdef no_spirv_shuffle
+    GLSL_ENCODE_FLAGS += --no-shuffle
+    CFLAGS += -DNO_SPIRV_SHUFFLE
+endif
 
 ##############################################################################
 # Executable
