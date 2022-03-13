@@ -193,8 +193,8 @@ int main(int argc, char* argv[])
     if (opt_shuffle) {
 
         // Dump header
-        output16(static_cast<uint16_t>(total_opcodes));
         output16(static_cast<uint16_t>(total_words));
+        output16(static_cast<uint16_t>(total_opcodes));
         output16(static_cast<uint16_t>(version >> 8));
         output16(static_cast<uint16_t>(bound));
 
@@ -202,14 +202,6 @@ int main(int argc, char* argv[])
         ret = walk_spirv(num_read, input_filename,
                          [&output](uint32_t opcode, uint32_t num_operands, const uint8_t* operands) {
             *(output++) = static_cast<uint8_t>(opcode);
-        });
-        if (ret)
-            return ret;
-
-        // Dump high byte of each opcode
-        ret = walk_spirv(num_read, input_filename,
-                         [&output](uint32_t opcode, uint32_t num_operands, const uint8_t* operands) {
-            *(output++) = static_cast<uint8_t>(opcode >> 8);
         });
         if (ret)
             return ret;
@@ -222,6 +214,24 @@ int main(int argc, char* argv[])
         if (ret)
             return ret;
 
+        // Dump low byte of each operand
+        ret = walk_spirv(num_read, input_filename,
+                         [&output](uint32_t opcode, uint32_t num_operands, const uint8_t* operands) {
+            const uint8_t* const end = operands + num_operands * 4;
+            for (; operands < end; operands += 4)
+                *(output++) = *operands;
+        });
+        if (ret)
+            return ret;
+
+        // Dump high byte of each opcode
+        ret = walk_spirv(num_read, input_filename,
+                         [&output](uint32_t opcode, uint32_t num_operands, const uint8_t* operands) {
+            *(output++) = static_cast<uint8_t>(opcode >> 8);
+        });
+        if (ret)
+            return ret;
+
         // Dump high byte of each number of operands
         ret = walk_spirv(num_read, input_filename,
                          [&output](uint32_t opcode, uint32_t num_operands, const uint8_t* operands) {
@@ -230,8 +240,8 @@ int main(int argc, char* argv[])
         if (ret)
             return ret;
 
-        // Dump operands, one byte at a time
-        for (int op_byte = 0; op_byte < 4; op_byte++) {
+        // Dump 3 high bytes of each operand, first byte 1, then byte 2, then byte 3
+        for (int op_byte = 1; op_byte < 4; op_byte++) {
             ret = walk_spirv(num_read, input_filename,
                              [&output, op_byte](uint32_t opcode, uint32_t num_operands, const uint8_t* operands) {
                 operands += op_byte;
