@@ -8,14 +8,14 @@
 
 static uint32_t read32le(const void* buf)
 {
-    const uint8_t* bytes = static_cast<const uint8_t*>(buf);
-    const uint32_t b[4] = {
-        bytes[0],
-        bytes[1],
-        bytes[2],
-        bytes[3]
-    };
-    return b[0] | (b[1] << 8) | (b[2] << 16) | (b[3] << 24);
+    const uint8_t* const bytes = static_cast<const uint8_t*>(buf);
+
+    const uint32_t b0 = bytes[0];
+    const uint32_t b1 = bytes[1];
+    const uint32_t b2 = bytes[2];
+    const uint32_t b3 = bytes[3];
+
+    return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
 }
 
 static int can_remove(uint32_t opcode)
@@ -44,7 +44,8 @@ static int can_remove(uint32_t opcode)
 static bool opt_remove_unused = false;
 
 // Declare input buffer
-// Input buffer is large enough for any reasonable SPIR-V shader
+// Input buffer is large enough for any reasonable SPIR-V shader.
+// Larger shaders wouldn't fit in a 64KB intro anyway.
 static uint8_t input_buf[256 * 1024];
 
 static constexpr uint32_t spirv_header_size = 20;
@@ -82,9 +83,49 @@ int walk_spirv(size_t num_read, const char* input_filename, T func)
     return EXIT_SUCCESS;
 }
 
+static int write_output(const uint8_t* output_buf,
+                        size_t         output_size,
+                        FILE*          output_file,
+                        const char*    variable_name)
+{
+    if (fprintf(output_file, "#pragma once\n") < 0)
+        return EXIT_FAILURE;
+
+    if (fprintf(output_file, "uint8_t %s[%u] = {\n", variable_name,
+                static_cast<unsigned>(output_size)) < 0)
+        return EXIT_FAILURE;
+
+    constexpr uint32_t columns = 16;
+
+    for (uint32_t i = 0; i < output_size; i++) {
+        if (i % columns == 0) {
+            if (fprintf(output_file, "    ") < 0)
+                return EXIT_FAILURE;
+        }
+
+        if (fprintf(output_file, "0x%02x", output_buf[i]) < 0)
+            return EXIT_FAILURE;
+
+        if (i + 1 < output_size) {
+            if (fprintf(output_file, ",") < 0)
+                return EXIT_FAILURE;
+        }
+
+        if ((i % columns == columns - 1) || (i + 1 == output_size)) {
+            if (fprintf(output_file, "\n") < 0)
+                return EXIT_FAILURE;
+        }
+    }
+    if (fprintf(output_file, "};\n") < 0)
+        return EXIT_FAILURE;
+
+    return EXIT_SUCCESS;
+}
+
 int main(int argc, char* argv[])
 {
-    const char usage[] = "Usage: spirv_encode [--remove-unused] [--no-shuffle] <VARIABLE_NAME> <INPUT_FILE> <OUTPUT_FILE>\n";
+    static const char usage[] =
+        "Usage: spirv_encode [--remove-unused] [--no-shuffle] <VARIABLE_NAME> <INPUT_FILE> <OUTPUT_FILE>\n";
     if (argc < 4) {
         fprintf(stderr, "%s", usage);
         return EXIT_FAILURE;
@@ -126,7 +167,7 @@ int main(int argc, char* argv[])
     fclose(input_file);
 
     if (num_read < 6 * 4) {
-        fprintf(stderr, "spirv_encode: invalid SPIR-V in file %s\n", input_filename);
+        fprintf(stderr, "spirv_encode: invalid SPIR-V in %s\n", input_filename);
         return EXIT_FAILURE;
     }
 
@@ -142,25 +183,27 @@ int main(int argc, char* argv[])
 
     // Validate SPIR-V header
     if (read32le(input_buf) == 0x03022307) {
-        fprintf(stderr, "spirv_encode: big endian SPIR-V is not supported: file %s\n", input_filename);
+        fprintf(stderr, "spirv_encode: big endian SPIR-V is not supported in %s\n", input_filename);
         return EXIT_FAILURE;
     }
     if (read32le(input_buf) != 0x07230203) {
-        fprintf(stderr, "spirv_encode: file %s does not contain valid SPIR-V\n", input_filename);
+        fprintf(stderr, "spirv_encode: %s does not contain valid SPIR-V\n", input_filename);
         return EXIT_FAILURE;
     }
     const uint32_t version = read32le(&input_buf[4]);
     if ((version & 0xFF0000FFu) != 0) {
-        fprintf(stderr, "spirv_encode: file %s contains unsupported version 0x%x in the header\n", input_filename, version);
+        fprintf(stderr, "spirv_encode: %s contains unsupported version 0x%x in the header\n",
+                input_filename, version);
         return EXIT_FAILURE;
     }
     const uint32_t bound = read32le(&input_buf[12]);
     if (bound > 0xFFFFu) {
-        fprintf(stderr, "spirv_encode: bound 0x%x exceeds 16 bits in file %s\n", bound, input_filename);
+        fprintf(stderr, "spirv_encode: bound 0x%x exceeds 16 bits in %s\n", bound, input_filename);
         return EXIT_FAILURE;
     }
     if (read32le(&input_buf[16]) != 0) {
-        fprintf(stderr, "spirv_encode: file %s contains unrecognized value in reserved word in the header\n", input_filename);
+        fprintf(stderr, "spirv_encode: %s contains unrecognized value 0x%x in reserved word in the header\n",
+                input_filename, read32le(&input_buf[16]));
         return EXIT_FAILURE;
     }
 
@@ -291,43 +334,13 @@ int main(int argc, char* argv[])
 
     // Write output buffer to the output file
     const size_t output_size = static_cast<size_t>(output - output_buf);
-    const auto write_output = [output_size, output_file, variable_name]() {
-        if (fprintf(output_file, "#pragma once\n") < 0)
-            return EXIT_FAILURE;
-        if (fprintf(output_file, "uint8_t %s[%u] = {\n", variable_name,
-                    static_cast<unsigned>(output_size)) < 0)
-            return EXIT_FAILURE;
-        constexpr uint32_t columns = 16;
-        for (uint32_t i = 0; i < output_size; i++) {
-            if (i % columns == 0) {
-                if (fprintf(output_file, "    ") < 0)
-                    return EXIT_FAILURE;
-            }
-
-            if (fprintf(output_file, "0x%02x", output_buf[i]) < 0)
-                return EXIT_FAILURE;
-
-            if (i + 1 < output_size) {
-                if (fprintf(output_file, ",") < 0)
-                    return EXIT_FAILURE;
-            }
-
-            if ((i % columns == columns - 1) || (i + 1 == output_size)) {
-                if (fprintf(output_file, "\n") < 0)
-                    return EXIT_FAILURE;
-            }
-        }
-        if (fprintf(output_file, "};\n") < 0)
-            return EXIT_FAILURE;
-        return EXIT_SUCCESS;
-    };
-    ret = write_output();
+    ret = write_output(output_buf, output_size, output_file, variable_name);
+    fclose(output_file);
     if (ret) {
         perror("spirv_encode");
         fprintf(stderr, "spirv_encode: failed to write to %s\n", output_filename);
         return ret;
     }
-    fclose(output_file);
 
     return EXIT_SUCCESS;
 }
