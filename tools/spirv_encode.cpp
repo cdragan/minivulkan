@@ -173,6 +173,10 @@ int main(int argc, char* argv[])
         output += 2;
     };
 
+    // 8 bytes for storing loaded VkShaderModule object
+    memset(output, 0, 8);
+    output += 8;
+
     // Dump header
     output16(static_cast<uint16_t>(total_opcodes));
     output16(static_cast<uint16_t>(total_words));
@@ -236,11 +240,11 @@ int main(int argc, char* argv[])
     // Write output buffer to the output file
     const size_t output_size = static_cast<size_t>(output - output_buf);
     const char* const variable_name = argv[1];
-    const auto write_output = [output_size, output_file, variable_name, total_words]() {
+    const auto write_output = [output_size, output_file, variable_name]() {
         if (fprintf(output_file, "#pragma once\n") < 0)
             return EXIT_FAILURE;
         if (fprintf(output_file, "uint8_t %s[%u] = {\n", variable_name,
-                    static_cast<unsigned>(output_size + total_words * 4 + spirv_header_size)) < 0)
+                    static_cast<unsigned>(output_size)) < 0)
             return EXIT_FAILURE;
         constexpr uint32_t columns = 16;
         for (uint32_t i = 0; i < output_size; i++) {

@@ -38,6 +38,7 @@ lib_src_files += mstdc.cpp
 lib_src_files += vmath.cpp
 
 threed_src_files += minivulkan.cpp
+threed_src_files += shaders.cpp
 threed_src_files += sound.cpp
 
 ifeq ($(UNAME), Linux)
@@ -333,13 +334,13 @@ $(eval $(call LINK_RULE,$(spirv_encode),$(spirv_encode_src_files)))
 define GLSL_EXT
 $(out_dir)/shaders/%.$1.h: shaders/%.$1.glsl $(spirv_encode) | $(out_dir)/shaders
 	$(GLSL_VALIDATOR_PREFIX)glslangValidator $(GLSL_FLAGS) -o $$@.spv $$<
-	$(spirv_encode) $$(subst .,_,$$(notdir $$<)) $$@.spv $$@ $(GLSL_UNUSED)
+	$(spirv_encode) shader_$$(subst .,_,$$(basename $$(notdir $$<))) $$@.spv $$@ $(GLSL_UNUSED)
 endef
 
 $(foreach ext, vert tesc tese geom frag comp, $(eval $(call GLSL_EXT,$(ext))))
 
-$(call OBJ_FROM_SRC, minivulkan.cpp) $(out_dir)/minivulkan.cpp.$(asm_suffix): $(addprefix $(out_dir)/,$(addsuffix .h,$(basename $(shader_files))))
-$(call OBJ_FROM_SRC, minivulkan.cpp) $(out_dir)/minivulkan.cpp.$(asm_suffix): CFLAGS += -I$(out_dir)/shaders
+$(call OBJ_FROM_SRC, shaders.cpp) $(out_dir)/shaders.cpp.$(asm_suffix): $(addprefix $(out_dir)/,$(addsuffix .h,$(basename $(shader_files))))
+$(call OBJ_FROM_SRC, shaders.cpp) $(out_dir)/shaders.cpp.$(asm_suffix): CFLAGS += -I$(out_dir)/shaders
 
 $(eval $(call LINK_RULE,$(out_dir)/vmath_unit$(exe_suffix),$(all_vmath_unit_src_files)))
 
