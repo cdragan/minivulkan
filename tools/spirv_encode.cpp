@@ -84,18 +84,27 @@ int walk_spirv(size_t num_read, const char* input_filename, T func)
 
 int main(int argc, char* argv[])
 {
-    if (argc == 5 && strcmp(argv[4], "--remove-unused") == 0) {
-        --argc;
-        opt_remove_unused = true;
-    }
-
-    if (argc != 4) {
-        fprintf(stderr, "Usage: spirv_encode <VARIABLE_NAME> <INPUT_FILE> <OUTPUT_FILE> [--remove-unused]\n");
+    const char usage[] = "Usage: spirv_encode [--remove-unused] <VARIABLE_NAME> <INPUT_FILE> <OUTPUT_FILE>\n";
+    if (argc < 4) {
+        fprintf(stderr, "%s", usage);
         return EXIT_FAILURE;
     }
 
+    for (int i = 1; i < argc - 3; i++) {
+        const char* const arg = argv[i];
+
+        if (strcmp(arg, "--remove-unused") == 0)
+            opt_remove_unused = true;
+        else {
+            fprintf(stderr, "%s", usage);
+            return EXIT_FAILURE;
+        }
+    }
+    const char* const variable_name   = argv[argc - 3];
+    const char* const input_filename  = argv[argc - 2];
+    const char* const output_filename = argv[argc - 1];
+
     // Open input file
-    const char* const input_filename = argv[2];
     FILE* const input_file = fopen(input_filename, "rb");
     if ( ! input_file) {
         perror("spirv_encode");
@@ -229,7 +238,6 @@ int main(int argc, char* argv[])
     }
 
     // Open output file
-    const char* const output_filename = argv[3];
     FILE* const output_file = fopen(output_filename, "w+");
     if ( ! output_file) {
         perror("spirv_encode");
@@ -239,7 +247,6 @@ int main(int argc, char* argv[])
 
     // Write output buffer to the output file
     const size_t output_size = static_cast<size_t>(output - output_buf);
-    const char* const variable_name = argv[1];
     const auto write_output = [output_size, output_file, variable_name]() {
         if (fprintf(output_file, "#pragma once\n") < 0)
             return EXIT_FAILURE;

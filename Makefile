@@ -216,14 +216,14 @@ ifdef VULKAN_SDK
 endif
 
 GLSL_FLAGS = --target-env vulkan1.1
-GLSL_UNUSED =
+GLSL_ENCODE_FLAGS =
 ifndef GLSL_NO_OPTIMIZER
     GLSL_FLAGS += -Os
 endif
 ifdef debug
     GLSL_FLAGS += -g
 else
-    GLSL_UNUSED += --remove-unused
+    GLSL_ENCODE_FLAGS += --remove-unused
 endif
 
 ##############################################################################
@@ -334,7 +334,7 @@ $(eval $(call LINK_RULE,$(spirv_encode),$(spirv_encode_src_files)))
 define GLSL_EXT
 $(out_dir)/shaders/%.$1.h: shaders/%.$1.glsl $(spirv_encode) | $(out_dir)/shaders
 	$(GLSL_VALIDATOR_PREFIX)glslangValidator $(GLSL_FLAGS) -o $$@.spv $$<
-	$(spirv_encode) shader_$$(subst .,_,$$(basename $$(notdir $$<))) $$@.spv $$@ $(GLSL_UNUSED)
+	$(spirv_encode) $(GLSL_ENCODE_FLAGS) shader_$$(subst .,_,$$(basename $$(notdir $$<))) $$@.spv $$@
 endef
 
 $(foreach ext, vert tesc tese geom frag comp, $(eval $(call GLSL_EXT,$(ext))))
