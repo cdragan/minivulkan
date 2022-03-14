@@ -1,8 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2021-2022 Chris Dragan
 
-#define __STDC_FORMAT_MACROS
-#include <inttypes.h>
+#include <stdint.h>
 
 #include "vulkan_functions.h"
 
