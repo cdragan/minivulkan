@@ -58,6 +58,13 @@ bool load_sound(uint32_t sound_id, const void* data, uint32_t size)
         return false;
     }
 
+    #ifdef ENABLE_GUI
+    if (sound.sounds[sound_id]) {
+        [sound.sounds[sound_id] stop];
+        sound.sounds[sound_id] = nullptr;
+    }
+    #endif
+
     NSData *sound_data = [NSData dataWithBytes: data
                                  length:        size];
     sound.sounds[sound_id] = [[AVAudioPlayer alloc] initWithData: sound_data
@@ -141,7 +148,7 @@ bool play_sound(uint32_t sound_id)
         self.view.wantsLayer = YES;
 
         struct Window win;
-        win.layer = (__bridge CAMetalLayer *)self.view.layer;
+        win.layer = (CAMetalLayer *)self.view.layer;
 
         if ( ! init_vulkan(&win)) {
             [NSApp terminate: nil];
@@ -248,13 +255,13 @@ bool play_sound(uint32_t sound_id)
 
     - (void)createMenu
     {
-        id main_menu = [[NSMenu alloc] init];
+        id main_menu = [NSMenu new];
         NSApp.mainMenu = main_menu;
 
-        NSMenuItem *app_item = [[NSMenuItem alloc] init];
+        NSMenuItem *app_item = [NSMenuItem new];
         [main_menu addItem: app_item];
 
-        id app_menu = [[NSMenu alloc] init];
+        id app_menu = [NSMenu new];
         app_item.submenu = app_menu;
 
         id quit_item = [[NSMenuItem alloc]
@@ -325,7 +332,7 @@ bool play_sound(uint32_t sound_id)
 int main()
 {
     [NSApplication sharedApplication];
-    id delegate = [[AppDelegate alloc] init];
+    id delegate = [AppDelegate new];
     NSApp.delegate = delegate;
 
     [delegate createMenu];
