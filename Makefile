@@ -35,6 +35,7 @@ out_dir = Out
 # Sources
 
 lib_src_files += mstdc.cpp
+lib_src_files += rng.cpp
 lib_src_files += vmath.cpp
 
 threed_src_files += minivulkan.cpp
