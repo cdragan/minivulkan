@@ -492,6 +492,39 @@ RETZERO:
         }
     }
 
+    __declspec(naked) void _aullshr()
+    {
+        __asm
+        {
+            cmp     cl, 64
+            jae     short retzero
+            ;
+            ; Handle shifts of between 0 and 31 bits
+            ;
+            cmp     cl, 32
+            jae     short more32
+            shrd    eax, edx, cl
+            shr     edx, cl
+            ret
+            ;
+            ; Handle shifts of between 32 and 63 bits
+            ;
+    more32:
+            mov     eax, edx
+            xor     edx, edx
+            and     cl, 31
+            shr     eax, cl
+            ret
+            ;
+            ; return 0 in edx:eax
+            ;
+    retzero:
+            xor     eax, eax
+            xor     edx, edx
+            ret
+        }
+    }
+
 #if 0
     // Reference implementation of _ultod3
     static inline uint32_t& low(uint64_t& value)
