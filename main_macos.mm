@@ -6,6 +6,7 @@
 #import <Cocoa/Cocoa.h>
 #import <QuartzCore/CAMetalLayer.h>
 #include "minivulkan.h"
+#include "mstdc.h"
 #include "dprintf.h"
 #ifdef ENABLE_GUI
 #   include "imgui/backends/imgui_impl_osx.h"
@@ -53,7 +54,7 @@ static Sound sound;
 
 bool load_sound(uint32_t sound_id, const void* data, uint32_t size)
 {
-    if (sound_id >= sizeof(sound.sounds)) {
+    if (sound_id >= mstd::array_size(sound.sounds)) {
         dprintf("Sound %u doesn't exist\n", sound_id);
         return false;
     }
@@ -87,7 +88,7 @@ bool load_sound(uint32_t sound_id, const void* data, uint32_t size)
 
 bool play_sound(uint32_t sound_id)
 {
-    if (sound_id >= sizeof(sound.sounds)) {
+    if (sound_id >= mstd::array_size(sound.sounds)) {
         dprintf("Sound %u doesn't exist\n", sound_id);
         return false;
     }
@@ -113,29 +114,29 @@ bool play_sound(uint32_t sound_id)
 
 @implementation VulkanViewController
     {
-        NSSize           size_;
-        CVDisplayLinkRef display_link_;
+        NSSize           m_size;
+        CVDisplayLinkRef m_display_link;
     }
 
     - (id)initWithSize: (NSSize)aSize
     {
         self = [super init];
         if (self) {
-            size_ = aSize;
+            m_size = aSize;
         }
         return self;
     }
 
     - (void)dealloc
     {
-        CVDisplayLinkRelease(display_link_);
+        CVDisplayLinkRelease(m_display_link);
         [super dealloc];
     }
 
     - (void)loadView
     {
         NSView *view = [[VulkanView alloc]
-            initWithFrame: NSMakeRect(0, 0, size_.width, size_.height)
+            initWithFrame: NSMakeRect(0, 0, m_size.width, m_size.height)
         ];
         view.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
         self.view = view;
@@ -167,9 +168,18 @@ bool play_sound(uint32_t sound_id)
         ImGui_ImplOSX_Init(self.view);
         #endif
 
-        CVDisplayLinkCreateWithActiveCGDisplays(&display_link_);
-        CVDisplayLinkSetOutputCallback(display_link_, &display_link_callback, (__bridge void *)self.view);
-        CVDisplayLinkStart(display_link_);
+        CVDisplayLinkCreateWithActiveCGDisplays(&m_display_link);
+        CVDisplayLinkSetOutputCallback(m_display_link, &display_link_callback, (__bridge void *)self.view);
+    }
+
+    - (void)viewDidAppear
+    {
+        CVDisplayLinkStart(m_display_link);
+    }
+
+    - (void)viewWillDisappear
+    {
+        CVDisplayLinkStop(m_display_link);
     }
 
     static CVReturn display_link_callback(CVDisplayLinkRef   displayLink,
