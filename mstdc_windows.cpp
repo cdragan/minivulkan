@@ -593,7 +593,7 @@ RETZERO:
             push    esi
             push    edi
             push    edx                             ; high(value)
-            push    eax                             ; low(value)
+            push    ecx                             ; low(value)
             mov     edi, edx                        ; edi := high(value)
             bsr     ecx, edi
             je      no_high_bits
