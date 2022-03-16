@@ -205,6 +205,9 @@ static bool create_window(Window* w)
 
     dprintf("Created window %ux%u at [%u, %u]\n", width, height, x, y);
 
+    if (full_screen)
+        ShowCursor(FALSE);
+
     ShowWindow(hwnd, SW_SHOW);
 
     return true;
