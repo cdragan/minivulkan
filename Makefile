@@ -178,7 +178,7 @@ else
 endif
 
 ifeq ($(UNAME), Linux)
-    LDFLAGS += -lxcb -ldl
+    LDFLAGS += -lxcb -lxcb-xfixes -ldl
 
     ifndef debug
         STRIP = strip

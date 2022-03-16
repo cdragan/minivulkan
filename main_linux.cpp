@@ -9,6 +9,7 @@
 #include <unistd.h>
 #include <dlfcn.h>
 #include <xcb/xcb.h>
+#include <xcb/xfixes.h>
 
 struct Window {
     xcb_connection_t* connection;
@@ -96,6 +97,9 @@ static void set_fullscreen(xcb_connection_t* conn,
                         32,
                         1,
                         &atom_wm_fullscreen->atom);
+
+    xcb_xfixes_query_version(conn, 4, 0);
+    xcb_xfixes_hide_cursor(conn, window);
 }
 
 #ifdef ENABLE_GUI
