@@ -8,6 +8,8 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 
+#include <xaudio2.h>
+
 #ifdef ENABLE_GUI
 #   include "imgui/backends/imgui_impl_win32.h"
     extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
@@ -49,15 +51,95 @@ uint64_t get_current_time_ms()
     return time_100ns / 10'000;
 }
 
+static IXAudio2*            x_audio   = nullptr;
+static IXAudio2SourceVoice* voices[1] = { };
+
 bool load_sound(uint32_t sound_id, const void* data, uint32_t size)
 {
-    // TODO
+    if (sound_id >= mstd::array_size(voices)) {
+        dprintf("Sound id %u exceeds supported maximum\n", sound_id);
+        return false;
+    }
+
+    if ( ! x_audio) {
+        if (FAILED(CoInitializeEx(nullptr, COINIT_MULTITHREADED))) {
+            dprintf("Failed to initialize COM\n");
+            return false;
+        }
+
+        if (FAILED(XAudio2Create(&x_audio, 0, XAUDIO2_DEFAULT_PROCESSOR))) {
+            dprintf("Failed to initialize XAudio2\n");
+            return false;
+        }
+
+        IXAudio2MasteringVoice* mastering_voice;
+        if (FAILED(x_audio->CreateMasteringVoice(&mastering_voice))) {
+            dprintf("Failed to create mastering voice\n");
+            return false;
+        }
+    }
+
+    constexpr uint32_t sampling_rate   = 44100;
+    constexpr uint32_t num_channels    = 2;
+    constexpr uint32_t bits_per_sample = 16;
+
+    static WAVEFORMATEX wave_format = {
+        WAVE_FORMAT_PCM,
+        num_channels,    // nChannels
+        sampling_rate,   // nSamplesPerSec
+        sampling_rate * num_channels * bits_per_sample / 8, // nAvgBytesPerSec
+        num_channels * bits_per_sample / 8,                 // nBlockAlign
+        bits_per_sample, // wBitsPerSample
+        0                // cbSize
+    };
+
+    IXAudio2SourceVoice* source_voice;
+    if (FAILED(x_audio->CreateSourceVoice(&source_voice, &wave_format))) {
+        dprintf("Failed to create source voice\n");
+        return false;
+    }
+
+    static XAUDIO2_BUFFER buffer = {
+        0,       // Flags
+        0,       // AudioBytes
+        nullptr, // pAudioData
+        0,       // PlayBegin
+        0,       // PlayLength
+        0,       // LoopBegin
+        0,       // LoopLength
+        0,       // LoopCount
+        nullptr  // pContext
+    };
+    buffer.AudioBytes = size;
+    buffer.pAudioData = static_cast<const BYTE*>(data);
+
+    if (FAILED(source_voice->SubmitSourceBuffer(&buffer))) {
+        dprintf("Failed to submit sound data\n");
+        return false;
+    }
+
+    voices[sound_id] = source_voice;
+
     return true;
 }
 
 bool play_sound(uint32_t sound_id)
 {
-    // TODO
+    if (sound_id >= mstd::array_size(voices)) {
+        dprintf("Sound id %u exceeds supported maximum\n", sound_id);
+        return false;
+    }
+
+    if ( ! voices[sound_id]) {
+        dprintf("Sound id %u was not allocated\n", sound_id);
+        return false;
+    }
+
+    if (FAILED(voices[sound_id]->Start(0))) {
+        dprintf("Failed to start sound %u\n", sound_id);
+        return false;
+    }
+
     return true;
 }
 

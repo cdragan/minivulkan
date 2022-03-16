@@ -130,7 +130,7 @@ ifeq ($(UNAME), Windows)
     CFLAGS += -std:c++17 -Zc:__cplusplus
 
     LDFLAGS += -nologo
-    LDFLAGS += user32.lib kernel32.lib
+    LDFLAGS += user32.lib kernel32.lib ole32.lib
 
     CXX  = cl.exe
     LINK = link.exe

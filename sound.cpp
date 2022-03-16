@@ -6,6 +6,12 @@
 #include "vmath.h"
 #include "vecfloat.h"
 
+#ifdef __APPLE__
+#   define NEED_WAV_HEADER 1
+#else
+#   define NEED_WAV_HEADER 0
+#endif
+
 struct WAVHeader {
     char     riff[4];           // "RIFF"
     uint32_t file_size;         // data_size + sizeof(WAVHeader) - 8
@@ -29,7 +35,9 @@ struct Sample16Stereo {
 };
 
 struct WAVFile16Stereo {
+#if NEED_WAV_HEADER
     WAVHeader      header;
+#endif
     Sample16Stereo data[1];
 };
 
@@ -37,6 +45,7 @@ static constexpr uint32_t sampling_rate   = 44100;
 static constexpr uint16_t num_channels    = 2;
 static constexpr uint16_t bits_per_sample = 16;
 
+#if NEED_WAV_HEADER
 static const WAVHeader wav_header = {
     { 'R', 'I', 'F', 'F' },
     0,
@@ -51,6 +60,7 @@ static const WAVHeader wav_header = {
     { 'd', 'a', 't', 'a' },
     0
 };
+#endif
 
 bool init_sound()
 {
@@ -59,15 +69,19 @@ bool init_sound()
 
     constexpr uint32_t total_samples = static_cast<uint32_t>((duration_ms * sampling_rate) / 1000u);
     constexpr uint32_t data_size     = total_samples * num_channels * (bits_per_sample / 8u);
-    constexpr uint32_t alloc_size    = sizeof(wav_header) + data_size;
+    constexpr uint32_t wav_hdr_size  = NEED_WAV_HEADER ? static_cast<uint32_t>(sizeof(WAVHeader)) : 0u;
+    constexpr uint32_t alloc_size    = wav_hdr_size + data_size;
 
     static uint8_t audio_buf[alloc_size];
 
+    WAVFile16Stereo& wav_file = *reinterpret_cast<WAVFile16Stereo*>(audio_buf);
+
+    #if NEED_WAV_HEADER
     mstd::mem_copy(audio_buf, &wav_header, sizeof(wav_header));
 
-    WAVFile16Stereo& wav_file = *reinterpret_cast<WAVFile16Stereo*>(audio_buf);
     wav_file.header.file_size = alloc_size - 8;
     wav_file.header.data_size = data_size;
+    #endif
 
     constexpr float coeff = vmath::two_pi * frequency_hz / sampling_rate;
 
