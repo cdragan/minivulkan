@@ -13,7 +13,8 @@
     X(bezier_surface_quadratic_tesc) \
     X(bezier_surface_quadratic_tese) \
     X(bezier_surface_cubic_tesc) \
-    X(bezier_surface_cubic_tese)
+    X(bezier_surface_cubic_tese) \
+    X(synth_comp)
 
 #define X(shader) extern uint8_t shader_##shader[];
 DEFINE_SHADERS

@@ -13,6 +13,7 @@
 #include "bezier_surface_quadratic.tese.h"
 #include "bezier_surface_cubic.tesc.h"
 #include "bezier_surface_cubic.tese.h"
+#include "synth.comp.h"
 
 static const uint32_t* decode_shader(uint8_t* code, size_t* out_size)
 {
