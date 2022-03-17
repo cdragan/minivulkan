@@ -1497,7 +1497,6 @@ struct Vertex {
 struct ShaderInfo {
     uint8_t*                                 shader_ids[4];
     uint8_t                                  vertex_stride;
-    uint8_t                                  topology;
     uint8_t                                  patch_control_points;
     uint8_t                                  polygon_mode;
     uint8_t                                  num_vertex_attributes;
@@ -1584,10 +1583,11 @@ static bool create_graphics_pipeline(const ShaderInfo& shader_info, VkPipeline* 
         VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
         nullptr,
         0,  // flags
-        VK_PRIMITIVE_TOPOLOGY_POINT_LIST,
+        VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
         VK_FALSE
     };
-    input_assembly_state.topology = static_cast<VkPrimitiveTopology>(shader_info.topology);
+    if (shader_info.patch_control_points)
+        input_assembly_state.topology = VK_PRIMITIVE_TOPOLOGY_PATCH_LIST;
 
     static VkPipelineTessellationStateCreateInfo tessellation_state = {
         VK_STRUCTURE_TYPE_PIPELINE_TESSELLATION_STATE_CREATE_INFO,
@@ -1767,7 +1767,6 @@ static bool create_simple_graphics_pipeline()
             shader_phong_frag
         },
         sizeof(Vertex),
-        VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
         0, // patch_control_points
         VK_POLYGON_MODE_FILL,
         mstd::array_size(vertex_attributes),
@@ -1801,7 +1800,6 @@ static bool create_patch_graphics_pipeline()
             shader_bezier_surface_cubic_tese
         },
         sizeof(Vertex),
-        VK_PRIMITIVE_TOPOLOGY_PATCH_LIST,
         16, // patch_control_points
         VK_POLYGON_MODE_FILL,
         mstd::array_size(vertex_attributes),
