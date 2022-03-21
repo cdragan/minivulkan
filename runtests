@@ -22,4 +22,7 @@ make clean
 make -j $JOBS debug=1
 
 make clean
+make -j $JOBS debug=1 imgui=1
+
+make clean
 make -j $JOBS debug=1 stdlib=1 test
