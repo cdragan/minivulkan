@@ -5,17 +5,20 @@
 #include <assert.h>
 #include <stdint.h>
 
-#define APPNAME "minivulkan"
+#ifndef APPNAME
+#   define APPNAME "minivulkan"
+#endif
 
-extern VkInstance               vk_instance;
-extern VkSurfaceKHR             vk_surface;
-extern VkPhysicalDevice         vk_phys_dev;
-extern VkDevice                 vk_dev;
-extern uint32_t                 vk_queue_family_index;
-extern VkQueue                  vk_queue;
-extern uint32_t                 vk_num_swapchain_images;
-extern VkRenderPass             vk_render_pass;
-extern VkSurfaceCapabilitiesKHR vk_surface_caps;
+extern VkInstance                  vk_instance;
+extern VkSurfaceKHR                vk_surface;
+extern VkPhysicalDevice            vk_phys_dev;
+extern VkDevice                    vk_dev;
+extern uint32_t                    vk_queue_family_index;
+extern VkQueue                     vk_queue;
+extern uint32_t                    vk_num_swapchain_images;
+extern VkRenderPass                vk_render_pass;
+extern VkSurfaceCapabilitiesKHR    vk_surface_caps;
+extern VkPhysicalDeviceProperties2 vk_phys_props;
 
 struct Window;
 
@@ -23,10 +26,14 @@ bool init_vulkan(struct Window* w);
 bool init_sound();
 bool create_surface(struct Window* w);
 bool draw_frame();
+bool draw_frame(uint32_t image_idx, uint64_t time_ms, VkFence queue_fence);
 void idle_queue();
 uint64_t get_current_time_ms();
 bool load_sound(uint32_t sound_id, const void* data, uint32_t size);
 bool play_sound(uint32_t sound_id);
+bool create_additional_heaps();
+bool create_pipeline_layouts();
+bool create_pipelines();
 
 #ifdef NDEBUG
 #   define CHK(call) call
@@ -310,5 +317,27 @@ class HostFiller {
         Buffer                    buffers[max_buffers];
         uint32_t                  num_buffers = 0;
 };
+
+static constexpr VkClearValue make_clear_color(float r, float g, float b, float a)
+{
+    VkClearValue value = { };
+    value.color.float32[0] = r;
+    value.color.float32[1] = g;
+    value.color.float32[2] = b;
+    value.color.float32[3] = a;
+    return value;
+}
+
+static constexpr VkClearValue make_clear_depth(float depth, uint32_t stencil)
+{
+    VkClearValue value = { };
+    value.depthStencil.depth   = depth;
+    value.depthStencil.stencil = stencil;
+    return value;
+}
+
+extern Image         vk_swapchain_images[max_swapchain_size];
+extern Image         vk_depth_buffers[max_swapchain_size];
+extern VkFramebuffer vk_frame_buffers[max_swapchain_size];
 
 #endif // __cplusplus

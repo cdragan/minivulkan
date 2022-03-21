@@ -70,20 +70,23 @@ imgui_src_files += imgui/imgui_tables.cpp
 imgui_src_files += imgui/imgui_widgets.cpp
 imgui_src_files += imgui/backends/imgui_impl_vulkan.cpp
 imgui_src_files += gui.cpp
+ifdef imgui
+    threed_src_files += $(imgui_src_files)
+endif
 
 spirv_encode_src_files += tools/spirv_encode.cpp
+
+example_src_files += example/example.cpp
 
 all_src_files += $(lib_src_files)
 all_src_files += $(threed_src_files)
 all_src_files += $(vmath_unit_src_files)
-all_src_files += $(imgui_src_files)
 all_src_files += $(spirv_encode_src_files)
+all_src_files += $(example_src_files)
 
-all_threed_src_files += $(lib_src_files)
-all_threed_src_files += $(threed_src_files)
-ifdef imgui
-    all_threed_src_files += $(imgui_src_files)
-endif
+all_example_src_files += $(example_src_files)
+all_example_src_files += $(lib_src_files)
+all_example_src_files += $(threed_src_files)
 
 all_vmath_unit_src_files += $(lib_src_files)
 all_vmath_unit_src_files += $(vmath_unit_src_files)
@@ -235,31 +238,42 @@ endif
 ##############################################################################
 # Executable
 
-exe_name = minivulkan
-
 ifeq ($(UNAME), Windows)
     exe_suffix = .exe
 else
     exe_suffix =
 endif
 
-exe = $(out_dir)/$(exe_name)$(exe_suffix)
+CMDLINE_PATH = $(out_dir)/$1$(exe_suffix)
 
 ifeq ($(UNAME), Darwin)
-    macos_app_dir = $(out_dir)/$(exe_name).app/Contents/MacOS
+    GUI_PATH = $(out_dir)/$1.app/Contents/MacOS/$1
 
-    exe = $(macos_app_dir)/$(exe_name)
+    define GUI_LINK_RULE
+      $(call LINK_RULE,$(call GUI_PATH,$1),$2)
+
+      $$(out_dir)/$1.app/Contents/MacOS: | $$(out_dir)
+	mkdir -p $$@
+
+      $(call GUI_PATH,$1): | $$(out_dir)/$1.app/Contents/MacOS/Info.plist
+
+      $$(out_dir)/$1.app/Contents/MacOS/Info.plist: $1/$1-Info.plist | $$(out_dir)/$1.app/Contents/MacOS
+	cp $$< $$@
+    endef
+else
+    GUI_PATH = $(out_dir)/$1$(exe_suffix)
+    GUI_LINK_RULE = $(call LINK_RULE,$(call GUI_PATH,$1),$2)
 endif
 
 ##############################################################################
 # Rules
 
-default: $(exe)
+default: $(call GUI_PATH,example)
 
 clean:
 	rm -rf $(out_dir)
 
-asm: $(addprefix $(out_dir)/,$(addsuffix .$(asm_suffix),$(notdir $(filter %.cpp,$(all_threed_src_files)))))
+asm: $(addprefix $(out_dir)/,$(addsuffix .$(asm_suffix),$(notdir $(filter %.cpp,$(all_example_src_files)))))
 
 $(out_dir):
 	mkdir -p $@
@@ -273,10 +287,10 @@ endif
 endef
 
 ifeq ($(UNAME), Windows)
-$(exe): SUBSYSTEMFLAGS = -subsystem:windows
+$(call GUI_PATH,example): SUBSYSTEMFLAGS = -subsystem:windows
 endif
 
-$(eval $(call LINK_RULE,$(exe),$(all_threed_src_files)))
+$(eval $(call GUI_LINK_RULE,example,$(all_example_src_files)))
 
 define MM_RULE
 $$(call OBJ_FROM_SRC,$1): $1 | $$(out_dir)
@@ -299,18 +313,6 @@ endef
 
 $(foreach file, $(filter %.cpp, $(all_src_files)), $(eval $(call ASM_RULE,$(file))))
 
-ifeq ($(UNAME), Darwin)
-$(macos_app_dir): | $(out_dir)
-	mkdir -p $(macos_app_dir)
-
-$(exe): | $(macos_app_dir)
-
-default: $(macos_app_dir)/Info.plist
-
-$(macos_app_dir)/Info.plist: Info.plist | $(macos_app_dir)
-	cp $< $@
-endif
-
 $(foreach file, $(filter-out $(imgui_src_files), $(all_src_files)), $(call OBJ_FROM_SRC, $(file))): CFLAGS += $(WFLAGS)
 
 $(foreach file, $(imgui_src_files), $(call OBJ_FROM_SRC, $(file))): CFLAGS += -DIMGUI_IMPL_VULKAN_NO_PROTOTYPES
@@ -328,7 +330,7 @@ else
     GLSL_VALIDATOR_PREFIX =
 endif
 
-spirv_encode = $(out_dir)/spirv_encode$(exe_suffix)
+spirv_encode = $(call CMDLINE_PATH,spirv_encode)
 
 ifeq ($(UNAME), Windows)
 $(spirv_encode): LDFLAGS_NODEFAULTLIB =
@@ -348,10 +350,10 @@ $(foreach ext, vert tesc tese geom frag comp, $(eval $(call GLSL_EXT,$(ext))))
 $(call OBJ_FROM_SRC, shaders.cpp) $(out_dir)/shaders.cpp.$(asm_suffix): $(addprefix $(out_dir)/,$(addsuffix .h,$(basename $(shader_files))))
 $(call OBJ_FROM_SRC, shaders.cpp) $(out_dir)/shaders.cpp.$(asm_suffix): CFLAGS += -I$(out_dir)/shaders
 
-$(eval $(call LINK_RULE,$(out_dir)/vmath_unit$(exe_suffix),$(all_vmath_unit_src_files)))
+$(eval $(call LINK_RULE,$(call CMDLINE_PATH,vmath_unit),$(all_vmath_unit_src_files)))
 
-test: $(out_dir)/vmath_unit$(exe_suffix)
-	$(out_dir)/vmath_unit$(exe_suffix)
+test: $(call CMDLINE_PATH,vmath_unit)
+	$<
 
 ##############################################################################
 # Dependency files

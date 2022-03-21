@@ -122,33 +122,6 @@ bool init_gui()
     return true;
 }
 
-extern float    user_roundedness;
-extern uint32_t user_tess_level;
-extern bool     user_wireframe;
-
-// TODO move this to a separate file
-static bool construct_gui()
-{
-    ImGui::Text("Hello, world!");
-    ImGui::Separator();
-    ImGui::SliderFloat("Roundedness", &user_roundedness, 0.0f, 1.0f);
-    ImGui::SliderInt("Tessellation Level", reinterpret_cast<int*>(&user_tess_level), 1, 20);
-    ImGui::Checkbox("Wireframe", &user_wireframe);
-    return true;
-}
-
-bool create_gui_frame()
-{
-    ImGuiIO& io = ImGui::GetIO();
-    io.DisplaySize.x = vk_surface_caps.currentExtent.width;
-    io.DisplaySize.y = vk_surface_caps.currentExtent.height;
-
-    ImGui_ImplVulkan_NewFrame();
-    ImGui::NewFrame();
-
-    return construct_gui();
-}
-
 bool send_gui_to_gpu(VkCommandBuffer cmdbuf)
 {
     ImGui::Render();
