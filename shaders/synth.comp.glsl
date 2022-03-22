@@ -81,6 +81,8 @@ layout(push_constant) uniform push_constants {
 
 layout(set = 0, binding = 1) buffer output_data { float out_sound[]; };
 
+layout(local_size_x = 1024) in;
+
 uint random(uint index)
 {
     // Use offset (index to the sample) as seed for a trivial LCG

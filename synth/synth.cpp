@@ -8,6 +8,8 @@
 #include "../shaders.h"
 #include "../vmath.h"
 
+constexpr bool play_new_sound = false;
+
 #ifdef ENABLE_GUI
 static float    user_roundedness = 111.0f / 127.0f;
 static uint32_t user_tess_level  = 12;
@@ -205,12 +207,109 @@ bool draw_frame(uint32_t image_idx, uint64_t time_ms, VkFence queue_fence)
 {
     VkResult res;
 
+    // Allocate descriptor set
+    static VkDescriptorSet desc_set = VK_NULL_HANDLE;
+    if ( ! desc_set) {
+        static VkDescriptorPoolSize pool_sizes[] = {
+            {
+                VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,      // type
+                1                                       // descriptorCount
+            },
+            {
+                VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,      // type
+                1                                       // descriptorCount
+            }
+        };
+
+        static VkDescriptorPoolCreateInfo pool_create_info = {
+            VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+            nullptr,
+            0, // flags
+            1, // maxSets
+            mstd::array_size(pool_sizes),
+            pool_sizes
+        };
+
+        VkDescriptorPool desc_set_pool;
+
+        res = CHK(vkCreateDescriptorPool(vk_dev, &pool_create_info, nullptr, &desc_set_pool));
+        if (res != VK_SUCCESS)
+            return false;
+
+        static VkDescriptorSetAllocateInfo alloc_info = {
+            VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+            nullptr,
+            VK_NULL_HANDLE,             // descriptorPool
+            1,                          // descriptorSetCount
+            &vk_desc_set_layout         // pSetLayouts
+        };
+
+        alloc_info.descriptorPool = desc_set_pool;
+
+        res = CHK(vkAllocateDescriptorSets(vk_dev, &alloc_info, &desc_set));
+        if (res != VK_SUCCESS)
+            return false;
+
+        // Update descriptor set
+        static VkDescriptorBufferInfo uniform_buffer_info = {
+            VK_NULL_HANDLE,     // buffer
+            0,                  // offset
+            0                   // range
+        };
+        //TODO
+        //uniform_buffer_info.buffer = shader_data.get_buffer();
+        uniform_buffer_info.range  = sizeof(UboData);
+
+        static VkDescriptorBufferInfo storage_buffer_info = {
+            VK_NULL_HANDLE,     // buffer
+            0,                  // offset
+            0                   // range
+        };
+        //TODO
+        //storage_buffer_info.buffer = shader_data.get_buffer();
+        //storage_buffer_info.range  = slot_size;
+
+        static VkWriteDescriptorSet write_desc_sets[] = {
+            {
+                VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                nullptr,
+                VK_NULL_HANDLE,                     // dstSet
+                0,                                  // dstBinding
+                0,                                  // dstArrayElement
+                1,                                  // descriptorCount
+                VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,  // descriptorType
+                nullptr,                            // pImageInfo
+                &uniform_buffer_info,               // pBufferInfo
+                nullptr                             // pTexelBufferView
+            },
+            {
+                VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                nullptr,
+                VK_NULL_HANDLE,                     // dstSet
+                1,                                  // dstBinding
+                0,                                  // dstArrayElement
+                1,                                  // descriptorCount
+                VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,  // descriptorType
+                nullptr,                            // pImageInfo
+                &storage_buffer_info,               // pBufferInfo
+                nullptr                             // pTexelBufferView
+            }
+        };
+        write_desc_sets[0].dstSet = desc_set;
+        write_desc_sets[1].dstSet = desc_set;
+
+        vkUpdateDescriptorSets(vk_dev,
+                               mstd::array_size(write_desc_sets),
+                               write_desc_sets,
+                               0,           // descriptorCopyCount
+                               nullptr);    // pDescriptorCopies
+    }
+
+    // Handle GUI
     if ( ! create_gui_frame())
         return false;
 
-    // Regenerate sound if needed and draw GUI
-    Image& image = vk_swapchain_images[image_idx];
-
+    // Prepare command buffer
     static CommandBuffers<2 * mstd::array_size(vk_swapchain_images)> bufs;
 
     if ( ! allocate_command_buffers_once(&bufs))
@@ -220,6 +319,31 @@ bool draw_frame(uint32_t image_idx, uint64_t time_ms, VkFence queue_fence)
 
     if ( ! reset_and_begin_command_buffer(buf))
         return false;
+
+    // Synthesize the sound
+    if (play_new_sound) {
+
+        // Send compute workload to the device
+
+        constexpr uint32_t work_group_size = 1024;
+        constexpr uint32_t sound_length    = 44100; // TODO
+
+        vkCmdBindPipeline(buf, VK_PIPELINE_BIND_POINT_COMPUTE, vk_pipeline);
+
+        vkCmdBindDescriptorSets(buf,
+                                VK_PIPELINE_BIND_POINT_COMPUTE,
+                                vk_pipeline_layout,
+                                0,        // firstSet
+                                1,        // descriptorSetCount
+                                &desc_set,
+                                0,        // dynamicOffsetCount
+                                nullptr); // pDynamicOffsets
+
+        vkCmdDispatch(buf, sound_length / work_group_size, 1, 1);
+    }
+
+    // Draw GUI
+    Image& image = vk_swapchain_images[image_idx];
 
     static const Image::Transition color_att_init = {
         VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
@@ -278,10 +402,12 @@ bool draw_frame(uint32_t image_idx, uint64_t time_ms, VkFence queue_fence)
     };
     image.set_image_layout(buf, color_att_present);
 
+    // Finish command buffer
     res = CHK(vkEndCommandBuffer(buf));
     if (res != VK_SUCCESS)
         return false;
 
+    // Submit command buffer to queue
     static const VkPipelineStageFlags dst_stage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
 
     static VkSubmitInfo submit_info = {
