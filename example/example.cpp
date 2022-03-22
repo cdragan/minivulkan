@@ -12,7 +12,7 @@ static uint32_t user_tess_level  = 12;
 static bool     user_wireframe   = false;
 
 #ifdef ENABLE_GUI
-bool create_gui_frame()
+static bool create_gui_frame()
 {
     ImGuiIO& io = ImGui::GetIO();
     io.DisplaySize.x = vk_surface_caps.currentExtent.width;
@@ -26,6 +26,11 @@ bool create_gui_frame()
     ImGui::SliderFloat("Roundedness", &user_roundedness, 0.0f, 1.0f);
     ImGui::SliderInt("Tessellation Level", reinterpret_cast<int*>(&user_tess_level), 1, 20);
     ImGui::Checkbox("Wireframe", &user_wireframe);
+    return true;
+}
+#else
+static constexpr bool create_gui_frame()
+{
     return true;
 }
 #endif
@@ -979,4 +984,3 @@ bool draw_frame(uint32_t image_idx, uint64_t time_ms, VkFence queue_fence)
 
     return true;
 }
-

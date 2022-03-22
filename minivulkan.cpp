@@ -561,8 +561,23 @@ static bool load_device_functions()
             });
 }
 
+static VkPhysicalDeviceShaderFloat16Int8Features vk_shader_int8_features = {
+    VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_FLOAT16_INT8_FEATURES
+};
+
+static VkPhysicalDevice8BitStorageFeatures vk_8b_storage_features = {
+    VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_8BIT_STORAGE_FEATURES,
+    &vk_shader_int8_features
+};
+
+static VkPhysicalDevice16BitStorageFeatures vk_16b_storage_features = {
+    VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_16BIT_STORAGE_FEATURES,
+    &vk_8b_storage_features
+};
+
 static VkPhysicalDeviceFeatures2 vk_features = {
-    VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2
+    VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
+    &vk_16b_storage_features
 };
 
 static bool create_device()

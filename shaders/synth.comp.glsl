@@ -62,6 +62,7 @@ struct ADSR {
     uint16_t release_ms;
 };
 
+const uint  mix_freq       = 44100;
 const uint  max_components = 32;
 const uint  max_lfos       = 4;
 const float two_pi         = 6.283185307179586;
@@ -75,7 +76,6 @@ layout(set = 0, binding = 0) uniform ubo_data {
 
 layout(push_constant) uniform push_constants {
     uint base_freq;     // Frequency of the note being played
-    uint mix_freq;      // Mixing frequency of the produced output
     uint duration_ms;   // Entire duration of the note, including release
 } push;
 
@@ -139,7 +139,7 @@ int lfo(LFO lfo, uint offs)
     if (lfo.period_ms == 0)
         return 0;
 
-    const uint lfo_period = lfo.period_ms * push.mix_freq / 1000;
+    const uint lfo_period = lfo.period_ms * mix_freq / 1000;
 
     return int(wave(lfo.wave_type, offs, lfo_period) * lfo.peak_delta);
 }
@@ -153,13 +153,13 @@ uint16_t mix16(uint16_t start_value, uint16_t end_value, uint offs, uint end_off
 
 uint envelope(ADSR envelope, uint offs, uint duration_ms)
 {
-    const uint attack_end_offs = envelope.attack_ms * push.mix_freq / 1000;
+    const uint attack_end_offs = envelope.attack_ms * mix_freq / 1000;
     if (offs < attack_end_offs)
         return mix16(envelope.init_value, envelope.max_value, offs, attack_end_offs);
 
     offs -= attack_end_offs;
 
-    const uint decay_end_offs = envelope.decay_ms * push.mix_freq / 1000;
+    const uint decay_end_offs = envelope.decay_ms * mix_freq / 1000;
     if (offs < decay_end_offs)
         return mix16(envelope.max_value, envelope.sustain_value, offs, decay_end_offs);
 
@@ -167,13 +167,13 @@ uint envelope(ADSR envelope, uint offs, uint duration_ms)
 
     const uint att_dec_rel_ms   = envelope.attack_ms + envelope.decay_ms + envelope.release_ms;
     const uint sustain_ms       = duration_ms - att_dec_rel_ms;
-    const uint sustain_end_offs = sustain_ms * push.mix_freq / 1000;
+    const uint sustain_end_offs = sustain_ms * mix_freq / 1000;
     if (offs < sustain_end_offs)
         return envelope.sustain_value;
 
     offs -= sustain_end_offs;
 
-    const uint release_end_offs = envelope.release_ms * push.mix_freq / 1000;
+    const uint release_end_offs = envelope.release_ms * mix_freq / 1000;
     if (offs < release_end_offs)
         return mix16(envelope.sustain_value, envelope.end_value, offs, release_end_offs);
 
@@ -192,7 +192,7 @@ void main()
     for (uint i = 0; i < ubo.num_comps; i++) {
         Component comp = ubo.comps[i];
 
-        const uint start_offs = comp.delay_us * push.mix_freq / 1000000;
+        const uint start_offs = comp.delay_us * mix_freq / 1000000;
         if (gl_GlobalInvocationID.x < start_offs)
             continue;
 
@@ -209,7 +209,7 @@ void main()
             freq_delta += int(env_value) - 32768;
         }
 
-        const uint period = push.mix_freq / ((push.base_freq + freq_delta) * comp.freq_mult);
+        const uint period = mix_freq / ((push.base_freq + freq_delta) * comp.freq_mult);
 
         float comp_value = wave(comp.wave_type, offs, period);
 

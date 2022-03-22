@@ -78,15 +78,22 @@ spirv_encode_src_files += tools/spirv_encode.cpp
 
 example_src_files += example/example.cpp
 
+synth_src_files += synth/synth.cpp
+
 all_src_files += $(lib_src_files)
 all_src_files += $(threed_src_files)
 all_src_files += $(vmath_unit_src_files)
 all_src_files += $(spirv_encode_src_files)
 all_src_files += $(example_src_files)
+all_src_files += $(synth_src_files)
 
 all_example_src_files += $(example_src_files)
 all_example_src_files += $(lib_src_files)
 all_example_src_files += $(threed_src_files)
+
+all_synth_src_files += $(synth_src_files)
+all_synth_src_files += $(lib_src_files)
+all_synth_src_files += $(threed_src_files)
 
 all_vmath_unit_src_files += $(lib_src_files)
 all_vmath_unit_src_files += $(vmath_unit_src_files)
@@ -257,7 +264,7 @@ ifeq ($(UNAME), Darwin)
 
       $(call GUI_PATH,$1): | $$(out_dir)/$1.app/Contents/MacOS/Info.plist
 
-      $$(out_dir)/$1.app/Contents/MacOS/Info.plist: $1/$1-Info.plist | $$(out_dir)/$1.app/Contents/MacOS
+      $$(out_dir)/$1.app/Contents/MacOS/Info.plist: Info.plist | $$(out_dir)/$1.app/Contents/MacOS
 	cp $$< $$@
     endef
 else
@@ -268,7 +275,9 @@ endif
 ##############################################################################
 # Rules
 
-default: $(call GUI_PATH,example)
+gui_targets = example synth
+
+default: $(foreach target,$(gui_targets),$(call GUI_PATH,$(target)))
 
 clean:
 	rm -rf $(out_dir)
@@ -287,10 +296,10 @@ endif
 endef
 
 ifeq ($(UNAME), Windows)
-$(call GUI_PATH,example): SUBSYSTEMFLAGS = -subsystem:windows
+$(foreach target,$(gui_targets),$(call GUI_PATH,$(target))): SUBSYSTEMFLAGS = -subsystem:windows
 endif
 
-$(eval $(call GUI_LINK_RULE,example,$(all_example_src_files)))
+$(foreach target,$(gui_targets),$(eval $(call GUI_LINK_RULE,$(target),$(all_$(target)_src_files))))
 
 define MM_RULE
 $$(call OBJ_FROM_SRC,$1): $1 | $$(out_dir)

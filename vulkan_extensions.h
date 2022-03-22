@@ -6,7 +6,8 @@
 
 #define SUPPORTED_DEVICE_EXTENSIONS_BASE \
     X(VK_KHR_portability_subset,        OPTIONAL) \
-    X(VK_KHR_swapchain,                 REQUIRED)
+    X(VK_KHR_swapchain,                 REQUIRED) \
+    X(VK_KHR_8bit_storage,              REQUIRED)
 
 #ifdef __APPLE__
 #   define SUPPORTED_INSTANCE_EXTENSIONS SUPPORTED_INSTANCE_EXTENSIONS_BASE \
