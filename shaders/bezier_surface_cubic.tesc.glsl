@@ -3,13 +3,17 @@
 
 #version 460 core
 
+#extension GL_GOOGLE_include_directive: require
+
+#include "ubo_data.glsl"
+
 layout(vertices = 16) out;
 
 void main()
 {
     if (gl_InvocationID == 0) {
-        const uint width  = 12;
-        const uint height = 12;
+        const uint width  = uint(ubo.params.y);
+        const uint height = uint(ubo.params.y);
 
         gl_TessLevelOuter[0] = height;
         gl_TessLevelOuter[1] = width;
