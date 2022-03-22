@@ -83,10 +83,10 @@ int walk_spirv(size_t num_read, const char* input_filename, T func)
     return EXIT_SUCCESS;
 }
 
-static int write_output(const uint8_t* output_buf,
-                        size_t         output_size,
-                        FILE*          output_file,
-                        const char*    variable_name)
+static int write_c_output(const uint8_t* output_buf,
+                          size_t         output_size,
+                          FILE*          output_file,
+                          const char*    variable_name)
 {
     if (fprintf(output_file, "#pragma once\n") < 0)
         return EXIT_FAILURE;
@@ -125,13 +125,14 @@ static int write_output(const uint8_t* output_buf,
 int main(int argc, char* argv[])
 {
     static const char usage[] =
-        "Usage: spirv_encode [--remove-unused] [--no-shuffle] <VARIABLE_NAME> <INPUT_FILE> <OUTPUT_FILE>\n";
+        "Usage: spirv_encode [--remove-unused] [--no-shuffle] [--binary] <VARIABLE_NAME> <INPUT_FILE> <OUTPUT_FILE>\n";
     if (argc < 4) {
         fprintf(stderr, "%s", usage);
         return EXIT_FAILURE;
     }
 
     bool opt_shuffle = true;
+    bool opt_binary  = false;
 
     for (int i = 1; i < argc - 3; i++) {
         const char* const arg = argv[i];
@@ -140,6 +141,8 @@ int main(int argc, char* argv[])
             opt_remove_unused = true;
         else if (strcmp(arg, "--no-shuffle") == 0)
             opt_shuffle = false;
+        else if (strcmp(arg, "--binary") == 0)
+            opt_binary = true;
         else {
             fprintf(stderr, "%s", usage);
             return EXIT_FAILURE;
@@ -334,7 +337,12 @@ int main(int argc, char* argv[])
 
     // Write output buffer to the output file
     const size_t output_size = static_cast<size_t>(output - output_buf);
-    ret = write_output(output_buf, output_size, output_file, variable_name);
+    if (opt_binary) {
+        if (fwrite(output_buf, 1, output_size, output_file) != output_size)
+            ret = EXIT_FAILURE;
+    }
+    else
+        ret = write_c_output(output_buf, output_size, output_file, variable_name);
     fclose(output_file);
     if (ret) {
         perror("spirv_encode");
