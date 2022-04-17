@@ -49,10 +49,21 @@ bool create_additional_heaps()
     return vk_coherent_heap.allocate_heap(coherent_heap_size);
 }
 
-static VkPipelineLayout vk_pipeline_layout = VK_NULL_HANDLE;
-static VkPipeline       vk_pipeline        = VK_NULL_HANDLE;
+enum DescSetLayouts {
+    dsl_synth,
+    dsl_mono_to_stereo,
+    num_dsls
+};
 
-static VkDescriptorSetLayout vk_desc_set_layout = VK_NULL_HANDLE;
+enum Pipelines {
+    pipe_synth,
+    pipe_mono_to_stereo,
+    num_pips
+};
+
+static VkDescriptorSetLayout vk_descriptor_set_layouts[num_dsls];
+static VkPipelineLayout      vk_pipeline_layouts[num_pips];
+static VkPipeline            vk_pipelines[num_pips];
 
 // Interface to the synth compute shader
 enum WaveType {
@@ -102,63 +113,113 @@ struct UboData {
     uint32_t  num_comps;
 };
 
-struct PushConstants {
+struct Mono2StereoPushConstants {
+    uint32_t num_samples;   // Number of samples to generate in the output sound
+};
+
+struct SynthPushConstants: public Mono2StereoPushConstants {
     uint32_t base_freq;     // Frequency of the note being played
-    uint32_t duration_ms;   // Entire duration of the note, including release
 };
 
 bool create_pipeline_layouts()
 {
-    static const VkDescriptorSetLayoutBinding create_bindings[] = {
-        // UboData
-        {
+    ////////////////////////////////////////////////////////////////////////////
+    {
+        static const VkDescriptorSetLayoutBinding create_bindings[] = {
+            { 0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr },
+            { 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr }
+        };
+
+        static const VkDescriptorSetLayoutCreateInfo create_desc_set_layout = {
+            VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+            nullptr,
+            0, // flags
+            mstd::array_size(create_bindings),
+            create_bindings
+        };
+
+        const VkResult res = CHK(vkCreateDescriptorSetLayout(vk_dev,
+                                                             &create_desc_set_layout,
+                                                             nullptr,
+                                                             &vk_descriptor_set_layouts[dsl_synth]));
+        if (res != VK_SUCCESS)
+            return false;
+    }
+
+    ////////////////////////////////////////////////////////////////////////////
+    {
+        static const VkDescriptorSetLayoutBinding create_bindings[] = {
+            { 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr },
+            { 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr }
+        };
+
+        static const VkDescriptorSetLayoutCreateInfo create_desc_set_layout = {
+            VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+            nullptr,
+            0, // flags
+            mstd::array_size(create_bindings),
+            create_bindings
+        };
+
+        const VkResult res = CHK(vkCreateDescriptorSetLayout(vk_dev,
+                                                             &create_desc_set_layout,
+                                                             nullptr,
+                                                             &vk_descriptor_set_layouts[dsl_mono_to_stereo]));
+        if (res != VK_SUCCESS)
+            return false;
+    }
+
+    ////////////////////////////////////////////////////////////////////////////
+    {
+        static const VkPushConstantRange push_constant_range = {
+            VK_SHADER_STAGE_COMPUTE_BIT,
             0,
-            VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+            sizeof(SynthPushConstants)
+        };
+
+        static VkPipelineLayoutCreateInfo layout_create_info = {
+            VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+            nullptr,
+            0,      // flags
             1,
+            &vk_descriptor_set_layouts[dsl_synth],
+            1,      // pushConstantRangeCount
+            &push_constant_range
+        };
+
+        const VkResult res = CHK(vkCreatePipelineLayout(vk_dev,
+                                                        &layout_create_info,
+                                                        nullptr,
+                                                        &vk_pipeline_layouts[pipe_synth]));
+        if (res != VK_SUCCESS)
+            return false;
+    }
+
+    ////////////////////////////////////////////////////////////////////////////
+    {
+        static const VkPushConstantRange push_constant_range = {
             VK_SHADER_STAGE_COMPUTE_BIT,
-            nullptr
-        },
-        // Buffer of floats
-        {
+            0,
+            sizeof(Mono2StereoPushConstants)
+        };
+
+        static VkPipelineLayoutCreateInfo layout_create_info = {
+            VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+            nullptr,
+            0,      // flags
             1,
-            VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-            1,
-            VK_SHADER_STAGE_COMPUTE_BIT,
-            nullptr
-        }
-    };
+            &vk_descriptor_set_layouts[dsl_mono_to_stereo],
+            1,      // pushConstantRangeCount
+            &push_constant_range
+        };
 
-    static const VkDescriptorSetLayoutCreateInfo create_desc_set_layout = {
-        VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-        nullptr,
-        0, // flags
-        mstd::array_size(create_bindings),
-        create_bindings
-    };
-
-    VkResult res = CHK(vkCreateDescriptorSetLayout(vk_dev, &create_desc_set_layout, nullptr, &vk_desc_set_layout));
-    if (res != VK_SUCCESS)
-        return false;
-
-    static const VkPushConstantRange push_constant_range = {
-        VK_SHADER_STAGE_COMPUTE_BIT,
-        0,
-        sizeof(PushConstants)
-    };
-
-    static VkPipelineLayoutCreateInfo layout_create_info = {
-        VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
-        nullptr,
-        0,      // flags
-        1,
-        &vk_desc_set_layout,
-        1,      // pushConstantRangeCount
-        &push_constant_range
-    };
-
-    res = CHK(vkCreatePipelineLayout(vk_dev, &layout_create_info, nullptr, &vk_pipeline_layout));
-    if (res != VK_SUCCESS)
-        return false;
+        const VkResult res = CHK(vkCreatePipelineLayout(vk_dev,
+                                                        &layout_create_info,
+                                                        nullptr,
+                                                        &vk_pipeline_layouts[pipe_mono_to_stereo]));
+        if (res != VK_SUCCESS)
+            return false;
+    }
 
     return true;
 }
@@ -200,7 +261,8 @@ static bool create_compute_pipeline(VkPipelineLayout layout, uint8_t* shader, Vk
 
 bool create_pipelines()
 {
-    return create_compute_pipeline(vk_pipeline_layout, shader_synth_comp, &vk_pipeline);
+    return create_compute_pipeline(vk_pipeline_layouts[pipe_synth],          shader_synth_comp,          &vk_pipelines[pipe_synth]) &&
+           create_compute_pipeline(vk_pipeline_layouts[pipe_mono_to_stereo], shader_mono_to_stereo_comp, &vk_pipelines[pipe_mono_to_stereo]);
 }
 
 bool draw_frame(uint32_t image_idx, uint64_t time_ms, VkFence queue_fence)
@@ -208,8 +270,8 @@ bool draw_frame(uint32_t image_idx, uint64_t time_ms, VkFence queue_fence)
     VkResult res;
 
     // Allocate descriptor set
-    static VkDescriptorSet desc_set = VK_NULL_HANDLE;
-    if ( ! desc_set) {
+    static VkDescriptorSet desc_sets[num_dsls];
+    if ( ! desc_sets[0]) {
         static VkDescriptorPoolSize pool_sizes[] = {
             {
                 VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,      // type
@@ -217,7 +279,7 @@ bool draw_frame(uint32_t image_idx, uint64_t time_ms, VkFence queue_fence)
             },
             {
                 VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,      // type
-                1                                       // descriptorCount
+                3                                       // descriptorCount
             }
         };
 
@@ -230,23 +292,19 @@ bool draw_frame(uint32_t image_idx, uint64_t time_ms, VkFence queue_fence)
             pool_sizes
         };
 
-        VkDescriptorPool desc_set_pool;
-
-        res = CHK(vkCreateDescriptorPool(vk_dev, &pool_create_info, nullptr, &desc_set_pool));
-        if (res != VK_SUCCESS)
-            return false;
-
         static VkDescriptorSetAllocateInfo alloc_info = {
             VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
             nullptr,
             VK_NULL_HANDLE,             // descriptorPool
-            1,                          // descriptorSetCount
-            &vk_desc_set_layout         // pSetLayouts
+            mstd::array_size(vk_descriptor_set_layouts),
+            vk_descriptor_set_layouts
         };
 
-        alloc_info.descriptorPool = desc_set_pool;
+        res = CHK(vkCreateDescriptorPool(vk_dev, &pool_create_info, nullptr, &alloc_info.descriptorPool));
+        if (res != VK_SUCCESS)
+            return false;
 
-        res = CHK(vkAllocateDescriptorSets(vk_dev, &alloc_info, &desc_set));
+        res = CHK(vkAllocateDescriptorSets(vk_dev, &alloc_info, desc_sets));
         if (res != VK_SUCCESS)
             return false;
 
@@ -295,8 +353,8 @@ bool draw_frame(uint32_t image_idx, uint64_t time_ms, VkFence queue_fence)
                 nullptr                             // pTexelBufferView
             }
         };
-        write_desc_sets[0].dstSet = desc_set;
-        write_desc_sets[1].dstSet = desc_set;
+        write_desc_sets[0].dstSet = desc_sets[0];
+        write_desc_sets[1].dstSet = desc_sets[0];
 
         vkUpdateDescriptorSets(vk_dev,
                                mstd::array_size(write_desc_sets),
@@ -328,14 +386,14 @@ bool draw_frame(uint32_t image_idx, uint64_t time_ms, VkFence queue_fence)
         constexpr uint32_t work_group_size = 1024;
         constexpr uint32_t sound_length    = 44100; // TODO
 
-        vkCmdBindPipeline(buf, VK_PIPELINE_BIND_POINT_COMPUTE, vk_pipeline);
+        vkCmdBindPipeline(buf, VK_PIPELINE_BIND_POINT_COMPUTE, vk_pipelines[pipe_synth]);
 
         vkCmdBindDescriptorSets(buf,
                                 VK_PIPELINE_BIND_POINT_COMPUTE,
-                                vk_pipeline_layout,
+                                vk_pipeline_layouts[pipe_synth],
                                 0,        // firstSet
                                 1,        // descriptorSetCount
-                                &desc_set,
+                                &desc_sets[0],
                                 0,        // dynamicOffsetCount
                                 nullptr); // pDynamicOffsets
 

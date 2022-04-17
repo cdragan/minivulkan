@@ -75,8 +75,8 @@ layout(set = 0, binding = 0) uniform ubo_data {
 } ubo;
 
 layout(push_constant) uniform push_constants {
+    uint num_samples;   // Number of samples to generate in the output sound
     uint base_freq;     // Frequency of the note being played
-    uint duration_ms;   // Entire duration of the note, including release
 } push;
 
 layout(set = 0, binding = 1) buffer output_data { float out_sound[]; };
@@ -182,24 +182,26 @@ uint envelope(ADSR envelope, uint offs, uint duration_ms)
     return envelope.end_value;
 }
 
-void main()
+void generate_sample(uint out_offs)
 {
     float value = 0;
 
     int lfo_values[max_lfos];
     for (uint i = 0; i < max_lfos; i++) {
-        lfo_values[i] = lfo(ubo.lfo[i], gl_GlobalInvocationID.x);
+        lfo_values[i] = lfo(ubo.lfo[i], out_offs);
     }
+
+    const uint duration_ms = push.num_samples * 1000 / mix_freq;
 
     for (uint i = 0; i < ubo.num_comps; i++) {
         Component comp = ubo.comps[i];
 
         const uint start_offs = comp.delay_us * mix_freq / 1000000;
-        if (gl_GlobalInvocationID.x < start_offs)
+        if (out_offs < start_offs)
             continue;
 
         const uint delay_ms = (comp.delay_us > 0) ? ((comp.delay_us - 1) / 1000 + 1) : 0;
-        const uint offs     = gl_GlobalInvocationID.x - start_offs;
+        const uint offs     = out_offs - start_offs;
 
         int freq_delta = 0;
         if (comp.freq_lfo > 0)
@@ -207,7 +209,7 @@ void main()
 
         if (comp.freq_env > 0) {
             const uint env_value = envelope(ubo.envelope[comp.freq_env - 1], offs,
-                                            push.duration_ms - delay_ms);
+                                            duration_ms - delay_ms);
             freq_delta += int(env_value) - 32768;
         }
 
@@ -220,12 +222,21 @@ void main()
 
         if (comp.amplitude_env > 0) {
             const uint env_value = envelope(ubo.envelope[comp.amplitude_env - 1], offs,
-                                            push.duration_ms - delay_ms);
+                                            duration_ms - delay_ms);
             comp_value *= float(env_value) / 65536.0;
         }
 
         value += comp_value;
     }
 
-    out_sound[gl_GlobalInvocationID.x] = value;
+    out_sound[out_offs] = value;
+}
+
+void main()
+{
+    const uint delta = gl_WorkGroupSize.x * gl_NumWorkGroups.x;
+
+    for (uint out_offs = gl_GlobalInvocationID.x; out_offs < push.num_samples; out_offs += delta) {
+        generate_sample(out_offs);
+    }
 }

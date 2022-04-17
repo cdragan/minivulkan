@@ -110,6 +110,7 @@ shader_files += shaders/bezier_surface_quadratic.tese.glsl
 shader_files += shaders/bezier_surface_cubic.tesc.glsl
 shader_files += shaders/bezier_surface_cubic.tese.glsl
 shader_files += shaders/synth.comp.glsl
+shader_files += shaders/mono_to_stereo.comp.glsl
 
 ##############################################################################
 # Compiler flags
