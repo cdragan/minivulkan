@@ -7,6 +7,8 @@
 #include "../shaders.h"
 #include "../vmath.h"
 
+constexpr float image_ratio = 0.0f;
+
 static float    user_roundedness = 111.0f / 127.0f;
 static uint32_t user_tess_level  = 12;
 static bool     user_wireframe   = false;
@@ -216,18 +218,50 @@ static bool create_graphics_pipeline(const ShaderInfo& shader_info, VkPipeline* 
         1       // maxDepth
     };
 
-    // Flip Y coordinate.  The world coordinate system assumes Y going from bottom to top,
-    // but in Vulkan screen-space Y coordinate goes from top to bottom.
-    viewport.y      = static_cast<float>(vk_surface_caps.currentExtent.height);
-    viewport.width  = static_cast<float>(vk_surface_caps.currentExtent.width);
-    viewport.height = -static_cast<float>(vk_surface_caps.currentExtent.height);
-
     static VkRect2D scissor = {
         { 0, 0 },   // offset
         { 0, 0 }    // extent
     };
 
-    scissor.extent = vk_surface_caps.currentExtent;
+    // Note: Flip Y coordinate.  The world coordinate system assumes Y going from
+    // bottom to top, but in Vulkan screen-space Y coordinate goes from top to bottom.
+    if (image_ratio != 0) {
+        const float cur_ratio = static_cast<float>(vk_surface_caps.currentExtent.width) /
+                                static_cast<float>(vk_surface_caps.currentExtent.height);
+
+        if (cur_ratio > image_ratio) {
+            const uint32_t height = vk_surface_caps.currentExtent.height;
+            const uint32_t width  = static_cast<uint32_t>(height * image_ratio);
+
+            scissor.offset.x      = (vk_surface_caps.currentExtent.width - width) / 2;
+            scissor.extent.width  = width;
+            scissor.extent.height = height;
+
+            viewport.x      = static_cast<float>(scissor.offset.x);
+            viewport.y      = static_cast<float>(height);
+            viewport.width  = static_cast<float>(width);
+            viewport.height = -static_cast<float>(height);
+        }
+        else {
+            const uint32_t width  = vk_surface_caps.currentExtent.width;
+            const uint32_t height = static_cast<uint32_t>(width / image_ratio);
+
+            scissor.offset.y      = (vk_surface_caps.currentExtent.height - height) / 2;
+            scissor.extent.width  = width;
+            scissor.extent.height = height;
+
+            viewport.y      = static_cast<float>((vk_surface_caps.currentExtent.height + height) / 2);
+            viewport.width  = static_cast<float>(width);
+            viewport.height = -static_cast<float>(height);
+        }
+    }
+    else {
+        viewport.y      = static_cast<float>(vk_surface_caps.currentExtent.height);
+        viewport.width  = static_cast<float>(vk_surface_caps.currentExtent.width);
+        viewport.height = -static_cast<float>(vk_surface_caps.currentExtent.height);
+
+        scissor.extent = vk_surface_caps.currentExtent;
+    }
 
     static VkPipelineViewportStateCreateInfo viewport_state = {
         VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
@@ -801,9 +835,11 @@ bool draw_frame(uint32_t image_idx, uint64_t time_ms, VkFence queue_fence)
     const float angle = vmath::radians(static_cast<float>(time_ms) * 15.0f / 1000.0f);
     const vmath::mat4 model_view = vmath::mat4(vmath::quat(vmath::vec3(0.70710678f, 0.70710678f, 0), angle))
                                  * vmath::translate(0.0f, 0.0f, 7.0f);
+    const float aspect = (image_ratio != 0) ? image_ratio
+                         : (static_cast<float>(vk_surface_caps.currentExtent.width)
+                           / static_cast<float>(vk_surface_caps.currentExtent.height));
     const vmath::mat4 proj = vmath::projection(
-            static_cast<float>(vk_surface_caps.currentExtent.width)     // aspect
-                / static_cast<float>(vk_surface_caps.currentExtent.height),
+            aspect,
             vmath::radians(30.0f),  // fov
             0.01f,                  // near_plane
             100.0f,                 // far_plane
