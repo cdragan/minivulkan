@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2021-2022 Chris Dragan
 
+#include "d_printf.h"
 #include "gui.h"
 #include "minivulkan.h"
 
@@ -80,14 +81,20 @@ static void set_fullscreen(xcb_connection_t* conn,
                                                                false,
                                                                net_wm_state,
                                                                sizeof(net_wm_state) - 1);
-    if (!atom_wm_state)
+    if ( ! atom_wm_state) {
+        d_printf("Failed to get _NET_WM_STATE atom\n");
         return;
+    }
 
     static const char net_wm_state_fullscreen[] = "_NET_WM_STATE_FULLSCREEN";
     xcb_intern_atom_reply_t* const atom_wm_fullscreen = intern_atom(conn,
                                                                     false,
                                                                     net_wm_state_fullscreen,
                                                                     sizeof(net_wm_state_fullscreen) - 1);
+    if ( ! atom_wm_fullscreen) {
+        d_printf("Failed to get _NET_WM_STATE_FULLSCREEN atom\n");
+        return;
+    }
 
     xcb_change_property(conn,
                         XCB_PROP_MODE_REPLACE,
@@ -114,8 +121,10 @@ static bool create_window(Window* w)
 {
     w->connection = xcb_connect(nullptr, nullptr);
 
-    if ( ! w->connection)
+    if ( ! w->connection) {
+        d_printf("Failed to connect to X server\n");
         return false;
+    }
 
     xcb_screen_t* const screen = xcb_setup_roots_iterator(xcb_get_setup(w->connection)).data;
 
@@ -187,6 +196,10 @@ static bool create_window(Window* w)
         xcb_keysyms          = xcb_get_keyboard_mapping_keysyms(reply);
         assert(num_keycodes * xcb_keysyms_per_code ==
                static_cast<uint32_t>(xcb_get_keyboard_mapping_keysyms_length(reply)));
+    }
+    else {
+        d_printf("Failed to get keyboard mappings\n");
+        return false;
     }
     #endif
 
