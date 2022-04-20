@@ -150,8 +150,8 @@ static bool create_window(Window* w)
     constexpr bool full_screen = true;
     #endif
 
-    constexpr uint16_t width  = full_screen ? 1 : 800;
-    constexpr uint16_t height = full_screen ? 1 : 600;
+    const uint16_t width  = full_screen ? screen->width_in_pixels  : 800;
+    const uint16_t height = full_screen ? screen->height_in_pixels : 600;
 
     xcb_create_window(w->connection,
                       XCB_COPY_FROM_PARENT,
