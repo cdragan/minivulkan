@@ -5,6 +5,7 @@
 # Determine target OS
 
 UNAME = $(shell uname -s)
+ARCH ?= $(shell uname -m)
 
 ifneq (,$(filter CYGWIN% MINGW% MSYS%, $(UNAME)))
     # Note: Still use cl.exe on Windows
@@ -160,7 +161,9 @@ else
     CFLAGS += -fvisibility=hidden
     CFLAGS += -fPIC
     CFLAGS += -MD
-    CFLAGS += -msse4.1
+    ifneq ($(ARCH), aarch64)
+        CFLAGS += -msse4.1
+    endif
 
     ifdef debug
         CFLAGS  += -fsanitize=address
@@ -229,9 +232,10 @@ ifdef VULKAN_SDK
 endif
 
 GLSL_FLAGS = --target-env vulkan1.1
+GLSL_OPT_FLAGS =
 GLSL_ENCODE_FLAGS =
 ifndef GLSL_NO_OPTIMIZER
-    GLSL_FLAGS += -Os
+    GLSL_OPT_FLAGS += -Os
 endif
 ifdef debug
     GLSL_FLAGS += -g
@@ -241,6 +245,11 @@ endif
 ifdef no_spirv_shuffle
     GLSL_ENCODE_FLAGS += --no-shuffle
     CFLAGS += -DNO_SPIRV_SHUFFLE
+endif
+
+ASM_SYNTAX =
+ifneq ($(ARCH), aarch64)
+    ASM_SYNTAX = -masm=intel
 endif
 
 ##############################################################################
@@ -318,7 +327,7 @@ $(foreach file, $(filter %.cpp, $(all_src_files)), $(eval $(call CPP_RULE,$(file
 
 define ASM_RULE
 $$(call ASM_FROM_SRC,$1): $1 | $$(out_dir)
-	$$(CXX) $$(CFLAGS) $$(CXXFLAGS) -masm=intel -S $$(call COMPILER_OUTPUT,$$@) $$<
+	$$(CXX) $$(CFLAGS) $$(CXXFLAGS) $$(ASM_SYNTAX) -S $$(call COMPILER_OUTPUT,$$@) $$<
 endef
 
 $(foreach file, $(filter %.cpp, $(all_src_files)), $(eval $(call ASM_RULE,$(file))))
@@ -352,8 +361,9 @@ $(eval $(call LINK_RULE,$(spirv_encode),$(spirv_encode_src_files)))
 define GLSL_EXT
 $(out_dir)/shaders/%.$1.h: shaders/%.$1.glsl $(spirv_encode) | $(out_dir)/shaders
 	$(GLSL_VALIDATOR_PREFIX)glslangValidator $(GLSL_FLAGS) -o $$@.spv $$<
-	$(spirv_encode) $(GLSL_ENCODE_FLAGS) shader_$$(subst .,_,$$(basename $$(notdir $$<))) $$@.spv $$@
-	$(spirv_encode) $(GLSL_ENCODE_FLAGS) --binary shader_$$(subst .,_,$$(basename $$(notdir $$<))) $$@.spv $$(basename $$@).bin
+	$(GLSL_VALIDATOR_PREFIX)spirv-opt $(GLSL_OPT_FLAGS) $$@.spv -o $$@.opt.spv
+	$(spirv_encode) $(GLSL_ENCODE_FLAGS) shader_$$(subst .,_,$$(basename $$(notdir $$<))) $$@.opt.spv $$@
+	$(spirv_encode) $(GLSL_ENCODE_FLAGS) --binary shader_$$(subst .,_,$$(basename $$(notdir $$<))) $$@.opt.spv $$(basename $$@).bin
 endef
 
 $(foreach ext, vert tesc tese geom frag comp, $(eval $(call GLSL_EXT,$(ext))))
