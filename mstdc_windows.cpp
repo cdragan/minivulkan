@@ -690,18 +690,8 @@ RETZERO:
     __declspec(naked) void _ftoui3()
     {
         __asm {
-            push      ebp
-            mov       ebp, esp
-            and       esp, -16
-            sub       esp, 16
-            movss     xmm0, DWORD PTR [ebp + 8]
-            movss     DWORD PTR [esp], xmm0
-            mov       DWORD PTR [esp + 4], 0
-            mov       DWORD PTR [esp + 8], 0
-            mov       DWORD PTR [esp + 12], 0
-            cvttss2si eax, XMMWORD PTR [esp]
-            mov       esp, ebp
-            pop       ebp
+            movss     xmm0, DWORD PTR [esp + 8]
+            cvttss2si eax, xmm0
             ret
         }
     }
