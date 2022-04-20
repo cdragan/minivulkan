@@ -4,7 +4,7 @@
 #include "gui.h"
 #include "minivulkan.h"
 #include "mstdc.h"
-#include "dprintf.h"
+#include "d_printf.h"
 
 static void check_gui_result(VkResult imgui_error)
 {
@@ -18,7 +18,7 @@ static PFN_vkVoidFunction load_vk_function(const char* name, void* cookie)
     if ( ! func) {
         func = vkGetInstanceProcAddr(vk_instance, name);
         if ( ! func)
-            dprintf("Failed to load function %s for GUI\n", name);
+            d_printf("Failed to load function %s for GUI\n", name);
     }
     return func;
 }
@@ -27,7 +27,7 @@ bool init_gui()
 {
     IMGUI_CHECKVERSION();
     if ( ! ImGui::CreateContext()) {
-        dprintf("Failed to initialize GUI context\n");
+        d_printf("Failed to initialize GUI context\n");
         return false;
     }
 
@@ -75,7 +75,7 @@ bool init_gui()
     init_info.ImageCount      = vk_num_swapchain_images;
     init_info.CheckVkResultFn = check_gui_result;
     if ( ! ImGui_ImplVulkan_Init(&init_info, vk_render_pass)) {
-        dprintf("Failed to initialize Vulkan GUI\n");
+        d_printf("Failed to initialize Vulkan GUI\n");
         return false;
     }
 
@@ -88,7 +88,7 @@ bool init_gui()
         return false;
 
     if ( ! ImGui_ImplVulkan_CreateFontsTexture(cmd_buf.bufs[0])) {
-        dprintf("Failed to create GUI font texture\n");
+        d_printf("Failed to create GUI font texture\n");
         return false;
     }
 

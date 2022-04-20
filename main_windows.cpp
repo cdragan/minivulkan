@@ -2,7 +2,7 @@
 // Copyright (c) 2021-2022 Chris Dragan
 
 #include "minivulkan.h"
-#include "dprintf.h"
+#include "d_printf.h"
 #include "mstdc.h"
 
 #define WIN32_LEAN_AND_MEAN
@@ -57,24 +57,24 @@ static IXAudio2SourceVoice* voices[1] = { };
 bool load_sound(uint32_t sound_id, const void* data, uint32_t size)
 {
     if (sound_id >= mstd::array_size(voices)) {
-        dprintf("Sound id %u exceeds supported maximum\n", sound_id);
+        d_printf("Sound id %u exceeds supported maximum\n", sound_id);
         return false;
     }
 
     if ( ! x_audio) {
         if (FAILED(CoInitializeEx(nullptr, COINIT_MULTITHREADED))) {
-            dprintf("Failed to initialize COM\n");
+            d_printf("Failed to initialize COM\n");
             return false;
         }
 
         if (FAILED(XAudio2Create(&x_audio, 0, XAUDIO2_DEFAULT_PROCESSOR))) {
-            dprintf("Failed to initialize XAudio2\n");
+            d_printf("Failed to initialize XAudio2\n");
             return false;
         }
 
         IXAudio2MasteringVoice* mastering_voice;
         if (FAILED(x_audio->CreateMasteringVoice(&mastering_voice))) {
-            dprintf("Failed to create mastering voice\n");
+            d_printf("Failed to create mastering voice\n");
             return false;
         }
     }
@@ -95,7 +95,7 @@ bool load_sound(uint32_t sound_id, const void* data, uint32_t size)
 
     IXAudio2SourceVoice* source_voice;
     if (FAILED(x_audio->CreateSourceVoice(&source_voice, &wave_format))) {
-        dprintf("Failed to create source voice\n");
+        d_printf("Failed to create source voice\n");
         return false;
     }
 
@@ -114,7 +114,7 @@ bool load_sound(uint32_t sound_id, const void* data, uint32_t size)
     buffer.pAudioData = static_cast<const BYTE*>(data);
 
     if (FAILED(source_voice->SubmitSourceBuffer(&buffer))) {
-        dprintf("Failed to submit sound data\n");
+        d_printf("Failed to submit sound data\n");
         return false;
     }
 
@@ -126,17 +126,17 @@ bool load_sound(uint32_t sound_id, const void* data, uint32_t size)
 bool play_sound(uint32_t sound_id)
 {
     if (sound_id >= mstd::array_size(voices)) {
-        dprintf("Sound id %u exceeds supported maximum\n", sound_id);
+        d_printf("Sound id %u exceeds supported maximum\n", sound_id);
         return false;
     }
 
     if ( ! voices[sound_id]) {
-        dprintf("Sound id %u was not allocated\n", sound_id);
+        d_printf("Sound id %u was not allocated\n", sound_id);
         return false;
     }
 
     if (FAILED(voices[sound_id]->Start(0))) {
-        dprintf("Failed to start sound %u\n", sound_id);
+        d_printf("Failed to start sound %u\n", sound_id);
         return false;
     }
 
@@ -223,7 +223,7 @@ static bool create_window(Window* w)
     wnd_class.hInstance = w->instance;
 
     if ( ! RegisterClass(&wnd_class)) {
-        dprintf("Failed to register window class\n");
+        d_printf("Failed to register window class\n");
         return false;
     }
 
@@ -247,7 +247,7 @@ static bool create_window(Window* w)
 
         static MONITORINFO monitor_info = { sizeof(MONITORINFO) };
         if ( ! GetMonitorInfo(monitor, &monitor_info)) {
-            dprintf("Failed to get current video mode\n");
+            d_printf("Failed to get current video mode\n");
             return false;
         }
 
@@ -281,11 +281,11 @@ static bool create_window(Window* w)
                                      w);                    // lpParam
 
     if ( ! hwnd) {
-        dprintf("Failed to create window\n");
+        d_printf("Failed to create window\n");
         return false;
     }
 
-    dprintf("Created window %ux%u at [%u, %u]\n", width, height, x, y);
+    d_printf("Created window %ux%u at [%u, %u]\n", width, height, x, y);
 
     if (full_screen)
         ShowCursor(FALSE);

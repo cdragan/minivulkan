@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2021-2022 Chris Dragan
 
-#include "../dprintf.h"
+#include "../d_printf.h"
 #include "../gui.h"
 #include "../minivulkan.h"
 #include "../mstdc.h"
@@ -35,7 +35,7 @@ static bool create_gui_frame()
 static bool create_gui_frame()
 {
     // The synth is useless without the GUI
-    dprintf("Synth compiled without GUI, exiting\n");
+    d_printf("Synth compiled without GUI, exiting\n");
     return false;
 }
 #endif

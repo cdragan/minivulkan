@@ -7,7 +7,7 @@
 #import <QuartzCore/CAMetalLayer.h>
 #include "minivulkan.h"
 #include "mstdc.h"
-#include "dprintf.h"
+#include "d_printf.h"
 #ifdef ENABLE_GUI
 #   include "imgui/backends/imgui_impl_osx.h"
 #endif
@@ -55,7 +55,7 @@ static Sound sound;
 bool load_sound(uint32_t sound_id, const void* data, uint32_t size)
 {
     if (sound_id >= mstd::array_size(sound.sounds)) {
-        dprintf("Sound %u doesn't exist\n", sound_id);
+        d_printf("Sound %u doesn't exist\n", sound_id);
         return false;
     }
 
@@ -72,14 +72,14 @@ bool load_sound(uint32_t sound_id, const void* data, uint32_t size)
                                                     error:        nullptr];
 
     if ( ! sound.sounds[sound_id]) {
-        dprintf("Failed to load sound %u\n", sound_id);
+        d_printf("Failed to load sound %u\n", sound_id);
         return false;
     }
 
-    dprintf("Sound %u duration %.3f s\n", sound_id, sound.sounds[sound_id].duration);
+    d_printf("Sound %u duration %.3f s\n", sound_id, sound.sounds[sound_id].duration);
 
     if ( ! [sound.sounds[sound_id] prepareToPlay]) {
-        dprintf("Failed to initialize sound %u for playback\n", sound_id);
+        d_printf("Failed to initialize sound %u for playback\n", sound_id);
         return false;
     }
 
@@ -89,12 +89,12 @@ bool load_sound(uint32_t sound_id, const void* data, uint32_t size)
 bool play_sound(uint32_t sound_id)
 {
     if (sound_id >= mstd::array_size(sound.sounds)) {
-        dprintf("Sound %u doesn't exist\n", sound_id);
+        d_printf("Sound %u doesn't exist\n", sound_id);
         return false;
     }
 
     if ( ! [sound.sounds[sound_id] play]) {
-        dprintf("Failed to play sound %u\n", sound_id);
+        d_printf("Failed to play sound %u\n", sound_id);
         return false;
     }
 

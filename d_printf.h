@@ -2,9 +2,9 @@
 // Copyright (c) 2021-2022 Chris Dragan
 
 #ifdef NDEBUG
-#   define dprintf(...)
+#   define d_printf(...)
 #else
 #   include <stdio.h>
 #   include <string.h>
-#   define dprintf printf
+#   define d_printf printf
 #endif

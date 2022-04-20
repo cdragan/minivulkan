@@ -2,7 +2,7 @@
 // Copyright (c) 2021-2022 Chris Dragan
 
 #include "minivulkan.h"
-#include "dprintf.h"
+#include "d_printf.h"
 #include "gui.h"
 #include "mstdc.h"
 #include "vmath.h"
@@ -61,9 +61,9 @@ VkResult check_vk_call(const char* call_str, const char* file, int line, VkResul
         }
 
         if (desc)
-            dprintf("%s:%d: %s in %s\n", file, line, desc, call_str);
+            d_printf("%s:%d: %s in %s\n", file, line, desc, call_str);
         else
-            dprintf("%s:%d: error %d in %s\n", file, line, static_cast<int>(res), call_str);
+            d_printf("%s:%d: error %d in %s\n", file, line, static_cast<int>(res), call_str);
     }
 
     return res;
@@ -130,7 +130,7 @@ static bool load_functions(const char* names, PFN_vkVoidFunction* fn_ptrs, LOAD_
         const PFN_vkVoidFunction fn = load(names);
 
         if ( ! fn) {
-            dprintf("Failed to load %s\n", names);
+            d_printf("Failed to load %s\n", names);
             return false;
         }
 
@@ -188,7 +188,7 @@ static bool enable_extensions(const char*                  supported_extensions,
             ++*num_enabled_extensions;
         }
         else if (req == '1') {
-            dprintf("Required extension %s not found\n", supported_extensions);
+            d_printf("Required extension %s not found\n", supported_extensions);
             return false;
         }
 
@@ -243,9 +243,9 @@ static bool init_instance()
 
 #ifndef NDEBUG
     if (num_ext_props)
-        dprintf("instance extensions:\n");
+        d_printf("instance extensions:\n");
     for (uint32_t i = 0; i < num_ext_props; i++)
-        dprintf("    %s\n", ext_props[i].extensionName);
+        d_printf("    %s\n", ext_props[i].extensionName);
 #endif
 
     // List of extensions declared in vulkan_extensions.h
@@ -291,7 +291,7 @@ static bool init_instance()
     };
 
     for (uint32_t i = 0; i < num_layer_props; i++) {
-        dprintf("layer: %s\n", layer_props[i].layerName);
+        d_printf("layer: %s\n", layer_props[i].layerName);
 
         num_ext_props = mstd::array_size(ext_props);
 
@@ -302,7 +302,7 @@ static bool init_instance()
                                                      ext_props);
         if (res == VK_SUCCESS || res == VK_INCOMPLETE) {
             for (uint32_t j = 0; j < num_ext_props; j++) {
-                dprintf("    %s\n", ext_props[j].extensionName);
+                d_printf("    %s\n", ext_props[j].extensionName);
 
                 static const char validation_features_ext[] = "VK_EXT_validation_features";
                 if (mstd::strcmp(ext_props[i].extensionName, validation_features_ext) == 0)
@@ -414,7 +414,7 @@ static bool find_surface_format(VkPhysicalDevice phys_dev)
                 swapchain_create_info.surface         = vk_surface;
                 swapchain_create_info.imageFormat     = pref_format;
                 swapchain_create_info.imageColorSpace = formats[i_cur].colorSpace;
-                dprintf("found surface format %s\n", format_string(pref_format));
+                d_printf("found surface format %s\n", format_string(pref_format));
                 return true;
             }
         }
@@ -454,7 +454,7 @@ static bool find_gpu()
         return false;
 
     if ( ! count) {
-        dprintf("Found 0 physical devices\n");
+        d_printf("Found 0 physical devices\n");
         return false;
     }
 
@@ -503,12 +503,12 @@ static bool find_gpu()
                 continue;
 
             vk_phys_dev = phys_devices[i_dev];
-            dprintf("Selected device %u: %s\n", i_dev, vk_phys_props.properties.deviceName);
+            d_printf("Selected device %u: %s\n", i_dev, vk_phys_props.properties.deviceName);
             return true;
         }
     }
 
-    dprintf("Could not find any usable GPUs\n");
+    d_printf("Could not find any usable GPUs\n");
     return false;
 }
 
@@ -531,7 +531,7 @@ static bool get_device_extensions()
 
 #ifndef NDEBUG
     for (uint32_t i = 0; i < num_extensions; i++)
-        dprintf("    %s\n", extensions[i].extensionName);
+        d_printf("    %s\n", extensions[i].extensionName);
 #endif
 
     // List of extensions declared in vulkan_extensions.h
@@ -668,7 +668,7 @@ bool DeviceMemoryHeap::init_heap_info()
 
     VkDeviceSize device_heap_size = 0;
 
-    dprintf("Memory heaps\n");
+    d_printf("Memory heaps\n");
     for (int i = 0; i < static_cast<int>(mem_props.memoryTypeCount); i++) {
 
         const VkMemoryType& memory_type    = mem_props.memoryTypes[i];
@@ -686,7 +686,7 @@ bool DeviceMemoryHeap::init_heap_info()
             str_append(info, "host_coherent,");
         if (property_flags & VK_MEMORY_PROPERTY_HOST_CACHED_BIT)
             str_append(info, "host_cached,");
-        dprintf("    type %d, heap %u, flags 0x%x (%s)\n",
+        d_printf("    type %d, heap %u, flags 0x%x (%s)\n",
                 i,
                 memory_type.heapIndex,
                 property_flags,
@@ -727,7 +727,7 @@ bool DeviceMemoryHeap::init_heap_info()
     }
 
     if (host_type_index == -1) {
-        dprintf("Could not find coherent and cached host memory type\n");
+        d_printf("Could not find coherent and cached host memory type\n");
         return false;
     }
 
@@ -775,7 +775,7 @@ bool DeviceMemoryHeap::allocate_heap(VkDeviceSize size)
         return false;
 
     heap_size = size;
-    dprintf("Allocated heap size 0x%" PRIx64 " bytes with memory type %u\n",
+    d_printf("Allocated heap size 0x%" PRIx64 " bytes with memory type %u\n",
             static_cast<uint64_t>(size), memory_type);
 
     return true;
@@ -803,8 +803,8 @@ bool DeviceMemoryHeap::allocate_memory(const VkMemoryRequirements& requirements,
     assert(aligned_offs % alignment == 0);
 
     if (aligned_offs + requirements.size > heap_size) {
-        dprintf("Not enough device memory\n");
-        dprintf("Surface size 0x%" PRIx64 ", used heap size 0x%" PRIx64 ", max heap size 0x%" PRIx64 "\n",
+        d_printf("Not enough device memory\n");
+        d_printf("Surface size 0x%" PRIx64 ", used heap size 0x%" PRIx64 ", max heap size 0x%" PRIx64 "\n",
                 static_cast<uint64_t>(requirements.size),
                 static_cast<uint64_t>(aligned_offs),
                 static_cast<uint64_t>(heap_size));
@@ -938,7 +938,7 @@ bool Image::allocate(DeviceMemoryHeap& heap)
 {
 #ifndef NDEBUG
     if ( ! (memory_reqs.memoryTypeBits & (1u << heap.get_memory_type()))) {
-        dprintf("Device memory does not support requested image type\n");
+        d_printf("Device memory does not support requested image type\n");
         return false;
     }
 #endif
@@ -1067,7 +1067,7 @@ bool Buffer::allocate(DeviceMemoryHeap&  heap,
 
 #ifndef NDEBUG
     if ( ! (memory_reqs.memoryTypeBits & (1u << heap.get_memory_type()))) {
-        dprintf("Device memory does not support requested buffer type\n");
+        d_printf("Device memory does not support requested buffer type\n");
         return false;
     }
 #endif
@@ -1195,7 +1195,7 @@ static bool allocate_depth_buffers(uint32_t num_depth_buffers)
                                       mstd::array_size(depth_formats),
                                       VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT,
                                       &vk_depth_format)) {
-        dprintf("error: could not find any of the required depth formats\n");
+        d_printf("error: could not find any of the required depth formats\n");
         return false;
     }
 
@@ -1240,7 +1240,7 @@ static bool create_swapchain()
     if (res != VK_SUCCESS)
         return false;
 
-    dprintf("create_swapchain %ux%u\n", vk_surface_caps.currentExtent.width, vk_surface_caps.currentExtent.height);
+    d_printf("create_swapchain %ux%u\n", vk_surface_caps.currentExtent.width, vk_surface_caps.currentExtent.height);
 
     VkSwapchainKHR old_swapchain = vk_swapchain;
 
@@ -1368,7 +1368,7 @@ static bool create_render_pass()
                                       1,
                                       VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT,
                                       &attachments[0].format)) {
-        dprintf("error: surface format does not support color attachments\n");
+        d_printf("error: surface format does not support color attachments\n");
         return false;
     }
 #endif
@@ -1449,7 +1449,7 @@ static bool create_frame_buffer()
 void idle_queue()
 {
     if (vk_queue) {
-        dprintf("idling queue\n");
+        d_printf("idling queue\n");
         CHK(vkQueueWaitIdle(vk_queue));
     }
 }
