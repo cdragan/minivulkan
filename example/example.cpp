@@ -17,8 +17,8 @@ static bool     user_wireframe   = false;
 static bool create_gui_frame()
 {
     ImGuiIO& io = ImGui::GetIO();
-    io.DisplaySize.x = vk_surface_caps.currentExtent.width;
-    io.DisplaySize.y = vk_surface_caps.currentExtent.height;
+    io.DisplaySize.x = static_cast<float>(vk_surface_caps.currentExtent.width);
+    io.DisplaySize.y = static_cast<float>(vk_surface_caps.currentExtent.height);
 
     ImGui_ImplVulkan_NewFrame();
     ImGui::NewFrame();
@@ -230,7 +230,7 @@ static bool create_graphics_pipeline(const ShaderInfo& shader_info, VkPipeline* 
 
         if (cur_ratio > image_ratio) {
             const uint32_t height = vk_surface_caps.currentExtent.height;
-            const uint32_t width  = static_cast<uint32_t>(height * image_ratio);
+            const uint32_t width  = static_cast<uint32_t>(static_cast<float>(height) * image_ratio);
 
             scissor.offset.x      = (vk_surface_caps.currentExtent.width - width) / 2;
             scissor.extent.width  = width;
@@ -243,7 +243,7 @@ static bool create_graphics_pipeline(const ShaderInfo& shader_info, VkPipeline* 
         }
         else {
             const uint32_t width  = vk_surface_caps.currentExtent.width;
-            const uint32_t height = static_cast<uint32_t>(width / image_ratio);
+            const uint32_t height = static_cast<uint32_t>(static_cast<float>(width) / image_ratio);
 
             scissor.offset.y      = (vk_surface_caps.currentExtent.height - height) / 2;
             scissor.extent.width  = width;
@@ -820,6 +820,8 @@ bool draw_frame(uint32_t image_idx, uint64_t time_ms, VkFence queue_fence)
     if ( ! shader_data.allocated()) {
         slot_size = mstd::align_up(static_cast<uint32_t>(sizeof(UniformBuffer)),
                                    static_cast<uint32_t>(vk_phys_props.properties.limits.minUniformBufferOffsetAlignment));
+        slot_size = mstd::align_up(slot_size,
+                                   static_cast<uint32_t>(vk_phys_props.properties.limits.nonCoherentAtomSize));
         const uint32_t total_size = slot_size * mstd::array_size(desc_set);
         if ( ! shader_data.allocate(vk_coherent_heap, total_size, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT))
             return false;

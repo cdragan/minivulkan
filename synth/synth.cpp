@@ -18,8 +18,8 @@ static bool     user_wireframe   = false;
 static bool create_gui_frame()
 {
     ImGuiIO& io = ImGui::GetIO();
-    io.DisplaySize.x = vk_surface_caps.currentExtent.width;
-    io.DisplaySize.y = vk_surface_caps.currentExtent.height;
+    io.DisplaySize.x = static_cast<float>(vk_surface_caps.currentExtent.width);
+    io.DisplaySize.y = static_cast<float>(vk_surface_caps.currentExtent.height);
 
     ImGui_ImplVulkan_NewFrame();
     ImGui::NewFrame();
