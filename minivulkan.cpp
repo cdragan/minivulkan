@@ -727,8 +727,12 @@ bool DeviceMemoryHeap::init_heap_info()
     }
 
     if (host_type_index == -1) {
-        d_printf("Could not find coherent and cached host memory type\n");
-        return false;
+        if (coherent_type_index != -1)
+            host_type_index = coherent_type_index;
+        else {
+            d_printf("Could not find coherent and cached host memory type\n");
+            return false;
+        }
     }
 
     device_memory_type   = (uint32_t)device_type_index;
@@ -821,6 +825,7 @@ MapBase::MapBase(DeviceMemoryHeap* heap, VkDeviceSize offset, VkDeviceSize size)
 {
     assert( ! heap->mapped);
     assert((offset % vk_phys_props.properties.limits.minMemoryMapAlignment) == 0);
+    assert((offset % vk_phys_props.properties.limits.nonCoherentAtomSize) == 0);
 
     const VkDeviceSize aligned_size = mstd::align_up(size,
             VkDeviceSize(vk_phys_props.properties.limits.minMemoryMapAlignment));
@@ -865,6 +870,7 @@ bool MapBase::flush(uint32_t offset, uint32_t size)
         return false;
 
     assert(offset + size <= mapped_size);
+    assert((size % vk_phys_props.properties.limits.nonCoherentAtomSize) == 0);
 
     static VkMappedMemoryRange range = {
         VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE,
