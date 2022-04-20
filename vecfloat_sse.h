@@ -24,8 +24,8 @@ struct float4_base {
         return _mm_castsi128_ps(_mm_set_epi32(d, c, b, a));
     }
 
-    int movemask() const {
-        return _mm_movemask_ps(data);
+    bool all() const {
+        return _mm_movemask_ps(data) == 0b1111;
     }
 
     float get0() const {
@@ -159,7 +159,7 @@ inline float1 operator<(const float1& v1, const float1& v2)
 
 inline float1 operator<=(const float1& v1, const float1& v2)
 {
-    return float1{_mm_cmplt_ss(v1, v2)};
+    return float1{_mm_cmple_ss(v1, v2)};
 }
 
 inline float1 operator>(const float1& v1, const float1& v2)
@@ -334,7 +334,7 @@ inline float4 operator<(const float4& v1, const float4& v2)
 
 inline float4 operator<=(const float4& v1, const float4& v2)
 {
-    return float4{_mm_cmplt_ps(v1, v2)};
+    return float4{_mm_cmple_ps(v1, v2)};
 }
 
 inline float4 operator>(const float4& v1, const float4& v2)
@@ -422,11 +422,6 @@ inline float4 movehl(const float4& v1, const float4& v2)
 inline float4 hadd(const float4& v1, const float4& v2)
 {
     return float4{_mm_hadd_ps(v1, v2)};
-}
-
-inline float4 hsub(const float4& v1, const float4& v2)
-{
-    return float4{_mm_hsub_ps(v1, v2)};
 }
 
 inline void transpose(float4& a, float4& b, float4& c, float4& d)

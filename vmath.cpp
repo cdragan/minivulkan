@@ -161,12 +161,12 @@ vec4& vec4::operator/=(const vec4& v)
 
 bool vec4::operator==(const vec4& v) const
 {
-    return (float4::load4_aligned(data) == float4::load4_aligned(v.data)).movemask() == 0b1111;
+    return (float4::load4_aligned(data) == float4::load4_aligned(v.data)).all();
 }
 
 bool vec4::operator!=(const vec4& v) const
 {
-    return (float4::load4_aligned(data) == float4::load4_aligned(v.data)).movemask() != 0b1111;
+    return ! (float4::load4_aligned(data) == float4::load4_aligned(v.data)).all();
 }
 
 vec4 vec4::operator-() const
@@ -210,6 +210,7 @@ quat::quat(const vec3& axis, float angle_radians)
 
 quat::quat(const vec3& euler_xyz)
 {
+#ifdef USE_SSE
     const sin_cos_result4 sc_half = sincos(float4::load4_aligned(euler_xyz.data) * spread4(0.5f));
     const float4          sc_xy   = shuffle<0, 1, 0, 2>(sc_half.sin, sc_half.cos);
     const float4          sc_z    = shuffle<2, 2, 2, 2>(sc_half.sin, sc_half.cos);
@@ -224,6 +225,9 @@ quat::quat(const vec3& euler_xyz)
 
     dst1 += dst2;
     dst1.store4_aligned(data);
+#else
+    // TODO
+#endif
 }
 
 quat::quat(const mat3& rot_mtx)
@@ -250,12 +254,12 @@ quat& quat::operator*=(const quat& q)
 
 bool quat::operator==(const quat& q) const
 {
-    return (float4::load4_aligned(data) == float4::load4_aligned(q.data)).movemask() == 0b1111;
+    return (float4::load4_aligned(data) == float4::load4_aligned(q.data)).all();
 }
 
 bool quat::operator!=(const quat& q) const
 {
-    return (float4::load4_aligned(data) == float4::load4_aligned(q.data)).movemask() != 0b1111;
+    return ! (float4::load4_aligned(data) == float4::load4_aligned(q.data)).all();
 }
 
 quat quat::operator-() const

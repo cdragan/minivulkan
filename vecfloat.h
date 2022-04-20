@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2021-2022 Chris Dragan
 
+#include "vecfloat_neon.h"
 #include "vecfloat_sse.h"
 
 namespace vmath {
