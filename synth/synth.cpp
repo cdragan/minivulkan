@@ -40,6 +40,19 @@ static bool create_gui_frame()
 }
 #endif
 
+uint32_t check_device_features()
+{
+    uint32_t missing_features = 0;
+
+    missing_features += check_feature(&vk_8b_storage_features.uniformAndStorageBuffer8BitAccess);
+    missing_features += check_feature(&vk_16b_storage_features.uniformAndStorageBuffer16BitAccess);
+    missing_features += check_feature(&vk_16b_storage_features.storageBuffer16BitAccess);
+    missing_features += check_feature(&vk_shader_int8_features.shaderInt8);
+    missing_features += check_feature(&vk_features.features.shaderInt16);
+
+    return missing_features;
+}
+
 static constexpr uint32_t coherent_heap_size = 1u * 1024u * 1024u;
 
 static DeviceMemoryHeap vk_coherent_heap{DeviceMemoryHeap::coherent_memory};

@@ -561,24 +561,81 @@ static bool load_device_functions()
             });
 }
 
-static VkPhysicalDeviceShaderFloat16Int8Features vk_shader_int8_features = {
-    VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_FLOAT16_INT8_FEATURES
-};
+#define X(set, prev, type, tag) type vk##set = { tag, prev };
+FEATURE_SETS
+#undef X
 
-static VkPhysicalDevice8BitStorageFeatures vk_8b_storage_features = {
-    VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_8BIT_STORAGE_FEATURES,
-    &vk_shader_int8_features
-};
+#ifdef NDEBUG
+uint32_t check_feature(const VkBool32* feature)
+{
+    return ! *feature;
+}
 
-static VkPhysicalDevice16BitStorageFeatures vk_16b_storage_features = {
-    VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_16BIT_STORAGE_FEATURES,
-    &vk_8b_storage_features
-};
+static bool check_device_features_internal()
+{
+    return ! check_device_features();
+}
 
-static VkPhysicalDeviceFeatures2 vk_features = {
-    VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
-    &vk_16b_storage_features
-};
+#else
+
+#define X(set, prev, type, tag) static type init##set = { tag };
+FEATURE_SETS
+#undef X
+
+static void set_feature(const VkBool32* feature, const void* device_set, void* init_set, size_t set_size)
+{
+    const uintptr_t feature_ptr = reinterpret_cast<uintptr_t>(feature);
+    const uintptr_t set_begin   = reinterpret_cast<uintptr_t>(device_set);
+    const uintptr_t set_end     = set_begin + set_size;
+
+    if (feature_ptr > set_begin && feature_ptr < set_end) {
+        const uintptr_t offset = feature_ptr - set_begin;
+        const uintptr_t target = reinterpret_cast<uintptr_t>(init_set) + offset;
+        VkBool32* const init_feature = reinterpret_cast<VkBool32*>(target);
+
+        *init_feature = VK_TRUE;
+    }
+}
+
+uint32_t check_feature_str(const char* name, const VkBool32* feature)
+{
+    const uint32_t missing_features = ! *feature;
+
+    if (missing_features)
+        d_printf("Feature %s is not present\n", name);
+
+    #define X(set, prev, type, tag) set_feature(feature, &vk##set, &init##set, sizeof(init##set));
+    FEATURE_SETS
+    #undef X
+
+    return missing_features;
+}
+
+static void copy_feature_set(void* dest, const void* src, size_t set_size)
+{
+    uint8_t*       dest_bytes = static_cast<uint8_t*>(dest);
+    const uint8_t* src_bytes  = static_cast<const uint8_t*>(src);
+    const size_t   skip_size  = offsetof(VkPhysicalDeviceFeatures2, features);
+
+    dest_bytes += skip_size;
+    src_bytes  += skip_size;
+    set_size   -= skip_size;
+
+    mstd::mem_copy(dest_bytes, src_bytes, static_cast<uint32_t>(set_size));
+}
+
+static bool check_device_features_internal()
+{
+    if (check_device_features())
+        return false;
+
+    #define X(set, prev, type, tag) copy_feature_set(&vk##set, &init##set, sizeof(init##set));
+    FEATURE_SETS
+    #undef X
+
+    return true;
+}
+#endif
 
 static bool create_device()
 {
@@ -589,6 +646,9 @@ static bool create_device()
         return false;
 
     vkGetPhysicalDeviceFeatures2(vk_phys_dev, &vk_features);
+
+    if ( ! check_device_features_internal())
+        return false;
 
     static VkDeviceQueueCreateInfo queue_create_info = {
         VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,

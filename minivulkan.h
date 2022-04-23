@@ -9,16 +9,26 @@
 #   define APPNAME "minivulkan"
 #endif
 
-extern VkInstance                  vk_instance;
-extern VkSurfaceKHR                vk_surface;
-extern VkPhysicalDevice            vk_phys_dev;
-extern VkDevice                    vk_dev;
-extern uint32_t                    vk_queue_family_index;
-extern VkQueue                     vk_queue;
-extern uint32_t                    vk_num_swapchain_images;
-extern VkRenderPass                vk_render_pass;
-extern VkSurfaceCapabilitiesKHR    vk_surface_caps;
-extern VkPhysicalDeviceProperties2 vk_phys_props;
+extern VkInstance                                vk_instance;
+extern VkSurfaceKHR                              vk_surface;
+extern VkPhysicalDevice                          vk_phys_dev;
+extern VkDevice                                  vk_dev;
+extern uint32_t                                  vk_queue_family_index;
+extern VkQueue                                   vk_queue;
+extern uint32_t                                  vk_num_swapchain_images;
+extern VkRenderPass                              vk_render_pass;
+extern VkSurfaceCapabilitiesKHR                  vk_surface_caps;
+extern VkPhysicalDeviceProperties2               vk_phys_props;
+
+#define FEATURE_SETS \
+    X(_shader_int8_features, nullptr,                  VkPhysicalDeviceShaderFloat16Int8Features, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_FLOAT16_INT8_FEATURES) \
+    X(_8b_storage_features,  &vk_shader_int8_features, VkPhysicalDevice8BitStorageFeatures,       VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_8BIT_STORAGE_FEATURES)        \
+    X(_16b_storage_features, &vk_8b_storage_features,  VkPhysicalDevice16BitStorageFeatures,      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_16BIT_STORAGE_FEATURES)       \
+    X(_features,             &vk_16b_storage_features, VkPhysicalDeviceFeatures2,                 VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2)
+
+#define X(set, prev, type, tag) extern type vk##set;
+FEATURE_SETS
+#undef X
 
 struct Window;
 
@@ -31,6 +41,8 @@ void idle_queue();
 uint64_t get_current_time_ms();
 bool load_sound(uint32_t sound_id, const void* data, uint32_t size);
 bool play_sound(uint32_t sound_id);
+
+uint32_t check_device_features();
 bool create_additional_heaps();
 bool create_pipeline_layouts();
 bool create_pipelines();
@@ -40,6 +52,13 @@ bool create_pipelines();
 #else
 #   define CHK(call) check_vk_call(#call, __FILE__, __LINE__, (call))
 VkResult check_vk_call(const char* call_str, const char* file, int line, VkResult res);
+#endif
+
+#ifdef NDEBUG
+uint32_t check_feature(const VkBool32* feature);
+#else
+#   define check_feature(feature) check_feature_str(#feature, feature)
+uint32_t check_feature_str(const char* name, const VkBool32* feature);
 #endif
 
 enum eLimits {
