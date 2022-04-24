@@ -37,11 +37,24 @@ static constexpr bool create_gui_frame()
 }
 #endif
 
+enum WhatGeometry {
+    geom_cube,
+    geom_cubic_patch,
+    geom_quadratic_patch
+};
+#ifdef __aarch64__
+static constexpr WhatGeometry what_geometry = geom_cube;
+#else
+static constexpr WhatGeometry what_geometry = geom_quadratic_patch;
+#endif
+
 uint32_t check_device_features()
 {
     uint32_t missing_features = 0;
 
-    missing_features += check_feature(&vk_features.features.tessellationShader);
+    if (what_geometry != geom_cube)
+        missing_features += check_feature(&vk_features.features.tessellationShader);
+
     missing_features += check_feature(&vk_features.features.fillModeNonSolid);
 
     return missing_features;
@@ -55,13 +68,6 @@ bool create_additional_heaps()
 {
     return vk_coherent_heap.allocate_heap(coherent_heap_size);
 }
-
-enum WhatGeometry {
-    geom_cube,
-    geom_cubic_patch,
-    geom_quadratic_patch
-};
-static constexpr WhatGeometry what_geometry = geom_quadratic_patch;
 
 static VkPipelineLayout vk_gr_pipeline_layout = VK_NULL_HANDLE;
 static VkPipeline       vk_gr_pipeline[2];
