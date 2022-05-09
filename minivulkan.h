@@ -9,16 +9,16 @@
 #   define APPNAME "minivulkan"
 #endif
 
-extern VkInstance                                vk_instance;
-extern VkSurfaceKHR                              vk_surface;
-extern VkPhysicalDevice                          vk_phys_dev;
-extern VkDevice                                  vk_dev;
-extern uint32_t                                  vk_queue_family_index;
-extern VkQueue                                   vk_queue;
-extern uint32_t                                  vk_num_swapchain_images;
-extern VkRenderPass                              vk_render_pass;
-extern VkSurfaceCapabilitiesKHR                  vk_surface_caps;
-extern VkPhysicalDeviceProperties2               vk_phys_props;
+extern VkInstance                  vk_instance;
+extern VkSurfaceKHR                vk_surface;
+extern VkPhysicalDevice            vk_phys_dev;
+extern VkDevice                    vk_dev;
+extern uint32_t                    vk_queue_family_index;
+extern VkQueue                     vk_queue;
+extern uint32_t                    vk_num_swapchain_images;
+extern VkRenderPass                vk_render_pass;
+extern VkSurfaceCapabilitiesKHR    vk_surface_caps;
+extern VkPhysicalDeviceProperties2 vk_phys_props;
 
 #define FEATURE_SETS \
     X(_shader_int8_features, nullptr,                  VkPhysicalDeviceShaderFloat16Int8Features, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_FLOAT16_INT8_FEATURES) \
