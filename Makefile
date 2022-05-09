@@ -233,9 +233,11 @@ endif
 
 GLSL_FLAGS = --target-env vulkan1.1
 GLSL_OPT_FLAGS =
+GLSL_STRIP_FLAGS =
 GLSL_ENCODE_FLAGS =
 ifndef GLSL_NO_OPTIMIZER
     GLSL_OPT_FLAGS += -Os
+    GLSL_STRIP_FLAGS += --strip all --dce all
 endif
 ifdef debug
     GLSL_FLAGS += -g
@@ -340,8 +342,17 @@ ifdef imgui
     CFLAGS += -Iimgui -DENABLE_GUI=1
 endif
 
-$(out_dir)/shaders: | $(out_dir)
+shaders_out_dir = $(out_dir)/shaders
+
+$(shaders_out_dir): | $(out_dir)
 	mkdir -p $@
+
+shader_dirs = default opt strip bin
+
+$(addprefix $(shaders_out_dir)/,$(shader_dirs)): | $(shaders_out_dir)
+	mkdir -p $@
+
+shader_stage = $(addprefix $(shaders_out_dir)/$1/,$(subst .glsl,.spv,$(notdir $2)))
 
 ifdef VULKAN_SDK_BIN
     GLSL_VALIDATOR_PREFIX = $(VULKAN_SDK_BIN)/
@@ -359,17 +370,18 @@ endif
 $(eval $(call LINK_RULE,$(spirv_encode),$(spirv_encode_src_files)))
 
 define GLSL_EXT
-$(out_dir)/shaders/%.$1.h: shaders/%.$1.glsl $(spirv_encode) | $(out_dir)/shaders
-	$(GLSL_VALIDATOR_PREFIX)glslangValidator $(GLSL_FLAGS) -o $$@.spv $$<
-	$(GLSL_VALIDATOR_PREFIX)spirv-opt $(GLSL_OPT_FLAGS) $$@.spv -o $$@.opt.spv
-	$(spirv_encode) $(GLSL_ENCODE_FLAGS) shader_$$(subst .,_,$$(basename $$(notdir $$<))) $$@.opt.spv $$@
-	$(spirv_encode) $(GLSL_ENCODE_FLAGS) --binary shader_$$(subst .,_,$$(basename $$(notdir $$<))) $$@.opt.spv $$(basename $$@).bin
+$(shaders_out_dir)/%.$1.h: shaders/%.$1.glsl $(spirv_encode) | $(shaders_out_dir) $(addprefix $(shaders_out_dir)/,$(shader_dirs))
+	$(GLSL_VALIDATOR_PREFIX)glslangValidator $(GLSL_FLAGS) -o $$(call shader_stage,default,$$<) $$<
+	$(GLSL_VALIDATOR_PREFIX)spirv-opt $(GLSL_OPT_FLAGS) $$(call shader_stage,default,$$<) -o $$(call shader_stage,opt,$$<)
+	$(GLSL_VALIDATOR_PREFIX)spirv-remap $(GLSL_STRIP_FLAGS) --input $$(call shader_stage,opt,$$<) --output $(shaders_out_dir)/strip
+	$(spirv_encode) $(GLSL_ENCODE_FLAGS) shader_$$(subst .,_,$$(basename $$(notdir $$<))) $$(call shader_stage,strip,$$<) $$@
+	$(spirv_encode) $(GLSL_ENCODE_FLAGS) --binary shader_$$(subst .,_,$$(basename $$(notdir $$<))) $$(call shader_stage,strip,$$<) $$(basename $$@).bin
 endef
 
 $(foreach ext, vert tesc tese geom frag comp, $(eval $(call GLSL_EXT,$(ext))))
 
 $(call OBJ_FROM_SRC, shaders.cpp) $(out_dir)/shaders.cpp.$(asm_suffix): $(addprefix $(out_dir)/,$(addsuffix .h,$(basename $(shader_files))))
-$(call OBJ_FROM_SRC, shaders.cpp) $(out_dir)/shaders.cpp.$(asm_suffix): CFLAGS += -I$(out_dir)/shaders
+$(call OBJ_FROM_SRC, shaders.cpp) $(out_dir)/shaders.cpp.$(asm_suffix): CFLAGS += -I$(shaders_out_dir)
 
 $(eval $(call LINK_RULE,$(call CMDLINE_PATH,vmath_unit),$(all_vmath_unit_src_files)))
 
