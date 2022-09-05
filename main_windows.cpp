@@ -1,19 +1,12 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2021-2022 Chris Dragan
 
+#include "main_windows.h"
 #include "minivulkan.h"
 #include "d_printf.h"
 #include "mstdc.h"
 
-#define WIN32_LEAN_AND_MEAN
-#include <windows.h>
-
 #include <xaudio2.h>
-
-#ifdef ENABLE_GUI
-#   include "imgui/backends/imgui_impl_win32.h"
-    extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
-#endif
 
 struct Window {
     HINSTANCE instance;
@@ -145,10 +138,8 @@ bool play_sound(uint32_t sound_id)
 
 static LRESULT CALLBACK window_proc(HWND hwnd, UINT umsg, WPARAM wparam, LPARAM lparam)
 {
-    #ifdef ENABLE_GUI
-    if (ImGui_ImplWin32_WndProcHandler(hwnd, umsg, wparam, lparam))
+    if (gui_WndProcHandler(hwnd, umsg, wparam, lparam))
         return 0;
-    #endif
 
     switch (umsg) {
 
@@ -170,17 +161,14 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT umsg, WPARAM wparam, LPARAM 
             if ( ! init_vulkan(w))
                 break;
 
-            #ifdef ENABLE_GUI
-            ImGui_ImplWin32_Init(hwnd);
-            #endif
+            gui_init(hwnd);
 
             return 0;
         }
 
         case WM_PAINT:
-            #ifdef ENABLE_GUI
-            ImGui_ImplWin32_NewFrame();
-            #endif
+            gui_new_frame();
+
             if ( ! draw_frame())
                 break;
 
@@ -227,11 +215,7 @@ static bool create_window(Window* w)
         return false;
     }
 
-    #ifdef ENABLE_GUI
-    constexpr bool full_screen = false;
-    #else
-    constexpr bool full_screen = true;
-    #endif
+    const bool full_screen = is_full_screen();
 
     DWORD ws_ex;
     DWORD ws;
@@ -267,18 +251,18 @@ static bool create_window(Window* w)
         height = 600;
     }
 
-    const HWND hwnd = CreateWindowEx(ws_ex,                 // dwExStyle
-                                     title,                 // lpClassName
-                                     title,                 // lpWindowName
-                                     ws,                    // dwStyle
-                                     x,                     // X
-                                     y,                     // Y
-                                     width,                 // nWidth
-                                     height,                // nHeight
-                                     nullptr,               // hWndParent
-                                     nullptr,               // hMenu
-                                     w->instance,           // hInstance
-                                     w);                    // lpParam
+    const HWND hwnd = CreateWindowEx(ws_ex,       // dwExStyle
+                                     title,       // lpClassName
+                                     title,       // lpWindowName
+                                     ws,          // dwStyle
+                                     x,           // X
+                                     y,           // Y
+                                     width,       // nWidth
+                                     height,      // nHeight
+                                     nullptr,     // hWndParent
+                                     nullptr,     // hMenu
+                                     w->instance, // hInstance
+                                     w);          // lpParam
 
     if ( ! hwnd) {
         d_printf("Failed to create window\n");
