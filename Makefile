@@ -383,7 +383,7 @@ define GLSL_EXT
 $(shaders_out_dir)/%.$1.h: shaders/%.$1.glsl $(spirv_encode) | $(shaders_out_dir) $(addprefix $(shaders_out_dir)/,$(shader_dirs))
 	$(GLSL_VALIDATOR_PREFIX)glslangValidator $(GLSL_FLAGS) -o $$(call shader_stage,default,$$<) $$<
 	$(GLSL_VALIDATOR_PREFIX)spirv-opt $(GLSL_OPT_FLAGS) $$(call shader_stage,default,$$<) -o $$(call shader_stage,opt,$$<)
-	$(GLSL_VALIDATOR_PREFIX)spirv-remap $(GLSL_STRIP_FLAGS) --input $$(call shader_stage,opt,$$<) --output $(shaders_out_dir)/strip
+	cd $(shaders_out_dir)/opt && $(GLSL_VALIDATOR_PREFIX)spirv-remap $(GLSL_STRIP_FLAGS) --input $$(subst .glsl,.spv,$$(notdir $$<)) --output ../../../$(shaders_out_dir)/strip
 	$(spirv_encode) $(GLSL_ENCODE_FLAGS) shader_$$(subst .,_,$$(basename $$(notdir $$<))) $$(call shader_stage,strip,$$<) $$@
 	$(spirv_encode) $(GLSL_ENCODE_FLAGS) --binary shader_$$(subst .,_,$$(basename $$(notdir $$<))) $$(call shader_stage,strip,$$<) $$(basename $$@).bin
 endef
