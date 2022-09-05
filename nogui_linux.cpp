@@ -2,6 +2,7 @@
 // Copyright (c) 2021-2022 Chris Dragan
 
 #include "main_linux.h"
+#include <xcb/xcb.h>
 
 const uint32_t* get_window_events()
 {
@@ -13,7 +14,7 @@ const uint32_t* get_window_events()
     return events;
 }
 
-bool install_keyboard_events()
+bool install_keyboard_events(void* void_conn)
 {
     return true;
 }

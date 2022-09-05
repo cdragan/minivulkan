@@ -16,6 +16,7 @@ esac
 
 echo "Using $JOBS jobs"
 
+make clean
 make -j $JOBS -k
 
 make clean

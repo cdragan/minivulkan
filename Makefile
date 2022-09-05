@@ -45,6 +45,10 @@ threed_src_files += sound.cpp
 
 ifeq ($(UNAME), Linux)
     threed_src_files += main_linux.cpp
+    imgui_src_files  += gui_linux.cpp
+    ifndef imgui
+        threed_src_files += nogui_linux.cpp
+    endif
 endif
 
 ifeq ($(UNAME), Darwin)

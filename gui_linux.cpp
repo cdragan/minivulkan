@@ -1,7 +1,11 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2021-2022 Chris Dragan
 
+#include "d_printf.h"
 #include "main_linux.h"
+#include "imgui/imgui.h"
+
+#include <assert.h>
 #include <xcb/xcb.h>
 
 const uint32_t* get_window_events()
@@ -29,14 +33,14 @@ static xcb_keysym_t* xcb_keysyms          = nullptr;
 
 bool install_keyboard_events(void* void_conn)
 {
-    xcb_connection_t* const conn = void_conn;
+    xcb_connection_t* const conn = static_cast<xcb_connection_t*>(void_conn);
 
     constexpr uint8_t num_keycodes = max_keycode - min_keycode + 1;
-    const auto cookie = xcb_get_keyboard_mapping_unchecked(w->connection,
+    const auto cookie = xcb_get_keyboard_mapping_unchecked(conn,
                                                            min_keycode,
                                                            num_keycodes);
     xcb_generic_error_t* error = nullptr;
-    const auto reply = xcb_get_keyboard_mapping_reply(w->connection,
+    const auto reply = xcb_get_keyboard_mapping_reply(conn,
                                                       cookie,
                                                       &error);
     if (reply && ! error) {
