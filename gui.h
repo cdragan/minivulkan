@@ -18,3 +18,5 @@ template<typename T>
 inline bool send_gui_to_gpu(T cmdbuf) { return true; }
 
 #endif
+
+bool is_full_screen();

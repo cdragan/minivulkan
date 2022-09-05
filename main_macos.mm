@@ -1,16 +1,14 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2021-2022 Chris Dragan
 
-#import <AppKit/AppKit.h>
 #import <AVFoundation/AVAudioPlayer.h>
 #import <Cocoa/Cocoa.h>
 #import <QuartzCore/CAMetalLayer.h>
+#include "gui.h"
+#include "main_macos.h"
 #include "minivulkan.h"
 #include "mstdc.h"
 #include "d_printf.h"
-#ifdef ENABLE_GUI
-#   include "imgui/backends/imgui_impl_osx.h"
-#endif
 #include <time.h>
 
 struct Window {
@@ -59,12 +57,10 @@ bool load_sound(uint32_t sound_id, const void* data, uint32_t size)
         return false;
     }
 
-    #ifdef ENABLE_GUI
     if (sound.sounds[sound_id]) {
         [sound.sounds[sound_id] stop];
         sound.sounds[sound_id] = nullptr;
     }
-    #endif
 
     NSData *sound_data = [NSData dataWithBytes: data
                                  length:        size];
@@ -100,10 +96,6 @@ bool play_sound(uint32_t sound_id)
 
     return true;
 }
-
-@interface VulkanViewController: NSViewController
-    - (id)initWithSize: (NSSize)aSize;
-@end
 
 @interface VulkanView: NSView
 @end
@@ -156,17 +148,8 @@ bool play_sound(uint32_t sound_id)
             return;
         }
 
-        #ifdef ENABLE_GUI
-        // Enable correct mouse tracking
-        NSTrackingArea *trackingArea =
-            [[NSTrackingArea alloc] initWithRect: NSZeroRect
-                                    options:      NSTrackingMouseMoved | NSTrackingInVisibleRect | NSTrackingActiveAlways
-                                    owner:        self
-                                    userInfo:     nil];
-        [self.view addTrackingArea: trackingArea];
-
-        ImGui_ImplOSX_Init(self.view);
-        #endif
+        init_mouse_tracking(self, self.view);
+        init_os_gui(self.view);
 
         CVDisplayLinkCreateWithActiveCGDisplays(&m_display_link);
         CVDisplayLinkSetOutputCallback(m_display_link, &display_link_callback, (__bridge void *)self.view);
@@ -189,9 +172,7 @@ bool play_sound(uint32_t sound_id)
                                           CVOptionFlags     *flagsOut,
                                           void              *target)
     {
-        #ifdef ENABLE_GUI
-        ImGui_ImplOSX_NewFrame((__bridge NSView *)target);
-        #endif
+        init_os_gui_frame((__bridge NSView *)target);
 
         if ( ! draw_frame()) {
             [NSApp terminate: nil];
@@ -200,22 +181,6 @@ bool play_sound(uint32_t sound_id)
 
         return kCVReturnSuccess;
     }
-
-    #ifdef ENABLE_GUI
-    - (void)mouseDown:         (NSEvent *)event { ImGui_ImplOSX_HandleEvent(event, self.view); }
-    - (void)rightMouseDown:    (NSEvent *)event { ImGui_ImplOSX_HandleEvent(event, self.view); }
-    - (void)otherMouseDown:    (NSEvent *)event { ImGui_ImplOSX_HandleEvent(event, self.view); }
-    - (void)mouseUp:           (NSEvent *)event { ImGui_ImplOSX_HandleEvent(event, self.view); }
-    - (void)rightMouseUp:      (NSEvent *)event { ImGui_ImplOSX_HandleEvent(event, self.view); }
-    - (void)otherMouseUp:      (NSEvent *)event { ImGui_ImplOSX_HandleEvent(event, self.view); }
-    - (void)mouseMoved:        (NSEvent *)event { ImGui_ImplOSX_HandleEvent(event, self.view); }
-    - (void)mouseDragged:      (NSEvent *)event { ImGui_ImplOSX_HandleEvent(event, self.view); }
-    - (void)rightMouseMoved:   (NSEvent *)event { ImGui_ImplOSX_HandleEvent(event, self.view); }
-    - (void)rightMouseDragged: (NSEvent *)event { ImGui_ImplOSX_HandleEvent(event, self.view); }
-    - (void)otherMouseMoved:   (NSEvent *)event { ImGui_ImplOSX_HandleEvent(event, self.view); }
-    - (void)otherMouseDragged: (NSEvent *)event { ImGui_ImplOSX_HandleEvent(event, self.view); }
-    - (void)scrollWheel:       (NSEvent *)event { ImGui_ImplOSX_HandleEvent(event, self.view); }
-    #endif
 
 @end
 
@@ -284,11 +249,7 @@ bool play_sound(uint32_t sound_id)
 
     - (void)applicationDidFinishLaunching: (NSNotification *)notification
     {
-        #ifdef ENABLE_GUI
-        constexpr bool full_screen = false;
-        #else
-        constexpr bool full_screen = true;
-        #endif
+        const bool full_screen = is_full_screen();
 
         NSRect screen_frame = [[NSScreen mainScreen] frame];
         NSRect frame_rect   = NSMakeRect(0, 0,
@@ -311,7 +272,7 @@ bool play_sound(uint32_t sound_id)
         window.title   = @ APPNAME;
         window.minSize = NSMakeSize(512, 384);
 
-        id view_ctrl = [[VulkanViewController alloc]
+        id view_ctrl = [alloc_view_controller()
             initWithSize: frame_rect.size
         ];
         window.contentViewController = view_ctrl;

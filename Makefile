@@ -49,7 +49,11 @@ endif
 
 ifeq ($(UNAME), Darwin)
     threed_src_files += main_macos.mm
+    imgui_src_files  += gui_macos.mm
     imgui_src_files  += imgui/backends/imgui_impl_osx.mm
+    ifndef imgui
+        threed_src_files += nogui_macos.mm
+    endif
 endif
 
 ifeq ($(UNAME), Windows)
@@ -73,6 +77,8 @@ imgui_src_files += imgui/backends/imgui_impl_vulkan.cpp
 imgui_src_files += gui.cpp
 ifdef imgui
     threed_src_files += $(imgui_src_files)
+else
+    threed_src_files += nogui.cpp
 endif
 
 spirv_encode_src_files += tools/spirv_encode.cpp
