@@ -22,4 +22,4 @@ make -j $JOBS -k
 
 make -j $JOBS debug=1 -k
 
-make -j $JOBS debug=1 stdlib=1 test
+make -j $JOBS debug=1 stdlib=1 test default
