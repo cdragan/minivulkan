@@ -2,6 +2,7 @@
 // Copyright (c) 2021-2022 Chris Dragan
 
 #include "main_windows.h"
+#include "gui.h"
 #include "minivulkan.h"
 #include "d_printf.h"
 #include "mstdc.h"
