@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2021-2022 Chris Dragan
 
+#include "example.h"
+
 #include "../gui.h"
 #include "../minivulkan.h"
 #include "../mstdc.h"
@@ -9,33 +11,9 @@
 
 constexpr float image_ratio = 0.0f;
 
-static float    user_roundedness = 111.0f / 127.0f;
-static uint32_t user_tess_level  = 12;
-static bool     user_wireframe   = false;
-
-#ifdef ENABLE_GUI
-static bool create_gui_frame()
-{
-    ImGuiIO& io = ImGui::GetIO();
-    io.DisplaySize.x = static_cast<float>(vk_surface_caps.currentExtent.width);
-    io.DisplaySize.y = static_cast<float>(vk_surface_caps.currentExtent.height);
-
-    ImGui_ImplVulkan_NewFrame();
-    ImGui::NewFrame();
-
-    ImGui::Text("Hello, world!");
-    ImGui::Separator();
-    ImGui::SliderFloat("Roundedness", &user_roundedness, 0.0f, 1.0f);
-    ImGui::SliderInt("Tessellation Level", reinterpret_cast<int*>(&user_tess_level), 1, 20);
-    ImGui::Checkbox("Wireframe", &user_wireframe);
-    return true;
-}
-#else
-static constexpr bool create_gui_frame()
-{
-    return true;
-}
-#endif
+float    user_roundedness = 111.0f / 127.0f;
+uint32_t user_tess_level  = 12;
+bool     user_wireframe   = false;
 
 enum WhatGeometry {
     geom_cube,

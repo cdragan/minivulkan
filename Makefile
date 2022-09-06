@@ -13,6 +13,43 @@ ifneq (,$(filter CYGWIN% MINGW% MSYS%, $(UNAME)))
 endif
 
 ##############################################################################
+# Default build flags
+
+# Debug vs release
+debug ?= 0
+
+# Disables spirv shuffling, for debugging purposes
+no_spirv_shuffle ?= 0
+
+# Windows only: 1 links against MSVCRT, 0 doesn't use MSVCRT
+ifeq ($(UNAME), Windows)
+    stdlib ?= 0
+else
+    override stdlib := 1
+endif
+
+##############################################################################
+# Directory where generated files are stored
+
+out_dir_base ?= Out
+
+ifeq ($(UNAME), Windows)
+    ifneq ($(stdlib), 0)
+        out_dir_suffix = _stdlib
+    endif
+endif
+
+out_dir_suffix ?=
+
+ifeq ($(debug), 0)
+    out_dir_config = release
+else
+    out_dir_config = debug
+endif
+
+out_dir = $(out_dir_base)/$(out_dir_config)$(out_dir_suffix)
+
+##############################################################################
 # Function for converting source path to object file path
 
 ifeq ($(UNAME), Windows)
@@ -28,11 +65,6 @@ OBJ_FROM_SRC = $(addsuffix .$(o_suffix), $(addprefix $(out_dir)/,$(basename $(no
 ASM_FROM_SRC = $(addsuffix .$(asm_suffix), $(addprefix $(out_dir)/,$(notdir $1)))
 
 ##############################################################################
-# Directory where generated files are stored
-
-out_dir = Out
-
-##############################################################################
 # Sources
 
 lib_src_files += mstdc.cpp
@@ -45,31 +77,24 @@ threed_src_files += sound.cpp
 
 ifeq ($(UNAME), Linux)
     threed_src_files += main_linux.cpp
-    imgui_src_files  += gui_linux.cpp
-    ifndef imgui
-        threed_src_files += nogui_linux.cpp
-    endif
+    gui_src_files    += gui_linux.cpp
+    nogui_src_files  += nogui_linux.cpp
 endif
 
 ifeq ($(UNAME), Darwin)
     threed_src_files += main_macos.mm
-    imgui_src_files  += gui_macos.mm
+    gui_src_files    += gui_macos.mm
     imgui_src_files  += imgui/backends/imgui_impl_osx.mm
-    ifndef imgui
-        threed_src_files += nogui_macos.mm
-    endif
+    nogui_src_files  += nogui_macos.mm
 endif
 
 ifeq ($(UNAME), Windows)
     threed_src_files += main_windows.cpp
     imgui_src_files  += imgui/backends/imgui_impl_win32.cpp
-    imgui_src_files  += gui_windows.cpp
-    ifdef imgui
-        stdlib = 1
-    else
-        threed_src_files += nogui_windows.cpp
-    endif
-    ifndef stdlib
+    gui_src_files    += gui_windows.cpp
+    nogui_src_files  += nogui_windows.cpp
+
+    ifeq ($(stdlib), 0)
         lib_src_files += mstdc_windows.cpp
     endif
 endif
@@ -81,33 +106,47 @@ imgui_src_files += imgui/imgui_draw.cpp
 imgui_src_files += imgui/imgui_tables.cpp
 imgui_src_files += imgui/imgui_widgets.cpp
 imgui_src_files += imgui/backends/imgui_impl_vulkan.cpp
-imgui_src_files += gui.cpp
-ifdef imgui
-    threed_src_files += $(imgui_src_files)
-else
-    threed_src_files += nogui.cpp
-endif
+
+gui_src_files += $(imgui_src_files)
+gui_src_files += gui.cpp
+
+nogui_src_files += nogui.cpp
 
 spirv_encode_src_files += tools/spirv_encode.cpp
 
-example_src_files += example/example.cpp
+example_src_files       += example/example.cpp
+example_gui_src_files   += example/example_gui.cpp
+example_nogui_src_files += example/example_nogui.cpp
 
 synth_src_files += synth/synth.cpp
 
 all_src_files += $(lib_src_files)
 all_src_files += $(threed_src_files)
+all_src_files += $(gui_src_files)
+all_src_files += $(nogui_src_files)
 all_src_files += $(vmath_unit_src_files)
 all_src_files += $(spirv_encode_src_files)
 all_src_files += $(example_src_files)
+all_src_files += $(example_gui_src_files)
+all_src_files += $(example_nogui_src_files)
 all_src_files += $(synth_src_files)
 
 all_example_src_files += $(example_src_files)
+all_example_src_files += $(example_nogui_src_files)
 all_example_src_files += $(lib_src_files)
 all_example_src_files += $(threed_src_files)
+all_example_src_files += $(nogui_src_files)
+
+all_example_gui_src_files += $(example_src_files)
+all_example_gui_src_files += $(example_gui_src_files)
+all_example_gui_src_files += $(lib_src_files)
+all_example_gui_src_files += $(threed_src_files)
+all_example_gui_src_files += $(gui_src_files)
 
 all_synth_src_files += $(synth_src_files)
 all_synth_src_files += $(lib_src_files)
 all_synth_src_files += $(threed_src_files)
+all_synth_src_files += $(gui_src_files)
 
 all_vmath_unit_src_files += $(lib_src_files)
 all_vmath_unit_src_files += $(vmath_unit_src_files)
@@ -130,23 +169,24 @@ shader_files += shaders/mono_to_stereo.comp.glsl
 # Compiler flags
 
 SUBSYSTEMFLAGS =
+LDFLAGS_gui    =
 
 ifeq ($(UNAME), Windows)
     WFLAGS += -W3
 
-    ifdef debug
-        CFLAGS  += -D_DEBUG -Zi -MTd
-        LDFLAGS += -debug
-    else
+    ifeq ($(debug), 0)
         CFLAGS  += -O1 -Oi -DNDEBUG -GL -MT
         LDFLAGS += -ltcg
+    else
+        CFLAGS  += -D_DEBUG -Zi -MTd
+        LDFLAGS += -debug
     endif
 
-    ifdef stdlib
-        LDFLAGS_NODEFAULTLIB =
-    else
+    ifeq ($(stdlib), 0)
         CFLAGS += -DNOSTDLIB -D_NO_CRT_STDIO_INLINE -Zc:threadSafeInit- -GS- -Gs9999999
         LDFLAGS_NODEFAULTLIB += -nodefaultlib -stack:0x100000,0x100000
+    else
+        LDFLAGS_NODEFAULTLIB =
     endif
 
     CFLAGS += -nologo
@@ -164,7 +204,7 @@ ifeq ($(UNAME), Windows)
     COMPILER_OUTPUT = -Fo:$1
     LINKER_OUTPUT   = -out:$1
 
-    ifndef debug
+    ifeq ($(debug), 0)
         $(call OBJ_FROM_SRC, mstdc_windows.cpp): CFLAGS += -GL-
     endif
 else
@@ -178,18 +218,18 @@ else
         CFLAGS += -msse4.1
     endif
 
-    ifdef debug
-        CFLAGS  += -fsanitize=address
-        LDFLAGS += -fsanitize=address
-
-        CFLAGS += -O0 -g
-    else
+    ifeq ($(debug), 0)
         CFLAGS += -DNDEBUG -Os
         CFLAGS += -fomit-frame-pointer
         CFLAGS += -fno-stack-check -fno-stack-protector -fno-threadsafe-statics
 
         CFLAGS  += -ffunction-sections -fdata-sections
         LDFLAGS += -ffunction-sections -fdata-sections
+    else
+        CFLAGS  += -fsanitize=address
+        LDFLAGS += -fsanitize=address
+
+        CFLAGS += -O0 -g
     endif
 
     CXXFLAGS += -x c++ -std=c++17 -fno-rtti -fno-exceptions
@@ -208,7 +248,7 @@ endif
 ifeq ($(UNAME), Linux)
     LDFLAGS += -lxcb -lxcb-xfixes -ldl
 
-    ifndef debug
+    ifeq ($(debug), 0)
         STRIP = strip
 
         LDFLAGS += -Wl,--gc-sections -Wl,--as-needed
@@ -224,13 +264,12 @@ ifeq ($(UNAME), Darwin)
     frameworks += CoreVideo
     frameworks += Quartz
 
-    ifdef imgui
-        frameworks += GameController
-    endif
+    gui_frameworks += GameController
 
-    LDFLAGS += $(addprefix -framework ,$(frameworks))
+    LDFLAGS     += $(addprefix -framework ,$(frameworks))
+    LDFLAGS_gui += $(addprefix -framework ,$(gui_frameworks))
 
-    ifndef debug
+    ifeq ($(debug), 0)
         STRIP = strip -x
 
         LDFLAGS += -Wl,-dead_strip
@@ -252,12 +291,12 @@ ifndef GLSL_NO_OPTIMIZER
     GLSL_OPT_FLAGS += -Os
     GLSL_STRIP_FLAGS += --strip all --dce all
 endif
-ifdef debug
-    GLSL_FLAGS += -g
-else
+ifeq ($(debug), 0)
     GLSL_ENCODE_FLAGS += --remove-unused
+else
+    GLSL_FLAGS += -g
 endif
-ifdef no_spirv_shuffle
+ifneq ($(no_spirv_shuffle), 0)
     GLSL_ENCODE_FLAGS += --no-shuffle
     CFLAGS += -DNO_SPIRV_SHUFFLE
 endif
@@ -300,16 +339,25 @@ endif
 ##############################################################################
 # Rules
 
-gui_targets = example synth
+gui_targets   = example_gui synth
+nogui_targets = example
 
-default: $(foreach target,$(gui_targets),$(call GUI_PATH,$(target)))
+# imgui requires std C library
+ifeq ($(stdlib), 0)
+    gui_targets :=
+endif
+
+default: $(foreach target,$(gui_targets) $(nogui_targets),$(call GUI_PATH,$(target)))
 
 clean:
 	rm -rf $(out_dir)
 
-asm: $(addprefix $(out_dir)/,$(addsuffix .$(asm_suffix),$(notdir $(filter %.cpp,$(all_example_src_files)))))
+asm: $(addprefix $(out_dir)/,$(addsuffix .$(asm_suffix),$(notdir $(filter %.cpp,$(all_example_nogui_src_files)))))
 
-$(out_dir):
+$(out_dir_base):
+	mkdir -p $@
+
+$(out_dir): | $(out_dir_base)
 	mkdir -p $@
 
 define LINK_RULE
@@ -321,10 +369,14 @@ endif
 endef
 
 ifeq ($(UNAME), Windows)
-$(foreach target,$(gui_targets),$(call GUI_PATH,$(target))): SUBSYSTEMFLAGS = -subsystem:windows
+$(foreach target,$(gui_targets) $(nogui_targets),$(call GUI_PATH,$(target))): SUBSYSTEMFLAGS = -subsystem:windows
 endif
 
-$(foreach target,$(gui_targets),$(eval $(call GUI_LINK_RULE,$(target),$(all_$(target)_src_files))))
+ifeq ($(UNAME), Darwin)
+$(foreach target,$(gui_targets),$(call GUI_PATH,$(target))): SUBSYSTEMFLAGS = $(LDFLAGS_gui)
+endif
+
+$(foreach target,$(gui_targets) $(nogui_targets),$(eval $(call GUI_LINK_RULE,$(target),$(all_$(target)_src_files))))
 
 define MM_RULE
 $$(call OBJ_FROM_SRC,$1): $1 | $$(out_dir)
@@ -351,13 +403,11 @@ $(foreach file, $(filter-out $(imgui_src_files), $(all_src_files)), $(call OBJ_F
 
 $(foreach file, $(imgui_src_files), $(call OBJ_FROM_SRC, $(file))): CFLAGS += -DIMGUI_IMPL_VULKAN_NO_PROTOTYPES
 
-ifdef imgui
-    CFLAGS += -Iimgui -DENABLE_GUI=1
-endif
+$(foreach file, $(gui_src_files) $(example_gui_src_files) $(synth_src_files), $(call OBJ_FROM_SRC, $(file))): CFLAGS += -Iimgui
 
-shaders_out_dir = $(out_dir)/shaders
+shaders_out_dir = $(out_dir_base)/shaders
 
-$(shaders_out_dir): | $(out_dir)
+$(shaders_out_dir): | $(out_dir_base)
 	mkdir -p $@
 
 shader_dirs = default opt strip bin
@@ -383,7 +433,7 @@ endif
 $(eval $(call LINK_RULE,$(spirv_encode),$(spirv_encode_src_files)))
 
 define GLSL_EXT
-$(shaders_out_dir)/%.$1.h: shaders/%.$1.glsl $(spirv_encode) | $(shaders_out_dir) $(addprefix $(shaders_out_dir)/,$(shader_dirs))
+$(shaders_out_dir)/%.$1.h: shaders/%.$1.glsl | $(spirv_encode) $(shaders_out_dir) $(addprefix $(shaders_out_dir)/,$(shader_dirs))
 	$(GLSL_VALIDATOR_PREFIX)glslangValidator $(GLSL_FLAGS) -o $$(call shader_stage,default,$$<) $$<
 	$(GLSL_VALIDATOR_PREFIX)spirv-opt $(GLSL_OPT_FLAGS) $$(call shader_stage,default,$$<) -o $$(call shader_stage,opt,$$<)
 	cd $(shaders_out_dir)/opt && $(GLSL_VALIDATOR_PREFIX)spirv-remap $(GLSL_STRIP_FLAGS) --input $$(subst .glsl,.spv,$$(notdir $$<)) --output ../../../$(shaders_out_dir)/strip
@@ -393,7 +443,7 @@ endef
 
 $(foreach ext, vert tesc tese geom frag comp, $(eval $(call GLSL_EXT,$(ext))))
 
-$(call OBJ_FROM_SRC, shaders.cpp) $(out_dir)/shaders.cpp.$(asm_suffix): $(addprefix $(out_dir)/,$(addsuffix .h,$(basename $(shader_files))))
+$(call OBJ_FROM_SRC, shaders.cpp) $(out_dir)/shaders.cpp.$(asm_suffix): $(addprefix $(shaders_out_dir)/,$(addsuffix .h,$(basename $(notdir $(shader_files)))))
 $(call OBJ_FROM_SRC, shaders.cpp) $(out_dir)/shaders.cpp.$(asm_suffix): CFLAGS += -I$(shaders_out_dir)
 
 $(eval $(call LINK_RULE,$(call CMDLINE_PATH,vmath_unit),$(all_vmath_unit_src_files)))

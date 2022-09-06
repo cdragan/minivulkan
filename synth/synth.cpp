@@ -8,9 +8,11 @@
 #include "../shaders.h"
 #include "../vmath.h"
 
+#include "../imgui/imgui.h"
+#include "../imgui/backends/imgui_impl_vulkan.h"
+
 constexpr bool play_new_sound = false;
 
-#ifdef ENABLE_GUI
 static float    user_roundedness = 111.0f / 127.0f;
 static uint32_t user_tess_level  = 12;
 static bool     user_wireframe   = false;
@@ -31,14 +33,6 @@ static bool create_gui_frame()
     ImGui::Checkbox("Wireframe", &user_wireframe);
     return true;
 }
-#else
-static bool create_gui_frame()
-{
-    // The synth is useless without the GUI
-    d_printf("Synth compiled without GUI, exiting\n");
-    return false;
-}
-#endif
 
 uint32_t check_device_features()
 {

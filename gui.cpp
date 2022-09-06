@@ -6,6 +6,9 @@
 #include "mstdc.h"
 #include "d_printf.h"
 
+#include "../imgui/imgui.h"
+#include "../imgui/backends/imgui_impl_vulkan.h"
+
 static void check_gui_result(VkResult imgui_error)
 {
     if (CHK(imgui_error) != VK_SUCCESS) {

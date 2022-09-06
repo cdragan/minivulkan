@@ -16,14 +16,10 @@ esac
 
 echo "Using $JOBS jobs"
 
-make clean
+rm -rf Out
+
 make -j $JOBS -k
 
-make clean
-make -j $JOBS debug=1
+make -j $JOBS debug=1 -k
 
-make clean
-make -j $JOBS debug=1 imgui=1
-
-make clean
 make -j $JOBS debug=1 stdlib=1 test
