@@ -225,8 +225,6 @@ bool play_sound(uint32_t sound_id)
 @end
 
 @implementation AppDelegate
-    {
-    }
 
     - (void)createMenu
     {
