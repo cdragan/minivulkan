@@ -597,6 +597,8 @@ static void set_feature(const VkBool32* feature, const void* device_set, void* i
     }
 }
 
+// In debug builds, check_feature() is a macro, which unfolds to check_feature_str(),
+// so that we can print feature name if it isn't supported
 uint32_t check_feature_str(const char* name, const VkBool32* feature)
 {
     const uint32_t missing_features = ! *feature;
@@ -604,6 +606,7 @@ uint32_t check_feature_str(const char* name, const VkBool32* feature)
     if (missing_features)
         d_printf("Feature %s is not present\n", name);
 
+    // Set the feature in the init set.  See check_device_features_internal() for details.
     #define X(set, prev, type, tag) set_feature(feature, &vk##set, &init##set, sizeof(init##set));
     FEATURE_SETS
     #undef X
@@ -611,17 +614,16 @@ uint32_t check_feature_str(const char* name, const VkBool32* feature)
     return missing_features;
 }
 
-static void copy_feature_set(void* dest, const void* src, size_t set_size)
+template<typename T>
+static void copy_feature_set(T* dest, const T* src, size_t)
 {
-    uint8_t*       dest_bytes = static_cast<uint8_t*>(dest);
-    const uint8_t* src_bytes  = static_cast<const uint8_t*>(src);
-    const size_t   skip_size  = offsetof(VkPhysicalDeviceFeatures2, features);
+    const VkStructureType s_type = dest->sType;
+    void* const           p_next = dest->pNext;
 
-    dest_bytes += skip_size;
-    src_bytes  += skip_size;
-    set_size   -= skip_size;
+    *dest = *src;
 
-    mstd::mem_copy(dest_bytes, src_bytes, static_cast<uint32_t>(set_size));
+    dest->sType = s_type;
+    dest->pNext = p_next;
 }
 
 static bool check_device_features_internal()
@@ -629,6 +631,13 @@ static bool check_device_features_internal()
     if (check_device_features())
         return false;
 
+    // vk_features and chained structures are initialized by obtaining features from the device.
+    // Then check_device_features() calls check_feature_str() for each feature, which then
+    // sets the feature bit in the init set.  We copy each feature set back, so we clear
+    // all the unused feature bits and set all the used one.  Then the updated vk_features
+    // gets used to create the device.  This way validation layers will tell us if we missed
+    // to check any feature bits.
+    // In release builds we just enable all feature bits supported by the device to reduce exe size.
     #define X(set, prev, type, tag) copy_feature_set(&vk##set, &init##set, sizeof(init##set));
     FEATURE_SETS
     #undef X
@@ -795,9 +804,9 @@ bool DeviceMemoryHeap::init_heap_info()
         }
     }
 
-    device_memory_type   = (uint32_t)device_type_index;
-    host_memory_type     = (uint32_t)host_type_index;
-    coherent_memory_type = (uint32_t)coherent_type_index;
+    device_memory_type   = static_cast<uint32_t>(device_type_index);
+    host_memory_type     = static_cast<uint32_t>(host_type_index);
+    coherent_memory_type = static_cast<uint32_t>(coherent_type_index);
 
     return true;
 }
