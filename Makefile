@@ -352,7 +352,7 @@ default: $(foreach target,$(gui_targets) $(nogui_targets),$(call GUI_PATH,$(targ
 clean:
 	rm -rf $(out_dir)
 
-asm: $(addprefix $(out_dir)/,$(addsuffix .$(asm_suffix),$(notdir $(filter %.cpp,$(all_example_nogui_src_files)))))
+asm: $(addprefix $(out_dir)/,$(addsuffix .$(asm_suffix),$(notdir $(filter %.cpp,$(all_example_src_files)))))
 
 $(out_dir_base):
 	mkdir -p $@
