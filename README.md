@@ -16,8 +16,8 @@ Ideas which contribute to reduced executable size:
 * Rearrange SPIR-V bytecode to make it more friendly to executable compressors.
   This increases the executable size in the first place, but the SPIR-V bytecode
   is laid out in such a way that the executable becomes even smaller after compression.
-* (Windows) Do not depend on MS C runtime.  C library is linked statically into the
-  executable and caused bloat.
+* (Windows) Do not depend on MS C runtime.  C library on Windows is linked statically
+  into the executable and causes bloat.
 
 ## Building from sources
 
