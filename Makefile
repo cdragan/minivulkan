@@ -76,23 +76,23 @@ threed_src_files += shaders.cpp
 threed_src_files += sound.cpp
 
 ifeq ($(UNAME), Linux)
-    threed_src_files += main_linux.cpp
-    gui_src_files    += gui_linux.cpp
-    nogui_src_files  += nogui_linux.cpp
+    threed_src_files       += main_linux.cpp
+    threed_gui_src_files   += gui_linux.cpp
+    threed_nogui_src_files += nogui_linux.cpp
 endif
 
 ifeq ($(UNAME), Darwin)
-    threed_src_files += main_macos.mm
-    gui_src_files    += gui_macos.mm
-    imgui_src_files  += imgui/backends/imgui_impl_osx.mm
-    nogui_src_files  += nogui_macos.mm
+    threed_src_files       += main_macos.mm
+    threed_gui_src_files   += gui_macos.mm
+    imgui_src_files        += imgui/backends/imgui_impl_osx.mm
+    threed_nogui_src_files += nogui_macos.mm
 endif
 
 ifeq ($(UNAME), Windows)
-    threed_src_files += main_windows.cpp
-    imgui_src_files  += imgui/backends/imgui_impl_win32.cpp
-    gui_src_files    += gui_windows.cpp
-    nogui_src_files  += nogui_windows.cpp
+    threed_src_files       += main_windows.cpp
+    imgui_src_files        += imgui/backends/imgui_impl_win32.cpp
+    threed_gui_src_files   += gui_windows.cpp
+    threed_nogui_src_files += nogui_windows.cpp
 
     ifeq ($(stdlib), 0)
         lib_src_files += mstdc_windows.cpp
@@ -107,50 +107,21 @@ imgui_src_files += imgui/imgui_tables.cpp
 imgui_src_files += imgui/imgui_widgets.cpp
 imgui_src_files += imgui/backends/imgui_impl_vulkan.cpp
 
-gui_src_files += $(imgui_src_files)
-gui_src_files += gui.cpp
+threed_gui_src_files += $(imgui_src_files)
+threed_gui_src_files += gui.cpp
 
-nogui_src_files += nogui.cpp
+threed_nogui_src_files += nogui.cpp
 
 spirv_encode_src_files += tools/spirv_encode.cpp
 
-example_src_files       += example/example.cpp
-example_gui_src_files   += example/example_gui.cpp
-example_nogui_src_files += example/example_nogui.cpp
-
-synth_src_files += synth/synth.cpp
-
 all_src_files += $(lib_src_files)
 all_src_files += $(threed_src_files)
-all_src_files += $(gui_src_files)
-all_src_files += $(nogui_src_files)
+all_src_files += $(threed_gui_src_files)
+all_src_files += $(threed_nogui_src_files)
 all_src_files += $(vmath_unit_src_files)
 all_src_files += $(spirv_encode_src_files)
-all_src_files += $(example_src_files)
-all_src_files += $(example_gui_src_files)
-all_src_files += $(example_nogui_src_files)
-all_src_files += $(synth_src_files)
 
-all_gui_src_files += $(gui_src_files)
-all_gui_src_files += $(example_gui_src_files)
-all_gui_src_files += $(synth_src_files)
-
-all_example_src_files += $(example_src_files)
-all_example_src_files += $(example_nogui_src_files)
-all_example_src_files += $(lib_src_files)
-all_example_src_files += $(threed_src_files)
-all_example_src_files += $(nogui_src_files)
-
-all_example_gui_src_files += $(example_src_files)
-all_example_gui_src_files += $(example_gui_src_files)
-all_example_gui_src_files += $(lib_src_files)
-all_example_gui_src_files += $(threed_src_files)
-all_example_gui_src_files += $(gui_src_files)
-
-all_synth_src_files += $(synth_src_files)
-all_synth_src_files += $(lib_src_files)
-all_synth_src_files += $(threed_src_files)
-all_synth_src_files += $(gui_src_files)
+all_gui_src_files += $(threed_gui_src_files)
 
 all_vmath_unit_src_files += $(lib_src_files)
 all_vmath_unit_src_files += $(vmath_unit_src_files)
@@ -178,35 +149,46 @@ project_path = $1
 gui_project_name =
 nogui_project_name =
 src_files =
+gui_src_files =
+nogui_src_files =
 use_threed = 1
 
 include $1/makefile.mk
 
-all_src_files += $$(addprefix $1/,$$(src_files))
+project_$1_src_files       := $$(src_files)
+project_$1_gui_src_files   := $$(gui_src_files)
+project_$1_nogui_src_files := $$(nogui_src_files)
+
+all_src_files += $$(addprefix $1/,$$(project_$1_src_files))
 
 ifneq ($$(gui_project_name),)
+    all_$$(gui_project_name)_src_files += $$(addprefix $1/,$$(project_$1_src_files))
+    all_$$(gui_project_name)_src_files += $$(addprefix $1/,$$(project_$1_gui_src_files))
+    all_$$(gui_project_name)_src_files += $$(lib_src_files)
+    all_$$(gui_project_name)_src_files += $$(threed_src_files)
+    all_$$(gui_project_name)_src_files += $$(threed_gui_src_files)
 
-  all_$$(gui_project_name)_src_files += $$(src_files)
-  all_$$(gui_project_name)_src_files += $$(lib_src_files)
-  all_$$(gui_project_name)_src_files += $$(threed_src_files)
-  all_$$(gui_project_name)_src_files += $$(gui_src_files)
+    all_gui_src_files += $$(addprefix $1/,$$(project_$1_src_files))
+    all_gui_src_files += $$(addprefix $1/,$$(project_$1_gui_src_files))
+    all_src_files     += $$(addprefix $1/,$$(project_$1_gui_src_files))
 
-  all_gui_src_files += $$(src_files)
-
-  gui_targets += $$(gui_project_name)
+    project_$1_gui_name := $$(gui_project_name)
+    gui_targets         += $$(project_$1_gui_name)
 endif
 
 ifneq ($$(nogui_project_name),)
+    all_$$(nogui_project_name)_src_files += $$(addprefix $1/,$$(project_$1_src_files))
+    all_$$(nogui_project_name)_src_files += $$(lib_src_files)
 
-  all_$$(nogui_project_name)_src_files += $$(src_files)
-  all_$$(nogui_project_name)_src_files += $$(lib_src_files)
+    ifeq ($$(use_threed), 1)
+        all_$$(nogui_project_name)_src_files += $$(addprefix $1/,$$(project_$1_nogui_src_files))
+        all_src_files                        += $$(addprefix $1/,$$(project_$1_nogui_src_files))
+        all_$$(nogui_project_name)_src_files += $$(threed_src_files)
+        all_$$(nogui_project_name)_src_files += $$(threed_nogui_src_files)
+    endif
 
-  ifeq ($$(use_threed), 1)
-    all_$$(nogui_project_name)_src_files += $$(threed_src_files)
-    all_$$(nogui_project_name)_src_files += $$(nogui_src_files)
-  endif
-
-  nogui_targets += $$(nogui_project_name)
+    project_$1_nogui_name := $$(nogui_project_name)
+    nogui_targets         += $$(project_$1_nogui_name)
 endif
 
 endef
@@ -214,7 +196,9 @@ endef
 ##############################################################################
 # Sub-projects
 
+projects += example
 projects += sculptor
+projects += synth
 
 $(foreach project,$(projects),$(eval $(call include_project,$(project))))
 
@@ -392,15 +376,19 @@ endif
 ##############################################################################
 # Rules
 
-gui_targets   += example_gui synth
-nogui_targets += example
-
 # imgui requires std C library
 ifeq ($(stdlib), 0)
     gui_targets :=
 endif
 
-default: $(foreach target,$(gui_targets) $(nogui_targets),$(call GUI_PATH,$(target)))
+default: $(gui_targets) $(nogui_targets)
+
+define make_target_rule
+.PHONY: $1
+$1: $$(call GUI_PATH,$1)
+endef
+
+$(foreach target,$(gui_targets) $(nogui_targets),$(eval $(call make_target_rule,$(target))))
 
 clean:
 	rm -rf $(out_dir)
