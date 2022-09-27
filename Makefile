@@ -131,6 +131,10 @@ all_src_files += $(example_gui_src_files)
 all_src_files += $(example_nogui_src_files)
 all_src_files += $(synth_src_files)
 
+all_gui_src_files += $(gui_src_files)
+all_gui_src_files += $(example_gui_src_files)
+all_gui_src_files += $(synth_src_files)
+
 all_example_src_files += $(example_src_files)
 all_example_src_files += $(example_nogui_src_files)
 all_example_src_files += $(lib_src_files)
@@ -164,6 +168,55 @@ shader_files += shaders/bezier_surface_cubic.tesc.glsl
 shader_files += shaders/bezier_surface_cubic.tese.glsl
 shader_files += shaders/synth.comp.glsl
 shader_files += shaders/mono_to_stereo.comp.glsl
+
+##############################################################################
+# Sub-project handling
+
+define include_project
+
+project_path = $1
+gui_project_name =
+nogui_project_name =
+src_files =
+use_threed = 1
+
+include $1/makefile.mk
+
+all_src_files += $$(addprefix $1/,$$(src_files))
+
+ifneq ($$(gui_project_name),)
+
+  all_$$(gui_project_name)_src_files += $$(src_files)
+  all_$$(gui_project_name)_src_files += $$(lib_src_files)
+  all_$$(gui_project_name)_src_files += $$(threed_src_files)
+  all_$$(gui_project_name)_src_files += $$(gui_src_files)
+
+  all_gui_src_files += $$(src_files)
+
+  gui_targets += $$(gui_project_name)
+endif
+
+ifneq ($$(nogui_project_name),)
+
+  all_$$(nogui_project_name)_src_files += $$(src_files)
+  all_$$(nogui_project_name)_src_files += $$(lib_src_files)
+
+  ifeq ($$(use_threed), 1)
+    all_$$(nogui_project_name)_src_files += $$(threed_src_files)
+    all_$$(nogui_project_name)_src_files += $$(nogui_src_files)
+  endif
+
+  nogui_targets += $$(nogui_project_name)
+endif
+
+endef
+
+##############################################################################
+# Sub-projects
+
+projects += sculptor
+
+$(foreach project,$(projects),$(eval $(call include_project,$(project))))
 
 ##############################################################################
 # Compiler flags
@@ -339,8 +392,8 @@ endif
 ##############################################################################
 # Rules
 
-gui_targets   = example_gui synth
-nogui_targets = example
+gui_targets   += example_gui synth
+nogui_targets += example
 
 # imgui requires std C library
 ifeq ($(stdlib), 0)
@@ -403,7 +456,7 @@ $(foreach file, $(filter-out $(imgui_src_files), $(all_src_files)), $(call OBJ_F
 
 $(foreach file, $(imgui_src_files), $(call OBJ_FROM_SRC, $(file))): CFLAGS += -DIMGUI_IMPL_VULKAN_NO_PROTOTYPES
 
-$(foreach file, $(gui_src_files) $(example_gui_src_files) $(synth_src_files), $(call OBJ_FROM_SRC, $(file))): CFLAGS += -Iimgui
+$(foreach file, $(all_gui_src_files), $(call OBJ_FROM_SRC, $(file))): CFLAGS += -Iimgui
 
 shaders_out_dir = $(out_dir_base)/shaders
 
