@@ -1258,8 +1258,6 @@ static bool allocate_depth_buffers(uint32_t num_depth_buffers)
     for (uint32_t i = 0; i < mstd::array_size(vk_depth_buffers); i++)
         vk_depth_buffers[i].destroy();
 
-    depth_buffer_heap.free_heap();
-
     const uint32_t width  = vk_surface_caps.currentExtent.width;
     const uint32_t height = vk_surface_caps.currentExtent.height;
 
@@ -1297,8 +1295,15 @@ static bool allocate_depth_buffers(uint32_t num_depth_buffers)
                                     VkDeviceSize(vk_phys_props.properties.limits.minMemoryMapAlignment));
     }
 
-    if ( ! depth_buffer_heap.allocate_heap(heap_size))
-        return false;
+    if (heap_size > depth_buffer_heap.get_heap_size()) {
+
+        depth_buffer_heap.free_heap();
+
+        if ( ! depth_buffer_heap.allocate_heap(heap_size))
+            return false;
+    }
+    else
+        depth_buffer_heap.reset_heap();
 
     for (uint32_t i = 0; i < num_depth_buffers; i++) {
         if ( ! vk_depth_buffers[i].allocate(depth_buffer_heap))

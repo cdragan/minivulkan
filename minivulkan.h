@@ -102,11 +102,13 @@ class DeviceMemoryHeap {
         bool allocate_heap_once(const VkMemoryRequirements& requirements);
         bool allocate_heap(VkDeviceSize size);
         void free_heap();
+        void reset_heap() { next_free_offs = 0; }
         bool allocate_memory(const VkMemoryRequirements& requirements, VkDeviceSize* offset);
 
         VkDeviceMemory  get_memory() const { return memory; }
         bool            is_host_memory() const { return host_visible; }
         static uint32_t get_memory_type() { return device_memory_type; }
+        VkDeviceSize    get_heap_size() const { return heap_size; }
 
     private:
         static bool init_heap_info();
