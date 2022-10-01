@@ -21,9 +21,16 @@
     X(vkGetInstanceProcAddr) \
     X(vkGetDeviceProcAddr)
 
-#define VK_GLOBAL_FUNCTIONS \
+#define VK_GLOBAL_FUNCTIONS_BASE \
     X(vkEnumerateInstanceExtensionProperties) \
     X(vkCreateInstance)
+
+#ifdef NDEBUG
+#   define VK_GLOBAL_FUNCTIONS VK_GLOBAL_FUNCTIONS_BASE
+#else
+#   define VK_GLOBAL_FUNCTIONS VK_GLOBAL_FUNCTIONS_BASE \
+    X(vkEnumerateInstanceVersion)
+#endif
 
 #define VK_INSTANCE_FUNCTIONS_BASE \
     X(vkEnumeratePhysicalDevices) \
@@ -143,6 +150,7 @@ enum e_device_functions {
 #define vkGetInstanceProcAddr                     SELECT_VK_FUNCTION(lib,      vkGetInstanceProcAddr)
 #define vkGetDeviceProcAddr                       SELECT_VK_FUNCTION(lib,      vkGetDeviceProcAddr)
 
+#define vkEnumerateInstanceVersion                SELECT_VK_FUNCTION(global,   vkEnumerateInstanceVersion)
 #define vkEnumerateInstanceExtensionProperties    SELECT_VK_FUNCTION(global,   vkEnumerateInstanceExtensionProperties)
 #define vkCreateInstance                          SELECT_VK_FUNCTION(global,   vkCreateInstance)
 

@@ -219,6 +219,22 @@ static bool load_instance_functions()
 
 static bool init_instance()
 {
+    VkResult res;
+
+#ifndef NDEBUG
+    uint32_t api_version = 0;
+
+    res = CHK(vkEnumerateInstanceVersion(&api_version));
+    if (res != VK_SUCCESS)
+        return false;
+
+    d_printf("Vulkan version %u.%u.%u variant %u\n",
+             VK_API_VERSION_MAJOR(api_version),
+             VK_API_VERSION_MINOR(api_version),
+             VK_API_VERSION_PATCH(api_version),
+             VK_API_VERSION_VARIANT(api_version));
+#endif
+
     static const VkApplicationInfo app_info = {
         VK_STRUCTURE_TYPE_APPLICATION_INFO,
         nullptr,
@@ -245,7 +261,7 @@ static bool init_instance()
     VkExtensionProperties ext_props[32];
     uint32_t              num_ext_props = mstd::array_size(ext_props);
 
-    VkResult res = CHK(vkEnumerateInstanceExtensionProperties(nullptr, &num_ext_props, ext_props));
+    res = CHK(vkEnumerateInstanceExtensionProperties(nullptr, &num_ext_props, ext_props));
     if (res != VK_SUCCESS && res != VK_INCOMPLETE)
         return false;
 
