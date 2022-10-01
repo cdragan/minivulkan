@@ -95,12 +95,20 @@ static void* vulkan_lib = nullptr;
 static bool load_vulkan()
 {
 #ifdef _WIN32
-    vulkan_lib = LoadLibrary("vulkan-1.dll");
+    static const char lib_name[] = "vulkan-1.dll";
 #elif defined(__APPLE__)
-    vulkan_lib = dlopen("libvulkan.dylib", RTLD_NOW | RTLD_LOCAL);
+    static const char lib_name[] = "libvulkan.dylib";
 #elif defined(__linux__)
-    vulkan_lib = dlopen("libvulkan.so.1", RTLD_NOW | RTLD_LOCAL);
+    static const char lib_name[] = "libvulkan.so.1";
 #endif
+
+#ifdef _WIN32
+    vulkan_lib = LoadLibrary(lib_name);
+#elif defined(__APPLE__) || defined(__linux__)
+    vulkan_lib = dlopen(lib_name, RTLD_NOW | RTLD_LOCAL);
+#endif
+
+    d_printf("%s %s\n", vulkan_lib ? "Loaded" : "Failed to load", lib_name);
 
     return !! vulkan_lib;
 }
@@ -243,7 +251,7 @@ static bool init_instance()
 
 #ifndef NDEBUG
     if (num_ext_props)
-        d_printf("instance extensions:\n");
+        d_printf("Instance extensions:\n");
     for (uint32_t i = 0; i < num_ext_props; i++)
         d_printf("    %s\n", ext_props[i].extensionName);
 #endif
@@ -291,7 +299,7 @@ static bool init_instance()
     };
 
     for (uint32_t i = 0; i < num_layer_props; i++) {
-        d_printf("layer: %s\n", layer_props[i].layerName);
+        d_printf("Layer: %s\n", layer_props[i].layerName);
 
         num_ext_props = mstd::array_size(ext_props);
 
@@ -414,7 +422,7 @@ static bool find_surface_format(VkPhysicalDevice phys_dev)
                 swapchain_create_info.surface         = vk_surface;
                 swapchain_create_info.imageFormat     = pref_format;
                 swapchain_create_info.imageColorSpace = formats[i_cur].colorSpace;
-                d_printf("found surface format %s\n", format_string(pref_format));
+                d_printf("Found surface format %s\n", format_string(pref_format));
                 return true;
             }
         }
@@ -1268,7 +1276,7 @@ static bool allocate_depth_buffers(uint32_t num_depth_buffers)
                                       mstd::array_size(depth_formats),
                                       VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT,
                                       &vk_depth_format)) {
-        d_printf("error: could not find any of the required depth formats\n");
+        d_printf("Error: could not find any of the required depth formats\n");
         return false;
     }
 
@@ -1320,7 +1328,7 @@ static bool create_swapchain()
     if (res != VK_SUCCESS)
         return false;
 
-    d_printf("create_swapchain %ux%u\n", vk_surface_caps.currentExtent.width, vk_surface_caps.currentExtent.height);
+    d_printf("Create swapchain %ux%u\n", vk_surface_caps.currentExtent.width, vk_surface_caps.currentExtent.height);
 
     VkSwapchainKHR old_swapchain = vk_swapchain;
 
@@ -1448,7 +1456,7 @@ static bool create_render_pass()
                                       1,
                                       VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT,
                                       &attachments[0].format)) {
-        d_printf("error: surface format does not support color attachments\n");
+        d_printf("Error: surface format does not support color attachments\n");
         return false;
     }
 #endif
@@ -1529,7 +1537,7 @@ static bool create_frame_buffer()
 void idle_queue()
 {
     if (vk_queue) {
-        d_printf("idling queue\n");
+        d_printf("Idling queue\n");
         CHK(vkQueueWaitIdle(vk_queue));
     }
 }
