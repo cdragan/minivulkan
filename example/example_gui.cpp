@@ -8,6 +8,8 @@
 #include "../imgui/imgui.h"
 #include "../imgui/backends/imgui_impl_vulkan.h"
 
+int gui_config_flags = ImGuiConfigFlags_NavEnableKeyboard;
+
 bool create_gui_frame()
 {
     ImGuiIO& io = ImGui::GetIO();

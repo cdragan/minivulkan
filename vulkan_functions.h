@@ -17,6 +17,9 @@
 
 #include <vulkan/vulkan.h>
 
+#define GET_VK_DEV_FUNCTION(name, dev) \
+    const PFN_##name name = reinterpret_cast<PFN_##name>(vkGetDeviceProcAddr((dev), #name))
+
 #define VK_LIB_FUNCTIONS \
     X(vkGetInstanceProcAddr) \
     X(vkGetDeviceProcAddr)
@@ -124,7 +127,7 @@ extern PFN_vkVoidFunction vk_instance_functions[];
 extern PFN_vkVoidFunction vk_device_functions[];
 
 #define X(func) id_##func,
-enum eLibFunctions {
+enum e_lib_functions {
     VK_LIB_FUNCTIONS
     id_lib_num
 };

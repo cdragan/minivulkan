@@ -11,6 +11,8 @@
 #include "../imgui/imgui.h"
 #include "../imgui/backends/imgui_impl_vulkan.h"
 
+int gui_config_flags = ImGuiConfigFlags_NavEnableKeyboard;
+
 constexpr bool play_new_sound = false;
 
 static float    user_roundedness = 111.0f / 127.0f;

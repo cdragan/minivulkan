@@ -38,8 +38,7 @@ bool init_gui()
     ImGui::StyleColorsDark();
 
     ImGuiIO& io = ImGui::GetIO();
-    io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
-    //io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
+    io.ConfigFlags |= gui_config_flags;
 
     if ( ! ImGui_ImplVulkan_LoadFunctions(load_vk_function, nullptr))
         return false;
@@ -122,6 +121,9 @@ bool init_gui()
         return false;
 
     ImGui_ImplVulkan_DestroyFontUploadObjects();
+
+    GET_VK_DEV_FUNCTION(vkDestroyCommandPool, vk_dev);
+    vkDestroyCommandPool(vk_dev, cmd_buf.pool, nullptr);
 
     return true;
 }

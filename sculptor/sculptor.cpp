@@ -10,6 +10,9 @@
 #include "../imgui/imgui.h"
 #include "../imgui/backends/imgui_impl_vulkan.h"
 
+int gui_config_flags = ImGuiConfigFlags_NavEnableKeyboard
+                     | ImGuiConfigFlags_DockingEnable;
+
 uint32_t check_device_features()
 {
     return 0;
