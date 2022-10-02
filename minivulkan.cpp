@@ -54,9 +54,9 @@ VkResult check_vk_call(const char* call_str, const char* file, int line, VkResul
             MAKE_ERR_STR(VK_ERROR_INVALID_OPAQUE_CAPTURE_ADDRESS)
             MAKE_ERR_STR(VK_ERROR_SURFACE_LOST_KHR)
             MAKE_ERR_STR(VK_ERROR_NATIVE_WINDOW_IN_USE_KHR)
-            MAKE_ERR_STR(VK_SUBOPTIMAL_KHR)
             MAKE_ERR_STR(VK_ERROR_OUT_OF_DATE_KHR)
 #           undef MAKE_ERR_STR
+            case VK_SUBOPTIMAL_KHR: return res;
             default: break;
         }
 
