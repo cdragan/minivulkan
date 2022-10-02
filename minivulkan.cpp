@@ -228,11 +228,10 @@ static bool init_instance()
     if (res != VK_SUCCESS)
         return false;
 
-    d_printf("Vulkan version %u.%u.%u variant %u\n",
-             VK_API_VERSION_MAJOR(api_version),
-             VK_API_VERSION_MINOR(api_version),
-             VK_API_VERSION_PATCH(api_version),
-             VK_API_VERSION_VARIANT(api_version));
+    d_printf("Vulkan version %u.%u.%u\n",
+             VK_VERSION_MAJOR(api_version),
+             VK_VERSION_MINOR(api_version),
+             VK_VERSION_PATCH(api_version));
 #endif
 
     static const VkApplicationInfo app_info = {
