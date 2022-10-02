@@ -188,7 +188,7 @@ class Map: public MapBase {
 
 class Resource {
     public:
-        Resource() = default;
+        constexpr Resource() = default;
         Resource(const Resource&) = delete;
         Resource& operator=(const Resource&) = delete;
 
@@ -220,7 +220,7 @@ class Image: public Resource {
 
         VkImageLayout layout = initial_layout;
 
-        Image() = default;
+        constexpr Image() = default;
 
         const VkImage& get_image() const { return image; }
         VkImageView get_view() const { return view; }
@@ -261,7 +261,7 @@ class Image: public Resource {
 
 class Buffer: public Resource {
     public:
-        Buffer() = default;
+        constexpr Buffer() = default;
         Buffer(const Buffer&) = delete;
         Buffer& operator=(const Buffer&) = delete;
 
@@ -282,8 +282,8 @@ class Buffer: public Resource {
 bool allocate_depth_buffers(Image (&depth_buffers)[max_swapchain_size], uint32_t num_depth_buffers);
 
 struct CommandBuffersBase {
-    VkCommandPool   pool = VK_NULL_HANDLE;
-    VkCommandBuffer bufs[1];
+    VkCommandPool   pool    = VK_NULL_HANDLE;
+    VkCommandBuffer bufs[1] = { };
 };
 
 bool reset_and_begin_command_buffer(VkCommandBuffer cmd_buf);
@@ -294,7 +294,7 @@ struct CommandBuffers: public CommandBuffersBase {
     static constexpr uint32_t size() { return num_buffers; }
 
     private:
-        VkCommandBuffer tail[num_buffers - 1];
+        VkCommandBuffer tail[num_buffers - 1] = { };
 };
 
 template<>
@@ -303,13 +303,13 @@ struct CommandBuffers<1>: public CommandBuffersBase {
 };
 
 template<uint32_t num_buffers>
-static bool allocate_command_buffers(CommandBuffers<num_buffers>* bufs)
+inline bool allocate_command_buffers(CommandBuffers<num_buffers>* bufs)
 {
     return allocate_command_buffers(bufs, num_buffers);
 }
 
 template<uint32_t num_buffers>
-static bool allocate_command_buffers_once(CommandBuffers<num_buffers>* bufs)
+inline bool allocate_command_buffers_once(CommandBuffers<num_buffers>* bufs)
 {
     if (bufs->pool)
         return true;
@@ -319,7 +319,7 @@ static bool allocate_command_buffers_once(CommandBuffers<num_buffers>* bufs)
 
 class HostFiller {
     public:
-        HostFiller() = default;
+        constexpr HostFiller() = default;
 
         bool init(VkDeviceSize heap_size);
 
@@ -340,7 +340,7 @@ class HostFiller {
         uint32_t                  num_buffers = 0;
 };
 
-static constexpr VkClearValue make_clear_color(float r, float g, float b, float a)
+inline constexpr VkClearValue make_clear_color(float r, float g, float b, float a)
 {
     VkClearValue value = { };
     value.color.float32[0] = r;
@@ -350,7 +350,7 @@ static constexpr VkClearValue make_clear_color(float r, float g, float b, float 
     return value;
 }
 
-static constexpr VkClearValue make_clear_depth(float depth, uint32_t stencil)
+inline constexpr VkClearValue make_clear_depth(float depth, uint32_t stencil)
 {
     VkClearValue value = { };
     value.depthStencil.depth   = depth;
