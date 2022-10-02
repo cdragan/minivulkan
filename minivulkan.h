@@ -280,6 +280,8 @@ class Buffer: public Resource {
         VkBufferView view   = VK_NULL_HANDLE;
 };
 
+bool allocate_depth_buffers(Image (&depth_buffers)[max_swapchain_size], uint32_t num_depth_buffers);
+
 struct CommandBuffersBase {
     VkCommandPool   pool = VK_NULL_HANDLE;
     VkCommandBuffer bufs[1];

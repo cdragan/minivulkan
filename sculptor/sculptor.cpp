@@ -90,7 +90,7 @@ bool draw_frame(uint32_t image_idx, uint64_t time_ms, VkFence queue_fence)
     }
 
     static const VkClearValue clear_values[2] = {
-        make_clear_color(0, 0, 0, 0),
+        make_clear_color(0.2f, 0.2f, 0.2f, 0),
         make_clear_depth(0, 0)
     };
 

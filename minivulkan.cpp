@@ -1276,10 +1276,10 @@ Image                   vk_depth_buffers[max_swapchain_size];
 static DeviceMemoryHeap depth_buffer_heap;
 static VkFormat         vk_depth_format = VK_FORMAT_UNDEFINED;
 
-static bool allocate_depth_buffers(uint32_t num_depth_buffers)
+bool allocate_depth_buffers(Image (&depth_buffers)[max_swapchain_size], uint32_t num_depth_buffers)
 {
-    for (uint32_t i = 0; i < mstd::array_size(vk_depth_buffers); i++)
-        vk_depth_buffers[i].destroy();
+    for (uint32_t i = 0; i < mstd::array_size(depth_buffers); i++)
+        depth_buffers[i].destroy();
 
     const uint32_t width  = vk_surface_caps.currentExtent.width;
     const uint32_t height = vk_surface_caps.currentExtent.height;
@@ -1311,10 +1311,10 @@ static bool allocate_depth_buffers(uint32_t num_depth_buffers)
         image_info.height = height;
         image_info.format = vk_depth_format;
 
-        if ( ! vk_depth_buffers[i].create(image_info, VK_IMAGE_TILING_OPTIMAL))
+        if ( ! depth_buffers[i].create(image_info, VK_IMAGE_TILING_OPTIMAL))
             return false;
 
-        heap_size += mstd::align_up(vk_depth_buffers[i].size(),
+        heap_size += mstd::align_up(depth_buffers[i].size(),
                                     VkDeviceSize(vk_phys_props.properties.limits.minMemoryMapAlignment));
     }
 
@@ -1329,7 +1329,7 @@ static bool allocate_depth_buffers(uint32_t num_depth_buffers)
         depth_buffer_heap.reset_heap();
 
     for (uint32_t i = 0; i < num_depth_buffers; i++) {
-        if ( ! vk_depth_buffers[i].allocate(depth_buffer_heap))
+        if ( ! depth_buffers[i].allocate(depth_buffer_heap))
             return false;
     }
     return true;
@@ -1432,7 +1432,7 @@ static bool create_swapchain()
         vk_swapchain_images[i].set_view(view);
     }
 
-    return allocate_depth_buffers(num_images);
+    return allocate_depth_buffers(vk_depth_buffers, num_images);
 }
 
 VkRenderPass vk_render_pass = VK_NULL_HANDLE;
@@ -1514,7 +1514,7 @@ static bool create_render_pass()
 
 VkFramebuffer vk_frame_buffers[max_swapchain_size];
 
-static bool create_frame_buffer()
+static bool create_swapchain_frame_buffer()
 {
     for (uint32_t i = 0; i < mstd::array_size(vk_frame_buffers); i++) {
 
@@ -1572,7 +1572,7 @@ static bool update_resolution()
     if ( ! create_swapchain())
         return false;
 
-    if ( ! create_frame_buffer())
+    if ( ! create_swapchain_frame_buffer())
         return false;
 
     if ( ! create_pipelines())
@@ -1758,7 +1758,7 @@ bool init_vulkan(Window* w)
     if ( ! create_render_pass())
         return false;
 
-    if ( ! create_frame_buffer())
+    if ( ! create_swapchain_frame_buffer())
         return false;
 
     if ( ! create_pipeline_layouts())
