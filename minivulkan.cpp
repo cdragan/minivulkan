@@ -769,16 +769,19 @@ bool DeviceMemoryHeap::init_heap_info()
         static char info[64];
         info[0] = 0;
         if (property_flags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)
-            str_append(info, "device,");
+            str_append(info, "device, ");
         if (property_flags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT)
-            str_append(info, "host_visible,");
+            str_append(info, "host_visible, ");
         if (property_flags & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)
-            str_append(info, "host_coherent,");
+            str_append(info, "host_coherent, ");
         if (property_flags & VK_MEMORY_PROPERTY_HOST_CACHED_BIT)
-            str_append(info, "host_cached,");
-        d_printf("    type %d, heap %u, flags 0x%x (%s)\n",
+            str_append(info, "host_cached, ");
+        if (info[0])
+            info[mstd::strlen(info) - 2] = 0;
+        d_printf("    type %d, heap %u (size %" PRIu64 " MB), flags 0x%x (%s)\n",
                 i,
                 memory_type.heapIndex,
+                static_cast<uint64_t>(heap_size) / (1024u * 1024u),
                 property_flags,
                 info);
 #endif
@@ -1629,6 +1632,11 @@ bool reset_and_begin_command_buffer(VkCommandBuffer cmd_buf)
 
 bool HostFiller::init(VkDeviceSize heap_size)
 {
+    if (host_heap.get_memory_type() == vk_device_heap.get_memory_type()) {
+        d_printf("Skipping host filler heap, detected unified memory\n");
+        return true;
+    }
+
     if ( ! host_heap.allocate_heap(heap_size))
         return false;
 
@@ -1643,17 +1651,28 @@ bool HostFiller::fill_buffer(Buffer*            buffer,
                              const void*        data,
                              uint32_t           size)
 {
+    if ( ! buffer->allocate(vk_device_heap,
+                            size,
+                            usage | VK_BUFFER_USAGE_TRANSFER_DST_BIT))
+        return false;
+
+    if ( ! host_heap.get_heap_size()) {
+        assert(host_heap.get_memory_type() == buffer->get_memory_type());
+
+        Map<uint8_t> map = buffer->map<uint8_t>();
+        if ( ! map.mapped())
+            return false;
+
+        mstd::mem_copy(map.data(), data, size);
+        return true;
+    }
+
     assert(num_buffers < max_buffers);
 
     if (num_buffers == max_buffers)
         return false;
 
     Buffer& host_buffer = buffers[num_buffers++];
-
-    if ( ! buffer->allocate(vk_device_heap,
-                            size,
-                            usage | VK_BUFFER_USAGE_TRANSFER_DST_BIT))
-        return false;
 
     if ( ! host_buffer.allocate(host_heap, size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT))
         return false;
@@ -1681,6 +1700,9 @@ bool HostFiller::fill_buffer(Buffer*            buffer,
 
 bool HostFiller::send_to_gpu()
 {
+    if ( ! num_buffers)
+        return true;
+
     VkResult res = CHK(vkEndCommandBuffer(cmd_buf.bufs[0]));
     if (res != VK_SUCCESS)
         return false;

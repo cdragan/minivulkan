@@ -94,8 +94,8 @@ class DeviceMemoryHeap {
             coherent_memory
         };
 
-        DeviceMemoryHeap() = default;
-        DeviceMemoryHeap(Location loc) : memory_location(loc), host_visible(loc == host_memory) { }
+        constexpr DeviceMemoryHeap() = default;
+        constexpr DeviceMemoryHeap(Location loc) : memory_location(loc), host_visible(loc == host_memory) { }
         DeviceMemoryHeap(const DeviceMemoryHeap&) = delete;
         DeviceMemoryHeap& operator=(const DeviceMemoryHeap&) = delete;
 
@@ -197,6 +197,7 @@ class Resource {
 
         bool allocated() const { return !! memory_reqs.size; }
         VkDeviceSize size() const { return memory_reqs.size; }
+        uint32_t get_memory_type() const { return owning_heap->get_memory_type(); }
 
     protected:
         DeviceMemoryHeap*    owning_heap = nullptr;
