@@ -20,8 +20,9 @@ static PFN_vkVoidFunction load_vk_function(const char* name, void* cookie)
     PFN_vkVoidFunction func = vkGetDeviceProcAddr(vk_dev, name);
     if ( ! func) {
         func = vkGetInstanceProcAddr(vk_instance, name);
-        if ( ! func)
+        if ( ! func) {
             d_printf("Failed to load function %s for GUI\n", name);
+        }
     }
     return func;
 }

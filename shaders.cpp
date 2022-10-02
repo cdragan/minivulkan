@@ -44,7 +44,7 @@ static const uint32_t* decode_shader(uint8_t* code, size_t* out_size)
     assert(total_opcodes);
     assert(total_words > total_opcodes);
 
-    const uint32_t size = (spirv_header_words + total_words) * sizeof(uint32_t);
+    const uint32_t size = (spirv_header_words + total_words) * uint32_t(sizeof(uint32_t));
     assert(size <= sizeof(out_code));
 
     // Fill out SPIR-V header
