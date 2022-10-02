@@ -42,10 +42,14 @@ bool create_gui_frame()
     ImGui_ImplVulkan_NewFrame();
     ImGui::NewFrame();
 
+    ImGui::DockSpaceOverViewport(ImGui::GetMainViewport(), ImGuiDockNodeFlags_PassthruCentralNode);
+
+    ImGui::Begin("Hello, Window!");
     ImGui::Text("Hello, world!");
     ImGui::Separator();
     static float user_roundedness;
     ImGui::SliderFloat("Roundedness", &user_roundedness, 0.0f, 1.0f);
+    ImGui::End();
 
     return true;
 }
