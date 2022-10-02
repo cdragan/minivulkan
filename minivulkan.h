@@ -107,15 +107,13 @@ class DeviceMemoryHeap {
 
         VkDeviceMemory  get_memory() const { return memory; }
         bool            is_host_memory() const { return host_visible; }
-        static uint32_t get_memory_type() { return device_memory_type; }
+        uint32_t        get_memory_type() const { return vk_memory_type[memory_location]; }
         VkDeviceSize    get_heap_size() const { return heap_size; }
 
     private:
         static bool init_heap_info();
 
-        static uint32_t device_memory_type;
-        static uint32_t host_memory_type;
-        static uint32_t coherent_memory_type;
+        static uint32_t vk_memory_type[3];
 
         VkDeviceMemory  memory          = VK_NULL_HANDLE;
         VkDeviceSize    next_free_offs  = 0;

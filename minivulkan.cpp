@@ -725,11 +725,9 @@ static bool create_device()
     return true;
 }
 
-uint32_t DeviceMemoryHeap::device_memory_type   = ~0u;
-uint32_t DeviceMemoryHeap::host_memory_type     = ~0u;
-uint32_t DeviceMemoryHeap::coherent_memory_type = ~0u;
+uint32_t DeviceMemoryHeap::vk_memory_type[3] = { ~0u, 0, 0 };
 
-static constexpr uint32_t alloc_heap_size    = 64u * 1024u * 1024u;
+static constexpr uint32_t alloc_heap_size = 64u * 1024u * 1024u;
 
 static DeviceMemoryHeap vk_device_heap;
 
@@ -748,7 +746,7 @@ static void str_append(char* buf, const char* str)
 
 bool DeviceMemoryHeap::init_heap_info()
 {
-    if (device_memory_type != ~0u)
+    if (vk_memory_type[device_memory] != ~0u)
         return true;
 
     VkPhysicalDeviceMemoryProperties mem_props;
@@ -827,9 +825,9 @@ bool DeviceMemoryHeap::init_heap_info()
         }
     }
 
-    device_memory_type   = static_cast<uint32_t>(device_type_index);
-    host_memory_type     = static_cast<uint32_t>(host_type_index);
-    coherent_memory_type = static_cast<uint32_t>(coherent_type_index);
+    vk_memory_type[device_memory]   = static_cast<uint32_t>(device_type_index);
+    vk_memory_type[host_memory]     = static_cast<uint32_t>(host_type_index);
+    vk_memory_type[coherent_memory] = static_cast<uint32_t>(coherent_type_index);
 
     return true;
 }
@@ -851,9 +849,7 @@ bool DeviceMemoryHeap::allocate_heap(VkDeviceSize size)
     if ( ! init_heap_info())
         return false;
 
-    const uint32_t memory_type = (memory_location == device_memory) ? device_memory_type :
-                                 (memory_location == host_memory)   ? host_memory_type   :
-                                                                      coherent_memory_type;
+    const uint32_t memory_type = vk_memory_type[memory_location];
 
     size = mstd::align_up(size, VkDeviceSize(vk_phys_props.properties.limits.minMemoryMapAlignment));
 
