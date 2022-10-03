@@ -36,19 +36,54 @@ bool create_pipelines()
 bool create_gui_frame()
 {
     ImGuiIO& io = ImGui::GetIO();
-    io.DisplaySize.x = static_cast<float>(vk_surface_caps.currentExtent.width);
-    io.DisplaySize.y = static_cast<float>(vk_surface_caps.currentExtent.height);
+    io.DisplaySize.x = static_cast<float>(vk_surface_caps.currentExtent.width)  / vk_surface_scale;
+    io.DisplaySize.y = static_cast<float>(vk_surface_caps.currentExtent.height) / vk_surface_scale;
 
     ImGui_ImplVulkan_NewFrame();
     ImGui::NewFrame();
 
+    if (ImGui::BeginMainMenuBar()) {
+        if (ImGui::BeginMenu("File")) {
+            if (ImGui::MenuItem("New")) {
+            }
+            if (ImGui::MenuItem("Open", "CTRL+O")) {
+            }
+            if (ImGui::MenuItem("Save", "CTRL+S")) {
+            }
+            ImGui::EndMenu();
+        }
+        if (ImGui::BeginMenu("Edit")) {
+            if (ImGui::MenuItem("Undo", "CTRL+Z")) {
+            }
+            if (ImGui::MenuItem("Redo", "CTRL+Y", false, false)) {
+            }
+            ImGui::Separator();
+            if (ImGui::MenuItem("Cut", "CTRL+X")) {
+            }
+            if (ImGui::MenuItem("Copy", "CTRL+C")) {
+            }
+            if (ImGui::MenuItem("Paste", "CTRL+V")) {
+            }
+            ImGui::EndMenu();
+        }
+        ImGui::EndMainMenuBar();
+    }
+
     ImGui::DockSpaceOverViewport(ImGui::GetMainViewport(), ImGuiDockNodeFlags_PassthruCentralNode);
 
     ImGui::Begin("Hello, Window!");
-    ImGui::Text("Hello, world!");
-    ImGui::Separator();
-    static float user_roundedness;
-    ImGui::SliderFloat("Roundedness", &user_roundedness, 0.0f, 1.0f);
+    {
+        const ImVec2 win_size = ImGui::GetWindowSize();
+        ImGui::Text("Window Size: %d x %d", static_cast<int>(win_size.x), static_cast<int>(win_size.y));
+        const ImVec2 vp_size = ImGui::GetMainViewport()->Size;
+        ImGui::Text("Viewport Size: %d x %d", static_cast<int>(vp_size.x), static_cast<int>(vp_size.y));
+        ImGui::Text("Surface Size: %u x %u", vk_surface_caps.currentExtent.width, vk_surface_caps.currentExtent.height);
+
+        ImGui::Separator();
+
+        static float user_roundedness;
+        ImGui::SliderFloat("Roundedness", &user_roundedness, 0.0f, 1.0f);
+    }
     ImGui::End();
 
     return true;

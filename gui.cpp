@@ -9,6 +9,8 @@
 #include "../imgui/imgui.h"
 #include "../imgui/backends/imgui_impl_vulkan.h"
 
+float vk_surface_scale = 1.0f;
+
 static void check_gui_result(VkResult imgui_error)
 {
     if (CHK(imgui_error) != VK_SUCCESS) {

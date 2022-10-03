@@ -3,6 +3,7 @@
 
 #include "example.h"
 
+#include "../gui.h"
 #include "../minivulkan.h"
 
 #include "../imgui/imgui.h"
@@ -13,8 +14,8 @@ int gui_config_flags = ImGuiConfigFlags_NavEnableKeyboard;
 bool create_gui_frame()
 {
     ImGuiIO& io = ImGui::GetIO();
-    io.DisplaySize.x = static_cast<float>(vk_surface_caps.currentExtent.width);
-    io.DisplaySize.y = static_cast<float>(vk_surface_caps.currentExtent.height);
+    io.DisplaySize.x = static_cast<float>(vk_surface_caps.currentExtent.width)  / vk_surface_scale;
+    io.DisplaySize.y = static_cast<float>(vk_surface_caps.currentExtent.height) / vk_surface_scale;
 
     ImGui_ImplVulkan_NewFrame();
     ImGui::NewFrame();

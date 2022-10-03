@@ -2,6 +2,7 @@
 // Copyright (c) 2021-2022 Chris Dragan
 
 #include "main_macos.h"
+#include "gui.h"
 #include "imgui/backends/imgui_impl_osx.h"
 
 @interface GUIVulkanViewController: VulkanViewController
@@ -34,6 +35,10 @@ void init_mouse_tracking(NSViewController *view_controller, NSView *view)
                                 owner:        view_controller
                                 userInfo:     nil];
     [view addTrackingArea: trackingArea];
+
+    // Save view scaling for ImGui
+    const NSSize view_scale = [view convertSizeToBacking: NSMakeSize(1, 1)];
+    vk_surface_scale = static_cast<float>(MIN(view_scale.width, view_scale.height));
 }
 
 void init_os_gui(NSView *view)
