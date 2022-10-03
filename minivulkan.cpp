@@ -1548,17 +1548,21 @@ static bool create_swapchain_frame_buffer()
     return true;
 }
 
-void idle_queue()
+VkResult idle_queue()
 {
+    VkResult res = VK_SUCCESS;
+
     if (vk_queue) {
         d_printf("Idling queue\n");
-        CHK(vkQueueWaitIdle(vk_queue));
+        res = CHK(vkQueueWaitIdle(vk_queue));
     }
+
+    return res;
 }
 
 static bool update_resolution()
 {
-    const VkResult res = CHK(vkQueueWaitIdle(vk_queue));
+    const VkResult res = idle_queue();
     if (res != VK_SUCCESS)
         return false;
 

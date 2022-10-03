@@ -37,7 +37,7 @@ bool init_sound();
 bool create_surface(struct Window* w);
 bool draw_frame();
 bool draw_frame(uint32_t image_idx, uint64_t time_ms, VkFence queue_fence);
-void idle_queue();
+VkResult idle_queue();
 uint64_t get_current_time_ms();
 bool load_sound(uint32_t sound_id, const void* data, uint32_t size);
 bool play_sound(uint32_t sound_id);
