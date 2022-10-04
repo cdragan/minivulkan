@@ -288,6 +288,10 @@ struct CommandBuffersBase {
 
 bool reset_and_begin_command_buffer(VkCommandBuffer cmd_buf);
 bool allocate_command_buffers(CommandBuffersBase* bufs, uint32_t num_buffers);
+inline bool allocate_command_buffers_once(CommandBuffersBase* bufs, uint32_t num_buffers)
+{
+    return bufs->pool ? true : allocate_command_buffers(bufs, num_buffers);
+}
 
 template<uint32_t num_buffers>
 struct CommandBuffers: public CommandBuffersBase {

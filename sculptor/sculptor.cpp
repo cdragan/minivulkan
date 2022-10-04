@@ -97,9 +97,9 @@ bool draw_frame(uint32_t image_idx, uint64_t time_ms, VkFence queue_fence)
     // Render image
     Image& image = vk_swapchain_images[image_idx];
 
-    static CommandBuffers<2 * mstd::array_size(vk_swapchain_images)> bufs;
+    static CommandBuffers<max_swapchain_size> bufs;
 
-    if ( ! allocate_command_buffers_once(&bufs))
+    if ( ! allocate_command_buffers_once(&bufs, vk_num_swapchain_images))
         return false;
 
     const VkCommandBuffer buf = bufs.bufs[image_idx];
