@@ -5,15 +5,16 @@
     X(VK_KHR_surface,                   REQUIRED)
 
 #define SUPPORTED_DEVICE_EXTENSIONS_BASE \
-    X(VK_KHR_portability_subset,        OPTIONAL) \
     X(VK_KHR_swapchain,                 REQUIRED) \
     X(VK_KHR_8bit_storage,              REQUIRED)
 
 #ifdef __APPLE__
 #   define SUPPORTED_INSTANCE_EXTENSIONS SUPPORTED_INSTANCE_EXTENSIONS_BASE \
-    X(VK_EXT_metal_surface,             REQUIRED)
+    X(VK_EXT_metal_surface,             REQUIRED) \
+    X(VK_KHR_portability_enumeration,   OPTIONAL)
 
-#   define SUPPORTED_DEVICE_EXTENSIONS SUPPORTED_DEVICE_EXTENSIONS_BASE
+#   define SUPPORTED_DEVICE_EXTENSIONS SUPPORTED_DEVICE_EXTENSIONS_BASE \
+    X(VK_KHR_portability_subset,        OPTIONAL)
 #endif
 
 #ifdef __linux__

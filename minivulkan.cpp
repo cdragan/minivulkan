@@ -193,6 +193,7 @@ static bool enable_extensions(const char*                  supported_extensions,
 
         if (found) {
             enabled_extensions[*num_enabled_extensions] = supported_extensions;
+            d_printf("Enable extension %s\n", supported_extensions);
             ++*num_enabled_extensions;
         }
         else if (req == '1') {
@@ -249,7 +250,11 @@ static bool init_instance()
     static VkInstanceCreateInfo instance_info = {
         VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
         nullptr,
+#ifdef __APPLE__
+        VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR,
+#else
         0,
+#endif
         &app_info,
         0,
         nullptr,
