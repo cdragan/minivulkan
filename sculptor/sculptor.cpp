@@ -13,6 +13,8 @@
 int gui_config_flags = ImGuiConfigFlags_NavEnableKeyboard
                      | ImGuiConfigFlags_DockingEnable;
 
+static constexpr uint32_t num_viewports = 0;
+
 uint32_t check_device_features()
 {
     return 0;
@@ -89,12 +91,16 @@ bool create_gui_frame()
     return true;
 }
 
+static bool render_view(uint32_t i_view, uint32_t image_idx, VkCommandBuffer buf)
+{
+    return true;
+}
+
 bool draw_frame(uint32_t image_idx, uint64_t time_ms, VkFence queue_fence)
 {
     if ( ! create_gui_frame())
         return false;
 
-    // Render image
     Image& image = vk_swapchain_images[image_idx];
 
     static CommandBuffers<max_swapchain_size> bufs;
@@ -149,7 +155,9 @@ bool draw_frame(uint32_t image_idx, uint64_t time_ms, VkFence queue_fence)
 
     vkCmdBeginRenderPass(buf, &render_pass_info, VK_SUBPASS_CONTENTS_INLINE);
 
-    // ...
+    for (uint32_t i_view = 0; i_view < num_viewports; i_view++)
+        if ( ! render_view(i_view, image_idx, buf))
+            return false;
 
     if ( ! send_gui_to_gpu(buf))
         return false;
