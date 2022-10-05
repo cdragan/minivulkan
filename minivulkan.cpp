@@ -250,7 +250,7 @@ static bool init_instance()
     static VkInstanceCreateInfo instance_info = {
         VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
         nullptr,
-#ifdef __APPLE__
+#if defined(__APPLE__) && defined(VK_KHR_portability_enumeration)
         VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR,
 #else
         0,
@@ -1520,10 +1520,9 @@ VkFramebuffer vk_frame_buffers[max_swapchain_size];
 
 static bool create_swapchain_frame_buffer()
 {
-    for (uint32_t i = 0; i < mstd::array_size(vk_frame_buffers); i++) {
+    for (uint32_t i = 0; i < vk_num_swapchain_images; i++) {
 
-        if ( ! vk_swapchain_images[i].get_image())
-            break;
+        assert(vk_swapchain_images[i].get_image());
 
         static VkImageView attachments[2];
 
