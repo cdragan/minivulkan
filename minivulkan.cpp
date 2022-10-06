@@ -531,7 +531,11 @@ static bool find_gpu()
                 continue;
 
             vk_phys_dev = phys_devices[i_dev];
-            d_printf("Selected device %u: %s\n", i_dev, vk_phys_props.properties.deviceName);
+            d_printf("Selected device %u: %s, supports Vulkan %u.%u\n",
+                     i_dev,
+                     vk_phys_props.properties.deviceName,
+                     VK_VERSION_MAJOR(vk_phys_props.properties.apiVersion),
+                     VK_VERSION_MINOR(vk_phys_props.properties.apiVersion));
             return true;
         }
     }
@@ -1582,9 +1586,6 @@ static bool update_resolution()
     if ( ! create_swapchain_frame_buffer())
         return false;
 
-    if ( ! create_pipelines())
-        return false;
-
     return true;
 }
 
@@ -1746,6 +1747,71 @@ bool HostFiller::wait_until_done()
     return true;
 }
 
+void send_viewport_and_scissor(VkCommandBuffer cmd_buf,
+                               float           image_ratio,
+                               uint32_t        viewport_width,
+                               uint32_t        viewport_height)
+{
+    static VkViewport viewport = {
+        0,      // x
+        0,      // y
+        0,      // width
+        0,      // height
+        0,      // minDepth
+        1       // maxDepth
+    };
+
+    static VkRect2D scissor = {
+        { 0, 0 },   // offset
+        { 0, 0 }    // extent
+    };
+
+    // Note: Flip Y coordinate.  The world coordinate system assumes Y going from
+    // bottom to top, but in Vulkan screen-space Y coordinate goes from top to bottom.
+    if (image_ratio != 0) {
+        const float cur_ratio = static_cast<float>(viewport_width) /
+                                static_cast<float>(viewport_height);
+
+        if (cur_ratio > image_ratio) {
+            const uint32_t height = viewport_height;
+            const uint32_t width  = static_cast<uint32_t>(static_cast<float>(height) * image_ratio);
+
+            scissor.offset.x      = (viewport_width - width) / 2;
+            scissor.extent.width  = width;
+            scissor.extent.height = height;
+
+            viewport.x      = static_cast<float>(scissor.offset.x);
+            viewport.y      = static_cast<float>(height);
+            viewport.width  = static_cast<float>(width);
+            viewport.height = -static_cast<float>(height);
+        }
+        else {
+            const uint32_t width  = viewport_width;
+            const uint32_t height = static_cast<uint32_t>(static_cast<float>(width) / image_ratio);
+
+            scissor.offset.y      = (viewport_height - height) / 2;
+            scissor.extent.width  = width;
+            scissor.extent.height = height;
+
+            viewport.y      = static_cast<float>((viewport_height + height) / 2);
+            viewport.width  = static_cast<float>(width);
+            viewport.height = -static_cast<float>(height);
+        }
+    }
+    else {
+        viewport.y      = static_cast<float>(viewport_height);
+        viewport.width  = static_cast<float>(viewport_width);
+        viewport.height = -static_cast<float>(viewport_height);
+
+        scissor.extent.width  = viewport_width;
+        scissor.extent.height = viewport_height;
+    }
+
+    vkCmdSetViewport(cmd_buf, 0, 1, &viewport);
+
+    vkCmdSetScissor(cmd_buf, 0, 1, &scissor);
+}
+
 bool init_vulkan(Window* w)
 {
     if ( ! load_vulkan())
@@ -1787,10 +1853,7 @@ bool init_vulkan(Window* w)
     if ( ! create_swapchain_frame_buffer())
         return false;
 
-    if ( ! create_pipeline_layouts())
-        return false;
-
-    if ( ! create_pipelines())
+    if ( ! init_assets())
         return false;
 
     if ( ! init_gui())

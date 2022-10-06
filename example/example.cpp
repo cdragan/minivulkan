@@ -52,7 +52,7 @@ static VkPipeline       vk_gr_pipeline[2];
 
 static VkDescriptorSetLayout vk_desc_set_layout = VK_NULL_HANDLE;
 
-bool create_pipeline_layouts()
+static bool create_pipeline_layouts()
 {
     static const VkDescriptorSetLayoutBinding create_binding = {
         0,
@@ -202,68 +202,14 @@ static bool create_graphics_pipeline(const ShaderInfo& shader_info, VkPipeline* 
     };
     tessellation_state.patchControlPoints = shader_info.patch_control_points;
 
-    static VkViewport viewport = {
-        0,      // x
-        0,      // y
-        0,      // width
-        0,      // height
-        0,      // minDepth
-        1       // maxDepth
-    };
-
-    static VkRect2D scissor = {
-        { 0, 0 },   // offset
-        { 0, 0 }    // extent
-    };
-
-    // Note: Flip Y coordinate.  The world coordinate system assumes Y going from
-    // bottom to top, but in Vulkan screen-space Y coordinate goes from top to bottom.
-    if (image_ratio != 0) {
-        const float cur_ratio = static_cast<float>(vk_surface_caps.currentExtent.width) /
-                                static_cast<float>(vk_surface_caps.currentExtent.height);
-
-        if (cur_ratio > image_ratio) {
-            const uint32_t height = vk_surface_caps.currentExtent.height;
-            const uint32_t width  = static_cast<uint32_t>(static_cast<float>(height) * image_ratio);
-
-            scissor.offset.x      = (vk_surface_caps.currentExtent.width - width) / 2;
-            scissor.extent.width  = width;
-            scissor.extent.height = height;
-
-            viewport.x      = static_cast<float>(scissor.offset.x);
-            viewport.y      = static_cast<float>(height);
-            viewport.width  = static_cast<float>(width);
-            viewport.height = -static_cast<float>(height);
-        }
-        else {
-            const uint32_t width  = vk_surface_caps.currentExtent.width;
-            const uint32_t height = static_cast<uint32_t>(static_cast<float>(width) / image_ratio);
-
-            scissor.offset.y      = (vk_surface_caps.currentExtent.height - height) / 2;
-            scissor.extent.width  = width;
-            scissor.extent.height = height;
-
-            viewport.y      = static_cast<float>((vk_surface_caps.currentExtent.height + height) / 2);
-            viewport.width  = static_cast<float>(width);
-            viewport.height = -static_cast<float>(height);
-        }
-    }
-    else {
-        viewport.y      = static_cast<float>(vk_surface_caps.currentExtent.height);
-        viewport.width  = static_cast<float>(vk_surface_caps.currentExtent.width);
-        viewport.height = -static_cast<float>(vk_surface_caps.currentExtent.height);
-
-        scissor.extent = vk_surface_caps.currentExtent;
-    }
-
     static VkPipelineViewportStateCreateInfo viewport_state = {
         VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
         nullptr,
         0,  // flags
-        1,
-        &viewport,
-        1,
-        &scissor
+        0,
+        nullptr,
+        0,
+        nullptr
     };
 
     static VkPipelineRasterizationStateCreateInfo rasterization_state = {
@@ -334,8 +280,9 @@ static bool create_graphics_pipeline(const ShaderInfo& shader_info, VkPipeline* 
         { }         // blendConstants
     };
 
-#if 0
     static VkDynamicState dynamic_states[] = {
+        VK_DYNAMIC_STATE_VIEWPORT,
+        VK_DYNAMIC_STATE_SCISSOR
     };
 
     static VkPipelineDynamicStateCreateInfo dynamic_state = {
@@ -345,7 +292,6 @@ static bool create_graphics_pipeline(const ShaderInfo& shader_info, VkPipeline* 
         mstd::array_size(dynamic_states),
         dynamic_states
     };
-#endif
 
     static VkGraphicsPipelineCreateInfo pipeline_create_info = {
         VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
@@ -361,7 +307,7 @@ static bool create_graphics_pipeline(const ShaderInfo& shader_info, VkPipeline* 
         &multisample_state,
         &depth_stencil_state,
         &color_blend_state,
-        nullptr,        // pDynamicState
+        &dynamic_state,
         VK_NULL_HANDLE, // layout
         VK_NULL_HANDLE, // renderPass
         0,              // subpass
@@ -457,7 +403,7 @@ static bool create_patch_graphics_pipeline()
     return create_graphics_pipeline(shader_info, &vk_gr_pipeline[1]);
 }
 
-bool create_pipelines()
+static bool create_pipelines()
 {
     // TODO unify common parts
     if (what_geometry == geom_cube)
@@ -731,6 +677,17 @@ static bool create_quadratic_patch(Buffer* vertex_buffer, Buffer* index_buffer)
     return filler.wait_until_done();
 }
 
+bool init_assets()
+{
+    if ( ! create_pipeline_layouts())
+        return false;
+
+    if ( ! create_pipelines())
+        return false;
+
+    return true;
+}
+
 bool draw_frame(uint32_t image_idx, uint64_t time_ms, VkFence queue_fence)
 {
     static Buffer vertex_buffer;
@@ -940,6 +897,11 @@ bool draw_frame(uint32_t image_idx, uint64_t time_ms, VkFence queue_fence)
     vkCmdBeginRenderPass(buf, &render_pass_info, VK_SUBPASS_CONTENTS_INLINE);
 
     vkCmdBindPipeline(buf, VK_PIPELINE_BIND_POINT_GRAPHICS, vk_gr_pipeline[user_wireframe ? 1 : 0]);
+
+    send_viewport_and_scissor(buf,
+                              image_ratio,
+                              vk_surface_caps.currentExtent.width,
+                              vk_surface_caps.currentExtent.height);
 
     static const VkDeviceSize vb_offset = 0;
     vkCmdBindVertexBuffers(buf,

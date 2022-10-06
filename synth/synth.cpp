@@ -130,7 +130,7 @@ struct SynthPushConstants: public Mono2StereoPushConstants {
     uint32_t base_freq;     // Frequency of the note being played
 };
 
-bool create_pipeline_layouts()
+static bool create_pipeline_layouts()
 {
     ////////////////////////////////////////////////////////////////////////////
     {
@@ -268,10 +268,21 @@ static bool create_compute_pipeline(VkPipelineLayout layout, uint8_t* shader, Vk
     return res == VK_SUCCESS;
 }
 
-bool create_pipelines()
+static bool create_pipelines()
 {
     return create_compute_pipeline(vk_pipeline_layouts[pipe_synth],          shader_synth_comp,          &vk_pipelines[pipe_synth]) &&
            create_compute_pipeline(vk_pipeline_layouts[pipe_mono_to_stereo], shader_mono_to_stereo_comp, &vk_pipelines[pipe_mono_to_stereo]);
+}
+
+bool init_assets()
+{
+    if ( ! create_pipeline_layouts())
+        return false;
+
+    if ( ! create_pipelines())
+        return false;
+
+    return true;
 }
 
 bool draw_frame(uint32_t image_idx, uint64_t time_ms, VkFence queue_fence)

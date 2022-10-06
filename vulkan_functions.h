@@ -116,6 +116,8 @@
     X(vkCmdBindVertexBuffers) \
     X(vkCmdBindIndexBuffer) \
     X(vkCmdBindDescriptorSets) \
+    X(vkCmdSetViewport) \
+    X(vkCmdSetScissor) \
     X(vkCmdDrawIndexed) \
     X(vkCmdPipelineBarrier) \
     X(vkCmdCopyBuffer) \
@@ -224,6 +226,8 @@ enum e_device_functions {
 #define vkCmdBindVertexBuffers                    SELECT_VK_FUNCTION(device,   vkCmdBindVertexBuffers)
 #define vkCmdBindIndexBuffer                      SELECT_VK_FUNCTION(device,   vkCmdBindIndexBuffer)
 #define vkCmdBindDescriptorSets                   SELECT_VK_FUNCTION(device,   vkCmdBindDescriptorSets)
+#define vkCmdSetViewport                          SELECT_VK_FUNCTION(device,   vkCmdSetViewport)
+#define vkCmdSetScissor                           SELECT_VK_FUNCTION(device,   vkCmdSetScissor)
 #define vkCmdDrawIndexed                          SELECT_VK_FUNCTION(device,   vkCmdDrawIndexed)
 #define vkCmdPipelineBarrier                      SELECT_VK_FUNCTION(device,   vkCmdPipelineBarrier)
 #define vkCmdCopyBuffer                           SELECT_VK_FUNCTION(device,   vkCmdCopyBuffer)

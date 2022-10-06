@@ -44,8 +44,7 @@ bool play_sound(uint32_t sound_id);
 
 uint32_t check_device_features();
 bool create_additional_heaps();
-bool create_pipeline_layouts();
-bool create_pipelines();
+bool init_assets();
 
 #ifdef NDEBUG
 #   define CHK(call) call
@@ -365,5 +364,10 @@ inline constexpr VkClearValue make_clear_depth(float depth, uint32_t stencil)
 extern Image         vk_swapchain_images[max_swapchain_size];
 extern Image         vk_depth_buffers[max_swapchain_size];
 extern VkFramebuffer vk_frame_buffers[max_swapchain_size];
+
+void send_viewport_and_scissor(VkCommandBuffer cmd_buf,
+                               float           image_ratio,
+                               uint32_t        viewport_width,
+                               uint32_t        viewport_height);
 
 #endif // __cplusplus

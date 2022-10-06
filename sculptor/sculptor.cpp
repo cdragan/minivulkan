@@ -33,12 +33,7 @@ bool create_additional_heaps()
     return true;
 }
 
-bool create_pipeline_layouts()
-{
-    return true;
-}
-
-bool create_pipelines()
+bool init_assets()
 {
     return true;
 }
