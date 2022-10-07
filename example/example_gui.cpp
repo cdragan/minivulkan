@@ -20,9 +20,7 @@ bool create_gui_frame()
     ImGui_ImplVulkan_NewFrame();
     ImGui::NewFrame();
 
-    ImGui::Begin("Example");
-    ImGui::Text("Hello, world!");
-    ImGui::Separator();
+    ImGui::Begin("Shape settings");
     ImGui::SliderFloat("Roundedness", &user_roundedness, 0.0f, 1.0f);
     ImGui::SliderInt("Tessellation Level", reinterpret_cast<int*>(&user_tess_level), 1, 20);
     ImGui::Checkbox("Wireframe", &user_wireframe);
