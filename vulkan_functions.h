@@ -94,6 +94,7 @@
     X(vkDestroyBufferView) \
     X(vkGetBufferMemoryRequirements) \
     X(vkBindBufferMemory) \
+    X(vkCreateSampler) \
     X(vkCreateShaderModule) \
     X(vkCreateDescriptorSetLayout) \
     X(vkCreatePipelineLayout) \
@@ -204,6 +205,7 @@ enum e_device_functions {
 #define vkDestroyBufferView                       SELECT_VK_FUNCTION(device,   vkDestroyBufferView)
 #define vkGetBufferMemoryRequirements             SELECT_VK_FUNCTION(device,   vkGetBufferMemoryRequirements)
 #define vkBindBufferMemory                        SELECT_VK_FUNCTION(device,   vkBindBufferMemory)
+#define vkCreateSampler                           SELECT_VK_FUNCTION(device,   vkCreateSampler)
 #define vkCreateShaderModule                      SELECT_VK_FUNCTION(device,   vkCreateShaderModule)
 #define vkCreateDescriptorSetLayout               SELECT_VK_FUNCTION(device,   vkCreateDescriptorSetLayout)
 #define vkCreatePipelineLayout                    SELECT_VK_FUNCTION(device,   vkCreatePipelineLayout)

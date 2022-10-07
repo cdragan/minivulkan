@@ -14,6 +14,7 @@ extern VkSurfaceKHR                vk_surface;
 extern VkPhysicalDevice            vk_phys_dev;
 extern VkDevice                    vk_dev;
 extern uint32_t                    vk_queue_family_index;
+extern VkSwapchainCreateInfoKHR    swapchain_create_info;
 extern VkQueue                     vk_queue;
 extern uint32_t                    vk_num_swapchain_images;
 extern VkRenderPass                vk_render_pass;
@@ -37,7 +38,7 @@ bool init_sound();
 bool create_surface(struct Window* w);
 bool draw_frame();
 bool draw_frame(uint32_t image_idx, uint64_t time_ms, VkFence queue_fence);
-VkResult idle_queue();
+bool idle_queue();
 uint64_t get_current_time_ms();
 bool load_sound(uint32_t sound_id, const void* data, uint32_t size);
 bool play_sound(uint32_t sound_id);
@@ -102,6 +103,7 @@ class DeviceMemoryHeap {
         bool allocate_heap(VkDeviceSize size);
         void free_heap();
         void reset_heap() { next_free_offs = 0; }
+        bool reserve(VkDeviceSize size);
         bool allocate_memory(const VkMemoryRequirements& requirements, VkDeviceSize* offset);
 
         VkDeviceMemory  get_memory() const { return memory; }
@@ -364,6 +366,7 @@ inline constexpr VkClearValue make_clear_depth(float depth, uint32_t stencil)
 extern Image         vk_swapchain_images[max_swapchain_size];
 extern Image         vk_depth_buffers[max_swapchain_size];
 extern VkFramebuffer vk_frame_buffers[max_swapchain_size];
+extern VkFormat      vk_depth_format;
 
 void send_viewport_and_scissor(VkCommandBuffer cmd_buf,
                                float           image_ratio,

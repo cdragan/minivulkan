@@ -389,7 +389,7 @@ static constexpr uint32_t no_queue_family = ~0u;
 
 uint32_t vk_queue_family_index = no_queue_family;
 
-static VkSwapchainCreateInfoKHR swapchain_create_info = {
+VkSwapchainCreateInfoKHR swapchain_create_info = {
     VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR,
     nullptr,
     0,
@@ -896,6 +896,18 @@ void DeviceMemoryHeap::free_heap()
     }
 }
 
+bool DeviceMemoryHeap::reserve(VkDeviceSize size)
+{
+    if (size > heap_size) {
+        free_heap();
+        return allocate_heap(size);
+    }
+    else
+        reset_heap();
+
+    return true;
+}
+
 bool DeviceMemoryHeap::allocate_memory(const VkMemoryRequirements& requirements,
                                        VkDeviceSize*               offset)
 {
@@ -1282,7 +1294,7 @@ uint32_t                vk_num_swapchain_images = 0;
 Image                   vk_swapchain_images[max_swapchain_size];
 Image                   vk_depth_buffers[max_swapchain_size];
 static DeviceMemoryHeap depth_buffer_heap;
-static VkFormat         vk_depth_format = VK_FORMAT_UNDEFINED;
+VkFormat                vk_depth_format = VK_FORMAT_UNDEFINED;
 
 bool allocate_depth_buffers(Image (&depth_buffers)[max_swapchain_size], uint32_t num_depth_buffers)
 {
@@ -1326,15 +1338,8 @@ bool allocate_depth_buffers(Image (&depth_buffers)[max_swapchain_size], uint32_t
                                     VkDeviceSize(vk_phys_props.properties.limits.minMemoryMapAlignment));
     }
 
-    if (heap_size > depth_buffer_heap.get_heap_size()) {
-
-        depth_buffer_heap.free_heap();
-
-        if ( ! depth_buffer_heap.allocate_heap(heap_size))
-            return false;
-    }
-    else
-        depth_buffer_heap.reset_heap();
+    if ( ! depth_buffer_heap.reserve(heap_size))
+        return false;
 
     for (uint32_t i = 0; i < num_depth_buffers; i++) {
         if ( ! depth_buffers[i].allocate(depth_buffer_heap))
@@ -1556,7 +1561,7 @@ static bool create_swapchain_frame_buffer()
     return true;
 }
 
-VkResult idle_queue()
+bool idle_queue()
 {
     VkResult res = VK_SUCCESS;
 
@@ -1565,13 +1570,12 @@ VkResult idle_queue()
         res = CHK(vkQueueWaitIdle(vk_queue));
     }
 
-    return res;
+    return res == VK_SUCCESS;
 }
 
 static bool update_resolution()
 {
-    const VkResult res = idle_queue();
-    if (res != VK_SUCCESS)
+    if ( ! idle_queue())
         return false;
 
     for (uint32_t i = 0; i < mstd::array_size(vk_frame_buffers); i++) {
