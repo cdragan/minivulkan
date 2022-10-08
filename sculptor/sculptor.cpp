@@ -209,6 +209,9 @@ static bool allocate_viewports(VkDeviceSize heap_size)
             continue;
 
         for (uint32_t i_img = 0; i_img < vk_num_swapchain_images; i_img++) {
+            if (viewport.color_buffer[i_img].get_view())
+                continue;
+
             if ( ! viewport.color_buffer[i_img].allocate(viewport_heap))
                 return false;
 
@@ -220,9 +223,9 @@ static bool allocate_viewports(VkDeviceSize heap_size)
 
             if (viewport.gui_tex[i_img]) {
 
-                VkDescriptorImageInfo image_info = {
-                    viewport_sampler,
-                    viewport.color_buffer[i_img].get_view(),
+                static VkDescriptorImageInfo image_info = {
+                    VK_NULL_HANDLE,
+                    VK_NULL_HANDLE,
                     VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
                 };
 
@@ -234,13 +237,14 @@ static bool allocate_viewports(VkDeviceSize heap_size)
                     0,                  // dstArrayElement
                     1,                  // descriptorCount
                     VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-                    nullptr,            // pImageInfo
+                    &image_info,
                     nullptr,            // pBufferInfo
                     nullptr             // pTexelBufferView
                 };
 
-                write_desc.dstSet     = viewport.gui_tex[i_img];
-                write_desc.pImageInfo = &image_info;
+                image_info.sampler   = viewport_sampler;
+                image_info.imageView = viewport.color_buffer[i_img].get_view();
+                write_desc.dstSet    = viewport.gui_tex[i_img];
 
                 vkUpdateDescriptorSets(vk_dev, 1, &write_desc, 0, nullptr);
             }
@@ -256,7 +260,7 @@ static bool allocate_viewports(VkDeviceSize heap_size)
     return true;
 }
 
-bool create_gui_frame()
+static bool create_gui_frame(uint32_t image_idx)
 {
     ImGuiIO& io = ImGui::GetIO();
     io.DisplaySize.x = static_cast<float>(vk_surface_caps.currentExtent.width)  / vk_surface_scale;
@@ -304,11 +308,6 @@ bool create_gui_frame()
 
         ImGui::Separator();
 
-        static float user_roundedness;
-        ImGui::SliderFloat("Roundedness", &user_roundedness, 0.0f, 1.0f);
-
-        ImGui::Separator();
-
         for (uint32_t i = 0; i < mstd::array_size(viewports); i++)
             ImGui::Checkbox(viewports[i].name, &viewports[i].enabled);
     }
@@ -336,7 +335,16 @@ bool create_gui_frame()
             if ((win_size.x != viewports[i].width) || (win_size.y != viewports[i].height))
                 viewports_changed = true;
 
+            const ImVec2 cursor_pos = ImGui::GetCursorPos();
+
+            ImGui::Image(viewports[i].gui_tex[image_idx],
+                         ImVec2{static_cast<float>(viewports[i].width),
+                                static_cast<float>(viewports[i].height)});
+
+            ImGui::SetCursorPos(cursor_pos);
+
             ImGui::Text("Window Size: %d x %d", static_cast<int>(win_size.x), static_cast<int>(win_size.y));
+            ImGui::Text("Cursor Pos: %d x %d", static_cast<int>(cursor_pos.x), static_cast<int>(cursor_pos.y));
         }
         ImGui::End();
     }
@@ -347,14 +355,14 @@ bool create_gui_frame()
     return true;
 }
 
-static bool render_view(uint32_t i_view, uint32_t image_idx, VkCommandBuffer buf)
+static bool render_view(Viewport& viewport, uint32_t image_idx, VkCommandBuffer buf)
 {
     return true;
 }
 
 bool draw_frame(uint32_t image_idx, uint64_t time_ms, VkFence queue_fence)
 {
-    if ( ! create_gui_frame())
+    if ( ! create_gui_frame(image_idx))
         return false;
 
     Image& image = vk_swapchain_images[image_idx];
@@ -378,20 +386,19 @@ bool draw_frame(uint32_t image_idx, uint64_t time_ms, VkFence queue_fence)
     };
     image.set_image_layout(buf, color_att_init);
 
-    if (vk_depth_buffers[image_idx].layout != VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL) {
-        static const Image::Transition depth_init = {
-            VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-            0,
-            VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT,
-            VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT,
-            VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL
-        };
+    static const Image::Transition depth_init = {
+        VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+        0,
+        VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT,
+        VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT,
+        VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL
+    };
 
+    if (vk_depth_buffers[image_idx].layout != VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
         vk_depth_buffers[image_idx].set_image_layout(buf, depth_init);
-    }
 
     static const VkClearValue clear_values[2] = {
-        make_clear_color(0.2f, 0.2f, 0.2f, 0),
+        make_clear_color(0.2f, 0.2f, 0.2f, 1),
         make_clear_depth(0, 0)
     };
 
@@ -405,15 +412,49 @@ bool draw_frame(uint32_t image_idx, uint64_t time_ms, VkFence queue_fence)
         clear_values
     };
 
+    for (Viewport& viewport : viewports) {
+        if ( ! viewport.enabled)
+            continue;
+
+        static const Image::Transition render_viewport_layout = {
+            VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+            0,
+            VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+            VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+            VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
+        };
+        viewport.color_buffer[image_idx].set_image_layout(buf, render_viewport_layout);
+
+        if (viewport.depth_buffer[image_idx].layout != VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
+            viewport.depth_buffer[image_idx].set_image_layout(buf, depth_init);
+
+        render_pass_info.renderPass               = vk_render_pass;
+        render_pass_info.framebuffer              = viewport.frame_buffer[image_idx];
+        render_pass_info.renderArea.extent.width  = viewport.width;
+        render_pass_info.renderArea.extent.height = viewport.height;
+
+        vkCmdBeginRenderPass(buf, &render_pass_info, VK_SUBPASS_CONTENTS_INLINE);
+
+        if ( ! render_view(viewport, image_idx, buf))
+            return false;
+
+        vkCmdEndRenderPass(buf);
+
+        static const Image::Transition gui_image_layout = {
+            VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+            0,
+            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+            VK_ACCESS_SHADER_READ_BIT,
+            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
+        };
+        viewport.color_buffer[image_idx].set_image_layout(buf, gui_image_layout);
+    }
+
     render_pass_info.renderPass        = vk_render_pass;
     render_pass_info.framebuffer       = vk_frame_buffers[image_idx];
     render_pass_info.renderArea.extent = vk_surface_caps.currentExtent;
 
     vkCmdBeginRenderPass(buf, &render_pass_info, VK_SUBPASS_CONTENTS_INLINE);
-
-    for (uint32_t i_view = 0; i_view < mstd::array_size(viewports); i_view++)
-        if (viewports[i_view].enabled && ! render_view(i_view, image_idx, buf))
-            return false;
 
     if ( ! send_gui_to_gpu(buf))
         return false;
