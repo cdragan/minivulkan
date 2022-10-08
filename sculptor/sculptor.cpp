@@ -337,7 +337,7 @@ static bool create_gui_frame(uint32_t image_idx)
 
             const ImVec2 cursor_pos = ImGui::GetCursorPos();
 
-            ImGui::Image(viewports[i].gui_tex[image_idx],
+            ImGui::Image(reinterpret_cast<ImTextureID>(viewports[i].gui_tex[image_idx]),
                          ImVec2{static_cast<float>(viewports[i].width),
                                 static_cast<float>(viewports[i].height)});
 
