@@ -11,24 +11,27 @@
 #include "../imgui/imgui.h"
 #include "../imgui/backends/imgui_impl_vulkan.h"
 
-int gui_config_flags = ImGuiConfigFlags_NavEnableKeyboard
-                     | ImGuiConfigFlags_DockingEnable;
+const int gui_config_flags = ImGuiConfigFlags_NavEnableKeyboard
+                           | ImGuiConfigFlags_DockingEnable;
 
 struct Viewport {
-    const char*   name;
-    bool          enabled;
-    uint32_t      width;
-    uint32_t      height;
-    VkRenderPass  render_pass;
-    Image         color_buffer[max_swapchain_size];
-    Image         depth_buffer[max_swapchain_size];
-    VkFramebuffer frame_buffer[max_swapchain_size];
+    const char*     name;
+    bool            enabled;
+    uint32_t        width;
+    uint32_t        height;
+    VkRenderPass    render_pass;
+    Image           color_buffer[max_swapchain_size];
+    Image           depth_buffer[max_swapchain_size];
+    VkFramebuffer   frame_buffer[max_swapchain_size];
+    VkDescriptorSet gui_tex[max_swapchain_size];
 };
 
 static Viewport viewports[] = {
     { "Front View", true },
     { "3D View",    true }
 };
+
+const unsigned gui_num_descriptors = mstd::array_size(viewports) * max_swapchain_size;
 
 static bool viewports_changed = true;
 
@@ -214,6 +217,39 @@ static bool allocate_viewports(VkDeviceSize heap_size)
 
             if ( ! allocate_framebuffer(viewport, i_img))
                 return false;
+
+            if (viewport.gui_tex[i_img]) {
+
+                VkDescriptorImageInfo image_info = {
+                    viewport_sampler,
+                    viewport.color_buffer[i_img].get_view(),
+                    VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
+                };
+
+                static VkWriteDescriptorSet write_desc = {
+                    VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                    nullptr,
+                    VK_NULL_HANDLE,     // dstSet
+                    0,                  // dstBinding
+                    0,                  // dstArrayElement
+                    1,                  // descriptorCount
+                    VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                    nullptr,            // pImageInfo
+                    nullptr,            // pBufferInfo
+                    nullptr             // pTexelBufferView
+                };
+
+                write_desc.dstSet     = viewport.gui_tex[i_img];
+                write_desc.pImageInfo = &image_info;
+
+                vkUpdateDescriptorSets(vk_dev, 1, &write_desc, 0, nullptr);
+            }
+            else {
+                viewport.gui_tex[i_img] = ImGui_ImplVulkan_AddTexture(
+                        viewport_sampler,
+                        viewport.color_buffer[i_img].get_view(),
+                        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+            }
         }
     }
 

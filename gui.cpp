@@ -45,23 +45,24 @@ bool init_gui()
     if ( ! ImGui_ImplVulkan_LoadFunctions(load_vk_function, nullptr))
         return false;
 
-    static constexpr uint32_t num_samplers = 1;
-
     static VkDescriptorPoolSize pool_sizes[] = {
         {
             VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,  // type
-            num_samplers                                // descriptorCount
+            0                                           // descriptorCount
         }
     };
+    pool_sizes[0].descriptorCount = gui_num_descriptors;
 
     static VkDescriptorPoolCreateInfo pool_create_info = {
         VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
         nullptr,
         0,            // flags
-        num_samplers, // maxSets
+        0,            // maxSets
         mstd::array_size(pool_sizes),
         pool_sizes
     };
+
+    pool_create_info.maxSets = gui_num_descriptors;
 
     VkDescriptorPool desc_pool;
 
