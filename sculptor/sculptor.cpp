@@ -112,11 +112,9 @@ static bool destroy_viewports()
 
 static constexpr VkDeviceSize viewport_error = ~VkDeviceSize(0);
 
-static VkDeviceSize create_viewport_images(uint32_t i_view)
+static VkDeviceSize create_viewport_images(uint32_t i_view, ImVec2 content_size)
 {
     Viewport& viewport = viewports[i_view];
-
-    const ImVec2 win_size = ImGui::GetWindowSize();
 
     if (viewport.width)
         return 0;
@@ -130,8 +128,8 @@ static VkDeviceSize create_viewport_images(uint32_t i_view)
         VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT
     };
 
-    color_info.width  = static_cast<uint32_t>(win_size.x);
-    color_info.height = static_cast<uint32_t>(win_size.y);
+    color_info.width  = static_cast<uint32_t>(content_size.x);
+    color_info.height = static_cast<uint32_t>(content_size.y);
     color_info.format = swapchain_create_info.imageFormat;
 
     static ImageInfo depth_info {
@@ -143,8 +141,8 @@ static VkDeviceSize create_viewport_images(uint32_t i_view)
         VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT
     };
 
-    depth_info.width  = static_cast<uint32_t>(win_size.x);
-    depth_info.height = static_cast<uint32_t>(win_size.y);
+    depth_info.width  = static_cast<uint32_t>(content_size.x);
+    depth_info.height = static_cast<uint32_t>(content_size.y);
     depth_info.format = vk_depth_format;
 
     VkDeviceSize heap_size = 0;
@@ -164,8 +162,8 @@ static VkDeviceSize create_viewport_images(uint32_t i_view)
                                     VkDeviceSize(vk_phys_props.properties.limits.minMemoryMapAlignment));
     }
 
-    viewport.width  = static_cast<uint32_t>(win_size.x);
-    viewport.height = static_cast<uint32_t>(win_size.y);
+    viewport.width  = static_cast<uint32_t>(content_size.x);
+    viewport.height = static_cast<uint32_t>(content_size.y);
 
     return heap_size;
 }
@@ -324,27 +322,23 @@ static bool create_gui_frame(uint32_t image_idx)
         if ( ! viewports[i].enabled)
             continue;
 
-        ImGui::Begin(viewports[i].name, &viewports[i].enabled);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2{0, 0});
+        ImGui::Begin(viewports[i].name, &viewports[i].enabled, ImGuiWindowFlags_NoScrollbar);
+        ImGui::PopStyleVar();
         {
-            VkDeviceSize size = create_viewport_images(i);
+            const ImVec2 content_size = ImGui::GetContentRegionAvail();
+
+            VkDeviceSize size = create_viewport_images(i, content_size);
             if (size == viewport_error)
                 return false;
             heap_size += size;
 
-            const ImVec2 win_size = ImGui::GetWindowSize();
-            if ((win_size.x != viewports[i].width) || (win_size.y != viewports[i].height))
+            if ((content_size.x != viewports[i].width) || (content_size.y != viewports[i].height))
                 viewports_changed = true;
-
-            const ImVec2 cursor_pos = ImGui::GetCursorPos();
 
             ImGui::Image(reinterpret_cast<ImTextureID>(viewports[i].gui_tex[image_idx]),
                          ImVec2{static_cast<float>(viewports[i].width),
                                 static_cast<float>(viewports[i].height)});
-
-            ImGui::SetCursorPos(cursor_pos);
-
-            ImGui::Text("Window Size: %d x %d", static_cast<int>(win_size.x), static_cast<int>(win_size.y));
-            ImGui::Text("Cursor Pos: %d x %d", static_cast<int>(cursor_pos.x), static_cast<int>(cursor_pos.y));
         }
         ImGui::End();
     }
@@ -397,8 +391,8 @@ bool draw_frame(uint32_t image_idx, uint64_t time_ms, VkFence queue_fence)
     if (vk_depth_buffers[image_idx].layout != VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
         vk_depth_buffers[image_idx].set_image_layout(buf, depth_init);
 
-    static const VkClearValue clear_values[2] = {
-        make_clear_color(0.2f, 0.2f, 0.2f, 1),
+    static VkClearValue clear_values[2] = {
+        make_clear_color(0, 0, 0, 0),
         make_clear_depth(0, 0)
     };
 
@@ -433,6 +427,8 @@ bool draw_frame(uint32_t image_idx, uint64_t time_ms, VkFence queue_fence)
         render_pass_info.renderArea.extent.width  = viewport.width;
         render_pass_info.renderArea.extent.height = viewport.height;
 
+        clear_values[0] = make_clear_color(0.2f, 0.2f, 0.2f, 1);
+
         vkCmdBeginRenderPass(buf, &render_pass_info, VK_SUBPASS_CONTENTS_INLINE);
 
         if ( ! render_view(viewport, image_idx, buf))
@@ -453,6 +449,8 @@ bool draw_frame(uint32_t image_idx, uint64_t time_ms, VkFence queue_fence)
     render_pass_info.renderPass        = vk_render_pass;
     render_pass_info.framebuffer       = vk_frame_buffers[image_idx];
     render_pass_info.renderArea.extent = vk_surface_caps.currentExtent;
+
+    clear_values[0] = make_clear_color(0, 0, 0, 1);
 
     vkCmdBeginRenderPass(buf, &render_pass_info, VK_SUBPASS_CONTENTS_INLINE);
 
