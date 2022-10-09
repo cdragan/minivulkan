@@ -406,6 +406,8 @@ bool draw_frame(uint32_t image_idx, uint64_t time_ms, VkFence queue_fence)
         clear_values
     };
 
+    render_pass_info.renderPass = vk_render_pass;
+
     for (Viewport& viewport : viewports) {
         if ( ! viewport.enabled)
             continue;
@@ -422,7 +424,6 @@ bool draw_frame(uint32_t image_idx, uint64_t time_ms, VkFence queue_fence)
         if (viewport.depth_buffer[image_idx].layout != VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
             viewport.depth_buffer[image_idx].set_image_layout(buf, depth_init);
 
-        render_pass_info.renderPass               = vk_render_pass;
         render_pass_info.framebuffer              = viewport.frame_buffer[image_idx];
         render_pass_info.renderArea.extent.width  = viewport.width;
         render_pass_info.renderArea.extent.height = viewport.height;
@@ -446,7 +447,6 @@ bool draw_frame(uint32_t image_idx, uint64_t time_ms, VkFence queue_fence)
         viewport.color_buffer[image_idx].set_image_layout(buf, gui_image_layout);
     }
 
-    render_pass_info.renderPass        = vk_render_pass;
     render_pass_info.framebuffer       = vk_frame_buffers[image_idx];
     render_pass_info.renderArea.extent = vk_surface_caps.currentExtent;
 
