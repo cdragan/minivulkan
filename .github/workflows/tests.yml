@@ -10,7 +10,7 @@ jobs:
     runs-on: ubuntu-20.04
     timeout-minutes: 2
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v3
       - name: Install Vulkan SDK
         run: |
           sudo apt-get update
@@ -22,7 +22,7 @@ jobs:
     runs-on: macos-latest
     timeout-minutes: 6
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v3
       - name: Cache Vulkan SDK
         id: cache-vulkansdk
         uses: actions/cache@v1
@@ -52,7 +52,7 @@ jobs:
       - name: Remove link.exe from MSYS2
         shell: msys2 {0}
         run: rm -f /bin/link.exe
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v3
       - name: Install Vulkan SDK
         uses: humbletim/install-vulkan-sdk@v1
         with:
