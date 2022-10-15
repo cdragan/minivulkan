@@ -349,8 +349,16 @@ static bool create_gui_frame(uint32_t image_idx)
     return true;
 }
 
+static bool draw_grid(Viewport& viewport, VkCommandBuffer buf)
+{
+    return true;
+}
+
 static bool render_view(Viewport& viewport, uint32_t image_idx, VkCommandBuffer buf)
 {
+    if ( ! draw_grid(viewport, buf))
+        return false;
+
     return true;
 }
 
