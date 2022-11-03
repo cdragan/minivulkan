@@ -5,7 +5,7 @@
 
 void RNG::init(uint32_t seed)
 {
-    init(seed, ~seed);
+    init(seed, ~(uint64_t)seed);
 
     union {
         uint64_t u64[2];
