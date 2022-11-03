@@ -1,3 +1,3 @@
 LIBRARY ole32.dll
 EXPORTS
-    CoInitializeEx @ 928
+    CoInitializeEx @928
