@@ -228,7 +228,7 @@ ifeq ($(UNAME), Windows)
 
     CFLAGS += -nologo
     CFLAGS += -GR-
-    CFLAGS += -TP -EHa- -EHs- -D_HAS_EXCEPTIONS=0
+    CFLAGS += -TP -EHa-
     CFLAGS += -FS
     CFLAGS += -std:c++17 -Zc:__cplusplus
 
