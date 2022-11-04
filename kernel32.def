@@ -1,9 +1,0 @@
-LIBRARY kernel32.dll
-EXPORTS
-    ExitProcess             @360
-    GetLastError            @619
-    GetModuleHandleA        @639
-    GetProcAddress          @697
-    GetSystemTimeAsFileTime @756
-    LoadLibraryA            @969
-    LoadLibraryExA          @970

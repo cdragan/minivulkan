@@ -232,11 +232,12 @@ ifeq ($(UNAME), Windows)
     CFLAGS += -FS
     CFLAGS += -std:c++17 -Zc:__cplusplus
 
-    win_libs += user32.lib
     win_libs += kernel32.lib
     win_libs += ole32.lib
+    win_libs += user32.lib
 
     LDFLAGS += -nologo
+    LDFLAGS += $(win_libs)
 
     CXX  = cl.exe
     LINK = link.exe
@@ -414,12 +415,6 @@ endef
 
 ifeq ($(UNAME), Windows)
 $(foreach target,$(gui_targets) $(nogui_targets),$(call GUI_PATH,$(target))): SUBSYSTEMFLAGS = -subsystem:windows
-    ifeq ($(stdlib), 0)
-$(foreach target,$(gui_targets) $(nogui_targets),$(call GUI_PATH,$(target))): LDFLAGS += $(addprefix $(out_dir)/,$(win_libs))
-$(foreach target,$(gui_targets) $(nogui_targets),$(call GUI_PATH,$(target))): $(addprefix $(out_dir)/,$(win_libs))
-    else
-$(foreach target,$(gui_targets) $(nogui_targets),$(call GUI_PATH,$(target))): LDFLAGS += $(win_libs)
-    endif
 endif
 
 ifeq ($(UNAME), Darwin)
@@ -497,18 +492,6 @@ $(call OBJ_FROM_SRC, shaders.cpp) $(out_dir)/shaders.cpp.$(asm_suffix): $(addpre
 $(call OBJ_FROM_SRC, shaders.cpp) $(out_dir)/shaders.cpp.$(asm_suffix): CFLAGS += -I$(shaders_out_dir)
 
 $(eval $(call LINK_RULE,$(call CMDLINE_PATH,vmath_unit),$(all_vmath_unit_src_files)))
-
-ifeq ($(UNAME), Windows)
-$(spirv_encode):                 LDFLAGS += $(win_libs)
-$(call CMDLINE_PATH,vmath_unit): LDFLAGS += $(win_libs)
-endif
-
-define WIN_LIB_RULE
-$(out_dir)/$1: $(basename $1).def | $$(out_dir)
-	lib -def:$$< -out:$$@
-endef
-
-$(foreach lib,$(win_libs),$(eval $(call WIN_LIB_RULE,$(lib))))
 
 test: $(call CMDLINE_PATH,vmath_unit)
 	$<
