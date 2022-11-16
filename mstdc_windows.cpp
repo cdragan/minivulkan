@@ -696,5 +696,14 @@ RETZERO:
         }
     }
 
+    __declspec(naked) void _ftol3()
+    {
+        __asm {
+            movss     xmm0, DWORD PTR [esp + 8]
+            cvttss2si eax, xmm0
+            cdq
+            ret
+        }
+    }
 #endif
 }

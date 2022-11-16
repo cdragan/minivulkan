@@ -7,6 +7,7 @@
 #include "d_printf.h"
 #include "mstdc.h"
 
+/* TODO Just including xaudio2.h somehow calls LoadLibraryEx - figure out how to avoid that */
 #include <xaudio2.h>
 
 struct Window {
