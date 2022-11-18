@@ -103,7 +103,7 @@ static bool load_vulkan()
 #endif
 
 #ifdef _WIN32
-    vulkan_lib = LoadLibrary(lib_name);
+    vulkan_lib = LoadLibraryEx(lib_name, nullptr, 0);
 #elif defined(__APPLE__) || defined(__linux__)
     vulkan_lib = dlopen(lib_name, RTLD_NOW | RTLD_LOCAL);
 #endif
