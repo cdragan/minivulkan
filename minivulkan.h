@@ -199,6 +199,7 @@ class Resource {
         bool allocated() const { return !! memory_reqs.size; }
         VkDeviceSize size() const { return memory_reqs.size; }
         uint32_t get_memory_type() const { return owning_heap->get_memory_type(); }
+        bool     is_host_memory()  const { return owning_heap->is_host_memory(); }
 
     protected:
         DeviceMemoryHeap*    owning_heap = nullptr;
@@ -274,6 +275,7 @@ class Buffer: public Resource {
                       VkBufferUsageFlags usage);
         bool create_view(VkFormat format);
         void destroy();
+        bool cpu_fill(const void* data, uint32_t size);
 
     private:
         VkBuffer     buffer = VK_NULL_HANDLE;

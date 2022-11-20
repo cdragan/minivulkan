@@ -1226,6 +1226,19 @@ bool Buffer::create_view(VkFormat format)
     return res == VK_SUCCESS;
 }
 
+bool Buffer::cpu_fill(const void* data, uint32_t size)
+{
+    assert(is_host_memory());
+
+    Map<uint8_t> map = this->map<uint8_t>();
+
+    if ( ! map.mapped())
+        return false;
+
+    mstd::mem_copy(map.data(), data, size);
+    return true;
+}
+
 void Buffer::destroy()
 {
     if (view)
@@ -1672,12 +1685,7 @@ bool HostFiller::fill_buffer(Buffer*            buffer,
     if ( ! host_heap.get_heap_size()) {
         assert(host_heap.get_memory_type() == buffer->get_memory_type());
 
-        Map<uint8_t> map = buffer->map<uint8_t>();
-        if ( ! map.mapped())
-            return false;
-
-        mstd::mem_copy(map.data(), data, size);
-        return true;
+        return buffer->cpu_fill(data, size);
     }
 
     assert(num_buffers < max_buffers);
@@ -1690,13 +1698,8 @@ bool HostFiller::fill_buffer(Buffer*            buffer,
     if ( ! host_buffer.allocate(host_heap, size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT))
         return false;
 
-    {
-        Map<uint8_t> map = host_buffer.map<uint8_t>();
-        if ( ! map.mapped())
-            return false;
-
-        mstd::mem_copy(map.data(), data, size);
-    }
+    if ( ! host_buffer.cpu_fill(data, size))
+        return false;
 
     static VkBufferCopy copy_region = {
         0, // srcOffset
