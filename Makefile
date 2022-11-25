@@ -29,6 +29,11 @@ else
 endif
 
 ##############################################################################
+# Declare default target
+
+default:
+
+##############################################################################
 # Directory where generated files are stored
 
 out_dir_base ?= Out
@@ -198,6 +203,7 @@ endef
 
 projects += example
 projects += sculptor
+projects += sleek
 projects += synth
 
 $(foreach project,$(projects),$(eval $(call include_project,$(project))))
@@ -317,6 +323,8 @@ ifeq ($(UNAME), Darwin)
 
         LTO_CFLAGS += -flto
         LDFLAGS    += -flto
+    else
+        export MallocNanoZone=0
     endif
 endif
 
