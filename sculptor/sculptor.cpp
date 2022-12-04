@@ -11,6 +11,8 @@
 #include "../imgui/imgui.h"
 #include "../imgui/backends/imgui_impl_vulkan.h"
 
+const char app_name[] = "Object Editor";
+
 const int gui_config_flags = ImGuiConfigFlags_NavEnableKeyboard
                            | ImGuiConfigFlags_DockingEnable;
 

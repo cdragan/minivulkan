@@ -5,10 +5,7 @@
 #include <assert.h>
 #include <stdint.h>
 
-#ifndef APPNAME
-#   define APPNAME "minivulkan"
-#endif
-
+extern const char                  app_name[];
 extern VkInstance                  vk_instance;
 extern VkSurfaceKHR                vk_surface;
 extern VkPhysicalDevice            vk_phys_dev;

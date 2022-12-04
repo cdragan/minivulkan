@@ -267,7 +267,9 @@ bool play_sound(uint32_t sound_id)
         ];
         [window center];
         [window makeKeyAndOrderFront: nil];
-        window.title   = @ APPNAME;
+        window.title   = [[NSString alloc]
+                            initWithCString: app_name
+                            encoding: NSASCIIStringEncoding];
         window.minSize = NSMakeSize(512, 384);
 
         id view_ctrl = [alloc_view_controller()

@@ -9,6 +9,8 @@
 #include "../shaders.h"
 #include "../vmath.h"
 
+const char app_name[] = "minivulkan example";
+
 constexpr float image_ratio = 0.0f;
 
 float    user_roundedness = 111.0f / 127.0f;

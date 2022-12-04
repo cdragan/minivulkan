@@ -7,6 +7,8 @@
 #include "../shaders.h"
 #include "../vmath.h"
 
+const char app_name[] = "Sleek";
+
 constexpr float image_ratio = 0.0f;
 
 float    user_roundedness = 111.0f / 127.0f;

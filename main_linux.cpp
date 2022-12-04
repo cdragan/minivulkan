@@ -7,6 +7,7 @@
 #include "minivulkan.h"
 
 #include <stdlib.h>
+#include <string.h>
 #include <time.h>
 #include <unistd.h>
 #include <dlfcn.h>
@@ -139,16 +140,14 @@ static bool create_window(Window* w)
                       XCB_CW_BACK_PIXEL | XCB_CW_EVENT_MASK,
                       get_window_events());
 
-    static const char title[] = APPNAME;
-
     xcb_change_property(w->connection,
                         XCB_PROP_MODE_REPLACE,
                         w->window,
                         XCB_ATOM_WM_NAME,
                         XCB_ATOM_STRING,
                         8,
-                        sizeof(title) - 1,
-                        title);
+                        strlen(app_name),
+                        app_name);
 
     if (full_screen)
         set_fullscreen(w->connection, w->window);

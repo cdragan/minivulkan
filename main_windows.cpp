@@ -193,8 +193,6 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT umsg, WPARAM wparam, LPARAM 
 
 static bool create_window(Window* w)
 {
-    static const char title[] = APPNAME;
-
     static WNDCLASS wnd_class = {
         CS_HREDRAW | CS_VREDRAW | CS_OWNDC,     // style
         window_proc,                            // lpfnWndProc
@@ -205,7 +203,7 @@ static bool create_window(Window* w)
         0,                                      // hCursor
         0,                                      // hbrBackground
         nullptr,                                // lpszMenuName
-        title                                   // lpszClassName
+        app_name                                // lpszClassName
     };
 
     w->instance = GetModuleHandle(nullptr);
@@ -254,8 +252,8 @@ static bool create_window(Window* w)
     }
 
     const HWND hwnd = CreateWindowEx(ws_ex,       // dwExStyle
-                                     title,       // lpClassName
-                                     title,       // lpWindowName
+                                     app_name,    // lpClassName
+                                     app_name,    // lpWindowName
                                      ws,          // dwStyle
                                      x,           // X
                                      y,           // Y

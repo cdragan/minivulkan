@@ -11,6 +11,8 @@
 #include "../imgui/imgui.h"
 #include "../imgui/backends/imgui_impl_vulkan.h"
 
+const char app_name[] = "Sound Editor";
+
 const int gui_config_flags = ImGuiConfigFlags_NavEnableKeyboard;
 
 const unsigned gui_num_descriptors = 1;
