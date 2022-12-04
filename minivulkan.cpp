@@ -130,9 +130,7 @@ typedef PFN_vkVoidFunction (*LOAD_FUNCTION)(const char* name);
 static bool load_functions(const char* names, PFN_vkVoidFunction* fn_ptrs, LOAD_FUNCTION load)
 {
     for (;;) {
-        const uint32_t len = mstd::strlen(names);
-
-        if ( ! len)
+        if ( ! *names)
             break;
 
         const PFN_vkVoidFunction fn = load(names);
@@ -145,7 +143,7 @@ static bool load_functions(const char* names, PFN_vkVoidFunction* fn_ptrs, LOAD_
         *fn_ptrs = fn;
 
         ++fn_ptrs;
-        names += len + 1;
+        names += mstd::strlen(names) + 1;
     }
 
     return true;
