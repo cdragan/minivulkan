@@ -202,6 +202,7 @@ endef
 # Sub-projects
 
 projects += example
+projects += matedit
 projects += sculptor
 projects += sleek
 projects += synth
