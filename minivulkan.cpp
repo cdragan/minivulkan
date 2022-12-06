@@ -7,6 +7,9 @@
 #include "mstdc.h"
 #include "vmath.h"
 #include "vulkan_extensions.h"
+#ifndef NDEBUG
+#   include <stdlib.h>
+#endif
 
 #ifdef _WIN32
 #   define dlsym GetProcAddress
@@ -216,6 +219,14 @@ static bool load_instance_functions()
             });
 }
 
+#ifndef NDEBUG
+static bool print_extensions()
+{
+    const char *ext = getenv("EXTENSIONS");
+    return ext != nullptr;
+}
+#endif
+
 static bool init_instance()
 {
     VkResult res;
@@ -268,10 +279,14 @@ static bool init_instance()
         return false;
 
 #ifndef NDEBUG
-    if (num_ext_props)
-        d_printf("Instance extensions:\n");
-    for (uint32_t i = 0; i < num_ext_props; i++)
-        d_printf("    %s\n", ext_props[i].extensionName);
+    if (print_extensions()) {
+        if (num_ext_props)
+            d_printf("Instance extensions:\n");
+        for (uint32_t i = 0; i < num_ext_props; i++)
+            d_printf("    %s\n", ext_props[i].extensionName);
+    }
+    else
+        d_printf("Tip: Set EXTENSIONS env var to print extensions and layers\n");
 #endif
 
     // List of extensions declared in vulkan_extensions.h
@@ -293,62 +308,64 @@ static bool init_instance()
         return false;
 
 #ifndef NDEBUG
-    const PFN_vkEnumerateInstanceLayerProperties vkEnumerateInstanceLayerProperties =
-        reinterpret_cast<PFN_vkEnumerateInstanceLayerProperties>(
-            vkGetInstanceProcAddr(nullptr, "vkEnumerateInstanceLayerProperties"));
+    if (print_extensions()) {
+        const PFN_vkEnumerateInstanceLayerProperties vkEnumerateInstanceLayerProperties =
+            reinterpret_cast<PFN_vkEnumerateInstanceLayerProperties>(
+                vkGetInstanceProcAddr(nullptr, "vkEnumerateInstanceLayerProperties"));
 
-    static VkLayerProperties layer_props[8];
+        static VkLayerProperties layer_props[8];
 
-    uint32_t num_layer_props = 0;
+        uint32_t num_layer_props = 0;
 
-    if (vkEnumerateInstanceLayerProperties) {
-        num_layer_props = mstd::array_size(layer_props);
+        if (vkEnumerateInstanceLayerProperties) {
+            num_layer_props = mstd::array_size(layer_props);
 
-        res = vkEnumerateInstanceLayerProperties(&num_layer_props, layer_props);
-        if (res != VK_SUCCESS && res != VK_INCOMPLETE)
-            num_layer_props = 0;
-    }
-
-    const char* validation_str = nullptr;
-
-    VkValidationFeaturesEXT validation_features = {
-        VK_STRUCTURE_TYPE_VALIDATION_FEATURES_EXT,
-        nullptr,
-    };
-
-    for (uint32_t i = 0; i < num_layer_props; i++) {
-        d_printf("Layer: %s\n", layer_props[i].layerName);
-
-        num_ext_props = mstd::array_size(ext_props);
-
-        const char* validation_features_str = nullptr;
-
-        res = vkEnumerateInstanceExtensionProperties(layer_props[i].layerName,
-                                                     &num_ext_props,
-                                                     ext_props);
-        if (res == VK_SUCCESS || res == VK_INCOMPLETE) {
-            for (uint32_t j = 0; j < num_ext_props; j++) {
-                d_printf("    %s\n", ext_props[j].extensionName);
-
-                static const char validation_features_ext[] = "VK_EXT_validation_features";
-                if (mstd::strcmp(ext_props[i].extensionName, validation_features_ext) == 0)
-                    validation_features_str = validation_features_ext;
-            }
+            res = vkEnumerateInstanceLayerProperties(&num_layer_props, layer_props);
+            if (res != VK_SUCCESS && res != VK_INCOMPLETE)
+                num_layer_props = 0;
         }
 
-        static const char validation[] = "VK_LAYER_KHRONOS_validation";
-        if (mstd::strcmp(layer_props[i].layerName, validation) == 0) {
-            validation_str = validation;
-            instance_info.ppEnabledLayerNames = &validation_str;
-            instance_info.enabledLayerCount   = 1;
+        const char* validation_str = nullptr;
 
-            if (validation_features_str &&
-                instance_info.enabledExtensionCount < mstd::array_size(enabled_instance_extensions)) {
+        VkValidationFeaturesEXT validation_features = {
+            VK_STRUCTURE_TYPE_VALIDATION_FEATURES_EXT,
+            nullptr,
+        };
 
-                enabled_instance_extensions[instance_info.enabledExtensionCount] = validation_features_str;
-                ++instance_info.enabledExtensionCount;
+        for (uint32_t i = 0; i < num_layer_props; i++) {
+            d_printf("Layer: %s\n", layer_props[i].layerName);
 
-                instance_info.pNext = &validation_features;
+            num_ext_props = mstd::array_size(ext_props);
+
+            const char* validation_features_str = nullptr;
+
+            res = vkEnumerateInstanceExtensionProperties(layer_props[i].layerName,
+                                                         &num_ext_props,
+                                                         ext_props);
+            if (res == VK_SUCCESS || res == VK_INCOMPLETE) {
+                for (uint32_t j = 0; j < num_ext_props; j++) {
+                    d_printf("    %s\n", ext_props[j].extensionName);
+
+                    static const char validation_features_ext[] = "VK_EXT_validation_features";
+                    if (mstd::strcmp(ext_props[i].extensionName, validation_features_ext) == 0)
+                        validation_features_str = validation_features_ext;
+                }
+            }
+
+            static const char validation[] = "VK_LAYER_KHRONOS_validation";
+            if (mstd::strcmp(layer_props[i].layerName, validation) == 0) {
+                validation_str = validation;
+                instance_info.ppEnabledLayerNames = &validation_str;
+                instance_info.enabledLayerCount   = 1;
+
+                if (validation_features_str &&
+                    instance_info.enabledExtensionCount < mstd::array_size(enabled_instance_extensions)) {
+
+                    enabled_instance_extensions[instance_info.enabledExtensionCount] = validation_features_str;
+                    ++instance_info.enabledExtensionCount;
+
+                    instance_info.pNext = &validation_features;
+                }
             }
         }
     }
@@ -560,8 +577,10 @@ static bool get_device_extensions()
         return false;
 
 #ifndef NDEBUG
-    for (uint32_t i = 0; i < num_extensions; i++)
-        d_printf("    %s\n", extensions[i].extensionName);
+    if (print_extensions()) {
+        for (uint32_t i = 0; i < num_extensions; i++)
+            d_printf("    %s\n", extensions[i].extensionName);
+    }
 #endif
 
     // List of extensions declared in vulkan_extensions.h
