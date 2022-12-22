@@ -222,8 +222,12 @@ static bool load_instance_functions()
 #ifndef NDEBUG
 static bool print_extensions()
 {
+#ifdef _WIN32
+    return GetEnvironmentVariable("EXTENSIONS", nullptr, 0) != 0;
+#else
     const char *ext = getenv("EXTENSIONS");
     return ext != nullptr;
+#endif
 }
 #endif
 
