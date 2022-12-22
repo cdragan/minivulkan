@@ -111,6 +111,9 @@ imgui_src_files += imgui/imgui_draw.cpp
 imgui_src_files += imgui/imgui_tables.cpp
 imgui_src_files += imgui/imgui_widgets.cpp
 imgui_src_files += imgui/backends/imgui_impl_vulkan.cpp
+ifneq ($(debug), 0)
+    imgui_src_files += imgui/imgui_demo.cpp
+endif
 
 threed_gui_src_files += $(imgui_src_files)
 threed_gui_src_files += gui.cpp

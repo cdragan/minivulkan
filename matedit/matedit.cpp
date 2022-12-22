@@ -260,6 +260,50 @@ static bool allocate_viewports(VkDeviceSize heap_size)
     return true;
 }
 
+static void draw_material_list()
+{
+    ImGui::Begin("Materials");
+
+    if (ImGui::Button("Load")) {
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Save")) {
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("New")) {
+    }
+
+#ifndef NDEBUG
+    ImGui::SameLine();
+    static bool open_demo = false;
+    ImGui::Checkbox("Demo", &open_demo);
+    if (open_demo)
+        ImGui::ShowDemoWindow();
+#endif
+
+    ImGui::Separator();
+
+    static const char* const view_names[] = {
+        "Image", "List"
+    };
+    static int view = 0;
+    ImGui::Combo("View", &view, view_names, static_cast<int>(mstd::array_size(view_names)));
+
+    ImGui::End();
+}
+
+static void draw_material_preview()
+{
+}
+
+static void draw_material_settings()
+{
+}
+
+static void draw_shader_editor()
+{
+}
+
 static bool create_gui_frame(uint32_t image_idx)
 {
     ImGuiIO& io = ImGui::GetIO();
@@ -298,21 +342,12 @@ static bool create_gui_frame(uint32_t image_idx)
 
     ImGui::DockSpaceOverViewport(ImGui::GetMainViewport(), ImGuiDockNodeFlags_PassthruCentralNode);
 
-    ImGui::Begin("Hello, Window!");
-    {
-        const ImVec2 win_size = ImGui::GetWindowSize();
-        ImGui::Text("Window Size: %d x %d", static_cast<int>(win_size.x), static_cast<int>(win_size.y));
-        const ImVec2 vp_size = ImGui::GetMainViewport()->Size;
-        ImGui::Text("Viewport Size: %d x %d", static_cast<int>(vp_size.x), static_cast<int>(vp_size.y));
-        ImGui::Text("Surface Size: %u x %u", vk_surface_caps.currentExtent.width, vk_surface_caps.currentExtent.height);
+    draw_material_list();
+    draw_material_preview();
+    draw_material_settings();
+    draw_shader_editor();
 
-        ImGui::Separator();
-
-        for (uint32_t i = 0; i < mstd::array_size(viewports); i++)
-            ImGui::Checkbox(viewports[i].name, &viewports[i].enabled);
-    }
-    ImGui::End();
-
+    /*
     if (viewports_changed)
         if ( ! destroy_viewports())
             return false;
@@ -347,19 +382,7 @@ static bool create_gui_frame(uint32_t image_idx)
 
     if (heap_size && ! allocate_viewports(heap_size))
         return false;
-
-    return true;
-}
-
-static bool draw_grid(Viewport& viewport, VkCommandBuffer buf)
-{
-    return true;
-}
-
-static bool render_view(Viewport& viewport, uint32_t image_idx, VkCommandBuffer buf)
-{
-    if ( ! draw_grid(viewport, buf))
-        return false;
+    */
 
     return true;
 }
@@ -418,6 +441,7 @@ bool draw_frame(uint32_t image_idx, uint64_t time_ms, VkFence queue_fence)
 
     render_pass_info.renderPass = vk_render_pass;
 
+    /*
     for (Viewport& viewport : viewports) {
         if ( ! viewport.enabled)
             continue;
@@ -456,6 +480,7 @@ bool draw_frame(uint32_t image_idx, uint64_t time_ms, VkFence queue_fence)
         };
         viewport.color_buffer[image_idx].set_image_layout(buf, gui_image_layout);
     }
+    */
 
     render_pass_info.framebuffer       = vk_frame_buffers[image_idx];
     render_pass_info.renderArea.extent = vk_surface_caps.currentExtent;
