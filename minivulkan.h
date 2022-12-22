@@ -37,8 +37,8 @@ bool draw_frame();
 bool draw_frame(uint32_t image_idx, uint64_t time_ms, VkFence queue_fence);
 bool idle_queue();
 uint64_t get_current_time_ms();
-bool load_sound(uint32_t sound_id, const void* data, uint32_t size);
-bool play_sound(uint32_t sound_id);
+bool load_sound_track(const void* data, uint32_t size);
+bool play_sound_track();
 
 uint32_t check_device_features();
 bool create_additional_heaps();

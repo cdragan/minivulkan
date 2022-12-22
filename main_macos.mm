@@ -44,53 +44,38 @@ uint64_t get_current_time_ms()
     return time_ms;
 }
 
-struct Sound {
-    AVAudioPlayer* sounds[1];
-};
+static AVAudioPlayer* sound_track;
 
-static Sound sound;
-
-bool load_sound(uint32_t sound_id, const void* data, uint32_t size)
+bool load_sound_track(const void* data, uint32_t size)
 {
-    if (sound_id >= mstd::array_size(sound.sounds)) {
-        d_printf("Sound %u doesn't exist\n", sound_id);
-        return false;
-    }
-
-    if (sound.sounds[sound_id]) {
-        [sound.sounds[sound_id] stop];
-        sound.sounds[sound_id] = nullptr;
-    }
+    assert( ! sound_track);
 
     NSData *sound_data = [NSData dataWithBytes: data
                                  length:        size];
-    sound.sounds[sound_id] = [[AVAudioPlayer alloc] initWithData: sound_data
-                                                    error:        nullptr];
+    sound_track = [[AVAudioPlayer alloc] initWithData: sound_data
+                                        error:        nullptr];
 
-    if ( ! sound.sounds[sound_id]) {
-        d_printf("Failed to load sound %u\n", sound_id);
+    if ( ! sound_track) {
+        d_printf("Failed to load soundtrack\n");
         return false;
     }
 
-    d_printf("Sound %u duration %.3f s\n", sound_id, sound.sounds[sound_id].duration);
+    d_printf("Soundtrack duration %.3f s\n", sound_track.duration);
 
-    if ( ! [sound.sounds[sound_id] prepareToPlay]) {
-        d_printf("Failed to initialize sound %u for playback\n", sound_id);
+    if ( ! [sound_track prepareToPlay]) {
+        d_printf("Failed to initialize soundtrack for playback\n");
         return false;
     }
 
     return true;
 }
 
-bool play_sound(uint32_t sound_id)
+bool play_sound_track()
 {
-    if (sound_id >= mstd::array_size(sound.sounds)) {
-        d_printf("Sound %u doesn't exist\n", sound_id);
-        return false;
-    }
+    assert(sound_track);
 
-    if ( ! [sound.sounds[sound_id] play]) {
-        d_printf("Failed to play sound %u\n", sound_id);
+    if ( ! [sound_track play]) {
+        d_printf("Failed to play soundtrack\n");
         return false;
     }
 

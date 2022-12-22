@@ -1897,7 +1897,7 @@ bool draw_frame()
     static bool playing = false;
     if ( ! playing) {
         playing = true;
-        if ( ! play_sound(0))
+        if ( ! play_sound_track())
             return false;
     }
 

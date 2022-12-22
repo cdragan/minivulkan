@@ -94,5 +94,5 @@ bool init_sound()
         out.right = value;
     }
 
-    return load_sound(0, audio_buf, mstd::array_size(audio_buf));
+    return load_sound_track(audio_buf, mstd::array_size(audio_buf));
 }

@@ -46,32 +46,28 @@ uint64_t get_current_time_ms()
     return time_100ns / 10'000;
 }
 
-static IXAudio2*            x_audio   = nullptr;
-static IXAudio2SourceVoice* voices[1] = { };
+static IXAudio2*            x_audio;
+static IXAudio2SourceVoice* sound_track;
 
-bool load_sound(uint32_t sound_id, const void* data, uint32_t size)
+bool load_sound_track(const void* data, uint32_t size)
 {
-    if (sound_id >= mstd::array_size(voices)) {
-        d_printf("Sound id %u exceeds supported maximum\n", sound_id);
+    assert( ! x_audio);
+    assert( ! sound_track);
+
+    if (FAILED(CoInitializeEx(nullptr, COINIT_MULTITHREADED))) {
+        d_printf("Failed to initialize COM\n");
         return false;
     }
 
-    if ( ! x_audio) {
-        if (FAILED(CoInitializeEx(nullptr, COINIT_MULTITHREADED))) {
-            d_printf("Failed to initialize COM\n");
-            return false;
-        }
+    if (FAILED(XAudio2Create(&x_audio, 0, XAUDIO2_DEFAULT_PROCESSOR))) {
+        d_printf("Failed to initialize XAudio2\n");
+        return false;
+    }
 
-        if (FAILED(XAudio2Create(&x_audio, 0, XAUDIO2_DEFAULT_PROCESSOR))) {
-            d_printf("Failed to initialize XAudio2\n");
-            return false;
-        }
-
-        IXAudio2MasteringVoice* mastering_voice;
-        if (FAILED(x_audio->CreateMasteringVoice(&mastering_voice))) {
-            d_printf("Failed to create mastering voice\n");
-            return false;
-        }
+    IXAudio2MasteringVoice* mastering_voice;
+    if (FAILED(x_audio->CreateMasteringVoice(&mastering_voice))) {
+        d_printf("Failed to create mastering voice\n");
+        return false;
     }
 
     constexpr uint32_t sampling_rate   = 44100;
@@ -113,25 +109,17 @@ bool load_sound(uint32_t sound_id, const void* data, uint32_t size)
         return false;
     }
 
-    voices[sound_id] = source_voice;
+    sound_track = source_voice;
 
     return true;
 }
 
-bool play_sound(uint32_t sound_id)
+bool play_sound_track()
 {
-    if (sound_id >= mstd::array_size(voices)) {
-        d_printf("Sound id %u exceeds supported maximum\n", sound_id);
-        return false;
-    }
+    assert(sound_track);
 
-    if ( ! voices[sound_id]) {
-        d_printf("Sound id %u was not allocated\n", sound_id);
-        return false;
-    }
-
-    if (FAILED(voices[sound_id]->Start(0))) {
-        d_printf("Failed to start sound %u\n", sound_id);
+    if (FAILED(sound_track->Start(0))) {
+        d_printf("Failed to start soundtrack\n");
         return false;
     }
 
