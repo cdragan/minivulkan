@@ -78,6 +78,7 @@ const char* format_string(VkFormat format)
 #define MAKE_STR(fmt) case fmt: return #fmt ;
         MAKE_STR(VK_FORMAT_A2B10G10R10_UNORM_PACK32)
         MAKE_STR(VK_FORMAT_A2R10G10B10_UNORM_PACK32)
+        MAKE_STR(VK_FORMAT_R16G16B16A16_UNORM)
         MAKE_STR(VK_FORMAT_A8B8G8R8_UNORM_PACK32)
         MAKE_STR(VK_FORMAT_B8G8R8A8_UNORM)
         MAKE_STR(VK_FORMAT_R8G8B8A8_UNORM)
@@ -445,6 +446,7 @@ static bool find_surface_format(VkPhysicalDevice phys_dev)
     static const VkFormat preferred_output_formats[] = {
         VK_FORMAT_A2B10G10R10_UNORM_PACK32,
         VK_FORMAT_A2R10G10B10_UNORM_PACK32,
+        VK_FORMAT_R16G16B16A16_UNORM,
         VK_FORMAT_A8B8G8R8_UNORM_PACK32,
         VK_FORMAT_B8G8R8A8_UNORM,
         VK_FORMAT_R8G8B8A8_UNORM,
@@ -808,7 +810,7 @@ bool DeviceMemoryHeap::init_heap_info()
             str_append(info, "host_cached, ");
         if (info[0])
             info[mstd::strlen(info) - 2] = 0;
-        d_printf("    type %d, heap %u (size %" PRIu64 " MB), flags 0x%x (%s)\n",
+        d_printf("    type %d: heap %u (size %" PRIu64 " MB), flags 0x%x (%s)\n",
                 i,
                 memory_type.heapIndex,
                 static_cast<uint64_t>(heap_size) / (1024u * 1024u),
@@ -1698,12 +1700,17 @@ bool HostFiller::fill_buffer(Buffer*            buffer,
                              const void*        data,
                              uint32_t           size)
 {
+    const bool is_host_writable = ! host_heap.get_heap_size();
+
+    if ( ! is_host_writable)
+        usage |= VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+
     if ( ! buffer->allocate(vk_device_heap,
                             size,
-                            usage | VK_BUFFER_USAGE_TRANSFER_DST_BIT))
+                            usage))
         return false;
 
-    if ( ! host_heap.get_heap_size()) {
+    if (is_host_writable) {
         assert(host_heap.get_memory_type() == buffer->get_memory_type());
 
         return buffer->cpu_fill(data, size);
