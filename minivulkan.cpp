@@ -78,12 +78,14 @@ const char* format_string(VkFormat format)
 #define MAKE_STR(fmt) case fmt: return #fmt ;
         MAKE_STR(VK_FORMAT_A2B10G10R10_UNORM_PACK32)
         MAKE_STR(VK_FORMAT_A2R10G10B10_UNORM_PACK32)
+        MAKE_STR(VK_FORMAT_R16G16B16A16_SFLOAT)
         MAKE_STR(VK_FORMAT_R16G16B16A16_UNORM)
         MAKE_STR(VK_FORMAT_A8B8G8R8_UNORM_PACK32)
         MAKE_STR(VK_FORMAT_B8G8R8A8_UNORM)
         MAKE_STR(VK_FORMAT_R8G8B8A8_UNORM)
         MAKE_STR(VK_FORMAT_B8G8R8_UNORM)
         MAKE_STR(VK_FORMAT_R8G8B8_UNORM)
+        MAKE_STR(VK_FORMAT_B8G8R8A8_SRGB)
         default: break;
     }
     return "unrecognized";
@@ -443,10 +445,11 @@ static bool find_surface_format(VkPhysicalDevice phys_dev)
     if (res != VK_SUCCESS && res != VK_INCOMPLETE)
         return false;
 
-    static const VkFormat preferred_output_formats[] = {
+    static const uint8_t preferred_output_formats[] = {
         VK_FORMAT_A2B10G10R10_UNORM_PACK32,
         VK_FORMAT_A2R10G10B10_UNORM_PACK32,
         VK_FORMAT_R16G16B16A16_UNORM,
+        VK_FORMAT_R16G16B16A16_SFLOAT,
         VK_FORMAT_A8B8G8R8_UNORM_PACK32,
         VK_FORMAT_B8G8R8A8_UNORM,
         VK_FORMAT_R8G8B8A8_UNORM,
@@ -456,7 +459,7 @@ static bool find_surface_format(VkPhysicalDevice phys_dev)
 
     for (uint32_t i_pref = 0; i_pref < mstd::array_size(preferred_output_formats); i_pref++) {
 
-        const VkFormat pref_format = preferred_output_formats[i_pref];
+        const VkFormat pref_format = static_cast<VkFormat>(preferred_output_formats[i_pref]);
 
         for (uint32_t i_cur = 0; i_cur < num_formats; i_cur++) {
             if (formats[i_cur].format == pref_format) {
