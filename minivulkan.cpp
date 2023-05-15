@@ -20,6 +20,11 @@
 #define __STDC_FORMAT_MACROS
 #include <inttypes.h>
 
+#if defined(_WIN32) && defined(NOSTDLIB) && defined(_M_AMD64)
+#   undef PRIx64
+#   define PRIx64 "Ix"
+#endif
+
 // Workaround Windows headers
 #ifdef OPTIONAL
 #   undef OPTIONAL
@@ -813,10 +818,10 @@ bool DeviceMemoryHeap::init_heap_info()
             str_append(info, "host_cached, ");
         if (info[0])
             info[mstd::strlen(info) - 2] = 0;
-        d_printf("    type %d: heap %u (size %" PRIu64 " MB), flags 0x%x (%s)\n",
+        d_printf("    type %d: heap %u (size %u MB), flags 0x%x (%s)\n",
                 i,
                 memory_type.heapIndex,
-                static_cast<uint64_t>(heap_size) / (1024u * 1024u),
+                static_cast<unsigned>(static_cast<uint64_t>(heap_size) / (1024u * 1024u)),
                 property_flags,
                 info);
 #endif
