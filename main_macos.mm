@@ -53,7 +53,7 @@ bool load_sound_track(const void* data, uint32_t size)
     NSData *sound_data = [NSData dataWithBytes: data
                                  length:        size];
     sound_track = [[AVAudioPlayer alloc] initWithData: sound_data
-                                        error:        nullptr];
+                                         error:        nullptr];
 
     if ( ! sound_track) {
         d_printf("Failed to load soundtrack\n");
