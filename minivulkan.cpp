@@ -1855,6 +1855,44 @@ void send_viewport_and_scissor(VkCommandBuffer cmd_buf,
     vkCmdSetScissor(cmd_buf, 0, 1, &scissor);
 }
 
+#if !defined(NDEBUG) || defined(TIME_STATS)
+static void update_time_stats(uint64_t draw_start_time_ms)
+{
+    const uint64_t  draw_end_time_ms = get_current_time_ms();
+    static uint64_t last_draw_end_time_ms;
+    static uint64_t stat_start_time_ms;
+
+    if (last_draw_end_time_ms) {
+        const uint64_t draw_time_ms = draw_end_time_ms - draw_start_time_ms;
+
+        static uint64_t total_draw_time_ms;
+        static uint32_t num_frames;
+
+        total_draw_time_ms += draw_time_ms;
+        ++num_frames;
+
+        const uint64_t stat_time = draw_end_time_ms - stat_start_time_ms;
+        if (stat_time > 1000) {
+            const double   fps              = 1000.0 * num_frames / stat_time;
+            const unsigned avg_draw_time_ms = static_cast<unsigned>(total_draw_time_ms / num_frames);
+            const unsigned load             = static_cast<unsigned>(100 * total_draw_time_ms / stat_time);
+
+            d_printf("FPS: %.1f, avg draw %u ms, load %u%%\n", fps, avg_draw_time_ms, load);
+
+            stat_start_time_ms = draw_end_time_ms;
+            total_draw_time_ms = 0;
+            num_frames         = 0;
+        }
+    }
+    else
+        stat_start_time_ms = draw_end_time_ms;
+
+    last_draw_end_time_ms = draw_end_time_ms;
+}
+#else
+#define update_time_stats() (void)0
+#endif
+
 bool init_vulkan(Window* w)
 {
     if ( ! load_vulkan())
@@ -1947,14 +1985,16 @@ bool draw_frame()
             return false;
     }
 
-    const uint64_t  cur_abs_time  = get_current_time_ms();
-    static uint64_t base_abs_time = 0;
-    if ( ! base_abs_time)
-        base_abs_time = cur_abs_time;
+    const uint64_t  cur_abs_time_ms  = get_current_time_ms();
+    static uint64_t base_abs_time_ms = 0;
+    if ( ! base_abs_time_ms)
+        base_abs_time_ms = cur_abs_time_ms;
 
-    if ( ! draw_frame(image_idx, cur_abs_time - base_abs_time, vk_fens[fen_queue]))
+    if ( ! draw_frame(image_idx, cur_abs_time_ms - base_abs_time_ms, vk_fens[fen_queue]))
         return false;
     fence_set[image_idx] = true;
+
+    update_time_stats(cur_abs_time_ms);
 
     static VkPresentInfoKHR present_info = {
         VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
