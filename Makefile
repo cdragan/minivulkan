@@ -332,6 +332,11 @@ ifeq ($(UNAME), Darwin)
     endif
 endif
 
+time_stats ?= 0
+ifeq ($(time_stats), 1)
+    CFLAGS += -DTIME_STATS=1
+endif
+
 ifdef VULKAN_SDK
     CFLAGS += -I$(VULKAN_SDK)/include
 endif

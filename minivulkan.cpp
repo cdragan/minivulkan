@@ -10,19 +10,18 @@
 #ifndef NDEBUG
 #   include <stdlib.h>
 #endif
+#if defined(NDEBUG) && defined(TIME_STATS)
+#   if !defined(_WIN32) || !defined(NOSTDLIB)
+#       include <stdio.h>
+#   else
+#       define printf wsprintfA
+#   endif
+#endif
 
 #ifdef _WIN32
 #   define dlsym GetProcAddress
 #else
 #   include <dlfcn.h>
-#endif
-
-#define __STDC_FORMAT_MACROS
-#include <inttypes.h>
-
-#if defined(_WIN32) && defined(NOSTDLIB) && defined(_M_AMD64)
-#   undef PRIx64
-#   define PRIx64 "Ix"
 #endif
 
 // Workaround Windows headers
@@ -1877,7 +1876,7 @@ static void update_time_stats(uint64_t draw_start_time_ms)
             const unsigned avg_draw_time_ms = static_cast<unsigned>(total_draw_time_ms / num_frames);
             const unsigned load             = static_cast<unsigned>(100 * total_draw_time_ms / stat_time);
 
-            d_printf("FPS: %.1f, avg draw %u ms, load %u%%\n", fps, avg_draw_time_ms, load);
+            printf("FPS: %.1f, avg draw %u ms, load %u%%\n", fps, avg_draw_time_ms, load);
 
             stat_start_time_ms = draw_end_time_ms;
             total_draw_time_ms = 0;
@@ -1890,7 +1889,7 @@ static void update_time_stats(uint64_t draw_start_time_ms)
     last_draw_end_time_ms = draw_end_time_ms;
 }
 #else
-#define update_time_stats() (void)0
+#define update_time_stats(time) (void)0
 #endif
 
 bool init_vulkan(Window* w)
