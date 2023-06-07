@@ -41,6 +41,12 @@ constexpr T max(T a, T b)
 }
 
 template<typename T>
+constexpr T align_down(T value, T alignment)
+{
+    return value - (value % alignment);
+}
+
+template<typename T>
 constexpr T align_up(T value, T alignment)
 {
     return ((value - 1) / alignment) * alignment + alignment;

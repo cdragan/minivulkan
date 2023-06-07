@@ -76,7 +76,10 @@ lib_src_files += mstdc.cpp
 lib_src_files += rng.cpp
 lib_src_files += vmath.cpp
 
+threed_src_files += host_filler.cpp
+threed_src_files += memory_heap.cpp
 threed_src_files += minivulkan.cpp
+threed_src_files += resource.cpp
 threed_src_files += shaders.cpp
 threed_src_files += sound.cpp
 

@@ -80,7 +80,6 @@
     X(vkAllocateMemory) \
     X(vkFreeMemory) \
     X(vkMapMemory) \
-    X(vkUnmapMemory) \
     X(vkFlushMappedMemoryRanges) \
     X(vkCreateImage) \
     X(vkDestroyImage) \
@@ -89,9 +88,7 @@
     X(vkCreateImageView) \
     X(vkDestroyImageView) \
     X(vkCreateBuffer) \
-    X(vkDestroyBuffer) \
     X(vkCreateBufferView) \
-    X(vkDestroyBufferView) \
     X(vkGetBufferMemoryRequirements) \
     X(vkBindBufferMemory) \
     X(vkCreateSampler) \
@@ -191,7 +188,6 @@ enum e_device_functions {
 #define vkAllocateMemory                          SELECT_VK_FUNCTION(device,   vkAllocateMemory)
 #define vkFreeMemory                              SELECT_VK_FUNCTION(device,   vkFreeMemory)
 #define vkMapMemory                               SELECT_VK_FUNCTION(device,   vkMapMemory)
-#define vkUnmapMemory                             SELECT_VK_FUNCTION(device,   vkUnmapMemory)
 #define vkFlushMappedMemoryRanges                 SELECT_VK_FUNCTION(device,   vkFlushMappedMemoryRanges)
 #define vkCreateImage                             SELECT_VK_FUNCTION(device,   vkCreateImage)
 #define vkDestroyImage                            SELECT_VK_FUNCTION(device,   vkDestroyImage)
@@ -200,9 +196,7 @@ enum e_device_functions {
 #define vkCreateImageView                         SELECT_VK_FUNCTION(device,   vkCreateImageView)
 #define vkDestroyImageView                        SELECT_VK_FUNCTION(device,   vkDestroyImageView)
 #define vkCreateBuffer                            SELECT_VK_FUNCTION(device,   vkCreateBuffer)
-#define vkDestroyBuffer                           SELECT_VK_FUNCTION(device,   vkDestroyBuffer)
 #define vkCreateBufferView                        SELECT_VK_FUNCTION(device,   vkCreateBufferView)
-#define vkDestroyBufferView                       SELECT_VK_FUNCTION(device,   vkDestroyBufferView)
 #define vkGetBufferMemoryRequirements             SELECT_VK_FUNCTION(device,   vkGetBufferMemoryRequirements)
 #define vkBindBufferMemory                        SELECT_VK_FUNCTION(device,   vkBindBufferMemory)
 #define vkCreateSampler                           SELECT_VK_FUNCTION(device,   vkCreateSampler)

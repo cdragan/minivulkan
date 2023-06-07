@@ -1,0 +1,108 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2021-2023 Chris Dragan
+
+#include "usage.h"
+
+#include "vulkan_functions.h"
+
+#include <assert.h>
+
+class MemoryHeap;
+
+class Resource {
+    public:
+        constexpr Resource()                 = default;
+        Resource(const Resource&)            = delete;
+        Resource& operator=(const Resource&) = delete;
+
+        bool         allocated() const { return !! alloc_size; }
+        VkDeviceSize size()      const { return alloc_size; }
+
+        template<typename T>
+        T* get_ptr() { return static_cast<T*>(get_raw_ptr()); }
+
+        template<typename T>
+        const T* get_ptr() const { return static_cast<const T*>(get_raw_ptr()); }
+
+    protected:
+        void* get_raw_ptr() const;
+
+        MemoryHeap*  owning_heap = nullptr;
+        VkDeviceSize heap_offset = 0;
+        VkDeviceSize alloc_size  = 0;
+};
+
+struct ImageInfo {
+    uint32_t           width;
+    uint32_t           height;
+    VkFormat           format;
+    uint32_t           mip_levels;
+    VkImageAspectFlags aspect;
+    VkImageUsageFlags  usage;
+    Usage              heap_usage;
+};
+
+class Image: public Resource {
+    public:
+        VkImageLayout layout = VK_IMAGE_LAYOUT_UNDEFINED;
+
+        constexpr Image()              = default;
+        Image(const Image&)            = delete;
+        Image& operator=(const Image&) = delete;
+
+        const VkImage& get_image() const { return image; }
+        VkImageView    get_view()  const { return view; }
+
+        bool allocate(const ImageInfo& image_info);
+        void destroy();
+
+        struct Transition {
+            VkPipelineStageFlags src_stage;
+            VkAccessFlags        src_access;
+            VkPipelineStageFlags dest_stage;
+            VkAccessFlags        dest_access;
+            VkImageLayout        new_layout;
+        };
+
+        void set_image_layout(VkCommandBuffer buf, const Transition& transition);
+
+        // Used with swapchains
+        void set_image(VkImage new_image) {
+            assert(image == VK_NULL_HANDLE);
+            image  = new_image;
+            aspect = VK_IMAGE_ASPECT_COLOR_BIT;
+        }
+        void set_view(VkImageView new_view) {
+            assert(view == VK_NULL_HANDLE);
+            view = new_view;
+        }
+
+    private:
+        VkImage            image      = VK_NULL_HANDLE;
+        VkImageView        view       = VK_NULL_HANDLE;
+        VkFormat           format     = VK_FORMAT_UNDEFINED;
+        VkImageAspectFlags aspect     = VK_IMAGE_ASPECT_COLOR_BIT;
+        Usage              heap_usage = Usage::fixed;
+        uint32_t           mip_levels = 0;
+};
+
+class Buffer: public Resource {
+    public:
+        constexpr Buffer()               = default;
+        Buffer(const Buffer&)            = delete;
+        Buffer& operator=(const Buffer&) = delete;
+
+        const VkBuffer& get_buffer() const { return buffer; }
+        VkBufferView    get_view()   const { return view; }
+
+        bool allocate(Usage              heap_usage,
+                      uint32_t           size,
+                      VkFormat           format,
+                      VkBufferUsageFlags usage);
+        void cpu_fill(const void* data, uint32_t size);
+        bool flush();
+
+    private:
+        VkBuffer     buffer = VK_NULL_HANDLE;
+        VkBufferView view   = VK_NULL_HANDLE;
+};

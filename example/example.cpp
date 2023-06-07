@@ -4,6 +4,8 @@
 #include "example.h"
 
 #include "../gui.h"
+#include "../host_filler.h"
+#include "../memory_heap.h"
 #include "../minivulkan.h"
 #include "../mstdc.h"
 #include "../shaders.h"
@@ -16,6 +18,8 @@ constexpr float image_ratio = 0.0f;
 float    user_roundedness = 111.0f / 127.0f;
 uint32_t user_tess_level  = 12;
 bool     user_wireframe   = false;
+
+static HostFiller filler;
 
 enum WhatGeometry {
     geom_cube,
@@ -38,15 +42,6 @@ uint32_t check_device_features()
     missing_features += check_feature(&vk_features.features.fillModeNonSolid);
 
     return missing_features;
-}
-
-static constexpr uint32_t coherent_heap_size = 1u * 1024u * 1024u;
-
-static DeviceMemoryHeap vk_coherent_heap{DeviceMemoryHeap::coherent_memory};
-
-bool create_additional_heaps()
-{
-    return vk_coherent_heap.allocate_heap(coherent_heap_size);
 }
 
 static VkPipelineLayout vk_gr_pipeline_layout = VK_NULL_HANDLE;
@@ -428,10 +423,14 @@ static bool create_pipelines()
         return create_patch_graphics_pipeline();
 }
 
+static CommandBuffers<1> cmd_buf;
+
 static bool create_cube(Buffer* vertex_buffer, Buffer* index_buffer)
 {
-    HostFiller filler;
-    if ( ! filler.init(0x10000))
+    if ( ! cmd_buf.pool && ! allocate_command_buffers(&cmd_buf))
+        return false;
+
+    if ( ! reset_and_begin_command_buffer(cmd_buf.bufs[0]))
         return false;
 
     static const Vertex vertices[] = {
@@ -461,8 +460,13 @@ static bool create_cube(Buffer* vertex_buffer, Buffer* index_buffer)
         { { -127, -127, -127 }, { -127,    0,    0 } },
     };
 
-    if ( ! filler.fill_buffer(vertex_buffer, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
-                              vertices, sizeof(vertices)))
+    if ( ! filler.fill_buffer(cmd_buf.bufs[0],
+                              vertex_buffer,
+                              Usage::fixed,
+                              VK_FORMAT_UNDEFINED,
+                              VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+                              vertices,
+                              sizeof(vertices)))
         return false;
 
     static const uint16_t indices[] = {
@@ -480,18 +484,24 @@ static bool create_cube(Buffer* vertex_buffer, Buffer* index_buffer)
         20, 23, 21,
     };
 
-    if ( ! filler.fill_buffer(index_buffer, VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
-                              indices, sizeof(indices)))
+    if ( ! filler.fill_buffer(cmd_buf.bufs[0],
+                              index_buffer,
+                              Usage::fixed,
+                              VK_FORMAT_UNDEFINED,
+                              VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
+                              indices,
+                              sizeof(indices)))
         return false;
 
-    filler.send_to_gpu();
-    return filler.wait_until_done();
+    return send_to_device_and_wait(cmd_buf.bufs[0]);
 }
 
 static bool create_cubic_patch(Buffer* vertex_buffer, Buffer* index_buffer)
 {
-    HostFiller filler;
-    if ( ! filler.init(0x10000))
+    if ( ! cmd_buf.pool && ! allocate_command_buffers(&cmd_buf))
+        return false;
+
+    if ( ! reset_and_begin_command_buffer(cmd_buf.bufs[0]))
         return false;
 
     static const Vertex vertices[] = {
@@ -505,8 +515,13 @@ static bool create_cubic_patch(Buffer* vertex_buffer, Buffer* index_buffer)
         { { -127, -127, -127 }, { } },
     };
 
-    if ( ! filler.fill_buffer(vertex_buffer, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
-                              vertices, sizeof(vertices)))
+    if ( ! filler.fill_buffer(cmd_buf.bufs[0],
+                              vertex_buffer,
+                              Usage::fixed,
+                              VK_FORMAT_UNDEFINED,
+                              VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+                              vertices,
+                              sizeof(vertices)))
         return false;
 
     static const uint16_t indices[] = {
@@ -516,18 +531,24 @@ static bool create_cubic_patch(Buffer* vertex_buffer, Buffer* index_buffer)
         4, 4, 7, 7,
     };
 
-    if ( ! filler.fill_buffer(index_buffer, VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
-                              indices, sizeof(indices)))
+    if ( ! filler.fill_buffer(cmd_buf.bufs[0],
+                              index_buffer,
+                              Usage::fixed,
+                              VK_FORMAT_UNDEFINED,
+                              VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
+                              indices,
+                              sizeof(indices)))
         return false;
 
-    filler.send_to_gpu();
-    return filler.wait_until_done();
+    return send_to_device_and_wait(cmd_buf.bufs[0]);
 }
 
 static bool create_quadratic_patch(Buffer* vertex_buffer, Buffer* index_buffer)
 {
-    HostFiller filler;
-    if ( ! filler.init(0x10000))
+    if ( ! cmd_buf.pool && ! allocate_command_buffers(&cmd_buf))
+        return false;
+
+    if ( ! reset_and_begin_command_buffer(cmd_buf.bufs[0]))
         return false;
 
     static const Vertex vertices[] = {
@@ -600,8 +621,13 @@ static bool create_quadratic_patch(Buffer* vertex_buffer, Buffer* index_buffer)
         { {  127, -127,  127 }, {} },
     };
 
-    if ( ! filler.fill_buffer(vertex_buffer, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
-                              vertices, sizeof(vertices)))
+    if ( ! filler.fill_buffer(cmd_buf.bufs[0],
+                              vertex_buffer,
+                              Usage::fixed,
+                              VK_FORMAT_UNDEFINED,
+                              VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+                              vertices,
+                              sizeof(vertices)))
         return false;
 
     static const uint16_t indices[] = {
@@ -685,12 +711,16 @@ static bool create_quadratic_patch(Buffer* vertex_buffer, Buffer* index_buffer)
         58, 58, 57,
     };
 
-    if ( ! filler.fill_buffer(index_buffer, VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
-                              indices, sizeof(indices)))
+    if ( ! filler.fill_buffer(cmd_buf.bufs[0],
+                              index_buffer,
+                              Usage::fixed,
+                              VK_FORMAT_UNDEFINED,
+                              VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
+                              indices,
+                              sizeof(indices)))
         return false;
 
-    filler.send_to_gpu();
-    return filler.wait_until_done();
+    return send_to_device_and_wait(cmd_buf.bufs[0]);
 }
 
 bool init_assets()
@@ -782,19 +812,19 @@ bool draw_frame(uint32_t image_idx, uint64_t time_ms, VkFence queue_fence)
         vmath::vec4 params;           // shader-specific parameters
         vmath::vec4 lights[1];        // light positions in world space
     };
-    static uint32_t     slot_size;
-    static Map<uint8_t> host_shader_data;
+    static uint32_t slot_size;
+    static uint8_t* host_shader_data;
     if ( ! shader_data.allocated()) {
         slot_size = mstd::align_up(static_cast<uint32_t>(sizeof(UniformBuffer)),
                                    static_cast<uint32_t>(vk_phys_props.properties.limits.minUniformBufferOffsetAlignment));
         slot_size = mstd::align_up(slot_size,
                                    static_cast<uint32_t>(vk_phys_props.properties.limits.nonCoherentAtomSize));
         const uint32_t total_size = slot_size * mstd::array_size(desc_set);
-        if ( ! shader_data.allocate(vk_coherent_heap, total_size, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT))
+        if ( ! shader_data.allocate(Usage::dynamic, total_size, VK_FORMAT_UNDEFINED, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT))
             return false;
 
-        host_shader_data = Map<uint8_t>(&vk_coherent_heap, 0, total_size);
-        if ( ! host_shader_data.mapped())
+        host_shader_data = shader_data.get_ptr<uint8_t>();
+        if ( ! host_shader_data)
             return false;
     }
 
@@ -823,7 +853,7 @@ bool draw_frame(uint32_t image_idx, uint64_t time_ms, VkFence queue_fence)
     uniform_data->lights[0]       = vmath::vec4(5.0f, 5.0f, -5.0f, 1.0f);
 
     // Send matrices to GPU
-    if ( ! host_shader_data.flush(slot_size * image_idx, slot_size))
+    if ( ! shader_data.flush())
         return false;
 
     // Update descriptor set

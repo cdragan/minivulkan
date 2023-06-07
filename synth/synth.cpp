@@ -5,6 +5,7 @@
 #include "../gui.h"
 #include "../minivulkan.h"
 #include "../mstdc.h"
+#include "../resource.h"
 #include "../shaders.h"
 #include "../vmath.h"
 
@@ -51,15 +52,6 @@ uint32_t check_device_features()
     missing_features += check_feature(&vk_features.features.shaderInt16);
 
     return missing_features;
-}
-
-static constexpr uint32_t coherent_heap_size = 1u * 1024u * 1024u;
-
-static DeviceMemoryHeap vk_coherent_heap{DeviceMemoryHeap::coherent_memory};
-
-bool create_additional_heaps()
-{
-    return vk_coherent_heap.allocate_heap(coherent_heap_size);
 }
 
 enum DescSetLayouts {

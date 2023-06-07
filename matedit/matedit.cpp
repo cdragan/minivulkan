@@ -4,6 +4,7 @@
 #include "../d_printf.h"
 #include "../gui.h"
 #include "../minivulkan.h"
+#include "../resource.h"
 #include "../mstdc.h"
 #include "../shaders.h"
 #include "../vmath.h"
@@ -33,22 +34,15 @@ static Viewport viewports[] = {
     { "3D View",    true }
 };
 
-const unsigned gui_num_descriptors = mstd::array_size(viewports) * max_swapchain_size;
+constexpr unsigned gui_num_descriptors = mstd::array_size(viewports) * max_swapchain_size;
 
 static bool viewports_changed = true;
-
-static DeviceMemoryHeap viewport_heap{DeviceMemoryHeap::device_memory};
 
 static VkSampler viewport_sampler;
 
 uint32_t check_device_features()
 {
     return 0;
-}
-
-bool create_additional_heaps()
-{
-    return true;
 }
 
 static bool create_samplers()
@@ -112,64 +106,6 @@ static bool destroy_viewports()
     return true;
 }
 
-static constexpr VkDeviceSize viewport_error = ~VkDeviceSize(0);
-
-static VkDeviceSize create_viewport_images(uint32_t i_view, ImVec2 content_size)
-{
-    Viewport& viewport = viewports[i_view];
-
-    if (viewport.width)
-        return 0;
-
-    static ImageInfo color_info {
-        0, // width
-        0, // height
-        VK_FORMAT_UNDEFINED,
-        1, // mip_levels
-        VK_IMAGE_ASPECT_COLOR_BIT,
-        VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT
-    };
-
-    color_info.width  = static_cast<uint32_t>(content_size.x);
-    color_info.height = static_cast<uint32_t>(content_size.y);
-    color_info.format = swapchain_create_info.imageFormat;
-
-    static ImageInfo depth_info {
-        0, // width
-        0, // height
-        VK_FORMAT_UNDEFINED,
-        1, // mip_levels
-        VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT,
-        VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT
-    };
-
-    depth_info.width  = static_cast<uint32_t>(content_size.x);
-    depth_info.height = static_cast<uint32_t>(content_size.y);
-    depth_info.format = vk_depth_format;
-
-    VkDeviceSize heap_size = 0;
-
-    for (uint32_t i_img = 0; i_img < vk_num_swapchain_images; i_img++) {
-
-        if ( ! viewport.color_buffer[i_img].create(color_info, VK_IMAGE_TILING_OPTIMAL))
-            return viewport_error;
-
-        heap_size += mstd::align_up(viewport.color_buffer[i_img].size(),
-                                    VkDeviceSize(vk_phys_props.properties.limits.minMemoryMapAlignment));
-
-        if ( ! viewport.depth_buffer[i_img].create(depth_info, VK_IMAGE_TILING_OPTIMAL))
-            return viewport_error;
-
-        heap_size += mstd::align_up(viewport.depth_buffer[i_img].size(),
-                                    VkDeviceSize(vk_phys_props.properties.limits.minMemoryMapAlignment));
-    }
-
-    viewport.width  = static_cast<uint32_t>(content_size.x);
-    viewport.height = static_cast<uint32_t>(content_size.y);
-
-    return heap_size;
-}
-
 static bool allocate_framebuffer(Viewport& viewport, uint32_t i_img)
 {
     static VkImageView attachments[2];
@@ -199,11 +135,8 @@ static bool allocate_framebuffer(Viewport& viewport, uint32_t i_img)
     return res == VK_SUCCESS;
 }
 
-static bool allocate_viewports(VkDeviceSize heap_size)
+static bool allocate_viewports()
 {
-    if ( ! viewport_heap.reserve(heap_size))
-        return false;
-
     for (Viewport& viewport : viewports) {
         if ( ! viewport.enabled)
             continue;
@@ -212,10 +145,38 @@ static bool allocate_viewports(VkDeviceSize heap_size)
             if (viewport.color_buffer[i_img].get_view())
                 continue;
 
-            if ( ! viewport.color_buffer[i_img].allocate(viewport_heap))
+            static ImageInfo color_info {
+                0, // width
+                0, // height
+                VK_FORMAT_UNDEFINED,
+                1, // mip_levels
+                VK_IMAGE_ASPECT_COLOR_BIT,
+                VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+                Usage::device_temporary
+            };
+
+            color_info.width  = viewport.width;
+            color_info.height = viewport.height;
+            color_info.format = swapchain_create_info.imageFormat;
+
+            static ImageInfo depth_info {
+                0, // width
+                0, // height
+                VK_FORMAT_UNDEFINED,
+                1, // mip_levels
+                VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT,
+                VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
+                Usage::device_temporary
+            };
+
+            depth_info.width  = viewport.width;
+            depth_info.height = viewport.height;
+            depth_info.format = vk_depth_format;
+
+            if ( ! viewport.color_buffer[i_img].allocate(color_info))
                 return false;
 
-            if ( ! viewport.depth_buffer[i_img].allocate(viewport_heap))
+            if ( ! viewport.depth_buffer[i_img].allocate(depth_info))
                 return false;
 
             if ( ! allocate_framebuffer(viewport, i_img))
@@ -347,13 +308,10 @@ static bool create_gui_frame(uint32_t image_idx)
     draw_material_settings();
     draw_shader_editor();
 
-    /*
     if (viewports_changed)
         if ( ! destroy_viewports())
             return false;
     viewports_changed = false;
-
-    VkDeviceSize heap_size = 0;
 
     for (uint32_t i = 0; i < mstd::array_size(viewports); i++) {
         if ( ! viewports[i].enabled)
@@ -365,10 +323,8 @@ static bool create_gui_frame(uint32_t image_idx)
         {
             const ImVec2 content_size = ImGui::GetContentRegionAvail();
 
-            VkDeviceSize size = create_viewport_images(i, content_size);
-            if (size == viewport_error)
-                return false;
-            heap_size += size;
+            viewports[i].width  = static_cast<uint32_t>(content_size.x);
+            viewports[i].height = static_cast<uint32_t>(content_size.y);
 
             if ((content_size.x != viewports[i].width) || (content_size.y != viewports[i].height))
                 viewports_changed = true;
@@ -380,9 +336,8 @@ static bool create_gui_frame(uint32_t image_idx)
         ImGui::End();
     }
 
-    if (heap_size && ! allocate_viewports(heap_size))
+    if ( ! allocate_viewports())
         return false;
-    */
 
     return true;
 }

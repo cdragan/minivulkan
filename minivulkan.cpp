@@ -2,11 +2,15 @@
 // Copyright (c) 2021-2022 Chris Dragan
 
 #include "minivulkan.h"
+
 #include "d_printf.h"
 #include "gui.h"
+#include "memory_heap.h"
 #include "mstdc.h"
+#include "resource.h"
 #include "vmath.h"
 #include "vulkan_extensions.h"
+
 #ifndef NDEBUG
 #   include <stdlib.h>
 #endif
@@ -764,523 +768,6 @@ static bool create_device()
     return true;
 }
 
-uint32_t DeviceMemoryHeap::vk_memory_type[3] = { ~0u, 0, 0 };
-
-static constexpr uint32_t alloc_heap_size = 64u * 1024u * 1024u;
-
-static DeviceMemoryHeap vk_device_heap;
-
-#ifndef NDEBUG
-static void str_append(char* buf, const char* str)
-{
-    while (*buf)
-        ++buf;
-
-    while (*str)
-        *(buf++) = *(str++);
-
-    *buf = 0;
-}
-#endif
-
-bool DeviceMemoryHeap::init_heap_info()
-{
-    if (vk_memory_type[device_memory] != ~0u)
-        return true;
-
-    VkPhysicalDeviceMemoryProperties mem_props;
-    vkGetPhysicalDeviceMemoryProperties(vk_phys_dev, &mem_props);
-
-    int device_type_index   = -1;
-    int host_type_index     = -1;
-    int coherent_type_index = -1;
-
-    VkDeviceSize device_heap_size = 0;
-
-    d_printf("Memory heaps\n");
-    for (int i = 0; i < static_cast<int>(mem_props.memoryTypeCount); i++) {
-
-        const VkMemoryType& memory_type    = mem_props.memoryTypes[i];
-        const uint32_t      property_flags = memory_type.propertyFlags;
-        const VkDeviceSize  heap_size      = mem_props.memoryHeaps[memory_type.heapIndex].size;
-
-#ifndef NDEBUG
-        static char info[64];
-        info[0] = 0;
-        if (property_flags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)
-            str_append(info, "device, ");
-        if (property_flags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT)
-            str_append(info, "host_visible, ");
-        if (property_flags & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)
-            str_append(info, "host_coherent, ");
-        if (property_flags & VK_MEMORY_PROPERTY_HOST_CACHED_BIT)
-            str_append(info, "host_cached, ");
-        if (info[0])
-            info[mstd::strlen(info) - 2] = 0;
-        d_printf("    type %d: heap %u (size %u MB), flags 0x%x (%s)\n",
-                i,
-                memory_type.heapIndex,
-                static_cast<unsigned>(static_cast<uint64_t>(heap_size) / (1024u * 1024u)),
-                property_flags,
-                info);
-#endif
-
-        if ((property_flags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) &&
-            (heap_size > device_heap_size)) {
-
-            device_type_index = i;
-            device_heap_size  = heap_size;
-        }
-
-        constexpr uint32_t host_flags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
-                                      | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
-                                      | VK_MEMORY_PROPERTY_HOST_CACHED_BIT;
-        if ((property_flags & host_flags) == host_flags) {
-            if ((property_flags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) ||
-                (host_type_index == -1))
-
-                host_type_index = i;
-        }
-
-        constexpr uint32_t coherent_flags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
-                                          | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
-        if ((property_flags & coherent_flags) == coherent_flags) {
-            if (property_flags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) {
-                if (heap_size >= device_heap_size) {
-                    device_type_index = i;
-                    device_heap_size  = heap_size;
-                }
-
-                coherent_type_index = i;
-            }
-            else if (coherent_type_index == -1)
-                coherent_type_index = i;
-        }
-    }
-
-    if (host_type_index == -1) {
-        if (coherent_type_index != -1)
-            host_type_index = coherent_type_index;
-        else {
-            d_printf("Could not find coherent and cached host memory type\n");
-            return false;
-        }
-    }
-
-    vk_memory_type[device_memory]   = static_cast<uint32_t>(device_type_index);
-    vk_memory_type[host_memory]     = static_cast<uint32_t>(host_type_index);
-    vk_memory_type[coherent_memory] = static_cast<uint32_t>(coherent_type_index);
-
-    return true;
-}
-
-bool DeviceMemoryHeap::allocate_heap_once(const VkMemoryRequirements& requirements)
-{
-    if (memory != VK_NULL_HANDLE)
-        return true;
-
-    return allocate_heap(mstd::align_up(requirements.size, requirements.alignment));
-}
-
-bool DeviceMemoryHeap::allocate_heap(VkDeviceSize size)
-{
-    assert(memory         == VK_NULL_HANDLE);
-    assert(next_free_offs == 0);
-    assert(heap_size      == 0);
-
-    if ( ! init_heap_info())
-        return false;
-
-    const uint32_t memory_type = vk_memory_type[memory_location];
-
-    size = mstd::align_up(size, VkDeviceSize(vk_phys_props.properties.limits.minMemoryMapAlignment));
-
-    static VkMemoryAllocateInfo alloc_info = {
-        VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
-        nullptr,
-        0,  // allocationSize
-        0   // memoryTypeIndex
-    };
-    alloc_info.allocationSize  = size;
-    alloc_info.memoryTypeIndex = memory_type;
-
-    const VkResult res = CHK(vkAllocateMemory(vk_dev, &alloc_info, nullptr, &memory));
-    if (res != VK_SUCCESS)
-        return false;
-
-    heap_size = size;
-    d_printf("Allocated heap size 0x%" PRIx64 " bytes with memory type %u\n",
-            static_cast<uint64_t>(size), memory_type);
-
-    return true;
-}
-
-void DeviceMemoryHeap::free_heap()
-{
-    if (memory) {
-        vkFreeMemory(vk_dev, memory, nullptr);
-
-        memory         = VK_NULL_HANDLE;
-        next_free_offs = 0;
-        heap_size      = 0;
-    }
-}
-
-bool DeviceMemoryHeap::reserve(VkDeviceSize size)
-{
-    if (size > heap_size) {
-        free_heap();
-        return allocate_heap(size);
-    }
-    else
-        reset_heap();
-
-    return true;
-}
-
-bool DeviceMemoryHeap::allocate_memory(const VkMemoryRequirements& requirements,
-                                       VkDeviceSize*               offset)
-{
-    const VkDeviceSize alignment = mstd::align_up(requirements.alignment,
-                                                  VkDeviceSize(vk_phys_props.properties.limits.minMemoryMapAlignment));
-    const VkDeviceSize aligned_offs = mstd::align_up(next_free_offs, alignment);
-    assert(next_free_offs || ! aligned_offs);
-    assert(aligned_offs >= next_free_offs);
-    assert(aligned_offs % alignment == 0);
-
-    if (aligned_offs + requirements.size > heap_size) {
-        d_printf("Not enough device memory\n");
-        d_printf("Surface size 0x%" PRIx64 ", used heap size 0x%" PRIx64 ", max heap size 0x%" PRIx64 "\n",
-                static_cast<uint64_t>(requirements.size),
-                static_cast<uint64_t>(aligned_offs),
-                static_cast<uint64_t>(heap_size));
-        return false;
-    }
-
-    *offset        = aligned_offs;
-    next_free_offs = aligned_offs + requirements.size;
-
-    return true;
-}
-
-MapBase::MapBase(DeviceMemoryHeap* heap, VkDeviceSize offset, VkDeviceSize size)
-{
-    assert( ! heap->mapped);
-    assert((offset % vk_phys_props.properties.limits.minMemoryMapAlignment) == 0);
-    assert((offset % vk_phys_props.properties.limits.nonCoherentAtomSize) == 0);
-
-    const VkDeviceSize aligned_size = mstd::align_up(size,
-            VkDeviceSize(vk_phys_props.properties.limits.minMemoryMapAlignment));
-
-    void* ptr;
-    const VkResult res = CHK(vkMapMemory(vk_dev, heap->get_memory(), offset, aligned_size, 0, &ptr));
-    if (res == VK_SUCCESS) {
-        mapped_heap   = heap;
-        mapped_ptr    = ptr;
-        mapped_offset = offset;
-        mapped_size   = size;
-        heap->mapped  = true;
-    }
-}
-
-void MapBase::unmap()
-{
-    if (mapped_heap) {
-        assert(mapped_ptr);
-        assert(mapped_size);
-        assert(mapped_heap->mapped);
-
-        vkUnmapMemory(vk_dev, mapped_heap->get_memory());
-        mapped_heap->mapped = false;
-
-        mapped_heap   = nullptr;
-        mapped_ptr    = nullptr;
-        mapped_offset = 0;
-        mapped_size   = 0;
-    }
-    else {
-        assert( ! mapped_ptr);
-        assert( ! mapped_offset);
-        assert( ! mapped_size);
-    }
-}
-
-bool MapBase::flush(uint32_t offset, uint32_t size)
-{
-    assert(mapped_heap);
-    if ( ! mapped_heap)
-        return false;
-
-    assert(offset + size <= mapped_size);
-    assert((size % vk_phys_props.properties.limits.nonCoherentAtomSize) == 0);
-
-    static VkMappedMemoryRange range = {
-        VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE,
-        nullptr,
-        VK_NULL_HANDLE,     // memory
-        0,                  // offset
-        0                   // size
-    };
-    range.memory = mapped_heap->get_memory();
-    range.offset = mapped_offset + offset;
-    range.size   = size;
-
-    const VkResult res = CHK(vkFlushMappedMemoryRanges(vk_dev, 1, &range));
-    return res == VK_SUCCESS;
-}
-
-void MapBase::move_from(MapBase& map)
-{
-    unmap();
-
-    mapped_heap = map.mapped_heap;
-    mapped_ptr  = map.mapped_ptr;
-    mapped_size = map.mapped_size;
-
-    map.mapped_heap = nullptr;
-    map.mapped_ptr  = nullptr;
-    map.mapped_size = 0;
-}
-
-bool Image::create(const ImageInfo& image_info, VkImageTiling tiling)
-{
-    static VkImageCreateInfo create_info = {
-        VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
-        nullptr,
-        0,                  // flags
-        VK_IMAGE_TYPE_2D,
-        VK_FORMAT_UNDEFINED,
-        { 0, 0, 1 },        // extent
-        1,                  // mipLevels
-        1,                  // arrayLayers
-        VK_SAMPLE_COUNT_1_BIT,
-        VK_IMAGE_TILING_OPTIMAL,
-        0,                  // usage
-        VK_SHARING_MODE_EXCLUSIVE,
-        1,                  // queueFamilyIndexCount
-        &vk_queue_family_index,
-        Image::initial_layout
-    };
-    create_info.format        = image_info.format;
-    create_info.extent.width  = image_info.width;
-    create_info.extent.height = image_info.height;
-    create_info.mipLevels     = image_info.mip_levels;
-    create_info.tiling        = tiling;
-    create_info.usage         = image_info.usage;
-
-    const VkResult res = CHK(vkCreateImage(vk_dev, &create_info, nullptr, &image));
-    if (res != VK_SUCCESS)
-        return false;
-
-    layout     = Image::initial_layout;
-    format     = image_info.format;
-    aspect     = image_info.aspect;
-    mip_levels = image_info.mip_levels;
-
-    vkGetImageMemoryRequirements(vk_dev, image, &memory_reqs);
-
-    return true;
-}
-
-bool Image::allocate(DeviceMemoryHeap& heap)
-{
-#ifndef NDEBUG
-    if ( ! (memory_reqs.memoryTypeBits & (1u << heap.get_memory_type()))) {
-        d_printf("Device memory does not support requested image type\n");
-        return false;
-    }
-#endif
-
-    if ( ! heap.allocate_heap_once(memory_reqs))
-        return false;
-
-    VkDeviceSize offset;
-    if ( ! heap.allocate_memory(memory_reqs, &offset))
-        return false;
-
-    VkResult res = CHK(vkBindImageMemory(vk_dev, image, heap.get_memory(), offset));
-    if (res != VK_SUCCESS)
-        return false;
-
-    owning_heap = &heap;
-    heap_offset = offset;
-
-    static VkImageViewCreateInfo view_create_info = {
-        VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
-        nullptr,
-        0,                  // flags
-        VK_NULL_HANDLE,     // image
-        VK_IMAGE_VIEW_TYPE_2D,
-        VK_FORMAT_UNDEFINED,
-        {
-            VK_COMPONENT_SWIZZLE_IDENTITY,
-            VK_COMPONENT_SWIZZLE_IDENTITY,
-            VK_COMPONENT_SWIZZLE_IDENTITY,
-            VK_COMPONENT_SWIZZLE_IDENTITY
-        },
-        {
-            0, // aspectMask
-            0, // baseMipLevel
-            0, // levelCount
-            0, // baseArrayLayer
-            1  // layerCount
-        }
-    };
-    view_create_info.image                       = image;
-    view_create_info.format                      = format;
-    view_create_info.subresourceRange.aspectMask = aspect;
-    view_create_info.subresourceRange.levelCount = mip_levels;
-
-    res = CHK(vkCreateImageView(vk_dev, &view_create_info, nullptr, &view));
-    return res == VK_SUCCESS;
-}
-
-bool Image::allocate(DeviceMemoryHeap& heap, const ImageInfo& image_info)
-{
-    const VkImageTiling tiling = heap.is_host_memory() ? VK_IMAGE_TILING_LINEAR : VK_IMAGE_TILING_OPTIMAL;
-    return create(image_info, tiling) && allocate(heap);
-}
-
-void Image::destroy()
-{
-    if (view)
-        vkDestroyImageView(vk_dev, view, nullptr);
-    if (image)
-        vkDestroyImage(vk_dev, image, nullptr);
-    view        = VK_NULL_HANDLE;
-    image       = VK_NULL_HANDLE;
-    owning_heap = nullptr;
-    heap_offset = 0;
-}
-
-void Image::set_image_layout(VkCommandBuffer buf, const Transition& transition)
-{
-    static VkImageMemoryBarrier img_barrier = {
-        VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
-        nullptr,
-        0,
-        VK_ACCESS_COLOR_ATTACHMENT_READ_BIT,
-        VK_IMAGE_LAYOUT_UNDEFINED,
-        VK_IMAGE_LAYOUT_UNDEFINED
-    };
-
-    img_barrier.oldLayout     = layout;
-    img_barrier.newLayout     = transition.new_layout;
-    img_barrier.srcAccessMask = transition.src_access;
-    img_barrier.dstAccessMask = transition.dest_access;
-
-    layout = transition.new_layout;
-
-    img_barrier.srcQueueFamilyIndex         = vk_queue_family_index;
-    img_barrier.dstQueueFamilyIndex         = vk_queue_family_index;
-    img_barrier.image                       = image;
-    img_barrier.subresourceRange.aspectMask = aspect;
-    img_barrier.subresourceRange.levelCount = 1;
-    img_barrier.subresourceRange.layerCount = 1;
-
-    vkCmdPipelineBarrier(buf,
-                         transition.src_stage,
-                         transition.dest_stage,
-                         0,
-                         0,
-                         nullptr,
-                         0,
-                         nullptr,
-                         1,
-                         &img_barrier);
-}
-
-bool Buffer::allocate(DeviceMemoryHeap&  heap,
-                      uint32_t           alloc_size,
-                      VkBufferUsageFlags usage)
-{
-    static VkBufferCreateInfo create_info = {
-        VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-        nullptr,
-        0,          // flags
-        0,          // size
-        0,          // usage
-        VK_SHARING_MODE_EXCLUSIVE,
-        1,          // queueFamilyIndexCount
-        &vk_queue_family_index
-    };
-    create_info.size  = alloc_size;
-    create_info.usage = usage;
-
-    VkResult res = CHK(vkCreateBuffer(vk_dev, &create_info, nullptr, &buffer));
-    if (res != VK_SUCCESS)
-        return false;
-
-    vkGetBufferMemoryRequirements(vk_dev, buffer, &memory_reqs);
-
-#ifndef NDEBUG
-    if ( ! (memory_reqs.memoryTypeBits & (1u << heap.get_memory_type()))) {
-        d_printf("Device memory does not support requested buffer type\n");
-        return false;
-    }
-#endif
-
-    if ( ! heap.allocate_heap_once(memory_reqs))
-        return false;
-
-    VkDeviceSize offset;
-    if ( ! heap.allocate_memory(memory_reqs, &offset))
-        return false;
-
-    res = CHK(vkBindBufferMemory(vk_dev, buffer, heap.get_memory(), offset));
-    if (res != VK_SUCCESS)
-        return false;
-
-    owning_heap = &heap;
-    heap_offset = offset;
-
-    return true;
-}
-
-bool Buffer::create_view(VkFormat format)
-{
-    static VkBufferViewCreateInfo view_create_info = {
-        VK_STRUCTURE_TYPE_BUFFER_VIEW_CREATE_INFO,
-        nullptr,
-        0,                      // flags
-        VK_NULL_HANDLE,         // buffer
-        VK_FORMAT_UNDEFINED,    // format
-        0,                      // offset
-        VK_WHOLE_SIZE           // range
-    };
-    view_create_info.buffer = buffer;
-    view_create_info.format = format;
-    view_create_info.offset = heap_offset;
-
-    const VkResult res = CHK(vkCreateBufferView(vk_dev, &view_create_info, nullptr, &view));
-    return res == VK_SUCCESS;
-}
-
-bool Buffer::cpu_fill(const void* data, uint32_t size)
-{
-    assert(is_host_memory());
-
-    Map<uint8_t> map = this->map<uint8_t>();
-
-    if ( ! map.mapped())
-        return false;
-
-    mstd::mem_copy(map.data(), data, size);
-    return true;
-}
-
-void Buffer::destroy()
-{
-    if (view)
-        vkDestroyBufferView(vk_dev, view, nullptr);
-    if (buffer)
-        vkDestroyBuffer(vk_dev, buffer, nullptr);
-    buffer      = VK_NULL_HANDLE;
-    view        = VK_NULL_HANDLE;
-    owning_heap = nullptr;
-    heap_offset = 0;
-}
-
 VkSemaphore vk_sems[num_semaphores];
 
 static bool create_semaphores()
@@ -1333,16 +820,17 @@ VkSurfaceCapabilitiesKHR vk_surface_caps;
 
 static VkSwapchainKHR vk_swapchain = VK_NULL_HANDLE;
 
-uint32_t                vk_num_swapchain_images = 0;
-Image                   vk_swapchain_images[max_swapchain_size];
-Image                   vk_depth_buffers[max_swapchain_size];
-static DeviceMemoryHeap depth_buffer_heap;
-VkFormat                vk_depth_format = VK_FORMAT_UNDEFINED;
+uint32_t vk_num_swapchain_images = 0;
+Image    vk_swapchain_images[max_swapchain_size];
+Image    vk_depth_buffers[max_swapchain_size];
+VkFormat vk_depth_format = VK_FORMAT_UNDEFINED;
 
 bool allocate_depth_buffers(Image (&depth_buffers)[max_swapchain_size], uint32_t num_depth_buffers)
 {
     for (uint32_t i = 0; i < mstd::array_size(depth_buffers); i++)
         depth_buffers[i].destroy();
+
+    mem_mgr.reset_device_temporary();
 
     const uint32_t width  = vk_surface_caps.currentExtent.width;
     const uint32_t height = vk_surface_caps.currentExtent.height;
@@ -1358,8 +846,6 @@ bool allocate_depth_buffers(Image (&depth_buffers)[max_swapchain_size], uint32_t
         return false;
     }
 
-    VkDeviceSize heap_size = 0;
-
     for (uint32_t i = 0; i < num_depth_buffers; i++) {
 
         static ImageInfo image_info = {
@@ -1368,26 +854,17 @@ bool allocate_depth_buffers(Image (&depth_buffers)[max_swapchain_size], uint32_t
             VK_FORMAT_UNDEFINED,
             1, // mip_levels
             VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT,
-            VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT
+            VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
+            Usage::device_temporary
         };
         image_info.width  = width;
         image_info.height = height;
         image_info.format = vk_depth_format;
 
-        if ( ! depth_buffers[i].create(image_info, VK_IMAGE_TILING_OPTIMAL))
-            return false;
-
-        heap_size += mstd::align_up(depth_buffers[i].size(),
-                                    VkDeviceSize(vk_phys_props.properties.limits.minMemoryMapAlignment));
-    }
-
-    if ( ! depth_buffer_heap.reserve(heap_size))
-        return false;
-
-    for (uint32_t i = 0; i < num_depth_buffers; i++) {
-        if ( ! depth_buffers[i].allocate(depth_buffer_heap))
+        if ( ! depth_buffers[i].allocate(image_info))
             return false;
     }
+
     return true;
 }
 
@@ -1399,7 +876,7 @@ static bool create_swapchain()
     if (res != VK_SUCCESS)
         return false;
 
-    d_printf("Create swapchain %ux%u\n", vk_surface_caps.currentExtent.width, vk_surface_caps.currentExtent.height);
+    d_printf("Create swapchain %u x %u\n", vk_surface_caps.currentExtent.width, vk_surface_caps.currentExtent.height);
 
     VkSwapchainKHR old_swapchain = vk_swapchain;
 
@@ -1686,75 +1163,9 @@ bool reset_and_begin_command_buffer(VkCommandBuffer cmd_buf)
     return res == VK_SUCCESS;
 }
 
-bool HostFiller::init(VkDeviceSize heap_size)
+bool send_to_device_and_wait(VkCommandBuffer cmd_buf)
 {
-    if (host_heap.get_memory_type() == vk_device_heap.get_memory_type()) {
-        d_printf("Skipping host filler heap, detected unified memory\n");
-        return true;
-    }
-
-    if ( ! host_heap.allocate_heap(heap_size))
-        return false;
-
-    if ( ! allocate_command_buffers(&cmd_buf))
-        return false;
-
-    return reset_and_begin_command_buffer(cmd_buf.bufs[0]);
-}
-
-bool HostFiller::fill_buffer(Buffer*            buffer,
-                             VkBufferUsageFlags usage,
-                             const void*        data,
-                             uint32_t           size)
-{
-    const bool is_host_writable = ! host_heap.get_heap_size();
-
-    if ( ! is_host_writable)
-        usage |= VK_BUFFER_USAGE_TRANSFER_DST_BIT;
-
-    if ( ! buffer->allocate(vk_device_heap,
-                            size,
-                            usage))
-        return false;
-
-    if (is_host_writable) {
-        assert(host_heap.get_memory_type() == buffer->get_memory_type());
-
-        return buffer->cpu_fill(data, size);
-    }
-
-    assert(num_buffers < max_buffers);
-
-    if (num_buffers == max_buffers)
-        return false;
-
-    Buffer& host_buffer = buffers[num_buffers++];
-
-    if ( ! host_buffer.allocate(host_heap, size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT))
-        return false;
-
-    if ( ! host_buffer.cpu_fill(data, size))
-        return false;
-
-    static VkBufferCopy copy_region = {
-        0, // srcOffset
-        0, // dstOffset
-        0  // size
-    };
-
-    copy_region.size = size;
-
-    vkCmdCopyBuffer(cmd_buf.bufs[0], host_buffer.get_buffer(), buffer->get_buffer(), 1, &copy_region);
-
-    return true;
-}
-
-bool HostFiller::send_to_gpu()
-{
-    if ( ! num_buffers)
-        return true;
-
-    VkResult res = CHK(vkEndCommandBuffer(cmd_buf.bufs[0]));
+    VkResult res = CHK(vkEndCommandBuffer(cmd_buf));
     if (res != VK_SUCCESS)
         return false;
 
@@ -1767,26 +1178,16 @@ bool HostFiller::send_to_gpu()
         nullptr,            // pWaitSemaphored
         &dst_stage,         // pWaitDstStageMask
         1,                  // commandBufferCount
-        cmd_buf.bufs,
+        &cmd_buf,
         0,                  // signalSemaphoreCount
         nullptr             // pSignalSemaphores
     };
 
     res = CHK(vkQueueSubmit(vk_queue, 1, &submit_info, vk_fens[fen_copy_to_dev]));
-    return res == VK_SUCCESS;
-}
-
-bool HostFiller::wait_until_done()
-{
-    if ( ! wait_and_reset_fence(fen_copy_to_dev))
+    if (res != VK_SUCCESS)
         return false;
 
-    while (num_buffers--)
-        buffers[num_buffers].destroy();
-
-    host_heap.free_heap();
-
-    return true;
+    return wait_and_reset_fence(fen_copy_to_dev);
 }
 
 void send_viewport_and_scissor(VkCommandBuffer cmd_buf,
@@ -1912,10 +1313,9 @@ bool init_vulkan(Window* w)
     if ( ! create_device())
         return false;
 
-    if ( ! vk_device_heap.allocate_heap(alloc_heap_size))
-        return false;
-
-    if ( ! create_additional_heaps())
+    if ( ! mem_mgr.init_heaps(256u * 1024u * 1024u,
+                              64u * 1024u * 1024u,
+                              16u * 1024u * 1024u))
         return false;
 
     if ( ! create_semaphores())
