@@ -14,7 +14,6 @@ extern uint32_t                    vk_queue_family_index;
 extern VkSwapchainCreateInfoKHR    swapchain_create_info;
 extern VkQueue                     vk_queue;
 extern uint32_t                    vk_num_swapchain_images;
-extern VkRenderPass                vk_render_pass;
 extern VkSurfaceCapabilitiesKHR    vk_surface_caps;
 extern VkPhysicalDeviceProperties2 vk_phys_props;
 
@@ -79,6 +78,11 @@ enum eFenceId {
 extern VkFence vk_fens[num_fences];
 
 bool wait_and_reset_fence(enum eFenceId fence);
+
+bool find_optimal_tiling_format(const VkFormat* preferred_formats,
+                                uint32_t        num_preferred_formats,
+                                uint32_t        format_feature_flags,
+                                VkFormat*       out_format);
 
 #ifdef __cplusplus
 
@@ -148,7 +152,6 @@ inline constexpr VkClearValue make_clear_depth(float depth, uint32_t stencil)
 
 extern Image         vk_swapchain_images[max_swapchain_size];
 extern Image         vk_depth_buffers[max_swapchain_size];
-extern VkFramebuffer vk_frame_buffers[max_swapchain_size];
 extern VkFormat      vk_depth_format;
 
 void send_viewport_and_scissor(VkCommandBuffer cmd_buf,

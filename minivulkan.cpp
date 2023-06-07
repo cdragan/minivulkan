@@ -266,7 +266,7 @@ static bool init_instance()
         0,
         nullptr,
         0,
-        VK_API_VERSION_1_2
+        VK_API_VERSION_1_3
     };
 
     static const char* enabled_instance_extensions[16];
@@ -483,10 +483,10 @@ static bool find_surface_format(VkPhysicalDevice phys_dev)
     return false;
 }
 
-static bool find_optimal_tiling_format(const VkFormat* preferred_formats,
-                                       uint32_t        num_preferred_formats,
-                                       uint32_t        format_feature_flags,
-                                       VkFormat*       out_format)
+bool find_optimal_tiling_format(const VkFormat* preferred_formats,
+                                uint32_t        num_preferred_formats,
+                                uint32_t        format_feature_flags,
+                                VkFormat*       out_format)
 {
     for (uint32_t i = 0; i < num_preferred_formats; i++) {
         VkFormatProperties props;
@@ -878,6 +878,19 @@ static bool create_swapchain()
 
     d_printf("Create swapchain %u x %u\n", vk_surface_caps.currentExtent.width, vk_surface_caps.currentExtent.height);
 
+#ifndef NDEBUG
+    {
+        VkFormat found_tiling_format = VK_FORMAT_UNDEFINED;
+        if ( ! find_optimal_tiling_format(&swapchain_create_info.imageFormat,
+                                          1,
+                                          VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT,
+                                          &found_tiling_format)) {
+            d_printf("Error: surface format does not support color attachments\n");
+            return false;
+        }
+    }
+#endif
+
     VkSwapchainKHR old_swapchain = vk_swapchain;
 
     swapchain_create_info.minImageCount = mstd::max(vk_surface_caps.minImageCount, 2u);
@@ -968,119 +981,6 @@ static bool create_swapchain()
     return allocate_depth_buffers(vk_depth_buffers, num_images);
 }
 
-VkRenderPass vk_render_pass = VK_NULL_HANDLE;
-
-static bool create_render_pass()
-{
-    static VkAttachmentDescription attachments[] = {
-        {
-            0, // flags
-            VK_FORMAT_UNDEFINED,
-            VK_SAMPLE_COUNT_1_BIT,
-            VK_ATTACHMENT_LOAD_OP_CLEAR,
-            VK_ATTACHMENT_STORE_OP_STORE,
-            VK_ATTACHMENT_LOAD_OP_DONT_CARE,
-            VK_ATTACHMENT_STORE_OP_DONT_CARE,
-            VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-            VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
-        },
-        {
-            0, // flags
-            VK_FORMAT_UNDEFINED,
-            VK_SAMPLE_COUNT_1_BIT,
-            VK_ATTACHMENT_LOAD_OP_CLEAR,
-            VK_ATTACHMENT_STORE_OP_DONT_CARE,
-            VK_ATTACHMENT_LOAD_OP_DONT_CARE,
-            VK_ATTACHMENT_STORE_OP_DONT_CARE,
-            VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
-            VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL
-        }
-    };
-
-#ifdef NDEBUG
-    attachments[0].format = swapchain_create_info.imageFormat;
-#else
-    if ( ! find_optimal_tiling_format(&swapchain_create_info.imageFormat,
-                                      1,
-                                      VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT,
-                                      &attachments[0].format)) {
-        d_printf("Error: surface format does not support color attachments\n");
-        return false;
-    }
-#endif
-
-    attachments[1].format = vk_depth_format;
-
-    static const VkAttachmentReference color_att_ref = {
-        0,
-        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
-    };
-    static const VkAttachmentReference depth_att_ref = {
-        1,
-        VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL
-    };
-    static const VkSubpassDescription subpass = {
-        0,          // flags
-        VK_PIPELINE_BIND_POINT_GRAPHICS,
-        0,          // inputAttachmentCount
-        nullptr,    // pInputAttachments
-        1,
-        &color_att_ref,
-        nullptr,    // pResolveAttachments
-        &depth_att_ref,
-        0,          // preserveAttachmentCount
-        nullptr     // pPreserveAttachments
-    };
-    static const VkRenderPassCreateInfo render_pass_info = {
-        VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO,
-        nullptr,    // pNext
-        0,          // flags
-        mstd::array_size(attachments),
-        attachments,
-        1,          // subpassCount
-        &subpass
-    };
-
-    const VkResult res = CHK(vkCreateRenderPass(vk_dev, &render_pass_info, nullptr, &vk_render_pass));
-    return res == VK_SUCCESS;
-}
-
-VkFramebuffer vk_frame_buffers[max_swapchain_size];
-
-static bool create_swapchain_frame_buffer()
-{
-    for (uint32_t i = 0; i < vk_num_swapchain_images; i++) {
-
-        assert(vk_swapchain_images[i].get_image());
-
-        static VkImageView attachments[2];
-
-        static VkFramebufferCreateInfo frame_buffer_info = {
-            VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
-            nullptr,
-            0,                  // flags
-            VK_NULL_HANDLE,     // renderPass
-            mstd::array_size(attachments),
-            attachments,
-            0,                  // width
-            0,                  // height
-            1                   // layers
-        };
-        frame_buffer_info.renderPass = vk_render_pass;
-        frame_buffer_info.width      = vk_surface_caps.currentExtent.width;
-        frame_buffer_info.height     = vk_surface_caps.currentExtent.height;
-
-        attachments[0] = vk_swapchain_images[i].get_view();
-        attachments[1] = vk_depth_buffers[i].get_view();
-
-        const VkResult res = CHK(vkCreateFramebuffer(vk_dev, &frame_buffer_info, nullptr, &vk_frame_buffers[i]));
-        if (res != VK_SUCCESS)
-            return false;
-    }
-
-    return true;
-}
-
 bool idle_queue()
 {
     VkResult res = VK_SUCCESS;
@@ -1098,16 +998,7 @@ static bool update_resolution()
     if ( ! idle_queue())
         return false;
 
-    for (uint32_t i = 0; i < mstd::array_size(vk_frame_buffers); i++) {
-        if (vk_frame_buffers[i])
-            vkDestroyFramebuffer(vk_dev, vk_frame_buffers[i], nullptr);
-        vk_frame_buffers[i] = VK_NULL_HANDLE;
-    }
-
     if ( ! create_swapchain())
-        return false;
-
-    if ( ! create_swapchain_frame_buffer())
         return false;
 
     return true;
@@ -1325,12 +1216,6 @@ bool init_vulkan(Window* w)
         return false;
 
     if ( ! create_swapchain())
-        return false;
-
-    if ( ! create_render_pass())
-        return false;
-
-    if ( ! create_swapchain_frame_buffer())
         return false;
 
     if ( ! init_assets())

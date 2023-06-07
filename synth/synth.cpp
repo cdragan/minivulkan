@@ -440,32 +440,56 @@ bool draw_frame(uint32_t image_idx, uint64_t time_ms, VkFence queue_fence)
         vk_depth_buffers[image_idx].set_image_layout(buf, depth_init);
     }
 
-    static const VkClearValue clear_values[2] = {
-        make_clear_color(0, 0, 0, 0),
+    // TODO get rid of depth buffer
+    static VkRenderingAttachmentInfo color_att = {
+        VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+        nullptr,
+        VK_NULL_HANDLE,             // imageView
+        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+        VK_RESOLVE_MODE_NONE,
+        VK_NULL_HANDLE,             // resolveImageView
+        VK_IMAGE_LAYOUT_UNDEFINED,  // resolveImageLayout
+        VK_ATTACHMENT_LOAD_OP_CLEAR,
+        VK_ATTACHMENT_STORE_OP_STORE,
+        make_clear_color(0, 0, 0, 0)
+    };
+
+    static VkRenderingAttachmentInfo depth_att = {
+        VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+        nullptr,
+        VK_NULL_HANDLE,             // imageView
+        VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+        VK_RESOLVE_MODE_NONE,
+        VK_NULL_HANDLE,             // resolveImageView
+        VK_IMAGE_LAYOUT_UNDEFINED,  // resolveImageLayout
+        VK_ATTACHMENT_LOAD_OP_CLEAR,
+        VK_ATTACHMENT_STORE_OP_DONT_CARE,
         make_clear_depth(0, 0)
     };
 
-    // TODO create own render pass without depth buffer
-    static VkRenderPassBeginInfo render_pass_info = {
-        VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
+    static VkRenderingInfo rendering_info = {
+        VK_STRUCTURE_TYPE_RENDERING_INFO,
         nullptr,
-        VK_NULL_HANDLE,     // renderPass
-        VK_NULL_HANDLE,     // framebuffer
-        { },
-        mstd::array_size(clear_values),
-        clear_values
+        0,              // flags
+        { },            // renderArea
+        1,              // layerCount
+        0,              // viewMask
+        1,              // colorAttachmentCount
+        &color_att,
+        &depth_att,
+        nullptr         // pStencilAttachment
     };
 
-    render_pass_info.renderPass        = vk_render_pass;
-    render_pass_info.framebuffer       = vk_frame_buffers[image_idx];
-    render_pass_info.renderArea.extent = vk_surface_caps.currentExtent;
+    color_att.imageView              = image.get_view();
+    depth_att.imageView              = vk_depth_buffers[image_idx].get_view();
+    rendering_info.renderArea.extent = vk_surface_caps.currentExtent;
 
-    vkCmdBeginRenderPass(buf, &render_pass_info, VK_SUBPASS_CONTENTS_INLINE);
+    vkCmdBeginRenderingKHR(buf, &rendering_info);
 
     if ( ! send_gui_to_gpu(buf))
         return false;
 
-    vkCmdEndRenderPass(buf);
+    vkCmdEndRenderingKHR(buf);
 
     static const Image::Transition color_att_present = {
         VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,

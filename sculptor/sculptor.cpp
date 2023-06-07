@@ -22,10 +22,8 @@ struct Viewport {
     bool            enabled;
     uint32_t        width;
     uint32_t        height;
-    VkRenderPass    render_pass;
     Image           color_buffer[max_swapchain_size];
     Image           depth_buffer[max_swapchain_size];
-    VkFramebuffer   frame_buffer[max_swapchain_size];
     VkDescriptorSet gui_tex[max_swapchain_size];
 };
 
@@ -152,11 +150,6 @@ static bool destroy_viewports()
 
     for (Viewport& viewport : viewports) {
         for (uint32_t i_img = 0; i_img < max_swapchain_size; i_img++) {
-            if (viewport.frame_buffer[i_img]) {
-                vkDestroyFramebuffer(vk_dev, viewport.frame_buffer[i_img], nullptr);
-                viewport.frame_buffer[i_img] = VK_NULL_HANDLE;
-            }
-
             viewport.color_buffer[i_img].destroy();
             viewport.depth_buffer[i_img].destroy();
         }
@@ -166,35 +159,6 @@ static bool destroy_viewports()
     }
 
     return true;
-}
-
-static bool allocate_framebuffer(Viewport& viewport, uint32_t i_img)
-{
-    static VkImageView attachments[2];
-
-    static VkFramebufferCreateInfo frame_buffer_info = {
-        VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
-        nullptr,
-        0,                  // flags
-        VK_NULL_HANDLE,     // renderPass
-        mstd::array_size(attachments),
-        attachments,
-        0,                  // width
-        0,                  // height
-        1                   // layers
-    };
-    frame_buffer_info.renderPass = vk_render_pass;
-    frame_buffer_info.width      = viewport.width;
-    frame_buffer_info.height     = viewport.height;
-
-    attachments[0] = viewport.color_buffer[i_img].get_view();
-    attachments[1] = viewport.depth_buffer[i_img].get_view();
-
-    const VkResult res = CHK(vkCreateFramebuffer(vk_dev,
-                                                 &frame_buffer_info,
-                                                 nullptr,
-                                                 &viewport.frame_buffer[i_img]));
-    return res == VK_SUCCESS;
 }
 
 static bool allocate_viewports()
@@ -239,9 +203,6 @@ static bool allocate_viewports()
                 return false;
 
             if ( ! viewport.depth_buffer[i_img].allocate(depth_info))
-                return false;
-
-            if ( ! allocate_framebuffer(viewport, i_img))
                 return false;
 
             if (viewport.gui_tex[i_img]) {
@@ -420,22 +381,44 @@ bool draw_frame(uint32_t image_idx, uint64_t time_ms, VkFence queue_fence)
     if (vk_depth_buffers[image_idx].layout != VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
         vk_depth_buffers[image_idx].set_image_layout(buf, depth_init);
 
-    static VkClearValue clear_values[2] = {
-        make_clear_color(0, 0, 0, 0),
+    static VkRenderingAttachmentInfo color_att = {
+        VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+        nullptr,
+        VK_NULL_HANDLE,             // imageView
+        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+        VK_RESOLVE_MODE_NONE,
+        VK_NULL_HANDLE,             // resolveImageView
+        VK_IMAGE_LAYOUT_UNDEFINED,  // resolveImageLayout
+        VK_ATTACHMENT_LOAD_OP_CLEAR,
+        VK_ATTACHMENT_STORE_OP_STORE,
+        make_clear_color(0, 0, 0, 0)
+    };
+
+    static VkRenderingAttachmentInfo depth_att = {
+        VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+        nullptr,
+        VK_NULL_HANDLE,             // imageView
+        VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+        VK_RESOLVE_MODE_NONE,
+        VK_NULL_HANDLE,             // resolveImageView
+        VK_IMAGE_LAYOUT_UNDEFINED,  // resolveImageLayout
+        VK_ATTACHMENT_LOAD_OP_CLEAR,
+        VK_ATTACHMENT_STORE_OP_DONT_CARE,
         make_clear_depth(0, 0)
     };
 
-    static VkRenderPassBeginInfo render_pass_info = {
-        VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
+    static VkRenderingInfo rendering_info = {
+        VK_STRUCTURE_TYPE_RENDERING_INFO,
         nullptr,
-        VK_NULL_HANDLE,     // renderPass
-        VK_NULL_HANDLE,     // framebuffer
-        { },
-        mstd::array_size(clear_values),
-        clear_values
+        0,              // flags
+        { },            // renderArea
+        1,              // layerCount
+        0,              // viewMask
+        1,              // colorAttachmentCount
+        &color_att,
+        &depth_att,
+        nullptr         // pStencilAttachment
     };
-
-    render_pass_info.renderPass = vk_render_pass;
 
     for (Viewport& viewport : viewports) {
         if ( ! viewport.enabled)
@@ -453,18 +436,18 @@ bool draw_frame(uint32_t image_idx, uint64_t time_ms, VkFence queue_fence)
         if (viewport.depth_buffer[image_idx].layout != VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
             viewport.depth_buffer[image_idx].set_image_layout(buf, depth_init);
 
-        render_pass_info.framebuffer              = viewport.frame_buffer[image_idx];
-        render_pass_info.renderArea.extent.width  = viewport.width;
-        render_pass_info.renderArea.extent.height = viewport.height;
+        color_att.imageView   = viewport.color_buffer[image_idx].get_view();
+        color_att.clearValue  = make_clear_color(0.2f, 0.2f, 0.2f, 1);
+        depth_att.imageView   = viewport.depth_buffer[image_idx].get_view();
+        rendering_info.renderArea.extent.width  = viewport.width;
+        rendering_info.renderArea.extent.height = viewport.height;
 
-        clear_values[0] = make_clear_color(0.2f, 0.2f, 0.2f, 1);
-
-        vkCmdBeginRenderPass(buf, &render_pass_info, VK_SUBPASS_CONTENTS_INLINE);
+        vkCmdBeginRenderingKHR(buf, &rendering_info);
 
         if ( ! render_view(viewport, image_idx, buf))
             return false;
 
-        vkCmdEndRenderPass(buf);
+        vkCmdEndRenderingKHR(buf);
 
         static const Image::Transition gui_image_layout = {
             VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
@@ -476,17 +459,17 @@ bool draw_frame(uint32_t image_idx, uint64_t time_ms, VkFence queue_fence)
         viewport.color_buffer[image_idx].set_image_layout(buf, gui_image_layout);
     }
 
-    render_pass_info.framebuffer       = vk_frame_buffers[image_idx];
-    render_pass_info.renderArea.extent = vk_surface_caps.currentExtent;
+    color_att.imageView              = image.get_view();
+    color_att.clearValue             = make_clear_color(0, 0, 0, 1);
+    depth_att.imageView              = vk_depth_buffers[image_idx].get_view();
+    rendering_info.renderArea.extent = vk_surface_caps.currentExtent;
 
-    clear_values[0] = make_clear_color(0, 0, 0, 1);
-
-    vkCmdBeginRenderPass(buf, &render_pass_info, VK_SUBPASS_CONTENTS_INLINE);
+    vkCmdBeginRenderingKHR(buf, &rendering_info);
 
     if ( ! send_gui_to_gpu(buf))
         return false;
 
-    vkCmdEndRenderPass(buf);
+    vkCmdEndRenderingKHR(buf);
 
     static const Image::Transition color_att_present = {
         VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,

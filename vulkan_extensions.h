@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2021-2022 Chris Dragan
+// Copyright (c) 2021-2023 Chris Dragan
 
 #define SUPPORTED_INSTANCE_EXTENSIONS_BASE \
     X(VK_KHR_surface,                   REQUIRED)
 
 #define SUPPORTED_DEVICE_EXTENSIONS_BASE \
     X(VK_KHR_swapchain,                 REQUIRED) \
+    X(VK_KHR_dynamic_rendering,         REQUIRED) \
     X(VK_KHR_8bit_storage,              REQUIRED)
 
 #ifdef __APPLE__

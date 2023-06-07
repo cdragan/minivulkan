@@ -341,9 +341,21 @@ static bool create_graphics_pipelines(VkPipeline*    pipelines,
             dynamic_states
         };
 
+        static VkPipelineRenderingCreateInfo rendering_info = {
+            VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO,
+            nullptr,
+            0,                      // viewMask
+            1,                      // colorAttachmentCount
+            &swapchain_create_info.imageFormat,
+            VK_FORMAT_UNDEFINED,    // depthAttachmentFormat
+            VK_FORMAT_UNDEFINED     // stencilAttachmentFormat
+        };
+
+        rendering_info.depthAttachmentFormat = vk_depth_format;
+
         static VkGraphicsPipelineCreateInfo pipeline_create_info = {
             VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
-            nullptr,
+            &rendering_info,
             0,              // flags
             num_stages,
             shader_stages,
@@ -363,8 +375,7 @@ static bool create_graphics_pipelines(VkPipeline*    pipelines,
             -1              // basePipelineIndex
         };
 
-        pipeline_create_info.layout     = vk_gr_pipeline_layout;
-        pipeline_create_info.renderPass = vk_render_pass;
+        pipeline_create_info.layout = vk_gr_pipeline_layout;
 
         const VkResult res = CHK(vkCreateGraphicsPipelines(vk_dev,
                                                            VK_NULL_HANDLE,
@@ -1046,26 +1057,50 @@ bool draw_frame(uint32_t image_idx, uint64_t time_ms, VkFence queue_fence)
         vk_depth_buffers[image_idx].set_image_layout(buf, depth_init);
     }
 
-    static const VkClearValue clear_values[2] = {
-        make_clear_color(0, 0, 0, 0),
+    static VkRenderingAttachmentInfo color_att = {
+        VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+        nullptr,
+        VK_NULL_HANDLE,             // imageView
+        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+        VK_RESOLVE_MODE_NONE,
+        VK_NULL_HANDLE,             // resolveImageView
+        VK_IMAGE_LAYOUT_UNDEFINED,  // resolveImageLayout
+        VK_ATTACHMENT_LOAD_OP_CLEAR,
+        VK_ATTACHMENT_STORE_OP_STORE,
+        make_clear_color(0, 0, 0, 0)
+    };
+
+    static VkRenderingAttachmentInfo depth_att = {
+        VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+        nullptr,
+        VK_NULL_HANDLE,             // imageView
+        VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+        VK_RESOLVE_MODE_NONE,
+        VK_NULL_HANDLE,             // resolveImageView
+        VK_IMAGE_LAYOUT_UNDEFINED,  // resolveImageLayout
+        VK_ATTACHMENT_LOAD_OP_CLEAR,
+        VK_ATTACHMENT_STORE_OP_DONT_CARE,
         make_clear_depth(0, 0)
     };
 
-    static VkRenderPassBeginInfo render_pass_info = {
-        VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
+    static VkRenderingInfo rendering_info = {
+        VK_STRUCTURE_TYPE_RENDERING_INFO,
         nullptr,
-        VK_NULL_HANDLE,     // renderPass
-        VK_NULL_HANDLE,     // framebuffer
-        { },
-        mstd::array_size(clear_values),
-        clear_values
+        0,              // flags
+        { },            // renderArea
+        1,              // layerCount
+        0,              // viewMask
+        1,              // colorAttachmentCount
+        &color_att,
+        &depth_att,
+        nullptr         // pStencilAttachment
     };
 
-    render_pass_info.renderPass        = vk_render_pass;
-    render_pass_info.framebuffer       = vk_frame_buffers[image_idx];
-    render_pass_info.renderArea.extent = vk_surface_caps.currentExtent;
+    color_att.imageView              = image.get_view();
+    depth_att.imageView              = vk_depth_buffers[image_idx].get_view();
+    rendering_info.renderArea.extent = vk_surface_caps.currentExtent;
 
-    vkCmdBeginRenderPass(buf, &render_pass_info, VK_SUBPASS_CONTENTS_INLINE);
+    vkCmdBeginRenderingKHR(buf, &rendering_info);
 
     vkCmdBindPipeline(buf, VK_PIPELINE_BIND_POINT_GRAPHICS, vk_gr_pipeline[user_wireframe ? 1 : 0]);
 
@@ -1111,7 +1146,7 @@ bool draw_frame(uint32_t image_idx, uint64_t time_ms, VkFence queue_fence)
     if ( ! send_gui_to_gpu(buf))
         return false;
 
-    vkCmdEndRenderPass(buf);
+    vkCmdEndRenderingKHR(buf);
 
     static const Image::Transition color_att_present = {
         VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,

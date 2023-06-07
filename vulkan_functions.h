@@ -74,9 +74,6 @@
     X(vkWaitForFences) \
     X(vkResetFences) \
     X(vkCreateSemaphore) \
-    X(vkCreateRenderPass) \
-    X(vkCreateFramebuffer) \
-    X(vkDestroyFramebuffer) \
     X(vkAllocateMemory) \
     X(vkFreeMemory) \
     X(vkMapMemory) \
@@ -108,8 +105,8 @@
     X(vkCreateDescriptorPool) \
     X(vkAllocateDescriptorSets) \
     X(vkUpdateDescriptorSets) \
-    X(vkCmdBeginRenderPass) \
-    X(vkCmdEndRenderPass) \
+    X(vkCmdBeginRenderingKHR) \
+    X(vkCmdEndRenderingKHR) \
     X(vkCmdBindPipeline) \
     X(vkCmdBindVertexBuffers) \
     X(vkCmdBindIndexBuffer) \
@@ -182,9 +179,6 @@ enum e_device_functions {
 #define vkWaitForFences                           SELECT_VK_FUNCTION(device,   vkWaitForFences)
 #define vkResetFences                             SELECT_VK_FUNCTION(device,   vkResetFences)
 #define vkCreateSemaphore                         SELECT_VK_FUNCTION(device,   vkCreateSemaphore)
-#define vkCreateRenderPass                        SELECT_VK_FUNCTION(device,   vkCreateRenderPass)
-#define vkCreateFramebuffer                       SELECT_VK_FUNCTION(device,   vkCreateFramebuffer)
-#define vkDestroyFramebuffer                      SELECT_VK_FUNCTION(device,   vkDestroyFramebuffer)
 #define vkAllocateMemory                          SELECT_VK_FUNCTION(device,   vkAllocateMemory)
 #define vkFreeMemory                              SELECT_VK_FUNCTION(device,   vkFreeMemory)
 #define vkMapMemory                               SELECT_VK_FUNCTION(device,   vkMapMemory)
@@ -216,8 +210,8 @@ enum e_device_functions {
 #define vkCreateDescriptorPool                    SELECT_VK_FUNCTION(device,   vkCreateDescriptorPool)
 #define vkAllocateDescriptorSets                  SELECT_VK_FUNCTION(device,   vkAllocateDescriptorSets)
 #define vkUpdateDescriptorSets                    SELECT_VK_FUNCTION(device,   vkUpdateDescriptorSets)
-#define vkCmdBeginRenderPass                      SELECT_VK_FUNCTION(device,   vkCmdBeginRenderPass)
-#define vkCmdEndRenderPass                        SELECT_VK_FUNCTION(device,   vkCmdEndRenderPass)
+#define vkCmdBeginRenderingKHR                    SELECT_VK_FUNCTION(device,   vkCmdBeginRenderingKHR)
+#define vkCmdEndRenderingKHR                      SELECT_VK_FUNCTION(device,   vkCmdEndRenderingKHR)
 #define vkCmdBindPipeline                         SELECT_VK_FUNCTION(device,   vkCmdBindPipeline)
 #define vkCmdBindVertexBuffers                    SELECT_VK_FUNCTION(device,   vkCmdBindVertexBuffers)
 #define vkCmdBindIndexBuffer                      SELECT_VK_FUNCTION(device,   vkCmdBindIndexBuffer)
