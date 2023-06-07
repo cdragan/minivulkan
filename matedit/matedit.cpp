@@ -32,7 +32,7 @@ static Viewport viewports[] = {
     { "3D View",    true }
 };
 
-constexpr unsigned gui_num_descriptors = mstd::array_size(viewports) * max_swapchain_size;
+const unsigned gui_num_descriptors = mstd::array_size(viewports) * max_swapchain_size;
 
 static bool viewports_changed = true;
 
