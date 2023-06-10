@@ -21,6 +21,9 @@ debug ?= 0
 # Disables spirv shuffling, for debugging purposes
 no_spirv_shuffle ?= 0
 
+# Disable spirv optimization, for debugging purposes
+no_spirv_opt ?= 0
+
 # Windows only: 1 links against MSVCRT, 0 doesn't use MSVCRT
 ifeq ($(UNAME), Windows)
     stdlib ?= 0
@@ -355,7 +358,7 @@ ifndef GLSL_NO_OPTIMIZER
     GLSL_OPT_FLAGS += -Os
     GLSL_STRIP_FLAGS += --strip all --dce all
 endif
-ifeq ($(debug), 0)
+ifeq ($(no_spirv_opt), 0)
     GLSL_ENCODE_FLAGS += --remove-unused
 else
     GLSL_FLAGS += -g
