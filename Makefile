@@ -148,6 +148,9 @@ shader_files += shaders/bezier_surface_quadratic.tesc.glsl
 shader_files += shaders/bezier_surface_quadratic.tese.glsl
 shader_files += shaders/bezier_surface_cubic.tesc.glsl
 shader_files += shaders/bezier_surface_cubic.tese.glsl
+shader_files += shaders/bezier_surface_cubic_sculptor.tesc.glsl
+shader_files += shaders/bezier_surface_cubic_sculptor.tese.glsl
+shader_files += shaders/sculptor_object.frag.glsl
 shader_files += shaders/synth.comp.glsl
 shader_files += shaders/mono_to_stereo.comp.glsl
 
@@ -504,6 +507,7 @@ $(shaders_out_dir)/%.$1.h: shaders/%.$1.glsl | $(spirv_encode) $(shaders_out_dir
 	cd $(shaders_out_dir)/opt && $(GLSL_VALIDATOR_PREFIX)spirv-remap $(GLSL_STRIP_FLAGS) --input $$(subst .glsl,.spv,$$(notdir $$<)) --output ../../../$(shaders_out_dir)/strip
 	$(spirv_encode) $(GLSL_ENCODE_FLAGS) shader_$$(subst .,_,$$(basename $$(notdir $$<))) $$(call shader_stage,strip,$$<) $$@
 	$(spirv_encode) $(GLSL_ENCODE_FLAGS) --binary shader_$$(subst .,_,$$(basename $$(notdir $$<))) $$(call shader_stage,strip,$$<) $$(basename $$@).bin
+	$(GLSL_VALIDATOR_PREFIX)spirv-dis -o $$(basename $$@).disasm $$(call shader_stage,strip,$$<)
 endef
 
 $(foreach ext, vert tesc tese geom frag comp, $(eval $(call GLSL_EXT,$(ext))))

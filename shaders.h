@@ -14,6 +14,9 @@
     X(bezier_surface_quadratic_tese) \
     X(bezier_surface_cubic_tesc) \
     X(bezier_surface_cubic_tese) \
+    X(bezier_surface_cubic_surface_tesc) \
+    X(bezier_surface_cubic_surface_tese) \
+    X(sculptor_object) \
     X(synth_comp) \
     X(mono_to_stereo_comp)
 
