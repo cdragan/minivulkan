@@ -192,6 +192,7 @@ bool MemoryAllocator::init_heaps(VkDeviceSize device_heap_size,
     };
 
     static const uint8_t preferred_host_heap_flags[] = {
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT,
         VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
         VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT,
         0
@@ -206,7 +207,7 @@ bool MemoryAllocator::init_heaps(VkDeviceSize device_heap_size,
     };
 
     const int device_type_index  = find_mem_type(preferred_device_heap_flags,  allow_device_memory);
-    const int host_type_index    = find_mem_type(preferred_host_heap_flags,    require_host_memory);
+    int       host_type_index    = find_mem_type(preferred_host_heap_flags,    require_host_memory);
     const int dynamic_type_index = find_mem_type(preferred_dynamic_heap_flags, allow_device_memory);
 
     d_printf("Found memory types: device=%d, host=%d, dynamic=%d\n",
@@ -217,26 +218,19 @@ bool MemoryAllocator::init_heaps(VkDeviceSize device_heap_size,
         return false;
     }
 
+    if (dynamic_type_index == device_type_index)
+        device_heap_size += dynamic_heap_size;
+    else if ( ! dynamic_heap.allocate_heap(dynamic_type_index, dynamic_heap_size))
+        return false;
+
     if ( ! device_heap.allocate_heap(device_type_index, device_heap_size))
         return false;
 
-    if (host_type_index >= 0 &&
-        host_type_index != device_type_index &&
-        host_type_index != dynamic_type_index) {
+    if (host_type_index < 0)
+        host_type_index = dynamic_type_index;
 
-        if ( ! host_heap.allocate_heap(host_type_index, host_heap_size))
-            return false;
-    }
-    else if ( ! (vk_mem_props.memoryTypes[device_type_index].propertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT)) {
-        d_printf("Failed to find host heap, selected memory type %d in device heap is not host visible\n",
-                 device_type_index);
+    if ( ! host_heap.allocate_heap(host_type_index, host_heap_size))
         return false;
-    }
-
-
-    if (dynamic_type_index >= 0 && dynamic_type_index != device_type_index)
-        if ( ! dynamic_heap.allocate_heap(dynamic_type_index, dynamic_heap_size))
-            return false;
 
     return true;
 }
