@@ -7,7 +7,7 @@
 
 bool create_material_layouts();
 
-struct ShaderInfo {
+struct MaterialInfo {
     uint8_t*                                 shader_ids[4];
     uint8_t                                  vertex_stride;
     uint8_t                                  patch_control_points;
@@ -16,4 +16,4 @@ struct ShaderInfo {
     const VkVertexInputAttributeDescription* vertex_attributes;
 };
 
-bool create_material(const ShaderInfo& shader_info, VkPipeline* pipeline);
+bool create_material(const MaterialInfo& mat_info, VkPipeline* pipeline);

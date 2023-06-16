@@ -47,6 +47,8 @@ uint32_t check_device_features()
 
 static VkDescriptorSetLayout vk_per_frame_desc_set_layout = VK_NULL_HANDLE;
 static VkPipelineLayout      vk_gr_pipeline_layout        = VK_NULL_HANDLE;
+static VkPipeline            sculptor_object_pipeline     = VK_NULL_HANDLE;
+static Sculptor::Geometry    patch_geometry;
 
 static bool create_pipeline_layouts()
 {
@@ -139,6 +141,37 @@ bool init_assets()
 
     if ( ! create_material_layouts())
         return false;
+
+    static const VkVertexInputAttributeDescription vertex_attributes[] = {
+        {
+            0, // location
+            0, // binding
+            VK_FORMAT_R16G16B16_SNORM,
+            offsetof(Sculptor::Geometry::Vertex, pos)
+        }
+    };
+
+    static const MaterialInfo mat_info = {
+        {
+            shader_pass_through_vert,
+            shader_sculptor_object_frag,
+            shader_bezier_surface_cubic_sculptor_tesc,
+            shader_bezier_surface_cubic_sculptor_tese
+        },
+        sizeof(Sculptor::Geometry::Vertex),
+        16, // patch_control_points
+        VK_POLYGON_MODE_FILL,
+        mstd::array_size(vertex_attributes),
+        vertex_attributes
+    };
+
+    if ( ! create_material(mat_info, &sculptor_object_pipeline))
+        return false;
+
+    if ( ! patch_geometry.allocate())
+        return false;
+
+    patch_geometry.set_cube();
 
     return true;
 }

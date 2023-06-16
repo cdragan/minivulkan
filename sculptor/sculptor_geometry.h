@@ -11,6 +11,7 @@ class Geometry {
 
         struct Vertex {
             int16_t pos[3];
+            int16_t value;
         };
 
         struct FaceData {

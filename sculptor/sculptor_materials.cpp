@@ -80,7 +80,7 @@ bool create_material_layouts()
     return true;
 }
 
-bool create_material(const ShaderInfo& shader_info, VkPipeline* pipeline)
+bool create_material(const MaterialInfo& mat_info, VkPipeline* pipeline)
 {
     static VkPipelineShaderStageCreateInfo shader_stages[] = {
         {
@@ -122,8 +122,8 @@ bool create_material(const ShaderInfo& shader_info, VkPipeline* pipeline)
     };
 
     uint32_t num_stages;
-    for (num_stages = 0; num_stages < mstd::array_size(shader_info.shader_ids); num_stages++) {
-        uint8_t* const shader = shader_info.shader_ids[num_stages];
+    for (num_stages = 0; num_stages < mstd::array_size(mat_info.shader_ids); num_stages++) {
+        uint8_t* const shader = mat_info.shader_ids[num_stages];
         if ( ! shader)
             break;
         shader_stages[num_stages].module = load_shader(shader);
@@ -136,7 +136,7 @@ bool create_material(const ShaderInfo& shader_info, VkPipeline* pipeline)
             VK_VERTEX_INPUT_RATE_VERTEX
         }
     };
-    vertex_bindings[0].stride = shader_info.vertex_stride;
+    vertex_bindings[0].stride = mat_info.vertex_stride;
 
     static VkPipelineVertexInputStateCreateInfo vertex_input_state = {
         VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
@@ -147,8 +147,8 @@ bool create_material(const ShaderInfo& shader_info, VkPipeline* pipeline)
         0,      // vertexAttributeDescriptionCount
         nullptr // pVertexAttributeDescriptions
     };
-    vertex_input_state.vertexAttributeDescriptionCount = shader_info.num_vertex_attributes;
-    vertex_input_state.pVertexAttributeDescriptions    = shader_info.vertex_attributes;
+    vertex_input_state.vertexAttributeDescriptionCount = mat_info.num_vertex_attributes;
+    vertex_input_state.pVertexAttributeDescriptions    = mat_info.vertex_attributes;
 
     static VkPipelineInputAssemblyStateCreateInfo input_assembly_state = {
         VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
@@ -157,7 +157,7 @@ bool create_material(const ShaderInfo& shader_info, VkPipeline* pipeline)
         VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
         VK_FALSE
     };
-    if (shader_info.patch_control_points)
+    if (mat_info.patch_control_points)
         input_assembly_state.topology = VK_PRIMITIVE_TOPOLOGY_PATCH_LIST;
 
     static VkPipelineTessellationStateCreateInfo tessellation_state = {
@@ -166,7 +166,7 @@ bool create_material(const ShaderInfo& shader_info, VkPipeline* pipeline)
         0,  // flags
         0   // patchControlPoints
     };
-    tessellation_state.patchControlPoints = shader_info.patch_control_points;
+    tessellation_state.patchControlPoints = mat_info.patch_control_points;
 
     static VkViewport viewport = {
         0,      // x
@@ -208,7 +208,7 @@ bool create_material(const ShaderInfo& shader_info, VkPipeline* pipeline)
         1           // lineWidth
     };
 
-    rasterization_state.polygonMode = static_cast<VkPolygonMode>(shader_info.polygon_mode);
+    rasterization_state.polygonMode = static_cast<VkPolygonMode>(mat_info.polygon_mode);
 
     static VkPipelineMultisampleStateCreateInfo multisample_state = {
         VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
