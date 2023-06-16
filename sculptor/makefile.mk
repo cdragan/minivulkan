@@ -5,3 +5,4 @@ gui_project_name = sculptor
 
 src_files += sculptor.cpp
 src_files += sculptor_geometry.cpp
+src_files += sculptor_materials.cpp

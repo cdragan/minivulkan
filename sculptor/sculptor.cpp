@@ -1,11 +1,13 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2021-2022 Chris Dragan
 
+#include "sculptor_geometry.h"
+#include "sculptor_materials.h"
+
 #include "../d_printf.h"
 #include "../gui.h"
 #include "../minivulkan.h"
 #include "../mstdc.h"
-#include "../resource.h"
 #include "../shaders.h"
 #include "../vmath.h"
 
@@ -41,11 +43,6 @@ static VkSampler viewport_sampler;
 uint32_t check_device_features()
 {
     return 0;
-}
-
-bool create_additional_heaps()
-{
-    return true;
 }
 
 static VkDescriptorSetLayout vk_per_frame_desc_set_layout = VK_NULL_HANDLE;
@@ -138,6 +135,9 @@ bool init_assets()
         return false;
 
     if ( ! create_samplers())
+        return false;
+
+    if ( ! create_material_layouts())
         return false;
 
     return true;

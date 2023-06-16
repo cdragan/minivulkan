@@ -37,14 +37,14 @@ bool Sculptor::Geometry::allocate()
         return false;
 
     if ( ! faces.allocate(Usage::fixed,
-                          max_faces * sizeof(PatchFace),
+                          sizeof(FacesBuf) + (max_faces - 1) * sizeof(FaceData),
                           VK_FORMAT_UNDEFINED,
-                          VK_BUFFER_USAGE_INDEX_BUFFER_BIT |
+                          VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
                               VK_BUFFER_USAGE_TRANSFER_DST_BIT))
         return false;
 
     if ( ! host_faces.allocate(Usage::host_only,
-                               max_faces * sizeof(PatchFace),
+                               sizeof(FacesBuf) + (max_faces - 1) * sizeof(FaceData),
                                VK_FORMAT_UNDEFINED,
                                    VK_BUFFER_USAGE_TRANSFER_SRC_BIT))
         return false;
@@ -66,12 +66,17 @@ bool Sculptor::Geometry::send_to_gpu(VkCommandBuffer cmd_buf)
         vkCmdCopyBuffer(cmd_buf, host_vertices.get_buffer(), vertices.get_buffer(), 1, &copy_region);
     }
 
+    FacesBuf* const faces_ptr = host_faces.get_ptr<FacesBuf>();
+    faces_ptr->tess_level[0] = 12;
+
     num_indices = 0;
     uint16_t* const indices_ptr = host_indices.get_ptr<uint16_t>();
     for (uint32_t i_face = 0; i_face < num_faces; i_face++) {
         assert(num_indices + 16 <= max_indices);
 
         const Face& face = obj_faces[i_face];
+
+        faces_ptr->face_data[i_face].material_id = face.material_id;
 
         static const uint32_t idx_map[] = {
              0,  1,  2,  3,
@@ -116,7 +121,7 @@ bool Sculptor::Geometry::send_to_gpu(VkCommandBuffer cmd_buf)
     }
 
     if (num_faces) {
-        copy_region.size = num_faces * sizeof(PatchFace);
+        copy_region.size = sizeof(FacesBuf) + (num_faces - 1) * sizeof(FaceData);
 
         vkCmdCopyBuffer(cmd_buf, host_faces.get_buffer(), faces.get_buffer(), 1, &copy_region);
     }
@@ -311,8 +316,12 @@ void Sculptor::Geometry::set_cube()
          3, -3,  3,
     };
 
+    constexpr int16_t multiplier = 256;
+
     for (unsigned i = 0; i < mstd::array_size(cube_vertices); i += 3)
-        add_vertex(cube_vertices[i], cube_vertices[i + 1], cube_vertices[i + 2]);
+        add_vertex(cube_vertices[i] * multiplier,
+                   cube_vertices[i + 1] * multiplier,
+                   cube_vertices[i + 2] * multiplier);
 
     const uint32_t cube_edges[] = {
          0,  1,  2,  3,
@@ -332,7 +341,10 @@ void Sculptor::Geometry::set_cube()
     };
 
     for (unsigned i = 0; i < mstd::array_size(cube_edges); i += 4)
-        add_edge(cube_edges[i], cube_edges[i + 1], cube_edges[i + 2], cube_edges[i + 3]);
+        add_edge(cube_edges[i],
+                 cube_edges[i + 1],
+                 cube_edges[i + 2],
+                 cube_edges[i + 3]);
 
     const int32_t cube_face_edges[] = {
          0,  1,   2,   3,
@@ -355,6 +367,12 @@ void Sculptor::Geometry::set_cube()
     assert(mstd::array_size(cube_face_edges) == mstd::array_size(cube_face_vertices));
 
     for (unsigned i = 0; i < mstd::array_size(cube_face_edges); i += 4)
-        add_face(cube_face_edges[i], cube_face_edges[i + 1], cube_face_edges[i + 2], cube_face_edges[i + 3],
-                 cube_face_vertices[i], cube_face_vertices[i + 1], cube_face_vertices[i + 2], cube_face_vertices[i + 3]);
+        add_face(cube_face_edges[i],
+                 cube_face_edges[i + 1],
+                 cube_face_edges[i + 2],
+                 cube_face_edges[i + 3],
+                 cube_face_vertices[i],
+                 cube_face_vertices[i + 1],
+                 cube_face_vertices[i + 2],
+                 cube_face_vertices[i + 3]);
 }

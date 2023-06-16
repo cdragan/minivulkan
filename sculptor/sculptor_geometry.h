@@ -13,8 +13,13 @@ class Geometry {
             int16_t pos[3];
         };
 
-        struct PatchFace {
+        struct FaceData {
             uint32_t material_id;
+        };
+
+        struct FacesBuf {
+            int32_t  tess_level[4];
+            FaceData face_data[1];
         };
 
         bool allocate();
