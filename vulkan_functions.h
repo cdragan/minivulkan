@@ -75,7 +75,6 @@
     X(vkResetFences) \
     X(vkCreateSemaphore) \
     X(vkAllocateMemory) \
-    X(vkFreeMemory) \
     X(vkMapMemory) \
     X(vkFlushMappedMemoryRanges) \
     X(vkCreateImage) \
@@ -179,7 +178,6 @@ enum e_device_functions {
 #define vkResetFences                             SELECT_VK_FUNCTION(device,   vkResetFences)
 #define vkCreateSemaphore                         SELECT_VK_FUNCTION(device,   vkCreateSemaphore)
 #define vkAllocateMemory                          SELECT_VK_FUNCTION(device,   vkAllocateMemory)
-#define vkFreeMemory                              SELECT_VK_FUNCTION(device,   vkFreeMemory)
 #define vkMapMemory                               SELECT_VK_FUNCTION(device,   vkMapMemory)
 #define vkFlushMappedMemoryRanges                 SELECT_VK_FUNCTION(device,   vkFlushMappedMemoryRanges)
 #define vkCreateImage                             SELECT_VK_FUNCTION(device,   vkCreateImage)
