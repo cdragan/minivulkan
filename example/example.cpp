@@ -107,10 +107,7 @@ struct ShaderInfo {
 
 static bool create_graphics_pipeline(const ShaderInfo& shader_info, VkPipeline* pipeline)
 {
-    if (*pipeline != VK_NULL_HANDLE) {
-        vkDestroyPipeline(vk_dev, *pipeline, nullptr);
-        *pipeline = VK_NULL_HANDLE;
-    }
+    assert(*pipeline == VK_NULL_HANDLE);
 
     static VkPipelineShaderStageCreateInfo shader_stages[] = {
         {

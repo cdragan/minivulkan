@@ -94,7 +94,6 @@
     X(vkCreatePipelineLayout) \
     X(vkCreateGraphicsPipelines) \
     X(vkCreateComputePipelines) \
-    X(vkDestroyPipeline) \
     X(vkCreateCommandPool) \
     X(vkAllocateCommandBuffers) \
     X(vkResetCommandBuffer) \
@@ -199,7 +198,6 @@ enum e_device_functions {
 #define vkCreatePipelineLayout                    SELECT_VK_FUNCTION(device,   vkCreatePipelineLayout)
 #define vkCreateGraphicsPipelines                 SELECT_VK_FUNCTION(device,   vkCreateGraphicsPipelines)
 #define vkCreateComputePipelines                  SELECT_VK_FUNCTION(device,   vkCreateComputePipelines)
-#define vkDestroyPipeline                         SELECT_VK_FUNCTION(device,   vkDestroyPipeline)
 #define vkCreateCommandPool                       SELECT_VK_FUNCTION(device,   vkCreateCommandPool)
 #define vkAllocateCommandBuffers                  SELECT_VK_FUNCTION(device,   vkAllocateCommandBuffers)
 #define vkResetCommandBuffer                      SELECT_VK_FUNCTION(device,   vkResetCommandBuffer)

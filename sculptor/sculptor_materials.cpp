@@ -82,6 +82,8 @@ bool create_material_layouts()
 
 bool create_material(const MaterialInfo& mat_info, VkPipeline* pipeline)
 {
+    assert(*pipeline == VK_NULL_HANDLE);
+
     static VkPipelineShaderStageCreateInfo shader_stages[] = {
         {
             VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
