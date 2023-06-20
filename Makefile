@@ -286,8 +286,10 @@ else
         CFLAGS  += -ffunction-sections -fdata-sections
         LDFLAGS += -ffunction-sections -fdata-sections
     else
-        CFLAGS  += -fsanitize=address
-        LDFLAGS += -fsanitize=address
+        ifeq ($(no_spirv_opt), 0)
+            CFLAGS  += -fsanitize=address
+            LDFLAGS += -fsanitize=address
+        endif
 
         CFLAGS += -O0 -g
     endif
