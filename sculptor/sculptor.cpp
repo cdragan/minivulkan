@@ -22,6 +22,7 @@ const int gui_config_flags = ImGuiConfigFlags_NavEnableKeyboard
 struct Viewport {
     const char*     name;
     bool            enabled;
+    uint32_t        id;
     uint32_t        width;
     uint32_t        height;
     Image           color_buffer[max_swapchain_size];
@@ -30,8 +31,8 @@ struct Viewport {
 };
 
 static Viewport viewports[] = {
-    { "Front View", true },
-    { "3D View",    true }
+    { "Front View", true, 0 },
+    { "3D View",    true, 1 }
 };
 
 const unsigned gui_num_descriptors = mstd::array_size(viewports) * max_swapchain_size;
@@ -97,7 +98,7 @@ static bool create_transforms_buffer()
                 vk_phys_props.properties.limits.minUniformBufferOffsetAlignment));
 
     return transforms_buf.allocate(Usage::dynamic,
-                                   transforms_stride * max_swapchain_size,
+                                   transforms_stride * max_swapchain_size * mstd::array_size(viewports),
                                    VK_FORMAT_UNDEFINED,
                                    VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT);
 }
@@ -394,32 +395,33 @@ static bool create_gui_frame(uint32_t image_idx)
 
         ImGui::Separator();
 
-        for (uint32_t i = 0; i < mstd::array_size(viewports); i++)
-            ImGui::Checkbox(viewports[i].name, &viewports[i].enabled);
+        for (Viewport& viewport : viewports)
+            ImGui::Checkbox(viewport.name, &viewport.enabled);
     }
     ImGui::End();
 
     bool viewports_changed = false;
 
-    for (uint32_t i = 0; i < mstd::array_size(viewports); i++) {
-        if ( ! viewports[i].enabled)
+    for (Viewport& viewport : viewports) {
+        if ( ! viewport.enabled)
             continue;
 
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2{0, 0});
-        ImGui::Begin(viewports[i].name, &viewports[i].enabled, ImGuiWindowFlags_NoScrollbar);
+        ImGui::Begin(viewport.name, &viewport.enabled, ImGuiWindowFlags_NoScrollbar);
         ImGui::PopStyleVar();
         {
             const ImVec2 content_size = ImGui::GetContentRegionAvail();
 
-            if ((content_size.x != viewports[i].width) || (content_size.y != viewports[i].height))
+            if ((static_cast<uint32_t>(content_size.x) != viewport.width) ||
+                (static_cast<uint32_t>(content_size.y) != viewport.height))
                 viewports_changed = true;
 
-            viewports[i].width  = static_cast<uint32_t>(content_size.x);
-            viewports[i].height = static_cast<uint32_t>(content_size.y);
+            viewport.width  = static_cast<uint32_t>(content_size.x);
+            viewport.height = static_cast<uint32_t>(content_size.y);
 
-            ImGui::Image(reinterpret_cast<ImTextureID>(viewports[i].gui_tex[image_idx]),
-                         ImVec2{static_cast<float>(viewports[i].width),
-                                static_cast<float>(viewports[i].height)});
+            ImGui::Image(reinterpret_cast<ImTextureID>(viewport.gui_tex[image_idx]),
+                         ImVec2{static_cast<float>(viewport.width),
+                                static_cast<float>(viewport.height)});
         }
         ImGui::End();
     }
@@ -438,12 +440,13 @@ static bool draw_grid(const Viewport& viewport, VkCommandBuffer buf)
     return true;
 }
 
-static void set_patch_transforms(const Viewport& viewport, uint32_t image_idx)
+static void set_patch_transforms(const Viewport& viewport, uint32_t transform_id)
 {
-    Transforms* const transforms = transforms_buf.get_ptr<Transforms>(image_idx, transforms_stride);
+    Transforms* const transforms = transforms_buf.get_ptr<Transforms>(transform_id, transforms_stride);
     assert(transforms);
 
-    const vmath::mat4 model_view = vmath::scale(0.1f, 0.1f, 0.1f)
+    const float scale_factor = 16.0f;
+    const vmath::mat4 model_view = vmath::scale(scale_factor, scale_factor, scale_factor)
                                  * vmath::translate(0.0f, 0.0f, 7.0f);
 
     transforms->model_view = model_view;
@@ -470,11 +473,13 @@ static bool render_view(const Viewport& viewport, uint32_t image_idx, VkCommandB
                               viewport.width,
                               viewport.height);
 
+    const uint32_t transform_id = image_idx * mstd::array_size(viewports) + viewport.id;
+
     uint32_t dynamic_offsets[] = {
-        image_idx * transforms_stride
+        transform_id * transforms_stride
     };
 
-    set_patch_transforms(viewport, image_idx);
+    set_patch_transforms(viewport, transform_id);
 
     vkCmdBindDescriptorSets(buf,
                             VK_PIPELINE_BIND_POINT_GRAPHICS,

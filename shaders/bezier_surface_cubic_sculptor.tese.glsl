@@ -46,7 +46,7 @@ void main()
     const vec4 view_pos = vec4(obj_pos, 1) * model_view;
 
     out_pos     = view_pos.xyz;
-    gl_Position = vec4(view_pos.xy * proj.xy, view_pos.z * proj.z + view_pos.w, view_pos.z * proj.w);
+    gl_Position = vec4(view_pos.xy * proj.xy, view_pos.z * proj.z + view_pos.w * proj.w, view_pos.z);
 
     const vec3 du = bezier_derivative_cubic(p[0], p[1], p[2], p[3], gl_TessCoord.y);
 

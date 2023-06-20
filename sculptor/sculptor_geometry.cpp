@@ -329,7 +329,7 @@ void Sculptor::Geometry::set_cube()
          3, -3,  3,
     };
 
-    constexpr int16_t multiplier = 256;
+    constexpr int16_t multiplier = 128;
 
     for (unsigned i = 0; i < mstd::array_size(cube_vertices); i += 3)
         add_vertex(cube_vertices[i] * multiplier,
