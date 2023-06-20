@@ -11,7 +11,7 @@ class Geometry {
 
         struct Vertex {
             int16_t pos[3];
-            int16_t value;
+            int16_t unused;
         };
 
         struct FaceData {
@@ -24,7 +24,9 @@ class Geometry {
         };
 
         bool allocate();
+        void set_dirty() { dirty = true; }
         bool send_to_gpu(VkCommandBuffer cmd_buf);
+        void render(VkCommandBuffer cmd_buf);
 
         uint32_t add_vertex(int16_t x, int16_t y, int16_t z);
         uint32_t get_num_vertices() const { return num_vertices; }
@@ -38,6 +40,8 @@ class Geometry {
                           uint32_t vtx_0, uint32_t vtx_1, uint32_t vtx_2, uint32_t vtx_3);
         uint32_t get_num_faces() const { return num_faces; }
         void     validate_face(uint32_t face_id);
+
+        const VkBuffer& get_faces_buffer() const { return faces.get_buffer(); }
 
         void set_cube();
 
@@ -53,6 +57,7 @@ class Geometry {
         uint32_t num_indices  = 0;
         uint32_t num_edges    = 0;
         uint32_t num_faces    = 0;
+        bool     dirty        = true;
 
         using Edge = uint32_t[4];
         static constexpr uint32_t max_edges = 0x10000U;

@@ -36,70 +36,29 @@ static Viewport viewports[] = {
 
 const unsigned gui_num_descriptors = mstd::array_size(viewports) * max_swapchain_size;
 
-static bool viewports_changed = true;
-
 static VkSampler viewport_sampler;
 
 uint32_t check_device_features()
 {
-    return 0;
+    uint32_t missing_features = 0;
+
+    missing_features += check_feature(&vk_features.features.tessellationShader);
+    missing_features += check_feature(&vk_dyn_rendering_features.dynamicRendering);
+
+    return missing_features;
 }
 
-static VkDescriptorSetLayout vk_per_frame_desc_set_layout = VK_NULL_HANDLE;
-static VkPipelineLayout      vk_gr_pipeline_layout        = VK_NULL_HANDLE;
-static VkPipeline            sculptor_object_pipeline     = VK_NULL_HANDLE;
-static Sculptor::Geometry    patch_geometry;
+static VkPipeline         sculptor_object_pipeline = VK_NULL_HANDLE;
+static VkDescriptorSet    desc_set_2               = VK_NULL_HANDLE;
+static Sculptor::Geometry patch_geometry;
+static Buffer             transforms_buf;
+static uint32_t           transforms_stride;
 
-static bool create_pipeline_layouts()
-{
-    static const VkDescriptorSetLayoutBinding create_binding = {
-        0,
-        VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-        1,
-        VK_SHADER_STAGE_VERTEX_BIT
-            | VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT
-            | VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT
-            | VK_SHADER_STAGE_FRAGMENT_BIT,
-        nullptr
-    };
-
-    static const VkDescriptorSetLayoutCreateInfo create_desc_set_layout = {
-        VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-        nullptr,
-        0, // flags
-        1,
-        &create_binding
-    };
-
-    VkResult res = CHK(vkCreateDescriptorSetLayout(vk_dev, &create_desc_set_layout, nullptr, &vk_per_frame_desc_set_layout));
-    if (res != VK_SUCCESS)
-        return false;
-
-    static VkPushConstantRange push_constants = {
-        VK_SHADER_STAGE_VERTEX_BIT
-            | VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT,
-        0,
-        // One 4x4 matrix of floats - model-view matrix
-        // One 3x3 matrix of floats - inverse-transpose of model-view matrix, for normals
-        100
-    };
-
-    static VkPipelineLayoutCreateInfo layout_create_info = {
-        VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
-        nullptr,
-        0,      // flags
-        1,
-        &vk_per_frame_desc_set_layout,
-        1,      // pushConstantRangeCount
-        &push_constants
-    };
-
-    res = CHK(vkCreatePipelineLayout(vk_dev, &layout_create_info, nullptr, &vk_gr_pipeline_layout));
-    if (res != VK_SUCCESS)
-        return false;
-
-    return true;
-}
+struct Transforms {
+    vmath::mat4 model_view;
+    vmath::mat3 model_view_normal;
+    vmath::vec4 proj;
+};
 
 static bool create_samplers()
 {
@@ -131,11 +90,115 @@ static bool create_samplers()
     return true;
 }
 
+static bool create_transforms_buffer()
+{
+    transforms_stride = static_cast<uint32_t>(mstd::align_up(
+                static_cast<VkDeviceSize>(sizeof(Transforms)),
+                vk_phys_props.properties.limits.minUniformBufferOffsetAlignment));
+
+    return transforms_buf.allocate(Usage::dynamic,
+                                   transforms_stride * max_swapchain_size,
+                                   VK_FORMAT_UNDEFINED,
+                                   VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT);
+}
+
+static bool create_descriptor_sets()
+{
+    static VkDescriptorSetAllocateInfo alloc_info = {
+        VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+        nullptr,
+        VK_NULL_HANDLE,                 // descriptorPool
+        1,                              // descriptorSetCount
+        &sculptor_desc_set_layout[2]    // pSetLayouts
+    };
+
+    {
+        static VkDescriptorPoolSize pool_sizes[] = {
+            {
+                VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC,
+                1
+            },
+            {
+                VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                1
+            }
+        };
+
+        static VkDescriptorPoolCreateInfo pool_create_info = {
+            VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+            nullptr,
+            0, // flags
+            1, // maxSets
+            mstd::array_size(pool_sizes),
+            pool_sizes
+        };
+
+        const VkResult res = CHK(vkCreateDescriptorPool(vk_dev, &pool_create_info, nullptr, &alloc_info.descriptorPool));
+        if (res != VK_SUCCESS)
+            return false;
+    }
+
+    {
+        const VkResult res = CHK(vkAllocateDescriptorSets(vk_dev, &alloc_info, &desc_set_2));
+        if (res != VK_SUCCESS)
+            return false;
+    }
+
+    {
+        static VkDescriptorBufferInfo dynamic_buffer_info = {
+            VK_NULL_HANDLE,     // buffer
+            0,                  // offset
+            0                   // range
+        };
+        static VkDescriptorBufferInfo storage_buffer_info = {
+            VK_NULL_HANDLE,     // buffer
+            0,                  // offset
+            VK_WHOLE_SIZE       // range
+        };
+        static VkWriteDescriptorSet write_desc_sets[] = {
+            {
+                VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                nullptr,
+                VK_NULL_HANDLE,                             // dstSet
+                0,                                          // dstBinding
+                0,                                          // dstArrayElement
+                1,                                          // descriptorCount
+                VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC,  // descriptorType
+                nullptr,                                    // pImageInfo
+                &dynamic_buffer_info,                       // pBufferInfo
+                nullptr                                     // pTexelBufferView
+            },
+            {
+                VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                nullptr,
+                VK_NULL_HANDLE,                             // dstSet
+                1,                                          // dstBinding
+                0,                                          // dstArrayElement
+                1,                                          // descriptorCount
+                VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,          // descriptorType
+                nullptr,                                    // pImageInfo
+                &storage_buffer_info,                       // pBufferInfo
+                nullptr                                     // pTexelBufferView
+            }
+        };
+        dynamic_buffer_info.buffer = transforms_buf.get_buffer();
+        dynamic_buffer_info.range  = transforms_stride;
+        storage_buffer_info.buffer = patch_geometry.get_faces_buffer();
+        write_desc_sets[0].dstSet  = desc_set_2;
+        write_desc_sets[1].dstSet  = desc_set_2;
+
+        vkUpdateDescriptorSets(vk_dev,
+                               mstd::array_size(write_desc_sets),
+                               write_desc_sets,
+                               0,           // descriptorCopyCount
+                               nullptr);    // pDescriptorCopies
+    }
+
+    return true;
+}
+
 bool init_assets()
 {
-    if ( ! create_pipeline_layouts())
-        return false;
-
     if ( ! create_samplers())
         return false;
 
@@ -173,6 +236,15 @@ bool init_assets()
 
     patch_geometry.set_cube();
 
+    if ( ! create_transforms_buffer())
+        return false;
+
+    if ( ! create_descriptor_sets())
+        return false;
+
+    if ( ! init_gui(GuiClear::clear))
+        return false;
+
     return true;
 }
 
@@ -186,9 +258,6 @@ static bool destroy_viewports()
             viewport.color_buffer[i_img].destroy();
             viewport.depth_buffer[i_img].destroy();
         }
-
-        viewport.width  = 0;
-        viewport.height = 0;
     }
 
     return true;
@@ -330,10 +399,7 @@ static bool create_gui_frame(uint32_t image_idx)
     }
     ImGui::End();
 
-    if (viewports_changed)
-        if ( ! destroy_viewports())
-            return false;
-    viewports_changed = false;
+    bool viewports_changed = false;
 
     for (uint32_t i = 0; i < mstd::array_size(viewports); i++) {
         if ( ! viewports[i].enabled)
@@ -345,11 +411,11 @@ static bool create_gui_frame(uint32_t image_idx)
         {
             const ImVec2 content_size = ImGui::GetContentRegionAvail();
 
-            viewports[i].width  = static_cast<uint32_t>(content_size.x);
-            viewports[i].height = static_cast<uint32_t>(content_size.y);
-
             if ((content_size.x != viewports[i].width) || (content_size.y != viewports[i].height))
                 viewports_changed = true;
+
+            viewports[i].width  = static_cast<uint32_t>(content_size.x);
+            viewports[i].height = static_cast<uint32_t>(content_size.y);
 
             ImGui::Image(reinterpret_cast<ImTextureID>(viewports[i].gui_tex[image_idx]),
                          ImVec2{static_cast<float>(viewports[i].width),
@@ -358,21 +424,68 @@ static bool create_gui_frame(uint32_t image_idx)
         ImGui::End();
     }
 
+    if (viewports_changed && ! destroy_viewports())
+        return false;
+
     if ( ! allocate_viewports())
         return false;
 
     return true;
 }
 
-static bool draw_grid(Viewport& viewport, VkCommandBuffer buf)
+static bool draw_grid(const Viewport& viewport, VkCommandBuffer buf)
 {
     return true;
 }
 
-static bool render_view(Viewport& viewport, uint32_t image_idx, VkCommandBuffer buf)
+static void set_patch_transforms(const Viewport& viewport, uint32_t image_idx)
+{
+    Transforms* const transforms = transforms_buf.get_ptr<Transforms>(image_idx, transforms_stride);
+    assert(transforms);
+
+    const vmath::mat4 model_view = vmath::scale(0.1f, 0.1f, 0.1f)
+                                 * vmath::translate(0.0f, 0.0f, 7.0f);
+
+    transforms->model_view = model_view;
+
+    transforms->model_view_normal = vmath::transpose(vmath::inverse(vmath::mat3(model_view)));
+
+    const float aspect = static_cast<float>(viewport.width) / static_cast<float>(viewport.height);
+    transforms->proj = vmath::projection_vector(aspect,
+                                                vmath::radians(30.0f),
+                                                0.01f,      // near_plane
+                                                1000.0f,    // far_plane
+                                                0.0f);      // depth_bias
+}
+
+static bool render_view(const Viewport& viewport, uint32_t image_idx, VkCommandBuffer buf)
 {
     if ( ! draw_grid(viewport, buf))
         return false;
+
+    vkCmdBindPipeline(buf, VK_PIPELINE_BIND_POINT_GRAPHICS, sculptor_object_pipeline);
+
+    send_viewport_and_scissor(buf,
+                              static_cast<float>(viewport.width) / static_cast<float>(viewport.height),
+                              viewport.width,
+                              viewport.height);
+
+    uint32_t dynamic_offsets[] = {
+        image_idx * transforms_stride
+    };
+
+    set_patch_transforms(viewport, image_idx);
+
+    vkCmdBindDescriptorSets(buf,
+                            VK_PIPELINE_BIND_POINT_GRAPHICS,
+                            sculptor_material_layout,
+                            2,          // firstSet
+                            1,          // descriptorSetCount
+                            &desc_set_2,
+                            mstd::array_size(dynamic_offsets),
+                            dynamic_offsets);
+
+    patch_geometry.render(buf);
 
     return true;
 }
@@ -457,6 +570,9 @@ bool draw_frame(uint32_t image_idx, uint64_t time_ms, VkFence queue_fence)
         if ( ! viewport.enabled)
             continue;
 
+        if ( ! patch_geometry.send_to_gpu(buf))
+            return false;
+
         static const Image::Transition render_viewport_layout = {
             VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
             0,
@@ -492,17 +608,8 @@ bool draw_frame(uint32_t image_idx, uint64_t time_ms, VkFence queue_fence)
         viewport.color_buffer[image_idx].set_image_layout(buf, gui_image_layout);
     }
 
-    color_att.imageView              = image.get_view();
-    color_att.clearValue             = make_clear_color(0, 0, 0, 1);
-    depth_att.imageView              = vk_depth_buffers[image_idx].get_view();
-    rendering_info.renderArea.extent = vk_surface_caps.currentExtent;
-
-    vkCmdBeginRenderingKHR(buf, &rendering_info);
-
-    if ( ! send_gui_to_gpu(buf))
+    if ( ! send_gui_to_gpu(buf, image_idx))
         return false;
-
-    vkCmdEndRenderingKHR(buf);
 
     static const Image::Transition color_att_present = {
         VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,

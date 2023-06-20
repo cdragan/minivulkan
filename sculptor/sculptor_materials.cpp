@@ -7,8 +7,8 @@
 #include "../mstdc.h"
 #include "../shaders.h"
 
-static VkDescriptorSetLayout desc_set_layout[4];
-static VkPipelineLayout      material_layout;
+VkDescriptorSetLayout sculptor_desc_set_layout[3];
+VkPipelineLayout      sculptor_material_layout;
 
 bool create_material_layouts()
 {
@@ -21,19 +21,21 @@ bool create_material_layouts()
             nullptr
         };
 
-        const VkResult res = CHK(vkCreateDescriptorSetLayout(vk_dev, &create_empty_set_layout, nullptr, &desc_set_layout[0]));
+        const VkResult res = CHK(vkCreateDescriptorSetLayout(vk_dev,
+                                                             &create_empty_set_layout,
+                                                             nullptr,
+                                                             &sculptor_desc_set_layout[0]));
         if (res != VK_SUCCESS)
             return false;
     }
 
-    desc_set_layout[1] = desc_set_layout[0];
-    desc_set_layout[2] = desc_set_layout[0];
+    sculptor_desc_set_layout[1] = sculptor_desc_set_layout[0];
 
     {
         static const VkDescriptorSetLayoutBinding per_object_set[] = {
             {
                 0, // binding 0: uniform buffer with transforms
-                VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+                VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC,
                 1,
                 VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT,
                 nullptr
@@ -56,7 +58,10 @@ bool create_material_layouts()
             per_object_set
         };
 
-        const VkResult res = CHK(vkCreateDescriptorSetLayout(vk_dev, &create_per_object_set_layout, nullptr, &desc_set_layout[3]));
+        const VkResult res = CHK(vkCreateDescriptorSetLayout(vk_dev,
+                                                             &create_per_object_set_layout,
+                                                             nullptr,
+                                                             &sculptor_desc_set_layout[2]));
         if (res != VK_SUCCESS)
             return false;
     }
@@ -66,13 +71,16 @@ bool create_material_layouts()
             VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
             nullptr,
             0,      // flags
-            mstd::array_size(desc_set_layout),
-            desc_set_layout,
+            mstd::array_size(sculptor_desc_set_layout),
+            sculptor_desc_set_layout,
             0,      // pushConstantRangeCount
             nullptr // pPushConstantRanges
         };
 
-        const VkResult res = CHK(vkCreatePipelineLayout(vk_dev, &layout_create_info, nullptr, &material_layout));
+        const VkResult res = CHK(vkCreatePipelineLayout(vk_dev,
+                                                        &layout_create_info,
+                                                        nullptr,
+                                                        &sculptor_material_layout));
         if (res != VK_SUCCESS)
             return false;
     }
@@ -309,7 +317,7 @@ bool create_material(const MaterialInfo& mat_info, VkPipeline* pipeline)
         -1              // basePipelineIndex
     };
 
-    pipeline_create_info.layout = material_layout;
+    pipeline_create_info.layout = sculptor_material_layout;
 
     const VkResult res = CHK(vkCreateGraphicsPipelines(vk_dev,
                                                        VK_NULL_HANDLE,

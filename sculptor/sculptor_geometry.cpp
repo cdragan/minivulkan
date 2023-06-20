@@ -54,6 +54,9 @@ bool Sculptor::Geometry::allocate()
 
 bool Sculptor::Geometry::send_to_gpu(VkCommandBuffer cmd_buf)
 {
+    if ( ! dirty)
+        return true;
+
     static VkBufferCopy copy_region = {
         0, // srcOffset
         0, // dstOffset
@@ -126,6 +129,8 @@ bool Sculptor::Geometry::send_to_gpu(VkCommandBuffer cmd_buf)
         vkCmdCopyBuffer(cmd_buf, host_faces.get_buffer(), faces.get_buffer(), 1, &copy_region);
     }
 
+    dirty = false;
+
     return true;
 }
 
@@ -140,6 +145,7 @@ uint32_t Sculptor::Geometry::add_vertex(int16_t x, int16_t y, int16_t z)
 void Sculptor::Geometry::set_vertex(uint32_t vtx, int16_t x, int16_t y, int16_t z)
 {
     assert(vtx < num_vertices);
+
     Vertex& vertex = host_vertices.get_ptr<Vertex>()[vtx];
     vertex.pos[0] = x;
     vertex.pos[1] = y;
@@ -157,10 +163,12 @@ uint32_t Sculptor::Geometry::add_edge(uint32_t vtx_0, uint32_t vtx_1, uint32_t v
 void Sculptor::Geometry::set_edge(uint32_t edge, uint32_t vtx_0, uint32_t vtx_1, uint32_t vtx_2, uint32_t vtx_3)
 {
     assert(edge < num_edges);
+
     assert(vtx_0 < num_vertices);
     assert(vtx_1 < num_vertices);
     assert(vtx_2 < num_vertices);
     assert(vtx_3 < num_vertices);
+
     obj_edges[edge][0] = vtx_0;
     obj_edges[edge][1] = vtx_1;
     obj_edges[edge][2] = vtx_2;
@@ -180,6 +188,7 @@ void Sculptor::Geometry::set_face(uint32_t face_id, int32_t edge_0, int32_t edge
                                   uint32_t vtx_0, uint32_t vtx_1, uint32_t vtx_2, uint32_t vtx_3)
 {
     assert(face_id < num_faces);
+
     assert(edge_0 < static_cast<int32_t>(num_edges));
     assert(edge_1 < static_cast<int32_t>(num_edges));
     assert(edge_2 < static_cast<int32_t>(num_edges));
@@ -188,10 +197,12 @@ void Sculptor::Geometry::set_face(uint32_t face_id, int32_t edge_0, int32_t edge
     assert(edge_1 >= -static_cast<int32_t>(num_edges));
     assert(edge_2 >= -static_cast<int32_t>(num_edges));
     assert(edge_3 >= -static_cast<int32_t>(num_edges));
+
     assert(vtx_0 < num_vertices);
     assert(vtx_1 < num_vertices);
     assert(vtx_2 < num_vertices);
     assert(vtx_3 < num_vertices);
+
     obj_faces[face_id].edges[0] = edge_0;
     obj_faces[face_id].edges[1] = edge_1;
     obj_faces[face_id].edges[2] = edge_2;
@@ -200,6 +211,8 @@ void Sculptor::Geometry::set_face(uint32_t face_id, int32_t edge_0, int32_t edge
     obj_faces[face_id].ctrl_vertices[1] = vtx_1;
     obj_faces[face_id].ctrl_vertices[2] = vtx_2;
     obj_faces[face_id].ctrl_vertices[3] = vtx_3;
+
+    validate_face(face_id);
 }
 
 void Sculptor::Geometry::validate_face(uint32_t face_id)
@@ -352,7 +365,7 @@ void Sculptor::Geometry::set_cube()
          5,  2,  10,   6,
          6, -4, -12,   7,
          7, -2, -10,   4,
-        -9, 10,   9, -11
+        -9, 10,   9, -12
     };
 
     const uint32_t cube_face_vertices[] = {
@@ -375,4 +388,28 @@ void Sculptor::Geometry::set_cube()
                  cube_face_vertices[i + 1],
                  cube_face_vertices[i + 2],
                  cube_face_vertices[i + 3]);
+
+    set_dirty();
+}
+
+void Sculptor::Geometry::render(VkCommandBuffer cmd_buf)
+{
+    static const VkDeviceSize vb_offset = 0;
+    vkCmdBindVertexBuffers(cmd_buf,
+                           0, // firstBinding
+                           1, // bindingCount
+                           &vertices.get_buffer(),
+                           &vb_offset);
+
+    vkCmdBindIndexBuffer(cmd_buf,
+                         indices.get_buffer(),
+                         0, // offset
+                         VK_INDEX_TYPE_UINT16);
+
+    vkCmdDrawIndexed(cmd_buf,
+                     num_indices,
+                     num_faces,
+                     0,  // firstVertex
+                     0,  // vertexOffset
+                     0); // firstInstance
 }
