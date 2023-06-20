@@ -50,6 +50,7 @@ uint32_t check_device_features()
     missing_features += check_feature(&vk_16b_storage_features.storageBuffer16BitAccess);
     missing_features += check_feature(&vk_shader_int8_features.shaderInt8);
     missing_features += check_feature(&vk_features.features.shaderInt16);
+    missing_features += check_feature(&vk_dyn_rendering_features.dynamicRendering);
 
     return missing_features;
 }
@@ -278,6 +279,9 @@ bool init_assets()
     if ( ! create_pipelines())
         return false;
 
+    if ( ! init_gui(GuiClear::clear))
+        return false;
+
     return true;
 }
 
@@ -291,11 +295,11 @@ bool draw_frame(uint32_t image_idx, uint64_t time_ms, VkFence queue_fence)
         static VkDescriptorPoolSize pool_sizes[] = {
             {
                 VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,      // type
-                1                                       // descriptorCount
+                1 * num_dsls                            // descriptorCount
             },
             {
                 VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,      // type
-                3                                       // descriptorCount
+                3 * num_dsls                            // descriptorCount
             }
         };
 
@@ -440,56 +444,8 @@ bool draw_frame(uint32_t image_idx, uint64_t time_ms, VkFence queue_fence)
         vk_depth_buffers[image_idx].set_image_layout(buf, depth_init);
     }
 
-    // TODO get rid of depth buffer
-    static VkRenderingAttachmentInfo color_att = {
-        VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
-        nullptr,
-        VK_NULL_HANDLE,             // imageView
-        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-        VK_RESOLVE_MODE_NONE,
-        VK_NULL_HANDLE,             // resolveImageView
-        VK_IMAGE_LAYOUT_UNDEFINED,  // resolveImageLayout
-        VK_ATTACHMENT_LOAD_OP_CLEAR,
-        VK_ATTACHMENT_STORE_OP_STORE,
-        make_clear_color(0, 0, 0, 0)
-    };
-
-    static VkRenderingAttachmentInfo depth_att = {
-        VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
-        nullptr,
-        VK_NULL_HANDLE,             // imageView
-        VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
-        VK_RESOLVE_MODE_NONE,
-        VK_NULL_HANDLE,             // resolveImageView
-        VK_IMAGE_LAYOUT_UNDEFINED,  // resolveImageLayout
-        VK_ATTACHMENT_LOAD_OP_CLEAR,
-        VK_ATTACHMENT_STORE_OP_DONT_CARE,
-        make_clear_depth(0, 0)
-    };
-
-    static VkRenderingInfo rendering_info = {
-        VK_STRUCTURE_TYPE_RENDERING_INFO,
-        nullptr,
-        0,              // flags
-        { },            // renderArea
-        1,              // layerCount
-        0,              // viewMask
-        1,              // colorAttachmentCount
-        &color_att,
-        &depth_att,
-        nullptr         // pStencilAttachment
-    };
-
-    color_att.imageView              = image.get_view();
-    depth_att.imageView              = vk_depth_buffers[image_idx].get_view();
-    rendering_info.renderArea.extent = vk_surface_caps.currentExtent;
-
-    vkCmdBeginRenderingKHR(buf, &rendering_info);
-
-    if ( ! send_gui_to_gpu(buf))
+    if ( ! send_gui_to_gpu(buf, image_idx))
         return false;
-
-    vkCmdEndRenderingKHR(buf);
 
     static const Image::Transition color_att_present = {
         VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,

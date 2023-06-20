@@ -35,6 +35,7 @@ uint32_t check_device_features()
         missing_features += check_feature(&vk_features.features.tessellationShader);
 
     missing_features += check_feature(&vk_features.features.fillModeNonSolid);
+    missing_features += check_feature(&vk_dyn_rendering_features.dynamicRendering);
 
     return missing_features;
 }
@@ -1143,10 +1144,10 @@ bool draw_frame(uint32_t image_idx, uint64_t time_ms, VkFence queue_fence)
                      0,     // vertexOffset
                      0);    // firstInstance
 
-    if ( ! send_gui_to_gpu(buf))
-        return false;
-
     vkCmdEndRenderingKHR(buf);
+
+    if ( ! send_gui_to_gpu(buf, image_idx))
+        return false;
 
     static const Image::Transition color_att_present = {
         VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,

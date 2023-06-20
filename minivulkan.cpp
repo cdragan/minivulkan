@@ -294,7 +294,8 @@ static bool init_instance()
         return false;
 
 #ifndef NDEBUG
-    if (print_extensions()) {
+    const bool do_print = print_extensions();
+    if (do_print) {
         if (num_ext_props)
             d_printf("Instance extensions:\n");
         for (uint32_t i = 0; i < num_ext_props; i++)
@@ -323,7 +324,7 @@ static bool init_instance()
         return false;
 
 #ifndef NDEBUG
-    if (print_extensions()) {
+    {
         const PFN_vkEnumerateInstanceLayerProperties vkEnumerateInstanceLayerProperties =
             reinterpret_cast<PFN_vkEnumerateInstanceLayerProperties>(
                 vkGetInstanceProcAddr(nullptr, "vkEnumerateInstanceLayerProperties"));
@@ -348,7 +349,8 @@ static bool init_instance()
         };
 
         for (uint32_t i = 0; i < num_layer_props; i++) {
-            d_printf("Layer: %s\n", layer_props[i].layerName);
+            if (do_print)
+                d_printf("Layer: %s\n", layer_props[i].layerName);
 
             num_ext_props = mstd::array_size(ext_props);
 
@@ -359,7 +361,8 @@ static bool init_instance()
                                                          ext_props);
             if (res == VK_SUCCESS || res == VK_INCOMPLETE) {
                 for (uint32_t j = 0; j < num_ext_props; j++) {
-                    d_printf("    %s\n", ext_props[j].extensionName);
+                    if (do_print)
+                        d_printf("    %s\n", ext_props[j].extensionName);
 
                     static const char validation_features_ext[] = "VK_EXT_validation_features";
                     if (mstd::strcmp(ext_props[i].extensionName, validation_features_ext) == 0)
@@ -998,6 +1001,8 @@ static bool update_resolution()
     if ( ! idle_queue())
         return false;
 
+    free_gui_framebuffers();
+
     if ( ! create_swapchain())
         return false;
 
@@ -1219,9 +1224,6 @@ bool init_vulkan(Window* w)
         return false;
 
     if ( ! init_assets())
-        return false;
-
-    if ( ! init_gui())
         return false;
 
     if ( ! init_sound())

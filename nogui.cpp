@@ -3,12 +3,16 @@
 
 #include "gui.h"
 
-bool init_gui()
+bool init_gui(GuiClear clear)
 {
     return true;
 }
 
-bool send_gui_to_gpu(VkCommandBuffer cmdbuf)
+void free_gui_framebuffers()
+{
+}
+
+bool send_gui_to_gpu(VkCommandBuffer cmdbuf, uint32_t image_idx)
 {
     return true;
 }

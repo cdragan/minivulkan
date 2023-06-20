@@ -2,14 +2,24 @@
 // Copyright (c) 2021-2022 Chris Dragan
 
 #include "gui.h"
+
 #include "minivulkan.h"
 #include "mstdc.h"
+#include "resource.h"
 #include "d_printf.h"
 
 #include "../imgui/imgui.h"
 #include "../imgui/backends/imgui_impl_vulkan.h"
 
 float vk_surface_scale = 1.0f;
+
+static VkRenderPass  vk_gui_render_pass;
+static VkFramebuffer vk_framebuffers[max_swapchain_size];
+
+static PFN_vkCmdBeginRenderPass myCmdBeginRenderPass;
+static PFN_vkCmdEndRenderPass   myCmdEndRenderPass;
+static PFN_vkCreateFramebuffer  myCreateFramebuffer;
+static PFN_vkDestroyFramebuffer myDestroyFramebuffer;
 
 static void check_gui_result(VkResult imgui_error)
 {
@@ -29,14 +39,14 @@ static PFN_vkVoidFunction load_vk_function(const char* name, void* cookie)
     return func;
 }
 
-static bool create_render_pass(VkRenderPass* render_pass)
+static bool create_render_pass(VkRenderPass* render_pass, GuiClear clear)
 {
     static VkAttachmentDescription attachments[] = {
         {
             0, // flags
             VK_FORMAT_UNDEFINED,
             VK_SAMPLE_COUNT_1_BIT,
-            VK_ATTACHMENT_LOAD_OP_CLEAR,
+            VK_ATTACHMENT_LOAD_OP_DONT_CARE,
             VK_ATTACHMENT_STORE_OP_STORE,
             VK_ATTACHMENT_LOAD_OP_DONT_CARE,
             VK_ATTACHMENT_STORE_OP_DONT_CARE,
@@ -55,6 +65,9 @@ static bool create_render_pass(VkRenderPass* render_pass)
             VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL
         }
     };
+
+    if (clear == GuiClear::clear)
+        attachments[0].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
 
     if ( ! find_optimal_tiling_format(&swapchain_create_info.imageFormat,
                                       1,
@@ -96,15 +109,93 @@ static bool create_render_pass(VkRenderPass* render_pass)
         &subpass
     };
 
-    const PFN_vkCreateRenderPass vkCreateRenderPass = reinterpret_cast<PFN_vkCreateRenderPass>(load_vk_function("vkCreateRenderPass", nullptr));
-    if ( ! vkCreateRenderPass)
+    PFN_vkCreateRenderPass vkCreateRenderPass;
+
+    vkCreateRenderPass   = reinterpret_cast<PFN_vkCreateRenderPass>(  load_vk_function("vkCreateRenderPass",   nullptr));
+    myCmdBeginRenderPass = reinterpret_cast<PFN_vkCmdBeginRenderPass>(load_vk_function("vkCmdBeginRenderPass", nullptr));
+    myCmdEndRenderPass   = reinterpret_cast<PFN_vkCmdEndRenderPass>(  load_vk_function("vkCmdEndRenderPass",   nullptr));
+    myCreateFramebuffer  = reinterpret_cast<PFN_vkCreateFramebuffer>( load_vk_function("vkCreateFramebuffer",  nullptr));
+    myDestroyFramebuffer = reinterpret_cast<PFN_vkDestroyFramebuffer>(load_vk_function("vkDestroyFramebuffer", nullptr));
+
+    if ( ! vkCreateRenderPass || ! myCmdBeginRenderPass || ! myCmdEndRenderPass || ! myCreateFramebuffer || ! myDestroyFramebuffer)
         return false;
 
     const VkResult res = CHK(vkCreateRenderPass(vk_dev, &render_pass_info, nullptr, render_pass));
     return res == VK_SUCCESS;
 }
 
-bool init_gui()
+static bool create_framebuffer(uint32_t image_idx)
+{
+    if (vk_framebuffers[image_idx])
+        return true;
+
+    static VkImageView attachments[2];
+
+    static VkFramebufferCreateInfo frame_buffer_info = {
+        VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
+        nullptr,
+        0,                  // flags
+        VK_NULL_HANDLE,     // renderPass
+        mstd::array_size(attachments),
+        attachments,
+        0,                  // width
+        0,                  // height
+        1                   // layers
+    };
+    frame_buffer_info.renderPass = vk_gui_render_pass;
+    frame_buffer_info.width      = vk_surface_caps.currentExtent.width;
+    frame_buffer_info.height     = vk_surface_caps.currentExtent.height;
+
+    attachments[0] = vk_swapchain_images[image_idx].get_view();
+    attachments[1] = vk_depth_buffers[image_idx].get_view();
+
+    const VkResult res = CHK(myCreateFramebuffer(vk_dev,
+                                                 &frame_buffer_info,
+                                                 nullptr,
+                                                 &vk_framebuffers[image_idx]));
+    return res == VK_SUCCESS;
+}
+
+void free_gui_framebuffers()
+{
+    for (uint32_t i = 0; i < mstd::array_size(vk_framebuffers); i++) {
+        if (vk_framebuffers[i]) {
+            myDestroyFramebuffer(vk_dev, vk_framebuffers[i], nullptr);
+            vk_framebuffers[i] = VK_NULL_HANDLE;
+        }
+    }
+}
+
+static bool begin_gui_render_pass(VkCommandBuffer buf, uint32_t image_idx)
+{
+    if ( ! create_framebuffer(image_idx))
+        return false;
+
+    static const VkClearValue clear_values[] = {
+        make_clear_color(0, 0, 0, 1),
+        make_clear_depth(0, 0)
+    };
+
+    static VkRenderPassBeginInfo render_pass_info = {
+        VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
+        nullptr,
+        VK_NULL_HANDLE,     // renderPass
+        VK_NULL_HANDLE,     // framebuffer
+        { },                // renderArea
+        mstd::array_size(clear_values),
+        clear_values
+    };
+
+    render_pass_info.renderPass        = vk_gui_render_pass;
+    render_pass_info.framebuffer       = vk_framebuffers[image_idx];
+    render_pass_info.renderArea.extent = vk_surface_caps.currentExtent;
+
+    myCmdBeginRenderPass(buf, &render_pass_info, VK_SUBPASS_CONTENTS_INLINE);
+
+    return true;
+}
+
+bool init_gui(GuiClear clear)
 {
     IMGUI_CHECKVERSION();
     if ( ! ImGui::CreateContext()) {
@@ -145,8 +236,8 @@ bool init_gui()
     if (res != VK_SUCCESS)
         return false;
 
-    VkRenderPass init_render_pass;
-    if ( ! create_render_pass(&init_render_pass))
+    assert(vk_gui_render_pass == VK_NULL_HANDLE);
+    if ( ! create_render_pass(&vk_gui_render_pass, clear))
         return false;
 
     ImGui_ImplVulkan_InitInfo init_info = { };
@@ -159,7 +250,7 @@ bool init_gui()
     init_info.MinImageCount   = vk_num_swapchain_images;
     init_info.ImageCount      = vk_num_swapchain_images;
     init_info.CheckVkResultFn = check_gui_result;
-    if ( ! ImGui_ImplVulkan_Init(&init_info, init_render_pass)) {
+    if ( ! ImGui_ImplVulkan_Init(&init_info, vk_gui_render_pass)) {
         d_printf("Failed to initialize Vulkan GUI\n");
         return false;
     }
@@ -210,11 +301,16 @@ bool init_gui()
     return true;
 }
 
-bool send_gui_to_gpu(VkCommandBuffer cmdbuf)
+bool send_gui_to_gpu(VkCommandBuffer cmdbuf, uint32_t image_idx)
 {
+    if ( ! begin_gui_render_pass(cmdbuf, image_idx))
+        return false;
+
     ImGui::Render();
 
     ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), cmdbuf);
+
+    myCmdEndRenderPass(cmdbuf);
 
     return true;
 }

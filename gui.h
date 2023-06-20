@@ -7,6 +7,12 @@ extern const int      gui_config_flags;
 extern const unsigned gui_num_descriptors;
 extern float          vk_surface_scale;
 
-bool init_gui();
-bool send_gui_to_gpu(VkCommandBuffer cmdbuf);
+enum class GuiClear {
+    preserve,
+    clear
+};
+
+bool init_gui(GuiClear clear);
+bool send_gui_to_gpu(VkCommandBuffer cmdbuf, uint32_t image_idx);
 bool is_full_screen();
+void free_gui_framebuffers();

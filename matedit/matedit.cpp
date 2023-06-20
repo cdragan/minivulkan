@@ -40,7 +40,11 @@ static VkSampler viewport_sampler;
 
 uint32_t check_device_features()
 {
-    return 0;
+    uint32_t missing_features = 0;
+
+    missing_features += check_feature(&vk_dyn_rendering_features.dynamicRendering);
+
+    return missing_features;
 }
 
 static bool create_samplers()
@@ -76,6 +80,9 @@ static bool create_samplers()
 bool init_assets()
 {
     if ( ! create_samplers())
+        return false;
+
+    if ( ! init_gui(GuiClear::clear))
         return false;
 
     return true;
@@ -303,6 +310,11 @@ static bool create_gui_frame(uint32_t image_idx)
     return true;
 }
 
+static bool render_view(Viewport& viewport, uint32_t image_idx, VkCommandBuffer buf)
+{
+    return true;
+}
+
 bool draw_frame(uint32_t image_idx, uint64_t time_ms, VkFence queue_fence)
 {
     if ( ! create_gui_frame(image_idx))
@@ -379,7 +391,6 @@ bool draw_frame(uint32_t image_idx, uint64_t time_ms, VkFence queue_fence)
         nullptr         // pStencilAttachment
     };
 
-    /*
     for (Viewport& viewport : viewports) {
         if ( ! viewport.enabled)
             continue;
@@ -418,19 +429,9 @@ bool draw_frame(uint32_t image_idx, uint64_t time_ms, VkFence queue_fence)
         };
         viewport.color_buffer[image_idx].set_image_layout(buf, gui_image_layout);
     }
-    */
 
-    color_att.imageView              = image.get_view();
-    color_att.clearValue             = make_clear_color(0, 0, 0, 1);
-    depth_att.imageView              = vk_depth_buffers[image_idx].get_view();
-    rendering_info.renderArea.extent = vk_surface_caps.currentExtent;
-
-    vkCmdBeginRenderingKHR(buf, &rendering_info);
-
-    if ( ! send_gui_to_gpu(buf))
+    if ( ! send_gui_to_gpu(buf, image_idx))
         return false;
-
-    vkCmdEndRenderingKHR(buf);
 
     static const Image::Transition color_att_present = {
         VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,

@@ -40,6 +40,7 @@ uint32_t check_device_features()
         missing_features += check_feature(&vk_features.features.tessellationShader);
 
     missing_features += check_feature(&vk_features.features.fillModeNonSolid);
+    missing_features += check_feature(&vk_dyn_rendering_features.dynamicRendering);
 
     return missing_features;
 }
@@ -472,7 +473,7 @@ static bool create_cube(Buffer* vertex_buffer, Buffer* index_buffer)
                               vertex_buffer,
                               Usage::fixed,
                               VK_FORMAT_UNDEFINED,
-                              VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+                              VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
                               vertices,
                               sizeof(vertices)))
         return false;
@@ -496,7 +497,7 @@ static bool create_cube(Buffer* vertex_buffer, Buffer* index_buffer)
                               index_buffer,
                               Usage::fixed,
                               VK_FORMAT_UNDEFINED,
-                              VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
+                              VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
                               indices,
                               sizeof(indices)))
         return false;
@@ -527,7 +528,7 @@ static bool create_cubic_patch(Buffer* vertex_buffer, Buffer* index_buffer)
                               vertex_buffer,
                               Usage::fixed,
                               VK_FORMAT_UNDEFINED,
-                              VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+                              VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
                               vertices,
                               sizeof(vertices)))
         return false;
@@ -543,7 +544,7 @@ static bool create_cubic_patch(Buffer* vertex_buffer, Buffer* index_buffer)
                               index_buffer,
                               Usage::fixed,
                               VK_FORMAT_UNDEFINED,
-                              VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
+                              VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
                               indices,
                               sizeof(indices)))
         return false;
@@ -633,7 +634,7 @@ static bool create_quadratic_patch(Buffer* vertex_buffer, Buffer* index_buffer)
                               vertex_buffer,
                               Usage::fixed,
                               VK_FORMAT_UNDEFINED,
-                              VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+                              VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
                               vertices,
                               sizeof(vertices)))
         return false;
@@ -723,7 +724,7 @@ static bool create_quadratic_patch(Buffer* vertex_buffer, Buffer* index_buffer)
                               index_buffer,
                               Usage::fixed,
                               VK_FORMAT_UNDEFINED,
-                              VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
+                              VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
                               indices,
                               sizeof(indices)))
         return false;
@@ -737,6 +738,9 @@ bool init_assets()
         return false;
 
     if ( ! create_pipelines())
+        return false;
+
+    if ( ! init_gui(GuiClear::preserve))
         return false;
 
     return true;
@@ -1015,10 +1019,10 @@ bool draw_frame(uint32_t image_idx, uint64_t time_ms, VkFence queue_fence)
                      0,     // vertexOffset
                      0);    // firstInstance
 
-    if ( ! send_gui_to_gpu(buf))
-        return false;
-
     vkCmdEndRenderingKHR(buf);
+
+    if ( ! send_gui_to_gpu(buf, image_idx))
+        return false;
 
     static const Image::Transition color_att_present = {
         VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
