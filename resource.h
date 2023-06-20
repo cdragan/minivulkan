@@ -19,13 +19,32 @@ class Resource {
         VkDeviceSize size()      const { return alloc_size; }
 
         template<typename T>
-        T* get_ptr() { return static_cast<T*>(get_raw_ptr()); }
+        T* get_ptr() {
+            assert(sizeof(T) <= alloc_size);
+            return static_cast<T*>(get_raw_ptr());
+        }
 
         template<typename T>
-        const T* get_ptr() const { return static_cast<const T*>(get_raw_ptr()); }
+        const T* get_ptr() const {
+            assert(sizeof(T) <= alloc_size);
+            return static_cast<const T*>(get_raw_ptr());
+        }
+
+        template<typename T>
+        T* get_ptr(VkDeviceSize idx, VkDeviceSize stride) {
+            assert(sizeof(T) <= stride);
+            return static_cast<T*>(get_raw_ptr(idx, stride));
+        }
+
+        template<typename T>
+        const T* get_ptr(VkDeviceSize idx, VkDeviceSize stride) const {
+            assert(sizeof(T) <= stride);
+            return static_cast<T*>(get_raw_ptr(idx, stride));
+        }
 
     protected:
         void* get_raw_ptr() const;
+        void* get_raw_ptr(VkDeviceSize idx, VkDeviceSize stride) const;
 
         MemoryHeap*  owning_heap = nullptr;
         VkDeviceSize heap_offset = 0;
