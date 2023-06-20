@@ -448,6 +448,21 @@ mat4 vmath::projection(float aspect, float fov_radians, float near_plane, float 
     return result;
 }
 
+vec4 vmath::projection_vector(float aspect, float fov_radians, float near_plane, float far_plane, float depth_bias)
+{
+    const float fov_tan = vmath::tan(fov_radians * 0.5f);
+    const float rrange  = rcp(float1{far_plane - near_plane}).get0();
+
+    vec4 result;
+
+    result.x = rcp(float1{aspect * fov_tan}).get0();
+    result.y = rcp(float1{fov_tan}).get0();
+    result.z = depth_bias - near_plane * rrange;
+    result.w = (far_plane * near_plane) * rrange;
+
+    return result;
+}
+
 mat4 vmath::operator*(const mat4& m1, const mat4& m2)
 {
     mat4 result;
