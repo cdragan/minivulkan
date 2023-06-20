@@ -25,7 +25,7 @@ class MemoryHeap {
         MemoryHeap& operator=(const MemoryHeap&) = delete;
 
         bool allocate_heap(int req_memory_type, VkDeviceSize size);
-        void reset_back() { last_free_offs = heap_size; }
+        void reset_back();
 
         enum class Placement {
             front,  // Most resources allocated from the front of the heap, never released
@@ -44,11 +44,16 @@ class MemoryHeap {
             return !! (memory_type_bits & (1u << memory_type));
         }
 
+        void print_stats(const char* heap_name) const;
+
     private:
         VkDeviceMemory  memory           = VK_NULL_HANDLE;
         void*           host_ptr         = nullptr;
         VkDeviceSize    next_free_offs   = 0;
         VkDeviceSize    last_free_offs   = 0;
+#ifndef NDEBUG
+        VkDeviceSize    lowest_end_offs  = 0;
+#endif
         VkDeviceSize    heap_size        = 0;
         uint32_t        memory_type      = 0;
 };
@@ -58,6 +63,9 @@ class MemoryAllocator {
         constexpr MemoryAllocator()                        = default;
         MemoryAllocator(const MemoryAllocator&)            = delete;
         MemoryAllocator& operator=(const MemoryAllocator&) = delete;
+#ifndef NDEBUG
+        ~MemoryAllocator();
+#endif
 
         bool init_heaps(VkDeviceSize device_heap_size,
                         VkDeviceSize host_heap_size,

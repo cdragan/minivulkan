@@ -13,6 +13,12 @@ MemoryAllocator mem_mgr;
 
 static VkPhysicalDeviceMemoryProperties vk_mem_props;
 
+static unsigned in_mb(VkDeviceSize size)
+{
+    constexpr VkDeviceSize one_mb = 1024u * 1024u;
+    return static_cast<unsigned>(mstd::align_up(size, one_mb) / one_mb);
+}
+
 bool MemoryHeap::allocate_heap(int req_memory_type, VkDeviceSize size)
 {
     assert(req_memory_type >= 0);
@@ -44,12 +50,15 @@ bool MemoryHeap::allocate_heap(int req_memory_type, VkDeviceSize size)
             return false;
     }
 
-    heap_size      = size;
-    last_free_offs = size;
-    memory_type    = static_cast<uint32_t>(req_memory_type);
+    heap_size       = size;
+    last_free_offs  = size;
+    memory_type     = static_cast<uint32_t>(req_memory_type);
+#ifndef NDEBUG
+    lowest_end_offs = size;
+#endif
 
-    d_printf("Allocated heap size 0x%" PRIx64 " bytes with memory type %d\n",
-             static_cast<uint64_t>(size), req_memory_type);
+    d_printf("Allocated heap size 0x%" PRIx64 " bytes (%u MB) with memory type %d\n",
+             static_cast<uint64_t>(size), in_mb(size), req_memory_type);
 
     return true;
 }
@@ -92,6 +101,15 @@ bool MemoryHeap::allocate_memory(const VkMemoryRequirements& requirements,
         last_free_offs = aligned_offs;
 
     return true;
+}
+
+void MemoryHeap::reset_back()
+{
+#ifndef NDEBUG
+    lowest_end_offs = mstd::min(lowest_end_offs, last_free_offs);
+#endif
+
+    last_free_offs = heap_size;
 }
 
 #ifndef NDEBUG
@@ -270,3 +288,26 @@ bool MemoryAllocator::need_host_copy(Usage heap_usage)
 {
     return heap_usage == Usage::fixed && host_heap.get_memory();
 }
+
+#ifndef NDEBUG
+MemoryAllocator::~MemoryAllocator()
+{
+    device_heap.print_stats("device");
+    host_heap.print_stats("host");
+    dynamic_heap.print_stats("dynamic");
+}
+
+void MemoryHeap::print_stats(const char* heap_name) const
+{
+    if (heap_size) {
+        const VkDeviceSize max_top_alloc_size = heap_size - mstd::min(lowest_end_offs, last_free_offs);
+        d_printf("Memory type %u, used %u MB out of %u MB, bottom %u MB, top %u MB in %s heap\n",
+                 memory_type,
+                 in_mb(next_free_offs + max_top_alloc_size),
+                 in_mb(heap_size),
+                 in_mb(next_free_offs),
+                 in_mb(max_top_alloc_size),
+                 heap_name);
+    }
+}
+#endif
