@@ -18,17 +18,30 @@ endif
 # Debug vs release
 debug ?= 0
 
-# Disables spirv shuffling, for debugging purposes
-no_spirv_shuffle ?= 0
+# Enable spirv shuffling, disable for debugging purposes
+spirv_shuffle ?= 1
 
-# Disable spirv optimization, for debugging purposes
-no_spirv_opt ?= 0
+# Enable spirv optimization, disable for debugging purposes
+spirv_opt ?= 1
 
 # Windows only: 1 links against MSVCRT, 0 doesn't use MSVCRT
 ifeq ($(UNAME), Windows)
     stdlib ?= 0
 else
     override stdlib := 1
+endif
+
+# Enable address sanitizer in debug builds
+ifneq ($(UNAME), Windows)
+    # Disable sanitizers for nsight
+    ifeq ($(spirv_opt), 0)
+        sanitize =
+    endif
+    # Use address sanitizer only in debug builds
+    ifneq ($(debug), 0)
+        sanitize ?= address
+    endif
+    sanitize ?=
 endif
 
 ##############################################################################
@@ -45,6 +58,10 @@ ifeq ($(UNAME), Windows)
     ifneq ($(stdlib), 0)
         out_dir_suffix = _stdlib
     endif
+else
+    ifneq ($(sanitize),)
+        out_dir_suffix = _$(sanitize)
+    endif
 endif
 
 out_dir_suffix ?=
@@ -53,9 +70,6 @@ ifeq ($(debug), 0)
     out_dir_config = release
 else
     out_dir_config = debug
-    ifneq ($(no_spirv_opt), 0)
-        out_dir_config := $(out_dir_config)_nosan
-    endif
 endif
 
 out_dir = $(out_dir_base)/$(out_dir_config)$(out_dir_suffix)
@@ -289,9 +303,9 @@ else
         CFLAGS  += -ffunction-sections -fdata-sections
         LDFLAGS += -ffunction-sections -fdata-sections
     else
-        ifeq ($(no_spirv_opt), 0)
-            CFLAGS  += -fsanitize=address
-            LDFLAGS += -fsanitize=address
+        ifneq ($(sanitize),)
+            CFLAGS  += -fsanitize=$(sanitize)
+            LDFLAGS += -fsanitize=$(sanitize)
         endif
 
         CFLAGS += -O0 -g
@@ -363,12 +377,12 @@ ifndef GLSL_NO_OPTIMIZER
     GLSL_OPT_FLAGS += -Os
     GLSL_STRIP_FLAGS += --strip all --dce all
 endif
-ifeq ($(no_spirv_opt), 0)
-    GLSL_ENCODE_FLAGS += --remove-unused
-else
+ifeq ($(spirv_opt), 0)
     GLSL_FLAGS += -g
+else
+    GLSL_ENCODE_FLAGS += --remove-unused
 endif
-ifneq ($(no_spirv_shuffle), 0)
+ifeq ($(spirv_shuffle), 0)
     GLSL_ENCODE_FLAGS += --no-shuffle
     CFLAGS += -DNO_SPIRV_SHUFFLE
 endif
@@ -483,10 +497,10 @@ $(foreach file, $(all_gui_src_files), $(call OBJ_FROM_SRC, $(file))): CFLAGS += 
 
 shaders_out_dir := $(out_dir_base)/shaders
 
-ifneq ($(no_spirv_opt), 0)
+ifeq ($(spirv_opt), 0)
     shaders_out_dir := $(shaders_out_dir)_noopt
 endif
-ifneq ($(no_spirv_shuffle), 0)
+ifeq ($(spirv_shuffle), 0)
     shaders_out_dir := $(shaders_out_dir)_noshuffle
 endif
 
