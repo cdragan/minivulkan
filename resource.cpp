@@ -25,6 +25,9 @@ void* Resource::get_raw_ptr(VkDeviceSize idx, VkDeviceSize stride) const
 bool Resource::flush_range(VkDeviceSize offset, VkDeviceSize size)
 {
     assert(owning_heap);
+    assert(offset < alloc_size);
+    assert(size < alloc_size);
+    assert(offset + size <= alloc_size);
 
     if ( ! owning_heap->get_host_ptr())
         return true;
@@ -270,5 +273,6 @@ bool Buffer::flush()
 
 bool Buffer::flush(VkDeviceSize idx, VkDeviceSize stride)
 {
+    assert(idx * stride + stride <= alloc_size);
     return flush_range(idx * stride, stride);
 }
