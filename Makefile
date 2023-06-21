@@ -53,6 +53,9 @@ ifeq ($(debug), 0)
     out_dir_config = release
 else
     out_dir_config = debug
+    ifneq ($(no_spirv_opt), 0)
+        out_dir_config := $(out_dir_config)_nosan
+    endif
 endif
 
 out_dir = $(out_dir_base)/$(out_dir_config)$(out_dir_suffix)
@@ -478,7 +481,14 @@ $(foreach file, $(imgui_src_files), $(call OBJ_FROM_SRC, $(file))): CFLAGS += -D
 
 $(foreach file, $(all_gui_src_files), $(call OBJ_FROM_SRC, $(file))): CFLAGS += -Iimgui
 
-shaders_out_dir = $(out_dir_base)/shaders
+shaders_out_dir := $(out_dir_base)/shaders
+
+ifneq ($(no_spirv_opt), 0)
+    shaders_out_dir := $(shaders_out_dir)_noopt
+endif
+ifneq ($(no_spirv_shuffle), 0)
+    shaders_out_dir := $(shaders_out_dir)_noshuffle
+endif
 
 $(shaders_out_dir): | $(out_dir_base)
 	mkdir -p $@
