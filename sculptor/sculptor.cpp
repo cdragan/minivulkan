@@ -19,10 +19,18 @@ const char app_name[] = "Object Editor";
 const int gui_config_flags = ImGuiConfigFlags_NavEnableKeyboard
                            | ImGuiConfigFlags_DockingEnable;
 
+enum class ViewType {
+    free_moving,
+    front
+};
+
 struct Viewport {
     const char*     name;
     bool            enabled;
     uint32_t        id;
+    ViewType        view_type;
+    vmath::vec3     camera_pos;
+    vmath::vec3     look_at;
     uint32_t        width;
     uint32_t        height;
     Image           color_buffer[max_swapchain_size];
@@ -30,9 +38,11 @@ struct Viewport {
     VkDescriptorSet gui_tex[max_swapchain_size];
 };
 
+static constexpr float init_dist = 0.125f;
+
 static Viewport viewports[] = {
-    { "Front View", true, 0 },
-    { "3D View",    true, 1 }
+    { "Front View", true, 0, ViewType::front,       { 0.0f,      0.0f,      -init_dist }, { 0.0f, 0.0f, 0.0f } },
+    { "3D View",    true, 1, ViewType::free_moving, { init_dist, init_dist, -init_dist }, { 0.0f, 0.0f, 0.0f } }
 };
 
 const unsigned gui_num_descriptors = mstd::array_size(viewports) * max_swapchain_size;
@@ -445,9 +455,7 @@ static bool set_patch_transforms(const Viewport& viewport, uint32_t transform_id
     Transforms* const transforms = transforms_buf.get_ptr<Transforms>(transform_id, transforms_stride);
     assert(transforms);
 
-    const float scale_factor = 16.0f;
-    const vmath::mat4 model_view = vmath::scale(scale_factor, scale_factor, scale_factor)
-                                 * vmath::translate(0.0f, 0.0f, 7.0f);
+    const vmath::mat4 model_view = vmath::look_at(viewport.camera_pos, viewport.look_at);
 
     transforms->model_view = model_view;
 
