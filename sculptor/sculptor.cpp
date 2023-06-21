@@ -440,7 +440,7 @@ static bool draw_grid(const Viewport& viewport, VkCommandBuffer buf)
     return true;
 }
 
-static void set_patch_transforms(const Viewport& viewport, uint32_t transform_id)
+static bool set_patch_transforms(const Viewport& viewport, uint32_t transform_id)
 {
     Transforms* const transforms = transforms_buf.get_ptr<Transforms>(transform_id, transforms_stride);
     assert(transforms);
@@ -459,6 +459,8 @@ static void set_patch_transforms(const Viewport& viewport, uint32_t transform_id
                                                 0.01f,      // near_plane
                                                 1000.0f,    // far_plane
                                                 0.0f);      // depth_bias
+
+    return transforms_buf.flush();
 }
 
 static bool render_view(const Viewport& viewport, uint32_t image_idx, VkCommandBuffer buf)
@@ -479,7 +481,8 @@ static bool render_view(const Viewport& viewport, uint32_t image_idx, VkCommandB
         transform_id * transforms_stride
     };
 
-    set_patch_transforms(viewport, transform_id);
+    if ( ! set_patch_transforms(viewport, transform_id))
+        return false;
 
     vkCmdBindDescriptorSets(buf,
                             VK_PIPELINE_BIND_POINT_GRAPHICS,
