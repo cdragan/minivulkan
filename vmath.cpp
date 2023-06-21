@@ -195,6 +195,48 @@ float vmath::dot_product<4>(const vec<4>& v1, const vec<4>& v2)
     return dot_product4(float4::load4_aligned(v1.data), float4::load4_aligned(v2.data)).get0();
 }
 
+vec3 vmath::cross_product(const vec3& v1, const vec3& v2)
+{
+    const vec3 a{v1.y, v1.z, v1.x};
+    const vec3 b{v2.z, v2.x, v2.y};
+    const vec3 c{v1.z, v1.x, v1.y};
+    const vec3 d{v2.y, v2.z, v2.x};
+
+    return a * b - c * d;
+}
+
+template<unsigned dim>
+float vmath::length(const vec<dim>& v)
+{
+    const float dp = dot_product(v, v);
+    return (dp > small) ? sqrt(float1{dp}).get0() : 0.0f;
+}
+
+template float vmath::length<2>(const vec<2>&);
+template float vmath::length<3>(const vec<3>&);
+template float vmath::length<4>(const vec<4>&);
+
+template<unsigned dim>
+float vmath::rlength(const vec<dim>& v)
+{
+    const float dp = dot_product(v, v);
+    return (dp > small) ? rsqrt(float1{dp}).get0() : 0.0f;
+}
+
+template float vmath::rlength<2>(const vec<2>&);
+template float vmath::rlength<3>(const vec<3>&);
+template float vmath::rlength<4>(const vec<4>&);
+
+template<unsigned dim>
+vec<dim> vmath::normalize(const vec<dim>& v)
+{
+    return v * rlength(v);
+}
+
+template vec<2> vmath::normalize(const vec<2>&);
+template vec<3> vmath::normalize(const vec<3>&);
+template vec<4> vmath::normalize(const vec<4>&);
+
 quat::quat(const vec3& axis, float angle_radians)
 {
     const float4 axis_f4 = float4::load4_aligned(axis.data);
@@ -459,6 +501,28 @@ vec4 vmath::projection_vector(float aspect, float fov_radians, float near_plane,
     result.y = rcp(float1{fov_tan}).get0();
     result.z = depth_bias - near_plane * rrange;
     result.w = (far_plane * near_plane) * rrange;
+
+    return result;
+}
+
+mat4 vmath::look_at(const vec3& eye_pos, const vec3& target)
+{
+    constexpr vec3 up{0, 1, 0};
+    const vec3 z_axis = normalize(target - eye_pos);
+    const vec3 x_axis = normalize(cross_product(up, z_axis));
+    const vec3 y_axis = cross_product(z_axis, x_axis);
+
+    mat4 result;
+
+    mstd::mem_zero(result.data, sizeof(result.data));
+    mstd::mem_copy(&result.data[0], &x_axis.data[0], sizeof(x_axis.data));
+    mstd::mem_copy(&result.data[4], &y_axis.data[0], sizeof(y_axis.data));
+    mstd::mem_copy(&result.data[8], &z_axis.data[0], sizeof(z_axis.data));
+
+    result.a30 = -dot_product(x_axis, eye_pos);
+    result.a31 = -dot_product(y_axis, eye_pos);
+    result.a32 = -dot_product(z_axis, eye_pos);
+    result.a33 = 1.0f;
 
     return result;
 }

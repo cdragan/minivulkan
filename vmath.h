@@ -246,35 +246,35 @@ template<unsigned dim>
 inline vec<dim> operator+(vec<dim> v1, const vec<dim>& v2)
 {
     v1 += v2;
-    return *v1;
+    return v1;
 }
 
 template<unsigned dim>
 inline vec<dim> operator-(vec<dim> v1, const vec<dim>& v2)
 {
     v1 -= v2;
-    return *v1;
+    return v1;
 }
 
 template<unsigned dim>
 inline vec<dim> operator*(vec<dim> v, float c)
 {
     v *= c;
-    return *v;
+    return v;
 }
 
 template<unsigned dim>
 inline vec<dim> operator*(float c, vec<dim> v)
 {
     v *= c;
-    return *v;
+    return v;
 }
 
 template<unsigned dim>
 inline vec<dim> operator/(vec<dim> v, float c)
 {
     v /= c;
-    return *v;
+    return v;
 }
 
 template<unsigned dim>
@@ -293,6 +293,17 @@ inline vec<dim> operator/(vec<dim> v1, const vec<dim>& v2)
 
 template<unsigned dim>
 float dot_product(const vec<dim>& v1, const vec<dim>& v2);
+
+vec3 cross_product(const vec3& v1, const vec3& v2);
+
+template<unsigned dim>
+float length(const vec<dim>& v);
+
+template<unsigned dim>
+float rlength(const vec<dim>& v);
+
+template<unsigned dim>
+vec<dim> normalize(const vec<dim>& v);
 
 struct quat {
     union {
@@ -394,6 +405,7 @@ vec4 operator*(const mat4& mtx, const vec4& v);
 mat4 transpose(const mat4& mtx);
 mat4 projection(float aspect, float fov_radians, float near_plane, float far_plane, float depth_bias);
 vec4 projection_vector(float aspect, float fov_radians, float near_plane, float far_plane, float depth_bias);
+mat4 look_at(const vec3& eye_pos, const vec3& target);
 mat4 translate(float x, float y, float z);
 mat4 scale(float x, float y, float z);
 
