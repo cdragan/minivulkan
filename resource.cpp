@@ -22,6 +22,31 @@ void* Resource::get_raw_ptr(VkDeviceSize idx, VkDeviceSize stride) const
     return ptr ? (ptr + heap_offset + offset) : ptr;
 }
 
+bool Resource::flush_range(VkDeviceSize offset, VkDeviceSize size)
+{
+    assert(owning_heap);
+
+    if ( ! owning_heap->get_host_ptr())
+        return true;
+
+    const VkDeviceSize alignment = vk_phys_props.properties.limits.nonCoherentAtomSize;
+    const VkDeviceSize begin     = heap_offset + offset;
+
+    static VkMappedMemoryRange range = {
+        VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE,
+        nullptr,
+        VK_NULL_HANDLE,     // memory
+        0,                  // offset
+        0                   // size
+    };
+    range.memory = owning_heap->get_memory();
+    range.offset = mstd::align_down(begin, alignment);
+    range.size   = mstd::align_up(size + (begin - range.offset), alignment);
+
+    const VkResult res = CHK(vkFlushMappedMemoryRanges(vk_dev, 1, &range));
+    return res == VK_SUCCESS;
+}
+
 bool Image::allocate(const ImageInfo& image_info)
 {
     const bool host_access = (image_info.heap_usage == Usage::host_only) ||
@@ -240,26 +265,10 @@ void Buffer::cpu_fill(const void* data, uint32_t size)
 
 bool Buffer::flush()
 {
-    assert(owning_heap);
+    return flush_range(0, alloc_size);
+}
 
-    if ( ! owning_heap->get_host_ptr())
-        return true;
-
-    // TODO check coherent flag, only flush if non-coherent
-
-    const VkDeviceSize alignment = vk_phys_props.properties.limits.nonCoherentAtomSize;
-
-    static VkMappedMemoryRange range = {
-        VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE,
-        nullptr,
-        VK_NULL_HANDLE,     // memory
-        0,                  // offset
-        0                   // size
-    };
-    range.memory = owning_heap->get_memory();
-    range.offset = mstd::align_down(heap_offset, alignment);
-    range.size   = mstd::align_up(alloc_size + heap_offset - range.offset, alignment);
-
-    const VkResult res = CHK(vkFlushMappedMemoryRanges(vk_dev, 1, &range));
-    return res == VK_SUCCESS;
+bool Buffer::flush(VkDeviceSize idx, VkDeviceSize stride)
+{
+    return flush_range(idx * stride, stride);
 }

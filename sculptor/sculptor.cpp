@@ -460,7 +460,7 @@ static bool set_patch_transforms(const Viewport& viewport, uint32_t transform_id
                                                 1000.0f,    // far_plane
                                                 0.0f);      // depth_bias
 
-    return transforms_buf.flush();
+    return transforms_buf.flush(transform_id, transforms_stride);
 }
 
 static bool render_view(const Viewport& viewport, uint32_t image_idx, VkCommandBuffer buf)

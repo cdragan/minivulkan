@@ -45,6 +45,7 @@ class Resource {
     protected:
         void* get_raw_ptr() const;
         void* get_raw_ptr(VkDeviceSize idx, VkDeviceSize stride) const;
+        bool flush_range(VkDeviceSize offset, VkDeviceSize size);
 
         MemoryHeap*  owning_heap = nullptr;
         VkDeviceSize heap_offset = 0;
@@ -120,6 +121,7 @@ class Buffer: public Resource {
                       VkBufferUsageFlags usage);
         void cpu_fill(const void* data, uint32_t size);
         bool flush();
+        bool flush(VkDeviceSize idx, VkDeviceSize stride);
 
     private:
         VkBuffer     buffer = VK_NULL_HANDLE;
