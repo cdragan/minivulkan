@@ -6,6 +6,7 @@
 
 #include "../d_printf.h"
 #include "../gui.h"
+#include "../memory_heap.h"
 #include "../minivulkan.h"
 #include "../mstdc.h"
 #include "../shaders.h"
@@ -259,23 +260,47 @@ bool init_assets()
     return true;
 }
 
+static VkDeviceSize heap_low_checkpoint;
+static VkDeviceSize heap_high_checkpoint;
+static bool         viewports_allocated;
+
+static void free_viewport_images()
+{
+    if (viewports_allocated) {
+        for (Viewport& viewport : viewports) {
+            for (uint32_t i_img = 0; i_img < max_swapchain_size; i_img++) {
+                viewport.color_buffer[i_img].destroy();
+                viewport.depth_buffer[i_img].destroy();
+            }
+        }
+
+        mem_mgr.restore_heap_checkpoint(heap_low_checkpoint, heap_high_checkpoint);
+        heap_low_checkpoint  = 0;
+        heap_high_checkpoint = 0;
+        viewports_allocated  = false;
+    }
+}
+
 static bool destroy_viewports()
 {
     if ( ! idle_queue())
         return false;
 
-    for (Viewport& viewport : viewports) {
-        for (uint32_t i_img = 0; i_img < max_swapchain_size; i_img++) {
-            viewport.color_buffer[i_img].destroy();
-            viewport.depth_buffer[i_img].destroy();
-        }
-    }
+    free_viewport_images();
 
     return true;
 }
 
+void notify_gui_heap_freed()
+{
+    free_viewport_images();
+}
+
 static bool allocate_viewports()
 {
+    if ( ! viewports_allocated)
+        heap_low_checkpoint = mem_mgr.get_heap_checkpoint();
+
     for (Viewport& viewport : viewports) {
         if ( ! viewport.enabled)
             continue;
@@ -353,6 +378,10 @@ static bool allocate_viewports()
             }
         }
     }
+
+    heap_high_checkpoint = mem_mgr.get_heap_checkpoint();
+    if (heap_high_checkpoint != heap_low_checkpoint)
+        viewports_allocated = true;
 
     return true;
 }

@@ -156,8 +156,12 @@ static bool create_framebuffer(uint32_t image_idx)
     return res == VK_SUCCESS;
 }
 
+extern void notify_gui_heap_freed();
+
 void free_gui_framebuffers()
 {
+    notify_gui_heap_freed();
+
     for (uint32_t i = 0; i < mstd::array_size(vk_framebuffers); i++) {
         if (vk_framebuffers[i]) {
             myDestroyFramebuffer(vk_dev, vk_framebuffers[i], nullptr);

@@ -103,13 +103,17 @@ bool MemoryHeap::allocate_memory(const VkMemoryRequirements& requirements,
     return true;
 }
 
-void MemoryHeap::reset_back()
+void MemoryHeap::restore_checkpoint(VkDeviceSize low_checkpoint, VkDeviceSize high_checkpoint)
 {
+    assert(low_checkpoint > high_checkpoint);
+    assert(low_checkpoint <= heap_size);
+    assert(last_free_offs == high_checkpoint);
+
 #ifndef NDEBUG
     lowest_end_offs = mstd::min(lowest_end_offs, last_free_offs);
 #endif
 
-    last_free_offs = heap_size;
+    last_free_offs = low_checkpoint;
 }
 
 #ifndef NDEBUG

@@ -106,6 +106,11 @@ static bool destroy_viewports()
     return true;
 }
 
+void notify_gui_heap_freed()
+{
+    // TODO
+}
+
 static bool allocate_viewports()
 {
     for (Viewport& viewport : viewports) {

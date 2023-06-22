@@ -25,7 +25,8 @@ class MemoryHeap {
         MemoryHeap& operator=(const MemoryHeap&) = delete;
 
         bool allocate_heap(int req_memory_type, VkDeviceSize size);
-        void reset_back();
+        VkDeviceSize get_checkpoint() const { return last_free_offs; }
+        void restore_checkpoint(VkDeviceSize low_checkpoint, VkDeviceSize high_checkpoint);
 
         enum class Placement {
             front,  // Most resources allocated from the front of the heap, never released
@@ -78,7 +79,10 @@ class MemoryAllocator {
 
         bool need_host_copy(Usage heap_usage);
 
-        void reset_device_temporary() { device_heap.reset_back(); }
+        VkDeviceSize get_heap_checkpoint() const { return device_heap.get_checkpoint(); }
+        void restore_heap_checkpoint(VkDeviceSize low_checkpoint, VkDeviceSize high_checkpoint) {
+            device_heap.restore_checkpoint(low_checkpoint, high_checkpoint);
+        }
 
     private:
         MemoryHeap device_heap;

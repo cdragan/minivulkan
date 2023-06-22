@@ -55,6 +55,10 @@ uint32_t check_device_features()
     return missing_features;
 }
 
+void notify_gui_heap_freed()
+{
+}
+
 enum DescSetLayouts {
     dsl_synth,
     dsl_mono_to_stereo,

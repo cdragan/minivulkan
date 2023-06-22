@@ -828,12 +828,20 @@ Image    vk_swapchain_images[max_swapchain_size];
 Image    vk_depth_buffers[max_swapchain_size];
 VkFormat vk_depth_format = VK_FORMAT_UNDEFINED;
 
+static VkDeviceSize heap_low_checkpoint;
+static VkDeviceSize heap_high_checkpoint;
+
 bool allocate_depth_buffers(Image (&depth_buffers)[max_swapchain_size], uint32_t num_depth_buffers)
 {
-    for (uint32_t i = 0; i < mstd::array_size(depth_buffers); i++)
-        depth_buffers[i].destroy();
+    if (heap_low_checkpoint != heap_high_checkpoint) {
+        for (uint32_t i = 0; i < mstd::array_size(depth_buffers); i++)
+            depth_buffers[i].destroy();
 
-    mem_mgr.reset_device_temporary();
+        mem_mgr.restore_heap_checkpoint(heap_low_checkpoint, heap_high_checkpoint);
+        heap_high_checkpoint = 0;
+    }
+
+    heap_low_checkpoint = mem_mgr.get_heap_checkpoint();
 
     const uint32_t width  = vk_surface_caps.currentExtent.width;
     const uint32_t height = vk_surface_caps.currentExtent.height;
@@ -867,6 +875,8 @@ bool allocate_depth_buffers(Image (&depth_buffers)[max_swapchain_size], uint32_t
         if ( ! depth_buffers[i].allocate(image_info))
             return false;
     }
+
+    heap_high_checkpoint = mem_mgr.get_heap_checkpoint();
 
     return true;
 }

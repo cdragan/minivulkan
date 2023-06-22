@@ -13,6 +13,10 @@ const int gui_config_flags = ImGuiConfigFlags_NavEnableKeyboard;
 
 const unsigned gui_num_descriptors = 1;
 
+void notify_gui_heap_freed()
+{
+}
+
 bool create_gui_frame()
 {
     ImGuiIO& io = ImGui::GetIO();
