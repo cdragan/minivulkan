@@ -486,10 +486,24 @@ static bool create_gui_frame(uint32_t image_idx)
             viewport.captured_mouse = true;
 
         if (viewport.captured_mouse) {
-            constexpr float scale_factor = 0.01f;
+            constexpr float scale_factor       = 0.01f;
+            constexpr float ortho_scale_factor = 0.002f;
 
-            viewport.camera_pos.x += scale_factor * mouse_delta.x;
-            viewport.camera_pos.y -= scale_factor * mouse_delta.y;
+            switch (viewport.view_type) {
+
+                case ViewType::free_moving:
+                    viewport.camera_pos.x -= scale_factor * mouse_delta.x;
+                    viewport.camera_pos.y += scale_factor * mouse_delta.y;
+                    break;
+
+                case ViewType::front:
+                    viewport.camera_pos.x -= ortho_scale_factor * mouse_delta.x;
+                    viewport.camera_pos.y += ortho_scale_factor * mouse_delta.y;
+                    break;
+
+                default:
+                    assert(0);
+            }
         }
 
         ImGui::End();
@@ -514,7 +528,21 @@ static bool set_patch_transforms(const Viewport& viewport, uint32_t transform_id
     Transforms* const transforms = transforms_buf.get_ptr<Transforms>(transform_id, transforms_stride);
     assert(transforms);
 
-    const vmath::mat4 model_view = vmath::look_at(viewport.camera_pos, viewport.look_at);
+    vmath::mat4 model_view;
+
+    switch (viewport.view_type) {
+
+        case ViewType::free_moving:
+            model_view = vmath::look_at(viewport.camera_pos, viewport.look_at);
+            break;
+
+        case ViewType::front:
+            model_view = vmath::look_at(viewport.camera_pos, vmath::vec3(viewport.camera_pos.x, viewport.camera_pos.y, 0));
+            break;
+
+        default:
+            assert(0);
+    }
 
     transforms->model_view = model_view;
 
