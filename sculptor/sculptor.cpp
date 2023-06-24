@@ -37,6 +37,7 @@ struct Viewport {
     Image           color_buffer[max_swapchain_size];
     Image           depth_buffer[max_swapchain_size];
     VkDescriptorSet gui_tex[max_swapchain_size];
+    bool            captured_mouse;
 };
 
 static constexpr float init_dist = 0.125f;
@@ -395,6 +396,20 @@ static bool create_gui_frame(uint32_t image_idx)
     ImGui_ImplVulkan_NewFrame();
     ImGui::NewFrame();
 
+    const ImVec2 abs_mouse_pos = ImGui::GetMousePos();
+    const bool   ctrl_pressed  = ImGui::IsKeyPressed(ImGuiKey_LeftCtrl) || ImGui::IsKeyPressed(ImGuiKey_RightCtrl);
+    const bool   ctrl_down     = ImGui::IsKeyDown(ImGuiKey_LeftCtrl)    || ImGui::IsKeyDown(ImGuiKey_RightCtrl);
+
+    if ( ! ctrl_down) {
+        for (Viewport& viewport: viewports) {
+            viewport.captured_mouse = false;
+        }
+    }
+
+    static ImVec2 prev_mouse_pos;
+    const ImVec2 mouse_delta = ImVec2(abs_mouse_pos.x - prev_mouse_pos.x, abs_mouse_pos.y - prev_mouse_pos.y);
+    prev_mouse_pos = abs_mouse_pos;
+
     if (ImGui::BeginMainMenuBar()) {
         if (ImGui::BeginMenu("File")) {
             if (ImGui::MenuItem("New")) {
@@ -448,6 +463,10 @@ static bool create_gui_frame(uint32_t image_idx)
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2{0, 0});
         ImGui::Begin(viewport.name, &viewport.enabled, ImGuiWindowFlags_NoScrollbar);
         ImGui::PopStyleVar();
+
+        //const ImVec2 abs_window_pos = ImGui::GetItemRectMin();
+        //const ImVec2 rel_mouse_pos  = ImVec2(abs_mouse_pos.x - abs_window_pos.x, abs_mouse_pos.y - abs_window_pos.y);
+
         {
             const ImVec2 content_size = ImGui::GetContentRegionAvail();
 
@@ -462,6 +481,17 @@ static bool create_gui_frame(uint32_t image_idx)
                          ImVec2{static_cast<float>(viewport.width),
                                 static_cast<float>(viewport.height)});
         }
+
+        if (ctrl_pressed && ImGui::IsItemHovered())
+            viewport.captured_mouse = true;
+
+        if (viewport.captured_mouse) {
+            constexpr float scale_factor = 0.01f;
+
+            viewport.camera_pos.x += scale_factor * mouse_delta.x;
+            viewport.camera_pos.y -= scale_factor * mouse_delta.y;
+        }
+
         ImGui::End();
     }
 
