@@ -353,8 +353,9 @@ inline quat operator*(quat q1, const quat& q2)
 quat conjugate(const quat& q);
 quat normalize(const quat& q);
 
+// mat3 represents a 3x3 matrix with column-major layout
 // The storage for mat3 is actually mat3x4 (3 columns, 4 rows) to match
-// how we pass mat3 data to shaders
+// how we pass mat3 data to shaders to satisfy alignment requirements
 struct mat3 {
     union {
         struct {
@@ -375,9 +376,16 @@ struct mat3 {
     static mat3 identity();
 };
 
+// Transposes a matrix
 mat3 transpose(const mat3& mtx);
+
+// Creates an inverse matrix
 mat3 inverse(const mat3& mtx);
 
+// mat4 represents a 4x4 matrix with column-major layout
+// The matrices are typically used in vec * mat multiplication with row vectors
+// (NOT mat * vec with column vectors!), and column-major layout simplifies operations with vector
+// instructions (e.g. SSE).
 struct mat4 {
     union {
         struct {
@@ -400,20 +408,71 @@ struct mat4 {
 };
 
 mat4 operator*(const mat4& m1, const mat4& m2);
+
+// Multiplies a row vector by a matrix, i.e. vec * mat
+// All matrices are constructed with assumption that this operation is used
+// to perform transformations.
 vec4 operator*(const vec4& v, const mat4& mtx);
+
+// Multiplies a matrix by a column vector, i.e. mat * vec
+// This operation is rarely used, the vec * mat operation is preferred, all matrices
+// assume that vec * mat is used.
 vec4 operator*(const mat4& mtx, const vec4& v);
+
+// Transposes a matrix
 mat4 transpose(const mat4& mtx);
+
+// Creates projection transform matrix in the following form:
+//
+//     [ xf 0  0  0 ]
+//     [ 0  yf 0  0 ]
+//     [ 0  0  zf 1 ]
+//     [ 0  0  wf 0 ]
+//
+// This projection matrix is for left-handed coordinate system and is used for vec * mat
+// multiplications with row vectors (NOT mat * vec with column vectors!).
+//
+// Input:
+// - aspect         - aspect ratio of the rendered view rectangle
+// - fov_radians    - horizontal field of view, in radians
+// - near_plane     - distance of the near plane, in view coordinates
+// - far_plane      - distance of the far plane, in view coordinates
+// - depth_bias     - a depth bias value to be added
+//
+// The matrix contains the following values (aside from 0s and 1s):
+// - xf - multiplication factor for x coordinate = 1 / (aspect * tan(fov_radians / 2))
+// - yf - multiplication factor for y coordinate = 1 / tan(fov_radians / 2)
+// - zf - multiplication factor for z coordinate = depth_bias - near_plane / (far_plane - near_plane)
+// - wf - multiplication factor for w coordinate = (far_plane * near_plane) / (far_plane - near_plane)
 mat4 projection(float aspect, float fov_radians, float near_plane, float far_plane, float depth_bias);
+
+// Creates a vector containing non-0/1 factors of the projection transform matrix
+// The returned vector is: [xf, yf, zf, wf]
+// See projection() for the meaning of inputs and output factors.
+// This form simplifies calculations in shaders.
 vec4 projection_vector(float aspect, float fov_radians, float near_plane, float far_plane, float depth_bias);
+
+// Creates a look-at view transform matrix, used for transforming points from world coordinate space
+// into view coordinate space.
+//
+// Input:
+// - eye_pos    - position of the camera's "eye"
+// - target     - point at which the camera is looking
 mat4 look_at(const vec3& eye_pos, const vec3& target);
+
+// Creates a translation transform matrix
 mat4 translate(float x, float y, float z);
+
+// Creates a scale transform matrix
 mat4 scale(float x, float y, float z);
 
+// Creates a translation transform matrix
 inline mat4 translate(const vec3& v)
 {
     return translate(v.x, v.y, v.z);
 }
 
+// Creates a scale transform matrix
 inline mat4 scale(const vec3& v)
 {
     return scale(v.x, v.y, v.z);
