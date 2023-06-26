@@ -342,6 +342,8 @@ struct quat {
     bool operator==(const quat& q) const;
     bool operator!=(const quat& q) const;
     quat operator-() const;
+
+    vec3 rotate(const vec3& v) const;
 };
 
 inline quat operator*(quat q1, const quat& q2)

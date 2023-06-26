@@ -4,6 +4,7 @@
 #include "vmath.h"
 #include "vecfloat.h"
 #include "mstdc.h"
+#include <assert.h>
 
 using namespace vmath;
 
@@ -252,34 +253,43 @@ quat::quat(const vec3& axis, float angle_radians)
 
 quat::quat(const vec3& euler_xyz)
 {
-#ifdef USE_SSE
     const sin_cos_result4 sc_half = sincos(float4::load4_aligned(euler_xyz.data) * spread4(0.5f));
-    const float4          sc_xy   = shuffle<0, 1, 0, 2>(sc_half.sin, sc_half.cos);
-    const float4          sc_z    = shuffle<2, 2, 2, 2>(sc_half.sin, sc_half.cos);
 
-    float4 dst1 = shuffle<0, 2, 2, 2>(sc_xy, sc_xy);
-    dst1       *= shuffle<3, 1, 3, 3>(sc_xy, sc_xy);
-    dst1       *= shuffle<2, 2, 0, 2>(sc_z,  sc_z);
+#ifdef USE_SSE
+    const float4 sc_xy = shuffle<0, 1, 0, 1>(sc_half.sin, sc_half.cos); // [ sinx, siny, cosx, cosy ]
+    const float4 sc_z  = shuffle<2, 2, 2, 2>(sc_half.sin, sc_half.cos); // [ sinz, sinz, cosz, cosz ]
 
-    float4 dst2 = shuffle<2, 0, 0, 0>(sc_xy, sc_xy) ^ float4{float4_base::load_mask(1 << 31, 0, 1 << 31, 0)};
-    dst2       *= shuffle<1, 3, 1, 1>(sc_xy, sc_xy);
-    dst2       *= shuffle<0, 0, 2, 0>(sc_z,  sc_z);
+    const float4 cx = shuffle<0, 2, 2, 2>(sc_xy, sc_xy);
+    const float4 cy = shuffle<3, 1, 3, 3>(sc_xy, sc_xy);
+    const float4 cz = shuffle<2, 2, 0, 2>(sc_z,  sc_z);
 
-    dst1 += dst2;
-    dst1.store4_aligned(data);
+    const float4 sx = shuffle<2, 0, 0, 0>(sc_xy, sc_xy);
+    const float4 sy = shuffle<1, 3, 1, 1>(sc_xy, sc_xy);
+    const float4 sz = shuffle<0, 0, 2, 0>(sc_z,  sc_z);
 #else
-    // TODO
+    const float4 cx{sc_half.sin[0], sc_half.cos[0], sc_half.cos[0], sc_half.cos[0]};
+    const float4 cy{sc_half.cos[1], sc_half.sin[1], sc_half.cos[1], sc_half.cos[1]};
+    const float4 cz{sc_half.cos[2], sc_half.cos[2], sc_half.sin[2], sc_half.cos[2]};
+    const float4 sx{sc_half.cos[0], sc_half.sin[0], sc_half.sin[0], sc_half.sin[0]};
+    const float4 sy{sc_half.sin[1], sc_half.cos[1], sc_half.sin[1], sc_half.sin[1]};
+    const float4 sz{sc_half.sin[2], sc_half.sin[2], sc_half.cos[2], sc_half.sin[2]};
 #endif
+
+    const float4 result = cx * cy * cz + ((sx * sy * sz) ^ float4{float4_base::load_mask(1 << 31, 0, 1 << 31, 0)});
+
+    result.store4_aligned(data);
 }
 
 quat::quat(const mat3& rot_mtx)
 {
     // TODO
+    assert(0);
 }
 
 quat::quat(const mat4& rot_mtx)
 {
     // TODO
+    assert(0);
 }
 
 quat& quat::operator*=(const quat& q)
@@ -306,15 +316,21 @@ bool quat::operator!=(const quat& q) const
 
 quat quat::operator-() const
 {
-    return quat{-x, -y, -z, -w};
+    const float4 result = float4::load4_aligned(data) ^ float4{float4_base::load_mask(1 << 31, 1 << 31, 1 << 31, 1 << 31)};
+    quat new_q;
+    result.store4_aligned(new_q.data);
+    return new_q;
 }
 
-quat conjugate(const quat& q)
+quat vmath::conjugate(const quat& q)
 {
-    return quat{-q.x, -q.y, -q.z, q.w};
+    const float4 result = float4::load4_aligned(q.data) ^ float4{float4_base::load_mask(1 << 31, 1 << 31, 1 << 31, 0)};
+    quat new_q;
+    result.store4_aligned(new_q.data);
+    return new_q;
 }
 
-quat normalize(const quat& q)
+quat vmath::normalize(const quat& q)
 {
     float4       fq  = float4::load4_aligned(q.data);
     const float4 dp  = dot_product4(fq, fq);
@@ -327,6 +343,13 @@ quat normalize(const quat& q)
     quat result;
     fq.store4_aligned(result.data);
     return result;
+}
+
+vec3 quat::rotate(const vec3& v) const
+{
+    const quat result = *this * vmath::quat{v.x, v.y, v.z, 0} * conjugate(*this);
+
+    return vec3{result.data};
 }
 
 mat3::mat3(const mat4& mtx)
@@ -342,6 +365,7 @@ mat3::mat3(const float* ptr)
 mat3::mat3(const quat& q)
 {
     // TODO this is incorrect, it assumed mat3x3, but the layout has changed to mat3x4 (3 columns, 4 rows)
+    assert(0);
     const float4 q2f = float4::load4_aligned(q.data) * float4{2, 2, 2, 2};
 
     quat q2w;

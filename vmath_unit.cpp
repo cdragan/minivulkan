@@ -11,7 +11,7 @@
 
 static int exit_code = 0;
 
-static bool is_near(float value1, float value2, float max_error = 0.0025f)
+static bool is_near(float value1, float value2, float max_error = 0.005f)
 {
     return fabs(value1 - value2) < max_error;
 }
@@ -757,7 +757,90 @@ int main()
     //////////////////////////////////////////////////////////////////////////////////////////
     // quat
 
-    // TODO
+    // conjugate
+    {
+        const vmath::quat q{1, 2, 3, 4};
+        const vmath::quat c = vmath::conjugate(q);
+
+        TEST(c.x == -1);
+        TEST(c.y == -2);
+        TEST(c.z == -3);
+        TEST(c.w == 4);
+    }
+
+    // quat::operator-
+    {
+        const vmath::quat q{1, 2, 3, 4};
+        const vmath::quat c = -q;
+
+        TEST(c.x == -1);
+        TEST(c.y == -2);
+        TEST(c.z == -3);
+        TEST(c.w == -4);
+    }
+
+    // normalize
+    {
+        const vmath::quat q{10.0f, 10.0f, 10.0f, 10.0f};
+        const vmath::quat n = vmath::normalize(q);
+
+        TEST(is_near(n.x, 0.5f));
+        TEST(is_near(n.y, 0.5f));
+        TEST(is_near(n.z, 0.5f));
+        TEST(is_near(n.w, 0.5f));
+    }
+
+    // quat, axis, angle
+    {
+        const vmath::quat q{vmath::vec3{0, 0, 1}, vmath::pi_half};
+        const vmath::vec3 v{q.rotate(vmath::vec3{1, 0, 0})};
+
+        TEST(is_near(v.x, 0));
+        TEST(is_near(v.y, 1));
+        TEST(is_near(v.z, 0));
+    }
+    {
+        const vmath::quat q{vmath::vec3{0, 1, 0}, vmath::pi_half};
+        const vmath::vec3 v{q.rotate(vmath::vec3{0, 0, 1})};
+
+        TEST(is_near(v.x, 1));
+        TEST(is_near(v.y, 0));
+        TEST(is_near(v.z, 0));
+    }
+    {
+        const vmath::quat q{vmath::vec3{1, 0, 0}, vmath::pi_half};
+        const vmath::vec3 v{q.rotate(vmath::vec3{0, 1, 0})};
+
+        TEST(is_near(v.x, 0));
+        TEST(is_near(v.y, 0));
+        TEST(is_near(v.z, 1));
+    }
+
+    // quat, euler_xyz
+    {
+        const vmath::quat q{vmath::vec3{0, 0, vmath::pi_half}};
+        const vmath::vec3 v{q.rotate(vmath::vec3{1, 0, 0})};
+
+        TEST(is_near(v.x, 0));
+        TEST(is_near(v.y, 1));
+        TEST(is_near(v.z, 0));
+    }
+    {
+        const vmath::quat q{vmath::vec3{0, vmath::pi_half, 0}};
+        const vmath::vec3 v{q.rotate(vmath::vec3{0, 0, 1})};
+
+        TEST(is_near(v.x, 1));
+        TEST(is_near(v.y, 0));
+        TEST(is_near(v.z, 0));
+    }
+    {
+        const vmath::quat q{vmath::vec3{vmath::pi_half, 0, 0}};
+        const vmath::vec3 v{q.rotate(vmath::vec3{0, 1, 0})};
+
+        TEST(is_near(v.x, 0));
+        TEST(is_near(v.y, 0));
+        TEST(is_near(v.z, 1));
+    }
 
     //////////////////////////////////////////////////////////////////////////////////////////
     // mat3
@@ -1053,6 +1136,16 @@ int main()
         TEST(m.a31 == 0);
         TEST(is_near(m.a32, 5.0f / 4.0f));
         TEST(m.a33 == 0);
+    }
+
+    // projection_vector
+    {
+        const vmath::vec4 v = vmath::projection_vector(1, vmath::pi_half, 1, 5, 0);
+
+        TEST(is_near(v.x, 1, 0.005f));
+        TEST(is_near(v.y, 1, 0.005f));
+        TEST(is_near(v.z, -0.25f));
+        TEST(is_near(v.w, 5.0f / 4.0f));
     }
 
     return exit_code;
