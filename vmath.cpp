@@ -332,10 +332,10 @@ quat vmath::conjugate(const quat& q)
 
 quat vmath::normalize(const quat& q)
 {
-    float4       fq  = float4::load4_aligned(q.data);
-    const float4 dp  = dot_product4(fq, fq);
+    float4       fq = float4::load4_aligned(q.data);
+    const float4 dp = dot_product4(fq, fq);
 
-    if (dp.get0() > 0) {
+    if (dp.get0() > small) {
         const float1 rcp_len = rsqrt(float1{dp});
         fq *= spread4(rcp_len);
     }

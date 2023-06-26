@@ -186,8 +186,8 @@ inline float1 sqrt(const float1& v)
 inline float1 rsqrt(const float1& v)
 {
     float value = vrsqrtes_f32(v.data);
-    value *= vrsqrtss_f32(value, v.data);
-    value *= vrsqrtss_f32(value, v.data);
+    value *= vrsqrtss_f32(value * v.data, value);
+    value *= vrsqrtss_f32(value * v.data, value);
     return float1{value};
 }
 
@@ -361,8 +361,8 @@ inline float4 sqrt(const float4& v)
 inline float4 rsqrt(const float4& v)
 {
     float32x4_t value = vrsqrteq_f32(v);
-    value = vmulq_f32(value, vrsqrtsq_f32(value, v));
-    value = vmulq_f32(value, vrsqrtsq_f32(value, v));
+    value = vmulq_f32(value, vrsqrtsq_f32(vmulq_f32(value, v.data), value));
+    value = vmulq_f32(value, vrsqrtsq_f32(vmulq_f32(value, v.data), value));
     return float4{value};
 }
 
