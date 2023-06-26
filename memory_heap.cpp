@@ -232,7 +232,7 @@ bool MemoryAllocator::init_heaps(VkDeviceSize device_heap_size,
     int       host_type_index    = find_mem_type(preferred_host_heap_flags,    require_host_memory);
     const int dynamic_type_index = find_mem_type(preferred_dynamic_heap_flags, allow_device_memory);
 
-    d_printf("Found memory types: device=%d, host=%d, dynamic=%d\n",
+    d_printf("Selected memory types: device=%d, host=%d, dynamic=%d\n",
              device_type_index, host_type_index, dynamic_type_index);
 
     if (device_type_index < 0 || dynamic_type_index < 0) {
