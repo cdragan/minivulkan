@@ -209,7 +209,7 @@ bool create_material(const MaterialInfo& mat_info, VkPipeline* pipeline)
         VK_FALSE,   // depthClampEnable
         VK_FALSE,   // rasterizerDiscardEnable
         VK_POLYGON_MODE_FILL,
-        VK_CULL_MODE_BACK_BIT,
+        VK_CULL_MODE_NONE,
         VK_FRONT_FACE_COUNTER_CLOCKWISE,
         VK_FALSE,   // depthBiasEnable
         0,          // depthBiasConstantFactor
@@ -219,6 +219,7 @@ bool create_material(const MaterialInfo& mat_info, VkPipeline* pipeline)
     };
 
     rasterization_state.polygonMode = static_cast<VkPolygonMode>(mat_info.polygon_mode);
+    rasterization_state.cullMode    = static_cast<VkCullModeFlags>(mat_info.cull_mode);
 
     static VkPipelineMultisampleStateCreateInfo multisample_state = {
         VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,

@@ -117,8 +117,24 @@ bool Sculptor::Geometry::send_to_gpu(VkCommandBuffer cmd_buf)
         num_indices += 16;
     }
 
-    if (num_indices) {
-        copy_region.size = num_indices * sizeof(Vertex);
+    edge_indices_offset = num_indices;
+    num_edge_indices = 0;
+    for (uint32_t i_edge = 0; i_edge < num_edges; i_edge++) {
+        assert(num_edge_indices + 4 <= max_indices);
+
+        const Edge& edge = obj_edges[i_edge];
+
+        for (uint32_t i_idx = 0; i_idx < 4; i_idx++) {
+            assert(edge[i_idx] < max_vertices);
+            const uint32_t dest_idx = edge_indices_offset + num_edge_indices + i_idx;
+            indices_ptr[dest_idx] = static_cast<uint16_t>(edge[i_idx]);
+        }
+
+        num_edge_indices += 4;
+    }
+
+    if (num_indices + num_edge_indices) {
+        copy_region.size = (num_indices + num_edge_indices) * sizeof(Vertex);
 
         vkCmdCopyBuffer(cmd_buf, host_indices.get_buffer(), indices.get_buffer(), 1, &copy_region);
     }
@@ -409,6 +425,28 @@ void Sculptor::Geometry::render(VkCommandBuffer cmd_buf)
     vkCmdDrawIndexed(cmd_buf,
                      num_indices,
                      num_faces,
+                     0,  // firstVertex
+                     0,  // vertexOffset
+                     0); // firstInstance
+}
+
+void Sculptor::Geometry::render_edges(VkCommandBuffer cmd_buf)
+{
+    static const VkDeviceSize vb_offset = 0;
+    vkCmdBindVertexBuffers(cmd_buf,
+                           0, // firstBinding
+                           1, // bindingCount
+                           &vertices.get_buffer(),
+                           &vb_offset);
+
+    vkCmdBindIndexBuffer(cmd_buf,
+                         indices.get_buffer(),
+                         edge_indices_offset * sizeof(uint16_t),
+                         VK_INDEX_TYPE_UINT16);
+
+    vkCmdDrawIndexed(cmd_buf,
+                     num_edge_indices,
+                     num_edges,
                      0,  // firstVertex
                      0,  // vertexOffset
                      0); // firstInstance

@@ -27,6 +27,7 @@ class Geometry {
         void set_dirty() { dirty = true; }
         bool send_to_gpu(VkCommandBuffer cmd_buf);
         void render(VkCommandBuffer cmd_buf);
+        void render_edges(VkCommandBuffer cmd_buf);
 
         uint32_t add_vertex(int16_t x, int16_t y, int16_t z);
         uint32_t get_num_vertices() const { return num_vertices; }
@@ -53,11 +54,13 @@ class Geometry {
         Buffer   faces;
         Buffer   host_faces;
 
-        uint32_t num_vertices = 0;
-        uint32_t num_indices  = 0;
-        uint32_t num_edges    = 0;
-        uint32_t num_faces    = 0;
-        bool     dirty        = true;
+        uint32_t num_vertices        = 0;
+        uint32_t num_indices         = 0;
+        uint32_t num_edge_indices    = 0;
+        uint32_t edge_indices_offset = 0;
+        uint32_t num_edges           = 0;
+        uint32_t num_faces           = 0;
+        bool     dirty               = true;
 
         using Edge = uint32_t[4];
         static constexpr uint32_t max_edges = 0x10000U;

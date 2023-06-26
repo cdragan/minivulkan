@@ -31,7 +31,9 @@ struct Viewport {
     uint32_t        id;
     ViewType        view_type;
     vmath::vec3     camera_pos;
-    vmath::vec3     look_at;
+    float           camera_distance;
+    float           camera_yaw;
+    float           camera_pitch;
     uint32_t        width;
     uint32_t        height;
     Image           color_buffer[max_swapchain_size];
@@ -40,11 +42,9 @@ struct Viewport {
     bool            captured_mouse;
 };
 
-static constexpr float init_dist = 0.125f;
-
 static Viewport viewports[] = {
-    { "Front View", true, 0, ViewType::front,       { 0.0f,      0.0f,      -init_dist }, { 0.0f, 0.0f, 0.0f } },
-    { "3D View",    true, 1, ViewType::free_moving, { init_dist, init_dist, -init_dist }, { 0.0f, 0.0f, 0.0f } }
+    { "Front View", true, 0, ViewType::front,       { 0.0f, 0.0f, -0.125f } },
+    { "3D View",    true, 1, ViewType::free_moving, { 0.0f, 0.0f, 0.0f },   0.2f }
 };
 
 const unsigned gui_num_descriptors = mstd::array_size(viewports) * max_swapchain_size;
@@ -56,12 +56,14 @@ uint32_t check_device_features()
     uint32_t missing_features = 0;
 
     missing_features += check_feature(&vk_features.features.tessellationShader);
+    missing_features += check_feature(&vk_features.features.fillModeNonSolid);
     missing_features += check_feature(&vk_dyn_rendering_features.dynamicRendering);
 
     return missing_features;
 }
 
 static VkPipeline         sculptor_object_pipeline = VK_NULL_HANDLE;
+static VkPipeline         sculptor_edge_pipeline   = VK_NULL_HANDLE;
 static VkDescriptorSet    desc_set_2               = VK_NULL_HANDLE;
 static Sculptor::Geometry patch_geometry;
 static Buffer             transforms_buf;
@@ -72,6 +74,8 @@ struct Transforms {
     vmath::mat3 model_view_normal;
     vmath::vec4 proj;
 };
+
+static constexpr uint32_t transforms_per_viewport = 1;
 
 static bool create_samplers()
 {
@@ -110,7 +114,7 @@ static bool create_transforms_buffer()
                 vk_phys_props.properties.limits.minUniformBufferOffsetAlignment));
 
     return transforms_buf.allocate(Usage::dynamic,
-                                   transforms_stride * max_swapchain_size * mstd::array_size(viewports),
+                                   transforms_stride * max_swapchain_size * mstd::array_size(viewports) * transforms_per_viewport,
                                    VK_FORMAT_UNDEFINED,
                                    VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT);
 }
@@ -227,7 +231,7 @@ bool init_assets()
         }
     };
 
-    static const MaterialInfo mat_info = {
+    static const MaterialInfo object_mat_info = {
         {
             shader_pass_through_vert,
             shader_sculptor_object_frag,
@@ -237,11 +241,30 @@ bool init_assets()
         sizeof(Sculptor::Geometry::Vertex),
         16, // patch_control_points
         VK_POLYGON_MODE_FILL,
+        VK_CULL_MODE_BACK_BIT,
         mstd::array_size(vertex_attributes),
         vertex_attributes
     };
 
-    if ( ! create_material(mat_info, &sculptor_object_pipeline))
+    if ( ! create_material(object_mat_info, &sculptor_object_pipeline))
+        return false;
+
+    static const MaterialInfo edge_mat_info = {
+        {
+            shader_pass_through_vert,
+            shader_sculptor_edge_frag,
+            shader_bezier_line_cubic_sculptor_tesc,
+            shader_bezier_line_cubic_sculptor_tese
+        },
+        sizeof(Sculptor::Geometry::Vertex),
+        4, // patch_control_points
+        VK_POLYGON_MODE_LINE,
+        VK_CULL_MODE_NONE,
+        mstd::array_size(vertex_attributes),
+        vertex_attributes
+    };
+
+    if ( ! create_material(edge_mat_info, &sculptor_edge_pipeline))
         return false;
 
     if ( ! patch_geometry.allocate())
@@ -486,14 +509,14 @@ static bool create_gui_frame(uint32_t image_idx)
             viewport.captured_mouse = true;
 
         if (viewport.captured_mouse) {
-            constexpr float scale_factor       = 0.01f;
-            constexpr float ortho_scale_factor = 0.002f;
+            constexpr float rot_scale_factor   = 0.3f;
+            constexpr float ortho_scale_factor = 0.0005f;
 
             switch (viewport.view_type) {
 
                 case ViewType::free_moving:
-                    viewport.camera_pos.x -= scale_factor * mouse_delta.x;
-                    viewport.camera_pos.y += scale_factor * mouse_delta.y;
+                    viewport.camera_yaw   += rot_scale_factor * mouse_delta.x;
+                    viewport.camera_pitch += rot_scale_factor * mouse_delta.y;
                     break;
 
                 case ViewType::front:
@@ -533,7 +556,11 @@ static bool set_patch_transforms(const Viewport& viewport, uint32_t transform_id
     switch (viewport.view_type) {
 
         case ViewType::free_moving:
-            model_view = vmath::look_at(viewport.camera_pos, viewport.look_at);
+            {
+                const vmath::quat q{vmath::vec3{vmath::radians(viewport.camera_pitch), vmath::radians(viewport.camera_yaw), 0.0f}};
+                const vmath::vec3 cam_vector{vmath::vec4(0, 0, viewport.camera_distance, 0) * vmath::mat4(q)};
+                model_view = vmath::look_at(viewport.camera_pos - cam_vector, viewport.camera_pos);
+            }
             break;
 
         case ViewType::front:
@@ -563,14 +590,9 @@ static bool render_view(const Viewport& viewport, uint32_t image_idx, VkCommandB
     if ( ! draw_grid(viewport, buf))
         return false;
 
-    vkCmdBindPipeline(buf, VK_PIPELINE_BIND_POINT_GRAPHICS, sculptor_object_pipeline);
+    const uint32_t transform_id_base = (image_idx * mstd::array_size(viewports) + viewport.id) * transforms_per_viewport;
 
-    send_viewport_and_scissor(buf,
-                              static_cast<float>(viewport.width) / static_cast<float>(viewport.height),
-                              viewport.width,
-                              viewport.height);
-
-    const uint32_t transform_id = image_idx * mstd::array_size(viewports) + viewport.id;
+    const uint32_t transform_id = transform_id_base + 0;
 
     uint32_t dynamic_offsets[] = {
         transform_id * transforms_stride
@@ -579,16 +601,29 @@ static bool render_view(const Viewport& viewport, uint32_t image_idx, VkCommandB
     if ( ! set_patch_transforms(viewport, transform_id))
         return false;
 
-    vkCmdBindDescriptorSets(buf,
-                            VK_PIPELINE_BIND_POINT_GRAPHICS,
-                            sculptor_material_layout,
-                            2,          // firstSet
-                            1,          // descriptorSetCount
-                            &desc_set_2,
-                            mstd::array_size(dynamic_offsets),
-                            dynamic_offsets);
+    for (uint32_t i = 0; i < 2; i++) {
+        vkCmdBindPipeline(buf, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                          (i == 0) ? sculptor_object_pipeline : sculptor_edge_pipeline);
 
-    patch_geometry.render(buf);
+        send_viewport_and_scissor(buf,
+                                  static_cast<float>(viewport.width) / static_cast<float>(viewport.height),
+                                  viewport.width,
+                                  viewport.height);
+
+        vkCmdBindDescriptorSets(buf,
+                                VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                sculptor_material_layout,
+                                2,          // firstSet
+                                1,          // descriptorSetCount
+                                &desc_set_2,
+                                mstd::array_size(dynamic_offsets),
+                                dynamic_offsets);
+
+        if (i == 0)
+            patch_geometry.render(buf);
+        else
+            patch_geometry.render_edges(buf);
+    }
 
     return true;
 }
