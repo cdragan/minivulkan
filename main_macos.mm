@@ -257,7 +257,7 @@ bool play_sound_track()
                             encoding: NSASCIIStringEncoding];
         window.minSize = NSMakeSize(512, 384);
 
-        id view_ctrl = [alloc_view_controller()
+        id view_ctrl = [[VulkanViewController alloc]
             initWithSize: frame_rect.size
         ];
         window.contentViewController = view_ctrl;

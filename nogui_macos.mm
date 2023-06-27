@@ -14,8 +14,3 @@ void init_os_gui(NSView *view)
 void init_os_gui_frame(NSView *view)
 {
 }
-
-VulkanViewController *alloc_view_controller()
-{
-    return [VulkanViewController alloc];
-}
