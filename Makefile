@@ -140,6 +140,7 @@ endif
 
 threed_gui_src_files += $(imgui_src_files)
 threed_gui_src_files += gui.cpp
+threed_gui_src_files += gui_config.cpp
 
 threed_nogui_src_files += nogui.cpp
 

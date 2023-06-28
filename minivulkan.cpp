@@ -1011,7 +1011,7 @@ static bool update_resolution()
     if ( ! idle_queue())
         return false;
 
-    free_gui_framebuffers();
+    resize_gui();
 
     if ( ! create_swapchain())
         return false;

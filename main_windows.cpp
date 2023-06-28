@@ -235,8 +235,8 @@ static bool create_window(Window* w)
         ws     = WS_CLIPSIBLINGS | WS_CLIPCHILDREN | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_THICKFRAME;
         x      = CW_USEDEFAULT;
         y      = CW_USEDEFAULT;
-        width  = 800;
-        height = 600;
+        width  = get_main_window_width();
+        height = get_main_window_height();
     }
 
     const HWND hwnd = CreateWindowEx(ws_ex,       // dwExStyle

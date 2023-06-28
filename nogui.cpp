@@ -8,7 +8,7 @@ bool init_gui(GuiClear clear)
     return true;
 }
 
-void free_gui_framebuffers()
+void resize_gui()
 {
 }
 
@@ -20,4 +20,14 @@ bool send_gui_to_gpu(VkCommandBuffer cmdbuf, uint32_t image_idx)
 bool is_full_screen()
 {
     return true;
+}
+
+uint32_t get_main_window_width()
+{
+    return 800;
+}
+
+uint32_t get_main_window_height()
+{
+    return 600;
 }

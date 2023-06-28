@@ -239,7 +239,7 @@ bool play_sound_track()
                                          screen_frame.size.width,
                                          screen_frame.size.height);
         if ( ! full_screen)
-            frame_rect = NSMakeRect(0, 0, 800, 600);
+            frame_rect = NSMakeRect(0, 0, get_main_window_width(), get_main_window_height());
 
         NSWindow *window = [[NSWindow alloc]
             initWithContentRect: frame_rect
