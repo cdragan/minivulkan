@@ -39,13 +39,15 @@ struct Viewport {
     Image           color_buffer[max_swapchain_size];
     Image           depth_buffer[max_swapchain_size];
     VkDescriptorSet gui_tex[max_swapchain_size];
-    bool            captured_mouse;
 };
 
 static Viewport viewports[] = {
     { "Front View", true, 0, ViewType::front,       { 0.0f, 0.0f, -0.125f } },
     { "3D View",    true, 1, ViewType::free_moving, { 0.0f, 0.0f, 0.0f },   0.2f }
 };
+
+// Which viewport has captured mouse
+static int viewport_mouse = -1;
 
 const unsigned gui_num_descriptors = mstd::array_size(viewports) * max_swapchain_size;
 
@@ -420,14 +422,10 @@ static bool create_gui_frame(uint32_t image_idx)
     ImGui::NewFrame();
 
     const ImVec2 abs_mouse_pos = ImGui::GetMousePos();
-    const bool   ctrl_pressed  = ImGui::IsKeyPressed(ImGuiKey_LeftCtrl) || ImGui::IsKeyPressed(ImGuiKey_RightCtrl);
     const bool   ctrl_down     = ImGui::IsKeyDown(ImGuiKey_LeftCtrl)    || ImGui::IsKeyDown(ImGuiKey_RightCtrl);
 
-    if ( ! ctrl_down) {
-        for (Viewport& viewport: viewports) {
-            viewport.captured_mouse = false;
-        }
-    }
+    if ( ! ctrl_down)
+        viewport_mouse = -1;
 
     static ImVec2 prev_mouse_pos;
     const ImVec2 mouse_delta = ImVec2(abs_mouse_pos.x - prev_mouse_pos.x, abs_mouse_pos.y - prev_mouse_pos.y);
@@ -505,10 +503,10 @@ static bool create_gui_frame(uint32_t image_idx)
                                 static_cast<float>(viewport.height)});
         }
 
-        if (ctrl_pressed && ImGui::IsItemHovered())
-            viewport.captured_mouse = true;
+        if (viewport_mouse == -1 && ctrl_down && ImGui::IsItemHovered())
+            viewport_mouse = static_cast<int>(viewport.id);
 
-        if (viewport.captured_mouse) {
+        if (viewport.id == static_cast<uint32_t>(viewport_mouse)) {
             constexpr float rot_scale_factor   = 0.3f;
             constexpr float ortho_scale_factor = 0.0005f;
 
