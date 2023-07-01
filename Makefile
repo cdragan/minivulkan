@@ -235,9 +235,7 @@ endef
 # Sub-projects
 
 projects += example
-projects += matedit
 projects += sculptor
-projects += sleek
 projects += synth
 
 $(foreach project,$(projects),$(eval $(call include_project,$(project))))
