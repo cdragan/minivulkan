@@ -42,7 +42,7 @@ struct Viewport {
 };
 
 static Viewport viewports[] = {
-    { "Front View", true, 0, ViewType::front,       { 0.0f, 0.0f, -0.125f } },
+    { "Front View", true, 0, ViewType::front,       { 0.0f, 0.0f, -2.0f } },
     { "3D View",    true, 1, ViewType::free_moving, { 0.0f, 0.0f, 0.0f },   0.2f }
 };
 
@@ -75,6 +75,7 @@ struct Transforms {
     vmath::mat4 model_view;
     vmath::mat3 model_view_normal;
     vmath::vec4 proj;
+    vmath::vec4 proj_w;
 };
 
 static constexpr uint32_t transforms_per_viewport = 1;
@@ -574,10 +575,22 @@ static bool set_patch_transforms(const Viewport& viewport, uint32_t transform_id
     transforms->model_view_normal = vmath::transpose(vmath::inverse(vmath::mat3(model_view)));
 
     const float aspect = static_cast<float>(viewport.width) / static_cast<float>(viewport.height);
-    transforms->proj = vmath::projection_vector(aspect,
-                                                vmath::radians(30.0f),
-                                                0.01f,      // near_plane
-                                                1000.0f);   // far_plane
+
+    if (viewport.view_type == ViewType::free_moving) {
+        transforms->proj = vmath::projection_vector(aspect,
+                                                    vmath::radians(30.0f),
+                                                    0.01f,      // near_plane
+                                                    1000.0f);   // far_plane
+        transforms->proj_w = vmath::vec4(0.0f, 0.0f, 1.0f, 0.0f);
+    }
+    else {
+        constexpr float view_height = 0.1f;
+        transforms->proj = vmath::ortho_vector(aspect,
+                                               view_height,
+                                               0.01f,   // near_plane
+                                               3.0f);   // far_plane
+        transforms->proj_w = vmath::vec4(0.0f, 0.0f, 0.0f, 1.0f);
+    }
 
     return transforms_buf.flush(transform_id, transforms_stride);
 }
