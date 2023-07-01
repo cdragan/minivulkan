@@ -197,28 +197,14 @@ static bool create_graphics_pipeline(const ShaderInfo& shader_info, VkPipeline* 
     };
     tessellation_state.patchControlPoints = shader_info.patch_control_points;
 
-    static VkViewport viewport = {
-        0,      // x
-        0,      // y
-        0,      // width
-        0,      // height
-        0,      // minDepth
-        1       // maxDepth
-    };
-
-    static VkRect2D scissor = {
-        { 0, 0 },   // offset
-        { 0, 0 }    // extent
-    };
-
     static VkPipelineViewportStateCreateInfo viewport_state = {
         VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
         nullptr,
         0,  // flags
         1,
-        &viewport,
+        nullptr,
         1,
-        &scissor
+        nullptr
     };
 
     static VkPipelineRasterizationStateCreateInfo rasterization_state = {
