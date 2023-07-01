@@ -424,7 +424,7 @@ vec4 operator*(const mat4& mtx, const vec4& v);
 // Transposes a matrix
 mat4 transpose(const mat4& mtx);
 
-// Creates projection transform matrix in the following form:
+// Creates perspective projection transform matrix in the following form:
 //
 //     [ xf 0  0  0 ]
 //     [ 0  yf 0  0 ]
@@ -437,22 +437,47 @@ mat4 transpose(const mat4& mtx);
 // Input:
 // - aspect         - aspect ratio of the rendered view rectangle
 // - fov_radians    - horizontal field of view, in radians
-// - near_plane     - distance of the near plane, in view coordinates
-// - far_plane      - distance of the far plane, in view coordinates
-// - depth_bias     - a depth bias value to be added
+// - near_plane     - distance of the near plane, in view space coordinates
+// - far_plane      - distance of the far plane, in view space coordinates
 //
 // The matrix contains the following values (aside from 0s and 1s):
 // - xf - multiplication factor for x coordinate = 1 / (aspect * tan(fov_radians / 2))
 // - yf - multiplication factor for y coordinate = 1 / tan(fov_radians / 2)
-// - zf - multiplication factor for z coordinate = depth_bias - near_plane / (far_plane - near_plane)
+// - zf - multiplication factor for z coordinate = -near_plane / (far_plane - near_plane)
 // - wf - multiplication factor for w coordinate = (far_plane * near_plane) / (far_plane - near_plane)
-mat4 projection(float aspect, float fov_radians, float near_plane, float far_plane, float depth_bias);
+mat4 projection(float aspect, float fov_radians, float near_plane, float far_plane);
 
-// Creates a vector containing non-0/1 factors of the projection transform matrix
+// Creates a vector containing non-0/1 factors of the perspective projection transform matrix
 // The returned vector is: [xf, yf, zf, wf]
 // See projection() for the meaning of inputs and output factors.
 // This form simplifies calculations in shaders.
-vec4 projection_vector(float aspect, float fov_radians, float near_plane, float far_plane, float depth_bias);
+vec4 projection_vector(float aspect, float fov_radians, float near_plane, float far_plane);
+
+// Creates orthographic projection matrix in the form of:
+//
+//     [ xf 0  0  0 ]
+//     [ 0  yf 0  0 ]
+//     [ 0  0  zf 0 ]
+//     [ 0  0  wf 1 ]
+//
+// Input:
+// - aspect         - aspect ratio of the rendered view rectangle
+// - height         - height of view, in view space coordinates
+// - near_plane     - distance of the near plane, in view space coordinates
+// - far_plane      - distance of the far plane, in view space coordinates
+//
+// The matrix contains the following values (aside from 0s and 1s):
+// - xf - multiplication factor for x coordinate = 1 / (aspect * height / 2)
+// - yf - multiplication factor for y coordinate = 1 / (height / 2)
+// - zf - multiplication factor for z coordinate = -1 / (far_plane - near_plane)
+// - wf - multiplication factor for w coordinate = far_plane / (far_plane - near_plane)
+mat4 ortho(float aspect, float height, float near_plane, float far_plane);
+
+// Creates a vector containing non-0/1 factors of the orthographic projection transform matrix
+// The returned vector is: [xf, yf, zf, wf]
+// See ortho() for the meaning of inputs and output factors.
+// This form simplifies calculations in shaders.
+vec4 ortho_vector(float aspect, float height, float near_plane, float far_plane);
 
 // Creates a look-at view transform matrix, used for transforming points from world coordinate space
 // into view coordinate space.

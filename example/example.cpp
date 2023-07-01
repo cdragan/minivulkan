@@ -852,8 +852,7 @@ bool draw_frame(uint32_t image_idx, uint64_t time_ms, VkFence queue_fence)
             aspect,
             vmath::radians(30.0f),  // fov
             0.01f,                  // near_plane
-            100.0f,                 // far_plane
-            0.0f);                  // depth_bias
+            100.0f);                // far_plane
     uniform_data->model_view_proj = model_view * proj;
     uniform_data->model           = model_view;
     uniform_data->model_normal    = vmath::transpose(vmath::inverse(vmath::mat3(model_view)));

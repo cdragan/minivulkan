@@ -496,8 +496,72 @@ mat4 mat4::identity()
     return result;
 }
 
-mat4 vmath::projection(float aspect, float fov_radians, float near_plane, float far_plane, float depth_bias)
+mat4 vmath::projection(float aspect, float fov_radians, float near_plane, float far_plane)
 {
+    //             ^ Z axis
+    //             |
+    //  -----------+---------------- far plane: pixels farther than this are not drawn
+    //             |
+    //             |
+    //     h/2     |    h/2
+    //  *----------+----------*----- near plane: pixel closer than this are not drawn
+    //  :\         |         /:
+    //  : \        |        / :
+    //  :  \       |       /  :
+    //  :   \      |      /   :
+    //  :    \     |     /    :
+    //  :     \    |_   /     :
+    //  :      \   | - /<---- angle: θ/2
+    //  :       \  |  /       :
+    //  :        \ | /        :
+    //  :         \|/         :
+    // =|==========*==========|======> Y axis
+    // -1          0          1
+    //
+    // h - viewport height
+    // n - near plane
+    // f - far plane
+    // θ - field-of-view (fov) angle, in radians
+    //
+    // (h / 2) / n = tan(θ / 2)
+    //
+    // In Vulkan, after all transformations, the X and Y coordinates of pixels before pixel shader go
+    // from -1 to 1 before being mapped to viewport.  Pixels on the far plane are mapped to Z=0 and
+    // pixels on the near plane are mapped to Z=1.  Pixels outside of the near/far plane range are
+    // not drawn.  The far plane is at Z=0 so that the depth buffer can be cleared with 0.
+    //
+    // Therefore Y coordinate is simply scaled from h / 2 to 1, so it's simply divided by
+    // tan(θ / 2).  X coordinate is also scaled, but it is divided by aspect * tan(θ / 2),
+    // where aspect is the ratio of width to height.
+    //
+    // x' = x / (aspect * tan(θ / 2))
+    // y' = y / tan(θ / 2)
+    //
+    // The values of Z must be flipped, such that:
+    // - z values go backwards, from far plane to near plane
+    // - far plane ends up at 0
+    // - near plane ends up at 1 (with Z axis effectively being flipped)
+    //
+    // z' = (far_plane - z) * near_plane / (far_plane - near_plane)
+    // z' = -z * near_plane / (far_plane - near_plane) + far_plane * near_plane / (far_plane - near_plane)
+    //
+    // Perspective division occurs as part of the fixed function of the graphics pipeline,
+    // all computed x', y' and z' coordinates are divided by w'.  To achieve the mapping:
+    // w' = z
+    //
+    // Note: z' is divided by w', so effectively by z, therefore the final Z value used in depth buffer is this:
+    // z'' = (far_plane - z) * near_plane / (z * (far_plane - near_plane))
+    // The multiplication by near_plane is done so that it will cancel out with z for z=near_plane.
+    //
+    // Examples:
+    //
+    // For z=far_plane: z'' = (far_plane - far_plane) * near_plane / (far_plane * (far_plane - near_plane))
+    //                  z'' = 0
+    //
+    // For z=near_plane: z'' = (far_plane - near_plane) * near_plane / (near_plane * (far_plane - near_plane))
+    //                   z'' = near_plane / near_plane
+    //                   z'' = 1
+    //
     const float fov_tan = vmath::tan(fov_radians * 0.5f);
     const float rrange  = rcp(float1{far_plane - near_plane}).get0();
 
@@ -507,14 +571,14 @@ mat4 vmath::projection(float aspect, float fov_radians, float near_plane, float 
 
     result.a00 = rcp(float1{aspect * fov_tan}).get0();
     result.a11 = rcp(float1{fov_tan}).get0();
-    result.a22 = depth_bias - near_plane * rrange;
+    result.a22 = -near_plane * rrange;
     result.a32 = (far_plane * near_plane) * rrange;
     result.a23 = 1;
 
     return result;
 }
 
-vec4 vmath::projection_vector(float aspect, float fov_radians, float near_plane, float far_plane, float depth_bias)
+vec4 vmath::projection_vector(float aspect, float fov_radians, float near_plane, float far_plane)
 {
     const float fov_tan = vmath::tan(fov_radians * 0.5f);
     const float rrange  = rcp(float1{far_plane - near_plane}).get0();
@@ -523,8 +587,80 @@ vec4 vmath::projection_vector(float aspect, float fov_radians, float near_plane,
 
     result.x = rcp(float1{aspect * fov_tan}).get0();
     result.y = rcp(float1{fov_tan}).get0();
-    result.z = depth_bias - near_plane * rrange;
+    result.z = -near_plane * rrange;
     result.w = (far_plane * near_plane) * rrange;
+
+    return result;
+}
+
+mat4 vmath::ortho(float aspect, float height, float near_plane, float far_plane)
+{
+    //             ^ Z axis
+    //             |
+    //  +----------+---------------- far plane: pixels farther than this are not drawn
+    //  |          |          |
+    //  |          |          |
+    //  |  h/2     |    h/2   |
+    //  *----------+----------+----- near plane: pixel closer than this are not drawn
+    //  |          |          |
+    //  |          |          |
+    // =|==========+==========|======> Y axis
+    // -1          0          1
+    //
+    // h - viewport height
+    // n - near plane
+    // f - far plane
+    //
+    // In Vulkan, after all transformations, the X and Y coordinates of pixels before pixel shader go
+    // from -1 to 1 before being mapped to viewport.  Pixels on the far plane are mapped to Z=0 and
+    // pixels on the near plane are mapped to Z=1.  Pixels outside of the near/far plane range are
+    // not drawn.  The far plane is at Z=0 so that the depth buffer can be cleared with 0.
+    //
+    // Therefore Y coordinate is simply scaled from height / 2 to 1, so it's simply divided by
+    // height / 2.  X coordinate is also scaled, but it is divided by aspect * height / 2,
+    // where aspect is the ratio of width to height.
+    //
+    // x' = x / (aspect * h / 2)
+    // y' = y / (h / 2)
+    //
+    // The values of Z must be flipped, such that:
+    // - z values go backwards, from far plane to near plane
+    // - far plane ends up at 0
+    // - near plane ends up at 1 (with Z axis effectively being flipped)
+    //
+    // z' = (far_plane - z) / (far_plane - near_plane)
+    // z' = -z / (far_plane - near_plane) + far_plane / (far_plane - near_plane)
+    //
+    // Perspective division is still performed by Vulkan's fixed function part of graphics pipeline,
+    // so to support orthographic projection, the w' coordinate is simply set to 1.
+    //
+    const float half_h = height * 0.5f;
+    const float rrange = rcp(float1{far_plane - near_plane}).get0();
+
+    mat4 result;
+
+    mstd::mem_zero(result.data, sizeof(result.data));
+
+    result.a00 = rcp(float1{aspect * half_h}).get0();
+    result.a11 = rcp(float1{half_h}).get0();
+    result.a22 = -rrange;
+    result.a32 = far_plane * rrange;
+    result.a33 = 1;
+
+    return result;
+}
+
+vec4 vmath::ortho_vector(float aspect, float height, float near_plane, float far_plane)
+{
+    const float half_h = height * 0.5f;
+    const float rrange = rcp(float1{far_plane - near_plane}).get0();
+
+    vec4 result;
+
+    result.x = rcp(float1{aspect * half_h}).get0();
+    result.y = rcp(float1{half_h}).get0();
+    result.z = -rrange;
+    result.w = far_plane * rrange;
 
     return result;
 }

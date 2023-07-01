@@ -577,8 +577,7 @@ static bool set_patch_transforms(const Viewport& viewport, uint32_t transform_id
     transforms->proj = vmath::projection_vector(aspect,
                                                 vmath::radians(30.0f),
                                                 0.01f,      // near_plane
-                                                1000.0f,    // far_plane
-                                                0.0f);      // depth_bias
+                                                1000.0f);   // far_plane
 
     return transforms_buf.flush(transform_id, transforms_stride);
 }
