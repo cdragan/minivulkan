@@ -5,22 +5,23 @@
 #include "minivulkan.h"
 #include <assert.h>
 
-#include "simple.vert.h"
-#include "phong.frag.h"
-#include "pass_through.vert.h"
-#include "rounded_cube.vert.h"
 #include "bezier_line_cubic_sculptor.tesc.h"
 #include "bezier_line_cubic_sculptor.tese.h"
-#include "bezier_surface_quadratic.tesc.h"
-#include "bezier_surface_quadratic.tese.h"
 #include "bezier_surface_cubic.tesc.h"
 #include "bezier_surface_cubic.tese.h"
 #include "bezier_surface_cubic_sculptor.tesc.h"
 #include "bezier_surface_cubic_sculptor.tese.h"
-#include "sculptor_edge.frag.h"
-#include "sculptor_object.frag.h"
-#include "synth.comp.h"
+#include "bezier_surface_quadratic.tesc.h"
+#include "bezier_surface_quadratic.tese.h"
 #include "mono_to_stereo.comp.h"
+#include "pass_through.vert.h"
+#include "phong.frag.h"
+#include "rounded_cube.vert.h"
+#include "sculptor_color.frag.h"
+#include "sculptor_object.frag.h"
+#include "sculptor_simple.vert.h"
+#include "simple.vert.h"
+#include "synth.comp.h"
 
 static const uint32_t* decode_shader(uint8_t* code, size_t* out_size)
 {

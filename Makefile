@@ -161,22 +161,23 @@ all_vmath_unit_src_files += $(vmath_unit_src_files)
 ##############################################################################
 # Shaders
 
-shader_files += shaders/simple.vert.glsl
-shader_files += shaders/phong.frag.glsl
-shader_files += shaders/pass_through.vert.glsl
-shader_files += shaders/rounded_cube.vert.glsl
 shader_files += shaders/bezier_line_cubic_sculptor.tesc.glsl
 shader_files += shaders/bezier_line_cubic_sculptor.tese.glsl
-shader_files += shaders/bezier_surface_quadratic.tesc.glsl
-shader_files += shaders/bezier_surface_quadratic.tese.glsl
 shader_files += shaders/bezier_surface_cubic.tesc.glsl
 shader_files += shaders/bezier_surface_cubic.tese.glsl
 shader_files += shaders/bezier_surface_cubic_sculptor.tesc.glsl
 shader_files += shaders/bezier_surface_cubic_sculptor.tese.glsl
-shader_files += shaders/sculptor_edge.frag.glsl
-shader_files += shaders/sculptor_object.frag.glsl
-shader_files += shaders/synth.comp.glsl
+shader_files += shaders/bezier_surface_quadratic.tesc.glsl
+shader_files += shaders/bezier_surface_quadratic.tese.glsl
 shader_files += shaders/mono_to_stereo.comp.glsl
+shader_files += shaders/pass_through.vert.glsl
+shader_files += shaders/phong.frag.glsl
+shader_files += shaders/rounded_cube.vert.glsl
+shader_files += shaders/sculptor_color.frag.glsl
+shader_files += shaders/sculptor_object.frag.glsl
+shader_files += shaders/sculptor_simple.vert.glsl
+shader_files += shaders/simple.vert.glsl
+shader_files += shaders/synth.comp.glsl
 
 ##############################################################################
 # Sub-project handling

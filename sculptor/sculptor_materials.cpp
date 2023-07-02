@@ -29,7 +29,32 @@ bool create_material_layouts()
             return false;
     }
 
-    sculptor_desc_set_layout[1] = sculptor_desc_set_layout[0];
+    {
+        static const VkDescriptorSetLayoutBinding per_object_set[] = {
+            {
+                0, // binding 0: uniform buffer with materials
+                VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC,
+                1,
+                VK_SHADER_STAGE_FRAGMENT_BIT,
+                nullptr
+            }
+        };
+
+        static const VkDescriptorSetLayoutCreateInfo create_per_object_set_layout = {
+            VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+            nullptr,
+            0, // flags
+            mstd::array_size(per_object_set),
+            per_object_set
+        };
+
+        const VkResult res = CHK(vkCreateDescriptorSetLayout(vk_dev,
+                                                             &create_per_object_set_layout,
+                                                             nullptr,
+                                                             &sculptor_desc_set_layout[1]));
+        if (res != VK_SUCCESS)
+            return false;
+    }
 
     {
         static const VkDescriptorSetLayoutBinding per_object_set[] = {
@@ -37,7 +62,8 @@ bool create_material_layouts()
                 0, // binding 0: uniform buffer with transforms
                 VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC,
                 1,
-                VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT,
+                VK_SHADER_STAGE_VERTEX_BIT
+                    | VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT,
                 nullptr
             },
             {
@@ -167,8 +193,7 @@ bool create_material(const MaterialInfo& mat_info, VkPipeline* pipeline)
         VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
         VK_FALSE
     };
-    if (mat_info.patch_control_points)
-        input_assembly_state.topology = VK_PRIMITIVE_TOPOLOGY_PATCH_LIST;
+    input_assembly_state.topology = static_cast<VkPrimitiveTopology>(mat_info.primitive_topology);
 
     static VkPipelineTessellationStateCreateInfo tessellation_state = {
         VK_STRUCTURE_TYPE_PIPELINE_TESSELLATION_STATE_CREATE_INFO,
@@ -223,8 +248,8 @@ bool create_material(const MaterialInfo& mat_info, VkPipeline* pipeline)
         VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
         nullptr,
         0,          // flags
-        VK_TRUE,    // depthTestEnable
-        VK_TRUE,    // depthWriteEnable
+        VK_FALSE,   // depthTestEnable
+        VK_FALSE,   // depthWriteEnable
         VK_COMPARE_OP_GREATER_OR_EQUAL,
         VK_FALSE,   // depthBoundsTestEnable
         VK_FALSE,   // stencilTestEnable
@@ -233,6 +258,8 @@ bool create_material(const MaterialInfo& mat_info, VkPipeline* pipeline)
         0,          // minDepthBounds
         0           // maxDepthBounds
     };
+    depth_stencil_state.depthTestEnable  = mat_info.depth_test;
+    depth_stencil_state.depthWriteEnable = mat_info.depth_test;
 
     static VkPipelineColorBlendAttachmentState color_blend_att = {
         VK_FALSE,               // blendEnable
@@ -286,7 +313,7 @@ bool create_material(const MaterialInfo& mat_info, VkPipeline* pipeline)
         VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
         &rendering_info,
         0,              // flags
-        num_stages,
+        0,
         shader_stages,
         &vertex_input_state,
         &input_assembly_state,
@@ -304,7 +331,8 @@ bool create_material(const MaterialInfo& mat_info, VkPipeline* pipeline)
         -1              // basePipelineIndex
     };
 
-    pipeline_create_info.layout = sculptor_material_layout;
+    pipeline_create_info.stageCount = num_stages;
+    pipeline_create_info.layout     = sculptor_material_layout;
 
     const VkResult res = CHK(vkCreateGraphicsPipelines(vk_dev,
                                                        VK_NULL_HANDLE,

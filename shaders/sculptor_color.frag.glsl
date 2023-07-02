@@ -5,9 +5,11 @@
 
 #extension GL_GOOGLE_include_directive: require
 
+#include "sculptor_material.glsl"
+
 layout(location = 0) out vec4 out_color;
 
 void main()
 {
-    out_color = vec4(0.9, 0.9, 0.9, 1);
+    out_color = vec4(diffuse_color.xyz, 1);
 }

@@ -15,35 +15,49 @@
 #include "../imgui/imgui.h"
 #include "../imgui/backends/imgui_impl_vulkan.h"
 
+#include <math.h>
+
 const char app_name[] = "Object Editor";
 
 const int gui_config_flags = ImGuiConfigFlags_NavEnableKeyboard
                            | ImGuiConfigFlags_DockingEnable;
 
-enum class ViewType {
-    free_moving,
-    front
-};
+namespace {
 
-struct Viewport {
-    const char*     name;
-    bool            enabled;
-    uint32_t        id;
-    ViewType        view_type;
-    vmath::vec3     camera_pos;
-    float           camera_distance;
-    float           camera_yaw;
-    float           camera_pitch;
-    uint32_t        width;
-    uint32_t        height;
-    Image           color_buffer[max_swapchain_size];
-    Image           depth_buffer[max_swapchain_size];
-    VkDescriptorSet gui_tex[max_swapchain_size];
-};
+    enum class ViewType {
+        free_moving,
+        front
+    };
+
+    struct Viewport {
+        const char*     name;
+        bool            enabled;
+        uint32_t        id;
+        ViewType        view_type;
+        vmath::vec3     camera_pos;
+        float           camera_distance;
+        float           camera_yaw;
+        float           camera_pitch;
+        uint32_t        width;
+        uint32_t        height;
+        Image           color_buffer[max_swapchain_size];
+        Image           depth_buffer[max_swapchain_size];
+        VkDescriptorSet gui_tex[max_swapchain_size];
+    };
+
+    using GridVertex = Sculptor::Geometry::Vertex;
+
+    enum MaterialsForShaders {
+        mat_grid,
+        mat_object_edge,
+        num_materials
+    };
+
+}
 
 static Viewport viewports[] = {
-    { "Front View", true, 0, ViewType::front,       { 0.0f, 0.0f, -2.0f } },
-    { "3D View",    true, 1, ViewType::free_moving, { 0.0f, 0.0f, 0.0f },   0.2f }
+    { "Front View", true, 0, ViewType::front,       { 0.0f, 0.0f, -2.0f }, 4096.0f },
+    { "3D View",    true, 1, ViewType::free_moving, { 0.0f, 0.0f,  0.0f },    0.2f }
 };
 
 // Which viewport has captured mouse
@@ -64,11 +78,15 @@ uint32_t check_device_features()
     return missing_features;
 }
 
-static VkPipeline         sculptor_object_pipeline = VK_NULL_HANDLE;
-static VkPipeline         sculptor_edge_pipeline   = VK_NULL_HANDLE;
-static VkDescriptorSet    desc_set_2               = VK_NULL_HANDLE;
+static VkPipeline         grid_pipeline;
+static VkPipeline         sculptor_object_pipeline;
+static VkPipeline         sculptor_edge_pipeline;
+static VkDescriptorSet    desc_set[3];
 static Sculptor::Geometry patch_geometry;
+static Buffer             materials_buf;
 static Buffer             transforms_buf;
+static Buffer             grid_lines_buf;
+static uint32_t           materials_stride;
 static uint32_t           transforms_stride;
 
 struct Transforms {
@@ -78,7 +96,9 @@ struct Transforms {
     vmath::vec4 proj_w;
 };
 
+static constexpr uint32_t max_grid_lines          = 4096;
 static constexpr uint32_t transforms_per_viewport = 1;
+static constexpr float    int16_scale             = 32767.0f;
 
 static bool create_samplers()
 {
@@ -110,6 +130,26 @@ static bool create_samplers()
     return true;
 }
 
+static bool create_grid_lines_buffer()
+{
+    return grid_lines_buf.allocate(Usage::dynamic,
+                                   max_grid_lines * 2 * max_swapchain_size * sizeof(GridVertex),
+                                   VK_FORMAT_UNDEFINED,
+                                   VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
+}
+
+static bool create_materials_buffer()
+{
+    materials_stride = static_cast<uint32_t>(mstd::align_up(
+                static_cast<VkDeviceSize>(sizeof(ShaderMaterial)),
+                vk_phys_props.properties.limits.minUniformBufferOffsetAlignment));
+
+    return materials_buf.allocate(Usage::dynamic,
+                                  materials_stride * max_swapchain_size * num_materials,
+                                  VK_FORMAT_UNDEFINED,
+                                  VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT);
+}
+
 static bool create_transforms_buffer()
 {
     transforms_stride = static_cast<uint32_t>(mstd::align_up(
@@ -128,15 +168,15 @@ static bool create_descriptor_sets()
         VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
         nullptr,
         VK_NULL_HANDLE,                 // descriptorPool
-        1,                              // descriptorSetCount
-        &sculptor_desc_set_layout[2]    // pSetLayouts
+        2,                              // descriptorSetCount
+        &sculptor_desc_set_layout[1]    // pSetLayouts
     };
 
     {
         static VkDescriptorPoolSize pool_sizes[] = {
             {
                 VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC,
-                1
+                2
             },
             {
                 VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
@@ -148,7 +188,7 @@ static bool create_descriptor_sets()
             VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
             nullptr,
             0, // flags
-            1, // maxSets
+            2, // maxSets
             mstd::array_size(pool_sizes),
             pool_sizes
         };
@@ -157,15 +197,19 @@ static bool create_descriptor_sets()
         if (res != VK_SUCCESS)
             return false;
     }
-
     {
-        const VkResult res = CHK(vkAllocateDescriptorSets(vk_dev, &alloc_info, &desc_set_2));
+        const VkResult res = CHK(vkAllocateDescriptorSets(vk_dev, &alloc_info, &desc_set[1]));
         if (res != VK_SUCCESS)
             return false;
     }
 
     {
-        static VkDescriptorBufferInfo dynamic_buffer_info = {
+        static VkDescriptorBufferInfo materials_buffer_info = {
+            VK_NULL_HANDLE,     // buffer
+            0,                  // offset
+            0                   // range
+        };
+        static VkDescriptorBufferInfo transforms_buffer_info = {
             VK_NULL_HANDLE,     // buffer
             0,                  // offset
             0                   // range
@@ -185,7 +229,19 @@ static bool create_descriptor_sets()
                 1,                                          // descriptorCount
                 VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC,  // descriptorType
                 nullptr,                                    // pImageInfo
-                &dynamic_buffer_info,                       // pBufferInfo
+                &materials_buffer_info,                     // pBufferInfo
+                nullptr                                     // pTexelBufferView
+            },
+            {
+                VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                nullptr,
+                VK_NULL_HANDLE,                             // dstSet
+                0,                                          // dstBinding
+                0,                                          // dstArrayElement
+                1,                                          // descriptorCount
+                VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC,  // descriptorType
+                nullptr,                                    // pImageInfo
+                &transforms_buffer_info,                    // pBufferInfo
                 nullptr                                     // pTexelBufferView
             },
             {
@@ -201,11 +257,16 @@ static bool create_descriptor_sets()
                 nullptr                                     // pTexelBufferView
             }
         };
-        dynamic_buffer_info.buffer = transforms_buf.get_buffer();
-        dynamic_buffer_info.range  = transforms_stride;
-        storage_buffer_info.buffer = patch_geometry.get_faces_buffer();
-        write_desc_sets[0].dstSet  = desc_set_2;
-        write_desc_sets[1].dstSet  = desc_set_2;
+
+        materials_buffer_info.buffer  = materials_buf.get_buffer();
+        materials_buffer_info.range   = materials_stride;
+        transforms_buffer_info.buffer = transforms_buf.get_buffer();
+        transforms_buffer_info.range  = transforms_stride;
+        storage_buffer_info.buffer    = patch_geometry.get_faces_buffer();
+
+        write_desc_sets[0].dstSet     = desc_set[1];
+        write_desc_sets[1].dstSet     = desc_set[2];
+        write_desc_sets[2].dstSet     = desc_set[2];
 
         vkUpdateDescriptorSets(vk_dev,
                                mstd::array_size(write_desc_sets),
@@ -217,12 +278,29 @@ static bool create_descriptor_sets()
     return true;
 }
 
+static void set_material_buf(const MaterialInfo& mat_info, uint32_t mat_id)
+{
+    for (uint32_t i = 0; i < vk_num_swapchain_images; i++) {
+        const uint32_t abs_mat_id = (i * num_materials) + mat_id;
+
+        ShaderMaterial* const material = materials_buf.get_ptr<ShaderMaterial>(abs_mat_id, materials_stride);
+
+        for (uint32_t comp = 0; comp < 3; comp++)
+            material->diffuse_color[comp] = static_cast<float>(mat_info.diffuse_color[comp]) / 255.0f;
+
+        material->diffuse_color[3] = 1.0f;
+    }
+}
+
 bool init_assets()
 {
     if ( ! create_samplers())
         return false;
 
     if ( ! create_material_layouts())
+        return false;
+
+    if ( ! create_materials_buffer())
         return false;
 
     static const VkVertexInputAttributeDescription vertex_attributes[] = {
@@ -234,6 +312,26 @@ bool init_assets()
         }
     };
 
+    static const MaterialInfo grid_info = {
+        {
+            shader_sculptor_simple_vert,
+            shader_sculptor_color_frag
+        },
+        vertex_attributes,
+        mstd::array_size(vertex_attributes),
+        sizeof(GridVertex),
+        VK_PRIMITIVE_TOPOLOGY_LINE_LIST,
+        0, // patch_control_points
+        VK_POLYGON_MODE_FILL,
+        VK_CULL_MODE_NONE,
+        false,               // depth_test
+        { 0x55, 0x55, 0x55 } // diffuse
+    };
+
+    if ( ! create_material(grid_info, &grid_pipeline))
+        return false;
+    set_material_buf(grid_info, mat_grid);
+
     static const MaterialInfo object_mat_info = {
         {
             shader_pass_through_vert,
@@ -241,12 +339,15 @@ bool init_assets()
             shader_bezier_surface_cubic_sculptor_tesc,
             shader_bezier_surface_cubic_sculptor_tese
         },
+        vertex_attributes,
+        mstd::array_size(vertex_attributes),
         sizeof(Sculptor::Geometry::Vertex),
+        VK_PRIMITIVE_TOPOLOGY_PATCH_LIST,
         16, // patch_control_points
         VK_POLYGON_MODE_FILL,
         VK_CULL_MODE_BACK_BIT,
-        mstd::array_size(vertex_attributes),
-        vertex_attributes
+        true,                // depth_test
+        { 0x00, 0x00, 0x00 } // diffuse
     };
 
     if ( ! create_material(object_mat_info, &sculptor_object_pipeline))
@@ -255,19 +356,26 @@ bool init_assets()
     static const MaterialInfo edge_mat_info = {
         {
             shader_pass_through_vert,
-            shader_sculptor_edge_frag,
+            shader_sculptor_color_frag,
             shader_bezier_line_cubic_sculptor_tesc,
             shader_bezier_line_cubic_sculptor_tese
         },
+        vertex_attributes,
+        mstd::array_size(vertex_attributes),
         sizeof(Sculptor::Geometry::Vertex),
+        VK_PRIMITIVE_TOPOLOGY_PATCH_LIST,
         4, // patch_control_points
         VK_POLYGON_MODE_LINE,
         VK_CULL_MODE_NONE,
-        mstd::array_size(vertex_attributes),
-        vertex_attributes
+        true,                // depth_test
+        { 0xEE, 0xEE, 0xEE } // diffuse
     };
 
     if ( ! create_material(edge_mat_info, &sculptor_edge_pipeline))
+        return false;
+    set_material_buf(edge_mat_info, mat_object_edge);
+
+    if ( ! materials_buf.flush())
         return false;
 
     if ( ! patch_geometry.allocate())
@@ -276,6 +384,9 @@ bool init_assets()
     patch_geometry.set_cube();
 
     if ( ! create_transforms_buffer())
+        return false;
+
+    if ( ! create_grid_lines_buffer())
         return false;
 
     if ( ! create_descriptor_sets())
@@ -540,8 +651,117 @@ static bool create_gui_frame(uint32_t image_idx)
     return true;
 }
 
-static bool draw_grid(const Viewport& viewport, VkCommandBuffer buf)
+static bool draw_grid(const Viewport& viewport, uint32_t image_idx, VkCommandBuffer buf, uint32_t transforms_dyn_offs)
 {
+    if (viewport.view_type != ViewType::front)
+        return true;
+
+    const uint32_t sub_buf_stride = max_grid_lines * 2 * sizeof(GridVertex);
+
+    auto     vertices  = grid_lines_buf.get_ptr<GridVertex>(image_idx, sub_buf_stride);
+    uint32_t num_lines = 0;
+
+    const float half_seen_height = viewport.camera_distance * 0.5f;
+    const float half_seen_width  = half_seen_height * static_cast<float>(viewport.width)
+                                 / static_cast<float>(viewport.height);
+
+    int32_t min_x = static_cast<int32_t>(floorf(viewport.camera_pos.x * int16_scale - half_seen_width));
+    int32_t max_x = static_cast<int32_t>(ceilf( viewport.camera_pos.x * int16_scale + half_seen_width));
+    int32_t min_y = static_cast<int32_t>(floorf(viewport.camera_pos.y * int16_scale - half_seen_height));
+    int32_t max_y = static_cast<int32_t>(ceilf( viewport.camera_pos.y * int16_scale + half_seen_height));
+
+    const int32_t     seen_height     = max_y - min_y;
+    constexpr int32_t est_horiz_lines = 16;
+    int32_t           vert_dist       = seen_height / est_horiz_lines;
+    if (vert_dist == 0)
+        vert_dist = 1;
+
+    // Find the highest power of two less or equal than vert_dist
+    for (;;) {
+        // Clear lowermost set bit
+        const int32_t new_vert_dist = vert_dist & (vert_dist - 1);
+        if ( ! new_vert_dist)
+            break;
+        vert_dist = new_vert_dist;
+    }
+
+    const int16_t minor_step = (vert_dist < 4096) ? static_cast<int16_t>(vert_dist) : 4096;
+
+    min_x -= min_x % minor_step + minor_step;
+    max_x += (max_x % minor_step) + minor_step;
+    min_y -= min_y % minor_step + minor_step;
+    max_y += (max_y % minor_step) + minor_step;
+
+    for (int32_t x = min_x; x <= max_x; x += minor_step) {
+        assert(num_lines < max_grid_lines);
+
+        vertices[0].pos[0] = static_cast<int16_t>(x);
+        vertices[0].pos[1] = static_cast<int16_t>(min_y);
+        vertices[0].pos[2] = 0;
+
+        vertices[1].pos[0] = static_cast<int16_t>(x);
+        vertices[1].pos[1] = static_cast<int16_t>(max_y);
+        vertices[1].pos[2] = 0;
+
+        vertices += 2;
+        ++num_lines;
+    }
+
+    for (int32_t y = min_y; y <= max_y; y += minor_step) {
+        assert(num_lines < max_grid_lines);
+
+        vertices[0].pos[0] = static_cast<int16_t>(min_x);
+        vertices[0].pos[1] = static_cast<int16_t>(y);
+        vertices[0].pos[2] = 0;
+
+        vertices[1].pos[0] = static_cast<int16_t>(max_x);
+        vertices[1].pos[1] = static_cast<int16_t>(y);
+        vertices[1].pos[2] = 0;
+
+        vertices += 2;
+        ++num_lines;
+    }
+
+    if ( ! grid_lines_buf.flush(image_idx, sub_buf_stride))
+        return false;
+
+    vkCmdBindPipeline(buf, VK_PIPELINE_BIND_POINT_GRAPHICS, grid_pipeline);
+
+    send_viewport_and_scissor(buf,
+                              static_cast<float>(viewport.width) / static_cast<float>(viewport.height),
+                              viewport.width,
+                              viewport.height);
+
+    const uint32_t grid_mat_id = (image_idx * num_materials) + mat_grid;
+
+    uint32_t dynamic_offsets[] = {
+        grid_mat_id * materials_stride,
+        transforms_dyn_offs
+    };
+
+    vkCmdBindDescriptorSets(buf,
+                            VK_PIPELINE_BIND_POINT_GRAPHICS,
+                            sculptor_material_layout,
+                            1,          // firstSet
+                            2,          // descriptorSetCount
+                            &desc_set[1],
+                            mstd::array_size(dynamic_offsets),
+                            dynamic_offsets);
+
+    const VkDeviceSize vb_offset = image_idx * sub_buf_stride;
+
+    vkCmdBindVertexBuffers(buf,
+                           0, // firstBinding
+                           1, // bindingCount
+                           &grid_lines_buf.get_buffer(),
+                           &vb_offset);
+
+    vkCmdDraw(buf,
+              num_lines * 2,
+              num_lines,
+              0,  // firstVertex
+              0); // firstInstance
+
     return true;
 }
 
@@ -584,9 +804,8 @@ static bool set_patch_transforms(const Viewport& viewport, uint32_t transform_id
         transforms->proj_w = vmath::vec4(0.0f, 0.0f, 1.0f, 0.0f);
     }
     else {
-        constexpr float view_height = 0.1f;
         transforms->proj = vmath::ortho_vector(aspect,
-                                               view_height,
+                                               viewport.camera_distance / int16_scale,
                                                0.01f,   // near_plane
                                                3.0f);   // far_plane
         transforms->proj_w = vmath::vec4(0.0f, 0.0f, 0.0f, 1.0f);
@@ -597,18 +816,21 @@ static bool set_patch_transforms(const Viewport& viewport, uint32_t transform_id
 
 static bool render_view(const Viewport& viewport, uint32_t image_idx, VkCommandBuffer buf)
 {
-    if ( ! draw_grid(viewport, buf))
-        return false;
+    const uint32_t edge_mat_id = (image_idx * num_materials) + mat_object_edge;
 
     const uint32_t transform_id_base = (image_idx * mstd::array_size(viewports) + viewport.id) * transforms_per_viewport;
 
     const uint32_t transform_id = transform_id_base + 0;
 
     uint32_t dynamic_offsets[] = {
+        edge_mat_id * materials_stride,
         transform_id * transforms_stride
     };
 
     if ( ! set_patch_transforms(viewport, transform_id))
+        return false;
+
+    if ( ! draw_grid(viewport, image_idx, buf, transform_id * transforms_stride))
         return false;
 
     for (uint32_t i = 0; i < 2; i++) {
@@ -623,9 +845,9 @@ static bool render_view(const Viewport& viewport, uint32_t image_idx, VkCommandB
         vkCmdBindDescriptorSets(buf,
                                 VK_PIPELINE_BIND_POINT_GRAPHICS,
                                 sculptor_material_layout,
-                                2,          // firstSet
-                                1,          // descriptorSetCount
-                                &desc_set_2,
+                                1,          // firstSet
+                                2,          // descriptorSetCount
+                                &desc_set[1],
                                 mstd::array_size(dynamic_offsets),
                                 dynamic_offsets);
 
