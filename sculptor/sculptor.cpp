@@ -534,7 +534,8 @@ static bool create_gui_frame(uint32_t image_idx)
     ImGui::NewFrame();
 
     const ImVec2 abs_mouse_pos = ImGui::GetMousePos();
-    const bool   ctrl_down     = ImGui::IsKeyDown(ImGuiKey_LeftCtrl)    || ImGui::IsKeyDown(ImGuiKey_RightCtrl);
+    const bool   ctrl_down     = ImGui::IsKeyDown(ImGuiKey_LeftCtrl) || ImGui::IsKeyDown(ImGuiKey_RightCtrl);
+    const float  wheel_delta   = io.MouseWheel;
 
     if ( ! ctrl_down)
         viewport_mouse = -1;
@@ -637,6 +638,18 @@ static bool create_gui_frame(uint32_t image_idx)
                 default:
                     assert(0);
             }
+        }
+
+        if ((wheel_delta != 0.0f) && (viewport.view_type != ViewType::free_moving)) {
+            viewport.camera_distance += 1024.0f * wheel_delta;
+
+            constexpr float min_dist = 128.0f;
+            constexpr float max_dist = 65536.0f;
+
+            if (viewport.camera_distance < min_dist)
+                viewport.camera_distance = min_dist;
+            else if (viewport.camera_distance > max_dist)
+                viewport.camera_distance = max_dist;
         }
 
         ImGui::End();
