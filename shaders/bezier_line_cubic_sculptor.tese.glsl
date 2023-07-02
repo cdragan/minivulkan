@@ -22,7 +22,5 @@ void main()
 
     const float depth_bias = 0.0001f;
 
-    gl_Position = vec4(view_pos.xy * proj.xy,
-                       view_pos.z * proj.z + proj.w + depth_bias,
-                       view_pos.z * proj_w.z + proj_w.w);
+    gl_Position = projection(view_pos.xyz) + vec4(0, 0, depth_bias, 0);
 }
