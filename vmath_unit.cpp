@@ -1118,7 +1118,7 @@ int main()
 
     // projection
     {
-        const vmath::mat4 m = vmath::projection(1, vmath::pi_half, 1, 5, 0);
+        const vmath::mat4 m = vmath::projection(1, vmath::pi_half, 1, 5);
 
         TEST(is_near(m.a00, 1, 0.005f));
         TEST(m.a01 == 0);
@@ -1140,7 +1140,7 @@ int main()
 
     // projection_vector
     {
-        const vmath::vec4 v = vmath::projection_vector(1, vmath::pi_half, 1, 5, 0);
+        const vmath::vec4 v = vmath::projection_vector(1, vmath::pi_half, 1, 5);
 
         TEST(is_near(v.x, 1, 0.005f));
         TEST(is_near(v.y, 1, 0.005f));
