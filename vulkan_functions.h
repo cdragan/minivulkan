@@ -80,6 +80,7 @@
     X(vkCreateImage) \
     X(vkDestroyImage) \
     X(vkGetImageMemoryRequirements) \
+    X(vkGetImageSubresourceLayout) \
     X(vkBindImageMemory) \
     X(vkCreateImageView) \
     X(vkDestroyImageView) \
@@ -115,6 +116,7 @@
     X(vkCmdDrawIndexed) \
     X(vkCmdPipelineBarrier) \
     X(vkCmdCopyBuffer) \
+    X(vkCmdCopyImage) \
     X(vkCmdDispatch)
 
 extern PFN_vkVoidFunction vk_lib_functions[];
@@ -184,6 +186,7 @@ enum e_device_functions {
 #define vkCreateImage                             SELECT_VK_FUNCTION(device,   vkCreateImage)
 #define vkDestroyImage                            SELECT_VK_FUNCTION(device,   vkDestroyImage)
 #define vkGetImageMemoryRequirements              SELECT_VK_FUNCTION(device,   vkGetImageMemoryRequirements)
+#define vkGetImageSubresourceLayout               SELECT_VK_FUNCTION(device,   vkGetImageSubresourceLayout)
 #define vkBindImageMemory                         SELECT_VK_FUNCTION(device,   vkBindImageMemory)
 #define vkCreateImageView                         SELECT_VK_FUNCTION(device,   vkCreateImageView)
 #define vkDestroyImageView                        SELECT_VK_FUNCTION(device,   vkDestroyImageView)
@@ -219,4 +222,5 @@ enum e_device_functions {
 #define vkCmdDrawIndexed                          SELECT_VK_FUNCTION(device,   vkCmdDrawIndexed)
 #define vkCmdPipelineBarrier                      SELECT_VK_FUNCTION(device,   vkCmdPipelineBarrier)
 #define vkCmdCopyBuffer                           SELECT_VK_FUNCTION(device,   vkCmdCopyBuffer)
+#define vkCmdCopyImage                            SELECT_VK_FUNCTION(device,   vkCmdCopyImage)
 #define vkCmdDispatch                             SELECT_VK_FUNCTION(device,   vkCmdDispatch)
