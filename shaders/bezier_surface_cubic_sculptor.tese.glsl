@@ -12,6 +12,7 @@ layout(quads, ccw, equal_spacing) in;
 
 layout(location = 0) out vec3 out_pos;
 layout(location = 1) out vec3 out_normal;
+layout(location = 2) out uint out_object_id;
 
 void main()
 {
@@ -42,5 +43,7 @@ void main()
     const vec3 dv = bezier_derivative_cubic(p[0], p[1], p[2], p[3], gl_TessCoord.x);
 
     const vec3 obj_normal = cross(dv, du);
-    out_normal = obj_normal * mat3(model_view_normal);
+    out_normal = normalize(obj_normal) * mat3(model_view_normal);
+
+    out_object_id = gl_PrimitiveID;
 }

@@ -10,6 +10,8 @@
 
 layout(quads, ccw, equal_spacing) in;
 
+layout(location = 2) out uint out_object_id;
+
 void main()
 {
     const vec3 obj_pos = bezier_curve_cubic(gl_in[0].gl_Position.xyz,
@@ -23,4 +25,6 @@ void main()
     const float depth_bias = 0.0001f;
 
     gl_Position = projection(view_pos.xyz) + vec4(0, 0, depth_bias, 0);
+
+    out_object_id = gl_PrimitiveID;
 }
