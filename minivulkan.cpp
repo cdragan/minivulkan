@@ -1191,7 +1191,7 @@ static void update_time_stats(uint64_t draw_start_time_ms)
 
         const uint64_t stat_time = draw_end_time_ms - stat_start_time_ms;
         if (stat_time > 1000) {
-            const double   fps              = 1000.0 * num_frames / stat_time;
+            const double   fps              = 1000.0 * num_frames / static_cast<double>(stat_time);
             const unsigned avg_draw_time_ms = static_cast<unsigned>(total_draw_time_ms / num_frames);
             const unsigned load             = static_cast<unsigned>(100 * total_draw_time_ms / stat_time);
 

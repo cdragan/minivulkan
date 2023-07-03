@@ -13,11 +13,13 @@ MemoryAllocator mem_mgr;
 
 static VkPhysicalDeviceMemoryProperties vk_mem_props;
 
+#ifndef NDEBUG
 static unsigned in_mb(VkDeviceSize size)
 {
     constexpr VkDeviceSize one_mb = 1024u * 1024u;
     return static_cast<unsigned>(mstd::align_up(size, one_mb) / one_mb);
 }
+#endif
 
 bool MemoryHeap::allocate_heap(int req_memory_type, VkDeviceSize size)
 {

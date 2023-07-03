@@ -146,7 +146,7 @@ static bool create_window(Window* w)
                         XCB_ATOM_WM_NAME,
                         XCB_ATOM_STRING,
                         8,
-                        strlen(app_name),
+                        static_cast<uint32_t>(strlen(app_name)),
                         app_name);
 
     if (full_screen)
