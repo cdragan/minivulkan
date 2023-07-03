@@ -144,6 +144,18 @@ bool Image::allocate(const ImageInfo& image_info)
     heap_offset = offset;
     alloc_size  = memory_reqs.size;
 
+    if (host_access) {
+        VkSubresourceLayout             subresource_layout;
+        static const VkImageSubresource select_subresource = {
+            VK_IMAGE_ASPECT_COLOR_BIT,
+            0, // mipLevel
+            0  // arrayLayer
+        };
+        vkGetImageSubresourceLayout(vk_dev, image, &select_subresource, &subresource_layout);
+
+        pitch = static_cast<uint32_t>(subresource_layout.rowPitch);
+    }
+
     return true;
 }
 

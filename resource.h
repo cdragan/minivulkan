@@ -72,6 +72,7 @@ class Image: public Resource {
 
         const VkImage& get_image() const { return image; }
         VkImageView    get_view()  const { return view; }
+        uint32_t       get_pitch() const { return pitch; }
 
         bool allocate(const ImageInfo& image_info);
         void destroy();
@@ -104,6 +105,7 @@ class Image: public Resource {
         VkImageAspectFlags aspect     = VK_IMAGE_ASPECT_COLOR_BIT;
         Usage              heap_usage = Usage::fixed;
         uint32_t           mip_levels = 0;
+        uint32_t           pitch      = 0;
 };
 
 class Buffer: public Resource {
