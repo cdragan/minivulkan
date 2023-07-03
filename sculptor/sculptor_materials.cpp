@@ -71,7 +71,8 @@ bool create_material_layouts()
                 VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
                 1,
                 VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT
-                    | VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT,
+                    | VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT
+                    | VK_SHADER_STAGE_FRAGMENT_BIT,
                 nullptr
             }
         };
@@ -297,15 +298,21 @@ bool create_material(const MaterialInfo& mat_info, VkPipeline* pipeline)
         dynamic_states
     };
 
+    static VkFormat color_format = VK_FORMAT_UNDEFINED;
+
     static VkPipelineRenderingCreateInfo rendering_info = {
         VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO,
         nullptr,
         0,                      // viewMask
         1,                      // colorAttachmentCount
-        &swapchain_create_info.imageFormat,
+        &color_format,
         VK_FORMAT_UNDEFINED,    // depthAttachmentFormat
         VK_FORMAT_UNDEFINED     // stencilAttachmentFormat
     };
+
+    color_format = (mat_info.color_format == VK_FORMAT_UNDEFINED)
+        ? swapchain_create_info.imageFormat
+        : static_cast<VkFormat>(mat_info.color_format);
 
     rendering_info.depthAttachmentFormat = vk_depth_format;
 

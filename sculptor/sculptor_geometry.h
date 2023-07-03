@@ -16,12 +16,16 @@ class Geometry {
 
         struct FaceData {
             uint32_t material_id;
+            uint32_t state;
         };
 
         struct FacesBuf {
             int32_t  tess_level[4];
             FaceData face_data[1];
         };
+
+        static constexpr uint32_t max_edges = 0x10000U;
+        static constexpr uint32_t max_faces = 0x10000U / 16U;
 
         bool allocate();
         void set_dirty() { dirty = true; }
@@ -45,6 +49,7 @@ class Geometry {
         const VkBuffer& get_faces_buffer() const { return faces.get_buffer(); }
 
         void set_cube();
+        void set_hovered_face(uint32_t face_id);
 
     private:
         Buffer   vertices;
@@ -54,6 +59,8 @@ class Geometry {
         Buffer   faces;
         Buffer   host_faces;
 
+        uint32_t last_buffer         = 0;
+        uint32_t hovered_face_id     = ~0U;
         uint32_t num_vertices        = 0;
         uint32_t num_indices         = 0;
         uint32_t num_edge_indices    = 0;
@@ -63,7 +70,6 @@ class Geometry {
         bool     dirty               = true;
 
         using Edge = uint32_t[4];
-        static constexpr uint32_t max_edges = 0x10000U;
         Edge obj_edges[max_edges] = { };
 
         struct Face {
@@ -71,8 +77,8 @@ class Geometry {
             uint32_t ctrl_vertices[4];
             uint32_t material_id;
         };
-        static constexpr uint32_t max_faces = 0x10000U / 16U;
         Face obj_faces[max_faces] = { };
+        uint32_t get_face_state(uint32_t face_id, const Face& face) const;
 };
 
 }

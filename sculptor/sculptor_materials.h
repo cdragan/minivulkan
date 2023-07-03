@@ -15,6 +15,7 @@ struct MaterialInfo {
     const VkVertexInputAttributeDescription* vertex_attributes;
     uint8_t                                  num_vertex_attributes;
     uint8_t                                  vertex_stride;
+    uint8_t                                  color_format;
     uint8_t                                  primitive_topology;
     uint8_t                                  patch_control_points;
     uint8_t                                  polygon_mode;

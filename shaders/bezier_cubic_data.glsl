@@ -3,6 +3,7 @@
 
 struct face_data {
     uint material_id;
+    uint state; // 0: default, 1: hovered, 2: selected
 };
 
 layout(set = 2, binding = 1) buffer faces_data {

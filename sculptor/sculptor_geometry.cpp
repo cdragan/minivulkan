@@ -5,46 +5,50 @@
 
 #include "../mstdc.h"
 
-constexpr uint32_t max_vertices = 65536;
-constexpr uint32_t max_indices  = 65536;
+constexpr uint32_t max_vertices    = 65536;
+constexpr uint32_t max_indices     = 65536;
+constexpr uint32_t num_host_copies = 3;
+constexpr uint32_t vertices_stride = max_vertices * sizeof(Sculptor::Geometry::Vertex);
+constexpr uint32_t indices_stride  = max_indices * sizeof(uint16_t);
+constexpr uint32_t faces_stride    = sizeof(Sculptor::Geometry::FacesBuf) + (Sculptor::Geometry::max_faces - 1) * sizeof(Sculptor::Geometry::FaceData);
 
 bool Sculptor::Geometry::allocate()
 {
     if ( ! vertices.allocate(Usage::fixed,
-                             max_vertices * sizeof(Vertex),
+                             vertices_stride,
                              VK_FORMAT_UNDEFINED,
                              VK_BUFFER_USAGE_VERTEX_BUFFER_BIT |
                                 VK_BUFFER_USAGE_TRANSFER_DST_BIT))
         return false;
 
     if ( ! host_vertices.allocate(Usage::host_only,
-                                  max_vertices * sizeof(Vertex),
+                                  vertices_stride * num_host_copies,
                                   VK_FORMAT_UNDEFINED,
                                   VK_BUFFER_USAGE_TRANSFER_SRC_BIT))
         return false;
 
     if ( ! indices.allocate(Usage::fixed,
-                            max_indices * sizeof(uint16_t),
+                            indices_stride,
                             VK_FORMAT_UNDEFINED,
                             VK_BUFFER_USAGE_INDEX_BUFFER_BIT |
                                 VK_BUFFER_USAGE_TRANSFER_DST_BIT))
         return false;
 
     if ( ! host_indices.allocate(Usage::host_only,
-                                 max_indices * sizeof(uint16_t),
+                                 indices_stride * num_host_copies,
                                  VK_FORMAT_UNDEFINED,
                                  VK_BUFFER_USAGE_TRANSFER_SRC_BIT))
         return false;
 
     if ( ! faces.allocate(Usage::fixed,
-                          sizeof(FacesBuf) + (max_faces - 1) * sizeof(FaceData),
+                          faces_stride,
                           VK_FORMAT_UNDEFINED,
                           VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
                               VK_BUFFER_USAGE_TRANSFER_DST_BIT))
         return false;
 
     if ( ! host_faces.allocate(Usage::host_only,
-                               sizeof(FacesBuf) + (max_faces - 1) * sizeof(FaceData),
+                               faces_stride * num_host_copies,
                                VK_FORMAT_UNDEFINED,
                                    VK_BUFFER_USAGE_TRANSFER_SRC_BIT))
         return false;
@@ -52,10 +56,28 @@ bool Sculptor::Geometry::allocate()
     return true;
 }
 
+void Sculptor::Geometry::set_hovered_face(uint32_t face_id)
+{
+    if (face_id != hovered_face_id) {
+        hovered_face_id = face_id;
+        dirty = true;
+    }
+}
+
+uint32_t Sculptor::Geometry::get_face_state(uint32_t face_id, const Face& face) const
+{
+    if (face_id == hovered_face_id)
+        return 1;
+
+    return 0;
+}
+
 bool Sculptor::Geometry::send_to_gpu(VkCommandBuffer cmd_buf)
 {
     if ( ! dirty)
         return true;
+
+    last_buffer = (last_buffer + 1) % num_host_copies;
 
     static VkBufferCopy copy_region = {
         0, // srcOffset
@@ -64,22 +86,24 @@ bool Sculptor::Geometry::send_to_gpu(VkCommandBuffer cmd_buf)
     };
 
     if (num_vertices) {
-        copy_region.size = num_vertices * sizeof(Vertex);
+        copy_region.srcOffset = 0;
+        copy_region.size      = num_vertices * sizeof(Vertex);
 
         vkCmdCopyBuffer(cmd_buf, host_vertices.get_buffer(), vertices.get_buffer(), 1, &copy_region);
     }
 
-    FacesBuf* const faces_ptr = host_faces.get_ptr<FacesBuf>();
+    FacesBuf* const faces_ptr = host_faces.get_ptr<FacesBuf>(last_buffer, faces_stride);
     faces_ptr->tess_level[0] = 12;
 
     num_indices = 0;
-    uint16_t* const indices_ptr = host_indices.get_ptr<uint16_t>();
+    uint16_t* const indices_ptr = host_indices.get_ptr<uint16_t>(last_buffer, indices_stride);
     for (uint32_t i_face = 0; i_face < num_faces; i_face++) {
         assert(num_indices + 16 <= max_indices);
 
         const Face& face = obj_faces[i_face];
 
         faces_ptr->face_data[i_face].material_id = face.material_id;
+        faces_ptr->face_data[i_face].state       = get_face_state(i_face, face);
 
         static const uint32_t idx_map[] = {
              0,  1,  2,  3,
@@ -134,13 +158,15 @@ bool Sculptor::Geometry::send_to_gpu(VkCommandBuffer cmd_buf)
     }
 
     if (num_indices + num_edge_indices) {
-        copy_region.size = (num_indices + num_edge_indices) * sizeof(Vertex);
+        copy_region.srcOffset = last_buffer * indices_stride;
+        copy_region.size      = (num_indices + num_edge_indices) * sizeof(Vertex);
 
         vkCmdCopyBuffer(cmd_buf, host_indices.get_buffer(), indices.get_buffer(), 1, &copy_region);
     }
 
     if (num_faces) {
-        copy_region.size = sizeof(FacesBuf) + (num_faces - 1) * sizeof(FaceData);
+        copy_region.srcOffset = last_buffer * faces_stride;
+        copy_region.size      = sizeof(FacesBuf) + (num_faces - 1) * sizeof(FaceData);
 
         vkCmdCopyBuffer(cmd_buf, host_faces.get_buffer(), faces.get_buffer(), 1, &copy_region);
     }
@@ -424,7 +450,7 @@ void Sculptor::Geometry::render(VkCommandBuffer cmd_buf)
 
     vkCmdDrawIndexed(cmd_buf,
                      num_indices,
-                     num_faces,
+                     1,
                      0,  // firstVertex
                      0,  // vertexOffset
                      0); // firstInstance
@@ -446,7 +472,7 @@ void Sculptor::Geometry::render_edges(VkCommandBuffer cmd_buf)
 
     vkCmdDrawIndexed(cmd_buf,
                      num_edge_indices,
-                     num_edges,
+                     1,
                      0,  // firstVertex
                      0,  // vertexOffset
                      0); // firstInstance

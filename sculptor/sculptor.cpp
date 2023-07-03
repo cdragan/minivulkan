@@ -29,20 +29,38 @@ namespace {
         front
     };
 
+    struct MouseSelection {
+        bool     is_active;
+        uint32_t x;
+        uint32_t y;
+        uint32_t object_id;
+    };
+
     struct Viewport {
         const char*     name;
         bool            enabled;
         uint32_t        id;
         ViewType        view_type;
         vmath::vec3     camera_pos;
-        float           camera_distance;
+        union {
+            float       camera_distance;
+            float       view_height;
+        };
         float           camera_yaw;
         float           camera_pitch;
+        MouseSelection  selection;
+
+        // Rendered viewport image, sampled as texture by ImGui
         uint32_t        width;
         uint32_t        height;
         Image           color_buffer[max_swapchain_size];
         Image           depth_buffer[max_swapchain_size];
         VkDescriptorSet gui_tex[max_swapchain_size];
+
+        // Small images used for querying selection under mouse cursor
+        Image           select_query[max_swapchain_size];
+        Image           select_query_host[max_swapchain_size];
+        bool            select_query_pending[max_swapchain_size];
     };
 
     using GridVertex = Sculptor::Geometry::Vertex;
@@ -56,8 +74,8 @@ namespace {
 }
 
 static Viewport viewports[] = {
-    { "Front View", true, 0, ViewType::front,       { 0.0f, 0.0f, -2.0f }, 4096.0f },
-    { "3D View",    true, 1, ViewType::free_moving, { 0.0f, 0.0f,  0.0f },    0.2f }
+    { "Front View", true, 0, ViewType::front,       { 0.0f, 0.0f, -2.0f }, { 4096.0f } },
+    { "3D View",    true, 1, ViewType::free_moving, { 0.0f, 0.0f,  0.0f }, {    0.2f } }
 };
 
 // Which viewport has captured mouse
@@ -80,6 +98,7 @@ uint32_t check_device_features()
 
 static VkPipeline         grid_pipeline;
 static VkPipeline         sculptor_object_pipeline;
+static VkPipeline         sculptor_object_id_pipeline;
 static VkPipeline         sculptor_edge_pipeline;
 static VkDescriptorSet    desc_set[3];
 static Sculptor::Geometry patch_geometry;
@@ -99,6 +118,8 @@ struct Transforms {
 static constexpr uint32_t max_grid_lines          = 4096;
 static constexpr uint32_t transforms_per_viewport = 1;
 static constexpr float    int16_scale             = 32767.0f;
+static constexpr uint32_t select_query_range      = 5;
+static constexpr uint32_t select_mid_point        = (select_query_range >> 1) + 1;
 
 static bool create_samplers()
 {
@@ -320,6 +341,7 @@ bool init_assets()
         vertex_attributes,
         mstd::array_size(vertex_attributes),
         sizeof(GridVertex),
+        VK_FORMAT_UNDEFINED,
         VK_PRIMITIVE_TOPOLOGY_LINE_LIST,
         0, // patch_control_points
         VK_POLYGON_MODE_FILL,
@@ -342,6 +364,7 @@ bool init_assets()
         vertex_attributes,
         mstd::array_size(vertex_attributes),
         sizeof(Sculptor::Geometry::Vertex),
+        VK_FORMAT_UNDEFINED,
         VK_PRIMITIVE_TOPOLOGY_PATCH_LIST,
         16, // patch_control_points
         VK_POLYGON_MODE_FILL,
@@ -363,6 +386,7 @@ bool init_assets()
         vertex_attributes,
         mstd::array_size(vertex_attributes),
         sizeof(Sculptor::Geometry::Vertex),
+        VK_FORMAT_UNDEFINED,
         VK_PRIMITIVE_TOPOLOGY_PATCH_LIST,
         4, // patch_control_points
         VK_POLYGON_MODE_LINE,
@@ -376,6 +400,28 @@ bool init_assets()
     set_material_buf(edge_mat_info, mat_object_edge);
 
     if ( ! materials_buf.flush())
+        return false;
+
+    static const MaterialInfo object_id_info = {
+        {
+            shader_pass_through_vert,
+            shader_sculptor_object_id_frag,
+            shader_bezier_surface_cubic_sculptor_tesc,
+            shader_bezier_surface_cubic_sculptor_tese
+        },
+        vertex_attributes,
+        mstd::array_size(vertex_attributes),
+        sizeof(Sculptor::Geometry::Vertex),
+        VK_FORMAT_R32_UINT,
+        VK_PRIMITIVE_TOPOLOGY_PATCH_LIST,
+        16, // patch_control_points
+        VK_POLYGON_MODE_FILL,
+        VK_CULL_MODE_BACK_BIT,
+        true,                // depth_test
+        { 0x00, 0x00, 0x00 } // diffuse
+    };
+
+    if ( ! create_material(object_id_info, &sculptor_object_id_pipeline))
         return false;
 
     if ( ! patch_geometry.allocate())
@@ -409,6 +455,7 @@ static void free_viewport_images()
             for (uint32_t i_img = 0; i_img < max_swapchain_size; i_img++) {
                 viewport.color_buffer[i_img].destroy();
                 viewport.depth_buffer[i_img].destroy();
+                viewport.select_query[i_img].destroy();
             }
         }
 
@@ -475,10 +522,42 @@ static bool allocate_viewports()
             depth_info.height = viewport.height;
             depth_info.format = vk_depth_format;
 
+            static ImageInfo select_query_info {
+                0, // width
+                0, // height
+                VK_FORMAT_R32_UINT,
+                1, // mip_levels
+                VK_IMAGE_ASPECT_COLOR_BIT,
+                VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+                Usage::device_temporary
+            };
+
+            select_query_info.width  = viewport.width;
+            select_query_info.height = viewport.height;
+
+            static ImageInfo select_query_host_info {
+                0, // width
+                0, // height
+                VK_FORMAT_R32_UINT,
+                1, // mip_levels
+                VK_IMAGE_ASPECT_COLOR_BIT,
+                VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+                Usage::host_only
+            };
+
+            select_query_host_info.width  = select_query_range;
+            select_query_host_info.height = select_query_range;
+
             if ( ! viewport.color_buffer[i_img].allocate(color_info))
                 return false;
 
             if ( ! viewport.depth_buffer[i_img].allocate(depth_info))
+                return false;
+
+            if ( ! viewport.select_query[i_img].allocate(select_query_info))
+                return false;
+
+            if ( ! viewport.select_query_host[i_img].get_view() && ! viewport.select_query_host[i_img].allocate(select_query_host_info))
                 return false;
 
             if (viewport.gui_tex[i_img]) {
@@ -522,6 +601,39 @@ static bool allocate_viewports()
         viewports_allocated = true;
 
     return true;
+}
+
+static void read_last_selection(Viewport& viewport, uint32_t image_idx)
+{
+    if (viewport.select_query_pending[image_idx]) {
+
+        viewport.select_query_pending[image_idx] = false;
+
+        const uint32_t* const ptr = viewport.select_query_host[image_idx].get_ptr<uint32_t>();
+
+        // TODO invalidate cache for non-coherent host surfaces
+
+        const uint32_t pitch = viewport.select_query_host[image_idx].get_pitch();
+
+        const uint32_t center_object_id = ptr[(select_mid_point * pitch / sizeof(uint32_t)) + select_mid_point];
+
+        if (center_object_id) {
+            viewport.selection.object_id = center_object_id;
+            return;
+        }
+
+        for (uint32_t y = 0; y < select_query_range; y++) {
+            for (uint32_t x = 0; x < select_query_range; x++) {
+                const uint32_t object_id = ptr[(y * pitch / sizeof(uint32_t)) + x];
+                if (object_id) {
+                    viewport.selection.object_id = object_id;
+                    return;
+                }
+            }
+        }
+    }
+
+    viewport.selection.object_id = 0;
 }
 
 static bool create_gui_frame(uint32_t image_idx)
@@ -598,9 +710,6 @@ static bool create_gui_frame(uint32_t image_idx)
         ImGui::Begin(viewport.name, &viewport.enabled, ImGuiWindowFlags_NoScrollbar);
         ImGui::PopStyleVar();
 
-        //const ImVec2 abs_window_pos = ImGui::GetItemRectMin();
-        //const ImVec2 rel_mouse_pos  = ImVec2(abs_mouse_pos.x - abs_window_pos.x, abs_mouse_pos.y - abs_window_pos.y);
-
         {
             const ImVec2 content_size = ImGui::GetContentRegionAvail();
 
@@ -615,6 +724,18 @@ static bool create_gui_frame(uint32_t image_idx)
                          ImVec2{static_cast<float>(viewport.width),
                                 static_cast<float>(viewport.height)});
         }
+
+        const ImVec2 abs_window_pos  = ImGui::GetItemRectMin();
+        const ImVec2 rel_mouse_pos   = ImVec2(abs_mouse_pos.x - abs_window_pos.x, abs_mouse_pos.y - abs_window_pos.y);
+        const ImVec2 window_size     = ImGui::GetItemRectSize();
+        viewport.selection.is_active = ImGui::IsItemHovered() &&
+                                       (rel_mouse_pos.x >= select_mid_point) && (rel_mouse_pos.y >= select_mid_point) &&
+                                       (rel_mouse_pos.x < window_size.x - select_mid_point) &&
+                                       (rel_mouse_pos.y < window_size.y - select_mid_point);
+        viewport.selection.x         = static_cast<uint32_t>(rel_mouse_pos.x);
+        viewport.selection.y         = static_cast<uint32_t>(rel_mouse_pos.y);
+
+        read_last_selection(viewport, image_idx);
 
         if (viewport_mouse == -1 && ctrl_down && ImGui::IsItemHovered())
             viewport_mouse = static_cast<int>(viewport.id);
@@ -641,15 +762,15 @@ static bool create_gui_frame(uint32_t image_idx)
         }
 
         if ((wheel_delta != 0.0f) && (viewport.view_type != ViewType::free_moving)) {
-            viewport.camera_distance += 1024.0f * wheel_delta;
+            viewport.view_height += 1024.0f * wheel_delta;
 
             constexpr float min_dist = 128.0f;
             constexpr float max_dist = 65536.0f;
 
-            if (viewport.camera_distance < min_dist)
-                viewport.camera_distance = min_dist;
-            else if (viewport.camera_distance > max_dist)
-                viewport.camera_distance = max_dist;
+            if (viewport.view_height < min_dist)
+                viewport.view_height = min_dist;
+            else if (viewport.view_height > max_dist)
+                viewport.view_height = max_dist;
         }
 
         ImGui::End();
@@ -674,7 +795,7 @@ static bool draw_grid(const Viewport& viewport, uint32_t image_idx, VkCommandBuf
     auto     vertices  = grid_lines_buf.get_ptr<GridVertex>(image_idx, sub_buf_stride);
     uint32_t num_lines = 0;
 
-    const float half_seen_height = viewport.camera_distance * 0.5f;
+    const float half_seen_height = viewport.view_height * 0.5f;
     const float half_seen_width  = half_seen_height * static_cast<float>(viewport.width)
                                  / static_cast<float>(viewport.height);
 
@@ -771,7 +892,7 @@ static bool draw_grid(const Viewport& viewport, uint32_t image_idx, VkCommandBuf
 
     vkCmdDraw(buf,
               num_lines * 2,
-              num_lines,
+              1,
               0,  // firstVertex
               0); // firstInstance
 
@@ -818,7 +939,7 @@ static bool set_patch_transforms(const Viewport& viewport, uint32_t transform_id
     }
     else {
         transforms->proj = vmath::ortho_vector(aspect,
-                                               viewport.camera_distance / int16_scale,
+                                               viewport.view_height / int16_scale,
                                                0.01f,   // near_plane
                                                3.0f);   // far_plane
         transforms->proj_w = vmath::vec4(0.0f, 0.0f, 0.0f, 1.0f);
@@ -869,6 +990,63 @@ static bool render_view(const Viewport& viewport, uint32_t image_idx, VkCommandB
         else
             patch_geometry.render_edges(buf);
     }
+
+    return true;
+}
+
+static bool render_selection(const Viewport& viewport, uint32_t image_idx, VkCommandBuffer buf, VkOffset2D* scissor_offset)
+{
+    const uint32_t transform_id_base = (image_idx * mstd::array_size(viewports) + viewport.id) * transforms_per_viewport;
+
+    const uint32_t transform_id = transform_id_base + 0;
+
+    uint32_t dynamic_offsets[] = {
+        transform_id * transforms_stride
+    };
+
+    vkCmdBindPipeline(buf, VK_PIPELINE_BIND_POINT_GRAPHICS, sculptor_object_id_pipeline);
+
+    static VkViewport vk_viewport = {
+        0,      // x
+        0,      // y
+        0,      // width
+        0,      // height
+        0,      // minDepth
+        1       // maxDepth
+    };
+
+    VkRect2D vk_scissor = {
+        { 0, 0 }, // offset
+        { 0, 0 }  // extent
+    };
+
+    configure_viewport_and_scissor(&vk_viewport,
+                                   &vk_scissor,
+                                   static_cast<float>(viewport.width) / static_cast<float>(viewport.height),
+                                   viewport.width,
+                                   viewport.height);
+
+    vk_scissor.offset.x     += viewport.selection.x - select_mid_point;
+    vk_scissor.offset.y     += viewport.selection.y - select_mid_point;
+    vk_scissor.extent.width  = select_query_range;
+    vk_scissor.extent.height = select_query_range;
+
+    *scissor_offset = vk_scissor.offset;
+
+    vkCmdSetViewport(buf, 0, 1, &vk_viewport);
+
+    vkCmdSetScissor(buf, 0, 1, &vk_scissor);
+
+    vkCmdBindDescriptorSets(buf,
+                            VK_PIPELINE_BIND_POINT_GRAPHICS,
+                            sculptor_material_layout,
+                            2,          // firstSet
+                            1,          // descriptorSetCount
+                            &desc_set[2],
+                            mstd::array_size(dynamic_offsets),
+                            dynamic_offsets);
+
+    patch_geometry.render(buf);
 
     return true;
 }
@@ -949,12 +1127,22 @@ bool draw_frame(uint32_t image_idx, uint64_t time_ms, VkFence queue_fence)
         nullptr         // pStencilAttachment
     };
 
+    uint32_t hovered_object_id = ~0U;
+    for (const Viewport& viewport : viewports) {
+        if (viewport.enabled && viewport.selection.is_active)
+            hovered_object_id = viewport.selection.object_id - 1;
+    }
+    patch_geometry.set_hovered_face(hovered_object_id);
+
+    if ( ! patch_geometry.send_to_gpu(buf))
+        return false;
+
     for (Viewport& viewport : viewports) {
         if ( ! viewport.enabled)
             continue;
 
-        if ( ! patch_geometry.send_to_gpu(buf))
-            return false;
+        //////////////////////////
+        // Render viewport image
 
         static const Image::Transition render_viewport_layout = {
             VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
@@ -989,6 +1177,65 @@ bool draw_frame(uint32_t image_idx, uint64_t time_ms, VkFence queue_fence)
             VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
         };
         viewport.color_buffer[image_idx].set_image_layout(buf, gui_image_layout);
+
+        /////////////////////////////////////////////
+        // Render the same in selection query image
+
+        if (viewport.selection.is_active) {
+            viewport.select_query[image_idx].set_image_layout(buf, render_viewport_layout);
+
+            color_att.imageView                  = viewport.select_query[image_idx].get_view();
+            color_att.clearValue.color.uint32[0] = 0;
+
+            vkCmdBeginRenderingKHR(buf, &rendering_info);
+
+            VkOffset2D selection_offset;
+            if ( ! render_selection(viewport, image_idx, buf, &selection_offset))
+                return false;
+
+            vkCmdEndRenderingKHR(buf);
+
+            static const Image::Transition transfer_src_image_layout = {
+                VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                0,
+                VK_PIPELINE_STAGE_TRANSFER_BIT,
+                VK_ACCESS_TRANSFER_READ_BIT,
+                VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL
+            };
+            viewport.select_query[image_idx].set_image_layout(buf, transfer_src_image_layout);
+
+            if (viewport.select_query_host[image_idx].layout != VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL) {
+                static const Image::Transition transfer_dst_image_layout = {
+                    VK_PIPELINE_STAGE_TRANSFER_BIT,
+                    0,
+                    VK_PIPELINE_STAGE_TRANSFER_BIT,
+                    VK_ACCESS_TRANSFER_WRITE_BIT,
+                    VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL
+                };
+                viewport.select_query_host[image_idx].set_image_layout(buf, transfer_dst_image_layout);
+            }
+
+            viewport.select_query_pending[image_idx] = true;
+
+            static VkImageCopy region = {
+                { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
+                { },                                            // srcOffset
+                { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
+                { },                                            // dstOffset
+                { select_query_range, select_query_range, 1 }   // extent
+            };
+
+            region.srcOffset.x = selection_offset.x;
+            region.srcOffset.y = selection_offset.y;
+
+            vkCmdCopyImage(buf,
+                           viewport.select_query[image_idx].get_image(),
+                           VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                           viewport.select_query_host[image_idx].get_image(),
+                           VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                           1,
+                           &region);
+        }
     }
 
     if ( ! send_gui_to_gpu(buf, image_idx))
