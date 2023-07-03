@@ -20,6 +20,7 @@
     X(rounded_cube_vert) \
     X(sculptor_color_frag) \
     X(sculptor_object_frag) \
+    X(sculptor_object_id_frag) \
     X(sculptor_simple_vert) \
     X(simple_vert) \
     X(synth_comp)

@@ -19,6 +19,7 @@
 #include "rounded_cube.vert.h"
 #include "sculptor_color.frag.h"
 #include "sculptor_object.frag.h"
+#include "sculptor_object_id.frag.h"
 #include "sculptor_simple.vert.h"
 #include "simple.vert.h"
 #include "synth.comp.h"
