@@ -22,9 +22,7 @@ void main()
 
     const vec4 view_pos = vec4(obj_pos, 1) * model_view;
 
-    const float depth_bias = 0.0001f;
-
-    gl_Position = projection(view_pos.xyz) + vec4(0, 0, depth_bias, 0);
+    gl_Position = projection(view_pos.xyz);
 
     out_object_id = gl_PrimitiveID;
 }

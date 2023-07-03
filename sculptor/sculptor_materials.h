@@ -13,6 +13,7 @@ extern VkPipelineLayout      sculptor_material_layout;
 struct MaterialInfo {
     uint8_t*                                 shader_ids[4];
     const VkVertexInputAttributeDescription* vertex_attributes;
+    float                                    depth_bias;
     uint8_t                                  num_vertex_attributes;
     uint8_t                                  vertex_stride;
     uint8_t                                  color_format;

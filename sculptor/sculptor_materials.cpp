@@ -232,6 +232,10 @@ bool create_material(const MaterialInfo& mat_info, VkPipeline* pipeline)
 
     rasterization_state.polygonMode = static_cast<VkPolygonMode>(mat_info.polygon_mode);
     rasterization_state.cullMode    = static_cast<VkCullModeFlags>(mat_info.cull_mode);
+    if (mat_info.depth_bias != 0.0f) {
+        rasterization_state.depthBiasEnable         = VK_TRUE;
+        rasterization_state.depthBiasConstantFactor = mat_info.depth_bias;
+    }
 
     static VkPipelineMultisampleStateCreateInfo multisample_state = {
         VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,

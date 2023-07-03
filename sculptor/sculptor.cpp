@@ -339,6 +339,7 @@ bool init_assets()
             shader_sculptor_color_frag
         },
         vertex_attributes,
+        0.0f, // depth_bias
         mstd::array_size(vertex_attributes),
         sizeof(GridVertex),
         VK_FORMAT_UNDEFINED,
@@ -362,6 +363,7 @@ bool init_assets()
             shader_bezier_surface_cubic_sculptor_tese
         },
         vertex_attributes,
+        0.0f, // depth_bias
         mstd::array_size(vertex_attributes),
         sizeof(Sculptor::Geometry::Vertex),
         VK_FORMAT_UNDEFINED,
@@ -384,6 +386,7 @@ bool init_assets()
             shader_bezier_line_cubic_sculptor_tese
         },
         vertex_attributes,
+        2048.0f, // depth_bias
         mstd::array_size(vertex_attributes),
         sizeof(Sculptor::Geometry::Vertex),
         VK_FORMAT_UNDEFINED,
@@ -410,6 +413,7 @@ bool init_assets()
             shader_bezier_surface_cubic_sculptor_tese
         },
         vertex_attributes,
+        0.0f, // depth_bias
         mstd::array_size(vertex_attributes),
         sizeof(Sculptor::Geometry::Vertex),
         VK_FORMAT_R32_UINT,
