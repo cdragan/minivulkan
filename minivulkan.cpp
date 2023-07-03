@@ -1096,6 +1096,57 @@ bool send_to_device_and_wait(VkCommandBuffer cmd_buf)
     return wait_and_reset_fence(fen_copy_to_dev);
 }
 
+void configure_viewport_and_scissor(VkViewport* viewport,
+                                    VkRect2D*   scissor,
+                                    float       image_ratio,
+                                    uint32_t    viewport_width,
+                                    uint32_t    viewport_height)
+{
+    // Note: Flip Y coordinate.  The world coordinate system assumes Y going from
+    // bottom to top, but in Vulkan screen-space Y coordinate goes from top to bottom.
+    if (image_ratio != 0) {
+        const float cur_ratio = static_cast<float>(viewport_width) /
+                                static_cast<float>(viewport_height);
+
+        if (cur_ratio > image_ratio) {
+            const uint32_t height = viewport_height;
+            const uint32_t width  = static_cast<uint32_t>(static_cast<float>(height) * image_ratio);
+            const uint32_t x      = (viewport_width - width) / 2;
+
+            scissor->offset.x      = static_cast<int32_t>(x);
+            scissor->extent.width  = width;
+            scissor->extent.height = height;
+
+            viewport->x      = static_cast<float>(x);
+            viewport->y      = static_cast<float>(height);
+            viewport->width  = static_cast<float>(width);
+            viewport->height = -static_cast<float>(height);
+        }
+        else {
+            const uint32_t width  = viewport_width;
+            const uint32_t height = static_cast<uint32_t>(static_cast<float>(width) / image_ratio);
+            const uint32_t y      = (viewport_height - height) / 2;
+
+            scissor->offset.y      = static_cast<int32_t>(y);
+            scissor->extent.width  = width;
+            scissor->extent.height = height;
+
+            viewport->y      = static_cast<float>((viewport_height + height) / 2);
+            viewport->width  = static_cast<float>(width);
+            viewport->height = -static_cast<float>(height);
+        }
+    }
+    else {
+        viewport->y      = static_cast<float>(viewport_height);
+        viewport->width  = static_cast<float>(viewport_width);
+        viewport->height = -static_cast<float>(viewport_height);
+
+        scissor->extent.width  = viewport_width;
+        scissor->extent.height = viewport_height;
+    }
+
+}
+
 void send_viewport_and_scissor(VkCommandBuffer cmd_buf,
                                float           image_ratio,
                                uint32_t        viewport_width,
@@ -1115,46 +1166,7 @@ void send_viewport_and_scissor(VkCommandBuffer cmd_buf,
         { 0, 0 }    // extent
     };
 
-    // Note: Flip Y coordinate.  The world coordinate system assumes Y going from
-    // bottom to top, but in Vulkan screen-space Y coordinate goes from top to bottom.
-    if (image_ratio != 0) {
-        const float cur_ratio = static_cast<float>(viewport_width) /
-                                static_cast<float>(viewport_height);
-
-        if (cur_ratio > image_ratio) {
-            const uint32_t height = viewport_height;
-            const uint32_t width  = static_cast<uint32_t>(static_cast<float>(height) * image_ratio);
-
-            scissor.offset.x      = (viewport_width - width) / 2;
-            scissor.extent.width  = width;
-            scissor.extent.height = height;
-
-            viewport.x      = static_cast<float>(scissor.offset.x);
-            viewport.y      = static_cast<float>(height);
-            viewport.width  = static_cast<float>(width);
-            viewport.height = -static_cast<float>(height);
-        }
-        else {
-            const uint32_t width  = viewport_width;
-            const uint32_t height = static_cast<uint32_t>(static_cast<float>(width) / image_ratio);
-
-            scissor.offset.y      = (viewport_height - height) / 2;
-            scissor.extent.width  = width;
-            scissor.extent.height = height;
-
-            viewport.y      = static_cast<float>((viewport_height + height) / 2);
-            viewport.width  = static_cast<float>(width);
-            viewport.height = -static_cast<float>(height);
-        }
-    }
-    else {
-        viewport.y      = static_cast<float>(viewport_height);
-        viewport.width  = static_cast<float>(viewport_width);
-        viewport.height = -static_cast<float>(viewport_height);
-
-        scissor.extent.width  = viewport_width;
-        scissor.extent.height = viewport_height;
-    }
+    configure_viewport_and_scissor(&viewport, &scissor, image_ratio, viewport_width, viewport_height);
 
     vkCmdSetViewport(cmd_buf, 0, 1, &viewport);
 

@@ -155,6 +155,12 @@ extern Image         vk_swapchain_images[max_swapchain_size];
 extern Image         vk_depth_buffers[max_swapchain_size];
 extern VkFormat      vk_depth_format;
 
+void configure_viewport_and_scissor(VkViewport* viewport,
+                                    VkRect2D*   scissor,
+                                    float       image_ratio,
+                                    uint32_t    viewport_width,
+                                    uint32_t    viewport_height);
+
 void send_viewport_and_scissor(VkCommandBuffer cmd_buf,
                                float           image_ratio,
                                uint32_t        viewport_width,
