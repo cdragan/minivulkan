@@ -154,7 +154,7 @@ static bool create_samplers()
 static bool create_grid_lines_buffer()
 {
     return grid_lines_buf.allocate(Usage::dynamic,
-                                   max_grid_lines * 2 * max_swapchain_size * sizeof(GridVertex),
+                                   max_grid_lines * 2 * max_swapchain_size * mstd::array_size(viewports) * sizeof(GridVertex),
                                    VK_FORMAT_UNDEFINED,
                                    VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
 }
@@ -347,7 +347,7 @@ bool init_assets()
         0, // patch_control_points
         VK_POLYGON_MODE_FILL,
         VK_CULL_MODE_NONE,
-        false,               // depth_test
+        true,                // depth_test
         { 0x55, 0x55, 0x55 } // diffuse
     };
 
@@ -745,36 +745,35 @@ static bool create_gui_frame(uint32_t image_idx)
             viewport_mouse = static_cast<int>(viewport.id);
 
         if (viewport.id == static_cast<uint32_t>(viewport_mouse)) {
-            constexpr float rot_scale_factor   = 0.3f;
-            constexpr float ortho_scale_factor = 0.0005f;
+            constexpr float rot_scale_factor = 0.3f;
 
             switch (viewport.view_type) {
 
                 case ViewType::free_moving:
                     viewport.camera_yaw   += rot_scale_factor * mouse_delta.x;
                     viewport.camera_pitch += rot_scale_factor * mouse_delta.y;
+                    viewport.camera_pitch  = mstd::min(mstd::max(viewport.camera_pitch, -90.0f), 90.0f);
                     break;
 
-                case ViewType::front:
-                    viewport.camera_pos.x -= ortho_scale_factor * mouse_delta.x;
-                    viewport.camera_pos.y += ortho_scale_factor * mouse_delta.y;
+                case ViewType::front: {
+                    const float view_bounds        = 1.1f;
+                    const float ortho_scale_factor = viewport.view_height * 0.0000001f;
+                    viewport.camera_pos.x = mstd::min(mstd::max(viewport.camera_pos.x - ortho_scale_factor * mouse_delta.x, -view_bounds), view_bounds);
+                    viewport.camera_pos.y = mstd::min(mstd::max(viewport.camera_pos.y + ortho_scale_factor * mouse_delta.y, -view_bounds), view_bounds);
                     break;
+                }
 
                 default:
                     assert(0);
             }
         }
 
-        if ((wheel_delta != 0.0f) && (viewport.view_type != ViewType::free_moving)) {
-            viewport.view_height += 1024.0f * wheel_delta;
+        if (ImGui::IsItemHovered() && (wheel_delta != 0.0f) && (viewport.view_type != ViewType::free_moving)) {
+            constexpr float min_dist   = 128.0f;
+            constexpr float max_dist   = 65536.0f;
+            constexpr float dist_scale = 1024.0f;
 
-            constexpr float min_dist = 128.0f;
-            constexpr float max_dist = 65536.0f;
-
-            if (viewport.view_height < min_dist)
-                viewport.view_height = min_dist;
-            else if (viewport.view_height > max_dist)
-                viewport.view_height = max_dist;
+            viewport.view_height = mstd::min(mstd::max(viewport.view_height + dist_scale * wheel_delta, min_dist), max_dist);
         }
 
         ImGui::End();
@@ -789,78 +788,123 @@ static bool create_gui_frame(uint32_t image_idx)
     return true;
 }
 
+static int16_t clamp16(int32_t value)
+{
+    return static_cast<int16_t>(mstd::min(mstd::max(value, -32768), 32767));
+}
+
 static bool draw_grid(const Viewport& viewport, uint32_t image_idx, VkCommandBuffer buf, uint32_t transforms_dyn_offs)
 {
-    if (viewport.view_type != ViewType::front)
-        return true;
-
     const uint32_t sub_buf_stride = max_grid_lines * 2 * sizeof(GridVertex);
+    const uint32_t grid_idx       = viewport.id * max_swapchain_size + image_idx;
 
-    auto     vertices  = grid_lines_buf.get_ptr<GridVertex>(image_idx, sub_buf_stride);
+    auto     vertices  = grid_lines_buf.get_ptr<GridVertex>(grid_idx, sub_buf_stride);
     uint32_t num_lines = 0;
 
-    const float half_seen_height = viewport.view_height * 0.5f;
-    const float half_seen_width  = half_seen_height * static_cast<float>(viewport.width)
-                                 / static_cast<float>(viewport.height);
+    if (viewport.view_type == ViewType::front) {
 
-    int32_t min_x = static_cast<int32_t>(floorf(viewport.camera_pos.x * int16_scale - half_seen_width));
-    int32_t max_x = static_cast<int32_t>(ceilf( viewport.camera_pos.x * int16_scale + half_seen_width));
-    int32_t min_y = static_cast<int32_t>(floorf(viewport.camera_pos.y * int16_scale - half_seen_height));
-    int32_t max_y = static_cast<int32_t>(ceilf( viewport.camera_pos.y * int16_scale + half_seen_height));
+        const float half_seen_height = viewport.view_height * 0.5f;
+        const float half_seen_width  = half_seen_height * static_cast<float>(viewport.width)
+                                     / static_cast<float>(viewport.height);
 
-    const int32_t     seen_height     = max_y - min_y;
-    constexpr int32_t est_horiz_lines = 16;
-    int32_t           vert_dist       = seen_height / est_horiz_lines;
-    if (vert_dist == 0)
-        vert_dist = 1;
+        int32_t min_x = static_cast<int32_t>(floorf(viewport.camera_pos.x * int16_scale - half_seen_width));
+        int32_t max_x = static_cast<int32_t>(ceilf( viewport.camera_pos.x * int16_scale + half_seen_width));
+        int32_t min_y = static_cast<int32_t>(floorf(viewport.camera_pos.y * int16_scale - half_seen_height));
+        int32_t max_y = static_cast<int32_t>(ceilf( viewport.camera_pos.y * int16_scale + half_seen_height));
 
-    // Find the highest power of two less or equal than vert_dist
-    for (;;) {
-        // Clear lowermost set bit
-        const int32_t new_vert_dist = vert_dist & (vert_dist - 1);
-        if ( ! new_vert_dist)
-            break;
-        vert_dist = new_vert_dist;
+        const int32_t     seen_height     = max_y - min_y;
+        constexpr int32_t est_horiz_lines = 16;
+        int32_t           vert_dist       = seen_height / est_horiz_lines;
+        if (vert_dist == 0)
+            vert_dist = 1;
+
+        // Find the highest power of two less or equal than vert_dist
+        for (;;) {
+            // Clear lowermost set bit
+            const int32_t new_vert_dist = vert_dist & (vert_dist - 1);
+            if ( ! new_vert_dist)
+                break;
+            vert_dist = new_vert_dist;
+        }
+
+        const int16_t minor_step = (vert_dist < 4096) ? static_cast<int16_t>(vert_dist) : 4096;
+
+        min_x -= min_x % minor_step + minor_step;
+        max_x += (max_x % minor_step) + minor_step;
+        min_y -= min_y % minor_step + minor_step;
+        max_y += (max_y % minor_step) + minor_step;
+
+        for (int32_t x = min_x; x <= max_x; x += minor_step) {
+            assert(num_lines < max_grid_lines);
+
+            vertices[0].pos[0] = clamp16(x);
+            vertices[0].pos[1] = clamp16(min_y);
+            vertices[0].pos[2] = 32767;
+
+            vertices[1].pos[0] = clamp16(x);
+            vertices[1].pos[1] = clamp16(max_y);
+            vertices[1].pos[2] = 32767;
+
+            vertices += 2;
+            ++num_lines;
+        }
+
+        for (int32_t y = min_y; y <= max_y; y += minor_step) {
+            assert(num_lines < max_grid_lines);
+
+            vertices[0].pos[0] = clamp16(min_x);
+            vertices[0].pos[1] = clamp16(y);
+            vertices[0].pos[2] = 32767;
+
+            vertices[1].pos[0] = clamp16(max_x);
+            vertices[1].pos[1] = clamp16(y);
+            vertices[1].pos[2] = 32767;
+
+            vertices += 2;
+            ++num_lines;
+        }
+    }
+    else {
+        assert(viewport.view_type == ViewType::free_moving);
+        const int32_t min_x = -4096;
+        const int32_t max_x = 4096;
+        const int32_t min_z = -4096;
+        const int32_t max_z = 4096;
+
+        const int32_t minor_step = 128;
+
+        for (int32_t x = min_x; x <= max_x; x += minor_step) {
+            assert(num_lines < max_grid_lines);
+
+            vertices[0].pos[0] = clamp16(x);
+            vertices[0].pos[1] = 0;
+            vertices[0].pos[2] = clamp16(min_z);
+
+            vertices[1].pos[0] = clamp16(x);
+            vertices[1].pos[1] = 0;
+            vertices[1].pos[2] = clamp16(max_z);
+
+            vertices += 2;
+            ++num_lines;
+        }
+
+        for (int32_t z = min_z; z <= max_z; z += minor_step) {
+            assert(num_lines < max_grid_lines);
+
+            vertices[0].pos[0] = clamp16(min_x);
+            vertices[0].pos[1] = 0;
+            vertices[0].pos[2] = clamp16(z);
+
+            vertices[1].pos[0] = clamp16(max_x);
+            vertices[1].pos[1] = 0;
+            vertices[1].pos[2] = clamp16(z);
+
+            vertices += 2;
+            ++num_lines;
+        }
     }
 
-    const int16_t minor_step = (vert_dist < 4096) ? static_cast<int16_t>(vert_dist) : 4096;
-
-    min_x -= min_x % minor_step + minor_step;
-    max_x += (max_x % minor_step) + minor_step;
-    min_y -= min_y % minor_step + minor_step;
-    max_y += (max_y % minor_step) + minor_step;
-
-    for (int32_t x = min_x; x <= max_x; x += minor_step) {
-        assert(num_lines < max_grid_lines);
-
-        vertices[0].pos[0] = static_cast<int16_t>(x);
-        vertices[0].pos[1] = static_cast<int16_t>(min_y);
-        vertices[0].pos[2] = 0;
-
-        vertices[1].pos[0] = static_cast<int16_t>(x);
-        vertices[1].pos[1] = static_cast<int16_t>(max_y);
-        vertices[1].pos[2] = 0;
-
-        vertices += 2;
-        ++num_lines;
-    }
-
-    for (int32_t y = min_y; y <= max_y; y += minor_step) {
-        assert(num_lines < max_grid_lines);
-
-        vertices[0].pos[0] = static_cast<int16_t>(min_x);
-        vertices[0].pos[1] = static_cast<int16_t>(y);
-        vertices[0].pos[2] = 0;
-
-        vertices[1].pos[0] = static_cast<int16_t>(max_x);
-        vertices[1].pos[1] = static_cast<int16_t>(y);
-        vertices[1].pos[2] = 0;
-
-        vertices += 2;
-        ++num_lines;
-    }
-
-    if ( ! grid_lines_buf.flush(image_idx, sub_buf_stride))
+    if ( ! grid_lines_buf.flush(grid_idx, sub_buf_stride))
         return false;
 
     vkCmdBindPipeline(buf, VK_PIPELINE_BIND_POINT_GRAPHICS, grid_pipeline);
@@ -886,7 +930,7 @@ static bool draw_grid(const Viewport& viewport, uint32_t image_idx, VkCommandBuf
                             mstd::array_size(dynamic_offsets),
                             dynamic_offsets);
 
-    const VkDeviceSize vb_offset = image_idx * sub_buf_stride;
+    const VkDeviceSize vb_offset = grid_idx * sub_buf_stride;
 
     vkCmdBindVertexBuffers(buf,
                            0, // firstBinding
