@@ -918,10 +918,7 @@ static bool draw_grid(const Viewport& viewport, uint32_t image_idx, VkCommandBuf
 
     vkCmdBindPipeline(buf, VK_PIPELINE_BIND_POINT_GRAPHICS, grid_pipeline);
 
-    send_viewport_and_scissor(buf,
-                              static_cast<float>(viewport.width) / static_cast<float>(viewport.height),
-                              viewport.width,
-                              viewport.height);
+    send_viewport_and_scissor(buf, viewport.width, viewport.height);
 
     const uint32_t grid_mat_id = (image_idx * num_materials) + mat_grid;
 
@@ -1028,10 +1025,7 @@ static bool render_view(const Viewport& viewport, uint32_t image_idx, VkCommandB
         vkCmdBindPipeline(buf, VK_PIPELINE_BIND_POINT_GRAPHICS,
                           (i == 0) ? sculptor_object_pipeline : sculptor_edge_pipeline);
 
-        send_viewport_and_scissor(buf,
-                                  static_cast<float>(viewport.width) / static_cast<float>(viewport.height),
-                                  viewport.width,
-                                  viewport.height);
+        send_viewport_and_scissor(buf, viewport.width, viewport.height);
 
         vkCmdBindDescriptorSets(buf,
                                 VK_PIPELINE_BIND_POINT_GRAPHICS,
@@ -1077,11 +1071,7 @@ static bool render_selection(const Viewport& viewport, uint32_t image_idx, VkCom
         { 0, 0 }  // extent
     };
 
-    configure_viewport_and_scissor(&vk_viewport,
-                                   &vk_scissor,
-                                   static_cast<float>(viewport.width) / static_cast<float>(viewport.height),
-                                   viewport.width,
-                                   viewport.height);
+    configure_viewport_and_scissor(&vk_viewport, &vk_scissor, viewport.width, viewport.height);
 
     vk_scissor.offset.x     += viewport.selection.x - select_mid_point;
     vk_scissor.offset.y     += viewport.selection.y - select_mid_point;

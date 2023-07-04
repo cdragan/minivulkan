@@ -1147,6 +1147,18 @@ void configure_viewport_and_scissor(VkViewport* viewport,
 
 }
 
+void configure_viewport_and_scissor(VkViewport* viewport,
+                                    VkRect2D*   scissor,
+                                    uint32_t    viewport_width,
+                                    uint32_t    viewport_height)
+{
+    configure_viewport_and_scissor(viewport,
+                                   scissor,
+                                   static_cast<float>(viewport_width) / static_cast<float>(viewport_height),
+                                   viewport_width,
+                                   viewport_height);
+}
+
 void send_viewport_and_scissor(VkCommandBuffer cmd_buf,
                                float           image_ratio,
                                uint32_t        viewport_width,
@@ -1171,6 +1183,16 @@ void send_viewport_and_scissor(VkCommandBuffer cmd_buf,
     vkCmdSetViewport(cmd_buf, 0, 1, &viewport);
 
     vkCmdSetScissor(cmd_buf, 0, 1, &scissor);
+}
+
+void send_viewport_and_scissor(VkCommandBuffer cmd_buf,
+                               uint32_t        viewport_width,
+                               uint32_t        viewport_height)
+{
+    send_viewport_and_scissor(cmd_buf,
+                              static_cast<float>(viewport_width) / static_cast<float>(viewport_height),
+                              viewport_width,
+                              viewport_height);
 }
 
 #if !defined(NDEBUG) || defined(TIME_STATS)
