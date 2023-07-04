@@ -74,8 +74,8 @@ namespace {
 }
 
 static Viewport viewports[] = {
-    { "Front View", true, 0, ViewType::front,       { 0.0f, 0.0f, -2.0f }, { 4096.0f } },
-    { "3D View",    true, 1, ViewType::free_moving, { 0.0f, 0.0f,  0.0f }, {    0.2f } }
+    { "Front View", true, 0, ViewType::front,       { 0.0f, 0.0f, -2.0f }, { 4096.0f  } },
+    { "3D View",    true, 1, ViewType::free_moving, { 0.0f, 0.0f,  0.0f }, {    0.25f } }
 };
 
 // Which viewport has captured mouse
@@ -768,10 +768,10 @@ static bool create_gui_frame(uint32_t image_idx)
             }
         }
 
-        if (ImGui::IsItemHovered() && (wheel_delta != 0.0f) && (viewport.view_type != ViewType::free_moving)) {
-            constexpr float min_dist   = 128.0f;
-            constexpr float max_dist   = 65536.0f;
-            constexpr float dist_scale = 1024.0f;
+        if (ImGui::IsItemHovered() && (wheel_delta != 0.0f)) {
+            const float min_dist   = (viewport.view_type == ViewType::free_moving) ? 0.05f : 128.0f;
+            const float max_dist   = (viewport.view_type == ViewType::free_moving) ? 8.0f  : 65536.0f;
+            const float dist_scale = (viewport.view_type == ViewType::free_moving) ? 1.0f  : 1024.0f;
 
             viewport.view_height = mstd::min(mstd::max(viewport.view_height + dist_scale * wheel_delta, min_dist), max_dist);
         }
@@ -791,6 +791,23 @@ static bool create_gui_frame(uint32_t image_idx)
 static int16_t clamp16(int32_t value)
 {
     return static_cast<int16_t>(mstd::min(mstd::max(value, -32768), 32767));
+}
+
+// Find the highest power of two that is less than or equal to value
+static int32_t just_msb(int32_t value)
+{
+    if (value < 1)
+        value = 1;
+
+    for (;;) {
+        // Clear lowermost set bit
+        const int32_t new_value = value & (value - 1);
+        if ( ! new_value)
+            break;
+        value = new_value;
+    }
+
+    return value;
 }
 
 static bool draw_grid(const Viewport& viewport, uint32_t image_idx, VkCommandBuffer buf, uint32_t transforms_dyn_offs)
@@ -814,18 +831,7 @@ static bool draw_grid(const Viewport& viewport, uint32_t image_idx, VkCommandBuf
 
         const int32_t     seen_height     = max_y - min_y;
         constexpr int32_t est_horiz_lines = 16;
-        int32_t           vert_dist       = seen_height / est_horiz_lines;
-        if (vert_dist == 0)
-            vert_dist = 1;
-
-        // Find the highest power of two less or equal than vert_dist
-        for (;;) {
-            // Clear lowermost set bit
-            const int32_t new_vert_dist = vert_dist & (vert_dist - 1);
-            if ( ! new_vert_dist)
-                break;
-            vert_dist = new_vert_dist;
-        }
+        const int32_t     vert_dist       = just_msb(seen_height / est_horiz_lines);
 
         const int16_t minor_step = (vert_dist < 4096) ? static_cast<int16_t>(vert_dist) : 4096;
 
@@ -866,12 +872,15 @@ static bool draw_grid(const Viewport& viewport, uint32_t image_idx, VkCommandBuf
     }
     else {
         assert(viewport.view_type == ViewType::free_moving);
-        const int32_t min_x = -4096;
-        const int32_t max_x = 4096;
-        const int32_t min_z = -4096;
-        const int32_t max_z = 4096;
 
-        const int32_t minor_step = 128;
+        const int32_t scaled_dist = static_cast<int32_t>(floorf(32768.0f * viewport.camera_distance));
+        const int32_t grid_limit  = just_msb(scaled_dist);
+        const int32_t min_x = -grid_limit;
+        const int32_t max_x = grid_limit;
+        const int32_t min_z = -grid_limit;
+        const int32_t max_z = grid_limit;
+
+        const int32_t minor_step = mstd::max(grid_limit / 16, 16);
 
         for (int32_t x = min_x; x <= max_x; x += minor_step) {
             assert(num_lines < max_grid_lines);
@@ -924,8 +933,8 @@ static bool draw_grid(const Viewport& viewport, uint32_t image_idx, VkCommandBuf
     vkCmdBindDescriptorSets(buf,
                             VK_PIPELINE_BIND_POINT_GRAPHICS,
                             sculptor_material_layout,
-                            1,          // firstSet
-                            2,          // descriptorSetCount
+                            1, // firstSet
+                            2, // descriptorSetCount
                             &desc_set[1],
                             mstd::array_size(dynamic_offsets),
                             dynamic_offsets);
@@ -940,7 +949,7 @@ static bool draw_grid(const Viewport& viewport, uint32_t image_idx, VkCommandBuf
 
     vkCmdDraw(buf,
               num_lines * 2,
-              1,
+              1,  // instanceCount
               0,  // firstVertex
               0); // firstInstance
 

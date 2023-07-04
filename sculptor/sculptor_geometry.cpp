@@ -450,7 +450,7 @@ void Sculptor::Geometry::render(VkCommandBuffer cmd_buf)
 
     vkCmdDrawIndexed(cmd_buf,
                      num_indices,
-                     1,
+                     1,  // instanceCount
                      0,  // firstVertex
                      0,  // vertexOffset
                      0); // firstInstance
@@ -472,7 +472,7 @@ void Sculptor::Geometry::render_edges(VkCommandBuffer cmd_buf)
 
     vkCmdDrawIndexed(cmd_buf,
                      num_edge_indices,
-                     1,
+                     1,  // instanceCount
                      0,  // firstVertex
                      0,  // vertexOffset
                      0); // firstInstance
