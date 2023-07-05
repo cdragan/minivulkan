@@ -709,6 +709,11 @@ static bool create_gui_frame(uint32_t image_idx)
 
         for (Viewport& viewport : viewports)
             ImGui::Checkbox(viewport.name, &viewport.enabled);
+
+        ImGui::Separator();
+
+        if (ImGui::RadioButton("Select faces",   mouse_mode == MouseMode::select))   mouse_mode = MouseMode::select;
+        if (ImGui::RadioButton("Deselect faces", mouse_mode == MouseMode::deselect)) mouse_mode = MouseMode::deselect;
     }
     ImGui::End();
 
