@@ -29,11 +29,17 @@ namespace {
         front
     };
 
+    enum class MouseMode {
+        select,
+        deselect
+    };
+
     struct MouseSelection {
         bool     is_active;
         uint32_t x;
         uint32_t y;
         uint32_t object_id;
+        uint32_t clicked_id;
     };
 
     struct Viewport {
@@ -80,6 +86,8 @@ static Viewport viewports[] = {
 
 // Which viewport has captured mouse
 static int viewport_mouse = -1;
+
+static MouseMode mouse_mode = MouseMode::select;
 
 const unsigned gui_num_descriptors = mstd::array_size(viewports) * max_swapchain_size;
 
@@ -768,13 +776,37 @@ static bool create_gui_frame(uint32_t image_idx)
             }
         }
 
-        if (ImGui::IsItemHovered() && (wheel_delta != 0.0f)) {
-            const float min_dist   = (viewport.view_type == ViewType::free_moving) ? 0.05f : 128.0f;
-            const float max_dist   = (viewport.view_type == ViewType::free_moving) ? 8.0f  : 65536.0f;
-            const float dist_scale = (viewport.view_type == ViewType::free_moving) ? 1.0f  : 1024.0f;
+        if (ImGui::IsItemHovered()) {
+            if (wheel_delta != 0.0f) {
+                const float min_dist   = (viewport.view_type == ViewType::free_moving) ? 0.05f : 128.0f;
+                const float max_dist   = (viewport.view_type == ViewType::free_moving) ? 8.0f  : 65536.0f;
+                const float dist_scale = (viewport.view_type == ViewType::free_moving) ? 1.0f  : 1024.0f;
 
-            viewport.view_height = mstd::min(mstd::max(viewport.view_height + dist_scale * wheel_delta, min_dist), max_dist);
+                viewport.view_height = mstd::min(mstd::max(viewport.view_height + dist_scale * wheel_delta, min_dist), max_dist);
+            }
+
+            if (ImGui::IsMouseClicked(ImGuiMouseButton_Left))
+                viewport.selection.clicked_id = viewport.selection.object_id;
+
+            if (ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
+                if ((viewport.selection.clicked_id == viewport.selection.object_id) && viewport.selection.clicked_id) {
+                    switch (mouse_mode) {
+
+                        case MouseMode::select:
+                            patch_geometry.select_face(viewport.selection.clicked_id - 1);
+                            break;
+
+                        case MouseMode::deselect:
+                            patch_geometry.deselect_face(viewport.selection.clicked_id - 1);
+                            break;
+                    }
+                }
+
+                viewport.selection.clicked_id = 0;
+            }
         }
+        else
+            viewport.selection.clicked_id = 0;
 
         ImGui::End();
     }

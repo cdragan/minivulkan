@@ -50,6 +50,8 @@ class Geometry {
 
         void set_cube();
         void set_hovered_face(uint32_t face_id);
+        void select_face(uint32_t face_id);
+        void deselect_face(uint32_t face_id);
 
     private:
         Buffer   vertices;
@@ -76,6 +78,7 @@ class Geometry {
             int32_t  edges[4];
             uint32_t ctrl_vertices[4];
             uint32_t material_id;
+            bool     selected;
         };
         Face obj_faces[max_faces] = { };
         uint32_t get_face_state(uint32_t face_id, const Face& face) const;

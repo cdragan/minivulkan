@@ -64,12 +64,28 @@ void Sculptor::Geometry::set_hovered_face(uint32_t face_id)
     }
 }
 
+void Sculptor::Geometry::select_face(uint32_t face_id)
+{
+    assert(face_id < num_faces);
+
+    obj_faces[face_id].selected = true;
+}
+
+void Sculptor::Geometry::deselect_face(uint32_t face_id)
+{
+    assert(face_id < num_faces);
+
+    obj_faces[face_id].selected = false;
+}
+
 uint32_t Sculptor::Geometry::get_face_state(uint32_t face_id, const Face& face) const
 {
     if (face_id == hovered_face_id)
         return 1;
 
-    return 0;
+    assert(face_id < num_faces);
+
+    return obj_faces[face_id].selected ? 2 : 0;
 }
 
 bool Sculptor::Geometry::send_to_gpu(VkCommandBuffer cmd_buf)
@@ -253,6 +269,9 @@ void Sculptor::Geometry::set_face(uint32_t face_id, int32_t edge_0, int32_t edge
     obj_faces[face_id].ctrl_vertices[1] = vtx_1;
     obj_faces[face_id].ctrl_vertices[2] = vtx_2;
     obj_faces[face_id].ctrl_vertices[3] = vtx_3;
+
+    obj_faces[face_id].material_id = 0;
+    obj_faces[face_id].selected    = false;
 
     validate_face(face_id);
 }
