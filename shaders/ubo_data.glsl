@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2021-2022 Chris Dragan
+// Copyright (c) 2021-2023 Chris Dragan
 
 layout(constant_id = 0) const uint num_lights = 1;
 
