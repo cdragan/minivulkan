@@ -52,6 +52,7 @@ class Geometry {
         void set_hovered_face(uint32_t face_id);
         void select_face(uint32_t face_id);
         void deselect_face(uint32_t face_id);
+        void deselect_all_faces();
 
     private:
         Buffer   vertices;
@@ -71,7 +72,10 @@ class Geometry {
         uint32_t num_faces           = 0;
         bool     dirty               = true;
 
-        using Edge = uint32_t[4];
+        struct Edge {
+            uint32_t vertices[4];
+            bool     selected;
+        };
         Edge obj_edges[max_edges] = { };
 
         struct Face {

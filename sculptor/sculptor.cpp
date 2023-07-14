@@ -30,8 +30,8 @@ namespace {
     };
 
     enum class MouseMode {
-        select,
-        deselect
+        select_faces,
+        select_edges
     };
 
     struct MouseSelection {
@@ -81,13 +81,13 @@ namespace {
 
 static Viewport viewports[] = {
     { "Front View", true, 0, ViewType::front,       { 0.0f, 0.0f, -2.0f }, { 4096.0f  } },
-    { "3D View",    true, 1, ViewType::free_moving, { 0.0f, 0.0f,  0.0f }, {    0.25f } }
+    { "3D View",    true, 1, ViewType::free_moving, { 0.0f, 0.0f,  0.0f }, {    0.25f }, 0.0f, 1.0f }
 };
 
 // Which viewport has captured mouse
 static int viewport_mouse = -1;
 
-static MouseMode mouse_mode = MouseMode::select;
+static MouseMode mouse_mode = MouseMode::select_faces;
 
 const unsigned gui_num_descriptors = mstd::array_size(viewports) * max_swapchain_size;
 
@@ -658,7 +658,8 @@ static bool create_gui_frame(uint32_t image_idx)
     ImGui::NewFrame();
 
     const ImVec2 abs_mouse_pos = ImGui::GetMousePos();
-    const bool   ctrl_down     = ImGui::IsKeyDown(ImGuiKey_LeftCtrl) || ImGui::IsKeyDown(ImGuiKey_RightCtrl);
+    const bool   ctrl_down     = ImGui::IsKeyDown(ImGuiKey_LeftCtrl)  || ImGui::IsKeyDown(ImGuiKey_RightCtrl);
+    const bool   shift_down    = ImGui::IsKeyDown(ImGuiKey_LeftShift) || ImGui::IsKeyDown(ImGuiKey_RightShift);
     const float  wheel_delta   = io.MouseWheel;
 
     if ( ! ctrl_down)
@@ -712,8 +713,8 @@ static bool create_gui_frame(uint32_t image_idx)
 
         ImGui::Separator();
 
-        if (ImGui::RadioButton("Select faces",   mouse_mode == MouseMode::select))   mouse_mode = MouseMode::select;
-        if (ImGui::RadioButton("Deselect faces", mouse_mode == MouseMode::deselect)) mouse_mode = MouseMode::deselect;
+        if (ImGui::RadioButton("Select faces", mouse_mode == MouseMode::select_faces)) mouse_mode = MouseMode::select_faces;
+        if (ImGui::RadioButton("Select edges", mouse_mode == MouseMode::select_edges)) mouse_mode = MouseMode::select_edges;
     }
     ImGui::End();
 
@@ -797,12 +798,18 @@ static bool create_gui_frame(uint32_t image_idx)
                 if ((viewport.selection.clicked_id == viewport.selection.object_id) && viewport.selection.clicked_id) {
                     switch (mouse_mode) {
 
-                        case MouseMode::select:
-                            patch_geometry.select_face(viewport.selection.clicked_id - 1);
+                        case MouseMode::select_faces:
+                            if (ctrl_down)
+                                patch_geometry.deselect_face(viewport.selection.clicked_id - 1);
+                            else {
+                                if ( ! shift_down)
+                                    patch_geometry.deselect_all_faces();
+                                patch_geometry.select_face(viewport.selection.clicked_id - 1);
+                            }
                             break;
 
-                        case MouseMode::deselect:
-                            patch_geometry.deselect_face(viewport.selection.clicked_id - 1);
+                        case MouseMode::select_edges:
+                            // TODO
                             break;
                     }
                 }

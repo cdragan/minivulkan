@@ -68,14 +68,26 @@ void Sculptor::Geometry::select_face(uint32_t face_id)
 {
     assert(face_id < num_faces);
 
-    obj_faces[face_id].selected = true;
+    if ( ! obj_faces[face_id].selected) {
+        obj_faces[face_id].selected = true;
+        dirty = true;
+    }
 }
 
 void Sculptor::Geometry::deselect_face(uint32_t face_id)
 {
     assert(face_id < num_faces);
 
-    obj_faces[face_id].selected = false;
+    if (obj_faces[face_id].selected) {
+        obj_faces[face_id].selected = false;
+        dirty = true;
+    }
+}
+
+void Sculptor::Geometry::deselect_all_faces()
+{
+    for (uint32_t i = 0; i < num_faces; i++)
+        deselect_face(i);
 }
 
 uint32_t Sculptor::Geometry::get_face_state(uint32_t face_id, const Face& face) const
@@ -135,10 +147,10 @@ bool Sculptor::Geometry::send_to_gpu(VkCommandBuffer cmd_buf)
 
             for (uint32_t i_idx = 0; i_idx < 4; i_idx++) {
                 const uint32_t src_idx = inverse_edge ? (3 - i_idx) : i_idx;
-                assert(edge[src_idx] < max_vertices);
+                assert(edge.vertices[src_idx] < max_vertices);
                 const uint32_t dest_idx = num_indices + idx_map[i_edge * 4 + i_idx];
                 assert(dest_idx < num_indices + 16);
-                indices_ptr[dest_idx] = static_cast<uint16_t>(edge[src_idx]);
+                indices_ptr[dest_idx] = static_cast<uint16_t>(edge.vertices[src_idx]);
             }
         }
 
@@ -165,9 +177,9 @@ bool Sculptor::Geometry::send_to_gpu(VkCommandBuffer cmd_buf)
         const Edge& edge = obj_edges[i_edge];
 
         for (uint32_t i_idx = 0; i_idx < 4; i_idx++) {
-            assert(edge[i_idx] < max_vertices);
+            assert(edge.vertices[i_idx] < max_vertices);
             const uint32_t dest_idx = edge_indices_offset + num_edge_indices + i_idx;
-            indices_ptr[dest_idx] = static_cast<uint16_t>(edge[i_idx]);
+            indices_ptr[dest_idx] = static_cast<uint16_t>(edge.vertices[i_idx]);
         }
 
         num_edge_indices += 4;
@@ -227,10 +239,11 @@ void Sculptor::Geometry::set_edge(uint32_t edge, uint32_t vtx_0, uint32_t vtx_1,
     assert(vtx_2 < num_vertices);
     assert(vtx_3 < num_vertices);
 
-    obj_edges[edge][0] = vtx_0;
-    obj_edges[edge][1] = vtx_1;
-    obj_edges[edge][2] = vtx_2;
-    obj_edges[edge][3] = vtx_3;
+    obj_edges[edge].vertices[0] = vtx_0;
+    obj_edges[edge].vertices[1] = vtx_1;
+    obj_edges[edge].vertices[2] = vtx_2;
+    obj_edges[edge].vertices[3] = vtx_3;
+    obj_edges[edge].selected    = false;
 }
 
 uint32_t Sculptor::Geometry::add_face(int32_t edge_0, int32_t edge_1, int32_t edge_2, int32_t edge_3,
@@ -306,13 +319,13 @@ void Sculptor::Geometry::validate_face(uint32_t face_id)
         const Edge& edge    = obj_edges[edge_sel[i_edge]];
         const bool  inverse = inverse_edge[i_edge];
 
-        assert(edge[0] < num_vertices);
-        assert(edge[1] < num_vertices);
-        assert(edge[2] < num_vertices);
-        assert(edge[3] < num_vertices);
+        assert(edge.vertices[0] < num_vertices);
+        assert(edge.vertices[1] < num_vertices);
+        assert(edge.vertices[2] < num_vertices);
+        assert(edge.vertices[3] < num_vertices);
 
-        e_vertices[i_edge][0] = edge[inverse ? 3 : 0];
-        e_vertices[i_edge][1] = edge[inverse ? 0 : 3];
+        e_vertices[i_edge][0] = edge.vertices[inverse ? 3 : 0];
+        e_vertices[i_edge][1] = edge.vertices[inverse ? 0 : 3];
     }
 
     assert(e_vertices[0][0] == e_vertices[1][0]);
