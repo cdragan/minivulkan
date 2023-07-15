@@ -27,18 +27,18 @@ jobs:
         id: cache-vulkansdk
         uses: actions/cache@v3
         with:
-          path: "vulkansdk-macos-1.3.250.0"
-          key: vulkansdk-macos-1.3.250.0
+          path: "vulkansdk-macos-1.3.250.1"
+          key: vulkansdk-macos-1.3.250.1
       - name: Install Vulkan SDK
         if: steps.cache-vulkansdk.outputs.cache-hit != 'true'
         run: |
-          wget https://sdk.lunarg.com/sdk/download/1.3.250.0/mac/vulkansdk-macos-1.3.250.0.dmg?Human=true -O vulkansdk-macos-1.3.250.0.dmg
-          hdiutil attach vulkansdk-macos-1.3.250.0.dmg
-          sudo /Volumes/VulkanSDK/InstallVulkan.app/Contents/MacOS/InstallVulkan --root $GITHUB_WORKSPACE/vulkansdk-macos-1.3.250.0 --accept-licenses --default-answer --confirm-command install
+          wget https://sdk.lunarg.com/sdk/download/1.3.250.1/mac/vulkansdk-macos-1.3.250.1.dmg?Human=true -O vulkansdk-macos-1.3.250.1.dmg
+          hdiutil attach vulkansdk-macos-1.3.250.1.dmg
+          sudo /Volumes/VulkanSDK/InstallVulkan.app/Contents/MacOS/InstallVulkan --root $GITHUB_WORKSPACE/vulkansdk-macos-1.3.250.1 --accept-licenses --default-answer --confirm-command install
           hdiutil detach /Volumes/VulkanSDK
       - name: Test
         run: |
-          export VULKAN_SDK=`pwd`/vulkansdk-macos-1.3.250.0/macOS
+          export VULKAN_SDK=`pwd`/vulkansdk-macos-1.3.250.1/macOS
           export VULKAN_SDK_BIN="$VULKAN_SDK/bin"
           ./runtests
 
