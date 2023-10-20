@@ -111,7 +111,7 @@ static bool load_vulkan()
 #ifdef _WIN32
     static const char lib_name[] = "vulkan-1.dll";
 #elif defined(__APPLE__)
-    static const char lib_name[] = "libvulkan.dylib";
+    static const char lib_name[] = "/usr/local/lib/libvulkan.1.dylib";
 #elif defined(__linux__)
     static const char lib_name[] = "libvulkan.so.1";
 #endif
