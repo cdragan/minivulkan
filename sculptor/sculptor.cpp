@@ -3,6 +3,7 @@
 
 #include "sculptor_geometry.h"
 #include "sculptor_materials.h"
+#include "sculptor_geom_edit.h"
 
 #include "../d_printf.h"
 #include "../gui.h"
@@ -78,6 +79,8 @@ namespace {
     };
 
 }
+
+static GeometryEditor geometry_editor;
 
 static Viewport viewports[] = {
     { "Front View", true, 0, ViewType::front,       { 0.0f, 0.0f, -2.0f }, { 4096.0f  } },
@@ -323,6 +326,8 @@ static void set_material_buf(const MaterialInfo& mat_info, uint32_t mat_id)
 
 bool init_assets()
 {
+    geometry_editor.set_name("unnamed");
+
     if ( ! create_samplers())
         return false;
 
@@ -698,6 +703,8 @@ static bool create_gui_frame(uint32_t image_idx)
 
     ImGui::DockSpaceOverViewport(ImGui::GetMainViewport(), ImGuiDockNodeFlags_PassthruCentralNode);
 
+    static bool geom_edit_enabled = true;
+
     ImGui::Begin("Hello, Window!");
     {
         const ImVec2 win_size = ImGui::GetWindowSize();
@@ -710,6 +717,8 @@ static bool create_gui_frame(uint32_t image_idx)
 
         for (Viewport& viewport : viewports)
             ImGui::Checkbox(viewport.name, &viewport.enabled);
+
+        ImGui::Checkbox("Geometry Editor", &geom_edit_enabled);
 
         ImGui::Separator();
 
@@ -827,6 +836,9 @@ static bool create_gui_frame(uint32_t image_idx)
         return false;
 
     if ( ! allocate_viewports())
+        return false;
+
+    if (geom_edit_enabled && ! geometry_editor.create_gui_frame(image_idx))
         return false;
 
     return true;
@@ -1328,6 +1340,9 @@ bool draw_frame(uint32_t image_idx, uint64_t time_ms, VkFence queue_fence)
                            &region);
         }
     }
+
+    if ( ! geometry_editor.draw_frame(buf, image_idx))
+        return false;
 
     if ( ! send_gui_to_gpu(buf, image_idx))
         return false;
