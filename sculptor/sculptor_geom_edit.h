@@ -13,6 +13,8 @@ class GeometryEditor: public Editor {
         bool draw_frame(VkCommandBuffer cmdbuf, uint32_t image_idx) override;
 
     private:
+        void gui_status_bar();
+
         struct Resources {
             Image           color;
             Image           depth;

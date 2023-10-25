@@ -65,23 +65,10 @@ void GeometryEditor::set_name(const char* new_name)
     name[len] = 0;
 }
 
-bool GeometryEditor::create_gui_frame(uint32_t image_idx)
+void GeometryEditor::gui_status_bar()
 {
-    char window_title[sizeof(name) + 36];
-    snprintf(window_title, sizeof(window_title), "Geometry Editor - %s###Geometry Editor", name);
-
-    const ImGuiWindowFlags geom_win_flags =
-        ImGuiWindowFlags_NoScrollWithMouse |
-        ImGuiWindowFlags_NoScrollbar;
-
-    if ( ! ImGui::Begin(window_title, nullptr, geom_win_flags)) {
-        ImGui::End();
-        return true;
-    }
-
-    // Create status bar
-    const ImVec2 item_pos     = ImGui::GetItemRectMin();
-    const ImVec2 win_size     = ImGui::GetWindowSize();
+    const ImVec2 item_pos = ImGui::GetItemRectMin();
+    const ImVec2 win_size = ImGui::GetWindowSize();
 
     ImGui::SetNextWindowPos(ImVec2(item_pos.x,
                                    item_pos.y + win_size.y - ImGui::GetFrameHeight()));
@@ -108,6 +95,23 @@ bool GeometryEditor::create_gui_frame(uint32_t image_idx)
         }
     }
     ImGui::EndChild();
+}
+
+bool GeometryEditor::create_gui_frame(uint32_t image_idx)
+{
+    char window_title[sizeof(name) + 36];
+    snprintf(window_title, sizeof(window_title), "Geometry Editor - %s###Geometry Editor", name);
+
+    const ImGuiWindowFlags geom_win_flags =
+        ImGuiWindowFlags_NoScrollWithMouse |
+        ImGuiWindowFlags_NoScrollbar;
+
+    if ( ! ImGui::Begin(window_title, nullptr, geom_win_flags)) {
+        ImGui::End();
+        return true;
+    }
+
+    gui_status_bar();
 
     ImGui::End();
 
