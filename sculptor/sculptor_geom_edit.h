@@ -13,22 +13,27 @@ class GeometryEditor: public Editor {
         bool draw_frame(VkCommandBuffer cmdbuf, uint32_t image_idx) override;
 
     private:
-        void gui_status_bar();
-
         struct Resources {
             Image           color;
             Image           depth;
             Image           selection;
             Image           host_selection;
-            bool            selection_pending;
-            VkDescriptorSet gui_texture;
+            bool            selection_pending = false;
+            VkDescriptorSet gui_texture       = VK_NULL_HANDLE;
         };
 
         struct View {
-            uint32_t  width;
-            uint32_t  height;
+            uint32_t  width  = 0;
+            uint32_t  height = 0;
             Resources res[max_swapchain_size];
         };
+
+        bool alloc_view_resources(View*     dst_view,
+                                  uint32_t  width,
+                                  uint32_t  height,
+                                  VkSampler viewport_sampler);
+        void free_view_resources(View* dst_view);
+        void gui_status_bar();
 
         View view;
         char name[128] = { };
