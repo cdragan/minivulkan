@@ -3,6 +3,7 @@
 
 gui_project_name = sculptor
 
+all_sculptor_src_files += $(imgui_src_files)
 all_sculptor_src_files += $(libpng_src_files)
 all_sculptor_src_files += $(zlib_src_files)
 

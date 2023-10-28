@@ -112,13 +112,11 @@ endif
 ifeq ($(UNAME), Darwin)
     threed_src_files       += main_macos.mm
     threed_gui_src_files   += gui_macos.mm
-    imgui_src_files        += imgui/backends/imgui_impl_osx.mm
     threed_nogui_src_files += nogui_macos.mm
 endif
 
 ifeq ($(UNAME), Windows)
     threed_src_files       += main_windows.cpp
-    imgui_src_files        += imgui/backends/imgui_impl_win32.cpp
     threed_gui_src_files   += gui_windows.cpp
     threed_nogui_src_files += nogui_windows.cpp
 
@@ -129,16 +127,6 @@ endif
 
 vmath_unit_src_files += vmath_unit.cpp
 
-imgui_src_files += imgui/imgui.cpp
-imgui_src_files += imgui/imgui_draw.cpp
-imgui_src_files += imgui/imgui_tables.cpp
-imgui_src_files += imgui/imgui_widgets.cpp
-imgui_src_files += imgui/backends/imgui_impl_vulkan.cpp
-ifneq ($(debug), 0)
-    imgui_src_files += imgui/imgui_demo.cpp
-endif
-
-threed_gui_src_files += $(imgui_src_files)
 threed_gui_src_files += gui.cpp
 threed_gui_src_files += gui_config.cpp
 
@@ -244,6 +232,7 @@ endef
 projects += example
 projects += sculptor
 projects += synth
+projects += thirdparty/imgui
 projects += thirdparty/libpng
 projects += thirdparty/zlib
 
@@ -507,11 +496,9 @@ endef
 
 $(foreach file, $(filter %.cpp, $(all_src_files)), $(eval $(call ASM_RULE,$(file))))
 
-$(foreach file, $(filter-out $(imgui_src_files), $(all_src_files)), $(call OBJ_FROM_SRC, $(file))): CFLAGS += $(WFLAGS)
+$(foreach file, $(filter-out $(imgui_src_files) $(libpng_src_files) $(zlib_src_files), $(all_src_files)), $(call OBJ_FROM_SRC, $(file))): CFLAGS += $(WFLAGS)
 
-$(foreach file, $(imgui_src_files), $(call OBJ_FROM_SRC, $(file))): CFLAGS += -DIMGUI_IMPL_VULKAN_NO_PROTOTYPES
-
-$(foreach file, $(all_gui_src_files), $(call OBJ_FROM_SRC, $(file))): CFLAGS += -Iimgui
+$(foreach file, $(all_gui_src_files), $(call OBJ_FROM_SRC, $(file))): CFLAGS += -Ithirdparty/imgui/src
 
 shaders_out_dir := $(out_dir_base)/shaders
 

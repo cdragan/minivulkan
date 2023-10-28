@@ -4,6 +4,8 @@
 gui_project_name   = example_gui
 nogui_project_name = example
 
+all_example_gui_src_files += $(imgui_src_files)
+
 src_files       += example.cpp
 gui_src_files   += example_gui.cpp
 nogui_src_files += example_nogui.cpp

@@ -6,8 +6,8 @@
 #include "../gui.h"
 #include "../minivulkan.h"
 
-#include "../imgui/imgui.h"
-#include "../imgui/backends/imgui_impl_vulkan.h"
+#include "imgui.h"
+#include "backends/imgui_impl_vulkan.h"
 
 const int gui_config_flags = ImGuiConfigFlags_NavEnableKeyboard;
 

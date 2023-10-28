@@ -4,8 +4,8 @@
 #include "sculptor_geom_edit.h"
 #include "../mstdc.h"
 
-#include "../imgui/imgui.h"
-#include "../imgui/backends/imgui_impl_vulkan.h"
+#include "imgui.h"
+#include "backends/imgui_impl_vulkan.h"
 
 #include <stdio.h>
 
