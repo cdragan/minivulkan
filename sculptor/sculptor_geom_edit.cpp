@@ -45,6 +45,9 @@ User input
 - Select
     - Drag rectangle to select
     - Additive/subtractive selection
+    - 1: vertices, 2: edges, 3: faces
+    - Shift+1/2/3: enable selection of multiple types of items (vertices, edges, faces)
+    - Shift: select multiple items, one by one
 - Manipulation
     - G :: grab and move objects
         - click to finish
@@ -58,6 +61,28 @@ User input
     - Ctrl + Mouse :: snap
 - Edit
     - E :: extrude - add faces/edges, begin moving
+
+Toolbar in Object Edit mode
+---------------------------
+
+- Select
+    - Faces
+    - Edges
+    - Vertices
+- Viewport
+    - Perspective view
+    - Orthographic view
+    - Pan
+    - Rotate
+    - Zoom
+- Transform
+    - Move
+    - Rotate
+    - Scale
+- Edit
+    - Delete
+    - Extrude
+
 */
 
 void GeometryEditor::set_name(const char* new_name)
