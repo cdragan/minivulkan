@@ -5,7 +5,6 @@ lib_name = libpng
 
 libpng_src_files += png.c
 libpng_src_files += pngerror.c
-libpng_src_files += png.c
 libpng_src_files += pngget.c
 libpng_src_files += pngmem.c
 libpng_src_files += pngpread.c
