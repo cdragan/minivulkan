@@ -188,6 +188,7 @@ define include_project
 project_path = $1
 gui_project_name =
 nogui_project_name =
+lib_name =
 src_files =
 gui_src_files =
 nogui_src_files =
@@ -231,6 +232,10 @@ ifneq ($$(nogui_project_name),)
     nogui_targets         += $$(project_$1_nogui_name)
 endif
 
+ifneq ($$(lib_name),)
+    $$(lib_name)_src_files := $$(addprefix $1/,$$(project_$1_src_files))
+endif
+
 endef
 
 ##############################################################################
@@ -239,6 +244,8 @@ endef
 projects += example
 projects += sculptor
 projects += synth
+projects += thirdparty/libpng
+projects += thirdparty/zlib
 
 $(foreach project,$(projects),$(eval $(call include_project,$(project))))
 
@@ -478,6 +485,13 @@ $$(call OBJ_FROM_SRC,$1): $1 | $$(out_dir)
 endef
 
 $(foreach file, $(filter %.mm, $(all_src_files)), $(eval $(call MM_RULE,$(file))))
+
+define C_RULE
+$$(call OBJ_FROM_SRC,$1): $1 | $$(out_dir)
+	$$(CC) $$(CFLAGS) $$(LTO_CFLAGS) -c $$(call COMPILER_OUTPUT,$$@) $$<
+endef
+
+$(foreach file, $(filter %.c, $(all_src_files)), $(eval $(call C_RULE,$(file))))
 
 define CPP_RULE
 $$(call OBJ_FROM_SRC,$1): $1 | $$(out_dir)

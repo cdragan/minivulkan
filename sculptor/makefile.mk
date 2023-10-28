@@ -3,6 +3,9 @@
 
 gui_project_name = sculptor
 
+all_sculptor_src_files += $(libpng_src_files)
+all_sculptor_src_files += $(zlib_src_files)
+
 src_files += sculptor.cpp
 src_files += sculptor_geometry.cpp
 src_files += sculptor_materials.cpp
