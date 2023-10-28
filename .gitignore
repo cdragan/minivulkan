@@ -6,3 +6,6 @@ Out
 
 # ImGui config file
 imgui.ini
+
+# MSVC files
+vc140.pdb

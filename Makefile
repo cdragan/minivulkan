@@ -275,6 +275,7 @@ ifeq ($(UNAME), Windows)
     LDFLAGS += -nologo
     LDFLAGS += $(win_libs)
 
+    CC   = cl.exe
     CXX  = cl.exe
     LINK = link.exe
 

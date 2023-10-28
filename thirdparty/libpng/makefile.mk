@@ -23,4 +23,4 @@ src_dir := libpng-1.6.40
 
 src_files += $(addprefix $(src_dir)/,$(libpng_src_files))
 
-$(call OBJ_FROM_SRC,$(libpng_src_files)): CFLAGS += -Ithirdparty/libpng
+$(call OBJ_FROM_SRC,$(libpng_src_files)): CFLAGS += -Ithirdparty/libpng -Ithirdparty/zlib/zlib-1.3
