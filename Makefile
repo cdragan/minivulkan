@@ -508,6 +508,8 @@ $(foreach file, $(filter-out $(imgui_src_files) $(libpng_src_files) $(zlib_src_f
 
 $(foreach file, $(all_gui_src_files), $(call OBJ_FROM_SRC, $(file))): CFLAGS += -Ithirdparty/imgui/src
 
+$(call OBJ_FROM_SRC, load_png.cpp): CFLAGS += -Ithirdparty/libpng
+
 shaders_out_dir := $(out_dir_base)/shaders
 
 ifeq ($(spirv_opt), 0)
