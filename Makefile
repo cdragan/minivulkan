@@ -194,6 +194,7 @@ ifneq ($$(gui_project_name),)
     all_$$(gui_project_name)_src_files += $$(addprefix $1/,$$(project_$1_src_files))
     all_$$(gui_project_name)_src_files += $$(addprefix $1/,$$(project_$1_gui_src_files))
     all_$$(gui_project_name)_src_files += $$(lib_src_files)
+    all_$$(gui_project_name)_src_files += $$(lib_gui_src_files)
     all_$$(gui_project_name)_src_files += $$(threed_src_files)
     all_$$(gui_project_name)_src_files += $$(threed_gui_src_files)
 
@@ -222,6 +223,7 @@ endif
 
 ifneq ($$(lib_name),)
     $$(lib_name)_src_files := $$(addprefix $1/,$$(project_$1_src_files))
+    lib_gui_src_files      += $$(addprefix $1/,$$(project_$1_src_files))
 endif
 
 endef

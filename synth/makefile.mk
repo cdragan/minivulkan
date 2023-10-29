@@ -3,6 +3,4 @@
 
 gui_project_name = synth
 
-all_synth_src_files += $(imgui_src_files)
-
 src_files += synth.cpp
