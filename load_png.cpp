@@ -24,8 +24,8 @@ bool load_png(const char* filename, Image* image, VkCommandBuffer cmd_buf)
         png_infop   info_ptr;
 
         public:
-            destroy(FILE* file, png_structp png_ptr, png_infop info_ptr)
-                : file(file), png_ptr(png_ptr), info_ptr(info_ptr) { }
+            destroy(FILE* in_file, png_structp in_png_ptr, png_infop in_info_ptr)
+                : file(in_file), png_ptr(in_png_ptr), info_ptr(in_info_ptr) { }
             ~destroy()
             {
                 png_destroy_read_struct(&png_ptr, &info_ptr, nullptr);
