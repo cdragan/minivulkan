@@ -271,7 +271,13 @@ bool GeometryEditor::create_gui_frame(uint32_t image_idx)
         ImGuiWindowFlags_NoScrollWithMouse |
         ImGuiWindowFlags_NoScrollbar;
 
-    if ( ! ImGui::Begin(window_title, nullptr, geom_win_flags)) {
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2{0, 0});
+
+    const bool window_ok = ImGui::Begin(window_title, nullptr, geom_win_flags);
+
+    ImGui::PopStyleVar();
+
+    if ( ! window_ok) {
         ImGui::End();
         return true;
     }
