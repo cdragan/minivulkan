@@ -50,6 +50,11 @@ bool Resource::flush_range(VkDeviceSize offset, VkDeviceSize size)
     return res == VK_SUCCESS;
 }
 
+bool Resource::flush_whole()
+{
+    return flush_range(0, alloc_size);
+}
+
 bool Image::allocate(const ImageInfo& image_info)
 {
     const bool host_access = (image_info.heap_usage == Usage::host_only) ||
@@ -276,11 +281,6 @@ bool Buffer::allocate(Usage              heap_usage,
 void Buffer::cpu_fill(const void* data, uint32_t size)
 {
     mstd::mem_copy(get_ptr<void*>(), data, size);
-}
-
-bool Buffer::flush()
-{
-    return flush_range(0, alloc_size);
 }
 
 bool Buffer::flush(VkDeviceSize idx, VkDeviceSize stride)

@@ -48,6 +48,8 @@ class Resource {
         void* get_raw_ptr() const;
         void* get_raw_ptr(VkDeviceSize idx, VkDeviceSize stride) const;
         bool flush_range(VkDeviceSize offset, VkDeviceSize size);
+        bool flush_whole();
+
 
         MemoryHeap*  owning_heap = nullptr;
         VkDeviceSize heap_offset = 0;
@@ -77,6 +79,7 @@ class Image: public Resource {
         uint32_t       get_pitch() const { return pitch; }
 
         bool allocate(const ImageInfo& image_info);
+        bool flush() { return flush_whole(); }
         void destroy();
 
         struct Transition {
@@ -124,7 +127,7 @@ class Buffer: public Resource {
                       VkFormat           format,
                       VkBufferUsageFlags usage);
         void cpu_fill(const void* data, uint32_t size);
-        bool flush();
+        bool flush() { return flush_whole(); }
         bool flush(VkDeviceSize idx, VkDeviceSize stride);
 
     private:
