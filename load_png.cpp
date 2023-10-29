@@ -3,7 +3,10 @@
 
 #include "load_png.h"
 #include "d_printf.h"
+#include "mstdc.h"
+
 #include "thirdparty/libpng/libpng-1.6.40/png.h"
+
 #include <algorithm>
 
 bool load_png(const char* filename, Image* image, VkCommandBuffer cmd_buf)
@@ -106,7 +109,7 @@ bool load_png(const char* filename, Image* image, VkCommandBuffer cmd_buf)
     uint8_t* host_ptr = host_image.get_ptr<uint8_t>();
 
     for (uint32_t i = 0; i < height; i++, host_ptr += host_image.get_pitch())
-        memcpy(host_ptr, row_pointers[i], width * 4);
+        mstd::mem_copy(host_ptr, row_pointers[i], width * 4);
 
     if ( ! host_image.flush())
         return false;
