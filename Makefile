@@ -129,6 +129,7 @@ vmath_unit_src_files += vmath_unit.cpp
 
 threed_gui_src_files += gui.cpp
 threed_gui_src_files += gui_config.cpp
+threed_gui_src_files += load_png.cpp
 
 threed_nogui_src_files += nogui.cpp
 
