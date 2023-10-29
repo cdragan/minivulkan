@@ -210,6 +210,7 @@ endif
 ifneq ($$(nogui_project_name),)
     all_$$(nogui_project_name)_src_files += $$(addprefix $1/,$$(project_$1_src_files))
     all_$$(nogui_project_name)_src_files += $$(lib_src_files)
+    all_$$(nogui_project_name)_src_files += $$(lib_nogui_src_files)
 
     ifeq ($$(use_threed), 1)
         all_$$(nogui_project_name)_src_files += $$(addprefix $1/,$$(project_$1_nogui_src_files))
@@ -223,8 +224,11 @@ ifneq ($$(nogui_project_name),)
 endif
 
 ifneq ($$(lib_name),)
-    $$(lib_name)_src_files := $$(addprefix $1/,$$(project_$1_src_files))
-    lib_gui_src_files      += $$(addprefix $1/,$$(project_$1_src_files))
+    $$(lib_name)_src_files =  $$(addprefix $1/,$$(project_$1_gui_src_files) $$(project_$1_nogui_src_files))
+    lib_gui_src_files      += $$(addprefix $1/,$$(project_$1_gui_src_files))
+    lib_nogui_src_files    += $$(addprefix $1/,$$(project_$1_nogui_src_files))
+    all_src_files          += $$(addprefix $1/,$$(project_$1_gui_src_files))
+    all_src_files          += $$(addprefix $1/,$$(project_$1_nogui_src_files))
 endif
 
 endef
