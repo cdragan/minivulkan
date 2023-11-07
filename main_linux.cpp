@@ -6,7 +6,6 @@
 #include "main_linux.h"
 #include "minivulkan.h"
 
-#include <stdlib.h>
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
@@ -189,8 +188,6 @@ static int event_loop(Window* w)
                     handle_gui_event(event);
                     break;
             }
-
-            free(event);
         }
 
         if ( ! draw_frame())

@@ -7,6 +7,7 @@
 #include "imgui.h"
 
 #include <assert.h>
+#include <stdlib.h>
 #include <xcb/xcb.h>
 
 const uint32_t* get_window_events()
@@ -213,6 +214,8 @@ void handle_key_press(void* event)
     xcb_key_press_event_t* const key_event = static_cast<xcb_key_press_event_t*>(event);
 
     handle_key_event(key_event->detail, key_event->state, true);
+
+    free(event);
 }
 
 static void handle_key_release(xcb_key_release_event_t* event)
@@ -294,4 +297,6 @@ void handle_gui_event(void* event)
             ImGui::GetIO().AddFocusEvent(false);
             break;
     }
+
+    free(event);
 }
