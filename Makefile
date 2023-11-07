@@ -336,7 +336,7 @@ ifeq ($(UNAME), Linux)
     LDFLAGS += -lxcb -lxcb-xfixes -ldl
 
     ifeq ($(debug), 0)
-        STRIP = strip
+        STRIP = strip -R .note.* -R .comment -R .eh_frame*
 
         LDFLAGS += -Wl,--gc-sections -Wl,--as-needed
 
