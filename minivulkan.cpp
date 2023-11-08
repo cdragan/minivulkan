@@ -365,7 +365,7 @@ static bool init_instance()
                         d_printf("    %s\n", ext_props[j].extensionName);
 
                     static const char validation_features_ext[] = "VK_EXT_validation_features";
-                    if (mstd::strcmp(ext_props[i].extensionName, validation_features_ext) == 0)
+                    if (mstd::strcmp(ext_props[j].extensionName, validation_features_ext) == 0)
                         validation_features_str = validation_features_ext;
                 }
             }
@@ -381,8 +381,12 @@ static bool init_instance()
 
                     enabled_instance_extensions[instance_info.enabledExtensionCount] = validation_features_str;
                     ++instance_info.enabledExtensionCount;
+                    if (do_print)
+                        d_printf("Enable extension %s\n", validation_features_str);
 
                     instance_info.pNext = &validation_features;
+
+                    d_printf("Enable layer %s\n", layer_props[i].layerName);
                 }
             }
         }
