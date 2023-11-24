@@ -176,11 +176,11 @@ static int event_loop(Window* w)
                     xcb_key_press_event_t* const key_event =
                         reinterpret_cast<xcb_key_press_event_t*>(event);
 
-                    handle_key_press(event);
-
                     constexpr uint8_t keycode_esc = 9;
                     if (key_event->detail == keycode_esc)
                         quit = true;
+
+                    handle_key_press(event);
                     break;
                 }
 
