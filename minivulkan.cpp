@@ -302,7 +302,7 @@ static bool init_instance()
             d_printf("    %s\n", ext_props[i].extensionName);
     }
     else
-        d_printf("Tip: Set EXTENSIONS env var to print extensions and layers\n");
+        d_printf("Tip: Set EXTENSIONS env var to print all available extensions and layers\n");
 #endif
 
     // List of extensions declared in vulkan_extensions.h
@@ -381,8 +381,7 @@ static bool init_instance()
 
                     enabled_instance_extensions[instance_info.enabledExtensionCount] = validation_features_str;
                     ++instance_info.enabledExtensionCount;
-                    if (do_print)
-                        d_printf("Enable extension %s\n", validation_features_str);
+                    d_printf("Enable extension %s\n", validation_features_str);
 
                     instance_info.pNext = &validation_features;
 
