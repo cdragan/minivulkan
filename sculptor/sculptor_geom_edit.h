@@ -9,7 +9,9 @@ class GeometryEditor: public Editor {
     public:
         ~GeometryEditor() override = default;
         void set_name(const char* new_name);
-        bool create_gui_frame(uint32_t image_idx) override;
+        bool create_gui_frame(uint32_t image_idx, bool* need_realloc) override;
+        bool allocate_resources() override;
+        void free_resources() override;
         bool draw_frame(VkCommandBuffer cmdbuf, uint32_t image_idx) override;
 
     private:
@@ -33,8 +35,10 @@ class GeometryEditor: public Editor {
                                   uint32_t  height,
                                   VkSampler viewport_sampler);
         void free_view_resources(View* dst_view);
-        void gui_status_bar();
+        float gui_status_bar();
 
-        View view;
-        char name[128] = { };
+        View     view;
+        uint32_t window_width  = 0;
+        uint32_t window_height = 0;
+        char     name[128]     = { };
 };

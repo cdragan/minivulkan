@@ -92,7 +92,8 @@ static int viewport_mouse = -1;
 
 static MouseMode mouse_mode = MouseMode::select_faces;
 
-const unsigned gui_num_descriptors = mstd::array_size(viewports) * max_swapchain_size;
+// +1 for geometry editor
+const unsigned gui_num_descriptors = (mstd::array_size(viewports) + 1) * max_swapchain_size;
 
 static VkSampler viewport_sampler;
 
@@ -483,22 +484,24 @@ static void free_viewport_images()
     }
 }
 
+void notify_gui_heap_freed()
+{
+    geometry_editor.free_resources();
+
+    free_viewport_images();
+}
+
 static bool destroy_viewports()
 {
     if ( ! idle_queue())
         return false;
 
-    free_viewport_images();
+    notify_gui_heap_freed();
 
     return true;
 }
 
-void notify_gui_heap_freed()
-{
-    free_viewport_images();
-}
-
-static bool allocate_viewports()
+static bool allocate_viewports(bool geom_edit)
 {
     if ( ! viewports_allocated)
         heap_low_checkpoint = mem_mgr.get_heap_checkpoint();
@@ -612,6 +615,9 @@ static bool allocate_viewports()
             }
         }
     }
+
+    if (geom_edit && ! geometry_editor.allocate_resources())
+        return false;
 
     heap_high_checkpoint = mem_mgr.get_heap_checkpoint();
     if (heap_high_checkpoint != heap_low_checkpoint)
@@ -729,6 +735,15 @@ static bool create_gui_frame(uint32_t image_idx)
 
     bool viewports_changed = false;
 
+    if (geom_edit_enabled) {
+        bool need_realloc = false;
+        if ( ! geometry_editor.create_gui_frame(image_idx, &need_realloc))
+            return false;
+
+        if (need_realloc)
+            viewports_changed = true;
+    }
+
     for (Viewport& viewport : viewports) {
         if ( ! viewport.enabled)
             continue;
@@ -835,10 +850,7 @@ static bool create_gui_frame(uint32_t image_idx)
     if (viewports_changed && ! destroy_viewports())
         return false;
 
-    if ( ! allocate_viewports())
-        return false;
-
-    if (geom_edit_enabled && ! geometry_editor.create_gui_frame(image_idx))
+    if ( ! allocate_viewports(geom_edit_enabled))
         return false;
 
     return true;

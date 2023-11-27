@@ -13,6 +13,8 @@ class Editor {
         Editor& operator=(const Editor&) = delete;
         virtual ~Editor() = default;
 
-        virtual bool create_gui_frame(uint32_t image_idx) = 0;
+        virtual bool create_gui_frame(uint32_t image_idx, bool* need_realloc) = 0;
+        virtual bool allocate_resources() = 0;
+        virtual void free_resources() = 0;
         virtual bool draw_frame(VkCommandBuffer cmdbuf, uint32_t image_idx) = 0;
 };

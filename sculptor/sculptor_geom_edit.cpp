@@ -65,6 +65,16 @@ User input
 Toolbar in Object Edit mode
 ---------------------------
 
+- File
+    - New
+    - Open
+    - Save
+- Edit
+    - Undo
+    - Redo
+    - Copy
+    - Paste
+    - Cut
 - Select
     - Faces
     - Edges
@@ -93,11 +103,48 @@ void GeometryEditor::set_name(const char* new_name)
     name[len] = 0;
 }
 
+bool GeometryEditor::allocate_resources()
+{
+    static VkSampler viewport_sampler;
+
+    if ( ! viewport_sampler) {
+        static VkSamplerCreateInfo sampler_info = {
+            VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
+            nullptr,
+            0,                                          // flags
+            VK_FILTER_NEAREST,                          // magFilter
+            VK_FILTER_NEAREST,                          // minFilter
+            VK_SAMPLER_MIPMAP_MODE_NEAREST,             // mipmapMode
+            VK_SAMPLER_ADDRESS_MODE_REPEAT,             // addressModeU
+            VK_SAMPLER_ADDRESS_MODE_REPEAT,             // addressModeV
+            VK_SAMPLER_ADDRESS_MODE_REPEAT,             // addressModeW
+            0,                                          // mipLodBias
+            VK_FALSE,                                   // anisotropyEnble
+            0,                                          // maxAnisotropy
+            VK_FALSE,                                   // compareEnable
+            VK_COMPARE_OP_NEVER,                        // compareOp
+            0,                                          // minLod
+            0,                                          // maxLod
+            VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK,    // borderColor
+            VK_FALSE                                    // unnormailzedCoordinates
+        };
+
+        VkResult res = CHK(vkCreateSampler(vk_dev, &sampler_info, nullptr, &viewport_sampler));
+        if (res != VK_SUCCESS)
+            return false;
+    }
+
+    return alloc_view_resources(&view, window_width, window_height, viewport_sampler);
+}
+
 bool GeometryEditor::alloc_view_resources(View*     dst_view,
                                           uint32_t  width,
                                           uint32_t  height,
                                           VkSampler viewport_sampler)
 {
+    if (dst_view->res[0].color.get_image())
+        return true;
+
     dst_view->width  = width;
     dst_view->height = height;
 
@@ -158,7 +205,7 @@ bool GeometryEditor::alloc_view_resources(View*     dst_view,
             Usage::host_only
         };
 
-        // TODO specify and allocate maximum selection size
+        // TODO start with large size, only grow
         select_query_host_info.width  = width;
         select_query_host_info.height = height;
 
@@ -171,8 +218,10 @@ bool GeometryEditor::alloc_view_resources(View*     dst_view,
         if ( ! res.selection.allocate(select_query_info))
             return false;
 
+#if 0
         if ( ! res.host_selection.get_view() && ! res.host_selection.allocate(select_query_host_info))
             return false;
+#endif
 
         res.selection_pending = false;
 
@@ -214,8 +263,16 @@ bool GeometryEditor::alloc_view_resources(View*     dst_view,
     return true;
 }
 
+void GeometryEditor::free_resources()
+{
+    free_view_resources(&view);
+}
+
 void GeometryEditor::free_view_resources(View* dst_view)
 {
+    if ( ! dst_view->res[0].color.get_image())
+        return;
+
     dst_view->width  = 0;
     dst_view->height = 0;
 
@@ -230,13 +287,15 @@ void GeometryEditor::free_view_resources(View* dst_view)
     }
 }
 
-void GeometryEditor::gui_status_bar()
+float GeometryEditor::gui_status_bar()
 {
     const ImVec2 item_pos = ImGui::GetItemRectMin();
     const ImVec2 win_size = ImGui::GetWindowSize();
 
+    const float height = ImGui::GetFrameHeight();
+
     ImGui::SetNextWindowPos(ImVec2(item_pos.x,
-                                   item_pos.y + win_size.y - ImGui::GetFrameHeight()));
+                                   item_pos.y + win_size.y - height));
 
     const ImGuiWindowFlags status_flags =
         ImGuiWindowFlags_NoDecoration |
@@ -260,9 +319,11 @@ void GeometryEditor::gui_status_bar()
         }
     }
     ImGui::EndChild();
+
+    return height;
 }
 
-bool GeometryEditor::create_gui_frame(uint32_t image_idx)
+bool GeometryEditor::create_gui_frame(uint32_t image_idx, bool* need_realloc)
 {
     char window_title[sizeof(name) + 36];
     snprintf(window_title, sizeof(window_title), "Geometry Editor - %s###Geometry Editor", name);
@@ -282,7 +343,20 @@ bool GeometryEditor::create_gui_frame(uint32_t image_idx)
         return true;
     }
 
-    gui_status_bar();
+    const float status_bar_height = gui_status_bar();
+
+    const ImVec2 content_size = ImGui::GetWindowSize();
+
+    if ((static_cast<uint32_t>(content_size.x) != window_width) ||
+        (static_cast<uint32_t>(content_size.y - status_bar_height) != window_height))
+        *need_realloc = true;
+
+    window_width  = static_cast<uint32_t>(content_size.x);
+    window_height = static_cast<uint32_t>(content_size.y - status_bar_height);
+
+    ImGui::Image(reinterpret_cast<ImTextureID>(view.res[image_idx].gui_texture),
+                 ImVec2{static_cast<float>(window_width),
+                        static_cast<float>(window_height)});
 
     ImGui::End();
 

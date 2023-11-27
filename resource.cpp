@@ -99,6 +99,7 @@ bool Image::allocate(const ImageInfo& image_info)
 
     VkDeviceSize offset;
     MemoryHeap*  heap;
+
     if ( ! mem_mgr.allocate_memory(memory_reqs, heap_usage, &offset, &heap))
         return false;
 
