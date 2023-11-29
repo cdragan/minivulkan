@@ -218,10 +218,8 @@ bool GeometryEditor::alloc_view_resources(View*     dst_view,
         if ( ! res.selection.allocate(select_query_info))
             return false;
 
-#if 0
-        if ( ! res.host_selection.get_view() && ! res.host_selection.allocate(select_query_host_info))
+        if ( ! res.host_selection.get_image() && ! res.host_selection.allocate(select_query_host_info))
             return false;
-#endif
 
         res.selection_pending = false;
 
