@@ -296,15 +296,10 @@ void GeometryEditor::free_view_resources(View* dst_view)
     }
 }
 
-float GeometryEditor::gui_status_bar()
+void GeometryEditor::gui_status_bar()
 {
     const ImVec2 item_pos = ImGui::GetItemRectMin();
     const ImVec2 win_size = ImGui::GetWindowSize();
-
-    const float height = ImGui::GetFrameHeight();
-
-    ImGui::SetNextWindowPos(ImVec2(item_pos.x,
-                                   item_pos.y + win_size.y - height));
 
     const ImGuiWindowFlags status_flags =
         ImGuiWindowFlags_NoDecoration |
@@ -328,8 +323,6 @@ float GeometryEditor::gui_status_bar()
         }
     }
     ImGui::EndChild();
-
-    return height;
 }
 
 bool GeometryEditor::create_gui_frame(uint32_t image_idx, bool* need_realloc)
@@ -352,20 +345,28 @@ bool GeometryEditor::create_gui_frame(uint32_t image_idx, bool* need_realloc)
         return true;
     }
 
-    const float status_bar_height = gui_status_bar();
+    const float frame_height = ImGui::GetFrameHeight();
 
     const ImVec2 content_size = ImGui::GetWindowSize();
 
-    if ((static_cast<uint32_t>(content_size.x) != window_width) ||
-        (static_cast<uint32_t>(content_size.y - status_bar_height) != window_height))
+    const uint32_t new_width  = static_cast<uint32_t>(content_size.x);
+    const uint32_t new_height = static_cast<uint32_t>(content_size.y - frame_height * 2);
+
+    if ((new_width != window_width) || (new_height != window_height))
         *need_realloc = true;
 
-    window_width  = static_cast<uint32_t>(content_size.x);
-    window_height = static_cast<uint32_t>(content_size.y - status_bar_height);
+    window_width  = new_width;
+    window_height = new_height;
+
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2{0, 0});
 
     ImGui::Image(reinterpret_cast<ImTextureID>(view.res[image_idx].gui_texture),
                  ImVec2{static_cast<float>(window_width),
                         static_cast<float>(window_height)});
+
+    ImGui::PopStyleVar();
+
+    gui_status_bar();
 
     ImGui::End();
 
@@ -374,5 +375,84 @@ bool GeometryEditor::create_gui_frame(uint32_t image_idx, bool* need_realloc)
 
 bool GeometryEditor::draw_frame(VkCommandBuffer cmdbuf, uint32_t image_idx)
 {
+    static VkRenderingAttachmentInfo color_att = {
+        VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+        nullptr,
+        VK_NULL_HANDLE,             // imageView
+        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+        VK_RESOLVE_MODE_NONE,
+        VK_NULL_HANDLE,             // resolveImageView
+        VK_IMAGE_LAYOUT_UNDEFINED,  // resolveImageLayout
+        VK_ATTACHMENT_LOAD_OP_CLEAR,
+        VK_ATTACHMENT_STORE_OP_STORE,
+        make_clear_color(0, 0, 0, 0)
+    };
+
+    static VkRenderingAttachmentInfo depth_att = {
+        VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+        nullptr,
+        VK_NULL_HANDLE,             // imageView
+        VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+        VK_RESOLVE_MODE_NONE,
+        VK_NULL_HANDLE,             // resolveImageView
+        VK_IMAGE_LAYOUT_UNDEFINED,  // resolveImageLayout
+        VK_ATTACHMENT_LOAD_OP_CLEAR,
+        VK_ATTACHMENT_STORE_OP_DONT_CARE,
+        make_clear_depth(0, 0)
+    };
+
+    static VkRenderingInfo rendering_info = {
+        VK_STRUCTURE_TYPE_RENDERING_INFO,
+        nullptr,
+        0,              // flags
+        { },            // renderArea
+        1,              // layerCount
+        0,              // viewMask
+        1,              // colorAttachmentCount
+        &color_att,
+        &depth_att,
+        nullptr         // pStencilAttachment
+    };
+
+    Resources& res = view.res[image_idx];
+
+    static const Image::Transition render_viewport_layout = {
+        VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+        0,
+        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+        VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
+    };
+    res.color.set_image_layout(cmdbuf, render_viewport_layout);
+
+    static const Image::Transition depth_init = {
+        VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+        0,
+        VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT,
+        VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT,
+        VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL
+    };
+
+    if (res.depth.layout != VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
+        res.depth.set_image_layout(cmdbuf, depth_init);
+
+    color_att.imageView  = res.color.get_view();
+    color_att.clearValue = make_clear_color(0.2f, 0.2f, 0.2f, 1);
+    depth_att.imageView  = res.depth.get_view();
+    rendering_info.renderArea.extent.width  = view.width;
+    rendering_info.renderArea.extent.height = view.height;
+
+    vkCmdBeginRenderingKHR(cmdbuf, &rendering_info);
+    vkCmdEndRenderingKHR(cmdbuf);
+
+    static const Image::Transition gui_image_layout = {
+        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+        0,
+        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+        VK_ACCESS_SHADER_READ_BIT,
+        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
+    };
+    res.color.set_image_layout(cmdbuf, gui_image_layout);
+
     return true;
 }

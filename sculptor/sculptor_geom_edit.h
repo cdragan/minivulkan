@@ -36,7 +36,7 @@ class GeometryEditor: public Editor {
                                   uint32_t  height,
                                   VkSampler viewport_sampler);
         void free_view_resources(View* dst_view);
-        float gui_status_bar();
+        void gui_status_bar();
 
         View     view;
         uint32_t window_width  = 0;

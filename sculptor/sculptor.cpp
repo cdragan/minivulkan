@@ -1271,9 +1271,9 @@ bool draw_frame(uint32_t image_idx, uint64_t time_ms, VkFence queue_fence)
         if (viewport.depth_buffer[image_idx].layout != VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
             viewport.depth_buffer[image_idx].set_image_layout(buf, depth_init);
 
-        color_att.imageView   = viewport.color_buffer[image_idx].get_view();
-        color_att.clearValue  = make_clear_color(0.2f, 0.2f, 0.2f, 1);
-        depth_att.imageView   = viewport.depth_buffer[image_idx].get_view();
+        color_att.imageView  = viewport.color_buffer[image_idx].get_view();
+        color_att.clearValue = make_clear_color(0.2f, 0.2f, 0.2f, 1);
+        depth_att.imageView  = viewport.depth_buffer[image_idx].get_view();
         rendering_info.renderArea.extent.width  = viewport.width;
         rendering_info.renderArea.extent.height = viewport.height;
 
