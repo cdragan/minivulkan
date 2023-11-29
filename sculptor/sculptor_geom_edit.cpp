@@ -2,6 +2,7 @@
 // Copyright (c) 2021-2023 Chris Dragan
 
 #include "sculptor_geom_edit.h"
+#include "../d_printf.h"
 #include "../mstdc.h"
 
 #include "imgui.h"
@@ -145,6 +146,13 @@ bool GeometryEditor::alloc_view_resources(View*     dst_view,
     if (dst_view->res[0].color.get_image())
         return true;
 
+    const uint32_t new_host_sel_size = mstd::align_up(width, 1024U) * mstd::align_up(height, 1024U);
+    const bool     update_host_sel   = new_host_sel_size > dst_view->host_sel_size;
+    if (update_host_sel) {
+        dst_view->host_sel_size = new_host_sel_size;
+        d_printf("Updating host selection surface\n");
+    }
+
     dst_view->width  = width;
     dst_view->height = height;
 
@@ -205,9 +213,11 @@ bool GeometryEditor::alloc_view_resources(View*     dst_view,
             Usage::host_only
         };
 
-        // TODO start with large size, only grow
-        select_query_host_info.width  = width;
-        select_query_host_info.height = height;
+        select_query_host_info.width  = mstd::align_up(width,  1024U);
+        select_query_host_info.height = mstd::align_up(height, 1024U);
+
+        if (update_host_sel)
+            res.host_selection.destroy();
 
         if ( ! res.color.allocate(color_info))
             return false;
@@ -218,7 +228,7 @@ bool GeometryEditor::alloc_view_resources(View*     dst_view,
         if ( ! res.selection.allocate(select_query_info))
             return false;
 
-        if ( ! res.host_selection.get_image() && ! res.host_selection.allocate(select_query_host_info))
+        if ( ! res.host_selection.allocate(select_query_host_info))
             return false;
 
         res.selection_pending = false;
@@ -280,6 +290,7 @@ void GeometryEditor::free_view_resources(View* dst_view)
         res.color.destroy();
         res.depth.destroy();
         res.selection.destroy();
+        res.host_selection.destroy_and_keep_memory();
 
         res.selection_pending = false;
     }

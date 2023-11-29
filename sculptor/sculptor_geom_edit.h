@@ -25,8 +25,9 @@ class GeometryEditor: public Editor {
         };
 
         struct View {
-            uint32_t  width  = 0;
-            uint32_t  height = 0;
+            uint32_t  width         = 0;
+            uint32_t  height        = 0;
+            uint32_t  host_sel_size = 0;
             Resources res[max_swapchain_size];
         };
 

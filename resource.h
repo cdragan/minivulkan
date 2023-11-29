@@ -50,7 +50,6 @@ class Resource {
         bool flush_range(VkDeviceSize offset, VkDeviceSize size);
         bool flush_whole();
 
-
         MemoryHeap*  owning_heap = nullptr;
         VkDeviceSize heap_offset = 0;
         VkDeviceSize alloc_size  = 0;
@@ -81,6 +80,7 @@ class Image: public Resource {
         bool allocate(const ImageInfo& image_info);
         bool flush() { return flush_whole(); }
         void destroy();
+        void destroy_and_keep_memory();
 
         struct Transition {
             VkPipelineStageFlags src_stage;

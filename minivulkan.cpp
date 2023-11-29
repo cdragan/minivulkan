@@ -1257,7 +1257,7 @@ bool init_vulkan(Window* w)
         return false;
 
     if ( ! mem_mgr.init_heaps(256u * 1024u * 1024u,
-                              64u * 1024u * 1024u,
+                              128u * 1024u * 1024u,
                               16u * 1024u * 1024u))
         return false;
 

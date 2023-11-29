@@ -97,20 +97,24 @@ bool Image::allocate(const ImageInfo& image_info)
     VkMemoryRequirements memory_reqs;
     vkGetImageMemoryRequirements(vk_dev, image, &memory_reqs);
 
-    VkDeviceSize offset;
-    MemoryHeap*  heap;
+    if ( ! owning_heap) {
+        if ( ! mem_mgr.allocate_memory(memory_reqs, heap_usage, &heap_offset, &owning_heap))
+            return false;
 
-    if ( ! mem_mgr.allocate_memory(memory_reqs, heap_usage, &offset, &heap))
-        return false;
+        alloc_size = memory_reqs.size;
+    }
+    else {
+        assert(alloc_size >= memory_reqs.size);
+    }
 
 #ifndef NDEBUG
-    if ( ! heap->check_memory_type(memory_reqs.memoryTypeBits)) {
+    if ( ! owning_heap->check_memory_type(memory_reqs.memoryTypeBits)) {
         d_printf("Device memory does not support requested image type\n");
         return false;
     }
 #endif
 
-    res = CHK(vkBindImageMemory(vk_dev, image, heap->get_memory(), offset));
+    res = CHK(vkBindImageMemory(vk_dev, image, owning_heap->get_memory(), heap_offset));
     if (res != VK_SUCCESS)
         return false;
 
@@ -145,10 +149,6 @@ bool Image::allocate(const ImageInfo& image_info)
         if (res != VK_SUCCESS)
             return false;
     }
-
-    owning_heap = heap;
-    heap_offset = offset;
-    alloc_size  = memory_reqs.size;
 
     if (host_access) {
         VkSubresourceLayout             subresource_layout;
@@ -209,6 +209,19 @@ void Image::destroy()
     if (image)
         vkDestroyImage(vk_dev, image, nullptr);
     mstd::mem_zero(this, sizeof(*this));
+}
+
+void Image::destroy_and_keep_memory()
+{
+    MemoryHeap*  heap   = owning_heap;
+    VkDeviceSize offset = heap_offset;
+    VkDeviceSize size   = alloc_size;
+
+    destroy();
+
+    owning_heap = heap;
+    heap_offset = offset;
+    alloc_size  = size;
 }
 
 bool Buffer::allocate(Usage              heap_usage,
