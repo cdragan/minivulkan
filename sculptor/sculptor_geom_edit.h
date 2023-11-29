@@ -18,8 +18,8 @@ class GeometryEditor: public Editor {
         struct Resources {
             Image           color;
             Image           depth;
-            Image           selection;
-            Image           host_selection;
+            Image           select_feedback;
+            Image           host_select_feedback;
             bool            selection_pending = false;
             VkDescriptorSet gui_texture       = VK_NULL_HANDLE;
         };
@@ -37,6 +37,8 @@ class GeometryEditor: public Editor {
                                   VkSampler viewport_sampler);
         void free_view_resources(View* dst_view);
         void gui_status_bar();
+        bool draw_geometry_view(VkCommandBuffer cmdbuf, View& dst_view, uint32_t image_idx);
+        bool draw_selection_feedback(VkCommandBuffer cmdbuf, View& dst_view, uint32_t image_idx);
 
         View     view;
         uint32_t window_width  = 0;

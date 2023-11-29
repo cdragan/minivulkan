@@ -150,7 +150,7 @@ bool GeometryEditor::alloc_view_resources(View*     dst_view,
     const bool     update_host_sel   = new_host_sel_size > dst_view->host_sel_size;
     if (update_host_sel) {
         dst_view->host_sel_size = new_host_sel_size;
-        d_printf("Updating host selection surface\n");
+        d_printf("Updating host selection feedback surface\n");
     }
 
     dst_view->width  = width;
@@ -217,7 +217,7 @@ bool GeometryEditor::alloc_view_resources(View*     dst_view,
         select_query_host_info.height = mstd::align_up(height, 1024U);
 
         if (update_host_sel)
-            res.host_selection.destroy();
+            res.host_select_feedback.destroy();
 
         if ( ! res.color.allocate(color_info))
             return false;
@@ -225,10 +225,10 @@ bool GeometryEditor::alloc_view_resources(View*     dst_view,
         if ( ! res.depth.allocate(depth_info))
             return false;
 
-        if ( ! res.selection.allocate(select_query_info))
+        if ( ! res.select_feedback.allocate(select_query_info))
             return false;
 
-        if ( ! res.host_selection.allocate(select_query_host_info))
+        if ( ! res.host_select_feedback.allocate(select_query_host_info))
             return false;
 
         res.selection_pending = false;
@@ -289,8 +289,8 @@ void GeometryEditor::free_view_resources(View* dst_view)
 
         res.color.destroy();
         res.depth.destroy();
-        res.selection.destroy();
-        res.host_selection.destroy_and_keep_memory();
+        res.select_feedback.destroy();
+        res.host_select_feedback.destroy_and_keep_memory();
 
         res.selection_pending = false;
     }
@@ -375,46 +375,57 @@ bool GeometryEditor::create_gui_frame(uint32_t image_idx, bool* need_realloc)
 
 bool GeometryEditor::draw_frame(VkCommandBuffer cmdbuf, uint32_t image_idx)
 {
-    static VkRenderingAttachmentInfo color_att = {
-        VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
-        nullptr,
-        VK_NULL_HANDLE,             // imageView
-        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-        VK_RESOLVE_MODE_NONE,
-        VK_NULL_HANDLE,             // resolveImageView
-        VK_IMAGE_LAYOUT_UNDEFINED,  // resolveImageLayout
-        VK_ATTACHMENT_LOAD_OP_CLEAR,
-        VK_ATTACHMENT_STORE_OP_STORE,
-        make_clear_color(0, 0, 0, 0)
-    };
+    if ( ! draw_geometry_view(cmdbuf, view, image_idx))
+        return false;
 
-    static VkRenderingAttachmentInfo depth_att = {
-        VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
-        nullptr,
-        VK_NULL_HANDLE,             // imageView
-        VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
-        VK_RESOLVE_MODE_NONE,
-        VK_NULL_HANDLE,             // resolveImageView
-        VK_IMAGE_LAYOUT_UNDEFINED,  // resolveImageLayout
-        VK_ATTACHMENT_LOAD_OP_CLEAR,
-        VK_ATTACHMENT_STORE_OP_DONT_CARE,
-        make_clear_depth(0, 0)
-    };
+    if ( ! draw_selection_feedback(cmdbuf, view, image_idx))
+        return false;
 
-    static VkRenderingInfo rendering_info = {
-        VK_STRUCTURE_TYPE_RENDERING_INFO,
-        nullptr,
-        0,              // flags
-        { },            // renderArea
-        1,              // layerCount
-        0,              // viewMask
-        1,              // colorAttachmentCount
-        &color_att,
-        &depth_att,
-        nullptr         // pStencilAttachment
-    };
+    return true;
+}
 
-    Resources& res = view.res[image_idx];
+static VkRenderingAttachmentInfo color_att = {
+    VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+    nullptr,
+    VK_NULL_HANDLE,             // imageView
+    VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+    VK_RESOLVE_MODE_NONE,
+    VK_NULL_HANDLE,             // resolveImageView
+    VK_IMAGE_LAYOUT_UNDEFINED,  // resolveImageLayout
+    VK_ATTACHMENT_LOAD_OP_CLEAR,
+    VK_ATTACHMENT_STORE_OP_STORE,
+    make_clear_color(0, 0, 0, 0)
+};
+
+static VkRenderingAttachmentInfo depth_att = {
+    VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+    nullptr,
+    VK_NULL_HANDLE,             // imageView
+    VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+    VK_RESOLVE_MODE_NONE,
+    VK_NULL_HANDLE,             // resolveImageView
+    VK_IMAGE_LAYOUT_UNDEFINED,  // resolveImageLayout
+    VK_ATTACHMENT_LOAD_OP_CLEAR,
+    VK_ATTACHMENT_STORE_OP_DONT_CARE,
+    make_clear_depth(0, 0)
+};
+
+static VkRenderingInfo rendering_info = {
+    VK_STRUCTURE_TYPE_RENDERING_INFO,
+    nullptr,
+    0,              // flags
+    { },            // renderArea
+    1,              // layerCount
+    0,              // viewMask
+    1,              // colorAttachmentCount
+    &color_att,
+    &depth_att,
+    nullptr         // pStencilAttachment
+};
+
+bool GeometryEditor::draw_geometry_view(VkCommandBuffer cmdbuf, View& dst_view, uint32_t image_idx)
+{
+    Resources& res = dst_view.res[image_idx];
 
     static const Image::Transition render_viewport_layout = {
         VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
@@ -439,8 +450,8 @@ bool GeometryEditor::draw_frame(VkCommandBuffer cmdbuf, uint32_t image_idx)
     color_att.imageView  = res.color.get_view();
     color_att.clearValue = make_clear_color(0.2f, 0.2f, 0.2f, 1);
     depth_att.imageView  = res.depth.get_view();
-    rendering_info.renderArea.extent.width  = view.width;
-    rendering_info.renderArea.extent.height = view.height;
+    rendering_info.renderArea.extent.width  = dst_view.width;
+    rendering_info.renderArea.extent.height = dst_view.height;
 
     vkCmdBeginRenderingKHR(cmdbuf, &rendering_info);
     vkCmdEndRenderingKHR(cmdbuf);
@@ -453,6 +464,74 @@ bool GeometryEditor::draw_frame(VkCommandBuffer cmdbuf, uint32_t image_idx)
         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
     };
     res.color.set_image_layout(cmdbuf, gui_image_layout);
+
+    return true;
+}
+
+bool GeometryEditor::draw_selection_feedback(VkCommandBuffer cmdbuf, View& dst_view, uint32_t image_idx)
+{
+    Resources& res = dst_view.res[image_idx];
+
+    static const Image::Transition render_viewport_layout = {
+        VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+        0,
+        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+        VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
+    };
+    res.select_feedback.set_image_layout(cmdbuf, render_viewport_layout);
+
+    assert(res.depth.layout == VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+
+    color_att.imageView                  = res.select_feedback.get_view();
+    color_att.clearValue.color.uint32[0] = 0;
+    depth_att.imageView                  = res.depth.get_view();
+    rendering_info.renderArea.extent.width  = dst_view.width;
+    rendering_info.renderArea.extent.height = dst_view.height;
+
+    vkCmdBeginRenderingKHR(cmdbuf, &rendering_info);
+    vkCmdEndRenderingKHR(cmdbuf);
+
+    static const Image::Transition transfer_src_image_layout = {
+        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+        0,
+        VK_PIPELINE_STAGE_TRANSFER_BIT,
+        VK_ACCESS_TRANSFER_READ_BIT,
+        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL
+    };
+    res.select_feedback.set_image_layout(cmdbuf, transfer_src_image_layout);
+
+    if (res.host_select_feedback.layout != VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL) {
+        static const Image::Transition transfer_dst_image_layout = {
+            VK_PIPELINE_STAGE_TRANSFER_BIT,
+            0,
+            VK_PIPELINE_STAGE_TRANSFER_BIT,
+            VK_ACCESS_TRANSFER_WRITE_BIT,
+            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL
+        };
+        res.host_select_feedback.set_image_layout(cmdbuf, transfer_dst_image_layout);
+    }
+
+    res.selection_pending = true;
+
+    static VkImageCopy region = {
+        { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
+        { },        // srcOffset
+        { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
+        { },        // dstOffset
+        { 0, 0, 1 } // extent
+    };
+
+    region.extent.width  = dst_view.width;
+    region.extent.height = dst_view.height;
+
+    vkCmdCopyImage(cmdbuf,
+                   res.select_feedback.get_image(),
+                   VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                   res.host_select_feedback.get_image(),
+                   VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                   1,
+                   &region);
 
     return true;
 }
