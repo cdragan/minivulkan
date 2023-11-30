@@ -423,17 +423,18 @@ static VkRenderingInfo rendering_info = {
     nullptr         // pStencilAttachment
 };
 
+static const Image::Transition render_viewport_layout = {
+    VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+    0,
+    VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+    VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+    VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
+};
+
 bool GeometryEditor::draw_geometry_view(VkCommandBuffer cmdbuf, View& dst_view, uint32_t image_idx)
 {
     Resources& res = dst_view.res[image_idx];
 
-    static const Image::Transition render_viewport_layout = {
-        VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-        0,
-        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-        VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
-        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
-    };
     res.color.set_image_layout(cmdbuf, render_viewport_layout);
 
     static const Image::Transition depth_init = {
@@ -472,13 +473,6 @@ bool GeometryEditor::draw_selection_feedback(VkCommandBuffer cmdbuf, View& dst_v
 {
     Resources& res = dst_view.res[image_idx];
 
-    static const Image::Transition render_viewport_layout = {
-        VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-        0,
-        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-        VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
-        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
-    };
     res.select_feedback.set_image_layout(cmdbuf, render_viewport_layout);
 
     assert(res.depth.layout == VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
