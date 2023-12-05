@@ -118,12 +118,9 @@ namespace {
 
 namespace Sculptor {
 
-void GeometryEditor::set_name(const char* new_name)
+const char* GeometryEditor::get_editor_name() const
 {
-    const uint32_t len = mstd::min(mstd::strlen(new_name),
-                                   static_cast<uint32_t>(sizeof(name)) - 1U);
-    mstd::mem_copy(name, new_name, len);
-    name[len] = 0;
+    return "Geometry Editor";
 }
 
 bool GeometryEditor::allocate_resources()
@@ -558,8 +555,9 @@ void GeometryEditor::gui_status_bar()
 
 bool GeometryEditor::create_gui_frame(uint32_t image_idx, bool* need_realloc)
 {
-    char window_title[sizeof(name) + 36];
-    snprintf(window_title, sizeof(window_title), "Geometry Editor - %s###Geometry Editor", name);
+    char window_title[sizeof(object_name) + 36];
+    snprintf(window_title, sizeof(window_title),
+             "%s - %s###Geometry Editor", get_editor_name(), get_object_name());
 
     const ImGuiWindowFlags geom_win_flags =
         ImGuiWindowFlags_NoScrollWithMouse |

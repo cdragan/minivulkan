@@ -12,7 +12,7 @@ namespace Sculptor {
 class GeometryEditor: public Editor {
     public:
         ~GeometryEditor() override = default;
-        void set_name(const char* new_name);
+        const char* get_editor_name() const override;
         bool create_gui_frame(uint32_t image_idx, bool* need_realloc) override;
         bool allocate_resources() override;
         void free_resources() override;
@@ -77,7 +77,6 @@ class GeometryEditor: public Editor {
         // - desc set 2: per-object resources
         VkDescriptorSet    desc_set[3]       = { };
         VkPipeline         gray_patch_mat    = VK_NULL_HANDLE;
-        char               name[128]         = { };
         Sculptor::Geometry patch_geometry;
         Buffer             materials_buf;
         Buffer             transforms_buf;

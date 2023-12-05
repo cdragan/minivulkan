@@ -82,6 +82,12 @@ namespace {
 
 static Sculptor::GeometryEditor geometry_editor;
 
+// Global list of all possible editor windows, this collection is used for generic handling
+// of editor windows, like drawing and event passing to visible editors
+static Sculptor::Editor* const editors[] = {
+    &geometry_editor
+};
+
 static Viewport viewports[] = {
     { "Front View", false, 0, ViewType::front,       { 0.0f, 0.0f, -2.0f }, { 4096.0f  } },
     { "3D View",    false, 1, ViewType::free_moving, { 0.0f, 0.0f,  0.0f }, {    0.25f }, 0.0f, 1.0f }
@@ -327,7 +333,7 @@ static void set_material_buf(const Sculptor::MaterialInfo& mat_info, uint32_t ma
 
 bool init_assets()
 {
-    geometry_editor.set_name("unnamed");
+    geometry_editor.set_object_name("unnamed");
 
     if ( ! create_samplers())
         return false;
@@ -486,7 +492,9 @@ static void free_viewport_images()
 
 void notify_gui_heap_freed()
 {
-    geometry_editor.free_resources();
+    for (Sculptor::Editor* editor : editors) {
+        editor->free_resources();
+    }
 
     free_viewport_images();
 }
@@ -501,7 +509,7 @@ static bool destroy_viewports()
     return true;
 }
 
-static bool allocate_viewports(bool geom_edit)
+static bool allocate_viewports()
 {
     if ( ! viewports_allocated)
         heap_low_checkpoint = mem_mgr.get_heap_checkpoint();
@@ -616,8 +624,9 @@ static bool allocate_viewports(bool geom_edit)
         }
     }
 
-    if (geom_edit && ! geometry_editor.allocate_resources())
-        return false;
+    for (Sculptor::Editor* editor : editors)
+        if (editor->enabled && ! editor->allocate_resources())
+            return false;
 
     heap_high_checkpoint = mem_mgr.get_heap_checkpoint();
     if (heap_high_checkpoint != heap_low_checkpoint)
@@ -709,8 +718,6 @@ static bool create_gui_frame(uint32_t image_idx)
 
     ImGui::DockSpaceOverViewport(ImGui::GetMainViewport(), ImGuiDockNodeFlags_PassthruCentralNode);
 
-    static bool geom_edit_enabled = true;
-
     ImGui::Begin("Hello, Window!");
     {
         const ImVec2 win_size = ImGui::GetWindowSize();
@@ -724,7 +731,11 @@ static bool create_gui_frame(uint32_t image_idx)
         for (Viewport& viewport : viewports)
             ImGui::Checkbox(viewport.name, &viewport.enabled);
 
-        ImGui::Checkbox("Geometry Editor", &geom_edit_enabled);
+        for (Sculptor::Editor* editor : editors) {
+            char name[128];
+            snprintf(name, sizeof(name), "%s: %s", editor->get_editor_name(), editor->get_object_name());
+            ImGui::Checkbox(name, &editor->enabled);
+        }
 
         ImGui::Separator();
 
@@ -735,9 +746,12 @@ static bool create_gui_frame(uint32_t image_idx)
 
     bool viewports_changed = false;
 
-    if (geom_edit_enabled) {
+    for (Sculptor::Editor* editor : editors) {
+        if ( ! editor->enabled)
+            continue;
+
         bool need_realloc = false;
-        if ( ! geometry_editor.create_gui_frame(image_idx, &need_realloc))
+        if ( ! editor->create_gui_frame(image_idx, &need_realloc))
             return false;
 
         if (need_realloc)
@@ -850,7 +864,7 @@ static bool create_gui_frame(uint32_t image_idx)
     if (viewports_changed && ! destroy_viewports())
         return false;
 
-    if ( ! allocate_viewports(geom_edit_enabled))
+    if ( ! allocate_viewports())
         return false;
 
     return true;
@@ -1353,8 +1367,9 @@ bool draw_frame(uint32_t image_idx, uint64_t time_ms, VkFence queue_fence)
         }
     }
 
-    if ( ! geometry_editor.draw_frame(buf, image_idx))
-        return false;
+    for (Sculptor::Editor* editor : editors)
+        if (editor->enabled && ! editor->draw_frame(buf, image_idx))
+            return false;
 
     if ( ! send_gui_to_gpu(buf, image_idx))
         return false;
