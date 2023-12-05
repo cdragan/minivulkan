@@ -13,7 +13,7 @@ class GeometryEditor: public Editor {
     public:
         ~GeometryEditor() override = default;
         const char* get_editor_name() const override;
-        bool create_gui_frame(uint32_t image_idx, bool* need_realloc) override;
+        bool create_gui_frame(uint32_t image_idx, bool* need_realloc, const MouseInfo& mouse) override;
         bool allocate_resources() override;
         void free_resources() override;
         bool draw_frame(VkCommandBuffer cmdbuf, uint32_t image_idx) override;

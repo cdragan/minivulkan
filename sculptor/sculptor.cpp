@@ -686,6 +686,8 @@ static bool create_gui_frame(uint32_t image_idx)
     const ImVec2 mouse_delta = ImVec2(abs_mouse_pos.x - prev_mouse_pos.x, abs_mouse_pos.y - prev_mouse_pos.y);
     prev_mouse_pos = abs_mouse_pos;
 
+    Sculptor::Editor::MouseInfo mouse_info = { abs_mouse_pos, mouse_delta, wheel_delta };
+
     if (ImGui::BeginMainMenuBar()) {
         if (ImGui::BeginMenu("File")) {
             if (ImGui::MenuItem("New")) {
@@ -748,7 +750,7 @@ static bool create_gui_frame(uint32_t image_idx)
             continue;
 
         bool need_realloc = false;
-        if ( ! editor->create_gui_frame(image_idx, &need_realloc))
+        if ( ! editor->create_gui_frame(image_idx, &need_realloc, mouse_info))
             return false;
 
         if (need_realloc)
