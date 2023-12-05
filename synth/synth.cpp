@@ -3,14 +3,12 @@
 
 #include "../d_printf.h"
 #include "../gui.h"
+#include "../gui_imgui.h"
 #include "../minivulkan.h"
 #include "../mstdc.h"
 #include "../resource.h"
 #include "../shaders.h"
 #include "../vmath.h"
-
-#include "imgui.h"
-#include "backends/imgui_impl_vulkan.h"
 
 const char app_name[] = "Sound Editor";
 

@@ -3,13 +3,11 @@
 
 #include "gui.h"
 
+#include "gui_imgui.h"
 #include "minivulkan.h"
 #include "mstdc.h"
 #include "resource.h"
 #include "d_printf.h"
-
-#include "imgui.h"
-#include "backends/imgui_impl_vulkan.h"
 
 float vk_surface_scale = 1.0f;
 

@@ -7,14 +7,12 @@
 
 #include "../d_printf.h"
 #include "../gui.h"
+#include "../gui_imgui.h"
 #include "../memory_heap.h"
 #include "../minivulkan.h"
 #include "../mstdc.h"
 #include "../shaders.h"
 #include "../vmath.h"
-
-#include "imgui.h"
-#include "backends/imgui_impl_vulkan.h"
 
 #include <math.h>
 
@@ -492,9 +490,8 @@ static void free_viewport_images()
 
 void notify_gui_heap_freed()
 {
-    for (Sculptor::Editor* editor : editors) {
+    for (Sculptor::Editor* editor : editors)
         editor->free_resources();
-    }
 
     free_viewport_images();
 }

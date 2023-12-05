@@ -3,7 +3,7 @@
 
 #include "main_macos.h"
 #include "gui.h"
-#include "backends/imgui_impl_osx.h"
+#include "thirdparty/imgui/src/backends/imgui_impl_osx.h"
 
 void init_mouse_tracking(NSViewController *view_controller, NSView *view)
 {

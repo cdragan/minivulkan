@@ -4,7 +4,7 @@
 #include "d_printf.h"
 #include "main_linux.h"
 
-#include "imgui.h"
+#include "thirdparty/imgui/src/imgui.h"
 
 #include <assert.h>
 #include <stdlib.h>

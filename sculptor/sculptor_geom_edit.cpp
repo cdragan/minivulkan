@@ -4,11 +4,9 @@
 #include "sculptor_geom_edit.h"
 #include "sculptor_materials.h"
 #include "../d_printf.h"
+#include "../gui_imgui.h"
 #include "../mstdc.h"
 #include "../shaders.h"
-
-#include "imgui.h"
-#include "backends/imgui_impl_vulkan.h"
 
 #include <stdio.h>
 
