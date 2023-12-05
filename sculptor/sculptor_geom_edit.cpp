@@ -551,7 +551,7 @@ void GeometryEditor::gui_status_bar()
     ImGui::EndChild();
 }
 
-bool GeometryEditor::create_gui_frame(uint32_t image_idx, bool* need_realloc, const MouseInfo& mouse)
+bool GeometryEditor::create_gui_frame(uint32_t image_idx, bool* need_realloc, const UserInput& input)
 {
     char window_title[sizeof(object_name) + 36];
     snprintf(window_title, sizeof(window_title),
@@ -596,7 +596,7 @@ bool GeometryEditor::create_gui_frame(uint32_t image_idx, bool* need_realloc, co
     // Detect if mouse is hovered over the rendered image and calculate relative position
     if (ImGui::IsItemHovered()) {
 #if 0
-        const vmath::vec2 hovered_pos = get_rel_mouse_pos(mouse);
+        const vmath::vec2 hovered_pos = get_rel_mouse_pos(input);
 #endif
     }
 
