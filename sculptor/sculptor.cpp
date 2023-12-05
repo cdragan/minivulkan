@@ -15,6 +15,7 @@
 #include "../vmath.h"
 
 #include <math.h>
+#include <stdio.h>
 
 const char app_name[] = "Object Editor";
 
