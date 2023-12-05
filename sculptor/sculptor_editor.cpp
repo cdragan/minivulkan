@@ -16,3 +16,27 @@ vmath::vec2 Sculptor::Editor::get_rel_mouse_pos(const UserInput& input)
     const vmath::vec2 abs_window_pos = ImGui::GetItemRectMin();
     return input.abs_mouse_pos - abs_window_pos;
 }
+
+namespace {
+    Sculptor::Editor* editor_with_mouse = nullptr;
+}
+
+void Sculptor::Editor::capture_mouse()
+{
+    editor_with_mouse = this;
+}
+
+void Sculptor::Editor::release_mouse()
+{
+    editor_with_mouse = nullptr;
+}
+
+bool Sculptor::Editor::has_captured_mouse() const
+{
+    return editor_with_mouse == this;
+}
+
+bool Sculptor::Editor::is_mouse_captured()
+{
+    return editor_with_mouse != nullptr;
+}

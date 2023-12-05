@@ -687,7 +687,17 @@ static bool create_gui_frame(uint32_t image_idx)
     const ImVec2 mouse_delta = ImVec2(abs_mouse_pos.x - prev_mouse_pos.x, abs_mouse_pos.y - prev_mouse_pos.y);
     prev_mouse_pos = abs_mouse_pos;
 
-    const Sculptor::Editor::UserInput input = { abs_mouse_pos, mouse_delta, wheel_delta };
+    const Sculptor::Editor::UserInput input = {
+        abs_mouse_pos,
+        mouse_delta,
+        wheel_delta
+    };
+
+    static const Sculptor::Editor::UserInput no_input = {
+        vmath::vec2(-(1 << 20), -(1 << 20)),
+        vmath::vec2(0, 0),
+        0
+    };
 
     if (ImGui::BeginMainMenuBar()) {
         if (ImGui::BeginMenu("File")) {
@@ -750,8 +760,12 @@ static bool create_gui_frame(uint32_t image_idx)
         if ( ! editor->enabled)
             continue;
 
+        const bool real_input = ! editor->is_mouse_captured() || editor->has_captured_mouse();
+
         bool need_realloc = false;
-        if ( ! editor->create_gui_frame(image_idx, &need_realloc, input))
+        if ( ! editor->create_gui_frame(image_idx,
+                                        &need_realloc,
+                                        real_input ? input : no_input))
             return false;
 
         if (need_realloc)
