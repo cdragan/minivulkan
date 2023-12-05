@@ -5,10 +5,12 @@
 
 #include <stdint.h>
 
+namespace Sculptor {
+
 bool create_material_layouts();
 
-extern VkDescriptorSetLayout sculptor_desc_set_layout[3];
-extern VkPipelineLayout      sculptor_material_layout;
+extern VkDescriptorSetLayout desc_set_layout[3];
+extern VkPipelineLayout      material_layout;
 
 struct MaterialInfo {
     uint8_t*                                 shader_ids[4];
@@ -30,3 +32,5 @@ bool create_material(const MaterialInfo& mat_info, VkPipeline* pipeline);
 struct ShaderMaterial {
     float diffuse_color[4];
 };
+
+}

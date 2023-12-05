@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2021-2023 Chris Dragan
 
+#pragma once
+
 namespace vmath {
 
 constexpr double pi_double  = 3.141592653589793;

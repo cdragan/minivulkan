@@ -2,8 +2,10 @@
 // Copyright (c) 2021-2023 Chris Dragan
 
 #include "sculptor_geom_edit.h"
+#include "sculptor_materials.h"
 #include "../d_printf.h"
 #include "../mstdc.h"
+#include "../shaders.h"
 
 #include "imgui.h"
 #include "backends/imgui_impl_vulkan.h"
@@ -96,6 +98,26 @@ Toolbar in Object Edit mode
 
 */
 
+namespace {
+    enum MaterialsForShaders {
+        mat_grid,
+        mat_object_edge,
+        num_materials
+    };
+
+    struct Transforms {
+        vmath::mat4 model_view;
+        vmath::mat3 model_view_normal;
+        vmath::vec4 proj;
+        vmath::vec4 proj_w;
+    };
+
+    constexpr uint32_t transforms_per_viewport = 1;
+    constexpr float    int16_scale             = 32767.0f;
+}
+
+namespace Sculptor {
+
 void GeometryEditor::set_name(const char* new_name)
 {
     const uint32_t len = mstd::min(mstd::strlen(new_name),
@@ -133,9 +155,16 @@ bool GeometryEditor::allocate_resources()
         VkResult res = CHK(vkCreateSampler(vk_dev, &sampler_info, nullptr, &viewport_sampler));
         if (res != VK_SUCCESS)
             return false;
+
     }
 
-    return alloc_view_resources(&view, window_width, window_height, viewport_sampler);
+    if ( ! alloc_view_resources(&view, window_width, window_height, viewport_sampler))
+        return false;
+
+    if ( ! allocate_resources_once())
+        return false;
+
+    return true;
 }
 
 bool GeometryEditor::alloc_view_resources(View*     dst_view,
@@ -296,6 +325,208 @@ void GeometryEditor::free_view_resources(View* dst_view)
     }
 }
 
+bool GeometryEditor::allocate_resources_once()
+{
+    // Check if already allocated
+    if (gray_patch_mat)
+        return true;
+
+    if ( ! patch_geometry.allocate())
+        return false;
+
+    // TODO load user-specified geometry
+    patch_geometry.set_cube();
+
+    if ( ! create_materials())
+        return false;
+
+    if ( ! create_transforms_buffer())
+        return false;
+
+    if ( ! create_descriptor_sets())
+        return false;
+
+    view.camera[static_cast<int>(ViewType::free_moving)] = Camera{ { 0.0f, 0.0f,  0.0f }, 0.25f,    0.0f, 0.0f, 1.0f };
+    view.camera[static_cast<int>(ViewType::front)]       = Camera{ { 0.0f, 0.0f, -2.0f },  0.0f, 4096.0f, 0.0f, 0.0f };
+
+    return true;
+}
+
+bool GeometryEditor::create_materials()
+{
+    static const VkVertexInputAttributeDescription vertex_attributes[] = {
+        {
+            0, // location
+            0, // binding
+            VK_FORMAT_R16G16B16_SNORM,
+            offsetof(Sculptor::Geometry::Vertex, pos)
+        }
+    };
+
+    materials_stride = static_cast<uint32_t>(mstd::align_up(
+                static_cast<VkDeviceSize>(sizeof(ShaderMaterial)),
+                vk_phys_props.properties.limits.minUniformBufferOffsetAlignment));
+
+    if ( ! materials_buf.allocate(Usage::dynamic,
+                                  materials_stride * max_swapchain_size * num_materials,
+                                  VK_FORMAT_UNDEFINED,
+                                  VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT))
+        return false;
+
+    static const MaterialInfo object_mat_info = {
+        {
+            shader_pass_through_vert,
+            shader_sculptor_object_frag,
+            shader_bezier_surface_cubic_sculptor_tesc,
+            shader_bezier_surface_cubic_sculptor_tese
+        },
+        vertex_attributes,
+        0.0f, // depth_bias
+        mstd::array_size(vertex_attributes),
+        sizeof(Sculptor::Geometry::Vertex),
+        VK_FORMAT_UNDEFINED,
+        VK_PRIMITIVE_TOPOLOGY_PATCH_LIST,
+        16, // patch_control_points
+        VK_POLYGON_MODE_FILL,
+        VK_CULL_MODE_BACK_BIT,
+        true,                // depth_test
+        { 0x00, 0x00, 0x00 } // diffuse
+    };
+
+    if ( ! create_material(object_mat_info, &gray_patch_mat))
+        return false;
+
+    return true;
+}
+
+bool GeometryEditor::create_transforms_buffer()
+{
+    transforms_stride = static_cast<uint32_t>(mstd::align_up(
+                static_cast<VkDeviceSize>(sizeof(Transforms)),
+                vk_phys_props.properties.limits.minUniformBufferOffsetAlignment));
+
+    return transforms_buf.allocate(Usage::dynamic,
+                                   transforms_stride * max_swapchain_size * transforms_per_viewport,
+                                   VK_FORMAT_UNDEFINED,
+                                   VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT);
+}
+
+bool GeometryEditor::create_descriptor_sets()
+{
+    static VkDescriptorSetAllocateInfo alloc_info = {
+        VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+        nullptr,
+        VK_NULL_HANDLE,                 // descriptorPool
+        2,                              // descriptorSetCount
+        &Sculptor::desc_set_layout[1]   // pSetLayouts
+    };
+
+    {
+        static VkDescriptorPoolSize pool_sizes[] = {
+            {
+                VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC,
+                2
+            },
+            {
+                VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                1
+            }
+        };
+
+        static VkDescriptorPoolCreateInfo pool_create_info = {
+            VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+            nullptr,
+            0, // flags
+            2, // maxSets
+            mstd::array_size(pool_sizes),
+            pool_sizes
+        };
+
+        const VkResult res = CHK(vkCreateDescriptorPool(vk_dev, &pool_create_info, nullptr, &alloc_info.descriptorPool));
+        if (res != VK_SUCCESS)
+            return false;
+    }
+    {
+        const VkResult res = CHK(vkAllocateDescriptorSets(vk_dev, &alloc_info, &desc_set[1]));
+        if (res != VK_SUCCESS)
+            return false;
+    }
+
+    {
+        static VkDescriptorBufferInfo materials_buffer_info = {
+            VK_NULL_HANDLE,     // buffer
+            0,                  // offset
+            0                   // range
+        };
+        static VkDescriptorBufferInfo transforms_buffer_info = {
+            VK_NULL_HANDLE,     // buffer
+            0,                  // offset
+            0                   // range
+        };
+        static VkDescriptorBufferInfo storage_buffer_info = {
+            VK_NULL_HANDLE,     // buffer
+            0,                  // offset
+            VK_WHOLE_SIZE       // range
+        };
+        static VkWriteDescriptorSet write_desc_sets[] = {
+            {
+                VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                nullptr,
+                VK_NULL_HANDLE,                             // dstSet
+                0,                                          // dstBinding
+                0,                                          // dstArrayElement
+                1,                                          // descriptorCount
+                VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC,  // descriptorType
+                nullptr,                                    // pImageInfo
+                &materials_buffer_info,                     // pBufferInfo
+                nullptr                                     // pTexelBufferView
+            },
+            {
+                VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                nullptr,
+                VK_NULL_HANDLE,                             // dstSet
+                0,                                          // dstBinding
+                0,                                          // dstArrayElement
+                1,                                          // descriptorCount
+                VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC,  // descriptorType
+                nullptr,                                    // pImageInfo
+                &transforms_buffer_info,                    // pBufferInfo
+                nullptr                                     // pTexelBufferView
+            },
+            {
+                VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                nullptr,
+                VK_NULL_HANDLE,                             // dstSet
+                1,                                          // dstBinding
+                0,                                          // dstArrayElement
+                1,                                          // descriptorCount
+                VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,          // descriptorType
+                nullptr,                                    // pImageInfo
+                &storage_buffer_info,                       // pBufferInfo
+                nullptr                                     // pTexelBufferView
+            }
+        };
+
+        materials_buffer_info.buffer  = materials_buf.get_buffer();
+        materials_buffer_info.range   = materials_stride;
+        transforms_buffer_info.buffer = transforms_buf.get_buffer();
+        transforms_buffer_info.range  = transforms_stride;
+        storage_buffer_info.buffer    = patch_geometry.get_faces_buffer();
+
+        write_desc_sets[0].dstSet     = desc_set[1];
+        write_desc_sets[1].dstSet     = desc_set[2];
+        write_desc_sets[2].dstSet     = desc_set[2];
+
+        vkUpdateDescriptorSets(vk_dev,
+                               mstd::array_size(write_desc_sets),
+                               write_desc_sets,
+                               0,           // descriptorCopyCount
+                               nullptr);    // pDescriptorCopies
+    }
+
+    return true;
+}
+
 void GeometryEditor::gui_status_bar()
 {
     const ImVec2 item_pos = ImGui::GetItemRectMin();
@@ -375,6 +606,9 @@ bool GeometryEditor::create_gui_frame(uint32_t image_idx, bool* need_realloc)
 
 bool GeometryEditor::draw_frame(VkCommandBuffer cmdbuf, uint32_t image_idx)
 {
+    if ( ! patch_geometry.send_to_gpu(cmdbuf))
+        return false;
+
     if ( ! draw_geometry_view(cmdbuf, view, image_idx))
         return false;
 
@@ -431,7 +665,9 @@ static const Image::Transition render_viewport_layout = {
     VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
 };
 
-bool GeometryEditor::draw_geometry_view(VkCommandBuffer cmdbuf, View& dst_view, uint32_t image_idx)
+bool GeometryEditor::draw_geometry_view(VkCommandBuffer cmdbuf,
+                                        View&           dst_view,
+                                        uint32_t        image_idx)
 {
     Resources& res = dst_view.res[image_idx];
 
@@ -455,6 +691,10 @@ bool GeometryEditor::draw_geometry_view(VkCommandBuffer cmdbuf, View& dst_view, 
     rendering_info.renderArea.extent.height = dst_view.height;
 
     vkCmdBeginRenderingKHR(cmdbuf, &rendering_info);
+
+    if ( ! render_geometry(cmdbuf, dst_view, image_idx))
+        return false;
+
     vkCmdEndRenderingKHR(cmdbuf);
 
     static const Image::Transition gui_image_layout = {
@@ -469,7 +709,9 @@ bool GeometryEditor::draw_geometry_view(VkCommandBuffer cmdbuf, View& dst_view, 
     return true;
 }
 
-bool GeometryEditor::draw_selection_feedback(VkCommandBuffer cmdbuf, View& dst_view, uint32_t image_idx)
+bool GeometryEditor::draw_selection_feedback(VkCommandBuffer cmdbuf,
+                                             View&           dst_view,
+                                             uint32_t        image_idx)
 {
     Resources& res = dst_view.res[image_idx];
 
@@ -529,3 +771,92 @@ bool GeometryEditor::draw_selection_feedback(VkCommandBuffer cmdbuf, View& dst_v
 
     return true;
 }
+
+bool GeometryEditor::set_patch_transforms(const View& dst_view, uint32_t transform_id)
+{
+    Transforms* const transforms = transforms_buf.get_ptr<Transforms>(transform_id, transforms_stride);
+    assert(transforms);
+
+    const Camera& camera = dst_view.camera[static_cast<int>(dst_view.view_type)];
+
+    vmath::mat4 model_view;
+
+    switch (dst_view.view_type) {
+
+        case ViewType::free_moving:
+            {
+                const vmath::quat q{vmath::vec3{vmath::radians(camera.pitch), vmath::radians(camera.yaw), 0.0f}};
+                const vmath::vec3 cam_vector{vmath::vec4(0, 0, camera.distance, 0) * vmath::mat4(q)};
+                model_view = vmath::look_at(camera.pos - cam_vector, camera.pos);
+            }
+            break;
+
+        case ViewType::front:
+            model_view = vmath::look_at(camera.pos, vmath::vec3(camera.pos.x, camera.pos.y, 0));
+            break;
+
+        default:
+            assert(0);
+    }
+
+    transforms->model_view = model_view;
+
+    transforms->model_view_normal = vmath::transpose(vmath::inverse(vmath::mat3(model_view)));
+
+    const float aspect = static_cast<float>(dst_view.width) / static_cast<float>(dst_view.height);
+
+    if (dst_view.view_type == ViewType::free_moving) {
+        transforms->proj = vmath::projection_vector(aspect,
+                                                    vmath::radians(30.0f),
+                                                    0.01f,      // near_plane
+                                                    1000.0f);   // far_plane
+        transforms->proj_w = vmath::vec4(0.0f, 0.0f, 1.0f, 0.0f);
+    }
+    else {
+        transforms->proj = vmath::ortho_vector(aspect,
+                                               camera.view_height / int16_scale,
+                                               0.01f,   // near_plane
+                                               3.0f);   // far_plane
+        transforms->proj_w = vmath::vec4(0.0f, 0.0f, 0.0f, 1.0f);
+    }
+
+    return transforms_buf.flush(transform_id, transforms_stride);
+}
+
+bool GeometryEditor::render_geometry(VkCommandBuffer cmdbuf,
+                                     const View&     dst_view,
+                                     uint32_t        image_idx)
+{
+    const uint32_t edge_mat_id = (image_idx * num_materials) + mat_object_edge;
+
+    const uint32_t transform_id_base = image_idx * transforms_per_viewport;
+
+    const uint32_t transform_id = transform_id_base + 0;
+
+    uint32_t dynamic_offsets[] = {
+        edge_mat_id * materials_stride,
+        transform_id * transforms_stride
+    };
+
+    if ( ! set_patch_transforms(dst_view, transform_id))
+        return false;
+
+    vkCmdBindPipeline(cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, gray_patch_mat);
+
+    send_viewport_and_scissor(cmdbuf, dst_view.width, dst_view.height);
+
+    vkCmdBindDescriptorSets(cmdbuf,
+                            VK_PIPELINE_BIND_POINT_GRAPHICS,
+                            Sculptor::material_layout,
+                            1,          // firstSet
+                            2,          // descriptorSetCount
+                            &desc_set[1],
+                            mstd::array_size(dynamic_offsets),
+                            dynamic_offsets);
+
+    patch_geometry.render(cmdbuf);
+
+    return true;
+}
+
+} // namespace Sculptor

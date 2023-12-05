@@ -6,6 +6,8 @@
 #include "../vulkan_functions.h"
 #include <stdint.h>
 
+namespace Sculptor {
+
 class Editor {
     public:
         Editor() = default;
@@ -18,3 +20,5 @@ class Editor {
         virtual void free_resources() = 0;
         virtual bool draw_frame(VkCommandBuffer cmdbuf, uint32_t image_idx) = 0;
 };
+
+}

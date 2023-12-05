@@ -7,10 +7,10 @@
 #include "../mstdc.h"
 #include "../shaders.h"
 
-VkDescriptorSetLayout sculptor_desc_set_layout[3];
-VkPipelineLayout      sculptor_material_layout;
+VkDescriptorSetLayout Sculptor::desc_set_layout[3];
+VkPipelineLayout      Sculptor::material_layout;
 
-bool create_material_layouts()
+bool Sculptor::create_material_layouts()
 {
     {
         static const VkDescriptorSetLayoutCreateInfo create_empty_set_layout = {
@@ -24,7 +24,7 @@ bool create_material_layouts()
         const VkResult res = CHK(vkCreateDescriptorSetLayout(vk_dev,
                                                              &create_empty_set_layout,
                                                              nullptr,
-                                                             &sculptor_desc_set_layout[0]));
+                                                             &desc_set_layout[0]));
         if (res != VK_SUCCESS)
             return false;
     }
@@ -51,7 +51,7 @@ bool create_material_layouts()
         const VkResult res = CHK(vkCreateDescriptorSetLayout(vk_dev,
                                                              &create_per_object_set_layout,
                                                              nullptr,
-                                                             &sculptor_desc_set_layout[1]));
+                                                             &desc_set_layout[1]));
         if (res != VK_SUCCESS)
             return false;
     }
@@ -88,7 +88,7 @@ bool create_material_layouts()
         const VkResult res = CHK(vkCreateDescriptorSetLayout(vk_dev,
                                                              &create_per_object_set_layout,
                                                              nullptr,
-                                                             &sculptor_desc_set_layout[2]));
+                                                             &desc_set_layout[2]));
         if (res != VK_SUCCESS)
             return false;
     }
@@ -98,8 +98,8 @@ bool create_material_layouts()
             VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
             nullptr,
             0,      // flags
-            mstd::array_size(sculptor_desc_set_layout),
-            sculptor_desc_set_layout,
+            mstd::array_size(desc_set_layout),
+            desc_set_layout,
             0,      // pushConstantRangeCount
             nullptr // pPushConstantRanges
         };
@@ -107,7 +107,7 @@ bool create_material_layouts()
         const VkResult res = CHK(vkCreatePipelineLayout(vk_dev,
                                                         &layout_create_info,
                                                         nullptr,
-                                                        &sculptor_material_layout));
+                                                        &material_layout));
         if (res != VK_SUCCESS)
             return false;
     }
@@ -115,7 +115,7 @@ bool create_material_layouts()
     return true;
 }
 
-bool create_material(const MaterialInfo& mat_info, VkPipeline* pipeline)
+bool Sculptor::create_material(const MaterialInfo& mat_info, VkPipeline* pipeline)
 {
     assert(*pipeline == VK_NULL_HANDLE);
 
@@ -343,7 +343,7 @@ bool create_material(const MaterialInfo& mat_info, VkPipeline* pipeline)
     };
 
     pipeline_create_info.stageCount = num_stages;
-    pipeline_create_info.layout     = sculptor_material_layout;
+    pipeline_create_info.layout     = material_layout;
 
     const VkResult res = CHK(vkCreateGraphicsPipelines(vk_dev,
                                                        VK_NULL_HANDLE,

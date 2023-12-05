@@ -80,11 +80,11 @@ namespace {
 
 }
 
-static GeometryEditor geometry_editor;
+static Sculptor::GeometryEditor geometry_editor;
 
 static Viewport viewports[] = {
-    { "Front View", true, 0, ViewType::front,       { 0.0f, 0.0f, -2.0f }, { 4096.0f  } },
-    { "3D View",    true, 1, ViewType::free_moving, { 0.0f, 0.0f,  0.0f }, {    0.25f }, 0.0f, 1.0f }
+    { "Front View", false, 0, ViewType::front,       { 0.0f, 0.0f, -2.0f }, { 4096.0f  } },
+    { "3D View",    false, 1, ViewType::free_moving, { 0.0f, 0.0f,  0.0f }, {    0.25f }, 0.0f, 1.0f }
 };
 
 // Which viewport has captured mouse
@@ -174,7 +174,7 @@ static bool create_grid_lines_buffer()
 static bool create_materials_buffer()
 {
     materials_stride = static_cast<uint32_t>(mstd::align_up(
-                static_cast<VkDeviceSize>(sizeof(ShaderMaterial)),
+                static_cast<VkDeviceSize>(sizeof(Sculptor::ShaderMaterial)),
                 vk_phys_props.properties.limits.minUniformBufferOffsetAlignment));
 
     return materials_buf.allocate(Usage::dynamic,
@@ -202,7 +202,7 @@ static bool create_descriptor_sets()
         nullptr,
         VK_NULL_HANDLE,                 // descriptorPool
         2,                              // descriptorSetCount
-        &sculptor_desc_set_layout[1]    // pSetLayouts
+        &Sculptor::desc_set_layout[1]   // pSetLayouts
     };
 
     {
@@ -311,12 +311,12 @@ static bool create_descriptor_sets()
     return true;
 }
 
-static void set_material_buf(const MaterialInfo& mat_info, uint32_t mat_id)
+static void set_material_buf(const Sculptor::MaterialInfo& mat_info, uint32_t mat_id)
 {
     for (uint32_t i = 0; i < vk_num_swapchain_images; i++) {
         const uint32_t abs_mat_id = (i * num_materials) + mat_id;
 
-        ShaderMaterial* const material = materials_buf.get_ptr<ShaderMaterial>(abs_mat_id, materials_stride);
+        Sculptor::ShaderMaterial* const material = materials_buf.get_ptr<Sculptor::ShaderMaterial>(abs_mat_id, materials_stride);
 
         for (uint32_t comp = 0; comp < 3; comp++)
             material->diffuse_color[comp] = static_cast<float>(mat_info.diffuse_color[comp]) / 255.0f;
@@ -332,7 +332,7 @@ bool init_assets()
     if ( ! create_samplers())
         return false;
 
-    if ( ! create_material_layouts())
+    if ( ! Sculptor::create_material_layouts())
         return false;
 
     if ( ! create_materials_buffer())
@@ -347,7 +347,7 @@ bool init_assets()
         }
     };
 
-    static const MaterialInfo grid_info = {
+    static const Sculptor::MaterialInfo grid_info = {
         {
             shader_sculptor_simple_vert,
             shader_sculptor_color_frag
@@ -365,11 +365,11 @@ bool init_assets()
         { 0x55, 0x55, 0x55 } // diffuse
     };
 
-    if ( ! create_material(grid_info, &grid_pipeline))
+    if ( ! Sculptor::create_material(grid_info, &grid_pipeline))
         return false;
     set_material_buf(grid_info, mat_grid);
 
-    static const MaterialInfo object_mat_info = {
+    static const Sculptor::MaterialInfo object_mat_info = {
         {
             shader_pass_through_vert,
             shader_sculptor_object_frag,
@@ -389,10 +389,10 @@ bool init_assets()
         { 0x00, 0x00, 0x00 } // diffuse
     };
 
-    if ( ! create_material(object_mat_info, &sculptor_object_pipeline))
+    if ( ! Sculptor::create_material(object_mat_info, &sculptor_object_pipeline))
         return false;
 
-    static const MaterialInfo edge_mat_info = {
+    static const Sculptor::MaterialInfo edge_mat_info = {
         {
             shader_pass_through_vert,
             shader_sculptor_color_frag,
@@ -412,14 +412,14 @@ bool init_assets()
         { 0xEE, 0xEE, 0xEE } // diffuse
     };
 
-    if ( ! create_material(edge_mat_info, &sculptor_edge_pipeline))
+    if ( ! Sculptor::create_material(edge_mat_info, &sculptor_edge_pipeline))
         return false;
     set_material_buf(edge_mat_info, mat_object_edge);
 
     if ( ! materials_buf.flush())
         return false;
 
-    static const MaterialInfo object_id_info = {
+    static const Sculptor::MaterialInfo object_id_info = {
         {
             shader_pass_through_vert,
             shader_sculptor_object_id_frag,
@@ -439,7 +439,7 @@ bool init_assets()
         { 0x00, 0x00, 0x00 } // diffuse
     };
 
-    if ( ! create_material(object_id_info, &sculptor_object_id_pipeline))
+    if ( ! Sculptor::create_material(object_id_info, &sculptor_object_id_pipeline))
         return false;
 
     if ( ! patch_geometry.allocate())
@@ -997,7 +997,7 @@ static bool draw_grid(const Viewport& viewport, uint32_t image_idx, VkCommandBuf
 
     vkCmdBindDescriptorSets(buf,
                             VK_PIPELINE_BIND_POINT_GRAPHICS,
-                            sculptor_material_layout,
+                            Sculptor::material_layout,
                             1, // firstSet
                             2, // descriptorSetCount
                             &desc_set[1],
@@ -1097,7 +1097,7 @@ static bool render_view(const Viewport& viewport, uint32_t image_idx, VkCommandB
 
         vkCmdBindDescriptorSets(buf,
                                 VK_PIPELINE_BIND_POINT_GRAPHICS,
-                                sculptor_material_layout,
+                                Sculptor::material_layout,
                                 1,          // firstSet
                                 2,          // descriptorSetCount
                                 &desc_set[1],
@@ -1154,7 +1154,7 @@ static bool render_selection(const Viewport& viewport, uint32_t image_idx, VkCom
 
     vkCmdBindDescriptorSets(buf,
                             VK_PIPELINE_BIND_POINT_GRAPHICS,
-                            sculptor_material_layout,
+                            Sculptor::material_layout,
                             2,          // firstSet
                             1,          // descriptorSetCount
                             &desc_set[2],
