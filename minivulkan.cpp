@@ -343,9 +343,16 @@ static bool init_instance()
 
         const char* validation_str = nullptr;
 
-        VkValidationFeaturesEXT validation_features = {
+        static VkValidationFeatureEnableEXT enabled_features[] = {
+            VK_VALIDATION_FEATURE_ENABLE_BEST_PRACTICES_EXT,
+            //VK_VALIDATION_FEATURE_ENABLE_SYNCHRONIZATION_VALIDATION_EXT
+        };
+
+        static VkValidationFeaturesEXT validation_features = {
             VK_STRUCTURE_TYPE_VALIDATION_FEATURES_EXT,
             nullptr,
+            mstd::array_size(enabled_features),
+            enabled_features
         };
 
         for (uint32_t i = 0; i < num_layer_props; i++) {
