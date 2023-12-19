@@ -119,11 +119,18 @@ static bool create_window(Window* w)
         return false;
     }
 
+    const bool full_screen = is_full_screen();
+
+    // To reduce number of symbols pulled in, only check for error
+    // in non-fullscreen builds (typically builds with GUI)
+    if ( ! full_screen && xcb_connection_has_error(w->connection)) {
+        d_printf("Failed to connect to X server\n");
+        return false;
+    }
+
     xcb_screen_t* const screen = xcb_setup_roots_iterator(xcb_get_setup(w->connection)).data;
 
     w->window = xcb_generate_id(w->connection);
-
-    const bool full_screen = is_full_screen();
 
     const uint16_t width  = full_screen ? screen->width_in_pixels  : static_cast<uint16_t>(get_main_window_width());
     const uint16_t height = full_screen ? screen->height_in_pixels : static_cast<uint16_t>(get_main_window_height());
