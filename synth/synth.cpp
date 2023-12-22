@@ -450,8 +450,8 @@ bool draw_frame(uint32_t image_idx, uint64_t time_ms, VkFence queue_fence)
         return false;
 
     static const Image::Transition color_att_present = {
-        VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
-        0,
+        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+        VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
         VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
         VK_ACCESS_COLOR_ATTACHMENT_READ_BIT,
         VK_IMAGE_LAYOUT_PRESENT_SRC_KHR

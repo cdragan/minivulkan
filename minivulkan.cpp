@@ -345,7 +345,7 @@ static bool init_instance()
 
         static VkValidationFeatureEnableEXT enabled_features[] = {
             VK_VALIDATION_FEATURE_ENABLE_BEST_PRACTICES_EXT,
-            //VK_VALIDATION_FEATURE_ENABLE_SYNCHRONIZATION_VALIDATION_EXT
+            VK_VALIDATION_FEATURE_ENABLE_SYNCHRONIZATION_VALIDATION_EXT
         };
 
         static VkValidationFeaturesEXT validation_features = {

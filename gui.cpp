@@ -44,7 +44,7 @@ static bool create_render_pass(VkRenderPass* render_pass, GuiClear clear)
             0, // flags
             VK_FORMAT_UNDEFINED,
             VK_SAMPLE_COUNT_1_BIT,
-            VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+            VK_ATTACHMENT_LOAD_OP_LOAD,
             VK_ATTACHMENT_STORE_OP_STORE,
             VK_ATTACHMENT_LOAD_OP_DONT_CARE,
             VK_ATTACHMENT_STORE_OP_DONT_CARE,
@@ -97,7 +97,7 @@ static bool create_render_pass(VkRenderPass* render_pass, GuiClear clear)
         0,          // preserveAttachmentCount
         nullptr     // pPreserveAttachments
     };
-    static const VkRenderPassCreateInfo render_pass_info = {
+    static VkRenderPassCreateInfo render_pass_info = {
         VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO,
         nullptr,    // pNext
         0,          // flags
@@ -106,6 +106,21 @@ static bool create_render_pass(VkRenderPass* render_pass, GuiClear clear)
         1,          // subpassCount
         &subpass
     };
+
+    if (clear != GuiClear::clear) {
+        static const VkSubpassDependency dependency = {
+            VK_SUBPASS_EXTERNAL,
+            0,
+            VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+            VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+            VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+            VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_COLOR_ATTACHMENT_READ_BIT,
+            0
+        };
+
+        render_pass_info.dependencyCount = 1;
+        render_pass_info.pDependencies   = &dependency;
+    }
 
     PFN_vkCreateRenderPass vkCreateRenderPass;
 

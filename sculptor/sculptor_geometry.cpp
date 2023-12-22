@@ -100,10 +100,70 @@ uint32_t Sculptor::Geometry::get_face_state(uint32_t face_id, const Face& face) 
     return obj_faces[face_id].selected ? 2 : 0;
 }
 
+struct Barrier {
+    static constexpr uint32_t max_barriers = 3;
+
+    VkBufferMemoryBarrier buffer_barrier[max_barriers];
+    uint32_t              num_buffer_barriers = 0;
+
+    void add_buffer(VkBuffer      buffer,
+                    VkAccessFlags src_access,
+                    VkAccessFlags dst_access);
+
+    void execute(VkCommandBuffer      cmd_buf,
+                 VkPipelineStageFlags src_stage_mask,
+                 VkPipelineStageFlags dst_stage_mask);
+};
+
+void Barrier::add_buffer(VkBuffer      buffer,
+                         VkAccessFlags src_access,
+                         VkAccessFlags dst_access)
+{
+    VkBufferMemoryBarrier& barrier = buffer_barrier[num_buffer_barriers++];
+
+    static const VkBufferMemoryBarrier barrier_template = {
+        VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
+        nullptr,
+        0,
+        0,
+        0,
+        0,
+        VK_NULL_HANDLE,
+        0,
+        VK_WHOLE_SIZE
+    };
+
+    barrier = barrier_template;
+    barrier.srcAccessMask = src_access;
+    barrier.dstAccessMask = dst_access;
+    barrier.buffer        = buffer;
+}
+
+void Barrier::execute(VkCommandBuffer cmd_buf,
+                      VkPipelineStageFlags src_stage_mask,
+                      VkPipelineStageFlags dst_stage_mask)
+{
+    if ( ! num_buffer_barriers)
+        return;
+
+    vkCmdPipelineBarrier(cmd_buf,
+                         src_stage_mask,
+                         dst_stage_mask,
+                         0,             // dependencyFlags
+                         0,             // memoryBarrierCount
+                         nullptr,       // pMemoryBarriers
+                         num_buffer_barriers,
+                         buffer_barrier,
+                         0,             // imageMemoryBarrierCount
+                         nullptr);      // pImageMemoryBarriers
+}
+
 bool Sculptor::Geometry::send_to_gpu(VkCommandBuffer cmd_buf)
 {
     if ( ! dirty)
         return true;
+
+    Barrier barrier;
 
     last_buffer = (last_buffer + 1) % num_host_copies;
 
@@ -118,6 +178,10 @@ bool Sculptor::Geometry::send_to_gpu(VkCommandBuffer cmd_buf)
         copy_region.size      = num_vertices * sizeof(Vertex);
 
         vkCmdCopyBuffer(cmd_buf, host_vertices.get_buffer(), vertices.get_buffer(), 1, &copy_region);
+
+        barrier.add_buffer(vertices.get_buffer(),
+                           VK_ACCESS_TRANSFER_WRITE_BIT,
+                           VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT);
     }
 
     FacesBuf* const faces_ptr = host_faces.get_ptr<FacesBuf>(last_buffer, faces_stride);
@@ -190,6 +254,10 @@ bool Sculptor::Geometry::send_to_gpu(VkCommandBuffer cmd_buf)
         copy_region.size      = (num_indices + num_edge_indices) * sizeof(Vertex);
 
         vkCmdCopyBuffer(cmd_buf, host_indices.get_buffer(), indices.get_buffer(), 1, &copy_region);
+
+        barrier.add_buffer(indices.get_buffer(),
+                           VK_ACCESS_TRANSFER_WRITE_BIT,
+                           VK_ACCESS_INDEX_READ_BIT);
     }
 
     if (num_faces) {
@@ -197,7 +265,17 @@ bool Sculptor::Geometry::send_to_gpu(VkCommandBuffer cmd_buf)
         copy_region.size      = sizeof(FacesBuf) + (num_faces - 1) * sizeof(FaceData);
 
         vkCmdCopyBuffer(cmd_buf, host_faces.get_buffer(), faces.get_buffer(), 1, &copy_region);
+
+        barrier.add_buffer(faces.get_buffer(),
+                           VK_ACCESS_TRANSFER_WRITE_BIT,
+                           VK_ACCESS_SHADER_READ_BIT);
     }
+
+    barrier.execute(cmd_buf,
+                    VK_PIPELINE_STAGE_TRANSFER_BIT,
+                    VK_PIPELINE_STAGE_VERTEX_INPUT_BIT |
+                        VK_PIPELINE_STAGE_TESSELLATION_CONTROL_SHADER_BIT |
+                        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
 
     dirty = false;
 
