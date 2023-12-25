@@ -423,7 +423,7 @@ ifeq ($(UNAME), Darwin)
       $(call GUI_PATH,$1): | $$(out_dir)/$1.app/Contents/MacOS/Info.plist
 
       $$(out_dir)/$1.app/Contents/MacOS/Info.plist: Info.plist | $$(out_dir)/$1.app/Contents/MacOS
-	cp $$< $$@
+	sed 's:minivulkan:$1:' $$< > $$@
     endef
 else
     GUI_PATH = $(out_dir)/$1$(exe_suffix)
