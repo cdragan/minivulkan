@@ -600,6 +600,12 @@ bool GeometryEditor::create_gui_frame(uint32_t image_idx, bool* need_realloc, co
 #endif
     }
 
+    const ImVec2 status_bar_pos = ImGui::GetCursorPos();
+
+    // TODO SetCursorPos and draw toolbar
+
+    ImGui::SetCursorPos(status_bar_pos);
+
     gui_status_bar();
 
     ImGui::End();
