@@ -499,6 +499,19 @@ int main()
         TEST(dp == 19);
     }
 
+    // dot_product3(float4)
+    {
+        const vmath::float4 v1{2, 4, -1, 2};
+        const vmath::float4 v2{3, 5, 7, 6};
+
+        const vmath::float4 dp = vmath::dot_product3(v1, v2);
+
+        TEST(dp[0] == 19);
+        TEST(dp[1] == 19);
+        TEST(dp[2] == 19);
+        TEST(dp[3] == 19);
+    }
+
     //////////////////////////////////////////////////////////////////////////////////////////
     // vec4
 
@@ -656,6 +669,126 @@ int main()
         TEST(v1 != v5);
         TEST(v1 != v6);
         TEST(v1 != v7);
+    }
+
+    // float4::operator== and !=
+    {
+        const vmath::float4 v1{1, 2, 3, 4};
+        const vmath::float4 v2{1, 2, 3, 4};
+        const vmath::float4 v3{-1, 2, 3, 4};
+        const vmath::float4 v4{1, -2, 3, 4};
+        const vmath::float4 v5{1, 2, -3, 4};
+        const vmath::float4 v6{1, 2, 3, -4};
+        const vmath::float4 v7{-1, -2, -3, -4};
+
+        const auto check = [](float f, bool is_true) -> bool
+        {
+            const uint32_t u = *reinterpret_cast<uint32_t*>(&f);
+            if (is_true)
+                return u == ~0U;
+            else
+                return u == 0;
+        };
+
+        vmath::float4 cmp;
+
+        cmp = v1 == v1;
+        TEST(check(cmp[0], true));
+        TEST(check(cmp[1], true));
+        TEST(check(cmp[2], true));
+        TEST(check(cmp[3], true));
+        TEST(cmp.all());
+
+        cmp = v1 == v2;
+        TEST(check(cmp[0], true));
+        TEST(check(cmp[1], true));
+        TEST(check(cmp[2], true));
+        TEST(check(cmp[3], true));
+        TEST(cmp.all());
+
+        cmp = v1 == v3;
+        TEST(check(cmp[0], false));
+        TEST(check(cmp[1], true));
+        TEST(check(cmp[2], true));
+        TEST(check(cmp[3], true));
+        TEST(!cmp.all());
+
+        cmp = v1 == v4;
+        TEST(check(cmp[0], true));
+        TEST(check(cmp[1], false));
+        TEST(check(cmp[2], true));
+        TEST(check(cmp[3], true));
+        TEST(!cmp.all());
+
+        cmp = v1 == v5;
+        TEST(check(cmp[0], true));
+        TEST(check(cmp[1], true));
+        TEST(check(cmp[2], false));
+        TEST(check(cmp[3], true));
+        TEST(!cmp.all());
+
+        cmp = v1 == v6;
+        TEST(check(cmp[0], true));
+        TEST(check(cmp[1], true));
+        TEST(check(cmp[2], true));
+        TEST(check(cmp[3], false));
+        TEST(!cmp.all());
+
+        cmp = v1 == v7;
+        TEST(check(cmp[0], false));
+        TEST(check(cmp[1], false));
+        TEST(check(cmp[2], false));
+        TEST(check(cmp[3], false));
+        TEST(!cmp.all());
+
+        cmp = v1 != v1;
+        TEST(check(cmp[0], false));
+        TEST(check(cmp[1], false));
+        TEST(check(cmp[2], false));
+        TEST(check(cmp[3], false));
+        TEST(!cmp.any());
+
+        cmp = v1 != v2;
+        TEST(check(cmp[0], false));
+        TEST(check(cmp[1], false));
+        TEST(check(cmp[2], false));
+        TEST(check(cmp[3], false));
+        TEST(!cmp.any());
+
+        cmp = v1 != v3;
+        TEST(check(cmp[0], true));
+        TEST(check(cmp[1], false));
+        TEST(check(cmp[2], false));
+        TEST(check(cmp[3], false));
+        TEST(cmp.any());
+
+        cmp = v1 != v4;
+        TEST(check(cmp[0], false));
+        TEST(check(cmp[1], true));
+        TEST(check(cmp[2], false));
+        TEST(check(cmp[3], false));
+        TEST(cmp.any());
+
+        cmp = v1 != v5;
+        TEST(check(cmp[0], false));
+        TEST(check(cmp[1], false));
+        TEST(check(cmp[2], true));
+        TEST(check(cmp[3], false));
+        TEST(cmp.any());
+
+        cmp = v1 != v6;
+        TEST(check(cmp[0], false));
+        TEST(check(cmp[1], false));
+        TEST(check(cmp[2], false));
+        TEST(check(cmp[3], true));
+        TEST(cmp.any());
+
+        cmp = v1 != v7;
+        TEST(check(cmp[0], true));
+        TEST(check(cmp[1], true));
+        TEST(check(cmp[2], true));
+        TEST(check(cmp[3], true));
+        TEST(cmp.any());
     }
 
     // vec4::operator- (negation)
