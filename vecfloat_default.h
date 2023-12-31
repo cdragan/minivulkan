@@ -170,11 +170,19 @@ struct float4 {
     }
 
     constexpr bool all() const {
-        const uint32_t sign_bits = (as_uint32(data[0]) >> 31) +
-                                   (as_uint32(data[1]) >> 31) +
-                                   (as_uint32(data[2]) >> 31) +
-                                   (as_uint32(data[3]) >> 31);
-        return !! sign_bits;
+        const uint32_t sign_bits = as_uint32(data[0]) &
+                                   as_uint32(data[1]) &
+                                   as_uint32(data[2]) &
+                                   as_uint32(data[3]);
+        return !! (sign_bits & 0x80000000U);
+    }
+
+    constexpr bool any() const {
+        const uint32_t sign_bits = as_uint32(data[0]) |
+                                   as_uint32(data[1]) |
+                                   as_uint32(data[2]) |
+                                   as_uint32(data[3]);
+        return !! (sign_bits & 0x80000000U);
     }
 
     constexpr float get0() const {
