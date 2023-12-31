@@ -28,6 +28,10 @@ struct float4_base {
         return _mm_movemask_ps(data) == 0b1111;
     }
 
+    bool any() const {
+        return _mm_movemask_ps(data) != 0;
+    }
+
     float get0() const {
         float value;
         _mm_store_ss(&value, data);
@@ -334,9 +338,7 @@ inline bool equal(const float4& v1, const float4& v2)
 
 inline bool not_equal(const float4& v1, const float4& v2)
 {
-    // TODO
-    //return (v1 != v2).any();
-    return ! (v1 == v2).all();
+    return (v1 != v2).any();
 }
 
 inline float4 operator<(const float4& v1, const float4& v2)

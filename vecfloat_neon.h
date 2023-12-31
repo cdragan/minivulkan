@@ -31,6 +31,13 @@ struct float4_base {
         return vgetq_lane_s32(add2, 0) == -4;
     }
 
+    bool any() const {
+        const int32x4_t as_int = vreinterpretq_s32_f32(data);
+        const int32x4_t add1   = vpaddq_s32(as_int, as_int);
+        const int32x4_t add2   = vpaddq_s32(add1, add1);
+        return vgetq_lane_s32(add2, 0) != 0;
+    }
+
     float get0() const {
         return vgetq_lane_f32(data, 0);
     }
@@ -332,9 +339,7 @@ inline bool equal(const float4& v1, const float4& v2)
 
 inline bool not_equal(const float4& v1, const float4& v2)
 {
-    // TODO
-    //return (v1 != v2).any();
-    return ! (v1 == v2).all();
+    return (v1 != v2).any();
 }
 
 inline float4 operator<(const float4& v1, const float4& v2)
