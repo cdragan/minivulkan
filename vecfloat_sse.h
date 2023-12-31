@@ -327,6 +327,18 @@ inline float4 operator!=(const float4& v1, const float4& v2)
     return float4{_mm_cmpneq_ps(v1, v2)};
 }
 
+inline bool equal(const float4& v1, const float4& v2)
+{
+    return (v1 == v2).all();
+}
+
+inline bool not_equal(const float4& v1, const float4& v2)
+{
+    // TODO
+    //return (v1 != v2).any();
+    return ! (v1 == v2).all();
+}
+
 inline float4 operator<(const float4& v1, const float4& v2)
 {
     return float4{_mm_cmplt_ps(v1, v2)};

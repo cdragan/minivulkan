@@ -162,12 +162,12 @@ vec4& vec4::operator/=(const vec4& v)
 
 bool vec4::operator==(const vec4& v) const
 {
-    return (float4::load4_aligned(data) == float4::load4_aligned(v.data)).all();
+    return equal(float4::load4_aligned(data), float4::load4_aligned(v.data));
 }
 
 bool vec4::operator!=(const vec4& v) const
 {
-    return ! (float4::load4_aligned(data) == float4::load4_aligned(v.data)).all();
+    return not_equal(float4::load4_aligned(data), float4::load4_aligned(v.data));
 }
 
 vec4 vec4::operator-() const
@@ -275,7 +275,7 @@ quat::quat(const vec3& euler_xyz)
     const float4 sz{sc_half.sin[2], sc_half.sin[2], sc_half.cos[2], sc_half.sin[2]};
 #endif
 
-    const float4 result = cx * cy * cz + ((sx * sy * sz) ^ float4{float4_base::load_mask(1 << 31, 0, 1 << 31, 0)});
+    const float4 result = cx * cy * cz + ((sx * sy * sz) ^ float4{float4::load_mask(1 << 31, 0, 1 << 31, 0)});
 
     result.store4_aligned(data);
 }
@@ -306,17 +306,17 @@ quat& quat::operator*=(const quat& q)
 
 bool quat::operator==(const quat& q) const
 {
-    return (float4::load4_aligned(data) == float4::load4_aligned(q.data)).all();
+    return equal(float4::load4_aligned(data), float4::load4_aligned(q.data));
 }
 
 bool quat::operator!=(const quat& q) const
 {
-    return ! (float4::load4_aligned(data) == float4::load4_aligned(q.data)).all();
+    return not_equal(float4::load4_aligned(data), float4::load4_aligned(q.data));
 }
 
 quat quat::operator-() const
 {
-    const float4 result = float4::load4_aligned(data) ^ float4{float4_base::load_mask(1 << 31, 1 << 31, 1 << 31, 1 << 31)};
+    const float4 result = float4::load4_aligned(data) ^ float4{float4::load_mask(1 << 31, 1 << 31, 1 << 31, 1 << 31)};
     quat new_q;
     result.store4_aligned(new_q.data);
     return new_q;
@@ -324,7 +324,7 @@ quat quat::operator-() const
 
 quat vmath::conjugate(const quat& q)
 {
-    const float4 result = float4::load4_aligned(q.data) ^ float4{float4_base::load_mask(1 << 31, 1 << 31, 1 << 31, 0)};
+    const float4 result = float4::load4_aligned(q.data) ^ float4{float4::load_mask(1 << 31, 1 << 31, 1 << 31, 0)};
     quat new_q;
     result.store4_aligned(new_q.data);
     return new_q;

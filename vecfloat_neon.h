@@ -325,6 +325,18 @@ inline float4 operator!=(const float4& v1, const float4& v2)
     return float4{vreinterpretq_f32_u32(vmvnq_u32(vceqq_f32(v1, v2)))};
 }
 
+inline bool equal(const float4& v1, const float4& v2)
+{
+    return (v1 == v2).all();
+}
+
+inline bool not_equal(const float4& v1, const float4& v2)
+{
+    // TODO
+    //return (v1 != v2).any();
+    return ! (v1 == v2).all();
+}
+
 inline float4 operator<(const float4& v1, const float4& v2)
 {
     return float4{vreinterpretq_f32_u32(vcltq_f32(v1, v2))};

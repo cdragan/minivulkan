@@ -3,6 +3,7 @@
 
 #include "vecfloat_neon.h"
 #include "vecfloat_sse.h"
+#include "vecfloat_default.h"
 
 namespace vmath {
 
