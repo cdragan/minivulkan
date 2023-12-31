@@ -14,7 +14,7 @@ case "$UNAME" in
     *)                    JOBS=2 ;;
 esac
 
-echo "Using $JOBS jobs"
+echo "Using $JOBS jobs, arch: $(uname -m)"
 
 rm -rf Out
 
