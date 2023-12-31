@@ -299,7 +299,7 @@ else
     CFLAGS += -fvisibility=hidden
     CFLAGS += -fPIC
     CFLAGS += -MD
-    ifneq (,$(filter 86,$(ARCH)))
+    ifneq (,$(filter %86 %86_64,$(ARCH)))
         CFLAGS += -msse4.1
     endif
 
