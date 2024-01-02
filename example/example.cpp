@@ -26,7 +26,7 @@ enum WhatGeometry {
     geom_cubic_patch,
     geom_quadratic_patch
 };
-#ifdef __aarch64__
+#if defined(__aarch64__) || defined(__riscv)
 static constexpr WhatGeometry what_geometry = geom_cube;
 #else
 static constexpr WhatGeometry what_geometry = geom_quadratic_patch;
