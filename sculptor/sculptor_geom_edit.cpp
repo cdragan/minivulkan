@@ -12,23 +12,24 @@
 
 /*
 
-- One viewport
-    - Should there me multiple viewports?
-    - Draw
-        - Background
-        - Grid
-        - Solid object fill
-            - Toggle solid fill on/off (off - pure wireframe)
-            - Toggle tessellation on/off
-        - Wireframe
-            - Toggle between generated triangles and just quad surrounds, i.e. patch wireframe
-        - Vertices
-        - Connectors to control vertices
-        - Selection highlight (surround around selected features)
-        - Hovered and selected features have distinct color
-        - Toggle texture/color/etc. versus plain
-        - Selection rectangle
-        - Draw selection surface used to determine what mouse and selection rectangle are touching
+Object editor UI
+----------------
+
+- One viewport, drawing sequence:
+    - Background
+    - Grid
+    - Solid object fill
+        - Toggle solid fill on/off (off - pure wireframe)
+        - Toggle tessellation on/off
+    - Wireframe
+        - Toggle between generated triangles and just quad surrounds, i.e. patch wireframe
+    - Vertices
+    - Connectors to control vertices
+    - Selection highlight (surround around selected features)
+    - Hovered and selected features have distinct color
+    - Toggle texture/color/etc. versus plain
+    - Selection rectangle
+    - Draw selection surface used to determine what mouse and selection rectangle are touching
 - Status: current mode, total vertices/edges/faces, number of selected vertices/edges/faces
 - Toolbar with key shortcuts
 
@@ -63,36 +64,66 @@ User input
 - Edit
     - E :: extrude - add faces/edges, begin moving
 
-Toolbar in Object Edit mode
----------------------------
 
-- File
-    - New
-    - Open
-    - Save
+Modes of operation
+------------------
+
+* Select - default mode
+    - Add to selection              LMB
+    - Remove from selection         Shift+LMB
+    - Add rectangle to selection    LMB drag
+    - Remove rectangle from sel     Shift+LMB drag
+    - Clear selection               ???
+    - Select all                    Cmd+A
+    - Pan                           Shift+Mouse move
+    - Rotate                        Ctrl+Mouse move
+    - Scale                         Mouse wheel (smooth)
+    - Select vertices/edges/faces   1/2/3
+    - Focus on selection            .                  << no toolbar!
+* Other modes are actions
+    - Actions are completed with click (LMB) or Space
+    - Actions are cancelled with Esc
+    - In each case go back to select mode
+* Transform/Move
+* Transform/Rotate
+* Transform/Scale
+* Extrude
+
+Toolbar in Object Editor
+------------------------
+
+- New Object
+    - Cube
 - Edit
-    - Undo
-    - Redo
-    - Copy
-    - Paste
-    - Cut
+    - Undo                      Cmd+Z
+    - Redo                      Shift+Cmd+Z
+    - Copy                      Cmd+C
+    - Paste                     Cmd+V
+    - Cut                       Cmd+X
 - Select
-    - Faces
-    - Edges
-    - Vertices
+    - Vertices                  1
+    - Edges                     2
+    - Faces                     3
+    - Clear selection           ???
 - Viewport
-    - Perspective view
-    - Orthographic view
-    - Pan
-    - Rotate
-    - Zoom
+    - Perspective view          5
+    - Orthographic view Z       6 (toggle front/back)
+    - Orthographic view X       7 (toggle right/left)
+    - Orthographic view Y       8 (toggle top/bottom)
+- View options
+    - Toggle tessellation       Alt-T
+    - Toggle wireframe          Alt-W
+- Constraint (applies to move, scale, pan, rotate, edit operations, etc.)
+    - X                         X
+    - Y                         Y
+    - Z                         Z
 - Transform
-    - Move
-    - Rotate
-    - Scale
+    - Move                      G, GX, GY, GZ, click to finish or Space
+    - Rotate                    R, click to finish or Space
+    - Scale                     S, SX, SY, SZ, click to finish or Space
 - Edit
-    - Delete
-    - Extrude
+    - Delete                    Del
+    - Extrude                   E
 
 */
 
