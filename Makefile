@@ -74,6 +74,8 @@ endif
 
 out_dir = $(out_dir_base)/$(out_dir_config)$(out_dir_suffix)
 
+gen_headers_dir := $(out_dir_base)/headers
+
 ##############################################################################
 # Function for converting source path to object file path
 
@@ -135,12 +137,15 @@ threed_nogui_src_files += nogui.cpp
 
 spirv_encode_src_files += tools/spirv_encode.cpp
 
+make_header_src_files += tools/make_header.cpp
+
 all_src_files += $(lib_src_files)
+all_src_files += $(make_header_src_files)
+all_src_files += $(spirv_encode_src_files)
 all_src_files += $(threed_src_files)
 all_src_files += $(threed_gui_src_files)
 all_src_files += $(threed_nogui_src_files)
 all_src_files += $(vmath_unit_src_files)
-all_src_files += $(spirv_encode_src_files)
 
 all_gui_src_files += $(threed_gui_src_files)
 
@@ -181,6 +186,7 @@ lib_name =
 src_files =
 gui_src_files =
 nogui_src_files =
+bin_to_header_files =
 use_threed = 1
 
 include $1/makefile.mk
@@ -188,8 +194,10 @@ include $1/makefile.mk
 project_$1_src_files       := $$(src_files)
 project_$1_gui_src_files   := $$(gui_src_files)
 project_$1_nogui_src_files := $$(nogui_src_files)
+project_$1_bin_to_header_files := $$(bin_to_header_files)
 
 all_src_files += $$(addprefix $1/,$$(project_$1_src_files))
+all_bin_to_header_files += $$(addprefix $1/,$$(project_$1_bin_to_header_files))
 
 ifneq ($$(gui_project_name),)
     all_$$(gui_project_name)_src_files += $$(addprefix $1/,$$(project_$1_src_files))
@@ -537,12 +545,16 @@ endif
 
 spirv_encode = $(call CMDLINE_PATH,spirv_encode)
 
+make_header = $(call CMDLINE_PATH,make_header)
+
 ifeq ($(UNAME), Windows)
-$(spirv_encode): LDFLAGS_NODEFAULTLIB =
-$(spirv_encode): SUBSYSTEMFLAGS = -subsystem:console
+$(spirv_encode) $(make_header): LDFLAGS_NODEFAULTLIB =
+$(spirv_encode) $(make_header): SUBSYSTEMFLAGS = -subsystem:console
 endif
 
 $(eval $(call LINK_RULE,$(spirv_encode),$(spirv_encode_src_files)))
+
+$(eval $(call LINK_RULE,$(make_header),$(make_header_src_files)))
 
 define GLSL_EXT
 $(shaders_out_dir)/%.$1.h: shaders/%.$1.glsl | $(spirv_encode) $(shaders_out_dir) $(addprefix $(shaders_out_dir)/,$(shader_dirs))
@@ -558,6 +570,19 @@ $(foreach ext, vert tesc tese geom frag comp, $(eval $(call GLSL_EXT,$(ext))))
 
 $(call OBJ_FROM_SRC, shaders.cpp) $(out_dir)/shaders.cpp.$(asm_suffix): $(addprefix $(shaders_out_dir)/,$(addsuffix .h,$(basename $(notdir $(shader_files)))))
 $(call OBJ_FROM_SRC, shaders.cpp) $(out_dir)/shaders.cpp.$(asm_suffix): CFLAGS += -I$(shaders_out_dir)
+
+$(gen_headers_dir): | $(out_dir_base)
+	mkdir -p $@
+
+define MAKE_HEADER_FROM_BINARY
+$(gen_headers_dir)/$$(notdir $1).h: $1 | $(make_header) $(gen_headers_dir)
+	$(make_header) $$(basename $$(notdir $$<)) $$< $$@
+endef
+
+$(foreach file, $(all_bin_to_header_files), $(eval $(call MAKE_HEADER_FROM_BINARY,$(file))))
+
+$(foreach file, $(all_gui_src_files), $(call OBJ_FROM_SRC, $(file))): CFLAGS += -I$(gen_headers_dir)
+$(foreach file, $(all_gui_src_files), $(call OBJ_FROM_SRC, $(file))): $(foreach file, $(all_bin_to_header_files), $(addsuffix .h,$(addprefix $(gen_headers_dir)/,$(notdir $(file)))))
 
 $(eval $(call LINK_RULE,$(call CMDLINE_PATH,vmath_unit),$(all_vmath_unit_src_files)))
 

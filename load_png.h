@@ -3,4 +3,5 @@
 
 #include "resource.h"
 
-bool load_png(const char* filename, Image* image, VkCommandBuffer cmd_buf);
+bool load_png_file(const char* filename, Image* image, VkCommandBuffer cmd_buf);
+bool load_png(const uint8_t* png, size_t png_size, Image* image, VkCommandBuffer cmd_buf);

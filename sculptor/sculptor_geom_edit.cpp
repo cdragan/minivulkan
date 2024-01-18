@@ -5,10 +5,13 @@
 #include "sculptor_materials.h"
 #include "../d_printf.h"
 #include "../gui_imgui.h"
+#include "../load_png.h"
 #include "../mstdc.h"
 #include "../shaders.h"
 
 #include <stdio.h>
+
+#include "toolbar.png.h"
 
 /*
 
@@ -143,6 +146,8 @@ namespace {
 
     constexpr uint32_t transforms_per_viewport = 1;
     constexpr float    int16_scale             = 32767.0f;
+
+    Image toolbar_image;
 }
 
 namespace Sculptor {
@@ -646,6 +651,10 @@ bool GeometryEditor::create_gui_frame(uint32_t image_idx, bool* need_realloc, co
 
 bool GeometryEditor::draw_frame(VkCommandBuffer cmdbuf, uint32_t image_idx)
 {
+    if ( ! toolbar_image.allocated() &&
+         ! load_png(toolbar, sizeof(toolbar), &toolbar_image, cmdbuf))
+        return false;
+
     if ( ! patch_geometry.send_to_gpu(cmdbuf))
         return false;
 
