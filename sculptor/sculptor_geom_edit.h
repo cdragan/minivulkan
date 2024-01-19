@@ -19,6 +19,45 @@ class GeometryEditor: public Editor {
         bool draw_frame(VkCommandBuffer cmdbuf, uint32_t image_idx) override;
 
     private:
+#       ifdef __APPLE__
+#           define CTRL_KEY "Cmd "
+#           define SHIFT_CTRL_KEY "Shift Cmd "
+#       else
+#           define CTRL_KEY "Ctrl "
+#           define SHIFT_CTRL_KEY "Shift Ctrl "
+#       endif
+#       define TOOLBAR_BUTTONS \
+            X(new_cube,         0, "",                 "New cube")                    \
+            X(undo,             1, CTRL_KEY "Z",       "Undo")                        \
+            X(redo,             0, SHIFT_CTRL_KEY "Z", "Redo")                        \
+            X(copy,             0, CTRL_KEY "C",       "Copy")                        \
+            X(paste,            0, CTRL_KEY "V",       "Paste")                       \
+            X(cut,              0, CTRL_KEY "X",       "Cut")                         \
+            X(sel_vertices,     1, "1",                "Select vertices")             \
+            X(sel_edges,        0, "2",                "Select edges")                \
+            X(sel_faces,        0, "3",                "Select faces")                \
+            X(sel_clear,        0, "",                 "Clear selection")             \
+            X(view_perspective, 1, "5",                "Perspective view")            \
+            X(view_ortho_z,     0, "6",                "Orthographic view in Z axis") \
+            X(view_ortho_x,     0, "7",                "Orthographic view in X axis") \
+            X(view_ortho_y,     0, "8",                "Orthographic view in Y axis") \
+            X(toggle_tessell,   1, "Alt T",            "Toggle tessellation")         \
+            X(toggle_wireframe, 0, "Alt W",            "Toggle wireframe")            \
+            X(snap_x,           1, "X",                "Snap to X")                   \
+            X(snap_y,           0, "Y",                "Snap to Y")                   \
+            X(snap_z,           0, "Z",                "Snap to Z")                   \
+            X(move,             1, "G",                "Move")                        \
+            X(rotate,           0, "R",                "Rotate")                      \
+            X(scale,            0, "S",                "Scale")                       \
+            X(erase,            1, "Del",              "Delete selection")            \
+            X(extrude,          0, "E",                "Extrude")                     \
+
+        enum class ToolbarButton {
+#           define X(tag, first, combo, desc) tag,
+            TOOLBAR_BUTTONS
+#           undef X
+        };
+
         struct Resources {
             Image           color;
             Image           depth;
@@ -61,6 +100,8 @@ class GeometryEditor: public Editor {
         bool create_transforms_buffer();
         bool create_descriptor_sets();
         void gui_status_bar();
+        bool gui_toolbar();
+        bool toolbar_button(ToolbarButton button, bool* checked = nullptr);
         bool draw_geometry_view(VkCommandBuffer cmdbuf, View& dst_view, uint32_t image_idx);
         bool draw_selection_feedback(VkCommandBuffer cmdbuf, View& dst_view, uint32_t image_idx);
         bool render_geometry(VkCommandBuffer cmdbuf, const View& dst_view, uint32_t image_idx);
@@ -77,9 +118,36 @@ class GeometryEditor: public Editor {
         // - desc set 2: per-object resources
         VkDescriptorSet    desc_set[3]       = { };
         VkPipeline         gray_patch_mat    = VK_NULL_HANDLE;
+        VkDescriptorSet    toolbar_texture   = VK_NULL_HANDLE;
         Sculptor::Geometry patch_geometry;
         Buffer             materials_buf;
         Buffer             transforms_buf;
+
+        struct ToolbarState {
+            bool sel_vertices;
+            bool sel_edges;
+            bool sel_faces;
+
+            bool view_perspective;
+            bool view_ortho_z;
+            bool view_ortho_x;
+            bool view_ortho_y;
+
+            bool toggle_tessellation;
+            bool toggle_wireframe;
+
+            bool snap_x;
+            bool snap_y;
+            bool snap_z;
+
+            bool move;
+            bool rotate;
+            bool scale;
+
+            bool extrude;
+        };
+
+        ToolbarState       toolbar_state     = { };
 };
 
 }

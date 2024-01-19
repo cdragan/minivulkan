@@ -147,7 +147,22 @@ namespace {
     constexpr uint32_t transforms_per_viewport = 1;
     constexpr float    int16_scale             = 32767.0f;
 
-    Image toolbar_image;
+    Image    toolbar_image;
+    uint32_t toolbar_image_width;
+    uint32_t toolbar_image_height;
+
+    struct ToolbarInfo {
+        const char* tag;
+        const char* tooltip;
+        const char* combo;
+        bool        first_in_group;
+    };
+
+    const ToolbarInfo toolbar_info[] = {
+#       define X(tag, first, combo, desc) { "geom_tb_" #tag, desc, combo, first != 0 },
+        TOOLBAR_BUTTONS
+#       undef X
+    };
 }
 
 namespace Sculptor {
@@ -159,9 +174,9 @@ const char* GeometryEditor::get_editor_name() const
 
 bool GeometryEditor::allocate_resources()
 {
-    static VkSampler viewport_sampler;
+    static VkSampler point_sampler;
 
-    if ( ! viewport_sampler) {
+    if ( ! point_sampler) {
         static VkSamplerCreateInfo sampler_info = {
             VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
             nullptr,
@@ -183,13 +198,18 @@ bool GeometryEditor::allocate_resources()
             VK_FALSE                                    // unnormailzedCoordinates
         };
 
-        VkResult res = CHK(vkCreateSampler(vk_dev, &sampler_info, nullptr, &viewport_sampler));
+        VkResult res = CHK(vkCreateSampler(vk_dev, &sampler_info, nullptr, &point_sampler));
         if (res != VK_SUCCESS)
             return false;
 
     }
 
-    if ( ! alloc_view_resources(&view, window_width, window_height, viewport_sampler))
+    if ( ! toolbar_texture && toolbar_image.allocated())
+        toolbar_texture = ImGui_ImplVulkan_AddTexture(point_sampler,
+                                                      toolbar_image.get_view(),
+                                                      VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+
+    if ( ! alloc_view_resources(&view, window_width, window_height, point_sampler))
         return false;
 
     if ( ! allocate_resources_once())
@@ -587,6 +607,94 @@ void GeometryEditor::gui_status_bar()
     ImGui::EndChild();
 }
 
+bool GeometryEditor::toolbar_button(ToolbarButton button, bool* checked)
+{
+    const ImVec2 button_size{static_cast<float>(toolbar_image_height),
+                             static_cast<float>(toolbar_image_height)};
+
+    const uint32_t idx        = static_cast<uint32_t>(button);
+    const uint32_t start_offs = idx * toolbar_image_height;
+    const uint32_t end_offs   = start_offs + toolbar_image_height;
+
+    const ImVec2 uv0{static_cast<float>((start_offs * 1.0) / toolbar_image_width), 0};
+    const ImVec2 uv1{static_cast<float>((end_offs   * 1.0) / toolbar_image_width), 1};
+
+    const ToolbarInfo& info = toolbar_info[idx];
+
+    if (idx > 0)
+        ImGui::SameLine(0, info.first_in_group ? -1 : 0);
+
+    ImVec4 button_color;
+    if (checked && *checked)
+        button_color = ImVec4{0.18f, 0.18f, 0.17f, 1};
+    else
+        button_color = ImVec4{0.34f, 0.34f, 0.33f, 1};
+
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2{3, 3});
+    ImGui::PushStyleColor(ImGuiCol_Button,        button_color);
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4{0.45f, 0.45f, 0.45f, 1});
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4{0.20f, 0.20f, 0.20f, 1});
+
+    const bool clicked = ImGui::ImageButton(info.tag,
+                                            toolbar_texture,
+                                            button_size,
+                                            uv0,
+                                            uv1);
+
+    ImGui::PopStyleColor(3);
+    ImGui::PopStyleVar();
+
+    if (info.combo && info.combo[0])
+        ImGui::SetItemTooltip("%s (%s)", info.tooltip, info.combo);
+    else
+        ImGui::SetItemTooltip("%s", info.tooltip);
+
+    if (clicked && checked)
+        *checked = ! *checked;
+
+    return clicked;
+}
+
+bool GeometryEditor::gui_toolbar()
+{
+    // Skip if it's not loaded yet
+    if ( ! toolbar_texture)
+        return true;
+
+    constexpr uint32_t margin = 10;
+    ImGui::SetCursorPos(ImVec2{margin, margin + ImGui::GetTextLineHeightWithSpacing()});
+
+    if (toolbar_button(ToolbarButton::new_cube)) {
+        d_printf("OK\n");
+    }
+
+    toolbar_button(ToolbarButton::undo);
+    toolbar_button(ToolbarButton::redo);
+    toolbar_button(ToolbarButton::copy);
+    toolbar_button(ToolbarButton::paste);
+    toolbar_button(ToolbarButton::cut);
+    toolbar_button(ToolbarButton::sel_vertices, &toolbar_state.sel_vertices);
+    toolbar_button(ToolbarButton::sel_edges, &toolbar_state.sel_edges);
+    toolbar_button(ToolbarButton::sel_faces, &toolbar_state.sel_faces);
+    toolbar_button(ToolbarButton::sel_clear);
+    toolbar_button(ToolbarButton::view_perspective, &toolbar_state.view_perspective);
+    toolbar_button(ToolbarButton::view_ortho_z, &toolbar_state.view_ortho_z);
+    toolbar_button(ToolbarButton::view_ortho_x, &toolbar_state.view_ortho_x);
+    toolbar_button(ToolbarButton::view_ortho_y, &toolbar_state.view_ortho_y);
+    toolbar_button(ToolbarButton::toggle_tessell, &toolbar_state.toggle_tessellation);
+    toolbar_button(ToolbarButton::toggle_wireframe, &toolbar_state.toggle_wireframe);
+    toolbar_button(ToolbarButton::snap_x, &toolbar_state.snap_x);
+    toolbar_button(ToolbarButton::snap_y, &toolbar_state.snap_y);
+    toolbar_button(ToolbarButton::snap_z, &toolbar_state.snap_z);
+    toolbar_button(ToolbarButton::move, &toolbar_state.move);
+    toolbar_button(ToolbarButton::rotate, &toolbar_state.rotate);
+    toolbar_button(ToolbarButton::scale, &toolbar_state.scale);
+    toolbar_button(ToolbarButton::erase);
+    toolbar_button(ToolbarButton::extrude, &toolbar_state.extrude);
+
+    return true;
+}
+
 bool GeometryEditor::create_gui_frame(uint32_t image_idx, bool* need_realloc, const UserInput& input)
 {
     char window_title[sizeof(object_name) + 36];
@@ -638,7 +746,8 @@ bool GeometryEditor::create_gui_frame(uint32_t image_idx, bool* need_realloc, co
 
     const ImVec2 status_bar_pos = ImGui::GetCursorPos();
 
-    // TODO SetCursorPos and draw toolbar
+    if ( ! gui_toolbar())
+        return false;
 
     ImGui::SetCursorPos(status_bar_pos);
 
@@ -652,7 +761,12 @@ bool GeometryEditor::create_gui_frame(uint32_t image_idx, bool* need_realloc, co
 bool GeometryEditor::draw_frame(VkCommandBuffer cmdbuf, uint32_t image_idx)
 {
     if ( ! toolbar_image.allocated() &&
-         ! load_png(toolbar, sizeof(toolbar), &toolbar_image, cmdbuf))
+         ! load_png(toolbar,
+                    sizeof(toolbar),
+                    &toolbar_image,
+                    &toolbar_image_width,
+                    &toolbar_image_height,
+                    cmdbuf))
         return false;
 
     if ( ! patch_geometry.send_to_gpu(cmdbuf))

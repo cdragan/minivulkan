@@ -17,9 +17,7 @@ float calculate_lighting(vec3 light_pos, vec3 surface_pos, vec3 surface_normal)
     const float shininess      = 16;
     const float ambient        = 0.1;
     const vec3  light_dir      = light_pos - surface_pos;
-    const float light_distance = length(light_dir);
-    const vec3  norm_light_dir = light_dir / light_distance;
-    const float diffuse        = max(0, dot(surface_normal, norm_light_dir));
+    const float diffuse        = max(0, dot(surface_normal, normalize(light_dir)));
     float       specular       = 0;
 
     // Blinn-Phong specular

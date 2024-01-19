@@ -12,6 +12,8 @@
 static bool read_png_into_image(png_structp     png_ptr,
                                 png_infop       info_ptr,
                                 Image*          image,
+                                uint32_t*       width_ptr,
+                                uint32_t*       height_ptr,
                                 VkCommandBuffer cmd_buf)
 {
     constexpr int transforms =
@@ -32,6 +34,9 @@ static bool read_png_into_image(png_structp     png_ptr,
     png_get_IHDR(png_ptr, info_ptr,
                  &width, &height, &bit_depth, &color_type, &interlace_type,
                  &compression_type, &filter_method);
+
+    *width_ptr  = width;
+    *height_ptr = height;
 
     const png_bytepp row_pointers = png_get_rows(png_ptr, info_ptr);
     if ( ! row_pointers)
@@ -127,7 +132,11 @@ static bool read_png_into_image(png_structp     png_ptr,
     return true;
 }
 
-bool load_png_file(const char* filename, Image* image, VkCommandBuffer cmd_buf)
+bool load_png_file(const char*     filename,
+                   Image*          image,
+                   uint32_t*       width_ptr,
+                   uint32_t*       height_ptr,
+                   VkCommandBuffer cmd_buf)
 {
     FILE* const file = fopen(filename, "rb");
     if ( ! file) {
@@ -169,7 +178,7 @@ bool load_png_file(const char* filename, Image* image, VkCommandBuffer cmd_buf)
 
     png_init_io(png_ptr, file);
 
-    return read_png_into_image(png_ptr, info_ptr, image, cmd_buf);
+    return read_png_into_image(png_ptr, info_ptr, image, width_ptr, height_ptr, cmd_buf);
 }
 
 struct PngInputData {
@@ -194,7 +203,12 @@ static void read_png_from_memory(png_structp png_ptr,
     }
 }
 
-bool load_png(const uint8_t* png, size_t png_size, Image* image, VkCommandBuffer cmd_buf)
+bool load_png(const uint8_t*  png,
+              size_t          png_size,
+              Image*          image,
+              uint32_t*       width_ptr,
+              uint32_t*       height_ptr,
+              VkCommandBuffer cmd_buf)
 {
     png_structp png_ptr  = nullptr;
     png_infop   info_ptr = nullptr;
@@ -229,5 +243,5 @@ bool load_png(const uint8_t* png, size_t png_size, Image* image, VkCommandBuffer
     PngInputData input_data = { png, png_size };
     png_set_read_fn(png_ptr, &input_data, read_png_from_memory);
 
-    return read_png_into_image(png_ptr, info_ptr, image, cmd_buf);
+    return read_png_into_image(png_ptr, info_ptr, image, width_ptr, height_ptr, cmd_buf);
 }
