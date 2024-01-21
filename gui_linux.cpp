@@ -199,13 +199,13 @@ static void handle_key_event(xcb_keycode_t key_code, uint16_t state, bool down)
 
     // Shift (1) or CapsLock (2)
     const uint16_t shift = ((state >> 1) ^ state) & 1;
-    io.AddKeyEvent(ImGuiKey_ModShift, !! shift);
+    io.AddKeyEvent(ImGuiKey_Shift, !! shift);
 
     // Ctrl (4)
-    io.AddKeyEvent(ImGuiKey_ModCtrl,  !! (state & 4));
+    io.AddKeyEvent(ImGuiKey_Ctrl,  !! (state & 4));
 
     // Alt (8, 128)
-    io.AddKeyEvent(ImGuiKey_ModCtrl,  !! (state & (8 | 128)));
+    io.AddKeyEvent(ImGuiKey_Ctrl,  !! (state & (8 | 128)));
 
     const ImGuiKey key = map_key(key_code);
     if (key != ImGuiKey_None) {

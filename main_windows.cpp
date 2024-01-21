@@ -10,11 +10,6 @@
 /* TODO Just including xaudio2.h somehow calls LoadLibraryEx - figure out how to avoid that */
 #include <xaudio2.h>
 
-struct Window {
-    HINSTANCE instance;
-    HWND      window;
-};
-
 bool create_surface(Window* w)
 {
     static VkWin32SurfaceCreateInfoKHR surf_create_info = {

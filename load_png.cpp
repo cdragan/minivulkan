@@ -8,6 +8,7 @@
 #include "thirdparty/libpng/libpng-1.6.40/png.h"
 
 #include <algorithm>
+#include <string.h>
 
 static bool read_png_into_image(png_structp     png_ptr,
                                 png_infop       info_ptr,
