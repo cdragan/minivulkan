@@ -22,9 +22,21 @@ const uint32_t* get_window_events()
         | XCB_EVENT_MASK_BUTTON_RELEASE
         | XCB_EVENT_MASK_ENTER_WINDOW
         | XCB_EVENT_MASK_LEAVE_WINDOW
+        | XCB_EVENT_MASK_EXPOSURE
     };
 
     return events;
+}
+
+static bool window_needs_update = false;
+
+bool need_redraw(struct Window*)
+{
+    const bool needs_update = window_needs_update;
+
+    window_needs_update = false;
+
+    return needs_update;
 }
 
 constexpr uint8_t min_keycode = 10;
@@ -295,6 +307,10 @@ void handle_gui_event(void* event)
 
         case XCB_LEAVE_NOTIFY:
             ImGui::GetIO().AddFocusEvent(false);
+            break;
+
+        case XCB_EXPOSE:
+            window_needs_update = true;
             break;
     }
 

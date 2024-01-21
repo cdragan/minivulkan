@@ -8,6 +8,16 @@ bool init_gui(GuiClear clear)
     return true;
 }
 
+bool need_redraw(struct Window* w)
+{
+    return true;
+}
+
+bool skip_frame(struct Window* w)
+{
+    return false;
+}
+
 void resize_gui()
 {
 }

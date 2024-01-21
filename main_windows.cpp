@@ -131,6 +131,8 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT umsg, WPARAM wparam, LPARAM 
     if (gui_WndProcHandler(hwnd, umsg, wparam, lparam))
         return 0;
 
+    Window* const w = reinterpret_cast<Window*>(GetWindowLongPtr(hwnd, GWLP_USERDATA));
+
     switch (umsg) {
 
         case WM_NCCREATE:
@@ -144,8 +146,6 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT umsg, WPARAM wparam, LPARAM 
             return DefWindowProc(hwnd, umsg, wparam, lparam);
 
         case WM_CREATE: {
-            Window* const w = reinterpret_cast<Window*>(GetWindowLongPtr(hwnd, GWLP_USERDATA));
-
             w->window = hwnd;
 
             if ( ! init_vulkan(w))
@@ -158,6 +158,9 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT umsg, WPARAM wparam, LPARAM 
 
         case WM_PAINT:
             gui_new_frame();
+
+            if ( ! need_redraw(w) && skip_frame(w))
+                return 0;
 
             if ( ! draw_frame())
                 break;

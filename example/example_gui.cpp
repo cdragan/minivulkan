@@ -15,6 +15,11 @@ void notify_gui_heap_freed()
 {
 }
 
+bool skip_frame(struct Window* w)
+{
+    return false;
+}
+
 bool create_gui_frame()
 {
     ImGuiIO& io = ImGui::GetIO();

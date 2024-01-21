@@ -760,6 +760,7 @@ bool GeometryEditor::create_gui_frame(uint32_t image_idx, bool* need_realloc, co
 
 bool GeometryEditor::draw_frame(VkCommandBuffer cmdbuf, uint32_t image_idx)
 {
+    // TODO decouple reading PNG and sending to device
     if ( ! toolbar_image.allocated() &&
          ! load_png(toolbar,
                     sizeof(toolbar),

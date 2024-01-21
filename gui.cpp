@@ -9,6 +9,8 @@
 #include "resource.h"
 #include "d_printf.h"
 
+#include "imgui_internal.h" // For checking pending events
+
 float vk_surface_scale = 1.0f;
 
 static VkRenderPass  vk_gui_render_pass;
@@ -181,6 +183,13 @@ void resize_gui()
             vk_framebuffers[i] = VK_NULL_HANDLE;
         }
     }
+}
+
+bool gui_has_pending_events()
+{
+    ImGuiContext& ctx = *GImGui;
+
+    return ctx.InputEventsQueue.Size > 0;
 }
 
 static bool begin_gui_render_pass(VkCommandBuffer buf, uint32_t image_idx)

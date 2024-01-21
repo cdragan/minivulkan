@@ -159,6 +159,9 @@ bool play_sound_track()
     {
         init_os_gui_frame((__bridge NSView *)target);
 
+        if ( ! need_redraw(nullptr) && skip_frame(nullptr))
+            return kCVReturnSuccess;
+
         if ( ! draw_frame()) {
             [NSApp terminate: nil];
             return kCVReturnError;

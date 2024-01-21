@@ -35,6 +35,8 @@ struct Window;
 bool init_vulkan(struct Window* w);
 bool init_sound();
 bool create_surface(struct Window* w);
+bool skip_frame(struct Window* w);
+bool need_redraw(struct Window* w);
 bool draw_frame();
 bool draw_frame(uint32_t image_idx, uint64_t time_ms, VkFence queue_fence);
 bool idle_queue();

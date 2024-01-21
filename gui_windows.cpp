@@ -12,6 +12,17 @@ LRESULT gui_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
     return ImGui_ImplWin32_WndProcHandler(hWnd, msg, wParam, lParam);
 }
 
+bool need_redraw(struct Window* w)
+{
+    RECT rc = { };
+    if ( ! GetUpdateRect(w->window, &rc, FALSE))
+        return false;
+
+    // Validate window (we will draw it in draw_frame())
+    ValidateRect(w->window, &rc);
+    return true;
+}
+
 void gui_init(HWND hwnd)
 {
     ImGui_ImplWin32_Init(hwnd);

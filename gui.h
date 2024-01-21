@@ -19,3 +19,4 @@ bool is_full_screen();
 uint32_t get_main_window_width();
 uint32_t get_main_window_height();
 void resize_gui();
+bool gui_has_pending_events();

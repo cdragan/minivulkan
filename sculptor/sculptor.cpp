@@ -113,6 +113,21 @@ uint32_t check_device_features()
     return missing_features;
 }
 
+bool skip_frame(struct Window* w)
+{
+    static int skip_count = 0;
+    constexpr int max_skip_count = 2;
+
+    // TODO check if any editor is animating
+
+    if (gui_has_pending_events())
+        skip_count = 0;
+    else if (skip_count < max_skip_count)
+        ++skip_count;
+
+    return skip_count >= max_skip_count;
+}
+
 static VkPipeline         grid_pipeline;
 static VkPipeline         sculptor_object_pipeline;
 static VkPipeline         sculptor_object_id_pipeline;

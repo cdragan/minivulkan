@@ -197,6 +197,9 @@ static int event_loop(Window* w)
             }
         }
 
+        if ( ! need_redraw(w) && skip_frame(w))
+            continue;
+
         if ( ! draw_frame())
             return 1;
     }
