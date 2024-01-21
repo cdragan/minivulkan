@@ -622,7 +622,7 @@ bool GeometryEditor::toolbar_button(ToolbarButton button, bool* checked)
     const ToolbarInfo& info = toolbar_info[idx];
 
     if (idx > 0)
-        ImGui::SameLine(0, info.first_in_group ? -1 : 0);
+        ImGui::SameLine(0.0f, info.first_in_group ? -1.0f : 0.0f);
 
     ImVec4 button_color;
     if (checked && *checked)
@@ -636,7 +636,7 @@ bool GeometryEditor::toolbar_button(ToolbarButton button, bool* checked)
     ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4{0.20f, 0.20f, 0.20f, 1});
 
     const bool clicked = ImGui::ImageButton(info.tag,
-                                            toolbar_texture,
+                                            reinterpret_cast<ImTextureID>(toolbar_texture),
                                             button_size,
                                             uv0,
                                             uv1);
