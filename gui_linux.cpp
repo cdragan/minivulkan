@@ -36,7 +36,8 @@ bool need_redraw(struct Window*)
 
     window_needs_update = false;
 
-    return needs_update;
+    // TODO not working properly
+    return true || needs_update;
 }
 
 constexpr uint8_t min_keycode = 10;
