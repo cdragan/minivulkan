@@ -19,7 +19,8 @@ bool need_redraw(struct Window* w)
         return false;
 
     // Validate window (we will draw it in draw_frame())
-    ValidateRect(w->window, &rc);
+    // TODO not reacting to window resize or to mouse/key events!
+    //ValidateRect(w->window, &rc);
     return true;
 }
 

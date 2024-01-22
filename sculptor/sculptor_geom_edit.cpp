@@ -716,12 +716,14 @@ bool GeometryEditor::create_gui_frame(uint32_t image_idx, bool* need_realloc, co
         return true;
     }
 
-    const float frame_height = ImGui::GetFrameHeight();
+    const float frame_height  = ImGui::GetFrameHeight();
+    const float min_win_space = frame_height * 2;
 
     const ImVec2 content_size = ImGui::GetWindowSize();
 
-    const uint32_t new_width  = static_cast<uint32_t>(content_size.x);
-    const uint32_t new_height = static_cast<uint32_t>(content_size.y - frame_height * 2);
+    const uint32_t new_width  = static_cast<uint32_t>(content_size.x > 0.0f ? content_size.x : 1.0f);
+    const uint32_t new_height = static_cast<uint32_t>(content_size.y > min_win_space ?
+                                                      content_size.y - min_win_space : 1.0f);
 
     if ((new_width != window_width) || (new_height != window_height))
         *need_realloc = true;
