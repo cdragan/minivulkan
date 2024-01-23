@@ -302,3 +302,80 @@ bool Buffer::flush(VkDeviceSize idx, VkDeviceSize stride)
     assert(idx * stride + stride <= alloc_size);
     return flush_range(idx * stride, stride);
 }
+
+bool ImageWithHostCopy::allocate(const ImageInfo& image_info)
+{
+    if ( ! Image::allocate(image_info))
+        return false;
+
+    width  = image_info.width;
+    height = image_info.height;
+
+    ImageInfo host_image_info = image_info;
+
+    host_image_info.usage      = VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+    host_image_info.heap_usage = Usage::host_only;
+
+    return host_image.allocate(host_image_info);
+}
+
+bool ImageWithHostCopy::send_to_gpu(VkCommandBuffer cmdbuf)
+{
+    if ( ! dirty)
+        return true;
+
+    if ( ! host_image.flush())
+        return false;
+
+    static const Image::Transition transfer_src_layout = {
+        VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+        0,
+        VK_PIPELINE_STAGE_TRANSFER_BIT,
+        VK_ACCESS_TRANSFER_READ_BIT,
+        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL
+    };
+
+    static const Image::Transition transfer_dst_layout = {
+        VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+        0,
+        VK_PIPELINE_STAGE_TRANSFER_BIT,
+        VK_ACCESS_TRANSFER_WRITE_BIT,
+        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL
+    };
+
+    set_image_layout(cmdbuf, transfer_dst_layout);
+    host_image.set_image_layout(cmdbuf, transfer_src_layout);
+
+    static VkImageCopy region = {
+        { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
+        { },                                    // srcOffset
+        { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
+        { },                                    // dstOffset
+        { 0, 0, 1 }                             // extent
+    };
+
+    region.extent.width  = width;
+    region.extent.height = height;
+
+    vkCmdCopyImage(cmdbuf,
+                   host_image.get_image(),
+                   VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                   get_image(),
+                   VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                   1,
+                   &region);
+
+    static const Image::Transition texture_layout = {
+        VK_PIPELINE_STAGE_TRANSFER_BIT,
+        VK_ACCESS_TRANSFER_WRITE_BIT,
+        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+        VK_ACCESS_SHADER_READ_BIT,
+        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
+    };
+
+    set_image_layout(cmdbuf, texture_layout);
+
+    dirty = false;
+
+    return true;
+}

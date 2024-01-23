@@ -10,12 +10,9 @@
 #include <algorithm>
 #include <string.h>
 
-static bool read_png_into_image(png_structp     png_ptr,
-                                png_infop       info_ptr,
-                                Image*          image,
-                                uint32_t*       width_ptr,
-                                uint32_t*       height_ptr,
-                                VkCommandBuffer cmd_buf)
+static bool read_png_into_image(png_structp        png_ptr,
+                                png_infop          info_ptr,
+                                ImageWithHostCopy* image)
 {
     constexpr int transforms =
         PNG_TRANSFORM_STRIP_16 |
@@ -36,9 +33,6 @@ static bool read_png_into_image(png_structp     png_ptr,
                  &width, &height, &bit_depth, &color_type, &interlace_type,
                  &compression_type, &filter_method);
 
-    *width_ptr  = width;
-    *height_ptr = height;
-
     const png_bytepp row_pointers = png_get_rows(png_ptr, info_ptr);
     if ( ! row_pointers)
         return false;
@@ -52,92 +46,25 @@ static bool read_png_into_image(png_structp     png_ptr,
         VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
         Usage::fixed
     };
-    static ImageInfo host_image_info = {
-        0,
-        0,
-        VK_FORMAT_R8G8B8A8_UNORM,
-        1,
-        VK_IMAGE_ASPECT_COLOR_BIT,
-        VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
-        Usage::host_only
-    };
 
-    image_info.width       = width;
-    image_info.height      = height;
-    host_image_info.width  = width;
-    host_image_info.height = height;
+    image_info.width  = width;
+    image_info.height = height;
 
     if ( ! image->allocate(image_info))
         return false;
 
-    Image host_image;
-    if ( ! host_image.allocate(host_image_info))
-        return false;
+    Image& host_image = image->get_host_image();
 
     uint8_t* host_ptr = host_image.get_ptr<uint8_t>();
 
     for (uint32_t i = 0; i < height; i++, host_ptr += host_image.get_pitch())
         mstd::mem_copy(host_ptr, row_pointers[i], width * 4);
 
-    if ( ! host_image.flush())
-        return false;
-
-    static const Image::Transition transfer_src_layout = {
-        VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-        0,
-        VK_PIPELINE_STAGE_TRANSFER_BIT,
-        VK_ACCESS_TRANSFER_READ_BIT,
-        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL
-    };
-
-    static const Image::Transition transfer_dst_layout = {
-        VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-        0,
-        VK_PIPELINE_STAGE_TRANSFER_BIT,
-        VK_ACCESS_TRANSFER_WRITE_BIT,
-        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL
-    };
-
-    image->set_image_layout(cmd_buf, transfer_dst_layout);
-    host_image.set_image_layout(cmd_buf, transfer_src_layout);
-
-    static VkImageCopy region = {
-        { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
-        { },                                    // srcOffset
-        { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
-        { },                                    // dstOffset
-        { 0, 0, 1 }                             // extent
-    };
-
-    region.extent.width  = width;
-    region.extent.height = height;
-
-    vkCmdCopyImage(cmd_buf,
-                   host_image.get_image(),
-                   VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                   image->get_image(),
-                   VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                   1,
-                   &region);
-
-    static const Image::Transition texture_layout = {
-        VK_PIPELINE_STAGE_TRANSFER_BIT,
-        VK_ACCESS_TRANSFER_WRITE_BIT,
-        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-        VK_ACCESS_SHADER_READ_BIT,
-        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
-    };
-
-    image->set_image_layout(cmd_buf, texture_layout);
-
     return true;
 }
 
-bool load_png_file(const char*     filename,
-                   Image*          image,
-                   uint32_t*       width_ptr,
-                   uint32_t*       height_ptr,
-                   VkCommandBuffer cmd_buf)
+bool load_png_file(const char*        filename,
+                   ImageWithHostCopy* image)
 {
     FILE* const file = fopen(filename, "rb");
     if ( ! file) {
@@ -179,7 +106,7 @@ bool load_png_file(const char*     filename,
 
     png_init_io(png_ptr, file);
 
-    return read_png_into_image(png_ptr, info_ptr, image, width_ptr, height_ptr, cmd_buf);
+    return read_png_into_image(png_ptr, info_ptr, image);
 }
 
 struct PngInputData {
@@ -204,12 +131,9 @@ static void read_png_from_memory(png_structp png_ptr,
     }
 }
 
-bool load_png(const uint8_t*  png,
-              size_t          png_size,
-              Image*          image,
-              uint32_t*       width_ptr,
-              uint32_t*       height_ptr,
-              VkCommandBuffer cmd_buf)
+bool load_png(const uint8_t*     png,
+              size_t             png_size,
+              ImageWithHostCopy* image)
 {
     png_structp png_ptr  = nullptr;
     png_infop   info_ptr = nullptr;
@@ -244,5 +168,5 @@ bool load_png(const uint8_t*  png,
     PngInputData input_data = { png, png_size };
     png_set_read_fn(png_ptr, &input_data, read_png_from_memory);
 
-    return read_png_into_image(png_ptr, info_ptr, image, width_ptr, height_ptr, cmd_buf);
+    return read_png_into_image(png_ptr, info_ptr, image);
 }

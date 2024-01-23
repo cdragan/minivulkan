@@ -147,9 +147,7 @@ namespace {
     constexpr uint32_t transforms_per_viewport = 1;
     constexpr float    int16_scale             = 32767.0f;
 
-    Image    toolbar_image;
-    uint32_t toolbar_image_width;
-    uint32_t toolbar_image_height;
+    ImageWithHostCopy  toolbar_image;
 
     struct ToolbarInfo {
         const char* tag;
@@ -204,10 +202,16 @@ bool GeometryEditor::allocate_resources()
 
     }
 
-    if ( ! toolbar_texture && toolbar_image.allocated())
+    if ( ! toolbar_texture) {
+        if ( ! load_png(toolbar,
+                        sizeof(toolbar),
+                        &toolbar_image))
+            return false;
+
         toolbar_texture = ImGui_ImplVulkan_AddTexture(point_sampler,
                                                       toolbar_image.get_view(),
                                                       VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    }
 
     if ( ! alloc_view_resources(&view, window_width, window_height, point_sampler))
         return false;
@@ -609,15 +613,15 @@ void GeometryEditor::gui_status_bar()
 
 bool GeometryEditor::toolbar_button(ToolbarButton button, bool* checked)
 {
-    const ImVec2 button_size{static_cast<float>(toolbar_image_height),
-                             static_cast<float>(toolbar_image_height)};
+    const ImVec2 button_size{static_cast<float>(toolbar_image.get_height()),
+                             static_cast<float>(toolbar_image.get_height())};
 
     const uint32_t idx        = static_cast<uint32_t>(button);
-    const uint32_t start_offs = idx * toolbar_image_height;
-    const uint32_t end_offs   = start_offs + toolbar_image_height;
+    const uint32_t start_offs = idx * toolbar_image.get_height();
+    const uint32_t end_offs   = start_offs + toolbar_image.get_height();
 
-    const ImVec2 uv0{static_cast<float>((start_offs * 1.0) / toolbar_image_width), 0};
-    const ImVec2 uv1{static_cast<float>((end_offs   * 1.0) / toolbar_image_width), 1};
+    const ImVec2 uv0{static_cast<float>((start_offs * 1.0) / toolbar_image.get_width()), 0};
+    const ImVec2 uv1{static_cast<float>((end_offs   * 1.0) / toolbar_image.get_width()), 1};
 
     const ToolbarInfo& info = toolbar_info[idx];
 
@@ -762,14 +766,7 @@ bool GeometryEditor::create_gui_frame(uint32_t image_idx, bool* need_realloc, co
 
 bool GeometryEditor::draw_frame(VkCommandBuffer cmdbuf, uint32_t image_idx)
 {
-    // TODO decouple reading PNG and sending to device
-    if ( ! toolbar_image.allocated() &&
-         ! load_png(toolbar,
-                    sizeof(toolbar),
-                    &toolbar_image,
-                    &toolbar_image_width,
-                    &toolbar_image_height,
-                    cmdbuf))
+    if ( ! toolbar_image.send_to_gpu(cmdbuf))
         return false;
 
     if ( ! patch_geometry.send_to_gpu(cmdbuf))

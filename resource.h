@@ -134,3 +134,26 @@ class Buffer: public Resource {
         VkBuffer     buffer = VK_NULL_HANDLE;
         VkBufferView view   = VK_NULL_HANDLE;
 };
+
+struct ImageWithHostCopy: public Image {
+    public:
+        constexpr ImageWithHostCopy()                          = default;
+        ImageWithHostCopy(const ImageWithHostCopy&)            = delete;
+        ImageWithHostCopy& operator=(const ImageWithHostCopy&) = delete;
+
+        bool allocate(const ImageInfo& image_info);
+
+        const Image& get_host_image() const { return host_image; }
+        Image& get_host_image() { dirty = true; return host_image; }
+
+        bool send_to_gpu(VkCommandBuffer cmdbuf);
+
+        uint32_t get_width()  const { return width; }
+        uint32_t get_height() const { return height; }
+
+    private:
+        Image    host_image;
+        uint32_t width  = 0;
+        uint32_t height = 0;
+        bool     dirty  = false;
+};

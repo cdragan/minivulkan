@@ -115,7 +115,7 @@ uint32_t check_device_features()
 
 bool skip_frame(struct Window* w)
 {
-    static int skip_count = 0;
+    static int    skip_count = 0;
     constexpr int max_skip_count = 2;
 
     // TODO check if any editor is animating
