@@ -36,8 +36,7 @@ bool need_redraw(struct Window*)
 
     window_needs_update = false;
 
-    // TODO not working properly
-    return true || needs_update;
+    return needs_update;
 }
 
 constexpr uint8_t min_keycode = 10;
@@ -224,6 +223,8 @@ static void handle_key_event(xcb_keycode_t key_code, uint16_t state, bool down)
 
 void handle_key_press(void* event)
 {
+    window_needs_update = true;
+
     xcb_key_press_event_t* const key_event = static_cast<xcb_key_press_event_t*>(event);
 
     handle_key_event(key_event->detail, key_event->state, true);
@@ -280,6 +281,8 @@ static void handle_mouse_motion(xcb_motion_notify_event_t* event)
 
 void handle_gui_event(void* event)
 {
+    window_needs_update = true;
+
     switch (static_cast<xcb_generic_event_t*>(event)->response_type & ~0x80) {
 
         case XCB_KEY_RELEASE: {
@@ -308,10 +311,6 @@ void handle_gui_event(void* event)
 
         case XCB_LEAVE_NOTIFY:
             ImGui::GetIO().AddFocusEvent(false);
-            break;
-
-        case XCB_EXPOSE:
-            window_needs_update = true;
             break;
     }
 
