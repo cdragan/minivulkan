@@ -684,45 +684,54 @@ void GeometryEditor::handle_keyboard_actions()
     };
 
     if (ImGui::IsKeyPressed(ImGuiKey_Z) && IsCtrl()) {
-        // undo
+        // TODO undo
     }
+
     if (ImGui::IsKeyPressed(ImGuiKey_Z) && IsCtrl() &&
         (ImGui::IsKeyDown(ImGuiKey_LeftShift) || ImGui::IsKeyDown(ImGuiKey_RightShift))) {
-        // redo
+        // TODO redo
     }
+
     if (ImGui::IsKeyPressed(ImGuiKey_C) && IsCtrl()) {
-        // copy
+        // TODO copy
     }
+
     if (ImGui::IsKeyPressed(ImGuiKey_V) && IsCtrl()) {
-        // paste
+        // TODO paste
     }
+
     if (ImGui::IsKeyPressed(ImGuiKey_X) && IsCtrl()) {
-        // cut
+        // TODO cut
     }
+
     if (ImGui::IsKeyPressed(ImGuiKey_1)) {
         toolbar_state.select.vertices = ! toolbar_state.select.vertices;
         if (mode != Mode::select)
             saved_select = toolbar_state.select;
         new_mode = Mode::select;
     }
+
     if (ImGui::IsKeyPressed(ImGuiKey_2)) {
         toolbar_state.select.edges = ! toolbar_state.select.edges;
         if (mode != Mode::select)
             saved_select = toolbar_state.select;
         new_mode = Mode::select;
     }
+
     if (ImGui::IsKeyPressed(ImGuiKey_3)) {
         toolbar_state.select.faces = ! toolbar_state.select.faces;
         if (mode != Mode::select)
             saved_select = toolbar_state.select;
         new_mode = Mode::select;
     }
+
     if (ImGui::IsKeyPressed(ImGuiKey_5)) {
         toolbar_state.view_perspective = true;
         toolbar_state.view_ortho_x = false;
         toolbar_state.view_ortho_y = false;
         toolbar_state.view_ortho_z = false;
     }
+
     if (ImGui::IsKeyPressed(ImGuiKey_6)) {
         if (toolbar_state.view_ortho_z) {
             // TODO flip front/back
@@ -732,6 +741,7 @@ void GeometryEditor::handle_keyboard_actions()
         toolbar_state.view_ortho_y = false;
         toolbar_state.view_ortho_z = true;
     }
+
     if (ImGui::IsKeyPressed(ImGuiKey_7)) {
         if (toolbar_state.view_ortho_x) {
             // TODO flip left/right
@@ -741,6 +751,7 @@ void GeometryEditor::handle_keyboard_actions()
         toolbar_state.view_ortho_y = false;
         toolbar_state.view_ortho_z = false;
     }
+
     if (ImGui::IsKeyPressed(ImGuiKey_8)) {
         if (toolbar_state.view_ortho_y) {
             // TODO flip top/bottom
@@ -750,33 +761,43 @@ void GeometryEditor::handle_keyboard_actions()
         toolbar_state.view_ortho_y = true;
         toolbar_state.view_ortho_z = false;
     }
+
     if (ImGui::IsKeyPressed(ImGuiKey_T) &&
             (ImGui::IsKeyDown(ImGuiKey_LeftAlt) || ImGui::IsKeyDown(ImGuiKey_RightAlt)))
         toolbar_state.toggle_tessellation = ! toolbar_state.toggle_tessellation;
+
     if (ImGui::IsKeyPressed(ImGuiKey_W) &&
             (ImGui::IsKeyDown(ImGuiKey_LeftAlt) || ImGui::IsKeyDown(ImGuiKey_RightAlt)))
         toolbar_state.toggle_wireframe = ! toolbar_state.toggle_wireframe;
+
     if (ImGui::IsKeyPressed(ImGuiKey_X))
         toolbar_state.snap_x = ! toolbar_state.snap_x;
+
     if (ImGui::IsKeyPressed(ImGuiKey_Y))
         toolbar_state.snap_y = ! toolbar_state.snap_y;
+
     if (ImGui::IsKeyPressed(ImGuiKey_Z))
         toolbar_state.snap_z = ! toolbar_state.snap_z;
+
     if (ImGui::IsKeyPressed(ImGuiKey_G)) {
         toolbar_state.move = true;
         new_mode = Mode::move;
     }
+
     if (ImGui::IsKeyPressed(ImGuiKey_R)) {
         toolbar_state.rotate = true;
         new_mode = Mode::rotate;
     }
+
     if (ImGui::IsKeyPressed(ImGuiKey_S)) {
         toolbar_state.scale = true;
         new_mode = Mode::scale;
     }
+
     if (ImGui::IsKeyPressed(ImGuiKey_Delete)) {
-        // delete
+        // TODO delete
     }
+
     if (ImGui::IsKeyPressed(ImGuiKey_E)) {
         toolbar_state.extrude = true;
         new_mode = Mode::extrude;
@@ -797,38 +818,47 @@ bool GeometryEditor::gui_toolbar()
     Mode new_mode = mode;
 
     if (toolbar_button(ToolbarButton::new_cube)) {
-        // new cube
+        // TODO new cube
     }
+
     if (toolbar_button(ToolbarButton::undo)) {
-        // undo
+        // TODO undo
     }
+
     if (toolbar_button(ToolbarButton::redo)) {
-        // redo
+        // TODO redo
     }
+
     if (toolbar_button(ToolbarButton::copy)) {
-        // copy
+        // TODO copy
     }
+
     if (toolbar_button(ToolbarButton::paste)) {
-        // paste
+        // TODO paste
     }
+
     if (toolbar_button(ToolbarButton::cut)) {
-        // cut
+        // TODO cut
     }
+
     if (toolbar_button(ToolbarButton::sel_vertices, &toolbar_state.select.vertices)) {
         if (mode != Mode::select)
             saved_select = toolbar_state.select;
         new_mode = Mode::select;
     }
+
     if (toolbar_button(ToolbarButton::sel_edges, &toolbar_state.select.edges)) {
         if (mode != Mode::select)
             saved_select = toolbar_state.select;
         new_mode = Mode::select;
     }
+
     if (toolbar_button(ToolbarButton::sel_faces, &toolbar_state.select.faces)) {
         if (mode != Mode::select)
             saved_select = toolbar_state.select;
         new_mode = Mode::select;
     }
+
     toolbar_button(ToolbarButton::sel_clear);
     if (toolbar_button(ToolbarButton::view_perspective, &toolbar_state.view_perspective)) {
         toolbar_state.view_perspective = true;
@@ -836,6 +866,7 @@ bool GeometryEditor::gui_toolbar()
         toolbar_state.view_ortho_y = false;
         toolbar_state.view_ortho_z = false;
     }
+
     if (toolbar_button(ToolbarButton::view_ortho_z, &toolbar_state.view_ortho_z)) {
         if ( ! toolbar_state.view_ortho_z) {
             // TODO flip front/back
@@ -845,6 +876,7 @@ bool GeometryEditor::gui_toolbar()
         toolbar_state.view_ortho_y = false;
         toolbar_state.view_ortho_z = true;
     }
+
     if (toolbar_button(ToolbarButton::view_ortho_x, &toolbar_state.view_ortho_x)) {
         if ( ! toolbar_state.view_ortho_x) {
             // TODO flip left/right
@@ -854,6 +886,7 @@ bool GeometryEditor::gui_toolbar()
         toolbar_state.view_ortho_y = false;
         toolbar_state.view_ortho_z = false;
     }
+
     if (toolbar_button(ToolbarButton::view_ortho_y, &toolbar_state.view_ortho_y)) {
         if ( ! toolbar_state.view_ortho_y) {
             // TODO flip top/bottom
@@ -863,18 +896,30 @@ bool GeometryEditor::gui_toolbar()
         toolbar_state.view_ortho_y = true;
         toolbar_state.view_ortho_z = false;
     }
+
     toolbar_button(ToolbarButton::toggle_tessell, &toolbar_state.toggle_tessellation);
+
     toolbar_button(ToolbarButton::toggle_wireframe, &toolbar_state.toggle_wireframe);
+
     toolbar_button(ToolbarButton::snap_x, &toolbar_state.snap_x);
+
     toolbar_button(ToolbarButton::snap_y, &toolbar_state.snap_y);
+
     toolbar_button(ToolbarButton::snap_z, &toolbar_state.snap_z);
+
     if (toolbar_button(ToolbarButton::move, &toolbar_state.move))
         new_mode = toolbar_state.move ? Mode::move : Mode::select;
+
     if (toolbar_button(ToolbarButton::rotate, &toolbar_state.rotate))
         new_mode = toolbar_state.rotate ? Mode::rotate : Mode::select;
+
     if (toolbar_button(ToolbarButton::scale, &toolbar_state.scale))
         new_mode = toolbar_state.scale ? Mode::scale : Mode::select;
-    toolbar_button(ToolbarButton::erase);
+
+    if (toolbar_button(ToolbarButton::erase)) {
+        // TODO delete
+    }
+
     if (toolbar_button(ToolbarButton::extrude, &toolbar_state.extrude))
         new_mode = toolbar_state.extrude ? Mode::extrude : Mode::select;
 
@@ -885,48 +930,42 @@ bool GeometryEditor::gui_toolbar()
 
 void GeometryEditor::switch_mode(Mode new_mode)
 {
-    if (new_mode == mode) {
-        // At least one thing is always selectable
-        if ((mode == Mode::select) && ! toolbar_state.select.vertices && ! toolbar_state.select.edges)
-            toolbar_state.select.faces = true;
+    if (new_mode != mode) {
 
-        // No need to do anything, since mode hasn't changed
-        return;
+        if (mode == Mode::select)
+            saved_select = toolbar_state.select;
+
+        toolbar_state.select  = { false, false, false };
+        toolbar_state.move    = false;
+        toolbar_state.rotate  = false;
+        toolbar_state.scale   = false;
+        toolbar_state.extrude = false;
+
+        switch (new_mode) {
+
+            case Mode::select:
+                toolbar_state.select = saved_select;
+                break;
+
+            case Mode::move:
+                toolbar_state.move = true;
+                break;
+
+            case Mode::rotate:
+                toolbar_state.rotate = true;
+                break;
+
+            case Mode::scale:
+                toolbar_state.scale = true;
+                break;
+
+            case Mode::extrude:
+                toolbar_state.extrude = true;
+                break;
+        }
+
+        mode = new_mode;
     }
-
-    if (mode == Mode::select)
-        saved_select = toolbar_state.select;
-
-    toolbar_state.select  = { false, false, false };
-    toolbar_state.move    = false;
-    toolbar_state.rotate  = false;
-    toolbar_state.scale   = false;
-    toolbar_state.extrude = false;
-
-    switch (new_mode) {
-
-        case Mode::select:
-            toolbar_state.select = saved_select;
-            break;
-
-        case Mode::move:
-            toolbar_state.move = true;
-            break;
-
-        case Mode::rotate:
-            toolbar_state.rotate = true;
-            break;
-
-        case Mode::scale:
-            toolbar_state.scale = true;
-            break;
-
-        case Mode::extrude:
-            toolbar_state.extrude = true;
-            break;
-    }
-
-    mode = new_mode;
 
     // At least one thing is always selectable
     if ((mode == Mode::select) && ! toolbar_state.select.vertices && ! toolbar_state.select.edges)
