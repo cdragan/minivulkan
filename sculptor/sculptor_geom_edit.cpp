@@ -601,6 +601,14 @@ void GeometryEditor::gui_status_bar()
 
     if (ImGui::BeginChild("##Geometry Editor Status Bar", status_bar_size, false, status_flags)) {
         if (ImGui::BeginMenuBar()) {
+            static const char* const mode_names[] = {
+#               define X(mode, name) name,
+                MODE_LIST
+#               undef X
+            };
+
+            ImGui::Text("Mode: %s", mode_names[static_cast<unsigned>(mode)]);
+            ImGui::Separator();
             ImGui::Text("Pos: %ux%u", static_cast<unsigned>(item_pos.x), static_cast<unsigned>(item_pos.y));
             ImGui::Separator();
             ImGui::Text("Window: %ux%u", static_cast<unsigned>(win_size.x), static_cast<unsigned>(win_size.y));
@@ -659,6 +667,124 @@ bool GeometryEditor::toolbar_button(ToolbarButton button, bool* checked)
     return clicked;
 }
 
+void GeometryEditor::handle_keyboard_actions()
+{
+    Mode new_mode = mode;
+
+#ifdef __APPLE__
+    constexpr ImGuiKey left_ctrl  = ImGuiKey_LeftSuper;
+    constexpr ImGuiKey right_ctrl = ImGuiKey_RightSuper;
+#else
+    constexpr ImGuiKey left_ctrl  = ImGuiKey_LeftCtrl;
+    constexpr ImGuiKey right_ctrl = ImGuiKey_RightCtrl;
+#endif
+
+    const auto IsCtrl = []() -> bool {
+        return ImGui::IsKeyDown(left_ctrl) || ImGui::IsKeyDown(right_ctrl);
+    };
+
+    if (ImGui::IsKeyPressed(ImGuiKey_Z) && IsCtrl()) {
+        // undo
+    }
+    if (ImGui::IsKeyPressed(ImGuiKey_Z) && IsCtrl() &&
+        (ImGui::IsKeyDown(ImGuiKey_LeftShift) || ImGui::IsKeyDown(ImGuiKey_RightShift))) {
+        // redo
+    }
+    if (ImGui::IsKeyPressed(ImGuiKey_C) && IsCtrl()) {
+        // copy
+    }
+    if (ImGui::IsKeyPressed(ImGuiKey_V) && IsCtrl()) {
+        // paste
+    }
+    if (ImGui::IsKeyPressed(ImGuiKey_X) && IsCtrl()) {
+        // cut
+    }
+    if (ImGui::IsKeyPressed(ImGuiKey_1)) {
+        toolbar_state.select.vertices = ! toolbar_state.select.vertices;
+        if (mode != Mode::select)
+            saved_select = toolbar_state.select;
+        new_mode = Mode::select;
+    }
+    if (ImGui::IsKeyPressed(ImGuiKey_2)) {
+        toolbar_state.select.edges = ! toolbar_state.select.edges;
+        if (mode != Mode::select)
+            saved_select = toolbar_state.select;
+        new_mode = Mode::select;
+    }
+    if (ImGui::IsKeyPressed(ImGuiKey_3)) {
+        toolbar_state.select.faces = ! toolbar_state.select.faces;
+        if (mode != Mode::select)
+            saved_select = toolbar_state.select;
+        new_mode = Mode::select;
+    }
+    if (ImGui::IsKeyPressed(ImGuiKey_5)) {
+        toolbar_state.view_perspective = true;
+        toolbar_state.view_ortho_x = false;
+        toolbar_state.view_ortho_y = false;
+        toolbar_state.view_ortho_z = false;
+    }
+    if (ImGui::IsKeyPressed(ImGuiKey_6)) {
+        if (toolbar_state.view_ortho_z) {
+            // TODO flip front/back
+        }
+        toolbar_state.view_perspective = false;
+        toolbar_state.view_ortho_x = false;
+        toolbar_state.view_ortho_y = false;
+        toolbar_state.view_ortho_z = true;
+    }
+    if (ImGui::IsKeyPressed(ImGuiKey_7)) {
+        if (toolbar_state.view_ortho_x) {
+            // TODO flip left/right
+        }
+        toolbar_state.view_perspective = false;
+        toolbar_state.view_ortho_x = true;
+        toolbar_state.view_ortho_y = false;
+        toolbar_state.view_ortho_z = false;
+    }
+    if (ImGui::IsKeyPressed(ImGuiKey_8)) {
+        if (toolbar_state.view_ortho_y) {
+            // TODO flip top/bottom
+        }
+        toolbar_state.view_perspective = false;
+        toolbar_state.view_ortho_x = false;
+        toolbar_state.view_ortho_y = true;
+        toolbar_state.view_ortho_z = false;
+    }
+    if (ImGui::IsKeyPressed(ImGuiKey_T) &&
+            (ImGui::IsKeyDown(ImGuiKey_LeftAlt) || ImGui::IsKeyDown(ImGuiKey_RightAlt)))
+        toolbar_state.toggle_tessellation = ! toolbar_state.toggle_tessellation;
+    if (ImGui::IsKeyPressed(ImGuiKey_W) &&
+            (ImGui::IsKeyDown(ImGuiKey_LeftAlt) || ImGui::IsKeyDown(ImGuiKey_RightAlt)))
+        toolbar_state.toggle_wireframe = ! toolbar_state.toggle_wireframe;
+    if (ImGui::IsKeyPressed(ImGuiKey_X))
+        toolbar_state.snap_x = ! toolbar_state.snap_x;
+    if (ImGui::IsKeyPressed(ImGuiKey_Y))
+        toolbar_state.snap_y = ! toolbar_state.snap_y;
+    if (ImGui::IsKeyPressed(ImGuiKey_Z))
+        toolbar_state.snap_z = ! toolbar_state.snap_z;
+    if (ImGui::IsKeyPressed(ImGuiKey_G)) {
+        toolbar_state.move = true;
+        new_mode = Mode::move;
+    }
+    if (ImGui::IsKeyPressed(ImGuiKey_R)) {
+        toolbar_state.rotate = true;
+        new_mode = Mode::rotate;
+    }
+    if (ImGui::IsKeyPressed(ImGuiKey_S)) {
+        toolbar_state.scale = true;
+        new_mode = Mode::scale;
+    }
+    if (ImGui::IsKeyPressed(ImGuiKey_Delete)) {
+        // delete
+    }
+    if (ImGui::IsKeyPressed(ImGuiKey_E)) {
+        toolbar_state.extrude = true;
+        new_mode = Mode::extrude;
+    }
+
+    switch_mode(new_mode);
+}
+
 bool GeometryEditor::gui_toolbar()
 {
     // Skip if it's not loaded yet
@@ -668,39 +794,149 @@ bool GeometryEditor::gui_toolbar()
     constexpr uint32_t margin = 10;
     ImGui::SetCursorPos(ImVec2{margin, margin + ImGui::GetTextLineHeightWithSpacing()});
 
-    if (toolbar_button(ToolbarButton::new_cube)) {
-        d_printf("OK\n");
-    }
+    Mode new_mode = mode;
 
-    toolbar_button(ToolbarButton::undo);
-    toolbar_button(ToolbarButton::redo);
-    toolbar_button(ToolbarButton::copy);
-    toolbar_button(ToolbarButton::paste);
-    toolbar_button(ToolbarButton::cut);
-    toolbar_button(ToolbarButton::sel_vertices, &toolbar_state.sel_vertices);
-    toolbar_button(ToolbarButton::sel_edges, &toolbar_state.sel_edges);
-    toolbar_button(ToolbarButton::sel_faces, &toolbar_state.sel_faces);
+    if (toolbar_button(ToolbarButton::new_cube)) {
+        // new cube
+    }
+    if (toolbar_button(ToolbarButton::undo)) {
+        // undo
+    }
+    if (toolbar_button(ToolbarButton::redo)) {
+        // redo
+    }
+    if (toolbar_button(ToolbarButton::copy)) {
+        // copy
+    }
+    if (toolbar_button(ToolbarButton::paste)) {
+        // paste
+    }
+    if (toolbar_button(ToolbarButton::cut)) {
+        // cut
+    }
+    if (toolbar_button(ToolbarButton::sel_vertices, &toolbar_state.select.vertices)) {
+        if (mode != Mode::select)
+            saved_select = toolbar_state.select;
+        new_mode = Mode::select;
+    }
+    if (toolbar_button(ToolbarButton::sel_edges, &toolbar_state.select.edges)) {
+        if (mode != Mode::select)
+            saved_select = toolbar_state.select;
+        new_mode = Mode::select;
+    }
+    if (toolbar_button(ToolbarButton::sel_faces, &toolbar_state.select.faces)) {
+        if (mode != Mode::select)
+            saved_select = toolbar_state.select;
+        new_mode = Mode::select;
+    }
     toolbar_button(ToolbarButton::sel_clear);
-    toolbar_button(ToolbarButton::view_perspective, &toolbar_state.view_perspective);
-    toolbar_button(ToolbarButton::view_ortho_z, &toolbar_state.view_ortho_z);
-    toolbar_button(ToolbarButton::view_ortho_x, &toolbar_state.view_ortho_x);
-    toolbar_button(ToolbarButton::view_ortho_y, &toolbar_state.view_ortho_y);
+    if (toolbar_button(ToolbarButton::view_perspective, &toolbar_state.view_perspective)) {
+        toolbar_state.view_perspective = true;
+        toolbar_state.view_ortho_x = false;
+        toolbar_state.view_ortho_y = false;
+        toolbar_state.view_ortho_z = false;
+    }
+    if (toolbar_button(ToolbarButton::view_ortho_z, &toolbar_state.view_ortho_z)) {
+        if ( ! toolbar_state.view_ortho_z) {
+            // TODO flip front/back
+        }
+        toolbar_state.view_perspective = false;
+        toolbar_state.view_ortho_x = false;
+        toolbar_state.view_ortho_y = false;
+        toolbar_state.view_ortho_z = true;
+    }
+    if (toolbar_button(ToolbarButton::view_ortho_x, &toolbar_state.view_ortho_x)) {
+        if ( ! toolbar_state.view_ortho_x) {
+            // TODO flip left/right
+        }
+        toolbar_state.view_perspective = false;
+        toolbar_state.view_ortho_x = true;
+        toolbar_state.view_ortho_y = false;
+        toolbar_state.view_ortho_z = false;
+    }
+    if (toolbar_button(ToolbarButton::view_ortho_y, &toolbar_state.view_ortho_y)) {
+        if ( ! toolbar_state.view_ortho_y) {
+            // TODO flip top/bottom
+        }
+        toolbar_state.view_perspective = false;
+        toolbar_state.view_ortho_x = false;
+        toolbar_state.view_ortho_y = true;
+        toolbar_state.view_ortho_z = false;
+    }
     toolbar_button(ToolbarButton::toggle_tessell, &toolbar_state.toggle_tessellation);
     toolbar_button(ToolbarButton::toggle_wireframe, &toolbar_state.toggle_wireframe);
     toolbar_button(ToolbarButton::snap_x, &toolbar_state.snap_x);
     toolbar_button(ToolbarButton::snap_y, &toolbar_state.snap_y);
     toolbar_button(ToolbarButton::snap_z, &toolbar_state.snap_z);
-    toolbar_button(ToolbarButton::move, &toolbar_state.move);
-    toolbar_button(ToolbarButton::rotate, &toolbar_state.rotate);
-    toolbar_button(ToolbarButton::scale, &toolbar_state.scale);
+    if (toolbar_button(ToolbarButton::move, &toolbar_state.move))
+        new_mode = toolbar_state.move ? Mode::move : Mode::select;
+    if (toolbar_button(ToolbarButton::rotate, &toolbar_state.rotate))
+        new_mode = toolbar_state.rotate ? Mode::rotate : Mode::select;
+    if (toolbar_button(ToolbarButton::scale, &toolbar_state.scale))
+        new_mode = toolbar_state.scale ? Mode::scale : Mode::select;
     toolbar_button(ToolbarButton::erase);
-    toolbar_button(ToolbarButton::extrude, &toolbar_state.extrude);
+    if (toolbar_button(ToolbarButton::extrude, &toolbar_state.extrude))
+        new_mode = toolbar_state.extrude ? Mode::extrude : Mode::select;
+
+    switch_mode(new_mode);
 
     return true;
 }
 
+void GeometryEditor::switch_mode(Mode new_mode)
+{
+    if (new_mode == mode) {
+        // At least one thing is always selectable
+        if ((mode == Mode::select) && ! toolbar_state.select.vertices && ! toolbar_state.select.edges)
+            toolbar_state.select.faces = true;
+
+        // No need to do anything, since mode hasn't changed
+        return;
+    }
+
+    if (mode == Mode::select)
+        saved_select = toolbar_state.select;
+
+    toolbar_state.select  = { false, false, false };
+    toolbar_state.move    = false;
+    toolbar_state.rotate  = false;
+    toolbar_state.scale   = false;
+    toolbar_state.extrude = false;
+
+    switch (new_mode) {
+
+        case Mode::select:
+            toolbar_state.select = saved_select;
+            break;
+
+        case Mode::move:
+            toolbar_state.move = true;
+            break;
+
+        case Mode::rotate:
+            toolbar_state.rotate = true;
+            break;
+
+        case Mode::scale:
+            toolbar_state.scale = true;
+            break;
+
+        case Mode::extrude:
+            toolbar_state.extrude = true;
+            break;
+    }
+
+    mode = new_mode;
+
+    // At least one thing is always selectable
+    if ((mode == Mode::select) && ! toolbar_state.select.vertices && ! toolbar_state.select.edges)
+        toolbar_state.select.faces = true;
+}
+
 bool GeometryEditor::create_gui_frame(uint32_t image_idx, bool* need_realloc, const UserInput& input)
 {
+    handle_keyboard_actions();
+
     char window_title[sizeof(object_name) + 36];
     snprintf(window_title, sizeof(window_title),
              "%s - %s###Geometry Editor", get_editor_name(), get_object_name());
