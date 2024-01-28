@@ -81,12 +81,13 @@ class GeometryEditor: public Editor {
         };
 
         struct View {
-            uint32_t  width         = 0;
-            uint32_t  height        = 0;
-            uint32_t  host_sel_size = 0;
-            ViewType  view_type     = ViewType::free_moving;
-            Camera    camera[static_cast<int>(ViewType::num_types)];
-            Resources res[max_swapchain_size];
+            uint32_t    width         = 0;
+            uint32_t    height        = 0;
+            uint32_t    host_sel_size = 0;
+            ViewType    view_type     = ViewType::free_moving;
+            Camera      camera[static_cast<int>(ViewType::num_types)];
+            Resources   res[max_swapchain_size];
+            vmath::vec2 mouse_pos;
         };
 
         struct SelectState {
@@ -130,6 +131,14 @@ class GeometryEditor: public Editor {
 #           undef X
         };
 
+        enum class Action {
+            none,
+            select,
+            execute,
+            rotate,
+            pan,
+        };
+
         bool alloc_view_resources(View*     dst_view,
                                   uint32_t  width,
                                   uint32_t  height,
@@ -139,6 +148,7 @@ class GeometryEditor: public Editor {
         bool create_materials();
         bool create_transforms_buffer();
         bool create_descriptor_sets();
+        void handle_mouse_actions(const UserInput& input, bool view_hovered);
         void handle_keyboard_actions();
         void gui_status_bar();
         bool gui_toolbar();
@@ -148,6 +158,8 @@ class GeometryEditor: public Editor {
         bool draw_selection_feedback(VkCommandBuffer cmdbuf, View& dst_view, uint32_t image_idx);
         bool render_geometry(VkCommandBuffer cmdbuf, const View& dst_view, uint32_t image_idx);
         bool set_patch_transforms(const View& dst_view, uint32_t transform_id);
+        void finish_edit_mode();
+        void cancel_edit_mode();
 
         View               view;
         uint32_t           window_width      = 0;
@@ -167,6 +179,8 @@ class GeometryEditor: public Editor {
         ToolbarState       toolbar_state     = { };
         SelectState        saved_select      = { };
         Mode               mode              = Mode::select;
+        Action             mouse_action      = Action::none;
+        vmath::vec2        mouse_action_init {0.0f, 0.0f};
 };
 
 }

@@ -584,7 +584,6 @@ bool GeometryEditor::create_descriptor_sets()
 
 void GeometryEditor::gui_status_bar()
 {
-    const ImVec2 item_pos = ImGui::GetItemRectMin();
     const ImVec2 win_size = ImGui::GetWindowSize();
 
     const ImGuiWindowFlags status_flags =
@@ -609,9 +608,7 @@ void GeometryEditor::gui_status_bar()
 
             ImGui::Text("Mode: %s", mode_names[static_cast<unsigned>(mode)]);
             ImGui::Separator();
-            ImGui::Text("Pos: %ux%u", static_cast<unsigned>(item_pos.x), static_cast<unsigned>(item_pos.y));
-            ImGui::Separator();
-            ImGui::Text("Window: %ux%u", static_cast<unsigned>(win_size.x), static_cast<unsigned>(win_size.y));
+            ImGui::Text("Mouse: %ux%u", static_cast<unsigned>(view.mouse_pos.x), static_cast<unsigned>(view.mouse_pos.y));
 
             ImGui::EndMenuBar();
         }
@@ -665,6 +662,91 @@ bool GeometryEditor::toolbar_button(ToolbarButton button, bool* checked)
         *checked = ! *checked;
 
     return clicked;
+}
+
+void GeometryEditor::handle_mouse_actions(const UserInput& input, bool view_hovered)
+{
+    const bool mouse_moved = input.mouse_pos_delta.x != 0 || input.mouse_pos_delta.y != 0;
+
+    // When mouse moves, but is not captured, detect a new mouse action
+    if ( ! has_captured_mouse() && view_hovered && ! is_mouse_captured()) {
+
+        assert(mouse_action == Action::none);
+
+        if (mouse_moved && (ImGui::IsKeyDown(ImGuiKey_LeftCtrl) || ImGui::IsKeyDown(ImGuiKey_RightCtrl)))
+            mouse_action = Action::rotate;
+        else if (mouse_moved && (ImGui::IsKeyDown(ImGuiKey_LeftShift) || ImGui::IsKeyDown(ImGuiKey_RightShift)))
+            mouse_action = Action::pan;
+
+        if (ImGui::IsMouseClicked(ImGuiMouseButton_Left))
+            mouse_action = (mode == Mode::select) ? Action::select : Action::execute;
+
+        if (mouse_action != Action::none) {
+            capture_mouse();
+            mouse_action_init = input.abs_mouse_pos;
+        }
+    }
+
+    if (has_captured_mouse()) {
+        switch (mouse_action) {
+
+            case Action::rotate:
+                if ( ! ImGui::IsKeyDown(ImGuiKey_LeftCtrl) && ! ImGui::IsKeyDown(ImGuiKey_RightCtrl))
+                    release_mouse();
+                else if (mouse_moved) {
+                    // TODO rotate
+                }
+                break;
+
+            case Action::pan:
+                if ( ! ImGui::IsKeyDown(ImGuiKey_LeftShift) && ! ImGui::IsKeyDown(ImGuiKey_RightShift))
+                    release_mouse();
+                else if (mouse_moved) {
+                    // TODO pan
+                }
+                break;
+
+            case Action::select:
+                if (ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
+                    release_mouse();
+                    // TODO finish selection
+                }
+                else if (mouse_moved) {
+                    // TODO update selection rectangle
+                }
+                break;
+
+            case Action::execute:
+                if (ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
+                    release_mouse();
+                    finish_edit_mode();
+                    switch_mode(Mode::select);
+                }
+                break;
+
+            default:
+                assert("missing action" == nullptr);
+        }
+
+        if ( ! has_captured_mouse()) {
+            mouse_action = Action::none;
+        }
+    }
+    else {
+        assert(mouse_action == Action::none);
+    }
+
+    if ((mode == Mode::select) && view_hovered && (mouse_action != Action::select)) {
+        // TODO draw hover selection of selectable items
+    }
+
+    if ((mode != Mode::select) && ! has_captured_mouse() && mouse_moved) {
+        // TODO adjust modification
+    }
+
+    if (input.wheel_delta != 0) {
+        // TODO zoom
+    }
 }
 
 void GeometryEditor::handle_keyboard_actions()
@@ -801,6 +883,13 @@ void GeometryEditor::handle_keyboard_actions()
     if (ImGui::IsKeyPressed(ImGuiKey_E)) {
         toolbar_state.extrude = true;
         new_mode = Mode::extrude;
+    }
+
+    if (ImGui::IsKeyPressed(ImGuiKey_Escape)) {
+        new_mode     = Mode::select;
+        mouse_action = Action::none;
+        if (has_captured_mouse())
+            release_mouse();
     }
 
     switch_mode(new_mode);
@@ -945,6 +1034,7 @@ void GeometryEditor::switch_mode(Mode new_mode)
 
             case Mode::select:
                 toolbar_state.select = saved_select;
+                cancel_edit_mode();
                 break;
 
             case Mode::move:
@@ -1010,25 +1100,39 @@ bool GeometryEditor::create_gui_frame(uint32_t image_idx, bool* need_realloc, co
     window_width  = new_width;
     window_height = new_height;
 
-    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2{0, 0});
+    const ImVec2 image_pos = ImGui::GetCursorPos();
+    const ImVec2 image_size{static_cast<float>(window_width), static_cast<float>(window_height)};
 
-    ImGui::Image(reinterpret_cast<ImTextureID>(view.res[image_idx].gui_texture),
-                 ImVec2{static_cast<float>(window_width),
-                        static_cast<float>(window_height)});
-
-    ImGui::PopStyleVar();
-
-    // Detect if mouse is hovered over the rendered image and calculate relative position
-    if (ImGui::IsItemHovered()) {
-#if 0
-        const vmath::vec2 hovered_pos = get_rel_mouse_pos(input);
-#endif
+    {
+        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2{0, 0});
+        ImGui::Image(reinterpret_cast<ImTextureID>(view.res[image_idx].gui_texture),
+                     image_size);
+        ImGui::PopStyleVar();
     }
+
+    UserInput local_input = input;
+    local_input.abs_mouse_pos -= vmath::vec2(ImGui::GetItemRectMin());
+
+    view.mouse_pos = local_input.abs_mouse_pos;
+
+    handle_mouse_actions(local_input, ImGui::IsItemHovered());
 
     const ImVec2 status_bar_pos = ImGui::GetCursorPos();
 
     if ( ! gui_toolbar())
         return false;
+
+    const ImVec2 mask_pos{image_pos.x, ImGui::GetCursorPos().y};
+    const ImVec2 mask_size{image_size.x, image_size.y - (mask_pos.y - image_pos.y)};
+
+    ImGui::SetCursorPos(mask_pos);
+
+    if (mask_size.x > 0 && mask_size.y > 0) {
+        // Prevent mouse from dragging the entire window
+        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2{0, 0});
+        ImGui::InvisibleButton("Obscure Geometry Editor View", mask_size);
+        ImGui::PopStyleVar();
+    }
 
     ImGui::SetCursorPos(status_bar_pos);
 
@@ -1295,6 +1399,14 @@ bool GeometryEditor::render_geometry(VkCommandBuffer cmdbuf,
     patch_geometry.render(cmdbuf);
 
     return true;
+}
+
+void GeometryEditor::finish_edit_mode()
+{
+}
+
+void GeometryEditor::cancel_edit_mode()
+{
 }
 
 } // namespace Sculptor

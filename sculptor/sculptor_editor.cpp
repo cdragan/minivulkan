@@ -28,6 +28,7 @@ void Sculptor::Editor::capture_mouse()
 
 void Sculptor::Editor::release_mouse()
 {
+    assert(editor_with_mouse == this);
     editor_with_mouse = nullptr;
 }
 

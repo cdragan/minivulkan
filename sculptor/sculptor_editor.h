@@ -32,7 +32,7 @@ class Editor {
         virtual bool draw_frame(VkCommandBuffer cmdbuf, uint32_t image_idx) = 0;
 
         void capture_mouse();
-        static void release_mouse();
+        void release_mouse();
         bool has_captured_mouse() const;
         static bool is_mouse_captured();
 
