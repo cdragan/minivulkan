@@ -694,7 +694,29 @@ void GeometryEditor::handle_mouse_actions(const UserInput& input, bool view_hove
                 if ( ! ImGui::IsKeyDown(ImGuiKey_LeftCtrl) && ! ImGui::IsKeyDown(ImGuiKey_RightCtrl))
                     release_mouse();
                 else if (mouse_moved) {
-                    // TODO rotate
+                    constexpr float rot_scale_factor = 0.3f;
+
+                    Camera& camera = view.camera[static_cast<int>(view.view_type)];
+
+                    switch (view.view_type) {
+
+                        case ViewType::free_moving:
+                            camera.yaw   += rot_scale_factor * input.mouse_pos_delta.x;
+                            camera.pitch += rot_scale_factor * input.mouse_pos_delta.y;
+                            camera.pitch  = mstd::min(mstd::max(camera.pitch, -90.0f), 90.0f);
+                            break;
+
+                        case ViewType::front: {
+                            const float view_bounds        = 1.1f;
+                            const float ortho_scale_factor = view.height * 0.0000001f;
+                            camera.pos.x = mstd::min(mstd::max(camera.pos.x - ortho_scale_factor * input.mouse_pos_delta.x, -view_bounds), view_bounds);
+                            camera.pos.y = mstd::min(mstd::max(camera.pos.y + ortho_scale_factor * input.mouse_pos_delta.y, -view_bounds), view_bounds);
+                            break;
+                        }
+
+                        default:
+                            assert(0);
+                    }
                 }
                 break;
 
