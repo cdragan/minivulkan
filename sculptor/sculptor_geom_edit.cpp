@@ -608,7 +608,7 @@ void GeometryEditor::gui_status_bar()
 
             ImGui::Text("Mode: %s", mode_names[static_cast<unsigned>(mode)]);
             ImGui::Separator();
-            ImGui::Text("Mouse: %ux%u", static_cast<unsigned>(view.mouse_pos.x), static_cast<unsigned>(view.mouse_pos.y));
+            ImGui::Text("Mouse: %dx%d", static_cast<int>(view.mouse_pos.x), static_cast<int>(view.mouse_pos.y));
 
             ImGui::EndMenuBar();
         }

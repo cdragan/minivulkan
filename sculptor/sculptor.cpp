@@ -690,27 +690,37 @@ static bool create_gui_frame(uint32_t image_idx)
     ImGui_ImplVulkan_NewFrame();
     ImGui::NewFrame();
 
-    const ImVec2 abs_mouse_pos = ImGui::GetMousePos();
-    const bool   ctrl_down     = ImGui::IsKeyDown(ImGuiKey_LeftCtrl)  || ImGui::IsKeyDown(ImGuiKey_RightCtrl);
-    const bool   shift_down    = ImGui::IsKeyDown(ImGuiKey_LeftShift) || ImGui::IsKeyDown(ImGuiKey_RightShift);
-    const float  wheel_delta   = io.MouseWheel;
+    static vmath::vec2 prev_mouse_pos;
+
+    const vmath::vec2 abs_mouse_pos = ImGui::GetMousePos();
+    const bool        ctrl_down     = ImGui::IsKeyDown(ImGuiKey_LeftCtrl)  || ImGui::IsKeyDown(ImGuiKey_RightCtrl);
+    const bool        shift_down    = ImGui::IsKeyDown(ImGuiKey_LeftShift) || ImGui::IsKeyDown(ImGuiKey_RightShift);
+    const float       wheel_delta   = io.MouseWheel;
+
+    static vmath::vec2 initial_pos;
+    static bool        initial_pos_set;
+    if ( ! initial_pos_set) {
+        initial_pos     = abs_mouse_pos;
+        prev_mouse_pos  = abs_mouse_pos;
+        initial_pos_set = true;
+    }
+    const bool is_mouse_pos_valid = prev_mouse_pos.x != initial_pos.x;
 
     if ( ! ctrl_down)
         viewport_mouse = -1;
 
-    static ImVec2 prev_mouse_pos;
-    const ImVec2 mouse_delta = ImVec2(abs_mouse_pos.x - prev_mouse_pos.x, abs_mouse_pos.y - prev_mouse_pos.y);
+    const vmath::vec2 mouse_delta = abs_mouse_pos - prev_mouse_pos;
     prev_mouse_pos = abs_mouse_pos;
 
     const Sculptor::Editor::UserInput input = {
-        abs_mouse_pos,
-        mouse_delta,
+        is_mouse_pos_valid ? abs_mouse_pos : vmath::vec2{0.0f, 0.0f},
+        is_mouse_pos_valid ? mouse_delta   : vmath::vec2{0.0f, 0.0f},
         wheel_delta
     };
 
     static const Sculptor::Editor::UserInput no_input = {
-        vmath::vec2(-(1 << 20), -(1 << 20)),
-        vmath::vec2(0, 0),
+        vmath::vec2{-(1 << 20), -(1 << 20)},
+        vmath::vec2{0, 0},
         0
     };
 
