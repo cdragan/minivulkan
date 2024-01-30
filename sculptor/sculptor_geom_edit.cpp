@@ -401,8 +401,15 @@ bool GeometryEditor::allocate_resources_once()
     if ( ! create_descriptor_sets())
         return false;
 
-    view.camera[static_cast<int>(ViewType::free_moving)] = Camera{ { 0.0f, 0.0f,  0.0f }, 0.25f,    0.0f, 0.0f, 1.0f };
-    view.camera[static_cast<int>(ViewType::front)]       = Camera{ { 0.0f, 0.0f, -2.0f },  0.0f, 4096.0f, 0.0f, 0.0f };
+    view.camera[static_cast<int>(ViewType::free_moving)] = Camera{ {  0.0f,  0.0f,  0.0f }, 0.25f,    0.0f, 0.0f, 1.0f };
+    view.camera[static_cast<int>(ViewType::front)]       = Camera{ {  0.0f,  0.0f, -2.0f },  0.0f, 4096.0f, 0.0f, 0.0f };
+    view.camera[static_cast<int>(ViewType::back)]        = Camera{ {  0.0f,  0.0f,  2.0f },  0.0f, 4096.0f, 0.0f, 0.0f };
+    view.camera[static_cast<int>(ViewType::left)]        = Camera{ { -2.0f,  0.0f,  0.0f },  0.0f, 4096.0f, 0.0f, 0.0f };
+    view.camera[static_cast<int>(ViewType::right)]       = Camera{ {  2.0f,  0.0f,  0.0f },  0.0f, 4096.0f, 0.0f, 0.0f };
+    view.camera[static_cast<int>(ViewType::bottom)]      = Camera{ {  0.0f, -2.0f,  0.0f },  0.0f, 4096.0f, 0.0f, 0.0f };
+    view.camera[static_cast<int>(ViewType::top)]         = Camera{ {  0.0f,  2.0f,  0.0f },  0.0f, 4096.0f, 0.0f, 0.0f };
+
+    toolbar_state.view_perspective = true;
 
     return true;
 }
@@ -606,7 +613,22 @@ void GeometryEditor::gui_status_bar()
 #               undef X
             };
 
+            static const char* const view_names[] = {
+                "Perspective",
+                "Front",
+                "Back",
+                "Left",
+                "Right",
+                "Bottom",
+                "Top",
+            };
+
+            const unsigned view_idx = static_cast<unsigned>(view.view_type);
+            assert(view_idx < mstd::array_size(view_names));
+
             ImGui::Text("Mode: %s", mode_names[static_cast<unsigned>(mode)]);
+            ImGui::Separator();
+            ImGui::Text("View: %s", view_names[view_idx]);
             ImGui::Separator();
             ImGui::Text("Mouse: %dx%d", static_cast<int>(view.mouse_pos.x), static_cast<int>(view.mouse_pos.y));
 
@@ -706,16 +728,13 @@ void GeometryEditor::handle_mouse_actions(const UserInput& input, bool view_hove
                             camera.pitch  = mstd::min(mstd::max(camera.pitch, -90.0f), 90.0f);
                             break;
 
-                        case ViewType::front: {
-                            const float view_bounds        = 1.1f;
-                            const float ortho_scale_factor = view.height * 0.0000001f;
+                        default: {
+                            constexpr float view_bounds        = 1.1f;
+                            const     float ortho_scale_factor = view.height * 0.0000001f;
                             camera.pos.x = mstd::min(mstd::max(camera.pos.x - ortho_scale_factor * input.mouse_pos_delta.x, -view_bounds), view_bounds);
                             camera.pos.y = mstd::min(mstd::max(camera.pos.y + ortho_scale_factor * input.mouse_pos_delta.y, -view_bounds), view_bounds);
                             break;
                         }
-
-                        default:
-                            assert(0);
                     }
                 }
                 break;
@@ -834,12 +853,14 @@ void GeometryEditor::handle_keyboard_actions()
         toolbar_state.view_ortho_x = false;
         toolbar_state.view_ortho_y = false;
         toolbar_state.view_ortho_z = false;
+        view.view_type = ViewType::free_moving;
     }
 
     if (ImGui::IsKeyPressed(ImGuiKey_6)) {
-        if (toolbar_state.view_ortho_z) {
-            // TODO flip front/back
-        }
+        if (toolbar_state.view_ortho_z)
+            view.view_type = (view.view_type == ViewType::front) ? ViewType::back : ViewType::front;
+        else
+            view.view_type = ViewType::front;
         toolbar_state.view_perspective = false;
         toolbar_state.view_ortho_x = false;
         toolbar_state.view_ortho_y = false;
@@ -847,9 +868,10 @@ void GeometryEditor::handle_keyboard_actions()
     }
 
     if (ImGui::IsKeyPressed(ImGuiKey_7)) {
-        if (toolbar_state.view_ortho_x) {
-            // TODO flip left/right
-        }
+        if (toolbar_state.view_ortho_x)
+            view.view_type = (view.view_type == ViewType::left) ? ViewType::right : ViewType::left;
+        else
+            view.view_type = ViewType::left;
         toolbar_state.view_perspective = false;
         toolbar_state.view_ortho_x = true;
         toolbar_state.view_ortho_y = false;
@@ -857,9 +879,10 @@ void GeometryEditor::handle_keyboard_actions()
     }
 
     if (ImGui::IsKeyPressed(ImGuiKey_8)) {
-        if (toolbar_state.view_ortho_y) {
-            // TODO flip top/bottom
-        }
+        if (toolbar_state.view_ortho_y)
+            view.view_type = (view.view_type == ViewType::bottom) ? ViewType::top : ViewType::bottom;
+        else
+            view.view_type = ViewType::bottom;
         toolbar_state.view_perspective = false;
         toolbar_state.view_ortho_x = false;
         toolbar_state.view_ortho_y = true;
@@ -976,12 +999,14 @@ bool GeometryEditor::gui_toolbar()
         toolbar_state.view_ortho_x = false;
         toolbar_state.view_ortho_y = false;
         toolbar_state.view_ortho_z = false;
+        view.view_type = ViewType::free_moving;
     }
 
     if (toolbar_button(ToolbarButton::view_ortho_z, &toolbar_state.view_ortho_z)) {
-        if ( ! toolbar_state.view_ortho_z) {
-            // TODO flip front/back
-        }
+        if (toolbar_state.view_ortho_z)
+            view.view_type = ViewType::front;
+        else
+            view.view_type = (view.view_type == ViewType::front) ? ViewType::back : ViewType::front;
         toolbar_state.view_perspective = false;
         toolbar_state.view_ortho_x = false;
         toolbar_state.view_ortho_y = false;
@@ -989,9 +1014,10 @@ bool GeometryEditor::gui_toolbar()
     }
 
     if (toolbar_button(ToolbarButton::view_ortho_x, &toolbar_state.view_ortho_x)) {
-        if ( ! toolbar_state.view_ortho_x) {
-            // TODO flip left/right
-        }
+        if (toolbar_state.view_ortho_x)
+            view.view_type = ViewType::left;
+        else
+            view.view_type = (view.view_type == ViewType::left) ? ViewType::right : ViewType::left;
         toolbar_state.view_perspective = false;
         toolbar_state.view_ortho_x = true;
         toolbar_state.view_ortho_y = false;
@@ -999,9 +1025,10 @@ bool GeometryEditor::gui_toolbar()
     }
 
     if (toolbar_button(ToolbarButton::view_ortho_y, &toolbar_state.view_ortho_y)) {
-        if ( ! toolbar_state.view_ortho_y) {
-            // TODO flip top/bottom
-        }
+        if (toolbar_state.view_ortho_y)
+            view.view_type = ViewType::bottom;
+        else
+            view.view_type = (view.view_type == ViewType::bottom) ? ViewType::top : ViewType::bottom;
         toolbar_state.view_perspective = false;
         toolbar_state.view_ortho_x = false;
         toolbar_state.view_ortho_y = true;
@@ -1256,6 +1283,17 @@ bool GeometryEditor::draw_geometry_view(VkCommandBuffer cmdbuf,
 
     vkCmdBeginRenderingKHR(cmdbuf, &rendering_info);
 
+    // TODO
+    // * Draw grid lines
+    // * Draw solid geometry
+    //   - Toggle tessellation
+    //   - Toggle wireframe
+    //   - Toggle material or just plain shaded
+    // * Draw patch outline
+    // * Draw edges (observe selection)
+    // * Draw vertices (including control vertices) and connectors (observe selection)
+    // * In all cases observe selection and hover highlight
+
     if ( ! render_geometry(cmdbuf, dst_view, image_idx))
         return false;
 
@@ -1356,7 +1394,18 @@ bool GeometryEditor::set_patch_transforms(const View& dst_view, uint32_t transfo
             break;
 
         case ViewType::front:
+        case ViewType::back:
             model_view = vmath::look_at(camera.pos, vmath::vec3(camera.pos.x, camera.pos.y, 0));
+            break;
+
+        case ViewType::left:
+        case ViewType::right:
+            model_view = vmath::look_at(camera.pos, vmath::vec3(0, camera.pos.y, camera.pos.z));
+            break;
+
+        case ViewType::bottom:
+        case ViewType::top:
+            model_view = vmath::look_at(camera.pos, vmath::vec3(camera.pos.x, 0, camera.pos.z));
             break;
 
         default:

@@ -69,6 +69,11 @@ class GeometryEditor: public Editor {
         enum class ViewType {
             free_moving,
             front,
+            back,
+            left,
+            right,
+            bottom,
+            top,
             num_types
         };
 
