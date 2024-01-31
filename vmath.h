@@ -487,7 +487,8 @@ vec4 ortho_vector(float aspect, float height, float near_plane, float far_plane)
 // Input:
 // - eye_pos    - position of the camera's "eye"
 // - target     - point at which the camera is looking
-mat4 look_at(const vec3& eye_pos, const vec3& target);
+// - up         - vector pointing in the "up" direction
+mat4 look_at(const vec3& eye_pos, const vec3& target, const vec3& up);
 
 // Creates a translation transform matrix
 mat4 translate(float x, float y, float z);

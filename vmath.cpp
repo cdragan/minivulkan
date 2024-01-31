@@ -665,9 +665,8 @@ vec4 vmath::ortho_vector(float aspect, float height, float near_plane, float far
     return result;
 }
 
-mat4 vmath::look_at(const vec3& eye_pos, const vec3& target)
+mat4 vmath::look_at(const vec3& eye_pos, const vec3& target, const vec3& up)
 {
-    constexpr vec3 up{0, 1, 0};
     const vec3 z_axis = normalize(target - eye_pos);
     const vec3 x_axis = normalize(cross_product(up, z_axis));
     const vec3 y_axis = cross_product(z_axis, x_axis);

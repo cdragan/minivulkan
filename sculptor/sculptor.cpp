@@ -1087,12 +1087,12 @@ static bool set_patch_transforms(const Viewport& viewport, uint32_t transform_id
             {
                 const vmath::quat q{vmath::vec3{vmath::radians(viewport.camera_pitch), vmath::radians(viewport.camera_yaw), 0.0f}};
                 const vmath::vec3 cam_vector{vmath::vec4(0, 0, viewport.camera_distance, 0) * vmath::mat4(q)};
-                model_view = vmath::look_at(viewport.camera_pos - cam_vector, viewport.camera_pos);
+                model_view = vmath::look_at(viewport.camera_pos - cam_vector, viewport.camera_pos, vmath::vec3{0, 1, 0});
             }
             break;
 
         case ViewType::front:
-            model_view = vmath::look_at(viewport.camera_pos, vmath::vec3(viewport.camera_pos.x, viewport.camera_pos.y, 0));
+            model_view = vmath::look_at(viewport.camera_pos, vmath::vec3(viewport.camera_pos.x, viewport.camera_pos.y, 0), vmath::vec3{0, 1, 0});
             break;
 
         default:

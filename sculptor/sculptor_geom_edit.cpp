@@ -626,9 +626,9 @@ void GeometryEditor::gui_status_bar()
             const unsigned view_idx = static_cast<unsigned>(view.view_type);
             assert(view_idx < mstd::array_size(view_names));
 
-            ImGui::Text("Mode: %s", mode_names[static_cast<unsigned>(mode)]);
+            ImGui::Text("%s", mode_names[static_cast<unsigned>(mode)]);
             ImGui::Separator();
-            ImGui::Text("View: %s", view_names[view_idx]);
+            ImGui::Text("%s", view_names[view_idx]);
             ImGui::Separator();
             ImGui::Text("Mouse: %dx%d", static_cast<int>(view.mouse_pos.x), static_cast<int>(view.mouse_pos.y));
 
@@ -1389,23 +1389,23 @@ bool GeometryEditor::set_patch_transforms(const View& dst_view, uint32_t transfo
             {
                 const vmath::quat q{vmath::vec3{vmath::radians(camera.pitch), vmath::radians(camera.yaw), 0.0f}};
                 const vmath::vec3 cam_vector{vmath::vec4(0, 0, camera.distance, 0) * vmath::mat4(q)};
-                model_view = vmath::look_at(camera.pos - cam_vector, camera.pos);
+                model_view = vmath::look_at(camera.pos - cam_vector, camera.pos, vmath::vec3{0, 1, 0});
             }
             break;
 
         case ViewType::front:
         case ViewType::back:
-            model_view = vmath::look_at(camera.pos, vmath::vec3(camera.pos.x, camera.pos.y, 0));
+            model_view = vmath::look_at(camera.pos, vmath::vec3(camera.pos.x, camera.pos.y, 0), vmath::vec3{0, 1, 0});
             break;
 
         case ViewType::left:
         case ViewType::right:
-            model_view = vmath::look_at(camera.pos, vmath::vec3(0, camera.pos.y, camera.pos.z));
+            model_view = vmath::look_at(camera.pos, vmath::vec3(0, camera.pos.y, camera.pos.z), vmath::vec3{0, 1, 0});
             break;
 
         case ViewType::bottom:
         case ViewType::top:
-            model_view = vmath::look_at(camera.pos, vmath::vec3(camera.pos.x, 0, camera.pos.z));
+            model_view = vmath::look_at(camera.pos, vmath::vec3(camera.pos.x, 0, camera.pos.z), vmath::vec3{0, 0, 1});
             break;
 
         default:
