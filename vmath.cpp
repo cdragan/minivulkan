@@ -5,7 +5,6 @@
 #include "vecfloat.h"
 #include "mstdc.h"
 #include <assert.h>
-#include <cmath>
 
 using namespace vmath;
 
@@ -242,7 +241,9 @@ template vec<4> vmath::normalize(const vec<4>&);
 template<>
 vmath::vec<2> vmath::min(const vec<2>& v1, const vec<2>& v2)
 {
-    return vec<2>{fmin(v1.x, v2.x), fmin(v1.y, v2.y)};
+    vec<2> result;
+    min(float4::load2(v1.data), float4::load2(v2.data)).store2(result.data);
+    return result;
 }
 
 template<>
@@ -264,7 +265,9 @@ vmath::vec<4> vmath::min(const vec<4>& v1, const vec<4>& v2)
 template<>
 vmath::vec<2> vmath::max(const vec<2>& v1, const vec<2>& v2)
 {
-    return vec<2>{fmax(v1.x, v2.x), fmax(v1.y, v2.y)};
+    vec<2> result;
+    max(float4::load2(v1.data), float4::load2(v2.data)).store2(result.data);
+    return result;
 }
 
 template<>
