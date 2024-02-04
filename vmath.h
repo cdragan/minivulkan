@@ -3,6 +3,15 @@
 
 #pragma once
 
+#ifdef _WIN32
+#   ifdef min
+#       undef min
+#   endif
+#   ifdef max
+#       undef max
+#   endif
+#endif
+
 namespace vmath {
 
 constexpr double pi_double  = 3.141592653589793;
@@ -313,7 +322,7 @@ template<unsigned dim>
 vec<dim> min(const vec<dim>& v1, const vec<dim>& v2);
 
 template<unsigned dim>
-vec<dim> max(const vec<dim>& v, const vec<dim>& v21);
+vec<dim> max(const vec<dim>& v1, const vec<dim>& v2);
 
 struct quat {
     union {
