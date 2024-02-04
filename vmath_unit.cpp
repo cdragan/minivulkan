@@ -28,12 +28,12 @@ int main()
     //////////////////////////////////////////////////////////////////////////////////////////
     // constants
 
-    TEST(is_near(vmath::pi,          3.141592f));
-    TEST(is_near(vmath::pi_half,     1.570796f));
-    TEST(is_near(vmath::pi_squared,  9.869604f));
-    TEST(is_near(vmath::two_pi,      6.283185f));
-    TEST(is_near(vmath::radians(60), 1.047197f));
-    TEST(is_near(vmath::degrees(1),  57.295779f));
+    TEST(is_near(vmath::pi,             3.141592f));
+    TEST(is_near(vmath::pi_half,        1.570796f));
+    TEST(is_near(vmath::pi_squared,     9.869604f));
+    TEST(is_near(vmath::two_pi,         6.283185f));
+    TEST(is_near(vmath::radians(60.0f), 1.047197f));
+    TEST(is_near(vmath::degrees(1.0f),  57.295779f));
 
     //////////////////////////////////////////////////////////////////////////////////////////
     // sincos
@@ -951,7 +951,7 @@ int main()
 
     // quat, euler_xyz
     {
-        const vmath::quat q{vmath::vec3{0, 0, vmath::pi_half}};
+        const vmath::quat q = vmath::quat::from_euler(vmath::vec3{0, 0, vmath::pi_half});
         const vmath::vec3 v{q.rotate(vmath::vec3{1, 0, 0})};
 
         TEST(is_near(v.x, 0));
@@ -959,7 +959,7 @@ int main()
         TEST(is_near(v.z, 0));
     }
     {
-        const vmath::quat q{vmath::vec3{0, vmath::pi_half, 0}};
+        const vmath::quat q = vmath::quat::from_euler(vmath::vec3{0, vmath::pi_half, 0});
         const vmath::vec3 v{q.rotate(vmath::vec3{0, 0, 1})};
 
         TEST(is_near(v.x, 1));
@@ -967,7 +967,7 @@ int main()
         TEST(is_near(v.z, 0));
     }
     {
-        const vmath::quat q{vmath::vec3{vmath::pi_half, 0, 0}};
+        const vmath::quat q = vmath::quat::from_euler(vmath::vec3{vmath::pi_half, 0, 0});
         const vmath::vec3 v{q.rotate(vmath::vec3{0, 1, 0})};
 
         TEST(is_near(v.x, 0));
