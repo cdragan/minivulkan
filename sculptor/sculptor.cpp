@@ -728,23 +728,23 @@ static bool create_gui_frame(uint32_t image_idx)
         if (ImGui::BeginMenu("File")) {
             if (ImGui::MenuItem("New")) {
             }
-            if (ImGui::MenuItem("Open", "CTRL+O")) {
+            if (ImGui::MenuItem("Open", CTRL_KEY "O")) {
             }
-            if (ImGui::MenuItem("Save", "CTRL+S")) {
+            if (ImGui::MenuItem("Save", CTRL_KEY "S")) {
             }
             ImGui::EndMenu();
         }
         if (ImGui::BeginMenu("Edit")) {
-            if (ImGui::MenuItem("Undo", "CTRL+Z")) {
+            if (ImGui::MenuItem("Undo", CTRL_KEY "Z")) {
             }
-            if (ImGui::MenuItem("Redo", "CTRL+Y", false, false)) {
+            if (ImGui::MenuItem("Redo", CTRL_KEY "Y", false, false)) {
             }
             ImGui::Separator();
-            if (ImGui::MenuItem("Cut", "CTRL+X")) {
+            if (ImGui::MenuItem("Cut", CTRL_KEY "X")) {
             }
-            if (ImGui::MenuItem("Copy", "CTRL+C")) {
+            if (ImGui::MenuItem("Copy", CTRL_KEY "C")) {
             }
-            if (ImGui::MenuItem("Paste", "CTRL+V")) {
+            if (ImGui::MenuItem("Paste", CTRL_KEY "V")) {
             }
             ImGui::EndMenu();
         }
@@ -1085,7 +1085,8 @@ static bool set_patch_transforms(const Viewport& viewport, uint32_t transform_id
 
         case ViewType::free_moving:
             {
-                const vmath::quat q{vmath::vec3{vmath::radians(viewport.camera_pitch), vmath::radians(viewport.camera_yaw), 0.0f}};
+                const vmath::quat q = vmath::quat::from_euler(
+                        vmath::radians(vmath::vec3{viewport.camera_pitch, viewport.camera_yaw, 0.0f}));
                 const vmath::vec3 cam_vector{vmath::vec4(0, 0, viewport.camera_distance, 0) * vmath::mat4(q)};
                 model_view = vmath::look_at(viewport.camera_pos - cam_vector, viewport.camera_pos, vmath::vec3{0, 1, 0});
             }

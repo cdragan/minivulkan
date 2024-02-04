@@ -165,6 +165,17 @@ namespace {
 
 namespace Sculptor {
 
+vmath::quat GeometryEditor::Camera::get_perspective_rotation_quat() const
+{
+    return vmath::quat::from_euler(vmath::radians(vmath::vec3{pitch, yaw, 0.0f}));
+}
+
+void GeometryEditor::Camera::move(const vmath::vec3& delta)
+{
+    constexpr vmath::vec3 max_pos{1.1f};
+    pos = vmath::max(vmath::min(pos + get_perspective_rotation_quat().rotate(delta), max_pos), -max_pos);
+}
+
 const char* GeometryEditor::get_editor_name() const
 {
     return "Geometry Editor";
@@ -401,13 +412,13 @@ bool GeometryEditor::allocate_resources_once()
     if ( ! create_descriptor_sets())
         return false;
 
-    view.camera[static_cast<int>(ViewType::free_moving)] = Camera{ {  0.0f,  0.0f,  0.0f }, 0.25f,    0.0f, 0.0f, 1.0f };
-    view.camera[static_cast<int>(ViewType::front)]       = Camera{ {  0.0f,  0.0f, -2.0f },  0.0f, 4096.0f, 0.0f, 0.0f };
-    view.camera[static_cast<int>(ViewType::back)]        = Camera{ {  0.0f,  0.0f,  2.0f },  0.0f, 4096.0f, 0.0f, 0.0f };
-    view.camera[static_cast<int>(ViewType::left)]        = Camera{ { -2.0f,  0.0f,  0.0f },  0.0f, 4096.0f, 0.0f, 0.0f };
-    view.camera[static_cast<int>(ViewType::right)]       = Camera{ {  2.0f,  0.0f,  0.0f },  0.0f, 4096.0f, 0.0f, 0.0f };
-    view.camera[static_cast<int>(ViewType::bottom)]      = Camera{ {  0.0f, -2.0f,  0.0f },  0.0f, 4096.0f, 0.0f, 0.0f };
-    view.camera[static_cast<int>(ViewType::top)]         = Camera{ {  0.0f,  2.0f,  0.0f },  0.0f, 4096.0f, 0.0f, 0.0f };
+    view.camera[static_cast<int>(ViewType::free_moving)] = Camera{ { 0.0f, 0.0f, 0.0f }, 0.25f,    0.0f, 0.0f, 1.0f };
+    view.camera[static_cast<int>(ViewType::front)]       = Camera{ { 0.0f, 0.0f, 0.0f },  0.0f, 4096.0f, 0.0f, 0.0f };
+    view.camera[static_cast<int>(ViewType::back)]        = Camera{ { 0.0f, 0.0f, 0.0f },  0.0f, 4096.0f, 0.0f, 0.0f };
+    view.camera[static_cast<int>(ViewType::left)]        = Camera{ { 0.0f, 0.0f, 0.0f },  0.0f, 4096.0f, 0.0f, 0.0f };
+    view.camera[static_cast<int>(ViewType::right)]       = Camera{ { 0.0f, 0.0f, 0.0f },  0.0f, 4096.0f, 0.0f, 0.0f };
+    view.camera[static_cast<int>(ViewType::bottom)]      = Camera{ { 0.0f, 0.0f, 0.0f },  0.0f, 4096.0f, 0.0f, 0.0f };
+    view.camera[static_cast<int>(ViewType::top)]         = Camera{ { 0.0f, 0.0f, 0.0f },  0.0f, 4096.0f, 0.0f, 0.0f };
 
     toolbar_state.view_perspective = true;
 
@@ -729,6 +740,7 @@ void GeometryEditor::handle_mouse_actions(const UserInput& input, bool view_hove
                             break;
 
                         default: {
+                            // TODO switch to free_moving and apply rotation
                             constexpr float view_bounds        = 1.1f;
                             const     float ortho_scale_factor = view.height * 0.0000001f;
                             camera.pos.x = mstd::min(mstd::max(camera.pos.x - ortho_scale_factor * input.mouse_pos_delta.x, -view_bounds), view_bounds);
@@ -743,7 +755,45 @@ void GeometryEditor::handle_mouse_actions(const UserInput& input, bool view_hove
                 if ( ! ImGui::IsKeyDown(ImGuiKey_LeftShift) && ! ImGui::IsKeyDown(ImGuiKey_RightShift))
                     release_mouse();
                 else if (mouse_moved) {
-                    // TODO pan
+                    const float pan_factor = view.height * 0.0000001f;
+
+                    Camera& camera = view.camera[static_cast<int>(view.view_type)];
+
+                    switch (view.view_type) {
+
+                        default:
+                            assert(view.view_type == ViewType::free_moving);
+                            camera.move(vmath::vec3{-pan_factor, pan_factor, 0} * vmath::vec3{input.mouse_pos_delta});
+                            break;
+
+                        case ViewType::front:
+                            camera.move(vmath::vec3{-pan_factor, pan_factor, 0} * vmath::vec3{input.mouse_pos_delta});
+                            break;
+
+                        case ViewType::back:
+                            camera.move(vmath::vec3{pan_factor, pan_factor, 0} * vmath::vec3{input.mouse_pos_delta});
+                            break;
+
+                        case ViewType::left:
+                            camera.move(vmath::vec3{0, pan_factor, pan_factor} *
+                                        vmath::vec3{0, input.mouse_pos_delta.y, input.mouse_pos_delta.x});
+                            break;
+
+                        case ViewType::right:
+                            camera.move(vmath::vec3{0, pan_factor, -pan_factor} *
+                                        vmath::vec3{0, input.mouse_pos_delta.y, input.mouse_pos_delta.x});
+                            break;
+
+                        case ViewType::bottom:
+                            camera.move(vmath::vec3{pan_factor, 0, pan_factor} *
+                                        vmath::vec3{input.mouse_pos_delta.x, 0, input.mouse_pos_delta.y});
+                            break;
+
+                        case ViewType::top:
+                            camera.move(vmath::vec3{-pan_factor, 0, pan_factor} *
+                                        vmath::vec3{input.mouse_pos_delta.x, 0, input.mouse_pos_delta.y});
+                            break;
+                    }
                 }
                 break;
 
@@ -1387,25 +1437,46 @@ bool GeometryEditor::set_patch_transforms(const View& dst_view, uint32_t transfo
 
         case ViewType::free_moving:
             {
-                const vmath::quat q{vmath::vec3{vmath::radians(camera.pitch), vmath::radians(camera.yaw), 0.0f}};
-                const vmath::vec3 cam_vector{vmath::vec4(0, 0, camera.distance, 0) * vmath::mat4(q)};
+                const vmath::quat q = camera.get_perspective_rotation_quat();
+                const vmath::vec3 cam_vector = q.rotate(vmath::vec3{0, 0, camera.distance});
                 model_view = vmath::look_at(camera.pos - cam_vector, camera.pos, vmath::vec3{0, 1, 0});
             }
             break;
 
         case ViewType::front:
+            model_view = vmath::look_at(vmath::vec3{camera.pos.x, camera.pos.y, -2},
+                                        vmath::vec3{camera.pos.x, camera.pos.y, 0},
+                                        vmath::vec3{0, 1, 0});
+            break;
+
         case ViewType::back:
-            model_view = vmath::look_at(camera.pos, vmath::vec3(camera.pos.x, camera.pos.y, 0), vmath::vec3{0, 1, 0});
+            model_view = vmath::look_at(vmath::vec3{camera.pos.x, camera.pos.y, 2},
+                                        vmath::vec3{camera.pos.x, camera.pos.y, 0},
+                                        vmath::vec3{0, 1, 0});
             break;
 
         case ViewType::left:
+            model_view = vmath::look_at(vmath::vec3{-2, camera.pos.y, camera.pos.z},
+                                        vmath::vec3{0, camera.pos.y, camera.pos.z},
+                                        vmath::vec3{0, 1, 0});
+            break;
+
         case ViewType::right:
-            model_view = vmath::look_at(camera.pos, vmath::vec3(0, camera.pos.y, camera.pos.z), vmath::vec3{0, 1, 0});
+            model_view = vmath::look_at(vmath::vec3{2, camera.pos.y, camera.pos.z},
+                                        vmath::vec3{0, camera.pos.y, camera.pos.z},
+                                        vmath::vec3{0, 1, 0});
             break;
 
         case ViewType::bottom:
+            model_view = vmath::look_at(vmath::vec3{camera.pos.x, -2, camera.pos.z},
+                                        vmath::vec3{camera.pos.x, 0, camera.pos.z},
+                                        vmath::vec3{0, 0, 1});
+            break;
+
         case ViewType::top:
-            model_view = vmath::look_at(camera.pos, vmath::vec3(camera.pos.x, 0, camera.pos.z), vmath::vec3{0, 0, 1});
+            model_view = vmath::look_at(vmath::vec3{camera.pos.x, 2, camera.pos.z},
+                                        vmath::vec3{camera.pos.x, 0, camera.pos.z},
+                                        vmath::vec3{0, 0, 1});
             break;
 
         default:

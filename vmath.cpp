@@ -5,6 +5,7 @@
 #include "vecfloat.h"
 #include "mstdc.h"
 #include <assert.h>
+#include <cmath>
 
 using namespace vmath;
 
@@ -238,6 +239,50 @@ template vec<2> vmath::normalize(const vec<2>&);
 template vec<3> vmath::normalize(const vec<3>&);
 template vec<4> vmath::normalize(const vec<4>&);
 
+template<>
+vmath::vec<2> vmath::min(const vec<2>& v1, const vec<2>& v2)
+{
+    return vec<2>{fmin(v1.x, v2.x), fmin(v1.y, v2.y)};
+}
+
+template<>
+vmath::vec<3> vmath::min(const vec<3>& v1, const vec<3>& v2)
+{
+    vec<3> result;
+    min(float4::load4_aligned(v1.data), float4::load4_aligned(v2.data)).store3(result.data);
+    return result;
+}
+
+template<>
+vmath::vec<4> vmath::min(const vec<4>& v1, const vec<4>& v2)
+{
+    vec<4> result;
+    min(float4::load4_aligned(v1.data), float4::load4_aligned(v2.data)).store4_aligned(result.data);
+    return result;
+}
+
+template<>
+vmath::vec<2> vmath::max(const vec<2>& v1, const vec<2>& v2)
+{
+    return vec<2>{fmax(v1.x, v2.x), fmax(v1.y, v2.y)};
+}
+
+template<>
+vmath::vec<3> vmath::max(const vec<3>& v1, const vec<3>& v2)
+{
+    vec<3> result;
+    max(float4::load4_aligned(v1.data), float4::load4_aligned(v2.data)).store3(result.data);
+    return result;
+}
+
+template<>
+vmath::vec<4> vmath::max(const vec<4>& v1, const vec<4>& v2)
+{
+    vec<4> result;
+    max(float4::load4_aligned(v1.data), float4::load4_aligned(v2.data)).store4_aligned(result.data);
+    return result;
+}
+
 quat::quat(const vec3& axis, float angle_radians)
 {
     const float4 axis_f4 = float4::load4_aligned(axis.data);
@@ -251,7 +296,7 @@ quat::quat(const vec3& axis, float angle_radians)
     }
 }
 
-quat::quat(const vec3& euler_xyz)
+quat quat::from_euler(const vec3& euler_xyz)
 {
     const sin_cos_result4 sc_half = sincos(float4::load4_aligned(euler_xyz.data) * spread4(0.5f));
 
@@ -277,7 +322,9 @@ quat::quat(const vec3& euler_xyz)
 
     const float4 result = cx * cy * cz + ((sx * sy * sz) ^ float4{float4::load_mask(1 << 31, 0, 1 << 31, 0)});
 
-    result.store4_aligned(data);
+    quat q;
+    result.store4_aligned(q.data);
+    return q;
 }
 
 quat::quat(const mat3& rot_mtx)

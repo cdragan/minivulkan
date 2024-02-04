@@ -7,6 +7,12 @@
 #include "../vulkan_functions.h"
 #include <stdint.h>
 
+#ifdef __APPLE__
+#    define CTRL_KEY "Cmd "
+#else
+#    define CTRL_KEY "Ctrl "
+#endif
+
 namespace Sculptor {
 
 class Editor {

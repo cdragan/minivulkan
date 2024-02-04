@@ -10,17 +10,19 @@ constexpr float  pi         = static_cast<float>(pi_double);
 constexpr float  pi_squared = static_cast<float>(pi_double * pi_double);
 constexpr float  pi_half    = static_cast<float>(pi_double / 2);
 constexpr float  two_pi     = static_cast<float>(pi_double * 2);
+constexpr float  to_radians = static_cast<float>(pi_double / 180.0);
+constexpr float  to_degrees = static_cast<float>(180.0 / pi_double);
 
-static inline constexpr float radians(float deg)
+template<typename T>
+static inline constexpr T radians(T deg)
 {
-    constexpr float to_rad = static_cast<float>(pi_double / 180.0);
-    return deg * to_rad;
+    return deg * T{to_radians};
 }
 
-static inline constexpr float degrees(float rad)
+template<typename T>
+static inline constexpr T degrees(T rad)
 {
-    constexpr float to_deg = static_cast<float>(180.0 / pi_double);
-    return rad * to_deg;
+    return rad * T{to_degrees};
 }
 
 template<unsigned dim> struct vec;
@@ -307,6 +309,12 @@ float rlength(const vec<dim>& v);
 template<unsigned dim>
 vec<dim> normalize(const vec<dim>& v);
 
+template<unsigned dim>
+vec<dim> min(const vec<dim>& v1, const vec<dim>& v2);
+
+template<unsigned dim>
+vec<dim> max(const vec<dim>& v, const vec<dim>& v21);
+
 struct quat {
     union {
         struct {
@@ -328,9 +336,10 @@ struct quat {
         : x(ptr[0]), y(ptr[1]), z(ptr[2]), w(ptr[3]) { }
 
     quat(const vec3& axis, float angle_radians);
-    explicit quat(const vec3& euler_xyz);
     explicit quat(const mat3& rot_mtx);
     explicit quat(const mat4& rot_mtx);
+
+    static quat from_euler(const vec3& euler_xyz);
 
     constexpr float& operator[](unsigned i) {
         return data[i];

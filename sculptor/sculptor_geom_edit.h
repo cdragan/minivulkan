@@ -19,11 +19,6 @@ class GeometryEditor: public Editor {
         bool draw_frame(VkCommandBuffer cmdbuf, uint32_t image_idx) override;
 
     private:
-#       ifdef __APPLE__
-#           define CTRL_KEY "Cmd "
-#       else
-#           define CTRL_KEY "Ctrl "
-#       endif
         //    id        new group  key                     tooltip
 #       define TOOLBAR_BUTTONS \
             X(new_cube,         0, "",                     "New cube")                    \
@@ -83,6 +78,9 @@ class GeometryEditor: public Editor {
             float       view_height = 0;
             float       yaw         = 0;
             float       pitch       = 0;
+
+            vmath::quat get_perspective_rotation_quat() const;
+            void move(const vmath::vec3& delta);
         };
 
         struct View {
