@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: MIT
-# Copyright (c) 2021-2023 Chris Dragan
+# SPDX-FileCopyrightText: Copyright (c) 2021-2024 Chris Dragan
 
 lib_name = zlib
 
