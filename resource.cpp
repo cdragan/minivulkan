@@ -10,7 +10,7 @@
 
 void* Resource::get_raw_ptr() const
 {
-    return get_raw_ptr(0, 0);
+    return get_raw_ptr(0);
 }
 
 void* Resource::get_raw_ptr(VkDeviceSize idx, VkDeviceSize stride) const
@@ -18,6 +18,11 @@ void* Resource::get_raw_ptr(VkDeviceSize idx, VkDeviceSize stride) const
     const VkDeviceSize offset = idx * stride;
     assert(offset + stride <= alloc_size);
 
+    return get_raw_ptr(offset);
+}
+
+void* Resource::get_raw_ptr(VkDeviceSize offset) const
+{
     uint8_t* const ptr = static_cast<uint8_t*>(owning_heap->get_host_ptr());
     return ptr ? (ptr + heap_offset + offset) : ptr;
 }

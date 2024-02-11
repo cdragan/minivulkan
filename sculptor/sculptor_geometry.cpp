@@ -5,52 +5,37 @@
 
 #include "../mstdc.h"
 
-constexpr uint32_t max_vertices    = 65536;
-constexpr uint32_t max_indices     = 65536;
-constexpr uint32_t num_host_copies = 3;
-constexpr uint32_t vertices_stride = max_vertices * sizeof(Sculptor::Geometry::Vertex);
-constexpr uint32_t indices_stride  = max_indices * sizeof(uint16_t);
-constexpr uint32_t faces_stride    = sizeof(Sculptor::Geometry::FacesBuf) + (Sculptor::Geometry::max_faces - 1) * sizeof(Sculptor::Geometry::FaceData);
+constexpr uint32_t max_vertices         = 65536;
+constexpr uint32_t max_indices          = 65536;
+constexpr uint32_t num_host_copies      = 3;
+
+constexpr uint32_t host_vertices_offset = 0;
+constexpr uint32_t gpu_vertices_offset  = 0;
+constexpr uint32_t vertices_stride      = max_vertices * sizeof(Sculptor::Geometry::Vertex);
+
+constexpr uint32_t host_indices_offset  = vertices_stride;
+constexpr uint32_t gpu_indices_offset   = vertices_stride;
+constexpr uint32_t indices_stride       = max_indices * sizeof(uint16_t);
+
+constexpr uint32_t host_faces_offset    = vertices_stride + indices_stride * num_host_copies;
+constexpr uint32_t gpu_faces_offset     = vertices_stride + indices_stride;
+constexpr uint32_t faces_stride         = sizeof(Sculptor::Geometry::FacesBuf) + (Sculptor::Geometry::max_faces - 1) * sizeof(Sculptor::Geometry::FaceData);
 
 bool Sculptor::Geometry::allocate()
 {
-    if ( ! vertices.allocate(Usage::fixed,
-                             vertices_stride,
-                             VK_FORMAT_UNDEFINED,
-                             VK_BUFFER_USAGE_VERTEX_BUFFER_BIT |
-                                VK_BUFFER_USAGE_TRANSFER_DST_BIT))
-        return false;
-
-    if ( ! host_vertices.allocate(Usage::host_only,
-                                  vertices_stride * num_host_copies,
-                                  VK_FORMAT_UNDEFINED,
-                                  VK_BUFFER_USAGE_TRANSFER_SRC_BIT))
-        return false;
-
-    if ( ! indices.allocate(Usage::fixed,
-                            indices_stride,
-                            VK_FORMAT_UNDEFINED,
-                            VK_BUFFER_USAGE_INDEX_BUFFER_BIT |
-                                VK_BUFFER_USAGE_TRANSFER_DST_BIT))
-        return false;
-
-    if ( ! host_indices.allocate(Usage::host_only,
-                                 indices_stride * num_host_copies,
-                                 VK_FORMAT_UNDEFINED,
-                                 VK_BUFFER_USAGE_TRANSFER_SRC_BIT))
-        return false;
-
-    if ( ! faces.allocate(Usage::fixed,
-                          faces_stride,
-                          VK_FORMAT_UNDEFINED,
-                          VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
-                              VK_BUFFER_USAGE_TRANSFER_DST_BIT))
-        return false;
-
-    if ( ! host_faces.allocate(Usage::host_only,
-                               faces_stride * num_host_copies,
+    if ( ! gpu_buffer.allocate(Usage::fixed,
+                               vertices_stride + indices_stride + faces_stride,
                                VK_FORMAT_UNDEFINED,
-                                   VK_BUFFER_USAGE_TRANSFER_SRC_BIT))
+                               VK_BUFFER_USAGE_VERTEX_BUFFER_BIT |
+                                 VK_BUFFER_USAGE_INDEX_BUFFER_BIT |
+                                 VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+                                 VK_BUFFER_USAGE_TRANSFER_DST_BIT))
+        return false;
+
+    if ( ! host_buffer.allocate(Usage::host_only,
+                                vertices_stride + (indices_stride + faces_stride) * num_host_copies,
+                                VK_FORMAT_UNDEFINED,
+                                VK_BUFFER_USAGE_TRANSFER_SRC_BIT))
         return false;
 
     return true;
@@ -100,28 +85,14 @@ uint32_t Sculptor::Geometry::get_face_state(uint32_t face_id, const Face& face) 
     return obj_faces[face_id].selected ? 2 : 0;
 }
 
-struct Barrier {
-    static constexpr uint32_t max_barriers = 3;
-
-    VkBufferMemoryBarrier buffer_barrier[max_barriers];
-    uint32_t              num_buffer_barriers = 0;
-
-    void add_buffer(VkBuffer      buffer,
-                    VkAccessFlags src_access,
-                    VkAccessFlags dst_access);
-
-    void execute(VkCommandBuffer      cmd_buf,
-                 VkPipelineStageFlags src_stage_mask,
-                 VkPipelineStageFlags dst_stage_mask);
-};
-
-void Barrier::add_buffer(VkBuffer      buffer,
-                         VkAccessFlags src_access,
-                         VkAccessFlags dst_access)
+static void buffer_barrier(VkCommandBuffer      cmd_buf,
+                           VkBuffer             buffer,
+                           VkAccessFlags        src_access,
+                           VkAccessFlags        dst_access,
+                           VkPipelineStageFlags src_stage_mask,
+                           VkPipelineStageFlags dst_stage_mask)
 {
-    VkBufferMemoryBarrier& barrier = buffer_barrier[num_buffer_barriers++];
-
-    static const VkBufferMemoryBarrier barrier_template = {
+    static VkBufferMemoryBarrier barrier = {
         VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
         nullptr,
         0,
@@ -133,18 +104,9 @@ void Barrier::add_buffer(VkBuffer      buffer,
         VK_WHOLE_SIZE
     };
 
-    barrier = barrier_template;
     barrier.srcAccessMask = src_access;
     barrier.dstAccessMask = dst_access;
     barrier.buffer        = buffer;
-}
-
-void Barrier::execute(VkCommandBuffer cmd_buf,
-                      VkPipelineStageFlags src_stage_mask,
-                      VkPipelineStageFlags dst_stage_mask)
-{
-    if ( ! num_buffer_barriers)
-        return;
 
     vkCmdPipelineBarrier(cmd_buf,
                          src_stage_mask,
@@ -152,8 +114,8 @@ void Barrier::execute(VkCommandBuffer cmd_buf,
                          0,             // dependencyFlags
                          0,             // memoryBarrierCount
                          nullptr,       // pMemoryBarriers
-                         num_buffer_barriers,
-                         buffer_barrier,
+                         1,
+                         &barrier,
                          0,             // imageMemoryBarrierCount
                          nullptr);      // pImageMemoryBarriers
 }
@@ -163,7 +125,23 @@ bool Sculptor::Geometry::send_to_gpu(VkCommandBuffer cmd_buf)
     if ( ! dirty)
         return true;
 
-    Barrier barrier;
+    buffer_barrier(cmd_buf,
+                   gpu_buffer.get_buffer(),
+                   VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT |
+                       VK_ACCESS_INDEX_READ_BIT |
+                       VK_ACCESS_SHADER_READ_BIT,
+                   VK_ACCESS_TRANSFER_WRITE_BIT,
+                   VK_PIPELINE_STAGE_VERTEX_INPUT_BIT |
+                       VK_PIPELINE_STAGE_TESSELLATION_CONTROL_SHADER_BIT |
+                       VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                   VK_PIPELINE_STAGE_TRANSFER_BIT);
+
+    buffer_barrier(cmd_buf,
+                   host_buffer.get_buffer(),
+                   VK_ACCESS_HOST_WRITE_BIT,
+                   VK_ACCESS_TRANSFER_READ_BIT,
+                   VK_PIPELINE_STAGE_HOST_BIT,
+                   VK_PIPELINE_STAGE_TRANSFER_BIT);
 
     last_buffer = (last_buffer + 1) % num_host_copies;
 
@@ -174,21 +152,20 @@ bool Sculptor::Geometry::send_to_gpu(VkCommandBuffer cmd_buf)
     };
 
     if (num_vertices) {
-        copy_region.srcOffset = 0;
+        copy_region.srcOffset = host_vertices_offset;
+        copy_region.dstOffset = gpu_vertices_offset;
         copy_region.size      = num_vertices * sizeof(Vertex);
 
-        vkCmdCopyBuffer(cmd_buf, host_vertices.get_buffer(), vertices.get_buffer(), 1, &copy_region);
-
-        barrier.add_buffer(vertices.get_buffer(),
-                           VK_ACCESS_TRANSFER_WRITE_BIT,
-                           VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT);
+        vkCmdCopyBuffer(cmd_buf, host_buffer.get_buffer(), gpu_buffer.get_buffer(), 1, &copy_region);
     }
 
-    FacesBuf* const faces_ptr = host_faces.get_ptr<FacesBuf>(last_buffer, faces_stride);
+    const uint32_t cur_faces_offset = host_faces_offset + last_buffer * faces_stride;
+    FacesBuf* const faces_ptr = host_buffer.get_ptr<FacesBuf>(cur_faces_offset);
     faces_ptr->tess_level[0] = 12;
 
+    const uint32_t cur_indices_offset = host_indices_offset + last_buffer * indices_stride;
     num_indices = 0;
-    uint16_t* const indices_ptr = host_indices.get_ptr<uint16_t>(last_buffer, indices_stride);
+    uint16_t* const indices_ptr = host_buffer.get_ptr<uint16_t>(cur_indices_offset);
     for (uint32_t i_face = 0; i_face < num_faces; i_face++) {
         assert(num_indices + 16 <= max_indices);
 
@@ -250,32 +227,38 @@ bool Sculptor::Geometry::send_to_gpu(VkCommandBuffer cmd_buf)
     }
 
     if (num_indices + num_edge_indices) {
-        copy_region.srcOffset = last_buffer * indices_stride;
-        copy_region.size      = (num_indices + num_edge_indices) * sizeof(Vertex);
+        copy_region.srcOffset = cur_indices_offset;
+        copy_region.dstOffset = gpu_indices_offset;
+        copy_region.size      = (num_indices + num_edge_indices) * sizeof(uint16_t);
 
-        vkCmdCopyBuffer(cmd_buf, host_indices.get_buffer(), indices.get_buffer(), 1, &copy_region);
-
-        barrier.add_buffer(indices.get_buffer(),
-                           VK_ACCESS_TRANSFER_WRITE_BIT,
-                           VK_ACCESS_INDEX_READ_BIT);
+        vkCmdCopyBuffer(cmd_buf, host_buffer.get_buffer(), gpu_buffer.get_buffer(), 1, &copy_region);
     }
 
     if (num_faces) {
-        copy_region.srcOffset = last_buffer * faces_stride;
+        copy_region.srcOffset = cur_faces_offset;
+        copy_region.dstOffset = gpu_faces_offset;
         copy_region.size      = sizeof(FacesBuf) + (num_faces - 1) * sizeof(FaceData);
 
-        vkCmdCopyBuffer(cmd_buf, host_faces.get_buffer(), faces.get_buffer(), 1, &copy_region);
-
-        barrier.add_buffer(faces.get_buffer(),
-                           VK_ACCESS_TRANSFER_WRITE_BIT,
-                           VK_ACCESS_SHADER_READ_BIT);
+        vkCmdCopyBuffer(cmd_buf, host_buffer.get_buffer(), gpu_buffer.get_buffer(), 1, &copy_region);
     }
 
-    barrier.execute(cmd_buf,
-                    VK_PIPELINE_STAGE_TRANSFER_BIT,
-                    VK_PIPELINE_STAGE_VERTEX_INPUT_BIT |
-                        VK_PIPELINE_STAGE_TESSELLATION_CONTROL_SHADER_BIT |
-                        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+    buffer_barrier(cmd_buf,
+                   gpu_buffer.get_buffer(),
+                   VK_ACCESS_TRANSFER_WRITE_BIT,
+                   VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT |
+                       VK_ACCESS_INDEX_READ_BIT |
+                       VK_ACCESS_SHADER_READ_BIT,
+                   VK_PIPELINE_STAGE_TRANSFER_BIT,
+                   VK_PIPELINE_STAGE_VERTEX_INPUT_BIT |
+                       VK_PIPELINE_STAGE_TESSELLATION_CONTROL_SHADER_BIT |
+                       VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+
+    buffer_barrier(cmd_buf,
+                   host_buffer.get_buffer(),
+                   VK_ACCESS_TRANSFER_WRITE_BIT,
+                   VK_ACCESS_HOST_WRITE_BIT,
+                   VK_PIPELINE_STAGE_TRANSFER_BIT,
+                   VK_PIPELINE_STAGE_HOST_BIT);
 
     dirty = false;
 
@@ -294,7 +277,7 @@ void Sculptor::Geometry::set_vertex(uint32_t vtx, int16_t x, int16_t y, int16_t 
 {
     assert(vtx < num_vertices);
 
-    Vertex& vertex = host_vertices.get_ptr<Vertex>()[vtx];
+    Vertex& vertex = host_buffer.get_ptr<Vertex>(host_vertices_offset)[vtx];
     vertex.pos[0] = x;
     vertex.pos[1] = y;
     vertex.pos[2] = z;
@@ -544,18 +527,25 @@ void Sculptor::Geometry::set_cube()
     set_dirty();
 }
 
+void Sculptor::Geometry::write_faces_descriptor(VkDescriptorBufferInfo* desc)
+{
+    desc->buffer = gpu_buffer.get_buffer();
+    desc->offset = gpu_faces_offset;
+    desc->range  = faces_stride;
+}
+
 void Sculptor::Geometry::render(VkCommandBuffer cmd_buf)
 {
-    static const VkDeviceSize vb_offset = 0;
+    const VkDeviceSize vb_offset = gpu_vertices_offset;
     vkCmdBindVertexBuffers(cmd_buf,
                            0, // firstBinding
                            1, // bindingCount
-                           &vertices.get_buffer(),
+                           &gpu_buffer.get_buffer(),
                            &vb_offset);
 
     vkCmdBindIndexBuffer(cmd_buf,
-                         indices.get_buffer(),
-                         0, // offset
+                         gpu_buffer.get_buffer(),
+                         gpu_indices_offset, // offset
                          VK_INDEX_TYPE_UINT16);
 
     vkCmdDrawIndexed(cmd_buf,
@@ -568,16 +558,16 @@ void Sculptor::Geometry::render(VkCommandBuffer cmd_buf)
 
 void Sculptor::Geometry::render_edges(VkCommandBuffer cmd_buf)
 {
-    static const VkDeviceSize vb_offset = 0;
+    const VkDeviceSize vb_offset = gpu_vertices_offset;
     vkCmdBindVertexBuffers(cmd_buf,
                            0, // firstBinding
                            1, // bindingCount
-                           &vertices.get_buffer(),
+                           &gpu_buffer.get_buffer(),
                            &vb_offset);
 
     vkCmdBindIndexBuffer(cmd_buf,
-                         indices.get_buffer(),
-                         edge_indices_offset * sizeof(uint16_t),
+                         gpu_buffer.get_buffer(),
+                         gpu_indices_offset + edge_indices_offset * sizeof(uint16_t),
                          VK_INDEX_TYPE_UINT16);
 
     vkCmdDrawIndexed(cmd_buf,

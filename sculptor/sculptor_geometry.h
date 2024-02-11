@@ -32,6 +32,7 @@ class Geometry {
         bool allocate();
         void set_dirty() { dirty = true; }
         bool send_to_gpu(VkCommandBuffer cmd_buf);
+        void write_faces_descriptor(VkDescriptorBufferInfo* desc);
         void render(VkCommandBuffer cmd_buf);
         void render_edges(VkCommandBuffer cmd_buf);
 
@@ -48,8 +49,6 @@ class Geometry {
         uint32_t get_num_faces() const { return num_faces; }
         void     validate_face(uint32_t face_id);
 
-        const VkBuffer& get_faces_buffer() const { return faces.get_buffer(); }
-
         void set_cube();
         void set_hovered_face(uint32_t face_id);
         void select_face(uint32_t face_id);
@@ -57,12 +56,8 @@ class Geometry {
         void deselect_all_faces();
 
     private:
-        Buffer   vertices;
-        Buffer   host_vertices;
-        Buffer   indices;
-        Buffer   host_indices;
-        Buffer   faces;
-        Buffer   host_faces;
+        Buffer   gpu_buffer;
+        Buffer   host_buffer;
 
         uint32_t last_buffer         = 0;
         uint32_t hovered_face_id     = ~0U;

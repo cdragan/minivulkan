@@ -33,6 +33,18 @@ class Resource {
         }
 
         template<typename T>
+        T* get_ptr(VkDeviceSize offset) {
+            assert(offset + sizeof(T) <= alloc_size);
+            return static_cast<T*>(get_raw_ptr(offset));
+        }
+
+        template<typename T>
+        const T* get_ptr(VkDeviceSize offset) const {
+            assert(offset + sizeof(T) <= alloc_size);
+            return static_cast<const T*>(get_raw_ptr(offset));
+        }
+
+        template<typename T>
         T* get_ptr(VkDeviceSize idx, VkDeviceSize stride) {
             assert(sizeof(T) <= stride);
             return static_cast<T*>(get_raw_ptr(idx, stride));
@@ -41,12 +53,13 @@ class Resource {
         template<typename T>
         const T* get_ptr(VkDeviceSize idx, VkDeviceSize stride) const {
             assert(sizeof(T) <= stride);
-            return static_cast<T*>(get_raw_ptr(idx, stride));
+            return static_cast<const T*>(get_raw_ptr(idx, stride));
         }
 
     protected:
         void* get_raw_ptr() const;
         void* get_raw_ptr(VkDeviceSize idx, VkDeviceSize stride) const;
+        void* get_raw_ptr(VkDeviceSize offset) const;
         bool flush_range(VkDeviceSize offset, VkDeviceSize size);
         bool flush_whole();
 

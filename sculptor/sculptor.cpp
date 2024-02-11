@@ -315,7 +315,7 @@ static bool create_descriptor_sets()
         materials_buffer_info.range   = materials_stride;
         transforms_buffer_info.buffer = transforms_buf.get_buffer();
         transforms_buffer_info.range  = transforms_stride;
-        storage_buffer_info.buffer    = patch_geometry.get_faces_buffer();
+        patch_geometry.write_faces_descriptor(&storage_buffer_info);
 
         write_desc_sets[0].dstSet     = desc_set[1];
         write_desc_sets[1].dstSet     = desc_set[2];
