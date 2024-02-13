@@ -9,3 +9,6 @@ imgui.ini
 
 # MSVC files
 vc140.pdb
+
+# Config file for clangd
+.clangd
