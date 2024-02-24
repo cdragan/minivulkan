@@ -65,11 +65,10 @@ bool play_sound_track()
 }
 
 static xcb_intern_atom_reply_t* intern_atom(xcb_connection_t* conn,
-                                            bool              only_if_exists,
                                             const char*       str,
                                             uint16_t          str_size)
 {
-    const xcb_intern_atom_cookie_t cookie = xcb_intern_atom(conn, only_if_exists, str_size, str);
+    const xcb_intern_atom_cookie_t cookie = xcb_intern_atom(conn, false, str_size, str);
 
     return xcb_intern_atom_reply(conn, cookie, nullptr);
 }
@@ -79,7 +78,6 @@ static void set_fullscreen(xcb_connection_t* conn,
 {
     static const char net_wm_state[] = "_NET_WM_STATE";
     xcb_intern_atom_reply_t* const atom_wm_state = intern_atom(conn,
-                                                               false,
                                                                net_wm_state,
                                                                sizeof(net_wm_state) - 1);
     if ( ! atom_wm_state) {
@@ -89,7 +87,6 @@ static void set_fullscreen(xcb_connection_t* conn,
 
     static const char net_wm_state_fullscreen[] = "_NET_WM_STATE_FULLSCREEN";
     xcb_intern_atom_reply_t* const atom_wm_fullscreen = intern_atom(conn,
-                                                                    false,
                                                                     net_wm_state_fullscreen,
                                                                     sizeof(net_wm_state_fullscreen) - 1);
     if ( ! atom_wm_fullscreen) {
@@ -109,6 +106,8 @@ static void set_fullscreen(xcb_connection_t* conn,
     xcb_xfixes_query_version(conn, 4, 0);
     xcb_xfixes_hide_cursor(conn, window);
 }
+
+static xcb_intern_atom_reply_t* atom_wm_delete_window;
 
 static bool create_window(Window* w)
 {
@@ -158,6 +157,23 @@ static bool create_window(Window* w)
     if (full_screen)
         set_fullscreen(w->connection, w->window);
 
+    static const char wm_delete_window[] = "WM_DELETE_WINDOW";
+    atom_wm_delete_window = intern_atom(w->connection, wm_delete_window, sizeof(wm_delete_window) - 1);
+
+    static const char wm_protocols[] = "WM_PROTOCOLS";
+    xcb_intern_atom_reply_t* const atom_wm_protocols = intern_atom(w->connection,
+                                                                   wm_protocols,
+                                                                   sizeof(wm_protocols) - 1);
+
+    xcb_change_property(w->connection,
+                        XCB_PROP_MODE_REPLACE,
+                        w->window,
+                        atom_wm_protocols->atom,
+                        4,
+                        32,
+                        1,
+                        &atom_wm_delete_window->atom);
+
     xcb_map_window(w->connection, w->window);
 
     xcb_flush(w->connection);
@@ -188,6 +204,14 @@ static int event_loop(Window* w)
                         quit = true;
 
                     handle_key_press(event);
+                    break;
+                }
+
+                case XCB_CLIENT_MESSAGE: {
+                    xcb_client_message_event_t* const client_event =
+                        reinterpret_cast<xcb_client_message_event_t*>(event);
+                    if (client_event->data.data32[0] == atom_wm_delete_window->atom)
+                        quit = true;
                     break;
                 }
 
