@@ -425,6 +425,20 @@ bool GeometryEditor::allocate_resources_once()
     return true;
 }
 
+void GeometryEditor::set_material_buf(const MaterialInfo& mat_info, uint32_t mat_id)
+{
+    for (uint32_t i = 0; i < vk_num_swapchain_images; i++) {
+        const uint32_t abs_mat_id = (i * num_materials) + mat_id;
+
+        Sculptor::ShaderMaterial* const material = materials_buf.get_ptr<Sculptor::ShaderMaterial>(abs_mat_id, materials_stride);
+
+        for (uint32_t comp = 0; comp < 3; comp++)
+            material->diffuse_color[comp] = static_cast<float>(mat_info.diffuse_color[comp]) / 255.0f;
+
+        material->diffuse_color[3] = 1.0f;
+    }
+}
+
 bool GeometryEditor::create_materials()
 {
     static const VkVertexInputAttributeDescription vertex_attributes[] = {
@@ -463,11 +477,35 @@ bool GeometryEditor::create_materials()
         VK_POLYGON_MODE_FILL,
         VK_CULL_MODE_BACK_BIT,
         true,                // depth_test
+        true,                // depth_write
         { 0x00, 0x00, 0x00 } // diffuse
     };
 
     if ( ! create_material(object_mat_info, &gray_patch_mat))
         return false;
+
+    static const MaterialInfo edge_mat_info = {
+        {
+            shader_bezier_line_cubic_sculptor_vert,
+            shader_sculptor_color_frag
+        },
+        nullptr,
+        0.0f, // depth_bias
+        0,
+        0,
+        VK_FORMAT_UNDEFINED,
+        VK_PRIMITIVE_TOPOLOGY_LINE_STRIP,
+        0, // patch_control_points
+        VK_POLYGON_MODE_FILL,
+        VK_CULL_MODE_BACK_BIT,
+        true,                // depth_test
+        false,               // depth_write
+        { 0xEE, 0xEE, 0xEE } // diffuse
+    };
+
+    if ( ! create_material(edge_mat_info, &edge_patch_mat))
+        return false;
+    set_material_buf(edge_mat_info, mat_object_edge);
 
     return true;
 }
@@ -502,7 +540,7 @@ bool GeometryEditor::create_descriptor_sets()
             },
             {
                 VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-                1
+                3
             }
         };
 
@@ -541,6 +579,16 @@ bool GeometryEditor::create_descriptor_sets()
             0,                  // offset
             VK_WHOLE_SIZE       // range
         };
+        static VkDescriptorBufferInfo edge_index_buffer_info = {
+            VK_NULL_HANDLE,     // buffer
+            0,                  // offset
+            0                   // range
+        };
+        static VkDescriptorBufferInfo edge_vertex_buffer_info = {
+            VK_NULL_HANDLE,     // buffer
+            0,                  // offset
+            0                   // range
+        };
         static VkWriteDescriptorSet write_desc_sets[] = {
             {
                 VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
@@ -577,7 +625,31 @@ bool GeometryEditor::create_descriptor_sets()
                 nullptr,                                    // pImageInfo
                 &storage_buffer_info,                       // pBufferInfo
                 nullptr                                     // pTexelBufferView
-            }
+            },
+            {
+                VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                nullptr,
+                VK_NULL_HANDLE,                             // dstSet
+                2,                                          // dstBinding
+                0,                                          // dstArrayElement
+                1,                                          // descriptorCount
+                VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,          // descriptorType
+                nullptr,                                    // pImageInfo
+                &edge_index_buffer_info,                    // pBufferInfo
+                nullptr                                     // pTexelBufferView
+            },
+            {
+                VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                nullptr,
+                VK_NULL_HANDLE,                             // dstSet
+                3,                                          // dstBinding
+                0,                                          // dstArrayElement
+                1,                                          // descriptorCount
+                VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,          // descriptorType
+                nullptr,                                    // pImageInfo
+                &edge_vertex_buffer_info,                   // pBufferInfo
+                nullptr                                     // pTexelBufferView
+            },
         };
 
         materials_buffer_info.buffer  = materials_buf.get_buffer();
@@ -585,10 +657,14 @@ bool GeometryEditor::create_descriptor_sets()
         transforms_buffer_info.buffer = transforms_buf.get_buffer();
         transforms_buffer_info.range  = transforms_stride;
         patch_geometry.write_faces_descriptor(&storage_buffer_info);
+        patch_geometry.write_edge_indices_descriptor(&edge_index_buffer_info);
+        patch_geometry.write_edge_vertices_descriptor(&edge_vertex_buffer_info);
 
         write_desc_sets[0].dstSet     = desc_set[1];
         write_desc_sets[1].dstSet     = desc_set[2];
         write_desc_sets[2].dstSet     = desc_set[2];
+        write_desc_sets[3].dstSet     = desc_set[2];
+        write_desc_sets[4].dstSet     = desc_set[2];
 
         vkUpdateDescriptorSets(vk_dev,
                                mstd::array_size(write_desc_sets),
@@ -1539,6 +1615,21 @@ bool GeometryEditor::render_geometry(VkCommandBuffer cmdbuf,
                             dynamic_offsets);
 
     patch_geometry.render(cmdbuf);
+
+    vkCmdBindPipeline(cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, edge_patch_mat);
+
+    send_viewport_and_scissor(cmdbuf, dst_view.width, dst_view.height);
+
+    vkCmdBindDescriptorSets(cmdbuf,
+                            VK_PIPELINE_BIND_POINT_GRAPHICS,
+                            Sculptor::material_layout,
+                            1,          // firstSet
+                            2,          // descriptorSetCount
+                            &desc_set[1],
+                            mstd::array_size(dynamic_offsets),
+                            dynamic_offsets);
+
+    patch_geometry.render_edges2(cmdbuf);
 
     return true;
 }

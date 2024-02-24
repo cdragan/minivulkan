@@ -233,7 +233,7 @@ static bool create_descriptor_sets()
             },
             {
                 VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-                1
+                3
             }
         };
 
@@ -272,6 +272,16 @@ static bool create_descriptor_sets()
             0,                  // offset
             VK_WHOLE_SIZE       // range
         };
+        static VkDescriptorBufferInfo edge_index_buffer_info = {
+            VK_NULL_HANDLE,     // buffer
+            0,                  // offset
+            0                   // range
+        };
+        static VkDescriptorBufferInfo edge_vertex_buffer_info = {
+            VK_NULL_HANDLE,     // buffer
+            0,                  // offset
+            0                   // range
+        };
         static VkWriteDescriptorSet write_desc_sets[] = {
             {
                 VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
@@ -308,7 +318,31 @@ static bool create_descriptor_sets()
                 nullptr,                                    // pImageInfo
                 &storage_buffer_info,                       // pBufferInfo
                 nullptr                                     // pTexelBufferView
-            }
+            },
+            {
+                VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                nullptr,
+                VK_NULL_HANDLE,                             // dstSet
+                2,                                          // dstBinding
+                0,                                          // dstArrayElement
+                1,                                          // descriptorCount
+                VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,          // descriptorType
+                nullptr,                                    // pImageInfo
+                &edge_index_buffer_info,                    // pBufferInfo
+                nullptr                                     // pTexelBufferView
+            },
+            {
+                VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                nullptr,
+                VK_NULL_HANDLE,                             // dstSet
+                3,                                          // dstBinding
+                0,                                          // dstArrayElement
+                1,                                          // descriptorCount
+                VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,          // descriptorType
+                nullptr,                                    // pImageInfo
+                &edge_vertex_buffer_info,                   // pBufferInfo
+                nullptr                                     // pTexelBufferView
+            },
         };
 
         materials_buffer_info.buffer  = materials_buf.get_buffer();
@@ -316,10 +350,14 @@ static bool create_descriptor_sets()
         transforms_buffer_info.buffer = transforms_buf.get_buffer();
         transforms_buffer_info.range  = transforms_stride;
         patch_geometry.write_faces_descriptor(&storage_buffer_info);
+        patch_geometry.write_edge_indices_descriptor(&edge_index_buffer_info);
+        patch_geometry.write_edge_vertices_descriptor(&edge_vertex_buffer_info);
 
         write_desc_sets[0].dstSet     = desc_set[1];
         write_desc_sets[1].dstSet     = desc_set[2];
         write_desc_sets[2].dstSet     = desc_set[2];
+        write_desc_sets[3].dstSet     = desc_set[2];
+        write_desc_sets[4].dstSet     = desc_set[2];
 
         vkUpdateDescriptorSets(vk_dev,
                                mstd::array_size(write_desc_sets),
@@ -382,6 +420,7 @@ bool init_assets()
         VK_POLYGON_MODE_FILL,
         VK_CULL_MODE_NONE,
         true,                // depth_test
+        false,               // depth_write
         { 0x55, 0x55, 0x55 } // diffuse
     };
 
@@ -406,6 +445,7 @@ bool init_assets()
         VK_POLYGON_MODE_FILL,
         VK_CULL_MODE_BACK_BIT,
         true,                // depth_test
+        true,                // depth_write
         { 0x00, 0x00, 0x00 } // diffuse
     };
 
@@ -429,6 +469,7 @@ bool init_assets()
         VK_POLYGON_MODE_LINE,
         VK_CULL_MODE_NONE,
         true,                // depth_test
+        false,               // depth_write
         { 0xEE, 0xEE, 0xEE } // diffuse
     };
 
@@ -456,6 +497,7 @@ bool init_assets()
         VK_POLYGON_MODE_FILL,
         VK_CULL_MODE_BACK_BIT,
         true,                // depth_test
+        false,               // depth_write
         { 0x00, 0x00, 0x00 } // diffuse
     };
 

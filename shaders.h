@@ -6,6 +6,7 @@
 #include "vulkan_functions.h"
 
 #define DEFINE_SHADERS \
+    X(bezier_line_cubic_sculptor_vert) \
     X(bezier_line_cubic_sculptor_tesc) \
     X(bezier_line_cubic_sculptor_tese) \
     X(bezier_surface_cubic_sculptor_tesc) \

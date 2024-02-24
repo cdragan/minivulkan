@@ -5,6 +5,7 @@
 #include "minivulkan.h"
 #include <assert.h>
 
+#include "bezier_line_cubic_sculptor.vert.h"
 #include "bezier_line_cubic_sculptor.tesc.h"
 #include "bezier_line_cubic_sculptor.tese.h"
 #include "bezier_surface_cubic.tesc.h"

@@ -4,9 +4,15 @@
 #include "sculptor_geometry.h"
 
 #include "../mstdc.h"
+#include "vulkan/vulkan_core.h"
+
+constexpr uint32_t tess_level           = 12; // TODO
 
 constexpr uint32_t max_vertices         = 65536;
 constexpr uint32_t max_indices          = 65536;
+constexpr uint32_t max_face_indices     = 43008;
+constexpr uint32_t max_edge_indices     = 22528;
+static_assert(max_edge_indices + max_face_indices == max_indices);
 constexpr uint32_t num_host_copies      = 3;
 
 constexpr uint32_t host_vertices_offset = 0;
@@ -87,10 +93,10 @@ uint32_t Sculptor::Geometry::get_face_state(uint32_t face_id, const Face& face) 
 
 static void buffer_barrier(VkCommandBuffer      cmd_buf,
                            VkBuffer             buffer,
-                           VkAccessFlags        src_access,
-                           VkAccessFlags        dst_access,
                            VkPipelineStageFlags src_stage_mask,
-                           VkPipelineStageFlags dst_stage_mask)
+                           VkAccessFlags        src_access,
+                           VkPipelineStageFlags dst_stage_mask,
+                           VkAccessFlags        dst_access)
 {
     static VkBufferMemoryBarrier barrier = {
         VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
@@ -127,21 +133,17 @@ bool Sculptor::Geometry::send_to_gpu(VkCommandBuffer cmd_buf)
 
     buffer_barrier(cmd_buf,
                    gpu_buffer.get_buffer(),
-                   VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT |
-                       VK_ACCESS_INDEX_READ_BIT |
-                       VK_ACCESS_SHADER_READ_BIT,
-                   VK_ACCESS_TRANSFER_WRITE_BIT,
-                   VK_PIPELINE_STAGE_VERTEX_INPUT_BIT |
-                       VK_PIPELINE_STAGE_TESSELLATION_CONTROL_SHADER_BIT |
-                       VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-                   VK_PIPELINE_STAGE_TRANSFER_BIT);
+                   VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT,
+                   VK_ACCESS_MEMORY_READ_BIT,
+                   VK_PIPELINE_STAGE_TRANSFER_BIT,
+                   VK_ACCESS_TRANSFER_WRITE_BIT);
 
     buffer_barrier(cmd_buf,
                    host_buffer.get_buffer(),
-                   VK_ACCESS_HOST_WRITE_BIT,
-                   VK_ACCESS_TRANSFER_READ_BIT,
                    VK_PIPELINE_STAGE_HOST_BIT,
-                   VK_PIPELINE_STAGE_TRANSFER_BIT);
+                   VK_ACCESS_HOST_WRITE_BIT,
+                   VK_PIPELINE_STAGE_TRANSFER_BIT,
+                   VK_ACCESS_TRANSFER_READ_BIT);
 
     last_buffer = (last_buffer + 1) % num_host_copies;
 
@@ -161,13 +163,14 @@ bool Sculptor::Geometry::send_to_gpu(VkCommandBuffer cmd_buf)
 
     const uint32_t cur_faces_offset = host_faces_offset + last_buffer * faces_stride;
     FacesBuf* const faces_ptr = host_buffer.get_ptr<FacesBuf>(cur_faces_offset);
-    faces_ptr->tess_level[0] = 12;
+    faces_ptr->tess_level[0] = tess_level;
 
+    // Write 16 indices for each face to the host copy of the index buffer
     const uint32_t cur_indices_offset = host_indices_offset + last_buffer * indices_stride;
     num_indices = 0;
     uint16_t* const indices_ptr = host_buffer.get_ptr<uint16_t>(cur_indices_offset);
     for (uint32_t i_face = 0; i_face < num_faces; i_face++) {
-        assert(num_indices + 16 <= max_indices);
+        assert(num_indices + 16 <= max_face_indices);
 
         const Face& face = obj_faces[i_face];
 
@@ -181,6 +184,7 @@ bool Sculptor::Geometry::send_to_gpu(VkCommandBuffer cmd_buf)
             12, 13, 14, 15
         };
 
+        // Write indices for the edges; note the indices of corners overlap
         for (uint32_t i_edge = 0; i_edge < 4; i_edge++) {
             const int32_t edge_sel     = face.edges[i_edge];
             const bool    inverse_edge = edge_sel < 0;
@@ -200,6 +204,7 @@ bool Sculptor::Geometry::send_to_gpu(VkCommandBuffer cmd_buf)
             9, 10
         };
 
+        // Write 4 center indices which control the face, which are not included in edges
         for (uint32_t i_idx = 0; i_idx < 4; i_idx++) {
             assert(face.ctrl_vertices[i_idx] < max_vertices);
             const uint32_t dest_idx = num_indices + ctrl_idx_map[i_idx];
@@ -210,16 +215,17 @@ bool Sculptor::Geometry::send_to_gpu(VkCommandBuffer cmd_buf)
         num_indices += 16;
     }
 
-    edge_indices_offset = num_indices;
+    // Write indices for each edge to the host copy of the index buffer;
+    // The edge indices are used for drawing patch edges and follow face indices
     num_edge_indices = 0;
     for (uint32_t i_edge = 0; i_edge < num_edges; i_edge++) {
-        assert(num_edge_indices + 4 <= max_indices);
+        assert(num_edge_indices + 4 <= max_edge_indices);
 
         const Edge& edge = obj_edges[i_edge];
 
         for (uint32_t i_idx = 0; i_idx < 4; i_idx++) {
             assert(edge.vertices[i_idx] < max_vertices);
-            const uint32_t dest_idx = edge_indices_offset + num_edge_indices + i_idx;
+            const uint32_t dest_idx = max_face_indices + num_edge_indices + i_idx;
             indices_ptr[dest_idx] = static_cast<uint16_t>(edge.vertices[i_idx]);
         }
 
@@ -229,7 +235,7 @@ bool Sculptor::Geometry::send_to_gpu(VkCommandBuffer cmd_buf)
     if (num_indices + num_edge_indices) {
         copy_region.srcOffset = cur_indices_offset;
         copy_region.dstOffset = gpu_indices_offset;
-        copy_region.size      = (num_indices + num_edge_indices) * sizeof(uint16_t);
+        copy_region.size      = (max_face_indices + num_edge_indices) * sizeof(uint16_t);
 
         vkCmdCopyBuffer(cmd_buf, host_buffer.get_buffer(), gpu_buffer.get_buffer(), 1, &copy_region);
     }
@@ -244,21 +250,20 @@ bool Sculptor::Geometry::send_to_gpu(VkCommandBuffer cmd_buf)
 
     buffer_barrier(cmd_buf,
                    gpu_buffer.get_buffer(),
-                   VK_ACCESS_TRANSFER_WRITE_BIT,
-                   VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT |
-                       VK_ACCESS_INDEX_READ_BIT |
-                       VK_ACCESS_SHADER_READ_BIT,
                    VK_PIPELINE_STAGE_TRANSFER_BIT,
+                   VK_ACCESS_TRANSFER_WRITE_BIT,
                    VK_PIPELINE_STAGE_VERTEX_INPUT_BIT |
-                       VK_PIPELINE_STAGE_TESSELLATION_CONTROL_SHADER_BIT |
-                       VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+                     VK_PIPELINE_STAGE_VERTEX_SHADER_BIT |
+                     VK_PIPELINE_STAGE_TESSELLATION_CONTROL_SHADER_BIT |
+                     VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                   VK_ACCESS_MEMORY_READ_BIT);
 
     buffer_barrier(cmd_buf,
                    host_buffer.get_buffer(),
-                   VK_ACCESS_TRANSFER_WRITE_BIT,
-                   VK_ACCESS_HOST_WRITE_BIT,
                    VK_PIPELINE_STAGE_TRANSFER_BIT,
-                   VK_PIPELINE_STAGE_HOST_BIT);
+                   VK_ACCESS_TRANSFER_READ_BIT,
+                   VK_PIPELINE_STAGE_HOST_BIT,
+                   VK_ACCESS_HOST_WRITE_BIT);
 
     dirty = false;
 
@@ -534,6 +539,20 @@ void Sculptor::Geometry::write_faces_descriptor(VkDescriptorBufferInfo* desc)
     desc->range  = faces_stride;
 }
 
+void Sculptor::Geometry::write_edge_indices_descriptor(VkDescriptorBufferInfo* desc)
+{
+    desc->buffer = gpu_buffer.get_buffer();
+    desc->offset = gpu_indices_offset + max_face_indices * sizeof(uint16_t);
+    desc->range  = max_edge_indices * sizeof(uint16_t);
+}
+
+void Sculptor::Geometry::write_edge_vertices_descriptor(VkDescriptorBufferInfo* desc)
+{
+    desc->buffer = gpu_buffer.get_buffer();
+    desc->offset = gpu_vertices_offset;
+    desc->range  = vertices_stride;
+}
+
 void Sculptor::Geometry::render(VkCommandBuffer cmd_buf)
 {
     const VkDeviceSize vb_offset = gpu_vertices_offset;
@@ -567,7 +586,7 @@ void Sculptor::Geometry::render_edges(VkCommandBuffer cmd_buf)
 
     vkCmdBindIndexBuffer(cmd_buf,
                          gpu_buffer.get_buffer(),
-                         gpu_indices_offset + edge_indices_offset * sizeof(uint16_t),
+                         gpu_indices_offset + max_face_indices * sizeof(uint16_t),
                          VK_INDEX_TYPE_UINT16);
 
     vkCmdDrawIndexed(cmd_buf,
@@ -576,4 +595,13 @@ void Sculptor::Geometry::render_edges(VkCommandBuffer cmd_buf)
                      0,  // firstVertex
                      0,  // vertexOffset
                      0); // firstInstance
+}
+
+void Sculptor::Geometry::render_edges2(VkCommandBuffer cmd_buf)
+{
+    vkCmdDraw(cmd_buf,
+              tess_level + 1,   // vertexCount
+              num_edges,        // instanceCount
+              0,                // firstVertex
+              0);               // firstInstance
 }

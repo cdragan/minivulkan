@@ -155,6 +155,7 @@ all_vmath_unit_src_files += $(vmath_unit_src_files)
 ##############################################################################
 # Shaders
 
+shader_files += shaders/bezier_line_cubic_sculptor.vert.glsl
 shader_files += shaders/bezier_line_cubic_sculptor.tesc.glsl
 shader_files += shaders/bezier_line_cubic_sculptor.tese.glsl
 shader_files += shaders/bezier_surface_cubic.tesc.glsl

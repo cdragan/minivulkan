@@ -24,6 +24,7 @@ struct MaterialInfo {
     uint8_t                                  polygon_mode;
     uint8_t                                  cull_mode;
     uint8_t                                  depth_test;
+    uint8_t                                  depth_write;
     uint8_t                                  diffuse_color[3];
 };
 

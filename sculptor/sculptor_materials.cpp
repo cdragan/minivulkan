@@ -70,11 +70,26 @@ bool Sculptor::create_material_layouts()
                 1, // binding 1: storage buffer with patch face data
                 VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
                 1,
-                VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT
+                VK_SHADER_STAGE_VERTEX_BIT
+                    | VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT
                     | VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT
                     | VK_SHADER_STAGE_FRAGMENT_BIT,
                 nullptr
-            }
+            },
+            {
+                2, // binding 2: storage buffer with index buffer for edges
+                VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                1,
+                VK_SHADER_STAGE_VERTEX_BIT,
+                nullptr
+            },
+            {
+                3, // binding 3: storrage buffer with vertex buffer for edges
+                VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                1,
+                VK_SHADER_STAGE_VERTEX_BIT,
+                nullptr
+            },
         };
 
         static const VkDescriptorSetLayoutCreateInfo create_per_object_set_layout = {
@@ -179,11 +194,15 @@ bool Sculptor::create_material(const MaterialInfo& mat_info, VkPipeline* pipelin
         VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
         nullptr,
         0,      // flags
-        mstd::array_size(vertex_bindings),
-        vertex_bindings,
+        0,
+        nullptr,
         0,      // vertexAttributeDescriptionCount
         nullptr // pVertexAttributeDescriptions
     };
+    vertex_input_state.vertexBindingDescriptionCount   =
+        mat_info.vertex_stride ? mstd::array_size(vertex_bindings) : 0U;
+    vertex_input_state.pVertexBindingDescriptions      =
+        mat_info.vertex_stride ? vertex_bindings : nullptr;
     vertex_input_state.vertexAttributeDescriptionCount = mat_info.num_vertex_attributes;
     vertex_input_state.pVertexAttributeDescriptions    = mat_info.vertex_attributes;
 
@@ -264,7 +283,7 @@ bool Sculptor::create_material(const MaterialInfo& mat_info, VkPipeline* pipelin
         0           // maxDepthBounds
     };
     depth_stencil_state.depthTestEnable  = mat_info.depth_test;
-    depth_stencil_state.depthWriteEnable = mat_info.depth_test;
+    depth_stencil_state.depthWriteEnable = mat_info.depth_write;
 
     static VkPipelineColorBlendAttachmentState color_blend_att = {
         VK_FALSE,               // blendEnable
