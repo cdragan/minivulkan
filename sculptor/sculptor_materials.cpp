@@ -255,6 +255,8 @@ bool Sculptor::create_material(const MaterialInfo& mat_info, VkPipeline* pipelin
         rasterization_state.depthBiasEnable         = VK_TRUE;
         rasterization_state.depthBiasConstantFactor = mat_info.depth_bias;
     }
+    else
+        rasterization_state.depthBiasEnable         = VK_FALSE;
 
     static VkPipelineMultisampleStateCreateInfo multisample_state = {
         VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
