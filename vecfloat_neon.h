@@ -121,7 +121,10 @@ struct float1 {
         return *this;
     }
 
-    static constexpr float get_all1s() {
+    #ifndef __clang__
+    constexpr
+    #endif
+    static float get_all1s() {
         constexpr unsigned int u = ~0U;
         return *reinterpret_cast<const float*>(&u);
     }
