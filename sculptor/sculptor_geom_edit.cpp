@@ -1462,7 +1462,7 @@ bool GeometryEditor::draw_geometry_view(VkCommandBuffer cmdbuf,
 
     static const Image::Transition gui_image_layout = {
         VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-        0,
+        VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
         VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
         VK_ACCESS_SHADER_READ_BIT,
         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
