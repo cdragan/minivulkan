@@ -146,6 +146,7 @@ namespace {
 
     constexpr uint32_t transforms_per_viewport = 1;
     constexpr float    int16_scale             = 32767.0f;
+    constexpr uint32_t max_grid_lines          = 4096;
 
     ImageWithHostCopy  toolbar_image;
 
@@ -409,6 +410,9 @@ bool GeometryEditor::allocate_resources_once()
     if ( ! create_transforms_buffer())
         return false;
 
+    if ( ! create_grid_buffer())
+        return false;
+
     if ( ! create_descriptor_sets())
         return false;
 
@@ -497,7 +501,7 @@ bool GeometryEditor::create_materials()
         VK_PRIMITIVE_TOPOLOGY_LINE_STRIP,
         0, // patch_control_points
         VK_POLYGON_MODE_FILL,
-        VK_CULL_MODE_BACK_BIT,
+        VK_CULL_MODE_NONE,
         true,                // depth_test
         false,               // depth_write
         { 0xEE, 0xEE, 0xEE } // diffuse
@@ -506,6 +510,29 @@ bool GeometryEditor::create_materials()
     if ( ! create_material(edge_mat_info, &edge_patch_mat))
         return false;
     set_material_buf(edge_mat_info, mat_object_edge);
+
+    static const MaterialInfo grid_info = {
+        {
+            shader_sculptor_simple_vert,
+            shader_sculptor_color_frag
+        },
+        vertex_attributes,
+        0.0f, // depth_bias
+        mstd::array_size(vertex_attributes),
+        sizeof(Sculptor::Geometry::Vertex),
+        VK_FORMAT_UNDEFINED,
+        VK_PRIMITIVE_TOPOLOGY_LINE_LIST,
+        0, // patch_control_points
+        VK_POLYGON_MODE_FILL,
+        VK_CULL_MODE_NONE,
+        true,                // depth_test
+        false,               // depth_write
+        { 0x55, 0x55, 0x55 } // diffuse
+    };
+
+    if ( ! Sculptor::create_material(grid_info, &grid_mat))
+        return false;
+    set_material_buf(grid_info, mat_grid);
 
     return true;
 }
@@ -520,6 +547,14 @@ bool GeometryEditor::create_transforms_buffer()
                                    transforms_stride * max_swapchain_size * transforms_per_viewport,
                                    VK_FORMAT_UNDEFINED,
                                    VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT);
+}
+
+bool GeometryEditor::create_grid_buffer()
+{
+    return grid_buf.allocate(Usage::dynamic,
+                             max_grid_lines * 2 * max_swapchain_size,
+                             VK_FORMAT_UNDEFINED,
+                             VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT);
 }
 
 bool GeometryEditor::create_descriptor_sets()

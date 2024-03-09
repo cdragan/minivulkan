@@ -153,6 +153,7 @@ class GeometryEditor: public Editor {
         bool create_materials();
         void set_material_buf(const MaterialInfo& mat_info, uint32_t mat_id);
         bool create_transforms_buffer();
+        bool create_grid_buffer();
         bool create_descriptor_sets();
         void handle_mouse_actions(const UserInput& input, bool view_hovered);
         void handle_keyboard_actions();
@@ -179,10 +180,12 @@ class GeometryEditor: public Editor {
         VkDescriptorSet    desc_set[3]       = { };
         VkPipeline         gray_patch_mat    = VK_NULL_HANDLE;
         VkPipeline         edge_patch_mat    = VK_NULL_HANDLE;
+        VkPipeline         grid_mat          = VK_NULL_HANDLE;
         VkDescriptorSet    toolbar_texture   = VK_NULL_HANDLE;
         Sculptor::Geometry patch_geometry;
         Buffer             materials_buf;
         Buffer             transforms_buf;
+        Buffer             grid_buf;
         ToolbarState       toolbar_state     = { };
         SelectState        saved_select      = { };
         Mode               mode              = Mode::select;
