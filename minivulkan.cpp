@@ -857,7 +857,10 @@ bool allocate_depth_buffers(Image (&depth_buffers)[max_swapchain_size], uint32_t
     const uint32_t height = vk_surface_caps.currentExtent.height;
 
     static const VkFormat depth_formats[] = {
-        VK_FORMAT_D24_UNORM_S8_UINT
+        VK_FORMAT_D24_UNORM_S8_UINT,
+        #ifdef __APPLE__
+        VK_FORMAT_D32_SFLOAT_S8_UINT,
+        #endif
     };
     if ( ! find_optimal_tiling_format(depth_formats,
                                       mstd::array_size(depth_formats),
