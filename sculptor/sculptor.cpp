@@ -1262,7 +1262,7 @@ static bool render_selection(const Viewport& viewport, uint32_t image_idx, VkCom
     return true;
 }
 
-bool draw_frame(uint32_t image_idx, uint64_t time_ms, VkFence queue_fence)
+bool draw_frame(uint32_t image_idx, uint64_t time_ms, VkFence queue_fence, uint32_t sem_id)
 {
     if ( ! create_gui_frame(image_idx))
         return false;
@@ -1476,14 +1476,17 @@ bool draw_frame(uint32_t image_idx, uint64_t time_ms, VkFence queue_fence)
     static VkSubmitInfo submit_info = {
         VK_STRUCTURE_TYPE_SUBMIT_INFO,
         nullptr,
-        1,                      // waitSemaphoreCount
-        &vk_sems[sem_acquire],  // pWaitSemaphores
-        &dst_stage,             // pWaitDstStageMask
-        1,                      // commandBufferCount
-        nullptr,                // pCommandBuffers
-        1,                      // signalSemaphoreCount
-        &vk_sems[sem_acquire]   // pSignalSemaphores
+        1,                                  // waitSemaphoreCount
+        nullptr,                            // pWaitSemaphores
+        &dst_stage,                         // pWaitDstStageMask
+        1,                                  // commandBufferCount
+        nullptr,                            // pCommandBuffers
+        1,                                  // signalSemaphoreCount
+        nullptr,                            // pSignalSemaphores
     };
+
+    submit_info.pWaitSemaphores   = &vk_sems[sem_id + sem_acquire];
+    submit_info.pSignalSemaphores = &vk_sems[sem_id + sem_present];
 
     submit_info.pCommandBuffers = &buf;
 

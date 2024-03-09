@@ -732,7 +732,7 @@ bool init_assets()
     return true;
 }
 
-bool draw_frame(uint32_t image_idx, uint64_t time_ms, VkFence queue_fence)
+bool draw_frame(uint32_t image_idx, uint64_t time_ms, VkFence queue_fence, uint32_t sem_id)
 {
     static Buffer vertex_buffer;
     static Buffer index_buffer;
@@ -1027,16 +1027,18 @@ bool draw_frame(uint32_t image_idx, uint64_t time_ms, VkFence queue_fence)
     static VkSubmitInfo submit_info = {
         VK_STRUCTURE_TYPE_SUBMIT_INFO,
         nullptr,
-        1,                      // waitSemaphoreCount
-        &vk_sems[sem_acquire],  // pWaitSemaphores
-        &dst_stage,             // pWaitDstStageMask
-        1,                      // commandBufferCount
-        nullptr,                // pCommandBuffers
-        1,                      // signalSemaphoreCount
-        &vk_sems[sem_acquire]   // pSignalSemaphores
+        1,                                  // waitSemaphoreCount
+        nullptr,                            // pWaitSemaphores
+        &dst_stage,                         // pWaitDstStageMask
+        1,                                  // commandBufferCount
+        nullptr,                            // pCommandBuffers
+        1,                                  // signalSemaphoreCount
+        nullptr                             // pSignalSemaphores
     };
 
-    submit_info.pCommandBuffers = &buf;
+    submit_info.pCommandBuffers   = &buf;
+    submit_info.pWaitSemaphores   = &vk_sems[sem_id + sem_acquire];
+    submit_info.pSignalSemaphores = &vk_sems[sem_id + sem_present];
 
     res = CHK(vkQueueSubmit(vk_queue, 1, &submit_info, queue_fence));
     if (res != VK_SUCCESS)

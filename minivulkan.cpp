@@ -1289,6 +1289,14 @@ bool init_vulkan(Window* w)
     return true;
 }
 
+static uint32_t get_next_sem_id()
+{
+    static uint32_t next_sem_id = 0;
+    const uint32_t sem_id = next_sem_id;
+    next_sem_id = (next_sem_id + num_semaphore_types) % num_semaphores;
+    return sem_id;
+}
+
 bool draw_frame()
 {
     uint32_t image_idx;
@@ -1301,12 +1309,14 @@ bool draw_frame()
             return false;
     }
 
+    const uint32_t sem_id = get_next_sem_id();
+
     for (;;) {
 
         res = CHK(vkAcquireNextImageKHR(vk_dev,
                                         vk_swapchain,
                                         1'000'000'000,
-                                        vk_sems[sem_acquire],
+                                        vk_sems[sem_id + sem_acquire],
                                         VK_NULL_HANDLE,
                                         &image_idx));
         if (res == VK_SUCCESS || res == VK_SUBOPTIMAL_KHR) {
@@ -1333,7 +1343,7 @@ bool draw_frame()
     if ( ! base_abs_time_ms)
         base_abs_time_ms = cur_abs_time_ms;
 
-    if ( ! draw_frame(image_idx, cur_abs_time_ms - base_abs_time_ms, vk_fens[fen_queue]))
+    if ( ! draw_frame(image_idx, cur_abs_time_ms - base_abs_time_ms, vk_fens[fen_queue], sem_id))
         return false;
     fence_set[image_idx] = true;
 
@@ -1343,14 +1353,15 @@ bool draw_frame()
         VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
         nullptr,
         1,
-        &vk_sems[sem_acquire],
+        nullptr,
         1,
         &vk_swapchain,
         nullptr,
         nullptr
     };
 
-    present_info.pImageIndices = &image_idx;
+    present_info.pImageIndices   = &image_idx;
+    present_info.pWaitSemaphores = &vk_sems[sem_id + sem_present];
 
     res = CHK(vkQueuePresentKHR(vk_queue, &present_info));
 

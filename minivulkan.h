@@ -38,7 +38,7 @@ bool create_surface(struct Window* w);
 bool skip_frame(struct Window* w);
 bool need_redraw(struct Window* w);
 bool draw_frame();
-bool draw_frame(uint32_t image_idx, uint64_t time_ms, VkFence queue_fence);
+bool draw_frame(uint32_t image_idx, uint64_t time_ms, VkFence queue_fence, uint32_t sem_id);
 bool idle_queue();
 uint64_t get_current_time_ms();
 bool load_sound_track(const void* data, uint32_t size);
@@ -61,15 +61,16 @@ uint32_t check_feature(const VkBool32* feature);
 uint32_t check_feature_str(const char* name, const VkBool32* feature);
 #endif
 
-enum eLimits {
-    max_swapchain_size = 3
-};
+static constexpr uint32_t max_swapchain_size = 3;
 
 enum eSemId {
     sem_acquire,
+    sem_present,
 
-    num_semaphores
+    num_semaphore_types
 };
+
+static constexpr uint32_t num_semaphores = (max_swapchain_size + 1) * num_semaphore_types;
 
 extern VkSemaphore vk_sems[num_semaphores];
 
