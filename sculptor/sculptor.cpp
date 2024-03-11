@@ -188,7 +188,8 @@ static bool create_grid_lines_buffer()
     return grid_lines_buf.allocate(Usage::dynamic,
                                    max_grid_lines * 2 * max_swapchain_size * mstd::array_size(viewports) * sizeof(GridVertex),
                                    VK_FORMAT_UNDEFINED,
-                                   VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
+                                   VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+                                   "grid lines buffer");
 }
 
 static bool create_materials_buffer()
@@ -200,7 +201,8 @@ static bool create_materials_buffer()
     return materials_buf.allocate(Usage::dynamic,
                                   materials_stride * max_swapchain_size * num_materials,
                                   VK_FORMAT_UNDEFINED,
-                                  VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT);
+                                  VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+                                  "materials buffer");
 }
 
 static bool create_transforms_buffer()
@@ -212,7 +214,8 @@ static bool create_transforms_buffer()
     return transforms_buf.allocate(Usage::dynamic,
                                    transforms_stride * max_swapchain_size * mstd::array_size(viewports) * transforms_per_viewport,
                                    VK_FORMAT_UNDEFINED,
-                                   VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT);
+                                   VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+                                   "transforms buffer");
 }
 
 static bool create_descriptor_sets()
@@ -631,16 +634,16 @@ static bool allocate_viewports()
             select_query_host_info.width  = select_query_range;
             select_query_host_info.height = select_query_range;
 
-            if ( ! viewport.color_buffer[i_img].allocate(color_info))
+            if ( ! viewport.color_buffer[i_img].allocate(color_info, {"view color output", i_img}))
                 return false;
 
-            if ( ! viewport.depth_buffer[i_img].allocate(depth_info))
+            if ( ! viewport.depth_buffer[i_img].allocate(depth_info, {"view depth", i_img}))
                 return false;
 
-            if ( ! viewport.select_query[i_img].allocate(select_query_info))
+            if ( ! viewport.select_query[i_img].allocate(select_query_info, {"select query", i_img}))
                 return false;
 
-            if ( ! viewport.select_query_host[i_img].get_view() && ! viewport.select_query_host[i_img].allocate(select_query_host_info))
+            if ( ! viewport.select_query_host[i_img].get_view() && ! viewport.select_query_host[i_img].allocate(select_query_host_info, {"select host query", i_img}))
                 return false;
 
             if (viewport.gui_tex[i_img]) {

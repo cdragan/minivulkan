@@ -315,16 +315,16 @@ bool GeometryEditor::alloc_view_resources(View*     dst_view,
         if (update_host_sel)
             res.host_select_feedback.destroy();
 
-        if ( ! res.color.allocate(color_info))
+        if ( ! res.color.allocate(color_info, {"view color output", i_img}))
             return false;
 
-        if ( ! res.depth.allocate(depth_info))
+        if ( ! res.depth.allocate(depth_info, {"view depth", i_img}))
             return false;
 
-        if ( ! res.select_feedback.allocate(select_query_info))
+        if ( ! res.select_feedback.allocate(select_query_info, {"view select feedback", i_img}))
             return false;
 
-        if ( ! res.host_select_feedback.allocate(select_query_host_info))
+        if ( ! res.host_select_feedback.allocate(select_query_host_info, {"view host select feedback", i_img}))
             return false;
 
         res.selection_pending = false;
@@ -461,7 +461,8 @@ bool GeometryEditor::create_materials()
     if ( ! materials_buf.allocate(Usage::dynamic,
                                   materials_stride * max_swapchain_size * num_materials,
                                   VK_FORMAT_UNDEFINED,
-                                  VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT))
+                                  VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+                                  "materials buffer"))
         return false;
 
     static const MaterialInfo object_mat_info = {
@@ -546,7 +547,8 @@ bool GeometryEditor::create_transforms_buffer()
     return transforms_buf.allocate(Usage::dynamic,
                                    transforms_stride * max_swapchain_size * transforms_per_viewport,
                                    VK_FORMAT_UNDEFINED,
-                                   VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT);
+                                   VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+                                   "transforms buffer");
 }
 
 bool GeometryEditor::create_grid_buffer()
@@ -554,7 +556,8 @@ bool GeometryEditor::create_grid_buffer()
     return grid_buf.allocate(Usage::dynamic,
                              max_grid_lines * 2 * max_swapchain_size,
                              VK_FORMAT_UNDEFINED,
-                             VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT);
+                             VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+                             "grid buffer");
 }
 
 bool GeometryEditor::create_descriptor_sets()
@@ -1439,6 +1442,8 @@ bool GeometryEditor::draw_geometry_view(VkCommandBuffer cmdbuf,
     color_att.imageView  = res.color.get_view();
     color_att.clearValue = make_clear_color(0.2f, 0.2f, 0.2f, 1);
     depth_att.imageView  = res.depth.get_view();
+    depth_att.loadOp     = VK_ATTACHMENT_LOAD_OP_CLEAR;  // clear it
+    depth_att.storeOp    = VK_ATTACHMENT_STORE_OP_STORE; // keep it for selection
     rendering_info.renderArea.extent.width  = dst_view.width;
     rendering_info.renderArea.extent.height = dst_view.height;
 
@@ -1485,6 +1490,8 @@ bool GeometryEditor::draw_selection_feedback(VkCommandBuffer cmdbuf,
     color_att.imageView                  = res.select_feedback.get_view();
     color_att.clearValue.color.uint32[0] = 0;
     depth_att.imageView                  = res.depth.get_view();
+    depth_att.loadOp                     = VK_ATTACHMENT_LOAD_OP_LOAD;       // reload from draw
+    depth_att.storeOp                    = VK_ATTACHMENT_STORE_OP_DONT_CARE; // discard it
     rendering_info.renderArea.extent.width  = dst_view.width;
     rendering_info.renderArea.extent.height = dst_view.height;
 
@@ -1493,7 +1500,7 @@ bool GeometryEditor::draw_selection_feedback(VkCommandBuffer cmdbuf,
 
     static const Image::Transition transfer_src_image_layout = {
         VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-        0,
+        VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
         VK_PIPELINE_STAGE_TRANSFER_BIT,
         VK_ACCESS_TRANSFER_READ_BIT,
         VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL
@@ -1513,6 +1520,7 @@ bool GeometryEditor::draw_selection_feedback(VkCommandBuffer cmdbuf,
 
     res.selection_pending = true;
 
+    #if 0
     static VkImageCopy region = {
         { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
         { },        // srcOffset
@@ -1531,6 +1539,7 @@ bool GeometryEditor::draw_selection_feedback(VkCommandBuffer cmdbuf,
                    VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                    1,
                    &region);
+    #endif
 
     return true;
 }

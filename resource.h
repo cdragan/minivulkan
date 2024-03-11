@@ -90,7 +90,7 @@ class Image: public Resource {
         VkImageView    get_view()  const { return view; }
         uint32_t       get_pitch() const { return pitch; }
 
-        bool allocate(const ImageInfo& image_info);
+        bool allocate(const ImageInfo& image_info, Description desc);
         bool flush() { return flush_whole(); }
         void destroy();
         void destroy_and_keep_memory();
@@ -138,7 +138,8 @@ class Buffer: public Resource {
         bool allocate(Usage              heap_usage,
                       uint32_t           size,
                       VkFormat           format,
-                      VkBufferUsageFlags usage);
+                      VkBufferUsageFlags usage,
+                      Description        desc);
         void cpu_fill(const void* data, uint32_t size);
         bool flush() { return flush_whole(); }
         bool flush(VkDeviceSize idx, VkDeviceSize stride);
@@ -154,7 +155,7 @@ struct ImageWithHostCopy: public Image {
         ImageWithHostCopy(const ImageWithHostCopy&)            = delete;
         ImageWithHostCopy& operator=(const ImageWithHostCopy&) = delete;
 
-        bool allocate(const ImageInfo& image_info);
+        bool allocate(const ImageInfo& image_info, Description desc);
 
         const Image& get_host_image() const { return host_image; }
         Image& get_host_image() { dirty = true; return host_image; }

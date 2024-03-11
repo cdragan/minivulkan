@@ -50,7 +50,7 @@ static bool read_png_into_image(png_structp        png_ptr,
     image_info.width  = width;
     image_info.height = height;
 
-    if ( ! image->allocate(image_info))
+    if ( ! image->allocate(image_info, "png image"))
         return false;
 
     Image& host_image = image->get_host_image();

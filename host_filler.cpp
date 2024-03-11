@@ -20,7 +20,8 @@ bool HostFiller::fill_buffer(VkCommandBuffer    cmd_buf,
     if ( ! buffer->allocate(heap_usage,
                             size,
                             format,
-                            usage))
+                            usage,
+                            "host filler buffer"))
         return false;
 
     if ( ! need_host_copy) {
@@ -41,7 +42,8 @@ bool HostFiller::fill_buffer(VkCommandBuffer    cmd_buf,
     if ( ! host_buffer.allocate(Usage::host_only,
                                 size,
                                 VK_FORMAT_UNDEFINED,
-                                VK_BUFFER_USAGE_TRANSFER_SRC_BIT))
+                                VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                                "host filler host buffer"))
         return false;
 
     host_buffer.cpu_fill(data, size);

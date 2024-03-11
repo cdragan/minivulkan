@@ -781,6 +781,37 @@ static bool create_device()
     return true;
 }
 
+#ifndef NDEBUG
+void set_vk_object_name(VkObjectType type, uint64_t handle, Description desc)
+{
+    static char name_buf[128];
+    snprintf(name_buf, sizeof(name_buf), "%s %u", desc.name, desc.idx);
+
+    static VkDebugUtilsObjectNameInfoEXT object_name_info = {
+        VK_STRUCTURE_TYPE_DEBUG_UTILS_OBJECT_NAME_INFO_EXT,
+        nullptr,
+        VK_OBJECT_TYPE_UNKNOWN,
+        0,
+        nullptr
+    };
+
+    object_name_info.objectType   = type;
+    object_name_info.objectHandle = handle;
+    object_name_info.pObjectName  = (desc.idx == ~0U) ? desc.name : name_buf;
+
+    static PFN_vkSetDebugUtilsObjectNameEXT vkSetDebugUtilsObjectNameEXT;
+
+    if ( ! vkSetDebugUtilsObjectNameEXT) {
+        vkSetDebugUtilsObjectNameEXT =
+            reinterpret_cast<PFN_vkSetDebugUtilsObjectNameEXT>(
+                vkGetDeviceProcAddr(vk_dev, "vkSetDebugUtilsObjectNameEXT"));
+    }
+
+    if (vkSetDebugUtilsObjectNameEXT)
+        CHK(vkSetDebugUtilsObjectNameEXT(vk_dev, &object_name_info));
+}
+#endif
+
 VkSemaphore vk_sems[num_semaphores];
 
 static bool create_semaphores()
@@ -885,7 +916,7 @@ bool allocate_depth_buffers(Image (&depth_buffers)[max_swapchain_size], uint32_t
         image_info.height = height;
         image_info.format = vk_depth_format;
 
-        if ( ! depth_buffers[i].allocate(image_info))
+        if ( ! depth_buffers[i].allocate(image_info, {"depth buffer", i}))
             return false;
     }
 

@@ -4,7 +4,6 @@
 #include "sculptor_geometry.h"
 
 #include "../mstdc.h"
-#include "vulkan/vulkan_core.h"
 
 constexpr uint32_t tess_level           = 12; // TODO
 
@@ -35,13 +34,15 @@ bool Sculptor::Geometry::allocate()
                                VK_BUFFER_USAGE_VERTEX_BUFFER_BIT |
                                  VK_BUFFER_USAGE_INDEX_BUFFER_BIT |
                                  VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
-                                 VK_BUFFER_USAGE_TRANSFER_DST_BIT))
+                                 VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                               "geometry buffer"))
         return false;
 
     if ( ! host_buffer.allocate(Usage::host_only,
                                 vertices_stride + (indices_stride + faces_stride) * num_host_copies,
                                 VK_FORMAT_UNDEFINED,
-                                VK_BUFFER_USAGE_TRANSFER_SRC_BIT))
+                                VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                                "geometry host buffer"))
         return false;
 
     return true;

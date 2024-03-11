@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include <stdint.h>
+
 enum class Usage {
     // Constant resources created on host and transferred to device, e.g. textures, vertex buffers, etc.
     fixed,
@@ -14,4 +16,19 @@ enum class Usage {
     host_only,
     // Resources used on the device, which are occasionally purged, e.g. depth buffers
     device_temporary
+};
+
+struct Description {
+#ifdef NDEBUG
+    constexpr Description(const char*, uint32_t) { }
+    constexpr Description(const char*) { }
+#else
+    constexpr Description(const char* name, uint32_t idx)
+        : name(name), idx(idx) { }
+    constexpr Description(const char* name)
+        : name(name) { }
+
+    const char* name = nullptr;
+    uint32_t    idx  = ~0U;
+#endif
 };

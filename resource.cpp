@@ -60,7 +60,7 @@ bool Resource::flush_whole()
     return flush_range(0, alloc_size);
 }
 
-bool Image::allocate(const ImageInfo& image_info)
+bool Image::allocate(const ImageInfo& image_info, Description desc)
 {
     const bool host_access = (image_info.heap_usage == Usage::host_only) ||
                              (image_info.heap_usage == Usage::dynamic);
@@ -92,6 +92,8 @@ bool Image::allocate(const ImageInfo& image_info)
     VkResult res = CHK(vkCreateImage(vk_dev, &create_info, nullptr, &image));
     if (res != VK_SUCCESS)
         return false;
+
+    set_vk_object_name(image, desc);
 
     layout     = VK_IMAGE_LAYOUT_UNDEFINED;
     format     = image_info.format;
@@ -232,7 +234,8 @@ void Image::destroy_and_keep_memory()
 bool Buffer::allocate(Usage              heap_usage,
                       uint32_t           size,
                       VkFormat           format,
-                      VkBufferUsageFlags usage)
+                      VkBufferUsageFlags usage,
+                      Description        desc)
 {
     static VkBufferCreateInfo create_info = {
         VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
@@ -250,6 +253,8 @@ bool Buffer::allocate(Usage              heap_usage,
     VkResult res = CHK(vkCreateBuffer(vk_dev, &create_info, nullptr, &buffer));
     if (res != VK_SUCCESS)
         return false;
+
+    set_vk_object_name(buffer, desc);
 
     VkMemoryRequirements memory_reqs;
     vkGetBufferMemoryRequirements(vk_dev, buffer, &memory_reqs);
@@ -308,9 +313,9 @@ bool Buffer::flush(VkDeviceSize idx, VkDeviceSize stride)
     return flush_range(idx * stride, stride);
 }
 
-bool ImageWithHostCopy::allocate(const ImageInfo& image_info)
+bool ImageWithHostCopy::allocate(const ImageInfo& image_info, Description desc)
 {
-    if ( ! Image::allocate(image_info))
+    if ( ! Image::allocate(image_info, desc))
         return false;
 
     width  = image_info.width;
@@ -321,7 +326,7 @@ bool ImageWithHostCopy::allocate(const ImageInfo& image_info)
     host_image_info.usage      = VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
     host_image_info.heap_usage = Usage::host_only;
 
-    return host_image.allocate(host_image_info);
+    return host_image.allocate(host_image_info, desc);
 }
 
 bool ImageWithHostCopy::send_to_gpu(VkCommandBuffer cmdbuf)

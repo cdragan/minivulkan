@@ -818,7 +818,11 @@ bool draw_frame(uint32_t image_idx, uint64_t time_ms, VkFence queue_fence, uint3
         slot_size = mstd::align_up(slot_size,
                                    static_cast<uint32_t>(vk_phys_props.properties.limits.nonCoherentAtomSize));
         const uint32_t total_size = slot_size * mstd::array_size(desc_set);
-        if ( ! shader_data.allocate(Usage::dynamic, total_size, VK_FORMAT_UNDEFINED, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT))
+        if ( ! shader_data.allocate(Usage::dynamic,
+                                    total_size,
+                                    VK_FORMAT_UNDEFINED,
+                                    VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+                                    "example shader data"))
             return false;
 
         host_shader_data = shader_data.get_ptr<uint8_t>();
