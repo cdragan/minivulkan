@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2021-2024 Chris Dragan
 
 #include "sculptor_geom_edit.h"
+#include "sculptor_geometry.h"
 #include "sculptor_materials.h"
 #include "../d_printf.h"
 #include "../gui_imgui.h"
@@ -554,9 +555,9 @@ bool GeometryEditor::create_transforms_buffer()
 bool GeometryEditor::create_grid_buffer()
 {
     return grid_buf.allocate(Usage::dynamic,
-                             max_grid_lines * 2 * max_swapchain_size,
+                             max_grid_lines * 2 * max_swapchain_size * sizeof(Sculptor::Geometry::Vertex),
                              VK_FORMAT_UNDEFINED,
-                             VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+                             VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
                              "grid buffer");
 }
 
@@ -1442,8 +1443,8 @@ bool GeometryEditor::draw_geometry_view(VkCommandBuffer cmdbuf,
     color_att.imageView  = res.color.get_view();
     color_att.clearValue = make_clear_color(0.2f, 0.2f, 0.2f, 1);
     depth_att.imageView  = res.depth.get_view();
-    depth_att.loadOp     = VK_ATTACHMENT_LOAD_OP_CLEAR;  // clear it
-    depth_att.storeOp    = VK_ATTACHMENT_STORE_OP_STORE; // keep it for selection
+    depth_att.loadOp     = VK_ATTACHMENT_LOAD_OP_CLEAR;
+    depth_att.storeOp    = VK_ATTACHMENT_STORE_OP_DONT_CARE;
     rendering_info.renderArea.extent.width  = dst_view.width;
     rendering_info.renderArea.extent.height = dst_view.height;
 
@@ -1461,6 +1462,9 @@ bool GeometryEditor::draw_geometry_view(VkCommandBuffer cmdbuf,
     // * In all cases observe selection and hover highlight
 
     if ( ! render_geometry(cmdbuf, dst_view, image_idx))
+        return false;
+
+    if ( ! render_grid(cmdbuf, dst_view, image_idx))
         return false;
 
     vkCmdEndRenderingKHR(cmdbuf);
@@ -1490,8 +1494,8 @@ bool GeometryEditor::draw_selection_feedback(VkCommandBuffer cmdbuf,
     color_att.imageView                  = res.select_feedback.get_view();
     color_att.clearValue.color.uint32[0] = 0;
     depth_att.imageView                  = res.depth.get_view();
-    depth_att.loadOp                     = VK_ATTACHMENT_LOAD_OP_LOAD;       // reload from draw
-    depth_att.storeOp                    = VK_ATTACHMENT_STORE_OP_DONT_CARE; // discard it
+    depth_att.loadOp                     = VK_ATTACHMENT_LOAD_OP_CLEAR;
+    depth_att.storeOp                    = VK_ATTACHMENT_STORE_OP_DONT_CARE;
     rendering_info.renderArea.extent.width  = dst_view.width;
     rendering_info.renderArea.extent.height = dst_view.height;
 
@@ -1674,6 +1678,85 @@ bool GeometryEditor::render_geometry(VkCommandBuffer cmdbuf,
                             dynamic_offsets);
 
     patch_geometry.render_edges2(cmdbuf);
+
+    return true;
+}
+
+bool GeometryEditor::render_grid(VkCommandBuffer cmdbuf,
+                                 const View&     dst_view,
+                                 uint32_t        image_idx)
+{
+    const uint32_t sub_buf_stride = max_grid_lines * 2 * sizeof(Sculptor::Geometry::Vertex);
+
+    auto     vertices  = grid_buf.get_ptr<Sculptor::Geometry::Vertex>(image_idx, sub_buf_stride);
+    uint32_t num_lines = 0;
+
+    vertices[0].pos[0] = -0x3FFF;
+    vertices[0].pos[1] = 0;
+    vertices[0].pos[2] = 0;
+
+    vertices[1].pos[0] = 0x3FFF;
+    vertices[1].pos[1] = 0;
+    vertices[1].pos[2] = 0;
+
+    vertices[2].pos[0] = 0;
+    vertices[2].pos[1] = -0x3FFF;
+    vertices[2].pos[2] = 0;
+
+    vertices[3].pos[0] = 0;
+    vertices[3].pos[1] = 0x3FFF;
+    vertices[3].pos[2] = 0;
+
+    vertices[4].pos[0] = 0;
+    vertices[4].pos[1] = 0;
+    vertices[4].pos[2] = -0x3FFF;
+
+    vertices[5].pos[0] = 0;
+    vertices[5].pos[1] = 0;
+    vertices[5].pos[2] = 0x3FFF;
+
+    num_lines = 3;
+
+    if ( ! grid_buf.flush(image_idx, sub_buf_stride))
+        return false;
+
+    vkCmdBindPipeline(cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, grid_mat);
+
+    send_viewport_and_scissor(cmdbuf, dst_view.width, dst_view.height);
+
+    const uint32_t grid_mat_id = (image_idx * num_materials) + mat_grid;
+
+    const uint32_t transform_id_base = image_idx * transforms_per_viewport;
+
+    const uint32_t transform_id = transform_id_base + 0;
+
+    uint32_t dynamic_offsets[] = {
+        grid_mat_id * materials_stride,
+        transform_id * transforms_stride
+    };
+
+    vkCmdBindDescriptorSets(cmdbuf,
+                            VK_PIPELINE_BIND_POINT_GRAPHICS,
+                            Sculptor::material_layout,
+                            1, // firstSet
+                            2, // descriptorSetCount
+                            &desc_set[1],
+                            mstd::array_size(dynamic_offsets),
+                            dynamic_offsets);
+
+    const VkDeviceSize vb_offset = image_idx * sub_buf_stride;
+
+    vkCmdBindVertexBuffers(cmdbuf,
+                           0, // firstBinding
+                           1, // bindingCount
+                           &grid_buf.get_buffer(),
+                           &vb_offset);
+
+    vkCmdDraw(cmdbuf,
+              num_lines * 2,
+              1,  // instanceCount
+              0,  // firstVertex
+              0); // firstInstance
 
     return true;
 }
