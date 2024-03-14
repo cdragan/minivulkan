@@ -951,7 +951,28 @@ void GeometryEditor::handle_mouse_actions(const UserInput& input, bool view_hove
     }
 
     if (input.wheel_delta != 0) {
-        // TODO zoom
+
+        Camera& camera = view.camera[static_cast<int>(view.view_type)];
+
+        constexpr float perspective_zoom_factor = -0.02f;
+        constexpr float ortho_zoom_factor       = 200.0f;
+
+        switch (view.view_type) {
+
+            default:
+                assert(view.view_type == ViewType::free_moving);
+                camera.move(vmath::vec3{0, 0, input.wheel_delta * perspective_zoom_factor});
+                break;
+
+            case ViewType::front:
+            case ViewType::back:
+            case ViewType::left:
+            case ViewType::right:
+            case ViewType::bottom:
+            case ViewType::top:
+                camera.view_height += input.wheel_delta * ortho_zoom_factor;
+                break;
+        }
     }
 }
 
