@@ -496,13 +496,13 @@ bool GeometryEditor::create_materials()
             shader_sculptor_color_frag
         },
         nullptr,
-        0.0f, // depth_bias
+        512.0f,
         0,
         0,
         VK_FORMAT_UNDEFINED,
-        VK_PRIMITIVE_TOPOLOGY_LINE_STRIP,
+        VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
         0, // patch_control_points
-        VK_POLYGON_MODE_FILL,
+        VK_POLYGON_MODE_LINE,
         VK_CULL_MODE_NONE,
         true,                // depth_test
         false,               // depth_write

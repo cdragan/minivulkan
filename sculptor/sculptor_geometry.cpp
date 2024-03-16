@@ -601,7 +601,7 @@ void Sculptor::Geometry::render_edges(VkCommandBuffer cmd_buf)
 void Sculptor::Geometry::render_edges2(VkCommandBuffer cmd_buf)
 {
     vkCmdDraw(cmd_buf,
-              tess_level + 1,   // vertexCount
+              tess_level * 3,   // vertexCount
               num_edges,        // instanceCount
               0,                // firstVertex
               0);               // firstInstance

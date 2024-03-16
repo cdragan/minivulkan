@@ -66,13 +66,11 @@ vec3 calc_current_vertex_pos(uint edge_index, float t)
 
 void main()
 {
-    const float t = float(gl_VertexIndex) / float(tess_level.x);
+    const float t = float((gl_VertexIndex + 2) / 3) / float(tess_level.x);
 
     const vec3 pos = calc_current_vertex_pos(gl_InstanceIndex, t);
 
     const vec4 view_pos = vec4(pos, 1) * model_view;
-    const vec4 screen_pos = projection(view_pos.xyz);
-    const float depth_bias = 1.0 / 4096.0;
-    gl_Position = vec4(screen_pos.xy, screen_pos.z + depth_bias * screen_pos.w, screen_pos.w);
+    gl_Position = projection(view_pos.xyz);
 }
 
