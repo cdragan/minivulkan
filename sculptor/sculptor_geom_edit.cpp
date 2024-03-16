@@ -1634,18 +1634,21 @@ bool GeometryEditor::set_patch_transforms(const View& dst_view, uint32_t transfo
 
     const float aspect = static_cast<float>(dst_view.width) / static_cast<float>(dst_view.height);
 
+    constexpr float near_plane = 0.01f;
+    constexpr float far_plane  = 3.0f;
+
     if (dst_view.view_type == ViewType::free_moving) {
         transforms->proj = vmath::projection_vector(aspect,
                                                     vmath::radians(30.0f),
-                                                    0.01f,      // near_plane
-                                                    1000.0f);   // far_plane
+                                                    near_plane,
+                                                    far_plane);
         transforms->proj_w = vmath::vec4(0.0f, 0.0f, 1.0f, 0.0f);
     }
     else {
         transforms->proj = vmath::ortho_vector(aspect,
                                                camera.view_height / int16_scale,
-                                               0.01f,   // near_plane
-                                               3.0f);   // far_plane
+                                               near_plane,
+                                               far_plane);
         transforms->proj_w = vmath::vec4(0.0f, 0.0f, 0.0f, 1.0f);
     }
 
