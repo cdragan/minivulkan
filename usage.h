@@ -23,10 +23,10 @@ struct Description {
     constexpr Description(const char*, uint32_t) { }
     constexpr Description(const char*) { }
 #else
-    constexpr Description(const char* name, uint32_t idx)
-        : name(name), idx(idx) { }
-    constexpr Description(const char* name)
-        : name(name) { }
+    constexpr Description(const char* dbg_name, uint32_t dbg_idx)
+        : name(dbg_name), idx(dbg_idx) { }
+    constexpr Description(const char* dbg_name)
+        : name(dbg_name) { }
 
     const char* name = nullptr;
     uint32_t    idx  = ~0U;
