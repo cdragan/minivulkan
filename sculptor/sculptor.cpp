@@ -860,7 +860,7 @@ static bool create_gui_frame(uint32_t image_idx)
             viewport.width  = static_cast<uint32_t>(content_size.x);
             viewport.height = static_cast<uint32_t>(content_size.y);
 
-            ImGui::Image(reinterpret_cast<ImTextureID>(viewport.gui_tex[image_idx]),
+            ImGui::Image(make_texture_id(viewport.gui_tex[image_idx]),
                          ImVec2{static_cast<float>(viewport.width),
                                 static_cast<float>(viewport.height)});
         }

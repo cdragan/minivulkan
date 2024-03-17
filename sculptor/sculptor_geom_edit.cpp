@@ -793,7 +793,7 @@ bool GeometryEditor::toolbar_button(ToolbarButton button, bool* checked)
     ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4{0.20f, 0.20f, 0.20f, 1});
 
     const bool clicked = ImGui::ImageButton(info.tag,
-                                            reinterpret_cast<ImTextureID>(toolbar_texture),
+                                            make_texture_id(toolbar_texture),
                                             button_size,
                                             uv0,
                                             uv1);
@@ -1340,7 +1340,7 @@ bool GeometryEditor::create_gui_frame(uint32_t image_idx, bool* need_realloc, co
 
     {
         ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2{0, 0});
-        ImGui::Image(reinterpret_cast<ImTextureID>(view.res[image_idx].gui_texture),
+        ImGui::Image(make_texture_id(view.res[image_idx].gui_texture),
                      image_size);
         ImGui::PopStyleVar();
     }

@@ -11,3 +11,14 @@
 
 #include "thirdparty/imgui/src/imgui.h"
 #include "thirdparty/imgui/src/backends/imgui_impl_vulkan.h"
+
+inline ImTextureID make_texture_id(VkDescriptorSet ds)
+{
+    union {
+        uint64_t        u64;
+        ImTextureID     texId;
+        VkDescriptorSet ds;
+    } convert = { };
+    convert.ds = ds;
+    return convert.texId;
+}

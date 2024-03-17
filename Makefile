@@ -283,6 +283,8 @@ ifeq ($(UNAME), Windows)
     CFLAGS += -FS
     CFLAGS += -std:c++17 -Zc:__cplusplus
 
+    CFLAGS += -DImTextureID=ImU64
+
     win_libs += kernel32.lib
     win_libs += ole32.lib
     win_libs += user32.lib
