@@ -49,25 +49,17 @@ uint32_t check_device_features();
 bool init_assets();
 
 #ifdef NDEBUG
-template<typename T>
-inline constexpr void set_vk_object_name(T obj, Description desc) { }
+inline constexpr void set_vk_object_name(VkObjectType type, uint64_t handle, Description desc) { }
 #else
 void set_vk_object_name(VkObjectType type, uint64_t handle, Description desc);
 
-#define OBJECT_TYPES(X) \
-    X(VkImage,  IMAGE)  \
-    X(VkBuffer, BUFFER)
-
-#define X(type, id) \
-inline constexpr VkObjectType get_object_type(type) { return VK_OBJECT_TYPE_##id; }
-OBJECT_TYPES(X)
-#undef X
-
+#if !defined(_MSC_VER) || !defined(_M_IX86)
 template<typename T>
-void set_vk_object_name(T object, Description desc)
+void set_vk_object_name(VkObjectType type, T handle, Description desc)
 {
-    set_vk_object_name(get_object_type(object), static_cast<uint64_t>(reinterpret_cast<uintptr_t>(object)), desc);
+    set_vk_object_name(type, reinterpret_cast<uint64_t>(handle), desc);
 }
+#endif
 #endif
 
 #ifdef NDEBUG

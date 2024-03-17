@@ -93,7 +93,7 @@ bool Image::allocate(const ImageInfo& image_info, Description desc)
     if (res != VK_SUCCESS)
         return false;
 
-    set_vk_object_name(image, desc);
+    set_vk_object_name(VK_OBJECT_TYPE_IMAGE, image, desc);
 
     layout     = VK_IMAGE_LAYOUT_UNDEFINED;
     format     = image_info.format;
@@ -254,7 +254,7 @@ bool Buffer::allocate(Usage              heap_usage,
     if (res != VK_SUCCESS)
         return false;
 
-    set_vk_object_name(buffer, desc);
+    set_vk_object_name(VK_OBJECT_TYPE_BUFFER, buffer, desc);
 
     VkMemoryRequirements memory_reqs;
     vkGetBufferMemoryRequirements(vk_dev, buffer, &memory_reqs);
