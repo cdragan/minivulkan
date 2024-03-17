@@ -90,6 +90,20 @@ extern "C" {
 
         return num;
     }
+
+    int snprintf(char* buf, size_t size, const char* format, ...)
+    {
+        va_list args;
+        va_start(args, format);
+
+        const int num = wvsprintf(buf, format, args);
+
+        va_end(args);
+
+        OutputDebugString(buf);
+
+        return num;
+    }
 #endif
 
 // The code below is used in place of MS Visual C Runtime library in 32-bit builds.
