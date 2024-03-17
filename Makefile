@@ -316,7 +316,8 @@ else
     ifeq ($(debug), 0)
         CFLAGS += -DNDEBUG -Os
         CFLAGS += -fomit-frame-pointer
-        CFLAGS += -fno-stack-check -fno-stack-protector -fno-threadsafe-statics
+        CFLAGS += -fno-stack-check -fno-stack-protector
+        CXXFLAGS += -fno-threadsafe-statics
 
         CFLAGS  += -ffunction-sections -fdata-sections
         LDFLAGS += -ffunction-sections -fdata-sections
