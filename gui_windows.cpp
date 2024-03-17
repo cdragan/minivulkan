@@ -9,6 +9,11 @@ extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg
 
 LRESULT gui_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
+    // Redraw whenever receiving any type of message
+    RECT rc = { };
+    GetClientRect(hWnd, &rc);
+    InvalidateRect(hWnd, &rc, FALSE);
+
     return ImGui_ImplWin32_WndProcHandler(hWnd, msg, wParam, lParam);
 }
 
@@ -19,8 +24,7 @@ bool need_redraw(struct Window* w)
         return false;
 
     // Validate window (we will draw it in draw_frame())
-    // TODO not reacting to window resize or to mouse/key events!
-    //ValidateRect(w->window, &rc);
+    ValidateRect(w->window, &rc);
     return true;
 }
 
