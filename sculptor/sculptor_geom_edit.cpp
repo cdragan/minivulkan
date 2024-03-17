@@ -857,7 +857,7 @@ void GeometryEditor::handle_mouse_actions(const UserInput& input, bool view_hove
                         default: {
                             // TODO switch to free_moving and apply rotation
                             constexpr float view_bounds        = 1.1f;
-                            const     float ortho_scale_factor = view.height * 0.0000001f;
+                            const     float ortho_scale_factor = static_cast<float>(view.height) * 0.0000001f;
                             camera.pos.x = mstd::min(mstd::max(camera.pos.x - ortho_scale_factor * input.mouse_pos_delta.x, -view_bounds), view_bounds);
                             camera.pos.y = mstd::min(mstd::max(camera.pos.y + ortho_scale_factor * input.mouse_pos_delta.y, -view_bounds), view_bounds);
                             break;
@@ -870,7 +870,7 @@ void GeometryEditor::handle_mouse_actions(const UserInput& input, bool view_hove
                 if ( ! ImGui::IsKeyDown(ImGuiKey_LeftShift) && ! ImGui::IsKeyDown(ImGuiKey_RightShift))
                     release_mouse();
                 else if (mouse_moved) {
-                    const float pan_factor = view.height * 0.0000001f;
+                    const float pan_factor = static_cast<float>(view.height) * 0.0000001f;
 
                     Camera& camera = view.camera[static_cast<int>(view.view_type)];
 
@@ -1715,31 +1715,57 @@ bool GeometryEditor::render_grid(VkCommandBuffer cmdbuf,
     auto     vertices  = grid_buf.get_ptr<Sculptor::Geometry::Vertex>(image_idx, sub_buf_stride);
     uint32_t num_lines = 0;
 
-    vertices[0].pos[0] = -0x3FFF;
-    vertices[0].pos[1] = 0;
-    vertices[0].pos[2] = 0;
+    uint32_t idx_1  = 0;
+    uint32_t idx_2  = 2;
+    uint32_t idx_z  = 1;
+    int32_t  min_1  = -0x8000;
+    int32_t  max_1  = 0x8000;
+    int32_t  step_1 = 0x800;
+    int32_t  min_2  = -0x8000;
+    int32_t  max_2  = 0x8000;
+    int32_t  step_2 = 0x800;
 
-    vertices[1].pos[0] = 0x3FFF;
-    vertices[1].pos[1] = 0;
-    vertices[1].pos[2] = 0;
+    const auto fix_pos = [](int32_t x) -> int16_t {
+        return (x == 0x8000) ? 0x7FFF : static_cast<int16_t>(x);
+    };
 
-    vertices[2].pos[0] = 0;
-    vertices[2].pos[1] = -0x3FFF;
-    vertices[2].pos[2] = 0;
+    switch (dst_view.view_type) {
+        case ViewType::front:
+        case ViewType::back:
+            idx_2 = 1;
+            idx_z = 2;
+            break;
 
-    vertices[3].pos[0] = 0;
-    vertices[3].pos[1] = 0x3FFF;
-    vertices[3].pos[2] = 0;
+        case ViewType::right:
+        case ViewType::left:
+            idx_1 = 2;
+            idx_2 = 1;
+            idx_z = 0;
+            break;
 
-    vertices[4].pos[0] = 0;
-    vertices[4].pos[1] = 0;
-    vertices[4].pos[2] = -0x3FFF;
+        default:
+            break;
+    }
 
-    vertices[5].pos[0] = 0;
-    vertices[5].pos[1] = 0;
-    vertices[5].pos[2] = 0x3FFF;
+    for (int32_t x = min_1; x <= max_1 && num_lines < max_grid_lines; x += step_1, num_lines++) {
+        Sculptor::Geometry::Vertex* const vtx = &vertices[num_lines * 2];
+        vtx[0].pos[idx_1] = fix_pos(x);
+        vtx[0].pos[idx_2] = fix_pos(min_2);
+        vtx[0].pos[idx_z] = 0;
+        vtx[1].pos[idx_1] = fix_pos(x);
+        vtx[1].pos[idx_2] = fix_pos(max_2);
+        vtx[1].pos[idx_z] = 0;
+    }
 
-    num_lines = 3;
+    for (int32_t x = min_2; x <= max_2 && num_lines < max_grid_lines; x += step_2, num_lines++) {
+        Sculptor::Geometry::Vertex* const vtx = &vertices[num_lines * 2];
+        vtx[0].pos[idx_2] = fix_pos(x);
+        vtx[0].pos[idx_1] = fix_pos(min_1);
+        vtx[0].pos[idx_z] = 0;
+        vtx[1].pos[idx_2] = fix_pos(x);
+        vtx[1].pos[idx_1] = fix_pos(max_1);
+        vtx[1].pos[idx_z] = 0;
+    }
 
     if ( ! grid_buf.flush(image_idx, sub_buf_stride))
         return false;
