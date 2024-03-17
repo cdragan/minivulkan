@@ -52,6 +52,7 @@ bool init_assets();
 inline constexpr void set_vk_object_name(VkObjectType type, uint64_t handle, Description desc) { }
 #else
 void set_vk_object_name(VkObjectType type, uint64_t handle, Description desc);
+#endif
 
 #if !defined(_MSC_VER) || !defined(_M_IX86)
 template<typename T>
@@ -59,7 +60,6 @@ void set_vk_object_name(VkObjectType type, T handle, Description desc)
 {
     set_vk_object_name(type, reinterpret_cast<uint64_t>(handle), desc);
 }
-#endif
 #endif
 
 #ifdef NDEBUG
