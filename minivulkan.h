@@ -54,15 +54,12 @@ inline constexpr void set_vk_object_name(T obj, Description desc) { }
 #else
 void set_vk_object_name(VkObjectType type, uint64_t handle, Description desc);
 
-template<typename T>
-VkObjectType get_object_type(T);
-
 #define OBJECT_TYPES(X) \
     X(VkImage,  IMAGE)  \
     X(VkBuffer, BUFFER)
 
 #define X(type, id) \
-template<> constexpr VkObjectType get_object_type<type>(type) { return VK_OBJECT_TYPE_##id; }
+constexpr VkObjectType get_object_type(type) { return VK_OBJECT_TYPE_##id; }
 OBJECT_TYPES(X)
 #undef X
 
