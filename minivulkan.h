@@ -59,7 +59,7 @@ void set_vk_object_name(VkObjectType type, uint64_t handle, Description desc);
     X(VkBuffer, BUFFER)
 
 #define X(type, id) \
-constexpr VkObjectType get_object_type(type) { return VK_OBJECT_TYPE_##id; }
+inline constexpr VkObjectType get_object_type(type) { return VK_OBJECT_TYPE_##id; }
 OBJECT_TYPES(X)
 #undef X
 
