@@ -14,5 +14,9 @@
 #       define PRIx64 "Ix"
 #   endif
 
-#   define d_printf printf
+#   if defined(_MSC_VER) && !defined(NOSTDLIB)
+        void d_printf(const char* format, ...);
+#   else
+#       define d_printf printf
+#   endif
 #endif

@@ -17,9 +17,12 @@
 #if defined(NDEBUG) && defined(TIME_STATS)
 #   if !defined(_WIN32) || !defined(NOSTDLIB)
 #       include <stdio.h>
+#       define stats_printf printf
 #   else
-#       define printf wsprintfA
+#       define stats_printf wsprintfA
 #   endif
+#else
+#   define stats_printf d_printf
 #endif
 
 #ifdef _WIN32
@@ -1261,7 +1264,7 @@ static void update_time_stats(uint64_t draw_start_time_ms)
             const unsigned avg_draw_time_ms = static_cast<unsigned>(total_draw_time_ms / num_frames);
             const unsigned load             = static_cast<unsigned>(100 * total_draw_time_ms / stat_time);
 
-            printf("FPS: %.1f, avg draw %u ms, load %u%%\n", fps, avg_draw_time_ms, load);
+            stats_printf("FPS: %.1f, avg draw %u ms, load %u%%\n", fps, avg_draw_time_ms, load);
 
             stat_start_time_ms = draw_end_time_ms;
             total_draw_time_ms = 0;

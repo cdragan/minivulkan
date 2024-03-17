@@ -10,6 +10,21 @@
 /* TODO Just including xaudio2.h somehow calls LoadLibraryEx - figure out how to avoid that */
 #include <xaudio2.h>
 
+#if !defined(NDEBUG) && !defined(NOSTDLIB)
+void d_printf(const char* format, ...)
+{
+    va_list args;
+    va_start(args, format);
+
+    char buf[1024];
+    vsnprintf(buf, sizeof(buf), format, args);
+
+    va_end(args);
+
+    OutputDebugString(buf);
+}
+#endif
+
 bool create_surface(Window* w)
 {
     static VkWin32SurfaceCreateInfoKHR surf_create_info = {
@@ -154,7 +169,7 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT umsg, WPARAM wparam, LPARAM 
         case WM_PAINT:
             gui_new_frame();
 
-            if ( ! need_redraw(w) && skip_frame(w))
+            if (skip_frame(w) && ! need_redraw(w))
                 return 0;
 
             if ( ! draw_frame())
