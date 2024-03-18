@@ -175,7 +175,10 @@ vmath::quat GeometryEditor::Camera::get_perspective_rotation_quat() const
 void GeometryEditor::Camera::move(const vmath::vec3& delta)
 {
     constexpr vmath::vec3 max_pos{1.1f};
-    pos = vmath::max(vmath::min(pos + get_perspective_rotation_quat().rotate(delta), max_pos), -max_pos);
+    const vmath::vec3 moved_pos = pos + get_perspective_rotation_quat().rotate(delta);
+    const vmath::vec3 fixed_pos = vmath::max(-max_pos, vmath::min(moved_pos, max_pos));
+    if (fixed_pos == moved_pos)
+        pos = fixed_pos;
 }
 
 const char* GeometryEditor::get_editor_name() const
@@ -417,13 +420,13 @@ bool GeometryEditor::allocate_resources_once()
     if ( ! create_descriptor_sets())
         return false;
 
-    view.camera[static_cast<int>(ViewType::free_moving)] = Camera{ { 0.0f, 0.0f, 0.0f }, 0.25f,    0.0f, 0.0f, 1.0f };
-    view.camera[static_cast<int>(ViewType::front)]       = Camera{ { 0.0f, 0.0f, 0.0f },  0.0f, 4096.0f, 0.0f, 0.0f };
-    view.camera[static_cast<int>(ViewType::back)]        = Camera{ { 0.0f, 0.0f, 0.0f },  0.0f, 4096.0f, 0.0f, 0.0f };
-    view.camera[static_cast<int>(ViewType::left)]        = Camera{ { 0.0f, 0.0f, 0.0f },  0.0f, 4096.0f, 0.0f, 0.0f };
-    view.camera[static_cast<int>(ViewType::right)]       = Camera{ { 0.0f, 0.0f, 0.0f },  0.0f, 4096.0f, 0.0f, 0.0f };
-    view.camera[static_cast<int>(ViewType::bottom)]      = Camera{ { 0.0f, 0.0f, 0.0f },  0.0f, 4096.0f, 0.0f, 0.0f };
-    view.camera[static_cast<int>(ViewType::top)]         = Camera{ { 0.0f, 0.0f, 0.0f },  0.0f, 4096.0f, 0.0f, 0.0f };
+    view.camera[static_cast<int>(ViewType::free_moving)] = Camera{ { 0.0f, 0.01f, -0.2f }, 0.25f,    0.0f, 0.0f, 1.0f };
+    view.camera[static_cast<int>(ViewType::front)]       = Camera{ { 0.0f, 0.0f,   0.0f },  0.0f, 4096.0f, 0.0f, 0.0f };
+    view.camera[static_cast<int>(ViewType::back)]        = Camera{ { 0.0f, 0.0f,   0.0f },  0.0f, 4096.0f, 0.0f, 0.0f };
+    view.camera[static_cast<int>(ViewType::left)]        = Camera{ { 0.0f, 0.0f,   0.0f },  0.0f, 4096.0f, 0.0f, 0.0f };
+    view.camera[static_cast<int>(ViewType::right)]       = Camera{ { 0.0f, 0.0f,   0.0f },  0.0f, 4096.0f, 0.0f, 0.0f };
+    view.camera[static_cast<int>(ViewType::bottom)]      = Camera{ { 0.0f, 0.0f,   0.0f },  0.0f, 4096.0f, 0.0f, 0.0f };
+    view.camera[static_cast<int>(ViewType::top)]         = Camera{ { 0.0f, 0.0f,   0.0f },  0.0f, 4096.0f, 0.0f, 0.0f };
 
     toolbar_state.view_perspective = true;
 
@@ -1584,7 +1587,7 @@ bool GeometryEditor::set_patch_transforms(const View& dst_view, uint32_t transfo
             {
                 const vmath::quat q = camera.get_perspective_rotation_quat();
                 const vmath::vec3 cam_vector = q.rotate(vmath::vec3{0, 0, camera.distance});
-                model_view = vmath::look_at(camera.pos - cam_vector, camera.pos, vmath::vec3{0, 1, 0});
+                model_view = vmath::look_at(camera.pos, camera.pos + cam_vector, vmath::vec3{0, 1, 0});
             }
             break;
 
