@@ -16,11 +16,6 @@ float vk_surface_scale = 1.0f;
 static VkRenderPass  vk_gui_render_pass;
 static VkFramebuffer vk_framebuffers[max_swapchain_size];
 
-static PFN_vkCmdBeginRenderPass myCmdBeginRenderPass;
-static PFN_vkCmdEndRenderPass   myCmdEndRenderPass;
-static PFN_vkCreateFramebuffer  myCreateFramebuffer;
-static PFN_vkDestroyFramebuffer myDestroyFramebuffer;
-
 static void check_gui_result(VkResult imgui_error)
 {
     if (CHK(imgui_error) != VK_SUCCESS) {
@@ -29,14 +24,7 @@ static void check_gui_result(VkResult imgui_error)
 
 static PFN_vkVoidFunction load_vk_function(const char* name, void* cookie)
 {
-    PFN_vkVoidFunction func = vkGetDeviceProcAddr(vk_dev, name);
-    if ( ! func) {
-        func = vkGetInstanceProcAddr(vk_instance, name);
-        if ( ! func) {
-            d_printf("Failed to load function %s for GUI\n", name);
-        }
-    }
-    return func;
+    return load_vk_function(name);
 }
 
 static bool create_render_pass(VkRenderPass* render_pass, GuiClear clear)
@@ -124,18 +112,7 @@ static bool create_render_pass(VkRenderPass* render_pass, GuiClear clear)
         render_pass_info.pDependencies   = &dependency;
     }
 
-    PFN_vkCreateRenderPass vkCreateRenderPass;
-
-    vkCreateRenderPass   = reinterpret_cast<PFN_vkCreateRenderPass>(  load_vk_function("vkCreateRenderPass",   nullptr));
-    myCmdBeginRenderPass = reinterpret_cast<PFN_vkCmdBeginRenderPass>(load_vk_function("vkCmdBeginRenderPass", nullptr));
-    myCmdEndRenderPass   = reinterpret_cast<PFN_vkCmdEndRenderPass>(  load_vk_function("vkCmdEndRenderPass",   nullptr));
-    myCreateFramebuffer  = reinterpret_cast<PFN_vkCreateFramebuffer>( load_vk_function("vkCreateFramebuffer",  nullptr));
-    myDestroyFramebuffer = reinterpret_cast<PFN_vkDestroyFramebuffer>(load_vk_function("vkDestroyFramebuffer", nullptr));
-
-    if ( ! vkCreateRenderPass || ! myCmdBeginRenderPass || ! myCmdEndRenderPass || ! myCreateFramebuffer || ! myDestroyFramebuffer)
-        return false;
-
-    const VkResult res = CHK(vkCreateRenderPass(vk_dev, &render_pass_info, nullptr, render_pass));
+    const VkResult res = CHK(VK_FUNCTION(vkCreateRenderPass)(vk_dev, &render_pass_info, nullptr, render_pass));
     return res == VK_SUCCESS;
 }
 
@@ -164,10 +141,10 @@ static bool create_framebuffer(uint32_t image_idx)
     attachments[0] = vk_swapchain_images[image_idx].get_view();
     attachments[1] = vk_depth_buffers[image_idx].get_view();
 
-    const VkResult res = CHK(myCreateFramebuffer(vk_dev,
-                                                 &frame_buffer_info,
-                                                 nullptr,
-                                                 &vk_framebuffers[image_idx]));
+    const VkResult res = CHK(VK_FUNCTION(vkCreateFramebuffer)(vk_dev,
+                                                              &frame_buffer_info,
+                                                              nullptr,
+                                                              &vk_framebuffers[image_idx]));
     return res == VK_SUCCESS;
 }
 
@@ -179,7 +156,7 @@ void resize_gui()
 
     for (uint32_t i = 0; i < mstd::array_size(vk_framebuffers); i++) {
         if (vk_framebuffers[i]) {
-            myDestroyFramebuffer(vk_dev, vk_framebuffers[i], nullptr);
+            VK_FUNCTION(vkDestroyFramebuffer)(vk_dev, vk_framebuffers[i], nullptr);
             vk_framebuffers[i] = VK_NULL_HANDLE;
         }
     }
@@ -216,7 +193,7 @@ static bool begin_gui_render_pass(VkCommandBuffer buf, uint32_t image_idx)
     render_pass_info.framebuffer       = vk_framebuffers[image_idx];
     render_pass_info.renderArea.extent = vk_surface_caps.currentExtent;
 
-    myCmdBeginRenderPass(buf, &render_pass_info, VK_SUBPASS_CONTENTS_INLINE);
+    VK_FUNCTION(vkCmdBeginRenderPass)(buf, &render_pass_info, VK_SUBPASS_CONTENTS_INLINE);
 
     return true;
 }
@@ -336,7 +313,7 @@ bool send_gui_to_gpu(VkCommandBuffer cmdbuf, uint32_t image_idx)
 
     ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), cmdbuf);
 
-    myCmdEndRenderPass(cmdbuf);
+    VK_FUNCTION(vkCmdEndRenderPass)(cmdbuf);
 
     return true;
 }

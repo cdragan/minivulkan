@@ -328,14 +328,11 @@ static bool init_instance()
 
 #ifndef NDEBUG
     {
-        const PFN_vkEnumerateInstanceLayerProperties vkEnumerateInstanceLayerProperties =
-            reinterpret_cast<PFN_vkEnumerateInstanceLayerProperties>(
-                vkGetInstanceProcAddr(nullptr, "vkEnumerateInstanceLayerProperties"));
-
         static VkLayerProperties layer_props[8];
 
         uint32_t num_layer_props = 0;
 
+        const auto vkEnumerateInstanceLayerProperties = VK_FUNCTION(vkEnumerateInstanceLayerProperties);
         if (vkEnumerateInstanceLayerProperties) {
             num_layer_props = mstd::array_size(layer_props);
 
@@ -643,6 +640,18 @@ static bool load_device_functions()
             });
 }
 
+PFN_vkVoidFunction load_vk_function(const char* name)
+{
+    PFN_vkVoidFunction func = vkGetDeviceProcAddr(vk_dev, name);
+    if ( ! func) {
+        func = vkGetInstanceProcAddr(vk_instance, name);
+        if ( ! func) {
+            d_printf("Failed to load function %s\n", name);
+        }
+    }
+    return func;
+}
+
 #define X(set, prev, type, tag) type vk##set = { tag, prev };
 FEATURE_SETS
 #undef X
@@ -802,13 +811,7 @@ void set_vk_object_name(VkObjectType type, uint64_t handle, Description desc)
     object_name_info.objectHandle = handle;
     object_name_info.pObjectName  = (desc.idx == ~0U) ? desc.name : name_buf;
 
-    static PFN_vkSetDebugUtilsObjectNameEXT vkSetDebugUtilsObjectNameEXT;
-
-    if ( ! vkSetDebugUtilsObjectNameEXT) {
-        vkSetDebugUtilsObjectNameEXT =
-            reinterpret_cast<PFN_vkSetDebugUtilsObjectNameEXT>(
-                vkGetDeviceProcAddr(vk_dev, "vkSetDebugUtilsObjectNameEXT"));
-    }
+    const auto vkSetDebugUtilsObjectNameEXT = VK_FUNCTION(vkSetDebugUtilsObjectNameEXT);
 
     if (vkSetDebugUtilsObjectNameEXT)
         CHK(vkSetDebugUtilsObjectNameEXT(vk_dev, &object_name_info));

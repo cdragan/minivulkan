@@ -76,6 +76,19 @@ uint32_t check_feature(const VkBool32* feature);
 uint32_t check_feature_str(const char* name, const VkBool32* feature);
 #endif
 
+PFN_vkVoidFunction load_vk_function(const char* name);
+
+#define VK_FUNCTION(name) static_load_vk_function<PFN_##name>(#name)
+
+template<typename T>
+T static_load_vk_function(const char* name)
+{
+    static T func;
+    if ( ! func)
+        func = reinterpret_cast<T>(load_vk_function(name));
+    return func;
+}
+
 static constexpr uint32_t max_swapchain_size = 3;
 
 enum eSemId {

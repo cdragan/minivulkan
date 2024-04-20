@@ -24,8 +24,7 @@ void Buffer::free()
     VkDeviceSize const offset = heap_offset;
     VkDeviceSize const size   = alloc_size;
 
-    // TODO
-    //vkDestroyBuffer(vk_dev, buffer, nullptr);
+    VK_FUNCTION(vkDestroyBuffer)(vk_dev, buffer, nullptr);
 
     heap->free_memory(offset, size);
 
