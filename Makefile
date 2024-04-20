@@ -130,10 +130,13 @@ endif
 vmath_unit_src_files += vmath_unit.cpp
 
 threed_gui_src_files += gui.cpp
+threed_gui_src_files += memory_heap_gui.cpp
+threed_gui_src_files += resource_gui.cpp
 threed_gui_src_files += gui_config.cpp
 threed_gui_src_files += load_png.cpp
 
 threed_nogui_src_files += nogui.cpp
+threed_nogui_src_files += memory_heap_nogui.cpp
 
 spirv_encode_src_files += tools/spirv_encode.cpp
 

@@ -269,7 +269,7 @@ bool GeometryEditor::alloc_view_resources(View*     dst_view,
             1, // mip_levels
             VK_IMAGE_ASPECT_COLOR_BIT,
             VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
-            Usage::device_temporary
+            Usage::device_only
         };
 
         color_info.width  = width;
@@ -283,7 +283,7 @@ bool GeometryEditor::alloc_view_resources(View*     dst_view,
             1, // mip_levels
             VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT,
             VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
-            Usage::device_temporary
+            Usage::device_only
         };
 
         depth_info.width  = width;
@@ -297,7 +297,7 @@ bool GeometryEditor::alloc_view_resources(View*     dst_view,
             1, // mip_levels
             VK_IMAGE_ASPECT_COLOR_BIT,
             VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
-            Usage::device_temporary
+            Usage::device_only
         };
 
         select_query_info.width  = width;
@@ -317,7 +317,7 @@ bool GeometryEditor::alloc_view_resources(View*     dst_view,
         select_query_host_info.height = mstd::align_up(height, 1024U);
 
         if (update_host_sel)
-            res.host_select_feedback.destroy();
+            res.host_select_feedback.free();
 
         if ( ! res.color.allocate(color_info, {"view color output", i_img}))
             return false;
@@ -387,10 +387,10 @@ void GeometryEditor::free_view_resources(View* dst_view)
     for (uint32_t i_img = 0; i_img < max_swapchain_size; i_img++) {
         Resources& res = dst_view->res[i_img];
 
-        res.color.destroy();
-        res.depth.destroy();
-        res.select_feedback.destroy();
-        res.host_select_feedback.destroy_and_keep_memory();
+        res.color.free();
+        res.depth.free();
+        res.select_feedback.free();
+        res.host_select_feedback.free();
 
         res.selection_pending = false;
     }

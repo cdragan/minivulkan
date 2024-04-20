@@ -36,6 +36,7 @@ class MemoryHeap {
         bool allocate_memory(const VkMemoryRequirements& requirements,
                              Placement                   placement,
                              VkDeviceSize*               offset);
+        void free_memory(VkDeviceSize offset, VkDeviceSize size); // GUI only
 
         VkDeviceMemory get_memory()   const { return memory; }
         void*          get_host_ptr() const { return host_ptr; }
@@ -48,6 +49,12 @@ class MemoryHeap {
         void print_stats(const char* heap_name) const;
 
     private:
+        bool allocate_free_block(const VkMemoryRequirements& requirements,
+                                 Placement                   placement,
+                                 VkDeviceSize*               offset);
+        void insert_free_block(uint32_t idx, VkDeviceSize offset, VkDeviceSize size);
+        void delete_free_block(uint32_t idx);
+
         VkDeviceMemory  memory           = VK_NULL_HANDLE;
         void*           host_ptr         = nullptr;
         VkDeviceSize    next_free_offs   = 0;
@@ -57,6 +64,16 @@ class MemoryHeap {
 #endif
         VkDeviceSize    heap_size        = 0;
         uint32_t        memory_type      = 0;
+
+        // Free blocks are only used in GUI builds
+        struct FreeBlock {
+            constexpr FreeBlock() = default;
+            VkDeviceSize offset = 0;
+            VkDeviceSize size   = 0;
+        };
+
+        uint32_t        num_free_blocks  = 0;
+        FreeBlock       free_blocks[256];
 };
 
 class MemoryAllocator {

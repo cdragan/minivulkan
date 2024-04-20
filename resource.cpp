@@ -218,19 +218,6 @@ void Image::destroy()
     mstd::mem_zero(this, sizeof(*this));
 }
 
-void Image::destroy_and_keep_memory()
-{
-    MemoryHeap*  heap   = owning_heap;
-    VkDeviceSize offset = heap_offset;
-    VkDeviceSize size   = alloc_size;
-
-    destroy();
-
-    owning_heap = heap;
-    heap_offset = offset;
-    alloc_size  = size;
-}
-
 bool Buffer::allocate(Usage              heap_usage,
                       uint32_t           size,
                       VkFormat           format,

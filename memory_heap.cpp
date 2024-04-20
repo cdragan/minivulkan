@@ -72,6 +72,9 @@ bool MemoryHeap::allocate_memory(const VkMemoryRequirements& requirements,
     assert(next_free_offs <= last_free_offs);
     assert(last_free_offs <= heap_size);
 
+    if (allocate_free_block(requirements, placement, offset))
+        return true;
+
     const VkDeviceSize alignment = requirements.alignment;
 
     const VkDeviceSize aligned_offs = (placement == Placement::front)

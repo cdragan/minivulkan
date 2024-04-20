@@ -93,7 +93,7 @@ class Image: public Resource {
         bool allocate(const ImageInfo& image_info, Description desc);
         bool flush() { return flush_whole(); }
         void destroy();
-        void destroy_and_keep_memory();
+        void free(); // GUI only
 
         struct Transition {
             VkPipelineStageFlags src_stage;
@@ -143,6 +143,7 @@ class Buffer: public Resource {
         void cpu_fill(const void* data, uint32_t size);
         bool flush() { return flush_whole(); }
         bool flush(VkDeviceSize idx, VkDeviceSize stride);
+        void free(); // GUI only
 
     private:
         VkBuffer     buffer = VK_NULL_HANDLE;
