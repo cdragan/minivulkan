@@ -169,6 +169,7 @@ shader_files += shaders/pass_through.vert.glsl
 shader_files += shaders/phong.frag.glsl
 shader_files += shaders/rounded_cube.vert.glsl
 shader_files += shaders/sculptor_color.frag.glsl
+shader_files += shaders/sculptor_edge_color.frag.glsl
 shader_files += shaders/sculptor_object.frag.glsl
 shader_files += shaders/sculptor_object_id.frag.glsl
 shader_files += shaders/sculptor_simple.vert.glsl

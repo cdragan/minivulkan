@@ -496,10 +496,10 @@ bool GeometryEditor::create_materials()
     static const MaterialInfo edge_mat_info = {
         {
             shader_bezier_line_cubic_sculptor_vert,
-            shader_sculptor_color_frag
+            shader_sculptor_edge_color_frag
         },
         nullptr,
-        512.0f,
+        0.0f,
         0,
         0,
         VK_FORMAT_UNDEFINED,

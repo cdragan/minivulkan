@@ -19,6 +19,7 @@
 #include "phong.frag.h"
 #include "rounded_cube.vert.h"
 #include "sculptor_color.frag.h"
+#include "sculptor_edge_color.frag.h"
 #include "sculptor_object.frag.h"
 #include "sculptor_object_id.frag.h"
 #include "sculptor_simple.vert.h"

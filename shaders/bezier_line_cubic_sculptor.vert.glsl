@@ -8,6 +8,8 @@
 #include "bezier_cubic_data.glsl"
 #include "transforms.glsl"
 
+layout(location = 0) out vec4 out_pos;
+
 struct index_data {
     uint idx01;
     uint idx23;
@@ -72,5 +74,6 @@ void main()
 
     const vec4 view_pos = vec4(pos, 1) * model_view;
     gl_Position = projection(view_pos.xyz);
-}
 
+    out_pos = vec4(view_pos.xyz, gl_Position.z / gl_Position.w);
+}
