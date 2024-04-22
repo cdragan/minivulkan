@@ -48,6 +48,9 @@ jobs:
     steps:
       - uses: msys2/setup-msys2@v2
         with:
+          msystem: UCRT64
+          update: true
+          install: git mingw-w64-ucrt-x86_64-gcc
           path-type: inherit
       - name: Remove link.exe from MSYS2
         shell: msys2 {0}
