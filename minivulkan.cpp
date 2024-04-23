@@ -642,7 +642,7 @@ static bool load_device_functions()
 
 PFN_vkVoidFunction load_vk_function(const char* name)
 {
-    PFN_vkVoidFunction func = vkGetDeviceProcAddr(vk_dev, name);
+    PFN_vkVoidFunction func = vk_dev ? vkGetDeviceProcAddr(vk_dev, name) : nullptr;
     if ( ! func) {
         func = vkGetInstanceProcAddr(vk_instance, name);
         if ( ! func) {
