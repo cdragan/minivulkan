@@ -17,11 +17,22 @@ void d_printf(const char* format, ...)
     va_start(args, format);
 
     char buf[1024];
-    vsnprintf(buf, sizeof(buf), format, args);
+    const size_t chars = static_cast<size_t>(vsnprintf(buf, sizeof(buf), format, args));
 
     va_end(args);
 
-    OutputDebugString(buf);
+    assert(chars >= sizeof(buf) || buf[chars] == 0);
+
+    static HANDLE out = INVALID_HANDLE_VALUE;
+    if (out == INVALID_HANDLE_VALUE)
+    {
+        out = GetStdHandle(STD_OUTPUT_HANDLE);
+    }
+    if (out != INVALID_HANDLE_VALUE)
+    {
+        DWORD numWritten = 0;
+        WriteFile(out, buf, static_cast<DWORD>(chars), &numWritten, nullptr);
+    }
 }
 #endif
 
@@ -294,6 +305,10 @@ static int event_loop(Window* w)
 
 int WINAPI WinMain(HINSTANCE hinstance, HINSTANCE hprev_instance, PSTR cmd_line, INT cmd_show)
 {
+#ifndef NDEBUG
+    AttachConsole((DWORD)-1);
+#endif
+
     Window w = { };
 
     if ( ! create_window(&w))

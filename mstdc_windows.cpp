@@ -86,7 +86,18 @@ extern "C" {
 
         va_end(args);
 
-        OutputDebugString(buf);
+        assert(num >= static_cast<int>(sizeof(buf)) || buf[num] == 0);
+
+        static HANDLE out = INVALID_HANDLE_VALUE;
+        if (out == INVALID_HANDLE_VALUE)
+        {
+            out = GetStdHandle(STD_OUTPUT_HANDLE);
+        }
+        if (out != INVALID_HANDLE_VALUE)
+        {
+            DWORD numWritten = 0;
+            WriteFile(out, buf, static_cast<DWORD>(num), &numWritten, nullptr);
+        }
 
         return num;
     }
@@ -99,8 +110,6 @@ extern "C" {
         const int num = wvsprintf(buf, format, args);
 
         va_end(args);
-
-        OutputDebugString(buf);
 
         return num;
     }
