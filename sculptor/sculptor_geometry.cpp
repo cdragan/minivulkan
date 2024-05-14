@@ -5,7 +5,7 @@
 
 #include "../mstdc.h"
 
-constexpr uint32_t tess_level           = 12; // TODO
+constexpr uint32_t tess_level           = 3; // TODO
 
 constexpr uint32_t max_vertices         = 65536;
 constexpr uint32_t max_indices          = 65536;
@@ -577,28 +577,6 @@ void Sculptor::Geometry::render(VkCommandBuffer cmd_buf)
 }
 
 void Sculptor::Geometry::render_edges(VkCommandBuffer cmd_buf)
-{
-    const VkDeviceSize vb_offset = gpu_vertices_offset;
-    vkCmdBindVertexBuffers(cmd_buf,
-                           0, // firstBinding
-                           1, // bindingCount
-                           &gpu_buffer.get_buffer(),
-                           &vb_offset);
-
-    vkCmdBindIndexBuffer(cmd_buf,
-                         gpu_buffer.get_buffer(),
-                         gpu_indices_offset + max_face_indices * sizeof(uint16_t),
-                         VK_INDEX_TYPE_UINT16);
-
-    vkCmdDrawIndexed(cmd_buf,
-                     num_edge_indices,
-                     1,  // instanceCount
-                     0,  // firstVertex
-                     0,  // vertexOffset
-                     0); // firstInstance
-}
-
-void Sculptor::Geometry::render_edges2(VkCommandBuffer cmd_buf)
 {
     vkCmdDraw(cmd_buf,
               tess_level * 3,   // vertexCount

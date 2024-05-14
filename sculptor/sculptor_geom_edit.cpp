@@ -1475,7 +1475,6 @@ bool GeometryEditor::draw_geometry_view(VkCommandBuffer cmdbuf,
     vkCmdBeginRenderingKHR(cmdbuf, &rendering_info);
 
     // TODO
-    // * Draw grid lines
     // * Draw solid geometry
     //   - Toggle tessellation
     //   - Toggle wireframe
@@ -1704,7 +1703,7 @@ bool GeometryEditor::render_geometry(VkCommandBuffer cmdbuf,
                             mstd::array_size(dynamic_offsets),
                             dynamic_offsets);
 
-    patch_geometry.render_edges2(cmdbuf);
+    patch_geometry.render_edges(cmdbuf);
 
     return true;
 }
