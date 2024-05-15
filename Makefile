@@ -142,8 +142,14 @@ spirv_encode_src_files += tools/spirv_encode.cpp
 
 make_header_src_files += tools/make_header.cpp
 
+make_shaders_h_src_files += tools/make_shaders_h.cpp
+
+make_shaders_cpp_src_files += tools/make_shaders_cpp.cpp
+
 all_src_files += $(lib_src_files)
 all_src_files += $(make_header_src_files)
+all_src_files += $(make_shaders_h_src_files)
+all_src_files += $(make_shaders_cpp_src_files)
 all_src_files += $(spirv_encode_src_files)
 all_src_files += $(threed_src_files)
 all_src_files += $(threed_gui_src_files)
@@ -154,30 +160,6 @@ all_gui_src_files += $(threed_gui_src_files)
 
 all_vmath_unit_src_files += $(lib_src_files)
 all_vmath_unit_src_files += $(vmath_unit_src_files)
-
-##############################################################################
-# Shaders
-
-shader_files += shaders/bezier_line_cubic_sculptor.vert.glsl
-shader_files += shaders/bezier_line_cubic_sculptor.tesc.glsl
-shader_files += shaders/bezier_line_cubic_sculptor.tese.glsl
-shader_files += shaders/bezier_surface_cubic.tesc.glsl
-shader_files += shaders/bezier_surface_cubic.tese.glsl
-shader_files += shaders/bezier_surface_cubic_sculptor.tesc.glsl
-shader_files += shaders/bezier_surface_cubic_sculptor.tese.glsl
-shader_files += shaders/bezier_surface_quadratic.tesc.glsl
-shader_files += shaders/bezier_surface_quadratic.tese.glsl
-shader_files += shaders/mono_to_stereo.comp.glsl
-shader_files += shaders/pass_through.vert.glsl
-shader_files += shaders/phong.frag.glsl
-shader_files += shaders/rounded_cube.vert.glsl
-shader_files += shaders/sculptor_color.frag.glsl
-shader_files += shaders/sculptor_edge_color.frag.glsl
-shader_files += shaders/sculptor_object.frag.glsl
-shader_files += shaders/sculptor_object_id.frag.glsl
-shader_files += shaders/sculptor_simple.vert.glsl
-shader_files += shaders/simple.vert.glsl
-shader_files += shaders/synth.comp.glsl
 
 ##############################################################################
 # Sub-project handling
@@ -192,6 +174,7 @@ src_files =
 gui_src_files =
 nogui_src_files =
 bin_to_header_files =
+shader_files =
 use_threed = 1
 
 include $1/makefile.mk
@@ -200,9 +183,15 @@ project_$1_src_files       := $$(src_files)
 project_$1_gui_src_files   := $$(gui_src_files)
 project_$1_nogui_src_files := $$(nogui_src_files)
 project_$1_bin_to_header_files := $$(bin_to_header_files)
+project_$1_shader_files    := $$(shader_files)
+
+ifneq ($$(shader_files),)
+    all_src_files    += $$(gen_headers_dir)/$1_shaders.cpp
+endif
 
 all_src_files += $$(addprefix $1/,$$(project_$1_src_files))
 all_bin_to_header_files += $$(addprefix $1/,$$(project_$1_bin_to_header_files))
+all_shader_files += $$(addprefix $1/,$$(project_$1_shader_files))
 
 ifneq ($$(gui_project_name),)
     all_$$(gui_project_name)_src_files += $$(addprefix $1/,$$(project_$1_src_files))
@@ -215,6 +204,10 @@ ifneq ($$(gui_project_name),)
     all_gui_src_files += $$(addprefix $1/,$$(project_$1_src_files))
     all_gui_src_files += $$(addprefix $1/,$$(project_$1_gui_src_files))
     all_src_files     += $$(addprefix $1/,$$(project_$1_gui_src_files))
+
+    ifneq ($$(shader_files),)
+        all_$$(gui_project_name)_src_files += $$(gen_headers_dir)/$1_shaders.cpp
+    endif
 
     project_$1_gui_name := $$(gui_project_name)
     gui_targets         += $$(project_$1_gui_name)
@@ -230,6 +223,10 @@ ifneq ($$(nogui_project_name),)
         all_src_files                        += $$(addprefix $1/,$$(project_$1_nogui_src_files))
         all_$$(nogui_project_name)_src_files += $$(threed_src_files)
         all_$$(nogui_project_name)_src_files += $$(threed_nogui_src_files)
+    endif
+
+    ifneq ($$(shader_files),)
+        all_$$(nogui_project_name)_src_files += $$(gen_headers_dir)/$1_shaders.cpp
     endif
 
     project_$1_nogui_name := $$(nogui_project_name)
@@ -556,17 +553,25 @@ spirv_encode = $(call CMDLINE_PATH,spirv_encode)
 
 make_header = $(call CMDLINE_PATH,make_header)
 
+make_shaders_h = $(call CMDLINE_PATH,make_shaders_h)
+
+make_shaders_cpp = $(call CMDLINE_PATH,make_shaders_cpp)
+
 ifeq ($(UNAME), Windows)
-$(spirv_encode) $(make_header): LDFLAGS_NODEFAULTLIB =
-$(spirv_encode) $(make_header): SUBSYSTEMFLAGS = -subsystem:console
+$(spirv_encode) $(make_header) $(make_shaders_h) $(make_shaders_cpp): LDFLAGS_NODEFAULTLIB =
+$(spirv_encode) $(make_header) $(make_shaders_h) $(make_shaders_cpp): SUBSYSTEMFLAGS = -subsystem:console
 endif
 
 $(eval $(call LINK_RULE,$(spirv_encode),$(spirv_encode_src_files)))
 
 $(eval $(call LINK_RULE,$(make_header),$(make_header_src_files)))
 
-define GLSL_EXT
-$(shaders_out_dir)/%.$1.h: shaders/%.$1.glsl | $(spirv_encode) $(shaders_out_dir) $(addprefix $(shaders_out_dir)/,$(shader_dirs))
+$(eval $(call LINK_RULE,$(make_shaders_h),$(make_shaders_h_src_files)))
+
+$(eval $(call LINK_RULE,$(make_shaders_cpp),$(make_shaders_cpp_src_files)))
+
+define SHADER_RULE
+$(shaders_out_dir)/$(basename $(notdir $1)).h: $1 | $(spirv_encode) $(shaders_out_dir) $(addprefix $(shaders_out_dir)/,$(shader_dirs))
 	$(GLSL_VALIDATOR_PREFIX)glslangValidator $(GLSL_FLAGS) -o $$(call shader_stage,default,$$<) $$<
 	$(GLSL_VALIDATOR_PREFIX)spirv-opt $(GLSL_OPT_FLAGS) $$(call shader_stage,default,$$<) -o $$(call shader_stage,opt,$$<)
 	cd $(shaders_out_dir)/opt && $(GLSL_VALIDATOR_PREFIX)spirv-remap $(GLSL_STRIP_FLAGS) --input $$(subst .glsl,.spv,$$(notdir $$<)) --output ../../../$(shaders_out_dir)/strip
@@ -575,10 +580,24 @@ $(shaders_out_dir)/%.$1.h: shaders/%.$1.glsl | $(spirv_encode) $(shaders_out_dir
 	$(GLSL_VALIDATOR_PREFIX)spirv-dis -o $$(basename $$@).disasm $$(call shader_stage,strip,$$<)
 endef
 
-$(foreach ext, vert tesc tese geom frag comp, $(eval $(call GLSL_EXT,$(ext))))
+$(foreach shader, $(all_shader_files), $(eval $(call SHADER_RULE,$(shader))))
 
-$(call OBJ_FROM_SRC, shaders.cpp) $(out_dir)/shaders.cpp.$(asm_suffix): $(addprefix $(shaders_out_dir)/,$(addsuffix .h,$(basename $(notdir $(shader_files)))))
-$(call OBJ_FROM_SRC, shaders.cpp) $(out_dir)/shaders.cpp.$(asm_suffix): CFLAGS += -I$(shaders_out_dir)
+define PROJECT_SHADERS
+$$(call OBJ_FROM_SRC, $$(project_$1_src_files)): $(gen_headers_dir)/$1_shaders.h
+
+gen_$1_shader_headers := $$(addprefix $(shaders_out_dir)/,$$(addsuffix .h,$$(basename $$(notdir $$(project_$1_shader_files)))))
+
+$(gen_headers_dir)/$1_shaders.h: $(make_shaders_h) $1/makefile.mk | $(gen_headers_dir)
+	$(make_shaders_h) $$@ $$(subst .,_,$$(basename $$(project_$1_shader_files)))
+
+$(gen_headers_dir)/$1_shaders.cpp: $(make_shaders_cpp) $1/makefile.mk | $(gen_headers_dir)
+	$(make_shaders_cpp) $$@ $$(patsubst %.glsl,%.h,$$(project_$1_shader_files))
+
+$$(call OBJ_FROM_SRC, $1_shaders.cpp): $$(gen_$1_shader_headers)
+$$(call OBJ_FROM_SRC, $1_shaders.cpp): CFLAGS += -I$(shaders_out_dir)
+endef
+
+$(foreach project, $(projects), $(eval $(call PROJECT_SHADERS,$(project))))
 
 $(gen_headers_dir): | $(out_dir_base)
 	mkdir -p $@

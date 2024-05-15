@@ -9,6 +9,15 @@ src_files += sculptor_geometry.cpp
 src_files += sculptor_materials.cpp
 src_files += sculptor_geom_edit.cpp
 
+shader_files += sculptor_pass_through.vert.glsl
+shader_files += bezier_line_cubic_sculptor.vert.glsl
+shader_files += sculptor_simple.vert.glsl
+shader_files += bezier_surface_cubic_sculptor.tesc.glsl
+shader_files += bezier_surface_cubic_sculptor.tese.glsl
+shader_files += sculptor_object.frag.glsl
+shader_files += sculptor_edge_color.frag.glsl
+shader_files += sculptor_color.frag.glsl
+
 bin_to_header_files += toolbar.png
 
 $(call OBJ_FROM_SRC,sculptor_geom_edit.cpp): $(gen_headers_dir)/toolbar.png.h

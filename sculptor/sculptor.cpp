@@ -10,8 +10,10 @@
 #include "../memory_heap.h"
 #include "../minivulkan.h"
 #include "../mstdc.h"
-#include "../shaders.h"
 #include "../vmath.h"
+
+#include "sculptor_shaders.h"
+#include "../shaders.h"
 
 #include <math.h>
 #include <stdio.h>

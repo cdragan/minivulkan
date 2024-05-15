@@ -5,6 +5,8 @@
 
 #include "../minivulkan.h"
 #include "../mstdc.h"
+
+#include "sculptor_shaders.h"
 #include "../shaders.h"
 
 VkDescriptorSetLayout Sculptor::desc_set_layout[3];

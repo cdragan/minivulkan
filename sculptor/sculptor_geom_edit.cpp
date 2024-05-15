@@ -8,6 +8,8 @@
 #include "../gui_imgui.h"
 #include "../load_png.h"
 #include "../mstdc.h"
+
+#include "sculptor_shaders.h"
 #include "../shaders.h"
 
 #include <stdio.h>
@@ -471,7 +473,7 @@ bool GeometryEditor::create_materials()
 
     static const MaterialInfo object_mat_info = {
         {
-            shader_pass_through_vert,
+            shader_sculptor_pass_through_vert,
             shader_sculptor_object_frag,
             shader_bezier_surface_cubic_sculptor_tesc,
             shader_bezier_surface_cubic_sculptor_tese

@@ -8,8 +8,10 @@
 #include "../memory_heap.h"
 #include "../minivulkan.h"
 #include "../mstdc.h"
-#include "../shaders.h"
 #include "../vmath.h"
+
+#include "example_shaders.h"
+#include "../shaders.h"
 
 const char app_name[] = "minivulkan example";
 
@@ -26,7 +28,7 @@ enum WhatGeometry {
     geom_cubic_patch,
     geom_quadratic_patch
 };
-#if defined(__aarch64__) || defined(__riscv)
+#if (defined(__aarch64__) && !defined(__APPLE__)) || defined(__riscv)
 static constexpr WhatGeometry what_geometry = geom_cube;
 #else
 static constexpr WhatGeometry what_geometry = geom_quadratic_patch;
@@ -352,8 +354,8 @@ static bool create_simple_graphics_pipeline()
 
     static ShaderInfo shader_info = {
         {
-            shader_simple_vert,
-            shader_phong_frag
+            shader_example_simple_vert,
+            shader_example_phong_frag
         },
         sizeof(Vertex),
         0, // patch_control_points
@@ -383,10 +385,10 @@ static bool create_patch_graphics_pipeline()
 
     static ShaderInfo shader_info = {
         {
-            shader_pass_through_vert,
-            shader_phong_frag,
-            shader_bezier_surface_cubic_tesc,
-            shader_bezier_surface_cubic_tese
+            shader_example_pass_through_vert,
+            shader_example_phong_frag,
+            shader_example_bezier_surface_cubic_tesc,
+            shader_example_bezier_surface_cubic_tese
         },
         sizeof(Vertex),
         16, // patch_control_points
@@ -396,9 +398,9 @@ static bool create_patch_graphics_pipeline()
     };
     if (what_geometry == geom_quadratic_patch) {
         shader_info.patch_control_points = 9;
-        shader_info.shader_ids[0]        = shader_rounded_cube_vert;
-        shader_info.shader_ids[2]        = shader_bezier_surface_quadratic_tesc;
-        shader_info.shader_ids[3]        = shader_bezier_surface_quadratic_tese;
+        shader_info.shader_ids[0]        = shader_example_rounded_cube_vert;
+        shader_info.shader_ids[2]        = shader_example_bezier_surface_quadratic_tesc;
+        shader_info.shader_ids[3]        = shader_example_bezier_surface_quadratic_tese;
     }
 
     shader_info.polygon_mode = VK_POLYGON_MODE_FILL;
