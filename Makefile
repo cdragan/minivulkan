@@ -267,7 +267,7 @@ ifeq ($(UNAME), Windows)
         CFLAGS  += -O1 -Oi -DNDEBUG -GL -MT
         LDFLAGS += -ltcg
     else
-        CFLAGS  += -D_DEBUG -Zi -FS -MTd
+        CFLAGS  += -D_DEBUG -Z7 -FS -MTd
         LDFLAGS += -debug
     endif
 
