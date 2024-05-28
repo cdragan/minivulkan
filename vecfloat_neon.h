@@ -25,17 +25,11 @@ struct float4_base {
     }
 
     bool all() const {
-        const int32x4_t as_int = vreinterpretq_s32_f32(data);
-        const int32x4_t add1   = vpaddq_s32(as_int, as_int);
-        const int32x4_t add2   = vpaddq_s32(add1, add1);
-        return vgetq_lane_s32(add2, 0) == -4;
+        return !! vminvq_u32(vreinterpretq_u32_f32(data));
     }
 
     bool any() const {
-        const int32x4_t as_int = vreinterpretq_s32_f32(data);
-        const int32x4_t add1   = vpaddq_s32(as_int, as_int);
-        const int32x4_t add2   = vpaddq_s32(add1, add1);
-        return vgetq_lane_s32(add2, 0) != 0;
+        return !! vmaxvq_u32(vreinterpretq_u32_f32(data));
     }
 
     float get0() const {
@@ -342,7 +336,7 @@ inline bool equal(const float4& v1, const float4& v2)
 
 inline bool not_equal(const float4& v1, const float4& v2)
 {
-    return (v1 != v2).any();
+    return ! equal(v1, v2);
 }
 
 inline float4 operator<(const float4& v1, const float4& v2)
