@@ -301,7 +301,7 @@ template<unsigned dim>
 inline vec<dim> operator/(vec<dim> v1, const vec<dim>& v2)
 {
     v1 /= v2;
-    return *v1;
+    return v1;
 }
 
 template<unsigned dim>
