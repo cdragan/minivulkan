@@ -119,8 +119,11 @@ struct float1 {
     constexpr
     #endif
     static float get_all1s() {
-        constexpr unsigned int u = ~0U;
-        return *reinterpret_cast<const float*>(&u);
+        constexpr union {
+            unsigned int u;
+            float        f;
+        } u2f = { ~0U };
+        return u2f.f;
     }
 };
 
