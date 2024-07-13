@@ -18,6 +18,9 @@ shader_files += sculptor_object.frag.glsl
 shader_files += sculptor_edge_color.frag.glsl
 shader_files += sculptor_color.frag.glsl
 
+shader_files += sculptor_vertex_select.vert.glsl
+shader_files += sculptor_vertex_select.frag.glsl
+
 bin_to_header_files += toolbar.png
 
 $(call OBJ_FROM_SRC,sculptor_geom_edit.cpp): $(gen_headers_dir)/toolbar.png.h

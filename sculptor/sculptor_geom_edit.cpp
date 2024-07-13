@@ -15,6 +15,7 @@
 #include <stdio.h>
 
 #include "toolbar.png.h"
+#include "vulkan/vulkan_core.h"
 
 /*
 
@@ -137,6 +138,7 @@ namespace {
     enum MaterialsForShaders {
         mat_grid,
         mat_object_edge,
+        mat_vertex_sel,
         num_materials
     };
 
@@ -145,6 +147,7 @@ namespace {
         vmath::mat3 model_view_normal;
         vmath::vec4 proj;
         vmath::vec4 proj_w;
+        vmath::vec2 pixel_dim;
     };
 
     constexpr uint32_t transforms_per_viewport = 1;
@@ -517,6 +520,29 @@ bool GeometryEditor::create_materials()
     if ( ! create_material(edge_mat_info, &edge_patch_mat))
         return false;
     set_material_buf(edge_mat_info, mat_object_edge);
+
+    static const MaterialInfo vertex_info = {
+        {
+            shader_sculptor_vertex_select_vert,
+            shader_sculptor_vertex_select_frag
+        },
+        nullptr,
+        0.0f,
+        0,
+        0,
+        VK_FORMAT_UNDEFINED,
+        VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP,
+        0, // patch_control_points
+        VK_POLYGON_MODE_FILL,
+        VK_CULL_MODE_BACK_BIT,
+        true,                // depth_test
+        false,               // depth_write
+        { 0xEF, 0xEF, 0xF4 } // diffuse
+    };
+
+    if ( ! create_material(vertex_info, &vertex_mat))
+        return false;
+    set_material_buf(vertex_info, mat_vertex_sel);
 
     static const MaterialInfo grid_info = {
         {
@@ -1656,6 +1682,9 @@ bool GeometryEditor::set_patch_transforms(const View& dst_view, uint32_t transfo
         transforms->proj_w = vmath::vec4(0.0f, 0.0f, 0.0f, 1.0f);
     }
 
+    transforms->pixel_dim = vmath::vec2(2.0f) / vmath::vec2(static_cast<float>(dst_view.width),
+                                                            static_cast<float>(dst_view.height));
+
     return transforms_buf.flush(transform_id, transforms_stride);
 }
 
@@ -1706,6 +1735,24 @@ bool GeometryEditor::render_geometry(VkCommandBuffer cmdbuf,
                             dynamic_offsets);
 
     patch_geometry.render_edges(cmdbuf);
+
+    vkCmdBindPipeline(cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, vertex_mat);
+
+    send_viewport_and_scissor(cmdbuf, dst_view.width, dst_view.height);
+
+    const uint32_t vertex_mat_id = (image_idx * num_materials) + mat_vertex_sel;
+    dynamic_offsets[0] = vertex_mat_id * materials_stride;
+
+    vkCmdBindDescriptorSets(cmdbuf,
+                            VK_PIPELINE_BIND_POINT_GRAPHICS,
+                            Sculptor::material_layout,
+                            1,          // firstSet
+                            2,          // descriptorSetCount
+                            &desc_set[1],
+                            mstd::array_size(dynamic_offsets),
+                            dynamic_offsets);
+
+    patch_geometry.render_vertices(cmdbuf);
 
     return true;
 }

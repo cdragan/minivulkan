@@ -7,13 +7,13 @@
 
 #include "sculptor_material.glsl"
 
-layout(location = 0) in  vec4 in_pos;
+layout(location = 0) in  float in_depth;
 
-layout(location = 0) out vec4 out_color;
+layout(location = 0) out vec4  out_color;
 
 void main()
 {
     out_color = vec4(diffuse_color.rgb, 1);
 
-    gl_FragDepth = in_pos.w * 1.0078125;
+    gl_FragDepth = in_depth * 1.00195325;
 }

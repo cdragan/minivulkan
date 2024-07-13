@@ -6,6 +6,7 @@ layout(set = 2, binding = 0) uniform transform_data {
     mat3x4 model_view_normal;
     vec4   proj;
     vec4   proj_w; // perspective: [0, 0, 1, 0], orthographic: [0, 0, 0, 1]
+    vec2   pixel_dim;
 };
 
 vec4 projection(vec3 pos)

@@ -181,6 +181,7 @@ class GeometryEditor: public Editor {
         VkDescriptorSet    desc_set[3]       = { };
         VkPipeline         gray_patch_mat    = VK_NULL_HANDLE;
         VkPipeline         edge_patch_mat    = VK_NULL_HANDLE;
+        VkPipeline         vertex_mat        = VK_NULL_HANDLE;
         VkPipeline         grid_mat          = VK_NULL_HANDLE;
         VkDescriptorSet    toolbar_texture   = VK_NULL_HANDLE;
         Sculptor::Geometry patch_geometry;
