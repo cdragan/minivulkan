@@ -29,10 +29,17 @@
     X(VK_KHR_portability_subset,        OPTIONAL)
 #endif
 
-#ifdef __linux__
+#if defined(__linux__) && defined(LINUX_USE_XCB)
 #   define SUPPORTED_INSTANCE_EXTENSIONS SUPPORTED_INSTANCE_EXTENSIONS_BASE \
     X(VK_KHR_xcb_surface,               REQUIRED)
+#endif
 
+#if defined(__linux__) && !defined(LINUX_USE_XCB)
+#   define SUPPORTED_INSTANCE_EXTENSIONS SUPPORTED_INSTANCE_EXTENSIONS_BASE \
+    X(VK_KHR_wayland_surface,           REQUIRED)
+#endif
+
+#ifdef __linux__
 #   define SUPPORTED_DEVICE_EXTENSIONS SUPPORTED_DEVICE_EXTENSIONS_BASE
 #endif
 

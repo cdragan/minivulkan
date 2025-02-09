@@ -44,6 +44,15 @@ ifneq ($(UNAME), Windows)
     sanitize ?=
 endif
 
+# On Linux, default to Wayland if available, otherwise fall back to XCB
+ifeq ($(UNAME), Linux)
+    ifeq (true,$(shell ./have_wayland $(CC)))
+        wayland ?= 1
+    else
+        wayland ?= 0
+    endif
+endif
+
 ##############################################################################
 # Declare default target
 
@@ -106,9 +115,17 @@ threed_src_files += shaders.cpp
 threed_src_files += sound.cpp
 
 ifeq ($(UNAME), Linux)
-    threed_src_files       += main_linux.cpp
-    threed_gui_src_files   += gui_linux.cpp
-    threed_nogui_src_files += nogui_linux.cpp
+    ifeq ($(wayland), 1)
+        threed_src_files       += main_linux_wayland.cpp
+        threed_src_files       += linux/xdg-shell.c
+        threed_gui_src_files   += gui_linux_wayland.cpp
+        threed_nogui_src_files += nogui_linux_wayland.cpp
+    else
+        threed_src_files       += main_linux_xcb.cpp
+        threed_gui_src_files   += gui_linux_xcb.cpp
+        threed_nogui_src_files += nogui_linux_xcb.cpp
+    endif
+    threed_src_files           += main_linux.cpp
 endif
 
 ifeq ($(UNAME), Darwin)
@@ -345,7 +362,14 @@ else
 endif
 
 ifeq ($(UNAME), Linux)
-    LDFLAGS += -lxcb -lxcb-xfixes -ldl
+    ifeq ($(wayland), 1)
+        LDFLAGS += -lwayland-client
+    else
+        LDFLAGS += -lxcb -lxcb-xfixes
+        CFLAGS  += -DLINUX_USE_XCB
+    endif
+
+    LDFLAGS += -ldl
 
     ifeq ($(debug), 0)
         STRIP = strip -R .note.* -R .comment -R .eh_frame*
@@ -523,6 +547,19 @@ $(foreach file, $(all_gui_src_files), $(call OBJ_FROM_SRC, $(file))): CFLAGS += 
 $(foreach file, $(all_gui_src_files) $(imgui_src_files), $(call OBJ_FROM_SRC, $(file))): CFLAGS += -DIMGUI_DISABLE_OBSOLETE_KEYIO -DIMGUI_DISABLE_OBSOLETE_FUNCTIONS
 
 $(call OBJ_FROM_SRC, load_png.cpp): CFLAGS += -Ithirdparty/libpng
+
+ifeq ($(UNAME), Linux)
+linux/xdg-shell.h: | linux
+	wayland-scanner client-header /usr/share/wayland-protocols/stable/xdg-shell/xdg-shell.xml $@
+
+linux/xdg-shell.c: | linux
+	wayland-scanner private-code /usr/share/wayland-protocols/stable/xdg-shell/xdg-shell.xml $@
+
+linux:
+	mkdir -p $@
+
+$(call OBJ_FROM_SRC, main_linux_wayland.cpp): linux/xdg-shell.h
+endif
 
 shaders_out_dir := $(out_dir_base)/shaders
 

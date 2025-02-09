@@ -1,0 +1,21 @@
+#!/bin/sh
+
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: Copyright (c) 2021-2025 Chris Dragan
+
+set -e
+
+CC="$1"
+shift
+
+SRC=$(mktemp -t have_wayland_XXXXXX.c)
+EXE=$(mktemp -t have_wayland_XXXXXX)
+
+echo "#include <wayland-client.h>" > "$SRC"
+echo "int main() { return wl_display_connect(0) ? 0 : 1; }" >> "$SRC"
+
+if "$CC" "$@" -o "$EXE" "$SRC" -lwayland-client >/dev/null 2>&1; then
+    echo "true"
+fi
+
+rm -f "$SRC" "$OBJ"

@@ -7,8 +7,12 @@
 #   define VK_USE_PLATFORM_METAL_EXT
 #endif
 
-#ifdef __linux__
+#if defined(__linux__) && defined(LINUX_USE_XCB)
 #   define VK_USE_PLATFORM_XCB_KHR
+#endif
+
+#if defined(__linux__) && !defined(LINUX_USE_XCB)
+#   define VK_USE_PLATFORM_WAYLAND_KHR
 #endif
 
 #ifdef _WIN32
@@ -53,9 +57,14 @@
     X(vkCreateMetalSurfaceEXT)
 #endif
 
-#ifdef __linux__
+#if defined(__linux__) && defined(LINUX_USE_XCB)
 #   define VK_INSTANCE_FUNCTIONS VK_INSTANCE_FUNCTIONS_BASE \
     X(vkCreateXcbSurfaceKHR)
+#endif
+
+#if defined(__linux__) && !defined(LINUX_USE_XCB)
+#   define VK_INSTANCE_FUNCTIONS VK_INSTANCE_FUNCTIONS_BASE \
+    X(vkCreateWaylandSurfaceKHR)
 #endif
 
 #ifdef _WIN32
@@ -167,6 +176,7 @@ enum e_device_functions {
 #define vkEnumerateDeviceExtensionProperties      SELECT_VK_FUNCTION(instance, vkEnumerateDeviceExtensionProperties)
 #define vkCreateMetalSurfaceEXT                   SELECT_VK_FUNCTION(instance, vkCreateMetalSurfaceEXT)
 #define vkCreateXcbSurfaceKHR                     SELECT_VK_FUNCTION(instance, vkCreateXcbSurfaceKHR)
+#define vkCreateWaylandSurfaceKHR                 SELECT_VK_FUNCTION(instance, vkCreateWaylandSurfaceKHR)
 #define vkCreateWin32SurfaceKHR                   SELECT_VK_FUNCTION(instance, vkCreateWin32SurfaceKHR)
 #define vkCreateDevice                            SELECT_VK_FUNCTION(instance, vkCreateDevice)
 
