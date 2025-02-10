@@ -118,19 +118,21 @@ static void handle_toplevel_configure(void*         data,
                                       int32_t       height,
                                       wl_array*     states)
 {
-    if (width <= 0)
-        width = max_width;
-    if (height <= 0)
-        height = max_height;
-
-    d_printf("toplevel configure %dx%d\n", width, height);
+    d_printf("window resize %dx%d\n", width, height);
 
     Window* const w = static_cast<Window*>(data);
 
+    if (width > 0 && height > 0) {
+        w->width  = width;
+        w->height = height;
+    }
+
+#if 0
     wl_buffer* const buffer = create_buffer(w, width, height);
 
     wl_surface_attach(w->surface, buffer, 0, 0);
     wl_surface_commit(w->surface);
+#endif
 }
 
 static void handle_toplevel_close(void*         data,
@@ -227,7 +229,7 @@ static bool create_window(Window* w)
     xdg_toplevel* toplevel = xdg_surface_get_toplevel(wm_surface);
 
     if ( ! toplevel) {
-        d_printf("Failed to create top level thingiemajing\n");
+        d_printf("Failed to create toplevel window\n");
         return false;
     }
 
@@ -239,12 +241,24 @@ static bool create_window(Window* w)
     xdg_toplevel_add_listener(toplevel, &toplevel_listener, w);
 
     xdg_toplevel_set_title(toplevel, app_name);
+    xdg_toplevel_set_app_id(toplevel, app_name);
 
     if (full_screen)
         xdg_toplevel_set_fullscreen(toplevel, nullptr);
     else
-        xdg_surface_set_window_geometry(wm_surface, 0, 0, max_width, max_height);
+        xdg_surface_set_window_geometry(wm_surface,
+                                        0,
+                                        0,
+                                        get_main_window_width(),
+                                        get_main_window_height());
 
+    // Apply changes to the surface
+    wl_surface_commit(w->surface);
+
+    // Receive configuration request
+    wl_display_roundtrip(w->display);
+
+    // Complete configuration
     wl_surface_commit(w->surface);
 
     //return install_keyboard_events(w->connection);
@@ -257,42 +271,15 @@ static const struct wl_callback_listener frame_listener = {
     .done = frame_done
 };
 
-static void frame_done(void* data, wl_callback* callback, uint32_t time)
-{
-    Window* const w = static_cast<Window*>(data);
-
-    // Destroy the previous callback
-    wl_callback_destroy(callback);
-
-    // Initialize Vulkan
-    static bool initialized;
-    if ( ! initialized) {
-        if ( ! init_vulkan(w)) {
-            w->quit = true;
-            return;
-        }
-        initialized = true;
-    }
-
-    // Trigger rendering
-    if (need_redraw(w) || ! skip_frame(w)) {
-        if ( ! draw_frame()) {
-
-            // Quit on error
-            w->quit = true;
-            return;
-        }
-    }
-
-    // Register a new frame callback
-    wl_callback_add_listener(wl_surface_frame(w->surface), &frame_listener, w);
-}
-
 static int event_loop(Window* w)
 {
-    wl_callback_add_listener(wl_surface_frame(w->surface), &frame_listener, w);
+    while ( ! w->quit && wl_display_dispatch_pending(w->display) != -1) {
+        if ( ! need_redraw(w) && skip_frame(w))
+            continue;
 
-    while ( ! w->quit && wl_display_dispatch(w->display) != -1);
+        if ( ! draw_frame())
+            return 1;
+    }
 
     idle_queue();
 
@@ -304,6 +291,9 @@ int main()
     static Window w = { };
 
     if ( ! create_window(&w))
+        return 1;
+
+    if ( ! init_vulkan(&w))
         return 1;
 
     return event_loop(&w);
