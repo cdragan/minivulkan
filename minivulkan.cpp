@@ -939,6 +939,12 @@ static bool create_swapchain()
     if (res != VK_SUCCESS)
         return false;
 
+    if (vk_surface_caps.currentExtent.width == ~0U) {
+        d_printf("No surface size available, using dummy defaults\n");
+        vk_surface_caps.currentExtent.width  = 64;
+        vk_surface_caps.currentExtent.height = 64;
+    }
+
     d_printf("Create swapchain %u x %u\n", vk_surface_caps.currentExtent.width, vk_surface_caps.currentExtent.height);
 
 #ifndef NDEBUG

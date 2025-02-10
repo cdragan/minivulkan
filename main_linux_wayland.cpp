@@ -7,26 +7,27 @@
 #include "minivulkan.h"
 
 #include <string.h>
+#include <sys/mman.h>
 #include <time.h>
 #include <unistd.h>
 #include <dlfcn.h>
-//#include <wayland-client-protocol.h>
 #include <wayland-client-core.h>
 #include <wayland-client.h>
 #include "linux/xdg-shell.h" // generated file
 
 struct Window {
-    bool              quit;
-    wl_display*       display;
-    wl_surface*       surface;
-    wl_compositor*    compositor;
-
-    // Windowed
-    wl_shell*         shell;
-    wl_shell_surface* shell_surface;
-
-    // Fullscreen
-    xdg_wm_base*      wm_base;
+    wl_display*    display;
+    wl_surface*    surface;
+    wl_compositor* compositor;
+    wl_seat*       seat;
+    wl_shm*        shm;
+    wl_shm_pool*   pool;
+    wl_pointer*    pointer;
+    wl_keyboard*   keyboard;
+    xdg_wm_base*   wm_base;
+    uint32_t       width;
+    uint32_t       height;
+    bool           quit;
 };
 
 bool create_surface(struct Window* w)
@@ -46,8 +47,15 @@ bool create_surface(struct Window* w)
                                                        &surf_create_info,
                                                        nullptr,
                                                        &vk_surface));
+    d_printf("Created Wayland surface, for window %ux%u\n", w->width, w->height);
     return res == VK_SUCCESS;
 }
+
+struct WaylandInterfaceMapping {
+    const char*         name;
+    const wl_interface* iface;
+    size_t              ptr_offset;
+};
 
 static void registry_handler(void        *data,
                              wl_registry *registry,
@@ -55,19 +63,23 @@ static void registry_handler(void        *data,
                              const char  *interface,
                              uint32_t     version)
 {
-    Window* const w = static_cast<Window*>(data);
+    static const WaylandInterfaceMapping interfaces[] = {
+        { "wl_compositor", &wl_compositor_interface, offsetof(Window, compositor) },
+        { "wl_seat",       &wl_seat_interface,       offsetof(Window, seat)       },
+        { "wl_shm",        &wl_shm_interface,        offsetof(Window, shm)        },
+        { "xdg_wm_base",   &xdg_wm_base_interface,   offsetof(Window, wm_base)    },
+        { nullptr,         nullptr,                  0                            }
+    };
 
-    if ( ! strcmp(interface, "wl_compositor")) {
-        w->compositor = static_cast<wl_compositor*>(
-            wl_registry_bind(registry, id, &wl_compositor_interface, 1));
-    }
-    else if ( ! is_full_screen() && ! strcmp(interface, "wl_shell")) {
-        w->shell = static_cast<wl_shell*>(
-            wl_registry_bind(registry, id, &wl_shell_interface, 1));
-    }
-    else if (is_full_screen() && ! strcmp(interface, "xdg_wm_base")) {
-        w->wm_base = static_cast<xdg_wm_base*>(
-            wl_registry_bind(registry, id, &xdg_wm_base_interface, 1));
+    for (const WaylandInterfaceMapping* mapping = interfaces; mapping->name; mapping++) {
+        if ( ! strcmp(mapping->name, interface)) {
+            void** const ptr_ptr = reinterpret_cast<void**>(
+                static_cast<char*>(data) + mapping->ptr_offset);
+
+            *ptr_ptr = wl_registry_bind(registry, id, mapping->iface, 1);
+
+            break;
+        }
     }
 }
 
@@ -77,9 +89,54 @@ static void registry_remover(void        *data,
 {
 }
 
+static wl_buffer* create_buffer(Window* w, uint32_t width, uint32_t height)
+{
+    return wl_shm_pool_create_buffer(w->pool,
+                                     0,
+                                     width,
+                                     height,
+                                     width * 4,
+                                     WL_SHM_FORMAT_ABGR8888);
+}
+
 static void handle_wm_ping(void* data, xdg_wm_base* wm_base, uint32_t serial)
 {
     xdg_wm_base_pong(static_cast<Window*>(data)->wm_base, serial);
+}
+
+static void handle_wm_configure(void* data, xdg_surface* wm_surface, uint32_t serial)
+{
+    xdg_surface_ack_configure(wm_surface, serial);
+}
+
+constexpr uint32_t max_width  = 800;
+constexpr uint32_t max_height = 600;
+
+static void handle_toplevel_configure(void*         data,
+                                      xdg_toplevel* toplevel,
+                                      int32_t       width,
+                                      int32_t       height,
+                                      wl_array*     states)
+{
+    if (width <= 0)
+        width = max_width;
+    if (height <= 0)
+        height = max_height;
+
+    d_printf("toplevel configure %dx%d\n", width, height);
+
+    Window* const w = static_cast<Window*>(data);
+
+    wl_buffer* const buffer = create_buffer(w, width, height);
+
+    wl_surface_attach(w->surface, buffer, 0, 0);
+    wl_surface_commit(w->surface);
+}
+
+static void handle_toplevel_close(void*         data,
+                                  xdg_toplevel* toplevel)
+{
+    static_cast<Window*>(data)->quit = true;
 }
 
 static bool create_window(Window* w)
@@ -101,9 +158,43 @@ static bool create_window(Window* w)
     wl_registry_add_listener(wl_display_get_registry(w->display), &registry_listener, w);
     wl_display_roundtrip(w->display);
 
-    // Check compositor
+    // Check interfaces
     if ( ! w->compositor) {
         d_printf("Wayland compositor is not available\n");
+        return false;
+    }
+    if ( ! w->seat) {
+        d_printf("Failed to Wayland seat\n");
+        return false;
+    }
+    if ( ! w->shm) {
+        d_printf("Failed to Wayland shm\n");
+        return false;
+    }
+    if ( ! w->wm_base) {
+        d_printf("Failed to get window manager base\n");
+        return false;
+    }
+
+    // Create shared memory objects for Wayland compositor
+    constexpr uint32_t capacity = max_width * max_height * 4;
+    const int fd = memfd_create(app_name, MFD_CLOEXEC);
+    if (fd == -1) {
+        d_printf("Failed to create shared memory file\n");
+        return false;
+    }
+    if (ftruncate(fd, capacity)) {
+        d_printf("Failed to resize shared memory file\n");
+        return false;
+    }
+    void* const memory = mmap(nullptr, capacity, PROT_READ, MAP_SHARED, fd, 0);
+    if (memory == MAP_FAILED) {
+        d_printf("Failed to map shared memory file\n");
+        return false;
+    }
+    w->pool = wl_shm_create_pool(w->shm, fd, capacity);
+    if ( ! w->pool) {
+        d_printf("Failed to create Wayland shared memory pool\n");
         return false;
     }
 
@@ -114,42 +205,47 @@ static bool create_window(Window* w)
         return false;
     }
 
-    // Create shell surface
-    if ( ! full_screen) {
-        if ( ! w->shell) {
-            d_printf("Wayland shell is not available\n");
-            return false;
-        }
+    static const xdg_wm_base_listener wm_base_listener = {
+        .ping = handle_wm_ping,
+    };
 
-        w->shell_surface = wl_shell_get_shell_surface(w->shell, w->surface);
-        if ( ! w->shell_surface) {
-            d_printf("Failed to get Wayland shell surface\n");
-            return false;
-        }
+    xdg_wm_base_add_listener(w->wm_base, &wm_base_listener, w);
 
-        wl_shell_surface_set_toplevel(w->shell_surface);
+    xdg_surface* wm_surface = xdg_wm_base_get_xdg_surface(w->wm_base, w->surface);
+
+    if ( ! wm_surface) {
+        d_printf("Failed to create window manager's surface\n");
+        return false;
     }
 
-    // Create fullscreen window
-    if (full_screen) {
-        if ( ! w->wm_base) {
-            d_printf("Failed to get window manager base\n");
-            return false;
-        }
+    static const xdg_surface_listener surface_listener = {
+        .configure = handle_wm_configure
+    };
 
-        static const xdg_wm_base_listener wm_base_listener = {
-            .ping = handle_wm_ping,
-        };
+    xdg_surface_add_listener(wm_surface, &surface_listener, w);
 
-        xdg_wm_base_add_listener(w->wm_base, &wm_base_listener, w);
+    xdg_toplevel* toplevel = xdg_surface_get_toplevel(wm_surface);
 
-        xdg_surface*  wm_surface = xdg_wm_base_get_xdg_surface(w->wm_base, w->surface);
-        xdg_toplevel* toplevel   = xdg_surface_get_toplevel(wm_surface);
+    if ( ! toplevel) {
+        d_printf("Failed to create top level thingiemajing\n");
+        return false;
+    }
+
+    static const xdg_toplevel_listener toplevel_listener = {
+        .configure = handle_toplevel_configure,
+        .close     = handle_toplevel_close
+    };
+
+    xdg_toplevel_add_listener(toplevel, &toplevel_listener, w);
+
+    xdg_toplevel_set_title(toplevel, app_name);
+
+    if (full_screen)
         xdg_toplevel_set_fullscreen(toplevel, nullptr);
-    }
+    else
+        xdg_surface_set_window_geometry(wm_surface, 0, 0, max_width, max_height);
 
     wl_surface_commit(w->surface);
-    wl_display_roundtrip(w->display);
 
     //return install_keyboard_events(w->connection);
     return true;
@@ -163,11 +259,22 @@ static const struct wl_callback_listener frame_listener = {
 
 static void frame_done(void* data, wl_callback* callback, uint32_t time)
 {
+    Window* const w = static_cast<Window*>(data);
+
     // Destroy the previous callback
     wl_callback_destroy(callback);
 
+    // Initialize Vulkan
+    static bool initialized;
+    if ( ! initialized) {
+        if ( ! init_vulkan(w)) {
+            w->quit = true;
+            return;
+        }
+        initialized = true;
+    }
+
     // Trigger rendering
-    Window* const w = static_cast<Window*>(data);
     if (need_redraw(w) || ! skip_frame(w)) {
         if ( ! draw_frame()) {
 
@@ -185,8 +292,7 @@ static int event_loop(Window* w)
 {
     wl_callback_add_listener(wl_surface_frame(w->surface), &frame_listener, w);
 
-    while ( ! w->quit && wl_display_dispatch(w->display) != -1) {
-    }
+    while ( ! w->quit && wl_display_dispatch(w->display) != -1);
 
     idle_queue();
 
@@ -198,9 +304,6 @@ int main()
     static Window w = { };
 
     if ( ! create_window(&w))
-        return 1;
-
-    if ( ! init_vulkan(&w))
         return 1;
 
     return event_loop(&w);
