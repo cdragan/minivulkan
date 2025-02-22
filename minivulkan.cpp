@@ -565,8 +565,10 @@ static bool find_gpu()
 
                 res = vkGetPhysicalDeviceSurfaceSupportKHR(phys_dev, i_queue, vk_surface, &supported);
 
-                if (res != VK_SUCCESS || ! supported)
+                if (res != VK_SUCCESS || ! supported) {
+                    d_printf("Skip queue family %u which does not support vk surface\n", i_queue);
                     continue;
+                }
 
                 vk_queue_family_index = i_queue;
                 break;
@@ -739,9 +741,6 @@ static bool check_device_features_internal()
 
 static bool create_device()
 {
-    if ( ! find_gpu())
-        return false;
-
     if ( ! get_device_extensions())
         return false;
 
@@ -868,6 +867,8 @@ bool wait_and_reset_fence(eFenceId fence)
 
 VkSurfaceCapabilitiesKHR vk_surface_caps;
 
+VkExtent2D vk_window_extent;
+
 static VkSwapchainKHR vk_swapchain = VK_NULL_HANDLE;
 
 uint32_t vk_num_swapchain_images = 0;
@@ -939,11 +940,8 @@ static bool create_swapchain()
     if (res != VK_SUCCESS)
         return false;
 
-    if (vk_surface_caps.currentExtent.width == ~0U) {
-        d_printf("No surface size available, using dummy defaults\n");
-        vk_surface_caps.currentExtent.width  = 64;
-        vk_surface_caps.currentExtent.height = 64;
-    }
+    if (vk_surface_caps.currentExtent.width == ~0U)
+        vk_surface_caps.currentExtent = vk_window_extent;
 
     d_printf("Create swapchain %u x %u\n", vk_surface_caps.currentExtent.width, vk_surface_caps.currentExtent.height);
 
@@ -1304,6 +1302,9 @@ bool init_vulkan(Window* w)
         return false;
 
     if ( ! create_surface(w))
+        return false;
+
+    if ( ! find_gpu())
         return false;
 
     if ( ! create_device())

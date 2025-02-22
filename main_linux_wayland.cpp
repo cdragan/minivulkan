@@ -7,7 +7,6 @@
 #include "minivulkan.h"
 
 #include <string.h>
-#include <sys/mman.h>
 #include <time.h>
 #include <unistd.h>
 #include <dlfcn.h>
@@ -20,13 +19,9 @@ struct Window {
     wl_surface*    surface;
     wl_compositor* compositor;
     wl_seat*       seat;
-    wl_shm*        shm;
-    wl_shm_pool*   pool;
     wl_pointer*    pointer;
     wl_keyboard*   keyboard;
     xdg_wm_base*   wm_base;
-    uint32_t       width;
-    uint32_t       height;
     bool           quit;
 };
 
@@ -47,7 +42,6 @@ bool create_surface(struct Window* w)
                                                        &surf_create_info,
                                                        nullptr,
                                                        &vk_surface));
-    d_printf("Created Wayland surface, for window %ux%u\n", w->width, w->height);
     return res == VK_SUCCESS;
 }
 
@@ -64,10 +58,9 @@ static void registry_handler(void        *data,
                              uint32_t     version)
 {
     static const WaylandInterfaceMapping interfaces[] = {
-        { "wl_compositor", &wl_compositor_interface, offsetof(Window, compositor) },
-        { "wl_seat",       &wl_seat_interface,       offsetof(Window, seat)       },
-        { "wl_shm",        &wl_shm_interface,        offsetof(Window, shm)        },
-        { "xdg_wm_base",   &xdg_wm_base_interface,   offsetof(Window, wm_base)    },
+        { "wl_compositor", &wl_compositor_interface, offsetof(Window, compositor) }, // Wayland compositor
+        { "wl_seat",       &wl_seat_interface,       offsetof(Window, seat)       }, // Input devices
+        { "xdg_wm_base",   &xdg_wm_base_interface,   offsetof(Window, wm_base)    }, // Window manager
         { nullptr,         nullptr,                  0                            }
     };
 
@@ -89,16 +82,6 @@ static void registry_remover(void        *data,
 {
 }
 
-static wl_buffer* create_buffer(Window* w, uint32_t width, uint32_t height)
-{
-    return wl_shm_pool_create_buffer(w->pool,
-                                     0,
-                                     width,
-                                     height,
-                                     width * 4,
-                                     WL_SHM_FORMAT_ABGR8888);
-}
-
 static void handle_wm_ping(void* data, xdg_wm_base* wm_base, uint32_t serial)
 {
     xdg_wm_base_pong(static_cast<Window*>(data)->wm_base, serial);
@@ -109,30 +92,22 @@ static void handle_wm_configure(void* data, xdg_surface* wm_surface, uint32_t se
     xdg_surface_ack_configure(wm_surface, serial);
 }
 
-constexpr uint32_t max_width  = 800;
-constexpr uint32_t max_height = 600;
-
 static void handle_toplevel_configure(void*         data,
                                       xdg_toplevel* toplevel,
                                       int32_t       width,
                                       int32_t       height,
                                       wl_array*     states)
 {
-    d_printf("window resize %dx%d\n", width, height);
-
-    Window* const w = static_cast<Window*>(data);
+    d_printf("Window resize %dx%d\n", width, height);
 
     if (width > 0 && height > 0) {
-        w->width  = width;
-        w->height = height;
+        vk_window_extent.width  = static_cast<uint32_t>(width);
+        vk_window_extent.height = static_cast<uint32_t>(height);
     }
-
-#if 0
-    wl_buffer* const buffer = create_buffer(w, width, height);
-
-    wl_surface_attach(w->surface, buffer, 0, 0);
-    wl_surface_commit(w->surface);
-#endif
+    else {
+        vk_window_extent.width  = get_main_window_width();
+        vk_window_extent.height = get_main_window_height();
+    }
 }
 
 static void handle_toplevel_close(void*         data,
@@ -166,44 +141,18 @@ static bool create_window(Window* w)
         return false;
     }
     if ( ! w->seat) {
-        d_printf("Failed to Wayland seat\n");
-        return false;
-    }
-    if ( ! w->shm) {
-        d_printf("Failed to Wayland shm\n");
+        d_printf("Wayland input devices are not available\n");
         return false;
     }
     if ( ! w->wm_base) {
-        d_printf("Failed to get window manager base\n");
-        return false;
-    }
-
-    // Create shared memory objects for Wayland compositor
-    constexpr uint32_t capacity = max_width * max_height * 4;
-    const int fd = memfd_create(app_name, MFD_CLOEXEC);
-    if (fd == -1) {
-        d_printf("Failed to create shared memory file\n");
-        return false;
-    }
-    if (ftruncate(fd, capacity)) {
-        d_printf("Failed to resize shared memory file\n");
-        return false;
-    }
-    void* const memory = mmap(nullptr, capacity, PROT_READ, MAP_SHARED, fd, 0);
-    if (memory == MAP_FAILED) {
-        d_printf("Failed to map shared memory file\n");
-        return false;
-    }
-    w->pool = wl_shm_create_pool(w->shm, fd, capacity);
-    if ( ! w->pool) {
-        d_printf("Failed to create Wayland shared memory pool\n");
+        d_printf("Wayland window manager is not available\n");
         return false;
     }
 
     // Create compositor surface
     w->surface = wl_compositor_create_surface(w->compositor);
     if ( ! w->surface) {
-        d_printf("Failed to create wayland surface\n");
+        d_printf("Failed to create Wayland compositor surface\n");
         return false;
     }
 
@@ -229,7 +178,7 @@ static bool create_window(Window* w)
     xdg_toplevel* toplevel = xdg_surface_get_toplevel(wm_surface);
 
     if ( ! toplevel) {
-        d_printf("Failed to create toplevel window\n");
+        d_printf("Failed to create window (toplevel)\n");
         return false;
     }
 
@@ -245,12 +194,6 @@ static bool create_window(Window* w)
 
     if (full_screen)
         xdg_toplevel_set_fullscreen(toplevel, nullptr);
-    else
-        xdg_surface_set_window_geometry(wm_surface,
-                                        0,
-                                        0,
-                                        get_main_window_width(),
-                                        get_main_window_height());
 
     // Apply changes to the surface
     wl_surface_commit(w->surface);
@@ -264,12 +207,6 @@ static bool create_window(Window* w)
     //return install_keyboard_events(w->connection);
     return true;
 }
-
-static void frame_done(void* data, wl_callback* callback, uint32_t time);
-
-static const struct wl_callback_listener frame_listener = {
-    .done = frame_done
-};
 
 static int event_loop(Window* w)
 {

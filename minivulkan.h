@@ -18,6 +18,7 @@ extern VkSwapchainCreateInfoKHR    swapchain_create_info;
 extern VkQueue                     vk_queue;
 extern uint32_t                    vk_num_swapchain_images;
 extern VkSurfaceCapabilitiesKHR    vk_surface_caps;
+extern VkExtent2D                  vk_window_extent;
 extern VkPhysicalDeviceProperties2 vk_phys_props;
 
 #define FEATURE_SETS \
