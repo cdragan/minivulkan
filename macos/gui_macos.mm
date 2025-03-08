@@ -2,8 +2,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2021-2024 Chris Dragan
 
 #include "main_macos.h"
-#include "gui.h"
-#include "thirdparty/imgui/src/backends/imgui_impl_osx.h"
+#include "../gui.h"
+#include "../thirdparty/imgui/src/backends/imgui_impl_osx.h"
 
 static bool window_needs_update = true;
 

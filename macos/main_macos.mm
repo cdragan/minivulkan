@@ -4,11 +4,11 @@
 #import <AVFoundation/AVAudioPlayer.h>
 #import <Cocoa/Cocoa.h>
 #import <QuartzCore/CAMetalLayer.h>
-#include "gui.h"
+#include "../gui.h"
 #include "main_macos.h"
-#include "minivulkan.h"
-#include "mstdc.h"
-#include "d_printf.h"
+#include "../minivulkan.h"
+#include "../mstdc.h"
+#include "../d_printf.h"
 #include <time.h>
 
 struct Window {
