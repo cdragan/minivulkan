@@ -135,12 +135,12 @@ ifeq ($(UNAME), Darwin)
 endif
 
 ifeq ($(UNAME), Windows)
-    threed_src_files       += main_windows.cpp
-    threed_gui_src_files   += gui_windows.cpp
-    threed_nogui_src_files += nogui_windows.cpp
+    threed_src_files       += windows/main_windows.cpp
+    threed_gui_src_files   += windows/gui_windows.cpp
+    threed_nogui_src_files += windows/nogui_windows.cpp
 
     ifeq ($(stdlib), 0)
-        lib_src_files += mstdc_windows.cpp
+        lib_src_files += windows/mstdc_windows.cpp
     endif
 endif
 

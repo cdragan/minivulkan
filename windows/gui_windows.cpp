@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: MIT
 // SPDX-FileCopyrightText: Copyright (c) 2021-2024 Chris Dragan
 
-#include "main_windows.h"
+#include "../main_windows.h"
 
-#include "thirdparty/imgui/src/backends/imgui_impl_win32.h"
+#include "../thirdparty/imgui/src/backends/imgui_impl_win32.h"
 
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
