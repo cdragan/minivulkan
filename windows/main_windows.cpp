@@ -2,10 +2,10 @@
 // SPDX-FileCopyrightText: Copyright (c) 2021-2025 Chris Dragan
 
 #include "main_windows.h"
-#include "../gui.h"
-#include "../minivulkan.h"
-#include "../d_printf.h"
-#include "../mstdc.h"
+#include "../core/gui.h"
+#include "../core/minivulkan.h"
+#include "../core/d_printf.h"
+#include "../core/mstdc.h"
 
 /* TODO Just including xaudio2.h somehow calls LoadLibraryEx - figure out how to avoid that */
 #include <xaudio2.h>

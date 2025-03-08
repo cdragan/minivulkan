@@ -5,7 +5,7 @@
 #include "d_printf.h"
 #include "mstdc.h"
 
-#include "thirdparty/libpng/libpng-1.6.40/png.h"
+#include "../thirdparty/libpng/libpng-1.6.40/png.h"
 
 #include <algorithm>
 #include <string.h>

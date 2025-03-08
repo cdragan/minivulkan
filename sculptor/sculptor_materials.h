@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 // SPDX-FileCopyrightText: Copyright (c) 2021-2025 Chris Dragan
 
-#include "../vulkan_functions.h"
+#include "../core/vulkan_functions.h"
 
 #include <stdint.h>
 

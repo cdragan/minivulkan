@@ -3,9 +3,9 @@
 
 #include "example.h"
 
-#include "../gui.h"
-#include "../gui_imgui.h"
-#include "../minivulkan.h"
+#include "../core/gui.h"
+#include "../core/gui_imgui.h"
+#include "../core/minivulkan.h"
 
 const int gui_config_flags = ImGuiConfigFlags_NavEnableKeyboard;
 

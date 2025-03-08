@@ -9,8 +9,8 @@
         constexpr ImVec2(const vmath::vec2& v) : x(v.x), y(v.y) { } \
         constexpr operator vmath::vec2() const { return vmath::vec2(x, y); }
 
-#include "thirdparty/imgui/src/imgui.h"
-#include "thirdparty/imgui/src/backends/imgui_impl_vulkan.h"
+#include "../thirdparty/imgui/src/imgui.h"
+#include "../thirdparty/imgui/src/backends/imgui_impl_vulkan.h"
 
 inline ImTextureID make_texture_id(VkDescriptorSet ds)
 {

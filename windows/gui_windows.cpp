@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 // SPDX-FileCopyrightText: Copyright (c) 2021-2025 Chris Dragan
 
-#include "../main_windows.h"
+#include "../core/main_windows.h"
 
 #include "../thirdparty/imgui/src/backends/imgui_impl_win32.h"
 

@@ -3,11 +3,11 @@
 
 #include "sculptor_materials.h"
 
-#include "../minivulkan.h"
-#include "../mstdc.h"
+#include "../core/minivulkan.h"
+#include "../core/mstdc.h"
 
 #include "sculptor_shaders.h"
-#include "../shaders.h"
+#include "../core/shaders.h"
 
 VkDescriptorSetLayout Sculptor::desc_set_layout[3];
 VkPipelineLayout      Sculptor::material_layout;

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 // SPDX-FileCopyrightText: Copyright (c) 2021-2025 Chris Dragan
 
-#include "../mstdc.h"
+#include "../core/mstdc.h"
 
 #include <assert.h>
 #include <stdarg.h>

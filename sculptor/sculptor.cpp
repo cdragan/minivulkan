@@ -4,16 +4,16 @@
 #include "sculptor_materials.h"
 #include "sculptor_geom_edit.h"
 
-#include "../d_printf.h"
-#include "../gui.h"
-#include "../gui_imgui.h"
-#include "../memory_heap.h"
-#include "../minivulkan.h"
-#include "../mstdc.h"
-#include "../vmath.h"
+#include "../core/d_printf.h"
+#include "../core/gui.h"
+#include "../core/gui_imgui.h"
+#include "../core/memory_heap.h"
+#include "../core/minivulkan.h"
+#include "../core/mstdc.h"
+#include "../core/vmath.h"
 
 #include "sculptor_shaders.h"
-#include "../shaders.h"
+#include "../core/shaders.h"
 
 #include <math.h>
 #include <stdio.h>

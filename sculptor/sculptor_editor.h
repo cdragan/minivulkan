@@ -3,8 +3,8 @@
 
 #pragma once
 
-#include "../vmath.h"
-#include "../vulkan_functions.h"
+#include "../core/vmath.h"
+#include "../core/vulkan_functions.h"
 #include <stdint.h>
 
 #ifdef __APPLE__

@@ -3,7 +3,7 @@
 
 #include "sculptor_geometry.h"
 
-#include "../mstdc.h"
+#include "../core/mstdc.h"
 
 constexpr uint32_t tess_level           = 3; // TODO
 

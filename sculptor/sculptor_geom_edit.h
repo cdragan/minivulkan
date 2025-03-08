@@ -3,9 +3,9 @@
 
 #include "sculptor_editor.h"
 #include "sculptor_geometry.h"
-#include "../resource.h"
-#include "../minivulkan.h"
-#include "../vmath.h"
+#include "../core/resource.h"
+#include "../core/minivulkan.h"
+#include "../core/vmath.h"
 
 namespace Sculptor {
 

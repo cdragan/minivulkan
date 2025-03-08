@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2021-2025 Chris Dragan
 
 #include "sculptor_editor.h"
-#include "../gui_imgui.h"
+#include "../core/gui_imgui.h"
 
 #include <stdio.h>
 

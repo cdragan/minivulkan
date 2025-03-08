@@ -3,15 +3,15 @@
 
 #include "example.h"
 
-#include "../gui.h"
-#include "../host_filler.h"
-#include "../memory_heap.h"
-#include "../minivulkan.h"
-#include "../mstdc.h"
-#include "../vmath.h"
+#include "../core/gui.h"
+#include "../core/host_filler.h"
+#include "../core/memory_heap.h"
+#include "../core/minivulkan.h"
+#include "../core/mstdc.h"
+#include "../core/vmath.h"
 
 #include "example_shaders.h"
-#include "../shaders.h"
+#include "../core/shaders.h"
 
 const char app_name[] = "minivulkan example";
 

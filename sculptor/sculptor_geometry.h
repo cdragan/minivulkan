@@ -3,7 +3,7 @@
 
 #pragma once
 
-#include "../resource.h"
+#include "../core/resource.h"
 
 namespace Sculptor {
 

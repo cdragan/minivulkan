@@ -4,13 +4,13 @@
 #include "sculptor_geom_edit.h"
 #include "sculptor_geometry.h"
 #include "sculptor_materials.h"
-#include "../d_printf.h"
-#include "../gui_imgui.h"
-#include "../load_png.h"
-#include "../mstdc.h"
+#include "../core/d_printf.h"
+#include "../core/gui_imgui.h"
+#include "../core/load_png.h"
+#include "../core/mstdc.h"
 
 #include "sculptor_shaders.h"
-#include "../shaders.h"
+#include "../core/shaders.h"
 
 #include <stdio.h>
 

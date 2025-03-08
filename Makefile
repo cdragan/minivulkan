@@ -103,16 +103,16 @@ ASM_FROM_SRC = $(addsuffix .$(asm_suffix), $(addprefix $(out_dir)/,$(notdir $1))
 ##############################################################################
 # Sources
 
-lib_src_files += mstdc.cpp
-lib_src_files += rng.cpp
-lib_src_files += vmath.cpp
+lib_src_files += core/mstdc.cpp
+lib_src_files += core/rng.cpp
+lib_src_files += core/vmath.cpp
 
-threed_src_files += host_filler.cpp
-threed_src_files += memory_heap.cpp
-threed_src_files += minivulkan.cpp
-threed_src_files += resource.cpp
-threed_src_files += shaders.cpp
-threed_src_files += sound.cpp
+threed_src_files += core/host_filler.cpp
+threed_src_files += core/memory_heap.cpp
+threed_src_files += core/minivulkan.cpp
+threed_src_files += core/resource.cpp
+threed_src_files += core/shaders.cpp
+threed_src_files += core/sound.cpp
 
 ifeq ($(UNAME), Linux)
     ifeq ($(wayland), 1)
@@ -144,16 +144,16 @@ ifeq ($(UNAME), Windows)
     endif
 endif
 
-vmath_unit_src_files += vmath_unit.cpp
+vmath_unit_src_files += core/vmath_unit.cpp
 
-threed_gui_src_files += gui.cpp
-threed_gui_src_files += memory_heap_gui.cpp
-threed_gui_src_files += resource_gui.cpp
-threed_gui_src_files += gui_config.cpp
-threed_gui_src_files += load_png.cpp
+threed_gui_src_files += core/gui.cpp
+threed_gui_src_files += core/memory_heap_gui.cpp
+threed_gui_src_files += core/resource_gui.cpp
+threed_gui_src_files += core/gui_config.cpp
+threed_gui_src_files += core/load_png.cpp
 
-threed_nogui_src_files += nogui.cpp
-threed_nogui_src_files += memory_heap_nogui.cpp
+threed_nogui_src_files += core/nogui.cpp
+threed_nogui_src_files += core/memory_heap_nogui.cpp
 
 spirv_encode_src_files += tools/spirv_encode.cpp
 
