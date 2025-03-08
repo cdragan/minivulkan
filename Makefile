@@ -116,16 +116,16 @@ threed_src_files += sound.cpp
 
 ifeq ($(UNAME), Linux)
     ifeq ($(wayland), 1)
-        threed_src_files       += main_linux_wayland.cpp
+        threed_src_files       += linux/main_linux_wayland.cpp
         threed_src_files       += linux/xdg-shell.c
-        threed_gui_src_files   += gui_linux_wayland.cpp
-        threed_nogui_src_files += nogui_linux_wayland.cpp
+        threed_gui_src_files   += linux/gui_linux_wayland.cpp
+        threed_nogui_src_files += linux/nogui_linux_wayland.cpp
     else
-        threed_src_files       += main_linux_xcb.cpp
-        threed_gui_src_files   += gui_linux_xcb.cpp
-        threed_nogui_src_files += nogui_linux_xcb.cpp
+        threed_src_files       += linux/main_linux_xcb.cpp
+        threed_gui_src_files   += linux/gui_linux_xcb.cpp
+        threed_nogui_src_files += linux/nogui_linux_xcb.cpp
     endif
-    threed_src_files           += main_linux.cpp
+    threed_src_files           += linux/main_linux.cpp
 endif
 
 ifeq ($(UNAME), Darwin)
@@ -549,14 +549,11 @@ $(foreach file, $(all_gui_src_files) $(imgui_src_files), $(call OBJ_FROM_SRC, $(
 $(call OBJ_FROM_SRC, load_png.cpp): CFLAGS += -Ithirdparty/libpng
 
 ifeq ($(UNAME), Linux)
-linux/xdg-shell.h: | linux
+linux/xdg-shell.h:
 	wayland-scanner client-header /usr/share/wayland-protocols/stable/xdg-shell/xdg-shell.xml $@
 
-linux/xdg-shell.c: | linux
+linux/xdg-shell.c:
 	wayland-scanner private-code /usr/share/wayland-protocols/stable/xdg-shell/xdg-shell.xml $@
-
-linux:
-	mkdir -p $@
 
 $(call OBJ_FROM_SRC, main_linux_wayland.cpp): linux/xdg-shell.h
 endif
