@@ -14,7 +14,7 @@ struct vertex_data {
     uint z;
 };
 
-layout(set = 2, binding = 3) buffer object_vertices {
+layout(set = 2, binding = 3) readonly buffer object_vertices {
     vertex_data vertices[];
 };
 

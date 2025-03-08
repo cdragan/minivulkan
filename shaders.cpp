@@ -95,6 +95,8 @@ VkShaderModule load_shader(uint8_t* shader)
         const VkResult res = CHK(vkCreateShaderModule(vk_dev, &create_info, nullptr, shader_module));
         if (res != VK_SUCCESS)
             return VK_NULL_HANDLE;
+
+        set_vk_object_name(VK_OBJECT_TYPE_SHADER_MODULE, *shader_module, "shader");
     }
 
     return *shader_module;
