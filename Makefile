@@ -46,7 +46,7 @@ endif
 
 # On Linux, default to Wayland if available, otherwise fall back to XCB
 ifeq ($(UNAME), Linux)
-    ifeq (true,$(shell ./have_wayland $(CC)))
+    ifeq (true,$(shell linux/have_wayland $(CC)))
         wayland ?= 0 # Disable for now until it works
     else
         wayland ?= 0
