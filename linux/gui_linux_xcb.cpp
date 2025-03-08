@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: MIT
 // SPDX-FileCopyrightText: Copyright (c) 2021-2024 Chris Dragan
 
-#include "d_printf.h"
+#include "../d_printf.h"
 #include "main_linux.h"
 
-#include "thirdparty/imgui/src/imgui.h"
+#include "../thirdparty/imgui/src/imgui.h"
 
 #include <assert.h>
 #include <stdlib.h>

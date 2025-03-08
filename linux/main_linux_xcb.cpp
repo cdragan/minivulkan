@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: MIT
 // SPDX-FileCopyrightText: Copyright (c) 2021-2024 Chris Dragan
 
-#include "d_printf.h"
-#include "gui.h"
+#include "../d_printf.h"
+#include "../gui.h"
 #include "main_linux.h"
-#include "minivulkan.h"
+#include "../minivulkan.h"
 
 #include <string.h>
 #include <unistd.h>

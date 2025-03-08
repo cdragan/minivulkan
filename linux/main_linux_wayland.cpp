@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: MIT
 // SPDX-FileCopyrightText: Copyright (c) 2021-2024 Chris Dragan
 
-#include "d_printf.h"
-#include "gui.h"
+#include "../d_printf.h"
+#include "../gui.h"
 #include "main_linux.h"
-#include "minivulkan.h"
+#include "../minivulkan.h"
 
 #include <string.h>
 #include <time.h>
@@ -12,7 +12,7 @@
 #include <dlfcn.h>
 #include <wayland-client-core.h>
 #include <wayland-client.h>
-#include "linux/xdg-shell.h" // generated file
+#include "xdg-shell.h" // generated file
 
 struct Window {
     wl_display*    display;
