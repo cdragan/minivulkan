@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// SPDX-FileCopyrightText: Copyright (c) 2021-2024 Chris Dragan
+// SPDX-FileCopyrightText: Copyright (c) 2021-2025 Chris Dragan
 
 #if defined(__x86_64__) || defined(_M_AMD64) || defined(__i386__) || defined(_M_IX86)
 
