@@ -131,6 +131,7 @@ endif
 ifeq ($(UNAME), Darwin)
     threed_src_files       += macos/main_macos.mm
     threed_gui_src_files   += macos/gui_macos.mm
+    threed_gui_src_files   += macos/realtime_audio_macos.mm
     threed_nogui_src_files += macos/nogui_macos.mm
 endif
 
@@ -388,6 +389,7 @@ ifeq ($(UNAME), Darwin)
     frameworks += Quartz
 
     gui_frameworks += GameController
+    gui_frameworks += AudioToolbox
 
     LDFLAGS     += $(addprefix -framework ,$(frameworks))
     LDFLAGS_gui += $(addprefix -framework ,$(gui_frameworks))
