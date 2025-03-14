@@ -4,7 +4,6 @@
 #import <AppKit/AppKit.h>
 
 @interface VulkanViewController: NSViewController
-    - (id)initWithSize: (NSSize)aSize;
 @end
 
 void init_mouse_tracking(NSViewController *view_controller, NSView *view);

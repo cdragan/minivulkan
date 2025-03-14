@@ -86,7 +86,6 @@ bool play_sound_track()
 @end
 
 @interface AppDelegate: NSObject<NSApplicationDelegate>
-    - (void)createMenu;
 @end
 
 @implementation VulkanViewController
