@@ -131,7 +131,7 @@ endif
 ifeq ($(UNAME), Darwin)
     threed_src_files       += macos/main_macos.mm
     threed_gui_src_files   += macos/gui_macos.mm
-    threed_gui_src_files   += macos/realtime_audio_macos.mm
+    threed_gui_src_files   += macos/realtime_synth_macos.mm
     threed_nogui_src_files += macos/nogui_macos.mm
 endif
 

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 // SPDX-FileCopyrightText: Copyright (c) 2021-2025 Chris Dragan
 
-#include "../core/realtime_audio.h"
+#include "../core/realtime_synth.h"
 #import <AudioToolbox/AudioToolbox.h>
 #import <AVFoundation/AVFoundation.h>
 #include "../core/d_printf.h"
@@ -19,8 +19,8 @@
                     error:                        (NSError**)                 outError
     {
         self = [super initWithComponentDescription: componentDescription
-                      options:                      0
-                      error:                        outError];
+                      options: 0
+                      error: outError];
         if (self) {
             m_busses = nil;
         }
@@ -62,18 +62,36 @@
         return ^AUAudioUnitStatus(AudioUnitRenderActionFlags* action_flags,
                                   const AudioTimeStamp*       timestamp,
                                   AUAudioFrameCount           num_frames,
-                                  NSInteger                   outputBusNumber,
-                                  AudioBufferList*            outputData,
-                                  const AURenderEvent*        realtimeEventListHead,
-                                  AURenderPullInputBlock      pullInputBlock)
+                                  NSInteger                   output_bus_number,
+                                  AudioBufferList*            output_data,
+                                  const AURenderEvent*        realtime_event_list_head,
+                                  AURenderPullInputBlock      pull_input_block)
         {
-            if (outputData->mNumberBuffers != 2)
+            if (output_data->mNumberBuffers != 2)
                 return noErr;
+
+            const AURenderEvent* event = realtime_event_list_head;
+            while (event) {
+                switch (event->head.eventType) {
+
+                    case AURenderEventMIDI:
+                        // TODO handle MIDI event
+                        break;
+
+                    case AURenderEventMIDISysEx:
+                        // TODO handle MIDI system exclusive event
+                        break;
+
+                    default:
+                        break;
+                }
+                event = event->head.next;
+            }
 
             // TODO render
 
-            float* const left_chan  = (float *)outputData->mBuffers[0].mData;
-            float* const right_chan = (float *)outputData->mBuffers[1].mData;
+            float* const left_chan  = (float *)output_data->mBuffers[0].mData;
+            float* const right_chan = (float *)output_data->mBuffers[1].mData;
 
             for (AUAudioFrameCount i = 0; i < num_frames; i++) {
                 static float phase = 0;
@@ -86,8 +104,8 @@
                     phase -= 2.0f * vmath::pi;
             }
 
-            outputData->mBuffers[0].mDataByteSize = num_frames * sizeof(float);
-            outputData->mBuffers[1].mDataByteSize = num_frames * sizeof(float);
+            output_data->mBuffers[0].mDataByteSize = num_frames * sizeof(float);
+            output_data->mBuffers[1].mDataByteSize = num_frames * sizeof(float);
 
             return noErr;
         };
@@ -95,7 +113,7 @@
 
 @end
 
-bool init_real_time_audio()
+bool init_real_time_synth()
 {
     static const AudioComponentDescription synth_desc = {
         kAudioUnitType_MusicDevice,
@@ -105,7 +123,7 @@ bool init_real_time_audio()
         0
     };
 
-    [SynthAU registerSubclass:       SynthAU.class
+    [SynthAU registerSubclass:       [SynthAU class]
              asComponentDescription: synth_desc
              name:                   [[NSString alloc] initWithCString: app_name
                                                        encoding: NSASCIIStringEncoding]
@@ -117,34 +135,40 @@ bool init_real_time_audio()
         return true;
     }
 
+    static bool failed;
+    failed = false;
+
     [AVAudioUnit instantiateWithComponentDescription: synth_desc
                  options: 0
                  completionHandler:
-        ^(AVAudioUnit * _Nullable audioUnit, NSError * _Nullable error)
+        ^(AVAudioUnit * _Nullable audio_unit, NSError * _Nullable error)
         {
             if (error) {
                 d_printf("Failed instantiate AVAudioUnit\n");
+                failed = true;
                 return;
             }
 
-            [engine attachNode: audioUnit];
+            [engine attachNode: audio_unit];
 
             AVAudioNode* output_node = engine.outputNode;
             if ( ! output_node) {
                 d_printf("Failed to attach output node\n");
+                failed = true;
                 return;
             }
 
-            [engine connect: audioUnit to: output_node format: nil];
+            [engine connect: audio_unit to: output_node format: nil];
 
-            NSError *startError;
-            [engine startAndReturnError: &startError];
-            if (startError) {
+            NSError* start_error = nil;
+            [engine startAndReturnError: &start_error];
+            if (start_error) {
                 d_printf("Failed to start AVAudioEngine\n");
+                failed = true;
                 return;
             }
         }
     ];
 
-    return true;
+    return ! failed;
 }

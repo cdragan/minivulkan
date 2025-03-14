@@ -5,4 +5,4 @@
 
 static constexpr uint32_t rt_sampling_rate = 44100;
 
-bool init_real_time_audio();
+bool init_real_time_synth();
