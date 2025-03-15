@@ -728,5 +728,15 @@ RETZERO:
             ret
         }
     }
+
+    __declspec(naked) void _ultof3()
+    {
+        __asm {
+            xorps    xmm0, xmm0
+            cvtsi2ss xmm0, DWORD PTR [esp + 8]
+            movss    DWORD PTR [esp+8], xmm0
+            ret
+        }
+    }
 #endif
 }
