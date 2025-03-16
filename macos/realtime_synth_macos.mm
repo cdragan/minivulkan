@@ -6,7 +6,8 @@
 #import <AVFoundation/AVFoundation.h>
 #include "../core/d_printf.h"
 #include "../core/minivulkan.h"
-#include "../core/vmath.h"
+
+static uint32_t actual_sampling_rate;
 
 @interface SynthAU: AUAudioUnit {
     AUAudioUnitBusArray* m_busses;
@@ -33,7 +34,6 @@
             AVAudioFormat* outputFormat = [[AVAudioFormat alloc]
                                                 initStandardFormatWithSampleRate: rt_sampling_rate
                                                 channels: 2];
-
             if ( ! outputFormat) {
                 d_printf("Failed to create AVAudioFormat\n");
                 return m_busses;
@@ -57,6 +57,34 @@
         return m_busses;
     }
 
+    - (BOOL)allocateRenderResourcesAndReturnError: (NSError**)out_error
+    {
+        if (![super allocateRenderResourcesAndReturnError: out_error])
+            return NO;
+
+        AVAudioFormat* outputFormat = m_busses[0].format;
+
+        if (outputFormat.channelCount != 2) {
+            d_printf("Unsupported output channel count %u\n", outputFormat.channelCount);
+            return NO;
+        }
+
+        if (outputFormat.interleaved) {
+            d_printf("Output channels are interleaved\n");
+            return NO;
+        }
+
+        if ( ! outputFormat.standard) {
+            d_printf("Output channel format is not float\n");
+            return NO;
+        }
+
+        actual_sampling_rate = static_cast<uint32_t>(outputFormat.sampleRate);
+        d_printf("Sampling rate %u Hz\n", actual_sampling_rate);
+
+        return YES;
+    }
+
     - (AUInternalRenderBlock)internalRenderBlock
     {
         return ^AUAudioUnitStatus(AudioUnitRenderActionFlags* action_flags,
@@ -67,6 +95,8 @@
                                   const AURenderEvent*        realtime_event_list_head,
                                   AURenderPullInputBlock      pull_input_block)
         {
+            assert(output_bus_number == 0);
+
             if (output_data->mNumberBuffers != 2)
                 return noErr;
 
@@ -88,21 +118,10 @@
                 event = event->head.next;
             }
 
-            // TODO render
-
-            float* const left_chan  = (float *)output_data->mBuffers[0].mData;
-            float* const right_chan = (float *)output_data->mBuffers[1].mData;
-
-            for (AUAudioFrameCount i = 0; i < num_frames; i++) {
-                static float phase = 0;
-                static const float frequency = 440.0f;
-
-                left_chan[i]  = sinf(phase);
-                right_chan[i] = sinf(phase + vmath::pi);
-                phase += 2.0f * vmath::pi * frequency / 44100.0f;
-                if (phase > 2.0f * vmath::pi)
-                    phase -= 2.0f * vmath::pi;
-            }
+            render_audio_buffer(actual_sampling_rate,
+                                num_frames,
+                                static_cast<float*>(output_data->mBuffers[0].mData),
+                                static_cast<float*>(output_data->mBuffers[1].mData));
 
             output_data->mBuffers[0].mDataByteSize = num_frames * sizeof(float);
             output_data->mBuffers[1].mDataByteSize = num_frames * sizeof(float);
@@ -113,7 +132,7 @@
 
 @end
 
-bool init_real_time_synth()
+bool init_real_time_synth_os()
 {
     static const AudioComponentDescription synth_desc = {
         kAudioUnitType_MusicDevice,
@@ -129,7 +148,7 @@ bool init_real_time_synth()
                                                        encoding: NSASCIIStringEncoding]
              version:                1];
 
-    AVAudioEngine* engine = [[AVAudioEngine alloc] init];
+    AVAudioEngine* const engine = [[AVAudioEngine alloc] init];
     if ( ! engine) {
         d_printf("Failed to create AVAudioEngine\n");
         return true;

@@ -6,3 +6,8 @@
 static constexpr uint32_t rt_sampling_rate = 44100;
 
 bool init_real_time_synth();
+
+void render_audio_buffer(uint32_t sampling_rate,
+                         uint32_t num_frames,
+                         float*   left_channel,
+                         float*   right_channel);
