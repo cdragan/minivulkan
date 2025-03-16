@@ -2,6 +2,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2021-2025 Chris Dragan
 
 #include "realtime_synth.h"
+#include "../core/d_printf.h"
+#include "../core/minivulkan.h"
 #include "../core/vmath.h"
 #include <math.h>
 
@@ -9,6 +11,11 @@ bool init_real_time_synth_os();
 
 bool init_real_time_synth()
 {
+    if (compute_family_index == no_queue_family) {
+        d_printf("No async compute queue available for synth\n");
+        return false;
+    }
+
     if ( ! init_real_time_synth_os())
         return false;
 

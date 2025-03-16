@@ -13,13 +13,17 @@ extern VkInstance                  vk_instance;
 extern VkSurfaceKHR                vk_surface;
 extern VkPhysicalDevice            vk_phys_dev;
 extern VkDevice                    vk_dev;
-extern uint32_t                    vk_queue_family_index;
+extern uint32_t                    graphics_family_index;
+extern uint32_t                    compute_family_index;
 extern VkSwapchainCreateInfoKHR    swapchain_create_info;
-extern VkQueue                     vk_queue;
+extern VkQueue                     vk_graphics_queue;
+extern VkQueue                     vk_compute_queue;
 extern uint32_t                    vk_num_swapchain_images;
 extern VkSurfaceCapabilitiesKHR    vk_surface_caps;
 extern VkExtent2D                  vk_window_extent;
 extern VkPhysicalDeviceProperties2 vk_phys_props;
+
+static constexpr uint32_t no_queue_family = ~0u;
 
 #define FEATURE_SETS \
     X(_shader_int8_features,   nullptr,                    VkPhysicalDeviceShaderFloat16Int8Features, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_FLOAT16_INT8_FEATURES) \

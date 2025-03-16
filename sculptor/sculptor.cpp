@@ -299,7 +299,7 @@ bool draw_frame(uint32_t image_idx, uint64_t time_ms, VkFence queue_fence, uint3
 
     submit_info.pCommandBuffers = &buf;
 
-    res = CHK(vkQueueSubmit(vk_queue, 1, &submit_info, queue_fence));
+    res = CHK(vkQueueSubmit(vk_graphics_queue, 1, &submit_info, queue_fence));
     if (res != VK_SUCCESS)
         return false;
 

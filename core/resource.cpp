@@ -79,7 +79,7 @@ bool Image::allocate(const ImageInfo& image_info, Description desc)
         0,                  // usage
         VK_SHARING_MODE_EXCLUSIVE,
         1,                  // queueFamilyIndexCount
-        &vk_queue_family_index,
+        &graphics_family_index,
         VK_IMAGE_LAYOUT_UNDEFINED
     };
     create_info.format        = image_info.format;
@@ -190,8 +190,8 @@ void Image::set_image_layout(VkCommandBuffer buf, const Transition& transition)
 
     layout = transition.new_layout;
 
-    img_barrier.srcQueueFamilyIndex         = vk_queue_family_index;
-    img_barrier.dstQueueFamilyIndex         = vk_queue_family_index;
+    img_barrier.srcQueueFamilyIndex         = graphics_family_index;
+    img_barrier.dstQueueFamilyIndex         = graphics_family_index;
     img_barrier.image                       = image;
     img_barrier.subresourceRange.aspectMask = aspect;
     img_barrier.subresourceRange.levelCount = 1;
@@ -224,6 +224,9 @@ bool Buffer::allocate(Usage              heap_usage,
                       VkBufferUsageFlags usage,
                       Description        desc)
 {
+    const bool compute = !! (usage & VK_BUFFER_USAGE_ASYNC_COMPUTE_BIT);
+    usage &= ~static_cast<uint32_t>(VK_BUFFER_USAGE_ASYNC_COMPUTE_BIT);
+
     static VkBufferCreateInfo create_info = {
         VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
         nullptr,
@@ -232,10 +235,13 @@ bool Buffer::allocate(Usage              heap_usage,
         0,          // usage
         VK_SHARING_MODE_EXCLUSIVE,
         1,          // queueFamilyIndexCount
-        &vk_queue_family_index
+        nullptr
     };
     create_info.size  = size;
     create_info.usage = usage;
+
+    create_info.pQueueFamilyIndices = compute ? &compute_family_index
+                                              : &graphics_family_index;
 
     VkResult res = CHK(vkCreateBuffer(vk_dev, &create_info, nullptr, &buffer));
     if (res != VK_SUCCESS)

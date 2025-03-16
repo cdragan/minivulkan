@@ -9,6 +9,7 @@
 #include "mstdc.h"
 #include "resource.h"
 #include "vmath.h"
+#include "vulkan/vulkan_core.h"
 #include "vulkan_extensions.h"
 
 #ifndef NDEBUG
@@ -428,9 +429,8 @@ VkPhysicalDeviceProperties2 vk_phys_props = {
 
 static const float queue_priorities[] = { 1 };
 
-static constexpr uint32_t no_queue_family = ~0u;
-
-uint32_t vk_queue_family_index = no_queue_family;
+uint32_t graphics_family_index = no_queue_family;
+uint32_t compute_family_index  = no_queue_family;
 
 VkSwapchainCreateInfoKHR swapchain_create_info = {
     VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR,
@@ -555,27 +555,49 @@ static bool find_gpu()
             vkGetPhysicalDeviceQueueFamilyProperties(phys_dev, &num_queues, queues);
 
             uint32_t i_queue;
+            uint32_t num_graphics_queues = 0;
 
             for (i_queue = 0; i_queue < num_queues; i_queue++) {
 
-                if ( ! (queues[i_queue].queueFlags & VK_QUEUE_GRAPHICS_BIT))
-                    continue;
+                if (queues[i_queue].queueFlags & VK_QUEUE_GRAPHICS_BIT) {
 
-                VkBool32 supported = VK_FALSE;
+                    if ( ! num_graphics_queues) {
 
-                res = vkGetPhysicalDeviceSurfaceSupportKHR(phys_dev, i_queue, vk_surface, &supported);
+                        VkBool32 supported = VK_FALSE;
 
-                if (res != VK_SUCCESS || ! supported) {
-                    d_printf("Skip queue family %u which does not support vk surface\n", i_queue);
-                    continue;
+                        res = vkGetPhysicalDeviceSurfaceSupportKHR(phys_dev, i_queue, vk_surface, &supported);
+
+                        if (res != VK_SUCCESS || ! supported) {
+                            d_printf("Skip queue family %u which does not support vk surface\n", i_queue);
+                            continue;
+                        }
+
+                        graphics_family_index = i_queue;
+
+                        num_graphics_queues = queues[i_queue].queueCount;
+
+                        // Possibly use second graphics-capable queue in this family for async compute
+                        if (num_graphics_queues > 1)
+                            compute_family_index = i_queue;
+                    }
+                    // Possibly use another graphics-capable queue family for async compute
+                    else if (num_graphics_queues == 1 && compute_family_index == no_queue_family)
+                        compute_family_index = i_queue;
                 }
+                else if (queues[i_queue].queueFlags & VK_QUEUE_COMPUTE_BIT) {
+                    if ((compute_family_index == no_queue_family) ||
+                        // Prefer non-graphics-capable queue for async compute
+                        (queues[compute_family_index].queueFlags & VK_QUEUE_GRAPHICS_BIT)) {
 
-                vk_queue_family_index = i_queue;
-                break;
+                        compute_family_index = i_queue;
+                    }
+                }
             }
 
-            if (i_queue == num_queues)
+            if (graphics_family_index == no_queue_family) {
+                compute_family_index = no_queue_family;
                 continue;
+            }
 
             vk_phys_dev = phys_devices[i_dev];
             d_printf("Selected device %u: %s, supports Vulkan %u.%u\n",
@@ -592,7 +614,8 @@ static bool find_gpu()
 }
 
 VkDevice           vk_dev                   = VK_NULL_HANDLE;
-VkQueue            vk_queue                 = VK_NULL_HANDLE;
+VkQueue            vk_graphics_queue        = VK_NULL_HANDLE;
+VkQueue            vk_compute_queue         = VK_NULL_HANDLE;
 static const char* vk_device_extensions[16];
 static uint32_t    vk_num_device_extensions = 0;
 
@@ -749,23 +772,34 @@ static bool create_device()
     if ( ! check_device_features_internal())
         return false;
 
-    static VkDeviceQueueCreateInfo queue_create_info = {
-        VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
-        nullptr,
-        0,
-        no_queue_family, // queueFamilyIndex
-        1,               // queueCount
-        queue_priorities
+    static VkDeviceQueueCreateInfo queue_create_info[2] = {
+        {
+            VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
+            nullptr,
+            0,
+            no_queue_family, // queueFamilyIndex
+            1,               // queueCount
+            queue_priorities
+        },
+        {
+            VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
+            nullptr,
+            0,
+            no_queue_family, // queueFamilyIndex
+            1,               // queueCount
+            queue_priorities
+        }
     };
 
-    queue_create_info.queueFamilyIndex = vk_queue_family_index;
+    queue_create_info[0].queueFamilyIndex = graphics_family_index;
+    queue_create_info[1].queueFamilyIndex = compute_family_index;
 
     static VkDeviceCreateInfo dev_create_info = {
         VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
         &vk_features,
         0,
         1,
-        &queue_create_info,
+        queue_create_info,
         0,
         nullptr,
         0,       // enabledExtensionCount
@@ -775,6 +809,16 @@ static bool create_device()
 
     dev_create_info.enabledExtensionCount   = vk_num_device_extensions;
     dev_create_info.ppEnabledExtensionNames = vk_device_extensions;
+
+    const bool has_compute_queue = compute_family_index != no_queue_family;
+    const uint32_t compute_queue_idx =
+        (graphics_family_index == compute_family_index) ? 1 : 0;
+    if (has_compute_queue) {
+        if (compute_queue_idx)
+            queue_create_info[0].queueCount = 2;
+        else
+            dev_create_info.queueCreateInfoCount = 2;
+    }
 
     const VkResult res = CHK(vkCreateDevice(vk_phys_dev,
                                             &dev_create_info,
@@ -787,7 +831,12 @@ static bool create_device()
     if ( ! load_device_functions())
         return false;
 
-    vkGetDeviceQueue(vk_dev, vk_queue_family_index, 0, &vk_queue);
+    vkGetDeviceQueue(vk_dev, graphics_family_index, 0, &vk_graphics_queue);
+
+    if (has_compute_queue) {
+        vkGetDeviceQueue(vk_dev, compute_family_index, compute_queue_idx, &vk_compute_queue);
+        d_printf("Compute queue family %u index %u\n", compute_family_index, compute_queue_idx);
+    }
 
     return true;
 }
@@ -1052,9 +1101,9 @@ bool idle_queue()
 {
     VkResult res = VK_SUCCESS;
 
-    if (vk_queue) {
+    if (vk_graphics_queue) {
         d_printf("Idling queue\n");
-        res = CHK(vkQueueWaitIdle(vk_queue));
+        res = CHK(vkQueueWaitIdle(vk_graphics_queue));
     }
 
     return res == VK_SUCCESS;
@@ -1083,7 +1132,7 @@ bool allocate_command_buffers(CommandBuffersBase* bufs, uint32_t num_buffers)
         VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT
     };
 
-    create_info.queueFamilyIndex = vk_queue_family_index;
+    create_info.queueFamilyIndex = graphics_family_index;
 
     VkResult res = CHK(vkCreateCommandPool(vk_dev,
                                            &create_info,
@@ -1143,7 +1192,7 @@ bool send_to_device_and_wait(VkCommandBuffer cmd_buf)
         nullptr             // pSignalSemaphores
     };
 
-    res = CHK(vkQueueSubmit(vk_queue, 1, &submit_info, vk_fens[fen_copy_to_dev]));
+    res = CHK(vkQueueSubmit(vk_graphics_queue, 1, &submit_info, vk_fens[fen_copy_to_dev]));
     if (res != VK_SUCCESS)
         return false;
 
@@ -1407,7 +1456,7 @@ bool draw_frame()
     present_info.pImageIndices   = &image_idx;
     present_info.pWaitSemaphores = &vk_sems[sem_id + sem_present];
 
-    res = CHK(vkQueuePresentKHR(vk_queue, &present_info));
+    res = CHK(vkQueuePresentKHR(vk_graphics_queue, &present_info));
 
     if (res == VK_SUBOPTIMAL_KHR || res == VK_ERROR_OUT_OF_DATE_KHR)
         return update_resolution();

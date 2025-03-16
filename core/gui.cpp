@@ -247,8 +247,8 @@ bool init_gui(GuiClear clear)
     init_info.Instance        = vk_instance;
     init_info.PhysicalDevice  = vk_phys_dev;
     init_info.Device          = vk_dev;
-    init_info.QueueFamily     = vk_queue_family_index;
-    init_info.Queue           = vk_queue;
+    init_info.QueueFamily     = graphics_family_index;
+    init_info.Queue           = vk_graphics_queue;
     init_info.DescriptorPool  = desc_pool;
     init_info.MinImageCount   = vk_num_swapchain_images;
     init_info.ImageCount      = vk_num_swapchain_images;
@@ -289,7 +289,7 @@ bool init_gui(GuiClear clear)
         nullptr             // pSignalSemaphores
     };
 
-    res = CHK(vkQueueSubmit(vk_queue, 1, &submit_info, vk_fens[fen_copy_to_dev]));
+    res = CHK(vkQueueSubmit(vk_graphics_queue, 1, &submit_info, vk_fens[fen_copy_to_dev]));
     if (res != VK_SUCCESS)
         return false;
 

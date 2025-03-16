@@ -126,6 +126,10 @@ class Image: public Resource {
         uint32_t           pitch      = 0;
 };
 
+enum {
+    VK_BUFFER_USAGE_ASYNC_COMPUTE_BIT = 0x02000000
+};
+
 class Buffer: public Resource {
     public:
         constexpr Buffer()               = default;
