@@ -7,8 +7,6 @@
 #include "../core/d_printf.h"
 #include "../core/minivulkan.h"
 
-static uint32_t actual_sampling_rate;
-
 @interface SynthAU: AUAudioUnit {
     AUAudioUnitBusArray* m_busses;
 }
@@ -79,8 +77,11 @@ static uint32_t actual_sampling_rate;
             return NO;
         }
 
-        actual_sampling_rate = static_cast<uint32_t>(outputFormat.sampleRate);
-        d_printf("Sampling rate %u Hz\n", actual_sampling_rate);
+        const uint32_t sampling_rate = static_cast<uint32_t>(outputFormat.sampleRate);
+        if (sampling_rate != rt_sampling_rate) {
+            d_printf("OS changed sampling rate to %u Hz - unsupported\n", sampling_rate);
+            return NO;
+        }
 
         return YES;
     }
@@ -118,8 +119,7 @@ static uint32_t actual_sampling_rate;
                 event = event->head.next;
             }
 
-            render_audio_buffer(actual_sampling_rate,
-                                num_frames,
+            render_audio_buffer(num_frames,
                                 static_cast<float*>(output_data->mBuffers[0].mData),
                                 static_cast<float*>(output_data->mBuffers[1].mData));
 
