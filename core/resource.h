@@ -62,6 +62,7 @@ class Resource {
         void* get_raw_ptr(VkDeviceSize offset) const;
         bool flush_range(VkDeviceSize offset, VkDeviceSize size);
         bool flush_whole();
+        bool invalidate_whole();
 
         MemoryHeap*  owning_heap = nullptr;
         VkDeviceSize heap_offset = 0;
@@ -147,6 +148,7 @@ class Buffer: public Resource {
         void cpu_fill(const void* data, uint32_t size);
         bool flush() { return flush_whole(); }
         bool flush(VkDeviceSize idx, VkDeviceSize stride);
+        bool invalidate() { return invalidate_whole(); }
         void free(); // GUI only
 
     private:

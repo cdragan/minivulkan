@@ -60,6 +60,31 @@ bool Resource::flush_whole()
     return flush_range(0, alloc_size);
 }
 
+bool Resource::invalidate_whole()
+{
+    assert(owning_heap);
+
+    if ( ! owning_heap->get_host_ptr())
+        return true;
+
+    const VkDeviceSize alignment = vk_phys_props.properties.limits.nonCoherentAtomSize;
+    const VkDeviceSize begin     = heap_offset;
+
+    static VkMappedMemoryRange range = {
+        VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE,
+        nullptr,
+        VK_NULL_HANDLE,
+        0,
+        0
+    };
+    range.memory = owning_heap->get_memory();
+    range.offset = mstd::align_down(begin, alignment);
+    range.size   = mstd::align_up(alloc_size, alignment);
+
+    const VkResult res = CHK(vkInvalidateMappedMemoryRanges(vk_dev, 1, &range));
+    return res;
+}
+
 bool Image::allocate(const ImageInfo& image_info, Description desc)
 {
     const bool host_access = (image_info.heap_usage == Usage::host_only) ||

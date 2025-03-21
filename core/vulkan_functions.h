@@ -86,6 +86,7 @@
     X(vkAllocateMemory) \
     X(vkMapMemory) \
     X(vkFlushMappedMemoryRanges) \
+    X(vkInvalidateMappedMemoryRanges) \
     X(vkCreateImage) \
     X(vkDestroyImage) \
     X(vkGetImageMemoryRequirements) \
@@ -193,6 +194,7 @@ enum e_device_functions {
 #define vkAllocateMemory                          SELECT_VK_FUNCTION(device,   vkAllocateMemory)
 #define vkMapMemory                               SELECT_VK_FUNCTION(device,   vkMapMemory)
 #define vkFlushMappedMemoryRanges                 SELECT_VK_FUNCTION(device,   vkFlushMappedMemoryRanges)
+#define vkInvalidateMappedMemoryRanges            SELECT_VK_FUNCTION(device,   vkInvalidateMappedMemoryRanges)
 #define vkCreateImage                             SELECT_VK_FUNCTION(device,   vkCreateImage)
 #define vkDestroyImage                            SELECT_VK_FUNCTION(device,   vkDestroyImage)
 #define vkGetImageMemoryRequirements              SELECT_VK_FUNCTION(device,   vkGetImageMemoryRequirements)
