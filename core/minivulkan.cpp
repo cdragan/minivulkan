@@ -9,7 +9,6 @@
 #include "mstdc.h"
 #include "resource.h"
 #include "vmath.h"
-#include "vulkan/vulkan_core.h"
 #include "vulkan_extensions.h"
 
 #ifndef NDEBUG

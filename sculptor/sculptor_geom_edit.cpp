@@ -15,7 +15,6 @@
 #include <stdio.h>
 
 #include "toolbar.png.h"
-#include "vulkan/vulkan_core.h"
 
 /*
 

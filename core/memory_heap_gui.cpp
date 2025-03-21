@@ -5,7 +5,6 @@
 
 #include "d_printf.h"
 #include "mstdc.h"
-#include "vulkan/vulkan_core.h"
 
 #include <assert.h>
 
