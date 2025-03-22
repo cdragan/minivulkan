@@ -110,6 +110,7 @@ extern VkSemaphore vk_sems[num_semaphores];
 enum eFenceId {
     fen_submit,
     fen_copy_to_dev = fen_submit + max_swapchain_size,
+    fen_compute,
 
     num_fences
 };
@@ -135,12 +136,17 @@ struct CommandBuffersBase {
 };
 
 bool reset_and_begin_command_buffer(VkCommandBuffer cmd_buf);
-bool send_to_device_and_wait(VkCommandBuffer cmd_buf);
+bool send_to_device_and_wait(VkCommandBuffer cmd_buf, VkQueue queue, eFenceId fence);
 
-bool allocate_command_buffers(CommandBuffersBase* bufs, uint32_t num_buffers);
-inline bool allocate_command_buffers_once(CommandBuffersBase* bufs, uint32_t num_buffers)
+bool allocate_command_buffers(CommandBuffersBase* bufs,
+                              uint32_t            num_buffers,
+                              uint32_t            queue_family_index = graphics_family_index);
+
+inline bool allocate_command_buffers_once(CommandBuffersBase* bufs,
+                                          uint32_t            num_buffers,
+                                          uint32_t            queue_family_index = graphics_family_index)
 {
-    return bufs->pool ? true : allocate_command_buffers(bufs, num_buffers);
+    return bufs->pool ? true : allocate_command_buffers(bufs, num_buffers, queue_family_index);
 }
 
 template<uint32_t num_buffers>
@@ -154,6 +160,8 @@ struct CommandBuffers: public CommandBuffersBase {
 template<>
 struct CommandBuffers<1>: public CommandBuffersBase {
     static constexpr uint32_t size() { return 1; }
+
+    operator VkCommandBuffer() const { return bufs[0]; }
 };
 
 template<uint32_t num_buffers>

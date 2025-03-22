@@ -12,6 +12,8 @@
 namespace {
     Buffer host_audio_output_buf;
 
+    CommandBuffers<1> audio_cmd_buf;
+
     constexpr uint32_t rt_step_samples = 256;
 }
 
@@ -28,13 +30,18 @@ bool init_real_time_synth()
         return false;
 
     // TODO - use project-dependent audio length
-    constexpr VkDeviceSize buf_size = mstd::align_up(rt_sampling_rate * uint32_t(sizeof(float)) * 2U, rt_step_samples);
+    constexpr uint32_t seconds = 1;
+    constexpr uint32_t sample_size = sizeof(float);
+    constexpr VkDeviceSize buf_size = mstd::align_up(rt_sampling_rate * 2U * sample_size * seconds, rt_step_samples);
 
     if ( ! host_audio_output_buf.allocate(Usage::host_only,
                                           buf_size,
                                           VK_FORMAT_UNDEFINED,
                                           VK_BUFFER_USAGE_TRANSFER_DST_BIT,
                                           { "host audio buffer" }))
+        return false;
+
+    if ( ! allocate_command_buffers_once(&audio_cmd_buf, 1, compute_family_index))
         return false;
 
     return true;
@@ -170,6 +177,48 @@ template<typename T, bool interleaved>
 static void render_audio(uint32_t num_samples)
 {
     assert(num_samples % rt_step_samples == 0 && num_samples > 0);
+
+    VkResult res = CHK(vkResetCommandBuffer(audio_cmd_buf, 0));
+    if (res != VK_SUCCESS)
+        return;
+
+    static VkCommandBufferBeginInfo begin_info = {
+        VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+        nullptr,
+        VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
+        nullptr
+    };
+
+    res = CHK(vkBeginCommandBuffer(audio_cmd_buf, &begin_info));
+    if (res != VK_SUCCESS)
+        return;
+
+    // TODO 256 samples at a time
+
+    res = CHK(vkEndCommandBuffer(audio_cmd_buf));
+    if (res != VK_SUCCESS)
+        return;
+
+    static const VkPipelineStageFlags dst_stage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+
+    static VkSubmitInfo submit_info = {
+        VK_STRUCTURE_TYPE_SUBMIT_INFO,
+        nullptr,
+        0,                  // waitSemaphoreCount
+        nullptr,            // pWaitSemaphored
+        &dst_stage,         // pWaitDstStageMask
+        1,                  // commandBufferCount
+        audio_cmd_buf.bufs,
+        0,                  // signalSemaphoreCount
+        nullptr             // pSignalSemaphores
+    };
+
+    res = CHK(vkQueueSubmit(vk_compute_queue, 1, &submit_info, vk_fens[fen_compute]));
+    if (res != VK_SUCCESS)
+        return;
+
+    if ( ! wait_and_reset_fence(fen_compute))
+        return;
 
     host_audio_output_buf.invalidate();
 

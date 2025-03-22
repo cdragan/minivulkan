@@ -1121,7 +1121,7 @@ static bool update_resolution()
     return true;
 }
 
-bool allocate_command_buffers(CommandBuffersBase* bufs, uint32_t num_buffers)
+bool allocate_command_buffers(CommandBuffersBase* bufs, uint32_t num_buffers, uint32_t queue_family_index)
 {
     assert(bufs->pool == VK_NULL_HANDLE);
 
@@ -1131,7 +1131,7 @@ bool allocate_command_buffers(CommandBuffersBase* bufs, uint32_t num_buffers)
         VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT
     };
 
-    create_info.queueFamilyIndex = graphics_family_index;
+    create_info.queueFamilyIndex = queue_family_index;
 
     VkResult res = CHK(vkCreateCommandPool(vk_dev,
                                            &create_info,
@@ -1171,7 +1171,7 @@ bool reset_and_begin_command_buffer(VkCommandBuffer cmd_buf)
     return res == VK_SUCCESS;
 }
 
-bool send_to_device_and_wait(VkCommandBuffer cmd_buf)
+bool send_to_device_and_wait(VkCommandBuffer cmd_buf, VkQueue queue, eFenceId fence)
 {
     VkResult res = CHK(vkEndCommandBuffer(cmd_buf));
     if (res != VK_SUCCESS)
@@ -1191,7 +1191,7 @@ bool send_to_device_and_wait(VkCommandBuffer cmd_buf)
         nullptr             // pSignalSemaphores
     };
 
-    res = CHK(vkQueueSubmit(vk_graphics_queue, 1, &submit_info, vk_fens[fen_copy_to_dev]));
+    res = CHK(vkQueueSubmit(queue, 1, &submit_info, vk_fens[fence]));
     if (res != VK_SUCCESS)
         return false;
 

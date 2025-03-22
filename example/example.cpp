@@ -490,7 +490,7 @@ static bool create_cube(Buffer* vertex_buffer, Buffer* index_buffer)
                               sizeof(indices)))
         return false;
 
-    return send_to_device_and_wait(cmd_buf.bufs[0]);
+    return send_to_device_and_wait(cmd_buf.bufs[0], vk_graphics_queue, fen_copy_to_dev);
 }
 
 static bool create_cubic_patch(Buffer* vertex_buffer, Buffer* index_buffer)
@@ -537,7 +537,7 @@ static bool create_cubic_patch(Buffer* vertex_buffer, Buffer* index_buffer)
                               sizeof(indices)))
         return false;
 
-    return send_to_device_and_wait(cmd_buf.bufs[0]);
+    return send_to_device_and_wait(cmd_buf.bufs[0], vk_graphics_queue, fen_copy_to_dev);
 }
 
 static bool create_quadratic_patch(Buffer* vertex_buffer, Buffer* index_buffer)
@@ -717,7 +717,7 @@ static bool create_quadratic_patch(Buffer* vertex_buffer, Buffer* index_buffer)
                               sizeof(indices)))
         return false;
 
-    return send_to_device_and_wait(cmd_buf.bufs[0]);
+    return send_to_device_and_wait(cmd_buf.bufs[0], vk_graphics_queue, fen_copy_to_dev);
 }
 
 bool init_assets()
