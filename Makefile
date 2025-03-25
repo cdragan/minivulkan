@@ -100,6 +100,8 @@ OBJ_FROM_SRC = $(addsuffix .$(o_suffix), $(addprefix $(out_dir)/,$(basename $(no
 
 ASM_FROM_SRC = $(addsuffix .$(asm_suffix), $(addprefix $(out_dir)/,$(notdir $1)))
 
+TARGET_FILES = $(call OBJ_FROM_SRC, $1) $(call ASM_FROM_SRC, $1)
+
 ##############################################################################
 # Sources
 
@@ -320,7 +322,7 @@ ifeq ($(UNAME), Windows)
     LINKER_OUTPUT   = -out:$1
 
     ifeq ($(debug), 0)
-        $(call OBJ_FROM_SRC, mstdc_windows.cpp): CFLAGS += -GL-
+        $(call TARGET_FILES, mstdc_windows.cpp): CFLAGS += -GL-
     endif
 else
     WFLAGS += -Wall -Wextra -Wno-unused-parameter -Wunused -Wno-missing-field-initializers
@@ -543,13 +545,13 @@ endef
 
 $(foreach file, $(filter %.cpp, $(all_src_files)), $(eval $(call ASM_RULE,$(file))))
 
-$(foreach file, $(filter-out $(imgui_src_files) $(libpng_src_files) $(zlib_src_files), $(all_src_files)), $(call OBJ_FROM_SRC, $(file))): CFLAGS += $(WFLAGS)
+$(foreach file, $(filter-out $(imgui_src_files) $(libpng_src_files) $(zlib_src_files), $(all_src_files)), $(call TARGET_FILES, $(file))): CFLAGS += $(WFLAGS)
 
-$(foreach file, $(all_gui_src_files), $(call OBJ_FROM_SRC, $(file))): CFLAGS += -Ithirdparty/imgui/src
+$(foreach file, $(all_gui_src_files), $(call TARGET_FILES, $(file))): CFLAGS += -Ithirdparty/imgui/src
 
-$(foreach file, $(all_gui_src_files) $(imgui_src_files), $(call OBJ_FROM_SRC, $(file))): CFLAGS += -DIMGUI_DISABLE_OBSOLETE_KEYIO -DIMGUI_DISABLE_OBSOLETE_FUNCTIONS
+$(foreach file, $(all_gui_src_files) $(imgui_src_files), $(call TARGET_FILES, $(file))): CFLAGS += -DIMGUI_DISABLE_OBSOLETE_KEYIO -DIMGUI_DISABLE_OBSOLETE_FUNCTIONS
 
-$(call OBJ_FROM_SRC, load_png.cpp): CFLAGS += -Ithirdparty/libpng
+$(call TARGET_FILES, load_png.cpp): CFLAGS += -Ithirdparty/libpng
 
 ifeq ($(UNAME), Linux)
 linux/xdg-shell.h:
@@ -558,7 +560,7 @@ linux/xdg-shell.h:
 linux/xdg-shell.c:
 	wayland-scanner private-code /usr/share/wayland-protocols/stable/xdg-shell/xdg-shell.xml $@
 
-$(call OBJ_FROM_SRC, main_linux_wayland.cpp): linux/xdg-shell.h
+$(call TARGET_FILES, main_linux_wayland.cpp): linux/xdg-shell.h
 endif
 
 shaders_out_dir := $(out_dir_base)/shaders
@@ -620,7 +622,7 @@ endef
 $(foreach shader, $(all_shader_files), $(eval $(call SHADER_RULE,$(shader))))
 
 define PROJECT_SHADERS
-$$(call OBJ_FROM_SRC, $$(project_$1_src_files)): $(gen_headers_dir)/$1_shaders.h
+$$(call TARGET_FILES, $$(project_$1_src_files)): $(gen_headers_dir)/$1_shaders.h
 
 gen_$1_shader_headers := $$(addprefix $(shaders_out_dir)/,$$(addsuffix .h,$$(basename $$(notdir $$(project_$1_shader_files)))))
 
@@ -630,8 +632,8 @@ $(gen_headers_dir)/$1_shaders.h: $(make_shaders_h) $1/makefile.mk | $(gen_header
 $(gen_headers_dir)/$1_shaders.cpp: $(make_shaders_cpp) $1/makefile.mk | $(gen_headers_dir)
 	$(make_shaders_cpp) $$@ $$(patsubst %.glsl,%.h,$$(project_$1_shader_files))
 
-$$(call OBJ_FROM_SRC, $1_shaders.cpp): $$(gen_$1_shader_headers)
-$$(call OBJ_FROM_SRC, $1_shaders.cpp): CFLAGS += -I$(shaders_out_dir)
+$$(call TARGET_FILES, $1_shaders.cpp): $$(gen_$1_shader_headers)
+$$(call TARGET_FILES, $1_shaders.cpp): CFLAGS += -I$(shaders_out_dir)
 endef
 
 $(foreach project, $(projects), $(eval $(call PROJECT_SHADERS,$(project))))
@@ -646,8 +648,8 @@ endef
 
 $(foreach file, $(all_bin_to_header_files), $(eval $(call MAKE_HEADER_FROM_BINARY,$(file))))
 
-$(foreach file, $(all_gui_src_files), $(call OBJ_FROM_SRC, $(file))): CFLAGS += -I$(gen_headers_dir)
-$(foreach file, $(all_gui_src_files), $(call OBJ_FROM_SRC, $(file))): $(foreach file, $(all_bin_to_header_files), $(addsuffix .h,$(addprefix $(gen_headers_dir)/,$(notdir $(file)))))
+$(foreach file, $(all_gui_src_files), $(call TARGET_FILES, $(file))): CFLAGS += -I$(gen_headers_dir)
+$(foreach file, $(all_gui_src_files), $(call TARGET_FILES, $(file))): $(foreach file, $(all_bin_to_header_files), $(addsuffix .h,$(addprefix $(gen_headers_dir)/,$(notdir $(file)))))
 
 $(eval $(call LINK_RULE,$(call CMDLINE_PATH,vmath_unit),$(all_vmath_unit_src_files)))
 
