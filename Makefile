@@ -128,6 +128,7 @@ ifeq ($(UNAME), Linux)
         threed_nogui_src_files += linux/nogui_linux_xcb.cpp
     endif
     threed_src_files           += linux/main_linux.cpp
+    threed_src_files           += linux/realtime_synth_linux.cpp
 endif
 
 ifeq ($(UNAME), Darwin)
@@ -140,6 +141,7 @@ endif
 ifeq ($(UNAME), Windows)
     threed_src_files       += windows/main_windows.cpp
     threed_gui_src_files   += windows/gui_windows.cpp
+    threed_gui_src_files   += windows/realtime_synth_windows.cpp
     threed_nogui_src_files += windows/nogui_windows.cpp
 
     ifeq ($(stdlib), 0)
