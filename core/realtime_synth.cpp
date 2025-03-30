@@ -217,7 +217,7 @@ static bool get_next_midi_event(Synth::MidiEvent* event, uint32_t end_samples)
     uint32_t        channel = last_channel;
 
     for (;;) {
-        const uint8_t* encoded_delta_time = Synth::delta_times[channel];
+        const uint8_t* encoded_delta_time = Synth::midi_delta_times[channel];
 
         uint32_t delta_time = *(encoded_delta_time++);
         if (delta_time > 0x7Fu) {
@@ -231,11 +231,11 @@ static bool get_next_midi_event(Synth::MidiEvent* event, uint32_t end_samples)
         const uint32_t end_of_channel = 0x3FFFu;
 
         if (event_samples < end_samples && delta_time < end_of_channel) {
-            last_channel                = channel;
-            channel_samples[channel]    = event_samples;
-            Synth::delta_times[channel] = encoded_delta_time;
-            event->time                 = event_samples;
-            event->channel              = static_cast<uint8_t>(channel);
+            last_channel                     = channel;
+            channel_samples[channel]         = event_samples;
+            Synth::midi_delta_times[channel] = encoded_delta_time;
+            event->time                      = event_samples;
+            event->channel                   = static_cast<uint8_t>(channel);
             break;
         }
 
@@ -244,11 +244,11 @@ static bool get_next_midi_event(Synth::MidiEvent* event, uint32_t end_samples)
             return false;
     }
 
-    const uint8_t* const encoded_event_ptr = Synth::events[channel];
+    const uint8_t* const encoded_event_ptr = Synth::midi_events[channel];
     uint8_t              event_code        = *encoded_event_ptr;
     uint8_t              event_state       = events_decode_state[channel];
 
-    Synth::events[channel] = encoded_event_ptr + event_state;
+    Synth::midi_events[channel] = encoded_event_ptr + event_state;
 
     event_state ^= 1u;
     events_decode_state[channel] = event_state;
@@ -258,17 +258,17 @@ static bool get_next_midi_event(Synth::MidiEvent* event, uint32_t end_samples)
     event->event = static_cast<Synth::EvType>(event_code);
 
     if (event_code <= static_cast<uint8_t>(Synth::EvType::aftertouch)) {
-        event->note      = *(Synth::notes[channel]++);
-        event->note_data = *(Synth::note_data[channel]++);
+        event->note      = *(Synth::midi_notes[channel]++);
+        event->note_data = *(Synth::midi_note_data[channel]++);
     }
     else if (static_cast<Synth::EvType>(event_code) == Synth::EvType::controller) {
-        event->controller      = *(Synth::controller[channel]++);
-        event->controller_data = *(Synth::controller_data[channel]++);
+        event->controller      = *(Synth::midi_ctrl[channel]++);
+        event->controller_data = *(Synth::midi_ctrl_data[channel]++);
     }
     else {
         assert(event_code == static_cast<uint8_t>(Synth::EvType::pitch_bend));
-        const int16_t lo = *(Synth::pitch_bend_lo[channel]++);
-        const int16_t hi = *(Synth::pitch_bend_hi[channel]++);
+        const int16_t lo = *(Synth::midi_pitch_bend_lo[channel]++);
+        const int16_t hi = *(Synth::midi_pitch_bend_hi[channel]++);
         assert(lo <= 0x7F);
         assert(hi <= 0x7F);
         event->pitch_bend = static_cast<int16_t>((hi << 7) + lo - 0x2000);

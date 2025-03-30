@@ -13,14 +13,14 @@ static constexpr uint32_t max_channels = 16;
 
 // MIDI data
 extern const uint32_t num_channels;         // Total number of used channels
-extern const uint8_t* delta_times[];        // Encoded event delta times, per-channel
-extern const uint8_t* events[];             // Encoded events, per-channel
-extern const uint8_t* notes[];              // Per-channel notes for note events
-extern const uint8_t* note_data[];          // Per-channel note data for note events
-extern const uint8_t* controller[];         // Per-channel controllers for controller events
-extern const uint8_t* controller_data[];    // Per-channel controller data for controller events
-extern const uint8_t* pitch_bend_lo[];      // Per-channel pitch bend LSB values
-extern const uint8_t* pitch_bend_hi[];      // Per-channel pitch bend MSB values
+extern const uint8_t* midi_delta_times[];   // Encoded event delta times, per-channel
+extern const uint8_t* midi_events[];        // Encoded events, per-channel
+extern const uint8_t* midi_notes[];         // Per-channel notes for note events
+extern const uint8_t* midi_note_data[];     // Per-channel note data for note events
+extern const uint8_t* midi_ctrl[];          // Per-channel controllers for controller events
+extern const uint8_t* midi_ctrl_data[];     // Per-channel controller data for controller events
+extern const uint8_t* midi_pitch_bend_lo[]; // Per-channel pitch bend LSB values
+extern const uint8_t* midi_pitch_bend_hi[]; // Per-channel pitch bend MSB values
 
 #define MIDI_EVENT_TYPES(X) \
     X(note_off)             \
