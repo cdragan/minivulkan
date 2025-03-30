@@ -1160,7 +1160,7 @@ bool reset_and_begin_command_buffer(VkCommandBuffer cmd_buf)
     if (res != VK_SUCCESS)
         return false;
 
-    static VkCommandBufferBeginInfo begin_info = {
+    static const VkCommandBufferBeginInfo begin_info = {
         VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
         nullptr,
         VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
@@ -1179,23 +1179,39 @@ bool send_to_device_and_wait(VkCommandBuffer cmd_buf, VkQueue queue, eFenceId fe
 
     static const VkPipelineStageFlags dst_stage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
 
-    static VkSubmitInfo submit_info = {
-        VK_STRUCTURE_TYPE_SUBMIT_INFO,
-        nullptr,
-        0,                  // waitSemaphoreCount
-        nullptr,            // pWaitSemaphored
-        &dst_stage,         // pWaitDstStageMask
-        1,                  // commandBufferCount
-        &cmd_buf,
-        0,                  // signalSemaphoreCount
-        nullptr             // pSignalSemaphores
+    static VkSubmitInfo submit_info[2] = {
+        {
+            VK_STRUCTURE_TYPE_SUBMIT_INFO,
+            nullptr,
+            0,                  // waitSemaphoreCount
+            nullptr,            // pWaitSemaphored
+            &dst_stage,         // pWaitDstStageMask
+            1,                  // commandBufferCount
+            nullptr,            // pCommandBuffers
+            0,                  // signalSemaphoreCount
+            nullptr             // pSignalSemaphores
+        },
+        {
+            VK_STRUCTURE_TYPE_SUBMIT_INFO,
+            nullptr,
+            0,                  // waitSemaphoreCount
+            nullptr,            // pWaitSemaphored
+            &dst_stage,         // pWaitDstStageMask
+            1,                  // commandBufferCount
+            nullptr,            // pCommandBuffers
+            0,                  // signalSemaphoreCount
+            nullptr             // pSignalSemaphores
+        }
     };
 
-    res = CHK(vkQueueSubmit(queue, 1, &submit_info, vk_fens[fence]));
+    VkSubmitInfo* const cur_submit_info = &submit_info[(queue == vk_compute_queue) ? 1 : 0];
+    cur_submit_info->pCommandBuffers = &cmd_buf;
+
+    res = CHK(vkQueueSubmit(queue, 1, cur_submit_info, vk_fens[fence]));
     if (res != VK_SUCCESS)
         return false;
 
-    return wait_and_reset_fence(fen_copy_to_dev);
+    return wait_and_reset_fence(fence);
 }
 
 void configure_viewport_and_scissor(VkViewport* viewport,

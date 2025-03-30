@@ -1,0 +1,312 @@
+#!/usr/bin/env kos
+
+import io
+import base: buffer, hex, print, range, string
+
+fun get_var_len(buf, pos, end_pos)
+{
+    var value = 0
+
+    while pos < end_pos {
+        const byte = buf[pos]
+        value = (value << 7) + (byte & 0x7F)
+        pos += 1
+
+        if byte <= 0x7F {
+            break
+        }
+    }
+
+    return [value, pos]
+}
+
+fun process_track(buf, pos, end_pos)
+{
+    const event_map = [
+        "note off",
+        "note on",
+        "poly aftertouch",
+        "control",
+        "program",
+        "channel aftertouch",
+        "pitch",
+        "sys"
+    ]
+
+    const data_size = [
+        2,
+        2,
+        2,
+        2,
+        1,
+        1,
+        2,
+        0
+    ]
+
+    var time = 0
+    var output = []
+
+    while pos < end_pos {
+        var delta_time = 0
+        delta_time, pos = get_var_len(buf, pos, end_pos)
+
+        time += delta_time
+
+        assert pos < end_pos
+        const status = buf[pos]
+        pos += 1
+
+        assert status > 0x7F
+
+        const event   = (status >> 4) & 0x7
+        const channel = status & 0xF
+
+        if event == 0x7 {
+            var meta_type = void
+            if channel == 0xF {
+                assert pos < end_pos
+                meta_type = buf[pos]
+                pos += 1
+            }
+
+            assert pos < end_pos
+            var len = void
+            len, pos = get_var_len(buf, pos, end_pos)
+            assert pos + len <= end_pos
+
+            var data = buf[pos : pos + len]
+            pos += len
+            if meta_type >= 1 && meta_type <= 9 {
+                data = "'" ++ string(data) ++ "'"
+            }
+
+            if event == 0x7 && meta_type == 0x2F && data.size == 0 {
+                print("+\(delta_time)", "end of track")
+            }
+            else if event == 0x7 && meta_type == 0x51 {
+                var mspb = 0
+                for const byte in data {
+                    mspb = (mspb << 8) + byte
+                }
+                const bpm = 60_000_000 / mspb
+                print("+\(delta_time)", "tempo", bpm)
+                assert bpm < 256
+                output.push([time, 0x10, 0x7, [bpm]])
+            }
+            else {
+                const meta_str = (meta_type == void) ? "" : hex(meta_type)
+                print("+\(delta_time)", event_map[event], meta_str, data)
+            }
+        }
+        else {
+            const len = data_size[event]
+
+            const data = buf[pos : pos + len]
+            pos += len
+
+            #print("+\(delta_time)", event_map[event], "ch\(channel)", data)
+
+            output.push([time, channel, event, data])
+        }
+    }
+
+    return output
+}
+
+fun load_midi_file(filename)
+{
+    var buf = void
+
+    with const f = io.open(filename) {
+        buf = f.read()
+    }
+
+    var format     = void
+    var num_tracks = 0
+    var tick_div   = 0
+
+    var pos = 0
+    var itrack = -1
+
+    var channels = []
+
+    while pos + 8 < buf.size {
+        const chunk_type, chunk_bytes = buf.unpack("> s4 u4", pos)
+        pos += 8
+
+        assert pos + chunk_bytes <= buf.size
+
+        if chunk_type == "MThd" {
+            assert chunk_bytes == 6
+            assert format == void
+
+            format, num_tracks, tick_div = buf.unpack("> 3u2", pos)
+
+            print("Format", format)
+            print("Number of tracks", num_tracks)
+            if tick_div <= 0x7FFF {
+                print("Tick divisor", tick_div, "ticks per quarter note")
+            }
+            else {
+                const fps = 0x100 - (tick_div >> 8)
+                const sub_frames = tick_div & 0xFF
+                print("Tick divisor", fps, "FPS", sub_frames, "sub-frames")
+            }
+        }
+        else {
+            assert chunk_type == "MTrk"
+
+            itrack += 1
+
+            print()
+            print("Track", itrack)
+            channels.insert(void, process_track(buf, pos, pos + chunk_bytes))
+        }
+
+        pos += chunk_bytes
+    }
+
+    channels.sort(elem => elem[0])
+
+    return channels
+}
+
+fun save_joined(filename, in_data)
+{
+    const out_delta_time = []
+    const out_chan_ev    = []
+    const out_note       = []
+    const out_data1      = []
+    const out_data2      = []
+
+    var prev_time = 0
+
+    for const time, channel, event, data in in_data {
+        const delta_time = time - prev_time
+        prev_time = time
+
+        if delta_time <= 0x7F {
+            out_delta_time.push(delta_time)
+        }
+        else {
+            out_delta_time.push(0x80 | ((delta_time >> 7) & 0x7F))
+            out_delta_time.push(delta_time & 0x7F)
+        }
+        out_chan_ev.push((event << 4) | channel)
+        if event <= 2 {
+            assert data.size == 2
+            out_note.push(data[0])
+            out_data1.push(data[1])
+        }
+        else {
+            assert data.size >= 1 && data.size <= 2
+            out_data2.push(data[0])
+            if data.size == 2 {
+                out_data2.push(data[1])
+            }
+        }
+    }
+
+    with const f = io.create(filename ++ ".joined.bin") {
+        f.write(buffer(out_delta_time))
+        f.write(buffer(out_chan_ev))
+        f.write(buffer(out_note))
+        f.write(buffer(out_data1))
+        f.write(buffer(out_data2))
+    }
+}
+
+fun save_separated(filename, in_data)
+{
+    const channels = []
+
+    for const time, channel, event, data in in_data {
+        while channel >= channels.size {
+            channels.push([])
+        }
+
+        if channels[channel].size == 0 {
+            for const i in range(8) {
+                channels[channel].push([])
+            }
+            channels[channel].push({
+                time:  0,
+                event: void
+            })
+        }
+
+        const status = channels[channel][8]
+
+        const delta_time = time - status.time
+        status.time      = time
+
+        const out_delta_time = channels[channel][0]
+        const out_event      = channels[channel][1]
+        const out_note       = channels[channel][2]
+        const out_note_data  = channels[channel][3]
+        const out_ctrl       = channels[channel][4]
+        const out_ctrl_data  = channels[channel][5]
+        const out_pitch_bend = channels[channel][6]
+        const out_other      = channels[channel][7]
+
+        if delta_time <= 0x7F {
+            out_delta_time.push(delta_time)
+        }
+        else {
+            out_delta_time.push(0x80 | ((delta_time >> 7) & 0x7F))
+            out_delta_time.push(delta_time & 0x7F)
+        }
+        if status.event == void {
+            status.event = event
+        }
+        else {
+            out_event.push((event << 4) | status.event)
+            status.event = void
+        }
+        if event <= 2 {
+            assert data.size == 2
+            out_note.push(data[0])
+            out_note_data.push(data[1])
+        }
+        else if event == 3 {
+            assert data.size == 2
+            out_ctrl.push(data[0])
+            out_ctrl_data.push(data[1])
+        }
+        else if event == 6 {
+            assert data.size == 2
+            out_pitch_bend.push(data[0])
+            out_other.push(data[1])
+        }
+        else {
+            assert data.size == 1
+            out_other.push(data[0])
+        }
+    }
+
+    with const f = io.create(filename ++ ".separated.bin") {
+        for const i in range(8) {
+            for const channel in channels {
+                if channel.size == 0 {
+                    continue
+                }
+                const data = buffer(channel[i])
+                const size = buffer().pack("u2", data.size)
+                f.write(size)
+                f.write(data)
+            }
+        }
+    }
+}
+
+public fun main(_, files...)
+{
+    print("Rearranging data in a MIDI file for testing compression")
+    for const filename in files {
+        const channels = load_midi_file(filename)
+
+        save_joined(filename, channels)
+        save_separated(filename, channels)
+    }
+}

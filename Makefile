@@ -155,6 +155,7 @@ threed_gui_src_files += core/resource_gui.cpp
 threed_gui_src_files += core/gui_config.cpp
 threed_gui_src_files += core/load_png.cpp
 threed_gui_src_files += core/realtime_synth.cpp
+threed_gui_src_files += core/empty_midi_soundtrack.cpp
 
 threed_nogui_src_files += core/nogui.cpp
 threed_nogui_src_files += core/memory_heap_nogui.cpp
@@ -491,7 +492,7 @@ $(foreach target,$(gui_targets) $(nogui_targets),$(eval $(call make_target_rule,
 clean:
 	rm -rf $(out_dir)
 
-asm: $(addprefix $(out_dir)/,$(addsuffix .$(asm_suffix),$(notdir $(filter %.cpp,$(all_example_src_files)))))
+asm: $(addprefix $(out_dir)/,$(addsuffix .$(asm_suffix),$(notdir $(filter %.cpp,$(all_src_files)))))
 
 $(out_dir_base):
 	mkdir -p $@
@@ -547,9 +548,7 @@ $(foreach file, $(filter %.cpp, $(all_src_files)), $(eval $(call ASM_RULE,$(file
 
 $(foreach file, $(filter-out $(imgui_src_files) $(libpng_src_files) $(zlib_src_files), $(all_src_files)), $(call TARGET_FILES, $(file))): CFLAGS += $(WFLAGS)
 
-$(foreach file, $(all_gui_src_files), $(call TARGET_FILES, $(file))): CFLAGS += -Ithirdparty/imgui/src
-
-$(foreach file, $(all_gui_src_files) $(imgui_src_files), $(call TARGET_FILES, $(file))): CFLAGS += -DIMGUI_DISABLE_OBSOLETE_KEYIO -DIMGUI_DISABLE_OBSOLETE_FUNCTIONS
+$(foreach file, $(all_gui_src_files) $(imgui_src_files), $(call TARGET_FILES, $(file))): CFLAGS += -DIMGUI_DISABLE_OBSOLETE_KEYIO -DIMGUI_DISABLE_OBSOLETE_FUNCTIONS -Ithirdparty/imgui/src
 
 $(call TARGET_FILES, load_png.cpp): CFLAGS += -Ithirdparty/libpng
 

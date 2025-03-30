@@ -30,7 +30,7 @@
     {
         if ( ! m_busses) {
             AVAudioFormat* outputFormat = [[AVAudioFormat alloc]
-                                                initStandardFormatWithSampleRate: rt_sampling_rate
+                                                initStandardFormatWithSampleRate: Synth::rt_sampling_rate
                                                 channels: 2];
             if ( ! outputFormat) {
                 d_printf("Failed to create AVAudioFormat\n");
@@ -78,7 +78,7 @@
         }
 
         const uint32_t sampling_rate = static_cast<uint32_t>(outputFormat.sampleRate);
-        if (sampling_rate != rt_sampling_rate) {
+        if (sampling_rate != Synth::rt_sampling_rate) {
             d_printf("OS changed sampling rate to %u Hz - unsupported\n", sampling_rate);
             return NO;
         }
@@ -132,6 +132,9 @@
 
 @end
 
+static AVAudioNode* output_node;
+static double       output_sample_rate;
+
 bool init_real_time_synth_os()
 {
     static const AudioComponentDescription synth_desc = {
@@ -170,7 +173,7 @@ bool init_real_time_synth_os()
 
             [engine attachNode: audio_unit];
 
-            AVAudioNode* output_node = engine.outputNode;
+            output_node = engine.outputNode;
             if ( ! output_node) {
                 d_printf("Failed to attach output node\n");
                 failed = true;
@@ -179,10 +182,13 @@ bool init_real_time_synth_os()
 
             [engine connect: audio_unit to: output_node format: nil];
 
+            output_sample_rate = [output_node outputFormatForBus: 0].sampleRate;
+
             NSError* start_error = nil;
             [engine startAndReturnError: &start_error];
             if (start_error) {
                 d_printf("Failed to start AVAudioEngine\n");
+                output_node = nullptr;
                 failed = true;
                 return;
             }
@@ -190,4 +196,20 @@ bool init_real_time_synth_os()
     ];
 
     return ! failed;
+}
+
+uint64_t get_real_time_synth_timestamp_ms()
+{
+    AVAudioTime* const last_render_time = output_node.lastRenderTime;
+
+    static uint64_t saved_timestamp_ms;
+
+    if (last_render_time) {
+        const int64_t sample_frames = last_render_time.sampleTime;
+
+        if (sample_frames >= 0)
+            saved_timestamp_ms = static_cast<uint64_t>(sample_frames) * 1000U / static_cast<uint64_t>(output_sample_rate);
+    }
+
+    return saved_timestamp_ms;
 }
