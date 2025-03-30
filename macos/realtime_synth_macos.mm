@@ -119,9 +119,9 @@
                 event = event->head.next;
             }
 
-            render_audio_buffer(num_frames,
-                                static_cast<float*>(output_data->mBuffers[0].mData),
-                                static_cast<float*>(output_data->mBuffers[1].mData));
+            Synth::render_audio_buffer(num_frames,
+                                       static_cast<float*>(output_data->mBuffers[0].mData),
+                                       static_cast<float*>(output_data->mBuffers[1].mData));
 
             output_data->mBuffers[0].mDataByteSize = num_frames * sizeof(float);
             output_data->mBuffers[1].mDataByteSize = num_frames * sizeof(float);
@@ -135,7 +135,9 @@
 static AVAudioNode* output_node;
 static double       output_sample_rate;
 
-bool init_real_time_synth_os()
+namespace Synth {
+
+bool init_synth_os()
 {
     static const AudioComponentDescription synth_desc = {
         kAudioUnitType_MusicDevice,
@@ -198,7 +200,7 @@ bool init_real_time_synth_os()
     return ! failed;
 }
 
-uint64_t get_real_time_synth_timestamp_ms()
+uint64_t get_current_timestamp_ms()
 {
     AVAudioTime* const last_render_time = output_node.lastRenderTime;
 
@@ -213,3 +215,5 @@ uint64_t get_real_time_synth_timestamp_ms()
 
     return saved_timestamp_ms;
 }
+
+} // namespace Synth

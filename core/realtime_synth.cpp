@@ -10,28 +10,56 @@
 #include <math.h>
 
 namespace {
+    // Host buffer which is filled with generated audio data
     Buffer host_audio_output_buf;
 
+    // Vulkan command buffer used for the synth
     CommandBuffers<1> audio_cmd_buf;
 
     // Number of samples rendered in one step.
     // This is also how frequently LFOs and ADSR envelopes are updated.
     constexpr uint32_t rt_step_samples = 256;
 
+    // Maximum number of supported voices
+    constexpr uint32_t max_voices = 256;
+
     // Number of samples which have been rendered since playback started.
-    static uint32_t rendered_samples;
+    uint32_t rendered_samples;
+
+    // Actual tempo converted to samples
+    uint32_t samples_per_midi_tick = 0;
+
+    // Stores current per-channel time measured in samples
+    uint32_t channel_samples[Synth::max_channels];
+
+    // Saved state of event decode, per-channel
+    uint8_t events_decode_state[Synth::max_channels];
+
+    // Map notes in each note in each channel to voices
+    typedef uint8_t NoteToVoice[128];
+    NoteToVoice note_to_voice[Synth::max_channels];
+
+    // Voice is a single playing note of a single instrument
+    struct Voice {
+        bool    active;
+        uint8_t channel;
+    };
+
+    Voice voices[max_voices];
 }
 
-bool init_real_time_synth_os();
+namespace Synth {
+    bool init_synth_os();
+}
 
-bool init_real_time_synth()
+bool Synth::init_synth()
 {
     if (compute_family_index == no_queue_family) {
         d_printf("No async compute queue available for synth\n");
         return false;
     }
 
-    if ( ! init_real_time_synth_os())
+    if ( ! init_synth_os())
         return false;
 
     // TODO - use project-dependent audio length
@@ -183,38 +211,7 @@ static void copy_audio_data(StereoPtr<T, true> dest, StereoPtr<T, true> src, uin
     copy_audio_data(dest.data, src.data, num_samples * 2 * sizeof(T));
 }
 
-#define MIDI_EVENT_TYPES(X) \
-    X(note_off)             \
-    X(note_on)              \
-    X(aftertouch)           \
-    X(controller)           \
-    X(pitch_bend)           \
-
-enum class EvType : uint8_t {
-    #define X(name) name,
-    MIDI_EVENT_TYPES(X)
-    #undef X
-    num_event_types
-};
-
-struct MidiEvent {
-    uint32_t time; // Event time, in samples, since the beginning of playback
-    EvType   event;
-    uint8_t  channel;
-    union {
-        struct { // Used by note_off, note_on and aftertouch events
-            uint8_t note;
-            uint8_t note_data;
-        };
-        struct { // Used by controller events
-            uint8_t controller;
-            uint8_t controller_data;
-        };
-        int16_t pitch_bend; // Used by pitch_bend events
-    };
-};
-
-static bool get_next_midi_event(MidiEvent* event, uint32_t end_samples)
+static bool get_next_midi_event(Synth::MidiEvent* event, uint32_t end_samples)
 {
     static uint32_t last_channel;
     uint32_t        channel = last_channel;
@@ -228,16 +225,17 @@ static bool get_next_midi_event(MidiEvent* event, uint32_t end_samples)
             delta_time = ((delta_time & 0x7Fu) << 7) | *(encoded_delta_time++);
         }
 
-        const uint32_t delta_samples = delta_time * Synth::samples_per_midi_tick;
+        const uint32_t delta_samples = delta_time * samples_per_midi_tick;
+        const uint32_t event_samples = channel_samples[channel] + delta_samples;
 
-        const uint32_t event_samples = Synth::channel_samples[channel] + delta_samples;
+        const uint32_t end_of_channel = 0x3FFFu;
 
-        if (event_samples < end_samples && delta_time < 0x3FFFu) {
-            last_channel                    = channel;
-            Synth::channel_samples[channel] = event_samples;
-            Synth::delta_times[channel]     = encoded_delta_time;
-            event->time                     = event_samples;
-            event->channel                  = static_cast<uint8_t>(channel);
+        if (event_samples < end_samples && delta_time < end_of_channel) {
+            last_channel                = channel;
+            channel_samples[channel]    = event_samples;
+            Synth::delta_times[channel] = encoded_delta_time;
+            event->time                 = event_samples;
+            event->channel              = static_cast<uint8_t>(channel);
             break;
         }
 
@@ -248,72 +246,117 @@ static bool get_next_midi_event(MidiEvent* event, uint32_t end_samples)
 
     const uint8_t* const encoded_event_ptr = Synth::events[channel];
     uint8_t              event_code        = *encoded_event_ptr;
-    uint8_t              event_state       = Synth::events_decode_state[channel];
+    uint8_t              event_state       = events_decode_state[channel];
 
     Synth::events[channel] = encoded_event_ptr + event_state;
 
     event_state ^= 1u;
-    Synth::events_decode_state[channel] = event_state;
+    events_decode_state[channel] = event_state;
 
     event_code = (event_code >> (event_state * 7u)) & 0xFu;
 
-    event->event = static_cast<EvType>(event_code);
+    event->event = static_cast<Synth::EvType>(event_code);
 
-    if (event_code <= static_cast<uint8_t>(EvType::aftertouch)) {
+    if (event_code <= static_cast<uint8_t>(Synth::EvType::aftertouch)) {
         event->note      = *(Synth::notes[channel]++);
         event->note_data = *(Synth::note_data[channel]++);
     }
-    else if (static_cast<EvType>(event_code) == EvType::controller) {
+    else if (static_cast<Synth::EvType>(event_code) == Synth::EvType::controller) {
         event->controller      = *(Synth::controller[channel]++);
         event->controller_data = *(Synth::controller_data[channel]++);
     }
     else {
-        assert(event_code == static_cast<uint8_t>(EvType::pitch_bend));
+        assert(event_code == static_cast<uint8_t>(Synth::EvType::pitch_bend));
         const int16_t lo = *(Synth::pitch_bend_lo[channel]++);
         const int16_t hi = *(Synth::pitch_bend_hi[channel]++);
-        assert(lo <= 0x7Fu);
-        assert(hi <= 0x7Fu);
+        assert(lo <= 0x7F);
+        assert(hi <= 0x7F);
         event->pitch_bend = static_cast<int16_t>((hi << 7) + lo - 0x2000);
     }
 
     return true;
 }
 
-static void process_note_off(uint32_t delta_samples, const MidiEvent& event)
+static void process_note_off(uint32_t delta_samples, const Synth::MidiEvent& event)
+{
+    const uint32_t channel   = event.channel;
+    const uint32_t note      = event.note;
+    uint32_t       voice_idx = note_to_voice[channel][note];
+
+    if ( ! voice_idx) {
+        d_printf("Wasted note_off event for note %u on channel %u\n", note, channel);
+        return;
+    }
+    assert(voices[voice_idx].active);
+
+    // TODO transition voice to decay state
+}
+
+static void process_note_on(uint32_t delta_samples, const Synth::MidiEvent& event)
+{
+    const uint32_t channel   = event.channel;
+    const uint32_t note      = event.note;
+    uint32_t       voice_idx = note_to_voice[channel][note];
+
+    if ( ! voice_idx) {
+
+        // Allocate unused voice
+        for (uint32_t i = 1; i < max_voices; i++) {
+            if ( ! voices[i].active)
+                break;
+        }
+
+        if ( ! voice_idx) {
+            d_printf("All voices are active, dropping note %u on channel %u\n", note, channel);
+            return;
+        }
+
+        note_to_voice[channel][note] = static_cast<uint8_t>(voice_idx);
+    }
+    else {
+        assert(voices[voice_idx].channel == channel);
+    }
+
+    voices[voice_idx].channel = static_cast<uint8_t>(channel);
+
+    // TODO start playing instrument
+}
+
+static void process_aftertouch(uint32_t delta_samples, const Synth::MidiEvent& event)
+{
+    const uint32_t channel   = event.channel;
+    const uint32_t note      = event.note;
+    uint32_t       voice_idx = note_to_voice[channel][note];
+
+    if ( ! voice_idx) {
+        d_printf("Wasted aftertouch event for note %u on channel %u\n", note, channel);
+        return;
+    }
+    assert(voices[voice_idx].active);
+
+    // TODO apply aftertouch
+}
+
+static void process_controller(uint32_t delta_samples, const Synth::MidiEvent& event)
 {
     // TODO
 }
 
-static void process_note_on(uint32_t delta_samples, const MidiEvent& event)
-{
-    // TODO
-}
-
-static void process_aftertouch(uint32_t delta_samples, const MidiEvent& event)
-{
-    // TODO
-}
-
-static void process_controller(uint32_t delta_samples, const MidiEvent& event)
-{
-    // TODO
-}
-
-static void process_pitch_bend(uint32_t delta_samples, const MidiEvent& event)
+static void process_pitch_bend(uint32_t delta_samples, const Synth::MidiEvent& event)
 {
     // TODO
 }
 
 static void process_events(uint32_t start_samples, uint32_t end_samples)
 {
-    using EventHandler = void (*)(uint32_t delta_samples, const MidiEvent& event);
+    using EventHandler = void (*)(uint32_t delta_samples, const Synth::MidiEvent& event);
     static const EventHandler event_handlers[] = {
         #define X(name) process_##name,
         MIDI_EVENT_TYPES(X)
         #undef X
     };
 
-    MidiEvent event;
+    Synth::MidiEvent event;
 
     while (get_next_midi_event(&event, end_samples)) {
 
@@ -433,9 +476,9 @@ static bool render_audio_buffer(StereoPtr<T, interleaved> output_buf, uint32_t n
     return true;
 }
 
-bool render_audio_buffer(uint32_t num_frames,
-                         float*   left_channel,
-                         float*   right_channel)
+bool Synth::render_audio_buffer(uint32_t num_frames,
+                                float*   left_channel,
+                                float*   right_channel)
 {
     if (num_frames) {
         const StereoPtr<float, false> channels = { left_channel, right_channel };

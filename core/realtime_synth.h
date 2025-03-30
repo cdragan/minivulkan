@@ -4,26 +4,61 @@
 #include <stdint.h>
 
 namespace Synth {
-    static constexpr uint32_t rt_sampling_rate = 44100;
 
-    extern const uint32_t num_channels;             // Total number of used channels
-    extern uint32_t       channel_samples[];        // Stores current per-channel time measured in samples
-    extern const uint8_t* delta_times[];            // Encoded event delta times, per-channel
-    extern const uint8_t* events[];                 // Encoded events, per-channel
-    extern uint8_t        events_decode_state[];    // Saved state of event decode, per-channel
-    extern const uint8_t* notes[];                  // Per-channel notes for note events
-    extern const uint8_t* note_data[];              // Per-channel note data for note events
-    extern const uint8_t* controller[];             // Per-channel controllers for controller events
-    extern const uint8_t* controller_data[];        // Per-channel controller data for controller events
-    extern const uint8_t* pitch_bend_lo[];          // Per-channel pitch bend LSB values
-    extern const uint8_t* pitch_bend_hi[];          // Per-channel pitch bend MSB values
-    extern uint32_t       samples_per_midi_tick;    // Actual tempo converted to samples
-}
+// Sampling frequency, i.e. frequency of produced audio buffer
+static constexpr uint32_t rt_sampling_rate = 44100;
 
-bool init_real_time_synth();
+// Maximum number of supported channels
+static constexpr uint32_t max_channels = 16;
+
+// MIDI data
+extern const uint32_t num_channels;         // Total number of used channels
+extern const uint8_t* delta_times[];        // Encoded event delta times, per-channel
+extern const uint8_t* events[];             // Encoded events, per-channel
+extern const uint8_t* notes[];              // Per-channel notes for note events
+extern const uint8_t* note_data[];          // Per-channel note data for note events
+extern const uint8_t* controller[];         // Per-channel controllers for controller events
+extern const uint8_t* controller_data[];    // Per-channel controller data for controller events
+extern const uint8_t* pitch_bend_lo[];      // Per-channel pitch bend LSB values
+extern const uint8_t* pitch_bend_hi[];      // Per-channel pitch bend MSB values
+
+#define MIDI_EVENT_TYPES(X) \
+    X(note_off)             \
+    X(note_on)              \
+    X(aftertouch)           \
+    X(controller)           \
+    X(pitch_bend)           \
+
+enum class EvType : uint8_t {
+    #define X(name) name,
+    MIDI_EVENT_TYPES(X)
+    #undef X
+    num_event_types
+};
+
+struct MidiEvent {
+    uint32_t time; // Event time, in samples, since the beginning of playback
+    EvType   event;
+    uint8_t  channel;
+    union {
+        struct { // Used by note_off, note_on and aftertouch events
+            uint8_t note;
+            uint8_t note_data;
+        };
+        struct { // Used by controller events
+            uint8_t controller;
+            uint8_t controller_data;
+        };
+        int16_t pitch_bend; // Used by pitch_bend events
+    };
+};
+
+bool init_synth();
 
 bool render_audio_buffer(uint32_t num_frames,
                          float*   left_channel,
                          float*   right_channel);
 
-uint64_t get_real_time_synth_timestamp_ms();
+uint64_t get_current_timestamp_ms();
+
+} // namespace Synth
