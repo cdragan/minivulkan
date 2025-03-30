@@ -14,4 +14,6 @@ namespace Synth {
     const uint8_t* midi_ctrl_data[]     = { nullptr };
     const uint8_t* midi_pitch_bend_lo[] = { nullptr };
     const uint8_t* midi_pitch_bend_hi[] = { nullptr };
+
+    const InstrumentRouting instr_routing[] = { { } };
 }

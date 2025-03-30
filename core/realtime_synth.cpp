@@ -41,8 +41,10 @@ namespace {
 
     // Voice is a single playing note of a single instrument
     struct Voice {
-        bool    active;
-        uint8_t channel;
+        bool     active;
+        uint8_t  channel;
+        uint8_t  instrument;
+        uint16_t cur_amplitude;
     };
 
     Voice voices[max_voices];
@@ -211,6 +213,37 @@ static void copy_audio_data(StereoPtr<T, true> dest, StereoPtr<T, true> src, uin
     copy_audio_data(dest.data, src.data, num_samples * 2 * sizeof(T));
 }
 
+static uint32_t allocate_unused_voice()
+{
+    for (uint32_t i = 1; i < max_voices; i++) {
+        if ( ! voices[i].active) {
+            assert(voices[i].cur_amplitude == 0);
+            return i;
+        }
+    }
+
+    return 0;
+}
+
+static uint8_t select_instrument(uint32_t channel, uint32_t note)
+{
+    uint32_t instr_idx;
+
+    for (instr_idx = 0; instr_idx < Synth::max_instr_per_channel; instr_idx++) {
+        const uint32_t start_note = Synth::instr_routing[channel].note_routing[instr_idx].start_note;
+        if (note < start_note || ! start_note) {
+            if (instr_idx)
+                --instr_idx;
+            break;
+        }
+    }
+
+    if (instr_idx == Synth::max_instr_per_channel)
+        --instr_idx;
+
+    return Synth::instr_routing[channel].note_routing[instr_idx].instrument;
+}
+
 static bool get_next_midi_event(Synth::MidiEvent* event, uint32_t end_samples)
 {
     static uint32_t last_channel;
@@ -281,7 +314,7 @@ static void process_note_off(uint32_t delta_samples, const Synth::MidiEvent& eve
 {
     const uint32_t channel   = event.channel;
     const uint32_t note      = event.note;
-    uint32_t       voice_idx = note_to_voice[channel][note];
+    const uint32_t voice_idx = note_to_voice[channel][note];
 
     if ( ! voice_idx) {
         d_printf("Wasted note_off event for note %u on channel %u\n", note, channel);
@@ -300,11 +333,7 @@ static void process_note_on(uint32_t delta_samples, const Synth::MidiEvent& even
 
     if ( ! voice_idx) {
 
-        // Allocate unused voice
-        for (uint32_t i = 1; i < max_voices; i++) {
-            if ( ! voices[i].active)
-                break;
-        }
+        voice_idx = allocate_unused_voice();
 
         if ( ! voice_idx) {
             d_printf("All voices are active, dropping note %u on channel %u\n", note, channel);
@@ -317,16 +346,17 @@ static void process_note_on(uint32_t delta_samples, const Synth::MidiEvent& even
         assert(voices[voice_idx].channel == channel);
     }
 
-    voices[voice_idx].channel = static_cast<uint8_t>(channel);
+    voices[voice_idx].channel    = static_cast<uint8_t>(channel);
+    voices[voice_idx].instrument = select_instrument(channel, note);
 
-    // TODO start playing instrument
+    // TODO reset instrument playback, set velocity, "attack" envelope starts at current amplitude
 }
 
 static void process_aftertouch(uint32_t delta_samples, const Synth::MidiEvent& event)
 {
     const uint32_t channel   = event.channel;
     const uint32_t note      = event.note;
-    uint32_t       voice_idx = note_to_voice[channel][note];
+    const uint32_t voice_idx = note_to_voice[channel][note];
 
     if ( ! voice_idx) {
         d_printf("Wasted aftertouch event for note %u on channel %u\n", note, channel);

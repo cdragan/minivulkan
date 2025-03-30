@@ -11,6 +11,9 @@ static constexpr uint32_t rt_sampling_rate = 44100;
 // Maximum number of supported channels
 static constexpr uint32_t max_channels = 16;
 
+// Maximum variants per instrument (different instruments assigned to different notes)
+static constexpr uint32_t max_instr_per_channel = 16;
+
 // MIDI data
 extern const uint32_t num_channels;         // Total number of used channels
 extern const uint8_t* midi_delta_times[];   // Encoded event delta times, per-channel
@@ -21,6 +24,14 @@ extern const uint8_t* midi_ctrl[];          // Per-channel controllers for contr
 extern const uint8_t* midi_ctrl_data[];     // Per-channel controller data for controller events
 extern const uint8_t* midi_pitch_bend_lo[]; // Per-channel pitch bend LSB values
 extern const uint8_t* midi_pitch_bend_hi[]; // Per-channel pitch bend MSB values
+
+struct InstrumentRouting {
+    struct {
+        uint8_t start_note;
+        uint8_t instrument;
+    } note_routing[max_instr_per_channel];
+};
+extern const InstrumentRouting instr_routing[];   // Per-channel routing of notes to instruments
 
 #define MIDI_EVENT_TYPES(X) \
     X(note_off)             \
