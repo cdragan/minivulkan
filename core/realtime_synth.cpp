@@ -9,6 +9,9 @@
 #include "vmath.h"
 #include <math.h>
 
+#include "synth_shaders.h"
+#include "shaders.h"
+
 namespace {
     // Host buffer which is filled with generated audio data
     Buffer host_audio_output_buf;
@@ -18,6 +21,7 @@ namespace {
 
     // Number of samples rendered in one step.
     // This is also how frequently LFOs and ADSR envelopes are updated.
+    // This must match workgroup geometry in compute shaders.
     constexpr uint32_t rt_step_samples = 256;
 
     // Maximum number of supported voices
@@ -39,12 +43,24 @@ namespace {
     typedef uint8_t NoteToVoice[128];
     NoteToVoice note_to_voice[Synth::max_channels];
 
+    // Maximum number of parameters per voice channel (single instrument note)
+    constexpr uint32_t max_parameters = 16;
+
+    // Fixed-point constants, parameters use fixed-point numbers with 32768 corresponding to 1.0
+    constexpr int32_t fxp_one = 32768;  // 1.0
+    constexpr int32_t fxp_pi  = 102944; // pi
+    constexpr int32_t fxp_2pi = 205887; // 2.0 * pi
+
+    enum Parameters {
+        param_cur_amplitude
+    };
+
     // Voice is a single playing note of a single instrument
     struct Voice {
-        bool     active;
-        uint8_t  channel;
-        uint8_t  instrument;
-        uint16_t cur_amplitude;
+        bool    active;
+        uint8_t channel;
+        uint8_t instrument;
+        int32_t parameters[max_parameters];
     };
 
     Voice voices[max_voices];
@@ -78,6 +94,8 @@ bool Synth::init_synth()
 
     if ( ! allocate_command_buffers_once(&audio_cmd_buf, 1, compute_family_index))
         return false;
+
+    load_shader(shader_synth_wave_gen_comp);
 
     return true;
 }
@@ -217,7 +235,7 @@ static uint32_t allocate_unused_voice()
 {
     for (uint32_t i = 1; i < max_voices; i++) {
         if ( ! voices[i].active) {
-            assert(voices[i].cur_amplitude == 0);
+            assert(voices[i].parameters[param_cur_amplitude] == 0);
             return i;
         }
     }
@@ -316,10 +334,7 @@ static void process_note_off(uint32_t delta_samples, const Synth::MidiEvent& eve
     const uint32_t note      = event.note;
     const uint32_t voice_idx = note_to_voice[channel][note];
 
-    if ( ! voice_idx) {
-        d_printf("Wasted note_off event for note %u on channel %u\n", note, channel);
-        return;
-    }
+    assert(voice_idx);
     assert(voices[voice_idx].active);
 
     // TODO transition voice to decay state
@@ -330,6 +345,7 @@ static void process_note_on(uint32_t delta_samples, const Synth::MidiEvent& even
     const uint32_t channel   = event.channel;
     const uint32_t note      = event.note;
     uint32_t       voice_idx = note_to_voice[channel][note];
+    int32_t        amplitude = 0;
 
     if ( ! voice_idx) {
 
@@ -343,13 +359,21 @@ static void process_note_on(uint32_t delta_samples, const Synth::MidiEvent& even
         note_to_voice[channel][note] = static_cast<uint8_t>(voice_idx);
     }
     else {
-        assert(voices[voice_idx].channel == channel);
+        assert(voices[voice_idx].channel    == channel);
+        assert(voices[voice_idx].instrument == select_instrument(channel, note));
+
+        amplitude = voices[voice_idx].parameters[param_cur_amplitude];
     }
 
     voices[voice_idx].channel    = static_cast<uint8_t>(channel);
     voices[voice_idx].instrument = select_instrument(channel, note);
 
-    // TODO reset instrument playback, set velocity, "attack" envelope starts at current amplitude
+    memset(&voices[voice_idx].parameters, 0, sizeof(voices[voice_idx].parameters));
+
+    // Preserve amplitude if the same note is replayed
+    voices[voice_idx].parameters[param_cur_amplitude] = amplitude;
+
+    // TODO set velocity
 }
 
 static void process_aftertouch(uint32_t delta_samples, const Synth::MidiEvent& event)
@@ -358,10 +382,7 @@ static void process_aftertouch(uint32_t delta_samples, const Synth::MidiEvent& e
     const uint32_t note      = event.note;
     const uint32_t voice_idx = note_to_voice[channel][note];
 
-    if ( ! voice_idx) {
-        d_printf("Wasted aftertouch event for note %u on channel %u\n", note, channel);
-        return;
-    }
+    assert(voice_idx);
     assert(voices[voice_idx].active);
 
     // TODO apply aftertouch
@@ -380,6 +401,11 @@ static void process_pitch_bend(uint32_t delta_samples, const Synth::MidiEvent& e
 static void process_events(uint32_t start_samples, uint32_t end_samples)
 {
     using EventHandler = void (*)(uint32_t delta_samples, const Synth::MidiEvent& event);
+
+    // These two MIDI events are unused and thus are unsupported
+    constexpr EventHandler process_program_change   = nullptr;
+    constexpr EventHandler process_channel_pressure = nullptr;
+
     static const EventHandler event_handlers[] = {
         #define X(name) process_##name,
         MIDI_EVENT_TYPES(X)
@@ -400,6 +426,11 @@ static void process_events(uint32_t start_samples, uint32_t end_samples)
     }
 }
 
+static void render_waveforms()
+{
+    // TODO
+}
+
 static void render_audio_step()
 {
     const uint32_t start_samples = rendered_samples;
@@ -409,23 +440,21 @@ static void render_audio_step()
 
     process_events(start_samples, end_samples);
 
-#if 0 // TODO
-    update_lfos();
+    //update_lfos();
 
-    update_filters();
+    //update_filters();
 
     render_waveforms();
 
-    apply_waveform_filters();
+    //apply_waveform_filters();
 
-    add_waveforms_to_channel();
+    //add_waveforms_to_channel();
 
-    apply_channel_filters();
+    //apply_channel_filters();
 
-    add_channels();
+    //add_channels();
 
-    apply_master_filters();
-#endif
+    //apply_master_filters();
 }
 
 template<typename T, bool interleaved>

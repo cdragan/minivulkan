@@ -38,6 +38,8 @@ extern const InstrumentRouting instr_routing[];   // Per-channel routing of note
     X(note_on)              \
     X(aftertouch)           \
     X(controller)           \
+    X(program_change)       \
+    X(channel_pressure)     \
     X(pitch_bend)           \
 
 enum class EvType : uint8_t {

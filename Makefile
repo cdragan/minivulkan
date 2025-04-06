@@ -272,6 +272,7 @@ endef
 
 projects += example
 projects += sculptor
+projects += synth
 projects += thirdparty/imgui
 projects += thirdparty/libpng
 projects += thirdparty/zlib
