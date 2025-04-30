@@ -4,6 +4,7 @@
 #import <AVFoundation/AVAudioPlayer.h>
 #import <Cocoa/Cocoa.h>
 #import <QuartzCore/CAMetalLayer.h>
+#import <QuartzCore/CADisplayLink.h>
 #include "../core/gui.h"
 #include "main_macos.h"
 #include "../core/minivulkan.h"
@@ -91,7 +92,11 @@ bool play_sound_track()
 @implementation VulkanViewController
     {
         NSSize           m_size;
+#if __MAC_OS_X_VERSION_MIN_REQUIRED >= 150000
+        CADisplayLink   *m_display_link;
+#else
         CVDisplayLinkRef m_display_link;
+#endif
     }
 
     - (id)initWithSize: (NSSize)aSize
@@ -101,12 +106,6 @@ bool play_sound_track()
             m_size = aSize;
         }
         return self;
-    }
-
-    - (void)dealloc
-    {
-        CVDisplayLinkRelease(m_display_link);
-        [super dealloc];
     }
 
     - (void)loadView
@@ -135,8 +134,59 @@ bool play_sound_track()
         init_mouse_tracking(self, self.view);
         init_os_gui(self.view);
 
+#if __MAC_OS_X_VERSION_MIN_REQUIRED < 150000
         CVDisplayLinkCreateWithActiveCGDisplays(&m_display_link);
         CVDisplayLinkSetOutputCallback(m_display_link, &display_link_callback, (__bridge void *)self.view);
+#endif
+    }
+
+    static bool draw_callback(NSView *view)
+    {
+        init_os_gui_frame(view);
+
+        if ( ! need_redraw(nullptr) && skip_frame(nullptr))
+            return true;
+
+        if ( ! draw_frame()) {
+            [NSApp terminate: nil];
+            return false;
+        }
+
+        return true;
+    }
+
+#if __MAC_OS_X_VERSION_MIN_REQUIRED >= 150000
+    - (void)viewDidAppear
+    {
+        [super viewDidAppear];
+
+        if ( ! m_display_link) {
+            m_display_link = [self.view displayLinkWithTarget: self
+                                        selector: @selector(displayLinkFired:)];
+            [m_display_link addToRunLoop: [NSRunLoop mainRunLoop]
+                            forMode: NSRunLoopCommonModes];
+        }
+    }
+
+    - (void)viewWillDisappear
+    {
+        [super viewWillDisappear];
+
+        if (m_display_link) {
+            [m_display_link invalidate];
+            m_display_link = nullptr;
+        }
+    }
+
+    - (void)displayLinkFired: (CADisplayLink *)display_link
+    {
+        draw_callback(self.view);
+    }
+#else
+    - (void)dealloc
+    {
+        CVDisplayLinkRelease(m_display_link);
+        [super dealloc];
     }
 
     - (void)viewDidAppear
@@ -156,18 +206,9 @@ bool play_sound_track()
                                           CVOptionFlags     *flagsOut,
                                           void              *target)
     {
-        init_os_gui_frame((__bridge NSView *)target);
-
-        if ( ! need_redraw(nullptr) && skip_frame(nullptr))
-            return kCVReturnSuccess;
-
-        if ( ! draw_frame()) {
-            [NSApp terminate: nil];
-            return kCVReturnError;
-        }
-
-        return kCVReturnSuccess;
+        return draw_callback((__bridge NSView *)target) ? kCVReturnSuccess : kCVReturnError;
     }
+#endif
 
 @end
 
