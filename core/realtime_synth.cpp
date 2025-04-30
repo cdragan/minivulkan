@@ -16,6 +16,12 @@ namespace {
     // Host buffer which is filled with generated audio data
     Buffer host_audio_output_buf;
 
+    // Device buffer which is used by effects etc.
+    Buffer device_work_buf;
+
+    // Device buffer with parameters for compute shaders etc.
+    Buffer param_buf;
+
     // Vulkan command buffer used for the synth
     CommandBuffers<1> audio_cmd_buf;
 
@@ -46,10 +52,17 @@ namespace {
     // Maximum number of parameters per voice channel (single instrument note)
     constexpr uint32_t max_parameters = 16;
 
+    // Current number of active voice waveforms
+    uint32_t num_waveforms;
+
+    VkPipeline       oscillator_pipeline;
+    VkPipelineLayout oscillator_pipeline_layout;
+    VkDescriptorSet  oscillator_desc_set;
+
     // Fixed-point constants, parameters use fixed-point numbers with 32768 corresponding to 1.0
-    constexpr int32_t fxp_one = 32768;  // 1.0
-    constexpr int32_t fxp_pi  = 102944; // pi
-    constexpr int32_t fxp_2pi = 205887; // 2.0 * pi
+    // constexpr int32_t fxp_one = 32768;  // 1.0
+    // constexpr int32_t fxp_pi  = 102944; // pi
+    // constexpr int32_t fxp_2pi = 205887; // 2.0 * pi
 
     enum Parameters {
         param_cur_amplitude
@@ -83,19 +96,35 @@ bool Synth::init_synth()
     // TODO - use project-dependent audio length
     constexpr uint32_t seconds = 1;
     constexpr uint32_t sample_size = sizeof(float);
-    constexpr VkDeviceSize buf_size = mstd::align_up(Synth::rt_sampling_rate * 2U * sample_size * seconds, rt_step_samples);
+    constexpr VkDeviceSize output_buf_size = mstd::align_up(Synth::rt_sampling_rate * 2U * sample_size * seconds, rt_step_samples);
+    constexpr VkDeviceSize device_buf_size = 1024 * 1024; // TODO
+    constexpr VkDeviceSize param_buf_size  = 1024 * 1024; // TODO
 
     if ( ! host_audio_output_buf.allocate(Usage::host_only,
-                                          buf_size,
+                                          output_buf_size,
                                           VK_FORMAT_UNDEFINED,
-                                          VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                                          VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
                                           { "host audio buffer" }))
+        return false;
+
+    if ( ! device_work_buf.allocate(Usage::device_only,
+                                    device_buf_size,
+                                    VK_FORMAT_UNDEFINED,
+                                    VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                                    { "audio work buffer" }))
+        return false;
+
+    if ( ! param_buf.allocate(Usage::dynamic,
+                              param_buf_size,
+                              VK_FORMAT_UNDEFINED,
+                              VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+                              { "audio param buffer" }))
         return false;
 
     if ( ! allocate_command_buffers_once(&audio_cmd_buf, 1, compute_family_index))
         return false;
 
-    load_shader(shader_synth_wave_gen_comp);
+    load_shader(shader_synth_oscillator_comp);
 
     return true;
 }
@@ -419,16 +448,34 @@ static void process_events(uint32_t start_samples, uint32_t end_samples)
         const uint32_t delta_samples = (event.time >= start_samples) ? (event.time - start_samples) : 0;
 
         assert(static_cast<uint32_t>(event.event) < mstd::array_size(event_handlers));
-
         const EventHandler handler = event_handlers[static_cast<uint8_t>(event.event)];
+        assert(handler);
 
         handler(delta_samples, event);
     }
 }
 
-static void render_waveforms()
+static void render_oscillators()
 {
-    // TODO
+    // for (active oscillator) {
+    //     set next offset;
+    //     update params;
+    // }
+
+#if 0
+    vkCmdBindPipeline(audio_cmd_buf, VK_PIPELINE_BIND_POINT_COMPUTE, oscillator_pipeline);
+
+    vkCmdBindDescriptorSets(audio_cmd_buf,
+                            VK_PIPELINE_BIND_POINT_COMPUTE,
+                            oscillator_pipeline_layout,
+                            0,          // firstSet
+                            1,          // descriptorSetCount
+                            &oscillator_desc_set,
+                            0,          // dynamicOffsetCount
+                            nullptr);   // pDynamicOffsets
+
+    vkCmdDispatch(audio_cmd_buf, num_waveforms, 1, 1);
+#endif
 }
 
 static void render_audio_step()
@@ -444,7 +491,7 @@ static void render_audio_step()
 
     //update_filters();
 
-    render_waveforms();
+    render_oscillators();
 
     //apply_waveform_filters();
 
@@ -457,10 +504,10 @@ static void render_audio_step()
     //apply_master_filters();
 }
 
+#if 1
 template<typename T, bool interleaved>
 static void copy_audio_step_to_host(uint32_t offset)
 {
-    // TODO vkCmdCopyBuffer or vkCmdDispatch
     const auto buf_ptr = StereoPtr<T, interleaved>::from_buffer(host_audio_output_buf);
     for (uint32_t i = 0; i < rt_step_samples; i++) {
         static float phase = 0;
@@ -475,6 +522,44 @@ static void copy_audio_step_to_host(uint32_t offset)
             phase -= 2.0f * vmath::pi;
     }
 }
+#else
+namespace {
+    template<typename T, bool interleaved>
+    void copy_audio_step_to_host(uint32_t offset);
+
+    template<>
+    void copy_audio_step_to_host<int16_t, true>(uint32_t offset)
+    {
+        // vkCmdDispatch - synth_output_16_interlv
+    }
+
+    template<>
+    void copy_audio_step_to_host<float, false>(uint32_t offset)
+    {
+        static VkBufferCopy region = {
+            0,
+            0,
+            rt_step_samples * sizeof(float)
+        };
+
+        region.srcOffset = 0; // TODO left channel
+        region.dstOffset = offset * sizeof(float);
+        vkCmdCopyBuffer(audio_cmd_buf,
+                        device_work_buf.get_buffer(),
+                        host_audio_output_buf.get_buffer(),
+                        1,
+                        &region);
+
+        region.dstOffset = 0; // TODO right channel
+        region.dstOffset += host_audio_output_buf.size() / 2;
+        vkCmdCopyBuffer(audio_cmd_buf,
+                        device_work_buf.get_buffer(),
+                        host_audio_output_buf.get_buffer(),
+                        1,
+                        &region);
+    }
+}
+#endif
 
 template<typename T, bool interleaved>
 static bool render_audio(uint32_t num_samples)
