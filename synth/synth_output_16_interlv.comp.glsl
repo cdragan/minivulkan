@@ -5,11 +5,15 @@
 
 #extension GL_EXT_shader_16bit_storage : require
 
-layout(set = 0, binding = 0) buffer InputData { float buf[]; } input_data[];
-
-layout(set = 0, binding = 1) buffer OutputData { int16_t buf[]; } output_data;
-
 layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0) readonly buffer data_buf { float data[]; };
+
+layout(set = 1, binding = 0) writeonly buffer output_buf { int16_t output_data[]; };
+
+layout(push_constant) uniform param_buf {
+    uint in_sound_offs;
+};
 
 int16_t convert(float value)
 {
@@ -18,6 +22,6 @@ int16_t convert(float value)
 
 void main()
 {
-    output_data.buf[gl_LocalInvocationID.x * 2]     = convert(input_data[0].buf[gl_LocalInvocationID.x]);
-    output_data.buf[gl_LocalInvocationID.x * 2 + 1] = convert(input_data[1].buf[gl_LocalInvocationID.x]);
+    output_data[gl_LocalInvocationID.x * 2]     = convert(data[in_sound_offs + gl_LocalInvocationID.x * 2]);
+    output_data[gl_LocalInvocationID.x * 2 + 1] = convert(data[in_sound_offs + gl_LocalInvocationID.x * 2 + 1]);
 }

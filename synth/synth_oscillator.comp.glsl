@@ -3,6 +3,8 @@
 
 #version 460 core
 
+layout(local_size_x = 256) in;
+
 const uint no_wave       = 0;
 const uint sine_wave     = 1;
 const uint sawtooth_wave = 2;
@@ -12,18 +14,17 @@ const uint noise_wave    = 4;
 const float two_pi = 6.283185307179586;
 
 struct OscillatorParams {
+    uint  out_sound_offs;   // Offset of output sound data
     float phase;            // Initial phase value at first sample to render, 1 is equivalent to wave length
-    float phase_step;       // Phase step between samples, derived from wave and sampling frequencies
+    float phase_step;       // Phase step between samples, derived from oscillator's and sampling frequencies
     uint  osc_type[2];      // Two oscillator types
     float duty[2];          // Duty cycle for sawtooth and pulse oscillator [0..1]
     float osc_mix;          // Mixing between osc_type[0] and osc_type[1] [0..1]
 };
 
-layout(set = 0, binding = 0) buffer input_params { OscillatorParams params[]; };
+layout(set = 0, binding = 0) writeonly buffer data_buf { float data[]; };
 
-layout(set = 0, binding = 1) buffer output_data { float out_sound[]; };
-
-layout(local_size_x = 256) in;
+layout(set = 1, binding = 0, std430) readonly buffer param_buf { OscillatorParams params[]; };
 
 uint pcg_hash(uint state)
 {
@@ -32,10 +33,8 @@ uint pcg_hash(uint state)
     return (word >> 22u) ^ word;
 }
 
-float oscillator(uint osc_type, float duty)
+float oscillator(uint osc_type, float phase, float duty)
 {
-    float phase = params[gl_WorkGroupID.x].phase;
-
     if (osc_type == sine_wave) {
         return sin(two_pi * phase);
     }
@@ -64,28 +63,30 @@ float oscillator(uint osc_type, float duty)
         return (phase < duty) ? 1.0 : -1.0;
     }
     else { // noise_wave
-        const uint uvalue = pcg_hash(uint(floor(phase)) + gl_LocalInvocationID.x);
+        const uint uvalue = pcg_hash(uint(floor(phase * 3)));
         return (float(uvalue & 0xFFFFu) / 32767.5) - 1.0;
     }
 }
 
 void main()
 {
-    const float phase = params[gl_WorkGroupID.x].phase + params[gl_WorkGroupID.x].phase_step * gl_LocalInvocationID.x;
+    const OscillatorParams param = params[gl_WorkGroupID.x];
 
-    const uint  type1 = params[gl_WorkGroupID.x].osc_type[0];
-    const float duty1 = params[gl_WorkGroupID.x].duty[0];
+    const float phase = param.phase + param.phase_step * gl_LocalInvocationID.x;
 
-    float value = oscillator(type1, duty1);
+    const uint  type1 = param.osc_type[0];
+    const float duty1 = param.duty[0];
 
-    const uint type2 = params[gl_WorkGroupID.x].osc_type[1];
+    float value = oscillator(type1, phase, duty1);
+
+    const uint type2 = param.osc_type[1];
 
     if (type2 != no_wave) {
-        const float duty2   = params[gl_WorkGroupID.x].duty[1];
-        const float osc_mix = params[gl_WorkGroupID.x].osc_mix;
+        const float duty2   = param.duty[1];
+        const float osc_mix = param.osc_mix;
 
-        value = mix(value, oscillator(type2, duty2), osc_mix);
+        value = mix(value, oscillator(type2, phase, duty2), osc_mix);
     }
 
-    out_sound[gl_GlobalInvocationID.x] = value;
+    data[param.out_sound_offs + gl_LocalInvocationID.x] = value;
 }
