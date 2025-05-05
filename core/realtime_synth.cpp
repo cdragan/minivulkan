@@ -13,14 +13,14 @@
 #include "shaders.h"
 
 namespace {
-    // Host buffer which is filled with generated audio data
-    Buffer host_audio_output_buf;
+    enum BufferTypes: uint8_t {
+        data_buf,   // Device buffer which is used by effects etc.
+        param_buf,  // Dynamic device buffer with parameters for compute shaders etc.
+        output_buf, // Host buffer which is filled with generated audio data
+        num_buf_types
+    };
 
-    // Device buffer which is used by effects etc.
-    Buffer device_work_buf;
-
-    // Device buffer with parameters for compute shaders etc.
-    Buffer param_buf;
+    Buffer buffers[num_buf_types];
 
     // Vulkan command buffer used for the synth
     CommandBuffers<1> audio_cmd_buf;
@@ -153,23 +153,46 @@ namespace {
     VkPipelineLayout pipe_layouts[num_synth_pipes];
     VkPipeline       pipes[num_synth_pipes];
 
-    enum DescSets: uint8_t {
+    enum DescSetTypes: uint8_t {
         one_buffer_ds,
         two_buffers_ds,
         one_double_buffer_ds,
         num_desc_set_layouts
     };
 
+#   define DECLARE_DESC_SET(X)                         \
+        X(data_desc,          one_buffer_ds,        1) \
+        X(one_param_desc,     one_buffer_ds,        1) \
+        X(two_param_desc,     two_buffers_ds,       2) \
+        X(single_output_desc, one_buffer_ds,        1) \
+        X(double_output_desc, one_double_buffer_ds, 2) \
+
+    enum DescTypes: uint8_t {
+#       define X(name, type, num_buf_descs) name,
+        DECLARE_DESC_SET(X)
+#       undef X
+        num_desc_sets
+    };
+
     VkDescriptorSetLayout desc_set_layouts[num_desc_set_layouts];
+    VkDescriptorSet       desc_sets[num_desc_sets];
+
+    const DescSetTypes desc_set_types[] = {
+#       define X(name, type, num_buf_descs) type,
+        DECLARE_DESC_SET(X)
+#       undef X
+    };
+
+    static_assert(mstd::array_size(desc_sets) == mstd::array_size(desc_set_types));
 
     bool create_shaders()
     {
         static const DescSetBindingInfo bindings[] = {
-            { one_buffer_ds,        0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1 },
-            { two_buffers_ds,       0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1 },
-            { two_buffers_ds,       1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1 },
-            { one_double_buffer_ds, 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 2 },
-            { num_desc_set_layouts, 0, 0,                                 0 }
+            { one_buffer_ds,        0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC, 1 },
+            { two_buffers_ds,       0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC, 1 },
+            { two_buffers_ds,       1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC, 1 },
+            { one_double_buffer_ds, 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC, 2 },
+            { num_desc_set_layouts, 0, 0,                                         0 }
         };
 
         if ( ! create_compute_descriptor_set_layouts(bindings,
@@ -181,7 +204,7 @@ namespace {
 
         struct ShaderInfo {
             ComputeShaderInfo shader_info;
-            DescSets          desc_sets[max_desc_sets];
+            DescSetTypes      desc_sets[max_desc_sets];
         };
 
         static const ShaderInfo shaders[] = {
@@ -206,6 +229,7 @@ namespace {
                 },
                 { one_buffer_ds, two_buffers_ds }
             },
+            // TODO load only in builds which need it
             {
                 {
                     shader_synth_output_16_interlv_comp,
@@ -213,6 +237,7 @@ namespace {
                 },
                 { one_buffer_ds, one_buffer_ds }
             },
+            // TODO load only in builds which need it
             {
                 {
                     shader_synth_output_f32_separate_comp,
@@ -229,6 +254,7 @@ namespace {
 
             const VkDescriptorSetLayout ds_layouts[max_desc_sets + 1] = {
                 desc_set_layouts[shaders[i].desc_sets[0]],
+                // TODO add support for dynamic count of descriptor sets
                 desc_set_layouts[shaders[i].desc_sets[1]],
                 VK_NULL_HANDLE
             };
@@ -238,6 +264,104 @@ namespace {
                                          &pipe_layouts[i],
                                          &pipes[i]))
                 return false;
+        }
+
+        static VkDescriptorSetLayout layouts[num_desc_sets];
+
+        for (uint32_t i = 0; i < num_desc_sets; i++)
+            layouts[i] = desc_set_layouts[desc_set_types[i]];
+
+        static VkDescriptorSetAllocateInfo desc_set_alloc_info = {
+            VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+            nullptr,
+            VK_NULL_HANDLE, // descriptorPool
+            mstd::array_size(layouts),
+            layouts
+        };
+
+        {
+            static const VkDescriptorPoolSize pool_sizes[] = {
+                {
+                    VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC,
+                    0
+#                   define X(name, type, num_buf_descs) + num_buf_descs
+                    DECLARE_DESC_SET(X)
+#                   undef X
+                }
+            };
+
+            static const VkDescriptorPoolCreateInfo pool_create_info = {
+                VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+                nullptr,
+                0,              // flags
+                num_desc_sets,  // maxSets
+                mstd::array_size(pool_sizes),
+                pool_sizes
+            };
+
+            const VkResult res = CHK(vkCreateDescriptorPool(vk_dev,
+                                                            &pool_create_info,
+                                                            nullptr,
+                                                            &desc_set_alloc_info.descriptorPool));
+            if (res != VK_SUCCESS)
+                return false;
+        }
+        {
+            const VkResult res = CHK(vkAllocateDescriptorSets(vk_dev,
+                                                              &desc_set_alloc_info,
+                                                              desc_sets));
+            if (res != VK_SUCCESS)
+                return false;
+        }
+
+        struct DescSetAssignment {
+            DescTypes   desc_set_id;
+            uint8_t     binding;
+            uint8_t     array_elem;
+            BufferTypes buffer_id;
+        };
+
+        static const DescSetAssignment desc_assignments[] = {
+            { data_desc,          0, 0, data_buf   },
+            { one_param_desc,     0, 0, param_buf  },
+            { two_param_desc,     0, 0, param_buf  },
+            { two_param_desc,     1, 0, param_buf  },
+            { single_output_desc, 0, 0, output_buf },
+            { double_output_desc, 0, 0, output_buf },
+            { double_output_desc, 0, 1, output_buf },
+        };
+
+        for (const DescSetAssignment& assign : desc_assignments) {
+
+            static VkDescriptorBufferInfo buffer_info = {
+                VK_NULL_HANDLE,     // buffer
+                0,                  // offset
+                VK_WHOLE_SIZE       // range
+            };
+
+            static VkWriteDescriptorSet write_desc_set = {
+                VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                nullptr,
+                VK_NULL_HANDLE,                             // dstSet
+                0,                                          // dstBinding
+                0,                                          // dstArrayElement
+                1,                                          // descriptorCount
+                VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC,  // descriptorType
+                nullptr,                                    // pImageInfo
+                &buffer_info,                               // pBufferInfo
+                nullptr                                     // pTexelBufferView
+            };
+
+            buffer_info.buffer             = buffers[assign.buffer_id].get_buffer();
+            write_desc_set.dstSet          = desc_sets[assign.desc_set_id];
+            write_desc_set.dstBinding      = assign.binding;
+            write_desc_set.dstArrayElement = assign.array_elem;
+
+            vkUpdateDescriptorSets(vk_dev,
+                                   1,
+                                   &write_desc_set,
+                                   0,           // descriptorCopyCount
+                                   nullptr);    // pDescriptorCopies
         }
 
         return true;
@@ -256,9 +380,6 @@ bool Synth::init_synth()
         return false;
     }
 
-    if ( ! create_shaders())
-        return false;
-
     // TODO - use project-dependent audio length
     constexpr uint32_t seconds = 1;
     constexpr uint32_t sample_size = sizeof(float);
@@ -266,25 +387,28 @@ bool Synth::init_synth()
     constexpr VkDeviceSize device_buf_size = 1024 * 1024; // TODO
     constexpr VkDeviceSize param_buf_size  = 1024 * 1024; // TODO
 
-    if ( ! host_audio_output_buf.allocate(Usage::host_only,
-                                          output_buf_size,
-                                          VK_FORMAT_UNDEFINED,
-                                          VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-                                          { "host audio buffer" }))
+    if ( ! buffers[output_buf].allocate(Usage::host_only,
+                                        output_buf_size,
+                                        VK_FORMAT_UNDEFINED,
+                                        VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                                        { "host audio buffer" }))
         return false;
 
-    if ( ! device_work_buf.allocate(Usage::device_only,
-                                    device_buf_size,
-                                    VK_FORMAT_UNDEFINED,
-                                    VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-                                    { "audio work buffer" }))
+    if ( ! buffers[data_buf].allocate(Usage::device_only,
+                                      device_buf_size,
+                                      VK_FORMAT_UNDEFINED,
+                                      VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                                      { "audio work buffer" }))
         return false;
 
-    if ( ! param_buf.allocate(Usage::dynamic,
-                              param_buf_size,
-                              VK_FORMAT_UNDEFINED,
-                              VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
-                              { "audio param buffer" }))
+    if ( ! buffers[param_buf].allocate(Usage::dynamic,
+                                       param_buf_size,
+                                       VK_FORMAT_UNDEFINED,
+                                       VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                                       { "audio param buffer" }))
+        return false;
+
+    if ( ! create_shaders())
         return false;
 
     if ( ! allocate_command_buffers_once(&audio_cmd_buf, 1, compute_family_index))
@@ -652,7 +776,7 @@ static void render_audio_step()
 template<typename T, bool interleaved>
 static void copy_audio_step_to_host(uint32_t offset)
 {
-    const auto buf_ptr = StereoPtr<T, interleaved>::from_buffer(host_audio_output_buf);
+    const auto buf_ptr = StereoPtr<T, interleaved>::from_buffer(buffers[output_buf]);
     for (uint32_t i = 0; i < rt_step_samples; i++) {
         static float phase = 0;
         static const float frequency = 440.0f;
@@ -722,25 +846,25 @@ static bool render_audio(uint32_t num_samples)
     if ( ! send_to_device_and_wait(audio_cmd_buf, vk_compute_queue, fen_compute))
         return false;
 
-    host_audio_output_buf.invalidate();
+    buffers[output_buf].invalidate();
 
     return true;
 }
 
 template<typename T, bool interleaved>
-static bool render_audio_buffer(StereoPtr<T, interleaved> output_buf, uint32_t num_samples)
+static bool render_audio_buffer(StereoPtr<T, interleaved> stereo_ptr, uint32_t num_samples)
 {
     static uint32_t consumed_samples;
     static uint32_t remaining_samples;
 
-    const auto rendered_src = StereoPtr<T, interleaved>::from_buffer(host_audio_output_buf);
+    const auto rendered_src = StereoPtr<T, interleaved>::from_buffer(buffers[output_buf]);
 
     if (remaining_samples) {
         const uint32_t to_copy = mstd::min(remaining_samples, num_samples);
 
-        copy_audio_data(output_buf, rendered_src + consumed_samples, to_copy);
+        copy_audio_data(stereo_ptr, rendered_src + consumed_samples, to_copy);
 
-        output_buf        += to_copy;
+        stereo_ptr        += to_copy;
         num_samples       -= to_copy;
         remaining_samples -= to_copy;
         consumed_samples  += to_copy;
@@ -754,7 +878,7 @@ static bool render_audio_buffer(StereoPtr<T, interleaved> output_buf, uint32_t n
         return false;
 
     const uint32_t to_copy = mstd::min(to_render, num_samples);
-    copy_audio_data(output_buf, rendered_src, to_copy);
+    copy_audio_data(stereo_ptr, rendered_src, to_copy);
 
     if (to_render > to_copy) {
         consumed_samples  = to_copy;
