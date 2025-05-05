@@ -55,10 +55,6 @@ namespace {
     // Current number of active voice waveforms
     uint32_t num_waveforms;
 
-    VkPipeline       oscillator_pipeline;
-    VkPipelineLayout oscillator_pipeline_layout;
-    VkDescriptorSet  oscillator_desc_set;
-
     // Fixed-point constants, parameters use fixed-point numbers with 32768 corresponding to 1.0
     // constexpr int32_t fxp_one = 32768;  // 1.0
     // constexpr int32_t fxp_pi  = 102944; // pi
@@ -77,6 +73,301 @@ namespace {
     };
 
     Voice voices[max_voices];
+
+    enum WaveType : uint32_t {
+        // Wave disabled - for WaveState that can only be wave_type[1]
+        no_wave,
+        // Normal sine wave, duty is ignored
+        sine_wave,
+        // Sawtooth wave
+        //
+        // |\  duty=0    /\ duty=0.5           duty=1  /|
+        // | \          /  \ (triangle wave)          / |
+        // |  \             \  /                     /  |
+        // |   \             \/                     /   |
+        sawtooth_wave,
+        // Pulse wave
+        //
+        // | duty=0   +--+ duty=0.5        duty=1 |
+        // |          |  | (square wave)          |
+        // |             |  |                     |
+        // +---          +--+              -------+
+        pulse_wave,
+        // White noise
+        noise_wave
+    };
+
+    namespace ShaderParams {
+
+        // Note: These defintions must match the structs inside the shaders
+
+        // synth_oscillator shader
+        struct Oscillator {
+            uint32_t out_sound_offs;
+            float    phase;
+            float    phase_step;
+            WaveType osc_type[2];
+            float    duty[2];
+            float    osc_mix;
+        };
+
+        // synth_fir shader
+        struct FIR {
+            uint32_t fir_memory_offs;
+            uint32_t taps_offs;
+            uint32_t in_sound_offs;
+            uint32_t out_sound_offs;
+        };
+
+        // synth_chan_combine shader (binding 0)
+        struct ChannelCombineInput {
+            uint32_t in_sound_offs;
+            float    old_volume;
+            float    volume;
+            float    old_panning;
+            float    panning;
+        };
+
+        // synth_chan_combine shader (binding 1)
+        struct ChannelCombine {
+            uint32_t out_sound_offs;
+            uint32_t input_params_offs;
+            uint32_t num_inputs;
+        };
+
+        // synth_output_* shaders
+        struct OutputPushConst {
+            uint32_t in_sound_offs;
+        };
+    }
+
+    enum SynthPipelines {
+        oscillator_pipe,
+        fir_pipe,
+        chan_combine_pipe,
+        output_16i_pipe,
+        output_32f_pipe,
+        num_synth_pipes
+    };
+
+    VkPipelineLayout pipe_layouts[num_synth_pipes];
+    VkPipeline       pipes[num_synth_pipes];
+
+    struct DescSetBindingInfo {
+        uint8_t set_layout_id;
+        uint8_t binding;
+        uint8_t desc_type;
+        uint8_t desc_count;
+    };
+
+    bool create_compute_descriptor_set_layouts(const DescSetBindingInfo* binding_desc,
+                                               uint32_t                  num_layouts,
+                                               VkDescriptorSetLayout*    out_layouts)
+    {
+        for (uint32_t i = 0; i < num_layouts; i++) {
+
+            static VkDescriptorSetLayoutBinding create_binding[4] = { };
+
+            static VkDescriptorSetLayoutCreateInfo create_info = {
+                VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+                nullptr,
+                0,       // flags
+                0,       // bindingCount
+                create_binding
+            };
+
+            uint32_t num_bindings = 0;
+            while (binding_desc->set_layout_id == i) {
+
+                assert(num_bindings < mstd::array_size(create_binding));
+
+                create_binding[num_bindings].binding         = binding_desc->binding;
+                create_binding[num_bindings].descriptorType  = static_cast<VkDescriptorType>(binding_desc->desc_type);
+                create_binding[num_bindings].descriptorCount = binding_desc->desc_count;
+                create_binding[num_bindings].stageFlags      = VK_SHADER_STAGE_COMPUTE_BIT;
+
+                ++num_bindings;
+                ++binding_desc;
+            }
+
+            create_info.bindingCount = num_bindings;
+
+            const VkResult res = CHK(vkCreateDescriptorSetLayout(vk_dev,
+                                                                 &create_info,
+                                                                 nullptr,
+                                                                 &out_layouts[i]));
+            if (res != VK_SUCCESS)
+                return res;
+        }
+
+        return true;
+    }
+
+    struct ComputeShaderInfo {
+        uint8_t* shader;
+        uint8_t  num_push_constants;
+    };
+
+    bool create_compute_shader(const ComputeShaderInfo&     shader_desc,
+                               const VkDescriptorSetLayout* desc_set_layouts,
+                               VkPipelineLayout*            out_pipe_layout,
+                               VkPipeline*                  out_pipe)
+    {
+        VkResult res;
+
+        static VkPushConstantRange push_range = {
+            VK_SHADER_STAGE_COMPUTE_BIT,
+            0,  // offset
+            0   // size
+        };
+
+        static VkPipelineLayoutCreateInfo layout_create_info = {
+            VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+            nullptr,
+            0,          // flags
+            0,          // setLayoutCount
+            nullptr,    // pSetLayouts
+            0,          // pushConstantRangeCount
+            &push_range
+        };
+
+        uint32_t num_desc_sets = 0;
+        while (desc_set_layouts[num_desc_sets])
+            ++num_desc_sets;
+
+        push_range.size                           = shader_desc.num_push_constants * 4;
+        layout_create_info.pushConstantRangeCount = shader_desc.num_push_constants ? 1 : 0;
+        layout_create_info.setLayoutCount         = num_desc_sets;
+        layout_create_info.pSetLayouts            = desc_set_layouts;
+
+        res = CHK(vkCreatePipelineLayout(vk_dev,
+                                         &layout_create_info,
+                                         nullptr,
+                                         out_pipe_layout));
+        if (res != VK_SUCCESS)
+            return false;
+
+        static VkComputePipelineCreateInfo pipeline_create_info =
+        {
+            VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
+            nullptr,
+            0,                  // flags
+            {
+                VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+                nullptr,
+                0,              // flags
+                VK_SHADER_STAGE_COMPUTE_BIT,
+                VK_NULL_HANDLE, // module
+                "main",
+                nullptr         // pSpecializationInfo
+            },
+            VK_NULL_HANDLE,     // layout
+            VK_NULL_HANDLE,     // basePipelineHandle
+            0                   // basePipelineIndex
+        };
+
+        pipeline_create_info.stage.module = load_shader(shader_desc.shader);
+        pipeline_create_info.layout       = *out_pipe_layout;
+
+        res = CHK(vkCreateComputePipelines(vk_dev,
+                                           VK_NULL_HANDLE,
+                                           1,
+                                           &pipeline_create_info,
+                                           nullptr,
+                                           out_pipe));
+        return res == VK_SUCCESS;
+    }
+
+    enum DescSets: uint8_t {
+        one_buffer_ds,
+        two_buffers_ds,
+        one_double_buffer_ds,
+        num_desc_set_layouts
+    };
+
+    VkDescriptorSetLayout desc_set_layouts[num_desc_set_layouts];
+
+    bool create_shaders()
+    {
+        static const DescSetBindingInfo bindings[] = {
+            { one_buffer_ds,        0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1 },
+            { two_buffers_ds,       0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1 },
+            { two_buffers_ds,       1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1 },
+            { one_double_buffer_ds, 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 2 },
+            { num_desc_set_layouts, 0, 0,                                 0 }
+        };
+
+        if ( ! create_compute_descriptor_set_layouts(bindings,
+                                                     num_desc_set_layouts,
+                                                     desc_set_layouts))
+            return false;
+
+        static constexpr uint32_t max_desc_sets = 2;
+
+        struct ShaderInfo {
+            ComputeShaderInfo shader_info;
+            DescSets          desc_sets[max_desc_sets];
+        };
+
+        static const ShaderInfo shaders[] = {
+            {
+                {
+                    shader_synth_oscillator_comp,
+                    0,
+                },
+                { one_buffer_ds, one_buffer_ds }
+            },
+            {
+                {
+                    shader_synth_fir_comp,
+                    0,
+                },
+                { one_buffer_ds, one_buffer_ds }
+            },
+            {
+                {
+                    shader_synth_chan_combine_comp,
+                    0,
+                },
+                { one_buffer_ds, two_buffers_ds }
+            },
+            {
+                {
+                    shader_synth_output_16_interlv_comp,
+                    1,
+                },
+                { one_buffer_ds, one_buffer_ds }
+            },
+            {
+                {
+                    shader_synth_output_f32_separate_comp,
+                    1,
+                },
+                { one_buffer_ds, one_double_buffer_ds }
+            }
+        };
+
+        assert(mstd::array_size(shaders) == mstd::array_size(pipes));
+        assert(mstd::array_size(pipes) == num_synth_pipes);
+
+        for (uint32_t i = 0; i < num_synth_pipes; i++) {
+
+            const VkDescriptorSetLayout ds_layouts[max_desc_sets + 1] = {
+                desc_set_layouts[shaders[i].desc_sets[0]],
+                desc_set_layouts[shaders[i].desc_sets[1]],
+                VK_NULL_HANDLE
+            };
+
+            if ( ! create_compute_shader(shaders[i].shader_info,
+                                         ds_layouts,
+                                         &pipe_layouts[i],
+                                         &pipes[i]))
+                return false;
+        }
+
+        return true;
+    }
+
 }
 
 namespace Synth {
@@ -90,7 +381,7 @@ bool Synth::init_synth()
         return false;
     }
 
-    if ( ! init_synth_os())
+    if ( ! create_shaders())
         return false;
 
     // TODO - use project-dependent audio length
@@ -124,33 +415,11 @@ bool Synth::init_synth()
     if ( ! allocate_command_buffers_once(&audio_cmd_buf, 1, compute_family_index))
         return false;
 
-    load_shader(shader_synth_oscillator_comp);
+    if ( ! init_synth_os())
+        return false;
 
     return true;
 }
-
-enum WaveType : uint32_t {
-    // Wave disabled - for WaveState that can only be wave_type[1]
-    no_wave,
-    // Normal sine wave, duty is ignored
-    sine_wave,
-    // Sawtooth wave
-    //
-    // |\  duty=0    /\ duty=0.5           duty=1  /|
-    // | \          /  \ (triangle wave)          / |
-    // |  \             \  /                     /  |
-    // |   \             \/                     /   |
-    sawtooth_wave,
-    // Pulse wave
-    //
-    // | duty=0   +--+ duty=0.5        duty=1 |
-    // |          |  | (square wave)          |
-    // |             |  |                     |
-    // +---          +--+              -------+
-    pulse_wave,
-    // White noise
-    noise_wave
-};
 
 using ParamIndex = uint32_t;
 

@@ -16,37 +16,42 @@ struct InputParams {
     float panning;
 };
 
+struct Params {
+    uint out_sound_offs;
+    uint input_params_offs;
+    uint num_inputs;
+};
+
 layout(set = 0, binding = 0) buffer data_buf { float data[]; };
 
 layout(set = 1, binding = 0, std430) readonly buffer input_param_buf { InputParams input_params[]; };
 
-layout(push_constant) uniform push {
-    uint out_sound_offs;
-    uint num_inputs;
-};
+layout(set = 1, binding = 1, std430) readonly buffer param_buf { Params params[]; };
 
 void main()
 {
+    const Params param = params[gl_WorkGroupID.x];
+
     float left_value  = 0;
     float right_value = 0;
 
-    for (uint i = 0; i < num_inputs; i++) {
-        const InputParams param = input_params[i];
+    for (uint i = 0; i < param.num_inputs; i++) {
+        const InputParams input_param = input_params[param.input_params_offs + i];
 
         // Read input sound data
-        float value = data[param.in_sound_offs + gl_LocalInvocationID.x];
+        float value = data[input_param.in_sound_offs + gl_LocalInvocationID.x];
 
         // Calculate multipliers with smooth adjustment
         float multiplier;
         float panning;
         if (gl_LocalInvocationID.x < volume_adjustment_samples) {
             const float step = float(gl_LocalInvocationID.x + 1) / float(volume_adjustment_samples);
-            multiplier = mix(param.old_volume,  param.volume,  step);
-            panning    = mix(param.old_panning, param.panning, step);
+            multiplier = mix(input_param.old_volume,  input_param.volume,  step);
+            panning    = mix(input_param.old_panning, input_param.panning, step);
         }
         else {
-            multiplier = param.volume;
-            panning    = param.panning;
+            multiplier = input_param.volume;
+            panning    = input_param.panning;
         }
 
         // Apply volume
@@ -58,6 +63,6 @@ void main()
         right_value += sin(theta) * value;
     }
 
-    data[out_sound_offs + gl_LocalInvocationID.x * 2]     = left_value;
-    data[out_sound_offs + gl_LocalInvocationID.x * 2 + 1] = right_value;
+    data[param.out_sound_offs + gl_LocalInvocationID.x * 2]     = left_value;
+    data[param.out_sound_offs + gl_LocalInvocationID.x * 2 + 1] = right_value;
 }

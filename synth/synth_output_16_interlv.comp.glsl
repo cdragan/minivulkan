@@ -17,7 +17,7 @@ layout(push_constant) uniform param_buf {
 
 int16_t convert(float value)
 {
-    return int16_t(int(value * 32767.0));
+    return int16_t(int(clamp(value, -1.0, 1.0) * 32767.0));
 }
 
 void main()

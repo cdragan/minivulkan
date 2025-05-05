@@ -15,6 +15,6 @@ layout(push_constant) uniform param_buf {
 
 void main()
 {
-    chan[0].output_data[gl_LocalInvocationID.x] = data[in_sound_offs + gl_LocalInvocationID.x * 2];
-    chan[1].output_data[gl_LocalInvocationID.x] = data[in_sound_offs + gl_LocalInvocationID.x * 2 + 1];
+    chan[0].output_data[gl_LocalInvocationID.x] = clamp(data[in_sound_offs + gl_LocalInvocationID.x * 2],     -1.0, 1.0);
+    chan[1].output_data[gl_LocalInvocationID.x] = clamp(data[in_sound_offs + gl_LocalInvocationID.x * 2 + 1], -1.0, 1.0);
 }
