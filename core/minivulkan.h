@@ -221,4 +221,27 @@ void send_viewport_and_scissor(VkCommandBuffer cmd_buf,
                                uint32_t        viewport_width,
                                uint32_t        viewport_height);
 
+VkShaderModule load_shader(uint8_t* shader);
+
+struct DescSetBindingInfo {
+    uint8_t set_layout_id;
+    uint8_t binding;
+    uint8_t desc_type;
+    uint8_t desc_count;
+};
+
+bool create_compute_descriptor_set_layouts(const DescSetBindingInfo* binding_desc,
+                                           uint32_t                  num_layouts,
+                                           VkDescriptorSetLayout*    out_layouts);
+
+struct ComputeShaderInfo {
+    uint8_t* shader;
+    uint8_t  num_push_constants;
+};
+
+bool create_compute_shader(const ComputeShaderInfo&     shader_desc,
+                           const VkDescriptorSetLayout* desc_set_layouts,
+                           VkPipelineLayout*            out_pipe_layout,
+                           VkPipeline*                  out_pipe);
+
 #endif // __cplusplus

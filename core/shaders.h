@@ -8,5 +8,3 @@
 #define X(shader) extern uint8_t shader_##shader[];
 DEFINE_SHADERS(X)
 #undef X
-
-VkShaderModule load_shader(uint8_t* shader);

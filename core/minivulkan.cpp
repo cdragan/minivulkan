@@ -1313,6 +1313,119 @@ void send_viewport_and_scissor(VkCommandBuffer cmd_buf,
                               viewport_height);
 }
 
+bool create_compute_descriptor_set_layouts(const DescSetBindingInfo* binding_desc,
+                                           uint32_t                  num_layouts,
+                                           VkDescriptorSetLayout*    out_layouts)
+{
+    for (uint32_t i = 0; i < num_layouts; i++) {
+
+        static VkDescriptorSetLayoutBinding create_binding[4] = { };
+
+        static VkDescriptorSetLayoutCreateInfo create_info = {
+            VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+            nullptr,
+            0,       // flags
+            0,       // bindingCount
+            create_binding
+        };
+
+        uint32_t num_bindings = 0;
+        while (binding_desc->set_layout_id == i) {
+
+            assert(num_bindings < mstd::array_size(create_binding));
+
+            create_binding[num_bindings].binding         = binding_desc->binding;
+            create_binding[num_bindings].descriptorType  = static_cast<VkDescriptorType>(binding_desc->desc_type);
+            create_binding[num_bindings].descriptorCount = binding_desc->desc_count;
+            create_binding[num_bindings].stageFlags      = VK_SHADER_STAGE_COMPUTE_BIT;
+
+            ++num_bindings;
+            ++binding_desc;
+        }
+
+        create_info.bindingCount = num_bindings;
+
+        const VkResult res = CHK(vkCreateDescriptorSetLayout(vk_dev,
+                                                             &create_info,
+                                                             nullptr,
+                                                             &out_layouts[i]));
+        if (res != VK_SUCCESS)
+            return res;
+    }
+
+    return true;
+}
+
+bool create_compute_shader(const ComputeShaderInfo&     shader_desc,
+                           const VkDescriptorSetLayout* desc_set_layouts,
+                           VkPipelineLayout*            out_pipe_layout,
+                           VkPipeline*                  out_pipe)
+{
+    VkResult res;
+
+    static VkPushConstantRange push_range = {
+        VK_SHADER_STAGE_COMPUTE_BIT,
+        0,  // offset
+        0   // size
+    };
+
+    static VkPipelineLayoutCreateInfo layout_create_info = {
+        VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+        nullptr,
+        0,          // flags
+        0,          // setLayoutCount
+        nullptr,    // pSetLayouts
+        0,          // pushConstantRangeCount
+        &push_range
+    };
+
+    uint32_t num_desc_sets = 0;
+    while (desc_set_layouts[num_desc_sets])
+        ++num_desc_sets;
+
+    push_range.size                           = shader_desc.num_push_constants * 4;
+    layout_create_info.pushConstantRangeCount = shader_desc.num_push_constants ? 1 : 0;
+    layout_create_info.setLayoutCount         = num_desc_sets;
+    layout_create_info.pSetLayouts            = desc_set_layouts;
+
+    res = CHK(vkCreatePipelineLayout(vk_dev,
+                                     &layout_create_info,
+                                     nullptr,
+                                     out_pipe_layout));
+    if (res != VK_SUCCESS)
+        return false;
+
+    static VkComputePipelineCreateInfo pipeline_create_info =
+    {
+        VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
+        nullptr,
+        0,                  // flags
+        {
+            VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+            nullptr,
+            0,              // flags
+            VK_SHADER_STAGE_COMPUTE_BIT,
+            VK_NULL_HANDLE, // module
+            "main",
+            nullptr         // pSpecializationInfo
+        },
+        VK_NULL_HANDLE,     // layout
+        VK_NULL_HANDLE,     // basePipelineHandle
+        0                   // basePipelineIndex
+    };
+
+    pipeline_create_info.stage.module = load_shader(shader_desc.shader);
+    pipeline_create_info.layout       = *out_pipe_layout;
+
+    res = CHK(vkCreateComputePipelines(vk_dev,
+                                       VK_NULL_HANDLE,
+                                       1,
+                                       &pipeline_create_info,
+                                       nullptr,
+                                       out_pipe));
+    return res == VK_SUCCESS;
+}
+
 #if !defined(NDEBUG) || defined(TIME_STATS)
 static void update_time_stats(uint64_t draw_start_time_ms)
 {
