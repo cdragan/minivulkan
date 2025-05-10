@@ -6,7 +6,6 @@
 #include "minivulkan.h"
 #include "mstdc.h"
 #include "resource.h"
-#include "vmath.h"
 #include <math.h>
 
 #include "synth_shaders.h"
@@ -51,11 +50,6 @@ namespace {
 
     // Maximum number of parameters per voice channel (single instrument note)
     constexpr uint32_t max_parameters = 16;
-
-    // Fixed-point constants, parameters use fixed-point numbers with 32768 corresponding to 1.0
-    // constexpr int32_t fxp_one = 32768;  // 1.0
-    // constexpr int32_t fxp_pi  = 102944; // pi
-    // constexpr int32_t fxp_2pi = 205887; // 2.0 * pi
 
     enum Parameters {
         param_cur_amplitude
@@ -840,7 +834,6 @@ static void render_audio_step()
                         mix_channels[0].chan_output_offs,
                         sizeof(float) * 2 * rt_step_samples,
                         0); // data
-        // TODO apply master effects even if there are zero oscillators
         return;
     }
 
