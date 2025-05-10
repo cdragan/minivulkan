@@ -203,6 +203,10 @@ bool MemoryAllocator::init_heaps(VkDeviceSize device_heap_size,
                 str_append(info, "host_coherent, ");
             if (property_flags & VK_MEMORY_PROPERTY_HOST_CACHED_BIT)
                 str_append(info, "host_cached, ");
+            if (property_flags & VK_MEMORY_PROPERTY_LAZILY_ALLOCATED_BIT)
+                str_append(info, "lazily_allocated, ");
+            if (property_flags & VK_MEMORY_PROPERTY_PROTECTED_BIT)
+                str_append(info, "protected, ");
             if (info[0])
                 info[mstd::strlen(info) - 2] = 0;
             d_printf("    type %u: flags 0x%x (%s)\n",
