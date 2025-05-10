@@ -52,9 +52,6 @@ namespace {
     // Maximum number of parameters per voice channel (single instrument note)
     constexpr uint32_t max_parameters = 16;
 
-    // Current number of active voice waveforms
-    uint32_t num_waveforms;
-
     // Fixed-point constants, parameters use fixed-point numbers with 32768 corresponding to 1.0
     // constexpr int32_t fxp_one = 32768;  // 1.0
     // constexpr int32_t fxp_pi  = 102944; // pi
@@ -75,7 +72,7 @@ namespace {
     Voice voices[max_voices];
 
     enum WaveType : uint32_t {
-        // Wave disabled - for WaveState that can only be wave_type[1]
+        // Wave disabled
         no_wave,
         // Normal sine wave, duty is ignored
         sine_wave,
@@ -109,14 +106,10 @@ namespace {
             WaveType osc_type[2];
             float    duty[2];
             float    osc_mix;
-        };
 
-        // synth_fir shader
-        struct FIR {
+            // Optional filter parameters
             uint32_t fir_memory_offs;
             uint32_t taps_offs;
-            uint32_t in_sound_offs;
-            uint32_t out_sound_offs;
         };
 
         // synth_chan_combine shader (binding 0)
@@ -143,7 +136,6 @@ namespace {
 
     enum SynthPipelines {
         oscillator_pipe,
-        fir_pipe,
         chan_combine_pipe,
         output_16i_pipe,
         output_32f_pipe,
@@ -211,13 +203,6 @@ namespace {
             {
                 {
                     shader_synth_oscillator_comp,
-                    0,
-                },
-                { one_buffer_ds, one_buffer_ds }
-            },
-            {
-                {
-                    shader_synth_fir_comp,
                     0,
                 },
                 { one_buffer_ds, one_buffer_ds }
@@ -315,20 +300,23 @@ namespace {
         }
 
         struct DescSetAssignment {
-            DescTypes   desc_set_id;
-            uint8_t     binding;
-            uint8_t     array_elem;
-            BufferTypes buffer_id;
+            DescTypes    desc_set_id;
+            uint8_t      binding;
+            uint8_t      array_elem;
+            BufferTypes  buffer_id;
+            VkDeviceSize max_range;
         };
 
+        constexpr uint32_t max_param_range = sizeof(ShaderParams::Oscillator) * 256;
+
         static const DescSetAssignment desc_assignments[] = {
-            { data_desc,          0, 0, data_buf   },
-            { one_param_desc,     0, 0, param_buf  },
-            { two_param_desc,     0, 0, param_buf  },
-            { two_param_desc,     1, 0, param_buf  },
-            { single_output_desc, 0, 0, output_buf },
-            { double_output_desc, 0, 0, output_buf },
-            { double_output_desc, 0, 1, output_buf },
+            { data_desc,          0, 0, data_buf,   VK_WHOLE_SIZE },
+            { one_param_desc,     0, 0, param_buf,  max_param_range },
+            { two_param_desc,     0, 0, param_buf,  max_param_range },
+            { two_param_desc,     1, 0, param_buf,  max_param_range },
+            { single_output_desc, 0, 0, output_buf, sizeof(int16_t) * 2 * rt_step_samples },
+            { double_output_desc, 0, 0, output_buf, sizeof(float) * rt_step_samples },
+            { double_output_desc, 0, 1, output_buf, sizeof(float) * rt_step_samples },
         };
 
         for (const DescSetAssignment& assign : desc_assignments) {
@@ -336,7 +324,7 @@ namespace {
             static VkDescriptorBufferInfo buffer_info = {
                 VK_NULL_HANDLE,     // buffer
                 0,                  // offset
-                VK_WHOLE_SIZE       // range
+                0                   // range
             };
 
             static VkWriteDescriptorSet write_desc_set = {
@@ -353,6 +341,7 @@ namespace {
             };
 
             buffer_info.buffer             = buffers[assign.buffer_id].get_buffer();
+            buffer_info.range              = assign.max_range;
             write_desc_set.dstSet          = desc_sets[assign.desc_set_id];
             write_desc_set.dstBinding      = assign.binding;
             write_desc_set.dstArrayElement = assign.array_elem;
@@ -367,10 +356,90 @@ namespace {
         return true;
     }
 
+    uint32_t allocator_data_offs;
+
+    uint32_t allocate_data(uint32_t data_size)
+    {
+        const uint32_t offset = allocator_data_offs;
+
+        const uint32_t alignment = static_cast<uint32_t>(
+                vk_phys_props.properties.limits.minStorageBufferOffsetAlignment);
+
+        allocator_data_offs = mstd::align_up(allocator_data_offs + data_size, alignment);
+
+        return offset;
+    }
+
+    uint32_t allocator_param_offs;
+
+    uint32_t allocate_param(uint32_t param_size)
+    {
+        const uint32_t offset = allocator_param_offs;
+
+        const uint32_t alignment = static_cast<uint32_t>(
+                vk_phys_props.properties.limits.minStorageBufferOffsetAlignment);
+
+        allocator_param_offs = mstd::align_up(allocator_param_offs + param_size, alignment);
+
+        return offset;
+    }
+
+    template<typename T>
+    T& get_param(uint32_t offset)
+    {
+        return *buffers[param_buf].get_ptr<T>(offset);
+    }
+
+    struct Oscillator {
+        // Constants which don't change for this oscillator's instance's life time
+        uint32_t midi_channel;      // MIDI channel on which this note was played
+        uint32_t output_channel;    // Output (mixing) channel for this MIDI channel/note
+        uint32_t note;              // MIDI note
+        uint32_t freq_mult;         // Frequency multiplier for component frequencies (1 for base frequency)
+        WaveType osc_type[2];       // Two oscillator types
+        uint32_t osc_output_offs;   // Oscillator data output offset
+        uint32_t fir_memory_offs;   // FIR filter memory offset
+        uint32_t fir_taps_offs;     // FIR filter taps offset
+
+        // Current values
+        float    phase;             // Current position of the oscillator
+        float    old_volume;        // Previous volume
+        float    old_panning;       // Previous panning
+
+        // Values from LFOs, envelopes, notes and instrument constants
+        float    volume;            // Current volume
+        float    panning;           // Current panning
+        float    pitch;             // Pitch adjustment in semitones = (midi_pitch_bend - 8192) / 4096
+        float    duty[2];           // Duty cycle for sawtooth and pulse oscillator (0..1)
+        float    osc_mix;           // Mix between osc_type[0] and osc_type[1] (0..1)
+    };
+    static Oscillator oscillators[10];
+
+    static constexpr uint32_t max_mix_channels = 8;
+
+    struct Channel {
+        uint32_t chan_output_offs;  // Channel data output offset
+    };
+    static Channel mix_channels[max_mix_channels];
 }
 
 namespace Synth {
     bool init_synth_os();
+}
+
+static void temp_init_osc_and_channel()
+{
+    allocator_data_offs = 0;
+
+    mix_channels[0].chan_output_offs = allocate_data(sizeof(float) * rt_step_samples * 2);
+
+    Oscillator& osc = oscillators[0];
+    osc.note = 69; // 69=A4
+    osc.freq_mult = 1;
+    osc.osc_type[0] = sine_wave;
+    osc.osc_output_offs = allocate_data(sizeof(float) * rt_step_samples);
+    osc.volume = 1.0;
+    osc.panning = 0.5;
 }
 
 bool Synth::init_synth()
@@ -379,6 +448,8 @@ bool Synth::init_synth()
         d_printf("No async compute queue available for synth\n");
         return false;
     }
+
+    temp_init_osc_and_channel();
 
     // TODO - use project-dependent audio length
     constexpr uint32_t seconds = 1;
@@ -397,7 +468,7 @@ bool Synth::init_synth()
     if ( ! buffers[data_buf].allocate(Usage::device_only,
                                       device_buf_size,
                                       VK_FORMAT_UNDEFINED,
-                                      VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                                      VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
                                       { "audio work buffer" }))
         return false;
 
@@ -419,49 +490,6 @@ bool Synth::init_synth()
 
     return true;
 }
-
-using ParamIndex = uint32_t;
-
-struct WaveState {
-    WaveType   wave_type[2];
-    ParamIndex duty[2];     // Duty for sawtooth or pulse
-    ParamIndex wave_mix;    // Amount of mixing between 2 waves
-    ParamIndex amplitude;   // Wave amplitude
-    ParamIndex pitch_adj;   // Pitch adjustment
-    float      pitch_base;  // Base pitch from note
-    float      phase;       // Current phase
-};
-
-enum ParamType : uint32_t {
-    const_param,            // Constant, fixed value
-    adsr_param,             // Envelope
-    lfo_param               // Low frequency oscillator
-};
-
-struct ParamState {
-    ParamIndex param;       // Index of global parameter description/config
-    float      value;       // Current value (e.g. LFO)
-    float      phase;       // Current phase step for ADSR/LFO
-};
-
-struct Parameter {
-    ParamType param_type;
-    union {
-        float        const_value;
-        struct {
-            uint32_t duration_ms[4]; // Attack, decay, sustain, release
-            float    value[4];       // Init, peak, sustain, end
-        } adsr;
-        struct {
-            WaveType wave_type;
-            float    duty;
-            uint32_t freq_hz;
-            float    value[2];  // Min, max
-        } lfo;
-    } param;
-};
-
-// TODO filter
 
 // Template boilerplate to support different output audio buffer types,
 // for example float non-interleaved or int16_t interleaved.
@@ -723,27 +751,48 @@ static void process_events(uint32_t start_samples, uint32_t end_samples)
     }
 }
 
-static void render_oscillators()
+struct CachedBufferAccessStage {
+    VkAccessFlags        access = 0;
+    VkPipelineStageFlags stage  = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+};
+
+static CachedBufferAccessStage cached_stage[num_buf_types];
+
+static void buffer_barrier(BufferTypes          buf_id,
+                           VkAccessFlags        dst_access,
+                           VkPipelineStageFlags dst_stage)
 {
-    // for (active oscillator) {
-    //     set next offset;
-    //     update params;
-    // }
+    static VkBufferMemoryBarrier buf_barrier = {
+        VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
+        nullptr,
+        VK_ACCESS_NONE,
+        VK_ACCESS_NONE,
+        0,
+        0,
+        VK_NULL_HANDLE,
+        0,
+        VK_WHOLE_SIZE
+    };
 
-#if 0
-    vkCmdBindPipeline(audio_cmd_buf, VK_PIPELINE_BIND_POINT_COMPUTE, oscillator_pipeline);
+    buf_barrier.srcAccessMask       = cached_stage[buf_id].access;
+    buf_barrier.dstAccessMask       = dst_access;
+    buf_barrier.srcQueueFamilyIndex = compute_family_index;
+    buf_barrier.dstQueueFamilyIndex = compute_family_index;
+    buf_barrier.buffer              = buffers[buf_id].get_buffer();
 
-    vkCmdBindDescriptorSets(audio_cmd_buf,
-                            VK_PIPELINE_BIND_POINT_COMPUTE,
-                            oscillator_pipeline_layout,
-                            0,          // firstSet
-                            1,          // descriptorSetCount
-                            &oscillator_desc_set,
-                            0,          // dynamicOffsetCount
-                            nullptr);   // pDynamicOffsets
+    vkCmdPipelineBarrier(audio_cmd_buf,
+                         cached_stage[buf_id].stage,
+                         dst_stage,
+                         0,             // dependencyFlags
+                         0,             // memoryBarrierCount
+                         nullptr,       // pMemoryBarriers
+                         1,             // bufferMemoryBarrierCount
+                         &buf_barrier,
+                         0,             // imageMemoryBarrierCount
+                         nullptr);      // pImageMemoryBarriers
 
-    vkCmdDispatch(audio_cmd_buf, num_waveforms, 1, 1);
-#endif
+    cached_stage[buf_id].access = dst_access;
+    cached_stage[buf_id].stage  = dst_stage;
 }
 
 static void render_audio_step()
@@ -755,79 +804,288 @@ static void render_audio_step()
 
     process_events(start_samples, end_samples);
 
-    //update_lfos();
+    // TODO update_lfos();
 
-    //update_filters();
+    // TODO update_filters();
 
-    render_oscillators();
+    // ======================================================================
 
-    //apply_waveform_filters();
+    uint32_t num_oscillators  = 0;
+    uint32_t num_mix_channels = 0;
+    uint32_t channel_osc_count[max_mix_channels] = { };
 
-    //add_waveforms_to_channel();
+    for (const Oscillator& oscillator : oscillators) {
+        if ( ! oscillator.osc_type[0])
+            continue;
 
-    //apply_channel_filters();
+        ++num_oscillators;
 
-    //add_channels();
-
-    //apply_master_filters();
-}
-
-#if 1
-template<typename T, bool interleaved>
-static void copy_audio_step_to_host(uint32_t offset)
-{
-    const auto buf_ptr = StereoPtr<T, interleaved>::from_buffer(buffers[output_buf]);
-    for (uint32_t i = 0; i < rt_step_samples; i++) {
-        static float phase = 0;
-        static const float frequency = 440.0f;
-
-        buf_ptr.left[offset + i]  = sinf(phase);
-        buf_ptr.right[offset + i] = sinf(phase + vmath::pi);
-
-        phase += 2.0f * vmath::pi * frequency / Synth::rt_sampling_rate;
-
-        if (phase > 2.0f * vmath::pi)
-            phase -= 2.0f * vmath::pi;
-    }
-}
+        // Channel 0 is master channel
+        // TODO uncomment
+#if 0
+        assert(oscillator.output_channel);
 #else
-namespace {
-    template<typename T, bool interleaved>
-    void copy_audio_step_to_host(uint32_t offset);
+        assert( ! oscillator.output_channel);
+#endif
 
-    template<>
-    void copy_audio_step_to_host<int16_t, true>(uint32_t offset)
-    {
-        // vkCmdDispatch - synth_output_16_interlv
+        if ( ! channel_osc_count[oscillator.output_channel]++)
+            ++num_mix_channels;
     }
 
-    template<>
-    void copy_audio_step_to_host<float, false>(uint32_t offset)
+    if ( ! num_oscillators) {
+        buffer_barrier(data_buf, VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+
+        vkCmdFillBuffer(audio_cmd_buf,
+                        buffers[data_buf].get_buffer(),
+                        mix_channels[0].chan_output_offs,
+                        sizeof(float) * 2 * rt_step_samples,
+                        0); // data
+        // TODO apply master effects even if there are zero oscillators
+        return;
+    }
+
+    // ======================================================================
+
+    const uint32_t osc_base_param_offs = allocate_param(num_oscillators * static_cast<uint32_t>(sizeof(ShaderParams::Oscillator)));
+    uint32_t cur_param_offs = osc_base_param_offs;
+
+    for (Oscillator& oscillator : oscillators) {
+        if ( ! oscillator.osc_type[0])
+            continue;
+
+        ShaderParams::Oscillator& param = get_param<ShaderParams::Oscillator>(cur_param_offs);
+
+        const float note_pitch  = static_cast<float>(static_cast<int>(oscillator.note) - 69);
+        const float note_freq   = (oscillator.freq_mult * 440.0f) * powf(2.0f, (note_pitch + oscillator.pitch) / 12.f);
+        const float phase_step  = (static_cast<float>(rt_step_samples) * note_freq) / static_cast<float>(Synth::rt_sampling_rate);
+
+        param.out_sound_offs  = oscillator.osc_output_offs / 4;
+        param.phase           = oscillator.phase;
+        param.phase_step      = phase_step / static_cast<float>(rt_step_samples);
+        param.osc_type[0]     = oscillator.osc_type[0];
+        param.osc_type[1]     = oscillator.osc_type[1];
+        param.duty[0]         = oscillator.duty[0];
+        param.duty[1]         = oscillator.duty[1];
+        param.osc_mix         = oscillator.osc_mix;
+        param.fir_memory_offs = oscillator.fir_memory_offs / 4;
+        param.taps_offs       = oscillator.fir_taps_offs   / 4;
+
+        oscillator.phase += phase_step;
+
+        cur_param_offs += static_cast<uint32_t>(sizeof(ShaderParams::Oscillator));
+    }
+
+    buffer_barrier(param_buf, VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+    buffer_barrier(data_buf, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+
+    vkCmdBindPipeline(audio_cmd_buf, VK_PIPELINE_BIND_POINT_COMPUTE, pipes[oscillator_pipe]);
+
     {
-        static VkBufferCopy region = {
-            0,
-            0,
-            rt_step_samples * sizeof(float)
+        const VkDescriptorSet descriptors[] = {
+            desc_sets[data_desc],
+            desc_sets[one_param_desc]
         };
 
-        region.srcOffset = 0; // TODO left channel
-        region.dstOffset = offset * sizeof(float);
-        vkCmdCopyBuffer(audio_cmd_buf,
-                        device_work_buf.get_buffer(),
-                        host_audio_output_buf.get_buffer(),
-                        1,
-                        &region);
+        const uint32_t offsets[] = {
+            0,
+            osc_base_param_offs
+        };
 
-        region.dstOffset = 0; // TODO right channel
-        region.dstOffset += host_audio_output_buf.size() / 2;
-        vkCmdCopyBuffer(audio_cmd_buf,
-                        device_work_buf.get_buffer(),
-                        host_audio_output_buf.get_buffer(),
-                        1,
-                        &region);
+        vkCmdBindDescriptorSets(audio_cmd_buf,
+                                VK_PIPELINE_BIND_POINT_COMPUTE,
+                                pipe_layouts[oscillator_pipe],
+                                0, // firstSet
+                                mstd::array_size(descriptors),
+                                descriptors,
+                                mstd::array_size(offsets),
+                                offsets);
     }
+
+    vkCmdDispatch(audio_cmd_buf, num_oscillators, 1, 1);
+
+    // ======================================================================
+
+    const uint32_t input_param_offs = allocate_param(num_oscillators * static_cast<uint32_t>(sizeof(ShaderParams::ChannelCombineInput)));
+    const uint32_t chan_param_offs  = allocate_param(num_mix_channels * static_cast<uint32_t>(sizeof(ShaderParams::ChannelCombine)));
+
+    uint32_t chan_input_indices[max_mix_channels] = { };
+    uint32_t chan_map[max_mix_channels]           = { };
+
+    for (uint32_t input_idx = 0, used_chan_idx = 0, chan_idx = 0; chan_idx < max_mix_channels; chan_idx++) {
+        if ( ! channel_osc_count[chan_idx])
+            continue;
+
+        assert(used_chan_idx < num_mix_channels);
+        chan_map[used_chan_idx]           = chan_idx;
+        chan_input_indices[used_chan_idx] = input_idx;
+
+        input_idx += channel_osc_count[chan_idx];
+        ++used_chan_idx;
+    }
+
+    uint32_t gen_chan_input_indices[max_mix_channels];
+    mstd::mem_copy(gen_chan_input_indices, chan_input_indices, sizeof(chan_input_indices));
+
+    for (Oscillator& oscillator : oscillators) {
+        if ( ! oscillator.osc_type[0])
+            continue;
+
+        const uint32_t cur_param_idx = gen_chan_input_indices[oscillator.output_channel]++;
+        cur_param_offs = input_param_offs + cur_param_idx * static_cast<uint32_t>(sizeof(ShaderParams::ChannelCombineInput));
+        ShaderParams::ChannelCombineInput& param = get_param<ShaderParams::ChannelCombineInput>(cur_param_offs);
+
+        param.in_sound_offs = oscillator.osc_output_offs / 4;
+        param.volume        = oscillator.volume;
+        param.panning       = oscillator.panning;
+        param.old_volume    = oscillator.old_volume;
+        param.old_panning   = oscillator.old_panning;
+
+        oscillator.old_volume  = oscillator.volume;
+        oscillator.old_panning = oscillator.panning;
+    }
+
+    for (uint32_t used_chan_idx = 0; used_chan_idx < num_mix_channels; used_chan_idx++) {
+
+        const uint32_t chan_idx = chan_map[used_chan_idx];
+
+        cur_param_offs = chan_param_offs + used_chan_idx * static_cast<uint32_t>(sizeof(ShaderParams::ChannelCombine));
+        ShaderParams::ChannelCombine& param = get_param<ShaderParams::ChannelCombine>(cur_param_offs);
+
+        param.out_sound_offs    = mix_channels[chan_idx].chan_output_offs / 4;
+        param.input_params_offs = chan_input_indices[used_chan_idx];
+        param.num_inputs        = channel_osc_count[chan_idx];
+    }
+
+    buffer_barrier(data_buf, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+
+    vkCmdBindPipeline(audio_cmd_buf, VK_PIPELINE_BIND_POINT_COMPUTE, pipes[chan_combine_pipe]);
+
+    {
+        const uint32_t offsets[] = {
+            input_param_offs,
+            chan_param_offs
+        };
+
+        vkCmdBindDescriptorSets(audio_cmd_buf,
+                                VK_PIPELINE_BIND_POINT_COMPUTE,
+                                pipe_layouts[chan_combine_pipe],
+                                1, // firstSet
+                                1, // descriptorSetCount
+                                &desc_sets[two_param_desc],
+                                mstd::array_size(offsets),
+                                offsets);
+    }
+
+    vkCmdDispatch(audio_cmd_buf, num_mix_channels, 1, 1);
+
+    // ======================================================================
+
+    // TODO Apply channel effects
+
+    // ======================================================================
+
+    // TODO Sum all channels into master channel
+
+    // ======================================================================
+
+    // TODO Apply master effects
+
+    buffer_barrier(param_buf, VK_ACCESS_HOST_WRITE_BIT, VK_PIPELINE_STAGE_HOST_BIT);
 }
-#endif
+
+template<typename T, bool interleaved>
+void copy_audio_step_to_host(uint32_t offset);
+
+template<>
+void copy_audio_step_to_host<int16_t, true>(uint32_t offset)
+{
+    buffer_barrier(data_buf, VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+    buffer_barrier(output_buf, VK_ACCESS_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+
+    vkCmdBindPipeline(audio_cmd_buf,
+                      VK_PIPELINE_BIND_POINT_COMPUTE,
+                      pipes[output_16i_pipe]);
+
+    const VkDescriptorSet descriptors[] = {
+        desc_sets[data_desc],
+        desc_sets[single_output_desc]
+    };
+
+    offset *= 2 * sizeof(int16_t);
+
+    const uint32_t offsets[] = {
+        0,
+        offset
+    };
+
+    vkCmdBindDescriptorSets(audio_cmd_buf,
+                            VK_PIPELINE_BIND_POINT_COMPUTE,
+                            pipe_layouts[output_16i_pipe],
+                            0, // firstSet
+                            mstd::array_size(descriptors),
+                            descriptors,
+                            mstd::array_size(offsets),
+                            offsets);
+
+    const ShaderParams::OutputPushConst push = { mix_channels[0].chan_output_offs };
+
+    vkCmdPushConstants(audio_cmd_buf,
+                       pipe_layouts[output_16i_pipe],
+                       VK_SHADER_STAGE_COMPUTE_BIT,
+                       0,               // offset
+                       sizeof(push),    // size
+                       &push);          // pValues
+
+    vkCmdDispatch(audio_cmd_buf, 1, 1, 1);
+
+    buffer_barrier(output_buf, VK_ACCESS_HOST_READ_BIT, VK_PIPELINE_STAGE_HOST_BIT);
+}
+
+template<>
+void copy_audio_step_to_host<float, false>(uint32_t offset)
+{
+    buffer_barrier(data_buf, VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+    buffer_barrier(output_buf, VK_ACCESS_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+
+    vkCmdBindPipeline(audio_cmd_buf,
+                      VK_PIPELINE_BIND_POINT_COMPUTE,
+                      pipes[output_32f_pipe]);
+
+    offset *= sizeof(float);
+
+    const VkDescriptorSet descriptors[] = {
+        desc_sets[data_desc],
+        desc_sets[double_output_desc]
+    };
+
+    const uint32_t offsets[] = {
+        0,
+        offset,
+        static_cast<uint32_t>(buffers[output_buf].size()) / 2 + offset
+    };
+
+    vkCmdBindDescriptorSets(audio_cmd_buf,
+                            VK_PIPELINE_BIND_POINT_COMPUTE,
+                            pipe_layouts[output_32f_pipe],
+                            0, // firstSet
+                            mstd::array_size(descriptors),
+                            descriptors,
+                            mstd::array_size(offsets),
+                            offsets);
+
+    const ShaderParams::OutputPushConst push = { mix_channels[0].chan_output_offs };
+
+    vkCmdPushConstants(audio_cmd_buf,
+                       pipe_layouts[output_32f_pipe],
+                       VK_SHADER_STAGE_COMPUTE_BIT,
+                       0,               // offset
+                       sizeof(push),    // size
+                       &push);          // pValues
+
+    vkCmdDispatch(audio_cmd_buf, 1, 1, 1);
+
+    buffer_barrier(output_buf, VK_ACCESS_HOST_READ_BIT, VK_PIPELINE_STAGE_HOST_BIT);
+}
 
 template<typename T, bool interleaved>
 static bool render_audio(uint32_t num_samples)
@@ -837,11 +1095,15 @@ static bool render_audio(uint32_t num_samples)
     if ( ! reset_and_begin_command_buffer(audio_cmd_buf))
         return false;
 
+    allocator_param_offs = 0;
+
     for (uint32_t offset = 0; offset < num_samples; offset += rt_step_samples) {
         render_audio_step();
 
         copy_audio_step_to_host<T, interleaved>(offset);
     }
+
+    buffers[param_buf].flush();
 
     if ( ! send_to_device_and_wait(audio_cmd_buf, vk_compute_queue, fen_compute))
         return false;

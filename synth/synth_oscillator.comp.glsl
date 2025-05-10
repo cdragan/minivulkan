@@ -5,6 +5,8 @@
 
 layout(local_size_x = 256) in;
 
+layout(constant_id = 0) const uint num_taps = 1025;
+
 const uint no_wave       = 0;
 const uint sine_wave     = 1;
 const uint sawtooth_wave = 2;
@@ -20,11 +22,17 @@ struct OscillatorParams {
     uint  osc_type[2];      // Two oscillator types
     float duty[2];          // Duty cycle for sawtooth and pulse oscillator [0..1]
     float osc_mix;          // Mixing between osc_type[0] and osc_type[1] [0..1]
+
+    // Optional filter parameters
+    uint  fir_memory_offs;  // Offset of FIR filter's memory
+    uint  taps_offs;        // Offset of FIR filter's taps
 };
 
-layout(set = 0, binding = 0) writeonly buffer data_buf { float data[]; };
+layout(set = 0, binding = 0) buffer data_buf { float data[]; };
 
 layout(set = 1, binding = 0, std430) readonly buffer param_buf { OscillatorParams params[]; };
+
+shared float cached_input[num_taps - 1 + gl_WorkGroupSize.x];
 
 uint pcg_hash(uint state)
 {
@@ -72,6 +80,7 @@ void main()
 {
     const OscillatorParams param = params[gl_WorkGroupID.x];
 
+    // Apply first oscillator
     const float phase = param.phase + param.phase_step * gl_LocalInvocationID.x;
 
     const uint  type1 = param.osc_type[0];
@@ -79,6 +88,7 @@ void main()
 
     float value = oscillator(type1, phase, duty1);
 
+    // Apply second oscillator (optional)
     const uint type2 = param.osc_type[1];
 
     if (type2 != no_wave) {
@@ -88,5 +98,33 @@ void main()
         value = mix(value, oscillator(type2, phase, duty2), osc_mix);
     }
 
+    // Apply FIR filter (optional)
+    if (param.taps_offs != 0) {
+
+        // Read previously saved inputs
+        for (uint tap = gl_LocalInvocationID.x; tap < num_taps - 1; tap += gl_WorkGroupSize.x) {
+            cached_input[tap] = data[param.fir_memory_offs + tap];
+        }
+
+        // Store generated sample values
+        const uint base_pos = num_taps - 1 + gl_LocalInvocationID.x;
+        cached_input[base_pos] = value;
+
+        barrier();
+
+        // Save current inputs for next invocation
+        for (uint tap = gl_LocalInvocationID.x; tap < num_taps - 1; tap += gl_WorkGroupSize.x) {
+            data[param.fir_memory_offs + tap] = cached_input[gl_WorkGroupSize.x + tap];
+        }
+
+        // Apply FIR filter convolution
+        value *= data[param.taps_offs];
+
+        for (uint tap = 1; tap < num_taps; tap++) {
+            value += data[param.taps_offs + tap] * cached_input[base_pos - tap];
+        }
+    }
+
+    // Output generated sample
     data[param.out_sound_offs + gl_LocalInvocationID.x] = value;
 }

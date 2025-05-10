@@ -4,7 +4,6 @@
 gui_project_name = sculptor
 
 shader_files += synth_oscillator.comp.glsl
-shader_files += synth_fir.comp.glsl
 shader_files += synth_chan_combine.comp.glsl
 shader_files += synth_output_16_interlv.comp.glsl
 shader_files += synth_output_f32_separate.comp.glsl
