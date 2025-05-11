@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 // SPDX-FileCopyrightText: Copyright (c) 2021-2025 Chris Dragan
 
-#if defined(__aarch64__) || defined(_M_ARM64) 
+#if defined(__aarch64__) || defined(_M_ARM64)
 
 #include <arm_neon.h>
 #include <math.h>

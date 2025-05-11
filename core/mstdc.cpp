@@ -3,6 +3,7 @@
 
 #include "mstdc.h"
 #include <assert.h>
+#include <math.h>
 
 uint32_t mstd::strlen(const char* name)
 {
@@ -63,4 +64,19 @@ void mstd::mem_copy(void* dest_ptr, const void* src_ptr, uint32_t num_bytes)
     do
         *(dest_byte++) = *(src_byte++);
     while (--num_bytes);
+}
+
+float mstd::exp2(float x)
+{
+    float integral;
+    const float frac = modff(x, &integral);
+
+    constexpr float c0 = 1.0f;
+    constexpr float c1 = 0.6931468f;
+    constexpr float c2 = 0.2402293f;
+    constexpr float c3 = 0.0555039f;
+
+    const float poly = c0 + frac * (c1 + frac * (c2 + frac * c3));
+
+    return ldexpf(poly, static_cast<int>(integral));
 }

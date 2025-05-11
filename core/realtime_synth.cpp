@@ -687,7 +687,7 @@ static void process_note_on(uint32_t delta_samples, const Synth::MidiEvent& even
     voices[voice_idx].channel    = static_cast<uint8_t>(channel);
     voices[voice_idx].instrument = select_instrument(channel, note);
 
-    memset(&voices[voice_idx].parameters, 0, sizeof(voices[voice_idx].parameters));
+    mstd::mem_zero(&voices[voice_idx].parameters, sizeof(voices[voice_idx].parameters));
 
     // Preserve amplitude if the same note is replayed
     voices[voice_idx].parameters[param_cur_amplitude] = amplitude;
@@ -849,7 +849,7 @@ static void render_audio_step()
         ShaderParams::Oscillator& param = get_param<ShaderParams::Oscillator>(cur_param_offs);
 
         const float note_pitch  = static_cast<float>(static_cast<int>(oscillator.note) - 69);
-        const float note_freq   = (oscillator.freq_mult * 440.0f) * powf(2.0f, (note_pitch + oscillator.pitch) / 12.f);
+        const float note_freq   = (oscillator.freq_mult * 440.0f) * mstd::exp2((note_pitch + oscillator.pitch) / 12.f);
         const float phase_step  = (static_cast<float>(rt_step_samples) * note_freq) / static_cast<float>(Synth::rt_sampling_rate);
 
         param.out_sound_offs  = oscillator.osc_output_offs / 4;

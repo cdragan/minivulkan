@@ -52,4 +52,6 @@ constexpr T align_up(T value, T alignment)
     return ((value - 1) / alignment) * alignment + alignment;
 }
 
+float exp2(float x);
+
 }
