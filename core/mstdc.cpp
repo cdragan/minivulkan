@@ -68,8 +68,9 @@ void mstd::mem_copy(void* dest_ptr, const void* src_ptr, uint32_t num_bytes)
 
 float mstd::exp2(float x)
 {
-    float integral;
-    const float frac = modff(x, &integral);
+    // modff()
+    const float integral = truncf(x);
+    const float frac     = x - integral;
 
     constexpr float c0 = 1.0f;
     constexpr float c1 = 0.6931468f;
@@ -78,5 +79,16 @@ float mstd::exp2(float x)
 
     const float poly = c0 + frac * (c1 + frac * (c2 + frac * c3));
 
-    return ldexpf(poly, static_cast<int>(integral));
+    // ldexpf()
+    union {
+        float f;
+        int   i;
+    } convert;
+
+    const int int_integral = static_cast<int>(integral);
+
+    convert.f = poly;
+    convert.i += int_integral << 23;
+
+    return convert.f;
 }
