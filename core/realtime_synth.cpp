@@ -6,6 +6,8 @@
 #include "minivulkan.h"
 #include "mstdc.h"
 #include "resource.h"
+#include "vecfloat.h"
+#include "vmath.h"
 #include <math.h>
 
 #include "synth_shaders.h"
@@ -87,6 +89,189 @@ namespace {
         // White noise
         noise_wave
     };
+
+    // Encoded envelope:
+    // u8 N     - number of points
+    // f32      - min value
+    // f32      - max value
+    // u8       - point index of sustain loop begin, >=N means no sustain
+    // u8       - point index of sustain end loop (can be same as sustain loop begin)
+    // u8[N]    - low byte of next point's delta position, each position is expressed in ticks (256 samples)
+    // u8[N]    - low byte of next point's delta value
+    // u8[N]    - high byte of next point's delta position (unsigned)
+    // u8[N]    - high byte of next point's delta value (signed, but uses zig-zag encoding)
+    //
+    // Delta values are encoded using zig-zag encoding (0->0, -1->1, 1->2, -2->3, 2->4, etc.).
+    //
+    // Volume envelope:
+    // - Value is in decibels
+    // - Value 0 means nominal attenuation
+    // - Point at position 0 and last point should indicate lowest possible negative value (no sound)
+    struct EnvelopeDescriptor {
+        uint8_t num_points;         // Number of points in the envelope
+        uint8_t unused_alignment;
+        uint8_t sustain_first_point;// Index if sustain loop start point
+        uint8_t sustain_last_point; // Index of last point of sustain loop (can be same as first point)
+        float   min_value;          // Minimum value produced by the envelope
+        float   min_max_delta;      // Delta between minimum and maximum value produced
+
+        struct Point {
+            uint16_t position;      // Number of ticks since the beginning of the envelope
+            uint16_t value;         // Value at this position (0=min_value, 0xFFFF=min_value+min_max_delta)
+        };
+
+        Point points[];
+    };
+    EnvelopeDescriptor envelope_descs[10];
+
+    struct LFODescriptor {
+        uint8_t  wave;              // LFO wave type
+        uint8_t  duty;              // Duty for sawtooth wave (0=left, 0x7F=triangle, 0xFF=right)
+        uint16_t period_ms;         // Period of the LFO, in milliseconds
+        float    min_value;         // Minimum value produced by the LFO
+        float    min_max_delta;     // Delta between minimum and maximum value produced
+    };
+    LFODescriptor lfo_descs[10];
+
+    struct ParameterDescriptor {
+        float    base_value;        // Initial base value (can be overridden from MIDI)
+        uint32_t envelope_desc_id;  // Id of envelope descriptor
+        uint32_t lfo_desc_id;       // Id of LFO descriptor
+    };
+    ParameterDescriptor param_descs[10];
+
+    struct Parameter {
+        float    cur_value;         // Current value of the parameter
+        uint16_t param_desc_id;     // Id of parameter descriptor
+        uint16_t lfo_tick;          // Current LFO tick of this parameter
+        uint16_t envelope_tick;     // Current envelope tick
+        uint16_t envelope_point;    // Current point on the envelope
+        uint8_t  voice_id;          // Voice id where this parameter is playing
+    };
+    Parameter params[10];
+
+    void advance_param(uint32_t param_id)
+    {
+        Parameter& param = params[param_id];
+
+        float value = 0;
+
+        if (param.param_desc_id) {
+
+            const ParameterDescriptor& desc = param_descs[param.param_desc_id - 1];
+
+            value = desc.base_value; // TODO use value from MIDI, if available
+
+            if (desc.envelope_desc_id) {
+                const EnvelopeDescriptor& envelope = envelope_descs[desc.envelope_desc_id - 1];
+
+                constexpr bool sustain = false; // TODO take from voice
+
+                uint32_t env_point = param.envelope_point;
+                uint32_t env_tick  = param.envelope_tick;
+
+                // Apply current position of the envelope
+                const EnvelopeDescriptor::Point pt1 = envelope.points[env_point];
+
+                int env_value = pt1.value;
+
+                if (env_tick > pt1.position) {
+                    assert(env_point + 1 < envelope.num_points);
+
+                    const EnvelopeDescriptor::Point pt2 = envelope.points[env_point + 1];
+
+                    const int delta_pos = static_cast<int>(env_tick - pt1.position);
+                    const int duration  = static_cast<int>(pt2.position - pt1.position);
+                    const int range     = static_cast<int>(pt2.value) - env_value;
+
+                    env_value = (delta_pos * range) / duration;
+                }
+
+                value += envelope.min_value + static_cast<float>(env_value) * envelope.min_max_delta;
+
+                for (;;) {
+                    // Advance envelope
+                    if ( ! sustain || env_point < envelope.sustain_last_point) {
+
+                        const uint32_t next_point = env_point + 1;
+                        if (next_point < envelope.num_points) {
+                            ++env_tick;
+
+                            // Advance envelope point
+                            const uint32_t next_tick  = envelope.points[next_point].position;
+                            if (env_tick == next_tick)
+                                env_point = next_point;
+                        }
+                        else {
+                            assert(env_tick == envelope.points[envelope.num_points - 1].position);
+                        }
+                    }
+                    // Apply sustain loop
+                    else {
+                        assert(env_point == envelope.sustain_last_point);
+
+                        if (env_point == envelope.sustain_first_point) {
+                            assert(env_tick == envelope.points[env_point].position);
+                        }
+                        else {
+                            assert(env_tick == envelope.points[env_point].position);
+                            env_point = envelope.sustain_first_point;
+                            env_tick  = envelope.points[env_point].position;
+
+                            // Loop back and try to advance to next tick from envelope start
+                            continue;
+                        }
+                    }
+                    break;
+                }
+
+                param.envelope_point = static_cast<uint16_t>(env_point);
+                param.envelope_tick  = static_cast<uint16_t>(env_tick);
+            }
+
+            if (desc.lfo_desc_id) {
+
+                const LFODescriptor& lfo = lfo_descs[desc.lfo_desc_id - 1];
+
+                value += lfo.min_value;
+
+                const float phase = static_cast<float>(param.lfo_tick) * static_cast<float>(rt_step_samples * 1000) /
+                                    static_cast<float>(lfo.period_ms * Synth::rt_sampling_rate);
+
+                switch (lfo.wave) {
+                    case sine_wave:
+                        {
+                            const float sval = vmath::sincos(phase * vmath::two_pi).sin;
+
+                            value += (sval + 1.0f) * 0.5f * lfo.min_max_delta;
+                        }
+                        break;
+
+                    case sawtooth_wave:
+                        {
+                            const float frac_phase = phase - truncf(phase);
+                            const float duty       = static_cast<float>(lfo.duty) / 255.0f;
+
+                            if (frac_phase <= duty) {
+                                value += lfo.min_max_delta * frac_phase / duty;
+                            }
+                            else {
+                                value += lfo.min_max_delta * (1.0f - frac_phase) / (1.0f - duty);
+                            }
+                        }
+                        break;
+
+                    default:
+                        assert(lfo.wave == sine_wave || lfo.wave == sawtooth_wave);
+                        break;
+                }
+
+                ++param.lfo_tick;
+            }
+        }
+
+        param.cur_value = value;
+    }
 
     namespace ShaderParams {
 
@@ -386,6 +571,7 @@ namespace {
 
     struct Oscillator {
         // Constants which don't change for this oscillator's instance's life time
+        // TODO move some of these to OscillatorDescriptor
         uint32_t midi_channel;      // MIDI channel on which this note was played
         uint32_t output_channel;    // Output (mixing) channel for this MIDI channel/note
         uint32_t note;              // MIDI note
@@ -401,6 +587,7 @@ namespace {
         float    old_panning;       // Previous panning
 
         // Values from LFOs, envelopes, notes and instrument constants
+        // TODO convert these to param ids
         float    volume;            // Current volume
         float    panning;           // Current panning
         float    pitch;             // Pitch adjustment in semitones = (midi_pitch_bend - 8192) / 4096
@@ -428,12 +615,12 @@ static void temp_init_osc_and_channel()
     mix_channels[0].chan_output_offs = allocate_data(sizeof(float) * rt_step_samples * 2);
 
     Oscillator& osc = oscillators[0];
-    osc.note = 69; // 69=A4
-    osc.freq_mult = 1;
-    osc.osc_type[0] = sine_wave;
+    osc.note            = 69; // 69=A4
+    osc.freq_mult       = 1;
+    osc.osc_type[0]     = sine_wave;
     osc.osc_output_offs = allocate_data(sizeof(float) * rt_step_samples);
-    osc.volume = 1.0;
-    osc.panning = 0.5;
+    osc.volume          = 1.0;
+    osc.panning         = 0.5;
 }
 
 bool Synth::init_synth()
@@ -656,7 +843,7 @@ static void process_note_off(uint32_t delta_samples, const Synth::MidiEvent& eve
     assert(voice_idx);
     assert(voices[voice_idx].active);
 
-    // TODO transition voice to decay state
+    // TODO transition voice to release state
 }
 
 static void process_note_on(uint32_t delta_samples, const Synth::MidiEvent& event)
@@ -794,6 +981,7 @@ static void render_audio_step()
     const uint32_t start_samples = rendered_samples;
     const uint32_t end_samples   = start_samples + rt_step_samples;
 
+    // TODO move this to the end or outside of this function
     rendered_samples = end_samples;
 
     process_events(start_samples, end_samples);

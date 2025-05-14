@@ -85,6 +85,7 @@ bool init_sound()
 
     constexpr float coeff = vmath::two_pi * frequency_hz / sampling_rate;
 
+    // TODO use synth to generate the wave
     for (uint32_t i = 0; i < total_samples; i++) {
         const vmath::sin_cos_result sc = vmath::sincos(static_cast<float>(i) * coeff);
         const int16_t value = static_cast<int16_t>(sc.cos * 0.001f * 32767);
