@@ -398,6 +398,11 @@ ifeq ($(UNAME), Darwin)
     gui_frameworks += GameController
     gui_frameworks += AudioToolbox
 
+    ifneq ($(ARCH), $(shell uname -m))
+        CFLAGS  += -arch $(ARCH)
+        LDFLAGS += -arch $(ARCH)
+    endif
+
     LDFLAGS     += $(addprefix -framework ,$(frameworks))
     LDFLAGS_gui += $(addprefix -framework ,$(gui_frameworks))
 
@@ -441,7 +446,7 @@ ifeq ($(spirv_shuffle), 0)
 endif
 
 ASM_SYNTAX =
-ifneq ($(ARCH), aarch64)
+ifneq (,$(filter %86 %86_64,$(ARCH)))
     ASM_SYNTAX = -masm=intel
 endif
 

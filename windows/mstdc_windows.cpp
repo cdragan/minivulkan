@@ -4,6 +4,7 @@
 #include "../core/mstdc.h"
 
 #include <assert.h>
+#include <immintrin.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
@@ -64,6 +65,12 @@ extern "C" {
         return dest_ptr;
     }
 
+    float truncf(float value)
+    {
+        const __m128 val = _mm_set_ss(value);
+        return _mm_cvtss_f32(_mm_round_ss(val, val, _MM_FROUND_TO_ZERO | _MM_FROUND_NO_EXC));
+    }
+
     int atexit(void (__cdecl *func )(void))
     {
         return 0;
@@ -119,7 +126,6 @@ extern "C" {
 // In 32-bit builds the compiler calls these functions in order to perform 64-bit arithmetic.
 // This code has been copied from GitHub mmozeiko/win32_crt_float.cpp
 #ifdef _M_IX86
-#   include <immintrin.h>
 #   define CRT_LOWORD(x) dword ptr [x+0]
 #   define CRT_HIWORD(x) dword ptr [x+4]
 
