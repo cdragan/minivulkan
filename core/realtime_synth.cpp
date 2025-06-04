@@ -120,7 +120,7 @@ namespace {
             uint16_t value;         // Value at this position (0=min_value, 0xFFFF=min_value+min_max_delta)
         };
 
-        Point points[];
+        Point points[1];
     };
     EnvelopeDescriptor envelope_descs[10];
 
