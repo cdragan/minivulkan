@@ -330,6 +330,7 @@ namespace {
         oscillator_pipe,
         chan_combine_pipe,
         output_16i_pipe,
+        output_32fi_pipe,
         output_32f_pipe,
         num_synth_pipes
     };
@@ -410,6 +411,14 @@ namespace {
             {
                 {
                     shader_synth_output_16_interlv_comp,
+                    1,
+                },
+                { one_buffer_ds, one_buffer_ds }
+            },
+            // TODO load only in builds which need it
+            {
+                {
+                    shader_synth_output_f32_interlv_comp,
                     1,
                 },
                 { one_buffer_ds, one_buffer_ds }
@@ -1217,14 +1226,11 @@ static void render_audio_step()
 }
 
 template<typename T, bool interleaved>
-void copy_audio_step_to_host(uint32_t offset);
+void prepare_copy_audio_step_to_host(uint32_t offset);
 
 template<>
-void copy_audio_step_to_host<int16_t, true>(uint32_t offset)
+void prepare_copy_audio_step_to_host<int16_t, true>(uint32_t offset)
 {
-    buffer_barrier(data_buf, VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
-    buffer_barrier(output_buf, VK_ACCESS_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
-
     vkCmdBindPipeline(audio_cmd_buf,
                       VK_PIPELINE_BIND_POINT_COMPUTE,
                       pipes[output_16i_pipe]);
@@ -1258,18 +1264,49 @@ void copy_audio_step_to_host<int16_t, true>(uint32_t offset)
                        0,               // offset
                        sizeof(push),    // size
                        &push);          // pValues
-
-    vkCmdDispatch(audio_cmd_buf, 1, 1, 1);
-
-    buffer_barrier(output_buf, VK_ACCESS_HOST_READ_BIT, VK_PIPELINE_STAGE_HOST_BIT);
 }
 
 template<>
-void copy_audio_step_to_host<float, false>(uint32_t offset)
+void prepare_copy_audio_step_to_host<float, true>(uint32_t offset)
 {
-    buffer_barrier(data_buf, VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
-    buffer_barrier(output_buf, VK_ACCESS_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+    vkCmdBindPipeline(audio_cmd_buf,
+                      VK_PIPELINE_BIND_POINT_COMPUTE,
+                      pipes[output_32fi_pipe]);
 
+    const VkDescriptorSet descriptors[] = {
+        desc_sets[data_desc],
+        desc_sets[single_output_desc]
+    };
+
+    offset *= 2 * sizeof(float);
+
+    const uint32_t offsets[] = {
+        0,
+        offset
+    };
+
+    vkCmdBindDescriptorSets(audio_cmd_buf,
+                            VK_PIPELINE_BIND_POINT_COMPUTE,
+                            pipe_layouts[output_32fi_pipe],
+                            0, // firstSet
+                            mstd::array_size(descriptors),
+                            descriptors,
+                            mstd::array_size(offsets),
+                            offsets);
+
+    const ShaderParams::OutputPushConst push = { mix_channels[0].chan_output_offs };
+
+    vkCmdPushConstants(audio_cmd_buf,
+                       pipe_layouts[output_32fi_pipe],
+                       VK_SHADER_STAGE_COMPUTE_BIT,
+                       0,               // offset
+                       sizeof(push),    // size
+                       &push);          // pValues
+}
+
+template<>
+void prepare_copy_audio_step_to_host<float, false>(uint32_t offset)
+{
     vkCmdBindPipeline(audio_cmd_buf,
                       VK_PIPELINE_BIND_POINT_COMPUTE,
                       pipes[output_32f_pipe]);
@@ -1304,10 +1341,6 @@ void copy_audio_step_to_host<float, false>(uint32_t offset)
                        0,               // offset
                        sizeof(push),    // size
                        &push);          // pValues
-
-    vkCmdDispatch(audio_cmd_buf, 1, 1, 1);
-
-    buffer_barrier(output_buf, VK_ACCESS_HOST_READ_BIT, VK_PIPELINE_STAGE_HOST_BIT);
 }
 
 template<typename T, bool interleaved>
@@ -1323,7 +1356,14 @@ static bool render_audio(uint32_t num_samples)
     for (uint32_t offset = 0; offset < num_samples; offset += rt_step_samples) {
         render_audio_step();
 
-        copy_audio_step_to_host<T, interleaved>(offset);
+        buffer_barrier(data_buf, VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+        buffer_barrier(output_buf, VK_ACCESS_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+
+        prepare_copy_audio_step_to_host<T, interleaved>(offset);
+
+        vkCmdDispatch(audio_cmd_buf, 1, 1, 1);
+
+        buffer_barrier(output_buf, VK_ACCESS_HOST_READ_BIT, VK_PIPELINE_STAGE_HOST_BIT);
     }
 
     buffers[param_buf].flush();
