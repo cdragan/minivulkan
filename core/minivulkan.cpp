@@ -465,6 +465,12 @@ static bool find_surface_format(VkPhysicalDevice phys_dev)
     if (res != VK_SUCCESS && res != VK_INCOMPLETE)
         return false;
 
+#ifndef NDEBUG
+    if (res == VK_INCOMPLETE) {
+        d_printf("Failed to get all surface formats, buffer too small\n");
+    }
+#endif
+
     static const uint8_t preferred_output_formats[] = {
         VK_FORMAT_A2B10G10R10_UNORM_PACK32,
         VK_FORMAT_A2R10G10B10_UNORM_PACK32,

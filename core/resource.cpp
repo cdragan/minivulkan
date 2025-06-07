@@ -203,7 +203,7 @@ void Image::set_image_layout(VkCommandBuffer buf, const Transition& transition)
         VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
         nullptr,
         0,
-        VK_ACCESS_COLOR_ATTACHMENT_READ_BIT,
+        0,
         VK_IMAGE_LAYOUT_UNDEFINED,
         VK_IMAGE_LAYOUT_UNDEFINED
     };
