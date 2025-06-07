@@ -95,7 +95,7 @@ bool init_sound()
             value = static_cast<int16_t>(sc.cos * 0.001f * 32767);
         }
         else {
-            value = sc.cos;
+            value = sc.cos * 0.001f;
         }
 
         StereoSample& out = wav_file.data[i];
