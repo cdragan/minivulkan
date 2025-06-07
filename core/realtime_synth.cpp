@@ -448,7 +448,7 @@ namespace {
             static const VkSpecializationMapEntry map_entries[] = {
                 { 0, 0, 4 },
                 { 1, 4, 4 },
-                { 2, 4, 4 },
+                { 2, 8, 4 },
             };
 
             static const uint32_t spec_data[] = {
