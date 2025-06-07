@@ -34,6 +34,12 @@ namespace {
     // Maximum number of supported voices
     constexpr uint32_t max_voices = 256;
 
+    // Number of FIR filter taps
+    constexpr uint32_t num_fir_taps = 1025;
+
+    // Smooth volume adjustment to avoid glitches
+    constexpr uint32_t volume_adjustment_samples = 32;
+
     // Number of samples which have been rendered since playback started.
     uint32_t rendered_samples;
 
@@ -430,8 +436,28 @@ namespace {
                 VK_NULL_HANDLE
             };
 
+            static const VkSpecializationMapEntry map_entries[] = {
+                { 0, 0, 4 },
+                { 1, 4, 4 },
+                { 2, 4, 4 },
+            };
+
+            static const uint32_t spec_data[] = {
+                rt_step_samples,
+                num_fir_taps,
+                volume_adjustment_samples,
+            };
+
+            static const VkSpecializationInfo spec_constants = {
+                mstd::array_size(map_entries),
+                map_entries,
+                sizeof(spec_data),
+                &spec_data
+            };
+
             if ( ! create_compute_shader(shaders[i].shader_info,
                                          ds_layouts,
+                                         &spec_constants,
                                          &pipe_layouts[i],
                                          &pipes[i]))
                 return false;

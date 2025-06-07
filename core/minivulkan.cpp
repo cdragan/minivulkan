@@ -1358,6 +1358,7 @@ bool create_compute_descriptor_set_layouts(const DescSetBindingInfo* binding_des
 
 bool create_compute_shader(const ComputeShaderInfo&     shader_desc,
                            const VkDescriptorSetLayout* desc_set_layouts,
+                           const VkSpecializationInfo*  spec_constants,
                            VkPipelineLayout*            out_pipe_layout,
                            VkPipeline*                  out_pipe)
 {
@@ -1414,8 +1415,9 @@ bool create_compute_shader(const ComputeShaderInfo&     shader_desc,
         0                   // basePipelineIndex
     };
 
-    pipeline_create_info.stage.module = load_shader(shader_desc.shader);
-    pipeline_create_info.layout       = *out_pipe_layout;
+    pipeline_create_info.stage.module              = load_shader(shader_desc.shader);
+    pipeline_create_info.stage.pSpecializationInfo = spec_constants;
+    pipeline_create_info.layout                    = *out_pipe_layout;
 
     res = CHK(vkCreateComputePipelines(vk_dev,
                                        VK_NULL_HANDLE,

@@ -3,9 +3,11 @@
 
 #version 460 core
 
-layout(local_size_x = 256) in;
+layout(local_size_x_id = 0) in;
 
-layout(constant_id = 0) const uint num_taps = 1025;
+layout(constant_id = 0) const uint work_group_size = 1;
+
+layout(constant_id = 1) const uint num_taps = 1025;
 
 const uint no_wave       = 0;
 const uint sine_wave     = 1;
@@ -32,7 +34,7 @@ layout(set = 0, binding = 0) buffer data_buf { float data[]; };
 
 layout(set = 1, binding = 0, std430) readonly buffer param_buf { OscillatorParams params[]; };
 
-shared float cached_input[num_taps - 1 + gl_WorkGroupSize.x];
+shared float cached_input[num_taps - 1 + work_group_size];
 
 uint pcg_hash(uint state)
 {
@@ -102,7 +104,7 @@ void main()
     if (param.taps_offs != 0) {
 
         // Read previously saved inputs
-        for (uint tap = gl_LocalInvocationID.x; tap < num_taps - 1; tap += gl_WorkGroupSize.x) {
+        for (uint tap = gl_LocalInvocationID.x; tap < num_taps - 1; tap += work_group_size) {
             cached_input[tap] = data[param.fir_memory_offs + tap];
         }
 
@@ -113,8 +115,8 @@ void main()
         barrier();
 
         // Save current inputs for next invocation
-        for (uint tap = gl_LocalInvocationID.x; tap < num_taps - 1; tap += gl_WorkGroupSize.x) {
-            data[param.fir_memory_offs + tap] = cached_input[gl_WorkGroupSize.x + tap];
+        for (uint tap = gl_LocalInvocationID.x; tap < num_taps - 1; tap += work_group_size) {
+            data[param.fir_memory_offs + tap] = cached_input[work_group_size + tap];
         }
 
         // Apply FIR filter convolution

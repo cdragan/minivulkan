@@ -3,10 +3,12 @@
 
 #version 460 core
 
-layout(local_size_x = 256) in;
+layout(local_size_x_id = 0) in;
+
+layout(constant_id = 0) const uint work_group_size = 1;
 
 // Smooth volume adjustment to avoid glitches
-layout(constant_id = 0) const uint volume_adjustment_samples = 32;
+layout(constant_id = 2) const uint volume_adjustment_samples = 32;
 
 struct InputParams {
     uint  in_sound_offs;

@@ -5,7 +5,9 @@
 
 #extension GL_EXT_shader_16bit_storage : require
 
-layout(local_size_x = 256) in;
+layout(local_size_x_id = 0) in;
+
+layout(constant_id = 0) const uint work_group_size = 1;
 
 layout(set = 0, binding = 0) readonly buffer data_buf { float data[]; };
 

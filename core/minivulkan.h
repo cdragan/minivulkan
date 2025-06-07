@@ -252,6 +252,7 @@ struct ComputeShaderInfo {
 
 bool create_compute_shader(const ComputeShaderInfo&     shader_desc,
                            const VkDescriptorSetLayout* desc_set_layouts,
+                           const VkSpecializationInfo*  spec_constants,
                            VkPipelineLayout*            out_pipe_layout,
                            VkPipeline*                  out_pipe);
 
