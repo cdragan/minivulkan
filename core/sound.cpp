@@ -3,6 +3,7 @@
 
 #include "minivulkan.h"
 #include "mstdc.h"
+#include "realtime_synth.h"
 #include "vmath.h"
 #include "vecfloat.h"
 
@@ -29,21 +30,19 @@ struct WAVHeader {
 
 static_assert(sizeof(WAVHeader) == 44);
 
-struct Sample16Stereo {
-    int16_t left;
-    int16_t right;
+struct StereoSample {
+    SoundSampleType left;
+    SoundSampleType right;
 };
 
-struct WAVFile16Stereo {
+struct WAVFileStereo {
 #if NEED_WAV_HEADER
-    WAVHeader      header;
+    WAVHeader    header;
 #endif
-    Sample16Stereo data[1];
+    StereoSample data[1];
 };
 
-static constexpr uint32_t sampling_rate   = 44100;
-static constexpr uint16_t num_channels    = 2;
-static constexpr uint16_t bits_per_sample = 16;
+static constexpr uint16_t num_channels = 2;
 
 #if NEED_WAV_HEADER
 static const WAVHeader wav_header = {
@@ -51,10 +50,10 @@ static const WAVHeader wav_header = {
     0,
     { 'W', 'A', 'V', 'E', 'f', 'm', 't', ' ' },
     16,
-    1, // PCM
+    sample_format,
     num_channels,
-    sampling_rate,
-    (sampling_rate * num_channels * bits_per_sample) / 8,
+    Synth::rt_sampling_rate,
+    (Synth::rt_sampling_rate * num_channels * bits_per_sample) / 8,
     (num_channels * bits_per_sample) / 8,
     bits_per_sample,
     { 'd', 'a', 't', 'a' },
@@ -67,14 +66,15 @@ bool init_sound()
     constexpr uint64_t duration_ms  = 50;
     constexpr uint32_t frequency_hz = 440; // A
 
-    constexpr uint32_t total_samples = static_cast<uint32_t>((duration_ms * sampling_rate) / 1000u);
+    constexpr uint32_t total_samples = static_cast<uint32_t>((duration_ms * Synth::rt_sampling_rate) / 1000u);
     constexpr uint32_t data_size     = total_samples * num_channels * (bits_per_sample / 8u);
     constexpr uint32_t wav_hdr_size  = NEED_WAV_HEADER ? static_cast<uint32_t>(sizeof(WAVHeader)) : 0u;
     constexpr uint32_t alloc_size    = wav_hdr_size + data_size;
 
+    // TODO get this from synth
     static uint8_t audio_buf[alloc_size];
 
-    WAVFile16Stereo& wav_file = *reinterpret_cast<WAVFile16Stereo*>(audio_buf);
+    WAVFileStereo& wav_file = *reinterpret_cast<WAVFileStereo*>(audio_buf);
 
     #if NEED_WAV_HEADER
     mstd::mem_copy(audio_buf, &wav_header, sizeof(wav_header));
@@ -83,14 +83,22 @@ bool init_sound()
     wav_file.header.data_size = data_size;
     #endif
 
-    constexpr float coeff = vmath::two_pi * frequency_hz / sampling_rate;
+    constexpr float coeff = vmath::two_pi * frequency_hz / Synth::rt_sampling_rate;
 
     // TODO use synth to generate the wave
     for (uint32_t i = 0; i < total_samples; i++) {
         const vmath::sin_cos_result sc = vmath::sincos(static_cast<float>(i) * coeff);
-        const int16_t value = static_cast<int16_t>(sc.cos * 0.001f * 32767);
 
-        Sample16Stereo& out = wav_file.data[i];
+        SoundSampleType value;
+
+        if constexpr (sample_format == sample_pcm) {
+            value = static_cast<int16_t>(sc.cos * 0.001f * 32767);
+        }
+        else {
+            value = sc.cos;
+        }
+
+        StereoSample& out = wav_file.data[i];
         out.left  = value;
         out.right = value;
     }

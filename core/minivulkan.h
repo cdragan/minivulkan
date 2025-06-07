@@ -47,6 +47,17 @@ bool draw_frame();
 bool draw_frame(uint32_t image_idx, uint64_t time_ms, VkFence queue_fence, uint32_t sem_id);
 bool idle_queue();
 uint64_t get_current_time_ms();
+
+enum SampleFormat: uint8_t {
+    sample_pcm   = 1,
+    sample_float = 3
+};
+
+typedef float SoundSampleType;
+
+static constexpr uint8_t  sample_format   = (sizeof(SoundSampleType) == 4) ? sample_float : sample_pcm;
+static constexpr uint16_t bits_per_sample = static_cast<uint16_t>(sizeof(SoundSampleType)) * 8;
+
 bool load_sound_track(const void* data, uint32_t size);
 bool play_sound_track();
 

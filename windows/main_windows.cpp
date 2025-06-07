@@ -2,10 +2,11 @@
 // SPDX-FileCopyrightText: Copyright (c) 2021-2025 Chris Dragan
 
 #include "main_windows.h"
+#include "../core/d_printf.h"
 #include "../core/gui.h"
 #include "../core/minivulkan.h"
-#include "../core/d_printf.h"
 #include "../core/mstdc.h"
+#include "../core/realtime_synth.h"
 
 /* TODO Just including xaudio2.h somehow calls LoadLibraryEx - figure out how to avoid that */
 #include <xaudio2.h>
@@ -91,15 +92,13 @@ bool load_sound_track(const void* data, uint32_t size)
         return false;
     }
 
-    constexpr uint32_t sampling_rate   = 44100;
-    constexpr uint32_t num_channels    = 2;
-    constexpr uint32_t bits_per_sample = 16;
+    constexpr uint32_t num_channels = 2;
 
     static WAVEFORMATEX wave_format = {
-        WAVE_FORMAT_PCM,
+        sample_format,
         num_channels,    // nChannels
-        sampling_rate,   // nSamplesPerSec
-        sampling_rate * num_channels * bits_per_sample / 8, // nAvgBytesPerSec
+        Synth::rt_sampling_rate,   // nSamplesPerSec
+        Synth::rt_sampling_rate * num_channels * bits_per_sample / 8, // nAvgBytesPerSec
         num_channels * bits_per_sample / 8,                 // nBlockAlign
         bits_per_sample, // wBitsPerSample
         0                // cbSize
