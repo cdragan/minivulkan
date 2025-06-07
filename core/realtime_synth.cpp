@@ -277,6 +277,13 @@ namespace {
 
         // Note: These defintions must match the structs inside the shaders
 
+        // synth_fir_coeff shader
+        struct FIRCoeff {
+            uint32_t taps_offs;
+            uint32_t highpass_cutoff_freq;
+            uint32_t lowpass_cutoff_freq;
+        };
+
         // synth_oscillator shader
         struct Oscillator {
             uint32_t out_sound_offs;
@@ -988,7 +995,16 @@ static void render_audio_step()
 
     // TODO update_lfos();
 
-    // TODO update_filters();
+    // ======================================================================
+
+#if 0
+    if ( ! num_filters) {
+        buffer_barrier(param_buf, VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+        buffer_barrier(data_buf, VK_ACCESS_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+
+        // TODO update_filters();
+    }
+#endif
 
     // ======================================================================
 
