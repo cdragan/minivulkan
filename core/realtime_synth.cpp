@@ -6,6 +6,7 @@
 #include "minivulkan.h"
 #include "mstdc.h"
 #include "resource.h"
+#include "suballoc.h"
 #include "vecfloat.h"
 #include "vmath.h"
 #include <math.h>
@@ -577,33 +578,9 @@ namespace {
         return true;
     }
 
-    uint32_t allocator_data_offs;
+    SubAllocator<1024> data_allocator;
 
-    uint32_t allocate_data(uint32_t data_size)
-    {
-        const uint32_t offset = allocator_data_offs;
-
-        const uint32_t alignment = static_cast<uint32_t>(
-                vk_phys_props.properties.limits.minStorageBufferOffsetAlignment);
-
-        allocator_data_offs = mstd::align_up(allocator_data_offs + data_size, alignment);
-
-        return offset;
-    }
-
-    uint32_t allocator_param_offs;
-
-    uint32_t allocate_param(uint32_t param_size)
-    {
-        const uint32_t offset = allocator_param_offs;
-
-        const uint32_t alignment = static_cast<uint32_t>(
-                vk_phys_props.properties.limits.minStorageBufferOffsetAlignment);
-
-        allocator_param_offs = mstd::align_up(allocator_param_offs + param_size, alignment);
-
-        return offset;
-    }
+    SubAllocator<1> param_allocator;
 
     template<typename T>
     T& get_param(uint32_t offset)
@@ -652,15 +629,13 @@ namespace Synth {
 
 static void temp_init_osc_and_channel()
 {
-    allocator_data_offs = 0;
-
-    mix_channels[0].chan_output_offs = allocate_data(sizeof(float) * rt_step_samples * 2);
+    mix_channels[0].chan_output_offs = data_allocator.allocate(sizeof(float) * rt_step_samples * 2);
 
     Oscillator& osc = oscillators[0];
     osc.note            = 69; // 69=A4
     osc.freq_mult       = 1;
     osc.osc_type[0]     = sine_wave;
-    osc.osc_output_offs = allocate_data(sizeof(float) * rt_step_samples);
+    osc.osc_output_offs = data_allocator.allocate(sizeof(float) * rt_step_samples);
     osc.volume          = 1.0;
     osc.panning         = 0.5;
 }
@@ -671,8 +646,6 @@ bool Synth::init_synth()
         d_printf("No async compute queue available for synth\n");
         return false;
     }
-
-    temp_init_osc_and_channel();
 
     // TODO - use project-dependent audio length
     constexpr uint32_t seconds = 1;
@@ -695,6 +668,8 @@ bool Synth::init_synth()
                                       { "audio work buffer" }))
         return false;
 
+    data_allocator.init(device_buf_size);
+
     if ( ! buffers[param_buf].allocate(Usage::dynamic,
                                        param_buf_size,
                                        VK_FORMAT_UNDEFINED,
@@ -707,6 +682,8 @@ bool Synth::init_synth()
 
     if ( ! allocate_command_buffers_once(&audio_cmd_buf, 1, compute_family_index))
         return false;
+
+    temp_init_osc_and_channel();
 
     if ( ! init_synth_os())
         return false;
@@ -1078,7 +1055,8 @@ static void render_audio_step()
 
     // ======================================================================
 
-    const uint32_t osc_base_param_offs = allocate_param(num_oscillators * static_cast<uint32_t>(sizeof(ShaderParams::Oscillator)));
+    const uint32_t osc_base_param_size = num_oscillators * static_cast<uint32_t>(sizeof(ShaderParams::Oscillator));
+    const uint32_t osc_base_param_offs = param_allocator.allocate(osc_base_param_size);
     uint32_t cur_param_offs = osc_base_param_offs;
 
     for (Oscillator& oscillator : oscillators) {
@@ -1137,8 +1115,10 @@ static void render_audio_step()
 
     // ======================================================================
 
-    const uint32_t input_param_offs = allocate_param(num_oscillators * static_cast<uint32_t>(sizeof(ShaderParams::ChannelCombineInput)));
-    const uint32_t chan_param_offs  = allocate_param(num_mix_channels * static_cast<uint32_t>(sizeof(ShaderParams::ChannelCombine)));
+    const uint32_t input_param_size = num_oscillators * static_cast<uint32_t>(sizeof(ShaderParams::ChannelCombineInput));
+    const uint32_t chan_param_size  = num_mix_channels * static_cast<uint32_t>(sizeof(ShaderParams::ChannelCombine));
+    const uint32_t input_param_offs = param_allocator.allocate(input_param_size);
+    const uint32_t chan_param_offs  = param_allocator.allocate(chan_param_size);
 
     uint32_t chan_input_indices[max_mix_channels] = { };
     uint32_t chan_map[max_mix_channels]           = { };
@@ -1351,7 +1331,7 @@ static bool render_audio(uint32_t num_samples)
     if ( ! reset_and_begin_command_buffer(audio_cmd_buf))
         return false;
 
-    allocator_param_offs = 0;
+    param_allocator.init(static_cast<uint32_t>(buffers[param_buf].size()));
 
     for (uint32_t offset = 0; offset < num_samples; offset += rt_step_samples) {
         render_audio_step();

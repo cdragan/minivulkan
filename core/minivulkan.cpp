@@ -411,21 +411,6 @@ VkSurfaceKHR vk_surface = VK_NULL_HANDLE;
 
 VkPhysicalDevice vk_phys_dev = VK_NULL_HANDLE;
 
-static VkPhysicalDeviceVulkan12Properties vk12_props = {
-    VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_PROPERTIES,
-    nullptr
-};
-
-static VkPhysicalDeviceVulkan11Properties vk11_props = {
-    VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_PROPERTIES,
-    &vk12_props
-};
-
-VkPhysicalDeviceProperties2 vk_phys_props = {
-    VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2,
-    &vk11_props
-};
-
 static const float queue_priorities[] = { 1 };
 
 uint32_t graphics_family_index = no_queue_family;
