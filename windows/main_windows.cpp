@@ -11,32 +11,6 @@
 /* TODO Just including xaudio2.h somehow calls LoadLibraryEx - figure out how to avoid that */
 #include <xaudio2.h>
 
-#if !defined(NDEBUG) && !defined(NOSTDLIB)
-void d_printf(const char* format, ...)
-{
-    va_list args;
-    va_start(args, format);
-
-    char buf[1024];
-    const size_t chars = static_cast<size_t>(vsnprintf(buf, sizeof(buf), format, args));
-
-    va_end(args);
-
-    assert(chars >= sizeof(buf) || buf[chars] == 0);
-
-    static HANDLE out = INVALID_HANDLE_VALUE;
-    if (out == INVALID_HANDLE_VALUE)
-    {
-        out = GetStdHandle(STD_OUTPUT_HANDLE);
-    }
-    if (out != INVALID_HANDLE_VALUE)
-    {
-        DWORD numWritten = 0;
-        WriteFile(out, buf, static_cast<DWORD>(chars), &numWritten, nullptr);
-    }
-}
-#endif
-
 bool create_surface(Window* w)
 {
     static VkWin32SurfaceCreateInfoKHR surf_create_info = {

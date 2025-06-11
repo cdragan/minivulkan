@@ -148,6 +148,10 @@ ifeq ($(UNAME), Windows)
 
     ifeq ($(stdlib), 0)
         lib_src_files += windows/mstdc_windows.cpp
+    else
+        ifneq ($(debug), 0)
+            lib_src_files += windows/d_printf_windows.cpp
+        endif
     endif
 endif
 
