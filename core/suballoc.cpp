@@ -37,6 +37,8 @@ void SubAllocatorBase::remove_free_chunk(uint32_t i_chunk)
 SubAllocatorBase::Chunk SubAllocatorBase::allocate(size_t size, size_t alignment)
 {
     assert(alignment);
+    // Make sure alignment is a power of two
+    assert( ! (alignment & (alignment - 1)));
 
     uint32_t i_chunk;
 
@@ -49,7 +51,7 @@ SubAllocatorBase::Chunk SubAllocatorBase::allocate(size_t size, size_t alignment
         size_t new_offset = chunk.offset;
         size_t new_size   = mstd::align_up(size, alignment);
 
-        if (new_offset % alignment) {
+        if (new_offset & (alignment - 1)) {
 
             new_offset = mstd::align_down(chunk.offset + chunk.size - size, alignment);
 
