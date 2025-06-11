@@ -2,21 +2,26 @@
 // SPDX-FileCopyrightText: Copyright (c) 2021-2025 Chris Dragan
 
 #include "suballoc.h"
+#include "d_printf.h"
 #include "minivulkan.h"
 #include "mstdc.h"
 
-void SubAllocatorBase::init(uint32_t size)
+void SubAllocatorBase::reset()
 {
-    num_free_chunks = 1;
-    free_chunk[0] = { 0, size };
+    assert(total_size);
+
+    init_base(total_size, num_slots);
 }
 
-uint32_t SubAllocatorBase::align_size(uint32_t size)
+void SubAllocatorBase::init_base(size_t size, uint32_t slots)
 {
-    const uint32_t alignment = static_cast<uint32_t>(
-            vk_phys_props.properties.limits.minStorageBufferOffsetAlignment);
-
-    return mstd::align_up(size, alignment);
+    total_size      = size;
+#ifndef NDEBUG
+    used_size       = 0;
+#endif
+    num_free_chunks = 1;
+    num_slots       = slots;
+    free_chunk[0]   = { 0, size };
 }
 
 void SubAllocatorBase::remove_free_chunk(uint32_t i_chunk)
@@ -29,42 +34,71 @@ void SubAllocatorBase::remove_free_chunk(uint32_t i_chunk)
     --num_free_chunks;
 }
 
-uint32_t SubAllocatorBase::allocate(uint32_t size)
+SubAllocatorBase::Chunk SubAllocatorBase::allocate(size_t size, size_t alignment)
 {
-    size = align_size(size);
+    assert(alignment);
 
     uint32_t i_chunk;
 
     for (i_chunk = 0; i_chunk < num_free_chunks; i_chunk++) {
-        if (size <= free_chunk[i_chunk].size)
-            break;
+        if (size > free_chunk[i_chunk].size)
+            continue;
+
+        Chunk& chunk = free_chunk[i_chunk];
+
+        size_t new_offset = chunk.offset;
+        size_t new_size   = mstd::align_up(size, alignment);
+
+        if (new_offset % alignment) {
+
+            new_offset = mstd::align_down(chunk.offset + chunk.size - size, alignment);
+
+            if (new_offset < chunk.offset)
+                continue;
+
+            new_size = chunk.size - new_offset + chunk.offset;
+        }
+        else {
+
+            new_size = mstd::align_up(size, alignment);
+
+            if (new_size > chunk.size)
+                continue;
+
+            chunk.offset += new_size;
+        }
+
+        chunk.size -= new_size;
+
+        if (chunk.size == 0) {
+            remove_free_chunk(i_chunk);
+        }
+
+#ifndef NDEBUG
+        used_size += new_size;
+        if (used_size > max_used_size)
+            max_used_size = used_size;
+#endif
+
+        return { new_offset, new_size };
     }
 
     assert(i_chunk < num_free_chunks);
 
-    if (i_chunk == num_free_chunks) {
-        return 0; // TODO return something better than 0
-    }
+    d_printf("Suballocator failed to allocate 0x%" PRIx64 " bytes - %s\n",
+             static_cast<uint64_t>(size),
+             num_free_chunks ? "note: heap is fragmented" : "out of memory");
 
-    FreeChunk& chunk = free_chunk[i_chunk];
-
-    const uint32_t offset = chunk.offset;
-
-    chunk.offset = offset + size;
-    chunk.size  -= size;
-
-    if (chunk.size == 0) {
-        remove_free_chunk(i_chunk);
-    }
-
-    return offset;
+    return  { total_size, 0 };
 }
 
-void SubAllocatorBase::free(uint32_t offset, uint32_t size)
+void SubAllocatorBase::free(size_t offset, size_t size)
 {
-    size = align_size(size);
+#ifndef NDEBUG
+    used_size -= size;
+#endif
 
-    const uint32_t end_offset = offset + size;
+    const size_t end_offset = offset + size;
 
     uint32_t i_chunk;
 
@@ -74,13 +108,13 @@ void SubAllocatorBase::free(uint32_t offset, uint32_t size)
     }
 
     if (i_chunk > 0) {
-        FreeChunk& prev = free_chunk[i_chunk - 1];
+        Chunk& prev = free_chunk[i_chunk - 1];
 
         if (prev.offset + prev.size == offset) {
             prev.size += size;
 
             if (i_chunk < num_free_chunks) {
-                const FreeChunk& next = free_chunk[i_chunk];
+                const Chunk& next = free_chunk[i_chunk];
 
                 if (end_offset == next.offset) {
                     prev.size += next.size;
@@ -94,7 +128,7 @@ void SubAllocatorBase::free(uint32_t offset, uint32_t size)
     }
 
     if (i_chunk < num_free_chunks) {
-        FreeChunk& next = free_chunk[i_chunk];
+        Chunk& next = free_chunk[i_chunk];
 
         if (end_offset == next.offset) {
             next.offset -= size;
@@ -106,16 +140,16 @@ void SubAllocatorBase::free(uint32_t offset, uint32_t size)
 
     assert(num_free_chunks < num_slots);
 
-    if (num_free_chunks == num_slots)
-        return; // TODO return some error
+    if (num_free_chunks == num_slots) {
+        d_printf("Suballocator free heap is too fragmented\n");
+        return;
+    }
 
     for (uint32_t i_slot = num_free_chunks; i_slot > i_chunk; i_slot--) {
         free_chunk[i_slot] = free_chunk[i_slot - 1];
     }
 
-    FreeChunk& chunk = free_chunk[i_chunk];
-    chunk.offset = offset;
-    chunk.size   = size;
+    free_chunk[i_chunk] = { offset, size };
 
     ++num_free_chunks;
 }

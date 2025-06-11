@@ -73,10 +73,6 @@ bool init_assets()
     return true;
 }
 
-static VkDeviceSize heap_low_checkpoint;
-static VkDeviceSize heap_high_checkpoint;
-static bool         viewports_allocated;
-
 void notify_gui_heap_freed()
 {
     for (Sculptor::Editor* editor : editors)
@@ -95,16 +91,9 @@ static bool destroy_viewports()
 
 static bool allocate_viewports()
 {
-    if ( ! viewports_allocated)
-        heap_low_checkpoint = mem_mgr.get_heap_checkpoint();
-
     for (Sculptor::Editor* editor : editors)
         if (editor->enabled && ! editor->allocate_resources())
             return false;
-
-    heap_high_checkpoint = mem_mgr.get_heap_checkpoint();
-    if (heap_high_checkpoint != heap_low_checkpoint)
-        viewports_allocated = true;
 
     return true;
 }

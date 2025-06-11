@@ -93,8 +93,7 @@ class Image: public Resource {
 
         bool allocate(const ImageInfo& image_info, Description desc);
         bool flush() { return flush_whole(); }
-        void destroy();
-        void free(); // GUI only
+        void free();
 
         struct Transition {
             VkPipelineStageFlags src_stage;

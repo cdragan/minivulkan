@@ -7,17 +7,6 @@
 #include "minivulkan.h"
 #include "mstdc.h"
 
-void Image::free()
-{
-    MemoryHeap*  const heap   = owning_heap;
-    VkDeviceSize const offset = heap_offset;
-    VkDeviceSize const size   = alloc_size;
-
-    destroy();
-
-    heap->free_memory(offset, size);
-}
-
 void Buffer::free()
 {
     MemoryHeap*  const heap   = owning_heap;

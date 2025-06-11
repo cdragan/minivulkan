@@ -27,8 +27,6 @@ bool MemoryHeap::allocate_heap(int req_memory_type, VkDeviceSize size)
     assert(req_memory_type <  static_cast<int>(mstd::array_size(vk_mem_props.memoryTypes)));
     assert(memory          == VK_NULL_HANDLE);
     assert(host_ptr        == nullptr);
-    assert(next_free_offs  == 0);
-    assert(last_free_offs  == 0);
     assert(heap_size       == 0);
 
     size = mstd::align_up(size, VkDeviceSize(vk_phys_props.properties.limits.minMemoryMapAlignment));
@@ -52,12 +50,10 @@ bool MemoryHeap::allocate_heap(int req_memory_type, VkDeviceSize size)
             return false;
     }
 
-    heap_size       = size;
-    last_free_offs  = size;
-    memory_type     = static_cast<uint32_t>(req_memory_type);
-#ifndef NDEBUG
-    lowest_end_offs = size;
-#endif
+    heap_size   = size;
+    memory_type = static_cast<uint32_t>(req_memory_type);
+
+    suballoc.init(static_cast<size_t>(size));
 
     d_printf("Allocated heap size 0x%" PRIx64 " bytes (%u MB) with memory type %d\n",
              static_cast<uint64_t>(size), in_mb(size), req_memory_type);
@@ -66,59 +62,36 @@ bool MemoryHeap::allocate_heap(int req_memory_type, VkDeviceSize size)
 }
 
 bool MemoryHeap::allocate_memory(const VkMemoryRequirements& requirements,
-                                 Placement                   placement,
-                                 VkDeviceSize*               offset)
+                                 VkDeviceSize*               offset,
+                                 VkDeviceSize*               size)
 {
-    assert(next_free_offs <= last_free_offs);
-    assert(last_free_offs <= heap_size);
+    const SubAllocatorBase::Chunk chunk = suballoc.allocate(requirements.size, requirements.alignment);
 
-    if (allocate_free_block(requirements, placement, offset))
-        return true;
-
-    const VkDeviceSize alignment = requirements.alignment;
-
-    const VkDeviceSize aligned_offs = (placement == Placement::front)
-             ? mstd::align_up(next_free_offs, alignment)
-             : mstd::align_down(last_free_offs - requirements.size, alignment);
-
-    const VkDeviceSize end_offs = aligned_offs + requirements.size;
-
-    assert(aligned_offs >= next_free_offs);
-    assert(aligned_offs % alignment == 0);
-
-    if (requirements.size > last_free_offs - next_free_offs ||
-        aligned_offs < next_free_offs ||
-        end_offs > last_free_offs) {
-
+    if (chunk.offset >= heap_size) {
         d_printf("Not enough device memory\n");
         d_printf("Requested surface size 0x%" PRIx64 ", used heap size 0x%" PRIx64 ", total heap size 0x%" PRIx64 "\n",
                 static_cast<uint64_t>(requirements.size),
-                static_cast<uint64_t>(heap_size - last_free_offs + next_free_offs),
+                static_cast<uint64_t>(suballoc.get_used_size()),
                 static_cast<uint64_t>(heap_size));
         return false;
     }
 
-    *offset = aligned_offs;
+    if (chunk.offset % requirements.alignment) {
+        d_printf("Invalid alignment from suballocator, requested alignment 0x%" PRIx64 ", got offset 0x%" PRIx64 "\n",
+                 static_cast<uint64_t>(requirements.alignment),
+                 static_cast<uint64_t>(chunk.offset));
+        return false;
+    }
 
-    if (placement == Placement::front)
-        next_free_offs = end_offs;
-    else
-        last_free_offs = aligned_offs;
+    *offset = static_cast<VkDeviceSize>(chunk.offset);
+    *size   = static_cast<VkDeviceSize>(chunk.size);
 
     return true;
 }
 
-void MemoryHeap::restore_checkpoint(VkDeviceSize low_checkpoint, VkDeviceSize high_checkpoint)
+void MemoryHeap::free_memory(VkDeviceSize offset, VkDeviceSize size)
 {
-    assert(low_checkpoint > high_checkpoint);
-    assert(low_checkpoint <= heap_size);
-    assert(last_free_offs == high_checkpoint);
-
-#ifndef NDEBUG
-    lowest_end_offs = mstd::min(lowest_end_offs, last_free_offs);
-#endif
-
-    last_free_offs = low_checkpoint;
+    suballoc.free(static_cast<size_t>(offset), static_cast<size_t>(size));
 }
 
 #ifndef NDEBUG
@@ -269,6 +242,7 @@ bool MemoryAllocator::init_heaps(VkDeviceSize device_heap_size,
 bool MemoryAllocator::allocate_memory(const VkMemoryRequirements& requirements,
                                       Usage                       heap_usage,
                                       VkDeviceSize*               offset,
+                                      VkDeviceSize*               size,
                                       MemoryHeap**                heap)
 {
     MemoryHeap* selected_heap = &device_heap;
@@ -291,10 +265,7 @@ bool MemoryAllocator::allocate_memory(const VkMemoryRequirements& requirements,
 
     *heap = selected_heap;
 
-    using Placement = MemoryHeap::Placement;
-    const Placement placement = (heap_usage == Usage::device_temporary) ? Placement::back : Placement::front;
-
-    return selected_heap->allocate_memory(requirements, placement, offset);
+    return selected_heap->allocate_memory(requirements, offset, size);
 }
 
 bool MemoryAllocator::need_host_copy(Usage heap_usage)
@@ -313,13 +284,10 @@ MemoryAllocator::~MemoryAllocator()
 void MemoryHeap::print_stats(const char* heap_name) const
 {
     if (heap_size) {
-        const VkDeviceSize max_top_alloc_size = heap_size - mstd::min(lowest_end_offs, last_free_offs);
-        d_printf("Memory type %u, used %u MB out of %u MB, bottom %u MB, top %u MB in %s heap\n",
+        d_printf("Memory type %u, used %u MB out of %u MB in %s heap\n",
                  memory_type,
-                 in_mb(next_free_offs + max_top_alloc_size),
+                 in_mb(static_cast<VkDeviceSize>(suballoc.get_max_used_size())),
                  in_mb(heap_size),
-                 in_mb(next_free_offs),
-                 in_mb(max_top_alloc_size),
                  heap_name);
     }
 }

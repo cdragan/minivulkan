@@ -582,6 +582,8 @@ namespace {
 
     SubAllocator<1> param_allocator;
 
+    size_t synth_alignment;
+
     template<typename T>
     T& get_param(uint32_t offset)
     {
@@ -629,13 +631,13 @@ namespace Synth {
 
 static void temp_init_osc_and_channel()
 {
-    mix_channels[0].chan_output_offs = data_allocator.allocate(sizeof(float) * rt_step_samples * 2);
+    mix_channels[0].chan_output_offs = static_cast<uint32_t>(data_allocator.allocate(sizeof(float) * rt_step_samples * 2, synth_alignment).offset);
 
     Oscillator& osc = oscillators[0];
     osc.note            = 69; // 69=A4
     osc.freq_mult       = 1;
     osc.osc_type[0]     = sine_wave;
-    osc.osc_output_offs = data_allocator.allocate(sizeof(float) * rt_step_samples);
+    osc.osc_output_offs = static_cast<uint32_t>(data_allocator.allocate(sizeof(float) * rt_step_samples, synth_alignment).offset);
     osc.volume          = 1.0;
     osc.panning         = 0.5;
 }
@@ -682,6 +684,8 @@ bool Synth::init_synth()
 
     if ( ! allocate_command_buffers_once(&audio_cmd_buf, 1, compute_family_index))
         return false;
+
+    synth_alignment = static_cast<size_t>(vk_phys_props.properties.limits.minMemoryMapAlignment);
 
     temp_init_osc_and_channel();
 
@@ -1056,7 +1060,7 @@ static void render_audio_step()
     // ======================================================================
 
     const uint32_t osc_base_param_size = num_oscillators * static_cast<uint32_t>(sizeof(ShaderParams::Oscillator));
-    const uint32_t osc_base_param_offs = param_allocator.allocate(osc_base_param_size);
+    const uint32_t osc_base_param_offs = static_cast<uint32_t>(param_allocator.allocate(osc_base_param_size, synth_alignment).offset);
     uint32_t cur_param_offs = osc_base_param_offs;
 
     for (Oscillator& oscillator : oscillators) {
@@ -1117,8 +1121,8 @@ static void render_audio_step()
 
     const uint32_t input_param_size = num_oscillators * static_cast<uint32_t>(sizeof(ShaderParams::ChannelCombineInput));
     const uint32_t chan_param_size  = num_mix_channels * static_cast<uint32_t>(sizeof(ShaderParams::ChannelCombine));
-    const uint32_t input_param_offs = param_allocator.allocate(input_param_size);
-    const uint32_t chan_param_offs  = param_allocator.allocate(chan_param_size);
+    const uint32_t input_param_offs = static_cast<uint32_t>(param_allocator.allocate(input_param_size, synth_alignment).offset);
+    const uint32_t chan_param_offs  = static_cast<uint32_t>(param_allocator.allocate(chan_param_size, synth_alignment).offset);
 
     uint32_t chan_input_indices[max_mix_channels] = { };
     uint32_t chan_map[max_mix_channels]           = { };

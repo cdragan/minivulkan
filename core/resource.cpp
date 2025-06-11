@@ -130,10 +130,8 @@ bool Image::allocate(const ImageInfo& image_info, Description desc)
     vkGetImageMemoryRequirements(vk_dev, image, &memory_reqs);
 
     if ( ! owning_heap) {
-        if ( ! mem_mgr.allocate_memory(memory_reqs, heap_usage, &heap_offset, &owning_heap))
+        if ( ! mem_mgr.allocate_memory(memory_reqs, heap_usage, &heap_offset, &alloc_size, &owning_heap))
             return false;
-
-        alloc_size = memory_reqs.size;
     }
     else {
         assert(alloc_size >= memory_reqs.size);
@@ -234,12 +232,17 @@ void Image::set_image_layout(VkCommandBuffer buf, const Transition& transition)
                          &img_barrier);
 }
 
-void Image::destroy()
+void Image::free()
 {
     if (view)
         vkDestroyImageView(vk_dev, view, nullptr);
+
     if (image)
         vkDestroyImage(vk_dev, image, nullptr);
+
+    if (alloc_size)
+        owning_heap->free_memory(heap_offset, alloc_size);
+
     mstd::mem_zero(this, sizeof(*this));
 }
 
@@ -278,9 +281,10 @@ bool Buffer::allocate(Usage              heap_usage,
     vkGetBufferMemoryRequirements(vk_dev, buffer, &memory_reqs);
 
     VkDeviceSize offset;
+    VkDeviceSize actual_size;
     MemoryHeap*  heap;
 
-    if ( ! mem_mgr.allocate_memory(memory_reqs, heap_usage, &offset, &heap))
+    if ( ! mem_mgr.allocate_memory(memory_reqs, heap_usage, &offset, &actual_size, &heap))
         return false;
 
 #ifndef NDEBUG
@@ -315,7 +319,7 @@ bool Buffer::allocate(Usage              heap_usage,
 
     owning_heap = heap;
     heap_offset = offset;
-    alloc_size  = size;
+    alloc_size  = actual_size;
 
     return true;
 }

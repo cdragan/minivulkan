@@ -156,7 +156,6 @@ vmath_unit_src_files += core/vmath_unit.cpp
 suballoc_unit_src_files += core/suballoc_unit.cpp
 
 threed_gui_src_files += core/gui.cpp
-threed_gui_src_files += core/memory_heap_gui.cpp
 threed_gui_src_files += core/resource_gui.cpp
 threed_gui_src_files += core/gui_config.cpp
 threed_gui_src_files += core/load_png.cpp
@@ -164,7 +163,6 @@ threed_gui_src_files += core/realtime_synth.cpp
 threed_gui_src_files += core/empty_midi_soundtrack.cpp
 
 threed_nogui_src_files += core/nogui.cpp
-threed_nogui_src_files += core/memory_heap_nogui.cpp
 
 spirv_encode_src_files += tools/spirv_encode.cpp
 

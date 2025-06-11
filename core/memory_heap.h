@@ -4,6 +4,7 @@
 #include "vulkan_functions.h"
 
 #include "usage.h"
+#include "suballoc.h"
 
 // Memory heap is a single range of device memory allocated once during init.
 //
@@ -25,18 +26,11 @@ class MemoryHeap {
         MemoryHeap& operator=(const MemoryHeap&) = delete;
 
         bool allocate_heap(int req_memory_type, VkDeviceSize size);
-        VkDeviceSize get_checkpoint() const { return last_free_offs; }
-        void restore_checkpoint(VkDeviceSize low_checkpoint, VkDeviceSize high_checkpoint);
-
-        enum class Placement {
-            front,  // Most resources allocated from the front of the heap, never released
-            back    // Swap chain images allocated from the back of the heap, reallocated on resize
-        };
 
         bool allocate_memory(const VkMemoryRequirements& requirements,
-                             Placement                   placement,
-                             VkDeviceSize*               offset);
-        void free_memory(VkDeviceSize offset, VkDeviceSize size); // GUI only
+                             VkDeviceSize*               offset,
+                             VkDeviceSize*               size);
+        void free_memory(VkDeviceSize offset, VkDeviceSize size);
 
         VkDeviceMemory get_memory()   const { return memory; }
         void*          get_host_ptr() const { return host_ptr; }
@@ -49,31 +43,11 @@ class MemoryHeap {
         void print_stats(const char* heap_name) const;
 
     private:
-        bool allocate_free_block(const VkMemoryRequirements& requirements,
-                                 Placement                   placement,
-                                 VkDeviceSize*               offset);
-        void insert_free_block(uint32_t idx, VkDeviceSize offset, VkDeviceSize size);
-        void delete_free_block(uint32_t idx);
-
-        VkDeviceMemory  memory           = VK_NULL_HANDLE;
-        void*           host_ptr         = nullptr;
-        VkDeviceSize    next_free_offs   = 0;
-        VkDeviceSize    last_free_offs   = 0;
-#ifndef NDEBUG
-        VkDeviceSize    lowest_end_offs  = 0;
-#endif
-        VkDeviceSize    heap_size        = 0;
-        uint32_t        memory_type      = 0;
-
-        // Free blocks are only used in GUI builds
-        struct FreeBlock {
-            constexpr FreeBlock() = default;
-            VkDeviceSize offset = 0;
-            VkDeviceSize size   = 0;
-        };
-
-        uint32_t        num_free_blocks  = 0;
-        FreeBlock       free_blocks[256];
+        VkDeviceMemory    memory      = VK_NULL_HANDLE;
+        void*             host_ptr    = nullptr;
+        VkDeviceSize      heap_size   = 0;
+        uint32_t          memory_type = 0;
+        SubAllocator<256> suballoc;
 };
 
 class MemoryAllocator {
@@ -92,14 +66,10 @@ class MemoryAllocator {
         bool allocate_memory(const VkMemoryRequirements& requirements,
                              Usage                       heap_usage,
                              VkDeviceSize*               offset,
+                             VkDeviceSize*               size,
                              MemoryHeap**                heap);
 
         bool need_host_copy(Usage heap_usage);
-
-        VkDeviceSize get_heap_checkpoint() const { return device_heap.get_checkpoint(); }
-        void restore_heap_checkpoint(VkDeviceSize low_checkpoint, VkDeviceSize high_checkpoint) {
-            device_heap.restore_checkpoint(low_checkpoint, high_checkpoint);
-        }
 
     private:
         MemoryHeap device_heap;
