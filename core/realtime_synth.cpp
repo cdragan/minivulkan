@@ -439,11 +439,14 @@ namespace {
 
         for (uint32_t i = 0; i < num_synth_pipes; i++) {
 
+            if (!shaders[i].shader_info.shader)
+                continue;
+
             const VkDescriptorSetLayout ds_layouts[max_desc_sets + 1] = {
                 desc_set_layouts[shaders[i].desc_sets[0]],
                 // TODO add support for dynamic count of descriptor sets
                 desc_set_layouts[shaders[i].desc_sets[1]],
-                VK_NULL_HANDLE
+                VK_NULL_HANDLE // list terminator
             };
 
             static const VkSpecializationMapEntry map_entries[] = {
@@ -955,48 +958,35 @@ static void process_events(uint32_t start_samples, uint32_t end_samples)
     }
 }
 
-struct CachedBufferAccessStage {
-    VkAccessFlags        access = 0;
-    VkPipelineStageFlags stage  = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
-};
-
-static CachedBufferAccessStage cached_stage[num_buf_types];
-
-static void buffer_barrier(BufferTypes          buf_id,
-                           VkAccessFlags        dst_access,
+static void memory_barrier(VkAccessFlags        dst_access,
                            VkPipelineStageFlags dst_stage)
 {
-    static VkBufferMemoryBarrier buf_barrier = {
-        VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
+    static VkAccessFlags        src_access = 0;
+    static VkPipelineStageFlags src_stage  = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+
+    static VkMemoryBarrier barrier = {
+        VK_STRUCTURE_TYPE_MEMORY_BARRIER,
         nullptr,
-        VK_ACCESS_NONE,
-        VK_ACCESS_NONE,
         0,
-        0,
-        VK_NULL_HANDLE,
-        0,
-        VK_WHOLE_SIZE
+        0
     };
 
-    buf_barrier.srcAccessMask       = cached_stage[buf_id].access;
-    buf_barrier.dstAccessMask       = dst_access;
-    buf_barrier.srcQueueFamilyIndex = compute_family_index;
-    buf_barrier.dstQueueFamilyIndex = compute_family_index;
-    buf_barrier.buffer              = buffers[buf_id].get_buffer();
+    barrier.srcAccessMask = src_access;
+    barrier.dstAccessMask = dst_access;
 
     vkCmdPipelineBarrier(audio_cmd_buf,
-                         cached_stage[buf_id].stage,
+                         src_stage,
                          dst_stage,
                          0,             // dependencyFlags
-                         0,             // memoryBarrierCount
-                         nullptr,       // pMemoryBarriers
-                         1,             // bufferMemoryBarrierCount
-                         &buf_barrier,
+                         1,             // memoryBarrierCount
+                         &barrier,
+                         0,             // bufferMemoryBarrierCount
+                         nullptr,       // pBufferMemoryBarriers
                          0,             // imageMemoryBarrierCount
                          nullptr);      // pImageMemoryBarriers
 
-    cached_stage[buf_id].access = dst_access;
-    cached_stage[buf_id].stage  = dst_stage;
+    src_access = dst_access;
+    src_stage  = dst_stage;
 }
 
 static void render_audio_step()
@@ -1015,8 +1005,7 @@ static void render_audio_step()
 
 #if 0
     if ( ! num_filters) {
-        buffer_barrier(param_buf, VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
-        buffer_barrier(data_buf, VK_ACCESS_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+        memory_barrier(VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
 
         // TODO update_filters();
     }
@@ -1047,7 +1036,7 @@ static void render_audio_step()
     }
 
     if ( ! num_oscillators) {
-        buffer_barrier(data_buf, VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+        memory_barrier(VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
 
         vkCmdFillBuffer(audio_cmd_buf,
                         buffers[data_buf].get_buffer(),
@@ -1089,8 +1078,7 @@ static void render_audio_step()
         cur_param_offs += static_cast<uint32_t>(sizeof(ShaderParams::Oscillator));
     }
 
-    buffer_barrier(param_buf, VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
-    buffer_barrier(data_buf, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+    memory_barrier(VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
 
     vkCmdBindPipeline(audio_cmd_buf, VK_PIPELINE_BIND_POINT_COMPUTE, pipes[oscillator_pipe]);
 
@@ -1172,7 +1160,7 @@ static void render_audio_step()
         param.num_inputs        = channel_osc_count[chan_idx];
     }
 
-    buffer_barrier(data_buf, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+    memory_barrier(VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
 
     vkCmdBindPipeline(audio_cmd_buf, VK_PIPELINE_BIND_POINT_COMPUTE, pipes[chan_combine_pipe]);
 
@@ -1206,7 +1194,7 @@ static void render_audio_step()
 
     // TODO Apply master effects
 
-    buffer_barrier(param_buf, VK_ACCESS_HOST_WRITE_BIT, VK_PIPELINE_STAGE_HOST_BIT);
+    memory_barrier(VK_ACCESS_HOST_WRITE_BIT, VK_PIPELINE_STAGE_HOST_BIT);
 }
 
 template<typename T, bool interleaved>
@@ -1340,15 +1328,14 @@ static bool render_audio(uint32_t num_samples)
     for (uint32_t offset = 0; offset < num_samples; offset += rt_step_samples) {
         render_audio_step();
 
-        buffer_barrier(data_buf, VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
-        buffer_barrier(output_buf, VK_ACCESS_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+        memory_barrier(VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
 
         prepare_copy_audio_step_to_host<T, interleaved>(offset);
 
         vkCmdDispatch(audio_cmd_buf, 1, 1, 1);
-
-        buffer_barrier(output_buf, VK_ACCESS_HOST_READ_BIT, VK_PIPELINE_STAGE_HOST_BIT);
     }
+
+    memory_barrier(VK_ACCESS_HOST_READ_BIT, VK_PIPELINE_STAGE_HOST_BIT);
 
     buffers[param_buf].flush();
 
