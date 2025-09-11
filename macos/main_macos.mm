@@ -228,8 +228,14 @@ bool play_sound_track()
     - (CALayer *)makeBackingLayer
     {
         CAMetalLayer* layer      = [self.class.layerClass layer];
-        const NSSize  view_scale = [self convertSizeToBacking: NSMakeSize(1, 1)];
-        layer.contentsScale      = MIN(view_scale.width, view_scale.height);
+
+        // Avoid UI scaling in full screen mode, assuming that in this mode we don't
+        // need cursor interaction (otherwise cursor position would need to be scaled properly).
+        if ( ! is_full_screen()) {
+            const NSSize  view_scale = [self convertSizeToBacking: NSMakeSize(1, 1)];
+            layer.contentsScale      = MIN(view_scale.width, view_scale.height);
+        }
+
         return layer;
     }
 
