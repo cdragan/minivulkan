@@ -177,6 +177,53 @@ static void handle_repeat_info(void*        data,
 {
 }
 
+static void handle_pointer_enter(void*       data,
+                                 wl_pointer* ptr,
+                                 uint32_t    serial,
+                                 wl_surface* surface,
+                                 wl_fixed_t  surface_x,
+                                 wl_fixed_t  surface_y)
+{
+    handle_wl_focus(true);
+}
+
+static void handle_pointer_leave(void*       data,
+                                 wl_pointer* ptr,
+                                 uint32_t    serial,
+                                 wl_surface* surface)
+{
+    handle_wl_focus(false);
+}
+
+static void handle_pointer_motion(void*       data,
+                                  wl_pointer* ptr,
+                                  uint32_t    time,
+                                  wl_fixed_t  surface_x,
+                                  wl_fixed_t  surface_y)
+{
+    handle_wl_pointer_motion((float)wl_fixed_to_double(surface_x),
+                             (float)wl_fixed_to_double(surface_y));
+}
+
+static void handle_pointer_button(void*       data,
+                                  wl_pointer* ptr,
+                                  uint32_t    serial,
+                                  uint32_t    time,
+                                  uint32_t    button,
+                                  uint32_t    state)
+{
+    handle_wl_pointer_button(button, state);
+}
+
+static void handle_pointer_axis(void*       data,
+                                wl_pointer* ptr,
+                                uint32_t    time,
+                                uint32_t    axis,
+                                wl_fixed_t  value)
+{
+    handle_wl_scroll(axis, (float)wl_fixed_to_double(value));
+}
+
 static bool create_window(Window* w)
 {
     const bool full_screen = is_full_screen();
@@ -272,6 +319,24 @@ static bool create_window(Window* w)
         .repeat_info = handle_repeat_info
     };
     wl_keyboard_add_listener(w->keyboard, &keyboard_listener, w);
+
+    // Hook up mouse
+    if (has_gui()) {
+        w->pointer = wl_seat_get_pointer(w->seat);
+        if ( ! w->pointer) {
+            d_printf("Wayland pointer is not available\n");
+            return false;
+        }
+
+        static const wl_pointer_listener pointer_listener = {
+            .enter  = handle_pointer_enter,
+            .leave  = handle_pointer_leave,
+            .motion = handle_pointer_motion,
+            .button = handle_pointer_button,
+            .axis   = handle_pointer_axis
+        };
+        wl_pointer_add_listener(w->pointer, &pointer_listener, w);
+    }
 
     // Apply changes to the surface
     wl_surface_commit(w->surface);

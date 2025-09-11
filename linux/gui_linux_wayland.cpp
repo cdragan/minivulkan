@@ -169,3 +169,21 @@ void handle_wl_focus(bool focused)
 {
     ImGui::GetIO().AddFocusEvent(focused);
 }
+
+void handle_wl_pointer_motion(float x, float y)
+{
+    ImGui::GetIO().AddMousePosEvent(x, y);
+}
+
+void handle_wl_pointer_button(uint32_t button, uint32_t state)
+{
+    const int button_idx = (int)button - BTN_LEFT;
+    if (button_idx >= 0 && button_idx < (int)ImGuiMouseButton_COUNT)
+        ImGui::GetIO().AddMouseButtonEvent(button_idx, !! state);
+}
+
+void handle_wl_scroll(uint32_t axis, float delta)
+{
+    if (axis == 0 && delta != 0.0f)
+        ImGui::GetIO().AddMouseWheelEvent(0, (delta > 0.0f) ? 1 : -1);
+}

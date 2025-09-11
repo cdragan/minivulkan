@@ -3,6 +3,11 @@
 
 #include "gui.h"
 
+bool has_gui()
+{
+    return false;
+}
+
 bool init_gui(GuiClear clear)
 {
     return true;

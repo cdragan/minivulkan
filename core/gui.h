@@ -15,6 +15,7 @@ enum class GuiClear {
 bool init_gui(GuiClear clear);
 bool send_gui_to_gpu(VkCommandBuffer cmdbuf, uint32_t image_idx);
 
+bool has_gui();
 bool is_full_screen();
 uint32_t get_main_window_width();
 uint32_t get_main_window_height();

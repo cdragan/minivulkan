@@ -16,6 +16,11 @@ float vk_surface_scale = 1.0f;
 static VkRenderPass  vk_gui_render_pass;
 static VkFramebuffer vk_framebuffers[max_swapchain_size];
 
+bool has_gui()
+{
+    return true;
+}
+
 static void check_gui_result(VkResult imgui_error)
 {
     if (CHK(imgui_error) != VK_SUCCESS) {
