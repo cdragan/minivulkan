@@ -6,6 +6,7 @@
 #include "main_linux.h"
 #include "../core/minivulkan.h"
 
+#include <errno.h>
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
@@ -270,38 +271,39 @@ static bool create_window(Window* w)
 
     xdg_wm_base_add_listener(w->wm_base, &wm_base_listener, w);
 
-    xdg_surface* wm_surface = xdg_wm_base_get_xdg_surface(w->wm_base, w->surface);
+    if (full_screen)  {
+        xdg_surface* wm_surface = xdg_wm_base_get_xdg_surface(w->wm_base, w->surface);
 
-    if ( ! wm_surface) {
-        d_printf("Failed to create window manager's surface\n");
-        return false;
-    }
+        if ( ! wm_surface) {
+            d_printf("Failed to create window manager's surface\n");
+            return false;
+        }
 
-    static const xdg_surface_listener surface_listener = {
-        .configure = handle_wm_configure
-    };
+        static const xdg_surface_listener surface_listener = {
+            .configure = handle_wm_configure
+        };
 
-    xdg_surface_add_listener(wm_surface, &surface_listener, w);
+        xdg_surface_add_listener(wm_surface, &surface_listener, w);
 
-    xdg_toplevel* toplevel = xdg_surface_get_toplevel(wm_surface);
+        xdg_toplevel* toplevel = xdg_surface_get_toplevel(wm_surface);
 
-    if ( ! toplevel) {
-        d_printf("Failed to create window (toplevel)\n");
-        return false;
-    }
+        if ( ! toplevel) {
+            d_printf("Failed to create window (toplevel)\n");
+            return false;
+        }
 
-    static const xdg_toplevel_listener toplevel_listener = {
-        .configure = handle_toplevel_configure,
-        .close     = handle_toplevel_close
-    };
+        static const xdg_toplevel_listener toplevel_listener = {
+            .configure = handle_toplevel_configure,
+            .close     = handle_toplevel_close
+        };
 
-    xdg_toplevel_add_listener(toplevel, &toplevel_listener, w);
+        xdg_toplevel_add_listener(toplevel, &toplevel_listener, w);
 
-    xdg_toplevel_set_title(toplevel, app_name);
-    xdg_toplevel_set_app_id(toplevel, app_name);
+        xdg_toplevel_set_title(toplevel, app_name);
+        xdg_toplevel_set_app_id(toplevel, app_name);
 
-    if (full_screen)
         xdg_toplevel_set_fullscreen(toplevel, nullptr);
+    }
 
     // Hook up keyboard
     w->keyboard = wl_seat_get_keyboard(w->seat);
@@ -347,7 +349,12 @@ static bool create_window(Window* w)
     // Complete configuration
     wl_surface_commit(w->surface);
 
-    //return install_keyboard_events(w->connection);
+    // Install decorations
+    if ( ! full_screen) {
+        if ( ! init_wl_gui(w->display, w->surface, &w->quit))
+            return false;
+    }
+
     return true;
 }
 
@@ -358,8 +365,10 @@ static int event_loop(Window* w)
     while ( ! w->quit) {
         const int status = blocking ? wl_display_dispatch(w->display)
                                     : wl_display_dispatch_pending(w->display);
-        if (status == -1)
+        if (status == -1) {
+            d_printf("Failed to dispatch Wayland events: %s\n", strerror(errno));
             break;
+        }
 
         blocking = ! need_redraw(w) && skip_frame(w);
         if (blocking)

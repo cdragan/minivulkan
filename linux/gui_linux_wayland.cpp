@@ -2,13 +2,17 @@
 // SPDX-FileCopyrightText: Copyright (c) 2021-2025 Chris Dragan
 
 #include "../core/d_printf.h"
+#include "../core/gui.h"
 #include "main_linux.h"
+#include "../core/minivulkan.h"
 
 #include "../thirdparty/imgui/src/imgui.h"
 
-#include "linux/input-event-codes.h"
+#include <errno.h>
+#include <libdecor-0/libdecor.h>
+#include <linux/input-event-codes.h>
 
-static bool window_needs_update = false;
+static bool window_needs_update;
 
 bool need_redraw(struct Window*)
 {
@@ -17,6 +21,93 @@ bool need_redraw(struct Window*)
     window_needs_update = false;
 
     return needs_update;
+}
+
+static void decor_error(libdecor*      context,
+                        libdecor_error error,
+                        const char*    message)
+{
+}
+
+static bool decor_configured;
+
+static void decor_configure(libdecor_frame*         frame,
+                            libdecor_configuration* configuration,
+                            void*                   user_data)
+{
+    const uint32_t width  = vk_window_extent.width  ? vk_window_extent.width  : get_main_window_width();
+    const uint32_t height = vk_window_extent.height ? vk_window_extent.height : get_main_window_height();
+
+    vk_window_extent.width  = width;
+    vk_window_extent.height = height;
+
+    d_printf("Decor resize %ux%u\n", width, height);
+
+    libdecor_state* const state = libdecor_state_new(width, height);
+    libdecor_frame_commit(frame, state, nullptr);
+    libdecor_state_free(state);
+
+    decor_configured = true;
+}
+
+static void decor_close(libdecor_frame* frame,
+                        void*           user_data)
+{
+    *static_cast<bool*>(user_data) = true;
+}
+
+static void decor_commit(libdecor_frame* frame,
+                         void*           user_data)
+{
+}
+
+static void decor_dismiss_popup(libdecor_frame* frame,
+                                const char*     seat_name,
+                                void*           user_data)
+{
+}
+
+bool init_wl_gui(void* display, void* surface, bool* quit)
+{
+    static libdecor_interface decor_callbacks = {
+        .error = decor_error
+    };
+
+    libdecor* const context = libdecor_new(static_cast<wl_display*>(display), &decor_callbacks);
+    if ( ! context) {
+        d_printf("Failed to initialize libdecor\n");
+        return false;
+    }
+
+    static libdecor_frame_interface frame_callbacks = {
+        .configure     = decor_configure,
+        .close         = decor_close,
+        .commit        = decor_commit,
+        .dismiss_popup = decor_dismiss_popup
+    };
+
+    libdecor_frame* const frame = libdecor_decorate(context,
+                                                    static_cast<wl_surface*>(surface),
+                                                    &frame_callbacks,
+                                                    quit);
+    if ( ! frame) {
+        d_printf("Failed to create libdecor frame\n");
+        return false;
+    }
+
+    libdecor_frame_set_app_id(frame, app_name);
+    //libdecor_frame_set_title(frame, app_name);
+
+    libdecor_frame_map(frame);
+
+    while ( ! decor_configured) {
+        if (wl_display_roundtrip(static_cast<wl_display*>(display)) == -1) {
+            d_printf("Failed to dispatch Wayland events: %s\n", strerror(errno));
+            return false;
+        }
+    }
+
+    return true;
 }
 
 #if 1

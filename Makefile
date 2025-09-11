@@ -381,7 +381,8 @@ endif
 
 ifeq ($(UNAME), Linux)
     ifeq ($(wayland), 1)
-        LDFLAGS += -lwayland-client
+        LDFLAGS     += -lwayland-client
+        LDFLAGS_gui += -ldecor-0
     else
         LDFLAGS += -lxcb -lxcb-xfixes
         CFLAGS  += -DLINUX_USE_XCB
@@ -530,9 +531,7 @@ ifeq ($(UNAME), Windows)
 $(foreach target,$(gui_targets) $(nogui_targets),$(call GUI_PATH,$(target))): SUBSYSTEMFLAGS = -subsystem:windows
 endif
 
-ifeq ($(UNAME), Darwin)
 $(foreach target,$(gui_targets),$(call GUI_PATH,$(target))): SUBSYSTEMFLAGS = $(LDFLAGS_gui)
-endif
 
 $(foreach target,$(gui_targets) $(nogui_targets),$(eval $(call GUI_LINK_RULE,$(target),$(all_$(target)_src_files))))
 

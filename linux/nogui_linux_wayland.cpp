@@ -4,6 +4,11 @@
 #include "main_linux.h"
 #include <stdlib.h>
 
+bool init_wl_gui(void*, void*, bool*)
+{
+    return false;
+}
+
 void handle_wl_key_press(uint32_t)
 {
 }
