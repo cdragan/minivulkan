@@ -173,7 +173,8 @@ bool play_sound_track()
         [super viewWillDisappear];
 
         if (m_display_link) {
-            [m_display_link invalidate];
+            // Technically invalidate should be called, however it crashes, solution not known
+            //[m_display_link invalidate];
             m_display_link = nullptr;
         }
     }
