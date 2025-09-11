@@ -116,6 +116,64 @@ static void handle_toplevel_close(void*         data,
     static_cast<Window*>(data)->quit = true;
 }
 
+static void handle_keymap(void*        data,
+                          wl_keyboard* kb,
+                          uint32_t     format,
+                          int32_t      fd,
+                          uint32_t     size)
+{
+}
+
+static void handle_keyboard_enter(void*        data,
+                                  wl_keyboard* kb,
+                                  uint32_t     serial,
+                                  wl_surface*  surface,
+                                  wl_array*    keys)
+{
+}
+
+static void handle_keyboard_leave(void*        data,
+                                  wl_keyboard* kb,
+                                  uint32_t     serial,
+                                  wl_surface*  surface)
+{
+}
+
+static void handle_key(void*        data,
+                       wl_keyboard* kb,
+                       uint32_t     serial,
+                       uint32_t     time,
+                       uint32_t     key,
+                       uint32_t     state)
+{
+    Window* const w = static_cast<Window*>(data);
+
+    if (state == WL_KEYBOARD_KEY_STATE_PRESSED) {
+        switch (key) {
+            case 1: // Esc
+                w->quit = true;
+                break;
+        }
+    }
+}
+
+static void handle_modifiers(void*        data,
+                             wl_keyboard* kb,
+                             uint32_t     serial,
+                             uint32_t     mods_depressed,
+                             uint32_t     mods_latched,
+                             uint32_t     mods_locked,
+                             uint32_t     group)
+{
+}
+
+static void handle_repeat_info(void*        data,
+                               wl_keyboard* kb,
+                               int32_t      rate,
+                               int32_t      delay)
+{
+}
+
 static bool create_window(Window* w)
 {
     const bool full_screen = is_full_screen();
@@ -194,6 +252,23 @@ static bool create_window(Window* w)
 
     if (full_screen)
         xdg_toplevel_set_fullscreen(toplevel, nullptr);
+
+    // Hook up keyboard
+    w->keyboard = wl_seat_get_keyboard(w->seat);
+    if ( ! w->keyboard) {
+        d_printf("Wayland keyboard is not available\n");
+        return false;
+    }
+
+    static const wl_keyboard_listener keyboard_listener = {
+        .keymap      = handle_keymap,
+        .enter       = handle_keyboard_enter,
+        .leave       = handle_keyboard_leave,
+        .key         = handle_key,
+        .modifiers   = handle_modifiers,
+        .repeat_info = handle_repeat_info
+    };
+    wl_keyboard_add_listener(w->keyboard, &keyboard_listener, w);
 
     // Apply changes to the surface
     wl_surface_commit(w->surface);
