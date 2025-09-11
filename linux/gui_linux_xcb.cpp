@@ -71,7 +71,7 @@ bool install_keyboard_events(void* void_conn)
     return true;
 }
 
-#if 0
+#if 1
 #   define CHARKEY(x) x
 #else
 #   define CHARKEY(x) ImGuiKey_None
@@ -181,6 +181,7 @@ static ImGuiKey map_key(xcb_keycode_t key)
         case 116: return ImGuiKey_DownArrow;
         case 117: return ImGuiKey_PageDown;
 
+        case 118: return ImGuiKey_Insert;
         case 119: return ImGuiKey_Delete;
 
         case 125: return ImGuiKey_KeypadEqual;
@@ -205,7 +206,7 @@ static void handle_key_event(xcb_keycode_t key_code, uint16_t state, bool down)
     io.AddKeyEvent(ImGuiMod_Ctrl,  !! (state & 4));
 
     // Alt (8, 128)
-    io.AddKeyEvent(ImGuiMod_Ctrl,  !! (state & (8 | 128)));
+    io.AddKeyEvent(ImGuiMod_Alt,   !! (state & (8 | 128)));
 
     const ImGuiKey key = map_key(key_code);
     if (key != ImGuiKey_None) {

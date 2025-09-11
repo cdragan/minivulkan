@@ -130,6 +130,7 @@ static void handle_keyboard_enter(void*        data,
                                   wl_surface*  surface,
                                   wl_array*    keys)
 {
+    handle_wl_focus(true);
 }
 
 static void handle_keyboard_leave(void*        data,
@@ -137,6 +138,7 @@ static void handle_keyboard_leave(void*        data,
                                   uint32_t     serial,
                                   wl_surface*  surface)
 {
+    handle_wl_focus(false);
 }
 
 static void handle_key(void*        data,
@@ -149,12 +151,13 @@ static void handle_key(void*        data,
     Window* const w = static_cast<Window*>(data);
 
     if (state == WL_KEYBOARD_KEY_STATE_PRESSED) {
-        switch (key) {
-            case 1: // Esc
-                w->quit = true;
-                break;
-        }
+        if (key == 1) // Esc
+            w->quit = true;
+        else
+            handle_wl_key_press(key);
     }
+    else
+        handle_wl_key_release(key);
 }
 
 static void handle_modifiers(void*        data,

@@ -3,3 +3,15 @@
 
 #include "main_linux.h"
 #include <stdlib.h>
+
+void handle_wl_key_press(uint32_t)
+{
+}
+
+void handle_wl_key_release(uint32_t)
+{
+}
+
+void handle_wl_focus(bool)
+{
+}
