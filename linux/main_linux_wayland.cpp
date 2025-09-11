@@ -285,8 +285,16 @@ static bool create_window(Window* w)
 
 static int event_loop(Window* w)
 {
-    while ( ! w->quit && wl_display_dispatch_pending(w->display) != -1) {
-        if ( ! need_redraw(w) && skip_frame(w))
+    bool blocking = false;
+
+    while ( ! w->quit) {
+        const int status = blocking ? wl_display_dispatch(w->display)
+                                    : wl_display_dispatch_pending(w->display);
+        if (status == -1)
+            break;
+
+        blocking = ! need_redraw(w) && skip_frame(w);
+        if (blocking)
             continue;
 
         if ( ! draw_frame())
