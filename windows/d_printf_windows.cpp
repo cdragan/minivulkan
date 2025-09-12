@@ -3,6 +3,7 @@
 
 #include "../core/d_printf.h"
 
+#include <assert.h>
 #include <stdarg.h>
 
 #define WIN32_LEAN_AND_MEAN
