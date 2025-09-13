@@ -1499,7 +1499,7 @@ bool GeometryEditor::draw_geometry_view(VkCommandBuffer cmdbuf,
     rendering_info.renderArea.extent.width  = dst_view.width;
     rendering_info.renderArea.extent.height = dst_view.height;
 
-    vkCmdBeginRenderingKHR(cmdbuf, &rendering_info);
+    vkCmdBeginRendering(cmdbuf, &rendering_info);
 
     // TODO
     // * Draw solid geometry
@@ -1517,7 +1517,7 @@ bool GeometryEditor::draw_geometry_view(VkCommandBuffer cmdbuf,
     if ( ! render_grid(cmdbuf, dst_view, image_idx))
         return false;
 
-    vkCmdEndRenderingKHR(cmdbuf);
+    vkCmdEndRendering(cmdbuf);
 
     static const Image::Transition gui_image_layout = {
         VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
@@ -1549,8 +1549,8 @@ bool GeometryEditor::draw_selection_feedback(VkCommandBuffer cmdbuf,
     rendering_info.renderArea.extent.width  = dst_view.width;
     rendering_info.renderArea.extent.height = dst_view.height;
 
-    vkCmdBeginRenderingKHR(cmdbuf, &rendering_info);
-    vkCmdEndRenderingKHR(cmdbuf);
+    vkCmdBeginRendering(cmdbuf, &rendering_info);
+    vkCmdEndRendering(cmdbuf);
 
     static const Image::Transition transfer_src_image_layout = {
         VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,

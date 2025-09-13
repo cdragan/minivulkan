@@ -969,7 +969,7 @@ bool draw_frame(uint32_t image_idx, uint64_t time_ms, VkFence queue_fence, uint3
     depth_att.imageView              = vk_depth_buffers[image_idx].get_view();
     rendering_info.renderArea.extent = vk_surface_caps.currentExtent;
 
-    vkCmdBeginRenderingKHR(buf, &rendering_info);
+    vkCmdBeginRendering(buf, &rendering_info);
 
     vkCmdBindPipeline(buf, VK_PIPELINE_BIND_POINT_GRAPHICS, vk_gr_pipeline[user_wireframe ? 1 : 0]);
 
@@ -1012,7 +1012,7 @@ bool draw_frame(uint32_t image_idx, uint64_t time_ms, VkFence queue_fence, uint3
                      0,     // vertexOffset
                      0);    // firstInstance
 
-    vkCmdEndRenderingKHR(buf);
+    vkCmdEndRendering(buf);
 
     if ( ! send_gui_to_gpu(buf, image_idx))
         return false;

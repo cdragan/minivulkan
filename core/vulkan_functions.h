@@ -114,8 +114,8 @@
     X(vkCreateDescriptorPool) \
     X(vkAllocateDescriptorSets) \
     X(vkUpdateDescriptorSets) \
-    X(vkCmdBeginRenderingKHR) \
-    X(vkCmdEndRenderingKHR) \
+    X(vkCmdBeginRendering) \
+    X(vkCmdEndRendering) \
     X(vkCmdBindPipeline) \
     X(vkCmdBindVertexBuffers) \
     X(vkCmdBindIndexBuffer) \
@@ -224,8 +224,8 @@ enum e_device_functions {
 #define vkCreateDescriptorPool                    SELECT_VK_FUNCTION(device,   vkCreateDescriptorPool)
 #define vkAllocateDescriptorSets                  SELECT_VK_FUNCTION(device,   vkAllocateDescriptorSets)
 #define vkUpdateDescriptorSets                    SELECT_VK_FUNCTION(device,   vkUpdateDescriptorSets)
-#define vkCmdBeginRenderingKHR                    SELECT_VK_FUNCTION(device,   vkCmdBeginRenderingKHR)
-#define vkCmdEndRenderingKHR                      SELECT_VK_FUNCTION(device,   vkCmdEndRenderingKHR)
+#define vkCmdBeginRendering                       SELECT_VK_FUNCTION(device,   vkCmdBeginRendering)
+#define vkCmdEndRendering                         SELECT_VK_FUNCTION(device,   vkCmdEndRendering)
 #define vkCmdBindPipeline                         SELECT_VK_FUNCTION(device,   vkCmdBindPipeline)
 #define vkCmdBindVertexBuffers                    SELECT_VK_FUNCTION(device,   vkCmdBindVertexBuffers)
 #define vkCmdBindIndexBuffer                      SELECT_VK_FUNCTION(device,   vkCmdBindIndexBuffer)
