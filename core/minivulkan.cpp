@@ -343,16 +343,21 @@ static bool init_instance()
 
         const char* validation_str = nullptr;
 
-        static VkValidationFeatureEnableEXT enabled_features[] = {
-            VK_VALIDATION_FEATURE_ENABLE_BEST_PRACTICES_EXT,
-            VK_VALIDATION_FEATURE_ENABLE_SYNCHRONIZATION_VALIDATION_EXT
+        static const char validation[] = "VK_LAYER_KHRONOS_validation";
+
+        static const VkBool32 true_value = VK_TRUE;
+
+        static VkLayerSettingEXT layer_settings[] = {
+            { validation, "validate_sync",           VK_LAYER_SETTING_TYPE_BOOL32_EXT, 1, &true_value },
+            { validation, "thread_safety",           VK_LAYER_SETTING_TYPE_BOOL32_EXT, 1, &true_value },
+            { validation, "validate_best_practices", VK_LAYER_SETTING_TYPE_BOOL32_EXT, 1, &true_value },
         };
 
-        static VkValidationFeaturesEXT validation_features = {
-            VK_STRUCTURE_TYPE_VALIDATION_FEATURES_EXT,
+        static const VkLayerSettingsCreateInfoEXT layer_settings_info = {
+            VK_STRUCTURE_TYPE_LAYER_SETTINGS_CREATE_INFO_EXT,
             nullptr,
-            mstd::array_size(enabled_features),
-            enabled_features
+            mstd::array_size(layer_settings),
+            layer_settings
         };
 
         for (uint32_t i = 0; i < num_layer_props; i++) {
@@ -361,7 +366,7 @@ static bool init_instance()
 
             num_ext_props = mstd::array_size(ext_props);
 
-            const char* validation_features_str = nullptr;
+            const char* layer_settings_str = nullptr;
 
             res = vkEnumerateInstanceExtensionProperties(layer_props[i].layerName,
                                                          &num_ext_props,
@@ -371,26 +376,25 @@ static bool init_instance()
                     if (do_print)
                         d_printf("    %s\n", ext_props[j].extensionName);
 
-                    static const char validation_features_ext[] = "VK_EXT_validation_features";
-                    if (mstd::strcmp(ext_props[j].extensionName, validation_features_ext) == 0)
-                        validation_features_str = validation_features_ext;
+                    static const char layer_settings_ext[] = "VK_EXT_layer_settings";
+                    if (mstd::strcmp(ext_props[j].extensionName, layer_settings_ext) == 0)
+                        layer_settings_str = layer_settings_ext;
                 }
             }
 
-            static const char validation[] = "VK_LAYER_KHRONOS_validation";
             if (mstd::strcmp(layer_props[i].layerName, validation) == 0) {
                 validation_str = validation;
                 instance_info.ppEnabledLayerNames = &validation_str;
                 instance_info.enabledLayerCount   = 1;
 
-                if (validation_features_str &&
+                if (layer_settings_str &&
                     instance_info.enabledExtensionCount < mstd::array_size(enabled_instance_extensions)) {
 
-                    enabled_instance_extensions[instance_info.enabledExtensionCount] = validation_features_str;
+                    enabled_instance_extensions[instance_info.enabledExtensionCount] = layer_settings_str;
                     ++instance_info.enabledExtensionCount;
-                    d_printf("Enable extension %s\n", validation_features_str);
+                    d_printf("Enable extension %s\n", layer_settings_str);
 
-                    instance_info.pNext = &validation_features;
+                    instance_info.pNext = &layer_settings_info;
 
                     d_printf("Enable layer %s\n", layer_props[i].layerName);
                 }
