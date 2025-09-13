@@ -382,7 +382,7 @@ endif
 ifeq ($(UNAME), Linux)
     ifeq ($(wayland), 1)
         LDFLAGS     += -lwayland-client
-        LDFLAGS_gui += -ldecor-0
+        LDFLAGS_gui += -lwayland-cursor -ldecor-0
     else
         LDFLAGS += -lxcb -lxcb-xfixes
         CFLAGS  += -DLINUX_USE_XCB

@@ -4,6 +4,7 @@
 #include "../core/d_printf.h"
 #include "../core/gui.h"
 #include "main_linux.h"
+#include "main_linux_wayland.h"
 #include "../core/minivulkan.h"
 
 #include "../thirdparty/imgui/src/imgui.h"
@@ -67,13 +68,55 @@ static void decor_dismiss_popup(libdecor_frame* frame,
 {
 }
 
-bool init_wl_gui(void* display, void* surface, bool* quit)
+static WaylandCursor create_cursor(const char*      name,
+                                   wl_compositor*   compositor,
+                                   wl_cursor_theme* cursor_theme)
 {
+    wl_cursor* const cursor = wl_cursor_theme_get_cursor(cursor_theme, name);
+    if ( ! cursor)
+        return { };
+
+    wl_cursor_image* const image = cursor->images[0];
+    if ( ! image)
+        return { };
+
+    wl_surface* const surface = wl_compositor_create_surface(compositor);
+    if ( ! surface)
+        return { };
+
+    wl_buffer* const buffer = wl_cursor_image_get_buffer(image);
+    if ( ! buffer)
+        return { };
+
+    wl_surface_attach(surface, buffer, 0, 0);
+    wl_surface_commit(surface);
+
+    return { surface, image->hotspot_x, image->hotspot_y };
+}
+
+bool init_wl_gui(Window* w)
+{
+    wl_cursor_theme* cursor_theme = nullptr;
+
+    if ( ! w->shm) {
+        d_printf("Wayland shared memory is not available\n");
+    }
+    else {
+        cursor_theme = wl_cursor_theme_load(nullptr, 24, w->shm);
+
+        if ( ! cursor_theme)
+            d_printf("Wayland cursor theme is not available\n");
+    }
+
+    if (cursor_theme) {
+        w->cursors.left_ptr = create_cursor("left_ptr", w->compositor, cursor_theme);
+    }
+
     static libdecor_interface decor_callbacks = {
         .error = decor_error
     };
 
-    libdecor* const context = libdecor_new(static_cast<wl_display*>(display), &decor_callbacks);
+    libdecor* const context = libdecor_new(w->display, &decor_callbacks);
     if ( ! context) {
         d_printf("Failed to initialize libdecor\n");
         return false;
@@ -87,9 +130,9 @@ bool init_wl_gui(void* display, void* surface, bool* quit)
     };
 
     libdecor_frame* const frame = libdecor_decorate(context,
-                                                    static_cast<wl_surface*>(surface),
+                                                    w->surface,
                                                     &frame_callbacks,
-                                                    quit);
+                                                    &w->quit);
     if ( ! frame) {
         d_printf("Failed to create libdecor frame\n");
         return false;
@@ -101,7 +144,7 @@ bool init_wl_gui(void* display, void* surface, bool* quit)
     libdecor_frame_map(frame);
 
     while ( ! decor_configured) {
-        if (wl_display_roundtrip(static_cast<wl_display*>(display)) == -1) {
+        if (wl_display_roundtrip(w->display) == -1) {
             d_printf("Failed to dispatch Wayland events: %s\n", strerror(errno));
             return false;
         }
@@ -259,6 +302,17 @@ void handle_wl_key_release(uint32_t key_code)
 void handle_wl_focus(bool focused)
 {
     ImGui::GetIO().AddFocusEvent(focused);
+}
+
+void handle_wl_cursor_enter(wl_pointer* pointer, uint32_t serial, Window* w)
+{
+    WaylandCursor& left_ptr = w->cursors.left_ptr;
+    if (left_ptr.cursor_surface)
+        wl_pointer_set_cursor(pointer,
+                              serial,
+                              left_ptr.cursor_surface,
+                              left_ptr.hotspot_x,
+                              left_ptr.hotspot_y);
 }
 
 void handle_wl_pointer_motion(float x, float y)

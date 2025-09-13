@@ -4,6 +4,7 @@
 #include "../core/d_printf.h"
 #include "../core/gui.h"
 #include "main_linux.h"
+#include "main_linux_wayland.h"
 #include "../core/minivulkan.h"
 
 #include <errno.h>
@@ -11,20 +12,6 @@
 #include <time.h>
 #include <unistd.h>
 #include <dlfcn.h>
-#include <wayland-client-core.h>
-#include <wayland-client.h>
-#include "xdg-shell.h" // generated file
-
-struct Window {
-    wl_display*    display;
-    wl_surface*    surface;
-    wl_compositor* compositor;
-    wl_seat*       seat;
-    wl_pointer*    pointer;
-    wl_keyboard*   keyboard;
-    xdg_wm_base*   wm_base;
-    bool           quit;
-};
 
 bool create_surface(struct Window* w)
 {
@@ -61,6 +48,7 @@ static void registry_handler(void        *data,
     static const WaylandInterfaceMapping interfaces[] = {
         { "wl_compositor", &wl_compositor_interface, offsetof(Window, compositor) }, // Wayland compositor
         { "wl_seat",       &wl_seat_interface,       offsetof(Window, seat)       }, // Input devices
+        { "wl_shm",        &wl_shm_interface,        offsetof(Window, shm)        }, // Shared memory
         { "xdg_wm_base",   &xdg_wm_base_interface,   offsetof(Window, wm_base)    }, // Window manager
         { nullptr,         nullptr,                  0                            }
     };
@@ -186,6 +174,7 @@ static void handle_pointer_enter(void*       data,
                                  wl_fixed_t  surface_y)
 {
     handle_wl_focus(true);
+    handle_wl_cursor_enter(ptr, serial, static_cast<Window*>(data));
 }
 
 static void handle_pointer_leave(void*       data,
@@ -351,7 +340,7 @@ static bool create_window(Window* w)
 
     // Install decorations
     if ( ! full_screen) {
-        if ( ! init_wl_gui(w->display, w->surface, &w->quit))
+        if ( ! init_wl_gui(w))
             return false;
     }
 
@@ -386,7 +375,6 @@ static int event_loop(Window* w)
 int main()
 {
     static Window w = { };
-
     if ( ! create_window(&w))
         return 1;
 
