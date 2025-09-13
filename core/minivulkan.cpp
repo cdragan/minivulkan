@@ -257,9 +257,9 @@ static bool init_instance()
         return false;
 
     d_printf("Vulkan version %u.%u.%u\n",
-             VK_VERSION_MAJOR(api_version),
-             VK_VERSION_MINOR(api_version),
-             VK_VERSION_PATCH(api_version));
+             VK_API_VERSION_MAJOR(api_version),
+             VK_API_VERSION_MINOR(api_version),
+             VK_API_VERSION_PATCH(api_version));
 #endif
 
     static const VkApplicationInfo app_info = {
@@ -593,8 +593,8 @@ static bool find_gpu()
             d_printf("Selected device %u: %s, supports Vulkan %u.%u\n",
                      i_dev,
                      vk_phys_props.properties.deviceName,
-                     VK_VERSION_MAJOR(vk_phys_props.properties.apiVersion),
-                     VK_VERSION_MINOR(vk_phys_props.properties.apiVersion));
+                     VK_API_VERSION_MAJOR(vk_phys_props.properties.apiVersion),
+                     VK_API_VERSION_MINOR(vk_phys_props.properties.apiVersion));
             return true;
         }
     }
