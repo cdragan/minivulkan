@@ -104,8 +104,9 @@ bool init_wl_gui(Window* w)
     else {
         cursor_theme = wl_cursor_theme_load(nullptr, 24, w->shm);
 
-        if ( ! cursor_theme)
+        if ( ! cursor_theme) {
             d_printf("Wayland cursor theme is not available\n");
+        }
     }
 
     if (cursor_theme) {

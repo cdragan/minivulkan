@@ -174,7 +174,10 @@ static void handle_pointer_enter(void*       data,
                                  wl_fixed_t  surface_y)
 {
     handle_wl_focus(true);
-    handle_wl_cursor_enter(ptr, serial, static_cast<Window*>(data));
+    if (is_full_screen() && ! has_gui())
+        wl_pointer_set_cursor(ptr, serial, nullptr, 0, 0);
+    else
+        handle_wl_cursor_enter(ptr, serial, static_cast<Window*>(data));
 }
 
 static void handle_pointer_leave(void*       data,
@@ -312,22 +315,20 @@ static bool create_window(Window* w)
     wl_keyboard_add_listener(w->keyboard, &keyboard_listener, w);
 
     // Hook up mouse
-    if (has_gui()) {
-        w->pointer = wl_seat_get_pointer(w->seat);
-        if ( ! w->pointer) {
-            d_printf("Wayland pointer is not available\n");
-            return false;
-        }
-
-        static const wl_pointer_listener pointer_listener = {
-            .enter  = handle_pointer_enter,
-            .leave  = handle_pointer_leave,
-            .motion = handle_pointer_motion,
-            .button = handle_pointer_button,
-            .axis   = handle_pointer_axis
-        };
-        wl_pointer_add_listener(w->pointer, &pointer_listener, w);
+    w->pointer = wl_seat_get_pointer(w->seat);
+    if ( ! w->pointer) {
+        d_printf("Wayland pointer is not available\n");
+        return false;
     }
+
+    static const wl_pointer_listener pointer_listener = {
+        .enter  = handle_pointer_enter,
+        .leave  = handle_pointer_leave,
+        .motion = handle_pointer_motion,
+        .button = handle_pointer_button,
+        .axis   = handle_pointer_axis
+    };
+    wl_pointer_add_listener(w->pointer, &pointer_listener, w);
 
     // Apply changes to the surface
     wl_surface_commit(w->surface);
