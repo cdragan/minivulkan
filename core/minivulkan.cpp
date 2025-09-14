@@ -345,6 +345,7 @@ static bool init_instance()
 
         static const char validation[] = "VK_LAYER_KHRONOS_validation";
 
+#ifdef VK_EXT_LAYER_SETTINGS_EXTENSION_NAME
         static const VkBool32 true_value = VK_TRUE;
 
         static VkLayerSettingEXT layer_settings[] = {
@@ -359,6 +360,19 @@ static bool init_instance()
             mstd::array_size(layer_settings),
             layer_settings
         };
+#else
+        static VkValidationFeatureEnableEXT enabled_features[] = {
+            VK_VALIDATION_FEATURE_ENABLE_BEST_PRACTICES_EXT,
+            VK_VALIDATION_FEATURE_ENABLE_SYNCHRONIZATION_VALIDATION_EXT
+        };
+
+        static VkValidationFeaturesEXT layer_settings_info = {
+            VK_STRUCTURE_TYPE_VALIDATION_FEATURES_EXT,
+            nullptr,
+            mstd::array_size(enabled_features),
+            enabled_features
+        };
+#endif
 
         for (uint32_t i = 0; i < num_layer_props; i++) {
             if (do_print)
@@ -376,7 +390,11 @@ static bool init_instance()
                     if (do_print)
                         d_printf("    %s\n", ext_props[j].extensionName);
 
+#ifdef VK_EXT_LAYER_SETTINGS_EXTENSION_NAME
                     static const char layer_settings_ext[] = "VK_EXT_layer_settings";
+#else
+                    static const char layer_settings_ext[] = "VK_EXT_validation_features";
+#endif
                     if (mstd::strcmp(ext_props[j].extensionName, layer_settings_ext) == 0)
                         layer_settings_str = layer_settings_ext;
                 }
