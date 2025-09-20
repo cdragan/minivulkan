@@ -71,10 +71,13 @@ class MemoryAllocator {
 
         bool need_host_copy(Usage heap_usage);
 
+        bool is_unified_memory() const { return unified; }
+
     private:
         MemoryHeap device_heap;
         MemoryHeap host_heap;
         MemoryHeap dynamic_heap;
+        bool       unified = false;
 };
 
 extern MemoryAllocator mem_mgr;
