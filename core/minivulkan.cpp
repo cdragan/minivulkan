@@ -968,7 +968,7 @@ bool allocate_depth_buffers(Image (&depth_buffers)[max_swapchain_size], uint32_t
             1, // mip_levels
             VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT,
             VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
-            Usage::device_temporary
+            Usage::device_only
         };
         image_info.width  = width;
         image_info.height = height;
