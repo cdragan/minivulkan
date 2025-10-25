@@ -1490,9 +1490,10 @@ bool init_vulkan(Window* w)
     if ( ! create_device())
         return false;
 
-    if ( ! mem_mgr.init_heaps(384u * 1024u * 1024u,
+    if ( ! mem_mgr.init_heaps(320u * 1024u * 1024u,
                               128u * 1024u * 1024u,
-                              16u * 1024u * 1024u))
+                              16u * 1024u * 1024u,
+                              64u * 1024u * 1024))
         return false;
 
     if ( ! create_semaphores())

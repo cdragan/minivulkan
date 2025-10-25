@@ -21,7 +21,11 @@
 
 class MemoryHeap {
     public:
-        constexpr MemoryHeap()                   = default;
+#ifdef NDEBUG
+        constexpr explicit MemoryHeap(const char*) { }
+#else
+        explicit MemoryHeap(const char* name) : heap_name(name) { }
+#endif
         MemoryHeap(const MemoryHeap&)            = delete;
         MemoryHeap& operator=(const MemoryHeap&) = delete;
 
@@ -40,9 +44,12 @@ class MemoryHeap {
             return !! (memory_type_bits & (1u << memory_type));
         }
 
-        void print_stats(const char* heap_name) const;
+        void print_stats() const;
 
     private:
+#ifndef NDEBUG
+        const char*       heap_name   = nullptr;
+#endif
         VkDeviceMemory    memory      = VK_NULL_HANDLE;
         void*             host_ptr    = nullptr;
         VkDeviceSize      heap_size   = 0;
@@ -61,7 +68,8 @@ class MemoryAllocator {
 
         bool init_heaps(VkDeviceSize device_heap_size,
                         VkDeviceSize host_heap_size,
-                        VkDeviceSize dynamic_heap_size);
+                        VkDeviceSize dynamic_heap_size,
+                        VkDeviceSize transient_heap_size);
 
         bool allocate_memory(const VkMemoryRequirements& requirements,
                              Usage                       heap_usage,
@@ -73,10 +81,13 @@ class MemoryAllocator {
 
         bool is_unified_memory() const { return unified; }
 
+        bool has_transient_heap() const { return !! transient_heap.get_memory(); }
+
     private:
-        MemoryHeap device_heap;
-        MemoryHeap host_heap;
-        MemoryHeap dynamic_heap;
+        MemoryHeap device_heap{"device"};
+        MemoryHeap host_heap{"host"};
+        MemoryHeap dynamic_heap{"dynamic"};
+        MemoryHeap transient_heap{"transient"};
         bool       unified = false;
 };
 

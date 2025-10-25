@@ -12,6 +12,8 @@ enum class Usage {
     dynamic,
     // Resources initialized and used on the device, never accessed on the host
     device_only,
+    // Resources used temporarily on the device during frame generation, e.g. G-buffers
+    transient,
     // Resources allocated on the host, device can still transfer to/from these resources
     host_only
 };
