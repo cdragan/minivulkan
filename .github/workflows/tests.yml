@@ -11,6 +11,10 @@ jobs:
     timeout-minutes: 6
     steps:
       - uses: actions/checkout@v4
+      - name: Install Headers
+        run: |
+          sudo apt-get update
+          sudo apt-get install libxcb-xfixes0-dev
       - name: Install Vulkan SDK
         uses: humbletim/install-vulkan-sdk@v1.2
         with:
