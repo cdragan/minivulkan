@@ -12,9 +12,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install Vulkan SDK
-        run: |
-          sudo apt-get update
-          sudo apt-get install libvulkan-dev glslang-tools libxcb-xfixes0-dev
+        uses: humbletim/setup-vulkan-sdk@v1.2.1
+        with:
+          vulkan-query-version: 1.4.309.0
+          vulkan-components: Vulkan-Headers, Vulkan-Loader, Glslang
+          vulkan-use-cache: true
       - name: Test
         run: ./runtests
 
@@ -32,9 +34,9 @@ jobs:
       - name: Install Vulkan SDK
         if: steps.cache-vulkansdk.outputs.cache-hit != 'true'
         run: |
-          wget https://sdk.lunarg.com/sdk/download/1.4.309.0/mac/vulkansdk-macos-1.4.309.0.dmg?Human=true -O vulkansdk-macos-1.4.309.0.dmg
-          hdiutil attach vulkansdk-macos-1.4.309.0.dmg
-          sudo /Volumes/VulkanSDK/InstallVulkan.app/Contents/MacOS/InstallVulkan --root $GITHUB_WORKSPACE/vulkansdk-macos-1.4.309.0 --accept-licenses --default-answer --confirm-command install
+          wget https://sdk.lunarg.com/sdk/download/1.4.309.0/mac/vulkansdk-macos-1.4.309.0.zip?Human=true -O vulkansdk-macos-1.4.309.0.zip
+          unzip vulkansdk-macos-1.4.309.0.zip
+          sudo InstallVulkan-1.4.309.0.app/Contents/MacOS/InstallVulkan-1.4.309.0 --root $GITHUB_WORKSPACE/vulkansdk-macos-1.4.309.0 --accept-licenses --default-answer --confirm-command install
           hdiutil detach /Volumes/VulkanSDK
       - name: Test
         run: |
