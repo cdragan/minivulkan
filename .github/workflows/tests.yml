@@ -8,15 +8,14 @@ on:
 jobs:
   ubuntu:
     runs-on: ubuntu-24.04
-    timeout-minutes: 3
+    timeout-minutes: 6
     steps:
       - uses: actions/checkout@v4
       - name: Install Vulkan SDK
-        uses: humbletim/setup-vulkan-sdk@v1.2.1
+        uses: humbletim/install-vulkan-sdk@v1.2
         with:
-          vulkan-query-version: 1.4.309.0
-          vulkan-components: Vulkan-Headers, Vulkan-Loader, Glslang
-          vulkan-use-cache: true
+          version: 1.4.309.0
+          cache: true
       - name: Test
         run: ./runtests
 
@@ -25,24 +24,13 @@ jobs:
     timeout-minutes: 6
     steps:
       - uses: actions/checkout@v4
-      - name: Cache Vulkan SDK
-        id: cache-vulkansdk
-        uses: actions/cache@v4
-        with:
-          path: "vulkansdk-macos-1.4.309.0"
-          key: vulkansdk-macos-1.4.309.0
       - name: Install Vulkan SDK
-        if: steps.cache-vulkansdk.outputs.cache-hit != 'true'
-        run: |
-          wget https://sdk.lunarg.com/sdk/download/1.4.309.0/mac/vulkansdk-macos-1.4.309.0.zip?Human=true -O vulkansdk-macos-1.4.309.0.zip
-          unzip vulkansdk-macos-1.4.309.0.zip
-          sudo InstallVulkan-1.4.309.0.app/Contents/MacOS/InstallVulkan-1.4.309.0 --root $GITHUB_WORKSPACE/vulkansdk-macos-1.4.309.0 --accept-licenses --default-answer --confirm-command install
-          hdiutil detach /Volumes/VulkanSDK
+        uses: humbletim/install-vulkan-sdk@v1.2
+        with:
+          version: 1.4.309.0
+          cache: true
       - name: Test
-        run: |
-          export VULKAN_SDK=`pwd`/vulkansdk-macos-1.4.309.0/macOS
-          export VULKAN_SDK_BIN="$VULKAN_SDK/bin"
-          ./runtests
+        run: ./runtests
 
   windows:
     runs-on: windows-2022
