@@ -269,7 +269,7 @@ static bool init_instance()
         0,
         nullptr,
         0,
-        VK_API_VERSION_1_3
+        VK_API_VERSION_1_4
     };
 
     static const char* enabled_instance_extensions[16];
