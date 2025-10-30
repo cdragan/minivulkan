@@ -41,6 +41,7 @@ uint32_t check_device_features()
     missing_features += check_feature(&vk_features.features.tessellationShader);
     missing_features += check_feature(&vk_features.features.fillModeNonSolid);
     missing_features += check_feature(&vk_dyn_rendering_features.dynamicRendering);
+    missing_features += check_feature(&vk_maintenance4_features.maintenance4);
 
     return missing_features;
 }
