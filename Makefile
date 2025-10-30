@@ -438,7 +438,7 @@ ifdef VULKAN_SDK
     CFLAGS += -I$(VULKAN_SDK)/include
 endif
 
-GLSL_FLAGS = --target-env vulkan1.2
+GLSL_FLAGS = --target-env vulkan1.4
 GLSL_OPT_FLAGS =
 GLSL_STRIP_FLAGS =
 GLSL_ENCODE_FLAGS =
