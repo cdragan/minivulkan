@@ -443,8 +443,8 @@ GLSL_OPT_FLAGS =
 GLSL_STRIP_FLAGS =
 GLSL_ENCODE_FLAGS =
 ifndef GLSL_NO_OPTIMIZER
-    GLSL_OPT_FLAGS += -Os
-    GLSL_STRIP_FLAGS += --strip all --dce all
+    GLSL_OPT_FLAGS += -Os --canonicalize-ids
+    GLSL_STRIP_FLAGS += --strip-debug --strip-nonsemantic
 endif
 ifeq ($(spirv_opt), 0)
     GLSL_FLAGS += -g
@@ -629,7 +629,7 @@ define SHADER_RULE
 $(shaders_out_dir)/$(basename $(notdir $1)).h: $1 | $(spirv_encode) $(shaders_out_dir) $(addprefix $(shaders_out_dir)/,$(shader_dirs))
 	$(GLSL_VALIDATOR_PREFIX)glslangValidator $(GLSL_FLAGS) -o $$(call shader_stage,default,$$<) $$<
 	$(GLSL_VALIDATOR_PREFIX)spirv-opt $(GLSL_OPT_FLAGS) $$(call shader_stage,default,$$<) -o $$(call shader_stage,opt,$$<)
-	cd $(shaders_out_dir)/opt && $(GLSL_VALIDATOR_PREFIX)spirv-remap $(GLSL_STRIP_FLAGS) --input $$(subst .glsl,.spv,$$(notdir $$<)) --output ../../../$(shaders_out_dir)/strip
+	$(GLSL_VALIDATOR_PREFIX)spirv-opt $(GLSL_STRIP_FLAGS) $$(call shader_stage,opt,$$<) -o $$(call shader_stage,strip,$$<)
 	$(spirv_encode) $(GLSL_ENCODE_FLAGS) shader_$$(subst .,_,$$(basename $$(notdir $$<))) $$(call shader_stage,strip,$$<) $$@
 	$(spirv_encode) $(GLSL_ENCODE_FLAGS) --binary shader_$$(subst .,_,$$(basename $$(notdir $$<))) $$(call shader_stage,strip,$$<) $$(basename $$@).bin
 	$(GLSL_VALIDATOR_PREFIX)spirv-dis -o $$(basename $$@).disasm $$(call shader_stage,strip,$$<)
