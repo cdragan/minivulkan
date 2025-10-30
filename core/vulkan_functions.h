@@ -120,6 +120,7 @@
     X(vkCmdBindVertexBuffers) \
     X(vkCmdBindIndexBuffer) \
     X(vkCmdBindDescriptorSets) \
+    X(vkCmdPushDescriptorSet) \
     X(vkCmdPushConstants) \
     X(vkCmdSetViewport) \
     X(vkCmdSetScissor) \
@@ -230,6 +231,7 @@ enum e_device_functions {
 #define vkCmdBindVertexBuffers                    SELECT_VK_FUNCTION(device,   vkCmdBindVertexBuffers)
 #define vkCmdBindIndexBuffer                      SELECT_VK_FUNCTION(device,   vkCmdBindIndexBuffer)
 #define vkCmdBindDescriptorSets                   SELECT_VK_FUNCTION(device,   vkCmdBindDescriptorSets)
+#define vkCmdPushDescriptorSet                    SELECT_VK_FUNCTION(device,   vkCmdPushDescriptorSet)
 #define vkCmdPushConstants                        SELECT_VK_FUNCTION(device,   vkCmdPushConstants)
 #define vkCmdSetViewport                          SELECT_VK_FUNCTION(device,   vkCmdSetViewport)
 #define vkCmdSetScissor                           SELECT_VK_FUNCTION(device,   vkCmdSetScissor)

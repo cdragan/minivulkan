@@ -70,7 +70,7 @@ static bool create_pipeline_layouts()
     static const VkDescriptorSetLayoutCreateInfo create_desc_set_layout = {
         VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
         nullptr,
-        0, // flags
+        VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT, // flags
         1,
         &create_binding
     };
@@ -760,50 +760,6 @@ bool draw_frame(uint32_t image_idx, uint64_t time_ms, VkFence queue_fence, uint3
         }
     }
 
-    // Allocate descriptor set
-    static VkDescriptorSet desc_set[max_swapchain_size] = { VK_NULL_HANDLE };
-    if ( ! desc_set[0]) {
-        static VkDescriptorPoolSize pool_sizes[] = {
-            {
-                VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,      // type
-                mstd::array_size(desc_set)              // descriptorCount
-            }
-        };
-
-        static VkDescriptorPoolCreateInfo pool_create_info = {
-            VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
-            nullptr,
-            0,                                      // flags
-            mstd::array_size(desc_set),             // maxSets
-            mstd::array_size(pool_sizes),
-            pool_sizes
-        };
-
-        VkDescriptorPool desc_set_pool;
-
-        res = CHK(vkCreateDescriptorPool(vk_dev, &pool_create_info, nullptr, &desc_set_pool));
-        if (res != VK_SUCCESS)
-            return false;
-
-        static VkDescriptorSetLayout       layouts[max_swapchain_size];
-        static VkDescriptorSetAllocateInfo alloc_info = {
-            VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
-            nullptr,
-            VK_NULL_HANDLE,             // descriptorPool
-            mstd::array_size(layouts),  // descriptorSetCount
-            layouts                     // pSetLayouts
-        };
-
-        alloc_info.descriptorPool = desc_set_pool;
-
-        for (uint32_t i = 0; i < mstd::array_size(layouts); i++)
-            layouts[i] = vk_desc_set_layout;
-
-        res = CHK(vkAllocateDescriptorSets(vk_dev, &alloc_info, desc_set));
-        if (res != VK_SUCCESS)
-            return false;
-    }
-
     // Create shader data
     static Buffer shader_data;
     struct UniformBuffer {
@@ -821,7 +777,7 @@ bool draw_frame(uint32_t image_idx, uint64_t time_ms, VkFence queue_fence, uint3
                                    static_cast<uint32_t>(vk_phys_props.properties.limits.minUniformBufferOffsetAlignment));
         slot_size = mstd::align_up(slot_size,
                                    static_cast<uint32_t>(vk_phys_props.properties.limits.nonCoherentAtomSize));
-        const uint32_t total_size = slot_size * mstd::array_size(desc_set);
+        const uint32_t total_size = slot_size * max_swapchain_size;
         if ( ! shader_data.allocate(Usage::dynamic,
                                     total_size,
                                     VK_FORMAT_UNDEFINED,
@@ -860,37 +816,6 @@ bool draw_frame(uint32_t image_idx, uint64_t time_ms, VkFence queue_fence, uint3
     // Send matrices to GPU
     if ( ! shader_data.flush())
         return false;
-
-    // Update descriptor set
-    static VkDescriptorBufferInfo buffer_info = {
-        VK_NULL_HANDLE,     // buffer
-        0,                  // offset
-        0                   // range
-    };
-    buffer_info.buffer = shader_data.get_buffer();
-    buffer_info.offset = slot_size * image_idx;
-    buffer_info.range  = slot_size;
-    static VkWriteDescriptorSet write_desc_sets[] = {
-        {
-            VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-            nullptr,
-            VK_NULL_HANDLE,                     // dstSet
-            0,                                  // dstBinding
-            0,                                  // dstArrayElement
-            1,                                  // descriptorCount
-            VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,  // descriptorType
-            nullptr,                            // pImageInfo
-            &buffer_info,                       // pBufferInfo
-            nullptr                             // pTexelBufferView
-        }
-    };
-    write_desc_sets[0].dstSet = desc_set[image_idx];
-
-    vkUpdateDescriptorSets(vk_dev,
-                           mstd::array_size(write_desc_sets),
-                           write_desc_sets,
-                           0,           // descriptorCopyCount
-                           nullptr);    // pDescriptorCopies
 
     // Render image
     Image& image = vk_swapchain_images[image_idx];
@@ -990,14 +915,36 @@ bool draw_frame(uint32_t image_idx, uint64_t time_ms, VkFence queue_fence, uint3
                          0,     // offset
                          VK_INDEX_TYPE_UINT16);
 
-    vkCmdBindDescriptorSets(buf,
-                            VK_PIPELINE_BIND_POINT_GRAPHICS,
-                            vk_gr_pipeline_layout,
-                            0,          // firstSet
-                            1,          // descriptorSetCount
-                            &desc_set[image_idx],
-                            0,          // dynamicOffsetCount
-                            nullptr);   // pDynamicOffsets
+    // Update descriptor set
+    static VkDescriptorBufferInfo buffer_info = {
+        VK_NULL_HANDLE,     // buffer
+        0,                  // offset
+        0                   // range
+    };
+    buffer_info.buffer = shader_data.get_buffer();
+    buffer_info.offset = slot_size * image_idx;
+    buffer_info.range  = slot_size;
+    static VkWriteDescriptorSet write_desc_sets[] = {
+        {
+            VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+            nullptr,
+            VK_NULL_HANDLE,                     // dstSet
+            0,                                  // dstBinding
+            0,                                  // dstArrayElement
+            1,                                  // descriptorCount
+            VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,  // descriptorType
+            nullptr,                            // pImageInfo
+            &buffer_info,                       // pBufferInfo
+            nullptr                             // pTexelBufferView
+        }
+    };
+
+    vkCmdPushDescriptorSet(buf,
+                           VK_PIPELINE_BIND_POINT_GRAPHICS,
+                           vk_gr_pipeline_layout,
+                           0, // set
+                           mstd::array_size(write_desc_sets),
+                           write_desc_sets);
 
     constexpr uint32_t index_count =
         (what_geometry == geom_cube)            ? 36 :
