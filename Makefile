@@ -442,9 +442,18 @@ GLSL_FLAGS = --target-env vulkan1.4
 GLSL_OPT_FLAGS =
 GLSL_STRIP_FLAGS =
 GLSL_ENCODE_FLAGS =
+SPIRV_STRIP := spirv-remap
+ifeq ($(shell command -v spirv-remap >/dev/null 2>/dev/null || echo "missing"), missing)
+    SPIRV_STRIP := spirv-opt
+endif
 ifndef GLSL_NO_OPTIMIZER
-    GLSL_OPT_FLAGS += -Os --canonicalize-ids
-    GLSL_STRIP_FLAGS += --strip-debug --strip-nonsemantic
+    ifeq ($(SPIRV_STRIP), spirv-opt)
+        GLSL_OPT_FLAGS += -Os --canonicalize-ids
+        GLSL_STRIP_FLAGS += --strip-debug --strip-nonsemantic
+    else
+        GLSL_OPT_FLAGS += -Os --canonicalize-ids
+        GLSL_STRIP_FLAGS += --strip all --dce all
+    endif
 endif
 ifeq ($(spirv_opt), 0)
     GLSL_FLAGS += -g
@@ -629,7 +638,11 @@ define SHADER_RULE
 $(shaders_out_dir)/$(basename $(notdir $1)).h: $1 | $(spirv_encode) $(shaders_out_dir) $(addprefix $(shaders_out_dir)/,$(shader_dirs))
 	$(GLSL_VALIDATOR_PREFIX)glslangValidator $(GLSL_FLAGS) -o $$(call shader_stage,default,$$<) $$<
 	$(GLSL_VALIDATOR_PREFIX)spirv-opt $(GLSL_OPT_FLAGS) $$(call shader_stage,default,$$<) -o $$(call shader_stage,opt,$$<)
+ifeq ($(SPIRV_STRIP), spirv-opt)
 	$(GLSL_VALIDATOR_PREFIX)spirv-opt $(GLSL_STRIP_FLAGS) $$(call shader_stage,opt,$$<) -o $$(call shader_stage,strip,$$<)
+else
+	cd $(shaders_out_dir)/opt && $(GLSL_VALIDATOR_PREFIX)spirv-remap --strip all --dce all --input $$(subst .glsl,.spv,$$(notdir $$<)) --output ../../../$(shaders_out_dir)/strip
+endif
 	$(spirv_encode) $(GLSL_ENCODE_FLAGS) shader_$$(subst .,_,$$(basename $$(notdir $$<))) $$(call shader_stage,strip,$$<) $$@
 	$(spirv_encode) $(GLSL_ENCODE_FLAGS) --binary shader_$$(subst .,_,$$(basename $$(notdir $$<))) $$(call shader_stage,strip,$$<) $$(basename $$@).bin
 	$(GLSL_VALIDATOR_PREFIX)spirv-dis -o $$(basename $$@).disasm $$(call shader_stage,strip,$$<)
