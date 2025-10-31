@@ -48,8 +48,14 @@ endif
 ifeq ($(UNAME), Linux)
     ifeq (true,$(shell linux/have_wayland $(CC)))
         wayland ?= 0 # Disable for now until it works
+        ifeq (true,$(shell linux/have_libdecor $(CC)))
+            libdecor ?= 1
+        else
+            libdecor ?= 0
+        endif
     else
-        wayland ?= 0
+        wayland  ?= 0
+        libdecor ?= 0
     endif
 endif
 
@@ -383,6 +389,9 @@ ifeq ($(UNAME), Linux)
     ifeq ($(wayland), 1)
         LDFLAGS     += -lwayland-client
         LDFLAGS_gui += -lwayland-cursor -ldecor-0
+        ifeq ($(libdecor), 1)
+            CFLAGS += -DHAVE_LIBDECOR
+        endif
     else
         LDFLAGS += -lxcb -lxcb-xfixes
         CFLAGS  += -DLINUX_USE_XCB

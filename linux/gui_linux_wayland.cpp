@@ -10,7 +10,9 @@
 #include "../thirdparty/imgui/src/imgui.h"
 
 #include <errno.h>
-#include <libdecor-0/libdecor.h>
+#ifdef HAVE_LIBDECOR
+#   include <libdecor-0/libdecor.h>
+#endif
 #include <linux/input-event-codes.h>
 
 static bool window_needs_update;
@@ -24,6 +26,7 @@ bool need_redraw(struct Window*)
     return needs_update;
 }
 
+#ifdef HAVE_LIBDECOR
 static void decor_error(libdecor*      context,
                         libdecor_error error,
                         const char*    message)
@@ -67,6 +70,7 @@ static void decor_dismiss_popup(libdecor_frame* frame,
                                 void*           user_data)
 {
 }
+#endif
 
 static WaylandCursor create_cursor(const char*      name,
                                    wl_compositor*   compositor,
@@ -113,6 +117,10 @@ bool init_wl_gui(Window* w)
         w->cursors.left_ptr = create_cursor("left_ptr", w->compositor, cursor_theme);
     }
 
+    // Perhaps it's possible to run GUI without decorations, but the user
+    // won't be able to move or hide the window.  Unfortunately Wayland
+    // does not feature "server-side decorations".
+#ifdef HAVE_LIBDECOR
     static libdecor_interface decor_callbacks = {
         .error = decor_error
     };
@@ -150,6 +158,7 @@ bool init_wl_gui(Window* w)
             return false;
         }
     }
+#endif
 
     return true;
 }
