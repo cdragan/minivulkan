@@ -19,9 +19,9 @@ struct FIRParams {
     uint lowpass_cutoff_freq;   // Low pass frequency (if 0, it's a pure high pass)
 };
 
-layout(set = 0, binding = 0) writeonly buffer data_buf { float data[]; };
+layout(binding = 0) writeonly buffer data_buf { float data[]; };
 
-layout(set = 1, binding = 0, std430) readonly buffer param_buf { FIRParams params[]; };
+layout(binding = 1, std430) readonly buffer param_buf { FIRParams params[]; };
 
 layout(push_constant) uniform global_param_buf {
     uint sampling_freq;

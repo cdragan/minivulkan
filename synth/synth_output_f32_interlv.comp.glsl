@@ -7,9 +7,9 @@ layout(local_size_x_id = 0) in;
 
 layout(constant_id = 0) const uint work_group_size = 1;
 
-layout(set = 0, binding = 0) readonly buffer data_buf { float data[]; };
+layout(binding = 0) readonly buffer data_buf { float data[]; };
 
-layout(set = 1, binding = 0) writeonly buffer output_buf { float output_data[]; };
+layout(binding = 1) writeonly buffer output_buf { float output_data[]; };
 
 layout(push_constant) uniform param_buf {
     uint in_sound_offs;

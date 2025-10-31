@@ -9,67 +9,30 @@
 #include "sculptor_shaders.h"
 #include "../core/shaders.h"
 
-VkDescriptorSetLayout Sculptor::desc_set_layout[3];
+VkDescriptorSetLayout Sculptor::desc_set_layout;
 VkPipelineLayout      Sculptor::material_layout;
 
 bool Sculptor::create_material_layouts()
 {
     {
-        static const VkDescriptorSetLayoutCreateInfo create_empty_set_layout = {
-            VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-            nullptr,
-            0, // flags
-            0,
-            nullptr
-        };
-
-        const VkResult res = CHK(vkCreateDescriptorSetLayout(vk_dev,
-                                                             &create_empty_set_layout,
-                                                             nullptr,
-                                                             &desc_set_layout[0]));
-        if (res != VK_SUCCESS)
-            return false;
-    }
-
-    {
         static const VkDescriptorSetLayoutBinding per_object_set[] = {
             {
                 0, // binding 0: uniform buffer with materials
-                VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC,
+                VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
                 1,
                 VK_SHADER_STAGE_FRAGMENT_BIT,
                 nullptr
-            }
-        };
-
-        static const VkDescriptorSetLayoutCreateInfo create_per_object_set_layout = {
-            VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-            nullptr,
-            0, // flags
-            mstd::array_size(per_object_set),
-            per_object_set
-        };
-
-        const VkResult res = CHK(vkCreateDescriptorSetLayout(vk_dev,
-                                                             &create_per_object_set_layout,
-                                                             nullptr,
-                                                             &desc_set_layout[1]));
-        if (res != VK_SUCCESS)
-            return false;
-    }
-
-    {
-        static const VkDescriptorSetLayoutBinding per_object_set[] = {
+            },
             {
-                0, // binding 0: uniform buffer with transforms
-                VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC,
+                1, // binding 1: uniform buffer with transforms
+                VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
                 1,
                 VK_SHADER_STAGE_VERTEX_BIT
                     | VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT,
                 nullptr
             },
             {
-                1, // binding 1: storage buffer with patch face data
+                2, // binding 2: storage buffer with patch face data
                 VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
                 1,
                 VK_SHADER_STAGE_VERTEX_BIT
@@ -79,14 +42,14 @@ bool Sculptor::create_material_layouts()
                 nullptr
             },
             {
-                2, // binding 2: storage buffer with index buffer for edges
+                3, // binding 3: storage buffer with index buffer for edges
                 VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
                 1,
                 VK_SHADER_STAGE_VERTEX_BIT,
                 nullptr
             },
             {
-                3, // binding 3: storrage buffer with vertex buffer for edges
+                4, // binding 4: storrage buffer with vertex buffer for edges
                 VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
                 1,
                 VK_SHADER_STAGE_VERTEX_BIT,
@@ -97,7 +60,7 @@ bool Sculptor::create_material_layouts()
         static const VkDescriptorSetLayoutCreateInfo create_per_object_set_layout = {
             VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
             nullptr,
-            0, // flags
+            VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT, // flags
             mstd::array_size(per_object_set),
             per_object_set
         };
@@ -105,7 +68,7 @@ bool Sculptor::create_material_layouts()
         const VkResult res = CHK(vkCreateDescriptorSetLayout(vk_dev,
                                                              &create_per_object_set_layout,
                                                              nullptr,
-                                                             &desc_set_layout[2]));
+                                                             &desc_set_layout));
         if (res != VK_SUCCESS)
             return false;
     }
@@ -115,8 +78,8 @@ bool Sculptor::create_material_layouts()
             VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
             nullptr,
             0,      // flags
-            mstd::array_size(desc_set_layout),
-            desc_set_layout,
+            1,
+            &desc_set_layout,
             0,      // pushConstantRangeCount
             nullptr // pPushConstantRanges
         };

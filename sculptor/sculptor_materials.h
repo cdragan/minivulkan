@@ -9,7 +9,7 @@ namespace Sculptor {
 
 bool create_material_layouts();
 
-extern VkDescriptorSetLayout desc_set_layout[3];
+extern VkDescriptorSetLayout desc_set_layout;
 extern VkPipelineLayout      material_layout;
 
 struct MaterialInfo {

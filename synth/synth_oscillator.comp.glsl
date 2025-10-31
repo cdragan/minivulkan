@@ -30,9 +30,9 @@ struct OscillatorParams {
     uint  taps_offs;        // Offset of FIR filter's taps
 };
 
-layout(set = 0, binding = 0) buffer data_buf { float data[]; };
+layout(binding = 0) buffer data_buf { float data[]; };
 
-layout(set = 1, binding = 0, std430) readonly buffer param_buf { OscillatorParams params[]; };
+layout(binding = 1, std430) readonly buffer param_buf { OscillatorParams params[]; };
 
 shared float cached_input[num_taps - 1 + work_group_size];
 

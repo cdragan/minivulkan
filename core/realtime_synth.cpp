@@ -305,6 +305,8 @@ namespace {
             uint32_t taps_offs;
         };
 
+        constexpr uint32_t max_param_range = sizeof(Oscillator) * 256;
+
         // synth_chan_combine shader (binding 0)
         struct ChannelCombineInput {
             uint32_t in_sound_offs;
@@ -346,39 +348,19 @@ namespace {
         num_desc_set_layouts
     };
 
-#   define DECLARE_DESC_SET(X)                         \
-        X(data_desc,          one_buffer_ds,        1) \
-        X(one_param_desc,     one_buffer_ds,        1) \
-        X(two_param_desc,     two_buffers_ds,       2) \
-        X(single_output_desc, one_buffer_ds,        1) \
-        X(double_output_desc, one_double_buffer_ds, 2) \
-
-    enum DescTypes: uint8_t {
-#       define X(name, type, num_buf_descs) name,
-        DECLARE_DESC_SET(X)
-#       undef X
-        num_desc_sets
-    };
-
     VkDescriptorSetLayout desc_set_layouts[num_desc_set_layouts];
-    VkDescriptorSet       desc_sets[num_desc_sets];
-
-    const DescSetTypes desc_set_types[] = {
-#       define X(name, type, num_buf_descs) type,
-        DECLARE_DESC_SET(X)
-#       undef X
-    };
-
-    static_assert(mstd::array_size(desc_sets) == mstd::array_size(desc_set_types));
 
     bool create_shaders()
     {
         static const DescSetBindingInfo bindings[] = {
-            { one_buffer_ds,        0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC, 1 },
-            { two_buffers_ds,       0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC, 1 },
-            { two_buffers_ds,       1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC, 1 },
-            { one_double_buffer_ds, 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC, 2 },
-            { num_desc_set_layouts, 0, 0,                                         0 }
+            { one_buffer_ds,        0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1 },
+            { one_buffer_ds,        1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1 },
+            { two_buffers_ds,       0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1 },
+            { two_buffers_ds,       1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1 },
+            { two_buffers_ds,       2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1 },
+            { one_double_buffer_ds, 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1 },
+            { one_double_buffer_ds, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 2 },
+            { num_desc_set_layouts, 0, 0,                                 0 }
         };
 
         if ( ! create_compute_descriptor_set_layouts(bindings,
@@ -386,11 +368,9 @@ namespace {
                                                      desc_set_layouts))
             return false;
 
-        static constexpr uint32_t max_desc_sets = 2;
-
         struct ShaderInfo {
             ComputeShaderInfo shader_info;
-            DescSetTypes      desc_sets[max_desc_sets];
+            DescSetTypes      desc_set;
         };
 
         static const ShaderInfo shaders[] = {
@@ -399,14 +379,14 @@ namespace {
                     shader_synth_oscillator_comp,
                     0,
                 },
-                { one_buffer_ds, one_buffer_ds }
+                one_buffer_ds
             },
             {
                 {
                     shader_synth_chan_combine_comp,
                     0,
                 },
-                { one_buffer_ds, two_buffers_ds }
+                two_buffers_ds
             },
             // TODO load only in builds which need it
             {
@@ -414,7 +394,7 @@ namespace {
                     shader_synth_output_16_interlv_comp,
                     1,
                 },
-                { one_buffer_ds, one_buffer_ds }
+                one_buffer_ds
             },
             // TODO load only in builds which need it
             {
@@ -422,7 +402,7 @@ namespace {
                     shader_synth_output_f32_interlv_comp,
                     1,
                 },
-                { one_buffer_ds, one_buffer_ds }
+                one_buffer_ds
             },
             // TODO load only in builds which need it
             {
@@ -430,7 +410,7 @@ namespace {
                     shader_synth_output_f32_separate_comp,
                     1,
                 },
-                { one_buffer_ds, one_double_buffer_ds }
+                one_double_buffer_ds
             }
         };
 
@@ -442,10 +422,8 @@ namespace {
             if (!shaders[i].shader_info.shader)
                 continue;
 
-            const VkDescriptorSetLayout ds_layouts[max_desc_sets + 1] = {
-                desc_set_layouts[shaders[i].desc_sets[0]],
-                // TODO add support for dynamic count of descriptor sets
-                desc_set_layouts[shaders[i].desc_sets[1]],
+            const VkDescriptorSetLayout ds_layouts[] = {
+                desc_set_layouts[shaders[i].desc_set],
                 VK_NULL_HANDLE // list terminator
             };
 
@@ -474,108 +452,6 @@ namespace {
                                          &pipe_layouts[i],
                                          &pipes[i]))
                 return false;
-        }
-
-        static VkDescriptorSetLayout layouts[num_desc_sets];
-
-        for (uint32_t i = 0; i < num_desc_sets; i++)
-            layouts[i] = desc_set_layouts[desc_set_types[i]];
-
-        static VkDescriptorSetAllocateInfo desc_set_alloc_info = {
-            VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
-            nullptr,
-            VK_NULL_HANDLE, // descriptorPool
-            mstd::array_size(layouts),
-            layouts
-        };
-
-        {
-            static const VkDescriptorPoolSize pool_sizes[] = {
-                {
-                    VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC,
-                    0
-#                   define X(name, type, num_buf_descs) + num_buf_descs
-                    DECLARE_DESC_SET(X)
-#                   undef X
-                }
-            };
-
-            static const VkDescriptorPoolCreateInfo pool_create_info = {
-                VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
-                nullptr,
-                0,              // flags
-                num_desc_sets,  // maxSets
-                mstd::array_size(pool_sizes),
-                pool_sizes
-            };
-
-            const VkResult res = CHK(vkCreateDescriptorPool(vk_dev,
-                                                            &pool_create_info,
-                                                            nullptr,
-                                                            &desc_set_alloc_info.descriptorPool));
-            if (res != VK_SUCCESS)
-                return false;
-        }
-        {
-            const VkResult res = CHK(vkAllocateDescriptorSets(vk_dev,
-                                                              &desc_set_alloc_info,
-                                                              desc_sets));
-            if (res != VK_SUCCESS)
-                return false;
-        }
-
-        struct DescSetAssignment {
-            DescTypes    desc_set_id;
-            uint8_t      binding;
-            uint8_t      array_elem;
-            BufferTypes  buffer_id;
-            VkDeviceSize max_range;
-        };
-
-        constexpr uint32_t max_param_range = sizeof(ShaderParams::Oscillator) * 256;
-
-        static const DescSetAssignment desc_assignments[] = {
-            { data_desc,          0, 0, data_buf,   VK_WHOLE_SIZE },
-            { one_param_desc,     0, 0, param_buf,  max_param_range },
-            { two_param_desc,     0, 0, param_buf,  max_param_range },
-            { two_param_desc,     1, 0, param_buf,  max_param_range },
-            { single_output_desc, 0, 0, output_buf, sizeof(int16_t) * 2 * rt_step_samples },
-            { double_output_desc, 0, 0, output_buf, sizeof(float) * rt_step_samples },
-            { double_output_desc, 0, 1, output_buf, sizeof(float) * rt_step_samples },
-        };
-
-        for (const DescSetAssignment& assign : desc_assignments) {
-
-            static VkDescriptorBufferInfo buffer_info = {
-                VK_NULL_HANDLE,     // buffer
-                0,                  // offset
-                0                   // range
-            };
-
-            static VkWriteDescriptorSet write_desc_set = {
-                VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-                nullptr,
-                VK_NULL_HANDLE,                             // dstSet
-                0,                                          // dstBinding
-                0,                                          // dstArrayElement
-                1,                                          // descriptorCount
-                VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC,  // descriptorType
-                nullptr,                                    // pImageInfo
-                &buffer_info,                               // pBufferInfo
-                nullptr                                     // pTexelBufferView
-            };
-
-            buffer_info.buffer             = buffers[assign.buffer_id].get_buffer();
-            buffer_info.range              = assign.max_range;
-            write_desc_set.dstSet          = desc_sets[assign.desc_set_id];
-            write_desc_set.dstBinding      = assign.binding;
-            write_desc_set.dstArrayElement = assign.array_elem;
-
-            vkUpdateDescriptorSets(vk_dev,
-                                   1,
-                                   &write_desc_set,
-                                   0,           // descriptorCopyCount
-                                   nullptr);    // pDescriptorCopies
         }
 
         return true;
@@ -989,6 +865,50 @@ static void memory_barrier(VkAccessFlags        dst_access,
     src_stage  = dst_stage;
 }
 
+struct PushDescriptorInfo {
+    uint8_t      pipeline_layout;
+    uint8_t      binding;
+    uint8_t      array_element;
+    uint8_t      buffer_idx;
+    VkDeviceSize buffer_range;
+};
+
+static void push_descriptor(const PushDescriptorInfo& info, uint32_t buffer_offset)
+{
+    static VkDescriptorBufferInfo buffer_info = {
+        VK_NULL_HANDLE, // buffer
+        0,              // offset
+        0               // range
+    };
+
+    static VkWriteDescriptorSet write_desc_set = {
+        VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+        nullptr,
+        VK_NULL_HANDLE,                     // dstSet
+        0,                                  // dstBinding
+        0,                                  // dstArrayElement
+        1,                                  // descriptorCount
+        VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,  // descriptorType
+        nullptr,                            // pImageInfo
+        &buffer_info,                       // pBufferInfo
+        nullptr                             // pTexelBufferView
+    };
+
+    buffer_info.buffer = buffers[info.buffer_idx].get_buffer();
+    buffer_info.offset = buffer_offset;
+    buffer_info.range  = info.buffer_range;
+
+    write_desc_set.dstBinding      = info.binding;
+    write_desc_set.dstArrayElement = info.array_element;
+
+    vkCmdPushDescriptorSet(audio_cmd_buf,
+                           VK_PIPELINE_BIND_POINT_COMPUTE,
+                           pipe_layouts[info.pipeline_layout],
+                           0,
+                           1,
+                           &write_desc_set);
+}
+
 static void render_audio_step()
 {
     const uint32_t start_samples = rendered_samples;
@@ -1082,26 +1002,11 @@ static void render_audio_step()
 
     vkCmdBindPipeline(audio_cmd_buf, VK_PIPELINE_BIND_POINT_COMPUTE, pipes[oscillator_pipe]);
 
-    {
-        const VkDescriptorSet descriptors[] = {
-            desc_sets[data_desc],
-            desc_sets[one_param_desc]
-        };
+    static const PushDescriptorInfo push_osc_data = { oscillator_pipe, 0, 0, data_buf, VK_WHOLE_SIZE };
+    push_descriptor(push_osc_data, 0);
 
-        const uint32_t offsets[] = {
-            0,
-            osc_base_param_offs
-        };
-
-        vkCmdBindDescriptorSets(audio_cmd_buf,
-                                VK_PIPELINE_BIND_POINT_COMPUTE,
-                                pipe_layouts[oscillator_pipe],
-                                0, // firstSet
-                                mstd::array_size(descriptors),
-                                descriptors,
-                                mstd::array_size(offsets),
-                                offsets);
-    }
+    static const PushDescriptorInfo push_osc_param = { oscillator_pipe, 1, 0, param_buf, ShaderParams::max_param_range };
+    push_descriptor(push_osc_param, osc_base_param_offs);
 
     vkCmdDispatch(audio_cmd_buf, num_oscillators, 1, 1);
 
@@ -1164,21 +1069,13 @@ static void render_audio_step()
 
     vkCmdBindPipeline(audio_cmd_buf, VK_PIPELINE_BIND_POINT_COMPUTE, pipes[chan_combine_pipe]);
 
-    {
-        const uint32_t offsets[] = {
-            input_param_offs,
-            chan_param_offs
-        };
+    push_descriptor(push_osc_data, 0);
 
-        vkCmdBindDescriptorSets(audio_cmd_buf,
-                                VK_PIPELINE_BIND_POINT_COMPUTE,
-                                pipe_layouts[chan_combine_pipe],
-                                1, // firstSet
-                                1, // descriptorSetCount
-                                &desc_sets[two_param_desc],
-                                mstd::array_size(offsets),
-                                offsets);
-    }
+    static const PushDescriptorInfo push_comb_param0 = { chan_combine_pipe, 1, 0, param_buf, ShaderParams::max_param_range };
+    push_descriptor(push_comb_param0, input_param_offs);
+
+    static const PushDescriptorInfo push_comb_param1 = { chan_combine_pipe, 2, 0, param_buf, ShaderParams::max_param_range };
+    push_descriptor(push_comb_param1, chan_param_offs);
 
     vkCmdDispatch(audio_cmd_buf, num_mix_channels, 1, 1);
 
@@ -1207,26 +1104,13 @@ void prepare_copy_audio_step_to_host<int16_t, true>(uint32_t offset)
                       VK_PIPELINE_BIND_POINT_COMPUTE,
                       pipes[output_16i_pipe]);
 
-    const VkDescriptorSet descriptors[] = {
-        desc_sets[data_desc],
-        desc_sets[single_output_desc]
-    };
-
     offset *= 2 * sizeof(int16_t);
 
-    const uint32_t offsets[] = {
-        0,
-        offset
-    };
+    static const PushDescriptorInfo push_out_data = { output_16i_pipe, 0, 0, data_buf, VK_WHOLE_SIZE };
+    push_descriptor(push_out_data, 0);
 
-    vkCmdBindDescriptorSets(audio_cmd_buf,
-                            VK_PIPELINE_BIND_POINT_COMPUTE,
-                            pipe_layouts[output_16i_pipe],
-                            0, // firstSet
-                            mstd::array_size(descriptors),
-                            descriptors,
-                            mstd::array_size(offsets),
-                            offsets);
+    static const PushDescriptorInfo push_out_output = { output_16i_pipe, 1, 0, output_buf, sizeof(int16_t) * 2 * rt_step_samples };
+    push_descriptor(push_out_output, offset);
 
     const ShaderParams::OutputPushConst push = { mix_channels[0].chan_output_offs };
 
@@ -1245,26 +1129,13 @@ void prepare_copy_audio_step_to_host<float, true>(uint32_t offset)
                       VK_PIPELINE_BIND_POINT_COMPUTE,
                       pipes[output_32fi_pipe]);
 
-    const VkDescriptorSet descriptors[] = {
-        desc_sets[data_desc],
-        desc_sets[single_output_desc]
-    };
-
     offset *= 2 * sizeof(float);
 
-    const uint32_t offsets[] = {
-        0,
-        offset
-    };
+    static const PushDescriptorInfo push_out_data = { output_32fi_pipe, 0, 0, data_buf, VK_WHOLE_SIZE };
+    push_descriptor(push_out_data, 0);
 
-    vkCmdBindDescriptorSets(audio_cmd_buf,
-                            VK_PIPELINE_BIND_POINT_COMPUTE,
-                            pipe_layouts[output_32fi_pipe],
-                            0, // firstSet
-                            mstd::array_size(descriptors),
-                            descriptors,
-                            mstd::array_size(offsets),
-                            offsets);
+    static const PushDescriptorInfo push_out_output = { output_32fi_pipe, 1, 0, output_buf, sizeof(float) * 2 * rt_step_samples };
+    push_descriptor(push_out_output, offset);
 
     const ShaderParams::OutputPushConst push = { mix_channels[0].chan_output_offs };
 
@@ -1285,25 +1156,16 @@ void prepare_copy_audio_step_to_host<float, false>(uint32_t offset)
 
     offset *= sizeof(float);
 
-    const VkDescriptorSet descriptors[] = {
-        desc_sets[data_desc],
-        desc_sets[double_output_desc]
-    };
+    const uint32_t other_chan_offs = static_cast<uint32_t>(buffers[output_buf].size()) / 2 + offset;
 
-    const uint32_t offsets[] = {
-        0,
-        offset,
-        static_cast<uint32_t>(buffers[output_buf].size()) / 2 + offset
-    };
+    static const PushDescriptorInfo push_out_data = { output_32f_pipe, 0, 0, data_buf, VK_WHOLE_SIZE };
+    push_descriptor(push_out_data, 0);
 
-    vkCmdBindDescriptorSets(audio_cmd_buf,
-                            VK_PIPELINE_BIND_POINT_COMPUTE,
-                            pipe_layouts[output_32f_pipe],
-                            0, // firstSet
-                            mstd::array_size(descriptors),
-                            descriptors,
-                            mstd::array_size(offsets),
-                            offsets);
+    static const PushDescriptorInfo push_out_output0 = { output_32f_pipe, 1, 0, output_buf, sizeof(float) * rt_step_samples };
+    push_descriptor(push_out_output0, offset);
+
+    static const PushDescriptorInfo push_out_output1 = { output_32f_pipe, 1, 1, output_buf, sizeof(float) * rt_step_samples };
+    push_descriptor(push_out_output1, other_chan_offs);
 
     const ShaderParams::OutputPushConst push = { mix_channels[0].chan_output_offs };
 

@@ -15,7 +15,7 @@ struct index_data {
     uint idx23;
 };
 
-layout(set = 2, binding = 2) readonly buffer edge_indices {
+layout(binding = 3) readonly buffer edge_indices {
     index_data indices[]; // Vertex indices
 };
 
@@ -24,7 +24,7 @@ struct vertex_data {
     uint z;
 };
 
-layout(set = 2, binding = 3) readonly buffer edge_vertices {
+layout(binding = 4) readonly buffer edge_vertices {
     vertex_data vertices[];
 };
 

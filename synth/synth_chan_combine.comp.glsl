@@ -24,11 +24,11 @@ struct Params {
     uint num_inputs;
 };
 
-layout(set = 0, binding = 0) buffer data_buf { float data[]; };
+layout(binding = 0) buffer data_buf { float data[]; };
 
-layout(set = 1, binding = 0, std430) readonly buffer input_param_buf { InputParams input_params[]; };
+layout(binding = 1, std430) readonly buffer input_param_buf { InputParams input_params[]; };
 
-layout(set = 1, binding = 1, std430) readonly buffer param_buf { Params params[]; };
+layout(binding = 2, std430) readonly buffer param_buf { Params params[]; };
 
 void main()
 {

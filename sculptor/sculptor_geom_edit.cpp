@@ -362,7 +362,7 @@ bool GeometryEditor::alloc_view_resources(View*     dst_view,
             image_info.imageView = res.color.get_view();
             write_desc.dstSet    = res.gui_texture;
 
-            vkUpdateDescriptorSets(vk_dev, 1, &write_desc, 0, nullptr);
+            VK_FUNCTION(vkUpdateDescriptorSets)(vk_dev, 1, &write_desc, 0, nullptr);
         }
         else {
             res.gui_texture = ImGui_ImplVulkan_AddTexture(
@@ -419,9 +419,6 @@ bool GeometryEditor::allocate_resources_once()
         return false;
 
     if ( ! create_grid_buffer())
-        return false;
-
-    if ( ! create_descriptor_sets())
         return false;
 
     view.camera[static_cast<int>(ViewType::free_moving)] = Camera{ { 0.0f, 0.01f, -0.2f }, 0.25f,    0.0f, 0.0f, 1.0f };
@@ -591,158 +588,35 @@ bool GeometryEditor::create_grid_buffer()
                              "grid buffer");
 }
 
-bool GeometryEditor::create_descriptor_sets()
+static void push_descriptor(VkCommandBuffer               cmdbuf,
+                            VkPipelineLayout              layout,
+                            uint8_t                       binding,
+                            uint8_t                       desc_type,
+                            const VkDescriptorBufferInfo& buffer_info)
 {
-    static VkDescriptorSetAllocateInfo alloc_info = {
-        VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+    static VkWriteDescriptorSet write_desc_set = {
+        VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
         nullptr,
-        VK_NULL_HANDLE,                 // descriptorPool
-        2,                              // descriptorSetCount
-        &Sculptor::desc_set_layout[1]   // pSetLayouts
+        VK_NULL_HANDLE,             // dstSet
+        0,                          // dstBinding
+        0,                          // dstArrayElement
+        1,                          // descriptorCount
+        VK_DESCRIPTOR_TYPE_SAMPLER, // descriptorType
+        nullptr,                    // pImageInfo
+        nullptr,                    // pBufferInfo
+        nullptr                     // pTexelBufferView
     };
 
-    {
-        static VkDescriptorPoolSize pool_sizes[] = {
-            {
-                VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC,
-                2
-            },
-            {
-                VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-                3
-            }
-        };
+    write_desc_set.dstBinding     = binding;
+    write_desc_set.descriptorType = static_cast<VkDescriptorType>(desc_type);
+    write_desc_set.pBufferInfo    = &buffer_info;
 
-        static VkDescriptorPoolCreateInfo pool_create_info = {
-            VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
-            nullptr,
-            0, // flags
-            2, // maxSets
-            mstd::array_size(pool_sizes),
-            pool_sizes
-        };
-
-        const VkResult res = CHK(vkCreateDescriptorPool(vk_dev, &pool_create_info, nullptr, &alloc_info.descriptorPool));
-        if (res != VK_SUCCESS)
-            return false;
-    }
-    {
-        const VkResult res = CHK(vkAllocateDescriptorSets(vk_dev, &alloc_info, &desc_set[1]));
-        if (res != VK_SUCCESS)
-            return false;
-    }
-
-    {
-        static VkDescriptorBufferInfo materials_buffer_info = {
-            VK_NULL_HANDLE,     // buffer
-            0,                  // offset
-            0                   // range
-        };
-        static VkDescriptorBufferInfo transforms_buffer_info = {
-            VK_NULL_HANDLE,     // buffer
-            0,                  // offset
-            0                   // range
-        };
-        static VkDescriptorBufferInfo storage_buffer_info = {
-            VK_NULL_HANDLE,     // buffer
-            0,                  // offset
-            VK_WHOLE_SIZE       // range
-        };
-        static VkDescriptorBufferInfo edge_index_buffer_info = {
-            VK_NULL_HANDLE,     // buffer
-            0,                  // offset
-            0                   // range
-        };
-        static VkDescriptorBufferInfo edge_vertex_buffer_info = {
-            VK_NULL_HANDLE,     // buffer
-            0,                  // offset
-            0                   // range
-        };
-        static VkWriteDescriptorSet write_desc_sets[] = {
-            {
-                VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-                nullptr,
-                VK_NULL_HANDLE,                             // dstSet
-                0,                                          // dstBinding
-                0,                                          // dstArrayElement
-                1,                                          // descriptorCount
-                VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC,  // descriptorType
-                nullptr,                                    // pImageInfo
-                &materials_buffer_info,                     // pBufferInfo
-                nullptr                                     // pTexelBufferView
-            },
-            {
-                VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-                nullptr,
-                VK_NULL_HANDLE,                             // dstSet
-                0,                                          // dstBinding
-                0,                                          // dstArrayElement
-                1,                                          // descriptorCount
-                VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC,  // descriptorType
-                nullptr,                                    // pImageInfo
-                &transforms_buffer_info,                    // pBufferInfo
-                nullptr                                     // pTexelBufferView
-            },
-            {
-                VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-                nullptr,
-                VK_NULL_HANDLE,                             // dstSet
-                1,                                          // dstBinding
-                0,                                          // dstArrayElement
-                1,                                          // descriptorCount
-                VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,          // descriptorType
-                nullptr,                                    // pImageInfo
-                &storage_buffer_info,                       // pBufferInfo
-                nullptr                                     // pTexelBufferView
-            },
-            {
-                VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-                nullptr,
-                VK_NULL_HANDLE,                             // dstSet
-                2,                                          // dstBinding
-                0,                                          // dstArrayElement
-                1,                                          // descriptorCount
-                VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,          // descriptorType
-                nullptr,                                    // pImageInfo
-                &edge_index_buffer_info,                    // pBufferInfo
-                nullptr                                     // pTexelBufferView
-            },
-            {
-                VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-                nullptr,
-                VK_NULL_HANDLE,                             // dstSet
-                3,                                          // dstBinding
-                0,                                          // dstArrayElement
-                1,                                          // descriptorCount
-                VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,          // descriptorType
-                nullptr,                                    // pImageInfo
-                &edge_vertex_buffer_info,                   // pBufferInfo
-                nullptr                                     // pTexelBufferView
-            },
-        };
-
-        materials_buffer_info.buffer  = materials_buf.get_buffer();
-        materials_buffer_info.range   = materials_stride;
-        transforms_buffer_info.buffer = transforms_buf.get_buffer();
-        transforms_buffer_info.range  = transforms_stride;
-        patch_geometry.write_faces_descriptor(&storage_buffer_info);
-        patch_geometry.write_edge_indices_descriptor(&edge_index_buffer_info);
-        patch_geometry.write_edge_vertices_descriptor(&edge_vertex_buffer_info);
-
-        write_desc_sets[0].dstSet     = desc_set[1];
-        write_desc_sets[1].dstSet     = desc_set[2];
-        write_desc_sets[2].dstSet     = desc_set[2];
-        write_desc_sets[3].dstSet     = desc_set[2];
-        write_desc_sets[4].dstSet     = desc_set[2];
-
-        vkUpdateDescriptorSets(vk_dev,
-                               mstd::array_size(write_desc_sets),
-                               write_desc_sets,
-                               0,           // descriptorCopyCount
-                               nullptr);    // pDescriptorCopies
-    }
-
-    return true;
+    vkCmdPushDescriptorSet(cmdbuf,
+                           VK_PIPELINE_BIND_POINT_GRAPHICS,
+                           layout,
+                           0, // set
+                           1,
+                           &write_desc_set);
 }
 
 void GeometryEditor::gui_status_bar()
@@ -1697,11 +1571,6 @@ bool GeometryEditor::render_geometry(VkCommandBuffer cmdbuf,
 
     const uint32_t transform_id = transform_id_base + 0;
 
-    uint32_t dynamic_offsets[] = {
-        edge_mat_id * materials_stride,
-        transform_id * transforms_stride
-    };
-
     if ( ! set_patch_transforms(dst_view, transform_id))
         return false;
 
@@ -1709,29 +1578,46 @@ bool GeometryEditor::render_geometry(VkCommandBuffer cmdbuf,
 
     send_viewport_and_scissor(cmdbuf, dst_view.width, dst_view.height);
 
-    vkCmdBindDescriptorSets(cmdbuf,
-                            VK_PIPELINE_BIND_POINT_GRAPHICS,
-                            Sculptor::material_layout,
-                            1,          // firstSet
-                            2,          // descriptorSetCount
-                            &desc_set[1],
-                            mstd::array_size(dynamic_offsets),
-                            dynamic_offsets);
+    VkDescriptorBufferInfo buffer_info = {
+        VK_NULL_HANDLE, // buffer
+        0,              // offset
+        0               // range
+    };
+
+    buffer_info.buffer = materials_buf.get_buffer();
+    buffer_info.offset = edge_mat_id * materials_stride;
+    buffer_info.range  = materials_stride;
+
+    push_descriptor(cmdbuf, Sculptor::material_layout,
+                    0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, buffer_info);
+
+    buffer_info.buffer = transforms_buf.get_buffer();
+    buffer_info.offset = transform_id * transforms_stride;
+    buffer_info.range  = transforms_stride;
+
+    push_descriptor(cmdbuf, Sculptor::material_layout,
+                    1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, buffer_info);
+
+    patch_geometry.write_faces_descriptor(&buffer_info);
+
+    push_descriptor(cmdbuf, Sculptor::material_layout,
+                    2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, buffer_info);
+
+    patch_geometry.write_edge_indices_descriptor(&buffer_info);
+
+    push_descriptor(cmdbuf, Sculptor::material_layout,
+                    3, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, buffer_info);
+
+    patch_geometry.write_edge_vertices_descriptor(&buffer_info);
+
+    push_descriptor(cmdbuf, Sculptor::material_layout,
+                    4, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, buffer_info);
 
     patch_geometry.render(cmdbuf);
 
     vkCmdBindPipeline(cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, edge_patch_mat);
 
     send_viewport_and_scissor(cmdbuf, dst_view.width, dst_view.height);
-
-    vkCmdBindDescriptorSets(cmdbuf,
-                            VK_PIPELINE_BIND_POINT_GRAPHICS,
-                            Sculptor::material_layout,
-                            1,          // firstSet
-                            2,          // descriptorSetCount
-                            &desc_set[1],
-                            mstd::array_size(dynamic_offsets),
-                            dynamic_offsets);
 
     patch_geometry.render_edges(cmdbuf);
 
@@ -1740,16 +1626,13 @@ bool GeometryEditor::render_geometry(VkCommandBuffer cmdbuf,
     send_viewport_and_scissor(cmdbuf, dst_view.width, dst_view.height);
 
     const uint32_t vertex_mat_id = (image_idx * num_materials) + mat_vertex_sel;
-    dynamic_offsets[0] = vertex_mat_id * materials_stride;
 
-    vkCmdBindDescriptorSets(cmdbuf,
-                            VK_PIPELINE_BIND_POINT_GRAPHICS,
-                            Sculptor::material_layout,
-                            1,          // firstSet
-                            2,          // descriptorSetCount
-                            &desc_set[1],
-                            mstd::array_size(dynamic_offsets),
-                            dynamic_offsets);
+    buffer_info.buffer = materials_buf.get_buffer();
+    buffer_info.offset = vertex_mat_id * materials_stride;
+    buffer_info.range  = materials_stride;
+
+    push_descriptor(cmdbuf, Sculptor::material_layout,
+                    0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, buffer_info);
 
     patch_geometry.render_vertices(cmdbuf);
 
@@ -1826,23 +1709,18 @@ bool GeometryEditor::render_grid(VkCommandBuffer cmdbuf,
 
     const uint32_t grid_mat_id = (image_idx * num_materials) + mat_grid;
 
-    const uint32_t transform_id_base = image_idx * transforms_per_viewport;
-
-    const uint32_t transform_id = transform_id_base + 0;
-
-    uint32_t dynamic_offsets[] = {
-        grid_mat_id * materials_stride,
-        transform_id * transforms_stride
+    VkDescriptorBufferInfo buffer_info = {
+        VK_NULL_HANDLE, // buffer
+        0,              // offset
+        0               // range
     };
 
-    vkCmdBindDescriptorSets(cmdbuf,
-                            VK_PIPELINE_BIND_POINT_GRAPHICS,
-                            Sculptor::material_layout,
-                            1, // firstSet
-                            2, // descriptorSetCount
-                            &desc_set[1],
-                            mstd::array_size(dynamic_offsets),
-                            dynamic_offsets);
+    buffer_info.buffer = materials_buf.get_buffer();
+    buffer_info.offset = grid_mat_id * materials_stride;
+    buffer_info.range  = materials_stride;
+
+    push_descriptor(cmdbuf, Sculptor::material_layout,
+                    0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, buffer_info);
 
     const VkDeviceSize vb_offset = image_idx * sub_buf_stride;
 

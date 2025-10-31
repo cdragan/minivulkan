@@ -1325,8 +1325,8 @@ bool create_compute_descriptor_set_layouts(const DescSetBindingInfo* binding_des
         static VkDescriptorSetLayoutCreateInfo create_info = {
             VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
             nullptr,
-            0,       // flags
-            0,       // bindingCount
+            VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT, // flags
+            0, // bindingCount
             create_binding
         };
 

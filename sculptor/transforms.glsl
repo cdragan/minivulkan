@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 // SPDX-FileCopyrightText: Copyright (c) 2021-2025 Chris Dragan
 
-layout(set = 2, binding = 0) uniform transform_data {
+layout(binding = 1) uniform transform_data {
     mat4   model_view;
     mat3x4 model_view_normal;
     vec4   proj;

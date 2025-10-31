@@ -111,15 +111,11 @@
     X(vkEndCommandBuffer) \
     X(vkQueueSubmit) \
     X(vkQueueWaitIdle) \
-    X(vkCreateDescriptorPool) \
-    X(vkAllocateDescriptorSets) \
-    X(vkUpdateDescriptorSets) \
     X(vkCmdBeginRendering) \
     X(vkCmdEndRendering) \
     X(vkCmdBindPipeline) \
     X(vkCmdBindVertexBuffers) \
     X(vkCmdBindIndexBuffer) \
-    X(vkCmdBindDescriptorSets) \
     X(vkCmdPushDescriptorSet) \
     X(vkCmdPushConstants) \
     X(vkCmdSetViewport) \
@@ -222,15 +218,11 @@ enum e_device_functions {
 #define vkEndCommandBuffer                        SELECT_VK_FUNCTION(device,   vkEndCommandBuffer)
 #define vkQueueSubmit                             SELECT_VK_FUNCTION(device,   vkQueueSubmit)
 #define vkQueueWaitIdle                           SELECT_VK_FUNCTION(device,   vkQueueWaitIdle)
-#define vkCreateDescriptorPool                    SELECT_VK_FUNCTION(device,   vkCreateDescriptorPool)
-#define vkAllocateDescriptorSets                  SELECT_VK_FUNCTION(device,   vkAllocateDescriptorSets)
-#define vkUpdateDescriptorSets                    SELECT_VK_FUNCTION(device,   vkUpdateDescriptorSets)
 #define vkCmdBeginRendering                       SELECT_VK_FUNCTION(device,   vkCmdBeginRendering)
 #define vkCmdEndRendering                         SELECT_VK_FUNCTION(device,   vkCmdEndRendering)
 #define vkCmdBindPipeline                         SELECT_VK_FUNCTION(device,   vkCmdBindPipeline)
 #define vkCmdBindVertexBuffers                    SELECT_VK_FUNCTION(device,   vkCmdBindVertexBuffers)
 #define vkCmdBindIndexBuffer                      SELECT_VK_FUNCTION(device,   vkCmdBindIndexBuffer)
-#define vkCmdBindDescriptorSets                   SELECT_VK_FUNCTION(device,   vkCmdBindDescriptorSets)
 #define vkCmdPushDescriptorSet                    SELECT_VK_FUNCTION(device,   vkCmdPushDescriptorSet)
 #define vkCmdPushConstants                        SELECT_VK_FUNCTION(device,   vkCmdPushConstants)
 #define vkCmdSetViewport                          SELECT_VK_FUNCTION(device,   vkCmdSetViewport)

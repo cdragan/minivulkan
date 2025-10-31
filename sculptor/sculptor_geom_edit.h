@@ -154,7 +154,6 @@ class GeometryEditor: public Editor {
         void set_material_buf(const MaterialInfo& mat_info, uint32_t mat_id);
         bool create_transforms_buffer();
         bool create_grid_buffer();
-        bool create_descriptor_sets();
         void handle_mouse_actions(const UserInput& input, bool view_hovered);
         void handle_keyboard_actions();
         void gui_status_bar();
@@ -178,7 +177,6 @@ class GeometryEditor: public Editor {
         // - desc set 0: global and per-frame resources
         // - desc set 1: per-material resources
         // - desc set 2: per-object resources
-        VkDescriptorSet    desc_set[3]       = { };
         VkPipeline         gray_patch_mat    = VK_NULL_HANDLE;
         VkPipeline         edge_patch_mat    = VK_NULL_HANDLE;
         VkPipeline         vertex_mat        = VK_NULL_HANDLE;

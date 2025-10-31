@@ -29,7 +29,9 @@ static void check_gui_result(VkResult imgui_error)
 
 static PFN_vkVoidFunction load_vk_function(const char* name, void* cookie)
 {
-    return load_vk_function(name);
+    if (strstr(name, "vkGetPhysicalDevice") || strstr(name, "vkDestroySurface"))
+        return vkGetInstanceProcAddr(vk_instance, name);
+    return vkGetDeviceProcAddr(vk_dev, name);
 }
 
 static bool create_render_pass(VkRenderPass* render_pass, GuiClear clear)
@@ -240,7 +242,7 @@ bool init_gui(GuiClear clear)
 
     VkDescriptorPool desc_pool;
 
-    VkResult res = CHK(vkCreateDescriptorPool(vk_dev, &pool_create_info, nullptr, &desc_pool));
+    VkResult res = CHK(VK_FUNCTION(vkCreateDescriptorPool)(vk_dev, &pool_create_info, nullptr, &desc_pool));
     if (res != VK_SUCCESS)
         return false;
 
