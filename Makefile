@@ -451,7 +451,7 @@ ifndef GLSL_NO_OPTIMIZER
         GLSL_OPT_FLAGS += -Os --canonicalize-ids
         GLSL_STRIP_FLAGS += --strip-debug --strip-nonsemantic
     else
-        GLSL_OPT_FLAGS += -Os --canonicalize-ids
+        GLSL_OPT_FLAGS += -Os
         GLSL_STRIP_FLAGS += --strip all --dce all
     endif
 endif
