@@ -148,7 +148,7 @@ bool init_wl_gui(Window* w)
     }
 
     libdecor_frame_set_app_id(frame, app_name);
-    //libdecor_frame_set_title(frame, app_name);
+    libdecor_frame_set_title(frame, app_name);
 
     libdecor_frame_map(frame);
 

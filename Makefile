@@ -388,9 +388,10 @@ endif
 ifeq ($(UNAME), Linux)
     ifeq ($(wayland), 1)
         LDFLAGS     += -lwayland-client
-        LDFLAGS_gui += -lwayland-cursor -ldecor-0
+        LDFLAGS_gui += -lwayland-cursor
         ifeq ($(libdecor), 1)
             CFLAGS += -DHAVE_LIBDECOR
+            LDFLAGS_gui += -ldecor-0
         endif
     else
         LDFLAGS += -lxcb -lxcb-xfixes

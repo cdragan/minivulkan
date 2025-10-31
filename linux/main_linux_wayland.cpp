@@ -263,7 +263,12 @@ static bool create_window(Window* w)
 
     xdg_wm_base_add_listener(w->wm_base, &wm_base_listener, w);
 
-    if (full_screen)  {
+    xdg_toplevel* toplevel = nullptr;
+
+#ifdef HAVE_LIBDECOR
+    if (full_screen)
+#endif
+    {
         xdg_surface* wm_surface = xdg_wm_base_get_xdg_surface(w->wm_base, w->surface);
 
         if ( ! wm_surface) {
@@ -277,7 +282,7 @@ static bool create_window(Window* w)
 
         xdg_surface_add_listener(wm_surface, &surface_listener, w);
 
-        xdg_toplevel* toplevel = xdg_surface_get_toplevel(wm_surface);
+        toplevel = xdg_surface_get_toplevel(wm_surface);
 
         if ( ! toplevel) {
             d_printf("Failed to create window (toplevel)\n");
@@ -293,9 +298,10 @@ static bool create_window(Window* w)
 
         xdg_toplevel_set_title(toplevel, app_name);
         xdg_toplevel_set_app_id(toplevel, app_name);
-
-        xdg_toplevel_set_fullscreen(toplevel, nullptr);
     }
+
+    if (full_screen)
+        xdg_toplevel_set_fullscreen(toplevel, nullptr);
 
     // Hook up keyboard
     w->keyboard = wl_seat_get_keyboard(w->seat);
