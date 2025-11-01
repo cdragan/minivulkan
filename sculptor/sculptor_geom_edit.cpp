@@ -589,6 +589,7 @@ bool GeometryEditor::create_grid_buffer()
 }
 
 static void push_descriptor(VkCommandBuffer               cmdbuf,
+                            VkPipelineBindPoint           bind_point,
                             VkPipelineLayout              layout,
                             uint8_t                       binding,
                             uint8_t                       desc_type,
@@ -612,7 +613,7 @@ static void push_descriptor(VkCommandBuffer               cmdbuf,
     write_desc_set.pBufferInfo    = &buffer_info;
 
     vkCmdPushDescriptorSet(cmdbuf,
-                           VK_PIPELINE_BIND_POINT_GRAPHICS,
+                           bind_point,
                            layout,
                            0, // set
                            1,
@@ -1588,29 +1589,29 @@ bool GeometryEditor::render_geometry(VkCommandBuffer cmdbuf,
     buffer_info.offset = edge_mat_id * materials_stride;
     buffer_info.range  = materials_stride;
 
-    push_descriptor(cmdbuf, Sculptor::material_layout,
+    push_descriptor(cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, Sculptor::material_layout,
                     0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, buffer_info);
 
     buffer_info.buffer = transforms_buf.get_buffer();
     buffer_info.offset = transform_id * transforms_stride;
     buffer_info.range  = transforms_stride;
 
-    push_descriptor(cmdbuf, Sculptor::material_layout,
+    push_descriptor(cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, Sculptor::material_layout,
                     1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, buffer_info);
 
     patch_geometry.write_faces_descriptor(&buffer_info);
 
-    push_descriptor(cmdbuf, Sculptor::material_layout,
+    push_descriptor(cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, Sculptor::material_layout,
                     2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, buffer_info);
 
     patch_geometry.write_edge_indices_descriptor(&buffer_info);
 
-    push_descriptor(cmdbuf, Sculptor::material_layout,
+    push_descriptor(cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, Sculptor::material_layout,
                     3, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, buffer_info);
 
     patch_geometry.write_edge_vertices_descriptor(&buffer_info);
 
-    push_descriptor(cmdbuf, Sculptor::material_layout,
+    push_descriptor(cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, Sculptor::material_layout,
                     4, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, buffer_info);
 
     patch_geometry.render(cmdbuf);
@@ -1631,7 +1632,7 @@ bool GeometryEditor::render_geometry(VkCommandBuffer cmdbuf,
     buffer_info.offset = vertex_mat_id * materials_stride;
     buffer_info.range  = materials_stride;
 
-    push_descriptor(cmdbuf, Sculptor::material_layout,
+    push_descriptor(cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, Sculptor::material_layout,
                     0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, buffer_info);
 
     patch_geometry.render_vertices(cmdbuf);
@@ -1719,7 +1720,7 @@ bool GeometryEditor::render_grid(VkCommandBuffer cmdbuf,
     buffer_info.offset = grid_mat_id * materials_stride;
     buffer_info.range  = materials_stride;
 
-    push_descriptor(cmdbuf, Sculptor::material_layout,
+    push_descriptor(cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, Sculptor::material_layout,
                     0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, buffer_info);
 
     const VkDeviceSize vb_offset = image_idx * sub_buf_stride;
