@@ -285,7 +285,7 @@ bool GeometryEditor::alloc_view_resources(View*     dst_view,
             0, // height
             VK_FORMAT_UNDEFINED,
             1, // mip_levels
-            VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT,
+            VK_IMAGE_ASPECT_DEPTH_BIT,
             VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
             Usage::device_only
         };
