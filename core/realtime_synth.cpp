@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2021-2025 Chris Dragan
 
 #include "realtime_synth.h"
+
 #include "d_printf.h"
 #include "minivulkan.h"
 #include "mstdc.h"
@@ -834,35 +835,38 @@ static void process_events(uint32_t start_samples, uint32_t end_samples)
     }
 }
 
+// TODO switch to buffer barriers
 static void memory_barrier(VkAccessFlags        dst_access,
                            VkPipelineStageFlags dst_stage)
 {
-    static VkAccessFlags        src_access = 0;
-    static VkPipelineStageFlags src_stage  = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
-
-    static VkMemoryBarrier barrier = {
-        VK_STRUCTURE_TYPE_MEMORY_BARRIER,
-        nullptr,
-        0,
-        0
+    static VkMemoryBarrier2 barrier = {
+        VK_STRUCTURE_TYPE_MEMORY_BARRIER_2,
+        nullptr, // pNext
+        VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
+        VK_ACCESS_2_NONE,
+        VK_PIPELINE_STAGE_2_NONE,
+        VK_ACCESS_2_NONE
     };
 
-    barrier.srcAccessMask = src_access;
+    barrier.dstStageMask  = dst_stage;
     barrier.dstAccessMask = dst_access;
 
-    vkCmdPipelineBarrier(audio_cmd_buf,
-                         src_stage,
-                         dst_stage,
-                         0,             // dependencyFlags
-                         1,             // memoryBarrierCount
-                         &barrier,
-                         0,             // bufferMemoryBarrierCount
-                         nullptr,       // pBufferMemoryBarriers
-                         0,             // imageMemoryBarrierCount
-                         nullptr);      // pImageMemoryBarriers
+    static const VkDependencyInfo dependency_info = {
+        VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+        nullptr,    // pNext
+        0,          // dependecyFlags
+        1,          // memoryBarrierCount,
+        &barrier,   // pMemoryBarriers
+        0,          // bufferMemoryBarrierCount
+        nullptr,    // pBufferMemoryBarriers
+        0,          // imageMemoryBarrierCount
+        nullptr     // pImageMemoryBarriers
+    };
 
-    src_access = dst_access;
-    src_stage  = dst_stage;
+    vkCmdPipelineBarrier2(audio_cmd_buf, &dependency_info);
+
+    barrier.srcStageMask  = dst_stage;
+    barrier.srcAccessMask = dst_access;
 }
 
 struct PushDescriptorInfo {

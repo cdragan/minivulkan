@@ -31,7 +31,8 @@ static constexpr uint32_t no_queue_family = ~0u;
     X(_16b_storage_features,   &vk_8b_storage_features,    VkPhysicalDevice16BitStorageFeatures,      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_16BIT_STORAGE_FEATURES)       \
     X(_maintenance4_features,  &vk_16b_storage_features,   VkPhysicalDeviceMaintenance4Features,      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_4_FEATURES)       \
     X(_dyn_rendering_features, &vk_maintenance4_features,  VkPhysicalDeviceDynamicRenderingFeatures,  VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES)   \
-    X(_features,               &vk_dyn_rendering_features, VkPhysicalDeviceFeatures2,                 VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2)
+    X(_sync_2_features,        &vk_dyn_rendering_features, VkPhysicalDeviceSynchronization2Features,  VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SYNCHRONIZATION_2_FEATURES)   \
+    X(_features,               &vk_sync_2_features,        VkPhysicalDeviceFeatures2,                 VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2)
 
 #define X(set, prev, type, tag) extern type vk##set;
 FEATURE_SETS

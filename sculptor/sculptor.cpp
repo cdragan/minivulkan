@@ -4,6 +4,7 @@
 #include "sculptor_materials.h"
 #include "sculptor_geom_edit.h"
 
+#include "../core/barrier.h"
 #include "../core/d_printf.h"
 #include "../core/gui.h"
 #include "../core/gui_imgui.h"
@@ -38,6 +39,7 @@ uint32_t check_device_features()
 {
     uint32_t missing_features = 0;
 
+    missing_features += check_feature(&vk_sync_2_features.synchronization2);
     missing_features += check_feature(&vk_features.features.tessellationShader);
     missing_features += check_feature(&vk_features.features.fillModeNonSolid);
     missing_features += check_feature(&vk_dyn_rendering_features.dynamicRendering);
@@ -229,24 +231,26 @@ bool draw_frame(uint32_t image_idx, uint64_t time_ms, VkFence queue_fence, uint3
         return false;
 
     static const Image::Transition color_att_init = {
-        VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-        0,
-        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-        VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+        VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
+        VK_ACCESS_2_NONE,
+        VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+        VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
         VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
     };
-    image.set_image_layout(buf, color_att_init);
+    image.barrier(color_att_init);
 
     static const Image::Transition depth_init = {
-        VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-        0,
-        VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT,
-        VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT,
+        VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
+        VK_ACCESS_2_NONE,
+        VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT,
+        VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT | VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT,
         VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL
     };
 
     if (vk_depth_buffers[image_idx].layout != VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
-        vk_depth_buffers[image_idx].set_image_layout(buf, depth_init);
+        vk_depth_buffers[image_idx].barrier(depth_init);
+
+    send_barrier(buf);
 
     for (Sculptor::Editor* editor : editors)
         if (editor->enabled && ! editor->draw_frame(buf, image_idx))
@@ -256,13 +260,15 @@ bool draw_frame(uint32_t image_idx, uint64_t time_ms, VkFence queue_fence, uint3
         return false;
 
     static const Image::Transition color_att_present = {
-        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-        VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
-        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-        0,
+        VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+        VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+        VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+        VK_ACCESS_2_NONE,
         VK_IMAGE_LAYOUT_PRESENT_SRC_KHR
     };
-    image.set_image_layout(buf, color_att_present);
+    image.barrier(color_att_present);
+
+    send_barrier(buf);
 
     VkResult res;
 
@@ -270,7 +276,7 @@ bool draw_frame(uint32_t image_idx, uint64_t time_ms, VkFence queue_fence, uint3
     if (res != VK_SUCCESS)
         return false;
 
-    static const VkPipelineStageFlags dst_stage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+    static const VkPipelineStageFlags dst_stage = VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT;
 
     static VkSubmitInfo submit_info = {
         VK_STRUCTURE_TYPE_SUBMIT_INFO,

@@ -122,7 +122,7 @@
     X(vkCmdSetScissor) \
     X(vkCmdDraw) \
     X(vkCmdDrawIndexed) \
-    X(vkCmdPipelineBarrier) \
+    X(vkCmdPipelineBarrier2) \
     X(vkCmdFillBuffer) \
     X(vkCmdCopyBuffer) \
     X(vkCmdCopyImage) \
@@ -229,7 +229,7 @@ enum e_device_functions {
 #define vkCmdSetScissor                           SELECT_VK_FUNCTION(device,   vkCmdSetScissor)
 #define vkCmdDraw                                 SELECT_VK_FUNCTION(device,   vkCmdDraw)
 #define vkCmdDrawIndexed                          SELECT_VK_FUNCTION(device,   vkCmdDrawIndexed)
-#define vkCmdPipelineBarrier                      SELECT_VK_FUNCTION(device,   vkCmdPipelineBarrier)
+#define vkCmdPipelineBarrier2                     SELECT_VK_FUNCTION(device,   vkCmdPipelineBarrier2)
 #define vkCmdFillBuffer                           SELECT_VK_FUNCTION(device,   vkCmdFillBuffer)
 #define vkCmdCopyBuffer                           SELECT_VK_FUNCTION(device,   vkCmdCopyBuffer)
 #define vkCmdCopyImage                            SELECT_VK_FUNCTION(device,   vkCmdCopyImage)

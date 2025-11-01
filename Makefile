@@ -117,6 +117,7 @@ lib_src_files += core/suballoc.cpp
 lib_src_files += core/vmath.cpp
 lib_src_files += core/vk_props.cpp
 
+threed_src_files += core/barrier.cpp
 threed_src_files += core/host_filler.cpp
 threed_src_files += core/memory_heap.cpp
 threed_src_files += core/minivulkan.cpp

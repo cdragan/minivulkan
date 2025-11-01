@@ -96,14 +96,14 @@ class Image: public Resource {
         void free();
 
         struct Transition {
-            VkPipelineStageFlags src_stage;
-            VkAccessFlags        src_access;
-            VkPipelineStageFlags dest_stage;
-            VkAccessFlags        dest_access;
-            VkImageLayout        new_layout;
+            VkPipelineStageFlags2 src_stage;
+            VkAccessFlags2        src_access;
+            VkPipelineStageFlags2 dest_stage;
+            VkAccessFlags2        dest_access;
+            VkImageLayout         new_layout;
         };
 
-        void set_image_layout(VkCommandBuffer buf, const Transition& transition);
+        void barrier(const Transition& transition);
 
         // Used with swapchains
         void set_image(VkImage new_image) {
@@ -149,6 +149,15 @@ class Buffer: public Resource {
         bool flush(VkDeviceSize idx, VkDeviceSize stride);
         bool invalidate() { return invalidate_whole(); }
         void free(); // GUI only
+
+        struct Transition {
+            VkPipelineStageFlags2 src_stage;
+            VkAccessFlags2        src_access;
+            VkPipelineStageFlags2 dest_stage;
+            VkAccessFlags2        dest_access;
+        };
+
+        void barrier(const Transition& transition);
 
     private:
         VkBuffer     buffer = VK_NULL_HANDLE;

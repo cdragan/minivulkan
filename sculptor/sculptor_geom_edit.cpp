@@ -4,6 +4,7 @@
 #include "sculptor_geom_edit.h"
 #include "sculptor_geometry.h"
 #include "sculptor_materials.h"
+#include "../core/barrier.h"
 #include "../core/d_printf.h"
 #include "../core/gui_imgui.h"
 #include "../core/load_png.h"
@@ -1340,10 +1341,10 @@ static VkRenderingInfo rendering_info = {
 };
 
 static const Image::Transition render_viewport_layout = {
-    VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-    0,
-    VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-    VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+    VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
+    VK_ACCESS_2_NONE,
+    VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+    VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
     VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
 };
 
@@ -1353,18 +1354,20 @@ bool GeometryEditor::draw_geometry_view(VkCommandBuffer cmdbuf,
 {
     Resources& res = dst_view.res[image_idx];
 
-    res.color.set_image_layout(cmdbuf, render_viewport_layout);
+    res.color.barrier(render_viewport_layout);
 
     static const Image::Transition depth_init = {
-        VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-        0,
-        VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT,
-        VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT,
+        VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
+        VK_ACCESS_2_NONE,
+        VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT,
+        VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT | VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT,
         VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL
     };
 
     if (res.depth.layout != VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
-        res.depth.set_image_layout(cmdbuf, depth_init);
+        res.depth.barrier(depth_init);
+
+    send_barrier(cmdbuf);
 
     color_att.imageView  = res.color.get_view();
     color_att.clearValue = make_clear_color(0.2f, 0.2f, 0.2f, 1);
@@ -1395,13 +1398,15 @@ bool GeometryEditor::draw_geometry_view(VkCommandBuffer cmdbuf,
     vkCmdEndRendering(cmdbuf);
 
     static const Image::Transition gui_image_layout = {
-        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-        VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
-        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-        VK_ACCESS_SHADER_READ_BIT,
+        VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+        VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+        VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+        VK_ACCESS_2_SHADER_READ_BIT,
         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
     };
-    res.color.set_image_layout(cmdbuf, gui_image_layout);
+    res.color.barrier(gui_image_layout);
+
+    send_barrier(cmdbuf);
 
     return true;
 }
@@ -1412,7 +1417,8 @@ bool GeometryEditor::draw_selection_feedback(VkCommandBuffer cmdbuf,
 {
     Resources& res = dst_view.res[image_idx];
 
-    res.select_feedback.set_image_layout(cmdbuf, render_viewport_layout);
+    res.select_feedback.barrier(render_viewport_layout);
+    send_barrier(cmdbuf);
 
     assert(res.depth.layout == VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
 
@@ -1428,24 +1434,26 @@ bool GeometryEditor::draw_selection_feedback(VkCommandBuffer cmdbuf,
     vkCmdEndRendering(cmdbuf);
 
     static const Image::Transition transfer_src_image_layout = {
-        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-        VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
-        VK_PIPELINE_STAGE_TRANSFER_BIT,
-        VK_ACCESS_TRANSFER_READ_BIT,
+        VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+        VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+        VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+        VK_ACCESS_2_TRANSFER_READ_BIT,
         VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL
     };
-    res.select_feedback.set_image_layout(cmdbuf, transfer_src_image_layout);
+    res.select_feedback.barrier(transfer_src_image_layout);
 
     if (res.host_select_feedback.layout != VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL) {
         static const Image::Transition transfer_dst_image_layout = {
-            VK_PIPELINE_STAGE_TRANSFER_BIT,
-            0,
-            VK_PIPELINE_STAGE_TRANSFER_BIT,
-            VK_ACCESS_TRANSFER_WRITE_BIT,
+            VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+            VK_ACCESS_2_NONE,
+            VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+            VK_ACCESS_2_TRANSFER_WRITE_BIT,
             VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL
         };
-        res.host_select_feedback.set_image_layout(cmdbuf, transfer_dst_image_layout);
+        res.host_select_feedback.barrier(transfer_dst_image_layout);
     }
+
+    send_barrier(cmdbuf);
 
     res.selection_pending = true;
 

@@ -3,6 +3,7 @@
 
 #include "sculptor_geometry.h"
 
+#include "../core/barrier.h"
 #include "../core/mstdc.h"
 
 constexpr uint32_t tess_level           = 3; // TODO
@@ -92,59 +93,28 @@ uint32_t Sculptor::Geometry::get_face_state(uint32_t face_id, const Face& face) 
     return obj_faces[face_id].selected ? 2 : 0;
 }
 
-static void buffer_barrier(VkCommandBuffer      cmd_buf,
-                           VkBuffer             buffer,
-                           VkPipelineStageFlags src_stage_mask,
-                           VkAccessFlags        src_access,
-                           VkPipelineStageFlags dst_stage_mask,
-                           VkAccessFlags        dst_access)
-{
-    static VkBufferMemoryBarrier barrier = {
-        VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER,
-        nullptr,
-        0,
-        0,
-        0,
-        0,
-        VK_NULL_HANDLE,
-        0,
-        VK_WHOLE_SIZE
-    };
-
-    barrier.srcAccessMask = src_access;
-    barrier.dstAccessMask = dst_access;
-    barrier.buffer        = buffer;
-
-    vkCmdPipelineBarrier(cmd_buf,
-                         src_stage_mask,
-                         dst_stage_mask,
-                         0,             // dependencyFlags
-                         0,             // memoryBarrierCount
-                         nullptr,       // pMemoryBarriers
-                         1,
-                         &barrier,
-                         0,             // imageMemoryBarrierCount
-                         nullptr);      // pImageMemoryBarriers
-}
-
 bool Sculptor::Geometry::send_to_gpu(VkCommandBuffer cmd_buf)
 {
     if ( ! dirty)
         return true;
 
-    buffer_barrier(cmd_buf,
-                   gpu_buffer.get_buffer(),
-                   VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT,
-                   VK_ACCESS_MEMORY_READ_BIT,
-                   VK_PIPELINE_STAGE_TRANSFER_BIT,
-                   VK_ACCESS_TRANSFER_WRITE_BIT);
+    static const Buffer::Transition gpu_buffer_graphics_to_transfer = {
+        VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT,
+        VK_ACCESS_2_MEMORY_READ_BIT,
+        VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+        VK_ACCESS_2_TRANSFER_WRITE_BIT
+    };
+    gpu_buffer.barrier(gpu_buffer_graphics_to_transfer);
 
-    buffer_barrier(cmd_buf,
-                   host_buffer.get_buffer(),
-                   VK_PIPELINE_STAGE_HOST_BIT,
-                   VK_ACCESS_HOST_WRITE_BIT,
-                   VK_PIPELINE_STAGE_TRANSFER_BIT,
-                   VK_ACCESS_TRANSFER_READ_BIT);
+    static const Buffer::Transition host_buffer_host_to_transfer = {
+        VK_PIPELINE_STAGE_2_HOST_BIT,
+        VK_ACCESS_2_HOST_WRITE_BIT,
+        VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+        VK_ACCESS_2_TRANSFER_READ_BIT
+    };
+    host_buffer.barrier(host_buffer_host_to_transfer);
+
+    send_barrier(cmd_buf);
 
     last_buffer = (last_buffer + 1) % num_host_copies;
 
@@ -249,22 +219,26 @@ bool Sculptor::Geometry::send_to_gpu(VkCommandBuffer cmd_buf)
         vkCmdCopyBuffer(cmd_buf, host_buffer.get_buffer(), gpu_buffer.get_buffer(), 1, &copy_region);
     }
 
-    buffer_barrier(cmd_buf,
-                   gpu_buffer.get_buffer(),
-                   VK_PIPELINE_STAGE_TRANSFER_BIT,
-                   VK_ACCESS_TRANSFER_WRITE_BIT,
-                   VK_PIPELINE_STAGE_VERTEX_INPUT_BIT |
-                     VK_PIPELINE_STAGE_VERTEX_SHADER_BIT |
-                     VK_PIPELINE_STAGE_TESSELLATION_CONTROL_SHADER_BIT |
-                     VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-                   VK_ACCESS_MEMORY_READ_BIT);
+    static const Buffer::Transition gpu_buffer_transfer_to_graphics = {
+        VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+        VK_ACCESS_2_TRANSFER_WRITE_BIT,
+        VK_PIPELINE_STAGE_2_VERTEX_INPUT_BIT |
+            VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT |
+            VK_PIPELINE_STAGE_2_TESSELLATION_CONTROL_SHADER_BIT |
+            VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+        VK_ACCESS_2_MEMORY_READ_BIT
+    };
+    gpu_buffer.barrier(gpu_buffer_transfer_to_graphics);
 
-    buffer_barrier(cmd_buf,
-                   host_buffer.get_buffer(),
-                   VK_PIPELINE_STAGE_TRANSFER_BIT,
-                   VK_ACCESS_TRANSFER_READ_BIT,
-                   VK_PIPELINE_STAGE_HOST_BIT,
-                   VK_ACCESS_HOST_WRITE_BIT);
+    static const Buffer::Transition host_buffer_transfer_to_host = {
+        VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+        VK_ACCESS_2_TRANSFER_READ_BIT,
+        VK_PIPELINE_STAGE_2_HOST_BIT,
+        VK_ACCESS_2_HOST_WRITE_BIT
+    };
+    host_buffer.barrier(host_buffer_transfer_to_host);
+
+    send_barrier(cmd_buf);
 
     dirty = false;
 

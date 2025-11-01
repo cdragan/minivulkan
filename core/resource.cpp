@@ -3,6 +3,7 @@
 
 #include "resource.h"
 
+#include "barrier.h"
 #include "d_printf.h"
 #include "memory_heap.h"
 #include "minivulkan.h"
@@ -115,7 +116,7 @@ bool Image::allocate(const ImageInfo& image_info, Description desc)
     create_info.usage         = image_info.usage;
 
     if (image_info.heap_usage == Usage::transient && mem_mgr.has_transient_heap())
-        create_info.usage = VK_IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT;
+        create_info.usage |= VK_IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT;
 
     VkResult res = CHK(vkCreateImage(vk_dev, &create_info, nullptr, &image));
     if (res != VK_SUCCESS)
@@ -199,41 +200,39 @@ bool Image::allocate(const ImageInfo& image_info, Description desc)
     return true;
 }
 
-void Image::set_image_layout(VkCommandBuffer buf, const Transition& transition)
+void Image::barrier(const Transition& transition)
 {
-    static VkImageMemoryBarrier img_barrier = {
-        VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+    static VkImageMemoryBarrier2 barrier = {
+        VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
         nullptr,
-        0,
-        0,
+        VK_PIPELINE_STAGE_2_NONE,
+        VK_ACCESS_2_NONE,
+        VK_PIPELINE_STAGE_2_NONE,
+        VK_ACCESS_2_NONE,
         VK_IMAGE_LAYOUT_UNDEFINED,
-        VK_IMAGE_LAYOUT_UNDEFINED
+        VK_IMAGE_LAYOUT_UNDEFINED,
+        0,
+        0,
+        VK_NULL_HANDLE,
+        { }
     };
 
-    img_barrier.oldLayout     = layout;
-    img_barrier.newLayout     = transition.new_layout;
-    img_barrier.srcAccessMask = transition.src_access;
-    img_barrier.dstAccessMask = transition.dest_access;
+    barrier.srcStageMask                = transition.src_stage;
+    barrier.srcAccessMask               = transition.src_access;
+    barrier.dstStageMask                = transition.dest_stage;
+    barrier.dstAccessMask               = transition.dest_access;
+    barrier.oldLayout                   = layout;
+    barrier.newLayout                   = transition.new_layout;
+    barrier.srcQueueFamilyIndex         = graphics_family_index;
+    barrier.dstQueueFamilyIndex         = graphics_family_index;
+    barrier.image                       = image;
+    barrier.subresourceRange.aspectMask = aspect;
+    barrier.subresourceRange.levelCount = 1;
+    barrier.subresourceRange.layerCount = 1;
+
+    add_barrier(barrier);
 
     layout = transition.new_layout;
-
-    img_barrier.srcQueueFamilyIndex         = graphics_family_index;
-    img_barrier.dstQueueFamilyIndex         = graphics_family_index;
-    img_barrier.image                       = image;
-    img_barrier.subresourceRange.aspectMask = aspect;
-    img_barrier.subresourceRange.levelCount = 1;
-    img_barrier.subresourceRange.layerCount = 1;
-
-    vkCmdPipelineBarrier(buf,
-                         transition.src_stage,
-                         transition.dest_stage,
-                         0,
-                         0,
-                         nullptr,
-                         0,
-                         nullptr,
-                         1,
-                         &img_barrier);
 }
 
 void Image::free()
@@ -340,6 +339,33 @@ bool Buffer::flush(VkDeviceSize idx, VkDeviceSize stride)
     return flush_range(idx * stride, stride);
 }
 
+void Buffer::barrier(const Transition& transition)
+{
+    static VkBufferMemoryBarrier2 barrier = {
+        VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
+        nullptr,
+        VK_PIPELINE_STAGE_2_NONE,
+        VK_ACCESS_2_NONE,
+        VK_PIPELINE_STAGE_2_NONE,
+        VK_ACCESS_2_NONE,
+        0,
+        0,
+        VK_NULL_HANDLE,
+        0,
+        VK_WHOLE_SIZE
+    };
+
+    barrier.srcStageMask        = transition.src_stage;
+    barrier.srcAccessMask       = transition.src_access;
+    barrier.dstStageMask        = transition.dest_stage;
+    barrier.dstAccessMask       = transition.dest_access;
+    barrier.srcQueueFamilyIndex = graphics_family_index; // TODO pass in arg
+    barrier.dstQueueFamilyIndex = graphics_family_index; // TODO pass in arg
+    barrier.buffer              = buffer;
+
+    add_barrier(barrier);
+}
+
 bool ImageWithHostCopy::allocate(const ImageInfo& image_info, Description desc)
 {
     if ( ! Image::allocate(image_info, desc))
@@ -365,23 +391,24 @@ bool ImageWithHostCopy::send_to_gpu(VkCommandBuffer cmdbuf)
         return false;
 
     static const Image::Transition transfer_src_layout = {
-        VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-        0,
-        VK_PIPELINE_STAGE_TRANSFER_BIT,
-        VK_ACCESS_TRANSFER_READ_BIT,
+        VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
+        VK_ACCESS_2_NONE,
+        VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+        VK_ACCESS_2_TRANSFER_READ_BIT,
         VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL
     };
 
     static const Image::Transition transfer_dst_layout = {
-        VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-        0,
-        VK_PIPELINE_STAGE_TRANSFER_BIT,
-        VK_ACCESS_TRANSFER_WRITE_BIT,
+        VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
+        VK_ACCESS_2_NONE,
+        VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+        VK_ACCESS_2_TRANSFER_WRITE_BIT,
         VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL
     };
 
-    set_image_layout(cmdbuf, transfer_dst_layout);
-    host_image.set_image_layout(cmdbuf, transfer_src_layout);
+    barrier(transfer_dst_layout);
+    host_image.barrier(transfer_src_layout);
+    send_barrier(cmdbuf);
 
     static VkImageCopy region = {
         { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
@@ -403,14 +430,15 @@ bool ImageWithHostCopy::send_to_gpu(VkCommandBuffer cmdbuf)
                    &region);
 
     static const Image::Transition texture_layout = {
-        VK_PIPELINE_STAGE_TRANSFER_BIT,
-        VK_ACCESS_TRANSFER_WRITE_BIT,
-        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-        VK_ACCESS_SHADER_READ_BIT,
+        VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+        VK_ACCESS_2_TRANSFER_WRITE_BIT,
+        VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+        VK_ACCESS_2_SHADER_READ_BIT,
         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
     };
 
-    set_image_layout(cmdbuf, texture_layout);
+    barrier(texture_layout);
+    send_barrier(cmdbuf);
 
     dirty = false;
 
