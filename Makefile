@@ -380,7 +380,8 @@ else
     # For compatibility with MSVC
     LDFLAGS_NODEFAULTLIB =
 
-    LINK = $(CXX)
+    LINK   = $(CXX)
+    LINK_C = $(CC)
 
     COMPILER_OUTPUT = -o $1
     LINKER_OUTPUT   = -o $1
@@ -549,6 +550,8 @@ endef
 
 ifeq ($(UNAME), Windows)
 $(foreach target,$(gui_targets) $(nogui_targets),$(call GUI_PATH,$(target))): SUBSYSTEMFLAGS = -subsystem:windows
+else
+$(foreach target,$(nogui_targets),$(call GUI_PATH,$(target))): LINK = $(LINK_C)
 endif
 
 $(foreach target,$(gui_targets),$(call GUI_PATH,$(target))): SUBSYSTEMFLAGS = $(LDFLAGS_gui)
