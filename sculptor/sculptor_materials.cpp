@@ -9,6 +9,8 @@
 #include "sculptor_shaders.h"
 #include "../core/shaders.h"
 
+#include <iterator>
+
 VkDescriptorSetLayout Sculptor::desc_set_layout;
 VkPipelineLayout      Sculptor::material_layout;
 
@@ -61,7 +63,7 @@ bool Sculptor::create_material_layouts()
             VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
             nullptr,
             VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT, // flags
-            mstd::array_size(per_object_set),
+            std::size(per_object_set),
             per_object_set
         };
 
@@ -139,7 +141,7 @@ bool Sculptor::create_material(const MaterialInfo& mat_info, VkPipeline* pipelin
     };
 
     uint32_t num_stages;
-    for (num_stages = 0; num_stages < mstd::array_size(mat_info.shader_ids); num_stages++) {
+    for (num_stages = 0; num_stages < std::size(mat_info.shader_ids); num_stages++) {
         uint8_t* const shader = mat_info.shader_ids[num_stages];
         if ( ! shader)
             break;
@@ -165,7 +167,7 @@ bool Sculptor::create_material(const MaterialInfo& mat_info, VkPipeline* pipelin
         nullptr // pVertexAttributeDescriptions
     };
     vertex_input_state.vertexBindingDescriptionCount   =
-        mat_info.vertex_stride ? mstd::array_size(vertex_bindings) : 0U;
+        mat_info.vertex_stride ? std::size(vertex_bindings) : 0U;
     vertex_input_state.pVertexBindingDescriptions      =
         mat_info.vertex_stride ? vertex_bindings : nullptr;
     vertex_input_state.vertexAttributeDescriptionCount = mat_info.num_vertex_attributes;
@@ -280,7 +282,7 @@ bool Sculptor::create_material(const MaterialInfo& mat_info, VkPipeline* pipelin
         VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
         nullptr,
         0,          // flags
-        mstd::array_size(dynamic_states),
+        std::size(dynamic_states),
         dynamic_states
     };
 

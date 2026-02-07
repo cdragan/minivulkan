@@ -13,6 +13,8 @@
 #include "sculptor_shaders.h"
 #include "../core/shaders.h"
 
+#include <algorithm>
+#include <iterator>
 #include <stdio.h>
 
 #include "toolbar.png.h"
@@ -480,7 +482,7 @@ bool GeometryEditor::create_materials()
         },
         vertex_attributes,
         0.0f, // depth_bias
-        mstd::array_size(vertex_attributes),
+        std::size(vertex_attributes),
         sizeof(Sculptor::Geometry::Vertex),
         VK_FORMAT_UNDEFINED,
         VK_PRIMITIVE_TOPOLOGY_PATCH_LIST,
@@ -548,7 +550,7 @@ bool GeometryEditor::create_materials()
         },
         vertex_attributes,
         0.0f, // depth_bias
-        mstd::array_size(vertex_attributes),
+        std::size(vertex_attributes),
         sizeof(Sculptor::Geometry::Vertex),
         VK_FORMAT_UNDEFINED,
         VK_PRIMITIVE_TOPOLOGY_LINE_LIST,
@@ -656,7 +658,7 @@ void GeometryEditor::gui_status_bar()
             };
 
             const unsigned view_idx = static_cast<unsigned>(view.view_type);
-            assert(view_idx < mstd::array_size(view_names));
+            assert(view_idx < std::size(view_names));
 
             ImGui::Text("%s", mode_names[static_cast<unsigned>(mode)]);
             ImGui::Separator();
@@ -757,15 +759,15 @@ void GeometryEditor::handle_mouse_actions(const UserInput& input, bool view_hove
                         case ViewType::free_moving:
                             camera.yaw   += rot_scale_factor * input.mouse_pos_delta.x;
                             camera.pitch += rot_scale_factor * input.mouse_pos_delta.y;
-                            camera.pitch  = mstd::min(mstd::max(camera.pitch, -90.0f), 90.0f);
+                            camera.pitch  = std::min(std::max(camera.pitch, -90.0f), 90.0f);
                             break;
 
                         default: {
                             // TODO switch to free_moving and apply rotation
                             constexpr float view_bounds        = 1.1f;
                             const     float ortho_scale_factor = static_cast<float>(view.height) * 0.0000001f;
-                            camera.pos.x = mstd::min(mstd::max(camera.pos.x - ortho_scale_factor * input.mouse_pos_delta.x, -view_bounds), view_bounds);
-                            camera.pos.y = mstd::min(mstd::max(camera.pos.y + ortho_scale_factor * input.mouse_pos_delta.y, -view_bounds), view_bounds);
+                            camera.pos.x = std::min(std::max(camera.pos.x - ortho_scale_factor * input.mouse_pos_delta.x, -view_bounds), view_bounds);
+                            camera.pos.y = std::min(std::max(camera.pos.y + ortho_scale_factor * input.mouse_pos_delta.y, -view_bounds), view_bounds);
                             break;
                         }
                     }

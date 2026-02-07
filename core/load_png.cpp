@@ -123,7 +123,7 @@ static void read_png_from_memory(png_structp png_ptr,
     if (io_ptr) {
         PngInputData* input_data = (PngInputData*)io_ptr;
 
-        const size_t read_size = mstd::min(bytes_to_read, input_data->size_left);
+        const size_t read_size = std::min(bytes_to_read, input_data->size_left);
 
         memcpy(out_bytes, input_data->bytes, read_size);
 

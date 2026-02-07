@@ -16,6 +16,7 @@
 #include "sculptor_shaders.h"
 #include "../core/shaders.h"
 
+#include <iterator>
 #include <math.h>
 #include <stdio.h>
 
@@ -33,7 +34,7 @@ static Sculptor::Editor* const editors[] = {
 };
 
 // Need +1 for ImGui full window itself
-const unsigned gui_num_descriptors = (mstd::array_size(editors) + 1) * max_swapchain_size;
+const unsigned gui_num_descriptors = (std::size(editors) + 1) * max_swapchain_size;
 
 uint32_t check_device_features()
 {

@@ -6,6 +6,8 @@
 #include "../core/barrier.h"
 #include "../core/mstdc.h"
 
+#include <iterator>
+
 constexpr uint32_t tess_level           = 3; // TODO
 
 constexpr uint32_t max_vertices         = 65536;
@@ -446,7 +448,7 @@ void Sculptor::Geometry::set_cube()
 
     constexpr int16_t multiplier = 128;
 
-    for (unsigned i = 0; i < mstd::array_size(cube_vertices); i += 3)
+    for (unsigned i = 0; i < std::size(cube_vertices); i += 3)
         add_vertex(cube_vertices[i] * multiplier,
                    cube_vertices[i + 1] * multiplier,
                    cube_vertices[i + 2] * multiplier);
@@ -468,7 +470,7 @@ void Sculptor::Geometry::set_cube()
         52, 53, 54, 55
     };
 
-    for (unsigned i = 0; i < mstd::array_size(cube_edges); i += 4)
+    for (unsigned i = 0; i < std::size(cube_edges); i += 4)
         add_edge(cube_edges[i],
                  cube_edges[i + 1],
                  cube_edges[i + 2],
@@ -492,9 +494,9 @@ void Sculptor::Geometry::set_cube()
         46, 45, 50, 49
     };
 
-    assert(mstd::array_size(cube_face_edges) == mstd::array_size(cube_face_vertices));
+    assert(std::size(cube_face_edges) == std::size(cube_face_vertices));
 
-    for (unsigned i = 0; i < mstd::array_size(cube_face_edges); i += 4)
+    for (unsigned i = 0; i < std::size(cube_face_edges); i += 4)
         add_face(cube_face_edges[i],
                  cube_face_edges[i + 1],
                  cube_face_edges[i + 2],

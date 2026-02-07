@@ -4,6 +4,7 @@
 #include "vmath.h"
 #include "mstdc.h"
 #include "vecfloat.h"
+#include <iterator>
 #include <math.h>
 #include <stdio.h>
 
@@ -230,7 +231,7 @@ int main()
     {
         vmath::vec2 v;
 
-        static_assert(mstd::array_size(v.data) == 2);
+        static_assert(std::size(v.data) == 2);
         static_assert(sizeof(v.data) == 8);
     }
 
@@ -406,7 +407,7 @@ int main()
     {
         vmath::vec3 v;
 
-        static_assert(mstd::array_size(v.data) == 3);
+        static_assert(std::size(v.data) == 3);
         static_assert(sizeof(v.data) == 12);
     }
 
@@ -624,7 +625,7 @@ int main()
     {
         vmath::vec4 v;
 
-        static_assert(mstd::array_size(v.data) == 4);
+        static_assert(std::size(v.data) == 4);
         static_assert(sizeof(v.data) == 16);
     }
 
@@ -1092,7 +1093,7 @@ int main()
     {
         vmath::mat4 m;
 
-        static_assert(mstd::array_size(m.data) == 16);
+        static_assert(std::size(m.data) == 16);
         static_assert(sizeof(m) == 64);
     }
 

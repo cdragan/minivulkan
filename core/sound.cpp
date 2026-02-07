@@ -7,6 +7,8 @@
 #include "vmath.h"
 #include "vecfloat.h"
 
+#include <iterator>
+
 #ifdef __APPLE__
 #   define NEED_WAV_HEADER 1
 #else
@@ -103,5 +105,5 @@ bool init_sound()
         out.right = value;
     }
 
-    return load_sound_track(audio_buf, mstd::array_size(audio_buf));
+    return load_sound_track(audio_buf, std::size(audio_buf));
 }

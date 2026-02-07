@@ -14,6 +14,8 @@
 #include "example_shaders.h"
 #include "../core/shaders.h"
 
+#include <iterator>
+
 const char app_name[] = "minivulkan example";
 
 constexpr float image_ratio = 0.0f;
@@ -157,7 +159,7 @@ static bool create_graphics_pipeline(const ShaderInfo& shader_info, VkPipeline* 
     };
 
     uint32_t num_stages = 0;
-    for (uint32_t i = 0; i < mstd::array_size(shader_info.shader_ids); i++) {
+    for (uint32_t i = 0; i < std::size(shader_info.shader_ids); i++) {
         uint8_t* const shader = shader_info.shader_ids[i];
         if ( ! shader)
             break;
@@ -178,7 +180,7 @@ static bool create_graphics_pipeline(const ShaderInfo& shader_info, VkPipeline* 
         VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
         nullptr,
         0,      // flags
-        mstd::array_size(vertex_bindings),
+        std::size(vertex_bindings),
         vertex_bindings,
         0,      // vertexAttributeDescriptionCount
         nullptr // pVertexAttributeDescriptions
@@ -291,7 +293,7 @@ static bool create_graphics_pipeline(const ShaderInfo& shader_info, VkPipeline* 
         VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
         nullptr,
         0,          // flags
-        mstd::array_size(dynamic_states),
+        std::size(dynamic_states),
         dynamic_states
     };
 
@@ -365,7 +367,7 @@ static bool create_simple_graphics_pipeline()
         sizeof(Vertex),
         0, // patch_control_points
         VK_POLYGON_MODE_FILL,
-        mstd::array_size(vertex_attributes),
+        std::size(vertex_attributes),
         vertex_attributes
     };
 
@@ -398,7 +400,7 @@ static bool create_patch_graphics_pipeline()
         sizeof(Vertex),
         16, // patch_control_points
         VK_POLYGON_MODE_FILL,
-        mstd::array_size(vertex_attributes),
+        std::size(vertex_attributes),
         vertex_attributes
     };
     if (what_geometry == geom_quadratic_patch) {
@@ -949,7 +951,7 @@ bool draw_frame(uint32_t image_idx, uint64_t time_ms, VkFence queue_fence, uint3
                            VK_PIPELINE_BIND_POINT_GRAPHICS,
                            vk_gr_pipeline_layout,
                            0, // set
-                           mstd::array_size(write_desc_sets),
+                           std::size(write_desc_sets),
                            write_desc_sets);
 
     constexpr uint32_t index_count =

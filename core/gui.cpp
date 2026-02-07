@@ -11,6 +11,8 @@
 
 #include "imgui_internal.h" // For checking pending events
 
+#include <iterator>
+
 float vk_surface_scale = 1.0f;
 
 static VkRenderPass  vk_gui_render_pass;
@@ -98,7 +100,7 @@ static bool create_render_pass(VkRenderPass* render_pass, GuiClear clear)
         VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO,
         nullptr,    // pNext
         0,          // flags
-        mstd::array_size(attachments),
+        std::size(attachments),
         attachments,
         1,          // subpassCount
         &subpass
@@ -135,7 +137,7 @@ static bool create_framebuffer(uint32_t image_idx)
         nullptr,
         0,                  // flags
         VK_NULL_HANDLE,     // renderPass
-        mstd::array_size(attachments),
+        std::size(attachments),
         attachments,
         0,                  // width
         0,                  // height
@@ -161,7 +163,7 @@ void resize_gui()
 {
     notify_gui_heap_freed();
 
-    for (uint32_t i = 0; i < mstd::array_size(vk_framebuffers); i++) {
+    for (uint32_t i = 0; i < std::size(vk_framebuffers); i++) {
         if (vk_framebuffers[i]) {
             VK_FUNCTION(vkDestroyFramebuffer)(vk_dev, vk_framebuffers[i], nullptr);
             vk_framebuffers[i] = VK_NULL_HANDLE;
@@ -192,7 +194,7 @@ static bool begin_gui_render_pass(VkCommandBuffer buf, uint32_t image_idx)
         VK_NULL_HANDLE,     // renderPass
         VK_NULL_HANDLE,     // framebuffer
         { },                // renderArea
-        mstd::array_size(clear_values),
+        std::size(clear_values),
         clear_values
     };
 
@@ -234,7 +236,7 @@ bool init_gui(GuiClear clear)
         nullptr,
         0,            // flags
         0,            // maxSets
-        mstd::array_size(pool_sizes),
+        std::size(pool_sizes),
         pool_sizes
     };
 

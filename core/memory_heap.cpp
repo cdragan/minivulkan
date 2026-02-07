@@ -8,6 +8,7 @@
 #include "mstdc.h"
 
 #include <assert.h>
+#include <iterator>
 
 MemoryAllocator mem_mgr;
 
@@ -24,7 +25,7 @@ static unsigned in_mb(VkDeviceSize size)
 bool MemoryHeap::allocate_heap(int req_memory_type, VkDeviceSize size)
 {
     assert(req_memory_type >= 0);
-    assert(req_memory_type <  static_cast<int>(mstd::array_size(vk_mem_props.memoryTypes)));
+    assert(req_memory_type <  static_cast<int>(std::size(vk_mem_props.memoryTypes)));
     assert(memory          == VK_NULL_HANDLE);
     assert(host_ptr        == nullptr);
     assert(heap_size       == 0);

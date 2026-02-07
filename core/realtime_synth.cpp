@@ -10,6 +10,8 @@
 #include "suballoc.h"
 #include "vecfloat.h"
 #include "vmath.h"
+
+#include <algorithm>
 #include <math.h>
 
 #include "synth_shaders.h"
@@ -415,8 +417,8 @@ namespace {
             }
         };
 
-        assert(mstd::array_size(shaders) == mstd::array_size(pipes));
-        assert(mstd::array_size(pipes) == num_synth_pipes);
+        assert(std::size(shaders) == std::size(pipes));
+        assert(std::size(pipes) == num_synth_pipes);
 
         for (uint32_t i = 0; i < num_synth_pipes; i++) {
 
@@ -441,7 +443,7 @@ namespace {
             };
 
             static const VkSpecializationInfo spec_constants = {
-                mstd::array_size(map_entries),
+                std::size(map_entries),
                 map_entries,
                 sizeof(spec_data),
                 &spec_data
@@ -827,7 +829,7 @@ static void process_events(uint32_t start_samples, uint32_t end_samples)
 
         const uint32_t delta_samples = (event.time >= start_samples) ? (event.time - start_samples) : 0;
 
-        assert(static_cast<uint32_t>(event.event) < mstd::array_size(event_handlers));
+        assert(static_cast<uint32_t>(event.event) < std::size(event_handlers));
         const EventHandler handler = event_handlers[static_cast<uint8_t>(event.event)];
         assert(handler);
 
@@ -1222,7 +1224,7 @@ static bool render_audio_buffer(StereoPtr<T, interleaved> stereo_ptr, uint32_t n
     const auto rendered_src = StereoPtr<T, interleaved>::from_buffer(buffers[output_buf]);
 
     if (remaining_samples) {
-        const uint32_t to_copy = mstd::min(remaining_samples, num_samples);
+        const uint32_t to_copy = std::min(remaining_samples, num_samples);
 
         copy_audio_data(stereo_ptr, rendered_src + consumed_samples, to_copy);
 
@@ -1239,7 +1241,7 @@ static bool render_audio_buffer(StereoPtr<T, interleaved> stereo_ptr, uint32_t n
     if ( ! render_audio<T, interleaved>(to_render))
         return false;
 
-    const uint32_t to_copy = mstd::min(to_render, num_samples);
+    const uint32_t to_copy = std::min(to_render, num_samples);
     copy_audio_data(stereo_ptr, rendered_src, to_copy);
 
     if (to_render > to_copy) {
