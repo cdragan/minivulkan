@@ -324,7 +324,7 @@ ifeq ($(UNAME), Windows)
     CFLAGS += -GR-
     CFLAGS += -TP -EHa-
     CFLAGS += -FS
-    CFLAGS += -std:c++17 -Zc:__cplusplus
+    CFLAGS += -std:c++20 -Zc:__cplusplus
 
     CFLAGS += -DImTextureID=ImU64
 
@@ -373,9 +373,9 @@ else
         CFLAGS += -O0 -g
     endif
 
-    CXXFLAGS += -x c++ -std=c++17 -fno-rtti -fno-exceptions
+    CXXFLAGS += -x c++ -std=c++20 -fno-rtti -fno-exceptions
 
-    OBJCXXFLAGS += -x objective-c++ -std=c++17
+    OBJCXXFLAGS += -x objective-c++ -std=c++20
 
     # For compatibility with MSVC
     LDFLAGS_NODEFAULTLIB =
