@@ -400,7 +400,10 @@ ifeq ($(UNAME), Linux)
         CFLAGS  += -DLINUX_USE_XCB
     endif
 
+    # Required for dlopen() for Vulkan loader
     LDFLAGS += -ldl
+    # Required for truncf()
+    LDFLAGS += -lm
 
     ifeq ($(debug), 0)
         STRIP = strip -R .note.* -R .comment -R .eh_frame*
