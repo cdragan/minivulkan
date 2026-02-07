@@ -12,6 +12,7 @@
 #include "vmath.h"
 
 #include <algorithm>
+#include <iterator>
 #include <math.h>
 
 #include "synth_shaders.h"

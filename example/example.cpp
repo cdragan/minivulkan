@@ -313,7 +313,7 @@ static bool create_graphics_pipeline(const ShaderInfo& shader_info, VkPipeline* 
         VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
         &rendering_info,
         0,              // flags
-        num_stages,
+        0,              // stageCount
         shader_stages,
         &vertex_input_state,
         &input_assembly_state,
@@ -331,7 +331,8 @@ static bool create_graphics_pipeline(const ShaderInfo& shader_info, VkPipeline* 
         -1              // basePipelineIndex
     };
 
-    pipeline_create_info.layout = vk_gr_pipeline_layout;
+    pipeline_create_info.layout     = vk_gr_pipeline_layout;
+    pipeline_create_info.stageCount = num_stages;
 
     const VkResult res = CHK(vkCreateGraphicsPipelines(vk_dev,
                                                        VK_NULL_HANDLE,
