@@ -520,7 +520,11 @@ ifeq ($(stdlib), 0)
     gui_targets :=
 endif
 
-default: $(gui_targets) $(nogui_targets)
+build: $(gui_targets) $(nogui_targets)
+
+default: build
+
+.PHONY: build
 
 define make_target_rule
 .PHONY: $1
