@@ -14,29 +14,8 @@
 
 int WINAPI WinMain(HINSTANCE hinstance, HINSTANCE hprev_instance, PSTR cmd_line, INT cmd_show);
 
-using PVFV = void (__cdecl*)();
-
-extern "C" {
-    #pragma const_seg(".CRT$XIA")
-    const PVFV __xi_a = nullptr;
-    #pragma const_seg(".CRT$XIZ")
-    const PVFV __xi_z = nullptr;
-    #pragma const_seg(".CRT$XCA")
-    const PVFV __xc_a = nullptr;
-    #pragma const_seg(".CRT$XCZ")
-    const PVFV __xc_z = nullptr;
-}
-
 int __stdcall WinMainCRTStartup()
 {
-    // Call C++ initializers
-    for (const PVFV* init = &__xi_a; init < &__xi_z; ++init)
-        if (*init)
-            (*init)();
-    for (const PVFV* init = &__xc_a; init < &__xc_z; ++init)
-        if (*init)
-            (*init)();
-
     ExitProcess(WinMain(nullptr, nullptr, nullptr, 0));
 }
 
