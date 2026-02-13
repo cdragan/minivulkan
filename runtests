@@ -18,8 +18,8 @@ echo "Using $JOBS jobs, arch: $(uname -m)"
 
 rm -rf Out
 
-make -j $JOBS -k
+make -j $JOBS debug=0 -k
 
 make -j $JOBS debug=1 -k
 
-make -j $JOBS debug=1 stdlib=1 test default
+make -j $JOBS debug=1 stdlib=1

@@ -16,7 +16,7 @@ endif
 # Default build flags
 
 # Debug vs release
-debug ?= 0
+debug ?= 1
 
 # Enable spirv shuffling, disable for debugging purposes
 spirv_shuffle ?= 1
@@ -31,15 +31,14 @@ else
     override stdlib := 1
 endif
 
-# Enable address sanitizer in debug builds
+# Enable address and undefined behavior sanitizer in debug builds
 ifneq ($(UNAME), Windows)
     # Disable sanitizers for nsight
     ifeq ($(spirv_opt), 0)
         sanitize =
     endif
-    # Use address sanitizer only in debug builds
     ifneq ($(debug), 0)
-        sanitize ?= address
+        sanitize ?= address,undefined
     endif
     sanitize ?=
 endif
@@ -64,6 +63,8 @@ endif
 
 default:
 
+.PHONY: default
+
 ##############################################################################
 # Directory where generated files are stored
 
@@ -72,10 +73,6 @@ out_dir_base ?= Out
 ifeq ($(UNAME), Windows)
     ifneq ($(stdlib), 0)
         out_dir_suffix = _stdlib
-    endif
-else
-    ifneq ($(sanitize),)
-        out_dir_suffix = _$(sanitize)
     endif
 endif
 
@@ -711,6 +708,8 @@ test: run_$1
 endef
 
 $(foreach test_name, $(tests), $(eval $(call DEFINE_TEST,$(test_name))))
+
+default: test
 
 .PHONY: test
 
