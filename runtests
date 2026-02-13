@@ -21,10 +21,16 @@ esac
 
 echo "Using $JOBS jobs, arch: $(uname -m)"
 
-rm -rf Out
+run()
+{
+    echo "$$ $@"
+    "$@"
+}
 
-make -j $JOBS -k debug=0 $(NOSTDLIB_TARGET)
+run rm -rf Out
 
-make -j $JOBS -k debug=1 $(NOSTDLIB_TARGET)
+run make -j $JOBS -k debug=0 $NOSTDLIB_TARGET
 
-make -j $JOBS -k debug=1 stdlib=1
+run make -j $JOBS -k debug=1 $NOSTDLIB_TARGET
+
+run make -j $JOBS -k debug=1 stdlib=1
