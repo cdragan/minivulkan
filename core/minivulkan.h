@@ -26,7 +26,8 @@ extern VkPhysicalDeviceProperties2 vk_phys_props;
 static constexpr uint32_t no_queue_family = ~0u;
 
 #define FEATURE_SETS \
-    X(_shader_int8_features,   nullptr,                    VkPhysicalDeviceShaderFloat16Int8Features, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_FLOAT16_INT8_FEATURES) \
+    X(_14_features,            nullptr,                    VkPhysicalDeviceVulkan14Features,          VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_4_FEATURES)          \
+    X(_shader_int8_features,   &vk_14_features,            VkPhysicalDeviceShaderFloat16Int8Features, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_FLOAT16_INT8_FEATURES) \
     X(_8b_storage_features,    &vk_shader_int8_features,   VkPhysicalDevice8BitStorageFeatures,       VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_8BIT_STORAGE_FEATURES)        \
     X(_16b_storage_features,   &vk_8b_storage_features,    VkPhysicalDevice16BitStorageFeatures,      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_16BIT_STORAGE_FEATURES)       \
     X(_maintenance4_features,  &vk_16b_storage_features,   VkPhysicalDeviceMaintenance4Features,      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_4_FEATURES)       \

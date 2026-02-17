@@ -50,6 +50,7 @@ uint32_t check_device_features()
     missing_features += check_feature(&vk_maintenance4_features.maintenance4);
     missing_features += check_feature(&vk_16b_storage_features.storageBuffer16BitAccess); // for synth
     missing_features += check_feature(&vk_features.features.shaderInt16); // for synth
+    missing_features += check_feature(&vk_14_features.pushDescriptor);
 
     return missing_features;
 }
