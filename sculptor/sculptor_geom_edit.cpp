@@ -147,6 +147,7 @@ namespace {
     struct Transforms {
         vmath::mat4 model_view;
         vmath::mat3 model_view_normal;
+        vmath::mat3 view_inverse; // mat3x4: last column of inverse is always [0, 0, 0, 1], so omitted
         vmath::vec4 proj;
         vmath::vec4 proj_w;
         vmath::vec2 pixel_dim;
@@ -155,8 +156,11 @@ namespace {
     constexpr uint32_t transforms_per_viewport = 1;
     constexpr float    int16_scale             = 32767.0f;
     constexpr uint32_t max_grid_lines          = 4096;
+    constexpr uint32_t max_objects             = 0x10000u;
+    constexpr VkFormat selection_format        = (max_objects <= 0x10000u) ? VK_FORMAT_R16_UINT : VK_FORMAT_R32_UINT;
 
     ImageWithHostCopy  toolbar_image;
+    VkSampler          point_sampler;
 
     struct ToolbarInfo {
         const char* tag;
@@ -195,8 +199,6 @@ const char* GeometryEditor::get_editor_name() const
 
 bool GeometryEditor::allocate_resources()
 {
-    static VkSampler point_sampler;
-
     if ( ! point_sampler) {
         static VkSamplerCreateInfo sampler_info = {
             VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
@@ -283,13 +285,39 @@ bool GeometryEditor::alloc_view_resources(View*     dst_view,
         color_info.height = height;
         color_info.format = swapchain_create_info.imageFormat;
 
+        static ImageInfo obj_id_info {
+            0, // width
+            0, // height
+            selection_format,
+            1, // mip_levels
+            VK_IMAGE_ASPECT_COLOR_BIT,
+            VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+            Usage::device_only
+        };
+
+        obj_id_info.width  = width;
+        obj_id_info.height = height;
+
+        static ImageInfo normal_info {
+            0, // width
+            0, // height
+            VK_FORMAT_A2R10G10B10_UNORM_PACK32,
+            1, // mip_levels
+            VK_IMAGE_ASPECT_COLOR_BIT,
+            VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+            Usage::device_only
+        };
+
+        normal_info.width  = width;
+        normal_info.height = height;
+
         static ImageInfo depth_info {
             0, // width
             0, // height
             VK_FORMAT_UNDEFINED,
             1, // mip_levels
             VK_IMAGE_ASPECT_DEPTH_BIT,
-            VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
+            VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
             Usage::device_only
         };
 
@@ -297,6 +325,7 @@ bool GeometryEditor::alloc_view_resources(View*     dst_view,
         depth_info.height = height;
         depth_info.format = vk_depth_format;
 
+        // TODO Delete this
         static ImageInfo select_query_info {
             0, // width
             0, // height
@@ -329,8 +358,33 @@ bool GeometryEditor::alloc_view_resources(View*     dst_view,
         if ( ! res.color.allocate(color_info, {"view color output", i_img}))
             return false;
 
+        if ( ! res.obj_id.allocate(obj_id_info, {"g-buffer object id", i_img}))
+            return false;
+
+        if ( ! res.normal.allocate(normal_info, {"g-buffer normal", i_img}))
+            return false;
+
         if ( ! res.depth.allocate(depth_info, {"view depth", i_img}))
             return false;
+
+        if ( ! res.selection_buffer.get_buffer()) {
+            if ( ! res.selection_buffer.allocate(Usage::device_only,
+                                                 max_objects,
+                                                 VK_FORMAT_R8_UINT,
+                                                 VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+                                                     VK_BUFFER_USAGE_STORAGE_TEXEL_BUFFER_BIT |
+                                                     VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
+                                                     VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                                                 {"view selection", i_img}))
+                return false;
+            if ( ! res.host_selection_buffer.allocate(Usage::host_only,
+                                                      max_objects,
+                                                      VK_FORMAT_R8_UINT,
+                                                      VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
+                                                          VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                                                      {"host view selection", i_img}))
+                return false;
+        }
 
         if ( ! res.select_feedback.allocate(select_query_info, {"view select feedback", i_img}))
             return false;
@@ -395,6 +449,8 @@ void GeometryEditor::free_view_resources(View* dst_view)
         Resources& res = dst_view->res[i_img];
 
         res.color.free();
+        res.obj_id.free();
+        res.normal.free();
         res.depth.free();
         res.select_feedback.free();
         res.host_select_feedback.free();
@@ -484,7 +540,7 @@ bool GeometryEditor::create_materials()
         0.0f, // depth_bias
         std::size(vertex_attributes),
         sizeof(Sculptor::Geometry::Vertex),
-        VK_FORMAT_UNDEFINED,
+        { VK_FORMAT_UNDEFINED, VK_FORMAT_DISABLED, VK_FORMAT_DISABLED, VK_FORMAT_DISABLED },
         VK_PRIMITIVE_TOPOLOGY_PATCH_LIST,
         16, // patch_control_points
         VK_POLYGON_MODE_FILL,
@@ -497,6 +553,30 @@ bool GeometryEditor::create_materials()
     if ( ! create_material(object_mat_info, &gray_patch_mat))
         return false;
 
+    static const MaterialInfo gbuffer_mat_info = {
+        {
+            shader_sculptor_pass_through_vert,
+            shader_sculptor_g_buffer_frag,
+            shader_bezier_surface_cubic_sculptor_tesc,
+            shader_bezier_surface_cubic_sculptor_tese
+        },
+        vertex_attributes,
+        0.0f, // depth_bias
+        std::size(vertex_attributes),
+        sizeof(Sculptor::Geometry::Vertex),
+        { static_cast<uint8_t>(selection_format), VK_FORMAT_A2R10G10B10_UNORM_PACK32, VK_FORMAT_DISABLED, VK_FORMAT_DISABLED },
+        VK_PRIMITIVE_TOPOLOGY_PATCH_LIST,
+        16, // patch_control_points
+        VK_POLYGON_MODE_FILL,
+        VK_CULL_MODE_BACK_BIT,
+        true,                // depth_test
+        true,                // depth_write
+        { 0x00, 0x00, 0x00 } // diffuse
+    };
+
+    if ( ! create_material(gbuffer_mat_info, &gray_patch_gbuffer_mat))
+        return false;
+
     static const MaterialInfo edge_mat_info = {
         {
             shader_bezier_line_cubic_sculptor_vert,
@@ -506,7 +586,7 @@ bool GeometryEditor::create_materials()
         0.0f,
         0,
         0,
-        VK_FORMAT_UNDEFINED,
+        { VK_FORMAT_UNDEFINED, VK_FORMAT_DISABLED, VK_FORMAT_DISABLED, VK_FORMAT_DISABLED },
         VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
         0, // patch_control_points
         VK_POLYGON_MODE_LINE,
@@ -529,7 +609,7 @@ bool GeometryEditor::create_materials()
         0.0f,
         0,
         0,
-        VK_FORMAT_UNDEFINED,
+        { VK_FORMAT_UNDEFINED, VK_FORMAT_DISABLED, VK_FORMAT_DISABLED, VK_FORMAT_DISABLED },
         VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP,
         0, // patch_control_points
         VK_POLYGON_MODE_FILL,
@@ -552,7 +632,7 @@ bool GeometryEditor::create_materials()
         0.0f, // depth_bias
         std::size(vertex_attributes),
         sizeof(Sculptor::Geometry::Vertex),
-        VK_FORMAT_UNDEFINED,
+        { VK_FORMAT_UNDEFINED, VK_FORMAT_DISABLED, VK_FORMAT_DISABLED, VK_FORMAT_DISABLED },
         VK_PRIMITIVE_TOPOLOGY_LINE_LIST,
         0, // patch_control_points
         VK_POLYGON_MODE_FILL,
@@ -565,6 +645,28 @@ bool GeometryEditor::create_materials()
     if ( ! Sculptor::create_material(grid_info, &grid_mat))
         return false;
     set_material_buf(grid_info, mat_grid);
+
+    static const MaterialInfo lighting_mat_info = {
+        {
+            shader_sculptor_lighting_vert,
+            shader_sculptor_lighting_frag
+        },
+        nullptr, // vertex_attributes
+        0.0f,    // depth_bias
+        0,       // num_vertex_attributes
+        0,       // vertex_stride
+        { VK_FORMAT_UNDEFINED, VK_FORMAT_DISABLED, VK_FORMAT_DISABLED, VK_FORMAT_DISABLED },
+        VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
+        0,       // patch_control_points
+        VK_POLYGON_MODE_FILL,
+        VK_CULL_MODE_NONE,
+        false,   // depth_test
+        false,   // depth_write
+        { 0x00, 0x00, 0x00 } // diffuse
+    };
+
+    if ( ! Sculptor::create_material(lighting_mat_info, &lighting_mat, Sculptor::lighting_layout))
+        return false;
 
     return true;
 }
@@ -614,6 +716,36 @@ static void push_descriptor(VkCommandBuffer               cmdbuf,
     write_desc_set.dstBinding     = binding;
     write_desc_set.descriptorType = static_cast<VkDescriptorType>(desc_type);
     write_desc_set.pBufferInfo    = &buffer_info;
+
+    vkCmdPushDescriptorSet(cmdbuf,
+                           bind_point,
+                           layout,
+                           0, // set
+                           1,
+                           &write_desc_set);
+}
+
+static void push_descriptor(VkCommandBuffer              cmdbuf,
+                            VkPipelineBindPoint          bind_point,
+                            VkPipelineLayout             layout,
+                            uint8_t                      binding,
+                            const VkDescriptorImageInfo& image_info)
+{
+    static VkWriteDescriptorSet write_desc_set = {
+        VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+        nullptr,
+        VK_NULL_HANDLE,                         // dstSet
+        0,                                      // dstBinding
+        0,                                      // dstArrayElement
+        1,                                      // descriptorCount
+        VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, // descriptorType
+        nullptr,                                // pImageInfo
+        nullptr,                                // pBufferInfo
+        nullptr                                 // pTexelBufferView
+    };
+
+    write_desc_set.dstBinding = binding;
+    write_desc_set.pImageInfo = &image_info;
 
     vkCmdPushDescriptorSet(cmdbuf,
                            bind_point,
@@ -1291,95 +1423,9 @@ bool GeometryEditor::draw_frame(VkCommandBuffer cmdbuf, uint32_t image_idx)
     if ( ! toolbar_image.send_to_gpu(cmdbuf))
         return false;
 
+    // Send any updates/modifications to geometry to the GPU
     if ( ! patch_geometry.send_to_gpu(cmdbuf))
         return false;
-
-    if ( ! draw_geometry_view(cmdbuf, view, image_idx))
-        return false;
-
-    if ( ! draw_selection_feedback(cmdbuf, view, image_idx))
-        return false;
-
-    return true;
-}
-
-static VkRenderingAttachmentInfo color_att = {
-    VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
-    nullptr,
-    VK_NULL_HANDLE,             // imageView
-    VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-    VK_RESOLVE_MODE_NONE,
-    VK_NULL_HANDLE,             // resolveImageView
-    VK_IMAGE_LAYOUT_UNDEFINED,  // resolveImageLayout
-    VK_ATTACHMENT_LOAD_OP_CLEAR,
-    VK_ATTACHMENT_STORE_OP_STORE,
-    make_clear_color(0, 0, 0, 0)
-};
-
-static VkRenderingAttachmentInfo depth_att = {
-    VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
-    nullptr,
-    VK_NULL_HANDLE,             // imageView
-    VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
-    VK_RESOLVE_MODE_NONE,
-    VK_NULL_HANDLE,             // resolveImageView
-    VK_IMAGE_LAYOUT_UNDEFINED,  // resolveImageLayout
-    VK_ATTACHMENT_LOAD_OP_CLEAR,
-    VK_ATTACHMENT_STORE_OP_DONT_CARE,
-    make_clear_depth(0, 0)
-};
-
-static VkRenderingInfo rendering_info = {
-    VK_STRUCTURE_TYPE_RENDERING_INFO,
-    nullptr,
-    0,              // flags
-    { },            // renderArea
-    1,              // layerCount
-    0,              // viewMask
-    1,              // colorAttachmentCount
-    &color_att,
-    &depth_att,
-    nullptr         // pStencilAttachment
-};
-
-static const Image::Transition render_viewport_layout = {
-    VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
-    VK_ACCESS_2_NONE,
-    VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
-    VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
-    VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
-};
-
-bool GeometryEditor::draw_geometry_view(VkCommandBuffer cmdbuf,
-                                        View&           dst_view,
-                                        uint32_t        image_idx)
-{
-    Resources& res = dst_view.res[image_idx];
-
-    res.color.barrier(render_viewport_layout);
-
-    static const Image::Transition depth_init = {
-        VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
-        VK_ACCESS_2_NONE,
-        VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT,
-        VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT | VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT,
-        VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL
-    };
-
-    if (res.depth.layout != VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
-        res.depth.barrier(depth_init);
-
-    send_barrier(cmdbuf);
-
-    color_att.imageView  = res.color.get_view();
-    color_att.clearValue = make_clear_color(0.2f, 0.2f, 0.2f, 1);
-    depth_att.imageView  = res.depth.get_view();
-    depth_att.loadOp     = VK_ATTACHMENT_LOAD_OP_CLEAR;
-    depth_att.storeOp    = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-    rendering_info.renderArea.extent.width  = dst_view.width;
-    rendering_info.renderArea.extent.height = dst_view.height;
-
-    vkCmdBeginRendering(cmdbuf, &rendering_info);
 
     // TODO
     // * Draw solid geometry
@@ -1391,14 +1437,270 @@ bool GeometryEditor::draw_geometry_view(VkCommandBuffer cmdbuf,
     // * Draw vertices (including control vertices) and connectors (observe selection)
     // * In all cases observe selection and hover highlight
 
-    if ( ! render_geometry(cmdbuf, dst_view, image_idx))
+    // Draw shallow or deep selection
+    // - Use scissor to limit drawing to the selection rectangle or to a small
+    //   square around cursor hotspot
+    // - Disable color writes
+    // - For shallow selection, enable depth buffer
+    // - Write hover state to the hover buffer
+    // - Turns into selection on the host based on mouse clicks
+    if ( ! draw_selection(cmdbuf, view, image_idx))
         return false;
 
-    if ( ! render_grid(cmdbuf, dst_view, image_idx))
+    // Draw G-buffer.  This is several output attachments:
+    // - Object ID (R16_UINT or R32_UINT) - this is quite important
+    // - Depth (D32_SFLOAT) - use viewport location and inverse projXview
+    //   matrix to restore world position coordinates
+    // - Normal (A2R10G10B10_UNORM_PACK32)
+    if ( ! draw_geometry_pass(cmdbuf, view, image_idx))
+        return false;
+
+    // Perform final rendering pass.  Use G-buffers and apply fragment
+    // shader to each output pixel.  Use object ID from G-buffer and read
+    // the selection state from object state buffer/data, to select color.
+    //
+    // TODO Edge outlines for patches can be drawn by using object ID from G-buffer
+    // to detect boundaries of patches.
+    if ( ! draw_lighting_pass(cmdbuf, view, image_idx))
+        return false;
+
+    return true;
+}
+
+// G-buffer pass: renders obj_id (att 0) and normal (att 1) plus depth
+static VkRenderingAttachmentInfo gbuf_color_att[] = {
+    {
+        VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+        nullptr,
+        VK_NULL_HANDLE,                   // imageView (obj_id)
+        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+        VK_RESOLVE_MODE_NONE,
+        VK_NULL_HANDLE,                   // resolveImageView
+        VK_IMAGE_LAYOUT_UNDEFINED,        // resolveImageLayout
+        VK_ATTACHMENT_LOAD_OP_CLEAR,
+        VK_ATTACHMENT_STORE_OP_STORE,
+        make_clear_color(0, 0, 0, 0)
+    },
+    {
+        VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+        nullptr,
+        VK_NULL_HANDLE,                   // imageView (normal)
+        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+        VK_RESOLVE_MODE_NONE,
+        VK_NULL_HANDLE,                   // resolveImageView
+        VK_IMAGE_LAYOUT_UNDEFINED,        // resolveImageLayout
+        VK_ATTACHMENT_LOAD_OP_CLEAR,
+        VK_ATTACHMENT_STORE_OP_STORE,
+        make_clear_color(0, 0, 0, 0)
+    },
+};
+
+static VkRenderingAttachmentInfo depth_att = {
+    VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+    nullptr,
+    VK_NULL_HANDLE,                         // imageView
+    VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+    VK_RESOLVE_MODE_NONE,
+    VK_NULL_HANDLE,                         // resolveImageView
+    VK_IMAGE_LAYOUT_UNDEFINED,              // resolveImageLayout
+    VK_ATTACHMENT_LOAD_OP_CLEAR,
+    VK_ATTACHMENT_STORE_OP_STORE,
+    make_clear_depth(0, 0)
+};
+
+static VkRenderingInfo gbuf_rendering_info = {
+    VK_STRUCTURE_TYPE_RENDERING_INFO,
+    nullptr,
+    0,                          // flags
+    { },                        // renderArea
+    1,                          // layerCount
+    0,                          // viewMask
+    2,                          // colorAttachmentCount
+    gbuf_color_att,
+    &depth_att,
+    nullptr                     // pStencilAttachment
+};
+
+// Lighting pass: renders to the color output only
+static VkRenderingAttachmentInfo light_color_att = {
+    VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+    nullptr,
+    VK_NULL_HANDLE,                   // imageView
+    VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+    VK_RESOLVE_MODE_NONE,
+    VK_NULL_HANDLE,                   // resolveImageView
+    VK_IMAGE_LAYOUT_UNDEFINED,        // resolveImageLayout
+    VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+    VK_ATTACHMENT_STORE_OP_STORE,
+    make_clear_color(0, 0, 0, 0)
+};
+
+static VkRenderingInfo light_rendering_info = {
+    VK_STRUCTURE_TYPE_RENDERING_INFO,
+    nullptr,
+    0,                          // flags
+    { },                        // renderArea
+    1,                          // layerCount
+    0,                          // viewMask
+    1,                          // colorAttachmentCount
+    &light_color_att,
+    nullptr,                    // pDepthAttachment
+    nullptr                     // pStencilAttachment
+};
+
+static const Image::Transition render_viewport_layout = {
+    VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
+    VK_ACCESS_2_NONE,
+    VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+    VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+    VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
+};
+
+bool GeometryEditor::draw_geometry_pass(VkCommandBuffer cmdbuf,
+                                        View&           dst_view,
+                                        uint32_t        image_idx)
+{
+    Resources& res = dst_view.res[image_idx];
+
+    res.obj_id.barrier(render_viewport_layout);
+    res.normal.barrier(render_viewport_layout);
+
+    static const Image::Transition depth_init = {
+        VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
+        VK_ACCESS_2_NONE,
+        VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT,
+        VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+        VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL
+    };
+
+    if (res.depth.layout != VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL)
+        res.depth.barrier(depth_init);
+
+    send_barrier(cmdbuf);
+
+    gbuf_color_att[0].imageView = res.obj_id.get_view();
+    gbuf_color_att[1].imageView = res.normal.get_view();
+
+    depth_att.imageView = res.depth.get_view();
+
+    gbuf_rendering_info.renderArea.offset        = { 0, 0 };
+    gbuf_rendering_info.renderArea.extent.width  = dst_view.width;
+    gbuf_rendering_info.renderArea.extent.height = dst_view.height;
+
+    vkCmdBeginRendering(cmdbuf, &gbuf_rendering_info);
+
+    if ( ! render_geometry(cmdbuf, dst_view, image_idx, gray_patch_gbuffer_mat))
         return false;
 
     vkCmdEndRendering(cmdbuf);
 
+    // Transition G-buffers and depth to shader-readable layout for the lighting pass
+    static const Image::Transition gbuf_to_shader_read = {
+        VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+        VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+        VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+        VK_ACCESS_2_SHADER_READ_BIT,
+        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
+    };
+    res.obj_id.barrier(gbuf_to_shader_read);
+    res.normal.barrier(gbuf_to_shader_read);
+
+    static const Image::Transition depth_to_shader_read = {
+        VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
+        VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+        VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+        VK_ACCESS_2_SHADER_READ_BIT,
+        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
+    };
+    res.depth.barrier(depth_to_shader_read);
+
+    send_barrier(cmdbuf);
+
+    return true;
+}
+
+bool GeometryEditor::draw_lighting_pass(VkCommandBuffer cmdbuf,
+                                        View&           dst_view,
+                                        uint32_t        image_idx)
+{
+    Resources& res = dst_view.res[image_idx];
+
+    res.color.barrier(render_viewport_layout);
+
+    send_barrier(cmdbuf);
+
+    light_color_att.imageView = res.color.get_view();
+
+    light_rendering_info.renderArea.offset        = { 0, 0 };
+    light_rendering_info.renderArea.extent.width  = dst_view.width;
+    light_rendering_info.renderArea.extent.height = dst_view.height;
+
+    vkCmdBeginRendering(cmdbuf, &light_rendering_info);
+
+    static VkDescriptorImageInfo obj_id_image_info = {
+        VK_NULL_HANDLE, // sampler (filled below)
+        VK_NULL_HANDLE, // imageView
+        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
+    };
+
+    static VkDescriptorImageInfo normal_image_info = {
+        VK_NULL_HANDLE, // sampler (filled below)
+        VK_NULL_HANDLE, // imageView
+        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
+    };
+
+    static VkDescriptorImageInfo depth_image_info = {
+        VK_NULL_HANDLE, // sampler (filled below)
+        VK_NULL_HANDLE, // imageView
+        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
+    };
+
+    obj_id_image_info.sampler   = Sculptor::gbuffer_sampler;
+    obj_id_image_info.imageView = res.obj_id.get_view();
+    normal_image_info.sampler   = Sculptor::gbuffer_sampler;
+    normal_image_info.imageView = res.normal.get_view();
+    depth_image_info.sampler    = Sculptor::gbuffer_sampler;
+    depth_image_info.imageView  = res.depth.get_view();
+
+    push_descriptor(cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, Sculptor::lighting_layout,
+                    0, obj_id_image_info);
+
+    static VkDescriptorBufferInfo transforms_buf_info = {
+        VK_NULL_HANDLE,
+        0,
+        0
+    };
+    transforms_buf_info.buffer = transforms_buf.get_buffer();
+    transforms_buf_info.offset = (image_idx * transforms_per_viewport) * transforms_stride;
+    transforms_buf_info.range  = transforms_stride;
+
+    push_descriptor(cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, Sculptor::lighting_layout,
+                    1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, transforms_buf_info);
+
+    static VkDescriptorBufferInfo faces_buf_info = {
+        VK_NULL_HANDLE,
+        0,
+        0
+    };
+    patch_geometry.write_faces_descriptor(&faces_buf_info);
+
+    push_descriptor(cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, Sculptor::lighting_layout,
+                    2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, faces_buf_info);
+
+    push_descriptor(cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, Sculptor::lighting_layout,
+                    3, normal_image_info);
+    push_descriptor(cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, Sculptor::lighting_layout,
+                    4, depth_image_info);
+
+    vkCmdBindPipeline(cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, lighting_mat);
+
+    send_viewport_and_scissor(cmdbuf, dst_view.width, dst_view.height);
+
+    vkCmdDraw(cmdbuf, 3, 1, 0, 0);
+
+    vkCmdEndRendering(cmdbuf);
+
+    // Transition color output to shader-read layout for the GUI
     static const Image::Transition gui_image_layout = {
         VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
         VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
@@ -1413,72 +1715,93 @@ bool GeometryEditor::draw_geometry_view(VkCommandBuffer cmdbuf,
     return true;
 }
 
-bool GeometryEditor::draw_selection_feedback(VkCommandBuffer cmdbuf,
-                                             View&           dst_view,
-                                             uint32_t        image_idx)
+bool GeometryEditor::draw_selection(VkCommandBuffer cmdbuf,
+                                    View&           dst_view,
+                                    uint32_t        image_idx)
 {
+    if (image_idx != ~0u) return true; // TODO enable once this works
+
+    // TODO
+    const uint32_t num_objects = 1;
+
     Resources& res = dst_view.res[image_idx];
 
-    res.select_feedback.barrier(render_viewport_layout);
-    send_barrier(cmdbuf);
+    // TODO clear hover bit on the CPU
 
-    assert(res.depth.layout == VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+    if ( ! res.host_selection_buffer.flush())
+        return false;
 
-    color_att.imageView                  = res.select_feedback.get_view();
-    color_att.clearValue.color.uint32[0] = 0;
-    depth_att.imageView                  = res.depth.get_view();
-    depth_att.loadOp                     = VK_ATTACHMENT_LOAD_OP_CLEAR;
-    depth_att.storeOp                    = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-    rendering_info.renderArea.extent.width  = dst_view.width;
-    rendering_info.renderArea.extent.height = dst_view.height;
+    static const Buffer::Transition host_to_transfer = {
+        VK_PIPELINE_STAGE_2_HOST_BIT,
+        VK_ACCESS_2_HOST_READ_BIT | VK_ACCESS_2_HOST_WRITE_BIT,
+        VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+        VK_ACCESS_2_TRANSFER_READ_BIT
+    };
+    res.host_selection_buffer.barrier(host_to_transfer);
 
-    vkCmdBeginRendering(cmdbuf, &rendering_info);
-    vkCmdEndRendering(cmdbuf);
-
-    static const Image::Transition transfer_src_image_layout = {
-        VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
-        VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+    static const Buffer::Transition init_selection = {
         VK_PIPELINE_STAGE_2_TRANSFER_BIT,
         VK_ACCESS_2_TRANSFER_READ_BIT,
-        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL
+        VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+        VK_ACCESS_2_TRANSFER_WRITE_BIT
     };
-    res.select_feedback.barrier(transfer_src_image_layout);
-
-    if (res.host_select_feedback.layout != VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL) {
-        static const Image::Transition transfer_dst_image_layout = {
-            VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-            VK_ACCESS_2_NONE,
-            VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-            VK_ACCESS_2_TRANSFER_WRITE_BIT,
-            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL
-        };
-        res.host_select_feedback.barrier(transfer_dst_image_layout);
-    }
+    res.selection_buffer.barrier(init_selection);
 
     send_barrier(cmdbuf);
 
-    res.selection_pending = true;
-
-    #if 0
-    static VkImageCopy region = {
-        { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
-        { },        // srcOffset
-        { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
-        { },        // dstOffset
-        { 0, 0, 1 } // extent
+    // Copy selection buffer from host
+    static VkBufferCopy copy_region = {
+        0,
+        0,
+        0
     };
+    copy_region.size = num_objects;
+    vkCmdCopyBuffer(cmdbuf,
+                    res.host_selection_buffer.get_buffer(),
+                    res.selection_buffer.get_buffer(),
+                    1,
+                    &copy_region);
 
-    region.extent.width  = dst_view.width;
-    region.extent.height = dst_view.height;
+    // TODO buffer barrier
 
-    vkCmdCopyImage(cmdbuf,
-                   res.select_feedback.get_image(),
-                   VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                   res.host_select_feedback.get_image(),
-                   VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                   1,
-                   &region);
-    #endif
+    // Render selection rectangle
+    VkViewport viewport = { };
+    VkRect2D   scissor  = { };
+    configure_viewport_and_scissor(&viewport, &scissor, dst_view.width, dst_view.height);
+
+    // TODO update scissor
+
+    light_color_att.imageView  = res.color.get_view();
+    light_color_att.clearValue = make_clear_color(0.2f, 0.2f, 0.2f, 1);
+    light_color_att.loadOp     = VK_ATTACHMENT_LOAD_OP_CLEAR;
+    light_color_att.storeOp    = VK_ATTACHMENT_STORE_OP_STORE;
+    depth_att.imageView        = res.depth.get_view();
+    depth_att.loadOp           = VK_ATTACHMENT_LOAD_OP_CLEAR;
+    depth_att.storeOp          = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    light_rendering_info.pDepthAttachment = &depth_att;
+    light_rendering_info.renderArea = scissor;
+    d_printf("%u %u %u %u\n", light_rendering_info.renderArea.offset.x, light_rendering_info.renderArea.offset.y, light_rendering_info.renderArea.extent.width, light_rendering_info.renderArea.extent.height);
+
+    vkCmdBeginRendering(cmdbuf, &light_rendering_info);
+
+    vkCmdSetViewport(cmdbuf, 0, 1, &viewport);
+    vkCmdSetScissor(cmdbuf, 0, 1, &scissor);
+
+    if ( ! render_geometry(cmdbuf, dst_view, image_idx, gray_patch_mat))
+        return false;
+
+    vkCmdEndRendering(cmdbuf);
+
+    // TODO buffer barrier
+
+    // Copy selection buffer to host
+    vkCmdCopyBuffer(cmdbuf,
+                    res.selection_buffer.get_buffer(),
+                    res.host_selection_buffer.get_buffer(),
+                    1,
+                    &copy_region);
+
+    // TODO buffer barrier
 
     return true;
 }
@@ -1546,6 +1869,19 @@ bool GeometryEditor::set_patch_transforms(const View& dst_view, uint32_t transfo
 
     transforms->model_view_normal = vmath::transpose(vmath::inverse(vmath::mat3(model_view)));
 
+    // Compute inverse of the rigid-body view matrix analytically (no general mat4 inverse needed).
+    // The last column of the inverse is always [0,0,0,1] so we store only 3 columns as mat3x4.
+    // transpose(mat3(M)) gives R^T; the eye position goes into the padding row (row 3).
+    // Eye position = -t * R^T = -dot(t, each column of inv).
+    {
+        vmath::mat3 inv = vmath::transpose(vmath::mat3(model_view));
+        const vmath::vec3 t{model_view.a30, model_view.a31, model_view.a32};
+        inv.a30 = -vmath::dot_product(t, vmath::vec3{&inv.a00});
+        inv.a31 = -vmath::dot_product(t, vmath::vec3{&inv.a01});
+        inv.a32 = -vmath::dot_product(t, vmath::vec3{&inv.a02});
+        transforms->view_inverse = inv;
+    }
+
     const float aspect = static_cast<float>(dst_view.width) / static_cast<float>(dst_view.height);
 
     constexpr float near_plane = 0.01f;
@@ -1574,7 +1910,8 @@ bool GeometryEditor::set_patch_transforms(const View& dst_view, uint32_t transfo
 
 bool GeometryEditor::render_geometry(VkCommandBuffer cmdbuf,
                                      const View&     dst_view,
-                                     uint32_t        image_idx)
+                                     uint32_t        image_idx,
+                                     VkPipeline      patch_mat)
 {
     const uint32_t edge_mat_id = (image_idx * num_materials) + mat_object_edge;
 
@@ -1585,7 +1922,7 @@ bool GeometryEditor::render_geometry(VkCommandBuffer cmdbuf,
     if ( ! set_patch_transforms(dst_view, transform_id))
         return false;
 
-    vkCmdBindPipeline(cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, gray_patch_mat);
+    vkCmdBindPipeline(cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, patch_mat);
 
     send_viewport_and_scissor(cmdbuf, dst_view.width, dst_view.height);
 
@@ -1626,6 +1963,7 @@ bool GeometryEditor::render_geometry(VkCommandBuffer cmdbuf,
 
     patch_geometry.render(cmdbuf);
 
+#if 0
     vkCmdBindPipeline(cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, edge_patch_mat);
 
     send_viewport_and_scissor(cmdbuf, dst_view.width, dst_view.height);
@@ -1646,6 +1984,7 @@ bool GeometryEditor::render_geometry(VkCommandBuffer cmdbuf,
                     0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, buffer_info);
 
     patch_geometry.render_vertices(cmdbuf);
+#endif
 
     return true;
 }

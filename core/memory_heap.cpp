@@ -281,7 +281,10 @@ bool MemoryAllocator::allocate_memory(const VkMemoryRequirements& requirements,
             break;
 
         case Usage::transient:
-            if (transient_heap.get_memory())
+            // VK_IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT allows lazy allocation but doesn't require it.
+            // Only use the transient heap if its memory type is compatible with this resource
+            // (e.g. INPUT_ATTACHMENT_BIT may be incompatible with lazily-allocated memory on some platforms).
+            if (transient_heap.get_memory() && transient_heap.check_memory_type(requirements.memoryTypeBits))
                 selected_heap = &transient_heap;
             break;
 

@@ -4,6 +4,7 @@
 layout(binding = 1) uniform transform_data {
     mat4   model_view;
     mat3x4 model_view_normal;
+    mat3x4 view_inverse; // last column of the inverse is always [0, 0, 0, 1], so omitted
     vec4   proj;
     vec4   proj_w; // perspective: [0, 0, 1, 0], orthographic: [0, 0, 0, 1]
     vec2   pixel_dim;

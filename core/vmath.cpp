@@ -498,7 +498,7 @@ mat4::mat4(const mat3& mtx)
 {
     mstd::mem_zero(data, sizeof(data));
 
-    mstd::mem_copy(data, mtx.data, sizeof(data));
+    mstd::mem_copy(data, mtx.data, sizeof(mtx.data));
 
     a33 = 1;
 }

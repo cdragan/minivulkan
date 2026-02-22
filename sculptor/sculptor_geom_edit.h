@@ -56,9 +56,13 @@ class GeometryEditor: public Editor {
 
         struct Resources {
             Image           color;
+            Image           obj_id; // G-buffer
+            Image           normal; // G-buffer
             Image           depth;
-            Image           select_feedback;
-            Image           host_select_feedback;
+            Buffer          selection_buffer;
+            Buffer          host_selection_buffer;
+            Image           select_feedback;      // TODO delete
+            Image           host_select_feedback; // TODO delete
             bool            selection_pending = false;
             VkDescriptorSet gui_texture       = VK_NULL_HANDLE;
         };
@@ -160,9 +164,12 @@ class GeometryEditor: public Editor {
         bool gui_toolbar();
         bool toolbar_button(ToolbarButton button, bool* checked = nullptr);
         void switch_mode(Mode new_mode);
-        bool draw_geometry_view(VkCommandBuffer cmdbuf, View& dst_view, uint32_t image_idx);
-        bool draw_selection_feedback(VkCommandBuffer cmdbuf, View& dst_view, uint32_t image_idx);
-        bool render_geometry(VkCommandBuffer cmdbuf, const View& dst_view, uint32_t image_idx);
+
+        bool draw_selection(VkCommandBuffer cmdbuf, View& dst_view, uint32_t image_idx);
+        bool draw_geometry_pass(VkCommandBuffer cmdbuf, View& dst_view, uint32_t image_idx);
+        bool draw_lighting_pass(VkCommandBuffer cmdbuf, View& dst_view, uint32_t image_idx);
+
+        bool render_geometry(VkCommandBuffer cmdbuf, const View& dst_view, uint32_t image_idx, VkPipeline patch_mat);
         bool render_grid(VkCommandBuffer cmdbuf, const View& dst_view, uint32_t image_idx);
         bool set_patch_transforms(const View& dst_view, uint32_t transform_id);
         void finish_edit_mode();
@@ -177,11 +184,13 @@ class GeometryEditor: public Editor {
         // - desc set 0: global and per-frame resources
         // - desc set 1: per-material resources
         // - desc set 2: per-object resources
-        VkPipeline         gray_patch_mat    = VK_NULL_HANDLE;
-        VkPipeline         edge_patch_mat    = VK_NULL_HANDLE;
-        VkPipeline         vertex_mat        = VK_NULL_HANDLE;
-        VkPipeline         grid_mat          = VK_NULL_HANDLE;
-        VkDescriptorSet    toolbar_texture   = VK_NULL_HANDLE;
+        VkPipeline         gray_patch_mat         = VK_NULL_HANDLE;
+        VkPipeline         gray_patch_gbuffer_mat = VK_NULL_HANDLE;
+        VkPipeline         edge_patch_mat         = VK_NULL_HANDLE;
+        VkPipeline         vertex_mat             = VK_NULL_HANDLE;
+        VkPipeline         grid_mat               = VK_NULL_HANDLE;
+        VkPipeline         lighting_mat           = VK_NULL_HANDLE;
+        VkDescriptorSet    toolbar_texture        = VK_NULL_HANDLE;
         Sculptor::Geometry patch_geometry;
         Buffer             materials_buf;
         Buffer             transforms_buf;

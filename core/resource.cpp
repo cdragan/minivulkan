@@ -183,6 +183,8 @@ bool Image::allocate(const ImageInfo& image_info, Description desc)
         res = CHK(vkCreateImageView(vk_dev, &view_create_info, nullptr, &view));
         if (res != VK_SUCCESS)
             return false;
+
+        set_vk_object_name(VK_OBJECT_TYPE_IMAGE_VIEW, view, desc);
     }
 
     if (host_access) {
@@ -319,6 +321,8 @@ bool Buffer::allocate(Usage              heap_usage,
         res = CHK(vkCreateBufferView(vk_dev, &view_create_info, nullptr, &view));
         if (res != VK_SUCCESS)
             return false;
+
+        set_vk_object_name(VK_OBJECT_TYPE_BUFFER_VIEW, view, desc);
     }
 
     owning_heap = heap;

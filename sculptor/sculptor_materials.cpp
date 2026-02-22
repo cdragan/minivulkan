@@ -13,6 +13,9 @@
 
 VkDescriptorSetLayout Sculptor::desc_set_layout;
 VkPipelineLayout      Sculptor::material_layout;
+VkDescriptorSetLayout Sculptor::lighting_desc_set_layout;
+VkPipelineLayout      Sculptor::lighting_layout;
+VkSampler             Sculptor::gbuffer_sampler;
 
 bool Sculptor::create_material_layouts()
 {
@@ -94,10 +97,111 @@ bool Sculptor::create_material_layouts()
             return false;
     }
 
+    {
+        static const VkDescriptorSetLayoutBinding lighting_set[] = {
+            {
+                0, // binding 0: object id G-buffer
+                VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                1,
+                VK_SHADER_STAGE_FRAGMENT_BIT,
+                nullptr
+            },
+            {
+                1, // binding 1: transforms
+                VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+                1,
+                VK_SHADER_STAGE_FRAGMENT_BIT,
+                nullptr
+            },
+            {
+                2, // binding 2: faces storage buffer
+                VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                1,
+                VK_SHADER_STAGE_FRAGMENT_BIT,
+                nullptr
+            },
+            {
+                3, // binding 3: normal G-buffer
+                VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                1,
+                VK_SHADER_STAGE_FRAGMENT_BIT,
+                nullptr
+            },
+            {
+                4, // binding 4: depth buffer
+                VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                1,
+                VK_SHADER_STAGE_FRAGMENT_BIT,
+                nullptr
+            },
+        };
+
+        static const VkDescriptorSetLayoutCreateInfo create_lighting_set_layout = {
+            VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+            nullptr,
+            VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT, // flags
+            std::size(lighting_set),
+            lighting_set
+        };
+
+        const VkResult res = CHK(vkCreateDescriptorSetLayout(vk_dev,
+                                                             &create_lighting_set_layout,
+                                                             nullptr,
+                                                             &lighting_desc_set_layout));
+        if (res != VK_SUCCESS)
+            return false;
+    }
+
+    {
+        static VkPipelineLayoutCreateInfo layout_create_info = {
+            VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+            nullptr,
+            0,      // flags
+            1,
+            &lighting_desc_set_layout,
+            0,      // pushConstantRangeCount
+            nullptr // pPushConstantRanges
+        };
+
+        const VkResult res = CHK(vkCreatePipelineLayout(vk_dev,
+                                                        &layout_create_info,
+                                                        nullptr,
+                                                        &lighting_layout));
+        if (res != VK_SUCCESS)
+            return false;
+    }
+
+    {
+        static const VkSamplerCreateInfo sampler_info = {
+            VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
+            nullptr,
+            0,                                      // flags
+            VK_FILTER_NEAREST,                      // magFilter
+            VK_FILTER_NEAREST,                      // minFilter
+            VK_SAMPLER_MIPMAP_MODE_NEAREST,
+            VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,  // addressModeU
+            VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,  // addressModeV
+            VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,  // addressModeW
+            0,                                      // mipLodBias
+            VK_FALSE,                               // anisotropyEnable
+            0,                                      // maxAnisotropy
+            VK_FALSE,                               // compareEnable
+            VK_COMPARE_OP_ALWAYS,
+            0,                                      // minLod
+            0,                                      // maxLod
+            VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK,
+            VK_FALSE                                // unnormalizedCoordinates
+        };
+
+        const VkResult res = CHK(vkCreateSampler(vk_dev, &sampler_info, nullptr, &gbuffer_sampler));
+        if (res != VK_SUCCESS)
+            return false;
+    }
+
     return true;
 }
 
-bool Sculptor::create_material(const MaterialInfo& mat_info, VkPipeline* pipeline)
+bool Sculptor::create_material(const MaterialInfo& mat_info, VkPipeline* pipeline, VkPipelineLayout layout)
 {
     assert(*pipeline == VK_NULL_HANDLE);
 
@@ -250,17 +354,55 @@ bool Sculptor::create_material(const MaterialInfo& mat_info, VkPipeline* pipelin
     depth_stencil_state.depthTestEnable  = mat_info.depth_test;
     depth_stencil_state.depthWriteEnable = mat_info.depth_write;
 
-    static VkPipelineColorBlendAttachmentState color_blend_att = {
-        VK_FALSE,               // blendEnable
-        VK_BLEND_FACTOR_ZERO,   // srcColorBlendFactor
-        VK_BLEND_FACTOR_ZERO,   // dstColorBlendFactor
-        VK_BLEND_OP_ADD,        // colorBlendOp
-        VK_BLEND_FACTOR_ZERO,   // srcAlphaBlendFactor
-        VK_BLEND_FACTOR_ZERO,   // dstAlphaBlendFactor
-        VK_BLEND_OP_ADD,        // alphaBlendOp
-                                // colorWriteMask
-        VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT
+    static VkPipelineColorBlendAttachmentState color_blend_att[] = {
+        {
+            .blendEnable         = VK_FALSE,
+            .srcColorBlendFactor = VK_BLEND_FACTOR_ZERO,
+            .dstColorBlendFactor = VK_BLEND_FACTOR_ZERO,
+            .colorBlendOp        = VK_BLEND_OP_ADD,
+            .srcAlphaBlendFactor = VK_BLEND_FACTOR_ZERO,
+            .dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO,
+            .alphaBlendOp        = VK_BLEND_OP_ADD,
+            .colorWriteMask      = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT
+        },
+        {
+            .blendEnable         = VK_FALSE,
+            .srcColorBlendFactor = VK_BLEND_FACTOR_ZERO,
+            .dstColorBlendFactor = VK_BLEND_FACTOR_ZERO,
+            .colorBlendOp        = VK_BLEND_OP_ADD,
+            .srcAlphaBlendFactor = VK_BLEND_FACTOR_ZERO,
+            .dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO,
+            .alphaBlendOp        = VK_BLEND_OP_ADD,
+            .colorWriteMask      = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT
+        },
+        {
+            .blendEnable         = VK_FALSE,
+            .srcColorBlendFactor = VK_BLEND_FACTOR_ZERO,
+            .dstColorBlendFactor = VK_BLEND_FACTOR_ZERO,
+            .colorBlendOp        = VK_BLEND_OP_ADD,
+            .srcAlphaBlendFactor = VK_BLEND_FACTOR_ZERO,
+            .dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO,
+            .alphaBlendOp        = VK_BLEND_OP_ADD,
+            .colorWriteMask      = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT
+        },
+        {
+            .blendEnable         = VK_FALSE,
+            .srcColorBlendFactor = VK_BLEND_FACTOR_ZERO,
+            .dstColorBlendFactor = VK_BLEND_FACTOR_ZERO,
+            .colorBlendOp        = VK_BLEND_OP_ADD,
+            .srcAlphaBlendFactor = VK_BLEND_FACTOR_ZERO,
+            .dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO,
+            .alphaBlendOp        = VK_BLEND_OP_ADD,
+            .colorWriteMask      = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT
+        }
     };
+
+    static_assert(std::size(color_blend_att) == std::extent_v<decltype(MaterialInfo::color_formats)>);
+
+    uint32_t num_color_attachments = 0;
+    while (num_color_attachments < std::size(mat_info.color_formats) &&
+           mat_info.color_formats[num_color_attachments] != VK_FORMAT_DISABLED)
+        num_color_attachments++;
 
     static VkPipelineColorBlendStateCreateInfo color_blend_state = {
         VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
@@ -268,10 +410,11 @@ bool Sculptor::create_material(const MaterialInfo& mat_info, VkPipeline* pipelin
         0,          // flags
         VK_FALSE,   // logicOpEnable
         VK_LOGIC_OP_CLEAR,
-        1,          // attachmentCount
-        &color_blend_att,
+        0,          // attachmentCount
+        color_blend_att,
         { }         // blendConstants
     };
+    color_blend_state.attachmentCount = num_color_attachments;
 
     static VkDynamicState dynamic_states[] = {
         VK_DYNAMIC_STATE_VIEWPORT,
@@ -286,23 +429,25 @@ bool Sculptor::create_material(const MaterialInfo& mat_info, VkPipeline* pipelin
         dynamic_states
     };
 
-    static VkFormat color_format = VK_FORMAT_UNDEFINED;
+    static VkFormat color_formats[std::extent_v<decltype(MaterialInfo::color_formats)>];
+
+    for (uint32_t i = 0; i < num_color_attachments; i++) {
+        color_formats[i] = (mat_info.color_formats[i] == VK_FORMAT_UNDEFINED)
+            ? swapchain_create_info.imageFormat
+            : static_cast<VkFormat>(mat_info.color_formats[i]);
+    }
 
     static VkPipelineRenderingCreateInfo rendering_info = {
         VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO,
         nullptr,
         0,                      // viewMask
-        1,                      // colorAttachmentCount
-        &color_format,
+        0,                      // colorAttachmentCount
+        color_formats,
         VK_FORMAT_UNDEFINED,    // depthAttachmentFormat
         VK_FORMAT_UNDEFINED     // stencilAttachmentFormat
     };
-
-    color_format = (mat_info.color_format == VK_FORMAT_UNDEFINED)
-        ? swapchain_create_info.imageFormat
-        : static_cast<VkFormat>(mat_info.color_format);
-
-    rendering_info.depthAttachmentFormat = vk_depth_format;
+    rendering_info.colorAttachmentCount  = num_color_attachments;
+    rendering_info.depthAttachmentFormat = (mat_info.depth_test || mat_info.depth_write) ? vk_depth_format : VK_FORMAT_UNDEFINED;
 
     static VkGraphicsPipelineCreateInfo pipeline_create_info = {
         VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
@@ -327,7 +472,7 @@ bool Sculptor::create_material(const MaterialInfo& mat_info, VkPipeline* pipelin
     };
 
     pipeline_create_info.stageCount = num_stages;
-    pipeline_create_info.layout     = material_layout;
+    pipeline_create_info.layout     = (layout != VK_NULL_HANDLE) ? layout : material_layout;
 
     const VkResult res = CHK(vkCreateGraphicsPipelines(vk_dev,
                                                        VK_NULL_HANDLE,

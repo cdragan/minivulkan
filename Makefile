@@ -654,7 +654,8 @@ $(eval $(call LINK_RULE,$(make_shaders_cpp),$(make_shaders_cpp_src_files)))
 
 define SHADER_RULE
 $(shaders_out_dir)/$(basename $(notdir $1)).h: $1 | $(spirv_encode) $(shaders_out_dir) $(addprefix $(shaders_out_dir)/,$(shader_dirs))
-	$(GLSL_VALIDATOR_PREFIX)glslangValidator $(GLSL_FLAGS) -o $$(call shader_stage,default,$$<) $$<
+	$(GLSL_VALIDATOR_PREFIX)glslangValidator $(GLSL_FLAGS) --depfile $$(basename $$@).d.tmp -o $$(call shader_stage,default,$$<) $$<
+	sed 's|^[^:]*:|$$@:|' $$(basename $$@).d.tmp > $$(basename $$@).d && rm $$(basename $$@).d.tmp
 	$(GLSL_VALIDATOR_PREFIX)spirv-opt $(GLSL_OPT_FLAGS) $$(call shader_stage,default,$$<) -o $$(call shader_stage,opt,$$<)
 ifeq ($(SPIRV_STRIP), spirv-opt)
 	$(GLSL_VALIDATOR_PREFIX)spirv-opt $(GLSL_STRIP_FLAGS) $$(call shader_stage,opt,$$<) -o $$(call shader_stage,strip,$$<)
@@ -723,3 +724,7 @@ default: test
 dep_files = $(addprefix $(out_dir)/, $(addsuffix .d, $(basename $(notdir $(all_src_files)))))
 
 -include $(dep_files)
+
+shader_dep_files = $(addprefix $(shaders_out_dir)/, $(addsuffix .d, $(basename $(notdir $(all_shader_files)))))
+
+-include $(shader_dep_files)
