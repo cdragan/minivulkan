@@ -214,7 +214,7 @@ static void handle_key_event(xcb_keycode_t key_code, uint16_t state, bool down)
         io.SetKeyEventNativeData(key, key_code, -1);
     }
     else if ( ! down && xcb_keysyms &&
-             (key_code >= min_keycode) && (key_code < max_keycode)) {
+             (key_code >= min_keycode) && (key_code <= max_keycode)) {
 
         const uint32_t idx = (key_code - min_keycode) * xcb_keysyms_per_code;
         const xcb_keysym_t sym = xcb_keysyms[idx + shift];
