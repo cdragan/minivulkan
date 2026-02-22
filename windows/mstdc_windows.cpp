@@ -72,7 +72,7 @@ extern "C" {
 
         va_end(args);
 
-        assert(num >= static_cast<int>(sizeof(buf)) || buf[num] == 0);
+        assert(num < static_cast<int>(sizeof(buf)));
 
         static HANDLE out = INVALID_HANDLE_VALUE;
         if (out == INVALID_HANDLE_VALUE)

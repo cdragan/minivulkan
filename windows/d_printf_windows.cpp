@@ -19,7 +19,7 @@ void d_printf(const char* format, ...)
 
     va_end(args);
 
-    assert(chars >= sizeof(buf) || buf[chars] == 0);
+    assert(chars < sizeof(buf));
 
     static HANDLE out = INVALID_HANDLE_VALUE;
     if (out == INVALID_HANDLE_VALUE)
