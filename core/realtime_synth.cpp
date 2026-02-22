@@ -195,7 +195,7 @@ namespace {
                     const int duration  = static_cast<int>(pt2.position - pt1.position);
                     const int range     = static_cast<int>(pt2.value) - env_value;
 
-                    env_value = (delta_pos * range) / duration;
+                    env_value += (delta_pos * range) / duration;
                 }
 
                 value += envelope.min_value + static_cast<float>(env_value) * envelope.min_max_delta;

@@ -72,7 +72,7 @@ namespace vmath {
         // tan(x) * tan(x) = sqr((pi * pi + x * x) / (pi * pi - 4 * x * x)) - 1
         const float sq_x = radians * radians;
         const float rcp_cos = (pi_squared + sq_x) / (pi_squared - 4 * sq_x);
-        return sqrt(float1{rcp_cos * rcp_cos - 1}).get0();
+        return sqrt(float1{rcp_cos * rcp_cos - 1}).get0() * (radians < 0 ? -1.0f : 1.0f);
     }
 }
 
