@@ -546,14 +546,14 @@ mat4::mat4(const quat& q)
 template<>
 vmath::vec<3> vmath::column<3>(const mat4& mtx, unsigned col)
 {
-    assert(col < 3);
+    assert(col < 4);
     return vec3{&mtx.data[col * 4]};
 }
 
 template<>
 vmath::vec<4> vmath::column<4>(const mat4& mtx, unsigned col)
 {
-    assert(col < 3);
+    assert(col < 4);
     return vec4{&mtx.data[col * 4]};
 }
 

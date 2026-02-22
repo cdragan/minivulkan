@@ -80,10 +80,10 @@ bool Resource::invalidate_whole()
     };
     range.memory = owning_heap->get_memory();
     range.offset = mstd::align_down(begin, alignment);
-    range.size   = mstd::align_up(alloc_size, alignment);
+    range.size   = mstd::align_up(alloc_size + (begin - range.offset), alignment);
 
     const VkResult res = CHK(vkInvalidateMappedMemoryRanges(vk_dev, 1, &range));
-    return res;
+    return res == VK_SUCCESS;
 }
 
 bool Image::allocate(const ImageInfo& image_info, Description desc)
@@ -316,7 +316,6 @@ bool Buffer::allocate(Usage              heap_usage,
         };
         view_create_info.buffer = buffer;
         view_create_info.format = format;
-        view_create_info.offset = heap_offset;
 
         res = CHK(vkCreateBufferView(vk_dev, &view_create_info, nullptr, &view));
         if (res != VK_SUCCESS)

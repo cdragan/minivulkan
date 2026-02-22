@@ -1211,9 +1211,7 @@ static bool render_audio(uint32_t num_samples)
     if ( ! send_to_device_and_wait(audio_cmd_buf, vk_compute_queue, fen_compute))
         return false;
 
-    buffers[output_buf].invalidate();
-
-    return true;
+    return buffers[output_buf].invalidate();
 }
 
 template<typename T, bool interleaved>
