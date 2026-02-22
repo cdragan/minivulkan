@@ -19,17 +19,34 @@ void main()
     // Pixel-exact coordinates to the input attachments
     const ivec2 coord = ivec2(gl_FragCoord.xy);
 
-    // Read Z value from depth buffer
-    const float depth = texelFetch(depth_att, coord, 0).r;
+    // Read object id for this pixel
+    const uint obj_id = texelFetch(obj_id_att, coord, 0).r;
 
     // If there is no object at this pixel, render background color
-    if (depth == 0.0) {
+    if (obj_id == 0) {
         out_color = vec4(0.2, 0.2, 0.2, 1);
         return;
     }
 
-    // Read object id for this pixel
-    const uint obj_id = texelFetch(obj_id_att, coord, 0).r;
+    // Read object ids for surrounding pixels
+    const ivec2 max_coord = textureSize(obj_id_att, 0) - 1;
+    const uint obj_id_up = texelFetch(obj_id_att, clamp(coord - ivec2(0, 1), ivec2(0), max_coord), 0).r;
+    const uint obj_id_dn = texelFetch(obj_id_att, clamp(coord + ivec2(0, 1), ivec2(0), max_coord), 0).r;
+    const uint obj_id_lt = texelFetch(obj_id_att, clamp(coord - ivec2(1, 0), ivec2(0), max_coord), 0).r;
+    const uint obj_id_rt = texelFetch(obj_id_att, clamp(coord + ivec2(1, 0), ivec2(0), max_coord), 0).r;
+
+    // Draw edges
+    if (obj_id != obj_id_up ||
+        obj_id != obj_id_lt ||
+        obj_id_rt == 0 ||
+        obj_id_dn == 0) {
+
+        out_color = vec4(0.93, 0.93, 0.93, 1);
+        return;
+    }
+
+    // Read Z value from depth buffer
+    const float depth = texelFetch(depth_att, coord, 0).r;
 
     // Read normal, remap components from [0, 1] range back to [-1, 1] range
     const vec3 normal = (texelFetch(normal_att, coord, 0).rgb - 0.5) * 2.0;
@@ -49,7 +66,8 @@ void main()
 
     vec3 color = vec3(0.5);
 
-    const uint state = faces[obj_id].state;
+    // Read face state, note that obj_id has 1 added to it, because 0 indicates no object
+    const uint state = faces[obj_id - 1].state;
 
     if (state == 1)
         color *= vec3(1.2, 1.1, 1.1);

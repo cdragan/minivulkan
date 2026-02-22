@@ -16,7 +16,8 @@ layout(location = 1) out vec4      out_normal;
 
 void main()
 {
-    out_obj_id = in_object_id;
+    // Write object id + 1, use 0 to indicate no object at this pixel
+    out_obj_id = in_object_id + 1;
 
     // Compress normal components from [-1, 1] range to [0, 1] range
     out_normal = vec4(in_normal * 0.5 + 0.5, 0);
