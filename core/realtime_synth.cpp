@@ -264,10 +264,13 @@ namespace {
                             const float duty       = static_cast<float>(lfo.duty) / 255.0f;
 
                             if (frac_phase <= duty) {
-                                value += lfo.min_max_delta * frac_phase / duty;
+                                if (duty > 0.0f)
+                                    value += lfo.min_max_delta * frac_phase / duty;
                             }
                             else {
-                                value += lfo.min_max_delta * (1.0f - frac_phase) / (1.0f - duty);
+                                const float fall = 1.0f - duty;
+                                if (fall > 0.0f)
+                                    value += lfo.min_max_delta * (1.0f - frac_phase) / fall;
                             }
                         }
                         break;

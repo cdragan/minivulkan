@@ -1222,6 +1222,9 @@ void configure_viewport_and_scissor(VkViewport* viewport,
                                     uint32_t    viewport_width,
                                     uint32_t    viewport_height)
 {
+    mstd::mem_zero(viewport, sizeof *viewport);
+    mstd::mem_zero(scissor,  sizeof *scissor);
+
     // Note: Flip Y coordinate.  The world coordinate system assumes Y going from
     // bottom to top, but in Vulkan screen-space Y coordinate goes from top to bottom.
     if (image_ratio != 0) {
@@ -1352,7 +1355,7 @@ bool create_compute_descriptor_set_layouts(const DescSetBindingInfo* binding_des
                                                              nullptr,
                                                              &out_layouts[i]));
         if (res != VK_SUCCESS)
-            return res;
+            return false;
     }
 
     return true;
