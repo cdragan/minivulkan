@@ -18,7 +18,6 @@ shader_files += sculptor_object.frag.glsl
 shader_files += sculptor_g_buffer.frag.glsl
 shader_files += sculptor_lighting.vert.glsl
 shader_files += sculptor_lighting.frag.glsl
-shader_files += sculptor_edge_color.frag.glsl
 shader_files += sculptor_color.frag.glsl
 
 shader_files += sculptor_vertex_select.vert.glsl

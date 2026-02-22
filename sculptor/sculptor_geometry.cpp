@@ -552,15 +552,6 @@ void Sculptor::Geometry::render(VkCommandBuffer cmd_buf)
                      0); // firstInstance
 }
 
-void Sculptor::Geometry::render_edges(VkCommandBuffer cmd_buf)
-{
-    vkCmdDraw(cmd_buf,
-              tess_level * 3,   // vertexCount
-              num_edges,        // instanceCount
-              0,                // firstVertex
-              0);               // firstInstance
-}
-
 void Sculptor::Geometry::render_vertices(VkCommandBuffer cmd_buf)
 {
     vkCmdDraw(cmd_buf,

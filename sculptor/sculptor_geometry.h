@@ -36,7 +36,6 @@ class Geometry {
         void write_edge_indices_descriptor(VkDescriptorBufferInfo* desc);
         void write_edge_vertices_descriptor(VkDescriptorBufferInfo* desc);
         void render(VkCommandBuffer cmd_buf);
-        void render_edges(VkCommandBuffer cmd_buf);
         void render_vertices(VkCommandBuffer cmd_buf);
 
         uint32_t add_vertex(int16_t x, int16_t y, int16_t z);

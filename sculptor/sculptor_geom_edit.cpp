@@ -139,7 +139,6 @@ Toolbar in Object Editor
 namespace {
     enum MaterialsForShaders {
         mat_grid,
-        mat_object_edge,
         mat_vertex_sel,
         num_materials
     };
@@ -576,29 +575,6 @@ bool GeometryEditor::create_materials()
 
     if ( ! create_material(gbuffer_mat_info, &gray_patch_gbuffer_mat))
         return false;
-
-    static const MaterialInfo edge_mat_info = {
-        {
-            shader_bezier_line_cubic_sculptor_vert,
-            shader_sculptor_edge_color_frag
-        },
-        nullptr,
-        0.0f,
-        0,
-        0,
-        { VK_FORMAT_UNDEFINED, VK_FORMAT_DISABLED, VK_FORMAT_DISABLED, VK_FORMAT_DISABLED },
-        VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
-        0, // patch_control_points
-        VK_POLYGON_MODE_LINE,
-        VK_CULL_MODE_NONE,
-        true,                // depth_test
-        false,               // depth_write
-        { 0xEE, 0xEE, 0xEE } // diffuse
-    };
-
-    if ( ! create_material(edge_mat_info, &edge_patch_mat))
-        return false;
-    set_material_buf(edge_mat_info, mat_object_edge);
 
     static const MaterialInfo vertex_info = {
         {
@@ -1913,8 +1889,6 @@ bool GeometryEditor::render_geometry(VkCommandBuffer cmdbuf,
                                      uint32_t        image_idx,
                                      VkPipeline      patch_mat)
 {
-    const uint32_t edge_mat_id = (image_idx * num_materials) + mat_object_edge;
-
     const uint32_t transform_id_base = image_idx * transforms_per_viewport;
 
     const uint32_t transform_id = transform_id_base + 0;
@@ -1932,13 +1906,6 @@ bool GeometryEditor::render_geometry(VkCommandBuffer cmdbuf,
         0               // range
     };
 
-    buffer_info.buffer = materials_buf.get_buffer();
-    buffer_info.offset = edge_mat_id * materials_stride;
-    buffer_info.range  = materials_stride;
-
-    push_descriptor(cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, Sculptor::material_layout,
-                    0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, buffer_info);
-
     buffer_info.buffer = transforms_buf.get_buffer();
     buffer_info.offset = transform_id * transforms_stride;
     buffer_info.range  = transforms_stride;
@@ -1951,6 +1918,7 @@ bool GeometryEditor::render_geometry(VkCommandBuffer cmdbuf,
     push_descriptor(cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, Sculptor::material_layout,
                     2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, buffer_info);
 
+    // TODO refactor drawing and selecting edges and vertices
     patch_geometry.write_edge_indices_descriptor(&buffer_info);
 
     push_descriptor(cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, Sculptor::material_layout,
@@ -1964,12 +1932,6 @@ bool GeometryEditor::render_geometry(VkCommandBuffer cmdbuf,
     patch_geometry.render(cmdbuf);
 
 #if 0
-    vkCmdBindPipeline(cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, edge_patch_mat);
-
-    send_viewport_and_scissor(cmdbuf, dst_view.width, dst_view.height);
-
-    patch_geometry.render_edges(cmdbuf);
-
     vkCmdBindPipeline(cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, vertex_mat);
 
     send_viewport_and_scissor(cmdbuf, dst_view.width, dst_view.height);

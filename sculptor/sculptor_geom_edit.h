@@ -186,7 +186,6 @@ class GeometryEditor: public Editor {
         // - desc set 2: per-object resources
         VkPipeline         gray_patch_mat         = VK_NULL_HANDLE;
         VkPipeline         gray_patch_gbuffer_mat = VK_NULL_HANDLE;
-        VkPipeline         edge_patch_mat         = VK_NULL_HANDLE;
         VkPipeline         vertex_mat             = VK_NULL_HANDLE;
         VkPipeline         grid_mat               = VK_NULL_HANDLE;
         VkPipeline         lighting_mat           = VK_NULL_HANDLE;
