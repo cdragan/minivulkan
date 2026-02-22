@@ -127,7 +127,8 @@ static void read_png_from_memory(png_structp png_ptr,
 
         memcpy(out_bytes, input_data->bytes, read_size);
 
-        input_data->bytes += read_size;
+        input_data->bytes     += read_size;
+        input_data->size_left -= read_size;
     }
 }
 
