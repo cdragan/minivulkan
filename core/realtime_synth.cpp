@@ -435,16 +435,19 @@ namespace {
             };
 
             static const VkSpecializationMapEntry map_entries[] = {
-                { 0, 0, 4 },
-                { 1, 4, 4 },
-                { 2, 8, 4 },
+                { 0, 0,  4 },
+                { 1, 4,  4 },
+                { 2, 8,  4 },
+                { 3, 12, 4 },
             };
 
-            static const uint32_t spec_data[] = {
+            static uint32_t spec_data[] = {
                 rt_step_samples,
+                0,
                 num_fir_taps,
                 volume_adjustment_samples,
             };
+            spec_data[1] = vk11_props.subgroupSize;
 
             static const VkSpecializationInfo spec_constants = {
                 std::size(map_entries),

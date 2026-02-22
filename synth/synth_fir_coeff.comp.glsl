@@ -10,7 +10,9 @@ layout(local_size_x_id = 0) in;
 
 layout(constant_id = 0) const uint work_group_size = 1;
 
-layout(constant_id = 1) const uint num_taps = 1025;
+layout(constant_id = 1) const uint subgroup_size = 32;
+
+layout(constant_id = 2) const uint num_taps = 1025;
 
 struct FIRParams {
     uint taps_offs;             // Offset of FIR filter's taps
@@ -28,7 +30,7 @@ layout(push_constant) uniform global_param_buf {
 };
 
 shared float coefficients[num_taps];
-shared float norm_sum[work_group_size / 32];
+shared float norm_sum[work_group_size / subgroup_size];
 
 const float pi = 3.141592653589793;
 

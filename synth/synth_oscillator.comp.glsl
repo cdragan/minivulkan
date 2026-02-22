@@ -7,7 +7,7 @@ layout(local_size_x_id = 0) in;
 
 layout(constant_id = 0) const uint work_group_size = 1;
 
-layout(constant_id = 1) const uint num_taps = 1025;
+layout(constant_id = 2) const uint num_taps = 1025;
 
 const uint no_wave       = 0;
 const uint sine_wave     = 1;
