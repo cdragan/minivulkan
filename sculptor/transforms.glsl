@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// SPDX-FileCopyrightText: Copyright (c) 2021-2025 Chris Dragan
+// SPDX-FileCopyrightText: Copyright (c) 2021-2026 Chris Dragan
 
 layout(binding = 1) uniform transform_data {
     mat4   model_view;

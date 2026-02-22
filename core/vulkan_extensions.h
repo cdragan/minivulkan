@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// SPDX-FileCopyrightText: Copyright (c) 2021-2025 Chris Dragan
+// SPDX-FileCopyrightText: Copyright (c) 2021-2026 Chris Dragan
 
 #define SUPPORTED_INSTANCE_EXTENSIONS_BASE_RELEASE \
     X(VK_KHR_surface,                   REQUIRED)
