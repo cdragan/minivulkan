@@ -40,7 +40,7 @@
             AUAudioUnitBus* outputBus = [[AUAudioUnitBus alloc]
                                                 initWithFormat: outputFormat
                                                 error: nil];
-            if ( ! outputFormat) {
+            if ( ! outputBus) {
                 d_printf("Failed to create AVAudioUnitBus\n");
                 return m_busses;
             }
