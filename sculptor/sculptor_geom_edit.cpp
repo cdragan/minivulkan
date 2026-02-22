@@ -1876,9 +1876,9 @@ bool GeometryEditor::set_patch_transforms(const View& dst_view, uint32_t transfo
     {
         vmath::mat3 inv = vmath::transpose(vmath::mat3(model_view));
         const vmath::vec3 t{model_view.a30, model_view.a31, model_view.a32};
-        inv.a30 = -vmath::dot_product(t, vmath::vec3{&inv.a00});
-        inv.a31 = -vmath::dot_product(t, vmath::vec3{&inv.a01});
-        inv.a32 = -vmath::dot_product(t, vmath::vec3{&inv.a02});
+        inv.a30 = -vmath::dot_product(t, vmath::column<3>(inv, 0));
+        inv.a31 = -vmath::dot_product(t, vmath::column<3>(inv, 1));
+        inv.a32 = -vmath::dot_product(t, vmath::column<3>(inv, 2));
         transforms->view_inverse = inv;
     }
 

@@ -375,8 +375,8 @@ inline quat operator*(quat q1, const quat& q2)
 quat conjugate(const quat& q);
 quat normalize(const quat& q);
 
-// mat3 represents a 3x3 matrix with column-major layout
-// The storage for mat3 is actually mat3x4 (3 columns, 4 rows) to match
+// mat3 represents a 3x3 or 3x4 matrix with column-major layout
+// The storage for mat3 is equivalent to GLSL's mat3x4 (3 columns, 4 rows) to match
 // how we pass mat3 data to shaders to satisfy alignment requirements
 struct mat3 {
     union {
@@ -404,6 +404,10 @@ mat3 transpose(const mat3& mtx);
 // Creates an inverse matrix
 mat3 inverse(const mat3& mtx);
 
+// Retrieves column from the matrix
+template<unsigned dim>
+vec<dim> column(const mat3& mtx, unsigned col);
+
 // mat4 represents a 4x4 matrix with column-major layout
 // The matrices are typically used in vec * mat multiplication with row vectors
 // (NOT mat * vec with column vectors!), and column-major layout simplifies operations with vector
@@ -428,6 +432,10 @@ struct mat4 {
     void set_identity();
     static mat4 identity();
 };
+
+// Retrieves column from the matrix
+template<unsigned dim>
+vec<dim> column(const mat4& mtx, unsigned col);
 
 mat4 operator*(const mat4& m1, const mat4& m2);
 

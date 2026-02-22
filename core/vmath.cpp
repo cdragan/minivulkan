@@ -434,6 +434,20 @@ mat3::mat3(const quat& q)
     data[8] = 1 - q2x.x + q2y.y;
 }
 
+template<>
+vmath::vec<3> vmath::column<3>(const mat3& mtx, unsigned col)
+{
+    assert(col < 3);
+    return vec3{&mtx.data[col * 4]};
+}
+
+template<>
+vmath::vec<4> vmath::column<4>(const mat3& mtx, unsigned col)
+{
+    assert(col < 3);
+    return vec4{&mtx.data[col * 4]};
+}
+
 void mat3::set_identity()
 {
     mstd::mem_zero(data, sizeof(data));
@@ -527,6 +541,20 @@ mat4::mat4(const quat& q)
     (float4{q2x.y, 1, q2y.z, 0} - float4{-q2w.z, q2x.x + z2z, q2w.x, 0}).store4_aligned(&data[4]);
     (float4{q2x.z, q2y.z, 1, 0} - float4{q2w.y, -q2w.x, q2x.x + q2y.y, 0}).store4_aligned(&data[8]);
     float4{0, 0, 0, 1}.store4_aligned(&data[12]);
+}
+
+template<>
+vmath::vec<3> vmath::column<3>(const mat4& mtx, unsigned col)
+{
+    assert(col < 3);
+    return vec3{&mtx.data[col * 4]};
+}
+
+template<>
+vmath::vec<4> vmath::column<4>(const mat4& mtx, unsigned col)
+{
+    assert(col < 3);
+    return vec4{&mtx.data[col * 4]};
 }
 
 void mat4::set_identity()
