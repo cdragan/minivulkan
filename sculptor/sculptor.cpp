@@ -124,7 +124,7 @@ static bool create_gui_frame(uint32_t image_idx)
         prev_mouse_pos  = abs_mouse_pos;
         initial_pos_set = true;
     }
-    const bool is_mouse_pos_valid = prev_mouse_pos.x != initial_pos.x;
+    const bool is_mouse_pos_valid = prev_mouse_pos.x != initial_pos.x || prev_mouse_pos.y != initial_pos.y;
 
     const vmath::vec2 mouse_delta = abs_mouse_pos - prev_mouse_pos;
     prev_mouse_pos = abs_mouse_pos;
