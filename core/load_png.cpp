@@ -72,28 +72,20 @@ bool load_png_file(const char*        filename,
         return false;
     }
 
+    DEFER {
+        fclose(file);
+    };
+
     png_structp png_ptr  = nullptr;
     png_infop   info_ptr = nullptr;
-
-    // It would be nice to have a defer statement instead of this boilerplate...
-    class destroy {
-        FILE*       file;
-        png_structp png_ptr;
-        png_infop   info_ptr;
-
-        public:
-            destroy(FILE* in_file, png_structp in_png_ptr, png_infop in_info_ptr)
-                : file(in_file), png_ptr(in_png_ptr), info_ptr(in_info_ptr) { }
-            ~destroy() {
-                png_destroy_read_struct(&png_ptr, &info_ptr, nullptr);
-                fclose(file);
-            }
-    };
-    destroy on_return(file, png_ptr, info_ptr);
 
     png_ptr = png_create_read_struct(PNG_LIBPNG_VER_STRING, nullptr, nullptr, nullptr);
     if ( ! png_ptr)
         return false;
+
+    DEFER {
+        png_destroy_read_struct(&png_ptr, &info_ptr, nullptr);
+    };
 
     info_ptr = png_create_info_struct(png_ptr);
     if ( ! info_ptr)
@@ -139,23 +131,13 @@ bool load_png(const uint8_t*     png,
     png_structp png_ptr  = nullptr;
     png_infop   info_ptr = nullptr;
 
-    // It would be nice to have a defer statement instead of this boilerplate...
-    class destroy {
-        png_structp png_ptr;
-        png_infop   info_ptr;
-
-        public:
-            destroy(png_structp in_png_ptr, png_infop in_info_ptr)
-                : png_ptr(in_png_ptr), info_ptr(in_info_ptr) { }
-            ~destroy() {
-                png_destroy_read_struct(&png_ptr, &info_ptr, nullptr);
-            }
-    };
-    destroy on_return(png_ptr, info_ptr);
-
     png_ptr = png_create_read_struct(PNG_LIBPNG_VER_STRING, nullptr, nullptr, nullptr);
     if ( ! png_ptr)
         return false;
+
+    DEFER {
+        png_destroy_read_struct(&png_ptr, &info_ptr, nullptr);
+    };
 
     info_ptr = png_create_info_struct(png_ptr);
     if ( ! info_ptr)
