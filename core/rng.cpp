@@ -35,7 +35,7 @@ uint32_t RNG::get_random()
 
     constexpr uint64_t multiplier = 0x5851'F42D'4C95'7F2Dull;
 
-    m_state += state * multiplier + m_stream;
+    m_state = state * multiplier + m_stream;
 
     xorshifted = static_cast<uint32_t>(((state >> 18U) ^ state) >> 27U);
     rot        = static_cast<int>(state >> 59U);
