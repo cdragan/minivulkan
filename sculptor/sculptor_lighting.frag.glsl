@@ -30,10 +30,10 @@ void main()
 
     // Read object ids for surrounding pixels
     const ivec2 max_coord = textureSize(obj_id_att, 0) - 1;
-    const uint obj_id_up = texelFetch(obj_id_att, clamp(coord - ivec2(0, 1), ivec2(0), max_coord), 0).r;
-    const uint obj_id_dn = texelFetch(obj_id_att, clamp(coord + ivec2(0, 1), ivec2(0), max_coord), 0).r;
-    const uint obj_id_lt = texelFetch(obj_id_att, clamp(coord - ivec2(1, 0), ivec2(0), max_coord), 0).r;
-    const uint obj_id_rt = texelFetch(obj_id_att, clamp(coord + ivec2(1, 0), ivec2(0), max_coord), 0).r;
+    const uint  obj_id_up = texelFetch(obj_id_att, clamp(coord - ivec2(0, 1), ivec2(0), max_coord), 0).r;
+    const uint  obj_id_dn = texelFetch(obj_id_att, clamp(coord + ivec2(0, 1), ivec2(0), max_coord), 0).r;
+    const uint  obj_id_lt = texelFetch(obj_id_att, clamp(coord - ivec2(1, 0), ivec2(0), max_coord), 0).r;
+    const uint  obj_id_rt = texelFetch(obj_id_att, clamp(coord + ivec2(1, 0), ivec2(0), max_coord), 0).r;
 
     // Draw edges
     if (obj_id != obj_id_up ||
