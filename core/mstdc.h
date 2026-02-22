@@ -40,7 +40,7 @@ float exp2(float x);
 template<typename F>
 class Deferred {
     public:
-        explicit Deferred(F&& func) : func_(std::move(func)) { }
+        explicit Deferred(F&& func) : func_{std::move(func)} { }
         ~Deferred() { func_(); }
 
         Deferred(const Deferred&)            = delete;
@@ -54,7 +54,7 @@ struct Deferrer {
     template<typename F>
     Deferred<F> operator=(F&& func) const
     {
-        return Deferred<F>(std::forward<F>(func));
+        return Deferred<F>{std::forward<F>(func)};
     }
 };
 
