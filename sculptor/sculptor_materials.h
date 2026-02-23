@@ -17,6 +17,17 @@ extern VkDescriptorSetLayout lighting_desc_set_layout;
 extern VkPipelineLayout      lighting_layout;
 extern VkSampler             gbuffer_sampler;
 
+struct ByteColor {
+    uint8_t red;
+    uint8_t green;
+    uint8_t blue;
+};
+
+constexpr inline ByteColor make_byte_color(float red, float green, float blue)
+{
+    return ByteColor{static_cast<uint8_t>(red * 255.0f), static_cast<uint8_t>(green * 255.0f), static_cast<uint8_t>(blue * 255.0f)};
+}
+
 struct MaterialInfo {
     uint8_t*                                 shader_ids[4];
     const VkVertexInputAttributeDescription* vertex_attributes;
@@ -30,7 +41,7 @@ struct MaterialInfo {
     uint8_t                                  cull_mode;
     uint8_t                                  depth_test;
     uint8_t                                  depth_write;
-    uint8_t                                  diffuse_color[3];
+    ByteColor                                diffuse_color;
 };
 
 bool create_material(const MaterialInfo& mat_info, VkPipeline* pipeline, VkPipelineLayout layout = VK_NULL_HANDLE);

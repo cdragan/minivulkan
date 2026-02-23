@@ -271,7 +271,7 @@ bool Sculptor::create_material(const MaterialInfo& mat_info, VkPipeline* pipelin
         nullptr // pVertexAttributeDescriptions
     };
     vertex_input_state.vertexBindingDescriptionCount   =
-        mat_info.vertex_stride ? std::size(vertex_bindings) : 0U;
+        mat_info.vertex_stride ? static_cast<uint32_t>(std::size(vertex_bindings)) : 0U;
     vertex_input_state.pVertexBindingDescriptions      =
         mat_info.vertex_stride ? vertex_bindings : nullptr;
     vertex_input_state.vertexAttributeDescriptionCount = mat_info.num_vertex_attributes;

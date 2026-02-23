@@ -7,7 +7,6 @@
 
 #include "bezier_cubic_data.glsl"
 
-layout(location = 0) in  vec4      in_pos;
 layout(location = 1) in  vec3      in_normal;
 layout(location = 2) in  flat uint in_object_id;
 
@@ -25,6 +24,4 @@ void main()
         color *= vec3(1, 1, 1.4);
 
     out_color = vec4(color, 1);
-
-    gl_FragDepth = in_pos.w;
 }

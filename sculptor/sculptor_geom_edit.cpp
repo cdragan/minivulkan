@@ -499,9 +499,9 @@ void GeometryEditor::set_material_buf(const MaterialInfo& mat_info, uint32_t mat
 
         Sculptor::ShaderMaterial* const material = materials_buf.get_ptr<Sculptor::ShaderMaterial>(abs_mat_id, materials_stride);
 
-        for (uint32_t comp = 0; comp < 3; comp++)
-            material->diffuse_color[comp] = static_cast<float>(mat_info.diffuse_color[comp]) / 255.0f;
-
+        material->diffuse_color[0] = static_cast<float>(mat_info.diffuse_color.red)   / 255.0f;
+        material->diffuse_color[1] = static_cast<float>(mat_info.diffuse_color.green) / 255.0f;
+        material->diffuse_color[2] = static_cast<float>(mat_info.diffuse_color.blue)  / 255.0f;
         material->diffuse_color[3] = 1.0f;
     }
 }
@@ -536,17 +536,17 @@ bool GeometryEditor::create_materials()
             shader_bezier_surface_cubic_sculptor_tese
         },
         vertex_attributes,
-        0.0f, // depth_bias
+        0.0f,    // depth_bias
         std::size(vertex_attributes),
         sizeof(Sculptor::Geometry::Vertex),
         { VK_FORMAT_UNDEFINED, VK_FORMAT_DISABLED, VK_FORMAT_DISABLED, VK_FORMAT_DISABLED },
         VK_PRIMITIVE_TOPOLOGY_PATCH_LIST,
-        16, // patch_control_points
+        16,      // patch_control_points
         VK_POLYGON_MODE_FILL,
         VK_CULL_MODE_BACK_BIT,
-        true,                // depth_test
-        true,                // depth_write
-        { 0x00, 0x00, 0x00 } // diffuse
+        true,    // depth_test
+        true,    // depth_write
+        make_byte_color(0, 0, 0) // diffuse
     };
 
     if ( ! create_material(object_mat_info, &gray_patch_mat))
@@ -560,17 +560,17 @@ bool GeometryEditor::create_materials()
             shader_bezier_surface_cubic_sculptor_tese
         },
         vertex_attributes,
-        0.0f, // depth_bias
+        0.0f,    // depth_bias
         std::size(vertex_attributes),
         sizeof(Sculptor::Geometry::Vertex),
         { static_cast<uint8_t>(selection_format), VK_FORMAT_A2R10G10B10_UNORM_PACK32, VK_FORMAT_DISABLED, VK_FORMAT_DISABLED },
         VK_PRIMITIVE_TOPOLOGY_PATCH_LIST,
-        16, // patch_control_points
+        16,      // patch_control_points
         VK_POLYGON_MODE_FILL,
         VK_CULL_MODE_BACK_BIT,
-        true,                // depth_test
-        true,                // depth_write
-        { 0x00, 0x00, 0x00 } // diffuse
+        true,    // depth_test
+        true,    // depth_write
+        make_byte_color(0, 0, 0) // diffuse
     };
 
     if ( ! create_material(gbuffer_mat_info, &gray_patch_gbuffer_mat))
@@ -587,12 +587,12 @@ bool GeometryEditor::create_materials()
         0,
         { VK_FORMAT_UNDEFINED, VK_FORMAT_DISABLED, VK_FORMAT_DISABLED, VK_FORMAT_DISABLED },
         VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP,
-        0, // patch_control_points
+        0,       // patch_control_points
         VK_POLYGON_MODE_FILL,
         VK_CULL_MODE_BACK_BIT,
-        true,                // depth_test
-        false,               // depth_write
-        { 0xEF, 0xEF, 0xF4 } // diffuse
+        true,    // depth_test
+        false,   // depth_write
+        make_byte_color(0.9372f, 0.9372f, 0.9568f) // diffuse
     };
 
     if ( ! create_material(vertex_info, &vertex_mat))
@@ -605,17 +605,17 @@ bool GeometryEditor::create_materials()
             shader_sculptor_color_frag
         },
         vertex_attributes,
-        0.0f, // depth_bias
+        0.0f,    // depth_bias
         std::size(vertex_attributes),
         sizeof(Sculptor::Geometry::Vertex),
         { VK_FORMAT_UNDEFINED, VK_FORMAT_DISABLED, VK_FORMAT_DISABLED, VK_FORMAT_DISABLED },
         VK_PRIMITIVE_TOPOLOGY_LINE_LIST,
-        0, // patch_control_points
+        0,       // patch_control_points
         VK_POLYGON_MODE_FILL,
         VK_CULL_MODE_NONE,
-        true,                // depth_test
-        false,               // depth_write
-        { 0x55, 0x55, 0x55 } // diffuse
+        true,    // depth_test
+        false,   // depth_write
+        make_byte_color(0.333f, 0.333f, 0.333f) // diffuse
     };
 
     if ( ! Sculptor::create_material(grid_info, &grid_mat))
@@ -638,7 +638,7 @@ bool GeometryEditor::create_materials()
         VK_CULL_MODE_NONE,
         false,   // depth_test
         false,   // depth_write
-        { 0x00, 0x00, 0x00 } // diffuse
+        make_byte_color(0, 0, 0) // diffuse
     };
 
     if ( ! Sculptor::create_material(lighting_mat_info, &lighting_mat, Sculptor::lighting_layout))
@@ -1440,6 +1440,10 @@ bool GeometryEditor::draw_frame(VkCommandBuffer cmdbuf, uint32_t image_idx)
     if ( ! draw_lighting_pass(cmdbuf, view, image_idx))
         return false;
 
+    // Render the grid
+    if ( ! render_grid(cmdbuf, view, image_idx))
+        return false;
+
     return true;
 }
 
@@ -1524,6 +1528,46 @@ static VkRenderingInfo light_rendering_info = {
     nullptr                     // pStencilAttachment
 };
 
+// Grid pass: renders on top of lighting output, using the color attachment and depth for depth testing
+static VkRenderingAttachmentInfo grid_color_att = {
+    VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+    nullptr,
+    VK_NULL_HANDLE,                   // imageView (filled below)
+    VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+    VK_RESOLVE_MODE_NONE,
+    VK_NULL_HANDLE,                   // resolveImageView
+    VK_IMAGE_LAYOUT_UNDEFINED,        // resolveImageLayout
+    VK_ATTACHMENT_LOAD_OP_LOAD,
+    VK_ATTACHMENT_STORE_OP_STORE,
+    make_clear_color(0, 0, 0, 0)
+};
+
+static VkRenderingAttachmentInfo grid_depth_att = {
+    VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+    nullptr,
+    VK_NULL_HANDLE,                              // imageView (filled below)
+    VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL,
+    VK_RESOLVE_MODE_NONE,
+    VK_NULL_HANDLE,                              // resolveImageView
+    VK_IMAGE_LAYOUT_UNDEFINED,                   // resolveImageLayout
+    VK_ATTACHMENT_LOAD_OP_LOAD,
+    VK_ATTACHMENT_STORE_OP_DONT_CARE,
+    make_clear_depth(0, 0)
+};
+
+static VkRenderingInfo grid_rendering_info = {
+    VK_STRUCTURE_TYPE_RENDERING_INFO,
+    nullptr,
+    0,                          // flags
+    { },                        // renderArea
+    1,                          // layerCount
+    0,                          // viewMask
+    1,                          // colorAttachmentCount
+    &grid_color_att,
+    &grid_depth_att,
+    nullptr                     // pStencilAttachment
+};
+
 static const Image::Transition render_viewport_layout = {
     VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
     VK_ACCESS_2_NONE,
@@ -1544,7 +1588,7 @@ bool GeometryEditor::draw_geometry_pass(VkCommandBuffer cmdbuf,
     static const Image::Transition depth_init = {
         VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
         VK_ACCESS_2_NONE,
-        VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT,
+        VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
         VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
         VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL
     };
@@ -1582,7 +1626,7 @@ bool GeometryEditor::draw_geometry_pass(VkCommandBuffer cmdbuf,
     res.normal.barrier(gbuf_to_shader_read);
 
     static const Image::Transition depth_to_shader_read = {
-        VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
+        VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
         VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
         VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
         VK_ACCESS_2_SHADER_READ_BIT,
@@ -1676,17 +1720,8 @@ bool GeometryEditor::draw_lighting_pass(VkCommandBuffer cmdbuf,
 
     vkCmdEndRendering(cmdbuf);
 
-    // Transition color output to shader-read layout for the GUI
-    static const Image::Transition gui_image_layout = {
-        VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
-        VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
-        VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
-        VK_ACCESS_2_SHADER_READ_BIT,
-        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
-    };
-    res.color.barrier(gui_image_layout);
-
-    send_barrier(cmdbuf);
+    // Color remains in COLOR_ATTACHMENT_OPTIMAL for the grid pass which follows.
+    // The grid pass is responsible for transitioning color to SHADER_READ_ONLY_OPTIMAL.
 
     return true;
 }
@@ -1952,7 +1987,7 @@ bool GeometryEditor::render_geometry(VkCommandBuffer cmdbuf,
 }
 
 bool GeometryEditor::render_grid(VkCommandBuffer cmdbuf,
-                                 const View&     dst_view,
+                                 View&           dst_view,
                                  uint32_t        image_idx)
 {
     const uint32_t sub_buf_stride = max_grid_lines * 2 * sizeof(Sculptor::Geometry::Vertex);
@@ -2015,6 +2050,29 @@ bool GeometryEditor::render_grid(VkCommandBuffer cmdbuf,
     if ( ! grid_buf.flush(image_idx, sub_buf_stride))
         return false;
 
+    Resources& res = dst_view.res[image_idx];
+
+    // Transition depth from shader-read (used in lighting pass) to read-only depth
+    // attachment so it can be used for depth testing during grid rendering
+    static const Image::Transition depth_for_grid = {
+        VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+        VK_ACCESS_2_SHADER_READ_BIT,
+        VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT,
+        VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT,
+        VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL
+    };
+    res.depth.barrier(depth_for_grid);
+
+    send_barrier(cmdbuf);
+
+    grid_color_att.imageView                     = res.color.get_view();
+    grid_depth_att.imageView                     = res.depth.get_view();
+    grid_rendering_info.renderArea.offset        = { 0, 0 };
+    grid_rendering_info.renderArea.extent.width  = dst_view.width;
+    grid_rendering_info.renderArea.extent.height = dst_view.height;
+
+    vkCmdBeginRendering(cmdbuf, &grid_rendering_info);
+
     vkCmdBindPipeline(cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, grid_mat);
 
     send_viewport_and_scissor(cmdbuf, dst_view.width, dst_view.height);
@@ -2034,6 +2092,17 @@ bool GeometryEditor::render_grid(VkCommandBuffer cmdbuf,
     push_descriptor(cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, Sculptor::material_layout,
                     0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, buffer_info);
 
+    const uint32_t transform_id_base = image_idx * transforms_per_viewport;
+
+    const uint32_t transform_id = transform_id_base + 0;
+
+    buffer_info.buffer = transforms_buf.get_buffer();
+    buffer_info.offset = transform_id * transforms_stride;
+    buffer_info.range  = transforms_stride;
+
+    push_descriptor(cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, Sculptor::material_layout,
+                    1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, buffer_info);
+
     const VkDeviceSize vb_offset = image_idx * sub_buf_stride;
 
     vkCmdBindVertexBuffers(cmdbuf,
@@ -2047,6 +2116,20 @@ bool GeometryEditor::render_grid(VkCommandBuffer cmdbuf,
               1,  // instanceCount
               0,  // firstVertex
               0); // firstInstance
+
+    vkCmdEndRendering(cmdbuf);
+
+    // Transition color output to shader-read layout for the GUI
+    static const Image::Transition gui_image_layout = {
+        VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+        VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+        VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+        VK_ACCESS_2_SHADER_READ_BIT,
+        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
+    };
+    res.color.barrier(gui_image_layout);
+
+    send_barrier(cmdbuf);
 
     return true;
 }
