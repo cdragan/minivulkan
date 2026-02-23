@@ -582,7 +582,7 @@ mat4 vmath::projection(float aspect, float fov_radians, float near_plane, float 
     //             |
     //             |
     //     h/2     |    h/2
-    //  *----------+----------*----- near plane: pixel closer than this are not drawn
+    //  *----------+----------*----- near plane: pixels closer than this are not drawn
     //  :\         |         /:
     //  : \        |        / :
     //  :  \       |       /  :

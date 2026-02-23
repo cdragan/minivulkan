@@ -1222,7 +1222,6 @@ void configure_viewport_and_scissor(VkViewport* viewport,
                                     uint32_t    viewport_width,
                                     uint32_t    viewport_height)
 {
-    mstd::mem_zero(viewport, sizeof *viewport);
     mstd::mem_zero(scissor,  sizeof *scissor);
 
     // Note: Flip Y coordinate.  The world coordinate system assumes Y going from
@@ -1254,12 +1253,14 @@ void configure_viewport_and_scissor(VkViewport* viewport,
             scissor->extent.width  = width;
             scissor->extent.height = height;
 
+            viewport->x      = 0;
             viewport->y      = static_cast<float>((viewport_height + height) / 2);
             viewport->width  = static_cast<float>(width);
             viewport->height = -static_cast<float>(height);
         }
     }
     else {
+        viewport->x      = 0;
         viewport->y      = static_cast<float>(viewport_height);
         viewport->width  = static_cast<float>(viewport_width);
         viewport->height = -static_cast<float>(viewport_height);

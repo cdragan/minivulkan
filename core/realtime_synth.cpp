@@ -992,7 +992,7 @@ static void render_audio_step()
         ShaderParams::Oscillator& param = get_param<ShaderParams::Oscillator>(cur_param_offs);
 
         const float note_pitch  = static_cast<float>(static_cast<int>(oscillator.note) - 69);
-        const float note_freq   = (oscillator.freq_mult * 440.0f) * mstd::exp2((note_pitch + oscillator.pitch) / 12.f);
+        const float note_freq   = static_cast<float>(oscillator.freq_mult * 440) * mstd::exp2((note_pitch + oscillator.pitch) / 12.f);
         const float phase_step  = (static_cast<float>(rt_step_samples) * note_freq) / static_cast<float>(Synth::rt_sampling_rate);
 
         param.out_sound_offs  = oscillator.osc_output_offs / 4;
