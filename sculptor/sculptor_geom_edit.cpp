@@ -1424,10 +1424,10 @@ bool GeometryEditor::draw_frame(VkCommandBuffer cmdbuf, uint32_t image_idx)
         return false;
 
     // Draw G-buffer.  This is several output attachments:
-    // - Object ID (R16_UINT or R32_UINT) - this is quite important
-    // - Depth (D32_SFLOAT) - use viewport location and inverse projXview
-    //   matrix to restore world position coordinates
-    // - Normal (A2R10G10B10_UNORM_PACK32)
+    // - Object ID (R16_UINT or R32_UINT) - e.g. which face is rendered at which pixel
+    // - Normal (A2R10G10B10_UNORM_PACK32) - surface normal at each screen pixel
+    // - Depth (D32_SFLOAT) - the normal depth/stencil attachment, in the lihgting pass we
+    //   use viewport location and inverse projXview matrix to restore world position coordinates
     if ( ! draw_geometry_pass(cmdbuf, view, image_idx))
         return false;
 
@@ -1435,7 +1435,7 @@ bool GeometryEditor::draw_frame(VkCommandBuffer cmdbuf, uint32_t image_idx)
     // shader to each output pixel.  Use object ID from G-buffer and read
     // the selection state from object state buffer/data, to select color.
     //
-    // TODO Edge outlines for patches can be drawn by using object ID from G-buffer
+    // Edge outlines for patches are drawn by using object ID from G-buffer
     // to detect boundaries of patches.
     if ( ! draw_lighting_pass(cmdbuf, view, image_idx))
         return false;
@@ -1446,127 +1446,6 @@ bool GeometryEditor::draw_frame(VkCommandBuffer cmdbuf, uint32_t image_idx)
 
     return true;
 }
-
-// G-buffer pass: renders obj_id (att 0) and normal (att 1) plus depth
-static VkRenderingAttachmentInfo gbuf_color_att[] = {
-    {
-        VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
-        nullptr,
-        VK_NULL_HANDLE,                   // imageView (obj_id)
-        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-        VK_RESOLVE_MODE_NONE,
-        VK_NULL_HANDLE,                   // resolveImageView
-        VK_IMAGE_LAYOUT_UNDEFINED,        // resolveImageLayout
-        VK_ATTACHMENT_LOAD_OP_CLEAR,
-        VK_ATTACHMENT_STORE_OP_STORE,
-        make_clear_color(0, 0, 0, 0)
-    },
-    {
-        VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
-        nullptr,
-        VK_NULL_HANDLE,                   // imageView (normal)
-        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-        VK_RESOLVE_MODE_NONE,
-        VK_NULL_HANDLE,                   // resolveImageView
-        VK_IMAGE_LAYOUT_UNDEFINED,        // resolveImageLayout
-        VK_ATTACHMENT_LOAD_OP_CLEAR,
-        VK_ATTACHMENT_STORE_OP_STORE,
-        make_clear_color(0, 0, 0, 0)
-    },
-};
-
-static VkRenderingAttachmentInfo depth_att = {
-    VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
-    nullptr,
-    VK_NULL_HANDLE,                         // imageView
-    VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
-    VK_RESOLVE_MODE_NONE,
-    VK_NULL_HANDLE,                         // resolveImageView
-    VK_IMAGE_LAYOUT_UNDEFINED,              // resolveImageLayout
-    VK_ATTACHMENT_LOAD_OP_CLEAR,
-    VK_ATTACHMENT_STORE_OP_STORE,
-    make_clear_depth(0, 0)
-};
-
-static VkRenderingInfo gbuf_rendering_info = {
-    VK_STRUCTURE_TYPE_RENDERING_INFO,
-    nullptr,
-    0,                          // flags
-    { },                        // renderArea
-    1,                          // layerCount
-    0,                          // viewMask
-    2,                          // colorAttachmentCount
-    gbuf_color_att,
-    &depth_att,
-    nullptr                     // pStencilAttachment
-};
-
-// Lighting pass: renders to the color output only
-static VkRenderingAttachmentInfo light_color_att = {
-    VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
-    nullptr,
-    VK_NULL_HANDLE,                   // imageView
-    VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-    VK_RESOLVE_MODE_NONE,
-    VK_NULL_HANDLE,                   // resolveImageView
-    VK_IMAGE_LAYOUT_UNDEFINED,        // resolveImageLayout
-    VK_ATTACHMENT_LOAD_OP_DONT_CARE,
-    VK_ATTACHMENT_STORE_OP_STORE,
-    make_clear_color(0, 0, 0, 0)
-};
-
-static VkRenderingInfo light_rendering_info = {
-    VK_STRUCTURE_TYPE_RENDERING_INFO,
-    nullptr,
-    0,                          // flags
-    { },                        // renderArea
-    1,                          // layerCount
-    0,                          // viewMask
-    1,                          // colorAttachmentCount
-    &light_color_att,
-    nullptr,                    // pDepthAttachment
-    nullptr                     // pStencilAttachment
-};
-
-// Grid pass: renders on top of lighting output, using the color attachment and depth for depth testing
-static VkRenderingAttachmentInfo grid_color_att = {
-    VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
-    nullptr,
-    VK_NULL_HANDLE,                   // imageView (filled below)
-    VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-    VK_RESOLVE_MODE_NONE,
-    VK_NULL_HANDLE,                   // resolveImageView
-    VK_IMAGE_LAYOUT_UNDEFINED,        // resolveImageLayout
-    VK_ATTACHMENT_LOAD_OP_LOAD,
-    VK_ATTACHMENT_STORE_OP_STORE,
-    make_clear_color(0, 0, 0, 0)
-};
-
-static VkRenderingAttachmentInfo grid_depth_att = {
-    VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
-    nullptr,
-    VK_NULL_HANDLE,                              // imageView (filled below)
-    VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL,
-    VK_RESOLVE_MODE_NONE,
-    VK_NULL_HANDLE,                              // resolveImageView
-    VK_IMAGE_LAYOUT_UNDEFINED,                   // resolveImageLayout
-    VK_ATTACHMENT_LOAD_OP_LOAD,
-    VK_ATTACHMENT_STORE_OP_DONT_CARE,
-    make_clear_depth(0, 0)
-};
-
-static VkRenderingInfo grid_rendering_info = {
-    VK_STRUCTURE_TYPE_RENDERING_INFO,
-    nullptr,
-    0,                          // flags
-    { },                        // renderArea
-    1,                          // layerCount
-    0,                          // viewMask
-    1,                          // colorAttachmentCount
-    &grid_color_att,
-    &grid_depth_att,
-    nullptr                     // pStencilAttachment
-};
 
 static const Image::Transition render_viewport_layout = {
     VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
@@ -1598,10 +1477,65 @@ bool GeometryEditor::draw_geometry_pass(VkCommandBuffer cmdbuf,
 
     send_barrier(cmdbuf);
 
+    static VkRenderingAttachmentInfo gbuf_color_att[] = {
+        // Object ID attachment
+        {
+            VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+            nullptr,
+            VK_NULL_HANDLE,                   // imageView (obj_id)
+            VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+            VK_RESOLVE_MODE_NONE,
+            VK_NULL_HANDLE,                   // resolveImageView
+            VK_IMAGE_LAYOUT_UNDEFINED,        // resolveImageLayout
+            VK_ATTACHMENT_LOAD_OP_CLEAR,
+            VK_ATTACHMENT_STORE_OP_STORE,
+            make_clear_color(0, 0, 0, 0)
+        },
+        // Normal attachment
+        {
+            VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+            nullptr,
+            VK_NULL_HANDLE,                   // imageView (normal)
+            VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+            VK_RESOLVE_MODE_NONE,
+            VK_NULL_HANDLE,                   // resolveImageView
+            VK_IMAGE_LAYOUT_UNDEFINED,        // resolveImageLayout
+            VK_ATTACHMENT_LOAD_OP_CLEAR,
+            VK_ATTACHMENT_STORE_OP_STORE,
+            make_clear_color(0, 0, 0, 0)
+        },
+    };
+
     gbuf_color_att[0].imageView = res.obj_id.get_view();
     gbuf_color_att[1].imageView = res.normal.get_view();
 
+    static VkRenderingAttachmentInfo depth_att = {
+        VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+        nullptr,
+        VK_NULL_HANDLE,                         // imageView
+        VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+        VK_RESOLVE_MODE_NONE,
+        VK_NULL_HANDLE,                         // resolveImageView
+        VK_IMAGE_LAYOUT_UNDEFINED,              // resolveImageLayout
+        VK_ATTACHMENT_LOAD_OP_CLEAR,
+        VK_ATTACHMENT_STORE_OP_STORE,
+        make_clear_depth(0, 0)
+    };
+
     depth_att.imageView = res.depth.get_view();
+
+    static VkRenderingInfo gbuf_rendering_info = {
+        VK_STRUCTURE_TYPE_RENDERING_INFO,
+        nullptr,
+        0,                          // flags
+        { },                        // renderArea
+        1,                          // layerCount
+        0,                          // viewMask
+        2,                          // colorAttachmentCount
+        gbuf_color_att,
+        &depth_att,
+        nullptr                     // pStencilAttachment
+    };
 
     gbuf_rendering_info.renderArea.offset        = { 0, 0 };
     gbuf_rendering_info.renderArea.extent.width  = dst_view.width;
@@ -1649,7 +1583,33 @@ bool GeometryEditor::draw_lighting_pass(VkCommandBuffer cmdbuf,
 
     send_barrier(cmdbuf);
 
+    static VkRenderingAttachmentInfo light_color_att = {
+        VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+        nullptr,
+        VK_NULL_HANDLE,                   // imageView
+        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+        VK_RESOLVE_MODE_NONE,
+        VK_NULL_HANDLE,                   // resolveImageView
+        VK_IMAGE_LAYOUT_UNDEFINED,        // resolveImageLayout
+        VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+        VK_ATTACHMENT_STORE_OP_STORE,
+        make_clear_color(0, 0, 0, 0)
+    };
+
     light_color_att.imageView = res.color.get_view();
+
+    static VkRenderingInfo light_rendering_info = {
+        VK_STRUCTURE_TYPE_RENDERING_INFO,
+        nullptr,
+        0,                          // flags
+        { },                        // renderArea
+        1,                          // layerCount
+        0,                          // viewMask
+        1,                          // colorAttachmentCount
+        &light_color_att,
+        nullptr,                    // pDepthAttachment
+        nullptr                     // pStencilAttachment
+    };
 
     light_rendering_info.renderArea.offset        = { 0, 0 };
     light_rendering_info.renderArea.extent.width  = dst_view.width;
@@ -1720,9 +1680,6 @@ bool GeometryEditor::draw_lighting_pass(VkCommandBuffer cmdbuf,
 
     vkCmdEndRendering(cmdbuf);
 
-    // Color remains in COLOR_ATTACHMENT_OPTIMAL for the grid pass which follows.
-    // The grid pass is responsible for transitioning color to SHADER_READ_ONLY_OPTIMAL.
-
     return true;
 }
 
@@ -1782,18 +1739,7 @@ bool GeometryEditor::draw_selection(VkCommandBuffer cmdbuf,
 
     // TODO update scissor
 
-    light_color_att.imageView  = res.color.get_view();
-    light_color_att.clearValue = make_clear_color(0.2f, 0.2f, 0.2f, 1);
-    light_color_att.loadOp     = VK_ATTACHMENT_LOAD_OP_CLEAR;
-    light_color_att.storeOp    = VK_ATTACHMENT_STORE_OP_STORE;
-    depth_att.imageView        = res.depth.get_view();
-    depth_att.loadOp           = VK_ATTACHMENT_LOAD_OP_CLEAR;
-    depth_att.storeOp          = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-    light_rendering_info.pDepthAttachment = &depth_att;
-    light_rendering_info.renderArea = scissor;
-    d_printf("%u %u %u %u\n", light_rendering_info.renderArea.offset.x, light_rendering_info.renderArea.offset.y, light_rendering_info.renderArea.extent.width, light_rendering_info.renderArea.extent.height);
-
-    vkCmdBeginRendering(cmdbuf, &light_rendering_info);
+    //vkCmdBeginRendering(cmdbuf, &light_rendering_info);
 
     vkCmdSetViewport(cmdbuf, 0, 1, &viewport);
     vkCmdSetScissor(cmdbuf, 0, 1, &scissor);
@@ -2065,8 +2011,49 @@ bool GeometryEditor::render_grid(VkCommandBuffer cmdbuf,
 
     send_barrier(cmdbuf);
 
-    grid_color_att.imageView                     = res.color.get_view();
-    grid_depth_att.imageView                     = res.depth.get_view();
+    static VkRenderingAttachmentInfo grid_color_att = {
+        VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+        nullptr,
+        VK_NULL_HANDLE,                   // imageView (filled below)
+        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+        VK_RESOLVE_MODE_NONE,
+        VK_NULL_HANDLE,                   // resolveImageView
+        VK_IMAGE_LAYOUT_UNDEFINED,        // resolveImageLayout
+        VK_ATTACHMENT_LOAD_OP_LOAD,
+        VK_ATTACHMENT_STORE_OP_STORE,
+        make_clear_color(0, 0, 0, 0)
+    };
+
+    grid_color_att.imageView = res.color.get_view();
+
+    static VkRenderingAttachmentInfo grid_depth_att = {
+        VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+        nullptr,
+        VK_NULL_HANDLE,                              // imageView (filled below)
+        VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL,
+        VK_RESOLVE_MODE_NONE,
+        VK_NULL_HANDLE,                              // resolveImageView
+        VK_IMAGE_LAYOUT_UNDEFINED,                   // resolveImageLayout
+        VK_ATTACHMENT_LOAD_OP_LOAD,
+        VK_ATTACHMENT_STORE_OP_DONT_CARE,
+        make_clear_depth(0, 0)
+    };
+
+    grid_depth_att.imageView = res.depth.get_view();
+
+    static VkRenderingInfo grid_rendering_info = {
+        VK_STRUCTURE_TYPE_RENDERING_INFO,
+        nullptr,
+        0,                          // flags
+        { },                        // renderArea
+        1,                          // layerCount
+        0,                          // viewMask
+        1,                          // colorAttachmentCount
+        &grid_color_att,
+        &grid_depth_att,
+        nullptr                     // pStencilAttachment
+    };
+
     grid_rendering_info.renderArea.offset        = { 0, 0 };
     grid_rendering_info.renderArea.extent.width  = dst_view.width;
     grid_rendering_info.renderArea.extent.height = dst_view.height;
