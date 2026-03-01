@@ -15,7 +15,8 @@ void Buffer::free()
 
     VK_FUNCTION(vkDestroyBuffer)(vk_dev, buffer, nullptr);
 
-    heap->free_memory(offset, size);
+    if (size)
+        heap->free_memory(offset, size);
 
     mstd::mem_zero(this, sizeof(*this));
 }
