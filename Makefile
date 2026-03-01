@@ -581,14 +581,14 @@ $$(call OBJ_FROM_SRC,$1): $1 | $$(out_dir)
 	$$(CXX) $$(CFLAGS) $$(LTO_CFLAGS) $$(CXXFLAGS) -c $$(call COMPILER_OUTPUT,$$@) $$<
 endef
 
-$(foreach file, $(filter %.cpp, $(all_src_files)), $(eval $(call CPP_RULE,$(file))))
+$(foreach file, $(sort $(filter %.cpp, $(all_src_files))), $(eval $(call CPP_RULE,$(file))))
 
 define ASM_RULE
 $$(call ASM_FROM_SRC,$1): $1 | $$(out_dir)
 	$$(CXX) $$(CFLAGS) $$(CXXFLAGS) $$(ASM_SYNTAX) -S $$(call COMPILER_OUTPUT,$$@) $$<
 endef
 
-$(foreach file, $(filter %.cpp, $(all_src_files)), $(eval $(call ASM_RULE,$(file))))
+$(foreach file, $(sort $(filter %.cpp, $(all_src_files))), $(eval $(call ASM_RULE,$(file))))
 
 $(foreach file, $(filter-out $(imgui_src_files) $(libpng_src_files) $(zlib_src_files), $(all_src_files)), $(call TARGET_FILES, $(file))): CFLAGS += $(WFLAGS)
 

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: MIT
 # SPDX-FileCopyrightText: Copyright (c) 2021-2026 Chris Dragan
 
-gui_project_name = sculptor
+#gui_project_name = synth
 
 shader_files += synth_fir_coeff.comp.glsl
 shader_files += synth_oscillator.comp.glsl
