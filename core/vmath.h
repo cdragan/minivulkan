@@ -34,6 +34,8 @@ static inline constexpr T degrees(T rad)
     return rad * T{to_degrees};
 }
 
+float tan(float radians);
+
 template<unsigned dim> struct vec;
 struct quat;
 struct mat3;
