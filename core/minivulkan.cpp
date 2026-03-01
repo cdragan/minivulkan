@@ -1222,7 +1222,7 @@ void configure_viewport_and_scissor(VkViewport* viewport,
                                     uint32_t    viewport_width,
                                     uint32_t    viewport_height)
 {
-    mstd::mem_zero(scissor,  sizeof *scissor);
+    mstd::mem_zero(scissor, sizeof *scissor);
 
     // Note: Flip Y coordinate.  The world coordinate system assumes Y going from
     // bottom to top, but in Vulkan screen-space Y coordinate goes from top to bottom.
@@ -1268,7 +1268,6 @@ void configure_viewport_and_scissor(VkViewport* viewport,
         scissor->extent.width  = viewport_width;
         scissor->extent.height = viewport_height;
     }
-
 }
 
 void configure_viewport_and_scissor(VkViewport* viewport,
