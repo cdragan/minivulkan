@@ -54,10 +54,24 @@ bool Sculptor::create_material_layouts()
                 nullptr
             },
             {
-                4, // binding 4: storrage buffer with vertex buffer for edges
+                4, // binding 4: storage buffer with vertex buffer for edges
                 VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
                 1,
                 VK_SHADER_STAGE_VERTEX_BIT,
+                nullptr
+            },
+            {
+                5, // binding 5: selection state buffer (packed uint8 per object)
+                VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                1,
+                VK_SHADER_STAGE_FRAGMENT_BIT,
+                nullptr
+            },
+            {
+                6, // binding 6: per-frame global state (selection rect, flags)
+                VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+                1,
+                VK_SHADER_STAGE_FRAGMENT_BIT,
                 nullptr
             },
         };
@@ -130,6 +144,27 @@ bool Sculptor::create_material_layouts()
             {
                 4, // binding 4: depth buffer
                 VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                1,
+                VK_SHADER_STAGE_FRAGMENT_BIT,
+                nullptr
+            },
+            {
+                5, // binding 5: selection state buffer (packed uint8 per object)
+                VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                1,
+                VK_SHADER_STAGE_FRAGMENT_BIT,
+                nullptr
+            },
+            {
+                6, // binding 6: per-frame global state (selection rect, flags)
+                VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+                1,
+                VK_SHADER_STAGE_FRAGMENT_BIT,
+                nullptr
+            },
+            {
+                7, // binding 7: hover world position output (written at mouse cursor pixel)
+                VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
                 1,
                 VK_SHADER_STAGE_FRAGMENT_BIT,
                 nullptr
@@ -351,9 +386,6 @@ bool Sculptor::create_material(const MaterialInfo& mat_info, VkPipeline* pipelin
         0,          // minDepthBounds
         0           // maxDepthBounds
     };
-    depth_stencil_state.depthTestEnable  = mat_info.depth_test;
-    depth_stencil_state.depthWriteEnable = mat_info.depth_write;
-
     static VkPipelineColorBlendAttachmentState color_blend_att[] = {
         {
             .blendEnable         = VK_FALSE,
@@ -399,6 +431,21 @@ bool Sculptor::create_material(const MaterialInfo& mat_info, VkPipeline* pipelin
 
     static_assert(std::size(color_blend_att) == std::extent_v<decltype(MaterialInfo::color_formats)>);
 
+    for (VkPipelineColorBlendAttachmentState& att : color_blend_att) {
+        if (mat_info.alpha_blend) {
+            att.blendEnable         = VK_TRUE;
+            att.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+            att.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+            att.colorBlendOp        = VK_BLEND_OP_ADD;
+            att.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+            att.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+            att.alphaBlendOp        = VK_BLEND_OP_ADD;
+        }
+        else {
+            att.blendEnable = VK_FALSE;
+        }
+    }
+
     uint32_t num_color_attachments = 0;
     while (num_color_attachments < std::size(mat_info.color_formats) &&
            mat_info.color_formats[num_color_attachments] != VK_FORMAT_DISABLED)
@@ -418,7 +465,9 @@ bool Sculptor::create_material(const MaterialInfo& mat_info, VkPipeline* pipelin
 
     static VkDynamicState dynamic_states[] = {
         VK_DYNAMIC_STATE_VIEWPORT,
-        VK_DYNAMIC_STATE_SCISSOR
+        VK_DYNAMIC_STATE_SCISSOR,
+        VK_DYNAMIC_STATE_DEPTH_TEST_ENABLE,
+        VK_DYNAMIC_STATE_DEPTH_WRITE_ENABLE
     };
 
     static VkPipelineDynamicStateCreateInfo dynamic_state = {
@@ -447,7 +496,7 @@ bool Sculptor::create_material(const MaterialInfo& mat_info, VkPipeline* pipelin
         VK_FORMAT_UNDEFINED     // stencilAttachmentFormat
     };
     rendering_info.colorAttachmentCount  = num_color_attachments;
-    rendering_info.depthAttachmentFormat = (mat_info.depth_test || mat_info.depth_write) ? vk_depth_format : VK_FORMAT_UNDEFINED;
+    rendering_info.depthAttachmentFormat = mat_info.use_depth ? vk_depth_format : VK_FORMAT_UNDEFINED;
 
     static VkGraphicsPipelineCreateInfo pipeline_create_info = {
         VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,

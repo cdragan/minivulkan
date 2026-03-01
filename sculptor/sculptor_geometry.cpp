@@ -8,8 +8,6 @@
 
 #include <iterator>
 
-constexpr uint32_t tess_level           = 3; // TODO
-
 constexpr uint32_t max_vertices         = 65536;
 constexpr uint32_t max_indices          = 65536;
 constexpr uint32_t max_face_indices     = 43008;
@@ -532,6 +530,8 @@ void Sculptor::Geometry::write_edge_vertices_descriptor(VkDescriptorBufferInfo* 
 
 void Sculptor::Geometry::render(VkCommandBuffer cmd_buf)
 {
+    assert( ! dirty);
+
     const VkDeviceSize vb_offset = gpu_vertices_offset;
     vkCmdBindVertexBuffers(cmd_buf,
                            0, // firstBinding
@@ -554,6 +554,8 @@ void Sculptor::Geometry::render(VkCommandBuffer cmd_buf)
 
 void Sculptor::Geometry::render_vertices(VkCommandBuffer cmd_buf)
 {
+    assert( ! dirty);
+
     vkCmdDraw(cmd_buf,
               4,                // vertexCount
               num_vertices,     // instanceCount

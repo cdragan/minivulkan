@@ -120,9 +120,12 @@
     X(vkCmdPushConstants) \
     X(vkCmdSetViewport) \
     X(vkCmdSetScissor) \
+    X(vkCmdSetDepthTestEnable) \
+    X(vkCmdSetDepthWriteEnable) \
     X(vkCmdDraw) \
     X(vkCmdDrawIndexed) \
     X(vkCmdPipelineBarrier2) \
+    X(vkCmdUpdateBuffer) \
     X(vkCmdFillBuffer) \
     X(vkCmdCopyBuffer) \
     X(vkCmdCopyImage) \
@@ -227,9 +230,12 @@ enum e_device_functions {
 #define vkCmdPushConstants                        SELECT_VK_FUNCTION(device,   vkCmdPushConstants)
 #define vkCmdSetViewport                          SELECT_VK_FUNCTION(device,   vkCmdSetViewport)
 #define vkCmdSetScissor                           SELECT_VK_FUNCTION(device,   vkCmdSetScissor)
+#define vkCmdSetDepthTestEnable                   SELECT_VK_FUNCTION(device,   vkCmdSetDepthTestEnable)
+#define vkCmdSetDepthWriteEnable                  SELECT_VK_FUNCTION(device,   vkCmdSetDepthWriteEnable)
 #define vkCmdDraw                                 SELECT_VK_FUNCTION(device,   vkCmdDraw)
 #define vkCmdDrawIndexed                          SELECT_VK_FUNCTION(device,   vkCmdDrawIndexed)
 #define vkCmdPipelineBarrier2                     SELECT_VK_FUNCTION(device,   vkCmdPipelineBarrier2)
+#define vkCmdUpdateBuffer                         SELECT_VK_FUNCTION(device,   vkCmdUpdateBuffer)
 #define vkCmdFillBuffer                           SELECT_VK_FUNCTION(device,   vkCmdFillBuffer)
 #define vkCmdCopyBuffer                           SELECT_VK_FUNCTION(device,   vkCmdCopyBuffer)
 #define vkCmdCopyImage                            SELECT_VK_FUNCTION(device,   vkCmdCopyImage)

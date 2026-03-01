@@ -140,7 +140,21 @@ namespace {
     enum MaterialsForShaders {
         mat_grid,
         mat_vertex_sel,
+        mat_wireframe,
         num_materials
+    };
+
+    enum FrameFlags : uint32_t {
+        frame_flag_selection_active = 1u,
+        frame_flag_wireframe_mode   = 2u,
+    };
+
+    struct FrameData {
+        vmath::vec2 selection_rect_min;
+        vmath::vec2 selection_rect_max;
+        vmath::vec2 mouse_pos;
+        uint32_t    flags;
+        uint32_t    pad[1];
     };
 
     struct Transforms {
@@ -152,6 +166,7 @@ namespace {
         vmath::vec2 pixel_dim;
     };
 
+    constexpr float    fov_radians             = vmath::radians(30.0f);
     constexpr uint32_t transforms_per_viewport = 1;
     constexpr float    int16_scale             = 32767.0f;
     constexpr uint32_t max_grid_lines          = 4096;
@@ -173,6 +188,14 @@ namespace {
         TOOLBAR_BUTTONS
 #       undef X
     };
+
+    // Bits used to determine state of an object
+    enum ObjectState : uint8_t {
+        // Object is selected
+        obj_selected = 1,
+        // Mouse is over the object, or the object is inside selection rectangle
+        obj_hovered  = 2,
+    };
 }
 
 namespace Sculptor {
@@ -189,6 +212,77 @@ void GeometryEditor::Camera::move(const vmath::vec3& delta)
     const vmath::vec3 fixed_pos = vmath::max(-max_pos, vmath::min(moved_pos, max_pos));
     if (fixed_pos == moved_pos)
         pos = fixed_pos;
+}
+
+GeometryEditor::Camera GeometryEditor::Camera::get_rotated_camera() const
+{
+    Camera camera{*this};
+
+    if (camera.pivot) {
+        const vmath::vec3 cam_vec = camera.pos - *camera.pivot;
+
+        const vmath::vec3 cam_pos_rot_v{camera.rot_pitch, camera.rot_yaw, 0.0f};
+        const vmath::quat cam_pos_rot = vmath::quat::from_euler(vmath::radians(cam_pos_rot_v));
+
+        camera.pos    = *camera.pivot + cam_pos_rot.rotate(cam_vec);
+        camera.pitch += camera.rot_pitch;
+        camera.yaw   += camera.rot_yaw;
+
+        camera.pivot = std::nullopt;
+    }
+
+    return camera;
+}
+
+std::optional<vmath::vec3> GeometryEditor::read_mouse_world_pos(const View& src_view, uint32_t image_idx) const
+{
+    std::optional<vmath::vec3> ret;
+
+    const float* const hover = src_view.res[image_idx].hover_pos_host_buf.get_ptr<float>();
+
+    if (hover[3] > 0.5f)
+        ret = vmath::vec3{hover[0], hover[1], hover[2]};
+    else
+        ret = std::nullopt;
+
+    return ret;
+}
+
+std::optional<vmath::vec3> GeometryEditor::calc_grid_world_pos(const View& src_view) const
+{
+    if (src_view.width == 0 || src_view.height == 0)
+        return std::nullopt;
+
+    // TODO implement for other view types
+    if (src_view.view_type != ViewType::free_moving)
+        return std::nullopt;
+
+    const Camera      camera = src_view.camera[static_cast<int>(ViewType::free_moving)].get_rotated_camera();
+    const vmath::quat q      = camera.get_perspective_rotation_quat();
+
+    const vmath::vec3 cam_forward = q.rotate(vmath::vec3{0, 0, 1});
+    const vmath::vec3 cam_right   = q.rotate(vmath::vec3{1, 0, 0});
+    const vmath::vec3 cam_up      = q.rotate(vmath::vec3{0, 1, 0});
+
+    // Convert mouse position to NDC (note: Y is inverted)
+    const float aspect = static_cast<float>(src_view.width) / static_cast<float>(src_view.height);
+    const float ndc_x  = src_view.mouse_pos.x / static_cast<float>(src_view.width)  * 2.0f - 1.0f;
+    const float ndc_y  = 1.0f - src_view.mouse_pos.y / static_cast<float>(src_view.height) * 2.0f;
+
+    const float fov_tan = vmath::tan(fov_radians / 2);
+    const vmath::vec3 ray_dir = cam_forward
+                              + cam_right * (ndc_x * aspect * fov_tan)
+                              + cam_up    * (ndc_y * fov_tan);
+
+    if (std::abs(ray_dir.y) < 0.001f)
+        return std::nullopt;
+
+    const float t = -camera.pos.y / ray_dir.y;
+
+    if (t < 0.0f)
+        return std::nullopt;
+
+    return camera.pos + ray_dir * t;
 }
 
 const char* GeometryEditor::get_editor_name() const
@@ -254,13 +348,6 @@ bool GeometryEditor::alloc_view_resources(View*     dst_view,
     if (dst_view->res[0].color.get_image())
         return true;
 
-    const uint32_t new_host_sel_size = mstd::align_up(width, 1024U) * mstd::align_up(height, 1024U);
-    const bool     update_host_sel   = new_host_sel_size > dst_view->host_sel_size;
-    if (update_host_sel) {
-        dst_view->host_sel_size = new_host_sel_size;
-        d_printf("Updating host selection feedback surface\n");
-    }
-
     dst_view->width  = width;
     dst_view->height = height;
 
@@ -324,36 +411,6 @@ bool GeometryEditor::alloc_view_resources(View*     dst_view,
         depth_info.height = height;
         depth_info.format = vk_depth_format;
 
-        // TODO Delete this
-        static ImageInfo select_query_info {
-            0, // width
-            0, // height
-            VK_FORMAT_R32_UINT,
-            1, // mip_levels
-            VK_IMAGE_ASPECT_COLOR_BIT,
-            VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
-            Usage::device_only
-        };
-
-        select_query_info.width  = width;
-        select_query_info.height = height;
-
-        static ImageInfo select_query_host_info {
-            0, // width
-            0, // height
-            VK_FORMAT_R32_UINT,
-            1, // mip_levels
-            VK_IMAGE_ASPECT_COLOR_BIT,
-            VK_IMAGE_USAGE_TRANSFER_DST_BIT,
-            Usage::host_only
-        };
-
-        select_query_host_info.width  = mstd::align_up(width,  1024U);
-        select_query_host_info.height = mstd::align_up(height, 1024U);
-
-        if (update_host_sel)
-            res.host_select_feedback.free();
-
         if ( ! res.color.allocate(color_info, {"view color output", i_img}))
             return false;
 
@@ -366,32 +423,42 @@ bool GeometryEditor::alloc_view_resources(View*     dst_view,
         if ( ! res.depth.allocate(depth_info, {"view depth", i_img}))
             return false;
 
-        if ( ! res.selection_buffer.get_buffer()) {
-            if ( ! res.selection_buffer.allocate(Usage::device_only,
-                                                 max_objects,
-                                                 VK_FORMAT_R8_UINT,
-                                                 VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
-                                                     VK_BUFFER_USAGE_STORAGE_TEXEL_BUFFER_BIT |
-                                                     VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
-                                                     VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-                                                 {"view selection", i_img}))
+        if ( ! res.frame_data.allocate(Usage::device_only,
+                                       sizeof(FrameData),
+                                       VK_FORMAT_UNDEFINED,
+                                       VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                                       {"frame data", i_img}))
+            return false;
+
+        if ( ! res.sel_host_buf.allocated()) {
+            if ( ! res.sel_host_buf.allocate(Usage::host_only,
+                                             max_objects,
+                                             VK_FORMAT_UNDEFINED,
+                                             VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                                             {"selection host buffer", i_img}))
                 return false;
-            if ( ! res.host_selection_buffer.allocate(Usage::host_only,
-                                                      max_objects,
-                                                      VK_FORMAT_R8_UINT,
-                                                      VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
-                                                          VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-                                                      {"host view selection", i_img}))
+            mstd::mem_zero(res.sel_host_buf.get_ptr<uint8_t>(), max_objects);
+        }
+
+        if ( ! res.hover_pos_buf.allocated()) {
+            if ( ! res.hover_pos_buf.allocate(Usage::device_only,
+                                              sizeof(float) * 4,
+                                              VK_FORMAT_UNDEFINED,
+                                              VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                                              {"hover position buffer", i_img}))
                 return false;
         }
 
-        if ( ! res.select_feedback.allocate(select_query_info, {"view select feedback", i_img}))
-            return false;
-
-        if ( ! res.host_select_feedback.allocate(select_query_host_info, {"view host select feedback", i_img}))
-            return false;
-
-        res.selection_pending = false;
+        if ( ! res.hover_pos_host_buf.allocated()) {
+            static const float zeros[4] = {};
+            if ( ! res.hover_pos_host_buf.allocate(Usage::host_only,
+                                                   sizeof(float) * 4,
+                                                   VK_FORMAT_UNDEFINED,
+                                                   VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                                                   {"hover position host buffer", i_img}))
+                return false;
+            mstd::mem_copy(res.hover_pos_host_buf.get_ptr<float>(), zeros, sizeof(zeros));
+        }
 
         if (res.gui_texture) {
 
@@ -418,6 +485,9 @@ bool GeometryEditor::alloc_view_resources(View*     dst_view,
             image_info.imageView = res.color.get_view();
             write_desc.dstSet    = res.gui_texture;
 
+            // We don't use descriptor sets, put instead we use push descriptors.
+            // But ImGui relies on descriptor sets, so we need to explicitly load
+            // this Vulkan function here (which otherwise we don't want to load).
             VK_FUNCTION(vkUpdateDescriptorSets)(vk_dev, 1, &write_desc, 0, nullptr);
         }
         else {
@@ -451,10 +521,10 @@ void GeometryEditor::free_view_resources(View* dst_view)
         res.obj_id.free();
         res.normal.free();
         res.depth.free();
-        res.select_feedback.free();
-        res.host_select_feedback.free();
-
-        res.selection_pending = false;
+        res.frame_data.free();
+        res.sel_host_buf.free();
+        res.hover_pos_buf.free();
+        res.hover_pos_host_buf.free();
     }
 }
 
@@ -479,13 +549,45 @@ bool GeometryEditor::allocate_resources_once()
     if ( ! create_grid_buffer())
         return false;
 
-    view.camera[static_cast<int>(ViewType::free_moving)] = Camera{ { 0.0f, 0.01f, -0.2f }, 0.25f,    0.0f, 0.0f, 1.0f };
-    view.camera[static_cast<int>(ViewType::front)]       = Camera{ { 0.0f, 0.0f,   0.0f },  0.0f, 4096.0f, 0.0f, 0.0f };
-    view.camera[static_cast<int>(ViewType::back)]        = Camera{ { 0.0f, 0.0f,   0.0f },  0.0f, 4096.0f, 0.0f, 0.0f };
-    view.camera[static_cast<int>(ViewType::left)]        = Camera{ { 0.0f, 0.0f,   0.0f },  0.0f, 4096.0f, 0.0f, 0.0f };
-    view.camera[static_cast<int>(ViewType::right)]       = Camera{ { 0.0f, 0.0f,   0.0f },  0.0f, 4096.0f, 0.0f, 0.0f };
-    view.camera[static_cast<int>(ViewType::bottom)]      = Camera{ { 0.0f, 0.0f,   0.0f },  0.0f, 4096.0f, 0.0f, 0.0f };
-    view.camera[static_cast<int>(ViewType::top)]         = Camera{ { 0.0f, 0.0f,   0.0f },  0.0f, 4096.0f, 0.0f, 0.0f };
+    // Allocate selection buffer: max_objects bytes packed as uint32_t (4 objects per word)
+    constexpr uint32_t sel_buf_size = max_objects; // 1 byte per object
+    if ( ! sel_buf.allocate(Usage::device_only,
+                            sel_buf_size,
+                            VK_FORMAT_UNDEFINED,
+                            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+                                VK_BUFFER_USAGE_TRANSFER_DST_BIT |
+                                VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                            "selection buffer"))
+        return false;
+
+    // Create compute pipeline for clearing hover bits in sel_buf each frame
+    {
+        static const DescSetBindingInfo bindings[] = {
+            { 0, 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1 },
+            { 1, 0, 0, 0 }  // terminator: set_layout_id = num_layouts = 1
+        };
+
+        if ( ! create_compute_descriptor_set_layouts(bindings, 1, &sel_buf_ds_layout))
+            return false;
+
+        const ComputeShaderInfo shader_info = {
+            shader_sculptor_clear_hover_comp,
+            0 // no push constants
+        };
+
+        const VkDescriptorSetLayout ds_layouts[] = { sel_buf_ds_layout, VK_NULL_HANDLE };
+        if ( ! create_compute_shader(shader_info, ds_layouts, nullptr,
+                                     &sel_buf_pipe_layout, &clear_hover_pipe))
+            return false;
+    }
+
+    view.camera[static_cast<int>(ViewType::free_moving)] = Camera{ { 0.0f, 0.01f, -0.2f },    0.0f, 0.0f, 1.0f };
+    view.camera[static_cast<int>(ViewType::front)]       = Camera{ { 0.0f, 0.0f,   0.0f }, 4096.0f, 0.0f, 0.0f };
+    view.camera[static_cast<int>(ViewType::back)]        = Camera{ { 0.0f, 0.0f,   0.0f }, 4096.0f, 0.0f, 0.0f };
+    view.camera[static_cast<int>(ViewType::left)]        = Camera{ { 0.0f, 0.0f,   0.0f }, 4096.0f, 0.0f, 0.0f };
+    view.camera[static_cast<int>(ViewType::right)]       = Camera{ { 0.0f, 0.0f,   0.0f }, 4096.0f, 0.0f, 0.0f };
+    view.camera[static_cast<int>(ViewType::bottom)]      = Camera{ { 0.0f, 0.0f,   0.0f }, 4096.0f, 0.0f, 0.0f };
+    view.camera[static_cast<int>(ViewType::top)]         = Camera{ { 0.0f, 0.0f,   0.0f }, 4096.0f, 0.0f, 0.0f };
 
     toolbar_state.view_perspective = true;
 
@@ -544,8 +646,8 @@ bool GeometryEditor::create_materials()
         16,      // patch_control_points
         VK_POLYGON_MODE_FILL,
         VK_CULL_MODE_BACK_BIT,
-        true,    // depth_test
-        true,    // depth_write
+        true,    // use_depth
+        false,   // alpha_blend
         make_byte_color(0, 0, 0) // diffuse
     };
 
@@ -568,12 +670,36 @@ bool GeometryEditor::create_materials()
         16,      // patch_control_points
         VK_POLYGON_MODE_FILL,
         VK_CULL_MODE_BACK_BIT,
-        true,    // depth_test
-        true,    // depth_write
+        true,    // use_depth
+        false,   // alpha_blend
         make_byte_color(0, 0, 0) // diffuse
     };
 
     if ( ! create_material(gbuffer_mat_info, &gray_patch_gbuffer_mat))
+        return false;
+
+    static const MaterialInfo selection_mat_info = {
+        {
+            shader_sculptor_pass_through_vert,
+            shader_sculptor_selection_frag,
+            shader_bezier_surface_cubic_sculptor_tesc,
+            shader_bezier_surface_cubic_sculptor_tese
+        },
+        vertex_attributes,
+        0.0f,    // depth_bias
+        std::size(vertex_attributes),
+        sizeof(Sculptor::Geometry::Vertex),
+        { VK_FORMAT_DISABLED, VK_FORMAT_DISABLED, VK_FORMAT_DISABLED, VK_FORMAT_DISABLED },
+        VK_PRIMITIVE_TOPOLOGY_PATCH_LIST,
+        16,      // patch_control_points
+        VK_POLYGON_MODE_FILL,
+        VK_CULL_MODE_BACK_BIT,
+        true,    // use_depth
+        false,   // alpha_blend
+        make_byte_color(0, 0, 0) // diffuse
+    };
+
+    if ( ! create_material(selection_mat_info, &selection_mat))
         return false;
 
     static const MaterialInfo vertex_info = {
@@ -590,8 +716,8 @@ bool GeometryEditor::create_materials()
         0,       // patch_control_points
         VK_POLYGON_MODE_FILL,
         VK_CULL_MODE_BACK_BIT,
-        true,    // depth_test
-        false,   // depth_write
+        true,    // use_depth
+        false,   // alpha_blend
         make_byte_color(0.9372f, 0.9372f, 0.9568f) // diffuse
     };
 
@@ -613,14 +739,61 @@ bool GeometryEditor::create_materials()
         0,       // patch_control_points
         VK_POLYGON_MODE_FILL,
         VK_CULL_MODE_NONE,
-        true,    // depth_test
-        false,   // depth_write
+        true,    // use_depth
+        false,   // alpha_blend
         make_byte_color(0.333f, 0.333f, 0.333f) // diffuse
     };
 
     if ( ! Sculptor::create_material(grid_info, &grid_mat))
         return false;
     set_material_buf(grid_info, mat_grid);
+
+    static const MaterialInfo wireframe_mat_info = {
+        {
+            shader_bezier_line_cubic_sculptor_vert,
+            shader_sculptor_color_frag
+        },
+        nullptr, // vertex_attributes (uses vertex pulling from SSBOs at bindings 3 and 4)
+        0.0f,    // depth_bias
+        0,       // num_vertex_attributes
+        0,       // vertex_stride
+        { VK_FORMAT_UNDEFINED, VK_FORMAT_DISABLED, VK_FORMAT_DISABLED, VK_FORMAT_DISABLED },
+        VK_PRIMITIVE_TOPOLOGY_LINE_STRIP,
+        0,       // patch_control_points
+        VK_POLYGON_MODE_FILL,
+        VK_CULL_MODE_NONE,
+        false,   // use_depth (wireframe shows hidden edges too)
+        false,   // alpha_blend
+        make_byte_color(0.3f, 0.3f, 0.3f)
+    };
+
+    if ( ! Sculptor::create_material(wireframe_mat_info, &wireframe_mat))
+        return false;
+    set_material_buf(wireframe_mat_info, mat_wireframe);
+
+    static const MaterialInfo wireframe_tess_mat_info = {
+        {
+            shader_sculptor_pass_through_vert,
+            shader_sculptor_color_frag,
+            shader_bezier_surface_cubic_sculptor_tesc,
+            shader_bezier_surface_cubic_sculptor_tese
+        },
+        vertex_attributes,
+        0.0f,    // depth_bias
+        std::size(vertex_attributes),
+        sizeof(Sculptor::Geometry::Vertex),
+        { VK_FORMAT_UNDEFINED, VK_FORMAT_DISABLED, VK_FORMAT_DISABLED, VK_FORMAT_DISABLED },
+        VK_PRIMITIVE_TOPOLOGY_PATCH_LIST,
+        16,      // patch_control_points
+        VK_POLYGON_MODE_LINE,
+        VK_CULL_MODE_NONE,
+        false,   // use_depth: show hidden edges too
+        false,   // alpha_blend
+        make_byte_color(0.93f, 0.93f, 0.93f) // wireframe color
+    };
+
+    if ( ! Sculptor::create_material(wireframe_tess_mat_info, &wireframe_tess_mat))
+        return false;
 
     static const MaterialInfo lighting_mat_info = {
         {
@@ -636,9 +809,9 @@ bool GeometryEditor::create_materials()
         0,       // patch_control_points
         VK_POLYGON_MODE_FILL,
         VK_CULL_MODE_NONE,
-        false,   // depth_test
-        false,   // depth_write
-        make_byte_color(0, 0, 0) // diffuse
+        false,   // use_depth
+        true,    // alpha_blend: alpha=0 passes through wireframe/background, alpha=1 draws surface
+        make_byte_color(0, 0, 0) // diffuse (unused)
     };
 
     if ( ! Sculptor::create_material(lighting_mat_info, &lighting_mat, Sculptor::lighting_layout))
@@ -773,6 +946,16 @@ void GeometryEditor::gui_status_bar()
             ImGui::Text("%s", view_names[view_idx]);
             ImGui::Separator();
             ImGui::Text("Mouse: %dx%d", static_cast<int>(view.mouse_pos.x), static_cast<int>(view.mouse_pos.y));
+            if (view.mouse_world_pos) {
+                ImGui::Separator();
+                ImGui::Text("Hover: %.3f %.3f %.3f", view.mouse_world_pos->x, view.mouse_world_pos->y, view.mouse_world_pos->z);
+            }
+            const Camera& camera = view.camera[0];
+            if (camera.pivot) {
+                ImGui::Separator();
+                ImGui::Text("Pivot: %.3f %.3f %.3f yaw %.3f pitch %.3f",
+                            camera.pivot->x, camera.pivot->y, camera.pivot->z, camera.rot_yaw, camera.rot_pitch);
+            }
 
             ImGui::EndMenuBar();
         }
@@ -851,6 +1034,12 @@ void GeometryEditor::handle_mouse_actions(const UserInput& input, bool view_hove
         }
     }
 
+    // Finish rotation
+    if (mouse_action != Action::rotate) {
+        Camera& camera = view.camera[static_cast<int>(view.view_type)];
+        camera = camera.get_rotated_camera();
+    }
+
     if (has_captured_mouse()) {
         switch (mouse_action) {
 
@@ -865,17 +1054,31 @@ void GeometryEditor::handle_mouse_actions(const UserInput& input, bool view_hove
                     switch (view.view_type) {
 
                         case ViewType::free_moving:
-                            camera.yaw   += rot_scale_factor * input.mouse_pos_delta.x;
-                            camera.pitch += rot_scale_factor * input.mouse_pos_delta.y;
-                            camera.pitch  = std::min(std::max(camera.pitch, -90.0f), 90.0f);
+                            // Initiate rotation
+                            if (view.mouse_world_pos && ! camera.pivot) {
+                                camera.pivot     = *view.mouse_world_pos;
+                                camera.rot_yaw   = 0;
+                                camera.rot_pitch = 0;
+                            }
+                            {
+                                camera.rot_yaw += rot_scale_factor * input.mouse_pos_delta.x;
+
+                                // Make sure pitch doesn't exceed limits
+                                constexpr float max_pitch = 87.0f;
+                                const float pitch_delta = rot_scale_factor * input.mouse_pos_delta.y;
+                                const float old_pitch   = camera.pitch + camera.rot_pitch;
+                                const float new_pitch   = vmath::clamp(old_pitch + pitch_delta, -max_pitch, max_pitch);
+
+                                camera.rot_pitch += new_pitch - old_pitch;
+                            }
                             break;
 
                         default: {
                             // TODO switch to free_moving and apply rotation
                             constexpr float view_bounds        = 1.1f;
                             const     float ortho_scale_factor = static_cast<float>(view.height) * 0.0000001f;
-                            camera.pos.x = std::min(std::max(camera.pos.x - ortho_scale_factor * input.mouse_pos_delta.x, -view_bounds), view_bounds);
-                            camera.pos.y = std::min(std::max(camera.pos.y + ortho_scale_factor * input.mouse_pos_delta.y, -view_bounds), view_bounds);
+                            camera.pos.x = vmath::clamp(camera.pos.x - ortho_scale_factor * input.mouse_pos_delta.x, -view_bounds, view_bounds);
+                            camera.pos.y = vmath::clamp(camera.pos.y + ortho_scale_factor * input.mouse_pos_delta.y, -view_bounds, view_bounds);
                             break;
                         }
                     }
@@ -977,7 +1180,13 @@ void GeometryEditor::handle_mouse_actions(const UserInput& input, bool view_hove
 
             default:
                 assert(view.view_type == ViewType::free_moving);
-                camera.move(vmath::vec3{0, 0, input.wheel_delta * perspective_zoom_factor});
+                if (view.mouse_world_pos) {
+                    const float       zoom_frac = input.wheel_delta * perspective_zoom_factor;
+                    const vmath::vec3 to_target = *view.mouse_world_pos - camera.pos;
+                    camera.pos = camera.pos + to_target * zoom_frac;
+                } else {
+                    camera.move(vmath::vec3{0, 0, input.wheel_delta * perspective_zoom_factor});
+                }
                 break;
 
             case ViewType::front:
@@ -1366,6 +1575,13 @@ bool GeometryEditor::create_gui_frame(uint32_t image_idx, bool* need_realloc, co
 
     view.mouse_pos = local_input.abs_mouse_pos;
 
+    // Read mouse position from geometry feedback
+    view.mouse_world_pos = std::nullopt;
+    if (view.res[image_idx].hover_pos_host_buf.allocated())
+        view.mouse_world_pos = read_mouse_world_pos(view, image_idx);
+    if ( ! view.mouse_world_pos)
+        view.mouse_world_pos = calc_grid_world_pos(view);
+
     handle_mouse_actions(local_input, ImGui::IsItemHovered());
 
     const ImVec2 status_bar_pos = ImGui::GetCursorPos();
@@ -1413,25 +1629,36 @@ bool GeometryEditor::draw_frame(VkCommandBuffer cmdbuf, uint32_t image_idx)
     // * Draw vertices (including control vertices) and connectors (observe selection)
     // * In all cases observe selection and hover highlight
 
-    // Draw shallow or deep selection
-    // - Use scissor to limit drawing to the selection rectangle or to a small
-    //   square around cursor hotspot
-    // - Disable color writes
-    // - For shallow selection, enable depth buffer
-    // - Write hover state to the hover buffer
-    // - Turns into selection on the host based on mouse clicks
-    if ( ! draw_selection(cmdbuf, view, image_idx))
+    // Calculate and set up per-frame data
+    set_frame_data(cmdbuf, image_idx);
+
+    // Copy selection state from host to GPU, then clear hover bits in sel_buf (compute).
+    // Barriers issued here cover both the sel_buf transfer and the frame_data transfer.
+    // Surface hover detection is now performed inline in the G-buffer fragment shader
+    // using frame_data, so no separate selection geometry pass is needed.
+    if ( ! setup_selection(cmdbuf, image_idx))
         return false;
 
     // Draw G-buffer.  This is several output attachments:
-    // - Object ID (R16_UINT or R32_UINT) - e.g. which face is rendered at which pixel
+    // - Object ID (R16_UINT or R32_UINT) - e.g. which face is rendered at each pixel
     // - Normal (A2R10G10B10_UNORM_PACK32) - surface normal at each screen pixel
-    // - Depth (D32_SFLOAT) - the normal depth/stencil attachment, in the lihgting pass we
-    //   use viewport location and inverse projXview matrix to restore world position coordinates
+    // - Depth (D32_SFLOAT) - the normal depth/stencil attachment, in the lighting pass we
+    //   use viewport location and inverse proj*view matrix to restore world position coordinates
+    //
+    // The fragment shader also detects if the mouse hovers over any face (for shallow selection)
     if ( ! draw_geometry_pass(cmdbuf, view, image_idx))
         return false;
 
-    // Perform final rendering pass.  Use G-buffers and apply fragment
+    // If deep selection is enabled, e.g. in wireframe mode, render geometry inside
+    // selection rectangle to detect all hovered hidden faces
+    if ( ! draw_deep_selection(cmdbuf, view, image_idx))
+        return false;
+
+    // If wireframe mode is enabled, render wireframe for the geometry
+    if ( ! draw_wireframe_pass(cmdbuf, view, image_idx))
+        return false;
+
+    // Perform final rendering pass.  Use G-buffers as input and apply fragment
     // shader to each output pixel.  Use object ID from G-buffer and read
     // the selection state from object state buffer/data, to select color.
     //
@@ -1443,6 +1670,22 @@ bool GeometryEditor::draw_frame(VkCommandBuffer cmdbuf, uint32_t image_idx)
     // Render the grid
     if ( ! render_grid(cmdbuf, view, image_idx))
         return false;
+
+    // Copy selection buffer back to host for next frame
+    static const Buffer::Transition sel_buf_before_readback = {
+        VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+        VK_ACCESS_2_SHADER_READ_BIT,
+        VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+        VK_ACCESS_2_TRANSFER_READ_BIT
+    };
+    sel_buf.barrier(sel_buf_before_readback);
+
+    send_barrier(cmdbuf);
+
+    static const VkBufferCopy sel_copy_region = { 0, 0, max_objects };
+    vkCmdCopyBuffer(cmdbuf, sel_buf.get_buffer(),
+                    view.res[image_idx].sel_host_buf.get_buffer(),
+                    1, &sel_copy_region);
 
     return true;
 }
@@ -1543,7 +1786,13 @@ bool GeometryEditor::draw_geometry_pass(VkCommandBuffer cmdbuf,
 
     vkCmdBeginRendering(cmdbuf, &gbuf_rendering_info);
 
-    if ( ! render_geometry(cmdbuf, dst_view, image_idx, gray_patch_gbuffer_mat))
+    vkCmdBindPipeline(cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, gray_patch_gbuffer_mat);
+    vkCmdSetDepthTestEnable(cmdbuf, VK_TRUE);
+    vkCmdSetDepthWriteEnable(cmdbuf, VK_TRUE);
+
+    send_viewport_and_scissor(cmdbuf, dst_view.width, dst_view.height);
+
+    if ( ! render_geometry(cmdbuf, dst_view, image_idx))
         return false;
 
     vkCmdEndRendering(cmdbuf);
@@ -1579,7 +1828,38 @@ bool GeometryEditor::draw_lighting_pass(VkCommandBuffer cmdbuf,
 {
     Resources& res = dst_view.res[image_idx];
 
-    res.color.barrier(render_viewport_layout);
+    // Clear hover_pos_buf to zero so the shader only needs to write when there is a hit
+    vkCmdFillBuffer(cmdbuf, res.hover_pos_buf.get_buffer(), 0, sizeof(float) * 4, 0);
+
+    // Barrier: wait for sel_buf writes from geometry/deep selection passes before reading here.
+    // Also: hover_pos_buf fill must complete before the fragment shader writes to it.
+    static const Buffer::Transition sel_buf_for_lighting = {
+        VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+        VK_ACCESS_2_SHADER_WRITE_BIT,
+        VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+        VK_ACCESS_2_SHADER_READ_BIT
+    };
+    sel_buf.barrier(sel_buf_for_lighting);
+
+    static const Buffer::Transition hover_fill_to_shader = {
+        VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+        VK_ACCESS_2_TRANSFER_WRITE_BIT,
+        VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+        VK_ACCESS_2_SHADER_WRITE_BIT
+    };
+    res.hover_pos_buf.barrier(hover_fill_to_shader);
+
+    // Barrier: color attachment was written by wireframe pass; transition to COLOR_ATTACHMENT
+    // for the lighting pass load (it is already in COLOR_ATTACHMENT_OPTIMAL from wireframe pass,
+    // but we need to add a dependency on the previous color attachment write)
+    static const Image::Transition color_for_lighting = {
+        VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+        VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+        VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+        VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
+    };
+    res.color.barrier(color_for_lighting);
 
     send_barrier(cmdbuf);
 
@@ -1591,7 +1871,7 @@ bool GeometryEditor::draw_lighting_pass(VkCommandBuffer cmdbuf,
         VK_RESOLVE_MODE_NONE,
         VK_NULL_HANDLE,                   // resolveImageView
         VK_IMAGE_LAYOUT_UNDEFINED,        // resolveImageLayout
-        VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+        VK_ATTACHMENT_LOAD_OP_LOAD,       // preserve wireframe/background from wireframe pass
         VK_ATTACHMENT_STORE_OP_STORE,
         make_clear_color(0, 0, 0, 0)
     };
@@ -1672,7 +1952,45 @@ bool GeometryEditor::draw_lighting_pass(VkCommandBuffer cmdbuf,
     push_descriptor(cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, Sculptor::lighting_layout,
                     4, depth_image_info);
 
+    static VkDescriptorBufferInfo sel_buf_info = {
+        VK_NULL_HANDLE,
+        0,
+        0
+    };
+    sel_buf_info.buffer = sel_buf.get_buffer();
+    sel_buf_info.offset = 0;
+    sel_buf_info.range  = VK_WHOLE_SIZE;
+
+    push_descriptor(cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, Sculptor::lighting_layout,
+                    5, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, sel_buf_info);
+
+    static VkDescriptorBufferInfo frame_data_buf_info = {
+        VK_NULL_HANDLE,
+        0,
+        0
+    };
+    frame_data_buf_info.buffer = res.frame_data.get_buffer();
+    frame_data_buf_info.offset = 0;
+    frame_data_buf_info.range  = sizeof(FrameData);
+
+    push_descriptor(cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, Sculptor::lighting_layout,
+                    6, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, frame_data_buf_info);
+
+    static VkDescriptorBufferInfo hover_pos_buf_info = {
+        VK_NULL_HANDLE,
+        0,
+        0
+    };
+    hover_pos_buf_info.buffer = res.hover_pos_buf.get_buffer();
+    hover_pos_buf_info.offset = 0;
+    hover_pos_buf_info.range  = sizeof(float) * 4;
+
+    push_descriptor(cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, Sculptor::lighting_layout,
+                    7, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, hover_pos_buf_info);
+
     vkCmdBindPipeline(cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, lighting_mat);
+    vkCmdSetDepthTestEnable(cmdbuf, VK_FALSE);
+    vkCmdSetDepthWriteEnable(cmdbuf, VK_FALSE);
 
     send_viewport_and_scissor(cmdbuf, dst_view.width, dst_view.height);
 
@@ -1680,85 +1998,290 @@ bool GeometryEditor::draw_lighting_pass(VkCommandBuffer cmdbuf,
 
     vkCmdEndRendering(cmdbuf);
 
-    return true;
-}
-
-bool GeometryEditor::draw_selection(VkCommandBuffer cmdbuf,
-                                    View&           dst_view,
-                                    uint32_t        image_idx)
-{
-    if (image_idx != ~0u) return true; // TODO enable once this works
-
-    // TODO
-    const uint32_t num_objects = 1;
-
-    Resources& res = dst_view.res[image_idx];
-
-    // TODO clear hover bit on the CPU
-
-    if ( ! res.host_selection_buffer.flush())
-        return false;
-
-    static const Buffer::Transition host_to_transfer = {
-        VK_PIPELINE_STAGE_2_HOST_BIT,
-        VK_ACCESS_2_HOST_READ_BIT | VK_ACCESS_2_HOST_WRITE_BIT,
+    // Barrier: fragment shader write to hover_pos_buf must complete before transfer reads it
+    static const Buffer::Transition hover_shader_to_copy = {
+        VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+        VK_ACCESS_2_SHADER_WRITE_BIT,
         VK_PIPELINE_STAGE_2_TRANSFER_BIT,
         VK_ACCESS_2_TRANSFER_READ_BIT
     };
-    res.host_selection_buffer.barrier(host_to_transfer);
+    res.hover_pos_buf.barrier(hover_shader_to_copy);
 
-    static const Buffer::Transition init_selection = {
+    send_barrier(cmdbuf);
+
+    static const VkBufferCopy hover_copy_region = { 0, 0, sizeof(float) * 4 };
+    vkCmdCopyBuffer(cmdbuf, res.hover_pos_buf.get_buffer(),
+                    res.hover_pos_host_buf.get_buffer(), 1, &hover_copy_region);
+
+    return true;
+}
+
+void GeometryEditor::set_frame_data(VkCommandBuffer cmdbuf, uint32_t image_idx)
+{
+    FrameData frame_data = {};
+
+    if (mode == Mode::select) {
+        const vmath::vec2 view_max{static_cast<float>(view.width  - 1),
+                                   static_cast<float>(view.height - 1)};
+
+        if (mouse_action == Action::none) {
+            // Mouse hover: use a small snap rectangle around the cursor
+            constexpr vmath::vec2 mouse_snap_px{1.0f};
+            frame_data.selection_rect_min = vmath::max(view.mouse_pos - mouse_snap_px, vmath::vec2{0.0f});
+            frame_data.selection_rect_max = vmath::min(view.mouse_pos + mouse_snap_px, view_max);
+        }
+        else if (mouse_action == Action::select) {
+            // Active drag: use the full selection rectangle
+            frame_data.selection_rect_min = vmath::max(vmath::min(view.mouse_pos, mouse_action_init), vmath::vec2{0.0f});
+            frame_data.selection_rect_max = vmath::min(vmath::max(view.mouse_pos, mouse_action_init), view_max);
+        }
+
+        if (frame_data.selection_rect_max.x > frame_data.selection_rect_min.x &&
+            frame_data.selection_rect_max.y > frame_data.selection_rect_min.y)
+            frame_data.flags |= frame_flag_selection_active;
+    }
+
+    if (toolbar_state.toggle_wireframe)
+        frame_data.flags |= frame_flag_wireframe_mode;
+
+    frame_data.mouse_pos = view.mouse_pos;
+
+    vkCmdUpdateBuffer(cmdbuf, view.res[image_idx].frame_data.get_buffer(), 0,
+                      sizeof(frame_data), &frame_data);
+}
+
+bool GeometryEditor::setup_selection(VkCommandBuffer cmdbuf, uint32_t image_idx)
+{
+    Resources& res = view.res[image_idx];
+
+    // Barrier: wait for previous frame's readback (TRANSFER_READ) before writing sel_buf from host.
+    // Also covers frame_data written by vkCmdUpdateBuffer, readable in fragment shaders.
+    static const Buffer::Transition sel_buf_before_copy = {
         VK_PIPELINE_STAGE_2_TRANSFER_BIT,
         VK_ACCESS_2_TRANSFER_READ_BIT,
         VK_PIPELINE_STAGE_2_TRANSFER_BIT,
         VK_ACCESS_2_TRANSFER_WRITE_BIT
     };
-    res.selection_buffer.barrier(init_selection);
+    sel_buf.barrier(sel_buf_before_copy);
+
+    static const Buffer::Transition frame_data_after_update = {
+        VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+        VK_ACCESS_2_TRANSFER_WRITE_BIT,
+        VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+        VK_ACCESS_2_UNIFORM_READ_BIT
+    };
+    res.frame_data.barrier(frame_data_after_update);
 
     send_barrier(cmdbuf);
 
-    // Copy selection buffer from host
-    static VkBufferCopy copy_region = {
-        0,
+    // Copy host selection state to GPU
+    static const VkBufferCopy sel_copy_region = { 0, 0, max_objects };
+    vkCmdCopyBuffer(cmdbuf, res.sel_host_buf.get_buffer(), sel_buf.get_buffer(),
+                    1, &sel_copy_region);
+
+    // Barrier: wait for copy before compute clears hover bits in sel_buf
+    static const Buffer::Transition sel_buf_before_clear = {
+        VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+        VK_ACCESS_2_TRANSFER_WRITE_BIT,
+        VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+        VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT
+    };
+    sel_buf.barrier(sel_buf_before_clear);
+
+    send_barrier(cmdbuf);
+
+    // Dispatch compute shader to clear obj_hovered (bit 1) while preserving obj_selected (bit 0)
+    vkCmdBindPipeline(cmdbuf, VK_PIPELINE_BIND_POINT_COMPUTE, clear_hover_pipe);
+
+    static VkDescriptorBufferInfo sel_buf_compute_info = {
+        VK_NULL_HANDLE,
         0,
         0
     };
-    copy_region.size = num_objects;
-    vkCmdCopyBuffer(cmdbuf,
-                    res.host_selection_buffer.get_buffer(),
-                    res.selection_buffer.get_buffer(),
-                    1,
-                    &copy_region);
+    sel_buf_compute_info.buffer = sel_buf.get_buffer();
+    sel_buf_compute_info.offset = 0;
+    sel_buf_compute_info.range  = VK_WHOLE_SIZE;
 
-    // TODO buffer barrier
+    push_descriptor(cmdbuf, VK_PIPELINE_BIND_POINT_COMPUTE, sel_buf_pipe_layout,
+                    0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, sel_buf_compute_info);
 
-    // Render selection rectangle
-    VkViewport viewport = { };
-    VkRect2D   scissor  = { };
+    constexpr uint32_t clear_hover_groups = max_objects / 4 / 64;
+    vkCmdDispatch(cmdbuf, clear_hover_groups, 1, 1);
+
+    // Barrier: wait for compute write before fragment shader reads/writes sel_buf
+    static const Buffer::Transition sel_buf_after_clear = {
+        VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+        VK_ACCESS_2_SHADER_WRITE_BIT,
+        VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+        VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT
+    };
+    sel_buf.barrier(sel_buf_after_clear);
+
+    send_barrier(cmdbuf);
+
+    return true;
+}
+
+bool GeometryEditor::draw_deep_selection(VkCommandBuffer cmdbuf,
+                                         View&           dst_view,
+                                         uint32_t        image_idx)
+{
+    // Deep selection is only needed in wireframe mode during a rectangle drag.
+    // It rerenders the geometry with depth test OFF so that objects hidden behind
+    // other geometry are also marked as hovered.
+    if ( ! toolbar_state.toggle_wireframe || mouse_action != Action::select)
+        return true;
+
+    const vmath::vec2 view_max{static_cast<float>(dst_view.width  - 1),
+                               static_cast<float>(dst_view.height - 1)};
+    const vmath::vec2 capture_rect_min = vmath::max(vmath::min(dst_view.mouse_pos, mouse_action_init), vmath::vec2{0.0f});
+    const vmath::vec2 capture_rect_max = vmath::min(vmath::max(dst_view.mouse_pos, mouse_action_init), view_max);
+
+    if (capture_rect_max.x <= capture_rect_min.x || capture_rect_max.y <= capture_rect_min.y)
+        return true;
+
+    // Barrier: geometry pass fragment shader has written to sel_buf; synchronize before more writes
+    static const Buffer::Transition sel_buf_before_deep = {
+        VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+        VK_ACCESS_2_SHADER_WRITE_BIT,
+        VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+        VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT
+    };
+    sel_buf.barrier(sel_buf_before_deep);
+
+    send_barrier(cmdbuf);
+
+    // Render with no color or depth attachment: the fragment shader writes to sel_buf
+    // via atomicOr. No depth attachment needed since depth test is disabled.
+    static VkRenderingInfo deep_sel_rendering_info = {
+        VK_STRUCTURE_TYPE_RENDERING_INFO,
+        nullptr,
+        0,       // flags
+        { },     // renderArea
+        1,       // layerCount
+        0,       // viewMask
+        0,       // colorAttachmentCount
+        nullptr,
+        nullptr, // pDepthAttachment (depth test off, no attachment needed)
+        nullptr  // pStencilAttachment
+    };
+
+    deep_sel_rendering_info.renderArea.offset        = { 0, 0 };
+    deep_sel_rendering_info.renderArea.extent.width  = dst_view.width;
+    deep_sel_rendering_info.renderArea.extent.height = dst_view.height;
+
+    vkCmdBeginRendering(cmdbuf, &deep_sel_rendering_info);
+
+    vkCmdBindPipeline(cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, selection_mat);
+
+    // Deep selection: depth test OFF so all geometry along the ray is marked
+    vkCmdSetDepthTestEnable(cmdbuf, VK_FALSE);
+    vkCmdSetDepthWriteEnable(cmdbuf, VK_FALSE);
+
+    // Set viewport to full image but restrict scissor to selection rectangle
+    static VkViewport viewport = { 0, 0, 0, 0, 0, 1};
+    VkRect2D          scissor;
     configure_viewport_and_scissor(&viewport, &scissor, dst_view.width, dst_view.height);
-
-    // TODO update scissor
-
-    //vkCmdBeginRendering(cmdbuf, &light_rendering_info);
-
     vkCmdSetViewport(cmdbuf, 0, 1, &viewport);
+
+    scissor.offset.x      = static_cast<int32_t>(capture_rect_min.x);
+    scissor.offset.y      = static_cast<int32_t>(capture_rect_min.y);
+    scissor.extent.width  = static_cast<uint32_t>(capture_rect_max.x - capture_rect_min.x);
+    scissor.extent.height = static_cast<uint32_t>(capture_rect_max.y - capture_rect_min.y);
     vkCmdSetScissor(cmdbuf, 0, 1, &scissor);
 
-    if ( ! render_geometry(cmdbuf, dst_view, image_idx, gray_patch_mat))
+    if ( ! render_geometry(cmdbuf, dst_view, image_idx))
         return false;
 
     vkCmdEndRendering(cmdbuf);
 
-    // TODO buffer barrier
+    return true;
+}
 
-    // Copy selection buffer to host
-    vkCmdCopyBuffer(cmdbuf,
-                    res.selection_buffer.get_buffer(),
-                    res.host_selection_buffer.get_buffer(),
-                    1,
-                    &copy_region);
+bool GeometryEditor::draw_wireframe_pass(VkCommandBuffer cmdbuf,
+                                         View&           dst_view,
+                                         uint32_t        image_idx)
+{
+    Resources& res = dst_view.res[image_idx];
 
-    // TODO buffer barrier
+    res.color.barrier(render_viewport_layout);
+
+    send_barrier(cmdbuf);
+
+    // Clear the color attachment to the background color.
+    // When wireframe mode is enabled, also draw Bezier edge curves on top.
+    // The lighting pass uses LOAD_OP_LOAD and preserves this background for
+    // pixels where no solid geometry is present (alpha=0 in lighting shader).
+    static VkRenderingAttachmentInfo wire_color_att = {
+        VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+        nullptr,
+        VK_NULL_HANDLE,                   // imageView (filled below)
+        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+        VK_RESOLVE_MODE_NONE,
+        VK_NULL_HANDLE,                   // resolveImageView
+        VK_IMAGE_LAYOUT_UNDEFINED,        // resolveImageLayout
+        VK_ATTACHMENT_LOAD_OP_CLEAR,
+        VK_ATTACHMENT_STORE_OP_STORE,
+        make_clear_color(0.2f, 0.2f, 0.2f, 1.0f) // background color
+    };
+
+    wire_color_att.imageView = res.color.get_view();
+
+    static VkRenderingInfo wire_rendering_info = {
+        VK_STRUCTURE_TYPE_RENDERING_INFO,
+        nullptr,
+        0,       // flags
+        { },     // renderArea
+        1,       // layerCount
+        0,       // viewMask
+        1,       // colorAttachmentCount
+        &wire_color_att,
+        nullptr, // pDepthAttachment
+        nullptr  // pStencilAttachment
+    };
+
+    wire_rendering_info.renderArea.offset        = { 0, 0 };
+    wire_rendering_info.renderArea.extent.width  = dst_view.width;
+    wire_rendering_info.renderArea.extent.height = dst_view.height;
+
+    vkCmdBeginRendering(cmdbuf, &wire_rendering_info);
+
+    if (toolbar_state.toggle_wireframe && patch_geometry.get_num_faces() > 0) {
+        vkCmdBindPipeline(cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, wireframe_tess_mat);
+        vkCmdSetDepthTestEnable(cmdbuf, VK_FALSE);
+        vkCmdSetDepthWriteEnable(cmdbuf, VK_FALSE);
+
+        send_viewport_and_scissor(cmdbuf, dst_view.width, dst_view.height);
+
+        VkDescriptorBufferInfo buffer_info = {
+            VK_NULL_HANDLE,
+            0,
+            0
+        };
+
+        const uint32_t wire_mat_id  = (image_idx * num_materials) + mat_wireframe;
+        const uint32_t transform_id = image_idx * transforms_per_viewport;
+
+        buffer_info.buffer = materials_buf.get_buffer();
+        buffer_info.offset = wire_mat_id * materials_stride;
+        buffer_info.range  = materials_stride;
+        push_descriptor(cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, Sculptor::material_layout,
+                        0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, buffer_info);
+
+        buffer_info.buffer = transforms_buf.get_buffer();
+        buffer_info.offset = transform_id * transforms_stride;
+        buffer_info.range  = transforms_stride;
+        push_descriptor(cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, Sculptor::material_layout,
+                        1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, buffer_info);
+
+        patch_geometry.write_faces_descriptor(&buffer_info);
+        push_descriptor(cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, Sculptor::material_layout,
+                        2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, buffer_info);
+
+        patch_geometry.render(cmdbuf);
+    }
+
+    vkCmdEndRendering(cmdbuf);
 
     return true;
 }
@@ -1776,9 +2299,10 @@ bool GeometryEditor::set_patch_transforms(const View& dst_view, uint32_t transfo
 
         case ViewType::free_moving:
             {
-                const vmath::quat q = camera.get_perspective_rotation_quat();
-                const vmath::vec3 cam_vector = q.rotate(vmath::vec3{0, 0, camera.distance});
-                model_view = vmath::look_at(camera.pos, camera.pos + cam_vector, vmath::vec3{0, 1, 0});
+                const Camera      r_camera   = camera.get_rotated_camera();
+                const vmath::quat q          = r_camera.get_perspective_rotation_quat();
+                const vmath::vec3 cam_vector = q.rotate(vmath::vec3{0, 0, 1});
+                model_view = vmath::look_at(r_camera.pos, r_camera.pos + cam_vector, vmath::vec3{0, 1, 0});
             }
             break;
 
@@ -1846,7 +2370,7 @@ bool GeometryEditor::set_patch_transforms(const View& dst_view, uint32_t transfo
 
     if (dst_view.view_type == ViewType::free_moving) {
         transforms->proj = vmath::projection_vector(aspect,
-                                                    vmath::radians(30.0f),
+                                                    fov_radians,
                                                     near_plane,
                                                     far_plane);
         transforms->proj_w = vmath::vec4(0.0f, 0.0f, 1.0f, 0.0f);
@@ -1867,8 +2391,7 @@ bool GeometryEditor::set_patch_transforms(const View& dst_view, uint32_t transfo
 
 bool GeometryEditor::render_geometry(VkCommandBuffer cmdbuf,
                                      const View&     dst_view,
-                                     uint32_t        image_idx,
-                                     VkPipeline      patch_mat)
+                                     uint32_t        image_idx)
 {
     const uint32_t transform_id_base = image_idx * transforms_per_viewport;
 
@@ -1876,10 +2399,6 @@ bool GeometryEditor::render_geometry(VkCommandBuffer cmdbuf,
 
     if ( ! set_patch_transforms(dst_view, transform_id))
         return false;
-
-    vkCmdBindPipeline(cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, patch_mat);
-
-    send_viewport_and_scissor(cmdbuf, dst_view.width, dst_view.height);
 
     VkDescriptorBufferInfo buffer_info = {
         VK_NULL_HANDLE, // buffer
@@ -1909,6 +2428,20 @@ bool GeometryEditor::render_geometry(VkCommandBuffer cmdbuf,
 
     push_descriptor(cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, Sculptor::material_layout,
                     4, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, buffer_info);
+
+    buffer_info.buffer = sel_buf.get_buffer();
+    buffer_info.offset = 0;
+    buffer_info.range  = VK_WHOLE_SIZE;
+
+    push_descriptor(cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, Sculptor::material_layout,
+                    5, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, buffer_info);
+
+    buffer_info.buffer = view.res[image_idx].frame_data.get_buffer();
+    buffer_info.offset = 0;
+    buffer_info.range  = sizeof(FrameData);
+
+    push_descriptor(cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, Sculptor::material_layout,
+                    6, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, buffer_info);
 
     patch_geometry.render(cmdbuf);
 
@@ -2061,6 +2594,8 @@ bool GeometryEditor::render_grid(VkCommandBuffer cmdbuf,
     vkCmdBeginRendering(cmdbuf, &grid_rendering_info);
 
     vkCmdBindPipeline(cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, grid_mat);
+    vkCmdSetDepthTestEnable(cmdbuf, VK_TRUE);
+    vkCmdSetDepthWriteEnable(cmdbuf, VK_FALSE);
 
     send_viewport_and_scissor(cmdbuf, dst_view.width, dst_view.height);
 

@@ -39,8 +39,8 @@ struct MaterialInfo {
     uint8_t                                  patch_control_points;
     uint8_t                                  polygon_mode;
     uint8_t                                  cull_mode;
-    uint8_t                                  depth_test;
-    uint8_t                                  depth_write;
+    uint8_t                                  use_depth;
+    uint8_t                                  alpha_blend;
     ByteColor                                diffuse_color;
 };
 

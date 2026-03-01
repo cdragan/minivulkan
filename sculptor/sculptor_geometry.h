@@ -26,6 +26,7 @@ class Geometry {
             FaceData face_data[1];
         };
 
+        static constexpr uint32_t tess_level = 3; // TODO
         static constexpr uint32_t max_edges = 0x10000U;
         static constexpr uint32_t max_faces = 0x10000U / 16U;
 
