@@ -534,4 +534,16 @@ inline mat4 scale(const vec3& v)
     return scale(v.x, v.y, v.z);
 }
 
+template<typename T>
+static inline constexpr T clamp(T value, T min_value, T max_value)
+{
+    return (value < min_value) ? min_value : (value > max_value) ? max_value : value;
+}
+
+template<unsigned dim>
+static inline constexpr vec<dim> clamp(vec<dim> value, vec<dim> min_value, vec<dim> max_value)
+{
+    return vmath::max(min_value, vmath::min(value, max_value));
+}
+
 } // namespace vmath
