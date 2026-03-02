@@ -82,8 +82,7 @@ class GeometryEditor: public Editor {
         struct Camera {
             vmath::vec3 pos         {0.0f};
             float       view_height = 0;
-            float       yaw         = 0;
-            float       pitch       = 0;
+            vmath::vec3 dir         {0.0f, 0.0f, 1.0f};
 
             // Pivot point used during continuous view rotation action
             // During view rotation, the pivot point is used to calculate subsequent camera
@@ -92,10 +91,8 @@ class GeometryEditor: public Editor {
             // and modifying camera position results in unpredictable and non-repeatable movement.
             std::optional<vmath::vec3> pivot{0.0f};
             // Rotation around pivot point
-            float       rot_yaw     = 0;
-            float       rot_pitch   = 0;
+            vmath::quat rot         {0.0f, 0.0f, 0.0f, 1.0f};
 
-            vmath::quat get_perspective_rotation_quat() const;
             void move(const vmath::vec3& delta);
 
             // Applies interim rotation over pivot point to the camera

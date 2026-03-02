@@ -200,16 +200,13 @@ namespace {
 
 namespace Sculptor {
 
-vmath::quat GeometryEditor::Camera::get_perspective_rotation_quat() const
-{
-    return vmath::quat::from_euler(vmath::radians(vmath::vec3{pitch, yaw, 0.0f}));
-}
-
 void GeometryEditor::Camera::move(const vmath::vec3& delta)
 {
     constexpr vmath::vec3 max_pos{1.1f};
-    const vmath::vec3 moved_pos = pos + get_perspective_rotation_quat().rotate(delta);
-    const vmath::vec3 fixed_pos = vmath::max(-max_pos, vmath::min(moved_pos, max_pos));
+    const vmath::vec3 right     = vmath::normalize(vmath::cross_product(vmath::vec3{0, 1, 0}, dir));
+    const vmath::vec3 up        = vmath::normalize(vmath::cross_product(dir, right));
+    const vmath::vec3 moved_pos = pos + right * delta.x + up * delta.y + dir * delta.z;
+    const vmath::vec3 fixed_pos = vmath::clamp(moved_pos, -max_pos, max_pos);
     if (fixed_pos == moved_pos)
         pos = fixed_pos;
 }
@@ -221,14 +218,10 @@ GeometryEditor::Camera GeometryEditor::Camera::get_rotated_camera() const
     if (camera.pivot) {
         const vmath::vec3 cam_vec = camera.pos - *camera.pivot;
 
-        const vmath::vec3 cam_pos_rot_v{camera.rot_pitch, camera.rot_yaw, 0.0f};
-        const vmath::quat cam_pos_rot = vmath::quat::from_euler(vmath::radians(cam_pos_rot_v));
-
-        camera.pos    = *camera.pivot + cam_pos_rot.rotate(cam_vec);
-        camera.pitch += camera.rot_pitch;
-        camera.yaw   += camera.rot_yaw;
-
+        camera.pos   = *camera.pivot + camera.rot.rotate(cam_vec);
+        camera.dir   = vmath::normalize(camera.rot.rotate(camera.dir));
         camera.pivot = std::nullopt;
+        camera.rot   = vmath::quat{0.0f, 0.0f, 0.0f, 1.0f};
     }
 
     return camera;
@@ -257,12 +250,10 @@ std::optional<vmath::vec3> GeometryEditor::calc_grid_world_pos(const View& src_v
     if (src_view.view_type != ViewType::free_moving)
         return std::nullopt;
 
-    const Camera      camera = src_view.camera[static_cast<int>(ViewType::free_moving)].get_rotated_camera();
-    const vmath::quat q      = camera.get_perspective_rotation_quat();
-
-    const vmath::vec3 cam_forward = q.rotate(vmath::vec3{0, 0, 1});
-    const vmath::vec3 cam_right   = q.rotate(vmath::vec3{1, 0, 0});
-    const vmath::vec3 cam_up      = q.rotate(vmath::vec3{0, 1, 0});
+    const Camera      camera      = src_view.camera[static_cast<int>(ViewType::free_moving)].get_rotated_camera();
+    const vmath::vec3 cam_forward = camera.dir;
+    const vmath::vec3 cam_right   = vmath::normalize(vmath::cross_product(vmath::vec3{0, 1, 0}, camera.dir));
+    const vmath::vec3 cam_up      = vmath::normalize(vmath::cross_product(camera.dir, cam_right));
 
     // Convert mouse position to NDC (note: Y is inverted)
     const float aspect = static_cast<float>(src_view.width) / static_cast<float>(src_view.height);
@@ -581,13 +572,13 @@ bool GeometryEditor::allocate_resources_once()
             return false;
     }
 
-    view.camera[static_cast<int>(ViewType::free_moving)] = Camera{ { 0.0f, 0.01f, -0.2f },    0.0f, 0.0f, 1.0f };
-    view.camera[static_cast<int>(ViewType::front)]       = Camera{ { 0.0f, 0.0f,   0.0f }, 4096.0f, 0.0f, 0.0f };
-    view.camera[static_cast<int>(ViewType::back)]        = Camera{ { 0.0f, 0.0f,   0.0f }, 4096.0f, 0.0f, 0.0f };
-    view.camera[static_cast<int>(ViewType::left)]        = Camera{ { 0.0f, 0.0f,   0.0f }, 4096.0f, 0.0f, 0.0f };
-    view.camera[static_cast<int>(ViewType::right)]       = Camera{ { 0.0f, 0.0f,   0.0f }, 4096.0f, 0.0f, 0.0f };
-    view.camera[static_cast<int>(ViewType::bottom)]      = Camera{ { 0.0f, 0.0f,   0.0f }, 4096.0f, 0.0f, 0.0f };
-    view.camera[static_cast<int>(ViewType::top)]         = Camera{ { 0.0f, 0.0f,   0.0f }, 4096.0f, 0.0f, 0.0f };
+    view.camera[static_cast<int>(ViewType::free_moving)] = Camera{ { 0.0f, 0.01f, -0.2f } };
+    view.camera[static_cast<int>(ViewType::front)]       = Camera{ { 0.0f, 0.0f,   0.0f }, 4096.0f };
+    view.camera[static_cast<int>(ViewType::back)]        = Camera{ { 0.0f, 0.0f,   0.0f }, 4096.0f };
+    view.camera[static_cast<int>(ViewType::left)]        = Camera{ { 0.0f, 0.0f,   0.0f }, 4096.0f };
+    view.camera[static_cast<int>(ViewType::right)]       = Camera{ { 0.0f, 0.0f,   0.0f }, 4096.0f };
+    view.camera[static_cast<int>(ViewType::bottom)]      = Camera{ { 0.0f, 0.0f,   0.0f }, 4096.0f };
+    view.camera[static_cast<int>(ViewType::top)]         = Camera{ { 0.0f, 0.0f,   0.0f }, 4096.0f };
 
     toolbar_state.view_perspective = true;
 
@@ -953,8 +944,8 @@ void GeometryEditor::gui_status_bar()
             const Camera& camera = view.camera[0];
             if (camera.pivot) {
                 ImGui::Separator();
-                ImGui::Text("Pivot: %.3f %.3f %.3f yaw %.3f pitch %.3f",
-                            camera.pivot->x, camera.pivot->y, camera.pivot->z, camera.rot_yaw, camera.rot_pitch);
+                ImGui::Text("Pivot: %.3f %.3f %.3f",
+                            camera.pivot->x, camera.pivot->y, camera.pivot->z);
             }
 
             ImGui::EndMenuBar();
@@ -1056,20 +1047,27 @@ void GeometryEditor::handle_mouse_actions(const UserInput& input, bool view_hove
                         case ViewType::free_moving:
                             // Initiate rotation
                             if (view.mouse_world_pos && ! camera.pivot) {
-                                camera.pivot     = *view.mouse_world_pos;
-                                camera.rot_yaw   = 0;
-                                camera.rot_pitch = 0;
+                                camera.pivot = *view.mouse_world_pos;
+                                camera.rot   = vmath::quat{0.0f, 0.0f, 0.0f, 1.0f};
                             }
                             {
-                                camera.rot_yaw += rot_scale_factor * input.mouse_pos_delta.x;
+                                const float yaw = vmath::radians(rot_scale_factor * input.mouse_pos_delta.x);
+                                const vmath::quat yaw_q{vmath::vec3{0, 1, 0}, yaw};
 
-                                // Make sure pitch doesn't exceed limits
-                                constexpr float max_pitch = 87.0f;
-                                const float pitch_delta = rot_scale_factor * input.mouse_pos_delta.y;
-                                const float old_pitch   = camera.pitch + camera.rot_pitch;
-                                const float new_pitch   = vmath::clamp(old_pitch + pitch_delta, -max_pitch, max_pitch);
+                                // Rotate pitch around camera's current local right axis (horizontal component);
+                                // rotating around world X would cause distortions
+                                const float       pitch       = vmath::radians(rot_scale_factor * input.mouse_pos_delta.y);
+                                const vmath::vec3 current_dir = camera.rot.rotate(camera.dir);
+                                const vmath::vec3 pitch_axis  = vmath::normalize(vmath::cross_product(vmath::vec3{0, 1, 0}, current_dir));
+                                const vmath::quat pitch_q{pitch_axis, pitch};
 
-                                camera.rot_pitch += new_pitch - old_pitch;
+                                const vmath::quat new_rot = vmath::normalize(yaw_q * pitch_q * camera.rot);
+
+                                constexpr float max_dir_y = 0.9986f; // sin(87 deg)
+                                if (std::abs(new_rot.rotate(camera.dir).y) <= max_dir_y)
+                                    camera.rot = new_rot;
+                                else
+                                    camera.rot = vmath::normalize(yaw_q * camera.rot);
                             }
                             break;
 
@@ -2032,8 +2030,8 @@ void GeometryEditor::set_frame_data(VkCommandBuffer cmdbuf, uint32_t image_idx)
         }
         else if (mouse_action == Action::select) {
             // Active drag: use the full selection rectangle
-            frame_data.selection_rect_min = vmath::max(vmath::min(view.mouse_pos, mouse_action_init), vmath::vec2{0.0f});
-            frame_data.selection_rect_max = vmath::min(vmath::max(view.mouse_pos, mouse_action_init), view_max);
+            frame_data.selection_rect_min = vmath::clamp(view.mouse_pos, vmath::vec2{0.0f}, mouse_action_init);
+            frame_data.selection_rect_max = vmath::clamp(view.mouse_pos, mouse_action_init, view_max);
         }
 
         if (frame_data.selection_rect_max.x > frame_data.selection_rect_min.x &&
@@ -2134,8 +2132,8 @@ bool GeometryEditor::draw_deep_selection(VkCommandBuffer cmdbuf,
 
     const vmath::vec2 view_max{static_cast<float>(dst_view.width  - 1),
                                static_cast<float>(dst_view.height - 1)};
-    const vmath::vec2 capture_rect_min = vmath::max(vmath::min(dst_view.mouse_pos, mouse_action_init), vmath::vec2{0.0f});
-    const vmath::vec2 capture_rect_max = vmath::min(vmath::max(dst_view.mouse_pos, mouse_action_init), view_max);
+    const vmath::vec2 capture_rect_min = vmath::clamp(dst_view.mouse_pos, vmath::vec2{0.0f}, mouse_action_init);
+    const vmath::vec2 capture_rect_max = vmath::clamp(dst_view.mouse_pos, mouse_action_init, view_max);
 
     if (capture_rect_max.x <= capture_rect_min.x || capture_rect_max.y <= capture_rect_min.y)
         return true;
@@ -2299,10 +2297,8 @@ bool GeometryEditor::set_patch_transforms(const View& dst_view, uint32_t transfo
 
         case ViewType::free_moving:
             {
-                const Camera      r_camera   = camera.get_rotated_camera();
-                const vmath::quat q          = r_camera.get_perspective_rotation_quat();
-                const vmath::vec3 cam_vector = q.rotate(vmath::vec3{0, 0, 1});
-                model_view = vmath::look_at(r_camera.pos, r_camera.pos + cam_vector, vmath::vec3{0, 1, 0});
+                const Camera r_camera = camera.get_rotated_camera();
+                model_view = vmath::look_at(r_camera.pos, r_camera.pos + r_camera.dir, vmath::vec3{0, 1, 0});
             }
             break;
 
