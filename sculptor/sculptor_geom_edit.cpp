@@ -155,6 +155,7 @@ namespace {
         vmath::vec2 mouse_pos;
         uint32_t    flags;
         uint32_t    pad[1];
+        vmath::vec2 pixel_dim;
     };
 
     struct Transforms {
@@ -163,7 +164,6 @@ namespace {
         vmath::mat3 view_inverse; // mat3x4: last column of inverse is always [0, 0, 0, 1], so omitted
         vmath::vec4 proj;
         vmath::vec4 proj_w;
-        vmath::vec2 pixel_dim;
     };
 
     constexpr float    fov_radians             = vmath::radians(30.0f);
@@ -2107,6 +2107,9 @@ void GeometryEditor::set_frame_data(VkCommandBuffer cmdbuf, uint32_t image_idx)
 
     frame_data.mouse_pos = view.mouse_pos;
 
+    frame_data.pixel_dim = vmath::vec2(2.0f) / vmath::vec2(static_cast<float>(view.width),
+                                                           static_cast<float>(view.height));
+
     vkCmdUpdateBuffer(cmdbuf, view.res[image_idx].frame_data.get_buffer(), 0,
                       sizeof(frame_data), &frame_data);
 }
@@ -2441,9 +2444,6 @@ bool GeometryEditor::set_patch_transforms(const View& dst_view, uint32_t transfo
                                                far_plane);
         transforms->proj_w = vmath::vec4(0.0f, 0.0f, 0.0f, 1.0f);
     }
-
-    transforms->pixel_dim = vmath::vec2(2.0f) / vmath::vec2(static_cast<float>(dst_view.width),
-                                                            static_cast<float>(dst_view.height));
 
     return transforms_buf.flush(transform_id, transforms_stride);
 }
@@ -2787,6 +2787,13 @@ bool GeometryEditor::render_control_points(VkCommandBuffer cmdbuf,
 
     push_descriptor(cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, Sculptor::material_layout,
                     4, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, buffer_info);
+
+    buffer_info.buffer = res.frame_data.get_buffer();
+    buffer_info.offset = 0;
+    buffer_info.range  = sizeof(FrameData);
+
+    push_descriptor(cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, Sculptor::material_layout,
+                    6, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, buffer_info);
 
     patch_geometry.render_vertices(cmdbuf);
 

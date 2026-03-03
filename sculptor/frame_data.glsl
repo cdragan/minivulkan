@@ -8,6 +8,9 @@ layout(binding = 6) uniform frame_data {
     // Exact mouse cursor position in viewport pixels
     vec2 mouse_pos;
     uint frame_flags;
+    uint pad;
+    // Pixel dimensions in normalized device coordinates
+    vec2 pixel_dim;
 };
 
 // Per-frame flags

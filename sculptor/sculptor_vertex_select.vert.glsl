@@ -5,6 +5,7 @@
 
 #extension GL_GOOGLE_include_directive: require
 
+#include "frame_data.glsl"
 #include "transforms.glsl"
 
 layout(location = 0) out float out_depth;
