@@ -190,6 +190,7 @@ class GeometryEditor: public Editor {
 
         bool render_geometry(VkCommandBuffer cmdbuf, const View& dst_view, uint32_t image_idx);
         bool render_grid(VkCommandBuffer cmdbuf, View& dst_view, uint32_t image_idx);
+        bool render_control_points(VkCommandBuffer cmdbuf, View& dst_view, uint32_t image_idx);
         bool set_patch_transforms(const View& dst_view, uint32_t transform_id);
         void finish_edit_mode();
         void cancel_edit_mode();

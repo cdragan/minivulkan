@@ -1726,8 +1726,10 @@ bool GeometryEditor::draw_frame(VkCommandBuffer cmdbuf, uint32_t image_idx)
     if ( ! draw_lighting_pass(cmdbuf, view, image_idx))
         return false;
 
-    // Render the grid
     if ( ! render_grid(cmdbuf, view, image_idx))
+        return false;
+
+    if ( ! render_control_points(cmdbuf, view, image_idx))
         return false;
 
     // Copy selection buffer back to host for next frame
@@ -2502,23 +2504,6 @@ bool GeometryEditor::render_geometry(VkCommandBuffer cmdbuf,
 
     patch_geometry.render(cmdbuf);
 
-#if 0
-    vkCmdBindPipeline(cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, vertex_mat);
-
-    send_viewport_and_scissor(cmdbuf, dst_view.width, dst_view.height);
-
-    const uint32_t vertex_mat_id = (image_idx * num_materials) + mat_vertex_sel;
-
-    buffer_info.buffer = materials_buf.get_buffer();
-    buffer_info.offset = vertex_mat_id * materials_stride;
-    buffer_info.range  = materials_stride;
-
-    push_descriptor(cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, Sculptor::material_layout,
-                    0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, buffer_info);
-
-    patch_geometry.render_vertices(cmdbuf);
-#endif
-
     return true;
 }
 
@@ -2695,6 +2680,115 @@ bool GeometryEditor::render_grid(VkCommandBuffer cmdbuf,
               1,  // instanceCount
               0,  // firstVertex
               0); // firstInstance
+
+    vkCmdEndRendering(cmdbuf);
+
+    return true;
+}
+
+bool GeometryEditor::render_control_points(VkCommandBuffer cmdbuf,
+                                           View&           dst_view,
+                                           uint32_t        image_idx)
+{
+    Resources& res = dst_view.res[image_idx];
+
+    // Barrier: grid pass wrote to color; synchronize before loading it in vertex pass
+    static const Image::Transition color_for_vertices = {
+        VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+        VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+        VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+        VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
+    };
+    res.color.barrier(color_for_vertices);
+
+    send_barrier(cmdbuf);
+
+    static VkRenderingAttachmentInfo vtx_color_att = {
+        VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+        nullptr,
+        VK_NULL_HANDLE,                   // imageView (filled below)
+        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+        VK_RESOLVE_MODE_NONE,
+        VK_NULL_HANDLE,                   // resolveImageView
+        VK_IMAGE_LAYOUT_UNDEFINED,        // resolveImageLayout
+        VK_ATTACHMENT_LOAD_OP_LOAD,
+        VK_ATTACHMENT_STORE_OP_STORE,
+        make_clear_color(0, 0, 0, 0)
+    };
+
+    vtx_color_att.imageView = res.color.get_view();
+
+    static VkRenderingAttachmentInfo vtx_depth_att = {
+        VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+        nullptr,
+        VK_NULL_HANDLE,                              // imageView (filled below)
+        VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL,
+        VK_RESOLVE_MODE_NONE,
+        VK_NULL_HANDLE,                              // resolveImageView
+        VK_IMAGE_LAYOUT_UNDEFINED,                   // resolveImageLayout
+        VK_ATTACHMENT_LOAD_OP_LOAD,
+        VK_ATTACHMENT_STORE_OP_DONT_CARE,
+        make_clear_depth(0, 0)
+    };
+
+    vtx_depth_att.imageView = res.depth.get_view();
+
+    static VkRenderingInfo vtx_rendering_info = {
+        VK_STRUCTURE_TYPE_RENDERING_INFO,
+        nullptr,
+        0,                          // flags
+        { },                        // renderArea
+        1,                          // layerCount
+        0,                          // viewMask
+        1,                          // colorAttachmentCount
+        &vtx_color_att,
+        &vtx_depth_att,
+        nullptr                     // pStencilAttachment
+    };
+
+    vtx_rendering_info.renderArea.offset        = { 0, 0 };
+    vtx_rendering_info.renderArea.extent.width  = dst_view.width;
+    vtx_rendering_info.renderArea.extent.height = dst_view.height;
+
+    vkCmdBeginRendering(cmdbuf, &vtx_rendering_info);
+
+    vkCmdBindPipeline(cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, vertex_mat);
+    vkCmdSetDepthTestEnable(cmdbuf, VK_TRUE);
+    vkCmdSetDepthWriteEnable(cmdbuf, VK_FALSE);
+
+    send_viewport_and_scissor(cmdbuf, dst_view.width, dst_view.height);
+
+    const uint32_t vertex_mat_id = (image_idx * num_materials) + mat_vertex_sel;
+
+    VkDescriptorBufferInfo buffer_info = {
+        VK_NULL_HANDLE, // buffer
+        0,              // offset
+        0               // range
+    };
+
+    buffer_info.buffer = materials_buf.get_buffer();
+    buffer_info.offset = vertex_mat_id * materials_stride;
+    buffer_info.range  = materials_stride;
+
+    push_descriptor(cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, Sculptor::material_layout,
+                    0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, buffer_info);
+
+    const uint32_t transform_id = (image_idx * transforms_per_viewport) + 0;
+
+    buffer_info.buffer = transforms_buf.get_buffer();
+    buffer_info.offset = transform_id * transforms_stride;
+    buffer_info.range  = transforms_stride;
+
+    push_descriptor(cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, Sculptor::material_layout,
+                    1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, buffer_info);
+
+    patch_geometry.write_edge_vertices_descriptor(&buffer_info);
+
+    push_descriptor(cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, Sculptor::material_layout,
+                    4, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, buffer_info);
+
+    patch_geometry.render_vertices(cmdbuf);
 
     vkCmdEndRendering(cmdbuf);
 
