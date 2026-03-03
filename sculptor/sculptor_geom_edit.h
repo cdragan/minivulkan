@@ -58,10 +58,11 @@ class GeometryEditor: public Editor {
 
         struct Resources {
             Image           color;
-            Image           obj_id; // G-buffer
-            Image           normal; // G-buffer
+            Image           obj_id;            // G-buffer
+            Image           normal;            // G-buffer
             Image           depth;
             Buffer          frame_data;        // per-frame global state (selection rect, flags)
+            Buffer          transforms;        // per-object transform matrices
             Buffer          sel_host_buf;      // host-side selection state, mirrored to/from sel_buf each frame
             Buffer          hover_pos_buf;     // device-local SSBO: shader writes world pos under mouse here
             Buffer          hover_pos_host_buf;// host-visible copy for CPU readback
@@ -170,7 +171,6 @@ class GeometryEditor: public Editor {
         void free_view_resources(View* dst_view);
         bool create_materials();
         void set_material_buf(const MaterialInfo& mat_info, uint32_t mat_id);
-        bool create_transforms_buffer();
         bool create_grid_buffer();
         std::optional<vmath::vec3> read_mouse_world_pos(const View& src_view, uint32_t image_idx) const;
         std::optional<vmath::vec3> calc_grid_world_pos(const View& src_view) const;
@@ -182,6 +182,7 @@ class GeometryEditor: public Editor {
         void switch_mode(Mode new_mode);
 
         void set_frame_data(VkCommandBuffer cmdbuf, uint32_t image_idx);
+        void set_patch_transforms(VkCommandBuffer cmdbuf, const View& dst_view, uint32_t image_idx);
         bool setup_selection(VkCommandBuffer cmdbuf, uint32_t image_idx);
         bool draw_geometry_pass(VkCommandBuffer cmdbuf, View& dst_view, uint32_t image_idx);
         bool draw_deep_selection(VkCommandBuffer cmdbuf, View& dst_view, uint32_t image_idx);
@@ -191,7 +192,6 @@ class GeometryEditor: public Editor {
         bool render_geometry(VkCommandBuffer cmdbuf, const View& dst_view, uint32_t image_idx);
         bool render_grid(VkCommandBuffer cmdbuf, View& dst_view, uint32_t image_idx);
         bool render_control_points(VkCommandBuffer cmdbuf, View& dst_view, uint32_t image_idx);
-        bool set_patch_transforms(const View& dst_view, uint32_t transform_id);
         void finish_edit_mode();
         void cancel_edit_mode();
 
@@ -199,7 +199,6 @@ class GeometryEditor: public Editor {
         uint32_t           window_width      = 0;
         uint32_t           window_height     = 0;
         uint32_t           materials_stride  = 0;
-        uint32_t           transforms_stride = 0;
 
         VkPipeline            gray_patch_mat         = VK_NULL_HANDLE;
         VkPipeline            gray_patch_gbuffer_mat = VK_NULL_HANDLE;
@@ -219,7 +218,6 @@ class GeometryEditor: public Editor {
 
         Sculptor::Geometry patch_geometry;
         Buffer             materials_buf;
-        Buffer             transforms_buf;
         Buffer             grid_buf;
         ToolbarState       toolbar_state     = { };
         SelectState        saved_select      = { };

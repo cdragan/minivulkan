@@ -166,12 +166,11 @@ namespace {
         vmath::vec4 proj_w;
     };
 
-    constexpr float    fov_radians             = vmath::radians(30.0f);
-    constexpr uint32_t transforms_per_viewport = 1;
-    constexpr float    int16_scale             = 32767.0f;
-    constexpr uint32_t max_grid_lines          = 4096;
-    constexpr uint32_t max_objects             = 0x10000u;
-    constexpr VkFormat selection_format        = (max_objects <= 0x10000u) ? VK_FORMAT_R16_UINT : VK_FORMAT_R32_UINT;
+    constexpr float    fov_radians      = vmath::radians(30.0f);
+    constexpr float    int16_scale      = 32767.0f;
+    constexpr uint32_t max_grid_lines   = 4096;
+    constexpr uint32_t max_objects      = 0x10000u;
+    constexpr VkFormat selection_format = (max_objects <= 0x10000u) ? VK_FORMAT_R16_UINT : VK_FORMAT_R32_UINT;
 
     ImageWithHostCopy  toolbar_image;
     VkSampler          point_sampler;
@@ -421,6 +420,13 @@ bool GeometryEditor::alloc_view_resources(View*     dst_view,
                                        {"frame data", i_img}))
             return false;
 
+        if ( ! res.transforms.allocate(Usage::device_only,
+                                       sizeof(Transforms),
+                                       VK_FORMAT_UNDEFINED,
+                                       VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                                       {"transforms", i_img}))
+            return false;
+
         if ( ! res.sel_host_buf.allocated()) {
             if ( ! res.sel_host_buf.allocate(Usage::host_only,
                                              max_objects,
@@ -532,9 +538,6 @@ bool GeometryEditor::allocate_resources_once()
     patch_geometry.set_cube();
 
     if ( ! create_materials())
-        return false;
-
-    if ( ! create_transforms_buffer())
         return false;
 
     if ( ! create_grid_buffer())
@@ -809,19 +812,6 @@ bool GeometryEditor::create_materials()
         return false;
 
     return true;
-}
-
-bool GeometryEditor::create_transforms_buffer()
-{
-    transforms_stride = static_cast<uint32_t>(mstd::align_up(
-                static_cast<VkDeviceSize>(sizeof(Transforms)),
-                vk_phys_props.properties.limits.minUniformBufferOffsetAlignment));
-
-    return transforms_buf.allocate(Usage::dynamic,
-                                   transforms_stride * max_swapchain_size * transforms_per_viewport,
-                                   VK_FORMAT_UNDEFINED,
-                                   VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
-                                   "transforms buffer");
 }
 
 bool GeometryEditor::create_grid_buffer()
@@ -1690,6 +1680,7 @@ bool GeometryEditor::draw_frame(VkCommandBuffer cmdbuf, uint32_t image_idx)
 
     // Calculate and set up per-frame data
     set_frame_data(cmdbuf, image_idx);
+    set_patch_transforms(cmdbuf, view, image_idx);
 
     // Copy selection state from host to GPU, then clear hover bits in sel_buf (compute).
     // Barriers issued here cover both the sel_buf transfer and the frame_data transfer.
@@ -1991,9 +1982,9 @@ bool GeometryEditor::draw_lighting_pass(VkCommandBuffer cmdbuf,
         0,
         0
     };
-    transforms_buf_info.buffer = transforms_buf.get_buffer();
-    transforms_buf_info.offset = (image_idx * transforms_per_viewport) * transforms_stride;
-    transforms_buf_info.range  = transforms_stride;
+    transforms_buf_info.buffer = res.transforms.get_buffer();
+    transforms_buf_info.offset = 0;
+    transforms_buf_info.range  = sizeof(Transforms);
 
     push_descriptor(cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, Sculptor::lighting_layout,
                     1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, transforms_buf_info);
@@ -2135,6 +2126,14 @@ bool GeometryEditor::setup_selection(VkCommandBuffer cmdbuf, uint32_t image_idx)
         VK_ACCESS_2_UNIFORM_READ_BIT
     };
     res.frame_data.barrier(frame_data_after_update);
+
+    static const Buffer::Transition transforms_after_update = {
+        VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+        VK_ACCESS_2_TRANSFER_WRITE_BIT,
+        VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_2_TESSELLATION_EVALUATION_SHADER_BIT,
+        VK_ACCESS_2_UNIFORM_READ_BIT
+    };
+    res.transforms.barrier(transforms_after_update);
 
     send_barrier(cmdbuf);
 
@@ -2323,8 +2322,7 @@ bool GeometryEditor::draw_wireframe_pass(VkCommandBuffer cmdbuf,
             0
         };
 
-        const uint32_t wire_mat_id  = (image_idx * num_materials) + mat_wireframe;
-        const uint32_t transform_id = image_idx * transforms_per_viewport;
+        const uint32_t wire_mat_id = (image_idx * num_materials) + mat_wireframe;
 
         buffer_info.buffer = materials_buf.get_buffer();
         buffer_info.offset = wire_mat_id * materials_stride;
@@ -2332,9 +2330,9 @@ bool GeometryEditor::draw_wireframe_pass(VkCommandBuffer cmdbuf,
         push_descriptor(cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, Sculptor::material_layout,
                         0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, buffer_info);
 
-        buffer_info.buffer = transforms_buf.get_buffer();
-        buffer_info.offset = transform_id * transforms_stride;
-        buffer_info.range  = transforms_stride;
+        buffer_info.buffer = res.transforms.get_buffer();
+        buffer_info.offset = 0;
+        buffer_info.range  = sizeof(Transforms);
         push_descriptor(cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, Sculptor::material_layout,
                         1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, buffer_info);
 
@@ -2350,10 +2348,9 @@ bool GeometryEditor::draw_wireframe_pass(VkCommandBuffer cmdbuf,
     return true;
 }
 
-bool GeometryEditor::set_patch_transforms(const View& dst_view, uint32_t transform_id)
+void GeometryEditor::set_patch_transforms(VkCommandBuffer cmdbuf, const View& dst_view, uint32_t image_idx)
 {
-    Transforms* const transforms = transforms_buf.get_ptr<Transforms>(transform_id, transforms_stride);
-    assert(transforms);
+    Transforms transforms = {};
 
     const Camera& camera = dst_view.camera[static_cast<int>(dst_view.view_type)];
 
@@ -2408,9 +2405,9 @@ bool GeometryEditor::set_patch_transforms(const View& dst_view, uint32_t transfo
             assert(0);
     }
 
-    transforms->model_view = model_view;
+    transforms.model_view = model_view;
 
-    transforms->model_view_normal = vmath::transpose(vmath::inverse(vmath::mat3(model_view)));
+    transforms.model_view_normal = vmath::transpose(vmath::inverse(vmath::mat3(model_view)));
 
     // Compute inverse of the rigid-body view matrix analytically (no general mat4 inverse needed).
     // The last column of the inverse is always [0,0,0,1] so we store only 3 columns as mat3x4.
@@ -2422,7 +2419,7 @@ bool GeometryEditor::set_patch_transforms(const View& dst_view, uint32_t transfo
         inv.a30 = -vmath::dot_product(t, vmath::column<3>(inv, 0));
         inv.a31 = -vmath::dot_product(t, vmath::column<3>(inv, 1));
         inv.a32 = -vmath::dot_product(t, vmath::column<3>(inv, 2));
-        transforms->view_inverse = inv;
+        transforms.view_inverse = inv;
     }
 
     const float aspect = static_cast<float>(dst_view.width) / static_cast<float>(dst_view.height);
@@ -2431,43 +2428,37 @@ bool GeometryEditor::set_patch_transforms(const View& dst_view, uint32_t transfo
     constexpr float far_plane  = 3.0f;
 
     if (dst_view.view_type == ViewType::free_moving) {
-        transforms->proj = vmath::projection_vector(aspect,
-                                                    fov_radians,
-                                                    near_plane,
-                                                    far_plane);
-        transforms->proj_w = vmath::vec4(0.0f, 0.0f, 1.0f, 0.0f);
+        transforms.proj = vmath::projection_vector(aspect,
+                                                   fov_radians,
+                                                   near_plane,
+                                                   far_plane);
+        transforms.proj_w = vmath::vec4(0.0f, 0.0f, 1.0f, 0.0f);
     }
     else {
-        transforms->proj = vmath::ortho_vector(aspect,
-                                               camera.view_height / int16_scale,
-                                               near_plane,
-                                               far_plane);
-        transforms->proj_w = vmath::vec4(0.0f, 0.0f, 0.0f, 1.0f);
+        transforms.proj = vmath::ortho_vector(aspect,
+                                              camera.view_height / int16_scale,
+                                              near_plane,
+                                              far_plane);
+        transforms.proj_w = vmath::vec4(0.0f, 0.0f, 0.0f, 1.0f);
     }
 
-    return transforms_buf.flush(transform_id, transforms_stride);
+    vkCmdUpdateBuffer(cmdbuf, dst_view.res[image_idx].transforms.get_buffer(), 0,
+                      sizeof(transforms), &transforms);
 }
 
 bool GeometryEditor::render_geometry(VkCommandBuffer cmdbuf,
                                      const View&     dst_view,
                                      uint32_t        image_idx)
 {
-    const uint32_t transform_id_base = image_idx * transforms_per_viewport;
-
-    const uint32_t transform_id = transform_id_base + 0;
-
-    if ( ! set_patch_transforms(dst_view, transform_id))
-        return false;
-
     VkDescriptorBufferInfo buffer_info = {
         VK_NULL_HANDLE, // buffer
         0,              // offset
         0               // range
     };
 
-    buffer_info.buffer = transforms_buf.get_buffer();
-    buffer_info.offset = transform_id * transforms_stride;
-    buffer_info.range  = transforms_stride;
+    buffer_info.buffer = dst_view.res[image_idx].transforms.get_buffer();
+    buffer_info.offset = 0;
+    buffer_info.range  = sizeof(Transforms);
 
     push_descriptor(cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, Sculptor::material_layout,
                     1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, buffer_info);
@@ -2656,13 +2647,9 @@ bool GeometryEditor::render_grid(VkCommandBuffer cmdbuf,
     push_descriptor(cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, Sculptor::material_layout,
                     0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, buffer_info);
 
-    const uint32_t transform_id_base = image_idx * transforms_per_viewport;
-
-    const uint32_t transform_id = transform_id_base + 0;
-
-    buffer_info.buffer = transforms_buf.get_buffer();
-    buffer_info.offset = transform_id * transforms_stride;
-    buffer_info.range  = transforms_stride;
+    buffer_info.buffer = dst_view.res[image_idx].transforms.get_buffer();
+    buffer_info.offset = 0;
+    buffer_info.range  = sizeof(Transforms);
 
     push_descriptor(cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, Sculptor::material_layout,
                     1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, buffer_info);
@@ -2774,11 +2761,9 @@ bool GeometryEditor::render_control_points(VkCommandBuffer cmdbuf,
     push_descriptor(cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, Sculptor::material_layout,
                     0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, buffer_info);
 
-    const uint32_t transform_id = (image_idx * transforms_per_viewport) + 0;
-
-    buffer_info.buffer = transforms_buf.get_buffer();
-    buffer_info.offset = transform_id * transforms_stride;
-    buffer_info.range  = transforms_stride;
+    buffer_info.buffer = res.transforms.get_buffer();
+    buffer_info.offset = 0;
+    buffer_info.range  = sizeof(Transforms);
 
     push_descriptor(cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, Sculptor::material_layout,
                     1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, buffer_info);
