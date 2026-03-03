@@ -56,8 +56,8 @@ bool MemoryHeap::allocate_heap(int req_memory_type, VkDeviceSize size)
 
     suballoc.init(static_cast<size_t>(size));
 
-    d_printf("Allocated %s heap size 0x%" PRIx64 " bytes (%u MB) with memory type %d\n",
-             heap_name, static_cast<uint64_t>(size), in_mb(size), req_memory_type);
+    d_printf("Allocated heap size 0x%" PRIx64 " bytes (%u MB) with memory type %d\n",
+             static_cast<uint64_t>(size), in_mb(size), req_memory_type);
 
     return true;
 }
@@ -147,8 +147,7 @@ static int find_mem_type(const uint8_t  *preferred_flags,
 
 bool MemoryAllocator::init_heaps(VkDeviceSize device_heap_size,
                                  VkDeviceSize host_heap_size,
-                                 VkDeviceSize dynamic_heap_size,
-                                 VkDeviceSize transient_heap_size)
+                                 VkDeviceSize dynamic_heap_size)
 {
     assert( ! device_heap.get_memory());
 
@@ -197,11 +196,6 @@ bool MemoryAllocator::init_heaps(VkDeviceSize device_heap_size,
         0
     };
 
-    static const uint8_t preferred_transient_heap_flags[] = {
-        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT | VK_MEMORY_PROPERTY_LAZILY_ALLOCATED_BIT,
-        0
-    };
-
     static const uint8_t preferred_host_heap_flags[] = {
         VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT,
         VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
@@ -217,18 +211,14 @@ bool MemoryAllocator::init_heaps(VkDeviceSize device_heap_size,
         0
     };
 
-    const int device_type_index    = find_mem_type(preferred_device_heap_flags,    allow_device_memory);
-    int       host_type_index      = find_mem_type(preferred_host_heap_flags,      require_host_memory);
-    const int dynamic_type_index   = find_mem_type(preferred_dynamic_heap_flags,   allow_device_memory);
-    const int transient_type_index = find_mem_type(preferred_transient_heap_flags, allow_device_memory);
+    const int device_type_index  = find_mem_type(preferred_device_heap_flags,  allow_device_memory);
+    int       host_type_index    = find_mem_type(preferred_host_heap_flags,    require_host_memory);
+    const int dynamic_type_index = find_mem_type(preferred_dynamic_heap_flags, allow_device_memory);
 
     if (host_type_index < 0) {
         host_type_index = dynamic_type_index;
         unified = true;
     }
-
-    if (transient_type_index < 0)
-        device_heap_size += transient_heap_size;
 
     d_printf("Selected memory types: device=%d, host=%d, dynamic=%d\n",
              device_type_index, host_type_index, dynamic_type_index);
@@ -253,10 +243,6 @@ bool MemoryAllocator::init_heaps(VkDeviceSize device_heap_size,
     if ( ! device_heap.allocate_heap(device_type_index, device_heap_size))
         return false;
 
-    if (transient_type_index >= 0)
-        if ( ! transient_heap.allocate_heap(transient_type_index, transient_heap_size))
-            return false;
-
     return true;
 }
 
@@ -280,14 +266,6 @@ bool MemoryAllocator::allocate_memory(const VkMemoryRequirements& requirements,
                 selected_heap = &host_heap;
             break;
 
-        case Usage::transient:
-            // VK_IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT allows lazy allocation but doesn't require it.
-            // Only use the transient heap if its memory type is compatible with this resource
-            // (e.g. INPUT_ATTACHMENT_BIT may be incompatible with lazily-allocated memory on some platforms).
-            if (transient_heap.get_memory() && transient_heap.check_memory_type(requirements.memoryTypeBits))
-                selected_heap = &transient_heap;
-            break;
-
         default:
             break;
     }
@@ -305,13 +283,12 @@ bool MemoryAllocator::need_host_copy(Usage heap_usage)
 #ifndef NDEBUG
 MemoryAllocator::~MemoryAllocator()
 {
-    device_heap.print_stats();
-    host_heap.print_stats();
-    dynamic_heap.print_stats();
-    transient_heap.print_stats();
+    device_heap.print_stats("device");
+    host_heap.print_stats("host");
+    dynamic_heap.print_stats("dynamic");
 }
 
-void MemoryHeap::print_stats() const
+void MemoryHeap::print_stats(const char* heap_name) const
 {
     if (heap_size) {
         d_printf("Memory type %u, used %u MB out of %u MB in %s heap\n",

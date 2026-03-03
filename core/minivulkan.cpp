@@ -1496,8 +1496,7 @@ bool init_vulkan(Window* w)
 
     if ( ! mem_mgr.init_heaps(512u * 1024u * 1024u,
                               128u * 1024u * 1024u,
-                              16u * 1024u * 1024u,
-                              64u * 1024u * 1024))
+                              16u * 1024u * 1024u))
         return false;
 
     if ( ! create_semaphores())

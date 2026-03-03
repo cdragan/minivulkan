@@ -115,9 +115,6 @@ bool Image::allocate(const ImageInfo& image_info, Description desc)
     create_info.tiling        = host_access ? VK_IMAGE_TILING_LINEAR : VK_IMAGE_TILING_OPTIMAL;
     create_info.usage         = image_info.usage;
 
-    if (image_info.heap_usage == Usage::transient && mem_mgr.has_transient_heap())
-        create_info.usage |= VK_IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT;
-
     VkResult res = CHK(vkCreateImage(vk_dev, &create_info, nullptr, &image));
     if (res != VK_SUCCESS)
         return false;
@@ -143,8 +140,7 @@ bool Image::allocate(const ImageInfo& image_info, Description desc)
 
 #ifndef NDEBUG
     if ( ! owning_heap->check_memory_type(memory_reqs.memoryTypeBits)) {
-        d_printf("Device memory does not support requested image type for %s %u\n",
-                 desc.name, desc.idx);
+        d_printf("Device memory does not support requested image type\n");
         return false;
     }
 #endif
@@ -294,8 +290,7 @@ bool Buffer::allocate(Usage              heap_usage,
 
 #ifndef NDEBUG
     if ( ! heap->check_memory_type(memory_reqs.memoryTypeBits)) {
-        d_printf("Device memory does not support requested buffer type for %s %u\n",
-                 desc.name, desc.idx);
+        d_printf("Device memory does not support requested buffer type\n");
         return false;
     }
 #endif
