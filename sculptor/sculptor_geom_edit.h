@@ -89,9 +89,12 @@ class GeometryEditor: public Editor {
             // positions against pos+pivot, in order to avoid changing camera position pos
             // until the rotation action ends, because floating point operations are "lossy"
             // and modifying camera position results in unpredictable and non-repeatable movement.
-            std::optional<vmath::vec3> pivot{0.0f};
+            std::optional<vmath::vec3> pivot;
             // Rotation around pivot point
             vmath::quat rot         {0.0f, 0.0f, 0.0f, 1.0f};
+
+            // Grabbed point when panning the view with mouse
+            std::optional<vmath::vec3> pan_grab;
 
             void move(const vmath::vec3& delta);
 

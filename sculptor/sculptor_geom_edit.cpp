@@ -937,16 +937,6 @@ void GeometryEditor::gui_status_bar()
             ImGui::Text("%s", view_names[view_idx]);
             ImGui::Separator();
             ImGui::Text("Mouse: %dx%d", static_cast<int>(view.mouse_pos.x), static_cast<int>(view.mouse_pos.y));
-            if (view.mouse_world_pos) {
-                ImGui::Separator();
-                ImGui::Text("Hover: %.3f %.3f %.3f", view.mouse_world_pos->x, view.mouse_world_pos->y, view.mouse_world_pos->z);
-            }
-            const Camera& camera = view.camera[0];
-            if (camera.pivot) {
-                ImGui::Separator();
-                ImGui::Text("Pivot: %.3f %.3f %.3f",
-                            camera.pivot->x, camera.pivot->y, camera.pivot->z);
-            }
 
             ImGui::EndMenuBar();
         }
@@ -1031,6 +1021,12 @@ void GeometryEditor::handle_mouse_actions(const UserInput& input, bool view_hove
         camera = camera.get_rotated_camera();
     }
 
+    // Finish panning
+    if (mouse_action != Action::pan) {
+        Camera& camera = view.camera[static_cast<int>(view.view_type)];
+        camera.pan_grab = std::nullopt;
+    }
+
     if (has_captured_mouse()) {
         switch (mouse_action) {
 
@@ -1074,7 +1070,7 @@ void GeometryEditor::handle_mouse_actions(const UserInput& input, bool view_hove
                         default: {
                             // TODO switch to free_moving and apply rotation
                             constexpr float view_bounds        = 1.1f;
-                            const     float ortho_scale_factor = static_cast<float>(view.height) * 0.0000001f;
+                            const     float ortho_scale_factor = camera.view_height / (int16_scale * static_cast<float>(view.height));
                             camera.pos.x = vmath::clamp(camera.pos.x - ortho_scale_factor * input.mouse_pos_delta.x, -view_bounds, view_bounds);
                             camera.pos.y = vmath::clamp(camera.pos.y + ortho_scale_factor * input.mouse_pos_delta.y, -view_bounds, view_bounds);
                             break;
@@ -1087,43 +1083,108 @@ void GeometryEditor::handle_mouse_actions(const UserInput& input, bool view_hove
                 if ( ! ImGui::IsKeyDown(ImGuiKey_LeftShift) && ! ImGui::IsKeyDown(ImGuiKey_RightShift))
                     release_mouse();
                 else if (mouse_moved) {
-                    const float pan_factor = static_cast<float>(view.height) * 0.0000001f;
-
                     Camera& camera = view.camera[static_cast<int>(view.view_type)];
+
+                    const float aspect = static_cast<float>(view.width)  / static_cast<float>(view.height);
+                    const float ndc_x  = view.mouse_pos.x / static_cast<float>(view.width)  * 2.0f - 1.0f;
+                    const float ndc_y  = 1.0f - view.mouse_pos.y / static_cast<float>(view.height) * 2.0f;
+                    const float half_h = camera.view_height / (2.0f * int16_scale);
+                    constexpr float vb = 1.1f;
+
+                    // Initialize world grab position for panning
+                    if ( ! camera.pan_grab)
+                        camera.pan_grab = view.mouse_world_pos;
+
+                    // If no object was grabbed, grab the grid
+                    if ( ! camera.pan_grab) {
+                        switch (view.view_type) {
+                            default:
+                                assert(view.view_type == ViewType::free_moving);
+                                camera.pan_grab = calc_grid_world_pos(view);
+                                if ( ! camera.pan_grab) {
+                                    const vmath::vec3 right_fb = vmath::normalize(vmath::cross_product(vmath::vec3{0, 1, 0}, camera.dir));
+                                    const vmath::vec3 up_fb    = vmath::normalize(vmath::cross_product(camera.dir, right_fb));
+                                    const float       fov_tan  = vmath::tan(fov_radians * 0.5f);
+                                    camera.pan_grab = camera.pos + camera.dir
+                                                    + right_fb * (ndc_x * aspect * fov_tan)
+                                                    + up_fb    * (ndc_y * fov_tan);
+                                }
+                                break;
+
+                            case ViewType::front:
+                                camera.pan_grab = vmath::vec3{camera.pos.x + ndc_x * aspect * half_h, camera.pos.y + ndc_y * half_h, 0.0f};
+                                break;
+
+                            case ViewType::back:
+                                camera.pan_grab = vmath::vec3{camera.pos.x - ndc_x * aspect * half_h, camera.pos.y + ndc_y * half_h, 0.0f};
+                                break;
+
+                            case ViewType::left:
+                                camera.pan_grab = vmath::vec3{0.0f, camera.pos.y + ndc_y * half_h, camera.pos.z - ndc_x * aspect * half_h};
+                                break;
+
+                            case ViewType::right:
+                                camera.pan_grab = vmath::vec3{0.0f, camera.pos.y + ndc_y * half_h, camera.pos.z + ndc_x * aspect * half_h};
+                                break;
+
+                            case ViewType::top:
+                                camera.pan_grab = vmath::vec3{camera.pos.x + ndc_x * aspect * half_h, 0.0f, camera.pos.z + ndc_y * half_h};
+                                break;
+
+                            case ViewType::bottom:
+                                camera.pan_grab = vmath::vec3{camera.pos.x - ndc_x * aspect * half_h, 0.0f, camera.pos.z + ndc_y * half_h};
+                                break;
+                        }
+                    }
+
+                    const vmath::vec3 grab = *camera.pan_grab;
 
                     switch (view.view_type) {
 
                         default:
                             assert(view.view_type == ViewType::free_moving);
-                            camera.move(vmath::vec3{-pan_factor, pan_factor, 0} * vmath::vec3{input.mouse_pos_delta});
+                            {
+                                const vmath::vec3 right   = vmath::normalize(vmath::cross_product(vmath::vec3{0, 1, 0}, camera.dir));
+                                const vmath::vec3 up      = vmath::normalize(vmath::cross_product(camera.dir, right));
+                                const vmath::vec3 V       = grab - camera.pos;
+                                const float       v_fwd   = vmath::dot_product(V, camera.dir);
+                                const float       v_right = vmath::dot_product(V, right);
+                                const float       v_up    = vmath::dot_product(V, up);
+                                const float       fov_tan = vmath::tan(fov_radians * 0.5f);
+                                const float       dr      = v_right - ndc_x * v_fwd * aspect * fov_tan;
+                                const float       du      = v_up    - ndc_y * v_fwd * fov_tan;
+                                camera.pos = vmath::clamp(camera.pos + right * dr + up * du, vmath::vec3{-vb}, vmath::vec3{vb});
+                            }
                             break;
 
                         case ViewType::front:
-                            camera.move(vmath::vec3{-pan_factor, pan_factor, 0} * vmath::vec3{input.mouse_pos_delta});
+                            camera.pos.x = vmath::clamp(grab.x - ndc_x * aspect * half_h, -vb, vb);
+                            camera.pos.y = vmath::clamp(grab.y - ndc_y * half_h,          -vb, vb);
                             break;
 
                         case ViewType::back:
-                            camera.move(vmath::vec3{pan_factor, pan_factor, 0} * vmath::vec3{input.mouse_pos_delta});
+                            camera.pos.x = vmath::clamp(grab.x + ndc_x * aspect * half_h, -vb, vb);
+                            camera.pos.y = vmath::clamp(grab.y - ndc_y * half_h,          -vb, vb);
                             break;
 
                         case ViewType::left:
-                            camera.move(vmath::vec3{0, pan_factor, pan_factor} *
-                                        vmath::vec3{0, input.mouse_pos_delta.y, input.mouse_pos_delta.x});
+                            camera.pos.z = vmath::clamp(grab.z + ndc_x * aspect * half_h, -vb, vb);
+                            camera.pos.y = vmath::clamp(grab.y - ndc_y * half_h,          -vb, vb);
                             break;
 
                         case ViewType::right:
-                            camera.move(vmath::vec3{0, pan_factor, -pan_factor} *
-                                        vmath::vec3{0, input.mouse_pos_delta.y, input.mouse_pos_delta.x});
-                            break;
-
-                        case ViewType::bottom:
-                            camera.move(vmath::vec3{pan_factor, 0, pan_factor} *
-                                        vmath::vec3{input.mouse_pos_delta.x, 0, input.mouse_pos_delta.y});
+                            camera.pos.z = vmath::clamp(grab.z - ndc_x * aspect * half_h, -vb, vb);
+                            camera.pos.y = vmath::clamp(grab.y - ndc_y * half_h,          -vb, vb);
                             break;
 
                         case ViewType::top:
-                            camera.move(vmath::vec3{-pan_factor, 0, pan_factor} *
-                                        vmath::vec3{input.mouse_pos_delta.x, 0, input.mouse_pos_delta.y});
+                            camera.pos.x = vmath::clamp(grab.x - ndc_x * aspect * half_h, -vb, vb);
+                            camera.pos.z = vmath::clamp(grab.z - ndc_y * half_h,          -vb, vb);
+                            break;
+
+                        case ViewType::bottom:
+                            camera.pos.x = vmath::clamp(grab.x + ndc_x * aspect * half_h, -vb, vb);
+                            camera.pos.z = vmath::clamp(grab.z - ndc_y * half_h,          -vb, vb);
                             break;
                     }
                 }
