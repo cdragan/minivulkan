@@ -24,7 +24,7 @@ void main()
     out_normal = vec4(in_normal * 0.5 + 0.5, 0);
 
     // Detect selected faces - shallow selection for opaque faces
-    if ((frame_flags & FRAME_FLAG_SELECTION_ACTIVE) != 0u) {
+    if ((frame_flags & FRAME_FLAG_SELECT_FACES) != 0u) {
         const vec2 pos = gl_FragCoord.xy;
         if (pos.x >= selection_rect_min.x && pos.x <= selection_rect_max.x &&
             pos.y >= selection_rect_min.y && pos.y <= selection_rect_max.y) {

@@ -145,8 +145,9 @@ namespace {
     };
 
     enum FrameFlags : uint32_t {
-        frame_flag_selection_active = 1u,
-        frame_flag_wireframe_mode   = 2u,
+        frame_flag_select_faces     = 1u,
+        frame_flag_select_vertices  = 2u,
+        frame_flag_wireframe_mode   = 4u,
     };
 
     struct FrameData {
@@ -1441,11 +1442,13 @@ bool GeometryEditor::gui_toolbar()
         new_mode = Mode::select;
     }
 
+    /* TODO for now edge selection is not implemented
     if (toolbar_button(ToolbarButton::sel_edges, &toolbar_state.select.edges)) {
         if (mode != Mode::select)
             saved_select = toolbar_state.select;
         new_mode = Mode::select;
     }
+    */
 
     if (toolbar_button(ToolbarButton::sel_faces, &toolbar_state.select.faces)) {
         if (mode != Mode::select)
@@ -2079,8 +2082,12 @@ void GeometryEditor::set_frame_data(VkCommandBuffer cmdbuf, uint32_t image_idx)
         }
 
         if (frame_data.selection_rect_max.x > frame_data.selection_rect_min.x &&
-            frame_data.selection_rect_max.y > frame_data.selection_rect_min.y)
-            frame_data.flags |= frame_flag_selection_active;
+            frame_data.selection_rect_max.y > frame_data.selection_rect_min.y) {
+            if (toolbar_state.select.faces)
+                frame_data.flags |= frame_flag_select_faces;
+            if (toolbar_state.select.vertices)
+                frame_data.flags |= frame_flag_select_vertices;
+        }
     }
 
     if (toolbar_state.toggle_wireframe)
@@ -2182,7 +2189,7 @@ bool GeometryEditor::draw_deep_selection(VkCommandBuffer cmdbuf,
     // Deep selection is only needed in wireframe mode during a rectangle drag.
     // It rerenders the geometry with depth test OFF so that objects hidden behind
     // other geometry are also marked as hovered.
-    if ( ! toolbar_state.toggle_wireframe || mouse_action != Action::select)
+    if ( ! toolbar_state.toggle_wireframe || mouse_action != Action::select || ! toolbar_state.select.faces)
         return true;
 
     const vmath::vec2 view_max{static_cast<float>(dst_view.width  - 1),

@@ -14,5 +14,6 @@ layout(binding = 6) uniform frame_data {
 };
 
 // Per-frame flags
-#define FRAME_FLAG_SELECTION_ACTIVE 1u // mouse hover selection is in progress
-#define FRAME_FLAG_WIREFRAME_MODE   2u // object is rendered in wireframe mode
+#define FRAME_FLAG_SELECT_FACES     1u // face selection is active
+#define FRAME_FLAG_SELECT_VERTICES  2u // vertex selection is active
+#define FRAME_FLAG_WIREFRAME_MODE   4u // object is rendered in wireframe mode
