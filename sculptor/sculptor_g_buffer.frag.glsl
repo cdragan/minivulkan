@@ -5,7 +5,6 @@
 
 #extension GL_GOOGLE_include_directive: require
 
-#include "bezier_cubic_data.glsl"
 #include "frame_data.glsl"
 
 layout(location = 1) in  vec3      in_normal;

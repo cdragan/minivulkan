@@ -129,13 +129,6 @@ bool Sculptor::create_material_layouts()
                 nullptr
             },
             {
-                2, // binding 2: faces storage buffer
-                VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-                1,
-                VK_SHADER_STAGE_FRAGMENT_BIT,
-                nullptr
-            },
-            {
                 3, // binding 3: normal G-buffer
                 VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
                 1,

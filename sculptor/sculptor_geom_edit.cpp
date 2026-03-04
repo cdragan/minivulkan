@@ -1989,16 +1989,6 @@ bool GeometryEditor::draw_lighting_pass(VkCommandBuffer cmdbuf,
     push_descriptor(cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, Sculptor::lighting_layout,
                     1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, transforms_buf_info);
 
-    static VkDescriptorBufferInfo faces_buf_info = {
-        VK_NULL_HANDLE,
-        0,
-        0
-    };
-    patch_geometry.write_faces_descriptor(&faces_buf_info);
-
-    push_descriptor(cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, Sculptor::lighting_layout,
-                    2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, faces_buf_info);
-
     push_descriptor(cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, Sculptor::lighting_layout,
                     3, normal_image_info);
     push_descriptor(cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, Sculptor::lighting_layout,

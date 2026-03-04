@@ -5,8 +5,6 @@
 
 #extension GL_GOOGLE_include_directive: require
 
-#include "bezier_cubic_data.glsl"
-
 layout(location = 2) in flat uint in_object_id;
 
 layout(binding = 5) coherent buffer sel_buf_data { uint data[]; } sel_buf;
