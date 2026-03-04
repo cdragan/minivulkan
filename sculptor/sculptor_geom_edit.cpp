@@ -983,9 +983,14 @@ bool GeometryEditor::toolbar_button(ToolbarButton button, bool* checked)
     return clicked;
 }
 
-void GeometryEditor::handle_mouse_actions(const UserInput& input, bool view_hovered)
+void GeometryEditor::handle_mouse_actions(const UserInput& input, bool view_hovered, uint32_t image_idx)
 {
     const bool mouse_moved = input.mouse_pos_delta.x != 0 || input.mouse_pos_delta.y != 0;
+
+    const bool shift = ImGui::IsKeyDown(ImGuiKey_LeftShift) || ImGui::IsKeyDown(ImGuiKey_RightShift);
+
+    if ( ! shift)
+        pan_accum = 0.0f;
 
     // When mouse moves, but is not captured, detect a new mouse action
     if ( ! has_captured_mouse() && view_hovered && ! is_mouse_captured()) {
@@ -994,13 +999,28 @@ void GeometryEditor::handle_mouse_actions(const UserInput& input, bool view_hove
 
         if (mouse_moved && (ImGui::IsKeyDown(ImGuiKey_LeftCtrl) || ImGui::IsKeyDown(ImGuiKey_RightCtrl)))
             mouse_action = Action::rotate;
-        else if (mouse_moved && (ImGui::IsKeyDown(ImGuiKey_LeftShift) || ImGui::IsKeyDown(ImGuiKey_RightShift)))
-            mouse_action = Action::pan;
+        else if (mouse_moved && shift) {
+
+            // If mouse is hovering over geometry, activate panning only if it moved over threshold,
+            // otherwise (no geometry under the cursor) just pan immediately.  This allows the user
+            // to unselect faces with shift+click even if the cursor moves slightly during the click.
+            constexpr float pan_threshold = 5.0f;
+            const float* const hover = view.res[image_idx].hover_pos_host_buf.get_ptr<float>();
+            const bool over_geometry = hover[3] > 0.5f;
+            if (over_geometry) {
+                pan_accum += std::abs(input.mouse_pos_delta.x) + std::abs(input.mouse_pos_delta.y);
+                if (pan_accum >= pan_threshold)
+                    mouse_action = Action::pan;
+            }
+            else
+                mouse_action = Action::pan;
+        }
 
         if (ImGui::IsMouseClicked(ImGuiMouseButton_Left))
             mouse_action = (mode == Mode::select) ? Action::select : Action::execute;
 
         if (mouse_action != Action::none) {
+            pan_accum = 0.0f;
             capture_mouse();
             mouse_action_init = input.abs_mouse_pos;
         }
@@ -1071,7 +1091,7 @@ void GeometryEditor::handle_mouse_actions(const UserInput& input, bool view_hove
                 break;
 
             case Action::pan:
-                if ( ! ImGui::IsKeyDown(ImGuiKey_LeftShift) && ! ImGui::IsKeyDown(ImGuiKey_RightShift))
+                if ( ! shift)
                     release_mouse();
                 else if (mouse_moved) {
                     Camera& camera = view.camera[static_cast<int>(view.view_type)];
@@ -1184,10 +1204,23 @@ void GeometryEditor::handle_mouse_actions(const UserInput& input, bool view_hove
             case Action::select:
                 if (ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
                     release_mouse();
-                    // TODO finish selection
-                }
-                else if (mouse_moved) {
-                    // TODO update selection rectangle
+
+                    // Convert hover state to selection
+                    uint8_t* const sel = view.res[image_idx].sel_host_buf.get_ptr<uint8_t>();
+                    for (uint32_t i = 0; i < max_objects; i++) {
+                        if (sel[i] & obj_hovered) {
+                            if (shift)
+                                sel[i] &= ~static_cast<uint8_t>(obj_selected);
+                            else
+                                sel[i] |= obj_selected;
+                        }
+                    }
+
+                    // Update selection buffer for each swapchain image
+                    for (uint32_t i_img = 0; i_img < max_swapchain_size; i_img++) {
+                        if (i_img != image_idx && view.res[i_img].sel_host_buf.allocated())
+                            mstd::mem_copy(view.res[i_img].sel_host_buf.get_ptr<uint8_t>(), sel, max_objects);
+                    }
                 }
                 break;
 
@@ -1622,8 +1655,10 @@ bool GeometryEditor::create_gui_frame(uint32_t image_idx, bool* need_realloc, co
         ImGui::PopStyleVar();
     }
 
+    const ImVec2 image_rect_min = ImGui::GetItemRectMin();
+
     UserInput local_input = input;
-    local_input.abs_mouse_pos -= vmath::vec2(ImGui::GetItemRectMin());
+    local_input.abs_mouse_pos -= vmath::vec2(image_rect_min);
 
     view.mouse_pos = local_input.abs_mouse_pos;
 
@@ -1634,7 +1669,15 @@ bool GeometryEditor::create_gui_frame(uint32_t image_idx, bool* need_realloc, co
     if ( ! view.mouse_world_pos)
         view.mouse_world_pos = calc_grid_world_pos(view);
 
-    handle_mouse_actions(local_input, ImGui::IsItemHovered());
+    handle_mouse_actions(local_input, ImGui::IsItemHovered(), image_idx);
+
+    if (mouse_action == Action::select) {
+        const ImVec2 p0{image_rect_min.x + mouse_action_init.x, image_rect_min.y + mouse_action_init.y};
+        const ImVec2 p1{image_rect_min.x + view.mouse_pos.x,    image_rect_min.y + view.mouse_pos.y};
+        ImDrawList* const dl = ImGui::GetWindowDrawList();
+        dl->AddRectFilled(p0, p1, IM_COL32(255, 255, 255, 30));
+        dl->AddRect(p0, p1, IM_COL32(255, 255, 255, 200));
+    }
 
     const ImVec2 status_bar_pos = ImGui::GetCursorPos();
 
@@ -2069,9 +2112,10 @@ void GeometryEditor::set_frame_data(VkCommandBuffer cmdbuf, uint32_t image_idx)
         const vmath::vec2 view_max{static_cast<float>(view.width  - 1),
                                    static_cast<float>(view.height - 1)};
 
+        constexpr vmath::vec2 mouse_snap_px{1.0f};
+
         if (mouse_action == Action::none) {
             // Mouse hover: use a small snap rectangle around the cursor
-            constexpr vmath::vec2 mouse_snap_px{1.0f};
             frame_data.selection_rect_min = vmath::max(view.mouse_pos - mouse_snap_px, vmath::vec2{0.0f});
             frame_data.selection_rect_max = vmath::min(view.mouse_pos + mouse_snap_px, view_max);
         }
@@ -2079,6 +2123,13 @@ void GeometryEditor::set_frame_data(VkCommandBuffer cmdbuf, uint32_t image_idx)
             // Active drag: use the full selection rectangle
             frame_data.selection_rect_min = vmath::clamp(view.mouse_pos, vmath::vec2{0.0f}, mouse_action_init);
             frame_data.selection_rect_max = vmath::clamp(view.mouse_pos, mouse_action_init, view_max);
+
+            if (frame_data.selection_rect_max.x <= frame_data.selection_rect_min.x ||
+                frame_data.selection_rect_max.y <= frame_data.selection_rect_min.y) {
+
+                frame_data.selection_rect_min = vmath::max(view.mouse_pos - mouse_snap_px, vmath::vec2{0.0f});
+                frame_data.selection_rect_max = vmath::min(view.mouse_pos + mouse_snap_px, view_max);
+            }
         }
 
         if (frame_data.selection_rect_max.x > frame_data.selection_rect_min.x &&

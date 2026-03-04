@@ -174,7 +174,7 @@ class GeometryEditor: public Editor {
         bool create_grid_buffer();
         std::optional<vmath::vec3> read_mouse_world_pos(const View& src_view, uint32_t image_idx) const;
         std::optional<vmath::vec3> calc_grid_world_pos(const View& src_view) const;
-        void handle_mouse_actions(const UserInput& input, bool view_hovered);
+        void handle_mouse_actions(const UserInput& input, bool view_hovered, uint32_t image_idx);
         void handle_keyboard_actions();
         void gui_status_bar();
         bool gui_toolbar();
@@ -224,6 +224,7 @@ class GeometryEditor: public Editor {
         Mode               mode              = Mode::select;
         Action             mouse_action      = Action::none;
         vmath::vec2        mouse_action_init {0.0f, 0.0f};
+        float              pan_accum         = 0.0f;
 };
 
 }
