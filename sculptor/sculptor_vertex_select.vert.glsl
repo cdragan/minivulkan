@@ -40,7 +40,7 @@ void main()
     const vec4 view_pos    = vec4(orig_vertex, 1) * model_view;
     vec4       pos         = projection(view_pos.xyz);
 
-    pos.xy += vec2(ivec2(gl_VertexIndex & 1, gl_VertexIndex >> 1) * 2 - 1) * pixel_dim * 3.0 * pos.w;
+    pos.xy += vec2(ivec2(gl_VertexIndex & 1, gl_VertexIndex >> 1) * 2 - 1) * pixel_dim * 2.0 * pos.w;
 
     gl_Position = pos;
     out_depth   = pos.z / pos.w;
