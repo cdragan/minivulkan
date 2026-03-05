@@ -8,7 +8,8 @@
 #include "frame_data.glsl"
 #include "transforms.glsl"
 
-layout(location = 0) out float out_depth;
+layout(location = 1) out flat uint out_vtx_idx;
+layout(location = 2) out flat uint out_in_rect;
 
 struct vertex_data {
     uint xy;
@@ -40,8 +41,20 @@ void main()
     const vec4 view_pos    = vec4(orig_vertex, 1) * model_view;
     vec4       pos         = projection(view_pos.xyz);
 
+    out_vtx_idx = uint(gl_InstanceIndex);
+
+    // Check if vertex center falls within selection rectangle (vertex selection mode only)
+    out_in_rect = 0u;
+    if ((frame_flags & FRAME_FLAG_SELECT_VERTICES) != 0u) {
+        const vec2 ndc = pos.xy / pos.w;
+        const vec2 vp  = vec2(ndc.x + 1.0, 1.0 - ndc.y) / pixel_dim;
+        if (vp.x >= selection_rect_min.x && vp.x <= selection_rect_max.x &&
+            vp.y >= selection_rect_min.y && vp.y <= selection_rect_max.y)
+            out_in_rect = 1u;
+    }
+
     pos.xy += vec2(ivec2(gl_VertexIndex & 1, gl_VertexIndex >> 1) * 2 - 1) * pixel_dim * 2.0 * pos.w;
+    pos.z  *= 1.00195325;
 
     gl_Position = pos;
-    out_depth   = pos.z / pos.w;
 }

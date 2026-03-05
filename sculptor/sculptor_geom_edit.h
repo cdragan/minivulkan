@@ -64,7 +64,8 @@ class GeometryEditor: public Editor {
             Buffer          frame_data;        // per-frame global state (selection rect, flags)
             Buffer          transforms;        // per-object transform matrices
             Buffer          sel_host_buf;      // host-side selection state, mirrored to/from sel_buf each frame
-            Buffer          hover_pos_buf;     // device-local SSBO: shader writes world pos under mouse here
+            Buffer          vtx_sel_host_buf;  // host-visible mirror of vtx_sel_buf
+            Buffer          hover_pos_buf;     // device storage for mouse position in world coordinates
             Buffer          hover_pos_host_buf;// host-visible copy for CPU readback
             VkDescriptorSet gui_texture = VK_NULL_HANDLE;
         };
@@ -181,6 +182,8 @@ class GeometryEditor: public Editor {
         bool toolbar_button(ToolbarButton button, bool* checked = nullptr);
         void switch_mode(Mode new_mode);
 
+        static void commit_hover_selection(Buffer& buf_member, uint32_t num_elems, bool shift_pressed);
+
         void set_frame_data(VkCommandBuffer cmdbuf, uint32_t image_idx);
         void set_patch_transforms(VkCommandBuffer cmdbuf, const View& dst_view, uint32_t image_idx);
         bool setup_selection(VkCommandBuffer cmdbuf, uint32_t image_idx);
@@ -200,27 +203,32 @@ class GeometryEditor: public Editor {
         uint32_t           window_height     = 0;
         uint32_t           materials_stride  = 0;
 
-        VkPipeline            gray_patch_mat         = VK_NULL_HANDLE;
-        VkPipeline            gray_patch_gbuffer_mat = VK_NULL_HANDLE;
-        VkPipeline            selection_mat          = VK_NULL_HANDLE;
-        VkPipeline            vertex_mat             = VK_NULL_HANDLE;
-        VkPipeline            grid_mat               = VK_NULL_HANDLE;
-        VkPipeline            wireframe_tess_mat     = VK_NULL_HANDLE;
-        VkPipeline            wireframe_mat          = VK_NULL_HANDLE;
-        VkPipeline            lighting_mat           = VK_NULL_HANDLE;
+        VkPipeline         gray_patch_mat         = VK_NULL_HANDLE;
+        VkPipeline         gray_patch_gbuffer_mat = VK_NULL_HANDLE;
+        VkPipeline         selection_mat          = VK_NULL_HANDLE;
+        VkPipeline         vertex_mat             = VK_NULL_HANDLE;
+        VkPipeline         grid_mat               = VK_NULL_HANDLE;
+        VkPipeline         wireframe_tess_mat     = VK_NULL_HANDLE;
+        VkPipeline         wireframe_mat          = VK_NULL_HANDLE;
+        VkPipeline         lighting_mat           = VK_NULL_HANDLE;
 
-        VkDescriptorSet       toolbar_texture        = VK_NULL_HANDLE;
+        VkDescriptorSet    toolbar_texture        = VK_NULL_HANDLE;
 
-        Buffer                sel_buf;
-        VkDescriptorSetLayout sel_buf_ds_layout   = VK_NULL_HANDLE;
-        VkPipelineLayout      sel_buf_pipe_layout  = VK_NULL_HANDLE;
-        VkPipeline            clear_hover_pipe     = VK_NULL_HANDLE;
+        Buffer             sel_buf;     // Device-side selection buffer for faces
+        Buffer             vtx_sel_buf; // Device-side selection buffer for vertices
+        VkDescriptorSetLayout sel_buf_ds_layout = VK_NULL_HANDLE;
+        VkPipelineLayout   sel_buf_pipe_layout = VK_NULL_HANDLE;
+        VkPipeline         clear_hover_pipe    = VK_NULL_HANDLE;
 
         Sculptor::Geometry patch_geometry;
         Buffer             materials_buf;
         Buffer             grid_buf;
         ToolbarState       toolbar_state     = { };
         SelectState        saved_select      = { };
+        bool               clear_face_sel    = true;
+        bool               clear_vtx_sel     = true;
+        bool               face_sel_dirty    = false;
+        bool               vtx_sel_dirty     = false;
         Mode               mode              = Mode::select;
         Action             mouse_action      = Action::none;
         vmath::vec2        mouse_action_init {0.0f, 0.0f};

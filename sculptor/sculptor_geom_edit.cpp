@@ -438,6 +438,16 @@ bool GeometryEditor::alloc_view_resources(View*     dst_view,
             mstd::mem_zero(res.sel_host_buf.get_ptr<uint8_t>(), max_objects);
         }
 
+        if ( ! res.vtx_sel_host_buf.allocated()) {
+            if ( ! res.vtx_sel_host_buf.allocate(Usage::host_only,
+                                                 max_objects,
+                                                 VK_FORMAT_UNDEFINED,
+                                                 VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                                                 {"vertex selection host buffer", i_img}))
+                return false;
+            mstd::mem_zero(res.vtx_sel_host_buf.get_ptr<uint8_t>(), max_objects);
+        }
+
         if ( ! res.hover_pos_buf.allocated()) {
             if ( ! res.hover_pos_buf.allocate(Usage::device_only,
                                               sizeof(float) * 4,
@@ -521,6 +531,7 @@ void GeometryEditor::free_view_resources(View* dst_view)
         res.depth.free();
         res.frame_data.free();
         res.sel_host_buf.free();
+        res.vtx_sel_host_buf.free();
         res.hover_pos_buf.free();
         res.hover_pos_host_buf.free();
     }
@@ -553,6 +564,15 @@ bool GeometryEditor::allocate_resources_once()
                                 VK_BUFFER_USAGE_TRANSFER_DST_BIT |
                                 VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
                             "selection buffer"))
+        return false;
+
+    if ( ! vtx_sel_buf.allocate(Usage::device_only,
+                                max_objects,
+                                VK_FORMAT_UNDEFINED,
+                                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+                                    VK_BUFFER_USAGE_TRANSFER_DST_BIT |
+                                    VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                                "vertex selection buffer"))
         return false;
 
     // Create compute pipeline for clearing hover bits in sel_buf each frame
@@ -983,6 +1003,20 @@ bool GeometryEditor::toolbar_button(ToolbarButton button, bool* checked)
     return clicked;
 }
 
+void GeometryEditor::commit_hover_selection(Buffer& buffer, uint32_t num_elems, bool shift_pressed)
+{
+    uint8_t* const buf = buffer.get_ptr<uint8_t>();
+
+    for (uint32_t i = 0; i < num_elems; i++) {
+        if (buf[i] & obj_hovered) {
+            if (shift_pressed)
+                buf[i] &= ~static_cast<uint8_t>(obj_selected);
+            else
+                buf[i] |= obj_selected;
+        }
+    }
+}
+
 void GeometryEditor::handle_mouse_actions(const UserInput& input, bool view_hovered, uint32_t image_idx)
 {
     const bool mouse_moved = input.mouse_pos_delta.x != 0 || input.mouse_pos_delta.y != 0;
@@ -1205,21 +1239,18 @@ void GeometryEditor::handle_mouse_actions(const UserInput& input, bool view_hove
                 if (ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
                     release_mouse();
 
-                    // Convert hover state to selection
-                    uint8_t* const sel = view.res[image_idx].sel_host_buf.get_ptr<uint8_t>();
-                    for (uint32_t i = 0; i < max_objects; i++) {
-                        if (sel[i] & obj_hovered) {
-                            if (shift)
-                                sel[i] &= ~static_cast<uint8_t>(obj_selected);
-                            else
-                                sel[i] |= obj_selected;
-                        }
+                    if (toolbar_state.select.faces) {
+                        commit_hover_selection(view.res[image_idx].sel_host_buf,
+                                               patch_geometry.get_num_faces(),
+                                               shift);
+                        face_sel_dirty = true;
                     }
 
-                    // Update selection buffer for each swapchain image
-                    for (uint32_t i_img = 0; i_img < max_swapchain_size; i_img++) {
-                        if (i_img != image_idx && view.res[i_img].sel_host_buf.allocated())
-                            mstd::mem_copy(view.res[i_img].sel_host_buf.get_ptr<uint8_t>(), sel, max_objects);
+                    if (toolbar_state.select.vertices) {
+                        commit_hover_selection(view.res[image_idx].vtx_sel_host_buf,
+                                               patch_geometry.get_num_vertices(),
+                                               shift);
+                        vtx_sel_dirty = true;
                     }
                 }
                 break;
@@ -1326,6 +1357,9 @@ void GeometryEditor::handle_keyboard_actions()
         if (mode != Mode::select)
             saved_select = toolbar_state.select;
         new_mode = Mode::select;
+
+        if ( ! toolbar_state.select.vertices)
+            clear_vtx_sel = true;
     }
 
     if (ImGui::IsKeyPressed(ImGuiKey_2)) {
@@ -1340,6 +1374,9 @@ void GeometryEditor::handle_keyboard_actions()
         if (mode != Mode::select)
             saved_select = toolbar_state.select;
         new_mode = Mode::select;
+
+        if ( ! toolbar_state.select.faces)
+            clear_face_sel = true;
     }
 
     if (ImGui::IsKeyPressed(ImGuiKey_5)) {
@@ -1473,6 +1510,8 @@ bool GeometryEditor::gui_toolbar()
         if (mode != Mode::select)
             saved_select = toolbar_state.select;
         new_mode = Mode::select;
+        if ( ! toolbar_state.select.vertices)
+            clear_vtx_sel = true;
     }
 
     /* TODO for now edge selection is not implemented
@@ -1487,9 +1526,16 @@ bool GeometryEditor::gui_toolbar()
         if (mode != Mode::select)
             saved_select = toolbar_state.select;
         new_mode = Mode::select;
+
+        if ( ! toolbar_state.select.faces)
+            clear_face_sel = true;
     }
 
-    toolbar_button(ToolbarButton::sel_clear);
+    if (toolbar_button(ToolbarButton::sel_clear)) {
+        clear_face_sel = true;
+        clear_vtx_sel  = true;
+    }
+
     if (toolbar_button(ToolbarButton::view_perspective, &toolbar_state.view_perspective)) {
         toolbar_state.view_perspective = true;
         toolbar_state.view_ortho_x = false;
@@ -2112,7 +2158,7 @@ void GeometryEditor::set_frame_data(VkCommandBuffer cmdbuf, uint32_t image_idx)
         const vmath::vec2 view_max{static_cast<float>(view.width  - 1),
                                    static_cast<float>(view.height - 1)};
 
-        constexpr vmath::vec2 mouse_snap_px{1.0f};
+        const vmath::vec2 mouse_snap_px{toolbar_state.select.vertices ? 4.0f : 1.0f};
 
         if (mouse_action == Action::none) {
             // Mouse hover: use a small snap rectangle around the cursor
@@ -2167,6 +2213,14 @@ bool GeometryEditor::setup_selection(VkCommandBuffer cmdbuf, uint32_t image_idx)
     };
     sel_buf.barrier(sel_buf_before_copy);
 
+    static const Buffer::Transition vtx_sel_buf_before_copy = {
+        VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+        VK_ACCESS_2_TRANSFER_READ_BIT,
+        VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+        VK_ACCESS_2_TRANSFER_WRITE_BIT
+    };
+    vtx_sel_buf.barrier(vtx_sel_buf_before_copy);
+
     static const Buffer::Transition frame_data_after_update = {
         VK_PIPELINE_STAGE_2_TRANSFER_BIT,
         VK_ACCESS_2_TRANSFER_WRITE_BIT,
@@ -2185,10 +2239,27 @@ bool GeometryEditor::setup_selection(VkCommandBuffer cmdbuf, uint32_t image_idx)
 
     send_barrier(cmdbuf);
 
-    // Copy host selection state to GPU
-    static const VkBufferCopy sel_copy_region = { 0, 0, max_objects };
-    vkCmdCopyBuffer(cmdbuf, res.sel_host_buf.get_buffer(), sel_buf.get_buffer(),
-                    1, &sel_copy_region);
+    if (clear_face_sel) {
+        vkCmdFillBuffer(cmdbuf, sel_buf.get_buffer(), 0, VK_WHOLE_SIZE, 0);
+        clear_face_sel = false;
+        face_sel_dirty = false;
+    } else if (face_sel_dirty) {
+        static const VkBufferCopy sel_copy_region = { 0, 0, max_objects };
+        vkCmdCopyBuffer(cmdbuf, res.sel_host_buf.get_buffer(), sel_buf.get_buffer(),
+                        1, &sel_copy_region);
+        face_sel_dirty = false;
+    }
+
+    if (clear_vtx_sel) {
+        vkCmdFillBuffer(cmdbuf, vtx_sel_buf.get_buffer(), 0, VK_WHOLE_SIZE, 0);
+        clear_vtx_sel = false;
+        vtx_sel_dirty = false;
+    } else if (vtx_sel_dirty) {
+        static const VkBufferCopy vtx_sel_copy_region = { 0, 0, max_objects };
+        vkCmdCopyBuffer(cmdbuf, res.vtx_sel_host_buf.get_buffer(), vtx_sel_buf.get_buffer(),
+                        1, &vtx_sel_copy_region);
+        vtx_sel_dirty = false;
+    }
 
     // Barrier: wait for copy before compute clears hover bits in sel_buf
     static const Buffer::Transition sel_buf_before_clear = {
@@ -2198,6 +2269,14 @@ bool GeometryEditor::setup_selection(VkCommandBuffer cmdbuf, uint32_t image_idx)
         VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT
     };
     sel_buf.barrier(sel_buf_before_clear);
+
+    static const Buffer::Transition vtx_sel_buf_before_clear = {
+        VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+        VK_ACCESS_2_TRANSFER_WRITE_BIT,
+        VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+        VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT
+    };
+    vtx_sel_buf.barrier(vtx_sel_buf_before_clear);
 
     send_barrier(cmdbuf);
 
@@ -2219,7 +2298,18 @@ bool GeometryEditor::setup_selection(VkCommandBuffer cmdbuf, uint32_t image_idx)
     constexpr uint32_t clear_hover_groups = max_objects / 4 / 64;
     vkCmdDispatch(cmdbuf, clear_hover_groups, 1, 1);
 
-    // Barrier: wait for compute write before fragment shader reads/writes sel_buf
+    // Clear hover bits in vtx_sel_buf using same pipeline
+    static VkDescriptorBufferInfo vtx_sel_buf_compute_info = { VK_NULL_HANDLE, 0, 0 };
+    vtx_sel_buf_compute_info.buffer = vtx_sel_buf.get_buffer();
+    vtx_sel_buf_compute_info.offset = 0;
+    vtx_sel_buf_compute_info.range  = VK_WHOLE_SIZE;
+
+    push_descriptor(cmdbuf, VK_PIPELINE_BIND_POINT_COMPUTE, sel_buf_pipe_layout,
+                    0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, vtx_sel_buf_compute_info);
+
+    vkCmdDispatch(cmdbuf, clear_hover_groups, 1, 1);
+
+    // Barrier: wait for compute write before fragment shader reads/writes sel_buf and vtx_sel_buf
     static const Buffer::Transition sel_buf_after_clear = {
         VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
         VK_ACCESS_2_SHADER_WRITE_BIT,
@@ -2227,6 +2317,14 @@ bool GeometryEditor::setup_selection(VkCommandBuffer cmdbuf, uint32_t image_idx)
         VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT
     };
     sel_buf.barrier(sel_buf_after_clear);
+
+    static const Buffer::Transition vtx_sel_buf_after_clear = {
+        VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+        VK_ACCESS_2_SHADER_WRITE_BIT,
+        VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+        VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT
+    };
+    vtx_sel_buf.barrier(vtx_sel_buf_after_clear);
 
     send_barrier(cmdbuf);
 
@@ -2821,6 +2919,13 @@ bool GeometryEditor::render_control_points(VkCommandBuffer cmdbuf,
     push_descriptor(cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, Sculptor::material_layout,
                     4, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, buffer_info);
 
+    buffer_info.buffer = vtx_sel_buf.get_buffer();
+    buffer_info.offset = 0;
+    buffer_info.range  = VK_WHOLE_SIZE;
+
+    push_descriptor(cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, Sculptor::material_layout,
+                    5, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, buffer_info);
+
     buffer_info.buffer = res.frame_data.get_buffer();
     buffer_info.offset = 0;
     buffer_info.range  = sizeof(FrameData);
@@ -2831,6 +2936,22 @@ bool GeometryEditor::render_control_points(VkCommandBuffer cmdbuf,
     patch_geometry.render_vertices(cmdbuf);
 
     vkCmdEndRendering(cmdbuf);
+
+    // Readback vtx_sel_buf to vtx_sel_host_buf
+    static const Buffer::Transition vtx_sel_after_render = {
+        VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+        VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT,
+        VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+        VK_ACCESS_2_TRANSFER_READ_BIT
+    };
+    vtx_sel_buf.barrier(vtx_sel_after_render);
+
+    send_barrier(cmdbuf);
+
+    static const VkBufferCopy vtx_sel_readback_region = { 0, 0, max_objects };
+    vkCmdCopyBuffer(cmdbuf, vtx_sel_buf.get_buffer(),
+                    res.vtx_sel_host_buf.get_buffer(),
+                    1, &vtx_sel_readback_region);
 
     // Transition color output to shader-read layout for the GUI
     static const Image::Transition gui_image_layout = {
