@@ -160,6 +160,9 @@ namespace {
         vmath::vec2 pixel_dim;
         vmath::vec2 pad2;
 
+        // Light positions in world space
+        vmath::vec4 light_pos[4];
+
         // GUI colors
         vmath::vec4 color_face_base;
         vmath::vec4 color_face_hovered;
@@ -2283,6 +2286,11 @@ void GeometryEditor::set_frame_data(VkCommandBuffer cmdbuf, uint32_t image_idx)
     frame_data.color_vertex_hovered          = {1.0f,  0.7f,  0.0f,  1.0f};
     frame_data.color_vertex_hovered_selected = {1.0f, 1.0f,  0.3f,  1.0f};
     frame_data.color_vertex_selected         = {0.898f, 0.748f, 0.186f, 1.0f};
+
+    frame_data.light_pos[0] = {-10.0f, 10.0f,  -5.0f, 0.0f};  // key: upper-left-front
+    frame_data.light_pos[1] = { 10.0f,  5.0f,  -5.0f, 0.0f};  // fill: right-front
+    frame_data.light_pos[2] = {  0.0f,  3.0f,  15.0f, 0.0f};  // back light
+    frame_data.light_pos[3] = {  0.0f, 15.0f,   0.0f, 0.0f};  // top light
 
     vkCmdUpdateBuffer(cmdbuf, view.res[image_idx].frame_data.get_buffer(), 0,
                       sizeof(frame_data), &frame_data);

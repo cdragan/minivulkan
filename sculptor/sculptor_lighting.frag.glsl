@@ -16,6 +16,23 @@ layout(binding = 7) buffer hover_pos_data { vec4 pos; } hover_pos_buf;
 
 layout(location = 0) out vec4 out_color;
 
+float calculate_lighting(vec3 view_dir, vec3 light_pos, vec3 surface_pos, vec3 surface_normal)
+{
+    const float shininess = 32;  // TODO put in material
+    const vec3  light_dir = light_pos - surface_pos;
+    const float diffuse   = max(0, dot(surface_normal, normalize(light_dir)));
+    float       specular  = 0;
+
+    // Blinn-Phong specular
+    if (diffuse > 0) {
+        const vec3  half_dir = normalize(light_dir + view_dir);
+        const float spec_cos = max(0, dot(half_dir, surface_normal));
+        specular             = pow(spec_cos, shininess);
+    }
+
+    return diffuse + specular;
+}
+
 void main()
 {
     // Pixel-exact coordinates in the input attachments
@@ -78,7 +95,7 @@ void main()
     // Uncomment to visualize depth:
     //out_color = vec4(vec3(depth), 1.0);
 
-    vec3 color = color_face_base.rgb;
+    vec3 albedo = color_face_base.rgb;
 
     // Read object state from selection buffer
     // obj_id has 1 added to it (0 = no object), so actual object index is obj_id - 1.
@@ -88,11 +105,24 @@ void main()
     const uint state   = (word >> ((obj_idx & 3u) * 8u)) & 0xFFu;
 
     if (state == 3u)             // obj_hovered + obj_selected
-        color = color_face_hovered_selected.rgb;
+        albedo = color_face_hovered_selected.rgb;
     else if ((state & 2u) != 0u) // obj_hovered
-        color = color_face_hovered.rgb;
+        albedo = color_face_hovered.rgb;
     else if ((state & 1u) != 0u) // obj_selected
-        color = color_face_selected.rgb;
+        albedo = color_face_selected.rgb;
 
-    out_color = vec4(color, 1);
+    const vec3 world_normal = normalize(vec3(vec4(normal, 0.0) * view_inverse));
+    const vec3 cam_pos      = (vec4(0.0, 0.0, 0.0, 1.0) * view_inverse).xyz;
+    const vec3 view_dir     = normalize(cam_pos - world_pos);
+
+    float attenuation = 0.0;
+    for (int i = 0; i < 4; i++) {
+        attenuation += calculate_lighting(view_dir, light_pos[i].xyz, world_pos, world_normal);
+    }
+
+    const float ambient = 0.4; // TODO but in frame data
+    attenuation = ambient + attenuation / 4; // average input from all lights
+
+    const float gamma = 2.2;
+    out_color = vec4(pow(albedo * attenuation, vec3(1 / gamma)), 1);
 }

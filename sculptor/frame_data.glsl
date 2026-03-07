@@ -13,6 +13,9 @@ layout(binding = 6) uniform frame_data {
     vec2 pixel_dim;
     vec2 pad2;
 
+    // Light positions in world space
+    vec4 light_pos[4];
+
     // GUI colors
     vec4 color_face_base;
     vec4 color_face_hovered;
