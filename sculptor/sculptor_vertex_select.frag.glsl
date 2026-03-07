@@ -6,6 +6,7 @@
 #extension GL_GOOGLE_include_directive: require
 
 #include "sculptor_material.glsl"
+#include "frame_data.glsl"
 
 layout(early_fragment_tests) in;
 
@@ -30,12 +31,14 @@ void main()
     const uint state = (vtx_sel_buf.data[word_idx] >> shift) & 0xFFu;
 
     vec3 color;
-    if ((state & 2u) != 0u)           // hovered
-        color = vec3(1.0, 0.7, 0.0);  // orange
-    else if ((state & 1u) != 0u)      // selected
-        color = vec3(1.0, 0.4, 0.0);  // dark orange
+    if (state == 3u)                      // hovered + selected
+        color = color_vertex_hovered_selected.rgb;
+    else if ((state & 2u) != 0u)          // hovered
+        color = color_vertex_hovered.rgb;
+    else if ((state & 1u) != 0u)          // selected
+        color = color_vertex_selected.rgb;
     else
-        color = diffuse_color.rgb;    // default gray
+        color = diffuse_color.rgb;
 
     out_color = vec4(color, 1.0);
 }

@@ -11,6 +11,17 @@ layout(binding = 6) uniform frame_data {
     uint pad;
     // Pixel dimensions in normalized device coordinates
     vec2 pixel_dim;
+    vec2 pad2;
+
+    // GUI colors
+    vec4 color_face_base;
+    vec4 color_face_hovered;
+    vec4 color_face_hovered_selected;
+    vec4 color_face_selected;
+    vec4 color_edge;
+    vec4 color_vertex_hovered;
+    vec4 color_vertex_hovered_selected;
+    vec4 color_vertex_selected;
 };
 
 // Per-frame flags

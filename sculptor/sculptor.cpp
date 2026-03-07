@@ -22,6 +22,8 @@
 
 const char app_name[] = "Sculptor";
 
+float Sculptor::Editor::debug_color[4] = {1.0f, 0.5f, 0.0f, 1.0f};
+
 const int gui_config_flags = ImGuiConfigFlags_NavEnableKeyboard
                            | ImGuiConfigFlags_DockingEnable;
 
@@ -171,7 +173,7 @@ static bool create_gui_frame(uint32_t image_idx)
 
     ImGui::DockSpaceOverViewport(ImGui::GetMainViewport(), ImGuiDockNodeFlags_PassthruCentralNode);
 
-    ImGui::Begin("Hello, Window!");
+    ImGui::Begin("Debug");
     {
         const ImVec2 win_size = ImGui::GetWindowSize();
         ImGui::Text("Window Size: %d x %d", static_cast<int>(win_size.x), static_cast<int>(win_size.y));
@@ -186,6 +188,14 @@ static bool create_gui_frame(uint32_t image_idx)
             snprintf(name, sizeof(name), "%s: %s", editor->get_editor_name(), editor->get_object_name());
             ImGui::Checkbox(name, &editor->enabled);
         }
+
+        ImGui::Separator();
+
+        ImGui::ColorPicker4("Debug Color", Sculptor::Editor::debug_color, ImGuiColorEditFlags_NoAlpha);
+        ImGui::Text("Float: %.3f, %.3f, %.3f",
+                    Sculptor::Editor::debug_color[0],
+                    Sculptor::Editor::debug_color[1],
+                    Sculptor::Editor::debug_color[2]);
     }
     ImGui::End();
 

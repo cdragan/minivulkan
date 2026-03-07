@@ -43,7 +43,7 @@ void main()
         obj_id_rt == 0 ||
         obj_id_dn == 0) {
 
-        out_color = vec4(0.93, 0.93, 0.93, 1);
+        out_color = vec4(color_edge.rgb, 1);
         return;
     }
 
@@ -78,7 +78,7 @@ void main()
     // Uncomment to visualize depth:
     //out_color = vec4(vec3(depth), 1.0);
 
-    vec3 color = vec3(0.5);
+    vec3 color = color_face_base.rgb;
 
     // Read object state from selection buffer
     // obj_id has 1 added to it (0 = no object), so actual object index is obj_id - 1.
@@ -87,10 +87,12 @@ void main()
     const uint word    = sel_buf.data[obj_idx >> 2];
     const uint state   = (word >> ((obj_idx & 3u) * 8u)) & 0xFFu;
 
-    if ((state & 2u) != 0u)      // obj_hovered
-        color *= vec3(1.2, 1.1, 1.1);
+    if (state == 3u)             // obj_hovered + obj_selected
+        color = color_face_hovered_selected.rgb;
+    else if ((state & 2u) != 0u) // obj_hovered
+        color = color_face_hovered.rgb;
     else if ((state & 1u) != 0u) // obj_selected
-        color *= vec3(1, 1, 1.4);
+        color = color_face_selected.rgb;
 
     out_color = vec4(color, 1);
 }

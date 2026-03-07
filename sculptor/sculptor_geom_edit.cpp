@@ -150,13 +150,25 @@ namespace {
         frame_flag_wireframe_mode   = 4u,
     };
 
+    // Frame-global data passed to shaders, must match frame_data.glsl
     struct FrameData {
         vmath::vec2 selection_rect_min;
         vmath::vec2 selection_rect_max;
         vmath::vec2 mouse_pos;
         uint32_t    flags;
-        uint32_t    pad[1];
+        uint32_t    pad;
         vmath::vec2 pixel_dim;
+        vmath::vec2 pad2;
+
+        // GUI colors
+        vmath::vec4 color_face_base;
+        vmath::vec4 color_face_hovered;
+        vmath::vec4 color_face_hovered_selected;
+        vmath::vec4 color_face_selected;
+        vmath::vec4 color_edge;
+        vmath::vec4 color_vertex_hovered;
+        vmath::vec4 color_vertex_hovered_selected;
+        vmath::vec4 color_vertex_selected;
     };
 
     struct Transforms {
@@ -2262,6 +2274,15 @@ void GeometryEditor::set_frame_data(VkCommandBuffer cmdbuf, uint32_t image_idx)
 
     frame_data.pixel_dim = vmath::vec2(2.0f) / vmath::vec2(static_cast<float>(view.width),
                                                            static_cast<float>(view.height));
+
+    frame_data.color_face_base               = {0.5f,  0.5f,  0.5f,  1.0f};
+    frame_data.color_face_hovered            = {0.727f, 0.455f, 0.184f, 1.0f};
+    frame_data.color_face_hovered_selected   = {0.838f, 0.527f, 0.216f, 1.0f};
+    frame_data.color_face_selected           = {0.824f, 0.573f, 0.384f, 1.0f};
+    frame_data.color_edge                    = {0.93f, 0.93f, 0.93f, 1.0f};
+    frame_data.color_vertex_hovered          = {1.0f,  0.7f,  0.0f,  1.0f};
+    frame_data.color_vertex_hovered_selected = {1.0f, 1.0f,  0.3f,  1.0f};
+    frame_data.color_vertex_selected         = {0.898f, 0.748f, 0.186f, 1.0f};
 
     vkCmdUpdateBuffer(cmdbuf, view.res[image_idx].frame_data.get_buffer(), 0,
                       sizeof(frame_data), &frame_data);
