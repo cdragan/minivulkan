@@ -245,6 +245,36 @@ bool Sculptor::Geometry::send_to_gpu(VkCommandBuffer cmd_buf)
     return true;
 }
 
+void Sculptor::Geometry::get_face_vertex_indices(uint32_t face_id, uint32_t out_vtx[16]) const
+{
+    assert(face_id < num_faces);
+
+    const Face& face = obj_faces[face_id];
+
+    static const uint8_t idx_map[] = {
+         0,  1,  2,  3,
+         0,  4,  8, 12,
+         3,  7, 11, 15,
+        12, 13, 14, 15
+    };
+
+    for (uint32_t i_edge = 0; i_edge < 4; i_edge++) {
+        const int32_t edge_sel     = face.edges[i_edge];
+        const bool    inverse_edge = edge_sel < 0;
+        const Edge&   edge         = obj_edges[inverse_edge ? (-edge_sel - 1) : edge_sel];
+
+        for (uint32_t i_idx = 0; i_idx < 4; i_idx++) {
+            const uint32_t src_idx  = inverse_edge ? (3 - i_idx) : i_idx;
+            const uint32_t dest_idx = idx_map[i_edge * 4 + i_idx];
+            out_vtx[dest_idx] = edge.vertices[src_idx];
+        }
+    }
+
+    static const uint32_t ctrl_idx_map[] = { 5, 6, 9, 10 };
+    for (uint32_t i_idx = 0; i_idx < 4; i_idx++)
+        out_vtx[ctrl_idx_map[i_idx]] = face.ctrl_vertices[i_idx];
+}
+
 uint32_t Sculptor::Geometry::add_vertex(int16_t x, int16_t y, int16_t z)
 {
     assert(num_vertices < max_vertices);

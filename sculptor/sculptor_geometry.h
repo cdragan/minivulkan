@@ -51,6 +51,7 @@ class Geometry {
                           uint32_t vtx_0, uint32_t vtx_1, uint32_t vtx_2, uint32_t vtx_3);
         uint32_t get_num_faces() const { return num_faces; }
         void     validate_face(uint32_t face_id);
+        void     get_face_vertex_indices(uint32_t face_id, uint32_t out_vtx[16]) const;
 
         void set_cube();
         void set_hovered_face(uint32_t face_id);
