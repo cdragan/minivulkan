@@ -1003,6 +1003,67 @@ bool GeometryEditor::toolbar_button(ToolbarButton button, bool* checked)
     return clicked;
 }
 
+void GeometryEditor::draw_axis_indicator(ImDrawList* dl, float vp_max_x, float vp_max_y) const
+{
+    constexpr float line_len = 40.0f;
+    constexpr float margin   = 55.0f;
+
+    const float cx = vp_max_x - margin;
+    const float cy = vp_max_y - margin;
+
+    vmath::vec3 cam_right;
+    vmath::vec3 cam_up;
+
+    switch (view.view_type) {
+
+        case ViewType::free_moving: {
+            const Camera cam = view.camera[static_cast<int>(ViewType::free_moving)].get_rotated_camera();
+            cam_right = vmath::normalize(vmath::cross_product(vmath::vec3{0, 1, 0}, cam.dir));
+            cam_up    = vmath::cross_product(cam.dir, cam_right);
+            break;
+        }
+
+        case ViewType::front:   cam_right = {1, 0, 0};  cam_up = {0, 1, 0}; break;
+        case ViewType::back:    cam_right = {-1, 0, 0}; cam_up = {0, 1, 0}; break;
+        case ViewType::left:    cam_right = {0, 0, -1}; cam_up = {0, 1, 0}; break;
+        case ViewType::right:   cam_right = {0, 0, 1};  cam_up = {0, 1, 0}; break;
+        case ViewType::top:     cam_right = {1, 0, 0};  cam_up = {0, 0, 1}; break;
+        case ViewType::bottom:  cam_right = {-1, 0, 0}; cam_up = {0, 0, 1}; break;
+
+        default: return;
+    }
+
+    static const vmath::vec3 world_axes[3] = {{1, 0, 0}, {0, 1, 0}, {0, 0, 1}};
+    static const char* const labels[3]     = {"x", "y", "z"};
+    const bool locked[3] = {toolbar_state.snap_x, toolbar_state.snap_y, toolbar_state.snap_z};
+
+    const float font_h = ImGui::GetFontSize();
+    const float font_w = font_h * 0.5f;
+
+    for (int i = 0; i < 3; ++i) {
+        const float sx =  vmath::dot_product(world_axes[i], cam_right);
+        const float sy = -vmath::dot_product(world_axes[i], cam_up);
+
+        if (sx * sx + sy * sy < 0.01f)
+            continue;
+
+        const ImU32 line_color = locked[i] ? IM_COL32(220, 60, 60, 255) : IM_COL32(160, 160, 160, 255);
+
+        const float len = sqrtf(sx * sx + sy * sy);
+        const float ex  = cx + sx * line_len;
+        const float ey  = cy + sy * line_len;
+        dl->AddLine({cx, cy}, {ex, ey}, line_color, 1.5f);
+
+        constexpr float gap = 4.0f;
+        const float nx  = sx / len;
+        const float ny  = sy / len;
+        const float d   = gap + fabsf(nx) * font_w * 0.5f + fabsf(ny) * font_h * 0.5f;
+        const float tx  = ex + nx * d - font_w * 0.5f;
+        const float ty  = ey + ny * d - font_h * 0.5f;
+        dl->AddText({tx, ty}, IM_COL32(255, 255, 255, 255), labels[i]);
+    }
+}
+
 void GeometryEditor::commit_hover_selection(Buffer& buffer, uint32_t num_elems, bool shift_pressed)
 {
     uint8_t* const buf = buffer.get_ptr<uint8_t>();
@@ -1717,12 +1778,19 @@ bool GeometryEditor::create_gui_frame(uint32_t image_idx, bool* need_realloc, co
 
     handle_mouse_actions(local_input, ImGui::IsItemHovered(), image_idx);
 
-    if (mouse_action == Action::select) {
-        const ImVec2 p0{image_rect_min.x + mouse_action_init.x, image_rect_min.y + mouse_action_init.y};
-        const ImVec2 p1{image_rect_min.x + view.mouse_pos.x,    image_rect_min.y + view.mouse_pos.y};
+    {
         ImDrawList* const dl = ImGui::GetWindowDrawList();
-        dl->AddRectFilled(p0, p1, IM_COL32(255, 255, 255, 30));
-        dl->AddRect(p0, p1, IM_COL32(255, 255, 255, 200));
+
+        // Selection rectangle
+        if (mouse_action == Action::select) {
+            const ImVec2 p0{image_rect_min.x + mouse_action_init.x, image_rect_min.y + mouse_action_init.y};
+            const ImVec2 p1{image_rect_min.x + view.mouse_pos.x,    image_rect_min.y + view.mouse_pos.y};
+            dl->AddRectFilled(p0, p1, IM_COL32(255, 255, 255, 30));
+            dl->AddRect(p0, p1, IM_COL32(255, 255, 255, 200));
+        }
+
+        // Axis indicator
+        draw_axis_indicator(dl, image_rect_min.x + image_size.x, image_rect_min.y + image_size.y);
     }
 
     const ImVec2 status_bar_pos = ImGui::GetCursorPos();

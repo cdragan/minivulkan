@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 // SPDX-FileCopyrightText: Copyright (c) 2021-2026 Chris Dragan
 
+struct ImDrawList;
+
 #include "sculptor_editor.h"
 #include "sculptor_geometry.h"
 #include "../core/resource.h"
@@ -180,6 +182,7 @@ class GeometryEditor: public Editor {
         void gui_status_bar();
         bool gui_toolbar();
         bool toolbar_button(ToolbarButton button, bool* checked = nullptr);
+        void draw_axis_indicator(ImDrawList* dl, float vp_max_x, float vp_max_y) const;
         void switch_mode(Mode new_mode);
 
         static void commit_hover_selection(Buffer& buf_member, uint32_t num_elems, bool shift_pressed);
