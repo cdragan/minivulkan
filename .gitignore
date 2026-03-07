@@ -12,3 +12,6 @@ vc140.pdb
 
 # Config file for clangd
 .clangd
+
+# Worktrees
+.worktrees
