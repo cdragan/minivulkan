@@ -193,9 +193,9 @@ static bool create_gui_frame(uint32_t image_idx)
 
         ImGui::ColorPicker4("Debug Color", Sculptor::Editor::debug_color, ImGuiColorEditFlags_NoAlpha);
         ImGui::Text("Float: %.3f, %.3f, %.3f",
-                    Sculptor::Editor::debug_color[0],
-                    Sculptor::Editor::debug_color[1],
-                    Sculptor::Editor::debug_color[2]);
+                    static_cast<double>(Sculptor::Editor::debug_color[0]),
+                    static_cast<double>(Sculptor::Editor::debug_color[1]),
+                    static_cast<double>(Sculptor::Editor::debug_color[2]));
     }
     ImGui::End();
 
