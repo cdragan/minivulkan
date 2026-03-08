@@ -43,6 +43,7 @@ class Geometry {
         uint32_t add_vertex(int16_t x, int16_t y, int16_t z);
         uint32_t get_num_vertices() const { return num_vertices; }
         void     set_vertex(uint32_t vtx, int16_t x, int16_t y, int16_t z);
+        void     move_vertex(uint32_t vtx, float dx, float dy, float dz);
         uint32_t add_edge(uint32_t vtx_0, uint32_t vtx_1, uint32_t vtx_2, uint32_t vtx_3);
         void     set_edge(uint32_t edge, uint32_t vtx_0, uint32_t vtx_1, uint32_t vtx_2, uint32_t vtx_3);
         uint32_t get_num_edges() const { return num_edges; }
@@ -61,6 +62,7 @@ class Geometry {
         void deselect_all_faces();
 
         bool snapshot_state();
+        bool restore_snapshot();
         bool undo();
         bool redo();
         void clear_redo() { undo_redo.clear_redo(); }

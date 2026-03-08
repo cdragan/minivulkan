@@ -5,6 +5,7 @@
 
 #include "../core/barrier.h"
 #include "../core/mstdc.h"
+#include "../core/vmath.h"
 
 #include <iterator>
 
@@ -245,6 +246,15 @@ bool Sculptor::Geometry::send_to_gpu(VkCommandBuffer cmd_buf)
     dirty = false;
 
     return true;
+}
+
+void Sculptor::Geometry::move_vertex(uint32_t vtx, float dx, float dy, float dz)
+{
+    assert(vtx < num_vertices);
+    Vertex& vertex = host_buffer.get_ptr<Vertex>(host_vertices_offset)[vtx];
+    vertex.pos[0] = static_cast<int16_t>(vmath::clamp(vertex.pos[0] + dx, -32767.0f, 32767.0f));
+    vertex.pos[1] = static_cast<int16_t>(vmath::clamp(vertex.pos[1] + dy, -32767.0f, 32767.0f));
+    vertex.pos[2] = static_cast<int16_t>(vmath::clamp(vertex.pos[2] + dz, -32767.0f, 32767.0f));
 }
 
 void Sculptor::Geometry::get_face_vertex_indices(uint32_t face_id, uint32_t out_vtx[16]) const
@@ -551,19 +561,9 @@ bool Sculptor::Geometry::snapshot_state()
     return undo_redo.finish_undo_push();
 }
 
-bool Sculptor::Geometry::undo()
+bool Sculptor::Geometry::restore_snapshot()
 {
     if (undo_redo.undo_empty())
-        return false;
-
-    undo_redo.init_redo_push();
-    undo_redo.push(host_buffer.get_ptr<Vertex>(host_vertices_offset), num_vertices * sizeof(Vertex));
-    undo_redo.push(obj_edges, num_edges * sizeof(Edge));
-    undo_redo.push(obj_faces, num_faces * sizeof(Face));
-    undo_redo.push(num_vertices);
-    undo_redo.push(num_edges);
-    undo_redo.push(num_faces);
-    if (!undo_redo.finish_redo_push())
         return false;
 
     undo_redo.init_undo();
@@ -580,6 +580,24 @@ bool Sculptor::Geometry::undo()
     num_vertices = new_num_vertices;
     set_dirty();
     return true;
+}
+
+bool Sculptor::Geometry::undo()
+{
+    if (undo_redo.undo_empty())
+        return false;
+
+    undo_redo.init_redo_push();
+    undo_redo.push(host_buffer.get_ptr<Vertex>(host_vertices_offset), num_vertices * sizeof(Vertex));
+    undo_redo.push(obj_edges, num_edges * sizeof(Edge));
+    undo_redo.push(obj_faces, num_faces * sizeof(Face));
+    undo_redo.push(num_vertices);
+    undo_redo.push(num_edges);
+    undo_redo.push(num_faces);
+    if (!undo_redo.finish_redo_push())
+        return false;
+
+    return restore_snapshot();
 }
 
 bool Sculptor::Geometry::redo()
