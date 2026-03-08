@@ -38,7 +38,7 @@ static void test_single_undo_push_pop()
     ur.push(uint32_t{1});
     ur.push(uint32_t{2});
     ur.push(3.14f);
-    ur.finish_undo_push();
+    TEST(ur.finish_undo_push());
 
     TEST(ur.redo_empty());
     TEST(!ur.init_redo());
@@ -62,15 +62,15 @@ static void test_multiple_undo_entries()
 
     ur.init_undo_push();
     ur.push(uint32_t{10});
-    ur.finish_undo_push();
+    TEST(ur.finish_undo_push());
 
     ur.init_undo_push();
     ur.push(uint32_t{20});
-    ur.finish_undo_push();
+    TEST(ur.finish_undo_push());
 
     ur.init_undo_push();
     ur.push(uint32_t{30});
-    ur.finish_undo_push();
+    TEST(ur.finish_undo_push());
 
     TEST(ur.init_undo());
     TEST(ur.pop_u32() == 30);
@@ -96,7 +96,7 @@ static void test_single_redo_push_pop()
     ur.init_redo_push();
     ur.push(uint32_t{100});
     ur.push(uint32_t{200});
-    ur.finish_redo_push();
+    TEST(ur.finish_redo_push());
 
     TEST(ur.init_redo());
     TEST(ur.pop_u32() == 200);
@@ -115,11 +115,11 @@ static void test_undo_redo_cycle()
 
     ur.init_undo_push();
     ur.push(uint32_t{42});
-    ur.finish_undo_push();
+    TEST(ur.finish_undo_push());
 
     ur.init_undo_push();
     ur.push(uint32_t{99});
-    ur.finish_undo_push();
+    TEST(ur.finish_undo_push());
 
     TEST(ur.init_undo());
     TEST(ur.pop_u32() == 99);
@@ -127,7 +127,7 @@ static void test_undo_redo_cycle()
 
     ur.init_redo_push();
     ur.push(uint32_t{99});
-    ur.finish_redo_push();
+    TEST(ur.finish_redo_push());
 
     // Undo A
     TEST(ur.init_undo());
@@ -150,7 +150,7 @@ static void test_clear_redo()
 
     ur.init_redo_push();
     ur.push(uint32_t{5});
-    ur.finish_redo_push();
+    TEST(ur.finish_redo_push());
 
     ur.clear_redo();
 
@@ -166,16 +166,16 @@ static void test_overflow_trims_oldest()
 
     ur.init_undo_push();
     ur.push(uint32_t{1});
-    ur.finish_undo_push();
+    TEST(ur.finish_undo_push());
 
     ur.init_undo_push();
     ur.push(uint32_t{2});
-    ur.finish_undo_push();
+    TEST(ur.finish_undo_push());
 
     // Pushing one more block will remove oldest undo block
     ur.init_undo_push();
     ur.push(uint32_t{3});
-    ur.finish_undo_push();
+    TEST(ur.finish_undo_push());
 
     TEST(ur.init_undo());
     TEST(ur.pop_u32() == 3);
@@ -197,11 +197,11 @@ static void test_multiple_redo_entries()
 
     ur.init_redo_push();
     ur.push(uint32_t{1});
-    ur.finish_redo_push();
+    TEST(ur.finish_redo_push());
 
     ur.init_redo_push();
     ur.push(uint32_t{2});
-    ur.finish_redo_push();
+    TEST(ur.finish_redo_push());
 
     TEST(ur.init_redo());
     TEST(ur.pop_u32() == 2);
@@ -214,6 +214,72 @@ static void test_multiple_redo_entries()
     TEST(!ur.init_redo());
 }
 
+static void test_overflow_undo_push_clears_both_stacks()
+{
+    alignas(4) uint8_t buf[16];
+    UndoRedo ur;
+    ur.init(buf);
+
+    ur.init_undo_push();
+    ur.push(uint32_t{1});
+    TEST(ur.finish_undo_push());
+
+    ur.init_redo_push();
+    ur.push(uint32_t{2});
+    TEST(ur.finish_redo_push());
+
+    TEST(!ur.undo_empty());
+    TEST(!ur.redo_empty());
+
+    uint8_t data[13] = {};
+    ur.init_undo_push();
+    ur.push(data, sizeof data);
+    TEST(!ur.finish_undo_push());
+
+    TEST(ur.undo_empty());
+    TEST(ur.redo_empty());
+}
+
+static void test_overflow_redo_push_clears_both_stacks()
+{
+    alignas(4) uint8_t buf[16];
+    UndoRedo ur;
+    ur.init(buf);
+
+    ur.init_undo_push();
+    ur.push(uint32_t{1});
+    TEST(ur.finish_undo_push());
+
+    ur.init_redo_push();
+    ur.push(uint32_t{2});
+    TEST(ur.finish_redo_push());
+
+    TEST(!ur.undo_empty());
+    TEST(!ur.redo_empty());
+
+    uint8_t data[13] = {};
+    ur.init_redo_push();
+    ur.push(data, sizeof data);
+    TEST(!ur.finish_redo_push());
+
+    TEST(ur.undo_empty());
+    TEST(ur.redo_empty());
+}
+
+static void test_overflow_no_space()
+{
+    // Buffer too small to fit data + header (needs 8 bytes, only 4 available)
+    alignas(4) uint8_t buf[4];
+    UndoRedo ur;
+    ur.init(buf);
+
+    ur.init_undo_push();
+    ur.push(uint32_t{1});
+    TEST(!ur.finish_undo_push());
+    TEST(ur.undo_empty());
+    TEST(!ur.init_undo());
+}
+
 int main()
 {
     test_empty_state();
@@ -223,6 +289,9 @@ int main()
     test_undo_redo_cycle();
     test_clear_redo();
     test_overflow_trims_oldest();
+    test_overflow_undo_push_clears_both_stacks();
+    test_overflow_redo_push_clears_both_stacks();
+    test_overflow_no_space();
     test_multiple_redo_entries();
 
     return exit_code;

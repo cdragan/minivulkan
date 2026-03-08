@@ -23,10 +23,10 @@ class UndoRedo {
         void clear_redo();
 
         void init_undo_push();
-        void finish_undo_push();
+        bool finish_undo_push();
 
         void init_redo_push();
-        void finish_redo_push();
+        bool finish_redo_push();
 
         void push(const void* data, size_t size);
         void push(uint32_t v);
@@ -56,7 +56,7 @@ class UndoRedo {
             redo_pop,
         };
 
-        void make_room(uint32_t size);
+        bool make_room(uint32_t size);
 
         uint8_t* buf      = nullptr;
         uint32_t buf_size = 0;
@@ -64,6 +64,7 @@ class UndoRedo {
         uint32_t redo_idx = 0;
         uint32_t cur_size = 0;
         Mode     mode     = Mode::inactive;
+        bool     overflow = false;
 };
 
 } // namespace Sculptor

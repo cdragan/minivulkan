@@ -25,12 +25,12 @@ void UndoRedo::clear_redo()
     redo_idx = buf_size;
 }
 
-void UndoRedo::make_room(uint32_t size)
+bool UndoRedo::make_room(uint32_t size)
 {
     const uint32_t avail_size = redo_idx - undo_idx;
 
     if (size <= avail_size)
-        return;
+        return true;
 
     uint32_t clear_size = size - avail_size;
 
@@ -53,7 +53,7 @@ void UndoRedo::make_room(uint32_t size)
         memmove(buf, buf + idx, undo_idx);
 
     if (clear_size <= idx)
-        return;
+        return true;
 
     clear_size -= idx;
 
@@ -76,7 +76,7 @@ void UndoRedo::make_room(uint32_t size)
         memmove(buf + redo_idx + end_space, buf + redo_idx, idx - redo_idx);
     redo_idx += end_space;
 
-    assert(clear_size <= end_space);
+    return clear_size <= end_space;
 }
 
 void UndoRedo::init_undo_push()
@@ -87,9 +87,17 @@ void UndoRedo::init_undo_push()
     mode = Mode::undo_push;
 }
 
-void UndoRedo::finish_undo_push()
+bool UndoRedo::finish_undo_push()
 {
     assert(mode == Mode::undo_push);
+
+    if (overflow) {
+        undo_idx -= cur_size;
+        cur_size  = 0;
+        overflow  = false;
+        mode      = Mode::inactive;
+        return false;
+    }
 
     mode = Mode::inactive;
 
@@ -97,6 +105,8 @@ void UndoRedo::finish_undo_push()
     memcpy(buf + undo_idx, &cur_size, header_size);
     undo_idx += header_size;
     cur_size = 0;
+
+    return true;
 }
 
 void UndoRedo::init_redo_push()
@@ -107,9 +117,17 @@ void UndoRedo::init_redo_push()
     mode = Mode::redo_push;
 }
 
-void UndoRedo::finish_redo_push()
+bool UndoRedo::finish_redo_push()
 {
     assert(mode == Mode::redo_push);
+
+    if (overflow) {
+        redo_idx += cur_size;
+        cur_size  = 0;
+        overflow  = false;
+        mode      = Mode::inactive;
+        return false;
+    }
 
     mode = Mode::inactive;
 
@@ -117,14 +135,22 @@ void UndoRedo::finish_redo_push()
     static_assert(sizeof cur_size == header_size);
     memcpy(buf + redo_idx, &cur_size, header_size);
     cur_size = 0;
+
+    return true;
 }
 
 void UndoRedo::push(const void* data, size_t size)
 {
     assert(mode == Mode::undo_push || mode == Mode::redo_push);
 
+    if (overflow)
+        return;
+
     assert(static_cast<uint32_t>(size + header_size) == size + header_size);
-    make_room(static_cast<uint32_t>(size + header_size));
+    if (!make_room(static_cast<uint32_t>(size + header_size))) {
+        overflow = true;
+        return;
+    }
 
     void* dest_ptr;
 
