@@ -163,6 +163,8 @@ vmath_unit_src_files += core/vmath_unit.cpp
 
 suballoc_unit_src_files += core/suballoc_unit.cpp
 
+sculptor_undo_unit_src_files += sculptor/sculptor_undo_unit.cpp
+
 threed_gui_src_files += core/gui.cpp
 threed_gui_src_files += core/resource_gui.cpp
 threed_gui_src_files += core/gui_config.cpp
@@ -186,6 +188,7 @@ all_src_files += $(make_shaders_h_src_files)
 all_src_files += $(make_shaders_cpp_src_files)
 all_src_files += $(spirv_encode_src_files)
 all_src_files += $(suballoc_unit_src_files)
+all_src_files += $(sculptor_undo_unit_src_files)
 all_src_files += $(threed_src_files)
 all_src_files += $(threed_gui_src_files)
 all_src_files += $(threed_nogui_src_files)
@@ -198,6 +201,9 @@ all_vmath_unit_src_files += $(vmath_unit_src_files)
 
 all_suballoc_unit_src_files += $(lib_src_files)
 all_suballoc_unit_src_files += $(suballoc_unit_src_files)
+
+all_sculptor_undo_unit_src_files += sculptor/sculptor_undo.cpp
+all_sculptor_undo_unit_src_files += $(sculptor_undo_unit_src_files)
 
 ##############################################################################
 # Sub-project handling
@@ -701,6 +707,7 @@ $(foreach file, $(all_gui_src_files), $(call TARGET_FILES, $(file))): $(foreach 
 
 tests += vmath_unit
 tests += suballoc_unit
+tests += sculptor_undo_unit
 
 define DEFINE_TEST
 $$(eval $$(call LINK_RULE,$$(call CMDLINE_PATH,$1),$$(all_$1_src_files)))
