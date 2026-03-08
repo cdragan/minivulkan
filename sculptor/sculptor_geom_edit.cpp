@@ -15,6 +15,7 @@
 
 #include <algorithm>
 #include <iterator>
+#include <math.h>
 #include <stdio.h>
 
 #include "toolbar.png.h"
