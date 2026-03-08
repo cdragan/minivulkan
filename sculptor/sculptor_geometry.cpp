@@ -29,6 +29,8 @@ constexpr uint32_t faces_stride         = sizeof(Sculptor::Geometry::FacesBuf) +
 
 bool Sculptor::Geometry::allocate()
 {
+    undo_redo.init(undo_buf);
+
     if ( ! gpu_buffer.allocate(Usage::fixed,
                                vertices_stride + indices_stride + faces_stride,
                                VK_FORMAT_UNDEFINED,
@@ -535,6 +537,80 @@ void Sculptor::Geometry::set_cube()
                  cube_face_vertices[i + 3]);
 
     set_dirty();
+}
+
+bool Sculptor::Geometry::snapshot_state()
+{
+    undo_redo.init_undo_push();
+    undo_redo.push(host_buffer.get_ptr<Vertex>(host_vertices_offset), num_vertices * sizeof(Vertex));
+    undo_redo.push(obj_edges, num_edges * sizeof(Edge));
+    undo_redo.push(obj_faces, num_faces * sizeof(Face));
+    undo_redo.push(num_vertices);
+    undo_redo.push(num_edges);
+    undo_redo.push(num_faces);
+    return undo_redo.finish_undo_push();
+}
+
+bool Sculptor::Geometry::undo()
+{
+    if (undo_redo.undo_empty())
+        return false;
+
+    undo_redo.init_redo_push();
+    undo_redo.push(host_buffer.get_ptr<Vertex>(host_vertices_offset), num_vertices * sizeof(Vertex));
+    undo_redo.push(obj_edges, num_edges * sizeof(Edge));
+    undo_redo.push(obj_faces, num_faces * sizeof(Face));
+    undo_redo.push(num_vertices);
+    undo_redo.push(num_edges);
+    undo_redo.push(num_faces);
+    if (!undo_redo.finish_redo_push())
+        return false;
+
+    undo_redo.init_undo();
+    const uint32_t new_num_faces    = undo_redo.pop_u32();
+    const uint32_t new_num_edges    = undo_redo.pop_u32();
+    const uint32_t new_num_vertices = undo_redo.pop_u32();
+    undo_redo.pop(obj_faces, new_num_faces * sizeof(Face));
+    undo_redo.pop(obj_edges, new_num_edges * sizeof(Edge));
+    undo_redo.pop(host_buffer.get_ptr<Vertex>(host_vertices_offset), new_num_vertices * sizeof(Vertex));
+    undo_redo.finish_undo();
+
+    num_faces    = new_num_faces;
+    num_edges    = new_num_edges;
+    num_vertices = new_num_vertices;
+    set_dirty();
+    return true;
+}
+
+bool Sculptor::Geometry::redo()
+{
+    if (undo_redo.redo_empty())
+        return false;
+
+    undo_redo.init_undo_push();
+    undo_redo.push(host_buffer.get_ptr<Vertex>(host_vertices_offset), num_vertices * sizeof(Vertex));
+    undo_redo.push(obj_edges, num_edges * sizeof(Edge));
+    undo_redo.push(obj_faces, num_faces * sizeof(Face));
+    undo_redo.push(num_vertices);
+    undo_redo.push(num_edges);
+    undo_redo.push(num_faces);
+    if (!undo_redo.finish_undo_push())
+        return false;
+
+    undo_redo.init_redo();
+    const uint32_t new_num_faces    = undo_redo.pop_u32();
+    const uint32_t new_num_edges    = undo_redo.pop_u32();
+    const uint32_t new_num_vertices = undo_redo.pop_u32();
+    undo_redo.pop(obj_faces, new_num_faces * sizeof(Face));
+    undo_redo.pop(obj_edges, new_num_edges * sizeof(Edge));
+    undo_redo.pop(host_buffer.get_ptr<Vertex>(host_vertices_offset), new_num_vertices * sizeof(Vertex));
+    undo_redo.finish_redo();
+
+    num_faces    = new_num_faces;
+    num_edges    = new_num_edges;
+    num_vertices = new_num_vertices;
+    set_dirty();
+    return true;
 }
 
 void Sculptor::Geometry::write_faces_descriptor(VkDescriptorBufferInfo* desc)

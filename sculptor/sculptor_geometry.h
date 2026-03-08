@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include "sculptor_undo.h"
 #include "../core/resource.h"
 
 namespace Sculptor {
@@ -59,6 +60,13 @@ class Geometry {
         void deselect_face(uint32_t face_id);
         void deselect_all_faces();
 
+        bool snapshot_state();
+        bool undo();
+        bool redo();
+        void clear_redo() { undo_redo.clear_redo(); }
+        bool undo_empty() const { return undo_redo.undo_empty(); }
+        bool redo_empty() const { return undo_redo.redo_empty(); }
+
     private:
         Buffer   gpu_buffer;
         Buffer   host_buffer;
@@ -86,6 +94,10 @@ class Geometry {
         };
         Face obj_faces[max_faces] = { };
         uint32_t get_face_state(uint32_t face_id, const Face& face) const;
+
+        static constexpr uint32_t undo_buf_size = 512 * 1024;
+        alignas(4) uint8_t undo_buf[undo_buf_size];
+        UndoRedo undo_redo;
 };
 
 }
