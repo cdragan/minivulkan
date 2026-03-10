@@ -36,7 +36,9 @@ class UndoRedo {
         bool redo_empty() const { return redo_idx == buf_size; }
 
         bool init_undo();
-        void finish_undo();
+        void finish_undo();  // Finish undo operation, pop from undo stack
+        void restore_undo(); // Finish undo operation, but keep it on undo stack
+        bool skip_undo();    // Pop entry from undo stack without using it
 
         bool init_redo();
         void finish_redo();
@@ -61,6 +63,7 @@ class UndoRedo {
         uint8_t* buf      = nullptr;
         uint32_t buf_size = 0;
         uint32_t undo_idx = 0;
+        uint32_t undo_bak = 0;
         uint32_t redo_idx = 0;
         uint32_t cur_size = 0;
         Mode     mode     = Mode::inactive;

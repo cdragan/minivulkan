@@ -13,6 +13,7 @@ void UndoRedo::init(uint8_t* new_buf, size_t size)
     assert(mode == Mode::inactive);
     assert(buf_size == 0);
     assert(undo_idx == 0);
+    assert(undo_bak == 0);
     assert(redo_idx == 0);
 
     buf      = new_buf;
@@ -49,6 +50,7 @@ bool UndoRedo::make_room(uint32_t size)
 
     // Clear undo stack
     undo_idx -= idx;
+    undo_bak = undo_idx;
     if (idx)
         memmove(buf, buf + idx, undo_idx);
 
@@ -93,6 +95,7 @@ bool UndoRedo::finish_undo_push()
 
     if (overflow) {
         undo_idx -= cur_size;
+        undo_bak  = undo_idx;
         cur_size  = 0;
         overflow  = false;
         mode      = Mode::inactive;
@@ -104,6 +107,7 @@ bool UndoRedo::finish_undo_push()
     static_assert(sizeof cur_size == header_size);
     memcpy(buf + undo_idx, &cur_size, header_size);
     undo_idx += header_size;
+    undo_bak = undo_idx;
     cur_size = 0;
 
     return true;
@@ -199,7 +203,35 @@ void UndoRedo::finish_undo()
     assert(mode == Mode::undo_pop);
     assert(cur_size == 0);
 
-    mode = Mode::inactive;
+    mode     = Mode::inactive;
+    undo_bak = undo_idx;
+}
+
+void UndoRedo::restore_undo()
+{
+    assert(mode == Mode::undo_pop);
+    assert(cur_size == 0);
+
+    mode     = Mode::inactive;
+    undo_idx = undo_bak;
+}
+
+bool UndoRedo::skip_undo()
+{
+    assert(mode == Mode::inactive);
+    assert(cur_size == 0);
+
+    if ( ! undo_idx)
+        return false;
+
+    uint32_t block_size;
+    static_assert(sizeof block_size == header_size);
+    memcpy(&block_size, buf + undo_idx - header_size, header_size);
+
+    undo_idx -= header_size + block_size;
+    undo_bak = undo_idx;
+
+    return true;
 }
 
 bool UndoRedo::init_redo()

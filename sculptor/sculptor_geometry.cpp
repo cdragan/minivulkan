@@ -561,7 +561,22 @@ bool Sculptor::Geometry::snapshot_state()
     return undo_redo.finish_undo_push();
 }
 
+bool Sculptor::Geometry::drop_snapshot()
+{
+    return undo_redo.skip_undo();
+}
+
 bool Sculptor::Geometry::restore_snapshot()
+{
+    return apply_snapshot(true);
+}
+
+bool Sculptor::Geometry::apply_snapshot()
+{
+    return apply_snapshot(false);
+}
+
+bool Sculptor::Geometry::apply_snapshot(bool pop_undo)
 {
     if (undo_redo.undo_empty())
         return false;
@@ -573,7 +588,10 @@ bool Sculptor::Geometry::restore_snapshot()
     undo_redo.pop(obj_faces, new_num_faces * sizeof(Face));
     undo_redo.pop(obj_edges, new_num_edges * sizeof(Edge));
     undo_redo.pop(host_buffer.get_ptr<Vertex>(host_vertices_offset), new_num_vertices * sizeof(Vertex));
-    undo_redo.finish_undo();
+    if (pop_undo)
+        undo_redo.finish_undo();
+    else
+        undo_redo.restore_undo();
 
     num_faces    = new_num_faces;
     num_edges    = new_num_edges;

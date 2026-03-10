@@ -61,15 +61,19 @@ class Geometry {
         void deselect_face(uint32_t face_id);
         void deselect_all_faces();
 
-        bool snapshot_state();
-        bool restore_snapshot();
-        bool undo();
-        bool redo();
+        bool snapshot_state();   // Push a snapshot of geometry onto the undo stack
+        bool restore_snapshot(); // Pop the snapshot of geometry from the undo stack
+        bool apply_snapshot();   // Apply the snapshot of geometry without popping it from the stack
+        bool drop_snapshot();    // Pop the snapshot from the undo stack without applying it
+        bool undo();             // Save current geometry onto the redo stack and pop snapshot from undo stack
+        bool redo();             // Push a snapshot of geometry onto the undo stack and pop snapshot from redo stack
         void clear_redo() { undo_redo.clear_redo(); }
         bool undo_empty() const { return undo_redo.undo_empty(); }
         bool redo_empty() const { return undo_redo.redo_empty(); }
 
     private:
+        bool apply_snapshot(bool pop_undo);
+
         Buffer   gpu_buffer;
         Buffer   host_buffer;
 
