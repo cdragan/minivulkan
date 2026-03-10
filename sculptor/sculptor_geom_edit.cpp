@@ -1108,23 +1108,25 @@ void GeometryEditor::handle_mouse_actions(const UserInput& input, bool view_hove
 
         assert(mouse_action == Action::none);
 
-        if (mouse_moved && (ImGui::IsKeyDown(ImGuiKey_LeftCtrl) || ImGui::IsKeyDown(ImGuiKey_RightCtrl)))
-            mouse_action = Action::rotate;
-        else if (mouse_moved && shift) {
+        if (mouse_moved) {
+            if (ImGui::IsKeyDown(ImGuiKey_LeftCtrl) || ImGui::IsKeyDown(ImGuiKey_RightCtrl))
+                mouse_action = Action::rotate;
+            else if (shift) {
 
-            // If mouse is hovering over geometry, activate panning only if it moved over threshold,
-            // otherwise (no geometry under the cursor) just pan immediately.  This allows the user
-            // to unselect faces with shift+click even if the cursor moves slightly during the click.
-            constexpr float pan_threshold = 5.0f;
-            const float* const hover = view.res[image_idx].hover_pos_host_buf.get_ptr<float>();
-            const bool over_geometry = hover[3] > 0.5f;
-            if (over_geometry) {
-                pan_accum += std::abs(input.mouse_pos_delta.x) + std::abs(input.mouse_pos_delta.y);
-                if (pan_accum >= pan_threshold)
+                // If mouse is hovering over geometry, activate panning only if it moved over threshold,
+                // otherwise (no geometry under the cursor) just pan immediately.  This allows the user
+                // to unselect faces with shift+click even if the cursor moves slightly during the click.
+                constexpr float pan_threshold = 5.0f;
+                const float* const hover = view.res[image_idx].hover_pos_host_buf.get_ptr<float>();
+                const bool over_geometry = hover[3] > 0.5f;
+                if (over_geometry) {
+                    pan_accum += std::abs(input.mouse_pos_delta.x) + std::abs(input.mouse_pos_delta.y);
+                    if (pan_accum >= pan_threshold)
+                        mouse_action = Action::pan;
+                }
+                else
                     mouse_action = Action::pan;
             }
-            else
-                mouse_action = Action::pan;
         }
 
         if (ImGui::IsMouseClicked(ImGuiMouseButton_Left))
