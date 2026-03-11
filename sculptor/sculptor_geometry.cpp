@@ -52,50 +52,6 @@ bool Sculptor::Geometry::allocate()
     return true;
 }
 
-void Sculptor::Geometry::set_hovered_face(uint32_t face_id)
-{
-    if (face_id != hovered_face_id) {
-        hovered_face_id = face_id;
-        dirty = true;
-    }
-}
-
-void Sculptor::Geometry::select_face(uint32_t face_id)
-{
-    assert(face_id < num_faces);
-
-    if ( ! obj_faces[face_id].selected) {
-        obj_faces[face_id].selected = true;
-        dirty = true;
-    }
-}
-
-void Sculptor::Geometry::deselect_face(uint32_t face_id)
-{
-    assert(face_id < num_faces);
-
-    if (obj_faces[face_id].selected) {
-        obj_faces[face_id].selected = false;
-        dirty = true;
-    }
-}
-
-void Sculptor::Geometry::deselect_all_faces()
-{
-    for (uint32_t i = 0; i < num_faces; i++)
-        deselect_face(i);
-}
-
-uint32_t Sculptor::Geometry::get_face_state(uint32_t face_id, const Face& face) const
-{
-    if (face_id == hovered_face_id)
-        return 1;
-
-    assert(face_id < num_faces);
-
-    return obj_faces[face_id].selected ? 2 : 0;
-}
-
 bool Sculptor::Geometry::send_to_gpu(VkCommandBuffer cmd_buf)
 {
     if ( ! dirty)
@@ -149,7 +105,6 @@ bool Sculptor::Geometry::send_to_gpu(VkCommandBuffer cmd_buf)
         const Face& face = obj_faces[i_face];
 
         faces_ptr->face_data[i_face].material_id = face.material_id;
-        faces_ptr->face_data[i_face].state       = get_face_state(i_face, face);
 
         static const uint32_t idx_map[] = {
              0,  1,  2,  3,
@@ -326,7 +281,6 @@ void Sculptor::Geometry::set_edge(uint32_t edge, uint32_t vtx_0, uint32_t vtx_1,
     obj_edges[edge].vertices[1] = vtx_1;
     obj_edges[edge].vertices[2] = vtx_2;
     obj_edges[edge].vertices[3] = vtx_3;
-    obj_edges[edge].selected    = false;
 }
 
 uint32_t Sculptor::Geometry::add_face(int32_t edge_0, int32_t edge_1, int32_t edge_2, int32_t edge_3,
@@ -367,7 +321,6 @@ void Sculptor::Geometry::set_face(uint32_t face_id, int32_t edge_0, int32_t edge
     obj_faces[face_id].ctrl_vertices[3] = vtx_3;
 
     obj_faces[face_id].material_id = 0;
-    obj_faces[face_id].selected    = false;
 
     validate_face(face_id);
 }

@@ -19,7 +19,6 @@ class Geometry {
 
         struct FaceData {
             uint32_t material_id;
-            uint32_t state;
         };
 
         struct FacesBuf {
@@ -56,10 +55,6 @@ class Geometry {
         void     get_face_vertex_indices(uint32_t face_id, uint32_t out_vtx[16]) const;
 
         void set_cube();
-        void set_hovered_face(uint32_t face_id);
-        void select_face(uint32_t face_id);
-        void deselect_face(uint32_t face_id);
-        void deselect_all_faces();
 
         bool snapshot_state();   // Push a snapshot of geometry onto the undo stack
         bool restore_snapshot(); // Pop the snapshot of geometry from the undo stack
@@ -78,7 +73,6 @@ class Geometry {
         Buffer   host_buffer;
 
         uint32_t last_buffer         = 0;
-        uint32_t hovered_face_id     = ~0U;
         uint32_t num_vertices        = 0;
         uint32_t num_indices         = 0;
         uint32_t num_edge_indices    = 0;
@@ -88,7 +82,6 @@ class Geometry {
 
         struct Edge {
             uint32_t vertices[4];
-            bool     selected;
         };
         Edge obj_edges[max_edges] = { };
 
@@ -96,10 +89,8 @@ class Geometry {
             int32_t  edges[4];
             uint32_t ctrl_vertices[4];
             uint32_t material_id;
-            bool     selected;
         };
         Face obj_faces[max_faces] = { };
-        uint32_t get_face_state(uint32_t face_id, const Face& face) const;
 
         static constexpr uint32_t undo_buf_size = 512 * 1024;
         alignas(4) uint8_t undo_buf[undo_buf_size];
