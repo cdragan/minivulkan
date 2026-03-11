@@ -184,6 +184,8 @@ class GeometryEditor: public Editor {
         bool toolbar_button(ToolbarButton button, bool* checked = nullptr);
         void draw_axis_indicator(ImDrawList* dl, float vp_max_x, float vp_max_y) const;
         void switch_mode(Mode new_mode);
+        void apply_move(const UserInput& input, uint32_t image_idx);
+        void select_vertices_from_faces(View& dst_view, uint32_t image_idx);
 
         static void commit_hover_selection(Buffer& buf_member, uint32_t num_elems, bool shift_pressed);
 
@@ -200,11 +202,13 @@ class GeometryEditor: public Editor {
         bool render_control_points(VkCommandBuffer cmdbuf, View& dst_view, uint32_t image_idx);
         void finish_edit_mode();
         void cancel_edit_mode();
+        void undo();
+        void redo();
 
         View               view;
-        uint32_t           window_width      = 0;
-        uint32_t           window_height     = 0;
-        uint32_t           materials_stride  = 0;
+        uint32_t           window_width     = 0;
+        uint32_t           window_height    = 0;
+        uint32_t           materials_stride = 0;
 
         VkPipeline         gray_patch_mat         = VK_NULL_HANDLE;
         VkPipeline         gray_patch_gbuffer_mat = VK_NULL_HANDLE;
@@ -219,11 +223,12 @@ class GeometryEditor: public Editor {
 
         Buffer             sel_buf;     // Device-side selection buffer for faces
         Buffer             vtx_sel_buf; // Device-side selection buffer for vertices
-        VkDescriptorSetLayout sel_buf_ds_layout = VK_NULL_HANDLE;
-        VkPipelineLayout   sel_buf_pipe_layout = VK_NULL_HANDLE;
-        VkPipeline         clear_hover_pipe    = VK_NULL_HANDLE;
+        VkDescriptorSetLayout sel_buf_ds_layout   = VK_NULL_HANDLE;
+        VkPipelineLayout   sel_buf_pipe_layout    = VK_NULL_HANDLE;
+        VkPipeline         clear_hover_pipe       = VK_NULL_HANDLE;
 
         Sculptor::Geometry patch_geometry;
+        uint32_t           selected_vertices[0x10000 / 32];
         Buffer             materials_buf;
         Buffer             grid_buf;
         ToolbarState       toolbar_state     = { };
@@ -235,6 +240,7 @@ class GeometryEditor: public Editor {
         Mode               mode              = Mode::select;
         Action             mouse_action      = Action::none;
         vmath::vec2        mouse_action_init {0.0f, 0.0f};
+        std::optional<vmath::vec3> mouse_action_pos;
         float              pan_accum         = 0.0f;
 };
 

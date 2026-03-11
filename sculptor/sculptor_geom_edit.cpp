@@ -13,7 +13,6 @@
 #include "sculptor_shaders.h"
 #include "../core/shaders.h"
 
-#include <algorithm>
 #include <iterator>
 #include <math.h>
 #include <stdio.h>
@@ -1109,7 +1108,9 @@ void GeometryEditor::handle_mouse_actions(const UserInput& input, bool view_hove
         assert(mouse_action == Action::none);
 
         if (mouse_moved) {
-            if (ImGui::IsKeyDown(ImGuiKey_LeftCtrl) || ImGui::IsKeyDown(ImGuiKey_RightCtrl))
+            if (mode == Mode::move)
+                mouse_action = Action::execute;
+            else if (ImGui::IsKeyDown(ImGuiKey_LeftCtrl) || ImGui::IsKeyDown(ImGuiKey_RightCtrl))
                 mouse_action = Action::rotate;
             else if (shift) {
 
@@ -1136,6 +1137,13 @@ void GeometryEditor::handle_mouse_actions(const UserInput& input, bool view_hove
             pan_accum = 0.0f;
             capture_mouse();
             mouse_action_init = input.abs_mouse_pos;
+            mouse_action_pos  = view.mouse_world_pos;
+
+            if (mouse_action == Action::execute) {
+                patch_geometry.snapshot_state();
+
+                select_vertices_from_faces(view, image_idx);
+            }
         }
     }
 
@@ -1167,6 +1175,7 @@ void GeometryEditor::handle_mouse_actions(const UserInput& input, bool view_hove
                         case ViewType::free_moving:
                             // Initiate rotation
                             if (view.mouse_world_pos && ! camera.pivot) {
+                                // TODO replace pivot with mouse_action_pos
                                 camera.pivot = *view.mouse_world_pos;
                                 camera.rot   = vmath::quat{0.0f, 0.0f, 0.0f, 1.0f};
                             }
@@ -1335,6 +1344,17 @@ void GeometryEditor::handle_mouse_actions(const UserInput& input, bool view_hove
                 break;
 
             case Action::execute:
+                if (mouse_moved) {
+                    switch (mode) {
+                        case Mode::move:
+                            apply_move(input, image_idx);
+                            break;
+
+                        default:
+                            break;
+                    }
+                }
+
                 if (ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
                     release_mouse();
                     finish_edit_mode();
@@ -1356,10 +1376,6 @@ void GeometryEditor::handle_mouse_actions(const UserInput& input, bool view_hove
 
     if ((mode == Mode::select) && view_hovered && (mouse_action != Action::select)) {
         // TODO draw hover selection of selectable items
-    }
-
-    if ((mode != Mode::select) && ! has_captured_mouse() && mouse_moved) {
-        // TODO adjust modification
     }
 
     if (input.wheel_delta != 0) {
@@ -1411,12 +1427,12 @@ void GeometryEditor::handle_keyboard_actions()
     };
 
     if (ImGui::IsKeyPressed(ImGuiKey_Z) && IsCtrl()) {
-        // TODO undo
+        undo();
     }
 
     if (ImGui::IsKeyPressed(ImGuiKey_Z) && IsCtrl() &&
         (ImGui::IsKeyDown(ImGuiKey_LeftShift) || ImGui::IsKeyDown(ImGuiKey_RightShift))) {
-        // TODO redo
+        redo();
     }
 
     if (ImGui::IsKeyPressed(ImGuiKey_C) && IsCtrl()) {
@@ -1566,11 +1582,11 @@ bool GeometryEditor::gui_toolbar()
     }
 
     if (toolbar_button(ToolbarButton::undo)) {
-        // TODO undo
+        undo();
     }
 
     if (toolbar_button(ToolbarButton::redo)) {
-        // TODO redo
+        redo();
     }
 
     if (toolbar_button(ToolbarButton::copy)) {
@@ -1694,6 +1710,16 @@ void GeometryEditor::switch_mode(Mode new_mode)
         if (mode == Mode::select)
             saved_select = toolbar_state.select;
 
+        if (new_mode == Mode::select)
+            cancel_edit_mode();
+        else
+            finish_edit_mode();
+
+        if (has_captured_mouse()) {
+            release_mouse();
+            mouse_action = Action::none;
+        }
+
         toolbar_state.select  = { false, false, false };
         toolbar_state.move    = false;
         toolbar_state.rotate  = false;
@@ -1704,7 +1730,6 @@ void GeometryEditor::switch_mode(Mode new_mode)
 
             case Mode::select:
                 toolbar_state.select = saved_select;
-                cancel_edit_mode();
                 break;
 
             case Mode::move:
@@ -3048,10 +3073,12 @@ bool GeometryEditor::render_control_points(VkCommandBuffer cmdbuf,
 
     send_barrier(cmdbuf);
 
-    static const VkBufferCopy vtx_sel_readback_region = { 0, 0, max_objects };
-    vkCmdCopyBuffer(cmdbuf, vtx_sel_buf.get_buffer(),
-                    res.vtx_sel_host_buf.get_buffer(),
-                    1, &vtx_sel_readback_region);
+    if (mode == Mode::select) {
+        static const VkBufferCopy vtx_sel_readback_region = { 0, 0, max_objects };
+        vkCmdCopyBuffer(cmdbuf, vtx_sel_buf.get_buffer(),
+                        res.vtx_sel_host_buf.get_buffer(),
+                        1, &vtx_sel_readback_region);
+    }
 
     // Transition color output to shader-read layout for the GUI
     static const Image::Transition gui_image_layout = {
@@ -3068,12 +3095,176 @@ bool GeometryEditor::render_control_points(VkCommandBuffer cmdbuf,
     return true;
 }
 
+void GeometryEditor::apply_move(const UserInput& input, uint32_t image_idx)
+{
+    patch_geometry.apply_snapshot();
+
+    const Camera&     camera = view.camera[static_cast<int>(view.view_type)];
+    const float       height = static_cast<float>(view.height);
+    const vmath::vec2 md     = input.abs_mouse_pos - mouse_action_init;
+
+    vmath::vec3 delta{0.0f};
+
+    switch (view.view_type) {
+
+        default:
+            assert(view.view_type == ViewType::free_moving);
+            if (mouse_action_pos) {
+                const vmath::vec3 right   = vmath::normalize(vmath::cross_product(vmath::vec3{0, 1, 0}, camera.dir));
+                const vmath::vec3 up      = vmath::normalize(vmath::cross_product(camera.dir, right));
+                const float       depth   = vmath::dot_product(*mouse_action_pos - camera.pos, camera.dir);
+                const float       fov_tan = vmath::tan(fov_radians * 0.5f);
+                const float       scale   = depth * fov_tan * 2.0f / height * int16_scale;
+                delta = right * (md.x * scale) + up * (-md.y * scale);
+            }
+            break;
+
+        case ViewType::front: {
+            const float s = camera.view_height / height;
+            delta = {md.x * s, -md.y * s, 0.0f};
+            break;
+        }
+
+        case ViewType::back: {
+            const float s = camera.view_height / height;
+            delta = {-md.x * s, -md.y * s, 0.0f};
+            break;
+        }
+
+        case ViewType::left: {
+            const float s = camera.view_height / height;
+            delta = {0.0f, -md.y * s, -md.x * s};
+            break;
+        }
+
+        case ViewType::right: {
+            const float s = camera.view_height / height;
+            delta = {0.0f, -md.y * s, md.x * s};
+            break;
+        }
+
+        case ViewType::top: {
+            const float s = camera.view_height / height;
+            delta = {md.x * s, 0.0f, -md.y * s};
+            break;
+        }
+
+        case ViewType::bottom: {
+            const float s = camera.view_height / height;
+            delta = {-md.x * s, 0.0f, -md.y * s};
+            break;
+        }
+    }
+
+    if (toolbar_state.snap_x || toolbar_state.snap_y || toolbar_state.snap_z) {
+        if ( ! toolbar_state.snap_x)
+            delta.x = 0.0f;
+        if ( ! toolbar_state.snap_y)
+            delta.y = 0.0f;
+        if ( ! toolbar_state.snap_z)
+            delta.z = 0.0f;
+    }
+
+    const uint32_t num_vertices = patch_geometry.get_num_vertices();
+    const uint32_t num_slots    = mstd::align_up(num_vertices, 32u);
+
+    for (uint32_t i_slot = 0; i_slot < num_slots; i_slot++) {
+        const uint32_t slot = selected_vertices[i_slot];
+        if ( ! slot)
+            continue;
+
+        for (uint32_t i = 0; i < 32; i++) {
+            if ( ! (slot & (1u << i)))
+                continue;
+
+            const uint32_t i_vtx = (i_slot << 5) + i;
+            patch_geometry.move_vertex(i_vtx, delta.x, delta.y, delta.z);
+        }
+    }
+
+    patch_geometry.set_dirty();
+}
+
+void GeometryEditor::select_vertices_from_faces(View& dst_view, uint32_t image_idx)
+{
+    memset(selected_vertices, 0, sizeof selected_vertices);
+
+    Resources& res = dst_view.res[image_idx];
+
+    const uint32_t       num_vertices = patch_geometry.get_num_vertices();
+    const uint32_t       num_faces    = patch_geometry.get_num_faces();
+    uint8_t* const       vtx_sel      = res.vtx_sel_host_buf.get_ptr<uint8_t>();
+    const uint8_t* const face_sel     = res.sel_host_buf.get_ptr<uint8_t>();
+
+    for (uint32_t i_face = 0; i_face < num_faces; i_face++) {
+        if ( ! (face_sel[i_face] & obj_selected))
+            continue;
+
+        uint32_t face_vtx[16];
+        patch_geometry.get_face_vertex_indices(i_face, face_vtx);
+
+        for (uint32_t j = 0; j < 16; j++) {
+            const uint32_t i_vtx = face_vtx[j];
+            assert(i_vtx < num_vertices);
+
+            const uint32_t slot_idx = i_vtx >> 5;
+            const uint32_t bitmask  = 1u << (i_vtx & 0x1Fu);
+            assert(slot_idx < std::size(selected_vertices));
+            selected_vertices[slot_idx] |= bitmask;
+        }
+    }
+
+    for (uint32_t i_vtx = 0; i_vtx < num_vertices; i_vtx++) {
+        if ( ! (vtx_sel[i_vtx] & obj_selected))
+            continue;
+
+        const uint32_t slot_idx = i_vtx >> 5;
+        const uint32_t bitmask  = 1u << (i_vtx & 0x1Fu);
+        assert(slot_idx < std::size(selected_vertices));
+        selected_vertices[slot_idx] |= bitmask;
+    }
+}
+
 void GeometryEditor::finish_edit_mode()
 {
+    if (mouse_action_pos) {
+        mouse_action_pos = std::nullopt;
+        patch_geometry.clear_redo();
+    }
 }
 
 void GeometryEditor::cancel_edit_mode()
 {
+    if (mouse_action_pos) {
+        patch_geometry.restore_snapshot();
+        mouse_action_pos = std::nullopt;
+    }
+}
+
+void GeometryEditor::undo()
+{
+    if (has_captured_mouse())
+        release_mouse();
+    mouse_action_pos = std::nullopt;
+    switch_mode(Mode::select);
+
+    if (patch_geometry.undo()) {
+        clear_face_sel = true;
+        clear_vtx_sel  = true;
+    }
+}
+
+void GeometryEditor::redo()
+{
+    if (has_captured_mouse())
+        release_mouse();
+    mouse_action_pos = std::nullopt;
+    switch_mode(Mode::select);
+
+    if (patch_geometry.redo()) {
+        clear_face_sel = true;
+        clear_vtx_sel  = true;
+    }
 }
 
 } // namespace Sculptor
