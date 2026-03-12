@@ -196,6 +196,10 @@ static bool create_gui_frame(uint32_t image_idx)
                     static_cast<double>(Sculptor::Editor::debug_color[0]),
                     static_cast<double>(Sculptor::Editor::debug_color[1]),
                     static_cast<double>(Sculptor::Editor::debug_color[2]));
+
+        ImGui::Separator();
+
+        ImGui::SliderInt("Tessellation Level", &Sculptor::GeometryEditor::tess_level, 1, 10);
     }
     ImGui::End();
 

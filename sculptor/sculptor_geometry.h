@@ -26,7 +26,6 @@ class Geometry {
             FaceData face_data[1];
         };
 
-        static constexpr uint32_t tess_level = 3; // TODO
         static constexpr uint32_t max_edges = 0x10000U;
         static constexpr uint32_t max_faces = 0x10000U / 16U;
 
@@ -39,6 +38,7 @@ class Geometry {
         void render(VkCommandBuffer cmd_buf);
         void render_vertices(VkCommandBuffer cmd_buf);
 
+        void     set_tess_level(int32_t level);
         uint32_t add_vertex(int16_t x, int16_t y, int16_t z);
         uint32_t get_num_vertices() const { return num_vertices; }
         void     set_vertex(uint32_t vtx, int16_t x, int16_t y, int16_t z);
@@ -72,13 +72,14 @@ class Geometry {
         Buffer   gpu_buffer;
         Buffer   host_buffer;
 
-        uint32_t last_buffer         = 0;
-        uint32_t num_vertices        = 0;
-        uint32_t num_indices         = 0;
-        uint32_t num_edge_indices    = 0;
-        uint32_t num_edges           = 0;
-        uint32_t num_faces           = 0;
-        bool     dirty               = true;
+        int32_t  tess_level       = 3;
+        uint32_t last_buffer      = 0;
+        uint32_t num_vertices     = 0;
+        uint32_t num_indices      = 0;
+        uint32_t num_edge_indices = 0;
+        uint32_t num_edges        = 0;
+        uint32_t num_faces        = 0;
+        bool     dirty            = true;
 
         struct Edge {
             uint32_t vertices[4];

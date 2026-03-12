@@ -242,6 +242,14 @@ void Sculptor::Geometry::get_face_vertex_indices(uint32_t face_id, uint32_t out_
         out_vtx[ctrl_idx_map[i_idx]] = face.ctrl_vertices[i_idx];
 }
 
+void Sculptor::Geometry::set_tess_level(const int32_t level)
+{
+    if (level > 0 && level != tess_level) {
+        tess_level = level;
+        set_dirty();
+    }
+}
+
 uint32_t Sculptor::Geometry::add_vertex(int16_t x, int16_t y, int16_t z)
 {
     assert(num_vertices < max_vertices);

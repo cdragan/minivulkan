@@ -24,6 +24,8 @@ class GeometryEditor: public Editor {
         void free_resources() override;
         bool draw_frame(VkCommandBuffer cmdbuf, uint32_t image_idx) override;
 
+        static int tess_level;
+
     private:
         //    id        new group  key                     tooltip
 #       define TOOLBAR_BUTTONS \

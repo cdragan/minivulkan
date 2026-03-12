@@ -215,6 +215,8 @@ namespace {
 
 namespace Sculptor {
 
+int GeometryEditor::tess_level = 3;
+
 void GeometryEditor::Camera::move(const vmath::vec3& delta)
 {
     constexpr vmath::vec3 max_pos{1.1f};
@@ -270,25 +272,39 @@ std::optional<vmath::vec3> GeometryEditor::calc_grid_world_pos(const View& src_v
     const vmath::vec3 cam_right   = vmath::normalize(vmath::cross_product(vmath::vec3{0, 1, 0}, camera.dir));
     const vmath::vec3 cam_up      = vmath::normalize(vmath::cross_product(camera.dir, cam_right));
 
-    // Convert mouse position to NDC (note: Y is inverted)
+    // Convert mouse position to normalized device coordinates (note: Y is inverted)
     const float aspect = static_cast<float>(src_view.width) / static_cast<float>(src_view.height);
     const float ndc_x  = src_view.mouse_pos.x / static_cast<float>(src_view.width)  * 2.0f - 1.0f;
     const float ndc_y  = 1.0f - src_view.mouse_pos.y / static_cast<float>(src_view.height) * 2.0f;
 
     const float fov_tan = vmath::tan(fov_radians / 2);
-    const vmath::vec3 ray_dir = cam_forward
-                              + cam_right * (ndc_x * aspect * fov_tan)
-                              + cam_up    * (ndc_y * fov_tan);
+    vmath::vec3 cam_dir = cam_forward
+                        + cam_right * (ndc_x * aspect * fov_tan)
+                        + cam_up    * (ndc_y * fov_tan);
 
-    if (std::abs(ray_dir.y) < 0.001f)
-        return std::nullopt;
+    const float default_distance = 0.2f;
+    vmath::vec3 final_dir = camera.dir * (default_distance / vmath::length(camera.dir));
 
-    const float t = -camera.pos.y / ray_dir.y;
+    if (std::abs(cam_dir.y) > 0.001f) {
 
-    if (t < 0.0f)
-        return std::nullopt;
+        const float t = -camera.pos.y / cam_dir.y;
 
-    return camera.pos + ray_dir * t;
+        if (t > 0.0f) {
+
+            cam_dir *= t;
+
+            const float max_distance = 0.8f;
+
+            const float distance = vmath::length(cam_dir);
+
+            if (distance > max_distance)
+                cam_dir *= max_distance / distance;
+
+            final_dir = cam_dir;
+        }
+    }
+
+    return camera.pos + final_dir;
 }
 
 const char* GeometryEditor::get_editor_name() const
@@ -1868,18 +1884,9 @@ bool GeometryEditor::draw_frame(VkCommandBuffer cmdbuf, uint32_t image_idx)
         return false;
 
     // Send any updates/modifications to geometry to the GPU
+    patch_geometry.set_tess_level(toolbar_state.toggle_tessellation ? 1 : tess_level);
     if ( ! patch_geometry.send_to_gpu(cmdbuf))
         return false;
-
-    // TODO
-    // * Draw solid geometry
-    //   - Toggle tessellation
-    //   - Toggle wireframe
-    //   - Toggle material or just plain shaded
-    // * Draw patch outline
-    // * Draw edges (observe selection)
-    // * Draw vertices (including control vertices) and connectors (observe selection)
-    // * In all cases observe selection and hover highlight
 
     // Calculate and set up per-frame data
     set_frame_data(cmdbuf, image_idx);
@@ -3012,7 +3019,7 @@ bool GeometryEditor::render_control_points(VkCommandBuffer cmdbuf,
     vkCmdBeginRendering(cmdbuf, &vtx_rendering_info);
 
     vkCmdBindPipeline(cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, vertex_mat);
-    vkCmdSetDepthTestEnable(cmdbuf, VK_TRUE);
+    vkCmdSetDepthTestEnable(cmdbuf, toolbar_state.toggle_wireframe ? VK_FALSE : VK_TRUE);
     vkCmdSetDepthWriteEnable(cmdbuf, VK_FALSE);
 
     send_viewport_and_scissor(cmdbuf, dst_view.width, dst_view.height);
