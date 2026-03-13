@@ -33,10 +33,12 @@ class Geometry {
         void set_dirty() { dirty = true; }
         bool send_to_gpu(VkCommandBuffer cmd_buf);
         void write_faces_descriptor(VkDescriptorBufferInfo* desc);
+        void write_face_indices_descriptor(VkDescriptorBufferInfo* desc);
         void write_edge_indices_descriptor(VkDescriptorBufferInfo* desc);
         void write_edge_vertices_descriptor(VkDescriptorBufferInfo* desc);
         void render(VkCommandBuffer cmd_buf);
         void render_vertices(VkCommandBuffer cmd_buf);
+        void render_ctrl_pt_handles(VkCommandBuffer cmd_buf);
 
         void     set_tess_level(int32_t level);
         uint32_t add_vertex(int16_t x, int16_t y, int16_t z);

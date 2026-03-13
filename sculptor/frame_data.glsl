@@ -22,6 +22,7 @@ layout(binding = 6) uniform frame_data {
     vec4 color_face_hovered_selected;
     vec4 color_face_selected;
     vec4 color_edge;
+    vec4 color_ctrl_pt;
     vec4 color_vertex_hovered;
     vec4 color_vertex_hovered_selected;
     vec4 color_vertex_selected;

@@ -169,6 +169,7 @@ namespace {
         vmath::vec4 color_face_hovered_selected;
         vmath::vec4 color_face_selected;
         vmath::vec4 color_edge;
+        vmath::vec4 color_ctrl_pt;
         vmath::vec4 color_vertex_hovered;
         vmath::vec4 color_vertex_hovered_selected;
         vmath::vec4 color_vertex_selected;
@@ -769,6 +770,28 @@ bool GeometryEditor::create_materials()
     if ( ! create_material(vertex_info, &vertex_mat))
         return false;
     set_material_buf(vertex_info, mat_vertex_sel);
+
+    static const MaterialInfo ctrl_pt_handles_info = {
+        {
+            shader_sculptor_ctrl_pt_handles_vert,
+            shader_sculptor_ctrl_pt_handles_frag
+        },
+        nullptr,
+        0.0f,
+        0,
+        0,
+        { VK_FORMAT_UNDEFINED, VK_FORMAT_DISABLED, VK_FORMAT_DISABLED, VK_FORMAT_DISABLED },
+        VK_PRIMITIVE_TOPOLOGY_LINE_LIST,
+        0,       // patch_control_points
+        VK_POLYGON_MODE_FILL,
+        VK_CULL_MODE_NONE,
+        true,    // use_depth
+        false,   // alpha_blend
+        make_byte_color(0, 0, 0) // diffuse
+    };
+
+    if ( ! create_material(ctrl_pt_handles_info, &ctrl_pt_handles_mat))
+        return false;
 
     static const MaterialInfo grid_info = {
         {
@@ -2261,6 +2284,7 @@ void GeometryEditor::set_frame_data(VkCommandBuffer cmdbuf, uint32_t image_idx)
     frame_data.color_face_hovered_selected   = {0.838f, 0.527f, 0.216f, 1.0f};
     frame_data.color_face_selected           = {0.824f, 0.573f, 0.384f, 1.0f};
     frame_data.color_edge                    = {0.93f, 0.93f, 0.93f, 1.0f};
+    frame_data.color_ctrl_pt                 = {0.7f,  0.7f,  0.7f,  1.0f};
     frame_data.color_vertex_hovered          = {1.0f,  0.7f,  0.0f,  1.0f};
     frame_data.color_vertex_hovered_selected = {1.0f, 1.0f,  0.3f,  1.0f};
     frame_data.color_vertex_selected         = {0.898f, 0.748f, 0.186f, 1.0f};
@@ -2958,6 +2982,43 @@ bool GeometryEditor::render_control_points(VkCommandBuffer cmdbuf,
 
     vkCmdBeginRendering(cmdbuf, &vtx_rendering_info);
 
+    VkDescriptorBufferInfo buffer_info = {
+        VK_NULL_HANDLE, // buffer
+        0,              // offset
+        0               // range
+    };
+
+    // Draw dotted control point lines
+    if (patch_geometry.get_num_faces() > 0) {
+        vkCmdBindPipeline(cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, ctrl_pt_handles_mat);
+        vkCmdSetDepthTestEnable(cmdbuf, toolbar_state.toggle_wireframe ? VK_FALSE : VK_TRUE);
+        vkCmdSetDepthWriteEnable(cmdbuf, VK_FALSE);
+
+        send_viewport_and_scissor(cmdbuf, dst_view.width, dst_view.height);
+
+        buffer_info.buffer = res.transforms.get_buffer();
+        buffer_info.offset = 0;
+        buffer_info.range  = sizeof(Transforms);
+        push_descriptor(cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, Sculptor::material_layout,
+                        1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, buffer_info);
+
+        patch_geometry.write_face_indices_descriptor(&buffer_info);
+        push_descriptor(cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, Sculptor::material_layout,
+                        3, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, buffer_info);
+
+        patch_geometry.write_edge_vertices_descriptor(&buffer_info);
+        push_descriptor(cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, Sculptor::material_layout,
+                        4, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, buffer_info);
+
+        buffer_info.buffer = res.frame_data.get_buffer();
+        buffer_info.offset = 0;
+        buffer_info.range  = sizeof(FrameData);
+        push_descriptor(cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, Sculptor::material_layout,
+                        6, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, buffer_info);
+
+        patch_geometry.render_ctrl_pt_handles(cmdbuf);
+    }
+
     vkCmdBindPipeline(cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, vertex_mat);
     vkCmdSetDepthTestEnable(cmdbuf, toolbar_state.toggle_wireframe ? VK_FALSE : VK_TRUE);
     vkCmdSetDepthWriteEnable(cmdbuf, VK_FALSE);
@@ -2965,12 +3026,6 @@ bool GeometryEditor::render_control_points(VkCommandBuffer cmdbuf,
     send_viewport_and_scissor(cmdbuf, dst_view.width, dst_view.height);
 
     const uint32_t vertex_mat_id = (image_idx * num_materials) + mat_vertex_sel;
-
-    VkDescriptorBufferInfo buffer_info = {
-        VK_NULL_HANDLE, // buffer
-        0,              // offset
-        0               // range
-    };
 
     buffer_info.buffer = materials_buf.get_buffer();
     buffer_info.offset = vertex_mat_id * materials_stride;

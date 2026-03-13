@@ -617,6 +617,13 @@ void Sculptor::Geometry::write_faces_descriptor(VkDescriptorBufferInfo* desc)
     desc->range  = faces_stride;
 }
 
+void Sculptor::Geometry::write_face_indices_descriptor(VkDescriptorBufferInfo* desc)
+{
+    desc->buffer = gpu_buffer.get_buffer();
+    desc->offset = gpu_indices_offset;
+    desc->range  = max_face_indices * sizeof(uint16_t);
+}
+
 void Sculptor::Geometry::write_edge_indices_descriptor(VkDescriptorBufferInfo* desc)
 {
     desc->buffer = gpu_buffer.get_buffer();
@@ -664,4 +671,15 @@ void Sculptor::Geometry::render_vertices(VkCommandBuffer cmd_buf)
               num_vertices,     // instanceCount
               0,                // firstVertex
               0);               // firstInstance
+}
+
+void Sculptor::Geometry::render_ctrl_pt_handles(VkCommandBuffer cmd_buf)
+{
+    assert( ! dirty);
+
+    vkCmdDraw(cmd_buf,
+              2,              // vertexCount
+              num_faces * 12, // instanceCount (number of control point lines)
+              0,              // firstVertex
+              0);             // firstInstance
 }

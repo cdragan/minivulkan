@@ -207,6 +207,7 @@ class GeometryEditor: public Editor {
         VkPipeline         selection_mat          = VK_NULL_HANDLE;
         VkPipeline         vertex_mat             = VK_NULL_HANDLE;
         VkPipeline         grid_mat               = VK_NULL_HANDLE;
+        VkPipeline         ctrl_pt_handles_mat    = VK_NULL_HANDLE;
         VkPipeline         wireframe_tess_mat     = VK_NULL_HANDLE;
         VkPipeline         wireframe_mat          = VK_NULL_HANDLE;
         VkPipeline         lighting_mat           = VK_NULL_HANDLE;
