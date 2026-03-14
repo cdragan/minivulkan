@@ -10,6 +10,7 @@
 #include <errno.h>
 #include <iterator>
 #include <stdio.h>
+#include <string.h>
 
 constexpr uint32_t max_vertices         = 65536;
 constexpr uint32_t max_indices          = 65536;
