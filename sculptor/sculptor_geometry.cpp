@@ -7,7 +7,9 @@
 #include "../core/mstdc.h"
 #include "../core/vmath.h"
 
+#include <errno.h>
 #include <iterator>
+#include <stdio.h>
 
 constexpr uint32_t max_vertices         = 65536;
 constexpr uint32_t max_indices          = 65536;
@@ -27,6 +29,9 @@ constexpr uint32_t indices_stride       = max_indices * sizeof(uint16_t);
 constexpr uint32_t host_faces_offset    = vertices_stride + indices_stride * num_host_copies;
 constexpr uint32_t gpu_faces_offset     = vertices_stride + indices_stride;
 constexpr uint32_t faces_stride         = sizeof(Sculptor::Geometry::FacesBuf) + (Sculptor::Geometry::max_faces - 1) * sizeof(Sculptor::Geometry::FaceData);
+
+static const uint8_t  file_type[4] = {'G', 'E', 'O', 'M'};
+static const uint16_t file_version = 1;
 
 bool Sculptor::Geometry::allocate()
 {
@@ -508,6 +513,92 @@ void Sculptor::Geometry::set_cube()
                  cube_face_vertices[i + 3]);
 
     set_dirty();
+}
+
+bool Sculptor::Geometry::save(const char* path)
+{
+    if (!snapshot_state())
+        return false;
+    DEFER { drop_snapshot(); };
+
+    FILE* const file = fopen(path, "wb");
+    if (!file) {
+        fprintf(stderr, "Error: Failed to open %s for writing: %s\n", path, strerror(errno));
+        return false;
+    }
+    DEFER { fclose(file); };
+
+    const UndoRedo::Snapshot snapshot = undo_redo.get_snapshot();
+    assert(snapshot.buf);
+
+    if (fwrite(file_type,     1, sizeof file_type,    file) != sizeof file_type    ||
+        fwrite(&file_version, 1, sizeof file_version, file) != sizeof file_version ||
+        fwrite(snapshot.buf,  1, snapshot.size,       file) != snapshot.size) {
+
+        fprintf(stderr, "Error: Failed to save %s: %s\n", path, strerror(errno));
+        return false;
+    }
+
+    return true;
+}
+
+bool Sculptor::Geometry::load(const char* path)
+{
+    FILE* const file = fopen(path, "rb");
+    if (!file) {
+        fprintf(stderr, "Error: Failed to open %s for reading: %s\n", path, strerror(errno));
+        return false;
+    }
+    DEFER { fclose(file); };
+
+    uint8_t  marker[sizeof file_type];
+    uint16_t version;
+    if (fread(marker,   1, sizeof marker,  file) != sizeof marker  ||
+        fread(&version, 1, sizeof version, file) != sizeof version ||
+        fseek(file, 0, SEEK_END) != 0) {
+
+        fprintf(stderr, "Error: Failed to read %s: %s\n", path, strerror(errno));
+        return false;
+    }
+
+    if (memcmp(marker, file_type, sizeof marker) != 0) {
+        fprintf(stderr, "Error: File %s does not contain geometry\n", path);
+        return false;
+    }
+
+    if (version != file_version) {
+        fprintf(stderr, "Error: Unsupported version %u in file %s (supported version is %u)\n",
+                version, path, file_version);
+        return false;
+    }
+
+    const long file_size = ftell(file);
+    if (file_size < static_cast<long>(sizeof file_type + sizeof file_version)) {
+        fprintf(stderr, "Error: Invalid %s file size: %ld\n", path, file_size);
+        return false;
+    }
+    fseek(file, sizeof marker + sizeof version, SEEK_SET);
+
+    const UndoRedo::Snapshot buf = undo_redo.get_snapshot_space();
+
+    const size_t snapshot_size = static_cast<size_t>(file_size) - 6;
+    if (snapshot_size > buf.size) {
+        fprintf(stderr, "Error: Not enough space to load %s (have %u bytes but need %ld)\n",
+                path, buf.size, file_size);
+        undo_redo.push_snapshot(0);
+        return false;
+    }
+
+    if (fread(buf.buf, 1, snapshot_size, file) != snapshot_size) {
+        fprintf(stderr, "Error: Failed to read %s: %s\n", path, strerror(errno));
+        undo_redo.push_snapshot(0);
+        return false;
+    }
+
+    undo_redo.push_snapshot(static_cast<uint32_t>(snapshot_size));
+    restore_snapshot();
+
+    return true;
 }
 
 bool Sculptor::Geometry::snapshot_state()

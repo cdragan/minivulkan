@@ -57,6 +57,8 @@ class Geometry {
         void     get_face_vertex_indices(uint32_t face_id, uint32_t out_vtx[16]) const;
 
         void set_cube();
+        bool save(const char* path);
+        bool load(const char* path);
 
         bool snapshot_state();   // Push a snapshot of geometry onto the undo stack
         bool restore_snapshot(); // Pop the snapshot of geometry from the undo stack

@@ -149,8 +149,10 @@ static bool create_gui_frame(uint32_t image_idx)
             if (ImGui::MenuItem("New")) {
             }
             if (ImGui::MenuItem("Open", CTRL_KEY "O")) {
+                geometry_editor.trigger_load();
             }
             if (ImGui::MenuItem("Save", CTRL_KEY "S")) {
+                geometry_editor.trigger_save();
             }
             ImGui::EndMenu();
         }

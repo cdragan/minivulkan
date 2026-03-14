@@ -21,6 +21,16 @@ class UndoRedo {
         }
 
         void clear_redo();
+        void clear();
+
+        struct Snapshot {
+            uint8_t* buf  = nullptr;
+            uint32_t size = 0;
+        };
+
+        Snapshot get_snapshot();
+        Snapshot get_snapshot_space();
+        void     push_snapshot(uint32_t size);
 
         void init_undo_push();
         bool finish_undo_push();
@@ -56,6 +66,7 @@ class UndoRedo {
             redo_push,
             undo_pop,
             redo_pop,
+            snapshot_write,
         };
 
         bool make_room(uint32_t size);

@@ -26,6 +26,9 @@ class GeometryEditor: public Editor {
 
         static int tess_level;
 
+        void trigger_save();
+        void trigger_load();
+
     private:
         //    id        new group  key                     tooltip
 #       define TOOLBAR_BUTTONS \

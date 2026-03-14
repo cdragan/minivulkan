@@ -212,6 +212,9 @@ namespace {
         // Mouse is over the object, or the object is inside selection rectangle
         obj_hovered  = 2,
     };
+
+    bool dialog_save;
+    bool dialog_load;
 }
 
 namespace Sculptor {
@@ -1483,6 +1486,14 @@ void GeometryEditor::handle_keyboard_actions()
             toolbar_state.snap_z = ! toolbar_state.snap_z;
     }
 
+    if (ImGui::IsKeyPressed(ImGuiKey_S) && IsCtrl()) {
+        trigger_save();
+    }
+
+    if (ImGui::IsKeyPressed(ImGuiKey_O) && IsCtrl()) {
+        trigger_load();
+    }
+
     if (ImGui::IsKeyPressed(ImGuiKey_C) && IsCtrl()) {
         // TODO copy
     }
@@ -1961,6 +1972,51 @@ bool GeometryEditor::create_gui_frame(uint32_t image_idx, bool* need_realloc, co
     ImGui::SetCursorPos(status_bar_pos);
 
     gui_status_bar();
+
+    static char dialog_path[256];
+
+    if (dialog_save) {
+        snprintf(dialog_path, sizeof dialog_path, "%s.geom", get_object_name());
+        ImGui::OpenPopup("Save");
+        dialog_save = false;
+    }
+
+    if (ImGui::BeginPopupModal("Save", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::InputText("##path", dialog_path, sizeof dialog_path);
+        if (ImGui::Button("Save")) {
+            patch_geometry.save(dialog_path);
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel"))
+            ImGui::CloseCurrentPopup();
+        ImGui::EndPopup();
+    }
+
+    if (dialog_load) {
+        dialog_path[0] = 0;
+        ImGui::OpenPopup("Open");
+        dialog_load = false;
+    }
+
+    if (ImGui::BeginPopupModal("Open", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::InputText("##path", dialog_path, sizeof dialog_path);
+        if (ImGui::Button("Open")) {
+            if (!patch_geometry.load(dialog_path))
+                return false;
+
+            clear_selection(cur_res->sel_host_buf,     patch_geometry.get_num_faces());
+            clear_selection(cur_res->vtx_sel_host_buf, patch_geometry.get_num_vertices());
+            face_sel_dirty = true;
+            vtx_sel_dirty  = true;
+
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel"))
+            ImGui::CloseCurrentPopup();
+        ImGui::EndPopup();
+    }
 
     ImGui::End();
 
@@ -3373,6 +3429,16 @@ void GeometryEditor::redo()
         face_sel_dirty = true;
         vtx_sel_dirty  = true;
     }
+}
+
+void GeometryEditor::trigger_save()
+{
+    dialog_save = true;
+}
+
+void GeometryEditor::trigger_load()
+{
+    dialog_load = true;
 }
 
 } // namespace Sculptor

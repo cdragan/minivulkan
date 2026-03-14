@@ -26,6 +26,46 @@ void UndoRedo::clear_redo()
     redo_idx = buf_size;
 }
 
+void UndoRedo::clear()
+{
+    assert(mode == Mode::inactive);
+    undo_idx = 0;
+    undo_bak = 0;
+    redo_idx = buf_size;
+}
+
+UndoRedo::Snapshot UndoRedo::get_snapshot()
+{
+    assert(mode == Mode::inactive);
+
+    Snapshot snap;
+    if (undo_idx) {
+        uint32_t block_size;
+        memcpy(&block_size, buf + undo_idx - header_size, header_size);
+        snap.buf  = buf + undo_idx - header_size - block_size;
+        snap.size = block_size + header_size;
+    }
+    return snap;
+}
+
+UndoRedo::Snapshot UndoRedo::get_snapshot_space()
+{
+    assert(mode == Mode::inactive);
+
+    mode = Mode::snapshot_write;
+    return { buf + undo_idx, redo_idx - undo_idx };
+}
+
+void UndoRedo::push_snapshot(const uint32_t size)
+{
+    assert(mode == Mode::snapshot_write);
+    assert(size <= redo_idx - undo_idx);
+
+    mode      = Mode::inactive;
+    undo_idx += size;
+    undo_bak  = undo_idx;
+}
+
 bool UndoRedo::make_room(uint32_t size)
 {
     const uint32_t avail_size = redo_idx - undo_idx;
