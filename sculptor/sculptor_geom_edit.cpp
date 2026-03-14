@@ -1471,13 +1471,16 @@ void GeometryEditor::handle_keyboard_actions()
         return ImGui::IsKeyDown(left_ctrl) || ImGui::IsKeyDown(right_ctrl);
     };
 
-    if (ImGui::IsKeyPressed(ImGuiKey_Z) && IsCtrl()) {
-        undo();
-    }
+    if (ImGui::IsKeyPressed(ImGuiKey_Z)) {
 
-    if (ImGui::IsKeyPressed(ImGuiKey_Z) && IsCtrl() &&
-        (ImGui::IsKeyDown(ImGuiKey_LeftShift) || ImGui::IsKeyDown(ImGuiKey_RightShift))) {
-        redo();
+        if (IsCtrl()) {
+            if (ImGui::IsKeyDown(ImGuiKey_LeftShift) || ImGui::IsKeyDown(ImGuiKey_RightShift))
+                redo();
+            else
+                undo();
+        }
+        else
+            toolbar_state.snap_z = ! toolbar_state.snap_z;
     }
 
     if (ImGui::IsKeyPressed(ImGuiKey_C) && IsCtrl()) {
@@ -1577,9 +1580,6 @@ void GeometryEditor::handle_keyboard_actions()
 
     if (ImGui::IsKeyPressed(ImGuiKey_Y))
         toolbar_state.snap_y = ! toolbar_state.snap_y;
-
-    if (ImGui::IsKeyPressed(ImGuiKey_Z))
-        toolbar_state.snap_z = ! toolbar_state.snap_z;
 
     if (ImGui::IsKeyPressed(ImGuiKey_G)) {
         toolbar_state.move = true;
@@ -1795,6 +1795,12 @@ bool GeometryEditor::gui_toolbar()
         new_mode = toolbar_state.extrude ? Mode::extrude : Mode::select;
 
     switch_mode(new_mode);
+
+    // Prevent clicking on toolbar from having side effects, like deselecting objects
+    if (has_captured_mouse() && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && ImGui::IsAnyItemActive()) {
+        release_mouse();
+        mouse_action = Action::none;
+    }
 
     return true;
 }
