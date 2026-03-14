@@ -218,13 +218,19 @@ namespace Sculptor {
 
 int GeometryEditor::tess_level = 3;
 
+GeometryEditor::Camera::Axes GeometryEditor::Camera::get_axes() const
+{
+    const vmath::vec3 right = vmath::normalize(vmath::cross_product(world_up, dir));
+    const vmath::vec3 up    = vmath::normalize(vmath::cross_product(dir, right));
+    return Axes{ right, up };
+}
+
 void GeometryEditor::Camera::move(const vmath::vec3& delta)
 {
     constexpr vmath::vec3 max_pos{1.1f};
-    const vmath::vec3 right     = vmath::normalize(vmath::cross_product(vmath::vec3{0, 1, 0}, dir));
-    const vmath::vec3 up        = vmath::normalize(vmath::cross_product(dir, right));
-    const vmath::vec3 moved_pos = pos + right * delta.x + up * delta.y + dir * delta.z;
-    const vmath::vec3 fixed_pos = vmath::clamp(moved_pos, -max_pos, max_pos);
+    const auto        [right, up] = get_axes();
+    const vmath::vec3 moved_pos   = pos + right * delta.x + up * delta.y + dir * delta.z;
+    const vmath::vec3 fixed_pos   = vmath::clamp(moved_pos, -max_pos, max_pos);
     if (fixed_pos == moved_pos)
         pos = fixed_pos;
 }
@@ -267,10 +273,9 @@ std::optional<vmath::vec3> GeometryEditor::calc_grid_world_pos(const View& src_v
     if (src_view.view_type != ViewType::free_moving)
         return std::nullopt;
 
-    const Camera      camera      = get_rotated_camera(src_view);
-    const vmath::vec3 cam_forward = camera.dir;
-    const vmath::vec3 cam_right   = vmath::normalize(vmath::cross_product(vmath::vec3{0, 1, 0}, camera.dir));
-    const vmath::vec3 cam_up      = vmath::normalize(vmath::cross_product(camera.dir, cam_right));
+    const Camera camera = get_rotated_camera(src_view);
+
+    const auto [cam_right, cam_up] = camera.get_axes();
 
     // Convert mouse position to normalized device coordinates (note: Y is inverted)
     const float aspect = static_cast<float>(src_view.width) / static_cast<float>(src_view.height);
@@ -278,7 +283,7 @@ std::optional<vmath::vec3> GeometryEditor::calc_grid_world_pos(const View& src_v
     const float ndc_y  = 1.0f - src_view.mouse_pos.y / static_cast<float>(src_view.height) * 2.0f;
 
     const float fov_tan = vmath::tan(fov_radians / 2);
-    vmath::vec3 cam_dir = cam_forward
+    vmath::vec3 cam_dir = camera.dir
                         + cam_right * (ndc_x * aspect * fov_tan)
                         + cam_up    * (ndc_y * fov_tan);
 
@@ -1071,22 +1076,23 @@ void GeometryEditor::draw_axis_indicator(ImDrawList* dl, float vp_max_x, float v
 
         case ViewType::free_moving: {
             const Camera cam = get_rotated_camera(view);
-            cam_right = vmath::normalize(vmath::cross_product(vmath::vec3{0, 1, 0}, cam.dir));
-            cam_up    = vmath::cross_product(cam.dir, cam_right);
+            const Camera::Axes axes = cam.get_axes();
+            cam_right = axes.right;
+            cam_up    = axes.up;
             break;
         }
 
-        case ViewType::front:   cam_right = {1, 0, 0};  cam_up = {0, 1, 0}; break;
-        case ViewType::back:    cam_right = {-1, 0, 0}; cam_up = {0, 1, 0}; break;
-        case ViewType::left:    cam_right = {0, 0, -1}; cam_up = {0, 1, 0}; break;
-        case ViewType::right:   cam_right = {0, 0, 1};  cam_up = {0, 1, 0}; break;
+        case ViewType::front:   cam_right = {1, 0, 0};  cam_up = Camera::world_up; break;
+        case ViewType::back:    cam_right = {-1, 0, 0}; cam_up = Camera::world_up; break;
+        case ViewType::left:    cam_right = {0, 0, -1}; cam_up = Camera::world_up; break;
+        case ViewType::right:   cam_right = {0, 0, 1};  cam_up = Camera::world_up; break;
         case ViewType::top:     cam_right = {1, 0, 0};  cam_up = {0, 0, 1}; break;
         case ViewType::bottom:  cam_right = {-1, 0, 0}; cam_up = {0, 0, 1}; break;
 
         default: return;
     }
 
-    static const vmath::vec3 world_axes[3] = {{1, 0, 0}, {0, 1, 0}, {0, 0, 1}};
+    static const vmath::vec3 world_axes[3] = {{1, 0, 0}, Camera::world_up, {0, 0, 1}};
     static const char* const labels[3]     = {"x", "y", "z"};
     const bool locked[3] = {toolbar_state.snap_x, toolbar_state.snap_y, toolbar_state.snap_z};
 
@@ -1211,13 +1217,13 @@ void GeometryEditor::handle_mouse_actions(const UserInput& input, bool view_hove
                             }
                             {
                                 const float yaw = vmath::radians(rot_scale_factor * input.mouse_pos_delta.x);
-                                const vmath::quat yaw_q{vmath::vec3{0, 1, 0}, yaw};
+                                const vmath::quat yaw_q{Camera::world_up, yaw};
 
                                 // Rotate pitch around camera's current local right axis (horizontal component);
                                 // rotating around world X would cause distortions
                                 const float       pitch       = vmath::radians(rot_scale_factor * input.mouse_pos_delta.y);
                                 const vmath::vec3 current_dir = camera.rot.rotate(camera.dir);
-                                const vmath::vec3 pitch_axis  = vmath::normalize(vmath::cross_product(vmath::vec3{0, 1, 0}, current_dir));
+                                const vmath::vec3 pitch_axis  = vmath::normalize(vmath::cross_product(Camera::world_up, current_dir));
                                 const vmath::quat pitch_q{pitch_axis, pitch};
 
                                 const vmath::quat new_rot = vmath::normalize(yaw_q * pitch_q * camera.rot);
@@ -1252,54 +1258,56 @@ void GeometryEditor::handle_mouse_actions(const UserInput& input, bool view_hove
                     const float ndc_x  = view.mouse_pos.x / static_cast<float>(view.width)  * 2.0f - 1.0f;
                     const float ndc_y  = 1.0f - view.mouse_pos.y / static_cast<float>(view.height) * 2.0f;
                     const float half_h = camera.view_height / (2.0f * int16_scale);
-                    constexpr float vb = 1.1f;
+                    constexpr float max_pos = 1.1f;
 
                     switch (view.view_type) {
 
                         default:
                             assert(view.view_type == ViewType::free_moving);
                             {
-                                const vmath::vec3 right   = vmath::normalize(vmath::cross_product(vmath::vec3{0, 1, 0}, camera.dir));
-                                const vmath::vec3 up      = vmath::normalize(vmath::cross_product(camera.dir, right));
-                                const vmath::vec3 V       = *mouse_action_pos - camera.pos;
-                                const float       v_fwd   = vmath::dot_product(V, camera.dir);
-                                const float       v_right = vmath::dot_product(V, right);
-                                const float       v_up    = vmath::dot_product(V, up);
-                                const float       fov_tan = vmath::tan(fov_radians * 0.5f);
-                                const float       dr      = v_right - ndc_x * v_fwd * aspect * fov_tan;
-                                const float       du      = v_up    - ndc_y * v_fwd * fov_tan;
-                                camera.pos = vmath::clamp(camera.pos + right * dr + up * du, vmath::vec3{-vb}, vmath::vec3{vb});
+                                const auto [right, up] = camera.get_axes();
+
+                                const vmath::vec3 move_delta  = *mouse_action_pos - camera.pos;
+                                const float       fwd_delta   = vmath::dot_product(move_delta, camera.dir);
+                                const float       right_delta = vmath::dot_product(move_delta, right);
+                                const float       up_delta    = vmath::dot_product(move_delta, up);
+                                const float       fov_tan     = vmath::tan(fov_radians * 0.5f);
+                                const float       screen_dx   = right_delta - ndc_x * fwd_delta * aspect * fov_tan;
+                                const float       screen_dy   = up_delta    - ndc_y * fwd_delta * fov_tan;
+
+                                camera.pos = vmath::clamp(camera.pos + right * screen_dx + up * screen_dy,
+                                                          vmath::vec3{-max_pos}, vmath::vec3{max_pos});
                             }
                             break;
 
                         case ViewType::front:
-                            camera.pos.x = vmath::clamp(mouse_action_pos->x - ndc_x * aspect * half_h, -vb, vb);
-                            camera.pos.y = vmath::clamp(mouse_action_pos->y - ndc_y * half_h,          -vb, vb);
+                            camera.pos.x = vmath::clamp(mouse_action_pos->x - ndc_x * aspect * half_h, -max_pos, max_pos);
+                            camera.pos.y = vmath::clamp(mouse_action_pos->y - ndc_y * half_h,          -max_pos, max_pos);
                             break;
 
                         case ViewType::back:
-                            camera.pos.x = vmath::clamp(mouse_action_pos->x + ndc_x * aspect * half_h, -vb, vb);
-                            camera.pos.y = vmath::clamp(mouse_action_pos->y - ndc_y * half_h,          -vb, vb);
+                            camera.pos.x = vmath::clamp(mouse_action_pos->x + ndc_x * aspect * half_h, -max_pos, max_pos);
+                            camera.pos.y = vmath::clamp(mouse_action_pos->y - ndc_y * half_h,          -max_pos, max_pos);
                             break;
 
                         case ViewType::left:
-                            camera.pos.z = vmath::clamp(mouse_action_pos->z + ndc_x * aspect * half_h, -vb, vb);
-                            camera.pos.y = vmath::clamp(mouse_action_pos->y - ndc_y * half_h,          -vb, vb);
+                            camera.pos.z = vmath::clamp(mouse_action_pos->z + ndc_x * aspect * half_h, -max_pos, max_pos);
+                            camera.pos.y = vmath::clamp(mouse_action_pos->y - ndc_y * half_h,          -max_pos, max_pos);
                             break;
 
                         case ViewType::right:
-                            camera.pos.z = vmath::clamp(mouse_action_pos->z - ndc_x * aspect * half_h, -vb, vb);
-                            camera.pos.y = vmath::clamp(mouse_action_pos->y - ndc_y * half_h,          -vb, vb);
+                            camera.pos.z = vmath::clamp(mouse_action_pos->z - ndc_x * aspect * half_h, -max_pos, max_pos);
+                            camera.pos.y = vmath::clamp(mouse_action_pos->y - ndc_y * half_h,          -max_pos, max_pos);
                             break;
 
                         case ViewType::top:
-                            camera.pos.x = vmath::clamp(mouse_action_pos->x - ndc_x * aspect * half_h, -vb, vb);
-                            camera.pos.z = vmath::clamp(mouse_action_pos->z - ndc_y * half_h,          -vb, vb);
+                            camera.pos.x = vmath::clamp(mouse_action_pos->x - ndc_x * aspect * half_h, -max_pos, max_pos);
+                            camera.pos.z = vmath::clamp(mouse_action_pos->z - ndc_y * half_h,          -max_pos, max_pos);
                             break;
 
                         case ViewType::bottom:
-                            camera.pos.x = vmath::clamp(mouse_action_pos->x + ndc_x * aspect * half_h, -vb, vb);
-                            camera.pos.z = vmath::clamp(mouse_action_pos->z - ndc_y * half_h,          -vb, vb);
+                            camera.pos.x = vmath::clamp(mouse_action_pos->x + ndc_x * aspect * half_h, -max_pos, max_pos);
+                            camera.pos.z = vmath::clamp(mouse_action_pos->z - ndc_y * half_h,          -max_pos, max_pos);
                             break;
                     }
                 }
@@ -2604,31 +2612,31 @@ void GeometryEditor::set_patch_transforms(VkCommandBuffer cmdbuf, const View& ds
     switch (dst_view.view_type) {
 
         case ViewType::free_moving:
-            model_view = vmath::look_at(camera.pos, camera.pos + camera.dir, vmath::vec3{0, 1, 0});
+            model_view = vmath::look_at(camera.pos, camera.pos + camera.dir, Camera::world_up);
             break;
 
         case ViewType::front:
             model_view = vmath::look_at(vmath::vec3{camera.pos.x, camera.pos.y, -2},
                                         vmath::vec3{camera.pos.x, camera.pos.y, 0},
-                                        vmath::vec3{0, 1, 0});
+                                        Camera::world_up);
             break;
 
         case ViewType::back:
             model_view = vmath::look_at(vmath::vec3{camera.pos.x, camera.pos.y, 2},
                                         vmath::vec3{camera.pos.x, camera.pos.y, 0},
-                                        vmath::vec3{0, 1, 0});
+                                        Camera::world_up);
             break;
 
         case ViewType::left:
             model_view = vmath::look_at(vmath::vec3{-2, camera.pos.y, camera.pos.z},
                                         vmath::vec3{0, camera.pos.y, camera.pos.z},
-                                        vmath::vec3{0, 1, 0});
+                                        Camera::world_up);
             break;
 
         case ViewType::right:
             model_view = vmath::look_at(vmath::vec3{2, camera.pos.y, camera.pos.z},
                                         vmath::vec3{0, camera.pos.y, camera.pos.z},
-                                        vmath::vec3{0, 1, 0});
+                                        Camera::world_up);
             break;
 
         case ViewType::bottom:
@@ -3101,9 +3109,10 @@ void GeometryEditor::apply_move(const UserInput& input, uint32_t image_idx)
 {
     patch_geometry.apply_snapshot();
 
-    const Camera&     camera = view.camera[static_cast<int>(view.view_type)];
-    const float       height = static_cast<float>(view.height);
-    const vmath::vec2 md     = input.abs_mouse_pos - mouse_action_init;
+    const Camera&     camera       = view.camera[static_cast<int>(view.view_type)];
+    const float       height       = static_cast<float>(view.height);
+    const float       ortho_scale  = camera.view_height / height;
+    const vmath::vec2 screen_delta = input.abs_mouse_pos - mouse_action_init;
 
     vmath::vec3 delta{0.0f};
 
@@ -3112,50 +3121,38 @@ void GeometryEditor::apply_move(const UserInput& input, uint32_t image_idx)
         default:
             assert(view.view_type == ViewType::free_moving);
             if (mouse_action_pos) {
-                const vmath::vec3 right   = vmath::normalize(vmath::cross_product(vmath::vec3{0, 1, 0}, camera.dir));
-                const vmath::vec3 up      = vmath::normalize(vmath::cross_product(camera.dir, right));
-                const float       depth   = vmath::dot_product(*mouse_action_pos - camera.pos, camera.dir);
-                const float       fov_tan = vmath::tan(fov_radians * 0.5f);
-                const float       scale   = depth * fov_tan * 2.0f / height * int16_scale;
-                delta = right * (md.x * scale) + up * (-md.y * scale);
+                const auto [right, up] = camera.get_axes();
+
+                const float depth   = vmath::dot_product(*mouse_action_pos - camera.pos, camera.dir);
+                const float fov_tan = vmath::tan(fov_radians * 0.5f);
+                const float scale   = depth * fov_tan * 2.0f / height * int16_scale;
+                delta = right * (screen_delta.x * scale) + up * (-screen_delta.y * scale);
             }
             break;
 
-        case ViewType::front: {
-            const float s = camera.view_height / height;
-            delta = {md.x * s, -md.y * s, 0.0f};
+        case ViewType::front:
+            delta = {screen_delta.x * ortho_scale, -screen_delta.y * ortho_scale, 0.0f};
             break;
-        }
 
-        case ViewType::back: {
-            const float s = camera.view_height / height;
-            delta = {-md.x * s, -md.y * s, 0.0f};
+        case ViewType::back:
+            delta = {-screen_delta.x * ortho_scale, -screen_delta.y * ortho_scale, 0.0f};
             break;
-        }
 
-        case ViewType::left: {
-            const float s = camera.view_height / height;
-            delta = {0.0f, -md.y * s, -md.x * s};
+        case ViewType::left:
+            delta = {0.0f, -screen_delta.y * ortho_scale, -screen_delta.x * ortho_scale};
             break;
-        }
 
-        case ViewType::right: {
-            const float s = camera.view_height / height;
-            delta = {0.0f, -md.y * s, md.x * s};
+        case ViewType::right:
+            delta = {0.0f, -screen_delta.y * ortho_scale, screen_delta.x * ortho_scale};
             break;
-        }
 
-        case ViewType::top: {
-            const float s = camera.view_height / height;
-            delta = {md.x * s, 0.0f, -md.y * s};
+        case ViewType::top:
+            delta = {screen_delta.x * ortho_scale, 0.0f, -screen_delta.y * ortho_scale};
             break;
-        }
 
-        case ViewType::bottom: {
-            const float s = camera.view_height / height;
-            delta = {-md.x * s, 0.0f, -md.y * s};
+        case ViewType::bottom:
+            delta = {-screen_delta.x * ortho_scale, 0.0f, -screen_delta.y * ortho_scale};
             break;
-        }
     }
 
     if (toolbar_state.snap_x || toolbar_state.snap_y || toolbar_state.snap_z) {

@@ -86,12 +86,20 @@ class GeometryEditor: public Editor {
         };
 
         struct Camera {
-            vmath::vec3 pos         {0.0f};
+            vmath::vec3 pos{0.0f};
             float       view_height = 0;
-            vmath::vec3 dir         {0.0f, 0.0f, 1.0f};
+            vmath::vec3 dir{0, 0, 1};
 
             // Rotation around pivot point
-            vmath::quat rot         {0.0f, 0.0f, 0.0f, 1.0f};
+            vmath::quat rot{0, 0, 0, 1};
+
+            static constexpr vmath::vec3 world_up{0, 1, 0};
+
+            struct Axes {
+                vmath::vec3 right;
+                vmath::vec3 up;
+            };
+            Axes get_axes() const;
 
             void move(const vmath::vec3& delta);
         };
