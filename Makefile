@@ -344,6 +344,7 @@ ifeq ($(UNAME), Windows)
 
     COMPILER_OUTPUT = -Fo:$1
     LINKER_OUTPUT   = -out:$1
+    MAP_FLAG        = -map:$1.map
 
     ifeq ($(debug), 0)
         $(call TARGET_FILES, mstdc_windows.cpp): CFLAGS += -GL-
@@ -416,6 +417,8 @@ ifeq ($(UNAME), Linux)
         LTO_CFLAGS += -flto -fno-fat-lto-objects
         LDFLAGS    += -flto=auto -fuse-linker-plugin
     endif
+
+    MAP_FLAG = -Wl,-Map=$1.map
 endif
 
 ifeq ($(UNAME), Darwin)
@@ -445,6 +448,8 @@ ifeq ($(UNAME), Darwin)
     else
         export MallocNanoZone=0
     endif
+
+    MAP_FLAG = -Wl,-map,$1.map
 endif
 
 time_stats ?= 0
@@ -552,7 +557,7 @@ $(out_dir): | $(out_dir_base)
 
 define LINK_RULE
 $1: $$(call OBJ_FROM_SRC, $2)
-	$$(LINK) $$(call LINKER_OUTPUT,$$@) $$^ $$(LDFLAGS) $$(SUBSYSTEMFLAGS) $$(LDFLAGS_NODEFAULTLIB)
+	$$(LINK) $$(call LINKER_OUTPUT,$$@) $$^ $$(LDFLAGS) $$(SUBSYSTEMFLAGS) $$(LDFLAGS_NODEFAULTLIB) $$(call MAP_FLAG,$$@)
 ifdef STRIP
 	$$(STRIP) $$@
 endif
