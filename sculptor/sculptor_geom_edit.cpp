@@ -1123,13 +1123,56 @@ void GeometryEditor::draw_axis_indicator(ImDrawList* dl, float vp_max_x, float v
     }
 }
 
-void GeometryEditor::commit_hover_selection(Buffer& buffer, uint32_t num_elems, bool shift_pressed)
+static bool any_hovered(const Buffer& buffer, uint32_t num_elems)
+{
+    const uint8_t* const buf = buffer.get_ptr<uint8_t>();
+
+    for (uint32_t i = 0; i < num_elems; i++)
+        if (buf[i] & obj_hovered)
+            return true;
+
+    return false;
+}
+
+static bool all_selected(const Buffer& buffer, uint32_t num_elems)
+{
+    const uint8_t* const buf = buffer.get_ptr<uint8_t>();
+
+    for (uint32_t i = 0; i < num_elems; i++)
+        if ( ! (buf[i] & obj_selected))
+            return false;
+
+    return true;
+}
+
+static void select_all(Buffer& buffer, uint32_t num_elems)
+{
+    memset(buffer.get_ptr<uint8_t>(), obj_selected, num_elems);
+}
+
+static void clear_selection(Buffer& buffer, uint32_t num_elems)
+{
+    mstd::mem_zero(buffer.get_ptr<uint8_t>(), num_elems);
+}
+
+static void invert_selection(Buffer& buffer, uint32_t num_elems)
+{
+    constexpr uint64_t sel_mask = 0x0101'0101'0101'0101ull * obj_selected;
+
+    uint64_t* const buf64 = buffer.get_ptr<uint64_t>();
+
+    const uint32_t count = mstd::align_up(num_elems, 8u);
+    for (uint32_t i = 0; i < count; i++)
+        buf64[i] ^= sel_mask;
+}
+
+static void commit_hover_selection(Buffer& buffer, uint32_t num_elems, bool deselect)
 {
     uint8_t* const buf = buffer.get_ptr<uint8_t>();
 
     for (uint32_t i = 0; i < num_elems; i++) {
         if (buf[i] & obj_hovered) {
-            if (shift_pressed)
+            if (deselect)
                 buf[i] &= ~static_cast<uint8_t>(obj_selected);
             else
                 buf[i] |= obj_selected;
@@ -1317,18 +1360,31 @@ void GeometryEditor::handle_mouse_actions(const UserInput& input, bool view_hove
                 if (ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
                     release_mouse();
 
-                    if (toolbar_state.select.faces) {
-                        commit_hover_selection(view.res[image_idx].sel_host_buf,
-                                               patch_geometry.get_num_faces(),
-                                               shift);
-                        face_sel_dirty = true;
-                    }
+                    Resources&     res          = view.res[image_idx];
+                    const uint32_t num_faces    = patch_geometry.get_num_faces();
+                    const uint32_t num_vertices = patch_geometry.get_num_vertices();
 
-                    if (toolbar_state.select.vertices) {
-                        commit_hover_selection(view.res[image_idx].vtx_sel_host_buf,
-                                               patch_geometry.get_num_vertices(),
-                                               shift);
-                        vtx_sel_dirty = true;
+                    const bool faces_hovered    = toolbar_state.select.faces    && any_hovered(res.sel_host_buf,     num_faces);
+                    const bool vertices_hovered = toolbar_state.select.vertices && any_hovered(res.vtx_sel_host_buf, num_vertices);
+
+                    if ( ! faces_hovered && ! vertices_hovered && ! shift) {
+                        if (toolbar_state.select.faces) {
+                            clear_selection(res.sel_host_buf, num_faces);
+                            face_sel_dirty = true;
+                        }
+                        if (toolbar_state.select.vertices) {
+                            clear_selection(res.vtx_sel_host_buf, num_vertices);
+                            vtx_sel_dirty = true;
+                        }
+                    } else {
+                        if (toolbar_state.select.faces) {
+                            commit_hover_selection(res.sel_host_buf, num_faces, shift);
+                            face_sel_dirty = true;
+                        }
+                        if (toolbar_state.select.vertices) {
+                            commit_hover_selection(res.vtx_sel_host_buf, num_vertices, shift);
+                            vtx_sel_dirty = true;
+                        }
                     }
                 }
                 break;
@@ -1400,7 +1456,7 @@ void GeometryEditor::handle_mouse_actions(const UserInput& input, bool view_hove
     }
 }
 
-void GeometryEditor::handle_keyboard_actions()
+void GeometryEditor::handle_keyboard_actions(uint32_t image_idx)
 {
     Mode new_mode = mode;
 
@@ -1551,6 +1607,49 @@ void GeometryEditor::handle_keyboard_actions()
         mouse_action = Action::none;
         if (has_captured_mouse())
             release_mouse();
+    }
+
+    if (ImGui::IsKeyPressed(ImGuiKey_A) && mode == Mode::select) {
+        Resources&     res          = view.res[image_idx];
+        const uint32_t num_faces    = patch_geometry.get_num_faces();
+        const uint32_t num_vertices = patch_geometry.get_num_vertices();
+
+        const bool all_faces    = ! toolbar_state.select.faces    || all_selected(res.sel_host_buf,     num_faces);
+        const bool all_vertices = ! toolbar_state.select.vertices || all_selected(res.vtx_sel_host_buf, num_vertices);
+
+        if (all_faces && all_vertices) {
+            if (toolbar_state.select.faces) {
+                clear_selection(res.sel_host_buf, num_faces);
+                face_sel_dirty = true;
+            }
+            if (toolbar_state.select.vertices) {
+                clear_selection(res.vtx_sel_host_buf, num_vertices);
+                vtx_sel_dirty = true;
+            }
+        } else {
+            if (toolbar_state.select.faces) {
+                select_all(res.sel_host_buf, num_faces);
+                face_sel_dirty = true;
+            }
+            if (toolbar_state.select.vertices) {
+                select_all(res.vtx_sel_host_buf, num_vertices);
+                vtx_sel_dirty = true;
+            }
+        }
+    }
+
+    if (ImGui::IsKeyPressed(ImGuiKey_I) && IsCtrl() && mode == Mode::select) {
+        Resources&     res          = view.res[image_idx];
+        const uint32_t num_faces    = patch_geometry.get_num_faces();
+        const uint32_t num_vertices = patch_geometry.get_num_vertices();
+        if (toolbar_state.select.faces) {
+            invert_selection(res.sel_host_buf, num_faces);
+            face_sel_dirty = true;
+        }
+        if (toolbar_state.select.vertices) {
+            invert_selection(res.vtx_sel_host_buf, num_vertices);
+            vtx_sel_dirty = true;
+        }
     }
 
     switch_mode(new_mode);
@@ -1749,7 +1848,7 @@ void GeometryEditor::switch_mode(Mode new_mode)
 
 bool GeometryEditor::create_gui_frame(uint32_t image_idx, bool* need_realloc, const UserInput& input)
 {
-    handle_keyboard_actions();
+    handle_keyboard_actions(image_idx);
 
     char window_title[sizeof(object_name) + 36];
     snprintf(window_title, sizeof(window_title),

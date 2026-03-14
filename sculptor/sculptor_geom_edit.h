@@ -176,7 +176,7 @@ class GeometryEditor: public Editor {
         std::optional<vmath::vec3> read_mouse_world_pos(const View& src_view, uint32_t image_idx) const;
         std::optional<vmath::vec3> calc_grid_world_pos(const View& src_view) const;
         void handle_mouse_actions(const UserInput& input, bool view_hovered, uint32_t image_idx);
-        void handle_keyboard_actions();
+        void handle_keyboard_actions(uint32_t image_idx);
         void gui_status_bar();
         bool gui_toolbar();
         bool toolbar_button(ToolbarButton button, bool* checked = nullptr);
@@ -186,8 +186,6 @@ class GeometryEditor: public Editor {
         void select_vertices_from_faces(View& dst_view, uint32_t image_idx);
         // Applies interim rotation over pivot point to the camera
         Camera get_rotated_camera(const View& dst_view) const;
-
-        static void commit_hover_selection(Buffer& buf_member, uint32_t num_elems, bool shift_pressed);
 
         void set_frame_data(VkCommandBuffer cmdbuf, uint32_t image_idx);
         void set_patch_transforms(VkCommandBuffer cmdbuf, const View& dst_view, uint32_t image_idx);
