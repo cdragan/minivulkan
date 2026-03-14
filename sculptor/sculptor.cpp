@@ -22,7 +22,7 @@
 
 const char app_name[] = "Sculptor";
 
-float Sculptor::Editor::debug_color[4] = {1.0f, 0.5f, 0.0f, 1.0f};
+vmath::vec4 Sculptor::Editor::debug_color{0.5f, 0.5f, 0.5f, 1.0f};
 
 const int gui_config_flags = ImGuiConfigFlags_NavEnableKeyboard
                            | ImGuiConfigFlags_DockingEnable;
@@ -191,7 +191,7 @@ static bool create_gui_frame(uint32_t image_idx)
 
         ImGui::Separator();
 
-        ImGui::ColorPicker4("Debug Color", Sculptor::Editor::debug_color, ImGuiColorEditFlags_NoAlpha);
+        ImGui::ColorPicker4("Debug Color", &Sculptor::Editor::debug_color[0], ImGuiColorEditFlags_NoAlpha);
         ImGui::Text("Float: %.3f, %.3f, %.3f",
                     static_cast<double>(Sculptor::Editor::debug_color[0]),
                     static_cast<double>(Sculptor::Editor::debug_color[1]),

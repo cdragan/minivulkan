@@ -2279,20 +2279,20 @@ void GeometryEditor::set_frame_data(VkCommandBuffer cmdbuf, uint32_t image_idx)
     frame_data.pixel_dim = vmath::vec2(2.0f) / vmath::vec2(static_cast<float>(view.width),
                                                            static_cast<float>(view.height));
 
-    frame_data.color_face_base               = {0.5f,  0.5f,  0.5f,  1.0f};
-    frame_data.color_face_hovered            = {0.727f, 0.455f, 0.184f, 1.0f};
-    frame_data.color_face_hovered_selected   = {0.838f, 0.527f, 0.216f, 1.0f};
-    frame_data.color_face_selected           = {0.824f, 0.573f, 0.384f, 1.0f};
-    frame_data.color_edge                    = {0.93f, 0.93f, 0.93f, 1.0f};
-    frame_data.color_ctrl_pt                 = {0.7f,  0.7f,  0.7f,  1.0f};
-    frame_data.color_vertex_hovered          = {1.0f,  0.7f,  0.0f,  1.0f};
-    frame_data.color_vertex_hovered_selected = {1.0f, 1.0f,  0.3f,  1.0f};
-    frame_data.color_vertex_selected         = {0.898f, 0.748f, 0.186f, 1.0f};
+    frame_data.color_face_base               = { 0.500f, 0.500f, 0.500f, 1.0f };
+    frame_data.color_face_hovered            = { 0.727f, 0.455f, 0.184f, 1.0f };
+    frame_data.color_face_hovered_selected   = { 0.838f, 0.527f, 0.216f, 1.0f };
+    frame_data.color_face_selected           = { 0.824f, 0.573f, 0.384f, 1.0f };
+    frame_data.color_edge                    = { 0.722f, 0.722f, 0.722f, 1.0f };
+    frame_data.color_ctrl_pt                 = { 0.700f, 0.700f, 0.700f, 1.0f };
+    frame_data.color_vertex_hovered          = { 1.000f, 0.700f, 0.000f, 1.0f };
+    frame_data.color_vertex_hovered_selected = { 1.000f, 1.000f, 0.300f, 1.0f };
+    frame_data.color_vertex_selected         = { 0.898f, 0.748f, 0.186f, 1.0f };
 
-    frame_data.light_pos[0] = {-10.0f, 10.0f,  -5.0f, 0.0f};  // key: upper-left-front
-    frame_data.light_pos[1] = { 10.0f,  5.0f,  -5.0f, 0.0f};  // fill: right-front
-    frame_data.light_pos[2] = {  0.0f,  3.0f,  15.0f, 0.0f};  // back light
-    frame_data.light_pos[3] = {  0.0f, 15.0f,   0.0f, 0.0f};  // top light
+    frame_data.light_pos[0] = { -10.0f, 10.0f,  -5.0f, 0.0f };
+    frame_data.light_pos[1] = {  10.0f,  5.0f,  -5.0f, 0.0f };
+    frame_data.light_pos[2] = {   0.0f,  3.0f,  15.0f, 0.0f };
+    frame_data.light_pos[3] = {   0.0f, 15.0f,   0.0f, 0.0f };
 
     vkCmdUpdateBuffer(cmdbuf, view.res[image_idx].frame_data.get_buffer(), 0,
                       sizeof(frame_data), &frame_data);

@@ -44,7 +44,7 @@ class Editor {
 
         bool enabled = true;
 
-        static float debug_color[4];
+        static vmath::vec4 debug_color;
 
     protected:
         static vmath::vec2 get_rel_mouse_pos(const UserInput& input);
