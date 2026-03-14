@@ -173,17 +173,17 @@ class GeometryEditor: public Editor {
         bool create_materials();
         void set_material_buf(const MaterialInfo& mat_info, uint32_t mat_id);
         bool create_grid_buffer();
-        std::optional<vmath::vec3> read_mouse_world_pos(const View& src_view, uint32_t image_idx) const;
+        std::optional<vmath::vec3> read_mouse_world_pos() const;
         std::optional<vmath::vec3> calc_grid_world_pos(const View& src_view) const;
-        void handle_mouse_actions(const UserInput& input, bool view_hovered, uint32_t image_idx);
-        void handle_keyboard_actions(uint32_t image_idx);
+        void handle_mouse_actions(const UserInput& input, bool view_hovered);
+        void handle_keyboard_actions();
         void gui_status_bar();
-        bool gui_toolbar(uint32_t image_idx);
+        bool gui_toolbar();
         bool toolbar_button(ToolbarButton button, bool* checked = nullptr);
         void draw_axis_indicator(ImDrawList* dl, float vp_max_x, float vp_max_y) const;
         void switch_mode(Mode new_mode);
-        void apply_move(const UserInput& input, uint32_t image_idx);
-        void select_vertices_from_faces(View& dst_view, uint32_t image_idx);
+        void apply_move(const UserInput& input);
+        void select_vertices_from_faces();
         // Applies interim rotation over pivot point to the camera
         Camera get_rotated_camera(const View& dst_view) const;
 
@@ -200,10 +200,11 @@ class GeometryEditor: public Editor {
         bool render_control_points(VkCommandBuffer cmdbuf, View& dst_view, uint32_t image_idx);
         void finish_edit_mode();
         void cancel_edit_mode();
-        void undo(uint32_t image_idx);
-        void redo(uint32_t image_idx);
+        void undo();
+        void redo();
 
         View               view;
+        Resources*         cur_res          = nullptr; // Host resources used in this frame
         uint32_t           window_width     = 0;
         uint32_t           window_height    = 0;
         uint32_t           materials_stride = 0;

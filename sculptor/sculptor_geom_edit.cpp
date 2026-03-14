@@ -250,11 +250,11 @@ GeometryEditor::Camera GeometryEditor::get_rotated_camera(const View& dst_view) 
     return camera;
 }
 
-std::optional<vmath::vec3> GeometryEditor::read_mouse_world_pos(const View& src_view, uint32_t image_idx) const
+std::optional<vmath::vec3> GeometryEditor::read_mouse_world_pos() const
 {
     std::optional<vmath::vec3> ret;
 
-    const float* const hover = src_view.res[image_idx].hover_pos_host_buf.get_ptr<float>();
+    const float* const hover = cur_res->hover_pos_host_buf.get_ptr<float>();
 
     if (hover[3] > 0.5f)
         ret = vmath::vec3{hover[0], hover[1], hover[2]};
@@ -1180,7 +1180,7 @@ static void commit_hover_selection(Buffer& buffer, uint32_t num_elems, bool dese
     }
 }
 
-void GeometryEditor::handle_mouse_actions(const UserInput& input, bool view_hovered, uint32_t image_idx)
+void GeometryEditor::handle_mouse_actions(const UserInput& input, bool view_hovered)
 {
     const bool mouse_moved = input.mouse_pos_delta.x != 0 || input.mouse_pos_delta.y != 0;
 
@@ -1205,7 +1205,7 @@ void GeometryEditor::handle_mouse_actions(const UserInput& input, bool view_hove
                 // otherwise (no geometry under the cursor) just pan immediately.  This allows the user
                 // to unselect faces with shift+click even if the cursor moves slightly during the click.
                 constexpr float pan_threshold = 5.0f;
-                const float* const hover = view.res[image_idx].hover_pos_host_buf.get_ptr<float>();
+                const float* const hover = cur_res->hover_pos_host_buf.get_ptr<float>();
                 const bool over_geometry = hover[3] > 0.5f;
                 if (over_geometry) {
                     pan_accum += std::abs(input.mouse_pos_delta.x) + std::abs(input.mouse_pos_delta.y);
@@ -1229,7 +1229,7 @@ void GeometryEditor::handle_mouse_actions(const UserInput& input, bool view_hove
             if (mouse_action == Action::execute) {
                 patch_geometry.snapshot_state();
 
-                select_vertices_from_faces(view, image_idx);
+                select_vertices_from_faces();
             }
         }
     }
@@ -1360,29 +1360,28 @@ void GeometryEditor::handle_mouse_actions(const UserInput& input, bool view_hove
                 if (ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
                     release_mouse();
 
-                    Resources&     res          = view.res[image_idx];
                     const uint32_t num_faces    = patch_geometry.get_num_faces();
                     const uint32_t num_vertices = patch_geometry.get_num_vertices();
 
-                    const bool faces_hovered    = toolbar_state.select.faces    && any_hovered(res.sel_host_buf,     num_faces);
-                    const bool vertices_hovered = toolbar_state.select.vertices && any_hovered(res.vtx_sel_host_buf, num_vertices);
+                    const bool faces_hovered    = toolbar_state.select.faces    && any_hovered(cur_res->sel_host_buf,     num_faces);
+                    const bool vertices_hovered = toolbar_state.select.vertices && any_hovered(cur_res->vtx_sel_host_buf, num_vertices);
 
                     if ( ! faces_hovered && ! vertices_hovered && ! shift) {
                         if (toolbar_state.select.faces) {
-                            clear_selection(res.sel_host_buf, num_faces);
+                            clear_selection(cur_res->sel_host_buf, num_faces);
                             face_sel_dirty = true;
                         }
                         if (toolbar_state.select.vertices) {
-                            clear_selection(res.vtx_sel_host_buf, num_vertices);
+                            clear_selection(cur_res->vtx_sel_host_buf, num_vertices);
                             vtx_sel_dirty = true;
                         }
                     } else {
                         if (toolbar_state.select.faces) {
-                            commit_hover_selection(res.sel_host_buf, num_faces, shift);
+                            commit_hover_selection(cur_res->sel_host_buf, num_faces, shift);
                             face_sel_dirty = true;
                         }
                         if (toolbar_state.select.vertices) {
-                            commit_hover_selection(res.vtx_sel_host_buf, num_vertices, shift);
+                            commit_hover_selection(cur_res->vtx_sel_host_buf, num_vertices, shift);
                             vtx_sel_dirty = true;
                         }
                     }
@@ -1393,7 +1392,7 @@ void GeometryEditor::handle_mouse_actions(const UserInput& input, bool view_hove
                 if (mouse_moved) {
                     switch (mode) {
                         case Mode::move:
-                            apply_move(input, image_idx);
+                            apply_move(input);
                             break;
 
                         default:
@@ -1456,7 +1455,7 @@ void GeometryEditor::handle_mouse_actions(const UserInput& input, bool view_hove
     }
 }
 
-void GeometryEditor::handle_keyboard_actions(uint32_t image_idx)
+void GeometryEditor::handle_keyboard_actions()
 {
     Mode new_mode = mode;
 
@@ -1473,12 +1472,12 @@ void GeometryEditor::handle_keyboard_actions(uint32_t image_idx)
     };
 
     if (ImGui::IsKeyPressed(ImGuiKey_Z) && IsCtrl()) {
-        undo(image_idx);
+        undo();
     }
 
     if (ImGui::IsKeyPressed(ImGuiKey_Z) && IsCtrl() &&
         (ImGui::IsKeyDown(ImGuiKey_LeftShift) || ImGui::IsKeyDown(ImGuiKey_RightShift))) {
-        redo(image_idx);
+        redo();
     }
 
     if (ImGui::IsKeyPressed(ImGuiKey_C) && IsCtrl()) {
@@ -1500,7 +1499,7 @@ void GeometryEditor::handle_keyboard_actions(uint32_t image_idx)
         new_mode = Mode::select;
 
         if ( ! toolbar_state.select.vertices) {
-            clear_selection(view.res[image_idx].vtx_sel_host_buf, patch_geometry.get_num_vertices());
+            clear_selection(cur_res->vtx_sel_host_buf, patch_geometry.get_num_vertices());
             vtx_sel_dirty = true;
         }
     }
@@ -1519,7 +1518,7 @@ void GeometryEditor::handle_keyboard_actions(uint32_t image_idx)
         new_mode = Mode::select;
 
         if ( ! toolbar_state.select.faces) {
-            clear_selection(view.res[image_idx].sel_host_buf, patch_geometry.get_num_faces());
+            clear_selection(cur_res->sel_host_buf, patch_geometry.get_num_faces());
             face_sel_dirty = true;
         }
     }
@@ -1614,44 +1613,42 @@ void GeometryEditor::handle_keyboard_actions(uint32_t image_idx)
     }
 
     if (ImGui::IsKeyPressed(ImGuiKey_A) && mode == Mode::select) {
-        Resources&     res          = view.res[image_idx];
         const uint32_t num_faces    = patch_geometry.get_num_faces();
         const uint32_t num_vertices = patch_geometry.get_num_vertices();
 
-        const bool all_faces    = ! toolbar_state.select.faces    || all_selected(res.sel_host_buf,     num_faces);
-        const bool all_vertices = ! toolbar_state.select.vertices || all_selected(res.vtx_sel_host_buf, num_vertices);
+        const bool all_faces    = ! toolbar_state.select.faces    || all_selected(cur_res->sel_host_buf,     num_faces);
+        const bool all_vertices = ! toolbar_state.select.vertices || all_selected(cur_res->vtx_sel_host_buf, num_vertices);
 
         if (all_faces && all_vertices) {
             if (toolbar_state.select.faces) {
-                clear_selection(res.sel_host_buf, num_faces);
+                clear_selection(cur_res->sel_host_buf, num_faces);
                 face_sel_dirty = true;
             }
             if (toolbar_state.select.vertices) {
-                clear_selection(res.vtx_sel_host_buf, num_vertices);
+                clear_selection(cur_res->vtx_sel_host_buf, num_vertices);
                 vtx_sel_dirty = true;
             }
         } else {
             if (toolbar_state.select.faces) {
-                select_all(res.sel_host_buf, num_faces);
+                select_all(cur_res->sel_host_buf, num_faces);
                 face_sel_dirty = true;
             }
             if (toolbar_state.select.vertices) {
-                select_all(res.vtx_sel_host_buf, num_vertices);
+                select_all(cur_res->vtx_sel_host_buf, num_vertices);
                 vtx_sel_dirty = true;
             }
         }
     }
 
     if (ImGui::IsKeyPressed(ImGuiKey_I) && IsCtrl() && mode == Mode::select) {
-        Resources&     res          = view.res[image_idx];
         const uint32_t num_faces    = patch_geometry.get_num_faces();
         const uint32_t num_vertices = patch_geometry.get_num_vertices();
         if (toolbar_state.select.faces) {
-            invert_selection(res.sel_host_buf, num_faces);
+            invert_selection(cur_res->sel_host_buf, num_faces);
             face_sel_dirty = true;
         }
         if (toolbar_state.select.vertices) {
-            invert_selection(res.vtx_sel_host_buf, num_vertices);
+            invert_selection(cur_res->vtx_sel_host_buf, num_vertices);
             vtx_sel_dirty = true;
         }
     }
@@ -1659,7 +1656,7 @@ void GeometryEditor::handle_keyboard_actions(uint32_t image_idx)
     switch_mode(new_mode);
 }
 
-bool GeometryEditor::gui_toolbar(uint32_t image_idx)
+bool GeometryEditor::gui_toolbar()
 {
     // Skip if it's not loaded yet
     if ( ! toolbar_texture)
@@ -1675,11 +1672,11 @@ bool GeometryEditor::gui_toolbar(uint32_t image_idx)
     }
 
     if (toolbar_button(ToolbarButton::undo)) {
-        undo(image_idx);
+        undo();
     }
 
     if (toolbar_button(ToolbarButton::redo)) {
-        redo(image_idx);
+        redo();
     }
 
     if (toolbar_button(ToolbarButton::copy)) {
@@ -1699,7 +1696,7 @@ bool GeometryEditor::gui_toolbar(uint32_t image_idx)
             saved_select = toolbar_state.select;
         new_mode = Mode::select;
         if ( ! toolbar_state.select.vertices) {
-            clear_selection(view.res[image_idx].vtx_sel_host_buf, patch_geometry.get_num_vertices());
+            clear_selection(cur_res->vtx_sel_host_buf, patch_geometry.get_num_vertices());
             vtx_sel_dirty = true;
         }
     }
@@ -1718,14 +1715,14 @@ bool GeometryEditor::gui_toolbar(uint32_t image_idx)
         new_mode = Mode::select;
 
         if ( ! toolbar_state.select.faces) {
-            clear_selection(view.res[image_idx].sel_host_buf, patch_geometry.get_num_faces());
+            clear_selection(cur_res->sel_host_buf, patch_geometry.get_num_faces());
             face_sel_dirty = true;
         }
     }
 
     if (toolbar_button(ToolbarButton::sel_clear)) {
-        clear_selection(view.res[image_idx].sel_host_buf, patch_geometry.get_num_faces());
-        clear_selection(view.res[image_idx].vtx_sel_host_buf, patch_geometry.get_num_vertices());
+        clear_selection(cur_res->sel_host_buf, patch_geometry.get_num_faces());
+        clear_selection(cur_res->vtx_sel_host_buf, patch_geometry.get_num_vertices());
         face_sel_dirty = true;
         vtx_sel_dirty  = true;
     }
@@ -1858,7 +1855,10 @@ void GeometryEditor::switch_mode(Mode new_mode)
 
 bool GeometryEditor::create_gui_frame(uint32_t image_idx, bool* need_realloc, const UserInput& input)
 {
-    handle_keyboard_actions(image_idx);
+    cur_res = &view.res[image_idx];
+    DEFER { cur_res = nullptr; };
+
+    handle_keyboard_actions();
 
     char window_title[sizeof(object_name) + 36];
     snprintf(window_title, sizeof(window_title),
@@ -1899,7 +1899,7 @@ bool GeometryEditor::create_gui_frame(uint32_t image_idx, bool* need_realloc, co
 
     {
         ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2{0, 0});
-        ImGui::Image(make_texture_id(view.res[image_idx].gui_texture),
+        ImGui::Image(make_texture_id(cur_res->gui_texture),
                      image_size);
         ImGui::PopStyleVar();
     }
@@ -1913,12 +1913,12 @@ bool GeometryEditor::create_gui_frame(uint32_t image_idx, bool* need_realloc, co
 
     // Read mouse position from geometry feedback
     view.mouse_world_pos = std::nullopt;
-    if (view.res[image_idx].hover_pos_host_buf.allocated())
-        view.mouse_world_pos = read_mouse_world_pos(view, image_idx);
+    if (cur_res->hover_pos_host_buf.allocated())
+        view.mouse_world_pos = read_mouse_world_pos();
     if ( ! view.mouse_world_pos)
         view.mouse_world_pos = calc_grid_world_pos(view);
 
-    handle_mouse_actions(local_input, ImGui::IsItemHovered(), image_idx);
+    handle_mouse_actions(local_input, ImGui::IsItemHovered());
 
     {
         ImDrawList* const dl = ImGui::GetWindowDrawList();
@@ -1937,7 +1937,7 @@ bool GeometryEditor::create_gui_frame(uint32_t image_idx, bool* need_realloc, co
 
     const ImVec2 status_bar_pos = ImGui::GetCursorPos();
 
-    if ( ! gui_toolbar(image_idx))
+    if ( ! gui_toolbar())
         return false;
 
     const ImVec2 mask_pos{image_pos.x, ImGui::GetCursorPos().y};
@@ -3206,7 +3206,7 @@ bool GeometryEditor::render_control_points(VkCommandBuffer cmdbuf,
     return true;
 }
 
-void GeometryEditor::apply_move(const UserInput& input, uint32_t image_idx)
+void GeometryEditor::apply_move(const UserInput& input)
 {
     patch_geometry.apply_snapshot();
 
@@ -3285,16 +3285,14 @@ void GeometryEditor::apply_move(const UserInput& input, uint32_t image_idx)
     patch_geometry.set_dirty();
 }
 
-void GeometryEditor::select_vertices_from_faces(View& dst_view, uint32_t image_idx)
+void GeometryEditor::select_vertices_from_faces()
 {
     memset(selected_vertices, 0, sizeof selected_vertices);
 
-    Resources& res = dst_view.res[image_idx];
-
     const uint32_t       num_vertices = patch_geometry.get_num_vertices();
     const uint32_t       num_faces    = patch_geometry.get_num_faces();
-    uint8_t* const       vtx_sel      = res.vtx_sel_host_buf.get_ptr<uint8_t>();
-    const uint8_t* const face_sel     = res.sel_host_buf.get_ptr<uint8_t>();
+    uint8_t* const       vtx_sel      = cur_res->vtx_sel_host_buf.get_ptr<uint8_t>();
+    const uint8_t* const face_sel     = cur_res->sel_host_buf.get_ptr<uint8_t>();
 
     for (uint32_t i_face = 0; i_face < num_faces; i_face++) {
         if ( ! (face_sel[i_face] & obj_selected))
@@ -3341,7 +3339,7 @@ void GeometryEditor::cancel_edit_mode()
     }
 }
 
-void GeometryEditor::undo(uint32_t image_idx)
+void GeometryEditor::undo()
 {
     if (has_captured_mouse())
         release_mouse();
@@ -3349,15 +3347,14 @@ void GeometryEditor::undo(uint32_t image_idx)
     switch_mode(Mode::select);
 
     if (patch_geometry.undo()) {
-        Resources& res = view.res[image_idx];
-        clear_selection(res.sel_host_buf,     patch_geometry.get_num_faces());
-        clear_selection(res.vtx_sel_host_buf, patch_geometry.get_num_vertices());
+        clear_selection(cur_res->sel_host_buf,     patch_geometry.get_num_faces());
+        clear_selection(cur_res->vtx_sel_host_buf, patch_geometry.get_num_vertices());
         face_sel_dirty = true;
         vtx_sel_dirty  = true;
     }
 }
 
-void GeometryEditor::redo(uint32_t image_idx)
+void GeometryEditor::redo()
 {
     if (has_captured_mouse())
         release_mouse();
@@ -3365,9 +3362,8 @@ void GeometryEditor::redo(uint32_t image_idx)
     switch_mode(Mode::select);
 
     if (patch_geometry.redo()) {
-        Resources& res = view.res[image_idx];
-        clear_selection(res.sel_host_buf,     patch_geometry.get_num_faces());
-        clear_selection(res.vtx_sel_host_buf, patch_geometry.get_num_vertices());
+        clear_selection(cur_res->sel_host_buf,     patch_geometry.get_num_faces());
+        clear_selection(cur_res->vtx_sel_host_buf, patch_geometry.get_num_vertices());
         face_sel_dirty = true;
         vtx_sel_dirty  = true;
     }
