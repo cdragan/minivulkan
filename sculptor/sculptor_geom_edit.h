@@ -178,7 +178,7 @@ class GeometryEditor: public Editor {
         void handle_mouse_actions(const UserInput& input, bool view_hovered, uint32_t image_idx);
         void handle_keyboard_actions(uint32_t image_idx);
         void gui_status_bar();
-        bool gui_toolbar();
+        bool gui_toolbar(uint32_t image_idx);
         bool toolbar_button(ToolbarButton button, bool* checked = nullptr);
         void draw_axis_indicator(ImDrawList* dl, float vp_max_x, float vp_max_y) const;
         void switch_mode(Mode new_mode);
@@ -200,8 +200,8 @@ class GeometryEditor: public Editor {
         bool render_control_points(VkCommandBuffer cmdbuf, View& dst_view, uint32_t image_idx);
         void finish_edit_mode();
         void cancel_edit_mode();
-        void undo();
-        void redo();
+        void undo(uint32_t image_idx);
+        void redo(uint32_t image_idx);
 
         View               view;
         uint32_t           window_width     = 0;
@@ -232,8 +232,6 @@ class GeometryEditor: public Editor {
         Buffer             grid_buf;
         ToolbarState       toolbar_state     = { };
         SelectState        saved_select      = { };
-        bool               clear_face_sel    = true;
-        bool               clear_vtx_sel     = true;
         bool               face_sel_dirty    = false;
         bool               vtx_sel_dirty     = false;
         Mode               mode              = Mode::select;

@@ -1473,12 +1473,12 @@ void GeometryEditor::handle_keyboard_actions(uint32_t image_idx)
     };
 
     if (ImGui::IsKeyPressed(ImGuiKey_Z) && IsCtrl()) {
-        undo();
+        undo(image_idx);
     }
 
     if (ImGui::IsKeyPressed(ImGuiKey_Z) && IsCtrl() &&
         (ImGui::IsKeyDown(ImGuiKey_LeftShift) || ImGui::IsKeyDown(ImGuiKey_RightShift))) {
-        redo();
+        redo(image_idx);
     }
 
     if (ImGui::IsKeyPressed(ImGuiKey_C) && IsCtrl()) {
@@ -1499,8 +1499,10 @@ void GeometryEditor::handle_keyboard_actions(uint32_t image_idx)
             saved_select = toolbar_state.select;
         new_mode = Mode::select;
 
-        if ( ! toolbar_state.select.vertices)
-            clear_vtx_sel = true;
+        if ( ! toolbar_state.select.vertices) {
+            clear_selection(view.res[image_idx].vtx_sel_host_buf, patch_geometry.get_num_vertices());
+            vtx_sel_dirty = true;
+        }
     }
 
     if (ImGui::IsKeyPressed(ImGuiKey_2)) {
@@ -1516,8 +1518,10 @@ void GeometryEditor::handle_keyboard_actions(uint32_t image_idx)
             saved_select = toolbar_state.select;
         new_mode = Mode::select;
 
-        if ( ! toolbar_state.select.faces)
-            clear_face_sel = true;
+        if ( ! toolbar_state.select.faces) {
+            clear_selection(view.res[image_idx].sel_host_buf, patch_geometry.get_num_faces());
+            face_sel_dirty = true;
+        }
     }
 
     if (ImGui::IsKeyPressed(ImGuiKey_5)) {
@@ -1655,7 +1659,7 @@ void GeometryEditor::handle_keyboard_actions(uint32_t image_idx)
     switch_mode(new_mode);
 }
 
-bool GeometryEditor::gui_toolbar()
+bool GeometryEditor::gui_toolbar(uint32_t image_idx)
 {
     // Skip if it's not loaded yet
     if ( ! toolbar_texture)
@@ -1671,11 +1675,11 @@ bool GeometryEditor::gui_toolbar()
     }
 
     if (toolbar_button(ToolbarButton::undo)) {
-        undo();
+        undo(image_idx);
     }
 
     if (toolbar_button(ToolbarButton::redo)) {
-        redo();
+        redo(image_idx);
     }
 
     if (toolbar_button(ToolbarButton::copy)) {
@@ -1694,8 +1698,10 @@ bool GeometryEditor::gui_toolbar()
         if (mode != Mode::select)
             saved_select = toolbar_state.select;
         new_mode = Mode::select;
-        if ( ! toolbar_state.select.vertices)
-            clear_vtx_sel = true;
+        if ( ! toolbar_state.select.vertices) {
+            clear_selection(view.res[image_idx].vtx_sel_host_buf, patch_geometry.get_num_vertices());
+            vtx_sel_dirty = true;
+        }
     }
 
     /* TODO for now edge selection is not implemented
@@ -1711,13 +1717,17 @@ bool GeometryEditor::gui_toolbar()
             saved_select = toolbar_state.select;
         new_mode = Mode::select;
 
-        if ( ! toolbar_state.select.faces)
-            clear_face_sel = true;
+        if ( ! toolbar_state.select.faces) {
+            clear_selection(view.res[image_idx].sel_host_buf, patch_geometry.get_num_faces());
+            face_sel_dirty = true;
+        }
     }
 
     if (toolbar_button(ToolbarButton::sel_clear)) {
-        clear_face_sel = true;
-        clear_vtx_sel  = true;
+        clear_selection(view.res[image_idx].sel_host_buf, patch_geometry.get_num_faces());
+        clear_selection(view.res[image_idx].vtx_sel_host_buf, patch_geometry.get_num_vertices());
+        face_sel_dirty = true;
+        vtx_sel_dirty  = true;
     }
 
     if (toolbar_button(ToolbarButton::view_perspective, &toolbar_state.view_perspective)) {
@@ -1927,7 +1937,7 @@ bool GeometryEditor::create_gui_frame(uint32_t image_idx, bool* need_realloc, co
 
     const ImVec2 status_bar_pos = ImGui::GetCursorPos();
 
-    if ( ! gui_toolbar())
+    if ( ! gui_toolbar(image_idx))
         return false;
 
     const ImVec2 mask_pos{image_pos.x, ImGui::GetCursorPos().y};
@@ -2445,22 +2455,14 @@ bool GeometryEditor::setup_selection(VkCommandBuffer cmdbuf, uint32_t image_idx)
 
     send_barrier(cmdbuf);
 
-    if (clear_face_sel) {
-        vkCmdFillBuffer(cmdbuf, sel_buf.get_buffer(), 0, VK_WHOLE_SIZE, 0);
-        clear_face_sel = false;
-        face_sel_dirty = false;
-    } else if (face_sel_dirty) {
+    if (face_sel_dirty) {
         static const VkBufferCopy sel_copy_region = { 0, 0, max_objects };
         vkCmdCopyBuffer(cmdbuf, res.sel_host_buf.get_buffer(), sel_buf.get_buffer(),
                         1, &sel_copy_region);
         face_sel_dirty = false;
     }
 
-    if (clear_vtx_sel) {
-        vkCmdFillBuffer(cmdbuf, vtx_sel_buf.get_buffer(), 0, VK_WHOLE_SIZE, 0);
-        clear_vtx_sel = false;
-        vtx_sel_dirty = false;
-    } else if (vtx_sel_dirty) {
+    if (vtx_sel_dirty) {
         static const VkBufferCopy vtx_sel_copy_region = { 0, 0, max_objects };
         vkCmdCopyBuffer(cmdbuf, res.vtx_sel_host_buf.get_buffer(), vtx_sel_buf.get_buffer(),
                         1, &vtx_sel_copy_region);
@@ -3339,7 +3341,7 @@ void GeometryEditor::cancel_edit_mode()
     }
 }
 
-void GeometryEditor::undo()
+void GeometryEditor::undo(uint32_t image_idx)
 {
     if (has_captured_mouse())
         release_mouse();
@@ -3347,12 +3349,15 @@ void GeometryEditor::undo()
     switch_mode(Mode::select);
 
     if (patch_geometry.undo()) {
-        clear_face_sel = true;
-        clear_vtx_sel  = true;
+        Resources& res = view.res[image_idx];
+        clear_selection(res.sel_host_buf,     patch_geometry.get_num_faces());
+        clear_selection(res.vtx_sel_host_buf, patch_geometry.get_num_vertices());
+        face_sel_dirty = true;
+        vtx_sel_dirty  = true;
     }
 }
 
-void GeometryEditor::redo()
+void GeometryEditor::redo(uint32_t image_idx)
 {
     if (has_captured_mouse())
         release_mouse();
@@ -3360,8 +3365,11 @@ void GeometryEditor::redo()
     switch_mode(Mode::select);
 
     if (patch_geometry.redo()) {
-        clear_face_sel = true;
-        clear_vtx_sel  = true;
+        Resources& res = view.res[image_idx];
+        clear_selection(res.sel_host_buf,     patch_geometry.get_num_faces());
+        clear_selection(res.vtx_sel_host_buf, patch_geometry.get_num_vertices());
+        face_sel_dirty = true;
+        vtx_sel_dirty  = true;
     }
 }
 
