@@ -56,7 +56,7 @@ User input
 - Select
     - Drag rectangle to select
     - Additive/subtractive selection
-    - 1: vertices, 2: edges, 3: faces
+    - 1: vertices, 2: faces
     - Shift+1/2/3: enable selection of multiple types of items (vertices, edges, faces)
     - Shift: select multiple items, one by one
 - Manipulation
@@ -111,9 +111,8 @@ Toolbar in Object Editor
     - Cut                       Cmd+X
 - Select
     - Vertices                  1
-    - Edges                     2
-    - Faces                     3
-    - Clear selection           ???
+    - Faces                     2
+    - Clear selection           no key (but A either selects all or deselects all if all already selected)
 - Viewport
     - Perspective view          5
     - Orthographic view Z       6 (toggle front/back)
@@ -1706,14 +1705,6 @@ bool GeometryEditor::gui_toolbar()
         }
     }
 
-    /* TODO for now edge selection is not implemented
-    if (toolbar_button(ToolbarButton::sel_edges, &toolbar_state.select.edges)) {
-        if (mode != Mode::select)
-            saved_select = toolbar_state.select;
-        new_mode = Mode::select;
-    }
-    */
-
     if (toolbar_button(ToolbarButton::sel_faces, &toolbar_state.select.faces)) {
         if (mode != Mode::select)
             saved_select = toolbar_state.select;
@@ -1827,7 +1818,7 @@ void GeometryEditor::switch_mode(Mode new_mode)
             mouse_action = Action::none;
         }
 
-        toolbar_state.select  = { false, false, false };
+        toolbar_state.select  = { false, false };
         toolbar_state.move    = false;
         toolbar_state.rotate  = false;
         toolbar_state.scale   = false;
@@ -1860,7 +1851,7 @@ void GeometryEditor::switch_mode(Mode new_mode)
     }
 
     // At least one thing is always selectable
-    if ((mode == Mode::select) && ! toolbar_state.select.vertices && ! toolbar_state.select.edges)
+    if (mode == Mode::select && ! toolbar_state.select.vertices && ! toolbar_state.select.faces)
         toolbar_state.select.faces = true;
 }
 
@@ -2875,7 +2866,7 @@ bool GeometryEditor::render_geometry(VkCommandBuffer cmdbuf,
     push_descriptor(cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, Sculptor::material_layout,
                     2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, buffer_info);
 
-    // TODO refactor drawing and selecting edges and vertices
+    // TODO update this function's name
     patch_geometry.write_edge_indices_descriptor(&buffer_info);
 
     push_descriptor(cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, Sculptor::material_layout,

@@ -39,8 +39,8 @@ class GeometryEditor: public Editor {
             X(paste,            0, CTRL_KEY " V",          "Paste")                       \
             X(cut,              0, CTRL_KEY " X",          "Cut")                         \
             X(sel_vertices,     1, "1",                    "Select vertices")             \
-            X(sel_edges,        0, "2",                    "Select edges")                \
-            X(sel_faces,        0, "3",                    "Select faces")                \
+            X(sel_edges,        0, "",                     "Select edges")                \
+            X(sel_faces,        0, "2",                    "Select faces")                \
             X(sel_clear,        0, "",                     "Clear selection")             \
             X(view_perspective, 1, "5",                    "Perspective view")            \
             X(view_ortho_z,     0, "6",                    "Orthographic view in Z axis") \
@@ -120,7 +120,6 @@ class GeometryEditor: public Editor {
 
         struct SelectState {
             bool vertices;
-            bool edges;
             bool faces;
         };
 
