@@ -233,7 +233,6 @@ class GeometryEditor: public Editor {
         VkPipeline         clear_hover_pipe       = VK_NULL_HANDLE;
 
         Sculptor::Geometry patch_geometry;
-        uint32_t           selected_vertices[0x10000 / 32];
         Buffer             materials_buf;
         Buffer             grid_buf;
         ToolbarState       toolbar_state     = { };

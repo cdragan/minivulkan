@@ -317,6 +317,38 @@ void Sculptor::Geometry::invalidate_selection()
     num_sel_vertices = 0;
 }
 
+void Sculptor::Geometry::move_selection(const vmath::vec3 delta)
+{
+    SubAllocator<1> alloc;
+    alloc.init(scratch_buf_size);
+
+    const uint32_t num_slots = mstd::align_up(num_vertices, 32u);
+    uint32_t* const moved = alloc_scratch<uint32_t>(alloc, num_slots);
+    memset(moved, 0, num_slots * sizeof(uint32_t));
+
+    const auto apply_vertex_move = [&](const uint32_t i_vtx) {
+        const uint32_t bitmask = 1u << (i_vtx & 31u);
+
+        if ( ! (moved[i_vtx >> 5] & bitmask)) {
+            moved[i_vtx >> 5] |= bitmask;
+            move_vertex(i_vtx, delta.x, delta.y, delta.z);
+        }
+    };
+
+    for (uint32_t i_face = 0; i_face < num_sel_faces; i_face++) {
+        uint32_t vtx_list[16];
+        get_face_vertex_indices(sel_faces[i_face], vtx_list);
+
+        for (uint32_t i_vtx = 0; i_vtx < std::size(vtx_list); i_vtx++)
+            apply_vertex_move(vtx_list[i_vtx]);
+    }
+
+    for (uint32_t i = 0; i < num_sel_vertices; i++)
+        apply_vertex_move(sel_vertices[i]);
+
+    set_dirty();
+}
+
 void Sculptor::Geometry::extrude_faces(const uint8_t* const face_sel,
                                        vmath::vec3    const delta,
                                        MoveMode       const mode)

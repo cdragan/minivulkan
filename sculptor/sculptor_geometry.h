@@ -80,6 +80,8 @@ class Geometry {
         void     get_face_vertex_indices(uint32_t face_id, uint32_t out_vtx[16]) const;
 
         enum class MoveMode { along_delta, along_normal };
+
+        void     move_selection(vmath::vec3 delta);
         void     extrude_faces(const uint8_t* face_sel,
                                vmath::vec3    delta,
                                MoveMode       mode = MoveMode::along_delta);

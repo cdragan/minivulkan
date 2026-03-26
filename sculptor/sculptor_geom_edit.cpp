@@ -1232,11 +1232,8 @@ void GeometryEditor::handle_mouse_actions(const UserInput& input, bool view_hove
             mouse_action_init = input.abs_mouse_pos;
             mouse_action_pos  = view.mouse_world_pos;
 
-            if (mouse_action == Action::execute) {
+            if (mouse_action == Action::execute)
                 patch_geometry.snapshot_state();
-
-                select_vertices_from_faces();
-            }
         }
     }
 
@@ -3314,30 +3311,11 @@ vmath::vec3 GeometryEditor::compute_move_delta(const UserInput& input) const
     return delta;
 }
 
-void GeometryEditor::move_selected_vertices(const vmath::vec3& delta)
-{
-    const uint32_t num_vertices = patch_geometry.get_num_vertices();
-    const uint32_t num_slots    = mstd::align_up(num_vertices, 32u);
-
-    for (uint32_t i_slot = 0; i_slot < num_slots; i_slot++) {
-        const uint32_t slot = selected_vertices[i_slot];
-        if ( ! slot)
-            continue;
-
-        for (uint32_t i = 0; i < 32; i++) {
-            if ( ! (slot & (1u << i)))
-                continue;
-
-            patch_geometry.move_vertex((i_slot << 5) + i, delta.x, delta.y, delta.z);
-        }
-    }
-}
 
 void GeometryEditor::apply_move(const UserInput& input)
 {
     patch_geometry.apply_snapshot();
-    move_selected_vertices(compute_move_delta(input));
-    patch_geometry.set_dirty();
+    patch_geometry.move_selection(compute_move_delta(input));
 }
 
 void GeometryEditor::apply_extrude(const UserInput& input)
@@ -3361,43 +3339,6 @@ void GeometryEditor::apply_extrude(const UserInput& input)
     patch_geometry.set_dirty();
 }
 
-void GeometryEditor::select_vertices_from_faces()
-{
-    memset(selected_vertices, 0, sizeof selected_vertices);
-
-    const uint32_t       num_vertices = patch_geometry.get_num_vertices();
-    const uint32_t       num_faces    = patch_geometry.get_num_faces();
-    uint8_t* const       vtx_sel      = cur_res->vtx_sel_host_buf.get_ptr<uint8_t>();
-    const uint8_t* const face_sel     = cur_res->sel_host_buf.get_ptr<uint8_t>();
-
-    for (uint32_t i_face = 0; i_face < num_faces; i_face++) {
-        if ( ! (face_sel[i_face] & obj_selected))
-            continue;
-
-        uint32_t face_vtx[16];
-        patch_geometry.get_face_vertex_indices(i_face, face_vtx);
-
-        for (uint32_t j = 0; j < 16; j++) {
-            const uint32_t i_vtx = face_vtx[j];
-            assert(i_vtx < num_vertices);
-
-            const uint32_t slot_idx = i_vtx >> 5;
-            const uint32_t bitmask  = 1u << (i_vtx & 0x1Fu);
-            assert(slot_idx < std::size(selected_vertices));
-            selected_vertices[slot_idx] |= bitmask;
-        }
-    }
-
-    for (uint32_t i_vtx = 0; i_vtx < num_vertices; i_vtx++) {
-        if ( ! (vtx_sel[i_vtx] & obj_selected))
-            continue;
-
-        const uint32_t slot_idx = i_vtx >> 5;
-        const uint32_t bitmask  = 1u << (i_vtx & 0x1Fu);
-        assert(slot_idx < std::size(selected_vertices));
-        selected_vertices[slot_idx] |= bitmask;
-    }
-}
 
 void GeometryEditor::finish_edit_mode()
 {
