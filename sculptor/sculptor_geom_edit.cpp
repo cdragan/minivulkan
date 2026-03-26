@@ -1571,6 +1571,10 @@ void GeometryEditor::handle_keyboard_actions()
             (ImGui::IsKeyDown(ImGuiKey_LeftAlt) || ImGui::IsKeyDown(ImGuiKey_RightAlt)))
         toolbar_state.toggle_wireframe = ! toolbar_state.toggle_wireframe;
 
+    if (ImGui::IsKeyPressed(ImGuiKey_N) &&
+            (ImGui::IsKeyDown(ImGuiKey_LeftAlt) || ImGui::IsKeyDown(ImGuiKey_RightAlt)))
+        toolbar_state.snap_normals = ! toolbar_state.snap_normals;
+
     if (ImGui::IsKeyPressed(ImGuiKey_X))
         toolbar_state.snap_x = ! toolbar_state.snap_x;
 
@@ -1759,6 +1763,8 @@ bool GeometryEditor::gui_toolbar()
     toolbar_button(ToolbarButton::toggle_tessell, &toolbar_state.toggle_tessellation);
 
     toolbar_button(ToolbarButton::toggle_wireframe, &toolbar_state.toggle_wireframe);
+
+    toolbar_button(ToolbarButton::snap_normals, &toolbar_state.snap_normals);
 
     toolbar_button(ToolbarButton::snap_x, &toolbar_state.snap_x);
 

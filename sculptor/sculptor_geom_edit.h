@@ -39,7 +39,6 @@ class GeometryEditor: public Editor {
             X(paste,            0, CTRL_KEY " V",          "Paste")                       \
             X(cut,              0, CTRL_KEY " X",          "Cut")                         \
             X(sel_vertices,     1, "1",                    "Select vertices")             \
-            X(sel_edges,        0, "",                     "Select edges")                \
             X(sel_faces,        0, "2",                    "Select faces")                \
             X(sel_clear,        0, "",                     "Clear selection")             \
             X(view_perspective, 1, "5",                    "Perspective view")            \
@@ -48,7 +47,8 @@ class GeometryEditor: public Editor {
             X(view_ortho_y,     0, "8",                    "Orthographic view in Y axis") \
             X(toggle_tessell,   1, "Alt T",                "Toggle tessellation")         \
             X(toggle_wireframe, 0, "Alt W",                "Toggle wireframe")            \
-            X(snap_x,           1, "X",                    "Snap to X")                   \
+            X(snap_normals,     1, "Alt N",                "Snap to normals")             \
+            X(snap_x,           0, "X",                    "Snap to X")                   \
             X(snap_y,           0, "Y",                    "Snap to Y")                   \
             X(snap_z,           0, "Z",                    "Snap to Z")                   \
             X(move,             1, "G",                    "Move")                        \
@@ -134,6 +134,7 @@ class GeometryEditor: public Editor {
             bool toggle_tessellation;
             bool toggle_wireframe;
 
+            bool snap_normals;
             bool snap_x;
             bool snap_y;
             bool snap_z;
