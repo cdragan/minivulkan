@@ -79,7 +79,7 @@ class BufferSubAllocatorBase {
 
     private:
         void* allocate_raw(size_t count, size_t elem_size);
-        void  free_raw(void* ptr, size_t count, size_t elem_size);
+        void  free_raw(const void* ptr, size_t count, size_t elem_size);
 
         SubAllocatorBase* alloc;
         uint8_t*          buffer;

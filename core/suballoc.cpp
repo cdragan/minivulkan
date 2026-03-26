@@ -161,9 +161,9 @@ void* BufferSubAllocatorBase::allocate_raw(const size_t count, const size_t elem
     return buffer + alloc->allocate(count * elem_size, elem_size).offset;
 }
 
-void BufferSubAllocatorBase::free_raw(void* const ptr, const size_t count, const size_t elem_size)
+void BufferSubAllocatorBase::free_raw(const void* const ptr, const size_t count, const size_t elem_size)
 {
-    const uint8_t* const byte_ptr = static_cast<uint8_t*>(ptr);
+    const uint8_t* const byte_ptr = static_cast<const uint8_t*>(ptr);
     assert(byte_ptr >= buffer);
 
     const size_t offset = static_cast<size_t>(byte_ptr - buffer);
