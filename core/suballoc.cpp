@@ -155,3 +155,17 @@ void SubAllocatorBase::free(size_t offset, size_t size)
 
     ++num_free_chunks;
 }
+
+void* BufferSubAllocatorBase::allocate_raw(const size_t count, const size_t elem_size)
+{
+    return buffer + alloc->allocate(count * elem_size, elem_size).offset;
+}
+
+void BufferSubAllocatorBase::free_raw(void* const ptr, const size_t count, const size_t elem_size)
+{
+    const uint8_t* const byte_ptr = static_cast<uint8_t*>(ptr);
+    assert(byte_ptr >= buffer);
+
+    const size_t offset = static_cast<size_t>(byte_ptr - buffer);
+    alloc->free(offset, count * elem_size);
+}
