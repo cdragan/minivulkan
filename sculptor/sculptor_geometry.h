@@ -47,8 +47,9 @@ class Geometry {
             uint32_t material_id;
         };
 
-        static constexpr uint32_t max_edges = 0x10000U;
-        static constexpr uint32_t max_faces = 0x10000U / 16U;
+        static constexpr uint32_t max_edges    = 0x10000U;
+        static constexpr uint32_t max_faces    = 0x10000U / 16U;
+        static constexpr uint32_t max_vertices = 0x10000U;
 
         bool allocate();
         void set_dirty() { dirty = true; }
@@ -87,6 +88,9 @@ class Geometry {
         bool save(const char* path);
         bool load(const char* path);
 
+        void freeze_selection(const uint8_t* face_sel, const uint8_t* vtx_sel);
+        void invalidate_selection();
+
         bool snapshot_state();   // Push a snapshot of geometry onto the undo stack
         bool restore_snapshot(); // Pop the snapshot of geometry from the undo stack
         bool apply_snapshot();   // Apply the snapshot of geometry without popping it from the stack
@@ -114,8 +118,13 @@ class Geometry {
         uint32_t num_faces        = 0;
         bool     dirty            = true;
 
-        Edge obj_edges[max_edges] = { };
-        Face obj_faces[max_faces] = { };
+        Edge     obj_edges[max_edges] = { };
+        Face     obj_faces[max_faces] = { };
+
+        uint32_t num_sel_faces              = 0;
+        uint32_t num_sel_vertices           = 0;
+        uint16_t sel_faces[max_faces]       = { };
+        uint16_t sel_vertices[max_vertices] = { };
 
         static constexpr uint32_t undo_buf_size = 512 * 1024;
         alignas(4) uint8_t undo_buf[undo_buf_size];

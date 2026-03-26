@@ -13,7 +13,6 @@
 #include <stdio.h>
 #include <string.h>
 
-constexpr uint32_t max_vertices         = 65536;
 constexpr uint32_t max_indices          = 65536;
 constexpr uint32_t max_face_indices     = 43008;
 constexpr uint32_t max_edge_indices     = 22528;
@@ -22,7 +21,7 @@ constexpr uint32_t num_host_copies      = 3;
 
 constexpr uint32_t host_vertices_offset = 0;
 constexpr uint32_t gpu_vertices_offset  = 0;
-constexpr uint32_t vertices_stride      = max_vertices * sizeof(Sculptor::Geometry::Vertex);
+constexpr uint32_t vertices_stride      = Sculptor::Geometry::max_vertices * sizeof(Sculptor::Geometry::Vertex);
 
 constexpr uint32_t host_indices_offset  = vertices_stride;
 constexpr uint32_t gpu_indices_offset   = vertices_stride;
@@ -281,7 +280,7 @@ static_assert(sizeof(EdgeInfo) == 4);
 // When used inside EdgeInfo, it means the adjacent face is not selected (we don't collect its index).
 static constexpr uint16_t no_face = 0xFFFFu;
 
-static constexpr uint32_t scratch_buf_size = max_vertices * 64;
+static constexpr uint32_t scratch_buf_size = Sculptor::Geometry::max_vertices * 64;
 
 static uint8_t* alloc_scratch(SubAllocatorBase& alloc, const size_t size, const size_t alignment)
 {
@@ -294,6 +293,28 @@ template<typename T>
 static T* alloc_scratch(SubAllocatorBase& alloc, const size_t count)
 {
     return reinterpret_cast<T*>(alloc_scratch(alloc, count * sizeof(T), alignof(T)));
+}
+
+void Sculptor::Geometry::freeze_selection(const uint8_t* const face_sel,
+                                          const uint8_t* const vtx_sel)
+{
+    static_assert(max_faces <= 1 << (8 * sizeof(uint16_t)));
+    num_sel_faces = 0;
+    for (uint32_t i = 0; i < num_faces; i++)
+        if (face_sel[i] & obj_selected)
+            sel_faces[num_sel_faces++] = static_cast<uint16_t>(i);
+
+    static_assert(max_vertices <= 1 << (8 * sizeof(uint16_t)));
+    num_sel_vertices = 0;
+    for (uint32_t i = 0; i < num_vertices; i++)
+        if (vtx_sel[i] & obj_selected)
+            sel_vertices[num_sel_vertices++] = static_cast<uint16_t>(i);
+}
+
+void Sculptor::Geometry::invalidate_selection()
+{
+    num_sel_faces    = 0;
+    num_sel_vertices = 0;
 }
 
 void Sculptor::Geometry::extrude_faces(const uint8_t* const face_sel,

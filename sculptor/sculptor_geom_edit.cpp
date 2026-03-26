@@ -1800,13 +1800,19 @@ void GeometryEditor::switch_mode(Mode new_mode)
 {
     if (new_mode != mode) {
 
-        if (mode == Mode::select)
+        if (mode == Mode::select) {
             saved_select = toolbar_state.select;
+            patch_geometry.freeze_selection(
+                cur_res->sel_host_buf.get_ptr<uint8_t>(),
+                cur_res->vtx_sel_host_buf.get_ptr<uint8_t>());
+        }
 
-        if (new_mode == Mode::select)
+        if (new_mode == Mode::select) {
             cancel_edit_mode();
-        else
+            patch_geometry.invalidate_selection();
+        } else {
             finish_edit_mode();
+        }
 
         if (has_captured_mouse()) {
             release_mouse();
