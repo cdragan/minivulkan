@@ -31,6 +31,9 @@ constexpr uint32_t host_faces_offset    = vertices_stride + indices_stride * num
 constexpr uint32_t gpu_faces_offset     = vertices_stride + indices_stride;
 constexpr uint32_t faces_stride         = sizeof(Sculptor::Geometry::FacesBuf) + (Sculptor::Geometry::max_faces - 1) * sizeof(Sculptor::Geometry::FaceData);
 
+// Scratch buffer used for temporary data
+alignas(16) static uint8_t scratch_buf[Sculptor::Geometry::max_vertices * 64];
+
 // Maps edges to indices
 static const uint8_t edge_indices[] = {
     0,  1,  2,  3,  // top
@@ -280,21 +283,6 @@ static_assert(sizeof(EdgeInfo) == 4);
 // When used inside EdgeInfo, it means the adjacent face is not selected (we don't collect its index).
 static constexpr uint16_t no_face = 0xFFFFu;
 
-static constexpr uint32_t scratch_buf_size = Sculptor::Geometry::max_vertices * 64;
-
-static uint8_t* alloc_scratch(SubAllocatorBase& alloc, const size_t size, const size_t alignment)
-{
-    alignas(16) static uint8_t scratch_buf[scratch_buf_size];
-
-    return &scratch_buf[alloc.allocate(size, alignment).offset];
-}
-
-template<typename T>
-static T* alloc_scratch(SubAllocatorBase& alloc, const size_t count)
-{
-    return reinterpret_cast<T*>(alloc_scratch(alloc, count * sizeof(T), alignof(T)));
-}
-
 void Sculptor::Geometry::freeze_selection(const uint8_t* const face_sel,
                                           const uint8_t* const vtx_sel)
 {
@@ -319,18 +307,18 @@ void Sculptor::Geometry::invalidate_selection()
 
 void Sculptor::Geometry::move_selection(const vmath::vec3 delta)
 {
-    SubAllocator<1> alloc;
-    alloc.init(scratch_buf_size);
+    BufferSubAllocator<1> alloc{scratch_buf};
 
-    const uint32_t num_slots = mstd::align_up(num_vertices, 32u);
-    uint32_t* const moved = alloc_scratch<uint32_t>(alloc, num_slots);
-    memset(moved, 0, num_slots * sizeof(uint32_t));
+    const uint32_t num_slots = mstd::align_up(num_vertices, 32u) / 32u;
+    uint32_t* const moved_vertices = alloc.allocate<uint32_t>(num_slots);
+    memset(moved_vertices, 0, num_slots * sizeof(uint32_t));
 
     const auto apply_vertex_move = [&](const uint32_t i_vtx) {
         const uint32_t bitmask = 1u << (i_vtx & 31u);
+        assert(i_vtx < num_vertices);
 
-        if ( ! (moved[i_vtx >> 5] & bitmask)) {
-            moved[i_vtx >> 5] |= bitmask;
+        if ( ! (moved_vertices[i_vtx >> 5] & bitmask)) {
+            moved_vertices[i_vtx >> 5] |= bitmask;
             move_vertex(i_vtx, delta.x, delta.y, delta.z);
         }
     };
