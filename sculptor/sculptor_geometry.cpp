@@ -5,6 +5,7 @@
 
 #include "../core/barrier.h"
 #include "../core/mstdc.h"
+#include "../core/suballoc.h"
 #include "../core/vmath.h"
 
 #include <errno.h>
@@ -31,8 +32,34 @@ constexpr uint32_t host_faces_offset    = vertices_stride + indices_stride * num
 constexpr uint32_t gpu_faces_offset     = vertices_stride + indices_stride;
 constexpr uint32_t faces_stride         = sizeof(Sculptor::Geometry::FacesBuf) + (Sculptor::Geometry::max_faces - 1) * sizeof(Sculptor::Geometry::FaceData);
 
+// Maps edges to indices
+static const uint8_t edge_indices[] = {
+    0,  1,  2,  3,  // top
+    0,  4,  8,  12, // left
+    3,  7,  11, 15, // right
+    12, 13, 14, 15  // bottom
+};
+
 static const uint8_t  file_type[4] = {'G', 'E', 'O', 'M'};
 static const uint16_t file_version = 1;
+
+static int16_t to_int16(float f)
+{
+    return static_cast<int16_t>(vmath::clamp(f, -32767.0f, 32767.0f));
+}
+
+struct EdgeIndex {
+    uint32_t idx;
+    bool     inverse_edge;
+};
+
+static EdgeIndex get_edge_idx(const Sculptor::Geometry::Face& face, const uint32_t i_edge)
+{
+    const int32_t edge_sel     = face.edges[i_edge];
+    const bool    inverse_edge = edge_sel < 0;
+
+    return { static_cast<uint32_t>(inverse_edge ? (-edge_sel - 1) : edge_sel), inverse_edge };
+}
 
 bool Sculptor::Geometry::allocate()
 {
@@ -112,23 +139,15 @@ bool Sculptor::Geometry::send_to_gpu(VkCommandBuffer cmd_buf)
 
         faces_ptr->face_data[i_face].material_id = face.material_id;
 
-        static const uint32_t idx_map[] = {
-             0,  1,  2,  3,
-             0,  4,  8, 12,
-             3,  7, 11, 15,
-            12, 13, 14, 15
-        };
-
         // Write indices for the edges; note the indices of corners overlap
         for (uint32_t i_edge = 0; i_edge < 4; i_edge++) {
-            const int32_t edge_sel     = face.edges[i_edge];
-            const bool    inverse_edge = edge_sel < 0;
-            const Edge&   edge         = obj_edges[inverse_edge ? (-edge_sel - 1) : edge_sel];
+            const auto [edge_idx, inverse_edge] = get_edge_idx(face, i_edge);
+            const Edge& edge = obj_edges[edge_idx];
 
             for (uint32_t i_idx = 0; i_idx < 4; i_idx++) {
                 const uint32_t src_idx = inverse_edge ? (3 - i_idx) : i_idx;
                 assert(edge.vertices[src_idx] < max_vertices);
-                const uint32_t dest_idx = num_indices + idx_map[i_edge * 4 + i_idx];
+                const uint32_t dest_idx = num_indices + edge_indices[i_edge * 4 + i_idx];
                 assert(dest_idx < num_indices + 16);
                 indices_ptr[dest_idx] = static_cast<uint16_t>(edge.vertices[src_idx]);
             }
@@ -213,9 +232,9 @@ void Sculptor::Geometry::move_vertex(uint32_t vtx, float dx, float dy, float dz)
 {
     assert(vtx < num_vertices);
     Vertex& vertex = host_buffer.get_ptr<Vertex>(host_vertices_offset)[vtx];
-    vertex.pos[0] = static_cast<int16_t>(vmath::clamp(vertex.pos[0] + dx, -32767.0f, 32767.0f));
-    vertex.pos[1] = static_cast<int16_t>(vmath::clamp(vertex.pos[1] + dy, -32767.0f, 32767.0f));
-    vertex.pos[2] = static_cast<int16_t>(vmath::clamp(vertex.pos[2] + dz, -32767.0f, 32767.0f));
+    vertex.pos[0] = to_int16(vertex.pos[0] + dx);
+    vertex.pos[1] = to_int16(vertex.pos[1] + dy);
+    vertex.pos[2] = to_int16(vertex.pos[2] + dz);
 }
 
 void Sculptor::Geometry::get_face_vertex_indices(uint32_t face_id, uint32_t out_vtx[16]) const
@@ -224,21 +243,13 @@ void Sculptor::Geometry::get_face_vertex_indices(uint32_t face_id, uint32_t out_
 
     const Face& face = obj_faces[face_id];
 
-    static const uint8_t idx_map[] = {
-         0,  1,  2,  3,
-         0,  4,  8, 12,
-         3,  7, 11, 15,
-        12, 13, 14, 15
-    };
-
     for (uint32_t i_edge = 0; i_edge < 4; i_edge++) {
-        const int32_t edge_sel     = face.edges[i_edge];
-        const bool    inverse_edge = edge_sel < 0;
-        const Edge&   edge         = obj_edges[inverse_edge ? (-edge_sel - 1) : edge_sel];
+        const auto [edge_idx, inverse_edge] = get_edge_idx(face, i_edge);
+        const Edge& edge = obj_edges[edge_idx];
 
         for (uint32_t i_idx = 0; i_idx < 4; i_idx++) {
             const uint32_t src_idx  = inverse_edge ? (3 - i_idx) : i_idx;
-            const uint32_t dest_idx = idx_map[i_edge * 4 + i_idx];
+            const uint32_t dest_idx = edge_indices[i_edge * 4 + i_idx];
             out_vtx[dest_idx] = edge.vertices[src_idx];
         }
     }
@@ -246,6 +257,53 @@ void Sculptor::Geometry::get_face_vertex_indices(uint32_t face_id, uint32_t out_
     static const uint32_t ctrl_idx_map[] = { 5, 6, 9, 10 };
     for (uint32_t i_idx = 0; i_idx < 4; i_idx++)
         out_vtx[ctrl_idx_map[i_idx]] = face.ctrl_vertices[i_idx];
+}
+
+vmath::vec3 Sculptor::Geometry::get_vertex(const uint32_t vtx) const
+{
+    const Vertex* const vertices = host_buffer.get_ptr<Vertex>(host_vertices_offset);
+
+    return {
+        static_cast<float>(vertices[vtx].pos[0]),
+        static_cast<float>(vertices[vtx].pos[1]),
+        static_cast<float>(vertices[vtx].pos[2])
+    };
+}
+
+// Each edge has two adjacent faces.  This struct is used to collect faces
+// adjacent to an edge.
+struct EdgeInfo {
+    uint16_t face1;
+    uint16_t face2;
+};
+static_assert(sizeof(EdgeInfo) == 4);
+
+// When used inside EdgeInfo, it means the adjacent face is not selected (we don't collect its index).
+static constexpr uint16_t no_face = 0xFFFFu;
+
+static constexpr uint32_t scratch_buf_size = max_vertices * 64;
+
+static uint8_t* alloc_scratch(SubAllocatorBase& alloc, const size_t size, const size_t alignment)
+{
+    alignas(16) static uint8_t scratch_buf[scratch_buf_size];
+
+    return &scratch_buf[alloc.allocate(size, alignment).offset];
+}
+
+template<typename T>
+static T* alloc_scratch(SubAllocatorBase& alloc, const size_t count)
+{
+    return reinterpret_cast<T*>(alloc_scratch(alloc, count * sizeof(T), alignof(T)));
+}
+
+void Sculptor::Geometry::extrude_faces(const uint8_t* const face_sel,
+                                       vmath::vec3    const delta,
+                                       MoveMode       const mode)
+{
+    if (delta.x == 0 && delta.y == 0 && delta.z == 0)
+        return;
+
+    // TODO
 }
 
 void Sculptor::Geometry::set_tess_level(const int32_t level)
@@ -262,6 +320,11 @@ uint32_t Sculptor::Geometry::add_vertex(int16_t x, int16_t y, int16_t z)
     const uint32_t vtx = num_vertices++;
     set_vertex(vtx, x, y, z);
     return vtx;
+}
+
+uint32_t Sculptor::Geometry::add_vertex(const vmath::vec3& p)
+{
+    return add_vertex(to_int16(p.x), to_int16(p.y), to_int16(p.z));
 }
 
 void Sculptor::Geometry::set_vertex(uint32_t vtx, int16_t x, int16_t y, int16_t z)

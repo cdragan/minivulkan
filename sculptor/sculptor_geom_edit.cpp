@@ -183,7 +183,6 @@ namespace {
     };
 
     constexpr float    fov_radians      = vmath::radians(30.0f);
-    constexpr float    int16_scale      = 32767.0f;
     constexpr uint32_t max_grid_lines   = 4096;
     constexpr uint32_t max_objects      = 0x10000u;
     constexpr VkFormat selection_format = (max_objects <= 0x10000u) ? VK_FORMAT_R16_UINT : VK_FORMAT_R32_UINT;
@@ -202,14 +201,6 @@ namespace {
 #       define X(tag, first, combo, desc) { "geom_tb_" #tag, desc, combo, first != 0 },
         TOOLBAR_BUTTONS
 #       undef X
-    };
-
-    // Bits used to determine state of an object
-    enum ObjectState : uint8_t {
-        // Object is selected
-        obj_selected = 1,
-        // Mouse is over the object, or the object is inside selection rectangle
-        obj_hovered  = 2,
     };
 
     bool dialog_save;
@@ -1210,7 +1201,7 @@ void GeometryEditor::handle_mouse_actions(const UserInput& input, bool view_hove
         assert(mouse_action == Action::none);
 
         if (mouse_moved) {
-            if (mode == Mode::move)
+            if (mode == Mode::move || mode == Mode::extrude)
                 mouse_action = Action::execute;
             else if (ImGui::IsKeyDown(ImGuiKey_LeftCtrl) || ImGui::IsKeyDown(ImGuiKey_RightCtrl))
                 mouse_action = Action::rotate;
@@ -1408,6 +1399,10 @@ void GeometryEditor::handle_mouse_actions(const UserInput& input, bool view_hove
                     switch (mode) {
                         case Mode::move:
                             apply_move(input);
+                            break;
+
+                        case Mode::extrude:
+                            apply_extrude(input);
                             break;
 
                         default:
@@ -3253,10 +3248,8 @@ bool GeometryEditor::render_control_points(VkCommandBuffer cmdbuf,
     return true;
 }
 
-void GeometryEditor::apply_move(const UserInput& input)
+vmath::vec3 GeometryEditor::compute_move_delta(const UserInput& input) const
 {
-    patch_geometry.apply_snapshot();
-
     const Camera&     camera       = view.camera[static_cast<int>(view.view_type)];
     const float       height       = static_cast<float>(view.height);
     const float       ortho_scale  = camera.view_height / height;
@@ -3312,6 +3305,11 @@ void GeometryEditor::apply_move(const UserInput& input)
             delta.z = 0.0f;
     }
 
+    return delta;
+}
+
+void GeometryEditor::move_selected_vertices(const vmath::vec3& delta)
+{
     const uint32_t num_vertices = patch_geometry.get_num_vertices();
     const uint32_t num_slots    = mstd::align_up(num_vertices, 32u);
 
@@ -3324,9 +3322,34 @@ void GeometryEditor::apply_move(const UserInput& input)
             if ( ! (slot & (1u << i)))
                 continue;
 
-            const uint32_t i_vtx = (i_slot << 5) + i;
-            patch_geometry.move_vertex(i_vtx, delta.x, delta.y, delta.z);
+            patch_geometry.move_vertex((i_slot << 5) + i, delta.x, delta.y, delta.z);
         }
+    }
+}
+
+void GeometryEditor::apply_move(const UserInput& input)
+{
+    patch_geometry.apply_snapshot();
+    move_selected_vertices(compute_move_delta(input));
+    patch_geometry.set_dirty();
+}
+
+void GeometryEditor::apply_extrude(const UserInput& input)
+{
+    patch_geometry.apply_snapshot();
+
+    const vmath::vec3    delta     = compute_move_delta(input);
+    const uint32_t       num_faces = patch_geometry.get_num_faces();
+    const uint8_t* const face_sel  = cur_res->sel_host_buf.get_ptr<uint8_t>();
+
+    patch_geometry.extrude_faces(face_sel, delta);
+
+    // Clear selection state for newly added side faces
+    const uint32_t new_num_faces = patch_geometry.get_num_faces();
+    if (new_num_faces > num_faces) {
+        uint8_t* const face_sel_ptr = cur_res->sel_host_buf.get_ptr<uint8_t>();
+        memset(face_sel_ptr + num_faces, 0, new_num_faces - num_faces);
+        face_sel_dirty = true;
     }
 
     patch_geometry.set_dirty();
