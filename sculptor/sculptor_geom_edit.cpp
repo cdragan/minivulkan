@@ -3321,7 +3321,10 @@ vmath::vec3 GeometryEditor::compute_move_delta(const UserInput& input) const
 void GeometryEditor::apply_move(const UserInput& input)
 {
     patch_geometry.apply_snapshot();
-    patch_geometry.move_selection(compute_move_delta(input));
+    const Geometry::MoveMode move_mode = toolbar_state.snap_normals
+        ? Geometry::MoveMode::along_normal
+        : Geometry::MoveMode::along_delta;
+    patch_geometry.move_selection(compute_move_delta(input), move_mode);
 }
 
 void GeometryEditor::apply_extrude(const UserInput& input)

@@ -230,13 +230,13 @@ bool Sculptor::Geometry::send_to_gpu(VkCommandBuffer cmd_buf)
     return true;
 }
 
-void Sculptor::Geometry::move_vertex(uint32_t vtx, float dx, float dy, float dz)
+void Sculptor::Geometry::move_vertex(const uint32_t vtx, const vmath::vec3 delta)
 {
     assert(vtx < num_vertices);
     Vertex& vertex = host_buffer.get_ptr<Vertex>(host_vertices_offset)[vtx];
-    vertex.pos[0] = to_int16(vertex.pos[0] + dx);
-    vertex.pos[1] = to_int16(vertex.pos[1] + dy);
-    vertex.pos[2] = to_int16(vertex.pos[2] + dz);
+    vertex.pos[0] = to_int16(vertex.pos[0] + delta.x);
+    vertex.pos[1] = to_int16(vertex.pos[1] + delta.y);
+    vertex.pos[2] = to_int16(vertex.pos[2] + delta.z);
 }
 
 void Sculptor::Geometry::get_face_vertex_indices(uint32_t face_id, uint32_t out_vtx[16]) const
@@ -305,34 +305,79 @@ void Sculptor::Geometry::invalidate_selection()
     num_sel_vertices = 0;
 }
 
-void Sculptor::Geometry::move_selection(const vmath::vec3 delta)
+void Sculptor::Geometry::get_vertex_dirs_from_face_normals(vmath::vec3* const vtx_dirs)
+{
+    for (uint32_t i_face = 0; i_face < num_sel_faces; i_face++) {
+        uint32_t vtx_list[16];
+        get_face_vertex_indices(sel_faces[i_face], vtx_list);
+
+        // Face's corner vertices
+        //  0 ..  3
+        //  : ::  :
+        // 12 .. 15
+        const vmath::vec3 v0  = get_vertex(vtx_list[0]);
+        const vmath::vec3 v3  = get_vertex(vtx_list[3]);
+        const vmath::vec3 v12 = get_vertex(vtx_list[12]);
+        const vmath::vec3 v15 = get_vertex(vtx_list[15]);
+
+        const vmath::vec3 face_horiz = (v3  - v0) + (v15 - v12);
+        const vmath::vec3 face_vert  = (v12 - v0) + (v15 - v3);
+        const vmath::vec3 normal     = vmath::normalize(vmath::cross_product(face_horiz, face_vert));
+
+        for (uint32_t i = 0; i < std::size(vtx_list); i++)
+            vtx_dirs[vtx_list[i]] += normal;
+    }
+}
+
+void Sculptor::Geometry::move_selection(const vmath::vec3 delta, const MoveMode mode)
 {
     BufferSubAllocator<1> alloc{scratch_buf};
 
     const uint32_t num_slots = mstd::align_up(num_vertices, 32u) / 32u;
-    uint32_t* const moved_vertices = alloc.allocate<uint32_t>(num_slots);
-    memset(moved_vertices, 0, num_slots * sizeof(uint32_t));
+    uint32_t* const vtx_bitmap = alloc.allocate<uint32_t>(num_slots);
+    memset(vtx_bitmap, 0, num_slots * sizeof(uint32_t));
 
-    const auto apply_vertex_move = [&](const uint32_t i_vtx) {
-        const uint32_t bitmask = 1u << (i_vtx & 31u);
-        assert(i_vtx < num_vertices);
-
-        if ( ! (moved_vertices[i_vtx >> 5] & bitmask)) {
-            moved_vertices[i_vtx >> 5] |= bitmask;
-            move_vertex(i_vtx, delta.x, delta.y, delta.z);
-        }
-    };
+    vmath::vec3* vtx_dirs = nullptr;
+    if (mode == MoveMode::along_normal) {
+        vtx_dirs = alloc.allocate<vmath::vec3>(num_vertices);
+        memset(vtx_dirs, 0, num_vertices * sizeof(vmath::vec3));
+        get_vertex_dirs_from_face_normals(vtx_dirs);
+    }
 
     for (uint32_t i_face = 0; i_face < num_sel_faces; i_face++) {
         uint32_t vtx_list[16];
         get_face_vertex_indices(sel_faces[i_face], vtx_list);
 
-        for (uint32_t i_vtx = 0; i_vtx < std::size(vtx_list); i_vtx++)
-            apply_vertex_move(vtx_list[i_vtx]);
+        for (uint32_t i = 0; i < std::size(vtx_list); i++) {
+            const uint32_t i_vtx   = vtx_list[i];
+            const uint32_t slot    = i_vtx >> 5;
+            const uint32_t bitmask = 1u << (i_vtx & 31u);
+            assert(i_vtx < num_vertices);
+
+            if ( ! (vtx_bitmap[slot] & bitmask)) {
+                vtx_bitmap[slot] |= bitmask;
+
+                vmath::vec3 vtx_delta = delta;
+                if (vtx_dirs)
+                    vtx_delta = vmath::normalize(vtx_dirs[i_vtx]) * delta;
+
+                move_vertex(i_vtx, vtx_delta);
+            }
+        }
     }
 
-    for (uint32_t i = 0; i < num_sel_vertices; i++)
-        apply_vertex_move(sel_vertices[i]);
+    const uint32_t num_vert_to_move = vtx_dirs ? 0 : num_sel_vertices;
+    for (uint32_t i = 0; i < num_vert_to_move; i++) {
+        const uint32_t i_vtx   = sel_vertices[i];
+        const uint32_t slot    = i_vtx >> 5;
+        const uint32_t bitmask = 1u << (i_vtx & 31u);
+        assert(i_vtx < num_vertices);
+
+        if ( ! (vtx_bitmap[slot] & bitmask)) {
+            vtx_bitmap[slot] |= bitmask;
+            move_vertex(i_vtx, delta);
+        }
+    }
 
     set_dirty();
 }
@@ -363,9 +408,9 @@ uint32_t Sculptor::Geometry::add_vertex(int16_t x, int16_t y, int16_t z)
     return vtx;
 }
 
-uint32_t Sculptor::Geometry::add_vertex(const vmath::vec3& p)
+uint32_t Sculptor::Geometry::add_vertex(vmath::vec3 pos)
 {
-    return add_vertex(to_int16(p.x), to_int16(p.y), to_int16(p.z));
+    return add_vertex(to_int16(pos.x), to_int16(pos.y), to_int16(pos.z));
 }
 
 void Sculptor::Geometry::set_vertex(uint32_t vtx, int16_t x, int16_t y, int16_t z)

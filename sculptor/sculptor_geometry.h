@@ -7,6 +7,7 @@
 #include "../core/resource.h"
 #include "../core/vmath.h"
 
+
 namespace Sculptor {
 
 static constexpr float int16_scale = 32767.0f;
@@ -64,10 +65,10 @@ class Geometry {
 
         void     set_tess_level(int32_t level);
         uint32_t add_vertex(int16_t x, int16_t y, int16_t z);
-        uint32_t add_vertex(const vmath::vec3& p);
+        uint32_t add_vertex(vmath::vec3 p);
         uint32_t get_num_vertices() const { return num_vertices; }
         void     set_vertex(uint32_t vtx, int16_t x, int16_t y, int16_t z);
-        void     move_vertex(uint32_t vtx, float dx, float dy, float dz);
+        void     move_vertex(uint32_t vtx, vmath::vec3 delta);
         uint32_t add_edge(uint32_t vtx_0, uint32_t vtx_1, uint32_t vtx_2, uint32_t vtx_3);
         void     set_edge(uint32_t edge, uint32_t vtx_0, uint32_t vtx_1, uint32_t vtx_2, uint32_t vtx_3);
         uint32_t get_num_edges() const { return num_edges; }
@@ -81,7 +82,7 @@ class Geometry {
 
         enum class MoveMode { along_delta, along_normal };
 
-        void     move_selection(vmath::vec3 delta);
+        void     move_selection(vmath::vec3 delta, MoveMode mode);
         void     extrude_faces(const uint8_t* face_sel,
                                vmath::vec3    delta,
                                MoveMode       mode = MoveMode::along_delta);
@@ -107,6 +108,7 @@ class Geometry {
         bool apply_snapshot(bool pop_undo);
 
         vmath::vec3 get_vertex(uint32_t vtx) const;
+        void get_vertex_dirs_from_face_normals(vmath::vec3* vtx_deltas);
 
         Buffer   gpu_buffer;
         Buffer   host_buffer;
