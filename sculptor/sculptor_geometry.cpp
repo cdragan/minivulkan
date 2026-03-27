@@ -13,6 +13,10 @@
 #include <stdio.h>
 #include <string.h>
 
+#ifdef _WIN32
+#pragma warning( disable : 4996 )
+#endif
+
 constexpr uint32_t max_indices          = 65536;
 constexpr uint32_t max_face_indices     = 43008;
 constexpr uint32_t max_edge_indices     = 22528;
@@ -533,17 +537,17 @@ void Sculptor::Geometry::extrude_faces(const uint8_t* const face_sel,
             const vmath::vec3 delta_left  = inverse_new ? delta2 : delta1;
             const vmath::vec3 delta_right = inverse_new ? delta1 : delta2;
 
-            const uint32_t ctl0 = add_vertex(left_ctl  + delta_left  * (2.0f / 3.0f));
-            const uint32_t ctl1 = add_vertex(right_ctl + delta_right * (2.0f / 3.0f));
-            const uint32_t ctl2 = add_vertex(left_ctl  + delta_left  * (1.0f / 3.0f));
-            const uint32_t ctl3 = add_vertex(right_ctl + delta_right * (1.0f / 3.0f));
+            const uint32_t ctl0_vtx = add_vertex(left_ctl  + delta_left  * (2.0f / 3.0f));
+            const uint32_t ctl1_vtx = add_vertex(right_ctl + delta_right * (2.0f / 3.0f));
+            const uint32_t ctl2_vtx = add_vertex(left_ctl  + delta_left  * (1.0f / 3.0f));
+            const uint32_t ctl3_vtx = add_vertex(right_ctl + delta_right * (1.0f / 3.0f));
 
             // Create side face
             add_face(top_edge,
                      static_cast<int32_t>(left_edge),
                      static_cast<int32_t>(right_edge),
                      bottom_edge,
-                     ctl0, ctl1, ctl2, ctl3);
+                     ctl0_vtx, ctl1_vtx, ctl2_vtx, ctl3_vtx);
         }
 
         // Move this face's interior control points
