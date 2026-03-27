@@ -3321,9 +3321,11 @@ vmath::vec3 GeometryEditor::compute_move_delta(const UserInput& input) const
 void GeometryEditor::apply_move(const UserInput& input)
 {
     patch_geometry.apply_snapshot();
+
     const Geometry::MoveMode move_mode = toolbar_state.snap_normals
         ? Geometry::MoveMode::along_normal
         : Geometry::MoveMode::along_delta;
+
     patch_geometry.move_selection(compute_move_delta(input), move_mode);
 }
 
@@ -3335,7 +3337,11 @@ void GeometryEditor::apply_extrude(const UserInput& input)
     const uint32_t       num_faces = patch_geometry.get_num_faces();
     const uint8_t* const face_sel  = cur_res->sel_host_buf.get_ptr<uint8_t>();
 
-    patch_geometry.extrude_faces(face_sel, delta);
+    const Geometry::MoveMode move_mode = toolbar_state.snap_normals
+        ? Geometry::MoveMode::along_normal
+        : Geometry::MoveMode::along_delta;
+
+    patch_geometry.extrude_faces(face_sel, delta, move_mode);
 
     // Clear selection state for newly added side faces
     const uint32_t new_num_faces = patch_geometry.get_num_faces();

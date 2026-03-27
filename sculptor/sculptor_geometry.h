@@ -48,7 +48,7 @@ class Geometry {
             uint32_t material_id;
         };
 
-        static constexpr uint32_t max_edges    = 0x10000U;
+        static constexpr uint32_t max_edges    = 0x8000U;
         static constexpr uint32_t max_faces    = 0x10000U / 16U;
         static constexpr uint32_t max_vertices = 0x10000U;
 
@@ -83,9 +83,7 @@ class Geometry {
         enum class MoveMode { along_delta, along_normal };
 
         void     move_selection(vmath::vec3 delta, MoveMode mode);
-        void     extrude_faces(const uint8_t* face_sel,
-                               vmath::vec3    delta,
-                               MoveMode       mode = MoveMode::along_delta);
+        void     extrude_faces(const uint8_t* face_sel, vmath::vec3 delta, MoveMode mode);
 
         void set_cube();
         bool save(const char* path);

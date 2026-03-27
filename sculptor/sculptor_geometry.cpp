@@ -55,12 +55,17 @@ struct EdgeIndex {
     bool     inverse_edge;
 };
 
+static int32_t get_edge_sel(const int32_t edge_sel, const bool inverse_edge)
+{
+    return inverse_edge ? (-edge_sel - 1) : edge_sel;
+}
+
 static EdgeIndex get_edge_idx(const Sculptor::Geometry::Face& face, const uint32_t i_edge)
 {
     const int32_t edge_sel     = face.edges[i_edge];
     const bool    inverse_edge = edge_sel < 0;
 
-    return { static_cast<uint32_t>(inverse_edge ? (-edge_sel - 1) : edge_sel), inverse_edge };
+    return { static_cast<uint32_t>(get_edge_sel(edge_sel, inverse_edge)), inverse_edge };
 }
 
 bool Sculptor::Geometry::allocate()
@@ -272,17 +277,6 @@ vmath::vec3 Sculptor::Geometry::get_vertex(const uint32_t vtx) const
     };
 }
 
-// Each edge has two adjacent faces.  This struct is used to collect faces
-// adjacent to an edge.
-struct EdgeInfo {
-    uint16_t face1;
-    uint16_t face2;
-};
-static_assert(sizeof(EdgeInfo) == 4);
-
-// When used inside EdgeInfo, it means the adjacent face is not selected (we don't collect its index).
-static constexpr uint16_t no_face = 0xFFFFu;
-
 void Sculptor::Geometry::freeze_selection(const uint8_t* const face_sel,
                                           const uint8_t* const vtx_sel)
 {
@@ -389,7 +383,156 @@ void Sculptor::Geometry::extrude_faces(const uint8_t* const face_sel,
     if (delta.x == 0 && delta.y == 0 && delta.z == 0)
         return;
 
-    // TODO
+    BufferSubAllocator<1> alloc{scratch_buf};
+
+    // Find inner edges, which will not be extruded.
+    // Also count how many outer edges connect to each corner vertex.
+    uint8_t* const edge_count   = alloc.allocate<uint8_t>(max_edges);
+    uint8_t* const outer_corner = alloc.allocate<uint8_t>(max_vertices);
+    memset(edge_count,   0, num_edges    * sizeof(uint8_t));
+    memset(outer_corner, 0, num_vertices * sizeof(uint8_t));
+
+    for (uint32_t i_face = 0; i_face < num_sel_faces; i_face++) {
+        const Face& face = obj_faces[sel_faces[i_face]];
+
+        for (uint32_t i_edge = 0; i_edge < 4; i_edge++) {
+            const uint32_t edge_idx = get_edge_idx(face, i_edge).idx;
+
+            uint8_t& count = edge_count[edge_idx];
+            ++count;
+            assert(count <= 2);
+
+            const Edge& edge = obj_edges[edge_idx];
+            outer_corner[edge.vertices[0]] += (count == 1) ? 1 : -1;
+            outer_corner[edge.vertices[3]] += (count == 1) ? 1 : -1;
+        }
+    }
+
+    constexpr uint16_t no_object = 0xFFFFu;
+
+    // Map for corner vertices (no_object = not created yet)
+    uint16_t* const corner_vtx = alloc.allocate<uint16_t>(max_vertices);
+    memset(corner_vtx, 0xFF, num_vertices * sizeof(uint16_t));
+
+    // Map corner vertices to adjacent extruded edges, to reuse the edges
+    // for adjacent faces
+    uint16_t* const conn_edge = alloc.allocate<uint16_t>(max_vertices);
+    memset(conn_edge, 0xFF, num_vertices * sizeof(uint16_t));
+
+    // Bitmap tracking which original vertices have been moved (for inner non-extruded edges and vertices)
+    uint32_t* const moved_vtx_bitmap = alloc.allocate<uint32_t>(mstd::align_up(max_vertices, 32u) / 32u);
+    memset(moved_vtx_bitmap, 0, mstd::align_up(num_vertices, 32u) / 32u * sizeof(uint32_t));
+
+    for (uint32_t i_face = 0; i_face < num_sel_faces; i_face++) {
+        Face& face = obj_faces[sel_faces[i_face]];
+
+        for (uint32_t i_edge = 0; i_edge < 4; i_edge++) {
+            const auto [edge_idx, inverse_edge] = get_edge_idx(face, i_edge);
+
+            const Edge& edge = obj_edges[edge_idx];
+
+            // Inner edges (with selected face on both sides) are moved and not extruded
+            if (edge_count[edge_idx] >= 2) {
+                assert(edge_count[edge_idx] <= 3);
+
+                // Use 3 to mark an edge has already been moved
+                if (edge_count[edge_idx] == 3)
+                    continue;
+                edge_count[edge_idx] = 3;
+
+                // Duplicate boundary corners on the outer edges
+                for (uint32_t i_idx = 0; i_idx <= 3; i_idx += 3) {
+                    const uint32_t i_vtx = edge.vertices[i_idx];
+
+                    if (outer_corner[i_vtx]) {
+                        if (corner_vtx[i_vtx] == no_object)
+                            corner_vtx[i_vtx] = static_cast<uint16_t>(add_vertex(get_vertex(i_vtx) + delta));
+
+                        obj_edges[edge_idx].vertices[i_idx] = corner_vtx[i_vtx];
+                    }
+                    else {
+                        const uint32_t slot    = i_vtx >> 5;
+                        const uint32_t bitmask = 1u << (i_vtx & 31u);
+
+                        if ( ! (moved_vtx_bitmap[slot] & bitmask)) {
+                            moved_vtx_bitmap[slot] |= bitmask;
+                            move_vertex(i_vtx, delta);
+                        }
+                    }
+                }
+
+                // Move mid-edge control points for inner edges to new position
+                for (uint32_t i_idx = 1; i_idx <= 2; i_idx++) {
+                    const uint32_t i_vtx       = edge.vertices[i_idx];
+                    const uint32_t slot    = i_vtx >> 5;
+                    const uint32_t bitmask = 1u << (i_vtx & 31u);
+                    if ( ! (moved_vtx_bitmap[slot] & bitmask)) {
+                        moved_vtx_bitmap[slot] |= bitmask;
+                        move_vertex(i_vtx, delta);
+                    }
+                }
+                continue;
+            }
+
+            // Create new edge for the current (selected) face which has been moved
+            const vmath::vec3 vtx0_pos = get_vertex(edge.vertices[0]);
+            const vmath::vec3 vtx3_pos = get_vertex(edge.vertices[3]);
+            if (corner_vtx[edge.vertices[0]] == no_object)
+                corner_vtx[edge.vertices[0]] = static_cast<uint16_t>(add_vertex(vtx0_pos + delta));
+            if (corner_vtx[edge.vertices[3]] == no_object)
+                corner_vtx[edge.vertices[3]] = static_cast<uint16_t>(add_vertex(vtx3_pos + delta));
+            const uint32_t new_vtx0     = corner_vtx[edge.vertices[0]];
+            const uint32_t new_ctl1_vtx = add_vertex(get_vertex(edge.vertices[1]) + delta);
+            const uint32_t new_ctl2_vtx = add_vertex(get_vertex(edge.vertices[2]) + delta);
+            const uint32_t new_vtx3     = corner_vtx[edge.vertices[3]];
+            const uint32_t new_edge_idx = add_edge(new_vtx0, new_ctl1_vtx, new_ctl2_vtx, new_vtx3);
+            face.edges[i_edge]          = get_edge_sel(static_cast<int32_t>(new_edge_idx), inverse_edge);
+
+            // Maintain correct order of edges to make sure the new side face will always
+            // be facing outwards
+            const bool inverse_new = (i_edge == 0 || i_edge == 2) ^ inverse_edge;
+
+            // Create new side edges for the side face
+            if (conn_edge[edge.vertices[0]] == no_object) {
+                const uint32_t ctl1_vtx = add_vertex(vtx0_pos + delta * (2.0f / 3.0f));
+                const uint32_t ctl2_vtx = add_vertex(vtx0_pos + delta * (1.0f / 3.0f));
+                conn_edge[edge.vertices[0]] = static_cast<uint16_t>(add_edge(new_vtx0, ctl1_vtx, ctl2_vtx, edge.vertices[0]));
+            }
+            if (conn_edge[edge.vertices[3]] == no_object) {
+                const uint32_t ctl1_vtx = add_vertex(vtx3_pos + delta * (2.0f / 3.0f));
+                const uint32_t ctl2_vtx = add_vertex(vtx3_pos + delta * (1.0f / 3.0f));
+                conn_edge[edge.vertices[3]] = static_cast<uint16_t>(add_edge(new_vtx3, ctl1_vtx, ctl2_vtx, edge.vertices[3]));
+            }
+            const uint32_t left_edge  = conn_edge[inverse_new ? edge.vertices[3] : edge.vertices[0]];
+            const uint32_t right_edge = conn_edge[inverse_new ? edge.vertices[0] : edge.vertices[3]];
+
+            // Select orientation of the original and duplicated edge from the current face, used for the new face
+            const int32_t top_edge    = get_edge_sel(static_cast<int32_t>(new_edge_idx), inverse_new);
+            const int32_t bottom_edge = get_edge_sel(static_cast<int32_t>(edge_idx),     inverse_new);
+
+            // Create side face's control points
+            const vmath::vec3 left_ctl  = get_vertex(edge.vertices[inverse_new ? 2 : 1]);
+            const vmath::vec3 right_ctl = get_vertex(edge.vertices[inverse_new ? 1 : 2]);
+
+            const uint32_t ctl0 = add_vertex(left_ctl  + delta * (2.0f / 3.0f));
+            const uint32_t ctl1 = add_vertex(right_ctl + delta * (2.0f / 3.0f));
+            const uint32_t ctl2 = add_vertex(left_ctl  + delta * (1.0f / 3.0f));
+            const uint32_t ctl3 = add_vertex(right_ctl + delta * (1.0f / 3.0f));
+
+            // Create side face
+            add_face(top_edge,
+                     static_cast<int32_t>(left_edge),
+                     static_cast<int32_t>(right_edge),
+                     bottom_edge,
+                     ctl0, ctl1, ctl2, ctl3);
+        }
+
+        // Move this face's interior control points by delta
+        for (uint32_t i_ctl = 0; i_ctl < 4; i_ctl++)
+            move_vertex(face.ctrl_vertices[i_ctl], delta);
+    }
+
+    set_dirty();
 }
 
 void Sculptor::Geometry::set_tess_level(const int32_t level)
@@ -493,30 +636,13 @@ void Sculptor::Geometry::validate_face(uint32_t face_id)
 #ifndef NDEBUG
     const Face& face = obj_faces[face_id];
 
-    const bool inverse_edge[] = {
-        face.edges[0] < 0,
-        face.edges[1] < 0,
-        face.edges[2] < 0,
-        face.edges[3] < 0
-    };
-
-    const int32_t edge_sel[] {
-        inverse_edge[0] ? (-face.edges[0] - 1) : face.edges[0],
-        inverse_edge[1] ? (-face.edges[1] - 1) : face.edges[1],
-        inverse_edge[2] ? (-face.edges[2] - 1) : face.edges[2],
-        inverse_edge[3] ? (-face.edges[3] - 1) : face.edges[3]
-    };
-
-    assert(edge_sel[0] < static_cast<int32_t>(num_edges));
-    assert(edge_sel[1] < static_cast<int32_t>(num_edges));
-    assert(edge_sel[2] < static_cast<int32_t>(num_edges));
-    assert(edge_sel[3] < static_cast<int32_t>(num_edges));
-
     uint32_t e_vertices[4][2];
 
     for (uint32_t i_edge = 0; i_edge < 4; i_edge++) {
-        const Edge& edge    = obj_edges[edge_sel[i_edge]];
-        const bool  inverse = inverse_edge[i_edge];
+        const auto [edge_idx, inverse] = get_edge_idx(face, i_edge);
+        assert(edge_idx >= 0);
+        assert(static_cast<uint32_t>(edge_idx) < num_edges);
+        const Edge& edge    = obj_edges[edge_idx];
 
         assert(edge.vertices[0] < num_vertices);
         assert(edge.vertices[1] < num_vertices);
