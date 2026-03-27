@@ -85,11 +85,11 @@ SubAllocatorBase::Chunk SubAllocatorBase::allocate(size_t size, size_t alignment
         return { new_offset, new_size };
     }
 
-    assert(i_chunk < num_free_chunks);
-
     d_printf("Suballocator failed to allocate 0x%" PRIx64 " bytes - %s\n",
              static_cast<uint64_t>(size),
              num_free_chunks ? "note: heap is fragmented" : "out of memory");
+
+    assert(i_chunk < num_free_chunks);
 
     return  { total_size, 0 };
 }
@@ -158,7 +158,9 @@ void SubAllocatorBase::free(size_t offset, size_t size)
 
 void* BufferSubAllocatorBase::allocate_raw(const size_t count, const size_t elem_size)
 {
-    return buffer + alloc->allocate(count * elem_size, elem_size).offset;
+    const SubAllocatorBase::Chunk chunk = alloc->allocate(count * elem_size, elem_size);
+    assert(chunk.size == count * elem_size);
+    return buffer + chunk.offset;
 }
 
 void BufferSubAllocatorBase::free_raw(const void* const ptr, const size_t count, const size_t elem_size)
