@@ -3148,8 +3148,10 @@ bool GeometryEditor::render_control_points(VkCommandBuffer cmdbuf,
         0               // range
     };
 
+    const bool show_vertices = toolbar_state.select.vertices || (mode != Mode::select && saved_select.vertices);
+
     // Draw dotted control point lines
-    if (patch_geometry.get_num_faces() > 0) {
+    if (show_vertices && patch_geometry.get_num_faces() > 0) {
         vkCmdBindPipeline(cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, ctrl_pt_handles_mat);
         vkCmdSetDepthTestEnable(cmdbuf, toolbar_state.toggle_wireframe ? VK_FALSE : VK_TRUE);
         vkCmdSetDepthWriteEnable(cmdbuf, VK_FALSE);
@@ -3179,48 +3181,50 @@ bool GeometryEditor::render_control_points(VkCommandBuffer cmdbuf,
         patch_geometry.render_ctrl_pt_handles(cmdbuf);
     }
 
-    vkCmdBindPipeline(cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, vertex_mat);
-    vkCmdSetDepthTestEnable(cmdbuf, toolbar_state.toggle_wireframe ? VK_FALSE : VK_TRUE);
-    vkCmdSetDepthWriteEnable(cmdbuf, VK_FALSE);
+    if (show_vertices) {
+        vkCmdBindPipeline(cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, vertex_mat);
+        vkCmdSetDepthTestEnable(cmdbuf, toolbar_state.toggle_wireframe ? VK_FALSE : VK_TRUE);
+        vkCmdSetDepthWriteEnable(cmdbuf, VK_FALSE);
 
-    send_viewport_and_scissor(cmdbuf, dst_view.width, dst_view.height);
+        send_viewport_and_scissor(cmdbuf, dst_view.width, dst_view.height);
 
-    const uint32_t vertex_mat_id = (image_idx * num_materials) + mat_vertex_sel;
+        const uint32_t vertex_mat_id = (image_idx * num_materials) + mat_vertex_sel;
 
-    buffer_info.buffer = materials_buf.get_buffer();
-    buffer_info.offset = vertex_mat_id * materials_stride;
-    buffer_info.range  = materials_stride;
+        buffer_info.buffer = materials_buf.get_buffer();
+        buffer_info.offset = vertex_mat_id * materials_stride;
+        buffer_info.range  = materials_stride;
 
-    push_descriptor(cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, Sculptor::material_layout,
-                    0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, buffer_info);
+        push_descriptor(cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, Sculptor::material_layout,
+                        0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, buffer_info);
 
-    buffer_info.buffer = res.transforms.get_buffer();
-    buffer_info.offset = 0;
-    buffer_info.range  = sizeof(Transforms);
+        buffer_info.buffer = res.transforms.get_buffer();
+        buffer_info.offset = 0;
+        buffer_info.range  = sizeof(Transforms);
 
-    push_descriptor(cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, Sculptor::material_layout,
-                    1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, buffer_info);
+        push_descriptor(cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, Sculptor::material_layout,
+                        1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, buffer_info);
 
-    patch_geometry.write_edge_vertices_descriptor(&buffer_info);
+        patch_geometry.write_edge_vertices_descriptor(&buffer_info);
 
-    push_descriptor(cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, Sculptor::material_layout,
-                    4, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, buffer_info);
+        push_descriptor(cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, Sculptor::material_layout,
+                        4, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, buffer_info);
 
-    buffer_info.buffer = vtx_sel_buf.get_buffer();
-    buffer_info.offset = 0;
-    buffer_info.range  = VK_WHOLE_SIZE;
+        buffer_info.buffer = vtx_sel_buf.get_buffer();
+        buffer_info.offset = 0;
+        buffer_info.range  = VK_WHOLE_SIZE;
 
-    push_descriptor(cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, Sculptor::material_layout,
-                    5, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, buffer_info);
+        push_descriptor(cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, Sculptor::material_layout,
+                        5, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, buffer_info);
 
-    buffer_info.buffer = res.frame_data.get_buffer();
-    buffer_info.offset = 0;
-    buffer_info.range  = sizeof(FrameData);
+        buffer_info.buffer = res.frame_data.get_buffer();
+        buffer_info.offset = 0;
+        buffer_info.range  = sizeof(FrameData);
 
-    push_descriptor(cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, Sculptor::material_layout,
-                    6, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, buffer_info);
+        push_descriptor(cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, Sculptor::material_layout,
+                        6, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, buffer_info);
 
-    patch_geometry.render_vertices(cmdbuf);
+        patch_geometry.render_vertices(cmdbuf);
+    }
 
     vkCmdEndRendering(cmdbuf);
 
