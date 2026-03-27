@@ -353,7 +353,7 @@ void Sculptor::Geometry::move_selection(const vmath::vec3 delta, const MoveMode 
 
                 vmath::vec3 vtx_delta = delta;
                 if (vtx_dirs)
-                    vtx_delta = vmath::normalize(vtx_dirs[i_vtx]) * delta;
+                    vtx_delta = vmath::normalize(vtx_dirs[i_vtx]) * (delta.x + delta.y + delta.z);
 
                 move_vertex(i_vtx, vtx_delta);
             }
@@ -423,6 +423,18 @@ void Sculptor::Geometry::extrude_faces(const uint8_t* const face_sel,
     uint32_t* const moved_vtx_bitmap = alloc.allocate<uint32_t>(mstd::align_up(max_vertices, 32u) / 32u);
     memset(moved_vtx_bitmap, 0, mstd::align_up(num_vertices, 32u) / 32u * sizeof(uint32_t));
 
+    vmath::vec3* vtx_dirs = nullptr;
+    if (mode == MoveMode::along_normal) {
+        vtx_dirs = alloc.allocate<vmath::vec3>(max_vertices);
+        memset(vtx_dirs, 0, num_vertices * sizeof(vmath::vec3));
+        get_vertex_dirs_from_face_normals(vtx_dirs);
+    }
+    const auto get_delta = [&](const uint32_t i_vtx) -> vmath::vec3 {
+        if (vtx_dirs)
+            return vmath::normalize(vtx_dirs[i_vtx]) * (delta.x + delta.y + delta.z);
+        return delta;
+    };
+
     for (uint32_t i_face = 0; i_face < num_sel_faces; i_face++) {
         Face& face = obj_faces[sel_faces[i_face]];
 
@@ -446,7 +458,7 @@ void Sculptor::Geometry::extrude_faces(const uint8_t* const face_sel,
 
                     if (outer_corner[i_vtx]) {
                         if (corner_vtx[i_vtx] == no_object)
-                            corner_vtx[i_vtx] = static_cast<uint16_t>(add_vertex(get_vertex(i_vtx) + delta));
+                            corner_vtx[i_vtx] = static_cast<uint16_t>(add_vertex(get_vertex(i_vtx) + get_delta(i_vtx)));
 
                         obj_edges[edge_idx].vertices[i_idx] = corner_vtx[i_vtx];
                     }
@@ -456,7 +468,7 @@ void Sculptor::Geometry::extrude_faces(const uint8_t* const face_sel,
 
                         if ( ! (moved_vtx_bitmap[slot] & bitmask)) {
                             moved_vtx_bitmap[slot] |= bitmask;
-                            move_vertex(i_vtx, delta);
+                            move_vertex(i_vtx, get_delta(i_vtx));
                         }
                     }
                 }
@@ -468,22 +480,27 @@ void Sculptor::Geometry::extrude_faces(const uint8_t* const face_sel,
                     const uint32_t bitmask = 1u << (i_vtx & 31u);
                     if ( ! (moved_vtx_bitmap[slot] & bitmask)) {
                         moved_vtx_bitmap[slot] |= bitmask;
-                        move_vertex(i_vtx, delta);
+                        move_vertex(i_vtx, get_delta(i_vtx));
                     }
                 }
                 continue;
             }
 
+            const vmath::vec3 delta0 = get_delta(edge.vertices[0]);
+            const vmath::vec3 delta1 = get_delta(edge.vertices[1]);
+            const vmath::vec3 delta2 = get_delta(edge.vertices[2]);
+            const vmath::vec3 delta3 = get_delta(edge.vertices[3]);
+
             // Create new edge for the current (selected) face which has been moved
             const vmath::vec3 vtx0_pos = get_vertex(edge.vertices[0]);
             const vmath::vec3 vtx3_pos = get_vertex(edge.vertices[3]);
             if (corner_vtx[edge.vertices[0]] == no_object)
-                corner_vtx[edge.vertices[0]] = static_cast<uint16_t>(add_vertex(vtx0_pos + delta));
+                corner_vtx[edge.vertices[0]] = static_cast<uint16_t>(add_vertex(vtx0_pos + delta0));
             if (corner_vtx[edge.vertices[3]] == no_object)
-                corner_vtx[edge.vertices[3]] = static_cast<uint16_t>(add_vertex(vtx3_pos + delta));
+                corner_vtx[edge.vertices[3]] = static_cast<uint16_t>(add_vertex(vtx3_pos + delta3));
             const uint32_t new_vtx0     = corner_vtx[edge.vertices[0]];
-            const uint32_t new_ctl1_vtx = add_vertex(get_vertex(edge.vertices[1]) + delta);
-            const uint32_t new_ctl2_vtx = add_vertex(get_vertex(edge.vertices[2]) + delta);
+            const uint32_t new_ctl1_vtx = add_vertex(get_vertex(edge.vertices[1]) + delta1);
+            const uint32_t new_ctl2_vtx = add_vertex(get_vertex(edge.vertices[2]) + delta2);
             const uint32_t new_vtx3     = corner_vtx[edge.vertices[3]];
             const uint32_t new_edge_idx = add_edge(new_vtx0, new_ctl1_vtx, new_ctl2_vtx, new_vtx3);
             face.edges[i_edge]          = get_edge_sel(static_cast<int32_t>(new_edge_idx), inverse_edge);
@@ -494,13 +511,13 @@ void Sculptor::Geometry::extrude_faces(const uint8_t* const face_sel,
 
             // Create new side edges for the side face
             if (conn_edge[edge.vertices[0]] == no_object) {
-                const uint32_t ctl1_vtx = add_vertex(vtx0_pos + delta * (2.0f / 3.0f));
-                const uint32_t ctl2_vtx = add_vertex(vtx0_pos + delta * (1.0f / 3.0f));
+                const uint32_t ctl1_vtx = add_vertex(vtx0_pos + delta0 * (2.0f / 3.0f));
+                const uint32_t ctl2_vtx = add_vertex(vtx0_pos + delta0 * (1.0f / 3.0f));
                 conn_edge[edge.vertices[0]] = static_cast<uint16_t>(add_edge(new_vtx0, ctl1_vtx, ctl2_vtx, edge.vertices[0]));
             }
             if (conn_edge[edge.vertices[3]] == no_object) {
-                const uint32_t ctl1_vtx = add_vertex(vtx3_pos + delta * (2.0f / 3.0f));
-                const uint32_t ctl2_vtx = add_vertex(vtx3_pos + delta * (1.0f / 3.0f));
+                const uint32_t ctl1_vtx = add_vertex(vtx3_pos + delta3 * (2.0f / 3.0f));
+                const uint32_t ctl2_vtx = add_vertex(vtx3_pos + delta3 * (1.0f / 3.0f));
                 conn_edge[edge.vertices[3]] = static_cast<uint16_t>(add_edge(new_vtx3, ctl1_vtx, ctl2_vtx, edge.vertices[3]));
             }
             const uint32_t left_edge  = conn_edge[inverse_new ? edge.vertices[3] : edge.vertices[0]];
@@ -511,13 +528,15 @@ void Sculptor::Geometry::extrude_faces(const uint8_t* const face_sel,
             const int32_t bottom_edge = get_edge_sel(static_cast<int32_t>(edge_idx),     inverse_new);
 
             // Create side face's control points
-            const vmath::vec3 left_ctl  = get_vertex(edge.vertices[inverse_new ? 2 : 1]);
-            const vmath::vec3 right_ctl = get_vertex(edge.vertices[inverse_new ? 1 : 2]);
+            const vmath::vec3 left_ctl    = get_vertex(edge.vertices[inverse_new ? 2 : 1]);
+            const vmath::vec3 right_ctl   = get_vertex(edge.vertices[inverse_new ? 1 : 2]);
+            const vmath::vec3 delta_left  = inverse_new ? delta2 : delta1;
+            const vmath::vec3 delta_right = inverse_new ? delta1 : delta2;
 
-            const uint32_t ctl0 = add_vertex(left_ctl  + delta * (2.0f / 3.0f));
-            const uint32_t ctl1 = add_vertex(right_ctl + delta * (2.0f / 3.0f));
-            const uint32_t ctl2 = add_vertex(left_ctl  + delta * (1.0f / 3.0f));
-            const uint32_t ctl3 = add_vertex(right_ctl + delta * (1.0f / 3.0f));
+            const uint32_t ctl0 = add_vertex(left_ctl  + delta_left  * (2.0f / 3.0f));
+            const uint32_t ctl1 = add_vertex(right_ctl + delta_right * (2.0f / 3.0f));
+            const uint32_t ctl2 = add_vertex(left_ctl  + delta_left  * (1.0f / 3.0f));
+            const uint32_t ctl3 = add_vertex(right_ctl + delta_right * (1.0f / 3.0f));
 
             // Create side face
             add_face(top_edge,
@@ -527,9 +546,9 @@ void Sculptor::Geometry::extrude_faces(const uint8_t* const face_sel,
                      ctl0, ctl1, ctl2, ctl3);
         }
 
-        // Move this face's interior control points by delta
+        // Move this face's interior control points
         for (uint32_t i_ctl = 0; i_ctl < 4; i_ctl++)
-            move_vertex(face.ctrl_vertices[i_ctl], delta);
+            move_vertex(face.ctrl_vertices[i_ctl], get_delta(face.ctrl_vertices[i_ctl]));
     }
 
     set_dirty();
