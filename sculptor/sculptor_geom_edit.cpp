@@ -176,7 +176,6 @@ namespace {
 
     struct Transforms {
         vmath::mat4 model_view;
-        vmath::mat3 model_view_normal;
         vmath::mat3 view_inverse; // mat3x4: last column of inverse is always [0, 0, 0, 1], so omitted
         vmath::vec4 proj;
         vmath::vec4 proj_w;
@@ -2808,8 +2807,6 @@ void GeometryEditor::set_patch_transforms(VkCommandBuffer cmdbuf, const View& ds
     }
 
     transforms.model_view = model_view;
-
-    transforms.model_view_normal = vmath::transpose(vmath::inverse(vmath::mat3(model_view)));
 
     // Compute inverse of the rigid-body view matrix analytically (no general mat4 inverse needed).
     // The last column of the inverse is always [0,0,0,1] so we store only 3 columns as mat3x4.

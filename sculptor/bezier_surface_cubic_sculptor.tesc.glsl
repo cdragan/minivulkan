@@ -6,6 +6,7 @@
 #extension GL_GOOGLE_include_directive: require
 
 #include "bezier_cubic_data.glsl"
+#include "transforms.glsl"
 
 layout(vertices = 16) out;
 
@@ -24,5 +25,5 @@ void main()
         gl_TessLevelInner[1] = level;
     }
 
-    gl_out[gl_InvocationID].gl_Position = gl_in[gl_InvocationID].gl_Position;
+    gl_out[gl_InvocationID].gl_Position = gl_in[gl_InvocationID].gl_Position * model_view;
 }

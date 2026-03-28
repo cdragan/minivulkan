@@ -33,6 +33,7 @@ bool Sculptor::create_material_layouts()
                 VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
                 1,
                 VK_SHADER_STAGE_VERTEX_BIT
+                    | VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT
                     | VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT,
                 nullptr
             },

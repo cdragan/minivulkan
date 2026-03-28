@@ -24,10 +24,9 @@ void main()
                                   gl_TessCoord.x);
     }
 
-    const vec3 obj_pos  = bezier_curve_cubic(p[0], p[1], p[2], p[3], gl_TessCoord.y);
-    const vec4 view_pos = vec4(obj_pos, 1) * model_view;
+    const vec3 view_pos = bezier_curve_cubic(p[0], p[1], p[2], p[3], gl_TessCoord.y);
 
-    gl_Position = projection(view_pos.xyz);
+    gl_Position = projection(view_pos);
 
     const vec3 du = bezier_derivative_cubic(p[0], p[1], p[2], p[3], gl_TessCoord.y);
 
@@ -40,8 +39,7 @@ void main()
     }
     const vec3 dv = bezier_derivative_cubic(p[0], p[1], p[2], p[3], gl_TessCoord.x);
 
-    const vec3 obj_normal = cross(dv, du);
-    out_normal = normalize(obj_normal) * mat3(model_view_normal);
+    out_normal = normalize(cross(dv, du));
 
     out_object_id = gl_PrimitiveID;
 }
