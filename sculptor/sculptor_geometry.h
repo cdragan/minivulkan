@@ -31,10 +31,10 @@ class Geometry {
 
         struct FaceData {
             uint32_t material_id;
+            uint32_t max_tess_level;
         };
 
         struct FacesBuf {
-            int32_t  tess_level[4];
             FaceData face_data[1];
         };
 
@@ -46,6 +46,7 @@ class Geometry {
             int32_t  edges[4];
             uint32_t ctrl_vertices[4];
             uint32_t material_id;
+            uint32_t max_tess_level;
         };
 
         static constexpr uint32_t max_edges    = 0x8000U;
@@ -63,7 +64,6 @@ class Geometry {
         void render_vertices(VkCommandBuffer cmd_buf);
         void render_ctrl_pt_handles(VkCommandBuffer cmd_buf);
 
-        void     set_tess_level(int32_t level);
         uint32_t add_vertex(int16_t x, int16_t y, int16_t z);
         uint32_t add_vertex(vmath::vec3 p);
         uint32_t get_num_vertices() const { return num_vertices; }
@@ -111,7 +111,6 @@ class Geometry {
         Buffer   gpu_buffer;
         Buffer   host_buffer;
 
-        int32_t  tess_level       = 3;
         uint32_t last_buffer      = 0;
         uint32_t num_vertices     = 0;
         uint32_t num_indices      = 0;

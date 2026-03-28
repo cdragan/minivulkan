@@ -147,6 +147,7 @@ namespace {
         frame_flag_select_faces     = 1u,
         frame_flag_select_vertices  = 2u,
         frame_flag_wireframe_mode   = 4u,
+        frame_flag_tessellation_off = 8u,
     };
 
     // Frame-global data passed to shaders, must match frame_data.glsl
@@ -220,8 +221,6 @@ bool is_ctrl_down()
 }
 
 namespace Sculptor {
-
-int GeometryEditor::tess_level = 3;
 
 GeometryEditor::Camera::Axes GeometryEditor::Camera::get_axes() const
 {
@@ -581,7 +580,7 @@ void GeometryEditor::free_view_resources(View* dst_view)
 bool GeometryEditor::allocate_resources_once()
 {
     // Check if already allocated
-    if (gray_patch_mat)
+    if (gray_patch_gbuffer_mat)
         return true;
 
     if ( ! patch_geometry.allocate())
@@ -684,30 +683,6 @@ bool GeometryEditor::create_materials()
                                   VK_FORMAT_UNDEFINED,
                                   VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
                                   "materials buffer"))
-        return false;
-
-    static const MaterialInfo object_mat_info = {
-        {
-            shader_sculptor_pass_through_vert,
-            shader_sculptor_object_frag,
-            shader_bezier_surface_cubic_sculptor_tesc,
-            shader_bezier_surface_cubic_sculptor_tese
-        },
-        vertex_attributes,
-        0.0f,    // depth_bias
-        std::size(vertex_attributes),
-        sizeof(Sculptor::Geometry::Vertex),
-        { VK_FORMAT_UNDEFINED, VK_FORMAT_DISABLED, VK_FORMAT_DISABLED, VK_FORMAT_DISABLED },
-        VK_PRIMITIVE_TOPOLOGY_PATCH_LIST,
-        16,      // patch_control_points
-        VK_POLYGON_MODE_FILL,
-        VK_CULL_MODE_BACK_BIT,
-        true,    // use_depth
-        false,   // alpha_blend
-        make_byte_color(0, 0, 0) // diffuse
-    };
-
-    if ( ! create_material(object_mat_info, &gray_patch_mat))
         return false;
 
     static const MaterialInfo gbuffer_mat_info = {
@@ -825,29 +800,6 @@ bool GeometryEditor::create_materials()
     if ( ! Sculptor::create_material(grid_info, &grid_mat))
         return false;
     set_material_buf(grid_info, mat_grid);
-
-    static const MaterialInfo wireframe_mat_info = {
-        {
-            shader_bezier_line_cubic_sculptor_vert,
-            shader_sculptor_color_frag
-        },
-        nullptr, // vertex_attributes (uses vertex pulling from SSBOs at bindings 3 and 4)
-        0.0f,    // depth_bias
-        0,       // num_vertex_attributes
-        0,       // vertex_stride
-        { VK_FORMAT_UNDEFINED, VK_FORMAT_DISABLED, VK_FORMAT_DISABLED, VK_FORMAT_DISABLED },
-        VK_PRIMITIVE_TOPOLOGY_LINE_STRIP,
-        0,       // patch_control_points
-        VK_POLYGON_MODE_FILL,
-        VK_CULL_MODE_NONE,
-        false,   // use_depth (wireframe shows hidden edges too)
-        false,   // alpha_blend
-        make_byte_color(0.3f, 0.3f, 0.3f)
-    };
-
-    if ( ! Sculptor::create_material(wireframe_mat_info, &wireframe_mat))
-        return false;
-    set_material_buf(wireframe_mat_info, mat_wireframe);
 
     static const MaterialInfo wireframe_tess_mat_info = {
         {
@@ -2017,7 +1969,6 @@ bool GeometryEditor::draw_frame(VkCommandBuffer cmdbuf, uint32_t image_idx)
         return false;
 
     // Send any updates/modifications to geometry to the GPU
-    patch_geometry.set_tess_level(toolbar_state.toggle_tessellation ? 1 : tess_level);
     if ( ! patch_geometry.send_to_gpu(cmdbuf))
         return false;
 
@@ -2440,6 +2391,9 @@ void GeometryEditor::set_frame_data(VkCommandBuffer cmdbuf, uint32_t image_idx)
 
     if (toolbar_state.toggle_wireframe)
         frame_data.flags |= frame_flag_wireframe_mode;
+
+    if (toolbar_state.toggle_tessellation)
+        frame_data.flags |= frame_flag_tessellation_off;
 
     frame_data.mouse_pos = view.mouse_pos;
 

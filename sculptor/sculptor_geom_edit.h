@@ -24,8 +24,6 @@ class GeometryEditor: public Editor {
         void free_resources() override;
         bool draw_frame(VkCommandBuffer cmdbuf, uint32_t image_idx) override;
 
-        static int tess_level;
-
         void trigger_save();
         void trigger_load();
 
@@ -215,14 +213,12 @@ class GeometryEditor: public Editor {
         uint32_t           window_height    = 0;
         uint32_t           materials_stride = 0;
 
-        VkPipeline         gray_patch_mat         = VK_NULL_HANDLE;
         VkPipeline         gray_patch_gbuffer_mat = VK_NULL_HANDLE;
         VkPipeline         selection_mat          = VK_NULL_HANDLE;
         VkPipeline         vertex_mat             = VK_NULL_HANDLE;
         VkPipeline         grid_mat               = VK_NULL_HANDLE;
         VkPipeline         ctrl_pt_handles_mat    = VK_NULL_HANDLE;
         VkPipeline         wireframe_tess_mat     = VK_NULL_HANDLE;
-        VkPipeline         wireframe_mat          = VK_NULL_HANDLE;
         VkPipeline         lighting_mat           = VK_NULL_HANDLE;
 
         VkDescriptorSet    toolbar_texture        = VK_NULL_HANDLE;

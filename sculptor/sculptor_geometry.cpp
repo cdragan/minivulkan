@@ -137,7 +137,6 @@ bool Sculptor::Geometry::send_to_gpu(VkCommandBuffer cmd_buf)
 
     const uint32_t cur_faces_offset = host_faces_offset + last_buffer * faces_stride;
     FacesBuf* const faces_ptr = host_buffer.get_ptr<FacesBuf>(cur_faces_offset);
-    faces_ptr->tess_level[0] = tess_level;
 
     // Write 16 indices for each face to the host copy of the index buffer
     const uint32_t cur_indices_offset = host_indices_offset + last_buffer * indices_stride;
@@ -148,7 +147,8 @@ bool Sculptor::Geometry::send_to_gpu(VkCommandBuffer cmd_buf)
 
         const Face& face = obj_faces[i_face];
 
-        faces_ptr->face_data[i_face].material_id = face.material_id;
+        faces_ptr->face_data[i_face].material_id    = face.material_id;
+        faces_ptr->face_data[i_face].max_tess_level = face.max_tess_level;
 
         // Write indices for the edges; note the indices of corners overlap
         for (uint32_t i_edge = 0; i_edge < 4; i_edge++) {
@@ -558,14 +558,6 @@ void Sculptor::Geometry::extrude_faces(const uint8_t* const face_sel,
     set_dirty();
 }
 
-void Sculptor::Geometry::set_tess_level(const int32_t level)
-{
-    if (level > 0 && level != tess_level) {
-        tess_level = level;
-        set_dirty();
-    }
-}
-
 uint32_t Sculptor::Geometry::add_vertex(int16_t x, int16_t y, int16_t z)
 {
     assert(num_vertices < max_vertices);
@@ -649,7 +641,8 @@ void Sculptor::Geometry::set_face(uint32_t face_id, int32_t edge_0, int32_t edge
     obj_faces[face_id].ctrl_vertices[2] = vtx_2;
     obj_faces[face_id].ctrl_vertices[3] = vtx_3;
 
-    obj_faces[face_id].material_id = 0;
+    obj_faces[face_id].material_id    = 0;
+    obj_faces[face_id].max_tess_level = 0;
 
     validate_face(face_id);
 }

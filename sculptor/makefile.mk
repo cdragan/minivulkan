@@ -11,11 +11,9 @@ src_files += sculptor_materials.cpp
 src_files += sculptor_geom_edit.cpp
 
 shader_files += sculptor_pass_through.vert.glsl
-shader_files += bezier_line_cubic_sculptor.vert.glsl
 shader_files += sculptor_simple.vert.glsl
 shader_files += bezier_surface_cubic_sculptor.tesc.glsl
 shader_files += bezier_surface_cubic_sculptor.tese.glsl
-shader_files += sculptor_object.frag.glsl
 shader_files += sculptor_g_buffer.frag.glsl
 shader_files += sculptor_selection.frag.glsl
 shader_files += sculptor_clear_hover.comp.glsl

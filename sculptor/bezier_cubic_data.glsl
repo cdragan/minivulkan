@@ -3,11 +3,10 @@
 
 struct face_data {
     uint material_id;
-    uint state; // 0: default, 1: hovered, 2: selected
+    uint max_tess_level;
 };
 
 layout(binding = 2) readonly buffer faces_data {
-    ivec4     tess_level;
     face_data faces[]; // Indexed with gl_PrimitiveID
 };
 

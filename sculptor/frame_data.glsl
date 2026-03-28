@@ -32,3 +32,4 @@ layout(binding = 6) uniform frame_data {
 #define FRAME_FLAG_SELECT_FACES     1u // face selection is active
 #define FRAME_FLAG_SELECT_VERTICES  2u // vertex selection is active
 #define FRAME_FLAG_WIREFRAME_MODE   4u // object is rendered in wireframe mode
+#define FRAME_FLAG_TESSELLATION_OFF 8u // tessellation is disabled (level forced to 1)
