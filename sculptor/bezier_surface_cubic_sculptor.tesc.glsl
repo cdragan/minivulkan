@@ -11,27 +11,16 @@
 
 layout(vertices = 16) out;
 
-// Target pixels per tessellation segment
 const float pixels_per_segment = 16.0;
 
-vec2 to_screen(vec4 obj_pos)
+float edge_tess(vec2 p0, vec2 p1, vec2 p2, vec2 p3, float max_level)
 {
-    const vec4 clip = projection((obj_pos * model_view).xyz);
-    return clip.xy / max(clip.w, 0.001);
-}
+    const float distance = length((p1 - p0) / pixel_dim)
+                         + length((p2 - p1) / pixel_dim)
+                         + length((p3 - p2) / pixel_dim);
+    const float screen_level = distance / pixels_per_segment;
 
-float edge_level(vec4 p0, vec4 p1, vec4 p2, vec4 p3)
-{
-    const vec2 n0 = to_screen(p0);
-    const vec2 n1 = to_screen(p1);
-    const vec2 n2 = to_screen(p2);
-    const vec2 n3 = to_screen(p3);
-
-    const float arc_pixels = (length((n1 - n0) / pixel_dim)
-                            + length((n2 - n1) / pixel_dim)
-                            + length((n3 - n2) / pixel_dim));
-
-    return max(1.0, arc_pixels / pixels_per_segment);
+    return clamp(screen_level, 1.0, max_level);
 }
 
 void calculate_tess_level()
@@ -49,17 +38,30 @@ void calculate_tess_level()
         const uint  face_max       = faces[gl_PrimitiveID].max_tess_level;
         const float max_level      = face_max > 0u ? float(face_max) : max_tess_level;
 
-        const float lev0 = edge_level(gl_in[ 0].gl_Position, gl_in[ 4].gl_Position, gl_in[ 8].gl_Position, gl_in[12].gl_Position);
-        const float lev1 = edge_level(gl_in[ 0].gl_Position, gl_in[ 1].gl_Position, gl_in[ 2].gl_Position, gl_in[ 3].gl_Position);
-        const float lev2 = edge_level(gl_in[ 3].gl_Position, gl_in[ 7].gl_Position, gl_in[11].gl_Position, gl_in[15].gl_Position);
-        const float lev3 = edge_level(gl_in[12].gl_Position, gl_in[13].gl_Position, gl_in[14].gl_Position, gl_in[15].gl_Position);
+        vec2 screen_pos[16];
+        for (int i = 0; i < 16; i++) {
+            const vec4 clip = projection((gl_in[i].gl_Position * model_view).xyz);
+            screen_pos[i] = clip.xy / max(clip.w, 0.001);
+        }
 
-        gl_TessLevelOuter[0] = clamp(lev0, 1.0, max_level);
-        gl_TessLevelOuter[1] = clamp(lev1, 1.0, max_level);
-        gl_TessLevelOuter[2] = clamp(lev2, 1.0, max_level);
-        gl_TessLevelOuter[3] = clamp(lev3, 1.0, max_level);
-        gl_TessLevelInner[0] = max(gl_TessLevelOuter[1], gl_TessLevelOuter[3]);
-        gl_TessLevelInner[1] = max(gl_TessLevelOuter[0], gl_TessLevelOuter[2]);
+        float vert_level[4];
+        for (int i = 0; i < 4; i++) {
+            vert_level[i] = edge_tess(screen_pos[i], screen_pos[i + 4], screen_pos[i + 8], screen_pos[i + 12], max_level);
+        }
+
+        float horiz_level[4];
+        for (int i = 0; i < 4; i++) {
+            const int j = i * 4;
+            horiz_level[i] = edge_tess(screen_pos[j], screen_pos[j + 1], screen_pos[j + 2], screen_pos[j + 3], max_level);
+        }
+
+        gl_TessLevelOuter[0] = vert_level[0];
+        gl_TessLevelOuter[1] = horiz_level[0];
+        gl_TessLevelOuter[2] = vert_level[3];
+        gl_TessLevelOuter[3] = horiz_level[3];
+
+        gl_TessLevelInner[0] = max(max(horiz_level[0], horiz_level[1]), max(horiz_level[2], horiz_level[3]));
+        gl_TessLevelInner[1] = max(max(vert_level[0],  vert_level[1]),  max(vert_level[2],  vert_level[3]));
     }
 }
 
