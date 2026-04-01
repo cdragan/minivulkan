@@ -239,6 +239,19 @@ void GeometryEditor::Camera::move(const vmath::vec3& delta)
         pos = fixed_pos;
 }
 
+GeometryEditor::OrthoAxes GeometryEditor::get_ortho_axes(ViewType view_type)
+{
+    switch (view_type) {
+        case ViewType::front:  return { { 0,  0,  1}, {0, 1, 0} };
+        case ViewType::back:   return { { 0,  0, -1}, {0, 1, 0} };
+        case ViewType::left:   return { { 1,  0,  0}, {0, 1, 0} };
+        case ViewType::right:  return { {-1,  0,  0}, {0, 1, 0} };
+        case ViewType::bottom: return { { 0,  1,  0}, {0, 0, 1} };
+        case ViewType::top:    return { { 0, -1,  0}, {0, 0, 1} };
+        default:               assert(false); return {};
+    }
+}
+
 GeometryEditor::Camera GeometryEditor::get_rotated_camera(const View& dst_view) const
 {
     Camera camera{dst_view.camera[static_cast<int>(dst_view.view_type)]};
@@ -1234,11 +1247,33 @@ void GeometryEditor::handle_mouse_actions(const UserInput& input, bool view_hove
                             break;
 
                         default: {
-                            // TODO switch to free_moving and apply rotation
-                            constexpr float view_bounds        = 1.1f;
-                            const     float ortho_scale_factor = camera.view_height / (int16_scale * static_cast<float>(view.height));
-                            camera.pos.x = vmath::clamp(camera.pos.x - ortho_scale_factor * input.mouse_pos_delta.x, -view_bounds, view_bounds);
-                            camera.pos.y = vmath::clamp(camera.pos.y + ortho_scale_factor * input.mouse_pos_delta.y, -view_bounds, view_bounds);
+                            const vmath::vec3 view_axis = get_ortho_axes(view.view_type).view_axis;
+
+                            const float mid_x = static_cast<float>(view.width)  * 0.5f;
+                            const float mid_y = static_cast<float>(view.height) * 0.5f;
+
+                            // Rotate around the screen midpoint by grabbing with mouse
+                            const float cur_dx  = view.mouse_pos.x - mid_x;
+                            const float cur_dy  = -(view.mouse_pos.y - mid_y);
+                            const float prev_dx = cur_dx - input.mouse_pos_delta.x;
+                            const float prev_dy = cur_dy + input.mouse_pos_delta.y;
+
+                            // Avoid atan2 instability when mouse is near center
+                            constexpr float min_dist2 = 4.0f;
+                            if (cur_dx * cur_dx + cur_dy * cur_dy > min_dist2 &&
+                                prev_dx * prev_dx + prev_dy * prev_dy > min_dist2) {
+
+                                float delta_angle = atan2f(prev_dy, prev_dx) - atan2f(cur_dy, cur_dx);
+
+                                // Wrap to [-pi, pi]
+                                if (delta_angle >  vmath::pi)
+                                    delta_angle -= vmath::two_pi;
+                                if (delta_angle < -vmath::pi)
+                                    delta_angle += vmath::two_pi;
+
+                                const vmath::quat delta_rot{view_axis, delta_angle};
+                                camera.rot = vmath::normalize(delta_rot * camera.rot);
+                            }
                             break;
                         }
                     }
@@ -1248,13 +1283,9 @@ void GeometryEditor::handle_mouse_actions(const UserInput& input, bool view_hove
             case Action::pan:
                 if ( ! shift)
                     release_mouse();
-                else if (mouse_moved && mouse_action_pos) {
+                else if (mouse_moved && (mouse_action_pos || view.view_type != ViewType::free_moving)) {
                     Camera& camera = view.camera[static_cast<int>(view.view_type)];
 
-                    const float aspect = static_cast<float>(view.width)  / static_cast<float>(view.height);
-                    const float ndc_x  = view.mouse_pos.x / static_cast<float>(view.width)  * 2.0f - 1.0f;
-                    const float ndc_y  = 1.0f - view.mouse_pos.y / static_cast<float>(view.height) * 2.0f;
-                    const float half_h = camera.view_height / (2.0f * int16_scale);
                     constexpr float max_pos = 1.1f;
 
                     switch (view.view_type) {
@@ -1262,6 +1293,9 @@ void GeometryEditor::handle_mouse_actions(const UserInput& input, bool view_hove
                         default:
                             assert(view.view_type == ViewType::free_moving);
                             {
+                                const float aspect = static_cast<float>(view.width)  / static_cast<float>(view.height);
+                                const float ndc_x  = view.mouse_pos.x / static_cast<float>(view.width)  * 2.0f - 1.0f;
+                                const float ndc_y  = 1.0f - view.mouse_pos.y / static_cast<float>(view.height) * 2.0f;
                                 const auto [right, up] = camera.get_axes();
 
                                 const vmath::vec3 move_delta  = *mouse_action_pos - camera.pos;
@@ -1278,34 +1312,22 @@ void GeometryEditor::handle_mouse_actions(const UserInput& input, bool view_hove
                             break;
 
                         case ViewType::front:
-                            camera.pos.x = vmath::clamp(mouse_action_pos->x - ndc_x * aspect * half_h, -max_pos, max_pos);
-                            camera.pos.y = vmath::clamp(mouse_action_pos->y - ndc_y * half_h,          -max_pos, max_pos);
-                            break;
-
                         case ViewType::back:
-                            camera.pos.x = vmath::clamp(mouse_action_pos->x + ndc_x * aspect * half_h, -max_pos, max_pos);
-                            camera.pos.y = vmath::clamp(mouse_action_pos->y - ndc_y * half_h,          -max_pos, max_pos);
-                            break;
-
                         case ViewType::left:
-                            camera.pos.z = vmath::clamp(mouse_action_pos->z + ndc_x * aspect * half_h, -max_pos, max_pos);
-                            camera.pos.y = vmath::clamp(mouse_action_pos->y - ndc_y * half_h,          -max_pos, max_pos);
-                            break;
-
                         case ViewType::right:
-                            camera.pos.z = vmath::clamp(mouse_action_pos->z - ndc_x * aspect * half_h, -max_pos, max_pos);
-                            camera.pos.y = vmath::clamp(mouse_action_pos->y - ndc_y * half_h,          -max_pos, max_pos);
-                            break;
-
                         case ViewType::top:
-                            camera.pos.x = vmath::clamp(mouse_action_pos->x - ndc_x * aspect * half_h, -max_pos, max_pos);
-                            camera.pos.z = vmath::clamp(mouse_action_pos->z - ndc_y * half_h,          -max_pos, max_pos);
+                        case ViewType::bottom: {
+                            const auto [view_axis, natural_up] = get_ortho_axes(view.view_type);
+                            const vmath::vec3 screen_up    = camera.rot.rotate(natural_up);
+                            const vmath::vec3 screen_right = vmath::normalize(vmath::cross_product(screen_up, view_axis));
+                            const float scale = camera.view_height / (int16_scale * static_cast<float>(view.height));
+                            camera.pos = vmath::clamp(
+                                camera.pos
+                                    - screen_right * (input.mouse_pos_delta.x * scale)
+                                    + screen_up    * (input.mouse_pos_delta.y * scale),
+                                vmath::vec3{-max_pos}, vmath::vec3{max_pos});
                             break;
-
-                        case ViewType::bottom:
-                            camera.pos.x = vmath::clamp(mouse_action_pos->x + ndc_x * aspect * half_h, -max_pos, max_pos);
-                            camera.pos.z = vmath::clamp(mouse_action_pos->z - ndc_y * half_h,          -max_pos, max_pos);
-                            break;
+                        }
                     }
                 }
                 break;
@@ -2721,40 +2743,16 @@ void GeometryEditor::set_patch_transforms(VkCommandBuffer cmdbuf, const View& ds
             break;
 
         case ViewType::front:
-            model_view = vmath::look_at(vmath::vec3{camera.pos.x, camera.pos.y, -2},
-                                        vmath::vec3{camera.pos.x, camera.pos.y, 0},
-                                        Camera::world_up);
-            break;
-
         case ViewType::back:
-            model_view = vmath::look_at(vmath::vec3{camera.pos.x, camera.pos.y, 2},
-                                        vmath::vec3{camera.pos.x, camera.pos.y, 0},
-                                        Camera::world_up);
-            break;
-
         case ViewType::left:
-            model_view = vmath::look_at(vmath::vec3{-2, camera.pos.y, camera.pos.z},
-                                        vmath::vec3{0, camera.pos.y, camera.pos.z},
-                                        Camera::world_up);
-            break;
-
         case ViewType::right:
-            model_view = vmath::look_at(vmath::vec3{2, camera.pos.y, camera.pos.z},
-                                        vmath::vec3{0, camera.pos.y, camera.pos.z},
-                                        Camera::world_up);
-            break;
-
-        case ViewType::bottom:
-            model_view = vmath::look_at(vmath::vec3{camera.pos.x, -2, camera.pos.z},
-                                        vmath::vec3{camera.pos.x, 0, camera.pos.z},
-                                        vmath::vec3{0, 0, 1});
-            break;
-
         case ViewType::top:
-            model_view = vmath::look_at(vmath::vec3{camera.pos.x, 2, camera.pos.z},
-                                        vmath::vec3{camera.pos.x, 0, camera.pos.z},
-                                        vmath::vec3{0, 0, 1});
+        case ViewType::bottom: {
+            const auto [view_axis, natural_up] = get_ortho_axes(dst_view.view_type);
+            const vmath::vec3 up = camera.rot.rotate(natural_up);
+            model_view = vmath::look_at(camera.pos - view_axis * 2.0f, camera.pos, up);
             break;
+        }
 
         default:
             assert(0);

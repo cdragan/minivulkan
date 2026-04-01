@@ -86,6 +86,13 @@ class GeometryEditor: public Editor {
             num_types
         };
 
+        struct OrthoAxes {
+            vmath::vec3 view_axis;
+            vmath::vec3 natural_up;
+        };
+
+        static OrthoAxes get_ortho_axes(ViewType view_type);
+
         struct Camera {
             vmath::vec3 pos{0.0f};
             float       view_height = 0;
