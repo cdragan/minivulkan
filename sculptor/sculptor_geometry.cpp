@@ -248,6 +248,64 @@ void Sculptor::Geometry::move_vertex(const uint32_t vtx, const vmath::vec3 delta
     vertex.pos[2] = to_int16(vertex.pos[2] + delta.z);
 }
 
+Sculptor::Geometry::BoundingBox Sculptor::Geometry::get_bounding_box() const
+{
+    if (num_vertices == 0) {
+        return { {0.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 0.0f} };
+    }
+
+    vmath::vec3 min_pos = get_vertex(0);
+    vmath::vec3 max_pos = get_vertex(0);
+
+    for (uint32_t i = 1; i < num_vertices; i++) {
+        const vmath::vec3 vtx = get_vertex(i);
+        min_pos = vmath::min(min_pos, vtx);
+        max_pos = vmath::max(max_pos, vtx);
+    }
+
+    return { min_pos, max_pos };
+}
+
+std::optional<Sculptor::Geometry::BoundingBox>
+Sculptor::Geometry::get_selection_bounding_box(const uint8_t* const vtx_sel,
+                                               const uint8_t* const face_sel) const
+{
+    vmath::vec3 min_pos{int16_scale};
+    vmath::vec3 max_pos{-int16_scale};
+    bool found = false;
+
+    if (vtx_sel) {
+        for (uint32_t i = 0; i < num_vertices; i++) {
+            if (vtx_sel[i] & obj_selected) {
+                const vmath::vec3 vtx = get_vertex(i);
+                min_pos = vmath::min(min_pos, vtx);
+                max_pos = vmath::max(max_pos, vtx);
+                found = true;
+            }
+        }
+    }
+
+    if (face_sel) {
+        for (uint32_t i = 0; i < num_faces; i++) {
+            if (face_sel[i] & obj_selected) {
+                uint32_t vtx_list[16];
+                get_face_vertex_indices(i, vtx_list);
+                for (uint32_t j = 0; j < 16; j++) {
+                    const vmath::vec3 vtx = get_vertex(vtx_list[j]);
+                    min_pos = vmath::min(min_pos, vtx);
+                    max_pos = vmath::max(max_pos, vtx);
+                }
+                found = true;
+            }
+        }
+    }
+
+    if ( ! found)
+        return std::nullopt;
+
+    return BoundingBox{ min_pos, max_pos };
+}
+
 void Sculptor::Geometry::get_face_vertex_indices(uint32_t face_id, uint32_t out_vtx[16]) const
 {
     assert(face_id < num_faces);

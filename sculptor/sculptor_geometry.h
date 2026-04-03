@@ -6,6 +6,7 @@
 #include "sculptor_undo.h"
 #include "../core/resource.h"
 #include "../core/vmath.h"
+#include <optional>
 
 
 namespace Sculptor {
@@ -78,6 +79,14 @@ class Geometry {
                           uint32_t vtx_0, uint32_t vtx_1, uint32_t vtx_2, uint32_t vtx_3);
         uint32_t get_num_faces() const { return num_faces; }
         void     validate_face(uint32_t face_id);
+
+        struct BoundingBox {
+            vmath::vec3 min_pos;
+            vmath::vec3 max_pos;
+        };
+        BoundingBox get_bounding_box() const;
+        std::optional<BoundingBox> get_selection_bounding_box(const uint8_t* vtx_sel,
+                                                              const uint8_t* face_sel) const;
         void     get_face_vertex_indices(uint32_t face_id, uint32_t out_vtx[16]) const;
 
         enum class MoveMode { along_delta, along_normal };

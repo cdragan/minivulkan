@@ -185,6 +185,7 @@ class GeometryEditor: public Editor {
         std::optional<vmath::vec3> calc_grid_world_pos(const View& src_view) const;
         void handle_mouse_actions(const UserInput& input, bool view_hovered);
         void handle_keyboard_actions();
+        void center_selection();
         void gui_status_bar();
         bool gui_toolbar();
         bool toolbar_button(ToolbarButton button, bool* checked = nullptr);
@@ -194,7 +195,6 @@ class GeometryEditor: public Editor {
         void move_selected_vertices(const vmath::vec3& delta);
         void apply_move(const UserInput& input);
         void apply_extrude(const UserInput& input);
-        void select_vertices_from_faces();
         // Applies interim rotation over pivot point to the camera
         Camera get_rotated_camera(const View& dst_view) const;
 

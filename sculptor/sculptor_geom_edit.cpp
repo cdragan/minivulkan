@@ -13,6 +13,7 @@
 #include "sculptor_shaders.h"
 #include "../core/shaders.h"
 
+#include <algorithm>
 #include <iterator>
 #include <math.h>
 #include <stdio.h>
@@ -1544,6 +1545,9 @@ void GeometryEditor::handle_keyboard_actions()
         toolbar_state.view_ortho_z = false;
     }
 
+    if ((ImGui::IsKeyPressed(ImGuiKey_Period) || ImGui::IsKeyPressed(ImGuiKey_KeypadDecimal)) && no_modifier)
+        center_selection();
+
     if (ImGui::IsKeyPressed(ImGuiKey_T) && is_alt_down() && ! is_ctrl_down() && ! is_shift_down())
         toolbar_state.toggle_tessellation = ! toolbar_state.toggle_tessellation;
 
@@ -1641,6 +1645,52 @@ void GeometryEditor::handle_keyboard_actions()
     }
 
     switch_mode(new_mode);
+}
+
+void GeometryEditor::center_selection()
+{
+    const uint8_t* const vtx_sel  = toolbar_state.select.vertices ? cur_res->vtx_sel_host_buf.get_ptr<uint8_t>() : nullptr;
+    const uint8_t* const face_sel = toolbar_state.select.faces    ? cur_res->sel_host_buf.get_ptr<uint8_t>()     : nullptr;
+
+    const std::optional<Sculptor::Geometry::BoundingBox> sel_bbox =
+        patch_geometry.get_selection_bounding_box(vtx_sel, face_sel);
+
+    const Sculptor::Geometry::BoundingBox bbox = sel_bbox ? *sel_bbox : patch_geometry.get_bounding_box();
+
+    const float       inv_scale = 1.0f / int16_scale;
+    const vmath::vec3 center    = (bbox.min_pos + bbox.max_pos) * 0.5f * inv_scale;
+    const vmath::vec3 bbox_size = (bbox.max_pos - bbox.min_pos) * inv_scale;
+
+    const float max_size = std::max(std::max(std::max(
+                                bbox_size.x,
+                                bbox_size.y),
+                                bbox_size.z),
+                                2 * inv_scale);
+
+    Camera& camera = view.camera[static_cast<int>(view.view_type)];
+
+    if (view.view_type == ViewType::free_moving) {
+        const float       half_size = max_size * 0.5f * 1.75f;
+        const float       dist      = fmaxf(half_size / vmath::tan(fov_radians * 0.5f), 0.015f);
+        const vmath::vec3 home_pos  = center - camera.dir * dist;
+        constexpr float   epsilon   = 1e-5f;
+        if (vmath::length(camera.pos - home_pos) > epsilon) {
+            camera.pos = home_pos;
+        }
+    }
+    else {
+        const float fit_view_height = max_size * int16_scale * 1.75f;
+        constexpr float epsilon     = 1e-5f;
+        const bool at_home_pos      = vmath::length(camera.pos - center) < epsilon;
+        const bool at_home_zoom     = fabsf(camera.view_height - fit_view_height) < 0.5f;
+        if (at_home_pos && at_home_zoom) {
+            camera.rot = vmath::quat{0.0f, 0.0f, 0.0f, 1.0f};
+        }
+        else {
+            camera.pos         = center;
+            camera.view_height = fit_view_height;
+        }
+    }
 }
 
 bool GeometryEditor::gui_toolbar()
