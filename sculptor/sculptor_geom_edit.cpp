@@ -129,6 +129,7 @@ Future additions
 namespace {
     enum MaterialsForShaders {
         mat_grid,
+        mat_grid_major,
         mat_vertex_sel,
         mat_wireframe,
         num_materials
@@ -809,12 +810,32 @@ bool GeometryEditor::create_materials()
         VK_CULL_MODE_NONE,
         true,    // use_depth
         false,   // alpha_blend
-        make_byte_color(0.333f, 0.333f, 0.333f) // diffuse
+        make_byte_color(0.25f, 0.25f, 0.25f) // diffuse
+    };
+
+    static const MaterialInfo grid_major_info = {
+        {
+            shader_sculptor_simple_vert,
+            shader_sculptor_color_frag
+        },
+        vertex_attributes,
+        0.0f,    // depth_bias
+        std::size(vertex_attributes),
+        sizeof(Sculptor::Geometry::Vertex),
+        { VK_FORMAT_UNDEFINED, VK_FORMAT_DISABLED, VK_FORMAT_DISABLED, VK_FORMAT_DISABLED },
+        VK_PRIMITIVE_TOPOLOGY_LINE_LIST,
+        0,       // patch_control_points
+        VK_POLYGON_MODE_FILL,
+        VK_CULL_MODE_NONE,
+        true,    // use_depth
+        false,   // alpha_blend
+        make_byte_color(0.4f, 0.4f, 0.4f) // diffuse
     };
 
     if ( ! Sculptor::create_material(grid_info, &grid_mat))
         return false;
     set_material_buf(grid_info, mat_grid);
+    set_material_buf(grid_major_info, mat_grid_major);
 
     static const MaterialInfo wireframe_tess_mat_info = {
         {
@@ -2917,24 +2938,17 @@ bool GeometryEditor::render_grid(VkCommandBuffer cmdbuf,
                                  View&           dst_view,
                                  uint32_t        image_idx)
 {
-    const uint32_t sub_buf_stride = max_grid_lines * 2 * sizeof(Sculptor::Geometry::Vertex);
+    constexpr float   min_grid_pixels = 10;
+    constexpr int32_t grid_min        = -0x8000;
+    constexpr int32_t grid_max        = 0x7FFF;
+    const uint32_t    sub_buf_stride  = max_grid_lines * 2 * sizeof(Sculptor::Geometry::Vertex);
 
     auto     vertices  = grid_buf.get_ptr<Sculptor::Geometry::Vertex>(image_idx, sub_buf_stride);
     uint32_t num_lines = 0;
 
-    uint32_t idx_1  = 0;
-    uint32_t idx_2  = 2;
-    uint32_t idx_z  = 1;
-    int32_t  min_1  = -0x8000;
-    int32_t  max_1  = 0x8000;
-    int32_t  step_1 = 0x800;
-    int32_t  min_2  = -0x8000;
-    int32_t  max_2  = 0x8000;
-    int32_t  step_2 = 0x800;
-
-    const auto fix_pos = [](int32_t x) -> int16_t {
-        return (x == 0x8000) ? 0x7FFF : static_cast<int16_t>(x);
-    };
+    uint32_t idx_1 = 0;
+    uint32_t idx_2 = 2;
+    uint32_t idx_z = 1;
 
     switch (dst_view.view_type) {
         case ViewType::front:
@@ -2954,25 +2968,109 @@ bool GeometryEditor::render_grid(VkCommandBuffer cmdbuf,
             break;
     }
 
-    for (int32_t x = min_1; x <= max_1 && num_lines < max_grid_lines; x += step_1, num_lines++) {
-        Sculptor::Geometry::Vertex* const vtx = &vertices[num_lines * 2];
-        vtx[0].pos[idx_1] = fix_pos(x);
-        vtx[0].pos[idx_2] = fix_pos(min_2);
-        vtx[0].pos[idx_z] = 0;
-        vtx[1].pos[idx_1] = fix_pos(x);
-        vtx[1].pos[idx_2] = fix_pos(max_2);
-        vtx[1].pos[idx_z] = 0;
+    const Camera& cam    = dst_view.camera[static_cast<int>(dst_view.view_type)];
+    const float   view_h = cam.view_height;
+    const float   pix_h  = static_cast<float>(dst_view.height);
+    const float   pix_w  = static_cast<float>(dst_view.width);
+
+    const auto floor_step = [](int32_t val, int32_t step) -> int32_t {
+        return val & ~(step - 1);
+    };
+    const auto ceil_step = [](int32_t val, int32_t step) -> int32_t {
+        return (val + step - 1) & ~(step - 1);
+    };
+
+    int32_t minor_step;
+    int32_t min_1;
+    int32_t max_1;
+    int32_t min_2;
+    int32_t max_2;
+
+    if (view_h > 0.0f) {
+        const float min_step_f = min_grid_pixels * view_h / pix_h;
+        minor_step = 1;
+        while (static_cast<float>(minor_step) < min_step_f && minor_step < 0x10000 / 8 / 2)
+            minor_step <<= 1;
+
+        const float half_h   = view_h * 0.5f;
+        const float half_w   = half_h * pix_w / pix_h;
+        const float half_ext = vmath::length(vmath::vec2{half_w, half_h});
+        const float center_1 = cam.pos[idx_1] * int16_scale;
+        const float center_2 = cam.pos[idx_2] * int16_scale;
+
+        min_1 = std::max(grid_min, floor_step(static_cast<int32_t>(center_1 - half_ext), minor_step));
+        max_1 = std::min(grid_max, ceil_step( static_cast<int32_t>(center_1 + half_ext), minor_step));
+        min_2 = std::max(grid_min, floor_step(static_cast<int32_t>(center_2 - half_ext), minor_step));
+        max_2 = std::min(grid_max, ceil_step( static_cast<int32_t>(center_2 + half_ext), minor_step));
+    } else {
+        minor_step = 0x800;
+        min_1 = grid_min;
+        max_1 = grid_max + 1;
+        min_2 = grid_min;
+        max_2 = grid_max + 1;
     }
 
-    for (int32_t x = min_2; x <= max_2 && num_lines < max_grid_lines; x += step_2, num_lines++) {
+    constexpr int32_t grid_major_ratio = 8;
+    const int32_t major_step = minor_step * grid_major_ratio;
+
+    dst_view.grid_step = minor_step;
+
+    // Minor grid lines
+    for (int32_t x = min_1; x <= max_1 && num_lines < max_grid_lines; x += minor_step) {
+        if (x % major_step == 0)
+            continue;
         Sculptor::Geometry::Vertex* const vtx = &vertices[num_lines * 2];
-        vtx[0].pos[idx_2] = fix_pos(x);
-        vtx[0].pos[idx_1] = fix_pos(min_1);
+        vtx[0].pos[idx_1] = static_cast<int16_t>(std::min(x,    grid_max));
+        vtx[0].pos[idx_2] = static_cast<int16_t>(min_2);
         vtx[0].pos[idx_z] = 0;
-        vtx[1].pos[idx_2] = fix_pos(x);
-        vtx[1].pos[idx_1] = fix_pos(max_1);
+        vtx[1].pos[idx_1] = static_cast<int16_t>(std::min(x,    grid_max));
+        vtx[1].pos[idx_2] = static_cast<int16_t>(std::min(max_2, grid_max));
         vtx[1].pos[idx_z] = 0;
+        num_lines++;
     }
+    for (int32_t x = min_2; x <= max_2 && num_lines < max_grid_lines; x += minor_step) {
+        if (x % major_step == 0)
+            continue;
+        Sculptor::Geometry::Vertex* const vtx = &vertices[num_lines * 2];
+        vtx[0].pos[idx_2] = static_cast<int16_t>(std::min(x,    grid_max));
+        vtx[0].pos[idx_1] = static_cast<int16_t>(min_1);
+        vtx[0].pos[idx_z] = 0;
+        vtx[1].pos[idx_2] = static_cast<int16_t>(std::min(x,    grid_max));
+        vtx[1].pos[idx_1] = static_cast<int16_t>(std::min(max_1, grid_max));
+        vtx[1].pos[idx_z] = 0;
+        num_lines++;
+    }
+
+    const uint32_t num_minor_lines = num_lines;
+
+    const int32_t maj_min_1 = floor_step(min_1, major_step);
+    const int32_t maj_max_1 = ceil_step( max_1, major_step);
+    const int32_t maj_min_2 = floor_step(min_2, major_step);
+    const int32_t maj_max_2 = ceil_step( max_2, major_step);
+
+    // Major grid lines
+    for (int32_t x = maj_min_1; x <= maj_max_1 && num_lines < max_grid_lines; x += major_step) {
+        Sculptor::Geometry::Vertex* const vtx = &vertices[num_lines * 2];
+        vtx[0].pos[idx_1] = static_cast<int16_t>(std::min(x,    grid_max));
+        vtx[0].pos[idx_2] = static_cast<int16_t>(min_2);
+        vtx[0].pos[idx_z] = 0;
+        vtx[1].pos[idx_1] = static_cast<int16_t>(std::min(x,    grid_max));
+        vtx[1].pos[idx_2] = static_cast<int16_t>(std::min(max_2, grid_max));
+        vtx[1].pos[idx_z] = 0;
+        num_lines++;
+    }
+    for (int32_t x = maj_min_2; x <= maj_max_2 && num_lines < max_grid_lines; x += major_step) {
+        Sculptor::Geometry::Vertex* const vtx = &vertices[num_lines * 2];
+        vtx[0].pos[idx_2] = static_cast<int16_t>(std::min(x,    grid_max));
+        vtx[0].pos[idx_1] = static_cast<int16_t>(min_1);
+        vtx[0].pos[idx_z] = 0;
+        vtx[1].pos[idx_2] = static_cast<int16_t>(std::min(x,    grid_max));
+        vtx[1].pos[idx_1] = static_cast<int16_t>(std::min(max_1, grid_max));
+        vtx[1].pos[idx_z] = 0;
+        num_lines++;
+    }
+
+    const uint32_t num_major_lines = num_lines - num_minor_lines;
 
     if ( ! grid_buf.flush(image_idx, sub_buf_stride))
         return false;
@@ -3047,20 +3145,11 @@ bool GeometryEditor::render_grid(VkCommandBuffer cmdbuf,
 
     send_viewport_and_scissor(cmdbuf, dst_view.width, dst_view.height);
 
-    const uint32_t grid_mat_id = (image_idx * num_materials) + mat_grid;
-
     VkDescriptorBufferInfo buffer_info = {
         VK_NULL_HANDLE, // buffer
         0,              // offset
         0               // range
     };
-
-    buffer_info.buffer = materials_buf.get_buffer();
-    buffer_info.offset = grid_mat_id * materials_stride;
-    buffer_info.range  = materials_stride;
-
-    push_descriptor(cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, Sculptor::material_layout,
-                    0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, buffer_info);
 
     buffer_info.buffer = dst_view.res[image_idx].transforms.get_buffer();
     buffer_info.offset = 0;
@@ -3077,11 +3166,35 @@ bool GeometryEditor::render_grid(VkCommandBuffer cmdbuf,
                            &grid_buf.get_buffer(),
                            &vb_offset);
 
-    vkCmdDraw(cmdbuf,
-              num_lines * 2,
-              1,  // instanceCount
-              0,  // firstVertex
-              0); // firstInstance
+    if (num_minor_lines > 0) {
+        buffer_info.buffer = materials_buf.get_buffer();
+        buffer_info.offset = ((image_idx * num_materials) + mat_grid) * materials_stride;
+        buffer_info.range  = materials_stride;
+
+        push_descriptor(cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, Sculptor::material_layout,
+                        0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, buffer_info);
+
+        vkCmdDraw(cmdbuf,
+                  num_minor_lines * 2,
+                  1,  // instanceCount
+                  0,  // firstVertex
+                  0); // firstInstance
+    }
+
+    if (num_major_lines > 0) {
+        buffer_info.buffer = materials_buf.get_buffer();
+        buffer_info.offset = ((image_idx * num_materials) + mat_grid_major) * materials_stride;
+        buffer_info.range  = materials_stride;
+
+        push_descriptor(cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, Sculptor::material_layout,
+                        0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, buffer_info);
+
+        vkCmdDraw(cmdbuf,
+                  num_major_lines * 2,
+                  1,                    // instanceCount
+                  num_minor_lines * 2,  // firstVertex
+                  0);                   // firstInstance
+    }
 
     vkCmdEndRendering(cmdbuf);
 

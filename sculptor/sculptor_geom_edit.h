@@ -116,6 +116,7 @@ class GeometryEditor: public Editor {
             uint32_t    width     = 0;
             uint32_t    height    = 0;
             ViewType    view_type = ViewType::free_moving;
+            int32_t     grid_step = 0;
             Camera      camera[static_cast<int>(ViewType::num_types)];
             Resources   res[max_swapchain_size];
             vmath::vec2 mouse_pos;
