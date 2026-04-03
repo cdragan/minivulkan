@@ -173,6 +173,8 @@ namespace {
     };
 
     constexpr float    fov_radians      = vmath::radians(30.0f);
+    constexpr float    max_cam_dist     = 2.0f;
+    constexpr float    max_pos          = 1.1f;
     constexpr uint32_t max_grid_lines   = 4096;
     constexpr uint32_t max_objects      = 0x10000u;
     constexpr VkFormat selection_format = (max_objects <= 0x10000u) ? VK_FORMAT_R16_UINT : VK_FORMAT_R32_UINT;
@@ -231,10 +233,9 @@ GeometryEditor::Camera::Axes GeometryEditor::Camera::get_axes() const
 
 void GeometryEditor::Camera::move(const vmath::vec3& delta)
 {
-    constexpr vmath::vec3 max_pos{1.1f};
     const auto        [right, up] = get_axes();
     const vmath::vec3 moved_pos   = pos + right * delta.x + up * delta.y + dir * delta.z;
-    const vmath::vec3 fixed_pos   = vmath::clamp(moved_pos, -max_pos, max_pos);
+    const vmath::vec3 fixed_pos   = vmath::clamp(moved_pos, -vmath::vec3{max_pos}, vmath::vec3{max_pos});
     if (fixed_pos == moved_pos)
         pos = fixed_pos;
 }
@@ -1286,8 +1287,6 @@ void GeometryEditor::handle_mouse_actions(const UserInput& input, bool view_hove
                 else if (mouse_moved && (mouse_action_pos || view.view_type != ViewType::free_moving)) {
                     Camera& camera = view.camera[static_cast<int>(view.view_type)];
 
-                    constexpr float max_pos = 1.1f;
-
                     switch (view.view_type) {
 
                         default:
@@ -1306,8 +1305,9 @@ void GeometryEditor::handle_mouse_actions(const UserInput& input, bool view_hove
                                 const float       screen_dx   = right_delta - ndc_x * fwd_delta * aspect * fov_tan;
                                 const float       screen_dy   = up_delta    - ndc_y * fwd_delta * fov_tan;
 
-                                camera.pos = vmath::clamp(camera.pos + right * screen_dx + up * screen_dy,
-                                                          vmath::vec3{-max_pos}, vmath::vec3{max_pos});
+                                const vmath::vec3 new_pos = camera.pos + right * screen_dx + up * screen_dy;
+                                const float       dist    = vmath::length(new_pos);
+                                camera.pos = (dist > max_cam_dist) ? new_pos * (max_cam_dist / dist) : new_pos;
                             }
                             break;
 
@@ -1408,16 +1408,21 @@ void GeometryEditor::handle_mouse_actions(const UserInput& input, bool view_hove
         Camera& camera = view.camera[static_cast<int>(view.view_type)];
 
         constexpr float perspective_zoom_factor = -0.02f;
-        constexpr float ortho_zoom_factor       = 200.0f;
-
+        constexpr float ortho_zoom_factor       = 1.1f;
+        constexpr float min_view_height         = 10.0f;
+        constexpr float max_view_height         = 4.0f * int16_scale;
         switch (view.view_type) {
 
             default:
                 assert(view.view_type == ViewType::free_moving);
                 if (view.mouse_world_pos) {
-                    const float       zoom_frac = input.wheel_delta * perspective_zoom_factor;
+                    constexpr float   max_zoom  = 0.99f;
+                    const float       zoom_frac = vmath::clamp(input.wheel_delta * perspective_zoom_factor,
+                                                               -max_zoom, max_zoom);
                     const vmath::vec3 to_target = *view.mouse_world_pos - camera.pos;
-                    camera.pos = camera.pos + to_target * zoom_frac;
+                    const vmath::vec3 new_pos   = camera.pos + to_target * zoom_frac;
+                    if (vmath::length(new_pos) <= max_cam_dist)
+                        camera.pos = new_pos;
                 } else {
                     camera.move(vmath::vec3{0, 0, input.wheel_delta * perspective_zoom_factor});
                 }
@@ -1429,7 +1434,8 @@ void GeometryEditor::handle_mouse_actions(const UserInput& input, bool view_hove
             case ViewType::right:
             case ViewType::bottom:
             case ViewType::top:
-                camera.view_height += input.wheel_delta * ortho_zoom_factor;
+                camera.view_height = vmath::clamp(camera.view_height * powf(ortho_zoom_factor, input.wheel_delta),
+                                                  min_view_height, max_view_height);
                 break;
         }
     }
@@ -2784,7 +2790,7 @@ void GeometryEditor::set_patch_transforms(VkCommandBuffer cmdbuf, const View& ds
     const float aspect = static_cast<float>(dst_view.width) / static_cast<float>(dst_view.height);
 
     constexpr float near_plane = 0.01f;
-    constexpr float far_plane  = 3.0f;
+    constexpr float far_plane  = 5.0f;
 
     if (dst_view.view_type == ViewType::free_moving) {
         transforms.proj = vmath::projection_vector(aspect,
