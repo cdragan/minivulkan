@@ -45,7 +45,7 @@ class GeometryEditor: public Editor {
             X(view_ortho_y,     0, "8",                    "Orthographic view in Y axis") \
             X(toggle_tessell,   1, "Alt T",                "Toggle tessellation")         \
             X(toggle_wireframe, 0, "Alt W",                "Toggle wireframe")            \
-            X(snap_normals,     1, "Alt N",                "Snap to normals")             \
+            X(snap_normals,     1, "Alt S",                "Snap to normals")             \
             X(snap_x,           0, "X",                    "Snap to X")                   \
             X(snap_y,           0, "Y",                    "Snap to Y")                   \
             X(snap_z,           0, "Z",                    "Snap to Z")                   \

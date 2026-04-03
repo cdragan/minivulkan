@@ -21,27 +21,6 @@
 
 /*
 
-Object editor UI
-----------------
-
-- One viewport, drawing sequence:
-    - Background
-    - Grid
-    - Solid object fill
-        - Toggle solid fill on/off (off - pure wireframe)
-        - Toggle tessellation on/off
-    - Wireframe
-        - Toggle between generated triangles and just quad surrounds, i.e. patch wireframe
-    - Vertices
-    - Connectors to control vertices
-    - Selection highlight (surround around selected features)
-    - Hovered and selected features have distinct color
-    - Toggle texture/color/etc. versus plain
-    - Selection rectangle
-    - Draw selection surface used to determine what mouse and selection rectangle are touching
-- Status: current mode, total vertices/edges/faces, number of selected vertices/edges/faces
-- Toolbar with key shortcuts
-
 User input
 ----------
 
@@ -57,19 +36,14 @@ User input
     - Drag rectangle to select
     - Additive/subtractive selection
     - 1: vertices, 2: faces
-    - Shift+1/2/3: enable selection of multiple types of items (vertices, edges, faces)
-    - Shift: select multiple items, one by one
 - Manipulation
     - G :: grab and move objects
         - click to finish
-        - GX/GY/GZ to snap
         - mouse scroll to change range of the effect
     - R :: rotate
     - S :: scale
-        - SX/SY/SZ to snap
     - Alt-S :: move along normals
     - Tab :: toggle between object mode and edit mode
-    - Ctrl + Mouse :: snap
 - Edit
     - E :: extrude - add faces/edges, begin moving
 
@@ -83,7 +57,8 @@ Modes of operation
     - Add rectangle to selection    LMB drag
     - Remove rectangle from sel     Shift+LMB drag
     - Clear selection               ???
-    - Select all                    Cmd+A
+    - Select all (or none)          A
+    - Invert selection              Cmd+I
     - Pan                           Shift+Mouse move
     - Rotate                        Ctrl+Mouse move
     - Scale                         Mouse wheel (smooth)
@@ -122,16 +97,31 @@ Toolbar in Object Editor
     - Toggle tessellation       Alt-T
     - Toggle wireframe          Alt-W
 - Constraint (applies to move, scale, pan, rotate, edit operations, etc.)
+    - Normals                   Alt-S
     - X                         X
     - Y                         Y
     - Z                         Z
 - Transform
-    - Move                      G, GX, GY, GZ, click to finish or Space
+    - Move                      G, click to finish or Space
     - Rotate                    R, click to finish or Space
-    - Scale                     S, SX, SY, SZ, click to finish or Space
+    - Scale                     S, click to finish or Space
 - Edit
     - Delete                    Del
     - Extrude                   E
+
+Future additions
+----------------
+
+- Pivot point - used for operations like rotate and scale, add support for grabbing it
+- Inset - similar to extrude, but creates face inside a face
+- Loop cut - create edge running around the object across faces
+- Crease/smooth edge - affect control points to affect edge sharpness/smoothness
+- Tangent align - for making smooth transition between adjacent faces
+- Grab for mid-face control points: add support for snap to face normals, add support for moving them together or away from each other
+- Better grid density in orthographic view
+- Snap to grid (also in perspective mode), add control for snap density, maybe grid density should reflect it?
+- Flatten - align selected vertices on a common plane
+- Mirror modifier
 
 */
 
@@ -1554,7 +1544,7 @@ void GeometryEditor::handle_keyboard_actions()
     if (ImGui::IsKeyPressed(ImGuiKey_W) && is_alt_down() && ! is_ctrl_down() && ! is_shift_down())
         toolbar_state.toggle_wireframe = ! toolbar_state.toggle_wireframe;
 
-    if (ImGui::IsKeyPressed(ImGuiKey_N) && is_alt_down() && ! is_ctrl_down() && ! is_shift_down())
+    if (ImGui::IsKeyPressed(ImGuiKey_S) && is_alt_down() && ! is_ctrl_down() && ! is_shift_down())
         toolbar_state.snap_normals = ! toolbar_state.snap_normals;
 
     if (ImGui::IsKeyPressed(ImGuiKey_X) && no_modifier)
@@ -1594,7 +1584,7 @@ void GeometryEditor::handle_keyboard_actions()
             release_mouse();
     }
 
-    if (ImGui::IsKeyPressed(ImGuiKey_Enter) && no_modifier) {
+    if (ImGui::IsKeyPressed(ImGuiKey_Space) && no_modifier) {
         if (mode != Mode::select && has_captured_mouse()) {
             release_mouse();
             finish_edit_mode();
