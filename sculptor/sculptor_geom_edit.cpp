@@ -207,7 +207,7 @@ namespace {
     bool dialog_load;
 }
 
-bool is_ctrl_down()
+static bool is_ctrl_down()
 {
 #ifdef __APPLE__
     constexpr ImGuiKey left_ctrl  = ImGuiKey_LeftSuper;
@@ -218,6 +218,16 @@ bool is_ctrl_down()
 #endif
 
     return ImGui::IsKeyDown(left_ctrl) || ImGui::IsKeyDown(right_ctrl);
+}
+
+static bool is_shift_down()
+{
+    return ImGui::IsKeyDown(ImGuiKey_LeftShift) || ImGui::IsKeyDown(ImGuiKey_RightShift);
+}
+
+static bool is_alt_down()
+{
+    return ImGui::IsKeyDown(ImGuiKey_LeftAlt) || ImGui::IsKeyDown(ImGuiKey_RightAlt);
 }
 
 namespace Sculptor {
@@ -1439,39 +1449,41 @@ void GeometryEditor::handle_keyboard_actions()
 {
     Mode new_mode = mode;
 
-    if (ImGui::IsKeyPressed(ImGuiKey_Z)) {
+    const bool no_modifier = ! is_ctrl_down() && ! is_shift_down() && ! is_alt_down();
+
+    if (ImGui::IsKeyPressed(ImGuiKey_Z) && ! is_alt_down()) {
 
         if (is_ctrl_down()) {
-            if (ImGui::IsKeyDown(ImGuiKey_LeftShift) || ImGui::IsKeyDown(ImGuiKey_RightShift))
+            if (is_shift_down())
                 redo();
             else
                 undo();
         }
-        else
+        else if ( ! is_shift_down())
             toolbar_state.snap_z = ! toolbar_state.snap_z;
     }
 
-    if (ImGui::IsKeyPressed(ImGuiKey_S) && is_ctrl_down()) {
+    if (ImGui::IsKeyPressed(ImGuiKey_S) && is_ctrl_down() && ! is_shift_down()) {
         trigger_save();
     }
 
-    if (ImGui::IsKeyPressed(ImGuiKey_O) && is_ctrl_down()) {
+    if (ImGui::IsKeyPressed(ImGuiKey_O) && is_ctrl_down() && ! is_shift_down()) {
         trigger_load();
     }
 
-    if (ImGui::IsKeyPressed(ImGuiKey_C) && is_ctrl_down()) {
+    if (ImGui::IsKeyPressed(ImGuiKey_C) && is_ctrl_down() && ! is_shift_down()) {
         // TODO copy
     }
 
-    if (ImGui::IsKeyPressed(ImGuiKey_V) && is_ctrl_down()) {
+    if (ImGui::IsKeyPressed(ImGuiKey_V) && is_ctrl_down() && ! is_shift_down()) {
         // TODO paste
     }
 
-    if (ImGui::IsKeyPressed(ImGuiKey_X) && is_ctrl_down()) {
+    if (ImGui::IsKeyPressed(ImGuiKey_X) && is_ctrl_down() && ! is_shift_down()) {
         // TODO cut
     }
 
-    if (ImGui::IsKeyPressed(ImGuiKey_1) && ( ! toolbar_state.select.vertices || toolbar_state.select.faces)) {
+    if (ImGui::IsKeyPressed(ImGuiKey_1) && no_modifier && ( ! toolbar_state.select.vertices || toolbar_state.select.faces)) {
         toolbar_state.select.vertices = ! toolbar_state.select.vertices;
         if (mode != Mode::select)
             saved_select = toolbar_state.select;
@@ -1483,7 +1495,7 @@ void GeometryEditor::handle_keyboard_actions()
         }
     }
 
-    if (ImGui::IsKeyPressed(ImGuiKey_2) && ( ! toolbar_state.select.faces || toolbar_state.select.vertices)) {
+    if (ImGui::IsKeyPressed(ImGuiKey_2) && no_modifier && ( ! toolbar_state.select.faces || toolbar_state.select.vertices)) {
         toolbar_state.select.faces = ! toolbar_state.select.faces;
         if (mode != Mode::select)
             saved_select = toolbar_state.select;
@@ -1495,7 +1507,7 @@ void GeometryEditor::handle_keyboard_actions()
         }
     }
 
-    if (ImGui::IsKeyPressed(ImGuiKey_5)) {
+    if (ImGui::IsKeyPressed(ImGuiKey_5) && no_modifier) {
         toolbar_state.view_perspective = true;
         toolbar_state.view_ortho_x = false;
         toolbar_state.view_ortho_y = false;
@@ -1503,7 +1515,7 @@ void GeometryEditor::handle_keyboard_actions()
         view.view_type = ViewType::free_moving;
     }
 
-    if (ImGui::IsKeyPressed(ImGuiKey_6)) {
+    if (ImGui::IsKeyPressed(ImGuiKey_6) && no_modifier) {
         if (toolbar_state.view_ortho_z)
             view.view_type = (view.view_type == ViewType::front) ? ViewType::back : ViewType::front;
         else
@@ -1514,7 +1526,7 @@ void GeometryEditor::handle_keyboard_actions()
         toolbar_state.view_ortho_z = true;
     }
 
-    if (ImGui::IsKeyPressed(ImGuiKey_7)) {
+    if (ImGui::IsKeyPressed(ImGuiKey_7) && no_modifier) {
         if (toolbar_state.view_ortho_x)
             view.view_type = (view.view_type == ViewType::left) ? ViewType::right : ViewType::left;
         else
@@ -1525,7 +1537,7 @@ void GeometryEditor::handle_keyboard_actions()
         toolbar_state.view_ortho_z = false;
     }
 
-    if (ImGui::IsKeyPressed(ImGuiKey_8)) {
+    if (ImGui::IsKeyPressed(ImGuiKey_8) && no_modifier) {
         if (toolbar_state.view_ortho_y)
             view.view_type = (view.view_type == ViewType::bottom) ? ViewType::top : ViewType::bottom;
         else
@@ -1536,44 +1548,41 @@ void GeometryEditor::handle_keyboard_actions()
         toolbar_state.view_ortho_z = false;
     }
 
-    if (ImGui::IsKeyPressed(ImGuiKey_T) &&
-            (ImGui::IsKeyDown(ImGuiKey_LeftAlt) || ImGui::IsKeyDown(ImGuiKey_RightAlt)))
+    if (ImGui::IsKeyPressed(ImGuiKey_T) && is_alt_down() && ! is_ctrl_down() && ! is_shift_down())
         toolbar_state.toggle_tessellation = ! toolbar_state.toggle_tessellation;
 
-    if (ImGui::IsKeyPressed(ImGuiKey_W) &&
-            (ImGui::IsKeyDown(ImGuiKey_LeftAlt) || ImGui::IsKeyDown(ImGuiKey_RightAlt)))
+    if (ImGui::IsKeyPressed(ImGuiKey_W) && is_alt_down() && ! is_ctrl_down() && ! is_shift_down())
         toolbar_state.toggle_wireframe = ! toolbar_state.toggle_wireframe;
 
-    if (ImGui::IsKeyPressed(ImGuiKey_N) &&
-            (ImGui::IsKeyDown(ImGuiKey_LeftAlt) || ImGui::IsKeyDown(ImGuiKey_RightAlt)))
+    if (ImGui::IsKeyPressed(ImGuiKey_N) && is_alt_down() && ! is_ctrl_down() && ! is_shift_down())
         toolbar_state.snap_normals = ! toolbar_state.snap_normals;
 
-    if (ImGui::IsKeyPressed(ImGuiKey_X))
+    if (ImGui::IsKeyPressed(ImGuiKey_X) && no_modifier)
         toolbar_state.snap_x = ! toolbar_state.snap_x;
 
-    if (ImGui::IsKeyPressed(ImGuiKey_Y))
+    if (ImGui::IsKeyPressed(ImGuiKey_Y) && no_modifier)
         toolbar_state.snap_y = ! toolbar_state.snap_y;
 
-    if (ImGui::IsKeyPressed(ImGuiKey_G)) {
+    if (ImGui::IsKeyPressed(ImGuiKey_G) && no_modifier) {
         toolbar_state.move = true;
         new_mode = Mode::move;
     }
 
-    if (ImGui::IsKeyPressed(ImGuiKey_R)) {
+    if (ImGui::IsKeyPressed(ImGuiKey_R) && no_modifier) {
         toolbar_state.rotate = true;
         new_mode = Mode::rotate;
     }
 
-    if (ImGui::IsKeyPressed(ImGuiKey_S)) {
+    if (ImGui::IsKeyPressed(ImGuiKey_S) && no_modifier) {
         toolbar_state.scale = true;
         new_mode = Mode::scale;
     }
 
-    if (ImGui::IsKeyPressed(ImGuiKey_Delete)) {
+    if (ImGui::IsKeyPressed(ImGuiKey_Delete) && no_modifier) {
         // TODO delete
     }
 
-    if (ImGui::IsKeyPressed(ImGuiKey_E)) {
+    if (ImGui::IsKeyPressed(ImGuiKey_E) && no_modifier) {
         toolbar_state.extrude = true;
         new_mode = Mode::extrude;
     }
@@ -1585,7 +1594,16 @@ void GeometryEditor::handle_keyboard_actions()
             release_mouse();
     }
 
-    if (ImGui::IsKeyPressed(ImGuiKey_A) && mode == Mode::select) {
+    if (ImGui::IsKeyPressed(ImGuiKey_Enter) && no_modifier) {
+        if (mode != Mode::select && has_captured_mouse()) {
+            release_mouse();
+            finish_edit_mode();
+        }
+        new_mode     = Mode::select;
+        mouse_action = Action::none;
+    }
+
+    if (ImGui::IsKeyPressed(ImGuiKey_A) && no_modifier && mode == Mode::select) {
         const uint32_t num_faces    = patch_geometry.get_num_faces();
         const uint32_t num_vertices = patch_geometry.get_num_vertices();
 
@@ -1613,7 +1631,7 @@ void GeometryEditor::handle_keyboard_actions()
         }
     }
 
-    if (ImGui::IsKeyPressed(ImGuiKey_I) && is_ctrl_down() && mode == Mode::select) {
+    if (ImGui::IsKeyPressed(ImGuiKey_I) && mode == Mode::select && is_ctrl_down() && ! is_shift_down() && ! is_alt_down()) {
         const uint32_t num_faces    = patch_geometry.get_num_faces();
         const uint32_t num_vertices = patch_geometry.get_num_vertices();
         if (toolbar_state.select.faces) {
