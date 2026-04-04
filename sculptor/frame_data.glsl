@@ -13,7 +13,7 @@ layout(binding = 6) uniform frame_data {
     vec2 pixel_dim;
     vec2 pad2;
 
-    // Light positions in world space
+    // Light positions in view space
     vec4 light_pos[4];
 
     // GUI colors
@@ -33,3 +33,4 @@ layout(binding = 6) uniform frame_data {
 #define FRAME_FLAG_SELECT_VERTICES  2u // vertex selection is active
 #define FRAME_FLAG_WIREFRAME_MODE   4u // object is rendered in wireframe mode
 #define FRAME_FLAG_TESSELLATION_OFF 8u // tessellation is disabled (level forced to 1)
+#define FRAME_FLAG_SHOW_MATERIALS  16u

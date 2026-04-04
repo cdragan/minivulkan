@@ -13,6 +13,7 @@ layout(binding = 3) uniform sampler2D  normal_att;
 layout(binding = 4) uniform sampler2D  depth_att;
 layout(binding = 5) readonly buffer sel_buf_data { uint data[]; } sel_buf;
 layout(binding = 7) buffer hover_pos_data { vec4 pos; } hover_pos_buf;
+layout(binding = 8) uniform sampler2D  tex_coord_att;
 
 layout(location = 0) out vec4 out_color;
 
@@ -76,18 +77,22 @@ void main()
     // Read normal, remap components from [0, 1] range back to [-1, 1] range
     const vec3 normal = (texelFetch(normal_att, coord, 0).rgb - 0.5) * 2.0;
 
-    // Reconstruct world-space position from depth and fragment coordinates
+    // Read texture coordinates
+    const vec2 tex_uv = texelFetch(tex_coord_att, coord, 0).rg;
+
+    // Reconstruct view-space position from depth and fragment coordinates
     // Note: viewport Y is flipped (height is negative)
-    const vec2  ndc_xy    = vec2(gl_FragCoord.x * pixel_dim.x - 1.0,
-                                 1.0 - gl_FragCoord.y * pixel_dim.y);
-    const float view_z    = (proj.w - depth * proj_w.w) / (depth * proj_w.z - proj.z);
-    const float clip_w    = view_z * proj_w.z + proj_w.w;
-    const vec3  view_pos  = vec3(ndc_xy * clip_w / proj.xy, view_z);
-    const vec3  world_pos = vec4(view_pos, 1.0) * view_inverse;
+    const vec2  ndc_xy   = vec2(gl_FragCoord.x * pixel_dim.x - 1.0,
+                                1.0 - gl_FragCoord.y * pixel_dim.y);
+    const float view_z   = (proj.w - depth * proj_w.w) / (depth * proj_w.z - proj.z);
+    const float clip_w   = view_z * proj_w.z + proj_w.w;
+    const vec3  view_pos = vec3(ndc_xy * clip_w / proj.xy, view_z);
 
     // Write world position for CPU readback at the mouse cursor pixel
-    if (coord == ivec2(mouse_pos))
+    if (coord == ivec2(mouse_pos)) {
+        const vec3 world_pos = vec4(view_pos, 1.0) * view_inverse;
         hover_pos_buf.pos = vec4(world_pos, 1.0);
+    }
 
     // Uncomment to visualize normals:
     //out_color = vec4(texelFetch(normal_att, coord, 0).rgb, 1.0);
@@ -111,16 +116,15 @@ void main()
     else if ((state & 1u) != 0u) // obj_selected
         albedo = color_face_selected.rgb;
 
-    const vec3 world_normal = normalize(vec3(vec4(normal, 0.0) * view_inverse));
-    const vec3 cam_pos      = (vec4(0.0, 0.0, 0.0, 1.0) * view_inverse).xyz;
-    const vec3 view_dir     = normalize(cam_pos - world_pos);
+    // Lighting calculated in view space
+    const vec3 view_dir = normalize(-view_pos);
 
     float attenuation = 0.0;
     for (int i = 0; i < 4; i++) {
-        attenuation += calculate_lighting(view_dir, light_pos[i].xyz, world_pos, world_normal);
+        attenuation += calculate_lighting(view_dir, light_pos[i].xyz, view_pos, normal);
     }
 
-    const float ambient = 0.4; // TODO but in frame data
+    const float ambient = 0.4; // TODO put in frame data
     attenuation = ambient + attenuation / 4; // average input from all lights
 
     const float gamma = 2.2;

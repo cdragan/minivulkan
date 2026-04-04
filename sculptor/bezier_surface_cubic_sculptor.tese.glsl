@@ -12,6 +12,7 @@ layout(quads, ccw, equal_spacing) in;
 
 layout(location = 1) out vec3 out_normal;
 layout(location = 2) out uint out_object_id;
+layout(location = 3) out vec2 out_tex_coord;
 
 void main()
 {
@@ -42,4 +43,6 @@ void main()
     out_normal = normalize(cross(dv, du));
 
     out_object_id = gl_PrimitiveID;
+
+    out_tex_coord = gl_TessCoord.xy;
 }

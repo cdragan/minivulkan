@@ -65,6 +65,7 @@ class GeometryEditor: public Editor {
             Image           color;
             Image           obj_id;            // G-buffer
             Image           normal;            // G-buffer
+            Image           tex_coord;         // G-buffer
             Image           depth;
             Buffer          frame_data;        // per-frame global state (selection rect, flags)
             Buffer          transforms;        // per-object transform matrices
@@ -182,6 +183,7 @@ class GeometryEditor: public Editor {
         bool create_materials();
         void set_material_buf(const MaterialInfo& mat_info, uint32_t mat_id);
         bool create_grid_buffer();
+        vmath::mat4 compute_model_view(const View& dst_view) const;
         std::optional<vmath::vec3> read_mouse_world_pos() const;
         std::optional<vmath::vec3> calc_grid_world_pos(const View& src_view) const;
         void handle_mouse_actions(const UserInput& input, bool view_hovered);

@@ -165,6 +165,14 @@ bool Sculptor::create_material_layouts()
                 VK_SHADER_STAGE_FRAGMENT_BIT,
                 nullptr
             },
+            // TODO sort these in logical order
+            {
+                8, // binding 8: texture coordinates
+                VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                1,
+                VK_SHADER_STAGE_FRAGMENT_BIT,
+                nullptr
+            },
         };
 
         static const VkDescriptorSetLayoutCreateInfo create_lighting_set_layout = {

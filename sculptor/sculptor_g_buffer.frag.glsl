@@ -9,9 +9,11 @@
 
 layout(location = 1) in  vec3      in_normal;
 layout(location = 2) in  flat uint in_object_id;
+layout(location = 3) in  vec2      in_tex_coord;
 
 layout(location = 0) out uint      out_obj_id;
 layout(location = 1) out vec4      out_normal;
+layout(location = 2) out vec2      out_tex_coord;
 
 layout(binding = 5) coherent buffer sel_buf_data { uint data[]; } sel_buf;
 
@@ -22,6 +24,8 @@ void main()
 
     // Compress normal components from [-1, 1] range to [0, 1] range
     out_normal = vec4(in_normal * 0.5 + 0.5, 0);
+
+    out_tex_coord = in_tex_coord;
 
     // Detect selected faces - shallow selection for opaque faces
     if ((frame_flags & FRAME_FLAG_SELECT_FACES) != 0u) {
