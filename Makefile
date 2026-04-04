@@ -450,6 +450,10 @@ ifeq ($(UNAME), Darwin)
     endif
 
     MAP_FLAG = -Wl,-map,$1.map
+
+    LDFLAGS += -Wl,-rpath,@executable_path/../Frameworks
+
+    moltenvk_lib := $(or $(wildcard /opt/homebrew/lib/libMoltenVK.dylib),$(wildcard /usr/local/lib/libMoltenVK.dylib),$(if $(VULKAN_SDK),$(wildcard $(VULKAN_SDK)/lib/libMoltenVK.dylib)))
 endif
 
 time_stats ?= 0
@@ -513,10 +517,20 @@ ifeq ($(UNAME), Darwin)
       $$(out_dir)/$1.app/Contents/MacOS: | $$(out_dir)
 	mkdir -p $$@
 
+      $$(out_dir)/$1.app/Contents/Frameworks: | $$(out_dir)/$1.app/Contents/MacOS
+	mkdir -p $$@
+
       $(call GUI_PATH,$1): | $$(out_dir)/$1.app/Contents/MacOS/Info.plist
 
       $$(out_dir)/$1.app/Contents/MacOS/Info.plist: macos/Info.plist | $$(out_dir)/$1.app/Contents/MacOS
 	sed 's:minivulkan:$1:' $$< > $$@
+
+ifneq ($(moltenvk_lib),)
+      $$(out_dir)/$1.app/Contents/Frameworks/libMoltenVK.dylib: $(moltenvk_lib) | $$(out_dir)/$1.app/Contents/Frameworks
+	cp -c $$< $$@
+
+      $(call GUI_PATH,$1): | $$(out_dir)/$1.app/Contents/Frameworks/libMoltenVK.dylib
+endif
     endef
 else
     GUI_PATH = $(out_dir)/$1$(exe_suffix)
