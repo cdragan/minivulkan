@@ -402,6 +402,7 @@ bool GeometryEditor::alloc_view_resources(View*     dst_view,
             0, // height
             VK_FORMAT_UNDEFINED,
             1, // mip_levels
+            0, // array_layers
             VK_IMAGE_ASPECT_COLOR_BIT,
             VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
             Usage::device_only
@@ -416,6 +417,7 @@ bool GeometryEditor::alloc_view_resources(View*     dst_view,
             0, // height
             selection_format,
             1, // mip_levels
+            0, // array_layers
             VK_IMAGE_ASPECT_COLOR_BIT,
             VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
             Usage::device_only
@@ -429,6 +431,7 @@ bool GeometryEditor::alloc_view_resources(View*     dst_view,
             0, // height
             VK_FORMAT_A2R10G10B10_UNORM_PACK32,
             1, // mip_levels
+            0, // array_layers
             VK_IMAGE_ASPECT_COLOR_BIT,
             VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
             Usage::device_only
@@ -442,6 +445,7 @@ bool GeometryEditor::alloc_view_resources(View*     dst_view,
             0, // height
             VK_FORMAT_R16G16_SFLOAT,
             1, // mip_levels
+            0, // array_layers
             VK_IMAGE_ASPECT_COLOR_BIT,
             VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
             Usage::device_only
@@ -455,6 +459,7 @@ bool GeometryEditor::alloc_view_resources(View*     dst_view,
             0, // height
             VK_FORMAT_UNDEFINED,
             1, // mip_levels
+            0, // array_layers
             VK_IMAGE_ASPECT_DEPTH_BIT,
             VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
             Usage::device_only

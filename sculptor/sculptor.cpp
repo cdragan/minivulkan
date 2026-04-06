@@ -3,6 +3,7 @@
 
 #include "sculptor_materials.h"
 #include "sculptor_geom_edit.h"
+#include "sculptor_tex_edit.h"
 
 #include "../core/barrier.h"
 #include "../core/d_printf.h"
@@ -28,11 +29,13 @@ const int gui_config_flags = ImGuiConfigFlags_NavEnableKeyboard
                            | ImGuiConfigFlags_DockingEnable;
 
 static Sculptor::GeometryEditor geometry_editor;
+static Sculptor::TextureEditor  texture_editor;
 
 // Global list of all possible editor windows, this collection is used for generic handling
 // of editor windows, like drawing and event passing to visible editors
 static Sculptor::Editor* const editors[] = {
-    &geometry_editor
+    &geometry_editor,
+    &texture_editor
 };
 
 // Need +1 for ImGui full window itself

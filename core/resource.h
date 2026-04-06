@@ -74,6 +74,7 @@ struct ImageInfo {
     uint32_t           height;
     VkFormat           format;
     uint32_t           mip_levels;
+    uint32_t           array_layers;
     VkImageAspectFlags aspect;
     VkImageUsageFlags  usage;
     Usage              heap_usage;

@@ -9,6 +9,7 @@ src_files += sculptor_geometry.cpp
 src_files += sculptor_undo.cpp
 src_files += sculptor_materials.cpp
 src_files += sculptor_geom_edit.cpp
+src_files += sculptor_tex_edit.cpp
 
 shader_files += sculptor_pass_through.vert.glsl
 shader_files += sculptor_simple.vert.glsl
@@ -26,6 +27,8 @@ shader_files += sculptor_vertex_select.frag.glsl
 
 shader_files += sculptor_ctrl_pt_handles.vert.glsl
 shader_files += sculptor_ctrl_pt_handles.frag.glsl
+
+shader_files += sculptor_texgen.comp.glsl
 
 bin_to_header_files += toolbar.png
 

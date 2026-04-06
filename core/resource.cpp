@@ -108,10 +108,13 @@ bool Image::allocate(const ImageInfo& image_info, Description desc)
         &graphics_family_index,
         VK_IMAGE_LAYOUT_UNDEFINED
     };
+    const uint32_t array_layers = image_info.array_layers ? image_info.array_layers : 1;
+
     create_info.format        = image_info.format;
     create_info.extent.width  = image_info.width;
     create_info.extent.height = image_info.height;
     create_info.mipLevels     = image_info.mip_levels;
+    create_info.arrayLayers   = array_layers;
     create_info.tiling        = host_access ? VK_IMAGE_TILING_LINEAR : VK_IMAGE_TILING_OPTIMAL;
     create_info.usage         = image_info.usage;
 
@@ -171,10 +174,13 @@ bool Image::allocate(const ImageInfo& image_info, Description desc)
                 1  // layerCount
             }
         };
-        view_create_info.image                       = image;
-        view_create_info.format                      = format;
-        view_create_info.subresourceRange.aspectMask = aspect;
-        view_create_info.subresourceRange.levelCount = mip_levels;
+        view_create_info.image                        = image;
+        view_create_info.viewType                     = (array_layers > 1) ? VK_IMAGE_VIEW_TYPE_2D_ARRAY
+                                                                           : VK_IMAGE_VIEW_TYPE_2D;
+        view_create_info.format                       = format;
+        view_create_info.subresourceRange.aspectMask  = aspect;
+        view_create_info.subresourceRange.levelCount  = mip_levels;
+        view_create_info.subresourceRange.layerCount  = array_layers;
 
         res = CHK(vkCreateImageView(vk_dev, &view_create_info, nullptr, &view));
         if (res != VK_SUCCESS)

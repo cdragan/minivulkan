@@ -971,6 +971,7 @@ bool allocate_depth_buffers(Image (&depth_buffers)[max_swapchain_size], uint32_t
             0, // height
             VK_FORMAT_UNDEFINED,
             1, // mip_levels
+            0, // array_layers
             VK_IMAGE_ASPECT_DEPTH_BIT,
             VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
             Usage::device_only

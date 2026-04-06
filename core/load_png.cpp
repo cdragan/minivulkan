@@ -41,7 +41,8 @@ static bool read_png_into_image(png_structp        png_ptr,
         0,
         0,
         VK_FORMAT_R8G8B8A8_UNORM,
-        1,
+        1, // mip_levels
+        0, // array_layers
         VK_IMAGE_ASPECT_COLOR_BIT,
         VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
         Usage::fixed
