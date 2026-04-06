@@ -47,7 +47,9 @@ struct MaterialInfo {
 bool create_material(const MaterialInfo& mat_info, VkPipeline* pipeline, VkPipelineLayout layout = VK_NULL_HANDLE);
 
 struct ShaderMaterial {
-    float diffuse_color[4];
+    float    diffuse_color[4];
+    uint32_t tex_id;
+    uint32_t pad[3];
 };
 
 }

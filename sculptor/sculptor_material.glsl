@@ -3,4 +3,5 @@
 
 layout(binding = 0) uniform material_data {
     vec4 diffuse_color;
+    uint tex_id;
 };

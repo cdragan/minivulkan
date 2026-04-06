@@ -5,7 +5,9 @@
 
 #extension GL_GOOGLE_include_directive: require
 
-#include "sculptor_material.glsl"
+layout(push_constant) uniform push_data {
+    vec4 diffuse_color;
+};
 
 layout(location = 0) out vec4 out_color;
 

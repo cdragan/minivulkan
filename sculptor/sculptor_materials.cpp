@@ -96,14 +96,20 @@ bool Sculptor::create_material_layouts()
     }
 
     {
+        static const VkPushConstantRange push_constant_range = {
+            VK_SHADER_STAGE_FRAGMENT_BIT,
+            0,                // offset
+            sizeof(float) * 4 // vec4 diffuse_color
+        };
+
         static VkPipelineLayoutCreateInfo layout_create_info = {
             VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
             nullptr,
             0,      // flags
             1,
             &desc_set_layout,
-            0,      // pushConstantRangeCount
-            nullptr // pPushConstantRanges
+            1,      // pushConstantRangeCount
+            &push_constant_range
         };
 
         const VkResult res = CHK(vkCreatePipelineLayout(vk_dev,
@@ -126,6 +132,13 @@ bool Sculptor::create_material_layouts()
             {
                 1, // binding 1: transforms
                 VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+                1,
+                VK_SHADER_STAGE_FRAGMENT_BIT,
+                nullptr
+            },
+            {
+                2, // binding 2: face data
+                VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
                 1,
                 VK_SHADER_STAGE_FRAGMENT_BIT,
                 nullptr
@@ -165,10 +178,16 @@ bool Sculptor::create_material_layouts()
                 VK_SHADER_STAGE_FRAGMENT_BIT,
                 nullptr
             },
-            // TODO sort these in logical order
             {
                 8, // binding 8: texture coordinates
                 VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                1,
+                VK_SHADER_STAGE_FRAGMENT_BIT,
+                nullptr
+            },
+            {
+                9, // binding 9: materials array
+                VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
                 1,
                 VK_SHADER_STAGE_FRAGMENT_BIT,
                 nullptr

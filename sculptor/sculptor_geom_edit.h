@@ -181,7 +181,6 @@ class GeometryEditor: public Editor {
         bool allocate_resources_once();
         void free_view_resources(View* dst_view);
         bool create_materials();
-        void set_material_buf(const MaterialInfo& mat_info, uint32_t mat_id);
         bool create_grid_buffer();
         vmath::mat4 compute_model_view(const View& dst_view) const;
         std::optional<vmath::vec3> read_mouse_world_pos() const;
@@ -221,8 +220,6 @@ class GeometryEditor: public Editor {
         Resources*         cur_res          = nullptr; // Host resources used in this frame
         uint32_t           window_width     = 0;
         uint32_t           window_height    = 0;
-        uint32_t           materials_stride = 0;
-
         VkPipeline         gray_patch_gbuffer_mat = VK_NULL_HANDLE;
         VkPipeline         selection_mat          = VK_NULL_HANDLE;
         VkPipeline         vertex_mat             = VK_NULL_HANDLE;
@@ -240,7 +237,6 @@ class GeometryEditor: public Editor {
         VkPipeline         clear_hover_pipe       = VK_NULL_HANDLE;
 
         Sculptor::Geometry patch_geometry;
-        Buffer             materials_buf;
         Buffer             grid_buf;
         ToolbarState       toolbar_state     = { };
         SelectState        saved_select      = { };

@@ -127,14 +127,6 @@ Future additions
 */
 
 namespace {
-    enum MaterialsForShaders {
-        mat_grid,
-        mat_grid_major,
-        mat_vertex_sel,
-        mat_wireframe,
-        num_materials
-    };
-
     enum FrameFlags : uint32_t {
         frame_flag_select_faces     = 1u,
         frame_flag_select_vertices  = 2u,
@@ -683,19 +675,6 @@ bool GeometryEditor::allocate_resources_once()
     return true;
 }
 
-void GeometryEditor::set_material_buf(const MaterialInfo& mat_info, uint32_t mat_id)
-{
-    for (uint32_t i = 0; i < vk_num_swapchain_images; i++) {
-        const uint32_t abs_mat_id = (i * num_materials) + mat_id;
-
-        Sculptor::ShaderMaterial* const material = materials_buf.get_ptr<Sculptor::ShaderMaterial>(abs_mat_id, materials_stride);
-
-        material->diffuse_color[0] = static_cast<float>(mat_info.diffuse_color.red)   / 255.0f;
-        material->diffuse_color[1] = static_cast<float>(mat_info.diffuse_color.green) / 255.0f;
-        material->diffuse_color[2] = static_cast<float>(mat_info.diffuse_color.blue)  / 255.0f;
-        material->diffuse_color[3] = 1.0f;
-    }
-}
 
 bool GeometryEditor::create_materials()
 {
@@ -707,17 +686,6 @@ bool GeometryEditor::create_materials()
             offsetof(Sculptor::Geometry::Vertex, pos)
         }
     };
-
-    materials_stride = static_cast<uint32_t>(mstd::align_up(
-                static_cast<VkDeviceSize>(sizeof(ShaderMaterial)),
-                vk_phys_props.properties.limits.minUniformBufferOffsetAlignment));
-
-    if ( ! materials_buf.allocate(Usage::dynamic,
-                                  materials_stride * max_swapchain_size * num_materials,
-                                  VK_FORMAT_UNDEFINED,
-                                  VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
-                                  "materials buffer"))
-        return false;
 
     static const MaterialInfo gbuffer_mat_info = {
         {
@@ -788,7 +756,6 @@ bool GeometryEditor::create_materials()
 
     if ( ! create_material(vertex_info, &vertex_mat))
         return false;
-    set_material_buf(vertex_info, mat_vertex_sel);
 
     static const MaterialInfo ctrl_pt_handles_info = {
         {
@@ -852,8 +819,6 @@ bool GeometryEditor::create_materials()
 
     if ( ! Sculptor::create_material(grid_info, &grid_mat))
         return false;
-    set_material_buf(grid_info, mat_grid);
-    set_material_buf(grid_major_info, mat_grid_major);
 
     static const MaterialInfo wireframe_tess_mat_info = {
         {
@@ -2442,6 +2407,16 @@ bool GeometryEditor::draw_lighting_pass(VkCommandBuffer cmdbuf,
     push_descriptor(cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, Sculptor::lighting_layout,
                     1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, transforms_buf_info);
 
+    static VkDescriptorBufferInfo faces_buf_info = {
+        VK_NULL_HANDLE,
+        0,
+        0
+    };
+    patch_geometry.write_faces_descriptor(&faces_buf_info);
+
+    push_descriptor(cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, Sculptor::lighting_layout,
+                    2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, faces_buf_info);
+
     push_descriptor(cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, Sculptor::lighting_layout,
                     3, normal_image_info);
 
@@ -2849,13 +2824,9 @@ bool GeometryEditor::draw_wireframe_pass(VkCommandBuffer cmdbuf,
             0
         };
 
-        const uint32_t wire_mat_id = (image_idx * num_materials) + mat_wireframe;
-
-        buffer_info.buffer = materials_buf.get_buffer();
-        buffer_info.offset = wire_mat_id * materials_stride;
-        buffer_info.range  = materials_stride;
-        push_descriptor(cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, Sculptor::material_layout,
-                        0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, buffer_info);
+        static const float wireframe_color[4] = { 0.93f, 0.93f, 0.93f, 1.0f };
+        vkCmdPushConstants(cmdbuf, Sculptor::material_layout,
+                           VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(wireframe_color), wireframe_color);
 
         buffer_info.buffer = res.transforms.get_buffer();
         buffer_info.offset = 0;
@@ -3232,12 +3203,9 @@ bool GeometryEditor::render_grid(VkCommandBuffer cmdbuf,
                            &vb_offset);
 
     if (num_minor_lines > 0) {
-        buffer_info.buffer = materials_buf.get_buffer();
-        buffer_info.offset = ((image_idx * num_materials) + mat_grid) * materials_stride;
-        buffer_info.range  = materials_stride;
-
-        push_descriptor(cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, Sculptor::material_layout,
-                        0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, buffer_info);
+        static const float grid_color[4] = { 0.25f, 0.25f, 0.25f, 1.0f };
+        vkCmdPushConstants(cmdbuf, Sculptor::material_layout,
+                           VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(grid_color), grid_color);
 
         vkCmdDraw(cmdbuf,
                   num_minor_lines * 2,
@@ -3247,12 +3215,9 @@ bool GeometryEditor::render_grid(VkCommandBuffer cmdbuf,
     }
 
     if (num_major_lines > 0) {
-        buffer_info.buffer = materials_buf.get_buffer();
-        buffer_info.offset = ((image_idx * num_materials) + mat_grid_major) * materials_stride;
-        buffer_info.range  = materials_stride;
-
-        push_descriptor(cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, Sculptor::material_layout,
-                        0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, buffer_info);
+        static const float grid_major_color[4] = { 0.4f, 0.4f, 0.4f, 1.0f };
+        vkCmdPushConstants(cmdbuf, Sculptor::material_layout,
+                           VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(grid_major_color), grid_major_color);
 
         vkCmdDraw(cmdbuf,
                   num_major_lines * 2,
@@ -3379,14 +3344,9 @@ bool GeometryEditor::render_control_points(VkCommandBuffer cmdbuf,
 
         send_viewport_and_scissor(cmdbuf, dst_view.width, dst_view.height);
 
-        const uint32_t vertex_mat_id = (image_idx * num_materials) + mat_vertex_sel;
-
-        buffer_info.buffer = materials_buf.get_buffer();
-        buffer_info.offset = vertex_mat_id * materials_stride;
-        buffer_info.range  = materials_stride;
-
-        push_descriptor(cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, Sculptor::material_layout,
-                        0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, buffer_info);
+        static const float vertex_color[4] = { 0.9372f, 0.9372f, 0.9568f, 1.0f };
+        vkCmdPushConstants(cmdbuf, Sculptor::material_layout,
+                           VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(vertex_color), vertex_color);
 
         buffer_info.buffer = res.transforms.get_buffer();
         buffer_info.offset = 0;
