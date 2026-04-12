@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2021-2026 Chris Dragan
 
 #include "sculptor_materials.h"
+#include "sculptor_asset_browser.h"
 #include "sculptor_geom_edit.h"
 #include "sculptor_tex_edit.h"
 
@@ -28,18 +29,20 @@ vmath::vec4 Sculptor::Editor::debug_color{0.5f, 0.5f, 0.5f, 1.0f};
 const int gui_config_flags = ImGuiConfigFlags_NavEnableKeyboard
                            | ImGuiConfigFlags_DockingEnable;
 
+static Sculptor::AssetBrowser   asset_browser;
 static Sculptor::GeometryEditor geometry_editor;
 static Sculptor::TextureEditor  texture_editor;
 
 // Global list of all possible editor windows, this collection is used for generic handling
 // of editor windows, like drawing and event passing to visible editors
 static Sculptor::Editor* const editors[] = {
+    &asset_browser,
     &geometry_editor,
     &texture_editor
 };
 
-// Need +1 for ImGui full window itself
-const unsigned gui_num_descriptors = (std::size(editors) + 1) * max_swapchain_size;
+// Need +1 for ImGui full window itself, +max_asset_slots for asset thumbnails
+const unsigned gui_num_descriptors = (std::size(editors) + 1 + Sculptor::max_asset_slots) * max_swapchain_size;
 
 uint32_t check_device_features()
 {
@@ -74,6 +77,16 @@ bool skip_frame(struct Window* w)
 bool init_assets()
 {
     geometry_editor.set_object_name("unnamed");
+    texture_editor.set_asset_browser(&asset_browser);
+
+    Sculptor::TextureStore& tex_store = texture_editor.get_store();
+    asset_browser.register_tab(Sculptor::AssetBrowser::AssetTab::textures,
+                               tex_store.slots,
+                               sizeof(Sculptor::TextureSlot),
+                               Sculptor::AssetType::texture,
+                               &tex_store.list_state,
+                               "+ New Texture",
+                               "Texture");
 
     if ( ! Sculptor::create_material_layouts())
         return false;

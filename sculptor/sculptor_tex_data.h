@@ -3,11 +3,11 @@
 
 #pragma once
 
+#include "sculptor_asset_list.h"
 #include <stdint.h>
 
 namespace Sculptor {
 
-constexpr uint32_t max_textures       = 64;
 constexpr uint32_t max_modifiers      = 16; // per texture
 constexpr uint32_t texture_resolution = 512;
 
@@ -52,17 +52,14 @@ struct Modifier {
 //               [3]=mortar_R  [4]=mortar_G  [5]=mortar_B
 //               [6]=brick_R  [7]=brick_G  [8]=brick_B
 
-struct TextureSlot {
-    char     name[64];
-    bool     is_active;
-    uint32_t num_modifiers;
+struct TextureSlot : AssetSlotHeader {
+    uint32_t  num_modifiers;
     Modifier modifiers[max_modifiers];
 };
 
 struct TextureStore {
-    TextureSlot slots[max_textures];
-    uint32_t    display_order[max_textures]; // maps list position to slot index in the UI
-    uint32_t    num_active_slots;
+    TextureSlot    slots[max_asset_slots];
+    AssetListState list_state;
 };
 
 }

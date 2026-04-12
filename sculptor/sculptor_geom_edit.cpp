@@ -803,25 +803,6 @@ bool GeometryEditor::create_materials()
         make_byte_color(0.25f, 0.25f, 0.25f) // diffuse
     };
 
-    static const MaterialInfo grid_major_info = {
-        {
-            shader_sculptor_simple_vert,
-            shader_sculptor_color_frag
-        },
-        vertex_attributes,
-        0.0f,    // depth_bias
-        std::size(vertex_attributes),
-        sizeof(Sculptor::Geometry::Vertex),
-        { VK_FORMAT_UNDEFINED, VK_FORMAT_DISABLED, VK_FORMAT_DISABLED, VK_FORMAT_DISABLED },
-        VK_PRIMITIVE_TOPOLOGY_LINE_LIST,
-        0,       // patch_control_points
-        VK_POLYGON_MODE_FILL,
-        VK_CULL_MODE_NONE,
-        true,    // use_depth
-        false,   // alpha_blend
-        make_byte_color(0.4f, 0.4f, 0.4f) // diffuse
-    };
-
     if ( ! Sculptor::create_material(grid_info, &grid_mat))
         return false;
 

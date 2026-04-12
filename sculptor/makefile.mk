@@ -8,6 +8,8 @@ src_files += sculptor_editor.cpp
 src_files += sculptor_geometry.cpp
 src_files += sculptor_undo.cpp
 src_files += sculptor_materials.cpp
+src_files += sculptor_asset_browser.cpp
+src_files += sculptor_asset_list.cpp
 src_files += sculptor_geom_edit.cpp
 src_files += sculptor_tex_edit.cpp
 
@@ -30,6 +32,8 @@ shader_files += sculptor_ctrl_pt_handles.frag.glsl
 
 shader_files += sculptor_texgen.comp.glsl
 
+bin_to_header_files += assets.png
 bin_to_header_files += toolbar.png
 
+$(call OBJ_FROM_SRC,sculptor_asset_browser.cpp): $(gen_headers_dir)/assets.png.h
 $(call OBJ_FROM_SRC,sculptor_geom_edit.cpp): $(gen_headers_dir)/toolbar.png.h
