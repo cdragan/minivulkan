@@ -2133,6 +2133,16 @@ bool GeometryEditor::draw_frame(VkCommandBuffer cmdbuf, uint32_t image_idx)
     };
     sel_buf.barrier(sel_buf_before_readback);
 
+    // Barrier: sel_host_buf was read as copy source in setup_selection(); ensure that
+    // TRANSFER_READ completes before we write it as copy destination here.
+    static const Buffer::Transition sel_host_buf_before_readback = {
+        VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+        VK_ACCESS_2_TRANSFER_READ_BIT,
+        VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+        VK_ACCESS_2_TRANSFER_WRITE_BIT
+    };
+    view.res[image_idx].sel_host_buf.barrier(sel_host_buf_before_readback);
+
     send_barrier(cmdbuf);
 
     static const VkBufferCopy sel_copy_region = { 0, 0, max_objects };
@@ -3362,6 +3372,16 @@ bool GeometryEditor::render_control_points(VkCommandBuffer cmdbuf,
         VK_ACCESS_2_TRANSFER_READ_BIT
     };
     vtx_sel_buf.barrier(vtx_sel_after_render);
+
+    // Barrier: vtx_sel_host_buf was read as copy source in setup_selection(); ensure that
+    // TRANSFER_READ completes before we write it as copy destination here.
+    static const Buffer::Transition vtx_sel_host_buf_before_readback = {
+        VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+        VK_ACCESS_2_TRANSFER_READ_BIT,
+        VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+        VK_ACCESS_2_TRANSFER_WRITE_BIT
+    };
+    res.vtx_sel_host_buf.barrier(vtx_sel_host_buf_before_readback);
 
     send_barrier(cmdbuf);
 
