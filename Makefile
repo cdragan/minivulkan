@@ -309,7 +309,7 @@ ifeq ($(UNAME), Windows)
     WFLAGS += -W3
 
     ifeq ($(debug), 0)
-        CFLAGS  += -O1 -Oi -DNDEBUG -GL -MT
+        CFLAGS  += -O1 -Oi -DNDEBUG -GL -MT -Gw
         LDFLAGS += -ltcg
     else
         CFLAGS  += -D_DEBUG -Z7 -FS -MTd
