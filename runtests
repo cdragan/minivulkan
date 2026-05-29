@@ -29,8 +29,8 @@ run()
 
 run rm -rf Out
 
-run make -j $JOBS -k debug=0 $NOSTDLIB_TARGET
+run make -j $JOBS -k debug=0 stdlib=0 $NOSTDLIB_TARGET
 
-run make -j $JOBS -k debug=1 $NOSTDLIB_TARGET
+run make -j $JOBS -k debug=1 stdlib=0 $NOSTDLIB_TARGET
 
 run make -j $JOBS -k debug=1 stdlib=1

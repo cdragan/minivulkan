@@ -24,9 +24,12 @@ spirv_shuffle ?= 1
 # Enable spirv optimization, disable for debugging purposes
 spirv_opt ?= 1
 
-# Windows only: 1 links against MSVCRT, 0 doesn't use MSVCRT
+# Windows: 1 links against MSVCRT, 0 doesn't use MSVCRT
+# macOS: 1 builds with Objective-C, 0 builds the nogui executable without Objective-C
 ifeq ($(UNAME), Windows)
-    stdlib ?= 0
+    stdlib ?= 1
+else ifeq ($(UNAME), Darwin)
+    stdlib ?= 1
 else
     override stdlib := 1
 endif
@@ -70,10 +73,8 @@ default:
 
 out_dir_base ?= Out
 
-ifeq ($(UNAME), Windows)
-    ifneq ($(stdlib), 0)
-        out_dir_suffix = _stdlib
-    endif
+ifeq ($(stdlib), 0)
+    out_dir_suffix = _nostdlib
 endif
 
 out_dir_suffix ?=
@@ -120,7 +121,6 @@ threed_src_files += core/memory_heap.cpp
 threed_src_files += core/minivulkan.cpp
 threed_src_files += core/resource.cpp
 threed_src_files += core/shaders.cpp
-threed_src_files += core/sound.cpp
 
 ifeq ($(UNAME), Linux)
     ifeq ($(wayland), 1)
@@ -138,10 +138,15 @@ ifeq ($(UNAME), Linux)
 endif
 
 ifeq ($(UNAME), Darwin)
-    threed_src_files       += macos/main_macos.mm
+    ifeq ($(stdlib), 0)
+        # Objective-C-free window and surface setup, driven via the libobjc C runtime
+        threed_nogui_src_files += macos/main_macos_c.cpp
+    else
+        threed_src_files       += macos/main_macos.mm
+        threed_nogui_src_files += macos/nogui_macos.mm
+    endif
     threed_gui_src_files   += macos/gui_macos.mm
-    threed_gui_src_files   += macos/realtime_synth_macos.mm
-    threed_nogui_src_files += macos/nogui_macos.mm
+    threed_gui_src_files   += macos/realtime_synth_macos.cpp
 endif
 
 ifeq ($(UNAME), Windows)
@@ -422,7 +427,6 @@ ifeq ($(UNAME), Linux)
 endif
 
 ifeq ($(UNAME), Darwin)
-    frameworks += AVFoundation
     frameworks += Cocoa
     frameworks += CoreVideo
     frameworks += Quartz
@@ -442,6 +446,7 @@ ifeq ($(UNAME), Darwin)
         STRIP = strip -x
 
         LDFLAGS += -Wl,-dead_strip
+        LDFLAGS += -Wl,-no_function_starts -Wl,-no_data_in_code_info
 
         LTO_CFLAGS += -flto
         LDFLAGS    += -flto

@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: MIT
 // SPDX-FileCopyrightText: Copyright (c) 2021-2026 Chris Dragan
 
-#import <AVFoundation/AVAudioPlayer.h>
 #import <Cocoa/Cocoa.h>
 #import <QuartzCore/CAMetalLayer.h>
 #import <QuartzCore/CADisplayLink.h>
@@ -43,44 +42,6 @@ uint64_t get_current_time_ms()
     }
 
     return time_ms;
-}
-
-static AVAudioPlayer* sound_track;
-
-bool load_sound_track(const void* data, uint32_t size)
-{
-    assert( ! sound_track);
-
-    NSData *sound_data = [NSData dataWithBytes: data
-                                 length:        size];
-    sound_track = [[AVAudioPlayer alloc] initWithData: sound_data
-                                         error:        nullptr];
-
-    if ( ! sound_track) {
-        d_printf("Failed to load soundtrack\n");
-        return false;
-    }
-
-    d_printf("Soundtrack duration %.3f s\n", sound_track.duration);
-
-    if ( ! [sound_track prepareToPlay]) {
-        d_printf("Failed to initialize soundtrack for playback\n");
-        return false;
-    }
-
-    return true;
-}
-
-bool play_sound_track()
-{
-    assert(sound_track);
-
-    if ( ! [sound_track play]) {
-        d_printf("Failed to play soundtrack\n");
-        return false;
-    }
-
-    return true;
 }
 
 @interface VulkanView: NSView

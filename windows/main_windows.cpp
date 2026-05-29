@@ -6,10 +6,6 @@
 #include "../core/gui.h"
 #include "../core/minivulkan.h"
 #include "../core/mstdc.h"
-#include "../core/realtime_synth.h"
-
-/* TODO Just including xaudio2.h somehow calls LoadLibraryEx - figure out how to avoid that */
-#include <xaudio2.h>
 
 bool create_surface(Window* w)
 {
@@ -40,84 +36,6 @@ uint64_t get_current_time_ms()
     time_100ns += static_cast<uint64_t>(ft.dwHighDateTime) << 32;
 
     return time_100ns / 10'000;
-}
-
-static IXAudio2*            x_audio;
-static IXAudio2SourceVoice* sound_track;
-
-bool load_sound_track(const void* data, uint32_t size)
-{
-    assert( ! x_audio);
-    assert( ! sound_track);
-
-    if (FAILED(CoInitializeEx(nullptr, COINIT_MULTITHREADED))) {
-        d_printf("Failed to initialize COM\n");
-        return false;
-    }
-
-    if (FAILED(XAudio2Create(&x_audio, 0, XAUDIO2_DEFAULT_PROCESSOR))) {
-        d_printf("Failed to initialize XAudio2\n");
-        return false;
-    }
-
-    IXAudio2MasteringVoice* mastering_voice;
-    if (FAILED(x_audio->CreateMasteringVoice(&mastering_voice))) {
-        d_printf("Failed to create mastering voice\n");
-        return false;
-    }
-
-    constexpr uint32_t num_channels = 2;
-
-    static WAVEFORMATEX wave_format = {
-        sample_format,
-        num_channels,    // nChannels
-        Synth::rt_sampling_rate,   // nSamplesPerSec
-        Synth::rt_sampling_rate * num_channels * bits_per_sample / 8, // nAvgBytesPerSec
-        num_channels * bits_per_sample / 8,                 // nBlockAlign
-        bits_per_sample, // wBitsPerSample
-        0                // cbSize
-    };
-
-    IXAudio2SourceVoice* source_voice;
-    if (FAILED(x_audio->CreateSourceVoice(&source_voice, &wave_format))) {
-        d_printf("Failed to create source voice\n");
-        return false;
-    }
-
-    static XAUDIO2_BUFFER buffer = {
-        0,       // Flags
-        0,       // AudioBytes
-        nullptr, // pAudioData
-        0,       // PlayBegin
-        0,       // PlayLength
-        0,       // LoopBegin
-        0,       // LoopLength
-        0,       // LoopCount
-        nullptr  // pContext
-    };
-    buffer.AudioBytes = size;
-    buffer.pAudioData = static_cast<const BYTE*>(data);
-
-    if (FAILED(source_voice->SubmitSourceBuffer(&buffer))) {
-        d_printf("Failed to submit sound data\n");
-        return false;
-    }
-
-    sound_track = source_voice;
-
-    return true;
-}
-
-bool play_sound_track()
-{
-    assert(sound_track);
-
-    if (FAILED(sound_track->Start(0))) {
-        d_printf("Failed to start soundtrack\n");
-        return false;
-    }
-
-    return true;
 }
 
 static LRESULT CALLBACK window_proc(HWND hwnd, UINT umsg, WPARAM wparam, LPARAM lparam)

@@ -18,15 +18,3 @@ uint64_t get_current_time_ms()
 
     return time_ms;
 }
-
-bool load_sound_track(const void* data, uint32_t size)
-{
-    // TODO
-    return true;
-}
-
-bool play_sound_track()
-{
-    // TODO
-    return true;
-}
