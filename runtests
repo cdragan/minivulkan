@@ -31,6 +31,20 @@ run rm -rf Out
 
 run make -j $JOBS -k debug=0 stdlib=0 $NOSTDLIB_TARGET
 
+run mkdir -p Out/artifacts
+case "$UNAME" in
+    Linux)
+        run cp Out/release_nostdlib/example{,.map} Out/artifacts
+        ;;
+    Darwin)
+        run cp -r Out/release_nostdlib/example.app Out/artifacts
+        run rm -rf Out/artifacts/*.app/Contents/Frameworks
+        ;;
+    CYGWIN*|MINGW*|MSYS*)
+        run cp Out/release_nostdlib/example.exe{,.map} Out/artifacts
+        ;;
+esac
+
 run make -j $JOBS -k debug=1 stdlib=0 $NOSTDLIB_TARGET
 
 run make -j $JOBS -k debug=1 stdlib=1
