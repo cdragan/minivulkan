@@ -10,7 +10,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 6
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Install Headers
         run: |
           sudo apt-get update
@@ -27,7 +27,7 @@ jobs:
     runs-on: macos-latest
     timeout-minutes: 6
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Install Vulkan SDK
         uses: humbletim/install-vulkan-sdk@v1.2
         with:
@@ -35,6 +35,11 @@ jobs:
           cache: true
       - name: Test
         run: ./runtests
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: macos
+          path: Out/release_nostdlib
 
   windows:
     runs-on: windows-2022
@@ -49,7 +54,7 @@ jobs:
       - name: Remove link.exe from MSYS2
         shell: msys2 {0}
         run: rm -f /bin/link.exe
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Install Vulkan SDK
         uses: humbletim/install-vulkan-sdk@v1.2
         with:
@@ -60,3 +65,8 @@ jobs:
         run: |
           call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvarsall.bat" x86
           msys2 -c ./runtests
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows
+          path: Out/release_nostdlib
