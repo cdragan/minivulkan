@@ -34,7 +34,7 @@ run make -j $JOBS -k debug=0 stdlib=0 $NOSTDLIB_TARGET
 run mkdir -p Out/artifacts
 case "$UNAME" in
     Linux)
-        run cp Out/release_nostdlib/example{,.map} Out/artifacts
+        run cp Out/release/example{,.map} Out/artifacts
         ;;
     Darwin)
         run cp -r Out/release_nostdlib/example.app Out/artifacts

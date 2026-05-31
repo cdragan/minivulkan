@@ -16,7 +16,8 @@ endif
 # Default build flags
 
 # Debug vs release
-debug ?= 1
+debug   ?= 1
+release ?= $(if $(filter 1,$(debug)),0,1)
 
 # Enable spirv shuffling, disable for debugging purposes
 spirv_shuffle ?= 1
@@ -40,7 +41,7 @@ ifneq ($(UNAME), Windows)
     ifeq ($(spirv_opt), 0)
         sanitize =
     endif
-    ifneq ($(debug), 0)
+    ifeq ($(release), 0)
         sanitize ?= address,undefined
     endif
     sanitize ?=
@@ -79,10 +80,10 @@ endif
 
 out_dir_suffix ?=
 
-ifeq ($(debug), 0)
-    out_dir_config = release
-else
+ifeq ($(release), 0)
     out_dir_config = debug
+else
+    out_dir_config = release
 endif
 
 out_dir = $(out_dir_base)/$(out_dir_config)$(out_dir_suffix)
@@ -158,7 +159,7 @@ ifeq ($(UNAME), Windows)
     ifeq ($(stdlib), 0)
         lib_src_files += windows/mstdc_windows.cpp
     else
-        ifneq ($(debug), 0)
+        ifeq ($(release), 0)
             lib_src_files += windows/d_printf_windows.cpp
         endif
     endif
@@ -313,12 +314,15 @@ LDFLAGS_gui    =
 ifeq ($(UNAME), Windows)
     WFLAGS += -W3
 
-    ifeq ($(debug), 0)
-        CFLAGS  += -O1 -Oi -DNDEBUG -GL -MT -Gw
-        LDFLAGS += -ltcg
-    else
+    ifeq ($(release), 0)
         CFLAGS  += -D_DEBUG -Z7 -FS -MTd
         LDFLAGS += -debug
+    else
+        CFLAGS  += -O1 -Oi -DNDEBUG -MT -Gw
+        ifneq ($(CC), clang-cl.exe)
+            CFLAGS += -GL
+        endif
+        LDFLAGS += -ltcg
     endif
 
     ifeq ($(stdlib), 0)
@@ -351,7 +355,7 @@ ifeq ($(UNAME), Windows)
     LINKER_OUTPUT   = -out:$1
     MAP_FLAG        = -map:$1.map
 
-    ifeq ($(debug), 0)
+    ifneq ($(release), 0)
         $(call TARGET_FILES, mstdc_windows.cpp): CFLAGS += -GL-
     endif
 else
@@ -365,7 +369,14 @@ else
         CFLAGS += -msse4.1
     endif
 
-    ifeq ($(debug), 0)
+    ifeq ($(release), 0)
+        ifneq ($(sanitize),)
+            CFLAGS  += -fsanitize=$(sanitize)
+            LDFLAGS += -fsanitize=$(sanitize)
+        endif
+
+        CFLAGS += -O0 -g
+    else
         CFLAGS += -DNDEBUG -Os
         CFLAGS += -fomit-frame-pointer
         CFLAGS += -fno-stack-check -fno-stack-protector
@@ -373,13 +384,6 @@ else
 
         CFLAGS  += -ffunction-sections -fdata-sections
         LDFLAGS += -ffunction-sections -fdata-sections
-    else
-        ifneq ($(sanitize),)
-            CFLAGS  += -fsanitize=$(sanitize)
-            LDFLAGS += -fsanitize=$(sanitize)
-        endif
-
-        CFLAGS += -O0 -g
     endif
 
     CXXFLAGS += -x c++ -std=c++20 -fno-rtti -fno-exceptions
@@ -414,7 +418,7 @@ ifeq ($(UNAME), Linux)
     # Required for truncf()
     LDFLAGS += -lm
 
-    ifeq ($(debug), 0)
+    ifneq ($(release), 0)
         STRIP = strip -R .note.* -R .comment -R .eh_frame*
 
         LDFLAGS += -Wl,--gc-sections -Wl,--as-needed
@@ -442,7 +446,9 @@ ifeq ($(UNAME), Darwin)
     LDFLAGS     += $(addprefix -framework ,$(frameworks))
     LDFLAGS_gui += $(addprefix -framework ,$(gui_frameworks))
 
-    ifeq ($(debug), 0)
+    ifeq ($(release), 0)
+        export MallocNanoZone=0
+    else
         STRIP = strip -x
 
         LDFLAGS += -Wl,-dead_strip
@@ -450,8 +456,6 @@ ifeq ($(UNAME), Darwin)
 
         LTO_CFLAGS += -flto
         LDFLAGS    += -flto
-    else
-        export MallocNanoZone=0
     endif
 
     MAP_FLAG = -Wl,-map,$1.map
