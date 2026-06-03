@@ -19,9 +19,6 @@ endif
 debug   ?= 1
 release ?= $(if $(filter 1,$(debug)),0,1)
 
-# Enable spirv shuffling, disable for debugging purposes
-spirv_shuffle ?= 1
-
 # Enable spirv optimization, disable for debugging purposes
 spirv_opt ?= 1
 
@@ -477,7 +474,6 @@ endif
 GLSL_FLAGS = --target-env vulkan1.4
 GLSL_OPT_FLAGS =
 GLSL_STRIP_FLAGS =
-GLSL_ENCODE_FLAGS =
 SPIRV_STRIP := spirv-remap
 ifeq ($(shell command -v spirv-remap >/dev/null 2>/dev/null || echo "missing"), missing)
     SPIRV_STRIP := spirv-opt
@@ -493,12 +489,6 @@ ifndef GLSL_NO_OPTIMIZER
 endif
 ifeq ($(spirv_opt), 0)
     GLSL_FLAGS += -g
-else
-    GLSL_ENCODE_FLAGS += --remove-unused
-endif
-ifeq ($(spirv_shuffle), 0)
-    GLSL_ENCODE_FLAGS += --no-shuffle
-    CFLAGS += -DNO_SPIRV_SHUFFLE
 endif
 
 ASM_SYNTAX =
@@ -645,9 +635,6 @@ shaders_out_dir := $(out_dir_base)/shaders
 ifeq ($(spirv_opt), 0)
     shaders_out_dir := $(shaders_out_dir)_noopt
 endif
-ifeq ($(spirv_shuffle), 0)
-    shaders_out_dir := $(shaders_out_dir)_noshuffle
-endif
 
 $(shaders_out_dir): | $(out_dir_base)
 	mkdir -p $@
@@ -696,8 +683,8 @@ ifeq ($(SPIRV_STRIP), spirv-opt)
 else
 	cd $(shaders_out_dir)/opt && $(GLSL_VALIDATOR_PREFIX)spirv-remap --strip all --dce all --input $$(subst .glsl,.spv,$$(notdir $$<)) --output ../../../$(shaders_out_dir)/strip
 endif
-	$(spirv_encode) $(GLSL_ENCODE_FLAGS) shader_$$(subst .,_,$$(basename $$(notdir $$<))) $$(call shader_stage,strip,$$<) $$@
-	$(spirv_encode) $(GLSL_ENCODE_FLAGS) --binary shader_$$(subst .,_,$$(basename $$(notdir $$<))) $$(call shader_stage,strip,$$<) $$(basename $$@).bin
+	$(spirv_encode) shader_$$(subst .,_,$$(basename $$(notdir $$<))) $$(call shader_stage,strip,$$<) $$@
+	$(spirv_encode) --binary shader_$$(subst .,_,$$(basename $$(notdir $$<))) $$(call shader_stage,strip,$$<) $$(basename $$@).bin
 	$(GLSL_VALIDATOR_PREFIX)spirv-dis -o $$(basename $$@).disasm $$(call shader_stage,strip,$$<)
 endef
 
