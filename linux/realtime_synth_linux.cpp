@@ -10,6 +10,10 @@ bool init_synth_os()
     return false;
 }
 
+void stop_synth_os()
+{
+}
+
 uint64_t get_current_timestamp_ms()
 {
     return 0;

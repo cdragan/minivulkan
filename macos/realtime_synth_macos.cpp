@@ -105,6 +105,13 @@ bool init_synth_os()
     return true;
 }
 
+void stop_synth_os()
+{
+    if (output_unit) {
+        AudioOutputUnitStop(output_unit);
+    }
+}
+
 uint64_t get_current_timestamp_ms()
 {
     return saved_timestamp_ms;

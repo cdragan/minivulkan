@@ -9,6 +9,13 @@
 
 namespace Synth {
 
+static constexpr int pitch_bend_full_scale = 8192;
+
+float pitch_bend_to_semitones(int16_t centered_bend, float range_semitones)
+{
+    return static_cast<float>(centered_bend) / static_cast<float>(pitch_bend_full_scale) * range_semitones;
+}
+
 float note_to_frequency(int midi_note, float pitch_semitones, uint32_t freq_mult)
 {
     const float note_pitch = static_cast<float>(midi_note - 69) + pitch_semitones;

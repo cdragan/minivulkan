@@ -374,7 +374,7 @@ static int event_loop(Window* w)
             return 1;
     }
 
-    idle_queue();
+    deinit_vulkan();
 
     return 0;
 }

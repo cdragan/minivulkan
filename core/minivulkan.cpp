@@ -1115,6 +1115,12 @@ bool idle_queue()
     return res == VK_SUCCESS;
 }
 
+void deinit_vulkan()
+{
+    deinit_assets();
+    idle_queue();
+}
+
 static bool update_resolution()
 {
     if ( ! idle_queue())

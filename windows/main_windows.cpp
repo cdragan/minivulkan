@@ -88,7 +88,7 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT umsg, WPARAM wparam, LPARAM 
             return 0;
     }
 
-    idle_queue();
+    deinit_vulkan();
 
     PostQuitMessage(0);
     return 0;

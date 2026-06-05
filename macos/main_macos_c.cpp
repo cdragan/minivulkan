@@ -225,7 +225,7 @@ static void application_did_finish_launching(id self, SEL cmd, id notification)
 
 static void application_will_terminate(id self, SEL cmd, id notification)
 {
-    idle_queue();
+    deinit_vulkan();
 }
 
 static BOOL application_should_terminate_after_last_window_closed(id self, SEL cmd, id sender)

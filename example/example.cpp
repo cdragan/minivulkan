@@ -744,6 +744,10 @@ bool init_assets()
     return true;
 }
 
+void deinit_assets()
+{
+}
+
 bool draw_frame(uint32_t image_idx, uint64_t time_ms, VkFence queue_fence, uint32_t sem_id)
 {
     static Buffer vertex_buffer;

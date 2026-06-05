@@ -104,6 +104,11 @@ bool init_assets()
     return true;
 }
 
+void deinit_assets()
+{
+    Synth::stop_synth();
+}
+
 void notify_gui_heap_freed()
 {
     for (Sculptor::Editor* editor : editors)

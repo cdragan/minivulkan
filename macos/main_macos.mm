@@ -286,7 +286,7 @@ uint64_t get_current_time_ms()
 
     - (void)applicationWillTerminate: (NSNotification *)notification
     {
-        idle_queue();
+        deinit_vulkan();
     }
 
     - (BOOL)applicationShouldTerminateAfterLastWindowClosed: (NSApplication *)sender

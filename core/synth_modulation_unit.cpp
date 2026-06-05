@@ -122,5 +122,14 @@ int main()
         TEST(approx(release_value, 0.0f, 0.01f));
     }
 
+    // pitch bend -> semitones: centered 14-bit value scaled by the bend range.
+    // center (0) -> no bend; full deflection -> +/- range; half -> ~half range.
+    TEST(approx(Synth::pitch_bend_to_semitones(0, 2.0f), 0.0f, 0.001f));
+    TEST(approx(Synth::pitch_bend_to_semitones(8191, 2.0f), 2.0f, 0.001f));
+    TEST(approx(Synth::pitch_bend_to_semitones(-8192, 2.0f), -2.0f, 0.001f));
+    TEST(approx(Synth::pitch_bend_to_semitones(4096, 2.0f), 1.0f, 0.001f));
+    // range scales linearly
+    TEST(approx(Synth::pitch_bend_to_semitones(8191, 12.0f), 12.0f, 0.01f));
+
     return exit_code;
 }

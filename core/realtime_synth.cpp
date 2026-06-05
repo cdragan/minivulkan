@@ -59,6 +59,33 @@ namespace {
     typedef uint8_t NoteToVoice[128];
     NoteToVoice note_to_voice[Synth::max_channels];
 
+    // Per-channel MIDI expression state
+    float channel_pitch_bend[Synth::max_channels];  // semitones
+    float channel_mod_wheel[Synth::max_channels];   // 0..1
+    float channel_pressure[Synth::max_channels];    // 0..1
+
+    // TODO temporary test
+    // LFO driving vibrato (pitch), depth scaled by the mod wheel.  Bipolar [-1, 1]
+    // so the pitch swings symmetrically around the channel bend.  ~6 Hz.
+    static const Synth::LFODescriptor vibrato_lfo = { Synth::sine_wave, 0, 167, -1.0f, 2.0f };
+
+    // TODO temporary test
+    // LFO driving tremolo (volume), depth scaled by pressure / aftertouch.  Unipolar
+    // [0, 1] so the gain never inverts phase and never exceeds 1.  ~5 Hz.
+    static const Synth::LFODescriptor tremolo_lfo = { Synth::sine_wave, 0, 200, 0.0f, 1.0f };
+
+    // Maximum vibrato swing in semitones when the mod wheel is fully on
+    constexpr float vibrato_depth_semitones = 0.5f;
+
+    // Continuous LFO phase shared by all voices, advanced once per render step
+    uint32_t modulation_lfo_tick;
+
+    // Default pitch bend range in semitones (standard MIDI default is +/- 2)
+    constexpr float default_pitch_bend_range_semitones = 2.0f;
+
+    // MIDI continuous controller number for the modulation wheel
+    constexpr uint32_t mod_wheel_cc = 1;
+
     // Maximum number of parameters per voice channel (single instrument note)
     constexpr uint32_t max_parameters = 16;
 
@@ -73,6 +100,7 @@ namespace {
         uint8_t instrument;
         uint8_t osc_id;             // Oscillator owned by this voice (0 = none)
         float   velocity;           // Note-on velocity, 0..1
+        float   aftertouch;         // Per-note polyphonic aftertouch pressure, 0..1
         bool    releasing;          // True after note-off, until the volume envelope finishes
         int32_t parameters[max_parameters];
     };
@@ -399,6 +427,7 @@ namespace {
 
 namespace Synth {
     bool init_synth_os();
+    void stop_synth_os();
 }
 
 static void init_oscillator_buffers()
@@ -496,6 +525,11 @@ bool Synth::init_synth()
         return false;
 
     return true;
+}
+
+void Synth::stop_synth()
+{
+    stop_synth_os();
 }
 
 // Template boilerplate to support different output audio buffer types,
@@ -741,8 +775,9 @@ static void process_note_on(uint32_t delta_samples, const Synth::MidiEvent& even
     // Preserve amplitude if the same note is replayed
     voices[voice_idx].parameters[param_cur_amplitude] = amplitude;
 
-    voices[voice_idx].velocity  = static_cast<float>(event.note_data) / 127.0f;
-    voices[voice_idx].releasing = false;
+    voices[voice_idx].velocity   = static_cast<float>(event.note_data) / 127.0f;
+    voices[voice_idx].releasing  = false;
+    voices[voice_idx].aftertouch = 0.0f;
 
     // TODO The voice's volume parameter shares the oscillator slot index (1 volume
     // parameter per oscillator for now).  Parameter descriptor id 1 = ADSR volume.
@@ -766,26 +801,36 @@ static void process_aftertouch(uint32_t delta_samples, const Synth::MidiEvent& e
     assert(voice_idx);
     assert(voices[voice_idx].active);
 
-    // TODO apply aftertouch
+    voices[voice_idx].aftertouch = static_cast<float>(event.note_data) / 127.0f;
 }
 
 static void process_controller(uint32_t delta_samples, const Synth::MidiEvent& event)
 {
-    // TODO
+    // TODO Only the modulation wheel is supported for now; other controllers ignored.
+    if (event.controller == mod_wheel_cc) {
+        channel_mod_wheel[event.channel] = static_cast<float>(event.controller_data) / 127.0f;
+    }
 }
 
 static void process_pitch_bend(uint32_t delta_samples, const Synth::MidiEvent& event)
 {
-    // TODO
+    channel_pitch_bend[event.channel] = Synth::pitch_bend_to_semitones(event.pitch_bend, default_pitch_bend_range_semitones);
+}
+
+static void process_channel_pressure(uint32_t delta_samples, const Synth::MidiEvent& event)
+{
+    // TODO get_next_midi_event does not yet decode real channel-pressure messages;
+    // only the temp test driver populates note_data here.  Real-MIDI decode is
+    // a follow-up (live/file MIDI input is currently out of scope).
+    channel_pressure[event.channel] = static_cast<float>(event.note_data) / 127.0f;
 }
 
 static void process_events(uint32_t start_samples, uint32_t end_samples)
 {
     using EventHandler = void (*)(uint32_t delta_samples, const Synth::MidiEvent& event);
 
-    // These two MIDI events are unused and thus are unsupported
-    constexpr EventHandler process_program_change   = nullptr;
-    constexpr EventHandler process_channel_pressure = nullptr;
+    // Program change is unused and thus unsupported
+    constexpr EventHandler process_program_change = nullptr;
 
     static const EventHandler event_handlers[] = {
         #define X(name) process_##name,
@@ -889,43 +934,117 @@ static void push_descriptor(const PushDescriptorInfo& info, uint32_t buffer_offs
 // audible without a MIDI soundtrack.  Remove once real MIDI input exists.
 static void temp_drive_test_notes(uint32_t start_samples, uint32_t end_samples)
 {
-    constexpr uint32_t   note_period_samples = Synth::rt_sampling_rate;          // 1 note per second
-    constexpr uint32_t   note_on_samples     = Synth::rt_sampling_rate * 3 / 4;  // held 0.75s
-    static const uint8_t pattern_notes[]     = { 60, 62, 64, 65, 67, 69, 71, 72 };
+    constexpr uint32_t   note_period_samples      = Synth::rt_sampling_rate;          // 1 note per second
+    constexpr uint32_t   note_on_samples          = Synth::rt_sampling_rate * 3 / 4;  // held 0.75s
+    constexpr uint32_t   expression_update_samples = 256;                             // expression update granularity
+    static const uint8_t pattern_notes[]          = { 60, 62, 64, 65, 67, 69, 71, 72 };
+
+    // Number of distinct expression types cycled across steps.
+    constexpr uint32_t num_expr_types = 4;
+
+    // Helper lambda: build a base event for channel 0 with zeroed fields.
+    auto make_event = [](uint8_t note) {
+        Synth::MidiEvent ev = { };
+        ev.channel = 0;
+        ev.note    = note;
+        return ev;
+    };
 
     for (uint32_t sample = start_samples; sample < end_samples; sample++) {
         const uint32_t phase_in_period = sample % note_period_samples;
+        const uint32_t step            = (sample / note_period_samples) % std::size(pattern_notes);
+        const uint8_t  current_note    = pattern_notes[step];
+
         if (phase_in_period == 0) {
-            const uint32_t step = (sample / note_period_samples) % std::size(pattern_notes);
-            Synth::MidiEvent event = { };
-            event.channel   = 0;
-            event.note      = pattern_notes[step];
-            event.note_data = 100;  // velocity (used by follow-up task)
-            process_note_on(0, event);
+            // Reset channel 0 expression state so the previous note's effect
+            // does not bleed into the new note.
+            Synth::MidiEvent reset_ev = make_event(current_note);
+            reset_ev.pitch_bend = 0;
+            process_pitch_bend(0, reset_ev);
+            reset_ev.controller      = 1;
+            reset_ev.controller_data = 0;
+            process_controller(0, reset_ev);
+            reset_ev.note_data = 0;
+            process_channel_pressure(0, reset_ev);
+
+            // Note-on with velocity 100.
+            Synth::MidiEvent on_ev = make_event(current_note);
+            on_ev.note_data = 100;
+            process_note_on(0, on_ev);
         }
         else if (phase_in_period == note_on_samples) {
-            const uint32_t step = (sample / note_period_samples) % std::size(pattern_notes);
-            Synth::MidiEvent event = { };
-            event.channel = 0;
-            event.note    = pattern_notes[step];
-            process_note_off(0, event);
+            Synth::MidiEvent off_ev = make_event(current_note);
+            process_note_off(0, off_ev);
+        }
+        else if (phase_in_period < note_on_samples &&
+                 phase_in_period % expression_update_samples == 0) {
+            // Emit one expression update for the hold window, ramping 0->max
+            // proportionally to how far we are into the hold.
+            const float ramp01       = static_cast<float>(phase_in_period) /
+                                       static_cast<float>(note_on_samples);
+            const uint32_t expr_type = step % num_expr_types;
+
+            if (expr_type == 0) {
+                // Pitch-bend sweep: ramp pitch_bend from 0 up to +8191.
+                Synth::MidiEvent ev = make_event(current_note);
+                ev.pitch_bend = static_cast<int16_t>(ramp01 * 8191.0f);
+                process_pitch_bend(0, ev);
+            }
+            else if (expr_type == 1) {
+                // Mod-wheel vibrato: ramp controller_data 0->127.
+                Synth::MidiEvent ev  = make_event(current_note);
+                ev.controller        = 1;
+                ev.controller_data   = static_cast<uint8_t>(ramp01 * 127.0f);
+                process_controller(0, ev);
+            }
+            else if (expr_type == 2) {
+                // Channel-pressure tremolo: ramp note_data 0->127.
+                Synth::MidiEvent ev = make_event(current_note);
+                ev.note_data = static_cast<uint8_t>(ramp01 * 127.0f);
+                process_channel_pressure(0, ev);
+            }
+            else {
+                // Per-note aftertouch tremolo: ramp note_data 0->127.
+                // process_aftertouch asserts the voice is active, so only send
+                // this during the hold window (already guaranteed here).
+                Synth::MidiEvent ev = make_event(current_note);
+                ev.note_data = static_cast<uint8_t>(ramp01 * 127.0f);
+                process_aftertouch(0, ev);
+            }
         }
     }
 }
 
 static void update_modulation()
 {
+    // TODO temporary test
+    // Evaluate the modulation LFOs once per step so every oscillator shares the
+    // same phase this step.
+    const float vibrato_wave = eval_lfo(vibrato_lfo, modulation_lfo_tick, rt_step_samples, Synth::rt_sampling_rate);  // [-1, 1]
+    const float tremolo_wave = eval_lfo(tremolo_lfo, modulation_lfo_tick, rt_step_samples, Synth::rt_sampling_rate);  // [0, 1]
+
     for (uint32_t osc_idx = 1; osc_idx < max_oscillators; osc_idx++) {
         Oscillator& osc = oscillators[osc_idx];
         if (osc.osc_type[0] == no_wave) {
             continue;
         }
 
+        const uint32_t ch = osc.midi_channel;
+
+        // Apply the channel pitch bend plus the mod-wheel-scaled vibrato term.
+        osc.pitch = channel_pitch_bend[ch] + channel_mod_wheel[ch] * vibrato_depth_semitones * vibrato_wave;
+
         const uint32_t volume_param_id = osc_idx;  // 1 volume parameter per oscillator
         advance_param(volume_param_id);
 
         Voice& voice = voices[osc.voice_id];
-        osc.volume   = voice.velocity * params[volume_param_id].cur_value;
+
+        // Tremolo depth follows the stronger of per-note aftertouch and channel
+        // pressure.  Depth 0 leaves the gain at 1; full depth oscillates the gain
+        // down to (1 - depth) and never above 1.
+        const float tremolo_depth = std::max(voice.aftertouch, channel_pressure[ch]);
+        const float tremolo_gain  = 1.0f - tremolo_depth * (1.0f - tremolo_wave);
+        osc.volume = voice.velocity * params[volume_param_id].cur_value * tremolo_gain;
 
         // Free the voice once the release has decayed to silence.
         constexpr float silence_threshold = 0.0005f;
@@ -938,6 +1057,9 @@ static void update_modulation()
             mstd::mem_zero(&voice.parameters, sizeof(voice.parameters));
         }
     }
+
+    // Advance the shared LFO phase exactly once per render step.
+    modulation_lfo_tick++;
 }
 
 static void render_audio_step()

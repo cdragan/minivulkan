@@ -68,6 +68,8 @@ struct MidiEvent {
 
 bool init_synth();
 
+void stop_synth();
+
 bool render_audio_buffer(uint32_t num_frames,
                          float*   left_channel,
                          float*   right_channel);

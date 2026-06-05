@@ -43,6 +43,7 @@ FEATURE_SETS
 struct Window;
 
 bool init_vulkan(struct Window* w);
+void deinit_vulkan();
 bool create_surface(struct Window* w);
 bool skip_frame(struct Window* w);
 bool need_redraw(struct Window* w);
@@ -53,6 +54,7 @@ uint64_t get_current_time_ms();
 
 uint32_t check_device_features();
 bool init_assets();
+void deinit_assets();
 
 #ifdef NDEBUG
 inline constexpr void set_vk_object_name(VkObjectType type, uint64_t handle, Description desc) { }
