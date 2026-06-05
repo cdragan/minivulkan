@@ -13,6 +13,7 @@
 #include "../core/memory_heap.h"
 #include "../core/minivulkan.h"
 #include "../core/mstdc.h"
+#include "../core/realtime_synth.h"
 #include "../core/vmath.h"
 
 #include "sculptor_shaders.h"
@@ -55,6 +56,8 @@ uint32_t check_device_features()
     missing_features += check_feature(&vk_dyn_rendering_features.dynamicRendering);
     missing_features += check_feature(&vk_maintenance4_features.maintenance4);
     missing_features += check_feature(&vk_14_features.pushDescriptor);
+    missing_features += check_feature(&vk_16b_storage_features.storageBuffer16BitAccess); // for synth
+    missing_features += check_feature(&vk_features.features.shaderInt16); // for synth
 
     return missing_features;
 }
@@ -93,6 +96,10 @@ bool init_assets()
 
     if ( ! init_gui(GuiClear::clear))
         return false;
+
+    // TODO find a better place
+    if ( ! Synth::init_synth())
+        d_printf("Synth initialization failed; continuing without audio\n");
 
     return true;
 }

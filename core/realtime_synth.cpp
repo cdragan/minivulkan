@@ -8,9 +8,7 @@
 #include "mstdc.h"
 #include "resource.h"
 #include "suballoc.h"
-#include "vecfloat.h"
-#include "vmath.h"
-
+#include "synth_modulation.h"
 #include <algorithm>
 #include <iterator>
 #include <math.h>
@@ -73,75 +71,31 @@ namespace {
         bool    active;
         uint8_t channel;
         uint8_t instrument;
+        uint8_t osc_id;             // Oscillator owned by this voice (0 = none)
+        float   velocity;           // Note-on velocity, 0..1
+        bool    releasing;          // True after note-off, until the volume envelope finishes
         int32_t parameters[max_parameters];
     };
 
     Voice voices[max_voices];
 
-    enum WaveType : uint32_t {
-        // Wave disabled
-        no_wave,
-        // Normal sine wave, duty is ignored
-        sine_wave,
-        // Sawtooth wave
-        //
-        // |\  duty=0    /\ duty=0.5           duty=1  /|
-        // | \          /  \ (triangle wave)          / |
-        // |  \             \  /                     /  |
-        // |   \             \/                     /   |
-        sawtooth_wave,
-        // Pulse wave
-        //
-        // | duty=0   +--+ duty=0.5        duty=1 |
-        // |          |  | (square wave)          |
-        // |             |  |                     |
-        // +---          +--+              -------+
-        pulse_wave,
-        // White noise
-        noise_wave
+    using Synth::WaveType;
+    using Synth::no_wave;
+    using Synth::sine_wave;
+    using Synth::LFODescriptor;
+    using Synth::EnvelopeDescriptor;
+    using Synth::EnvelopeState;
+
+    constexpr uint32_t max_envelope_points = 8;
+
+    // Backing storage giving each envelope room for up to max_envelope_points
+    // contiguous points (EnvelopeDescriptor itself ends in a flexible points[1]).
+    struct StoredEnvelope {
+        EnvelopeDescriptor        desc;
+        EnvelopeDescriptor::Point extra_points[max_envelope_points - 1];
     };
+    StoredEnvelope envelopes[4];
 
-    // Encoded envelope:
-    // u8 N     - number of points
-    // f32      - min value
-    // f32      - max value
-    // u8       - point index of sustain loop begin, >=N means no sustain
-    // u8       - point index of sustain end loop (can be same as sustain loop begin)
-    // u8[N]    - low byte of next point's delta position, each position is expressed in ticks (256 samples)
-    // u8[N]    - low byte of next point's delta value
-    // u8[N]    - high byte of next point's delta position (unsigned)
-    // u8[N]    - high byte of next point's delta value (signed, but uses zig-zag encoding)
-    //
-    // Delta values are encoded using zig-zag encoding (0->0, -1->1, 1->2, -2->3, 2->4, etc.).
-    //
-    // Volume envelope:
-    // - Value is in decibels
-    // - Value 0 means nominal attenuation
-    // - Point at position 0 and last point should indicate lowest possible negative value (no sound)
-    struct EnvelopeDescriptor {
-        uint8_t num_points;         // Number of points in the envelope
-        uint8_t unused_alignment;
-        uint8_t sustain_first_point;// Index if sustain loop start point
-        uint8_t sustain_last_point; // Index of last point of sustain loop (can be same as first point)
-        float   min_value;          // Minimum value produced by the envelope
-        float   min_max_delta;      // Delta between minimum and maximum value produced
-
-        struct Point {
-            uint16_t position;      // Number of ticks since the beginning of the envelope
-            uint16_t value;         // Value at this position (0=min_value, 0xFFFF=min_value+min_max_delta)
-        };
-
-        Point points[1];
-    };
-    EnvelopeDescriptor envelope_descs[10];
-
-    struct LFODescriptor {
-        uint8_t  wave;              // LFO wave type
-        uint8_t  duty;              // Duty for sawtooth wave (0=left, 0x7F=triangle, 0xFF=right)
-        uint16_t period_ms;         // Period of the LFO, in milliseconds
-        float    min_value;         // Minimum value produced by the LFO
-        float    min_max_delta;     // Delta between minimum and maximum value produced
-    };
     LFODescriptor lfo_descs[10];
 
     struct ParameterDescriptor {
@@ -174,111 +128,24 @@ namespace {
             value = desc.base_value; // TODO use value from MIDI, if available
 
             if (desc.envelope_desc_id) {
-                const EnvelopeDescriptor& envelope = envelope_descs[desc.envelope_desc_id - 1];
+                const EnvelopeDescriptor& envelope     = envelopes[desc.envelope_desc_id - 1].desc;
+                const Voice&              owning_voice = voices[param.voice_id];
+                const bool                sustain      = owning_voice.active && ! owning_voice.releasing;
 
-                constexpr bool sustain = false; // TODO take from voice
+                EnvelopeState env_state;
+                env_state.point = param.envelope_point;
+                env_state.tick  = param.envelope_tick;
 
-                uint32_t env_point = param.envelope_point;
-                uint32_t env_tick  = param.envelope_tick;
+                value += eval_envelope(envelope, &env_state, sustain);
 
-                // Apply current position of the envelope
-                const EnvelopeDescriptor::Point pt1 = envelope.points[env_point];
-
-                int env_value = pt1.value;
-
-                if (env_tick > pt1.position) {
-                    assert(env_point + 1 < envelope.num_points);
-
-                    const EnvelopeDescriptor::Point pt2 = envelope.points[env_point + 1];
-
-                    const int delta_pos = static_cast<int>(env_tick - pt1.position);
-                    const int duration  = static_cast<int>(pt2.position - pt1.position);
-                    const int range     = static_cast<int>(pt2.value) - env_value;
-
-                    env_value += (delta_pos * range) / duration;
-                }
-
-                value += envelope.min_value + static_cast<float>(env_value) * envelope.min_max_delta;
-
-                for (;;) {
-                    // Advance envelope
-                    if ( ! sustain || env_point < envelope.sustain_last_point) {
-
-                        const uint32_t next_point = env_point + 1;
-                        if (next_point < envelope.num_points) {
-                            ++env_tick;
-
-                            // Advance envelope point
-                            const uint32_t next_tick  = envelope.points[next_point].position;
-                            if (env_tick == next_tick)
-                                env_point = next_point;
-                        }
-                        else {
-                            assert(env_tick == envelope.points[envelope.num_points - 1].position);
-                        }
-                    }
-                    // Apply sustain loop
-                    else {
-                        assert(env_point == envelope.sustain_last_point);
-
-                        if (env_point == envelope.sustain_first_point) {
-                            assert(env_tick == envelope.points[env_point].position);
-                        }
-                        else {
-                            assert(env_tick == envelope.points[env_point].position);
-                            env_point = envelope.sustain_first_point;
-                            env_tick  = envelope.points[env_point].position;
-
-                            // Loop back and try to advance to next tick from envelope start
-                            continue;
-                        }
-                    }
-                    break;
-                }
-
-                param.envelope_point = static_cast<uint16_t>(env_point);
-                param.envelope_tick  = static_cast<uint16_t>(env_tick);
+                param.envelope_point = env_state.point;
+                param.envelope_tick  = env_state.tick;
             }
 
             if (desc.lfo_desc_id) {
-
                 const LFODescriptor& lfo = lfo_descs[desc.lfo_desc_id - 1];
 
-                value += lfo.min_value;
-
-                const float phase = static_cast<float>(param.lfo_tick) * static_cast<float>(rt_step_samples * 1000) /
-                                    static_cast<float>(lfo.period_ms * Synth::rt_sampling_rate);
-
-                switch (lfo.wave) {
-                    case sine_wave:
-                        {
-                            const float sval = vmath::sincos(phase * vmath::two_pi).sin;
-
-                            value += (sval + 1.0f) * 0.5f * lfo.min_max_delta;
-                        }
-                        break;
-
-                    case sawtooth_wave:
-                        {
-                            const float frac_phase = phase - truncf(phase);
-                            const float duty       = static_cast<float>(lfo.duty) / 255.0f;
-
-                            if (frac_phase <= duty) {
-                                if (duty > 0.0f)
-                                    value += lfo.min_max_delta * frac_phase / duty;
-                            }
-                            else {
-                                const float fall = 1.0f - duty;
-                                if (fall > 0.0f)
-                                    value += lfo.min_max_delta * (1.0f - frac_phase) / fall;
-                            }
-                        }
-                        break;
-
-                    default:
-                        assert(lfo.wave == sine_wave || lfo.wave == sawtooth_wave);
-                        break;
-                }
+                value += eval_lfo(lfo, param.lfo_tick, rt_step_samples, Synth::rt_sampling_rate);
 
                 ++param.lfo_tick;
             }
@@ -503,8 +370,24 @@ namespace {
         float    pitch;             // Pitch adjustment in semitones = (midi_pitch_bend - 8192) / 4096
         float    duty[2];           // Duty cycle for sawtooth and pulse oscillator (0..1)
         float    osc_mix;           // Mix between osc_type[0] and osc_type[1] (0..1)
+        uint8_t  voice_id;          // Voice which owns this oscillator (0 = none/free)
     };
-    static Oscillator oscillators[10];
+
+    constexpr uint32_t max_oscillators = 10;
+
+    static Oscillator oscillators[max_oscillators];
+
+    // TODO Runtime instrument definition.  Hardcoded for now; an editor will
+    // populate these later.
+    struct RuntimeInstrument {
+        WaveType osc_type[2];       // osc_type[1] == no_wave means single oscillator
+        float    duty[2];
+        float    osc_mix;
+    };
+    // Index 0 is a plain sine.
+    RuntimeInstrument instruments[1] = {
+        { { sine_wave, no_wave }, { 0.0f, 0.0f }, 0.0f }
+    };
 
     static constexpr uint32_t max_mix_channels = 8;
 
@@ -518,17 +401,46 @@ namespace Synth {
     bool init_synth_os();
 }
 
-static void temp_init_osc_and_channel()
+static void init_oscillator_buffers()
 {
     mix_channels[0].chan_output_offs = static_cast<uint32_t>(data_allocator.allocate(sizeof(float) * rt_step_samples * 2, synth_alignment).offset);
 
-    Oscillator& osc = oscillators[0];
-    osc.note            = 69; // 69=A4
-    osc.freq_mult       = 1;
-    osc.osc_type[0]     = sine_wave;
-    osc.osc_output_offs = static_cast<uint32_t>(data_allocator.allocate(sizeof(float) * rt_step_samples, synth_alignment).offset);
-    osc.volume          = 1.0;
-    osc.panning         = 0.5;
+    for (uint32_t osc_idx = 0; osc_idx < max_oscillators; osc_idx++) {
+        oscillators[osc_idx].osc_output_offs = static_cast<uint32_t>(data_allocator.allocate(sizeof(float) * rt_step_samples, synth_alignment).offset);
+    }
+}
+
+static void init_modulation()
+{
+    // TODO test ADSR volume envelope.  value 0xFFFF maps to gain 1.0 (min_max_delta = 1/65535).
+    StoredEnvelope& volume_envelope = envelopes[0];
+    volume_envelope.desc.num_points          = 4;
+    volume_envelope.desc.unused_alignment    = 0;
+    volume_envelope.desc.sustain_first_point = 2;
+    volume_envelope.desc.sustain_last_point  = 2;
+    volume_envelope.desc.min_value           = 0.0f;
+    volume_envelope.desc.min_max_delta       = 1.0f / 65535.0f;
+    volume_envelope.desc.points[0] = { 0,  0 };       // start silent
+    volume_envelope.desc.points[1] = { 10, 0xFFFF };  // attack peak (~58 ms)
+    volume_envelope.desc.points[2] = { 20, 0x9999 };  // decay to ~0.6 sustain
+    volume_envelope.desc.points[3] = { 55, 0 };       // release to silence (~200 ms)
+
+    // TODO Parameter descriptor 0 (id 1): volume driven by the ADSR envelope, no LFO.
+    param_descs[0].base_value       = 0.0f;
+    param_descs[0].envelope_desc_id = 1;
+    param_descs[0].lfo_desc_id      = 0;
+}
+
+static uint32_t allocate_oscillator()
+{
+    // Slot 0 is reserved as sentinel
+    for (uint32_t osc_idx = 1; osc_idx < max_oscillators; osc_idx++) {
+        if (oscillators[osc_idx].osc_type[0] == no_wave) {
+            return osc_idx;
+        }
+    }
+
+    return max_oscillators;
 }
 
 bool Synth::init_synth()
@@ -576,7 +488,9 @@ bool Synth::init_synth()
 
     synth_alignment = static_cast<size_t>(vk_phys_props.properties.limits.minMemoryMapAlignment);
 
-    temp_init_osc_and_channel();
+    init_oscillator_buffers();
+
+    init_modulation();
 
     if ( ! init_synth_os())
         return false;
@@ -755,7 +669,7 @@ static void process_note_off(uint32_t delta_samples, const Synth::MidiEvent& eve
     assert(voice_idx);
     assert(voices[voice_idx].active);
 
-    // TODO transition voice to release state
+    voices[voice_idx].releasing = true;
 }
 
 static void process_note_on(uint32_t delta_samples, const Synth::MidiEvent& event)
@@ -785,13 +699,62 @@ static void process_note_on(uint32_t delta_samples, const Synth::MidiEvent& even
 
     voices[voice_idx].channel    = static_cast<uint8_t>(channel);
     voices[voice_idx].instrument = select_instrument(channel, note);
+    voices[voice_idx].active     = true;
+
+    if ( ! voices[voice_idx].osc_id) {
+        const uint32_t osc_idx = allocate_oscillator();
+
+        if (osc_idx == max_oscillators) {
+            d_printf("All oscillators are active, dropping note %u on channel %u\n", note, channel);
+            voices[voice_idx].active     = false;
+            note_to_voice[channel][note] = 0;
+            return;
+        }
+
+        voices[voice_idx].osc_id = static_cast<uint8_t>(osc_idx);
+    }
+
+    const RuntimeInstrument& instrument = instruments[voices[voice_idx].instrument < std::size(instruments) ? voices[voice_idx].instrument : 0];
+
+    Oscillator& osc     = oscillators[voices[voice_idx].osc_id];
+    osc.voice_id        = static_cast<uint8_t>(voice_idx);
+    osc.midi_channel    = channel;
+    osc.output_channel  = 0;
+    osc.note            = note;
+    osc.freq_mult       = 1;
+    osc.osc_type[0]     = instrument.osc_type[0];
+    osc.osc_type[1]     = instrument.osc_type[1];
+    osc.duty[0]         = instrument.duty[0];
+    osc.duty[1]         = instrument.duty[1];
+    osc.osc_mix         = instrument.osc_mix;
+    osc.phase           = 0.0f;
+    osc.pitch           = 0.0f;
+    osc.volume          = 0.0f;
+    osc.old_volume      = 0.0f;         // start ramped up from silence to avoid a click
+    osc.panning         = 0.5f;
+    osc.old_panning     = 0.5f;
+    osc.fir_memory_offs = 0;
+    osc.fir_taps_offs   = 0;
 
     mstd::mem_zero(&voices[voice_idx].parameters, sizeof(voices[voice_idx].parameters));
 
     // Preserve amplitude if the same note is replayed
     voices[voice_idx].parameters[param_cur_amplitude] = amplitude;
 
-    // TODO set velocity
+    voices[voice_idx].velocity  = static_cast<float>(event.note_data) / 127.0f;
+    voices[voice_idx].releasing = false;
+
+    // TODO The voice's volume parameter shares the oscillator slot index (1 volume
+    // parameter per oscillator for now).  Parameter descriptor id 1 = ADSR volume.
+    const uint32_t volume_param_id = voices[voice_idx].osc_id;
+    Parameter&     volume_param    = params[volume_param_id];
+
+    volume_param.cur_value      = 0.0f;
+    volume_param.param_desc_id  = 1;
+    volume_param.lfo_tick       = 0;
+    volume_param.envelope_tick  = 0;
+    volume_param.envelope_point = 0;
+    volume_param.voice_id       = static_cast<uint8_t>(voice_idx);
 }
 
 static void process_aftertouch(uint32_t delta_samples, const Synth::MidiEvent& event)
@@ -922,6 +885,61 @@ static void push_descriptor(const PushDescriptorInfo& info, uint32_t buffer_offs
                            &write_desc_set);
 }
 
+// TODO temporary test driver: plays a repeating short pattern so the engine is
+// audible without a MIDI soundtrack.  Remove once real MIDI input exists.
+static void temp_drive_test_notes(uint32_t start_samples, uint32_t end_samples)
+{
+    constexpr uint32_t   note_period_samples = Synth::rt_sampling_rate;          // 1 note per second
+    constexpr uint32_t   note_on_samples     = Synth::rt_sampling_rate * 3 / 4;  // held 0.75s
+    static const uint8_t pattern_notes[]     = { 60, 62, 64, 65, 67, 69, 71, 72 };
+
+    for (uint32_t sample = start_samples; sample < end_samples; sample++) {
+        const uint32_t phase_in_period = sample % note_period_samples;
+        if (phase_in_period == 0) {
+            const uint32_t step = (sample / note_period_samples) % std::size(pattern_notes);
+            Synth::MidiEvent event = { };
+            event.channel   = 0;
+            event.note      = pattern_notes[step];
+            event.note_data = 100;  // velocity (used by follow-up task)
+            process_note_on(0, event);
+        }
+        else if (phase_in_period == note_on_samples) {
+            const uint32_t step = (sample / note_period_samples) % std::size(pattern_notes);
+            Synth::MidiEvent event = { };
+            event.channel = 0;
+            event.note    = pattern_notes[step];
+            process_note_off(0, event);
+        }
+    }
+}
+
+static void update_modulation()
+{
+    for (uint32_t osc_idx = 1; osc_idx < max_oscillators; osc_idx++) {
+        Oscillator& osc = oscillators[osc_idx];
+        if (osc.osc_type[0] == no_wave) {
+            continue;
+        }
+
+        const uint32_t volume_param_id = osc_idx;  // 1 volume parameter per oscillator
+        advance_param(volume_param_id);
+
+        Voice& voice = voices[osc.voice_id];
+        osc.volume   = voice.velocity * params[volume_param_id].cur_value;
+
+        // Free the voice once the release has decayed to silence.
+        constexpr float silence_threshold = 0.0005f;
+        if (voice.releasing && params[volume_param_id].cur_value < silence_threshold) {
+            note_to_voice[osc.midi_channel][osc.note] = 0;
+            osc.osc_type[0] = no_wave;
+            osc.voice_id    = 0;
+            voice.active    = false;
+            voice.osc_id    = 0;
+            mstd::mem_zero(&voice.parameters, sizeof(voice.parameters));
+        }
+    }
+}
+
 static void render_audio_step()
 {
     const uint32_t start_samples = rendered_samples;
@@ -932,7 +950,9 @@ static void render_audio_step()
 
     process_events(start_samples, end_samples);
 
-    // TODO update_lfos();
+    temp_drive_test_notes(start_samples, end_samples);
+
+    update_modulation();
 
     // ======================================================================
 
@@ -991,8 +1011,7 @@ static void render_audio_step()
 
         ShaderParams::Oscillator& param = get_param<ShaderParams::Oscillator>(cur_param_offs);
 
-        const float note_pitch  = static_cast<float>(static_cast<int>(oscillator.note) - 69);
-        const float note_freq   = static_cast<float>(oscillator.freq_mult * 440) * mstd::exp2((note_pitch + oscillator.pitch) / 12.f);
+        const float note_freq   = Synth::note_to_frequency(static_cast<int>(oscillator.note), oscillator.pitch, oscillator.freq_mult);
         const float phase_step  = (static_cast<float>(rt_step_samples) * note_freq) / static_cast<float>(Synth::rt_sampling_rate);
 
         param.out_sound_offs  = oscillator.osc_output_offs / 4;
@@ -1082,7 +1101,8 @@ static void render_audio_step()
 
     vkCmdBindPipeline(audio_cmd_buf, VK_PIPELINE_BIND_POINT_COMPUTE, pipes[chan_combine_pipe]);
 
-    push_descriptor(push_osc_data, 0);
+    static const PushDescriptorInfo push_comb_data = { chan_combine_pipe, 0, 0, data_buf, VK_WHOLE_SIZE };
+    push_descriptor(push_comb_data, 0);
 
     static const PushDescriptorInfo push_comb_param0 = { chan_combine_pipe, 1, 0, param_buf, ShaderParams::max_param_range };
     push_descriptor(push_comb_param0, input_param_offs);
