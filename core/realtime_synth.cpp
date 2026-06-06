@@ -428,6 +428,7 @@ namespace {
         float    volume;            // Current volume
         float    panning;           // Current panning
         float    pitch;             // Pitch adjustment in semitones = (midi_pitch_bend - 8192) / 4096
+        float    detune;            // Per-oscillator pitch offset in semitones (instrument constant for this note's unison stack)
         float    duty[2];           // Duty cycle for sawtooth and pulse oscillator (0..1)
         float    osc_mix;           // Mix between osc_type[0] and osc_type[1] (0..1)
         uint8_t  voice_id;          // Voice which owns this oscillator (0 = none/free)
@@ -438,13 +439,18 @@ namespace {
     // TODO Runtime instrument definition.  Hardcoded for now; an editor will
     // populate these later.
     struct RuntimeInstrument {
-        WaveType osc_type[2];       // osc_type[1] == no_wave means single oscillator
+        WaveType osc_type[2];               // osc_type[1] == no_wave means single oscillator
         float    duty[2];
         float    osc_mix;
+        uint32_t unison_count;              // Number of oscillator slots a note of this instrument uses (1 = mono)
+        float    detune_semitones[max_unison]; // Per-oscillator pitch offset in semitones; entry [idx] applies to the idx-th allocated oscillator
     };
-    // Index 0 is a plain sine.
-    RuntimeInstrument instruments[1] = {
-        { { sine_wave, no_wave }, { 0.0f, 0.0f }, 0.0f }
+    // Index 0 is a plain mono sine.  Index 1 is a 7-voice supersaw with a
+    // symmetric detune spread of about +/- 18 cents.
+    RuntimeInstrument instruments[2] = {
+        { { sine_wave,     no_wave }, { 0.0f, 0.0f }, 0.0f, 1, { 0.0f } },
+        { { Synth::sawtooth_wave, no_wave }, { 0.0f, 0.0f }, 0.0f, max_unison,
+          { -0.18f, -0.12f, -0.06f, 0.0f, 0.06f, 0.12f, 0.18f } }
     };
 
     static constexpr uint32_t max_mix_channels = 8;
@@ -515,9 +521,12 @@ static bool allocate_oscillators(uint8_t*                 osc_ids,
 
     if (allocated < num_osc) {
         for (uint32_t rollback_idx = 0; rollback_idx < allocated; rollback_idx++) {
+
             Oscillator& osc = oscillators[osc_ids[rollback_idx]];
             osc.voice_id    = 0;
             osc.osc_type[0] = no_wave;
+
+            osc_ids[rollback_idx] = 0;
         }
         return false;
     }
@@ -752,6 +761,11 @@ static void process_note_off(uint32_t delta_samples, const Synth::MidiEvent& eve
     voices[voice_idx].releasing = true;
 }
 
+// TODO temporary test scaffolding: when set, process_note_on forces the
+// supersaw instrument (index 1) so the unison stack is audible.  The temp note
+// driver raises this flag only around its own note-ons.
+static bool temp_force_supersaw_instrument = false;
+
 // Returns a partially-allocated note to the free pool when allocation fails
 // part-way through.  Frees any oscillator slots and parameters the voice has
 // acquired and marks the voice free.  Only resources actually acquired
@@ -787,6 +801,13 @@ static void process_note_on(uint32_t delta_samples, const Synth::MidiEvent& even
     const uint32_t note      = event.note;
     uint32_t       voice_idx = note_to_voice[channel][note];
 
+    // Resolve the instrument once so the re-trigger match assert below and the
+    // assignment agree.  temp_force_supersaw_instrument is throwaway scaffolding
+    // (see its definition).
+    const uint8_t target_instrument = temp_force_supersaw_instrument
+                                      ? 1
+                                      : select_instrument(channel, note);
+
     if ( ! voice_idx) {
 
         voice_idx = allocate_unused_voice();
@@ -796,22 +817,28 @@ static void process_note_on(uint32_t delta_samples, const Synth::MidiEvent& even
             return;
         }
 
+        // A freshly allocated voice slot must own no oscillators.  Voice
+        // finalization in update_modulation zeroes osc_count (and osc_ids) when
+        // the last oscillator is freed, so the free pool only ever hands back
+        // fully released slots.
+        assert(voices[voice_idx].osc_count == 0);
+
         note_to_voice[channel][note] = static_cast<uint8_t>(voice_idx);
     }
     else {
         assert(voices[voice_idx].channel    == channel);
-        assert(voices[voice_idx].instrument == select_instrument(channel, note));
+        assert(voices[voice_idx].instrument == target_instrument);
     }
 
     voices[voice_idx].channel    = static_cast<uint8_t>(channel);
-    voices[voice_idx].instrument = select_instrument(channel, note);
+    voices[voice_idx].instrument = target_instrument;
     voices[voice_idx].active     = true;
 
     const RuntimeInstrument& instrument = instruments[voices[voice_idx].instrument < std::size(instruments) ? voices[voice_idx].instrument : 0];
 
-    // Number of oscillator slots this note uses.  Unison is added in a later
-    // task; for now every note uses exactly one oscillator.
-    constexpr uint32_t unison_count = 1;
+    // Number of oscillator slots this note uses (1 = mono).
+    const uint32_t unison_count = instrument.unison_count;
+    assert(unison_count >= 1 && unison_count <= max_unison);
 
     if ( ! voices[voice_idx].osc_count) {
         if ( ! allocate_oscillators(voices[voice_idx].osc_ids, unison_count, voice_idx, instrument)) {
@@ -822,8 +849,19 @@ static void process_note_on(uint32_t delta_samples, const Synth::MidiEvent& even
 
         voices[voice_idx].osc_count = static_cast<uint8_t>(unison_count);
     }
+    else {
+        // Re-triggering a still-releasing voice reuses its existing oscillator
+        // slots.  All of a voice's oscillators share ONE volume parameter, so
+        // they cross the silence threshold in the same update_modulation pass
+        // and are freed atomically (osc_count goes unison_count -> 0 within one
+        // pass, never partial between steps).  Hence on reuse osc_count must
+        // still equal the full unison_count.  A future change that breaks that
+        // atomicity will trip this assert instead of silently corrupting.
+        assert(voices[voice_idx].osc_count == unison_count);
+    }
 
     for (uint32_t unison_idx = 0; unison_idx < voices[voice_idx].osc_count; ++unison_idx) {
+        assert(unison_idx < max_unison);
         Oscillator& osc     = oscillators[voices[voice_idx].osc_ids[unison_idx]];
         osc.voice_id        = static_cast<uint8_t>(voice_idx);
         osc.midi_channel    = channel;
@@ -837,6 +875,7 @@ static void process_note_on(uint32_t delta_samples, const Synth::MidiEvent& even
         osc.osc_mix         = instrument.osc_mix;
         osc.phase           = 0.0f;
         osc.pitch           = 0.0f;
+        osc.detune          = instrument.detune_semitones[unison_idx];
         osc.volume          = 0.0f;
         osc.old_volume      = 0.0f;         // start ramped up from silence to avoid a click
         osc.panning         = 0.5f;
@@ -1074,7 +1113,11 @@ static void temp_drive_test_notes(uint32_t start_samples, uint32_t end_samples)
             // Note-on with velocity 100.
             Synth::MidiEvent on_ev = make_event(current_note);
             on_ev.note_data = 100;
+
+            // Play the supersaw so the unison stack is audible (see flag definition).
+            temp_force_supersaw_instrument = true;
             process_note_on(0, on_ev);
+            temp_force_supersaw_instrument = false;
         }
         else if (phase_in_period == note_on_samples) {
             Synth::MidiEvent off_ev = make_event(current_note);
@@ -1146,8 +1189,9 @@ static void update_modulation()
         const uint32_t ch    = osc.midi_channel;
         Voice&         voice = voices[osc.voice_id];
 
-        // Apply the per-voice pitch parameter plus the mod-wheel-scaled vibrato term.
-        osc.pitch = params[voice.pitch_param_id].cur_value + channel_mod_wheel[ch] * vibrato_depth_semitones * vibrato_wave;
+        // Apply the per-voice pitch parameter, the per-oscillator unison detune
+        // and the mod-wheel-scaled vibrato term.
+        osc.pitch = params[voice.pitch_param_id].cur_value + osc.detune + channel_mod_wheel[ch] * vibrato_depth_semitones * vibrato_wave;
 
         const uint32_t volume_param_id = voice.volume_param_id;
 
@@ -1163,6 +1207,7 @@ static void update_modulation()
             osc.osc_type[0] = no_wave;
             osc.voice_id    = 0;
 
+            assert(voice.osc_count <= max_unison);
             if (voice.osc_count) {
                 --voice.osc_count;
             }
@@ -1174,6 +1219,12 @@ static void update_modulation()
                 voice.volume_param_id = 0;
                 params[voice.pitch_param_id].active = false;
                 voice.pitch_param_id = 0;
+
+                // Clear the owned oscillator slot ids so a reused voice cannot
+                // read stale ids.
+                for (uint32_t unison_idx = 0; unison_idx < max_unison; ++unison_idx) {
+                    voice.osc_ids[unison_idx] = 0;
+                }
             }
         }
     }
