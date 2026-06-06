@@ -131,5 +131,65 @@ int main()
     // range scales linearly
     TEST(approx(Synth::pitch_bend_to_semitones(8191, 12.0f), 12.0f, 0.01f));
 
+    // eval_parameter sums a parameter's enabled sources (base + envelope + LFO +
+    // MIDI input) and advances the running state one tick per call.  Null sources
+    // and a zero MIDI value contribute nothing.
+    {
+        // base only
+        Synth::ParameterState base_state = { { 0, 0 }, 0 };
+        TEST(approx(Synth::eval_parameter(0.5f, nullptr, true, nullptr, 0.0f, &base_state, 256, 44100), 0.5f, 0.001f));
+
+        // MIDI input is added (e.g. pitch bend in semitones), independent of scope
+        Synth::ParameterState midi_state = { { 0, 0 }, 0 };
+        TEST(approx(Synth::eval_parameter(0.0f, nullptr, true, nullptr, 1.75f, &midi_state, 256, 44100), 1.75f, 0.001f));
+
+        // base + MIDI
+        Synth::ParameterState base_midi_state = { { 0, 0 }, 0 };
+        TEST(approx(Synth::eval_parameter(0.25f, nullptr, true, nullptr, -0.5f, &base_midi_state, 256, 44100), -0.25f, 0.001f));
+
+        // base + LFO matches base + eval_lfo, and the LFO tick advances each call
+        {
+            const Synth::LFODescriptor lfo = { Synth::sine_wave, 0, 1000, -1.0f, 2.0f };
+            Synth::ParameterState lfo_state = { { 0, 0 }, 0 };
+            const float expected_tick0 = 0.1f + Synth::eval_lfo(lfo, 0, 256, 44100);
+            TEST(approx(Synth::eval_parameter(0.1f, nullptr, true, &lfo, 0.0f, &lfo_state, 256, 44100), expected_tick0, 0.001f));
+            TEST(lfo_state.lfo_tick == 1);
+            const float expected_tick1 = 0.1f + Synth::eval_lfo(lfo, 1, 256, 44100);
+            TEST(approx(Synth::eval_parameter(0.1f, nullptr, true, &lfo, 0.0f, &lfo_state, 256, 44100), expected_tick1, 0.001f));
+            TEST(lfo_state.lfo_tick == 2);
+        }
+
+        // base + envelope + LFO + MIDI all sum together; state advances once
+        {
+            struct FourPointEnvelope {
+                Synth::EnvelopeDescriptor desc;
+                Synth::EnvelopeDescriptor::Point extra_points[3];
+            };
+            FourPointEnvelope env = { };
+            env.desc.num_points          = 4;
+            env.desc.sustain_first_point = 2;
+            env.desc.sustain_last_point  = 2;
+            env.desc.min_value           = 0.0f;
+            env.desc.min_max_delta       = 1.0f / 65535.0f;
+            env.desc.points[0] = { 0, 0 };
+            env.desc.points[1] = { 2, 0xFFFF };
+            env.desc.points[2] = { 4, 0x8000 };
+            env.desc.points[3] = { 6, 0 };
+
+            const Synth::LFODescriptor lfo = { Synth::sine_wave, 0, 1000, -1.0f, 2.0f };
+
+            // Reference contributions computed independently
+            Synth::EnvelopeState env_ref = { 0, 0 };
+            const float env_contrib = Synth::eval_envelope(env.desc, &env_ref, true);
+            const float lfo_contrib = Synth::eval_lfo(lfo, 0, 256, 44100);
+
+            Synth::ParameterState combined = { { 0, 0 }, 0 };
+            const float expected = 0.2f + env_contrib + lfo_contrib + 0.3f;
+            TEST(approx(Synth::eval_parameter(0.2f, &env.desc, true, &lfo, 0.3f, &combined, 256, 44100), expected, 0.001f));
+            TEST(combined.lfo_tick == 1);
+            TEST(combined.envelope.tick == env_ref.tick);
+        }
+    }
+
     return exit_code;
 }

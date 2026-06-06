@@ -133,4 +133,29 @@ float eval_envelope(const EnvelopeDescriptor& envelope, EnvelopeState* state, bo
     return value;
 }
 
+float eval_parameter(float                     base_value,
+                     const EnvelopeDescriptor* envelope,
+                     bool                      sustain,
+                     const LFODescriptor*      lfo,
+                     float                     midi_value,
+                     ParameterState*           state,
+                     uint32_t                  step_samples,
+                     uint32_t                  sampling_rate)
+{
+    float value = base_value;
+
+    if (envelope) {
+        value += eval_envelope(*envelope, &state->envelope, sustain);
+    }
+
+    if (lfo) {
+        value += eval_lfo(*lfo, state->lfo_tick, step_samples, sampling_rate);
+        ++state->lfo_tick;
+    }
+
+    value += midi_value;
+
+    return value;
+}
+
 } // namespace Synth

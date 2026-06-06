@@ -91,21 +91,18 @@ namespace {
     // Maximum number of parameters per voice channel (single instrument note)
     constexpr uint32_t max_parameters = 16;
 
-    enum Parameters {
-        param_cur_amplitude
-    };
-
     // Voice is a single playing note of a single instrument
     struct Voice {
-        bool    active;
-        uint8_t channel;
-        uint8_t instrument;
-        uint8_t osc_ids[max_unison];    // Oscillator slots owned by this voice
-        uint8_t osc_count;              // Number of live oscillator slots owned (0 = none)
-        float   velocity;               // Note-on velocity, 0..1
-        float   aftertouch;             // Per-note polyphonic aftertouch pressure, 0..1
-        bool    releasing;              // True after note-off, until the volume envelope finishes
-        int32_t parameters[max_parameters];
+        bool     active;
+        uint8_t  channel;
+        uint8_t  instrument;
+        uint8_t  osc_ids[max_unison];    // Oscillator slots owned by this voice
+        uint8_t  osc_count;              // Number of live oscillator slots owned (0 = none)
+        uint16_t volume_param_id;        // Per-voice volume parameter shared by all oscillators (0 = none)
+        uint16_t pitch_param_id;         // Per-voice pitch parameter shared by all oscillators (0 = none)
+        float    velocity;               // Note-on velocity, 0..1
+        float    aftertouch;             // Per-note polyphonic aftertouch pressure, 0..1
+        bool     releasing;              // True after note-off, until the volume envelope finishes
     };
 
     Voice voices[max_voices];
@@ -115,7 +112,6 @@ namespace {
     using Synth::sine_wave;
     using Synth::LFODescriptor;
     using Synth::EnvelopeDescriptor;
-    using Synth::EnvelopeState;
 
     constexpr uint32_t max_envelope_points = 8;
 
@@ -129,60 +125,93 @@ namespace {
 
     LFODescriptor lfo_descs[10];
 
+    // Raw MIDI input a parameter reads as an additive source
+    enum MidiSource : uint8_t {
+        midi_none,
+        midi_pitch_bend
+    };
+
     struct ParameterDescriptor {
-        float    base_value;        // Initial base value (can be overridden from MIDI)
-        uint32_t envelope_desc_id;  // Id of envelope descriptor
-        uint32_t lfo_desc_id;       // Id of LFO descriptor
+        float      base_value;        // Initial base value (can be overridden from MIDI)
+        uint32_t   envelope_desc_id;  // Id of envelope descriptor
+        uint32_t   lfo_desc_id;       // Id of LFO descriptor
+        MidiSource midi_source;       // Raw MIDI input added to the value
     };
     ParameterDescriptor param_descs[10];
 
     struct Parameter {
-        float    cur_value;         // Current value of the parameter
-        uint16_t param_desc_id;     // Id of parameter descriptor
-        uint16_t lfo_tick;          // Current LFO tick of this parameter
-        uint16_t envelope_tick;     // Current envelope tick
-        uint16_t envelope_point;    // Current point on the envelope
-        uint8_t  voice_id;          // Voice id where this parameter is playing
+        bool                  active;           // True while this slot is in use
+        float                 cur_value;        // Current value of the parameter
+        uint16_t              param_desc_id;    // Id of parameter descriptor
+        Synth::ParameterState state;            // Running modulation state (envelope and LFO ticks)
+        uint8_t               voice_id;         // Voice id where this parameter is playing
     };
-    Parameter params[max_oscillators];
 
-    void advance_param(uint32_t param_id)
+    // Per-voice parameter pool.  Slot 0 is a reserved sentinel (param id 0 = none).
+    constexpr uint32_t max_params = max_voices * max_parameters;
+    Parameter params[max_params];
+
+    // Finds the first free slot (active == false) in a pool over [1, count),
+    // skipping slot 0 which is a reserved sentinel.  Returns 0 if none is free.
+    template<typename T>
+    uint32_t allocate_unused_slot(T* pool, uint32_t count, bool T::* active)
     {
-        Parameter& param = params[param_id];
-
-        float value = 0;
-
-        if (param.param_desc_id) {
-
-            const ParameterDescriptor& desc = param_descs[param.param_desc_id - 1];
-
-            value = desc.base_value; // TODO use value from MIDI, if available
-
-            if (desc.envelope_desc_id) {
-                const EnvelopeDescriptor& envelope     = envelopes[desc.envelope_desc_id - 1].desc;
-                const Voice&              owning_voice = voices[param.voice_id];
-                const bool                sustain      = owning_voice.active && ! owning_voice.releasing;
-
-                EnvelopeState env_state;
-                env_state.point = param.envelope_point;
-                env_state.tick  = param.envelope_tick;
-
-                value += eval_envelope(envelope, &env_state, sustain);
-
-                param.envelope_point = env_state.point;
-                param.envelope_tick  = env_state.tick;
-            }
-
-            if (desc.lfo_desc_id) {
-                const LFODescriptor& lfo = lfo_descs[desc.lfo_desc_id - 1];
-
-                value += eval_lfo(lfo, param.lfo_tick, rt_step_samples, Synth::rt_sampling_rate);
-
-                ++param.lfo_tick;
+        for (uint32_t slot = 1; slot < count; slot++) {
+            if ( ! (pool[slot].*active)) {
+                return slot;
             }
         }
 
-        param.cur_value = value;
+        return 0;
+    }
+
+    // Resolves the raw MIDI source for a parameter into an additive value.
+    float eval_midi_source(const MidiSource midi_source, const Voice& owning_voice)
+    {
+        switch (midi_source) {
+            case midi_pitch_bend:
+                return channel_pitch_bend[owning_voice.channel];
+
+            case midi_none:
+                break;
+        }
+
+        return 0.0f;
+    }
+
+    void advance_param(const uint32_t param_id)
+    {
+        Parameter& param = params[param_id];
+
+        if ( ! param.param_desc_id) {
+            param.cur_value = 0;
+            return;
+        }
+
+        const ParameterDescriptor& desc = param_descs[param.param_desc_id - 1];
+
+        const EnvelopeDescriptor* envelope = nullptr;
+        if (desc.envelope_desc_id) {
+            envelope = &envelopes[desc.envelope_desc_id - 1].desc;
+        }
+
+        const LFODescriptor* lfo = nullptr;
+        if (desc.lfo_desc_id) {
+            lfo = &lfo_descs[desc.lfo_desc_id - 1];
+        }
+
+        const Voice& owning_voice = voices[param.voice_id];
+        const bool   sustain      = owning_voice.active && ! owning_voice.releasing;
+        const float  midi_value   = eval_midi_source(desc.midi_source, owning_voice);
+
+        param.cur_value = Synth::eval_parameter(desc.base_value,
+                                                envelope,
+                                                sustain,
+                                                lfo,
+                                                midi_value,
+                                                &param.state,
+                                                rt_step_samples,
+                                                Synth::rt_sampling_rate);
     }
 
     namespace ShaderParams {
@@ -459,6 +488,13 @@ static void init_modulation()
     param_descs[0].base_value       = 0.0f;
     param_descs[0].envelope_desc_id = 1;
     param_descs[0].lfo_desc_id      = 0;
+    param_descs[0].midi_source      = midi_none;
+
+    // TODO Parameter descriptor 1 (id 2): pitch driven by the MIDI pitch bend, no envelope or LFO.
+    param_descs[1].base_value       = 0.0f;
+    param_descs[1].envelope_desc_id = 0;
+    param_descs[1].lfo_desc_id      = 0;
+    param_descs[1].midi_source      = midi_pitch_bend;
 }
 
 static bool allocate_oscillators(uint8_t*                 osc_ids,
@@ -616,14 +652,7 @@ static void copy_audio_data(StereoPtr<T, true> dest, StereoPtr<T, true> src, uin
 
 static uint32_t allocate_unused_voice()
 {
-    for (uint32_t i = 1; i < max_voices; i++) {
-        if ( ! voices[i].active) {
-            assert(voices[i].parameters[param_cur_amplitude] == 0);
-            return i;
-        }
-    }
-
-    return 0;
+    return allocate_unused_slot(voices, max_voices, &Voice::active);
 }
 
 static uint8_t select_instrument(uint32_t channel, uint32_t note)
@@ -723,12 +752,40 @@ static void process_note_off(uint32_t delta_samples, const Synth::MidiEvent& eve
     voices[voice_idx].releasing = true;
 }
 
+// Returns a partially-allocated note to the free pool when allocation fails
+// part-way through.  Frees any oscillator slots and parameters the voice has
+// acquired and marks the voice free.  Only resources actually acquired
+// (osc_count, the param ids) are touched, so it is safe at any failure point.
+static void drop_voice(uint32_t voice_idx, uint32_t channel, uint32_t note)
+{
+    Voice& voice = voices[voice_idx];
+
+    for (uint32_t unison_idx = 0; unison_idx < voice.osc_count; ++unison_idx) {
+        Oscillator& osc = oscillators[voice.osc_ids[unison_idx]];
+        osc.osc_type[0] = no_wave;
+        osc.voice_id    = 0;
+    }
+    voice.osc_count = 0;
+
+    if (voice.volume_param_id) {
+        params[voice.volume_param_id].active = false;
+        voice.volume_param_id = 0;
+    }
+
+    if (voice.pitch_param_id) {
+        params[voice.pitch_param_id].active = false;
+        voice.pitch_param_id = 0;
+    }
+
+    voice.active                 = false;
+    note_to_voice[channel][note] = 0;
+}
+
 static void process_note_on(uint32_t delta_samples, const Synth::MidiEvent& event)
 {
     const uint32_t channel   = event.channel;
     const uint32_t note      = event.note;
     uint32_t       voice_idx = note_to_voice[channel][note];
-    int32_t        amplitude = 0;
 
     if ( ! voice_idx) {
 
@@ -744,8 +801,6 @@ static void process_note_on(uint32_t delta_samples, const Synth::MidiEvent& even
     else {
         assert(voices[voice_idx].channel    == channel);
         assert(voices[voice_idx].instrument == select_instrument(channel, note));
-
-        amplitude = voices[voice_idx].parameters[param_cur_amplitude];
     }
 
     voices[voice_idx].channel    = static_cast<uint8_t>(channel);
@@ -761,8 +816,7 @@ static void process_note_on(uint32_t delta_samples, const Synth::MidiEvent& even
     if ( ! voices[voice_idx].osc_count) {
         if ( ! allocate_oscillators(voices[voice_idx].osc_ids, unison_count, voice_idx, instrument)) {
             d_printf("All oscillators are active, dropping note %u on channel %u\n", note, channel);
-            voices[voice_idx].active     = false;
-            note_to_voice[channel][note] = 0;
+            drop_voice(voice_idx, channel, note);
             return;
         }
 
@@ -791,26 +845,55 @@ static void process_note_on(uint32_t delta_samples, const Synth::MidiEvent& even
         osc.fir_taps_offs   = 0;
     }
 
-    mstd::mem_zero(&voices[voice_idx].parameters, sizeof(voices[voice_idx].parameters));
-
-    // Preserve amplitude if the same note is replayed
-    voices[voice_idx].parameters[param_cur_amplitude] = amplitude;
-
     voices[voice_idx].velocity   = static_cast<float>(event.note_data) / 127.0f;
     voices[voice_idx].releasing  = false;
     voices[voice_idx].aftertouch = 0.0f;
 
-    for (uint32_t unison_idx = 0; unison_idx < voices[voice_idx].osc_count; ++unison_idx) {
-        const uint32_t volume_param_id = voices[voice_idx].osc_ids[unison_idx];
-        Parameter&     volume_param    = params[volume_param_id];
+    // Allocate the per-voice parameters shared by all the voice's oscillators.
+    // TODO turn this into a loop which walks all params
+    if ( ! voices[voice_idx].volume_param_id) {
+        const uint32_t allocated_param_id = allocate_unused_slot(params, max_params, &Parameter::active);
 
-        volume_param.cur_value      = 0.0f;
-        volume_param.param_desc_id  = 1;
-        volume_param.lfo_tick       = 0;
-        volume_param.envelope_tick  = 0;
-        volume_param.envelope_point = 0;
-        volume_param.voice_id       = static_cast<uint8_t>(voice_idx);
+        if ( ! allocated_param_id) {
+            d_printf("All parameters are active, dropping note %u on channel %u\n", note, channel);
+            drop_voice(voice_idx, channel, note);
+            return;
+        }
+
+        voices[voice_idx].volume_param_id = static_cast<uint16_t>(allocated_param_id);
+        params[allocated_param_id].active = true;
     }
+
+    if ( ! voices[voice_idx].pitch_param_id) {
+        const uint32_t allocated_param_id = allocate_unused_slot(params, max_params, &Parameter::active);
+
+        if ( ! allocated_param_id) {
+            d_printf("All parameters are active, dropping note %u on channel %u\n", note, channel);
+            drop_voice(voice_idx, channel, note);
+            return;
+        }
+
+        voices[voice_idx].pitch_param_id  = static_cast<uint16_t>(allocated_param_id);
+        params[allocated_param_id].active = true;
+    }
+
+    // ADSR volume descriptor (id 1)
+    constexpr uint16_t volume_param_desc_id = 1;
+
+    Parameter& volume_param    = params[voices[voice_idx].volume_param_id];
+    volume_param.cur_value     = 0.0f;
+    volume_param.param_desc_id = volume_param_desc_id;
+    volume_param.state         = { };
+    volume_param.voice_id      = static_cast<uint8_t>(voice_idx);
+
+    // Pitch bend descriptor (id 2)
+    constexpr uint16_t pitch_param_desc_id = 2;
+
+    Parameter& pitch_param    = params[voices[voice_idx].pitch_param_id];
+    pitch_param.cur_value     = 0.0f;
+    pitch_param.param_desc_id = pitch_param_desc_id;
+    pitch_param.state         = { };
+    pitch_param.voice_id      = static_cast<uint8_t>(voice_idx);
 }
 
 static void process_aftertouch(uint32_t delta_samples, const Synth::MidiEvent& event)
@@ -1044,21 +1127,29 @@ static void update_modulation()
     const float vibrato_wave = eval_lfo(vibrato_lfo, modulation_lfo_tick, rt_step_samples, Synth::rt_sampling_rate);  // [-1, 1]
     const float tremolo_wave = eval_lfo(tremolo_lfo, modulation_lfo_tick, rt_step_samples, Synth::rt_sampling_rate);  // [0, 1]
 
+    // Phase 1: advance every active parameter exactly once this step.
+    for (uint32_t param_idx = 1; param_idx < max_params; param_idx++) {
+        if (params[param_idx].active) {
+            advance_param(param_idx);
+        }
+    }
+
+    // Phase 2: update each live oscillator from its voice's shared parameters.
+    constexpr float silence_threshold = 0.0005f;
+
     for (uint32_t osc_idx = 1; osc_idx < max_oscillators; osc_idx++) {
         Oscillator& osc = oscillators[osc_idx];
         if (osc.osc_type[0] == no_wave) {
             continue;
         }
 
-        const uint32_t ch = osc.midi_channel;
+        const uint32_t ch    = osc.midi_channel;
+        Voice&         voice = voices[osc.voice_id];
 
-        // Apply the channel pitch bend plus the mod-wheel-scaled vibrato term.
-        osc.pitch = channel_pitch_bend[ch] + channel_mod_wheel[ch] * vibrato_depth_semitones * vibrato_wave;
+        // Apply the per-voice pitch parameter plus the mod-wheel-scaled vibrato term.
+        osc.pitch = params[voice.pitch_param_id].cur_value + channel_mod_wheel[ch] * vibrato_depth_semitones * vibrato_wave;
 
-        const uint32_t volume_param_id = osc_idx;  // 1 volume parameter per oscillator
-        advance_param(volume_param_id);
-
-        Voice& voice = voices[osc.voice_id];
+        const uint32_t volume_param_id = voice.volume_param_id;
 
         // Tremolo depth follows the stronger of per-note aftertouch and channel
         // pressure.  Depth 0 leaves the gain at 1; full depth oscillates the gain
@@ -1067,8 +1158,7 @@ static void update_modulation()
         const float tremolo_gain  = 1.0f - tremolo_depth * (1.0f - tremolo_wave);
         osc.volume = voice.velocity * params[volume_param_id].cur_value * tremolo_gain;
 
-        // Free oscillator once the release has decayed to silence
-        constexpr float silence_threshold = 0.0005f;
+        // Free oscillator once the voice's release has decayed to silence
         if (voice.releasing && params[volume_param_id].cur_value < silence_threshold) {
             osc.osc_type[0] = no_wave;
             osc.voice_id    = 0;
@@ -1080,7 +1170,10 @@ static void update_modulation()
             if ( ! voice.osc_count) {
                 note_to_voice[osc.midi_channel][osc.note] = 0;
                 voice.active = false;
-                mstd::mem_zero(&voice.parameters, sizeof(voice.parameters));
+                params[volume_param_id].active = false;
+                voice.volume_param_id = 0;
+                params[voice.pitch_param_id].active = false;
+                voice.pitch_param_id = 0;
             }
         }
     }

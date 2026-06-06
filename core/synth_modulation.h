@@ -98,4 +98,25 @@ float pitch_bend_to_semitones(int16_t centered_bend, float range_semitones);
 // the audio sampling rate.  The caller advances the tick between steps.
 float eval_lfo(const LFODescriptor& lfo, uint32_t lfo_tick, uint32_t step_samples, uint32_t sampling_rate);
 
+// Running modulation state a parameter carries between steps.
+struct ParameterState {
+    EnvelopeState envelope;     // Envelope tick and point
+    uint16_t      lfo_tick;     // LFO tick
+};
+
+// Computes a parameter's value for one step by summing its enabled sources
+// (base_value + envelope + LFO + MIDI input) and advances the running state by
+// one tick.  envelope and lfo may be null when that source is disabled.
+// midi_value is the already-resolved raw MIDI input contribution (0 when the
+// parameter has no MIDI source); it is added regardless of the parameter's scope.
+// sustain gates the envelope (held while true).
+float eval_parameter(float                     base_value,
+                     const EnvelopeDescriptor* envelope,
+                     bool                      sustain,
+                     const LFODescriptor*      lfo,
+                     float                     midi_value,
+                     ParameterState*           state,
+                     uint32_t                  step_samples,
+                     uint32_t                  sampling_rate);
+
 } // namespace Synth
