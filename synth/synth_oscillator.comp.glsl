@@ -17,6 +17,9 @@ const uint noise_wave    = 4;
 
 const float two_pi = 6.283185307179586;
 
+const uint osc_mode_blend = 0;  // Mix osc_type[0] and osc_type[1] by osc_mix (default)
+const uint osc_mode_fm    = 1;  // osc_type[0] is carrier, osc_type[1] is modulator
+
 struct OscillatorParams {
     uint  out_sound_offs;   // Offset of output sound data
     float phase;            // Initial phase value at first sample to render, 1 is equivalent to wave length
@@ -24,6 +27,11 @@ struct OscillatorParams {
     uint  osc_type[2];      // Two oscillator types
     float duty[2];          // Duty cycle for sawtooth and pulse oscillator [0..1]
     float osc_mix;          // Mixing between osc_type[0] and osc_type[1] [0..1]
+    uint  osc_mode;         // osc_mode_blend or osc_mode_fm
+    float mod_ratio;        // Modulator frequency / carrier frequency (present for host layout symmetry, unused here)
+    float fm_index;         // FM modulation depth
+    float mod_phase;        // Modulator's initial phase value at first sample to render
+    float mod_phase_step;   // Modulator's phase step between samples
 
     // Optional filter parameters
     uint  fir_memory_offs;  // Offset of FIR filter's memory
@@ -87,17 +95,26 @@ void main()
 
     const uint  type1 = param.osc_type[0];
     const float duty1 = param.duty[0];
+    const uint  type2 = param.osc_type[1];
+    const float duty2 = param.duty[1];
 
-    float value = oscillator(type1, phase, duty1);
+    float value;
 
-    // Apply second oscillator (optional)
-    const uint type2 = param.osc_type[1];
+    if (param.osc_mode == osc_mode_fm) {
+        // Frequency modulation: type1 is the carrier, type2 the modulator.
+        // The modulator runs at its own frequency with its own phase.
+        const float mod_phase = param.mod_phase + param.mod_phase_step * gl_LocalInvocationID.x;
+        const float modulator = oscillator(type2, mod_phase, duty2);
 
-    if (type2 != no_wave) {
-        const float duty2   = param.duty[1];
-        const float osc_mix = param.osc_mix;
+        value = oscillator(type1, phase + param.fm_index * modulator, duty1);
+    }
+    else {
+        // Blend mode: mix the two oscillators by osc_mix.
+        value = oscillator(type1, phase, duty1);
 
-        value = mix(value, oscillator(type2, phase, duty2), osc_mix);
+        if (type2 != no_wave) {
+            value = mix(value, oscillator(type2, phase, duty2), param.osc_mix);
+        }
     }
 
     // Apply FIR filter (optional)
