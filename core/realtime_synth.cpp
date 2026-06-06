@@ -40,8 +40,9 @@ namespace {
     constexpr uint32_t max_unison      = 7;  // Max oscillators per note
 
     // Oscillator modes (must match osc_mode_* constants in synth_oscillator.comp.glsl)
-    constexpr uint32_t osc_mode_blend = 0;  // Mix osc_type[0] and osc_type[1] by osc_mix
-    constexpr uint32_t osc_mode_fm    = 1;  // osc_type[0] is carrier, osc_type[1] is modulator
+    constexpr uint32_t osc_mode_blend     = 0;  // Mix osc_type[0] and osc_type[1] by osc_mix
+    constexpr uint32_t osc_mode_fm        = 1;  // osc_type[0] is carrier, osc_type[1] is modulator
+    constexpr uint32_t osc_mode_hard_sync = 2;  // osc_type[0] sets master frequency, osc_type[1] is the hard-synced slave
 
     // Number of FIR filter taps
     constexpr uint32_t num_fir_taps = 1025;
@@ -238,7 +239,7 @@ namespace {
             float    duty[2];
             float    osc_mix;
             uint32_t osc_mode;
-            float    mod_ratio;      // Present for layout symmetry; shader uses mod_phase_step
+            float    mod_ratio;      // FM: modulator/carrier freq ratio.  Hard sync: slave cycles per master cycle
             float    fm_index;
             float    mod_phase;
             float    mod_phase_step;
@@ -426,8 +427,8 @@ namespace {
         uint32_t osc_output_offs;   // Oscillator data output offset
         uint32_t fir_memory_offs;   // FIR filter memory offset
         uint32_t fir_taps_offs;     // FIR filter taps offset
-        uint32_t osc_mode;          // osc_mode_blend or osc_mode_fm
-        float    mod_ratio;         // FM modulator frequency / carrier frequency
+        uint32_t osc_mode;          // osc_mode_blend, osc_mode_fm or osc_mode_hard_sync
+        float    mod_ratio;         // FM: modulator/carrier freq ratio.  Hard sync: slave cycles per master cycle
         float    fm_index;          // FM modulation depth
 
         // Current values
@@ -455,20 +456,22 @@ namespace {
         WaveType osc_type[2];               // osc_type[1] == no_wave means single oscillator
         float    duty[2];
         float    osc_mix;
-        uint32_t osc_mode;                  // osc_mode_blend or osc_mode_fm
-        float    mod_ratio;                 // FM modulator frequency / carrier frequency
+        uint32_t osc_mode;                  // osc_mode_blend, osc_mode_fm or osc_mode_hard_sync
+        float    mod_ratio;                 // FM: modulator/carrier freq ratio.  Hard sync: slave cycles per master cycle
         float    fm_index;                  // FM modulation depth
         uint32_t unison_count;              // Number of oscillator slots a note of this instrument uses (1 = mono)
         float    detune_semitones[max_unison]; // Per-oscillator pitch offset in semitones; entry [idx] applies to the idx-th allocated oscillator
     };
     // Index 0 is a plain mono sine.  Index 1 is a 7-voice supersaw with a
     // symmetric detune spread of about +/- 18 cents.  Index 2 is a sine-on-sine
-    // FM voice (mod_ratio 2.0, fm_index 3.0).
-    RuntimeInstrument instruments[3] = {
+    // FM voice (mod_ratio 2.0, fm_index 3.0).  Index 3 is a hard-sync voice:
+    // a sine master sets the pitch and a sawtooth slave is synced at ratio 2.5.
+    RuntimeInstrument instruments[4] = {
         { { sine_wave,     no_wave }, { 0.0f, 0.0f }, 0.0f, osc_mode_blend, 0.0f, 0.0f, 1, { 0.0f } },
         { { Synth::sawtooth_wave, no_wave }, { 0.0f, 0.0f }, 0.0f, osc_mode_blend, 0.0f, 0.0f, max_unison,
           { -0.18f, -0.12f, -0.06f, 0.0f, 0.06f, 0.12f, 0.18f } },
-        { { sine_wave, sine_wave }, { 0.0f, 0.0f }, 0.0f, osc_mode_fm, 2.0f, 3.0f, 1, { 0.0f } }
+        { { sine_wave, sine_wave }, { 0.0f, 0.0f }, 0.0f, osc_mode_fm, 2.0f, 3.0f, 1, { 0.0f } },
+        { { sine_wave, Synth::sawtooth_wave }, { 0.0f, 0.0f }, 0.0f, osc_mode_hard_sync, 2.5f, 0.0f, 1, { 0.0f } }
     };
 
     static constexpr uint32_t max_mix_channels = 8;
@@ -1137,8 +1140,8 @@ static void temp_drive_test_notes(uint32_t start_samples, uint32_t end_samples)
             Synth::MidiEvent on_ev = make_event(current_note);
             on_ev.note_data = 100;
 
-            // Play the FM demo instrument (index 2) so it is audible (see flag definition).
-            temp_force_instrument = 2;
+            // Play the hard-sync demo instrument (index 3) so it is audible (see flag definition).
+            temp_force_instrument = 3;
             process_note_on(0, on_ev);
             temp_force_instrument = temp_no_force_instrument;
         }
@@ -1342,8 +1345,11 @@ static void render_audio_step()
         param.mod_ratio       = oscillator.mod_ratio;
         param.fm_index        = oscillator.fm_index;
 
-        // Modulator runs at carrier_freq * mod_ratio with its own accumulator so
-        // continuity holds at non-integer ratios.
+        // FM modulator runs at carrier_freq * mod_ratio with its own accumulator
+        // so continuity holds at non-integer ratios.  Hard sync derives the slave
+        // from the master phase directly, so mod_phase / mod_phase_step are unused
+        // in that mode (computed unconditionally here, harmless when mod_ratio is
+        // the sync ratio).
         const float mod_phase_step = phase_step * oscillator.mod_ratio;
         param.mod_phase       = oscillator.mod_phase;
         param.mod_phase_step  = mod_phase_step / static_cast<float>(rt_step_samples);

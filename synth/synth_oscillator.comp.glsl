@@ -17,8 +17,9 @@ const uint noise_wave    = 4;
 
 const float two_pi = 6.283185307179586;
 
-const uint osc_mode_blend = 0;  // Mix osc_type[0] and osc_type[1] by osc_mix (default)
-const uint osc_mode_fm    = 1;  // osc_type[0] is carrier, osc_type[1] is modulator
+const uint osc_mode_blend     = 0;  // Mix osc_type[0] and osc_type[1] by osc_mix (default)
+const uint osc_mode_fm        = 1;  // osc_type[0] is carrier, osc_type[1] is modulator
+const uint osc_mode_hard_sync = 2;  // osc_type[0] sets master frequency, osc_type[1] is the hard-synced slave
 
 struct OscillatorParams {
     uint  out_sound_offs;   // Offset of output sound data
@@ -28,7 +29,7 @@ struct OscillatorParams {
     float duty[2];          // Duty cycle for sawtooth and pulse oscillator [0..1]
     float osc_mix;          // Mixing between osc_type[0] and osc_type[1] [0..1]
     uint  osc_mode;         // osc_mode_blend or osc_mode_fm
-    float mod_ratio;        // Modulator frequency / carrier frequency (present for host layout symmetry, unused here)
+    float mod_ratio;        // FM: modulator frequency / carrier frequency.  Hard sync: slave cycles per master cycle
     float fm_index;         // FM modulation depth
     float mod_phase;        // Modulator's initial phase value at first sample to render
     float mod_phase_step;   // Modulator's phase step between samples
@@ -107,6 +108,13 @@ void main()
         const float modulator = oscillator(type2, mod_phase, duty2);
 
         value = oscillator(type1, phase + param.fm_index * modulator, duty1);
+    }
+    else if (param.osc_mode == osc_mode_hard_sync) {
+        // Hard sync: type1 is the master providing the note frequency, type2 is
+        // the slave whose phase resets each time the master phase wraps.  The
+        // slave is stateless, derived from the master phase.  mod_ratio is
+        // reused here as the sync ratio (slave cycles per master cycle).
+        value = oscillator(type2, fract(param.mod_ratio * fract(phase)), duty2);
     }
     else {
         // Blend mode: mix the two oscillators by osc_mix.
