@@ -34,8 +34,10 @@ namespace {
     // This must match workgroup geometry in compute shaders.
     constexpr uint32_t rt_step_samples = 256;
 
-    // Maximum number of supported voices
-    constexpr uint32_t max_voices = 256;
+    // Polyphony limits
+    constexpr uint32_t max_voices      = 64; // Max notes are playing
+    constexpr uint32_t max_oscillators = 64; // Max oscillators are playing
+    constexpr uint32_t max_unison      = 7;  // Max oscillators per note
 
     // Number of FIR filter taps
     constexpr uint32_t num_fir_taps = 1025;
@@ -98,10 +100,11 @@ namespace {
         bool    active;
         uint8_t channel;
         uint8_t instrument;
-        uint8_t osc_id;             // Oscillator owned by this voice (0 = none)
-        float   velocity;           // Note-on velocity, 0..1
-        float   aftertouch;         // Per-note polyphonic aftertouch pressure, 0..1
-        bool    releasing;          // True after note-off, until the volume envelope finishes
+        uint8_t osc_ids[max_unison];    // Oscillator slots owned by this voice
+        uint8_t osc_count;              // Number of live oscillator slots owned (0 = none)
+        float   velocity;               // Note-on velocity, 0..1
+        float   aftertouch;             // Per-note polyphonic aftertouch pressure, 0..1
+        bool    releasing;              // True after note-off, until the volume envelope finishes
         int32_t parameters[max_parameters];
     };
 
@@ -141,7 +144,7 @@ namespace {
         uint16_t envelope_point;    // Current point on the envelope
         uint8_t  voice_id;          // Voice id where this parameter is playing
     };
-    Parameter params[10];
+    Parameter params[max_oscillators];
 
     void advance_param(uint32_t param_id)
     {
@@ -401,8 +404,6 @@ namespace {
         uint8_t  voice_id;          // Voice which owns this oscillator (0 = none/free)
     };
 
-    constexpr uint32_t max_oscillators = 10;
-
     static Oscillator oscillators[max_oscillators];
 
     // TODO Runtime instrument definition.  Hardcoded for now; an editor will
@@ -460,16 +461,32 @@ static void init_modulation()
     param_descs[0].lfo_desc_id      = 0;
 }
 
-static uint32_t allocate_oscillator()
+static bool allocate_oscillators(uint8_t*                 osc_ids,
+                                 uint32_t                 num_osc,
+                                 uint32_t                 voice_idx,
+                                 const RuntimeInstrument& instrument)
 {
-    // Slot 0 is reserved as sentinel
-    for (uint32_t osc_idx = 1; osc_idx < max_oscillators; osc_idx++) {
+    uint32_t allocated = 0;
+
+    for (uint32_t osc_idx = 1; osc_idx < max_oscillators && allocated < num_osc; osc_idx++) {
         if (oscillators[osc_idx].osc_type[0] == no_wave) {
-            return osc_idx;
+            oscillators[osc_idx].voice_id    = static_cast<uint8_t>(voice_idx);
+            oscillators[osc_idx].osc_type[0] = instrument.osc_type[0];
+            osc_ids[allocated]               = static_cast<uint8_t>(osc_idx);
+            ++allocated;
         }
     }
 
-    return max_oscillators;
+    if (allocated < num_osc) {
+        for (uint32_t rollback_idx = 0; rollback_idx < allocated; rollback_idx++) {
+            Oscillator& osc = oscillators[osc_ids[rollback_idx]];
+            osc.voice_id    = 0;
+            osc.osc_type[0] = no_wave;
+        }
+        return false;
+    }
+
+    return true;
 }
 
 bool Synth::init_synth()
@@ -735,40 +752,44 @@ static void process_note_on(uint32_t delta_samples, const Synth::MidiEvent& even
     voices[voice_idx].instrument = select_instrument(channel, note);
     voices[voice_idx].active     = true;
 
-    if ( ! voices[voice_idx].osc_id) {
-        const uint32_t osc_idx = allocate_oscillator();
+    const RuntimeInstrument& instrument = instruments[voices[voice_idx].instrument < std::size(instruments) ? voices[voice_idx].instrument : 0];
 
-        if (osc_idx == max_oscillators) {
+    // Number of oscillator slots this note uses.  Unison is added in a later
+    // task; for now every note uses exactly one oscillator.
+    constexpr uint32_t unison_count = 1;
+
+    if ( ! voices[voice_idx].osc_count) {
+        if ( ! allocate_oscillators(voices[voice_idx].osc_ids, unison_count, voice_idx, instrument)) {
             d_printf("All oscillators are active, dropping note %u on channel %u\n", note, channel);
             voices[voice_idx].active     = false;
             note_to_voice[channel][note] = 0;
             return;
         }
 
-        voices[voice_idx].osc_id = static_cast<uint8_t>(osc_idx);
+        voices[voice_idx].osc_count = static_cast<uint8_t>(unison_count);
     }
 
-    const RuntimeInstrument& instrument = instruments[voices[voice_idx].instrument < std::size(instruments) ? voices[voice_idx].instrument : 0];
-
-    Oscillator& osc     = oscillators[voices[voice_idx].osc_id];
-    osc.voice_id        = static_cast<uint8_t>(voice_idx);
-    osc.midi_channel    = channel;
-    osc.output_channel  = 0;
-    osc.note            = note;
-    osc.freq_mult       = 1;
-    osc.osc_type[0]     = instrument.osc_type[0];
-    osc.osc_type[1]     = instrument.osc_type[1];
-    osc.duty[0]         = instrument.duty[0];
-    osc.duty[1]         = instrument.duty[1];
-    osc.osc_mix         = instrument.osc_mix;
-    osc.phase           = 0.0f;
-    osc.pitch           = 0.0f;
-    osc.volume          = 0.0f;
-    osc.old_volume      = 0.0f;         // start ramped up from silence to avoid a click
-    osc.panning         = 0.5f;
-    osc.old_panning     = 0.5f;
-    osc.fir_memory_offs = 0;
-    osc.fir_taps_offs   = 0;
+    for (uint32_t unison_idx = 0; unison_idx < voices[voice_idx].osc_count; ++unison_idx) {
+        Oscillator& osc     = oscillators[voices[voice_idx].osc_ids[unison_idx]];
+        osc.voice_id        = static_cast<uint8_t>(voice_idx);
+        osc.midi_channel    = channel;
+        osc.output_channel  = 0;
+        osc.note            = note;
+        osc.freq_mult       = 1;
+        osc.osc_type[0]     = instrument.osc_type[0];
+        osc.osc_type[1]     = instrument.osc_type[1];
+        osc.duty[0]         = instrument.duty[0];
+        osc.duty[1]         = instrument.duty[1];
+        osc.osc_mix         = instrument.osc_mix;
+        osc.phase           = 0.0f;
+        osc.pitch           = 0.0f;
+        osc.volume          = 0.0f;
+        osc.old_volume      = 0.0f;         // start ramped up from silence to avoid a click
+        osc.panning         = 0.5f;
+        osc.old_panning     = 0.5f;
+        osc.fir_memory_offs = 0;
+        osc.fir_taps_offs   = 0;
+    }
 
     mstd::mem_zero(&voices[voice_idx].parameters, sizeof(voices[voice_idx].parameters));
 
@@ -779,17 +800,17 @@ static void process_note_on(uint32_t delta_samples, const Synth::MidiEvent& even
     voices[voice_idx].releasing  = false;
     voices[voice_idx].aftertouch = 0.0f;
 
-    // TODO The voice's volume parameter shares the oscillator slot index (1 volume
-    // parameter per oscillator for now).  Parameter descriptor id 1 = ADSR volume.
-    const uint32_t volume_param_id = voices[voice_idx].osc_id;
-    Parameter&     volume_param    = params[volume_param_id];
+    for (uint32_t unison_idx = 0; unison_idx < voices[voice_idx].osc_count; ++unison_idx) {
+        const uint32_t volume_param_id = voices[voice_idx].osc_ids[unison_idx];
+        Parameter&     volume_param    = params[volume_param_id];
 
-    volume_param.cur_value      = 0.0f;
-    volume_param.param_desc_id  = 1;
-    volume_param.lfo_tick       = 0;
-    volume_param.envelope_tick  = 0;
-    volume_param.envelope_point = 0;
-    volume_param.voice_id       = static_cast<uint8_t>(voice_idx);
+        volume_param.cur_value      = 0.0f;
+        volume_param.param_desc_id  = 1;
+        volume_param.lfo_tick       = 0;
+        volume_param.envelope_tick  = 0;
+        volume_param.envelope_point = 0;
+        volume_param.voice_id       = static_cast<uint8_t>(voice_idx);
+    }
 }
 
 static void process_aftertouch(uint32_t delta_samples, const Synth::MidiEvent& event)
@@ -1046,15 +1067,21 @@ static void update_modulation()
         const float tremolo_gain  = 1.0f - tremolo_depth * (1.0f - tremolo_wave);
         osc.volume = voice.velocity * params[volume_param_id].cur_value * tremolo_gain;
 
-        // Free the voice once the release has decayed to silence.
+        // Free oscillator once the release has decayed to silence
         constexpr float silence_threshold = 0.0005f;
         if (voice.releasing && params[volume_param_id].cur_value < silence_threshold) {
-            note_to_voice[osc.midi_channel][osc.note] = 0;
             osc.osc_type[0] = no_wave;
             osc.voice_id    = 0;
-            voice.active    = false;
-            voice.osc_id    = 0;
-            mstd::mem_zero(&voice.parameters, sizeof(voice.parameters));
+
+            if (voice.osc_count) {
+                --voice.osc_count;
+            }
+
+            if ( ! voice.osc_count) {
+                note_to_voice[osc.midi_channel][osc.note] = 0;
+                voice.active = false;
+                mstd::mem_zero(&voice.parameters, sizeof(voice.parameters));
+            }
         }
     }
 
