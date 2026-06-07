@@ -486,6 +486,10 @@ namespace {
 
     struct Channel {
         uint32_t chan_output_offs;  // Channel data output offset
+        float    volume;            // Channel volume (linear), default 1.0
+        float    panning;           // Channel pan: 0 = left, 0.5 = center, 1 = right
+        float    old_volume;        // Previous step's volume, for 32-sample smoothing
+        float    old_panning;       // Previous step's panning, for 32-sample smoothing
     };
     static Channel mix_channels[max_mix_channels];
 
@@ -504,6 +508,10 @@ static void init_oscillator_buffers()
 
     for (uint32_t channel = 0; channel < Synth::num_channels; channel++) {
         mix_channels[channel].chan_output_offs = static_cast<uint32_t>(data_allocator.allocate(sizeof(float) * rt_step_samples * 2, synth_alignment).offset);
+        mix_channels[channel].volume      = 1.0f;
+        mix_channels[channel].panning     = 0.5f;
+        mix_channels[channel].old_volume  = 1.0f;
+        mix_channels[channel].old_panning = 0.5f;
     }
 
     for (uint32_t osc_idx = 0; osc_idx < max_oscillators; osc_idx++) {
@@ -1120,18 +1128,28 @@ static void push_descriptor(const PushDescriptorInfo& info, uint32_t buffer_offs
 // audible without a MIDI soundtrack.  Remove once real MIDI input exists.
 static void temp_drive_test_notes(uint32_t start_samples, uint32_t end_samples)
 {
-    constexpr uint32_t   note_period_samples      = Synth::rt_sampling_rate;          // 1 note per second
-    constexpr uint32_t   note_on_samples          = Synth::rt_sampling_rate * 3 / 4;  // held 0.75s
-    constexpr uint32_t   expression_update_samples = 256;                             // expression update granularity
-    static const uint8_t pattern_notes[]          = { 60, 62, 64, 65, 67, 69, 71, 72 };
+    constexpr uint32_t   note_period_samples = Synth::rt_sampling_rate;          // 1 note per second
+    constexpr uint32_t   note_on_samples     = Synth::rt_sampling_rate * 3 / 4;  // held 0.75s
+    static const uint8_t pattern_notes[]     = { 60, 62, 64, 65, 67, 69, 71, 72 };
 
-    // Number of distinct expression types cycled across steps.
-    constexpr uint32_t num_expr_types = 4;
+    // TEMP test scaffolding: position the two demo channels in the stereo field
+    // and scale channel 1 down so per-channel volume + pan are both audible.
+    // Removed when real MIDI input replaces this driver.
+    mix_channels[0].panning = 0.0f;  // hard left
+    mix_channels[0].volume  = 1.0f;
+    if (Synth::num_channels > 1) {
+        mix_channels[1].panning = 1.0f;  // hard right
+        mix_channels[1].volume  = 0.6f;
+    }
 
-    // Helper lambda: build a base event for channel 0 with zeroed fields.
-    auto make_event = [](uint8_t note) {
+    // Per-channel demo instrument: channel 0 plays supersaw (1), channel 1 FM (2).
+    static const uint8_t channel_instruments[] = { 1, 2 };
+    assert(Synth::num_channels <= std::size(channel_instruments));
+
+    // Helper lambda: build a base event for the given channel with zeroed fields.
+    auto make_event = [](uint8_t channel, uint8_t note) {
         Synth::MidiEvent ev = { };
-        ev.channel = 0;
+        ev.channel = channel;
         ev.note    = note;
         return ev;
     };
@@ -1141,65 +1159,23 @@ static void temp_drive_test_notes(uint32_t start_samples, uint32_t end_samples)
         const uint32_t step            = (sample / note_period_samples) % std::size(pattern_notes);
         const uint8_t  current_note    = pattern_notes[step];
 
-        if (phase_in_period == 0) {
-            // Reset channel 0 expression state so the previous note's effect
-            // does not bleed into the new note.
-            Synth::MidiEvent reset_ev = make_event(current_note);
-            reset_ev.pitch_bend = 0;
-            process_pitch_bend(0, reset_ev);
-            reset_ev.controller      = 1;
-            reset_ev.controller_data = 0;
-            process_controller(0, reset_ev);
-            reset_ev.note_data = 0;
-            process_channel_pressure(0, reset_ev);
-
-            // Note-on with velocity 100.
-            Synth::MidiEvent on_ev = make_event(current_note);
-            on_ev.note_data = 100;
-
-            // Play the hard-sync demo instrument (index 3) so it is audible (see flag definition).
-            temp_force_instrument = 3;
-            process_note_on(0, on_ev);
-            temp_force_instrument = temp_no_force_instrument;
+        if (phase_in_period != 0 && phase_in_period != note_on_samples) {
+            continue;
         }
-        else if (phase_in_period == note_on_samples) {
-            Synth::MidiEvent off_ev = make_event(current_note);
-            process_note_off(0, off_ev);
-        }
-        else if (phase_in_period < note_on_samples &&
-                 phase_in_period % expression_update_samples == 0) {
-            // Emit one expression update for the hold window, ramping 0->max
-            // proportionally to how far we are into the hold.
-            const float ramp01       = static_cast<float>(phase_in_period) /
-                                       static_cast<float>(note_on_samples);
-            const uint32_t expr_type = step % num_expr_types;
 
-            if (expr_type == 0) {
-                // Pitch-bend sweep: ramp pitch_bend from 0 up to +8191.
-                Synth::MidiEvent ev = make_event(current_note);
-                ev.pitch_bend = static_cast<int16_t>(ramp01 * 8191.0f);
-                process_pitch_bend(0, ev);
-            }
-            else if (expr_type == 1) {
-                // Mod-wheel vibrato: ramp controller_data 0->127.
-                Synth::MidiEvent ev  = make_event(current_note);
-                ev.controller        = 1;
-                ev.controller_data   = static_cast<uint8_t>(ramp01 * 127.0f);
-                process_controller(0, ev);
-            }
-            else if (expr_type == 2) {
-                // Channel-pressure tremolo: ramp note_data 0->127.
-                Synth::MidiEvent ev = make_event(current_note);
-                ev.note_data = static_cast<uint8_t>(ramp01 * 127.0f);
-                process_channel_pressure(0, ev);
+        for (uint8_t channel = 0; channel < Synth::num_channels; channel++) {
+            if (phase_in_period == 0) {
+                // Note-on with velocity 100, forcing this channel's demo instrument.
+                Synth::MidiEvent on_ev = make_event(channel, current_note);
+                on_ev.note_data = 100;
+
+                temp_force_instrument = channel_instruments[channel];
+                process_note_on(0, on_ev);
+                temp_force_instrument = temp_no_force_instrument;
             }
             else {
-                // Per-note aftertouch tremolo: ramp note_data 0->127.
-                // process_aftertouch asserts the voice is active, so only send
-                // this during the hold window (already guaranteed here).
-                Synth::MidiEvent ev = make_event(current_note);
-                ev.note_data = static_cast<uint8_t>(ramp01 * 127.0f);
-                process_aftertouch(0, ev);
+                Synth::MidiEvent off_ev = make_event(channel, current_note);
+                process_note_off(0, off_ev);
             }
         }
     }
@@ -1459,10 +1435,10 @@ static void render_audio_step()
 
     // ======================================================================
 
-    // Sum all per-channel stereo buffers into the master stereo buffer.
-    // TODO Per channel volume and pan are constants for now (unity, center).
-    const float master_channel_volume  = 1.0f;
-    const float master_channel_panning = 0.5f;
+    // Sum all per-channel stereo buffers into the master stereo buffer, applying
+    // each channel's volume + pan.  The master-mix shader smooths volume/pan over
+    // the first 32 samples from the previous step's values (old_*), so carry the
+    // current values into old_* after emitting them.
 
     const uint32_t master_input_param_size = num_mix_channels * static_cast<uint32_t>(sizeof(ShaderParams::ChannelCombineInput));
     const uint32_t master_input_param_offs = static_cast<uint32_t>(param_allocator.allocate(master_input_param_size, synth_alignment).offset);
@@ -1471,15 +1447,19 @@ static void render_audio_step()
     for (uint32_t used_chan_idx = 0; used_chan_idx < num_mix_channels; used_chan_idx++) {
 
         const uint32_t chan_idx = chan_map[used_chan_idx];
+        Channel&       channel  = mix_channels[chan_idx];
 
         cur_param_offs = master_input_param_offs + used_chan_idx * static_cast<uint32_t>(sizeof(ShaderParams::ChannelCombineInput));
         ShaderParams::ChannelCombineInput& param = get_param<ShaderParams::ChannelCombineInput>(cur_param_offs);
 
-        param.in_sound_offs = mix_channels[chan_idx].chan_output_offs / 4;
-        param.volume        = master_channel_volume;
-        param.panning       = master_channel_panning;
-        param.old_volume    = master_channel_volume;
-        param.old_panning   = master_channel_panning;
+        param.in_sound_offs = channel.chan_output_offs / 4;
+        param.old_volume    = channel.old_volume;
+        param.volume        = channel.volume;
+        param.old_panning   = channel.old_panning;
+        param.panning       = channel.panning;
+
+        channel.old_volume  = channel.volume;
+        channel.old_panning = channel.panning;
     }
 
     ShaderParams::ChannelCombine& master_param = get_param<ShaderParams::ChannelCombine>(master_param_offs);
