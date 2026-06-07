@@ -28,7 +28,7 @@ struct OscillatorParams {
     uint  osc_type[2];      // Two oscillator types
     float duty[2];          // Duty cycle for sawtooth and pulse oscillator [0..1]
     float osc_mix;          // Mixing between osc_type[0] and osc_type[1] [0..1]
-    uint  osc_mode;         // osc_mode_blend or osc_mode_fm
+    uint  osc_mode;         // osc_mode_blend, osc_mode_fm or osc_mode_hard_sync
     float mod_ratio;        // FM: modulator frequency / carrier frequency.  Hard sync: slave cycles per master cycle
     float fm_index;         // FM modulation depth
     float mod_phase;        // Modulator's initial phase value at first sample to render

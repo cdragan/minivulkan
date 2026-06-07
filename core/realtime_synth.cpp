@@ -276,6 +276,7 @@ namespace {
     enum SynthPipelines {
         oscillator_pipe,
         chan_combine_pipe,
+        master_mix_pipe,
         output_16i_pipe,
         output_32fi_pipe,
         output_32f_pipe,
@@ -328,6 +329,13 @@ namespace {
             {
                 {
                     shader_synth_chan_combine_comp,
+                    0,
+                },
+                two_buffers_ds
+            },
+            {
+                {
+                    shader_synth_master_mix_comp,
                     0,
                 },
                 two_buffers_ds
@@ -474,12 +482,15 @@ namespace {
         { { sine_wave, Synth::sawtooth_wave }, { 0.0f, 0.0f }, 0.0f, osc_mode_hard_sync, 2.5f, 0.0f, 1, { 0.0f } }
     };
 
-    static constexpr uint32_t max_mix_channels = 8;
+    static constexpr uint32_t max_mix_channels = Synth::max_channels;
 
     struct Channel {
         uint32_t chan_output_offs;  // Channel data output offset
     };
     static Channel mix_channels[max_mix_channels];
+
+    // Dedicated interleaved-stereo master output, summed from all channels
+    uint32_t master_output_offs;
 }
 
 namespace Synth {
@@ -489,11 +500,17 @@ namespace Synth {
 
 static void init_oscillator_buffers()
 {
-    mix_channels[0].chan_output_offs = static_cast<uint32_t>(data_allocator.allocate(sizeof(float) * rt_step_samples * 2, synth_alignment).offset);
+    assert(Synth::num_channels <= max_mix_channels);
+
+    for (uint32_t channel = 0; channel < Synth::num_channels; channel++) {
+        mix_channels[channel].chan_output_offs = static_cast<uint32_t>(data_allocator.allocate(sizeof(float) * rt_step_samples * 2, synth_alignment).offset);
+    }
 
     for (uint32_t osc_idx = 0; osc_idx < max_oscillators; osc_idx++) {
         oscillators[osc_idx].osc_output_offs = static_cast<uint32_t>(data_allocator.allocate(sizeof(float) * rt_step_samples, synth_alignment).offset);
     }
+
+    master_output_offs = static_cast<uint32_t>(data_allocator.allocate(sizeof(float) * rt_step_samples * 2, synth_alignment).offset);
 }
 
 static void init_modulation()
@@ -887,7 +904,7 @@ static void process_note_on(uint32_t delta_samples, const Synth::MidiEvent& even
         Oscillator& osc     = oscillators[voices[voice_idx].osc_ids[unison_idx]];
         osc.voice_id        = static_cast<uint8_t>(voice_idx);
         osc.midi_channel    = channel;
-        osc.output_channel  = 0;
+        osc.output_channel  = channel;
         osc.note            = note;
         osc.freq_mult       = 1;
         osc.osc_type[0]     = instrument.osc_type[0];
@@ -1295,14 +1312,6 @@ static void render_audio_step()
 
         ++num_oscillators;
 
-        // Channel 0 is master channel
-        // TODO uncomment
-#if 0
-        assert(oscillator.output_channel);
-#else
-        assert( ! oscillator.output_channel);
-#endif
-
         if ( ! channel_osc_count[oscillator.output_channel]++)
             ++num_mix_channels;
     }
@@ -1312,7 +1321,7 @@ static void render_audio_step()
 
         vkCmdFillBuffer(audio_cmd_buf,
                         buffers[data_buf].get_buffer(),
-                        mix_channels[0].chan_output_offs,
+                        master_output_offs,
                         sizeof(float) * 2 * rt_step_samples,
                         0); // data
         return;
@@ -1450,7 +1459,48 @@ static void render_audio_step()
 
     // ======================================================================
 
-    // TODO Sum all channels into master channel
+    // Sum all per-channel stereo buffers into the master stereo buffer.
+    // TODO Per channel volume and pan are constants for now (unity, center).
+    const float master_channel_volume  = 1.0f;
+    const float master_channel_panning = 0.5f;
+
+    const uint32_t master_input_param_size = num_mix_channels * static_cast<uint32_t>(sizeof(ShaderParams::ChannelCombineInput));
+    const uint32_t master_input_param_offs = static_cast<uint32_t>(param_allocator.allocate(master_input_param_size, synth_alignment).offset);
+    const uint32_t master_param_offs       = static_cast<uint32_t>(param_allocator.allocate(static_cast<uint32_t>(sizeof(ShaderParams::ChannelCombine)), synth_alignment).offset);
+
+    for (uint32_t used_chan_idx = 0; used_chan_idx < num_mix_channels; used_chan_idx++) {
+
+        const uint32_t chan_idx = chan_map[used_chan_idx];
+
+        cur_param_offs = master_input_param_offs + used_chan_idx * static_cast<uint32_t>(sizeof(ShaderParams::ChannelCombineInput));
+        ShaderParams::ChannelCombineInput& param = get_param<ShaderParams::ChannelCombineInput>(cur_param_offs);
+
+        param.in_sound_offs = mix_channels[chan_idx].chan_output_offs / 4;
+        param.volume        = master_channel_volume;
+        param.panning       = master_channel_panning;
+        param.old_volume    = master_channel_volume;
+        param.old_panning   = master_channel_panning;
+    }
+
+    ShaderParams::ChannelCombine& master_param = get_param<ShaderParams::ChannelCombine>(master_param_offs);
+    master_param.out_sound_offs    = master_output_offs / 4;
+    master_param.input_params_offs = 0;
+    master_param.num_inputs        = num_mix_channels;
+
+    memory_barrier(VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+
+    vkCmdBindPipeline(audio_cmd_buf, VK_PIPELINE_BIND_POINT_COMPUTE, pipes[master_mix_pipe]);
+
+    static const PushDescriptorInfo push_master_data = { master_mix_pipe, 0, 0, data_buf, VK_WHOLE_SIZE };
+    push_descriptor(push_master_data, 0);
+
+    static const PushDescriptorInfo push_master_param0 = { master_mix_pipe, 1, 0, param_buf, ShaderParams::max_param_range };
+    push_descriptor(push_master_param0, master_input_param_offs);
+
+    static const PushDescriptorInfo push_master_param1 = { master_mix_pipe, 2, 0, param_buf, ShaderParams::max_param_range };
+    push_descriptor(push_master_param1, master_param_offs);
+
+    vkCmdDispatch(audio_cmd_buf, 1, 1, 1);
 
     // ======================================================================
 
@@ -1477,7 +1527,7 @@ void prepare_copy_audio_step_to_host<int16_t, true>(uint32_t offset)
     static const PushDescriptorInfo push_out_output = { output_16i_pipe, 1, 0, output_buf, sizeof(int16_t) * 2 * rt_step_samples };
     push_descriptor(push_out_output, offset);
 
-    const ShaderParams::OutputPushConst push = { mix_channels[0].chan_output_offs };
+    const ShaderParams::OutputPushConst push = { master_output_offs / 4 };
 
     vkCmdPushConstants(audio_cmd_buf,
                        pipe_layouts[output_16i_pipe],
@@ -1502,7 +1552,7 @@ void prepare_copy_audio_step_to_host<float, true>(uint32_t offset)
     static const PushDescriptorInfo push_out_output = { output_32fi_pipe, 1, 0, output_buf, sizeof(float) * 2 * rt_step_samples };
     push_descriptor(push_out_output, offset);
 
-    const ShaderParams::OutputPushConst push = { mix_channels[0].chan_output_offs };
+    const ShaderParams::OutputPushConst push = { master_output_offs / 4 };
 
     vkCmdPushConstants(audio_cmd_buf,
                        pipe_layouts[output_32fi_pipe],
@@ -1532,7 +1582,7 @@ void prepare_copy_audio_step_to_host<float, false>(uint32_t offset)
     static const PushDescriptorInfo push_out_output1 = { output_32f_pipe, 1, 1, output_buf, sizeof(float) * rt_step_samples };
     push_descriptor(push_out_output1, other_chan_offs);
 
-    const ShaderParams::OutputPushConst push = { mix_channels[0].chan_output_offs };
+    const ShaderParams::OutputPushConst push = { master_output_offs / 4 };
 
     vkCmdPushConstants(audio_cmd_buf,
                        pipe_layouts[output_32f_pipe],
