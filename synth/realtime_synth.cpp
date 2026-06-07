@@ -251,7 +251,8 @@ namespace {
 
         constexpr uint32_t max_param_range = sizeof(Oscillator) * 256;
 
-        // synth_chan_combine shader (binding 0)
+        // synth_chan_combine shader (binding 0); the master-mix pass reuses the
+        // same layout to describe each per-channel input it sums.
         struct ChannelCombineInput {
             uint32_t in_sound_offs;
             float    old_volume;
@@ -260,7 +261,7 @@ namespace {
             float    panning;
         };
 
-        // synth_chan_combine shader (binding 1)
+        // synth_chan_combine shader (binding 1); also describes the master-mix output.
         struct ChannelCombine {
             uint32_t out_sound_offs;
             uint32_t input_params_offs;
@@ -1132,12 +1133,14 @@ static void temp_drive_test_notes(uint32_t start_samples, uint32_t end_samples)
     constexpr uint32_t   note_on_samples     = Synth::rt_sampling_rate * 3 / 4;  // held 0.75s
     static const uint8_t pattern_notes[]     = { 60, 62, 64, 65, 67, 69, 71, 72 };
 
-    // TEMP test scaffolding: position the two demo channels in the stereo field
-    // and scale channel 1 down so per-channel volume + pan are both audible.
+    // TEMP test scaffolding: when more than one channel is active, position the
+    // demo channels in the stereo field and scale channel 1 down so per-channel
+    // volume + pan are both audible.  A single channel keeps its center, unity
+    // init defaults so the output stays equivalent to the pre-multi-channel mix.
     // Removed when real MIDI input replaces this driver.
-    mix_channels[0].panning = 0.0f;  // hard left
-    mix_channels[0].volume  = 1.0f;
     if (Synth::num_channels > 1) {
+        mix_channels[0].panning = 0.0f;  // hard left
+        mix_channels[0].volume  = 1.0f;
         mix_channels[1].panning = 1.0f;  // hard right
         mix_channels[1].volume  = 0.6f;
     }
