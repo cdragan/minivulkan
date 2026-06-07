@@ -405,6 +405,7 @@ namespace {
                 { 1, 4,  4 },
                 { 2, 8,  4 },
                 { 3, 12, 4 },
+                { 4, 16, 4 },
             };
 
             static uint32_t spec_data[] = {
@@ -412,6 +413,7 @@ namespace {
                 0,
                 num_fir_taps,
                 volume_adjustment_samples,
+                Synth::effect_delay_max_samples,
             };
             spec_data[1] = vk11_props.subgroupSize;
 
@@ -572,10 +574,11 @@ namespace {
 
     static void init_effects()
     {
-        // TODO TEMP demo scaffolding: drive channel 0 through a single distortion so the
+        // TODO TEMP demo scaffolding: drive channel 0 through a single delay so the
         // effect engine is audible.  Replaced when a mixer GUI configures chains.
         channel_chains[0].num_effects = 1;
-        channel_chains[0].effects[0]  = { Synth::effect_distortion, true, { 5.0f, 1.0f, 0.0f, 0.0f, 0.0f }, 0 };
+        channel_chains[0].effects[0]  = { Synth::effect_delay, true,
+            { 0.5f * static_cast<float>(Synth::rt_sampling_rate), 0.4f, 0.4f, 0.0f, 0.0f }, 0 };
 
         effect_state_fill_offset = 0;
         effect_state_fill_bytes  = 0;
@@ -606,6 +609,11 @@ namespace {
         }
 
         return nullptr;
+    }
+
+    static bool chain_has_enabled_effect(const EffectChain& chain)
+    {
+        return nth_enabled_effect(chain, 0) != nullptr;
     }
 }
 
@@ -1305,8 +1313,8 @@ static void apply_effects(const EffectTarget* targets, uint32_t num_targets)
 // audible without a MIDI soundtrack.  Remove once real MIDI input exists.
 static void temp_drive_test_notes(uint32_t start_samples, uint32_t end_samples)
 {
-    constexpr uint32_t   note_period_samples = Synth::rt_sampling_rate;          // 1 note per second
-    constexpr uint32_t   note_on_samples     = Synth::rt_sampling_rate * 3 / 4;  // held 0.75s
+    constexpr uint32_t   note_period_samples = Synth::rt_sampling_rate * 2;      // 1 note per 2 s
+    constexpr uint32_t   note_on_samples     = Synth::rt_sampling_rate / 8;      // short pluck, ~0.125s
     static const uint8_t pattern_notes[]     = { 60, 62, 64, 65, 67, 69, 71, 72 };
 
     // TEMP test scaffolding: when more than one channel is active, position the
@@ -1472,21 +1480,31 @@ static void render_audio_step()
 
     // ======================================================================
 
-    uint32_t num_oscillators  = 0;
-    uint32_t num_mix_channels = 0;
+    uint32_t num_oscillators = 0;
     uint32_t channel_osc_count[max_mix_channels] = { };
 
     for (const Oscillator& oscillator : oscillators) {
-        if ( ! oscillator.osc_type[0])
+        if ( ! oscillator.osc_type[0]) {
             continue;
+        }
 
         ++num_oscillators;
-
-        if ( ! channel_osc_count[oscillator.output_channel]++)
-            ++num_mix_channels;
+        ++channel_osc_count[oscillator.output_channel];
     }
 
-    if ( ! num_oscillators) {
+    // A channel joins the mix graph when it has active oscillators this step or an
+    // enabled effect chain (so a delay/reverb tail keeps rendering on a silenced
+    // channel buffer after the notes stop).
+    uint32_t num_mix_channels = 0;
+    for (uint32_t chan_idx = 0; chan_idx < max_mix_channels; chan_idx++) {
+        if (channel_osc_count[chan_idx] || chain_has_enabled_effect(channel_chains[chan_idx])) {
+            ++num_mix_channels;
+        }
+    }
+
+    // Nothing to render only when no channel is in the graph and the master chain has
+    // no tail of its own.  Otherwise the graph runs so effect tails ring out.
+    if ( ! num_mix_channels && ! chain_has_enabled_effect(master_chain)) {
         memory_barrier(VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
 
         vkCmdFillBuffer(audio_cmd_buf,
@@ -1564,8 +1582,9 @@ static void render_audio_step()
     uint32_t chan_map[max_mix_channels]           = { };
 
     for (uint32_t input_idx = 0, used_chan_idx = 0, chan_idx = 0; chan_idx < max_mix_channels; chan_idx++) {
-        if ( ! channel_osc_count[chan_idx])
+        if ( ! channel_osc_count[chan_idx] && ! chain_has_enabled_effect(channel_chains[chan_idx])) {
             continue;
+        }
 
         assert(used_chan_idx < num_mix_channels);
         chan_map[used_chan_idx]           = chan_idx;

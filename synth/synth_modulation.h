@@ -132,7 +132,7 @@ enum EffectType : uint32_t {
     num_effect_types
 };
 
-constexpr uint32_t effect_delay_max_samples  = rt_sampling_rate / 4;   // 250 ms
+constexpr uint32_t effect_delay_max_samples  = rt_sampling_rate;       // 1 s
 constexpr uint32_t effect_chorus_max_samples = rt_sampling_rate / 20;  // 50 ms
 // The Freeverb comb and allpass delay-line lengths are a fixed published tuning
 // specified at 44100 Hz; the reverb shader defines the individual lengths.
