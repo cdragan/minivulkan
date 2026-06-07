@@ -191,5 +191,18 @@ int main()
         }
     }
 
+    TEST(Synth::effect_param_floats(Synth::effect_distortion) == 2);
+    TEST(Synth::effect_param_floats(Synth::effect_delay)      == 3);
+    TEST(Synth::effect_param_floats(Synth::effect_chorus)     == 3);
+    TEST(Synth::effect_param_floats(Synth::effect_reverb)     == 3);
+    TEST(Synth::effect_param_floats(Synth::effect_compressor) == 5);
+    TEST(Synth::effect_state_floats(Synth::effect_distortion) == 0);
+    TEST(Synth::effect_state_floats(Synth::effect_delay)      == 22051);
+    TEST(Synth::effect_state_floats(Synth::effect_chorus)     == 4412);
+    TEST(Synth::effect_state_floats(Synth::effect_reverb)     == 25191);
+    TEST(Synth::effect_state_floats(Synth::effect_compressor) == 1);
+    TEST(Synth::effect_param_floats(Synth::effect_none)       == 0);
+    TEST(Synth::effect_state_floats(Synth::effect_none)       == 0);
+
     return exit_code;
 }

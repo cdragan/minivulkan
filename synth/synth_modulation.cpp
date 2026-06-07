@@ -158,4 +158,46 @@ float eval_parameter(float                     base_value,
     return value;
 }
 
+uint32_t effect_param_floats(EffectType type)
+{
+    switch (type) {
+        case effect_distortion: return 2;
+        case effect_delay:      return 3;
+        case effect_chorus:     return 3;
+        case effect_reverb:     return 3;
+        case effect_compressor: return 5;
+        default:                return 0;
+    }
+}
+
+uint32_t effect_state_floats(EffectType type)
+{
+    switch (type) {
+        case effect_distortion:
+            return 0;
+
+        case effect_delay:
+            // One write-position counter plus a stereo (x2) ring buffer
+            // of effect_delay_max_samples samples per channel.
+            return 1 + 2 * effect_delay_max_samples;
+
+        case effect_chorus:
+            // An LFO phase accumulator and a write-position counter, plus a
+            // stereo (x2) ring buffer of effect_chorus_max_samples per channel.
+            return 2 + 2 * effect_chorus_max_samples;
+
+        case effect_reverb:
+            // One master state word plus stereo (x2) comb and allpass filter memory.
+            // effect_reverb_num_combs extra slots hold the per-comb filter state scalars.
+            return 1 + 2 * (effect_reverb_comb_sum + effect_reverb_num_combs + effect_reverb_allpass_sum);
+
+        case effect_compressor:
+            // One envelope follower state float.
+            return 1;
+
+        default:
+            return 0;
+    }
+}
+
 } // namespace Synth

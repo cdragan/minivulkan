@@ -7,6 +7,9 @@
 
 namespace Synth {
 
+// Sampling frequency, i.e. frequency of the produced audio buffer.
+constexpr uint32_t rt_sampling_rate = 44100;
+
 enum WaveType : uint32_t {
     // Wave disabled
     no_wave,
@@ -118,5 +121,29 @@ float eval_parameter(float                     base_value,
                      ParameterState*           state,
                      uint32_t                  step_samples,
                      uint32_t                  sampling_rate);
+
+enum EffectType : uint32_t {
+    effect_none,
+    effect_distortion,
+    effect_delay,
+    effect_chorus,
+    effect_reverb,
+    effect_compressor,
+    num_effect_types
+};
+
+constexpr uint32_t effect_delay_max_samples  = rt_sampling_rate / 4;   // 250 ms
+constexpr uint32_t effect_chorus_max_samples = rt_sampling_rate / 20;  // 50 ms
+// The Freeverb comb and allpass delay-line lengths are a fixed published tuning
+// specified at 44100 Hz; the reverb shader defines the individual lengths.
+constexpr uint32_t effect_reverb_comb_sum    = 11024; // sum of the 8 Freeverb comb lengths
+constexpr uint32_t effect_reverb_allpass_sum = 1563;  // sum of the 4 Freeverb allpass lengths
+constexpr uint32_t effect_reverb_num_combs   = 8;
+
+// Number of scalar float params an effect type uses.
+uint32_t effect_param_floats(EffectType type);
+
+// Number of persistent float slots an effect type keeps in the device state region.
+uint32_t effect_state_floats(EffectType type);
 
 } // namespace Synth

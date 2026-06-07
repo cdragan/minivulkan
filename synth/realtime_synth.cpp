@@ -268,6 +268,18 @@ namespace {
             uint32_t num_inputs;
         };
 
+        // synth_effect shader (binding 1); one per effect instance in a wave, rebuilt
+        // and uploaded every step.  params[] holds the effect's tweakable values;
+        // state_offs points at its persistent state (delay lines etc.) in the device buffer.
+        static constexpr uint32_t max_effect_param_floats = 5;
+        struct EffectParams {
+            uint32_t type;
+            uint32_t sound_offs;
+            uint32_t state_offs;
+            uint32_t pad;
+            float    params[max_effect_param_floats];
+        };
+
         // synth_output_* shaders
         struct OutputPushConst {
             uint32_t in_sound_offs;
@@ -278,6 +290,7 @@ namespace {
         oscillator_pipe,
         chan_combine_pipe,
         master_mix_pipe,
+        effect_pipe,
         output_16i_pipe,
         output_32fi_pipe,
         output_32f_pipe,
@@ -340,6 +353,13 @@ namespace {
                     0,
                 },
                 two_buffers_ds
+            },
+            {
+                {
+                    shader_synth_effect_comp,
+                    0,
+                },
+                one_buffer_ds
             },
             // TODO load only in builds which need it
             {
@@ -412,6 +432,8 @@ namespace {
 
         return true;
     }
+
+    constexpr VkDeviceSize device_buf_size = 1024 * 1024; // TODO
 
     SubAllocator<1024> data_allocator;
 
@@ -496,6 +518,95 @@ namespace {
 
     // Dedicated interleaved-stereo master output, summed from all channels
     uint32_t master_output_offs;
+
+    constexpr uint32_t max_effects_per_chain = 4;
+
+    struct EffectInstance {
+        Synth::EffectType type;
+        bool              enabled;
+        float             params[ShaderParams::max_effect_param_floats];
+        uint32_t          state_offs;   // byte offset into data_buf; 0 when the effect is stateless
+    };
+
+    struct EffectChain {
+        uint32_t       num_effects;
+        EffectInstance effects[max_effects_per_chain];
+    };
+
+    static EffectChain channel_chains[max_mix_channels];
+    static EffectChain master_chain;
+
+    // One-time zero-fill of the persistent device effect-state region, computed in
+    // init_effects and recorded on the first render (no command buffer exists yet at
+    // init time).  Bytes 0 means there is no state to clear.
+    uint32_t effect_state_fill_offset;
+    uint32_t effect_state_fill_bytes;
+
+    // Allocates persistent device state for one chain's enabled effects, growing the
+    // contiguous state region tracked by fill_offset / fill_bytes.
+    static void init_chain_state(EffectChain* chain, uint32_t* fill_offset, uint32_t* fill_bytes)
+    {
+        for (uint32_t effect_idx = 0; effect_idx < chain->num_effects; effect_idx++) {
+            EffectInstance& instance = chain->effects[effect_idx];
+
+            const uint32_t num_state_floats = ( ! instance.enabled || instance.type == Synth::effect_none)
+                                              ? 0
+                                              : Synth::effect_state_floats(instance.type);
+            if ( ! num_state_floats) {
+                instance.state_offs = 0;
+                continue;
+            }
+
+            const SubAllocatorBase::Chunk chunk =
+                data_allocator.allocate(num_state_floats * sizeof(float), synth_alignment);
+            assert(chunk.offset + chunk.size <= device_buf_size);
+
+            instance.state_offs = static_cast<uint32_t>(chunk.offset);
+
+            if ( ! *fill_bytes) {
+                *fill_offset = instance.state_offs;
+            }
+            *fill_bytes = static_cast<uint32_t>(chunk.offset + chunk.size) - *fill_offset;
+        }
+    }
+
+    static void init_effects()
+    {
+        // TODO TEMP demo scaffolding: drive channel 0 through a single distortion so the
+        // effect engine is audible.  Replaced when a mixer GUI configures chains.
+        channel_chains[0].num_effects = 1;
+        channel_chains[0].effects[0]  = { Synth::effect_distortion, true, { 5.0f, 1.0f, 0.0f, 0.0f, 0.0f }, 0 };
+
+        effect_state_fill_offset = 0;
+        effect_state_fill_bytes  = 0;
+
+        for (uint32_t channel = 0; channel < Synth::num_channels; channel++) {
+            init_chain_state(&channel_chains[channel], &effect_state_fill_offset, &effect_state_fill_bytes);
+        }
+
+        init_chain_state(&master_chain, &effect_state_fill_offset, &effect_state_fill_bytes);
+    }
+
+    // Returns the n-th enabled, non-none effect of a chain, or nullptr.
+    static const EffectInstance* nth_enabled_effect(const EffectChain& chain, uint32_t n)
+    {
+        uint32_t enabled_seen = 0;
+
+        for (uint32_t effect_idx = 0; effect_idx < chain.num_effects; effect_idx++) {
+            const EffectInstance& instance = chain.effects[effect_idx];
+
+            if ( ! instance.enabled || instance.type == Synth::effect_none) {
+                continue;
+            }
+
+            if (enabled_seen == n) {
+                return &instance;
+            }
+            ++enabled_seen;
+        }
+
+        return nullptr;
+    }
 }
 
 namespace Synth {
@@ -520,6 +631,8 @@ static void init_oscillator_buffers()
     }
 
     master_output_offs = static_cast<uint32_t>(data_allocator.allocate(sizeof(float) * rt_step_samples * 2, synth_alignment).offset);
+
+    init_effects();
 }
 
 static void init_modulation()
@@ -592,7 +705,6 @@ bool Synth::init_synth()
     constexpr uint32_t seconds = 1;
     constexpr uint32_t sample_size = sizeof(float);
     constexpr VkDeviceSize output_buf_size = mstd::align_up(Synth::rt_sampling_rate * 2U * sample_size * seconds, rt_step_samples);
-    constexpr VkDeviceSize device_buf_size = 1024 * 1024; // TODO
     constexpr VkDeviceSize param_buf_size  = 1024 * 1024; // TODO
 
     if ( ! buffers[output_buf].allocate(Usage::host_only,
@@ -1125,6 +1237,70 @@ static void push_descriptor(const PushDescriptorInfo& info, uint32_t buffer_offs
                            &write_desc_set);
 }
 
+struct EffectTarget {
+    const EffectChain* chain;
+    uint32_t           sound_offs;   // FLOAT index of the buffer to process in place
+};
+
+// Runs the targets as dependency-depth waves: wave d = the d-th enabled effect of
+// every target, packed into one dispatch; a barrier precedes each wave.  Chains are
+// sequential per buffer, but the buffers are distinct, so one wave has no conflicts.
+static void apply_effects(const EffectTarget* targets, uint32_t num_targets)
+{
+    for (uint32_t depth = 0; ; depth++) {
+
+        // Gather the depth-th enabled effect of every target first, so the param
+        // buffer is only allocated for a non-empty wave.  An empty depth means all
+        // chains are exhausted and the pass is done.
+        const EffectInstance* wave_instances[max_mix_channels];
+        uint32_t              wave_sound_offs[max_mix_channels];
+        uint32_t              wave_count = 0;
+
+        for (uint32_t target_idx = 0; target_idx < num_targets; target_idx++) {
+
+            const EffectInstance* const instance = nth_enabled_effect(*targets[target_idx].chain, depth);
+            if ( ! instance) {
+                continue;
+            }
+
+            wave_instances[wave_count]  = instance;
+            wave_sound_offs[wave_count] = targets[target_idx].sound_offs;
+            ++wave_count;
+        }
+
+        if ( ! wave_count) {
+            return;
+        }
+
+        const uint32_t param_size = wave_count * static_cast<uint32_t>(sizeof(ShaderParams::EffectParams));
+        const uint32_t param_offs = static_cast<uint32_t>(param_allocator.allocate(param_size, synth_alignment).offset);
+
+        for (uint32_t wave_idx = 0; wave_idx < wave_count; wave_idx++) {
+
+            const uint32_t cur_param_offs = param_offs + wave_idx * static_cast<uint32_t>(sizeof(ShaderParams::EffectParams));
+            ShaderParams::EffectParams& param = get_param<ShaderParams::EffectParams>(cur_param_offs);
+
+            param.type       = static_cast<uint32_t>(wave_instances[wave_idx]->type);
+            param.sound_offs = wave_sound_offs[wave_idx];
+            param.state_offs = wave_instances[wave_idx]->state_offs / 4;
+            param.pad        = 0;
+            mstd::mem_copy(param.params, wave_instances[wave_idx]->params, sizeof(param.params));
+        }
+
+        memory_barrier(VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+
+        vkCmdBindPipeline(audio_cmd_buf, VK_PIPELINE_BIND_POINT_COMPUTE, pipes[effect_pipe]);
+
+        static const PushDescriptorInfo push_effect_data = { effect_pipe, 0, 0, data_buf, VK_WHOLE_SIZE };
+        push_descriptor(push_effect_data, 0);
+
+        static const PushDescriptorInfo push_effect_param = { effect_pipe, 1, 0, param_buf, ShaderParams::max_param_range };
+        push_descriptor(push_effect_param, param_offs);
+
+        vkCmdDispatch(audio_cmd_buf, wave_count, 1, 1);
+    }
+}
+
 // TODO temporary test driver: plays a repeating short pattern so the engine is
 // audible without a MIDI soundtrack.  Remove once real MIDI input exists.
 static void temp_drive_test_notes(uint32_t start_samples, uint32_t end_samples)
@@ -1262,6 +1438,21 @@ static void render_audio_step()
 
     // TODO move this to the end or outside of this function
     rendered_samples = end_samples;
+
+    // Zero the persistent device effect-state region once.  No command buffer exists
+    // at init time, so the fill is deferred to the first render here, mirroring the
+    // silence fill below (TRANSFER stage).
+    static bool effect_state_cleared = false;
+    if ( ! effect_state_cleared && effect_state_fill_bytes) {
+        memory_barrier(VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+
+        vkCmdFillBuffer(audio_cmd_buf,
+                        buffers[data_buf].get_buffer(),
+                        effect_state_fill_offset,
+                        effect_state_fill_bytes,
+                        0); // data
+    }
+    effect_state_cleared = true;
 
     process_events(start_samples, end_samples);
 
@@ -1434,7 +1625,15 @@ static void render_audio_step()
 
     // ======================================================================
 
-    // TODO Apply channel effects
+    // Apply each active channel's effect chain in place, before the master mix sums
+    // the channels.  Distinct per-channel buffers run packed in dependency waves.
+    EffectTarget channel_effect_targets[max_mix_channels];
+    for (uint32_t used_chan_idx = 0; used_chan_idx < num_mix_channels; used_chan_idx++) {
+        const uint32_t chan_idx = chan_map[used_chan_idx];
+        channel_effect_targets[used_chan_idx].chain      = &channel_chains[chan_idx];
+        channel_effect_targets[used_chan_idx].sound_offs = mix_channels[chan_idx].chan_output_offs / 4;
+    }
+    apply_effects(channel_effect_targets, num_mix_channels);
 
     // ======================================================================
 
@@ -1487,7 +1686,9 @@ static void render_audio_step()
 
     // ======================================================================
 
-    // TODO Apply master effects
+    // Apply the master effect chain in place on the master buffer, after the mix.
+    const EffectTarget master_effect_target = { &master_chain, master_output_offs / 4 };
+    apply_effects(&master_effect_target, 1);
 
     memory_barrier(VK_ACCESS_HOST_WRITE_BIT, VK_PIPELINE_STAGE_HOST_BIT);
 }

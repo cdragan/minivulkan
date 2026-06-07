@@ -1,12 +1,11 @@
 // SPDX-License-Identifier: MIT
 // SPDX-FileCopyrightText: Copyright (c) 2021-2026 Chris Dragan
 
+#include "synth_modulation.h"
+
 #include <stdint.h>
 
 namespace Synth {
-
-// Sampling frequency, i.e. frequency of produced audio buffer
-static constexpr uint32_t rt_sampling_rate = 44100;
 
 // Maximum number of supported channels
 static constexpr uint32_t max_channels = 16;
