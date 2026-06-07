@@ -110,7 +110,6 @@ TARGET_FILES = $(call OBJ_FROM_SRC, $1) $(call ASM_FROM_SRC, $1)
 lib_src_files += core/mstdc.cpp
 lib_src_files += core/rng.cpp
 lib_src_files += core/suballoc.cpp
-lib_src_files += core/synth_modulation.cpp
 lib_src_files += core/vmath.cpp
 lib_src_files += core/vk_props.cpp
 
@@ -163,8 +162,6 @@ ifeq ($(UNAME), Windows)
     endif
 endif
 
-synth_modulation_unit_src_files += core/synth_modulation_unit.cpp
-
 vmath_unit_src_files += core/vmath_unit.cpp
 
 suballoc_unit_src_files += core/suballoc_unit.cpp
@@ -175,8 +172,6 @@ threed_gui_src_files += core/gui.cpp
 threed_gui_src_files += core/resource_gui.cpp
 threed_gui_src_files += core/gui_config.cpp
 threed_gui_src_files += core/load_png.cpp
-threed_gui_src_files += core/realtime_synth.cpp
-threed_gui_src_files += core/empty_midi_soundtrack.cpp
 
 threed_nogui_src_files += core/nogui.cpp
 
@@ -203,9 +198,6 @@ all_src_files += $(vmath_unit_src_files)
 
 all_gui_src_files += $(threed_gui_src_files)
 
-all_synth_modulation_unit_src_files += $(lib_src_files)
-all_synth_modulation_unit_src_files += $(synth_modulation_unit_src_files)
-
 all_vmath_unit_src_files += $(lib_src_files)
 all_vmath_unit_src_files += $(vmath_unit_src_files)
 
@@ -214,6 +206,9 @@ all_suballoc_unit_src_files += $(suballoc_unit_src_files)
 
 all_sculptor_undo_unit_src_files += sculptor/sculptor_undo.cpp
 all_sculptor_undo_unit_src_files += $(sculptor_undo_unit_src_files)
+
+all_synth_modulation_unit_src_files += $(lib_src_files)
+all_synth_modulation_unit_src_files += $(synth_modulation_unit_src_files)
 
 ##############################################################################
 # Sub-project handling
@@ -727,10 +722,10 @@ $(foreach file, $(all_bin_to_header_files), $(eval $(call MAKE_HEADER_FROM_BINAR
 $(foreach file, $(all_gui_src_files), $(call TARGET_FILES, $(file))): CFLAGS += -I$(gen_headers_dir)
 $(foreach file, $(all_gui_src_files), $(call TARGET_FILES, $(file))): $(foreach file, $(all_bin_to_header_files), $(addsuffix .h,$(addprefix $(gen_headers_dir)/,$(notdir $(file)))))
 
-tests += synth_modulation_unit
 tests += vmath_unit
 tests += suballoc_unit
 tests += sculptor_undo_unit
+tests += synth_modulation_unit
 
 define DEFINE_TEST
 $$(eval $$(call LINK_RULE,$$(call CMDLINE_PATH,$1),$$(all_$1_src_files)))

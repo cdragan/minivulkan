@@ -3,18 +3,18 @@
 
 #include "realtime_synth.h"
 
-#include "d_printf.h"
-#include "minivulkan.h"
-#include "mstdc.h"
-#include "resource.h"
-#include "suballoc.h"
+#include "../core/d_printf.h"
+#include "../core/minivulkan.h"
+#include "../core/mstdc.h"
+#include "../core/resource.h"
+#include "../core/suballoc.h"
 #include "synth_modulation.h"
 #include <algorithm>
 #include <iterator>
 #include <math.h>
 
 #include "synth_shaders.h"
-#include "shaders.h"
+#include "../core/shaders.h"
 
 namespace {
     enum BufferTypes: uint8_t {

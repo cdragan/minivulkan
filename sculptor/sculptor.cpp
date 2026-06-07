@@ -13,7 +13,7 @@
 #include "../core/memory_heap.h"
 #include "../core/minivulkan.h"
 #include "../core/mstdc.h"
-#include "../core/realtime_synth.h"
+#include "../synth/realtime_synth.h"
 #include "../core/vmath.h"
 
 #include "sculptor_shaders.h"

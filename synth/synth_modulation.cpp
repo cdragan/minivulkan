@@ -3,9 +3,9 @@
 
 #include "synth_modulation.h"
 #include <assert.h>
-#include "mstdc.h"
-#include "vmath.h"
-#include "vecfloat.h"  // provides vmath::sincos
+#include "../core/mstdc.h"
+#include "../core/vmath.h"
+#include "../core/vecfloat.h"  // provides vmath::sincos
 
 namespace Synth {
 

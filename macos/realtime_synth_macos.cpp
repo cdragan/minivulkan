@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 // SPDX-FileCopyrightText: Copyright (c) 2021-2026 Chris Dragan
 
-#include "../core/realtime_synth.h"
+#include "../synth/realtime_synth.h"
 #include "../core/d_printf.h"
 #include <AudioToolbox/AudioToolbox.h>
 

@@ -3,6 +3,13 @@
 
 #gui_project_name = synth
 
+lib_src_files += synth/synth_modulation.cpp
+
+synth_modulation_unit_src_files += synth/synth_modulation_unit.cpp
+
+threed_gui_src_files += synth/realtime_synth.cpp
+threed_gui_src_files += synth/empty_midi_soundtrack.cpp
+
 shader_files += synth_fir_coeff.comp.glsl
 shader_files += synth_oscillator.comp.glsl
 shader_files += synth_chan_combine.comp.glsl
