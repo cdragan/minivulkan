@@ -25,7 +25,7 @@ static void load_gui_config()
 
     loaded = true;
 
-    FILE* const file = fopen("imgui.ini", "rb");
+    FILE* const file = fopen("assets/imgui.ini", "rb");
     if ( ! file)
         return;
 

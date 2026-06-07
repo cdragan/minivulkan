@@ -12,6 +12,10 @@
 #include "imgui_internal.h" // For checking pending events
 
 #include <iterator>
+#include <sys/stat.h>
+#ifdef _WIN32
+#include <direct.h>
+#endif
 
 float vk_surface_scale = 1.0f;
 
@@ -219,6 +223,13 @@ bool init_gui(GuiClear clear)
 
     ImGuiIO& io = ImGui::GetIO();
     io.ConfigFlags |= gui_config_flags;
+    io.IniFilename  = "assets/imgui.ini";
+
+#ifdef _WIN32
+    _mkdir("assets");
+#else
+    mkdir("assets", 0755);
+#endif
 
     if ( ! ImGui_ImplVulkan_LoadFunctions(load_vk_function, nullptr))
         return false;

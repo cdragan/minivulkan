@@ -1992,7 +1992,7 @@ bool GeometryEditor::create_gui_frame(uint32_t image_idx, bool* need_realloc, co
     static char dialog_path[256];
 
     if (dialog_save) {
-        snprintf(dialog_path, sizeof dialog_path, "%s.geom", get_object_name());
+        snprintf(dialog_path, sizeof dialog_path, "assets/%s.geom", get_object_name());
         ImGui::OpenPopup("Save");
         dialog_save = false;
     }

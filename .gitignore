@@ -4,8 +4,8 @@ Out
 # Vim swap files
 .*.swp
 
-# ImGui config file
-imgui.ini
+# Assets saved by the app
+assets/
 
 # MSVC files
 vc140.pdb
