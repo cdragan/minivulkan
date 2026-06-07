@@ -406,6 +406,8 @@ namespace {
                 { 2, 8,  4 },
                 { 3, 12, 4 },
                 { 4, 16, 4 },
+                { 5, 20, 4 },
+                { 6, 24, 4 },
             };
 
             static uint32_t spec_data[] = {
@@ -414,6 +416,8 @@ namespace {
                 num_fir_taps,
                 volume_adjustment_samples,
                 Synth::effect_delay_max_samples,
+                Synth::effect_chorus_max_samples,
+                Synth::rt_sampling_rate,
             };
             spec_data[1] = vk11_props.subgroupSize;
 
@@ -499,12 +503,16 @@ namespace {
     // symmetric detune spread of about +/- 18 cents.  Index 2 is a sine-on-sine
     // FM voice (mod_ratio 2.0, fm_index 3.0).  Index 3 is a hard-sync voice:
     // a sine master sets the pitch and a sawtooth slave is synced at ratio 2.5.
-    RuntimeInstrument instruments[4] = {
+    // Index 4 is a plain mono sawtooth (rich harmonics, no unison detune); it is
+    // the clean source the chorus demo plays so the effect's moving detune is
+    // unambiguous (the supersaw's own static detune would otherwise mask it).
+    RuntimeInstrument instruments[5] = {
         { { sine_wave,     no_wave }, { 0.0f, 0.0f }, 0.0f, osc_mode_blend, 0.0f, 0.0f, 1, { 0.0f } },
         { { Synth::sawtooth_wave, no_wave }, { 0.0f, 0.0f }, 0.0f, osc_mode_blend, 0.0f, 0.0f, max_unison,
           { -0.18f, -0.12f, -0.06f, 0.0f, 0.06f, 0.12f, 0.18f } },
         { { sine_wave, sine_wave }, { 0.0f, 0.0f }, 0.0f, osc_mode_fm, 2.0f, 3.0f, 1, { 0.0f } },
-        { { sine_wave, Synth::sawtooth_wave }, { 0.0f, 0.0f }, 0.0f, osc_mode_hard_sync, 2.5f, 0.0f, 1, { 0.0f } }
+        { { sine_wave, Synth::sawtooth_wave }, { 0.0f, 0.0f }, 0.0f, osc_mode_hard_sync, 2.5f, 0.0f, 1, { 0.0f } },
+        { { Synth::sawtooth_wave, no_wave }, { 0.0f, 0.0f }, 0.0f, osc_mode_blend, 0.0f, 0.0f, 1, { 0.0f } }
     };
 
     static constexpr uint32_t max_mix_channels = Synth::max_channels;
@@ -574,11 +582,14 @@ namespace {
 
     static void init_effects()
     {
-        // TODO TEMP demo scaffolding: drive channel 0 through a single delay so the
+        // TODO TEMP demo scaffolding: drive channel 0 through a single chorus so the
         // effect engine is audible.  Replaced when a mixer GUI configures chains.
         channel_chains[0].num_effects = 1;
-        channel_chains[0].effects[0]  = { Synth::effect_delay, true,
-            { 0.5f * static_cast<float>(Synth::rt_sampling_rate), 0.4f, 0.4f, 0.0f, 0.0f }, 0 };
+        // Chorus depth is a time (~10 ms of delay swing), derived from the sample
+        // rate so it does not change meaning if the rate does.
+        constexpr float chorus_depth_samples = 10.0f * Synth::rt_sampling_rate / 1000.0f;
+        channel_chains[0].effects[0]  = { Synth::effect_chorus, true,
+            { 1.5f, chorus_depth_samples, 0.5f, 0.0f, 0.0f }, 0 };
 
         effect_state_fill_offset = 0;
         effect_state_fill_bytes  = 0;
@@ -1314,7 +1325,9 @@ static void apply_effects(const EffectTarget* targets, uint32_t num_targets)
 static void temp_drive_test_notes(uint32_t start_samples, uint32_t end_samples)
 {
     constexpr uint32_t   note_period_samples = Synth::rt_sampling_rate * 2;      // 1 note per 2 s
-    constexpr uint32_t   note_on_samples     = Synth::rt_sampling_rate / 8;      // short pluck, ~0.125s
+    // Sustain each note ~1.75 s (0.25 s gap) so the chorus LFO (~1.2 Hz) sweeps
+    // through a couple of cycles and its moving detune is clearly audible.
+    constexpr uint32_t   note_on_samples     = Synth::rt_sampling_rate * 7 / 4;
     static const uint8_t pattern_notes[]     = { 60, 62, 64, 65, 67, 69, 71, 72 };
 
     // TEMP test scaffolding: when more than one channel is active, position the
@@ -1329,8 +1342,9 @@ static void temp_drive_test_notes(uint32_t start_samples, uint32_t end_samples)
         mix_channels[1].volume  = 0.6f;
     }
 
-    // Per-channel demo instrument: channel 0 plays supersaw (1), channel 1 FM (2).
-    static const uint8_t channel_instruments[] = { 1, 2 };
+    // Per-channel demo instrument: channel 0 plays a plain sawtooth (4) through
+    // the chorus so the effect is obvious; channel 1 plays FM (2), dry.
+    static const uint8_t channel_instruments[] = { 4, 2 };
     assert(Synth::num_channels <= std::size(channel_instruments));
 
     // Helper lambda: build a base event for the given channel with zeroed fields.

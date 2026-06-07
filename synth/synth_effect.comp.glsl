@@ -30,6 +30,14 @@ layout(binding = 1, std430) readonly buffer eff_param_buf { EffectParams effects
 // Synth::effect_delay_max_samples.
 layout(constant_id = 4) const uint delay_max = 1;
 
+// Chorus ring length in stereo frames; the host supplies it from
+// Synth::effect_chorus_max_samples.
+layout(constant_id = 5) const uint chorus_max = 1;
+
+// Output sampling rate in Hz; the host supplies it from Synth::rt_sampling_rate.
+// Needed to turn an LFO rate in Hz into a per-sample phase increment.
+layout(constant_id = 6) const uint sampling_rate = 1;
+
 shared float block_left[work_group_size];
 shared float block_right[work_group_size];
 
@@ -38,9 +46,11 @@ void main()
     const EffectParams eff = effects[gl_WorkGroupID.x];
     const uint s = gl_LocalInvocationID.x;
 
-    // Read the delay write position before the barrier so every lane sees it
-    // before lane 0 advances it later (only the delay branch uses it).
-    uint base_pos = uint(data[eff.state_offs]);
+    // Read the write position before the barrier so every lane sees it before
+    // lane 0 advances it later (delay and chorus both use it).  Chorus stores its
+    // LFO phase at state_offs and the write position at state_offs + 1.
+    uint base_pos = uint(data[eff.state_offs + (eff.type == effect_chorus ? 1u : 0u)]);
+    float base_lfo_phase = data[eff.state_offs];
 
     // Load this instance's interleaved-stereo input block into shared memory so the
     // effect can read inputs while writing outputs back to the same offset in place.
@@ -81,12 +91,57 @@ void main()
         data[ring + write_frame * 2]     = block_left[s]  + delayed_left  * feedback;
         data[ring + write_frame * 2 + 1] = block_right[s] + delayed_right * feedback;
     }
-    // chorus / reverb / compressor branches are added by later tasks.
+    else if (eff.type == effect_chorus) {
+        const float rate_hz      = eff.params[0];
+        const float depth_samples = eff.params[1];
+        const float mix_amount   = eff.params[2];
+
+        const float pi = 3.14159265358979;
+
+        // Center delay the LFO swings the read offset around.  Expressed as a time
+        // and derived from the sample rate so it stays ~11 ms at any rate.
+        const float chorus_base_delay_ms = 11.0;
+        const float chorus_base_delay    = chorus_base_delay_ms * float(sampling_rate) / 1000.0;
+
+        const float phase = base_lfo_phase + float(s) * rate_hz / float(sampling_rate);
+
+        // Clamp like the delay branch so reads always target a prior frame and
+        // never alias any lane's write slot.  The lower bound work_group_size + 1
+        // keeps the fractional neighbor frame0 + 1 strictly below every lane's
+        // write frame; the upper -1.0 leaves room for that same neighbor.
+        const float read_offset = clamp(chorus_base_delay + depth_samples * (0.5 + 0.5 * sin(2.0 * pi * phase)),
+                                        float(work_group_size) + 1.0,
+                                        float(chorus_max - work_group_size) - 1.0);
+
+        const uint ring = eff.state_offs + 2u;
+
+        // Adding chorus_max keeps the read position non-negative before the modulo.
+        const float read_pos = float(base_pos + s) - read_offset + float(chorus_max);
+        const uint  frame0 = uint(read_pos) % chorus_max;
+        const uint  frame1 = (frame0 + 1u) % chorus_max;
+        const float frac   = fract(read_pos);
+
+        const float delayed_left  = mix(data[ring + frame0 * 2],     data[ring + frame1 * 2],     frac);
+        const float delayed_right = mix(data[ring + frame0 * 2 + 1], data[ring + frame1 * 2 + 1], frac);
+
+        out_left  = block_left[s]  * (1.0 - mix_amount) + delayed_left  * mix_amount;
+        out_right = block_right[s] * (1.0 - mix_amount) + delayed_right * mix_amount;
+
+        // Write the dry input into the ring (no feedback).
+        const uint write_frame = (base_pos + s) % chorus_max;
+        data[ring + write_frame * 2]     = block_left[s];
+        data[ring + write_frame * 2 + 1] = block_right[s];
+    }
+    // reverb / compressor branches are added by later tasks.
 
     // All ring reads/writes for this block are done; advance the write position.
     barrier();
     if (eff.type == effect_delay && s == 0u) {
         data[eff.state_offs] = float((base_pos + work_group_size) % delay_max);
+    }
+    else if (eff.type == effect_chorus && s == 0u) {
+        data[eff.state_offs]      = fract(base_lfo_phase + float(work_group_size) * eff.params[0] / float(sampling_rate));
+        data[eff.state_offs + 1u] = float((base_pos + work_group_size) % chorus_max);
     }
 
     data[eff.sound_offs + s * 2]     = out_left;
