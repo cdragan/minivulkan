@@ -134,11 +134,24 @@ enum EffectType : uint32_t {
 
 constexpr uint32_t effect_delay_max_samples  = rt_sampling_rate;       // 1 s
 constexpr uint32_t effect_chorus_max_samples = rt_sampling_rate / 20;  // 50 ms
-// The Freeverb comb and allpass delay-line lengths are a fixed published tuning
-// specified at 44100 Hz; the reverb shader defines the individual lengths.
-constexpr uint32_t effect_reverb_comb_sum    = 11024; // sum of the 8 Freeverb comb lengths
-constexpr uint32_t effect_reverb_allpass_sum = 1563;  // sum of the 4 Freeverb allpass lengths
+// Freeverb's comb and allpass delay-line lengths are a published tuning specified
+// at freeverb_base_rate.  They are scaled to rt_sampling_rate with the same integer
+// division the reverb shader applies, so the reverb keeps its voicing at any rate and
+// the host state size matches the shader's rings exactly.  The shader mirrors these
+// base lengths (GLSL cannot include this header).
+constexpr uint32_t freeverb_base_rate        = 44100;
 constexpr uint32_t effect_reverb_num_combs   = 8;
+constexpr uint32_t effect_reverb_num_allpass = 4;
+constexpr uint32_t effect_reverb_comb_base[effect_reverb_num_combs] =
+    { 1116, 1188, 1277, 1356, 1422, 1491, 1557, 1617 };
+constexpr uint32_t effect_reverb_allpass_base[effect_reverb_num_allpass] =
+    { 556, 441, 341, 225 };
+
+// A Freeverb delay-line length scaled from freeverb_base_rate to rt_sampling_rate.
+constexpr uint32_t freeverb_scaled_length(uint32_t base_length)
+{
+    return base_length * rt_sampling_rate / freeverb_base_rate;
+}
 
 // Number of scalar float params an effect type uses.
 uint32_t effect_param_floats(EffectType type);

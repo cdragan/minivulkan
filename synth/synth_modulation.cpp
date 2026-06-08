@@ -186,10 +186,19 @@ uint32_t effect_state_floats(EffectType type)
             // stereo (x2) ring buffer of effect_chorus_max_samples per channel.
             return 2 + 2 * effect_chorus_max_samples;
 
-        case effect_reverb:
-            // One master state word plus stereo (x2) comb and allpass filter memory.
-            // effect_reverb_num_combs extra slots hold the per-comb filter state scalars.
-            return 1 + 2 * (effect_reverb_comb_sum + effect_reverb_num_combs + effect_reverb_allpass_sum);
+        case effect_reverb: {
+            // One master state word plus, per stereo side (x2): the rate-scaled comb
+            // rings, one lowpass state per comb, and the rate-scaled allpass rings.
+            uint32_t comb_total = 0;
+            for (uint32_t comb_idx = 0; comb_idx < effect_reverb_num_combs; comb_idx++) {
+                comb_total += freeverb_scaled_length(effect_reverb_comb_base[comb_idx]);
+            }
+            uint32_t allpass_total = 0;
+            for (uint32_t allpass_idx = 0; allpass_idx < effect_reverb_num_allpass; allpass_idx++) {
+                allpass_total += freeverb_scaled_length(effect_reverb_allpass_base[allpass_idx]);
+            }
+            return 1 + 2 * (comb_total + effect_reverb_num_combs + allpass_total);
+        }
 
         case effect_compressor:
             // One envelope follower state float.

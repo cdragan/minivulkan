@@ -132,7 +132,116 @@ void main()
         data[ring + write_frame * 2]     = block_left[s];
         data[ring + write_frame * 2 + 1] = block_right[s];
     }
-    // reverb / compressor branches are added by later tasks.
+    else if (eff.type == effect_reverb) {
+        // Freeverb: 8 parallel feedback combs (each with a one-pole damping lowpass)
+        // summed into 4 series allpasses.  The two stereo sides are independent, so
+        // lane 0 runs the whole left side and lane 1 runs the whole right side
+        // sequentially over the block; every other lane idles here.  Per-sample feedback
+        // forbids splitting a side across lanes.
+
+        const float room_size = eff.params[0];
+        const float damping   = eff.params[1];
+        const float wet       = eff.params[2];
+
+        // Freeverb's published tuning constants.
+        const float scale_room  = 0.28;
+        const float offset_room = 0.7;
+        const float scale_damp  = 0.4;
+        const float fixed_gain  = 0.015;
+
+        const float feedback         = room_size * scale_room + offset_room;
+        const float damp1            = damping * scale_damp;
+        const float damp2            = 1.0 - damp1;
+        const float input_gain       = fixed_gain;
+        const float allpass_feedback = 0.5;
+
+        // Exact write position, bit-cast so it stays an integer across blocks.
+        const uint counter = floatBitsToUint(data[eff.state_offs]);
+
+        if (s == 0u || s == 1u) {
+            // Canonical Freeverb comb/allpass lengths at freeverb_base_rate; a mirror of
+            // the host's effect_reverb_comb_base/allpass_base (synth_modulation.h).  Each
+            // is scaled to the actual sampling_rate with the SAME integer division the host
+            // uses to size the state, so these rings and the host allocation stay in
+            // lockstep, and the reverb keeps its voicing at any rate.
+            const uint freeverb_base_rate = 44100u;
+            const uint comb_base[8]    = uint[8](1116u, 1188u, 1277u, 1356u, 1422u, 1491u, 1557u, 1617u);
+            const uint allpass_base[4] = uint[4](556u, 441u, 341u, 225u);
+
+            uint comb_len[8];
+            uint comb_off[8];
+            uint comb_sum = 0u;
+            for (uint c = 0u; c < 8u; c++) {
+                comb_len[c] = comb_base[c] * sampling_rate / freeverb_base_rate;
+                comb_off[c] = comb_sum;
+                comb_sum += comb_len[c];
+            }
+
+            uint allpass_len[4];
+            uint allpass_off[4];
+            uint allpass_sum = 0u;
+            for (uint a = 0u; a < 4u; a++) {
+                allpass_len[a] = allpass_base[a] * sampling_rate / freeverb_base_rate;
+                allpass_off[a] = allpass_sum;
+                allpass_sum += allpass_len[a];
+            }
+
+            // Per-side layout: comb rings, then one lowpass state per comb, then allpass rings.
+            const uint filterstore    = comb_sum;
+            const uint allpass_region = comb_sum + 8u;
+            const uint side_stride    = comb_sum + 8u + allpass_sum;
+
+            // Lane 0 owns the left side, lane 1 owns the right side; their device
+            // regions are disjoint, so the writes never race.
+            const uint side_base = eff.state_offs + 1u + s * side_stride;
+
+            float fs[8];
+            for (uint c = 0u; c < 8u; c++) {
+                fs[c] = data[side_base + filterstore + c];
+            }
+
+            // Each input sample is read exactly once (as dry) and then its slot is
+            // dead, so the wet result is written straight back into block_left/
+            // block_right in place; lanes 0 and 1 own disjoint arrays.  The
+            // post-branch barrier publishes these writes to every lane.
+            for (uint i = 0u; i < work_group_size; i++) {
+                const float dry = (s == 0u) ? block_left[i] : block_right[i];
+                const float comb_in = dry * input_gain;
+
+                float acc = 0.0;
+                for (uint c = 0u; c < 8u; c++) {
+                    const uint cbase = side_base + comb_off[c];
+                    const uint p = (counter + i) % comb_len[c];
+                    const float y = data[cbase + p];
+                    fs[c] = y * damp2 + fs[c] * damp1;
+                    data[cbase + p] = comb_in + fs[c] * feedback;
+                    acc += y;
+                }
+
+                float x = acc;
+                for (uint a = 0u; a < 4u; a++) {
+                    const uint abase = side_base + allpass_region + allpass_off[a];
+                    const uint p = (counter + i) % allpass_len[a];
+                    const float bufout = data[abase + p];
+                    data[abase + p] = x + bufout * allpass_feedback;
+                    x = bufout - x;  // Freeverb allpass: output = -input + bufout
+                }
+
+                const float w = dry * (1.0 - wet) + x * wet;
+                if (s == 0u) {
+                    block_left[i] = w;
+                }
+                else {
+                    block_right[i] = w;
+                }
+            }
+
+            for (uint c = 0u; c < 8u; c++) {
+                data[side_base + filterstore + c] = fs[c];
+            }
+        }
+    }
+    // compressor branch is added by a later task.
 
     // All ring reads/writes for this block are done; advance the write position.
     barrier();
@@ -142,6 +251,17 @@ void main()
     else if (eff.type == effect_chorus && s == 0u) {
         data[eff.state_offs]      = fract(base_lfo_phase + float(work_group_size) * eff.params[0] / float(sampling_rate));
         data[eff.state_offs + 1u] = float((base_pos + work_group_size) % chorus_max);
+    }
+    else if (eff.type == effect_reverb && s == 0u) {
+        // Recompute the counter here: state[0] is still the old value at this point.
+        data[eff.state_offs] = uintBitsToFloat(floatBitsToUint(data[eff.state_offs]) + work_group_size);
+    }
+
+    // The reverb wet output was written in place into block_left/block_right by
+    // lanes 0/1; pick it up now that the barrier above makes it visible to every lane.
+    if (eff.type == effect_reverb) {
+        out_left  = block_left[s];
+        out_right = block_right[s];
     }
 
     data[eff.sound_offs + s * 2]     = out_left;

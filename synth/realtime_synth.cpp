@@ -503,16 +503,17 @@ namespace {
     // symmetric detune spread of about +/- 18 cents.  Index 2 is a sine-on-sine
     // FM voice (mod_ratio 2.0, fm_index 3.0).  Index 3 is a hard-sync voice:
     // a sine master sets the pitch and a sawtooth slave is synced at ratio 2.5.
-    // Index 4 is a plain mono sawtooth (rich harmonics, no unison detune); it is
-    // the clean source the chorus demo plays so the effect's moving detune is
-    // unambiguous (the supersaw's own static detune would otherwise mask it).
+    // Index 4 is a mellow piano-ish voice: a triangle (sawtooth at duty 0.5, so
+    // soft harmonics) paired with the percussive piano envelope.  It is much
+    // easier to listen to than the buzzy sawtooth/FM voices, so the effects
+    // (chorus, reverb) are clearly audible on it.
     RuntimeInstrument instruments[5] = {
         { { sine_wave,     no_wave }, { 0.0f, 0.0f }, 0.0f, osc_mode_blend, 0.0f, 0.0f, 1, { 0.0f } },
         { { Synth::sawtooth_wave, no_wave }, { 0.0f, 0.0f }, 0.0f, osc_mode_blend, 0.0f, 0.0f, max_unison,
           { -0.18f, -0.12f, -0.06f, 0.0f, 0.06f, 0.12f, 0.18f } },
         { { sine_wave, sine_wave }, { 0.0f, 0.0f }, 0.0f, osc_mode_fm, 2.0f, 3.0f, 1, { 0.0f } },
         { { sine_wave, Synth::sawtooth_wave }, { 0.0f, 0.0f }, 0.0f, osc_mode_hard_sync, 2.5f, 0.0f, 1, { 0.0f } },
-        { { Synth::sawtooth_wave, no_wave }, { 0.0f, 0.0f }, 0.0f, osc_mode_blend, 0.0f, 0.0f, 1, { 0.0f } }
+        { { Synth::sawtooth_wave, no_wave }, { 0.5f, 0.0f }, 0.0f, osc_mode_blend, 0.0f, 0.0f, 1, { 0.0f } }
     };
 
     static constexpr uint32_t max_mix_channels = Synth::max_channels;
@@ -591,6 +592,10 @@ namespace {
         channel_chains[0].effects[0]  = { Synth::effect_chorus, true,
             { 1.5f, chorus_depth_samples, 0.5f, 0.0f, 0.0f }, 0 };
 
+        // TODO TEMP demo: a single Freeverb on the master bus (room_size, damping, wet).
+        master_chain.num_effects = 1;
+        master_chain.effects[0]  = { Synth::effect_reverb, true, { 0.7f, 0.5f, 0.3f, 0.0f, 0.0f }, 0 };
+
         effect_state_fill_offset = 0;
         effect_state_fill_bytes  = 0;
 
@@ -656,18 +661,26 @@ static void init_oscillator_buffers()
 
 static void init_modulation()
 {
-    // TODO test ADSR volume envelope.  value 0xFFFF maps to gain 1.0 (min_max_delta = 1/65535).
+    // TODO TEMP test settings
+    // Piano-ish volume envelope: a fast percussive attack then a long, roughly
+    // exponential decay (approximated by piecewise-linear points) down to near
+    // silence, held there while the key is down, then a short release.  The quick
+    // attack and decaying tail make the effects (especially the reverb) easy to
+    // hear.  Value 0xFFFF maps to gain 1.0 (min_max_delta = 1/65535); 1 tick ~ 6 ms.
     StoredEnvelope& volume_envelope = envelopes[0];
-    volume_envelope.desc.num_points          = 4;
+    volume_envelope.desc.num_points          = 7;
     volume_envelope.desc.unused_alignment    = 0;
-    volume_envelope.desc.sustain_first_point = 2;
-    volume_envelope.desc.sustain_last_point  = 2;
+    volume_envelope.desc.sustain_first_point = 5;
+    volume_envelope.desc.sustain_last_point  = 5;
     volume_envelope.desc.min_value           = 0.0f;
     volume_envelope.desc.min_max_delta       = 1.0f / 65535.0f;
-    volume_envelope.desc.points[0] = { 0,  0 };       // start silent
-    volume_envelope.desc.points[1] = { 10, 0xFFFF };  // attack peak (~58 ms)
-    volume_envelope.desc.points[2] = { 20, 0x9999 };  // decay to ~0.6 sustain
-    volume_envelope.desc.points[3] = { 55, 0 };       // release to silence (~200 ms)
+    volume_envelope.desc.points[0] = { 0,   0      };  // silent
+    volume_envelope.desc.points[1] = { 1,   0xFFFF };  // fast attack (~6 ms)
+    volume_envelope.desc.points[2] = { 12,  0xB000 };  // initial fast decay
+    volume_envelope.desc.points[3] = { 45,  0x6000 };
+    volume_envelope.desc.points[4] = { 120, 0x2000 };
+    volume_envelope.desc.points[5] = { 210, 0x0800 };  // long tail to ~3% (sustain)
+    volume_envelope.desc.points[6] = { 235, 0      };  // release (~145 ms)
 
     // TODO Parameter descriptor 0 (id 1): volume driven by the ADSR envelope, no LFO.
     param_descs[0].base_value       = 0.0f;
@@ -1342,9 +1355,10 @@ static void temp_drive_test_notes(uint32_t start_samples, uint32_t end_samples)
         mix_channels[1].volume  = 0.6f;
     }
 
-    // Per-channel demo instrument: channel 0 plays a plain sawtooth (4) through
-    // the chorus so the effect is obvious; channel 1 plays FM (2), dry.
-    static const uint8_t channel_instruments[] = { 4, 2 };
+    // Per-channel demo instrument: both channels play the mellow piano voice (4)
+    // so the effects are easy to hear; channel 0 runs through the chorus, channel
+    // 1 stays dry.  The master reverb applies to both.
+    static const uint8_t channel_instruments[] = { 4, 4 };
     assert(Synth::num_channels <= std::size(channel_instruments));
 
     // Helper lambda: build a base event for the given channel with zeroed fields.
