@@ -583,16 +583,33 @@ namespace {
 
     static void init_effects()
     {
-        // TODO TEMP demo scaffolding: drive channel 0 through a single chorus so the
-        // effect engine is audible.  Replaced when a mixer GUI configures chains.
+        // TODO TEMP compressor A/B scaffolding: channel 0 carries the compressor under
+        // test, channel 1 is dry.  temp_drive_test_notes plays one channel at a time,
+        // so alternating notes are heard back-to-back with and without compression.  No
+        // chorus here on purpose: its LFO-modulated detune sounds like vibrato and would
+        // muddy the comparison.  Replaced when a mixer GUI configures chains.
+        //
+        // Compressor params: threshold (linear), ratio, attack coeff, release coeff,
+        // makeup gain.  attack/release are smoothing coefficients (closer to 1 is
+        // slower); they are roughly 0.2 ms attack and 46 ms release at 44100 Hz, chosen
+        // directly to avoid pulling in libc exp() on the host.  These are exaggerated
+        // settings (very low threshold, high ratio) so the gain reduction is
+        // unmistakable; musical values to restore once confirmed: threshold 0.3,
+        // ratio 4.0, makeup 1.5.
+        constexpr float compressor_threshold = 0.05f;
+        constexpr float compressor_ratio     = 20.0f;
+        constexpr float compressor_attack    = 0.9f;
+        constexpr float compressor_release   = 0.9995f;
+        constexpr float compressor_makeup    = 1.0f;
         channel_chains[0].num_effects = 1;
-        // Chorus depth is a time (~10 ms of delay swing), derived from the sample
-        // rate so it does not change meaning if the rate does.
-        constexpr float chorus_depth_samples = 10.0f * Synth::rt_sampling_rate / 1000.0f;
-        channel_chains[0].effects[0]  = { Synth::effect_chorus, true,
-            { 1.5f, chorus_depth_samples, 0.5f, 0.0f, 0.0f }, 0 };
+        channel_chains[0].effects[0]  = { Synth::effect_compressor, true,
+            { compressor_threshold, compressor_ratio, compressor_attack, compressor_release, compressor_makeup }, 0 };
 
-        // TODO TEMP demo: a single Freeverb on the master bus (room_size, damping, wet).
+        // Channel 1 is the dry reference (no per-channel effects).
+        channel_chains[1].num_effects = 0;
+
+        // Master reverb applies equally to both channels, so it does not confound the
+        // compressor A/B.
         master_chain.num_effects = 1;
         master_chain.effects[0]  = { Synth::effect_reverb, true, { 0.7f, 0.5f, 0.3f, 0.0f, 0.0f }, 0 };
 
@@ -1337,29 +1354,21 @@ static void apply_effects(const EffectTarget* targets, uint32_t num_targets)
 // audible without a MIDI soundtrack.  Remove once real MIDI input exists.
 static void temp_drive_test_notes(uint32_t start_samples, uint32_t end_samples)
 {
-    constexpr uint32_t   note_period_samples = Synth::rt_sampling_rate * 2;      // 1 note per 2 s
-    // Sustain each note ~1.75 s (0.25 s gap) so the chorus LFO (~1.2 Hz) sweeps
-    // through a couple of cycles and its moving detune is clearly audible.
-    constexpr uint32_t   note_on_samples     = Synth::rt_sampling_rate * 7 / 4;
+    constexpr uint32_t   note_period_samples = Synth::rt_sampling_rate;          // 1 note per 1 s
+    // Sustain each note 0.75 s, leaving a 0.25 s gap before the next.
+    constexpr uint32_t   note_on_samples     = Synth::rt_sampling_rate * 3 / 4;
     static const uint8_t pattern_notes[]     = { 60, 62, 64, 65, 67, 69, 71, 72 };
 
-    // TEMP test scaffolding: when more than one channel is active, position the
-    // demo channels in the stereo field and scale channel 1 down so per-channel
-    // volume + pan are both audible.  A single channel keeps its center, unity
-    // init defaults so the output stays equivalent to the pre-multi-channel mix.
-    // Removed when real MIDI input replaces this driver.
-    if (Synth::num_channels > 1) {
-        mix_channels[0].panning = 0.0f;  // hard left
-        mix_channels[0].volume  = 1.0f;
-        mix_channels[1].panning = 1.0f;  // hard right
-        mix_channels[1].volume  = 0.6f;
-    }
+    // TEMP compressor A/B scaffolding: both channels carry the same piano voice (4),
+    // centered at unity so only the per-channel effect chain differs.  Channel 0 has
+    // the compressor, channel 1 is dry.  Removed when real MIDI input replaces this
+    // driver.
+    mix_channels[0].panning = 0.5f;
+    mix_channels[0].volume  = 1.0f;
+    mix_channels[1].panning = 0.5f;
+    mix_channels[1].volume  = 1.0f;
 
-    // Per-channel demo instrument: both channels play the mellow piano voice (4)
-    // so the effects are easy to hear; channel 0 runs through the chorus, channel
-    // 1 stays dry.  The master reverb applies to both.
-    static const uint8_t channel_instruments[] = { 4, 4 };
-    assert(Synth::num_channels <= std::size(channel_instruments));
+    constexpr uint8_t demo_instrument = 4;
 
     // Helper lambda: build a base event for the given channel with zeroed fields.
     auto make_event = [](uint8_t channel, uint8_t note) {
@@ -1371,27 +1380,30 @@ static void temp_drive_test_notes(uint32_t start_samples, uint32_t end_samples)
 
     for (uint32_t sample = start_samples; sample < end_samples; sample++) {
         const uint32_t phase_in_period = sample % note_period_samples;
-        const uint32_t step            = (sample / note_period_samples) % std::size(pattern_notes);
-        const uint8_t  current_note    = pattern_notes[step];
 
         if (phase_in_period != 0 && phase_in_period != note_on_samples) {
             continue;
         }
 
-        for (uint8_t channel = 0; channel < Synth::num_channels; channel++) {
-            if (phase_in_period == 0) {
-                // Note-on with velocity 100, forcing this channel's demo instrument.
-                Synth::MidiEvent on_ev = make_event(channel, current_note);
-                on_ev.note_data = 100;
+        // Each pitch is played twice back-to-back: first on channel 0 (compressor),
+        // then on channel 1 (dry), so the A/B is heard one note apart on the same note.
+        const uint32_t note_index   = sample / note_period_samples;
+        const uint8_t  channel      = static_cast<uint8_t>(note_index % 2);
+        const uint32_t step         = (note_index / 2) % std::size(pattern_notes);
+        const uint8_t  current_note = pattern_notes[step];
 
-                temp_force_instrument = channel_instruments[channel];
-                process_note_on(0, on_ev);
-                temp_force_instrument = temp_no_force_instrument;
-            }
-            else {
-                Synth::MidiEvent off_ev = make_event(channel, current_note);
-                process_note_off(0, off_ev);
-            }
+        if (phase_in_period == 0) {
+            // Note-on with velocity 100, forcing the demo instrument.
+            Synth::MidiEvent on_ev = make_event(channel, current_note);
+            on_ev.note_data = 100;
+
+            temp_force_instrument = demo_instrument;
+            process_note_on(0, on_ev);
+            temp_force_instrument = temp_no_force_instrument;
+        }
+        else {
+            Synth::MidiEvent off_ev = make_event(channel, current_note);
+            process_note_off(0, off_ev);
         }
     }
 }

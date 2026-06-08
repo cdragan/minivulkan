@@ -241,7 +241,44 @@ void main()
             }
         }
     }
-    // compressor branch is added by a later task.
+    else if (eff.type == effect_compressor) {
+        // Peak-following dynamics compressor.  The per-sample envelope feeds back
+        // into the next sample's gain, so lane 0 runs the whole block serially while
+        // every other lane idles here.
+        const float threshold = eff.params[0];
+        const float ratio     = eff.params[1];
+        const float attack    = eff.params[2];
+        const float release   = eff.params[3];
+        const float makeup    = eff.params[4];
+
+        if (s == 0u) {
+            float env = data[eff.state_offs];
+
+            // The gain exponent below; (1 - 1/ratio) maps the over-threshold level
+            // through the ratio in the log domain.
+            const float gain_exponent = 1.0 - 1.0 / ratio;
+
+            for (uint i = 0u; i < work_group_size; i++) {
+                const float level = max(abs(block_left[i]), abs(block_right[i]));
+
+                // Fast attack when the level rises, slow release when it falls.
+                env = mix(level, env, (level > env) ? attack : release);
+
+                // threshold > 0 guarantees env > threshold implies env > 0, so the
+                // division below is safe; below threshold the signal passes unchanged.
+                float gain = 1.0;
+                if (env > threshold) {
+                    gain = pow(threshold / env, gain_exponent);
+                }
+
+                block_left[i]  *= gain * makeup;
+                block_right[i] *= gain * makeup;
+            }
+
+            // Only lane 0 touched env; persist it for the next block.
+            data[eff.state_offs] = env;
+        }
+    }
 
     // All ring reads/writes for this block are done; advance the write position.
     barrier();
@@ -257,9 +294,10 @@ void main()
         data[eff.state_offs] = uintBitsToFloat(floatBitsToUint(data[eff.state_offs]) + work_group_size);
     }
 
-    // The reverb wet output was written in place into block_left/block_right by
-    // lanes 0/1; pick it up now that the barrier above makes it visible to every lane.
-    if (eff.type == effect_reverb) {
+    // Reverb (lanes 0/1) and the compressor (lane 0) both wrote their results in
+    // place into block_left/block_right; pick those up now that the barrier above
+    // makes them visible to every lane.
+    if (eff.type == effect_reverb || eff.type == effect_compressor) {
         out_left  = block_left[s];
         out_right = block_right[s];
     }
