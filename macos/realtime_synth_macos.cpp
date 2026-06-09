@@ -4,6 +4,9 @@
 #include "../synth/realtime_synth.h"
 #include "../core/d_printf.h"
 #include <AudioToolbox/AudioToolbox.h>
+#include <atomic>
+#include <pthread.h>
+#include <time.h>
 
 // Realtime synth output through the AUHAL (Output AudioUnit) C API.  This avoids
 // Objective-C so the same implementation can serve both the GUI build and the
@@ -11,6 +14,22 @@
 
 static AudioComponentInstance output_unit;
 static uint64_t               saved_timestamp_ms;
+
+static pthread_t         audio_producer_thread;
+static std::atomic<bool> audio_producer_running;
+
+static void* audio_producer_main(void*)
+{
+    while (audio_producer_running.load(std::memory_order_relaxed)) {
+        if ( ! Synth::produce_audio_batch<float, false>()) {
+            constexpr uint32_t        sleep_ns   = 1'000'000;
+            constexpr struct timespec sleep_time = { 0, sleep_ns };
+            nanosleep(&sleep_time, nullptr);
+        }
+    }
+
+    return nullptr;
+}
 
 static OSStatus render_callback(void*                       in_ref_con,
                                 AudioUnitRenderActionFlags* io_action_flags,
@@ -25,9 +44,9 @@ static OSStatus render_callback(void*                       in_ref_con,
     if (in_timestamp->mFlags & kAudioTimeStampSampleTimeValid)
         saved_timestamp_ms = static_cast<uint64_t>(in_timestamp->mSampleTime) * 1000U / Synth::rt_sampling_rate;
 
-    Synth::render_audio_buffer(in_number_frames,
-                               static_cast<float*>(io_data->mBuffers[0].mData),
-                               static_cast<float*>(io_data->mBuffers[1].mData));
+    Synth::consume_audio<float, false>(in_number_frames,
+                                       static_cast<float*>(io_data->mBuffers[0].mData),
+                                       static_cast<float*>(io_data->mBuffers[1].mData));
 
     return noErr;
 }
@@ -97,6 +116,14 @@ bool init_synth_os()
         return false;
     }
 
+    // Start the producer before the unit so the ring is prefilled when audio begins.
+    audio_producer_running.store(true, std::memory_order_relaxed);
+    if (pthread_create(&audio_producer_thread, nullptr, audio_producer_main, nullptr) != 0) {
+        audio_producer_running.store(false, std::memory_order_relaxed);
+        d_printf("Failed to start audio producer thread\n");
+        return false;
+    }
+
     if (AudioOutputUnitStart(output_unit) != noErr) {
         d_printf("Failed to start output audio unit\n");
         return false;
@@ -109,6 +136,11 @@ void stop_synth_os()
 {
     if (output_unit) {
         AudioOutputUnitStop(output_unit);
+    }
+
+    // Stop the producer after the callbacks, then join before any teardown.
+    if (audio_producer_running.exchange(false, std::memory_order_relaxed)) {
+        pthread_join(audio_producer_thread, nullptr);
     }
 }
 

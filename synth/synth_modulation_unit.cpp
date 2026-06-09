@@ -206,5 +206,29 @@ int main()
     TEST(Synth::effect_param_floats(Synth::effect_none)       == 0);
     TEST(Synth::effect_state_floats(Synth::effect_none)       == 0);
 
+    // Ring buffer accounting on free-running frame counters: available, free
+    // space, and the contiguous run before the physical buffer wraps.
+    {
+        const uint32_t capacity = 1024;
+
+        TEST(Synth::ring_available(0, 0) == 0);
+        TEST(Synth::ring_space(0, 0, capacity) == capacity);
+
+        TEST(Synth::ring_available(256, 0) == 256);
+        TEST(Synth::ring_space(256, 0, capacity) == capacity - 256);
+
+        TEST(Synth::ring_available(300, 44) == 256);
+        TEST(Synth::ring_space(300, 44, capacity) == capacity - 256);
+
+        TEST(Synth::ring_available(capacity, 0) == capacity);
+        TEST(Synth::ring_space(capacity, 0, capacity) == 0);
+
+        TEST(Synth::ring_contiguous(0, capacity, 256) == 256);
+        TEST(Synth::ring_contiguous(1000, capacity, 10) == 10);
+        TEST(Synth::ring_contiguous(1000, capacity, 100) == 24);
+        TEST(Synth::ring_contiguous(2048, capacity, 100) == 100);
+        TEST(Synth::ring_contiguous(2048, capacity, 2000) == capacity);
+    }
+
     return exit_code;
 }

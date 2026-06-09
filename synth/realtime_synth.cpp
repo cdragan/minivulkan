@@ -10,6 +10,7 @@
 #include "../core/suballoc.h"
 #include "synth_modulation.h"
 #include <algorithm>
+#include <atomic>
 #include <iterator>
 #include <math.h>
 
@@ -952,8 +953,9 @@ template<typename T>
 struct StereoPtr<T, true> {
     T* data;
 
+    // offset is in frames; interleaved stores 2 samples per frame.
     StereoPtr<T, true>& operator+=(size_t offset) {
-        data += offset;
+        data += offset * 2;
         return *this;
     }
 
@@ -965,7 +967,7 @@ struct StereoPtr<T, true> {
 template<typename T>
 static StereoPtr<T, true> operator+(StereoPtr<T, true> ptr, size_t offset)
 {
-    return { ptr.data + offset };
+    return { ptr.data + offset * 2 };
 }
 
 static void copy_audio_data(void* dest, const void* src, size_t size)
@@ -2236,51 +2238,145 @@ static bool render_audio(uint32_t num_samples)
     return buffers[output_buf].invalidate();
 }
 
+constexpr uint32_t audio_ring_frames      = Synth::rt_sampling_rate;
+constexpr uint32_t audio_lead_frames      = Synth::rt_sampling_rate / 50;
+constexpr uint32_t audio_max_batch_frames = rt_step_samples * 16;
+
+// Ring buffer holding rendered sound in the platform's output format.  Sized for either
+// channel layout: two channels of audio_ring_frames frames.
 template<typename T, bool interleaved>
-static bool render_audio_buffer(StereoPtr<T, interleaved> stereo_ptr, uint32_t num_samples)
+struct AudioRingStorage {
+    static T data[audio_ring_frames * 2];
+};
+
+template<typename T, bool interleaved>
+T AudioRingStorage<T, interleaved>::data[audio_ring_frames * 2];
+
+// Frame counters and the dry-ring count are format independent, so they are shared and the
+// GUI can read them without knowing the format.  Exactly one <T, interleaved> instantiation
+// may run per build (each has its own ring storage); using two would desync these counters.
+static std::atomic<uint64_t> audio_ring_write;     // frames produced; only the producer stores
+static std::atomic<uint64_t> audio_ring_read;      // frames consumed; only the callback stores
+static std::atomic<uint32_t> audio_underrun_count; // ring ran dry; read by the GUI indicator
+
+// A StereoPtr addressing the ring storage at a frame offset.
+template<typename T, bool interleaved>
+static StereoPtr<T, interleaved> ring_stereo(uint32_t frame_offset)
 {
-    static uint32_t consumed_samples;
-    static uint32_t remaining_samples;
+    T* const base = AudioRingStorage<T, interleaved>::data;
 
-    const auto rendered_src = StereoPtr<T, interleaved>::from_buffer(buffers[output_buf]);
-
-    if (remaining_samples) {
-        const uint32_t to_copy = std::min(remaining_samples, num_samples);
-
-        copy_audio_data(stereo_ptr, rendered_src + consumed_samples, to_copy);
-
-        stereo_ptr        += to_copy;
-        num_samples       -= to_copy;
-        remaining_samples -= to_copy;
-        consumed_samples  += to_copy;
-
-        if (remaining_samples)
-            return true;
+    if constexpr (interleaved) {
+        return { base + frame_offset * 2 };
     }
+    else {
+        return { base + frame_offset, base + audio_ring_frames + frame_offset };
+    }
+}
 
-    const uint32_t to_render = mstd::align_up(num_samples, rt_step_samples);
-    if ( ! render_audio<T, interleaved>(to_render))
+// A StereoPtr over the caller's output channels (channel1 is unused when interleaved).
+template<typename T, bool interleaved>
+static StereoPtr<T, interleaved> output_stereo(T* channel0, T* channel1)
+{
+    if constexpr (interleaved) {
+        return { channel0 };
+    }
+    else {
+        return { channel0, channel1 };
+    }
+}
+
+template<typename T, bool interleaved>
+static void zero_output(StereoPtr<T, interleaved> dest, uint32_t num_frames)
+{
+    if constexpr (interleaved) {
+        mstd::mem_zero(dest.data, num_frames * 2 * sizeof(T));
+    }
+    else {
+        mstd::mem_zero(dest.left,  num_frames * sizeof(T));
+        mstd::mem_zero(dest.right, num_frames * sizeof(T));
+    }
+}
+
+Synth::AudioRingStatus Synth::get_audio_ring_status()
+{
+    // Read before write so the monotonic counters cannot make the difference underflow.
+    const uint64_t read_pos  = audio_ring_read.load(std::memory_order_relaxed);
+    const uint64_t write_pos = audio_ring_write.load(std::memory_order_relaxed);
+
+    return { ring_available(write_pos, read_pos),
+             audio_lead_frames,
+             audio_underrun_count.load(std::memory_order_relaxed) };
+}
+
+template<typename T, bool interleaved>
+bool Synth::produce_audio_batch()
+{
+    const uint64_t write_pos = audio_ring_write.load(std::memory_order_relaxed);
+    const uint64_t read_pos  = audio_ring_read.load(std::memory_order_acquire);
+    const uint32_t available = ring_available(write_pos, read_pos);
+
+    // The callback drains the lead and the producer tops it back up.
+    if (available >= audio_lead_frames) {
         return false;
-
-    const uint32_t to_copy = std::min(to_render, num_samples);
-    copy_audio_data(stereo_ptr, rendered_src, to_copy);
-
-    if (to_render > to_copy) {
-        consumed_samples  = to_copy;
-        remaining_samples = to_render - to_copy;
     }
 
+    // Refill back toward the lead in one submit (whole steps), capped per batch.
+    uint32_t to_render = mstd::align_up(audio_lead_frames - available, rt_step_samples);
+    if (to_render > audio_max_batch_frames) {
+        to_render = audio_max_batch_frames;
+    }
+
+    if ( ! render_audio<T, interleaved>(to_render)) {
+        return false;
+    }
+
+    const StereoPtr<T, interleaved> rendered_src = StereoPtr<T, interleaved>::from_buffer(buffers[output_buf]);
+
+    uint32_t copied = 0;
+    while (copied < to_render) {
+        const uint32_t offset = static_cast<uint32_t>((write_pos + copied) % audio_ring_frames);
+        const uint32_t chunk  = ring_contiguous(write_pos + copied, audio_ring_frames, to_render - copied);
+        copy_audio_data(ring_stereo<T, interleaved>(offset), rendered_src + copied, chunk);
+        copied += chunk;
+    }
+
+    audio_ring_write.store(write_pos + to_render, std::memory_order_release);
     return true;
 }
 
-bool Synth::render_audio_buffer(uint32_t num_frames,
-                                float*   left_channel,
-                                float*   right_channel)
+template<typename T, bool interleaved>
+uint32_t Synth::consume_audio(uint32_t num_frames, T* channel0, T* channel1)
 {
-    if (num_frames) {
-        const StereoPtr<float, false> channels = { left_channel, right_channel };
-        return render_audio_buffer(channels, num_frames);
+    const uint64_t read_pos  = audio_ring_read.load(std::memory_order_relaxed);
+    const uint64_t write_pos = audio_ring_write.load(std::memory_order_acquire);
+    const uint32_t available = ring_available(write_pos, read_pos);
+    const uint32_t to_copy   = (available < num_frames) ? available : num_frames;
+
+    const StereoPtr<T, interleaved> dest = output_stereo<T, interleaved>(channel0, channel1);
+
+    uint32_t copied = 0;
+    while (copied < to_copy) {
+        const uint32_t offset = static_cast<uint32_t>((read_pos + copied) % audio_ring_frames);
+        const uint32_t chunk  = ring_contiguous(read_pos + copied, audio_ring_frames, to_copy - copied);
+        copy_audio_data(dest + copied, ring_stereo<T, interleaved>(offset), chunk);
+        copied += chunk;
     }
 
-    return true;
+    audio_ring_read.store(read_pos + to_copy, std::memory_order_release);
+
+    // Underrun: emit silence rather than stale or garbage samples, and count it.
+    if (to_copy < num_frames) {
+        audio_underrun_count.fetch_add(1, std::memory_order_relaxed);
+        zero_output<T, interleaved>(dest + to_copy, num_frames - to_copy);
+    }
+
+    return to_copy;
 }
+
+template bool Synth::produce_audio_batch<int16_t, true>();
+template bool Synth::produce_audio_batch<float,   true>();
+template bool Synth::produce_audio_batch<float,   false>();
+
+template uint32_t Synth::consume_audio<int16_t, true>(uint32_t, int16_t*, int16_t*);
+template uint32_t Synth::consume_audio<float,   true>(uint32_t, float*,   float*);
+template uint32_t Synth::consume_audio<float,   false>(uint32_t, float*,   float*);

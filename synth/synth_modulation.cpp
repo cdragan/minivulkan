@@ -215,4 +215,21 @@ uint32_t effect_state_floats(EffectType type)
     }
 }
 
+uint32_t ring_available(uint64_t write_pos, uint64_t read_pos)
+{
+    return static_cast<uint32_t>(write_pos - read_pos);
+}
+
+uint32_t ring_space(uint64_t write_pos, uint64_t read_pos, uint32_t capacity)
+{
+    return capacity - ring_available(write_pos, read_pos);
+}
+
+uint32_t ring_contiguous(uint64_t pos, uint32_t capacity, uint32_t count)
+{
+    const uint32_t offset = static_cast<uint32_t>(pos % capacity);
+    const uint32_t first  = capacity - offset;
+    return (count < first) ? count : first;
+}
+
 } // namespace Synth

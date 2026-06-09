@@ -163,4 +163,13 @@ uint32_t effect_param_floats(EffectType type);
 // Number of persistent float slots an effect type keeps in the device state region.
 uint32_t effect_state_floats(EffectType type);
 
+// Frames available to read from a ring buffer.
+uint32_t ring_available(uint64_t write_pos, uint64_t read_pos);
+
+// Frames of free space to write into a ring buffer of the given capacity.
+uint32_t ring_space(uint64_t write_pos, uint64_t read_pos, uint32_t capacity);
+
+// Contiguous frames from pos before the physical buffer wraps (works for read or write pos).
+uint32_t ring_contiguous(uint64_t pos, uint32_t capacity, uint32_t count);
+
 } // namespace Synth

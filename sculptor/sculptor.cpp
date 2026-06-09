@@ -226,6 +226,21 @@ static bool create_gui_frame(uint32_t image_idx)
                     static_cast<double>(Sculptor::Editor::debug_color[0]),
                     static_cast<double>(Sculptor::Editor::debug_color[1]),
                     static_cast<double>(Sculptor::Editor::debug_color[2]));
+
+        ImGui::Separator();
+
+        const Synth::AudioRingStatus ring        = Synth::get_audio_ring_status();
+        const float                  frames_to_ms = 1000.0f / static_cast<float>(Synth::rt_sampling_rate);
+        const float                  fill_ms      = static_cast<float>(ring.fill_frames) * frames_to_ms;
+        const float                  lead_ms      = static_cast<float>(ring.lead_frames) * frames_to_ms;
+        ImGui::TextWrapped("Audio %.1f / %.1f ms  Underruns %u",
+                           static_cast<double>(fill_ms),
+                           static_cast<double>(lead_ms),
+                           ring.underrun_count);
+        const float fill_frac = ring.lead_frames > 0
+                              ? static_cast<float>(ring.fill_frames) / static_cast<float>(ring.lead_frames)
+                              : 0.0f;
+        ImGui::ProgressBar(fill_frac, ImVec2(-1.0f, 0.0f));
     }
     ImGui::End();
 

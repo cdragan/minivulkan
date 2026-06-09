@@ -69,9 +69,25 @@ bool init_synth();
 
 void stop_synth();
 
-bool render_audio_buffer(uint32_t num_frames,
-                         float*   left_channel,
-                         float*   right_channel);
+// Fills the caller's output channels from the ring buffer on the audio callback (no GPU
+// work), in the platform's output format (T, interleaved).  channel1 is unused when the
+// format is interleaved.  Returns frames supplied; any shortfall is zero-filled to silence.
+template<typename T, bool interleaved>
+uint32_t consume_audio(uint32_t num_frames, T* channel0, T* channel1);
+
+// Tops the ring back up toward the target lead (producer thread), rendering whole steps in
+// one submit in the platform's format.  Returns false when full enough or the render failed.
+template<typename T, bool interleaved>
+bool produce_audio_batch();
+
+// Audio ring health, for the GUI buffer indicator.
+struct AudioRingStatus {
+    uint32_t fill_frames;       // frames currently buffered ahead of the callback
+    uint32_t lead_frames;       // target lead the producer keeps buffered
+    uint32_t underrun_count;    // times the ring ran dry and the callback got silence
+};
+
+AudioRingStatus get_audio_ring_status();
 
 uint64_t get_current_timestamp_ms();
 
