@@ -44,8 +44,7 @@ namespace {
     constexpr uint32_t osc_mode_fm        = 1;  // osc_type[0] is carrier, osc_type[1] is modulator
     constexpr uint32_t osc_mode_hard_sync = 2;  // osc_type[0] sets master frequency, osc_type[1] is the hard-synced slave
 
-    // Number of FIR filter taps
-    constexpr uint32_t num_fir_taps = 1025;
+    using Synth::num_fir_taps;
 
     // Smooth volume adjustment to avoid glitches
     constexpr uint32_t volume_adjustment_samples = 32;
@@ -694,10 +693,15 @@ namespace {
         constexpr float compressor_attack    = 0.9f;
         constexpr float compressor_release   = 0.9995f;
         constexpr float compressor_makeup    = 1.5f;
-        master_chain.num_effects = 2;
+        // TEMP demo: a modest 4 kHz low-pass FIR on the master bus band-limits the
+        // whole mix so the FIR effect is audible.  Remove once effect routing is
+        // GUI-configured.  params[0] = lowpass Hz, params[1] = highpass Hz (0 = off).
+        constexpr float demo_fir_lowpass_hz = 800.0f;
+        master_chain.num_effects = 3;
         master_chain.effects[0]  = { Synth::effect_reverb, true, { 0.7f, 0.5f, 0.3f, 0.0f, 0.0f }, 0 };
         master_chain.effects[1]  = { Synth::effect_compressor, true,
             { compressor_threshold, compressor_ratio, compressor_attack, compressor_release, compressor_makeup }, 0 };
+        master_chain.effects[2]  = { Synth::effect_fir, true, { demo_fir_lowpass_hz, 0.0f }, 0 };
 
         effect_state_fill_offset = 0;
         effect_state_fill_bytes  = 0;
@@ -1553,12 +1557,10 @@ static void temp_drive_test_notes(uint32_t start_samples, uint32_t end_samples)
     mix_channels[1].panning = 1.0f;   // hard right: chorus
     mix_channels[1].volume  = 1.0f;
 
-    // TEMP scaffolding for the swept-FIR listen-check: force the supersaw
-    // (instrument 1), whose every oscillator carries a low pass swept from ~6400 Hz
-    // down to 400 Hz over the note, so the bright sawtooth stack audibly darkens as
-    // each note plays.  Set back to 4 (the unfiltered piano voice) once the swept
-    // filter has been verified.
-    constexpr uint8_t demo_instrument = 1;
+    // TEMP scaffolding for the FIR-effect listen-check: force the unfiltered piano
+    // (instrument 4, no per-oscillator FIR) so the only filtering is the master
+    // effect_fir low pass, making it audible on its own.
+    constexpr uint8_t demo_instrument = 4;
 
     // Helper lambda: build a base event for the given channel with zeroed fields.
     auto make_event = [](uint8_t channel, uint8_t note) {
@@ -1592,6 +1594,31 @@ static void temp_drive_test_notes(uint32_t start_samples, uint32_t end_samples)
                 Synth::MidiEvent off_ev = make_event(channel, current_note);
                 process_note_off(0, off_ev);
             }
+        }
+    }
+}
+
+// TEMP demo scaffolding: sweep the master FIR-effect cutoff with a host-side sine so
+// the filter is plainly audible.  Effect params are not yet modulatable by the LFO/
+// envelope system (a later task wires effect params into the modulation pool); this
+// fakes it by rewriting the cutoff each block before compute_fir_coefficients reads it.
+static void temp_sweep_master_fir_cutoff()
+{
+    constexpr float    sweep_low_hz   = 250.0f;
+    constexpr float    sweep_high_hz  = 6000.0f;
+    constexpr float    sweep_period_s = 4.0f;
+    const uint32_t     period_samples = static_cast<uint32_t>(sweep_period_s * Synth::rt_sampling_rate);
+    const float        phase          = static_cast<float>(rendered_samples % period_samples) /
+                                         static_cast<float>(period_samples);
+    // Triangle 0..1..0 so the cutoff moves at a steady rate (no lingering at the ends).
+    const float        unipolar       = phase < 0.5f ? phase * 2.0f : 2.0f - phase * 2.0f;
+    // Exponential, so the cutoff sweeps in equal octaves (how the ear hears pitch).
+    const float        cutoff_hz      = sweep_low_hz * powf(sweep_high_hz / sweep_low_hz, unipolar);
+
+    for (uint32_t effect_idx = 0; effect_idx < master_chain.num_effects; effect_idx++) {
+        EffectInstance& instance = master_chain.effects[effect_idx];
+        if (instance.enabled && instance.type == Synth::effect_fir) {
+            instance.params[0] = cutoff_hz;
         }
     }
 }
@@ -1678,20 +1705,16 @@ static void update_modulation()
     modulation_lfo_tick++;
 }
 
-// Resolves an oscillator cutoff parameter into an integer Hz for the coeff shader.
-// A disabled edge (param id 0) yields 0 (the shader's "edge off" convention).  An
-// enabled edge is clamped to [1 Hz, Nyquist - 1] so the windowed-sinc stays valid.
-// cur_value is a float; truncating the +0.5f bias rounds to nearest without libc.
-static uint32_t cutoff_param_to_hz(uint16_t param_id)
+// Rounds a cutoff in Hz to the int the coeff shader wants; <=0 disables the edge, else clamped to [1, Nyquist-1].
+static uint32_t cutoff_hz_to_int(float value)
 {
-    if ( ! param_id) {
+    if (value <= 0.0f) {
         return 0;
     }
 
     constexpr uint32_t min_cutoff_hz = 1;
     const uint32_t     max_cutoff_hz = Synth::rt_sampling_rate / 2 - 1;
 
-    const float value = params[param_id].cur_value;
     if (value <= static_cast<float>(min_cutoff_hz)) {
         return min_cutoff_hz;
     }
@@ -1702,14 +1725,47 @@ static uint32_t cutoff_param_to_hz(uint16_t param_id)
     return static_cast<uint32_t>(value + 0.5f);
 }
 
-// FIR taps are recomputed every render block from each filtered oscillator's
-// current cutoff parameters, so envelope/LFO/MIDI sweeps take effect smoothly (the
-// FIR has no feedback and the shader renormalizes to unity DC gain, so per-block
-// coeff changes are click-free).  Packs one FIRCoeff per active filtered oscillator
-// contiguously (the shader reads params[gl_WorkGroupID.x]) and dispatches that many
-// work groups; the barrier inside lets the oscillator pass read the fresh taps.
-// Call this after update_modulation (so cutoff cur_values are fresh) and before the
-// oscillator dispatch.
+// Resolves an oscillator cutoff parameter into an integer Hz for the coeff shader.
+// A disabled edge (param id 0) yields 0.
+static uint32_t cutoff_param_to_hz(uint16_t param_id)
+{
+    if ( ! param_id) {
+        return 0;
+    }
+
+    return cutoff_hz_to_int(params[param_id].cur_value);
+}
+
+static void set_effect_fir_coeffs(const EffectChain& chain, uint32_t* cur_param_offs)
+{
+    for (uint32_t effect_idx = 0; effect_idx < chain.num_effects; effect_idx++) {
+        const EffectInstance& instance = chain.effects[effect_idx];
+        if ( ! instance.enabled || instance.type != Synth::effect_fir) {
+            continue;
+        }
+
+        ShaderParams::FIRCoeff& param = get_param<ShaderParams::FIRCoeff>(*cur_param_offs);
+        param.taps_offs            = instance.state_offs / 4;
+        param.lowpass_cutoff_freq  = cutoff_hz_to_int(instance.params[0]);
+        param.highpass_cutoff_freq = cutoff_hz_to_int(instance.params[1]);
+
+        *cur_param_offs += static_cast<uint32_t>(sizeof(ShaderParams::FIRCoeff));
+    }
+}
+
+static uint32_t count_effect_fir(const EffectChain& chain)
+{
+    uint32_t count = 0;
+    for (uint32_t effect_idx = 0; effect_idx < chain.num_effects; effect_idx++) {
+        const EffectInstance& instance = chain.effects[effect_idx];
+        if (instance.enabled && instance.type == Synth::effect_fir) {
+            ++count;
+        }
+    }
+
+    return count;
+}
+
 static void compute_fir_coefficients()
 {
     uint32_t num_active_filters = 0;
@@ -1718,6 +1774,11 @@ static void compute_fir_coefficients()
             ++num_active_filters;
         }
     }
+
+    for (uint32_t chan_idx = 0; chan_idx < Synth::num_channels; chan_idx++) {
+        num_active_filters += count_effect_fir(channel_chains[chan_idx]);
+    }
+    num_active_filters += count_effect_fir(master_chain);
 
     if ( ! num_active_filters) {
         return;
@@ -1740,6 +1801,11 @@ static void compute_fir_coefficients()
 
         cur_param_offs += static_cast<uint32_t>(sizeof(ShaderParams::FIRCoeff));
     }
+
+    for (uint32_t chan_idx = 0; chan_idx < Synth::num_channels; chan_idx++) {
+        set_effect_fir_coeffs(channel_chains[chan_idx], &cur_param_offs);
+    }
+    set_effect_fir_coeffs(master_chain, &cur_param_offs);
 
     memory_barrier(VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
 
@@ -1790,6 +1856,8 @@ static void render_audio_step()
     temp_drive_test_notes(start_samples, end_samples);
 
     update_modulation();
+
+    temp_sweep_master_fir_cutoff();
 
     // ======================================================================
 

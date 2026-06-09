@@ -129,8 +129,12 @@ enum EffectType : uint32_t {
     effect_chorus,
     effect_reverb,
     effect_compressor,
+    effect_fir,
     num_effect_types
 };
+
+// FIR filter tap count, shared by the per-oscillator FIR and the FIR effect.
+constexpr uint32_t num_fir_taps = 1025;
 
 constexpr uint32_t effect_delay_max_samples  = rt_sampling_rate;       // 1 s
 constexpr uint32_t effect_chorus_max_samples = rt_sampling_rate / 20;  // 50 ms

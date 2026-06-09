@@ -166,6 +166,7 @@ uint32_t effect_param_floats(EffectType type)
         case effect_chorus:     return 3;
         case effect_reverb:     return 3;
         case effect_compressor: return 5;
+        case effect_fir:        return 2;  // lowpass cutoff Hz, highpass cutoff Hz (0 = edge disabled)
         default:                return 0;
     }
 }
@@ -203,6 +204,11 @@ uint32_t effect_state_floats(EffectType type)
         case effect_compressor:
             // One envelope follower state float.
             return 1;
+
+        case effect_fir:
+            // The coeff buffer (num_fir_taps), a stereo (x2) input-history ring of
+            // num_fir_taps - 1 frames, and one write-position counter.
+            return num_fir_taps + 2 * (num_fir_taps - 1) + 1;
 
         default:
             return 0;
