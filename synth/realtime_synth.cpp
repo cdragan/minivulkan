@@ -287,6 +287,7 @@ namespace {
     }
 
     enum SynthPipelines {
+        fir_coeff_pipe,
         oscillator_pipe,
         chan_combine_pipe,
         master_mix_pipe,
@@ -333,6 +334,13 @@ namespace {
         };
 
         static const ShaderInfo shaders[] = {
+            {
+                {
+                    shader_synth_fir_coeff_comp,
+                    1,
+                },
+                one_buffer_ds
+            },
             {
                 {
                     shader_synth_oscillator_comp,
@@ -439,7 +447,7 @@ namespace {
         return true;
     }
 
-    constexpr VkDeviceSize device_buf_size = 1024 * 1024; // TODO
+    constexpr VkDeviceSize device_buf_size = 2 * 1024 * 1024; // TODO
 
     SubAllocator<1024> data_allocator;
 
@@ -456,48 +464,63 @@ namespace {
     struct Oscillator {
         // Constants which don't change for this oscillator's instance's life time
         // TODO move some of these to OscillatorDescriptor
-        uint32_t midi_channel;      // MIDI channel on which this note was played
-        uint32_t output_channel;    // Output (mixing) channel for this MIDI channel/note
-        uint32_t note;              // MIDI note
-        uint32_t freq_mult;         // Frequency multiplier for component frequencies (1 for base frequency)
-        WaveType osc_type[2];       // Two oscillator types
-        uint32_t osc_output_offs;   // Oscillator data output offset
-        uint32_t fir_memory_offs;   // FIR filter memory offset
-        uint32_t fir_taps_offs;     // FIR filter taps offset
-        uint32_t osc_mode;          // osc_mode_blend, osc_mode_fm or osc_mode_hard_sync
-        float    mod_ratio;         // FM: modulator/carrier freq ratio.  Hard sync: slave cycles per master cycle
-        float    fm_index;          // FM modulation depth
+        uint32_t midi_channel;              // MIDI channel on which this note was played
+        uint32_t output_channel;            // Output (mixing) channel for this MIDI channel/note
+        uint32_t note;                      // MIDI note
+        uint32_t freq_mult;                 // Frequency multiplier for component frequencies (1 for base frequency)
+        WaveType osc_type[2];               // Two oscillator types
+        uint32_t osc_output_offs;           // Oscillator data output offset
+        uint32_t fir_memory_offs;           // FIR filter memory offset
+        uint32_t fir_taps_offs;             // FIR filter taps offset
+        uint32_t osc_mode;                  // osc_mode_blend, osc_mode_fm or osc_mode_hard_sync
+        float    mod_ratio;                 // FM: modulator/carrier freq ratio.  Hard sync: slave cycles per master cycle
+        float    fm_index;                  // FM modulation depth
 
         // Current values
-        float    phase;             // Current position of the oscillator
-        float    mod_phase;         // Current position of the FM modulator
-        float    old_volume;        // Previous volume
-        float    old_panning;       // Previous panning
+        float    phase;                     // Current position of the oscillator
+        float    mod_phase;                 // Current position of the FM modulator
+        float    old_volume;                // Previous volume
+        float    old_panning;               // Previous panning
 
         // Values from LFOs, envelopes, notes and instrument constants
         // TODO convert these to param ids
-        float    volume;            // Current volume
-        float    panning;           // Current panning
-        float    pitch;             // Pitch adjustment in semitones = (midi_pitch_bend - 8192) / 4096
-        float    detune;            // Per-oscillator pitch offset in semitones (instrument constant for this note's unison stack)
-        float    duty[2];           // Duty cycle for sawtooth and pulse oscillator (0..1)
-        float    osc_mix;           // Mix between osc_type[0] and osc_type[1] (0..1)
-        uint8_t  voice_id;          // Voice which owns this oscillator (0 = none/free)
+        float    volume;                    // Current volume
+        float    panning;                   // Current panning
+        float    pitch;                     // Pitch adjustment in semitones = (midi_pitch_bend - 8192) / 4096
+        float    detune;                    // Per-oscillator pitch offset in semitones (instrument constant for this note's unison stack)
+        float    duty[2];                   // Duty cycle for sawtooth and pulse oscillator (0..1)
+        float    osc_mix;                   // Mix between osc_type[0] and osc_type[1] (0..1)
+        uint16_t lowpass_cutoff_param_id;   // Per-oscillator low pass cutoff modulation parameter (0 = none)
+        uint16_t highpass_cutoff_param_id;  // Per-oscillator high pass cutoff modulation parameter (0 = none)
+        uint8_t  voice_id;                  // Voice which owns this oscillator (0 = none/free)
+        bool     clear_fir_hist;            // Set on note-on of a filtered slot; the next render
+                                            // zeroes this slot's FIR history before the shader reads
+                                            // it, so a reused slot does not bleed the previous note.
     };
 
     static Oscillator oscillators[max_oscillators];
 
+    // Per-oscillator (per-unison-index) FIR filter selection.  Each edge names a
+    // parameter descriptor (1-based id into param_descs; 0 = that edge disabled),
+    // so the base cutoff Hz plus any envelope/LFO/MIDI modulation lives in the
+    // referenced descriptor.  An oscillator has a filter iff either edge id != 0.
+    struct OscFilter {
+        uint16_t lowpass_param_desc_id;
+        uint16_t highpass_param_desc_id;
+    };
+
     // TODO Runtime instrument definition.  Hardcoded for now; an editor will
     // populate these later.
     struct RuntimeInstrument {
-        WaveType osc_type[2];               // osc_type[1] == no_wave means single oscillator
-        float    duty[2];
-        float    osc_mix;
-        uint32_t osc_mode;                  // osc_mode_blend, osc_mode_fm or osc_mode_hard_sync
-        float    mod_ratio;                 // FM: modulator/carrier freq ratio.  Hard sync: slave cycles per master cycle
-        float    fm_index;                  // FM modulation depth
-        uint32_t unison_count;              // Number of oscillator slots a note of this instrument uses (1 = mono)
-        float    detune_semitones[max_unison]; // Per-oscillator pitch offset in semitones; entry [idx] applies to the idx-th allocated oscillator
+        WaveType  osc_type[2];                  // osc_type[1] == no_wave means single oscillator
+        float     duty[2];
+        float     osc_mix;
+        uint32_t  osc_mode;                     // osc_mode_blend, osc_mode_fm or osc_mode_hard_sync
+        float     mod_ratio;                    // FM: modulator/carrier freq ratio.  Hard sync: slave cycles per master cycle
+        float     fm_index;                     // FM modulation depth
+        uint32_t  unison_count;                 // Number of oscillator slots a note of this instrument uses (1 = mono)
+        float     detune_semitones[max_unison]; // Per-oscillator pitch offset in semitones; entry [idx] applies to the idx-th allocated oscillator
+        OscFilter filter[max_unison];           // Per-oscillator FIR filter selection; entry [idx] applies to the idx-th allocated oscillator
     };
     // Index 0 is a plain mono sine.  Index 1 is a 7-voice supersaw with a
     // symmetric detune spread of about +/- 18 cents.  Index 2 is a sine-on-sine
@@ -507,13 +530,23 @@ namespace {
     // soft harmonics) paired with the percussive piano envelope.  It is much
     // easier to listen to than the buzzy sawtooth/FM voices, so the effects
     // (chorus, reverb) are clearly audible on it.
+    // TEMP demo scaffolding: every oscillator of the supersaw (index 1) carries a
+    // swept low pass driven by cutoff parameter descriptor id 3 (base 400 Hz plus a
+    // decaying envelope), so its bright sawtooth stack sweeps audibly from bright to
+    // dark over each note.  All other instruments keep their filter all-zero (off)
+    // so they stay bit-identical to before.  Set the supersaw filter back to all-zero
+    // once instrument filters are GUI-configured.
+    constexpr uint16_t demo_cutoff_param_desc_id = 3;
     RuntimeInstrument instruments[5] = {
-        { { sine_wave,     no_wave }, { 0.0f, 0.0f }, 0.0f, osc_mode_blend, 0.0f, 0.0f, 1, { 0.0f } },
+        { { sine_wave,     no_wave }, { 0.0f, 0.0f }, 0.0f, osc_mode_blend, 0.0f, 0.0f, 1, { 0.0f }, { } },
         { { Synth::sawtooth_wave, no_wave }, { 0.0f, 0.0f }, 0.0f, osc_mode_blend, 0.0f, 0.0f, max_unison,
-          { -0.18f, -0.12f, -0.06f, 0.0f, 0.06f, 0.12f, 0.18f } },
-        { { sine_wave, sine_wave }, { 0.0f, 0.0f }, 0.0f, osc_mode_fm, 2.0f, 3.0f, 1, { 0.0f } },
-        { { sine_wave, Synth::sawtooth_wave }, { 0.0f, 0.0f }, 0.0f, osc_mode_hard_sync, 2.5f, 0.0f, 1, { 0.0f } },
-        { { Synth::sawtooth_wave, no_wave }, { 0.5f, 0.0f }, 0.0f, osc_mode_blend, 0.0f, 0.0f, 1, { 0.0f } }
+          { -0.18f, -0.12f, -0.06f, 0.0f, 0.06f, 0.12f, 0.18f },
+          { { demo_cutoff_param_desc_id, 0 }, { demo_cutoff_param_desc_id, 0 }, { demo_cutoff_param_desc_id, 0 },
+            { demo_cutoff_param_desc_id, 0 }, { demo_cutoff_param_desc_id, 0 }, { demo_cutoff_param_desc_id, 0 },
+            { demo_cutoff_param_desc_id, 0 } } },
+        { { sine_wave, sine_wave }, { 0.0f, 0.0f }, 0.0f, osc_mode_fm, 2.0f, 3.0f, 1, { 0.0f }, { } },
+        { { sine_wave, Synth::sawtooth_wave }, { 0.0f, 0.0f }, 0.0f, osc_mode_hard_sync, 2.5f, 0.0f, 1, { 0.0f }, { } },
+        { { Synth::sawtooth_wave, no_wave }, { 0.5f, 0.0f }, 0.0f, osc_mode_blend, 0.0f, 0.0f, 1, { 0.0f }, { } }
     };
 
     static constexpr uint32_t max_mix_channels = Synth::max_channels;
@@ -546,6 +579,61 @@ namespace {
 
     static EffectChain channel_chains[max_mix_channels];
     static EffectChain master_chain;
+
+    struct FirSlot {
+        uint32_t coeff_offs;
+        uint32_t history_offs;
+    };
+    FirSlot fir_slots[max_oscillators];
+
+    // An oscillator (unison index) has a filter iff either cutoff edge is selected.
+    static bool osc_filter_enabled(const OscFilter& filter)
+    {
+        return filter.lowpass_param_desc_id || filter.highpass_param_desc_id;
+    }
+
+    static bool any_instrument_has_filter()
+    {
+        for (uint32_t instr_idx = 0; instr_idx < std::size(instruments); instr_idx++) {
+            for (uint32_t unison_idx = 0; unison_idx < max_unison; unison_idx++) {
+                if (osc_filter_enabled(instruments[instr_idx].filter[unison_idx])) {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    static void init_fir()
+    {
+        constexpr uint32_t coeff_bytes   = num_fir_taps * sizeof(float);
+        constexpr uint32_t history_bytes = (num_fir_taps - 1) * sizeof(float);
+
+        fir_slots[0] = { 0, 0 };
+
+        // Optional allocation: when no instrument declares a filter, leave all FIR
+        // offsets 0 so no device bytes are consumed at all.
+        if ( ! any_instrument_has_filter()) {
+            for (uint32_t osc_idx = 1; osc_idx < max_oscillators; osc_idx++) {
+                fir_slots[osc_idx] = { 0, 0 };
+            }
+            return;
+        }
+
+        // Every oscillator slot gets its own coeff and history buffer so any slot
+        // can play a filtered note and sweep independently; slot 0 is the reserved
+        // sentinel and stays unused.
+        for (uint32_t osc_idx = 1; osc_idx < max_oscillators; osc_idx++) {
+            const SubAllocatorBase::Chunk coeff_chunk = data_allocator.allocate(coeff_bytes, synth_alignment);
+            assert(coeff_chunk.offset + coeff_chunk.size <= device_buf_size);
+            fir_slots[osc_idx].coeff_offs = static_cast<uint32_t>(coeff_chunk.offset);
+
+            const SubAllocatorBase::Chunk history_chunk = data_allocator.allocate(history_bytes, synth_alignment);
+            assert(history_chunk.offset + history_chunk.size <= device_buf_size);
+            fir_slots[osc_idx].history_offs = static_cast<uint32_t>(history_chunk.offset);
+        }
+    }
 
     // One-time zero-fill of the persistent device effect-state region, computed in
     // init_effects and recorded on the first render (no command buffer exists yet at
@@ -583,35 +671,33 @@ namespace {
 
     static void init_effects()
     {
-        // TODO TEMP compressor A/B scaffolding: channel 0 carries the compressor under
-        // test, channel 1 is dry.  temp_drive_test_notes plays one channel at a time,
-        // so alternating notes are heard back-to-back with and without compression.  No
-        // chorus here on purpose: its LFO-modulated detune sounds like vibrato and would
-        // muddy the comparison.  Replaced when a mixer GUI configures chains.
-        //
-        // Compressor params: threshold (linear), ratio, attack coeff, release coeff,
-        // makeup gain.  attack/release are smoothing coefficients (closer to 1 is
-        // slower); they are roughly 0.2 ms attack and 46 ms release at 44100 Hz, chosen
-        // directly to avoid pulling in libc exp() on the host.  These are exaggerated
-        // settings (very low threshold, high ratio) so the gain reduction is
-        // unmistakable; musical values to restore once confirmed: threshold 0.3,
-        // ratio 4.0, makeup 1.5.
-        constexpr float compressor_threshold = 0.05f;
-        constexpr float compressor_ratio     = 20.0f;
+        // TEMP demo routing: the two mix channels run different per-channel chains and
+        // both sum into the master chain, exercising the full multi-channel mix.  All of
+        // this is scaffolding the mixer GUI will replace.  Channel 0 -> distortion then
+        // delay; channel 1 -> chorus; master -> reverb then compressor.
+
+        // Channel 0: distortion only (tanh drive, fully wet).  The feedback delay is
+        // disabled here so its repeating echo does not obscure the per-note FIR cutoff
+        // sweep during the filter listen-check.
+        channel_chains[0].num_effects = 1;
+        channel_chains[0].effects[0]  = { Synth::effect_distortion, true, { 5.0f, 1.0f }, 0 };
+
+        // Channel 1: a single LFO-modulated chorus.
+        channel_chains[1].num_effects = 1;
+        channel_chains[1].effects[0]  = { Synth::effect_chorus, true, { 1.5f, 440.0f, 0.5f }, 0 };
+
+        // Master: reverb then a gentle musical compressor.  attack/release are smoothing
+        // coefficients (closer to 1 is slower), roughly 0.2 ms attack and 46 ms release
+        // at 44100 Hz, chosen directly to avoid pulling in libc exp() on the host.
+        constexpr float compressor_threshold = 0.3f;
+        constexpr float compressor_ratio     = 4.0f;
         constexpr float compressor_attack    = 0.9f;
         constexpr float compressor_release   = 0.9995f;
-        constexpr float compressor_makeup    = 1.0f;
-        channel_chains[0].num_effects = 1;
-        channel_chains[0].effects[0]  = { Synth::effect_compressor, true,
-            { compressor_threshold, compressor_ratio, compressor_attack, compressor_release, compressor_makeup }, 0 };
-
-        // Channel 1 is the dry reference (no per-channel effects).
-        channel_chains[1].num_effects = 0;
-
-        // Master reverb applies equally to both channels, so it does not confound the
-        // compressor A/B.
-        master_chain.num_effects = 1;
+        constexpr float compressor_makeup    = 1.5f;
+        master_chain.num_effects = 2;
         master_chain.effects[0]  = { Synth::effect_reverb, true, { 0.7f, 0.5f, 0.3f, 0.0f, 0.0f }, 0 };
+        master_chain.effects[1]  = { Synth::effect_compressor, true,
+            { compressor_threshold, compressor_ratio, compressor_attack, compressor_release, compressor_makeup }, 0 };
 
         effect_state_fill_offset = 0;
         effect_state_fill_bytes  = 0;
@@ -674,6 +760,8 @@ static void init_oscillator_buffers()
     master_output_offs = static_cast<uint32_t>(data_allocator.allocate(sizeof(float) * rt_step_samples * 2, synth_alignment).offset);
 
     init_effects();
+
+    init_fir();
 }
 
 static void init_modulation()
@@ -710,6 +798,33 @@ static void init_modulation()
     param_descs[1].envelope_desc_id = 0;
     param_descs[1].lfo_desc_id      = 0;
     param_descs[1].midi_source      = midi_pitch_bend;
+
+    // TODO TEMP demo: cutoff sweep envelope (id 2 => envelopes[1]).  It decays from
+    // the full sweep amount down to 0 over the note, so the cutoff parameter sweeps
+    // from base + sweep_hz down to base.  Value 0xFFFF maps to sweep_hz Hz
+    // (min_max_delta = sweep_hz / 65535); 1 tick ~ 6 ms, so ~125 ticks ~ 0.75 s
+    // matches the demo note length.  No sustain plateau: the sweep runs to 0 even
+    // while the key is held.
+    constexpr float cutoff_sweep_hz = 6000.0f;
+    StoredEnvelope& cutoff_envelope = envelopes[1];
+    cutoff_envelope.desc.num_points          = 3;
+    cutoff_envelope.desc.unused_alignment    = 0;
+    cutoff_envelope.desc.sustain_first_point = 2;
+    cutoff_envelope.desc.sustain_last_point  = 2;
+    cutoff_envelope.desc.min_value           = 0.0f;
+    cutoff_envelope.desc.min_max_delta       = cutoff_sweep_hz / 65535.0f;
+    cutoff_envelope.desc.points[0] = { 0,   0xFFFF };  // full sweep amount at note-on
+    cutoff_envelope.desc.points[1] = { 125, 0      };  // decays to base over ~0.75 s
+    cutoff_envelope.desc.points[2] = { 126, 0      };  // stays at base (sustain)
+
+    // TODO TEMP demo: cutoff parameter descriptor (id 3): base 400 Hz floor plus the
+    // decaying sweep envelope, no LFO or MIDI.  Cutoff sweeps from ~6400 Hz down to
+    // 400 Hz over the note.
+    constexpr float cutoff_base_hz = 400.0f;
+    param_descs[2].base_value       = cutoff_base_hz;
+    param_descs[2].envelope_desc_id = 2;
+    param_descs[2].lfo_desc_id      = 0;
+    param_descs[2].midi_source      = midi_none;
 }
 
 static bool allocate_oscillators(uint8_t*                 osc_ids,
@@ -987,6 +1102,15 @@ static void drop_voice(uint32_t voice_idx, uint32_t channel, uint32_t note)
         Oscillator& osc = oscillators[voice.osc_ids[unison_idx]];
         osc.osc_type[0] = no_wave;
         osc.voice_id    = 0;
+
+        if (osc.lowpass_cutoff_param_id) {
+            params[osc.lowpass_cutoff_param_id].active = false;
+            osc.lowpass_cutoff_param_id = 0;
+        }
+        if (osc.highpass_cutoff_param_id) {
+            params[osc.highpass_cutoff_param_id].active = false;
+            osc.highpass_cutoff_param_id = 0;
+        }
     }
     voice.osc_count = 0;
 
@@ -1002,6 +1126,28 @@ static void drop_voice(uint32_t voice_idx, uint32_t channel, uint32_t note)
 
     voice.active                 = false;
     note_to_voice[channel][note] = 0;
+}
+
+static bool init_fir_param(uint16_t* param_id, uint16_t param_desc_id, uint32_t voice_idx)
+{
+    if ( ! *param_id) {
+        const uint32_t allocated_param_id = allocate_unused_slot(params, max_params, &Parameter::active);
+
+        if ( ! allocated_param_id) {
+            return false;
+        }
+
+        *param_id                         = static_cast<uint16_t>(allocated_param_id);
+        params[allocated_param_id].active = true;
+    }
+
+    Parameter& param    = params[*param_id];
+    param.cur_value     = 0.0f;
+    param.param_desc_id = param_desc_id;
+    param.state         = { };
+    param.voice_id      = static_cast<uint8_t>(voice_idx);
+
+    return true;
 }
 
 static void process_note_on(uint32_t delta_samples, const Synth::MidiEvent& event)
@@ -1093,8 +1239,35 @@ static void process_note_on(uint32_t delta_samples, const Synth::MidiEvent& even
         osc.old_volume      = 0.0f;         // start ramped up from silence to avoid a click
         osc.panning         = 0.5f;
         osc.old_panning     = 0.5f;
-        osc.fir_memory_offs = 0;
-        osc.fir_taps_offs   = 0;
+
+        // Set up this oscillator's FIR
+        const uint32_t    osc_slot = voices[voice_idx].osc_ids[unison_idx];
+        const OscFilter&  filter   = instrument.filter[unison_idx];
+        if (osc_filter_enabled(filter)) {
+            osc.fir_taps_offs   = fir_slots[osc_slot].coeff_offs;
+            osc.fir_memory_offs = fir_slots[osc_slot].history_offs;
+            osc.clear_fir_hist  = true;
+
+            if (filter.lowpass_param_desc_id
+                && ! init_fir_param(&osc.lowpass_cutoff_param_id, filter.lowpass_param_desc_id, voice_idx)) {
+                d_printf("All parameters are active, dropping note %u on channel %u\n", note, channel);
+                drop_voice(voice_idx, channel, note);
+                return;
+            }
+            if (filter.highpass_param_desc_id
+                && ! init_fir_param(&osc.highpass_cutoff_param_id, filter.highpass_param_desc_id, voice_idx)) {
+                d_printf("All parameters are active, dropping note %u on channel %u\n", note, channel);
+                drop_voice(voice_idx, channel, note);
+                return;
+            }
+        }
+        else {
+            osc.fir_memory_offs          = 0;
+            osc.fir_taps_offs            = 0;
+            osc.lowpass_cutoff_param_id  = 0;
+            osc.highpass_cutoff_param_id = 0;
+            osc.clear_fir_hist           = false;
+        }
     }
 
     voices[voice_idx].velocity   = static_cast<float>(event.note_data) / 127.0f;
@@ -1210,7 +1383,9 @@ static void process_events(uint32_t start_samples, uint32_t end_samples)
 
 // TODO switch to buffer barriers
 static void memory_barrier(VkAccessFlags        dst_access,
-                           VkPipelineStageFlags dst_stage)
+                           VkPipelineStageFlags dst_stage,
+                           VkAccessFlags        extra_src_access = 0,
+                           VkPipelineStageFlags extra_src_stage  = 0)
 {
     static VkMemoryBarrier2 barrier = {
         VK_STRUCTURE_TYPE_MEMORY_BARRIER_2,
@@ -1221,6 +1396,13 @@ static void memory_barrier(VkAccessFlags        dst_access,
         VK_ACCESS_2_NONE
     };
 
+    // The chained source (set at the end of the previous call) covers the most
+    // recent producer.  extra_src_* additionally sources an earlier producer in a
+    // different stage, so a single dependency can make several writes visible at
+    // once (e.g. compute-written FIR taps AND a transfer history fill).  It applies
+    // only to this call; the chain reset below restores src = dst.
+    barrier.srcStageMask  |= extra_src_stage;
+    barrier.srcAccessMask |= extra_src_access;
     barrier.dstStageMask  = dst_stage;
     barrier.dstAccessMask = dst_access;
 
@@ -1359,16 +1541,24 @@ static void temp_drive_test_notes(uint32_t start_samples, uint32_t end_samples)
     constexpr uint32_t   note_on_samples     = Synth::rt_sampling_rate * 3 / 4;
     static const uint8_t pattern_notes[]     = { 60, 62, 64, 65, 67, 69, 71, 72 };
 
-    // TEMP compressor A/B scaffolding: both channels carry the same piano voice (4),
-    // centered at unity so only the per-channel effect chain differs.  Channel 0 has
-    // the compressor, channel 1 is dry.  Removed when real MIDI input replaces this
+    // TEMP demo scaffolding: every note plays on BOTH channels at once (same piano
+    // voice 4), so channel 0's distortion+delay chain and channel 1's chorus sum through
+    // the master reverb+compressor.  The two channels are panned hard apart so each chain
+    // is clearly audible on its own side (distortion+delay left, chorus right) instead of
+    // the louder distorted channel masking the chorus at the same pitch.  This exercises
+    // the multi-channel mix on every note.  Removed when real MIDI input replaces this
     // driver.
-    mix_channels[0].panning = 0.5f;
+    mix_channels[0].panning = 0.0f;   // hard left:  distortion + delay
     mix_channels[0].volume  = 1.0f;
-    mix_channels[1].panning = 0.5f;
+    mix_channels[1].panning = 1.0f;   // hard right: chorus
     mix_channels[1].volume  = 1.0f;
 
-    constexpr uint8_t demo_instrument = 4;
+    // TEMP scaffolding for the swept-FIR listen-check: force the supersaw
+    // (instrument 1), whose every oscillator carries a low pass swept from ~6400 Hz
+    // down to 400 Hz over the note, so the bright sawtooth stack audibly darkens as
+    // each note plays.  Set back to 4 (the unfiltered piano voice) once the swept
+    // filter has been verified.
+    constexpr uint8_t demo_instrument = 1;
 
     // Helper lambda: build a base event for the given channel with zeroed fields.
     auto make_event = [](uint8_t channel, uint8_t note) {
@@ -1385,25 +1575,23 @@ static void temp_drive_test_notes(uint32_t start_samples, uint32_t end_samples)
             continue;
         }
 
-        // Each pitch is played twice back-to-back: first on channel 0 (compressor),
-        // then on channel 1 (dry), so the A/B is heard one note apart on the same note.
-        const uint32_t note_index   = sample / note_period_samples;
-        const uint8_t  channel      = static_cast<uint8_t>(note_index % 2);
-        const uint32_t step         = (note_index / 2) % std::size(pattern_notes);
+        const uint32_t step         = (sample / note_period_samples) % std::size(pattern_notes);
         const uint8_t  current_note = pattern_notes[step];
 
-        if (phase_in_period == 0) {
-            // Note-on with velocity 100, forcing the demo instrument.
-            Synth::MidiEvent on_ev = make_event(channel, current_note);
-            on_ev.note_data = 100;
+        for (uint8_t channel = 0; channel < 2; channel++) {
+            if (phase_in_period == 0) {
+                // Note-on with velocity 100, forcing the demo instrument.
+                Synth::MidiEvent on_ev = make_event(channel, current_note);
+                on_ev.note_data = 100;
 
-            temp_force_instrument = demo_instrument;
-            process_note_on(0, on_ev);
-            temp_force_instrument = temp_no_force_instrument;
-        }
-        else {
-            Synth::MidiEvent off_ev = make_event(channel, current_note);
-            process_note_off(0, off_ev);
+                temp_force_instrument = demo_instrument;
+                process_note_on(0, on_ev);
+                temp_force_instrument = temp_no_force_instrument;
+            }
+            else {
+                Synth::MidiEvent off_ev = make_event(channel, current_note);
+                process_note_off(0, off_ev);
+            }
         }
     }
 }
@@ -1453,6 +1641,17 @@ static void update_modulation()
             osc.osc_type[0] = no_wave;
             osc.voice_id    = 0;
 
+            // Free this oscillator's own cutoff parameters so per-oscillator filters
+            // release independently and the parameter pool does not leak.
+            if (osc.lowpass_cutoff_param_id) {
+                params[osc.lowpass_cutoff_param_id].active = false;
+                osc.lowpass_cutoff_param_id = 0;
+            }
+            if (osc.highpass_cutoff_param_id) {
+                params[osc.highpass_cutoff_param_id].active = false;
+                osc.highpass_cutoff_param_id = 0;
+            }
+
             assert(voice.osc_count <= max_unison);
             if (voice.osc_count) {
                 --voice.osc_count;
@@ -1477,6 +1676,90 @@ static void update_modulation()
 
     // Advance the shared LFO phase exactly once per render step.
     modulation_lfo_tick++;
+}
+
+// Resolves an oscillator cutoff parameter into an integer Hz for the coeff shader.
+// A disabled edge (param id 0) yields 0 (the shader's "edge off" convention).  An
+// enabled edge is clamped to [1 Hz, Nyquist - 1] so the windowed-sinc stays valid.
+// cur_value is a float; truncating the +0.5f bias rounds to nearest without libc.
+static uint32_t cutoff_param_to_hz(uint16_t param_id)
+{
+    if ( ! param_id) {
+        return 0;
+    }
+
+    constexpr uint32_t min_cutoff_hz = 1;
+    const uint32_t     max_cutoff_hz = Synth::rt_sampling_rate / 2 - 1;
+
+    const float value = params[param_id].cur_value;
+    if (value <= static_cast<float>(min_cutoff_hz)) {
+        return min_cutoff_hz;
+    }
+    if (value >= static_cast<float>(max_cutoff_hz)) {
+        return max_cutoff_hz;
+    }
+
+    return static_cast<uint32_t>(value + 0.5f);
+}
+
+// FIR taps are recomputed every render block from each filtered oscillator's
+// current cutoff parameters, so envelope/LFO/MIDI sweeps take effect smoothly (the
+// FIR has no feedback and the shader renormalizes to unity DC gain, so per-block
+// coeff changes are click-free).  Packs one FIRCoeff per active filtered oscillator
+// contiguously (the shader reads params[gl_WorkGroupID.x]) and dispatches that many
+// work groups; the barrier inside lets the oscillator pass read the fresh taps.
+// Call this after update_modulation (so cutoff cur_values are fresh) and before the
+// oscillator dispatch.
+static void compute_fir_coefficients()
+{
+    uint32_t num_active_filters = 0;
+    for (uint32_t osc_idx = 1; osc_idx < max_oscillators; osc_idx++) {
+        if (oscillators[osc_idx].osc_type[0] != no_wave && oscillators[osc_idx].fir_taps_offs) {
+            ++num_active_filters;
+        }
+    }
+
+    if ( ! num_active_filters) {
+        return;
+    }
+
+    const uint32_t param_size = num_active_filters * static_cast<uint32_t>(sizeof(ShaderParams::FIRCoeff));
+    const uint32_t param_offs = static_cast<uint32_t>(param_allocator.allocate(param_size, synth_alignment).offset);
+
+    uint32_t cur_param_offs = param_offs;
+    for (uint32_t osc_idx = 1; osc_idx < max_oscillators; osc_idx++) {
+        const Oscillator& osc = oscillators[osc_idx];
+        if (osc.osc_type[0] == no_wave || ! osc.fir_taps_offs) {
+            continue;
+        }
+
+        ShaderParams::FIRCoeff& param = get_param<ShaderParams::FIRCoeff>(cur_param_offs);
+        param.taps_offs            = osc.fir_taps_offs / 4;
+        param.lowpass_cutoff_freq  = cutoff_param_to_hz(osc.lowpass_cutoff_param_id);
+        param.highpass_cutoff_freq = cutoff_param_to_hz(osc.highpass_cutoff_param_id);
+
+        cur_param_offs += static_cast<uint32_t>(sizeof(ShaderParams::FIRCoeff));
+    }
+
+    memory_barrier(VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+
+    vkCmdBindPipeline(audio_cmd_buf, VK_PIPELINE_BIND_POINT_COMPUTE, pipes[fir_coeff_pipe]);
+
+    static const PushDescriptorInfo push_fir_data = { fir_coeff_pipe, 0, 0, data_buf, VK_WHOLE_SIZE };
+    push_descriptor(push_fir_data, 0);
+
+    static const PushDescriptorInfo push_fir_param = { fir_coeff_pipe, 1, 0, param_buf, ShaderParams::max_param_range };
+    push_descriptor(push_fir_param, param_offs);
+
+    const uint32_t sampling_freq = Synth::rt_sampling_rate;
+    vkCmdPushConstants(audio_cmd_buf,
+                       pipe_layouts[fir_coeff_pipe],
+                       VK_SHADER_STAGE_COMPUTE_BIT,
+                       0,                     // offset
+                       sizeof(sampling_freq), // size
+                       &sampling_freq);       // pValues
+
+    vkCmdDispatch(audio_cmd_buf, num_active_filters, 1, 1);
 }
 
 static void render_audio_step()
@@ -1510,13 +1793,30 @@ static void render_audio_step()
 
     // ======================================================================
 
-#if 0
-    if ( ! num_filters) {
-        memory_barrier(VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+    compute_fir_coefficients();
 
-        // TODO update_filters();
+    // ======================================================================
+
+    // Clear FIR history buffer for new notes
+    bool any_history_cleared = false;
+    for (uint32_t osc_idx = 1; osc_idx < max_oscillators; osc_idx++) {
+        if ( ! oscillators[osc_idx].clear_fir_hist) {
+            continue;
+        }
+
+        if ( ! any_history_cleared) {
+            memory_barrier(VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+            any_history_cleared = true;
+        }
+
+        vkCmdFillBuffer(audio_cmd_buf,
+                        buffers[data_buf].get_buffer(),
+                        fir_slots[osc_idx].history_offs,
+                        (num_fir_taps - 1) * sizeof(float),
+                        0); // data
+
+        oscillators[osc_idx].clear_fir_hist = false;
     }
-#endif
 
     // ======================================================================
 
@@ -1599,7 +1899,10 @@ static void render_audio_step()
         cur_param_offs += static_cast<uint32_t>(sizeof(ShaderParams::Oscillator));
     }
 
-    memory_barrier(VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+    memory_barrier(VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
+                   VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                   VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT,
+                   VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT);
 
     vkCmdBindPipeline(audio_cmd_buf, VK_PIPELINE_BIND_POINT_COMPUTE, pipes[oscillator_pipe]);
 
