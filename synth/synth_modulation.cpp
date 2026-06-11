@@ -158,6 +158,28 @@ float eval_parameter(float                     base_value,
     return value;
 }
 
+uint32_t instrument_param_slot_count(const TargetBinding* bindings, uint32_t unison_count)
+{
+    uint32_t count = 0;
+
+    for (uint32_t target = 0; target < num_mod_targets; target++) {
+        if (bindings[target].scope == scope_voice) {
+            if (bindings[target].param_desc_id[0]) {
+                count++;
+            }
+        }
+        else {
+            for (uint32_t unison_idx = 0; unison_idx < unison_count; unison_idx++) {
+                if (bindings[target].param_desc_id[unison_idx]) {
+                    count++;
+                }
+            }
+        }
+    }
+
+    return count;
+}
+
 uint32_t effect_param_floats(EffectType type)
 {
     switch (type) {

@@ -191,6 +191,42 @@ int main()
         }
     }
 
+    // instrument_param_slot_count: voice-scope bound targets cost one slot;
+    // oscillator-scope targets cost one slot per bound unison oscillator below
+    // unison_count; unbound slots cost nothing.
+    {
+        Synth::TargetBinding bindings[Synth::num_mod_targets] = { };
+
+        // All targets unbound -> no slots, regardless of unison_count.
+        TEST(Synth::instrument_param_slot_count(bindings, 1) == 0);
+        TEST(Synth::instrument_param_slot_count(bindings, Synth::max_unison) == 0);
+
+        // One voice-scope target bound -> one slot, independent of unison_count.
+        bindings[Synth::mod_volume].scope            = Synth::scope_voice;
+        bindings[Synth::mod_volume].param_desc_id[0] = 1;
+        TEST(Synth::instrument_param_slot_count(bindings, 1) == 1);
+        TEST(Synth::instrument_param_slot_count(bindings, Synth::max_unison) == 1);
+
+        // One oscillator-scope target bound on every unison slot -> one slot per
+        // oscillator below unison_count, added to the voice-scope slot above.
+        bindings[Synth::mod_lowpass_cutoff].scope = Synth::scope_oscillator;
+        for (uint32_t unison_idx = 0; unison_idx < Synth::max_unison; unison_idx++) {
+            bindings[Synth::mod_lowpass_cutoff].param_desc_id[unison_idx] = 3;
+        }
+        TEST(Synth::instrument_param_slot_count(bindings, 4) == 1 + 4);
+        TEST(Synth::instrument_param_slot_count(bindings, Synth::max_unison) == 1 + Synth::max_unison);
+
+        // Oscillator-scope target bound on only some unison slots counts only the
+        // bound slots that fall below unison_count.
+        Synth::TargetBinding partial[Synth::num_mod_targets] = { };
+        partial[Synth::mod_highpass_cutoff].scope            = Synth::scope_oscillator;
+        partial[Synth::mod_highpass_cutoff].param_desc_id[0] = 5;
+        partial[Synth::mod_highpass_cutoff].param_desc_id[1] = 5;
+        partial[Synth::mod_highpass_cutoff].param_desc_id[2] = 5;
+        TEST(Synth::instrument_param_slot_count(partial, Synth::max_unison) == 3);
+        TEST(Synth::instrument_param_slot_count(partial, 2) == 2);
+    }
+
     TEST(Synth::effect_param_floats(Synth::effect_distortion) == 2);
     TEST(Synth::effect_param_floats(Synth::effect_delay)      == 3);
     TEST(Synth::effect_param_floats(Synth::effect_chorus)     == 3);

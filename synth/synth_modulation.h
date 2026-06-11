@@ -122,6 +122,45 @@ float eval_parameter(float                     base_value,
                      uint32_t                  step_samples,
                      uint32_t                  sampling_rate);
 
+// Maximum oscillators a single note (unison stack) uses.
+constexpr uint32_t max_unison = 7;
+
+// Per-oscillator modulatable quantities.  An instrument binds each independently.
+enum ModTarget : uint8_t {
+    mod_volume,
+    mod_pitch,
+    mod_panning,
+    mod_duty0,
+    mod_duty1,
+    mod_osc_mix,
+    mod_fm_index,
+    mod_lowpass_cutoff,
+    mod_highpass_cutoff,
+    num_mod_targets
+};
+
+// Where a bound parameter is allocated.
+enum ParamScope : uint8_t {
+    scope_voice,        // One shared parameter for all the voice's oscillators
+    scope_oscillator    // One parameter per oscillator (per unison index)
+};
+
+// An instrument's binding for one modulation target.  param_desc_id is 1-based into
+// the parameter-descriptor table; 0 leaves that slot unbound and the consumer uses
+// base_value.  scope_voice uses param_desc_id[0]; scope_oscillator uses
+// param_desc_id[unison_idx].
+struct TargetBinding {
+    ParamScope scope;
+    float      base_value;
+    uint16_t   param_desc_id[max_unison]; // 1-based param index into param_descs[]
+};
+
+// Counts the parameter pool slots one note of an instrument allocates: each
+// voice-scope target whose descriptor is bound costs one slot; each oscillator-scope
+// target costs one slot per unison oscillator (index 0..unison_count) whose
+// descriptor is bound.  Unbound slots cost nothing.
+uint32_t instrument_param_slot_count(const TargetBinding* bindings, uint32_t unison_count);
+
 enum EffectType : uint32_t {
     effect_none,
     effect_distortion,
