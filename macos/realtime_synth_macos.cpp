@@ -53,8 +53,15 @@ static OSStatus render_callback(void*                       in_ref_con,
 
 namespace Synth {
 
+bool init_midi_os();
+void stop_midi_os();
+
 bool init_synth_os()
 {
+    if ( ! init_midi_os()) {
+        d_printf("Live MIDI input unavailable\n");
+    }
+
     static const AudioComponentDescription output_desc = {
         kAudioUnitType_Output,
         kAudioUnitSubType_DefaultOutput,
@@ -134,6 +141,8 @@ bool init_synth_os()
 
 void stop_synth_os()
 {
+    stop_midi_os();
+
     if (output_unit) {
         AudioOutputUnitStop(output_unit);
     }

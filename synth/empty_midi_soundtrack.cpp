@@ -15,5 +15,6 @@ namespace Synth {
     const uint8_t* midi_pitch_bend_lo[] = { nullptr, nullptr };
     const uint8_t* midi_pitch_bend_hi[] = { nullptr, nullptr };
 
-    const InstrumentRouting instr_routing[] = { { }, { } };
+    // One routing per MIDI channel; live input can target any channel.
+    const InstrumentRouting instr_routing[max_channels] = { };
 }

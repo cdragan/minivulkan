@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 // SPDX-FileCopyrightText: Copyright (c) 2021-2026 Chris Dragan
 
+#pragma once
+
 #include "synth_modulation.h"
 
 #include <stdint.h>
@@ -24,13 +26,14 @@ extern const uint8_t* midi_ctrl_data[];     // Per-channel controller data for c
 extern const uint8_t* midi_pitch_bend_lo[]; // Per-channel pitch bend LSB values
 extern const uint8_t* midi_pitch_bend_hi[]; // Per-channel pitch bend MSB values
 
+// Per-channel routing of notes to instruments
 struct InstrumentRouting {
     struct {
         uint8_t start_note;
         uint8_t instrument;
     } note_routing[max_instr_per_channel];
 };
-extern const InstrumentRouting instr_routing[];   // Per-channel routing of notes to instruments
+extern const InstrumentRouting instr_routing[max_channels];
 
 #define MIDI_EVENT_TYPES(X) \
     X(note_off)             \
@@ -69,18 +72,20 @@ bool init_synth();
 
 void stop_synth();
 
-// Fills the caller's output channels from the ring buffer on the audio callback (no GPU
-// work), in the platform's output format (T, interleaved).  channel1 is unused when the
-// format is interleaved.  Returns frames supplied; any shortfall is zero-filled to silence.
+void apply_midi_event(const MidiEvent& event);
+
+// Drains live MIDI input into the synth
+void pump_live_midi();
+
+// Fills the caller's output channels from the audio ring buffer
 template<typename T, bool interleaved>
 uint32_t consume_audio(uint32_t num_frames, T* channel0, T* channel1);
 
-// Tops the ring back up toward the target lead (producer thread), rendering whole steps in
-// one submit in the platform's format.  Returns false when full enough or the render failed.
+// Tops up the audio ring buffer
 template<typename T, bool interleaved>
 bool produce_audio_batch();
 
-// Audio ring health, for the GUI buffer indicator.
+// Audio ring buffer health, for the GUI buffer indicator.
 struct AudioRingStatus {
     uint32_t fill_frames;       // frames currently buffered ahead of the callback
     uint32_t lead_frames;       // target lead the producer keeps buffered

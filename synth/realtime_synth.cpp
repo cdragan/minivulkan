@@ -784,7 +784,7 @@ static void init_oscillator_buffers()
 
     init_instruments();
 
-    for (uint32_t channel = 0; channel < Synth::num_channels; channel++) {
+    for (uint32_t channel = 0; channel < max_mix_channels; channel++) {
         mix_channels[channel].chan_output_offs = static_cast<uint32_t>(data_allocator.allocate(sizeof(float) * rt_step_samples * 2, synth_alignment).offset);
         mix_channels[channel].volume      = 1.0f;
         mix_channels[channel].panning     = 0.5f;
@@ -1139,17 +1139,12 @@ static void process_note_off(uint32_t delta_samples, const Synth::MidiEvent& eve
     const uint32_t note      = event.note;
     const uint32_t voice_idx = note_to_voice[channel][note];
 
-    assert(voice_idx);
-    assert(voices[voice_idx].active);
+    if (voice_idx) {
+        assert(voices[voice_idx].active);
 
-    voices[voice_idx].releasing = true;
+        voices[voice_idx].releasing = true;
+    }
 }
-
-// TODO temporary test scaffolding: when not temp_no_force_instrument,
-// process_note_on forces this instrument index so a chosen voice is audible.
-// The temp note driver sets this only around its own note-ons.
-constexpr uint8_t temp_no_force_instrument = 0xFF;
-static uint8_t temp_force_instrument = temp_no_force_instrument;
 
 static const RuntimeInstrument& voice_instrument(const Voice& voice)
 {
@@ -1269,10 +1264,7 @@ static void process_note_on(uint32_t delta_samples, const Synth::MidiEvent& even
     const uint32_t channel = event.channel;
     const uint32_t note    = event.note;
 
-    // temp_force_instrument is throwaway scaffolding (see its definition).
-    const uint8_t target_instrument = (temp_force_instrument != temp_no_force_instrument)
-                                      ? temp_force_instrument
-                                      : select_instrument(channel, note);
+    const uint8_t target_instrument = select_instrument(channel, note);
 
     // Re-triggering a note still alive (held or releasing, possibly with some
     // unison oscillators already silenced) reclaims it cleanly so the new note
@@ -1365,10 +1357,11 @@ static void process_aftertouch(uint32_t delta_samples, const Synth::MidiEvent& e
     const uint32_t note      = event.note;
     const uint32_t voice_idx = note_to_voice[channel][note];
 
-    assert(voice_idx);
-    assert(voices[voice_idx].active);
+    if (voice_idx) {
+        assert(voices[voice_idx].active);
 
-    voices[voice_idx].aftertouch = static_cast<float>(event.note_data) / 127.0f;
+        voices[voice_idx].aftertouch = static_cast<float>(event.note_data) / 127.0f;
+    }
 }
 
 static void process_controller(uint32_t delta_samples, const Synth::MidiEvent& event)
@@ -1386,25 +1379,33 @@ static void process_pitch_bend(uint32_t delta_samples, const Synth::MidiEvent& e
 
 static void process_channel_pressure(uint32_t delta_samples, const Synth::MidiEvent& event)
 {
-    // TODO get_next_midi_event does not yet decode real channel-pressure messages;
-    // only the temp test driver populates note_data here.  Real-MIDI decode is
-    // a follow-up (live/file MIDI input is currently out of scope).
     channel_pressure[event.channel] = static_cast<float>(event.note_data) / 127.0f;
+}
+
+using EventHandler = void (*)(uint32_t delta_samples, const Synth::MidiEvent& event);
+
+// Program change is unused and thus unsupported.
+constexpr EventHandler process_program_change = nullptr;
+
+static const EventHandler event_handlers[] = {
+    #define X(name) process_##name,
+    MIDI_EVENT_TYPES(X)
+    #undef X
+};
+
+void Synth::apply_midi_event(const Synth::MidiEvent& event)
+{
+    assert(static_cast<uint32_t>(event.event) < std::size(event_handlers));
+
+    const EventHandler handler = event_handlers[static_cast<uint8_t>(event.event)];
+
+    if (handler) {
+        handler(0, event);
+    }
 }
 
 static void process_events(uint32_t start_samples, uint32_t end_samples)
 {
-    using EventHandler = void (*)(uint32_t delta_samples, const Synth::MidiEvent& event);
-
-    // Program change is unused and thus unsupported
-    constexpr EventHandler process_program_change = nullptr;
-
-    static const EventHandler event_handlers[] = {
-        #define X(name) process_##name,
-        MIDI_EVENT_TYPES(X)
-        #undef X
-    };
-
     Synth::MidiEvent event;
 
     while (get_next_midi_event(&event, end_samples)) {
@@ -1567,69 +1568,6 @@ static void apply_effects(const EffectTarget* targets, uint32_t num_targets)
         push_descriptor(push_effect_param, param_offs);
 
         vkCmdDispatch(audio_cmd_buf, wave_count, 1, 1);
-    }
-}
-
-// TODO temporary test driver: plays a repeating short pattern so the engine is
-// audible without a MIDI soundtrack.  Remove once real MIDI input exists.
-static void temp_drive_test_notes(uint32_t start_samples, uint32_t end_samples)
-{
-    constexpr uint32_t   note_period_samples = Synth::rt_sampling_rate;          // 1 note per 1 s
-    // Sustain each note 0.75 s, leaving a 0.25 s gap before the next.
-    constexpr uint32_t   note_on_samples     = Synth::rt_sampling_rate * 3 / 4;
-    static const uint8_t pattern_notes[]     = { 60, 62, 64, 65, 67, 69, 71, 72 };
-
-    // TEMP demo scaffolding: every note plays on BOTH channels at once (same piano
-    // voice 4), so channel 0's distortion+delay chain and channel 1's chorus sum through
-    // the master reverb+compressor.  The two channels are panned hard apart so each chain
-    // is clearly audible on its own side (distortion+delay left, chorus right) instead of
-    // the louder distorted channel masking the chorus at the same pitch.  This exercises
-    // the multi-channel mix on every note.  Removed when real MIDI input replaces this
-    // driver.
-    mix_channels[0].panning = 0.0f;   // hard left:  distortion + delay
-    mix_channels[0].volume  = 1.0f;
-    mix_channels[1].panning = 1.0f;   // hard right: chorus
-    mix_channels[1].volume  = 1.0f;
-
-    // TEMP scaffolding for the per-oscillator release listen-check: force the
-    // supersaw (instrument 1), whose 7 unison oscillators each carry their own volume
-    // envelope with a staggered release, so the detuned layers fade out at audibly
-    // different rates after each note-off.
-    constexpr uint8_t demo_instrument = 1;
-
-    // Helper lambda: build a base event for the given channel with zeroed fields.
-    auto make_event = [](uint8_t channel, uint8_t note) {
-        Synth::MidiEvent ev = { };
-        ev.channel = channel;
-        ev.note    = note;
-        return ev;
-    };
-
-    for (uint32_t sample = start_samples; sample < end_samples; sample++) {
-        const uint32_t phase_in_period = sample % note_period_samples;
-
-        if (phase_in_period != 0 && phase_in_period != note_on_samples) {
-            continue;
-        }
-
-        const uint32_t step         = (sample / note_period_samples) % std::size(pattern_notes);
-        const uint8_t  current_note = pattern_notes[step];
-
-        for (uint8_t channel = 0; channel < 2; channel++) {
-            if (phase_in_period == 0) {
-                // Note-on with velocity 100, forcing the demo instrument.
-                Synth::MidiEvent on_ev = make_event(channel, current_note);
-                on_ev.note_data = 100;
-
-                temp_force_instrument = demo_instrument;
-                process_note_on(0, on_ev);
-                temp_force_instrument = temp_no_force_instrument;
-            }
-            else {
-                Synth::MidiEvent off_ev = make_event(channel, current_note);
-                process_note_off(0, off_ev);
-            }
-        }
     }
 }
 
@@ -1899,7 +1837,7 @@ static void render_audio_step()
 
     process_events(start_samples, end_samples);
 
-    temp_drive_test_notes(start_samples, end_samples);
+    Synth::pump_live_midi();
 
     update_modulation();
 
@@ -2026,7 +1964,9 @@ static void render_audio_step()
     static const PushDescriptorInfo push_osc_param = { oscillator_pipe, 1, 0, param_buf, ShaderParams::max_param_range };
     push_descriptor(push_osc_param, osc_base_param_offs);
 
-    vkCmdDispatch(audio_cmd_buf, num_oscillators, 1, 1);
+    if (num_oscillators) {
+        vkCmdDispatch(audio_cmd_buf, num_oscillators, 1, 1);
+    }
 
     // ======================================================================
 
@@ -2035,8 +1975,9 @@ static void render_audio_step()
     const uint32_t input_param_offs = static_cast<uint32_t>(param_allocator.allocate(input_param_size, synth_alignment).offset);
     const uint32_t chan_param_offs  = static_cast<uint32_t>(param_allocator.allocate(chan_param_size, synth_alignment).offset);
 
-    uint32_t chan_input_indices[max_mix_channels] = { };
-    uint32_t chan_map[max_mix_channels]           = { };
+    uint32_t chan_input_indices[max_mix_channels]     = { }; // indexed by compacted used_chan_idx
+    uint32_t chan_map[max_mix_channels]               = { };
+    uint32_t gen_chan_input_indices[max_mix_channels] = { }; // indexed by raw channel, for the oscillator loop
 
     for (uint32_t input_idx = 0, used_chan_idx = 0, chan_idx = 0; chan_idx < max_mix_channels; chan_idx++) {
         if ( ! channel_osc_count[chan_idx] && ! chain_has_enabled_effect(channel_chains[chan_idx])) {
@@ -2046,13 +1987,11 @@ static void render_audio_step()
         assert(used_chan_idx < num_mix_channels);
         chan_map[used_chan_idx]           = chan_idx;
         chan_input_indices[used_chan_idx] = input_idx;
+        gen_chan_input_indices[chan_idx]  = input_idx;
 
         input_idx += channel_osc_count[chan_idx];
         ++used_chan_idx;
     }
-
-    uint32_t gen_chan_input_indices[max_mix_channels];
-    mstd::mem_copy(gen_chan_input_indices, chan_input_indices, sizeof(chan_input_indices));
 
     for (Oscillator& oscillator : oscillators) {
         if ( ! oscillator.osc_type[0])
@@ -2347,7 +2286,7 @@ Synth::AudioRingStatus Synth::get_audio_ring_status()
     const uint64_t read_pos  = audio_ring_read.load(std::memory_order_relaxed);
     const uint64_t write_pos = audio_ring_write.load(std::memory_order_relaxed);
 
-    return { ring_available(write_pos, read_pos),
+    return { get_ringbuf_data_size(write_pos, read_pos),
              audio_lead_frames,
              audio_underrun_count.load(std::memory_order_relaxed) };
 }
@@ -2357,7 +2296,7 @@ bool Synth::produce_audio_batch()
 {
     const uint64_t write_pos = audio_ring_write.load(std::memory_order_relaxed);
     const uint64_t read_pos  = audio_ring_read.load(std::memory_order_acquire);
-    const uint32_t available = ring_available(write_pos, read_pos);
+    const uint32_t available = get_ringbuf_data_size(write_pos, read_pos);
 
     // The callback drains the lead and the producer tops it back up.
     if (available >= audio_lead_frames) {
@@ -2379,7 +2318,7 @@ bool Synth::produce_audio_batch()
     uint32_t copied = 0;
     while (copied < to_render) {
         const uint32_t offset = static_cast<uint32_t>((write_pos + copied) % audio_ring_frames);
-        const uint32_t chunk  = ring_contiguous(write_pos + copied, audio_ring_frames, to_render - copied);
+        const uint32_t chunk  = std::min(to_render - copied, get_ringbuf_contig_tail(write_pos + copied, audio_ring_frames));
         copy_audio_data(ring_stereo<T, interleaved>(offset), rendered_src + copied, chunk);
         copied += chunk;
     }
@@ -2393,7 +2332,7 @@ uint32_t Synth::consume_audio(uint32_t num_frames, T* channel0, T* channel1)
 {
     const uint64_t read_pos  = audio_ring_read.load(std::memory_order_relaxed);
     const uint64_t write_pos = audio_ring_write.load(std::memory_order_acquire);
-    const uint32_t available = ring_available(write_pos, read_pos);
+    const uint32_t available = get_ringbuf_data_size(write_pos, read_pos);
     const uint32_t to_copy   = (available < num_frames) ? available : num_frames;
 
     const StereoPtr<T, interleaved> dest = output_stereo<T, interleaved>(channel0, channel1);
@@ -2401,7 +2340,7 @@ uint32_t Synth::consume_audio(uint32_t num_frames, T* channel0, T* channel1)
     uint32_t copied = 0;
     while (copied < to_copy) {
         const uint32_t offset = static_cast<uint32_t>((read_pos + copied) % audio_ring_frames);
-        const uint32_t chunk  = ring_contiguous(read_pos + copied, audio_ring_frames, to_copy - copied);
+        const uint32_t chunk  = std::min(to_copy - copied, get_ringbuf_contig_tail(read_pos + copied, audio_ring_frames));
         copy_audio_data(dest + copied, ring_stereo<T, interleaved>(offset), chunk);
         copied += chunk;
     }

@@ -247,23 +247,22 @@ int main()
     {
         const uint32_t capacity = 1024;
 
-        TEST(Synth::ring_available(0, 0) == 0);
-        TEST(Synth::ring_space(0, 0, capacity) == capacity);
+        TEST(Synth::get_ringbuf_data_size(0, 0) == 0);
+        TEST(Synth::get_ringbuf_avail_space(0, 0, capacity) == capacity);
 
-        TEST(Synth::ring_available(256, 0) == 256);
-        TEST(Synth::ring_space(256, 0, capacity) == capacity - 256);
+        TEST(Synth::get_ringbuf_data_size(256, 0) == 256);
+        TEST(Synth::get_ringbuf_avail_space(256, 0, capacity) == capacity - 256);
 
-        TEST(Synth::ring_available(300, 44) == 256);
-        TEST(Synth::ring_space(300, 44, capacity) == capacity - 256);
+        TEST(Synth::get_ringbuf_data_size(300, 44) == 256);
+        TEST(Synth::get_ringbuf_avail_space(300, 44, capacity) == capacity - 256);
 
-        TEST(Synth::ring_available(capacity, 0) == capacity);
-        TEST(Synth::ring_space(capacity, 0, capacity) == 0);
+        TEST(Synth::get_ringbuf_data_size(capacity, 0) == capacity);
+        TEST(Synth::get_ringbuf_avail_space(capacity, 0, capacity) == 0);
 
-        TEST(Synth::ring_contiguous(0, capacity, 256) == 256);
-        TEST(Synth::ring_contiguous(1000, capacity, 10) == 10);
-        TEST(Synth::ring_contiguous(1000, capacity, 100) == 24);
-        TEST(Synth::ring_contiguous(2048, capacity, 100) == 100);
-        TEST(Synth::ring_contiguous(2048, capacity, 2000) == capacity);
+        TEST(Synth::get_ringbuf_contig_tail(0, capacity) == capacity);          // offset 0: whole buffer
+        TEST(Synth::get_ringbuf_contig_tail(1000, capacity) == 24);             // mid-buffer: 1024 - 1000
+        TEST(Synth::get_ringbuf_contig_tail(2048, capacity) == capacity);       // exact multiple wraps to 0
+        TEST(Synth::get_ringbuf_contig_tail(capacity + 1, capacity) == capacity - 1); // offset 1 after a wrap
     }
 
     return exit_code;

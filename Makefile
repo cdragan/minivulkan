@@ -145,6 +145,9 @@ ifeq ($(UNAME), Darwin)
     endif
     threed_gui_src_files   += macos/gui_macos.mm
     threed_gui_src_files   += macos/realtime_synth_macos.cpp
+    threed_gui_src_files   += macos/midi_macos.cpp
+
+    midi_test_sender_src_files += macos/midi_test_sender.cpp
 endif
 
 ifeq ($(UNAME), Windows)
@@ -188,9 +191,11 @@ all_src_files += $(make_header_src_files)
 all_src_files += $(make_shaders_h_src_files)
 all_src_files += $(make_shaders_cpp_src_files)
 all_src_files += $(spirv_encode_src_files)
+all_src_files += $(midi_test_sender_src_files)
 all_src_files += $(suballoc_unit_src_files)
 all_src_files += $(sculptor_undo_unit_src_files)
 all_src_files += $(synth_modulation_unit_src_files)
+all_src_files += $(midi_decode_unit_src_files)
 all_src_files += $(threed_src_files)
 all_src_files += $(threed_gui_src_files)
 all_src_files += $(threed_nogui_src_files)
@@ -209,6 +214,9 @@ all_sculptor_undo_unit_src_files += $(sculptor_undo_unit_src_files)
 
 all_synth_modulation_unit_src_files += $(lib_src_files)
 all_synth_modulation_unit_src_files += $(synth_modulation_unit_src_files)
+
+all_midi_decode_unit_src_files += synth/midi_decode.cpp
+all_midi_decode_unit_src_files += $(midi_decode_unit_src_files)
 
 ##############################################################################
 # Sub-project handling
@@ -436,6 +444,7 @@ ifeq ($(UNAME), Darwin)
 
     gui_frameworks += GameController
     gui_frameworks += AudioToolbox
+    gui_frameworks += CoreMIDI
 
     ifneq ($(ARCH), $(shell uname -m))
         CFLAGS  += -arch $(ARCH)
@@ -675,6 +684,13 @@ $(eval $(call LINK_RULE,$(make_shaders_h),$(make_shaders_h_src_files)))
 
 $(eval $(call LINK_RULE,$(make_shaders_cpp),$(make_shaders_cpp_src_files)))
 
+ifeq ($(UNAME), Darwin)
+midi_test_sender = $(call CMDLINE_PATH,midi_test_sender)
+$(midi_test_sender): LDFLAGS += -framework CoreMIDI -framework CoreFoundation
+$(eval $(call LINK_RULE,$(midi_test_sender),$(midi_test_sender_src_files)))
+build: $(midi_test_sender)
+endif
+
 define SHADER_RULE
 $(shaders_out_dir)/$(basename $(notdir $1)).h: $1 | $(spirv_encode) $(shaders_out_dir) $(addprefix $(shaders_out_dir)/,$(shader_dirs))
 	$(GLSL_VALIDATOR_PREFIX)glslangValidator $(GLSL_FLAGS) --depfile $$(basename $$@).d.tmp -o $$(call shader_stage,default,$$<) $$<
@@ -726,6 +742,7 @@ tests += vmath_unit
 tests += suballoc_unit
 tests += sculptor_undo_unit
 tests += synth_modulation_unit
+tests += midi_decode_unit
 
 define DEFINE_TEST
 $$(eval $$(call LINK_RULE,$$(call CMDLINE_PATH,$1),$$(all_$1_src_files)))

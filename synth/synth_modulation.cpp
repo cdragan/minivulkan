@@ -2,10 +2,10 @@
 // SPDX-FileCopyrightText: Copyright (c) 2021-2026 Chris Dragan
 
 #include "synth_modulation.h"
-#include <assert.h>
 #include "../core/mstdc.h"
 #include "../core/vmath.h"
-#include "../core/vecfloat.h"  // provides vmath::sincos
+#include "../core/vecfloat.h"
+#include <assert.h>
 
 namespace Synth {
 
@@ -237,21 +237,19 @@ uint32_t effect_state_floats(EffectType type)
     }
 }
 
-uint32_t ring_available(uint64_t write_pos, uint64_t read_pos)
+uint32_t get_ringbuf_data_size(const uint64_t write_pos, const uint64_t read_pos)
 {
     return static_cast<uint32_t>(write_pos - read_pos);
 }
 
-uint32_t ring_space(uint64_t write_pos, uint64_t read_pos, uint32_t capacity)
+uint32_t get_ringbuf_avail_space(const uint64_t write_pos, const uint64_t read_pos, const uint32_t capacity)
 {
-    return capacity - ring_available(write_pos, read_pos);
+    return capacity - get_ringbuf_data_size(write_pos, read_pos);
 }
 
-uint32_t ring_contiguous(uint64_t pos, uint32_t capacity, uint32_t count)
+uint32_t get_ringbuf_contig_tail(const uint64_t pos, const uint32_t capacity)
 {
-    const uint32_t offset = static_cast<uint32_t>(pos % capacity);
-    const uint32_t first  = capacity - offset;
-    return (count < first) ? count : first;
+    return capacity - static_cast<uint32_t>(pos % capacity);
 }
 
 } // namespace Synth

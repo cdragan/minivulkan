@@ -7,8 +7,14 @@ lib_src_files += synth/synth_modulation.cpp
 
 synth_modulation_unit_src_files += synth/synth_modulation_unit.cpp
 
+midi_decode_unit_src_files += synth/midi_decode_unit.cpp
+
 threed_gui_src_files += synth/realtime_synth.cpp
 threed_gui_src_files += synth/empty_midi_soundtrack.cpp
+threed_gui_src_files += synth/midi_decode.cpp
+threed_gui_src_files += synth/midi_input.cpp
+
+threed_nogui_src_files += synth/midi_input_none.cpp
 
 shader_files += synth_fir_coeff.comp.glsl
 shader_files += synth_oscillator.comp.glsl
