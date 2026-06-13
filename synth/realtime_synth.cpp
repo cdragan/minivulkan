@@ -66,26 +66,13 @@ namespace {
     typedef uint8_t NoteToVoice[128];
     NoteToVoice note_to_voice[Synth::max_channels];
 
-    // Per-channel MIDI expression state
-    float channel_pitch_bend[Synth::max_channels];  // semitones
-    float channel_mod_wheel[Synth::max_channels];   // 0..1
-    float channel_pressure[Synth::max_channels];    // 0..1
-
-    // TODO temporary test
-    // LFO driving vibrato (pitch), depth scaled by the mod wheel.  Bipolar [-1, 1]
-    // so the pitch swings symmetrically around the channel bend.  ~6 Hz.
-    static const Synth::LFODescriptor vibrato_lfo = { Synth::sine_wave, 0, 167, -1.0f, 2.0f };
-
-    // TODO temporary test
-    // LFO driving tremolo (volume), depth scaled by pressure / aftertouch.  Unipolar
-    // [0, 1] so the gain never inverts phase and never exceeds 1.  ~5 Hz.
-    static const Synth::LFODescriptor tremolo_lfo = { Synth::sine_wave, 0, 200, 0.0f, 1.0f };
-
     // Maximum vibrato swing in semitones when the mod wheel is fully on
     constexpr float vibrato_depth_semitones = 0.5f;
 
-    // Continuous LFO phase shared by all voices, advanced once per render step
-    uint32_t modulation_lfo_tick;
+    // Vibrato LFO period at rest (~6 Hz); the mod wheel shortens it toward a faster sweep, so
+    // raising the wheel makes the vibrato both deeper and faster (a parameter-sourced LFO rate).
+    constexpr uint16_t vibrato_period_ms     = 167;
+    constexpr float    vibrato_rate_range_ms = 107.0f;  // full wheel -> ~60 ms (~16 Hz)
 
     // Default pitch bend range in semitones (standard MIDI default is +/- 2)
     constexpr float default_pitch_bend_range_semitones = 2.0f;
@@ -100,23 +87,21 @@ namespace {
         uint8_t  instrument;
         uint8_t  osc_ids[max_unison];    // Oscillator slots owned by this voice
         uint8_t  osc_count;              // Number of live oscillator slots owned (0 = none)
-        float    velocity;               // Note-on velocity, 0..1
-        float    aftertouch;             // Per-note polyphonic aftertouch pressure, 0..1
         bool     releasing;              // True after note-off, until the volume envelope finishes
     };
 
     Voice voices[max_voices];
 
     using Synth::WaveType;
-    using Synth::no_wave;
-    using Synth::sine_wave;
     using Synth::LFODescriptor;
     using Synth::EnvelopeDescriptor;
-    using Synth::TargetBinding;
+    using Synth::InstrModBinding;
+    using Synth::ModInput;
+    using Synth::ModSource;
     using Synth::ModTarget;
     using Synth::ParamScope;
+    using Synth::SourceOp;
     using enum Synth::ModTarget;
-    using enum Synth::ParamScope;
 
     constexpr uint32_t max_envelope_points = 8;
 
@@ -130,40 +115,85 @@ namespace {
 
     LFODescriptor lfo_descs[10];
 
-    // Parameter descriptor ids (1-based) shared by instrument bindings and the
-    // descriptor setup in init_modulation.
-    constexpr uint16_t volume_param_desc_id         = 1; // per-voice ADSR volume envelope
-    constexpr uint16_t pitch_param_desc_id          = 2; // per-voice MIDI pitch bend
-    constexpr uint16_t demo_cutoff_param_desc_id    = 3; // supersaw demo: swept low pass
-    constexpr uint16_t demo_release_param_desc_base = 4; // supersaw demo: per-unison volume (ids 4..4+max_unison-1)
+    // Envelope ids (1-based into envelopes[]); set up in init_modulation.
+    constexpr uint16_t volume_envelope_id        = 1;   // envelopes[0]
+    constexpr uint16_t cutoff_sweep_envelope_id  = 2;   // envelopes[1]; one sweep shared by all unison cutoff nodes
+    constexpr uint16_t release_envelope_base     = 3;   // base id; per-unison release id = base + unison_idx
+    constexpr float    cutoff_base_hz            = 400.0f;
 
-    // Raw MIDI input a parameter reads as an additive source
-    enum MidiSource : uint8_t {
-        midi_none,
-        midi_pitch_bend
+    // LFO descriptor ids (1-based into lfo_descs[]); set up in init_modulation.
+    constexpr uint16_t vibrato_lfo_desc_id = 1;   // sine vibrato driving voice pitch
+    constexpr uint16_t tremolo_lfo_desc_id = 2;   // sine tremolo gain driving voice volume
+
+    // parameters[] is partitioned into a sentinel (param 0) then per-owner blocks.  Each owner has a
+    // fixed set of roles; a source addresses a parameter by computing its block index.  A modulation
+    // target that gets graph nodes occupies a {dest, env, lfo} role triple (the dest is the value the
+    // consumer reads; env and lfo are its optional generator leaves).  The per-voice input leaves are
+    // the MIDI sources a binding can route from (see resolve_source).
+    enum ChannelParamRole : uint32_t {
+        chan_param_bend,
+        chan_param_mod_wheel,
+        chan_param_pressure,
+        num_channel_roles
+    };
+    enum VoiceParamRole : uint32_t {
+        voice_input_velocity,
+        voice_input_aftertouch,
+        voice_input_pressure_combine,
+        voice_pitch_dest,
+        voice_pitch_env,
+        voice_pitch_lfo,
+        num_voice_roles
+    };
+    enum OscParamRole : uint32_t {
+        osc_volume_dest,
+        osc_volume_env,
+        osc_volume_lfo,
+        osc_lowpass_dest,
+        osc_lowpass_env,
+        osc_lowpass_lfo,
+        osc_highpass_dest,
+        osc_highpass_env,
+        osc_highpass_lfo,
+        num_osc_roles
     };
 
-    struct ParameterDescriptor {
-        float      base_value;        // Initial base value (can be overridden from MIDI)
-        uint32_t   envelope_desc_id;  // Id of envelope descriptor
-        uint32_t   lfo_desc_id;       // Id of LFO descriptor
-        MidiSource midi_source;       // Raw MIDI input added to the value
-    };
-    ParameterDescriptor param_descs[16];
+    constexpr uint32_t channel_block_base = 1;
+    constexpr uint32_t voice_block_base   = channel_block_base + Synth::max_channels * num_channel_roles;
+    constexpr uint32_t osc_block_base     = voice_block_base + max_voices * num_voice_roles;
+    constexpr uint32_t total_params       = osc_block_base + max_oscillators * num_osc_roles;
 
-    struct Parameter {
-        bool                  active;           // True while this slot is in use
-        float                 cur_value;        // Current value of the parameter
-        uint16_t              param_desc_id;    // Id of parameter descriptor
-        Synth::ParameterState state;            // Running modulation state (envelope and LFO ticks)
-        uint8_t               voice_id;         // Voice id where this parameter is playing
+    constexpr uint32_t channel_param(uint32_t channel, uint32_t role)
+    {
+        return channel_block_base + channel * num_channel_roles + role;
+    }
+    constexpr uint32_t voice_param(uint32_t voice, uint32_t role)
+    {
+        return voice_block_base + voice * num_voice_roles + role;
+    }
+    constexpr uint32_t osc_param(uint32_t osc, uint32_t role)
+    {
+        return osc_block_base + osc * num_osc_roles + role;
+    }
+
+    // Modulation targets which get graph nodes, with their node placement.  per_oscillator targets
+    // build a node triple per unison oscillator; the rest build one per voice.  dest_role is the
+    // triple's first role; the env and lfo generator roles are dest_role + 1 and dest_role + 2.
+    // Targets absent here are unmodulated constants read straight from the binding's base_value.
+    struct ModTargetNode {
+        ModTarget target;
+        bool      per_oscillator;
+        uint32_t  dest_role;
+    };
+    constexpr ModTargetNode mod_target_nodes[] = {
+        { mod_pitch,           false, voice_pitch_dest  },
+        { mod_volume,          true,  osc_volume_dest   },
+        { mod_lowpass_cutoff,  true,  osc_lowpass_dest  },
+        { mod_highpass_cutoff, true,  osc_highpass_dest },
     };
 
-    // Parameter pool.  Slot 0 is a reserved sentinel (param id 0 = none).  Sized for
-    // the worst case where every modulation target is oscillator-scope: one parameter
-    // per oscillator per target.
-    constexpr uint32_t max_params = max_oscillators * Synth::num_mod_targets + 1;
-    Parameter params[max_params];
+    Synth::Parameter       parameters[total_params];
+    Synth::ParamDescriptor param_descs[total_params];
 
     // Finds the first free slot (active == false) in a pool over [1, count),
     // skipping slot 0 which is a reserved sentinel.  Returns 0 if none is free.
@@ -177,55 +207,6 @@ namespace {
         }
 
         return 0;
-    }
-
-    // Resolves the raw MIDI source for a parameter into an additive value.
-    float eval_midi_source(const MidiSource midi_source, const Voice& owning_voice)
-    {
-        switch (midi_source) {
-            case midi_pitch_bend:
-                return channel_pitch_bend[owning_voice.channel];
-
-            case midi_none:
-                break;
-        }
-
-        return 0.0f;
-    }
-
-    void advance_param(const uint32_t param_id)
-    {
-        Parameter& param = params[param_id];
-
-        if ( ! param.param_desc_id) {
-            param.cur_value = 0;
-            return;
-        }
-
-        const ParameterDescriptor& desc = param_descs[param.param_desc_id - 1];
-
-        const EnvelopeDescriptor* envelope = nullptr;
-        if (desc.envelope_desc_id) {
-            envelope = &envelopes[desc.envelope_desc_id - 1].desc;
-        }
-
-        const LFODescriptor* lfo = nullptr;
-        if (desc.lfo_desc_id) {
-            lfo = &lfo_descs[desc.lfo_desc_id - 1];
-        }
-
-        const Voice& owning_voice = voices[param.voice_id];
-        const bool   sustain      = owning_voice.active && ! owning_voice.releasing;
-        const float  midi_value   = eval_midi_source(desc.midi_source, owning_voice);
-
-        param.cur_value = Synth::eval_parameter(desc.base_value,
-                                                envelope,
-                                                sustain,
-                                                lfo,
-                                                midi_value,
-                                                &param.state,
-                                                rt_step_samples,
-                                                Synth::rt_sampling_rate);
     }
 
     namespace ShaderParams {
@@ -244,7 +225,7 @@ namespace {
             uint32_t out_sound_offs;
             float    phase;
             float    phase_step;
-            WaveType osc_type[2];
+            uint32_t osc_type[2];    // WaveType, raw uint to match the shader layout
             float    duty[2];
             float    osc_mix;
             uint32_t osc_mode;
@@ -500,11 +481,6 @@ namespace {
         float    osc_mix;                   // Mix between osc_type[0] and osc_type[1] (0..1)
         float    fm_index;                  // FM modulation depth
 
-        // Bound parameter slot per modulation target (0 = unbound).  Voice-scope
-        // targets share one id across all the voice's oscillators; oscillator-scope
-        // targets get their own.
-        uint16_t param_ids[Synth::num_mod_targets];
-
         uint8_t  unison_idx;                // This oscillator's index in its voice's osc_ids list
         uint8_t  voice_id;                  // Voice which owns this oscillator (0 = none/free)
         bool     clear_fir_hist;            // Set on note-on of a filtered slot; the next render
@@ -517,12 +493,12 @@ namespace {
     // TODO Runtime instrument definition.  Hardcoded for now; an editor will
     // populate these later.  binding[] is filled in init_instruments.
     struct RuntimeInstrument {
-        WaveType     osc_type[2];                  // osc_type[1] == no_wave means single oscillator
-        uint32_t     osc_mode;                     // osc_mode_blend, osc_mode_fm or osc_mode_hard_sync
-        float        mod_ratio;                    // FM: modulator/carrier freq ratio.  Hard sync: slave cycles per master cycle
-        uint32_t     unison_count;                 // Number of oscillator slots a note of this instrument uses (1 = mono)
-        float        detune_semitones[max_unison]; // Per-oscillator pitch offset in semitones; entry [idx] applies to the idx-th allocated oscillator
-        TargetBinding binding[Synth::num_mod_targets]; // Per-target scope + base value + per-unison descriptor
+        WaveType        osc_type[2];                     // osc_type[1] == WaveType::no_wave means single oscillator
+        uint32_t        osc_mode;                        // osc_mode_blend, osc_mode_fm or osc_mode_hard_sync
+        float           mod_ratio;                       // FM: modulator/carrier freq ratio.  Hard sync: slave cycles per master cycle
+        uint32_t        unison_count;                    // Number of oscillator slots a note of this instrument uses (1 = mono)
+        float           detune_semitones[max_unison];    // Per-oscillator pitch offset in semitones; entry [idx] applies to the idx-th allocated oscillator
+        InstrModBinding binding[Synth::num_mod_targets]; // Per-target complete modulation declaration
     };
     // Index 0 is a plain mono sine.  Index 1 is a 7-voice supersaw with a
     // symmetric detune spread of about +/- 18 cents.  Index 2 is a sine-on-sine
@@ -530,12 +506,12 @@ namespace {
     // a sine master sets the pitch and a sawtooth slave is synced at ratio 2.5.
     // Index 4 is a mellow piano-ish voice: a triangle (sawtooth at duty 0.5).
     RuntimeInstrument instruments[5] = {
-        { { sine_wave,            no_wave },        osc_mode_blend,     0.0f, 1,          { 0.0f }, { } },
-        { { Synth::sawtooth_wave, no_wave },        osc_mode_blend,     0.0f, max_unison,
+        { { WaveType::sine_wave,            WaveType::no_wave },        osc_mode_blend,     0.0f, 1,          { 0.0f }, { } },
+        { { Synth::WaveType::sawtooth_wave, WaveType::no_wave },        osc_mode_blend,     0.0f, max_unison,
           { -0.18f, -0.12f, -0.06f, 0.0f, 0.06f, 0.12f, 0.18f }, { } },
-        { { sine_wave,            sine_wave },      osc_mode_fm,        2.0f, 1,          { 0.0f }, { } },
-        { { sine_wave,            Synth::sawtooth_wave }, osc_mode_hard_sync, 2.5f, 1,    { 0.0f }, { } },
-        { { Synth::sawtooth_wave, no_wave },        osc_mode_blend,     0.0f, 1,          { 0.0f }, { } }
+        { { WaveType::sine_wave,            WaveType::sine_wave },      osc_mode_fm,        2.0f, 1,          { 0.0f }, { } },
+        { { WaveType::sine_wave,            Synth::WaveType::sawtooth_wave }, osc_mode_hard_sync, 2.5f, 1,    { 0.0f }, { } },
+        { { Synth::WaveType::sawtooth_wave, WaveType::no_wave },        osc_mode_blend,     0.0f, 1,          { 0.0f }, { } }
     };
 
     static constexpr uint32_t max_mix_channels = Synth::max_channels;
@@ -575,20 +551,22 @@ namespace {
     };
     FirSlot fir_slots[max_oscillators];
 
-    // Descriptor id an instrument binds for a target at a given unison index,
-    // honoring scope (voice scope shares index 0).  0 means unbound.
-    static uint16_t binding_desc_id(const RuntimeInstrument& instrument, ModTarget target, uint32_t unison_idx)
+    // Envelope id an instrument binds for a target at a given unison index,
+    // honoring scope (voice scope shares index 0).  0 means no envelope.
+    static uint16_t binding_envelope_id(const RuntimeInstrument& instrument, ModTarget target, uint32_t unison_idx)
     {
-        const TargetBinding& binding = instrument.binding[target];
-        const uint32_t       slot    = (binding.scope == scope_voice) ? 0u : unison_idx;
-        return binding.param_desc_id[slot];
+        const InstrModBinding& binding = instrument.binding[target];
+        const uint32_t       slot    = (binding.scope == ParamScope::voice) ? 0u : unison_idx;
+        return binding.envelope_desc_id[slot];
     }
 
-    // An oscillator (unison index) has a filter iff either cutoff target is bound.
+    // An oscillator (unison index) has a filter iff a cutoff target has an envelope or a nonzero base.
     static bool osc_has_filter(const RuntimeInstrument& instrument, uint32_t unison_idx)
     {
-        return binding_desc_id(instrument, mod_lowpass_cutoff, unison_idx)
-            || binding_desc_id(instrument, mod_highpass_cutoff, unison_idx);
+        return binding_envelope_id(instrument, mod_lowpass_cutoff, unison_idx)
+            || binding_envelope_id(instrument, mod_highpass_cutoff, unison_idx)
+            || instrument.binding[mod_lowpass_cutoff].base_value  != 0.0f
+            || instrument.binding[mod_highpass_cutoff].base_value != 0.0f;
     }
 
     static bool any_instrument_has_filter()
@@ -647,7 +625,7 @@ namespace {
         for (uint32_t effect_idx = 0; effect_idx < chain->num_effects; effect_idx++) {
             EffectInstance& instance = chain->effects[effect_idx];
 
-            const uint32_t num_state_floats = ( ! instance.enabled || instance.type == Synth::effect_none)
+            const uint32_t num_state_floats = ( ! instance.enabled || instance.type == Synth::EffectType::none)
                                               ? 0
                                               : Synth::effect_state_floats(instance.type);
             if ( ! num_state_floats) {
@@ -679,11 +657,11 @@ namespace {
         // disabled here so its repeating echo does not obscure the per-note FIR cutoff
         // sweep during the filter listen-check.
         channel_chains[0].num_effects = 1;
-        channel_chains[0].effects[0]  = { Synth::effect_distortion, true, { 5.0f, 1.0f }, 0 };
+        channel_chains[0].effects[0]  = { Synth::EffectType::distortion, true, { 5.0f, 1.0f }, 0 };
 
         // Channel 1: a single LFO-modulated chorus.
         channel_chains[1].num_effects = 1;
-        channel_chains[1].effects[0]  = { Synth::effect_chorus, true, { 1.5f, 440.0f, 0.5f }, 0 };
+        channel_chains[1].effects[0]  = { Synth::EffectType::chorus, true, { 1.5f, 440.0f, 0.5f }, 0 };
 
         // Master: reverb then a gentle musical compressor.  attack/release are smoothing
         // coefficients (closer to 1 is slower), roughly 0.2 ms attack and 46 ms release
@@ -698,10 +676,10 @@ namespace {
         // GUI-configured.  params[0] = lowpass Hz, params[1] = highpass Hz (0 = off).
         constexpr float demo_fir_lowpass_hz = 800.0f;
         master_chain.num_effects = 3;
-        master_chain.effects[0]  = { Synth::effect_reverb, true, { 0.7f, 0.5f, 0.3f, 0.0f, 0.0f }, 0 };
-        master_chain.effects[1]  = { Synth::effect_compressor, true,
+        master_chain.effects[0]  = { Synth::EffectType::reverb, true, { 0.7f, 0.5f, 0.3f, 0.0f, 0.0f }, 0 };
+        master_chain.effects[1]  = { Synth::EffectType::compressor, true,
             { compressor_threshold, compressor_ratio, compressor_attack, compressor_release, compressor_makeup }, 0 };
-        master_chain.effects[2]  = { Synth::effect_fir, true, { demo_fir_lowpass_hz, 0.0f }, 0 };
+        master_chain.effects[2]  = { Synth::EffectType::fir, true, { demo_fir_lowpass_hz, 0.0f }, 0 };
 
         effect_state_fill_offset = 0;
         effect_state_fill_bytes  = 0;
@@ -721,7 +699,7 @@ namespace {
         for (uint32_t effect_idx = 0; effect_idx < chain.num_effects; effect_idx++) {
             const EffectInstance& instance = chain.effects[effect_idx];
 
-            if ( ! instance.enabled || instance.type == Synth::effect_none) {
+            if ( ! instance.enabled || instance.type == Synth::EffectType::none) {
                 continue;
             }
 
@@ -745,18 +723,42 @@ namespace Synth {
     void stop_synth_os();
 }
 
-// Fills each instrument's per-target binding table.  Volume and pitch are per-voice
-// for every instrument; the rest default to unbound constants.  Per-instrument
-// specifics (FM depth, duty, the supersaw demo) follow.
+// Fills each instrument's per-target modulation declarations.  Every instrument gets the same
+// default pitch and volume modulation; per-instrument specifics (FM depth, duty, the supersaw
+// demo) follow.  note-on expands these declarations into graph nodes.
 static void init_instruments()
 {
     for (RuntimeInstrument& instr : instruments) {
-        instr.binding[mod_volume].scope            = scope_voice;
-        instr.binding[mod_volume].param_desc_id[0] = volume_param_desc_id;
-        instr.binding[mod_pitch].scope             = scope_voice;
-        instr.binding[mod_pitch].param_desc_id[0]  = pitch_param_desc_id;
-        instr.binding[mod_panning].scope           = scope_voice;
-        instr.binding[mod_panning].base_value      = 0.5f;   // centered
+        // Pitch: channel bend added on top of a mod-wheel-scaled vibrato whose rate also speeds
+        // up with the wheel (a sourced LFO rate).  No envelope.
+        InstrModBinding& pitch = instr.binding[mod_pitch];
+        pitch.scope            = ParamScope::voice;
+        pitch.base_value       = 0.0f;
+        pitch.lfo_desc_id      = vibrato_lfo_desc_id;
+        pitch.lfo_op           = SourceOp::add;
+        pitch.lfo_depth_source = ModSource::mod_wheel;
+        pitch.lfo_depth        = vibrato_depth_semitones;
+        pitch.lfo_rate_source  = ModSource::mod_wheel;
+        pitch.lfo_rate_scale   = -vibrato_rate_range_ms;
+        pitch.num_inputs       = 1;
+        pitch.inputs[0]        = { ModSource::pitch_bend, SourceOp::add, 1.0f };
+
+        // Volume: an ADSR envelope, attenuated by a pressure-driven tremolo LFO and scaled by note
+        // velocity.  Voice scope shares envelope descriptor [0] across the (mono) oscillator.
+        InstrModBinding& volume = instr.binding[mod_volume];
+        volume.scope               = ParamScope::voice;
+        volume.base_value          = 0.0f;
+        volume.envelope_desc_id[0] = volume_envelope_id;
+        volume.lfo_desc_id         = tremolo_lfo_desc_id;
+        volume.lfo_op              = SourceOp::multiply;
+        volume.lfo_depth_source    = ModSource::pressure_combine;
+        volume.lfo_depth           = 1.0f;
+        volume.lfo_rate_source     = ModSource::none;
+        volume.num_inputs          = 1;
+        volume.inputs[0]           = { ModSource::velocity, SourceOp::multiply, 1.0f };
+
+        instr.binding[mod_panning].scope      = ParamScope::voice;
+        instr.binding[mod_panning].base_value = 0.5f;   // centered constant
     }
 
     // FM voice: constant FM depth 3.0.
@@ -765,16 +767,17 @@ static void init_instruments()
     // Triangle-ish piano: sawtooth at duty 0.5.
     instruments[4].binding[mod_duty0].base_value = 0.5f;
 
-    // Supersaw demo: each unison oscillator gets its own swept low pass and its own
-    // volume envelope with a staggered release, so the unison layers fade out at
-    // audibly different rates.
+    // Supersaw demo: each unison oscillator gets its own swept low pass and its own volume envelope
+    // with a staggered release, so the unison layers fade out at audibly different rates.  Volume
+    // keeps the default tremolo + velocity modulation; only its scope and per-unison envelopes change.
+    InstrModBinding& supersaw_cutoff = instruments[1].binding[mod_lowpass_cutoff];
+    supersaw_cutoff.scope      = ParamScope::oscillator;
+    supersaw_cutoff.base_value = cutoff_base_hz;
+    instruments[1].binding[mod_volume].scope = ParamScope::oscillator;
     for (uint32_t unison_idx = 0; unison_idx < max_unison; unison_idx++) {
-        instruments[1].binding[mod_lowpass_cutoff].scope                     = scope_oscillator;
-        instruments[1].binding[mod_lowpass_cutoff].param_desc_id[unison_idx] = demo_cutoff_param_desc_id;
-
-        instruments[1].binding[mod_volume].scope                     = scope_oscillator;
-        instruments[1].binding[mod_volume].param_desc_id[unison_idx] =
-            static_cast<uint16_t>(demo_release_param_desc_base + unison_idx);
+        supersaw_cutoff.envelope_desc_id[unison_idx]                 = cutoff_sweep_envelope_id;
+        instruments[1].binding[mod_volume].envelope_desc_id[unison_idx] =
+            static_cast<uint16_t>(release_envelope_base + unison_idx);
     }
 }
 
@@ -826,18 +829,6 @@ static void init_modulation()
     volume_envelope.desc.points[5] = { 210, 0x0800 };  // long tail to ~3% (sustain)
     volume_envelope.desc.points[6] = { 235, 0      };  // release (~145 ms)
 
-    // TODO Parameter descriptor 0 (id 1): volume driven by the ADSR envelope, no LFO.
-    param_descs[0].base_value       = 0.0f;
-    param_descs[0].envelope_desc_id = 1;
-    param_descs[0].lfo_desc_id      = 0;
-    param_descs[0].midi_source      = midi_none;
-
-    // TODO Parameter descriptor 1 (id 2): pitch driven by the MIDI pitch bend, no envelope or LFO.
-    param_descs[1].base_value       = 0.0f;
-    param_descs[1].envelope_desc_id = 0;
-    param_descs[1].lfo_desc_id      = 0;
-    param_descs[1].midi_source      = midi_pitch_bend;
-
     // TODO TEMP demo: cutoff sweep envelope (id 2 => envelopes[1]).  It decays from
     // the full sweep amount down to 0 over the note, so the cutoff parameter sweeps
     // from base + sweep_hz down to base.  Value 0xFFFF maps to sweep_hz Hz
@@ -856,19 +847,9 @@ static void init_modulation()
     cutoff_envelope.desc.points[1] = { 125, 0      };  // decays to base over ~0.75 s
     cutoff_envelope.desc.points[2] = { 126, 0      };  // stays at base (sustain)
 
-    // TODO TEMP demo: cutoff parameter descriptor (id 3): base 400 Hz floor plus the
-    // decaying sweep envelope, no LFO or MIDI.  Cutoff sweeps from ~6400 Hz down to
-    // 400 Hz over the note.
-    constexpr float cutoff_base_hz = 400.0f;
-    param_descs[2].base_value       = cutoff_base_hz;
-    param_descs[2].envelope_desc_id = 2;
-    param_descs[2].lfo_desc_id      = 0;
-    param_descs[2].midi_source      = midi_none;
-
-    // TEMP demo: per-unison volume envelopes for the supersaw (envelopes[2..] and
-    // parameter descriptor ids demo_release_param_desc_base..).  Each copies the
-    // piano volume envelope but lengthens the release so the unison layers tail off
-    // at audibly different rates.
+    // TEMP demo: per-unison volume envelopes for the supersaw (envelopes[2..]).  Each
+    // copies the piano volume envelope but lengthens the release so the unison layers
+    // tail off at audibly different rates.
     for (uint32_t unison_idx = 0; unison_idx < max_unison; unison_idx++) {
         StoredEnvelope& release_envelope = envelopes[2 + unison_idx];
         release_envelope = volume_envelope;
@@ -878,12 +859,20 @@ static void init_modulation()
         const uint16_t release_ticks = static_cast<uint16_t>(25 + unison_idx * 55);
         release_envelope.desc.points[6].position =
             static_cast<uint16_t>(release_envelope.desc.points[5].position + release_ticks);
+    }
 
-        ParameterDescriptor& release_desc = param_descs[demo_release_param_desc_base - 1 + unison_idx];
-        release_desc.base_value       = 0.0f;
-        release_desc.envelope_desc_id = 3 + unison_idx;   // envelopes[2 + unison_idx]
-        release_desc.lfo_desc_id      = 0;
-        release_desc.midi_source      = midi_none;
+    // Vibrato LFO: sine, ~6 Hz (167 ms); min/delta unused by eval_lfo_mod.
+    lfo_descs[vibrato_lfo_desc_id - 1] = { Synth::WaveType::sine_wave, 0, vibrato_period_ms, 0.0f, 1.0f };
+
+    // Tremolo LFO: sine, ~5 Hz (200 ms); min/delta unused by eval_lfo_mod.
+    lfo_descs[tremolo_lfo_desc_id - 1] = { Synth::WaveType::sine_wave, 0, 200, 0.0f, 1.0f };
+
+    // Each channel's pitch bend, mod wheel and pressure are externally-driven leaves;
+    // propagate_parameters must not overwrite them with base.
+    for (uint32_t channel = 0; channel < Synth::max_channels; channel++) {
+        param_descs[channel_param(channel, chan_param_bend)].is_leaf      = true;
+        param_descs[channel_param(channel, chan_param_mod_wheel)].is_leaf = true;
+        param_descs[channel_param(channel, chan_param_pressure)].is_leaf  = true;
     }
 }
 
@@ -895,7 +884,7 @@ static bool allocate_oscillators(uint8_t*                 osc_ids,
     uint32_t allocated = 0;
 
     for (uint32_t osc_idx = 1; osc_idx < max_oscillators && allocated < num_osc; osc_idx++) {
-        if (oscillators[osc_idx].osc_type[0] == no_wave) {
+        if (oscillators[osc_idx].osc_type[0] == WaveType::no_wave) {
             oscillators[osc_idx].voice_id    = static_cast<uint8_t>(voice_idx);
             oscillators[osc_idx].osc_type[0] = instrument.osc_type[0];
             osc_ids[allocated]               = static_cast<uint8_t>(osc_idx);
@@ -908,7 +897,7 @@ static bool allocate_oscillators(uint8_t*                 osc_ids,
 
             Oscillator& osc = oscillators[osc_ids[rollback_idx]];
             osc.voice_id    = 0;
-            osc.osc_type[0] = no_wave;
+            osc.osc_type[0] = WaveType::no_wave;
 
             osc_ids[rollback_idx] = 0;
         }
@@ -1151,60 +1140,17 @@ static const RuntimeInstrument& voice_instrument(const Voice& voice)
     return instruments[voice.instrument < std::size(instruments) ? voice.instrument : 0];
 }
 
-// Frees the parameters an oscillator owns for one binding scope and clears their
-// ids.  A voice-scope param is shared, so free it through one oscillator only.
-static void free_oscillator_params(Oscillator& osc, const RuntimeInstrument& instrument, ParamScope scope)
-{
-    for (uint32_t target = 0; target < Synth::num_mod_targets; target++) {
-        if (instrument.binding[target].scope != scope) {
-            continue;
-        }
-        const uint16_t param_id = osc.param_ids[target];
-        if (param_id) {
-            params[param_id].active = false;
-            osc.param_ids[target]   = 0;
-        }
-    }
-}
-
-// Allocates a fresh parameter slot bound to a descriptor for a voice; returns its
-// id, or 0 when the pool is full.
-static uint16_t alloc_param(uint16_t param_desc_id, uint32_t voice_idx)
-{
-    const uint32_t param_id = allocate_unused_slot(params, max_params, &Parameter::active);
-    if ( ! param_id) {
-        return 0;
-    }
-
-    Parameter& param    = params[param_id];
-    param.active        = true;
-    param.cur_value     = 0.0f;
-    param.param_desc_id = param_desc_id;
-    param.state         = { };
-    param.voice_id      = static_cast<uint8_t>(voice_idx);
-
-    return static_cast<uint16_t>(param_id);
-}
-
 // Returns a partially-allocated note to the free pool when allocation fails
 // part-way through, and reclaims a still-alive note on re-trigger.  osc_ids[0,
-// osc_count) is kept exactly the live oscillators, so this frees all of them and any
-// ids actually set; it is safe at any failure point.
+// osc_count) is kept exactly the live oscillators, so this frees all of them; it is
+// safe at any failure point.
 static void drop_voice(uint32_t voice_idx, uint32_t channel, uint32_t note)
 {
-    Voice&                   voice      = voices[voice_idx];
-    const RuntimeInstrument& instrument = voice_instrument(voice);
-
-    // Voice-scope params are shared by all the voice's oscillators, so free them
-    // once (through osc_ids[0]) before any oscillator's shared ids are cleared.
-    if (voice.osc_count) {
-        free_oscillator_params(oscillators[voice.osc_ids[0]], instrument, scope_voice);
-    }
+    Voice& voice = voices[voice_idx];
 
     for (uint32_t unison_idx = 0; unison_idx < voice.osc_count; ++unison_idx) {
         Oscillator& osc = oscillators[voice.osc_ids[unison_idx]];
-        free_oscillator_params(osc, instrument, scope_oscillator);
-        osc.osc_type[0] = no_wave;
+        osc.osc_type[0] = WaveType::no_wave;
         osc.voice_id    = 0;
     }
     voice.osc_count = 0;
@@ -1213,50 +1159,91 @@ static void drop_voice(uint32_t voice_idx, uint32_t channel, uint32_t note)
     note_to_voice[channel][note] = 0;
 }
 
-// Allocates the bound parameters for a note: voice-scope targets get one shared
-// parameter written into every oscillator; oscillator-scope targets get one per
-// oscillator.  Unbound slots stay 0.  Returns false (pool full) leaving the caller
-// to drop the voice.
-static bool allocate_note_params(uint32_t voice_idx, const RuntimeInstrument& instrument, uint32_t unison_count)
+// Maps a binding's input-source role to the concrete parameter id of the channel or voice leaf
+// that carries its live value.  none (and anything unrecognized) maps to the value-0 sentinel.
+static uint32_t resolve_source(ModSource source, uint32_t channel, uint32_t voice_idx)
 {
-    const Voice& voice = voices[voice_idx];
+    switch (source) {
+        case ModSource::pitch_bend:       return channel_param(channel, chan_param_bend);
+        case ModSource::mod_wheel:        return channel_param(channel, chan_param_mod_wheel);
+        case ModSource::channel_pressure: return channel_param(channel, chan_param_pressure);
+        case ModSource::velocity:         return voice_param(voice_idx, voice_input_velocity);
+        case ModSource::aftertouch:       return voice_param(voice_idx, voice_input_aftertouch);
+        case ModSource::pressure_combine: return voice_param(voice_idx, voice_input_pressure_combine);
+        default:                          return 0;
+    }
+}
 
-    for (uint32_t target = 0; target < Synth::num_mod_targets; target++) {
-        const TargetBinding& binding = instrument.binding[target];
+// Expands one target's binding into its {dest, env, lfo} node triple.  The dest folds, in order, an
+// additive edge from the envelope generator, an edge from the LFO generator (per lfo_op), then each
+// input edge with its resolved source; absent generators simply contribute no edge.  This is the
+// generic note-on expander: every modulation route is data in the binding, not code here.
+static void configure_target_nodes(uint32_t                 dest_node,
+                                   uint32_t                 env_node,
+                                   uint32_t                 lfo_node,
+                                   const RuntimeInstrument& instrument,
+                                   ModTarget                target,
+                                   uint32_t                 channel,
+                                   uint32_t                 voice_idx,
+                                   uint32_t                 unison_idx)
+{
+    const InstrModBinding& binding = instrument.binding[target];
 
-        if (binding.scope == scope_voice) {
-            const uint16_t desc_id = binding.param_desc_id[0];
-            if ( ! desc_id) {
-                continue;
-            }
+    param_descs[dest_node] = { };
+    uint32_t num_sources = 0;
 
-            const uint16_t param_id = alloc_param(desc_id, voice_idx);
-            if ( ! param_id) {
-                return false;
-            }
-
-            for (uint32_t unison_idx = 0; unison_idx < unison_count; ++unison_idx) {
-                oscillators[voice.osc_ids[unison_idx]].param_ids[target] = param_id;
-            }
-        }
-        else {
-            for (uint32_t unison_idx = 0; unison_idx < unison_count; ++unison_idx) {
-                const uint16_t desc_id = binding.param_desc_id[unison_idx];
-                if ( ! desc_id) {
-                    continue;
-                }
-
-                const uint16_t param_id = alloc_param(desc_id, voice_idx);
-                if ( ! param_id) {
-                    return false;
-                }
-
-                oscillators[voice.osc_ids[unison_idx]].param_ids[target] = param_id;
-            }
-        }
+    // Envelope generator leaf.  A leaf is never overwritten by propagate_parameters, but the pre-pass
+    // only writes it when it has a descriptor, so seed it to zero against stale values from a reused
+    // slot.  An absent envelope contributes no edge.
+    const uint16_t env_desc = binding_envelope_id(instrument, target, unison_idx);
+    param_descs[env_node] = { };
+    param_descs[env_node].is_leaf          = true;
+    param_descs[env_node].envelope_desc_id = env_desc;
+    parameters[env_node] = { };
+    parameters[env_node].sustain_voice = static_cast<uint16_t>(voice_idx);
+    if (env_desc) {
+        param_descs[dest_node].sources[num_sources++] =
+            { static_cast<uint16_t>(env_node), SourceOp::add, 1.0f };
     }
 
-    return true;
+    // LFO generator leaf, with depth and rate sources resolved from the binding.  The dest folds it
+    // in with the same op the LFO is shaped by.
+    param_descs[lfo_node] = { };
+    if (binding.lfo_desc_id) {
+        param_descs[lfo_node].is_leaf            = true;
+        param_descs[lfo_node].lfo_desc_id        = binding.lfo_desc_id;
+        param_descs[lfo_node].lfo_op             = binding.lfo_op;
+        param_descs[lfo_node].lfo_depth          = binding.lfo_depth;
+        param_descs[lfo_node].lfo_depth_param_id =
+            static_cast<uint16_t>(resolve_source(binding.lfo_depth_source, channel, voice_idx));
+        param_descs[lfo_node].lfo_rate_param_id  =
+            static_cast<uint16_t>(resolve_source(binding.lfo_rate_source, channel, voice_idx));
+        param_descs[lfo_node].lfo_rate_scale     = binding.lfo_rate_scale;
+        parameters[lfo_node] = { };   // fresh LFO phase per note
+        param_descs[dest_node].sources[num_sources++] =
+            { static_cast<uint16_t>(lfo_node), binding.lfo_op, 1.0f };
+    }
+
+    // Input edges from resolved MIDI sources.
+    for (uint32_t input_idx = 0; input_idx < binding.num_inputs; input_idx++) {
+        const ModInput& input = binding.inputs[input_idx];
+        param_descs[dest_node].sources[num_sources++] =
+            { static_cast<uint16_t>(resolve_source(input.source, channel, voice_idx)), input.op, input.multiplier };
+    }
+
+    param_descs[dest_node].is_leaf     = false;
+    param_descs[dest_node].base_value  = binding.base_value;
+    param_descs[dest_node].num_sources = static_cast<uint16_t>(num_sources);
+}
+
+// Seeds an externally-driven leaf (a MIDI input source) with an initial value+prev so a consumer
+// reads it with zero lag on the first step.
+static void set_input_leaf(uint32_t node, float value)
+{
+    param_descs[node] = { };
+    param_descs[node].is_leaf   = true;
+    parameters[node].value      = value;
+    parameters[node].prev_value = value;
 }
 
 static void process_note_on(uint32_t delta_samples, const Synth::MidiEvent& event)
@@ -1285,15 +1272,32 @@ static void process_note_on(uint32_t delta_samples, const Synth::MidiEvent& even
     voice.channel    = static_cast<uint8_t>(channel);
     voice.instrument = target_instrument;
     voice.active     = true;
-    voice.velocity   = static_cast<float>(event.note_data) / 127.0f;
     voice.releasing  = false;
-    voice.aftertouch = 0.0f;
 
     note_to_voice[channel][note] = static_cast<uint8_t>(voice_idx);
 
     const RuntimeInstrument& instrument   = voice_instrument(voice);
     const uint32_t           unison_count = instrument.unison_count;
     assert(unison_count >= 1 && unison_count <= max_unison);
+
+    // Per-voice input leaves the bindings route from.  velocity is the note's constant; aftertouch
+    // starts at zero (driven by poly-aftertouch events); pressure_combine is recomputed each step as
+    // max(aftertouch, channel pressure) by advance_parameters.
+    const float velocity = static_cast<float>(event.note_data) / 127.0f;
+    set_input_leaf(voice_param(voice_idx, voice_input_velocity),         velocity);
+    set_input_leaf(voice_param(voice_idx, voice_input_aftertouch),       0.0f);
+    set_input_leaf(voice_param(voice_idx, voice_input_pressure_combine), 0.0f);
+
+    // Expand the voice-scoped target bindings (pitch) into their node triples.
+    for (const ModTargetNode& node : mod_target_nodes) {
+        if (node.per_oscillator) {
+            continue;
+        }
+        configure_target_nodes(voice_param(voice_idx, node.dest_role),
+                               voice_param(voice_idx, node.dest_role + 1),
+                               voice_param(voice_idx, node.dest_role + 2),
+                               instrument, node.target, channel, voice_idx, 0);
+    }
 
     if ( ! allocate_oscillators(voice.osc_ids, unison_count, voice_idx, instrument)) {
         d_printf("All oscillators are active, dropping note %u on channel %u\n", note, channel);
@@ -1322,15 +1326,21 @@ static void process_note_on(uint32_t delta_samples, const Synth::MidiEvent& even
         osc.old_volume     = 0.0f;   // ramp up from silence to avoid a click
         osc.old_panning    = instrument.binding[mod_panning].base_value;
 
-        for (uint32_t target = 0; target < Synth::num_mod_targets; target++) {
-            osc.param_ids[target] = 0;
+        // Expand the per-oscillator target bindings (volume, low pass, high pass) into their node
+        // triples at this oscillator's slot.
+        const uint32_t osc_slot = voice.osc_ids[unison_idx];
+        for (const ModTargetNode& node : mod_target_nodes) {
+            if (node.per_oscillator) {
+                configure_target_nodes(osc_param(osc_slot, node.dest_role),
+                                       osc_param(osc_slot, node.dest_role + 1),
+                                       osc_param(osc_slot, node.dest_role + 2),
+                                       instrument,
+                                       node.target,
+                                       channel,
+                                       voice_idx,
+                                       unison_idx);
+            }
         }
-    }
-
-    if ( ! allocate_note_params(voice_idx, instrument, unison_count)) {
-        d_printf("All parameters are active, dropping note %u on channel %u\n", note, channel);
-        drop_voice(voice_idx, channel, note);
-        return;
     }
 
     // Set up each oscillator's FIR once cutoff bindings are resolved.
@@ -1338,7 +1348,7 @@ static void process_note_on(uint32_t delta_samples, const Synth::MidiEvent& even
         Oscillator&    osc      = oscillators[voice.osc_ids[unison_idx]];
         const uint32_t osc_slot = voice.osc_ids[unison_idx];
 
-        if (osc.param_ids[mod_lowpass_cutoff] || osc.param_ids[mod_highpass_cutoff]) {
+        if (osc_has_filter(instrument, unison_idx)) {
             osc.fir_taps_offs   = fir_slots[osc_slot].coeff_offs;
             osc.fir_memory_offs = fir_slots[osc_slot].history_offs;
             osc.clear_fir_hist  = true;
@@ -1360,7 +1370,11 @@ static void process_aftertouch(uint32_t delta_samples, const Synth::MidiEvent& e
     if (voice_idx) {
         assert(voices[voice_idx].active);
 
-        voices[voice_idx].aftertouch = static_cast<float>(event.note_data) / 127.0f;
+        // Drive the per-note aftertouch leaf (value and prev_value) so the combine reads it with zero lag.
+        const uint32_t aftertouch_node = voice_param(voice_idx, voice_input_aftertouch);
+        const float    pressure        = static_cast<float>(event.note_data) / 127.0f;
+        parameters[aftertouch_node].value      = pressure;
+        parameters[aftertouch_node].prev_value = pressure;
     }
 }
 
@@ -1368,18 +1382,29 @@ static void process_controller(uint32_t delta_samples, const Synth::MidiEvent& e
 {
     // TODO Only the modulation wheel is supported for now; other controllers ignored.
     if (event.controller == mod_wheel_cc) {
-        channel_mod_wheel[event.channel] = static_cast<float>(event.controller_data) / 127.0f;
+        const uint32_t node  = channel_param(event.channel, chan_param_mod_wheel);
+        const float    value = static_cast<float>(event.controller_data) / 127.0f;
+        parameters[node].value      = value;
+        parameters[node].prev_value = value;
     }
 }
 
 static void process_pitch_bend(uint32_t delta_samples, const Synth::MidiEvent& event)
 {
-    channel_pitch_bend[event.channel] = Synth::pitch_bend_to_semitones(event.pitch_bend, default_pitch_bend_range_semitones);
+    // Drive the channel bend leaf (value and prev_value) so consumers read it with zero lag.
+    const uint32_t bend_node = channel_param(event.channel, chan_param_bend);
+    const float    bend      = Synth::pitch_bend_to_semitones(event.pitch_bend, default_pitch_bend_range_semitones);
+    parameters[bend_node].value      = bend;
+    parameters[bend_node].prev_value = bend;
 }
 
 static void process_channel_pressure(uint32_t delta_samples, const Synth::MidiEvent& event)
 {
-    channel_pressure[event.channel] = static_cast<float>(event.note_data) / 127.0f;
+    // Drive the per-channel pressure leaf (value and prev_value) so the combine reads it with zero lag.
+    const uint32_t pressure_node = channel_param(event.channel, chan_param_pressure);
+    const float    pressure      = static_cast<float>(event.note_data) / 127.0f;
+    parameters[pressure_node].value      = pressure;
+    parameters[pressure_node].prev_value = pressure;
 }
 
 using EventHandler = void (*)(uint32_t delta_samples, const Synth::MidiEvent& event);
@@ -1590,83 +1615,111 @@ static void temp_sweep_master_fir_cutoff()
 
     for (uint32_t effect_idx = 0; effect_idx < master_chain.num_effects; effect_idx++) {
         EffectInstance& instance = master_chain.effects[effect_idx];
-        if (instance.enabled && instance.type == Synth::effect_fir) {
+        if (instance.enabled && instance.type == Synth::EffectType::fir) {
             instance.params[0] = cutoff_hz;
         }
     }
 }
 
-// Resolves a modulation target for an oscillator: its bound parameter's value, or
-// the instrument's base value when the target is unbound.
-static float resolve_param(const Oscillator& osc, ModTarget target, const RuntimeInstrument& instrument)
+// Advances the modulation graph one control-rate step: first compute every generator leaf's value
+// (reading depth/rate sources from prev_value -> one-step delay), then propagate base+edges.
+static void advance_parameters()
 {
-    const uint16_t param_id = osc.param_ids[target];
-    return param_id ? params[param_id].cur_value : instrument.binding[target].base_value;
+    // Tremolo depth is the stronger of per-note aftertouch and per-channel pressure -- the one
+    // non-additive combine the graph cannot express as an edge.  Written value+prev for zero lag.
+    for (uint32_t voice_idx = 1; voice_idx < max_voices; voice_idx++) {
+        if (voices[voice_idx].active) {
+            const uint32_t channel    = voices[voice_idx].channel;
+            const float    aftertouch = parameters[voice_param(voice_idx, voice_input_aftertouch)].value;
+            const float    pressure   = parameters[channel_param(channel, chan_param_pressure)].value;
+            const float    depth      = aftertouch > pressure ? aftertouch : pressure;
+            const uint32_t depth_node = voice_param(voice_idx, voice_input_pressure_combine);
+
+            parameters[depth_node].value      = depth;
+            parameters[depth_node].prev_value = depth;
+        }
+    }
+
+    for (uint32_t node_idx = 1; node_idx < total_params; node_idx++) {
+        const Synth::ParamDescriptor& gen           = param_descs[node_idx];
+        const uint16_t                sustain_voice = parameters[node_idx].sustain_voice;
+
+        if (gen.envelope_desc_id) {
+            const Voice& owner   = voices[sustain_voice];
+            const bool   sustain = sustain_voice ? (owner.active && ! owner.releasing) : true;
+            parameters[node_idx].value = Synth::eval_envelope(envelopes[gen.envelope_desc_id - 1].desc,
+                                                               &parameters[node_idx].envelope, sustain);
+        }
+        else if (gen.lfo_desc_id) {
+            const float    depth  = gen.lfo_depth_param_id
+                                  ? parameters[gen.lfo_depth_param_id].prev_value * gen.lfo_depth
+                                  : gen.lfo_depth;
+            // A rate source offsets the LFO's own period (ms) by source * lfo_rate_scale; without one,
+            // period 0 tells eval_lfo_mod to use the descriptor period unchanged.  Clamp the offset
+            // result to at least 1 ms so an editor-supplied scale can never drive the period negative
+            // (unsigned underflow) or to zero (a divide-by-zero in the LFO phase).
+            const float    base_ms    = static_cast<float>(lfo_descs[gen.lfo_desc_id - 1].period_ms);
+            const float    offset_ms  = base_ms + parameters[gen.lfo_rate_param_id].prev_value * gen.lfo_rate_scale;
+            const uint32_t period     = gen.lfo_rate_param_id
+                                      ? static_cast<uint32_t>(offset_ms > 1.0f ? offset_ms : 1.0f)
+                                      : 0;
+            parameters[node_idx].value = Synth::eval_lfo_mod(lfo_descs[gen.lfo_desc_id - 1],
+                                                             parameters[node_idx].lfo_tick,
+                                                             rt_step_samples,
+                                                             Synth::rt_sampling_rate,
+                                                             period,
+                                                             depth,
+                                                             gen.lfo_op);
+            parameters[node_idx].lfo_tick++;
+        }
+    }
+
+    Synth::propagate_parameters(parameters, param_descs, total_params);
 }
 
 static void update_modulation()
 {
-    // TODO temporary test
-    // Evaluate the modulation LFOs once per step so every oscillator shares the
-    // same phase this step.
-    const float vibrato_wave = eval_lfo(vibrato_lfo, modulation_lfo_tick, rt_step_samples, Synth::rt_sampling_rate);  // [-1, 1]
-    const float tremolo_wave = eval_lfo(tremolo_lfo, modulation_lfo_tick, rt_step_samples, Synth::rt_sampling_rate);  // [0, 1]
+    advance_parameters();
 
-    // Phase 1: advance every active parameter exactly once this step.
-    for (uint32_t param_idx = 1; param_idx < max_params; param_idx++) {
-        if (params[param_idx].active) {
-            advance_param(param_idx);
-        }
-    }
-
-    // Phase 2: resolve each live oscillator's values from its bound parameters.
+    // Resolve each live oscillator's values from the modulation graph.
     constexpr float silence_threshold = 0.0005f;
 
     for (uint32_t osc_idx = 1; osc_idx < max_oscillators; osc_idx++) {
         Oscillator& osc = oscillators[osc_idx];
-        if (osc.osc_type[0] == no_wave) {
+        if (osc.osc_type[0] == WaveType::no_wave) {
             continue;
         }
 
-        const uint32_t           ch         = osc.midi_channel;
         Voice&                   voice      = voices[osc.voice_id];
         const RuntimeInstrument& instrument = voice_instrument(voice);
 
-        // Pitch adds the per-oscillator unison detune and the mod-wheel-scaled
-        // vibrato term on top of the bound pitch parameter.
-        osc.pitch    = resolve_param(osc, mod_pitch, instrument)
-                     + osc.detune
-                     + channel_mod_wheel[ch] * vibrato_depth_semitones * vibrato_wave;
-        osc.panning  = resolve_param(osc, mod_panning, instrument);
-        osc.duty[0]  = resolve_param(osc, mod_duty0, instrument);
-        osc.duty[1]  = resolve_param(osc, mod_duty1, instrument);
-        osc.osc_mix  = resolve_param(osc, mod_osc_mix, instrument);
-        osc.fm_index = resolve_param(osc, mod_fm_index, instrument);
+        // Pitch adds the per-oscillator unison detune on top of the graph pitch
+        // node (which already folds in channel bend and the vibrato generator).
+        osc.pitch    = parameters[voice_param(osc.voice_id, voice_pitch_dest)].value
+                     + osc.detune;
+        // These targets are unmodulated constants: read the instrument's base value.
+        osc.panning  = instrument.binding[mod_panning].base_value;
+        osc.duty[0]  = instrument.binding[mod_duty0].base_value;
+        osc.duty[1]  = instrument.binding[mod_duty1].base_value;
+        osc.osc_mix  = instrument.binding[mod_osc_mix].base_value;
+        osc.fm_index = instrument.binding[mod_fm_index].base_value;
 
-        // Volume is the bound (raw envelope) value scaled by velocity and tremolo.
-        // Tremolo depth follows the stronger of per-note aftertouch and channel
-        // pressure: depth 0 leaves the gain at 1; full depth oscillates it down to
-        // (1 - depth) and never above 1.
-        const float volume_value  = resolve_param(osc, mod_volume, instrument);
-        const float tremolo_depth = std::max(voice.aftertouch, channel_pressure[ch]);
-        const float tremolo_gain  = 1.0f - tremolo_depth * (1.0f - tremolo_wave);
-        osc.volume = voice.velocity * volume_value * tremolo_gain;
+        // Volume: the oscillator's volume dest node, which already folds the ADSR envelope, the tremolo
+        // LFO edge and the velocity input edge.  free-on-silence keys off the raw ADSR envelope node.
+        const float vol_env_value = parameters[osc_param(osc_idx, osc_volume_env)].value;
+        osc.volume = parameters[osc_param(osc_idx, osc_volume_dest)].value;
 
         // Free the oscillator once its volume decays to silence during release.
         // Oscillator-scope volume can release at different rates per unison index,
-        // so a voice's oscillators may free in different steps; voice-scope
-        // parameters are freed only when the voice's last oscillator frees.
-        if (voice.releasing && volume_value < silence_threshold) {
-            free_oscillator_params(osc, instrument, scope_oscillator);
-            osc.osc_type[0] = no_wave;
+        // so a voice's oscillators may free in different steps; the voice itself is
+        // finalized only when its last oscillator frees.
+        if (voice.releasing && vol_env_value < silence_threshold) {
+            osc.osc_type[0] = WaveType::no_wave;
             osc.voice_id    = 0;
 
-            // Oscillator-scope volume can release at different rates per unison index,
-            // so a voice's oscillators may free in different steps.  Remove this slot
-            // from the voice's live list without a search: its position is
-            // osc.unison_idx, so move the last live entry into it (and update that
-            // moved oscillator's stored position) to keep osc_ids[0, osc_count) the
-            // live set.
+            // Remove this slot from the voice's live list without a search: its position is
+            // osc.unison_idx, so move the last live entry into it (and update that moved
+            // oscillator's stored position) to keep osc_ids[0, osc_count) the live set.
             assert(voice.osc_count);
             --voice.osc_count;
             const uint8_t moved_slot           = voice.osc_ids[voice.osc_count];
@@ -1674,7 +1727,6 @@ static void update_modulation()
             oscillators[moved_slot].unison_idx = osc.unison_idx;
 
             if ( ! voice.osc_count) {
-                free_oscillator_params(osc, instrument, scope_voice);
                 note_to_voice[osc.midi_channel][osc.note] = 0;
                 voice.active = false;
 
@@ -1684,9 +1736,6 @@ static void update_modulation()
             }
         }
     }
-
-    // Advance the shared LFO phase exactly once per render step.
-    modulation_lfo_tick++;
 }
 
 // Rounds a cutoff in Hz to the int the coeff shader wants; <=0 disables the edge, else clamped to [1, Nyquist-1].
@@ -1709,22 +1758,11 @@ static uint32_t cutoff_hz_to_int(float value)
     return static_cast<uint32_t>(value + 0.5f);
 }
 
-// Resolves an oscillator cutoff parameter into an integer Hz for the coeff shader.
-// A disabled edge (param id 0) yields 0.
-static uint32_t cutoff_param_to_hz(uint16_t param_id)
-{
-    if ( ! param_id) {
-        return 0;
-    }
-
-    return cutoff_hz_to_int(params[param_id].cur_value);
-}
-
 static void set_effect_fir_coeffs(const EffectChain& chain, uint32_t* cur_param_offs)
 {
     for (uint32_t effect_idx = 0; effect_idx < chain.num_effects; effect_idx++) {
         const EffectInstance& instance = chain.effects[effect_idx];
-        if ( ! instance.enabled || instance.type != Synth::effect_fir) {
+        if ( ! instance.enabled || instance.type != Synth::EffectType::fir) {
             continue;
         }
 
@@ -1742,7 +1780,7 @@ static uint32_t count_effect_fir(const EffectChain& chain)
     uint32_t count = 0;
     for (uint32_t effect_idx = 0; effect_idx < chain.num_effects; effect_idx++) {
         const EffectInstance& instance = chain.effects[effect_idx];
-        if (instance.enabled && instance.type == Synth::effect_fir) {
+        if (instance.enabled && instance.type == Synth::EffectType::fir) {
             ++count;
         }
     }
@@ -1754,7 +1792,7 @@ static void compute_fir_coefficients()
 {
     uint32_t num_active_filters = 0;
     for (uint32_t osc_idx = 1; osc_idx < max_oscillators; osc_idx++) {
-        if (oscillators[osc_idx].osc_type[0] != no_wave && oscillators[osc_idx].fir_taps_offs) {
+        if (oscillators[osc_idx].osc_type[0] != WaveType::no_wave && oscillators[osc_idx].fir_taps_offs) {
             ++num_active_filters;
         }
     }
@@ -1774,14 +1812,14 @@ static void compute_fir_coefficients()
     uint32_t cur_param_offs = param_offs;
     for (uint32_t osc_idx = 1; osc_idx < max_oscillators; osc_idx++) {
         const Oscillator& osc = oscillators[osc_idx];
-        if (osc.osc_type[0] == no_wave || ! osc.fir_taps_offs) {
+        if (osc.osc_type[0] == WaveType::no_wave || ! osc.fir_taps_offs) {
             continue;
         }
 
         ShaderParams::FIRCoeff& param = get_param<ShaderParams::FIRCoeff>(cur_param_offs);
         param.taps_offs            = osc.fir_taps_offs / 4;
-        param.lowpass_cutoff_freq  = cutoff_param_to_hz(osc.param_ids[mod_lowpass_cutoff]);
-        param.highpass_cutoff_freq = cutoff_param_to_hz(osc.param_ids[mod_highpass_cutoff]);
+        param.lowpass_cutoff_freq  = cutoff_hz_to_int(parameters[osc_param(osc_idx, osc_lowpass_dest)].value);
+        param.highpass_cutoff_freq = cutoff_hz_to_int(parameters[osc_param(osc_idx, osc_highpass_dest)].value);
 
         cur_param_offs += static_cast<uint32_t>(sizeof(ShaderParams::FIRCoeff));
     }
@@ -1876,7 +1914,7 @@ static void render_audio_step()
     uint32_t channel_osc_count[max_mix_channels] = { };
 
     for (const Oscillator& oscillator : oscillators) {
-        if ( ! oscillator.osc_type[0]) {
+        if (oscillator.osc_type[0] == WaveType::no_wave) {
             continue;
         }
 
@@ -1914,7 +1952,7 @@ static void render_audio_step()
     uint32_t cur_param_offs = osc_base_param_offs;
 
     for (Oscillator& oscillator : oscillators) {
-        if ( ! oscillator.osc_type[0])
+        if (oscillator.osc_type[0] == WaveType::no_wave)
             continue;
 
         ShaderParams::Oscillator& param = get_param<ShaderParams::Oscillator>(cur_param_offs);
@@ -1925,8 +1963,8 @@ static void render_audio_step()
         param.out_sound_offs  = oscillator.osc_output_offs / 4;
         param.phase           = oscillator.phase;
         param.phase_step      = phase_step / static_cast<float>(rt_step_samples);
-        param.osc_type[0]     = oscillator.osc_type[0];
-        param.osc_type[1]     = oscillator.osc_type[1];
+        param.osc_type[0]     = static_cast<uint32_t>(oscillator.osc_type[0]);
+        param.osc_type[1]     = static_cast<uint32_t>(oscillator.osc_type[1]);
         param.duty[0]         = oscillator.duty[0];
         param.duty[1]         = oscillator.duty[1];
         param.osc_mix         = oscillator.osc_mix;
@@ -1994,7 +2032,7 @@ static void render_audio_step()
     }
 
     for (Oscillator& oscillator : oscillators) {
-        if ( ! oscillator.osc_type[0])
+        if (oscillator.osc_type[0] == WaveType::no_wave)
             continue;
 
         const uint32_t cur_param_idx = gen_chan_input_indices[oscillator.output_channel]++;

@@ -10,7 +10,7 @@ namespace Synth {
 // Sampling frequency, i.e. frequency of the produced audio buffer.
 constexpr uint32_t rt_sampling_rate = 44100;
 
-enum WaveType : uint32_t {
+enum class WaveType : uint8_t {
     // Wave disabled
     no_wave,
     // Normal sine wave, duty is ignored
@@ -34,7 +34,7 @@ enum WaveType : uint32_t {
 };
 
 struct LFODescriptor {
-    uint8_t  wave;              // LFO wave type
+    WaveType wave;              // LFO wave type
     uint8_t  duty;              // Duty for sawtooth wave (0=left, 0x7F=triangle, 0xFF=right)
     uint16_t period_ms;         // Period of the LFO, in milliseconds
     float    min_value;         // Minimum value produced by the LFO
@@ -101,27 +101,6 @@ float pitch_bend_to_semitones(int16_t centered_bend, float range_semitones);
 // the audio sampling rate.  The caller advances the tick between steps.
 float eval_lfo(const LFODescriptor& lfo, uint32_t lfo_tick, uint32_t step_samples, uint32_t sampling_rate);
 
-// Running modulation state a parameter carries between steps.
-struct ParameterState {
-    EnvelopeState envelope;     // Envelope tick and point
-    uint16_t      lfo_tick;     // LFO tick
-};
-
-// Computes a parameter's value for one step by summing its enabled sources
-// (base_value + envelope + LFO + MIDI input) and advances the running state by
-// one tick.  envelope and lfo may be null when that source is disabled.
-// midi_value is the already-resolved raw MIDI input contribution (0 when the
-// parameter has no MIDI source); it is added regardless of the parameter's scope.
-// sustain gates the envelope (held while true).
-float eval_parameter(float                     base_value,
-                     const EnvelopeDescriptor* envelope,
-                     bool                      sustain,
-                     const LFODescriptor*      lfo,
-                     float                     midi_value,
-                     ParameterState*           state,
-                     uint32_t                  step_samples,
-                     uint32_t                  sampling_rate);
-
 // Maximum oscillators a single note (unison stack) uses.
 constexpr uint32_t max_unison = 7;
 
@@ -140,48 +119,34 @@ enum ModTarget : uint8_t {
 };
 
 // Where a bound parameter is allocated.
-enum ParamScope : uint8_t {
-    scope_voice,        // One shared parameter for all the voice's oscillators
-    scope_oscillator    // One parameter per oscillator (per unison index)
+enum class ParamScope : uint8_t {
+    voice,        // One shared parameter for all the voice's oscillators
+    oscillator    // One parameter per oscillator (per unison index)
 };
 
-// An instrument's binding for one modulation target.  param_desc_id is 1-based into
-// the parameter-descriptor table; 0 leaves that slot unbound and the consumer uses
-// base_value.  scope_voice uses param_desc_id[0]; scope_oscillator uses
-// param_desc_id[unison_idx].
-struct TargetBinding {
-    ParamScope scope;
-    float      base_value;
-    uint16_t   param_desc_id[max_unison]; // 1-based param index into param_descs[]
+enum class EffectType : uint8_t {
+    none,
+    distortion,
+    delay,
+    chorus,
+    reverb,
+    compressor,
+    fir,
+    num_types
 };
 
-// Counts the parameter pool slots one note of an instrument allocates: each
-// voice-scope target whose descriptor is bound costs one slot; each oscillator-scope
-// target costs one slot per unison oscillator (index 0..unison_count) whose
-// descriptor is bound.  Unbound slots cost nothing.
-uint32_t instrument_param_slot_count(const TargetBinding* bindings, uint32_t unison_count);
-
-enum EffectType : uint32_t {
-    effect_none,
-    effect_distortion,
-    effect_delay,
-    effect_chorus,
-    effect_reverb,
-    effect_compressor,
-    effect_fir,
-    num_effect_types
-};
+constexpr uint32_t num_effect_types = static_cast<uint32_t>(EffectType::num_types);
 
 // FIR filter tap count, shared by the per-oscillator FIR and the FIR effect.
 constexpr uint32_t num_fir_taps = 1025;
 
 constexpr uint32_t effect_delay_max_samples  = rt_sampling_rate;       // 1 s
 constexpr uint32_t effect_chorus_max_samples = rt_sampling_rate / 20;  // 50 ms
+                                                                       //
 // Freeverb's comb and allpass delay-line lengths are a published tuning specified
 // at freeverb_base_rate.  They are scaled to rt_sampling_rate with the same integer
 // division the reverb shader applies, so the reverb keeps its voicing at any rate and
-// the host state size matches the shader's rings exactly.  The shader mirrors these
-// base lengths (GLSL cannot include this header).
+// the host state size matches the shader's rings exactly.
 constexpr uint32_t freeverb_base_rate        = 44100;
 constexpr uint32_t effect_reverb_num_combs   = 8;
 constexpr uint32_t effect_reverb_num_allpass = 4;
@@ -210,5 +175,117 @@ uint32_t get_ringbuf_avail_space(uint64_t write_pos, uint64_t read_pos, uint32_t
 
 // Contiguous frames from pos to the end of the buffer before it wraps (read or write pos).
 uint32_t get_ringbuf_contig_tail(uint64_t pos, uint32_t capacity);
+
+// How a source parameter folds into another parameter
+enum class SourceOp : uint8_t {
+    add,        // neutral contribution 0
+    multiply    // neutral contribution 1
+};
+
+// Maximum source parameters feeding one parameter
+constexpr uint32_t max_param_sources = 4;
+
+// One input of a parameter: reads the PREVIOUS-step value of a source parameter
+// (one-step-delayed), scales it by multiplier, and folds it in per op.  param_id 0
+// references the reserved sentinel parameter (value 0).
+struct SourceParam {
+    uint16_t param_id;
+    SourceOp op;
+    float    multiplier;
+};
+
+// Description of how one parameter is computed.  Static in shape, not in lifetime: it holds no
+// per-sample runtime state (so the playback program can compress/pack these), but the engine
+// instantiates it per note, expanding an InstrModBinding onto the note's allocated slots.  A leaf
+// is never recomputed by propagate_parameters: its value is set externally (a MIDI input) or by the
+// generator pre-pass (envelope XOR LFO), so a source reading a leaf sees its current value with
+// zero lag.  A non-leaf is base_value folded with each source parameter.
+struct ParamDescriptor {
+    bool        is_leaf;
+    float       base_value;
+    uint16_t    num_sources;
+    SourceParam sources[max_param_sources];
+
+    // Generator: when set, this (leaf) parameter's value is an envelope XOR an LFO,
+    // computed by the host's per-step pre-pass.
+    uint16_t    envelope_desc_id;    // 1-based into the envelope table; 0 = none
+    uint16_t    lfo_desc_id;         // 1-based into the LFO table; 0 = none
+    SourceOp    lfo_op;              // how the LFO contribution is shaped (see eval_lfo_mod)
+    uint16_t    lfo_depth_param_id;  // 0 = use lfo_depth constant; else scales it by a source parameter
+    float       lfo_depth;
+    uint16_t    lfo_rate_param_id;   // 0 = use the LFO's own period; else a source parameter offsets it
+    float       lfo_rate_scale;      // ms of period offset per unit of the rate source parameter
+};
+
+// Input source ROLES an instrument binding can reference.  note-on resolves each to a concrete
+// parameter id via the engine's per-channel and per-voice leaves.
+enum class ModSource : uint8_t {
+    none,
+    pitch_bend,        // channel pitch-bend leaf
+    mod_wheel,         // channel modulation-wheel leaf
+    channel_pressure,  // channel pressure leaf
+    velocity,          // per-note velocity leaf
+    aftertouch,        // per-note polyphonic aftertouch leaf
+    pressure_combine   // per-voice max(aftertouch, channel pressure) leaf
+};
+
+// Maximum input parameters a single target binding declares (beyond its envelope and LFO).
+constexpr uint32_t max_mod_inputs = 2;
+
+// One modulation input of a target: folds a resolved source parameter in per op, scaled.
+struct ModInput {
+    ModSource source;
+    SourceOp  op;
+    float     multiplier;
+};
+
+// An instrument's complete modulation declaration for one target: a base value, an optional
+// envelope generator (per-unison descriptor), an optional LFO generator (sourceable depth and
+// rate), and a list of input edges.  note-on expands this into graph nodes generically, and the
+// editor edits these declarations directly.  No runtime state lives here, so it can be packed.
+struct InstrModBinding {
+    ParamScope scope;                         // envelope-descriptor selector: voice -> [0], oscillator -> [unison]
+    float      base_value;
+    uint16_t   envelope_desc_id[max_unison];  // 1-based into the envelope table; 0 = no envelope
+    uint16_t   lfo_desc_id;                   // 1-based into the LFO table; 0 = no LFO
+    SourceOp   lfo_op;                        // how the LFO folds into the target (see eval_lfo_mod)
+    ModSource  lfo_depth_source;              // none -> use lfo_depth constant; else scales it
+    float      lfo_depth;
+    ModSource  lfo_rate_source;               // none -> use the LFO's own period; else offsets it
+    float      lfo_rate_scale;                // ms of period offset per unit of the rate source
+    uint16_t   num_inputs;
+    ModInput   inputs[max_mod_inputs];
+};
+
+// Runtime value of one parameter, plus the generator state carried between render steps when the
+// parameter is an envelope or LFO leaf (the generator fields are unused for other parameters).
+struct Parameter {
+    float         value;
+    float         prev_value;
+    EnvelopeState envelope;       // Envelope tick and point
+    uint16_t      lfo_tick;       // LFO tick
+    uint16_t      sustain_voice;  // Voice gating the envelope sustain (0 = always sustain)
+};
+
+// Advances the parameters' base + source propagation one control-rate step:
+//   1. snapshot prev_value = value for every parameter (so reads are consistent),
+//   2. recompute each non-leaf parameter: value = base, then fold each source's
+//      amount * source.prev_value in by add or multiply per its op.
+// Because sources read prev_value, a leaf source is seen with zero lag while a
+// param->param hop is delayed exactly one step; cycles are well-defined and bounded.
+void propagate_parameters(Parameter* params, const ParamDescriptor* descs, uint32_t count);
+
+// LFO contribution with sourceable rate and depth, shaped by op:
+//   add      -> depth * bipolar_wave        in [-depth, depth], neutral 0
+//   multiply -> 1 - depth * (1 - unipolar_wave)  in [1-depth, 1], neutral 1
+// period_ms sets the rate (0 = use the descriptor's period_ms); only the wave shape
+// and duty are taken from lfo (its min_value / min_max_delta are ignored here).
+float eval_lfo_mod(const LFODescriptor& lfo,
+                   uint32_t             lfo_tick,
+                   uint32_t             step_samples,
+                   uint32_t             sampling_rate,
+                   uint32_t             period_ms,
+                   float                depth,
+                   SourceOp             op);
 
 } // namespace Synth

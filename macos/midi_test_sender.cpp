@@ -3,7 +3,8 @@
 
 // Standalone CoreMIDI test sender for exercising the synth's live MIDI input.  Creates a
 // virtual MIDI source and emits a short sequence (notes across channels, two non-contiguous
-// channels held together, then a held note swept with pitch bend and the modulation wheel).
+// channels held together, a held note swept with pitch bend and the modulation wheel, then a
+// held note with a channel-pressure swell that drives tremolo depth up and back down).
 // The synth connects to the new source automatically.
 //
 // Built as Out/<config>/midi_test_sender.  Run it while sculptor is running to drive the synth.
@@ -38,14 +39,21 @@ static void note_off(uint8_t channel, uint8_t note)
     send_bytes(bytes, 3);
 }
 
-// Pitch bend and mod wheel are persistent channel state; reset them so each run starts
-// neutral and leaves the channel neutral.
+static void channel_pressure(uint8_t channel, uint8_t value)
+{
+    const uint8_t bytes[] = { static_cast<uint8_t>(0xD0 | channel), value };
+    send_bytes(bytes, 2);
+}
+
+// Pitch bend, mod wheel and channel pressure are persistent channel state; reset them so each
+// run starts neutral and leaves the channel neutral.
 static void reset_controllers()
 {
     const uint8_t pitch_center[] = { 0xE0, 0x00, 0x40 }; // 8192 = no bend
     send_bytes(pitch_center, 3);
     const uint8_t mod_zero[]     = { 0xB0, 0x01, 0x00 };
     send_bytes(mod_zero, 3);
+    channel_pressure(0, 0);
 }
 
 int main()
@@ -99,6 +107,20 @@ int main()
         const uint8_t bytes[] = { 0xB0, 0x01, static_cast<uint8_t>(value) };
         send_bytes(bytes, 3);
         usleep(20000);
+    }
+    note_off(0, 60);
+
+    // Hold a note while swelling channel pressure 0 -> full -> 0: drives tremolo (volume LFO)
+    // depth up and back down, so the held note pulses progressively deeper, then settles.
+    note_on(0, 60, 100);
+    for (int value = 0; value <= 127; value += 4) {
+        channel_pressure(0, static_cast<uint8_t>(value));
+        usleep(30000);
+    }
+    usleep(1000000);   // hold full pressure: steady deep tremolo
+    for (int value = 127; value >= 0; value -= 4) {
+        channel_pressure(0, static_cast<uint8_t>(value));
+        usleep(30000);
     }
     note_off(0, 60);
 

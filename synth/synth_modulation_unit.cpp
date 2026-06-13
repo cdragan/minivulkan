@@ -35,7 +35,7 @@ int main()
     TEST(approx(Synth::note_to_frequency(69, 0.0f, 2), 880.0f, 0.02f));
 
     // sine LFO: contribution stays within [min, min+delta] and is periodic
-    const Synth::LFODescriptor sine_lfo = { Synth::sine_wave, 0, 1000, -1.0f, 2.0f }; // 1s period, range [-1,1]
+    const Synth::LFODescriptor sine_lfo = { Synth::WaveType::sine_wave, 0, 1000, -1.0f, 2.0f }; // 1s period, range [-1,1]
     float min_seen =  1e9f;
     float max_seen = -1e9f;
     for (uint32_t tick = 0; tick < 1000; tick++) {
@@ -53,7 +53,7 @@ int main()
     // periodicity: with these params one period is exactly 4 ticks, so values
     // repeat every 4 ticks
     {
-        const Synth::LFODescriptor periodic_lfo = { Synth::sine_wave, 0, 1024, -1.0f, 2.0f };
+        const Synth::LFODescriptor periodic_lfo = { Synth::WaveType::sine_wave, 0, 1024, -1.0f, 2.0f };
         const uint32_t ticks_per_period = 4;
         TEST(approx(Synth::eval_lfo(periodic_lfo, 0, 256, 1000),
                     Synth::eval_lfo(periodic_lfo, ticks_per_period, 256, 1000), 0.001f));
@@ -63,7 +63,7 @@ int main()
 
     // sawtooth (triangle, duty=0x7F) LFO stays within [0,1] and reaches both ends
     {
-        const Synth::LFODescriptor saw_lfo = { Synth::sawtooth_wave, 0x7F, 1000, 0.0f, 1.0f };
+        const Synth::LFODescriptor saw_lfo = { Synth::WaveType::sawtooth_wave, 0x7F, 1000, 0.0f, 1.0f };
         float saw_min =  1e9f;
         float saw_max = -1e9f;
         for (uint32_t tick = 0; tick < 1000; tick++) {
@@ -131,116 +131,20 @@ int main()
     // range scales linearly
     TEST(approx(Synth::pitch_bend_to_semitones(8191, 12.0f), 12.0f, 0.01f));
 
-    // eval_parameter sums a parameter's enabled sources (base + envelope + LFO +
-    // MIDI input) and advances the running state one tick per call.  Null sources
-    // and a zero MIDI value contribute nothing.
-    {
-        // base only
-        Synth::ParameterState base_state = { { 0, 0 }, 0 };
-        TEST(approx(Synth::eval_parameter(0.5f, nullptr, true, nullptr, 0.0f, &base_state, 256, 44100), 0.5f, 0.001f));
-
-        // MIDI input is added (e.g. pitch bend in semitones), independent of scope
-        Synth::ParameterState midi_state = { { 0, 0 }, 0 };
-        TEST(approx(Synth::eval_parameter(0.0f, nullptr, true, nullptr, 1.75f, &midi_state, 256, 44100), 1.75f, 0.001f));
-
-        // base + MIDI
-        Synth::ParameterState base_midi_state = { { 0, 0 }, 0 };
-        TEST(approx(Synth::eval_parameter(0.25f, nullptr, true, nullptr, -0.5f, &base_midi_state, 256, 44100), -0.25f, 0.001f));
-
-        // base + LFO matches base + eval_lfo, and the LFO tick advances each call
-        {
-            const Synth::LFODescriptor lfo = { Synth::sine_wave, 0, 1000, -1.0f, 2.0f };
-            Synth::ParameterState lfo_state = { { 0, 0 }, 0 };
-            const float expected_tick0 = 0.1f + Synth::eval_lfo(lfo, 0, 256, 44100);
-            TEST(approx(Synth::eval_parameter(0.1f, nullptr, true, &lfo, 0.0f, &lfo_state, 256, 44100), expected_tick0, 0.001f));
-            TEST(lfo_state.lfo_tick == 1);
-            const float expected_tick1 = 0.1f + Synth::eval_lfo(lfo, 1, 256, 44100);
-            TEST(approx(Synth::eval_parameter(0.1f, nullptr, true, &lfo, 0.0f, &lfo_state, 256, 44100), expected_tick1, 0.001f));
-            TEST(lfo_state.lfo_tick == 2);
-        }
-
-        // base + envelope + LFO + MIDI all sum together; state advances once
-        {
-            struct FourPointEnvelope {
-                Synth::EnvelopeDescriptor desc;
-                Synth::EnvelopeDescriptor::Point extra_points[3];
-            };
-            FourPointEnvelope env = { };
-            env.desc.num_points          = 4;
-            env.desc.sustain_first_point = 2;
-            env.desc.sustain_last_point  = 2;
-            env.desc.min_value           = 0.0f;
-            env.desc.min_max_delta       = 1.0f / 65535.0f;
-            env.desc.points[0] = { 0, 0 };
-            env.desc.points[1] = { 2, 0xFFFF };
-            env.desc.points[2] = { 4, 0x8000 };
-            env.desc.points[3] = { 6, 0 };
-
-            const Synth::LFODescriptor lfo = { Synth::sine_wave, 0, 1000, -1.0f, 2.0f };
-
-            // Reference contributions computed independently
-            Synth::EnvelopeState env_ref = { 0, 0 };
-            const float env_contrib = Synth::eval_envelope(env.desc, &env_ref, true);
-            const float lfo_contrib = Synth::eval_lfo(lfo, 0, 256, 44100);
-
-            Synth::ParameterState combined = { { 0, 0 }, 0 };
-            const float expected = 0.2f + env_contrib + lfo_contrib + 0.3f;
-            TEST(approx(Synth::eval_parameter(0.2f, &env.desc, true, &lfo, 0.3f, &combined, 256, 44100), expected, 0.001f));
-            TEST(combined.lfo_tick == 1);
-            TEST(combined.envelope.tick == env_ref.tick);
-        }
-    }
-
-    // instrument_param_slot_count: voice-scope bound targets cost one slot;
-    // oscillator-scope targets cost one slot per bound unison oscillator below
-    // unison_count; unbound slots cost nothing.
-    {
-        Synth::TargetBinding bindings[Synth::num_mod_targets] = { };
-
-        // All targets unbound -> no slots, regardless of unison_count.
-        TEST(Synth::instrument_param_slot_count(bindings, 1) == 0);
-        TEST(Synth::instrument_param_slot_count(bindings, Synth::max_unison) == 0);
-
-        // One voice-scope target bound -> one slot, independent of unison_count.
-        bindings[Synth::mod_volume].scope            = Synth::scope_voice;
-        bindings[Synth::mod_volume].param_desc_id[0] = 1;
-        TEST(Synth::instrument_param_slot_count(bindings, 1) == 1);
-        TEST(Synth::instrument_param_slot_count(bindings, Synth::max_unison) == 1);
-
-        // One oscillator-scope target bound on every unison slot -> one slot per
-        // oscillator below unison_count, added to the voice-scope slot above.
-        bindings[Synth::mod_lowpass_cutoff].scope = Synth::scope_oscillator;
-        for (uint32_t unison_idx = 0; unison_idx < Synth::max_unison; unison_idx++) {
-            bindings[Synth::mod_lowpass_cutoff].param_desc_id[unison_idx] = 3;
-        }
-        TEST(Synth::instrument_param_slot_count(bindings, 4) == 1 + 4);
-        TEST(Synth::instrument_param_slot_count(bindings, Synth::max_unison) == 1 + Synth::max_unison);
-
-        // Oscillator-scope target bound on only some unison slots counts only the
-        // bound slots that fall below unison_count.
-        Synth::TargetBinding partial[Synth::num_mod_targets] = { };
-        partial[Synth::mod_highpass_cutoff].scope            = Synth::scope_oscillator;
-        partial[Synth::mod_highpass_cutoff].param_desc_id[0] = 5;
-        partial[Synth::mod_highpass_cutoff].param_desc_id[1] = 5;
-        partial[Synth::mod_highpass_cutoff].param_desc_id[2] = 5;
-        TEST(Synth::instrument_param_slot_count(partial, Synth::max_unison) == 3);
-        TEST(Synth::instrument_param_slot_count(partial, 2) == 2);
-    }
-
-    TEST(Synth::effect_param_floats(Synth::effect_distortion) == 2);
-    TEST(Synth::effect_param_floats(Synth::effect_delay)      == 3);
-    TEST(Synth::effect_param_floats(Synth::effect_chorus)     == 3);
-    TEST(Synth::effect_param_floats(Synth::effect_reverb)     == 3);
-    TEST(Synth::effect_param_floats(Synth::effect_compressor) == 5);
-    TEST(Synth::effect_param_floats(Synth::effect_fir)        == 2);
-    TEST(Synth::effect_state_floats(Synth::effect_distortion) == 0);
-    TEST(Synth::effect_state_floats(Synth::effect_delay)      == 88201);
-    TEST(Synth::effect_state_floats(Synth::effect_chorus)     == 4412);
-    TEST(Synth::effect_state_floats(Synth::effect_reverb)     == 25191);
-    TEST(Synth::effect_state_floats(Synth::effect_compressor) == 1);
-    TEST(Synth::effect_state_floats(Synth::effect_fir)        == 3074);
-    TEST(Synth::effect_param_floats(Synth::effect_none)       == 0);
-    TEST(Synth::effect_state_floats(Synth::effect_none)       == 0);
+    TEST(Synth::effect_param_floats(Synth::EffectType::distortion) == 2);
+    TEST(Synth::effect_param_floats(Synth::EffectType::delay)      == 3);
+    TEST(Synth::effect_param_floats(Synth::EffectType::chorus)     == 3);
+    TEST(Synth::effect_param_floats(Synth::EffectType::reverb)     == 3);
+    TEST(Synth::effect_param_floats(Synth::EffectType::compressor) == 5);
+    TEST(Synth::effect_param_floats(Synth::EffectType::fir)        == 2);
+    TEST(Synth::effect_state_floats(Synth::EffectType::distortion) == 0);
+    TEST(Synth::effect_state_floats(Synth::EffectType::delay)      == 88201);
+    TEST(Synth::effect_state_floats(Synth::EffectType::chorus)     == 4412);
+    TEST(Synth::effect_state_floats(Synth::EffectType::reverb)     == 25191);
+    TEST(Synth::effect_state_floats(Synth::EffectType::compressor) == 1);
+    TEST(Synth::effect_state_floats(Synth::EffectType::fir)        == 3074);
+    TEST(Synth::effect_param_floats(Synth::EffectType::none)       == 0);
+    TEST(Synth::effect_state_floats(Synth::EffectType::none)       == 0);
 
     // Ring buffer accounting on free-running frame counters: available, free
     // space, and the contiguous run before the physical buffer wraps.
@@ -263,6 +167,151 @@ int main()
         TEST(Synth::get_ringbuf_contig_tail(1000, capacity) == 24);             // mid-buffer: 1024 - 1000
         TEST(Synth::get_ringbuf_contig_tail(2048, capacity) == capacity);       // exact multiple wraps to 0
         TEST(Synth::get_ringbuf_contig_tail(capacity + 1, capacity) == capacity - 1); // offset 1 after a wrap
+    }
+
+    // propagate_parameters: one-step-delay vs zero-lag leaf.  Chain L(leaf) -> B -> A.
+    // A leaf source is read at its current value (zero lag); a param->param hop lags
+    // exactly one step.  Parameter 0 is the reserved sentinel.
+    {
+        Synth::ParamDescriptor descs[4] = { };
+        descs[0].is_leaf = true;                      // sentinel
+        descs[3].is_leaf = true;                      // L (external value)
+        descs[2].base_value = 0.0f;                         // B reads L additively
+        descs[2].num_sources = 1;
+        descs[2].sources[0] = { 3, Synth::SourceOp::add, 1.0f };
+        descs[1].base_value = 0.0f;                         // A reads B additively
+        descs[1].num_sources = 1;
+        descs[1].sources[0] = { 2, Synth::SourceOp::add, 1.0f };
+
+        Synth::Parameter params[4] = { };
+        params[3].value = 5.0f;                       // drive the leaf
+
+        Synth::propagate_parameters(params, descs, 4);     // step 1
+        TEST(approx(params[2].value, 5.0f, 0.001f));  // B picked up the leaf with zero lag
+        TEST(approx(params[1].value, 0.0f, 0.001f));  // A still sees B's previous (0): one-step delay
+
+        Synth::propagate_parameters(params, descs, 4);     // step 2
+        TEST(approx(params[2].value, 5.0f, 0.001f));
+        TEST(approx(params[1].value, 5.0f, 0.001f));  // A now sees B, one step later
+    }
+
+    // propagate_parameters: a feedback cycle (A <-> B, |amount| < 1) stays finite and
+    // bounded; the one-step delay makes it a well-defined iteration, never a deadlock or NaN.
+    {
+        Synth::ParamDescriptor descs[3] = { };
+        descs[0].is_leaf = true;                      // sentinel
+        descs[1].base_value = 1.0f;                         // A = 1 + 0.5 * B.prev
+        descs[1].num_sources = 1;
+        descs[1].sources[0] = { 2, Synth::SourceOp::add, 0.5f };
+        descs[2].base_value = 1.0f;                         // B = 1 + 0.5 * A.prev
+        descs[2].num_sources = 1;
+        descs[2].sources[0] = { 1, Synth::SourceOp::add, 0.5f };
+
+        Synth::Parameter params[3] = { };
+        for (uint32_t step = 0; step < 1000; step++) {
+            Synth::propagate_parameters(params, descs, 3);
+        }
+        TEST(params[1].value == params[1].value);     // not NaN
+        TEST(params[2].value == params[2].value);
+        TEST(params[1].value < 100.0f && params[1].value > -100.0f); // bounded (converges to 2)
+        TEST(approx(params[1].value, 2.0f, 0.01f));
+    }
+
+    // propagate_parameters: a multiply source scales the base (e.g. velocity into volume).
+    {
+        Synth::ParamDescriptor descs[3] = { };
+        descs[0].is_leaf = true;
+        descs[2].is_leaf = true;                      // velocity leaf
+        descs[1].base_value = 0.8f;                         // volume base, scaled by velocity
+        descs[1].num_sources = 1;
+        descs[1].sources[0] = { 2, Synth::SourceOp::multiply, 1.0f };
+
+        Synth::Parameter params[3] = { };
+        params[2].value = 0.5f;                       // velocity 0.5
+        Synth::propagate_parameters(params, descs, 3);
+        TEST(approx(params[1].value, 0.4f, 0.001f));  // 0.8 * 0.5 (leaf read with zero lag)
+    }
+
+    // propagate_parameters: sources fold left-to-right over the running accumulator, so a
+    // multiply applies to base plus prior adds, not to base alone.  This is the production
+    // volume path: (base + envelope) * tremolo * velocity.
+    {
+        Synth::ParamDescriptor descs[5] = { };
+        descs[0].is_leaf = true;                      // sentinel
+        descs[2].is_leaf = true;                      // envelope leaf
+        descs[3].is_leaf = true;                      // tremolo leaf
+        descs[4].is_leaf = true;                      // velocity leaf
+        descs[1].base_value  = 0.0f;
+        descs[1].num_sources = 3;
+        descs[1].sources[0] = { 2, Synth::SourceOp::add,      1.0f };
+        descs[1].sources[1] = { 3, Synth::SourceOp::multiply, 1.0f };
+        descs[1].sources[2] = { 4, Synth::SourceOp::multiply, 1.0f };
+
+        Synth::Parameter params[5] = { };
+        params[2].value = 2.0f;                       // envelope 2.0
+        params[3].value = 0.5f;                       // tremolo gain 0.5
+        params[4].value = 0.5f;                       // velocity 0.5
+        Synth::propagate_parameters(params, descs, 5);
+        TEST(approx(params[1].value, 0.5f, 0.001f));  // (0 + 2.0) * 0.5 * 0.5, not 0 + 2.0 + ...
+    }
+
+    // eval_lfo_mod: add op swings bipolar within [-depth, depth] and reaches both ends;
+    // depth 0 is the neutral contribution 0.  4 ticks = one period here.
+    {
+        const Synth::LFODescriptor lfo = { Synth::WaveType::sine_wave, 0, 1000, 0.0f, 1.0f };
+        const float depth = 0.5f;
+        float add_min =  1e9f;
+        float add_max = -1e9f;
+        for (uint32_t tick = 0; tick < 1000; tick++) {
+            const float value = Synth::eval_lfo_mod(lfo, tick, 256, 1024, 1000, depth, Synth::SourceOp::add);
+            TEST(value >= -depth - 0.001f && value <= depth + 0.001f);
+            if (value < add_min) {
+                add_min = value;
+            }
+            if (value > add_max) {
+                add_max = value;
+            }
+        }
+        TEST(approx(add_min, -depth, 0.02f));
+        TEST(approx(add_max,  depth, 0.02f));
+        // depth 0 -> neutral 0 at every tick
+        TEST(approx(Synth::eval_lfo_mod(lfo, 7, 256, 1024, 1000, 0.0f, Synth::SourceOp::add), 0.0f, 0.001f));
+    }
+
+    // eval_lfo_mod: multiply op is an attenuation factor within [1-depth, 1];
+    // depth 0 is the neutral factor 1.
+    {
+        const Synth::LFODescriptor lfo = { Synth::WaveType::sine_wave, 0, 1000, 0.0f, 1.0f };
+        const float depth = 0.5f;
+        float mul_min =  1e9f;
+        float mul_max = -1e9f;
+        for (uint32_t tick = 0; tick < 1000; tick++) {
+            const float factor = Synth::eval_lfo_mod(lfo, tick, 256, 1024, 1000, depth, Synth::SourceOp::multiply);
+            TEST(factor >= 1.0f - depth - 0.001f && factor <= 1.0f + 0.001f);
+            if (factor < mul_min) {
+                mul_min = factor;
+            }
+            if (factor > mul_max) {
+                mul_max = factor;
+            }
+        }
+        TEST(approx(mul_min, 1.0f - depth, 0.02f));
+        TEST(approx(mul_max, 1.0f, 0.02f));
+        TEST(approx(Synth::eval_lfo_mod(lfo, 3, 256, 1024, 1000, 0.0f, Synth::SourceOp::multiply), 1.0f, 0.001f));
+    }
+
+    // eval_lfo_mod: a sourced rate (period_ms override) actually changes the rate.
+    // Halving the period doubles the cycles, so a tick that is a quarter-period at
+    // the long period becomes a half-period at the short one -> different phase.
+    {
+        const Synth::LFODescriptor lfo = { Synth::WaveType::sine_wave, 0, 1000, 0.0f, 1.0f };
+        const float slow = Synth::eval_lfo_mod(lfo, 1, 256, 1024, 1024, 0.5f, Synth::SourceOp::add);
+        const float fast = Synth::eval_lfo_mod(lfo, 1, 256, 1024,  512, 0.5f, Synth::SourceOp::add);
+        TEST( ! approx(slow, fast, 0.05f));
+        // period_ms 0 falls back to the descriptor's own period_ms.
+        const float defaulted = Synth::eval_lfo_mod(lfo, 1, 256, 1024,    0, 0.5f, Synth::SourceOp::add);
+        const float explicit_same = Synth::eval_lfo_mod(lfo, 1, 256, 1024, 1000, 0.5f, Synth::SourceOp::add);
+        TEST(approx(defaulted, explicit_same, 0.001f));
     }
 
     return exit_code;

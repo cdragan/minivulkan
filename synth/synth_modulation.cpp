@@ -22,48 +22,65 @@ float note_to_frequency(int midi_note, float pitch_semitones, uint32_t freq_mult
     return static_cast<float>(freq_mult * 440) * mstd::exp2(note_pitch / 12.0f);
 }
 
-float eval_lfo(const LFODescriptor& lfo, uint32_t lfo_tick, uint32_t step_samples, uint32_t sampling_rate)
+// Normalized LFO wave in [0, 1] at the given tick, using period_ms for the rate.
+static float eval_lfo_normalized(const LFODescriptor& lfo,
+                                 uint32_t             lfo_tick,
+                                 uint32_t             step_samples,
+                                 uint32_t             sampling_rate,
+                                 uint32_t             period_ms)
 {
-    float value = lfo.min_value;
-
     const float phase = static_cast<float>(lfo_tick) * static_cast<float>(step_samples * 1000u) /
-                        static_cast<float>(lfo.period_ms * sampling_rate);
+                        static_cast<float>(period_ms * sampling_rate);
 
     switch (lfo.wave) {
-        case sine_wave:
-            {
-                const float sval = vmath::sincos(phase * vmath::two_pi).sin;
+        case WaveType::sine_wave:
+            return (vmath::sincos(phase * vmath::two_pi).sin + 1.0f) * 0.5f;
 
-                value += (sval + 1.0f) * 0.5f * lfo.min_max_delta;
-            }
-            break;
-
-        case sawtooth_wave:
+        case WaveType::sawtooth_wave:
             {
                 const float frac_phase = phase - static_cast<float>(static_cast<int>(phase));
                 const float duty       = static_cast<float>(lfo.duty) / 255.0f;
 
                 if (frac_phase <= duty) {
-                    if (duty > 0.0f) {
-                        value += lfo.min_max_delta * frac_phase / duty;
-                    }
+                    return (duty > 0.0f) ? frac_phase / duty : 0.0f;
                 }
-                else {
-                    const float fall = 1.0f - duty;
-                    if (fall > 0.0f) {
-                        value += lfo.min_max_delta * (1.0f - frac_phase) / fall;
-                    }
-                }
+
+                const float fall = 1.0f - duty;
+                return (fall > 0.0f) ? (1.0f - frac_phase) / fall : 0.0f;
             }
-            break;
 
         default:
             // Only sine and sawtooth LFOs are supported
-            assert(lfo.wave == sine_wave || lfo.wave == sawtooth_wave);
-            break;
+            assert(lfo.wave == WaveType::sine_wave || lfo.wave == WaveType::sawtooth_wave);
+            return 0.0f;
+    }
+}
+
+float eval_lfo(const LFODescriptor& lfo, uint32_t lfo_tick, uint32_t step_samples, uint32_t sampling_rate)
+{
+    const float wave = eval_lfo_normalized(lfo, lfo_tick, step_samples, sampling_rate, lfo.period_ms);
+
+    return lfo.min_value + wave * lfo.min_max_delta;
+}
+
+float eval_lfo_mod(const LFODescriptor& lfo,
+                   uint32_t             lfo_tick,
+                   uint32_t             step_samples,
+                   uint32_t             sampling_rate,
+                   uint32_t             period_ms,
+                   float                depth,
+                   SourceOp             op)
+{
+    const uint32_t rate_period = period_ms ? period_ms : lfo.period_ms;
+    const float    wave        = eval_lfo_normalized(lfo, lfo_tick, step_samples, sampling_rate, rate_period);
+
+    // Multiply is an attenuation factor (neutral 1); add swings bipolar around 0
+    // (neutral 0).  These reproduce the legacy tremolo gain and vibrato swing.
+    if (op == SourceOp::multiply) {
+        return 1.0f - depth * (1.0f - wave);
     }
 
-    return value;
+    return depth * (2.0f * wave - 1.0f);
 }
 
 float eval_envelope(const EnvelopeDescriptor& envelope, EnvelopeState* state, bool sustain)
@@ -133,62 +150,15 @@ float eval_envelope(const EnvelopeDescriptor& envelope, EnvelopeState* state, bo
     return value;
 }
 
-float eval_parameter(float                     base_value,
-                     const EnvelopeDescriptor* envelope,
-                     bool                      sustain,
-                     const LFODescriptor*      lfo,
-                     float                     midi_value,
-                     ParameterState*           state,
-                     uint32_t                  step_samples,
-                     uint32_t                  sampling_rate)
-{
-    float value = base_value;
-
-    if (envelope) {
-        value += eval_envelope(*envelope, &state->envelope, sustain);
-    }
-
-    if (lfo) {
-        value += eval_lfo(*lfo, state->lfo_tick, step_samples, sampling_rate);
-        ++state->lfo_tick;
-    }
-
-    value += midi_value;
-
-    return value;
-}
-
-uint32_t instrument_param_slot_count(const TargetBinding* bindings, uint32_t unison_count)
-{
-    uint32_t count = 0;
-
-    for (uint32_t target = 0; target < num_mod_targets; target++) {
-        if (bindings[target].scope == scope_voice) {
-            if (bindings[target].param_desc_id[0]) {
-                count++;
-            }
-        }
-        else {
-            for (uint32_t unison_idx = 0; unison_idx < unison_count; unison_idx++) {
-                if (bindings[target].param_desc_id[unison_idx]) {
-                    count++;
-                }
-            }
-        }
-    }
-
-    return count;
-}
-
 uint32_t effect_param_floats(EffectType type)
 {
     switch (type) {
-        case effect_distortion: return 2;
-        case effect_delay:      return 3;
-        case effect_chorus:     return 3;
-        case effect_reverb:     return 3;
-        case effect_compressor: return 5;
-        case effect_fir:        return 2;  // lowpass cutoff Hz, highpass cutoff Hz (0 = edge disabled)
+        case EffectType::distortion: return 2;
+        case EffectType::delay:      return 3;
+        case EffectType::chorus:     return 3;
+        case EffectType::reverb:     return 3;
+        case EffectType::compressor: return 5;
+        case EffectType::fir:        return 2;  // lowpass cutoff Hz, highpass cutoff Hz (0 = edge disabled)
         default:                return 0;
     }
 }
@@ -196,20 +166,20 @@ uint32_t effect_param_floats(EffectType type)
 uint32_t effect_state_floats(EffectType type)
 {
     switch (type) {
-        case effect_distortion:
+        case EffectType::distortion:
             return 0;
 
-        case effect_delay:
+        case EffectType::delay:
             // One write-position counter plus a stereo (x2) ring buffer
             // of effect_delay_max_samples samples per channel.
             return 1 + 2 * effect_delay_max_samples;
 
-        case effect_chorus:
+        case EffectType::chorus:
             // An LFO phase accumulator and a write-position counter, plus a
             // stereo (x2) ring buffer of effect_chorus_max_samples per channel.
             return 2 + 2 * effect_chorus_max_samples;
 
-        case effect_reverb: {
+        case EffectType::reverb: {
             // One master state word plus, per stereo side (x2): the rate-scaled comb
             // rings, one lowpass state per comb, and the rate-scaled allpass rings.
             uint32_t comb_total = 0;
@@ -223,17 +193,49 @@ uint32_t effect_state_floats(EffectType type)
             return 1 + 2 * (comb_total + effect_reverb_num_combs + allpass_total);
         }
 
-        case effect_compressor:
+        case EffectType::compressor:
             // One envelope follower state float.
             return 1;
 
-        case effect_fir:
+        case EffectType::fir:
             // The coeff buffer (num_fir_taps), a stereo (x2) input-history ring of
             // num_fir_taps - 1 frames, and one write-position counter.
             return num_fir_taps + 2 * (num_fir_taps - 1) + 1;
 
         default:
             return 0;
+    }
+}
+
+void propagate_parameters(Parameter* params, const ParamDescriptor* descs, uint32_t count)
+{
+    // Snapshot every parameter's value so all reads this step see a consistent previous
+    // state.  Leaves were set externally before the step, so a parameter sourcing from a
+    // leaf reads its current value (zero lag); a param->param hop reads last step's
+    // value (one-step delay), which makes cycles a well-defined iteration.
+    for (uint32_t param_idx = 0; param_idx < count; param_idx++) {
+        params[param_idx].prev_value = params[param_idx].value;
+    }
+
+    for (uint32_t param_idx = 0; param_idx < count; param_idx++) {
+        const ParamDescriptor& desc = descs[param_idx];
+        if (desc.is_leaf) {
+            continue;
+        }
+
+        float value = desc.base_value;
+        for (uint32_t source_idx = 0; source_idx < desc.num_sources; source_idx++) {
+            const SourceParam& source       = desc.sources[source_idx];
+            const float        contribution = source.multiplier * params[source.param_id].prev_value;
+            if (source.op == SourceOp::add) {
+                value += contribution;
+            }
+            else {
+                value *= contribution;
+            }
+        }
+
+        params[param_idx].value = value;
     }
 }
 
