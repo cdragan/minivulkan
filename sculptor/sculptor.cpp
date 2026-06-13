@@ -64,7 +64,7 @@ uint32_t check_device_features()
 
 bool skip_frame(struct Window* w)
 {
-    static int    skip_count = 0;
+    static int    skip_count     = 0;
     constexpr int max_skip_count = 3;
 
     // TODO check if any editor is animating
@@ -74,7 +74,24 @@ bool skip_frame(struct Window* w)
     else if (skip_count < max_skip_count)
         ++skip_count;
 
-    return skip_count >= max_skip_count;
+    static uint32_t last_frame_ms = 0;
+
+    const uint64_t cur_time_ms = get_current_time_ms();
+
+    if (skip_count < max_skip_count) {
+        last_frame_ms = cur_time_ms;
+        return false;
+    }
+
+    // Redraw the window from time to time, this is useful for animated GUI elements,
+    // such as tooltips or live audio metrics
+    constexpr uint64_t min_frame_redraw_ms = 200;
+
+    if (cur_time_ms < last_frame_ms + min_frame_redraw_ms)
+        return true;
+
+    last_frame_ms = cur_time_ms;
+    return false;
 }
 
 bool init_assets()
