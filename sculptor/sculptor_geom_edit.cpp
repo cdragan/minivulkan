@@ -601,6 +601,7 @@ void GeometryEditor::free_view_resources(View* dst_view)
         res.tex_coord.free();
         res.depth.free();
         res.frame_data.free();
+        res.transforms.free();
         res.sel_host_buf.free();
         res.vtx_sel_host_buf.free();
         res.hover_pos_buf.free();
