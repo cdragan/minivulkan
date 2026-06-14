@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2021-2026 Chris Dragan
 
 #include "synth_modulation.h"
+#include "../core/rng.h"
 #include <stdio.h>
 
 #define TEST(test) if ( ! (test)) { failed(#test, __FILE__, __LINE__); }
@@ -364,6 +365,30 @@ int main()
         const float defaulted = Synth::eval_lfo_mod(lfo, 1, 256, 1024,    0, 0.5f, Synth::SourceOp::add);
         const float explicit_same = Synth::eval_lfo_mod(lfo, 1, 256, 1024, 1000, 0.5f, Synth::SourceOp::add);
         TEST(approx(defaulted, explicit_same, 0.001f));
+    }
+
+    // random_pitch_skew: a nonzero amount stays within [-amount, amount] and spans most of it;
+    // amount 0 is exactly 0 (deterministic, generator unadvanced).
+    {
+        RNG skew_rng;
+        skew_rng.init(0x5eed1234u);
+        TEST(Synth::random_pitch_skew(&skew_rng, 0.0f) == 0.0f);
+
+        const float amount = 0.25f;
+        float skew_min =  1e9f;
+        float skew_max = -1e9f;
+        for (uint32_t draw = 0; draw < 100000; draw++) {
+            const float skew = Synth::random_pitch_skew(&skew_rng, amount);
+            TEST(skew >= -amount && skew <= amount);
+            if (skew < skew_min) {
+                skew_min = skew;
+            }
+            if (skew > skew_max) {
+                skew_max = skew;
+            }
+        }
+        TEST(skew_min < -amount * 0.9f);
+        TEST(skew_max >  amount * 0.9f);
     }
 
     return exit_code;

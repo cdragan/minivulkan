@@ -7,6 +7,7 @@
 #include "../core/minivulkan.h"
 #include "../core/mstdc.h"
 #include "../core/resource.h"
+#include "../core/rng.h"
 #include "../core/suballoc.h"
 #include "synth_modulation.h"
 #include <algorithm>
@@ -73,6 +74,11 @@ namespace {
     // raising the wheel makes the vibrato both deeper and faster (a parameter-sourced LFO rate).
     constexpr uint16_t vibrato_period_ms     = 167;
     constexpr float    vibrato_rate_range_ms = 107.0f;  // full wheel -> ~60 ms (~16 Hz)
+
+    // Random pitch skew: a few cents of analog-style drift, applied per note and per layer.
+    constexpr uint32_t note_skew_seed                = 0x5eed1234u;
+    constexpr float    supersaw_note_skew_semitones  = 0.08f;
+    constexpr float    supersaw_layer_skew_semitones = 0.06f;
 
     // Default pitch bend range in semitones (standard MIDI default is +/- 2)
     constexpr float default_pitch_bend_range_semitones = 2.0f;
@@ -532,8 +538,11 @@ namespace {
         uint32_t      layer_count;                       // Number of layers a note of this instrument uses (1 = mono)
         OscDescriptor layers[max_layers];                // Per-layer oscillator descriptors
         TargetRouting routing[Synth::num_mod_targets];   // Per-target voice-wide base value and inputs
+        float         note_skew_semitones;               // Random pitch skew applied once per note (0 = none)
+        float         layer_skew_semitones;              // Random pitch skew drawn per layer (0 = none)
     };
     RuntimeInstrument instruments[5];
+    RNG               note_skew_rng;                     // Shared generator for per-note pitch skew
 
     static constexpr uint32_t max_mix_channels = Synth::max_channels;
 
@@ -782,6 +791,8 @@ static void set_instrument_layers(RuntimeInstrument* instr,
 // follow.  note-on expands these declarations into graph nodes.
 static void init_instruments()
 {
+    note_skew_rng.init(note_skew_seed);
+
     // Index 0 is a plain mono sine.  Index 1 is a 7-layer supersaw with a symmetric pitch spread of
     // about +/- 18 cents.  Index 2 is a sine-on-sine FM voice (mod_ratio 2.0, fm_index 3.0).  Index 3
     // is a hard-sync voice: a sine master sets the pitch and a sawtooth slave is synced at ratio 2.5.
@@ -846,6 +857,8 @@ static void init_instruments()
     // staggered release, so the layers fade out at audibly different rates.
     RuntimeInstrument& supersaw = instruments[1];
     supersaw.routing[mod_lowpass_cutoff].base_value = cutoff_base_hz;
+    supersaw.note_skew_semitones  = supersaw_note_skew_semitones;
+    supersaw.layer_skew_semitones = supersaw_layer_skew_semitones;
     for (uint32_t layer_idx = 0; layer_idx < supersaw.layer_count; layer_idx++) {
         supersaw.layers[layer_idx].gen[mod_lowpass_cutoff].envelope_desc_id = cutoff_sweep_envelope_id;
 
@@ -1457,6 +1470,9 @@ static void process_note_on(uint32_t delta_samples, const Synth::MidiEvent& even
     }
     voice.osc_count = static_cast<uint8_t>(layer_count);
 
+    // One per-note pitch skew applies to every layer; each layer adds its own skew on top.
+    const float note_skew = Synth::random_pitch_skew(&note_skew_rng, instrument.note_skew_semitones);
+
     // Initialize each oscillator's constants and phase/smoothing state.  Resolved
     // values (volume/pitch/duty/osc_mix/fm_index/panning) are written every step by
     // update_modulation; only the smoothing history is seeded here.
@@ -1472,7 +1488,8 @@ static void process_note_on(uint32_t delta_samples, const Synth::MidiEvent& even
         osc.osc_type[1]    = layer.osc_type[1];
         osc.osc_mode       = layer.osc_mode;
         osc.mod_ratio      = layer.mod_ratio;
-        osc.pitch_offset   = layer.pitch_offset;
+        osc.pitch_offset   = layer.pitch_offset + note_skew
+                           + Synth::random_pitch_skew(&note_skew_rng, instrument.layer_skew_semitones);
         osc.phase          = 0.0f;
         osc.mod_phase      = 0.0f;
         osc.old_volume     = 0.0f;   // ramp up from silence to avoid a click

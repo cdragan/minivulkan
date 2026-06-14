@@ -5,6 +5,7 @@
 #include "../core/mstdc.h"
 #include "../core/vmath.h"
 #include "../core/vecfloat.h"
+#include "../core/rng.h"
 #include <assert.h>
 
 namespace Synth {
@@ -20,6 +21,17 @@ float note_to_frequency(int midi_note, float pitch_semitones, uint32_t freq_mult
 {
     const float note_pitch = static_cast<float>(midi_note - 69) + pitch_semitones;
     return static_cast<float>(freq_mult * 440) * mstd::exp2(note_pitch / 12.0f);
+}
+
+float random_pitch_skew(RNG* rng, float amount_semitones)
+{
+    // Amount 0 leaves the pitch untouched and the generator unadvanced (deterministic, unchanged).
+    if (amount_semitones == 0.0f) {
+        return 0.0f;
+    }
+
+    const float normalized = static_cast<float>(rng->get_random()) / static_cast<float>(0xFFFFFFFFu);
+    return (normalized * 2.0f - 1.0f) * amount_semitones;
 }
 
 // Normalized LFO wave in [0, 1] at the given tick, using period_ms for the rate.

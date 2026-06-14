@@ -5,6 +5,8 @@
 
 #include <stdint.h>
 
+class RNG;
+
 namespace Synth {
 
 // Sampling frequency, i.e. frequency of the produced audio buffer.
@@ -95,6 +97,10 @@ float note_to_frequency(int midi_note, float pitch_semitones, uint32_t freq_mult
 // [-8192, 8191]) into a pitch offset in semitones, scaled so full
 // deflection reaches +/- range_semitones.
 float pitch_bend_to_semitones(int16_t centered_bend, float range_semitones);
+
+// Draws a uniform random pitch offset in [-amount_semitones, amount_semitones], advancing rng.
+// Amount 0 returns 0 without consuming rng, so a zero skew is deterministic and unchanged.
+float random_pitch_skew(RNG* rng, float amount_semitones);
 
 // Evaluates an LFO's contribution (its min_value offset plus the wave shape) at
 // the given tick.  step_samples is the LFO update granularity; sampling_rate is
