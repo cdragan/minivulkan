@@ -102,6 +102,21 @@ float pitch_bend_to_semitones(int16_t centered_bend, float range_semitones);
 // Amount 0 returns 0 without consuming rng, so a zero skew is deterministic and unchanged.
 float random_pitch_skew(RNG* rng, float amount_semitones);
 
+// Maximum instruments a single channel splits across (entries in its routing table).
+constexpr uint32_t max_instr_per_channel = 16;
+
+// One keyboard-split entry: the instrument that plays from start_note upward.  Entries are
+// ordered by ascending start_note; a start_note of 0 ends the table (so entry 0 must start
+// at a non-zero note, and an all-zero table resolves to instrument 0).
+struct NoteRoute {
+    uint8_t start_note;
+    uint8_t instrument;
+};
+
+// Picks the instrument for note from an ordered split table: the entry with the greatest
+// start_note <= note, or entry 0 when none matches.
+uint8_t select_instrument(const NoteRoute* routes, uint32_t count, uint8_t note);
+
 // Evaluates an LFO's contribution (its min_value offset plus the wave shape) at
 // the given tick.  step_samples is the LFO update granularity; sampling_rate is
 // the audio sampling rate.  The caller advances the tick between steps.

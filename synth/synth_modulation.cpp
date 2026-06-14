@@ -34,6 +34,27 @@ float random_pitch_skew(RNG* rng, float amount_semitones)
     return (normalized * 2.0f - 1.0f) * amount_semitones;
 }
 
+uint8_t select_instrument(const NoteRoute* routes, uint32_t count, uint8_t note)
+{
+    uint32_t instr_idx;
+
+    for (instr_idx = 0; instr_idx < count; instr_idx++) {
+        const uint32_t start_note = routes[instr_idx].start_note;
+        if (note < start_note || ! start_note) {
+            if (instr_idx) {
+                --instr_idx;
+            }
+            break;
+        }
+    }
+
+    if (instr_idx == count) {
+        --instr_idx;
+    }
+
+    return routes[instr_idx].instrument;
+}
+
 // Normalized LFO wave in [0, 1] at the given tick, using period_ms for the rate.
 static float eval_lfo_normalized(const LFODescriptor& lfo,
                                  uint32_t             lfo_tick,

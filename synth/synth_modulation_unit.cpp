@@ -391,5 +391,42 @@ int main()
         TEST(skew_max >  amount * 0.9f);
     }
 
+    // Keyboard split routing: select_instrument maps a note to an instrument via an ordered
+    // table; start_note 0 ends the table, so an all-zero table resolves to instrument 0.
+    {
+        const uint32_t count = Synth::max_instr_per_channel;
+
+        Synth::NoteRoute empty[Synth::max_instr_per_channel] = { };
+        TEST(Synth::select_instrument(empty, count, 0)   == 0);
+        TEST(Synth::select_instrument(empty, count, 60)  == 0);
+        TEST(Synth::select_instrument(empty, count, 127) == 0);
+
+        // Notes 1..59 -> instrument 0, notes 60.. -> instrument 1.  Entry 0 must start at a
+        // non-zero note since 0 is the end-of-table sentinel.
+        Synth::NoteRoute split[Synth::max_instr_per_channel] = { };
+        split[0] = { 1,  0 };
+        split[1] = { 60, 1 };
+        TEST(Synth::select_instrument(split, count, 0)   == 0);
+        TEST(Synth::select_instrument(split, count, 59)  == 0);
+        TEST(Synth::select_instrument(split, count, 60)  == 1);
+        TEST(Synth::select_instrument(split, count, 127) == 1);
+
+        Synth::NoteRoute three[Synth::max_instr_per_channel] = { };
+        three[0] = { 1,  2 };
+        three[1] = { 48, 4 };
+        three[2] = { 72, 3 };
+        TEST(Synth::select_instrument(three, count, 47)  == 2);
+        TEST(Synth::select_instrument(three, count, 48)  == 4);
+        TEST(Synth::select_instrument(three, count, 71)  == 4);
+        TEST(Synth::select_instrument(three, count, 72)  == 3);
+
+        // A full table with no sentinel still resolves the top range.
+        Synth::NoteRoute full[Synth::max_instr_per_channel] = { };
+        for (uint32_t idx = 0; idx < count; idx++) {
+            full[idx] = { static_cast<uint8_t>(idx + 1), static_cast<uint8_t>(idx) };
+        }
+        TEST(Synth::select_instrument(full, count, 127) == count - 1);
+    }
+
     return exit_code;
 }

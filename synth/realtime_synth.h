@@ -12,9 +12,6 @@ namespace Synth {
 // Maximum number of supported channels
 static constexpr uint32_t max_channels = 16;
 
-// Maximum variants per instrument (different instruments assigned to different notes)
-static constexpr uint32_t max_instr_per_channel = 16;
-
 // MIDI data
 extern const uint32_t num_channels;         // Total number of used channels
 extern const uint8_t* midi_delta_times[];   // Encoded event delta times, per-channel
@@ -28,10 +25,7 @@ extern const uint8_t* midi_pitch_bend_hi[]; // Per-channel pitch bend MSB values
 
 // Per-channel routing of notes to instruments
 struct InstrumentRouting {
-    struct {
-        uint8_t start_note;
-        uint8_t instrument;
-    } note_routing[max_instr_per_channel];
+    NoteRoute note_routing[max_instr_per_channel];
 };
 extern const InstrumentRouting instr_routing[max_channels];
 

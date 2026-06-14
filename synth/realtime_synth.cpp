@@ -1154,25 +1154,6 @@ static uint32_t allocate_unused_voice()
     return allocate_unused_slot(voices, max_voices, &Voice::active);
 }
 
-static uint8_t select_instrument(uint32_t channel, uint32_t note)
-{
-    uint32_t instr_idx;
-
-    for (instr_idx = 0; instr_idx < Synth::max_instr_per_channel; instr_idx++) {
-        const uint32_t start_note = Synth::instr_routing[channel].note_routing[instr_idx].start_note;
-        if (note < start_note || ! start_note) {
-            if (instr_idx)
-                --instr_idx;
-            break;
-        }
-    }
-
-    if (instr_idx == Synth::max_instr_per_channel)
-        --instr_idx;
-
-    return Synth::instr_routing[channel].note_routing[instr_idx].instrument;
-}
-
 static bool get_next_midi_event(Synth::MidiEvent* event, uint32_t end_samples)
 {
     static uint32_t last_channel;
@@ -1257,6 +1238,17 @@ static const RuntimeInstrument& voice_instrument(const Voice& voice)
     return instruments[voice.instrument < std::size(instruments) ? voice.instrument : 0];
 }
 
+static void free_oscillator(uint32_t osc_idx)
+{
+    oscillators[osc_idx].osc_type[0] = WaveType::no_wave;
+    oscillators[osc_idx].voice_id    = 0;
+
+    for (uint32_t role = 0; role < num_osc_roles; role++) {
+        param_descs[osc_param(osc_idx, role)] = { };
+        parameters[osc_param(osc_idx, role)]  = { };
+    }
+}
+
 // Returns a partially-allocated note to the free pool when allocation fails
 // part-way through, and reclaims a still-alive note on re-trigger.  osc_ids[0,
 // osc_count) is kept exactly the live oscillators, so this frees all of them; it is
@@ -1266,9 +1258,7 @@ static void drop_voice(uint32_t voice_idx, uint32_t channel, uint32_t note)
     Voice& voice = voices[voice_idx];
 
     for (uint32_t layer_idx = 0; layer_idx < voice.osc_count; ++layer_idx) {
-        Oscillator& osc = oscillators[voice.osc_ids[layer_idx]];
-        osc.osc_type[0] = WaveType::no_wave;
-        osc.voice_id    = 0;
+        free_oscillator(voice.osc_ids[layer_idx]);
     }
     voice.osc_count = 0;
 
@@ -1446,7 +1436,9 @@ static void process_note_on(uint32_t delta_samples, const Synth::MidiEvent& even
     const uint32_t channel = event.channel;
     const uint32_t note    = event.note;
 
-    const uint8_t target_instrument = select_instrument(channel, note);
+    const uint8_t target_instrument = Synth::select_instrument(Synth::instr_routing[channel].note_routing,
+                                                               Synth::max_instr_per_channel,
+                                                               static_cast<uint8_t>(note));
 
     // Re-triggering a note still alive (held or releasing, possibly with some
     // layers already silenced) reclaims it cleanly so the new note
@@ -1901,8 +1893,7 @@ static void update_modulation()
         // so a voice's oscillators may free in different steps; the voice itself is
         // finalized only when its last oscillator frees.
         if (voice.releasing && vol_env_value < silence_threshold) {
-            osc.osc_type[0] = WaveType::no_wave;
-            osc.voice_id    = 0;
+            free_oscillator(osc_idx);
 
             // Remove this slot from the voice's live list without a search: its position is
             // osc.layer_idx, so move the last live entry into it (and update that moved
