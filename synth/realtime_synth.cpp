@@ -95,11 +95,11 @@ namespace {
     using Synth::WaveType;
     using Synth::LFODescriptor;
     using Synth::EnvelopeDescriptor;
-    using Synth::InstrModBinding;
+    using Synth::LayerGen;
+    using Synth::TargetRouting;
     using Synth::ModInput;
     using Synth::ModSource;
     using Synth::ModTarget;
-    using Synth::ParamScope;
     using Synth::SourceOp;
     using enum Synth::ModTarget;
 
@@ -141,12 +141,12 @@ namespace {
         voice_input_velocity,
         voice_input_aftertouch,
         voice_input_pressure_combine,
-        voice_pitch_dest,
-        voice_pitch_env,
-        voice_pitch_lfo,
         num_voice_roles
     };
     enum OscParamRole : uint32_t {
+        osc_pitch_dest,
+        osc_pitch_env,
+        osc_pitch_lfo,
         osc_volume_dest,
         osc_volume_env,
         osc_volume_lfo,
@@ -184,20 +184,19 @@ namespace {
         return osc_block_base + osc * num_osc_roles + role;
     }
 
-    // Modulation targets which get graph nodes, with their node placement.  per_oscillator targets
-    // build a node triple per layer oscillator; the rest build one per voice.  dest_role is the
-    // triple's first role; the env and lfo generator roles are dest_role + 1 and dest_role + 2.
-    // Targets absent here are unmodulated constants read straight from the binding's base_value.
+    // Modulation targets which get graph nodes.  Each builds a node triple per layer oscillator;
+    // dest_role is the triple's first role, and the env and lfo generator roles are dest_role + 1
+    // and dest_role + 2.  Targets absent here are unmodulated constants read straight from the
+    // target's routing base_value.
     struct ModTargetNode {
         ModTarget target;
-        bool      per_oscillator;
         uint32_t  dest_role;
     };
     constexpr ModTargetNode mod_target_nodes[] = {
-        { mod_pitch,           false, voice_pitch_dest  },
-        { mod_volume,          true,  osc_volume_dest   },
-        { mod_lowpass_cutoff,  true,  osc_lowpass_dest  },
-        { mod_highpass_cutoff, true,  osc_highpass_dest },
+        { mod_pitch,           osc_pitch_dest    },
+        { mod_volume,          osc_volume_dest   },
+        { mod_lowpass_cutoff,  osc_lowpass_dest  },
+        { mod_highpass_cutoff, osc_highpass_dest },
     };
 
     Synth::Parameter       parameters[total_params];
@@ -518,28 +517,23 @@ namespace {
     static Oscillator oscillators[max_oscillators];
 
     // TODO Runtime instrument definition.  Hardcoded for now; an editor will
-    // populate these later.  binding[] is filled in init_instruments.
+    // populate these later.  Everything is filled in init_instruments.
+
+    // One oscillator (layer) of an instrument: its waveform, plus its per-target generators (each
+    // target's envelope and LFO, which it may own or share from another layer).
+    struct OscDescriptor {
+        WaveType osc_type[2];                  // osc_type[1] == WaveType::no_wave means single oscillator
+        uint32_t osc_mode;                     // osc_mode_blend, osc_mode_fm or osc_mode_hard_sync
+        float    mod_ratio;                    // FM: modulator/carrier freq ratio.  Hard sync: slave cycles per master cycle
+        float    pitch_offset;                 // This layer's pitch offset in semitones
+        LayerGen gen[Synth::num_mod_targets];  // Per-target envelope/LFO generators
+    };
     struct RuntimeInstrument {
-        WaveType        osc_type[2];                     // osc_type[1] == WaveType::no_wave means single oscillator
-        uint32_t        osc_mode;                        // osc_mode_blend, osc_mode_fm or osc_mode_hard_sync
-        float           mod_ratio;                       // FM: modulator/carrier freq ratio.  Hard sync: slave cycles per master cycle
-        uint32_t        layer_count;                     // Number of layers a note of this instrument uses (1 = mono)
-        float           pitch_offset[max_layers];        // Per-layer pitch offset in semitones; entry [idx] applies to the idx-th allocated layer
-        InstrModBinding binding[Synth::num_mod_targets]; // Per-target complete modulation declaration
+        uint32_t      layer_count;                       // Number of layers a note of this instrument uses (1 = mono)
+        OscDescriptor layers[max_layers];                // Per-layer oscillator descriptors
+        TargetRouting routing[Synth::num_mod_targets];   // Per-target voice-wide base value and inputs
     };
-    // Index 0 is a plain mono sine.  Index 1 is a 7-voice supersaw with a
-    // symmetric detune spread of about +/- 18 cents.  Index 2 is a sine-on-sine
-    // FM voice (mod_ratio 2.0, fm_index 3.0).  Index 3 is a hard-sync voice:
-    // a sine master sets the pitch and a sawtooth slave is synced at ratio 2.5.
-    // Index 4 is a mellow piano-ish voice: a triangle (sawtooth at duty 0.5).
-    RuntimeInstrument instruments[5] = {
-        { { WaveType::sine_wave,            WaveType::no_wave },        osc_mode_blend,     0.0f, 1,          { 0.0f }, { } },
-        { { Synth::WaveType::sawtooth_wave, WaveType::no_wave },        osc_mode_blend,     0.0f, max_layers,
-          { -0.18f, -0.12f, -0.06f, 0.0f, 0.06f, 0.12f, 0.18f }, { } },
-        { { WaveType::sine_wave,            WaveType::sine_wave },      osc_mode_fm,        2.0f, 1,          { 0.0f }, { } },
-        { { WaveType::sine_wave,            Synth::WaveType::sawtooth_wave }, osc_mode_hard_sync, 2.5f, 1,    { 0.0f }, { } },
-        { { Synth::WaveType::sawtooth_wave, WaveType::no_wave },        osc_mode_blend,     0.0f, 1,          { 0.0f }, { } }
-    };
+    RuntimeInstrument instruments[5];
 
     static constexpr uint32_t max_mix_channels = Synth::max_channels;
 
@@ -595,22 +589,19 @@ namespace {
     };
     FirSlot fir_slots[max_oscillators];
 
-    // Envelope id an instrument binds for a target at a given layer index,
-    // honoring scope (voice scope shares index 0).  0 means no envelope.
-    static uint16_t binding_envelope_id(const RuntimeInstrument& instrument, ModTarget target, uint32_t layer_idx)
+    // Envelope desc id driving a target on a layer.  0 means no envelope.
+    static uint16_t layer_envelope_id(const RuntimeInstrument& instrument, ModTarget target, uint32_t layer_idx)
     {
-        const InstrModBinding& binding = instrument.binding[target];
-        const uint32_t       layer   = (binding.scope == ParamScope::voice) ? 0u : layer_idx;
-        return binding.envelope_desc_id[layer];
+        return instrument.layers[layer_idx].gen[target].envelope_desc_id;
     }
 
     // A layer has a filter iff a cutoff target has an envelope or a nonzero base.
     static bool osc_has_filter(const RuntimeInstrument& instrument, uint32_t layer_idx)
     {
-        return binding_envelope_id(instrument, mod_lowpass_cutoff, layer_idx)
-            || binding_envelope_id(instrument, mod_highpass_cutoff, layer_idx)
-            || instrument.binding[mod_lowpass_cutoff].base_value  != 0.0f
-            || instrument.binding[mod_highpass_cutoff].base_value != 0.0f;
+        return layer_envelope_id(instrument, mod_lowpass_cutoff, layer_idx)
+            || layer_envelope_id(instrument, mod_highpass_cutoff, layer_idx)
+            || instrument.routing[mod_lowpass_cutoff].base_value  != 0.0f
+            || instrument.routing[mod_highpass_cutoff].base_value != 0.0f;
     }
 
     static bool any_instrument_has_filter()
@@ -768,60 +759,97 @@ namespace Synth {
     void stop_synth_os();
 }
 
-// Fills each instrument's per-target modulation declarations.  Every instrument gets the same
-// default pitch and volume modulation; per-instrument specifics (FM depth, duty, the supersaw
-// demo) follow.  note-on expands these declarations into graph nodes.
+// Fills count layers of an instrument with one waveform; per-layer generators are set afterwards.
+static void set_instrument_layers(RuntimeInstrument* instr,
+                                  uint32_t           count,
+                                  WaveType           type0,
+                                  WaveType           type1,
+                                  uint32_t           mode,
+                                  float              ratio)
+{
+    instr->layer_count = count;
+    for (uint32_t layer_idx = 0; layer_idx < count; layer_idx++) {
+        OscDescriptor& osc = instr->layers[layer_idx];
+        osc.osc_type[0] = type0;
+        osc.osc_type[1] = type1;
+        osc.osc_mode    = mode;
+        osc.mod_ratio   = ratio;
+    }
+}
+
+// Fills each instrument's waveforms and per-target modulation.  Every instrument gets the same
+// default pitch and volume modulation; per-instrument specifics (FM depth, duty, the supersaw demo)
+// follow.  note-on expands these declarations into graph nodes.
 static void init_instruments()
 {
+    // Index 0 is a plain mono sine.  Index 1 is a 7-layer supersaw with a symmetric pitch spread of
+    // about +/- 18 cents.  Index 2 is a sine-on-sine FM voice (mod_ratio 2.0, fm_index 3.0).  Index 3
+    // is a hard-sync voice: a sine master sets the pitch and a sawtooth slave is synced at ratio 2.5.
+    // Index 4 is a mellow piano-ish voice: a triangle (sawtooth at duty 0.5).
+    set_instrument_layers(&instruments[0], 1,          WaveType::sine_wave,     WaveType::no_wave,       osc_mode_blend,     0.0f);
+    set_instrument_layers(&instruments[1], max_layers, WaveType::sawtooth_wave, WaveType::no_wave,       osc_mode_blend,     0.0f);
+    set_instrument_layers(&instruments[2], 1,          WaveType::sine_wave,     WaveType::sine_wave,     osc_mode_fm,        2.0f);
+    set_instrument_layers(&instruments[3], 1,          WaveType::sine_wave,     WaveType::sawtooth_wave, osc_mode_hard_sync, 2.5f);
+    set_instrument_layers(&instruments[4], 1,          WaveType::sawtooth_wave, WaveType::no_wave,       osc_mode_blend,     0.0f);
+
+    // Supersaw pitch spread: symmetric about +/- 18 cents across the layers.
+    static const float supersaw_pitch_offsets[max_layers] = { -0.18f, -0.12f, -0.06f, 0.0f, 0.06f, 0.12f, 0.18f };
+    for (uint32_t layer_idx = 0; layer_idx < max_layers; layer_idx++) {
+        instruments[1].layers[layer_idx].pitch_offset = supersaw_pitch_offsets[layer_idx];
+    }
+
     for (RuntimeInstrument& instr : instruments) {
-        // Pitch: channel bend added on top of a mod-wheel-scaled vibrato whose rate also speeds
-        // up with the wheel (a sourced LFO rate).  No envelope.
-        InstrModBinding& pitch = instr.binding[mod_pitch];
-        pitch.scope            = ParamScope::voice;
-        pitch.base_value       = 0.0f;
-        pitch.lfo_desc_id      = vibrato_lfo_desc_id;
-        pitch.lfo_op           = SourceOp::add;
-        pitch.lfo_depth_source = ModSource::mod_wheel;
-        pitch.lfo_depth        = vibrato_depth_semitones;
-        pitch.lfo_rate_source  = ModSource::mod_wheel;
-        pitch.lfo_rate_scale   = -vibrato_rate_range_ms;
-        pitch.num_inputs       = 1;
-        pitch.inputs[0]        = { ModSource::pitch_bend, SourceOp::add, 1.0f };
+        // Pitch routing: channel bend folds in voice-wide on top of the per-layer vibrato.
+        instr.routing[mod_pitch].base_value = 0.0f;
+        instr.routing[mod_pitch].num_inputs = 1;
+        instr.routing[mod_pitch].inputs[0]  = { ModSource::pitch_bend, SourceOp::add, 1.0f };
 
-        // Volume: an ADSR envelope, attenuated by a pressure-driven tremolo LFO and scaled by note
-        // velocity.  Voice scope shares envelope descriptor [0] across the (mono) oscillator.
-        InstrModBinding& volume = instr.binding[mod_volume];
-        volume.scope               = ParamScope::voice;
-        volume.base_value          = 0.0f;
-        volume.envelope_desc_id[0] = volume_envelope_id;
-        volume.lfo_desc_id         = tremolo_lfo_desc_id;
-        volume.lfo_op              = SourceOp::multiply;
-        volume.lfo_depth_source    = ModSource::pressure_combine;
-        volume.lfo_depth           = 1.0f;
-        volume.lfo_rate_source     = ModSource::none;
-        volume.num_inputs          = 1;
-        volume.inputs[0]           = { ModSource::velocity, SourceOp::multiply, 1.0f };
+        // Volume routing: note velocity scales the result voice-wide.
+        instr.routing[mod_volume].base_value = 0.0f;
+        instr.routing[mod_volume].num_inputs = 1;
+        instr.routing[mod_volume].inputs[0]  = { ModSource::velocity, SourceOp::multiply, 1.0f };
 
-        instr.binding[mod_panning].scope      = ParamScope::voice;
-        instr.binding[mod_panning].base_value = 0.5f;   // centered constant
+        // Panning: centered constant (no generators).
+        instr.routing[mod_panning].base_value = 0.5f;
+
+        for (uint32_t layer_idx = 0; layer_idx < instr.layer_count; layer_idx++) {
+            // Pitch: a mod-wheel-scaled vibrato whose rate also speeds up with the wheel (a sourced
+            // LFO rate).  Each layer runs its own vibrato instance off the same descriptor, so the
+            // layers stay in phase (the LFO is a deterministic function of the tick).  No envelope.
+            LayerGen& pitch_gen        = instr.layers[layer_idx].gen[mod_pitch];
+            pitch_gen.lfo_desc_id      = vibrato_lfo_desc_id;
+            pitch_gen.lfo_op           = SourceOp::add;
+            pitch_gen.lfo_depth        = vibrato_depth_semitones;
+            pitch_gen.lfo_depth_source = ModSource::mod_wheel;
+            pitch_gen.lfo_rate_source  = ModSource::mod_wheel;
+            pitch_gen.lfo_rate_scale   = -vibrato_rate_range_ms;
+
+            // Volume: an ADSR envelope attenuated by a pressure-driven tremolo LFO (the supersaw
+            // overrides the envelope per layer below).
+            LayerGen& volume_gen        = instr.layers[layer_idx].gen[mod_volume];
+            volume_gen.envelope_desc_id = volume_envelope_id;
+            volume_gen.lfo_desc_id      = tremolo_lfo_desc_id;
+            volume_gen.lfo_op           = SourceOp::multiply;
+            volume_gen.lfo_depth        = 1.0f;
+            volume_gen.lfo_depth_source = ModSource::pressure_combine;
+            volume_gen.lfo_rate_source  = ModSource::none;
+        }
     }
 
     // FM voice: constant FM depth 3.0.
-    instruments[2].binding[mod_fm_index].base_value = 3.0f;
+    instruments[2].routing[mod_fm_index].base_value = 3.0f;
 
     // Triangle-ish piano: sawtooth at duty 0.5.
-    instruments[4].binding[mod_duty0].base_value = 0.5f;
+    instruments[4].routing[mod_duty0].base_value = 0.5f;
 
-    // Supersaw demo: each layer gets its own swept low pass and its own volume envelope
-    // with a staggered release, so the layers fade out at audibly different rates.  Volume
-    // keeps the default tremolo + velocity modulation; only its scope and per-layer envelopes change.
-    InstrModBinding& supersaw_cutoff = instruments[1].binding[mod_lowpass_cutoff];
-    supersaw_cutoff.scope      = ParamScope::oscillator;
-    supersaw_cutoff.base_value = cutoff_base_hz;
-    instruments[1].binding[mod_volume].scope = ParamScope::oscillator;
-    for (uint32_t layer_idx = 0; layer_idx < max_layers; layer_idx++) {
-        supersaw_cutoff.envelope_desc_id[layer_idx]                 = cutoff_sweep_envelope_id;
-        instruments[1].binding[mod_volume].envelope_desc_id[layer_idx] =
+    // Supersaw demo: each layer gets its own swept low pass and its own volume envelope with a
+    // staggered release, so the layers fade out at audibly different rates.
+    RuntimeInstrument& supersaw = instruments[1];
+    supersaw.routing[mod_lowpass_cutoff].base_value = cutoff_base_hz;
+    for (uint32_t layer_idx = 0; layer_idx < supersaw.layer_count; layer_idx++) {
+        supersaw.layers[layer_idx].gen[mod_lowpass_cutoff].envelope_desc_id = cutoff_sweep_envelope_id;
+
+        supersaw.layers[layer_idx].gen[mod_volume].envelope_desc_id =
             static_cast<uint16_t>(release_envelope_base + layer_idx);
     }
 }
@@ -942,7 +970,7 @@ static bool allocate_oscillators(uint8_t*                 osc_ids,
     for (uint32_t osc_idx = 1; osc_idx < max_oscillators && allocated < num_osc; osc_idx++) {
         if (oscillators[osc_idx].osc_type[0] == WaveType::no_wave) {
             oscillators[osc_idx].voice_id    = static_cast<uint8_t>(voice_idx);
-            oscillators[osc_idx].osc_type[0] = instrument.osc_type[0];
+            oscillators[osc_idx].osc_type[0] = instrument.layers[allocated].osc_type[0];
             osc_ids[allocated]               = static_cast<uint8_t>(osc_idx);
             ++allocated;
         }
@@ -1230,62 +1258,64 @@ static uint32_t resolve_source(ModSource source, uint32_t channel, uint32_t voic
     }
 }
 
-// Expands one target's binding into its {dest, env, lfo} node triple.  The dest folds, in order, an
-// additive source from the envelope generator, a source from the LFO generator (per lfo_op), then
-// each input source with its resolved param id; absent generators simply contribute no source.  This
-// is the generic note-on expander: every modulation route is data in the binding, not code here.
-static void configure_target_modulation(uint32_t                 dest_node,
-                                        uint32_t                 env_node,
-                                        uint32_t                 lfo_node,
-                                        const RuntimeInstrument& instrument,
+// Expands one layer's target into its {dest, env, lfo} node triple at the layer's oscillator slot.
+// The dest folds, in order, an additive source from the envelope generator, a source from the LFO
+// generator (per lfo_op), then each routed input source; absent generators contribute no source.
+// Each layer instantiates its own generators, so layers with the same descriptor id evaluate the
+// same value in phase without sharing nodes.  Every route is data, not code here.
+static void configure_target_modulation(const RuntimeInstrument& instrument,
                                         ModTarget                target,
+                                        uint32_t                 dest_role,
+                                        uint32_t                 osc_slot,
                                         uint32_t                 channel,
                                         uint32_t                 voice_idx,
                                         uint32_t                 layer_idx)
 {
-    const InstrModBinding& binding = instrument.binding[target];
+    const LayerGen&      gen     = instrument.layers[layer_idx].gen[target];
+    const TargetRouting& routing = instrument.routing[target];
+
+    const uint32_t env_node = osc_param(osc_slot, dest_role + 1);
+    const uint32_t lfo_node = osc_param(osc_slot, dest_role + 2);
 
     // Envelope generator node.  Clear it first to drop stale state from a reused slot: an absent
     // envelope leaves it kind external (unreferenced, value 0), so it contributes no source.
-    const uint16_t env_desc = binding_envelope_id(instrument, target, layer_idx);
     param_descs[env_node] = { };
     parameters[env_node]  = { };
-    if (env_desc) {
+    if (gen.envelope_desc_id) {
         param_descs[env_node].kind             = Synth::ParamKind::envelope;
-        param_descs[env_node].envelope.desc_id = env_desc;
+        param_descs[env_node].envelope.desc_id = gen.envelope_desc_id;
         parameters[env_node].sustain_voice     = static_cast<uint16_t>(voice_idx);
     }
 
-    // LFO generator node.  Clear the descriptor and the runtime phase to drop stale state from a
-    // reused slot; configure_lfo overrides the descriptor when the binding has an LFO, otherwise it
-    // stays kind external (unreferenced, since configure_plain gets lfo_param_id 0 below).
+    // LFO generator node.  Clear it first; configure_lfo overrides the descriptor when the layer has
+    // an LFO, otherwise it stays kind external (unreferenced, since configure_plain gets 0 below).
     param_descs[lfo_node] = { };
     parameters[lfo_node]  = { };
-    if (binding.lfo_desc_id) {
+    if (gen.lfo_desc_id) {
         Synth::configure_lfo(&param_descs[lfo_node],
-                            binding.lfo_desc_id,
-                            binding.lfo_op,
-                            binding.lfo_depth,
-                            static_cast<uint16_t>(resolve_source(binding.lfo_depth_source, channel, voice_idx)),
-                            static_cast<uint16_t>(resolve_source(binding.lfo_rate_source, channel, voice_idx)),
-                            binding.lfo_rate_scale);
+                            gen.lfo_desc_id,
+                            gen.lfo_op,
+                            gen.lfo_depth,
+                            static_cast<uint16_t>(resolve_source(gen.lfo_depth_source, channel, voice_idx)),
+                            static_cast<uint16_t>(resolve_source(gen.lfo_rate_source, channel, voice_idx)),
+                            gen.lfo_rate_scale);
     }
 
-    // Resolve the binding's input sources to concrete param ids.
+    // Resolve the target's routed input sources to concrete param ids.
     Synth::SourceParam sources[Synth::max_mod_inputs];
-    for (uint32_t input_idx = 0; input_idx < binding.num_inputs; input_idx++) {
-        const ModInput& input = binding.inputs[input_idx];
+    for (uint32_t input_idx = 0; input_idx < routing.num_inputs; input_idx++) {
+        const ModInput& input = routing.inputs[input_idx];
         sources[input_idx] = { static_cast<uint16_t>(resolve_source(input.source, channel, voice_idx)),
                                input.op, input.multiplier };
     }
 
-    Synth::configure_plain(&param_descs[dest_node],
-                                binding.base_value,
-                                env_desc ? static_cast<uint16_t>(env_node) : uint16_t(0),
-                                binding.lfo_desc_id ? static_cast<uint16_t>(lfo_node) : uint16_t(0),
-                                binding.lfo_op,
+    Synth::configure_plain(&param_descs[osc_param(osc_slot, dest_role)],
+                                routing.base_value,
+                                gen.envelope_desc_id ? static_cast<uint16_t>(env_node) : uint16_t(0),
+                                gen.lfo_desc_id ? static_cast<uint16_t>(lfo_node) : uint16_t(0),
+                                gen.lfo_op,
                                 sources,
-                                binding.num_inputs);
+                                routing.num_inputs);
 }
 
 // Seeds an externally-driven leaf (a MIDI input source) with an initial value+prev so a consumer
@@ -1420,21 +1450,6 @@ static void process_note_on(uint32_t delta_samples, const Synth::MidiEvent& even
     set_input_leaf(voice_param(voice_idx, voice_input_aftertouch),       0.0f);
     set_input_leaf(voice_param(voice_idx, voice_input_pressure_combine), 0.0f);
 
-    // Expand the voice-scoped target bindings (pitch) into their node triples.
-    for (const ModTargetNode& node : mod_target_nodes) {
-        if (node.per_oscillator) {
-            continue;
-        }
-        configure_target_modulation(voice_param(voice_idx, node.dest_role),
-                                    voice_param(voice_idx, node.dest_role + 1),
-                                    voice_param(voice_idx, node.dest_role + 2),
-                                    instrument,
-                                    node.target,
-                                    channel,
-                                    voice_idx,
-                                    0);
-    }
-
     if ( ! allocate_oscillators(voice.osc_ids, layer_count, voice_idx, instrument)) {
         d_printf("All oscillators are active, dropping note %u on channel %u\n", note, channel);
         drop_voice(voice_idx, channel, note);
@@ -1452,30 +1467,27 @@ static void process_note_on(uint32_t delta_samples, const Synth::MidiEvent& even
         osc.output_channel = channel;
         osc.note           = note;
         osc.freq_mult      = 1;
-        osc.osc_type[0]    = instrument.osc_type[0];
-        osc.osc_type[1]    = instrument.osc_type[1];
-        osc.osc_mode       = instrument.osc_mode;
-        osc.mod_ratio      = instrument.mod_ratio;
-        osc.pitch_offset   = instrument.pitch_offset[layer_idx];
+        const OscDescriptor& layer = instrument.layers[layer_idx];
+        osc.osc_type[0]    = layer.osc_type[0];
+        osc.osc_type[1]    = layer.osc_type[1];
+        osc.osc_mode       = layer.osc_mode;
+        osc.mod_ratio      = layer.mod_ratio;
+        osc.pitch_offset   = layer.pitch_offset;
         osc.phase          = 0.0f;
         osc.mod_phase      = 0.0f;
         osc.old_volume     = 0.0f;   // ramp up from silence to avoid a click
-        osc.old_panning    = instrument.binding[mod_panning].base_value;
+        osc.old_panning    = instrument.routing[mod_panning].base_value;
 
-        // Expand the per-oscillator target bindings (volume, low pass, high pass) into their node
-        // triples at this oscillator's slot.
+        // Expand each modulation target into its node triple at this oscillator's slot.
         const uint32_t osc_slot = voice.osc_ids[layer_idx];
         for (const ModTargetNode& node : mod_target_nodes) {
-            if (node.per_oscillator) {
-                configure_target_modulation(osc_param(osc_slot, node.dest_role),
-                                            osc_param(osc_slot, node.dest_role + 1),
-                                            osc_param(osc_slot, node.dest_role + 2),
-                                            instrument,
-                                            node.target,
-                                            channel,
-                                            voice_idx,
-                                            layer_idx);
-            }
+            configure_target_modulation(instrument,
+                                        node.target,
+                                        node.dest_role,
+                                        osc_slot,
+                                        channel,
+                                        voice_idx,
+                                        layer_idx);
         }
     }
 
@@ -1830,16 +1842,16 @@ static void update_modulation()
         Voice&                   voice      = voices[osc.voice_id];
         const RuntimeInstrument& instrument = voice_instrument(voice);
 
-        // Pitch adds the per-layer pitch offset on top of the graph pitch
+        // Pitch adds the per-layer pitch offset on top of the layer's graph pitch
         // node (which already folds in channel bend and the vibrato generator).
-        osc.pitch    = parameters[voice_param(osc.voice_id, voice_pitch_dest)].value
+        osc.pitch    = parameters[osc_param(osc_idx, osc_pitch_dest)].value
                      + osc.pitch_offset;
-        // These targets are unmodulated constants: read the instrument's base value.
-        osc.panning  = instrument.binding[mod_panning].base_value;
-        osc.duty[0]  = instrument.binding[mod_duty0].base_value;
-        osc.duty[1]  = instrument.binding[mod_duty1].base_value;
-        osc.osc_mix  = instrument.binding[mod_osc_mix].base_value;
-        osc.fm_index = instrument.binding[mod_fm_index].base_value;
+        // These targets are unmodulated constants: read the target's routing base value.
+        osc.panning  = instrument.routing[mod_panning].base_value;
+        osc.duty[0]  = instrument.routing[mod_duty0].base_value;
+        osc.duty[1]  = instrument.routing[mod_duty1].base_value;
+        osc.osc_mix  = instrument.routing[mod_osc_mix].base_value;
+        osc.fm_index = instrument.routing[mod_fm_index].base_value;
 
         // Volume: the oscillator's volume dest node, which already folds the ADSR envelope, the tremolo
         // LFO edge and the velocity input edge.  free-on-silence keys off the raw ADSR envelope node.

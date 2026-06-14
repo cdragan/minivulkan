@@ -118,12 +118,6 @@ enum ModTarget : uint8_t {
     num_mod_targets
 };
 
-// Where a bound parameter is allocated.
-enum class ParamScope : uint8_t {
-    voice,        // One shared parameter for all the voice's oscillators
-    oscillator    // One parameter per oscillator (per layer)
-};
-
 enum class EffectType : uint8_t {
     none,
     distortion,
@@ -205,8 +199,8 @@ enum class ParamKind : uint8_t {
 };
 
 // Description of how one parameter is computed.  Holds no per-sample runtime state (so the playback
-// program can compress/pack these); the engine instantiates it per note, expanding an InstrModBinding
-// onto the note's allocated slots.  kind selects the live union member.  A generator or external value
+// program can compress/pack these); the engine instantiates it per note, expanding a layer's
+// generators onto the note's allocated slots.  kind selects the live union member.  A generator or external value
 // is set before the fold, so a source reading it sees it with zero lag; a plain->plain hop is delayed
 // one step.
 struct ParamDescriptor {
@@ -262,22 +256,27 @@ struct ModInput {
     float     multiplier;
 };
 
-// An instrument's complete modulation declaration for one target: a base value, an optional
-// envelope generator (per-layer descriptor), an optional LFO generator (sourceable depth and
-// rate), and a list of input sources.  note-on expands this into graph nodes generically, and the
-// editor edits these declarations directly.  No runtime state lives here, so it can be packed.
-struct InstrModBinding {
-    ParamScope scope;                         // envelope-descriptor selector: voice -> [0], oscillator -> [layer]
-    float      base_value;
-    uint16_t   envelope_desc_id[max_layers];  // 1-based into the envelope table; 0 = no envelope
-    uint16_t   lfo_desc_id;                   // 1-based into the LFO table; 0 = no LFO
-    SourceOp   lfo_op;                        // how the LFO folds into the target (see eval_lfo_mod)
-    ModSource  lfo_depth_source;              // none -> use lfo_depth constant; else scales it
-    float      lfo_depth;
-    ModSource  lfo_rate_source;               // none -> use the LFO's own period; else offsets it
-    float      lfo_rate_scale;                // ms of period offset per unit of the rate source
-    uint16_t   num_inputs;
-    ModInput   inputs[max_mod_inputs];
+// One layer's generators for a single modulation target: an optional envelope and an optional LFO
+// (with sourceable depth and rate).  Each layer instantiates its own generators, so layers that name
+// the same descriptor id evaluate identically and in phase (the generators are deterministic in the
+// tick).  No runtime state lives here, so it can be packed; note-on expands it into graph nodes.
+struct LayerGen {
+    uint16_t  envelope_desc_id;   // 1-based into the envelope table; 0 = no envelope
+    uint16_t  lfo_desc_id;        // 1-based into the LFO table; 0 = no LFO
+    SourceOp  lfo_op;             // how the LFO folds into the target (see eval_lfo_mod)
+    float     lfo_depth;
+    ModSource lfo_depth_source;   // none -> use lfo_depth constant; else scales it
+    ModSource lfo_rate_source;    // none -> use the LFO's own period; else offsets it
+    float     lfo_rate_scale;     // ms of period offset per unit of the rate source
+};
+
+// Voice-wide routing for one modulation target, shared by all the instrument's layers: the base
+// value the generators fold onto, and the MIDI input sources.  The per-layer envelope and LFO that
+// fold in on top live in each layer's LayerGen.  No runtime state, so it can be packed.
+struct TargetRouting {
+    float     base_value;
+    uint16_t  num_inputs;
+    ModInput  inputs[max_mod_inputs];
 };
 
 // Runtime value of one parameter, plus the generator state carried between render steps when the
