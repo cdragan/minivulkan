@@ -194,27 +194,50 @@ struct SourceParam {
     float    multiplier;
 };
 
-// Description of how one parameter is computed.  Static in shape, not in lifetime: it holds no
-// per-sample runtime state (so the playback program can compress/pack these), but the engine
-// instantiates it per note, expanding an InstrModBinding onto the note's allocated slots.  A leaf
-// is never recomputed by propagate_parameters: its value is set externally (a MIDI input) or by the
-// generator pre-pass (envelope XOR LFO), so a source reading a leaf sees its current value with
-// zero lag.  A non-leaf is base_value folded with each source parameter.
-struct ParamDescriptor {
-    bool        is_leaf;
-    float       base_value;
-    uint16_t    num_sources;
-    SourceParam sources[max_param_sources];
+// What computes a parameter's value, and therefore which per-kind fields are live.  A node is exactly
+// one kind, so the fields are a union: illegal mixes (base+sources together with a generator) cannot
+// be expressed.  external is the zero-initialized default (value 0), which also covers the sentinel.
+enum class ParamKind : uint8_t {
+    external,   // value written from outside (a MIDI input, or the reserved sentinel); never computed
+    envelope,   // value produced each step by the envelope generator (the per-step pre-pass)
+    lfo,        // value produced each step by the LFO generator (the per-step pre-pass)
+    plain       // value computed by propagate_parameters: base_value folded with the source params
+};
 
-    // Generator: when set, this (leaf) parameter's value is an envelope XOR an LFO,
-    // computed by the host's per-step pre-pass.
-    uint16_t    envelope_desc_id;    // 1-based into the envelope table; 0 = none
-    uint16_t    lfo_desc_id;         // 1-based into the LFO table; 0 = none
-    SourceOp    lfo_op;              // how the LFO contribution is shaped (see eval_lfo_mod)
-    uint16_t    lfo_depth_param_id;  // 0 = use lfo_depth constant; else scales it by a source parameter
-    float       lfo_depth;
-    uint16_t    lfo_rate_param_id;   // 0 = use the LFO's own period; else a source parameter offsets it
-    float       lfo_rate_scale;      // ms of period offset per unit of the rate source parameter
+// Description of how one parameter is computed.  Holds no per-sample runtime state (so the playback
+// program can compress/pack these); the engine instantiates it per note, expanding an InstrModBinding
+// onto the note's allocated slots.  kind selects the live union member.  A generator or external value
+// is set before the fold, so a source reading it sees it with zero lag; a plain->plain hop is delayed
+// one step.
+struct ParamDescriptor {
+    // envelope
+    struct EnvelopeParam {
+        uint16_t desc_id;            // 1-based into the envelope table
+    };
+
+    // lfo
+    struct LfoParam {
+        uint16_t desc_id;            // 1-based into the LFO table
+        SourceOp op;                 // how the LFO contribution is shaped (see eval_lfo_mod)
+        float    depth;
+        uint16_t depth_param_id;     // 0 = use the constant depth; else scales it by a parameter
+        uint16_t rate_param_id;      // 0 = use the LFO's own period; else a parameter offsets it
+        float    rate_scale;         // ms of period offset per unit of the rate parameter
+    };
+
+    // plain
+    struct PlainParam {
+        float       base_value;
+        uint16_t    num_sources;
+        SourceParam sources[max_param_sources];
+    };
+
+    ParamKind kind;
+    union {
+        EnvelopeParam envelope;
+        LfoParam      lfo;
+        PlainParam    plain;
+    };
 };
 
 // Input source ROLES an instrument binding can reference.  note-on resolves each to a concrete
@@ -241,7 +264,7 @@ struct ModInput {
 
 // An instrument's complete modulation declaration for one target: a base value, an optional
 // envelope generator (per-unison descriptor), an optional LFO generator (sourceable depth and
-// rate), and a list of input edges.  note-on expands this into graph nodes generically, and the
+// rate), and a list of input sources.  note-on expands this into graph nodes generically, and the
 // editor edits these declarations directly.  No runtime state lives here, so it can be packed.
 struct InstrModBinding {
     ParamScope scope;                         // envelope-descriptor selector: voice -> [0], oscillator -> [unison]
@@ -269,11 +292,37 @@ struct Parameter {
 
 // Advances the parameters' base + source propagation one control-rate step:
 //   1. snapshot prev_value = value for every parameter (so reads are consistent),
-//   2. recompute each non-leaf parameter: value = base, then fold each source's
+//   2. recompute each plain parameter: value = base, then fold each source's
 //      amount * source.prev_value in by add or multiply per its op.
-// Because sources read prev_value, a leaf source is seen with zero lag while a
-// param->param hop is delayed exactly one step; cycles are well-defined and bounded.
+// Non-plain kinds (external, envelope, lfo) are left untouched -- they are set before this runs.
+// Because sources read prev_value, such a source is seen with zero lag while a plain->plain hop is
+// delayed exactly one step; cycles are well-defined and bounded.
 void propagate_parameters(Parameter* params, const ParamDescriptor* descs, uint32_t count);
+
+// Configures a ParamDescriptor as an LFO generator (kind == lfo): propagate_parameters leaves it
+// alone; the per-step pre-pass fills its value by evaluating the LFO.  Depth and rate can be driven
+// by parameters -- the pre-pass reads the depth/rate source parameters (one step delayed) when
+// computing the wave -- but those are generator inputs, not propagate sources.
+void configure_lfo(ParamDescriptor* leaf,
+                   uint16_t         lfo_desc_id,
+                   SourceOp         lfo_op,
+                   float            lfo_depth,
+                   uint16_t         lfo_depth_param_id,
+                   uint16_t         lfo_rate_param_id,
+                   float            lfo_rate_scale);
+
+// Assembles a modulated parameter's dest descriptor: base_value folded with an optional envelope
+// source (env_param_id != 0, additive), an optional LFO source (lfo_param_id != 0, folded with
+// lfo_op), then each pre-resolved input source in order.  The caller configures the leaves
+// themselves (the envelope leaf, and the LFO leaf via configure_lfo); this only builds the dest's
+// source list.  Each input is a SourceParam whose param_id is already a concrete graph node.
+void configure_plain(ParamDescriptor*   dest,
+                     float              base_value,
+                     uint16_t           env_param_id,
+                     uint16_t           lfo_param_id,
+                     SourceOp           lfo_op,
+                     const SourceParam* inputs,
+                     uint32_t           num_inputs);
 
 // LFO contribution with sourceable rate and depth, shaped by op:
 //   add      -> depth * bipolar_wave        in [-depth, depth], neutral 0

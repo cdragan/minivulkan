@@ -124,6 +124,7 @@ namespace {
     // LFO descriptor ids (1-based into lfo_descs[]); set up in init_modulation.
     constexpr uint16_t vibrato_lfo_desc_id = 1;   // sine vibrato driving voice pitch
     constexpr uint16_t tremolo_lfo_desc_id = 2;   // sine tremolo gain driving voice volume
+    constexpr uint16_t master_fir_sweep_lfo_desc_id = 3;   // TEMP demo: triangle sweep of master FIR cutoff
 
     // parameters[] is partitioned into a sentinel (param 0) then per-owner blocks.  Each owner has a
     // fixed set of roles; a source addresses a parameter by computing its block index.  A modulation
@@ -161,7 +162,14 @@ namespace {
     constexpr uint32_t channel_block_base = 1;
     constexpr uint32_t voice_block_base   = channel_block_base + Synth::max_channels * num_channel_roles;
     constexpr uint32_t osc_block_base     = voice_block_base + max_voices * num_voice_roles;
-    constexpr uint32_t total_params       = osc_block_base + max_oscillators * num_osc_roles;
+    constexpr uint32_t effect_pool_base   = osc_block_base + max_oscillators * num_osc_roles;
+
+    // Effect-param modulation pool: a bump region holding the dest node and optional LFO-leaf node
+    // for each modulated effect param.  Unlike voices, effects are configured once (not per note), so
+    // a node is allocated only for a param actually modulated rather than reserving a fixed block.
+    constexpr uint32_t max_effect_mod_params = 32;
+    constexpr uint32_t effect_pool_nodes     = max_effect_mod_params * 2;  // dest + optional LFO leaf each
+    constexpr uint32_t total_params          = effect_pool_base + effect_pool_nodes;
 
     constexpr uint32_t channel_param(uint32_t channel, uint32_t role)
     {
@@ -194,6 +202,25 @@ namespace {
 
     Synth::Parameter       parameters[total_params];
     Synth::ParamDescriptor param_descs[total_params];
+
+    // Bump cursor into the effect-param pool [effect_pool_base, total_params); reset before the
+    // effect bindings are (re)expanded.
+    uint32_t effect_pool_next = effect_pool_base;
+
+    void reset_effect_pool()
+    {
+        effect_pool_next = effect_pool_base;
+    }
+
+    // Hands out the next pool node, or 0 (the sentinel) when the pool is exhausted; a caller that
+    // gets 0 leaves the effect param as an unmodulated constant.
+    uint32_t allocate_effect_pool_node()
+    {
+        if (effect_pool_next >= total_params) {
+            return 0;
+        }
+        return effect_pool_next++;
+    }
 
     // Finds the first free slot (active == false) in a pool over [1, count),
     // skipping slot 0 which is a reserved sentinel.  Returns 0 if none is free.
@@ -535,11 +562,28 @@ namespace {
         bool              enabled;
         float             params[ShaderParams::max_effect_param_floats];
         uint32_t          state_offs;   // byte offset into data_buf; 0 when the effect is stateless
+        uint16_t          src_param_id[ShaderParams::max_effect_param_floats]; // 0 = unmodulated constant
     };
 
     struct EffectChain {
         uint32_t       num_effects;
         EffectInstance effects[max_effects_per_chain];
+    };
+
+    // One effect param's modulation declaration (editor-ready static data, no runtime state).  Effects
+    // are not note-triggered, so there is no envelope: a param is base_value driven by an optional LFO
+    // and optional channel MIDI input sources.  configure_effect_param expands it onto pool nodes.
+    struct EffectParamMod {
+        uint8_t   param_index;        // which of the effect's params[] this drives
+        float     base_value;
+        uint16_t  lfo_desc_id;        // 0 = no LFO
+        SourceOp  lfo_op;
+        float     lfo_depth;
+        ModSource lfo_depth_source;   // none = constant depth
+        ModSource lfo_rate_source;    // none = the LFO's own period
+        float     lfo_rate_scale;
+        uint16_t  num_inputs;
+        ModInput  inputs[Synth::max_mod_inputs];   // channel MIDI sources only
     };
 
     static EffectChain channel_chains[max_mix_channels];
@@ -671,15 +715,16 @@ namespace {
         constexpr float compressor_attack    = 0.9f;
         constexpr float compressor_release   = 0.9995f;
         constexpr float compressor_makeup    = 1.5f;
-        // TEMP demo: a modest 4 kHz low-pass FIR on the master bus band-limits the
-        // whole mix so the FIR effect is audible.  Remove once effect routing is
-        // GUI-configured.  params[0] = lowpass Hz, params[1] = highpass Hz (0 = off).
-        constexpr float demo_fir_lowpass_hz = 800.0f;
+        // TEMP demo: a low-pass FIR on the master bus whose cutoff is swept by an LFO through the
+        // modulation graph (bound in configure_effect_modulation).  params[0] = lowpass Hz -- the
+        // value here is only a fallback used if the sweep is not bound; the per-step pull overrides
+        // it each step.  params[1] = highpass Hz (0 = off).  Remove once routing is GUI-configured.
+        constexpr float master_fir_fallback_lowpass_hz = 3125.0f;  // sweep center
         master_chain.num_effects = 3;
         master_chain.effects[0]  = { Synth::EffectType::reverb, true, { 0.7f, 0.5f, 0.3f, 0.0f, 0.0f }, 0 };
         master_chain.effects[1]  = { Synth::EffectType::compressor, true,
             { compressor_threshold, compressor_ratio, compressor_attack, compressor_release, compressor_makeup }, 0 };
-        master_chain.effects[2]  = { Synth::EffectType::fir, true, { demo_fir_lowpass_hz, 0.0f }, 0 };
+        master_chain.effects[2]  = { Synth::EffectType::fir, true, { master_fir_fallback_lowpass_hz, 0.0f }, 0 };
 
         effect_state_fill_offset = 0;
         effect_state_fill_bytes  = 0;
@@ -806,6 +851,10 @@ static void init_oscillator_buffers()
     init_fir();
 }
 
+// Expands every effect param's modulation declaration onto pool nodes; defined after resolve_source,
+// forward-declared here because init_modulation runs earlier in the file.
+static void configure_effect_modulation();
+
 static void init_modulation()
 {
     // TODO TEMP test settings
@@ -867,13 +916,20 @@ static void init_modulation()
     // Tremolo LFO: sine, ~5 Hz (200 ms); min/delta unused by eval_lfo_mod.
     lfo_descs[tremolo_lfo_desc_id - 1] = { Synth::WaveType::sine_wave, 0, 200, 0.0f, 1.0f };
 
-    // Each channel's pitch bend, mod wheel and pressure are externally-driven leaves;
-    // propagate_parameters must not overwrite them with base.
+    // TEMP demo: master FIR cutoff sweep LFO -- a 4 s triangle (sawtooth, duty 0x7F); min/delta unused.
+    lfo_descs[master_fir_sweep_lfo_desc_id - 1] = { Synth::WaveType::sawtooth_wave, 0x7F, 4000, 0.0f, 1.0f };
+
+    // Each channel's pitch bend, mod wheel and pressure are externally-driven inputs;
+    // propagate_parameters must not overwrite them with a fold.
     for (uint32_t channel = 0; channel < Synth::max_channels; channel++) {
-        param_descs[channel_param(channel, chan_param_bend)].is_leaf      = true;
-        param_descs[channel_param(channel, chan_param_mod_wheel)].is_leaf = true;
-        param_descs[channel_param(channel, chan_param_pressure)].is_leaf  = true;
+        param_descs[channel_param(channel, chan_param_bend)].kind      = Synth::ParamKind::external;
+        param_descs[channel_param(channel, chan_param_mod_wheel)].kind = Synth::ParamKind::external;
+        param_descs[channel_param(channel, chan_param_pressure)].kind  = Synth::ParamKind::external;
     }
+
+    // Expand effect-param modulation onto pool nodes (resolves channel sources, so it runs after the
+    // channel leaves above; the chains themselves were built earlier in init_effects).
+    configure_effect_modulation();
 }
 
 static bool allocate_oscillators(uint8_t*                 osc_ids,
@@ -1175,65 +1231,61 @@ static uint32_t resolve_source(ModSource source, uint32_t channel, uint32_t voic
 }
 
 // Expands one target's binding into its {dest, env, lfo} node triple.  The dest folds, in order, an
-// additive edge from the envelope generator, an edge from the LFO generator (per lfo_op), then each
-// input edge with its resolved source; absent generators simply contribute no edge.  This is the
-// generic note-on expander: every modulation route is data in the binding, not code here.
-static void configure_target_nodes(uint32_t                 dest_node,
-                                   uint32_t                 env_node,
-                                   uint32_t                 lfo_node,
-                                   const RuntimeInstrument& instrument,
-                                   ModTarget                target,
-                                   uint32_t                 channel,
-                                   uint32_t                 voice_idx,
-                                   uint32_t                 unison_idx)
+// additive source from the envelope generator, a source from the LFO generator (per lfo_op), then
+// each input source with its resolved param id; absent generators simply contribute no source.  This
+// is the generic note-on expander: every modulation route is data in the binding, not code here.
+static void configure_target_modulation(uint32_t                 dest_node,
+                                        uint32_t                 env_node,
+                                        uint32_t                 lfo_node,
+                                        const RuntimeInstrument& instrument,
+                                        ModTarget                target,
+                                        uint32_t                 channel,
+                                        uint32_t                 voice_idx,
+                                        uint32_t                 unison_idx)
 {
     const InstrModBinding& binding = instrument.binding[target];
 
-    param_descs[dest_node] = { };
-    uint32_t num_sources = 0;
-
-    // Envelope generator leaf.  A leaf is never overwritten by propagate_parameters, but the pre-pass
-    // only writes it when it has a descriptor, so seed it to zero against stale values from a reused
-    // slot.  An absent envelope contributes no edge.
+    // Envelope generator node.  Clear it first to drop stale state from a reused slot: an absent
+    // envelope leaves it kind external (unreferenced, value 0), so it contributes no source.
     const uint16_t env_desc = binding_envelope_id(instrument, target, unison_idx);
     param_descs[env_node] = { };
-    param_descs[env_node].is_leaf          = true;
-    param_descs[env_node].envelope_desc_id = env_desc;
-    parameters[env_node] = { };
-    parameters[env_node].sustain_voice = static_cast<uint16_t>(voice_idx);
+    parameters[env_node]  = { };
     if (env_desc) {
-        param_descs[dest_node].sources[num_sources++] =
-            { static_cast<uint16_t>(env_node), SourceOp::add, 1.0f };
+        param_descs[env_node].kind             = Synth::ParamKind::envelope;
+        param_descs[env_node].envelope.desc_id = env_desc;
+        parameters[env_node].sustain_voice     = static_cast<uint16_t>(voice_idx);
     }
 
-    // LFO generator leaf, with depth and rate sources resolved from the binding.  The dest folds it
-    // in with the same op the LFO is shaped by.
+    // LFO generator node.  Clear the descriptor and the runtime phase to drop stale state from a
+    // reused slot; configure_lfo overrides the descriptor when the binding has an LFO, otherwise it
+    // stays kind external (unreferenced, since configure_plain gets lfo_param_id 0 below).
     param_descs[lfo_node] = { };
+    parameters[lfo_node]  = { };
     if (binding.lfo_desc_id) {
-        param_descs[lfo_node].is_leaf            = true;
-        param_descs[lfo_node].lfo_desc_id        = binding.lfo_desc_id;
-        param_descs[lfo_node].lfo_op             = binding.lfo_op;
-        param_descs[lfo_node].lfo_depth          = binding.lfo_depth;
-        param_descs[lfo_node].lfo_depth_param_id =
-            static_cast<uint16_t>(resolve_source(binding.lfo_depth_source, channel, voice_idx));
-        param_descs[lfo_node].lfo_rate_param_id  =
-            static_cast<uint16_t>(resolve_source(binding.lfo_rate_source, channel, voice_idx));
-        param_descs[lfo_node].lfo_rate_scale     = binding.lfo_rate_scale;
-        parameters[lfo_node] = { };   // fresh LFO phase per note
-        param_descs[dest_node].sources[num_sources++] =
-            { static_cast<uint16_t>(lfo_node), binding.lfo_op, 1.0f };
+        Synth::configure_lfo(&param_descs[lfo_node],
+                            binding.lfo_desc_id,
+                            binding.lfo_op,
+                            binding.lfo_depth,
+                            static_cast<uint16_t>(resolve_source(binding.lfo_depth_source, channel, voice_idx)),
+                            static_cast<uint16_t>(resolve_source(binding.lfo_rate_source, channel, voice_idx)),
+                            binding.lfo_rate_scale);
     }
 
-    // Input edges from resolved MIDI sources.
+    // Resolve the binding's input sources to concrete param ids.
+    Synth::SourceParam sources[Synth::max_mod_inputs];
     for (uint32_t input_idx = 0; input_idx < binding.num_inputs; input_idx++) {
         const ModInput& input = binding.inputs[input_idx];
-        param_descs[dest_node].sources[num_sources++] =
-            { static_cast<uint16_t>(resolve_source(input.source, channel, voice_idx)), input.op, input.multiplier };
+        sources[input_idx] = { static_cast<uint16_t>(resolve_source(input.source, channel, voice_idx)),
+                               input.op, input.multiplier };
     }
 
-    param_descs[dest_node].is_leaf     = false;
-    param_descs[dest_node].base_value  = binding.base_value;
-    param_descs[dest_node].num_sources = static_cast<uint16_t>(num_sources);
+    Synth::configure_plain(&param_descs[dest_node],
+                                binding.base_value,
+                                env_desc ? static_cast<uint16_t>(env_node) : uint16_t(0),
+                                binding.lfo_desc_id ? static_cast<uint16_t>(lfo_node) : uint16_t(0),
+                                binding.lfo_op,
+                                sources,
+                                binding.num_inputs);
 }
 
 // Seeds an externally-driven leaf (a MIDI input source) with an initial value+prev so a consumer
@@ -1241,9 +1293,89 @@ static void configure_target_nodes(uint32_t                 dest_node,
 static void set_input_leaf(uint32_t node, float value)
 {
     param_descs[node] = { };
-    param_descs[node].is_leaf   = true;
+    param_descs[node].kind      = Synth::ParamKind::external;
     parameters[node].value      = value;
     parameters[node].prev_value = value;
+}
+
+// Effects route only channel-wide MIDI sources; per-voice sources have no voice in an effect's context.
+static bool is_channel_mod_source(ModSource source)
+{
+    return source == ModSource::pitch_bend
+        || source == ModSource::mod_wheel
+        || source == ModSource::channel_pressure;
+}
+
+// Expands one effect param's modulation declaration onto pool nodes: a dest node (folded by
+// propagate_parameters) plus an LFO leaf when present, recording the dest in src_param_id so the
+// per-step pull copies its value into the param the shader reads.  channel resolves the input sources
+// (master effects pass no inputs, so channel is unused there).
+static void configure_effect_param(EffectInstance* effect, const EffectParamMod& mod, uint32_t channel)
+{
+    const uint32_t dest_node = allocate_effect_pool_node();
+    if ( ! dest_node) {
+        return;   // pool exhausted: the param keeps its constant value
+    }
+    parameters[dest_node] = { };
+
+    uint32_t lfo_node = 0;
+    if (mod.lfo_desc_id) {
+        lfo_node = allocate_effect_pool_node();
+        if ( ! lfo_node) {
+            return;
+        }
+        Synth::configure_lfo(&param_descs[lfo_node],
+                            mod.lfo_desc_id,
+                            mod.lfo_op,
+                            mod.lfo_depth,
+                            static_cast<uint16_t>(resolve_source(mod.lfo_depth_source, channel, 0)),
+                            static_cast<uint16_t>(resolve_source(mod.lfo_rate_source, channel, 0)),
+                            mod.lfo_rate_scale);
+        parameters[lfo_node] = { };   // fresh LFO phase
+    }
+
+    Synth::SourceParam sources[Synth::max_mod_inputs];
+    for (uint32_t input_idx = 0; input_idx < mod.num_inputs; input_idx++) {
+        const ModInput& input = mod.inputs[input_idx];
+        assert(is_channel_mod_source(input.source));
+        sources[input_idx] = { static_cast<uint16_t>(resolve_source(input.source, channel, 0)),
+                               input.op, input.multiplier };
+    }
+
+    Synth::configure_plain(&param_descs[dest_node],
+                                mod.base_value,
+                                0,   // effects have no envelope
+                                static_cast<uint16_t>(lfo_node),   // 0 when no LFO
+                                mod.lfo_op,
+                                sources,
+                                mod.num_inputs);
+
+    effect->src_param_id[mod.param_index] = static_cast<uint16_t>(dest_node);
+}
+
+static void configure_effect_modulation()
+{
+    reset_effect_pool();
+
+    // TEMP demo: sweep the master FIR lowpass cutoff with a 4 s triangle LFO (250..6000 Hz), now
+    // through the modulation graph instead of a host-side hack.  Removed once effect modulation is
+    // GUI-configured.  The sweep is linear in Hz (the LFO is linear), where the old hack was
+    // exponential -- close enough for demo scaffolding.
+    constexpr float sweep_low_hz  = 250.0f;
+    constexpr float sweep_high_hz = 6000.0f;
+
+    for (uint32_t effect_idx = 0; effect_idx < master_chain.num_effects; effect_idx++) {
+        EffectInstance& instance = master_chain.effects[effect_idx];
+        if (instance.enabled && instance.type == Synth::EffectType::fir) {
+            EffectParamMod mod   = { };
+            mod.param_index      = 0;   // FIR lowpass cutoff Hz
+            mod.base_value       = (sweep_low_hz + sweep_high_hz) * 0.5f;
+            mod.lfo_desc_id      = master_fir_sweep_lfo_desc_id;
+            mod.lfo_op           = SourceOp::add;
+            mod.lfo_depth        = (sweep_high_hz - sweep_low_hz) * 0.5f;
+            configure_effect_param(&instance, mod, 0);   // master: LFO only
+        }
+    }
 }
 
 static void process_note_on(uint32_t delta_samples, const Synth::MidiEvent& event)
@@ -1293,10 +1425,14 @@ static void process_note_on(uint32_t delta_samples, const Synth::MidiEvent& even
         if (node.per_oscillator) {
             continue;
         }
-        configure_target_nodes(voice_param(voice_idx, node.dest_role),
-                               voice_param(voice_idx, node.dest_role + 1),
-                               voice_param(voice_idx, node.dest_role + 2),
-                               instrument, node.target, channel, voice_idx, 0);
+        configure_target_modulation(voice_param(voice_idx, node.dest_role),
+                                    voice_param(voice_idx, node.dest_role + 1),
+                                    voice_param(voice_idx, node.dest_role + 2),
+                                    instrument,
+                                    node.target,
+                                    channel,
+                                    voice_idx,
+                                    0);
     }
 
     if ( ! allocate_oscillators(voice.osc_ids, unison_count, voice_idx, instrument)) {
@@ -1331,14 +1467,14 @@ static void process_note_on(uint32_t delta_samples, const Synth::MidiEvent& even
         const uint32_t osc_slot = voice.osc_ids[unison_idx];
         for (const ModTargetNode& node : mod_target_nodes) {
             if (node.per_oscillator) {
-                configure_target_nodes(osc_param(osc_slot, node.dest_role),
-                                       osc_param(osc_slot, node.dest_role + 1),
-                                       osc_param(osc_slot, node.dest_role + 2),
-                                       instrument,
-                                       node.target,
-                                       channel,
-                                       voice_idx,
-                                       unison_idx);
+                configure_target_modulation(osc_param(osc_slot, node.dest_role),
+                                            osc_param(osc_slot, node.dest_role + 1),
+                                            osc_param(osc_slot, node.dest_role + 2),
+                                            instrument,
+                                            node.target,
+                                            channel,
+                                            voice_idx,
+                                            unison_idx);
             }
         }
     }
@@ -1596,29 +1732,30 @@ static void apply_effects(const EffectTarget* targets, uint32_t num_targets)
     }
 }
 
-// TEMP demo scaffolding: sweep the master FIR-effect cutoff with a host-side sine so
-// the filter is plainly audible.  Effect params are not yet modulatable by the LFO/
-// envelope system (a later task wires effect params into the modulation pool); this
-// fakes it by rewriting the cutoff each block before compute_fir_coefficients reads it.
-static void temp_sweep_master_fir_cutoff()
+// Copies each modulated effect param's current graph value into the param float the effect shader
+// reads (and compute_fir_coefficients reads for the FIR effect).  Unmodulated params (src_param_id
+// 0) keep their constant value.
+static void pull_effect_param_chain(EffectChain* chain)
 {
-    constexpr float    sweep_low_hz   = 250.0f;
-    constexpr float    sweep_high_hz  = 6000.0f;
-    constexpr float    sweep_period_s = 4.0f;
-    const uint32_t     period_samples = static_cast<uint32_t>(sweep_period_s * Synth::rt_sampling_rate);
-    const float        phase          = static_cast<float>(rendered_samples % period_samples) /
-                                         static_cast<float>(period_samples);
-    // Triangle 0..1..0 so the cutoff moves at a steady rate (no lingering at the ends).
-    const float        unipolar       = phase < 0.5f ? phase * 2.0f : 2.0f - phase * 2.0f;
-    // Exponential, so the cutoff sweeps in equal octaves (how the ear hears pitch).
-    const float        cutoff_hz      = sweep_low_hz * powf(sweep_high_hz / sweep_low_hz, unipolar);
-
-    for (uint32_t effect_idx = 0; effect_idx < master_chain.num_effects; effect_idx++) {
-        EffectInstance& instance = master_chain.effects[effect_idx];
-        if (instance.enabled && instance.type == Synth::EffectType::fir) {
-            instance.params[0] = cutoff_hz;
+    for (uint32_t effect_idx = 0; effect_idx < chain->num_effects; effect_idx++) {
+        EffectInstance& instance = chain->effects[effect_idx];
+        if ( ! instance.enabled) {
+            continue;
+        }
+        for (uint32_t param_idx = 0; param_idx < ShaderParams::max_effect_param_floats; param_idx++) {
+            if (instance.src_param_id[param_idx]) {
+                instance.params[param_idx] = parameters[instance.src_param_id[param_idx]].value;
+            }
         }
     }
+}
+
+static void pull_effect_params()
+{
+    for (uint32_t channel = 0; channel < Synth::num_channels; channel++) {
+        pull_effect_param_chain(&channel_chains[channel]);
+    }
+    pull_effect_param_chain(&master_chain);
 }
 
 // Advances the modulation graph one control-rate step: first compute every generator leaf's value
@@ -1641,35 +1778,35 @@ static void advance_parameters()
     }
 
     for (uint32_t node_idx = 1; node_idx < total_params; node_idx++) {
-        const Synth::ParamDescriptor& gen           = param_descs[node_idx];
-        const uint16_t                sustain_voice = parameters[node_idx].sustain_voice;
+        const Synth::ParamDescriptor& gen = param_descs[node_idx];
 
-        if (gen.envelope_desc_id) {
-            const Voice& owner   = voices[sustain_voice];
-            const bool   sustain = sustain_voice ? (owner.active && ! owner.releasing) : true;
-            parameters[node_idx].value = Synth::eval_envelope(envelopes[gen.envelope_desc_id - 1].desc,
-                                                               &parameters[node_idx].envelope, sustain);
+        if (gen.kind == Synth::ParamKind::envelope) {
+            const uint16_t sustain_voice = parameters[node_idx].sustain_voice;
+            const Voice&   owner         = voices[sustain_voice];
+            const bool     sustain       = sustain_voice ? (owner.active && ! owner.releasing) : true;
+            parameters[node_idx].value = Synth::eval_envelope(envelopes[gen.envelope.desc_id - 1].desc,
+                                                              &parameters[node_idx].envelope, sustain);
         }
-        else if (gen.lfo_desc_id) {
-            const float    depth  = gen.lfo_depth_param_id
-                                  ? parameters[gen.lfo_depth_param_id].prev_value * gen.lfo_depth
-                                  : gen.lfo_depth;
-            // A rate source offsets the LFO's own period (ms) by source * lfo_rate_scale; without one,
+        else if (gen.kind == Synth::ParamKind::lfo) {
+            const float    depth  = gen.lfo.depth_param_id
+                                  ? parameters[gen.lfo.depth_param_id].prev_value * gen.lfo.depth
+                                  : gen.lfo.depth;
+            // A rate source offsets the LFO's own period (ms) by source * rate_scale; without one,
             // period 0 tells eval_lfo_mod to use the descriptor period unchanged.  Clamp the offset
             // result to at least 1 ms so an editor-supplied scale can never drive the period negative
             // (unsigned underflow) or to zero (a divide-by-zero in the LFO phase).
-            const float    base_ms    = static_cast<float>(lfo_descs[gen.lfo_desc_id - 1].period_ms);
-            const float    offset_ms  = base_ms + parameters[gen.lfo_rate_param_id].prev_value * gen.lfo_rate_scale;
-            const uint32_t period     = gen.lfo_rate_param_id
+            const float    base_ms    = static_cast<float>(lfo_descs[gen.lfo.desc_id - 1].period_ms);
+            const float    offset_ms  = base_ms + parameters[gen.lfo.rate_param_id].prev_value * gen.lfo.rate_scale;
+            const uint32_t period     = gen.lfo.rate_param_id
                                       ? static_cast<uint32_t>(offset_ms > 1.0f ? offset_ms : 1.0f)
                                       : 0;
-            parameters[node_idx].value = Synth::eval_lfo_mod(lfo_descs[gen.lfo_desc_id - 1],
+            parameters[node_idx].value = Synth::eval_lfo_mod(lfo_descs[gen.lfo.desc_id - 1],
                                                              parameters[node_idx].lfo_tick,
                                                              rt_step_samples,
                                                              Synth::rt_sampling_rate,
                                                              period,
                                                              depth,
-                                                             gen.lfo_op);
+                                                             gen.lfo.op);
             parameters[node_idx].lfo_tick++;
         }
     }
@@ -1879,7 +2016,7 @@ static void render_audio_step()
 
     update_modulation();
 
-    temp_sweep_master_fir_cutoff();
+    pull_effect_params();
 
     // ======================================================================
 

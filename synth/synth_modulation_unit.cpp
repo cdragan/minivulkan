@@ -169,25 +169,24 @@ int main()
         TEST(Synth::get_ringbuf_contig_tail(capacity + 1, capacity) == capacity - 1); // offset 1 after a wrap
     }
 
-    // propagate_parameters: one-step-delay vs zero-lag leaf.  Chain L(leaf) -> B -> A.
-    // A leaf source is read at its current value (zero lag); a param->param hop lags
-    // exactly one step.  Parameter 0 is the reserved sentinel.
+    // propagate_parameters: one-step-delay vs zero-lag external input.  Chain X(external) -> B -> A.
+    // An external source is read at its current value (zero lag); a plain->plain hop lags exactly
+    // one step.  Parameter 0 is the reserved sentinel.
     {
         Synth::ParamDescriptor descs[4] = { };
-        descs[0].is_leaf = true;                      // sentinel
-        descs[3].is_leaf = true;                      // L (external value)
-        descs[2].base_value = 0.0f;                         // B reads L additively
-        descs[2].num_sources = 1;
-        descs[2].sources[0] = { 3, Synth::SourceOp::add, 1.0f };
-        descs[1].base_value = 0.0f;                         // A reads B additively
-        descs[1].num_sources = 1;
-        descs[1].sources[0] = { 2, Synth::SourceOp::add, 1.0f };
+        // descs[0] (sentinel) and descs[3] (X, externally driven) stay kind external.
+        descs[2].kind = Synth::ParamKind::plain;            // B reads X additively
+        descs[2].plain.num_sources = 1;
+        descs[2].plain.sources[0] = { 3, Synth::SourceOp::add, 1.0f };
+        descs[1].kind = Synth::ParamKind::plain;            // A reads B additively
+        descs[1].plain.num_sources = 1;
+        descs[1].plain.sources[0] = { 2, Synth::SourceOp::add, 1.0f };
 
         Synth::Parameter params[4] = { };
-        params[3].value = 5.0f;                       // drive the leaf
+        params[3].value = 5.0f;                       // drive the external input
 
         Synth::propagate_parameters(params, descs, 4);     // step 1
-        TEST(approx(params[2].value, 5.0f, 0.001f));  // B picked up the leaf with zero lag
+        TEST(approx(params[2].value, 5.0f, 0.001f));  // B picked up the input with zero lag
         TEST(approx(params[1].value, 0.0f, 0.001f));  // A still sees B's previous (0): one-step delay
 
         Synth::propagate_parameters(params, descs, 4);     // step 2
@@ -199,13 +198,15 @@ int main()
     // bounded; the one-step delay makes it a well-defined iteration, never a deadlock or NaN.
     {
         Synth::ParamDescriptor descs[3] = { };
-        descs[0].is_leaf = true;                      // sentinel
-        descs[1].base_value = 1.0f;                         // A = 1 + 0.5 * B.prev
-        descs[1].num_sources = 1;
-        descs[1].sources[0] = { 2, Synth::SourceOp::add, 0.5f };
-        descs[2].base_value = 1.0f;                         // B = 1 + 0.5 * A.prev
-        descs[2].num_sources = 1;
-        descs[2].sources[0] = { 1, Synth::SourceOp::add, 0.5f };
+        // descs[0] (sentinel) stays kind external.
+        descs[1].kind = Synth::ParamKind::plain;            // A = 1 + 0.5 * B.prev
+        descs[1].plain.base_value = 1.0f;
+        descs[1].plain.num_sources = 1;
+        descs[1].plain.sources[0] = { 2, Synth::SourceOp::add, 0.5f };
+        descs[2].kind = Synth::ParamKind::plain;            // B = 1 + 0.5 * A.prev
+        descs[2].plain.base_value = 1.0f;
+        descs[2].plain.num_sources = 1;
+        descs[2].plain.sources[0] = { 1, Synth::SourceOp::add, 0.5f };
 
         Synth::Parameter params[3] = { };
         for (uint32_t step = 0; step < 1000; step++) {
@@ -220,16 +221,16 @@ int main()
     // propagate_parameters: a multiply source scales the base (e.g. velocity into volume).
     {
         Synth::ParamDescriptor descs[3] = { };
-        descs[0].is_leaf = true;
-        descs[2].is_leaf = true;                      // velocity leaf
-        descs[1].base_value = 0.8f;                         // volume base, scaled by velocity
-        descs[1].num_sources = 1;
-        descs[1].sources[0] = { 2, Synth::SourceOp::multiply, 1.0f };
+        // descs[0] (sentinel) and descs[2] (velocity input) stay kind external.
+        descs[1].kind = Synth::ParamKind::plain;            // volume base, scaled by velocity
+        descs[1].plain.base_value = 0.8f;
+        descs[1].plain.num_sources = 1;
+        descs[1].plain.sources[0] = { 2, Synth::SourceOp::multiply, 1.0f };
 
         Synth::Parameter params[3] = { };
         params[2].value = 0.5f;                       // velocity 0.5
         Synth::propagate_parameters(params, descs, 3);
-        TEST(approx(params[1].value, 0.4f, 0.001f));  // 0.8 * 0.5 (leaf read with zero lag)
+        TEST(approx(params[1].value, 0.4f, 0.001f));  // 0.8 * 0.5 (input read with zero lag)
     }
 
     // propagate_parameters: sources fold left-to-right over the running accumulator, so a
@@ -237,15 +238,13 @@ int main()
     // volume path: (base + envelope) * tremolo * velocity.
     {
         Synth::ParamDescriptor descs[5] = { };
-        descs[0].is_leaf = true;                      // sentinel
-        descs[2].is_leaf = true;                      // envelope leaf
-        descs[3].is_leaf = true;                      // tremolo leaf
-        descs[4].is_leaf = true;                      // velocity leaf
-        descs[1].base_value  = 0.0f;
-        descs[1].num_sources = 3;
-        descs[1].sources[0] = { 2, Synth::SourceOp::add,      1.0f };
-        descs[1].sources[1] = { 3, Synth::SourceOp::multiply, 1.0f };
-        descs[1].sources[2] = { 4, Synth::SourceOp::multiply, 1.0f };
+        // descs[0] sentinel, descs[2] envelope, descs[3] tremolo, descs[4] velocity stay kind
+        // external; their values are set directly below.
+        descs[1].kind = Synth::ParamKind::plain;
+        descs[1].plain.num_sources = 3;
+        descs[1].plain.sources[0] = { 2, Synth::SourceOp::add,      1.0f };
+        descs[1].plain.sources[1] = { 3, Synth::SourceOp::multiply, 1.0f };
+        descs[1].plain.sources[2] = { 4, Synth::SourceOp::multiply, 1.0f };
 
         Synth::Parameter params[5] = { };
         params[2].value = 2.0f;                       // envelope 2.0
@@ -253,6 +252,59 @@ int main()
         params[4].value = 0.5f;                       // velocity 0.5
         Synth::propagate_parameters(params, descs, 5);
         TEST(approx(params[1].value, 0.5f, 0.001f));  // (0 + 2.0) * 0.5 * 0.5, not 0 + 2.0 + ...
+    }
+
+    // configure_plain: effect-param shape -- base folded with an LFO leaf (add) and a
+    // channel input leaf (multiply).  This is the contract the effect-param expander relies on:
+    // a modulated effect param's value is propagate_parameters' result for the assembled dest.
+    // The LFO leaf value is set directly here (the host pre-pass that fills it is not under test).
+    {
+        constexpr uint16_t dest_id  = 1;
+        constexpr uint16_t lfo_id   = 2;
+        constexpr uint16_t input_id = 3;
+
+        Synth::ParamDescriptor descs[4] = { };
+        // descs[0] (sentinel) and descs[input_id] (channel input, e.g. mod wheel) stay kind external.
+
+        Synth::configure_lfo(&descs[lfo_id], 1, Synth::SourceOp::add, 0.5f, 0, 0, 0.0f);
+        const Synth::SourceParam inputs[1] = { { input_id, Synth::SourceOp::multiply, 1.0f } };
+        Synth::configure_plain(&descs[dest_id], 0.1f, 0, lfo_id, Synth::SourceOp::add, inputs, 1);
+
+        // configure_lfo made the LFO node; configure_plain made the dest a plain node.
+        TEST(descs[lfo_id].kind == Synth::ParamKind::lfo);
+        TEST(descs[lfo_id].lfo.desc_id == 1);
+        TEST(descs[dest_id].kind == Synth::ParamKind::plain);
+        TEST(descs[dest_id].plain.num_sources == 2);
+
+        Synth::Parameter params[4] = { };
+        params[lfo_id].value   = 0.2f;                // pretend the LFO produced 0.2
+        params[input_id].value = 0.5f;                // channel input 0.5
+        Synth::propagate_parameters(params, descs, 4);
+        TEST(approx(params[dest_id].value, 0.15f, 0.001f)); // (0.1 + 0.2) * 0.5
+    }
+
+    // configure_plain: no LFO, an envelope source plus a multiply input -- the voice volume
+    // shape (base + envelope) * velocity.  lfo_desc_id 0 means no LFO leaf and no LFO source.
+    {
+        constexpr uint16_t dest_id = 1;
+        constexpr uint16_t env_id  = 2;
+        constexpr uint16_t vel_id  = 3;
+
+        Synth::ParamDescriptor descs[4] = { };
+        // descs[0] sentinel, descs[env_id] envelope value, descs[vel_id] velocity: kind external,
+        // their values set directly below.
+
+        const Synth::SourceParam inputs[1] = { { vel_id, Synth::SourceOp::multiply, 1.0f } };
+        Synth::configure_plain(&descs[dest_id], 0.0f, env_id, 0, Synth::SourceOp::add, inputs, 1);
+
+        TEST(descs[dest_id].kind == Synth::ParamKind::plain);
+        TEST(descs[dest_id].plain.num_sources == 2);  // envelope source + velocity source, no LFO source
+
+        Synth::Parameter params[4] = { };
+        params[env_id].value = 2.0f;                  // envelope 2.0
+        params[vel_id].value = 0.5f;                  // velocity 0.5
+        Synth::propagate_parameters(params, descs, 4);
+        TEST(approx(params[dest_id].value, 1.0f, 0.001f)); // (0 + 2.0) * 0.5
     }
 
     // eval_lfo_mod: add op swings bipolar within [-depth, depth] and reaches both ends;

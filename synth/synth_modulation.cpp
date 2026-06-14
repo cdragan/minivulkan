@@ -210,22 +210,22 @@ uint32_t effect_state_floats(EffectType type)
 void propagate_parameters(Parameter* params, const ParamDescriptor* descs, uint32_t count)
 {
     // Snapshot every parameter's value so all reads this step see a consistent previous
-    // state.  Leaves were set externally before the step, so a parameter sourcing from a
-    // leaf reads its current value (zero lag); a param->param hop reads last step's
-    // value (one-step delay), which makes cycles a well-defined iteration.
+    // state.  Non-plain kinds were set before the step, so a parameter sourcing from one
+    // reads its current value (zero lag); a plain->plain hop reads last step's value
+    // (one-step delay), which makes cycles a well-defined iteration.
     for (uint32_t param_idx = 0; param_idx < count; param_idx++) {
         params[param_idx].prev_value = params[param_idx].value;
     }
 
     for (uint32_t param_idx = 0; param_idx < count; param_idx++) {
         const ParamDescriptor& desc = descs[param_idx];
-        if (desc.is_leaf) {
+        if (desc.kind != ParamKind::plain) {
             continue;
         }
 
-        float value = desc.base_value;
-        for (uint32_t source_idx = 0; source_idx < desc.num_sources; source_idx++) {
-            const SourceParam& source       = desc.sources[source_idx];
+        float value = desc.plain.base_value;
+        for (uint32_t source_idx = 0; source_idx < desc.plain.num_sources; source_idx++) {
+            const SourceParam& source       = desc.plain.sources[source_idx];
             const float        contribution = source.multiplier * params[source.param_id].prev_value;
             if (source.op == SourceOp::add) {
                 value += contribution;
@@ -237,6 +237,57 @@ void propagate_parameters(Parameter* params, const ParamDescriptor* descs, uint3
 
         params[param_idx].value = value;
     }
+}
+
+void configure_lfo(ParamDescriptor* leaf,
+                   uint16_t         lfo_desc_id,
+                   SourceOp         lfo_op,
+                   float            lfo_depth,
+                   uint16_t         lfo_depth_param_id,
+                   uint16_t         lfo_rate_param_id,
+                   float            lfo_rate_scale)
+{
+    *leaf = { };
+    leaf->kind                = ParamKind::lfo;
+    leaf->lfo.desc_id         = lfo_desc_id;
+    leaf->lfo.op              = lfo_op;
+    leaf->lfo.depth           = lfo_depth;
+    leaf->lfo.depth_param_id  = lfo_depth_param_id;
+    leaf->lfo.rate_param_id   = lfo_rate_param_id;
+    leaf->lfo.rate_scale      = lfo_rate_scale;
+}
+
+void configure_plain(ParamDescriptor*   dest,
+                     float              base_value,
+                     uint16_t           env_param_id,
+                     uint16_t           lfo_param_id,
+                     SourceOp           lfo_op,
+                     const SourceParam* inputs,
+                     uint32_t           num_inputs)
+{
+    // An envelope source, an LFO source and the inputs must all fit the dest's fixed source array.
+    assert((env_param_id ? 1u : 0u) + (lfo_param_id ? 1u : 0u) + num_inputs <= max_param_sources);
+
+    *dest = { };
+    dest->kind = ParamKind::plain;
+    uint32_t num_sources = 0;
+
+    // Envelope source first (additive), then the LFO source, then the inputs, matching the fold order
+    // the consumers expect: (base + envelope) shaped by the LFO and inputs.
+    if (env_param_id) {
+        dest->plain.sources[num_sources++] = { env_param_id, SourceOp::add, 1.0f };
+    }
+
+    if (lfo_param_id) {
+        dest->plain.sources[num_sources++] = { lfo_param_id, lfo_op, 1.0f };
+    }
+
+    for (uint32_t input_idx = 0; input_idx < num_inputs; input_idx++) {
+        dest->plain.sources[num_sources++] = inputs[input_idx];
+    }
+
+    dest->plain.base_value  = base_value;
+    dest->plain.num_sources = static_cast<uint16_t>(num_sources);
 }
 
 uint32_t get_ringbuf_data_size(const uint64_t write_pos, const uint64_t read_pos)
