@@ -38,7 +38,7 @@ namespace {
     // Polyphony limits
     constexpr uint32_t max_voices      = 64; // Max notes are playing
     constexpr uint32_t max_oscillators = 64; // Max oscillators are playing
-    using Synth::max_unison;                 // Max oscillators per note
+    using Synth::max_layers;                 // Max layers (oscillators) per note
 
     // Oscillator modes (must match osc_mode_* constants in synth_oscillator.comp.glsl)
     constexpr uint32_t osc_mode_blend     = 0;  // Mix osc_type[0] and osc_type[1] by osc_mix
@@ -85,7 +85,7 @@ namespace {
         bool     active;
         uint8_t  channel;
         uint8_t  instrument;
-        uint8_t  osc_ids[max_unison];    // Oscillator slots owned by this voice
+        uint8_t  osc_ids[max_layers];    // Oscillator slots owned by this voice
         uint8_t  osc_count;              // Number of live oscillator slots owned (0 = none)
         bool     releasing;              // True after note-off, until the volume envelope finishes
     };
@@ -117,8 +117,8 @@ namespace {
 
     // Envelope ids (1-based into envelopes[]); set up in init_modulation.
     constexpr uint16_t volume_envelope_id        = 1;   // envelopes[0]
-    constexpr uint16_t cutoff_sweep_envelope_id  = 2;   // envelopes[1]; one sweep shared by all unison cutoff nodes
-    constexpr uint16_t release_envelope_base     = 3;   // base id; per-unison release id = base + unison_idx
+    constexpr uint16_t cutoff_sweep_envelope_id  = 2;   // envelopes[1]; one sweep shared by all layer cutoff nodes
+    constexpr uint16_t release_envelope_base     = 3;   // base id; per-layer release id = base + layer_idx
     constexpr float    cutoff_base_hz            = 400.0f;
 
     // LFO descriptor ids (1-based into lfo_descs[]); set up in init_modulation.
@@ -185,7 +185,7 @@ namespace {
     }
 
     // Modulation targets which get graph nodes, with their node placement.  per_oscillator targets
-    // build a node triple per unison oscillator; the rest build one per voice.  dest_role is the
+    // build a node triple per layer oscillator; the rest build one per voice.  dest_role is the
     // triple's first role; the env and lfo generator roles are dest_role + 1 and dest_role + 2.
     // Targets absent here are unmodulated constants read straight from the binding's base_value.
     struct ModTargetNode {
@@ -490,7 +490,7 @@ namespace {
         uint32_t fir_taps_offs;             // FIR filter taps offset
         uint32_t osc_mode;                  // osc_mode_blend, osc_mode_fm or osc_mode_hard_sync
         float    mod_ratio;                 // FM: modulator/carrier freq ratio.  Hard sync: slave cycles per master cycle
-        float    detune;                    // Per-oscillator pitch offset in semitones (instrument constant for this note's unison stack)
+        float    pitch_offset;              // Per-oscillator pitch offset in semitones (instrument constant for this note's layers)
 
         // Current phase state
         float    phase;                     // Current position of the oscillator
@@ -508,7 +508,7 @@ namespace {
         float    osc_mix;                   // Mix between osc_type[0] and osc_type[1] (0..1)
         float    fm_index;                  // FM modulation depth
 
-        uint8_t  unison_idx;                // This oscillator's index in its voice's osc_ids list
+        uint8_t  layer_idx;                 // This oscillator's index in its voice's osc_ids list
         uint8_t  voice_id;                  // Voice which owns this oscillator (0 = none/free)
         bool     clear_fir_hist;            // Set on note-on of a filtered slot; the next render
                                             // zeroes this slot's FIR history before the shader reads
@@ -523,8 +523,8 @@ namespace {
         WaveType        osc_type[2];                     // osc_type[1] == WaveType::no_wave means single oscillator
         uint32_t        osc_mode;                        // osc_mode_blend, osc_mode_fm or osc_mode_hard_sync
         float           mod_ratio;                       // FM: modulator/carrier freq ratio.  Hard sync: slave cycles per master cycle
-        uint32_t        unison_count;                    // Number of oscillator slots a note of this instrument uses (1 = mono)
-        float           detune_semitones[max_unison];    // Per-oscillator pitch offset in semitones; entry [idx] applies to the idx-th allocated oscillator
+        uint32_t        layer_count;                     // Number of layers a note of this instrument uses (1 = mono)
+        float           pitch_offset[max_layers];        // Per-layer pitch offset in semitones; entry [idx] applies to the idx-th allocated layer
         InstrModBinding binding[Synth::num_mod_targets]; // Per-target complete modulation declaration
     };
     // Index 0 is a plain mono sine.  Index 1 is a 7-voice supersaw with a
@@ -534,7 +534,7 @@ namespace {
     // Index 4 is a mellow piano-ish voice: a triangle (sawtooth at duty 0.5).
     RuntimeInstrument instruments[5] = {
         { { WaveType::sine_wave,            WaveType::no_wave },        osc_mode_blend,     0.0f, 1,          { 0.0f }, { } },
-        { { Synth::WaveType::sawtooth_wave, WaveType::no_wave },        osc_mode_blend,     0.0f, max_unison,
+        { { Synth::WaveType::sawtooth_wave, WaveType::no_wave },        osc_mode_blend,     0.0f, max_layers,
           { -0.18f, -0.12f, -0.06f, 0.0f, 0.06f, 0.12f, 0.18f }, { } },
         { { WaveType::sine_wave,            WaveType::sine_wave },      osc_mode_fm,        2.0f, 1,          { 0.0f }, { } },
         { { WaveType::sine_wave,            Synth::WaveType::sawtooth_wave }, osc_mode_hard_sync, 2.5f, 1,    { 0.0f }, { } },
@@ -595,20 +595,20 @@ namespace {
     };
     FirSlot fir_slots[max_oscillators];
 
-    // Envelope id an instrument binds for a target at a given unison index,
+    // Envelope id an instrument binds for a target at a given layer index,
     // honoring scope (voice scope shares index 0).  0 means no envelope.
-    static uint16_t binding_envelope_id(const RuntimeInstrument& instrument, ModTarget target, uint32_t unison_idx)
+    static uint16_t binding_envelope_id(const RuntimeInstrument& instrument, ModTarget target, uint32_t layer_idx)
     {
         const InstrModBinding& binding = instrument.binding[target];
-        const uint32_t       slot    = (binding.scope == ParamScope::voice) ? 0u : unison_idx;
-        return binding.envelope_desc_id[slot];
+        const uint32_t       layer   = (binding.scope == ParamScope::voice) ? 0u : layer_idx;
+        return binding.envelope_desc_id[layer];
     }
 
-    // An oscillator (unison index) has a filter iff a cutoff target has an envelope or a nonzero base.
-    static bool osc_has_filter(const RuntimeInstrument& instrument, uint32_t unison_idx)
+    // A layer has a filter iff a cutoff target has an envelope or a nonzero base.
+    static bool osc_has_filter(const RuntimeInstrument& instrument, uint32_t layer_idx)
     {
-        return binding_envelope_id(instrument, mod_lowpass_cutoff, unison_idx)
-            || binding_envelope_id(instrument, mod_highpass_cutoff, unison_idx)
+        return binding_envelope_id(instrument, mod_lowpass_cutoff, layer_idx)
+            || binding_envelope_id(instrument, mod_highpass_cutoff, layer_idx)
             || instrument.binding[mod_lowpass_cutoff].base_value  != 0.0f
             || instrument.binding[mod_highpass_cutoff].base_value != 0.0f;
     }
@@ -616,8 +616,8 @@ namespace {
     static bool any_instrument_has_filter()
     {
         for (uint32_t instr_idx = 0; instr_idx < std::size(instruments); instr_idx++) {
-            for (uint32_t unison_idx = 0; unison_idx < max_unison; unison_idx++) {
-                if (osc_has_filter(instruments[instr_idx], unison_idx)) {
+            for (uint32_t layer_idx = 0; layer_idx < max_layers; layer_idx++) {
+                if (osc_has_filter(instruments[instr_idx], layer_idx)) {
                     return true;
                 }
             }
@@ -812,17 +812,17 @@ static void init_instruments()
     // Triangle-ish piano: sawtooth at duty 0.5.
     instruments[4].binding[mod_duty0].base_value = 0.5f;
 
-    // Supersaw demo: each unison oscillator gets its own swept low pass and its own volume envelope
-    // with a staggered release, so the unison layers fade out at audibly different rates.  Volume
-    // keeps the default tremolo + velocity modulation; only its scope and per-unison envelopes change.
+    // Supersaw demo: each layer gets its own swept low pass and its own volume envelope
+    // with a staggered release, so the layers fade out at audibly different rates.  Volume
+    // keeps the default tremolo + velocity modulation; only its scope and per-layer envelopes change.
     InstrModBinding& supersaw_cutoff = instruments[1].binding[mod_lowpass_cutoff];
     supersaw_cutoff.scope      = ParamScope::oscillator;
     supersaw_cutoff.base_value = cutoff_base_hz;
     instruments[1].binding[mod_volume].scope = ParamScope::oscillator;
-    for (uint32_t unison_idx = 0; unison_idx < max_unison; unison_idx++) {
-        supersaw_cutoff.envelope_desc_id[unison_idx]                 = cutoff_sweep_envelope_id;
-        instruments[1].binding[mod_volume].envelope_desc_id[unison_idx] =
-            static_cast<uint16_t>(release_envelope_base + unison_idx);
+    for (uint32_t layer_idx = 0; layer_idx < max_layers; layer_idx++) {
+        supersaw_cutoff.envelope_desc_id[layer_idx]                 = cutoff_sweep_envelope_id;
+        instruments[1].binding[mod_volume].envelope_desc_id[layer_idx] =
+            static_cast<uint16_t>(release_envelope_base + layer_idx);
     }
 }
 
@@ -896,16 +896,16 @@ static void init_modulation()
     cutoff_envelope.desc.points[1] = { 125, 0      };  // decays to base over ~0.75 s
     cutoff_envelope.desc.points[2] = { 126, 0      };  // stays at base (sustain)
 
-    // TEMP demo: per-unison volume envelopes for the supersaw (envelopes[2..]).  Each
-    // copies the piano volume envelope but lengthens the release so the unison layers
+    // TEMP demo: per-layer volume envelopes for the supersaw (envelopes[2..]).  Each
+    // copies the piano volume envelope but lengthens the release so the layers
     // tail off at audibly different rates.
-    for (uint32_t unison_idx = 0; unison_idx < max_unison; unison_idx++) {
-        StoredEnvelope& release_envelope = envelopes[2 + unison_idx];
+    for (uint32_t layer_idx = 0; layer_idx < max_layers; layer_idx++) {
+        StoredEnvelope& release_envelope = envelopes[2 + layer_idx];
         release_envelope = volume_envelope;
 
         // Release runs from the sustain point (5) to the final point (6); lengthen it
-        // per unison index from ~0.15 s up to ~2.1 s.
-        const uint16_t release_ticks = static_cast<uint16_t>(25 + unison_idx * 55);
+        // per layer index from ~0.15 s up to ~2.1 s.
+        const uint16_t release_ticks = static_cast<uint16_t>(25 + layer_idx * 55);
         release_envelope.desc.points[6].position =
             static_cast<uint16_t>(release_envelope.desc.points[5].position + release_ticks);
     }
@@ -1204,8 +1204,8 @@ static void drop_voice(uint32_t voice_idx, uint32_t channel, uint32_t note)
 {
     Voice& voice = voices[voice_idx];
 
-    for (uint32_t unison_idx = 0; unison_idx < voice.osc_count; ++unison_idx) {
-        Oscillator& osc = oscillators[voice.osc_ids[unison_idx]];
+    for (uint32_t layer_idx = 0; layer_idx < voice.osc_count; ++layer_idx) {
+        Oscillator& osc = oscillators[voice.osc_ids[layer_idx]];
         osc.osc_type[0] = WaveType::no_wave;
         osc.voice_id    = 0;
     }
@@ -1241,13 +1241,13 @@ static void configure_target_modulation(uint32_t                 dest_node,
                                         ModTarget                target,
                                         uint32_t                 channel,
                                         uint32_t                 voice_idx,
-                                        uint32_t                 unison_idx)
+                                        uint32_t                 layer_idx)
 {
     const InstrModBinding& binding = instrument.binding[target];
 
     // Envelope generator node.  Clear it first to drop stale state from a reused slot: an absent
     // envelope leaves it kind external (unreferenced, value 0), so it contributes no source.
-    const uint16_t env_desc = binding_envelope_id(instrument, target, unison_idx);
+    const uint16_t env_desc = binding_envelope_id(instrument, target, layer_idx);
     param_descs[env_node] = { };
     parameters[env_node]  = { };
     if (env_desc) {
@@ -1386,7 +1386,7 @@ static void process_note_on(uint32_t delta_samples, const Synth::MidiEvent& even
     const uint8_t target_instrument = select_instrument(channel, note);
 
     // Re-triggering a note still alive (held or releasing, possibly with some
-    // unison oscillators already silenced) reclaims it cleanly so the new note
+    // layers already silenced) reclaims it cleanly so the new note
     // starts from a fully-allocated voice.
     const uint32_t existing_voice = note_to_voice[channel][note];
     if (existing_voice) {
@@ -1408,9 +1408,9 @@ static void process_note_on(uint32_t delta_samples, const Synth::MidiEvent& even
 
     note_to_voice[channel][note] = static_cast<uint8_t>(voice_idx);
 
-    const RuntimeInstrument& instrument   = voice_instrument(voice);
-    const uint32_t           unison_count = instrument.unison_count;
-    assert(unison_count >= 1 && unison_count <= max_unison);
+    const RuntimeInstrument& instrument  = voice_instrument(voice);
+    const uint32_t           layer_count = instrument.layer_count;
+    assert(layer_count >= 1 && layer_count <= max_layers);
 
     // Per-voice input leaves the bindings route from.  velocity is the note's constant; aftertouch
     // starts at zero (driven by poly-aftertouch events); pressure_combine is recomputed each step as
@@ -1435,19 +1435,19 @@ static void process_note_on(uint32_t delta_samples, const Synth::MidiEvent& even
                                     0);
     }
 
-    if ( ! allocate_oscillators(voice.osc_ids, unison_count, voice_idx, instrument)) {
+    if ( ! allocate_oscillators(voice.osc_ids, layer_count, voice_idx, instrument)) {
         d_printf("All oscillators are active, dropping note %u on channel %u\n", note, channel);
         drop_voice(voice_idx, channel, note);
         return;
     }
-    voice.osc_count = static_cast<uint8_t>(unison_count);
+    voice.osc_count = static_cast<uint8_t>(layer_count);
 
     // Initialize each oscillator's constants and phase/smoothing state.  Resolved
     // values (volume/pitch/duty/osc_mix/fm_index/panning) are written every step by
     // update_modulation; only the smoothing history is seeded here.
-    for (uint32_t unison_idx = 0; unison_idx < unison_count; ++unison_idx) {
-        Oscillator& osc    = oscillators[voice.osc_ids[unison_idx]];
-        osc.unison_idx     = static_cast<uint8_t>(unison_idx);
+    for (uint32_t layer_idx = 0; layer_idx < layer_count; ++layer_idx) {
+        Oscillator& osc    = oscillators[voice.osc_ids[layer_idx]];
+        osc.layer_idx      = static_cast<uint8_t>(layer_idx);
         osc.midi_channel   = channel;
         osc.output_channel = channel;
         osc.note           = note;
@@ -1456,7 +1456,7 @@ static void process_note_on(uint32_t delta_samples, const Synth::MidiEvent& even
         osc.osc_type[1]    = instrument.osc_type[1];
         osc.osc_mode       = instrument.osc_mode;
         osc.mod_ratio      = instrument.mod_ratio;
-        osc.detune         = instrument.detune_semitones[unison_idx];
+        osc.pitch_offset   = instrument.pitch_offset[layer_idx];
         osc.phase          = 0.0f;
         osc.mod_phase      = 0.0f;
         osc.old_volume     = 0.0f;   // ramp up from silence to avoid a click
@@ -1464,7 +1464,7 @@ static void process_note_on(uint32_t delta_samples, const Synth::MidiEvent& even
 
         // Expand the per-oscillator target bindings (volume, low pass, high pass) into their node
         // triples at this oscillator's slot.
-        const uint32_t osc_slot = voice.osc_ids[unison_idx];
+        const uint32_t osc_slot = voice.osc_ids[layer_idx];
         for (const ModTargetNode& node : mod_target_nodes) {
             if (node.per_oscillator) {
                 configure_target_modulation(osc_param(osc_slot, node.dest_role),
@@ -1474,17 +1474,17 @@ static void process_note_on(uint32_t delta_samples, const Synth::MidiEvent& even
                                             node.target,
                                             channel,
                                             voice_idx,
-                                            unison_idx);
+                                            layer_idx);
             }
         }
     }
 
     // Set up each oscillator's FIR once cutoff bindings are resolved.
-    for (uint32_t unison_idx = 0; unison_idx < unison_count; ++unison_idx) {
-        Oscillator&    osc      = oscillators[voice.osc_ids[unison_idx]];
-        const uint32_t osc_slot = voice.osc_ids[unison_idx];
+    for (uint32_t layer_idx = 0; layer_idx < layer_count; ++layer_idx) {
+        Oscillator&    osc      = oscillators[voice.osc_ids[layer_idx]];
+        const uint32_t osc_slot = voice.osc_ids[layer_idx];
 
-        if (osc_has_filter(instrument, unison_idx)) {
+        if (osc_has_filter(instrument, layer_idx)) {
             osc.fir_taps_offs   = fir_slots[osc_slot].coeff_offs;
             osc.fir_memory_offs = fir_slots[osc_slot].history_offs;
             osc.clear_fir_hist  = true;
@@ -1830,10 +1830,10 @@ static void update_modulation()
         Voice&                   voice      = voices[osc.voice_id];
         const RuntimeInstrument& instrument = voice_instrument(voice);
 
-        // Pitch adds the per-oscillator unison detune on top of the graph pitch
+        // Pitch adds the per-layer pitch offset on top of the graph pitch
         // node (which already folds in channel bend and the vibrato generator).
         osc.pitch    = parameters[voice_param(osc.voice_id, voice_pitch_dest)].value
-                     + osc.detune;
+                     + osc.pitch_offset;
         // These targets are unmodulated constants: read the instrument's base value.
         osc.panning  = instrument.binding[mod_panning].base_value;
         osc.duty[0]  = instrument.binding[mod_duty0].base_value;
@@ -1847,7 +1847,7 @@ static void update_modulation()
         osc.volume = parameters[osc_param(osc_idx, osc_volume_dest)].value;
 
         // Free the oscillator once its volume decays to silence during release.
-        // Oscillator-scope volume can release at different rates per unison index,
+        // Oscillator-scope volume can release at different rates per layer index,
         // so a voice's oscillators may free in different steps; the voice itself is
         // finalized only when its last oscillator frees.
         if (voice.releasing && vol_env_value < silence_threshold) {
@@ -1855,13 +1855,13 @@ static void update_modulation()
             osc.voice_id    = 0;
 
             // Remove this slot from the voice's live list without a search: its position is
-            // osc.unison_idx, so move the last live entry into it (and update that moved
+            // osc.layer_idx, so move the last live entry into it (and update that moved
             // oscillator's stored position) to keep osc_ids[0, osc_count) the live set.
             assert(voice.osc_count);
             --voice.osc_count;
-            const uint8_t moved_slot           = voice.osc_ids[voice.osc_count];
-            voice.osc_ids[osc.unison_idx]      = moved_slot;
-            oscillators[moved_slot].unison_idx = osc.unison_idx;
+            const uint8_t moved_slot          = voice.osc_ids[voice.osc_count];
+            voice.osc_ids[osc.layer_idx]      = moved_slot;
+            oscillators[moved_slot].layer_idx = osc.layer_idx;
 
             if ( ! voice.osc_count) {
                 note_to_voice[osc.midi_channel][osc.note] = 0;

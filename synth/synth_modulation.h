@@ -101,8 +101,8 @@ float pitch_bend_to_semitones(int16_t centered_bend, float range_semitones);
 // the audio sampling rate.  The caller advances the tick between steps.
 float eval_lfo(const LFODescriptor& lfo, uint32_t lfo_tick, uint32_t step_samples, uint32_t sampling_rate);
 
-// Maximum oscillators a single note (unison stack) uses.
-constexpr uint32_t max_unison = 7;
+// Maximum layers a single note uses.  Each layer is one oscillator.
+constexpr uint32_t max_layers = 7;
 
 // Per-oscillator modulatable quantities.  An instrument binds each independently.
 enum ModTarget : uint8_t {
@@ -121,7 +121,7 @@ enum ModTarget : uint8_t {
 // Where a bound parameter is allocated.
 enum class ParamScope : uint8_t {
     voice,        // One shared parameter for all the voice's oscillators
-    oscillator    // One parameter per oscillator (per unison index)
+    oscillator    // One parameter per oscillator (per layer)
 };
 
 enum class EffectType : uint8_t {
@@ -263,13 +263,13 @@ struct ModInput {
 };
 
 // An instrument's complete modulation declaration for one target: a base value, an optional
-// envelope generator (per-unison descriptor), an optional LFO generator (sourceable depth and
+// envelope generator (per-layer descriptor), an optional LFO generator (sourceable depth and
 // rate), and a list of input sources.  note-on expands this into graph nodes generically, and the
 // editor edits these declarations directly.  No runtime state lives here, so it can be packed.
 struct InstrModBinding {
-    ParamScope scope;                         // envelope-descriptor selector: voice -> [0], oscillator -> [unison]
+    ParamScope scope;                         // envelope-descriptor selector: voice -> [0], oscillator -> [layer]
     float      base_value;
-    uint16_t   envelope_desc_id[max_unison];  // 1-based into the envelope table; 0 = no envelope
+    uint16_t   envelope_desc_id[max_layers];  // 1-based into the envelope table; 0 = no envelope
     uint16_t   lfo_desc_id;                   // 1-based into the LFO table; 0 = no LFO
     SourceOp   lfo_op;                        // how the LFO folds into the target (see eval_lfo_mod)
     ModSource  lfo_depth_source;              // none -> use lfo_depth constant; else scales it
