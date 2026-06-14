@@ -131,6 +131,11 @@ namespace {
     constexpr uint16_t vibrato_lfo_desc_id = 1;   // sine vibrato driving voice pitch
     constexpr uint16_t tremolo_lfo_desc_id = 2;   // sine tremolo gain driving voice volume
     constexpr uint16_t master_fir_sweep_lfo_desc_id = 3;   // TEMP demo: triangle sweep of master FIR cutoff
+    constexpr uint16_t autopan_lfo_desc_id = 4;   // sine auto-pan driving per-layer panning
+
+    // Auto-pan demo: a slow sine swinging panning around center; depth 0.4 keeps it short of the edges.
+    constexpr uint16_t autopan_period_ms = 1500;
+    constexpr float    autopan_depth     = 0.4f;
 
     // parameters[] is partitioned into a sentinel (param 0) then per-owner blocks.  Each owner has a
     // fixed set of roles; a source addresses a parameter by computing its block index.  A modulation
@@ -162,6 +167,9 @@ namespace {
         osc_highpass_dest,
         osc_highpass_env,
         osc_highpass_lfo,
+        osc_panning_dest,
+        osc_panning_env,
+        osc_panning_lfo,
         num_osc_roles
     };
 
@@ -203,6 +211,7 @@ namespace {
         { mod_volume,          osc_volume_dest   },
         { mod_lowpass_cutoff,  osc_lowpass_dest  },
         { mod_highpass_cutoff, osc_highpass_dest },
+        { mod_panning,         osc_panning_dest  },
     };
 
     Synth::Parameter       parameters[total_params];
@@ -850,6 +859,14 @@ static void init_instruments()
     // FM voice: constant FM depth 3.0.
     instruments[2].routing[mod_fm_index].base_value = 3.0f;
 
+    // FM voice also demos modulatable panning: a sine auto-pan added around center.
+    LayerGen& fm_pan_gen        = instruments[2].layers[0].gen[mod_panning];
+    fm_pan_gen.lfo_desc_id      = autopan_lfo_desc_id;
+    fm_pan_gen.lfo_op           = SourceOp::add;
+    fm_pan_gen.lfo_depth        = autopan_depth;
+    fm_pan_gen.lfo_depth_source = ModSource::none;
+    fm_pan_gen.lfo_rate_source  = ModSource::none;
+
     // Triangle-ish piano: sawtooth at duty 0.5.
     instruments[4].routing[mod_duty0].base_value = 0.5f;
 
@@ -959,6 +976,9 @@ static void init_modulation()
 
     // TEMP demo: master FIR cutoff sweep LFO -- a 4 s triangle (sawtooth, duty 0x7F); min/delta unused.
     lfo_descs[master_fir_sweep_lfo_desc_id - 1] = { Synth::WaveType::sawtooth_wave, 0x7F, 4000, 0.0f, 1.0f };
+
+    // Auto-pan LFO: sine, ~1.5 s sweep; min/delta unused by eval_lfo_mod.
+    lfo_descs[autopan_lfo_desc_id - 1] = { Synth::WaveType::sine_wave, 0, autopan_period_ms, 0.0f, 1.0f };
 
     // Each channel's pitch bend, mod wheel and pressure are externally-driven inputs;
     // propagate_parameters must not overwrite them with a fold.
@@ -1863,8 +1883,9 @@ static void update_modulation()
         // node (which already folds in channel bend and the vibrato generator).
         osc.pitch    = parameters[osc_param(osc_idx, osc_pitch_dest)].value
                      + osc.pitch_offset;
+        // Panning is a per-layer modulatable target: read its graph dest node.
+        osc.panning  = parameters[osc_param(osc_idx, osc_panning_dest)].value;
         // These targets are unmodulated constants: read the target's routing base value.
-        osc.panning  = instrument.routing[mod_panning].base_value;
         osc.duty[0]  = instrument.routing[mod_duty0].base_value;
         osc.duty[1]  = instrument.routing[mod_duty1].base_value;
         osc.osc_mix  = instrument.routing[mod_osc_mix].base_value;
