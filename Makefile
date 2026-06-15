@@ -470,6 +470,13 @@ ifeq ($(UNAME), Darwin)
 
     LDFLAGS += -Wl,-rpath,@executable_path/../Frameworks
 
+    ifeq ($(release), 0)
+        # Debug builds use libvulkan.1.dylib so we can use validation layers,
+        # which are not supported by libMoltenVK.dylib.
+        # Pull libvulkan.1.dylib from Homebrew in debug builds (life hack).
+        LDFLAGS += -Wl,-rpath,/opt/homebrew/lib
+    endif
+
     moltenvk_lib := $(or $(wildcard /opt/homebrew/lib/libMoltenVK.dylib),$(wildcard /usr/local/lib/libMoltenVK.dylib),$(if $(VULKAN_SDK),$(wildcard $(VULKAN_SDK)/lib/libMoltenVK.dylib)))
 endif
 
@@ -530,10 +537,18 @@ ifeq ($(UNAME), Darwin)
       $$(out_dir)/$1.app/Contents/Frameworks: | $$(out_dir)/$1.app/Contents/MacOS
 	mkdir -p $$@
 
-      $(call GUI_PATH,$1): | $$(out_dir)/$1.app/Contents/MacOS/Info.plist
+      $$(out_dir)/$1.app/Contents/Resources: | $$(out_dir)/$1.app/Contents/MacOS
+	mkdir -p $$@
 
-      $$(out_dir)/$1.app/Contents/MacOS/Info.plist: macos/Info.plist | $$(out_dir)/$1.app/Contents/MacOS
-	sed 's:minivulkan:$1:' $$< > $$@
+      $(call GUI_PATH,$1): | $$(out_dir)/$1.app/Contents/Info.plist
+
+      $$(out_dir)/$1.app/Contents/Info.plist: macos/Info.plist | $$(out_dir)/$1.app/Contents/MacOS
+	sed 's:PROJECTNAME:$1:' $$< > $$@
+
+      $$(out_dir)/$1.app/Contents/Resources/$1.icns: sculptor/sculptor.png macos/create_icon.sh | $$(out_dir)/$1.app/Contents/Resources
+	macos/create_icon.sh $$< $$@ $$(out_dir)
+
+      $(call GUI_PATH,$1): | $$(out_dir)/$1.app/Contents/Resources/$1.icns
 
 ifneq ($(moltenvk_lib),)
       $$(out_dir)/$1.app/Contents/Frameworks/libMoltenVK.dylib: $(moltenvk_lib) | $$(out_dir)/$1.app/Contents/Frameworks

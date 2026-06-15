@@ -4,8 +4,14 @@
 <dict>
 	<key>CFBundleDevelopmentRegion</key>
 	<string>English</string>
+	<key>CFBundleExecutable</key>
+	<string>PROJECTNAME</string>
+	<key>CFBundleIdentifier</key>
+	<string>com.minivulkan.PROJECTNAME</string>
 	<key>CFBundleName</key>
-	<string>minivulkan</string>
+	<string>PROJECTNAME</string>
+	<key>CFBundleIconFile</key>
+	<string>PROJECTNAME</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>NSPrincipalClass</key>
