@@ -40,7 +40,15 @@ extern "C" {
 #   pragma function(memcpy)
     void* memcpy(void* dest_ptr, const void* src, size_t num_bytes)
     {
-        mstd::mem_copy(dest_ptr, src, static_cast<uint32_t>(num_bytes));
+        assert(dest_ptr);
+        assert(src);
+
+        uint8_t*       dest_byte = static_cast<uint8_t*>(dest_ptr);
+        const uint8_t* src_byte  = static_cast<const uint8_t*>(src);
+
+        while (num_bytes--)
+            *(dest_byte++) = *(src_byte++);
+
         return dest_ptr;
     }
 

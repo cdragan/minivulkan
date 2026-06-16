@@ -404,12 +404,12 @@ vec3 quat::rotate(const vec3& v) const
 
 mat3::mat3(const mat4& mtx)
 {
-    mstd::mem_copy(&data[0], &mtx.data[0], sizeof(data));
+    memcpy(&data[0], &mtx.data[0], sizeof(data));
 }
 
 mat3::mat3(const float* ptr)
 {
-    mstd::mem_copy(data, ptr, sizeof(data));
+    memcpy(data, ptr, sizeof(data));
 }
 
 mat3::mat3(const quat& q)
@@ -450,7 +450,7 @@ vmath::vec<4> vmath::column<4>(const mat3& mtx, unsigned col)
 
 void mat3::set_identity()
 {
-    mstd::mem_zero(data, sizeof(data));
+    memset(data, 0, sizeof(data));
 
     a00 = 1;
     a11 = 1;
@@ -485,7 +485,7 @@ mat3 vmath::transpose(const mat3& mtx)
 mat3 vmath::inverse(const mat3& mtx)
 {
     mat3 result;
-    mstd::mem_zero(&result, sizeof(result));
+    memset(&result, 0, sizeof(result));
 
     result.a00 =  (mtx.a11 * mtx.a22 - mtx.a21 * mtx.a12);
     result.a10 = -(mtx.a10 * mtx.a22 - mtx.a20 * mtx.a12);
@@ -510,16 +510,16 @@ mat3 vmath::inverse(const mat3& mtx)
 
 mat4::mat4(const mat3& mtx)
 {
-    mstd::mem_zero(data, sizeof(data));
+    memset(data, 0, sizeof(data));
 
-    mstd::mem_copy(data, mtx.data, sizeof(mtx.data));
+    memcpy(data, mtx.data, sizeof(mtx.data));
 
     a33 = 1;
 }
 
 mat4::mat4(const float* ptr)
 {
-    mstd::mem_copy(data, ptr, sizeof(data));
+    memcpy(data, ptr, sizeof(data));
 }
 
 mat4::mat4(const quat& q)
@@ -559,7 +559,7 @@ vmath::vec<4> vmath::column<4>(const mat4& mtx, unsigned col)
 
 void mat4::set_identity()
 {
-    mstd::mem_zero(data, sizeof(data));
+    memset(data, 0, sizeof(data));
 
     a00 = 1;
     a11 = 1;
@@ -645,7 +645,7 @@ mat4 vmath::projection(float aspect, float fov_radians, float near_plane, float 
 
     mat4 result;
 
-    mstd::mem_zero(result.data, sizeof(result.data));
+    memset(result.data, 0, sizeof(result.data));
 
     result.a00 = rcp(float1{aspect * fov_tan}).get0();
     result.a11 = rcp(float1{fov_tan}).get0();
@@ -717,7 +717,7 @@ mat4 vmath::ortho(float aspect, float height, float near_plane, float far_plane)
 
     mat4 result;
 
-    mstd::mem_zero(result.data, sizeof(result.data));
+    memset(result.data, 0, sizeof(result.data));
 
     result.a00 = rcp(float1{aspect * half_h}).get0();
     result.a11 = rcp(float1{half_h}).get0();
@@ -751,10 +751,10 @@ mat4 vmath::look_at(const vec3& eye_pos, const vec3& target, const vec3& up)
 
     mat4 result;
 
-    mstd::mem_zero(result.data, sizeof(result.data));
-    mstd::mem_copy(&result.data[0], &x_axis.data[0], sizeof(x_axis.data));
-    mstd::mem_copy(&result.data[4], &y_axis.data[0], sizeof(y_axis.data));
-    mstd::mem_copy(&result.data[8], &z_axis.data[0], sizeof(z_axis.data));
+    memset(result.data, 0, sizeof(result.data));
+    memcpy(&result.data[0], &x_axis.data[0], sizeof(x_axis.data));
+    memcpy(&result.data[4], &y_axis.data[0], sizeof(y_axis.data));
+    memcpy(&result.data[8], &z_axis.data[0], sizeof(z_axis.data));
 
     result.a30 = -dot_product(x_axis, eye_pos);
     result.a31 = -dot_product(y_axis, eye_pos);

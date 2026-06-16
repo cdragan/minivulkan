@@ -250,7 +250,7 @@ void Image::free()
     if (alloc_size)
         owning_heap->free_memory(heap_offset, alloc_size);
 
-    mstd::mem_zero(this, sizeof(*this));
+    memset(this, 0, sizeof(*this));
 }
 
 bool Buffer::allocate(Usage              heap_usage,
@@ -334,7 +334,7 @@ bool Buffer::allocate(Usage              heap_usage,
 
 void Buffer::cpu_fill(const void* data, uint32_t size)
 {
-    mstd::mem_copy(get_ptr<void*>(), data, size);
+    memcpy(get_ptr<void*>(), data, size);
 }
 
 bool Buffer::flush(VkDeviceSize idx, VkDeviceSize stride)

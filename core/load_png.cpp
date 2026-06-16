@@ -59,7 +59,7 @@ static bool read_png_into_image(png_structp        png_ptr,
     uint8_t* host_ptr = host_image.get_ptr<uint8_t>();
 
     for (uint32_t i = 0; i < height; i++, host_ptr += host_image.get_pitch())
-        mstd::mem_copy(host_ptr, row_pointers[i], width * 4);
+        memcpy(host_ptr, row_pointers[i], width * 4);
 
     return true;
 }

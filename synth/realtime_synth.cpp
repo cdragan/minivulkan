@@ -1133,7 +1133,7 @@ static StereoPtr<T, true> operator+(StereoPtr<T, true> ptr, size_t offset)
 
 static void copy_audio_data(void* dest, const void* src, size_t size)
 {
-    mstd::mem_copy(dest, src, static_cast<uint32_t>(size));
+    memcpy(dest, src, static_cast<uint32_t>(size));
 }
 
 template<typename T>
@@ -1756,7 +1756,7 @@ static void apply_effects(const EffectTarget* targets, uint32_t num_targets)
             param.sound_offs = wave_sound_offs[wave_idx];
             param.state_offs = wave_instances[wave_idx]->state_offs / 4;
             param.pad        = 0;
-            mstd::mem_copy(param.params, wave_instances[wave_idx]->params, sizeof(param.params));
+            memcpy(param.params, wave_instances[wave_idx]->params, sizeof(param.params));
         }
 
         memory_barrier(VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
@@ -1910,7 +1910,7 @@ static void update_modulation()
 
                 // Clear the owned oscillator slot ids so a reused voice cannot
                 // read stale ids.
-                mstd::mem_zero(voice.osc_ids, sizeof(voice.osc_ids));
+                memset(voice.osc_ids, 0, sizeof(voice.osc_ids));
             }
         }
     }
@@ -2488,11 +2488,11 @@ template<typename T, bool interleaved>
 static void zero_output(StereoPtr<T, interleaved> dest, uint32_t num_frames)
 {
     if constexpr (interleaved) {
-        mstd::mem_zero(dest.data, num_frames * 2 * sizeof(T));
+        memset(dest.data, 0, num_frames * 2 * sizeof(T));
     }
     else {
-        mstd::mem_zero(dest.left,  num_frames * sizeof(T));
-        mstd::mem_zero(dest.right, num_frames * sizeof(T));
+        memset(dest.left, 0, num_frames * sizeof(T));
+        memset(dest.right, 0, num_frames * sizeof(T));
     }
 }
 

@@ -505,7 +505,7 @@ bool GeometryEditor::alloc_view_resources(View*     dst_view,
                                              VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
                                              {"selection host buffer", i_img}))
                 return false;
-            mstd::mem_zero(res.sel_host_buf.get_ptr<uint8_t>(), max_objects);
+            memset(res.sel_host_buf.get_ptr<uint8_t>(), 0, max_objects);
         }
 
         if ( ! res.vtx_sel_host_buf.allocated()) {
@@ -515,7 +515,7 @@ bool GeometryEditor::alloc_view_resources(View*     dst_view,
                                                  VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
                                                  {"vertex selection host buffer", i_img}))
                 return false;
-            mstd::mem_zero(res.vtx_sel_host_buf.get_ptr<uint8_t>(), max_objects);
+            memset(res.vtx_sel_host_buf.get_ptr<uint8_t>(), 0, max_objects);
         }
 
         if ( ! res.hover_pos_buf.allocated()) {
@@ -535,7 +535,7 @@ bool GeometryEditor::alloc_view_resources(View*     dst_view,
                                                    VK_BUFFER_USAGE_TRANSFER_DST_BIT,
                                                    {"hover position host buffer", i_img}))
                 return false;
-            mstd::mem_copy(res.hover_pos_host_buf.get_ptr<float>(), zeros, sizeof(zeros));
+            memcpy(res.hover_pos_host_buf.get_ptr<float>(), zeros, sizeof(zeros));
         }
 
         if (res.gui_texture) {
@@ -1115,7 +1115,7 @@ static void select_all(Buffer& buffer, uint32_t num_elems)
 
 static void clear_selection(Buffer& buffer, uint32_t num_elems)
 {
-    mstd::mem_zero(buffer.get_ptr<uint8_t>(), num_elems);
+    memset(buffer.get_ptr<uint8_t>(), 0, num_elems);
 }
 
 static void invert_selection(Buffer& buffer, uint32_t num_elems)

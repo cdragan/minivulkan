@@ -1044,7 +1044,7 @@ static bool create_swapchain()
         vkDestroySwapchainKHR(vk_dev, old_swapchain, nullptr);
     }
 
-    mstd::mem_zero(&vk_swapchain_images, sizeof(vk_swapchain_images));
+    memset(&vk_swapchain_images, 0, sizeof(vk_swapchain_images));
 
     VkImage  images[std::size(vk_swapchain_images)];
     uint32_t num_images = 0;
@@ -1233,7 +1233,7 @@ void configure_viewport_and_scissor(VkViewport* viewport,
                                     uint32_t    viewport_width,
                                     uint32_t    viewport_height)
 {
-    mstd::mem_zero(scissor, sizeof *scissor);
+    memset(scissor, 0, sizeof *scissor);
 
     // Note: Flip Y coordinate.  The world coordinate system assumes Y going from
     // bottom to top, but in Vulkan screen-space Y coordinate goes from top to bottom.
