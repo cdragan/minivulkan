@@ -108,6 +108,7 @@ TARGET_FILES = $(call OBJ_FROM_SRC, $1) $(call ASM_FROM_SRC, $1)
 # Sources
 
 lib_src_files += core/mstdc.cpp
+lib_src_files += core/pool.cpp
 lib_src_files += core/rng.cpp
 lib_src_files += core/suballoc.cpp
 lib_src_files += core/vmath.cpp
