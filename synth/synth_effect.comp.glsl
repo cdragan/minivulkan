@@ -180,7 +180,7 @@ vec2 apply_reverb(in EffectParams eff)
 
     if (gl_LocalInvocationID.x == 0u || gl_LocalInvocationID.x == 1u) {
         // Canonical Freeverb comb/allpass lengths at freeverb_base_rate, mirroring the
-        // host's effect_reverb_comb_base/allpass_base (synth_modulation.h).  Scaled to
+        // host's effect_reverb_comb_base/allpass_base (synth_effects.h).  Scaled to
         // sampling_rate with the SAME integer division the host uses to size the state,
         // so these rings and the host allocation stay in lockstep.
         const uint freeverb_base_rate = 44100u;

@@ -3,14 +3,11 @@
 
 #pragma once
 
-#include "synth_modulation.h"
+#include "synth_instrument.h"
 
 #include <stdint.h>
 
 namespace Synth {
-
-// Maximum number of supported channels
-static constexpr uint32_t max_channels = 16;
 
 // MIDI data
 extern const uint32_t num_channels;         // Total number of used channels

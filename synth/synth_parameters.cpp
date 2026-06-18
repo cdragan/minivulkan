@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 // SPDX-FileCopyrightText: Copyright (c) 2021-2026 Chris Dragan
 
-#include "synth_modulation.h"
+#include "synth_parameters.h"
 #include "../core/mstdc.h"
 #include "../core/vmath.h"
 #include "../core/vecfloat.h"
@@ -32,27 +32,6 @@ float random_pitch_skew(RNG* rng, float amount_semitones)
 
     const float normalized = static_cast<float>(rng->get_random()) / static_cast<float>(0xFFFFFFFFu);
     return (normalized * 2.0f - 1.0f) * amount_semitones;
-}
-
-uint8_t select_instrument(const NoteRoute* routes, uint32_t count, uint8_t note)
-{
-    uint32_t instr_idx;
-
-    for (instr_idx = 0; instr_idx < count; instr_idx++) {
-        const uint32_t start_note = routes[instr_idx].start_note;
-        if (note < start_note || ! start_note) {
-            if (instr_idx) {
-                --instr_idx;
-            }
-            break;
-        }
-    }
-
-    if (instr_idx == count) {
-        --instr_idx;
-    }
-
-    return routes[instr_idx].instrument;
 }
 
 // Normalized LFO wave in [0, 1] at the given tick, using period_ms for the rate.
@@ -107,8 +86,6 @@ float eval_lfo_mod(const LFODescriptor& lfo,
     const uint32_t rate_period = period_ms ? period_ms : lfo.period_ms;
     const float    wave        = eval_lfo_normalized(lfo, lfo_tick, step_samples, sampling_rate, rate_period);
 
-    // Multiply is an attenuation factor (neutral 1); add swings bipolar around 0
-    // (neutral 0).  These reproduce the legacy tremolo gain and vibrato swing.
     if (op == SourceOp::multiply) {
         return 1.0f - depth * (1.0f - wave);
     }
@@ -183,74 +160,15 @@ float eval_envelope(const EnvelopeDescriptor& envelope, EnvelopeState* state, bo
     return value;
 }
 
-uint32_t effect_param_floats(EffectType type)
-{
-    switch (type) {
-        case EffectType::distortion: return 2;
-        case EffectType::delay:      return 3;
-        case EffectType::chorus:     return 3;
-        case EffectType::reverb:     return 3;
-        case EffectType::compressor: return 5;
-        case EffectType::fir:        return 2;  // lowpass cutoff Hz, highpass cutoff Hz (0 = edge disabled)
-        default:                return 0;
-    }
-}
-
-uint32_t effect_state_floats(EffectType type)
-{
-    switch (type) {
-        case EffectType::distortion:
-            return 0;
-
-        case EffectType::delay:
-            // One write-position counter plus a stereo (x2) ring buffer
-            // of effect_delay_max_samples samples per channel.
-            return 1 + 2 * effect_delay_max_samples;
-
-        case EffectType::chorus:
-            // An LFO phase accumulator and a write-position counter, plus a
-            // stereo (x2) ring buffer of effect_chorus_max_samples per channel.
-            return 2 + 2 * effect_chorus_max_samples;
-
-        case EffectType::reverb: {
-            // One master state word plus, per stereo side (x2): the rate-scaled comb
-            // rings, one lowpass state per comb, and the rate-scaled allpass rings.
-            uint32_t comb_total = 0;
-            for (uint32_t comb_idx = 0; comb_idx < effect_reverb_num_combs; comb_idx++) {
-                comb_total += freeverb_scaled_length(effect_reverb_comb_base[comb_idx]);
-            }
-            uint32_t allpass_total = 0;
-            for (uint32_t allpass_idx = 0; allpass_idx < effect_reverb_num_allpass; allpass_idx++) {
-                allpass_total += freeverb_scaled_length(effect_reverb_allpass_base[allpass_idx]);
-            }
-            return 1 + 2 * (comb_total + effect_reverb_num_combs + allpass_total);
-        }
-
-        case EffectType::compressor:
-            // One envelope follower state float.
-            return 1;
-
-        case EffectType::fir:
-            // The coeff buffer (num_fir_taps), a stereo (x2) input-history ring of
-            // num_fir_taps - 1 frames, and one write-position counter.
-            return num_fir_taps + 2 * (num_fir_taps - 1) + 1;
-
-        default:
-            return 0;
-    }
-}
-
-void propagate_parameters(Parameter* params, const ParamDescriptor* descs, uint32_t count)
+void propagate_parameters(Parameter* params, const ParamDescriptor* descs, uint32_t num_params)
 {
     // Snapshot every parameter's value so all reads this step see a consistent previous
-    // state.  Non-plain kinds were set before the step, so a parameter sourcing from one
-    // reads its current value (zero lag); a plain->plain hop reads last step's value
-    // (one-step delay), which makes cycles a well-defined iteration.
-    for (uint32_t param_idx = 0; param_idx < count; param_idx++) {
+    // state.
+    for (uint32_t param_idx = 0; param_idx < num_params; param_idx++) {
         params[param_idx].prev_value = params[param_idx].value;
     }
 
-    for (uint32_t param_idx = 0; param_idx < count; param_idx++) {
+    for (uint32_t param_idx = 0; param_idx < num_params; param_idx++) {
         const ParamDescriptor& desc = descs[param_idx];
         if (desc.kind != ParamKind::plain) {
             continue;
@@ -259,7 +177,7 @@ void propagate_parameters(Parameter* params, const ParamDescriptor* descs, uint3
         float value = desc.plain.base_value;
         for (uint32_t source_idx = 0; source_idx < desc.plain.num_sources; source_idx++) {
             const SourceParam& source       = desc.plain.sources[source_idx];
-            const float        contribution = source.multiplier * params[source.param_id].prev_value;
+            const float        contribution = source.scale * params[source.param_id].prev_value;
             if (source.op == SourceOp::add) {
                 value += contribution;
             }
@@ -272,7 +190,7 @@ void propagate_parameters(Parameter* params, const ParamDescriptor* descs, uint3
     }
 }
 
-void configure_lfo(ParamDescriptor* leaf,
+void configure_lfo(ParamDescriptor* desc,
                    uint16_t         lfo_desc_id,
                    SourceOp         lfo_op,
                    float            lfo_depth,
@@ -280,17 +198,17 @@ void configure_lfo(ParamDescriptor* leaf,
                    uint16_t         lfo_rate_param_id,
                    float            lfo_rate_scale)
 {
-    *leaf = { };
-    leaf->kind                = ParamKind::lfo;
-    leaf->lfo.desc_id         = lfo_desc_id;
-    leaf->lfo.op              = lfo_op;
-    leaf->lfo.depth           = lfo_depth;
-    leaf->lfo.depth_param_id  = lfo_depth_param_id;
-    leaf->lfo.rate_param_id   = lfo_rate_param_id;
-    leaf->lfo.rate_scale      = lfo_rate_scale;
+    *desc = { };
+    desc->kind                = ParamKind::lfo;
+    desc->lfo.desc_id         = lfo_desc_id;
+    desc->lfo.op              = lfo_op;
+    desc->lfo.depth           = lfo_depth;
+    desc->lfo.depth_param_id  = lfo_depth_param_id;
+    desc->lfo.rate_param_id   = lfo_rate_param_id;
+    desc->lfo.rate_scale_ms   = lfo_rate_scale;
 }
 
-void configure_plain(ParamDescriptor*   dest,
+void configure_plain(ParamDescriptor*   desc,
                      float              base_value,
                      uint16_t           env_param_id,
                      uint16_t           lfo_param_id,
@@ -298,29 +216,27 @@ void configure_plain(ParamDescriptor*   dest,
                      const SourceParam* inputs,
                      uint32_t           num_inputs)
 {
-    // An envelope source, an LFO source and the inputs must all fit the dest's fixed source array.
     assert((env_param_id ? 1u : 0u) + (lfo_param_id ? 1u : 0u) + num_inputs <= max_param_sources);
 
-    *dest = { };
-    dest->kind = ParamKind::plain;
+    *desc = { };
+    desc->kind = ParamKind::plain;
+
     uint32_t num_sources = 0;
 
-    // Envelope source first (additive), then the LFO source, then the inputs, matching the fold order
-    // the consumers expect: (base + envelope) shaped by the LFO and inputs.
     if (env_param_id) {
-        dest->plain.sources[num_sources++] = { env_param_id, SourceOp::add, 1.0f };
+        desc->plain.sources[num_sources++] = { env_param_id, 1.0f, SourceOp::add };
     }
 
     if (lfo_param_id) {
-        dest->plain.sources[num_sources++] = { lfo_param_id, lfo_op, 1.0f };
+        desc->plain.sources[num_sources++] = { lfo_param_id, 1.0f, lfo_op };
     }
 
     for (uint32_t input_idx = 0; input_idx < num_inputs; input_idx++) {
-        dest->plain.sources[num_sources++] = inputs[input_idx];
+        desc->plain.sources[num_sources++] = inputs[input_idx];
     }
 
-    dest->plain.base_value  = base_value;
-    dest->plain.num_sources = static_cast<uint16_t>(num_sources);
+    desc->plain.base_value  = base_value;
+    desc->plain.num_sources = static_cast<uint16_t>(num_sources);
 }
 
 uint32_t get_ringbuf_data_size(const uint64_t write_pos, const uint64_t read_pos)

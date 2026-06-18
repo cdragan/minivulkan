@@ -1,9 +1,12 @@
 // SPDX-License-Identifier: MIT
 // SPDX-FileCopyrightText: Copyright (c) 2021-2026 Chris Dragan
 
-#include "synth_modulation.h"
+#include "synth_parameters.h"
+#include "synth_effects.h"
+#include "synth_instrument.h"
 #include "../core/rng.h"
 #include <stdio.h>
+#include <string.h>
 
 #define TEST(test) if ( ! (test)) { failed(#test, __FILE__, __LINE__); }
 
@@ -84,30 +87,26 @@ int main()
     // 4-point ADSR-like envelope: rise to peak (tick2), decay to mid (tick4,
     // the sustain point), release to zero (tick6).  value 0xFFFF maps to 1.0.
     {
-        struct FourPointEnvelope {
-            Synth::EnvelopeDescriptor desc;
-            Synth::EnvelopeDescriptor::Point extra_points[3];
-        };
-        FourPointEnvelope env = { };
-        env.desc.num_points          = 4;
-        env.desc.sustain_first_point = 2;
-        env.desc.sustain_last_point  = 2;
-        env.desc.min_value           = 0.0f;
-        env.desc.min_max_delta       = 1.0f / 65535.0f;
-        env.desc.points[0] = { 0, 0 };       // start at min
-        env.desc.points[1] = { 2, 0xFFFF };  // attack peak
-        env.desc.points[2] = { 4, 0x8000 };  // decay to ~mid (sustain)
-        env.desc.points[3] = { 6, 0 };       // release to min
+        Synth::EnvelopeDescriptor env = { };
+        env.num_points          = 4;
+        env.sustain_first_point = 2;
+        env.sustain_last_point  = 2;
+        env.min_value           = 0.0f;
+        env.min_max_delta       = 1.0f / 65535.0f;
+        env.points[0] = { 0, 0 };       // start at min
+        env.points[1] = { 2, 0xFFFF };  // attack peak
+        env.points[2] = { 4, 0x8000 };  // decay to ~mid (sustain)
+        env.points[3] = { 6, 0 };       // release to min
 
         // Sustained: run 20 ticks holding sustain.  Should reach ~1.0 peak,
         // then settle and HOLD at the sustain value (~0.5).
         Synth::EnvelopeState state = { 0, 0 };
-        float first_value = Synth::eval_envelope(env.desc, &state, true);
+        float first_value = Synth::eval_envelope(env, &state, true);
         TEST(approx(first_value, 0.0f, 0.01f));
         float peak_value = first_value;
         float last_value = first_value;
         for (uint32_t tick = 1; tick < 20; tick++) {
-            last_value = Synth::eval_envelope(env.desc, &state, true);
+            last_value = Synth::eval_envelope(env, &state, true);
             if (last_value > peak_value) {
                 peak_value = last_value;
             }
@@ -118,7 +117,7 @@ int main()
         // Release: stop sustaining, run more ticks; value must reach ~0.
         float release_value = last_value;
         for (uint32_t tick = 0; tick < 10; tick++) {
-            release_value = Synth::eval_envelope(env.desc, &state, false);
+            release_value = Synth::eval_envelope(env, &state, false);
         }
         TEST(approx(release_value, 0.0f, 0.01f));
     }
@@ -132,20 +131,20 @@ int main()
     // range scales linearly
     TEST(approx(Synth::pitch_bend_to_semitones(8191, 12.0f), 12.0f, 0.01f));
 
-    TEST(Synth::effect_param_floats(Synth::EffectType::distortion) == 2);
-    TEST(Synth::effect_param_floats(Synth::EffectType::delay)      == 3);
-    TEST(Synth::effect_param_floats(Synth::EffectType::chorus)     == 3);
-    TEST(Synth::effect_param_floats(Synth::EffectType::reverb)     == 3);
-    TEST(Synth::effect_param_floats(Synth::EffectType::compressor) == 5);
-    TEST(Synth::effect_param_floats(Synth::EffectType::fir)        == 2);
-    TEST(Synth::effect_state_floats(Synth::EffectType::distortion) == 0);
-    TEST(Synth::effect_state_floats(Synth::EffectType::delay)      == 88201);
-    TEST(Synth::effect_state_floats(Synth::EffectType::chorus)     == 4412);
-    TEST(Synth::effect_state_floats(Synth::EffectType::reverb)     == 25191);
-    TEST(Synth::effect_state_floats(Synth::EffectType::compressor) == 1);
-    TEST(Synth::effect_state_floats(Synth::EffectType::fir)        == 3074);
-    TEST(Synth::effect_param_floats(Synth::EffectType::none)       == 0);
-    TEST(Synth::effect_state_floats(Synth::EffectType::none)       == 0);
+    TEST(Synth::get_effect_param_floats(Synth::EffectType::distortion) == 2);
+    TEST(Synth::get_effect_param_floats(Synth::EffectType::delay)      == 3);
+    TEST(Synth::get_effect_param_floats(Synth::EffectType::chorus)     == 3);
+    TEST(Synth::get_effect_param_floats(Synth::EffectType::reverb)     == 3);
+    TEST(Synth::get_effect_param_floats(Synth::EffectType::compressor) == 5);
+    TEST(Synth::get_effect_param_floats(Synth::EffectType::fir)        == 2);
+    TEST(Synth::get_effect_state_floats(Synth::EffectType::distortion) == 0);
+    TEST(Synth::get_effect_state_floats(Synth::EffectType::delay)      == 88201);
+    TEST(Synth::get_effect_state_floats(Synth::EffectType::chorus)     == 4412);
+    TEST(Synth::get_effect_state_floats(Synth::EffectType::reverb)     == 25191);
+    TEST(Synth::get_effect_state_floats(Synth::EffectType::compressor) == 1);
+    TEST(Synth::get_effect_state_floats(Synth::EffectType::fir)        == 3074);
+    TEST(Synth::get_effect_param_floats(Synth::EffectType::none)       == 0);
+    TEST(Synth::get_effect_state_floats(Synth::EffectType::none)       == 0);
 
     // Ring buffer accounting on free-running frame counters: available, free
     // space, and the contiguous run before the physical buffer wraps.
@@ -178,10 +177,10 @@ int main()
         // descs[0] (sentinel) and descs[3] (X, externally driven) stay kind external.
         descs[2].kind = Synth::ParamKind::plain;            // B reads X additively
         descs[2].plain.num_sources = 1;
-        descs[2].plain.sources[0] = { 3, Synth::SourceOp::add, 1.0f };
+        descs[2].plain.sources[0] = { 3, 1.0f, Synth::SourceOp::add };
         descs[1].kind = Synth::ParamKind::plain;            // A reads B additively
         descs[1].plain.num_sources = 1;
-        descs[1].plain.sources[0] = { 2, Synth::SourceOp::add, 1.0f };
+        descs[1].plain.sources[0] = { 2, 1.0f, Synth::SourceOp::add };
 
         Synth::Parameter params[4] = { };
         params[3].value = 5.0f;                       // drive the external input
@@ -203,11 +202,11 @@ int main()
         descs[1].kind = Synth::ParamKind::plain;            // A = 1 + 0.5 * B.prev
         descs[1].plain.base_value = 1.0f;
         descs[1].plain.num_sources = 1;
-        descs[1].plain.sources[0] = { 2, Synth::SourceOp::add, 0.5f };
+        descs[1].plain.sources[0] = { 2, 0.5f, Synth::SourceOp::add };
         descs[2].kind = Synth::ParamKind::plain;            // B = 1 + 0.5 * A.prev
         descs[2].plain.base_value = 1.0f;
         descs[2].plain.num_sources = 1;
-        descs[2].plain.sources[0] = { 1, Synth::SourceOp::add, 0.5f };
+        descs[2].plain.sources[0] = { 1, 0.5f, Synth::SourceOp::add };
 
         Synth::Parameter params[3] = { };
         for (uint32_t step = 0; step < 1000; step++) {
@@ -226,7 +225,7 @@ int main()
         descs[1].kind = Synth::ParamKind::plain;            // volume base, scaled by velocity
         descs[1].plain.base_value = 0.8f;
         descs[1].plain.num_sources = 1;
-        descs[1].plain.sources[0] = { 2, Synth::SourceOp::multiply, 1.0f };
+        descs[1].plain.sources[0] = { 2, 1.0f, Synth::SourceOp::multiply };
 
         Synth::Parameter params[3] = { };
         params[2].value = 0.5f;                       // velocity 0.5
@@ -243,9 +242,9 @@ int main()
         // external; their values are set directly below.
         descs[1].kind = Synth::ParamKind::plain;
         descs[1].plain.num_sources = 3;
-        descs[1].plain.sources[0] = { 2, Synth::SourceOp::add,      1.0f };
-        descs[1].plain.sources[1] = { 3, Synth::SourceOp::multiply, 1.0f };
-        descs[1].plain.sources[2] = { 4, Synth::SourceOp::multiply, 1.0f };
+        descs[1].plain.sources[0] = { 2, 1.0f, Synth::SourceOp::add      };
+        descs[1].plain.sources[1] = { 3, 1.0f, Synth::SourceOp::multiply };
+        descs[1].plain.sources[2] = { 4, 1.0f, Synth::SourceOp::multiply };
 
         Synth::Parameter params[5] = { };
         params[2].value = 2.0f;                       // envelope 2.0
@@ -268,7 +267,7 @@ int main()
         // descs[0] (sentinel) and descs[input_id] (channel input, e.g. mod wheel) stay kind external.
 
         Synth::configure_lfo(&descs[lfo_id], 1, Synth::SourceOp::add, 0.5f, 0, 0, 0.0f);
-        const Synth::SourceParam inputs[1] = { { input_id, Synth::SourceOp::multiply, 1.0f } };
+        const Synth::SourceParam inputs[1] = { { input_id, 1.0f, Synth::SourceOp::multiply } };
         Synth::configure_plain(&descs[dest_id], 0.1f, 0, lfo_id, Synth::SourceOp::add, inputs, 1);
 
         // configure_lfo made the LFO node; configure_plain made the dest a plain node.
@@ -295,7 +294,7 @@ int main()
         // descs[0] sentinel, descs[env_id] envelope value, descs[vel_id] velocity: kind external,
         // their values set directly below.
 
-        const Synth::SourceParam inputs[1] = { { vel_id, Synth::SourceOp::multiply, 1.0f } };
+        const Synth::SourceParam inputs[1] = { { vel_id, 1.0f, Synth::SourceOp::multiply } };
         Synth::configure_plain(&descs[dest_id], 0.0f, env_id, 0, Synth::SourceOp::add, inputs, 1);
 
         TEST(descs[dest_id].kind == Synth::ParamKind::plain);
@@ -426,6 +425,146 @@ int main()
             full[idx] = { static_cast<uint8_t>(idx + 1), static_cast<uint8_t>(idx) };
         }
         TEST(Synth::select_instrument(full, count, 127) == count - 1);
+    }
+
+    // --- Phase 1 data foundation: generic pools, container, defragment + remap ---
+
+    // alloc-distinct: three allocations from an empty pool give distinct, in-range slots.
+    {
+        Pool<Synth::EnvelopeDescriptor, Synth::max_envelopes> env_pool = { };
+        const uint32_t slot0 = env_pool.allocate();
+        const uint32_t slot1 = env_pool.allocate();
+        const uint32_t slot2 = env_pool.allocate();
+        TEST(slot0 != pool_no_slot && slot1 != pool_no_slot && slot2 != pool_no_slot);
+        TEST(slot0 != slot1 && slot1 != slot2 && slot0 != slot2);
+        TEST(slot0 < Synth::max_envelopes && slot1 < Synth::max_envelopes && slot2 < Synth::max_envelopes);
+        TEST(env_pool.num_allocated == 3);
+    }
+
+    // reuse-after-free: freeing the middle slot lets the next allocate reuse it.
+    {
+        Pool<Synth::LFODescriptor, Synth::max_lfos> lfo_pool = { };
+        const uint32_t first  = lfo_pool.allocate();
+        const uint32_t middle = lfo_pool.allocate();
+        const uint32_t last   = lfo_pool.allocate();
+        TEST(first != pool_no_slot && last != pool_no_slot);
+        lfo_pool.free(middle);
+        TEST(lfo_pool.num_allocated == 2);
+        const uint32_t reused = lfo_pool.allocate();
+        TEST(reused == middle);
+        TEST(lfo_pool.num_allocated == 3);
+    }
+
+    // full-pool: allocate up to capacity, then allocate fails with pool_no_slot (no OOB).
+    {
+        Pool<Synth::LFODescriptor, Synth::max_lfos> lfo_pool = { };
+        for (uint32_t idx = 0; idx < Synth::max_lfos; idx++) {
+            TEST(lfo_pool.allocate() != pool_no_slot);
+        }
+        TEST(lfo_pool.allocate() == pool_no_slot);
+        TEST(lfo_pool.num_allocated == Synth::max_lfos);
+    }
+
+    // defrag-remap (envelopes): a fragmented pool [used,free,used,free,used] compacts to the
+    // front preserving order, and an instrument's 1-based envelope reference is rewritten.
+    {
+        Synth::InstrumentBank bank = { };
+        for (uint32_t idx = 0; idx < 5; idx++) {
+            TEST(bank.envelopes.allocate() == idx);
+        }
+        bank.envelopes.free(1);
+        bank.envelopes.free(3);
+
+        // Tag slot 4's data so we can find where it lands, and reference it from a layer
+        // (desc_id is 1-based: slot 4 -> id 5).
+        bank.envelopes.entries[4].num_points = 42;
+        const uint32_t instr = bank.instruments.allocate();
+        TEST(instr != pool_no_slot);
+        bank.instruments.entries[instr].layer_count = 1;
+        bank.instruments.entries[instr].layers[0].gen[Synth::mod_volume].envelope_desc_id = 5;
+
+        uint32_t env_map[Synth::max_envelopes];
+        bank.envelopes.defragment(env_map);
+        TEST(bank.envelopes.num_allocated == 3);
+        TEST(env_map[0] == 0);                      // old 0,2,4 -> new 0,1,2 in order
+        TEST(env_map[2] == 1);
+        TEST(env_map[4] == 2);
+        TEST(env_map[1] == pool_no_slot);
+        TEST(env_map[3] == pool_no_slot);
+        TEST(bank.envelopes.entries[2].num_points == 42); // slot 4's data moved to slot 2
+
+        Synth::remap_envelope_refs(&bank, env_map);
+        TEST(bank.instruments.entries[instr].layers[0].gen[Synth::mod_volume].envelope_desc_id == 3);
+    }
+
+    // defrag-remap (LFOs): same mechanism as envelopes -- a layer's 1-based lfo_desc_id is
+    // rewritten to the referenced LFO entry's new slot.
+    {
+        Synth::InstrumentBank bank = { };
+        for (uint32_t idx = 0; idx < 5; idx++) {
+            TEST(bank.lfos.allocate() == idx);
+        }
+        bank.lfos.free(1);
+        bank.lfos.free(3);
+        bank.lfos.entries[4].period_ms = 333;
+
+        const uint32_t instr = bank.instruments.allocate();
+        TEST(instr != pool_no_slot);
+        bank.instruments.entries[instr].layers[0].gen[Synth::mod_pitch].lfo_desc_id = 5; // slot 4 -> id 5
+
+        uint32_t lfo_map[Synth::max_lfos];
+        bank.lfos.defragment(lfo_map);
+        TEST(lfo_map[4] == 2);
+        TEST(bank.lfos.entries[2].period_ms == 333);
+
+        Synth::remap_lfo_refs(&bank, lfo_map);
+        TEST(bank.instruments.entries[instr].layers[0].gen[Synth::mod_pitch].lfo_desc_id == 3);
+    }
+
+    // defrag-remap (instruments): an instrument pool compacts and a channel split-table entry
+    // that references an instrument (0-based) is rewritten to the new slot.
+    {
+        Synth::InstrumentBank bank = { };
+        for (uint32_t idx = 0; idx < 5; idx++) {
+            TEST(bank.instruments.allocate() == idx);
+        }
+        bank.instruments.free(1);
+        bank.instruments.free(3);
+        bank.channel_routes[0][0] = { 1, 4 };       // note >= 1 -> instrument slot 4 (survives)
+        bank.channel_routes[0][1] = { 64, 3 };      // references deleted instrument slot 3
+
+        uint32_t instr_map[Synth::max_instruments];
+        bank.instruments.defragment(instr_map);
+        TEST(instr_map[4] == 2);
+
+        Synth::remap_instrument_refs(&bank, instr_map);
+        TEST(bank.channel_routes[0][0].instrument == 2);
+        TEST(bank.channel_routes[0][1].instrument == 0); // dangling ref falls back to instrument 0
+    }
+
+    // snapshot-roundtrip: a byte copy of the container, then a byte restore after mutation,
+    // reproduces identical state -- the property the undo stack and save/load rely on.
+    {
+        Synth::InstrumentBank bank = { };
+        const uint32_t instr = bank.instruments.allocate();
+        bank.instruments.entries[instr].layer_count = 3;
+        bank.drum_track_channel = 9;
+        const uint32_t env = bank.envelopes.allocate();
+        bank.envelopes.entries[env].num_points = 7;
+
+        Synth::InstrumentBank snapshot;
+        memcpy(&snapshot, &bank, sizeof(bank));
+
+        bank.instruments.entries[instr].layer_count = 99;
+        bank.instruments.free(instr);
+        bank.drum_track_channel = 0;
+
+        memcpy(&bank, &snapshot, sizeof(bank));
+        TEST(bank.instruments.num_allocated == 1);
+        TEST(bank.instruments.entries[instr].layer_count == 3);
+        TEST(bank.drum_track_channel == 9);
+        TEST(bank.envelopes.entries[env].num_points == 7);
+        TEST(memcmp(&bank, &snapshot, sizeof(bank)) == 0);
     }
 
     return exit_code;

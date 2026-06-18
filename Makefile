@@ -198,7 +198,7 @@ all_src_files += $(midi_test_sender_src_files)
 all_src_files += $(suballoc_unit_src_files)
 all_src_files += $(sculptor_graph_unit_src_files)
 all_src_files += $(sculptor_undo_unit_src_files)
-all_src_files += $(synth_modulation_unit_src_files)
+all_src_files += $(synth_unit_src_files)
 all_src_files += $(midi_decode_unit_src_files)
 all_src_files += $(threed_src_files)
 all_src_files += $(threed_gui_src_files)
@@ -219,6 +219,9 @@ all_sculptor_undo_unit_src_files += $(sculptor_undo_unit_src_files)
 all_sculptor_graph_unit_src_files += sculptor/sculptor_graph.cpp
 all_sculptor_graph_unit_src_files += core/pool.cpp
 all_sculptor_graph_unit_src_files += $(sculptor_graph_unit_src_files)
+
+all_synth_unit_src_files += $(lib_src_files)
+all_synth_unit_src_files += $(synth_unit_src_files)
 
 all_synth_modulation_unit_src_files += $(lib_src_files)
 all_synth_modulation_unit_src_files += $(synth_modulation_unit_src_files)
@@ -765,7 +768,7 @@ tests += vmath_unit
 tests += suballoc_unit
 tests += sculptor_graph_unit
 tests += sculptor_undo_unit
-tests += synth_modulation_unit
+tests += synth_unit
 tests += midi_decode_unit
 
 define DEFINE_TEST
