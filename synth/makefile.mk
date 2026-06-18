@@ -3,9 +3,11 @@
 
 #gui_project_name = synth
 
-lib_src_files += synth/synth_modulation.cpp
+lib_src_files += synth/synth_parameters.cpp
+lib_src_files += synth/synth_effects.cpp
+lib_src_files += synth/synth_instrument.cpp
 
-synth_modulation_unit_src_files += synth/synth_modulation_unit.cpp
+synth_unit_src_files += synth/synth_unit.cpp
 
 midi_decode_unit_src_files += synth/midi_decode_unit.cpp
 
