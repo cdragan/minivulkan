@@ -3,9 +3,13 @@
 
 #gui_project_name = synth
 
+lib_src_files += synth/midi_decode.cpp
+lib_src_files += synth/midi_file.cpp
 lib_src_files += synth/synth_parameters.cpp
 lib_src_files += synth/synth_effects.cpp
 lib_src_files += synth/synth_instrument.cpp
+lib_src_files += synth/synth_serialize.cpp
+lib_src_files += synth/synth_soundtrack.cpp
 
 synth_unit_src_files += synth/synth_unit.cpp
 
@@ -13,7 +17,6 @@ midi_decode_unit_src_files += synth/midi_decode_unit.cpp
 
 threed_gui_src_files += synth/realtime_synth.cpp
 threed_gui_src_files += synth/empty_midi_soundtrack.cpp
-threed_gui_src_files += synth/midi_decode.cpp
 threed_gui_src_files += synth/midi_input.cpp
 
 threed_nogui_src_files += synth/midi_input_none.cpp

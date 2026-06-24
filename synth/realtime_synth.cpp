@@ -11,6 +11,7 @@
 #include "../core/suballoc.h"
 #include "synth_effects.h"
 #include "synth_instrument.h"
+#include "synth_soundtrack.h"
 #include <algorithm>
 #include <atomic>
 #include <iterator>
@@ -49,14 +50,21 @@ namespace {
     // Number of samples which have been rendered since playback started.
     uint32_t rendered_samples;
 
-    // Actual tempo converted to samples
-    uint32_t samples_per_midi_tick = 0;
+    constexpr uint32_t default_midi_tempo_bpm         = 120;
+    constexpr uint32_t default_midi_ticks_per_quarter = 192;
+    uint32_t samples_per_midi_tick =
+        (Synth::rt_sampling_rate * 60u) / (default_midi_tempo_bpm * default_midi_ticks_per_quarter);
 
     // Stores current per-channel time measured in samples
     uint32_t channel_samples[Synth::max_channels];
 
     // Saved state of event decode, per-channel
     uint8_t events_decode_state[Synth::max_channels];
+
+    // MidiEvent, including note duration (for note_on event)
+    struct DispatchedMidiEvent : Synth::MidiEvent {
+        uint32_t release_sample;
+    };
 
     // Map notes in each note in each channel to voices
     typedef uint8_t NoteToVoice[128];
@@ -89,6 +97,7 @@ namespace {
         uint8_t  osc_ids[max_layers];    // Oscillator slots owned by this voice
         uint8_t  osc_count;              // Number of live oscillator slots owned (0 = none)
         bool     releasing;              // True after note-off, until the volume envelope finishes
+        uint32_t release_sample;         // Absolute sample to auto-release a duration-model note (0 = none)
     };
 
     Voice voices[max_voices];
@@ -1155,26 +1164,31 @@ static uint32_t allocate_unused_voice()
     return allocate_unused_slot(voices, max_voices, &Voice::active);
 }
 
-static bool get_next_midi_event(Synth::MidiEvent* event, uint32_t end_samples)
+static bool get_next_midi_event(DispatchedMidiEvent* event, uint32_t end_samples)
 {
     static uint32_t last_channel;
     uint32_t        channel = last_channel;
 
+    // The note_on event sets this.
+    // Keep 0 for events other than note_on.
+    event->release_sample = 0; // Only note_on overwrites this; default keeps other events release-free.
+
     for (;;) {
         const uint8_t* encoded_delta_time = Synth::midi_delta_times[channel];
 
-        uint32_t delta_time = *(encoded_delta_time++);
-        if (delta_time > 0x7Fu) {
-            assert(*encoded_delta_time <= 0x7Fu);
-            delta_time = ((delta_time & 0x7Fu) << 7) | *(encoded_delta_time++);
-        }
+        // Decode delta time, which is encoded as a variable-length quantity
+        // (7 bits per byte, MSB-first, high bit marks continuation).
+        uint32_t delta_time = 0;
+        uint8_t  delta_byte;
+        do {
+            delta_byte = *(encoded_delta_time++);
+            delta_time = (delta_time << 7) | (delta_byte & 0x7Fu);
+        } while (delta_byte & 0x80u);
 
         const uint32_t delta_samples = delta_time * samples_per_midi_tick;
         const uint32_t event_samples = channel_samples[channel] + delta_samples;
 
-        const uint32_t end_of_channel = 0x3FFFu;
-
-        if (event_samples < end_samples && delta_time < end_of_channel) {
+        if (event_samples < end_samples && delta_time < Synth::soundtrack_end_of_channel) {
             last_channel                     = channel;
             channel_samples[channel]         = event_samples;
             Synth::midi_delta_times[channel] = encoded_delta_time;
@@ -1197,13 +1211,31 @@ static bool get_next_midi_event(Synth::MidiEvent* event, uint32_t end_samples)
     event_state ^= 1u;
     events_decode_state[channel] = event_state;
 
-    event_code = (event_code >> (event_state * 7u)) & 0xFu;
+    // Two 4-bit event codes share a byte, high nibble first; event_state toggles which half.
+    event_code = (event_code >> (event_state * 4u)) & 0xFu;
 
     event->event = static_cast<Synth::EvType>(event_code);
 
     if (event_code <= static_cast<uint8_t>(Synth::EvType::aftertouch)) {
         event->note      = *(Synth::midi_notes[channel]++);
         event->note_data = *(Synth::midi_note_data[channel]++);
+
+        // A note_on carries a stored tick duration; schedule its auto-release.  Stored 0 means
+        // unbounded (no stored note_off); a stored value v means v - 1 ticks.
+        if (event_code == static_cast<uint8_t>(Synth::EvType::note_on)) {
+            const uint8_t* duration_ptr = Synth::midi_note_durations[channel];
+            uint32_t       stored       = 0;
+            for (;;) {
+                const uint8_t byte = *(duration_ptr++);
+                stored = (stored << 7) | (byte & 0x7Fu);
+                if ((byte & 0x80u) == 0) {
+                    break;
+                }
+            }
+            Synth::midi_note_durations[channel] = duration_ptr;
+
+            event->release_sample = Synth::soundtrack_note_release_sample(event->time, stored, samples_per_midi_tick);
+        }
     }
     else if (static_cast<Synth::EvType>(event_code) == Synth::EvType::controller) {
         event->controller      = *(Synth::midi_ctrl[channel]++);
@@ -1215,13 +1247,13 @@ static bool get_next_midi_event(Synth::MidiEvent* event, uint32_t end_samples)
         const int16_t hi = *(Synth::midi_pitch_bend_hi[channel]++);
         assert(lo <= 0x7F);
         assert(hi <= 0x7F);
-        event->pitch_bend = static_cast<int16_t>((hi << 7) + lo - 0x2000);
+        event->pitch_bend = static_cast<int16_t>((hi << 7) + lo - Synth::soundtrack_pitch_bend_center);
     }
 
     return true;
 }
 
-static void process_note_off(uint32_t delta_samples, const Synth::MidiEvent& event)
+static void process_note_off(uint32_t delta_samples, const DispatchedMidiEvent& event)
 {
     const uint32_t channel   = event.channel;
     const uint32_t note      = event.note;
@@ -1433,7 +1465,7 @@ static void configure_effect_modulation()
     }
 }
 
-static void process_note_on(uint32_t delta_samples, const Synth::MidiEvent& event)
+static void process_note_on(uint32_t delta_samples, const DispatchedMidiEvent& event)
 {
     const uint32_t channel = event.channel;
     const uint32_t note    = event.note;
@@ -1457,11 +1489,12 @@ static void process_note_on(uint32_t delta_samples, const Synth::MidiEvent& even
     }
     assert(voices[voice_idx].osc_count == 0);
 
-    Voice& voice     = voices[voice_idx];
-    voice.channel    = static_cast<uint8_t>(channel);
-    voice.instrument = target_instrument;
-    voice.active     = true;
-    voice.releasing  = false;
+    Voice& voice         = voices[voice_idx];
+    voice.channel        = static_cast<uint8_t>(channel);
+    voice.instrument     = target_instrument;
+    voice.active         = true;
+    voice.releasing      = false;
+    voice.release_sample = event.release_sample;
 
     note_to_voice[channel][note] = static_cast<uint8_t>(voice_idx);
 
@@ -1542,7 +1575,7 @@ static void process_note_on(uint32_t delta_samples, const Synth::MidiEvent& even
     }
 }
 
-static void process_aftertouch(uint32_t delta_samples, const Synth::MidiEvent& event)
+static void process_aftertouch(uint32_t delta_samples, const DispatchedMidiEvent& event)
 {
     const uint32_t channel   = event.channel;
     const uint32_t note      = event.note;
@@ -1559,7 +1592,7 @@ static void process_aftertouch(uint32_t delta_samples, const Synth::MidiEvent& e
     }
 }
 
-static void process_controller(uint32_t delta_samples, const Synth::MidiEvent& event)
+static void process_controller(uint32_t delta_samples, const DispatchedMidiEvent& event)
 {
     // TODO Only the modulation wheel is supported for now; other controllers ignored.
     if (event.controller == mod_wheel_cc) {
@@ -1570,7 +1603,7 @@ static void process_controller(uint32_t delta_samples, const Synth::MidiEvent& e
     }
 }
 
-static void process_pitch_bend(uint32_t delta_samples, const Synth::MidiEvent& event)
+static void process_pitch_bend(uint32_t delta_samples, const DispatchedMidiEvent& event)
 {
     // Drive the channel bend leaf (value and prev_value) so consumers read it with zero lag.
     const uint32_t bend_node = channel_param(event.channel, chan_param_bend);
@@ -1579,7 +1612,7 @@ static void process_pitch_bend(uint32_t delta_samples, const Synth::MidiEvent& e
     parameters[bend_node].prev_value = bend;
 }
 
-static void process_channel_pressure(uint32_t delta_samples, const Synth::MidiEvent& event)
+static void process_channel_pressure(uint32_t delta_samples, const DispatchedMidiEvent& event)
 {
     // Drive the per-channel pressure leaf (value and prev_value) so the combine reads it with zero lag.
     const uint32_t pressure_node = channel_param(event.channel, chan_param_pressure);
@@ -1588,7 +1621,7 @@ static void process_channel_pressure(uint32_t delta_samples, const Synth::MidiEv
     parameters[pressure_node].prev_value = pressure;
 }
 
-using EventHandler = void (*)(uint32_t delta_samples, const Synth::MidiEvent& event);
+using EventHandler = void (*)(uint32_t delta_samples, const DispatchedMidiEvent& event);
 
 // Program change is unused and thus unsupported.
 constexpr EventHandler process_program_change = nullptr;
@@ -1603,16 +1636,31 @@ void Synth::apply_midi_event(const Synth::MidiEvent& event)
 {
     assert(static_cast<uint32_t>(event.event) < std::size(event_handlers));
 
+    // Drop malformed events before they index per-channel/per-note arrays.
+    if (event.channel >= max_channels) {
+        return;
+    }
+    if ((event.event == Synth::EvType::note_off ||
+         event.event == Synth::EvType::note_on ||
+         event.event == Synth::EvType::aftertouch) && event.note >= 128) {
+        return;
+    }
+
+    // Live input notes have no stored duration; they end on a real note_off, not an auto-release,
+    // so they dispatch with release_sample 0.
     const EventHandler handler = event_handlers[static_cast<uint8_t>(event.event)];
 
     if (handler) {
-        handler(0, event);
+        DispatchedMidiEvent dispatched;
+        static_cast<Synth::MidiEvent&>(dispatched) = event;
+        dispatched.release_sample = 0;
+        handler(0, dispatched);
     }
 }
 
 static void process_events(uint32_t start_samples, uint32_t end_samples)
 {
-    Synth::MidiEvent event;
+    DispatchedMidiEvent event;
 
     while (get_next_midi_event(&event, end_samples)) {
 
@@ -2057,6 +2105,16 @@ static void render_audio_step()
     effect_state_cleared = true;
 
     process_events(start_samples, end_samples);
+
+    // Auto-release notes
+    for (uint32_t voice_idx = 1; voice_idx < max_voices; voice_idx++) {
+        Voice& voice = voices[voice_idx];
+        if (voice.active && ! voice.releasing && voice.release_sample) {
+            if (voice.release_sample <= end_samples) {
+                voice.releasing = true;
+            }
+        }
+    }
 
     Synth::pump_live_midi();
 
