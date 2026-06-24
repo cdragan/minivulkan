@@ -15,6 +15,7 @@ extern const uint8_t* midi_delta_times[];   // Encoded event delta times, per-ch
 extern const uint8_t* midi_events[];        // Encoded events, per-channel
 extern const uint8_t* midi_notes[];         // Per-channel notes for note events
 extern const uint8_t* midi_note_data[];     // Per-channel note data for note events
+extern const uint8_t* midi_note_durations[];// Per-channel VLQ tick durations, one per note_on
 extern const uint8_t* midi_ctrl[];          // Per-channel controllers for controller events
 extern const uint8_t* midi_ctrl_data[];     // Per-channel controller data for controller events
 extern const uint8_t* midi_pitch_bend_lo[]; // Per-channel pitch bend LSB values

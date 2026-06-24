@@ -4,6 +4,9 @@
 #include "synth_parameters.h"
 #include "synth_effects.h"
 #include "synth_instrument.h"
+#include "synth_serialize.h"
+#include "midi_file.h"
+#include "synth_soundtrack.h"
 #include "../core/rng.h"
 #include <stdio.h>
 #include <string.h>
@@ -565,6 +568,307 @@ int main()
         TEST(bank.drum_track_channel == 9);
         TEST(bank.envelopes.entries[env].num_points == 7);
         TEST(memcmp(&bank, &snapshot, sizeof(bank)) == 0);
+    }
+
+    // C1: instrument bank codec round-trips losslessly, with cross-references intact
+    {
+        Synth::InstrumentBank bank = { };
+        const uint32_t env   = bank.envelopes.allocate();
+        const uint32_t lfo   = bank.lfos.allocate();
+        const uint32_t instr = bank.instruments.allocate();
+        bank.instruments.entries[instr].layer_count = 2;
+        bank.instruments.entries[instr].layers[0].gen[Synth::mod_volume].envelope_desc_id =
+            static_cast<uint16_t>(env + 1);
+        bank.instruments.entries[instr].layers[0].gen[Synth::mod_pitch].lfo_desc_id =
+            static_cast<uint16_t>(lfo + 1);
+        bank.channel_routes[0][0] = { 0, static_cast<uint8_t>(instr) };
+        bank.drum_track_channel   = 9;
+        memcpy(bank.instrument_names[instr], "Lead", 5);
+
+        uint8_t image[Synth::instrument_bank_image_size];
+        const uint32_t written = Synth::encode_instrument_bank(&bank, image, sizeof(image));
+        TEST(written == Synth::instrument_bank_image_size);
+
+        Synth::InstrumentBank restored = { };
+        TEST(Synth::decode_instrument_bank(image, written, &restored));
+        TEST(memcmp(&bank, &restored, sizeof(bank)) == 0);
+
+        // A buffer too small to hold the image fails cleanly, writing nothing.
+        TEST(Synth::encode_instrument_bank(&bank, image, 4) == 0);
+
+        // A corrupt marker is rejected.
+        uint8_t bad[Synth::instrument_bank_image_size];
+        memcpy(bad, image, sizeof(bad));
+        bad[0] = static_cast<uint8_t>(bad[0] ^ 0xFFu);
+        TEST( ! Synth::decode_instrument_bank(bad, written, &restored));
+
+        // A mismatched version is rejected (version is the two bytes after the 4-byte marker).
+        memcpy(bad, image, sizeof(bad));
+        bad[4] = static_cast<uint8_t>(bad[4] ^ 0xFFu);
+        TEST( ! Synth::decode_instrument_bank(bad, written, &restored));
+
+        // A mismatched payload size is rejected (the four bytes after the version).
+        memcpy(bad, image, sizeof(bad));
+        bad[6] = static_cast<uint8_t>(bad[6] ^ 0xFFu);
+        TEST( ! Synth::decode_instrument_bank(bad, written, &restored));
+
+        // A truncated image (header only) is rejected.
+        TEST( ! Synth::decode_instrument_bank(image, Synth::instrument_bank_header_size, &restored));
+    }
+
+    // C2: instrument bank persists to and loads from a real file
+    {
+        Synth::InstrumentBank bank = { };
+        bank.drum_track_channel  = 7;
+        const uint32_t instr     = bank.instruments.allocate();
+        bank.instruments.entries[instr].layer_count = 3;
+        bank.channel_routes[2][1] = { 64, static_cast<uint8_t>(instr) };
+
+        const char* const path = "synth_bank_roundtrip.tmp";
+        TEST(Synth::save_instrument_bank(path, &bank));
+
+        Synth::InstrumentBank restored = { };
+        TEST(Synth::load_instrument_bank(path, &restored));
+        TEST(memcmp(&bank, &restored, sizeof(bank)) == 0);
+        remove(path);
+
+        // Loading a nonexistent file fails cleanly.
+        TEST( ! Synth::load_instrument_bank("synth_bank_does_not_exist.tmp", &restored));
+    }
+
+    // MIDI file: format 0, single track, division 96.  A tempo meta (500000 us/quarter =
+    // 120 BPM), a note_on at delta 0, and a note_off one quarter (delta 96) later.  At 44100 Hz
+    // a quarter note is 0.5 s = 22050 samples, so the note_off lands at sample 22050.
+    {
+        static const uint8_t midi[] = {
+            // MThd
+            0x4D, 0x54, 0x68, 0x64,             // "MThd"
+            0x00, 0x00, 0x00, 0x06,             // header length 6
+            0x00, 0x00,                         // format 0
+            0x00, 0x01,                         // ntrks 1
+            0x00, 0x60,                         // division 96
+            // MTrk
+            0x4D, 0x54, 0x72, 0x6B,             // "MTrk"
+            0x00, 0x00, 0x00, 0x13,             // track length 19
+            0x00, 0xFF, 0x51, 0x03, 0x07, 0xA1, 0x20, // delta 0, tempo 500000 us/quarter
+            0x00, 0x90, 0x3C, 0x64,             // delta 0, note_on ch0 note 60 vel 100
+            0x60, 0x80, 0x3C, 0x40,             // delta 96, note_off ch0 note 60 vel 64
+            0x00, 0xFF, 0x2F, 0x00,             // delta 0, end of track
+        };
+
+        Synth::MidiEvent events[8];
+        const uint32_t count = Synth::parse_midi_file(midi, sizeof(midi), events, 8, 44100);
+        TEST(count == 2);
+        TEST(events[0].event == Synth::EvType::note_on);
+        TEST(events[0].channel == 0);
+        TEST(events[0].note == 60);
+        TEST(events[0].note_data == 100);
+        TEST(events[0].time == 0);
+        TEST(events[1].event == Synth::EvType::note_off);
+        TEST(events[1].channel == 0);
+        TEST(events[1].note == 60);
+        TEST(events[1].time == 22050);
+    }
+
+    // MIDI file: running status -- a second note_on reuses the prior 0x90 status byte (no
+    // status byte, just data).  Default tempo (no FF51) is 120 BPM, division 96.
+    {
+        static const uint8_t midi[] = {
+            0x4D, 0x54, 0x68, 0x64,
+            0x00, 0x00, 0x00, 0x06,
+            0x00, 0x00,
+            0x00, 0x01,
+            0x00, 0x60,
+            0x4D, 0x54, 0x72, 0x6B,
+            0x00, 0x00, 0x00, 0x0B,             // track length 11
+            0x00, 0x90, 0x3C, 0x64,             // delta 0, note_on ch0 note 60 vel 100
+            0x30, 0x3E, 0x64,                   // delta 48, running status: note_on note 62 vel 100
+            0x00, 0xFF, 0x2F, 0x00,             // end of track
+        };
+
+        Synth::MidiEvent events[8];
+        const uint32_t count = Synth::parse_midi_file(midi, sizeof(midi), events, 8, 44100);
+        TEST(count == 2);
+        TEST(events[0].event == Synth::EvType::note_on);
+        TEST(events[0].note == 60);
+        TEST(events[0].time == 0);
+        TEST(events[1].event == Synth::EvType::note_on);
+        TEST(events[1].note == 62);
+        TEST(events[1].time == 11025);          // delta 48 ticks = half a quarter = 11025 samples
+    }
+
+    // MIDI file: malformed / truncated inputs return 0 without crashing (checked under ASAN).
+    {
+        Synth::MidiEvent events[8];
+        // Empty buffer.
+        TEST(Synth::parse_midi_file(nullptr, 0, events, 8, 44100) == 0);
+        // Bad magic.
+        static const uint8_t bad_magic[] = { 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07 };
+        TEST(Synth::parse_midi_file(bad_magic, sizeof(bad_magic), events, 8, 44100) == 0);
+        // Truncated valid header (track length claims more bytes than present).
+        static const uint8_t truncated[] = {
+            0x4D, 0x54, 0x68, 0x64,
+            0x00, 0x00, 0x00, 0x06,
+            0x00, 0x00,
+            0x00, 0x01,
+            0x00, 0x60,
+            0x4D, 0x54, 0x72, 0x6B,
+            0x00, 0x00, 0x00, 0x40,             // claims 64 bytes but track is cut off
+            0x00, 0x90, 0x3C,                   // incomplete note_on
+        };
+        TEST(Synth::parse_midi_file(truncated, sizeof(truncated), events, 8, 44100) == 0);
+        // SMPTE division (high bit set) is rejected.
+        static const uint8_t smpte[] = {
+            0x4D, 0x54, 0x68, 0x64,
+            0x00, 0x00, 0x00, 0x06,
+            0x00, 0x00,
+            0x00, 0x01,
+            0xE8, 0x04,                         // negative (SMPTE) division
+            0x4D, 0x54, 0x72, 0x6B,
+            0x00, 0x00, 0x00, 0x04,
+            0x00, 0xFF, 0x2F, 0x00,
+        };
+        TEST(Synth::parse_midi_file(smpte, sizeof(smpte), events, 8, 44100) == 0);
+    }
+
+    // A file whose sample time exceeds the 32-bit field is rejected (no UB on the cast).  An
+    // extreme tempo (0xFFFFFF us/quarter) at division 1 makes one tick ~740k samples, so a
+    // 6000-tick delta overruns UINT32_MAX.
+    {
+        const uint8_t overflow_midi[] = {
+            0x4D, 0x54, 0x68, 0x64,
+            0x00, 0x00, 0x00, 0x06,
+            0x00, 0x00,                         // format 0
+            0x00, 0x01,                         // one track
+            0x00, 0x01,                         // division: 1 tick per quarter
+            0x4D, 0x54, 0x72, 0x6B,
+            0x00, 0x00, 0x00, 0x10,             // track length 16
+            0x00, 0xFF, 0x51, 0x03, 0xFF, 0xFF, 0xFF, // tempo 0xFFFFFF us/quarter
+            0xAE, 0x70, 0x90, 0x3C, 0x64,       // delta 6000, note_on ch0 note 60 vel 100
+            0x00, 0xFF, 0x2F, 0x00,             // end of track
+        };
+        Synth::MidiEvent overflow_events[8] = { };
+        TEST(Synth::parse_midi_file(overflow_midi, sizeof(overflow_midi), overflow_events, 8, 44100) == 0);
+    }
+
+    // D3: soundtrack codec round-trips a tick-domain, time-ordered stream.  encode pairs each
+    // note_on with its later note_off into a note_on + duration; decode reconstructs the note_off
+    // at start + duration.  Times are MIDI ticks.  note_off velocity is not stored (the duration
+    // model drops it), so note_offs here carry note_data 0, matching the reconstructed value.
+    {
+        Synth::MidiEvent events[7] = { };
+
+        events[0].time = 0;   events[0].event = Synth::EvType::note_on;
+        events[0].channel = 0; events[0].note = 60; events[0].note_data = 100;
+
+        events[1].time = 0;   events[1].event = Synth::EvType::controller;
+        events[1].channel = 2; events[1].controller = 7; events[1].controller_data = 120;
+
+        events[2].time = 50;  events[2].event = Synth::EvType::aftertouch;
+        events[2].channel = 0; events[2].note = 60; events[2].note_data = 40;
+
+        events[3].time = 100; events[3].event = Synth::EvType::pitch_bend;
+        events[3].channel = 0; events[3].pitch_bend = -2048;
+
+        events[4].time = 100; events[4].event = Synth::EvType::note_on;
+        events[4].channel = 2; events[4].note = 67; events[4].note_data = 90;
+
+        events[5].time = 200; events[5].event = Synth::EvType::note_off;
+        events[5].channel = 0; events[5].note = 60; events[5].note_data = 0;
+
+        events[6].time = 300; events[6].event = Synth::EvType::note_off;
+        events[6].channel = 2; events[6].note = 67; events[6].note_data = 0;
+
+        const uint32_t event_count = 7;
+        uint8_t           dest[256];
+        Synth::Soundtrack soundtrack = { };
+        const uint32_t written = Synth::encode_soundtrack(events, event_count, dest, sizeof(dest),
+                                                          &soundtrack);
+        TEST(written > 0);
+
+        Synth::MidiEvent decoded[7] = { };
+        TEST(Synth::decode_soundtrack(soundtrack, decoded, 7) == event_count);
+        TEST(memcmp(events, decoded, event_count * sizeof(Synth::MidiEvent)) == 0);
+
+        // A buffer too small to hold the planes fails cleanly.
+        Synth::Soundtrack scratch = { };
+        TEST(Synth::encode_soundtrack(events, event_count, dest, 4, &scratch) == 0);
+
+        // An out-of-range channel is rejected.
+        Synth::MidiEvent bad_channel = events[0];
+        bad_channel.channel = Synth::max_channels;
+        TEST(Synth::encode_soundtrack(&bad_channel, 1, dest, sizeof(dest), &scratch) == 0);
+    }
+
+    // D2: an unmatched note_on (no note_off) encodes as an unbounded note and decodes back to a
+    // single note_on with no reconstructed note_off.
+    {
+        Synth::MidiEvent events[1] = { };
+        events[0].time = 0; events[0].event = Synth::EvType::note_on;
+        events[0].channel = 0; events[0].note = 48; events[0].note_data = 80;
+
+        uint8_t           dest[64];
+        Synth::Soundtrack soundtrack = { };
+        TEST(Synth::encode_soundtrack(events, 1, dest, sizeof(dest), &soundtrack) > 0);
+
+        Synth::MidiEvent decoded[4] = { };
+        TEST(Synth::decode_soundtrack(soundtrack, decoded, 4) == 1);
+        TEST(decoded[0].event == Synth::EvType::note_on);
+        TEST(decoded[0].note == 48 && decoded[0].note_data == 80);
+    }
+
+    // D3 (retrigger + multi-byte VLQ): an overlapping same-note retrigger closes the earlier note
+    // at the new note_on's time, and large tick deltas/durations (> 0x3FFF) exercise multi-byte VLQ.
+    {
+        Synth::MidiEvent events[3] = { };
+        events[0].time = 0;     events[0].event = Synth::EvType::note_on;
+        events[0].channel = 0;  events[0].note = 64; events[0].note_data = 100;
+        events[1].time = 20000; events[1].event = Synth::EvType::note_on; // retrigger; delta > 0x3FFF
+        events[1].channel = 0;  events[1].note = 64; events[1].note_data = 110;
+        events[2].time = 60000; events[2].event = Synth::EvType::note_off; // duration > 0x3FFF
+        events[2].channel = 0;  events[2].note = 64; events[2].note_data = 0;
+
+        uint8_t           dest[256];
+        Synth::Soundtrack soundtrack = { };
+        TEST(Synth::encode_soundtrack(events, 3, dest, sizeof(dest), &soundtrack) > 0);
+
+        // Decoded: note_on@0, note_off@20000 (earlier note closed at retrigger), note_on@20000,
+        // note_off@60000.  Sort is by (time, channel); same-time events keep input order.
+        Synth::MidiEvent decoded[8] = { };
+        const uint32_t decoded_count = Synth::decode_soundtrack(soundtrack, decoded, 8);
+        TEST(decoded_count == 4);
+
+        uint32_t note_offs = 0;
+        uint32_t off_at_20000 = 0;
+        uint32_t off_at_60000 = 0;
+        int off_idx_20000 = -1;
+        int on_idx_20000  = -1;
+        for (uint32_t i = 0; i < decoded_count; i++) {
+            if (decoded[i].event == Synth::EvType::note_off) {
+                note_offs++;
+                if (decoded[i].time == 20000) { off_at_20000++; off_idx_20000 = (int)i; }
+                if (decoded[i].time == 60000) { off_at_60000++; }
+                TEST(decoded[i].note == 64);
+            }
+            else if (decoded[i].event == Synth::EvType::note_on && decoded[i].time == 20000) {
+                on_idx_20000 = (int)i;
+            }
+        }
+        TEST(note_offs == 2);
+        TEST(off_at_20000 == 1); // earlier note closed at the retrigger
+        TEST(off_at_60000 == 1); // second note closed by its real note_off
+        // The reconstructed note_off must precede the retriggered note_on at the same tick, so the
+        // player closes the old voice before allocating the new one (else the retrigger drops it).
+        TEST(off_idx_20000 >= 0 && on_idx_20000 >= 0 && off_idx_20000 < on_idx_20000);
+    }
+
+    // D4: a note_on's stored duration resolves to the absolute sample at which the player
+    // auto-releases its voice (0 = none).  Stored value v means a real duration of v - 1 ticks.
+    {
+        TEST(Synth::soundtrack_note_release_sample(1000, 0, 50)  == 0);    // unbounded -> none
+        TEST(Synth::soundtrack_note_release_sample(1000, 11, 50) == 1500); // 10 ticks * 50 + 1000
+        TEST(Synth::soundtrack_note_release_sample(1000, 1, 50)  == 1000); // 0-tick note releases at start
+        TEST(Synth::soundtrack_note_release_sample(0, 1, 50)     == 0);    // degenerate: 0-tick at 0 -> none
     }
 
     return exit_code;
