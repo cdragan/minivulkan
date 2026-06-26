@@ -5,6 +5,7 @@
 #include "synth_effects.h"
 #include "synth_instrument.h"
 #include "synth_serialize.h"
+#include "synth_instrument_editor.h"
 #include "midi_file.h"
 #include "synth_soundtrack.h"
 #include "../core/rng.h"
@@ -570,7 +571,7 @@ int main()
         TEST(memcmp(&bank, &snapshot, sizeof(bank)) == 0);
     }
 
-    // C1: instrument bank codec round-trips losslessly, with cross-references intact
+    // instrument bank codec round-trips losslessly, with cross-references intact
     {
         Synth::InstrumentBank bank = { };
         const uint32_t env   = bank.envelopes.allocate();
@@ -616,7 +617,7 @@ int main()
         TEST( ! Synth::decode_instrument_bank(image, Synth::instrument_bank_header_size, &restored));
     }
 
-    // C2: instrument bank persists to and loads from a real file
+    // instrument bank persists to and loads from a real file
     {
         Synth::InstrumentBank bank = { };
         bank.drum_track_channel  = 7;
@@ -751,7 +752,7 @@ int main()
         TEST(Synth::parse_midi_file(overflow_midi, sizeof(overflow_midi), overflow_events, 8, 44100) == 0);
     }
 
-    // D3: soundtrack codec round-trips a tick-domain, time-ordered stream.  encode pairs each
+    // soundtrack codec round-trips a tick-domain, time-ordered stream.  encode pairs each
     // note_on with its later note_off into a note_on + duration; decode reconstructs the note_off
     // at start + duration.  Times are MIDI ticks.  note_off velocity is not stored (the duration
     // model drops it), so note_offs here carry note_data 0, matching the reconstructed value.
@@ -800,7 +801,7 @@ int main()
         TEST(Synth::encode_soundtrack(&bad_channel, 1, dest, sizeof(dest), &scratch) == 0);
     }
 
-    // D2: an unmatched note_on (no note_off) encodes as an unbounded note and decodes back to a
+    // an unmatched note_on (no note_off) encodes as an unbounded note and decodes back to a
     // single note_on with no reconstructed note_off.
     {
         Synth::MidiEvent events[1] = { };
@@ -862,13 +863,117 @@ int main()
         TEST(off_idx_20000 >= 0 && on_idx_20000 >= 0 && off_idx_20000 < on_idx_20000);
     }
 
-    // D4: a note_on's stored duration resolves to the absolute sample at which the player
+    // a note_on's stored duration resolves to the absolute sample at which the player
     // auto-releases its voice (0 = none).  Stored value v means a real duration of v - 1 ticks.
     {
         TEST(Synth::soundtrack_note_release_sample(1000, 0, 50)  == 0);    // unbounded -> none
         TEST(Synth::soundtrack_note_release_sample(1000, 11, 50) == 1500); // 10 ticks * 50 + 1000
         TEST(Synth::soundtrack_note_release_sample(1000, 1, 50)  == 1000); // 0-tick note releases at start
         TEST(Synth::soundtrack_note_release_sample(0, 1, 50)     == 0);    // degenerate: 0-tick at 0 -> none
+    }
+
+    // ---- editor container + persistence + undo/redo + thread-safe publish ----
+
+    // Helper: stamp several distinct fields so a memcmp discriminates more than one byte.
+    auto stamp_bank = [](Synth::InstrumentBank& b, uint8_t k) {
+        b.drum_track_channel          = k;
+        b.channel_routes[1][0].start_note = k;
+        b.channel_routes[1][0].instrument = static_cast<uint8_t>(k + 1u);
+        b.instrument_names[0][0]      = static_cast<char>('A' + (k & 7u));
+        b.channel_names[0][0]         = static_cast<char>('z' - (k & 7u));
+    };
+
+    // edit->snapshot->edit->undo restores the prior bank EXACTLY (full-struct memcmp);
+    // redo re-applies it exactly.  Whole-bank byte snapshots over UndoRedo.
+    {
+        Synth::InstrumentBank& bank = Synth::editable_bank();
+        stamp_bank(bank, 9);
+        static Synth::InstrumentBank refA;
+        refA = bank;                                   // state A reference
+
+        Synth::editor_snapshot();                      // snapshot A
+        stamp_bank(bank, 3);                           // edit -> B
+        static Synth::InstrumentBank refB;
+        refB = bank;                                   // state B reference
+
+        TEST(Synth::editor_undo());
+        TEST(memcmp(&bank, &refA, sizeof(bank)) == 0); // exact restore of A
+        TEST(Synth::editor_redo());
+        TEST(memcmp(&bank, &refB, sizeof(bank)) == 0); // exact reapply of B
+    }
+
+    // a fresh edit after an undo must invalidate redo history (no stale B reappears).
+    {
+        Synth::InstrumentBank& bank = Synth::editable_bank();
+        stamp_bank(bank, 10);
+        Synth::editor_snapshot();                      // snapshot A'
+        stamp_bank(bank, 20);                          // edit -> B'
+        TEST(Synth::editor_undo());                    // back to A' (drum=10)
+        TEST(bank.drum_track_channel == 10);
+        Synth::editor_snapshot();                      // fresh edit invalidates redo
+        stamp_bank(bank, 30);                          // edit -> C'
+        TEST( ! Synth::editor_redo());                 // stale B' must NOT come back
+        TEST(bank.drum_track_channel == 30);
+    }
+
+    // undo/redo at the ends of the stack are no-ops, not crashes.
+    {
+        while (Synth::editor_undo()) { }
+        TEST( ! Synth::editor_undo());
+        while (Synth::editor_redo()) { }
+        TEST( ! Synth::editor_redo());
+    }
+
+    // Publish/acquire handoff (3-buffer hazard pointer).  acquire_audio_bank returns a pointer to
+    // the latest published bank.  Single-threaded here, so the producer never picks the buffer the
+    // consumer holds; cross-thread torn-read freedom is by construction (the producer skips the
+    // published + reading buffers).
+    {
+        Synth::InstrumentBank& bank = Synth::editable_bank();
+
+        stamp_bank(bank, 5);
+        Synth::publish_bank();
+        const Synth::InstrumentBank* a = Synth::acquire_audio_bank();
+        TEST(a != nullptr);
+        TEST(memcmp(a, &bank, sizeof(bank)) == 0);     // exact published image
+
+        stamp_bank(bank, 7);
+        Synth::publish_bank();
+        const Synth::InstrumentBank* b = Synth::acquire_audio_bank();
+        TEST(b != nullptr);
+        TEST(memcmp(b, &bank, sizeof(bank)) == 0);     // tracks the latest publish
+        TEST(b != a);                                  // published into a different buffer
+
+        // Acquire with no intervening publish returns the same stable buffer.
+        const Synth::InstrumentBank* c = Synth::acquire_audio_bank();
+        TEST(c == b);
+    }
+
+    // SYIB encode/decode round-trips the whole bank exactly (full-struct memcmp).  Bad input
+    // fails cleanly without touching the destination (full-struct check, not one field).
+    {
+        Synth::InstrumentBank& bank = Synth::editable_bank();
+        stamp_bank(bank, 4);
+
+        static uint8_t blob[sizeof(Synth::InstrumentBank) + 64];
+        const uint32_t n = Synth::encode_instrument_bank(&bank, blob, sizeof(blob));
+        TEST(n > 0);
+
+        static Synth::InstrumentBank restored;
+        memset(&restored, 0x5A, sizeof(restored));
+        TEST(Synth::decode_instrument_bank(blob, n, &restored));
+        TEST(memcmp(&restored, &bank, sizeof(bank)) == 0);
+
+        // Bad input: truncated / corrupt marker -> false, destination byte-for-byte untouched.
+        static Synth::InstrumentBank untouched;
+        memset(&untouched, 0x33, sizeof(untouched));
+        static Synth::InstrumentBank untouched_ref;
+        memset(&untouched_ref, 0x33, sizeof(untouched_ref));
+        TEST( ! Synth::decode_instrument_bank(blob, 3, &untouched));        // truncated
+        TEST(memcmp(&untouched, &untouched_ref, sizeof(untouched)) == 0);
+        blob[0] ^= 0xFFu;                                                   // corrupt marker
+        TEST( ! Synth::decode_instrument_bank(blob, n, &untouched));
+        TEST(memcmp(&untouched, &untouched_ref, sizeof(untouched)) == 0);
     }
 
     return exit_code;
