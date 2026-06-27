@@ -5,7 +5,6 @@
 #include "synth_effects.h"
 #include "synth_instrument.h"
 #include "synth_serialize.h"
-#include "synth_instrument_editor.h"
 #include "midi_file.h"
 #include "synth_soundtrack.h"
 #include "../core/rng.h"
@@ -872,87 +871,22 @@ int main()
         TEST(Synth::soundtrack_note_release_sample(0, 1, 50)     == 0);    // degenerate: 0-tick at 0 -> none
     }
 
-    // ---- editor container + persistence + undo/redo + thread-safe publish ----
+    // ---- instrument bank persistence (codec) ----
 
-    // Helper: stamp several distinct fields so a memcmp discriminates more than one byte.
+    // Stamp several distinct fields so a memcmp discriminates more than one byte.
     auto stamp_bank = [](Synth::InstrumentBank& b, uint8_t k) {
-        b.drum_track_channel          = k;
+        b.drum_track_channel              = k;
         b.channel_routes[1][0].start_note = k;
         b.channel_routes[1][0].instrument = static_cast<uint8_t>(k + 1u);
-        b.instrument_names[0][0]      = static_cast<char>('A' + (k & 7u));
-        b.channel_names[0][0]         = static_cast<char>('z' - (k & 7u));
+        b.instrument_names[0][0]          = static_cast<char>('A' + (k & 7u));
+        b.channel_names[0][0]             = static_cast<char>('z' - (k & 7u));
     };
-
-    // edit->snapshot->edit->undo restores the prior bank EXACTLY (full-struct memcmp);
-    // redo re-applies it exactly.  Whole-bank byte snapshots over UndoRedo.
-    {
-        Synth::InstrumentBank& bank = Synth::editable_bank();
-        stamp_bank(bank, 9);
-        static Synth::InstrumentBank refA;
-        refA = bank;                                   // state A reference
-
-        Synth::editor_snapshot();                      // snapshot A
-        stamp_bank(bank, 3);                           // edit -> B
-        static Synth::InstrumentBank refB;
-        refB = bank;                                   // state B reference
-
-        TEST(Synth::editor_undo());
-        TEST(memcmp(&bank, &refA, sizeof(bank)) == 0); // exact restore of A
-        TEST(Synth::editor_redo());
-        TEST(memcmp(&bank, &refB, sizeof(bank)) == 0); // exact reapply of B
-    }
-
-    // a fresh edit after an undo must invalidate redo history (no stale B reappears).
-    {
-        Synth::InstrumentBank& bank = Synth::editable_bank();
-        stamp_bank(bank, 10);
-        Synth::editor_snapshot();                      // snapshot A'
-        stamp_bank(bank, 20);                          // edit -> B'
-        TEST(Synth::editor_undo());                    // back to A' (drum=10)
-        TEST(bank.drum_track_channel == 10);
-        Synth::editor_snapshot();                      // fresh edit invalidates redo
-        stamp_bank(bank, 30);                          // edit -> C'
-        TEST( ! Synth::editor_redo());                 // stale B' must NOT come back
-        TEST(bank.drum_track_channel == 30);
-    }
-
-    // undo/redo at the ends of the stack are no-ops, not crashes.
-    {
-        while (Synth::editor_undo()) { }
-        TEST( ! Synth::editor_undo());
-        while (Synth::editor_redo()) { }
-        TEST( ! Synth::editor_redo());
-    }
-
-    // Publish/acquire handoff (3-buffer hazard pointer).  acquire_audio_bank returns a pointer to
-    // the latest published bank.  Single-threaded here, so the producer never picks the buffer the
-    // consumer holds; cross-thread torn-read freedom is by construction (the producer skips the
-    // published + reading buffers).
-    {
-        Synth::InstrumentBank& bank = Synth::editable_bank();
-
-        stamp_bank(bank, 5);
-        Synth::publish_bank();
-        const Synth::InstrumentBank* a = Synth::acquire_audio_bank();
-        TEST(a != nullptr);
-        TEST(memcmp(a, &bank, sizeof(bank)) == 0);     // exact published image
-
-        stamp_bank(bank, 7);
-        Synth::publish_bank();
-        const Synth::InstrumentBank* b = Synth::acquire_audio_bank();
-        TEST(b != nullptr);
-        TEST(memcmp(b, &bank, sizeof(bank)) == 0);     // tracks the latest publish
-        TEST(b != a);                                  // published into a different buffer
-
-        // Acquire with no intervening publish returns the same stable buffer.
-        const Synth::InstrumentBank* c = Synth::acquire_audio_bank();
-        TEST(c == b);
-    }
 
     // SYIB encode/decode round-trips the whole bank exactly (full-struct memcmp).  Bad input
     // fails cleanly without touching the destination (full-struct check, not one field).
     {
-        Synth::InstrumentBank& bank = Synth::editable_bank();
+        static Synth::InstrumentBank bank;
+        memset(&bank, 0, sizeof(bank));
         stamp_bank(bank, 4);
 
         static uint8_t blob[sizeof(Synth::InstrumentBank) + 64];

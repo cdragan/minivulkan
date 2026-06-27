@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: MIT
 // SPDX-FileCopyrightText: Copyright (c) 2021-2026 Chris Dragan
 
-#include "synth_instrument_editor.h"
+#include "sculptor_instr_edit.h"
 
-#include "synth_serialize.h"
-#include "../sculptor/sculptor_undo.h"
+#include "../synth/realtime_synth.h"
+#include "../synth/synth_serialize.h"
+#include "sculptor_undo.h"
 
 #include <atomic>
 
@@ -31,9 +32,29 @@ static void ensure_undo_init()
     }
 }
 
+void Synth::init_editor()
+{
+    instr_bank = Synth::current_bank();
+
+    Synth::set_bank_source(&Synth::next_bank_update);
+}
+
 Synth::InstrumentBank& Synth::editable_bank()
 {
     return instr_bank;
+}
+
+const Synth::InstrumentBank* Synth::next_bank_update()
+{
+    static const Synth::InstrumentBank* last_consumed = nullptr;
+
+    const Synth::InstrumentBank* const latest = Synth::acquire_audio_bank();
+
+    if (latest && latest != last_consumed) {
+        last_consumed = latest;
+        return latest;
+    }
+    return nullptr;
 }
 
 void Synth::publish_bank()
