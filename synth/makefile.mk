@@ -12,8 +12,6 @@ lib_src_files += synth/synth_serialize.cpp
 lib_src_files += synth/synth_soundtrack.cpp
 
 synth_unit_src_files += synth/synth_unit.cpp
-synth_unit_src_files += synth/synth_instrument_editor.cpp
-synth_unit_src_files += sculptor/sculptor_undo.cpp
 
 midi_decode_unit_src_files += synth/midi_decode_unit.cpp
 

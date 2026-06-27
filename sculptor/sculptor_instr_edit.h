@@ -3,11 +3,13 @@
 
 #pragma once
 
-#include "synth_instrument.h"
+#include "../synth/synth_instrument.h"
 
 #include <stdint.h>
 
 namespace Synth {
+
+void init_editor();
 
 InstrumentBank& editable_bank();
 
@@ -19,11 +21,13 @@ bool editor_redo();
 bool save_editor_bank(const char* path);
 bool load_editor_bank(const char* path);
 
-// Publish the instrument bank to the synth.
-// Must be called from a single producer GUI thread.
+// Publish the editable bank to the synth (GUI thread).
 void publish_bank();
 
-// Read published instrument bank (used by synth/audio thread)
+// Acquire the latest published bank for the current audio block (in synth/audio thread)
 const InstrumentBank* acquire_audio_bank();
+
+// Returns the latest published bank, but only if it changed.
+const InstrumentBank* next_bank_update();
 
 } // namespace Synth

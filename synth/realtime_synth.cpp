@@ -120,6 +120,9 @@ namespace {
     // The bank of instruments, envelopes and LFOs the runtime builds at init and reads while playing.
     InstrumentBank synth_bank;
 
+    // Callback for reading modified instrument bank from the editor
+    Synth::BankSourceCallback bank_source_callback = nullptr;
+
     constexpr float cutoff_base_hz = 400.0f;
 
     // TODO temporary demo instruments
@@ -1032,6 +1035,16 @@ static bool allocate_oscillators(uint8_t*          osc_ids,
     }
 
     return true;
+}
+
+void Synth::set_bank_source(BankSourceCallback source)
+{
+    bank_source_callback = source;
+}
+
+const Synth::InstrumentBank& Synth::current_bank()
+{
+    return synth_bank;
 }
 
 bool Synth::init_synth()
@@ -2083,6 +2096,11 @@ static void compute_fir_coefficients()
 
 static void render_audio_step()
 {
+    if (bank_source_callback) {
+        if (const InstrumentBank* const published_bank = bank_source_callback())
+            synth_bank = *published_bank;
+    }
+
     const uint32_t start_samples = rendered_samples;
     const uint32_t end_samples   = start_samples + rt_step_samples;
 

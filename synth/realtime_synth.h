@@ -62,6 +62,13 @@ struct MidiEvent {
 
 bool init_synth();
 
+// Callback for updating instrument bank from the editor
+typedef const InstrumentBank* (*BankSourceCallback)();
+void set_bank_source(BankSourceCallback source);
+
+// Instrument bank currently used by the synth
+const InstrumentBank& current_bank();
+
 void stop_synth();
 
 void apply_midi_event(const MidiEvent& event);
