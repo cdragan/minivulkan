@@ -18,6 +18,17 @@ uint32_t PoolBase::allocate(bool* occupied, uint32_t capacity)
     return pool_no_slot;
 }
 
+uint32_t PoolBase::allocate_at(bool* occupied, uint32_t capacity, uint32_t index)
+{
+    if (index >= capacity || occupied[index]) {
+        return pool_no_slot;
+    }
+
+    occupied[index] = true;
+    ++num_allocated;
+    return index;
+}
+
 void PoolBase::free(bool* occupied, uint32_t slot)
 {
     if (occupied[slot]) {

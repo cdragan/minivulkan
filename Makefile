@@ -172,6 +172,8 @@ suballoc_unit_src_files += core/suballoc_unit.cpp
 
 sculptor_undo_unit_src_files += sculptor/sculptor_undo_unit.cpp
 
+sculptor_graph_unit_src_files += sculptor/sculptor_graph_unit.cpp
+
 threed_gui_src_files += core/gui.cpp
 threed_gui_src_files += core/resource_gui.cpp
 threed_gui_src_files += core/gui_config.cpp
@@ -194,6 +196,7 @@ all_src_files += $(make_shaders_cpp_src_files)
 all_src_files += $(spirv_encode_src_files)
 all_src_files += $(midi_test_sender_src_files)
 all_src_files += $(suballoc_unit_src_files)
+all_src_files += $(sculptor_graph_unit_src_files)
 all_src_files += $(sculptor_undo_unit_src_files)
 all_src_files += $(synth_modulation_unit_src_files)
 all_src_files += $(midi_decode_unit_src_files)
@@ -212,6 +215,10 @@ all_suballoc_unit_src_files += $(suballoc_unit_src_files)
 
 all_sculptor_undo_unit_src_files += sculptor/sculptor_undo.cpp
 all_sculptor_undo_unit_src_files += $(sculptor_undo_unit_src_files)
+
+all_sculptor_graph_unit_src_files += sculptor/sculptor_graph.cpp
+all_sculptor_graph_unit_src_files += core/pool.cpp
+all_sculptor_graph_unit_src_files += $(sculptor_graph_unit_src_files)
 
 all_synth_modulation_unit_src_files += $(lib_src_files)
 all_synth_modulation_unit_src_files += $(synth_modulation_unit_src_files)
@@ -643,7 +650,7 @@ $(foreach file, $(sort $(filter %.cpp, $(all_src_files))), $(eval $(call ASM_RUL
 
 $(foreach file, $(filter-out $(imgui_src_files) $(libpng_src_files) $(zlib_src_files), $(all_src_files)), $(call TARGET_FILES, $(file))): CFLAGS += $(WFLAGS)
 
-$(foreach file, $(all_gui_src_files) $(imgui_src_files), $(call TARGET_FILES, $(file))): CFLAGS += -DIMGUI_DISABLE_OBSOLETE_KEYIO -DIMGUI_DISABLE_OBSOLETE_FUNCTIONS -Ithirdparty/imgui/src
+$(foreach file, $(all_gui_src_files) $(imgui_src_files) $(all_sculptor_graph_unit_src_files), $(call TARGET_FILES, $(file))): CFLAGS += -DIMGUI_DISABLE_OBSOLETE_KEYIO -DIMGUI_DISABLE_OBSOLETE_FUNCTIONS -Ithirdparty/imgui/src
 
 $(call TARGET_FILES, load_png.cpp): CFLAGS += -Ithirdparty/libpng
 
@@ -756,6 +763,7 @@ $(foreach file, $(all_gui_src_files), $(call TARGET_FILES, $(file))): $(foreach 
 
 tests += vmath_unit
 tests += suballoc_unit
+tests += sculptor_graph_unit
 tests += sculptor_undo_unit
 tests += synth_modulation_unit
 tests += midi_decode_unit

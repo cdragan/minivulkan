@@ -10,6 +10,8 @@ src_files += sculptor_undo.cpp
 src_files += sculptor_materials.cpp
 src_files += sculptor_asset_browser.cpp
 src_files += sculptor_asset_list.cpp
+src_files += sculptor_graph.cpp
+src_files += sculptor_graph_render.cpp
 src_files += sculptor_geom_edit.cpp
 src_files += sculptor_tex_edit.cpp
 

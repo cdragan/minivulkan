@@ -15,6 +15,8 @@ class PoolBase {
 
         uint32_t allocate(bool* occupied, uint32_t capacity);
 
+        uint32_t allocate_at(bool* occupied, uint32_t capacity, uint32_t index);
+
         void free(bool* occupied, uint32_t slot);
 
         void defragment(void* entries, uint32_t elem_size, bool* occupied, uint32_t capacity, uint32_t* old_to_new);
@@ -33,6 +35,12 @@ class Pool: private PoolBase {
         uint32_t allocate()
         {
             return PoolBase::allocate(occupied, capacity);
+        }
+
+        uint32_t allocate_at(uint32_t slot)
+        {
+            assert(slot < capacity);
+            return PoolBase::allocate_at(occupied, capacity, slot);
         }
 
         void free(uint32_t slot)
