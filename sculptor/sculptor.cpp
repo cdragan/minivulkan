@@ -4,6 +4,7 @@
 #include "sculptor_materials.h"
 #include "sculptor_asset_browser.h"
 #include "sculptor_geom_edit.h"
+#include "sculptor_instr_edit.h"
 #include "sculptor_tex_edit.h"
 
 #include "../core/barrier.h"
@@ -117,6 +118,8 @@ bool init_assets()
     // TODO find a better place
     if ( ! Synth::init_synth())
         d_printf("Synth initialization failed; continuing without audio\n");
+    else
+        Synth::init_editor();
 
     return true;
 }
@@ -159,6 +162,21 @@ static bool create_gui_frame(uint32_t image_idx)
 
     ImGui_ImplVulkan_NewFrame();
     ImGui::NewFrame();
+
+    // TEMP Z0: live-rerouting test hook; removed when the Z2 channel editor lands.
+    // F8 publishes test splits on channel 2; Shift+F8 undoes them (Ctrl+Z belongs
+    // to the geometry editor until the instrument editor gets its own UI in Z2).
+    if (io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_F8)) {
+        if (Synth::editor_undo())
+            d_printf("TEMP Z0: bank undo (splits reverted)\n");
+    } else if (ImGui::IsKeyPressed(ImGuiKey_F8)) {
+        Synth::InstrumentBank& bank = Synth::editable_bank();
+        Synth::editor_snapshot();
+        bank.channel_routes[1][0] = { 1, 1 };  // channel 2 notes 1-59 -> supersaw demo
+        bank.channel_routes[1][1] = { 60, 2 }; // channel 2 notes 60+ -> FM demo
+        Synth::publish_bank();
+        d_printf("TEMP Z0: published test splits on channel 2\n");
+    }
 
     static vmath::vec2 prev_mouse_pos;
 

@@ -21,12 +21,6 @@ extern const uint8_t* midi_ctrl_data[];     // Per-channel controller data for c
 extern const uint8_t* midi_pitch_bend_lo[]; // Per-channel pitch bend LSB values
 extern const uint8_t* midi_pitch_bend_hi[]; // Per-channel pitch bend MSB values
 
-// Per-channel routing of notes to instruments
-struct InstrumentRouting {
-    NoteRoute note_routing[max_instr_per_channel];
-};
-extern const InstrumentRouting instr_routing[max_channels];
-
 #define MIDI_EVENT_TYPES(X) \
     X(note_off)             \
     X(note_on)              \

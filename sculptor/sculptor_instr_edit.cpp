@@ -7,7 +7,10 @@
 #include "../synth/synth_serialize.h"
 #include "sculptor_undo.h"
 
+#include "../core/d_printf.h"
 #include <atomic>
+#include <string.h>
+#include <type_traits>
 
 namespace {
 
@@ -34,7 +37,11 @@ static void ensure_undo_init()
 
 void Synth::init_editor()
 {
-    instr_bank = Synth::current_bank();
+    static_assert(std::is_trivially_copyable_v<Synth::InstrumentBank>);
+    memcpy(&instr_bank, &Synth::current_bank(), sizeof(instr_bank));
+
+    if (memcmp(&instr_bank, &Synth::current_bank(), sizeof(instr_bank)))
+        d_printf("Editor bank snapshot mismatch\n");
 
     Synth::set_bank_source(&Synth::next_bank_update);
 }

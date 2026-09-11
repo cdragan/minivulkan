@@ -79,7 +79,7 @@ int main()
         usleep(100000);
     }
 
-    // Exercise every MIDI channel: each routes through instr_routing[channel].
+    // Exercise every MIDI channel: each routes through the bank's channel routes.
     for (uint8_t channel = 0; channel < 16; channel++) {
         note_on(channel, 60, 100);
         usleep(60000);

@@ -120,8 +120,8 @@ namespace {
     // The bank of instruments, envelopes and LFOs the runtime builds at init and reads while playing.
     InstrumentBank synth_bank;
 
-    // Callback for reading modified instrument bank from the editor
-    Synth::BankSourceCallback bank_source_callback = nullptr;
+    // Callback for reading modified instrument bank from the editor.
+    std::atomic<Synth::BankSourceCallback> bank_source_callback = nullptr;
 
     constexpr float cutoff_base_hz = 400.0f;
 
@@ -1039,7 +1039,7 @@ static bool allocate_oscillators(uint8_t*          osc_ids,
 
 void Synth::set_bank_source(BankSourceCallback source)
 {
-    bank_source_callback = source;
+    bank_source_callback.store(source, std::memory_order_release);
 }
 
 const Synth::InstrumentBank& Synth::current_bank()
@@ -1483,9 +1483,9 @@ static void process_note_on(uint32_t delta_samples, const DispatchedMidiEvent& e
     const uint32_t channel = event.channel;
     const uint32_t note    = event.note;
 
-    const uint8_t target_instrument = Synth::select_instrument(Synth::instr_routing[channel].note_routing,
-                                                               Synth::max_instr_per_channel,
-                                                               static_cast<uint8_t>(note));
+    const uint8_t target_instrument = select_instrument(synth_bank.channel_routes[channel],
+                                                        Synth::max_instr_per_channel,
+                                                        static_cast<uint8_t>(note));
 
     // Re-triggering a note still alive (held or releasing, possibly with some
     // layers already silenced) reclaims it cleanly so the new note
@@ -2096,8 +2096,8 @@ static void compute_fir_coefficients()
 
 static void render_audio_step()
 {
-    if (bank_source_callback) {
-        if (const InstrumentBank* const published_bank = bank_source_callback())
+    if (const Synth::BankSourceCallback source = bank_source_callback.load(std::memory_order_acquire)) {
+        if (const InstrumentBank* const published_bank = source())
             synth_bank = *published_bank;
     }
 
