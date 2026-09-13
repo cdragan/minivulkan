@@ -5,25 +5,19 @@
 
 namespace Synth {
 
-uint32_t get_effect_param_floats(EffectType type)
+static constexpr uint32_t get_freeverb_scaled_length(uint32_t base_length)
 {
-    switch (type) {
-        case EffectType::distortion: return 2;
-        case EffectType::delay:      return 3;
-        case EffectType::chorus:     return 3;
-        case EffectType::reverb:     return 3;
-        case EffectType::compressor: return 5;
-        case EffectType::fir:        return 2;  // lowpass cutoff Hz, highpass cutoff Hz (0 = edge disabled)
-        default:                     return 0;
-    }
+    return base_length * rt_sampling_rate / freeverb_base_rate;
 }
 
-uint32_t get_effect_state_floats(EffectType type)
+static constexpr uint32_t align_effect_state_bytes(uint32_t bytes)
+{
+    return (bytes + effect_state_alignment - 1) & ~(effect_state_alignment - 1);
+}
+
+static constexpr uint32_t effect_state_floats(EffectType type)
 {
     switch (type) {
-        case EffectType::distortion:
-            return 0;
-
         case EffectType::delay:
             // One write-position counter plus a stereo (x2) ring buffer
             // of effect_delay_max_samples samples per channel.
@@ -59,6 +53,34 @@ uint32_t get_effect_state_floats(EffectType type)
 
         default:
             return 0;
+    }
+}
+
+// The state budget must admit a worst-case chain: every slot a delay effect.
+static_assert(max_chain_effects
+                  * align_effect_state_bytes(effect_state_floats(EffectType::delay) * sizeof(float))
+              <= effect_state_budget);
+
+uint32_t get_effect_state_floats(EffectType type)
+{
+    return effect_state_floats(type);
+}
+
+uint32_t get_effect_state_bytes(EffectType type)
+{
+    return align_effect_state_bytes(effect_state_floats(type) * sizeof(float));
+}
+
+uint32_t get_effect_param_floats(EffectType type)
+{
+    switch (type) {
+        case EffectType::distortion: return 2;
+        case EffectType::delay:      return 3;
+        case EffectType::chorus:     return 3;
+        case EffectType::reverb:     return 3;
+        case EffectType::compressor: return 5;
+        case EffectType::fir:        return 2;  // lowpass cutoff Hz, highpass cutoff Hz (0 = edge disabled)
+        default:                     return 0;
     }
 }
 

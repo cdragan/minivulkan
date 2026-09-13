@@ -40,6 +40,16 @@ constexpr uint32_t max_name_len = 24;
 // FIR filter tap count, shared by the per-oscillator FIR and the FIR effect.
 constexpr uint32_t num_fir_taps = 1025;
 
+// Number of samples rendered in one step. This is also how frequently LFOs and ADSR
+// envelopes are updated. This must match workgroup geometry in compute shaders.
+constexpr uint32_t rt_step_samples = 256;
+
+// Max oscillators are playing.
+constexpr uint32_t max_oscillators = 64;
+
+// Device bytes feeding the synth: effect state, oscillator FIR buffers, per-step outputs.
+constexpr uint32_t effect_buffer_bytes = 2 * 1024 * 1024;
+
 // Effect delay-line capacities.
 constexpr uint32_t effect_delay_max_samples  = rt_sampling_rate;       // 1 s
 constexpr uint32_t effect_chorus_max_samples = rt_sampling_rate / 20;  // 50 ms

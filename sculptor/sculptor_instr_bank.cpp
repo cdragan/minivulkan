@@ -87,6 +87,88 @@ bool valid_source_op(uint32_t op)
     return op <= static_cast<uint32_t>(SourceOp::multiply);
 }
 
+// Effects route only channel-wide MIDI sources; per-voice sources have no voice in an
+// effect's context (the runtime applies the same restriction at expansion).
+bool is_channel_effect_source(uint32_t source)
+{
+    return source == static_cast<uint32_t>(ModSource::none)
+        || source == static_cast<uint32_t>(ModSource::pitch_bend)
+        || source == static_cast<uint32_t>(ModSource::mod_wheel)
+        || source == static_cast<uint32_t>(ModSource::channel_pressure);
+}
+
+// One effect param's binding. The master chain admits no MIDI-driven source at all
+// (it has no channel inputs, so MIDI modulation there would be meaningless).
+bool validate_effect_param_binding(const EffectParamBinding& binding, bool is_master, uint32_t num_lfos)
+{
+    if ( ! std::isfinite(binding.base_value) ||
+         ! std::isfinite(binding.lfo_depth) ||
+         ! std::isfinite(binding.lfo_rate_scale)) {
+        return false;
+    }
+    if ( ! valid_source_op(static_cast<uint32_t>(binding.lfo_op))) {
+        return false;
+    }
+    // With dense pools, a 1-based descriptor id refers to an occupied entry iff id <= num_allocated.
+    if (binding.lfo_desc_id > num_lfos) {
+        return false;
+    }
+    if (is_master) {
+        if (binding.lfo_depth_source != ModSource::none || binding.lfo_rate_source != ModSource::none ||
+            binding.num_inputs) {
+            return false;
+        }
+    }
+    else {
+        if ( ! is_channel_effect_source(static_cast<uint32_t>(binding.lfo_depth_source)) ||
+             ! is_channel_effect_source(static_cast<uint32_t>(binding.lfo_rate_source))) {
+            return false;
+        }
+        if (binding.num_inputs > max_mod_inputs) {
+            return false;
+        }
+        for (uint32_t input = 0; input < binding.num_inputs; input++) {
+            const ModInput& mod_input = binding.inputs[input];
+            if ( ! is_channel_effect_source(static_cast<uint32_t>(mod_input.source)) ||
+                 ! valid_source_op(static_cast<uint32_t>(mod_input.op)) ||
+                 ! std::isfinite(mod_input.scale)) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+// One chain: slot types, finite params, legal bindings. Also accumulates the whole-bank
+// totals the caller checks against the modulation-pool and effect-state budgets.
+bool validate_effect_chain(const EffectChainBinding& chain, bool is_master, uint32_t num_lfos,
+                           uint32_t* num_modulated, uint32_t* state_bytes)
+{
+    if (chain.num_effects > max_chain_effects) {
+        return false;
+    }
+    for (uint32_t slot = 0; slot < chain.num_effects; slot++) {
+        const EffectSlotBinding& effect = chain.effects[slot];
+        if (static_cast<uint32_t>(effect.type) >= num_effect_types) {
+            return false;
+        }
+        const uint32_t num_params = get_effect_param_floats(effect.type);
+        for (uint32_t param = 0; param < num_params; param++) {
+            const EffectParamBinding& binding = effect.bindings[param];
+            if ( ! validate_effect_param_binding(binding, is_master, num_lfos)) {
+                return false;
+            }
+            if (binding.lfo_desc_id || binding.num_inputs) {
+                (*num_modulated)++;
+            }
+        }
+        if (effect.enabled && effect.type != EffectType::none) {
+            *state_bytes += get_effect_state_bytes(effect.type);
+        }
+    }
+    return true;
+}
+
 bool validate_instrument(const Instrument& instrument)
 {
     if (instrument.layer_count < 1 || instrument.layer_count > max_layers) {
@@ -215,6 +297,25 @@ bool validate_instrument_bank(const InstrumentBank* bank)
                 return false;
             }
         }
+    }
+
+    // Effect chains: slot types, finite params, legal sources. The whole bank's modulated
+    // effect params must fit the modulation pool; its enabled-effect state must fit the
+    // device state budget.
+    uint32_t num_modulated = 0;
+    uint32_t state_bytes = 0;
+    for (uint32_t channel = 0; channel < max_channels; channel++) {
+        if ( ! validate_effect_chain(bank->channel_chains[channel], false, bank->lfos.num_allocated,
+                                     &num_modulated, &state_bytes)) {
+            return false;
+        }
+    }
+    if ( ! validate_effect_chain(bank->master_chain, true, bank->lfos.num_allocated,
+                                 &num_modulated, &state_bytes)) {
+        return false;
+    }
+    if (num_modulated > max_effect_mod_params || state_bytes > effect_state_budget) {
+        return false;
     }
 
     return true;

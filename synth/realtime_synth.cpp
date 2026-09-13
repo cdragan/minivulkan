@@ -10,6 +10,7 @@
 #include "../core/rng.h"
 #include "../core/suballoc.h"
 #include "synth_effects.h"
+#include "synth_effect_expansion.h"
 #include "synth_instrument.h"
 #include "synth_soundtrack.h"
 #include <algorithm>
@@ -33,14 +34,9 @@ namespace {
     // Vulkan command buffer used for the synth
     CommandBuffers<1> audio_cmd_buf;
 
-    // Number of samples rendered in one step.
-    // This is also how frequently LFOs and ADSR envelopes are updated.
-    // This must match workgroup geometry in compute shaders.
-    constexpr uint32_t rt_step_samples = 256;
-
     // Polyphony limits
-    constexpr uint32_t max_voices      = 64; // Max notes are playing
-    constexpr uint32_t max_oscillators = 64; // Max oscillators are playing
+    constexpr uint32_t max_voices = 64;      // Max notes are playing
+
     using Synth::max_layers;                 // Max layers (oscillators) per note
     using Synth::num_fir_taps;
 
@@ -113,6 +109,11 @@ namespace {
     using Synth::OscMode;
     using Synth::EnvelopeDescriptor;
     using Synth::InstrumentBank;
+    using Synth::SourceParam;
+    using Synth::EffectType;
+    using Synth::EffectChainBinding;
+    using Synth::EffectSlotBinding;
+    using Synth::EffectParamBinding;
     using enum Synth::ModTarget;
     using enum Synth::OscMode;
 
@@ -178,14 +179,13 @@ namespace {
     constexpr uint32_t channel_block_base = 1;
     constexpr uint32_t voice_block_base   = channel_block_base + Synth::max_channels * num_channel_roles;
     constexpr uint32_t osc_block_base     = voice_block_base + max_voices * num_voice_roles;
-    constexpr uint32_t effect_pool_base   = osc_block_base + max_oscillators * num_osc_roles;
+    constexpr uint32_t effect_pool_base   = osc_block_base + Synth::max_oscillators * num_osc_roles;
 
     // Effect-param modulation pool: a bump region holding the dest node and optional LFO-leaf node
     // for each modulated effect param.  Unlike voices, effects are configured once (not per note), so
     // a node is allocated only for a param actually modulated rather than reserving a fixed block.
-    constexpr uint32_t max_effect_mod_params = 32;
-    constexpr uint32_t effect_pool_nodes     = max_effect_mod_params * 2;  // dest + optional LFO leaf each
-    constexpr uint32_t total_params          = effect_pool_base + effect_pool_nodes;
+    constexpr uint32_t effect_pool_nodes = Synth::max_effect_mod_params * 2; // dest + optional LFO leaf each
+    constexpr uint32_t total_params      = effect_pool_base + effect_pool_nodes;
 
     constexpr uint32_t channel_param(uint32_t channel, uint32_t role)
     {
@@ -304,7 +304,7 @@ namespace {
         // synth_effect shader (binding 1); one per effect instance in a wave, rebuilt
         // and uploaded every step.  params[] holds the effect's tweakable values;
         // state_offs points at its persistent state (delay lines etc.) in the device buffer.
-        static constexpr uint32_t max_effect_param_floats = 5;
+        using Synth::max_effect_param_floats;
         struct EffectParams {
             uint32_t type;
             uint32_t sound_offs;
@@ -452,7 +452,7 @@ namespace {
             };
 
             static uint32_t spec_data[] = {
-                rt_step_samples,
+                Synth::rt_step_samples,
                 0,
                 num_fir_taps,
                 volume_adjustment_samples,
@@ -480,7 +480,7 @@ namespace {
         return true;
     }
 
-    constexpr VkDeviceSize device_buf_size = 2 * 1024 * 1024; // TODO
+    constexpr VkDeviceSize device_buf_size = Synth::effect_buffer_bytes;
 
     SubAllocator<1024> data_allocator;
 
@@ -531,7 +531,7 @@ namespace {
                                             // it, so a reused slot does not bleed the previous note.
     };
 
-    static RunningOscillator oscillators[max_oscillators];
+    static RunningOscillator oscillators[Synth::max_oscillators];
 
     // TODO Runtime instrument definition.  Hardcoded for now; an editor will
     // populate these later.  Everything is filled in init_instruments.
@@ -556,36 +556,8 @@ namespace {
     // Dedicated interleaved-stereo master output, summed from all channels
     uint32_t master_output_offs;
 
-    constexpr uint32_t max_effects_per_chain = 4;
-
-    struct EffectInstance {
-        Synth::EffectType type;
-        bool              enabled;
-        float             params[ShaderParams::max_effect_param_floats];
-        uint32_t          state_offs;   // byte offset into data_buf; 0 when the effect is stateless
-        uint16_t          src_param_id[ShaderParams::max_effect_param_floats]; // 0 = unmodulated constant
-    };
-
-    struct EffectChain {
-        uint32_t       num_effects;
-        EffectInstance effects[max_effects_per_chain];
-    };
-
-    // One effect param's modulation declaration (editor-ready static data, no runtime state).  Effects
-    // are not note-triggered, so there is no envelope: a param is base_value driven by an optional LFO
-    // and optional channel MIDI input sources.  configure_effect_param expands it onto pool nodes.
-    struct EffectParamMod {
-        uint8_t   param_index;        // which of the effect's params[] this drives
-        float     base_value;
-        uint16_t  lfo_desc_id;        // 0 = no LFO
-        SourceOp  lfo_op;
-        float     lfo_depth;
-        ModSource lfo_depth_source;   // none = constant depth
-        ModSource lfo_rate_source;    // none = the LFO's own period
-        float     lfo_rate_scale;
-        uint16_t  num_inputs;
-        ModInput  inputs[Synth::max_mod_inputs];   // channel MIDI sources only
-    };
+    using Synth::EffectChain;
+    using Synth::EffectInstance;
 
     static EffectChain channel_chains[max_mix_channels];
     static EffectChain master_chain;
@@ -594,7 +566,7 @@ namespace {
         uint32_t coeff_offs;
         uint32_t history_offs;
     };
-    FirSlot fir_slots[max_oscillators];
+    FirSlot fir_slots[Synth::max_oscillators];
 
     // Envelope desc id driving a target on a layer.  0 means no envelope.
     static uint16_t layer_envelope_id(const Instrument& instrument, ModTarget target, uint32_t layer_idx)
@@ -634,7 +606,7 @@ namespace {
         // Optional allocation: when no instrument declares a filter, leave all FIR
         // offsets 0 so no device bytes are consumed at all.
         if ( ! any_instrument_has_filter()) {
-            for (uint32_t osc_idx = 1; osc_idx < max_oscillators; osc_idx++) {
+            for (uint32_t osc_idx = 1; osc_idx < Synth::max_oscillators; osc_idx++) {
                 fir_slots[osc_idx] = { 0, 0 };
             }
             return;
@@ -643,7 +615,7 @@ namespace {
         // Every oscillator slot gets its own coeff and history buffer so any slot
         // can play a filtered note and sweep independently; slot 0 is the reserved
         // sentinel and stays unused.
-        for (uint32_t osc_idx = 1; osc_idx < max_oscillators; osc_idx++) {
+        for (uint32_t osc_idx = 1; osc_idx < Synth::max_oscillators; osc_idx++) {
             const SubAllocatorBase::Chunk coeff_chunk = data_allocator.allocate(coeff_bytes, synth_alignment);
             assert(coeff_chunk.offset + coeff_chunk.size <= device_buf_size);
             fir_slots[osc_idx].coeff_offs = static_cast<uint32_t>(coeff_chunk.offset);
@@ -652,86 +624,6 @@ namespace {
             assert(history_chunk.offset + history_chunk.size <= device_buf_size);
             fir_slots[osc_idx].history_offs = static_cast<uint32_t>(history_chunk.offset);
         }
-    }
-
-    // One-time zero-fill of the persistent device effect-state region, computed in
-    // init_effects and recorded on the first render (no command buffer exists yet at
-    // init time).  Bytes 0 means there is no state to clear.
-    uint32_t effect_state_fill_offset;
-    uint32_t effect_state_fill_bytes;
-
-    // Allocates persistent device state for one chain's enabled effects, growing the
-    // contiguous state region tracked by fill_offset / fill_bytes.
-    static void init_chain_state(EffectChain* chain, uint32_t* fill_offset, uint32_t* fill_bytes)
-    {
-        for (uint32_t effect_idx = 0; effect_idx < chain->num_effects; effect_idx++) {
-            EffectInstance& instance = chain->effects[effect_idx];
-
-            const uint32_t num_state_floats = ( ! instance.enabled || instance.type == Synth::EffectType::none)
-                                              ? 0
-                                              : Synth::get_effect_state_floats(instance.type);
-            if ( ! num_state_floats) {
-                instance.state_offs = 0;
-                continue;
-            }
-
-            const SubAllocatorBase::Chunk chunk =
-                data_allocator.allocate(num_state_floats * sizeof(float), synth_alignment);
-            assert(chunk.offset + chunk.size <= device_buf_size);
-
-            instance.state_offs = static_cast<uint32_t>(chunk.offset);
-
-            if ( ! *fill_bytes) {
-                *fill_offset = instance.state_offs;
-            }
-            *fill_bytes = static_cast<uint32_t>(chunk.offset + chunk.size) - *fill_offset;
-        }
-    }
-
-    static void init_effects()
-    {
-        // TEMP demo routing: the two mix channels run different per-channel chains and
-        // both sum into the master chain, exercising the full multi-channel mix.  All of
-        // this is scaffolding the mixer GUI will replace.  Channel 0 -> distortion then
-        // delay; channel 1 -> chorus; master -> reverb then compressor.
-
-        // Channel 0: distortion only (tanh drive, fully wet).  The feedback delay is
-        // disabled here so its repeating echo does not obscure the per-note FIR cutoff
-        // sweep during the filter listen-check.
-        channel_chains[0].num_effects = 1;
-        channel_chains[0].effects[0]  = { Synth::EffectType::distortion, true, { 5.0f, 1.0f }, 0 };
-
-        // Channel 1: a single LFO-modulated chorus.
-        channel_chains[1].num_effects = 1;
-        channel_chains[1].effects[0]  = { Synth::EffectType::chorus, true, { 1.5f, 440.0f, 0.5f }, 0 };
-
-        // Master: reverb then a gentle musical compressor.  attack/release are smoothing
-        // coefficients (closer to 1 is slower), roughly 0.2 ms attack and 46 ms release
-        // at 44100 Hz, chosen directly to avoid pulling in libc exp() on the host.
-        constexpr float compressor_threshold = 0.3f;
-        constexpr float compressor_ratio     = 4.0f;
-        constexpr float compressor_attack    = 0.9f;
-        constexpr float compressor_release   = 0.9995f;
-        constexpr float compressor_makeup    = 1.5f;
-        // TEMP demo: a low-pass FIR on the master bus whose cutoff is swept by an LFO through the
-        // modulation graph (bound in configure_effect_modulation).  params[0] = lowpass Hz -- the
-        // value here is only a fallback used if the sweep is not bound; the per-step pull overrides
-        // it each step.  params[1] = highpass Hz (0 = off).  Remove once routing is GUI-configured.
-        constexpr float master_fir_fallback_lowpass_hz = 3125.0f;  // sweep center
-        master_chain.num_effects = 3;
-        master_chain.effects[0]  = { Synth::EffectType::reverb, true, { 0.7f, 0.5f, 0.3f, 0.0f, 0.0f }, 0 };
-        master_chain.effects[1]  = { Synth::EffectType::compressor, true,
-            { compressor_threshold, compressor_ratio, compressor_attack, compressor_release, compressor_makeup }, 0 };
-        master_chain.effects[2]  = { Synth::EffectType::fir, true, { master_fir_fallback_lowpass_hz, 0.0f }, 0 };
-
-        effect_state_fill_offset = 0;
-        effect_state_fill_bytes  = 0;
-
-        for (uint32_t channel = 0; channel < Synth::num_channels; channel++) {
-            init_chain_state(&channel_chains[channel], &effect_state_fill_offset, &effect_state_fill_bytes);
-        }
-
-        init_chain_state(&master_chain, &effect_state_fill_offset, &effect_state_fill_bytes);
     }
 
     // Returns the n-th enabled, non-none effect of a chain, or nullptr.
@@ -823,12 +715,12 @@ static void init_instruments()
         // Pitch routing: channel bend folds in voice-wide on top of the per-layer vibrato.
         instr.routing[mod_pitch].base_value = 0.0f;
         instr.routing[mod_pitch].num_inputs = 1;
-        instr.routing[mod_pitch].inputs[0]  = { ModSource::pitch_bend, 1.0f, SourceOp::add };
+        instr.routing[mod_pitch].inputs[0]  = { ModSource::pitch_bend, SourceOp::add, 1.0f };
 
         // Volume routing: note velocity scales the result voice-wide.
         instr.routing[mod_volume].base_value = 0.0f;
         instr.routing[mod_volume].num_inputs = 1;
-        instr.routing[mod_volume].inputs[0]  = { ModSource::velocity, 1.0f, SourceOp::multiply };
+        instr.routing[mod_volume].inputs[0]  = { ModSource::velocity, SourceOp::multiply, 1.0f };
 
         // Panning: centered constant (no generators).
         instr.routing[mod_panning].base_value = 0.5f;
@@ -884,6 +776,48 @@ static void init_instruments()
     }
 }
 
+static uint32_t writer_alloc_node(const void* ctx);
+static uint16_t writer_resolve_source(const void* ctx, Synth::ModSource source, uint32_t channel);
+static void writer_configure_dest(const void*               ctx,
+                                  uint32_t                  node,
+                                  uint16_t                  lfo_node,
+                                  float                     base_value,
+                                  Synth::SourceOp           lfo_op,
+                                  const Synth::SourceParam* sources,
+                                  uint32_t                  num_inputs);
+static void writer_configure_lfo(const void*     ctx,
+                                 uint32_t        node,
+                                 uint16_t        lfo_desc_id,
+                                 Synth::SourceOp lfo_op,
+                                 float           lfo_depth,
+                                 uint16_t        depth_source,
+                                 uint16_t        rate_source,
+                                 float           rate_scale);
+static bool expand_effects(const InstrumentBank& candidate);
+
+// Expands a candidate bank's effect chains into the runtime: a pure preflight (state
+// placement, pool and budget checks) followed by an infallible commit. On preflight
+// failure nothing is mutated - the previously committed chains keep sounding - and the
+// error is reported. Runs at init and at every bank publish (a step boundary).
+
+static bool expand_effects(const InstrumentBank& candidate)
+{
+    static Synth::EffectExpansionPlan plan;
+    const char* error = nullptr;
+    if ( ! Synth::preflight_effect_expansion(candidate, &plan, &error)) {
+        d_printf("Effect chain expansion failed: %s\n", error);
+        return false;
+    }
+
+    reset_effect_pool();
+    const Synth::EffectNodeWriter writer = {
+        &candidate, writer_alloc_node, writer_resolve_source, writer_configure_dest, writer_configure_lfo
+    };
+    Synth::commit_effect_expansion(candidate, plan, channel_chains, &master_chain, writer);
+    return true;
+}
+
+
 static void init_oscillator_buffers()
 {
     assert(Synth::num_channels <= max_mix_channels);
@@ -891,27 +825,34 @@ static void init_oscillator_buffers()
     init_instruments();
 
     for (uint32_t channel = 0; channel < max_mix_channels; channel++) {
-        mix_channels[channel].chan_output_offs = static_cast<uint32_t>(data_allocator.allocate(sizeof(float) * rt_step_samples * 2, synth_alignment).offset);
-        mix_channels[channel].volume      = 1.0f;
-        mix_channels[channel].panning     = 0.5f;
-        mix_channels[channel].old_volume  = 1.0f;
+        mix_channels[channel].chan_output_offs =
+        static_cast<uint32_t>(data_allocator.allocate(sizeof(float) * Synth::rt_step_samples * 2, synth_alignment).offset);
+        mix_channels[channel].volume = 1.0f;
+        mix_channels[channel].panning = 0.5f;
+        mix_channels[channel].old_volume = 1.0f;
         mix_channels[channel].old_panning = 0.5f;
     }
 
-    for (uint32_t osc_idx = 0; osc_idx < max_oscillators; osc_idx++) {
-        oscillators[osc_idx].osc_output_offs = static_cast<uint32_t>(data_allocator.allocate(sizeof(float) * rt_step_samples, synth_alignment).offset);
+    for (uint32_t osc_idx = 0; osc_idx < Synth::max_oscillators; osc_idx++) {
+        oscillators[osc_idx].osc_output_offs = static_cast<uint32_t>(data_allocator.allocate(sizeof(float) * Synth::rt_step_samples, synth_alignment).offset);
     }
 
-    master_output_offs = static_cast<uint32_t>(data_allocator.allocate(sizeof(float) * rt_step_samples * 2, synth_alignment).offset);
+    master_output_offs = static_cast<uint32_t>(data_allocator.allocate(sizeof(float) * Synth::rt_step_samples * 2, synth_alignment).offset);
 
-    init_effects();
+    // Carve the effect-state region out of the device data buffer; the expansion
+    // bump-allocates within it (cumulative, never freed). The pinned alignment must hold
+    // on this device.
+    assert(synth_alignment <= Synth::effect_state_alignment);
+    const SubAllocatorBase::Chunk effect_state_region =
+    data_allocator.allocate(Synth::effect_state_budget, Synth::effect_state_alignment);
+    assert(effect_state_region.size == Synth::effect_state_budget);
+    Synth::init_effect_state_region(static_cast<uint32_t>(effect_state_region.offset));
+
+    expand_effects(synth_bank);
 
     init_fir();
 }
 
-// Expands every effect param's modulation declaration onto pool nodes; defined after resolve_source,
-// forward-declared here because init_modulation runs earlier in the file.
-static void configure_effect_modulation();
 
 static void init_modulation_sources()
 {
@@ -988,6 +929,57 @@ static void init_modulation_sources()
 
     // Auto-pan LFO: sine, ~1.5 s sweep; min/delta unused by eval_lfo_mod.
     synth_bank.lfos.entries[autopan_lfo_desc_id - 1] = { Synth::WaveType::sine_wave, 0, autopan_period_ms, 0.0f, 1.0f };
+    // Demo effect chains, seeded into the published bank (the single source of truth the
+    // editor edits and the runtime expands). Channel 0: distortion; channel 1: chorus;
+    // master: reverb, compressor, then an FIR lowpass whose cutoff the sweep LFO drives
+    // through a bank binding (base = sweep center, depth = half the sweep span).
+    {
+    EffectChainBinding& chain = synth_bank.channel_chains[0];
+    chain.num_effects = 1;
+    chain.effects[0].type = EffectType::distortion;
+    chain.effects[0].enabled = true;
+    chain.effects[0].bindings[0].base_value = 5.0f; // tanh drive
+    chain.effects[0].bindings[1].base_value = 1.0f; // fully wet
+
+    EffectChainBinding& chorus_chain = synth_bank.channel_chains[1];
+    chorus_chain.num_effects = 1;
+    chorus_chain.effects[0].type = EffectType::chorus;
+    chorus_chain.effects[0].enabled = true;
+    chorus_chain.effects[0].bindings[0].base_value = 1.5f;
+    chorus_chain.effects[0].bindings[1].base_value = 440.0f;
+    chorus_chain.effects[0].bindings[2].base_value = 0.5f;
+
+    EffectChainBinding& master = synth_bank.master_chain;
+    master.num_effects = 3;
+    master.effects[0].type = EffectType::reverb;
+    master.effects[0].enabled = true;
+    master.effects[0].bindings[0].base_value = 0.7f;
+    master.effects[0].bindings[1].base_value = 0.5f;
+    master.effects[0].bindings[2].base_value = 0.3f;
+
+    constexpr float compressor_threshold = 0.3f;
+    constexpr float compressor_ratio = 4.0f;
+    constexpr float compressor_attack = 0.9f;
+    constexpr float compressor_release = 0.9995f;
+    constexpr float compressor_makeup = 1.5f;
+    master.effects[1].type = EffectType::compressor;
+    master.effects[1].enabled = true;
+    master.effects[1].bindings[0].base_value = compressor_threshold;
+    master.effects[1].bindings[1].base_value = compressor_ratio;
+    master.effects[1].bindings[2].base_value = compressor_attack;
+    master.effects[1].bindings[3].base_value = compressor_release;
+    master.effects[1].bindings[4].base_value = compressor_makeup;
+
+    constexpr float sweep_low_hz = 250.0f;
+    constexpr float sweep_high_hz = 6000.0f;
+    master.effects[2].type = EffectType::fir;
+    master.effects[2].enabled = true;
+    master.effects[2].bindings[0].base_value = (sweep_low_hz + sweep_high_hz) * 0.5f;
+    master.effects[2].bindings[0].lfo_desc_id = master_fir_sweep_lfo_desc_id;
+    master.effects[2].bindings[0].lfo_op = SourceOp::add;
+    master.effects[2].bindings[0].lfo_depth = (sweep_high_hz - sweep_low_hz) * 0.5f;
+    master.effects[2].bindings[1].base_value = 0.0f; // highpass off
+    }
 }
 
 static void init_modulation()
@@ -1000,9 +992,6 @@ static void init_modulation()
         param_descs[channel_param(channel, chan_param_pressure)].kind  = Synth::ParamKind::external;
     }
 
-    // Expand effect-param modulation onto pool nodes (resolves channel sources, so it runs after the
-    // channel leaves above; the chains themselves were built earlier in init_effects).
-    configure_effect_modulation();
 }
 
 static bool allocate_oscillators(uint8_t*          osc_ids,
@@ -1012,7 +1001,7 @@ static bool allocate_oscillators(uint8_t*          osc_ids,
 {
     uint32_t allocated = 0;
 
-    for (uint32_t osc_idx = 1; osc_idx < max_oscillators && allocated < num_osc; osc_idx++) {
+    for (uint32_t osc_idx = 1; osc_idx < Synth::max_oscillators && allocated < num_osc; osc_idx++) {
         if (oscillators[osc_idx].osc_type[0] == WaveType::no_wave) {
             oscillators[osc_idx].voice_id    = static_cast<uint8_t>(voice_idx);
             oscillators[osc_idx].osc_type[0] = instrument.layers[allocated].osc_type[0];
@@ -1048,6 +1037,13 @@ const Synth::InstrumentBank& Synth::current_bank()
 
 void Synth::set_current_bank(const InstrumentBank& bank)
 {
+    // Preflight and commit the candidate's effect expansion BEFORE installing it: on
+    // failure the previous bank and the previously committed chains both stay intact and
+    // sounding (nothing was mutated); the failure is reported by expand_effects.
+    if ( ! expand_effects(bank)) {
+        return;
+    }
+
     synth_bank = bank;
 }
 
@@ -1061,7 +1057,7 @@ bool Synth::init_synth()
     // TODO - use project-dependent audio length
     constexpr uint32_t seconds = 1;
     constexpr uint32_t sample_size = sizeof(float);
-    constexpr VkDeviceSize output_buf_size = mstd::align_up(Synth::rt_sampling_rate * 2U * sample_size * seconds, rt_step_samples);
+    constexpr VkDeviceSize output_buf_size = mstd::align_up(Synth::rt_sampling_rate * 2U * sample_size * seconds, Synth::rt_step_samples);
     constexpr VkDeviceSize param_buf_size  = 1024 * 1024; // TODO
 
     if ( ! buffers[output_buf].allocate(Usage::host_only,
@@ -1323,6 +1319,48 @@ static uint32_t resolve_source(ModSource source, uint32_t channel, uint32_t voic
         case ModSource::pressure_combine: return voice_param(voice_idx, voice_input_pressure_combine);
         default:                          return 0;
     }
+
+
+}
+
+static uint32_t writer_alloc_node(const void*)
+{
+    const uint32_t node = allocate_effect_pool_node();
+    assert(node); // the preflight counted this node into the pool budget
+    return node;
+}
+
+static uint16_t writer_resolve_source(const void*, ModSource source, uint32_t channel)
+{
+    return static_cast<uint16_t>(resolve_source(source, channel, 0));
+}
+
+static void writer_configure_dest(const void*               ctx,
+                                  uint32_t                  node,
+                                  uint16_t                  lfo_node,
+                                  float                     base_value,
+                                  Synth::SourceOp           lfo_op,
+                                  const Synth::SourceParam* sources,
+                                  uint32_t                  num_inputs)
+{
+    parameters[node] = { };
+    Synth::configure_plain(&param_descs[node], base_value,
+    0, // effects have no envelope
+    lfo_node, lfo_op, sources, num_inputs);
+}
+
+static void writer_configure_lfo(const void*     ctx,
+                                 uint32_t        node,
+                                 uint16_t        lfo_desc_id,
+                                 Synth::SourceOp lfo_op,
+                                 float           lfo_depth,
+                                 uint16_t        depth_source,
+                                 uint16_t        rate_source,
+                                 float           rate_scale)
+{
+    const InstrumentBank& candidate = *static_cast<const InstrumentBank*>(ctx);
+    Synth::configure_lfo(&param_descs[node], candidate.lfos.entries[lfo_desc_id - 1],
+    lfo_op, lfo_depth, depth_source, rate_source, rate_scale);
 }
 
 // Expands one layer's target into its {dest, env, lfo} node triple at the layer's oscillator slot.
@@ -1393,86 +1431,6 @@ static void set_input_leaf(uint32_t node, float value)
     param_descs[node].kind      = Synth::ParamKind::external;
     parameters[node].value      = value;
     parameters[node].prev_value = value;
-}
-
-// Effects route only channel-wide MIDI sources; per-voice sources have no voice in an effect's context.
-static bool is_channel_mod_source(ModSource source)
-{
-    return source == ModSource::pitch_bend
-        || source == ModSource::mod_wheel
-        || source == ModSource::channel_pressure;
-}
-
-// Expands one effect param's modulation declaration onto pool nodes: a dest node (folded by
-// propagate_parameters) plus an LFO leaf when present, recording the dest in src_param_id so the
-// per-step pull copies its value into the param the shader reads.  channel resolves the input sources
-// (master effects pass no inputs, so channel is unused there).
-static void configure_effect_param(EffectInstance* effect, const EffectParamMod& mod, uint32_t channel)
-{
-    const uint32_t dest_node = allocate_effect_pool_node();
-    if ( ! dest_node) {
-        return;   // pool exhausted: the param keeps its constant value
-    }
-    parameters[dest_node] = { };
-
-    uint32_t lfo_node = 0;
-    if (mod.lfo_desc_id) {
-        lfo_node = allocate_effect_pool_node();
-        if ( ! lfo_node) {
-            return;
-        }
-        Synth::configure_lfo(&param_descs[lfo_node],
-                             synth_bank.lfos.entries[mod.lfo_desc_id - 1],
-                             mod.lfo_op,
-                             mod.lfo_depth,
-                             static_cast<uint16_t>(resolve_source(mod.lfo_depth_source, channel, 0)),
-                             static_cast<uint16_t>(resolve_source(mod.lfo_rate_source, channel, 0)),
-                             mod.lfo_rate_scale);
-        parameters[lfo_node] = { };   // fresh LFO phase
-    }
-
-    Synth::SourceParam sources[Synth::max_mod_inputs];
-    for (uint32_t input_idx = 0; input_idx < mod.num_inputs; input_idx++) {
-        const ModInput& input = mod.inputs[input_idx];
-        assert(is_channel_mod_source(input.source));
-        sources[input_idx] = { static_cast<uint16_t>(resolve_source(input.source, channel, 0)),
-                               input.scale, input.op };
-    }
-
-    Synth::configure_plain(&param_descs[dest_node],
-                           mod.base_value,
-                           0,   // effects have no envelope
-                           static_cast<uint16_t>(lfo_node),   // 0 when no LFO
-                           mod.lfo_op,
-                           sources,
-                           mod.num_inputs);
-
-    effect->src_param_id[mod.param_index] = static_cast<uint16_t>(dest_node);
-}
-
-static void configure_effect_modulation()
-{
-    reset_effect_pool();
-
-    // TEMP demo: sweep the master FIR lowpass cutoff with a 4 s triangle LFO (250..6000 Hz), now
-    // through the modulation graph instead of a host-side hack.  Removed once effect modulation is
-    // GUI-configured.  The sweep is linear in Hz (the LFO is linear), where the old hack was
-    // exponential -- close enough for demo scaffolding.
-    constexpr float sweep_low_hz  = 250.0f;
-    constexpr float sweep_high_hz = 6000.0f;
-
-    for (uint32_t effect_idx = 0; effect_idx < master_chain.num_effects; effect_idx++) {
-        EffectInstance& instance = master_chain.effects[effect_idx];
-        if (instance.enabled && instance.type == Synth::EffectType::fir) {
-            EffectParamMod mod   = { };
-            mod.param_index      = 0;   // FIR lowpass cutoff Hz
-            mod.base_value       = (sweep_low_hz + sweep_high_hz) * 0.5f;
-            mod.lfo_desc_id      = master_fir_sweep_lfo_desc_id;
-            mod.lfo_op           = SourceOp::add;
-            mod.lfo_depth        = (sweep_high_hz - sweep_low_hz) * 0.5f;
-            configure_effect_param(&instance, mod, 0);   // master: LFO only
-        }
-    }
 }
 
 static void process_note_on(uint32_t delta_samples, const DispatchedMidiEvent& event)
@@ -1855,7 +1813,7 @@ static void pull_effect_param_chain(EffectChain* chain)
 
 static void pull_effect_params()
 {
-    for (uint32_t channel = 0; channel < Synth::num_channels; channel++) {
+    for (uint32_t channel = 0; channel < max_mix_channels; channel++) {
         pull_effect_param_chain(&channel_chains[channel]);
     }
     pull_effect_param_chain(&master_chain);
@@ -1906,7 +1864,7 @@ static void advance_parameters()
                                       : 0;
             parameters[node_idx].value = Synth::eval_lfo_mod(gen.lfo.lfo,
                                                              parameters[node_idx].lfo_tick,
-                                                             rt_step_samples,
+                                                             Synth::rt_step_samples,
                                                              Synth::rt_sampling_rate,
                                                              period,
                                                              depth,
@@ -1925,7 +1883,7 @@ static void update_modulation()
     // Resolve each live oscillator's values from the modulation graph.
     constexpr float silence_threshold = 0.0005f;
 
-    for (uint32_t osc_idx = 1; osc_idx < max_oscillators; osc_idx++) {
+    for (uint32_t osc_idx = 1; osc_idx < Synth::max_oscillators; osc_idx++) {
         RunningOscillator& osc = oscillators[osc_idx];
         if (osc.osc_type[0] == WaveType::no_wave) {
             continue;
@@ -2025,13 +1983,13 @@ static uint32_t count_effect_fir(const EffectChain& chain)
 static void compute_fir_coefficients()
 {
     uint32_t num_active_filters = 0;
-    for (uint32_t osc_idx = 1; osc_idx < max_oscillators; osc_idx++) {
+    for (uint32_t osc_idx = 1; osc_idx < Synth::max_oscillators; osc_idx++) {
         if (oscillators[osc_idx].osc_type[0] != WaveType::no_wave && oscillators[osc_idx].fir_taps_offs) {
             ++num_active_filters;
         }
     }
 
-    for (uint32_t chan_idx = 0; chan_idx < Synth::num_channels; chan_idx++) {
+    for (uint32_t chan_idx = 0; chan_idx < max_mix_channels; chan_idx++) {
         num_active_filters += count_effect_fir(channel_chains[chan_idx]);
     }
     num_active_filters += count_effect_fir(master_chain);
@@ -2044,7 +2002,7 @@ static void compute_fir_coefficients()
     const uint32_t param_offs = static_cast<uint32_t>(param_allocator.allocate(param_size, synth_alignment).offset);
 
     uint32_t cur_param_offs = param_offs;
-    for (uint32_t osc_idx = 1; osc_idx < max_oscillators; osc_idx++) {
+    for (uint32_t osc_idx = 1; osc_idx < Synth::max_oscillators; osc_idx++) {
         const RunningOscillator& osc = oscillators[osc_idx];
         if (osc.osc_type[0] == WaveType::no_wave || ! osc.fir_taps_offs) {
             continue;
@@ -2058,7 +2016,7 @@ static void compute_fir_coefficients()
         cur_param_offs += static_cast<uint32_t>(sizeof(ShaderParams::FIRCoeff));
     }
 
-    for (uint32_t chan_idx = 0; chan_idx < Synth::num_channels; chan_idx++) {
+    for (uint32_t chan_idx = 0; chan_idx < max_mix_channels; chan_idx++) {
         set_effect_fir_coeffs(channel_chains[chan_idx], &cur_param_offs);
     }
     set_effect_fir_coeffs(master_chain, &cur_param_offs);
@@ -2091,25 +2049,26 @@ static void render_audio_step()
     }
 
     const uint32_t start_samples = rendered_samples;
-    const uint32_t end_samples   = start_samples + rt_step_samples;
+    const uint32_t end_samples   = start_samples + Synth::rt_step_samples;
 
     // TODO move this to the end or outside of this function
     rendered_samples = end_samples;
 
-    // Zero the persistent device effect-state region once.  No command buffer exists
-    // at init time, so the fill is deferred to the first render here, mirroring the
-    // silence fill below (TRANSFER stage).
-    static bool effect_state_cleared = false;
-    if ( ! effect_state_cleared && effect_state_fill_bytes) {
+    // Zero the effect-state ranges freshly allocated since the last step (init or a bank
+    // publish). A range must be cleared before its effect's first shader use, so this runs
+    // before the effect dispatches (TRANSFER stage, no command buffer existed at init).
+    const Synth::EffectClearList effect_clears = Synth::take_effect_clear_ranges();
+    if (effect_clears.count) {
         memory_barrier(VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
 
-        vkCmdFillBuffer(audio_cmd_buf,
-                        buffers[data_buf].get_buffer(),
-                        effect_state_fill_offset,
-                        effect_state_fill_bytes,
-                        0); // data
+        for (uint32_t range_idx = 0; range_idx < effect_clears.count; range_idx++) {
+            vkCmdFillBuffer(audio_cmd_buf,
+                            buffers[data_buf].get_buffer(),
+                            effect_clears.ranges[range_idx].offset,
+                            effect_clears.ranges[range_idx].bytes,
+                            0); // data
+        }
     }
-    effect_state_cleared = true;
 
     process_events(start_samples, end_samples);
 
@@ -2137,7 +2096,7 @@ static void render_audio_step()
 
     // Clear FIR history buffer for new notes
     bool any_history_cleared = false;
-    for (uint32_t osc_idx = 1; osc_idx < max_oscillators; osc_idx++) {
+    for (uint32_t osc_idx = 1; osc_idx < Synth::max_oscillators; osc_idx++) {
         if ( ! oscillators[osc_idx].clear_fir_hist) {
             continue;
         }
@@ -2188,7 +2147,7 @@ static void render_audio_step()
         vkCmdFillBuffer(audio_cmd_buf,
                         buffers[data_buf].get_buffer(),
                         master_output_offs,
-                        sizeof(float) * 2 * rt_step_samples,
+                        sizeof(float) * 2 * Synth::rt_step_samples,
                         0); // data
         return;
     }
@@ -2206,11 +2165,11 @@ static void render_audio_step()
         ShaderParams::Oscillator& param = get_param<ShaderParams::Oscillator>(cur_param_offs);
 
         const float note_freq   = Synth::note_to_frequency(static_cast<int>(oscillator.note), oscillator.pitch, oscillator.freq_mult);
-        const float phase_step  = (static_cast<float>(rt_step_samples) * note_freq) / static_cast<float>(Synth::rt_sampling_rate);
+        const float phase_step  = (static_cast<float>(Synth::rt_step_samples) * note_freq) / static_cast<float>(Synth::rt_sampling_rate);
 
         param.out_sound_offs  = oscillator.osc_output_offs / 4;
         param.phase           = oscillator.phase;
-        param.phase_step      = phase_step / static_cast<float>(rt_step_samples);
+        param.phase_step      = phase_step / static_cast<float>(Synth::rt_step_samples);
         param.osc_type[0]     = static_cast<uint32_t>(oscillator.osc_type[0]);
         param.osc_type[1]     = static_cast<uint32_t>(oscillator.osc_type[1]);
         param.duty[0]         = oscillator.duty[0];
@@ -2227,7 +2186,7 @@ static void render_audio_step()
         // the sync ratio).
         const float mod_phase_step = phase_step * oscillator.mod_ratio;
         param.mod_phase       = oscillator.mod_phase;
-        param.mod_phase_step  = mod_phase_step / static_cast<float>(rt_step_samples);
+        param.mod_phase_step  = mod_phase_step / static_cast<float>(Synth::rt_step_samples);
         param.fir_memory_offs = oscillator.fir_memory_offs / 4;
         param.taps_offs       = oscillator.fir_taps_offs   / 4;
 
@@ -2409,7 +2368,7 @@ void prepare_copy_audio_step_to_host<int16_t, true>(uint32_t offset)
     static const PushDescriptorInfo push_out_data = { output_16i_pipe, 0, 0, data_buf, VK_WHOLE_SIZE };
     push_descriptor(push_out_data, 0);
 
-    static const PushDescriptorInfo push_out_output = { output_16i_pipe, 1, 0, output_buf, sizeof(int16_t) * 2 * rt_step_samples };
+    static const PushDescriptorInfo push_out_output = { output_16i_pipe, 1, 0, output_buf, sizeof(int16_t) * 2 * Synth::rt_step_samples };
     push_descriptor(push_out_output, offset);
 
     const ShaderParams::OutputPushConst push = { master_output_offs / 4 };
@@ -2434,7 +2393,7 @@ void prepare_copy_audio_step_to_host<float, true>(uint32_t offset)
     static const PushDescriptorInfo push_out_data = { output_32fi_pipe, 0, 0, data_buf, VK_WHOLE_SIZE };
     push_descriptor(push_out_data, 0);
 
-    static const PushDescriptorInfo push_out_output = { output_32fi_pipe, 1, 0, output_buf, sizeof(float) * 2 * rt_step_samples };
+    static const PushDescriptorInfo push_out_output = { output_32fi_pipe, 1, 0, output_buf, sizeof(float) * 2 * Synth::rt_step_samples };
     push_descriptor(push_out_output, offset);
 
     const ShaderParams::OutputPushConst push = { master_output_offs / 4 };
@@ -2461,10 +2420,10 @@ void prepare_copy_audio_step_to_host<float, false>(uint32_t offset)
     static const PushDescriptorInfo push_out_data = { output_32f_pipe, 0, 0, data_buf, VK_WHOLE_SIZE };
     push_descriptor(push_out_data, 0);
 
-    static const PushDescriptorInfo push_out_output0 = { output_32f_pipe, 1, 0, output_buf, sizeof(float) * rt_step_samples };
+    static const PushDescriptorInfo push_out_output0 = { output_32f_pipe, 1, 0, output_buf, sizeof(float) * Synth::rt_step_samples };
     push_descriptor(push_out_output0, offset);
 
-    static const PushDescriptorInfo push_out_output1 = { output_32f_pipe, 1, 1, output_buf, sizeof(float) * rt_step_samples };
+    static const PushDescriptorInfo push_out_output1 = { output_32f_pipe, 1, 1, output_buf, sizeof(float) * Synth::rt_step_samples };
     push_descriptor(push_out_output1, other_chan_offs);
 
     const ShaderParams::OutputPushConst push = { master_output_offs / 4 };
@@ -2480,14 +2439,14 @@ void prepare_copy_audio_step_to_host<float, false>(uint32_t offset)
 template<typename T, bool interleaved>
 static bool render_audio(uint32_t num_samples)
 {
-    assert(num_samples % rt_step_samples == 0 && num_samples > 0);
+    assert(num_samples % Synth::rt_step_samples == 0 && num_samples > 0);
 
     if ( ! reset_and_begin_command_buffer(audio_cmd_buf))
         return false;
 
     param_allocator.init(static_cast<uint32_t>(buffers[param_buf].size()));
 
-    for (uint32_t offset = 0; offset < num_samples; offset += rt_step_samples) {
+    for (uint32_t offset = 0; offset < num_samples; offset += Synth::rt_step_samples) {
         render_audio_step();
 
         memory_barrier(VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
@@ -2509,7 +2468,7 @@ static bool render_audio(uint32_t num_samples)
 
 constexpr uint32_t audio_ring_frames      = Synth::rt_sampling_rate;
 constexpr uint32_t audio_lead_frames      = Synth::rt_sampling_rate / 50;
-constexpr uint32_t audio_max_batch_frames = rt_step_samples * 16;
+constexpr uint32_t audio_max_batch_frames = Synth::rt_step_samples * 16;
 
 // Ring buffer holding rendered sound in the platform's output format.  Sized for either
 // channel layout: two channels of audio_ring_frames frames.
@@ -2590,7 +2549,7 @@ bool Synth::produce_audio_batch()
     }
 
     // Refill back toward the lead in one submit (whole steps), capped per batch.
-    uint32_t to_render = mstd::align_up(audio_lead_frames - available, rt_step_samples);
+    uint32_t to_render = mstd::align_up(audio_lead_frames - available, Synth::rt_step_samples);
     if (to_render > audio_max_batch_frames) {
         to_render = audio_max_batch_frames;
     }

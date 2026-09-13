@@ -3,6 +3,7 @@
 
 #include "synth_parameters.h"
 #include "synth_effects.h"
+#include "synth_effect_expansion.h"
 #include "synth_instrument.h"
 #include "../sculptor/sculptor_instr_bank.h"
 #include "synth_serialize.h"
@@ -30,6 +31,66 @@ static bool approx(float left, float right, float eps)
     }
     return diff <= eps;
 }
+
+namespace {
+
+constexpr uint32_t fake_region_base = 8192;
+
+struct FakeWriter {
+    uint32_t next_node;
+    uint32_t dest_count;
+    uint32_t lfo_count;
+    uint16_t last_dest_node;
+    uint16_t last_dest_lfo_node;
+};
+
+uint32_t fake_alloc_node(const void* ctx)
+{
+    FakeWriter& writer = *static_cast<FakeWriter*>(const_cast<void*>(ctx));
+    return writer.next_node++;
+}
+
+uint16_t fake_resolve_source(const void*, Synth::ModSource, uint32_t)
+{
+    return 77; // arbitrary concrete node id
+}
+
+void fake_configure_dest(const void* ctx, uint32_t node, uint16_t lfo_node, float,
+        Synth::SourceOp, const Synth::SourceParam*, uint32_t)
+{
+    FakeWriter& writer = *static_cast<FakeWriter*>(const_cast<void*>(ctx));
+    writer.dest_count++;
+    writer.last_dest_node = static_cast<uint16_t>(node);
+    writer.last_dest_lfo_node = lfo_node;
+}
+
+void fake_configure_lfo(const void* ctx, uint32_t, uint16_t, Synth::SourceOp, float, uint16_t, uint16_t, float)
+{
+    FakeWriter& writer = *static_cast<FakeWriter*>(const_cast<void*>(ctx));
+    writer.lfo_count++;
+}
+
+const Synth::EffectNodeWriter fake_writer_binding(FakeWriter& writer)
+{
+    const Synth::EffectNodeWriter result = {
+        &writer, fake_alloc_node, fake_resolve_source, fake_configure_dest, fake_configure_lfo
+    };
+    return result;
+}
+
+Synth::EffectSlotBinding* enabled_effect(Synth::InstrumentBank& bank, uint32_t channel, uint32_t slot,
+        Synth::EffectType type)
+{
+    Synth::EffectChainBinding& chain = (channel < Synth::max_channels)
+                                     ? bank.channel_chains[channel]
+                                     : bank.master_chain;
+    chain.num_effects = static_cast<uint8_t>(slot + 1);
+    chain.effects[slot].type = type;
+    chain.effects[slot].enabled = true;
+    return &chain.effects[slot];
+}
+
+} // namespace
 
 int main()
 {
@@ -1130,6 +1191,497 @@ int main()
         bank.instruments.entries[0].routing[0].inputs[0].op = static_cast<Synth::SourceOp>(7);
         expect_invalid(bank);
     }
+
+    // ---- Effect chains in the bank (schema, validation, codec) ----
+
+    TEST(Synth::get_effect_state_bytes(Synth::EffectType::delay) == 353024); // 88201 floats, 256-aligned
+
+    // A chain with one enabled delay and an LFO-driven param passes validation.
+    {
+        static Synth::InstrumentBank bank;
+        make_valid_bank(bank);
+        Synth::EffectChainBinding& chain = bank.channel_chains[0];
+        chain.num_effects = 1;
+        chain.effects[0].type = Synth::EffectType::delay;
+        chain.effects[0].enabled = true;
+        chain.effects[0].bindings[0].base_value = 250.0f;
+        chain.effects[0].bindings[0].lfo_desc_id = 1; // make_valid_bank allocated one LFO
+        chain.effects[0].bindings[0].lfo_op = Synth::SourceOp::add;
+        chain.effects[0].bindings[0].lfo_depth = 100.0f;
+        TEST(Synth::validate_instrument_bank(&bank));
+    }
+    {
+        static Synth::InstrumentBank bank;
+        make_valid_bank(bank);
+        bank.channel_chains[0].num_effects = 1;
+        bank.channel_chains[0].effects[0].type = Synth::EffectType::num_types; // invalid type
+        expect_invalid(bank);
+    }
+    {
+        static Synth::InstrumentBank bank;
+        make_valid_bank(bank);
+        bank.channel_chains[0].num_effects = Synth::max_chain_effects + 1; // over capacity
+        expect_invalid(bank);
+    }
+    {
+        static Synth::InstrumentBank bank;
+        make_valid_bank(bank);
+        bank.channel_chains[0].num_effects = 1;
+        bank.channel_chains[0].effects[0].type = Synth::EffectType::delay;
+        bank.channel_chains[0].effects[0].bindings[0].lfo_desc_id = 9; // dangling LFO ref
+        expect_invalid(bank);
+    }
+    {
+        static Synth::InstrumentBank bank;
+        make_valid_bank(bank);
+        bank.master_chain.num_effects = 1;
+        bank.master_chain.effects[0].type = Synth::EffectType::delay;
+        bank.master_chain.effects[0].bindings[0].num_inputs = 1; // master chain: no MIDI inputs
+        expect_invalid(bank);
+    }
+    {
+        static Synth::InstrumentBank bank;
+        make_valid_bank(bank);
+        bank.master_chain.num_effects = 1;
+        bank.master_chain.effects[0].type = Synth::EffectType::delay;
+        bank.master_chain.effects[0].bindings[0].lfo_desc_id = 1;
+        bank.master_chain.effects[0].bindings[0].lfo_depth_source = Synth::ModSource::pitch_bend; // master: LFO-only
+        expect_invalid(bank);
+    }
+    {
+        static Synth::InstrumentBank bank;
+        make_valid_bank(bank);
+        bank.channel_chains[0].num_effects = 1;
+        bank.channel_chains[0].effects[0].type = Synth::EffectType::delay;
+        bank.channel_chains[0].effects[0].bindings[0].num_inputs = 1;
+        bank.channel_chains[0].effects[0].bindings[0].inputs[0].source = Synth::ModSource::velocity; // per-note role
+        expect_invalid(bank);
+    }
+    {
+        static Synth::InstrumentBank bank;
+        make_valid_bank(bank);
+        bank.channel_chains[0].num_effects = 1;
+        bank.channel_chains[0].effects[0].type = Synth::EffectType::delay;
+        bank.channel_chains[0].effects[0].bindings[0].num_inputs = Synth::max_mod_inputs + 1;
+        expect_invalid(bank);
+    }
+    {
+        static Synth::InstrumentBank bank;
+        make_valid_bank(bank);
+        bank.channel_chains[0].num_effects = 1;
+        bank.channel_chains[0].effects[0].type = Synth::EffectType::delay;
+        bank.channel_chains[0].effects[0].bindings[0].base_value = NAN;
+        expect_invalid(bank);
+    }
+    {
+        static Synth::InstrumentBank bank;
+        make_valid_bank(bank);
+        bank.channel_chains[0].num_effects = 1;
+        bank.channel_chains[0].effects[0].type = Synth::EffectType::delay;
+        bank.channel_chains[0].effects[0].bindings[0].num_inputs = 1;
+        bank.channel_chains[0].effects[0].bindings[0].inputs[0].source = Synth::ModSource::mod_wheel;
+        bank.channel_chains[0].effects[0].bindings[0].inputs[0].scale = INFINITY;
+        expect_invalid(bank);
+    }
+    {
+        static Synth::InstrumentBank bank;
+        make_valid_bank(bank);
+        bank.master_chain.num_effects = Synth::max_chain_effects; // 4 delays: exactly the state budget
+        for (uint32_t slot = 0; slot < Synth::max_chain_effects; slot++) {
+            bank.master_chain.effects[slot].type = Synth::EffectType::delay;
+            bank.master_chain.effects[slot].enabled = true;
+        }
+        TEST(Synth::validate_instrument_bank(&bank));
+    }
+    {
+        static Synth::InstrumentBank bank;
+        make_valid_bank(bank);
+        bank.master_chain.num_effects = Synth::max_chain_effects;
+        for (uint32_t slot = 0; slot < Synth::max_chain_effects; slot++) {
+            bank.master_chain.effects[slot].type = Synth::EffectType::delay;
+            bank.master_chain.effects[slot].enabled = true;
+        }
+        bank.channel_chains[0].num_effects = 1; // 5th delay: over the whole-bank state budget
+        bank.channel_chains[0].effects[0].type = Synth::EffectType::delay;
+        bank.channel_chains[0].effects[0].enabled = true;
+        expect_invalid(bank);
+    }
+    {
+        // Exactly 32 modulated effect params pass; one more is rejected.
+        static Synth::InstrumentBank bank;
+        make_valid_bank(bank);
+        uint32_t num_modulated = 0;
+        for (uint32_t channel = 0; channel < Synth::max_channels && num_modulated < 32; channel++) {
+            Synth::EffectChainBinding& chain = bank.channel_chains[channel];
+            for (uint32_t slot = 0; slot < Synth::max_chain_effects && num_modulated < 32; slot++) {
+                chain.num_effects = static_cast<uint8_t>(slot + 1);
+                chain.effects[slot].type = Synth::EffectType::distortion; // 2 params, no state
+                for (uint32_t param = 0; param < 2 && num_modulated < 32; param++) {
+                    chain.effects[slot].bindings[param].lfo_desc_id = 1;
+                    num_modulated++;
+                }
+            }
+        }
+        TEST(num_modulated == 32);
+        TEST(Synth::validate_instrument_bank(&bank));
+        bank.channel_chains[15].num_effects = Synth::max_chain_effects;
+        bank.channel_chains[15].effects[3].type = Synth::EffectType::distortion;
+        bank.channel_chains[15].effects[3].bindings[1].lfo_desc_id = 1; // 33rd modulated param
+        expect_invalid(bank);
+    }
+
+    // Effect chain data round-trips through the codec byte-exactly.
+    {
+        static Synth::InstrumentBank bank;
+        make_valid_bank(bank);
+        bank.channel_chains[0].num_effects = 2;
+        bank.channel_chains[0].effects[0].type = Synth::EffectType::delay;
+        bank.channel_chains[0].effects[0].enabled = true;
+        bank.channel_chains[0].effects[0].bindings[0].base_value = 300.0f;
+        bank.channel_chains[0].effects[0].bindings[0].lfo_desc_id = 1;
+        bank.channel_chains[0].effects[0].bindings[0].lfo_depth = 50.0f;
+        bank.channel_chains[0].effects[1].type = Synth::EffectType::chorus;
+        bank.channel_chains[0].effects[1].bindings[1].num_inputs = 1;
+        bank.channel_chains[0].effects[1].bindings[1].inputs[0].source = Synth::ModSource::mod_wheel;
+        bank.channel_chains[0].effects[1].bindings[1].inputs[0].op = Synth::SourceOp::multiply;
+        bank.channel_chains[0].effects[1].bindings[1].inputs[0].scale = 0.5f;
+        bank.master_chain.num_effects = 1;
+        bank.master_chain.effects[0].type = Synth::EffectType::reverb;
+        bank.master_chain.effects[0].enabled = true;
+        bank.master_chain.effects[0].bindings[0].base_value = 0.25f;
+
+        static uint8_t blob[sizeof(Synth::InstrumentBank) + 64];
+        const uint32_t n = Synth::encode_instrument_bank(&bank, blob, sizeof(blob));
+        TEST(n > 0);
+        static Synth::InstrumentBank restored;
+        memset(&restored, 0x5A, sizeof(restored));
+        TEST(Synth::decode_instrument_bank(blob, n, &restored));
+        TEST(memcmp(&restored, &bank, sizeof(bank)) == 0);
+    }
+
+    // ---- Effect expansion seam: preflight/commit transaction over a fake node writer ----
+
+    // A stateful chain expands onto pool nodes with state at the region base, one clear range.
+    {
+        static Synth::InstrumentBank bank;
+        make_valid_bank(bank);
+        Synth::EffectSlotBinding* const delay = enabled_effect(bank, 0, 0, Synth::EffectType::delay);
+        delay->bindings[0].base_value = 300.0f;
+        delay->bindings[0].lfo_desc_id = 1;
+        delay->bindings[0].lfo_depth = 50.0f;
+
+        Synth::init_effect_state_region(fake_region_base);
+        static Synth::EffectExpansionPlan plan;
+        const char* error = nullptr;
+        TEST(Synth::preflight_effect_expansion(bank, &plan, &error));
+        TEST(plan.slots[0][0].state_offs == fake_region_base);
+        TEST(plan.slots[0][0].needs_clear);
+        TEST(plan.slots[0][0].allocated_for == Synth::EffectType::delay);
+        TEST(plan.num_nodes == 2); // dest + LFO leaf
+        TEST(plan.consumed_bytes == Synth::get_effect_state_bytes(Synth::EffectType::delay));
+
+        static Synth::EffectChain chains[Synth::max_channels];
+        static Synth::EffectChain master;
+        FakeWriter writer = { 50, 0, 0, 0, 0 };
+        Synth::commit_effect_expansion(bank, plan, chains, &master, fake_writer_binding(writer));
+        TEST(chains[0].num_effects == 1);
+        TEST(chains[0].effects[0].type == Synth::EffectType::delay);
+        TEST(chains[0].effects[0].enabled);
+        TEST(chains[0].effects[0].params[0] == 300.0f);
+        TEST(chains[0].effects[0].state_offs == fake_region_base);
+        TEST(chains[0].effects[0].src_param_id[0] == 50); // dest node allocated first
+        TEST(writer.dest_count == 1 && writer.lfo_count == 1);
+        TEST(writer.last_dest_lfo_node == 51); // LFO leaf allocated second
+
+        const Synth::EffectClearList clears = Synth::take_effect_clear_ranges();
+        TEST(clears.count == 1);
+        TEST(clears.ranges[0].offset == fake_region_base);
+        TEST(clears.ranges[0].bytes == Synth::get_effect_state_bytes(Synth::EffectType::delay));
+        TEST(Synth::take_effect_clear_ranges().count == 0); // consumed once
+    }
+    // An unchanged slot keeps its state offset and emits no clear; a type change re-allocates.
+    {
+        static Synth::InstrumentBank bank;
+        make_valid_bank(bank);
+        enabled_effect(bank, 0, 0, Synth::EffectType::delay);
+
+        Synth::init_effect_state_region(fake_region_base);
+        static Synth::EffectExpansionPlan plan;
+        const char* error = nullptr;
+        TEST(Synth::preflight_effect_expansion(bank, &plan, &error));
+        static Synth::EffectChain chains[Synth::max_channels];
+        static Synth::EffectChain master;
+        FakeWriter writer = { 1, 0, 0, 0, 0 };
+        Synth::commit_effect_expansion(bank, plan, chains, &master, fake_writer_binding(writer));
+        (void)Synth::take_effect_clear_ranges();
+
+        // Same effect: offset preserved, nothing to clear, no new consumption.
+        TEST(Synth::preflight_effect_expansion(bank, &plan, &error));
+        TEST(plan.slots[0][0].state_offs == fake_region_base);
+        TEST( ! plan.slots[0][0].needs_clear);
+        TEST(plan.consumed_bytes == Synth::get_effect_state_bytes(Synth::EffectType::delay));
+        Synth::commit_effect_expansion(bank, plan, chains, &master, fake_writer_binding(writer));
+        TEST(Synth::take_effect_clear_ranges().count == 0);
+
+        // Type change: fresh allocation at the bump position, cleared before first use.
+        enabled_effect(bank, 0, 0, Synth::EffectType::chorus);
+        TEST(Synth::preflight_effect_expansion(bank, &plan, &error));
+        const uint32_t delay_bytes = Synth::get_effect_state_bytes(Synth::EffectType::delay);
+        TEST(plan.slots[0][0].state_offs == fake_region_base + delay_bytes);
+        TEST(plan.slots[0][0].needs_clear);
+        TEST(plan.consumed_bytes == delay_bytes + Synth::get_effect_state_bytes(Synth::EffectType::chorus));
+    }
+    // Over-budget and over-pool preflights fail without touching committed state.
+    {
+        static Synth::InstrumentBank bank;
+        make_valid_bank(bank);
+        Synth::init_effect_state_region(fake_region_base);
+        static Synth::EffectExpansionPlan plan;
+        const char* error = nullptr;
+
+        // Master: 4 delays - exactly the worst chain, fits the budget.
+        for (uint32_t slot = 0; slot < Synth::max_chain_effects; slot++) {
+            enabled_effect(bank, Synth::max_channels, slot, Synth::EffectType::delay);
+        }
+        TEST(Synth::preflight_effect_expansion(bank, &plan, &error));
+        static Synth::EffectChain chains[Synth::max_channels];
+        static Synth::EffectChain master;
+        FakeWriter writer = { 1, 0, 0, 0, 0 };
+        Synth::commit_effect_expansion(bank, plan, chains, &master, fake_writer_binding(writer));
+        (void)Synth::take_effect_clear_ranges();
+        const uint32_t committed_consumed = plan.consumed_bytes;
+
+        // A 5th delay anywhere exceeds the budget: preflight fails, nothing mutates.
+        enabled_effect(bank, 0, 0, Synth::EffectType::delay);
+        TEST( ! Synth::preflight_effect_expansion(bank, &plan, &error));
+        TEST(plan.consumed_bytes == committed_consumed); // plan untouched by the failed run
+        TEST(Synth::take_effect_clear_ranges().count == 0); // no clears recorded
+
+        // The committed configuration (5th delay dropped again) still re-preflights
+        // cleanly via the preservation path.
+        bank.channel_chains[0].num_effects = 0;
+        TEST(Synth::preflight_effect_expansion(bank, &plan, &error));
+        TEST(plan.consumed_bytes == committed_consumed);
+
+        // 33 modulated params exceed the modulation pool: rejected wherever they sit.
+        Synth::init_effect_state_region(fake_region_base);
+        static Synth::InstrumentBank pool_bank;
+        make_valid_bank(pool_bank);
+        uint32_t num_modulated = 0;
+        for (uint32_t channel = 0; channel < Synth::max_channels && num_modulated < 33; channel++) {
+            Synth::EffectChainBinding& chain = pool_bank.channel_chains[channel];
+            chain.num_effects = 4;
+            for (uint32_t slot = 0; slot < 4 && num_modulated < 33; slot++) {
+                chain.effects[slot].type = Synth::EffectType::distortion; // 2 params, no state
+                for (uint32_t param = 0; param < 2 && num_modulated < 33; param++) {
+                    chain.effects[slot].bindings[param].lfo_desc_id = 1;
+                    num_modulated++;
+                }
+            }
+        }
+        TEST(num_modulated == 33);
+        TEST( ! Synth::preflight_effect_expansion(pool_bank, &plan, &error));
+
+        // An input-only binding (no LFO) costs one node, not two.
+        Synth::init_effect_state_region(fake_region_base);
+        static Synth::InstrumentBank input_bank;
+        make_valid_bank(input_bank);
+        Synth::EffectSlotBinding* const delay = enabled_effect(input_bank, 0, 0, Synth::EffectType::delay);
+        delay->bindings[0].num_inputs = 1;
+        delay->bindings[0].inputs[0].source = Synth::ModSource::mod_wheel;
+        TEST(Synth::preflight_effect_expansion(input_bank, &plan, &error));
+        TEST(plan.num_nodes == 1);
+    }
+    // A shrinking chain leaves no stale instances behind.
+    {
+        static Synth::InstrumentBank bank;
+        make_valid_bank(bank);
+        enabled_effect(bank, 0, 0, Synth::EffectType::delay);
+        enabled_effect(bank, 0, 1, Synth::EffectType::chorus);
+
+        Synth::init_effect_state_region(fake_region_base);
+        static Synth::EffectExpansionPlan plan;
+        const char* error = nullptr;
+        TEST(Synth::preflight_effect_expansion(bank, &plan, &error));
+        static Synth::EffectChain chains[Synth::max_channels];
+        static Synth::EffectChain master;
+        FakeWriter writer = { 1, 0, 0, 0, 0 };
+        Synth::commit_effect_expansion(bank, plan, chains, &master, fake_writer_binding(writer));
+        TEST(chains[0].num_effects == 2);
+
+        bank.channel_chains[0].num_effects = 1;
+        TEST(Synth::preflight_effect_expansion(bank, &plan, &error));
+        Synth::commit_effect_expansion(bank, plan, chains, &master, fake_writer_binding(writer));
+        TEST(chains[0].num_effects == 1);
+        TEST(chains[0].effects[1].type == Synth::EffectType::none);
+        TEST( ! chains[0].effects[1].enabled);
+        TEST(chains[0].effects[1].state_offs == 0);
+        TEST(chains[0].effects[1].src_param_id[0] == 0);
+    }
+
+    // Stateless effects (distortion) claim no state, no offset and no clear range.
+    {
+        static Synth::InstrumentBank bank;
+        make_valid_bank(bank);
+        Synth::EffectSlotBinding* const distortion = enabled_effect(bank, 0, 0, Synth::EffectType::distortion);
+        distortion->bindings[0].base_value = 5.0f;
+
+        Synth::init_effect_state_region(fake_region_base);
+        static Synth::EffectExpansionPlan plan;
+        const char* error = nullptr;
+        TEST(Synth::preflight_effect_expansion(bank, &plan, &error));
+        TEST(plan.slots[0][0].state_offs == 0);
+        TEST( ! plan.slots[0][0].needs_clear);
+        TEST(plan.consumed_bytes == 0);
+
+        static Synth::EffectChain chains[Synth::max_channels];
+        static Synth::EffectChain master;
+        FakeWriter writer = { 1, 0, 0, 0, 0 };
+        Synth::commit_effect_expansion(bank, plan, chains, &master, fake_writer_binding(writer));
+        TEST(chains[0].effects[0].enabled);
+        TEST(chains[0].effects[0].state_offs == 0);
+        TEST(Synth::take_effect_clear_ranges().count == 0);
+    }
+    // A preflight that fails validation leaves the caller's plan byte-identical. The commit
+    // is only reachable after a passing preflight (set_current_bank returns early on
+    // failure), so a rejected bank can never reach the writer or the chains.
+    {
+        static Synth::InstrumentBank bank;
+        make_valid_bank(bank);
+        Synth::EffectSlotBinding* const delay = enabled_effect(bank, 0, 0, Synth::EffectType::delay);
+        delay->bindings[0].num_inputs = Synth::max_mod_inputs + 1; // over the input bound
+
+        Synth::init_effect_state_region(fake_region_base);
+        static Synth::EffectExpansionPlan plan;
+        plan.consumed_bytes = 0xABCD;
+        const char* error = nullptr;
+        TEST( ! Synth::preflight_effect_expansion(bank, &plan, &error));
+        TEST(plan.consumed_bytes == 0xABCD); // untouched by the failed run
+        TEST(Synth::take_effect_clear_ranges().count == 0); // nothing recorded either
+    }
+    // Each commit-safety rule the writer relies on is checked by the preflight.
+    {
+        static Synth::InstrumentBank bank;
+        make_valid_bank(bank);
+        const char* error = nullptr;
+        static Synth::EffectExpansionPlan plan;
+
+        Synth::init_effect_state_region(fake_region_base);
+
+        // Dangling LFO descriptor.
+        enabled_effect(bank, 0, 0, Synth::EffectType::delay);
+        bank.channel_chains[0].effects[0].bindings[0].lfo_desc_id = 9;
+        TEST( ! Synth::preflight_effect_expansion(bank, &plan, &error));
+
+        // Non-finite LFO depth.
+        bank.channel_chains[0].effects[0].bindings[0].lfo_desc_id = 1;
+        bank.channel_chains[0].effects[0].bindings[0].lfo_depth = NAN;
+        TEST( ! Synth::preflight_effect_expansion(bank, &plan, &error));
+
+        // Per-note MIDI source on a channel effect.
+        bank.channel_chains[0].effects[0].bindings[0].lfo_depth = 1.0f;
+        bank.channel_chains[0].effects[0].bindings[1].num_inputs = 1;
+        bank.channel_chains[0].effects[0].bindings[1].inputs[0].source = Synth::ModSource::velocity;
+        TEST( ! Synth::preflight_effect_expansion(bank, &plan, &error));
+
+        // Any MIDI source on the master chain (here: via the LFO depth source).
+        Synth::EffectSlotBinding* const reverb = enabled_effect(bank, Synth::max_channels, 0, Synth::EffectType::reverb);
+        reverb->bindings[0].lfo_desc_id = 1;
+        reverb->bindings[0].lfo_depth_source = Synth::ModSource::mod_wheel;
+        TEST( ! Synth::preflight_effect_expansion(bank, &plan, &error));
+    }
+    // Clears accumulate across publishes drained in one step; the take hands out all of them.
+    {
+        static Synth::InstrumentBank bank;
+        make_valid_bank(bank);
+        enabled_effect(bank, 0, 0, Synth::EffectType::chorus);
+        enabled_effect(bank, 1, 0, Synth::EffectType::chorus);
+
+        Synth::init_effect_state_region(fake_region_base);
+        static Synth::EffectExpansionPlan plan;
+        const char* error = nullptr;
+        static Synth::EffectChain chains[Synth::max_channels];
+        static Synth::EffectChain master;
+        FakeWriter writer = { 1, 0, 0, 0, 0 };
+
+        TEST(Synth::preflight_effect_expansion(bank, &plan, &error));
+        Synth::commit_effect_expansion(bank, plan, chains, &master, fake_writer_binding(writer));
+
+        const uint32_t chorus_bytes = Synth::get_effect_state_bytes(Synth::EffectType::chorus);
+        const uint32_t delay_bytes = Synth::get_effect_state_bytes(Synth::EffectType::delay);
+
+        // Re-type both slots: the drained second publish allocates fresh state and clears it.
+        enabled_effect(bank, 0, 0, Synth::EffectType::delay);
+        enabled_effect(bank, 1, 0, Synth::EffectType::delay);
+        TEST(Synth::preflight_effect_expansion(bank, &plan, &error));
+        Synth::commit_effect_expansion(bank, plan, chains, &master, fake_writer_binding(writer));
+
+        const Synth::EffectClearList clears = Synth::take_effect_clear_ranges();
+        TEST(clears.count == 4); // two commits x two stateful slots, none consumed in between
+        TEST(clears.ranges[0].offset == fake_region_base);
+        TEST(clears.ranges[0].bytes == chorus_bytes);
+        TEST(clears.ranges[2].offset == fake_region_base + 2 * chorus_bytes); // second commit, fresh
+        TEST(clears.ranges[2].bytes == delay_bytes);
+        TEST(clears.ranges[3].offset == fake_region_base + 2 * chorus_bytes + delay_bytes);
+        TEST(Synth::take_effect_clear_ranges().count == 0);
+    }
+    // Channel 15 and the master chain expand like any other chain.
+    {
+        static Synth::InstrumentBank bank;
+        make_valid_bank(bank);
+        Synth::EffectSlotBinding* const ch15 = enabled_effect(bank, Synth::max_channels - 1, 0, Synth::EffectType::delay);
+        ch15->bindings[0].base_value = 100.0f;
+        Synth::EffectSlotBinding* const rev = enabled_effect(bank, Synth::max_channels, 0, Synth::EffectType::reverb);
+        rev->bindings[0].base_value = 0.7f;
+
+        Synth::init_effect_state_region(fake_region_base);
+        static Synth::EffectExpansionPlan plan;
+        const char* error = nullptr;
+        TEST(Synth::preflight_effect_expansion(bank, &plan, &error));
+        TEST(plan.slots[Synth::max_channels - 1][0].state_offs == fake_region_base);
+        const uint32_t delay_bytes = Synth::get_effect_state_bytes(Synth::EffectType::delay);
+        TEST(plan.slots[Synth::max_channels][0].state_offs == fake_region_base + delay_bytes);
+
+        static Synth::EffectChain chains[Synth::max_channels];
+        static Synth::EffectChain master;
+        FakeWriter writer = { 1, 0, 0, 0, 0 };
+        Synth::commit_effect_expansion(bank, plan, chains, &master, fake_writer_binding(writer));
+        TEST(chains[Synth::max_channels - 1].effects[0].params[0] == 100.0f);
+        TEST(master.effects[0].type == Synth::EffectType::reverb);
+        TEST(master.effects[0].params[0] == 0.7f);
+        TEST(master.effects[0].state_offs == fake_region_base + delay_bytes);
+    }
+    // The clear ring holds three full commits: the init commit's ranges stay pending until
+    // the first render step, where the drain can apply both queued banks.
+    {
+        static Synth::InstrumentBank bank;
+        make_valid_bank(bank);
+        Synth::EffectSlotBinding* const chorus = enabled_effect(bank, 0, 0, Synth::EffectType::chorus);
+        chorus->bindings[0].base_value = 1.5f;
+
+        Synth::init_effect_state_region(fake_region_base);
+        static Synth::EffectExpansionPlan plan;
+        const char* error = nullptr;
+        static Synth::EffectChain chains[Synth::max_channels];
+        static Synth::EffectChain master;
+        FakeWriter writer = { 1, 0, 0, 0, 0 };
+
+        TEST(Synth::preflight_effect_expansion(bank, &plan, &error));
+        Synth::commit_effect_expansion(bank, plan, chains, &master, fake_writer_binding(writer));
+
+        for (uint32_t republish = 0; republish < 2; republish++) {
+            // Each drained publish re-types the slot, so it allocates and clears fresh state.
+            enabled_effect(bank, 0, 0, (republish % 2) ? Synth::EffectType::chorus
+                    : Synth::EffectType::delay);
+            TEST(Synth::preflight_effect_expansion(bank, &plan, &error));
+            Synth::commit_effect_expansion(bank, plan, chains, &master, fake_writer_binding(writer));
+        }
+
+        const Synth::EffectClearList clears = Synth::take_effect_clear_ranges();
+        TEST(clears.count == 3); // init commit + two drained publishes, none consumed in between
+        TEST(Synth::take_effect_clear_ranges().count == 0);
+    }
+
 
     // Target-never-mutated: malformed images (each breaking a different validated invariant)
     // are rejected by decode and leave the destination byte-identical.

@@ -5,6 +5,7 @@
 
 #include "synth_config.h"
 #include "synth_parameters.h"
+#include "synth_effects.h"
 #include "../core/pool.h"
 
 #include <stdint.h>
@@ -39,9 +40,11 @@ enum class ModSource : uint8_t {
 // One input feeding a modulated quantity (volume, pitch, cutoff, ...)
 struct ModInput {
     ModSource source;
-    float     scale;
     SourceOp  op;
+    float     scale;
 };
+
+static_assert(sizeof(ModInput) == 8);
 
 // One layer's generators for a single modulation target: an optional envelope and an optional LFO
 // (with sourceable depth and rate).  Each layer instantiates its own generators, so layers that name
@@ -93,16 +96,46 @@ struct Zone {
     uint8_t instrument;
 };
 
+// One effect parameter's binding. Mirrors the runtime EffectParamMod field-for-field;
+// sources are channel-wide ModSource roles that the runtime resolves to modulation
+// nodes at expansion time (effects are not note-triggered, so there are no envelopes).
+struct EffectParamBinding {
+    float     base_value;
+    uint16_t  lfo_desc_id;      // 0 = none
+    SourceOp  lfo_op;           // how the LFO combines into the param
+    float     lfo_depth;
+    ModSource lfo_depth_source; // none = constant depth
+    ModSource lfo_rate_source;  // none = the LFO's own period
+    float     lfo_rate_scale;
+    uint16_t  num_inputs;
+    ModInput  inputs[max_mod_inputs]; // channel MIDI sources (master chain: none)
+};
+
+// One effect slot in a chain; only bindings[0..get_effect_param_floats(type)) are
+// meaningful for the slot's type.
+struct EffectSlotBinding {
+    EffectType         type;
+    bool               enabled;
+    EffectParamBinding bindings[max_effect_param_floats];
+};
+
+struct EffectChainBinding {
+    uint8_t           num_effects; // 0..max_chain_effects
+    EffectSlotBinding effects[max_chain_effects];
+};
+
 struct InstrumentBank {
     Pool<Instrument,         max_instruments> instruments;
     Pool<EnvelopeDescriptor, max_envelopes>   envelopes;
     Pool<LFODescriptor,      max_lfos>        lfos;
     Pool<ParamDescriptor,    max_parameters>  parameters;
 
-    Zone    channel_zones[max_channels][max_instr_per_channel]; // per-channel keyboard zones
-    char    instrument_names[max_instruments][max_name_len];
-    char    channel_names[max_channels][max_name_len];
-    uint8_t drum_track_channel;                                 // canonical drum channel (default 9 == channel 10)
+    Zone               channel_zones[max_channels][max_instr_per_channel]; // per-channel keyboard zones
+    char               instrument_names[max_instruments][max_name_len];
+    char               channel_names[max_channels][max_name_len];
+    EffectChainBinding channel_chains[max_channels]; // per-channel effect chains
+    EffectChainBinding master_chain;                 // sums all channel outputs
+    uint8_t            drum_track_channel;
 };
 
 static_assert(std::is_trivially_copyable_v<InstrumentBank>,

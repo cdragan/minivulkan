@@ -2,8 +2,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2021-2026 Chris Dragan
 
 #include "suballoc.h"
+#include <assert.h>
 #include "d_printf.h"
-#include "minivulkan.h"
 #include "mstdc.h"
 
 void SubAllocatorBase::reset()
