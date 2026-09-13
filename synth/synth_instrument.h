@@ -88,8 +88,7 @@ struct Instrument {
     float        layer_skew_semitones;      // Random pitch skew drawn per layer (0 = none)
 };
 
-// Keyboard-split entry
-struct NoteRoute {
+struct Zone {
     uint8_t start_note;
     uint8_t instrument;
 };
@@ -100,19 +99,15 @@ struct InstrumentBank {
     Pool<LFODescriptor,      max_lfos>        lfos;
     Pool<ParamDescriptor,    max_parameters>  parameters;
 
-    NoteRoute channel_routes[max_channels][max_instr_per_channel]; // per-channel keyboard splits
-    char      instrument_names[max_instruments][max_name_len];
-    char      channel_names[max_channels][max_name_len];
-    uint8_t   drum_track_channel;          // canonical drum channel (default 9 == channel 10)
+    Zone    channel_zones[max_channels][max_instr_per_channel]; // per-channel keyboard zones
+    char    instrument_names[max_instruments][max_name_len];
+    char    channel_names[max_channels][max_name_len];
+    uint8_t drum_track_channel;                                 // canonical drum channel (default 9 == channel 10)
 };
 
 static_assert(std::is_trivially_copyable_v<InstrumentBank>,
               "InstrumentBank must be trivially copyable for byte-snapshot undo and save/load");
 
-uint8_t select_instrument(const NoteRoute* routes, uint32_t num_routes, uint8_t note);
-
-void remap_envelope_refs  (InstrumentBank* bank, const uint32_t* old_to_new); // envelope_desc_id in every layer
-void remap_lfo_refs       (InstrumentBank* bank, const uint32_t* old_to_new); // lfo_desc_id in every layer
-void remap_instrument_refs(InstrumentBank* bank, const uint32_t* old_to_new); // instrument index in every channel split entry
+uint8_t route_instrument(const Zone* zones, uint32_t num_zones, uint8_t note);
 
 } // namespace Synth

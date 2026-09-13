@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2021-2026 Chris Dragan
 
 #include "synth_serialize.h"
+#include "synth_instrument.h"
 
 #include <errno.h>
 #include <stdio.h>
@@ -15,6 +16,8 @@ namespace Synth {
 static const uint8_t  bank_marker[4]     = { 'S', 'Y', 'I', 'B' };
 static const uint16_t bank_version       = 1;
 static const uint32_t bank_payload_size  = static_cast<uint32_t>(sizeof(InstrumentBank));
+
+static uint8_t serialize_image[instrument_bank_image_size];
 
 uint32_t encode_instrument_bank(const InstrumentBank* bank, uint8_t* dest, uint32_t dest_size)
 {
@@ -58,8 +61,7 @@ bool decode_instrument_bank(const uint8_t* src, uint32_t src_size, InstrumentBan
 
 bool save_instrument_bank(const char* path, const InstrumentBank* bank)
 {
-    uint8_t image[instrument_bank_image_size];
-    const uint32_t image_size = encode_instrument_bank(bank, image, sizeof(image));
+    const uint32_t image_size = encode_instrument_bank(bank, serialize_image, sizeof(serialize_image));
     if ( ! image_size) {
         return false;
     }
@@ -70,7 +72,7 @@ bool save_instrument_bank(const char* path, const InstrumentBank* bank)
         return false;
     }
 
-    const bool written = fwrite(image, 1, image_size, file) == image_size;
+    const bool written = fwrite(serialize_image, 1, image_size, file) == image_size;
     if ( ! written) {
         fprintf(stderr, "Error: Failed to save %s: %s\n", path, strerror(errno));
     }
@@ -83,15 +85,17 @@ bool load_instrument_bank(const char* path, InstrumentBank* bank)
 {
     FILE* const file = fopen(path, "rb");
     if ( ! file) {
-        fprintf(stderr, "Error: Failed to open %s for reading: %s\n", path, strerror(errno));
+        // For a missing file condition, let the caller print the error
+        if (errno != ENOENT) {
+            fprintf(stderr, "Error: Failed to open %s for reading: %s\n", path, strerror(errno));
+        }
         return false;
     }
 
-    uint8_t image[instrument_bank_image_size];
-    const size_t read_size = fread(image, 1, sizeof(image), file);
+    const size_t read_size = fread(serialize_image, 1, sizeof(serialize_image), file);
     fclose(file);
 
-    return decode_instrument_bank(image, static_cast<uint32_t>(read_size), bank);
+    return decode_instrument_bank(serialize_image, static_cast<uint32_t>(read_size), bank);
 }
 
 } // namespace Synth

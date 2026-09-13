@@ -191,7 +191,7 @@ void propagate_parameters(Parameter* params, const ParamDescriptor* descs, uint3
 }
 
 void configure_lfo(ParamDescriptor* desc,
-                   uint16_t         lfo_desc_id,
+                   const LFODescriptor& lfo,
                    SourceOp         lfo_op,
                    float            lfo_depth,
                    uint16_t         lfo_depth_param_id,
@@ -200,7 +200,7 @@ void configure_lfo(ParamDescriptor* desc,
 {
     *desc = { };
     desc->kind                = ParamKind::lfo;
-    desc->lfo.desc_id         = lfo_desc_id;
+    desc->lfo.lfo             = lfo;
     desc->lfo.op              = lfo_op;
     desc->lfo.depth           = lfo_depth;
     desc->lfo.depth_param_id  = lfo_depth_param_id;

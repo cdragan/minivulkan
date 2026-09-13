@@ -29,9 +29,9 @@ constexpr uint32_t max_param_sources = 4;
 constexpr uint32_t max_mod_inputs = 2;
 
 // Editor-side pool capacities.
-constexpr uint32_t max_instruments = 16;
-constexpr uint32_t max_envelopes   = 32;
-constexpr uint32_t max_lfos        = 32;
+constexpr uint32_t max_instruments = max_channels * max_instr_per_channel;
+constexpr uint32_t max_envelopes   = 128;
+constexpr uint32_t max_lfos        = 128;
 constexpr uint32_t max_parameters  = 64;
 
 // Maximum length of an instrument or channel name, including the terminator.

@@ -4,6 +4,7 @@
 #include "synth_parameters.h"
 #include "synth_effects.h"
 #include "synth_instrument.h"
+#include "../sculptor/sculptor_instr_bank.h"
 #include "synth_serialize.h"
 #include "midi_file.h"
 #include "synth_soundtrack.h"
@@ -269,13 +270,17 @@ int main()
         Synth::ParamDescriptor descs[4] = { };
         // descs[0] (sentinel) and descs[input_id] (channel input, e.g. mod wheel) stay kind external.
 
-        Synth::configure_lfo(&descs[lfo_id], 1, Synth::SourceOp::add, 0.5f, 0, 0, 0.0f);
+        Synth::LFODescriptor test_lfo = { };
+        test_lfo.wave = Synth::WaveType::sine_wave;
+        test_lfo.period_ms = 50;
+        Synth::configure_lfo(&descs[lfo_id], test_lfo, Synth::SourceOp::add, 0.5f, 0, 0, 0.0f);
         const Synth::SourceParam inputs[1] = { { input_id, 1.0f, Synth::SourceOp::multiply } };
         Synth::configure_plain(&descs[dest_id], 0.1f, 0, lfo_id, Synth::SourceOp::add, inputs, 1);
 
         // configure_lfo made the LFO node; configure_plain made the dest a plain node.
         TEST(descs[lfo_id].kind == Synth::ParamKind::lfo);
-        TEST(descs[lfo_id].lfo.desc_id == 1);
+        TEST(descs[lfo_id].lfo.lfo.wave == Synth::WaveType::sine_wave);
+        TEST(approx(descs[lfo_id].lfo.lfo.period_ms, 50.0f, 0.001f)); // captured copy
         TEST(descs[dest_id].kind == Synth::ParamKind::plain);
         TEST(descs[dest_id].plain.num_sources == 2);
 
@@ -393,41 +398,41 @@ int main()
         TEST(skew_max >  amount * 0.9f);
     }
 
-    // Keyboard split routing: select_instrument maps a note to an instrument via an ordered
+    // Keyboard split routing: route_instrument maps a note to an instrument via an ordered
     // table; start_note 0 ends the table, so an all-zero table resolves to instrument 0.
     {
         const uint32_t count = Synth::max_instr_per_channel;
 
-        Synth::NoteRoute empty[Synth::max_instr_per_channel] = { };
-        TEST(Synth::select_instrument(empty, count, 0)   == 0);
-        TEST(Synth::select_instrument(empty, count, 60)  == 0);
-        TEST(Synth::select_instrument(empty, count, 127) == 0);
+        Synth::Zone empty[Synth::max_instr_per_channel] = { };
+        TEST(Synth::route_instrument(empty, count, 0)   == 0);
+        TEST(Synth::route_instrument(empty, count, 60)  == 0);
+        TEST(Synth::route_instrument(empty, count, 127) == 0);
 
         // Notes 1..59 -> instrument 0, notes 60.. -> instrument 1.  Entry 0 must start at a
         // non-zero note since 0 is the end-of-table sentinel.
-        Synth::NoteRoute split[Synth::max_instr_per_channel] = { };
+        Synth::Zone split[Synth::max_instr_per_channel] = { };
         split[0] = { 1,  0 };
         split[1] = { 60, 1 };
-        TEST(Synth::select_instrument(split, count, 0)   == 0);
-        TEST(Synth::select_instrument(split, count, 59)  == 0);
-        TEST(Synth::select_instrument(split, count, 60)  == 1);
-        TEST(Synth::select_instrument(split, count, 127) == 1);
+        TEST(Synth::route_instrument(split, count, 0)   == 0);
+        TEST(Synth::route_instrument(split, count, 59)  == 0);
+        TEST(Synth::route_instrument(split, count, 60)  == 1);
+        TEST(Synth::route_instrument(split, count, 127) == 1);
 
-        Synth::NoteRoute three[Synth::max_instr_per_channel] = { };
+        Synth::Zone three[Synth::max_instr_per_channel] = { };
         three[0] = { 1,  2 };
         three[1] = { 48, 4 };
         three[2] = { 72, 3 };
-        TEST(Synth::select_instrument(three, count, 47)  == 2);
-        TEST(Synth::select_instrument(three, count, 48)  == 4);
-        TEST(Synth::select_instrument(three, count, 71)  == 4);
-        TEST(Synth::select_instrument(three, count, 72)  == 3);
+        TEST(Synth::route_instrument(three, count, 47)  == 2);
+        TEST(Synth::route_instrument(three, count, 48)  == 4);
+        TEST(Synth::route_instrument(three, count, 71)  == 4);
+        TEST(Synth::route_instrument(three, count, 72)  == 3);
 
         // A full table with no sentinel still resolves the top range.
-        Synth::NoteRoute full[Synth::max_instr_per_channel] = { };
+        Synth::Zone full[Synth::max_instr_per_channel] = { };
         for (uint32_t idx = 0; idx < count; idx++) {
             full[idx] = { static_cast<uint8_t>(idx + 1), static_cast<uint8_t>(idx) };
         }
-        TEST(Synth::select_instrument(full, count, 127) == count - 1);
+        TEST(Synth::route_instrument(full, count, 127) == count - 1);
     }
 
     // --- Phase 1 data foundation: generic pools, container, defragment + remap ---
@@ -495,9 +500,6 @@ int main()
         TEST(env_map[1] == pool_no_slot);
         TEST(env_map[3] == pool_no_slot);
         TEST(bank.envelopes.entries[2].num_points == 42); // slot 4's data moved to slot 2
-
-        Synth::remap_envelope_refs(&bank, env_map);
-        TEST(bank.instruments.entries[instr].layers[0].gen[Synth::mod_volume].envelope_desc_id == 3);
     }
 
     // defrag-remap (LFOs): same mechanism as envelopes -- a layer's 1-based lfo_desc_id is
@@ -519,9 +521,6 @@ int main()
         bank.lfos.defragment(lfo_map);
         TEST(lfo_map[4] == 2);
         TEST(bank.lfos.entries[2].period_ms == 333);
-
-        Synth::remap_lfo_refs(&bank, lfo_map);
-        TEST(bank.instruments.entries[instr].layers[0].gen[Synth::mod_pitch].lfo_desc_id == 3);
     }
 
     // defrag-remap (instruments): an instrument pool compacts and a channel split-table entry
@@ -533,16 +532,12 @@ int main()
         }
         bank.instruments.free(1);
         bank.instruments.free(3);
-        bank.channel_routes[0][0] = { 1, 4 };       // note >= 1 -> instrument slot 4 (survives)
-        bank.channel_routes[0][1] = { 64, 3 };      // references deleted instrument slot 3
+        bank.channel_zones[0][0] = { 1, 4 };       // note >= 1 -> instrument slot 4 (survives)
+        bank.channel_zones[0][1] = { 64, 3 };      // references deleted instrument slot 3
 
         uint32_t instr_map[Synth::max_instruments];
         bank.instruments.defragment(instr_map);
         TEST(instr_map[4] == 2);
-
-        Synth::remap_instrument_refs(&bank, instr_map);
-        TEST(bank.channel_routes[0][0].instrument == 2);
-        TEST(bank.channel_routes[0][1].instrument == 0); // dangling ref falls back to instrument 0
     }
 
     // snapshot-roundtrip: a byte copy of the container, then a byte restore after mutation,
@@ -576,12 +571,19 @@ int main()
         const uint32_t env   = bank.envelopes.allocate();
         const uint32_t lfo   = bank.lfos.allocate();
         const uint32_t instr = bank.instruments.allocate();
+
+        // Valid descriptor content: the decoder now fully validates banks.
+        bank.envelopes.entries[env].num_points = 2;
+        bank.envelopes.entries[env].points[1].position = 100;
+        bank.lfos.entries[lfo].wave = Synth::WaveType::sine_wave;
+        bank.lfos.entries[lfo].period_ms = 50;
+
         bank.instruments.entries[instr].layer_count = 2;
         bank.instruments.entries[instr].layers[0].gen[Synth::mod_volume].envelope_desc_id =
             static_cast<uint16_t>(env + 1);
         bank.instruments.entries[instr].layers[0].gen[Synth::mod_pitch].lfo_desc_id =
             static_cast<uint16_t>(lfo + 1);
-        bank.channel_routes[0][0] = { 0, static_cast<uint8_t>(instr) };
+        bank.channel_zones[0][0] = { 0, static_cast<uint8_t>(instr) };
         bank.drum_track_channel   = 9;
         memcpy(bank.instrument_names[instr], "Lead", 5);
 
@@ -622,7 +624,7 @@ int main()
         bank.drum_track_channel  = 7;
         const uint32_t instr     = bank.instruments.allocate();
         bank.instruments.entries[instr].layer_count = 3;
-        bank.channel_routes[2][1] = { 64, static_cast<uint8_t>(instr) };
+        bank.channel_zones[2][0] = { 64, static_cast<uint8_t>(instr) };
 
         const char* const path = "synth_bank_roundtrip.tmp";
         TEST(Synth::save_instrument_bank(path, &bank));
@@ -876,8 +878,10 @@ int main()
     // Stamp several distinct fields so a memcmp discriminates more than one byte.
     auto stamp_bank = [](Synth::InstrumentBank& b, uint8_t k) {
         b.drum_track_channel              = k;
-        b.channel_routes[1][0].start_note = k;
-        b.channel_routes[1][0].instrument = static_cast<uint8_t>(k + 1u);
+        b.instruments.allocate();
+        b.instruments.entries[0].layer_count = 1;
+        b.channel_zones[1][0].start_note = k;
+        b.channel_zones[1][0].instrument = 0;
         b.instrument_names[0][0]          = static_cast<char>('A' + (k & 7u));
         b.channel_names[0][0]             = static_cast<char>('z' - (k & 7u));
     };
@@ -908,6 +912,372 @@ int main()
         blob[0] ^= 0xFFu;                                                   // corrupt marker
         TEST( ! Synth::decode_instrument_bank(blob, n, &untouched));
         TEST(memcmp(&untouched, &untouched_ref, sizeof(untouched)) == 0);
+    }
+
+    // ---- Instrument bank: dense-pool validation, serialize, publish queue ----
+
+    // Builds a small valid bank: one instrument, one envelope, one LFO, one zone.
+    auto make_valid_bank = [](Synth::InstrumentBank& bank) {
+        memset(&bank, 0, sizeof(bank));
+        const uint32_t env = bank.envelopes.allocate();
+        bank.envelopes.entries[env].num_points = 2;
+        bank.envelopes.entries[env].points[1].position = 100;
+        const uint32_t lfo = bank.lfos.allocate();
+        bank.lfos.entries[lfo].wave = Synth::WaveType::sine_wave;
+        bank.lfos.entries[lfo].period_ms = 50;
+        const uint32_t instr = bank.instruments.allocate();
+        bank.instruments.entries[instr].layer_count = 1;
+        bank.instruments.entries[instr].layers[0].gen[Synth::mod_volume].envelope_desc_id = static_cast<uint16_t>(env + 1);
+        bank.instruments.entries[instr].layers[0].gen[Synth::mod_pitch].lfo_desc_id = static_cast<uint16_t>(lfo + 1);
+        bank.channel_zones[0][0] = { 1, static_cast<uint8_t>(instr) };
+    };
+
+    // A valid bank passes validation.
+    {
+        static Synth::InstrumentBank bank;
+        make_valid_bank(bank);
+        TEST(Synth::validate_instrument_bank(&bank));
+    }
+
+    // Validation negatives: each mutation makes exactly the targeted rule reject the bank.
+    auto expect_invalid = [](Synth::InstrumentBank& bank) {
+        TEST( ! Synth::validate_instrument_bank(&bank));
+    };
+    {
+        static Synth::InstrumentBank bank;
+        make_valid_bank(bank);
+        bank.instruments.num_allocated = Synth::max_instruments + 1; // over capacity
+        expect_invalid(bank);
+    }
+    {
+        static Synth::InstrumentBank bank;
+        make_valid_bank(bank);
+        bank.instruments.num_allocated = 2; // count mismatch: only 1 occupied
+        expect_invalid(bank);
+    }
+    {
+        static Synth::InstrumentBank bank;
+        make_valid_bank(bank);
+        bank.instruments.free(0); // hole below num_allocated: count/occupied mismatch
+        expect_invalid(bank);
+    }
+    {
+        static Synth::InstrumentBank bank;
+        make_valid_bank(bank);
+        bank.channel_zones[1][0] = { 10, 0 };
+        bank.channel_zones[1][1] = { 5, 0 }; // out of order
+        expect_invalid(bank);
+    }
+    {
+        static Synth::InstrumentBank bank;
+        make_valid_bank(bank);
+        bank.channel_zones[1][0] = { 10, 0 };
+        bank.channel_zones[1][1] = { 0, 0 };
+        bank.channel_zones[1][2] = { 20, 0 }; // garbage after the terminator
+        expect_invalid(bank);
+    }
+    {
+        static Synth::InstrumentBank bank;
+        make_valid_bank(bank);
+        bank.channel_zones[1][0] = { 10, 200 }; // slot 0 instrument unoccupied (dangling)
+        expect_invalid(bank);
+    }
+    {
+        static Synth::InstrumentBank bank;
+        make_valid_bank(bank);
+        bank.channel_zones[1][0] = { 10, 0 };
+        bank.channel_zones[1][1] = { 20, 1 }; // reachable entry references an unoccupied instrument
+        expect_invalid(bank);
+    }
+    // A full zone table with no terminator is valid (route_instrument semantics unchanged).
+    {
+        static Synth::InstrumentBank bank;
+        make_valid_bank(bank);
+        for (uint32_t e = 0; e < Synth::max_instr_per_channel; e++) {
+            bank.channel_zones[1][e] = { static_cast<uint8_t>(e + 1), 0 };
+        }
+        TEST(Synth::validate_instrument_bank(&bank));
+    }
+    {
+        static Synth::InstrumentBank bank;
+        make_valid_bank(bank);
+        bank.instruments.entries[0].layers[0].gen[Synth::mod_volume].envelope_desc_id = 5; // dangling
+        expect_invalid(bank);
+    }
+    {
+        static Synth::InstrumentBank bank;
+        make_valid_bank(bank);
+        bank.instruments.entries[0].layers[0].gen[Synth::mod_pitch].lfo_desc_id = 9; // dangling
+        expect_invalid(bank);
+    }
+    {
+        static Synth::InstrumentBank bank;
+        make_valid_bank(bank);
+        bank.envelopes.entries[0].num_points = 0;
+        expect_invalid(bank);
+    }
+    {
+        static Synth::InstrumentBank bank;
+        make_valid_bank(bank);
+        bank.envelopes.entries[0].num_points = Synth::max_envelope_points + 1;
+        expect_invalid(bank);
+    }
+    {
+        static Synth::InstrumentBank bank;
+        make_valid_bank(bank);
+        Synth::EnvelopeDescriptor& env = bank.envelopes.entries[0];
+        env.num_points = 3;
+        env.points[2].position = env.points[1].position; // duplicate position
+        expect_invalid(bank);
+    }
+    {
+        static Synth::InstrumentBank bank;
+        make_valid_bank(bank);
+        Synth::EnvelopeDescriptor& env = bank.envelopes.entries[0];
+        env.num_points = 3;
+        env.points[2].position = 50; // decreasing position
+        expect_invalid(bank);
+    }
+    {
+        static Synth::InstrumentBank bank;
+        make_valid_bank(bank);
+        Synth::EnvelopeDescriptor& env = bank.envelopes.entries[0];
+        env.sustain_first_point = 2; // sustain_first > sustain_last
+        expect_invalid(bank);
+    }
+    {
+        static Synth::InstrumentBank bank;
+        make_valid_bank(bank);
+        bank.envelopes.entries[0].sustain_last_point = Synth::max_envelope_points;
+        expect_invalid(bank);
+    }
+    {
+        static Synth::InstrumentBank bank;
+        make_valid_bank(bank);
+        bank.lfos.entries[0].period_ms = 0;
+        expect_invalid(bank);
+    }
+    {
+        static Synth::InstrumentBank bank;
+        make_valid_bank(bank);
+        bank.lfos.entries[0].wave = Synth::WaveType::no_wave; // not runtime-supported
+        expect_invalid(bank);
+    }
+    {
+        static Synth::InstrumentBank bank;
+        make_valid_bank(bank);
+        bank.lfos.entries[0].wave = Synth::WaveType::pulse_wave;
+        expect_invalid(bank);
+    }
+    {
+        static Synth::InstrumentBank bank;
+        make_valid_bank(bank);
+        bank.lfos.entries[0].wave = Synth::WaveType::noise_wave;
+        expect_invalid(bank);
+    }
+    {
+        static Synth::InstrumentBank bank;
+        make_valid_bank(bank);
+        bank.instruments.entries[0].layers[0].osc_type[0] = static_cast<Synth::WaveType>(99);
+        expect_invalid(bank);
+    }
+    {
+        static Synth::InstrumentBank bank;
+        make_valid_bank(bank);
+        bank.instruments.entries[0].layers[0].osc_type[1] = static_cast<Synth::WaveType>(200);
+        expect_invalid(bank);
+    }
+    {
+        static Synth::InstrumentBank bank;
+        make_valid_bank(bank);
+        bank.instruments.entries[0].layers[0].osc_mode = static_cast<Synth::OscMode>(3);
+        expect_invalid(bank);
+    }
+    {
+        static Synth::InstrumentBank bank;
+        make_valid_bank(bank);
+        bank.instruments.entries[0].layer_count = 0;
+        expect_invalid(bank);
+    }
+    {
+        static Synth::InstrumentBank bank;
+        make_valid_bank(bank);
+        bank.instruments.entries[0].layer_count = Synth::max_layers + 1;
+        expect_invalid(bank);
+    }
+    {
+        static Synth::InstrumentBank bank;
+        make_valid_bank(bank);
+        bank.instruments.entries[0].layers[0].gen[0].lfo_depth_source = static_cast<Synth::ModSource>(77);
+        expect_invalid(bank);
+    }
+    {
+        static Synth::InstrumentBank bank;
+        make_valid_bank(bank);
+        bank.instruments.entries[0].layers[0].gen[0].lfo_op = static_cast<Synth::SourceOp>(9);
+        expect_invalid(bank);
+    }
+    {
+        static Synth::InstrumentBank bank;
+        make_valid_bank(bank);
+        bank.instruments.entries[0].routing[0].num_inputs = Synth::max_mod_inputs + 1;
+        expect_invalid(bank);
+    }
+    {
+        static Synth::InstrumentBank bank;
+        make_valid_bank(bank);
+        bank.instruments.entries[0].routing[0].num_inputs = 1;
+        bank.instruments.entries[0].routing[0].inputs[0].op = static_cast<Synth::SourceOp>(7);
+        expect_invalid(bank);
+    }
+
+    // Target-never-mutated: malformed images (each breaking a different validated invariant)
+    // are rejected by decode and leave the destination byte-identical.
+    {
+        static Synth::InstrumentBank bank;
+        make_valid_bank(bank);
+        static uint8_t image[Synth::instrument_bank_image_size];
+        TEST(Synth::encode_instrument_bank(&bank, image, sizeof(image)) == Synth::instrument_bank_image_size);
+
+        // Byte offsets of the interesting fields inside the encoded image (header + bank copy).
+        const uint8_t* const bank_base = reinterpret_cast<const uint8_t*>(&bank);
+        auto image_offset = [bank_base](const void* field) {
+            return static_cast<uint32_t>(reinterpret_cast<const uint8_t*>(field) - bank_base)
+                + Synth::instrument_bank_header_size;
+        };
+        const uint32_t env_points_off = image_offset(&bank.envelopes.entries[0].num_points);
+        const uint32_t env_pos1_off = image_offset(&bank.envelopes.entries[0].points[1].position);
+        const uint32_t env_sustain_first_off = image_offset(&bank.envelopes.entries[0].sustain_first_point);
+        const uint32_t env_sustain_last_off = image_offset(&bank.envelopes.entries[0].sustain_last_point);
+        const uint32_t lfo_period_off = image_offset(&bank.lfos.entries[0].period_ms);
+        const uint32_t lfo_wave_off = image_offset(&bank.lfos.entries[0].wave);
+        const uint32_t instr_layer_count_off = image_offset(&bank.instruments.entries[0].layer_count);
+        const uint32_t osc_type0_off = image_offset(&bank.instruments.entries[0].layers[0].osc_type[0]);
+        const uint32_t osc_mode_off = image_offset(&bank.instruments.entries[0].layers[0].osc_mode);
+        const uint32_t gen_env_id_off = image_offset(&bank.instruments.entries[0].layers[0].gen[Synth::mod_volume].envelope_desc_id);
+        const uint32_t gen_lfo_id_off = image_offset(&bank.instruments.entries[0].layers[0].gen[Synth::mod_pitch].lfo_desc_id);
+        const uint32_t num_inputs_off = image_offset(&bank.instruments.entries[0].routing[0].num_inputs);
+        const uint32_t lfo_depth_source_off = image_offset(&bank.instruments.entries[0].layers[0].gen[0].lfo_depth_source);
+        const uint32_t instr_count_off = image_offset(&bank.instruments.num_allocated);
+
+        auto decode_must_reject = [&](const uint8_t* bad) {
+            static Synth::InstrumentBank untouched;
+            memset(&untouched, 0x5A, sizeof(untouched));
+            static Synth::InstrumentBank reference;
+            memset(&reference, 0x5A, sizeof(reference));
+            TEST( ! Synth::decode_instrument_bank(bad, sizeof(bad), &untouched));
+            TEST(memcmp(&untouched, &reference, sizeof(untouched)) == 0);
+        };
+
+        static uint8_t bad[Synth::instrument_bank_image_size];
+        memcpy(bad, image, sizeof(bad)); bad[env_points_off] = 0; decode_must_reject(bad); // 0 envelope points
+        memcpy(bad, image, sizeof(bad)); bad[env_points_off] = Synth::max_envelope_points + 1; decode_must_reject(bad); // 9 points
+        memcpy(bad, image, sizeof(bad)); bad[env_pos1_off] = 0; decode_must_reject(bad); // duplicate positions
+        memcpy(bad, image, sizeof(bad)); bad[env_sustain_first_off] = 2; bad[env_sustain_last_off] = 0; decode_must_reject(bad); // bad sustain
+        memcpy(bad, image, sizeof(bad)); bad[lfo_period_off] = 0; bad[lfo_period_off + 1] = 0; decode_must_reject(bad); // zero LFO period
+        memcpy(bad, image, sizeof(bad)); bad[lfo_wave_off] = static_cast<uint8_t>(Synth::WaveType::pulse_wave); decode_must_reject(bad); // bad LFO wave
+        memcpy(bad, image, sizeof(bad)); bad[osc_type0_off] = 99; decode_must_reject(bad); // bad osc_type
+        memcpy(bad, image, sizeof(bad)); bad[osc_mode_off] = 3; decode_must_reject(bad); // bad osc_mode
+        memcpy(bad, image, sizeof(bad)); bad[gen_env_id_off] = 5; decode_must_reject(bad); // dangling envelope ref
+        memcpy(bad, image, sizeof(bad)); bad[gen_lfo_id_off] = 9; decode_must_reject(bad); // dangling LFO ref
+        memcpy(bad, image, sizeof(bad)); bad[num_inputs_off] = Synth::max_mod_inputs + 1; decode_must_reject(bad); // too many inputs
+        memcpy(bad, image, sizeof(bad)); bad[lfo_depth_source_off] = 77; decode_must_reject(bad); // bad ModSource
+        memcpy(bad, image, sizeof(bad)); bad[instr_count_off] = 0xFF; decode_must_reject(bad); // num_allocated over capacity
+        memcpy(bad, image, sizeof(bad)); bad[instr_layer_count_off] = 0; decode_must_reject(bad); // layer_count 0
+    }
+
+    // Queue mechanics: room condition, wraparound, ordering, two-phase consume.
+    // Packets are whole banks; instruments.entries[0].layer_count marks each one.
+    {
+        static Synth::BankUpdateQueue queue;
+        memset(&queue, 0, sizeof(queue));
+
+        Synth::InstrumentBank bank = { };
+        bank.instruments.allocate();
+
+        // Fill the queue (capacity 2).
+        for (uint32_t k = 0; k < Synth::bank_queue_capacity; k++) {
+            bank.instruments.entries[0].layer_count = k + 1;
+            TEST(Synth::push_bank_update(&queue, bank));
+        }
+        // Third push fails at tail=2, head=0.
+        bank.instruments.entries[0].layer_count = 99;
+        TEST( ! Synth::push_bank_update(&queue, bank));
+
+        // Consume one: the third push now succeeds (wraparound: slot 0 reused).
+        TEST(Synth::peek_bank_update(&queue)->instruments.entries[0].layer_count == 1);
+        Synth::consume_bank_update(&queue);
+        TEST(Synth::push_bank_update(&queue, bank));
+
+        // Drain in order: 2, then 99.
+        TEST(Synth::peek_bank_update(&queue)->instruments.entries[0].layer_count == 2);
+        Synth::consume_bank_update(&queue);
+        TEST(Synth::peek_bank_update(&queue)->instruments.entries[0].layer_count == 99);
+        Synth::consume_bank_update(&queue);
+        TEST(Synth::peek_bank_update(&queue) == nullptr);
+    }
+    // get_zone_name: named instrument and the "Zone X" fallback.
+    {
+        static Synth::InstrumentBank bank;
+        make_valid_bank(bank);
+        memcpy(bank.instrument_names[0], "Lead", 5);
+        char name[Synth::max_name_len];
+        Synth::get_zone_name(&bank, 0, 0, name, sizeof(name));
+        TEST(strcmp(name, "Lead") == 0);
+
+        bank.instrument_names[0][0] = 0;
+        Synth::get_zone_name(&bank, 0, 0, name, sizeof(name));
+        TEST(strcmp(name, "Zone 0") == 0);
+
+        bank.channel_zones[0][1] = { 50, 0 };
+        Synth::get_zone_name(&bank, 0, 1, name, sizeof(name));
+        TEST(strcmp(name, "Zone 1") == 0);
+    }
+
+    // Capture semantics: a configured generator node holds its descriptor BY VALUE; mutating
+    // (or replacing) the bank afterwards cannot change the node's sound.
+    {
+        static Synth::InstrumentBank bank;
+        make_valid_bank(bank);
+
+        Synth::ParamDescriptor env_node = { };
+        env_node.kind = Synth::ParamKind::envelope;
+        env_node.envelope = bank.envelopes.entries[0];
+        bank.envelopes.entries[0].num_points = 7; // edit the bank entry
+        bank.envelopes.entries[0].points[1].position = 12345;
+        TEST(env_node.envelope.num_points == 2); // node kept its own copy
+        TEST(env_node.envelope.points[1].position == 100);
+
+        Synth::ParamDescriptor lfo_node = { };
+        Synth::configure_lfo(&lfo_node, bank.lfos.entries[0], Synth::SourceOp::add, 0.5f, 0, 0, 0.0f);
+        bank.lfos.entries[0].period_ms = 9999;
+        TEST(lfo_node.lfo.lfo.period_ms == 50); // node kept its own copy
+    }
+
+    // Full-bank publish flow: two complete banks queued (coalesced upstream), drained in
+    // order; the runtime bank ends at the newest and the queue is empty.
+    {
+        static Synth::InstrumentBank banks[2];
+        static Synth::InstrumentBank runtime;
+        static Synth::BankUpdateQueue queue;
+        memset(&queue, 0, sizeof(queue));
+        make_valid_bank(banks[0]);
+        make_valid_bank(banks[1]);
+        banks[0].instruments.entries[0].routing[Synth::mod_volume].base_value = 0.25f;
+        banks[1].instruments.entries[0].routing[Synth::mod_volume].base_value = 0.75f;
+
+        TEST(Synth::validate_instrument_bank(&banks[0]));
+        TEST(Synth::validate_instrument_bank(&banks[1]));
+        TEST(Synth::push_bank_update(&queue, banks[0]));
+        TEST(Synth::push_bank_update(&queue, banks[1]));
+
+        // Audio-side drain: copy each peeked bank, then consume (as the editor app's audio-step hook does).
+        while (const Synth::InstrumentBank* packet = Synth::peek_bank_update(&queue)) {
+            runtime = *packet;
+            Synth::consume_bank_update(&queue);
+        }
+        TEST(approx(runtime.instruments.entries[0].routing[Synth::mod_volume].base_value, 0.75f, 0.001f));
+        TEST(runtime.instruments.num_allocated == 1);
     }
 
     return exit_code;

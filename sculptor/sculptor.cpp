@@ -75,7 +75,7 @@ bool skip_frame(struct Window* w)
     else if (skip_count < max_skip_count)
         ++skip_count;
 
-    static uint32_t last_frame_ms = 0;
+    static uint64_t last_frame_ms = 0;
 
     const uint64_t cur_time_ms = get_current_time_ms();
 
@@ -163,19 +163,22 @@ static bool create_gui_frame(uint32_t image_idx)
     ImGui_ImplVulkan_NewFrame();
     ImGui::NewFrame();
 
-    // TEMP Z0: live-rerouting test hook; removed when the Z2 channel editor lands.
+    // TODO move this to instrument editor's create_gui_frame()
+    Synth::pump_bank_publish();
+
+    // TEMPORARY test hook, removed once the instrument editor has its own UI.
     // F8 publishes test splits on channel 2; Shift+F8 undoes them (Ctrl+Z belongs
-    // to the geometry editor until the instrument editor gets its own UI in Z2).
+    // to the geometry editor until the instrument editor gets its own UI).
     if (io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_F8)) {
         if (Synth::editor_undo())
-            d_printf("TEMP Z0: bank undo (splits reverted)\n");
+            d_printf("TEMP: bank undo (splits reverted)\n");
     } else if (ImGui::IsKeyPressed(ImGuiKey_F8)) {
         Synth::InstrumentBank& bank = Synth::editable_bank();
         Synth::editor_snapshot();
-        bank.channel_routes[1][0] = { 1, 1 };  // channel 2 notes 1-59 -> supersaw demo
-        bank.channel_routes[1][1] = { 60, 2 }; // channel 2 notes 60+ -> FM demo
+        bank.channel_zones[1][0] = { 1, 1 };  // channel 2 notes 1-59 -> supersaw demo
+        bank.channel_zones[1][1] = { 60, 2 }; // channel 2 notes 60+ -> FM demo
         Synth::publish_bank();
-        d_printf("TEMP Z0: published test splits on channel 2\n");
+        d_printf("TEMP: published test splits on channel 2\n");
     }
 
     static vmath::vec2 prev_mouse_pos;

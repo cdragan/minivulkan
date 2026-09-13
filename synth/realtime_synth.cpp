@@ -93,7 +93,6 @@ namespace {
     struct Voice {
         bool     active;
         uint8_t  channel;
-        uint8_t  instrument;
         uint8_t  osc_ids[max_layers];    // Oscillator slots owned by this voice
         uint8_t  osc_count;              // Number of live oscillator slots owned (0 = none)
         bool     releasing;              // True after note-off, until the volume envelope finishes
@@ -121,7 +120,7 @@ namespace {
     InstrumentBank synth_bank;
 
     // Callback for reading modified instrument bank from the editor.
-    std::atomic<Synth::BankSourceCallback> bank_source_callback = nullptr;
+    std::atomic<void (*)()> bank_source_callback = nullptr;
 
     constexpr float cutoff_base_hz = 400.0f;
 
@@ -1037,14 +1036,19 @@ static bool allocate_oscillators(uint8_t*          osc_ids,
     return true;
 }
 
-void Synth::set_bank_source(BankSourceCallback source)
+void Synth::set_bank_source_callback(void (*callback)())
 {
-    bank_source_callback.store(source, std::memory_order_release);
+    bank_source_callback.store(callback, std::memory_order_release);
 }
 
 const Synth::InstrumentBank& Synth::current_bank()
 {
     return synth_bank;
+}
+
+void Synth::set_current_bank(const InstrumentBank& bank)
+{
+    synth_bank = bank;
 }
 
 bool Synth::init_synth()
@@ -1279,12 +1283,6 @@ static void process_note_off(uint32_t delta_samples, const DispatchedMidiEvent& 
     }
 }
 
-static const Instrument& voice_instrument(const Voice& voice)
-{
-    const uint32_t count = synth_bank.instruments.num_allocated;
-    return synth_bank.instruments.entries[voice.instrument < count ? voice.instrument : 0];
-}
-
 static void free_oscillator(uint32_t osc_idx)
 {
     oscillators[osc_idx].osc_type[0] = WaveType::no_wave;
@@ -1308,8 +1306,7 @@ static void drop_voice(uint32_t voice_idx, uint32_t channel, uint32_t note)
         free_oscillator(voice.osc_ids[layer_idx]);
     }
     voice.osc_count = 0;
-
-    voice.active                 = false;
+    voice.active    = false;
     note_to_voice[channel][note] = 0;
 }
 
@@ -1352,9 +1349,9 @@ static void configure_target_modulation(const Instrument& instrument,
     param_descs[env_node] = { };
     parameters[env_node]  = { };
     if (gen.envelope_desc_id) {
-        param_descs[env_node].kind             = Synth::ParamKind::envelope;
-        param_descs[env_node].envelope.desc_id = gen.envelope_desc_id;
-        parameters[env_node].sustain_voice     = static_cast<uint16_t>(voice_idx);
+        param_descs[env_node].kind         = Synth::ParamKind::envelope;
+        param_descs[env_node].envelope     = synth_bank.envelopes.entries[gen.envelope_desc_id - 1];
+        parameters[env_node].sustain_voice = static_cast<uint16_t>(voice_idx);
     }
 
     // LFO generator node.  Clear it first; configure_lfo overrides the descriptor when the layer has
@@ -1363,12 +1360,12 @@ static void configure_target_modulation(const Instrument& instrument,
     parameters[lfo_node]  = { };
     if (gen.lfo_desc_id) {
         Synth::configure_lfo(&param_descs[lfo_node],
-                            gen.lfo_desc_id,
-                            gen.lfo_op,
-                            gen.lfo_depth,
-                            static_cast<uint16_t>(resolve_source(gen.lfo_depth_source, channel, voice_idx)),
-                            static_cast<uint16_t>(resolve_source(gen.lfo_rate_source, channel, voice_idx)),
-                            gen.lfo_rate_scale_ms);
+                             synth_bank.lfos.entries[gen.lfo_desc_id - 1],
+                             gen.lfo_op,
+                             gen.lfo_depth,
+                             static_cast<uint16_t>(resolve_source(gen.lfo_depth_source, channel, voice_idx)),
+                             static_cast<uint16_t>(resolve_source(gen.lfo_rate_source, channel, voice_idx)),
+                             gen.lfo_rate_scale_ms);
     }
 
     // Resolve the target's routed input sources to concrete param ids.
@@ -1380,12 +1377,12 @@ static void configure_target_modulation(const Instrument& instrument,
     }
 
     Synth::configure_plain(&param_descs[osc_param(osc_slot, dest_role)],
-                                routing.base_value,
-                                gen.envelope_desc_id ? static_cast<uint16_t>(env_node) : uint16_t(0),
-                                gen.lfo_desc_id ? static_cast<uint16_t>(lfo_node) : uint16_t(0),
-                                gen.lfo_op,
-                                sources,
-                                routing.num_inputs);
+                           routing.base_value,
+                           gen.envelope_desc_id ? static_cast<uint16_t>(env_node) : uint16_t(0),
+                           gen.lfo_desc_id ? static_cast<uint16_t>(lfo_node) : uint16_t(0),
+                           gen.lfo_op,
+                           sources,
+                           routing.num_inputs);
 }
 
 // Seeds an externally-driven leaf (a MIDI input source) with an initial value+prev so a consumer
@@ -1425,12 +1422,12 @@ static void configure_effect_param(EffectInstance* effect, const EffectParamMod&
             return;
         }
         Synth::configure_lfo(&param_descs[lfo_node],
-                            mod.lfo_desc_id,
-                            mod.lfo_op,
-                            mod.lfo_depth,
-                            static_cast<uint16_t>(resolve_source(mod.lfo_depth_source, channel, 0)),
-                            static_cast<uint16_t>(resolve_source(mod.lfo_rate_source, channel, 0)),
-                            mod.lfo_rate_scale);
+                             synth_bank.lfos.entries[mod.lfo_desc_id - 1],
+                             mod.lfo_op,
+                             mod.lfo_depth,
+                             static_cast<uint16_t>(resolve_source(mod.lfo_depth_source, channel, 0)),
+                             static_cast<uint16_t>(resolve_source(mod.lfo_rate_source, channel, 0)),
+                             mod.lfo_rate_scale);
         parameters[lfo_node] = { };   // fresh LFO phase
     }
 
@@ -1443,12 +1440,12 @@ static void configure_effect_param(EffectInstance* effect, const EffectParamMod&
     }
 
     Synth::configure_plain(&param_descs[dest_node],
-                                mod.base_value,
-                                0,   // effects have no envelope
-                                static_cast<uint16_t>(lfo_node),   // 0 when no LFO
-                                mod.lfo_op,
-                                sources,
-                                mod.num_inputs);
+                           mod.base_value,
+                           0,   // effects have no envelope
+                           static_cast<uint16_t>(lfo_node),   // 0 when no LFO
+                           mod.lfo_op,
+                           sources,
+                           mod.num_inputs);
 
     effect->src_param_id[mod.param_index] = static_cast<uint16_t>(dest_node);
 }
@@ -1483,9 +1480,9 @@ static void process_note_on(uint32_t delta_samples, const DispatchedMidiEvent& e
     const uint32_t channel = event.channel;
     const uint32_t note    = event.note;
 
-    const uint8_t target_instrument = select_instrument(synth_bank.channel_routes[channel],
-                                                        Synth::max_instr_per_channel,
-                                                        static_cast<uint8_t>(note));
+    const uint8_t target_instrument = route_instrument(synth_bank.channel_zones[channel],
+                                                       Synth::max_instr_per_channel,
+                                                       static_cast<uint8_t>(note));
 
     // Re-triggering a note still alive (held or releasing, possibly with some
     // layers already silenced) reclaims it cleanly so the new note
@@ -1504,14 +1501,13 @@ static void process_note_on(uint32_t delta_samples, const DispatchedMidiEvent& e
 
     Voice& voice         = voices[voice_idx];
     voice.channel        = static_cast<uint8_t>(channel);
-    voice.instrument     = target_instrument;
     voice.active         = true;
     voice.releasing      = false;
     voice.release_sample = event.release_sample;
 
     note_to_voice[channel][note] = static_cast<uint8_t>(voice_idx);
 
-    const Instrument& instrument  = voice_instrument(voice);
+    const Instrument& instrument  = synth_bank.instruments.entries[target_instrument];
     const uint32_t    layer_count = instrument.layer_count;
     assert(layer_count >= 1 && layer_count <= max_layers);
 
@@ -1533,9 +1529,6 @@ static void process_note_on(uint32_t delta_samples, const DispatchedMidiEvent& e
     // One per-note pitch skew applies to every layer; each layer adds its own skew on top.
     const float note_skew = Synth::random_pitch_skew(&note_skew_rng, instrument.note_skew_semitones);
 
-    // Initialize each oscillator's constants and phase/smoothing state.  Resolved
-    // values (volume/pitch/duty/osc_mix/fm_index/panning) are written every step by
-    // update_modulation; only the smoothing history is seeded here.
     for (uint32_t layer_idx = 0; layer_idx < layer_count; ++layer_idx) {
 
         RunningOscillator& osc = oscillators[voice.osc_ids[layer_idx]];
@@ -1556,6 +1549,10 @@ static void process_note_on(uint32_t delta_samples, const DispatchedMidiEvent& e
         osc.mod_phase      = 0.0f;
         osc.old_volume     = 0.0f;   // ramp up from silence to avoid a click
         osc.old_panning    = instrument.routing[mod_panning].base_value;
+        osc.duty[0]        = instrument.routing[mod_duty0].base_value;
+        osc.duty[1]        = instrument.routing[mod_duty1].base_value;
+        osc.osc_mix        = instrument.routing[mod_osc_mix].base_value;
+        osc.fm_index       = instrument.routing[mod_fm_index].base_value;
 
         // Expand each modulation target into its node triple at this oscillator's slot.
         const uint32_t osc_slot = voice.osc_ids[layer_idx];
@@ -1891,7 +1888,7 @@ static void advance_parameters()
             const Voice&   owner         = voices[sustain_voice];
             const bool     sustain       = sustain_voice ? (owner.active && ! owner.releasing) : true;
 
-            parameters[node_idx].value = Synth::eval_envelope(synth_bank.envelopes.entries[gen.envelope.desc_id - 1],
+            parameters[node_idx].value = Synth::eval_envelope(gen.envelope,
                                                               &parameters[node_idx].envelope, sustain);
         }
         else if (gen.kind == Synth::ParamKind::lfo) {
@@ -1902,12 +1899,12 @@ static void advance_parameters()
             // period 0 tells eval_lfo_mod to use the descriptor period unchanged.  Clamp the offset
             // result to at least 1 ms so an editor-supplied scale can never drive the period negative
             // (unsigned underflow) or to zero (a divide-by-zero in the LFO phase).
-            const float    base_ms    = static_cast<float>(synth_bank.lfos.entries[gen.lfo.desc_id - 1].period_ms);
+            const float    base_ms    = static_cast<float>(gen.lfo.lfo.period_ms);
             const float    offset_ms  = base_ms + parameters[gen.lfo.rate_param_id].prev_value * gen.lfo.rate_scale_ms;
             const uint32_t period     = gen.lfo.rate_param_id
                                       ? static_cast<uint32_t>(offset_ms > 1.0f ? offset_ms : 1.0f)
                                       : 0;
-            parameters[node_idx].value = Synth::eval_lfo_mod(synth_bank.lfos.entries[gen.lfo.desc_id - 1],
+            parameters[node_idx].value = Synth::eval_lfo_mod(gen.lfo.lfo,
                                                              parameters[node_idx].lfo_tick,
                                                              rt_step_samples,
                                                              Synth::rt_sampling_rate,
@@ -1934,8 +1931,7 @@ static void update_modulation()
             continue;
         }
 
-        Voice&            voice      = voices[osc.voice_id];
-        const Instrument& instrument = voice_instrument(voice);
+        Voice& voice = voices[osc.voice_id];
 
         // Pitch adds the per-layer pitch offset on top of the layer's graph pitch
         // node (which already folds in channel bend and the vibrato generator).
@@ -1943,12 +1939,6 @@ static void update_modulation()
                      + osc.pitch_offset;
         // Panning is a per-layer modulatable target: read its graph dest node.
         osc.panning  = parameters[osc_param(osc_idx, osc_panning_dest)].value;
-        // These targets are unmodulated constants: read the target's routing base value.
-        osc.duty[0]  = instrument.routing[mod_duty0].base_value;
-        osc.duty[1]  = instrument.routing[mod_duty1].base_value;
-        osc.osc_mix  = instrument.routing[mod_osc_mix].base_value;
-        osc.fm_index = instrument.routing[mod_fm_index].base_value;
-
         // Volume: the oscillator's volume dest node, which already folds the ADSR envelope, the tremolo
         // LFO edge and the velocity input edge.  free-on-silence keys off the raw ADSR envelope node.
         const float vol_env_value = parameters[osc_param(osc_idx, osc_volume_env)].value;
@@ -2096,9 +2086,8 @@ static void compute_fir_coefficients()
 
 static void render_audio_step()
 {
-    if (const Synth::BankSourceCallback source = bank_source_callback.load(std::memory_order_acquire)) {
-        if (const InstrumentBank* const published_bank = source())
-            synth_bank = *published_bank;
+    if (void (*const callback)() = bank_source_callback.load(std::memory_order_acquire)) {
+        callback();
     }
 
     const uint32_t start_samples = rendered_samples;

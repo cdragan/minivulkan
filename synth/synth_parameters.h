@@ -85,17 +85,13 @@ enum class ParamKind : uint8_t {
 };
 
 struct ParamDescriptor {
-    struct EnvelopeParam {
-        uint16_t desc_id;
-    };
-
     struct LFOParam {
-        uint16_t desc_id;
-        SourceOp op;
-        float    depth;
-        uint16_t depth_param_id;
-        uint16_t rate_param_id;
-        float    rate_scale_ms;
+        LFODescriptor lfo;
+        SourceOp      op;
+        float         depth;
+        uint16_t      depth_param_id;
+        uint16_t      rate_param_id;
+        float         rate_scale_ms;
     };
 
     struct PlainParam {
@@ -106,10 +102,13 @@ struct ParamDescriptor {
 
     ParamKind kind;
     union {
-        EnvelopeParam envelope;
-        LFOParam      lfo;
-        PlainParam    plain;
+        EnvelopeDescriptor envelope;
+        LFOParam           lfo;
+        PlainParam         plain;
     };
+
+    static_assert(sizeof(EnvelopeDescriptor) <= sizeof(PlainParam));
+    static_assert(sizeof(LFOParam) <= sizeof(PlainParam));
 };
 
 // Runtime value of one parameter
@@ -184,14 +183,14 @@ uint32_t get_ringbuf_contig_tail(uint64_t pos, uint32_t capacity);
 // Advances the parameters
 void propagate_parameters(Parameter* params, const ParamDescriptor* descs, uint32_t num_params);
 
-// Configures a ParamDescriptor as an LFO generator
-void configure_lfo(ParamDescriptor* desc,
-                   uint16_t         lfo_desc_id,
-                   SourceOp         lfo_op,
-                   float            lfo_depth,
-                   uint16_t         lfo_depth_param_id,
-                   uint16_t         lfo_rate_param_id,
-                   float            lfo_rate_scale);
+// Configures a ParamDescriptor as an LFO generator; the descriptor is captured by value.
+void configure_lfo(ParamDescriptor*     desc,
+                   const LFODescriptor& lfo,
+                   SourceOp             lfo_op,
+                   float                lfo_depth,
+                   uint16_t             lfo_depth_param_id,
+                   uint16_t             lfo_rate_param_id,
+                   float                lfo_rate_scale);
 
 // Configures a modulated parameter, composed of multiple input parameters
 void configure_plain(ParamDescriptor*   desc,

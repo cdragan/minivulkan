@@ -21,13 +21,11 @@ bool editor_redo();
 bool save_editor_bank(const char* path);
 bool load_editor_bank(const char* path);
 
-// Publish the editable bank to the synth (GUI thread).
-void publish_bank();
+// Publish the edited bank to the synth (GUI thread). Returns false when the bank queue
+// is backpressured; the pending copy is retained and retried by pump_bank_publish().
+bool publish_bank();
 
-// Acquire the latest published bank for the current audio block (in synth/audio thread)
-const InstrumentBank* acquire_audio_bank();
-
-// Returns the latest published bank, but only if it changed.
-const InstrumentBank* next_bank_update();
+// GUI thread, once per frame: retries a backpressured publish (see publish_bank).
+bool pump_bank_publish();
 
 } // namespace Synth
