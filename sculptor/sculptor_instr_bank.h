@@ -24,6 +24,14 @@ void get_zone_name(const InstrumentBank* bank, uint32_t channel, uint32_t zone_e
 // descriptor reference validity, envelope/LFO/oscillator invariants, enum/range checks.
 bool validate_instrument_bank(const InstrumentBank* bank);
 
+// Reclaims pool slots no live reference can reach: instruments referenced by no enabled
+// channel's zone table are removed, then descriptors referenced by no surviving instrument
+// and no effect chain (any channel or the master) are removed.  Survivors compact to the
+// dense prefix; every zone table and every descriptor reference is remapped in the same
+// pass, and instrument_names move with their instruments.  The bank must be valid on entry
+// (descriptor ids in bounds); the result is valid whenever the input was.
+void reclaim_unused_slots(InstrumentBank* bank);
+
 // Fixed-depth SPSC bank-swap queue (producer: GUI thread, consumer: the app's audio-step hook).
 // Packets hold a complete, self-consistent bank; the consumer copies it over the runtime bank
 // between steps. Room iff tail - head < capacity (unsigned bounded distance).

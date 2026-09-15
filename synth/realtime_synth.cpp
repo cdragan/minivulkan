@@ -66,18 +66,8 @@ namespace {
     typedef uint8_t NoteToVoice[128];
     NoteToVoice note_to_voice[Synth::max_channels];
 
-    // Maximum vibrato swing in semitones when the mod wheel is fully on
-    constexpr float vibrato_depth_semitones = 0.5f;
-
-    // Vibrato LFO period at rest (~6 Hz); the mod wheel shortens it toward a faster sweep, so
-    // raising the wheel makes the vibrato both deeper and faster (a parameter-sourced LFO rate).
-    constexpr uint16_t vibrato_period_ms     = 167;
-    constexpr float    vibrato_rate_range_ms = 107.0f;  // full wheel -> ~60 ms (~16 Hz)
-
     // Random pitch skew: a few cents of analog-style drift, applied per note and per layer.
     constexpr uint32_t note_skew_seed                = 0x5eed1234u;
-    constexpr float    supersaw_note_skew_semitones  = 0.08f;
-    constexpr float    supersaw_layer_skew_semitones = 0.06f;
 
     // Default pitch bend range in semitones (standard MIDI default is +/- 2)
     constexpr float default_pitch_bend_range_semitones = 2.0f;
@@ -122,23 +112,6 @@ namespace {
 
     // Callback for reading modified instrument bank from the editor.
     std::atomic<void (*)()> bank_source_callback = nullptr;
-
-    constexpr float cutoff_base_hz = 400.0f;
-
-    // TODO temporary demo instruments
-    // Pool ids of the built-in envelopes and LFOs (1-based, 0 = none).  init_modulation_sources
-    // allocates these in the bank's pools; the demo instruments and effects then reference them.
-    uint16_t volume_envelope_id;
-    uint16_t cutoff_sweep_envelope_id;
-    uint16_t release_envelope_ids[max_layers];   // one release envelope per layer, for staggered layer releases
-    uint16_t vibrato_lfo_desc_id;
-    uint16_t tremolo_lfo_desc_id;
-    uint16_t master_fir_sweep_lfo_desc_id;
-    uint16_t autopan_lfo_desc_id;
-
-    // Auto-pan demo: a slow sine swinging panning around center; depth 0.4 keeps it short of the edges.
-    constexpr uint16_t autopan_period_ms = 1500;
-    constexpr float    autopan_depth     = 0.4f;
 
     // parameters[] is partitioned into a sentinel (param 0) then per-owner blocks.  Each owner has a
     // fixed set of roles; a source addresses a parameter by computing its block index.  A modulation
@@ -533,13 +506,6 @@ namespace {
 
     static RunningOscillator oscillators[Synth::max_oscillators];
 
-    // TODO Runtime instrument definition.  Hardcoded for now; an editor will
-    // populate these later.  Everything is filled in init_instruments.
-
-    // Number of built-in instruments the runtime allocates at init (temporary until the editor
-    // supplies them).
-    constexpr uint32_t num_builtin_instruments = 5;
-
     RNG note_skew_rng;   // Shared generator for per-note pitch skew
 
     static constexpr uint32_t max_mix_channels = Synth::max_channels;
@@ -658,124 +624,6 @@ namespace Synth {
     void stop_synth_os();
 }
 
-// Fills count layers of an instrument with one waveform; per-layer generators are set afterwards.
-static void set_instrument_layers(Instrument*        instr,
-                                  uint32_t           count,
-                                  WaveType           type0,
-                                  WaveType           type1,
-                                  OscMode            mode,
-                                  float              ratio)
-{
-    instr->layer_count = count;
-    for (uint32_t layer_idx = 0; layer_idx < count; layer_idx++) {
-        Oscillator& osc = instr->layers[layer_idx];
-        osc.osc_type[0] = type0;
-        osc.osc_type[1] = type1;
-        osc.osc_mode    = mode;
-        osc.mod_ratio   = ratio;
-    }
-}
-
-// Fills each instrument's waveforms and per-target modulation.  Every instrument gets the same
-// default pitch and volume modulation; per-instrument specifics (FM depth, duty, the supersaw demo)
-// follow.  note-on expands these declarations into graph nodes.
-// Allocates and fills the runtime's envelopes and LFOs from the bank pools, recording their ids.
-// Runs before the instruments are wired so the wiring can reference the ids.
-static void init_modulation_sources();
-
-static void init_instruments()
-{
-    note_skew_rng.init(note_skew_seed);
-
-    init_modulation_sources();
-
-    for (uint32_t instr_idx = 0; instr_idx < num_builtin_instruments; instr_idx++) {
-        synth_bank.instruments.allocate();
-    }
-
-    // Index 0 is a plain mono sine.  Index 1 is a 7-layer supersaw with a symmetric pitch spread of
-    // about +/- 18 cents.  Index 2 is a sine-on-sine FM voice (mod_ratio 2.0, fm_index 3.0).  Index 3
-    // is a hard-sync voice: a sine master sets the pitch and a sawtooth slave is synced at ratio 2.5.
-    // Index 4 is a mellow piano-ish voice: a triangle (sawtooth at duty 0.5).
-    set_instrument_layers(&synth_bank.instruments.entries[0], 1,          WaveType::sine_wave,     WaveType::no_wave,       osc_mode_blend,     0.0f);
-    set_instrument_layers(&synth_bank.instruments.entries[1], max_layers, WaveType::sawtooth_wave, WaveType::no_wave,       osc_mode_blend,     0.0f);
-    set_instrument_layers(&synth_bank.instruments.entries[2], 1,          WaveType::sine_wave,     WaveType::sine_wave,     osc_mode_fm,        2.0f);
-    set_instrument_layers(&synth_bank.instruments.entries[3], 1,          WaveType::sine_wave,     WaveType::sawtooth_wave, osc_mode_hard_sync, 2.5f);
-    set_instrument_layers(&synth_bank.instruments.entries[4], 1,          WaveType::sawtooth_wave, WaveType::no_wave,       osc_mode_blend,     0.0f);
-
-    // Supersaw pitch spread: symmetric about +/- 18 cents across the layers.
-    static const float supersaw_pitch_offsets[max_layers] = { -0.18f, -0.12f, -0.06f, 0.0f, 0.06f, 0.12f, 0.18f };
-    for (uint32_t layer_idx = 0; layer_idx < max_layers; layer_idx++) {
-        synth_bank.instruments.entries[1].layers[layer_idx].pitch_offset = supersaw_pitch_offsets[layer_idx];
-    }
-
-    for (uint32_t instr_idx = 0; instr_idx < synth_bank.instruments.num_allocated; instr_idx++) {
-        Instrument& instr = synth_bank.instruments.entries[instr_idx];
-
-        // Pitch routing: channel bend folds in voice-wide on top of the per-layer vibrato.
-        instr.routing[mod_pitch].base_value = 0.0f;
-        instr.routing[mod_pitch].num_inputs = 1;
-        instr.routing[mod_pitch].inputs[0]  = { ModSource::pitch_bend, SourceOp::add, 1.0f };
-
-        // Volume routing: note velocity scales the result voice-wide.
-        instr.routing[mod_volume].base_value = 0.0f;
-        instr.routing[mod_volume].num_inputs = 1;
-        instr.routing[mod_volume].inputs[0]  = { ModSource::velocity, SourceOp::multiply, 1.0f };
-
-        // Panning: centered constant (no generators).
-        instr.routing[mod_panning].base_value = 0.5f;
-
-        for (uint32_t layer_idx = 0; layer_idx < instr.layer_count; layer_idx++) {
-            // Pitch: a mod-wheel-scaled vibrato whose rate also speeds up with the wheel (a sourced
-            // LFO rate).  Each layer runs its own vibrato instance off the same descriptor, so the
-            // layers stay in phase (the LFO is a deterministic function of the tick).  No envelope.
-            LayerGen& pitch_gen         = instr.layers[layer_idx].gen[mod_pitch];
-            pitch_gen.lfo_desc_id       = vibrato_lfo_desc_id;
-            pitch_gen.lfo_op            = SourceOp::add;
-            pitch_gen.lfo_depth         = vibrato_depth_semitones;
-            pitch_gen.lfo_depth_source  = ModSource::mod_wheel;
-            pitch_gen.lfo_rate_source   = ModSource::mod_wheel;
-            pitch_gen.lfo_rate_scale_ms = -vibrato_rate_range_ms;
-
-            // Volume: an ADSR envelope attenuated by a pressure-driven tremolo LFO (the supersaw
-            // overrides the envelope per layer below).
-            LayerGen& volume_gen        = instr.layers[layer_idx].gen[mod_volume];
-            volume_gen.envelope_desc_id = volume_envelope_id;
-            volume_gen.lfo_desc_id      = tremolo_lfo_desc_id;
-            volume_gen.lfo_op           = SourceOp::multiply;
-            volume_gen.lfo_depth        = 1.0f;
-            volume_gen.lfo_depth_source = ModSource::pressure_combine;
-            volume_gen.lfo_rate_source  = ModSource::none;
-        }
-    }
-
-    // FM voice: constant FM depth 3.0.
-    synth_bank.instruments.entries[2].routing[mod_fm_index].base_value = 3.0f;
-
-    // FM voice also demos modulatable panning: a sine auto-pan added around center.
-    LayerGen& fm_pan_gen        = synth_bank.instruments.entries[2].layers[0].gen[mod_panning];
-    fm_pan_gen.lfo_desc_id      = autopan_lfo_desc_id;
-    fm_pan_gen.lfo_op           = SourceOp::add;
-    fm_pan_gen.lfo_depth        = autopan_depth;
-    fm_pan_gen.lfo_depth_source = ModSource::none;
-    fm_pan_gen.lfo_rate_source  = ModSource::none;
-
-    // Triangle-ish piano: sawtooth at duty 0.5.
-    synth_bank.instruments.entries[4].routing[mod_duty0].base_value = 0.5f;
-
-    // Supersaw demo: each layer gets its own swept low pass and its own volume envelope with a
-    // staggered release, so the layers fade out at audibly different rates.
-    Instrument& supersaw = synth_bank.instruments.entries[1];
-    supersaw.routing[mod_lowpass_cutoff].base_value = cutoff_base_hz;
-    supersaw.note_skew_semitones  = supersaw_note_skew_semitones;
-    supersaw.layer_skew_semitones = supersaw_layer_skew_semitones;
-    for (uint32_t layer_idx = 0; layer_idx < supersaw.layer_count; layer_idx++) {
-        supersaw.layers[layer_idx].gen[mod_lowpass_cutoff].envelope_desc_id = cutoff_sweep_envelope_id;
-
-        supersaw.layers[layer_idx].gen[mod_volume].envelope_desc_id = release_envelope_ids[layer_idx];
-    }
-}
-
 static uint32_t writer_alloc_node(const void* ctx);
 static uint16_t writer_resolve_source(const void* ctx, Synth::ModSource source, uint32_t channel);
 static void writer_configure_dest(const void*               ctx,
@@ -822,7 +670,8 @@ static void init_oscillator_buffers()
 {
     assert(Synth::num_channels <= max_mix_channels);
 
-    init_instruments();
+    Synth::init_default_bank(&synth_bank);
+    note_skew_rng.init(note_skew_seed);
 
     for (uint32_t channel = 0; channel < max_mix_channels; channel++) {
         mix_channels[channel].chan_output_offs =
@@ -851,135 +700,6 @@ static void init_oscillator_buffers()
     expand_effects(synth_bank);
 
     init_fir();
-}
-
-
-static void init_modulation_sources()
-{
-    volume_envelope_id       = static_cast<uint16_t>(synth_bank.envelopes.allocate() + 1);
-    cutoff_sweep_envelope_id = static_cast<uint16_t>(synth_bank.envelopes.allocate() + 1);
-    for (uint32_t layer_idx = 0; layer_idx < max_layers; layer_idx++) {
-        release_envelope_ids[layer_idx] = static_cast<uint16_t>(synth_bank.envelopes.allocate() + 1);
-    }
-    vibrato_lfo_desc_id          = static_cast<uint16_t>(synth_bank.lfos.allocate() + 1);
-    tremolo_lfo_desc_id          = static_cast<uint16_t>(synth_bank.lfos.allocate() + 1);
-    master_fir_sweep_lfo_desc_id = static_cast<uint16_t>(synth_bank.lfos.allocate() + 1);
-    autopan_lfo_desc_id          = static_cast<uint16_t>(synth_bank.lfos.allocate() + 1);
-
-    // TODO TEMP test settings
-    // Piano-ish volume envelope: a fast percussive attack then a long, roughly
-    // exponential decay (approximated by piecewise-linear points) down to near
-    // silence, held there while the key is down, then a short release.  The quick
-    // attack and decaying tail make the effects (especially the reverb) easy to
-    // hear.  Value 0xFFFF maps to gain 1.0 (min_max_delta = 1/65535); 1 tick ~ 6 ms.
-    EnvelopeDescriptor& volume_envelope = synth_bank.envelopes.entries[volume_envelope_id - 1];
-    volume_envelope.num_points          = 7;
-    volume_envelope.unused_alignment    = 0;
-    volume_envelope.sustain_first_point = 5;
-    volume_envelope.sustain_last_point  = 5;
-    volume_envelope.min_value           = 0.0f;
-    volume_envelope.min_max_delta       = 1.0f / 65535.0f;
-    volume_envelope.points[0] = { 0,   0      };  // silent
-    volume_envelope.points[1] = { 1,   0xFFFF };  // fast attack (~6 ms)
-    volume_envelope.points[2] = { 12,  0xB000 };  // initial fast decay
-    volume_envelope.points[3] = { 45,  0x6000 };
-    volume_envelope.points[4] = { 120, 0x2000 };
-    volume_envelope.points[5] = { 210, 0x0800 };  // long tail to ~3% (sustain)
-    volume_envelope.points[6] = { 235, 0      };  // release (~145 ms)
-
-    // TODO TEMP demo: cutoff sweep envelope.  It decays from
-    // the full sweep amount down to 0 over the note, so the cutoff parameter sweeps
-    // from base + sweep_hz down to base.  Value 0xFFFF maps to sweep_hz Hz
-    // (min_max_delta = sweep_hz / 65535); 1 tick ~ 6 ms, so ~125 ticks ~ 0.75 s
-    // matches the demo note length.  No sustain plateau: the sweep runs to 0 even
-    // while the key is held.
-    constexpr float cutoff_sweep_hz = 6000.0f;
-    EnvelopeDescriptor& cutoff_envelope = synth_bank.envelopes.entries[cutoff_sweep_envelope_id - 1];
-    cutoff_envelope.num_points          = 3;
-    cutoff_envelope.unused_alignment    = 0;
-    cutoff_envelope.sustain_first_point = 2;
-    cutoff_envelope.sustain_last_point  = 2;
-    cutoff_envelope.min_value           = 0.0f;
-    cutoff_envelope.min_max_delta       = cutoff_sweep_hz / 65535.0f;
-    cutoff_envelope.points[0] = { 0,   0xFFFF };  // full sweep amount at note-on
-    cutoff_envelope.points[1] = { 125, 0      };  // decays to base over ~0.75 s
-    cutoff_envelope.points[2] = { 126, 0      };  // stays at base (sustain)
-
-    // TEMP demo: per-layer volume envelopes for the supersaw.  Each copies the piano volume
-    // envelope but lengthens the release so the layers tail off at audibly different rates.
-    for (uint32_t layer_idx = 0; layer_idx < max_layers; layer_idx++) {
-        EnvelopeDescriptor& release_envelope = synth_bank.envelopes.entries[release_envelope_ids[layer_idx] - 1];
-        release_envelope = volume_envelope;
-
-        // Release runs from the sustain point (5) to the final point (6); lengthen it
-        // per layer index from ~0.15 s up to ~2.1 s.
-        const uint16_t release_ticks = static_cast<uint16_t>(25 + layer_idx * 55);
-        release_envelope.points[6].position =
-            static_cast<uint16_t>(release_envelope.points[5].position + release_ticks);
-    }
-
-    // Vibrato LFO: sine, ~6 Hz (167 ms); min/delta unused by eval_lfo_mod.
-    synth_bank.lfos.entries[vibrato_lfo_desc_id - 1] = { Synth::WaveType::sine_wave, 0, vibrato_period_ms, 0.0f, 1.0f };
-
-    // Tremolo LFO: sine, ~5 Hz (200 ms); min/delta unused by eval_lfo_mod.
-    synth_bank.lfos.entries[tremolo_lfo_desc_id - 1] = { Synth::WaveType::sine_wave, 0, 200, 0.0f, 1.0f };
-
-    // TEMP demo: master FIR cutoff sweep LFO -- a 4 s triangle (sawtooth, duty 0x7F); min/delta unused.
-    synth_bank.lfos.entries[master_fir_sweep_lfo_desc_id - 1] = { Synth::WaveType::sawtooth_wave, 0x7F, 4000, 0.0f, 1.0f };
-
-    // Auto-pan LFO: sine, ~1.5 s sweep; min/delta unused by eval_lfo_mod.
-    synth_bank.lfos.entries[autopan_lfo_desc_id - 1] = { Synth::WaveType::sine_wave, 0, autopan_period_ms, 0.0f, 1.0f };
-    // Demo effect chains, seeded into the published bank (the single source of truth the
-    // editor edits and the runtime expands). Channel 0: distortion; channel 1: chorus;
-    // master: reverb, compressor, then an FIR lowpass whose cutoff the sweep LFO drives
-    // through a bank binding (base = sweep center, depth = half the sweep span).
-    {
-    EffectChainBinding& chain = synth_bank.channel_chains[0];
-    chain.num_effects = 1;
-    chain.effects[0].type = EffectType::distortion;
-    chain.effects[0].enabled = true;
-    chain.effects[0].bindings[0].base_value = 5.0f; // tanh drive
-    chain.effects[0].bindings[1].base_value = 1.0f; // fully wet
-
-    EffectChainBinding& chorus_chain = synth_bank.channel_chains[1];
-    chorus_chain.num_effects = 1;
-    chorus_chain.effects[0].type = EffectType::chorus;
-    chorus_chain.effects[0].enabled = true;
-    chorus_chain.effects[0].bindings[0].base_value = 1.5f;
-    chorus_chain.effects[0].bindings[1].base_value = 440.0f;
-    chorus_chain.effects[0].bindings[2].base_value = 0.5f;
-
-    EffectChainBinding& master = synth_bank.master_chain;
-    master.num_effects = 3;
-    master.effects[0].type = EffectType::reverb;
-    master.effects[0].enabled = true;
-    master.effects[0].bindings[0].base_value = 0.7f;
-    master.effects[0].bindings[1].base_value = 0.5f;
-    master.effects[0].bindings[2].base_value = 0.3f;
-
-    constexpr float compressor_threshold = 0.3f;
-    constexpr float compressor_ratio = 4.0f;
-    constexpr float compressor_attack = 0.9f;
-    constexpr float compressor_release = 0.9995f;
-    constexpr float compressor_makeup = 1.5f;
-    master.effects[1].type = EffectType::compressor;
-    master.effects[1].enabled = true;
-    master.effects[1].bindings[0].base_value = compressor_threshold;
-    master.effects[1].bindings[1].base_value = compressor_ratio;
-    master.effects[1].bindings[2].base_value = compressor_attack;
-    master.effects[1].bindings[3].base_value = compressor_release;
-    master.effects[1].bindings[4].base_value = compressor_makeup;
-
-    constexpr float sweep_low_hz = 250.0f;
-    constexpr float sweep_high_hz = 6000.0f;
-    master.effects[2].type = EffectType::fir;
-    master.effects[2].enabled = true;
-    master.effects[2].bindings[0].base_value = (sweep_low_hz + sweep_high_hz) * 0.5f;
-    master.effects[2].bindings[0].lfo_desc_id = master_fir_sweep_lfo_desc_id;
-    master.effects[2].bindings[0].lfo_op = SourceOp::add;
-    master.effects[2].bindings[0].lfo_depth = (sweep_high_hz - sweep_low_hz) * 0.5f;
-    master.effects[2].bindings[1].base_value = 0.0f; // highpass off
-    }
 }
 
 static void init_modulation()
@@ -1437,6 +1157,10 @@ static void process_note_on(uint32_t delta_samples, const DispatchedMidiEvent& e
 {
     const uint32_t channel = event.channel;
     const uint32_t note    = event.note;
+
+    if ( ! synth_bank.channel_enabled[channel]) {
+        return;
+    }
 
     const uint8_t target_instrument = route_instrument(synth_bank.channel_zones[channel],
                                                        Synth::max_instr_per_channel,

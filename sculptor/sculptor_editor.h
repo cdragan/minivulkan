@@ -15,6 +15,9 @@
 
 namespace Sculptor {
 
+bool is_ctrl_down();
+bool is_shift_down();
+
 class Editor {
     public:
         Editor() = default;

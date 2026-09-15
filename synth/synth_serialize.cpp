@@ -14,7 +14,7 @@ namespace Synth {
 // layout changes, so a stale file is rejected rather than misread.
 // Marker: SYnth Instrument Bank
 static const uint8_t  bank_marker[4]     = { 'S', 'Y', 'I', 'B' };
-static const uint16_t bank_version       = 2;
+static const uint16_t bank_version       = 3;
 static const uint32_t bank_payload_size  = static_cast<uint32_t>(sizeof(InstrumentBank));
 
 static uint8_t serialize_image[instrument_bank_image_size];

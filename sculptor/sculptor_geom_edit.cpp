@@ -194,24 +194,6 @@ namespace {
     bool dialog_load;
 }
 
-static bool is_ctrl_down()
-{
-#ifdef __APPLE__
-    constexpr ImGuiKey left_ctrl  = ImGuiKey_LeftSuper;
-    constexpr ImGuiKey right_ctrl = ImGuiKey_RightSuper;
-#else
-    constexpr ImGuiKey left_ctrl  = ImGuiKey_LeftCtrl;
-    constexpr ImGuiKey right_ctrl = ImGuiKey_RightCtrl;
-#endif
-
-    return ImGui::IsKeyDown(left_ctrl) || ImGui::IsKeyDown(right_ctrl);
-}
-
-static bool is_shift_down()
-{
-    return ImGui::IsKeyDown(ImGuiKey_LeftShift) || ImGui::IsKeyDown(ImGuiKey_RightShift);
-}
-
 static bool is_alt_down()
 {
     return ImGui::IsKeyDown(ImGuiKey_LeftAlt) || ImGui::IsKeyDown(ImGuiKey_RightAlt);
@@ -1441,7 +1423,7 @@ void GeometryEditor::handle_keyboard_actions()
 
     if (ImGui::IsKeyPressed(ImGuiKey_Z) && ! is_alt_down()) {
 
-        if (is_ctrl_down()) {
+        if (is_ctrl_down() && window_focused) {
             if (is_shift_down())
                 redo();
             else
@@ -2034,6 +2016,8 @@ bool GeometryEditor::create_gui_frame(uint32_t image_idx, bool* need_realloc, co
             ImGui::CloseCurrentPopup();
         ImGui::EndPopup();
     }
+
+    window_focused = ImGui::IsWindowFocused();
 
     ImGui::End();
 

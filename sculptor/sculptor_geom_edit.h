@@ -217,9 +217,10 @@ class GeometryEditor: public Editor {
         void redo();
 
         View               view;
-        Resources*         cur_res          = nullptr; // Host resources used in this frame
-        uint32_t           window_width     = 0;
-        uint32_t           window_height    = 0;
+        Resources*         cur_res                = nullptr; // Host resources used in this frame
+        uint32_t           window_width           = 0;
+        uint32_t           window_height          = 0;
+        bool               window_focused         = false;
         VkPipeline         gray_patch_gbuffer_mat = VK_NULL_HANDLE;
         VkPipeline         selection_mat          = VK_NULL_HANDLE;
         VkPipeline         vertex_mat             = VK_NULL_HANDLE;

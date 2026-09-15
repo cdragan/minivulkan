@@ -34,13 +34,15 @@ const int gui_config_flags = ImGuiConfigFlags_NavEnableKeyboard
 static Sculptor::AssetBrowser   asset_browser;
 static Sculptor::GeometryEditor geometry_editor;
 static Sculptor::TextureEditor  texture_editor;
+static Sculptor::SynthEditor    synth_editor;
 
 // Global list of all possible editor windows, this collection is used for generic handling
 // of editor windows, like drawing and event passing to visible editors
 static Sculptor::Editor* const editors[] = {
     &asset_browser,
     &geometry_editor,
-    &texture_editor
+    &texture_editor,
+    &synth_editor
 };
 
 // Need +1 for ImGui full window itself, +max_asset_slots for asset thumbnails
@@ -118,8 +120,6 @@ bool init_assets()
     // TODO find a better place
     if ( ! Synth::init_synth())
         d_printf("Synth initialization failed; continuing without audio\n");
-    else
-        Synth::init_editor();
 
     return true;
 }
@@ -162,24 +162,6 @@ static bool create_gui_frame(uint32_t image_idx)
 
     ImGui_ImplVulkan_NewFrame();
     ImGui::NewFrame();
-
-    // TODO move this to instrument editor's create_gui_frame()
-    Synth::pump_bank_publish();
-
-    // TEMPORARY test hook, removed once the instrument editor has its own UI.
-    // F8 publishes test splits on channel 2; Shift+F8 undoes them (Ctrl+Z belongs
-    // to the geometry editor until the instrument editor gets its own UI).
-    if (io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_F8)) {
-        if (Synth::editor_undo())
-            d_printf("TEMP: bank undo (splits reverted)\n");
-    } else if (ImGui::IsKeyPressed(ImGuiKey_F8)) {
-        Synth::InstrumentBank& bank = Synth::editable_bank();
-        Synth::editor_snapshot();
-        bank.channel_zones[1][0] = { 1, 1 };  // channel 2 notes 1-59 -> supersaw demo
-        bank.channel_zones[1][1] = { 60, 2 }; // channel 2 notes 60+ -> FM demo
-        Synth::publish_bank();
-        d_printf("TEMP: published test splits on channel 2\n");
-    }
 
     static vmath::vec2 prev_mouse_pos;
 
@@ -267,7 +249,7 @@ static bool create_gui_frame(uint32_t image_idx)
 
         ImGui::Separator();
 
-        const Synth::AudioRingStatus ring        = Synth::get_audio_ring_status();
+        const Synth::AudioRingStatus ring         = Synth::get_audio_ring_status();
         const float                  frames_to_ms = 1000.0f / static_cast<float>(Synth::rt_sampling_rate);
         const float                  fill_ms      = static_cast<float>(ring.fill_frames) * frames_to_ms;
         const float                  lead_ms      = static_cast<float>(ring.lead_frames) * frames_to_ms;

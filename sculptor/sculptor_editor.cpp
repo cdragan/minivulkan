@@ -6,6 +6,24 @@
 
 #include <stdio.h>
 
+bool Sculptor::is_ctrl_down()
+{
+#ifdef __APPLE__
+    constexpr ImGuiKey left_ctrl  = ImGuiKey_LeftSuper;
+    constexpr ImGuiKey right_ctrl = ImGuiKey_RightSuper;
+#else
+    constexpr ImGuiKey left_ctrl  = ImGuiKey_LeftCtrl;
+    constexpr ImGuiKey right_ctrl = ImGuiKey_RightCtrl;
+#endif
+
+    return ImGui::IsKeyDown(left_ctrl) || ImGui::IsKeyDown(right_ctrl);
+}
+
+bool Sculptor::is_shift_down()
+{
+    return ImGui::IsKeyDown(ImGuiKey_LeftShift) || ImGui::IsKeyDown(ImGuiKey_RightShift);
+}
+
 void Sculptor::Editor::set_object_name(const char* new_name)
 {
     snprintf(object_name, sizeof(object_name), "%s", new_name);

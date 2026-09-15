@@ -460,7 +460,7 @@ int main()
     }
 
     // Keyboard split routing: route_instrument maps a note to an instrument via an ordered
-    // table; start_note 0 ends the table, so an all-zero table resolves to instrument 0.
+    // table; stored starts are first-note + 1 (0 = unused slot), so an all-zero table resolves to instrument 0.
     {
         const uint32_t count = Synth::max_instr_per_channel;
 
@@ -469,11 +469,11 @@ int main()
         TEST(Synth::route_instrument(empty, count, 60)  == 0);
         TEST(Synth::route_instrument(empty, count, 127) == 0);
 
-        // Notes 1..59 -> instrument 0, notes 60.. -> instrument 1.  Entry 0 must start at a
-        // non-zero note since 0 is the end-of-table sentinel.
+        // Notes 0..59 -> instrument 0, notes 60.. -> instrument 1.  Slot 0 stores 1
+        // (zone 0 starts at note 0); 0 is the end-of-table sentinel.
         Synth::Zone split[Synth::max_instr_per_channel] = { };
         split[0] = { 1,  0 };
-        split[1] = { 60, 1 };
+        split[1] = { 61, 1 };;
         TEST(Synth::route_instrument(split, count, 0)   == 0);
         TEST(Synth::route_instrument(split, count, 59)  == 0);
         TEST(Synth::route_instrument(split, count, 60)  == 1);
@@ -481,8 +481,8 @@ int main()
 
         Synth::Zone three[Synth::max_instr_per_channel] = { };
         three[0] = { 1,  2 };
-        three[1] = { 48, 4 };
-        three[2] = { 72, 3 };
+        three[1] = { 49, 4 };;
+        three[2] = { 73, 3 };;
         TEST(Synth::route_instrument(three, count, 47)  == 2);
         TEST(Synth::route_instrument(three, count, 48)  == 4);
         TEST(Synth::route_instrument(three, count, 71)  == 4);
@@ -594,7 +594,7 @@ int main()
         bank.instruments.free(1);
         bank.instruments.free(3);
         bank.channel_zones[0][0] = { 1, 4 };       // note >= 1 -> instrument slot 4 (survives)
-        bank.channel_zones[0][1] = { 64, 3 };      // references deleted instrument slot 3
+        bank.channel_zones[0][1] = { 65, 3 };      // references deleted instrument slot 3
 
         uint32_t instr_map[Synth::max_instruments];
         bank.instruments.defragment(instr_map);
@@ -644,7 +644,7 @@ int main()
             static_cast<uint16_t>(env + 1);
         bank.instruments.entries[instr].layers[0].gen[Synth::mod_pitch].lfo_desc_id =
             static_cast<uint16_t>(lfo + 1);
-        bank.channel_zones[0][0] = { 0, static_cast<uint8_t>(instr) };
+        bank.channel_zones[0][0] = { 1, static_cast<uint8_t>(instr) };
         bank.drum_track_channel   = 9;
         memcpy(bank.instrument_names[instr], "Lead", 5);
 
@@ -685,7 +685,7 @@ int main()
         bank.drum_track_channel  = 7;
         const uint32_t instr     = bank.instruments.allocate();
         bank.instruments.entries[instr].layer_count = 3;
-        bank.channel_zones[2][0] = { 64, static_cast<uint8_t>(instr) };
+        bank.channel_zones[2][0] = { 65, static_cast<uint8_t>(instr) };
 
         const char* const path = "synth_bank_roundtrip.tmp";
         TEST(Synth::save_instrument_bank(path, &bank));
@@ -846,7 +846,7 @@ int main()
         uint8_t           dest[256];
         Synth::Soundtrack soundtrack = { };
         const uint32_t written = Synth::encode_soundtrack(events, event_count, dest, sizeof(dest),
-                                                          &soundtrack);
+                &soundtrack);
         TEST(written > 0);
 
         Synth::MidiEvent decoded[7] = { };
@@ -920,8 +920,8 @@ int main()
         TEST(note_offs == 2);
         TEST(off_at_20000 == 1); // earlier note closed at the retrigger
         TEST(off_at_60000 == 1); // second note closed by its real note_off
-        // The reconstructed note_off must precede the retriggered note_on at the same tick, so the
-        // player closes the old voice before allocating the new one (else the retrigger drops it).
+                                 // The reconstructed note_off must precede the retriggered note_on at the same tick, so the
+                                 // player closes the old voice before allocating the new one (else the retrigger drops it).
         TEST(off_idx_20000 >= 0 && on_idx_20000 >= 0 && off_idx_20000 < on_idx_20000);
     }
 
@@ -991,12 +991,190 @@ int main()
         bank.instruments.entries[instr].layers[0].gen[Synth::mod_volume].envelope_desc_id = static_cast<uint16_t>(env + 1);
         bank.instruments.entries[instr].layers[0].gen[Synth::mod_pitch].lfo_desc_id = static_cast<uint16_t>(lfo + 1);
         bank.channel_zones[0][0] = { 1, static_cast<uint8_t>(instr) };
+        bank.channel_enabled[0] = 1;
+        bank.channel_enabled[1] = 1; // zone-rule negatives exercise channel 1
     };
 
     // A valid bank passes validation.
     {
         static Synth::InstrumentBank bank;
         make_valid_bank(bank);
+        TEST(Synth::validate_instrument_bank(&bank));
+    }
+
+    // Default recipe: init_default_bank builds the first-run bank; every structural
+    // invariant the editor and runtime rely on holds out of the box.
+    {
+        static Synth::InstrumentBank bank;
+        Synth::init_default_bank(&bank);
+        TEST(Synth::validate_instrument_bank(&bank));
+        TEST(bank.channel_enabled[0] == 1);
+        bool others_disabled = true;
+        for (uint32_t c = 1; c < Synth::max_channels; c++) {
+            others_disabled = others_disabled && bank.channel_enabled[c] == 0;
+        }
+        TEST(others_disabled);
+        TEST(memcmp(bank.channel_names[0], "Channel 01", 11) == 0);
+        TEST(memcmp(bank.channel_names[9], "Drum Track", 11) == 0);
+        TEST(memcmp(bank.channel_names[15], "Channel 16", 11) == 0);
+        TEST(bank.drum_track_channel == 9);
+        TEST(bank.channel_zones[0][0].start_note == 1);
+        TEST(bank.channel_zones[0][0].instrument == 0);
+        TEST(bank.instruments.num_allocated == 1);
+        TEST(bank.envelopes.num_allocated == 1);
+        TEST(bank.lfos.num_allocated == 3); // vibrato, tremolo, master FIR sweep
+        TEST(bank.channel_chains[0].num_effects == 1);
+        TEST(bank.channel_chains[0].effects[0].type == Synth::EffectType::distortion);
+        TEST(bank.channel_chains[0].effects[0].enabled);
+        TEST(bank.master_chain.num_effects == 3);
+        // The default instrument wires its descriptors through the local-id remap.
+        const Synth::Instrument& instr = bank.instruments.entries[0];
+        TEST(instr.layer_count == 1);
+        TEST(instr.layers[0].gen[Synth::mod_volume].envelope_desc_id == 1);
+        TEST(instr.layers[0].gen[Synth::mod_pitch].lfo_desc_id == 1);
+        TEST(instr.layers[0].gen[Synth::mod_volume].lfo_desc_id == 2);
+        TEST(bank.master_chain.effects[2].bindings[0].lfo_desc_id == 3);
+    }
+
+    // init_default_channel into a populated bank appends the recipe into the free slots and
+    // remaps its descriptor references past the existing content.
+    {
+        static Synth::InstrumentBank bank;
+        memset(&bank, 0, sizeof(bank));
+        TEST(bank.envelopes.allocate() == 0);
+        bank.envelopes.entries[0].num_points = 2;
+        bank.envelopes.entries[0].points[1].position = 100;
+        TEST(bank.lfos.allocate() == 0);
+        bank.lfos.entries[0].wave = Synth::WaveType::sine_wave;
+        bank.lfos.entries[0].period_ms = 50;
+        TEST(bank.instruments.allocate() == 0);
+        bank.instruments.entries[0].layer_count = 1;
+        TEST(Synth::init_default_channel(&bank, 5));
+        TEST(bank.instruments.num_allocated == 2);
+        TEST(bank.envelopes.num_allocated == 2);
+        TEST(bank.lfos.num_allocated == 3);
+        TEST(bank.channel_zones[5][0].start_note == 1);
+        TEST(bank.channel_zones[5][0].instrument == 1);
+        const Synth::Instrument& instr = bank.instruments.entries[1];
+        TEST(instr.layers[0].gen[Synth::mod_volume].envelope_desc_id == 2);
+        TEST(instr.layers[0].gen[Synth::mod_pitch].lfo_desc_id == 2);
+        TEST(instr.layers[0].gen[Synth::mod_volume].lfo_desc_id == 3);
+        TEST(bank.channel_chains[5].num_effects == 1);
+        TEST(Synth::validate_instrument_bank(&bank));
+    }
+
+    // init_default_channel fails cleanly when a pool lacks space, leaving the bank
+    // byte-for-byte untouched.
+    {
+        static Synth::InstrumentBank bank;
+        memset(&bank, 0, sizeof(bank));
+        bank.instruments.entries[0].layer_count = 1;
+        TEST(bank.instruments.allocate() == 0);
+        for (uint32_t i = 0; i < Synth::max_lfos; i++) {
+            TEST(bank.lfos.allocate() == i);
+        }
+        static Synth::InstrumentBank before;
+        memcpy(&before, &bank, sizeof(bank));
+        TEST( ! Synth::init_default_channel(&bank, 2));
+        TEST(memcmp(&bank, &before, sizeof(bank)) == 0);
+    }
+
+    // reclaim_unused_slots removes instruments no enabled channel's zone table references and
+    // descriptors no surviving instrument or effect chain references, compacting the pools and
+    // remapping zones, names, and references in one pass.
+    {
+        static Synth::InstrumentBank bank;
+        make_valid_bank(bank); // instrument 0 (env 1, lfo 1) on ch0; ch0 and ch1 enabled
+
+        TEST(bank.instruments.allocate() == 1);
+        bank.instruments.entries[1].layer_count = 1;
+        bank.instruments.entries[1].layers[0].gen[Synth::mod_volume].envelope_desc_id = 1; // shares env 1
+        TEST(bank.instruments.allocate() == 2);
+        bank.instruments.entries[2].layer_count = 1;
+        TEST(bank.envelopes.allocate() == 1);
+        bank.envelopes.entries[1].num_points = 2;
+        bank.envelopes.entries[1].points[1].position = 200;
+        bank.instruments.entries[2].layers[0].gen[Synth::mod_volume].envelope_desc_id = 2; // env 2 roots nothing but instr 2
+        bank.channel_zones[1][0] = { 1, 1 }; // ch1 -> instrument 1
+
+        memcpy(bank.instrument_names[0], "KeepA", 6);
+        memcpy(bank.instrument_names[1], "KeepB", 6);
+        memcpy(bank.instrument_names[2], "Drop", 5);
+        TEST(Synth::validate_instrument_bank(&bank));
+
+        Synth::reclaim_unused_slots(&bank);
+
+        // The orphaned instrument is gone; survivors keep their relative order, names included.
+        TEST(bank.instruments.num_allocated == 2);
+        TEST(bank.channel_zones[0][0].instrument == 0);
+        TEST(bank.channel_zones[1][0].instrument == 1);
+        TEST(memcmp(bank.instrument_names[0], "KeepA", 6) == 0);
+        TEST(memcmp(bank.instrument_names[1], "KeepB", 6) == 0);
+        // Env 2 (referenced only by the removed instrument) is reclaimed; env 1 keeps id 1.
+        TEST(bank.envelopes.num_allocated == 1);
+        TEST(bank.instruments.entries[0].layers[0].gen[Synth::mod_volume].envelope_desc_id == 1);
+        TEST(bank.instruments.entries[1].layers[0].gen[Synth::mod_volume].envelope_desc_id == 1);
+        TEST(Synth::validate_instrument_bank(&bank));
+    }
+
+    // Effect chains root LFOs: with every channel disabled the chain's LFO survives while the
+    // instrument's LFO is reclaimed, and the chain's reference is remapped to the compacted id.
+    {
+        static Synth::InstrumentBank bank;
+        make_valid_bank(bank); // lfo 1 referenced by instrument 0
+        TEST(bank.lfos.allocate() == 1);
+        bank.lfos.entries[1].wave = Synth::WaveType::sawtooth_wave;
+        bank.lfos.entries[1].period_ms = 90;
+        bank.master_chain.num_effects = 1;
+        bank.master_chain.effects[0].type = Synth::EffectType::distortion;
+        bank.master_chain.effects[0].enabled = true;
+        bank.master_chain.effects[0].bindings[0].base_value = 1.0f;
+        bank.master_chain.effects[0].bindings[0].lfo_desc_id = 2;
+        TEST(Synth::validate_instrument_bank(&bank));
+
+        bank.channel_enabled[0] = 0;
+        bank.channel_enabled[1] = 0;
+        Synth::reclaim_unused_slots(&bank);
+
+        TEST(bank.instruments.num_allocated == 0);
+        TEST(bank.lfos.num_allocated == 1);
+        TEST(bank.master_chain.effects[0].bindings[0].lfo_desc_id == 1); // remapped 2 -> 1
+        TEST(bank.lfos.entries[0].wave == Synth::WaveType::sawtooth_wave);
+        TEST(Synth::validate_instrument_bank(&bank));
+    }
+
+    // A clean bank reclaims nothing: the bank comes back byte-for-byte identical.
+    {
+        static Synth::InstrumentBank bank;
+        make_valid_bank(bank);
+        static Synth::InstrumentBank before;
+        memcpy(&before, &bank, sizeof(bank));
+        Synth::reclaim_unused_slots(&bank);
+        TEST(memcmp(&bank, &before, sizeof(bank)) == 0);
+    }
+
+    // Disabled channels may hold stale zone bytes; reclaim clears references to removed
+    // instruments and remaps the rest without touching the (skipped) zone structure.
+    {
+        static Synth::InstrumentBank bank;
+        make_valid_bank(bank); // instr 0 on ch0
+        TEST(bank.instruments.allocate() == 1);
+        bank.instruments.entries[1].layer_count = 1;
+        bank.channel_zones[1][0] = { 1, 1 }; // ch1 -> instr 1
+        TEST(bank.instruments.allocate() == 2);
+        bank.instruments.entries[2].layer_count = 1; // orphaned
+        bank.channel_enabled[0] = 0; // instr 0 loses its last live reference
+        bank.channel_zones[2][0] = { 5, 7 };  // ch2 disabled: dangling reference
+        bank.channel_zones[2][1] = { 9, 0 };  // reference to the instrument about to be removed
+        bank.channel_zones[2][2] = { 13, 1 }; // reference to a survivor (compacts 1 -> 0)
+        Synth::reclaim_unused_slots(&bank);
+
+        TEST(bank.instruments.num_allocated == 1);
+        TEST(bank.envelopes.num_allocated == 0); // env 1 rooted instr 0 only
+        TEST(bank.channel_zones[2][0].instrument == 0);
+        TEST(bank.channel_zones[2][1].instrument == 0);
+        TEST(bank.channel_zones[2][2].instrument == 0);
+        TEST(bank.channel_zones[1][0].instrument == 0);
         TEST(Synth::validate_instrument_bank(&bank));
     }
 
@@ -1025,14 +1203,15 @@ int main()
     {
         static Synth::InstrumentBank bank;
         make_valid_bank(bank);
-        bank.channel_zones[1][0] = { 10, 0 };
-        bank.channel_zones[1][1] = { 5, 0 }; // out of order
+        bank.channel_zones[1][0] = { 1, 0 };
+        bank.channel_zones[1][1] = { 11, 0 };
+        bank.channel_zones[1][2] = { 6, 0 }; // later zone starts before the earlier one
         expect_invalid(bank);
     }
     {
         static Synth::InstrumentBank bank;
         make_valid_bank(bank);
-        bank.channel_zones[1][0] = { 10, 0 };
+        bank.channel_zones[1][0] = { 1, 0 };
         bank.channel_zones[1][1] = { 0, 0 };
         bank.channel_zones[1][2] = { 20, 0 }; // garbage after the terminator
         expect_invalid(bank);
@@ -1040,14 +1219,53 @@ int main()
     {
         static Synth::InstrumentBank bank;
         make_valid_bank(bank);
-        bank.channel_zones[1][0] = { 10, 200 }; // slot 0 instrument unoccupied (dangling)
+        bank.channel_zones[1][0] = { 1, 200 }; // slot 0 instrument unoccupied (dangling)
         expect_invalid(bank);
     }
     {
         static Synth::InstrumentBank bank;
         make_valid_bank(bank);
-        bank.channel_zones[1][0] = { 10, 0 };
+        bank.channel_zones[1][0] = { 1, 0 };
         bank.channel_zones[1][1] = { 20, 1 }; // reachable entry references an unoccupied instrument
+        expect_invalid(bank);
+    }
+    // Slot 0 must start at note 0 (stored start 1); any other first start is invalid.
+    {
+        static Synth::InstrumentBank bank;
+        make_valid_bank(bank);
+        bank.channel_zones[1][0] = { 5, 0 };
+        expect_invalid(bank);
+    }
+    // Disabled channels keep arbitrary zone bytes: garbage zones pass while disabled and
+    // fail once the channel is enabled.
+    {
+        static Synth::InstrumentBank bank;
+        make_valid_bank(bank);
+        bank.channel_zones[3][0] = { 9, 7 };
+        bank.channel_zones[3][1] = { 2, 80 }; // out of order
+        bank.channel_enabled[3] = 0;
+        TEST(Synth::validate_instrument_bank(&bank));
+        bank.channel_enabled[3] = 1;
+        expect_invalid(bank);
+    }
+    // channel_enabled bytes must be 0/1.
+    {
+        static Synth::InstrumentBank bank;
+        make_valid_bank(bank);
+        bank.channel_enabled[2] = 2;
+        expect_invalid(bank);
+    }
+    // Unterminated name fields are rejected (imported files are untrusted byte images).
+    {
+        static Synth::InstrumentBank bank;
+        make_valid_bank(bank);
+        memset(bank.instrument_names[0], 0xAB, Synth::max_name_len);
+        expect_invalid(bank);
+    }
+    {
+        static Synth::InstrumentBank bank;
+        make_valid_bank(bank);
+        memset(bank.channel_names[5], 0xAB, Synth::max_name_len);
         expect_invalid(bank);
     }
     // A full zone table with no terminator is valid (route_instrument semantics unchanged).
@@ -1359,7 +1577,7 @@ int main()
         TEST(memcmp(&restored, &bank, sizeof(bank)) == 0);
     }
 
-    // ---- Effect expansion seam: preflight/commit transaction over a fake node writer ----
+    // ---- Effect expansion: preflight/commit transaction over a fake node writer ----
 
     // A stateful chain expands onto pool nodes with state at the region base, one clear range.
     {
@@ -1832,5 +2050,174 @@ int main()
         TEST(runtime.instruments.num_allocated == 1);
     }
 
+
+    // ---- Zone table helpers: lookup, boundary moves, splits ----
+    {
+        static Synth::InstrumentBank bank;
+        Synth::init_default_bank(&bank);
+        Synth::Zone* zones = bank.channel_zones[0];
+
+        // Default channel: one zone covering 0..127, instrument 1.
+        TEST(Synth::zone_entry_at(zones, 0) == 0);
+        TEST(Synth::zone_entry_at(zones, 64) == 0);
+        TEST(Synth::zone_entry_at(zones, 127) == 0);
+
+        // Split at 60: zone 0 keeps 0..59, new zone 1 covers 60..127 with a cloned
+        // instrument (same bytes, name copied).  The instrument byte is the pool slot
+        // directly, so the default zone holds slot 0.
+        TEST(Synth::zone_split_new(zones, 0, 60, &bank));
+        TEST(zones[0].start_note == 1 && zones[0].instrument == 0);
+        TEST(zones[1].start_note == 61 && zones[1].instrument == 1);
+        TEST(zones[2].start_note == 0);
+        TEST(bank.instruments.num_allocated == 2);
+        TEST(memcmp(bank.instruments.entries, bank.instruments.entries + 1, sizeof(Synth::Instrument)) == 0);
+        TEST(strcmp(bank.instrument_names[0], bank.instrument_names[1]) == 0);
+        TEST(Synth::zone_entry_at(zones, 59) == 0);
+        TEST(Synth::zone_entry_at(zones, 60) == 1);
+
+        // Renaming the clone does not touch the original.
+        strcpy(bank.instrument_names[1], "Clone");
+        TEST(strcmp(bank.instrument_names[0], "Clone") != 0);
+
+        // Splitting at a zone's first note replaces its instrument in place (no new
+        // zone slot needed).
+        TEST(Synth::zone_split_new(zones, 1, 60, &bank));
+        TEST(zones[1].start_note == 61 && zones[1].instrument == 2);
+        TEST(bank.instruments.num_allocated == 3);
+        TEST(Synth::zone_entry_at(zones, 59) == 0);
+        TEST(Synth::zone_entry_at(zones, 60) == 1);
+
+        // join_next: note 50 joins zone 1, which starts at 50.
+        TEST(Synth::zone_join_next(zones, 0, 50));
+        TEST(zones[1].start_note == 51);
+        TEST(Synth::zone_entry_at(zones, 50) == 1);
+        TEST(Synth::zone_entry_at(zones, 49) == 0);
+
+        // join_previous: note 50 joins zone 0, which pushes zone 1's start to 51.
+        TEST(Synth::zone_join_previous(zones, 1, 50));
+        TEST(zones[1].start_note == 52);
+        TEST(Synth::zone_entry_at(zones, 50) == 0);
+        TEST(Synth::zone_entry_at(zones, 51) == 1);
+
+        // Moving a zone's last note into the previous zone removes the zone.
+        TEST(Synth::zone_join_previous(zones, 1, 127));
+        TEST(zones[0].start_note == 1 && zones[0].instrument == 0);
+        TEST(zones[1].start_note == 0);
+        TEST(Synth::zone_entry_at(zones, 127) == 0);
+
+        // Three-zone table: [0..20] [21..70] [71..127].
+        Synth::Zone* z = bank.channel_zones[1];
+        z[0] = Synth::Zone{ 1, 0 };
+        z[1] = Synth::Zone{ 22, 1 };
+        z[2] = Synth::Zone{ 72, 2 };
+        z[3] = Synth::Zone{ 0, 0 };
+        TEST(Synth::zone_entry_at(z, 0) == 0);
+        TEST(Synth::zone_entry_at(z, 20) == 0);
+        TEST(Synth::zone_entry_at(z, 21) == 1);
+        TEST(Synth::zone_entry_at(z, 70) == 1);
+        TEST(Synth::zone_entry_at(z, 71) == 2);
+        TEST(Synth::zone_entry_at(z, 127) == 2);
+
+        // Clicking an existing boundary: 21 is zone 1's first note; "add to previous
+        // zone" moves it into zone 0, and zone 1 starts at 22.
+        TEST(Synth::zone_join_previous(z, 1, 21));
+        TEST(z[0].start_note == 1 && z[1].start_note == 23);
+        TEST(Synth::zone_entry_at(z, 21) == 0);
+        TEST(Synth::zone_entry_at(z, 22) == 1);
+
+        // 70 is zone 1's last note; "add to next zone" moves it into zone 2.
+        TEST(Synth::zone_join_next(z, 1, 70));
+        TEST(z[2].start_note == 71);
+        TEST(Synth::zone_entry_at(z, 69) == 1);
+        TEST(Synth::zone_entry_at(z, 70) == 2);
+
+        // A one-note zone is dropped when its only note moves to the previous zone,
+        // and the later zones shift down.
+        Synth::Zone* w = bank.channel_zones[2];
+        w[0] = Synth::Zone{ 1, 0 };
+        w[1] = Synth::Zone{ 51, 1 };
+        w[2] = Synth::Zone{ 52, 2 };
+        w[3] = Synth::Zone{ 0, 0 };
+        TEST(Synth::zone_join_previous(w, 1, 50));
+        TEST(w[0].start_note == 1 && w[0].instrument == 0);
+        TEST(w[1].start_note == 52 && w[1].instrument == 2);
+        TEST(w[2].start_note == 0);
+        TEST(Synth::zone_entry_at(w, 50) == 0);
+        TEST(Synth::zone_entry_at(w, 51) == 1);
+
+        // ... and symmetrically, moving a zone's first note into the next zone drops
+        // the emptied zone; the next zone shifts down and absorbs the moved note.
+        // Here note 0 leaves zone 0 ([0..49]), so zone 1 moves to slot 0 and starts
+        // at 0.
+        Synth::Zone* v = bank.channel_zones[3];
+        v[0] = Synth::Zone{ 1, 0 };
+        v[1] = Synth::Zone{ 51, 1 };
+        v[2] = Synth::Zone{ 52, 2 };
+        v[3] = Synth::Zone{ 0, 0 };
+        TEST(Synth::zone_join_next(v, 0, 0));
+        TEST(v[0].start_note == 1 && v[0].instrument == 1);
+        TEST(v[1].start_note == 52 && v[1].instrument == 2);
+        TEST(v[2].start_note == 0);
+        TEST(Synth::zone_entry_at(v, 0) == 0);
+        TEST(Synth::zone_entry_at(v, 50) == 0);
+
+        // Splitting at note 1 leaves a one-note first zone [0].
+        Synth::Zone* n1 = bank.channel_zones[4];
+        n1[0] = Synth::Zone{ 1, 0 };
+        n1[1] = Synth::Zone{ 0, 0 };
+        TEST(Synth::zone_split_new(n1, 0, 1, &bank));
+        TEST(n1[0].start_note == 1 && n1[1].start_note == 2);
+        TEST(Synth::zone_entry_at(n1, 0) == 0);
+        TEST(Synth::zone_entry_at(n1, 1) == 1);
+
+        // A one-note-only first zone [0]: moving its note to the next zone drops it and
+        // the next zone takes over the whole keyboard.
+        Synth::Zone* s0 = bank.channel_zones[5];
+        s0[0] = Synth::Zone{ 1, 0 };
+        s0[1] = Synth::Zone{ 2, 1 };
+        s0[2] = Synth::Zone{ 0, 0 };
+        TEST(Synth::zone_join_next(s0, 0, 0));
+        TEST(s0[0].start_note == 1 && s0[0].instrument == 1);
+        TEST(s0[1].start_note == 0);
+        TEST(Synth::zone_entry_at(s0, 0) == 0);
+        TEST(Synth::zone_entry_at(s0, 127) == 0);
+
+        // A full 16-zone table cannot split in the middle; splitting at a zone's first
+        // note needs no new entry and stays allowed.
+        static Synth::InstrumentBank bank_full_table;
+        Synth::init_default_bank(&bank_full_table);
+        Synth::Zone* f = bank_full_table.channel_zones[0];
+        for (uint32_t e = 0; e < Synth::max_instr_per_channel; e++) {
+            f[e] = Synth::Zone{ static_cast<uint8_t>(e * 8 + 1),
+                                static_cast<uint8_t>(bank_full_table.instruments.allocate()) };
+        }
+        TEST(bank_full_table.instruments.num_allocated == 17); // 1 default + 16 zone instruments
+        TEST( ! Synth::zone_split_new(f, 0, 4, &bank_full_table));
+        TEST(f[1].start_note == 9); // table untouched on refusal
+        const uint32_t pool_before = bank_full_table.instruments.num_allocated;
+        TEST(Synth::zone_split_new(f, 0, 0, &bank_full_table));
+        TEST(bank_full_table.instruments.num_allocated == pool_before + 1);
+
+        // A full instrument pool refuses the clone with the bank untouched.
+        static Synth::InstrumentBank bank_full_pool;
+        Synth::init_default_bank(&bank_full_pool);
+        while (bank_full_pool.instruments.allocate() != pool_no_slot)
+            ;
+        TEST( ! Synth::zone_split_new(bank_full_pool.channel_zones[0], 0, 60, &bank_full_pool));
+        TEST(bank_full_pool.channel_zones[0][0].start_note == 1);
+        TEST(bank_full_pool.channel_zones[0][0].instrument == 0);
+
+        // Repeated split/reclaim cycles keep the instrument pool bounded: each split
+        // at the zone's first note clones the instrument and leaves the old one
+        // unreferenced, so reclaim returns it to the pool.
+        static Synth::InstrumentBank bank_cycles;
+        Synth::init_default_bank(&bank_cycles);
+        const uint32_t pool_start = bank_cycles.instruments.num_allocated;
+        for (uint32_t cycle = 0; cycle < 50; cycle++) {
+            TEST(Synth::zone_split_new(bank_cycles.channel_zones[0], 0, 0, &bank_cycles));
+            Synth::reclaim_unused_slots(&bank_cycles);
+            TEST(bank_cycles.instruments.num_allocated <= pool_start + 1);
+        }
+    }
     return exit_code;
 }
