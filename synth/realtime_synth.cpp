@@ -670,7 +670,6 @@ static void init_oscillator_buffers()
 {
     assert(Synth::num_channels <= max_mix_channels);
 
-    Synth::init_default_bank(&synth_bank);
     note_skew_rng.init(note_skew_seed);
 
     for (uint32_t channel = 0; channel < max_mix_channels; channel++) {

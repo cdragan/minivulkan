@@ -134,8 +134,6 @@ struct InstrumentBank {
     Pool<ParamDescriptor,    max_parameters>  parameters;
 
     Zone               channel_zones[max_channels][max_instr_per_channel]; // per-channel keyboard zones
-    char               instrument_names[max_instruments][max_name_len];
-    char               channel_names[max_channels][max_name_len];
     EffectChainBinding channel_chains[max_channels]; // per-channel effect chains
     EffectChainBinding master_chain;                 // sums all channel outputs
     uint8_t            channel_enabled[max_channels]; // 0/1 per channel; the runtime drops note-ons on disabled channels
@@ -157,31 +155,5 @@ bool remap_lfos(InstrumentBank* bank, const LFODescriptor* src, uint32_t num, ui
 // tables (table[i] = new 1-based id of source id i + 1; 0 = source id unused).
 void remap_instrument(const Instrument& src, const uint16_t* env_ids, const uint16_t* lfo_ids, Instrument* dst);
 void remap_effect_chain(const EffectChainBinding& src, const uint16_t* lfo_ids, EffectChainBinding* dst);
-
-// The default channel recipe: one sine instrument (wheel-driven vibrato, ADSR volume with
-// pressure tremolo) plus the demo channel chain.  init_default_channel appends the recipe
-// into the bank's free pool slots, wires the channel's zone table and chain, and returns
-// false with the bank unmodified when any pool lacks space.
-bool init_default_channel(InstrumentBank* bank, uint32_t channel); // Keyboard zone table operations.  A table is sorted by start_note and terminated
-// by an empty slot; entry i covers [start_note[i]-1, start_note[i+1]-2] and the last
-// entry covers through note 127.
-// Index of the entry covering note, or pool_no_slot if none does.
-uint32_t zone_entry_at(const Zone* zones, uint32_t note);
-// Entry i-1 takes note: entry i starts at note+1 and is dropped if that leaves it
-// empty.  false when i == 0 or note is not inside entry i.
-bool zone_join_previous(Zone* zones, uint32_t i, uint32_t note);
-// Entry i+1 takes note: it starts at note, and entry i is dropped if that leaves it
-// empty.  false when entry i+1 does not exist or note is not inside entry i.
-bool zone_join_next(Zone* zones, uint32_t i, uint32_t note);
-// Splits entry i at note: a new zone starting at note gets a CLONE of entry i's
-// instrument (same bytes, name copied, so the two rename independently); entry i keeps
-// the notes below and is dropped if note was its first note.  false, bank unmodified,
-// when the zone table or the instrument pool lacks a free slot.
-bool zone_split_new(Zone* zones, uint32_t i, uint32_t note, InstrumentBank* bank);
-
-// Builds the first-run bank: all channels disabled with default names ("Channel 01".."Channel
-// 16", channel 10 = "Drum Track"), channel 0 enabled with the default recipe, and the demo
-// master chain.
-void init_default_bank(InstrumentBank* bank);
 
 } // namespace Synth

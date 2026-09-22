@@ -16,6 +16,7 @@ src_files += sculptor_graph_render.cpp
 src_files += sculptor_geom_edit.cpp
 src_files += sculptor_instr_edit.cpp
 src_files += sculptor_instr_bank.cpp
+src_files += sculptor_instr_library.cpp
 src_files += sculptor_tex_edit.cpp
 
 shader_files += sculptor_pass_through.vert.glsl

@@ -6,6 +6,7 @@
 #include "synth_effect_expansion.h"
 #include "synth_instrument.h"
 #include "../sculptor/sculptor_instr_bank.h"
+#include "../sculptor/sculptor_instr_library.h"
 #include "synth_serialize.h"
 #include "midi_file.h"
 #include "synth_soundtrack.h"
@@ -646,11 +647,10 @@ int main()
             static_cast<uint16_t>(lfo + 1);
         bank.channel_zones[0][0] = { 1, static_cast<uint8_t>(instr) };
         bank.drum_track_channel   = 9;
-        memcpy(bank.instrument_names[instr], "Lead", 5);
 
-        uint8_t image[Synth::instrument_bank_image_size];
+        uint8_t image[Synth::instrument_bank_image_size<Synth::InstrumentBank>];
         const uint32_t written = Synth::encode_instrument_bank(&bank, image, sizeof(image));
-        TEST(written == Synth::instrument_bank_image_size);
+        TEST(written == Synth::instrument_bank_image_size<Synth::InstrumentBank>);
 
         Synth::InstrumentBank restored = { };
         TEST(Synth::decode_instrument_bank(image, written, &restored));
@@ -660,7 +660,7 @@ int main()
         TEST(Synth::encode_instrument_bank(&bank, image, 4) == 0);
 
         // A corrupt marker is rejected.
-        uint8_t bad[Synth::instrument_bank_image_size];
+        uint8_t bad[Synth::instrument_bank_image_size<Synth::InstrumentBank>];
         memcpy(bad, image, sizeof(bad));
         bad[0] = static_cast<uint8_t>(bad[0] ^ 0xFFu);
         TEST( ! Synth::decode_instrument_bank(bad, written, &restored));
@@ -943,8 +943,6 @@ int main()
         b.instruments.entries[0].layer_count = 1;
         b.channel_zones[1][0].start_note = k;
         b.channel_zones[1][0].instrument = 0;
-        b.instrument_names[0][0]          = static_cast<char>('A' + (k & 7u));
-        b.channel_names[0][0]             = static_cast<char>('z' - (k & 7u));
     };
 
     // SYIB encode/decode round-trips the whole bank exactly (full-struct memcmp).  Bad input
@@ -1014,9 +1012,13 @@ int main()
             others_disabled = others_disabled && bank.channel_enabled[c] == 0;
         }
         TEST(others_disabled);
-        TEST(memcmp(bank.channel_names[0], "Channel 01", 11) == 0);
-        TEST(memcmp(bank.channel_names[9], "Drum Track", 11) == 0);
-        TEST(memcmp(bank.channel_names[15], "Channel 16", 11) == 0);
+    char def_name[Synth::max_name_len];
+    Synth::get_default_channel_name(0, def_name, sizeof(def_name));
+    TEST(memcmp(def_name, "Channel 01", 11) == 0);
+    Synth::get_default_channel_name(9, def_name, sizeof(def_name));
+    TEST(memcmp(def_name, "Drum Track", 11) == 0);
+    Synth::get_default_channel_name(15, def_name, sizeof(def_name));
+    TEST(memcmp(def_name, "Channel 16", 11) == 0);
         TEST(bank.drum_track_channel == 9);
         TEST(bank.channel_zones[0][0].start_note == 1);
         TEST(bank.channel_zones[0][0].instrument == 0);
@@ -1083,71 +1085,71 @@ int main()
     // descriptors no surviving instrument or effect chain references, compacting the pools and
     // remapping zones, names, and references in one pass.
     {
-        static Synth::InstrumentBank bank;
-        make_valid_bank(bank); // instrument 0 (env 1, lfo 1) on ch0; ch0 and ch1 enabled
+        static Synth::InstrumentEditorBank bank;
+        make_valid_bank(bank.bank); // instrument 0 (env 1, lfo 1) on ch0; ch0 and ch1 enabled
 
-        TEST(bank.instruments.allocate() == 1);
-        bank.instruments.entries[1].layer_count = 1;
-        bank.instruments.entries[1].layers[0].gen[Synth::mod_volume].envelope_desc_id = 1; // shares env 1
-        TEST(bank.instruments.allocate() == 2);
-        bank.instruments.entries[2].layer_count = 1;
-        TEST(bank.envelopes.allocate() == 1);
-        bank.envelopes.entries[1].num_points = 2;
-        bank.envelopes.entries[1].points[1].position = 200;
-        bank.instruments.entries[2].layers[0].gen[Synth::mod_volume].envelope_desc_id = 2; // env 2 roots nothing but instr 2
-        bank.channel_zones[1][0] = { 1, 1 }; // ch1 -> instrument 1
+        TEST(bank.bank.instruments.allocate() == 1);
+        bank.bank.instruments.entries[1].layer_count = 1;
+        bank.bank.instruments.entries[1].layers[0].gen[Synth::mod_volume].envelope_desc_id = 1; // shares env 1
+        TEST(bank.bank.instruments.allocate() == 2);
+        bank.bank.instruments.entries[2].layer_count = 1;
+        TEST(bank.bank.envelopes.allocate() == 1);
+        bank.bank.envelopes.entries[1].num_points = 2;
+        bank.bank.envelopes.entries[1].points[1].position = 200;
+        bank.bank.instruments.entries[2].layers[0].gen[Synth::mod_volume].envelope_desc_id = 2; // env 2 roots nothing but instr 2
+        bank.bank.channel_zones[1][0] = { 1, 1 }; // ch1 -> instrument 1
 
         memcpy(bank.instrument_names[0], "KeepA", 6);
         memcpy(bank.instrument_names[1], "KeepB", 6);
         memcpy(bank.instrument_names[2], "Drop", 5);
-        TEST(Synth::validate_instrument_bank(&bank));
+        TEST(Synth::validate_instrument_bank(&bank.bank));
 
         Synth::reclaim_unused_slots(&bank);
 
         // The orphaned instrument is gone; survivors keep their relative order, names included.
-        TEST(bank.instruments.num_allocated == 2);
-        TEST(bank.channel_zones[0][0].instrument == 0);
-        TEST(bank.channel_zones[1][0].instrument == 1);
+        TEST(bank.bank.instruments.num_allocated == 2);
+        TEST(bank.bank.channel_zones[0][0].instrument == 0);
+        TEST(bank.bank.channel_zones[1][0].instrument == 1);
         TEST(memcmp(bank.instrument_names[0], "KeepA", 6) == 0);
         TEST(memcmp(bank.instrument_names[1], "KeepB", 6) == 0);
         // Env 2 (referenced only by the removed instrument) is reclaimed; env 1 keeps id 1.
-        TEST(bank.envelopes.num_allocated == 1);
-        TEST(bank.instruments.entries[0].layers[0].gen[Synth::mod_volume].envelope_desc_id == 1);
-        TEST(bank.instruments.entries[1].layers[0].gen[Synth::mod_volume].envelope_desc_id == 1);
-        TEST(Synth::validate_instrument_bank(&bank));
+        TEST(bank.bank.envelopes.num_allocated == 1);
+        TEST(bank.bank.instruments.entries[0].layers[0].gen[Synth::mod_volume].envelope_desc_id == 1);
+        TEST(bank.bank.instruments.entries[1].layers[0].gen[Synth::mod_volume].envelope_desc_id == 1);
+        TEST(Synth::validate_instrument_bank(&bank.bank));
     }
 
     // Effect chains root LFOs: with every channel disabled the chain's LFO survives while the
     // instrument's LFO is reclaimed, and the chain's reference is remapped to the compacted id.
     {
-        static Synth::InstrumentBank bank;
-        make_valid_bank(bank); // lfo 1 referenced by instrument 0
-        TEST(bank.lfos.allocate() == 1);
-        bank.lfos.entries[1].wave = Synth::WaveType::sawtooth_wave;
-        bank.lfos.entries[1].period_ms = 90;
-        bank.master_chain.num_effects = 1;
-        bank.master_chain.effects[0].type = Synth::EffectType::distortion;
-        bank.master_chain.effects[0].enabled = true;
-        bank.master_chain.effects[0].bindings[0].base_value = 1.0f;
-        bank.master_chain.effects[0].bindings[0].lfo_desc_id = 2;
-        TEST(Synth::validate_instrument_bank(&bank));
+        static Synth::InstrumentEditorBank bank;
+        make_valid_bank(bank.bank); // lfo 1 referenced by instrument 0
+        TEST(bank.bank.lfos.allocate() == 1);
+        bank.bank.lfos.entries[1].wave = Synth::WaveType::sawtooth_wave;
+        bank.bank.lfos.entries[1].period_ms = 90;
+        bank.bank.master_chain.num_effects = 1;
+        bank.bank.master_chain.effects[0].type = Synth::EffectType::distortion;
+        bank.bank.master_chain.effects[0].enabled = true;
+        bank.bank.master_chain.effects[0].bindings[0].base_value = 1.0f;
+        bank.bank.master_chain.effects[0].bindings[0].lfo_desc_id = 2;
+        TEST(Synth::validate_instrument_bank(&bank.bank));
 
-        bank.channel_enabled[0] = 0;
-        bank.channel_enabled[1] = 0;
+        bank.bank.channel_enabled[0] = 0;
+        bank.bank.channel_enabled[1] = 0;
         Synth::reclaim_unused_slots(&bank);
 
-        TEST(bank.instruments.num_allocated == 0);
-        TEST(bank.lfos.num_allocated == 1);
-        TEST(bank.master_chain.effects[0].bindings[0].lfo_desc_id == 1); // remapped 2 -> 1
-        TEST(bank.lfos.entries[0].wave == Synth::WaveType::sawtooth_wave);
-        TEST(Synth::validate_instrument_bank(&bank));
+        TEST(bank.bank.instruments.num_allocated == 0);
+        TEST(bank.bank.lfos.num_allocated == 1);
+        TEST(bank.bank.master_chain.effects[0].bindings[0].lfo_desc_id == 1); // remapped 2 -> 1
+        TEST(bank.bank.lfos.entries[0].wave == Synth::WaveType::sawtooth_wave);
+        TEST(Synth::validate_instrument_bank(&bank.bank));
     }
 
     // A clean bank reclaims nothing: the bank comes back byte-for-byte identical.
     {
-        static Synth::InstrumentBank bank;
-        make_valid_bank(bank);
-        static Synth::InstrumentBank before;
+        static Synth::InstrumentEditorBank bank;
+        make_valid_bank(bank.bank);
+        static Synth::InstrumentEditorBank before;
         memcpy(&before, &bank, sizeof(bank));
         Synth::reclaim_unused_slots(&bank);
         TEST(memcmp(&bank, &before, sizeof(bank)) == 0);
@@ -1156,26 +1158,26 @@ int main()
     // Disabled channels may hold stale zone bytes; reclaim clears references to removed
     // instruments and remaps the rest without touching the (skipped) zone structure.
     {
-        static Synth::InstrumentBank bank;
-        make_valid_bank(bank); // instr 0 on ch0
-        TEST(bank.instruments.allocate() == 1);
-        bank.instruments.entries[1].layer_count = 1;
-        bank.channel_zones[1][0] = { 1, 1 }; // ch1 -> instr 1
-        TEST(bank.instruments.allocate() == 2);
-        bank.instruments.entries[2].layer_count = 1; // orphaned
-        bank.channel_enabled[0] = 0; // instr 0 loses its last live reference
-        bank.channel_zones[2][0] = { 5, 7 };  // ch2 disabled: dangling reference
-        bank.channel_zones[2][1] = { 9, 0 };  // reference to the instrument about to be removed
-        bank.channel_zones[2][2] = { 13, 1 }; // reference to a survivor (compacts 1 -> 0)
+        static Synth::InstrumentEditorBank bank;
+        make_valid_bank(bank.bank); // instr 0 on ch0
+        TEST(bank.bank.instruments.allocate() == 1);
+        bank.bank.instruments.entries[1].layer_count = 1;
+        bank.bank.channel_zones[1][0] = { 1, 1 }; // ch1 -> instr 1
+        TEST(bank.bank.instruments.allocate() == 2);
+        bank.bank.instruments.entries[2].layer_count = 1; // orphaned
+        bank.bank.channel_enabled[0] = 0; // instr 0 loses its last live reference
+        bank.bank.channel_zones[2][0] = { 5, 7 };  // ch2 disabled: dangling reference
+        bank.bank.channel_zones[2][1] = { 9, 0 };  // reference to the instrument about to be removed
+        bank.bank.channel_zones[2][2] = { 13, 1 }; // reference to a survivor (compacts 1 -> 0)
         Synth::reclaim_unused_slots(&bank);
 
-        TEST(bank.instruments.num_allocated == 1);
-        TEST(bank.envelopes.num_allocated == 0); // env 1 rooted instr 0 only
-        TEST(bank.channel_zones[2][0].instrument == 0);
-        TEST(bank.channel_zones[2][1].instrument == 0);
-        TEST(bank.channel_zones[2][2].instrument == 0);
-        TEST(bank.channel_zones[1][0].instrument == 0);
-        TEST(Synth::validate_instrument_bank(&bank));
+        TEST(bank.bank.instruments.num_allocated == 1);
+        TEST(bank.bank.envelopes.num_allocated == 0); // env 1 rooted instr 0 only
+        TEST(bank.bank.channel_zones[2][0].instrument == 0);
+        TEST(bank.bank.channel_zones[2][1].instrument == 0);
+        TEST(bank.bank.channel_zones[2][2].instrument == 0);
+        TEST(bank.bank.channel_zones[1][0].instrument == 0);
+        TEST(Synth::validate_instrument_bank(&bank.bank));
     }
 
     // Validation negatives: each mutation makes exactly the targeted rule reject the bank.
@@ -1253,19 +1255,6 @@ int main()
         static Synth::InstrumentBank bank;
         make_valid_bank(bank);
         bank.channel_enabled[2] = 2;
-        expect_invalid(bank);
-    }
-    // Unterminated name fields are rejected (imported files are untrusted byte images).
-    {
-        static Synth::InstrumentBank bank;
-        make_valid_bank(bank);
-        memset(bank.instrument_names[0], 0xAB, Synth::max_name_len);
-        expect_invalid(bank);
-    }
-    {
-        static Synth::InstrumentBank bank;
-        make_valid_bank(bank);
-        memset(bank.channel_names[5], 0xAB, Synth::max_name_len);
         expect_invalid(bank);
     }
     // A full zone table with no terminator is valid (route_instrument semantics unchanged).
@@ -1906,8 +1895,8 @@ int main()
     {
         static Synth::InstrumentBank bank;
         make_valid_bank(bank);
-        static uint8_t image[Synth::instrument_bank_image_size];
-        TEST(Synth::encode_instrument_bank(&bank, image, sizeof(image)) == Synth::instrument_bank_image_size);
+        static uint8_t image[Synth::instrument_bank_image_size<Synth::InstrumentBank>];
+        TEST(Synth::encode_instrument_bank(&bank, image, sizeof(image)) == Synth::instrument_bank_image_size<Synth::InstrumentBank>);
 
         // Byte offsets of the interesting fields inside the encoded image (header + bank copy).
         const uint8_t* const bank_base = reinterpret_cast<const uint8_t*>(&bank);
@@ -1939,7 +1928,7 @@ int main()
             TEST(memcmp(&untouched, &reference, sizeof(untouched)) == 0);
         };
 
-        static uint8_t bad[Synth::instrument_bank_image_size];
+        static uint8_t bad[Synth::instrument_bank_image_size<Synth::InstrumentBank>];
         memcpy(bad, image, sizeof(bad)); bad[env_points_off] = 0; decode_must_reject(bad); // 0 envelope points
         memcpy(bad, image, sizeof(bad)); bad[env_points_off] = Synth::max_envelope_points + 1; decode_must_reject(bad); // 9 points
         memcpy(bad, image, sizeof(bad)); bad[env_pos1_off] = 0; decode_must_reject(bad); // duplicate positions
@@ -1988,8 +1977,8 @@ int main()
     }
     // get_zone_name: named instrument and the "Zone X" fallback.
     {
-        static Synth::InstrumentBank bank;
-        make_valid_bank(bank);
+        static Synth::InstrumentEditorBank bank;
+        make_valid_bank(bank.bank);
         memcpy(bank.instrument_names[0], "Lead", 5);
         char name[Synth::max_name_len];
         Synth::get_zone_name(&bank, 0, 0, name, sizeof(name));
@@ -1999,7 +1988,7 @@ int main()
         Synth::get_zone_name(&bank, 0, 0, name, sizeof(name));
         TEST(strcmp(name, "Zone 0") == 0);
 
-        bank.channel_zones[0][1] = { 50, 0 };
+        bank.bank.channel_zones[0][1] = { 50, 0 };
         Synth::get_zone_name(&bank, 0, 1, name, sizeof(name));
         TEST(strcmp(name, "Zone 1") == 0);
     }
@@ -2053,9 +2042,9 @@ int main()
 
     // ---- Zone table helpers: lookup, boundary moves, splits ----
     {
-        static Synth::InstrumentBank bank;
-        Synth::init_default_bank(&bank);
-        Synth::Zone* zones = bank.channel_zones[0];
+        static Synth::InstrumentEditorBank bank;
+        Synth::init_default_bank(&bank.bank);
+        Synth::Zone* zones = bank.bank.channel_zones[0];
 
         // Default channel: one zone covering 0..127, instrument 1.
         TEST(Synth::zone_entry_at(zones, 0) == 0);
@@ -2069,8 +2058,8 @@ int main()
         TEST(zones[0].start_note == 1 && zones[0].instrument == 0);
         TEST(zones[1].start_note == 61 && zones[1].instrument == 1);
         TEST(zones[2].start_note == 0);
-        TEST(bank.instruments.num_allocated == 2);
-        TEST(memcmp(bank.instruments.entries, bank.instruments.entries + 1, sizeof(Synth::Instrument)) == 0);
+        TEST(bank.bank.instruments.num_allocated == 2);
+        TEST(memcmp(bank.bank.instruments.entries, bank.bank.instruments.entries + 1, sizeof(Synth::Instrument)) == 0);
         TEST(strcmp(bank.instrument_names[0], bank.instrument_names[1]) == 0);
         TEST(Synth::zone_entry_at(zones, 59) == 0);
         TEST(Synth::zone_entry_at(zones, 60) == 1);
@@ -2083,7 +2072,7 @@ int main()
         // zone slot needed).
         TEST(Synth::zone_split_new(zones, 1, 60, &bank));
         TEST(zones[1].start_note == 61 && zones[1].instrument == 2);
-        TEST(bank.instruments.num_allocated == 3);
+        TEST(bank.bank.instruments.num_allocated == 3);
         TEST(Synth::zone_entry_at(zones, 59) == 0);
         TEST(Synth::zone_entry_at(zones, 60) == 1);
 
@@ -2106,7 +2095,7 @@ int main()
         TEST(Synth::zone_entry_at(zones, 127) == 0);
 
         // Three-zone table: [0..20] [21..70] [71..127].
-        Synth::Zone* z = bank.channel_zones[1];
+        Synth::Zone* z = bank.bank.channel_zones[1];
         z[0] = Synth::Zone{ 1, 0 };
         z[1] = Synth::Zone{ 22, 1 };
         z[2] = Synth::Zone{ 72, 2 };
@@ -2133,7 +2122,7 @@ int main()
 
         // A one-note zone is dropped when its only note moves to the previous zone,
         // and the later zones shift down.
-        Synth::Zone* w = bank.channel_zones[2];
+        Synth::Zone* w = bank.bank.channel_zones[2];
         w[0] = Synth::Zone{ 1, 0 };
         w[1] = Synth::Zone{ 51, 1 };
         w[2] = Synth::Zone{ 52, 2 };
@@ -2149,7 +2138,7 @@ int main()
         // the emptied zone; the next zone shifts down and absorbs the moved note.
         // Here note 0 leaves zone 0 ([0..49]), so zone 1 moves to slot 0 and starts
         // at 0.
-        Synth::Zone* v = bank.channel_zones[3];
+        Synth::Zone* v = bank.bank.channel_zones[3];
         v[0] = Synth::Zone{ 1, 0 };
         v[1] = Synth::Zone{ 51, 1 };
         v[2] = Synth::Zone{ 52, 2 };
@@ -2162,7 +2151,7 @@ int main()
         TEST(Synth::zone_entry_at(v, 50) == 0);
 
         // Splitting at note 1 leaves a one-note first zone [0].
-        Synth::Zone* n1 = bank.channel_zones[4];
+        Synth::Zone* n1 = bank.bank.channel_zones[4];
         n1[0] = Synth::Zone{ 1, 0 };
         n1[1] = Synth::Zone{ 0, 0 };
         TEST(Synth::zone_split_new(n1, 0, 1, &bank));
@@ -2172,7 +2161,7 @@ int main()
 
         // A one-note-only first zone [0]: moving its note to the next zone drops it and
         // the next zone takes over the whole keyboard.
-        Synth::Zone* s0 = bank.channel_zones[5];
+        Synth::Zone* s0 = bank.bank.channel_zones[5];
         s0[0] = Synth::Zone{ 1, 0 };
         s0[1] = Synth::Zone{ 2, 1 };
         s0[2] = Synth::Zone{ 0, 0 };
@@ -2184,40 +2173,467 @@ int main()
 
         // A full 16-zone table cannot split in the middle; splitting at a zone's first
         // note needs no new entry and stays allowed.
-        static Synth::InstrumentBank bank_full_table;
-        Synth::init_default_bank(&bank_full_table);
-        Synth::Zone* f = bank_full_table.channel_zones[0];
+        static Synth::InstrumentEditorBank bank_full_table;
+        Synth::init_default_bank(&bank_full_table.bank);
+        Synth::Zone* f = bank_full_table.bank.channel_zones[0];
         for (uint32_t e = 0; e < Synth::max_instr_per_channel; e++) {
             f[e] = Synth::Zone{ static_cast<uint8_t>(e * 8 + 1),
-                                static_cast<uint8_t>(bank_full_table.instruments.allocate()) };
+                static_cast<uint8_t>(bank_full_table.bank.instruments.allocate()) };
         }
-        TEST(bank_full_table.instruments.num_allocated == 17); // 1 default + 16 zone instruments
+        TEST(bank_full_table.bank.instruments.num_allocated == 17); // 1 default + 16 zone instruments
         TEST( ! Synth::zone_split_new(f, 0, 4, &bank_full_table));
         TEST(f[1].start_note == 9); // table untouched on refusal
-        const uint32_t pool_before = bank_full_table.instruments.num_allocated;
+        const uint32_t pool_before = bank_full_table.bank.instruments.num_allocated;
         TEST(Synth::zone_split_new(f, 0, 0, &bank_full_table));
-        TEST(bank_full_table.instruments.num_allocated == pool_before + 1);
+        TEST(bank_full_table.bank.instruments.num_allocated == pool_before + 1);
 
         // A full instrument pool refuses the clone with the bank untouched.
-        static Synth::InstrumentBank bank_full_pool;
-        Synth::init_default_bank(&bank_full_pool);
-        while (bank_full_pool.instruments.allocate() != pool_no_slot)
+        static Synth::InstrumentEditorBank bank_full_pool;
+        Synth::init_default_bank(&bank_full_pool.bank);
+        while (bank_full_pool.bank.instruments.allocate() != pool_no_slot)
             ;
-        TEST( ! Synth::zone_split_new(bank_full_pool.channel_zones[0], 0, 60, &bank_full_pool));
-        TEST(bank_full_pool.channel_zones[0][0].start_note == 1);
-        TEST(bank_full_pool.channel_zones[0][0].instrument == 0);
+        TEST( ! Synth::zone_split_new(bank_full_pool.bank.channel_zones[0], 0, 60, &bank_full_pool));
+        TEST(bank_full_pool.bank.channel_zones[0][0].start_note == 1);
+        TEST(bank_full_pool.bank.channel_zones[0][0].instrument == 0);
 
         // Repeated split/reclaim cycles keep the instrument pool bounded: each split
         // at the zone's first note clones the instrument and leaves the old one
         // unreferenced, so reclaim returns it to the pool.
-        static Synth::InstrumentBank bank_cycles;
-        Synth::init_default_bank(&bank_cycles);
-        const uint32_t pool_start = bank_cycles.instruments.num_allocated;
+        static Synth::InstrumentEditorBank bank_cycles;
+        Synth::init_default_bank(&bank_cycles.bank);
+        const uint32_t pool_start = bank_cycles.bank.instruments.num_allocated;
         for (uint32_t cycle = 0; cycle < 50; cycle++) {
-            TEST(Synth::zone_split_new(bank_cycles.channel_zones[0], 0, 0, &bank_cycles));
+            TEST(Synth::zone_split_new(bank_cycles.bank.channel_zones[0], 0, 0, &bank_cycles));
             Synth::reclaim_unused_slots(&bank_cycles);
-            TEST(bank_cycles.instruments.num_allocated <= pool_start + 1);
+            TEST(bank_cycles.bank.instruments.num_allocated <= pool_start + 1);
         }
     }
+    // ------------------------------------------------------------------
+    // Instrument library: records, the validation ladder, and reclaim on load.
+    // ------------------------------------------------------------------
+    {
+        static Synth::InstrumentEditorBank bank;
+        make_valid_bank(bank.bank);
+        // Instrument 1 references env 2 and lfo 2 while unrelated descriptors exist,
+        // so the record's dense renumbering is visible.
+        TEST(bank.bank.envelopes.allocate() == 1);
+        bank.bank.envelopes.entries[1].num_points = 2;
+        bank.bank.envelopes.entries[1].points[1].position = 100;
+        TEST(bank.bank.lfos.allocate() == 1);
+        bank.bank.lfos.entries[1].wave = Synth::WaveType::sawtooth_wave;
+        bank.bank.lfos.entries[1].period_ms = 80;
+        TEST(bank.bank.instruments.allocate() == 1);
+        bank.bank.instruments.entries[1].layer_count = 1;
+        bank.bank.instruments.entries[1].layers[0].gen[Synth::mod_volume].envelope_desc_id = 2;
+        bank.bank.instruments.entries[1].layers[0].gen[Synth::mod_pitch].lfo_desc_id = 2;
+        memcpy(bank.instrument_names[1], "Saved", 6);
+        TEST(Synth::validate_instrument_bank(&bank.bank));
+
+        const char* const path = "synth_library_roundtrip.tmp";
+
+        // Roundtrip: the record keeps the channel's whole instrument - every zone
+        // of the channel and every instrument the zones reference - renumbered to
+        // a dense prefix with the zoning on channel 0.
+        bank.bank.channel_zones[1][0] = { 1, 0 };
+        bank.bank.channel_zones[1][1] = { 61, 1 };
+        TEST(Synth::validate_instrument_bank(&bank.bank));
+        TEST(Synth::save_library_record(path, "Pads", "Saved", &bank, 1));
+
+        Synth::LibraryEntry entries[Synth::library_max_records];
+        TEST(Synth::read_library_index(path, entries, Synth::library_max_records) == 1);
+        TEST(strcmp(entries[0].category, "Pads") == 0);
+        TEST(strcmp(entries[0].name, "Saved") == 0);
+        TEST(entries[0].payload_size == Synth::library_payload_size);
+
+        static Synth::InstrumentEditorBank record;
+        memset(&record, 0, sizeof(record));
+        uint16_t load_slot = 0;
+        TEST(Synth::load_library_instrument(path, &entries[0], &record, 0, &load_slot));
+        TEST(load_slot == 0);
+        TEST(Synth::validate_instrument_bank(&record.bank));
+        TEST(record.bank.instruments.num_allocated == 2);
+        TEST(record.bank.envelopes.num_allocated == 2);
+        TEST(record.bank.lfos.num_allocated == 2);
+        // Both zones moved to channel 0; instrument ids stay dense and valid.
+        TEST(record.bank.channel_zones[0][0].start_note == 1);
+        TEST(record.bank.channel_zones[0][0].instrument == 0);
+        TEST(record.bank.channel_zones[0][1].start_note == 61);
+        TEST(record.bank.channel_zones[0][1].instrument == 1);
+        TEST(record.bank.instruments.entries[1].layers[0].gen[Synth::mod_volume].envelope_desc_id == 2);
+        TEST(record.bank.instruments.entries[1].layers[0].gen[Synth::mod_pitch].lfo_desc_id == 2);
+        TEST(record.bank.channel_chains[0].num_effects == 0);
+        TEST(record.bank.master_chain.num_effects == 0);
+        TEST(strcmp(record.instrument_names[1], "Saved") == 0);
+
+        // Save As renames only the record; the payload keeps the source names.
+        TEST(Synth::save_library_record(path, "Pads", "Renamed", &bank, 1));
+        TEST(Synth::read_library_index(path, entries, Synth::library_max_records) == 2);
+        TEST(strcmp(entries[1].name, "Renamed") == 0);
+        memset(&record, 0, sizeof(record));
+        TEST(Synth::load_library_instrument(path, &entries[1], &record, 0, &load_slot));
+        TEST(strcmp(record.instrument_names[1], "Saved") == 0);
+        TEST(strcmp(bank.instrument_names[1], "Saved") == 0);
+
+        remove(path);
+    }
+
+    // Load appends the record's instrument into a populated bank with remapped ids;
+    // repeated load/delete cycles keep the pool bounded through reclaim.
+    {
+        static Synth::InstrumentEditorBank src;
+        memset(&src, 0, sizeof(src));
+        src.bank.instruments.allocate();
+        src.bank.instruments.entries[0].layer_count = 1;
+        memcpy(src.instrument_names[0], "Loaded", 7);
+        src.bank.channel_zones[0][0].start_note = 1;
+        src.bank.channel_zones[0][0].instrument = 0;
+        src.bank.channel_enabled[0] = 1;
+        TEST(Synth::validate_instrument_bank(&src.bank));
+        const char* const load_path = "synth_library_load.tmp";
+        TEST(Synth::save_library_record(load_path, "Cat", "Inst", &src, 0));
+        Synth::LibraryEntry load_entries[1];
+        TEST(Synth::read_library_index(load_path, load_entries, 1) == 1);
+        static Synth::InstrumentEditorBank bank;
+        Synth::init_default_bank(&bank.bank);
+        const uint32_t pool_start = bank.bank.instruments.num_allocated;
+        uint16_t slot = 0;
+        TEST(Synth::load_library_instrument(load_path, &load_entries[0], &bank, 2, &slot));
+        TEST(slot == pool_start);
+        TEST(strcmp(bank.instrument_names[slot], "Loaded") == 0);
+        TEST(bank.bank.instruments.entries[slot].layer_count == 1);
+        TEST(bank.bank.channel_zones[2][0].start_note == 1);
+        TEST(bank.bank.channel_zones[2][0].instrument == slot);
+        bank.bank.channel_enabled[2] = 1;
+        Synth::reclaim_unused_slots(&bank);
+        TEST(Synth::validate_instrument_bank(&bank.bank));
+        for (uint32_t cycle = 0; cycle < 20; cycle++) {
+            TEST(Synth::load_library_instrument(load_path, &load_entries[0], &bank, 2, &slot));
+            bank.bank.channel_enabled[2] = 1;
+            Synth::reclaim_unused_slots(&bank);
+            memset(bank.bank.channel_zones[2], 0, sizeof(bank.bank.channel_zones[2]));
+            bank.bank.channel_enabled[2] = 0;
+            Synth::reclaim_unused_slots(&bank);
+            TEST(Synth::validate_instrument_bank(&bank.bank));
+            TEST(bank.bank.instruments.num_allocated == pool_start);
+        }
+        remove(load_path);
+    }
+
+    // A pool without space refuses the load with the bank unmodified.
+    {
+        static Synth::InstrumentEditorBank src;
+        memset(&src, 0, sizeof(src));
+        src.bank.envelopes.allocate();
+        Synth::EnvelopeDescriptor env = {};
+        env.num_points = 1;
+        env.sustain_first_point = 0;
+        env.sustain_last_point = 0;
+        env.min_value = 0.0f;
+        env.min_max_delta = 1.0f;
+        env.points[0].position = 0;
+        env.points[0].value = 0xFFFF;
+        src.bank.envelopes.entries[0] = env;
+        src.bank.instruments.allocate();
+        src.bank.instruments.entries[0].layer_count = 1;
+        src.bank.instruments.entries[0].layers[0].gen[Synth::mod_volume].envelope_desc_id = 1;
+        src.bank.channel_zones[0][0].start_note = 1;
+        src.bank.channel_zones[0][0].instrument = 0;
+        src.bank.channel_enabled[0] = 1;
+        TEST(Synth::validate_instrument_bank(&src.bank));
+        const char* const full_path = "synth_library_full.tmp";
+        TEST(Synth::save_library_record(full_path, "Cat", "Inst", &src, 0));
+        Synth::LibraryEntry full_entries[1];
+        TEST(Synth::read_library_index(full_path, full_entries, 1) == 1);
+        static Synth::InstrumentEditorBank bank;
+        Synth::init_default_bank(&bank.bank);
+        while (bank.bank.envelopes.allocate() != pool_no_slot)
+            ;
+        const uint32_t env_before = bank.bank.envelopes.num_allocated;
+        const uint32_t instr_before = bank.bank.instruments.num_allocated;
+        const uint32_t zone_before = bank.bank.channel_zones[2][0].start_note;
+        uint16_t slot = 0;
+        TEST( ! Synth::load_library_instrument(full_path, &full_entries[0], &bank, 2, &slot));
+        TEST(bank.bank.envelopes.num_allocated == env_before);
+        TEST(bank.bank.instruments.num_allocated == instr_before);
+        TEST(bank.bank.channel_zones[2][0].start_note == zone_before);
+        remove(full_path);
+    }
+
+    // The validation ladder refuses records at the step that first fails: framing,
+    // then decode, then record shape.
+    {
+        static Synth::InstrumentBank fat;
+        Synth::init_default_bank(&fat); // a valid bank, but not a valid record shape
+        static uint8_t image[Synth::instrument_bank_image_size<Synth::InstrumentBank>];
+        TEST(Synth::encode_instrument_bank(&fat, image, sizeof(image)) == sizeof(image));
+
+        const char* const path = "synth_library_ladder.tmp";
+        for (uint32_t attempt = 0; attempt < 2; attempt++) {
+            FILE* const file = fopen(path, "wb");
+            TEST(file != nullptr);
+            const uint32_t header[3] = { 0x42494c49, Synth::library_version, 1 };
+            fwrite(header, sizeof(header), 1, file);
+            char rec[52] = { };
+            memcpy(rec, "Cat", 3);
+            memcpy(rec + 24, "Wide", 4);
+            const uint32_t payload_size = sizeof(image);
+            memcpy(rec + 48, &payload_size, 4);
+            fwrite(rec, sizeof(rec), 1, file);
+            fwrite(image, sizeof(image), 1, file);
+            fclose(file);
+
+            Synth::LibraryEntry entries[4];
+            TEST(Synth::read_library_index(path, entries, 4) == 1);
+
+            static Synth::InstrumentEditorBank scratch;
+            memset(&scratch, 0, sizeof(scratch));
+            uint16_t load_slot = 0;
+            if (attempt == 0) {
+                // Framing: a payload shorter than a full bank image is refused.
+                entries[0].payload_size = sizeof(image) - 1;
+                TEST( ! Synth::load_library_instrument(path, &entries[0], &scratch, 0, &load_slot));
+
+                // Decode: a flipped payload byte breaks the bank image.
+                FILE* const patch = fopen(path, "r+b");
+                TEST(fseek(patch, static_cast<long>(entries[0].payload_offset), SEEK_SET) == 0);
+                const uint8_t broken = static_cast<uint8_t>(~image[0]);
+                fwrite(&broken, 1, 1, patch);
+                fclose(patch);
+                entries[0].payload_size = sizeof(image);
+                TEST( ! Synth::load_library_instrument(path, &entries[0], &scratch, 0, &load_slot));
+            }
+            else {
+                // Shape: a valid full bank (zones, chains, enabled channels) is not a
+                // valid record.
+                TEST( ! Synth::load_library_instrument(path, &entries[0], &scratch, 0, &load_slot));
+            }
+        }
+        remove(path);
+    }
+
+    // The scanner skips records with unterminated strings and stops at truncated or
+    // foreign files; only the first library_max_records records are indexed.
+    {
+        Synth::LibraryEntry entries[Synth::library_max_records];
+        const uint32_t magic = 0x42494c49;
+        const uint32_t small = 4;
+
+        const char* const path = "synth_library_scan.tmp";
+        FILE* const file = fopen(path, "wb");
+        TEST(file != nullptr);
+        const uint32_t header[3] = { magic, Synth::library_version, 3 };
+        fwrite(header, sizeof(header), 1, file);
+
+        char bad_category[52] = { };
+        memset(bad_category, 'x', Synth::library_category_len);
+        memcpy(bad_category + 48, &small, 4);
+        fwrite(bad_category, sizeof(bad_category), 1, file);
+        fwrite("1234", 4, 1, file);
+
+        char bad_name[52] = { };
+        memcpy(bad_name, "Cat", 3);
+        memset(bad_name + 24, 'y', Synth::library_name_len);
+        memcpy(bad_name + 48, &small, 4);
+        fwrite(bad_name, sizeof(bad_name), 1, file);
+        fwrite("5678", 4, 1, file);
+
+        char good[52] = { };
+        memcpy(good, "Cat", 3);
+        memcpy(good + 24, "Inst", 4);
+        memcpy(good + 48, &small, 4);
+        fwrite(good, sizeof(good), 1, file);
+        fwrite("9abc", 4, 1, file);
+        fclose(file);
+
+        TEST(Synth::read_library_index(path, entries, Synth::library_max_records) == 1);
+        TEST(strcmp(entries[0].category, "Cat") == 0 && strcmp(entries[0].name, "Inst") == 0);
+        TEST(entries[0].payload_offset == 12 + 2 * (52 + 4) + 52);
+        TEST(entries[0].payload_size == 4);
+        remove(path);
+
+        const char* const junk_path = "synth_library_junk.tmp";
+        FILE* const junk = fopen(junk_path, "wb");
+        fwrite("not a library at all", 20, 1, junk);
+        fclose(junk);
+        TEST(Synth::read_library_index(junk_path, entries, Synth::library_max_records) == 0);
+        remove(junk_path);
+
+        TEST(Synth::read_library_index("synth_library_missing.tmp", entries, Synth::library_max_records) == 0);
+
+        const char* const trunc_path = "synth_library_trunc.tmp";
+        FILE* const trunc = fopen(trunc_path, "wb");
+        fwrite(header, sizeof(header), 1, trunc); // declares 3 records, then ends
+        fclose(trunc);
+        TEST(Synth::read_library_index(trunc_path, entries, Synth::library_max_records) == 0);
+        remove(trunc_path);
+
+        const char* const cap_path = "synth_library_cap.tmp";
+        FILE* const cap = fopen(cap_path, "wb");
+        TEST(cap != nullptr);
+        const uint32_t cap_header[3] = { magic, Synth::library_version, Synth::library_max_records + 4 };
+        fwrite(cap_header, sizeof(cap_header), 1, cap);
+        char cap_rec[52] = { };
+        const uint32_t zero = 0;
+        memcpy(cap_rec + 48, &zero, 4);
+        for (uint32_t i = 0; i < Synth::library_max_records + 4; i++) {
+            snprintf(cap_rec + 24, Synth::library_name_len, "N%u", i);
+            fwrite(cap_rec, sizeof(cap_rec), 1, cap);
+        }
+        fclose(cap);
+        TEST(Synth::read_library_index(cap_path, entries, Synth::library_max_records) == Synth::library_max_records);
+        remove(cap_path);
+    }
+
+    // Overwriting a record preserves its siblings; the rebuilt file keeps the rest.
+    {
+        static Synth::InstrumentEditorBank bank;
+        make_valid_bank(bank.bank);
+        const char* const path = "synth_library_overwrite.tmp";
+        TEST(Synth::save_library_record(path, "C1", "N1", &bank, 0));
+        TEST(Synth::save_library_record(path, "C2", "N2", &bank, 0));
+
+        Synth::LibraryEntry entries[8];
+        TEST(Synth::read_library_index(path, entries, 8) == 2);
+        TEST(Synth::save_library_record(path, "C1", "N1", &bank, 0));
+        TEST(Synth::read_library_index(path, entries, 8) == 2);
+        TEST(strcmp(entries[0].category, "C2") == 0 && strcmp(entries[0].name, "N2") == 0);
+        TEST(strcmp(entries[1].category, "C1") == 0 && strcmp(entries[1].name, "N1") == 0);
+        remove(path);
+    }
+
+    // A corrupt or truncated library is never rebuilt over: the save fails and the
+    // original bytes stay untouched.
+    {
+        static Synth::InstrumentEditorBank bank;
+        make_valid_bank(bank.bank);
+
+        const char* const junk_path = "synth_library_corrupt_save.tmp";
+        FILE* const junk = fopen(junk_path, "wb");
+        fwrite("not a library at all", 20, 1, junk);
+        fclose(junk);
+        TEST( ! Synth::save_library_record(junk_path, "C", "N", &bank, 0));
+        FILE* const check = fopen(junk_path, "rb");
+        char buf[20] = { };
+        fread(buf, 1, 20, check);
+        fclose(check);
+        TEST(memcmp(buf, "not a library at all", 20) == 0);
+        remove(junk_path);
+
+        const char* const trunc_path = "synth_library_trunc_save.tmp";
+        FILE* const trunc = fopen(trunc_path, "wb");
+        TEST(trunc != nullptr);
+        const uint32_t header[3] = { 0x42494c49, Synth::library_version, 2 };
+        fwrite(header, sizeof(header), 1, trunc);
+        char rec[52] = { };
+        memcpy(rec, "C", 1);
+        memcpy(rec + 24, "N", 1);
+        const uint32_t zero = 0;
+        memcpy(rec + 48, &zero, 4);
+        fwrite(rec, sizeof(rec), 1, trunc);
+        fclose(trunc);
+        TEST( ! Synth::save_library_record(trunc_path, "C", "N2", &bank, 0));
+        remove(trunc_path);
+    }
+
+    // A record whose payload is not a bank image is indexed but dropped by the
+    // rebuild instead of overflowing the copy buffer.
+    {
+        const char* const path = "synth_library_oversize.tmp";
+        FILE* const file = fopen(path, "wb");
+        TEST(file != nullptr);
+        const uint32_t header[3] = { 0x42494c49, Synth::library_version, 1 };
+        fwrite(header, sizeof(header), 1, file);
+        char rec[52] = { };
+        memcpy(rec, "Cat", 3);
+        memcpy(rec + 24, "Huge", 4);
+        const uint32_t huge = 600000;
+        memcpy(rec + 48, &huge, 4);
+        fwrite(rec, sizeof(rec), 1, file);
+        static uint8_t junk[600000];
+        memset(junk, 0x5a, sizeof(junk));
+        fwrite(junk, sizeof(junk), 1, file);
+        fclose(file);
+
+        Synth::LibraryEntry entries[8];
+        Synth::LibraryScanStatus status = Synth::library_invalid;
+        TEST(Synth::read_library_index(path, entries, 8, &status) == 1);
+        TEST(status == Synth::library_valid);
+        TEST(entries[0].payload_size == 600000);
+
+        static Synth::InstrumentEditorBank bank;
+        make_valid_bank(bank.bank);
+        TEST(Synth::save_library_record(path, "Cat", "New", &bank, 0));
+        TEST(Synth::read_library_index(path, entries, 8, &status) == 1);
+        TEST(status == Synth::library_valid);
+        TEST(strcmp(entries[0].name, "New") == 0);
+        TEST(entries[0].payload_size == Synth::library_payload_size);
+        remove(path);
+    }
+
+    // Record shape: a stale zone past slot 0 in an otherwise empty bank is refused
+    // even though bank validation accepts it (disabled channels skip zone checks).
+    {
+        static Synth::InstrumentEditorBank bank;
+        memset(&bank, 0, sizeof(bank));
+        bank.bank.instruments.allocate();
+        bank.bank.instruments.entries[0].layer_count = 1;
+        bank.bank.channel_zones[3][1].start_note = 1;
+        TEST(Synth::validate_instrument_bank(&bank.bank));
+
+        static uint8_t image[Synth::instrument_bank_image_size<Synth::InstrumentBank>];
+        TEST(Synth::encode_instrument_bank(&bank.bank, image, sizeof(image)) == sizeof(image));
+
+        const char* const path = "synth_library_zoneshape.tmp";
+        FILE* const file = fopen(path, "wb");
+        TEST(file != nullptr);
+        const uint32_t header[3] = { 0x42494c49, Synth::library_version, 1 };
+        fwrite(header, sizeof(header), 1, file);
+        char rec[52] = { };
+        memcpy(rec, "Cat", 3);
+        memcpy(rec + 24, "Ghost", 5);
+        const uint32_t payload_size = sizeof(image);
+        memcpy(rec + 48, &payload_size, 4);
+        fwrite(rec, sizeof(rec), 1, file);
+        fwrite(image, sizeof(image), 1, file);
+        fclose(file);
+
+        Synth::LibraryEntry entries[4];
+        TEST(Synth::read_library_index(path, entries, 4) == 1);
+
+        static Synth::InstrumentEditorBank scratch;
+        memset(&scratch, 0, sizeof(scratch));
+        uint16_t load_slot = 0;
+        TEST( ! Synth::load_library_instrument(path, &entries[0], &scratch, 0, &load_slot));
+        remove(path);
+    }
+
+    // A library declaring more records than the index can hold is never rebuilt
+    // over: the save refuses instead of silently dropping the tail.
+    {
+        static Synth::InstrumentEditorBank bank;
+        make_valid_bank(bank.bank);
+
+        const char* const path = "synth_library_overcap.tmp";
+        FILE* const file = fopen(path, "wb");
+        TEST(file != nullptr);
+        const uint32_t header[3] = { 0x42494c49, Synth::library_version, Synth::library_max_records + 1 };
+        fwrite(header, sizeof(header), 1, file);
+        char rec[52] = { };
+        const uint32_t zero = 0;
+        memcpy(rec + 48, &zero, 4);
+        for (uint32_t i = 0; i < Synth::library_max_records + 1; i++) {
+            snprintf(rec, Synth::library_category_len, "C%u", i);
+            fwrite(rec, sizeof(rec), 1, file);
+        }
+        fclose(file);
+
+        Synth::LibraryEntry entries[Synth::library_max_records];
+        Synth::LibraryScanStatus status = Synth::library_invalid;
+        TEST(Synth::read_library_index(path, entries, Synth::library_max_records, &status) == Synth::library_max_records);
+        TEST(status == Synth::library_valid);
+        TEST( ! Synth::save_library_record(path, "C0", "N", &bank, 0));
+        remove(path);
+    }
+
     return exit_code;
 }

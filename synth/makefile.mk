@@ -9,12 +9,12 @@ lib_src_files += synth/synth_parameters.cpp
 lib_src_files += synth/synth_effects.cpp
 lib_src_files += synth/synth_effect_expansion.cpp
 lib_src_files += synth/synth_instrument.cpp
-lib_src_files += synth/synth_serialize.cpp
 lib_src_files += synth/synth_soundtrack.cpp
 
 synth_unit_src_files += synth/synth_unit.cpp
 synth_unit_src_files += synth/synth_effect_expansion.cpp
 synth_unit_src_files += sculptor/sculptor_instr_bank.cpp
+synth_unit_src_files += sculptor/sculptor_instr_library.cpp
 
 midi_decode_unit_src_files += synth/midi_decode_unit.cpp
 
