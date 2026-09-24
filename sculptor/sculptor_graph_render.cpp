@@ -560,7 +560,9 @@ void Graph::render(vmath::vec2 size, void* user_data)
         ImGui::EndPopup();
     }
 
-    // Right-click menu on a selected node: align and equal-size commands.
+    // Right-click menu on a selected node: align, equal-size and delete
+    // commands.  Delete runs the caller veto: a refused delete mutates
+    // nothing and is reported through the error overlay.
     if (ImGui::BeginPopup("node_menu")) {
         if (ImGui::MenuItem("Align left")) {
             align_selected(AlignKind::left);
@@ -580,6 +582,30 @@ void Graph::render(vmath::vec2 size, void* user_data)
         }
         if (ImGui::MenuItem("Equal height")) {
             align_selected(AlignKind::equal_height);
+        }
+        ImGui::Separator();
+        if (ImGui::MenuItem("Delete") && popup_node < max_nodes && nodes.is_occupied(popup_node)) {
+            delete_node(popup_node);
+            popup_node = pool_no_slot;
+        }
+        ImGui::EndPopup();
+    }
+
+    // Right-click menu on the empty canvas: the caller's items, then the
+    // widget's own add command.  The added node enters ghost mode so the
+    // caller's existing ghost-placement flow positions it.
+    if (ImGui::BeginPopup("canvas_menu")) {
+        if (canvas_menu_callback) {
+            canvas_menu_callback(canvas_menu_user_data);
+        }
+        if (ImGui::MenuItem("Add node")) {
+            const uint32_t added = create_node("node", popup_canvas_pos);
+            if (added != pool_no_slot) {
+                set_ghost(added, true);
+            }
+            else {
+                set_error("No free node slots");
+            }
         }
         ImGui::EndPopup();
     }
@@ -796,16 +822,25 @@ void Graph::render(vmath::vec2 size, void* user_data)
             set_ghost(ghost_idx, false); // pushes ghost_placed
         }
     }
-    // Right-click on a node opens the align/equal-size menu.  A right-click
-    // on an unselected node selects only it; on an already selected node the
-    // current (possibly multi-node) selection is kept.
-    if (interaction == Interaction::idle && ghost_idx == pool_no_slot && ImGui::IsWindowHovered() &&
-        in_widget(mouse_screen) && ImGui::IsMouseClicked(1) && node_hit && ! ImGui::IsAnyItemHovered()) {
+    // A right-click inside the widget with no ghost pending and no item
+    // under the mouse opens a popup: on a node the align/equal-size menu
+    // (a right-click on an unselected node selects only it; on an already
+    // selected node the current, possibly multi-node, selection is kept),
+    // on the empty canvas the add-node menu.
+    const bool canvas_right_click = interaction == Interaction::idle && ghost_idx == pool_no_slot &&
+                                    ImGui::IsWindowHovered() && in_widget(mouse_screen) && ImGui::IsMouseClicked(1) &&
+                                    ! ImGui::IsAnyItemHovered();
+    if (canvas_right_click && node_hit) {
         if (! is_selected(hit_node)) {
             select_none();
             set_selected(hit_node, true);
         }
+        popup_node = hit_node;
         ImGui::OpenPopup("node_menu");
+    }
+    else if (canvas_right_click && ! node_hit) {
+        popup_canvas_pos = mouse_graph();
+        ImGui::OpenPopup("canvas_menu");
     }
 
     // New press-starts, only inside the widget rect and when no ghost is

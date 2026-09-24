@@ -45,7 +45,7 @@ struct Slot {
     char          list_options[8][32];
 };
 
-constexpr uint32_t max_node_slots = 16;
+constexpr uint32_t max_node_slots = 40;
 
 // Draws the optional caller state widget at the bottom of a node.
 // Returns the widget height in pixels; the height is cached one frame.
@@ -63,7 +63,7 @@ struct Node {
     void*                      state_widget_data;
 };
 
-constexpr uint32_t max_nodes = 64;
+constexpr uint32_t max_nodes = 128;
 
 struct EndPoint {
     uint32_t node_idx;
@@ -75,13 +75,23 @@ struct Connection {
     EndPoint input;  // to
 };
 
-constexpr uint32_t max_connections = 128;
+constexpr uint32_t max_connections = 256;
 
 // Caller validation for connection attempts.  Runs after the widget's
 // structural checks (endpoint kinds, bounds, single connection per input);
 // return false to reject with an error overlay.  May be null.
 class Graph;
 using ValidationCallback = bool (*)(void* user_data, const Graph& graph, EndPoint output, EndPoint input);
+
+// Caller veto for node deletion; return true to refuse the delete.  May be
+// null.  When it fires, delete_node is a no-op and reports the refusal
+// through the error overlay.
+using NodeDeleteVeto = bool (*)(void* user_data, uint32_t node_idx);
+
+// Caller items for the empty-canvas right-click popup; the widget invokes
+// this first and then appends its own "Add node" item below the caller
+// items. May be null.
+using CanvasMenuCallback = void (*)(void* user_data);
 
 // Pools never compact: connections store stable node/slot indices, so
 // defragment() is deliberately unused.  Pools, view state, change queue and
@@ -176,6 +186,12 @@ public:
     // structural checks plus the caller validator and report failure through
     // the error overlay instead of silently returning an index.
     void set_validator(ValidationCallback callback, void* user_data);
+    // Refusal convention: delete_node stays void and refuses silently for
+    // bad indices; a vetoed delete also stays void, mutates nothing,
+    // pushes no events and reports through the error overlay.
+    // Snapshot restoration (load) bypasses the veto: it restores
+    // caller-driven state rather than acting on a user delete.
+    void set_delete_veto(NodeDeleteVeto callback, void* user_data);
     bool attempt_connection(EndPoint output, EndPoint input);
     // Retargets one end of a connection in place (connection_changed event).
     // A failed retarget destroys the connection, same rule as a failed drop.
@@ -223,7 +239,11 @@ public:
     // Application is event-based: load diffs the live state against the
     // incoming snapshot and enqueues the difference as normal GraphChange
     // events, so a live synth ramps surgically instead of being rebuilt.
-    void     set_state_callbacks(SerializeState serialize, DeserializeState deserialize, void* user_data);
+    void set_state_callbacks(SerializeState serialize, DeserializeState deserialize, void* user_data);
+
+    // Empty-canvas right-click popup items; the widget's own "Add node"
+    // item is always present and does not use this hook.
+    void     set_canvas_menu_callback(CanvasMenuCallback callback, void* user_data);
     uint32_t save(uint8_t* buffer, uint32_t buffer_size) const; // returns bytes
     bool     load(const uint8_t* buffer, uint32_t buffer_size, uint32_t* bytes_consumed);
 
@@ -265,6 +285,11 @@ private:
     // endpoint; output: as output endpoint).
     bool slot_is_connected(uint32_t node_idx, uint32_t slot_idx) const;
 
+    // Applies a node deletion without consulting the delete veto. Snapshot
+    // restoration uses it because the veto guards user-facing deletes, not
+    // restores. The caller has bounds/occupancy checked node_idx.
+    void delete_node_unvetoed(uint32_t node_idx);
+
     // Structural checks shared by add_connection, attempt_connection and
     // move_connection_end: bounds, node/slot existence, endpoint kinds.
     bool endpoints_structurally_valid(EndPoint output, EndPoint input) const;
@@ -279,6 +304,12 @@ private:
     // Caller validation callback.
     ValidationCallback validator           = nullptr;
     void*              validator_user_data = nullptr;
+
+    // Caller veto for delete_node and items for the canvas popup.
+    NodeDeleteVeto     delete_veto           = nullptr;
+    void*              delete_veto_user_data = nullptr;
+    CanvasMenuCallback canvas_menu_callback  = nullptr;
+    void*              canvas_menu_user_data = nullptr;
 
     // Error overlay state.
     char        error_message[128]           = {};
@@ -313,10 +344,12 @@ private:
 
     // Connection dragging: anchor endpoint and, when retargeting, which
     // connection end is being moved.
-    EndPoint connecting_from     = { pool_no_slot, pool_no_slot }; //  anchor dot
-    uint32_t retarget_connection = pool_no_slot;                   //  pool_no_slot when connecting anew
-    bool     retarget_output_end = false;                          //  true when the dragged end is the output
-    uint32_t popup_connection    = pool_no_slot;                   //  connection shown in the Delete popup
+    EndPoint    connecting_from     = { pool_no_slot, pool_no_slot }; //  anchor dot
+    uint32_t    retarget_connection = pool_no_slot;                   //  pool_no_slot when connecting anew
+    bool        retarget_output_end = false;                          //  true when the dragged end is the output
+    uint32_t    popup_connection    = pool_no_slot;                   //  connection shown in the Delete popup
+    uint32_t    popup_node          = pool_no_slot;                   //  node shown in the align/Delete popup
+    vmath::vec2 popup_canvas_pos    = {};                             //  right-click point for the canvas popup add
 
     // State widget heights cached from the previous frame (1-frame lag).
     float state_widget_heights[max_nodes];

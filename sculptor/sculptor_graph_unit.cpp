@@ -1032,9 +1032,9 @@ static void test_save_load_round_trip()
 // Test 2: caller-state serialize/deserialize hooks wrap the graph snapshot.
 static void test_save_load_caller_state_hook()
 {
-    Graph with_hooks;
+    static Graph with_hooks;
     with_hooks.set_state_callbacks(test_serialize_state, test_deserialize_state, nullptr);
-    Graph plain;
+    static Graph plain;
 
     const uint32_t n1 = with_hooks.create_node("n", vmath::vec2(0.0f, 0.0f));
     TEST(n1 != Sculptor::pool_no_slot);
@@ -1059,7 +1059,7 @@ static void test_save_load_caller_state_hook()
         return; // save is not implemented yet; the checks below need a snapshot
     }
 
-    Graph restore;
+    static Graph restore;
     restore.set_state_callbacks(nullptr, test_deserialize_state, nullptr);
     uint32_t   consumed = 0;
     const bool loaded   = restore.load(buf_with, total_with, &consumed);
@@ -1072,7 +1072,7 @@ static void test_save_load_caller_state_hook()
 
     // Deserialize hook is optional: the caller tail is skipped, load still
     // succeeds and still reports the tail as consumed.
-    Graph no_hooks;
+    static Graph no_hooks;
     consumed = 0;
     TEST(no_hooks.load(buf_with, total_with, &consumed));
     TEST(consumed == total_with);
@@ -1083,7 +1083,7 @@ static void test_save_load_caller_state_hook()
 
     // Over-reporting hook (huge size, near UINT32_MAX): save must refuse
     // rather than wrap the remaining-space arithmetic.
-    Graph over;
+    static Graph over;
     over.set_state_callbacks(test_serialize_state_overflow, test_deserialize_state, nullptr);
     TEST(over.create_node("n", vmath::vec2(0.0f, 0.0f)) != Sculptor::pool_no_slot);
     TEST(over.save(buf_with, sizeof(buf_with)) == 0);
@@ -1428,7 +1428,7 @@ static void test_load_diff_event_order()
 {
     // Live state: a -> b connected.  Snapshot: c -> d connected.  Loading must
     // delete first (connection, then nodes) and add afterwards.
-    Graph          g;
+    static Graph   g; // over a megabyte with the raised capacities; kept off the stack
     const uint32_t a = g.create_node("a", vmath::vec2(0.0f, 0.0f));
     TEST(a != Sculptor::pool_no_slot);
     const uint32_t b = g.create_node("b", vmath::vec2(160.0f, 0.0f));
@@ -1445,7 +1445,7 @@ static void test_load_diff_event_order()
     GraphChange changes[32];
     g.take_changes(changes, sizeof(changes) / sizeof(changes[0])); // drain build events
 
-    Graph          g2;
+    static Graph   g2; // over a megabyte with the raised capacities; kept off the stack
     const uint32_t c = g2.create_node("c", vmath::vec2(0.0f, 0.0f));
     TEST(c != Sculptor::pool_no_slot);
     const uint32_t d = g2.create_node("d", vmath::vec2(160.0f, 0.0f));
@@ -1513,7 +1513,7 @@ static void test_load_diff_event_order()
     // connection_changed.  Live: x(out+in) -> y, x -> z.  Snapshot: x keeps
     // its name (survives, out value 5 -> 6), y survives, z is replaced by w;
     // x -> z must be deleted and re-added, x -> x(in) retargets in place.
-    Graph          g3;
+    static Graph   g3; // over a megabyte with the raised capacities; kept off the stack
     const uint32_t x = g3.create_node("x", vmath::vec2(0.0f, 0.0f));
     TEST(x != Sculptor::pool_no_slot);
     const uint32_t y = g3.create_node("y", vmath::vec2(160.0f, 0.0f));
@@ -1535,7 +1535,7 @@ static void test_load_diff_event_order()
     TEST(g3.add_connection(EndPoint{ x, x_out }, EndPoint{ z, z_in }) != Sculptor::pool_no_slot);
     g3.take_changes(changes, sizeof(changes) / sizeof(changes[0])); // drain build events
 
-    Graph          g4;
+    static Graph   g4; // over a megabyte with the raised capacities; kept off the stack
     const uint32_t x4 = g4.create_node("x", vmath::vec2(0.0f, 0.0f));
     TEST(x4 != Sculptor::pool_no_slot);
     const uint32_t y4 = g4.create_node("y", vmath::vec2(160.0f, 0.0f));
@@ -1704,6 +1704,181 @@ static void test_save_load_failure_paths()
     TEST(g.save(full, sizeof(full)) == 0);
 }
 
+// ---------------------------------------------------------------------------
+// Delete veto: the editor refuses deletions of nodes referenced elsewhere.
+
+static bool veto_single_node(void* user_data, uint32_t node_idx)
+{
+    return node_idx == *static_cast<const uint32_t*>(user_data);
+}
+
+static void test_delete_node_veto()
+{
+    static Graph g; // over a megabyte with the raised capacities; kept off the stack
+
+    const uint32_t a = g.create_node("a", vmath::vec2(0.0f, 0.0f));
+    const uint32_t b = g.create_node("b", vmath::vec2(0.0f, 0.0f));
+    TEST(a != Sculptor::pool_no_slot);
+    TEST(b != Sculptor::pool_no_slot);
+
+    Slot out_slot        = {};
+    out_slot.kind        = SlotKind::output;
+    Slot in_slot         = {};
+    in_slot.kind         = SlotKind::input;
+    const uint32_t a_out = g.add_slot(a, out_slot);
+    const uint32_t b_in  = g.add_slot(b, in_slot);
+    TEST(a_out != Sculptor::pool_no_slot);
+    TEST(b_in != Sculptor::pool_no_slot);
+    TEST(g.add_connection(EndPoint{ a, a_out }, EndPoint{ b, b_in }) != Sculptor::pool_no_slot);
+
+    GraphChange scratch[8] = {};
+    drain_changes(g, scratch, 8); // drain the setup events
+
+    // Fill the pool: the probe assertions below need a full pool, with a
+    // and b as occupants (indices 0 and 1) and no free index anywhere else.
+    for (uint32_t i = 2; i < max_nodes; ++i) {
+        TEST(g.create_node("fill", vmath::vec2(0.0f, 0.0f)) != Sculptor::pool_no_slot);
+    }
+    GraphChange fill[max_nodes] = {};
+    drain_changes(g, fill, max_nodes);
+
+    uint32_t vetoed = a;
+    g.set_delete_veto(veto_single_node, &vetoed);
+
+    // Vetoed delete: the node, its slots and its touching connections all
+    // survive, and no change event is emitted.
+    g.delete_node(a);
+    TEST(g.has_error());
+    g.delete_node(a);
+    TEST(strcmp(g.node(a).name, "a") == 0);
+    TEST(g.node(a).slots.is_occupied(a_out));
+    TEST(g.connection_count() == 1);
+    // The vetoed node still occupies its pool index: nothing is free.
+    TEST(g.create_node("probe", vmath::vec2(0.0f, 0.0f)) == Sculptor::pool_no_slot);
+
+    GraphChange events[8] = {};
+    TEST(drain_changes(g, events, 8) == 0);
+
+    // The veto is per node: deleting a different node succeeds, dropping
+    // its connections (connection_deleted first) and then the node itself.
+    g.delete_node(b);
+    TEST(g.connection_count() == 0);
+    TEST(drain_changes(g, events, 8) == 2);
+    TEST(events[0].kind == ChangeKind::connection_deleted);
+    TEST(events[1].kind == ChangeKind::node_deleted && events[1].node_idx == b);
+    // The freed index is reused by the next allocation (first-fit pool).
+    TEST(g.create_node("probe", vmath::vec2(0.0f, 0.0f)) == b);
+}
+
+// ---------------------------------------------------------------------------
+// load() deletes without the veto (see delete_node_unvetoed).
+static bool veto_all_counter(void* user_data, uint32_t node_idx)
+{
+    (void)node_idx;
+    ++*static_cast<uint32_t*>(user_data);
+    return true;
+}
+static void test_load_bypasses_delete_veto()
+{
+    static Graph g; // over a megabyte with the raised capacities; kept off the stack
+    uint8_t      buffer[2048] = {};
+    TEST(g.create_node("a", vmath::vec2(0.0f, 0.0f)) != Sculptor::pool_no_slot);
+    TEST(g.create_node("b", vmath::vec2(0.0f, 0.0f)) != Sculptor::pool_no_slot);
+    const uint32_t saved = g.save(buffer, sizeof(buffer));
+    TEST(saved != 0);
+    GraphChange scratch[8] = {};
+    drain_changes(g, scratch, 8);
+    const uint32_t extra = g.create_node("extra", vmath::vec2(0.0f, 0.0f));
+    TEST(extra != Sculptor::pool_no_slot);
+    GraphChange setup[8] = {};
+    drain_changes(g, setup, 8);
+    uint32_t veto_calls = 0;
+    g.set_delete_veto(veto_all_counter, &veto_calls);
+    uint32_t consumed = 0;
+    TEST(g.load(buffer, saved, &consumed));
+    // The restore removed "extra" without a single veto invocation and
+    // without surfacing an error: the veto does not apply to load().
+    TEST(veto_calls == 0);
+    TEST(! g.has_error());
+    GraphChange events[8] = {};
+    TEST(drain_changes(g, events, 8) == 1);
+    TEST(events[0].kind == ChangeKind::node_deleted && events[0].node_idx == extra);
+}
+
+// Capacity raises: the pools saturate at the raised limits and refuse
+// further allocation safely, without crashing or corrupting existing state.
+
+static void test_capacity_smoke()
+{
+    static Graph g; // over a megabyte with the raised capacities; kept off the stack
+
+    uint32_t nodes[max_nodes] = {};
+    for (uint32_t i = 0; i < max_nodes; ++i) {
+        nodes[i] = g.create_node("n", vmath::vec2(0.0f, 0.0f));
+        TEST(nodes[i] != Sculptor::pool_no_slot);
+        if (nodes[i] == Sculptor::pool_no_slot) {
+            return; // already reported above; skip out-of-bounds checks below
+        }
+    }
+    // One past the node pool: refused safely, and stays refused.
+    TEST(g.create_node("over", vmath::vec2(0.0f, 0.0f)) == Sculptor::pool_no_slot);
+    TEST(g.create_node("over", vmath::vec2(0.0f, 0.0f)) == Sculptor::pool_no_slot);
+
+    // A single node holds max_node_slots slots.
+    Slot in_slot = {};
+    in_slot.kind = SlotKind::input;
+    for (uint32_t i = 0; i < max_node_slots; ++i) {
+        TEST(g.add_slot(nodes[0], in_slot) != Sculptor::pool_no_slot);
+    }
+    TEST(g.add_slot(nodes[0], in_slot) == Sculptor::pool_no_slot);
+    TEST(g.add_slot(nodes[0], in_slot) == Sculptor::pool_no_slot);
+
+    // Connections: the raw API allows fan-in onto one input slot (see
+    // test_add_delete_connection_basics), so a single output/input pair
+    // saturates the connection pool.
+    Slot out_slot      = {};
+    out_slot.kind      = SlotKind::output;
+    const uint32_t out = g.add_slot(nodes[1], out_slot);
+    const uint32_t in  = g.add_slot(nodes[1], in_slot);
+    TEST(out != Sculptor::pool_no_slot);
+    TEST(in != Sculptor::pool_no_slot);
+    for (uint32_t i = 0; i < max_connections; ++i) {
+        TEST(g.add_connection(EndPoint{ nodes[1], out }, EndPoint{ nodes[1], in }) != Sculptor::pool_no_slot);
+    }
+    TEST(g.add_connection(EndPoint{ nodes[1], out }, EndPoint{ nodes[1], in }) == Sculptor::pool_no_slot);
+    TEST(g.add_connection(EndPoint{ nodes[1], out }, EndPoint{ nodes[1], in }) == Sculptor::pool_no_slot);
+    TEST(g.connection_count() == max_connections);
+    TEST(g.get_connection(max_connections - 1).output.node_idx == nodes[1]);
+}
+
+// ---------------------------------------------------------------------------
+// Canvas menu callback: the popup itself lives in the renderer
+// (sculptor_graph_render.cpp), so only the callback type and setter are
+// reachable headlessly. The callback body runs the same way here as the
+// render side runs it when the empty-canvas popup opens.
+
+static void canvas_menu_adds_node(void* user_data)
+{
+    static_cast<Graph*>(user_data)->create_node("canvas", vmath::vec2(0.0f, 0.0f));
+}
+
+static void test_canvas_menu_callback_api()
+{
+    static Graph g; // over a megabyte with the raised capacities; kept off the stack
+
+    g.set_canvas_menu_callback(canvas_menu_adds_node, &g);
+    Sculptor::CanvasMenuCallback callback = canvas_menu_adds_node;
+
+    GraphChange scratch[8] = {};
+    drain_changes(g, scratch, 8);
+    callback(&g);
+
+    GraphChange events[8] = {};
+    TEST(drain_changes(g, events, 8) == 1);
+    TEST(events[0].kind == ChangeKind::node_added);
+    TEST(strcmp(g.node(0).name, "canvas") == 0);
+}
+
 int main()
 {
     test_create_node_distinct_indices();
@@ -1742,6 +1917,10 @@ int main()
     test_load_diff_structural_recreate();
     test_snapshot_stack_undo_redo();
     test_save_load_failure_paths();
+    test_delete_node_veto();
+    test_load_bypasses_delete_veto();
+    test_capacity_smoke();
+    test_canvas_menu_callback_api();
 
     return exit_code;
 }

@@ -255,6 +255,11 @@ void remap_snapshot_connection(const int32_t*            snap_to_live,
 }
 } // namespace
 
+// The editor state carve-out in sculptor_instr_bank.cpp reserves fixed
+// per-Graph slots; a capacity raise that outgrows the slot must fail the
+// build instead of silently busting that reserve.
+static_assert(sizeof(Graph) <= 1638400u);
+
 void Graph::push_change(ChangeKind kind, uint32_t node_idx, uint32_t slot_idx, uint32_t connection_idx)
 {
     if (changes_count == max_pending_changes) {
@@ -331,6 +336,18 @@ void Graph::delete_node(uint32_t node_idx)
     if (node_idx >= max_nodes || ! nodes.is_occupied(node_idx)) {
         return;
     }
+    // The veto runs before any mutation: a refused delete leaves the node,
+    // its slots and its connections untouched and pushes no change events;
+    // the refusal surfaces through the error overlay.
+    if (delete_veto && delete_veto(delete_veto_user_data, node_idx)) {
+        set_error("Node deletion refused");
+        return;
+    }
+    delete_node_unvetoed(node_idx);
+}
+
+void Graph::delete_node_unvetoed(uint32_t node_idx)
+{
     // Drop connections touching the node first, reporting each one, so the
     // caller never sees a connection referencing a dead node.  delete_connection
     // also cancels an active retarget of a dropped connection.
@@ -359,6 +376,9 @@ void Graph::delete_node(uint32_t node_idx)
     if (renaming_node == node_idx) {
         renaming_node = pool_no_slot;
         interaction   = Interaction::idle;
+    }
+    if (popup_node == node_idx) {
+        popup_node = pool_no_slot;
     }
     push_change(ChangeKind::node_deleted, node_idx, pool_no_slot, pool_no_slot);
 }
@@ -466,6 +486,18 @@ void Graph::set_validator(ValidationCallback callback, void* user_data)
 {
     validator           = callback;
     validator_user_data = user_data;
+}
+
+void Graph::set_delete_veto(NodeDeleteVeto callback, void* user_data)
+{
+    delete_veto           = callback;
+    delete_veto_user_data = user_data;
+}
+
+void Graph::set_canvas_menu_callback(CanvasMenuCallback callback, void* user_data)
+{
+    canvas_menu_callback  = callback;
+    canvas_menu_user_data = user_data;
 }
 
 void Graph::set_error(const char* message)
@@ -950,7 +982,7 @@ bool Graph::load(const uint8_t* buffer, uint32_t buffer_size, uint32_t* bytes_co
     }
     for (uint32_t i = 0; i < max_nodes; ++i) {
         if (nodes.is_occupied(i) && ! live_matched[i]) {
-            delete_node(i);
+            delete_node_unvetoed(i);
         }
     }
 
