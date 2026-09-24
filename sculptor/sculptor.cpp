@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: MIT
 // SPDX-FileCopyrightText: Copyright (c) 2021-2026 Chris Dragan
 
-#include "sculptor_materials.h"
 #include "sculptor_asset_browser.h"
 #include "sculptor_geom_edit.h"
 #include "sculptor_instr_edit.h"
+#include "sculptor_materials.h"
+#include "sculptor_notifications.h"
 #include "sculptor_tex_edit.h"
 
 #include "../core/barrier.h"
@@ -14,11 +15,15 @@
 #include "../core/memory_heap.h"
 #include "../core/minivulkan.h"
 #include "../core/mstdc.h"
-#include "../synth/realtime_synth.h"
 #include "../core/vmath.h"
+#include "../synth/realtime_synth.h"
 
+// Include order matters: sculptor_shaders.h defines the shader-list macro
+// that core/shaders.h expands.
+// clang-format off
 #include "sculptor_shaders.h"
 #include "../core/shaders.h"
+// clang-format on
 
 #include <iterator>
 #include <math.h>
@@ -26,10 +31,9 @@
 
 const char app_name[] = "Sculptor";
 
-vmath::vec4 Sculptor::Editor::debug_color{0.5f, 0.5f, 0.5f, 1.0f};
+vmath::vec4 Sculptor::Editor::debug_color{ 0.5f, 0.5f, 0.5f, 1.0f };
 
-const int gui_config_flags = ImGuiConfigFlags_NavEnableKeyboard
-                           | ImGuiConfigFlags_DockingEnable;
+const int gui_config_flags = ImGuiConfigFlags_NavEnableKeyboard | ImGuiConfigFlags_DockingEnable;
 
 static Sculptor::AssetBrowser   asset_browser;
 static Sculptor::GeometryEditor geometry_editor;
@@ -38,12 +42,7 @@ static Sculptor::SynthEditor    synth_editor;
 
 // Global list of all possible editor windows, this collection is used for generic handling
 // of editor windows, like drawing and event passing to visible editors
-static Sculptor::Editor* const editors[] = {
-    &asset_browser,
-    &geometry_editor,
-    &texture_editor,
-    &synth_editor
-};
+static Sculptor::Editor* const editors[] = { &asset_browser, &geometry_editor, &texture_editor, &synth_editor };
 
 // Need +1 for ImGui full window itself, +max_asset_slots for asset thumbnails
 const unsigned gui_num_descriptors = (std::size(editors) + 1 + Sculptor::max_asset_slots) * max_swapchain_size;
@@ -60,7 +59,7 @@ uint32_t check_device_features()
     missing_features += check_feature(&vk_maintenance4_features.maintenance4);
     missing_features += check_feature(&vk_14_features.pushDescriptor);
     missing_features += check_feature(&vk_16b_storage_features.storageBuffer16BitAccess); // for synth
-    missing_features += check_feature(&vk_features.features.shaderInt16); // for synth
+    missing_features += check_feature(&vk_features.features.shaderInt16);                 // for synth
 
     return missing_features;
 }
@@ -111,14 +110,14 @@ bool init_assets()
                                "+ New Texture",
                                "Texture");
 
-    if ( ! Sculptor::create_material_layouts())
+    if (! Sculptor::create_material_layouts())
         return false;
 
-    if ( ! init_gui(GuiClear::clear))
+    if (! init_gui(GuiClear::clear))
         return false;
 
     // TODO find a better place
-    if ( ! Synth::init_synth())
+    if (! Synth::init_synth())
         d_printf("Synth initialization failed; continuing without audio\n");
 
     return true;
@@ -137,7 +136,7 @@ void notify_gui_heap_freed()
 
 static bool destroy_viewports()
 {
-    if ( ! idle_queue())
+    if (! idle_queue())
         return false;
 
     notify_gui_heap_freed();
@@ -156,8 +155,8 @@ static bool allocate_viewports()
 
 static bool create_gui_frame(uint32_t image_idx)
 {
-    ImGuiIO& io = ImGui::GetIO();
-    io.DisplaySize.x = static_cast<float>(vk_surface_caps.currentExtent.width)  / vk_surface_scale;
+    ImGuiIO& io      = ImGui::GetIO();
+    io.DisplaySize.x = static_cast<float>(vk_surface_caps.currentExtent.width) / vk_surface_scale;
     io.DisplaySize.y = static_cast<float>(vk_surface_caps.currentExtent.height) / vk_surface_scale;
 
     ImGui_ImplVulkan_NewFrame();
@@ -170,7 +169,7 @@ static bool create_gui_frame(uint32_t image_idx)
 
     static vmath::vec2 initial_pos;
     static bool        initial_pos_set;
-    if ( ! initial_pos_set) {
+    if (! initial_pos_set) {
         initial_pos     = abs_mouse_pos;
         prev_mouse_pos  = abs_mouse_pos;
         initial_pos_set = true;
@@ -178,19 +177,15 @@ static bool create_gui_frame(uint32_t image_idx)
     const bool is_mouse_pos_valid = prev_mouse_pos.x != initial_pos.x || prev_mouse_pos.y != initial_pos.y;
 
     const vmath::vec2 mouse_delta = abs_mouse_pos - prev_mouse_pos;
-    prev_mouse_pos = abs_mouse_pos;
+    prev_mouse_pos                = abs_mouse_pos;
 
-    const Sculptor::Editor::UserInput input = {
-        is_mouse_pos_valid ? abs_mouse_pos : vmath::vec2{0.0f, 0.0f},
-        is_mouse_pos_valid ? mouse_delta   : vmath::vec2{0.0f, 0.0f},
-        wheel_delta
-    };
+    const Sculptor::Editor::UserInput input = { is_mouse_pos_valid ? abs_mouse_pos : vmath::vec2{ 0.0f, 0.0f },
+                                                is_mouse_pos_valid ? mouse_delta : vmath::vec2{ 0.0f, 0.0f },
+                                                wheel_delta };
 
-    static const Sculptor::Editor::UserInput no_input = {
-        vmath::vec2{-(1 << 20), -(1 << 20)},
-        vmath::vec2{0, 0},
-        0
-    };
+    static const Sculptor::Editor::UserInput no_input = { vmath::vec2{ -(1 << 20), -(1 << 20) },
+                                                          vmath::vec2{ 0, 0 },
+                                                          0 };
 
     if (ImGui::BeginMainMenuBar()) {
         if (ImGui::BeginMenu("File")) {
@@ -257,9 +252,8 @@ static bool create_gui_frame(uint32_t image_idx)
                            static_cast<double>(fill_ms),
                            static_cast<double>(lead_ms),
                            ring.underrun_count);
-        const float fill_frac = ring.lead_frames > 0
-                              ? static_cast<float>(ring.fill_frames) / static_cast<float>(ring.lead_frames)
-                              : 0.0f;
+        const float fill_frac =
+            ring.lead_frames > 0 ? static_cast<float>(ring.fill_frames) / static_cast<float>(ring.lead_frames) : 0.0f;
         ImGui::ProgressBar(fill_frac, ImVec2(-1.0f, 0.0f));
     }
     ImGui::End();
@@ -267,25 +261,25 @@ static bool create_gui_frame(uint32_t image_idx)
     bool viewports_changed = false;
 
     for (Sculptor::Editor* editor : editors) {
-        if ( ! editor->enabled)
+        if (! editor->enabled)
             continue;
 
         const bool real_input = ! editor->is_mouse_captured() || editor->has_captured_mouse();
 
         bool need_realloc = false;
-        if ( ! editor->create_gui_frame(image_idx,
-                                        &need_realloc,
-                                        real_input ? input : no_input))
+        if (! editor->create_gui_frame(image_idx, &need_realloc, real_input ? input : no_input))
             return false;
 
         if (need_realloc)
             viewports_changed = true;
     }
 
+    Sculptor::render_notifications();
+
     if (viewports_changed && ! destroy_viewports())
         return false;
 
-    if ( ! allocate_viewports())
+    if (! allocate_viewports())
         return false;
 
     return true;
@@ -293,37 +287,34 @@ static bool create_gui_frame(uint32_t image_idx)
 
 bool draw_frame(uint32_t image_idx, uint64_t time_ms, VkFence queue_fence, uint32_t sem_id)
 {
-    if ( ! create_gui_frame(image_idx))
+    if (! create_gui_frame(image_idx))
         return false;
 
     Image& image = vk_swapchain_images[image_idx];
 
     static CommandBuffers<max_swapchain_size> bufs;
 
-    if ( ! allocate_command_buffers_once(&bufs, vk_num_swapchain_images))
+    if (! allocate_command_buffers_once(&bufs, vk_num_swapchain_images))
         return false;
 
     const VkCommandBuffer buf = bufs.bufs[image_idx];
 
-    if ( ! reset_and_begin_command_buffer(buf))
+    if (! reset_and_begin_command_buffer(buf))
         return false;
 
-    static const Image::Transition color_att_init = {
-        VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
-        VK_ACCESS_2_NONE,
-        VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
-        VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
-        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
-    };
+    static const Image::Transition color_att_init = { VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
+                                                      VK_ACCESS_2_NONE,
+                                                      VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                                                      VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+                                                      VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL };
     image.barrier(color_att_init);
 
-    static const Image::Transition depth_init = {
-        VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
-        VK_ACCESS_2_NONE,
-        VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT,
-        VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT | VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT,
-        VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL
-    };
+    static const Image::Transition depth_init = { VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
+                                                  VK_ACCESS_2_NONE,
+                                                  VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT,
+                                                  VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT |
+                                                      VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT,
+                                                  VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL };
 
     if (vk_depth_buffers[image_idx].layout != VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
         vk_depth_buffers[image_idx].barrier(depth_init);
@@ -334,16 +325,14 @@ bool draw_frame(uint32_t image_idx, uint64_t time_ms, VkFence queue_fence, uint3
         if (editor->enabled && ! editor->draw_frame(buf, image_idx))
             return false;
 
-    if ( ! send_gui_to_gpu(buf, image_idx))
+    if (! send_gui_to_gpu(buf, image_idx))
         return false;
 
-    static const Image::Transition color_att_present = {
-        VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
-        VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
-        VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
-        VK_ACCESS_2_NONE,
-        VK_IMAGE_LAYOUT_PRESENT_SRC_KHR
-    };
+    static const Image::Transition color_att_present = { VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                                                         VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+                                                         VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                                                         VK_ACCESS_2_NONE,
+                                                         VK_IMAGE_LAYOUT_PRESENT_SRC_KHR };
     image.barrier(color_att_present);
 
     send_barrier(buf);
@@ -359,13 +348,13 @@ bool draw_frame(uint32_t image_idx, uint64_t time_ms, VkFence queue_fence, uint3
     static VkSubmitInfo submit_info = {
         VK_STRUCTURE_TYPE_SUBMIT_INFO,
         nullptr,
-        1,                                  // waitSemaphoreCount
-        nullptr,                            // pWaitSemaphores
-        &dst_stage,                         // pWaitDstStageMask
-        1,                                  // commandBufferCount
-        nullptr,                            // pCommandBuffers
-        1,                                  // signalSemaphoreCount
-        nullptr,                            // pSignalSemaphores
+        1,          // waitSemaphoreCount
+        nullptr,    // pWaitSemaphores
+        &dst_stage, // pWaitDstStageMask
+        1,          // commandBufferCount
+        nullptr,    // pCommandBuffers
+        1,          // signalSemaphoreCount
+        nullptr,    // pSignalSemaphores
     };
 
     submit_info.pWaitSemaphores   = &vk_sems[sem_id + sem_acquire];

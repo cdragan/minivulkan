@@ -35,7 +35,11 @@ extern const char default_channel_names[max_channels][max_name_len];
 bool init_default_channel(InstrumentBank* bank, uint32_t channel);
 void init_default_bank(InstrumentBank* bank);
 
-void get_zone_name(const InstrumentEditorBank* bank, uint32_t channel, uint32_t zone_entry, char* out, uint32_t out_size);
+void get_zone_name(const InstrumentEditorBank* bank,
+                   uint32_t                    channel,
+                   uint32_t                    zone_entry,
+                   char*                       out,
+                   uint32_t                    out_size);
 
 // Keyboard zone table operations.  A table is sorted by start_note and terminated
 // by an empty slot; entry i covers [start_note[i]-1, start_note[i+1]-2] and the last
@@ -83,9 +87,9 @@ void reclaim_unused_slots(InstrumentEditorBank* bank);
 constexpr uint32_t bank_queue_capacity = 2;
 
 struct BankUpdateQueue {
-    InstrumentBank           packets[bank_queue_capacity];
-    std::atomic<uint32_t>    head{0}; // consumer position (monotonic)
-    std::atomic<uint32_t>    tail{0}; // producer position (monotonic)
+    InstrumentBank        packets[bank_queue_capacity];
+    std::atomic<uint32_t> head{ 0 }; // consumer position (monotonic)
+    std::atomic<uint32_t> tail{ 0 }; // producer position (monotonic)
 };
 
 // Returns the next undrained bank without committing it (nullptr when empty).

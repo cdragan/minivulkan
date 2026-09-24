@@ -2,17 +2,27 @@
 // SPDX-FileCopyrightText: Copyright (c) 2021-2026 Chris Dragan
 
 #include "sculptor_instr_bank.h"
+#include "sculptor_instr_library.h"
+#include "sculptor_notifications.h"
+#include "sculptor_undo.h"
 
 #include <cmath>
 #include <stdio.h>
 #include <string.h>
 
-#include "../synth/synth_serialize.h"
-
-static_assert(sizeof(Synth::InstrumentBank) <= 450'000); // runtime + editor + scratch + rollback + pending
+static_assert(sizeof(Synth::InstrumentBank) <= 450'000);
 static_assert(sizeof(Synth::BankUpdateQueue) <= 2 * sizeof(Synth::InstrumentBank) + 32);
-static_assert(7 * sizeof(Synth::InstrumentBank) + 10 * sizeof(Synth::InstrumentBank) +
-                  Synth::instrument_bank_header_size + 4 * 1638400u <=
+
+// The JSON codec's staging footprint (1 MiB text + 64 KiB tokens + 16 KiB key
+// index), reserved here for the editor state budget; the codec pins its real
+// staging to the same number with its own static_assert.
+constexpr uint32_t bank_json_staging_reservation = 1024 * 1024 + 64 * 1024 + 16 * 1024;
+constexpr uint32_t editor_undo_depth             = 10;
+static_assert(bank_json_staging_reservation + 2 * (Synth::library_max_records * sizeof(Synth::LibraryEntry)) +
+                  sizeof(Sculptor::UndoRedo) + sizeof(uint32_t) + 2 * sizeof(Synth::InstrumentBank) +
+                  sizeof(Synth::BankUpdateQueue) + (6 + editor_undo_depth) * sizeof(Synth::InstrumentEditorBank) +
+                  editor_undo_depth * sizeof(uint32_t) + 64 * 1024 + // library record copy chunks
+                  Sculptor::notification_state_bytes + 4 * 1638400u <=
               16 * 1024 * 1024);
 
 // Factory default state: the first-run bank the editor builds for a fresh project,
@@ -170,8 +180,8 @@ void Synth::init_default_bank(InstrumentBank* bank)
     bank->drum_track_channel = 9;
 
     // A fresh bank always has room; the master chain's LFO remap cannot fail either.
-    if ( ! init_default_channel(bank, 0)) {
-        return;  // A fresh bank always has room for the recipe channel.
+    if (! init_default_channel(bank, 0)) {
+        return; // A fresh bank always has room for the recipe channel.
     }
     bank->channel_enabled[0] = 1;
 

@@ -3,7 +3,8 @@
 
 #include "sculptor_instr_library.h"
 
-#include "../synth/synth_serialize.h"
+#include "../core/atomic_file.h"
+#include "sculptor_bank_json.h"
 #include "sculptor_instr_bank.h"
 
 #include <errno.h>
@@ -28,11 +29,6 @@ bool names_terminated(const char* category, const char* name)
            memchr(name, 0, Synth::library_name_len) != nullptr;
 }
 
-bool same_record(const char* a, const char* b)
-{
-    return strncmp(a, b, Synth::library_category_len) == 0;
-}
-
 } // namespace
 
 uint32_t Synth::read_library_index(const char* const               path,
@@ -52,9 +48,12 @@ uint32_t Synth::read_library_index(const char* const               path,
     }
 
     uint32_t header[3] = {};
-    if (fread(header, sizeof(header), 1, file) != 1 || header[0] != library_file_magic ||
-        header[1] != Synth::library_version) {
+    if (fread(header, sizeof(header), 1, file) != 1 || header[0] != library_file_magic) {
+        fclose(file);
+        return 0;
+    }
 
+    if (header[1] != Synth::library_version) {
         fclose(file);
         return 0;
     }
@@ -69,8 +68,10 @@ uint32_t Synth::read_library_index(const char* const               path,
         return 0;
     }
 
-    uint32_t num_loaded  = 0;
-    uint32_t num_scanned = 0;
+    uint32_t num_loaded         = 0;
+    uint32_t num_scanned        = 0;
+    bool     oversized          = false; // any record past the payload bound, displayable or not
+    bool     unterminated_names = false; // a skipped record the rebuild would delete
     while (num_scanned < header[2]) {
 
         RecordHeader record;
@@ -81,9 +82,14 @@ uint32_t Synth::read_library_index(const char* const               path,
         if (payload_offset < 0 || record.payload_size > static_cast<uint32_t>(file_size - payload_offset))
             break;
 
+        if (record.payload_size > Synth::library_payload_max)
+            oversized = true;
         num_scanned++;
 
-        if (names_terminated(record.category, record.name) && num_loaded < max_entries) {
+        const bool terminated = names_terminated(record.category, record.name);
+        if (! terminated)
+            unterminated_names = true;
+        if (terminated && num_loaded < max_entries) {
             memcpy(entries[num_loaded].category, record.category, Synth::library_category_len);
             memcpy(entries[num_loaded].name, record.name, Synth::library_name_len);
             entries[num_loaded].payload_offset = static_cast<uint32_t>(payload_offset);
@@ -99,7 +105,18 @@ uint32_t Synth::read_library_index(const char* const               path,
 
     if (num_scanned < header[2])
         return num_loaded;
-
+    if (oversized) {
+        if (out_status)
+            *out_status = Synth::library_oversized;
+        return num_loaded;
+    }
+    // A record with unterminated names was skipped from the index: the library
+    // is corrupt, and rebuilding over it would silently delete that record.
+    if (unterminated_names) {
+        if (out_status)
+            *out_status = Synth::library_invalid;
+        return num_loaded;
+    }
     if (out_status)
         *out_status = Synth::library_valid;
 
@@ -107,6 +124,12 @@ uint32_t Synth::read_library_index(const char* const               path,
         *out_index_truncated = header[2] > max_entries;
 
     return num_loaded;
+}
+
+bool Synth::library_record_matches(const LibraryEntry& entry, const char* category, const char* name)
+{
+    return strncmp(entry.category, category, Synth::library_category_len) == 0 &&
+           strncmp(entry.name, name, Synth::library_name_len) == 0;
 }
 
 namespace {
@@ -167,17 +190,15 @@ bool validate_record(const Synth::InstrumentEditorBank* const editor_bank)
 
 } // namespace
 
-bool Synth::load_library_instrument(const char* const                path,
-                                    const Synth::LibraryEntry* const entry,
-                                    Synth::InstrumentEditorBank* const dst_editor_bank,
-                                    uint32_t const                   channel,
-                                    uint16_t* const                  out_first_slot)
+bool Synth::load_library_instrument(const char* const            path,
+                                    const Synth::LibraryEntry*   entry,
+                                    Synth::InstrumentEditorBank* dst_editor_bank,
+                                    uint32_t const               channel,
+                                    uint16_t* const              out_first_slot)
 {
     Synth::InstrumentBank* const dst_bank = &dst_editor_bank->bank;
-    if (entry->payload_size != Synth::library_payload_size || channel >= Synth::max_channels)
+    if (entry->payload_size > Synth::library_payload_max || channel >= Synth::max_channels)
         return false;
-
-    static uint8_t image[Synth::library_payload_size];
 
     FILE* const file = fopen(path, "rb");
     if (! file)
@@ -188,33 +209,28 @@ bool Synth::load_library_instrument(const char* const                path,
     const long header_offset = static_cast<long>(entry->payload_offset - sizeof(RecordHeader));
 
     // Ensure the record in the library did not change since we loaded the index
-    const bool read_ok = fseek(file, header_offset, SEEK_SET) == 0 &&
-                         fread(&record_header, sizeof(record_header), 1, file) == 1 &&
-                         memcmp(record_header.category, entry->category, Synth::library_category_len) == 0 &&
-                         memcmp(record_header.name, entry->name, Synth::library_name_len) == 0 &&
-                         record_header.payload_size == entry->payload_size &&
-                         fseek(file, static_cast<long>(entry->payload_offset), SEEK_SET) == 0 &&
-                         fread(image, sizeof(image), 1, file) == 1;
+    const bool header_ok = fseek(file, header_offset, SEEK_SET) == 0 &&
+                           fread(&record_header, sizeof(record_header), 1, file) == 1 &&
+                           memcmp(record_header.category, entry->category, Synth::library_category_len) == 0 &&
+                           memcmp(record_header.name, entry->name, Synth::library_name_len) == 0 &&
+                           record_header.payload_size == entry->payload_size &&
+                           fseek(file, static_cast<long>(entry->payload_offset), SEEK_SET) == 0;
 
+    // The read validates and canonicalizes into the record scratch and leaves it
+    // untouched on failure; the merge below reads the scratch with no decode
+    // between.
+    static Synth::InstrumentEditorBank record_bank;
+    const bool load_ok = header_ok && Synth::read_editor_bank_json(file, entry->payload_size, &record_bank);
     fclose(file);
-
-    if (! read_ok)
+    if (! load_ok)
         return false;
 
-    static Synth::InstrumentEditorBank record;
-    memset(&record, 0, sizeof(record));
-
-    if (! Synth::decode_instrument_bank(image, sizeof(image), &record))
+    if (! validate_record(&record_bank))
         return false;
 
-    if (! validate_record(&record))
-        return false;
-
-    if (! Synth::validate_instrument_bank(&record.bank))
-        return false;
-    const uint32_t num_envelopes = record.bank.envelopes.num_allocated;
-    const uint32_t num_lfos      = record.bank.lfos.num_allocated;
-    const uint32_t num_instrs    = record.bank.instruments.num_allocated;
+    const uint32_t num_envelopes = record_bank.bank.envelopes.num_allocated;
+    const uint32_t num_lfos      = record_bank.bank.lfos.num_allocated;
+    const uint32_t num_instrs    = record_bank.bank.instruments.num_allocated;
 
     if (dst_bank->envelopes.num_allocated + num_envelopes > Synth::max_envelopes ||
         dst_bank->lfos.num_allocated + num_lfos > Synth::max_lfos ||
@@ -226,13 +242,13 @@ bool Synth::load_library_instrument(const char* const                path,
 
     for (uint32_t i = 0; i < num_envelopes; i++) {
         const uint32_t slot               = dst_bank->envelopes.allocate();
-        dst_bank->envelopes.entries[slot] = record.bank.envelopes.entries[i];
+        dst_bank->envelopes.entries[slot] = record_bank.bank.envelopes.entries[i];
         env_ids[i]                        = static_cast<uint16_t>(slot + 1);
     }
 
     for (uint32_t i = 0; i < num_lfos; i++) {
         const uint32_t slot          = dst_bank->lfos.allocate();
-        dst_bank->lfos.entries[slot] = record.bank.lfos.entries[i];
+        dst_bank->lfos.entries[slot] = record_bank.bank.lfos.entries[i];
         lfo_ids[i]                   = static_cast<uint16_t>(slot + 1);
     }
 
@@ -240,8 +256,11 @@ bool Synth::load_library_instrument(const char* const                path,
 
     for (uint32_t i = 0; i < num_instrs; i++) {
         const uint32_t slot = dst_bank->instruments.allocate();
-        remap_instrument(record.bank.instruments.entries[i], env_ids, lfo_ids, &dst_bank->instruments.entries[slot]);
-        memcpy(dst_editor_bank->instrument_names[slot], record.instrument_names[i], Synth::max_name_len);
+        remap_instrument(record_bank.bank.instruments.entries[i],
+                         env_ids,
+                         lfo_ids,
+                         &dst_bank->instruments.entries[slot]);
+        memcpy(dst_editor_bank->instrument_names[slot], record_bank.instrument_names[i], Synth::max_name_len);
     }
 
     *out_first_slot = static_cast<uint16_t>(first_slot);
@@ -249,7 +268,7 @@ bool Synth::load_library_instrument(const char* const                path,
     memset(dst_bank->channel_zones[channel], 0, sizeof(dst_bank->channel_zones[channel]));
     for (uint32_t zone = 0; zone < Synth::max_instr_per_channel; zone++) {
 
-        const Synth::Zone& zone_src = record.bank.channel_zones[0][zone];
+        const Synth::Zone& zone_src = record_bank.bank.channel_zones[0][zone];
 
         if (zone_src.start_note == 0)
             break;
@@ -263,12 +282,15 @@ bool Synth::load_library_instrument(const char* const                path,
 
 namespace {
 
-bool write_library_file(const char* const    path,
-                        const char* const    category,
-                        const char* const    name,
-                        const uint8_t* const payload,
-                        uint32_t const       payload_size)
+int write_library_file(const char* const                        path,
+                       const char* const                        category,
+                       const char* const                        name,
+                       const Synth::InstrumentEditorBank* const editor_bank,
+                       Synth::LibraryScanStatus* const          out_status)
 {
+    if (out_status)
+        *out_status = Synth::library_invalid;
+
     static Synth::LibraryEntry entries[Synth::library_max_records];
 
     Synth::LibraryScanStatus status          = Synth::library_invalid;
@@ -277,36 +299,35 @@ bool write_library_file(const char* const    path,
     const uint32_t num_entries =
         Synth::read_library_index(path, entries, Synth::library_max_records, &status, &index_truncated);
 
-    if (status == Synth::library_invalid)
-        return false;
-
+    // Only a fully loadable index may be rebuilt: invalid or truncated input
+    // stays untouched, and an oversized record (flagged by the scan even when its
+    // names are unusable) can never be kept.
+    if (status != Synth::library_valid && status != Synth::library_absent) {
+        if (out_status)
+            *out_status = status;
+        return EINVAL;
+    }
     if (index_truncated)
-        return false;
+        return EINVAL;
 
     uint32_t num_kept = 0;
     bool     replace  = false;
 
     for (uint32_t i = 0; i < num_entries; i++) {
-        if (entries[i].payload_size != Synth::library_payload_size)
-            continue;
-
-        if (same_record(entries[i].category, category) && same_record(entries[i].name, name))
+        if (Synth::library_record_matches(entries[i], category, name))
             replace = true;
         else
             num_kept++;
     }
 
     if (! replace && num_kept + 1 > Synth::library_max_records)
-        return false;
+        return EINVAL;
 
-    char      tmp_path[512];
-    const int num_written = snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", path);
-    if (num_written < 0 || num_written >= static_cast<int>(sizeof(tmp_path)))
-        return false;
-
-    FILE* const file = fopen(tmp_path, "wb");
-    if (! file)
-        return false;
+    char                           tmp_path[512];
+    const std::variant<FILE*, int> staged = atomic_write_begin(path, tmp_path, sizeof(tmp_path));
+    if (std::holds_alternative<int>(staged))
+        return std::get<int>(staged);
+    FILE* const file = std::get<FILE*>(staged);
 
     const uint32_t header[3] = { library_file_magic, Synth::library_version, num_kept + 1 };
     bool           ok        = fwrite(header, sizeof(header), 1, file) == 1;
@@ -316,20 +337,26 @@ bool write_library_file(const char* const    path,
         ok = false;
 
     if (old) {
-        static uint8_t record_copy[sizeof(RecordHeader) + Synth::library_payload_size];
+        constexpr uint32_t copy_chunk_size = 64 * 1024;
+        static uint8_t     record_copy[copy_chunk_size];
 
         for (uint32_t i = 0; ok && i < num_entries; i++) {
-            if (entries[i].payload_size != Synth::library_payload_size)
-                continue;
-
-            if (same_record(entries[i].category, category) && same_record(entries[i].name, name))
+            if (Synth::library_record_matches(entries[i], category, name))
                 continue;
 
             const uint32_t header_offset = entries[i].payload_offset - sizeof(RecordHeader);
             const uint32_t record_size   = sizeof(RecordHeader) + entries[i].payload_size;
 
-            ok = fseek(old, static_cast<long>(header_offset), SEEK_SET) == 0 &&
-                 fread(record_copy, record_size, 1, old) == 1 && fwrite(record_copy, record_size, 1, file) == 1;
+            ok = fseek(old, static_cast<long>(header_offset), SEEK_SET) == 0;
+
+            // Records pass through in bounded chunks: a payload up to the capacity
+            // needs no second full-size staging buffer.
+            for (uint32_t remaining = record_size; ok && remaining;) {
+                const uint32_t chunk = remaining < copy_chunk_size ? remaining : copy_chunk_size;
+
+                ok = fread(record_copy, chunk, 1, old) == 1 && fwrite(record_copy, chunk, 1, file) == 1;
+                remaining -= chunk;
+            }
         }
 
         fclose(old);
@@ -339,63 +366,48 @@ bool write_library_file(const char* const    path,
         RecordHeader record;
         snprintf(record.category, sizeof(record.category), "%s", category);
         snprintf(record.name, sizeof(record.name), "%s", name);
-        record.payload_size = payload_size;
-        ok = fwrite(&record, sizeof(record), 1, file) == 1 && fwrite(payload, payload_size, 1, file) == 1;
+        record.payload_size   = 0;
+        const long record_pos = ftell(file);
+        ok                    = record_pos >= 0 && fwrite(&record, sizeof(record), 1, file) == 1;
+        uint32_t payload_size = 0;
+        if (ok)
+            ok = Synth::write_editor_bank_json(file, editor_bank, Synth::library_payload_max, &payload_size) == 0;
+        // The staging file is seekable: the size field is patched once the encoded
+        // length is known.
+        if (ok) {
+            record.payload_size = payload_size;
+            ok = fseek(file, record_pos, SEEK_SET) == 0 && fwrite(&record, sizeof(record), 1, file) == 1 &&
+                 fseek(file, 0, SEEK_END) == 0;
+        }
     }
-
-    ok = fclose(file) == 0 && ok;
     if (! ok) {
+        fclose(file);
         remove(tmp_path);
-        return false;
+        return EIO;
     }
 
-#ifdef _WIN32
-    // Windows rename() refuses an existing target. Move the original aside first;
-    // if installing the new file then fails, put the original back.
-    if (status == Synth::library_valid) {
-        char      backup_path[512];
-        const int backup_written = snprintf(backup_path, sizeof(backup_path), "%s.bak", path);
-
-        if (backup_written < 0 || backup_written >= static_cast<int>(sizeof(backup_path))) {
-            remove(tmp_path);
-            return false;
-        }
-
-        remove(backup_path);
-
-        if (rename(path, backup_path) != 0) {
-            remove(tmp_path);
-            return false;
-        }
-
-        if (rename(tmp_path, path) != 0) {
-            rename(backup_path, path);
-            return false;
-        }
-
-        remove(backup_path);
-
-        return true;
-    }
-#endif
-
-    if (rename(tmp_path, path) != 0)
-        return false;
-
-    return true;
+    // Flush + rename inside the commit makes the replacement crash-atomic:
+    // readers see either the complete previous library or the complete new one.
+    if (out_status)
+        *out_status = Synth::library_valid;
+    return atomic_write_commit(path, tmp_path, file);
 }
 
 } // namespace
 
-bool Synth::save_library_record(const char* const                  path,
-                                const char* const                  category,
-                                const char* const                  name,
-                                const Synth::InstrumentEditorBank* const src_editor_bank,
-                                uint32_t const                     channel)
+int Synth::save_library_record(const char* const                        path,
+                               const char* const                        category,
+                               const char* const                        name,
+                               const Synth::InstrumentEditorBank* const src_editor_bank,
+                               uint32_t const                           channel,
+                               Synth::LibraryScanStatus* const          out_status)
 {
+    if (out_status)
+        *out_status = Synth::library_invalid;
+
     const Synth::InstrumentBank* const src_bank = &src_editor_bank->bank;
     if (channel >= Synth::max_channels || ! src_bank->channel_enabled[channel])
-        return false;
+        return EINVAL;
 
     uint32_t num_zones = 0;
 
@@ -403,7 +415,7 @@ bool Synth::save_library_record(const char* const                  path,
         num_zones++;
 
     if (num_zones == 0)
-        return false;
+        return EINVAL;
 
     bool keep_instr[Synth::max_instruments] = {};
 
@@ -411,7 +423,7 @@ bool Synth::save_library_record(const char* const                  path,
         const uint32_t id = src_bank->channel_zones[channel][zone].instrument;
 
         if (id >= src_bank->instruments.num_allocated || ! src_bank->instruments.is_occupied(id))
-            return false;
+            return EINVAL;
 
         keep_instr[id] = true;
     }
@@ -439,11 +451,9 @@ bool Synth::save_library_record(const char* const                  path,
         }
     }
 
-    static const Synth::InstrumentEditorBank empty_bank = {};
     static Synth::InstrumentEditorBank reduced;
-    static uint8_t image[Synth::library_payload_size];
 
-    reduced = empty_bank;
+    memset(&reduced, 0, sizeof(reduced));
 
     uint16_t env_ids[Synth::max_envelopes] = {};
     uint16_t lfo_ids[Synth::max_lfos]      = {};
@@ -452,18 +462,18 @@ bool Synth::save_library_record(const char* const                  path,
         if (! keep_env[id - 1])
             continue;
 
-        const uint32_t slot             = reduced.bank.envelopes.allocate();
+        const uint32_t slot                  = reduced.bank.envelopes.allocate();
         reduced.bank.envelopes.entries[slot] = src_bank->envelopes.entries[id - 1];
-        env_ids[id - 1]                 = static_cast<uint16_t>(slot + 1);
+        env_ids[id - 1]                      = static_cast<uint16_t>(slot + 1);
     }
 
     for (uint32_t id = 1; id <= Synth::max_lfos; id++) {
         if (! keep_lfo[id - 1])
             continue;
 
-        const uint32_t slot        = reduced.bank.lfos.allocate();
+        const uint32_t slot             = reduced.bank.lfos.allocate();
         reduced.bank.lfos.entries[slot] = src_bank->lfos.entries[id - 1];
-        lfo_ids[id - 1]            = static_cast<uint16_t>(slot + 1);
+        lfo_ids[id - 1]                 = static_cast<uint16_t>(slot + 1);
     }
 
     uint16_t instr_ids[Synth::max_instruments] = {};
@@ -487,13 +497,5 @@ bool Synth::save_library_record(const char* const                  path,
             static_cast<uint8_t>(instr_ids[src_bank->channel_zones[channel][zone].instrument]);
     }
 
-    if (encode_instrument_bank(&reduced, image, sizeof(image)) != sizeof(image))
-        return false;
-
-    const uint32_t encoded = encode_instrument_bank(&reduced, image, sizeof(image));
-    if (encoded != sizeof(image)) {
-        return false;
-    }
-
-    return write_library_file(path, category, name, image, encoded);
+    return write_library_file(path, category, name, &reduced, out_status);
 }
