@@ -45,9 +45,7 @@ float snap_to_grid(float value)
 
 } // namespace
 
-namespace Sculptor {
-
-void Graph::render(vmath::vec2 size, void* user_data)
+void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
 {
     ImDrawList* const draw_list = ImGui::GetWindowDrawList();
     const vmath::vec2 origin(ImGui::GetCursorScreenPos());
@@ -925,5 +923,3 @@ void Graph::render(vmath::vec2 size, void* user_data)
 
     (void)user_data;
 }
-
-} // namespace Sculptor

@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2021-2026 Chris Dragan
 
 #include "sculptor_instr_bank.h"
+#include "sculptor_graph.h"
 #include "sculptor_instr_library.h"
 #include "sculptor_notifications.h"
 #include "sculptor_undo.h"
@@ -18,11 +19,14 @@ static_assert(sizeof(Synth::BankUpdateQueue) <= 2 * sizeof(Synth::InstrumentBank
 // staging to the same number with its own static_assert.
 constexpr uint32_t bank_json_staging_reservation = 1024 * 1024 + 64 * 1024 + 16 * 1024;
 constexpr uint32_t editor_undo_depth             = 10;
+// One editor-resident Graph instance (the oscillator graph): the graph is
+// rebuilt from the instrument model after undo/redo, zone change and load,
+// so no graph snapshots exist and undo memory never grows with the graph.
 static_assert(bank_json_staging_reservation + 2 * (Synth::library_max_records * sizeof(Synth::LibraryEntry)) +
                   sizeof(Sculptor::UndoRedo) + sizeof(uint32_t) + 2 * sizeof(Synth::InstrumentBank) +
                   sizeof(Synth::BankUpdateQueue) + (6 + editor_undo_depth) * sizeof(Synth::InstrumentEditorBank) +
                   editor_undo_depth * sizeof(uint32_t) + 64 * 1024 + // library record copy chunks
-                  Sculptor::notification_state_bytes + 4 * 1638400u <=
+                  Sculptor::notification_state_bytes + Sculptor::max_graph_bytes <=
               16 * 1024 * 1024);
 
 // Factory default state: the first-run bank the editor builds for a fresh project,

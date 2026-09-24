@@ -3,8 +3,10 @@
 
 #include "../core/rng.h"
 #include "../sculptor/sculptor_bank_json.h"
+#include "../sculptor/sculptor_graph.h"
 #include "../sculptor/sculptor_instr_bank.h"
 #include "../sculptor/sculptor_instr_library.h"
+#include "../sculptor/sculptor_osc_graph.h"
 #include "midi_file.h"
 #include "synth_effect_expansion.h"
 #include "synth_effects.h"
@@ -37,6 +39,280 @@ static bool approx(float left, float right, float eps)
         diff = -diff;
     }
     return diff <= eps;
+}
+
+// True for the five modulation targets the oscillator graph exposes bindings for
+// (the runtime's modulatable set: volume, pitch, panning, lowpass, highpass).  The
+// remaining targets (duty A/B, osc mix, FM index) are unmodulated constants that
+// carry only base values, so the graph projects no connectors or generators for
+// them and their routing stays input-free.
+static bool osc_graph_target(Synth::ModTarget target)
+{
+    return target == Synth::mod_volume || target == Synth::mod_pitch || target == Synth::mod_panning ||
+           target == Synth::mod_lowpass_cutoff || target == Synth::mod_highpass_cutoff;
+}
+
+static bool osc_graph_mark_node(bool* seen, uint32_t node_idx, uint32_t* count)
+{
+    if (node_idx >= Sculptor::max_nodes || seen[node_idx]) {
+        return false;
+    }
+    seen[node_idx] = true;
+    (*count)++;
+    return true;
+}
+
+// Checks via TEST that a projection filled the mapping consistently: every
+// expected node exists and is distinct, connector slots are pinned, and an
+// envelope/LFO node exists exactly when its descriptor id is nonzero.
+static void check_osc_graph_mapping(const Sculptor::Graph&           graph,
+                                    const Sculptor::OscGraphMapping& mapping,
+                                    uint32_t                         layer_count,
+                                    uint32_t                         env_bindings,
+                                    uint32_t                         lfo_bindings)
+{
+    bool     seen[Sculptor::max_nodes] = {};
+    uint32_t count                     = 0;
+    for (uint32_t idx = 0; idx < Sculptor::num_osc_graph_inputs; idx++) {
+        TEST(mapping.input_nodes[idx] != Sculptor::pool_no_slot);
+        TEST(osc_graph_mark_node(seen, mapping.input_nodes[idx], &count));
+    }
+    TEST(mapping.input_output_slot != Sculptor::pool_no_slot);
+    TEST(mapping.output_node != Sculptor::pool_no_slot);
+    TEST(osc_graph_mark_node(seen, mapping.output_node, &count));
+    TEST(mapping.osc_output_slot != Sculptor::pool_no_slot);
+    TEST(mapping.env_output_slot != Sculptor::pool_no_slot);
+    TEST(mapping.lfo_output_slot != Sculptor::pool_no_slot);
+    TEST(mapping.lfo_depth_input_slot != Sculptor::pool_no_slot);
+    TEST(mapping.lfo_rate_input_slot != Sculptor::pool_no_slot);
+    for (uint32_t layer = 0; layer < Synth::max_layers; layer++) {
+        if (layer < layer_count) {
+            TEST(mapping.osc_nodes[layer] != Sculptor::pool_no_slot);
+            TEST(osc_graph_mark_node(seen, mapping.osc_nodes[layer], &count));
+            // 21 connectors (output + 5 targets x [2 direct, env, LFO]) plus at
+            // least the 14 oscillator properties.
+            TEST(graph.node(mapping.osc_nodes[layer]).slots.num_allocated >= 35);
+        }
+        else {
+            TEST(mapping.osc_nodes[layer] == Sculptor::pool_no_slot);
+        }
+        for (uint32_t t = 0; t < Synth::num_mod_targets; t++) {
+            if (layer < layer_count) {
+                TEST((mapping.env_nodes[layer][t] != Sculptor::pool_no_slot) == (mapping.env_desc_ids[layer][t] != 0));
+                TEST((mapping.lfo_nodes[layer][t] != Sculptor::pool_no_slot) == (mapping.lfo_desc_ids[layer][t] != 0));
+                if (mapping.env_desc_ids[layer][t] != 0) {
+                    TEST(osc_graph_mark_node(seen, mapping.env_nodes[layer][t], &count));
+                }
+                if (mapping.lfo_desc_ids[layer][t] != 0) {
+                    TEST(osc_graph_mark_node(seen, mapping.lfo_nodes[layer][t], &count));
+                }
+            }
+            else {
+                TEST(mapping.env_nodes[layer][t] == Sculptor::pool_no_slot);
+                TEST(mapping.lfo_nodes[layer][t] == Sculptor::pool_no_slot);
+                TEST(mapping.env_desc_ids[layer][t] == 0);
+                TEST(mapping.lfo_desc_ids[layer][t] == 0);
+            }
+        }
+    }
+    uint32_t projected_targets = 0;
+    for (uint32_t t = 0; t < Synth::num_mod_targets; t++) {
+        if (osc_graph_target(static_cast<Synth::ModTarget>(t))) {
+            projected_targets++;
+            TEST(mapping.osc_direct_input_slot[t][0] != Sculptor::pool_no_slot);
+            TEST(mapping.osc_direct_input_slot[t][1] != Sculptor::pool_no_slot);
+            TEST(mapping.osc_env_input_slot[t] != Sculptor::pool_no_slot);
+            TEST(mapping.osc_lfo_input_slot[t] != Sculptor::pool_no_slot);
+        }
+    }
+    TEST(projected_targets == 5);
+    TEST(count == 7 + layer_count + env_bindings + lfo_bindings); // 6 inputs + output + oscillators + bindings
+}
+
+// Finds a slot by name on a node; slots are scanned in creation order.
+static bool find_graph_slot(const Sculptor::Graph& graph, uint32_t node_idx, const char* name, uint32_t* slot_idx)
+{
+    const Sculptor::Node& node = graph.node(node_idx);
+    for (uint32_t idx = 0; idx < node.slots.num_allocated; idx++) {
+        if (strncmp(node.slots.entries[idx].name, name, sizeof(node.slots.entries[idx].name)) == 0) {
+            *slot_idx = idx;
+            return true;
+        }
+    }
+    return false;
+}
+
+// The connection terminating at an input endpoint, or pool_no_slot.
+static uint32_t find_osc_graph_connection(const Sculptor::Graph& graph, const Sculptor::EndPoint& input)
+{
+    for (uint32_t i = 0; i < Sculptor::max_connections; ++i) {
+        if (! graph.connection_occupied(i)) {
+            continue;
+        }
+        const Sculptor::Connection& c = graph.get_connection(i);
+        if (c.input.node_idx == input.node_idx && c.input.slot_idx == input.slot_idx) {
+            return i;
+        }
+    }
+    return Sculptor::pool_no_slot;
+}
+
+// Builds a max-complexity projection fixture: 7 layers, an envelope and an LFO
+// bound on every layer for each of the five projected targets, full two-input
+// routing with mixed ops and scales (volume repeats velocity across its two
+// ordered inputs), nonzero skews, and one LFO descriptor aliased across two
+// layers.  Writes the referenced 1-based descriptor ids (0 = unbound), indexed
+// [layer][Synth::ModTarget], to env_ids/lfo_ids.
+static void build_osc_graph_max_fixture(Synth::InstrumentBank* bank,
+                                        Synth::Instrument*     instrument,
+                                        uint16_t (*env_ids)[Synth::num_mod_targets],
+                                        uint16_t (*lfo_ids)[Synth::num_mod_targets])
+{
+    *bank       = {};
+    *instrument = {};
+    for (uint32_t layer = 0; layer < Synth::max_layers; layer++) {
+        for (uint32_t t = 0; t < Synth::num_mod_targets; t++) {
+            env_ids[layer][t] = 0;
+            lfo_ids[layer][t] = 0;
+        }
+    }
+
+    instrument->layer_count = Synth::max_layers;
+    uint32_t env_count      = 0;
+    uint32_t lfo_count      = 0;
+    for (uint32_t layer = 0; layer < Synth::max_layers; layer++) {
+        Synth::Oscillator& osc = instrument->layers[layer];
+        osc.osc_type[0]        = static_cast<Synth::WaveType>(1 + (layer % 4));
+        osc.osc_type[1]        = static_cast<Synth::WaveType>(1 + ((layer + 2) % 4));
+        osc.osc_mode           = static_cast<Synth::OscMode>(layer % 3);
+        osc.mod_ratio          = 1.0f + 0.25f * static_cast<float>(layer);
+        osc.pitch_offset       = 0.5f * static_cast<float>(layer) - 1.5f;
+        for (uint32_t t = 0; t < Synth::num_mod_targets; t++) {
+            if (! osc_graph_target(static_cast<Synth::ModTarget>(t))) {
+                continue; // duty A/B, osc mix and FM index stay unmodulated constants
+            }
+            env_count++;
+            const uint32_t env_slot = bank->envelopes.allocate();
+            TEST(env_slot != pool_no_slot);
+            env_ids[layer][t]              = static_cast<uint16_t>(env_slot + 1);
+            Synth::EnvelopeDescriptor& env = bank->envelopes.entries[env_slot];
+            env.num_points                 = static_cast<uint8_t>(2 + (env_slot % (Synth::max_envelope_points - 1)));
+            env.sustain_first_point        = 0;
+            env.sustain_last_point         = static_cast<uint8_t>(env.num_points - 1);
+            env.min_value                  = -1.0f + 0.125f * static_cast<float>(env_slot);
+            env.min_max_delta              = 1.0f + 0.25f * static_cast<float>(env_slot);
+            for (uint32_t p = 0; p < env.num_points; p++) {
+                env.points[p].position = static_cast<uint16_t>(100 * p + env_slot);
+                env.points[p].value    = static_cast<uint16_t>(0x2000 * (p + 1));
+            }
+
+            // One LFO descriptor is deliberately aliased: layer 4's volume LFO
+            // reuses layer 1's pitch LFO descriptor (already allocated above).
+            if (layer == 4 && t == Synth::mod_volume) {
+                lfo_ids[layer][t] = lfo_ids[1][Synth::mod_pitch];
+            }
+            else {
+                lfo_count++;
+                const uint32_t lfo_slot = bank->lfos.allocate();
+                TEST(lfo_slot != pool_no_slot);
+                lfo_ids[layer][t]         = static_cast<uint16_t>(lfo_slot + 1);
+                Synth::LFODescriptor& lfo = bank->lfos.entries[lfo_slot];
+                lfo.wave                  = static_cast<Synth::WaveType>(1 + (lfo_slot % 4));
+                lfo.duty                  = static_cast<uint8_t>(0x20 + (lfo_slot % 0x60));
+                lfo.period_ms             = static_cast<uint16_t>(100 + 37 * lfo_slot);
+                lfo.min_value             = -0.5f + 0.0625f * static_cast<float>(lfo_slot);
+                lfo.min_max_delta         = 0.5f + 0.125f * static_cast<float>(lfo_slot);
+            }
+
+            Synth::LayerGen& gen  = osc.gen[t];
+            gen.envelope_desc_id  = env_ids[layer][t];
+            gen.lfo_desc_id       = lfo_ids[layer][t];
+            gen.lfo_op            = ((layer + t) % 2) != 0 ? Synth::SourceOp::multiply : Synth::SourceOp::add;
+            gen.lfo_depth         = 0.25f * static_cast<float>(layer + 1);
+            gen.lfo_depth_source  = static_cast<Synth::ModSource>(1 + ((layer + t) % 6));
+            gen.lfo_rate_source   = static_cast<Synth::ModSource>(1 + ((layer + 2 * t + 1) % 6));
+            gen.lfo_rate_scale_ms = 10.0f * static_cast<float>(layer + 1) + static_cast<float>(t);
+        }
+    }
+    TEST(env_count == 35);
+    TEST(lfo_count == 34); // 35 bindings minus the one alias
+
+    for (uint32_t t = 0; t < Synth::num_mod_targets; t++) {
+        Synth::InputRouting& routing = instrument->routing[t];
+        routing.base_value           = -1.0f + 0.25f * static_cast<float>(t);
+        if (! osc_graph_target(static_cast<Synth::ModTarget>(t))) {
+            continue; // non-projected targets stay pure constants (no routed inputs)
+        }
+        routing.num_inputs       = 2;
+        const bool same_source   = (t == Synth::mod_volume); // ordered duplicate: velocity twice
+        routing.inputs[0].source = same_source ? Synth::ModSource::velocity : Synth::ModSource::pitch_bend;
+        routing.inputs[0].op     = Synth::SourceOp::add;
+        routing.inputs[0].scale  = 0.5f * static_cast<float>(t);
+        routing.inputs[1].source = same_source ? Synth::ModSource::velocity : Synth::ModSource::mod_wheel;
+        routing.inputs[1].op     = Synth::SourceOp::multiply;
+        routing.inputs[1].scale  = -0.25f * static_cast<float>(t) - 0.5f;
+    }
+    instrument->note_skew_semitones  = 0.3f;
+    instrument->layer_skew_semitones = -0.7f;
+}
+
+// Builds a minimal projection fixture with an aliased envelope pair: one layer,
+// volume bound to an envelope and an LFO, pitch bound to an envelope sharing the
+// volume envelope's descriptor id.  The LFO's depth/rate sources stay unset so
+// the LFO node's source connectors are free for validator connection attempts.
+// Writes the shared envelope id and the LFO id (both 1-based).
+static void build_osc_graph_small_fixture(Synth::InstrumentBank* bank,
+                                          Synth::Instrument*     instrument,
+                                          uint16_t*              shared_env_id,
+                                          uint16_t*              lfo_id)
+{
+    *bank       = {};
+    *instrument = {};
+    TEST(bank->envelopes.allocate() == 0);
+    TEST(bank->lfos.allocate() == 0);
+    *shared_env_id = 1;
+    *lfo_id        = 1;
+
+    Synth::EnvelopeDescriptor& env = bank->envelopes.entries[0];
+    env.num_points                 = 3;
+    env.sustain_first_point        = 1;
+    env.sustain_last_point         = 1;
+    env.min_value                  = -0.5f;
+    env.min_max_delta              = 1.5f;
+    env.points[0]                  = { 0, 0x4000 };
+    env.points[1]                  = { 200, 0x8000 };
+    env.points[2]                  = { 500, 0xC000 };
+
+    Synth::LFODescriptor& lfo = bank->lfos.entries[0];
+    lfo.wave                  = Synth::WaveType::sine_wave;
+    lfo.duty                  = 0x7F;
+    lfo.period_ms             = 250;
+    lfo.min_value             = -1.0f;
+    lfo.min_max_delta         = 2.0f;
+
+    instrument->layer_count = 1;
+    Synth::Oscillator& osc  = instrument->layers[0];
+    osc.osc_type[0]         = Synth::WaveType::sine_wave;
+    osc.osc_type[1]         = Synth::WaveType::pulse_wave;
+    osc.osc_mode            = Synth::osc_mode_blend;
+    osc.mod_ratio           = 2.0f;
+    osc.pitch_offset        = 3.5f;
+
+    osc.gen[Synth::mod_volume].envelope_desc_id = *shared_env_id;
+    osc.gen[Synth::mod_volume].lfo_desc_id      = *lfo_id;
+    osc.gen[Synth::mod_volume].lfo_op           = Synth::SourceOp::add;
+    osc.gen[Synth::mod_volume].lfo_depth        = 0.5f;
+    osc.gen[Synth::mod_pitch].envelope_desc_id  = *shared_env_id;
+    osc.gen[Synth::mod_pitch].lfo_op            = Synth::SourceOp::multiply;
+    osc.gen[Synth::mod_pitch].lfo_depth         = 1.0f;
+
+    instrument->routing[Synth::mod_volume].base_value       = 0.8f;
+    instrument->routing[Synth::mod_volume].num_inputs       = 1;
+    instrument->routing[Synth::mod_volume].inputs[0].source = Synth::ModSource::velocity;
+    instrument->routing[Synth::mod_volume].inputs[0].op     = Synth::SourceOp::add;
+    instrument->routing[Synth::mod_volume].inputs[0].scale  = 2.0f;
+    instrument->routing[Synth::mod_pitch].base_value        = -2.0f;
+    instrument->note_skew_semitones                         = 0.1f;
 }
 
 namespace {
@@ -3463,5 +3739,264 @@ int main()
         remove(path);
     }
 
+    // ---- Oscillator-graph projection (sculptor_osc_graph) ----
+
+    // Max-complexity round-trip: a fully populated instrument projects to the
+    // full graph (84 nodes, 210 modulation edges + 7 hard connections) and
+    // compiles back bit-identically, with the descriptor pools untouched (no
+    // dedup or duplication) and the aliasing pattern preserved.
+    {
+        static Synth::InstrumentBank bank;
+        static Synth::InstrumentBank bank_image;
+        Synth::Instrument            instrument;
+        uint16_t                     env_ids[Synth::max_layers][Synth::num_mod_targets];
+        uint16_t                     lfo_ids[Synth::max_layers][Synth::num_mod_targets];
+        build_osc_graph_max_fixture(&bank, &instrument, env_ids, lfo_ids);
+        bank_image = bank;
+
+        static Sculptor::Graph           graph;
+        static Sculptor::OscGraphMapping mapping;
+        Sculptor::project_instrument_to_graph(instrument, bank, &graph, &mapping);
+
+        check_osc_graph_mapping(graph, mapping, Synth::max_layers, 35, 35);
+        TEST(graph.connection_count() == Synth::max_layers * 5 * 6 + Synth::max_layers);
+
+        // Re-projection onto a populated graph resets it deterministically.
+        Sculptor::project_instrument_to_graph(instrument, bank, &graph, &mapping);
+        check_osc_graph_mapping(graph, mapping, Synth::max_layers, 35, 35);
+        TEST(graph.connection_count() == Synth::max_layers * 5 * 6 + Synth::max_layers);
+
+        static Synth::Instrument compiled;
+        TEST(Sculptor::compile_graph_to_instrument(graph, mapping, &compiled));
+        TEST(memcmp(&instrument, &compiled, sizeof(Synth::Instrument)) == 0);
+        TEST(memcmp(&bank_image, &bank, sizeof(Synth::InstrumentBank)) == 0);
+
+        // The aliased LFO keeps one shared desc id on both bindings.
+        TEST(mapping.lfo_desc_ids[1][Synth::mod_pitch] == lfo_ids[1][Synth::mod_pitch]);
+        TEST(mapping.lfo_desc_ids[4][Synth::mod_volume] == lfo_ids[1][Synth::mod_pitch]);
+        TEST(compiled.layers[1].gen[Synth::mod_pitch].lfo_desc_id == lfo_ids[1][Synth::mod_pitch]);
+        TEST(compiled.layers[4].gen[Synth::mod_volume].lfo_desc_id == lfo_ids[1][Synth::mod_pitch]);
+    }
+
+    // Minimal round-trip: one layer, no bindings, projects to the fixed nodes
+    // plus one oscillator and compiles back bit-identically.
+    {
+        static Synth::InstrumentBank bank;
+        Synth::Instrument            instrument          = {};
+        instrument.layer_count                           = 1;
+        instrument.layers[0].osc_type[0]                 = Synth::WaveType::sawtooth_wave;
+        instrument.layers[0].pitch_offset                = -7.0f;
+        instrument.routing[Synth::mod_volume].base_value = 0.5f;
+        instrument.note_skew_semitones                   = 0.2f;
+
+        static Sculptor::Graph           graph;
+        static Sculptor::OscGraphMapping mapping;
+        Sculptor::project_instrument_to_graph(instrument, bank, &graph, &mapping);
+        check_osc_graph_mapping(graph, mapping, 1, 0, 0);
+        TEST(graph.connection_count() == 1); // one hard connection, no modulation edges
+
+        static Synth::Instrument compiled;
+        TEST(Sculptor::compile_graph_to_instrument(graph, mapping, &compiled));
+        TEST(memcmp(&instrument, &compiled, sizeof(Synth::Instrument)) == 0);
+    }
+
+    // Grammar validator: the allowed edge set is exactly Envelope -> target,
+    // LFO -> target, input -> target direct input, input -> LFO depth/rate
+    // sources, and the structural oscillator -> Output hard connections.  A
+    // repeated allowed pair stays allowed: duplicate inputs are first-class
+    // and order-significant, so there is no duplicate-source rule.
+    {
+        static Synth::InstrumentBank bank;
+        Synth::Instrument            instrument    = {};
+        uint16_t                     shared_env_id = 0;
+        uint16_t                     lfo_id        = 0;
+        build_osc_graph_small_fixture(&bank, &instrument, &shared_env_id, &lfo_id);
+
+        static Sculptor::Graph           graph;
+        static Sculptor::OscGraphMapping mapping;
+        Sculptor::project_instrument_to_graph(instrument, bank, &graph, &mapping);
+        check_osc_graph_mapping(graph, mapping, 1, 2, 1);
+        TEST(graph.connection_count() == 5); // 1 direct + 2 envelope + 1 LFO + 1 hard
+
+        const uint32_t           velocity_idx = static_cast<uint32_t>(Synth::ModSource::velocity) - 1;
+        const Sculptor::EndPoint input_out    = { mapping.input_nodes[velocity_idx], mapping.input_output_slot };
+        const Sculptor::EndPoint osc_out      = { mapping.osc_nodes[0], mapping.osc_output_slot };
+        const Sculptor::EndPoint env_out      = { mapping.env_nodes[0][Synth::mod_volume], mapping.env_output_slot };
+        const Sculptor::EndPoint lfo_out      = { mapping.lfo_nodes[0][Synth::mod_volume], mapping.lfo_output_slot };
+        const Sculptor::EndPoint direct_in    = { mapping.osc_nodes[0],
+                                                  mapping.osc_direct_input_slot[Synth::mod_pitch][0] };
+        const Sculptor::EndPoint direct_in_1  = { mapping.osc_nodes[0],
+                                                  mapping.osc_direct_input_slot[Synth::mod_pitch][1] };
+        const Sculptor::EndPoint env_in       = { mapping.osc_nodes[0], mapping.osc_env_input_slot[Synth::mod_pitch] };
+        const Sculptor::EndPoint lfo_in       = { mapping.osc_nodes[0], mapping.osc_lfo_input_slot[Synth::mod_pitch] };
+        const Sculptor::EndPoint depth_in = { mapping.lfo_nodes[0][Synth::mod_volume], mapping.lfo_depth_input_slot };
+        const Sculptor::EndPoint rate_in  = { mapping.lfo_nodes[0][Synth::mod_volume], mapping.lfo_rate_input_slot };
+        const Sculptor::EndPoint sum_in   = { mapping.output_node, mapping.output_layer_input_slot[0] };
+
+        TEST(osc_graph_validate(&mapping, graph, env_out, env_in));
+        TEST(osc_graph_validate(&mapping, graph, lfo_out, lfo_in));
+        TEST(osc_graph_validate(&mapping, graph, input_out, direct_in));
+        TEST(osc_graph_validate(&mapping, graph, input_out, direct_in_1));
+        TEST(osc_graph_validate(&mapping, graph, input_out, depth_in));
+        TEST(osc_graph_validate(&mapping, graph, input_out, rate_in));
+        TEST(osc_graph_validate(&mapping, graph, osc_out, sum_in));
+
+        // The same source -> same target pair validates twice: no duplicate rule.
+        TEST(osc_graph_validate(&mapping, graph, input_out, direct_in));
+        TEST(osc_graph_validate(&mapping, graph, input_out, direct_in));
+
+        // Everything outside the allowed set is refused.
+        TEST(! osc_graph_validate(&mapping, graph, input_out, env_out)); // input -> Envelope
+        TEST(! osc_graph_validate(&mapping, graph, env_out, depth_in));  // envelopes have no input side
+        TEST(! osc_graph_validate(&mapping, graph, env_out, direct_in)); // envelopes drive only targets
+        TEST(! osc_graph_validate(&mapping, graph, lfo_out, depth_in));  // LFOs drive only targets
+        TEST(! osc_graph_validate(&mapping, graph, osc_out, env_in));    // oscillators feed only the sum
+        TEST(! osc_graph_validate(&mapping, graph, input_out, sum_in));  // inputs never reach the sum directly
+        TEST(! osc_graph_validate(&mapping, graph, env_out, sum_in));
+
+        // Installed as the widget validator: a grammar refusal reports through
+        // the error overlay, a grammatically valid pair connects.
+        graph.set_validator(Sculptor::osc_graph_validate, &mapping);
+        TEST(! graph.attempt_connection(env_out, depth_in));
+        TEST(graph.has_error());
+        graph.dismiss_error();
+        TEST(graph.attempt_connection(input_out, depth_in));
+    }
+
+    // Descriptor-content property edits write through to the bank pool entry
+    // named by the node's desc_id; nodes sharing a desc id edit the same entry,
+    // so aliasing stays consistent and repeated edits are idempotent.
+    {
+        static Synth::InstrumentBank bank;
+        Synth::Instrument            instrument    = {};
+        uint16_t                     shared_env_id = 0;
+        uint16_t                     lfo_id        = 0;
+        build_osc_graph_small_fixture(&bank, &instrument, &shared_env_id, &lfo_id);
+
+        static Sculptor::Graph           graph;
+        static Sculptor::OscGraphMapping mapping;
+        Sculptor::project_instrument_to_graph(instrument, bank, &graph, &mapping);
+
+        const uint32_t env_node   = mapping.env_nodes[0][Synth::mod_volume];
+        const uint32_t alias_node = mapping.env_nodes[0][Synth::mod_pitch];
+        const uint32_t lfo_node   = mapping.lfo_nodes[0][Synth::mod_volume];
+        uint32_t       slot       = 0;
+
+        TEST(find_graph_slot(graph, env_node, "min_value", &slot));
+        Sculptor::PropertyValue edited = {};
+        edited.real                    = 0.125f;
+        TEST(Sculptor::apply_osc_graph_descriptor_edit(graph, mapping, &bank, env_node, slot, edited));
+        TEST(bank.envelopes.entries[shared_env_id - 1].min_value == 0.125f);
+
+        const Synth::EnvelopeDescriptor before = bank.envelopes.entries[shared_env_id - 1];
+        TEST(Sculptor::apply_osc_graph_descriptor_edit(graph, mapping, &bank, env_node, slot, edited));
+        TEST(memcmp(&before, &bank.envelopes.entries[shared_env_id - 1], sizeof(Synth::EnvelopeDescriptor)) == 0);
+
+        // The aliased sibling node edits the same pool entry.
+        TEST(find_graph_slot(graph, alias_node, "min_max_delta", &slot));
+        edited.real = 2.5f;
+        TEST(Sculptor::apply_osc_graph_descriptor_edit(graph, mapping, &bank, alias_node, slot, edited));
+        TEST(bank.envelopes.entries[shared_env_id - 1].min_max_delta == 2.5f);
+        TEST(bank.envelopes.entries[shared_env_id - 1].min_value == 0.125f);
+
+        TEST(find_graph_slot(graph, lfo_node, "period_ms", &slot));
+        edited.integer = 400;
+        TEST(Sculptor::apply_osc_graph_descriptor_edit(graph, mapping, &bank, lfo_node, slot, edited));
+        TEST(bank.lfos.entries[lfo_id - 1].period_ms == 400);
+
+        // A slot that is not a descriptor-content property is refused with the
+        // bank unmodified.
+        const Synth::EnvelopeDescriptor untouched = bank.envelopes.entries[shared_env_id - 1];
+        TEST(! Sculptor::apply_osc_graph_descriptor_edit(graph, mapping, &bank, mapping.osc_nodes[0], 0, edited));
+        TEST(memcmp(&untouched, &bank.envelopes.entries[shared_env_id - 1], sizeof(Synth::EnvelopeDescriptor)) == 0);
+    }
+
+    // Projection refuses instruments it cannot express: a routing input with
+    // the none source would change synthesis on commit if silently dropped
+    // (the eval multiplies by the zero sentinel), so the refusal is visible
+    // and leaves the graph, mapping and bank untouched.
+    {
+        static Synth::InstrumentBank bank;
+        static Synth::InstrumentBank bank_image;
+        Synth::Instrument            good          = {};
+        good.layer_count                           = 1;
+        good.routing[Synth::mod_volume].num_inputs = 1;
+        good.routing[Synth::mod_volume].inputs[0]  = { Synth::ModSource::velocity, Synth::SourceOp::multiply, 0.5f };
+
+        static Sculptor::Graph           graph;
+        static Sculptor::OscGraphMapping mapping;
+        TEST(Sculptor::project_instrument_to_graph(good, bank, &graph, &mapping));
+        TEST(mapping.output_node != Sculptor::pool_no_slot);
+
+        Synth::Instrument bad                           = good;
+        bad.routing[Synth::mod_volume].inputs[0].source = Synth::ModSource::none;
+        bank_image                                      = bank;
+        const uint32_t connections_before               = graph.connection_count();
+        const uint32_t output_before                    = mapping.output_node;
+
+        TEST(! Sculptor::project_instrument_to_graph(bad, bank, &graph, &mapping));
+        TEST(graph.has_error());
+        TEST(graph.connection_count() == connections_before);
+        TEST(mapping.output_node == output_before);
+        TEST(memcmp(&bank_image, &bank, sizeof(Synth::InstrumentBank)) == 0);
+    }
+
+    // Compile resolves envelope/LFO bindings from the graph edges entering
+    // each target, not from the projection-time mapping: deleting an edge
+    // unbinds the target, retargeting an edge moves the binding, and an LFO
+    // node with no depth edge compiles to lfo_depth_source none.
+    {
+        static Synth::InstrumentBank bank;
+        Synth::Instrument            instrument    = {};
+        uint16_t                     shared_env_id = 0;
+        uint16_t                     lfo_id        = 0;
+        build_osc_graph_small_fixture(&bank, &instrument, &shared_env_id, &lfo_id);
+
+        static Sculptor::Graph           graph;
+        static Sculptor::OscGraphMapping mapping;
+        static Synth::Instrument         compiled;
+
+        // (a) Deleting the volume envelope edge unbinds volume only.
+        Sculptor::project_instrument_to_graph(instrument, bank, &graph, &mapping);
+        Synth::Instrument expected                                 = instrument;
+        expected.layers[0].gen[Synth::mod_volume].envelope_desc_id = 0;
+        const uint32_t env_conn =
+            find_osc_graph_connection(graph, { mapping.osc_nodes[0], mapping.osc_env_input_slot[Synth::mod_volume] });
+        TEST(env_conn != Sculptor::pool_no_slot);
+        graph.delete_connection(env_conn);
+        TEST(Sculptor::compile_graph_to_instrument(graph, mapping, &compiled));
+        TEST(memcmp(&expected, &compiled, sizeof(Synth::Instrument)) == 0);
+
+        // (b) Retargeting the volume envelope to pitch moves the binding: pitch
+        // bound, volume unbound, bit-identical to a model built that way.
+        Sculptor::project_instrument_to_graph(instrument, bank, &graph, &mapping);
+        expected                                                   = instrument;
+        expected.layers[0].gen[Synth::mod_volume].envelope_desc_id = 0;
+        const uint32_t pitch_env_conn =
+            find_osc_graph_connection(graph, { mapping.osc_nodes[0], mapping.osc_env_input_slot[Synth::mod_pitch] });
+        TEST(pitch_env_conn != Sculptor::pool_no_slot);
+        graph.delete_connection(pitch_env_conn);
+        const uint32_t volume_env_conn =
+            find_osc_graph_connection(graph, { mapping.osc_nodes[0], mapping.osc_env_input_slot[Synth::mod_volume] });
+        TEST(volume_env_conn != Sculptor::pool_no_slot);
+        TEST(graph.move_connection_end(volume_env_conn,
+                                       false,
+                                       { mapping.osc_nodes[0], mapping.osc_env_input_slot[Synth::mod_pitch] }));
+        expected.layers[0].gen[Synth::mod_pitch].envelope_desc_id = shared_env_id;
+        TEST(Sculptor::compile_graph_to_instrument(graph, mapping, &compiled));
+        TEST(memcmp(&expected, &compiled, sizeof(Synth::Instrument)) == 0);
+
+        // (c) An LFO node with no depth edge yields lfo_depth_source none.
+        instrument.layers[0].gen[Synth::mod_volume].lfo_depth_source = Synth::ModSource::channel_pressure;
+        Sculptor::project_instrument_to_graph(instrument, bank, &graph, &mapping);
+        expected                                                   = instrument;
+        expected.layers[0].gen[Synth::mod_volume].lfo_depth_source = Synth::ModSource::none;
+        const uint32_t depth_conn =
+            find_osc_graph_connection(graph, { mapping.lfo_nodes[0][Synth::mod_volume], mapping.lfo_depth_input_slot });
+        TEST(depth_conn != Sculptor::pool_no_slot);
+        graph.delete_connection(depth_conn);
+        TEST(Sculptor::compile_graph_to_instrument(graph, mapping, &compiled));
+        TEST(memcmp(&expected, &compiled, sizeof(Synth::Instrument)) == 0);
+    }
     return exit_code;
 }

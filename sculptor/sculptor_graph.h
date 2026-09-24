@@ -45,7 +45,7 @@ struct Slot {
     char          list_options[8][32];
 };
 
-constexpr uint32_t max_node_slots = 40;
+constexpr uint32_t max_node_slots = 128;
 
 // Draws the optional caller state widget at the bottom of a node.
 // Returns the widget height in pixels; the height is cached one frame.
@@ -76,6 +76,12 @@ struct Connection {
 };
 
 constexpr uint32_t max_connections = 256;
+
+// Static size cap for one editor-resident Graph instance.  The editor state
+// budget in sculptor_instr_bank.cpp reserves exactly this much per graph;
+// a capacity raise that outgrows it must fail the build instead of silently
+// busting that reserve.
+constexpr uint32_t max_graph_bytes = 5 * 1024 * 1024;
 
 // Caller validation for connection attempts.  Runs after the widget's
 // structural checks (endpoint kinds, bounds, single connection per input);
@@ -176,6 +182,11 @@ public:
     // Node management (thin wrappers over Pool::allocate/free)
     uint32_t create_node(const char* name, vmath::vec2 position);
     void     delete_node(uint32_t node_idx);
+
+    // Removes every node (and with them every connection) without consulting
+    // the delete veto: wholesale rebuilds (projection, load) replace
+    // caller-driven state, they are not user deletes.
+    void     clear();
     void     remove_slot(uint32_t node_idx, uint32_t slot_idx); // drops touching connections
     uint32_t add_slot(uint32_t node_idx, const Slot& slot);     // returns slot idx
     uint32_t add_connection(EndPoint output, EndPoint input);   // returns connection idx
@@ -266,11 +277,24 @@ public:
     const GraphColors& colors() const;
     uint32_t           connection_count() const;
 
+    // True when the connection pool slot is live.  Pool indices are stable but
+    // sparse after deletions, so callers enumerate 0..max_connections-1 with
+    // this guard instead of assuming a dense 0..connection_count()-1 range.
+    bool connection_occupied(uint32_t connection_idx) const;
+
     // Error overlay state, set by rejected connect/retarget attempts and
     // shown by the renderer until the user dismisses it with Esc.
     bool        has_error() const;
     const char* error_text() const;
     void        dismiss_error();
+
+    // Reports a caller-side failure through the error overlay (used by the
+    // projection to surface refusals).
+    void set_error(const char* message);
+
+    // Connection index shown in the renderer's connection context menu;
+    // exposed so tests can verify that clear() leaves no stale popup target.
+    uint32_t connection_popup() const;
 
     // Rendering: call inside an already-open window/child.  Never calls
     // Begin/End.  Defined in sculptor_graph_render.cpp (ImGui linkage stays
@@ -296,7 +320,6 @@ private:
     // Input endpoints (input and connectable property slots) accept a single
     // connection; output endpoints fan out freely.
     bool input_slot_taken(uint32_t node_idx, uint32_t slot_idx, uint32_t except_connection) const;
-    void set_error(const char* message);
 
     Pool<Node, max_nodes>             nodes       = {};
     Pool<Connection, max_connections> connections = {};

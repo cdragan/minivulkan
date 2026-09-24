@@ -315,9 +315,7 @@ float boundary_x_of(uint32_t note, float white_w, float black_w)
 
 } // anonymous namespace
 
-namespace Sculptor {
-
-SynthEditor::SynthEditor()
+Sculptor::SynthEditor::SynthEditor()
 {
     for (int32_t& zone : selected_zone)
         zone = -1;
@@ -334,7 +332,7 @@ bool Sculptor::SynthEditor::allocate_resources()
     return true;
 }
 
-void SynthEditor::release_held_audition()
+void Sculptor::SynthEditor::release_held_audition()
 {
     if (! audition_held)
         return;
@@ -343,17 +341,17 @@ void SynthEditor::release_held_audition()
     audition_held = false;
 }
 
-void SynthEditor::trigger_save()
+void Sculptor::SynthEditor::trigger_save()
 {
     dialog_save = true;
 }
 
-void SynthEditor::trigger_load()
+void Sculptor::SynthEditor::trigger_load()
 {
     dialog_load = true;
 }
 
-void SynthEditor::rederive_zone_selection(uint32_t channel)
+void Sculptor::SynthEditor::rederive_zone_selection(uint32_t channel)
 {
     const Synth::InstrumentBank& bank = instr_bank.bank;
     // Empty/disabled channels hold no selection: slot 0 of a cleared table identifies an
@@ -376,13 +374,13 @@ void SynthEditor::rederive_zone_selection(uint32_t channel)
     zone_tab_force_entry   = zone;
 }
 
-void SynthEditor::rederive_all_selections()
+void Sculptor::SynthEditor::rederive_all_selections()
 {
     for (uint32_t channel = 0; channel < Synth::max_channels; channel++)
         rederive_zone_selection(channel);
 }
 
-bool SynthEditor::commit_candidate(const Synth::InstrumentEditorBank& candidate_bank)
+bool Sculptor::SynthEditor::commit_candidate(const Synth::InstrumentEditorBank& candidate_bank)
 {
     if (! Synth::validate_instrument_bank(&candidate_bank.bank)) {
         Sculptor::notify_error("Synth: refusing to commit an invalid bank");
@@ -399,7 +397,7 @@ bool SynthEditor::commit_candidate(const Synth::InstrumentEditorBank& candidate_
     return true;
 }
 
-void SynthEditor::do_initialize(uint32_t channel)
+void Sculptor::SynthEditor::do_initialize(uint32_t channel)
 {
     candidate = instr_bank;
     // Orphaned instruments may hold the only free pool slots, so reclaim before checking.
@@ -418,7 +416,7 @@ void SynthEditor::do_initialize(uint32_t channel)
     commit_candidate(candidate);
 }
 
-void SynthEditor::do_delete(uint32_t channel)
+void Sculptor::SynthEditor::do_delete(uint32_t channel)
 {
     candidate = instr_bank;
 
@@ -433,7 +431,7 @@ void SynthEditor::do_delete(uint32_t channel)
     commit_candidate(candidate);
 }
 
-bool SynthEditor::create_gui_frame(uint32_t image_idx, bool* need_realloc, const UserInput& input)
+bool Sculptor::SynthEditor::create_gui_frame(uint32_t image_idx, bool* need_realloc, const UserInput& input)
 {
     (void)image_idx;
     (void)input;
@@ -499,7 +497,7 @@ bool SynthEditor::create_gui_frame(uint32_t image_idx, bool* need_realloc, const
     return true;
 }
 
-void SynthEditor::gui_channel_list()
+void Sculptor::SynthEditor::gui_channel_list()
 {
     const Synth::InstrumentBank& bank = instr_bank.bank;
 
@@ -535,7 +533,7 @@ void SynthEditor::gui_channel_list()
     }
 }
 
-void SynthEditor::gui_channel_pane(uint32_t channel)
+void Sculptor::SynthEditor::gui_channel_pane(uint32_t channel)
 {
     const Synth::InstrumentBank& bank      = instr_bank.bank;
     const uint32_t               num_zones = zone_count(bank, channel);
@@ -628,7 +626,7 @@ void SynthEditor::gui_channel_pane(uint32_t channel)
     if (! show_effects_mode)
         gui_keyboard();
 }
-void SynthEditor::gui_keyboard()
+void Sculptor::SynthEditor::gui_keyboard()
 {
     // Zero window padding so the 72px child holds exactly the 8px report margin and the
     // 64px key strip; default padding would overflow the content into a scrollbar.
@@ -775,7 +773,7 @@ void SynthEditor::gui_keyboard()
     ImGui::EndChild();
 }
 
-void SynthEditor::do_zone_delete(uint32_t channel, uint32_t entry)
+void Sculptor::SynthEditor::do_zone_delete(uint32_t channel, uint32_t entry)
 {
     candidate                    = instr_bank;
     Synth::Zone* const zones     = candidate.bank.channel_zones[channel];
@@ -797,7 +795,7 @@ void SynthEditor::do_zone_delete(uint32_t channel, uint32_t entry)
     commit_candidate(candidate);
 }
 
-void SynthEditor::gui_zone_menu()
+void Sculptor::SynthEditor::gui_zone_menu()
 {
     if (zone_menu_open) {
         zone_menu_open = false;
@@ -842,7 +840,7 @@ void SynthEditor::gui_zone_menu()
     ImGui::EndPopup();
 }
 
-void SynthEditor::do_zone_join_previous(uint32_t channel, uint32_t note)
+void Sculptor::SynthEditor::do_zone_join_previous(uint32_t channel, uint32_t note)
 {
     const Synth::InstrumentBank& bank  = instr_bank.bank;
     const int32_t                entry = static_cast<int32_t>(Synth::zone_entry_at(bank.channel_zones[channel], note));
@@ -859,7 +857,7 @@ void SynthEditor::do_zone_join_previous(uint32_t channel, uint32_t note)
     commit_candidate(candidate);
 }
 
-void SynthEditor::do_zone_join_next(uint32_t channel, uint32_t note)
+void Sculptor::SynthEditor::do_zone_join_next(uint32_t channel, uint32_t note)
 {
     const Synth::InstrumentBank& bank  = instr_bank.bank;
     const int32_t                entry = static_cast<int32_t>(Synth::zone_entry_at(bank.channel_zones[channel], note));
@@ -876,7 +874,7 @@ void SynthEditor::do_zone_join_next(uint32_t channel, uint32_t note)
     commit_candidate(candidate);
 }
 
-void SynthEditor::do_zone_split_new(uint32_t channel, uint32_t note)
+void Sculptor::SynthEditor::do_zone_split_new(uint32_t channel, uint32_t note)
 {
     const Synth::InstrumentBank& bank  = instr_bank.bank;
     const int32_t                entry = static_cast<int32_t>(Synth::zone_entry_at(bank.channel_zones[channel], note));
@@ -897,7 +895,7 @@ void SynthEditor::do_zone_split_new(uint32_t channel, uint32_t note)
     commit_candidate(candidate);
 }
 
-void SynthEditor::gui_channel_popup()
+void Sculptor::SynthEditor::gui_channel_popup()
 {
     if (channel_menu_open) {
         channel_menu_open = false;
@@ -950,7 +948,7 @@ void SynthEditor::gui_channel_popup()
     ImGui::EndPopup();
 }
 
-void SynthEditor::gui_rename_popup()
+void Sculptor::SynthEditor::gui_rename_popup()
 {
     bool just_opened = false;
     if (rename_popup_open) {
@@ -998,7 +996,7 @@ void SynthEditor::gui_rename_popup()
     ImGui::EndPopup();
 }
 
-void SynthEditor::gui_bank_popups()
+void Sculptor::SynthEditor::gui_bank_popups()
 {
     static char path[256];
 
@@ -1042,7 +1040,7 @@ void SynthEditor::gui_bank_popups()
     }
 }
 
-bool SynthEditor::do_library_load(const Synth::LibraryEntry& entry)
+bool Sculptor::SynthEditor::do_library_load(const Synth::LibraryEntry& entry)
 {
     // The record joins the candidate; the editable bank only changes after the
     // whole candidate validates.
@@ -1068,7 +1066,7 @@ bool SynthEditor::do_library_load(const Synth::LibraryEntry& entry)
     return true;
 }
 
-bool SynthEditor::save_instrument_to_library(const char* category, const char* name)
+bool Sculptor::SynthEditor::save_instrument_to_library(const char* category, const char* name)
 {
     // Refresh the index so the overwrite check sees the current file contents.
     Synth::LibraryScanStatus scan_status = Synth::library_valid;
@@ -1103,7 +1101,7 @@ bool SynthEditor::save_instrument_to_library(const char* category, const char* n
     return finish_library_save(category, name);
 }
 
-bool SynthEditor::finish_library_save(const char* category, const char* name)
+bool Sculptor::SynthEditor::finish_library_save(const char* category, const char* name)
 {
     if (! instr_bank.bank.channel_enabled[library_channel] || zone_count(instr_bank.bank, library_channel) == 0)
         return false;
@@ -1127,7 +1125,7 @@ bool SynthEditor::finish_library_save(const char* category, const char* name)
     return true;
 }
 
-void SynthEditor::gui_library_popups()
+void Sculptor::SynthEditor::gui_library_popups()
 {
     if (library_open) {
         library_open                    = false;
@@ -1186,7 +1184,7 @@ void SynthEditor::gui_library_popups()
     gui_library_save_popups();
 }
 
-void SynthEditor::gui_library_browser()
+void Sculptor::SynthEditor::gui_library_browser()
 {
     if (! ImGui::BeginPopup("##synth_library"))
         return;
@@ -1237,7 +1235,7 @@ void SynthEditor::gui_library_browser()
     ImGui::EndPopup();
 }
 
-void SynthEditor::gui_library_save_popups()
+void Sculptor::SynthEditor::gui_library_save_popups()
 {
     if (ImGui::BeginPopupModal("##synth_library_save_as", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
         ImGui::SetNextItemWidth(240.0f);
@@ -1271,5 +1269,3 @@ void SynthEditor::gui_library_save_popups()
         ImGui::EndPopup();
     }
 }
-
-} // namespace Sculptor

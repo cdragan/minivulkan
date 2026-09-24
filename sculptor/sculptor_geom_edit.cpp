@@ -10,6 +10,11 @@
 #include "sculptor_geometry.h"
 #include "sculptor_materials.h"
 
+// sculptor_shaders.h defines the shader-list macro that core/shaders.h expands;
+// the blank line keeps the two includes in separate blocks so clang-format
+// cannot reorder them.
+#include "sculptor_shaders.h"
+
 #include "../core/shaders.h"
 #include "sculptor_shaders.h"
 
@@ -200,16 +205,14 @@ static bool is_alt_down()
     return ImGui::IsKeyDown(ImGuiKey_LeftAlt) || ImGui::IsKeyDown(ImGuiKey_RightAlt);
 }
 
-namespace Sculptor {
-
-GeometryEditor::Camera::Axes GeometryEditor::Camera::get_axes() const
+Sculptor::GeometryEditor::Camera::Axes Sculptor::GeometryEditor::Camera::get_axes() const
 {
     const vmath::vec3 right = vmath::normalize(vmath::cross_product(world_up, dir));
     const vmath::vec3 up    = vmath::normalize(vmath::cross_product(dir, right));
     return Axes{ right, up };
 }
 
-void GeometryEditor::Camera::move(const vmath::vec3& delta)
+void Sculptor::GeometryEditor::Camera::move(const vmath::vec3& delta)
 {
     const auto [right, up]      = get_axes();
     const vmath::vec3 moved_pos = pos + right * delta.x + up * delta.y + dir * delta.z;
@@ -218,7 +221,7 @@ void GeometryEditor::Camera::move(const vmath::vec3& delta)
         pos = fixed_pos;
 }
 
-GeometryEditor::OrthoAxes GeometryEditor::get_ortho_axes(ViewType view_type)
+Sculptor::GeometryEditor::OrthoAxes Sculptor::GeometryEditor::get_ortho_axes(ViewType view_type)
 {
     switch (view_type) {
         case ViewType::front:
@@ -239,7 +242,7 @@ GeometryEditor::OrthoAxes GeometryEditor::get_ortho_axes(ViewType view_type)
     }
 }
 
-GeometryEditor::Camera GeometryEditor::get_rotated_camera(const View& dst_view) const
+Sculptor::GeometryEditor::Camera Sculptor::GeometryEditor::get_rotated_camera(const View& dst_view) const
 {
     Camera camera{ dst_view.camera[static_cast<int>(dst_view.view_type)] };
 
@@ -254,7 +257,7 @@ GeometryEditor::Camera GeometryEditor::get_rotated_camera(const View& dst_view) 
     return camera;
 }
 
-std::optional<vmath::vec3> GeometryEditor::read_mouse_world_pos() const
+std::optional<vmath::vec3> Sculptor::GeometryEditor::read_mouse_world_pos() const
 {
     std::optional<vmath::vec3> ret;
 
@@ -268,7 +271,7 @@ std::optional<vmath::vec3> GeometryEditor::read_mouse_world_pos() const
     return ret;
 }
 
-std::optional<vmath::vec3> GeometryEditor::calc_grid_world_pos(const View& src_view) const
+std::optional<vmath::vec3> Sculptor::GeometryEditor::calc_grid_world_pos(const View& src_view) const
 {
     if (src_view.width == 0 || src_view.height == 0)
         return std::nullopt;
@@ -314,12 +317,12 @@ std::optional<vmath::vec3> GeometryEditor::calc_grid_world_pos(const View& src_v
     return camera.pos + final_dir;
 }
 
-const char* GeometryEditor::get_editor_name() const
+const char* Sculptor::GeometryEditor::get_editor_name() const
 {
     return "Geometry Editor";
 }
 
-bool GeometryEditor::allocate_resources()
+bool Sculptor::GeometryEditor::allocate_resources()
 {
     if (! point_sampler) {
         static VkSamplerCreateInfo sampler_info = {
@@ -366,7 +369,10 @@ bool GeometryEditor::allocate_resources()
     return true;
 }
 
-bool GeometryEditor::alloc_view_resources(View* dst_view, uint32_t width, uint32_t height, VkSampler viewport_sampler)
+bool Sculptor::GeometryEditor::alloc_view_resources(View*     dst_view,
+                                                    uint32_t  width,
+                                                    uint32_t  height,
+                                                    VkSampler viewport_sampler)
 {
     if (dst_view->res[0].color.get_image())
         return true;
@@ -550,12 +556,12 @@ bool GeometryEditor::alloc_view_resources(View* dst_view, uint32_t width, uint32
     return true;
 }
 
-void GeometryEditor::free_resources()
+void Sculptor::GeometryEditor::free_resources()
 {
     free_view_resources(&view);
 }
 
-void GeometryEditor::free_view_resources(View* dst_view)
+void Sculptor::GeometryEditor::free_view_resources(View* dst_view)
 {
     if (! dst_view->res[0].color.get_image())
         return;
@@ -580,7 +586,7 @@ void GeometryEditor::free_view_resources(View* dst_view)
     }
 }
 
-bool GeometryEditor::allocate_resources_once()
+bool Sculptor::GeometryEditor::allocate_resources_once()
 {
     // Check if already allocated
     if (gray_patch_gbuffer_mat)
@@ -649,7 +655,7 @@ bool GeometryEditor::allocate_resources_once()
     return true;
 }
 
-bool GeometryEditor::create_materials()
+bool Sculptor::GeometryEditor::create_materials()
 {
     static const VkVertexInputAttributeDescription vertex_attributes[] = { { 0, // location
                                                                              0, // binding
@@ -805,7 +811,7 @@ bool GeometryEditor::create_materials()
     return true;
 }
 
-bool GeometryEditor::create_grid_buffer()
+bool Sculptor::GeometryEditor::create_grid_buffer()
 {
     return grid_buf.allocate(Usage::dynamic,
                              max_grid_lines * 2 * max_swapchain_size * sizeof(Sculptor::Geometry::Vertex),
@@ -876,7 +882,7 @@ static void push_descriptor(VkCommandBuffer              cmdbuf,
                            &write_desc_set);
 }
 
-void GeometryEditor::gui_status_bar()
+void Sculptor::GeometryEditor::gui_status_bar()
 {
     const ImVec2 win_size = ImGui::GetWindowSize();
 
@@ -914,7 +920,7 @@ void GeometryEditor::gui_status_bar()
     ImGui::EndChild();
 }
 
-bool GeometryEditor::toolbar_button(ToolbarButton button, bool* checked)
+bool Sculptor::GeometryEditor::toolbar_button(ToolbarButton button, bool* checked)
 {
     const ImVec2 button_size{ static_cast<float>(toolbar_image.get_height()),
                               static_cast<float>(toolbar_image.get_height()) };
@@ -958,7 +964,7 @@ bool GeometryEditor::toolbar_button(ToolbarButton button, bool* checked)
     return clicked;
 }
 
-void GeometryEditor::draw_axis_indicator(ImDrawList* dl, float vp_max_x, float vp_max_y) const
+void Sculptor::GeometryEditor::draw_axis_indicator(ImDrawList* dl, float vp_max_x, float vp_max_y) const
 {
     constexpr float line_len = 40.0f;
     constexpr float margin   = 55.0f;
@@ -1044,7 +1050,7 @@ static bool any_hovered(const Buffer& buffer, uint32_t num_elems)
     const uint8_t* const buf = buffer.get_ptr<uint8_t>();
 
     for (uint32_t i = 0; i < num_elems; i++)
-        if (buf[i] & obj_hovered)
+        if (buf[i] & Sculptor::obj_hovered)
             return true;
 
     return false;
@@ -1055,7 +1061,7 @@ static bool all_selected(const Buffer& buffer, uint32_t num_elems)
     const uint8_t* const buf = buffer.get_ptr<uint8_t>();
 
     for (uint32_t i = 0; i < num_elems; i++)
-        if (! (buf[i] & obj_selected))
+        if (! (buf[i] & Sculptor::obj_selected))
             return false;
 
     return true;
@@ -1063,7 +1069,7 @@ static bool all_selected(const Buffer& buffer, uint32_t num_elems)
 
 static void select_all(Buffer& buffer, uint32_t num_elems)
 {
-    memset(buffer.get_ptr<uint8_t>(), obj_selected, num_elems);
+    memset(buffer.get_ptr<uint8_t>(), Sculptor::obj_selected, num_elems);
 }
 
 static void clear_selection(Buffer& buffer, uint32_t num_elems)
@@ -1073,7 +1079,7 @@ static void clear_selection(Buffer& buffer, uint32_t num_elems)
 
 static void invert_selection(Buffer& buffer, uint32_t num_elems)
 {
-    constexpr uint64_t sel_mask = 0x0101'0101'0101'0101ull * obj_selected;
+    constexpr uint64_t sel_mask = 0x0101'0101'0101'0101ull * Sculptor::obj_selected;
 
     uint64_t* const buf64 = buffer.get_ptr<uint64_t>();
 
@@ -1087,16 +1093,16 @@ static void commit_hover_selection(Buffer& buffer, uint32_t num_elems, bool dese
     uint8_t* const buf = buffer.get_ptr<uint8_t>();
 
     for (uint32_t i = 0; i < num_elems; i++) {
-        if (buf[i] & obj_hovered) {
+        if (buf[i] & Sculptor::obj_hovered) {
             if (deselect)
-                buf[i] &= ~static_cast<uint8_t>(obj_selected);
+                buf[i] &= ~static_cast<uint8_t>(Sculptor::obj_selected);
             else
-                buf[i] |= obj_selected;
+                buf[i] |= Sculptor::obj_selected;
         }
     }
 }
 
-void GeometryEditor::handle_mouse_actions(const UserInput& input, bool view_hovered)
+void Sculptor::GeometryEditor::handle_mouse_actions(const UserInput& input, bool view_hovered)
 {
     const bool mouse_moved = input.mouse_pos_delta.x != 0 || input.mouse_pos_delta.y != 0;
 
@@ -1392,7 +1398,7 @@ void GeometryEditor::handle_mouse_actions(const UserInput& input, bool view_hove
     }
 }
 
-void GeometryEditor::handle_keyboard_actions()
+void Sculptor::GeometryEditor::handle_keyboard_actions()
 {
     Mode new_mode = mode;
 
@@ -1602,7 +1608,7 @@ void GeometryEditor::handle_keyboard_actions()
     switch_mode(new_mode);
 }
 
-void GeometryEditor::center_selection()
+void Sculptor::GeometryEditor::center_selection()
 {
     const uint8_t* const vtx_sel =
         toolbar_state.select.vertices ? cur_res->vtx_sel_host_buf.get_ptr<uint8_t>() : nullptr;
@@ -1645,7 +1651,7 @@ void GeometryEditor::center_selection()
     }
 }
 
-bool GeometryEditor::gui_toolbar()
+bool Sculptor::GeometryEditor::gui_toolbar()
 {
     // Skip if it's not loaded yet
     if (! toolbar_texture)
@@ -1788,7 +1794,7 @@ bool GeometryEditor::gui_toolbar()
     return true;
 }
 
-void GeometryEditor::switch_mode(Mode new_mode)
+void Sculptor::GeometryEditor::switch_mode(Mode new_mode)
 {
     if (new_mode != mode) {
 
@@ -1848,7 +1854,7 @@ void GeometryEditor::switch_mode(Mode new_mode)
         toolbar_state.select.faces = true;
 }
 
-bool GeometryEditor::create_gui_frame(uint32_t image_idx, bool* need_realloc, const UserInput& input)
+bool Sculptor::GeometryEditor::create_gui_frame(uint32_t image_idx, bool* need_realloc, const UserInput& input)
 {
     cur_res = &view.res[image_idx];
     DEFER
@@ -2002,7 +2008,7 @@ bool GeometryEditor::create_gui_frame(uint32_t image_idx, bool* need_realloc, co
     return true;
 }
 
-bool GeometryEditor::draw_frame(VkCommandBuffer cmdbuf, uint32_t image_idx)
+bool Sculptor::GeometryEditor::draw_frame(VkCommandBuffer cmdbuf, uint32_t image_idx)
 {
     if (! toolbar_image.send_to_gpu(cmdbuf))
         return false;
@@ -2085,7 +2091,7 @@ static const Image::Transition render_viewport_layout = { VK_PIPELINE_STAGE_2_TO
                                                           VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
                                                           VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL };
 
-bool GeometryEditor::draw_geometry_pass(VkCommandBuffer cmdbuf, View& dst_view, uint32_t image_idx)
+bool Sculptor::GeometryEditor::draw_geometry_pass(VkCommandBuffer cmdbuf, View& dst_view, uint32_t image_idx)
 {
     Resources& res = dst_view.res[image_idx];
 
@@ -2212,7 +2218,7 @@ bool GeometryEditor::draw_geometry_pass(VkCommandBuffer cmdbuf, View& dst_view, 
     return true;
 }
 
-bool GeometryEditor::draw_lighting_pass(VkCommandBuffer cmdbuf, View& dst_view, uint32_t image_idx)
+bool Sculptor::GeometryEditor::draw_lighting_pass(VkCommandBuffer cmdbuf, View& dst_view, uint32_t image_idx)
 {
     Resources& res = dst_view.res[image_idx];
 
@@ -2397,7 +2403,7 @@ bool GeometryEditor::draw_lighting_pass(VkCommandBuffer cmdbuf, View& dst_view, 
     return true;
 }
 
-void GeometryEditor::set_frame_data(VkCommandBuffer cmdbuf, uint32_t image_idx)
+void Sculptor::GeometryEditor::set_frame_data(VkCommandBuffer cmdbuf, uint32_t image_idx)
 {
     FrameData frame_data = {};
 
@@ -2466,7 +2472,7 @@ void GeometryEditor::set_frame_data(VkCommandBuffer cmdbuf, uint32_t image_idx)
     vkCmdUpdateBuffer(cmdbuf, view.res[image_idx].frame_data.get_buffer(), 0, sizeof(frame_data), &frame_data);
 }
 
-bool GeometryEditor::setup_selection(VkCommandBuffer cmdbuf, uint32_t image_idx)
+bool Sculptor::GeometryEditor::setup_selection(VkCommandBuffer cmdbuf, uint32_t image_idx)
 {
     Resources& res = view.res[image_idx];
 
@@ -2582,7 +2588,7 @@ bool GeometryEditor::setup_selection(VkCommandBuffer cmdbuf, uint32_t image_idx)
     return true;
 }
 
-bool GeometryEditor::draw_deep_selection(VkCommandBuffer cmdbuf, View& dst_view, uint32_t image_idx)
+bool Sculptor::GeometryEditor::draw_deep_selection(VkCommandBuffer cmdbuf, View& dst_view, uint32_t image_idx)
 {
     // Deep selection is only needed in wireframe mode during a rectangle drag.
     // It rerenders the geometry with depth test OFF so that objects hidden behind
@@ -2654,7 +2660,7 @@ bool GeometryEditor::draw_deep_selection(VkCommandBuffer cmdbuf, View& dst_view,
     return true;
 }
 
-bool GeometryEditor::draw_wireframe_pass(VkCommandBuffer cmdbuf, View& dst_view, uint32_t image_idx)
+bool Sculptor::GeometryEditor::draw_wireframe_pass(VkCommandBuffer cmdbuf, View& dst_view, uint32_t image_idx)
 {
     Resources& res = dst_view.res[image_idx];
 
@@ -2743,7 +2749,7 @@ bool GeometryEditor::draw_wireframe_pass(VkCommandBuffer cmdbuf, View& dst_view,
     return true;
 }
 
-vmath::mat4 GeometryEditor::compute_model_view(const View& dst_view) const
+vmath::mat4 Sculptor::GeometryEditor::compute_model_view(const View& dst_view) const
 {
     const Camera camera = get_rotated_camera(dst_view);
 
@@ -2769,7 +2775,7 @@ vmath::mat4 GeometryEditor::compute_model_view(const View& dst_view) const
     }
 }
 
-void GeometryEditor::set_patch_transforms(VkCommandBuffer cmdbuf, const View& dst_view, uint32_t image_idx)
+void Sculptor::GeometryEditor::set_patch_transforms(VkCommandBuffer cmdbuf, const View& dst_view, uint32_t image_idx)
 {
     Transforms transforms = {};
 
@@ -2808,7 +2814,7 @@ void GeometryEditor::set_patch_transforms(VkCommandBuffer cmdbuf, const View& ds
     vkCmdUpdateBuffer(cmdbuf, dst_view.res[image_idx].transforms.get_buffer(), 0, sizeof(transforms), &transforms);
 }
 
-bool GeometryEditor::render_geometry(VkCommandBuffer cmdbuf, const View& dst_view, uint32_t image_idx)
+bool Sculptor::GeometryEditor::render_geometry(VkCommandBuffer cmdbuf, const View& dst_view, uint32_t image_idx)
 {
     VkDescriptorBufferInfo buffer_info = {
         VK_NULL_HANDLE, // buffer
@@ -2882,7 +2888,7 @@ bool GeometryEditor::render_geometry(VkCommandBuffer cmdbuf, const View& dst_vie
     return true;
 }
 
-bool GeometryEditor::render_grid(VkCommandBuffer cmdbuf, View& dst_view, uint32_t image_idx)
+bool Sculptor::GeometryEditor::render_grid(VkCommandBuffer cmdbuf, View& dst_view, uint32_t image_idx)
 {
     constexpr float   min_grid_pixels = 10;
     constexpr int32_t grid_min        = -0x8000;
@@ -3144,7 +3150,7 @@ bool GeometryEditor::render_grid(VkCommandBuffer cmdbuf, View& dst_view, uint32_
     return true;
 }
 
-bool GeometryEditor::render_control_points(VkCommandBuffer cmdbuf, View& dst_view, uint32_t image_idx)
+bool Sculptor::GeometryEditor::render_control_points(VkCommandBuffer cmdbuf, View& dst_view, uint32_t image_idx)
 {
     Resources& res = dst_view.res[image_idx];
 
@@ -3360,7 +3366,7 @@ bool GeometryEditor::render_control_points(VkCommandBuffer cmdbuf, View& dst_vie
     return true;
 }
 
-vmath::vec3 GeometryEditor::compute_move_delta(const UserInput& input) const
+vmath::vec3 Sculptor::GeometryEditor::compute_move_delta(const UserInput& input) const
 {
     const Camera&     camera       = view.camera[static_cast<int>(view.view_type)];
     const float       height       = static_cast<float>(view.height);
@@ -3420,7 +3426,7 @@ vmath::vec3 GeometryEditor::compute_move_delta(const UserInput& input) const
     return delta;
 }
 
-void GeometryEditor::apply_move(const UserInput& input)
+void Sculptor::GeometryEditor::apply_move(const UserInput& input)
 {
     patch_geometry.apply_snapshot();
 
@@ -3430,7 +3436,7 @@ void GeometryEditor::apply_move(const UserInput& input)
     patch_geometry.move_selection(compute_move_delta(input), move_mode);
 }
 
-void GeometryEditor::apply_extrude(const UserInput& input)
+void Sculptor::GeometryEditor::apply_extrude(const UserInput& input)
 {
     patch_geometry.apply_snapshot();
 
@@ -3454,7 +3460,7 @@ void GeometryEditor::apply_extrude(const UserInput& input)
     patch_geometry.set_dirty();
 }
 
-void GeometryEditor::finish_edit_mode()
+void Sculptor::GeometryEditor::finish_edit_mode()
 {
     if (mouse_action_pos) {
         mouse_action_pos = std::nullopt;
@@ -3462,7 +3468,7 @@ void GeometryEditor::finish_edit_mode()
     }
 }
 
-void GeometryEditor::cancel_edit_mode()
+void Sculptor::GeometryEditor::cancel_edit_mode()
 {
     if (mouse_action_pos) {
         patch_geometry.restore_snapshot();
@@ -3470,7 +3476,7 @@ void GeometryEditor::cancel_edit_mode()
     }
 }
 
-void GeometryEditor::undo()
+void Sculptor::GeometryEditor::undo()
 {
     if (has_captured_mouse())
         release_mouse();
@@ -3485,7 +3491,7 @@ void GeometryEditor::undo()
     }
 }
 
-void GeometryEditor::redo()
+void Sculptor::GeometryEditor::redo()
 {
     if (has_captured_mouse())
         release_mouse();
@@ -3500,14 +3506,12 @@ void GeometryEditor::redo()
     }
 }
 
-void GeometryEditor::trigger_save()
+void Sculptor::GeometryEditor::trigger_save()
 {
     dialog_save = true;
 }
 
-void GeometryEditor::trigger_load()
+void Sculptor::GeometryEditor::trigger_load()
 {
     dialog_load = true;
 }
-
-} // namespace Sculptor

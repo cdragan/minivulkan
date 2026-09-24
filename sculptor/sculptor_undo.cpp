@@ -6,9 +6,7 @@
 #include <assert.h>
 #include <string.h>
 
-namespace Sculptor {
-
-void UndoRedo::init(uint8_t* new_buf, size_t size)
+void Sculptor::UndoRedo::init(uint8_t* new_buf, size_t size)
 {
     assert(mode == Mode::inactive);
     assert(buf_size == 0);
@@ -21,12 +19,12 @@ void UndoRedo::init(uint8_t* new_buf, size_t size)
     redo_idx = static_cast<uint32_t>(size);
 }
 
-void UndoRedo::clear_redo()
+void Sculptor::UndoRedo::clear_redo()
 {
     redo_idx = buf_size;
 }
 
-void UndoRedo::clear()
+void Sculptor::UndoRedo::clear()
 {
     assert(mode == Mode::inactive);
     undo_idx = 0;
@@ -34,7 +32,7 @@ void UndoRedo::clear()
     redo_idx = buf_size;
 }
 
-UndoRedo::Snapshot UndoRedo::get_snapshot()
+Sculptor::UndoRedo::Snapshot Sculptor::UndoRedo::get_snapshot()
 {
     assert(mode == Mode::inactive);
 
@@ -48,7 +46,7 @@ UndoRedo::Snapshot UndoRedo::get_snapshot()
     return snap;
 }
 
-UndoRedo::Snapshot UndoRedo::get_snapshot_space()
+Sculptor::UndoRedo::Snapshot Sculptor::UndoRedo::get_snapshot_space()
 {
     assert(mode == Mode::inactive);
 
@@ -56,7 +54,7 @@ UndoRedo::Snapshot UndoRedo::get_snapshot_space()
     return { buf + undo_idx, redo_idx - undo_idx };
 }
 
-void UndoRedo::push_snapshot(const uint32_t size)
+void Sculptor::UndoRedo::push_snapshot(const uint32_t size)
 {
     assert(mode == Mode::snapshot_write);
     assert(size <= redo_idx - undo_idx);
@@ -66,7 +64,7 @@ void UndoRedo::push_snapshot(const uint32_t size)
     undo_bak = undo_idx;
 }
 
-bool UndoRedo::make_room(uint32_t size)
+bool Sculptor::UndoRedo::make_room(uint32_t size)
 {
     const uint32_t avail_size = redo_idx - undo_idx;
 
@@ -121,7 +119,7 @@ bool UndoRedo::make_room(uint32_t size)
     return clear_size <= end_space;
 }
 
-void UndoRedo::init_undo_push()
+void Sculptor::UndoRedo::init_undo_push()
 {
     assert(mode == Mode::inactive);
     assert(cur_size == 0);
@@ -129,7 +127,7 @@ void UndoRedo::init_undo_push()
     mode = Mode::undo_push;
 }
 
-bool UndoRedo::finish_undo_push()
+bool Sculptor::UndoRedo::finish_undo_push()
 {
     assert(mode == Mode::undo_push);
 
@@ -153,7 +151,7 @@ bool UndoRedo::finish_undo_push()
     return true;
 }
 
-void UndoRedo::init_redo_push()
+void Sculptor::UndoRedo::init_redo_push()
 {
     assert(mode == Mode::inactive);
     assert(cur_size == 0);
@@ -161,7 +159,7 @@ void UndoRedo::init_redo_push()
     mode = Mode::redo_push;
 }
 
-bool UndoRedo::finish_redo_push()
+bool Sculptor::UndoRedo::finish_redo_push()
 {
     assert(mode == Mode::redo_push);
 
@@ -183,7 +181,7 @@ bool UndoRedo::finish_redo_push()
     return true;
 }
 
-void UndoRedo::push(const void* data, size_t size)
+void Sculptor::UndoRedo::push(const void* data, size_t size)
 {
     assert(mode == Mode::undo_push || mode == Mode::redo_push);
 
@@ -212,17 +210,17 @@ void UndoRedo::push(const void* data, size_t size)
     cur_size += size;
 }
 
-void UndoRedo::push(uint32_t v)
+void Sculptor::UndoRedo::push(uint32_t v)
 {
     push(&v, sizeof v);
 }
 
-void UndoRedo::push(float v)
+void Sculptor::UndoRedo::push(float v)
 {
     push(&v, sizeof v);
 }
 
-bool UndoRedo::init_undo()
+bool Sculptor::UndoRedo::init_undo()
 {
     assert(mode == Mode::inactive);
     assert(cur_size == 0);
@@ -238,7 +236,7 @@ bool UndoRedo::init_undo()
     return true;
 }
 
-void UndoRedo::finish_undo()
+void Sculptor::UndoRedo::finish_undo()
 {
     assert(mode == Mode::undo_pop);
     assert(cur_size == 0);
@@ -247,7 +245,7 @@ void UndoRedo::finish_undo()
     undo_bak = undo_idx;
 }
 
-void UndoRedo::restore_undo()
+void Sculptor::UndoRedo::restore_undo()
 {
     assert(mode == Mode::undo_pop);
     assert(cur_size == 0);
@@ -256,7 +254,7 @@ void UndoRedo::restore_undo()
     undo_idx = undo_bak;
 }
 
-bool UndoRedo::skip_undo()
+bool Sculptor::UndoRedo::skip_undo()
 {
     assert(mode == Mode::inactive);
     assert(cur_size == 0);
@@ -274,7 +272,7 @@ bool UndoRedo::skip_undo()
     return true;
 }
 
-bool UndoRedo::init_redo()
+bool Sculptor::UndoRedo::init_redo()
 {
     assert(mode == Mode::inactive);
     assert(cur_size == 0);
@@ -290,7 +288,7 @@ bool UndoRedo::init_redo()
     return true;
 }
 
-void UndoRedo::finish_redo()
+void Sculptor::UndoRedo::finish_redo()
 {
     assert(mode == Mode::redo_pop);
     assert(cur_size == 0);
@@ -298,7 +296,7 @@ void UndoRedo::finish_redo()
     mode = Mode::inactive;
 }
 
-void UndoRedo::pop(void* data, size_t size)
+void Sculptor::UndoRedo::pop(void* data, size_t size)
 {
     assert(mode == Mode::undo_pop || mode == Mode::redo_pop);
     assert(size <= cur_size);
@@ -315,18 +313,16 @@ void UndoRedo::pop(void* data, size_t size)
     cur_size -= static_cast<uint32_t>(size);
 }
 
-uint32_t UndoRedo::pop_u32()
+uint32_t Sculptor::UndoRedo::pop_u32()
 {
     uint32_t value;
     pop(&value, sizeof value);
     return value;
 }
 
-float UndoRedo::pop_f32()
+float Sculptor::UndoRedo::pop_f32()
 {
     float value;
     pop(&value, sizeof value);
     return value;
 }
-
-} // namespace Sculptor

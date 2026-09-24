@@ -653,7 +653,7 @@ $(foreach file, $(sort $(filter %.cpp, $(all_src_files))), $(eval $(call ASM_RUL
 
 $(foreach file, $(filter-out $(imgui_src_files) $(libpng_src_files) $(zlib_src_files), $(all_src_files)), $(call TARGET_FILES, $(file))): CFLAGS += $(WFLAGS)
 
-$(foreach file, $(all_gui_src_files) $(imgui_src_files) $(all_sculptor_graph_unit_src_files), $(call TARGET_FILES, $(file))): CFLAGS += -DIMGUI_DISABLE_OBSOLETE_KEYIO -DIMGUI_DISABLE_OBSOLETE_FUNCTIONS -Ithirdparty/imgui/src
+$(foreach file, $(all_gui_src_files) $(imgui_src_files) $(all_sculptor_graph_unit_src_files) $(all_synth_unit_src_files), $(call TARGET_FILES, $(file))): CFLAGS += -DIMGUI_DISABLE_OBSOLETE_KEYIO -DIMGUI_DISABLE_OBSOLETE_FUNCTIONS -Ithirdparty/imgui/src
 
 $(call TARGET_FILES, load_png.cpp): CFLAGS += -Ithirdparty/libpng
 

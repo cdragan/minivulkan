@@ -12,11 +12,9 @@
 #include <stdio.h>
 #include <string.h>
 
-namespace Sculptor {
-
-GraphColors default_graph_colors()
+Sculptor::GraphColors Sculptor::default_graph_colors()
 {
-    GraphColors colors              = {};
+    Sculptor::GraphColors colors    = {};
     colors.node_background          = 0x2B2B2BFFu;
     colors.node_border              = 0x5A5A5AFFu;
     colors.node_selected_border     = 0xFFFFFFFFu;
@@ -66,8 +64,8 @@ bool read_bytes(const uint8_t* buffer, uint32_t buffer_size, uint32_t& off, void
 }
 
 struct SnapshotSlot {
-    bool present;
-    Slot slot;
+    bool           present;
+    Sculptor::Slot slot;
 };
 
 struct SnapshotNode {
@@ -79,22 +77,22 @@ struct SnapshotNode {
     float        content_height_override;
     bool         ghost;
     bool         has_state_widget;
-    SnapshotSlot slots[max_node_slots];
+    SnapshotSlot slots[Sculptor::max_node_slots];
 };
 
 struct SnapshotConnection {
-    bool     present;
-    EndPoint output;
-    EndPoint input;
+    bool               present;
+    Sculptor::EndPoint output;
+    Sculptor::EndPoint input;
 };
 
 struct Snapshot {
-    SnapshotNode       nodes[max_nodes];
-    SnapshotConnection connections[max_connections];
-    vmath::vec2        view_origin;
-    float              zoom;
-    GraphColors        colors;
-    uint32_t           caller_state_size;
+    SnapshotNode          nodes[Sculptor::max_nodes];
+    SnapshotConnection    connections[Sculptor::max_connections];
+    vmath::vec2           view_origin;
+    float                 zoom;
+    Sculptor::GraphColors colors;
+    uint32_t              caller_state_size;
 };
 
 // Parses and validates the graph sections of a snapshot (everything except
@@ -108,12 +106,12 @@ bool parse_snapshot(const uint8_t* buffer, uint32_t buffer_size, uint32_t& off, 
     }
 
     uint32_t node_count = 0;
-    if (! read_bytes(buffer, buffer_size, off, &node_count, 4) || node_count > max_nodes) {
+    if (! read_bytes(buffer, buffer_size, off, &node_count, 4) || node_count > Sculptor::max_nodes) {
         return false;
     }
     for (uint32_t i = 0; i < node_count; ++i) {
         uint16_t node_idx = 0;
-        if (! read_bytes(buffer, buffer_size, off, &node_idx, 2) || node_idx >= max_nodes ||
+        if (! read_bytes(buffer, buffer_size, off, &node_idx, 2) || node_idx >= Sculptor::max_nodes ||
             snapshot.nodes[node_idx].present) {
             return false;
         }
@@ -131,14 +129,14 @@ bool parse_snapshot(const uint8_t* buffer, uint32_t buffer_size, uint32_t& off, 
         uint16_t slot_count = 0;
         if (! read_bytes(buffer, buffer_size, off, &ghost, 1) ||
             ! read_bytes(buffer, buffer_size, off, &has_widget, 1) ||
-            ! read_bytes(buffer, buffer_size, off, &slot_count, 2) || slot_count > max_node_slots) {
+            ! read_bytes(buffer, buffer_size, off, &slot_count, 2) || slot_count > Sculptor::max_node_slots) {
             return false;
         }
         node.ghost            = ghost != 0;
         node.has_state_widget = has_widget != 0;
         for (uint32_t s = 0; s < slot_count; ++s) {
             uint16_t slot_idx = 0;
-            if (! read_bytes(buffer, buffer_size, off, &slot_idx, 2) || slot_idx >= max_node_slots ||
+            if (! read_bytes(buffer, buffer_size, off, &slot_idx, 2) || slot_idx >= Sculptor::max_node_slots ||
                 node.slots[slot_idx].present) {
                 return false;
             }
@@ -149,18 +147,19 @@ bool parse_snapshot(const uint8_t* buffer, uint32_t buffer_size, uint32_t& off, 
             uint8_t property_type = 0;
             uint8_t num_options   = 0;
             if (! read_bytes(buffer, buffer_size, off, slot.slot.name, sizeof(slot.slot.name)) ||
-                ! read_bytes(buffer, buffer_size, off, &kind, 1) || kind < static_cast<uint8_t>(SlotKind::input) ||
-                kind > static_cast<uint8_t>(SlotKind::property) ||
+                ! read_bytes(buffer, buffer_size, off, &kind, 1) ||
+                kind < static_cast<uint8_t>(Sculptor::SlotKind::input) ||
+                kind > static_cast<uint8_t>(Sculptor::SlotKind::property) ||
                 ! read_bytes(buffer, buffer_size, off, &connectable, 1) ||
                 ! read_bytes(buffer, buffer_size, off, &property_type, 1) ||
-                property_type > static_cast<uint8_t>(PropertyType::list) ||
+                property_type > static_cast<uint8_t>(Sculptor::PropertyType::list) ||
                 ! read_bytes(buffer, buffer_size, off, &slot.slot.value, sizeof(slot.slot.value)) ||
                 ! read_bytes(buffer, buffer_size, off, &num_options, 1) || num_options > 8) {
                 return false;
             }
-            slot.slot.kind             = static_cast<SlotKind>(kind);
+            slot.slot.kind             = static_cast<Sculptor::SlotKind>(kind);
             slot.slot.connectable      = connectable != 0;
-            slot.slot.property_type    = static_cast<PropertyType>(property_type);
+            slot.slot.property_type    = static_cast<Sculptor::PropertyType>(property_type);
             slot.slot.num_list_options = num_options;
             for (uint32_t o = 0; o < num_options; ++o) {
                 if (! read_bytes(buffer,
@@ -175,12 +174,12 @@ bool parse_snapshot(const uint8_t* buffer, uint32_t buffer_size, uint32_t& off, 
     }
 
     uint32_t conn_count = 0;
-    if (! read_bytes(buffer, buffer_size, off, &conn_count, 4) || conn_count > max_connections) {
+    if (! read_bytes(buffer, buffer_size, off, &conn_count, 4) || conn_count > Sculptor::max_connections) {
         return false;
     }
     for (uint32_t i = 0; i < conn_count; ++i) {
         uint16_t conn_idx = 0;
-        if (! read_bytes(buffer, buffer_size, off, &conn_idx, 2) || conn_idx >= max_connections ||
+        if (! read_bytes(buffer, buffer_size, off, &conn_idx, 2) || conn_idx >= Sculptor::max_connections ||
             snapshot.connections[conn_idx].present) {
             return false;
         }
@@ -196,18 +195,21 @@ bool parse_snapshot(const uint8_t* buffer, uint32_t buffer_size, uint32_t& off, 
         // kind contract. load() places connections directly at snapshot indices,
         // bypassing add_connection, so parse_snapshot re-checks everything a
         // snapshot connection needs before it can exist in a live graph.
-        if (connection.output.node_idx >= max_nodes || connection.input.node_idx >= max_nodes ||
+        if (connection.output.node_idx >= Sculptor::max_nodes || connection.input.node_idx >= Sculptor::max_nodes ||
             ! snapshot.nodes[connection.output.node_idx].present ||
-            ! snapshot.nodes[connection.input.node_idx].present || connection.output.slot_idx >= max_node_slots ||
-            connection.input.slot_idx >= max_node_slots ||
+            ! snapshot.nodes[connection.input.node_idx].present ||
+            connection.output.slot_idx >= Sculptor::max_node_slots ||
+            connection.input.slot_idx >= Sculptor::max_node_slots ||
             ! snapshot.nodes[connection.output.node_idx].slots[connection.output.slot_idx].present ||
             ! snapshot.nodes[connection.input.node_idx].slots[connection.input.slot_idx].present) {
             return false;
         }
-        const Slot& out_slot = snapshot.nodes[connection.output.node_idx].slots[connection.output.slot_idx].slot;
-        const Slot& in_slot  = snapshot.nodes[connection.input.node_idx].slots[connection.input.slot_idx].slot;
-        if (out_slot.kind != SlotKind::output ||
-            ! (in_slot.kind == SlotKind::input || (in_slot.kind == SlotKind::property && in_slot.connectable))) {
+        const Sculptor::Slot& out_slot =
+            snapshot.nodes[connection.output.node_idx].slots[connection.output.slot_idx].slot;
+        const Sculptor::Slot& in_slot = snapshot.nodes[connection.input.node_idx].slots[connection.input.slot_idx].slot;
+        if (out_slot.kind != Sculptor::SlotKind::output ||
+            ! (in_slot.kind == Sculptor::SlotKind::input ||
+               (in_slot.kind == Sculptor::SlotKind::property && in_slot.connectable))) {
             return false;
         }
     }
@@ -226,7 +228,7 @@ bool parse_snapshot(const uint8_t* buffer, uint32_t buffer_size, uint32_t& off, 
 }
 
 // Kind/type/options identity: value and name are diffed separately.
-bool slot_structure_equal(const Slot& a, const Slot& b)
+bool slot_structure_equal(const Sculptor::Slot& a, const Sculptor::Slot& b)
 {
     if (a.kind != b.kind || a.connectable != b.connectable || a.property_type != b.property_type ||
         a.num_list_options != b.num_list_options) {
@@ -245,8 +247,8 @@ bool slot_structure_equal(const Slot& a, const Slot& b)
 // node index needs remapping through the name match.
 void remap_snapshot_connection(const int32_t*            snap_to_live,
                                const SnapshotConnection& connection,
-                               EndPoint&                 out,
-                               EndPoint&                 in)
+                               Sculptor::EndPoint&       out,
+                               Sculptor::EndPoint&       in)
 {
     out.node_idx = static_cast<uint32_t>(snap_to_live[connection.output.node_idx]);
     out.slot_idx = connection.output.slot_idx;
@@ -255,12 +257,13 @@ void remap_snapshot_connection(const int32_t*            snap_to_live,
 }
 } // namespace
 
-// The editor state carve-out in sculptor_instr_bank.cpp reserves fixed
-// per-Graph slots; a capacity raise that outgrows the slot must fail the
-// build instead of silently busting that reserve.
-static_assert(sizeof(Graph) <= 1638400u);
+// The editor state carve-out in sculptor_instr_bank.cpp reserves one
+// editor-resident Graph slot at exactly max_graph_bytes; a capacity raise
+// that outgrows it must fail the build instead of silently busting that
+// reserve.
+static_assert(sizeof(Sculptor::Graph) <= Sculptor::max_graph_bytes);
 
-void Graph::push_change(ChangeKind kind, uint32_t node_idx, uint32_t slot_idx, uint32_t connection_idx)
+void Sculptor::Graph::push_change(ChangeKind kind, uint32_t node_idx, uint32_t slot_idx, uint32_t connection_idx)
 {
     if (changes_count == max_pending_changes) {
         // Caller did not drain fast enough: force a resync instead of losing
@@ -276,7 +279,7 @@ void Graph::push_change(ChangeKind kind, uint32_t node_idx, uint32_t slot_idx, u
     ++changes_count;
 }
 
-uint32_t Graph::take_changes(GraphChange* out, uint32_t out_size)
+uint32_t Sculptor::Graph::take_changes(GraphChange* out, uint32_t out_size)
 {
     const uint32_t count = out_size < changes_count ? out_size : changes_count;
     for (uint32_t i = 0; i < count; ++i) {
@@ -287,14 +290,14 @@ uint32_t Graph::take_changes(GraphChange* out, uint32_t out_size)
     return count;
 }
 
-bool Graph::changes_overflowed()
+bool Sculptor::Graph::changes_overflowed()
 {
     const bool overflowed   = changes_overflowed_flag;
     changes_overflowed_flag = false;
     return overflowed;
 }
 
-bool Graph::slot_is_connected(uint32_t node_idx, uint32_t slot_idx) const
+bool Sculptor::Graph::slot_is_connected(uint32_t node_idx, uint32_t slot_idx) const
 {
     for (uint32_t i = 0; i < max_connections; ++i) {
         if (! connections.is_occupied(i)) {
@@ -311,7 +314,7 @@ bool Graph::slot_is_connected(uint32_t node_idx, uint32_t slot_idx) const
     return false;
 }
 
-uint32_t Graph::create_node(const char* name, vmath::vec2 position)
+uint32_t Sculptor::Graph::create_node(const char* name, vmath::vec2 position)
 {
     const uint32_t node_idx = nodes.allocate();
     if (node_idx == pool_no_slot) {
@@ -331,7 +334,7 @@ uint32_t Graph::create_node(const char* name, vmath::vec2 position)
     return node_idx;
 }
 
-void Graph::delete_node(uint32_t node_idx)
+void Sculptor::Graph::delete_node(uint32_t node_idx)
 {
     if (node_idx >= max_nodes || ! nodes.is_occupied(node_idx)) {
         return;
@@ -346,7 +349,7 @@ void Graph::delete_node(uint32_t node_idx)
     delete_node_unvetoed(node_idx);
 }
 
-void Graph::delete_node_unvetoed(uint32_t node_idx)
+void Sculptor::Graph::delete_node_unvetoed(uint32_t node_idx)
 {
     // Drop connections touching the node first, reporting each one, so the
     // caller never sees a connection referencing a dead node.  delete_connection
@@ -383,10 +386,29 @@ void Graph::delete_node_unvetoed(uint32_t node_idx)
     push_change(ChangeKind::node_deleted, node_idx, pool_no_slot, pool_no_slot);
 }
 
+// Wholesale rebuild primitive: deletes every node, which drops every
+// connection with it.  Bypasses the delete veto for the same reason as
+// snapshot restoration: this is caller-driven state replacement, not a
+// user delete.
+void Sculptor::Graph::clear()
+{
+    for (uint32_t i = 0; i < max_nodes; ++i) {
+        if (nodes.is_occupied(i)) {
+            delete_node_unvetoed(i);
+        }
+    }
+    // The canvas popup and the error overlay describe pre-clear state: a
+    // stale popup must not delete a reused connection index, and no stale
+    // error text survives a rebuild.
+    popup_connection = pool_no_slot;
+    error_message[0] = 0;
+    error_active     = false;
+}
+
 // Removes a single slot, dropping connections that reference it first
 // (same hygiene as delete_node).  Used by callers rebuilding a node's
 // slot set incrementally.
-void Graph::remove_slot(uint32_t node_idx, uint32_t slot_idx)
+void Sculptor::Graph::remove_slot(uint32_t node_idx, uint32_t slot_idx)
 {
     if (node_idx >= max_nodes || ! nodes.is_occupied(node_idx) || slot_idx >= max_node_slots ||
         ! nodes.entries[node_idx].slots.is_occupied(slot_idx)) {
@@ -406,7 +428,7 @@ void Graph::remove_slot(uint32_t node_idx, uint32_t slot_idx)
     push_change(ChangeKind::slot_deleted, node_idx, slot_idx, pool_no_slot);
 }
 
-uint32_t Graph::add_slot(uint32_t node_idx, const Slot& slot)
+uint32_t Sculptor::Graph::add_slot(uint32_t node_idx, const Slot& slot)
 {
     if (node_idx >= max_nodes || ! nodes.is_occupied(node_idx)) {
         return pool_no_slot;
@@ -422,7 +444,7 @@ uint32_t Graph::add_slot(uint32_t node_idx, const Slot& slot)
     return slot_idx;
 }
 
-bool Graph::endpoints_structurally_valid(EndPoint output, EndPoint input) const
+bool Sculptor::Graph::endpoints_structurally_valid(EndPoint output, EndPoint input) const
 {
     if (output.node_idx >= max_nodes || input.node_idx >= max_nodes || output.slot_idx >= max_node_slots ||
         input.slot_idx >= max_node_slots) {
@@ -449,7 +471,7 @@ bool Graph::endpoints_structurally_valid(EndPoint output, EndPoint input) const
     return true;
 }
 
-bool Graph::input_slot_taken(uint32_t node_idx, uint32_t slot_idx, uint32_t except_connection) const
+bool Sculptor::Graph::input_slot_taken(uint32_t node_idx, uint32_t slot_idx, uint32_t except_connection) const
 {
     for (uint32_t i = 0; i < max_connections; ++i) {
         if (i == except_connection || ! connections.is_occupied(i)) {
@@ -463,7 +485,7 @@ bool Graph::input_slot_taken(uint32_t node_idx, uint32_t slot_idx, uint32_t exce
     return false;
 }
 
-uint32_t Graph::add_connection(EndPoint output, EndPoint input)
+uint32_t Sculptor::Graph::add_connection(EndPoint output, EndPoint input)
 {
     if (! endpoints_structurally_valid(output, input)) {
         return pool_no_slot;
@@ -482,31 +504,31 @@ uint32_t Graph::add_connection(EndPoint output, EndPoint input)
     return connection_idx;
 }
 
-void Graph::set_validator(ValidationCallback callback, void* user_data)
+void Sculptor::Graph::set_validator(ValidationCallback callback, void* user_data)
 {
     validator           = callback;
     validator_user_data = user_data;
 }
 
-void Graph::set_delete_veto(NodeDeleteVeto callback, void* user_data)
+void Sculptor::Graph::set_delete_veto(NodeDeleteVeto callback, void* user_data)
 {
     delete_veto           = callback;
     delete_veto_user_data = user_data;
 }
 
-void Graph::set_canvas_menu_callback(CanvasMenuCallback callback, void* user_data)
+void Sculptor::Graph::set_canvas_menu_callback(CanvasMenuCallback callback, void* user_data)
 {
     canvas_menu_callback  = callback;
     canvas_menu_user_data = user_data;
 }
 
-void Graph::set_error(const char* message)
+void Sculptor::Graph::set_error(const char* message)
 {
     snprintf(error_message, sizeof error_message, "%s", message);
     error_active = true;
 }
 
-bool Graph::attempt_connection(EndPoint output, EndPoint input)
+bool Sculptor::Graph::attempt_connection(EndPoint output, EndPoint input)
 {
     if (! endpoints_structurally_valid(output, input)) {
         set_error("Invalid connection");
@@ -527,7 +549,7 @@ bool Graph::attempt_connection(EndPoint output, EndPoint input)
     return true;
 }
 
-bool Graph::move_connection_end(uint32_t connection_idx, bool move_output_end, EndPoint new_point)
+bool Sculptor::Graph::move_connection_end(uint32_t connection_idx, bool move_output_end, EndPoint new_point)
 {
     if (connection_idx >= max_connections || ! connections.is_occupied(connection_idx)) {
         return false;
@@ -560,7 +582,7 @@ bool Graph::move_connection_end(uint32_t connection_idx, bool move_output_end, E
     return true;
 }
 
-void Graph::delete_connection(uint32_t connection_idx)
+void Sculptor::Graph::delete_connection(uint32_t connection_idx)
 {
     if (connection_idx >= max_connections || ! connections.is_occupied(connection_idx)) {
         return;
@@ -575,7 +597,7 @@ void Graph::delete_connection(uint32_t connection_idx)
     push_change(ChangeKind::connection_deleted, pool_no_slot, pool_no_slot, connection_idx);
 }
 
-void Graph::set_ghost(uint32_t node_idx, bool ghost)
+void Sculptor::Graph::set_ghost(uint32_t node_idx, bool ghost)
 {
     if (node_idx >= max_nodes || ! nodes.is_occupied(node_idx)) {
         return;
@@ -593,26 +615,26 @@ void Graph::set_ghost(uint32_t node_idx, bool ghost)
 }
 
 // Selection: pure view state (see header).
-bool Graph::is_selected(uint32_t node_idx) const
+bool Sculptor::Graph::is_selected(uint32_t node_idx) const
 {
     return node_idx < max_nodes && nodes.is_occupied(node_idx) && selected[node_idx];
 }
 
-void Graph::set_selected(uint32_t node_idx, bool node_selected)
+void Sculptor::Graph::set_selected(uint32_t node_idx, bool node_selected)
 {
     if (node_idx < max_nodes && nodes.is_occupied(node_idx)) {
         selected[node_idx] = node_selected;
     }
 }
 
-void Graph::select_none()
+void Sculptor::Graph::select_none()
 {
     for (uint32_t i = 0; i < max_nodes; ++i) {
         selected[i] = false;
     }
 }
 
-void Graph::align_selected(AlignKind kind)
+void Sculptor::Graph::align_selected(AlignKind kind)
 {
     // First pass: collect the reference edges over selected, non-ghost nodes.
     bool  any_selected = false;
@@ -693,14 +715,14 @@ void Graph::align_selected(AlignKind kind)
     }
 }
 
-void Graph::report_content_size(uint32_t node_idx, vmath::vec2 size)
+void Sculptor::Graph::report_content_size(uint32_t node_idx, vmath::vec2 size)
 {
     if (node_idx < max_nodes && nodes.is_occupied(node_idx)) {
         content_sizes[node_idx] = size;
     }
 }
 
-vmath::vec2 Graph::content_size(uint32_t node_idx) const
+vmath::vec2 Sculptor::Graph::content_size(uint32_t node_idx) const
 {
     if (node_idx >= max_nodes) {
         return vmath::vec2(0.0f, 0.0f);
@@ -708,12 +730,12 @@ vmath::vec2 Graph::content_size(uint32_t node_idx) const
     return content_sizes[node_idx];
 }
 
-void Graph::set_colors(const GraphColors& colors)
+void Sculptor::Graph::set_colors(const GraphColors& colors)
 {
     colors_ = colors;
 }
 
-void Graph::set_node_color(uint32_t node_idx, uint32_t packed_rgba)
+void Sculptor::Graph::set_node_color(uint32_t node_idx, uint32_t packed_rgba)
 {
     if (node_idx >= max_nodes || ! nodes.is_occupied(node_idx)) {
         return;
@@ -726,7 +748,7 @@ void Graph::set_node_color(uint32_t node_idx, uint32_t packed_rgba)
     push_change(ChangeKind::color_changed, node_idx, pool_no_slot, pool_no_slot);
 }
 
-void Graph::set_state_widget(uint32_t node_idx, StateWidgetCallback callback, void* user_data)
+void Sculptor::Graph::set_state_widget(uint32_t node_idx, StateWidgetCallback callback, void* user_data)
 {
     if (node_idx >= max_nodes || ! nodes.is_occupied(node_idx)) {
         return;
@@ -735,7 +757,7 @@ void Graph::set_state_widget(uint32_t node_idx, StateWidgetCallback callback, vo
     nodes.entries[node_idx].state_widget_data = user_data;
 }
 
-void Graph::set_state_callbacks(SerializeState serialize, DeserializeState deserialize, void* user_data)
+void Sculptor::Graph::set_state_callbacks(SerializeState serialize, DeserializeState deserialize, void* user_data)
 {
     serialize_state   = serialize;
     deserialize_state = deserialize;
@@ -746,7 +768,7 @@ void Graph::set_state_callbacks(SerializeState serialize, DeserializeState deser
 // Returns total bytes, or 0 when buffer_size is insufficient.  The serialize
 // hook, if installed, is called last and its output is prefixed with a u32
 // length so load() can report bytes_consumed covering the caller tail.
-uint32_t Graph::save(uint8_t* buffer, uint32_t buffer_size) const
+uint32_t Sculptor::Graph::save(uint8_t* buffer, uint32_t buffer_size) const
 {
     if (! buffer || buffer_size < 2) {
         return 0;
@@ -889,7 +911,7 @@ uint32_t Graph::save(uint8_t* buffer, uint32_t buffer_size) const
 // Node identity is the name: pool indices churn across deletions, so
 // connection endpoints are remapped through the name match.  Nothing is
 // mutated until the whole snapshot has parsed and validated.
-bool Graph::load(const uint8_t* buffer, uint32_t buffer_size, uint32_t* bytes_consumed)
+bool Sculptor::Graph::load(const uint8_t* buffer, uint32_t buffer_size, uint32_t* bytes_consumed)
 {
     if (bytes_consumed) {
         *bytes_consumed = 0;
@@ -1150,48 +1172,57 @@ bool Graph::load(const uint8_t* buffer, uint32_t buffer_size, uint32_t* bytes_co
     return true;
 }
 
-bool Graph::interaction_active() const
+bool Sculptor::Graph::interaction_active() const
 {
     return interaction != Interaction::idle;
 }
 
-const Node& Graph::node(uint32_t node_idx) const
+const Sculptor::Node& Sculptor::Graph::node(uint32_t node_idx) const
 {
     assert(node_idx < max_nodes);
     assert(nodes.is_occupied(node_idx));
     return nodes.entries[node_idx];
 }
 
-const Connection& Graph::get_connection(uint32_t connection_idx) const
+const Sculptor::Connection& Sculptor::Graph::get_connection(uint32_t connection_idx) const
 {
     assert(connection_idx < max_connections);
     assert(connections.is_occupied(connection_idx));
     return connections.entries[connection_idx];
 }
 
-const GraphColors& Graph::colors() const
+const Sculptor::GraphColors& Sculptor::Graph::colors() const
 {
     return colors_;
 }
 
-uint32_t Graph::connection_count() const
+uint32_t Sculptor::Graph::connection_count() const
 {
     return connections.num_allocated;
 }
 
-bool Graph::has_error() const
+bool Sculptor::Graph::connection_occupied(uint32_t connection_idx) const
+{
+    assert(connection_idx < max_connections);
+    return connections.is_occupied(connection_idx);
+}
+
+bool Sculptor::Graph::has_error() const
 {
     return error_active;
 }
 
-const char* Graph::error_text() const
+uint32_t Sculptor::Graph::connection_popup() const
+{
+    return popup_connection;
+}
+
+const char* Sculptor::Graph::error_text() const
 {
     return error_message;
 }
 
-void Graph::dismiss_error()
+void Sculptor::Graph::dismiss_error()
 {
     error_active = false;
 }
-
-} // namespace Sculptor

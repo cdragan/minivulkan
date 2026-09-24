@@ -16,6 +16,8 @@ synth_unit_src_files += synth/synth_effect_expansion.cpp
 synth_unit_src_files += sculptor/sculptor_instr_bank.cpp
 synth_unit_src_files += sculptor/sculptor_instr_library.cpp
 synth_unit_src_files += sculptor/sculptor_bank_json.cpp
+synth_unit_src_files += sculptor/sculptor_graph.cpp
+synth_unit_src_files += sculptor/sculptor_osc_graph.cpp
 
 midi_decode_unit_src_files += synth/midi_decode_unit.cpp
 

@@ -43,7 +43,7 @@ static uint32_t drain_changes(Graph& graph, GraphChange* out, uint32_t out_size)
 
 static void test_create_node_distinct_indices()
 {
-    Graph g;
+    static Graph g; // over 5 MB; kept off the stack
 
     uint32_t idx[max_nodes]  = {};
     bool     seen[max_nodes] = {};
@@ -63,7 +63,7 @@ static void test_create_node_distinct_indices()
 
 static void test_create_node_exhaustion_is_safe()
 {
-    Graph g;
+    static Graph g; // over 5 MB; kept off the stack
 
     for (uint32_t i = 0; i < max_nodes; ++i) {
         TEST(g.create_node("node", vmath::vec2(0.0f, 0.0f)) != Sculptor::pool_no_slot);
@@ -76,7 +76,7 @@ static void test_create_node_exhaustion_is_safe()
 
 static void test_create_node_snaps_position_to_grid()
 {
-    Graph g;
+    static Graph g; // over 5 MB; kept off the stack
 
     const uint32_t idx = g.create_node("node", vmath::vec2(10.0f, 23.0f));
     TEST(idx != Sculptor::pool_no_slot);
@@ -87,7 +87,7 @@ static void test_create_node_snaps_position_to_grid()
 
 static void test_add_slot_grows_within_limit()
 {
-    Graph g;
+    static Graph g; // over 5 MB; kept off the stack
 
     const uint32_t node_idx = g.create_node("node", vmath::vec2(0.0f, 0.0f));
     TEST(node_idx != Sculptor::pool_no_slot);
@@ -110,7 +110,7 @@ static void test_add_slot_grows_within_limit()
 
 static void test_add_slot_overflow_returns_no_slot()
 {
-    Graph g;
+    static Graph g; // over 5 MB; kept off the stack
 
     const uint32_t node_idx = g.create_node("node", vmath::vec2(0.0f, 0.0f));
     TEST(node_idx != Sculptor::pool_no_slot);
@@ -129,7 +129,7 @@ static void test_add_slot_overflow_returns_no_slot()
 
 static void test_delete_node_frees_index_and_drops_connections()
 {
-    Graph g;
+    static Graph g; // over 5 MB; kept off the stack
 
     const uint32_t node_a = g.create_node("a", vmath::vec2(0.0f, 0.0f));
     const uint32_t node_b = g.create_node("b", vmath::vec2(0.0f, 0.0f));
@@ -187,7 +187,7 @@ static void test_delete_node_frees_index_and_drops_connections()
 
 static void test_add_delete_connection_basics()
 {
-    Graph g;
+    static Graph g; // over 5 MB; kept off the stack
 
     const uint32_t node_a = g.create_node("a", vmath::vec2(0.0f, 0.0f));
     const uint32_t node_b = g.create_node("b", vmath::vec2(0.0f, 0.0f));
@@ -234,7 +234,7 @@ static void test_add_delete_connection_basics()
 
 static void test_add_connection_rejects_bad_endpoints()
 {
-    Graph g;
+    static Graph g; // over 5 MB; kept off the stack
 
     const uint32_t node_a = g.create_node("a", vmath::vec2(0.0f, 0.0f));
     TEST(node_a != Sculptor::pool_no_slot);
@@ -286,7 +286,7 @@ static void test_add_connection_rejects_bad_endpoints()
 
 static void test_ghost_is_flag_on_normal_node()
 {
-    Graph g;
+    static Graph g; // over 5 MB; kept off the stack
 
     // The caller creates the node normally, then marks it as a ghost.
     const uint32_t node_idx = g.create_node("ghost", vmath::vec2(0.0f, 0.0f));
@@ -322,7 +322,7 @@ static void test_ghost_is_flag_on_normal_node()
 
 static void test_colors_api()
 {
-    Graph g;
+    static Graph g; // over 5 MB; kept off the stack
 
     // set_colors copies the whole set (observable via colors()).
     GraphColors colors     = {};
@@ -344,7 +344,7 @@ static void test_colors_api()
 
 static void test_change_events_queue_and_drain()
 {
-    Graph g;
+    static Graph g; // over 5 MB; kept off the stack
 
     TEST(drain_changes(g, nullptr, 0) == 0);
     TEST(! g.changes_overflowed());
@@ -387,7 +387,7 @@ static void test_change_events_queue_and_drain()
 
 static void test_change_events_overflow_is_reported()
 {
-    Graph g;
+    static Graph g; // over 5 MB; kept off the stack
 
     // Overflow the ring buffer: more than max_pending_changes events without
     // draining.  Each cycle pushes two events (node_added, node_deleted).
@@ -593,7 +593,7 @@ static void test_move_connection_end_structural_failure_deletes()
 
 static void test_selection_basics()
 {
-    Graph          g;
+    static Graph   g; // over 5 MB; kept off the stack
     const uint32_t a = g.create_node("a", vmath::vec2(0.0f, 0.0f));
     const uint32_t b = g.create_node("b", vmath::vec2(32.0f, 0.0f));
     TEST(a != Sculptor::pool_no_slot);
@@ -628,7 +628,7 @@ static void test_selection_basics()
 
 static void test_delete_node_clears_selection()
 {
-    Graph          g;
+    static Graph   g; // over 5 MB; kept off the stack
     const uint32_t a = g.create_node("a", vmath::vec2(0.0f, 0.0f));
     TEST(a != Sculptor::pool_no_slot);
 
@@ -647,7 +647,7 @@ static void test_delete_node_clears_selection()
 
 static void test_selection_api_ignores_unoccupied_slots()
 {
-    Graph g;
+    static Graph g; // over 5 MB; kept off the stack
 
     // Out-of-range and unoccupied slots are no-ops, never seed state.
     g.set_selected(Sculptor::max_nodes, true);
@@ -668,7 +668,7 @@ static void test_selection_api_ignores_unoccupied_slots()
 
 static void test_align_left_and_top()
 {
-    Graph          g;
+    static Graph   g; // over 5 MB; kept off the stack
     const uint32_t a = g.create_node("a", vmath::vec2(96.0f, 48.0f));
     const uint32_t b = g.create_node("b", vmath::vec2(32.0f, 80.0f));
     const uint32_t c = g.create_node("c", vmath::vec2(64.0f, 16.0f));
@@ -706,7 +706,7 @@ static void test_align_left_and_top()
 
 static void test_align_right_and_bottom()
 {
-    Graph          g;
+    static Graph   g; // over 5 MB; kept off the stack
     const uint32_t a = g.create_node("a", vmath::vec2(96.0f, 48.0f));
     const uint32_t b = g.create_node("b", vmath::vec2(32.0f, 80.0f));
     const uint32_t c = g.create_node("c", vmath::vec2(64.0f, 16.0f));
@@ -738,7 +738,7 @@ static void test_align_right_and_bottom()
 
 static void test_align_equal_width_and_height()
 {
-    Graph          g;
+    static Graph   g; // over 5 MB; kept off the stack
     const uint32_t a = g.create_node("a", vmath::vec2(0.0f, 0.0f));
     const uint32_t b = g.create_node("b", vmath::vec2(32.0f, 0.0f));
     TEST(a != Sculptor::pool_no_slot);
@@ -763,7 +763,7 @@ static void test_align_equal_height_applies_as_equal_width()
 {
     // Equal height sets every selected node's height override to the
     // tallest selected height.
-    Graph          g;
+    static Graph   g; // over 5 MB; kept off the stack
     const uint32_t a = g.create_node("a", vmath::vec2(0.0f, 0.0f));
     const uint32_t b = g.create_node("b", vmath::vec2(32.0f, 0.0f));
     TEST(a != Sculptor::pool_no_slot);
@@ -785,7 +785,7 @@ static void test_align_equal_height_applies_as_equal_width()
 
 static void test_align_skips_ghosts_and_empty_selection()
 {
-    Graph          g;
+    static Graph   g; // over 5 MB; kept off the stack
     const uint32_t a     = g.create_node("a", vmath::vec2(32.0f, 0.0f));
     const uint32_t b     = g.create_node("b", vmath::vec2(64.0f, 32.0f));
     const uint32_t ghost = g.create_node("ghost", vmath::vec2(96.0f, 64.0f));
@@ -917,7 +917,7 @@ static void build_int_property_graph(Graph& g, int32_t value, uint32_t* node_idx
 // Test 1: full round-trip through save/load preserves all graph state.
 static void test_save_load_round_trip()
 {
-    Graph g;
+    static Graph g; // over 5 MB; kept off the stack
 
     GraphColors custom              = {};
     custom.node_background          = 0x11223344;
@@ -1010,9 +1010,9 @@ static void test_save_load_round_trip()
         return; // save is not implemented yet; the checks below need a snapshot
     }
 
-    Graph      g2;
-    uint32_t   consumed = 0;
-    const bool loaded   = g2.load(buffer, saved, &consumed);
+    static Graph g2; // over 5 MB; kept off the stack
+    uint32_t     consumed = 0;
+    const bool   loaded   = g2.load(buffer, saved, &consumed);
     TEST(loaded);
     TEST(consumed == saved);
     if (! loaded) {
@@ -1092,9 +1092,9 @@ static void test_save_load_caller_state_hook()
 // Test 3: diff application emits exactly the changed value, nothing else.
 static void test_load_diff_value_changed_only()
 {
-    Graph    g;
-    uint32_t n = Sculptor::pool_no_slot;
-    uint32_t s = Sculptor::pool_no_slot;
+    static Graph g; // over 5 MB; kept off the stack
+    uint32_t     n = Sculptor::pool_no_slot;
+    uint32_t     s = Sculptor::pool_no_slot;
     build_int_property_graph(g, 5, &n, &s);
     GraphChange changes[8];
     g.take_changes(changes, sizeof(changes) / sizeof(changes[0])); // drain build events
@@ -1105,9 +1105,9 @@ static void test_load_diff_value_changed_only()
     p.value.integer = 5;
 
     // Snapshot of the same graph with only the property value changed.
-    Graph    g2;
-    uint32_t n2 = Sculptor::pool_no_slot;
-    uint32_t s2 = Sculptor::pool_no_slot;
+    static Graph g2; // over 5 MB; kept off the stack
+    uint32_t     n2 = Sculptor::pool_no_slot;
+    uint32_t     s2 = Sculptor::pool_no_slot;
     build_int_property_graph(g2, 6, &n2, &s2);
     uint8_t        buffer[1024] = {};
     const uint32_t saved        = g2.save(buffer, sizeof(buffer));
@@ -1126,9 +1126,9 @@ static void test_load_diff_value_changed_only()
 
     // Position-only difference: identical names, slots and values, different
     // node positions.  Positions are silent, so no events may be emitted.
-    Graph    g7;
-    uint32_t n7 = Sculptor::pool_no_slot;
-    uint32_t s7 = Sculptor::pool_no_slot;
+    static Graph g7; // over 5 MB; kept off the stack
+    uint32_t     n7 = Sculptor::pool_no_slot;
+    uint32_t     s7 = Sculptor::pool_no_slot;
     build_int_property_graph(g7, 5, &n7, &s7);
     g7.delete_node(n7);
     g7.take_changes(changes, sizeof(changes) / sizeof(changes[0]));
@@ -1138,9 +1138,9 @@ static void test_load_diff_value_changed_only()
     TEST(s7 != Sculptor::pool_no_slot);
     g7.take_changes(changes, sizeof(changes) / sizeof(changes[0])); // drain rebuild events
 
-    Graph    g8;
-    uint32_t n8 = Sculptor::pool_no_slot;
-    uint32_t s8 = Sculptor::pool_no_slot;
+    static Graph g8; // over 5 MB; kept off the stack
+    uint32_t     n8 = Sculptor::pool_no_slot;
+    uint32_t     s8 = Sculptor::pool_no_slot;
     build_int_property_graph(g8, 5, &n8, &s8); // identical, at the origin
     uint8_t        pos_buffer[1024] = {};
     const uint32_t pos_saved        = g8.save(pos_buffer, sizeof(pos_buffer));
@@ -1164,7 +1164,7 @@ static void test_load_diff_value_changed_only()
 // is by name).
 static void test_load_diff_value_name_color()
 {
-    Graph          g;
+    static Graph   g; // over 5 MB; kept off the stack
     const uint32_t x = g.create_node("x", vmath::vec2(0.0f, 0.0f));
     TEST(x != Sculptor::pool_no_slot);
     Slot out             = {};
@@ -1182,7 +1182,7 @@ static void test_load_diff_value_name_color()
     GraphChange changes[8];
     g.take_changes(changes, sizeof(changes) / sizeof(changes[0])); // drain build events
 
-    Graph          g2;
+    static Graph   g2; // over 5 MB; kept off the stack
     const uint32_t x2 = g2.create_node("x", vmath::vec2(0.0f, 0.0f));
     TEST(x2 != Sculptor::pool_no_slot);
     Slot out6          = out;
@@ -1219,7 +1219,7 @@ static void test_load_diff_value_name_color()
 // connection retargets onto a recreated slot (connection_changed).
 static void test_load_diff_structural_recreate()
 {
-    Graph          g;
+    static Graph   g; // over 5 MB; kept off the stack
     const uint32_t x = g.create_node("x", vmath::vec2(0.0f, 0.0f));
     TEST(x != Sculptor::pool_no_slot);
     const uint32_t y = g.create_node("y", vmath::vec2(160.0f, 0.0f));
@@ -1237,7 +1237,7 @@ static void test_load_diff_structural_recreate()
     GraphChange changes[8];
     g.take_changes(changes, sizeof(changes) / sizeof(changes[0])); // drain build events
 
-    Graph          g2;
+    static Graph   g2; // over 5 MB; kept off the stack
     const uint32_t x2 = g2.create_node("x", vmath::vec2(0.0f, 0.0f));
     TEST(x2 != Sculptor::pool_no_slot);
     const uint32_t y2 = g2.create_node("y", vmath::vec2(160.0f, 0.0f));
@@ -1287,7 +1287,7 @@ static void test_load_diff_structural_recreate()
 
 static void test_save_load_round_trip_fan_in()
 {
-    Graph          g;
+    static Graph   g; // over 5 MB; kept off the stack
     const uint32_t x = g.create_node("x", vmath::vec2(0.0f, 0.0f));
     TEST(x != Sculptor::pool_no_slot);
     const uint32_t y = g.create_node("y", vmath::vec2(160.0f, 0.0f));
@@ -1308,8 +1308,8 @@ static void test_save_load_round_trip_fan_in()
     const uint32_t saved        = g.save(buffer, sizeof(buffer));
     TEST(saved > 0);
 
-    Graph    g2;
-    uint32_t consumed = 0;
+    static Graph g2; // over 5 MB; kept off the stack
+    uint32_t     consumed = 0;
     TEST(g2.load(buffer, saved, &consumed));
     TEST(consumed == saved);
     TEST(g2.connection_count() == 2);
@@ -1327,7 +1327,7 @@ static void test_save_load_round_trip_fan_in()
 // one input must round-trip through save/load unchanged.
 static void test_load_diff_sparse_recreate()
 {
-    Graph          g;
+    static Graph   g; // over 5 MB; kept off the stack
     const uint32_t x = g.create_node("x", vmath::vec2(0.0f, 0.0f));
     TEST(x != Sculptor::pool_no_slot);
     const uint32_t y = g.create_node("y", vmath::vec2(160.0f, 0.0f));
@@ -1353,7 +1353,7 @@ static void test_load_diff_sparse_recreate()
     GraphChange changes[16];
     g.take_changes(changes, sizeof(changes) / sizeof(changes[0])); // drain
 
-    Graph          g2;
+    static Graph   g2; // over 5 MB; kept off the stack
     const uint32_t x2 = g2.create_node("x", vmath::vec2(0.0f, 0.0f));
     TEST(x2 != Sculptor::pool_no_slot);
     const uint32_t y2 = g2.create_node("y", vmath::vec2(160.0f, 0.0f));
@@ -1428,7 +1428,7 @@ static void test_load_diff_event_order()
 {
     // Live state: a -> b connected.  Snapshot: c -> d connected.  Loading must
     // delete first (connection, then nodes) and add afterwards.
-    static Graph   g; // over a megabyte with the raised capacities; kept off the stack
+    static Graph   g; // over 5 MB; kept off the stack
     const uint32_t a = g.create_node("a", vmath::vec2(0.0f, 0.0f));
     TEST(a != Sculptor::pool_no_slot);
     const uint32_t b = g.create_node("b", vmath::vec2(160.0f, 0.0f));
@@ -1445,7 +1445,7 @@ static void test_load_diff_event_order()
     GraphChange changes[32];
     g.take_changes(changes, sizeof(changes) / sizeof(changes[0])); // drain build events
 
-    static Graph   g2; // over a megabyte with the raised capacities; kept off the stack
+    static Graph   g2; // over 5 MB; kept off the stack
     const uint32_t c = g2.create_node("c", vmath::vec2(0.0f, 0.0f));
     TEST(c != Sculptor::pool_no_slot);
     const uint32_t d = g2.create_node("d", vmath::vec2(160.0f, 0.0f));
@@ -1513,7 +1513,7 @@ static void test_load_diff_event_order()
     // connection_changed.  Live: x(out+in) -> y, x -> z.  Snapshot: x keeps
     // its name (survives, out value 5 -> 6), y survives, z is replaced by w;
     // x -> z must be deleted and re-added, x -> x(in) retargets in place.
-    static Graph   g3; // over a megabyte with the raised capacities; kept off the stack
+    static Graph   g3; // over 5 MB; kept off the stack
     const uint32_t x = g3.create_node("x", vmath::vec2(0.0f, 0.0f));
     TEST(x != Sculptor::pool_no_slot);
     const uint32_t y = g3.create_node("y", vmath::vec2(160.0f, 0.0f));
@@ -1535,7 +1535,7 @@ static void test_load_diff_event_order()
     TEST(g3.add_connection(EndPoint{ x, x_out }, EndPoint{ z, z_in }) != Sculptor::pool_no_slot);
     g3.take_changes(changes, sizeof(changes) / sizeof(changes[0])); // drain build events
 
-    static Graph   g4; // over a megabyte with the raised capacities; kept off the stack
+    static Graph   g4; // over 5 MB; kept off the stack
     const uint32_t x4 = g4.create_node("x", vmath::vec2(0.0f, 0.0f));
     TEST(x4 != Sculptor::pool_no_slot);
     const uint32_t y4 = g4.create_node("y", vmath::vec2(160.0f, 0.0f));
@@ -1590,9 +1590,9 @@ static void test_load_diff_event_order()
 // Test 5: snapshot stack undo/redo restores values and reports value_changed.
 static void test_snapshot_stack_undo_redo()
 {
-    Graph    g;
-    uint32_t n = Sculptor::pool_no_slot;
-    uint32_t s = Sculptor::pool_no_slot;
+    static Graph g; // over 5 MB; kept off the stack
+    uint32_t     n = Sculptor::pool_no_slot;
+    uint32_t     s = Sculptor::pool_no_slot;
     build_int_property_graph(g, 5, &n, &s);
     GraphChange changes[8];
     g.take_changes(changes, sizeof(changes) / sizeof(changes[0])); // drain build events
@@ -1644,7 +1644,7 @@ static void test_snapshot_stack_undo_redo()
 // Test 6: save/load failure paths are clean and leave live state untouched.
 static void test_save_load_failure_paths()
 {
-    Graph          g;
+    static Graph   g; // over 5 MB; kept off the stack
     const uint32_t a = g.create_node("alpha", vmath::vec2(0.0f, 0.0f));
     TEST(a != Sculptor::pool_no_slot);
     const uint32_t b = g.create_node("beta", vmath::vec2(160.0f, 0.0f));
@@ -1714,7 +1714,7 @@ static bool veto_single_node(void* user_data, uint32_t node_idx)
 
 static void test_delete_node_veto()
 {
-    static Graph g; // over a megabyte with the raised capacities; kept off the stack
+    static Graph g; // over 5 MB; kept off the stack
 
     const uint32_t a = g.create_node("a", vmath::vec2(0.0f, 0.0f));
     const uint32_t b = g.create_node("b", vmath::vec2(0.0f, 0.0f));
@@ -1780,7 +1780,7 @@ static bool veto_all_counter(void* user_data, uint32_t node_idx)
 }
 static void test_load_bypasses_delete_veto()
 {
-    static Graph g; // over a megabyte with the raised capacities; kept off the stack
+    static Graph g; // over 5 MB; kept off the stack
     uint8_t      buffer[2048] = {};
     TEST(g.create_node("a", vmath::vec2(0.0f, 0.0f)) != Sculptor::pool_no_slot);
     TEST(g.create_node("b", vmath::vec2(0.0f, 0.0f)) != Sculptor::pool_no_slot);
@@ -1810,7 +1810,7 @@ static void test_load_bypasses_delete_veto()
 
 static void test_capacity_smoke()
 {
-    static Graph g; // over a megabyte with the raised capacities; kept off the stack
+    static Graph g; // over 5 MB; kept off the stack
 
     uint32_t nodes[max_nodes] = {};
     for (uint32_t i = 0; i < max_nodes; ++i) {
@@ -1864,7 +1864,7 @@ static void canvas_menu_adds_node(void* user_data)
 
 static void test_canvas_menu_callback_api()
 {
-    static Graph g; // over a megabyte with the raised capacities; kept off the stack
+    static Graph g; // over 5 MB; kept off the stack
 
     g.set_canvas_menu_callback(canvas_menu_adds_node, &g);
     Sculptor::CanvasMenuCallback callback = canvas_menu_adds_node;
@@ -1879,6 +1879,51 @@ static void test_canvas_menu_callback_api()
     TEST(strcmp(g.node(0).name, "canvas") == 0);
 }
 
+// clear() must leave no stale interaction state behind: the error overlay
+// is dismissed and the canvas popup target is reset so the renderer's
+// Delete item cannot act on a reused connection index.
+static void test_clear_resets_popup_and_error()
+{
+    static Graph g; // over 5 MB; kept off the stack
+
+    const uint32_t node_a = g.create_node("a", vmath::vec2(0.0f, 0.0f));
+    const uint32_t node_b = g.create_node("b", vmath::vec2(0.0f, 0.0f));
+    TEST(node_a != Sculptor::pool_no_slot);
+    TEST(node_b != Sculptor::pool_no_slot);
+    Slot slot_a = {};
+    slot_a.kind = SlotKind::output;
+    TEST(g.add_slot(node_a, slot_a) != Sculptor::pool_no_slot);
+    Slot slot_b = {};
+    slot_b.kind = SlotKind::input;
+    TEST(g.add_slot(node_b, slot_b) != Sculptor::pool_no_slot);
+    const EndPoint out = { node_a, 0 };
+    const EndPoint in  = { node_b, 0 };
+    TEST(g.add_connection(out, in) != Sculptor::pool_no_slot);
+
+    // A refused connect attempt leaves the error overlay active.
+    TEST(! g.attempt_connection(out, out));
+    TEST(g.has_error());
+
+    g.clear();
+    TEST(! g.has_error());
+    TEST(g.connection_popup() == Sculptor::pool_no_slot);
+
+    // State is clean after a rebuild into the same graph.
+    const uint32_t node_c = g.create_node("c", vmath::vec2(0.0f, 0.0f));
+    TEST(node_c != Sculptor::pool_no_slot);
+    Slot slot_c = {};
+    slot_c.kind = SlotKind::output;
+    TEST(g.add_slot(node_c, slot_c) != Sculptor::pool_no_slot);
+    const uint32_t node_d = g.create_node("d", vmath::vec2(0.0f, 0.0f));
+    TEST(node_d != Sculptor::pool_no_slot);
+    Slot slot_d = {};
+    slot_d.kind = SlotKind::input;
+    TEST(g.add_slot(node_d, slot_d) != Sculptor::pool_no_slot);
+    TEST(g.add_connection(EndPoint{ node_c, 0 }, EndPoint{ node_d, 0 }) != Sculptor::pool_no_slot);
+    TEST(! g.has_error());
+    TEST(g.connection_popup() == Sculptor::pool_no_slot);
+}
+
 int main()
 {
     test_create_node_distinct_indices();
@@ -1888,6 +1933,7 @@ int main()
     test_add_slot_overflow_returns_no_slot();
     test_delete_node_frees_index_and_drops_connections();
     test_add_delete_connection_basics();
+    test_clear_resets_popup_and_error();
     test_add_connection_rejects_bad_endpoints();
     test_ghost_is_flag_on_normal_node();
     test_colors_api();
