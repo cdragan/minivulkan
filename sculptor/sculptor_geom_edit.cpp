@@ -2,16 +2,16 @@
 // SPDX-FileCopyrightText: Copyright (c) 2021-2026 Chris Dragan
 
 #include "sculptor_geom_edit.h"
-#include "sculptor_geometry.h"
-#include "sculptor_materials.h"
 #include "../core/barrier.h"
 #include "../core/d_printf.h"
 #include "../core/gui_imgui.h"
 #include "../core/load_png.h"
 #include "../core/mstdc.h"
+#include "sculptor_geometry.h"
+#include "sculptor_materials.h"
 
-#include "sculptor_shaders.h"
 #include "../core/shaders.h"
+#include "sculptor_shaders.h"
 
 #include <algorithm>
 #include <iterator>
@@ -118,7 +118,8 @@ Future additions
 - Loop cut - create edge running around the object across faces
 - Crease/smooth edge - affect control points to affect edge sharpness/smoothness
 - Tangent align - for making smooth transition between adjacent faces
-- Grab for mid-face control points: add support for snap to face normals, add support for moving them together or away from each other
+- Grab for mid-face control points: add support for snap to face normals, add support for moving them together or away
+from each other
 - Better grid density in orthographic view
 - Snap to grid (also in perspective mode), add control for snap density, maybe grid density should reflect it?
 - Flatten - align selected vertices on a common plane
@@ -127,72 +128,72 @@ Future additions
 */
 
 namespace {
-    enum FrameFlags : uint32_t {
-        frame_flag_select_faces     = 1u,
-        frame_flag_select_vertices  = 2u,
-        frame_flag_wireframe_mode   = 4u,
-        frame_flag_tessellation_off = 8u,
-        frame_flag_show_materials   = 16u,
-    };
+enum FrameFlags : uint32_t {
+    frame_flag_select_faces     = 1u,
+    frame_flag_select_vertices  = 2u,
+    frame_flag_wireframe_mode   = 4u,
+    frame_flag_tessellation_off = 8u,
+    frame_flag_show_materials   = 16u,
+};
 
-    // Frame-global data passed to shaders, must match frame_data.glsl
-    struct FrameData {
-        vmath::vec2 selection_rect_min;
-        vmath::vec2 selection_rect_max;
-        vmath::vec2 mouse_pos;
-        uint32_t    flags;
-        uint32_t    pad;
-        vmath::vec2 pixel_dim;
-        vmath::vec2 pad2;
+// Frame-global data passed to shaders, must match frame_data.glsl
+struct FrameData {
+    vmath::vec2 selection_rect_min;
+    vmath::vec2 selection_rect_max;
+    vmath::vec2 mouse_pos;
+    uint32_t    flags;
+    uint32_t    pad;
+    vmath::vec2 pixel_dim;
+    vmath::vec2 pad2;
 
-        // Light positions in view space
-        vmath::vec4 light_pos[4];
+    // Light positions in view space
+    vmath::vec4 light_pos[4];
 
-        // GUI colors
-        vmath::vec4 color_face_base;
-        vmath::vec4 color_face_hovered;
-        vmath::vec4 color_face_hovered_selected;
-        vmath::vec4 color_face_selected;
-        vmath::vec4 color_edge;
-        vmath::vec4 color_ctrl_pt;
-        vmath::vec4 color_vertex_hovered;
-        vmath::vec4 color_vertex_hovered_selected;
-        vmath::vec4 color_vertex_selected;
-    };
+    // GUI colors
+    vmath::vec4 color_face_base;
+    vmath::vec4 color_face_hovered;
+    vmath::vec4 color_face_hovered_selected;
+    vmath::vec4 color_face_selected;
+    vmath::vec4 color_edge;
+    vmath::vec4 color_ctrl_pt;
+    vmath::vec4 color_vertex_hovered;
+    vmath::vec4 color_vertex_hovered_selected;
+    vmath::vec4 color_vertex_selected;
+};
 
-    struct Transforms {
-        vmath::mat4 model_view;
-        vmath::mat3 view_inverse; // mat3x4: last column of inverse is always [0, 0, 0, 1], so omitted
-        vmath::vec4 proj;
-        vmath::vec4 proj_w;
-    };
+struct Transforms {
+    vmath::mat4 model_view;
+    vmath::mat3 view_inverse; // mat3x4: last column of inverse is always [0, 0, 0, 1], so omitted
+    vmath::vec4 proj;
+    vmath::vec4 proj_w;
+};
 
-    constexpr float    fov_radians      = vmath::radians(30.0f);
-    constexpr float    max_cam_dist     = 2.0f;
-    constexpr float    max_pos          = 1.1f;
-    constexpr uint32_t max_grid_lines   = 4096;
-    constexpr uint32_t max_objects      = 0x10000u;
-    constexpr VkFormat selection_format = (max_objects <= 0x10000u) ? VK_FORMAT_R16_UINT : VK_FORMAT_R32_UINT;
+constexpr float    fov_radians      = vmath::radians(30.0f);
+constexpr float    max_cam_dist     = 2.0f;
+constexpr float    max_pos          = 1.1f;
+constexpr uint32_t max_grid_lines   = 4096;
+constexpr uint32_t max_objects      = 0x10000u;
+constexpr VkFormat selection_format = (max_objects <= 0x10000u) ? VK_FORMAT_R16_UINT : VK_FORMAT_R32_UINT;
 
-    ImageWithHostCopy  toolbar_image;
-    VkSampler          point_sampler;
+ImageWithHostCopy toolbar_image;
+VkSampler         point_sampler;
 
-    struct ToolbarInfo {
-        const char* tag;
-        const char* tooltip;
-        const char* combo;
-        bool        first_in_group;
-    };
+struct ToolbarInfo {
+    const char* tag;
+    const char* tooltip;
+    const char* combo;
+    bool        first_in_group;
+};
 
-    const ToolbarInfo toolbar_info[] = {
-#       define X(tag, first, combo, desc) { "geom_tb_" #tag, desc, combo, first != 0 },
-        TOOLBAR_BUTTONS
-#       undef X
-    };
+const ToolbarInfo toolbar_info[] = {
+#define X(tag, first, combo, desc) { "geom_tb_" #tag, desc, combo, first != 0 },
+    TOOLBAR_BUTTONS
+#undef X
+};
 
-    bool dialog_save;
-    bool dialog_load;
-}
+bool dialog_save;
+bool dialog_load;
+} // namespace
 
 static bool is_alt_down()
 {
@@ -210,9 +211,9 @@ GeometryEditor::Camera::Axes GeometryEditor::Camera::get_axes() const
 
 void GeometryEditor::Camera::move(const vmath::vec3& delta)
 {
-    const auto        [right, up] = get_axes();
-    const vmath::vec3 moved_pos   = pos + right * delta.x + up * delta.y + dir * delta.z;
-    const vmath::vec3 fixed_pos   = vmath::clamp(moved_pos, -vmath::vec3{max_pos}, vmath::vec3{max_pos});
+    const auto [right, up]      = get_axes();
+    const vmath::vec3 moved_pos = pos + right * delta.x + up * delta.y + dir * delta.z;
+    const vmath::vec3 fixed_pos = vmath::clamp(moved_pos, -vmath::vec3{ max_pos }, vmath::vec3{ max_pos });
     if (fixed_pos == moved_pos)
         pos = fixed_pos;
 }
@@ -220,26 +221,34 @@ void GeometryEditor::Camera::move(const vmath::vec3& delta)
 GeometryEditor::OrthoAxes GeometryEditor::get_ortho_axes(ViewType view_type)
 {
     switch (view_type) {
-        case ViewType::front:  return { { 0,  0,  1}, {0, 1, 0} };
-        case ViewType::back:   return { { 0,  0, -1}, {0, 1, 0} };
-        case ViewType::left:   return { { 1,  0,  0}, {0, 1, 0} };
-        case ViewType::right:  return { {-1,  0,  0}, {0, 1, 0} };
-        case ViewType::bottom: return { { 0,  1,  0}, {0, 0, 1} };
-        case ViewType::top:    return { { 0, -1,  0}, {0, 0, 1} };
-        default:               assert(false); return {};
+        case ViewType::front:
+            return { { 0, 0, 1 }, { 0, 1, 0 } };
+        case ViewType::back:
+            return { { 0, 0, -1 }, { 0, 1, 0 } };
+        case ViewType::left:
+            return { { 1, 0, 0 }, { 0, 1, 0 } };
+        case ViewType::right:
+            return { { -1, 0, 0 }, { 0, 1, 0 } };
+        case ViewType::bottom:
+            return { { 0, 1, 0 }, { 0, 0, 1 } };
+        case ViewType::top:
+            return { { 0, -1, 0 }, { 0, 0, 1 } };
+        default:
+            assert(false);
+            return {};
     }
 }
 
 GeometryEditor::Camera GeometryEditor::get_rotated_camera(const View& dst_view) const
 {
-    Camera camera{dst_view.camera[static_cast<int>(dst_view.view_type)]};
+    Camera camera{ dst_view.camera[static_cast<int>(dst_view.view_type)] };
 
     if (mouse_action_pos && dst_view.view_type == ViewType::free_moving) {
         const vmath::vec3 cam_vec = camera.pos - *mouse_action_pos;
 
         camera.pos = *mouse_action_pos + camera.rot.rotate(cam_vec);
         camera.dir = vmath::normalize(camera.rot.rotate(camera.dir));
-        camera.rot = vmath::quat{0.0f, 0.0f, 0.0f, 1.0f};
+        camera.rot = vmath::quat{ 0.0f, 0.0f, 0.0f, 1.0f };
     }
 
     return camera;
@@ -252,7 +261,7 @@ std::optional<vmath::vec3> GeometryEditor::read_mouse_world_pos() const
     const float* const hover = cur_res->hover_pos_host_buf.get_ptr<float>();
 
     if (hover[3] > 0.5f)
-        ret = vmath::vec3{hover[0], hover[1], hover[2]};
+        ret = vmath::vec3{ hover[0], hover[1], hover[2] };
     else
         ret = std::nullopt;
 
@@ -274,16 +283,14 @@ std::optional<vmath::vec3> GeometryEditor::calc_grid_world_pos(const View& src_v
 
     // Convert mouse position to normalized device coordinates (note: Y is inverted)
     const float aspect = static_cast<float>(src_view.width) / static_cast<float>(src_view.height);
-    const float ndc_x  = src_view.mouse_pos.x / static_cast<float>(src_view.width)  * 2.0f - 1.0f;
+    const float ndc_x  = src_view.mouse_pos.x / static_cast<float>(src_view.width) * 2.0f - 1.0f;
     const float ndc_y  = 1.0f - src_view.mouse_pos.y / static_cast<float>(src_view.height) * 2.0f;
 
     const float fov_tan = vmath::tan(fov_radians / 2);
-    vmath::vec3 cam_dir = camera.dir
-                        + cam_right * (ndc_x * aspect * fov_tan)
-                        + cam_up    * (ndc_y * fov_tan);
+    vmath::vec3 cam_dir = camera.dir + cam_right * (ndc_x * aspect * fov_tan) + cam_up * (ndc_y * fov_tan);
 
     const float default_distance = 0.2f;
-    vmath::vec3 final_dir = camera.dir * (default_distance / vmath::length(camera.dir));
+    vmath::vec3 final_dir        = camera.dir * (default_distance / vmath::length(camera.dir));
 
     if (std::abs(cam_dir.y) > 0.001f) {
 
@@ -314,38 +321,35 @@ const char* GeometryEditor::get_editor_name() const
 
 bool GeometryEditor::allocate_resources()
 {
-    if ( ! point_sampler) {
+    if (! point_sampler) {
         static VkSamplerCreateInfo sampler_info = {
             VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
             nullptr,
-            0,                                          // flags
-            VK_FILTER_NEAREST,                          // magFilter
-            VK_FILTER_NEAREST,                          // minFilter
-            VK_SAMPLER_MIPMAP_MODE_NEAREST,             // mipmapMode
-            VK_SAMPLER_ADDRESS_MODE_REPEAT,             // addressModeU
-            VK_SAMPLER_ADDRESS_MODE_REPEAT,             // addressModeV
-            VK_SAMPLER_ADDRESS_MODE_REPEAT,             // addressModeW
-            0,                                          // mipLodBias
-            VK_FALSE,                                   // anisotropyEnble
-            0,                                          // maxAnisotropy
-            VK_FALSE,                                   // compareEnable
-            VK_COMPARE_OP_NEVER,                        // compareOp
-            0,                                          // minLod
-            0,                                          // maxLod
-            VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK,    // borderColor
-            VK_FALSE                                    // unnormailzedCoordinates
+            0,                                       // flags
+            VK_FILTER_NEAREST,                       // magFilter
+            VK_FILTER_NEAREST,                       // minFilter
+            VK_SAMPLER_MIPMAP_MODE_NEAREST,          // mipmapMode
+            VK_SAMPLER_ADDRESS_MODE_REPEAT,          // addressModeU
+            VK_SAMPLER_ADDRESS_MODE_REPEAT,          // addressModeV
+            VK_SAMPLER_ADDRESS_MODE_REPEAT,          // addressModeW
+            0,                                       // mipLodBias
+            VK_FALSE,                                // anisotropyEnble
+            0,                                       // maxAnisotropy
+            VK_FALSE,                                // compareEnable
+            VK_COMPARE_OP_NEVER,                     // compareOp
+            0,                                       // minLod
+            0,                                       // maxLod
+            VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK, // borderColor
+            VK_FALSE                                 // unnormailzedCoordinates
         };
 
         VkResult res = CHK(vkCreateSampler(vk_dev, &sampler_info, nullptr, &point_sampler));
         if (res != VK_SUCCESS)
             return false;
-
     }
 
-    if ( ! toolbar_texture) {
-        if ( ! load_png(toolbar,
-                        sizeof(toolbar),
-                        &toolbar_image))
+    if (! toolbar_texture) {
+        if (! load_png(toolbar, sizeof(toolbar), &toolbar_image))
             return false;
 
         toolbar_texture = ImGui_ImplVulkan_AddTexture(point_sampler,
@@ -353,19 +357,16 @@ bool GeometryEditor::allocate_resources()
                                                       VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     }
 
-    if ( ! alloc_view_resources(&view, window_width, window_height, point_sampler))
+    if (! alloc_view_resources(&view, window_width, window_height, point_sampler))
         return false;
 
-    if ( ! allocate_resources_once())
+    if (! allocate_resources_once())
         return false;
 
     return true;
 }
 
-bool GeometryEditor::alloc_view_resources(View*     dst_view,
-                                          uint32_t  width,
-                                          uint32_t  height,
-                                          VkSampler viewport_sampler)
+bool GeometryEditor::alloc_view_resources(View* dst_view, uint32_t width, uint32_t height, VkSampler viewport_sampler)
 {
     if (dst_view->res[0].color.get_image())
         return true;
@@ -379,166 +380,155 @@ bool GeometryEditor::alloc_view_resources(View*     dst_view,
         if (res.color.get_view())
             continue;
 
-        static ImageInfo color_info {
-            0, // width
-            0, // height
-            VK_FORMAT_UNDEFINED,
-            1, // mip_levels
-            0, // array_layers
-            VK_IMAGE_ASPECT_COLOR_BIT,
-            VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
-            Usage::device_only
-        };
+        static ImageInfo color_info{ 0, // width
+                                     0, // height
+                                     VK_FORMAT_UNDEFINED,
+                                     1, // mip_levels
+                                     0, // array_layers
+                                     VK_IMAGE_ASPECT_COLOR_BIT,
+                                     VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+                                     Usage::device_only };
 
         color_info.width  = width;
         color_info.height = height;
         color_info.format = swapchain_create_info.imageFormat;
 
-        static ImageInfo obj_id_info {
-            0, // width
-            0, // height
-            selection_format,
-            1, // mip_levels
-            0, // array_layers
-            VK_IMAGE_ASPECT_COLOR_BIT,
-            VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
-            Usage::device_only
-        };
+        static ImageInfo obj_id_info{ 0, // width
+                                      0, // height
+                                      selection_format,
+                                      1, // mip_levels
+                                      0, // array_layers
+                                      VK_IMAGE_ASPECT_COLOR_BIT,
+                                      VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+                                      Usage::device_only };
 
         obj_id_info.width  = width;
         obj_id_info.height = height;
 
-        static ImageInfo normal_info {
-            0, // width
-            0, // height
-            VK_FORMAT_A2R10G10B10_UNORM_PACK32,
-            1, // mip_levels
-            0, // array_layers
-            VK_IMAGE_ASPECT_COLOR_BIT,
-            VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
-            Usage::device_only
-        };
+        static ImageInfo normal_info{ 0, // width
+                                      0, // height
+                                      VK_FORMAT_A2R10G10B10_UNORM_PACK32,
+                                      1, // mip_levels
+                                      0, // array_layers
+                                      VK_IMAGE_ASPECT_COLOR_BIT,
+                                      VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+                                      Usage::device_only };
 
         normal_info.width  = width;
         normal_info.height = height;
 
-        static ImageInfo tex_coord_info {
-            0, // width
-            0, // height
-            VK_FORMAT_R16G16_SFLOAT,
-            1, // mip_levels
-            0, // array_layers
-            VK_IMAGE_ASPECT_COLOR_BIT,
-            VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
-            Usage::device_only
-        };
+        static ImageInfo tex_coord_info{ 0, // width
+                                         0, // height
+                                         VK_FORMAT_R16G16_SFLOAT,
+                                         1, // mip_levels
+                                         0, // array_layers
+                                         VK_IMAGE_ASPECT_COLOR_BIT,
+                                         VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+                                         Usage::device_only };
 
         tex_coord_info.width  = width;
         tex_coord_info.height = height;
 
-        static ImageInfo depth_info {
-            0, // width
-            0, // height
-            VK_FORMAT_UNDEFINED,
-            1, // mip_levels
-            0, // array_layers
-            VK_IMAGE_ASPECT_DEPTH_BIT,
-            VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
-            Usage::device_only
-        };
+        static ImageInfo depth_info{ 0, // width
+                                     0, // height
+                                     VK_FORMAT_UNDEFINED,
+                                     1, // mip_levels
+                                     0, // array_layers
+                                     VK_IMAGE_ASPECT_DEPTH_BIT,
+                                     VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+                                     Usage::device_only };
 
         depth_info.width  = width;
         depth_info.height = height;
         depth_info.format = vk_depth_format;
 
-        if ( ! res.color.allocate(color_info, {"view color output", i_img}))
+        if (! res.color.allocate(color_info, { "view color output", i_img }))
             return false;
 
-        if ( ! res.obj_id.allocate(obj_id_info, {"g-buffer object id", i_img}))
+        if (! res.obj_id.allocate(obj_id_info, { "g-buffer object id", i_img }))
             return false;
 
-        if ( ! res.normal.allocate(normal_info, {"g-buffer normal", i_img}))
+        if (! res.normal.allocate(normal_info, { "g-buffer normal", i_img }))
             return false;
 
-        if ( ! res.tex_coord.allocate(tex_coord_info, {"g-buffer texture coord", i_img}))
+        if (! res.tex_coord.allocate(tex_coord_info, { "g-buffer texture coord", i_img }))
             return false;
 
-        if ( ! res.depth.allocate(depth_info, {"view depth", i_img}))
+        if (! res.depth.allocate(depth_info, { "view depth", i_img }))
             return false;
 
-        if ( ! res.frame_data.allocate(Usage::device_only,
-                                       sizeof(FrameData),
-                                       VK_FORMAT_UNDEFINED,
-                                       VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-                                       {"frame data", i_img}))
+        if (! res.frame_data.allocate(Usage::device_only,
+                                      sizeof(FrameData),
+                                      VK_FORMAT_UNDEFINED,
+                                      VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                                      { "frame data", i_img }))
             return false;
 
-        if ( ! res.transforms.allocate(Usage::device_only,
-                                       sizeof(Transforms),
-                                       VK_FORMAT_UNDEFINED,
-                                       VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-                                       {"transforms", i_img}))
+        if (! res.transforms.allocate(Usage::device_only,
+                                      sizeof(Transforms),
+                                      VK_FORMAT_UNDEFINED,
+                                      VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                                      { "transforms", i_img }))
             return false;
 
-        if ( ! res.sel_host_buf.allocated()) {
-            if ( ! res.sel_host_buf.allocate(Usage::host_only,
-                                             max_objects,
-                                             VK_FORMAT_UNDEFINED,
-                                             VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-                                             {"selection host buffer", i_img}))
+        if (! res.sel_host_buf.allocated()) {
+            if (! res.sel_host_buf.allocate(Usage::host_only,
+                                            max_objects,
+                                            VK_FORMAT_UNDEFINED,
+                                            VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                                            { "selection host buffer", i_img }))
                 return false;
             memset(res.sel_host_buf.get_ptr<uint8_t>(), 0, max_objects);
         }
 
-        if ( ! res.vtx_sel_host_buf.allocated()) {
-            if ( ! res.vtx_sel_host_buf.allocate(Usage::host_only,
-                                                 max_objects,
-                                                 VK_FORMAT_UNDEFINED,
-                                                 VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-                                                 {"vertex selection host buffer", i_img}))
+        if (! res.vtx_sel_host_buf.allocated()) {
+            if (! res.vtx_sel_host_buf.allocate(Usage::host_only,
+                                                max_objects,
+                                                VK_FORMAT_UNDEFINED,
+                                                VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                                                { "vertex selection host buffer", i_img }))
                 return false;
             memset(res.vtx_sel_host_buf.get_ptr<uint8_t>(), 0, max_objects);
         }
 
-        if ( ! res.hover_pos_buf.allocated()) {
-            if ( ! res.hover_pos_buf.allocate(Usage::device_only,
-                                              sizeof(float) * 4,
-                                              VK_FORMAT_UNDEFINED,
-                                              VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-                                              {"hover position buffer", i_img}))
+        if (! res.hover_pos_buf.allocated()) {
+            if (! res.hover_pos_buf.allocate(Usage::device_only,
+                                             sizeof(float) * 4,
+                                             VK_FORMAT_UNDEFINED,
+                                             VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT |
+                                                 VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                                             { "hover position buffer", i_img }))
                 return false;
         }
 
-        if ( ! res.hover_pos_host_buf.allocated()) {
+        if (! res.hover_pos_host_buf.allocated()) {
             static const float zeros[4] = {};
-            if ( ! res.hover_pos_host_buf.allocate(Usage::host_only,
-                                                   sizeof(float) * 4,
-                                                   VK_FORMAT_UNDEFINED,
-                                                   VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-                                                   {"hover position host buffer", i_img}))
+            if (! res.hover_pos_host_buf.allocate(Usage::host_only,
+                                                  sizeof(float) * 4,
+                                                  VK_FORMAT_UNDEFINED,
+                                                  VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                                                  { "hover position host buffer", i_img }))
                 return false;
             memcpy(res.hover_pos_host_buf.get_ptr<float>(), zeros, sizeof(zeros));
         }
 
         if (res.gui_texture) {
 
-            static VkDescriptorImageInfo image_info = {
-                VK_NULL_HANDLE,
-                VK_NULL_HANDLE,
-                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
-            };
+            static VkDescriptorImageInfo image_info = { VK_NULL_HANDLE,
+                                                        VK_NULL_HANDLE,
+                                                        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
 
             static VkWriteDescriptorSet write_desc = {
                 VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
                 nullptr,
-                VK_NULL_HANDLE,     // dstSet
-                0,                  // dstBinding
-                0,                  // dstArrayElement
-                1,                  // descriptorCount
+                VK_NULL_HANDLE, // dstSet
+                0,              // dstBinding
+                0,              // dstArrayElement
+                1,              // descriptorCount
                 VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
                 &image_info,
-                nullptr,            // pBufferInfo
-                nullptr             // pTexelBufferView
+                nullptr, // pBufferInfo
+                nullptr  // pTexelBufferView
             };
 
             image_info.sampler   = viewport_sampler;
@@ -551,10 +541,9 @@ bool GeometryEditor::alloc_view_resources(View*     dst_view,
             VK_FUNCTION(vkUpdateDescriptorSets)(vk_dev, 1, &write_desc, 0, nullptr);
         }
         else {
-            res.gui_texture = ImGui_ImplVulkan_AddTexture(
-                    viewport_sampler,
-                    res.color.get_view(),
-                    VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+            res.gui_texture = ImGui_ImplVulkan_AddTexture(viewport_sampler,
+                                                          res.color.get_view(),
+                                                          VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
         }
     }
 
@@ -568,7 +557,7 @@ void GeometryEditor::free_resources()
 
 void GeometryEditor::free_view_resources(View* dst_view)
 {
-    if ( ! dst_view->res[0].color.get_image())
+    if (! dst_view->res[0].color.get_image())
         return;
 
     dst_view->width  = 0;
@@ -597,46 +586,44 @@ bool GeometryEditor::allocate_resources_once()
     if (gray_patch_gbuffer_mat)
         return true;
 
-    if ( ! patch_geometry.allocate())
+    if (! patch_geometry.allocate())
         return false;
 
     // TODO load user-specified geometry
     patch_geometry.set_cube();
 
-    if ( ! create_materials())
+    if (! create_materials())
         return false;
 
-    if ( ! create_grid_buffer())
+    if (! create_grid_buffer())
         return false;
 
     // Allocate selection buffer: max_objects bytes packed as uint32_t (4 objects per word)
     constexpr uint32_t sel_buf_size = max_objects; // 1 byte per object
-    if ( ! sel_buf.allocate(Usage::device_only,
-                            sel_buf_size,
-                            VK_FORMAT_UNDEFINED,
-                            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
-                                VK_BUFFER_USAGE_TRANSFER_DST_BIT |
-                                VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-                            "selection buffer"))
+    if (! sel_buf.allocate(Usage::device_only,
+                           sel_buf_size,
+                           VK_FORMAT_UNDEFINED,
+                           VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT |
+                               VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                           "selection buffer"))
         return false;
 
-    if ( ! vtx_sel_buf.allocate(Usage::device_only,
-                                max_objects,
-                                VK_FORMAT_UNDEFINED,
-                                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
-                                    VK_BUFFER_USAGE_TRANSFER_DST_BIT |
-                                    VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-                                "vertex selection buffer"))
+    if (! vtx_sel_buf.allocate(Usage::device_only,
+                               max_objects,
+                               VK_FORMAT_UNDEFINED,
+                               VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT |
+                                   VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                               "vertex selection buffer"))
         return false;
 
     // Create compute pipeline for clearing hover bits in sel_buf each frame
     {
         static const DescSetBindingInfo bindings[] = {
             { 0, 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1 },
-            { 1, 0, 0, 0 }  // terminator: set_layout_id = num_layouts = 1
+            { 1, 0, 0, 0 } // terminator: set_layout_id = num_layouts = 1
         };
 
-        if ( ! create_compute_descriptor_set_layouts(bindings, 1, &sel_buf_ds_layout))
+        if (! create_compute_descriptor_set_layouts(bindings, 1, &sel_buf_ds_layout))
             return false;
 
         const ComputeShaderInfo shader_info = {
@@ -645,194 +632,174 @@ bool GeometryEditor::allocate_resources_once()
         };
 
         const VkDescriptorSetLayout ds_layouts[] = { sel_buf_ds_layout, VK_NULL_HANDLE };
-        if ( ! create_compute_shader(shader_info, ds_layouts, nullptr,
-                                     &sel_buf_pipe_layout, &clear_hover_pipe))
+        if (! create_compute_shader(shader_info, ds_layouts, nullptr, &sel_buf_pipe_layout, &clear_hover_pipe))
             return false;
     }
 
     view.camera[static_cast<int>(ViewType::free_moving)] = Camera{ { 0.0f, 0.01f, -0.2f } };
-    view.camera[static_cast<int>(ViewType::front)]       = Camera{ { 0.0f, 0.0f,   0.0f }, 4096.0f };
-    view.camera[static_cast<int>(ViewType::back)]        = Camera{ { 0.0f, 0.0f,   0.0f }, 4096.0f };
-    view.camera[static_cast<int>(ViewType::left)]        = Camera{ { 0.0f, 0.0f,   0.0f }, 4096.0f };
-    view.camera[static_cast<int>(ViewType::right)]       = Camera{ { 0.0f, 0.0f,   0.0f }, 4096.0f };
-    view.camera[static_cast<int>(ViewType::bottom)]      = Camera{ { 0.0f, 0.0f,   0.0f }, 4096.0f };
-    view.camera[static_cast<int>(ViewType::top)]         = Camera{ { 0.0f, 0.0f,   0.0f }, 4096.0f };
+    view.camera[static_cast<int>(ViewType::front)]       = Camera{ { 0.0f, 0.0f, 0.0f }, 4096.0f };
+    view.camera[static_cast<int>(ViewType::back)]        = Camera{ { 0.0f, 0.0f, 0.0f }, 4096.0f };
+    view.camera[static_cast<int>(ViewType::left)]        = Camera{ { 0.0f, 0.0f, 0.0f }, 4096.0f };
+    view.camera[static_cast<int>(ViewType::right)]       = Camera{ { 0.0f, 0.0f, 0.0f }, 4096.0f };
+    view.camera[static_cast<int>(ViewType::bottom)]      = Camera{ { 0.0f, 0.0f, 0.0f }, 4096.0f };
+    view.camera[static_cast<int>(ViewType::top)]         = Camera{ { 0.0f, 0.0f, 0.0f }, 4096.0f };
 
     toolbar_state.view_perspective = true;
 
     return true;
 }
 
-
 bool GeometryEditor::create_materials()
 {
-    static const VkVertexInputAttributeDescription vertex_attributes[] = {
-        {
-            0, // location
-            0, // binding
-            VK_FORMAT_R16G16B16_SNORM,
-            offsetof(Sculptor::Geometry::Vertex, pos)
-        }
-    };
+    static const VkVertexInputAttributeDescription vertex_attributes[] = { { 0, // location
+                                                                             0, // binding
+                                                                             VK_FORMAT_R16G16B16_SNORM,
+                                                                             offsetof(Sculptor::Geometry::Vertex,
+                                                                                      pos) } };
 
     static const MaterialInfo gbuffer_mat_info = {
-        {
-            shader_sculptor_pass_through_vert,
-            shader_sculptor_g_buffer_frag,
-            shader_bezier_surface_cubic_sculptor_tesc,
-            shader_bezier_surface_cubic_sculptor_tese
-        },
+        { shader_sculptor_pass_through_vert,
+          shader_sculptor_g_buffer_frag,
+          shader_bezier_surface_cubic_sculptor_tesc,
+          shader_bezier_surface_cubic_sculptor_tese },
         vertex_attributes,
-        0.0f,    // depth_bias
+        0.0f, // depth_bias
         std::size(vertex_attributes),
         sizeof(Sculptor::Geometry::Vertex),
-        { static_cast<uint8_t>(selection_format), VK_FORMAT_A2R10G10B10_UNORM_PACK32, VK_FORMAT_R16G16_SFLOAT, VK_FORMAT_DISABLED },
+        { static_cast<uint8_t>(selection_format),
+          VK_FORMAT_A2R10G10B10_UNORM_PACK32,
+          VK_FORMAT_R16G16_SFLOAT,
+          VK_FORMAT_DISABLED },
         VK_PRIMITIVE_TOPOLOGY_PATCH_LIST,
-        16,      // patch_control_points
+        16, // patch_control_points
         VK_POLYGON_MODE_FILL,
         VK_CULL_MODE_BACK_BIT,
-        true,    // use_depth
-        false,   // alpha_blend
+        true,                    // use_depth
+        false,                   // alpha_blend
         make_byte_color(0, 0, 0) // diffuse
     };
 
-    if ( ! create_material(gbuffer_mat_info, &gray_patch_gbuffer_mat))
+    if (! create_material(gbuffer_mat_info, &gray_patch_gbuffer_mat))
         return false;
 
     static const MaterialInfo selection_mat_info = {
-        {
-            shader_sculptor_pass_through_vert,
-            shader_sculptor_selection_frag,
-            shader_bezier_surface_cubic_sculptor_tesc,
-            shader_bezier_surface_cubic_sculptor_tese
-        },
+        { shader_sculptor_pass_through_vert,
+          shader_sculptor_selection_frag,
+          shader_bezier_surface_cubic_sculptor_tesc,
+          shader_bezier_surface_cubic_sculptor_tese },
         vertex_attributes,
-        0.0f,    // depth_bias
+        0.0f, // depth_bias
         std::size(vertex_attributes),
         sizeof(Sculptor::Geometry::Vertex),
         { VK_FORMAT_DISABLED, VK_FORMAT_DISABLED, VK_FORMAT_DISABLED, VK_FORMAT_DISABLED },
         VK_PRIMITIVE_TOPOLOGY_PATCH_LIST,
-        16,      // patch_control_points
+        16, // patch_control_points
         VK_POLYGON_MODE_FILL,
         VK_CULL_MODE_BACK_BIT,
-        true,    // use_depth
-        false,   // alpha_blend
+        true,                    // use_depth
+        false,                   // alpha_blend
         make_byte_color(0, 0, 0) // diffuse
     };
 
-    if ( ! create_material(selection_mat_info, &selection_mat))
+    if (! create_material(selection_mat_info, &selection_mat))
         return false;
 
     static const MaterialInfo vertex_info = {
-        {
-            shader_sculptor_vertex_select_vert,
-            shader_sculptor_vertex_select_frag
-        },
+        { shader_sculptor_vertex_select_vert, shader_sculptor_vertex_select_frag },
         nullptr,
         0.0f,
         0,
         0,
         { VK_FORMAT_UNDEFINED, VK_FORMAT_DISABLED, VK_FORMAT_DISABLED, VK_FORMAT_DISABLED },
         VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP,
-        0,       // patch_control_points
+        0, // patch_control_points
         VK_POLYGON_MODE_FILL,
         VK_CULL_MODE_BACK_BIT,
-        true,    // use_depth
-        false,   // alpha_blend
+        true,                                      // use_depth
+        false,                                     // alpha_blend
         make_byte_color(0.9372f, 0.9372f, 0.9568f) // diffuse
     };
 
-    if ( ! create_material(vertex_info, &vertex_mat))
+    if (! create_material(vertex_info, &vertex_mat))
         return false;
 
     static const MaterialInfo ctrl_pt_handles_info = {
-        {
-            shader_sculptor_ctrl_pt_handles_vert,
-            shader_sculptor_ctrl_pt_handles_frag
-        },
+        { shader_sculptor_ctrl_pt_handles_vert, shader_sculptor_ctrl_pt_handles_frag },
         nullptr,
         0.0f,
         0,
         0,
         { VK_FORMAT_UNDEFINED, VK_FORMAT_DISABLED, VK_FORMAT_DISABLED, VK_FORMAT_DISABLED },
         VK_PRIMITIVE_TOPOLOGY_LINE_LIST,
-        0,       // patch_control_points
+        0, // patch_control_points
         VK_POLYGON_MODE_FILL,
         VK_CULL_MODE_NONE,
-        true,    // use_depth
-        false,   // alpha_blend
+        true,                    // use_depth
+        false,                   // alpha_blend
         make_byte_color(0, 0, 0) // diffuse
     };
 
-    if ( ! create_material(ctrl_pt_handles_info, &ctrl_pt_handles_mat))
+    if (! create_material(ctrl_pt_handles_info, &ctrl_pt_handles_mat))
         return false;
 
     static const MaterialInfo grid_info = {
-        {
-            shader_sculptor_simple_vert,
-            shader_sculptor_color_frag
-        },
+        { shader_sculptor_simple_vert, shader_sculptor_color_frag },
         vertex_attributes,
-        0.0f,    // depth_bias
+        0.0f, // depth_bias
         std::size(vertex_attributes),
         sizeof(Sculptor::Geometry::Vertex),
         { VK_FORMAT_UNDEFINED, VK_FORMAT_DISABLED, VK_FORMAT_DISABLED, VK_FORMAT_DISABLED },
         VK_PRIMITIVE_TOPOLOGY_LINE_LIST,
-        0,       // patch_control_points
+        0, // patch_control_points
         VK_POLYGON_MODE_FILL,
         VK_CULL_MODE_NONE,
-        true,    // use_depth
-        false,   // alpha_blend
+        true,                                // use_depth
+        false,                               // alpha_blend
         make_byte_color(0.25f, 0.25f, 0.25f) // diffuse
     };
 
-    if ( ! Sculptor::create_material(grid_info, &grid_mat))
+    if (! Sculptor::create_material(grid_info, &grid_mat))
         return false;
 
     static const MaterialInfo wireframe_tess_mat_info = {
-        {
-            shader_sculptor_pass_through_vert,
-            shader_sculptor_color_frag,
-            shader_bezier_surface_cubic_sculptor_tesc,
-            shader_bezier_surface_cubic_sculptor_tese
-        },
+        { shader_sculptor_pass_through_vert,
+          shader_sculptor_color_frag,
+          shader_bezier_surface_cubic_sculptor_tesc,
+          shader_bezier_surface_cubic_sculptor_tese },
         vertex_attributes,
-        0.0f,    // depth_bias
+        0.0f, // depth_bias
         std::size(vertex_attributes),
         sizeof(Sculptor::Geometry::Vertex),
         { VK_FORMAT_UNDEFINED, VK_FORMAT_DISABLED, VK_FORMAT_DISABLED, VK_FORMAT_DISABLED },
         VK_PRIMITIVE_TOPOLOGY_PATCH_LIST,
-        16,      // patch_control_points
+        16, // patch_control_points
         VK_POLYGON_MODE_LINE,
         VK_CULL_MODE_NONE,
-        false,   // use_depth: show hidden edges too
-        false,   // alpha_blend
+        false,                               // use_depth: show hidden edges too
+        false,                               // alpha_blend
         make_byte_color(0.93f, 0.93f, 0.93f) // wireframe color
     };
 
-    if ( ! Sculptor::create_material(wireframe_tess_mat_info, &wireframe_tess_mat))
+    if (! Sculptor::create_material(wireframe_tess_mat_info, &wireframe_tess_mat))
         return false;
 
     static const MaterialInfo lighting_mat_info = {
-        {
-            shader_sculptor_lighting_vert,
-            shader_sculptor_lighting_frag
-        },
+        { shader_sculptor_lighting_vert, shader_sculptor_lighting_frag },
         nullptr, // vertex_attributes
         0.0f,    // depth_bias
         0,       // num_vertex_attributes
         0,       // vertex_stride
         { VK_FORMAT_UNDEFINED, VK_FORMAT_DISABLED, VK_FORMAT_DISABLED, VK_FORMAT_DISABLED },
         VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
-        0,       // patch_control_points
+        0, // patch_control_points
         VK_POLYGON_MODE_FILL,
         VK_CULL_MODE_NONE,
-        false,   // use_depth
-        true,    // alpha_blend: alpha=0 passes through wireframe/background, alpha=1 draws surface
+        false,                   // use_depth
+        true,                    // alpha_blend: alpha=0 passes through wireframe/background, alpha=1 draws surface
         make_byte_color(0, 0, 0) // diffuse (unused)
     };
 
-    if ( ! Sculptor::create_material(lighting_mat_info, &lighting_mat, Sculptor::lighting_layout))
+    if (! Sculptor::create_material(lighting_mat_info, &lighting_mat, Sculptor::lighting_layout))
         return false;
 
     return true;
@@ -888,14 +855,14 @@ static void push_descriptor(VkCommandBuffer              cmdbuf,
     static VkWriteDescriptorSet write_desc_set = {
         VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
         nullptr,
-        VK_NULL_HANDLE,                         // dstSet
-        0,                                      // dstBinding
-        0,                                      // dstArrayElement
-        1,                                      // descriptorCount
+        VK_NULL_HANDLE,                            // dstSet
+        0,                                         // dstBinding
+        0,                                         // dstArrayElement
+        1,                                         // descriptorCount
         VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, // descriptorType
-        nullptr,                                // pImageInfo
-        nullptr,                                // pBufferInfo
-        nullptr                                 // pTexelBufferView
+        nullptr,                                   // pImageInfo
+        nullptr,                                   // pBufferInfo
+        nullptr                                    // pTexelBufferView
     };
 
     write_desc_set.dstBinding = binding;
@@ -913,34 +880,23 @@ void GeometryEditor::gui_status_bar()
 {
     const ImVec2 win_size = ImGui::GetWindowSize();
 
-    const ImGuiWindowFlags status_flags =
-        ImGuiWindowFlags_NoDecoration |
-        ImGuiWindowFlags_NoInputs |
-        ImGuiWindowFlags_NoScrollWithMouse |
-        ImGuiWindowFlags_NoSavedSettings |
-        ImGuiWindowFlags_NoBringToFrontOnFocus |
-        ImGuiWindowFlags_NoBackground |
-        ImGuiWindowFlags_MenuBar;
+    const ImGuiWindowFlags status_flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoInputs |
+                                          ImGuiWindowFlags_NoScrollWithMouse | ImGuiWindowFlags_NoSavedSettings |
+                                          ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoBackground |
+                                          ImGuiWindowFlags_MenuBar;
 
-    const ImVec2 status_bar_size{win_size.x,
-                                 ImGui::GetTextLineHeightWithSpacing()};
+    const ImVec2 status_bar_size{ win_size.x, ImGui::GetTextLineHeightWithSpacing() };
 
     if (ImGui::BeginChild("##Geometry Editor Status Bar", status_bar_size, false, status_flags)) {
         if (ImGui::BeginMenuBar()) {
             static const char* const mode_names[] = {
-#               define X(mode, name) name,
+#define X(mode, name) name,
                 MODE_LIST
-#               undef X
+#undef X
             };
 
             static const char* const view_names[] = {
-                "Perspective",
-                "Front",
-                "Back",
-                "Left",
-                "Right",
-                "Bottom",
-                "Top",
+                "Perspective", "Front", "Back", "Left", "Right", "Bottom", "Top",
             };
 
             const unsigned view_idx = static_cast<unsigned>(view.view_type);
@@ -960,15 +916,15 @@ void GeometryEditor::gui_status_bar()
 
 bool GeometryEditor::toolbar_button(ToolbarButton button, bool* checked)
 {
-    const ImVec2 button_size{static_cast<float>(toolbar_image.get_height()),
-                             static_cast<float>(toolbar_image.get_height())};
+    const ImVec2 button_size{ static_cast<float>(toolbar_image.get_height()),
+                              static_cast<float>(toolbar_image.get_height()) };
 
     const uint32_t idx        = static_cast<uint32_t>(button);
     const uint32_t start_offs = idx * toolbar_image.get_height();
     const uint32_t end_offs   = start_offs + toolbar_image.get_height();
 
-    const ImVec2 uv0{static_cast<float>((start_offs * 1.0) / toolbar_image.get_width()), 0};
-    const ImVec2 uv1{static_cast<float>((end_offs   * 1.0) / toolbar_image.get_width()), 1};
+    const ImVec2 uv0{ static_cast<float>((start_offs * 1.0) / toolbar_image.get_width()), 0 };
+    const ImVec2 uv1{ static_cast<float>((end_offs * 1.0) / toolbar_image.get_width()), 1 };
 
     const ToolbarInfo& info = toolbar_info[idx];
 
@@ -977,20 +933,16 @@ bool GeometryEditor::toolbar_button(ToolbarButton button, bool* checked)
 
     ImVec4 button_color;
     if (checked && *checked)
-        button_color = ImVec4{0.18f, 0.18f, 0.17f, 1};
+        button_color = ImVec4{ 0.18f, 0.18f, 0.17f, 1 };
     else
-        button_color = ImVec4{0.34f, 0.34f, 0.33f, 1};
+        button_color = ImVec4{ 0.34f, 0.34f, 0.33f, 1 };
 
-    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2{3, 3});
-    ImGui::PushStyleColor(ImGuiCol_Button,        button_color);
-    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4{0.45f, 0.45f, 0.45f, 1});
-    ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4{0.20f, 0.20f, 0.20f, 1});
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2{ 3, 3 });
+    ImGui::PushStyleColor(ImGuiCol_Button, button_color);
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4{ 0.45f, 0.45f, 0.45f, 1 });
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4{ 0.20f, 0.20f, 0.20f, 1 });
 
-    const bool clicked = ImGui::ImageButton(info.tag,
-                                            make_texture_id(toolbar_texture),
-                                            button_size,
-                                            uv0,
-                                            uv1);
+    const bool clicked = ImGui::ImageButton(info.tag, make_texture_id(toolbar_texture), button_size, uv0, uv1);
 
     ImGui::PopStyleColor(3);
     ImGui::PopStyleVar();
@@ -1020,32 +972,51 @@ void GeometryEditor::draw_axis_indicator(ImDrawList* dl, float vp_max_x, float v
     switch (view.view_type) {
 
         case ViewType::free_moving: {
-            const Camera cam = get_rotated_camera(view);
+            const Camera       cam  = get_rotated_camera(view);
             const Camera::Axes axes = cam.get_axes();
-            cam_right = axes.right;
-            cam_up    = axes.up;
+            cam_right               = axes.right;
+            cam_up                  = axes.up;
             break;
         }
 
-        case ViewType::front:   cam_right = {1, 0, 0};  cam_up = Camera::world_up; break;
-        case ViewType::back:    cam_right = {-1, 0, 0}; cam_up = Camera::world_up; break;
-        case ViewType::left:    cam_right = {0, 0, -1}; cam_up = Camera::world_up; break;
-        case ViewType::right:   cam_right = {0, 0, 1};  cam_up = Camera::world_up; break;
-        case ViewType::top:     cam_right = {1, 0, 0};  cam_up = {0, 0, 1}; break;
-        case ViewType::bottom:  cam_right = {-1, 0, 0}; cam_up = {0, 0, 1}; break;
+        case ViewType::front:
+            cam_right = { 1, 0, 0 };
+            cam_up    = Camera::world_up;
+            break;
+        case ViewType::back:
+            cam_right = { -1, 0, 0 };
+            cam_up    = Camera::world_up;
+            break;
+        case ViewType::left:
+            cam_right = { 0, 0, -1 };
+            cam_up    = Camera::world_up;
+            break;
+        case ViewType::right:
+            cam_right = { 0, 0, 1 };
+            cam_up    = Camera::world_up;
+            break;
+        case ViewType::top:
+            cam_right = { 1, 0, 0 };
+            cam_up    = { 0, 0, 1 };
+            break;
+        case ViewType::bottom:
+            cam_right = { -1, 0, 0 };
+            cam_up    = { 0, 0, 1 };
+            break;
 
-        default: return;
+        default:
+            return;
     }
 
-    static const vmath::vec3 world_axes[3] = {{1, 0, 0}, Camera::world_up, {0, 0, 1}};
-    static const char* const labels[3]     = {"x", "y", "z"};
-    const bool locked[3] = {toolbar_state.snap_x, toolbar_state.snap_y, toolbar_state.snap_z};
+    static const vmath::vec3 world_axes[3] = { { 1, 0, 0 }, Camera::world_up, { 0, 0, 1 } };
+    static const char* const labels[3]     = { "x", "y", "z" };
+    const bool               locked[3]     = { toolbar_state.snap_x, toolbar_state.snap_y, toolbar_state.snap_z };
 
     const float font_h = ImGui::GetFontSize();
     const float font_w = font_h * 0.5f;
 
     for (int i = 0; i < 3; ++i) {
-        const float sx =  vmath::dot_product(world_axes[i], cam_right);
+        const float sx = vmath::dot_product(world_axes[i], cam_right);
         const float sy = -vmath::dot_product(world_axes[i], cam_up);
 
         if (sx * sx + sy * sy < 0.01f)
@@ -1056,15 +1027,15 @@ void GeometryEditor::draw_axis_indicator(ImDrawList* dl, float vp_max_x, float v
         const float len = sqrtf(sx * sx + sy * sy);
         const float ex  = cx + sx * line_len;
         const float ey  = cy + sy * line_len;
-        dl->AddLine({cx, cy}, {ex, ey}, line_color, 1.5f);
+        dl->AddLine({ cx, cy }, { ex, ey }, line_color, 1.5f);
 
         constexpr float gap = 4.0f;
-        const float nx  = sx / len;
-        const float ny  = sy / len;
-        const float d   = gap + fabsf(nx) * font_w * 0.5f + fabsf(ny) * font_h * 0.5f;
-        const float tx  = ex + nx * d - font_w * 0.5f;
-        const float ty  = ey + ny * d - font_h * 0.5f;
-        dl->AddText({tx, ty}, IM_COL32(255, 255, 255, 255), labels[i]);
+        const float     nx  = sx / len;
+        const float     ny  = sy / len;
+        const float     d   = gap + fabsf(nx) * font_w * 0.5f + fabsf(ny) * font_h * 0.5f;
+        const float     tx  = ex + nx * d - font_w * 0.5f;
+        const float     ty  = ey + ny * d - font_h * 0.5f;
+        dl->AddText({ tx, ty }, IM_COL32(255, 255, 255, 255), labels[i]);
     }
 }
 
@@ -1084,7 +1055,7 @@ static bool all_selected(const Buffer& buffer, uint32_t num_elems)
     const uint8_t* const buf = buffer.get_ptr<uint8_t>();
 
     for (uint32_t i = 0; i < num_elems; i++)
-        if ( ! (buf[i] & obj_selected))
+        if (! (buf[i] & obj_selected))
             return false;
 
     return true;
@@ -1131,11 +1102,11 @@ void GeometryEditor::handle_mouse_actions(const UserInput& input, bool view_hove
 
     const bool shift = ImGui::IsKeyDown(ImGuiKey_LeftShift) || ImGui::IsKeyDown(ImGuiKey_RightShift);
 
-    if ( ! shift)
+    if (! shift)
         pan_accum = 0.0f;
 
     // When mouse moves, but is not captured, detect a new mouse action
-    if ( ! has_captured_mouse() && view_hovered && ! is_mouse_captured()) {
+    if (! has_captured_mouse() && view_hovered && ! is_mouse_captured()) {
 
         assert(mouse_action == Action::none);
 
@@ -1149,9 +1120,9 @@ void GeometryEditor::handle_mouse_actions(const UserInput& input, bool view_hove
                 // If mouse is hovering over geometry, activate panning only if it moved over threshold,
                 // otherwise (no geometry under the cursor) just pan immediately.  This allows the user
                 // to unselect faces with shift+click even if the cursor moves slightly during the click.
-                constexpr float pan_threshold = 5.0f;
-                const float* const hover = cur_res->hover_pos_host_buf.get_ptr<float>();
-                const bool over_geometry = hover[3] > 0.5f;
+                constexpr float    pan_threshold = 5.0f;
+                const float* const hover         = cur_res->hover_pos_host_buf.get_ptr<float>();
+                const bool         over_geometry = hover[3] > 0.5f;
                 if (over_geometry) {
                     pan_accum += std::abs(input.mouse_pos_delta.x) + std::abs(input.mouse_pos_delta.y);
                     if (pan_accum >= pan_threshold)
@@ -1185,7 +1156,7 @@ void GeometryEditor::handle_mouse_actions(const UserInput& input, bool view_hove
         switch (mouse_action) {
 
             case Action::rotate:
-                if ( ! ImGui::IsKeyDown(ImGuiKey_LeftCtrl) && ! ImGui::IsKeyDown(ImGuiKey_RightCtrl))
+                if (! ImGui::IsKeyDown(ImGuiKey_LeftCtrl) && ! ImGui::IsKeyDown(ImGuiKey_RightCtrl))
                     release_mouse();
                 else if (mouse_moved) {
                     constexpr float rot_scale_factor = 0.3f;
@@ -1198,18 +1169,19 @@ void GeometryEditor::handle_mouse_actions(const UserInput& input, bool view_hove
                             // Initiate rotation
                             if (view.mouse_world_pos && ! mouse_action_pos) {
                                 mouse_action_pos = *view.mouse_world_pos;
-                                camera.rot       = vmath::quat{0.0f, 0.0f, 0.0f, 1.0f};
+                                camera.rot       = vmath::quat{ 0.0f, 0.0f, 0.0f, 1.0f };
                             }
                             {
-                                const float yaw = vmath::radians(rot_scale_factor * input.mouse_pos_delta.x);
-                                const vmath::quat yaw_q{Camera::world_up, yaw};
+                                const float       yaw = vmath::radians(rot_scale_factor * input.mouse_pos_delta.x);
+                                const vmath::quat yaw_q{ Camera::world_up, yaw };
 
                                 // Rotate pitch around camera's current local right axis (horizontal component);
                                 // rotating around world X would cause distortions
-                                const float       pitch       = vmath::radians(rot_scale_factor * input.mouse_pos_delta.y);
+                                const float       pitch = vmath::radians(rot_scale_factor * input.mouse_pos_delta.y);
                                 const vmath::vec3 current_dir = camera.rot.rotate(camera.dir);
-                                const vmath::vec3 pitch_axis  = vmath::normalize(vmath::cross_product(Camera::world_up, current_dir));
-                                const vmath::quat pitch_q{pitch_axis, pitch};
+                                const vmath::vec3 pitch_axis =
+                                    vmath::normalize(vmath::cross_product(Camera::world_up, current_dir));
+                                const vmath::quat pitch_q{ pitch_axis, pitch };
 
                                 const vmath::quat new_rot = vmath::normalize(yaw_q * pitch_q * camera.rot);
 
@@ -1224,7 +1196,7 @@ void GeometryEditor::handle_mouse_actions(const UserInput& input, bool view_hove
                         default: {
                             const vmath::vec3 view_axis = get_ortho_axes(view.view_type).view_axis;
 
-                            const float mid_x = static_cast<float>(view.width)  * 0.5f;
+                            const float mid_x = static_cast<float>(view.width) * 0.5f;
                             const float mid_y = static_cast<float>(view.height) * 0.5f;
 
                             // Rotate around the screen midpoint by grabbing with mouse
@@ -1241,12 +1213,12 @@ void GeometryEditor::handle_mouse_actions(const UserInput& input, bool view_hove
                                 float delta_angle = atan2f(prev_dy, prev_dx) - atan2f(cur_dy, cur_dx);
 
                                 // Wrap to [-pi, pi]
-                                if (delta_angle >  vmath::pi)
+                                if (delta_angle > vmath::pi)
                                     delta_angle -= vmath::two_pi;
                                 if (delta_angle < -vmath::pi)
                                     delta_angle += vmath::two_pi;
 
-                                const vmath::quat delta_rot{view_axis, delta_angle};
+                                const vmath::quat delta_rot{ view_axis, delta_angle };
                                 camera.rot = vmath::normalize(delta_rot * camera.rot);
                             }
                             break;
@@ -1256,7 +1228,7 @@ void GeometryEditor::handle_mouse_actions(const UserInput& input, bool view_hove
                 break;
 
             case Action::pan:
-                if ( ! shift)
+                if (! shift)
                     release_mouse();
                 else if (mouse_moved && (mouse_action_pos || view.view_type != ViewType::free_moving)) {
                     Camera& camera = view.camera[static_cast<int>(view.view_type)];
@@ -1266,8 +1238,8 @@ void GeometryEditor::handle_mouse_actions(const UserInput& input, bool view_hove
                         default:
                             assert(view.view_type == ViewType::free_moving);
                             {
-                                const float aspect = static_cast<float>(view.width)  / static_cast<float>(view.height);
-                                const float ndc_x  = view.mouse_pos.x / static_cast<float>(view.width)  * 2.0f - 1.0f;
+                                const float aspect = static_cast<float>(view.width) / static_cast<float>(view.height);
+                                const float ndc_x  = view.mouse_pos.x / static_cast<float>(view.width) * 2.0f - 1.0f;
                                 const float ndc_y  = 1.0f - view.mouse_pos.y / static_cast<float>(view.height) * 2.0f;
                                 const auto [right, up] = camera.get_axes();
 
@@ -1277,7 +1249,7 @@ void GeometryEditor::handle_mouse_actions(const UserInput& input, bool view_hove
                                 const float       up_delta    = vmath::dot_product(move_delta, up);
                                 const float       fov_tan     = vmath::tan(fov_radians * 0.5f);
                                 const float       screen_dx   = right_delta - ndc_x * fwd_delta * aspect * fov_tan;
-                                const float       screen_dy   = up_delta    - ndc_y * fwd_delta * fov_tan;
+                                const float       screen_dy   = up_delta - ndc_y * fwd_delta * fov_tan;
 
                                 const vmath::vec3 new_pos = camera.pos + right * screen_dx + up * screen_dy;
                                 const float       dist    = vmath::length(new_pos);
@@ -1292,14 +1264,14 @@ void GeometryEditor::handle_mouse_actions(const UserInput& input, bool view_hove
                         case ViewType::top:
                         case ViewType::bottom: {
                             const auto [view_axis, natural_up] = get_ortho_axes(view.view_type);
-                            const vmath::vec3 screen_up    = camera.rot.rotate(natural_up);
-                            const vmath::vec3 screen_right = vmath::normalize(vmath::cross_product(screen_up, view_axis));
+                            const vmath::vec3 screen_up        = camera.rot.rotate(natural_up);
+                            const vmath::vec3 screen_right =
+                                vmath::normalize(vmath::cross_product(screen_up, view_axis));
                             const float scale = camera.view_height / (int16_scale * static_cast<float>(view.height));
-                            camera.pos = vmath::clamp(
-                                camera.pos
-                                    - screen_right * (input.mouse_pos_delta.x * scale)
-                                    + screen_up    * (input.mouse_pos_delta.y * scale),
-                                vmath::vec3{-max_pos}, vmath::vec3{max_pos});
+                            camera.pos = vmath::clamp(camera.pos - screen_right * (input.mouse_pos_delta.x * scale) +
+                                                          screen_up * (input.mouse_pos_delta.y * scale),
+                                                      vmath::vec3{ -max_pos },
+                                                      vmath::vec3{ max_pos });
                             break;
                         }
                     }
@@ -1313,10 +1285,12 @@ void GeometryEditor::handle_mouse_actions(const UserInput& input, bool view_hove
                     const uint32_t num_faces    = patch_geometry.get_num_faces();
                     const uint32_t num_vertices = patch_geometry.get_num_vertices();
 
-                    const bool faces_hovered    = toolbar_state.select.faces    && any_hovered(cur_res->sel_host_buf,     num_faces);
-                    const bool vertices_hovered = toolbar_state.select.vertices && any_hovered(cur_res->vtx_sel_host_buf, num_vertices);
+                    const bool faces_hovered =
+                        toolbar_state.select.faces && any_hovered(cur_res->sel_host_buf, num_faces);
+                    const bool vertices_hovered =
+                        toolbar_state.select.vertices && any_hovered(cur_res->vtx_sel_host_buf, num_vertices);
 
-                    if ( ! faces_hovered && ! vertices_hovered && ! shift) {
+                    if (! faces_hovered && ! vertices_hovered && ! shift) {
                         if (toolbar_state.select.faces) {
                             clear_selection(cur_res->sel_host_buf, num_faces);
                             face_sel_dirty = true;
@@ -1325,7 +1299,8 @@ void GeometryEditor::handle_mouse_actions(const UserInput& input, bool view_hove
                             clear_selection(cur_res->vtx_sel_host_buf, num_vertices);
                             vtx_sel_dirty = true;
                         }
-                    } else {
+                    }
+                    else {
                         if (toolbar_state.select.faces) {
                             commit_hover_selection(cur_res->sel_host_buf, num_faces, shift);
                             face_sel_dirty = true;
@@ -1365,7 +1340,7 @@ void GeometryEditor::handle_mouse_actions(const UserInput& input, bool view_hove
                 assert("missing action" == nullptr);
         }
 
-        if ( ! has_captured_mouse()) {
+        if (! has_captured_mouse()) {
             mouse_action = Action::none;
         }
     }
@@ -1390,15 +1365,16 @@ void GeometryEditor::handle_mouse_actions(const UserInput& input, bool view_hove
             default:
                 assert(view.view_type == ViewType::free_moving);
                 if (view.mouse_world_pos) {
-                    constexpr float   max_zoom  = 0.99f;
-                    const float       zoom_frac = vmath::clamp(input.wheel_delta * perspective_zoom_factor,
-                                                               -max_zoom, max_zoom);
+                    constexpr float max_zoom = 0.99f;
+                    const float     zoom_frac =
+                        vmath::clamp(input.wheel_delta * perspective_zoom_factor, -max_zoom, max_zoom);
                     const vmath::vec3 to_target = *view.mouse_world_pos - camera.pos;
                     const vmath::vec3 new_pos   = camera.pos + to_target * zoom_frac;
                     if (vmath::length(new_pos) <= max_cam_dist)
                         camera.pos = new_pos;
-                } else {
-                    camera.move(vmath::vec3{0, 0, input.wheel_delta * perspective_zoom_factor});
+                }
+                else {
+                    camera.move(vmath::vec3{ 0, 0, input.wheel_delta * perspective_zoom_factor });
                 }
                 break;
 
@@ -1409,7 +1385,8 @@ void GeometryEditor::handle_mouse_actions(const UserInput& input, bool view_hove
             case ViewType::bottom:
             case ViewType::top:
                 camera.view_height = vmath::clamp(camera.view_height * powf(ortho_zoom_factor, input.wheel_delta),
-                                                  min_view_height, max_view_height);
+                                                  min_view_height,
+                                                  max_view_height);
                 break;
         }
     }
@@ -1429,7 +1406,7 @@ void GeometryEditor::handle_keyboard_actions()
             else
                 undo();
         }
-        else if ( ! is_shift_down())
+        else if (! is_shift_down())
             toolbar_state.snap_z = ! toolbar_state.snap_z;
     }
 
@@ -1453,25 +1430,27 @@ void GeometryEditor::handle_keyboard_actions()
         // TODO cut
     }
 
-    if (ImGui::IsKeyPressed(ImGuiKey_1) && no_modifier && ( ! toolbar_state.select.vertices || toolbar_state.select.faces)) {
+    if (ImGui::IsKeyPressed(ImGuiKey_1) && no_modifier &&
+        (! toolbar_state.select.vertices || toolbar_state.select.faces)) {
         toolbar_state.select.vertices = ! toolbar_state.select.vertices;
         if (mode != Mode::select)
             saved_select = toolbar_state.select;
         new_mode = Mode::select;
 
-        if ( ! toolbar_state.select.vertices) {
+        if (! toolbar_state.select.vertices) {
             clear_selection(cur_res->vtx_sel_host_buf, patch_geometry.get_num_vertices());
             vtx_sel_dirty = true;
         }
     }
 
-    if (ImGui::IsKeyPressed(ImGuiKey_2) && no_modifier && ( ! toolbar_state.select.faces || toolbar_state.select.vertices)) {
+    if (ImGui::IsKeyPressed(ImGuiKey_2) && no_modifier &&
+        (! toolbar_state.select.faces || toolbar_state.select.vertices)) {
         toolbar_state.select.faces = ! toolbar_state.select.faces;
         if (mode != Mode::select)
             saved_select = toolbar_state.select;
         new_mode = Mode::select;
 
-        if ( ! toolbar_state.select.faces) {
+        if (! toolbar_state.select.faces) {
             clear_selection(cur_res->sel_host_buf, patch_geometry.get_num_faces());
             face_sel_dirty = true;
         }
@@ -1479,10 +1458,10 @@ void GeometryEditor::handle_keyboard_actions()
 
     if (ImGui::IsKeyPressed(ImGuiKey_5) && no_modifier) {
         toolbar_state.view_perspective = true;
-        toolbar_state.view_ortho_x = false;
-        toolbar_state.view_ortho_y = false;
-        toolbar_state.view_ortho_z = false;
-        view.view_type = ViewType::free_moving;
+        toolbar_state.view_ortho_x     = false;
+        toolbar_state.view_ortho_y     = false;
+        toolbar_state.view_ortho_z     = false;
+        view.view_type                 = ViewType::free_moving;
     }
 
     if (ImGui::IsKeyPressed(ImGuiKey_6) && no_modifier) {
@@ -1491,9 +1470,9 @@ void GeometryEditor::handle_keyboard_actions()
         else
             view.view_type = ViewType::front;
         toolbar_state.view_perspective = false;
-        toolbar_state.view_ortho_x = false;
-        toolbar_state.view_ortho_y = false;
-        toolbar_state.view_ortho_z = true;
+        toolbar_state.view_ortho_x     = false;
+        toolbar_state.view_ortho_y     = false;
+        toolbar_state.view_ortho_z     = true;
     }
 
     if (ImGui::IsKeyPressed(ImGuiKey_7) && no_modifier) {
@@ -1502,9 +1481,9 @@ void GeometryEditor::handle_keyboard_actions()
         else
             view.view_type = ViewType::left;
         toolbar_state.view_perspective = false;
-        toolbar_state.view_ortho_x = true;
-        toolbar_state.view_ortho_y = false;
-        toolbar_state.view_ortho_z = false;
+        toolbar_state.view_ortho_x     = true;
+        toolbar_state.view_ortho_y     = false;
+        toolbar_state.view_ortho_z     = false;
     }
 
     if (ImGui::IsKeyPressed(ImGuiKey_8) && no_modifier) {
@@ -1513,9 +1492,9 @@ void GeometryEditor::handle_keyboard_actions()
         else
             view.view_type = ViewType::bottom;
         toolbar_state.view_perspective = false;
-        toolbar_state.view_ortho_x = false;
-        toolbar_state.view_ortho_y = true;
-        toolbar_state.view_ortho_z = false;
+        toolbar_state.view_ortho_x     = false;
+        toolbar_state.view_ortho_y     = true;
+        toolbar_state.view_ortho_z     = false;
     }
 
     if ((ImGui::IsKeyPressed(ImGuiKey_Period) || ImGui::IsKeyPressed(ImGuiKey_KeypadDecimal)) && no_modifier)
@@ -1538,17 +1517,17 @@ void GeometryEditor::handle_keyboard_actions()
 
     if (ImGui::IsKeyPressed(ImGuiKey_G) && no_modifier) {
         toolbar_state.move = true;
-        new_mode = Mode::move;
+        new_mode           = Mode::move;
     }
 
     if (ImGui::IsKeyPressed(ImGuiKey_R) && no_modifier) {
         toolbar_state.rotate = true;
-        new_mode = Mode::rotate;
+        new_mode             = Mode::rotate;
     }
 
     if (ImGui::IsKeyPressed(ImGuiKey_S) && no_modifier) {
         toolbar_state.scale = true;
-        new_mode = Mode::scale;
+        new_mode            = Mode::scale;
     }
 
     if (ImGui::IsKeyPressed(ImGuiKey_Delete) && no_modifier) {
@@ -1557,7 +1536,7 @@ void GeometryEditor::handle_keyboard_actions()
 
     if (ImGui::IsKeyPressed(ImGuiKey_E) && no_modifier) {
         toolbar_state.extrude = true;
-        new_mode = Mode::extrude;
+        new_mode              = Mode::extrude;
     }
 
     if (ImGui::IsKeyPressed(ImGuiKey_Escape)) {
@@ -1580,8 +1559,9 @@ void GeometryEditor::handle_keyboard_actions()
         const uint32_t num_faces    = patch_geometry.get_num_faces();
         const uint32_t num_vertices = patch_geometry.get_num_vertices();
 
-        const bool all_faces    = ! toolbar_state.select.faces    || all_selected(cur_res->sel_host_buf,     num_faces);
-        const bool all_vertices = ! toolbar_state.select.vertices || all_selected(cur_res->vtx_sel_host_buf, num_vertices);
+        const bool all_faces = ! toolbar_state.select.faces || all_selected(cur_res->sel_host_buf, num_faces);
+        const bool all_vertices =
+            ! toolbar_state.select.vertices || all_selected(cur_res->vtx_sel_host_buf, num_vertices);
 
         if (all_faces && all_vertices) {
             if (toolbar_state.select.faces) {
@@ -1592,7 +1572,8 @@ void GeometryEditor::handle_keyboard_actions()
                 clear_selection(cur_res->vtx_sel_host_buf, num_vertices);
                 vtx_sel_dirty = true;
             }
-        } else {
+        }
+        else {
             if (toolbar_state.select.faces) {
                 select_all(cur_res->sel_host_buf, num_faces);
                 face_sel_dirty = true;
@@ -1604,7 +1585,8 @@ void GeometryEditor::handle_keyboard_actions()
         }
     }
 
-    if (ImGui::IsKeyPressed(ImGuiKey_I) && mode == Mode::select && is_ctrl_down() && ! is_shift_down() && ! is_alt_down()) {
+    if (ImGui::IsKeyPressed(ImGuiKey_I) && mode == Mode::select && is_ctrl_down() && ! is_shift_down() &&
+        ! is_alt_down()) {
         const uint32_t num_faces    = patch_geometry.get_num_faces();
         const uint32_t num_vertices = patch_geometry.get_num_vertices();
         if (toolbar_state.select.faces) {
@@ -1622,8 +1604,9 @@ void GeometryEditor::handle_keyboard_actions()
 
 void GeometryEditor::center_selection()
 {
-    const uint8_t* const vtx_sel  = toolbar_state.select.vertices ? cur_res->vtx_sel_host_buf.get_ptr<uint8_t>() : nullptr;
-    const uint8_t* const face_sel = toolbar_state.select.faces    ? cur_res->sel_host_buf.get_ptr<uint8_t>()     : nullptr;
+    const uint8_t* const vtx_sel =
+        toolbar_state.select.vertices ? cur_res->vtx_sel_host_buf.get_ptr<uint8_t>() : nullptr;
+    const uint8_t* const face_sel = toolbar_state.select.faces ? cur_res->sel_host_buf.get_ptr<uint8_t>() : nullptr;
 
     const std::optional<Sculptor::Geometry::BoundingBox> sel_bbox =
         patch_geometry.get_selection_bounding_box(vtx_sel, face_sel);
@@ -1634,11 +1617,7 @@ void GeometryEditor::center_selection()
     const vmath::vec3 center    = (bbox.min_pos + bbox.max_pos) * 0.5f * inv_scale;
     const vmath::vec3 bbox_size = (bbox.max_pos - bbox.min_pos) * inv_scale;
 
-    const float max_size = std::max(std::max(std::max(
-                                bbox_size.x,
-                                bbox_size.y),
-                                bbox_size.z),
-                                2 * inv_scale);
+    const float max_size = std::max(std::max(std::max(bbox_size.x, bbox_size.y), bbox_size.z), 2 * inv_scale);
 
     Camera& camera = view.camera[static_cast<int>(view.view_type)];
 
@@ -1652,12 +1631,12 @@ void GeometryEditor::center_selection()
         }
     }
     else {
-        const float fit_view_height = max_size * int16_scale * 1.75f;
-        constexpr float epsilon     = 1e-5f;
-        const bool at_home_pos      = vmath::length(camera.pos - center) < epsilon;
-        const bool at_home_zoom     = fabsf(camera.view_height - fit_view_height) < 0.5f;
+        const float     fit_view_height = max_size * int16_scale * 1.75f;
+        constexpr float epsilon         = 1e-5f;
+        const bool      at_home_pos     = vmath::length(camera.pos - center) < epsilon;
+        const bool      at_home_zoom    = fabsf(camera.view_height - fit_view_height) < 0.5f;
         if (at_home_pos && at_home_zoom) {
-            camera.rot = vmath::quat{0.0f, 0.0f, 0.0f, 1.0f};
+            camera.rot = vmath::quat{ 0.0f, 0.0f, 0.0f, 1.0f };
         }
         else {
             camera.pos         = center;
@@ -1669,11 +1648,11 @@ void GeometryEditor::center_selection()
 bool GeometryEditor::gui_toolbar()
 {
     // Skip if it's not loaded yet
-    if ( ! toolbar_texture)
+    if (! toolbar_texture)
         return true;
 
     constexpr uint32_t margin = 10;
-    ImGui::SetCursorPos(ImVec2{margin, margin + ImGui::GetTextLineHeightWithSpacing()});
+    ImGui::SetCursorPos(ImVec2{ margin, margin + ImGui::GetTextLineHeightWithSpacing() });
 
     Mode new_mode = mode;
 
@@ -1705,7 +1684,7 @@ bool GeometryEditor::gui_toolbar()
         if (mode != Mode::select)
             saved_select = toolbar_state.select;
         new_mode = Mode::select;
-        if ( ! toolbar_state.select.vertices) {
+        if (! toolbar_state.select.vertices) {
             clear_selection(cur_res->vtx_sel_host_buf, patch_geometry.get_num_vertices());
             vtx_sel_dirty = true;
         }
@@ -1716,7 +1695,7 @@ bool GeometryEditor::gui_toolbar()
             saved_select = toolbar_state.select;
         new_mode = Mode::select;
 
-        if ( ! toolbar_state.select.faces) {
+        if (! toolbar_state.select.faces) {
             clear_selection(cur_res->sel_host_buf, patch_geometry.get_num_faces());
             face_sel_dirty = true;
         }
@@ -1731,10 +1710,10 @@ bool GeometryEditor::gui_toolbar()
 
     if (toolbar_button(ToolbarButton::view_perspective, &toolbar_state.view_perspective)) {
         toolbar_state.view_perspective = true;
-        toolbar_state.view_ortho_x = false;
-        toolbar_state.view_ortho_y = false;
-        toolbar_state.view_ortho_z = false;
-        view.view_type = ViewType::free_moving;
+        toolbar_state.view_ortho_x     = false;
+        toolbar_state.view_ortho_y     = false;
+        toolbar_state.view_ortho_z     = false;
+        view.view_type                 = ViewType::free_moving;
     }
 
     if (toolbar_button(ToolbarButton::view_ortho_z, &toolbar_state.view_ortho_z)) {
@@ -1743,9 +1722,9 @@ bool GeometryEditor::gui_toolbar()
         else
             view.view_type = (view.view_type == ViewType::front) ? ViewType::back : ViewType::front;
         toolbar_state.view_perspective = false;
-        toolbar_state.view_ortho_x = false;
-        toolbar_state.view_ortho_y = false;
-        toolbar_state.view_ortho_z = true;
+        toolbar_state.view_ortho_x     = false;
+        toolbar_state.view_ortho_y     = false;
+        toolbar_state.view_ortho_z     = true;
     }
 
     if (toolbar_button(ToolbarButton::view_ortho_x, &toolbar_state.view_ortho_x)) {
@@ -1754,9 +1733,9 @@ bool GeometryEditor::gui_toolbar()
         else
             view.view_type = (view.view_type == ViewType::left) ? ViewType::right : ViewType::left;
         toolbar_state.view_perspective = false;
-        toolbar_state.view_ortho_x = true;
-        toolbar_state.view_ortho_y = false;
-        toolbar_state.view_ortho_z = false;
+        toolbar_state.view_ortho_x     = true;
+        toolbar_state.view_ortho_y     = false;
+        toolbar_state.view_ortho_z     = false;
     }
 
     if (toolbar_button(ToolbarButton::view_ortho_y, &toolbar_state.view_ortho_y)) {
@@ -1765,9 +1744,9 @@ bool GeometryEditor::gui_toolbar()
         else
             view.view_type = (view.view_type == ViewType::bottom) ? ViewType::top : ViewType::bottom;
         toolbar_state.view_perspective = false;
-        toolbar_state.view_ortho_x = false;
-        toolbar_state.view_ortho_y = true;
-        toolbar_state.view_ortho_z = false;
+        toolbar_state.view_ortho_x     = false;
+        toolbar_state.view_ortho_y     = true;
+        toolbar_state.view_ortho_z     = false;
     }
 
     toolbar_button(ToolbarButton::toggle_tessell, &toolbar_state.toggle_tessellation);
@@ -1815,15 +1794,15 @@ void GeometryEditor::switch_mode(Mode new_mode)
 
         if (mode == Mode::select) {
             saved_select = toolbar_state.select;
-            patch_geometry.freeze_selection(
-                cur_res->sel_host_buf.get_ptr<uint8_t>(),
-                cur_res->vtx_sel_host_buf.get_ptr<uint8_t>());
+            patch_geometry.freeze_selection(cur_res->sel_host_buf.get_ptr<uint8_t>(),
+                                            cur_res->vtx_sel_host_buf.get_ptr<uint8_t>());
         }
 
         if (new_mode == Mode::select) {
             cancel_edit_mode();
             patch_geometry.invalidate_selection();
-        } else {
+        }
+        else {
             finish_edit_mode();
         }
 
@@ -1872,25 +1851,25 @@ void GeometryEditor::switch_mode(Mode new_mode)
 bool GeometryEditor::create_gui_frame(uint32_t image_idx, bool* need_realloc, const UserInput& input)
 {
     cur_res = &view.res[image_idx];
-    DEFER { cur_res = nullptr; };
+    DEFER
+    {
+        cur_res = nullptr;
+    };
 
     handle_keyboard_actions();
 
     char window_title[sizeof(object_name) + 36];
-    snprintf(window_title, sizeof(window_title),
-             "%s - %s###Geometry Editor", get_editor_name(), get_object_name());
+    snprintf(window_title, sizeof(window_title), "%s - %s###Geometry Editor", get_editor_name(), get_object_name());
 
-    const ImGuiWindowFlags geom_win_flags =
-        ImGuiWindowFlags_NoScrollWithMouse |
-        ImGuiWindowFlags_NoScrollbar;
+    const ImGuiWindowFlags geom_win_flags = ImGuiWindowFlags_NoScrollWithMouse | ImGuiWindowFlags_NoScrollbar;
 
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2{0, 0});
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2{ 0, 0 });
 
     const bool window_ok = ImGui::Begin(window_title, nullptr, geom_win_flags);
 
     ImGui::PopStyleVar();
 
-    if ( ! window_ok) {
+    if (! window_ok) {
         ImGui::End();
         return true;
     }
@@ -1900,9 +1879,9 @@ bool GeometryEditor::create_gui_frame(uint32_t image_idx, bool* need_realloc, co
 
     const ImVec2 content_size = ImGui::GetWindowSize();
 
-    const uint32_t new_width  = static_cast<uint32_t>(content_size.x > 0.0f ? content_size.x : 1.0f);
-    const uint32_t new_height = static_cast<uint32_t>(content_size.y > min_win_space ?
-                                                      content_size.y - min_win_space : 1.0f);
+    const uint32_t new_width = static_cast<uint32_t>(content_size.x > 0.0f ? content_size.x : 1.0f);
+    const uint32_t new_height =
+        static_cast<uint32_t>(content_size.y > min_win_space ? content_size.y - min_win_space : 1.0f);
 
     if ((new_width != window_width) || (new_height != window_height))
         *need_realloc = true;
@@ -1911,12 +1890,11 @@ bool GeometryEditor::create_gui_frame(uint32_t image_idx, bool* need_realloc, co
     window_height = new_height;
 
     const ImVec2 image_pos = ImGui::GetCursorPos();
-    const ImVec2 image_size{static_cast<float>(window_width), static_cast<float>(window_height)};
+    const ImVec2 image_size{ static_cast<float>(window_width), static_cast<float>(window_height) };
 
     {
-        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2{0, 0});
-        ImGui::Image(make_texture_id(cur_res->gui_texture),
-                     image_size);
+        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2{ 0, 0 });
+        ImGui::Image(make_texture_id(cur_res->gui_texture), image_size);
         ImGui::PopStyleVar();
     }
 
@@ -1931,7 +1909,7 @@ bool GeometryEditor::create_gui_frame(uint32_t image_idx, bool* need_realloc, co
     view.mouse_world_pos = std::nullopt;
     if (cur_res->hover_pos_host_buf.allocated())
         view.mouse_world_pos = read_mouse_world_pos();
-    if ( ! view.mouse_world_pos)
+    if (! view.mouse_world_pos)
         view.mouse_world_pos = calc_grid_world_pos(view);
 
     handle_mouse_actions(local_input, ImGui::IsItemHovered());
@@ -1941,8 +1919,8 @@ bool GeometryEditor::create_gui_frame(uint32_t image_idx, bool* need_realloc, co
 
         // Selection rectangle
         if (mouse_action == Action::select) {
-            const ImVec2 p0{image_rect_min.x + mouse_action_init.x, image_rect_min.y + mouse_action_init.y};
-            const ImVec2 p1{image_rect_min.x + view.mouse_pos.x,    image_rect_min.y + view.mouse_pos.y};
+            const ImVec2 p0{ image_rect_min.x + mouse_action_init.x, image_rect_min.y + mouse_action_init.y };
+            const ImVec2 p1{ image_rect_min.x + view.mouse_pos.x, image_rect_min.y + view.mouse_pos.y };
             dl->AddRectFilled(p0, p1, IM_COL32(255, 255, 255, 30));
             dl->AddRect(p0, p1, IM_COL32(255, 255, 255, 200));
         }
@@ -1953,17 +1931,17 @@ bool GeometryEditor::create_gui_frame(uint32_t image_idx, bool* need_realloc, co
 
     const ImVec2 status_bar_pos = ImGui::GetCursorPos();
 
-    if ( ! gui_toolbar())
+    if (! gui_toolbar())
         return false;
 
-    const ImVec2 mask_pos{image_pos.x, ImGui::GetCursorPos().y};
-    const ImVec2 mask_size{image_size.x, image_size.y - (mask_pos.y - image_pos.y)};
+    const ImVec2 mask_pos{ image_pos.x, ImGui::GetCursorPos().y };
+    const ImVec2 mask_size{ image_size.x, image_size.y - (mask_pos.y - image_pos.y) };
 
     ImGui::SetCursorPos(mask_pos);
 
     if (mask_size.x > 0 && mask_size.y > 0) {
         // Prevent mouse from dragging the entire window
-        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2{0, 0});
+        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2{ 0, 0 });
         ImGui::InvisibleButton("Obscure Geometry Editor View", mask_size);
         ImGui::PopStyleVar();
     }
@@ -2001,10 +1979,10 @@ bool GeometryEditor::create_gui_frame(uint32_t image_idx, bool* need_realloc, co
     if (ImGui::BeginPopupModal("Open", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
         ImGui::InputText("##path", dialog_path, sizeof dialog_path);
         if (ImGui::Button("Open")) {
-            if (!patch_geometry.load(dialog_path))
+            if (! patch_geometry.load(dialog_path))
                 return false;
 
-            clear_selection(cur_res->sel_host_buf,     patch_geometry.get_num_faces());
+            clear_selection(cur_res->sel_host_buf, patch_geometry.get_num_faces());
             clear_selection(cur_res->vtx_sel_host_buf, patch_geometry.get_num_vertices());
             face_sel_dirty = true;
             vtx_sel_dirty  = true;
@@ -2026,11 +2004,11 @@ bool GeometryEditor::create_gui_frame(uint32_t image_idx, bool* need_realloc, co
 
 bool GeometryEditor::draw_frame(VkCommandBuffer cmdbuf, uint32_t image_idx)
 {
-    if ( ! toolbar_image.send_to_gpu(cmdbuf))
+    if (! toolbar_image.send_to_gpu(cmdbuf))
         return false;
 
     // Send any updates/modifications to geometry to the GPU
-    if ( ! patch_geometry.send_to_gpu(cmdbuf))
+    if (! patch_geometry.send_to_gpu(cmdbuf))
         return false;
 
     // Calculate and set up per-frame data
@@ -2041,7 +2019,7 @@ bool GeometryEditor::draw_frame(VkCommandBuffer cmdbuf, uint32_t image_idx)
     // Barriers issued here cover both the sel_buf transfer and the frame_data transfer.
     // Surface hover detection is now performed inline in the G-buffer fragment shader
     // using frame_data, so no separate selection geometry pass is needed.
-    if ( ! setup_selection(cmdbuf, image_idx))
+    if (! setup_selection(cmdbuf, image_idx))
         return false;
 
     // Draw G-buffer.  This is several output attachments:
@@ -2051,16 +2029,16 @@ bool GeometryEditor::draw_frame(VkCommandBuffer cmdbuf, uint32_t image_idx)
     //   use viewport location and inverse proj*view matrix to restore world position coordinates
     //
     // The fragment shader also detects if the mouse hovers over any face (for shallow selection)
-    if ( ! draw_geometry_pass(cmdbuf, view, image_idx))
+    if (! draw_geometry_pass(cmdbuf, view, image_idx))
         return false;
 
     // If deep selection is enabled, e.g. in wireframe mode, render geometry inside
     // selection rectangle to detect all hovered hidden faces
-    if ( ! draw_deep_selection(cmdbuf, view, image_idx))
+    if (! draw_deep_selection(cmdbuf, view, image_idx))
         return false;
 
     // If wireframe mode is enabled, render wireframe for the geometry
-    if ( ! draw_wireframe_pass(cmdbuf, view, image_idx))
+    if (! draw_wireframe_pass(cmdbuf, view, image_idx))
         return false;
 
     // Perform final rendering pass.  Use G-buffers as input and apply fragment
@@ -2069,55 +2047,45 @@ bool GeometryEditor::draw_frame(VkCommandBuffer cmdbuf, uint32_t image_idx)
     //
     // Edge outlines for patches are drawn by using object ID from G-buffer
     // to detect boundaries of patches.
-    if ( ! draw_lighting_pass(cmdbuf, view, image_idx))
+    if (! draw_lighting_pass(cmdbuf, view, image_idx))
         return false;
 
-    if ( ! render_grid(cmdbuf, view, image_idx))
+    if (! render_grid(cmdbuf, view, image_idx))
         return false;
 
-    if ( ! render_control_points(cmdbuf, view, image_idx))
+    if (! render_control_points(cmdbuf, view, image_idx))
         return false;
 
     // Copy selection buffer back to host for next frame
-    static const Buffer::Transition sel_buf_before_readback = {
-        VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
-        VK_ACCESS_2_SHADER_READ_BIT,
-        VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-        VK_ACCESS_2_TRANSFER_READ_BIT
-    };
+    static const Buffer::Transition sel_buf_before_readback = { VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+                                                                VK_ACCESS_2_SHADER_READ_BIT,
+                                                                VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                                                                VK_ACCESS_2_TRANSFER_READ_BIT };
     sel_buf.barrier(sel_buf_before_readback);
 
     // Barrier: sel_host_buf was read as copy source in setup_selection(); ensure that
     // TRANSFER_READ completes before we write it as copy destination here.
-    static const Buffer::Transition sel_host_buf_before_readback = {
-        VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-        VK_ACCESS_2_TRANSFER_READ_BIT,
-        VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-        VK_ACCESS_2_TRANSFER_WRITE_BIT
-    };
+    static const Buffer::Transition sel_host_buf_before_readback = { VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                                                                     VK_ACCESS_2_TRANSFER_READ_BIT,
+                                                                     VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                                                                     VK_ACCESS_2_TRANSFER_WRITE_BIT };
     view.res[image_idx].sel_host_buf.barrier(sel_host_buf_before_readback);
 
     send_barrier(cmdbuf);
 
     static const VkBufferCopy sel_copy_region = { 0, 0, max_objects };
-    vkCmdCopyBuffer(cmdbuf, sel_buf.get_buffer(),
-                    view.res[image_idx].sel_host_buf.get_buffer(),
-                    1, &sel_copy_region);
+    vkCmdCopyBuffer(cmdbuf, sel_buf.get_buffer(), view.res[image_idx].sel_host_buf.get_buffer(), 1, &sel_copy_region);
 
     return true;
 }
 
-static const Image::Transition render_viewport_layout = {
-    VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
-    VK_ACCESS_2_NONE,
-    VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
-    VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
-    VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
-};
+static const Image::Transition render_viewport_layout = { VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
+                                                          VK_ACCESS_2_NONE,
+                                                          VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                                                          VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+                                                          VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL };
 
-bool GeometryEditor::draw_geometry_pass(VkCommandBuffer cmdbuf,
-                                        View&           dst_view,
-                                        uint32_t        image_idx)
+bool GeometryEditor::draw_geometry_pass(VkCommandBuffer cmdbuf, View& dst_view, uint32_t image_idx)
 {
     Resources& res = dst_view.res[image_idx];
 
@@ -2140,76 +2108,68 @@ bool GeometryEditor::draw_geometry_pass(VkCommandBuffer cmdbuf,
 
     static VkRenderingAttachmentInfo gbuf_color_att[] = {
         // Object ID attachment
-        {
-            VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
-            nullptr,
-            VK_NULL_HANDLE,                   // imageView (obj_id)
-            VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-            VK_RESOLVE_MODE_NONE,
-            VK_NULL_HANDLE,                   // resolveImageView
-            VK_IMAGE_LAYOUT_UNDEFINED,        // resolveImageLayout
-            VK_ATTACHMENT_LOAD_OP_CLEAR,
-            VK_ATTACHMENT_STORE_OP_STORE,
-            make_clear_color(0, 0, 0, 0)
-        },
+        { VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+          nullptr,
+          VK_NULL_HANDLE, // imageView (obj_id)
+          VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+          VK_RESOLVE_MODE_NONE,
+          VK_NULL_HANDLE,            // resolveImageView
+          VK_IMAGE_LAYOUT_UNDEFINED, // resolveImageLayout
+          VK_ATTACHMENT_LOAD_OP_CLEAR,
+          VK_ATTACHMENT_STORE_OP_STORE,
+          make_clear_color(0, 0, 0, 0) },
         // Normal attachment
-        {
-            VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
-            nullptr,
-            VK_NULL_HANDLE,                   // imageView (normal)
-            VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-            VK_RESOLVE_MODE_NONE,
-            VK_NULL_HANDLE,                   // resolveImageView
-            VK_IMAGE_LAYOUT_UNDEFINED,        // resolveImageLayout
-            VK_ATTACHMENT_LOAD_OP_CLEAR,
-            VK_ATTACHMENT_STORE_OP_STORE,
-            make_clear_color(0, 0, 0, 0)
-        },
+        { VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+          nullptr,
+          VK_NULL_HANDLE, // imageView (normal)
+          VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+          VK_RESOLVE_MODE_NONE,
+          VK_NULL_HANDLE,            // resolveImageView
+          VK_IMAGE_LAYOUT_UNDEFINED, // resolveImageLayout
+          VK_ATTACHMENT_LOAD_OP_CLEAR,
+          VK_ATTACHMENT_STORE_OP_STORE,
+          make_clear_color(0, 0, 0, 0) },
         // Texture coordinates attachment
-        {
-            VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
-            nullptr,
-            VK_NULL_HANDLE,                   // imageView (texture coordinates)
-            VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-            VK_RESOLVE_MODE_NONE,
-            VK_NULL_HANDLE,                   // resolveImageView
-            VK_IMAGE_LAYOUT_UNDEFINED,        // resolveImageLayout
-            VK_ATTACHMENT_LOAD_OP_CLEAR,
-            VK_ATTACHMENT_STORE_OP_STORE,
-            make_clear_color(0, 0, 0, 0)
-        },
+        { VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+          nullptr,
+          VK_NULL_HANDLE, // imageView (texture coordinates)
+          VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+          VK_RESOLVE_MODE_NONE,
+          VK_NULL_HANDLE,            // resolveImageView
+          VK_IMAGE_LAYOUT_UNDEFINED, // resolveImageLayout
+          VK_ATTACHMENT_LOAD_OP_CLEAR,
+          VK_ATTACHMENT_STORE_OP_STORE,
+          make_clear_color(0, 0, 0, 0) },
     };
 
     gbuf_color_att[0].imageView = res.obj_id.get_view();
     gbuf_color_att[1].imageView = res.normal.get_view();
     gbuf_color_att[2].imageView = res.tex_coord.get_view();
 
-    static VkRenderingAttachmentInfo depth_att = {
-        VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
-        nullptr,
-        VK_NULL_HANDLE,                         // imageView
-        VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
-        VK_RESOLVE_MODE_NONE,
-        VK_NULL_HANDLE,                         // resolveImageView
-        VK_IMAGE_LAYOUT_UNDEFINED,              // resolveImageLayout
-        VK_ATTACHMENT_LOAD_OP_CLEAR,
-        VK_ATTACHMENT_STORE_OP_STORE,
-        make_clear_depth(0, 0)
-    };
+    static VkRenderingAttachmentInfo depth_att = { VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+                                                   nullptr,
+                                                   VK_NULL_HANDLE, // imageView
+                                                   VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+                                                   VK_RESOLVE_MODE_NONE,
+                                                   VK_NULL_HANDLE,            // resolveImageView
+                                                   VK_IMAGE_LAYOUT_UNDEFINED, // resolveImageLayout
+                                                   VK_ATTACHMENT_LOAD_OP_CLEAR,
+                                                   VK_ATTACHMENT_STORE_OP_STORE,
+                                                   make_clear_depth(0, 0) };
 
     depth_att.imageView = res.depth.get_view();
 
     static VkRenderingInfo gbuf_rendering_info = {
         VK_STRUCTURE_TYPE_RENDERING_INFO,
         nullptr,
-        0,                          // flags
-        { },                        // renderArea
-        1,                          // layerCount
-        0,                          // viewMask
-        3,                          // colorAttachmentCount
+        0,  // flags
+        {}, // renderArea
+        1,  // layerCount
+        0,  // viewMask
+        3,  // colorAttachmentCount
         gbuf_color_att,
         &depth_att,
-        nullptr                     // pStencilAttachment
+        nullptr // pStencilAttachment
     };
 
     gbuf_rendering_info.renderArea.offset        = { 0, 0 };
@@ -2224,30 +2184,27 @@ bool GeometryEditor::draw_geometry_pass(VkCommandBuffer cmdbuf,
 
     send_viewport_and_scissor(cmdbuf, dst_view.width, dst_view.height);
 
-    if ( ! render_geometry(cmdbuf, dst_view, image_idx))
+    if (! render_geometry(cmdbuf, dst_view, image_idx))
         return false;
 
     vkCmdEndRendering(cmdbuf);
 
     // Transition G-buffers and depth to shader-readable layout for the lighting pass
-    static const Image::Transition gbuf_to_shader_read = {
-        VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
-        VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
-        VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
-        VK_ACCESS_2_SHADER_READ_BIT,
-        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
-    };
+    static const Image::Transition gbuf_to_shader_read = { VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                                                           VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+                                                           VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+                                                           VK_ACCESS_2_SHADER_READ_BIT,
+                                                           VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
     res.obj_id.barrier(gbuf_to_shader_read);
     res.normal.barrier(gbuf_to_shader_read);
     res.tex_coord.barrier(gbuf_to_shader_read);
 
-    static const Image::Transition depth_to_shader_read = {
-        VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
-        VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
-        VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
-        VK_ACCESS_2_SHADER_READ_BIT,
-        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
-    };
+    static const Image::Transition depth_to_shader_read = { VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT |
+                                                                VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
+                                                            VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+                                                            VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+                                                            VK_ACCESS_2_SHADER_READ_BIT,
+                                                            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
     res.depth.barrier(depth_to_shader_read);
 
     send_barrier(cmdbuf);
@@ -2255,9 +2212,7 @@ bool GeometryEditor::draw_geometry_pass(VkCommandBuffer cmdbuf,
     return true;
 }
 
-bool GeometryEditor::draw_lighting_pass(VkCommandBuffer cmdbuf,
-                                        View&           dst_view,
-                                        uint32_t        image_idx)
+bool GeometryEditor::draw_lighting_pass(VkCommandBuffer cmdbuf, View& dst_view, uint32_t image_idx)
 {
     Resources& res = dst_view.res[image_idx];
 
@@ -2266,32 +2221,28 @@ bool GeometryEditor::draw_lighting_pass(VkCommandBuffer cmdbuf,
 
     // Barrier: wait for sel_buf writes from geometry/deep selection passes before reading here.
     // Also: hover_pos_buf fill must complete before the fragment shader writes to it.
-    static const Buffer::Transition sel_buf_for_lighting = {
-        VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
-        VK_ACCESS_2_SHADER_WRITE_BIT,
-        VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
-        VK_ACCESS_2_SHADER_READ_BIT
-    };
+    static const Buffer::Transition sel_buf_for_lighting = { VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT |
+                                                                 VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+                                                             VK_ACCESS_2_SHADER_WRITE_BIT,
+                                                             VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+                                                             VK_ACCESS_2_SHADER_READ_BIT };
     sel_buf.barrier(sel_buf_for_lighting);
 
-    static const Buffer::Transition hover_fill_to_shader = {
-        VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-        VK_ACCESS_2_TRANSFER_WRITE_BIT,
-        VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
-        VK_ACCESS_2_SHADER_WRITE_BIT
-    };
+    static const Buffer::Transition hover_fill_to_shader = { VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                                                             VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                                                             VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+                                                             VK_ACCESS_2_SHADER_WRITE_BIT };
     res.hover_pos_buf.barrier(hover_fill_to_shader);
 
     // Barrier: color attachment was written by wireframe pass; transition to COLOR_ATTACHMENT
     // for the lighting pass load (it is already in COLOR_ATTACHMENT_OPTIMAL from wireframe pass,
     // but we need to add a dependency on the previous color attachment write)
-    static const Image::Transition color_for_lighting = {
-        VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
-        VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
-        VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
-        VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
-        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
-    };
+    static const Image::Transition color_for_lighting = { VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                                                          VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+                                                          VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                                                          VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT |
+                                                              VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+                                                          VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL };
     res.color.barrier(color_for_lighting);
 
     send_barrier(cmdbuf);
@@ -2299,12 +2250,12 @@ bool GeometryEditor::draw_lighting_pass(VkCommandBuffer cmdbuf,
     static VkRenderingAttachmentInfo light_color_att = {
         VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
         nullptr,
-        VK_NULL_HANDLE,                   // imageView
+        VK_NULL_HANDLE, // imageView
         VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
         VK_RESOLVE_MODE_NONE,
-        VK_NULL_HANDLE,                   // resolveImageView
-        VK_IMAGE_LAYOUT_UNDEFINED,        // resolveImageLayout
-        VK_ATTACHMENT_LOAD_OP_LOAD,       // preserve wireframe/background from wireframe pass
+        VK_NULL_HANDLE,             // resolveImageView
+        VK_IMAGE_LAYOUT_UNDEFINED,  // resolveImageLayout
+        VK_ATTACHMENT_LOAD_OP_LOAD, // preserve wireframe/background from wireframe pass
         VK_ATTACHMENT_STORE_OP_STORE,
         make_clear_color(0, 0, 0, 0)
     };
@@ -2314,14 +2265,14 @@ bool GeometryEditor::draw_lighting_pass(VkCommandBuffer cmdbuf,
     static VkRenderingInfo light_rendering_info = {
         VK_STRUCTURE_TYPE_RENDERING_INFO,
         nullptr,
-        0,                          // flags
-        { },                        // renderArea
-        1,                          // layerCount
-        0,                          // viewMask
-        1,                          // colorAttachmentCount
+        0,  // flags
+        {}, // renderArea
+        1,  // layerCount
+        0,  // viewMask
+        1,  // colorAttachmentCount
         &light_color_att,
-        nullptr,                    // pDepthAttachment
-        nullptr                     // pStencilAttachment
+        nullptr, // pDepthAttachment
+        nullptr  // pStencilAttachment
     };
 
     light_rendering_info.renderArea.offset        = { 0, 0 };
@@ -2330,29 +2281,21 @@ bool GeometryEditor::draw_lighting_pass(VkCommandBuffer cmdbuf,
 
     vkCmdBeginRendering(cmdbuf, &light_rendering_info);
 
-    static VkDescriptorImageInfo obj_id_image_info = {
-        VK_NULL_HANDLE, // sampler (filled below)
-        VK_NULL_HANDLE, // imageView
-        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
-    };
+    static VkDescriptorImageInfo obj_id_image_info = { VK_NULL_HANDLE, // sampler (filled below)
+                                                       VK_NULL_HANDLE, // imageView
+                                                       VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
 
-    static VkDescriptorImageInfo normal_image_info = {
-        VK_NULL_HANDLE, // sampler (filled below)
-        VK_NULL_HANDLE, // imageView
-        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
-    };
+    static VkDescriptorImageInfo normal_image_info = { VK_NULL_HANDLE, // sampler (filled below)
+                                                       VK_NULL_HANDLE, // imageView
+                                                       VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
 
-    static VkDescriptorImageInfo depth_image_info = {
-        VK_NULL_HANDLE, // sampler (filled below)
-        VK_NULL_HANDLE, // imageView
-        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
-    };
+    static VkDescriptorImageInfo depth_image_info = { VK_NULL_HANDLE, // sampler (filled below)
+                                                      VK_NULL_HANDLE, // imageView
+                                                      VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
 
-    static VkDescriptorImageInfo tex_coord_image_info = {
-        VK_NULL_HANDLE, // sampler (filled below)
-        VK_NULL_HANDLE, // imageView
-        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
-    };
+    static VkDescriptorImageInfo tex_coord_image_info = { VK_NULL_HANDLE, // sampler (filled below)
+                                                          VK_NULL_HANDLE, // imageView
+                                                          VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
 
     obj_id_image_info.sampler      = Sculptor::gbuffer_sampler;
     obj_id_image_info.imageView    = res.obj_id.get_view();
@@ -2363,75 +2306,71 @@ bool GeometryEditor::draw_lighting_pass(VkCommandBuffer cmdbuf,
     tex_coord_image_info.sampler   = Sculptor::gbuffer_sampler;
     tex_coord_image_info.imageView = res.tex_coord.get_view();
 
-    push_descriptor(cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, Sculptor::lighting_layout,
-                    0, obj_id_image_info);
+    push_descriptor(cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, Sculptor::lighting_layout, 0, obj_id_image_info);
 
-    static VkDescriptorBufferInfo transforms_buf_info = {
-        VK_NULL_HANDLE,
-        0,
-        0
-    };
-    transforms_buf_info.buffer = res.transforms.get_buffer();
-    transforms_buf_info.offset = 0;
-    transforms_buf_info.range  = sizeof(Transforms);
+    static VkDescriptorBufferInfo transforms_buf_info = { VK_NULL_HANDLE, 0, 0 };
+    transforms_buf_info.buffer                        = res.transforms.get_buffer();
+    transforms_buf_info.offset                        = 0;
+    transforms_buf_info.range                         = sizeof(Transforms);
 
-    push_descriptor(cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, Sculptor::lighting_layout,
-                    1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, transforms_buf_info);
+    push_descriptor(cmdbuf,
+                    VK_PIPELINE_BIND_POINT_GRAPHICS,
+                    Sculptor::lighting_layout,
+                    1,
+                    VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+                    transforms_buf_info);
 
-    static VkDescriptorBufferInfo faces_buf_info = {
-        VK_NULL_HANDLE,
-        0,
-        0
-    };
+    static VkDescriptorBufferInfo faces_buf_info = { VK_NULL_HANDLE, 0, 0 };
     patch_geometry.write_faces_descriptor(&faces_buf_info);
 
-    push_descriptor(cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, Sculptor::lighting_layout,
-                    2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, faces_buf_info);
+    push_descriptor(cmdbuf,
+                    VK_PIPELINE_BIND_POINT_GRAPHICS,
+                    Sculptor::lighting_layout,
+                    2,
+                    VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                    faces_buf_info);
 
-    push_descriptor(cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, Sculptor::lighting_layout,
-                    3, normal_image_info);
+    push_descriptor(cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, Sculptor::lighting_layout, 3, normal_image_info);
 
-    push_descriptor(cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, Sculptor::lighting_layout,
-                    4, depth_image_info);
+    push_descriptor(cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, Sculptor::lighting_layout, 4, depth_image_info);
 
-    push_descriptor(cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, Sculptor::lighting_layout,
-                    8, tex_coord_image_info);
+    push_descriptor(cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, Sculptor::lighting_layout, 8, tex_coord_image_info);
 
-    static VkDescriptorBufferInfo sel_buf_info = {
-        VK_NULL_HANDLE,
-        0,
-        0
-    };
-    sel_buf_info.buffer = sel_buf.get_buffer();
-    sel_buf_info.offset = 0;
-    sel_buf_info.range  = VK_WHOLE_SIZE;
+    static VkDescriptorBufferInfo sel_buf_info = { VK_NULL_HANDLE, 0, 0 };
+    sel_buf_info.buffer                        = sel_buf.get_buffer();
+    sel_buf_info.offset                        = 0;
+    sel_buf_info.range                         = VK_WHOLE_SIZE;
 
-    push_descriptor(cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, Sculptor::lighting_layout,
-                    5, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, sel_buf_info);
+    push_descriptor(cmdbuf,
+                    VK_PIPELINE_BIND_POINT_GRAPHICS,
+                    Sculptor::lighting_layout,
+                    5,
+                    VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                    sel_buf_info);
 
-    static VkDescriptorBufferInfo frame_data_buf_info = {
-        VK_NULL_HANDLE,
-        0,
-        0
-    };
-    frame_data_buf_info.buffer = res.frame_data.get_buffer();
-    frame_data_buf_info.offset = 0;
-    frame_data_buf_info.range  = sizeof(FrameData);
+    static VkDescriptorBufferInfo frame_data_buf_info = { VK_NULL_HANDLE, 0, 0 };
+    frame_data_buf_info.buffer                        = res.frame_data.get_buffer();
+    frame_data_buf_info.offset                        = 0;
+    frame_data_buf_info.range                         = sizeof(FrameData);
 
-    push_descriptor(cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, Sculptor::lighting_layout,
-                    6, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, frame_data_buf_info);
+    push_descriptor(cmdbuf,
+                    VK_PIPELINE_BIND_POINT_GRAPHICS,
+                    Sculptor::lighting_layout,
+                    6,
+                    VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+                    frame_data_buf_info);
 
-    static VkDescriptorBufferInfo hover_pos_buf_info = {
-        VK_NULL_HANDLE,
-        0,
-        0
-    };
-    hover_pos_buf_info.buffer = res.hover_pos_buf.get_buffer();
-    hover_pos_buf_info.offset = 0;
-    hover_pos_buf_info.range  = sizeof(float) * 4;
+    static VkDescriptorBufferInfo hover_pos_buf_info = { VK_NULL_HANDLE, 0, 0 };
+    hover_pos_buf_info.buffer                        = res.hover_pos_buf.get_buffer();
+    hover_pos_buf_info.offset                        = 0;
+    hover_pos_buf_info.range                         = sizeof(float) * 4;
 
-    push_descriptor(cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, Sculptor::lighting_layout,
-                    7, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, hover_pos_buf_info);
+    push_descriptor(cmdbuf,
+                    VK_PIPELINE_BIND_POINT_GRAPHICS,
+                    Sculptor::lighting_layout,
+                    7,
+                    VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                    hover_pos_buf_info);
 
     vkCmdBindPipeline(cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, lighting_mat);
     vkCmdSetDepthTestEnable(cmdbuf, VK_FALSE);
@@ -2444,19 +2383,16 @@ bool GeometryEditor::draw_lighting_pass(VkCommandBuffer cmdbuf,
     vkCmdEndRendering(cmdbuf);
 
     // Barrier: fragment shader write to hover_pos_buf must complete before transfer reads it
-    static const Buffer::Transition hover_shader_to_copy = {
-        VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
-        VK_ACCESS_2_SHADER_WRITE_BIT,
-        VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-        VK_ACCESS_2_TRANSFER_READ_BIT
-    };
+    static const Buffer::Transition hover_shader_to_copy = { VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+                                                             VK_ACCESS_2_SHADER_WRITE_BIT,
+                                                             VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                                                             VK_ACCESS_2_TRANSFER_READ_BIT };
     res.hover_pos_buf.barrier(hover_shader_to_copy);
 
     send_barrier(cmdbuf);
 
     static const VkBufferCopy hover_copy_region = { 0, 0, sizeof(float) * 4 };
-    vkCmdCopyBuffer(cmdbuf, res.hover_pos_buf.get_buffer(),
-                    res.hover_pos_host_buf.get_buffer(), 1, &hover_copy_region);
+    vkCmdCopyBuffer(cmdbuf, res.hover_pos_buf.get_buffer(), res.hover_pos_host_buf.get_buffer(), 1, &hover_copy_region);
 
     return true;
 }
@@ -2466,25 +2402,24 @@ void GeometryEditor::set_frame_data(VkCommandBuffer cmdbuf, uint32_t image_idx)
     FrameData frame_data = {};
 
     if (mode == Mode::select) {
-        const vmath::vec2 view_max{static_cast<float>(view.width  - 1),
-                                   static_cast<float>(view.height - 1)};
+        const vmath::vec2 view_max{ static_cast<float>(view.width - 1), static_cast<float>(view.height - 1) };
 
-        const vmath::vec2 mouse_snap_px{toolbar_state.select.vertices ? 4.0f : 1.0f};
+        const vmath::vec2 mouse_snap_px{ toolbar_state.select.vertices ? 4.0f : 1.0f };
 
         if (mouse_action == Action::none) {
             // Mouse hover: use a small snap rectangle around the cursor
-            frame_data.selection_rect_min = vmath::max(view.mouse_pos - mouse_snap_px, vmath::vec2{0.0f});
+            frame_data.selection_rect_min = vmath::max(view.mouse_pos - mouse_snap_px, vmath::vec2{ 0.0f });
             frame_data.selection_rect_max = vmath::min(view.mouse_pos + mouse_snap_px, view_max);
         }
         else if (mouse_action == Action::select) {
             // Active drag: use the full selection rectangle
-            frame_data.selection_rect_min = vmath::clamp(view.mouse_pos, vmath::vec2{0.0f}, mouse_action_init);
+            frame_data.selection_rect_min = vmath::clamp(view.mouse_pos, vmath::vec2{ 0.0f }, mouse_action_init);
             frame_data.selection_rect_max = vmath::clamp(view.mouse_pos, mouse_action_init, view_max);
 
             if (frame_data.selection_rect_max.x <= frame_data.selection_rect_min.x ||
                 frame_data.selection_rect_max.y <= frame_data.selection_rect_min.y) {
 
-                frame_data.selection_rect_min = vmath::max(view.mouse_pos - mouse_snap_px, vmath::vec2{0.0f});
+                frame_data.selection_rect_min = vmath::max(view.mouse_pos - mouse_snap_px, vmath::vec2{ 0.0f });
                 frame_data.selection_rect_max = vmath::min(view.mouse_pos + mouse_snap_px, view_max);
             }
         }
@@ -2506,8 +2441,8 @@ void GeometryEditor::set_frame_data(VkCommandBuffer cmdbuf, uint32_t image_idx)
 
     frame_data.mouse_pos = view.mouse_pos;
 
-    frame_data.pixel_dim = vmath::vec2(2.0f) / vmath::vec2(static_cast<float>(view.width),
-                                                           static_cast<float>(view.height));
+    frame_data.pixel_dim =
+        vmath::vec2(2.0f) / vmath::vec2(static_cast<float>(view.width), static_cast<float>(view.height));
 
     frame_data.color_face_base               = { 0.500f, 0.500f, 0.500f, 1.0f };
     frame_data.color_face_hovered            = { 0.727f, 0.455f, 0.184f, 1.0f };
@@ -2520,18 +2455,15 @@ void GeometryEditor::set_frame_data(VkCommandBuffer cmdbuf, uint32_t image_idx)
     frame_data.color_vertex_selected         = { 0.898f, 0.748f, 0.186f, 1.0f };
 
     // Transform light positions from world space to view space
-    const vmath::mat4 model_view = compute_model_view(view);
-    static const vmath::vec4 world_lights[4] = {
-        { -10.0f, 10.0f,  -5.0f, 1.0f },
-        {  10.0f,  5.0f,  -5.0f, 1.0f },
-        {   0.0f,  3.0f,  15.0f, 1.0f },
-        {   0.0f, 15.0f,   0.0f, 1.0f }
-    };
+    const vmath::mat4        model_view      = compute_model_view(view);
+    static const vmath::vec4 world_lights[4] = { { -10.0f, 10.0f, -5.0f, 1.0f },
+                                                 { 10.0f, 5.0f, -5.0f, 1.0f },
+                                                 { 0.0f, 3.0f, 15.0f, 1.0f },
+                                                 { 0.0f, 15.0f, 0.0f, 1.0f } };
     for (size_t i = 0; i < std::size(world_lights); i++)
         frame_data.light_pos[i] = world_lights[i] * model_view;
 
-    vkCmdUpdateBuffer(cmdbuf, view.res[image_idx].frame_data.get_buffer(), 0,
-                      sizeof(frame_data), &frame_data);
+    vkCmdUpdateBuffer(cmdbuf, view.res[image_idx].frame_data.get_buffer(), 0, sizeof(frame_data), &frame_data);
 }
 
 bool GeometryEditor::setup_selection(VkCommandBuffer cmdbuf, uint32_t image_idx)
@@ -2540,28 +2472,22 @@ bool GeometryEditor::setup_selection(VkCommandBuffer cmdbuf, uint32_t image_idx)
 
     // Barrier: wait for previous frame's readback (TRANSFER_READ) before writing sel_buf from host.
     // Also covers frame_data written by vkCmdUpdateBuffer, readable in fragment shaders.
-    static const Buffer::Transition sel_buf_before_copy = {
-        VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-        VK_ACCESS_2_TRANSFER_READ_BIT,
-        VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-        VK_ACCESS_2_TRANSFER_WRITE_BIT
-    };
+    static const Buffer::Transition sel_buf_before_copy = { VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                                                            VK_ACCESS_2_TRANSFER_READ_BIT,
+                                                            VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                                                            VK_ACCESS_2_TRANSFER_WRITE_BIT };
     sel_buf.barrier(sel_buf_before_copy);
 
-    static const Buffer::Transition vtx_sel_buf_before_copy = {
-        VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-        VK_ACCESS_2_TRANSFER_READ_BIT,
-        VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-        VK_ACCESS_2_TRANSFER_WRITE_BIT
-    };
+    static const Buffer::Transition vtx_sel_buf_before_copy = { VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                                                                VK_ACCESS_2_TRANSFER_READ_BIT,
+                                                                VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                                                                VK_ACCESS_2_TRANSFER_WRITE_BIT };
     vtx_sel_buf.barrier(vtx_sel_buf_before_copy);
 
-    static const Buffer::Transition frame_data_after_update = {
-        VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-        VK_ACCESS_2_TRANSFER_WRITE_BIT,
-        VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
-        VK_ACCESS_2_UNIFORM_READ_BIT
-    };
+    static const Buffer::Transition frame_data_after_update = { VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                                                                VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                                                                VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+                                                                VK_ACCESS_2_UNIFORM_READ_BIT };
     res.frame_data.barrier(frame_data_after_update);
 
     static const Buffer::Transition transforms_after_update = {
@@ -2576,33 +2502,29 @@ bool GeometryEditor::setup_selection(VkCommandBuffer cmdbuf, uint32_t image_idx)
 
     if (face_sel_dirty) {
         static const VkBufferCopy sel_copy_region = { 0, 0, max_objects };
-        vkCmdCopyBuffer(cmdbuf, res.sel_host_buf.get_buffer(), sel_buf.get_buffer(),
-                        1, &sel_copy_region);
+        vkCmdCopyBuffer(cmdbuf, res.sel_host_buf.get_buffer(), sel_buf.get_buffer(), 1, &sel_copy_region);
         face_sel_dirty = false;
     }
 
     if (vtx_sel_dirty) {
         static const VkBufferCopy vtx_sel_copy_region = { 0, 0, max_objects };
-        vkCmdCopyBuffer(cmdbuf, res.vtx_sel_host_buf.get_buffer(), vtx_sel_buf.get_buffer(),
-                        1, &vtx_sel_copy_region);
+        vkCmdCopyBuffer(cmdbuf, res.vtx_sel_host_buf.get_buffer(), vtx_sel_buf.get_buffer(), 1, &vtx_sel_copy_region);
         vtx_sel_dirty = false;
     }
 
     // Barrier: wait for copy before compute clears hover bits in sel_buf
-    static const Buffer::Transition sel_buf_before_clear = {
-        VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-        VK_ACCESS_2_TRANSFER_WRITE_BIT,
-        VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-        VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT
-    };
+    static const Buffer::Transition sel_buf_before_clear = { VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                                                             VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                                                             VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                                                             VK_ACCESS_2_SHADER_READ_BIT |
+                                                                 VK_ACCESS_2_SHADER_WRITE_BIT };
     sel_buf.barrier(sel_buf_before_clear);
 
-    static const Buffer::Transition vtx_sel_buf_before_clear = {
-        VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-        VK_ACCESS_2_TRANSFER_WRITE_BIT,
-        VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-        VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT
-    };
+    static const Buffer::Transition vtx_sel_buf_before_clear = { VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                                                                 VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                                                                 VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                                                                 VK_ACCESS_2_SHADER_READ_BIT |
+                                                                     VK_ACCESS_2_SHADER_WRITE_BIT };
     vtx_sel_buf.barrier(vtx_sel_buf_before_clear);
 
     send_barrier(cmdbuf);
@@ -2610,47 +2532,49 @@ bool GeometryEditor::setup_selection(VkCommandBuffer cmdbuf, uint32_t image_idx)
     // Dispatch compute shader to clear obj_hovered (bit 1) while preserving obj_selected (bit 0)
     vkCmdBindPipeline(cmdbuf, VK_PIPELINE_BIND_POINT_COMPUTE, clear_hover_pipe);
 
-    static VkDescriptorBufferInfo sel_buf_compute_info = {
-        VK_NULL_HANDLE,
-        0,
-        0
-    };
-    sel_buf_compute_info.buffer = sel_buf.get_buffer();
-    sel_buf_compute_info.offset = 0;
-    sel_buf_compute_info.range  = VK_WHOLE_SIZE;
+    static VkDescriptorBufferInfo sel_buf_compute_info = { VK_NULL_HANDLE, 0, 0 };
+    sel_buf_compute_info.buffer                        = sel_buf.get_buffer();
+    sel_buf_compute_info.offset                        = 0;
+    sel_buf_compute_info.range                         = VK_WHOLE_SIZE;
 
-    push_descriptor(cmdbuf, VK_PIPELINE_BIND_POINT_COMPUTE, sel_buf_pipe_layout,
-                    0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, sel_buf_compute_info);
+    push_descriptor(cmdbuf,
+                    VK_PIPELINE_BIND_POINT_COMPUTE,
+                    sel_buf_pipe_layout,
+                    0,
+                    VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                    sel_buf_compute_info);
 
     constexpr uint32_t clear_hover_groups = max_objects / 4 / 64;
     vkCmdDispatch(cmdbuf, clear_hover_groups, 1, 1);
 
     // Clear hover bits in vtx_sel_buf using same pipeline
     static VkDescriptorBufferInfo vtx_sel_buf_compute_info = { VK_NULL_HANDLE, 0, 0 };
-    vtx_sel_buf_compute_info.buffer = vtx_sel_buf.get_buffer();
-    vtx_sel_buf_compute_info.offset = 0;
-    vtx_sel_buf_compute_info.range  = VK_WHOLE_SIZE;
+    vtx_sel_buf_compute_info.buffer                        = vtx_sel_buf.get_buffer();
+    vtx_sel_buf_compute_info.offset                        = 0;
+    vtx_sel_buf_compute_info.range                         = VK_WHOLE_SIZE;
 
-    push_descriptor(cmdbuf, VK_PIPELINE_BIND_POINT_COMPUTE, sel_buf_pipe_layout,
-                    0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, vtx_sel_buf_compute_info);
+    push_descriptor(cmdbuf,
+                    VK_PIPELINE_BIND_POINT_COMPUTE,
+                    sel_buf_pipe_layout,
+                    0,
+                    VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                    vtx_sel_buf_compute_info);
 
     vkCmdDispatch(cmdbuf, clear_hover_groups, 1, 1);
 
     // Barrier: wait for compute write before fragment shader reads/writes sel_buf and vtx_sel_buf
-    static const Buffer::Transition sel_buf_after_clear = {
-        VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-        VK_ACCESS_2_SHADER_WRITE_BIT,
-        VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
-        VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT
-    };
+    static const Buffer::Transition sel_buf_after_clear = { VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                                                            VK_ACCESS_2_SHADER_WRITE_BIT,
+                                                            VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+                                                            VK_ACCESS_2_SHADER_READ_BIT |
+                                                                VK_ACCESS_2_SHADER_WRITE_BIT };
     sel_buf.barrier(sel_buf_after_clear);
 
-    static const Buffer::Transition vtx_sel_buf_after_clear = {
-        VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-        VK_ACCESS_2_SHADER_WRITE_BIT,
-        VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
-        VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT
-    };
+    static const Buffer::Transition vtx_sel_buf_after_clear = { VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                                                                VK_ACCESS_2_SHADER_WRITE_BIT,
+                                                                VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+                                                                VK_ACCESS_2_SHADER_READ_BIT |
+                                                                    VK_ACCESS_2_SHADER_WRITE_BIT };
     vtx_sel_buf.barrier(vtx_sel_buf_after_clear);
 
     send_barrier(cmdbuf);
@@ -2658,31 +2582,27 @@ bool GeometryEditor::setup_selection(VkCommandBuffer cmdbuf, uint32_t image_idx)
     return true;
 }
 
-bool GeometryEditor::draw_deep_selection(VkCommandBuffer cmdbuf,
-                                         View&           dst_view,
-                                         uint32_t        image_idx)
+bool GeometryEditor::draw_deep_selection(VkCommandBuffer cmdbuf, View& dst_view, uint32_t image_idx)
 {
     // Deep selection is only needed in wireframe mode during a rectangle drag.
     // It rerenders the geometry with depth test OFF so that objects hidden behind
     // other geometry are also marked as hovered.
-    if ( ! toolbar_state.toggle_wireframe || mouse_action != Action::select || ! toolbar_state.select.faces)
+    if (! toolbar_state.toggle_wireframe || mouse_action != Action::select || ! toolbar_state.select.faces)
         return true;
 
-    const vmath::vec2 view_max{static_cast<float>(dst_view.width  - 1),
-                               static_cast<float>(dst_view.height - 1)};
-    const vmath::vec2 capture_rect_min = vmath::clamp(dst_view.mouse_pos, vmath::vec2{0.0f}, mouse_action_init);
+    const vmath::vec2 view_max{ static_cast<float>(dst_view.width - 1), static_cast<float>(dst_view.height - 1) };
+    const vmath::vec2 capture_rect_min = vmath::clamp(dst_view.mouse_pos, vmath::vec2{ 0.0f }, mouse_action_init);
     const vmath::vec2 capture_rect_max = vmath::clamp(dst_view.mouse_pos, mouse_action_init, view_max);
 
     if (capture_rect_max.x <= capture_rect_min.x || capture_rect_max.y <= capture_rect_min.y)
         return true;
 
     // Barrier: geometry pass fragment shader has written to sel_buf; synchronize before more writes
-    static const Buffer::Transition sel_buf_before_deep = {
-        VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
-        VK_ACCESS_2_SHADER_WRITE_BIT,
-        VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
-        VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT
-    };
+    static const Buffer::Transition sel_buf_before_deep = { VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+                                                            VK_ACCESS_2_SHADER_WRITE_BIT,
+                                                            VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+                                                            VK_ACCESS_2_SHADER_READ_BIT |
+                                                                VK_ACCESS_2_SHADER_WRITE_BIT };
     sel_buf.barrier(sel_buf_before_deep);
 
     send_barrier(cmdbuf);
@@ -2692,11 +2612,11 @@ bool GeometryEditor::draw_deep_selection(VkCommandBuffer cmdbuf,
     static VkRenderingInfo deep_sel_rendering_info = {
         VK_STRUCTURE_TYPE_RENDERING_INFO,
         nullptr,
-        0,       // flags
-        { },     // renderArea
-        1,       // layerCount
-        0,       // viewMask
-        0,       // colorAttachmentCount
+        0,  // flags
+        {}, // renderArea
+        1,  // layerCount
+        0,  // viewMask
+        0,  // colorAttachmentCount
         nullptr,
         nullptr, // pDepthAttachment (depth test off, no attachment needed)
         nullptr  // pStencilAttachment
@@ -2715,7 +2635,7 @@ bool GeometryEditor::draw_deep_selection(VkCommandBuffer cmdbuf,
     vkCmdSetDepthWriteEnable(cmdbuf, VK_FALSE);
 
     // Set viewport to full image but restrict scissor to selection rectangle
-    static VkViewport viewport = { 0, 0, 0, 0, 0, 1};
+    static VkViewport viewport = { 0, 0, 0, 0, 0, 1 };
     VkRect2D          scissor;
     configure_viewport_and_scissor(&viewport, &scissor, dst_view.width, dst_view.height);
     vkCmdSetViewport(cmdbuf, 0, 1, &viewport);
@@ -2726,7 +2646,7 @@ bool GeometryEditor::draw_deep_selection(VkCommandBuffer cmdbuf,
     scissor.extent.height = static_cast<uint32_t>(capture_rect_max.y - capture_rect_min.y);
     vkCmdSetScissor(cmdbuf, 0, 1, &scissor);
 
-    if ( ! render_geometry(cmdbuf, dst_view, image_idx))
+    if (! render_geometry(cmdbuf, dst_view, image_idx))
         return false;
 
     vkCmdEndRendering(cmdbuf);
@@ -2734,9 +2654,7 @@ bool GeometryEditor::draw_deep_selection(VkCommandBuffer cmdbuf,
     return true;
 }
 
-bool GeometryEditor::draw_wireframe_pass(VkCommandBuffer cmdbuf,
-                                         View&           dst_view,
-                                         uint32_t        image_idx)
+bool GeometryEditor::draw_wireframe_pass(VkCommandBuffer cmdbuf, View& dst_view, uint32_t image_idx)
 {
     Resources& res = dst_view.res[image_idx];
 
@@ -2751,11 +2669,11 @@ bool GeometryEditor::draw_wireframe_pass(VkCommandBuffer cmdbuf,
     static VkRenderingAttachmentInfo wire_color_att = {
         VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
         nullptr,
-        VK_NULL_HANDLE,                   // imageView (filled below)
+        VK_NULL_HANDLE, // imageView (filled below)
         VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
         VK_RESOLVE_MODE_NONE,
-        VK_NULL_HANDLE,                   // resolveImageView
-        VK_IMAGE_LAYOUT_UNDEFINED,        // resolveImageLayout
+        VK_NULL_HANDLE,            // resolveImageView
+        VK_IMAGE_LAYOUT_UNDEFINED, // resolveImageLayout
         VK_ATTACHMENT_LOAD_OP_CLEAR,
         VK_ATTACHMENT_STORE_OP_STORE,
         make_clear_color(0.2f, 0.2f, 0.2f, 1.0f) // background color
@@ -2766,11 +2684,11 @@ bool GeometryEditor::draw_wireframe_pass(VkCommandBuffer cmdbuf,
     static VkRenderingInfo wire_rendering_info = {
         VK_STRUCTURE_TYPE_RENDERING_INFO,
         nullptr,
-        0,       // flags
-        { },     // renderArea
-        1,       // layerCount
-        0,       // viewMask
-        1,       // colorAttachmentCount
+        0,  // flags
+        {}, // renderArea
+        1,  // layerCount
+        0,  // viewMask
+        1,  // colorAttachmentCount
         &wire_color_att,
         nullptr, // pDepthAttachment
         nullptr  // pStencilAttachment
@@ -2789,25 +2707,33 @@ bool GeometryEditor::draw_wireframe_pass(VkCommandBuffer cmdbuf,
 
         send_viewport_and_scissor(cmdbuf, dst_view.width, dst_view.height);
 
-        VkDescriptorBufferInfo buffer_info = {
-            VK_NULL_HANDLE,
-            0,
-            0
-        };
+        VkDescriptorBufferInfo buffer_info = { VK_NULL_HANDLE, 0, 0 };
 
         static const float wireframe_color[4] = { 0.93f, 0.93f, 0.93f, 1.0f };
-        vkCmdPushConstants(cmdbuf, Sculptor::material_layout,
-                           VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(wireframe_color), wireframe_color);
+        vkCmdPushConstants(cmdbuf,
+                           Sculptor::material_layout,
+                           VK_SHADER_STAGE_FRAGMENT_BIT,
+                           0,
+                           sizeof(wireframe_color),
+                           wireframe_color);
 
         buffer_info.buffer = res.transforms.get_buffer();
         buffer_info.offset = 0;
         buffer_info.range  = sizeof(Transforms);
-        push_descriptor(cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, Sculptor::material_layout,
-                        1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, buffer_info);
+        push_descriptor(cmdbuf,
+                        VK_PIPELINE_BIND_POINT_GRAPHICS,
+                        Sculptor::material_layout,
+                        1,
+                        VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+                        buffer_info);
 
         patch_geometry.write_faces_descriptor(&buffer_info);
-        push_descriptor(cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, Sculptor::material_layout,
-                        2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, buffer_info);
+        push_descriptor(cmdbuf,
+                        VK_PIPELINE_BIND_POINT_GRAPHICS,
+                        Sculptor::material_layout,
+                        2,
+                        VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                        buffer_info);
 
         patch_geometry.render(cmdbuf);
     }
@@ -2833,7 +2759,7 @@ vmath::mat4 GeometryEditor::compute_model_view(const View& dst_view) const
         case ViewType::top:
         case ViewType::bottom: {
             const auto [view_axis, natural_up] = get_ortho_axes(dst_view.view_type);
-            const vmath::vec3 up = camera.rot.rotate(natural_up);
+            const vmath::vec3 up               = camera.rot.rotate(natural_up);
             return vmath::look_at(camera.pos - view_axis * 2.0f, camera.pos, up);
         }
 
@@ -2856,11 +2782,11 @@ void GeometryEditor::set_patch_transforms(VkCommandBuffer cmdbuf, const View& ds
     // transpose(mat3(M)) gives R^T; the eye position goes into the padding row (row 3).
     // Eye position = -t * R^T = -dot(t, each column of inv).
     {
-        vmath::mat3 inv = vmath::transpose(vmath::mat3(model_view));
-        const vmath::vec3 t{model_view.a30, model_view.a31, model_view.a32};
-        inv.a30 = -vmath::dot_product(t, vmath::column<3>(inv, 0));
-        inv.a31 = -vmath::dot_product(t, vmath::column<3>(inv, 1));
-        inv.a32 = -vmath::dot_product(t, vmath::column<3>(inv, 2));
+        vmath::mat3       inv = vmath::transpose(vmath::mat3(model_view));
+        const vmath::vec3 t{ model_view.a30, model_view.a31, model_view.a32 };
+        inv.a30                 = -vmath::dot_product(t, vmath::column<3>(inv, 0));
+        inv.a31                 = -vmath::dot_product(t, vmath::column<3>(inv, 1));
+        inv.a32                 = -vmath::dot_product(t, vmath::column<3>(inv, 2));
         transforms.view_inverse = inv;
     }
 
@@ -2870,28 +2796,19 @@ void GeometryEditor::set_patch_transforms(VkCommandBuffer cmdbuf, const View& ds
     constexpr float far_plane  = 5.0f;
 
     if (dst_view.view_type == ViewType::free_moving) {
-        transforms.proj = vmath::projection_vector(aspect,
-                                                   fov_radians,
-                                                   near_plane,
-                                                   far_plane);
+        transforms.proj   = vmath::projection_vector(aspect, fov_radians, near_plane, far_plane);
         transforms.proj_w = vmath::vec4(0.0f, 0.0f, 1.0f, 0.0f);
     }
     else {
         const Camera ortho_cam = get_rotated_camera(dst_view);
-        transforms.proj = vmath::ortho_vector(aspect,
-                                              ortho_cam.view_height / int16_scale,
-                                              near_plane,
-                                              far_plane);
+        transforms.proj   = vmath::ortho_vector(aspect, ortho_cam.view_height / int16_scale, near_plane, far_plane);
         transforms.proj_w = vmath::vec4(0.0f, 0.0f, 0.0f, 1.0f);
     }
 
-    vkCmdUpdateBuffer(cmdbuf, dst_view.res[image_idx].transforms.get_buffer(), 0,
-                      sizeof(transforms), &transforms);
+    vkCmdUpdateBuffer(cmdbuf, dst_view.res[image_idx].transforms.get_buffer(), 0, sizeof(transforms), &transforms);
 }
 
-bool GeometryEditor::render_geometry(VkCommandBuffer cmdbuf,
-                                     const View&     dst_view,
-                                     uint32_t        image_idx)
+bool GeometryEditor::render_geometry(VkCommandBuffer cmdbuf, const View& dst_view, uint32_t image_idx)
 {
     VkDescriptorBufferInfo buffer_info = {
         VK_NULL_HANDLE, // buffer
@@ -2903,47 +2820,69 @@ bool GeometryEditor::render_geometry(VkCommandBuffer cmdbuf,
     buffer_info.offset = 0;
     buffer_info.range  = sizeof(Transforms);
 
-    push_descriptor(cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, Sculptor::material_layout,
-                    1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, buffer_info);
+    push_descriptor(cmdbuf,
+                    VK_PIPELINE_BIND_POINT_GRAPHICS,
+                    Sculptor::material_layout,
+                    1,
+                    VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+                    buffer_info);
 
     patch_geometry.write_faces_descriptor(&buffer_info);
 
-    push_descriptor(cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, Sculptor::material_layout,
-                    2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, buffer_info);
+    push_descriptor(cmdbuf,
+                    VK_PIPELINE_BIND_POINT_GRAPHICS,
+                    Sculptor::material_layout,
+                    2,
+                    VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                    buffer_info);
 
     // TODO update this function's name
     patch_geometry.write_edge_indices_descriptor(&buffer_info);
 
-    push_descriptor(cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, Sculptor::material_layout,
-                    3, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, buffer_info);
+    push_descriptor(cmdbuf,
+                    VK_PIPELINE_BIND_POINT_GRAPHICS,
+                    Sculptor::material_layout,
+                    3,
+                    VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                    buffer_info);
 
     patch_geometry.write_edge_vertices_descriptor(&buffer_info);
 
-    push_descriptor(cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, Sculptor::material_layout,
-                    4, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, buffer_info);
+    push_descriptor(cmdbuf,
+                    VK_PIPELINE_BIND_POINT_GRAPHICS,
+                    Sculptor::material_layout,
+                    4,
+                    VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                    buffer_info);
 
     buffer_info.buffer = sel_buf.get_buffer();
     buffer_info.offset = 0;
     buffer_info.range  = VK_WHOLE_SIZE;
 
-    push_descriptor(cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, Sculptor::material_layout,
-                    5, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, buffer_info);
+    push_descriptor(cmdbuf,
+                    VK_PIPELINE_BIND_POINT_GRAPHICS,
+                    Sculptor::material_layout,
+                    5,
+                    VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                    buffer_info);
 
     buffer_info.buffer = view.res[image_idx].frame_data.get_buffer();
     buffer_info.offset = 0;
     buffer_info.range  = sizeof(FrameData);
 
-    push_descriptor(cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, Sculptor::material_layout,
-                    6, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, buffer_info);
+    push_descriptor(cmdbuf,
+                    VK_PIPELINE_BIND_POINT_GRAPHICS,
+                    Sculptor::material_layout,
+                    6,
+                    VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+                    buffer_info);
 
     patch_geometry.render(cmdbuf);
 
     return true;
 }
 
-bool GeometryEditor::render_grid(VkCommandBuffer cmdbuf,
-                                 View&           dst_view,
-                                 uint32_t        image_idx)
+bool GeometryEditor::render_grid(VkCommandBuffer cmdbuf, View& dst_view, uint32_t image_idx)
 {
     constexpr float   min_grid_pixels = 10;
     constexpr int32_t grid_min        = -0x8000;
@@ -2980,12 +2919,8 @@ bool GeometryEditor::render_grid(VkCommandBuffer cmdbuf,
     const float   pix_h  = static_cast<float>(dst_view.height);
     const float   pix_w  = static_cast<float>(dst_view.width);
 
-    const auto floor_step = [](int32_t val, int32_t step) -> int32_t {
-        return val & ~(step - 1);
-    };
-    const auto ceil_step = [](int32_t val, int32_t step) -> int32_t {
-        return (val + step - 1) & ~(step - 1);
-    };
+    const auto floor_step = [](int32_t val, int32_t step) -> int32_t { return val & ~(step - 1); };
+    const auto ceil_step  = [](int32_t val, int32_t step) -> int32_t { return (val + step - 1) & ~(step - 1); };
 
     int32_t minor_step;
     int32_t min_1;
@@ -2995,30 +2930,31 @@ bool GeometryEditor::render_grid(VkCommandBuffer cmdbuf,
 
     if (view_h > 0.0f) {
         const float min_step_f = min_grid_pixels * view_h / pix_h;
-        minor_step = 1;
+        minor_step             = 1;
         while (static_cast<float>(minor_step) < min_step_f && minor_step < 0x10000 / 8 / 2)
             minor_step <<= 1;
 
         const float half_h   = view_h * 0.5f;
         const float half_w   = half_h * pix_w / pix_h;
-        const float half_ext = vmath::length(vmath::vec2{half_w, half_h});
+        const float half_ext = vmath::length(vmath::vec2{ half_w, half_h });
         const float center_1 = cam.pos[idx_1] * int16_scale;
         const float center_2 = cam.pos[idx_2] * int16_scale;
 
         min_1 = std::max(grid_min, floor_step(static_cast<int32_t>(center_1 - half_ext), minor_step));
-        max_1 = std::min(grid_max, ceil_step( static_cast<int32_t>(center_1 + half_ext), minor_step));
+        max_1 = std::min(grid_max, ceil_step(static_cast<int32_t>(center_1 + half_ext), minor_step));
         min_2 = std::max(grid_min, floor_step(static_cast<int32_t>(center_2 - half_ext), minor_step));
-        max_2 = std::min(grid_max, ceil_step( static_cast<int32_t>(center_2 + half_ext), minor_step));
-    } else {
+        max_2 = std::min(grid_max, ceil_step(static_cast<int32_t>(center_2 + half_ext), minor_step));
+    }
+    else {
         minor_step = 0x800;
-        min_1 = grid_min;
-        max_1 = grid_max + 1;
-        min_2 = grid_min;
-        max_2 = grid_max + 1;
+        min_1      = grid_min;
+        max_1      = grid_max + 1;
+        min_2      = grid_min;
+        max_2      = grid_max + 1;
     }
 
     constexpr int32_t grid_major_ratio = 8;
-    const int32_t major_step = minor_step * grid_major_ratio;
+    const int32_t     major_step       = minor_step * grid_major_ratio;
 
     dst_view.grid_step = minor_step;
 
@@ -3027,117 +2963,111 @@ bool GeometryEditor::render_grid(VkCommandBuffer cmdbuf,
         if (x % major_step == 0)
             continue;
         Sculptor::Geometry::Vertex* const vtx = &vertices[num_lines * 2];
-        vtx[0].pos[idx_1] = static_cast<int16_t>(std::min(x,    grid_max));
-        vtx[0].pos[idx_2] = static_cast<int16_t>(min_2);
-        vtx[0].pos[idx_z] = 0;
-        vtx[1].pos[idx_1] = static_cast<int16_t>(std::min(x,    grid_max));
-        vtx[1].pos[idx_2] = static_cast<int16_t>(std::min(max_2, grid_max));
-        vtx[1].pos[idx_z] = 0;
+        vtx[0].pos[idx_1]                     = static_cast<int16_t>(std::min(x, grid_max));
+        vtx[0].pos[idx_2]                     = static_cast<int16_t>(min_2);
+        vtx[0].pos[idx_z]                     = 0;
+        vtx[1].pos[idx_1]                     = static_cast<int16_t>(std::min(x, grid_max));
+        vtx[1].pos[idx_2]                     = static_cast<int16_t>(std::min(max_2, grid_max));
+        vtx[1].pos[idx_z]                     = 0;
         num_lines++;
     }
     for (int32_t x = min_2; x <= max_2 && num_lines < max_grid_lines; x += minor_step) {
         if (x % major_step == 0)
             continue;
         Sculptor::Geometry::Vertex* const vtx = &vertices[num_lines * 2];
-        vtx[0].pos[idx_2] = static_cast<int16_t>(std::min(x,    grid_max));
-        vtx[0].pos[idx_1] = static_cast<int16_t>(min_1);
-        vtx[0].pos[idx_z] = 0;
-        vtx[1].pos[idx_2] = static_cast<int16_t>(std::min(x,    grid_max));
-        vtx[1].pos[idx_1] = static_cast<int16_t>(std::min(max_1, grid_max));
-        vtx[1].pos[idx_z] = 0;
+        vtx[0].pos[idx_2]                     = static_cast<int16_t>(std::min(x, grid_max));
+        vtx[0].pos[idx_1]                     = static_cast<int16_t>(min_1);
+        vtx[0].pos[idx_z]                     = 0;
+        vtx[1].pos[idx_2]                     = static_cast<int16_t>(std::min(x, grid_max));
+        vtx[1].pos[idx_1]                     = static_cast<int16_t>(std::min(max_1, grid_max));
+        vtx[1].pos[idx_z]                     = 0;
         num_lines++;
     }
 
     const uint32_t num_minor_lines = num_lines;
 
     const int32_t maj_min_1 = floor_step(min_1, major_step);
-    const int32_t maj_max_1 = ceil_step( max_1, major_step);
+    const int32_t maj_max_1 = ceil_step(max_1, major_step);
     const int32_t maj_min_2 = floor_step(min_2, major_step);
-    const int32_t maj_max_2 = ceil_step( max_2, major_step);
+    const int32_t maj_max_2 = ceil_step(max_2, major_step);
 
     // Major grid lines
     for (int32_t x = maj_min_1; x <= maj_max_1 && num_lines < max_grid_lines; x += major_step) {
         Sculptor::Geometry::Vertex* const vtx = &vertices[num_lines * 2];
-        vtx[0].pos[idx_1] = static_cast<int16_t>(std::min(x,    grid_max));
-        vtx[0].pos[idx_2] = static_cast<int16_t>(min_2);
-        vtx[0].pos[idx_z] = 0;
-        vtx[1].pos[idx_1] = static_cast<int16_t>(std::min(x,    grid_max));
-        vtx[1].pos[idx_2] = static_cast<int16_t>(std::min(max_2, grid_max));
-        vtx[1].pos[idx_z] = 0;
+        vtx[0].pos[idx_1]                     = static_cast<int16_t>(std::min(x, grid_max));
+        vtx[0].pos[idx_2]                     = static_cast<int16_t>(min_2);
+        vtx[0].pos[idx_z]                     = 0;
+        vtx[1].pos[idx_1]                     = static_cast<int16_t>(std::min(x, grid_max));
+        vtx[1].pos[idx_2]                     = static_cast<int16_t>(std::min(max_2, grid_max));
+        vtx[1].pos[idx_z]                     = 0;
         num_lines++;
     }
     for (int32_t x = maj_min_2; x <= maj_max_2 && num_lines < max_grid_lines; x += major_step) {
         Sculptor::Geometry::Vertex* const vtx = &vertices[num_lines * 2];
-        vtx[0].pos[idx_2] = static_cast<int16_t>(std::min(x,    grid_max));
-        vtx[0].pos[idx_1] = static_cast<int16_t>(min_1);
-        vtx[0].pos[idx_z] = 0;
-        vtx[1].pos[idx_2] = static_cast<int16_t>(std::min(x,    grid_max));
-        vtx[1].pos[idx_1] = static_cast<int16_t>(std::min(max_1, grid_max));
-        vtx[1].pos[idx_z] = 0;
+        vtx[0].pos[idx_2]                     = static_cast<int16_t>(std::min(x, grid_max));
+        vtx[0].pos[idx_1]                     = static_cast<int16_t>(min_1);
+        vtx[0].pos[idx_z]                     = 0;
+        vtx[1].pos[idx_2]                     = static_cast<int16_t>(std::min(x, grid_max));
+        vtx[1].pos[idx_1]                     = static_cast<int16_t>(std::min(max_1, grid_max));
+        vtx[1].pos[idx_z]                     = 0;
         num_lines++;
     }
 
     const uint32_t num_major_lines = num_lines - num_minor_lines;
 
-    if ( ! grid_buf.flush(image_idx, sub_buf_stride))
+    if (! grid_buf.flush(image_idx, sub_buf_stride))
         return false;
 
     Resources& res = dst_view.res[image_idx];
 
     // Transition depth from shader-read (used in lighting pass) to read-only depth
     // attachment so it can be used for depth testing during grid rendering
-    static const Image::Transition depth_for_grid = {
-        VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
-        VK_ACCESS_2_SHADER_READ_BIT,
-        VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT,
-        VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT,
-        VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL
-    };
+    static const Image::Transition depth_for_grid = { VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+                                                      VK_ACCESS_2_SHADER_READ_BIT,
+                                                      VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT,
+                                                      VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT,
+                                                      VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL };
     res.depth.barrier(depth_for_grid);
 
     send_barrier(cmdbuf);
 
-    static VkRenderingAttachmentInfo grid_color_att = {
-        VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
-        nullptr,
-        VK_NULL_HANDLE,                   // imageView (filled below)
-        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-        VK_RESOLVE_MODE_NONE,
-        VK_NULL_HANDLE,                   // resolveImageView
-        VK_IMAGE_LAYOUT_UNDEFINED,        // resolveImageLayout
-        VK_ATTACHMENT_LOAD_OP_LOAD,
-        VK_ATTACHMENT_STORE_OP_STORE,
-        make_clear_color(0, 0, 0, 0)
-    };
+    static VkRenderingAttachmentInfo grid_color_att = { VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+                                                        nullptr,
+                                                        VK_NULL_HANDLE, // imageView (filled below)
+                                                        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                                                        VK_RESOLVE_MODE_NONE,
+                                                        VK_NULL_HANDLE,            // resolveImageView
+                                                        VK_IMAGE_LAYOUT_UNDEFINED, // resolveImageLayout
+                                                        VK_ATTACHMENT_LOAD_OP_LOAD,
+                                                        VK_ATTACHMENT_STORE_OP_STORE,
+                                                        make_clear_color(0, 0, 0, 0) };
 
     grid_color_att.imageView = res.color.get_view();
 
-    static VkRenderingAttachmentInfo grid_depth_att = {
-        VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
-        nullptr,
-        VK_NULL_HANDLE,                              // imageView (filled below)
-        VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL,
-        VK_RESOLVE_MODE_NONE,
-        VK_NULL_HANDLE,                              // resolveImageView
-        VK_IMAGE_LAYOUT_UNDEFINED,                   // resolveImageLayout
-        VK_ATTACHMENT_LOAD_OP_LOAD,
-        VK_ATTACHMENT_STORE_OP_DONT_CARE,
-        make_clear_depth(0, 0)
-    };
+    static VkRenderingAttachmentInfo grid_depth_att = { VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+                                                        nullptr,
+                                                        VK_NULL_HANDLE, // imageView (filled below)
+                                                        VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL,
+                                                        VK_RESOLVE_MODE_NONE,
+                                                        VK_NULL_HANDLE,            // resolveImageView
+                                                        VK_IMAGE_LAYOUT_UNDEFINED, // resolveImageLayout
+                                                        VK_ATTACHMENT_LOAD_OP_LOAD,
+                                                        VK_ATTACHMENT_STORE_OP_DONT_CARE,
+                                                        make_clear_depth(0, 0) };
 
     grid_depth_att.imageView = res.depth.get_view();
 
     static VkRenderingInfo grid_rendering_info = {
         VK_STRUCTURE_TYPE_RENDERING_INFO,
         nullptr,
-        0,                          // flags
-        { },                        // renderArea
-        1,                          // layerCount
-        0,                          // viewMask
-        1,                          // colorAttachmentCount
+        0,  // flags
+        {}, // renderArea
+        1,  // layerCount
+        0,  // viewMask
+        1,  // colorAttachmentCount
         &grid_color_att,
         &grid_depth_att,
-        nullptr                     // pStencilAttachment
+        nullptr // pStencilAttachment
     };
 
     grid_rendering_info.renderArea.offset        = { 0, 0 };
@@ -3162,8 +3092,12 @@ bool GeometryEditor::render_grid(VkCommandBuffer cmdbuf,
     buffer_info.offset = 0;
     buffer_info.range  = sizeof(Transforms);
 
-    push_descriptor(cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, Sculptor::material_layout,
-                    1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, buffer_info);
+    push_descriptor(cmdbuf,
+                    VK_PIPELINE_BIND_POINT_GRAPHICS,
+                    Sculptor::material_layout,
+                    1,
+                    VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+                    buffer_info);
 
     const VkDeviceSize vb_offset = image_idx * sub_buf_stride;
 
@@ -3175,8 +3109,12 @@ bool GeometryEditor::render_grid(VkCommandBuffer cmdbuf,
 
     if (num_minor_lines > 0) {
         static const float grid_color[4] = { 0.25f, 0.25f, 0.25f, 1.0f };
-        vkCmdPushConstants(cmdbuf, Sculptor::material_layout,
-                           VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(grid_color), grid_color);
+        vkCmdPushConstants(cmdbuf,
+                           Sculptor::material_layout,
+                           VK_SHADER_STAGE_FRAGMENT_BIT,
+                           0,
+                           sizeof(grid_color),
+                           grid_color);
 
         vkCmdDraw(cmdbuf,
                   num_minor_lines * 2,
@@ -3187,14 +3125,18 @@ bool GeometryEditor::render_grid(VkCommandBuffer cmdbuf,
 
     if (num_major_lines > 0) {
         static const float grid_major_color[4] = { 0.4f, 0.4f, 0.4f, 1.0f };
-        vkCmdPushConstants(cmdbuf, Sculptor::material_layout,
-                           VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(grid_major_color), grid_major_color);
+        vkCmdPushConstants(cmdbuf,
+                           Sculptor::material_layout,
+                           VK_SHADER_STAGE_FRAGMENT_BIT,
+                           0,
+                           sizeof(grid_major_color),
+                           grid_major_color);
 
         vkCmdDraw(cmdbuf,
                   num_major_lines * 2,
-                  1,                    // instanceCount
-                  num_minor_lines * 2,  // firstVertex
-                  0);                   // firstInstance
+                  1,                   // instanceCount
+                  num_minor_lines * 2, // firstVertex
+                  0);                  // firstInstance
     }
 
     vkCmdEndRendering(cmdbuf);
@@ -3202,65 +3144,58 @@ bool GeometryEditor::render_grid(VkCommandBuffer cmdbuf,
     return true;
 }
 
-bool GeometryEditor::render_control_points(VkCommandBuffer cmdbuf,
-                                           View&           dst_view,
-                                           uint32_t        image_idx)
+bool GeometryEditor::render_control_points(VkCommandBuffer cmdbuf, View& dst_view, uint32_t image_idx)
 {
     Resources& res = dst_view.res[image_idx];
 
     // Barrier: grid pass wrote to color; synchronize before loading it in vertex pass
-    static const Image::Transition color_for_vertices = {
-        VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
-        VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
-        VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
-        VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
-        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
-    };
+    static const Image::Transition color_for_vertices = { VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                                                          VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+                                                          VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                                                          VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT |
+                                                              VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+                                                          VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL };
     res.color.barrier(color_for_vertices);
 
     send_barrier(cmdbuf);
 
-    static VkRenderingAttachmentInfo vtx_color_att = {
-        VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
-        nullptr,
-        VK_NULL_HANDLE,                   // imageView (filled below)
-        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-        VK_RESOLVE_MODE_NONE,
-        VK_NULL_HANDLE,                   // resolveImageView
-        VK_IMAGE_LAYOUT_UNDEFINED,        // resolveImageLayout
-        VK_ATTACHMENT_LOAD_OP_LOAD,
-        VK_ATTACHMENT_STORE_OP_STORE,
-        make_clear_color(0, 0, 0, 0)
-    };
+    static VkRenderingAttachmentInfo vtx_color_att = { VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+                                                       nullptr,
+                                                       VK_NULL_HANDLE, // imageView (filled below)
+                                                       VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                                                       VK_RESOLVE_MODE_NONE,
+                                                       VK_NULL_HANDLE,            // resolveImageView
+                                                       VK_IMAGE_LAYOUT_UNDEFINED, // resolveImageLayout
+                                                       VK_ATTACHMENT_LOAD_OP_LOAD,
+                                                       VK_ATTACHMENT_STORE_OP_STORE,
+                                                       make_clear_color(0, 0, 0, 0) };
 
     vtx_color_att.imageView = res.color.get_view();
 
-    static VkRenderingAttachmentInfo vtx_depth_att = {
-        VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
-        nullptr,
-        VK_NULL_HANDLE,                              // imageView (filled below)
-        VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL,
-        VK_RESOLVE_MODE_NONE,
-        VK_NULL_HANDLE,                              // resolveImageView
-        VK_IMAGE_LAYOUT_UNDEFINED,                   // resolveImageLayout
-        VK_ATTACHMENT_LOAD_OP_LOAD,
-        VK_ATTACHMENT_STORE_OP_DONT_CARE,
-        make_clear_depth(0, 0)
-    };
+    static VkRenderingAttachmentInfo vtx_depth_att = { VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+                                                       nullptr,
+                                                       VK_NULL_HANDLE, // imageView (filled below)
+                                                       VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL,
+                                                       VK_RESOLVE_MODE_NONE,
+                                                       VK_NULL_HANDLE,            // resolveImageView
+                                                       VK_IMAGE_LAYOUT_UNDEFINED, // resolveImageLayout
+                                                       VK_ATTACHMENT_LOAD_OP_LOAD,
+                                                       VK_ATTACHMENT_STORE_OP_DONT_CARE,
+                                                       make_clear_depth(0, 0) };
 
     vtx_depth_att.imageView = res.depth.get_view();
 
     static VkRenderingInfo vtx_rendering_info = {
         VK_STRUCTURE_TYPE_RENDERING_INFO,
         nullptr,
-        0,                          // flags
-        { },                        // renderArea
-        1,                          // layerCount
-        0,                          // viewMask
-        1,                          // colorAttachmentCount
+        0,  // flags
+        {}, // renderArea
+        1,  // layerCount
+        0,  // viewMask
+        1,  // colorAttachmentCount
         &vtx_color_att,
         &vtx_depth_att,
-        nullptr                     // pStencilAttachment
+        nullptr // pStencilAttachment
     };
 
     vtx_rendering_info.renderArea.offset        = { 0, 0 };
@@ -3288,22 +3223,38 @@ bool GeometryEditor::render_control_points(VkCommandBuffer cmdbuf,
         buffer_info.buffer = res.transforms.get_buffer();
         buffer_info.offset = 0;
         buffer_info.range  = sizeof(Transforms);
-        push_descriptor(cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, Sculptor::material_layout,
-                        1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, buffer_info);
+        push_descriptor(cmdbuf,
+                        VK_PIPELINE_BIND_POINT_GRAPHICS,
+                        Sculptor::material_layout,
+                        1,
+                        VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+                        buffer_info);
 
         patch_geometry.write_face_indices_descriptor(&buffer_info);
-        push_descriptor(cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, Sculptor::material_layout,
-                        3, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, buffer_info);
+        push_descriptor(cmdbuf,
+                        VK_PIPELINE_BIND_POINT_GRAPHICS,
+                        Sculptor::material_layout,
+                        3,
+                        VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                        buffer_info);
 
         patch_geometry.write_edge_vertices_descriptor(&buffer_info);
-        push_descriptor(cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, Sculptor::material_layout,
-                        4, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, buffer_info);
+        push_descriptor(cmdbuf,
+                        VK_PIPELINE_BIND_POINT_GRAPHICS,
+                        Sculptor::material_layout,
+                        4,
+                        VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                        buffer_info);
 
         buffer_info.buffer = res.frame_data.get_buffer();
         buffer_info.offset = 0;
         buffer_info.range  = sizeof(FrameData);
-        push_descriptor(cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, Sculptor::material_layout,
-                        6, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, buffer_info);
+        push_descriptor(cmdbuf,
+                        VK_PIPELINE_BIND_POINT_GRAPHICS,
+                        Sculptor::material_layout,
+                        6,
+                        VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+                        buffer_info);
 
         patch_geometry.render_ctrl_pt_handles(cmdbuf);
     }
@@ -3316,34 +3267,54 @@ bool GeometryEditor::render_control_points(VkCommandBuffer cmdbuf,
         send_viewport_and_scissor(cmdbuf, dst_view.width, dst_view.height);
 
         static const float vertex_color[4] = { 0.9372f, 0.9372f, 0.9568f, 1.0f };
-        vkCmdPushConstants(cmdbuf, Sculptor::material_layout,
-                           VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(vertex_color), vertex_color);
+        vkCmdPushConstants(cmdbuf,
+                           Sculptor::material_layout,
+                           VK_SHADER_STAGE_FRAGMENT_BIT,
+                           0,
+                           sizeof(vertex_color),
+                           vertex_color);
 
         buffer_info.buffer = res.transforms.get_buffer();
         buffer_info.offset = 0;
         buffer_info.range  = sizeof(Transforms);
 
-        push_descriptor(cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, Sculptor::material_layout,
-                        1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, buffer_info);
+        push_descriptor(cmdbuf,
+                        VK_PIPELINE_BIND_POINT_GRAPHICS,
+                        Sculptor::material_layout,
+                        1,
+                        VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+                        buffer_info);
 
         patch_geometry.write_edge_vertices_descriptor(&buffer_info);
 
-        push_descriptor(cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, Sculptor::material_layout,
-                        4, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, buffer_info);
+        push_descriptor(cmdbuf,
+                        VK_PIPELINE_BIND_POINT_GRAPHICS,
+                        Sculptor::material_layout,
+                        4,
+                        VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                        buffer_info);
 
         buffer_info.buffer = vtx_sel_buf.get_buffer();
         buffer_info.offset = 0;
         buffer_info.range  = VK_WHOLE_SIZE;
 
-        push_descriptor(cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, Sculptor::material_layout,
-                        5, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, buffer_info);
+        push_descriptor(cmdbuf,
+                        VK_PIPELINE_BIND_POINT_GRAPHICS,
+                        Sculptor::material_layout,
+                        5,
+                        VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                        buffer_info);
 
         buffer_info.buffer = res.frame_data.get_buffer();
         buffer_info.offset = 0;
         buffer_info.range  = sizeof(FrameData);
 
-        push_descriptor(cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, Sculptor::material_layout,
-                        6, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, buffer_info);
+        push_descriptor(cmdbuf,
+                        VK_PIPELINE_BIND_POINT_GRAPHICS,
+                        Sculptor::material_layout,
+                        6,
+                        VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+                        buffer_info);
 
         patch_geometry.render_vertices(cmdbuf);
     }
@@ -3351,41 +3322,37 @@ bool GeometryEditor::render_control_points(VkCommandBuffer cmdbuf,
     vkCmdEndRendering(cmdbuf);
 
     // Readback vtx_sel_buf to vtx_sel_host_buf
-    static const Buffer::Transition vtx_sel_after_render = {
-        VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
-        VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT,
-        VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-        VK_ACCESS_2_TRANSFER_READ_BIT
-    };
+    static const Buffer::Transition vtx_sel_after_render = { VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+                                                             VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT,
+                                                             VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                                                             VK_ACCESS_2_TRANSFER_READ_BIT };
     vtx_sel_buf.barrier(vtx_sel_after_render);
 
     // Barrier: vtx_sel_host_buf was read as copy source in setup_selection(); ensure that
     // TRANSFER_READ completes before we write it as copy destination here.
-    static const Buffer::Transition vtx_sel_host_buf_before_readback = {
-        VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-        VK_ACCESS_2_TRANSFER_READ_BIT,
-        VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-        VK_ACCESS_2_TRANSFER_WRITE_BIT
-    };
+    static const Buffer::Transition vtx_sel_host_buf_before_readback = { VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                                                                         VK_ACCESS_2_TRANSFER_READ_BIT,
+                                                                         VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                                                                         VK_ACCESS_2_TRANSFER_WRITE_BIT };
     res.vtx_sel_host_buf.barrier(vtx_sel_host_buf_before_readback);
 
     send_barrier(cmdbuf);
 
     if (mode == Mode::select) {
         static const VkBufferCopy vtx_sel_readback_region = { 0, 0, max_objects };
-        vkCmdCopyBuffer(cmdbuf, vtx_sel_buf.get_buffer(),
+        vkCmdCopyBuffer(cmdbuf,
+                        vtx_sel_buf.get_buffer(),
                         res.vtx_sel_host_buf.get_buffer(),
-                        1, &vtx_sel_readback_region);
+                        1,
+                        &vtx_sel_readback_region);
     }
 
     // Transition color output to shader-read layout for the GUI
-    static const Image::Transition gui_image_layout = {
-        VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
-        VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
-        VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
-        VK_ACCESS_2_SHADER_READ_BIT,
-        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
-    };
+    static const Image::Transition gui_image_layout = { VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                                                        VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+                                                        VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+                                                        VK_ACCESS_2_SHADER_READ_BIT,
+                                                        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
     res.color.barrier(gui_image_layout);
 
     send_barrier(cmdbuf);
@@ -3400,7 +3367,7 @@ vmath::vec3 GeometryEditor::compute_move_delta(const UserInput& input) const
     const float       ortho_scale  = camera.view_height / height;
     const vmath::vec2 screen_delta = input.abs_mouse_pos - mouse_action_init;
 
-    vmath::vec3 delta{0.0f};
+    vmath::vec3 delta{ 0.0f };
 
     switch (view.view_type) {
 
@@ -3412,55 +3379,53 @@ vmath::vec3 GeometryEditor::compute_move_delta(const UserInput& input) const
                 const float depth   = vmath::dot_product(*mouse_action_pos - camera.pos, camera.dir);
                 const float fov_tan = vmath::tan(fov_radians * 0.5f);
                 const float scale   = depth * fov_tan * 2.0f / height * int16_scale;
-                delta = right * (screen_delta.x * scale) + up * (-screen_delta.y * scale);
+                delta               = right * (screen_delta.x * scale) + up * (-screen_delta.y * scale);
             }
             break;
 
         case ViewType::front:
-            delta = {screen_delta.x * ortho_scale, -screen_delta.y * ortho_scale, 0.0f};
+            delta = { screen_delta.x * ortho_scale, -screen_delta.y * ortho_scale, 0.0f };
             break;
 
         case ViewType::back:
-            delta = {-screen_delta.x * ortho_scale, -screen_delta.y * ortho_scale, 0.0f};
+            delta = { -screen_delta.x * ortho_scale, -screen_delta.y * ortho_scale, 0.0f };
             break;
 
         case ViewType::left:
-            delta = {0.0f, -screen_delta.y * ortho_scale, -screen_delta.x * ortho_scale};
+            delta = { 0.0f, -screen_delta.y * ortho_scale, -screen_delta.x * ortho_scale };
             break;
 
         case ViewType::right:
-            delta = {0.0f, -screen_delta.y * ortho_scale, screen_delta.x * ortho_scale};
+            delta = { 0.0f, -screen_delta.y * ortho_scale, screen_delta.x * ortho_scale };
             break;
 
         case ViewType::top:
-            delta = {screen_delta.x * ortho_scale, 0.0f, -screen_delta.y * ortho_scale};
+            delta = { screen_delta.x * ortho_scale, 0.0f, -screen_delta.y * ortho_scale };
             break;
 
         case ViewType::bottom:
-            delta = {-screen_delta.x * ortho_scale, 0.0f, -screen_delta.y * ortho_scale};
+            delta = { -screen_delta.x * ortho_scale, 0.0f, -screen_delta.y * ortho_scale };
             break;
     }
 
     if (toolbar_state.snap_x || toolbar_state.snap_y || toolbar_state.snap_z) {
-        if ( ! toolbar_state.snap_x)
+        if (! toolbar_state.snap_x)
             delta.x = 0.0f;
-        if ( ! toolbar_state.snap_y)
+        if (! toolbar_state.snap_y)
             delta.y = 0.0f;
-        if ( ! toolbar_state.snap_z)
+        if (! toolbar_state.snap_z)
             delta.z = 0.0f;
     }
 
     return delta;
 }
 
-
 void GeometryEditor::apply_move(const UserInput& input)
 {
     patch_geometry.apply_snapshot();
 
-    const Geometry::MoveMode move_mode = toolbar_state.snap_normals
-        ? Geometry::MoveMode::along_normal
-        : Geometry::MoveMode::along_delta;
+    const Geometry::MoveMode move_mode =
+        toolbar_state.snap_normals ? Geometry::MoveMode::along_normal : Geometry::MoveMode::along_delta;
 
     patch_geometry.move_selection(compute_move_delta(input), move_mode);
 }
@@ -3473,9 +3438,8 @@ void GeometryEditor::apply_extrude(const UserInput& input)
     const uint32_t       num_faces = patch_geometry.get_num_faces();
     const uint8_t* const face_sel  = cur_res->sel_host_buf.get_ptr<uint8_t>();
 
-    const Geometry::MoveMode move_mode = toolbar_state.snap_normals
-        ? Geometry::MoveMode::along_normal
-        : Geometry::MoveMode::along_delta;
+    const Geometry::MoveMode move_mode =
+        toolbar_state.snap_normals ? Geometry::MoveMode::along_normal : Geometry::MoveMode::along_delta;
 
     patch_geometry.extrude_faces(face_sel, delta, move_mode);
 
@@ -3489,7 +3453,6 @@ void GeometryEditor::apply_extrude(const UserInput& input)
 
     patch_geometry.set_dirty();
 }
-
 
 void GeometryEditor::finish_edit_mode()
 {
@@ -3515,7 +3478,7 @@ void GeometryEditor::undo()
     switch_mode(Mode::select);
 
     if (patch_geometry.undo()) {
-        clear_selection(cur_res->sel_host_buf,     patch_geometry.get_num_faces());
+        clear_selection(cur_res->sel_host_buf, patch_geometry.get_num_faces());
         clear_selection(cur_res->vtx_sel_host_buf, patch_geometry.get_num_vertices());
         face_sel_dirty = true;
         vtx_sel_dirty  = true;
@@ -3530,7 +3493,7 @@ void GeometryEditor::redo()
     switch_mode(Mode::select);
 
     if (patch_geometry.redo()) {
-        clear_selection(cur_res->sel_host_buf,     patch_geometry.get_num_faces());
+        clear_selection(cur_res->sel_host_buf, patch_geometry.get_num_faces());
         clear_selection(cur_res->vtx_sel_host_buf, patch_geometry.get_num_vertices());
         face_sel_dirty = true;
         vtx_sel_dirty  = true;

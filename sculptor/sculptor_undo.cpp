@@ -61,9 +61,9 @@ void UndoRedo::push_snapshot(const uint32_t size)
     assert(mode == Mode::snapshot_write);
     assert(size <= redo_idx - undo_idx);
 
-    mode      = Mode::inactive;
+    mode = Mode::inactive;
     undo_idx += size;
-    undo_bak  = undo_idx;
+    undo_bak = undo_idx;
 }
 
 bool UndoRedo::make_room(uint32_t size)
@@ -135,10 +135,10 @@ bool UndoRedo::finish_undo_push()
 
     if (overflow) {
         undo_idx -= cur_size;
-        undo_bak  = undo_idx;
-        cur_size  = 0;
-        overflow  = false;
-        mode      = Mode::inactive;
+        undo_bak = undo_idx;
+        cur_size = 0;
+        overflow = false;
+        mode     = Mode::inactive;
         return false;
     }
 
@@ -167,9 +167,9 @@ bool UndoRedo::finish_redo_push()
 
     if (overflow) {
         redo_idx += cur_size;
-        cur_size  = 0;
-        overflow  = false;
-        mode      = Mode::inactive;
+        cur_size = 0;
+        overflow = false;
+        mode     = Mode::inactive;
         return false;
     }
 
@@ -191,7 +191,7 @@ void UndoRedo::push(const void* data, size_t size)
         return;
 
     assert(static_cast<uint32_t>(size + header_size) == size + header_size);
-    if (!make_room(static_cast<uint32_t>(size + header_size))) {
+    if (! make_room(static_cast<uint32_t>(size + header_size))) {
         overflow = true;
         return;
     }
@@ -261,7 +261,7 @@ bool UndoRedo::skip_undo()
     assert(mode == Mode::inactive);
     assert(cur_size == 0);
 
-    if ( ! undo_idx)
+    if (! undo_idx)
         return false;
 
     uint32_t block_size;
