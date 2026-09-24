@@ -12,14 +12,16 @@
 
 static int exit_code = 0;
 
-#define TEST(cond) do { \
-    if (!(cond)) { \
-        printf("FAIL %s:%d: %s\n", __FILE__, __LINE__, #cond); \
-        exit_code = 1; \
-    } \
-} while(0)
+#define TEST(cond)                                                 \
+    do {                                                           \
+        if (! (cond)) {                                            \
+            printf("FAIL %s:%d: %s\n", __FILE__, __LINE__, #cond); \
+            exit_code = 1;                                         \
+        }                                                          \
+    } while (0)
 
 using Sculptor::ChangeKind;
+using Sculptor::Connection;
 using Sculptor::EndPoint;
 using Sculptor::Graph;
 using Sculptor::GraphChange;
@@ -28,7 +30,6 @@ using Sculptor::max_connections;
 using Sculptor::max_node_slots;
 using Sculptor::max_nodes;
 using Sculptor::max_pending_changes;
-using Sculptor::Connection;
 using Sculptor::Node;
 using Sculptor::PropertyType;
 using Sculptor::Slot;
@@ -51,12 +52,12 @@ static void test_create_node_distinct_indices()
         idx[i] = g.create_node("node", vmath::vec2(0.0f, 0.0f));
         TEST(idx[i] != Sculptor::pool_no_slot);
         if (idx[i] == Sculptor::pool_no_slot) {
-            break;  // already reported above; skip out-of-bounds checks below
+            break; // already reported above; skip out-of-bounds checks below
         }
         TEST(idx[i] < max_nodes);
-        TEST(!seen[idx[i]]);
+        TEST(! seen[idx[i]]);
         seen[idx[i]] = true;
-        TEST(!g.node(idx[i]).ghost);
+        TEST(! g.node(idx[i]).ghost);
     }
 }
 
@@ -80,8 +81,8 @@ static void test_create_node_snaps_position_to_grid()
     const uint32_t idx = g.create_node("node", vmath::vec2(10.0f, 23.0f));
     TEST(idx != Sculptor::pool_no_slot);
     const vmath::vec2 pos = g.node(idx).position;
-    TEST(pos.x == 0.0f);   // 10 snapped down to the 16px grid
-    TEST(pos.y == 16.0f);  // 23 snapped down to the 16px grid
+    TEST(pos.x == 0.0f);  // 10 snapped down to the 16px grid
+    TEST(pos.y == 16.0f); // 23 snapped down to the 16px grid
 }
 
 static void test_add_slot_grows_within_limit()
@@ -94,15 +95,15 @@ static void test_add_slot_grows_within_limit()
     bool seen[max_node_slots] = {};
 
     for (uint32_t i = 0; i < max_node_slots; ++i) {
-        Slot slot     = {};
-        slot.kind     = SlotKind::input;
+        Slot slot               = {};
+        slot.kind               = SlotKind::input;
         const uint32_t slot_idx = g.add_slot(node_idx, slot);
         TEST(slot_idx != Sculptor::pool_no_slot);
         if (slot_idx == Sculptor::pool_no_slot) {
-            break;  // already reported above; skip out-of-bounds checks below
+            break; // already reported above; skip out-of-bounds checks below
         }
         TEST(slot_idx < max_node_slots);
-        TEST(!seen[slot_idx]);
+        TEST(! seen[slot_idx]);
         seen[slot_idx] = true;
     }
 }
@@ -135,11 +136,11 @@ static void test_delete_node_frees_index_and_drops_connections()
     TEST(node_a != Sculptor::pool_no_slot);
     TEST(node_b != Sculptor::pool_no_slot);
 
-    Slot slot_a = {};
-    slot_a.kind = SlotKind::output;
+    Slot slot_a               = {};
+    slot_a.kind               = SlotKind::output;
     const uint32_t slot_a_idx = g.add_slot(node_a, slot_a);
-    Slot slot_b = {};
-    slot_b.kind = SlotKind::input;
+    Slot           slot_b     = {};
+    slot_b.kind               = SlotKind::input;
     const uint32_t slot_b_idx = g.add_slot(node_b, slot_b);
     TEST(slot_a_idx != Sculptor::pool_no_slot);
     TEST(slot_b_idx != Sculptor::pool_no_slot);
@@ -162,11 +163,11 @@ static void test_delete_node_frees_index_and_drops_connections()
     TEST(reused == node_a);
 
     // delete_node must have dropped the connection touching node_a.
-    GraphChange events[8] = {};
-    const uint32_t num_events       = drain_changes(g, events, 8);
-    uint32_t num_connection_deleted = 0;
-    uint32_t num_node_deleted       = 0;
-    uint32_t num_node_added         = 0;
+    GraphChange    events[8]              = {};
+    const uint32_t num_events             = drain_changes(g, events, 8);
+    uint32_t       num_connection_deleted = 0;
+    uint32_t       num_node_deleted       = 0;
+    uint32_t       num_node_added         = 0;
     for (uint32_t i = 0; i < num_events; ++i) {
         if (events[i].kind == ChangeKind::connection_deleted) {
             ++num_connection_deleted;
@@ -209,10 +210,10 @@ static void test_add_delete_connection_basics()
         const uint32_t con = g.add_connection(out, in);
         TEST(con != Sculptor::pool_no_slot);
         if (con == Sculptor::pool_no_slot) {
-            break;  // already reported above; skip out-of-bounds checks below
+            break; // already reported above; skip out-of-bounds checks below
         }
         TEST(con < max_connections);
-        TEST(!seen[con]);
+        TEST(! seen[con]);
         seen[con] = true;
     }
 
@@ -253,30 +254,30 @@ static void test_add_connection_rejects_bad_endpoints()
     // property.  Everything else is rejected.
     const uint32_t node_c = g.create_node("c", vmath::vec2(0.0f, 0.0f));
     TEST(node_c != Sculptor::pool_no_slot);
-    Slot output_slot = {};
-    output_slot.kind = SlotKind::output;
+    Slot output_slot          = {};
+    output_slot.kind          = SlotKind::output;
     const uint32_t output_idx = g.add_slot(node_a, output_slot);
     TEST(output_idx != Sculptor::pool_no_slot);
     const EndPoint valid_output = { node_a, output_idx };
-    Slot input_slot = {};
-    input_slot.kind = SlotKind::input;
-    const uint32_t input_idx = g.add_slot(node_c, input_slot);
+    Slot           input_slot   = {};
+    input_slot.kind             = SlotKind::input;
+    const uint32_t input_idx    = g.add_slot(node_c, input_slot);
     TEST(input_idx != Sculptor::pool_no_slot);
-    Slot plain_property = {};
-    plain_property.kind = SlotKind::property;
+    Slot plain_property        = {};
+    plain_property.kind        = SlotKind::property;
     plain_property.connectable = false;
-    const uint32_t plain_idx = g.add_slot(node_c, plain_property);
+    const uint32_t plain_idx   = g.add_slot(node_c, plain_property);
     TEST(plain_idx != Sculptor::pool_no_slot);
-    Slot connectable_property = {};
-    connectable_property.kind = SlotKind::property;
+    Slot connectable_property        = {};
+    connectable_property.kind        = SlotKind::property;
     connectable_property.connectable = true;
-    const uint32_t connectable_idx = g.add_slot(node_c, connectable_property);
+    const uint32_t connectable_idx   = g.add_slot(node_c, connectable_property);
     TEST(connectable_idx != Sculptor::pool_no_slot);
 
-    const EndPoint wrong_direction = { node_c, input_idx };  // input slot as output end
+    const EndPoint wrong_direction = { node_c, input_idx }; // input slot as output end
     TEST(g.add_connection(wrong_direction, valid_empty_slot) == Sculptor::pool_no_slot);
 
-    const EndPoint plain_property_ep = { node_c, plain_idx };  // not connectable
+    const EndPoint plain_property_ep = { node_c, plain_idx }; // not connectable
     TEST(g.add_connection(valid_output, plain_property_ep) == Sculptor::pool_no_slot);
 
     const EndPoint connectable_ep = { node_c, connectable_idx };
@@ -290,7 +291,7 @@ static void test_ghost_is_flag_on_normal_node()
     // The caller creates the node normally, then marks it as a ghost.
     const uint32_t node_idx = g.create_node("ghost", vmath::vec2(0.0f, 0.0f));
     TEST(node_idx != Sculptor::pool_no_slot);
-    TEST(!g.node(node_idx).ghost);
+    TEST(! g.node(node_idx).ghost);
 
     g.set_ghost(node_idx, true);
     TEST(g.node(node_idx).ghost);
@@ -301,10 +302,10 @@ static void test_ghost_is_flag_on_normal_node()
 
     // Placement clears the flag and pushes ghost_placed.
     g.set_ghost(node_idx, false);
-    TEST(!g.node(node_idx).ghost);
-    GraphChange events[4] = {};
-    const uint32_t num_events = drain_changes(g, events, 4);
-    uint32_t num_ghost_placed = 0;
+    TEST(! g.node(node_idx).ghost);
+    GraphChange    events[4]        = {};
+    const uint32_t num_events       = drain_changes(g, events, 4);
+    uint32_t       num_ghost_placed = 0;
     for (uint32_t i = 0; i < num_events; ++i) {
         if (events[i].kind == ChangeKind::ghost_placed) {
             ++num_ghost_placed;
@@ -324,9 +325,9 @@ static void test_colors_api()
     Graph g;
 
     // set_colors copies the whole set (observable via colors()).
-    GraphColors colors             = {};
-    colors.node_background         = 0x202020FFu;
-    colors.node_border             = 0x808080FFu;
+    GraphColors colors     = {};
+    colors.node_background = 0x202020FFu;
+    colors.node_border     = 0x808080FFu;
     g.set_colors(colors);
     TEST(g.colors().node_background == 0x202020FFu);
     TEST(g.colors().node_border == 0x808080FFu);
@@ -334,11 +335,11 @@ static void test_colors_api()
     const uint32_t node_idx = g.create_node("node", vmath::vec2(0.0f, 0.0f));
     TEST(node_idx != Sculptor::pool_no_slot);
 
-    g.set_node_color(node_idx, 0xFF0000FFu);  // override
+    g.set_node_color(node_idx, 0xFF0000FFu); // override
     TEST(g.node(node_idx).color_override == 0xFF0000FFu);
-    g.set_node_color(node_idx, 0);            // back to default set
+    g.set_node_color(node_idx, 0); // back to default set
     TEST(g.node(node_idx).color_override == 0);
-    g.set_node_color(max_nodes, 0);           // out of range must not crash
+    g.set_node_color(max_nodes, 0); // out of range must not crash
 }
 
 static void test_change_events_queue_and_drain()
@@ -346,12 +347,12 @@ static void test_change_events_queue_and_drain()
     Graph g;
 
     TEST(drain_changes(g, nullptr, 0) == 0);
-    TEST(!g.changes_overflowed());
+    TEST(! g.changes_overflowed());
 
     const uint32_t node_a = g.create_node("a", vmath::vec2(0.0f, 0.0f));
     const uint32_t node_b = g.create_node("b", vmath::vec2(0.0f, 0.0f));
-    Slot slot_a = {};
-    slot_a.kind = SlotKind::output;
+    Slot           slot_a = {};
+    slot_a.kind           = SlotKind::output;
     TEST(g.add_slot(node_a, slot_a) != Sculptor::pool_no_slot);
     Slot slot_b = {};
     slot_b.kind = SlotKind::input;
@@ -360,7 +361,7 @@ static void test_change_events_queue_and_drain()
     const EndPoint in  = { node_b, 0 };
     const uint32_t con = g.add_connection(out, in);
 
-    GraphChange events[8] = {};
+    GraphChange    events[8]  = {};
     const uint32_t num_events = drain_changes(g, events, 8);
     TEST(num_events == 5);
     if (num_events == 5) {
@@ -393,49 +394,47 @@ static void test_change_events_overflow_is_reported()
     for (uint32_t i = 0; i <= max_pending_changes / 2 + 1; ++i) {
         const uint32_t idx = g.create_node("cycle", vmath::vec2(0.0f, 0.0f));
         if (idx == Sculptor::pool_no_slot) {
-            break;  // pool exhaustion also overflows the queue; either is fine
+            break; // pool exhaustion also overflows the queue; either is fine
         }
         g.delete_node(idx);
     }
     TEST(g.changes_overflowed());
 
     // The flag is reported once, then cleared.
-    TEST(!g.changes_overflowed());
+    TEST(! g.changes_overflowed());
 }
 
 // --- M2: connections ---
 
-static bool validator_rejects_same_node(void* user_data, const Sculptor::Graph& graph,
-                                        EndPoint output, EndPoint input)
+static bool validator_rejects_same_node(void* user_data, const Sculptor::Graph& graph, EndPoint output, EndPoint input)
 {
     return output.node_idx != input.node_idx;
 }
 
-static bool validator_rejects_all(void* user_data, const Sculptor::Graph& graph,
-                                  EndPoint output, EndPoint input)
+static bool validator_rejects_all(void* user_data, const Sculptor::Graph& graph, EndPoint output, EndPoint input)
 {
     return false;
 }
 
 struct TwoNodeFixture {
-    Graph      graph;
-    uint32_t   node_a;
-    uint32_t   node_b;
-    uint32_t   output_slot;
-    uint32_t   input_slot;
-    EndPoint   output_end;
-    EndPoint   input_end;
+    Graph    graph;
+    uint32_t node_a;
+    uint32_t node_b;
+    uint32_t output_slot;
+    uint32_t input_slot;
+    EndPoint output_end;
+    EndPoint input_end;
 
     TwoNodeFixture()
     {
-        node_a = graph.create_node("a", vmath::vec2(0.0f, 0.0f));
-        node_b = graph.create_node("b", vmath::vec2(0.0f, 0.0f));
-        Slot out_slot    = {};
-        out_slot.kind    = SlotKind::output;
-        output_slot      = graph.add_slot(node_a, out_slot);
-        Slot in_slot     = {};
-        in_slot.kind     = SlotKind::input;
-        input_slot       = graph.add_slot(node_b, in_slot);
+        node_a              = graph.create_node("a", vmath::vec2(0.0f, 0.0f));
+        node_b              = graph.create_node("b", vmath::vec2(0.0f, 0.0f));
+        Slot out_slot       = {};
+        out_slot.kind       = SlotKind::output;
+        output_slot         = graph.add_slot(node_a, out_slot);
+        Slot in_slot        = {};
+        in_slot.kind        = SlotKind::input;
+        input_slot          = graph.add_slot(node_b, in_slot);
         output_end.node_idx = node_a;
         output_end.slot_idx = output_slot;
         input_end.node_idx  = node_b;
@@ -453,7 +452,7 @@ static void test_attempt_connection_success()
     TEST(f.graph.connection_count() == 1);
     TEST(f.graph.get_connection(0).output.node_idx == f.node_a);
     TEST(f.graph.get_connection(0).input.node_idx == f.node_b);
-    TEST(!f.graph.has_error());
+    TEST(! f.graph.has_error());
 
     GraphChange events[8];
     // node_added + slot_added per fixture node, then connection_added.
@@ -467,8 +466,8 @@ static void test_attempt_connection_validator_rejects()
     TwoNodeFixture f;
     f.graph.set_validator(validator_rejects_same_node, nullptr);
 
-        // Same-node connection: validator rejects, error is set, nothing added.
-    TEST(!f.graph.attempt_connection(f.output_end, f.output_end));
+    // Same-node connection: validator rejects, error is set, nothing added.
+    TEST(! f.graph.attempt_connection(f.output_end, f.output_end));
     TEST(f.graph.has_error());
     TEST(f.graph.error_text() != nullptr);
     TEST(f.graph.error_text()[0] != '\0');
@@ -480,12 +479,12 @@ static void test_attempt_connection_validator_rejects()
     TEST(events[3].kind != ChangeKind::connection_added);
 
     f.graph.dismiss_error();
-    TEST(!f.graph.has_error());
+    TEST(! f.graph.has_error());
 
     // Different nodes pass the validator and connect.
     TEST(f.graph.attempt_connection(f.output_end, f.input_end));
     TEST(f.graph.connection_count() == 1);
-    TEST(!f.graph.has_error());
+    TEST(! f.graph.has_error());
 }
 
 static void test_attempt_connection_structural_rejection_sets_error()
@@ -494,13 +493,13 @@ static void test_attempt_connection_structural_rejection_sets_error()
 
     // Occupied input: second attempt at the same input fails with error.
     TEST(f.graph.attempt_connection(f.output_end, f.input_end));
-    TEST(!f.graph.attempt_connection(f.output_end, f.input_end));
+    TEST(! f.graph.attempt_connection(f.output_end, f.input_end));
     TEST(f.graph.has_error());
     TEST(f.graph.connection_count() == 1);
     f.graph.dismiss_error();
 
     // Kind mismatch: output to output is rejected with error.
-    TEST(!f.graph.attempt_connection(f.output_end, f.output_end));
+    TEST(! f.graph.attempt_connection(f.output_end, f.output_end));
     TEST(f.graph.has_error());
     TEST(f.graph.connection_count() == 1);
 }
@@ -508,18 +507,19 @@ static void test_attempt_connection_structural_rejection_sets_error()
 static void test_move_connection_end_success()
 {
     TwoNodeFixture f;
-    const uint32_t node_c = f.graph.create_node("c", vmath::vec2(0.0f, 0.0f));
-    Slot out_slot = {};
-    out_slot.kind = SlotKind::output;
+    const uint32_t node_c   = f.graph.create_node("c", vmath::vec2(0.0f, 0.0f));
+    Slot           out_slot = {};
+    out_slot.kind           = SlotKind::output;
     const uint32_t c_output = f.graph.add_slot(node_c, out_slot);
-    Slot in_slot = {};
-    in_slot.kind = SlotKind::input;
-    const uint32_t c_input = f.graph.add_slot(node_c, in_slot);
+    Slot           in_slot  = {};
+    in_slot.kind            = SlotKind::input;
+    const uint32_t c_input  = f.graph.add_slot(node_c, in_slot);
     TEST(c_output != Sculptor::pool_no_slot);
     TEST(c_input != Sculptor::pool_no_slot);
 
     TEST(f.graph.attempt_connection(f.output_end, f.input_end));
-    GraphChange scratch[32]; drain_changes(f.graph, scratch, 32);
+    GraphChange scratch[32];
+    drain_changes(f.graph, scratch, 32);
 
     // Retarget the input end to node c.
     const EndPoint new_input = { node_c, c_input };
@@ -537,7 +537,7 @@ static void test_move_connection_end_success()
     TEST(f.graph.get_connection(0).input.node_idx == node_c);
 
     // Retargets push connection_changed events, not delete+add.
-    GraphChange events[8];
+    GraphChange    events[8];
     const uint32_t num_events = drain_changes(f.graph, events, 8);
     TEST(num_events == 2);
     TEST(events[0].kind == ChangeKind::connection_changed);
@@ -559,7 +559,7 @@ static void test_move_connection_end_failure_deletes()
     f.graph.set_validator(validator_rejects_all, nullptr);
 
     const EndPoint nowhere = { f.node_b, f.input_slot };
-    TEST(!f.graph.move_connection_end(0, false, nowhere));
+    TEST(! f.graph.move_connection_end(0, false, nowhere));
     // Failed retarget destroys the connection, same rule as a failed drop.
     TEST(f.graph.connection_count() == 0);
     TEST(f.graph.has_error());
@@ -573,53 +573,54 @@ static void test_move_connection_end_failure_deletes()
 static void test_move_connection_end_structural_failure_deletes()
 {
     TwoNodeFixture f;
-    const uint32_t node_c = f.graph.create_node("c", vmath::vec2(0.0f, 0.0f));
-    Slot in_slot = {};
-    in_slot.kind = SlotKind::input;
+    const uint32_t node_c  = f.graph.create_node("c", vmath::vec2(0.0f, 0.0f));
+    Slot           in_slot = {};
+    in_slot.kind           = SlotKind::input;
     const uint32_t c_input = f.graph.add_slot(node_c, in_slot);
     TEST(c_input != Sculptor::pool_no_slot);
 
     TEST(f.graph.attempt_connection(f.output_end, f.input_end));
-    GraphChange scratch[32]; drain_changes(f.graph, scratch, 32);
+    GraphChange scratch[32];
+    drain_changes(f.graph, scratch, 32);
 
     // Retarget to an out-of-range slot: structural check fails, connection
     // is deleted and the error overlay is set.
     const EndPoint bad_slot = { node_c, max_node_slots + 3 };
-    TEST(!f.graph.move_connection_end(0, false, bad_slot));
+    TEST(! f.graph.move_connection_end(0, false, bad_slot));
     TEST(f.graph.connection_count() == 0);
     TEST(f.graph.has_error());
 }
 
 static void test_selection_basics()
 {
-    Graph g;
+    Graph          g;
     const uint32_t a = g.create_node("a", vmath::vec2(0.0f, 0.0f));
     const uint32_t b = g.create_node("b", vmath::vec2(32.0f, 0.0f));
     TEST(a != Sculptor::pool_no_slot);
     TEST(b != Sculptor::pool_no_slot);
 
-    TEST(!g.is_selected(a));
-    TEST(!g.is_selected(b));
+    TEST(! g.is_selected(a));
+    TEST(! g.is_selected(b));
 
     g.set_selected(a, true);
     TEST(g.is_selected(a));
-    TEST(!g.is_selected(b));
+    TEST(! g.is_selected(b));
 
     g.set_selected(b, true);
     TEST(g.is_selected(a));
     TEST(g.is_selected(b));
 
     g.set_selected(a, false);
-    TEST(!g.is_selected(a));
+    TEST(! g.is_selected(a));
     TEST(g.is_selected(b));
 
     g.select_none();
-    TEST(!g.is_selected(a));
-    TEST(!g.is_selected(b));
+    TEST(! g.is_selected(a));
+    TEST(! g.is_selected(b));
 
     // Selection changes are pure view state: no change events.
     GraphChange scratch[8] = {};
-    drain_changes(g, scratch, 8);  // drain the two node_added events
+    drain_changes(g, scratch, 8); // drain the two node_added events
     g.set_selected(b, true);
     GraphChange events[8] = {};
     TEST(drain_changes(g, events, 8) == 0);
@@ -627,7 +628,7 @@ static void test_selection_basics()
 
 static void test_delete_node_clears_selection()
 {
-    Graph g;
+    Graph          g;
     const uint32_t a = g.create_node("a", vmath::vec2(0.0f, 0.0f));
     TEST(a != Sculptor::pool_no_slot);
 
@@ -639,7 +640,7 @@ static void test_delete_node_clears_selection()
     // a clean content size (it reads 0 until its first drawn frame).
     const uint32_t reused = g.create_node("b", vmath::vec2(0.0f, 0.0f));
     TEST(reused == a);
-    TEST(!g.is_selected(reused));
+    TEST(! g.is_selected(reused));
     TEST(g.content_size(reused).x == 0.0f);
     TEST(g.content_size(reused).y == 0.0f);
 }
@@ -653,21 +654,21 @@ static void test_selection_api_ignores_unoccupied_slots()
     g.set_selected(0, true);
     g.report_content_size(Sculptor::max_nodes, vmath::vec2(50.0f, 50.0f));
     g.report_content_size(0, vmath::vec2(50.0f, 50.0f));
-    TEST(!g.is_selected(Sculptor::max_nodes));
-    TEST(!g.is_selected(0));
+    TEST(! g.is_selected(Sculptor::max_nodes));
+    TEST(! g.is_selected(0));
     TEST(g.content_size(Sculptor::max_nodes).x == 0.0f);
     TEST(g.content_size(0).x == 0.0f);
 
     // A node created later at the touched slot starts clean.
     const uint32_t a = g.create_node("a", vmath::vec2(0.0f, 0.0f));
     TEST(a == 0);
-    TEST(!g.is_selected(a));
+    TEST(! g.is_selected(a));
     TEST(g.content_size(a).x == 0.0f);
 }
 
 static void test_align_left_and_top()
 {
-    Graph g;
+    Graph          g;
     const uint32_t a = g.create_node("a", vmath::vec2(96.0f, 48.0f));
     const uint32_t b = g.create_node("b", vmath::vec2(32.0f, 80.0f));
     const uint32_t c = g.create_node("c", vmath::vec2(64.0f, 16.0f));
@@ -680,7 +681,7 @@ static void test_align_left_and_top()
     g.report_content_size(c, vmath::vec2(50.0f, 40.0f));
 
     GraphChange scratch[8] = {};
-    drain_changes(g, scratch, 8);  // drain the node_added events
+    drain_changes(g, scratch, 8); // drain the node_added events
 
     g.set_selected(a, true);
     g.set_selected(b, true);
@@ -705,7 +706,7 @@ static void test_align_left_and_top()
 
 static void test_align_right_and_bottom()
 {
-    Graph g;
+    Graph          g;
     const uint32_t a = g.create_node("a", vmath::vec2(96.0f, 48.0f));
     const uint32_t b = g.create_node("b", vmath::vec2(32.0f, 80.0f));
     const uint32_t c = g.create_node("c", vmath::vec2(64.0f, 16.0f));
@@ -725,19 +726,19 @@ static void test_align_right_and_bottom()
     // lands there.
     g.align_selected(Sculptor::AlignKind::right);
     TEST(g.node(a).position.x == 96.0f);
-    TEST(g.node(b).position.x == 76.0f);  // 136 - 60
-    TEST(g.node(c).position.x == 86.0f);  // 136 - 50
+    TEST(g.node(b).position.x == 76.0f); // 136 - 60
+    TEST(g.node(c).position.x == 86.0f); // 136 - 50
 
     // Bottommost selected edge is b (80 + 20 = 100).
     g.align_selected(Sculptor::AlignKind::bottom);
-    TEST(g.node(a).position.y == 70.0f);  // 100 - 30
+    TEST(g.node(a).position.y == 70.0f); // 100 - 30
     TEST(g.node(b).position.y == 80.0f);
-    TEST(g.node(c).position.y == 60.0f);  // 100 - 40
+    TEST(g.node(c).position.y == 60.0f); // 100 - 40
 }
 
 static void test_align_equal_width_and_height()
 {
-    Graph g;
+    Graph          g;
     const uint32_t a = g.create_node("a", vmath::vec2(0.0f, 0.0f));
     const uint32_t b = g.create_node("b", vmath::vec2(32.0f, 0.0f));
     TEST(a != Sculptor::pool_no_slot);
@@ -756,14 +757,13 @@ static void test_align_equal_width_and_height()
     // Positions are untouched by equal-size commands.
     TEST(g.node(a).position.x == 0.0f);
     TEST(g.node(b).position.x == 32.0f);
-
 }
 
 static void test_align_equal_height_applies_as_equal_width()
 {
-        // Equal height sets every selected node's height override to the
+    // Equal height sets every selected node's height override to the
     // tallest selected height.
-    Graph g;
+    Graph          g;
     const uint32_t a = g.create_node("a", vmath::vec2(0.0f, 0.0f));
     const uint32_t b = g.create_node("b", vmath::vec2(32.0f, 0.0f));
     TEST(a != Sculptor::pool_no_slot);
@@ -775,7 +775,7 @@ static void test_align_equal_height_applies_as_equal_width()
     g.set_selected(a, true);
     g.set_selected(b, true);
 
-        g.align_selected(Sculptor::AlignKind::equal_height);
+    g.align_selected(Sculptor::AlignKind::equal_height);
     TEST(g.node(a).content_height_override == 30.0f);
     TEST(g.node(b).content_height_override == 30.0f);
     // Widths are untouched by equal_height.
@@ -785,7 +785,7 @@ static void test_align_equal_height_applies_as_equal_width()
 
 static void test_align_skips_ghosts_and_empty_selection()
 {
-    Graph g;
+    Graph          g;
     const uint32_t a     = g.create_node("a", vmath::vec2(32.0f, 0.0f));
     const uint32_t b     = g.create_node("b", vmath::vec2(64.0f, 32.0f));
     const uint32_t ghost = g.create_node("ghost", vmath::vec2(96.0f, 64.0f));
@@ -815,11 +815,10 @@ static bool colors_state_equal(const GraphColors& a, const GraphColors& b)
            a.node_selected_border == b.node_selected_border && a.node_title == b.node_title &&
            a.grid_line == b.grid_line && a.grid_axis == b.grid_axis && a.connector == b.connector &&
            a.connector_hover == b.connector_hover && a.connector_connected == b.connector_connected &&
-           a.connection == b.connection && a.ghost_node == b.ghost_node &&
-           a.property_value == b.property_value &&
-           a.property_connected_value == b.property_connected_value &&
-           a.error_background == b.error_background && a.error_text == b.error_text &&
-           a.selection_outline == b.selection_outline && a.selection_band == b.selection_band;
+           a.connection == b.connection && a.ghost_node == b.ghost_node && a.property_value == b.property_value &&
+           a.property_connected_value == b.property_connected_value && a.error_background == b.error_background &&
+           a.error_text == b.error_text && a.selection_outline == b.selection_outline &&
+           a.selection_band == b.selection_band;
 }
 
 static bool slot_state_equal(const Slot& a, const Slot& b)
@@ -861,7 +860,7 @@ static bool node_state_equal(const Node& a, const Node& b)
         if (a.slots.is_occupied(i) != b.slots.is_occupied(i)) {
             return false;
         }
-        if (a.slots.is_occupied(i) && !slot_state_equal(a.slots.entries[i], b.slots.entries[i])) {
+        if (a.slots.is_occupied(i) && ! slot_state_equal(a.slots.entries[i], b.slots.entries[i])) {
             return false;
         }
     }
@@ -874,7 +873,7 @@ static bool connection_state_equal(const Connection& a, const Connection& b)
            a.input.node_idx == b.input.node_idx && a.input.slot_idx == b.input.slot_idx;
 }
 
-static bool test_serialize_called    = false;
+static bool test_serialize_called   = false;
 static bool test_deserialize_called = false;
 
 static uint32_t test_serialize_state_overflow(void* /*user_data*/, uint8_t* /*buffer*/, uint32_t /*remaining*/)
@@ -895,8 +894,8 @@ static uint32_t test_serialize_state(void* /*user_data*/, uint8_t* buffer, uint3
 
 static bool test_deserialize_state(void* /*user_data*/, const uint8_t* buffer, uint32_t buffer_size)
 {
-    test_deserialize_called = buffer_size == 4 && buffer[0] == 0xde && buffer[1] == 0xad &&
-                              buffer[2] == 0xbe && buffer[3] == 0xef;
+    test_deserialize_called =
+        buffer_size == 4 && buffer[0] == 0xde && buffer[1] == 0xad && buffer[2] == 0xbe && buffer[3] == 0xef;
     return test_deserialize_called;
 }
 
@@ -905,10 +904,10 @@ static void build_int_property_graph(Graph& g, int32_t value, uint32_t* node_idx
 {
     const uint32_t n = g.create_node("n", vmath::vec2(0.0f, 0.0f));
     TEST(n != Sculptor::pool_no_slot);
-    Slot p          = {};
-    p.kind          = SlotKind::property;
-    p.property_type = PropertyType::integer;
-    p.value.integer = value;
+    Slot p           = {};
+    p.kind           = SlotKind::property;
+    p.property_type  = PropertyType::integer;
+    p.value.integer  = value;
     const uint32_t s = g.add_slot(n, p);
     TEST(s != Sculptor::pool_no_slot);
     *node_idx = n;
@@ -920,7 +919,7 @@ static void test_save_load_round_trip()
 {
     Graph g;
 
-    GraphColors custom = {};
+    GraphColors custom              = {};
     custom.node_background          = 0x11223344;
     custom.node_border              = 0x22334455;
     custom.node_selected_border     = 0x33445566;
@@ -953,7 +952,7 @@ static void test_save_load_round_trip()
     const uint32_t a_out = g.add_slot(a, out_slot);
     TEST(a_out != Sculptor::pool_no_slot);
 
-    Slot mode_slot = {};
+    Slot mode_slot             = {};
     mode_slot.kind             = SlotKind::property;
     mode_slot.property_type    = PropertyType::list;
     mode_slot.num_list_options = 2;
@@ -964,7 +963,7 @@ static void test_save_load_round_trip()
     const uint32_t a_mode = g.add_slot(a, mode_slot);
     TEST(a_mode != Sculptor::pool_no_slot);
 
-    Slot count_slot = {};
+    Slot count_slot          = {};
     count_slot.kind          = SlotKind::property;
     count_slot.property_type = PropertyType::integer;
     count_slot.value.integer = 7;
@@ -979,7 +978,7 @@ static void test_save_load_round_trip()
     TEST(b_in != Sculptor::pool_no_slot);
 
     // Connectable property on the input side: connections may target it.
-    Slot gain_slot = {};
+    Slot gain_slot          = {};
     gain_slot.kind          = SlotKind::property;
     gain_slot.connectable   = true;
     gain_slot.property_type = PropertyType::real;
@@ -989,8 +988,8 @@ static void test_save_load_round_trip()
     TEST(b_gain != Sculptor::pool_no_slot);
 
     // One output fans out to an input and to a connectable property.
-    TEST(g.add_connection(EndPoint{a, a_out}, EndPoint{b, b_in}) != Sculptor::pool_no_slot);
-    TEST(g.add_connection(EndPoint{a, a_out}, EndPoint{b, b_gain}) != Sculptor::pool_no_slot);
+    TEST(g.add_connection(EndPoint{ a, a_out }, EndPoint{ b, b_in }) != Sculptor::pool_no_slot);
+    TEST(g.add_connection(EndPoint{ a, a_out }, EndPoint{ b, b_gain }) != Sculptor::pool_no_slot);
 
     g.set_node_color(a, 0xff00ff00);
     g.set_ghost(c, true);
@@ -1003,21 +1002,21 @@ static void test_save_load_round_trip()
     g.align_selected(Sculptor::AlignKind::equal_width);
     g.align_selected(Sculptor::AlignKind::equal_height);
 
-    uint8_t buffer[4096] = {};
-    const uint32_t saved = g.save(buffer, sizeof(buffer));
+    uint8_t        buffer[4096] = {};
+    const uint32_t saved        = g.save(buffer, sizeof(buffer));
     TEST(saved > 0);
     TEST(saved <= sizeof(buffer));
     if (saved == 0) {
-        return;  // save is not implemented yet; the checks below need a snapshot
+        return; // save is not implemented yet; the checks below need a snapshot
     }
 
-    Graph g2;
-    uint32_t consumed = 0;
-    const bool loaded = g2.load(buffer, saved, &consumed);
+    Graph      g2;
+    uint32_t   consumed = 0;
+    const bool loaded   = g2.load(buffer, saved, &consumed);
     TEST(loaded);
     TEST(consumed == saved);
-    if (!loaded) {
-        return;  // load is not implemented yet
+    if (! loaded) {
+        return; // load is not implemented yet
     }
 
     TEST(colors_state_equal(g.colors(), g2.colors()));
@@ -1047,27 +1046,27 @@ static void test_save_load_caller_state_hook()
     TEST(n2 != Sculptor::pool_no_slot);
     TEST(plain.add_slot(n2, slot) != Sculptor::pool_no_slot);
 
-    uint8_t buf_with[2048]     = {};
-    uint8_t buf_plain[2048]    = {};
-    const uint32_t total_with  = with_hooks.save(buf_with, sizeof(buf_with));
-    const uint32_t total_plain = plain.save(buf_plain, sizeof(buf_plain));
+    uint8_t        buf_with[2048]  = {};
+    uint8_t        buf_plain[2048] = {};
+    const uint32_t total_with      = with_hooks.save(buf_with, sizeof(buf_with));
+    const uint32_t total_plain     = plain.save(buf_plain, sizeof(buf_plain));
     TEST(test_serialize_called);
     TEST(total_with > 0);
     TEST(total_plain > 0);
     TEST(total_with == total_plain + 4);
 
     if (total_with == 0) {
-        return;  // save is not implemented yet; the checks below need a snapshot
+        return; // save is not implemented yet; the checks below need a snapshot
     }
 
     Graph restore;
     restore.set_state_callbacks(nullptr, test_deserialize_state, nullptr);
-    uint32_t consumed = 0;
-    const bool loaded = restore.load(buf_with, total_with, &consumed);
+    uint32_t   consumed = 0;
+    const bool loaded   = restore.load(buf_with, total_with, &consumed);
     TEST(loaded);
     TEST(test_deserialize_called);
     TEST(consumed == total_with);
-    if (!loaded) {
+    if (! loaded) {
         return;
     }
 
@@ -1098,20 +1097,20 @@ static void test_load_diff_value_changed_only()
     uint32_t s = Sculptor::pool_no_slot;
     build_int_property_graph(g, 5, &n, &s);
     GraphChange changes[8];
-    g.take_changes(changes, sizeof(changes) / sizeof(changes[0]));  // drain build events
+    g.take_changes(changes, sizeof(changes) / sizeof(changes[0])); // drain build events
 
-    Slot p              = {};
-    p.kind              = SlotKind::property;
-    p.property_type     = PropertyType::integer;
-    p.value.integer     = 5;
+    Slot p          = {};
+    p.kind          = SlotKind::property;
+    p.property_type = PropertyType::integer;
+    p.value.integer = 5;
 
     // Snapshot of the same graph with only the property value changed.
     Graph    g2;
     uint32_t n2 = Sculptor::pool_no_slot;
     uint32_t s2 = Sculptor::pool_no_slot;
     build_int_property_graph(g2, 6, &n2, &s2);
-    uint8_t buffer[1024] = {};
-    const uint32_t saved = g2.save(buffer, sizeof(buffer));
+    uint8_t        buffer[1024] = {};
+    const uint32_t saved        = g2.save(buffer, sizeof(buffer));
     TEST(saved > 0);
 
     uint32_t consumed = 0;
@@ -1137,20 +1136,20 @@ static void test_load_diff_value_changed_only()
     TEST(n7 != Sculptor::pool_no_slot);
     s7 = g7.add_slot(n7, p);
     TEST(s7 != Sculptor::pool_no_slot);
-    g7.take_changes(changes, sizeof(changes) / sizeof(changes[0]));  // drain rebuild events
+    g7.take_changes(changes, sizeof(changes) / sizeof(changes[0])); // drain rebuild events
 
     Graph    g8;
     uint32_t n8 = Sculptor::pool_no_slot;
     uint32_t s8 = Sculptor::pool_no_slot;
-    build_int_property_graph(g8, 5, &n8, &s8);  // identical, at the origin
-    uint8_t pos_buffer[1024] = {};
-    const uint32_t pos_saved = g8.save(pos_buffer, sizeof(pos_buffer));
+    build_int_property_graph(g8, 5, &n8, &s8); // identical, at the origin
+    uint8_t        pos_buffer[1024] = {};
+    const uint32_t pos_saved        = g8.save(pos_buffer, sizeof(pos_buffer));
     TEST(pos_saved > 0);
     if (pos_saved == 0) {
         return;
     }
 
-    consumed = 0;
+    consumed              = 0;
     const bool pos_loaded = g7.load(pos_buffer, pos_saved, &consumed);
     TEST(pos_loaded);
     if (pos_loaded) {
@@ -1165,39 +1164,39 @@ static void test_load_diff_value_changed_only()
 // is by name).
 static void test_load_diff_value_name_color()
 {
-    Graph g;
+    Graph          g;
     const uint32_t x = g.create_node("x", vmath::vec2(0.0f, 0.0f));
     TEST(x != Sculptor::pool_no_slot);
-    Slot out = {};
-    out.kind          = SlotKind::output;
-    out.value.integer = 5;
+    Slot out             = {};
+    out.kind             = SlotKind::output;
+    out.value.integer    = 5;
     const uint32_t x_out = g.add_slot(x, out);
     TEST(x_out != Sculptor::pool_no_slot);
-    Slot prop             = {};
-    prop.kind             = SlotKind::property;
-    prop.property_type    = PropertyType::integer;
-    prop.value.integer    = 7;
+    Slot prop          = {};
+    prop.kind          = SlotKind::property;
+    prop.property_type = PropertyType::integer;
+    prop.value.integer = 7;
     snprintf(prop.name, sizeof(prop.name), "p1");
     const uint32_t x_prop = g.add_slot(x, prop);
     TEST(x_prop != Sculptor::pool_no_slot);
     GraphChange changes[8];
-    g.take_changes(changes, sizeof(changes) / sizeof(changes[0]));  // drain build events
+    g.take_changes(changes, sizeof(changes) / sizeof(changes[0])); // drain build events
 
-    Graph g2;
+    Graph          g2;
     const uint32_t x2 = g2.create_node("x", vmath::vec2(0.0f, 0.0f));
     TEST(x2 != Sculptor::pool_no_slot);
-    Slot out6    = out;
+    Slot out6          = out;
     out6.value.integer = 6;
     TEST(g2.add_slot(x2, out6) != Sculptor::pool_no_slot);
-    Slot prop2   = prop;
+    Slot prop2 = prop;
     snprintf(prop2.name, sizeof(prop2.name), "p2");
     TEST(g2.add_slot(x2, prop2) != Sculptor::pool_no_slot);
     g2.set_node_color(x2, 0xff0000ff);
 
-    uint8_t buffer[1024]    = {};
-    const uint32_t saved    = g2.save(buffer, sizeof(buffer));
+    uint8_t        buffer[1024] = {};
+    const uint32_t saved        = g2.save(buffer, sizeof(buffer));
     TEST(saved > 0);
-    uint32_t consumed       = 0;
+    uint32_t consumed = 0;
     TEST(g.load(buffer, saved, &consumed));
 
     const uint32_t count = g.take_changes(changes, sizeof(changes) / sizeof(changes[0]));
@@ -1220,31 +1219,31 @@ static void test_load_diff_value_name_color()
 // connection retargets onto a recreated slot (connection_changed).
 static void test_load_diff_structural_recreate()
 {
-    Graph g;
+    Graph          g;
     const uint32_t x = g.create_node("x", vmath::vec2(0.0f, 0.0f));
     TEST(x != Sculptor::pool_no_slot);
     const uint32_t y = g.create_node("y", vmath::vec2(160.0f, 0.0f));
     TEST(y != Sculptor::pool_no_slot);
-    Slot out1 = {};
-    out1.kind          = SlotKind::output;
-    out1.value.integer = 1;
+    Slot out1            = {};
+    out1.kind            = SlotKind::output;
+    out1.value.integer   = 1;
     const uint32_t x_out = g.add_slot(x, out1);
     TEST(x_out != Sculptor::pool_no_slot);
-    Slot in_plain      = {};
-    in_plain.kind      = SlotKind::input;
+    Slot in_plain       = {};
+    in_plain.kind       = SlotKind::input;
     const uint32_t y_in = g.add_slot(y, in_plain);
     TEST(y_in != Sculptor::pool_no_slot);
-    TEST(g.add_connection(EndPoint{x, x_out}, EndPoint{y, y_in}) != Sculptor::pool_no_slot);
+    TEST(g.add_connection(EndPoint{ x, x_out }, EndPoint{ y, y_in }) != Sculptor::pool_no_slot);
     GraphChange changes[8];
-    g.take_changes(changes, sizeof(changes) / sizeof(changes[0]));  // drain build events
+    g.take_changes(changes, sizeof(changes) / sizeof(changes[0])); // drain build events
 
-    Graph g2;
+    Graph          g2;
     const uint32_t x2 = g2.create_node("x", vmath::vec2(0.0f, 0.0f));
     TEST(x2 != Sculptor::pool_no_slot);
     const uint32_t y2 = g2.create_node("y", vmath::vec2(160.0f, 0.0f));
     TEST(y2 != Sculptor::pool_no_slot);
-    Slot out_typed    = out1;
-    out_typed.property_type = PropertyType::integer;  // structural diff, same index
+    Slot out_typed          = out1;
+    out_typed.property_type = PropertyType::integer; // structural diff, same index
     TEST(g2.add_slot(x2, out_typed) != Sculptor::pool_no_slot);
     Slot in_a = {};
     in_a.kind = SlotKind::input;
@@ -1254,12 +1253,12 @@ static void test_load_diff_structural_recreate()
     snprintf(in_b.name, sizeof(in_b.name), "b");
     const uint32_t y2_in2 = g2.add_slot(y2, in_b);
     TEST(y2_in2 != Sculptor::pool_no_slot);
-    TEST(g2.add_connection(EndPoint{x2, x_out}, EndPoint{y2, y2_in2}) != Sculptor::pool_no_slot);
+    TEST(g2.add_connection(EndPoint{ x2, x_out }, EndPoint{ y2, y2_in2 }) != Sculptor::pool_no_slot);
 
-    uint8_t buffer[1024] = {};
-    const uint32_t saved = g2.save(buffer, sizeof(buffer));
+    uint8_t        buffer[1024] = {};
+    const uint32_t saved        = g2.save(buffer, sizeof(buffer));
     TEST(saved > 0);
-    uint32_t consumed    = 0;
+    uint32_t consumed = 0;
     TEST(g.load(buffer, saved, &consumed));
 
     const uint32_t count = g.take_changes(changes, sizeof(changes) / sizeof(changes[0]));
@@ -1288,28 +1287,28 @@ static void test_load_diff_structural_recreate()
 
 static void test_save_load_round_trip_fan_in()
 {
-    Graph g;
+    Graph          g;
     const uint32_t x = g.create_node("x", vmath::vec2(0.0f, 0.0f));
     TEST(x != Sculptor::pool_no_slot);
     const uint32_t y = g.create_node("y", vmath::vec2(160.0f, 0.0f));
     TEST(y != Sculptor::pool_no_slot);
-    Slot out = {};
-    out.kind = SlotKind::output;
+    Slot out             = {};
+    out.kind             = SlotKind::output;
     const uint32_t x_out = g.add_slot(x, out);
     TEST(x_out != Sculptor::pool_no_slot);
-    Slot in_plain = {};
-    in_plain.kind = SlotKind::input;
+    Slot in_plain       = {};
+    in_plain.kind       = SlotKind::input;
     const uint32_t y_in = g.add_slot(y, in_plain);
     TEST(y_in != Sculptor::pool_no_slot);
-    TEST(g.add_connection(EndPoint{x, x_out}, EndPoint{y, y_in}) != Sculptor::pool_no_slot);
-    TEST(g.add_connection(EndPoint{x, x_out}, EndPoint{y, y_in}) != Sculptor::pool_no_slot);
+    TEST(g.add_connection(EndPoint{ x, x_out }, EndPoint{ y, y_in }) != Sculptor::pool_no_slot);
+    TEST(g.add_connection(EndPoint{ x, x_out }, EndPoint{ y, y_in }) != Sculptor::pool_no_slot);
     TEST(g.connection_count() == 2);
 
-    uint8_t buffer[1024] = {};
-    const uint32_t saved = g.save(buffer, sizeof(buffer));
+    uint8_t        buffer[1024] = {};
+    const uint32_t saved        = g.save(buffer, sizeof(buffer));
     TEST(saved > 0);
 
-    Graph g2;
+    Graph    g2;
     uint32_t consumed = 0;
     TEST(g2.load(buffer, saved, &consumed));
     TEST(consumed == saved);
@@ -1328,17 +1327,17 @@ static void test_save_load_round_trip_fan_in()
 // one input must round-trip through save/load unchanged.
 static void test_load_diff_sparse_recreate()
 {
-    Graph g;
+    Graph          g;
     const uint32_t x = g.create_node("x", vmath::vec2(0.0f, 0.0f));
     TEST(x != Sculptor::pool_no_slot);
     const uint32_t y = g.create_node("y", vmath::vec2(160.0f, 0.0f));
     TEST(y != Sculptor::pool_no_slot);
-    Slot out = {};
-    out.kind = SlotKind::output;
+    Slot out             = {};
+    out.kind             = SlotKind::output;
     const uint32_t x_out = g.add_slot(x, out);
     TEST(x_out != Sculptor::pool_no_slot);
-    Slot in_plain = {};
-    in_plain.kind = SlotKind::input;
+    Slot in_plain       = {};
+    in_plain.kind       = SlotKind::input;
     const uint32_t x_in = g.add_slot(x, in_plain);
     TEST(x_in != Sculptor::pool_no_slot);
     // Sparse slot layout for y: occupied indices 0 and 3.
@@ -1348,13 +1347,13 @@ static void test_load_diff_sparse_recreate()
     TEST(g.add_slot(y, in_plain) != Sculptor::pool_no_slot);
     const uint32_t y_in3 = g.add_slot(y, in_plain);
     TEST(y_in3 != Sculptor::pool_no_slot);
-    g.remove_slot(y, 1);  // sparse live layout {0, 3} to match the snapshot
+    g.remove_slot(y, 1); // sparse live layout {0, 3} to match the snapshot
     g.remove_slot(y, 2);
-    TEST(g.add_connection(EndPoint{x, x_out}, EndPoint{y, y_in0}) != Sculptor::pool_no_slot);
+    TEST(g.add_connection(EndPoint{ x, x_out }, EndPoint{ y, y_in0 }) != Sculptor::pool_no_slot);
     GraphChange changes[16];
-    g.take_changes(changes, sizeof(changes) / sizeof(changes[0]));  // drain
+    g.take_changes(changes, sizeof(changes) / sizeof(changes[0])); // drain
 
-    Graph g2;
+    Graph          g2;
     const uint32_t x2 = g2.create_node("x", vmath::vec2(0.0f, 0.0f));
     TEST(x2 != Sculptor::pool_no_slot);
     const uint32_t y2 = g2.create_node("y", vmath::vec2(160.0f, 0.0f));
@@ -1377,13 +1376,13 @@ static void test_load_diff_sparse_recreate()
     TEST(g2.add_slot(w2, in_w) != Sculptor::pool_no_slot);
     // Snapshot connections at indices 0 and 2: index 1 deleted, so the pool
     // is sparse and index 1 must stay free after load.
-    TEST(g2.add_connection(EndPoint{y2, 0}, EndPoint{w2, 0}) != Sculptor::pool_no_slot);
-    TEST(g2.add_connection(EndPoint{y2, y2_out3}, EndPoint{x2, 1}) != Sculptor::pool_no_slot);
-    TEST(g2.add_connection(EndPoint{x2, 0}, EndPoint{w2, 1}) != Sculptor::pool_no_slot);
+    TEST(g2.add_connection(EndPoint{ y2, 0 }, EndPoint{ w2, 0 }) != Sculptor::pool_no_slot);
+    TEST(g2.add_connection(EndPoint{ y2, y2_out3 }, EndPoint{ x2, 1 }) != Sculptor::pool_no_slot);
+    TEST(g2.add_connection(EndPoint{ x2, 0 }, EndPoint{ w2, 1 }) != Sculptor::pool_no_slot);
     g2.delete_connection(1);
 
-    uint8_t buffer[1024] = {};
-    const uint32_t saved = g2.save(buffer, sizeof(buffer));
+    uint8_t        buffer[1024] = {};
+    const uint32_t saved        = g2.save(buffer, sizeof(buffer));
     TEST(saved > 0);
     uint32_t consumed = 0;
     TEST(g.load(buffer, saved, &consumed));
@@ -1413,7 +1412,7 @@ static void test_load_diff_sparse_recreate()
     TEST(g.node(y).slots.entries[0].kind == SlotKind::output);
     TEST(g.node(y).slots.entries[3].kind == SlotKind::output);
     TEST(g.node(y).slots.entries[0].kind == SlotKind::output);
-    TEST(!g.node(y).slots.is_occupied(1) && !g.node(y).slots.is_occupied(2));
+    TEST(! g.node(y).slots.is_occupied(1) && ! g.node(y).slots.is_occupied(2));
     TEST(g.connection_count() == 2);
     TEST(g.get_connection(0).output.node_idx == y);
     TEST(g.get_connection(0).output.slot_idx == 0);
@@ -1429,24 +1428,24 @@ static void test_load_diff_event_order()
 {
     // Live state: a -> b connected.  Snapshot: c -> d connected.  Loading must
     // delete first (connection, then nodes) and add afterwards.
-    Graph g;
+    Graph          g;
     const uint32_t a = g.create_node("a", vmath::vec2(0.0f, 0.0f));
     TEST(a != Sculptor::pool_no_slot);
     const uint32_t b = g.create_node("b", vmath::vec2(160.0f, 0.0f));
     TEST(b != Sculptor::pool_no_slot);
-    Slot out_slot = {};
-    out_slot.kind = SlotKind::output;
+    Slot out_slot        = {};
+    out_slot.kind        = SlotKind::output;
     const uint32_t a_out = g.add_slot(a, out_slot);
     TEST(a_out != Sculptor::pool_no_slot);
-    Slot in_slot = {};
-    in_slot.kind = SlotKind::input;
+    Slot in_slot        = {};
+    in_slot.kind        = SlotKind::input;
     const uint32_t b_in = g.add_slot(b, in_slot);
     TEST(b_in != Sculptor::pool_no_slot);
-    TEST(g.add_connection(EndPoint{a, a_out}, EndPoint{b, b_in}) != Sculptor::pool_no_slot);
+    TEST(g.add_connection(EndPoint{ a, a_out }, EndPoint{ b, b_in }) != Sculptor::pool_no_slot);
     GraphChange changes[32];
-    g.take_changes(changes, sizeof(changes) / sizeof(changes[0]));  // drain build events
+    g.take_changes(changes, sizeof(changes) / sizeof(changes[0])); // drain build events
 
-    Graph g2;
+    Graph          g2;
     const uint32_t c = g2.create_node("c", vmath::vec2(0.0f, 0.0f));
     TEST(c != Sculptor::pool_no_slot);
     const uint32_t d = g2.create_node("d", vmath::vec2(160.0f, 0.0f));
@@ -1455,44 +1454,44 @@ static void test_load_diff_event_order()
     TEST(c_out != Sculptor::pool_no_slot);
     const uint32_t d_in = g2.add_slot(d, in_slot);
     TEST(d_in != Sculptor::pool_no_slot);
-    TEST(g2.add_connection(EndPoint{c, c_out}, EndPoint{d, d_in}) != Sculptor::pool_no_slot);
+    TEST(g2.add_connection(EndPoint{ c, c_out }, EndPoint{ d, d_in }) != Sculptor::pool_no_slot);
 
-    uint8_t buffer[2048] = {};
-    const uint32_t saved = g2.save(buffer, sizeof(buffer));
+    uint8_t        buffer[2048] = {};
+    const uint32_t saved        = g2.save(buffer, sizeof(buffer));
     TEST(saved > 0);
 
     uint32_t consumed = 0;
     TEST(g.load(buffer, saved, &consumed));
 
-    const uint32_t count         = g.take_changes(changes, sizeof(changes) / sizeof(changes[0]));
-    int first_connection_deleted = -1;
-    int first_node_deleted       = -1;
-    int first_node_added         = -1;
-    int first_connection_added   = -1;
+    const uint32_t count                    = g.take_changes(changes, sizeof(changes) / sizeof(changes[0]));
+    int            first_connection_deleted = -1;
+    int            first_node_deleted       = -1;
+    int            first_node_added         = -1;
+    int            first_connection_added   = -1;
     for (uint32_t i = 0; i < count; ++i) {
         switch (changes[i].kind) {
-        case ChangeKind::connection_deleted:
-            if (first_connection_deleted < 0) {
-                first_connection_deleted = static_cast<int>(i);
-            }
-            break;
-        case ChangeKind::node_deleted:
-            if (first_node_deleted < 0) {
-                first_node_deleted = static_cast<int>(i);
-            }
-            break;
-        case ChangeKind::node_added:
-            if (first_node_added < 0) {
-                first_node_added = static_cast<int>(i);
-            }
-            break;
-        case ChangeKind::connection_added:
-            if (first_connection_added < 0) {
-                first_connection_added = static_cast<int>(i);
-            }
-            break;
-        default:
-            break;
+            case ChangeKind::connection_deleted:
+                if (first_connection_deleted < 0) {
+                    first_connection_deleted = static_cast<int>(i);
+                }
+                break;
+            case ChangeKind::node_deleted:
+                if (first_node_deleted < 0) {
+                    first_node_deleted = static_cast<int>(i);
+                }
+                break;
+            case ChangeKind::node_added:
+                if (first_node_added < 0) {
+                    first_node_added = static_cast<int>(i);
+                }
+                break;
+            case ChangeKind::connection_added:
+                if (first_connection_added < 0) {
+                    first_connection_added = static_cast<int>(i);
+                }
+                break;
+            default:
+                break;
         }
     }
     TEST(first_connection_deleted >= 0);
@@ -1514,16 +1513,16 @@ static void test_load_diff_event_order()
     // connection_changed.  Live: x(out+in) -> y, x -> z.  Snapshot: x keeps
     // its name (survives, out value 5 -> 6), y survives, z is replaced by w;
     // x -> z must be deleted and re-added, x -> x(in) retargets in place.
-    Graph g3;
+    Graph          g3;
     const uint32_t x = g3.create_node("x", vmath::vec2(0.0f, 0.0f));
     TEST(x != Sculptor::pool_no_slot);
     const uint32_t y = g3.create_node("y", vmath::vec2(160.0f, 0.0f));
     TEST(y != Sculptor::pool_no_slot);
     const uint32_t z = g3.create_node("z", vmath::vec2(320.0f, 0.0f));
     TEST(z != Sculptor::pool_no_slot);
-    Slot out5 = {};
-    out5.kind          = SlotKind::output;
-    out5.value.integer = 5;
+    Slot out5            = {};
+    out5.kind            = SlotKind::output;
+    out5.value.integer   = 5;
     const uint32_t x_out = g3.add_slot(x, out5);
     TEST(x_out != Sculptor::pool_no_slot);
     const uint32_t x_in = g3.add_slot(x, in_slot);
@@ -1532,20 +1531,20 @@ static void test_load_diff_event_order()
     TEST(y_in != Sculptor::pool_no_slot);
     const uint32_t z_in = g3.add_slot(z, in_slot);
     TEST(z_in != Sculptor::pool_no_slot);
-    TEST(g3.add_connection(EndPoint{x, x_out}, EndPoint{y, y_in}) != Sculptor::pool_no_slot);
-    TEST(g3.add_connection(EndPoint{x, x_out}, EndPoint{z, z_in}) != Sculptor::pool_no_slot);
-    g3.take_changes(changes, sizeof(changes) / sizeof(changes[0]));  // drain build events
+    TEST(g3.add_connection(EndPoint{ x, x_out }, EndPoint{ y, y_in }) != Sculptor::pool_no_slot);
+    TEST(g3.add_connection(EndPoint{ x, x_out }, EndPoint{ z, z_in }) != Sculptor::pool_no_slot);
+    g3.take_changes(changes, sizeof(changes) / sizeof(changes[0])); // drain build events
 
-    Graph g4;
+    Graph          g4;
     const uint32_t x4 = g4.create_node("x", vmath::vec2(0.0f, 0.0f));
     TEST(x4 != Sculptor::pool_no_slot);
     const uint32_t y4 = g4.create_node("y", vmath::vec2(160.0f, 0.0f));
     TEST(y4 != Sculptor::pool_no_slot);
     const uint32_t w4 = g4.create_node("w", vmath::vec2(320.0f, 0.0f));
     TEST(w4 != Sculptor::pool_no_slot);
-    Slot out6 = {};
-    out6.kind          = SlotKind::output;
-    out6.value.integer = 6;
+    Slot out6             = {};
+    out6.kind             = SlotKind::output;
+    out6.value.integer    = 6;
     const uint32_t x4_out = g4.add_slot(x4, out6);
     TEST(x4_out != Sculptor::pool_no_slot);
     const uint32_t x4_in = g4.add_slot(x4, in_slot);
@@ -1554,8 +1553,8 @@ static void test_load_diff_event_order()
     TEST(y4_in != Sculptor::pool_no_slot);
     const uint32_t w4_in = g4.add_slot(w4, in_slot);
     TEST(w4_in != Sculptor::pool_no_slot);
-    TEST(g4.add_connection(EndPoint{x4, x4_out}, EndPoint{x4, x4_in}) != Sculptor::pool_no_slot);
-    TEST(g4.add_connection(EndPoint{x4, x4_out}, EndPoint{w4, w4_in}) != Sculptor::pool_no_slot);
+    TEST(g4.add_connection(EndPoint{ x4, x4_out }, EndPoint{ x4, x4_in }) != Sculptor::pool_no_slot);
+    TEST(g4.add_connection(EndPoint{ x4, x4_out }, EndPoint{ w4, w4_in }) != Sculptor::pool_no_slot);
 
     const uint32_t saved_order = g4.save(buffer, sizeof(buffer));
     TEST(saved_order > 0);
@@ -1596,7 +1595,7 @@ static void test_snapshot_stack_undo_redo()
     uint32_t s = Sculptor::pool_no_slot;
     build_int_property_graph(g, 5, &n, &s);
     GraphChange changes[8];
-    g.take_changes(changes, sizeof(changes) / sizeof(changes[0]));  // drain build events
+    g.take_changes(changes, sizeof(changes) / sizeof(changes[0])); // drain build events
 
     // Snapshot stack: "before" (value 5) and "after" (value 6) entries.
     Graph    g_after;
@@ -1604,10 +1603,10 @@ static void test_snapshot_stack_undo_redo()
     uint32_t s2 = Sculptor::pool_no_slot;
     build_int_property_graph(g_after, 6, &n2, &s2);
 
-    uint8_t before[1024]       = {};
-    uint8_t after[1024]        = {};
-    const uint32_t before_size = g.save(before, sizeof(before));
-    const uint32_t after_size  = g_after.save(after, sizeof(after));
+    uint8_t        before[1024] = {};
+    uint8_t        after[1024]  = {};
+    const uint32_t before_size  = g.save(before, sizeof(before));
+    const uint32_t after_size   = g_after.save(after, sizeof(after));
     TEST(before_size > 0);
     TEST(after_size > 0);
 
@@ -1645,44 +1644,44 @@ static void test_snapshot_stack_undo_redo()
 // Test 6: save/load failure paths are clean and leave live state untouched.
 static void test_save_load_failure_paths()
 {
-    Graph g;
+    Graph          g;
     const uint32_t a = g.create_node("alpha", vmath::vec2(0.0f, 0.0f));
     TEST(a != Sculptor::pool_no_slot);
     const uint32_t b = g.create_node("beta", vmath::vec2(160.0f, 0.0f));
     TEST(b != Sculptor::pool_no_slot);
-    Slot out_slot = {};
-    out_slot.kind = SlotKind::output;
+    Slot out_slot        = {};
+    out_slot.kind        = SlotKind::output;
     const uint32_t a_out = g.add_slot(a, out_slot);
     TEST(a_out != Sculptor::pool_no_slot);
-    Slot in_slot = {};
-    in_slot.kind = SlotKind::input;
+    Slot in_slot        = {};
+    in_slot.kind        = SlotKind::input;
     const uint32_t b_in = g.add_slot(b, in_slot);
     TEST(b_in != Sculptor::pool_no_slot);
-    TEST(g.add_connection(EndPoint{a, a_out}, EndPoint{b, b_in}) != Sculptor::pool_no_slot);
+    TEST(g.add_connection(EndPoint{ a, a_out }, EndPoint{ b, b_in }) != Sculptor::pool_no_slot);
 
     // Insufficient buffer: save must fail cleanly with 0.
     uint8_t tiny[8] = {};
     TEST(g.save(tiny, sizeof(tiny)) == 0);
     TEST(g.save(tiny, 0) == 0);
 
-    uint8_t full[4096]   = {};
-    const uint32_t saved = g.save(full, sizeof(full));
+    uint8_t        full[4096] = {};
+    const uint32_t saved      = g.save(full, sizeof(full));
     TEST(saved > 0);
     if (saved == 0) {
-        return;  // save is not implemented yet; the checks below need a snapshot
+        return; // save is not implemented yet; the checks below need a snapshot
     }
 
     // Bad version: load fails without touching live state.
-    uint8_t bad[64] = {};
-    bad[0] = 0x99;  // u16 version 0x0399 (little endian), not 1
-    bad[1] = 0x03;
+    uint8_t bad[64]   = {};
+    bad[0]            = 0x99; // u16 version 0x0399 (little endian), not 1
+    bad[1]            = 0x03;
     uint32_t consumed = 123;
-    TEST(!g.load(bad, sizeof(bad), &consumed));
+    TEST(! g.load(bad, sizeof(bad), &consumed));
     TEST(consumed == 0);
 
     // Truncated buffer: load fails without touching live state.
     consumed = 123;
-    TEST(!g.load(full, saved - 1, &consumed));
+    TEST(! g.load(full, saved - 1, &consumed));
     TEST(consumed == 0);
 
     // Live state untouched by the failed loads.
@@ -1695,11 +1694,11 @@ static void test_save_load_failure_paths()
 
     // Corrupt list option count: save must refuse rather than read past
     // list_options[8] (add_slot does not validate it).
-    Slot bad_options = {};
+    Slot bad_options             = {};
     bad_options.kind             = SlotKind::property;
     bad_options.property_type    = PropertyType::list;
     bad_options.num_list_options = 9;
-    const uint32_t c = g.create_node("c", vmath::vec2(320.0f, 0.0f));
+    const uint32_t c             = g.create_node("c", vmath::vec2(320.0f, 0.0f));
     TEST(c != Sculptor::pool_no_slot);
     TEST(g.add_slot(c, bad_options) != Sculptor::pool_no_slot);
     TEST(g.save(full, sizeof(full)) == 0);

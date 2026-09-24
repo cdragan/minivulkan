@@ -16,7 +16,7 @@ namespace Sculptor {
 
 GraphColors default_graph_colors()
 {
-    GraphColors colors = {};
+    GraphColors colors              = {};
     colors.node_background          = 0x2B2B2BFFu;
     colors.node_border              = 0x5A5A5AFFu;
     colors.node_selected_border     = 0xFFFFFFFFu;
@@ -38,15 +38,13 @@ GraphColors default_graph_colors()
     return colors;
 }
 
-
 namespace {
 
 // Packed 0xRRGGBBAA, one place inside the widget; callers may override the
 // whole set via set_colors().
 // Bounds-checked append for save().  Returns false when the buffer is too
 // small; the caller treats that as a 0 return from save().
-bool append_bytes(uint8_t* buffer, uint32_t buffer_size, uint32_t& off,
-                  const void* src, uint32_t n)
+bool append_bytes(uint8_t* buffer, uint32_t buffer_size, uint32_t& off, const void* src, uint32_t n)
 {
     if (off + n > buffer_size) {
         return false;
@@ -57,8 +55,7 @@ bool append_bytes(uint8_t* buffer, uint32_t buffer_size, uint32_t& off,
 }
 
 // Bounds-checked read for load().
-bool read_bytes(const uint8_t* buffer, uint32_t buffer_size, uint32_t& off,
-                void* dst, uint32_t n)
+bool read_bytes(const uint8_t* buffer, uint32_t buffer_size, uint32_t& off, void* dst, uint32_t n)
 {
     if (off + n > buffer_size) {
         return false;
@@ -74,95 +71,91 @@ struct SnapshotSlot {
 };
 
 struct SnapshotNode {
-    bool present;
-    char name[64];
-    vmath::vec2 position;
-    uint32_t color_override;
-    float content_width_override;
-    float content_height_override;
-    bool ghost;
-    bool has_state_widget;
+    bool         present;
+    char         name[64];
+    vmath::vec2  position;
+    uint32_t     color_override;
+    float        content_width_override;
+    float        content_height_override;
+    bool         ghost;
+    bool         has_state_widget;
     SnapshotSlot slots[max_node_slots];
 };
 
 struct SnapshotConnection {
-    bool present;
+    bool     present;
     EndPoint output;
     EndPoint input;
 };
 
 struct Snapshot {
-    SnapshotNode nodes[max_nodes];
+    SnapshotNode       nodes[max_nodes];
     SnapshotConnection connections[max_connections];
-    vmath::vec2 view_origin;
-    float zoom;
-    GraphColors colors;
-    uint32_t caller_state_size;
+    vmath::vec2        view_origin;
+    float              zoom;
+    GraphColors        colors;
+    uint32_t           caller_state_size;
 };
 
 // Parses and validates the graph sections of a snapshot (everything except
 // the caller tail).  Returns false on bad version, truncation or any
 // malformed field, so load() can bail before mutating live state.
-bool parse_snapshot(const uint8_t* buffer, uint32_t buffer_size, uint32_t& off,
-                    Snapshot& snapshot)
+bool parse_snapshot(const uint8_t* buffer, uint32_t buffer_size, uint32_t& off, Snapshot& snapshot)
 {
     uint16_t version = 0;
-    if ( ! read_bytes(buffer, buffer_size, off, &version, 2) || version != 1) {
+    if (! read_bytes(buffer, buffer_size, off, &version, 2) || version != 1) {
         return false;
     }
 
     uint32_t node_count = 0;
-    if ( ! read_bytes(buffer, buffer_size, off, &node_count, 4) || node_count > max_nodes) {
+    if (! read_bytes(buffer, buffer_size, off, &node_count, 4) || node_count > max_nodes) {
         return false;
     }
     for (uint32_t i = 0; i < node_count; ++i) {
         uint16_t node_idx = 0;
-        if ( ! read_bytes(buffer, buffer_size, off, &node_idx, 2) ||
-            node_idx >= max_nodes || snapshot.nodes[node_idx].present) {
+        if (! read_bytes(buffer, buffer_size, off, &node_idx, 2) || node_idx >= max_nodes ||
+            snapshot.nodes[node_idx].present) {
             return false;
         }
         SnapshotNode& node = snapshot.nodes[node_idx];
-        node.present = true;
-        if ( ! read_bytes(buffer, buffer_size, off, node.name, sizeof(node.name)) ||
+        node.present       = true;
+        if (! read_bytes(buffer, buffer_size, off, node.name, sizeof(node.name)) ||
             ! read_bytes(buffer, buffer_size, off, &node.position, sizeof(node.position)) ||
             ! read_bytes(buffer, buffer_size, off, &node.color_override, 4) ||
             ! read_bytes(buffer, buffer_size, off, &node.content_width_override, 4) ||
             ! read_bytes(buffer, buffer_size, off, &node.content_height_override, 4)) {
             return false;
         }
-        uint8_t ghost       = 0;
-        uint8_t has_widget  = 0;
+        uint8_t  ghost      = 0;
+        uint8_t  has_widget = 0;
         uint16_t slot_count = 0;
-        if ( ! read_bytes(buffer, buffer_size, off, &ghost, 1) ||
+        if (! read_bytes(buffer, buffer_size, off, &ghost, 1) ||
             ! read_bytes(buffer, buffer_size, off, &has_widget, 1) ||
-            ! read_bytes(buffer, buffer_size, off, &slot_count, 2) ||
-            slot_count > max_node_slots) {
+            ! read_bytes(buffer, buffer_size, off, &slot_count, 2) || slot_count > max_node_slots) {
             return false;
         }
-        node.ghost           = ghost != 0;
+        node.ghost            = ghost != 0;
         node.has_state_widget = has_widget != 0;
         for (uint32_t s = 0; s < slot_count; ++s) {
             uint16_t slot_idx = 0;
-            if ( ! read_bytes(buffer, buffer_size, off, &slot_idx, 2) ||
-                slot_idx >= max_node_slots || node.slots[slot_idx].present) {
+            if (! read_bytes(buffer, buffer_size, off, &slot_idx, 2) || slot_idx >= max_node_slots ||
+                node.slots[slot_idx].present) {
                 return false;
             }
-            SnapshotSlot& slot = node.slots[slot_idx];
-            slot.present       = true;
+            SnapshotSlot& slot    = node.slots[slot_idx];
+            slot.present          = true;
             uint8_t kind          = 0;
             uint8_t connectable   = 0;
             uint8_t property_type = 0;
             uint8_t num_options   = 0;
-            if ( ! read_bytes(buffer, buffer_size, off, slot.slot.name, sizeof(slot.slot.name)) ||
-                ! read_bytes(buffer, buffer_size, off, &kind, 1) ||
-                kind < static_cast<uint8_t>(SlotKind::input) ||
+            if (! read_bytes(buffer, buffer_size, off, slot.slot.name, sizeof(slot.slot.name)) ||
+                ! read_bytes(buffer, buffer_size, off, &kind, 1) || kind < static_cast<uint8_t>(SlotKind::input) ||
                 kind > static_cast<uint8_t>(SlotKind::property) ||
                 ! read_bytes(buffer, buffer_size, off, &connectable, 1) ||
                 ! read_bytes(buffer, buffer_size, off, &property_type, 1) ||
                 property_type > static_cast<uint8_t>(PropertyType::list) ||
                 ! read_bytes(buffer, buffer_size, off, &slot.slot.value, sizeof(slot.slot.value)) ||
-                ! read_bytes(buffer, buffer_size, off, &num_options, 1) ||
-                num_options > 8) {
+                ! read_bytes(buffer, buffer_size, off, &num_options, 1) || num_options > 8) {
                 return false;
             }
             slot.slot.kind             = static_cast<SlotKind>(kind);
@@ -170,8 +163,11 @@ bool parse_snapshot(const uint8_t* buffer, uint32_t buffer_size, uint32_t& off,
             slot.slot.property_type    = static_cast<PropertyType>(property_type);
             slot.slot.num_list_options = num_options;
             for (uint32_t o = 0; o < num_options; ++o) {
-                if ( ! read_bytes(buffer, buffer_size, off, slot.slot.list_options[o],
-                                  sizeof(slot.slot.list_options[o]))) {
+                if (! read_bytes(buffer,
+                                 buffer_size,
+                                 off,
+                                 slot.slot.list_options[o],
+                                 sizeof(slot.slot.list_options[o]))) {
                     return false;
                 }
             }
@@ -179,18 +175,18 @@ bool parse_snapshot(const uint8_t* buffer, uint32_t buffer_size, uint32_t& off,
     }
 
     uint32_t conn_count = 0;
-    if ( ! read_bytes(buffer, buffer_size, off, &conn_count, 4) || conn_count > max_connections) {
+    if (! read_bytes(buffer, buffer_size, off, &conn_count, 4) || conn_count > max_connections) {
         return false;
     }
     for (uint32_t i = 0; i < conn_count; ++i) {
         uint16_t conn_idx = 0;
-        if ( ! read_bytes(buffer, buffer_size, off, &conn_idx, 2) ||
-            conn_idx >= max_connections || snapshot.connections[conn_idx].present) {
+        if (! read_bytes(buffer, buffer_size, off, &conn_idx, 2) || conn_idx >= max_connections ||
+            snapshot.connections[conn_idx].present) {
             return false;
         }
         SnapshotConnection& connection = snapshot.connections[conn_idx];
         connection.present             = true;
-        if ( ! read_bytes(buffer, buffer_size, off, &connection.output.node_idx, 4) ||
+        if (! read_bytes(buffer, buffer_size, off, &connection.output.node_idx, 4) ||
             ! read_bytes(buffer, buffer_size, off, &connection.output.slot_idx, 4) ||
             ! read_bytes(buffer, buffer_size, off, &connection.input.node_idx, 4) ||
             ! read_bytes(buffer, buffer_size, off, &connection.input.slot_idx, 4)) {
@@ -200,34 +196,29 @@ bool parse_snapshot(const uint8_t* buffer, uint32_t buffer_size, uint32_t& off,
         // kind contract. load() places connections directly at snapshot indices,
         // bypassing add_connection, so parse_snapshot re-checks everything a
         // snapshot connection needs before it can exist in a live graph.
-        if (connection.output.node_idx >= max_nodes ||
-            connection.input.node_idx >= max_nodes ||
+        if (connection.output.node_idx >= max_nodes || connection.input.node_idx >= max_nodes ||
             ! snapshot.nodes[connection.output.node_idx].present ||
-            ! snapshot.nodes[connection.input.node_idx].present ||
-            connection.output.slot_idx >= max_node_slots ||
+            ! snapshot.nodes[connection.input.node_idx].present || connection.output.slot_idx >= max_node_slots ||
             connection.input.slot_idx >= max_node_slots ||
             ! snapshot.nodes[connection.output.node_idx].slots[connection.output.slot_idx].present ||
             ! snapshot.nodes[connection.input.node_idx].slots[connection.input.slot_idx].present) {
             return false;
         }
-        const Slot& out_slot =
-            snapshot.nodes[connection.output.node_idx].slots[connection.output.slot_idx].slot;
-        const Slot& in_slot =
-            snapshot.nodes[connection.input.node_idx].slots[connection.input.slot_idx].slot;
+        const Slot& out_slot = snapshot.nodes[connection.output.node_idx].slots[connection.output.slot_idx].slot;
+        const Slot& in_slot  = snapshot.nodes[connection.input.node_idx].slots[connection.input.slot_idx].slot;
         if (out_slot.kind != SlotKind::output ||
-            ! (in_slot.kind == SlotKind::input ||
-               (in_slot.kind == SlotKind::property && in_slot.connectable))) {
+            ! (in_slot.kind == SlotKind::input || (in_slot.kind == SlotKind::property && in_slot.connectable))) {
             return false;
         }
     }
 
-    if ( ! read_bytes(buffer, buffer_size, off, &snapshot.view_origin, sizeof(snapshot.view_origin)) ||
+    if (! read_bytes(buffer, buffer_size, off, &snapshot.view_origin, sizeof(snapshot.view_origin)) ||
         ! read_bytes(buffer, buffer_size, off, &snapshot.zoom, 4) ||
         ! read_bytes(buffer, buffer_size, off, &snapshot.colors, sizeof(snapshot.colors))) {
         return false;
     }
 
-    if ( ! read_bytes(buffer, buffer_size, off, &snapshot.caller_state_size, 4) ||
+    if (! read_bytes(buffer, buffer_size, off, &snapshot.caller_state_size, 4) ||
         snapshot.caller_state_size > buffer_size - off) {
         return false;
     }
@@ -237,8 +228,8 @@ bool parse_snapshot(const uint8_t* buffer, uint32_t buffer_size, uint32_t& off,
 // Kind/type/options identity: value and name are diffed separately.
 bool slot_structure_equal(const Slot& a, const Slot& b)
 {
-    if (a.kind != b.kind || a.connectable != b.connectable ||
-        a.property_type != b.property_type || a.num_list_options != b.num_list_options) {
+    if (a.kind != b.kind || a.connectable != b.connectable || a.property_type != b.property_type ||
+        a.num_list_options != b.num_list_options) {
         return false;
     }
     for (uint32_t i = 0; i < a.num_list_options; ++i) {
@@ -252,15 +243,17 @@ bool slot_structure_equal(const Slot& a, const Slot& b)
 // Maps a snapshot connection endpoint onto live pool indices.  Slots are
 // always placed at their exact snapshot index (allocate_at), so only the
 // node index needs remapping through the name match.
-void remap_snapshot_connection(const int32_t* snap_to_live,
-                               const SnapshotConnection& connection, EndPoint& out, EndPoint& in)
+void remap_snapshot_connection(const int32_t*            snap_to_live,
+                               const SnapshotConnection& connection,
+                               EndPoint&                 out,
+                               EndPoint&                 in)
 {
     out.node_idx = static_cast<uint32_t>(snap_to_live[connection.output.node_idx]);
     out.slot_idx = connection.output.slot_idx;
     in.node_idx  = static_cast<uint32_t>(snap_to_live[connection.input.node_idx]);
     in.slot_idx  = connection.input.slot_idx;
 }
-}  // namespace
+} // namespace
 
 void Graph::push_change(ChangeKind kind, uint32_t node_idx, uint32_t slot_idx, uint32_t connection_idx)
 {
@@ -270,10 +263,10 @@ void Graph::push_change(ChangeKind kind, uint32_t node_idx, uint32_t slot_idx, u
         changes_overflowed_flag = true;
         return;
     }
-    GraphChange& change = changes[(changes_head + changes_count) % max_pending_changes];
-    change.kind          = kind;
-    change.node_idx      = node_idx;
-    change.slot_idx      = slot_idx;
+    GraphChange& change   = changes[(changes_head + changes_count) % max_pending_changes];
+    change.kind           = kind;
+    change.node_idx       = node_idx;
+    change.slot_idx       = slot_idx;
     change.connection_idx = connection_idx;
     ++changes_count;
 }
@@ -291,7 +284,7 @@ uint32_t Graph::take_changes(GraphChange* out, uint32_t out_size)
 
 bool Graph::changes_overflowed()
 {
-    const bool overflowed = changes_overflowed_flag;
+    const bool overflowed   = changes_overflowed_flag;
     changes_overflowed_flag = false;
     return overflowed;
 }
@@ -299,7 +292,7 @@ bool Graph::changes_overflowed()
 bool Graph::slot_is_connected(uint32_t node_idx, uint32_t slot_idx) const
 {
     for (uint32_t i = 0; i < max_connections; ++i) {
-        if ( ! connections.is_occupied(i)) {
+        if (! connections.is_occupied(i)) {
             continue;
         }
         const Connection& connection = connections.entries[i];
@@ -319,8 +312,8 @@ uint32_t Graph::create_node(const char* name, vmath::vec2 position)
     if (node_idx == pool_no_slot) {
         return pool_no_slot;
     }
-        Node& new_node = nodes.entries[node_idx];
-    new_node   = Node();
+    Node& new_node = nodes.entries[node_idx];
+    new_node       = Node();
     // Defensive: parallel per-slot arrays must not leak state into a reused
     // slot (delete_node clears them too; this covers slots freed elsewhere).
     selected[node_idx]      = false;
@@ -342,7 +335,7 @@ void Graph::delete_node(uint32_t node_idx)
     // caller never sees a connection referencing a dead node.  delete_connection
     // also cancels an active retarget of a dropped connection.
     for (uint32_t i = 0; i < max_connections; ++i) {
-        if ( ! connections.is_occupied(i)) {
+        if (! connections.is_occupied(i)) {
             continue;
         }
         const Connection& connection = connections.entries[i];
@@ -375,12 +368,12 @@ void Graph::delete_node(uint32_t node_idx)
 // slot set incrementally.
 void Graph::remove_slot(uint32_t node_idx, uint32_t slot_idx)
 {
-    if (node_idx >= max_nodes || ! nodes.is_occupied(node_idx) ||
-        slot_idx >= max_node_slots || ! nodes.entries[node_idx].slots.is_occupied(slot_idx)) {
+    if (node_idx >= max_nodes || ! nodes.is_occupied(node_idx) || slot_idx >= max_node_slots ||
+        ! nodes.entries[node_idx].slots.is_occupied(slot_idx)) {
         return;
     }
     for (uint32_t i = 0; i < max_connections; ++i) {
-        if ( ! connections.is_occupied(i)) {
+        if (! connections.is_occupied(i)) {
             continue;
         }
         const Connection& connection = connections.entries[i];
@@ -398,12 +391,12 @@ uint32_t Graph::add_slot(uint32_t node_idx, const Slot& slot)
     if (node_idx >= max_nodes || ! nodes.is_occupied(node_idx)) {
         return pool_no_slot;
     }
-    Node& node = nodes.entries[node_idx];
+    Node&          node     = nodes.entries[node_idx];
     const uint32_t slot_idx = node.slots.allocate();
     if (slot_idx == pool_no_slot) {
         return pool_no_slot;
     }
-    node.slots.entries[slot_idx] = slot;
+    node.slots.entries[slot_idx]                                                     = slot;
     node.slots.entries[slot_idx].name[sizeof(node.slots.entries[slot_idx].name) - 1] = '\0';
     push_change(ChangeKind::slot_added, node_idx, slot_idx, pool_no_slot);
     return slot_idx;
@@ -411,14 +404,14 @@ uint32_t Graph::add_slot(uint32_t node_idx, const Slot& slot)
 
 bool Graph::endpoints_structurally_valid(EndPoint output, EndPoint input) const
 {
-    if (output.node_idx >= max_nodes || input.node_idx >= max_nodes ||
-        output.slot_idx >= max_node_slots || input.slot_idx >= max_node_slots) {
+    if (output.node_idx >= max_nodes || input.node_idx >= max_nodes || output.slot_idx >= max_node_slots ||
+        input.slot_idx >= max_node_slots) {
         return false;
     }
-    if ( ! nodes.is_occupied(output.node_idx) || ! nodes.is_occupied(input.node_idx)) {
+    if (! nodes.is_occupied(output.node_idx) || ! nodes.is_occupied(input.node_idx)) {
         return false;
     }
-    if ( ! nodes.entries[output.node_idx].slots.is_occupied(output.slot_idx) ||
+    if (! nodes.entries[output.node_idx].slots.is_occupied(output.slot_idx) ||
         ! nodes.entries[input.node_idx].slots.is_occupied(input.slot_idx)) {
         return false;
     }
@@ -430,15 +423,13 @@ bool Graph::endpoints_structurally_valid(EndPoint output, EndPoint input) const
     if (output_slot.kind != SlotKind::output) {
         return false;
     }
-    if (input_slot.kind != SlotKind::input &&
-        ! (input_slot.kind == SlotKind::property && input_slot.connectable)) {
+    if (input_slot.kind != SlotKind::input && ! (input_slot.kind == SlotKind::property && input_slot.connectable)) {
         return false;
     }
     return true;
 }
 
-bool Graph::input_slot_taken(uint32_t node_idx, uint32_t slot_idx,
-                             uint32_t except_connection) const
+bool Graph::input_slot_taken(uint32_t node_idx, uint32_t slot_idx, uint32_t except_connection) const
 {
     for (uint32_t i = 0; i < max_connections; ++i) {
         if (i == except_connection || ! connections.is_occupied(i)) {
@@ -454,7 +445,7 @@ bool Graph::input_slot_taken(uint32_t node_idx, uint32_t slot_idx,
 
 uint32_t Graph::add_connection(EndPoint output, EndPoint input)
 {
-    if ( ! endpoints_structurally_valid(output, input)) {
+    if (! endpoints_structurally_valid(output, input)) {
         return pool_no_slot;
     }
     // Note: no single-connection-per-input rule here.  The raw API allows
@@ -465,15 +456,15 @@ uint32_t Graph::add_connection(EndPoint output, EndPoint input)
         return pool_no_slot;
     }
     Connection& connection = connections.entries[connection_idx];
-    connection.output = output;
-    connection.input  = input;
+    connection.output      = output;
+    connection.input       = input;
     push_change(ChangeKind::connection_added, pool_no_slot, pool_no_slot, connection_idx);
     return connection_idx;
 }
 
 void Graph::set_validator(ValidationCallback callback, void* user_data)
 {
-    validator         = callback;
+    validator           = callback;
     validator_user_data = user_data;
 }
 
@@ -485,7 +476,7 @@ void Graph::set_error(const char* message)
 
 bool Graph::attempt_connection(EndPoint output, EndPoint input)
 {
-    if ( ! endpoints_structurally_valid(output, input)) {
+    if (! endpoints_structurally_valid(output, input)) {
         set_error("Invalid connection");
         return false;
     }
@@ -504,18 +495,17 @@ bool Graph::attempt_connection(EndPoint output, EndPoint input)
     return true;
 }
 
-bool Graph::move_connection_end(uint32_t connection_idx, bool move_output_end,
-                                EndPoint new_point)
+bool Graph::move_connection_end(uint32_t connection_idx, bool move_output_end, EndPoint new_point)
 {
     if (connection_idx >= max_connections || ! connections.is_occupied(connection_idx)) {
         return false;
     }
     const Connection& connection = connections.entries[connection_idx];
-    const EndPoint new_output    = move_output_end ? new_point : connection.output;
-    const EndPoint new_input     = move_output_end ? connection.input : new_point;
+    const EndPoint    new_output = move_output_end ? new_point : connection.output;
+    const EndPoint    new_input  = move_output_end ? connection.input : new_point;
 
     // Same rules as a fresh drop; a failed retarget destroys the connection.
-    if ( ! endpoints_structurally_valid(new_output, new_input)) {
+    if (! endpoints_structurally_valid(new_output, new_input)) {
         delete_connection(connection_idx);
         set_error("Invalid connection");
         return false;
@@ -532,8 +522,8 @@ bool Graph::move_connection_end(uint32_t connection_idx, bool move_output_end,
     }
 
     Connection& mutable_connection = connections.entries[connection_idx];
-    mutable_connection.output = new_output;
-    mutable_connection.input  = new_input;
+    mutable_connection.output      = new_output;
+    mutable_connection.input       = new_input;
     push_change(ChangeKind::connection_changed, pool_no_slot, pool_no_slot, connection_idx);
     return true;
 }
@@ -563,7 +553,7 @@ void Graph::set_ghost(uint32_t node_idx, bool ghost)
         return;
     }
     node.ghost = ghost;
-    if ( ! ghost) {
+    if (! ghost) {
         // Placement finishes the ghost mode; cancellation deletes the node and
         // is reported as a regular node_deleted event.
         push_change(ChangeKind::ghost_placed, node_idx, pool_no_slot, pool_no_slot);
@@ -593,27 +583,25 @@ void Graph::select_none()
 void Graph::align_selected(AlignKind kind)
 {
     // First pass: collect the reference edges over selected, non-ghost nodes.
-    bool any_selected = false;
-    float min_x       = 0.0f;
-    float min_y       = 0.0f;
-    float max_right   = 0.0f;
-    float max_bottom  = 0.0f;
-    float max_width   = 0.0f;
-    float max_height  = 0.0f;
+    bool  any_selected = false;
+    float min_x        = 0.0f;
+    float min_y        = 0.0f;
+    float max_right    = 0.0f;
+    float max_bottom   = 0.0f;
+    float max_width    = 0.0f;
+    float max_height   = 0.0f;
     for (uint32_t i = 0; i < max_nodes; ++i) {
-        if ( ! nodes.is_occupied(i) || ! selected[i] || nodes.entries[i].ghost) {
+        if (! nodes.is_occupied(i) || ! selected[i] || nodes.entries[i].ghost) {
             continue;
         }
-        const Node& node  = nodes.entries[i];
-        const float width = node.content_width_override > 0.0f
-                          ? node.content_width_override : content_sizes[i].x;
-        const float height = node.content_height_override > 0.0f
-                           ? node.content_height_override : content_sizes[i].y;
-        if ( ! any_selected) {
-            min_x      = node.position.x;
-            min_y      = node.position.y;
-            max_right  = node.position.x + width;
-            max_bottom = node.position.y + height;
+        const Node& node   = nodes.entries[i];
+        const float width  = node.content_width_override > 0.0f ? node.content_width_override : content_sizes[i].x;
+        const float height = node.content_height_override > 0.0f ? node.content_height_override : content_sizes[i].y;
+        if (! any_selected) {
+            min_x        = node.position.x;
+            min_y        = node.position.y;
+            max_right    = node.position.x + width;
+            max_bottom   = node.position.y + height;
             any_selected = true;
         }
         else {
@@ -637,40 +625,38 @@ void Graph::align_selected(AlignKind kind)
             max_height = height;
         }
     }
-    if ( ! any_selected) {
+    if (! any_selected) {
         return;
     }
 
     // Second pass: apply.  Node moves are pure view state: no change events,
     // same rule as dragging.
     for (uint32_t i = 0; i < max_nodes; ++i) {
-        if ( ! nodes.is_occupied(i) || ! selected[i] || nodes.entries[i].ghost) {
+        if (! nodes.is_occupied(i) || ! selected[i] || nodes.entries[i].ghost) {
             continue;
         }
-        Node& node        = nodes.entries[i];
-        const float width = node.content_width_override > 0.0f
-                          ? node.content_width_override : content_sizes[i].x;
-        const float height = node.content_height_override > 0.0f
-                           ? node.content_height_override : content_sizes[i].y;
+        Node&       node   = nodes.entries[i];
+        const float width  = node.content_width_override > 0.0f ? node.content_width_override : content_sizes[i].x;
+        const float height = node.content_height_override > 0.0f ? node.content_height_override : content_sizes[i].y;
         switch (kind) {
-        case AlignKind::left:
-            node.position.x = min_x;
-            break;
-        case AlignKind::right:
-            node.position.x = max_right - width;
-            break;
-        case AlignKind::top:
-            node.position.y = min_y;
-            break;
-        case AlignKind::bottom:
-            node.position.y = max_bottom - height;
-            break;
-        case AlignKind::equal_width:
-            node.content_width_override = max_width;
-            break;
-        case AlignKind::equal_height:
-            node.content_height_override = max_height;
-            break;
+            case AlignKind::left:
+                node.position.x = min_x;
+                break;
+            case AlignKind::right:
+                node.position.x = max_right - width;
+                break;
+            case AlignKind::top:
+                node.position.y = min_y;
+                break;
+            case AlignKind::bottom:
+                node.position.y = max_bottom - height;
+                break;
+            case AlignKind::equal_width:
+                node.content_width_override = max_width;
+                break;
+            case AlignKind::equal_height:
+                node.content_height_override = max_height;
+                break;
         }
     }
 }
@@ -730,7 +716,7 @@ void Graph::set_state_callbacks(SerializeState serialize, DeserializeState deser
 // length so load() can report bytes_consumed covering the caller tail.
 uint32_t Graph::save(uint8_t* buffer, uint32_t buffer_size) const
 {
-    if (!buffer || buffer_size < 2) {
+    if (! buffer || buffer_size < 2) {
         return 0;
     }
 
@@ -738,53 +724,53 @@ uint32_t Graph::save(uint8_t* buffer, uint32_t buffer_size) const
 
     // 1. Version
     const uint16_t version = 1;
-    if (!append_bytes(buffer, buffer_size, off, &version, 2)) {
+    if (! append_bytes(buffer, buffer_size, off, &version, 2)) {
         return 0;
     }
 
     // 2. Node pool: count, then per occupied slot in index order.
     const uint32_t node_count = nodes.num_allocated;
-    if (!append_bytes(buffer, buffer_size, off, &node_count, 4)) {
+    if (! append_bytes(buffer, buffer_size, off, &node_count, 4)) {
         return 0;
     }
 
     for (uint32_t i = 0; i < max_nodes; ++i) {
-        if (!nodes.is_occupied(i)) {
+        if (! nodes.is_occupied(i)) {
             continue;
         }
 
-        const Node& n           = nodes.entries[i];
+        const Node&    n        = nodes.entries[i];
         const uint16_t node_idx = static_cast<uint16_t>(i);
 
-        if (!append_bytes(buffer, buffer_size, off, &node_idx, 2) ||
-            !append_bytes(buffer, buffer_size, off, n.name, sizeof(n.name)) ||
-            !append_bytes(buffer, buffer_size, off, &n.position, sizeof(n.position)) ||
-            !append_bytes(buffer, buffer_size, off, &n.color_override, 4) ||
-            !append_bytes(buffer, buffer_size, off, &n.content_width_override, 4) ||
-            !append_bytes(buffer, buffer_size, off, &n.content_height_override, 4)) {
+        if (! append_bytes(buffer, buffer_size, off, &node_idx, 2) ||
+            ! append_bytes(buffer, buffer_size, off, n.name, sizeof(n.name)) ||
+            ! append_bytes(buffer, buffer_size, off, &n.position, sizeof(n.position)) ||
+            ! append_bytes(buffer, buffer_size, off, &n.color_override, 4) ||
+            ! append_bytes(buffer, buffer_size, off, &n.content_width_override, 4) ||
+            ! append_bytes(buffer, buffer_size, off, &n.content_height_override, 4)) {
             return 0;
         }
 
-        const uint8_t ghost       = n.ghost ? 1 : 0;
-        const uint8_t has_widget  = n.state_widget ? 1 : 0;
+        const uint8_t  ghost      = n.ghost ? 1 : 0;
+        const uint8_t  has_widget = n.state_widget ? 1 : 0;
         const uint16_t slot_count = static_cast<uint16_t>(n.slots.num_allocated);
 
-        if (!append_bytes(buffer, buffer_size, off, &ghost, 1) ||
-            !append_bytes(buffer, buffer_size, off, &has_widget, 1) ||
-            !append_bytes(buffer, buffer_size, off, &slot_count, 2)) {
+        if (! append_bytes(buffer, buffer_size, off, &ghost, 1) ||
+            ! append_bytes(buffer, buffer_size, off, &has_widget, 1) ||
+            ! append_bytes(buffer, buffer_size, off, &slot_count, 2)) {
             return 0;
         }
 
         for (uint32_t s = 0; s < max_node_slots; ++s) {
-            if (!n.slots.is_occupied(s)) {
+            if (! n.slots.is_occupied(s)) {
                 continue;
             }
 
-            const Slot& slot      = n.slots.entries[s];
-            const uint16_t sidx   = static_cast<uint16_t>(s);
-            const uint8_t   kind  = static_cast<uint8_t>(slot.kind);
-            const uint8_t   conn  = slot.connectable ? 1 : 0;
-            const uint8_t   ptype = static_cast<uint8_t>(slot.property_type);
+            const Slot&    slot  = n.slots.entries[s];
+            const uint16_t sidx  = static_cast<uint16_t>(s);
+            const uint8_t  kind  = static_cast<uint8_t>(slot.kind);
+            const uint8_t  conn  = slot.connectable ? 1 : 0;
+            const uint8_t  ptype = static_cast<uint8_t>(slot.property_type);
 
             // add_slot() does not validate this, and iterating it would read
             // past list_options[8]; refuse to serialize such a slot.
@@ -792,20 +778,18 @@ uint32_t Graph::save(uint8_t* buffer, uint32_t buffer_size) const
                 return 0;
             }
 
-            if (!append_bytes(buffer, buffer_size, off, &sidx, 2) ||
-                !append_bytes(buffer, buffer_size, off, slot.name, sizeof(slot.name)) ||
-                !append_bytes(buffer, buffer_size, off, &kind, 1) ||
-                !append_bytes(buffer, buffer_size, off, &conn, 1) ||
-                !append_bytes(buffer, buffer_size, off, &ptype, 1) ||
-                !append_bytes(buffer, buffer_size, off, &slot.value, sizeof(slot.value)) ||
-                !append_bytes(buffer, buffer_size, off, &slot.num_list_options, 1)) {
+            if (! append_bytes(buffer, buffer_size, off, &sidx, 2) ||
+                ! append_bytes(buffer, buffer_size, off, slot.name, sizeof(slot.name)) ||
+                ! append_bytes(buffer, buffer_size, off, &kind, 1) ||
+                ! append_bytes(buffer, buffer_size, off, &conn, 1) ||
+                ! append_bytes(buffer, buffer_size, off, &ptype, 1) ||
+                ! append_bytes(buffer, buffer_size, off, &slot.value, sizeof(slot.value)) ||
+                ! append_bytes(buffer, buffer_size, off, &slot.num_list_options, 1)) {
                 return 0;
             }
 
             for (uint32_t o = 0; o < slot.num_list_options; ++o) {
-                if (!append_bytes(buffer, buffer_size, off,
-                                  slot.list_options[o],
-                                  sizeof(slot.list_options[o]))) {
+                if (! append_bytes(buffer, buffer_size, off, slot.list_options[o], sizeof(slot.list_options[o]))) {
                     return 0;
                 }
             }
@@ -814,35 +798,35 @@ uint32_t Graph::save(uint8_t* buffer, uint32_t buffer_size) const
 
     // 3. Connection pool: count, then per occupied slot in index order.
     const uint32_t conn_count = connections.num_allocated;
-    if (!append_bytes(buffer, buffer_size, off, &conn_count, 4)) {
+    if (! append_bytes(buffer, buffer_size, off, &conn_count, 4)) {
         return 0;
     }
 
     for (uint32_t i = 0; i < max_connections; ++i) {
-        if (!connections.is_occupied(i)) {
+        if (! connections.is_occupied(i)) {
             continue;
         }
 
-        const Connection& c     = connections.entries[i];
-        const uint16_t conn_idx = static_cast<uint16_t>(i);
+        const Connection& c        = connections.entries[i];
+        const uint16_t    conn_idx = static_cast<uint16_t>(i);
 
-        if (!append_bytes(buffer, buffer_size, off, &conn_idx, 2) ||
-            !append_bytes(buffer, buffer_size, off, &c.output.node_idx, 4) ||
-            !append_bytes(buffer, buffer_size, off, &c.output.slot_idx, 4) ||
-            !append_bytes(buffer, buffer_size, off, &c.input.node_idx, 4) ||
-            !append_bytes(buffer, buffer_size, off, &c.input.slot_idx, 4)) {
+        if (! append_bytes(buffer, buffer_size, off, &conn_idx, 2) ||
+            ! append_bytes(buffer, buffer_size, off, &c.output.node_idx, 4) ||
+            ! append_bytes(buffer, buffer_size, off, &c.output.slot_idx, 4) ||
+            ! append_bytes(buffer, buffer_size, off, &c.input.node_idx, 4) ||
+            ! append_bytes(buffer, buffer_size, off, &c.input.slot_idx, 4)) {
             return 0;
         }
     }
 
     // 4. View state
-    if (!append_bytes(buffer, buffer_size, off, &view_origin, sizeof(view_origin)) ||
-        !append_bytes(buffer, buffer_size, off, &zoom, 4)) {
+    if (! append_bytes(buffer, buffer_size, off, &view_origin, sizeof(view_origin)) ||
+        ! append_bytes(buffer, buffer_size, off, &zoom, 4)) {
         return 0;
     }
 
     // 5. Colors (17 u32s, all fields of GraphColors, no padding)
-    if (!append_bytes(buffer, buffer_size, off, &colors_, sizeof(colors_))) {
+    if (! append_bytes(buffer, buffer_size, off, &colors_, sizeof(colors_))) {
         return 0;
     }
 
@@ -850,15 +834,14 @@ uint32_t Graph::save(uint8_t* buffer, uint32_t buffer_size) const
     // placeholder, call the hook into the remaining space, then patch.
     const uint32_t size_field_off = off;
     const uint32_t zero           = 0;
-    if (!append_bytes(buffer, buffer_size, off, &zero, 4)) {
+    if (! append_bytes(buffer, buffer_size, off, &zero, 4)) {
         return 0;
     }
 
     if (serialize_state) {
-        const uint32_t remaining = buffer_size - off;
-        const uint32_t hook_bytes = serialize_state(state_user_data,
-                                                    buffer + off, remaining);
-        if (hook_bytes > remaining) {  // no wrap: off <= buffer_size
+        const uint32_t remaining  = buffer_size - off;
+        const uint32_t hook_bytes = serialize_state(state_user_data, buffer + off, remaining);
+        if (hook_bytes > remaining) { // no wrap: off <= buffer_size
             return 0;
         }
         memcpy(buffer + size_field_off, &hook_bytes, 4);
@@ -879,7 +862,7 @@ bool Graph::load(const uint8_t* buffer, uint32_t buffer_size, uint32_t* bytes_co
     if (bytes_consumed) {
         *bytes_consumed = 0;
     }
-    if ( ! buffer || buffer_size < 2) {
+    if (! buffer || buffer_size < 2) {
         return false;
     }
 
@@ -889,41 +872,39 @@ bool Graph::load(const uint8_t* buffer, uint32_t buffer_size, uint32_t* bytes_co
     memset(&snapshot, 0, sizeof(snapshot));
 
     uint32_t off = 0;
-    if ( ! parse_snapshot(buffer, buffer_size, off, snapshot)) {
+    if (! parse_snapshot(buffer, buffer_size, off, snapshot)) {
         return false;
     }
 
     // Optional deserialize hook runs before any mutation, so a rejected tail
     // still leaves the live graph untouched.
-    if (deserialize_state &&
-        ! deserialize_state(state_user_data, buffer + off, snapshot.caller_state_size)) {
+    if (deserialize_state && ! deserialize_state(state_user_data, buffer + off, snapshot.caller_state_size)) {
         return false;
     }
     const uint32_t consumed = off + snapshot.caller_state_size;
 
     // Match snapshot nodes to live nodes by name.
-    int32_t snap_to_live[max_nodes];  // snapshot node idx -> live node idx
+    int32_t snap_to_live[max_nodes]; // snapshot node idx -> live node idx
     bool    snap_was_matched[max_nodes];
     bool    snap_slots_recreated[max_nodes];
     bool    live_matched[max_nodes];
     for (uint32_t s = 0; s < max_nodes; ++s) {
-        snap_to_live[s]        = -1;
-        snap_was_matched[s]    = false;
+        snap_to_live[s]         = -1;
+        snap_was_matched[s]     = false;
         snap_slots_recreated[s] = false;
     }
     for (uint32_t i = 0; i < max_nodes; ++i) {
         live_matched[i] = false;
     }
     for (uint32_t s = 0; s < max_nodes; ++s) {
-        if ( ! snapshot.nodes[s].present) {
+        if (! snapshot.nodes[s].present) {
             continue;
         }
         for (uint32_t i = 0; i < max_nodes; ++i) {
-            if ( ! nodes.is_occupied(i) || live_matched[i]) {
+            if (! nodes.is_occupied(i) || live_matched[i]) {
                 continue;
             }
-            if (strncmp(nodes.entries[i].name, snapshot.nodes[s].name,
-                        sizeof(nodes.entries[i].name)) == 0) {
+            if (strncmp(nodes.entries[i].name, snapshot.nodes[s].name, sizeof(nodes.entries[i].name)) == 0) {
                 snap_to_live[s]     = static_cast<int32_t>(i);
                 snap_was_matched[s] = true;
                 live_matched[i]     = true;
@@ -935,7 +916,7 @@ bool Graph::load(const uint8_t* buffer, uint32_t buffer_size, uint32_t* bytes_co
     // A matched node whose slot index set changed is recreated wholesale:
     // per-slot in-place updates are only sound when the index sets agree.
     for (uint32_t s = 0; s < max_nodes; ++s) {
-        if ( ! snap_was_matched[s]) {
+        if (! snap_was_matched[s]) {
             continue;
         }
         const Node& node = nodes.entries[snap_to_live[s]];
@@ -953,12 +934,11 @@ bool Graph::load(const uint8_t* buffer, uint32_t buffer_size, uint32_t* bytes_co
     // remapped endpoints differ (connection_changed).
     bool conn_survives[max_connections] = {};
     for (uint32_t j = 0; j < max_connections; ++j) {
-        if ( ! connections.is_occupied(j) || ! snapshot.connections[j].present) {
+        if (! connections.is_occupied(j) || ! snapshot.connections[j].present) {
             continue;
         }
         const SnapshotConnection& sc = snapshot.connections[j];
-        conn_survives[j] = snap_was_matched[sc.output.node_idx] &&
-                           snap_was_matched[sc.input.node_idx];
+        conn_survives[j]             = snap_was_matched[sc.output.node_idx] && snap_was_matched[sc.input.node_idx];
     }
 
     // 1. Deletions: connections first (delete_node would drop them anyway,
@@ -978,29 +958,29 @@ bool Graph::load(const uint8_t* buffer, uint32_t buffer_size, uint32_t* bytes_co
     // applied directly - node_added/slot_added already tell the caller.  Slots
     // land at their exact snapshot indices so connection endpoints remap 1:1.
     for (uint32_t s = 0; s < max_nodes; ++s) {
-        if ( ! snapshot.nodes[s].present || snap_was_matched[s]) {
+        if (! snapshot.nodes[s].present || snap_was_matched[s]) {
             continue;
         }
-        const SnapshotNode& sn  = snapshot.nodes[s];
-        const uint32_t live_idx = create_node(sn.name, sn.position);
+        const SnapshotNode& sn       = snapshot.nodes[s];
+        const uint32_t      live_idx = create_node(sn.name, sn.position);
         if (live_idx == pool_no_slot) {
             return false; // unreachable: deletions freed enough pool slots
         }
-        snap_to_live[s] = static_cast<int32_t>(live_idx);
-        Node& node = nodes.entries[live_idx];
-        node.position = sn.position;
-        node.color_override = sn.color_override;
-        node.content_width_override = sn.content_width_override;
+        snap_to_live[s]              = static_cast<int32_t>(live_idx);
+        Node& node                   = nodes.entries[live_idx];
+        node.position                = sn.position;
+        node.color_override          = sn.color_override;
+        node.content_width_override  = sn.content_width_override;
         node.content_height_override = sn.content_height_override;
-        node.ghost = sn.ghost;
+        node.ghost                   = sn.ghost;
         for (uint32_t t = 0; t < max_node_slots; ++t) {
-            if ( ! sn.slots[t].present) {
+            if (! sn.slots[t].present) {
                 continue;
             }
             if (node.slots.allocate_at(t) == pool_no_slot) {
                 return false; // unreachable: fresh node, snapshot indices unique
             }
-            node.slots.entries[t] = sn.slots[t].slot;
+            node.slots.entries[t]                                              = sn.slots[t].slot;
             node.slots.entries[t].name[sizeof(node.slots.entries[t].name) - 1] = '\0';
             push_change(ChangeKind::slot_added, live_idx, t, pool_no_slot);
         }
@@ -1013,12 +993,12 @@ bool Graph::load(const uint8_t* buffer, uint32_t buffer_size, uint32_t* bytes_co
     // would not reliably return a sparse index.  Index-set changes rebuild at
     // exact snapshot indices.
     for (uint32_t s = 0; s < max_nodes; ++s) {
-        if ( ! snapshot.nodes[s].present || ! snap_was_matched[s]) {
+        if (! snapshot.nodes[s].present || ! snap_was_matched[s]) {
             continue;
         }
-        const SnapshotNode& sn = snapshot.nodes[s];
-        const uint32_t i       = static_cast<uint32_t>(snap_to_live[s]);
-        Node& node = nodes.entries[i];
+        const SnapshotNode& sn   = snapshot.nodes[s];
+        const uint32_t      i    = static_cast<uint32_t>(snap_to_live[s]);
+        Node&               node = nodes.entries[i];
         if (snap_slots_recreated[s]) {
             for (uint32_t t = 0; t < max_node_slots; ++t) {
                 if (node.slots.is_occupied(t)) {
@@ -1027,25 +1007,25 @@ bool Graph::load(const uint8_t* buffer, uint32_t buffer_size, uint32_t* bytes_co
                 }
             }
             for (uint32_t t = 0; t < max_node_slots; ++t) {
-                if ( ! sn.slots[t].present) {
+                if (! sn.slots[t].present) {
                     continue;
                 }
                 if (node.slots.allocate_at(t) == pool_no_slot) {
                     return false; // unreachable: all slots freed above
                 }
-                node.slots.entries[t] = sn.slots[t].slot;
+                node.slots.entries[t]                                              = sn.slots[t].slot;
                 node.slots.entries[t].name[sizeof(node.slots.entries[t].name) - 1] = '\0';
                 push_change(ChangeKind::slot_added, i, t, pool_no_slot);
             }
         }
         else {
             for (uint32_t t = 0; t < max_node_slots; ++t) {
-                if ( ! sn.slots[t].present) {
+                if (! sn.slots[t].present) {
                     continue;
                 }
                 Slot& live_slot = node.slots.entries[t];
-                if ( ! slot_structure_equal(live_slot, sn.slots[t].slot)) {
-                    live_slot = sn.slots[t].slot;
+                if (! slot_structure_equal(live_slot, sn.slots[t].slot)) {
+                    live_slot                                  = sn.slots[t].slot;
                     live_slot.name[sizeof(live_slot.name) - 1] = '\0';
                     push_change(ChangeKind::slot_deleted, i, t, pool_no_slot);
                     push_change(ChangeKind::slot_added, i, t, pool_no_slot);
@@ -1058,7 +1038,7 @@ bool Graph::load(const uint8_t* buffer, uint32_t buffer_size, uint32_t* bytes_co
     // pool slot and are retargeted in phase 6, after node updates, so
     // connection_changed is emitted last per the pinned event order.
     for (uint32_t j = 0; j < max_connections; ++j) {
-        if ( ! snapshot.connections[j].present || connections.is_occupied(j)) {
+        if (! snapshot.connections[j].present || connections.is_occupied(j)) {
             continue;
         }
         EndPoint out;
@@ -1068,33 +1048,33 @@ bool Graph::load(const uint8_t* buffer, uint32_t buffer_size, uint32_t* bytes_co
             return false; // unreachable: survivors are a subset of the snapshot
         }
         connections.entries[j].output = out;
-        connections.entries[j].input = in;
+        connections.entries[j].input  = in;
         push_change(ChangeKind::connection_added, pool_no_slot, pool_no_slot, j);
     }
 
     // 5. In-place updates on matched nodes.
     for (uint32_t s = 0; s < max_nodes; ++s) {
-        if ( ! snapshot.nodes[s].present || ! snap_was_matched[s]) {
+        if (! snapshot.nodes[s].present || ! snap_was_matched[s]) {
             continue;
         }
-        const SnapshotNode& sn = snapshot.nodes[s];
-        const uint32_t i       = static_cast<uint32_t>(snap_to_live[s]);
-        Node& node = nodes.entries[i];
+        const SnapshotNode& sn   = snapshot.nodes[s];
+        const uint32_t      i    = static_cast<uint32_t>(snap_to_live[s]);
+        Node&               node = nodes.entries[i];
         // Silent: positions/overrides/ghost push no events (drag rule).
-        node.position = sn.position;
-        node.content_width_override = sn.content_width_override;
+        node.position                = sn.position;
+        node.content_width_override  = sn.content_width_override;
         node.content_height_override = sn.content_height_override;
-        node.ghost = sn.ghost;
+        node.ghost                   = sn.ghost;
         if (node.color_override != sn.color_override) {
             node.color_override = sn.color_override;
             push_change(ChangeKind::color_changed, i, pool_no_slot, pool_no_slot);
         }
-        if ( ! snap_slots_recreated[s]) {
+        if (! snap_slots_recreated[s]) {
             for (uint32_t t = 0; t < max_node_slots; ++t) {
-                if ( ! sn.slots[t].present) {
+                if (! sn.slots[t].present) {
                     continue;
                 }
-                Slot& live_slot = node.slots.entries[t];
+                Slot&       live_slot = node.slots.entries[t];
                 const Slot& snap_slot = sn.slots[t].slot;
                 if (memcmp(&live_slot.value, &snap_slot.value, sizeof(snap_slot.value)) != 0) {
                     live_slot.value = snap_slot.value;
@@ -1112,17 +1092,15 @@ bool Graph::load(const uint8_t* buffer, uint32_t buffer_size, uint32_t* bytes_co
     // Direct pool mutation plus one connection_changed event, mirroring
     // set_connection_endpoint().
     for (uint32_t j = 0; j < max_connections; ++j) {
-        if ( ! conn_survives[j]) {
+        if (! conn_survives[j]) {
             continue;
         }
         EndPoint out;
         EndPoint in;
         remap_snapshot_connection(snap_to_live, snapshot.connections[j], out, in);
         Connection& connection = connections.entries[j];
-        if (connection.output.node_idx != out.node_idx ||
-            connection.output.slot_idx != out.slot_idx ||
-            connection.input.node_idx != in.node_idx ||
-            connection.input.slot_idx != in.slot_idx) {
+        if (connection.output.node_idx != out.node_idx || connection.output.slot_idx != out.slot_idx ||
+            connection.input.node_idx != in.node_idx || connection.input.slot_idx != in.slot_idx) {
             connection.output = out;
             connection.input  = in;
             push_change(ChangeKind::connection_changed, pool_no_slot, pool_no_slot, j);
@@ -1184,4 +1162,4 @@ void Graph::dismiss_error()
     error_active = false;
 }
 
-}  // namespace Sculptor
+} // namespace Sculptor
