@@ -1755,7 +1755,10 @@ static void render_audio_step()
     // before the effect dispatches (TRANSFER stage, no command buffer existed at init).
     const Synth::EffectClearList effect_clears = Synth::take_effect_clear_ranges();
     if (effect_clears.count) {
-        memory_barrier(VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+        memory_barrier(VK_ACCESS_TRANSFER_WRITE_BIT,
+                       VK_PIPELINE_STAGE_TRANSFER_BIT,
+                       VK_ACCESS_TRANSFER_WRITE_BIT,
+                       VK_PIPELINE_STAGE_TRANSFER_BIT);
 
         for (uint32_t range_idx = 0; range_idx < effect_clears.count; range_idx++) {
             vkCmdFillBuffer(audio_cmd_buf,
@@ -1798,7 +1801,10 @@ static void render_audio_step()
         }
 
         if (! any_history_cleared) {
-            memory_barrier(VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+            memory_barrier(VK_ACCESS_TRANSFER_WRITE_BIT,
+                           VK_PIPELINE_STAGE_TRANSFER_BIT,
+                           VK_ACCESS_TRANSFER_WRITE_BIT,
+                           VK_PIPELINE_STAGE_TRANSFER_BIT);
             any_history_cleared = true;
         }
 
@@ -1838,7 +1844,10 @@ static void render_audio_step()
     // Nothing to render only when no channel is in the graph and the master chain has
     // no tail of its own.  Otherwise the graph runs so effect tails ring out.
     if (! num_mix_channels && ! chain_has_enabled_effect(master_chain)) {
-        memory_barrier(VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+        memory_barrier(VK_ACCESS_TRANSFER_WRITE_BIT,
+                       VK_PIPELINE_STAGE_TRANSFER_BIT,
+                       VK_ACCESS_TRANSFER_WRITE_BIT,
+                       VK_PIPELINE_STAGE_TRANSFER_BIT);
 
         vkCmdFillBuffer(audio_cmd_buf,
                         buffers[data_buf].get_buffer(),
