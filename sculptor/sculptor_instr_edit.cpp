@@ -28,14 +28,15 @@ const char* const library_invalid_open_refusal = "Synth: %s is invalid or unread
 
 // Pressing a keyboard key submits plain note events through the synth's live-MIDI
 // input, like any external keyboard; the synth knows nothing about the editor.
-void submit_note_event(uint32_t channel, uint32_t note, bool note_on)
+// Returns false when the event was dropped (input ring buffer full).
+bool submit_note_event(uint32_t channel, uint32_t note, bool note_on)
 {
     Synth::MidiEvent event = {};
     event.event            = note_on ? Synth::EvType::note_on : Synth::EvType::note_off;
     event.channel          = static_cast<uint8_t>(channel);
     event.note             = static_cast<uint8_t>(note);
     event.note_data        = 127;
-    Synth::submit_external_midi_event(event);
+    return Synth::submit_external_midi_event(event);
 }
 
 Synth::InstrumentEditorBank instr_bank; // GUI-thread-owned editable bank (names included).
@@ -804,9 +805,10 @@ void Sculptor::SynthEditor::release_held_note()
 {
     if (! held_note_active)
         return;
-    // Retry each frame until accepted; a refused off would leave the note sounding.
-    submit_note_event(held_note_channel, held_note, false);
-    held_note_active = false;
+    // Retry each frame until accepted; a dropped off would leave the note sounding.
+    if (submit_note_event(held_note_channel, held_note, false)) {
+        held_note_active = false;
+    }
 }
 
 bool Sculptor::SynthEditor::create_gui_frame(uint32_t image_idx, bool* need_realloc, const UserInput& input)
@@ -1510,7 +1512,9 @@ void Sculptor::SynthEditor::gui_keyboard()
         }
     }
 
-    if (active && hit >= 0) {
+    // The hover gate keeps clicks from occluding windows from triggering keys;
+    // the keyboard child is only hovered when it is actually on top.
+    if (active && hit >= 0 && ImGui::IsWindowHovered()) {
         if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
             const int32_t zone =
                 static_cast<int32_t>(Synth::zone_entry_at(bank.channel_zones[channel], static_cast<uint32_t>(hit)));

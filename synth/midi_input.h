@@ -7,7 +7,9 @@
 
 namespace Synth {
 
-// Pushes one decoded MIDI event into the live-input circular buffer from the OS MIDI thread.
-void submit_external_midi_event(const MidiEvent& event);
+// Pushes one decoded MIDI event into the live-input circular buffer from a
+// producer thread (OS MIDI thread or the synth editor GUI thread). Returns
+// false when the buffer is full and the event was dropped.
+bool submit_external_midi_event(const MidiEvent& event);
 
 } // namespace Synth

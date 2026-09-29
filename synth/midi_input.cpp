@@ -7,13 +7,16 @@
 
 namespace {
 
-// MIDI event circular buffer: single-producer (OS MIDI thread), single-consumer (audio
-// producer thread).  Sized so real MIDI rates never overflow between render steps.
+// MIDI event circular buffer: single-consumer (audio producer thread).  The two
+// producers (OS MIDI thread, synth editor GUI thread) are serialized by
+// submit_lock, keeping the ring effectively single-producer.  Sized so real MIDI
+// rates never overflow between render steps.
 constexpr uint32_t midi_buffer_capacity = 1024;
 
 Synth::MidiEvent      midi_event_buffer[midi_buffer_capacity];
 std::atomic<uint64_t> midi_write;
 std::atomic<uint64_t> midi_read;
+std::atomic_flag      submit_lock = ATOMIC_FLAG_INIT;
 
 } // anonymous namespace
 
@@ -31,16 +34,24 @@ void Synth::pump_live_midi()
     midi_read.store(read_pos + available, std::memory_order_release);
 }
 
-void Synth::submit_external_midi_event(const Synth::MidiEvent& event)
+bool Synth::submit_external_midi_event(const Synth::MidiEvent& event)
 {
+    // Spinlock serializes the two producers; the critical section is a few
+    // stores, so spinning is negligible.
+    while (submit_lock.test_and_set(std::memory_order_acquire)) {
+        // Spin until the other producer releases the lock.
+    }
+
     const uint64_t write_pos = midi_write.load(std::memory_order_relaxed);
     const uint64_t read_pos  = midi_read.load(std::memory_order_acquire);
 
     // Drop on overflow; only reachable under pathological flooding.
-    if (! get_ringbuf_avail_space(write_pos, read_pos, midi_buffer_capacity)) {
-        return;
+    const bool queued = get_ringbuf_avail_space(write_pos, read_pos, midi_buffer_capacity);
+    if (queued) {
+        midi_event_buffer[write_pos % midi_buffer_capacity] = event;
+        midi_write.store(write_pos + 1, std::memory_order_release);
     }
 
-    midi_event_buffer[write_pos % midi_buffer_capacity] = event;
-    midi_write.store(write_pos + 1, std::memory_order_release);
+    submit_lock.clear(std::memory_order_release);
+    return queued;
 }
