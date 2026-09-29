@@ -100,6 +100,7 @@ bool Synth::init_default_channel(InstrumentBank* bank, uint32_t channel)
     bank->channel_chains[channel] = {};
     return true;
 }
+
 void Synth::init_default_bank(InstrumentBank* bank)
 {
     memset(bank, 0, sizeof(*bank));

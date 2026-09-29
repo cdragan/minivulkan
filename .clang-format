@@ -30,6 +30,9 @@ BreakAfterOpenBracketBracedList: true
 # Collapse runs of blank lines to a single one; blank-line-separated blocks stay separated.
 MaxEmptyLinesToKeep: 1
 
+# Always have a blank line between blocks
+SeparateDefinitionBlocks: Always
+
 # One argument/parameter per line when it does not fit, aligned to the open paren.
 AlignAfterOpenBracket: Align
 BinPackArguments:  false
