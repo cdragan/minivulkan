@@ -18,8 +18,9 @@
 #include <iterator>
 #include <math.h>
 
-#include "../core/shaders.h"
 #include "synth_shaders.h"
+
+#include "../core/shaders.h"
 
 namespace {
 enum BufferTypes : uint8_t {
