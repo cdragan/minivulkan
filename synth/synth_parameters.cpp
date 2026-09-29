@@ -111,7 +111,9 @@ float eval_envelope(const EnvelopeDescriptor& envelope, EnvelopeState* state, bo
         const int duration  = static_cast<int>(pt2.position - pt1.position);
         const int range     = static_cast<int>(pt2.value) - env_value;
 
-        env_value += (delta_pos * range) / duration;
+        if (duration > 0) {
+            env_value += (delta_pos * range) / duration;
+        }
     }
 
     const float value = envelope.min_value + static_cast<float>(env_value) * envelope.min_max_delta;
