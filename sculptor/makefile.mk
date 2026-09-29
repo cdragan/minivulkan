@@ -4,6 +4,7 @@
 gui_project_name = sculptor
 
 src_files += sculptor.cpp
+src_files += sculptor_atomic_file.cpp
 src_files += sculptor_editor.cpp
 src_files += sculptor_geometry.cpp
 src_files += sculptor_undo.cpp

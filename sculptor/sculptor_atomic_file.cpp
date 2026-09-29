@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 // SPDX-FileCopyrightText: Copyright (c) 2021-2026 Chris Dragan
 
-#include "atomic_file.h"
+#include "sculptor_atomic_file.h"
 
 #include <errno.h>
 #include <stdio.h>

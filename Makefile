@@ -107,7 +107,6 @@ TARGET_FILES = $(call OBJ_FROM_SRC, $1) $(call ASM_FROM_SRC, $1)
 ##############################################################################
 # Sources
 
-lib_gui_src_files += core/atomic_file.cpp
 lib_src_files += core/mstdc.cpp
 lib_src_files += core/pool.cpp
 lib_src_files += core/rng.cpp
