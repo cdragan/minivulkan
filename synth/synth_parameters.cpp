@@ -3,9 +3,9 @@
 
 #include "synth_parameters.h"
 #include "../core/mstdc.h"
-#include "../core/vmath.h"
-#include "../core/vecfloat.h"
 #include "../core/rng.h"
+#include "../core/vecfloat.h"
+#include "../core/vmath.h"
 #include <assert.h>
 
 namespace Synth {
@@ -48,18 +48,17 @@ static float eval_lfo_normalized(const LFODescriptor& lfo,
         case WaveType::sine_wave:
             return (vmath::sincos(phase * vmath::two_pi).sin + 1.0f) * 0.5f;
 
-        case WaveType::sawtooth_wave:
-            {
-                const float frac_phase = phase - static_cast<float>(static_cast<int>(phase));
-                const float duty       = static_cast<float>(lfo.duty) / 255.0f;
+        case WaveType::sawtooth_wave: {
+            const float frac_phase = phase - static_cast<float>(static_cast<int>(phase));
+            const float duty       = static_cast<float>(lfo.duty) / 255.0f;
 
-                if (frac_phase <= duty) {
-                    return (duty > 0.0f) ? frac_phase / duty : 0.0f;
-                }
-
-                const float fall = 1.0f - duty;
-                return (fall > 0.0f) ? (1.0f - frac_phase) / fall : 0.0f;
+            if (frac_phase <= duty) {
+                return (duty > 0.0f) ? frac_phase / duty : 0.0f;
             }
+
+            const float fall = 1.0f - duty;
+            return (fall > 0.0f) ? (1.0f - frac_phase) / fall : 0.0f;
+        }
 
         default:
             // Only sine and sawtooth LFOs are supported
@@ -119,7 +118,7 @@ float eval_envelope(const EnvelopeDescriptor& envelope, EnvelopeState* state, bo
 
     for (;;) {
         // Advance envelope
-        if ( ! sustain || env_point < envelope.sustain_last_point) {
+        if (! sustain || env_point < envelope.sustain_last_point) {
 
             const uint32_t next_point = env_point + 1;
             if (next_point < envelope.num_points) {
@@ -190,22 +189,22 @@ void propagate_parameters(Parameter* params, const ParamDescriptor* descs, uint3
     }
 }
 
-void configure_lfo(ParamDescriptor* desc,
+void configure_lfo(ParamDescriptor*     desc,
                    const LFODescriptor& lfo,
-                   SourceOp         lfo_op,
-                   float            lfo_depth,
-                   uint16_t         lfo_depth_param_id,
-                   uint16_t         lfo_rate_param_id,
-                   float            lfo_rate_scale)
+                   SourceOp             lfo_op,
+                   float                lfo_depth,
+                   uint16_t             lfo_depth_param_id,
+                   uint16_t             lfo_rate_param_id,
+                   float                lfo_rate_scale)
 {
-    *desc = { };
-    desc->kind                = ParamKind::lfo;
-    desc->lfo.lfo             = lfo;
-    desc->lfo.op              = lfo_op;
-    desc->lfo.depth           = lfo_depth;
-    desc->lfo.depth_param_id  = lfo_depth_param_id;
-    desc->lfo.rate_param_id   = lfo_rate_param_id;
-    desc->lfo.rate_scale_ms   = lfo_rate_scale;
+    *desc                    = {};
+    desc->kind               = ParamKind::lfo;
+    desc->lfo.lfo            = lfo;
+    desc->lfo.op             = lfo_op;
+    desc->lfo.depth          = lfo_depth;
+    desc->lfo.depth_param_id = lfo_depth_param_id;
+    desc->lfo.rate_param_id  = lfo_rate_param_id;
+    desc->lfo.rate_scale_ms  = lfo_rate_scale;
 }
 
 void configure_plain(ParamDescriptor*   desc,
@@ -218,7 +217,7 @@ void configure_plain(ParamDescriptor*   desc,
 {
     assert((env_param_id ? 1u : 0u) + (lfo_param_id ? 1u : 0u) + num_inputs <= max_param_sources);
 
-    *desc = { };
+    *desc      = {};
     desc->kind = ParamKind::plain;
 
     uint32_t num_sources = 0;
