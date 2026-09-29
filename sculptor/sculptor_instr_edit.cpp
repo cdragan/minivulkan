@@ -25,6 +25,19 @@ namespace {
 const char* const library_oversized_refusal    = "Synth: %s holds a record too large to rebuild; saving is refused";
 const char* const library_invalid_save_refusal = "Synth: %s is not a valid instrument library; saving is refused";
 const char* const library_invalid_open_refusal = "Synth: %s is invalid or unreadable";
+
+// Pressing a keyboard key submits plain note events through the synth's live-MIDI
+// input, like any external keyboard; the synth knows nothing about the editor.
+void submit_note_event(uint32_t channel, uint32_t note, bool note_on)
+{
+    Synth::MidiEvent event = {};
+    event.event            = note_on ? Synth::EvType::note_on : Synth::EvType::note_off;
+    event.channel          = static_cast<uint8_t>(channel);
+    event.note             = static_cast<uint8_t>(note);
+    event.note_data        = 127;
+    Synth::submit_external_midi_event(event);
+}
+
 Synth::InstrumentEditorBank instr_bank; // GUI-thread-owned editable bank (names included).
 Sculptor::UndoRedo          undo_redo;
 constexpr uint32_t          undo_depth = 10;
@@ -787,6 +800,15 @@ void Sculptor::SynthEditor::do_delete(uint32_t channel)
         osc_graph_reproject = true;
 }
 
+void Sculptor::SynthEditor::release_held_note()
+{
+    if (! held_note_active)
+        return;
+    // Retry each frame until accepted; a refused off would leave the note sounding.
+    submit_note_event(held_note_channel, held_note, false);
+    held_note_active = false;
+}
+
 bool Sculptor::SynthEditor::create_gui_frame(uint32_t image_idx, bool* need_realloc, const UserInput& input)
 {
     (void)image_idx;
@@ -796,13 +818,26 @@ bool Sculptor::SynthEditor::create_gui_frame(uint32_t image_idx, bool* need_real
     // Publish pumping lives in delayed_updates(), which runs every frame
     // regardless of the enabled flag.
 
+    // The held note requires the left button to be down, so a release that
+    // happened while this frame was not running (editor disabled, focus loss) is
+    // caught here too. Window close releases at its own site; menu opens release
+    // at their OpenPopup sites.
+    if (! ImGui::IsMouseDown(ImGuiMouseButton_Left))
+        release_held_note();
+
     if (! ImGui::Begin("Synth")) {
+        release_held_note();
         ImGui::End();
         return true;
     }
 
     // Focus queries must run inside the Synth window's Begin scope: outside it
-    // they compare against whatever window is current, not Synth.
+    // they compare against whatever window is current, not Synth. The ChildWindows
+    // flag is required: the bare query compares NavWindow against the Synth root,
+    // and after a keyboard click the focused window is the keyboard child, which
+    // would release the held note every frame.
+    if (! ImGui::IsWindowFocused(ImGuiFocusedFlags_ChildWindows))
+        release_held_note();
 
     // Undo/redo act only while this window is focused and no text field is being
     // edited; the geometry editor gates its own shortcuts the same way, so one
@@ -1382,6 +1417,7 @@ void Sculptor::SynthEditor::gui_keyboard()
     const uint32_t    color_white     = IM_COL32(240, 240, 240, 255);
     const uint32_t    color_line      = IM_COL32(120, 120, 120, 255);
     const uint32_t    color_black_key = IM_COL32(35, 35, 35, 255);
+    const uint32_t    color_held      = IM_COL32(90, 160, 255, 255);
 
     for (uint32_t wk = 0; wk < 75; wk++) {
         const float x = origin.x + static_cast<float>(wk) * white_w;
@@ -1444,6 +1480,15 @@ void Sculptor::SynthEditor::gui_keyboard()
         }
     }
 
+    // The held note is highlighted on top of everything else.
+    if (held_note_active && held_note_channel == channel) {
+        const uint32_t note  = held_note;
+        const float    x     = origin.x + boundary_x_of(note, white_w, black_w);
+        const float    key_w = is_black_note(note) ? black_w : white_w;
+        const float    key_h = is_black_note(note) ? black_h : height;
+        draw->AddRectFilled(ImVec2(x, origin.y), ImVec2(x + key_w, origin.y + key_h), color_held);
+    }
+
     // Hit test: black keys are on top, then white keys.
     const ImGuiIO& io    = ImGui::GetIO();
     const ImVec2   mouse = io.MousePos;
@@ -1474,8 +1519,15 @@ void Sculptor::SynthEditor::gui_keyboard()
                 last_clicked_note[channel] = static_cast<uint8_t>(hit);
                 zone_tab_force_entry       = zone; // keyboard click moves the tab bar too
             }
+            if (! held_note_active) {
+                submit_note_event(channel, static_cast<uint32_t>(hit), true);
+                held_note_active  = true;
+                held_note_channel = static_cast<uint8_t>(channel);
+                held_note         = static_cast<uint8_t>(hit);
+            }
         }
         else if (ImGui::IsMouseReleased(ImGuiMouseButton_Right)) {
+            release_held_note(); // opening the menu releases the held note
             zone_menu_channel  = channel;
             zone_menu_note     = static_cast<uint32_t>(hit);
             zone_menu_from_tab = false;

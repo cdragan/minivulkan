@@ -52,6 +52,7 @@ private:
     void gui_channel_list();
     void gui_channel_pane(uint32_t channel);
     void gui_keyboard();
+    void release_held_note();
     void gui_channel_popup();
     void gui_zone_menu();
     void gui_rename_popup();
@@ -67,6 +68,10 @@ private:
     int32_t  selected_zone[Synth::max_channels];          // selected zone entry per channel, -1 = none
     uint8_t  last_clicked_note[Synth::max_channels] = {}; // selection re-derivation anchor
     bool     editor_bank_initialized                = false;
+
+    bool    held_note_active  = false; // single held note played by clicking a keyboard key
+    uint8_t held_note_channel = 0;
+    uint8_t held_note         = 0;
 
     uint32_t menu_channel         = target_master; // channel bound to the open right-click menu
     uint32_t zone_menu_channel    = 0;
