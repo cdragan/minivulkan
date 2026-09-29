@@ -260,6 +260,9 @@ static bool create_gui_frame(uint32_t image_idx)
 
     bool viewports_changed = false;
 
+    // Publish bank updates in the synth editor even when it's disabled
+    synth_editor.delayed_updates();
+
     for (Sculptor::Editor* editor : editors) {
         if (! editor->enabled)
             continue;

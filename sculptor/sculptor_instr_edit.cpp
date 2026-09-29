@@ -20,23 +20,11 @@
 
 namespace {
 
-// Auditioning submits plain note events through the synth's live-MIDI input,
-// like any external keyboard; the synth knows nothing about auditioning.
 // The scan-refusal messages are shared by the save path and the browser so the
 // wording cannot drift between them.
 const char* const library_oversized_refusal    = "Synth: %s holds a record too large to rebuild; saving is refused";
 const char* const library_invalid_save_refusal = "Synth: %s is not a valid instrument library; saving is refused";
 const char* const library_invalid_open_refusal = "Synth: %s is invalid or unreadable";
-void              submit_audition_note(uint32_t channel, uint32_t note, bool note_on)
-{
-    Synth::MidiEvent event = {};
-    event.event            = note_on ? Synth::EvType::note_on : Synth::EvType::note_off;
-    event.channel          = static_cast<uint8_t>(channel);
-    event.note             = static_cast<uint8_t>(note);
-    event.note_data        = 127;
-    Synth::submit_external_midi_event(event);
-}
-
 Synth::InstrumentEditorBank instr_bank; // GUI-thread-owned editable bank (names included).
 Sculptor::UndoRedo          undo_redo;
 constexpr uint32_t          undo_depth = 10;
@@ -497,7 +485,10 @@ bool editor_undo()
     undo_redo.pop(&instr_bank, sizeof(instr_bank));
     undo_redo.finish_undo();
 
-    return publish_edited_bank();
+    // Backpressure only defers the audible switch; the restoration itself
+    // succeeded, so the caller must resynchronize selections either way.
+    publish_edited_bank();
+    return true;
 }
 
 bool editor_redo()
@@ -518,42 +509,24 @@ bool editor_redo()
     undo_redo.pop(&instr_bank, sizeof(instr_bank));
     undo_redo.finish_redo();
 
-    return publish_edited_bank();
-}
-
-bool save_editor_bank(const char* path)
-{
-    if (! Synth::validate_instrument_bank(&instr_bank.bank)) {
-        Sculptor::notify_error("Synth: refusing to save an invalid instrument bank");
-        return false;
-    }
-
-    const int save_error = Synth::save_editor_bank_file(path, &instr_bank);
-    if (save_error) {
-        Sculptor::notify_error("Synth: bank save failed: %s: %s", path, strerror(save_error));
-        return false;
-    }
-
-    Sculptor::notify_info("Synth: bank saved: %s", path);
-
+    // Backpressure only defers the audible switch; the restoration itself
+    // succeeded, so the caller must resynchronize selections either way.
+    publish_edited_bank();
     return true;
 }
 
 // Loads a bank file into the editable bank.  A decode is transactional (the decoder
 // stages and validates before committing), so a corrupt file never leaves the
-// editable bank half-replaced.  A missing file is a fresh project at startup and
-// stays silent; an explicit user open of a missing file is a visible failure.
-bool load_editor_bank(const char* path, bool notify_absent)
+// editable bank half-replaced.  The only caller is startup, where a missing file
+// is a fresh project and stays silent.
+bool load_editor_bank(const char* path)
 {
     static Synth::InstrumentEditorBank scratch;
 
     const Synth::BankFileStatus status = Synth::load_editor_bank_file(path, &scratch);
 
-    if (status == Synth::BankFileStatus::absent) {
-        if (notify_absent)
-            Sculptor::notify_error("Synth: bank file not found: %s", path);
+    if (status == Synth::BankFileStatus::absent)
         return false;
-    }
 
     if (status == Synth::BankFileStatus::too_large) {
         Sculptor::notify_error("Synth: bank file too large to parse: %s", path);
@@ -584,7 +557,7 @@ void init_editor()
     // session or builds the bare default bank for a fresh project and publishes it.
     Synth::set_bank_source_callback(&drain_bank_updates);
 
-    if (load_editor_bank(bank_state_path, false))
+    if (load_editor_bank(bank_state_path))
         return;
 
     Synth::init_default_bank(&instr_bank.bank);
@@ -707,23 +680,11 @@ bool Sculptor::SynthEditor::allocate_resources()
     return true;
 }
 
-void Sculptor::SynthEditor::release_held_audition()
+void Sculptor::SynthEditor::delayed_updates()
 {
-    if (! audition_held)
-        return;
-    // Retry each frame until accepted; a refused off would leave the note sounding.
-    submit_audition_note(audition_channel, audition_note, false);
-    audition_held = false;
-}
-
-void Sculptor::SynthEditor::trigger_save()
-{
-    dialog_save = true;
-}
-
-void Sculptor::SynthEditor::trigger_load()
-{
-    dialog_load = true;
+    // Runs from sculptor.cpp before the editors loop, regardless of the
+    // enabled flag: a disabled editor must still publish pending banks.
+    pump_bank_publish();
 }
 
 void Sculptor::SynthEditor::rederive_zone_selection(uint32_t channel)
@@ -741,7 +702,7 @@ void Sculptor::SynthEditor::rederive_zone_selection(uint32_t channel)
     const int32_t current = selected_zone[channel];
     if (current >= 0 && static_cast<uint32_t>(current) < zone_count(bank, channel))
         return;
-    int32_t zone = static_cast<int32_t>(Synth::zone_entry_at(bank.channel_zones[channel], last_audition_note[channel]));
+    int32_t zone = static_cast<int32_t>(Synth::zone_entry_at(bank.channel_zones[channel], last_clicked_note[channel]));
     if (zone < 0)
         zone = static_cast<int32_t>(
             Synth::zone_entry_at(bank.channel_zones[channel], 0)); // zone 0 always starts at note 0
@@ -832,23 +793,16 @@ bool Sculptor::SynthEditor::create_gui_frame(uint32_t image_idx, bool* need_real
     (void)input;
     *need_realloc = false;
 
-    pump_bank_publish();
-
-    // A held audition note requires the left button to be down, so a release that
-    // happened while this frame was not running (editor disabled, focus loss) is
-    // caught here too.  Window close releases at its own site; menu opens release at
-    // their OpenPopup sites.
-    if (! ImGui::IsMouseDown(ImGuiMouseButton_Left))
-        release_held_audition();
-    if (window_was_focused && ! ImGui::IsWindowFocused())
-        release_held_audition();
+    // Publish pumping lives in delayed_updates(), which runs every frame
+    // regardless of the enabled flag.
 
     if (! ImGui::Begin("Synth")) {
-        release_held_audition();
         ImGui::End();
         return true;
     }
-    window_was_focused = ImGui::IsWindowFocused();
+
+    // Focus queries must run inside the Synth window's Begin scope: outside it
+    // they compare against whatever window is current, not Synth.
 
     // Undo/redo act only while this window is focused and no text field is being
     // edited; the geometry editor gates its own shortcuts the same way, so one
@@ -889,7 +843,6 @@ bool Sculptor::SynthEditor::create_gui_frame(uint32_t image_idx, bool* need_real
     gui_channel_popup();
     gui_zone_menu();
     gui_rename_popup();
-    gui_bank_popups();
     gui_library_popups();
 
     ImGui::End();
@@ -925,7 +878,6 @@ void Sculptor::SynthEditor::gui_channel_list()
         }
 
         if (ImGui::IsItemHovered() && ImGui::IsMouseReleased(ImGuiMouseButton_Right)) {
-            release_held_audition(); // opening the menu releases the held note
             menu_channel      = channel;
             channel_menu_open = true;
         }
@@ -938,8 +890,8 @@ void Sculptor::SynthEditor::gui_channel_pane(uint32_t channel)
     const uint32_t               num_zones = zone_count(bank, channel);
 
     if (num_zones == 0) {
-        // The empty-selection state: no instrument is selected, so the name box,
-        // audition, and zone mutations stay disabled for this target.
+        // The empty-selection state: no instrument is selected, so the name box
+        // and zone mutations stay disabled for this target.
         if (bank.channel_enabled[channel])
             ImGui::TextDisabled("No zones - use Initialize or Load");
         else
@@ -1020,8 +972,8 @@ void Sculptor::SynthEditor::gui_channel_pane(uint32_t channel)
         gui_osc_graph(channel);
     ImGui::EndChild();
 
-    // Audition is per-channel zone behavior, so the keyboard lives in the channel's
-    // Oscillators view only.
+    // Zone selection is per-channel behavior, so the keyboard lives in the
+    // channel's Oscillators view only.
     if (! show_effects_mode)
         gui_keyboard();
 }
@@ -1430,7 +1382,6 @@ void Sculptor::SynthEditor::gui_keyboard()
     const uint32_t    color_white     = IM_COL32(240, 240, 240, 255);
     const uint32_t    color_line      = IM_COL32(120, 120, 120, 255);
     const uint32_t    color_black_key = IM_COL32(35, 35, 35, 255);
-    const uint32_t    color_held      = IM_COL32(90, 160, 255, 255);
 
     for (uint32_t wk = 0; wk < 75; wk++) {
         const float x = origin.x + static_cast<float>(wk) * white_w;
@@ -1493,14 +1444,6 @@ void Sculptor::SynthEditor::gui_keyboard()
         }
     }
 
-    // The held note is highlighted on top of everything else.
-    if (audition_held) {
-        const float x     = origin.x + boundary_x_of(audition_note, white_w, black_w);
-        const float key_w = is_black_note(audition_note) ? black_w : white_w;
-        const float key_h = is_black_note(audition_note) ? black_h : height;
-        draw->AddRectFilled(ImVec2(x, origin.y), ImVec2(x + key_w, origin.y + key_h), color_held);
-    }
-
     // Hit test: black keys are on top, then white keys.
     const ImGuiIO& io    = ImGui::GetIO();
     const ImVec2   mouse = io.MousePos;
@@ -1527,19 +1470,12 @@ void Sculptor::SynthEditor::gui_keyboard()
             const int32_t zone =
                 static_cast<int32_t>(Synth::zone_entry_at(bank.channel_zones[channel], static_cast<uint32_t>(hit)));
             if (zone >= 0) {
-                selected_zone[channel]      = zone;
-                last_audition_note[channel] = static_cast<uint8_t>(hit);
-                zone_tab_force_entry        = zone; // keyboard click moves the tab bar too
-            }
-            if (! audition_held) {
-                submit_audition_note(channel, static_cast<uint32_t>(hit), true);
-                audition_held    = true;
-                audition_channel = channel;
-                audition_note    = static_cast<uint32_t>(hit);
+                selected_zone[channel]     = zone;
+                last_clicked_note[channel] = static_cast<uint8_t>(hit);
+                zone_tab_force_entry       = zone; // keyboard click moves the tab bar too
             }
         }
         else if (ImGui::IsMouseReleased(ImGuiMouseButton_Right)) {
-            release_held_audition(); // opening the menu releases the held note
             zone_menu_channel  = channel;
             zone_menu_note     = static_cast<uint32_t>(hit);
             zone_menu_from_tab = false;
@@ -1640,7 +1576,7 @@ void Sculptor::SynthEditor::do_zone_join_previous(uint32_t channel, uint32_t not
 
     // The zone may have been dropped and its instrument orphaned.
     Synth::reclaim_unused_slots(&candidate);
-    last_audition_note[channel] = static_cast<uint8_t>(note);
+    last_clicked_note[channel] = static_cast<uint8_t>(note);
     Sculptor::undo_group_reset(&osc_undo_group);
     if (commit_candidate(candidate, Sculptor::UndoGroupTag{ osc_tag_join_prev, channel, note }))
         osc_graph_reproject = true;
@@ -1664,7 +1600,7 @@ void Sculptor::SynthEditor::do_zone_join_next(uint32_t channel, uint32_t note)
 
     // The zone may have been dropped and its instrument orphaned.
     Synth::reclaim_unused_slots(&candidate);
-    last_audition_note[channel] = static_cast<uint8_t>(note);
+    last_clicked_note[channel] = static_cast<uint8_t>(note);
     Sculptor::undo_group_reset(&osc_undo_group);
     if (commit_candidate(candidate, Sculptor::UndoGroupTag{ osc_tag_join_next, channel, note }))
         osc_graph_reproject = true;
@@ -1697,7 +1633,7 @@ void Sculptor::SynthEditor::do_zone_split_new(uint32_t channel, uint32_t note)
     // bar follows the zone the user just created.
     selected_zone[channel] = static_cast<int32_t>(Synth::zone_entry_at(candidate.bank.channel_zones[channel], note));
     zone_tab_force_entry   = selected_zone[channel];
-    last_audition_note[channel] = static_cast<uint8_t>(note);
+    last_clicked_note[channel] = static_cast<uint8_t>(note);
     Sculptor::undo_group_reset(&osc_undo_group);
     if (commit_candidate(candidate, Sculptor::UndoGroupTag{ osc_tag_zone_split, channel, note }))
         osc_graph_reproject = true;
@@ -1806,50 +1742,6 @@ void Sculptor::SynthEditor::gui_rename_popup()
     ImGui::EndPopup();
 }
 
-void Sculptor::SynthEditor::gui_bank_popups()
-{
-    static char path[256];
-
-    if (dialog_save) {
-        snprintf(path, sizeof(path), "%s", bank_state_path);
-        dialog_save = false;
-        ImGui::OpenPopup("##synth_save_bank");
-    }
-
-    if (ImGui::BeginPopupModal("##synth_save_bank", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
-        ImGui::SetNextItemWidth(360.0f);
-        ImGui::InputText("##path", path, sizeof(path));
-        if (ImGui::Button("Save")) {
-            save_editor_bank(path); // failure raises a notification
-            ImGui::CloseCurrentPopup();
-        }
-        ImGui::SameLine();
-        if (ImGui::Button("Cancel"))
-            ImGui::CloseCurrentPopup();
-        ImGui::EndPopup();
-    }
-
-    if (dialog_load) {
-        snprintf(path, sizeof(path), "%s", bank_state_path);
-        dialog_load = false;
-        ImGui::OpenPopup("##synth_load_bank");
-    }
-
-    if (ImGui::BeginPopupModal("##synth_load_bank", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
-        ImGui::SetNextItemWidth(360.0f);
-        ImGui::InputText("##path", path, sizeof(path));
-        if (ImGui::Button("Open")) {
-            if (load_editor_bank(path, true))
-                rederive_all_selections(); // failure raises a notification
-            ImGui::CloseCurrentPopup();
-        }
-        ImGui::SameLine();
-        if (ImGui::Button("Cancel"))
-            ImGui::CloseCurrentPopup();
-        ImGui::EndPopup();
-    }
-}
-
 bool Sculptor::SynthEditor::do_library_load(const Synth::LibraryEntry& entry)
 {
     // The record joins the candidate; the editable bank only changes after the
@@ -1862,8 +1754,9 @@ bool Sculptor::SynthEditor::do_library_load(const Synth::LibraryEntry& entry)
         return false;
     }
 
-    // Loading enables the channel; the effect chain stays untouched.  The old
-    // instruments lose their zone roots and are reclaimed from the candidate.
+    // Loading enables the channel; the record's effect chain replaces the
+    // channel's chain. The old instruments and the replaced chain's
+    // now-unreferenced descriptors are reclaimed from the candidate.
     candidate.bank.channel_enabled[library_channel] = 1;
     // The record replaces the channel's zoning, so its graph state resets with it.
     Sculptor::channel_records_reset(&candidate, library_channel);
@@ -1871,8 +1764,8 @@ bool Sculptor::SynthEditor::do_library_load(const Synth::LibraryEntry& entry)
     // The channel takes the record's name so the library identity carries over.
     memcpy(candidate.channel_names[library_channel], entry.name, sizeof(candidate.channel_names[library_channel]));
     Synth::reclaim_unused_slots(&candidate);
-    selected_target                     = library_channel;
-    last_audition_note[library_channel] = 0;
+    selected_target                    = library_channel;
+    last_clicked_note[library_channel] = 0;
     Sculptor::undo_group_reset(&osc_undo_group);
     if (commit_candidate(candidate, Sculptor::UndoGroupTag{ osc_tag_load, library_channel, 0 }))
         osc_graph_reproject = true;
@@ -1957,8 +1850,7 @@ void Sculptor::SynthEditor::gui_library_popups()
         }
 
         library_num_categories = 0;
-        // ponytail: 64-category browser cap; raise if real libraries outgrow it
-        for (uint32_t i = 0; i < library_num_entries && library_num_categories < 64; i++) {
+        for (uint32_t i = 0; i < library_num_entries && library_num_categories < Synth::library_max_records; i++) {
             uint32_t c = 0;
             while (c < library_num_categories &&
                    strncmp(library_categories[c], library_entries[i].category, Synth::library_category_len) != 0)
@@ -2044,7 +1936,7 @@ void Sculptor::SynthEditor::gui_library_browser()
     }
 
     ImGui::Spacing();
-    ImGui::TextDisabled("Load replaces the channel's zoning with a single all-keys zone; the effect chain is kept.");
+    ImGui::TextDisabled("Load replaces the channel's zoning and effect chain with the record's.");
 
     ImGui::EndPopup();
 }

@@ -15,7 +15,7 @@ constexpr uint32_t library_name_len     = 24;
 constexpr uint32_t library_max_records  = 256;
 constexpr uint32_t library_version      = 2;
 
-// A record payload is the reduced one-instrument editor bank encoded as JSON text,
+// A record payload is the reduced whole-channel editor bank encoded as JSON text,
 // with its explicit length in the record header.  A payload beyond the capacity is
 // rejected on load, and a rebuild of a library containing such a record is refused:
 // its bytes cannot pass through the bounded staging buffers, so it is preserved in
@@ -74,9 +74,9 @@ bool load_library_instrument(const char*           path,
                              uint32_t              channel,
                              uint16_t*             out_first_slot);
 
-// Writes a multi-zone instrument from an instrument bank into instrument library.
-// The reduced record payload is re-decoded before writing, so a record that could
-// not be loaded back is visibly refused.
+// Writes a whole-channel instrument from an instrument bank into instrument library.
+// Saving is refused when the channel has nothing to save or the payload cannot be
+// represented; the original file is preserved on any write failure.
 //
 // - path - path to instrument library file
 // - category - name of the instrument category in the library

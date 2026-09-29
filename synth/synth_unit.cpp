@@ -24,8 +24,7 @@
         failed(#test, __FILE__, __LINE__); \
     }
 
-static int exit_code = 0;
-
+static int  exit_code = 0;
 static void failed(const char* test, const char* file, int line)
 {
     exit_code = 1;
@@ -2844,6 +2843,34 @@ int main()
         TEST(Synth::zone_entry_at(v, 0) == 0);
         TEST(Synth::zone_entry_at(v, 50) == 0);
 
+        // A full 16-entry table has no terminator; removal must stop at the table
+        // edge and never shift entries into an adjacent populated channel's table.
+        static Synth::Zone tables[2][Synth::max_instr_per_channel];
+        for (uint32_t slot = 0; slot < Synth::max_instr_per_channel; slot++) {
+            tables[0][slot] = Synth::Zone{ static_cast<uint8_t>(slot + 1), 0 };
+            tables[1][slot] = Synth::Zone{ static_cast<uint8_t>(slot + 1), 1 };
+        }
+        // Removing the last zone of the full table drops it in place.
+        TEST(Synth::zone_join_previous(tables[0], 15, 127));
+        TEST(tables[0][15].start_note == 0 && tables[0][15].instrument == 0);
+        TEST(tables[0][14].start_note == 15);
+        // Removing the first zone of the full table shifts the rest down.
+        for (uint32_t slot = 0; slot < Synth::max_instr_per_channel; slot++)
+            tables[0][slot] = Synth::Zone{ static_cast<uint8_t>(slot + 1), 0 };
+        TEST(Synth::zone_join_next(tables[0], 0, 0));
+        TEST(tables[0][0].start_note == 1 && tables[0][0].instrument == 0);
+        TEST(tables[0][14].start_note == 16 && tables[0][15].start_note == 0);
+        // Removing a middle zone of the full table shifts only the later entries.
+        for (uint32_t slot = 0; slot < Synth::max_instr_per_channel; slot++)
+            tables[0][slot] = Synth::Zone{ static_cast<uint8_t>(slot + 1), 0 };
+        TEST(Synth::zone_join_previous(tables[0], 7, 7));
+        TEST(tables[0][7].start_note == 9);
+        TEST(tables[0][13].start_note == 15 && tables[0][14].start_note == 16);
+        TEST(tables[0][15].start_note == 0);
+        // The adjacent populated channel's table is untouched throughout.
+        for (uint32_t slot = 0; slot < Synth::max_instr_per_channel; slot++)
+            TEST(tables[1][slot].start_note == static_cast<uint8_t>(slot + 1) && tables[1][slot].instrument == 1);
+
         // Splitting at note 1 leaves a one-note first zone [0].
         Synth::Zone* n1 = bank.bank.channel_zones[4];
         n1[0]           = Synth::Zone{ 1, 0 };
@@ -2968,6 +2995,163 @@ int main()
         TEST(strcmp(record.instrument_names[1], "Saved") == 0);
         TEST(strcmp(bank.instrument_names[1], "Saved") == 0);
 
+        remove(path);
+    }
+
+    // A whole-channel record carries the channel's effect chain; chain-referenced
+    // LFOs survive even when no instrument uses them.
+    {
+        static Synth::InstrumentEditorBank bank;
+        make_valid_bank(bank.bank);
+        TEST(bank.bank.lfos.allocate() == 1);
+        bank.bank.lfos.entries[1].wave                                 = Synth::WaveType::sawtooth_wave;
+        bank.bank.lfos.entries[1].period_ms                            = 80;
+        bank.bank.channel_chains[1].num_effects                        = 2;
+        bank.bank.channel_chains[1].effects[0].type                    = Synth::EffectType::delay;
+        bank.bank.channel_chains[1].effects[0].enabled                 = true;
+        bank.bank.channel_chains[1].effects[0].bindings[0].base_value  = 0.25f;
+        bank.bank.channel_chains[1].effects[0].bindings[0].lfo_desc_id = 2;
+        // Unused parameter slots have no canonical in-memory value; a stale
+        // reference there must not reach the record or crash the save remap.
+        bank.bank.channel_chains[1].effects[0].bindings[4].lfo_desc_id = Synth::max_lfos + 1;
+        bank.bank.channel_zones[1][0]                                  = { 1, 0 };
+        bank.bank.channel_chains[1].effects[1].type                    = Synth::EffectType::distortion;
+        TEST(Synth::validate_instrument_bank(&bank.bank));
+        const char* const path = "synth_library_chain.tmp";
+        TEST(Synth::save_library_record(path, "Fx", "Chained", &bank, 1) == 0);
+        Synth::LibraryEntry entries[Synth::library_max_records];
+        TEST(Synth::read_library_index(path, entries, Synth::library_max_records) == 1);
+        static Synth::InstrumentEditorBank record;
+        memset(&record, 0, sizeof(record));
+        uint16_t load_slot = 0;
+        TEST(Synth::load_library_instrument(path, &entries[0], &record, 0, &load_slot));
+        TEST(Synth::validate_instrument_bank(&record.bank));
+        TEST(record.bank.channel_chains[0].num_effects == 2);
+        TEST(record.bank.channel_chains[0].effects[0].type == Synth::EffectType::delay);
+        TEST(record.bank.channel_chains[0].effects[0].bindings[0].base_value == 0.25f);
+        TEST(record.bank.channel_chains[0].effects[0].bindings[0].lfo_desc_id == 2);
+        TEST(record.bank.channel_chains[0].effects[0].bindings[4].lfo_desc_id == 0);
+        TEST(record.bank.lfos.num_allocated == 2);
+        TEST(record.bank.lfos.entries[1].period_ms == 80);
+        TEST(record.bank.master_chain.num_effects == 0);
+        remove(path);
+    }
+
+    // Loading replaces the target channel's effect chain; the reclaim afterwards
+    // frees the replaced chain's exclusive descriptors with the old instruments.
+    {
+        static Synth::InstrumentEditorBank src;
+        memset(&src, 0, sizeof(src));
+        src.bank.instruments.allocate();
+        src.bank.instruments.entries[0].layer_count = 1;
+        memcpy(src.instrument_names[0], "Chained", 8);
+        src.bank.channel_zones[0][0].start_note = 1;
+        src.bank.channel_zones[0][0].instrument = 0;
+        src.bank.channel_enabled[0]             = 1;
+        TEST(src.bank.lfos.allocate() == 0);
+        src.bank.lfos.entries[0].wave                                 = Synth::WaveType::sine_wave;
+        src.bank.lfos.entries[0].period_ms                            = 80;
+        src.bank.channel_chains[0].num_effects                        = 1;
+        src.bank.channel_chains[0].effects[0].type                    = Synth::EffectType::chorus;
+        src.bank.channel_chains[0].effects[0].bindings[2].lfo_desc_id = 1;
+        TEST(Synth::validate_instrument_bank(&src.bank));
+        const char* const path = "synth_library_replace.tmp";
+        TEST(Synth::save_library_record(path, "Fx", "Chained", &src, 0) == 0);
+        Synth::LibraryEntry entries[1];
+        TEST(Synth::read_library_index(path, entries, 1) == 1);
+
+        static Synth::InstrumentEditorBank bank;
+        Synth::init_default_bank(&bank.bank);
+        bank.bank.channel_enabled[2]                                   = 1;
+        bank.bank.channel_zones[2][0].start_note                       = 1;
+        bank.bank.channel_zones[2][0].instrument                       = 0;
+        const uint32_t default_lfos                                    = bank.bank.lfos.num_allocated;
+        const uint32_t old_lfo                                         = bank.bank.lfos.allocate();
+        bank.bank.lfos.entries[old_lfo].wave                           = Synth::WaveType::sine_wave;
+        bank.bank.lfos.entries[old_lfo].period_ms                      = 90;
+        bank.bank.channel_chains[2].num_effects                        = 1;
+        bank.bank.channel_chains[2].effects[0].type                    = Synth::EffectType::reverb;
+        bank.bank.channel_chains[2].effects[0].bindings[0].lfo_desc_id = static_cast<uint16_t>(old_lfo + 1);
+        TEST(Synth::validate_instrument_bank(&bank.bank));
+        uint16_t slot = 0;
+        TEST(Synth::load_library_instrument(path, &entries[0], &bank, 2, &slot));
+        // The record's chain replaced channel 2's chain, LFO remapped into the bank.
+        TEST(bank.bank.channel_chains[2].num_effects == 1);
+        TEST(bank.bank.channel_chains[2].effects[0].type == Synth::EffectType::chorus);
+        TEST(bank.bank.channel_chains[2].effects[0].bindings[2].lfo_desc_id == bank.bank.lfos.num_allocated);
+        TEST(bank.bank.lfos.entries[bank.bank.lfos.num_allocated - 1].period_ms == 80);
+        Synth::reclaim_unused_slots(&bank);
+        TEST(Synth::validate_instrument_bank(&bank.bank));
+        // The replaced chain's exclusive LFO is gone; the record's chain LFO stayed.
+        TEST(bank.bank.lfos.num_allocated == default_lfos + 1);
+        TEST(bank.bank.lfos.entries[default_lfos].period_ms == 80);
+        TEST(bank.bank.channel_chains[2].effects[0].bindings[2].lfo_desc_id == default_lfos + 1);
+        remove(path);
+    }
+
+    // Record shape: the chain is legal only on channel 0, effect types must be in
+    // range, LFO references must resolve inside the record's LFO pool, and the
+    // zone table must be nonempty, anchored, ordered, and orphan-free.  A valid
+    // record loads; each rejection case introduces exactly one invalid condition.
+    {
+        static Synth::InstrumentEditorBank src;
+        make_valid_bank(src.bank);
+        src.bank.channel_enabled[0]                                   = 0;
+        src.bank.channel_enabled[1]                                   = 0;
+        src.bank.channel_chains[0].num_effects                        = 1;
+        src.bank.channel_chains[0].effects[0].type                    = Synth::EffectType::delay;
+        src.bank.channel_chains[0].effects[0].bindings[0].lfo_desc_id = 1;
+        constexpr uint32_t bank_json_text_size                        = 1024 * 1024;
+        static char        text[bank_json_text_size];
+        const char* const  path         = "synth_library_shape.tmp";
+        auto               attempt_load = [&](bool expect_load) {
+            const uint32_t payload_len = Synth::encode_editor_bank_json(&src, text, bank_json_text_size);
+            TEST(payload_len > 0 && payload_len <= Synth::library_payload_max);
+            FILE* const file = fopen(path, "wb");
+            TEST(file != nullptr);
+            const uint32_t header[3] = { 0x42494c49, Synth::library_version, 1 };
+            fwrite(header, sizeof(header), 1, file);
+            char rec[52] = {};
+            memcpy(rec, "Cat", 3);
+            memcpy(rec + 24, "Bad", 3);
+            memcpy(rec + 48, &payload_len, 4);
+            fwrite(rec, sizeof(rec), 1, file);
+            fwrite(text, payload_len, 1, file);
+            fclose(file);
+            Synth::LibraryEntry entries[1];
+            TEST(Synth::read_library_index(path, entries, 1) == 1);
+            static Synth::InstrumentEditorBank scratch;
+            memset(&scratch, 0, sizeof(scratch));
+            uint16_t load_slot = 0;
+            TEST(Synth::load_library_instrument(path, &entries[0], &scratch, 0, &load_slot) == expect_load);
+        };
+        attempt_load(true);
+        // A chain on a channel other than 0 is not a valid record.
+        src.bank.channel_chains[1].num_effects     = 1;
+        src.bank.channel_chains[1].effects[0].type = Synth::EffectType::delay;
+        attempt_load(false);
+        src.bank.channel_chains[1].num_effects = 0;
+        // Neither is a non-empty master chain.
+        src.bank.master_chain.num_effects     = 1;
+        src.bank.master_chain.effects[0].type = Synth::EffectType::delay;
+        attempt_load(false);
+        src.bank.master_chain.num_effects = 0;
+        // Chain LFO references must resolve inside the record's pool.
+        src.bank.channel_chains[0].effects[0].bindings[0].lfo_desc_id = 5;
+        attempt_load(false);
+        src.bank.channel_chains[0].effects[0].bindings[0].lfo_desc_id = 1;
+        // The zone table must be nonempty and anchored at note 0.
+        src.bank.channel_zones[0][0].start_note = 0;
+        attempt_load(false);
+        src.bank.channel_zones[0][0].start_note = 1;
+        // Zone starts must strictly ascend.
+        src.bank.channel_zones[0][1] = { 1, 0 };
+        attempt_load(false);
+        src.bank.channel_zones[0][1] = { 0, 0 };
+        // Every record instrument must be referenced by a zone.
+        src.bank.instruments.allocate();
+        src.bank.instruments.entries[1].layer_count = 1;
+        attempt_load(false);
         remove(path);
     }
 

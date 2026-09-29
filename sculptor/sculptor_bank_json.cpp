@@ -2,8 +2,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2021-2026 Chris Dragan
 
 #include "sculptor_bank_json.h"
-#include "../core/atomic_file.h"
 #include "../core/d_printf.h"
+#include "sculptor_atomic_file.h"
 #include "sculptor_osc_graph.h"
 
 // The vendored parser builds warning-clean under -Wall only; the format's strictness

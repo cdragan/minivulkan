@@ -21,13 +21,13 @@ public:
 
     const char* get_editor_name() const override { return "Synth"; }
     bool        create_gui_frame(uint32_t image_idx, bool* need_realloc, const UserInput& input) override;
-    bool        allocate_resources() override;
-    void        free_resources() override {}
-    bool        draw_frame(VkCommandBuffer cmdbuf, uint32_t image_idx) override { return true; }
 
-    // File-menu triggers; the dialogs open on the next create_gui_frame.
-    void trigger_save();
-    void trigger_load();
+    // Per-frame work that must run even when the editor is disabled: publish
+    // pumping.  Called before the editors loop.
+    void delayed_updates();
+    bool allocate_resources() override;
+    void free_resources() override {}
+    bool draw_frame(VkCommandBuffer cmdbuf, uint32_t image_idx) override { return true; }
 
 private:
     static constexpr uint32_t target_master = Synth::max_channels;
@@ -48,7 +48,6 @@ private:
     void do_osc_add_generator(bool is_env);
     void do_osc_add_parameter();
     void do_osc_change_target_param(uint32_t node_idx, uint32_t new_target);
-    void release_held_audition();
 
     void gui_channel_list();
     void gui_channel_pane(uint32_t channel);
@@ -56,7 +55,6 @@ private:
     void gui_channel_popup();
     void gui_zone_menu();
     void gui_rename_popup();
-    void gui_bank_popups();
     void gui_library_popups();
     void gui_library_browser();
     void gui_library_save_popups();
@@ -65,17 +63,11 @@ private:
     bool save_instrument_to_library(const char* category, const char* name);
     bool finish_library_save(const char* category, const char* name);
 
-    uint32_t selected_target = 0;                             // channel 0..15 or target_master
-    int32_t  selected_zone[Synth::max_channels];              // selected zone entry per channel, -1 = none
-    uint8_t  last_audition_note[Synth::max_channels] = {};    // selection re-derivation anchor
-    bool     audition_held                           = false; // single held audition note (channel + note below)
-    bool     editor_bank_initialized                 = false;
-    uint32_t audition_channel                        = 0;
-    uint32_t audition_note                           = 0;
-    bool     window_was_focused                      = false; // edge-detects focus loss to release the held note
+    uint32_t selected_target = 0;                         // channel 0..15 or target_master
+    int32_t  selected_zone[Synth::max_channels];          // selected zone entry per channel, -1 = none
+    uint8_t  last_clicked_note[Synth::max_channels] = {}; // selection re-derivation anchor
+    bool     editor_bank_initialized                = false;
 
-    bool     dialog_save          = false;
-    bool     dialog_load          = false;
     uint32_t menu_channel         = target_master; // channel bound to the open right-click menu
     uint32_t zone_menu_channel    = 0;
     uint32_t zone_menu_note       = 0;     // key under the open zone spec menu
@@ -97,10 +89,10 @@ private:
     bool                     library_open     = false; // deferred browser open
     uint32_t                 library_channel  = 0;     // channel the browser/save acts on
     Synth::LibraryEntry      library_entries[Synth::library_max_records];
-    uint32_t                 library_num_entries                                 = 0;
-    Synth::LibraryScanStatus library_scan_status                                 = Synth::library_valid;
-    char                     library_categories[64][Synth::library_category_len] = {};
-    uint32_t                 library_num_categories                              = 0;
+    uint32_t                 library_num_entries = 0;
+    Synth::LibraryScanStatus library_scan_status = Synth::library_valid;
+    char                     library_categories[Synth::library_max_records][Synth::library_category_len] = {};
+    uint32_t                 library_num_categories                                                      = 0;
     int32_t                  library_category = -1; // selected category index, -1 = none
 
     char save_category[Synth::max_name_len]    = {}; // last-used category

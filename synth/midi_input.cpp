@@ -37,7 +37,7 @@ void Synth::submit_external_midi_event(const Synth::MidiEvent& event)
     const uint64_t read_pos  = midi_read.load(std::memory_order_acquire);
 
     // Drop on overflow; only reachable under pathological flooding.
-    if ( ! get_ringbuf_avail_space(write_pos, read_pos, midi_buffer_capacity)) {
+    if (! get_ringbuf_avail_space(write_pos, read_pos, midi_buffer_capacity)) {
         return;
     }
 

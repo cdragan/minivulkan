@@ -3,7 +3,7 @@
 
 #include "sculptor_instr_library.h"
 
-#include "../core/atomic_file.h"
+#include "sculptor_atomic_file.h"
 #include "sculptor_bank_json.h"
 #include "sculptor_instr_bank.h"
 
@@ -156,7 +156,8 @@ bool validate_record(const Synth::InstrumentEditorBank* const editor_bank)
         if (bank->channel_enabled[channel])
             return false;
 
-        if (bank->channel_chains[channel].num_effects != 0)
+        // The whole-channel record carries the effect chain only on channel 0.
+        if (channel != 0 && bank->channel_chains[channel].num_effects != 0)
             return false;
 
         if (channel == 0)
@@ -168,6 +169,15 @@ bool validate_record(const Synth::InstrumentEditorBank* const editor_bank)
         }
     }
 
+    // The record must carry a usable whole-channel zone table: nonempty, anchored
+    // at note 0, strictly ascending, referencing occupied instruments, and
+    // covering every instrument in the record (no orphans).  Full bank validation
+    // skips these because record channels are disabled.
+    if (bank->channel_zones[0][0].start_note != 1)
+        return false;
+
+    bool    referenced[Synth::max_instruments] = {};
+    uint8_t prev_start                         = 0;
     for (uint32_t zone = 0; zone < Synth::max_instr_per_channel; zone++) {
 
         const Synth::Zone& zone_desc = bank->channel_zones[0][zone];
@@ -175,7 +185,18 @@ bool validate_record(const Synth::InstrumentEditorBank* const editor_bank)
         if (zone_desc.start_note == 0)
             break;
 
+        if (zone_desc.start_note <= prev_start || zone_desc.start_note > 128)
+            return false;
+        prev_start = zone_desc.start_note;
+
         if (zone_desc.instrument >= bank->instruments.num_allocated)
+            return false;
+        referenced[zone_desc.instrument] = true;
+    }
+    if (prev_start == 0)
+        return false;
+    for (uint32_t slot = 0; slot < bank->instruments.num_allocated; slot++) {
+        if (! referenced[slot])
             return false;
     }
 
@@ -184,6 +205,21 @@ bool validate_record(const Synth::InstrumentEditorBank* const editor_bank)
     for (uint32_t slot = 0; slot < bank->instruments.num_allocated; slot++) {
         if (! memchr(editor_bank->instrument_names[slot], 0, Synth::max_name_len))
             return false;
+    }
+
+    // The record's chain travels with the instrument: effect types must be real
+    // and LFO references must resolve inside the record's dense LFO pool.
+    const Synth::EffectChainBinding& chain = bank->channel_chains[0];
+    if (chain.num_effects > Synth::max_chain_effects)
+        return false;
+    for (uint32_t slot = 0; slot < chain.num_effects; slot++) {
+        if (static_cast<uint32_t>(chain.effects[slot].type) >= Synth::num_effect_types)
+            return false;
+        const uint32_t num_params = Synth::get_effect_param_floats(chain.effects[slot].type);
+        for (uint32_t param = 0; param < num_params; param++) {
+            if (chain.effects[slot].bindings[param].lfo_desc_id > bank->lfos.num_allocated)
+                return false;
+        }
     }
     return true;
 }
@@ -237,8 +273,8 @@ bool Synth::load_library_instrument(const char* const            path,
         dst_bank->instruments.num_allocated + num_instrs > Synth::max_instruments)
         return false;
 
-    uint16_t env_ids[Synth::max_envelopes];
-    uint16_t lfo_ids[Synth::max_lfos];
+    uint16_t env_ids[Synth::max_envelopes] = {};
+    uint16_t lfo_ids[Synth::max_lfos]      = {};
 
     for (uint32_t i = 0; i < num_envelopes; i++) {
         const uint32_t slot               = dst_bank->envelopes.allocate();
@@ -276,6 +312,10 @@ bool Synth::load_library_instrument(const char* const            path,
         dst_bank->channel_zones[channel][zone]            = zone_src;
         dst_bank->channel_zones[channel][zone].instrument = static_cast<uint8_t>(zone_src.instrument + first_slot);
     }
+
+    // The record's chain replaces the target channel's chain; the load flow's
+    // subsequent reclaim frees the replaced chain's exclusive LFOs.
+    Synth::remap_effect_chain(record_bank.bank.channel_chains[0], lfo_ids, &dst_bank->channel_chains[channel]);
 
     return true;
 }
@@ -451,6 +491,21 @@ int Synth::save_library_record(const char* const                        path,
         }
     }
 
+    // The channel's effect chain travels with the record; its LFO references
+    // join the keep-set so chain-only LFOs survive the roundtrip.
+    const Synth::EffectChainBinding& src_chain = src_bank->channel_chains[channel];
+    if (src_chain.num_effects > Synth::max_chain_effects)
+        return EINVAL;
+
+    for (uint32_t slot = 0; slot < src_chain.num_effects; slot++) {
+        const uint32_t num_params = Synth::get_effect_param_floats(src_chain.effects[slot].type);
+        for (uint32_t param = 0; param < num_params; param++) {
+            const uint16_t lfo_id = src_chain.effects[slot].bindings[param].lfo_desc_id;
+            if (lfo_id && lfo_id <= Synth::max_lfos)
+                keep_lfo[lfo_id - 1] = true;
+        }
+    }
+
     static Synth::InstrumentEditorBank reduced;
 
     memset(&reduced, 0, sizeof(reduced));
@@ -490,6 +545,10 @@ int Synth::save_library_record(const char* const                        path,
         memcpy(reduced.instrument_names[slot], src_editor_bank->instrument_names[id], Synth::max_name_len);
         instr_ids[id] = static_cast<uint16_t>(slot);
     }
+
+    // The chain rides along with its LFO references remapped; the zero-initialized
+    // map sends an out-of-range reference to none so it cannot survive the record.
+    Synth::remap_effect_chain(src_chain, lfo_ids, &reduced.bank.channel_chains[0]);
 
     for (uint32_t zone = 0; zone < num_zones; zone++) {
         reduced.bank.channel_zones[0][zone] = src_bank->channel_zones[channel][zone];

@@ -69,9 +69,7 @@ void init_effect_state_region(uint32_t region_base_offset);
 // budget and the modulated-param limit. On failure returns false with a static error
 // string and mutates nothing - the previously committed chains and state remain valid
 // and sounding.
-bool preflight_effect_expansion(const InstrumentBank& bank,
-                                EffectExpansionPlan*  out_plan,
-                                const char**          error);
+bool preflight_effect_expansion(const InstrumentBank& bank, EffectExpansionPlan* out_plan, const char** error);
 
 // Host callbacks the commit uses to configure modulation nodes over the runtime's
 // parameter arrays. After a passing preflight every callback is guaranteed to succeed.
@@ -79,22 +77,32 @@ struct EffectNodeWriter {
     const void* ctx;
     uint32_t (*alloc_node)(const void* ctx); // next free modulation-pool node id
     uint16_t (*resolve_source)(const void* ctx, ModSource source, uint32_t channel);
-    void (*configure_dest)(const void* ctx, uint32_t node, uint16_t lfo_node, float base_value,
-                           SourceOp lfo_op, const SourceParam* sources, uint32_t num_inputs);
-    void (*configure_lfo)(const void* ctx, uint32_t node, uint16_t lfo_desc_id,
-                          SourceOp lfo_op, float lfo_depth,
-                          uint16_t depth_source, uint16_t rate_source, float rate_scale);
+    void (*configure_dest)(const void*        ctx,
+                           uint32_t           node,
+                           uint16_t           lfo_node,
+                           float              base_value,
+                           SourceOp           lfo_op,
+                           const SourceParam* sources,
+                           uint32_t           num_inputs);
+    void (*configure_lfo)(const void* ctx,
+                          uint32_t    node,
+                          uint16_t    lfo_desc_id,
+                          SourceOp    lfo_op,
+                          float       lfo_depth,
+                          uint16_t    depth_source,
+                          uint16_t    rate_source,
+                          float       rate_scale);
 };
 
 // Applies a passing plan: fills the runtime chains from the bank (base values into
 // params[], state offsets and source nodes from the plan), records clear ranges for
 // freshly allocated state, and makes the plan current (preserving future re-expansions).
 // Infallible by construction after a passing preflight.
-void commit_effect_expansion(const InstrumentBank& bank,
+void commit_effect_expansion(const InstrumentBank&      bank,
                              const EffectExpansionPlan& plan,
-                             EffectChain* out_channel_chains, // [max_channels]
-                             EffectChain* out_master_chain,
-                             const EffectNodeWriter& writer);
+                             EffectChain*               out_channel_chains, // [max_channels]
+                             EffectChain*               out_master_chain,
+                             const EffectNodeWriter&    writer);
 
 // Hands the clear ranges recorded since the last take to the render loop, which zeroes
 // them before any effect dispatch. Single consumer, same thread as commit.

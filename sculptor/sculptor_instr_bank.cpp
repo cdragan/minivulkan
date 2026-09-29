@@ -389,7 +389,7 @@ bool Synth::zone_join_previous(Zone* zones, uint32_t i, uint32_t note)
         // shift the later zones down.  The loop stops at the first free slot, which
         // is where the terminator belongs.
         uint32_t slot = i;
-        while (zones[slot + 1].start_note != 0) {
+        while (slot + 1 < max_instr_per_channel && zones[slot + 1].start_note != 0) {
             zones[slot] = zones[slot + 1];
             slot++;
         }
@@ -414,7 +414,7 @@ bool Synth::zone_join_next(Zone* zones, uint32_t i, uint32_t note)
         // shift the later zones down.  The loop stops at the first free slot, which
         // is where the terminator belongs.  The shifted entry keeps the new start.
         uint32_t slot = i;
-        while (zones[slot + 1].start_note != 0) {
+        while (slot + 1 < max_instr_per_channel && zones[slot + 1].start_note != 0) {
             zones[slot] = zones[slot + 1];
             slot++;
         }

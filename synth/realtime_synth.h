@@ -10,16 +10,16 @@
 namespace Synth {
 
 // MIDI data
-extern const uint32_t num_channels;         // Total number of used channels
-extern const uint8_t* midi_delta_times[];   // Encoded event delta times, per-channel
-extern const uint8_t* midi_events[];        // Encoded events, per-channel
-extern const uint8_t* midi_notes[];         // Per-channel notes for note events
-extern const uint8_t* midi_note_data[];     // Per-channel note data for note events
-extern const uint8_t* midi_note_durations[];// Per-channel VLQ tick durations, one per note_on
-extern const uint8_t* midi_ctrl[];          // Per-channel controllers for controller events
-extern const uint8_t* midi_ctrl_data[];     // Per-channel controller data for controller events
-extern const uint8_t* midi_pitch_bend_lo[]; // Per-channel pitch bend LSB values
-extern const uint8_t* midi_pitch_bend_hi[]; // Per-channel pitch bend MSB values
+extern const uint32_t num_channels;          // Total number of used channels
+extern const uint8_t* midi_delta_times[];    // Encoded event delta times, per-channel
+extern const uint8_t* midi_events[];         // Encoded events, per-channel
+extern const uint8_t* midi_notes[];          // Per-channel notes for note events
+extern const uint8_t* midi_note_data[];      // Per-channel note data for note events
+extern const uint8_t* midi_note_durations[]; // Per-channel VLQ tick durations, one per note_on
+extern const uint8_t* midi_ctrl[];           // Per-channel controllers for controller events
+extern const uint8_t* midi_ctrl_data[];      // Per-channel controller data for controller events
+extern const uint8_t* midi_pitch_bend_lo[];  // Per-channel pitch bend LSB values
+extern const uint8_t* midi_pitch_bend_hi[];  // Per-channel pitch bend MSB values
 
 #define MIDI_EVENT_TYPES(X) \
     X(note_off)             \
@@ -28,12 +28,12 @@ extern const uint8_t* midi_pitch_bend_hi[]; // Per-channel pitch bend MSB values
     X(controller)           \
     X(program_change)       \
     X(channel_pressure)     \
-    X(pitch_bend)           \
+    X(pitch_bend)
 
 enum class EvType : uint8_t {
-    #define X(name) name,
+#define X(name) name,
     MIDI_EVENT_TYPES(X)
-    #undef X
+#undef X
     num_event_types
 };
 
@@ -72,18 +72,16 @@ void apply_midi_event(const MidiEvent& event);
 void pump_live_midi();
 
 // Fills the caller's output channels from the audio ring buffer
-template<typename T, bool interleaved>
-uint32_t consume_audio(uint32_t num_frames, T* channel0, T* channel1);
+template <typename T, bool interleaved> uint32_t consume_audio(uint32_t num_frames, T* channel0, T* channel1);
 
 // Tops up the audio ring buffer
-template<typename T, bool interleaved>
-bool produce_audio_batch();
+template <typename T, bool interleaved> bool produce_audio_batch();
 
 // Audio ring buffer health, for the GUI buffer indicator.
 struct AudioRingStatus {
-    uint32_t fill_frames;       // frames currently buffered ahead of the callback
-    uint32_t lead_frames;       // target lead the producer keeps buffered
-    uint32_t underrun_count;    // times the ring ran dry and the callback got silence
+    uint32_t fill_frames;    // frames currently buffered ahead of the callback
+    uint32_t lead_frames;    // target lead the producer keeps buffered
+    uint32_t underrun_count; // times the ring ran dry and the callback got silence
 };
 
 AudioRingStatus get_audio_ring_status();
