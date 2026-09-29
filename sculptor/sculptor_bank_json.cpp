@@ -4,6 +4,7 @@
 #include "sculptor_bank_json.h"
 #include "../core/atomic_file.h"
 #include "../core/d_printf.h"
+#include "sculptor_osc_graph.h"
 
 // The vendored parser builds warning-clean under -Wall only; the format's strictness
 // lives in this file's decoder, so its integer-conversion noise is silenced here.
@@ -17,7 +18,6 @@
 #endif
 
 #define JSMN_STATIC
-#define JSMN_STRICT
 #include "../thirdparty/jsmn/jsmn.h"
 
 #if defined(_MSC_VER)
@@ -76,7 +76,7 @@ static_assert(Synth::osc_mode_hard_sync == num_osc_modes - 1);
 // ---------------------------------------------------------------------------
 
 namespace {
-// Document staging bound: the largest JSON document the codec accepts. The
+// Document staging bound: the largest JSON document the codec accepts.  The
 // library's payload bound (library_payload_max) matches this by design.
 constexpr uint32_t bank_json_text_size = 1024 * 1024;
 // One token index per parser token; the decoder pins the vendored parser's
@@ -571,7 +571,8 @@ uint32_t Synth::encode_editor_bank_json(const InstrumentEditorBank* bank, char* 
     // a pool's entries
     if (bank->bank.instruments.num_allocated > Synth::max_instruments ||
         bank->bank.envelopes.num_allocated > Synth::max_envelopes || bank->bank.lfos.num_allocated > Synth::max_lfos ||
-        bank->bank.parameters.num_allocated > Synth::max_parameters)
+        bank->bank.parameters.num_allocated > Synth::max_parameters ||
+        bank->graph_layout_count > Synth::max_graph_records)
         return 0;
 
     Out o = { dest, dest_size, 0, false, false };
@@ -637,6 +638,55 @@ uint32_t Synth::encode_editor_bank_json(const InstrumentEditorBank* bank, char* 
 
     o.key("master_chain");
     enc_chain(o, bank->bank.master_chain);
+    // Editor-side state (sparse per-zone node layout records and the missing
+    // oscillator-sum masks).
+    o.key("editor");
+    o.ch('{');
+    o.key("layouts");
+    o.ch('[');
+    for (uint32_t i = 0; i < bank->graph_layout_count; i++) {
+        const Synth::GraphNodeLayout& record = bank->graph_layout[i];
+        o.sep();
+        o.ch('{');
+        key_uint(o, "channel", record.channel);
+        key_uint(o, "zone", record.zone);
+        key_uint(o, "kind", record.kind);
+        key_uint(o, "index", record.index);
+        key_float(o, "x", record.x);
+        key_float(o, "y", record.y);
+        key_float(o, "width", record.width_override);
+        key_float(o, "height", record.height_override);
+        key_uint(o, "depth_source", record.depth_source);
+        key_uint(o, "rate_source", record.rate_source);
+        key_uint(o, "uid", record.uid);
+        // Kind-3 partial-wiring persistence; the keys are optional and
+        // decode to zero when absent.
+        key_uint(o, "served", record.served);
+        key_uint(o, "env_desc_id", record.env_desc_id);
+        key_uint(o, "lfo_desc_id", record.lfo_desc_id);
+        key_uint(o, "lfo_depth_source", record.lfo_depth_source);
+        key_uint(o, "lfo_rate_source", record.lfo_rate_source);
+        // Absent when zero: a zero ordinal joins the target's uid-order
+        // positional attach.
+        key_uint_nonzero(o, "param_slot", record.param_slot);
+        o.key("name");
+        o.text_value(record.name, sizeof(record.name));
+        o.ch('}');
+    }
+    o.ch(']');
+    o.key("missing_sum");
+    o.ch('[');
+    for (uint32_t c = 0; c < Synth::max_channels; c++) {
+        o.sep();
+        o.ch('[');
+        for (uint32_t z = 0; z < Synth::max_instr_per_channel; z++) {
+            o.sep();
+            o.uint_value(bank->graph_missing_sum[c][z]);
+        }
+        o.ch(']');
+    }
+    o.ch(']');
+    o.ch('}');
 
     o.str("}}");
 
@@ -962,7 +1012,7 @@ bool gap_is_sep(const char* doc, uint32_t from, uint32_t to, char sep)
     return true;
 }
 
-// Decodes one \uXXXX escape (with surrogate pairs) into its code point. The
+// Decodes one \uXXXX escape (with surrogate pairs) into its code point.  The
 // document-wide grammar pass validated the four hex digits and paired lone
 // surrogates, so only the high/low pairing itself can fail here.
 bool escape_code_point(const char* src, uint32_t len, uint32_t& pos, int32_t& code)
@@ -1056,7 +1106,7 @@ bool unescape_string(const char* src, uint32_t len, char* dst, uint32_t dst_size
         else if (static_cast<unsigned char>(ch) >= 0x80) {
             // Literal multi-byte sequences must be well-formed UTF-8: bank text is
             // re-encoded verbatim, so a malformed sequence would produce an
-            // unencodable document. Shortest form only, no surrogates, at most
+            // unencodable document.  Shortest form only, no surrogates, at most
             // U+10FFFF - the same rules the key path enforces.
             const unsigned char lead = static_cast<unsigned char>(ch);
             uint32_t            need = 0;
@@ -1280,7 +1330,7 @@ uint32_t check_value(Walker& w, uint32_t i)
                 if (raw_start < prev_pos)
                     return invalid_index;
 
-                // Elements and pairs are separated by exactly one comma
+                // Elements and pairs are separated by exactly one comma.
                 if (u == 0 ? ! gap_is_ws(w.doc, prev_pos, raw_start) : ! gap_is_sep(w.doc, prev_pos, raw_start, ','))
                     return invalid_index;
 
@@ -1324,8 +1374,16 @@ uint32_t check_value(Walker& w, uint32_t i)
                 uint32_t num_keys = 0;
                 uint32_t k        = i + 1;
                 for (int u = 0; u < units; u++) {
-                    if (num_keys >= sizeof(object_keys) / sizeof(object_keys[0]) || k >= w.num_toks ||
-                        w.toks[k].type != JSMN_STRING)
+                    if (k >= w.num_toks)
+                        return invalid_index;
+                    if (w.toks[k].type == JSMN_OBJECT) {
+                        // An embedded continuation object is not a key; skip it whole.
+                        k = skip_value(w, k);
+                        if (k == invalid_index)
+                            return invalid_index;
+                        continue;
+                    }
+                    if (num_keys >= sizeof(object_keys) / sizeof(object_keys[0]) || w.toks[k].type != JSMN_STRING)
                         return invalid_index;
                     object_keys[num_keys++] = k;
                     k                       = skip_value(w, k + 1);
@@ -1349,7 +1407,7 @@ uint32_t check_value(Walker& w, uint32_t i)
 void unknown_field(Walker& w, uint32_t key_idx)
 {
     // The logged name is the key's decoded prefix, encoded as UTF-8 as far as the
-    // bounded display buffer holds it. A code point that no longer fits ends the
+    // bounded display buffer holds it.  A code point that no longer fits ends the
     // prefix, so the log always shows a faithful head of the decoded name,
     // whatever spelling the document used.
     char     display[48];
@@ -1421,7 +1479,7 @@ void want_float(Walker& w, uint32_t i, float* out)
     // Range checking happens after the binary32 conversion: the encoder's %.9g
     // spelling of the finite extrema (3.40282347e+38) sits just past the exact
     // float32 maximum as a double yet rounds back to the same finite float, and
-    // a bank holding that value must round-trip. Only a conversion that leaves
+    // a bank holding that value must round-trip.  Only a conversion that leaves
     // the finite float range (or the grammar-banned infinities/nans) fails.
     const double value     = strtod(s, nullptr);
     const float  converted = static_cast<float>(value);
@@ -1445,7 +1503,7 @@ void want_bool(Walker& w, uint32_t i, bool* out)
 // Reads a STRING token into out (NUL-terminated), unescaping JSON escapes.  Rejects
 // over-long text and content that cannot appear in bank text (control characters,
 // a \u escape for zero - which would truncate the name - or malformed
-// UTF-8). Multi-byte UTF-8 and non-ASCII escapes are accepted.
+// UTF-8).  Multi-byte UTF-8 and non-ASCII escapes are accepted.
 void want_text(Walker& w, uint32_t i, char* out, uint32_t out_size)
 {
     const jsmntok_t& t = w.toks[i];
@@ -2094,6 +2152,162 @@ void decode_parameters(Walker& w, uint32_t arr, Synth::InstrumentEditorBank* out
     });
 }
 
+// One sparse layout record.  Field-level checks that do not depend on the
+// descriptor pools reject here; the descriptor-range and implied-node-count
+// checks run after the whole document decoded (decode order is free).
+void decode_editor_record(Walker& w, uint32_t obj, Synth::GraphNodeLayout* record)
+{
+    walk_object(w, obj, [&](uint32_t key_idx, uint32_t val_idx) {
+        if (key_eq(w, key_idx, "channel")) {
+            uint32_t value = 0;
+            want_uint(w, val_idx, 0xFF, &value);
+            record->channel = static_cast<uint8_t>(value);
+        }
+        else if (key_eq(w, key_idx, "zone")) {
+            uint32_t value = 0;
+            want_uint(w, val_idx, 0xFF, &value);
+            record->zone = static_cast<uint8_t>(value);
+        }
+        else if (key_eq(w, key_idx, "kind")) {
+            uint32_t value = 0;
+            want_uint(w, val_idx, 0xFF, &value);
+            record->kind = static_cast<uint8_t>(value);
+        }
+        else if (key_eq(w, key_idx, "index")) {
+            uint32_t value = 0;
+            want_uint(w, val_idx, 0xFF, &value);
+            record->index = static_cast<uint8_t>(value);
+        }
+        else if (key_eq(w, key_idx, "x"))
+            want_float(w, val_idx, &record->x);
+        else if (key_eq(w, key_idx, "y"))
+            want_float(w, val_idx, &record->y);
+        else if (key_eq(w, key_idx, "width"))
+            want_float(w, val_idx, &record->width_override);
+        else if (key_eq(w, key_idx, "height"))
+            want_float(w, val_idx, &record->height_override);
+        else if (key_eq(w, key_idx, "depth_source")) {
+            uint32_t value = 0;
+            want_uint(w, val_idx, 0xFF, &value);
+            record->depth_source = static_cast<uint8_t>(value);
+        }
+        else if (key_eq(w, key_idx, "rate_source")) {
+            uint32_t value = 0;
+            want_uint(w, val_idx, 0xFF, &value);
+            record->rate_source = static_cast<uint8_t>(value);
+        }
+        else if (key_eq(w, key_idx, "uid")) {
+            uint32_t value = 0;
+            want_uint(w, val_idx, 0xFF, &value);
+            record->uid = static_cast<uint8_t>(value);
+        }
+        // Kind-3 partial-wiring persistence; the keys are optional and
+        // decode to zero when absent.
+        else if (key_eq(w, key_idx, "served")) {
+            uint32_t value = 0;
+            want_uint(w, val_idx, 0xFF, &value);
+            record->served = static_cast<uint8_t>(value);
+        }
+        else if (key_eq(w, key_idx, "env_desc_id")) {
+            uint32_t value = 0;
+            want_uint(w, val_idx, 0xFF, &value);
+            record->env_desc_id = static_cast<uint8_t>(value);
+        }
+        else if (key_eq(w, key_idx, "lfo_desc_id")) {
+            uint32_t value = 0;
+            want_uint(w, val_idx, 0xFF, &value);
+            record->lfo_desc_id = static_cast<uint8_t>(value);
+        }
+        else if (key_eq(w, key_idx, "lfo_depth_source")) {
+            uint32_t value = 0;
+            want_uint(w, val_idx, 0xFF, &value);
+            record->lfo_depth_source = static_cast<uint8_t>(value);
+        }
+        else if (key_eq(w, key_idx, "lfo_rate_source")) {
+            uint32_t value = 0;
+            want_uint(w, val_idx, 0xFF, &value);
+            record->lfo_rate_source = static_cast<uint8_t>(value);
+        }
+        else if (key_eq(w, key_idx, "param_slot")) {
+            uint32_t value = 0;
+            want_uint(w, val_idx, 0xFF, &value);
+            record->param_slot = static_cast<uint8_t>(value);
+        }
+        else if (key_eq(w, key_idx, "name"))
+            want_text(w, val_idx, record->name, sizeof(record->name));
+        else
+            unknown_field(w, key_idx);
+    });
+    if (w.failed)
+        return;
+    if (record->channel >= Synth::max_channels || record->zone >= Synth::max_instr_per_channel || record->kind > 3) {
+        w.failed = true;
+        return;
+    }
+    // Kind 0 keys a bound node in the fixed canonical numbering (inputs, sum
+    // node, oscillator layers), and only by index: a nonzero uid would
+    // create a second key for one node.
+    if (record->kind == 0 && (record->index >= Synth::graph_canonical_node_count || record->uid != 0)) {
+        w.failed = true;
+        return;
+    }
+    // Source bytes name ModSource values; none (0) is valid.
+    if (record->depth_source > static_cast<uint8_t>(Synth::ModSource::pressure_combine) ||
+        record->rate_source > static_cast<uint8_t>(Synth::ModSource::pressure_combine) ||
+        record->lfo_depth_source > static_cast<uint8_t>(Synth::ModSource::pressure_combine) ||
+        record->lfo_rate_source > static_cast<uint8_t>(Synth::ModSource::pressure_combine)) {
+        w.failed = true;
+        return;
+    }
+}
+
+void decode_editor_state(Walker& w, uint32_t val_idx, Synth::InstrumentEditorBank* out)
+{
+    walk_object(w, val_idx, [&](uint32_t key_idx, uint32_t inner_idx) {
+        if (key_eq(w, key_idx, "layouts")) {
+            uint16_t detached_per_zone[Synth::max_channels][Synth::max_instr_per_channel] = {};
+            walk_array(w, inner_idx, Synth::max_graph_records, [&](uint32_t elem, uint32_t) {
+                Synth::GraphNodeLayout record = {};
+                decode_editor_record(w, elem, &record);
+                if (w.failed)
+                    return;
+                if (record.kind != 0) {
+                    if (++detached_per_zone[record.channel][record.zone] > Synth::max_detached_per_zone) {
+                        w.failed = true;
+                        return;
+                    }
+                }
+                // Duplicate keys drop the later record: one key addresses one node.
+                for (uint32_t i = 0; i < out->graph_layout_count; ++i) {
+                    const Synth::GraphNodeLayout& other = out->graph_layout[i];
+                    if (other.channel == record.channel && other.zone == record.zone && other.kind == record.kind &&
+                        other.index == record.index && other.uid == record.uid) {
+                        return;
+                    }
+                }
+                if (out->graph_layout_count >= Synth::max_graph_records) {
+                    w.failed = true;
+                    return;
+                }
+                out->graph_layout[out->graph_layout_count++] = record;
+            });
+        }
+        else if (key_eq(w, key_idx, "missing_sum")) {
+            walk_array(w, inner_idx, Synth::max_channels, [&](uint32_t row_elem, uint32_t channel) {
+                walk_array(w, row_elem, Synth::max_instr_per_channel, [&](uint32_t elem, uint32_t zone) {
+                    uint32_t value = 0;
+                    want_uint(w, elem, 0x7F, &value); // only the seven layer bits are meaningful
+                    if (w.failed)
+                        return;
+                    out->graph_missing_sum[channel][zone] = static_cast<uint8_t>(value);
+                });
+            });
+        }
+        else
+            unknown_field(w, key_idx);
+    });
+}
+
 void decode_bank(Walker& w, uint32_t obj, Synth::InstrumentEditorBank* out)
 {
     walk_object(w, obj, [&](uint32_t key_idx, uint32_t val_idx) {
@@ -2120,6 +2334,8 @@ void decode_bank(Walker& w, uint32_t obj, Synth::InstrumentEditorBank* out)
             decode_names(w, val_idx, Synth::max_instruments, out->instrument_names);
         else if (key_eq(w, key_idx, "channel_names"))
             decode_names(w, val_idx, Synth::max_channels, out->channel_names);
+        else if (key_eq(w, key_idx, "editor"))
+            decode_editor_state(w, val_idx, out);
         else
             unknown_field(w, key_idx);
     });
@@ -2369,8 +2585,9 @@ namespace {
 // time, so one static scratch serves every caller (decode is not reentrant).
 Synth::InstrumentEditorBank decode_scratch;
 
-// Full pipeline into decode_scratch: grammar, schema overlay on defaults,
-// validation, canonicalization.  Returns false without touching any caller state.
+// Decode pipeline into decode_scratch: grammar pass, schema overlay
+// onto the defaults, then descriptor validation.
+
 bool decode_document_into_scratch(const char* text, uint32_t len)
 {
     // The staging text buffer is the format's document-size bound; file readers
@@ -2386,8 +2603,9 @@ bool decode_document_into_scratch(const char* text, uint32_t len)
                                       len,
                                       json_tokens,
                                       static_cast<unsigned int>(sizeof(json_tokens) / sizeof(json_tokens[0])));
-    if (num_tokens <= 0)
-        return false; // malformed document, or more tokens than the pool holds
+    if (num_tokens <= 0) {
+        return false;
+    }
 
     Walker w = { text, len, json_tokens, static_cast<uint32_t>(num_tokens), false };
 
@@ -2395,8 +2613,9 @@ bool decode_document_into_scratch(const char* text, uint32_t len)
     // content is rejected everywhere - including unknown subtrees the schema walk
     // never visits.
     const uint32_t grammar_next = check_value(w, 0);
-    if (grammar_next != w.num_toks || w.failed || w.toks[0].type != JSMN_OBJECT)
-        return false; // a structural violation anywhere, or tokens outside the root
+    if (grammar_next != w.num_toks || w.failed || w.toks[0].type != JSMN_OBJECT) {
+        return false;
+    } // a structural violation anywhere, or tokens outside the root
 
     // Nothing may precede the root object: jsmn consumes separators without a
     // root, so ",{}" would otherwise pass as an empty document
@@ -2422,16 +2641,24 @@ bool decode_document_into_scratch(const char* text, uint32_t len)
         }
         if (key_eq(w, key_idx, "instrument_editor_bank"))
             decode_bank(w, val_idx, &decode_scratch);
+        else if (key_eq(w, key_idx, "editor"))
+            decode_editor_state(w, val_idx, &decode_scratch);
         else
             unknown_field(w, key_idx);
     }
 
-    if (w.failed)
+    if (w.failed) {
         return false;
+    }
 
-    if (! Synth::validate_instrument_bank(&decode_scratch.bank))
+    if (! Synth::validate_instrument_bank(&decode_scratch.bank, false)) {
         return false;
-
+    }
+    // Editor metadata needs the decoded pools (descriptor ranges) and the
+    // full zone tables (implied node counts), so it validates after the walk.
+    if (! Sculptor::validate_editor_metadata(decode_scratch)) {
+        return false;
+    }
     canonicalize_editor_bank(&decode_scratch);
 
     return true;

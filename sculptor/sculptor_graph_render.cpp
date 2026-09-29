@@ -23,15 +23,38 @@ using Sculptor::max_nodes;
 using Sculptor::PropertyType;
 using Sculptor::SlotKind;
 
-constexpr float node_padding       = 8.0f;                     // inner margins of a node rect
-constexpr float dot_radius         = 5.0f;                     // connector dot radius
-constexpr float dot_space          = 2.0f * dot_radius + 2.0f; // room a dot claims
-constexpr float property_widget_w  = 80.0f;                    // width of inline value widgets
-constexpr float fit_view_margin    = 32.0f;                    // empty margin around Home fit
-constexpr float zoom_wheel_factor  = 1.2f;                     // zoom step per wheel tick
-constexpr float click_max_distance = 5.0f;                     // press-release distance still a click
-constexpr float dot_pick_radius    = dot_radius + 4.0f;        // dot hit-test radius
-constexpr float curve_min_reach    = 30.0f;                    // bezier control point reach, px
+constexpr float node_padding      = 8.0f;                     // inner margins of a node rect
+constexpr float dot_radius        = 5.0f;                     // connector dot radius
+constexpr float dot_space         = 2.0f * dot_radius + 2.0f; // room a dot claims
+constexpr float property_widget_w = 80.0f;                    // width of inline value widgets
+constexpr float fit_view_margin   = 32.0f;                    // empty margin around Home fit
+
+// Oscillator-node rows whose widgets only make sense for the current
+// waveform/mode selection.  Slot indices follow the projection layout
+// contract in sculptor_osc_graph.cpp (15 slots; waveform b at 3, mix mode
+// at 5, fm depth at 7, fm ratio at 8).
+bool osc_slot_disabled(const Sculptor::Node& node, uint32_t slot_idx)
+{
+    if (node.slots.num_allocated != 15) {
+        return false;
+    }
+    const uint32_t wave_b = node.slots.entries[3].value.list_index;
+    const uint32_t mode   = node.slots.entries[5].value.list_index;
+    if (wave_b == 0 && (slot_idx == 4 || slot_idx == 5 || slot_idx == 6 || slot_idx == 7 || slot_idx == 8)) {
+        return true; // duty b, mix mode, waveform mix and both fm rows need waveform b
+    }
+    if (slot_idx == 7 && mode != 1) {
+        return true; // fm depth only drives the fm mix mode
+    }
+    if (slot_idx == 8 && mode == 0) {
+        return true; // fm ratio drives fm and hard sync, not blend
+    }
+    return false;
+}
+constexpr float zoom_wheel_factor  = 1.2f;              // zoom step per wheel tick
+constexpr float click_max_distance = 5.0f;              // press-release distance still a click
+constexpr float dot_pick_radius    = dot_radius + 4.0f; // dot hit-test radius
+constexpr float curve_min_reach    = 30.0f;             // bezier control point reach, px
 
 ImU32 to_imgui(uint32_t packed)
 {
@@ -67,8 +90,10 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
     // their contents into overlapping mush.
     const float render_scale = zoom < 1.0f ? 1.0f : zoom;
 
-    const auto mouse_graph = [&]() { return (view_origin + ((mouse_screen - origin) / zoom)); };
-    const auto in_widget   = [&](vmath::vec2 pos_screen) {
+    // A zero zoom (zero-filled state) is treated as 1 everywhere below.
+    const float zoom_scale  = zoom != 0.0f ? zoom : 1.0f;
+    const auto  mouse_graph = [&]() { return (view_origin + ((mouse_screen - origin) / zoom_scale)); };
+    const auto  in_widget   = [&](vmath::vec2 pos_screen) {
         return pos_screen.x >= origin.x && pos_screen.y >= origin.y && pos_screen.x <= (origin + widget_size).x &&
                pos_screen.y <= (origin + widget_size).y;
     };
@@ -104,6 +129,16 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
         const vmath::vec2 mouse_point = mouse_graph();
         view_origin                   = (mouse_point - ((mouse_screen - origin) / new_zoom));
         zoom                          = new_zoom;
+    }
+
+    // Delete: delete the selected nodes (the veto applies per node).  Only
+    // while no interaction is active (drag, retarget, connecting, rubber
+    // band) and without key repeat, so holding or dragging never re-fires the
+    // delete mid-gesture.  The text-input guard keeps an active node-rename
+    // editor from swallowing the keypress as a delete.
+    if (ImGui::IsWindowHovered() && in_widget(mouse_screen) && interaction == Interaction::idle &&
+        ImGui::IsKeyPressed(ImGuiKey_Delete, false) && ! ImGui::GetIO().WantTextInput) {
+        delete_selected();
     }
 
     // Home: fit all nodes into view.
@@ -147,20 +182,20 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
     {
         const int32_t first_col = static_cast<int32_t>(floor(view_origin.x / graph_grid_spacing));
         const int32_t last_col =
-            static_cast<int32_t>(floor((view_origin.x + widget_size.x / zoom) / graph_grid_spacing));
+            static_cast<int32_t>(floor((view_origin.x + widget_size.x / zoom_scale) / graph_grid_spacing));
         for (int32_t col = first_col; col <= last_col; ++col) {
             const float gx    = static_cast<float>(col) * graph_grid_spacing;
-            const float sx    = origin.x + (gx - view_origin.x) * zoom;
+            const float sx    = origin.x + (gx - view_origin.x) * zoom_scale;
             const bool  axis  = (col % graph_grid_axis_cells) == 0;
             const ImU32 color = to_imgui(axis ? colors_.grid_axis : colors_.grid_line);
             draw_list->AddLine(ImVec2(sx, origin.y), ImVec2(sx, origin.y + widget_size.y), color);
         }
         const int32_t first_row = static_cast<int32_t>(floor(view_origin.y / graph_grid_spacing));
         const int32_t last_row =
-            static_cast<int32_t>(floor((view_origin.y + widget_size.y / zoom) / graph_grid_spacing));
+            static_cast<int32_t>(floor((view_origin.y + widget_size.y / zoom_scale) / graph_grid_spacing));
         for (int32_t row = first_row; row <= last_row; ++row) {
             const float gy    = static_cast<float>(row) * graph_grid_spacing;
-            const float sy    = origin.y + (gy - view_origin.y) * zoom;
+            const float sy    = origin.y + (gy - view_origin.y) * zoom_scale;
             const bool  axis  = (row % graph_grid_axis_cells) == 0;
             const ImU32 color = to_imgui(axis ? colors_.grid_axis : colors_.grid_line);
             draw_list->AddLine(ImVec2(origin.x, sy), ImVec2(origin.x + widget_size.x, sy), color);
@@ -231,59 +266,116 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
         float       content_h  = pad + title_h;
         float       max_line_w = ImGui::CalcTextSize(node.name).x;
 
-        // Classify slots: inputs and outputs pair on shared lines (first
-        // input and first output on the same line), properties go below.
-        uint32_t input_slots[max_node_slots];
-        uint32_t output_slots[max_node_slots];
-        uint32_t num_inputs  = 0;
-        uint32_t num_outputs = 0;
-        struct PropertyLine {
+        // Lines: every slot belongs to the line of its row_group (0 = own
+        // line).  Same-group slots pack onto one line in slot order, so a
+        // connector and its inline widgets share a row.
+        struct LineElem {
             uint32_t slot_idx;
-            float    y; // top of the line, graph space
+            bool     dot; // draws a connector dot
         };
-        PropertyLine property_lines[max_node_slots];
-        uint32_t     num_property_lines = 0;
+        struct Line {
+            LineElem elems[max_node_slots];
+            uint32_t num_elems  = 0;
+            float    y          = 0.0f; // top of the line, graph space
+            bool     has_widget = false;
+        };
+        Line    lines[max_node_slots];
+        int32_t group_line[256]; // row_group id -> line index, -1 = none yet
+        for (uint32_t g = 0; g < 256; ++g) {
+            group_line[g] = -1;
+        }
+        uint32_t num_lines = 0;
 
         for (uint32_t slot_idx = 0; slot_idx < max_node_slots; ++slot_idx) {
             if (! node.slots.is_occupied(slot_idx)) {
                 continue;
             }
             const Slot& slot = node.slots.entries[slot_idx];
-            if (slot.kind == SlotKind::input) {
-                input_slots[num_inputs++] = slot_idx;
+            uint32_t    line_idx;
+            if (slot.row_group != 0 && group_line[slot.row_group] >= 0) {
+                line_idx = static_cast<uint32_t>(group_line[slot.row_group]);
             }
-            else if (slot.kind == SlotKind::output) {
-                output_slots[num_outputs++] = slot_idx;
+            else {
+                line_idx = num_lines++;
+                if (slot.row_group != 0) {
+                    group_line[slot.row_group] = static_cast<int32_t>(line_idx);
+                }
+                lines[line_idx].num_elems  = 0;
+                lines[line_idx].has_widget = false;
             }
-            else if (slot.kind == SlotKind::property) {
-                property_lines[num_property_lines].slot_idx = slot_idx;
-                ++num_property_lines;
+            Line& line                          = lines[line_idx];
+            line.elems[line.num_elems].slot_idx = slot_idx;
+            line.elems[line.num_elems].dot      = slot.kind == SlotKind::input || slot.kind == SlotKind::output ||
+                                                  (slot.kind == SlotKind::property && slot.connectable);
+            ++line.num_elems;
+            if (slot.kind == SlotKind::property) {
+                line.has_widget = true;
             }
         }
 
-        // Paired I/O lines: each side claims dot space plus its name width.
-        const uint32_t num_io_lines = num_inputs > num_outputs ? num_inputs : num_outputs;
-        for (uint32_t line = 0; line < num_io_lines; ++line) {
-            float line_w = 2.0f * dot_space;
-            if (line < num_inputs) {
-                line_w += ImGui::CalcTextSize(node.slots.entries[input_slots[line]].name).x;
+        // Widget columns: the k-th inline property widget of every line
+        // aligns at the widest line's offset, so values line up across
+        // rows instead of trailing their labels.  Names keep their
+        // flowing position.
+        float    value_col[8] = {};
+        uint32_t max_props    = 0;
+        for (uint32_t line_idx = 0; line_idx < num_lines; ++line_idx) {
+            const Line& line      = lines[line_idx];
+            uint32_t    left_dots = 0;
+            for (uint32_t e = 0; e < line.num_elems; ++e) {
+                const Slot& slot = node.slots.entries[line.elems[e].slot_idx];
+                if (line.elems[e].dot && slot.kind != SlotKind::output) {
+                    ++left_dots;
+                }
             }
-            if (line < num_outputs) {
-                line_w += ImGui::CalcTextSize(node.slots.entries[output_slots[line]].name).x;
+            float    cursor = pad + static_cast<float>(left_dots > 0 ? left_dots : 1) * dot_space;
+            uint32_t prop   = 0;
+            for (uint32_t e = 0; e < line.num_elems; ++e) {
+                const Slot& slot = node.slots.entries[line.elems[e].slot_idx];
+                if (slot.kind == SlotKind::output) {
+                    continue;
+                }
+                if (slot.kind != SlotKind::property) {
+                    cursor += ImGui::CalcTextSize(slot.name).x + 8.0f;
+                    continue;
+                }
+                const float x = cursor + ImGui::CalcTextSize(slot.name).x + 8.0f;
+                if (prop < 8) {
+                    value_col[prop] = x > value_col[prop] ? x : value_col[prop];
+                }
+                ++prop;
+                cursor = x + property_widget_w;
             }
-            max_line_w = line_w > max_line_w ? line_w : max_line_w;
+            max_props = prop > max_props ? prop : max_props;
         }
-        const float io_block_top = content_h;
-        content_h += static_cast<float>(num_io_lines) * line_h;
+        for (uint32_t k = 1; k < max_props && k < 8; ++k) {
+            const float min_col = value_col[k - 1] + property_widget_w + 8.0f;
+            value_col[k]        = value_col[k] > min_col ? value_col[k] : min_col;
+        }
+        if (max_props > 0) {
+            const float widest = value_col[max_props < 8 ? max_props - 1 : 7] + property_widget_w;
+            max_line_w         = widest > max_line_w ? widest : max_line_w;
+        }
 
-        // Property lines below the I/O block.
-        for (uint32_t p = 0; p < num_property_lines; ++p) {
-            property_lines[p].y = content_h;
-            content_h += frame_h + 0.5f * node_padding;
-            const Slot& slot = node.slots.entries[property_lines[p].slot_idx];
-            const float line_w =
-                (slot.connectable ? dot_space : 0.0f) + ImGui::CalcTextSize(slot.name).x + 8.0f + property_widget_w;
+        // Line sizing: dot columns plus each element's name; property
+        // elements add their value widget.  All lines get frame height plus
+        // half padding so connector rows breathe as loosely as widget rows.
+        for (uint32_t line_idx = 0; line_idx < num_lines; ++line_idx) {
+            Line& line   = lines[line_idx];
+            float line_w = 0.0f;
+            for (uint32_t e = 0; e < line.num_elems; ++e) {
+                const Slot& slot = node.slots.entries[line.elems[e].slot_idx];
+                if (line.elems[e].dot) {
+                    line_w += dot_space;
+                }
+                line_w += ImGui::CalcTextSize(slot.name).x;
+                if (slot.kind == SlotKind::property) {
+                    line_w += 8.0f + property_widget_w;
+                }
+            }
             max_line_w = line_w > max_line_w ? line_w : max_line_w;
+            line.y     = content_h;
+            content_h  = content_h + frame_h + 0.5f * node_padding;
         }
 
         const float state_h = node.state_widget ? state_widget_heights[node_idx] : 0.0f;
@@ -297,18 +389,23 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
         const float node_h      = node.content_height_override > 0.0f ? node.content_height_override : content_h;
         content_sizes[node_idx] = vmath::vec2(content_w, node_h);
 
-        const vmath::vec2 rect_min = (origin + ((node.position - view_origin) * zoom));
+        const vmath::vec2 rect_min = (origin + ((node.position - view_origin) * zoom_scale));
         // The drawn rect must use the override-aware height, not the auto
         // content height, or equal-height renders as nothing and bottom/
         // right aligns land short of the reference edge.
-        const vmath::vec2 rect_max = (rect_min + (vmath::vec2(content_w, node_h) * render_scale));
-        const ImU32       bg_color = to_imgui(is_ghost                   ? colors_.ghost_node
-                                              : node.color_override != 0 ? node.color_override
-                                                                         : colors_.node_background);
+        const vmath::vec2 rect_max    = (rect_min + (vmath::vec2(content_w, node_h) * render_scale));
+        const uint8_t     visual_role = node_visual_roles[node_idx];
+        const ImU32 bg_color = to_imgui(is_ghost                   ? colors_.ghost_node
+                                        : node.color_override != 0 ? node.color_override
+                                        : visual_role == node_role_parameter && colors_.parameter_node_background != 0
+                                            ? colors_.parameter_node_background
+                                            : colors_.node_background);
         draw_list->AddRectFilled(ImVec2(rect_min.x, rect_min.y), ImVec2(rect_max.x, rect_max.y), bg_color);
         draw_list->AddRect(ImVec2(rect_min.x, rect_min.y),
                            ImVec2(rect_max.x, rect_max.y),
-                           to_imgui(colors_.node_border));
+                           to_imgui(visual_role == node_role_parameter && colors_.parameter_node_border != 0
+                                        ? colors_.parameter_node_border
+                                        : colors_.node_border));
         if (is_selected(node_idx)) {
             draw_list->AddRect(ImVec2(rect_min.x - 2.0f, rect_min.y - 2.0f),
                                ImVec2(rect_max.x + 2.0f, rect_max.y + 2.0f),
@@ -318,7 +415,7 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
                                2.0f);
         }
 
-        const vmath::vec2 title_pos = vmath::vec2(rect_min.x + pad, rect_min.y + pad * 0.5f);
+        const vmath::vec2 title_pos = vmath::vec2(rect_min.x + pad, rect_min.y + pad);
         draw_list->AddText(ImVec2(title_pos.x, title_pos.y),
                            to_imgui(is_ghost ? colors_.ghost_node : colors_.node_title),
                            node.name);
@@ -349,120 +446,196 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
             ImGui::PopItemWidth();
         }
 
-        // Endpoint dot + name for input/output slots: dot on the node edge,
-        // filled when connected, hollow when free; name beside the dot.
-        const auto draw_endpoint = [&](uint32_t endpoint_slot_idx, bool is_output, float endpoint_y_center) {
-            const Slot& slot      = node.slots.entries[endpoint_slot_idx];
-            const bool  connected = slot_is_connected(node_idx, endpoint_slot_idx);
-            const float dot_x     = is_output ? rect_max.x : rect_min.x;
-            const ImU32 dot_color = to_imgui(connected ? colors_.connector_connected : colors_.connector);
-            dot_positions[node_idx * max_node_slots + endpoint_slot_idx] = vmath::vec2(dot_x, endpoint_y_center);
-            if (connected) {
-                draw_list->AddCircleFilled(ImVec2(dot_x, endpoint_y_center), dot_radius, dot_color);
-            }
-            else {
-                draw_list->AddCircle(ImVec2(dot_x, endpoint_y_center), dot_radius, dot_color, 0, 1.5f);
-            }
-            const float name_x = is_output ? rect_max.x - pad - dot_space - ImGui::CalcTextSize(slot.name).x
-                                           : rect_min.x + pad + dot_space;
-            draw_list->AddText(ImVec2(name_x, endpoint_y_center - line_h * 0.5f),
-                               to_imgui(colors_.property_value),
-                               slot.name);
-        };
+        // Line drawing: input and connectable-property dots pack at the
+        // left node edge, output dots sit on the right edge; element names
+        // and value widgets then run left to right.  A missing mark paints
+        // the free dot red: the editor flags inputs whose expected
+        // connection is absent (a broken oscillator sum edge).
+        for (uint32_t line_idx = 0; line_idx < num_lines; ++line_idx) {
+            const Line& line      = lines[line_idx];
+            const float line_span = frame_h + 0.5f * node_padding;
+            const float y_center  = rect_min.y + (line.y + 0.5f * line_span) * render_scale;
 
-        // Paired I/O block above the properties: first input and first output
-        // share the top line, extra inputs/outputs get their own lines.
-        for (uint32_t line = 0; line < num_io_lines; ++line) {
-            const float y_center =
-                rect_min.y + (io_block_top + (static_cast<float>(line) + 0.5f) * line_h) * render_scale;
-            if (line < num_inputs) {
-                draw_endpoint(input_slots[line], false, y_center);
-            }
-            if (line < num_outputs) {
-                draw_endpoint(output_slots[line], true, y_center);
-            }
-        }
-
-        // Property lines below the I/O block: connectable ones get a left-edge
-        // dot; name on the left, value widget (or greyed text) on the right.
-        for (uint32_t p = 0; p < num_property_lines; ++p) {
-            const uint32_t slot_idx = property_lines[p].slot_idx;
-            const Slot&    slot     = node.slots.entries[slot_idx];
-            const float    y_center =
-                rect_min.y + (property_lines[p].y + (frame_h + 0.5f * node_padding) * 0.5f) * render_scale;
-
-            if (slot.connectable) {
-                const bool  connected = slot_is_connected(node_idx, slot_idx);
-                const ImU32 dot_color = to_imgui(connected ? colors_.connector_connected : colors_.connector);
-                dot_positions[node_idx * max_node_slots + slot_idx] = vmath::vec2(rect_min.x, y_center);
-                if (connected) {
-                    draw_list->AddCircleFilled(ImVec2(rect_min.x, y_center), dot_radius, dot_color);
-                }
-                else {
-                    draw_list->AddCircle(ImVec2(rect_min.x, y_center), dot_radius, dot_color, 0, 1.5f);
-                }
-            }
-
-            const float name_x = rect_min.x + pad + (slot.connectable ? dot_space : 0.0f);
-            draw_list->AddText(ImVec2(name_x, y_center - line_h * 0.5f), to_imgui(colors_.property_value), slot.name);
-
-            {
-                const bool  connected = slot_is_connected(node_idx, slot_idx);
-                const float widget_x  = rect_max.x - pad - property_widget_w;
-                const float widget_y  = y_center - frame_h * 0.5f;
-                if (connected || is_ghost) {
-                    // Greyed-out value text: the connection drives the value,
-                    // and ghosts submit no live widgets at all.
-                    char value_text[32] = {};
-                    if (slot.property_type == PropertyType::integer) {
-                        snprintf(value_text, sizeof(value_text), "%d", slot.value.integer);
-                    }
-                    else if (slot.property_type == PropertyType::real) {
-                        snprintf(value_text, sizeof(value_text), "%.3f", static_cast<double>(slot.value.real));
-                    }
-                    else {
-                        snprintf(value_text, sizeof(value_text), "%u", slot.value.list_index);
-                    }
-                    draw_list->AddText(ImVec2(widget_x, widget_y + (frame_h - line_h) * 0.5f),
-                                       to_imgui(colors_.property_connected_value),
-                                       value_text);
+            uint32_t left_dots  = 0;
+            uint32_t right_dots = 0;
+            for (uint32_t e = 0; e < line.num_elems; ++e) {
+                const uint32_t elem_slot = line.elems[e].slot_idx;
+                if (! line.elems[e].dot) {
                     continue;
                 }
+                const Slot& slot      = node.slots.entries[elem_slot];
+                const bool  connected = slot_is_connected(node_idx, elem_slot);
+                const float dot_x     = slot.kind == SlotKind::output
+                                            ? rect_max.x - static_cast<float>(right_dots++) * dot_space
+                                            : rect_min.x + static_cast<float>(left_dots++) * dot_space;
+                const ImU32 dot_color = to_imgui(connected                           ? colors_.connector_connected
+                                                 : slot_missing(node_idx, elem_slot) ? colors_.connector_missing
+                                                                                     : colors_.connector);
+                dot_positions[node_idx * max_node_slots + elem_slot] = vmath::vec2(dot_x, y_center);
+                if (connected) {
+                    draw_list->AddCircleFilled(ImVec2(dot_x, y_center), dot_radius, dot_color);
+                }
+                else {
+                    draw_list->AddCircle(ImVec2(dot_x, y_center), dot_radius, dot_color, 0, 1.5f);
+                }
+                if (slot.kind == SlotKind::output) {
+                    // Output names right-align against their dot so the
+                    // label sits inside the node next to the connector.
+                    const float name_w = ImGui::CalcTextSize(slot.name).x;
+                    draw_list->AddText(ImVec2(dot_x - pad - name_w, y_center - line_h * 0.5f),
+                                       to_imgui(colors_.property_value),
+                                       slot.name);
+                }
+            }
 
-                ImGui::PushID(static_cast<int>(node_idx * max_node_slots + slot_idx));
-                ImGui::SetCursorScreenPos(ImVec2(widget_x, widget_y));
-                ImGui::PushItemWidth(property_widget_w);
-                bool value_edited = false;
-                switch (slot.property_type) {
-                    case PropertyType::integer:
-                        value_edited = ImGui::InputInt("##value", &node.slots.entries[slot_idx].value.integer);
-                        break;
-                    case PropertyType::real:
-                        value_edited = ImGui::InputFloat("##value", &node.slots.entries[slot_idx].value.real);
-                        break;
-                    case PropertyType::list: {
-                        const char* items[8] = {};
-                        for (uint8_t option = 0; option < slot.num_list_options && option < 8; ++option) {
-                            items[option] = slot.list_options[option];
-                        }
-                        int list_index = static_cast<int>(slot.value.list_index);
-                        // num_list_options is an unconstrained public field;
-                        // clamp so Combo never reads past the items array.
-                        const int num_items = static_cast<int>(slot.num_list_options < 8 ? slot.num_list_options : 8);
-                        value_edited        = ImGui::Combo("##value", &list_index, items, num_items);
-                        if (value_edited) {
-                            node.slots.entries[slot_idx].value.list_index = static_cast<uint8_t>(list_index);
-                        }
-                        break;
+            // Shared routing rows (parameter value row + source op/scale
+            // rows) carry a marker so the fan-out target is visible at a
+            // glance; one glyph per rendered line.
+            bool line_shared = false;
+            for (uint32_t e = 0; e < line.num_elems; ++e) {
+                if (slot_visual_roles[node_idx * max_node_slots + line.elems[e].slot_idx] == slot_role_shared_row) {
+                    line_shared = true;
+                    break;
+                }
+            }
+
+            // A line with no input dots still starts its names one dot
+            // column in, matching the input-tagged lines beside it.
+            float    cursor    = rect_min.x + pad + static_cast<float>(left_dots > 0 ? left_dots : 1) * dot_space;
+            uint32_t line_prop = 0;
+            for (uint32_t e = 0; e < line.num_elems; ++e) {
+                const uint32_t slot_idx = line.elems[e].slot_idx;
+                const Slot&    slot     = node.slots.entries[slot_idx];
+                if (slot.kind == SlotKind::output) {
+                    continue; // name drawn beside its dot above
+                }
+                const float name_w = ImGui::CalcTextSize(slot.name).x;
+                if (line_shared) {
+                    line_shared = false;
+                    if (colors_.shared_row_marker != 0) {
+                        draw_list->AddCircleFilled(ImVec2(cursor - 4.0f * render_scale, y_center),
+                                                   2.0f * render_scale,
+                                                   to_imgui(colors_.shared_row_marker));
                     }
-                    case PropertyType::unused:
-                        break;
                 }
-                if (value_edited) {
-                    push_change(ChangeKind::value_changed, node_idx, slot_idx, pool_no_slot);
+                const bool disabled = slot.kind == SlotKind::property && osc_slot_disabled(node, slot_idx);
+                draw_list->AddText(ImVec2(cursor, y_center - line_h * 0.5f),
+                                   to_imgui(disabled ? colors_.property_connected_value : colors_.property_value),
+                                   slot.name);
+                if (slot.kind != SlotKind::property) {
+                    cursor += name_w + 8.0f;
+                    continue;
                 }
-                ImGui::PopItemWidth();
-                ImGui::PopID();
+                const float widget_x = line_prop < 8 ? rect_min.x + value_col[line_prop] : cursor + name_w + 8.0f;
+                const float widget_y = y_center - frame_h * 0.5f;
+                cursor               = widget_x + property_widget_w;
+                ++line_prop;
+                {
+                    const bool connected = slot_is_connected(node_idx, slot_idx);
+                    if (connected || is_ghost) {
+                        // Greyed-out value text: the connection drives the value,
+                        // and ghosts submit no live widgets at all.
+                        char value_text[32] = {};
+                        if (slot.property_type == PropertyType::integer) {
+                            snprintf(value_text, sizeof(value_text), "%d", slot.value.integer);
+                        }
+                        else if (slot.property_type == PropertyType::real) {
+                            snprintf(value_text, sizeof(value_text), "%.3f", static_cast<double>(slot.value.real));
+                        }
+                        else {
+                            snprintf(value_text, sizeof(value_text), "%u", slot.value.list_index);
+                        }
+                        draw_list->AddText(ImVec2(widget_x, widget_y + (frame_h - line_h) * 0.5f),
+                                           to_imgui(colors_.property_connected_value),
+                                           value_text);
+                        continue;
+                    }
+
+                    ImGui::PushID(static_cast<int>(node_idx * max_node_slots + slot_idx));
+                    ImGui::SetCursorScreenPos(ImVec2(widget_x, widget_y));
+                    ImGui::PushItemWidth(property_widget_w);
+                    if (disabled) {
+                        ImGui::BeginDisabled(true);
+                    }
+                    bool item_submitted = false;
+                    bool value_edited   = false;
+                    switch (slot.property_type) {
+                        case PropertyType::integer:
+                            value_edited   = ImGui::InputInt("##value", &node.slots.entries[slot_idx].value.integer);
+                            item_submitted = true;
+                            break;
+                        case PropertyType::real:
+                            if (slot.real_bounded) {
+                                value_edited = ImGui::SliderFloat("##value",
+                                                                  &node.slots.entries[slot_idx].value.real,
+                                                                  slot.real_min,
+                                                                  slot.real_max,
+                                                                  "%.3f",
+                                                                  slot.real_logarithmic ? ImGuiSliderFlags_Logarithmic
+                                                                                        : ImGuiSliderFlags_None);
+                            }
+                            else {
+                                value_edited = ImGui::InputFloat("##value", &node.slots.entries[slot_idx].value.real);
+                            }
+                            item_submitted = true;
+                            break;
+                        case PropertyType::list: {
+                            const char* items[8] = {};
+                            for (uint8_t option = 0; option < slot.num_list_options && option < 8; ++option) {
+                                items[option] = slot.list_options[option];
+                            }
+                            int list_index = static_cast<int>(slot.value.list_index);
+                            // num_list_options is an unconstrained public field;
+                            // clamp so Combo never reads past the items array.
+                            const int num_items =
+                                static_cast<int>(slot.num_list_options < 8 ? slot.num_list_options : 8);
+                            if (num_items == 2) {
+                                // Two-option lists are mode selectors (add vs
+                                // multiply): a horizontal radio pair reads
+                                // faster than a dropdown, with the option
+                                // label ahead of its button.
+                                int radio_index = list_index;
+                                for (int option_i = 0; option_i < 2; ++option_i) {
+                                    if (option_i > 0) {
+                                        ImGui::SameLine();
+                                    }
+                                    ImGui::TextUnformatted(items[option_i]);
+                                    ImGui::SameLine();
+                                    ImGui::RadioButton(option_i == 0 ? "##op0" : "##op1", &radio_index, option_i);
+                                }
+                                if (radio_index != list_index) {
+                                    node.slots.entries[slot_idx].value.list_index = static_cast<uint8_t>(radio_index);
+                                    value_edited                                  = true;
+                                }
+                                item_submitted = true;
+                                break;
+                            }
+                            value_edited = ImGui::Combo("##value", &list_index, items, num_items);
+                            if (value_edited) {
+                                node.slots.entries[slot_idx].value.list_index = static_cast<uint8_t>(list_index);
+                            }
+                            break;
+                        }
+                        case PropertyType::unused:
+                            // A SetCursorScreenPos that lands outside the window
+                            // bounds must be followed by an item, or ImGui's
+                            // boundary-extent error check fires on the next move.
+                            ImGui::Dummy(ImVec2(property_widget_w, ImGui::GetTextLineHeight()));
+                            item_submitted = true;
+                            break;
+                    }
+                    if (! item_submitted) {
+                        ImGui::Dummy(ImVec2(property_widget_w, ImGui::GetTextLineHeight()));
+                    }
+                    if (value_edited) {
+                        push_change(ChangeKind::value_changed, node_idx, slot_idx, pool_no_slot);
+                    }
+                    if (disabled) {
+                        ImGui::EndDisabled();
+                    }
+                    ImGui::PopItemWidth();
+                    ImGui::PopID();
+                }
             }
         }
 
@@ -558,10 +731,13 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
         ImGui::EndPopup();
     }
 
-    // Right-click menu on a selected node: align, equal-size and delete
-    // commands.  Delete runs the caller veto: a refused delete mutates
-    // nothing and is reported through the error overlay.
+    // Right-click menu on a selected node: caller items first, then align,
+    // equal-size and delete commands.  Delete runs the caller veto: a refused
+    // delete mutates nothing and is reported through the error overlay.
     if (ImGui::BeginPopup("node_menu")) {
+        if (node_menu_callback && node_menu_callback(node_menu_user_data, popup_node)) {
+            ImGui::Separator();
+        }
         if (ImGui::MenuItem("Align left")) {
             align_selected(AlignKind::left);
         }
@@ -589,21 +765,11 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
         ImGui::EndPopup();
     }
 
-    // Right-click menu on the empty canvas: the caller's items, then the
-    // widget's own add command.  The added node enters ghost mode so the
-    // caller's existing ghost-placement flow positions it.
+    // Right-click menu on the empty canvas: fully caller-provided items; the
+    // widget adds none of its own (the caller places added nodes itself).
     if (ImGui::BeginPopup("canvas_menu")) {
         if (canvas_menu_callback) {
             canvas_menu_callback(canvas_menu_user_data);
-        }
-        if (ImGui::MenuItem("Add node")) {
-            const uint32_t added = create_node("node", popup_canvas_pos);
-            if (added != pool_no_slot) {
-                set_ghost(added, true);
-            }
-            else {
-                set_error("No free node slots");
-            }
         }
         ImGui::EndPopup();
     }
@@ -618,8 +784,8 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
         const float       band_min_y = band_start.y < band_now.y ? band_start.y : band_now.y;
         const float       band_max_x = band_start.x > band_now.x ? band_start.x : band_now.x;
         const float       band_max_y = band_start.y > band_now.y ? band_start.y : band_now.y;
-        const vmath::vec2 scr_min    = (origin + ((vmath::vec2(band_min_x, band_min_y) - view_origin) * zoom));
-        const vmath::vec2 scr_max    = (origin + ((vmath::vec2(band_max_x, band_max_y) - view_origin) * zoom));
+        const vmath::vec2 scr_min    = (origin + ((vmath::vec2(band_min_x, band_min_y) - view_origin) * zoom_scale));
+        const vmath::vec2 scr_max    = (origin + ((vmath::vec2(band_max_x, band_max_y) - view_origin) * zoom_scale));
         draw_list->AddRectFilled(ImVec2(scr_min.x, scr_min.y),
                                  ImVec2(scr_max.x, scr_max.y),
                                  to_imgui(colors_.selection_band));
@@ -653,10 +819,14 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
         case Interaction::dragging_node: {
             if (! io.MouseDown[0]) {
                 // A press on the title without movement becomes a rename.
+                // node_state_edits_enabled stays off for projections that
+                // regenerate every title; a node the projection marks
+                // renamable owns its stored title and opts in per node.
                 const ImVec2 drag_delta = ImGui::GetMouseDragDelta(0);
                 const float  drag_sq    = drag_delta.x * drag_delta.x + drag_delta.y * drag_delta.y;
                 if (title_pressed && drag_sq <= click_max_distance * click_max_distance &&
-                    dragged_node != pool_no_slot) {
+                    dragged_node != pool_no_slot &&
+                    (node_state_edits_enabled || nodes.entries[dragged_node].renamable)) {
                     interaction    = Interaction::renaming;
                     renaming_node  = dragged_node;
                     renaming_focus = true;
@@ -699,7 +869,7 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
                 interaction = Interaction::idle;
                 break;
             }
-            view_origin = (view_origin - (vmath::vec2(io.MouseDelta.x, io.MouseDelta.y) / zoom));
+            view_origin = (view_origin - (vmath::vec2(io.MouseDelta.x, io.MouseDelta.y) / zoom_scale));
             break;
         }
         case Interaction::connecting: {
@@ -776,7 +946,7 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
                     continue;
                 }
                 const vmath::vec2 node_min = nodes.entries[i].position;
-                const vmath::vec2 node_max = (node_min + (content_sizes[i] * band_render_scale / zoom));
+                const vmath::vec2 node_max = (node_min + (content_sizes[i] * band_render_scale / zoom_scale));
                 if (node_min.x < band_max_x && node_max.x > band_min_x && node_min.y < band_max_y &&
                     node_max.y > band_min_y) {
                     set_selected(i, true);
@@ -920,6 +1090,9 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
     // Restore the window cursor past the widget so caller code after
     // render() (labels, event readouts) does not draw inside the graph.
     ImGui::SetCursorScreenPos(ImVec2(origin.x, origin.y + widget_size.y));
+    // Validate the extended extent: when the window scrolls, this position
+    // is outside the visible region and no caller item may follow it.
+    ImGui::Dummy(ImVec2(0.0f, 0.0f));
 
     (void)user_data;
 }

@@ -11,6 +11,8 @@
 
 namespace Sculptor {
 
+struct UndoGroupTag;
+
 class SynthEditor : public Editor {
 public:
     SynthEditor();
@@ -32,13 +34,20 @@ private:
 
     void rederive_zone_selection(uint32_t channel);
     void rederive_all_selections();
-    bool commit_candidate(const Synth::InstrumentEditorBank& candidate);
+    bool commit_candidate(const Synth::InstrumentEditorBank& candidate, Sculptor::UndoGroupTag tag);
     void do_initialize(uint32_t channel);
     void do_delete(uint32_t channel);
     void do_zone_join_previous(uint32_t channel, uint32_t note);
     void do_zone_join_next(uint32_t channel, uint32_t note);
     void do_zone_split_new(uint32_t channel, uint32_t note);
     void do_zone_delete(uint32_t channel, uint32_t entry);
+    void gui_osc_graph(uint32_t channel);
+    void drain_osc_graph(uint32_t channel, uint32_t zone);
+    void run_osc_canvas_command();
+    void do_osc_add_oscillator();
+    void do_osc_add_generator(bool is_env);
+    void do_osc_add_parameter();
+    void do_osc_change_target_param(uint32_t node_idx, uint32_t new_target);
     void release_held_audition();
 
     void gui_channel_list();

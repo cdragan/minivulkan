@@ -3,8 +3,10 @@
 
 #include "sculptor_instr_edit.h"
 #include "sculptor_bank_json.h"
+#include "sculptor_graph.h"
 #include "sculptor_instr_bank.h"
 #include "sculptor_notifications.h"
+#include "sculptor_osc_graph.h"
 
 #include "../synth/midi_input.h"
 #include "../synth/realtime_synth.h"
@@ -46,6 +48,373 @@ Synth::BankUpdateQueue bank_queue;
 bool                  bank_changes_pending = false;
 Synth::InstrumentBank pending_bank;
 
+// The oscillator graph editor: one widget instance plus its mapping, kept in
+// step with the committed bank by re-projection (selection change, undo/redo,
+// load, zone operations, structural or refused commits) and by per-frame
+// change application (drain -> apply -> single commit -> publish).
+Sculptor::Graph           osc_graph;
+Sculptor::OscGraphMapping osc_mapping;
+Sculptor::UndoGroupState  osc_undo_group         = {};
+uint32_t                  osc_graph_zone_channel = 0;
+uint32_t                  osc_graph_zone_index   = 0;
+bool                      osc_graph_projected    = false; // mapping matches the selection
+bool                      osc_graph_reproject    = false; // deferred wholesale rebuild
+
+// Canvas popup commands are only queued during render; the add commands run
+// afterwards against the committed bank.
+enum OscCanvasCommand {
+    osc_cmd_none,
+    osc_cmd_add_oscillator,
+    osc_cmd_add_envelope,
+    osc_cmd_add_lfo,
+    osc_cmd_add_parameter,
+    osc_cmd_change_target_param
+};
+OscCanvasCommand osc_canvas_command         = osc_cmd_none;
+uint32_t         osc_canvas_retarget_node   = Sculptor::pool_no_slot; // pending osc_cmd_change_target_param
+uint32_t         osc_canvas_retarget_target = 0;                      // pending osc_cmd_change_target_param
+
+// Undo tags: every commit kind has its own tag so one edit never coalesces
+// into another's undo entry.  Drained batches use graph_base + change kind,
+// layout-only commits use graph_base with the moved node, and batches with
+// no single-field identity (two different change kinds in one frame, or a
+// multi-node layout gesture) take a fresh unique tag so they never amend a
+// batch-shaped or node-shaped entry.
+constexpr uint32_t osc_tag_graph_base          = 16;
+constexpr uint32_t osc_tag_init                = 1;
+constexpr uint32_t osc_tag_delete              = 2;
+constexpr uint32_t osc_tag_join_prev           = 3;
+constexpr uint32_t osc_tag_join_next           = 4;
+constexpr uint32_t osc_tag_zone_split          = 5;
+constexpr uint32_t osc_tag_zone_drop           = 6;
+constexpr uint32_t osc_tag_rename              = 7;
+constexpr uint32_t osc_tag_load                = 8;
+constexpr uint32_t osc_tag_add_osc             = 9;
+constexpr uint32_t osc_tag_add_env             = 10;
+constexpr uint32_t osc_tag_add_lfo             = 11;
+constexpr uint32_t osc_tag_add_param           = 12;
+constexpr uint32_t osc_tag_change_target_param = 13;
+constexpr uint32_t osc_tag_fresh               = osc_tag_graph_base + 12; // outside every batch kind
+uint32_t           osc_fresh_tag_serial        = 0;                       // keeps consecutive fresh tags distinct
+
+void init_osc_graph_widget();
+
+// The delete veto needs the graph to report a specific refusal, so the
+// mapping rides with a pointer to the widget instance it describes.
+struct OscDeleteVetoContext {
+    const Sculptor::OscGraphMapping* mapping;
+    Sculptor::Graph*                 graph;
+};
+OscDeleteVetoContext osc_veto_context = { &osc_mapping, &osc_graph };
+
+// Fixed nodes are structural: the MIDI input nodes and the oscillator sum
+// node cannot be deleted.  Oscillator layer nodes remove their layer and
+// generator nodes are freely deletable, so neither is vetoed - except the
+// last remaining oscillator layer: an instrument needs one layer, and a
+// commit-time refusal would delete the node for one frame and resurrect it.
+bool osc_node_delete_veto(void* user_data, uint32_t node_idx)
+{
+    OscDeleteVetoContext* context = static_cast<OscDeleteVetoContext*>(user_data);
+    // The context is the file-static initializer above: both pointers are
+    // set once and never cleared, and delete_node vetoes only occupied
+    // nodes, so there is nothing to null-check here.
+    const Sculptor::OscGraphMapping* mapping = context->mapping;
+    if (mapping->input_node == node_idx) {
+        return true;
+    }
+    if (mapping->output_node == node_idx) {
+        return true;
+    }
+    if (mapping->osc_nodes[0] == node_idx && mapping->osc_nodes[1] == Sculptor::pool_no_slot) {
+        context->graph->set_error("The last oscillator layer cannot be deleted");
+        return true;
+    }
+    return false;
+}
+
+// The canvas menu is fully caller-provided; these items cover every node
+// kind the graph can express.
+void osc_canvas_menu(void* user_data)
+{
+    (void)user_data;
+    if (ImGui::MenuItem("Add Oscillator")) {
+        osc_canvas_command = osc_cmd_add_oscillator;
+    }
+    if (ImGui::MenuItem("Add Envelope")) {
+        osc_canvas_command = osc_cmd_add_envelope;
+    }
+    if (ImGui::MenuItem("Add LFO")) {
+        osc_canvas_command = osc_cmd_add_lfo;
+    }
+    if (ImGui::MenuItem("Add Parameter")) {
+        osc_canvas_command = osc_cmd_add_parameter;
+    }
+}
+
+// Node context menu: a parameter node gains a Change Target submenu of the
+// five connectable targets (the target re-key; free-text renaming lives in
+// the title editor).  A derived parameter (uid == 0) cannot change target: the
+// generator bindings would re-derive the old parameter.
+bool osc_node_menu(void* user_data, uint32_t node_idx)
+{
+    (void)user_data;
+    if (node_idx >= Sculptor::max_nodes || ! osc_graph.node_occupied(node_idx)) {
+        return false;
+    }
+    for (uint32_t p = 0; p < osc_mapping.param_count; ++p) {
+        if (osc_mapping.params[p].node_idx != node_idx) {
+            continue;
+        }
+        const Sculptor::ParamEntry& param = osc_mapping.params[p];
+        ImGui::BeginDisabled(param.uid == 0);
+        if (ImGui::BeginMenu("Change Target")) {
+            for (uint32_t target = 0; target < 5; ++target) {
+                if (ImGui::MenuItem(Sculptor::param_target_names[target], nullptr, false, target != param.target)) {
+                    osc_canvas_retarget_node   = node_idx;
+                    osc_canvas_retarget_target = target;
+                    osc_canvas_command         = osc_cmd_change_target_param;
+                }
+            }
+            ImGui::EndMenu();
+        }
+        ImGui::EndDisabled();
+        return true;
+    }
+    return false;
+}
+
+// Layout of every node as the projection built it: a node whose live layout
+// still matches needs no kind-0 record, so records stay sparse.
+vmath::vec2 osc_projected_position[Sculptor::max_nodes];
+float       osc_projected_width[Sculptor::max_nodes];
+float       osc_projected_height[Sculptor::max_nodes];
+
+// Whether an occupied node's live layout still matches the projected
+// snapshot: a node the user has not touched needs no kind-0 record.
+bool osc_node_layout_moved(uint32_t node)
+{
+    const Sculptor::Node& node_ref = osc_graph.node(node);
+    return node_ref.position.x != osc_projected_position[node].x ||
+           node_ref.position.y != osc_projected_position[node].y ||
+           node_ref.content_width_override != osc_projected_width[node] ||
+           node_ref.content_height_override != osc_projected_height[node];
+}
+
+// Re-bases one node's snapshot on its live layout, after a commit or a
+// re-projection.
+void osc_snapshot_node_layout(uint32_t node)
+{
+    const Sculptor::Node& node_ref = osc_graph.node(node);
+    osc_projected_position[node]   = node_ref.position;
+    osc_projected_width[node]      = node_ref.content_width_override;
+    osc_projected_height[node]     = node_ref.content_height_override;
+}
+
+// Rebuilds the graph for one zone from the committed bank and drains the
+// projection's own construction traffic, so projection events never echo
+// into commits.  Also clears the undo group tag: a re-projected graph starts
+// a new edit context.
+void reproject_osc_graph(uint32_t channel, uint32_t zone)
+{
+    osc_graph_zone_channel = channel;
+    osc_graph_zone_index   = zone;
+    osc_graph_projected    = Sculptor::project_editor_to_graph(instr_bank, &osc_graph, &osc_mapping, channel, zone);
+    if (osc_graph_projected) {
+        for (uint32_t node = 0; node < Sculptor::max_nodes; ++node) {
+            if (osc_graph.node_occupied(node)) {
+                osc_snapshot_node_layout(node);
+            }
+        }
+    }
+    // Drain until the ring is empty: a projection can queue more events
+    // than one batch holds, and leftovers would leak into the next frame's
+    // apply batch.  The buffer is sized to the ring so one pass always drains.
+    Sculptor::GraphChange discard[Sculptor::max_pending_changes];
+    while (osc_graph.take_changes(discard, Sculptor::max_pending_changes) != 0) {
+    }
+    (void)osc_graph.changes_overflowed();
+    Sculptor::undo_group_reset(&osc_undo_group);
+}
+
+void init_osc_graph_widget()
+{
+    static bool inited = false;
+    if (inited) {
+        return;
+    }
+    inited = true;
+    osc_graph.set_colors(Sculptor::default_graph_colors());
+    osc_graph.set_validator(&Sculptor::osc_graph_validate, &osc_mapping);
+    osc_graph.set_delete_veto(&osc_node_delete_veto, &osc_veto_context);
+    osc_graph.set_canvas_menu_callback(&osc_canvas_menu, nullptr);
+    osc_graph.set_node_menu_callback(&osc_node_menu, nullptr);
+    // The apply path drops color/ghost events (projection state), so the
+    // widget must not offer those edits.  Titles regenerate on re-projection
+    // for every node except parameters (their record stores the name), so
+    // the projection opts parameter nodes into the title editor one by one
+    // through the per-node renamable flag.
+    osc_graph.node_state_edits_enabled = false;
+}
+
+// Lowest live node whose layout no longer matches what the projection
+// built, with the number of moved nodes; pool_no_slot when the layout is
+// unchanged.  One moved node tags per node, so moving node A then node B
+// stays two undo entries while one drag gesture coalesces through the
+// unchanged tag; a multi-node drag takes a fresh unique tag, so a later
+// single-node move of the lowest node cannot amend the multi-node entry.
+uint32_t osc_moved_node(uint32_t* moved_count)
+{
+    *moved_count    = 0;
+    uint32_t lowest = Sculptor::pool_no_slot;
+    for (uint32_t node = 0; node < Sculptor::max_nodes; ++node) {
+        if (! osc_graph.node_occupied(node) || ! osc_node_layout_moved(node)) {
+            continue;
+        }
+        ++*moved_count;
+        if (lowest == Sculptor::pool_no_slot) {
+            lowest = node;
+        }
+    }
+    return lowest;
+}
+
+// Re-bases the projected-layout snapshot on the live graph after a commit, so
+// an unchanged layout never commits twice.
+void refresh_osc_projected_layout()
+{
+    for (uint32_t node = 0; node < Sculptor::max_nodes; ++node) {
+        if (osc_graph.node_occupied(node)) {
+            osc_snapshot_node_layout(node);
+        }
+    }
+}
+
+// Moves one existing layout record onto a node's live position.
+void write_record_position(Synth::InstrumentEditorBank* bank, int32_t record_idx, const Sculptor::Node& node_ref)
+{
+    Synth::GraphNodeLayout& record = bank->graph_layout[record_idx];
+    record.x                       = node_ref.position.x;
+    record.y                       = node_ref.position.y;
+    record.width_override          = node_ref.content_width_override;
+    record.height_override         = node_ref.content_height_override;
+}
+
+// Writes every mapped node's current layout into the bank's records: bound
+// nodes key kind-0 records by canonical index, detached nodes update their
+// own record in place.  A node still at its projected layout writes nothing,
+// so records stay sparse.  Returns false when a moved node would need a new
+// record but the global record list is full.
+bool sync_osc_graph_layout(Synth::InstrumentEditorBank* bank)
+{
+    const uint32_t channel = osc_graph_zone_channel;
+    const uint32_t zone    = osc_graph_zone_index;
+    for (uint32_t node = 0; node < Sculptor::max_nodes; ++node) {
+        if (! osc_graph.node_occupied(node)) {
+            continue;
+        }
+        const Sculptor::Node& node_ref = osc_graph.node(node);
+        const bool            moved    = osc_node_layout_moved(node);
+        if (! moved) {
+            continue;
+        }
+        const uint32_t canonical = Sculptor::osc_graph_canonical_index(osc_mapping, node);
+        if (canonical != Sculptor::pool_no_slot) {
+            const int32_t record_idx = Sculptor::find_record(*bank, channel, zone, 0, canonical, 0);
+            if (record_idx >= 0) {
+                write_record_position(bank, record_idx, node_ref);
+                continue;
+            }
+            if (! Sculptor::graph_records_have_capacity(*bank, 1)) {
+                return false;
+            }
+            Synth::GraphNodeLayout record                  = {};
+            record.channel                                 = static_cast<uint8_t>(channel);
+            record.zone                                    = static_cast<uint8_t>(zone);
+            record.kind                                    = 0;
+            record.index                                   = static_cast<uint8_t>(canonical);
+            record.x                                       = node_ref.position.x;
+            record.y                                       = node_ref.position.y;
+            record.width_override                          = node_ref.content_width_override;
+            record.height_override                         = node_ref.content_height_override;
+            bank->graph_layout[bank->graph_layout_count++] = record;
+            continue;
+        }
+        // Detached nodes carry their own record; its position follows the
+        // node so a re-projection keeps the move.  A record-less derived
+        // instance that the user moves gains its kind-1/2 record (fresh uid,
+        // live source wires) so the move survives re-projection too.
+        for (uint32_t i = 0; i < osc_mapping.detached_count; ++i) {
+            const Sculptor::DetachedNode& entry = osc_mapping.detached[i];
+            if (entry.node_idx != node) {
+                continue;
+            }
+            int32_t record_idx = Sculptor::find_record(*bank, channel, zone, entry.kind, entry.desc_id, entry.uid);
+            if (record_idx < 0) {
+                if (entry.uid != 0) {
+                    break; // record vanished under a live uid: nothing to update
+                }
+                if (! Sculptor::detach_osc_graph_instance(bank, osc_graph, &osc_mapping, channel, zone, i)) {
+                    return false;
+                }
+                break;
+            }
+            write_record_position(bank, record_idx, node_ref);
+            break;
+        }
+
+        // Parameter nodes carry their own kind-3 record; a record-less
+        // (derived) parameter that the user moves gains one - seeded from
+        // its live wiring, like a detach - so the move survives
+        // re-projection.  Refused while an earlier-enumerated same-target
+        // derived parameter is still record-less: the new record would
+        // attach to that sibling positionally at re-projection and hijack
+        // its node, so the node keeps no record and the move stays
+        // session-only.
+        for (uint32_t i = 0; i < osc_mapping.param_count; ++i) {
+            const Sculptor::ParamEntry& param = osc_mapping.params[i];
+            if (param.node_idx != node) {
+                continue;
+            }
+            int32_t record_idx = Sculptor::find_record(*bank, channel, zone, 3, param.target, param.uid);
+            if (record_idx < 0 && ! Sculptor::param_has_recordless_predecessor(osc_mapping, i)) {
+                if (! Sculptor::graph_records_have_capacity(*bank, 1)) {
+                    return false;
+                }
+                Synth::GraphNodeLayout record = {};
+                record.channel                = static_cast<uint8_t>(channel);
+                record.zone                   = static_cast<uint8_t>(zone);
+                record.kind                   = 3;
+                record.index                  = param.target;
+                record.param_slot             = Sculptor::param_group_ordinal(osc_mapping, i);
+                if (! Sculptor::store_param_wiring(osc_graph, osc_mapping, param, &record)) {
+                    return false;
+                }
+                record.uid = Sculptor::allocate_detached_uid(*bank, channel, zone, 3);
+                bank->graph_layout[bank->graph_layout_count++] = record;
+                // Write the fresh uid back into the mapping so a later move
+                // updates this record instead of appending duplicates.
+                osc_mapping.params[i].uid = record.uid;
+                record_idx                = static_cast<int32_t>(bank->graph_layout_count - 1);
+                // The naive ordinal above can miscount dormant and merged
+                // siblings; the re-stamp inside the refresh replaces it with
+                // the derived truth before the record is ever read back.
+                Sculptor::refresh_osc_graph_compilation(bank, osc_graph, osc_mapping, channel, zone);
+                // The re-stamp's merge reconciliation can remove records,
+                // shifting graph_layout indices; re-derive this record's
+                // slot by key instead of trusting the pre-refresh index.
+                record_idx = Sculptor::find_record(*bank, channel, zone, 3, record.index, record.uid);
+            }
+            else if (record_idx < 0) {
+                Sculptor::notify_error("Synth: the earlier parameter of this target must be renamed first");
+            }
+            if (record_idx >= 0) {
+                write_record_position(bank, record_idx, node_ref);
+            }
+        }
+    }
+    return true;
+}
+
 void undo_init_once()
 {
     static bool inited = false;
@@ -78,7 +447,12 @@ bool publish_edited_bank()
         return false;
     }
 
-    pending_bank         = instr_bank.bank; // names are editor-only and never reach the audio thread
+    pending_bank = instr_bank.bank; // names are editor-only and never reach the audio thread
+    // A zone with a broken oscillator sum publishes its channel disabled so
+    // notes cannot trigger it; the stored channel_enabled values stay 1.
+    uint8_t publish_enabled[Synth::max_channels];
+    Sculptor::compute_publish_channel_enabled(instr_bank, publish_enabled);
+    memcpy(pending_bank.channel_enabled, publish_enabled, sizeof(publish_enabled));
     bank_changes_pending = true;
 
     const int save_error = Synth::save_editor_bank_file(bank_state_path, &instr_bank);
@@ -165,9 +539,9 @@ bool save_editor_bank(const char* path)
     return true;
 }
 
-// Loads a bank file into the editable bank. A decode is transactional (the decoder
+// Loads a bank file into the editable bank.  A decode is transactional (the decoder
 // stages and validates before committing), so a corrupt file never leaves the
-// editable bank half-replaced. A missing file is a fresh project at startup and
+// editable bank half-replaced.  A missing file is a fresh project at startup and
 // stays silent; an explicit user open of a missing file is a visible failure.
 bool load_editor_bank(const char* path, bool notify_absent)
 {
@@ -197,7 +571,8 @@ bool load_editor_bank(const char* path, bool notify_absent)
     }
 
     editor_snapshot();
-    instr_bank = scratch; // names ride in the bank file
+    instr_bank          = scratch; // names ride in the bank file
+    osc_graph_reproject = true;
     return publish_edited_bank();
 }
 
@@ -206,7 +581,7 @@ void init_editor()
     static_assert(std::is_trivially_copyable_v<Synth::InstrumentEditorBank>);
 
     // The player starts with an empty, silent bank; the editor restores the last
-    // session or builds the factory recipe for a fresh project and publishes it.
+    // session or builds the bare default bank for a fresh project and publishes it.
     Synth::set_bank_source_callback(&drain_bank_updates);
 
     if (load_editor_bank(bank_state_path, false))
@@ -380,14 +755,25 @@ void Sculptor::SynthEditor::rederive_all_selections()
         rederive_zone_selection(channel);
 }
 
-bool Sculptor::SynthEditor::commit_candidate(const Synth::InstrumentEditorBank& candidate_bank)
+// Commits a validated candidate over the editable bank.  The undo group tag
+// decides whether the commit opens a new undo entry or amends the state of
+// the previous same-tag commit; a refused commit remembers no tag, so the
+// next commit always snapshots.
+bool Sculptor::SynthEditor::commit_candidate(const Synth::InstrumentEditorBank& candidate_bank,
+                                             Sculptor::UndoGroupTag             tag)
 {
     if (! Synth::validate_instrument_bank(&candidate_bank.bank)) {
         Sculptor::notify_error("Synth: refusing to commit an invalid bank");
         return false;
     }
+    if (! Sculptor::validate_editor_metadata(candidate_bank)) {
+        Sculptor::notify_error("Synth: refusing to commit invalid graph state");
+        return false;
+    }
 
-    editor_snapshot();
+    if (Sculptor::undo_group_needs_snapshot(&osc_undo_group, tag)) {
+        editor_snapshot();
+    }
     instr_bank = candidate_bank;
 
     if (! publish_edited_bank())
@@ -409,11 +795,16 @@ void Sculptor::SynthEditor::do_initialize(uint32_t channel)
     }
 
     candidate.bank.channel_enabled[channel] = 1;
+    Synth::get_default_channel_name(channel, candidate.channel_names[channel], Synth::max_name_len);
     // The channel's old instruments are now unreferenced by its replacement zone table.
     Synth::reclaim_unused_slots(&candidate);
+    // The channel's graph state is replaced together with its zone tables.
+    Sculptor::channel_records_reset(&candidate, channel);
 
     selected_target = channel;
-    commit_candidate(candidate);
+    Sculptor::undo_group_reset(&osc_undo_group);
+    if (commit_candidate(candidate, Sculptor::UndoGroupTag{ osc_tag_init, channel, 0 }))
+        osc_graph_reproject = true;
 }
 
 void Sculptor::SynthEditor::do_delete(uint32_t channel)
@@ -426,9 +817,13 @@ void Sculptor::SynthEditor::do_delete(uint32_t channel)
     memset(&candidate.bank.channel_chains[channel], 0, sizeof(candidate.bank.channel_chains[channel]));
     // Instruments the channel's old zone table referenced are now unreferenced.
     Synth::reclaim_unused_slots(&candidate);
+    // The channel's graph state is replaced together with its zone tables.
+    Sculptor::channel_records_reset(&candidate, channel);
 
     selected_target = channel;
-    commit_candidate(candidate);
+    Sculptor::undo_group_reset(&osc_undo_group);
+    if (commit_candidate(candidate, Sculptor::UndoGroupTag{ osc_tag_delete, channel, 0 }))
+        osc_graph_reproject = true;
 }
 
 bool Sculptor::SynthEditor::create_gui_frame(uint32_t image_idx, bool* need_realloc, const UserInput& input)
@@ -441,7 +836,7 @@ bool Sculptor::SynthEditor::create_gui_frame(uint32_t image_idx, bool* need_real
 
     // A held audition note requires the left button to be down, so a release that
     // happened while this frame was not running (editor disabled, focus loss) is
-    // caught here too. Window close releases at its own site; menu opens release at
+    // caught here too.  Window close releases at its own site; menu opens release at
     // their OpenPopup sites.
     if (! ImGui::IsMouseDown(ImGuiMouseButton_Left))
         release_held_audition();
@@ -461,13 +856,17 @@ bool Sculptor::SynthEditor::create_gui_frame(uint32_t image_idx, bool* need_real
     const ImGuiIO& io = ImGui::GetIO();
     if (ImGui::IsWindowFocused() && ! io.WantTextInput) {
         if (is_ctrl_down() && ! is_shift_down() && ImGui::IsKeyPressed(ImGuiKey_Z)) {
-            if (editor_undo())
+            if (editor_undo()) {
+                osc_graph_reproject = true;
                 rederive_all_selections();
+            }
         }
         if (is_ctrl_down() && ((! is_shift_down() && ImGui::IsKeyPressed(ImGuiKey_Y)) ||
                                (is_shift_down() && ImGui::IsKeyPressed(ImGuiKey_Z)))) {
-            if (editor_redo())
+            if (editor_redo()) {
+                osc_graph_reproject = true;
                 rederive_all_selections();
+            }
         }
     }
 
@@ -605,7 +1004,7 @@ void Sculptor::SynthEditor::gui_channel_pane(uint32_t channel)
 
     ImGui::Separator();
 
-    // The Oscillators view keeps a bottom strip for the keyboard. Avail inside an
+    // The Oscillators view keeps a bottom strip for the keyboard.  Avail inside an
     // auto-height table cell is unbounded down to the window bottom, so subtract what
     // the layout adds below the placeholder: the cell padding under the row, plus the
     // item spacing before the keyboard child; otherwise the column overflows the
@@ -618,7 +1017,7 @@ void Sculptor::SynthEditor::gui_channel_pane(uint32_t channel)
     if (show_effects_mode)
         ImGui::TextDisabled("Effects editor is not available yet");
     else
-        ImGui::TextDisabled("Oscillators editor is not available yet");
+        gui_osc_graph(channel);
     ImGui::EndChild();
 
     // Audition is per-channel zone behavior, so the keyboard lives in the channel's
@@ -626,6 +1025,385 @@ void Sculptor::SynthEditor::gui_channel_pane(uint32_t channel)
     if (! show_effects_mode)
         gui_keyboard();
 }
+
+// The Oscillators pane: the zone's instrument as an editable node graph.  The
+// widget edits the graph; the committed bank is updated per frame from the
+// drained change events, and wholesale model changes re-project the graph.
+void Sculptor::SynthEditor::gui_osc_graph(uint32_t channel)
+{
+    init_osc_graph_widget();
+
+    const int32_t zone = selected_zone[channel];
+    if (osc_graph_reproject || ! osc_graph_projected || osc_graph_zone_channel != channel || zone < 0 ||
+        osc_graph_zone_index != static_cast<uint32_t>(zone)) {
+        osc_graph_reproject = false;
+        if (zone >= 0) {
+            reproject_osc_graph(channel, static_cast<uint32_t>(zone));
+        }
+        else {
+            osc_graph_zone_channel = channel;
+            osc_graph_projected    = false;
+        }
+    }
+
+    if (! osc_graph_projected || zone < 0) {
+        ImGui::TextDisabled("Oscillators editor is not available for this zone");
+        return;
+    }
+
+    osc_graph.render(ImGui::GetContentRegionAvail(), nullptr);
+    drain_osc_graph(channel, static_cast<uint32_t>(zone));
+    run_osc_canvas_command();
+}
+
+void Sculptor::SynthEditor::drain_osc_graph(uint32_t channel, uint32_t zone)
+{
+    // One frame's events always fit one batch: a smaller buffer would split
+    // a frame's events across frames, breaking the apply/commit semantics
+    // that assume a whole batch belongs to one user gesture.
+    Sculptor::GraphChange changes[Sculptor::max_pending_changes];
+    const uint32_t        count = osc_graph.take_changes(changes, Sculptor::max_pending_changes);
+    if (osc_graph.changes_overflowed()) {
+        // The ring overflowed, so the batch is incomplete: resynchronize from
+        // the committed bank instead of applying a partial batch.
+        reproject_osc_graph(channel, zone);
+        return;
+    }
+    if (count == 0) {
+        // Node moves and resizes push no change events; they persist as their
+        // own commit, tagged per node so one drag gesture stays one undo
+        // entry.  The commit waits for the button to come up: committing per
+        // frame during a drag would run the full publish path, including the
+        // bank-file write, on every gesture frame.
+        uint32_t       moved_count = 0;
+        const uint32_t moved_node  = osc_moved_node(&moved_count);
+        if (moved_node == Sculptor::pool_no_slot || ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+            return;
+        }
+        candidate                      = instr_bank;
+        const uint32_t layout_tag_kind = moved_count > 1 ? osc_tag_fresh : osc_tag_graph_base;
+        const uint32_t layout_tag_id0  = moved_count > 1 ? ++osc_fresh_tag_serial : moved_node;
+        if (sync_osc_graph_layout(&candidate) &&
+            commit_candidate(candidate, Sculptor::UndoGroupTag{ layout_tag_kind, layout_tag_id0, 0 })) {
+            refresh_osc_projected_layout();
+        }
+        else {
+            Sculptor::notify_error("Synth: oscillator edit refused");
+            reproject_osc_graph(channel, zone);
+        }
+        return;
+    }
+
+    candidate       = instr_bank;
+    bool ok         = true;
+    bool structural = false;
+    for (uint32_t i = 0; i < count && ok; ++i) {
+        const Sculptor::GraphChange& change = changes[i];
+        structural                          = structural || change.kind != Sculptor::ChangeKind::value_changed;
+        ok = Sculptor::apply_osc_graph_change(&candidate, &osc_graph, &osc_mapping, change, channel, zone);
+    }
+    if (ok) {
+        ok = sync_osc_graph_layout(&candidate);
+    }
+    // One tag for the whole batch when every change edits the same field; a
+    // mixed batch gets a fresh unique tag instead, so it can never amend an
+    // entry tagged with one change's field identity.
+    const Sculptor::GraphChange& first = changes[0];
+    const uint32_t first_id0 = first.node_idx != Sculptor::pool_no_slot ? first.node_idx : first.connection_idx;
+    bool           mixed     = false;
+    for (uint32_t i = 1; i < count; ++i) {
+        const Sculptor::GraphChange& other = changes[i];
+        const uint32_t other_id0 = other.node_idx != Sculptor::pool_no_slot ? other.node_idx : other.connection_idx;
+        if (other.kind != first.kind || other_id0 != first_id0 || other.slot_idx != first.slot_idx) {
+            mixed = true;
+            break;
+        }
+    }
+    const Sculptor::UndoGroupTag tag =
+        mixed
+            ? Sculptor::UndoGroupTag{ osc_tag_fresh, ++osc_fresh_tag_serial, 0 }
+            : Sculptor::UndoGroupTag{ osc_tag_graph_base + static_cast<uint32_t>(first.kind),
+                                      first.node_idx != Sculptor::pool_no_slot ? first.node_idx : first.connection_idx,
+                                      first.slot_idx };
+    if (! ok || ! commit_candidate(candidate, tag)) {
+        // Refused batch: graph and model resynchronize from the last committed
+        // bank, and the refused edit does not coalesce into the next one.
+        Sculptor::notify_error("Synth: oscillator edit refused");
+        reproject_osc_graph(channel, zone);
+        return;
+    }
+    refresh_osc_projected_layout();
+    if (structural) {
+        // Structural applies (layer removal, binding rewiring) rebuild the
+        // whole mapping from the committed bank before more edits arrive.
+        osc_graph_reproject = true;
+    }
+}
+
+void Sculptor::SynthEditor::run_osc_canvas_command()
+{
+    const OscCanvasCommand command = osc_canvas_command;
+    osc_canvas_command             = osc_cmd_none;
+    switch (command) {
+        case osc_cmd_add_oscillator:
+            do_osc_add_oscillator();
+            break;
+        case osc_cmd_add_envelope:
+            do_osc_add_generator(true);
+            break;
+        case osc_cmd_add_lfo:
+            do_osc_add_generator(false);
+            break;
+        case osc_cmd_add_parameter:
+            do_osc_add_parameter();
+            break;
+        case osc_cmd_change_target_param:
+            do_osc_change_target_param(osc_canvas_retarget_node, osc_canvas_retarget_target);
+            break;
+        case osc_cmd_none:
+            break;
+    }
+}
+
+// Canvas menu "Add Oscillator": one more oscillator layer at the menu
+// position, with the model's fresh-Oscillator defaults.  Node capacity is
+// checked against the actual projected node count: a full node pool refuses
+// even below the seven-layer limit.
+void Sculptor::SynthEditor::do_osc_add_oscillator()
+{
+    const uint32_t channel        = osc_graph_zone_channel;
+    const uint32_t zone           = osc_graph_zone_index;
+    candidate                     = instr_bank;
+    const Synth::Zone& zone_entry = candidate.bank.channel_zones[channel][zone];
+    if (zone_entry.start_note == 0 || zone_entry.instrument >= candidate.bank.instruments.num_allocated) {
+        return;
+    }
+    Synth::Instrument& instrument = candidate.bank.instruments.entries[zone_entry.instrument];
+    if (instrument.layer_count >= Synth::max_layers) {
+        Sculptor::notify_error("Synth: cannot add an oscillator: all seven layers exist");
+        return;
+    }
+    if (Sculptor::count_projected_nodes(candidate, channel, zone) + 1 > Sculptor::max_nodes) {
+        Sculptor::notify_error("Synth: cannot add an oscillator: the graph is full");
+        return;
+    }
+    if (! Sculptor::graph_records_have_capacity(candidate, 1)) {
+        Sculptor::notify_error("Synth: cannot add an oscillator: the graph state is full");
+        return;
+    }
+
+    const uint32_t new_layer     = instrument.layer_count;
+    instrument.layers[new_layer] = Synth::Oscillator{};
+    // Waveform A cannot be off, so a fresh layer starts on sine.
+    instrument.layers[new_layer].osc_type[0] = Synth::WaveType::sine_wave;
+    instrument.layer_count                   = static_cast<uint8_t>(new_layer + 1);
+
+    // The new layer's node lands at the menu position via its layout record.
+    Synth::GraphNodeLayout record = {};
+    record.channel                = static_cast<uint8_t>(channel);
+    record.zone                   = static_cast<uint8_t>(zone);
+    record.kind                   = 0;
+    record.index                  = static_cast<uint8_t>(Synth::graph_canonical_first_osc + new_layer);
+    const vmath::vec2 popup_pos   = osc_graph.canvas_popup_pos();
+    record.x                      = popup_pos.x;
+    record.y                      = popup_pos.y;
+    candidate.graph_layout[candidate.graph_layout_count++] = record;
+
+    Sculptor::undo_group_reset(&osc_undo_group);
+    if (commit_candidate(candidate, Sculptor::UndoGroupTag{ osc_tag_add_osc, channel, zone }))
+        osc_graph_reproject = true;
+}
+
+// Canvas menu "Add Envelope"/"Add LFO": a fresh descriptor plus a detached
+// node record at the menu position; the re-projection builds the node.
+void Sculptor::SynthEditor::do_osc_add_generator(bool is_env)
+{
+    const uint32_t channel = osc_graph_zone_channel;
+    const uint32_t zone    = osc_graph_zone_index;
+    candidate              = instr_bank;
+
+    // Preflight before any mutation: descriptor pool, node pool, record list
+    // and the per-zone detached cap.
+    if (is_env ? candidate.bank.envelopes.num_allocated >= Synth::max_envelopes
+               : candidate.bank.lfos.num_allocated >= Synth::max_lfos) {
+        Sculptor::notify_error("Synth: cannot add: the descriptor pool is full");
+        return;
+    }
+    if (Sculptor::count_projected_nodes(candidate, channel, zone) + 1 > Sculptor::max_nodes) {
+        Sculptor::notify_error("Synth: cannot add: the graph is full");
+        return;
+    }
+    if (Sculptor::count_detached_records(candidate, channel, zone) >= Sculptor::max_detached_nodes ||
+        ! Sculptor::graph_records_have_capacity(candidate, 1)) {
+        Sculptor::notify_error("Synth: cannot add: the graph state is full");
+        return;
+    }
+
+    Synth::GraphNodeLayout record = {};
+    record.channel                = static_cast<uint8_t>(channel);
+    record.zone                   = static_cast<uint8_t>(zone);
+    record.kind                   = is_env ? 1 : 2;
+    const vmath::vec2 popup_pos   = osc_graph.canvas_popup_pos();
+    record.x                      = popup_pos.x;
+    record.y                      = popup_pos.y;
+    if (is_env) {
+        const uint32_t slot = candidate.bank.envelopes.allocate();
+        // The default must satisfy bank validation: an attack from min to
+        // max in about 30 ms (positions are control ticks, 256/44100 s
+        // each) with sustain at the peak and a ~0.5 s release tail to neutral (0x8000), spanning -1..+1.  The delta is
+        // in per-65535 point units: 0xFFFF scales to min_value + min_max_delta.
+        Synth::EnvelopeDescriptor& env = candidate.bank.envelopes.entries[slot];
+        env                            = Synth::EnvelopeDescriptor{};
+        env.num_points                 = 3;
+        env.sustain_first_point        = 1;
+        env.sustain_last_point         = 1;
+        env.min_value                  = -1.0f;
+        env.min_max_delta              = 2.0f / 65535.0f;
+        env.points[0].position         = 0;
+        env.points[0].value            = 0x0000;
+        env.points[1].position         = 5;
+        env.points[1].value            = 0xFFFF;
+        env.points[2].position         = 91;
+        env.points[2].value            = 0x8000;
+        record.index                   = static_cast<uint8_t>(slot + 1);
+    }
+    else {
+        const uint32_t        slot = candidate.bank.lfos.allocate();
+        Synth::LFODescriptor& lfo  = candidate.bank.lfos.entries[slot];
+        lfo                        = Synth::LFODescriptor{};
+        lfo.wave                   = Synth::WaveType::sine_wave;
+        lfo.period_ms              = 300; // a zero period would not oscillate
+        lfo.min_value              = -1.0f;
+        lfo.min_max_delta          = 2.0f;
+        record.index               = static_cast<uint8_t>(slot + 1);
+    }
+    record.uid = Sculptor::allocate_detached_uid(candidate, channel, zone, record.kind);
+    candidate.graph_layout[candidate.graph_layout_count++] = record;
+
+    Sculptor::undo_group_reset(&osc_undo_group);
+    if (commit_candidate(candidate,
+                         Sculptor::UndoGroupTag{ is_env ? osc_tag_add_env : osc_tag_add_lfo, channel, zone }))
+        osc_graph_reproject = true;
+}
+// Canvas menu "Add Parameter": a free-standing Volume parameter node at
+// the menu position, via a kind-3 record; the re-projection builds the node.
+void Sculptor::SynthEditor::do_osc_add_parameter()
+{
+    const uint32_t channel        = osc_graph_zone_channel;
+    const uint32_t zone           = osc_graph_zone_index;
+    candidate                     = instr_bank;
+    const Synth::Zone& zone_entry = candidate.bank.channel_zones[channel][zone];
+    if (zone_entry.start_note == 0 || zone_entry.instrument >= candidate.bank.instruments.num_allocated) {
+        return;
+    }
+    // The live mapping mirrors the committed bank, and the new record is
+    // free-standing, so the projection adds at most one parameter node.
+    char add_error[128];
+    if (osc_graph_projected && Sculptor::osc_add_parameter_refused(osc_mapping, 0, add_error, sizeof(add_error))) {
+        Sculptor::notify_error("%s", add_error);
+        return;
+    }
+
+    // Same preflights as Add Envelope/LFO, minus the descriptor pool:
+    // node pool, record list and the per-zone detached cap.
+    if (Sculptor::count_projected_nodes(candidate, channel, zone) + 1 > Sculptor::max_nodes) {
+        Sculptor::notify_error("Synth: cannot add a parameter: the graph is full");
+        return;
+    }
+    if (Sculptor::count_detached_records(candidate, channel, zone) >= Sculptor::max_detached_nodes ||
+        ! Sculptor::graph_records_have_capacity(candidate, 1)) {
+        Sculptor::notify_error("Synth: cannot add a parameter: the graph state is full");
+        return;
+    }
+    Synth::GraphNodeLayout record = {};
+    record.channel                = static_cast<uint8_t>(channel);
+    record.zone                   = static_cast<uint8_t>(zone);
+    record.kind                   = 3;
+    record.index                  = 0; // volume, projection order
+    record.param_slot             = Synth::graph_record_param_free;
+    const vmath::vec2 popup_pos   = osc_graph.canvas_popup_pos();
+    record.x                      = popup_pos.x;
+    record.y                      = popup_pos.y;
+    record.uid                    = Sculptor::allocate_detached_uid(candidate, channel, zone, 3);
+    snprintf(record.name, sizeof(record.name), "Parameter %u", record.uid);
+    candidate.graph_layout[candidate.graph_layout_count++] = record;
+    Sculptor::undo_group_reset(&osc_undo_group);
+    if (commit_candidate(candidate, Sculptor::UndoGroupTag{ osc_tag_add_param, channel, zone })) {
+        osc_graph_reproject = true;
+    }
+}
+
+// Node menu "Change Target": retargets the parameter - the kind-3 record
+// re-keys, the value wires shift onto the new target's oscillator rows, and
+// the source rows adopt the destination's routing. The rewrite is eventless,
+// so the bindings and the compiled instrument refresh before the commit.
+// Names are user-owned: the node keeps its title across the retarget.
+void Sculptor::SynthEditor::do_osc_change_target_param(uint32_t node_idx, uint32_t new_target)
+{
+    if (! osc_graph_projected || node_idx >= Sculptor::max_nodes || ! osc_graph.node_occupied(node_idx)) {
+        return;
+    }
+    const uint32_t     channel    = osc_graph_zone_channel;
+    const uint32_t     zone       = osc_graph_zone_index;
+    const Synth::Zone& zone_entry = instr_bank.bank.channel_zones[channel][zone];
+    if (zone_entry.start_note == 0 || zone_entry.instrument >= instr_bank.bank.instruments.num_allocated) {
+        return;
+    }
+    const int32_t found = Sculptor::find_param(osc_mapping, node_idx);
+    if (found < 0) {
+        return;
+    }
+    Sculptor::ParamEntry& param = osc_mapping.params[found];
+    if (param.uid == 0) {
+        // A derived parameter cannot change target: the generator bindings
+        // would re-derive the old parameter on the next projection.
+        Sculptor::notify_error("Synth: a derived parameter cannot change target");
+        return;
+    }
+    if (new_target >= 5) {
+        Sculptor::notify_error("Synth: invalid parameter target");
+        return;
+    }
+    if (new_target == param.target) {
+        Sculptor::notify_error("Synth: the parameter already has that target");
+        return;
+    }
+    if (Sculptor::param_target_has_recordless_derived(osc_mapping, new_target)) {
+        // A record re-keyed into the target would attach to its derived
+        // parameter positionally at re-projection and hijack that sibling.
+        Sculptor::notify_error("Synth: cannot change target: it has a derived parameter - rename that one first");
+        return;
+    }
+    candidate = instr_bank;
+    if (! Sculptor::retarget_param(&candidate,
+                                   osc_graph,
+                                   osc_mapping,
+                                   channel,
+                                   zone,
+                                   static_cast<uint32_t>(found),
+                                   new_target)) {
+        Sculptor::notify_error("Synth: cannot change target: the graph state is full");
+        return;
+    }
+    // The wire rewrite is eventless, so no drained batch will compile the
+    // moved routing: refresh the bindings and the compiled instrument here,
+    // before the commit.
+    if (! Sculptor::refresh_osc_graph_compilation(&candidate, osc_graph, osc_mapping, channel, zone)) {
+        Sculptor::notify_error("Synth: oscillator edit refused");
+        reproject_osc_graph(channel, zone);
+        return;
+    }
+    Sculptor::undo_group_reset(&osc_undo_group);
+    if (! commit_candidate(candidate, Sculptor::UndoGroupTag{ osc_tag_change_target_param, node_idx, 0 })) {
+        // Refused commit: the flipped mapping target and the retargeted node must
+        // not linger in the graph; re-derive it from the committed bank (the
+        // same recovery the refusal paths in drain_osc_graph use).
+        reproject_osc_graph(channel, zone);
+        return;
+    }
+    osc_graph_reproject = true;
+}
+
 void Sculptor::SynthEditor::gui_keyboard()
 {
     // Zero window padding so the 72px child holds exactly the 8px report margin and the
@@ -784,15 +1562,19 @@ void Sculptor::SynthEditor::do_zone_delete(uint32_t channel, uint32_t entry)
         if (num_zones == 1)
             return;              // the channel keeps at least one playable zone
         zones[1].start_note = 1; // the next zone takes over from note 0
-        entry               = 1;
+        entry               = 0; // the promoted zone slides into the freed slot
     }
     // Boundaries are stored as zone starts, so dropping the entry extends the
     // previous zone over the deleted range.
     for (uint32_t zone = entry; zone + 1 < Synth::max_instr_per_channel; zone++)
         zones[zone] = zones[zone + 1];
     memset(&zones[Synth::max_instr_per_channel - 1], 0, sizeof(zones[0]));
+    // The dropped entry's records and mask row move with the zone table.
+    Sculptor::zone_records_drop_zone(&candidate, channel, entry);
     Synth::reclaim_unused_slots(&candidate);
-    commit_candidate(candidate);
+    Sculptor::undo_group_reset(&osc_undo_group);
+    if (commit_candidate(candidate, Sculptor::UndoGroupTag{ osc_tag_zone_drop, channel, entry }))
+        osc_graph_reproject = true;
 }
 
 void Sculptor::SynthEditor::gui_zone_menu()
@@ -851,10 +1633,17 @@ void Sculptor::SynthEditor::do_zone_join_previous(uint32_t channel, uint32_t not
     if (! Synth::zone_join_previous(candidate.bank.channel_zones[channel], static_cast<uint32_t>(entry), note))
         return;
 
+    // The dropped entry (when the joined zone became empty) shifts later zones
+    // down, so its records and mask row move with the zone table.
+    if (zone_count(candidate.bank, channel) < zone_count(instr_bank.bank, channel))
+        Sculptor::zone_records_drop_zone(&candidate, channel, static_cast<uint32_t>(entry));
+
     // The zone may have been dropped and its instrument orphaned.
     Synth::reclaim_unused_slots(&candidate);
     last_audition_note[channel] = static_cast<uint8_t>(note);
-    commit_candidate(candidate);
+    Sculptor::undo_group_reset(&osc_undo_group);
+    if (commit_candidate(candidate, Sculptor::UndoGroupTag{ osc_tag_join_prev, channel, note }))
+        osc_graph_reproject = true;
 }
 
 void Sculptor::SynthEditor::do_zone_join_next(uint32_t channel, uint32_t note)
@@ -868,10 +1657,17 @@ void Sculptor::SynthEditor::do_zone_join_next(uint32_t channel, uint32_t note)
     if (! Synth::zone_join_next(candidate.bank.channel_zones[channel], static_cast<uint32_t>(entry), note))
         return;
 
+    // The dropped entry (when the joined zone became empty) shifts later zones
+    // down, so its records and mask row move with the zone table.
+    if (zone_count(candidate.bank, channel) < zone_count(instr_bank.bank, channel))
+        Sculptor::zone_records_drop_zone(&candidate, channel, static_cast<uint32_t>(entry));
+
     // The zone may have been dropped and its instrument orphaned.
     Synth::reclaim_unused_slots(&candidate);
     last_audition_note[channel] = static_cast<uint8_t>(note);
-    commit_candidate(candidate);
+    Sculptor::undo_group_reset(&osc_undo_group);
+    if (commit_candidate(candidate, Sculptor::UndoGroupTag{ osc_tag_join_next, channel, note }))
+        osc_graph_reproject = true;
 }
 
 void Sculptor::SynthEditor::do_zone_split_new(uint32_t channel, uint32_t note)
@@ -881,9 +1677,19 @@ void Sculptor::SynthEditor::do_zone_split_new(uint32_t channel, uint32_t note)
     if (entry < 0)
         return;
 
+    // A split at the zone's first note swaps the instrument in place: no zone
+    // is inserted, so the graph records stay where they are.  Any other split
+    // inserts an entry and shifts later zones, moving records and mask rows.
+    const bool first_note = note + 1 == bank.channel_zones[channel][entry].start_note;
+
     candidate = instr_bank;
     if (! Synth::zone_split_new(candidate.bank.channel_zones[channel], static_cast<uint32_t>(entry), note, &candidate))
         return; // pool or table full: the menu item is grayed, but stay safe
+
+    if (! first_note && ! Sculptor::zone_records_split_copy(&candidate, channel, static_cast<uint32_t>(entry))) {
+        Sculptor::notify_error("Synth: cannot split: the graph state is full");
+        return;
+    }
 
     // Splitting at the zone's first note orphans its old instrument.
     Synth::reclaim_unused_slots(&candidate);
@@ -892,7 +1698,9 @@ void Sculptor::SynthEditor::do_zone_split_new(uint32_t channel, uint32_t note)
     selected_zone[channel] = static_cast<int32_t>(Synth::zone_entry_at(candidate.bank.channel_zones[channel], note));
     zone_tab_force_entry   = selected_zone[channel];
     last_audition_note[channel] = static_cast<uint8_t>(note);
-    commit_candidate(candidate);
+    Sculptor::undo_group_reset(&osc_undo_group);
+    if (commit_candidate(candidate, Sculptor::UndoGroupTag{ osc_tag_zone_split, channel, note }))
+        osc_graph_reproject = true;
 }
 
 void Sculptor::SynthEditor::gui_channel_popup()
@@ -966,7 +1774,7 @@ void Sculptor::SynthEditor::gui_rename_popup()
     if (! ImGui::BeginPopupModal("Rename", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
         return;
 
-    // Esc is Cancel: close without committing. Every widget stays rendered so
+    // Esc is Cancel: close without committing.  Every widget stays rendered so
     // the buttons work regardless of key state.
     const bool esc = ImGui::IsKeyPressed(ImGuiKey_Escape);
     if (esc)
@@ -990,7 +1798,9 @@ void Sculptor::SynthEditor::gui_rename_popup()
                 : candidate.channel_names[menu_channel],
             rename_buf,
             sizeof(rename_buf));
-        commit_candidate(candidate);
+        Sculptor::undo_group_reset(&osc_undo_group);
+        commit_candidate(candidate,
+                         Sculptor::UndoGroupTag{ osc_tag_rename, menu_channel, rename_zone ? rename_zone_entry : 0 });
         ImGui::CloseCurrentPopup();
     }
     ImGui::EndPopup();
@@ -1052,16 +1862,20 @@ bool Sculptor::SynthEditor::do_library_load(const Synth::LibraryEntry& entry)
         return false;
     }
 
-    // Loading enables the channel; the effect chain stays untouched. The old
+    // Loading enables the channel; the effect chain stays untouched.  The old
     // instruments lose their zone roots and are reclaimed from the candidate.
     candidate.bank.channel_enabled[library_channel] = 1;
+    // The record replaces the channel's zoning, so its graph state resets with it.
+    Sculptor::channel_records_reset(&candidate, library_channel);
 
     // The channel takes the record's name so the library identity carries over.
     memcpy(candidate.channel_names[library_channel], entry.name, sizeof(candidate.channel_names[library_channel]));
     Synth::reclaim_unused_slots(&candidate);
     selected_target                     = library_channel;
     last_audition_note[library_channel] = 0;
-    commit_candidate(candidate);
+    Sculptor::undo_group_reset(&osc_undo_group);
+    if (commit_candidate(candidate, Sculptor::UndoGroupTag{ osc_tag_load, library_channel, 0 }))
+        osc_graph_reproject = true;
 
     return true;
 }
@@ -1164,7 +1978,7 @@ void Sculptor::SynthEditor::gui_library_popups()
         save_as_open = false;
 
         // Prefill from the channel: the record saves the channel's whole instrument
-        // (all zones), so the channel name is the record name. The channel may have
+        // (all zones), so the channel name is the record name.  The channel may have
         // gone empty since the menu click (e.g. via undo); then there is nothing to
         // save and the popup never opens.
         if (! instr_bank.bank.channel_enabled[library_channel] || zone_count(instr_bank.bank, library_channel) == 0) {
