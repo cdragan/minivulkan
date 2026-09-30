@@ -374,6 +374,13 @@ public:
     void    set_slot_visual_role(uint32_t node_idx, uint32_t slot_idx, uint8_t role);
     uint8_t node_visual_role(uint32_t node_idx) const;
     uint8_t slot_visual_role(uint32_t node_idx, uint32_t slot_idx) const;
+    // A row's knobs are inert while the row's input is unconnected.
+    void set_slot_edit_disabled(uint32_t node_idx, uint32_t slot_idx, bool disabled);
+    bool slot_edit_disabled(uint32_t node_idx, uint32_t slot_idx) const;
+
+    // True when any connection references this slot (input/property: as input
+    // endpoint; output: as output endpoint).
+    bool slot_is_connected(uint32_t node_idx, uint32_t slot_idx) const;
 
     // Per-node title-rename opt-in: the osc graph disables node-state edits
     // graph-wide, so parameter nodes opt in one by one.  Projection state
@@ -438,10 +445,6 @@ private:
                                 EndPoint   output,
                                 EndPoint   input,
                                 EndPoint   prev_input);
-
-    // True when any connection references this slot (input/property: as input
-    // endpoint; output: as output endpoint).
-    bool slot_is_connected(uint32_t node_idx, uint32_t slot_idx) const;
 
     // Applies a node deletion without consulting the delete veto.  Snapshot
     // restoration uses it because the veto guards user-facing deletes, not
@@ -524,8 +527,9 @@ private:
 
     // Per-node/per-slot visual roles (see set_node_visual_role); projection
     // state, wiped by clear() like the missing marks.
-    uint8_t node_visual_roles[max_nodes]                  = {};
-    uint8_t slot_visual_roles[max_nodes * max_node_slots] = {};
+    uint8_t node_visual_roles[max_nodes]                         = {};
+    uint8_t slot_visual_roles[max_nodes * max_node_slots]        = {};
+    uint8_t slot_edit_disabled_flags[max_nodes * max_node_slots] = {};
 
     // State widget heights cached from the previous frame (1-frame lag).
     float state_widget_heights[max_nodes];

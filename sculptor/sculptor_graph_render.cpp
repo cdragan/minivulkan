@@ -531,7 +531,8 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
                                                    to_imgui(colors_.shared_row_marker));
                     }
                 }
-                const bool disabled = slot.kind == SlotKind::property && osc_slot_disabled(node, slot_idx);
+                const bool disabled = slot.kind == SlotKind::property &&
+                                      (osc_slot_disabled(node, slot_idx) || slot_edit_disabled(node_idx, slot_idx));
                 draw_list->AddText(ImVec2(cursor, y_center - line_h * 0.5f),
                                    to_imgui(disabled ? colors_.property_connected_value : colors_.property_value),
                                    slot.name);

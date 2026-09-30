@@ -813,6 +813,28 @@ void wire_param_sources(Sculptor::Graph*                 graph,
 
 } // namespace
 
+// A parameter's LFO and source-row knobs shape the signal arriving on that
+// row's input; with no input connected they change nothing.
+
+static void install_edit_disabled_flags(Sculptor::Graph* graph, const Sculptor::OscGraphMapping& mapping)
+{
+    for (uint32_t p = 0; p < mapping.param_count; ++p) {
+        const Sculptor::ParamEntry& param = mapping.params[p];
+        if (param.node_idx == Sculptor::pool_no_slot) {
+            continue;
+        }
+        const bool lfo_wired = graph->slot_is_connected(param.node_idx, param_lfo_input);
+        graph->set_slot_edit_disabled(param.node_idx, param_lfo_op_prop, ! lfo_wired);
+        graph->set_slot_edit_disabled(param.node_idx, param_lfo_depth_prop, ! lfo_wired);
+        graph->set_slot_edit_disabled(param.node_idx, param_rate_scale_prop, ! lfo_wired);
+        for (uint32_t i = 0; i < Synth::max_mod_inputs; ++i) {
+            const bool src_wired = graph->slot_is_connected(param.node_idx, param_src_input(i));
+            graph->set_slot_edit_disabled(param.node_idx, param_src_op_prop(i), ! src_wired);
+            graph->set_slot_edit_disabled(param.node_idx, param_src_scale_prop(i), ! src_wired);
+        }
+    }
+}
+
 // Editor-facing helpers exported from sculptor_osc_graph.h.  Defined at
 // file scope with explicit prefixes; the file-local sections above and below
 // reach them through using-declarations.
@@ -3698,6 +3720,8 @@ bool Sculptor::project_editor_to_graph(const Synth::InstrumentEditorBank& bank,
             }
         }
     }
+    install_edit_disabled_flags(graph, *mapping);
+
     return true;
 }
 

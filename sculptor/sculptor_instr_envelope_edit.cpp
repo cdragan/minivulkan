@@ -30,6 +30,14 @@ constexpr ImU32 point_line_color   = IM_COL32(255, 255, 255, 70);
 constexpr ImU32 grid_color         = IM_COL32(255, 255, 255, 26);
 constexpr ImU32 chart_bg_color     = IM_COL32(0, 0, 0, 96);
 constexpr ImU32 scrollbar_color    = IM_COL32(255, 255, 255, 60);
+// Dimmed variants of the colors above, for a chart that cannot be edited.
+constexpr ImU32 curve_color_dim        = IM_COL32(210, 210, 210, 90);
+constexpr ImU32 hold_segment_color_dim = IM_COL32(150, 150, 150, 70);
+constexpr ImU32 point_color_dim        = IM_COL32(235, 235, 235, 90);
+constexpr ImU32 selected_color_dim     = IM_COL32(255, 255, 100, 110);
+constexpr ImU32 sustain_fill_color_dim = IM_COL32(255, 180, 40, 16);
+constexpr ImU32 sustain_line_color_dim = IM_COL32(255, 190, 60, 90);
+constexpr ImU32 point_line_color_dim   = IM_COL32(255, 255, 255, 35);
 
 // x axis span shown by the chart: the last point plus breathing room.
 float chart_span_ms(const Synth::EnvelopeDescriptor& env)
@@ -245,7 +253,8 @@ void Sculptor::gui_envelope_curve(EnvelopeCurveState*              state,
                                   const Synth::EnvelopeDescriptor& env,
                                   bool                             interactive,
                                   EnvelopeCurveEdit*               out_edit,
-                                  float                            render_scale)
+                                  float                            render_scale,
+                                  bool                             dim)
 {
     *out_edit         = {};
     const float width = (envelope_node_content_width - 2.0f * node_pad) * render_scale;
@@ -302,6 +311,13 @@ void Sculptor::gui_envelope_curve(EnvelopeCurveState*              state,
     draw_list->PushClipRect(ImVec2(m.origin_x - grab_radius, m.origin_y - grab_radius),
                             ImVec2(m.origin_x + m.width + grab_radius, m.origin_y + m.height + grab_radius),
                             true);
+    const ImU32 curve_col      = dim ? curve_color_dim : curve_color;
+    const ImU32 hold_col       = dim ? hold_segment_color_dim : hold_segment_color;
+    const ImU32 point_col      = dim ? point_color_dim : point_color;
+    const ImU32 selected_col   = dim ? selected_color_dim : selected_color;
+    const ImU32 sustain_fill   = dim ? sustain_fill_color_dim : sustain_fill_color;
+    const ImU32 sustain_col    = dim ? sustain_line_color_dim : sustain_line_color;
+    const ImU32 point_line_col = dim ? point_line_color_dim : point_line_color;
 
     draw_list->AddRectFilled(ImVec2(m.origin_x, m.origin_y),
                              ImVec2(m.origin_x + m.width, m.origin_y + m.height),
@@ -310,9 +326,7 @@ void Sculptor::gui_envelope_curve(EnvelopeCurveState*              state,
     // Sustain span highlight under everything else.
     const float sustain_x0 = tick_to_x(m, env.points[env.sustain_first_point].position);
     const float sustain_x1 = tick_to_x(m, env.points[env.sustain_last_point].position);
-    draw_list->AddRectFilled(ImVec2(sustain_x0, m.origin_y),
-                             ImVec2(sustain_x1, m.origin_y + m.height),
-                             sustain_fill_color);
+    draw_list->AddRectFilled(ImVec2(sustain_x0, m.origin_y), ImVec2(sustain_x1, m.origin_y + m.height), sustain_fill);
 
     // Gridlines at ruler intervals.
     const float step = ruler_step_ms(m.ms_span);
@@ -336,28 +350,26 @@ void Sculptor::gui_envelope_curve(EnvelopeCurveState*              state,
                          tick_to_x(m, env.points[i].position),
                          m.origin_y,
                          m.height,
-                         sustain_boundary_point(env, i) ? sustain_line_color : point_line_color);
+                         sustain_boundary_point(env, i) ? sustain_col : point_line_col);
     }
 
     // Tick-0 hold segment when the first point sits past the origin.
     if (env.points[0].position > 0) {
         const float y0 = point_y(m, env, 0);
-        draw_list->AddLine(ImVec2(m.origin_x, y0),
-                           ImVec2(tick_to_x(m, env.points[0].position), y0),
-                           hold_segment_color);
+        draw_list->AddLine(ImVec2(m.origin_x, y0), ImVec2(tick_to_x(m, env.points[0].position), y0), hold_col);
     }
     // Hold at the final value after the last point, as the runtime plays it.
     const float last_x = tick_to_x(m, env.points[env.num_points - 1].position);
     const float last_y = point_y(m, env, env.num_points - 1);
     if (last_x < m.origin_x + m.width) {
-        draw_list->AddLine(ImVec2(last_x, last_y), ImVec2(m.origin_x + m.width, last_y), hold_segment_color);
+        draw_list->AddLine(ImVec2(last_x, last_y), ImVec2(m.origin_x + m.width, last_y), hold_col);
     }
 
     // Curve through the active points.
     for (uint32_t i = 1; i < env.num_points; ++i) {
         draw_list->AddLine(ImVec2(tick_to_x(m, env.points[i - 1].position), point_y(m, env, i - 1)),
                            ImVec2(tick_to_x(m, env.points[i].position), point_y(m, env, i)),
-                           curve_color,
+                           curve_col,
                            1.5f);
     }
 
@@ -435,9 +447,9 @@ void Sculptor::gui_envelope_curve(EnvelopeCurveState*              state,
         const bool   selected = static_cast<int32_t>(i) == state->selected_point;
         const bool   hovered  = static_cast<int32_t>(i) == state->hover_point;
         const float  radius   = selected || hovered ? point_radius + 1.5f : point_radius;
-        draw_list->AddCircleFilled(center, radius, selected ? selected_color : point_color);
+        draw_list->AddCircleFilled(center, radius, selected ? selected_col : point_col);
         if (sustain_boundary_point(env, i)) {
-            draw_list->AddCircle(center, radius + 1.5f, sustain_line_color);
+            draw_list->AddCircle(center, radius + 1.5f, sustain_col);
         }
     }
     draw_list->PopClipRect();

@@ -754,14 +754,26 @@ int Sculptor::SynthEditor::envelope_state_widget_entry(void* user_data, float re
     const int widget_height = Sculptor::envelope_widget_height();
     // Envelopes whose positions overlap (reachable only from hand-built JSON
     // banks) are read-only: no edit can produce a valid descriptor from them.
-    const bool placed      = Sculptor::env_positions_strictly_increasing(*env);
-    const bool interactive = osc_graph.is_selected(ctx->node_idx) && placed;
+    const bool placed = Sculptor::env_positions_strictly_increasing(*env);
+    // An envelope has exactly one output and no wire-independent knobs: with
+    // nothing consuming that output its curve editor cannot affect the sound.
+    const bool unwired     = ! osc_graph.slot_is_connected(ctx->node_idx, osc_mapping.env_output_slot);
+    const bool interactive = osc_graph.is_selected(ctx->node_idx) && placed && ! unwired;
     if (osc_graph.is_selected(ctx->node_idx) && ! placed && ! ctx->ui.read_only_notified) {
         ctx->ui.read_only_notified = true;
         Sculptor::notify_warning("Synth: envelope points overlap; the curve is read-only");
     }
+    if (osc_graph.is_selected(ctx->node_idx) && unwired && ! ctx->ui.unwired_notified) {
+        ctx->ui.unwired_notified = true;
+        Sculptor::notify_warning("Synth: envelope is not wired to a parameter; connect it to edit");
+    }
     Sculptor::EnvelopeCurveEdit edit;
-    Sculptor::gui_envelope_curve(&ctx->ui, *env, interactive, &edit, render_scale);
+    Sculptor::gui_envelope_curve(&ctx->ui,
+                                 *env,
+                                 interactive,
+                                 &edit,
+                                 render_scale,
+                                 osc_graph.is_selected(ctx->node_idx) && ! interactive);
     if (edit.kind == Sculptor::EnvelopeEditKind::none) {
         return widget_height;
     }

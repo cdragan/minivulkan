@@ -454,6 +454,7 @@ void Sculptor::Graph::delete_node_unvetoed(uint32_t node_idx)
     content_sizes[node_idx]     = vmath::vec2(0.0f, 0.0f);
     node_visual_roles[node_idx] = 0;
     memset(&slot_visual_roles[node_idx * max_node_slots], 0, max_node_slots);
+    memset(&slot_edit_disabled_flags[node_idx * max_node_slots], 0, max_node_slots);
     if (dragged_node == node_idx) {
         dragged_node = pool_no_slot;
         interaction  = Interaction::idle;
@@ -688,6 +689,20 @@ uint8_t Sculptor::Graph::node_visual_role(const uint32_t node_idx) const
 uint8_t Sculptor::Graph::slot_visual_role(const uint32_t node_idx, const uint32_t slot_idx) const
 {
     return slot_visual_roles[node_idx * max_node_slots + slot_idx];
+}
+
+void Sculptor::Graph::set_slot_edit_disabled(uint32_t node_idx, uint32_t slot_idx, bool disabled)
+{
+    if (node_idx >= max_nodes || slot_idx >= max_node_slots) {
+        return;
+    }
+    slot_edit_disabled_flags[node_idx * max_node_slots + slot_idx] = disabled ? 1 : 0;
+}
+
+bool Sculptor::Graph::slot_edit_disabled(const uint32_t node_idx, const uint32_t slot_idx) const
+{
+    return node_idx < max_nodes && slot_idx < max_node_slots &&
+           slot_edit_disabled_flags[node_idx * max_node_slots + slot_idx] != 0;
 }
 
 void Sculptor::Graph::set_node_renamable(uint32_t node_idx, bool renamable)

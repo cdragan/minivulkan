@@ -4628,6 +4628,105 @@ int main()
         const Sculptor::EndPoint volume_input = { mapping.params[0].node_idx, 2 };
         TEST(! Sculptor::osc_graph_validate(&mapping, graph, env_out, volume_input));
     }
+    // An envelope whose output is unwired cannot affect the sound: its
+    // curve editor goes read-only (the widget checks the output wire).
+    // Row-level: a parameter row's knobs are inert exactly when that row's
+    // input is unconnected.
+    {
+        static Synth::InstrumentEditorBank bank;
+        static Synth::Instrument           instrument = {};
+        build_zone_fixture(&bank, &instrument);
+        const uint32_t env_slot = bank.bank.envelopes.allocate();
+        TEST(env_slot != pool_no_slot);
+        Synth::EnvelopeDescriptor& env = bank.bank.envelopes.entries[env_slot];
+        env.num_points                 = 2;
+        env.min_value                  = -1.0f;
+        env.min_max_delta              = 2.0f / 65535.0f;
+        env.points[0]                  = { 0, 0 };
+        env.points[1]                  = { 100, 0xFFFF };
+        add_detached_record(&bank,
+                            0,
+                            0,
+                            1,
+                            env_slot + 1,
+                            50.0f,
+                            60.0f,
+                            Synth::ModSource::none,
+                            Synth::ModSource::none,
+                            8);
+        const uint16_t lfo_desc = add_detached_lfo_descriptor(&bank);
+        add_detached_record(&bank, 0, 0, 2, lfo_desc, 70.0f, 80.0f, Synth::ModSource::none, Synth::ModSource::none, 9);
+        static Sculptor::Graph           graph;
+        static Sculptor::OscGraphMapping mapping;
+        TEST(Sculptor::project_editor_to_graph(bank, &graph, &mapping));
+        TEST(mapping.detached_count == 5); // two derived envs + derived LFO + two surplus
+        // Checks projected envelope wiring only: the widget derives its
+        // read-only decision from the envelope's output wire, but the
+        // ImGui-side application of that decision is not unit-testable.
+        TEST(graph.slot_is_connected(mapping.detached[0].node_idx, mapping.env_output_slot));
+        TEST(graph.slot_is_connected(mapping.detached[1].node_idx, mapping.env_output_slot));
+        TEST(! graph.slot_is_connected(mapping.detached[3].node_idx, mapping.env_output_slot));
+        // Row level: a parameter row's knobs are inert exactly when that
+        // row's input is unconnected.  Param slot layout: 4..6 LFO row
+        // knobs (op, depth, rate scale), 8..9 source 0 (op, scale),
+        // 11..12 source 1.
+        uint32_t volume_param = pool_no_slot;
+        uint32_t pitch_param  = pool_no_slot;
+        for (uint32_t p = 0; p < mapping.param_count; ++p) {
+            if (mapping.params[p].target == static_cast<uint32_t>(Synth::mod_volume)) {
+                volume_param = mapping.params[p].node_idx;
+            }
+            if (mapping.params[p].target == static_cast<uint32_t>(Synth::mod_pitch)) {
+                pitch_param = mapping.params[p].node_idx;
+            }
+        }
+        TEST(volume_param != pool_no_slot && pitch_param != pool_no_slot);
+        // The fixture binds the LFO to volume and routes velocity into
+        // volume's first source row; every other row input is unconnected.
+        for (uint32_t slot_idx = 4; slot_idx <= 6; ++slot_idx) {
+            TEST(! graph.slot_edit_disabled(volume_param, slot_idx));
+            TEST(graph.slot_edit_disabled(pitch_param, slot_idx));
+        }
+        TEST(! graph.slot_edit_disabled(volume_param, 8) && ! graph.slot_edit_disabled(volume_param, 9));
+        TEST(graph.slot_edit_disabled(pitch_param, 8) && graph.slot_edit_disabled(pitch_param, 9));
+        TEST(graph.slot_edit_disabled(volume_param, 11) && graph.slot_edit_disabled(volume_param, 12));
+        TEST(graph.slot_edit_disabled(pitch_param, 11) && graph.slot_edit_disabled(pitch_param, 12));
+    }
+    // Detaching the volume LFO leaves the parameter's LFO row unconnected:
+    // its knobs grey out at the next projection.
+    {
+        static Synth::InstrumentEditorBank bank;
+        static Synth::Instrument           instrument = {};
+        build_zone_fixture(&bank, &instrument);
+        Synth::Oscillator& layer                                        = bank.bank.instruments.entries[0].layers[0];
+        layer.gen[static_cast<uint32_t>(Synth::mod_volume)].lfo_desc_id = 0;
+        layer.gen[static_cast<uint32_t>(Synth::mod_volume)].lfo_depth_source = Synth::ModSource::none;
+        layer.gen[static_cast<uint32_t>(Synth::mod_volume)].lfo_rate_source  = Synth::ModSource::none;
+        add_detached_record(&bank,
+                            0,
+                            0,
+                            2,
+                            1,
+                            111.0f,
+                            222.0f,
+                            Synth::ModSource::velocity,
+                            Synth::ModSource::mod_wheel,
+                            1);
+        static Sculptor::Graph           graph;
+        static Sculptor::OscGraphMapping mapping;
+        TEST(Sculptor::project_editor_to_graph(bank, &graph, &mapping));
+        uint32_t volume_param = pool_no_slot;
+        for (uint32_t p = 0; p < mapping.param_count; ++p) {
+            if (mapping.params[p].target == static_cast<uint32_t>(Synth::mod_volume)) {
+                volume_param = mapping.params[p].node_idx;
+            }
+        }
+        TEST(volume_param != pool_no_slot);
+        for (uint32_t slot_idx = 4; slot_idx <= 6; ++slot_idx) {
+            TEST(graph.slot_edit_disabled(volume_param, slot_idx));
+        }
+        TEST(! graph.slot_edit_disabled(volume_param, 8) && ! graph.slot_edit_disabled(volume_param, 9));
+    }
 
     // Projection refuses instruments it cannot express: a routing input with
     // the none source would change synthesis on commit if silently dropped
