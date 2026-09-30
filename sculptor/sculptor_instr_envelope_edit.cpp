@@ -9,13 +9,14 @@
 
 namespace {
 
-constexpr float chart_height = 96.0f;
-constexpr float ruler_height = 14.0f;
-constexpr float grab_radius  = 7.0f;
-constexpr float point_radius = 3.5f;
-constexpr float dotted_dash  = 3.0f;
-constexpr float dotted_gap   = 3.0f;
-constexpr float min_span_ms  = 40.0f;
+constexpr float chart_height     = 96.0f;
+constexpr float ruler_height     = 14.0f;
+constexpr float grab_radius      = 7.0f;
+constexpr float point_radius     = 3.5f;
+constexpr float dotted_dash      = 3.0f;
+constexpr float dotted_gap       = 3.0f;
+constexpr float min_span_ms      = 40.0f;
+constexpr float scrollbar_height = 4.0f;
 // Inner margin the node renderer leaves around node content.
 constexpr float node_pad = 8.0f;
 
@@ -28,6 +29,7 @@ constexpr ImU32 sustain_line_color = IM_COL32(255, 190, 60, 255);
 constexpr ImU32 point_line_color   = IM_COL32(255, 255, 255, 70);
 constexpr ImU32 grid_color         = IM_COL32(255, 255, 255, 26);
 constexpr ImU32 chart_bg_color     = IM_COL32(0, 0, 0, 96);
+constexpr ImU32 scrollbar_color    = IM_COL32(255, 255, 255, 60);
 
 // x axis span shown by the chart: the last point plus breathing room.
 float chart_span_ms(const Synth::EnvelopeDescriptor& env)
@@ -43,22 +45,30 @@ struct ChartMapping {
     float width;
     float height;
     float ms_span;
+    float ms_scroll;    // model time at the chart's left edge
     float value_bottom; // effective value at the chart's bottom edge
     float value_top;    // effective value at the chart's top edge
 };
 
-// The y axis spans the full effective value range of the descriptor: raw
-// value 0 maps to min_value and raw value 65535 to min_value + 65535 *
-// min_max_delta, exactly as the runtime evaluates the curve.  A negative
-// scale renders an inverted curve; a zero scale renders a flat line.
-ChartMapping chart_mapping(const Synth::EnvelopeDescriptor& env, const ImVec2& origin, float ms_span_override)
+// x maps model time to screen: ms_scroll sits at the left edge, ms_scroll +
+// ms_span at the right.  The y axis spans the full effective value range of
+// the descriptor: raw value 0 maps to min_value and raw value 65535 to
+// min_value + 65535 * min_max_delta, exactly as the runtime evaluates the
+// curve.  A negative scale renders an inverted curve; a zero scale renders a
+// flat line.
+ChartMapping chart_mapping(const Synth::EnvelopeDescriptor& env,
+                           const ImVec2&                    origin,
+                           float                            width,
+                           float                            ms_span,
+                           float                            ms_scroll)
 {
     ChartMapping m;
     m.origin_x     = origin.x;
     m.origin_y     = origin.y;
-    m.width        = Sculptor::envelope_node_content_width - 2.0f * node_pad;
+    m.width        = width;
     m.height       = chart_height;
-    m.ms_span      = ms_span_override != 0.0f ? ms_span_override : chart_span_ms(env);
+    m.ms_span      = ms_span;
+    m.ms_scroll    = ms_scroll;
     const float a  = env.min_value;
     const float b  = env.min_value + 65535.0f * env.min_max_delta;
     m.value_bottom = a < b ? a : b;
@@ -74,7 +84,7 @@ ChartMapping chart_mapping(const Synth::EnvelopeDescriptor& env, const ImVec2& o
 
 float tick_to_x(const ChartMapping& m, uint16_t position)
 {
-    return m.origin_x + Sculptor::envelope_ticks_to_ms(position) / m.ms_span * m.width;
+    return m.origin_x + (Sculptor::envelope_ticks_to_ms(position) - m.ms_scroll) / m.ms_span * m.width;
 }
 
 float effective_to_y(const ChartMapping& m, float effective)
@@ -142,15 +152,21 @@ void draw_ruler(const ChartMapping& m)
     ImDrawList* draw_list = ImGui::GetWindowDrawList();
     const float step      = ruler_step_ms(m.ms_span);
     char        label[32];
-    for (float ms = 0.0f; ms <= m.ms_span + 0.001f; ms += step) {
-        const float x = m.origin_x + ms / m.ms_span * m.width;
+    for (float ms = 0.0f; ms <= m.ms_scroll + m.ms_span + 0.001f; ms += step) {
+        const float x = m.origin_x + (ms - m.ms_scroll) / m.ms_span * m.width;
+        if (x < m.origin_x - 0.5f) {
+            continue;
+        }
+        if (x > m.origin_x + m.width + 0.5f) {
+            break;
+        }
         draw_list->AddLine(ImVec2(x, m.origin_y + m.height), ImVec2(x, m.origin_y + m.height + 3.0f), grid_color);
         snprintf(label, sizeof(label), "%d", static_cast<int>(ms + 0.5f));
         const ImVec2 text_size = ImGui::CalcTextSize(label);
         draw_list->AddText(ImVec2(x - text_size.x * 0.5f, m.origin_y + m.height + 3.0f),
                            ImGui::GetColorU32(ImGuiCol_Text),
                            label);
-        if (m.ms_span - ms < step * 0.5f) {
+        if (m.ms_scroll + m.ms_span - ms < step * 0.5f) {
             break;
         }
     }
@@ -171,7 +187,8 @@ void emit_drag_edit(const Sculptor::EnvelopeCurveState* state,
                     Sculptor::EnvelopeCurveEdit*        out_edit)
 {
     const ImVec2 mouse = ImGui::GetIO().MousePos;
-    float        ms    = (mouse.x - m.origin_x) / m.width * state->gesture_ms_span - state->gesture_grab_offset_ms;
+    float        ms    = (mouse.x - m.origin_x) / m.width * state->gesture_ms_span + state->gesture_scroll_ms -
+                         state->gesture_grab_offset_ms;
     if (ms < 0.0f) {
         ms = 0.0f;
     }
@@ -206,6 +223,7 @@ void capture_gesture_mapping(Sculptor::EnvelopeCurveState*    state,
                              int32_t                          grabbed)
 {
     state->gesture_ms_span        = m.ms_span;
+    state->gesture_scroll_ms      = m.ms_scroll;
     state->gesture_value_bottom   = m.value_bottom;
     state->gesture_value_top      = m.value_top;
     state->gesture_min_value      = env.min_value;
@@ -219,21 +237,54 @@ void capture_gesture_mapping(Sculptor::EnvelopeCurveState*    state,
 int Sculptor::envelope_widget_height()
 {
     const ImGuiStyle& style = ImGui::GetStyle();
-    return static_cast<int>(chart_height + ruler_height + 2.0f * ImGui::GetFrameHeight() + ImGui::GetTextLineHeight() +
-                            4.0f * style.ItemSpacing.y + 0.5f);
+    return static_cast<int>(chart_height + ruler_height + scrollbar_height + 2.0f * ImGui::GetFrameHeight() +
+                            ImGui::GetTextLineHeight() + 4.0f * style.ItemSpacing.y + 1.5f + 0.5f);
 }
 
 void Sculptor::gui_envelope_curve(EnvelopeCurveState*              state,
                                   const Synth::EnvelopeDescriptor& env,
                                   bool                             interactive,
-                                  EnvelopeCurveEdit*               out_edit)
+                                  EnvelopeCurveEdit*               out_edit,
+                                  float                            render_scale)
 {
-    *out_edit                           = {};
-    const float        width            = envelope_node_content_width - 2.0f * node_pad;
-    const float        ms_span_override = state->chart_drag >= 0 ? state->gesture_ms_span : 0.0f;
-    const ImVec2       origin           = ImGui::GetCursorScreenPos();
-    ImDrawList*        draw_list        = ImGui::GetWindowDrawList();
-    const ChartMapping m                = chart_mapping(env, origin, ms_span_override);
+    *out_edit         = {};
+    const float width = (envelope_node_content_width - 2.0f * node_pad) * render_scale;
+    // x view: auto-fit until the user zooms; a set span is clamped into the
+    // envelope's extent every frame so shrinking content pulls the view back.
+    const float content_span = chart_span_ms(env);
+    float       ms_span;
+    float       ms_scroll;
+    if (state->chart_drag >= 0) {
+        // A drag uses the mapping frozen at its activation.
+        ms_span   = state->gesture_ms_span;
+        ms_scroll = state->gesture_scroll_ms;
+    }
+    else if (state->view_span_ms > 0.0f) {
+        ms_span = state->view_span_ms;
+        if (ms_span < min_span_ms) {
+            ms_span = min_span_ms;
+        }
+        if (ms_span > content_span) {
+            ms_span = content_span;
+        }
+        ms_scroll              = state->view_scroll_ms;
+        const float max_scroll = content_span - ms_span;
+        if (ms_scroll < 0.0f) {
+            ms_scroll = 0.0f;
+        }
+        if (ms_scroll > max_scroll) {
+            ms_scroll = max_scroll;
+        }
+        state->view_span_ms   = ms_span;
+        state->view_scroll_ms = ms_scroll;
+    }
+    else {
+        ms_span   = content_span;
+        ms_scroll = 0.0f;
+    }
+    const ImVec2       origin    = ImGui::GetCursorScreenPos();
+    ImDrawList*        draw_list = ImGui::GetWindowDrawList();
+    const ChartMapping m         = chart_mapping(env, origin, width, ms_span, ms_scroll);
     // Row offsets from the widget anchor.  Every row is placed with an
     // explicit SetCursorScreenPos: after each item ImGui resets the cursor x
     // to the window's line start, so cursor flow would throw the rows onto
@@ -242,9 +293,15 @@ void Sculptor::gui_envelope_curve(EnvelopeCurveState*              state,
     const float       sp        = style.ItemSpacing.y;
     const float       frame_h   = ImGui::GetFrameHeight();
     const float       text_h    = ImGui::GetTextLineHeight();
-    const float       buttons_y = chart_height + sp + ruler_height + sp;
+    const float       buttons_y = chart_height + sp + ruler_height + 1.0f + scrollbar_height + sp;
     const float       info_y    = buttons_y + frame_h + sp;
     const float       boxes_y   = info_y + text_h + sp;
+
+    // Keep zoomed-out content inside the chart; a small margin keeps edge
+    // point handles fully visible.
+    draw_list->PushClipRect(ImVec2(m.origin_x - grab_radius, m.origin_y - grab_radius),
+                            ImVec2(m.origin_x + m.width + grab_radius, m.origin_y + m.height + grab_radius),
+                            true);
 
     draw_list->AddRectFilled(ImVec2(m.origin_x, m.origin_y),
                              ImVec2(m.origin_x + m.width, m.origin_y + m.height),
@@ -259,10 +316,16 @@ void Sculptor::gui_envelope_curve(EnvelopeCurveState*              state,
 
     // Gridlines at ruler intervals.
     const float step = ruler_step_ms(m.ms_span);
-    for (float ms = step; ms <= m.ms_span + 0.001f; ms += step) {
-        const float x = m.origin_x + ms / m.ms_span * m.width;
+    for (float ms = step; ms <= m.ms_scroll + m.ms_span + 0.001f; ms += step) {
+        const float x = m.origin_x + (ms - m.ms_scroll) / m.ms_span * m.width;
+        if (x < m.origin_x - 0.5f) {
+            continue;
+        }
+        if (x > m.origin_x + m.width + 0.5f) {
+            break;
+        }
         draw_list->AddLine(ImVec2(x, m.origin_y), ImVec2(x, m.origin_y + m.height), grid_color);
-        if (m.ms_span - ms < step * 0.5f) {
+        if (m.ms_scroll + m.ms_span - ms < step * 0.5f) {
             break;
         }
     }
@@ -326,6 +389,44 @@ void Sculptor::gui_envelope_curve(EnvelopeCurveState*              state,
             state->chart_drag = -1;
             out_edit->kind    = EnvelopeEditKind::gesture_end;
         }
+        // Wheel zooms around the cursor; middle-drag pans.  Both act only
+        // over the chart itself so the buttons keep their own hover behavior.
+        if (ImGui::IsItemHovered()) {
+            ImGuiIO&    io    = ImGui::GetIO();
+            const float wheel = io.MouseWheel;
+            if (wheel != 0.0f) {
+                const float factor   = wheel > 0.0f ? 1.25f : 0.8f;
+                const float t        = (io.MousePos.x - m.origin_x) / m.width;
+                float       new_span = m.ms_span / factor;
+                if (new_span < min_span_ms) {
+                    new_span = min_span_ms;
+                }
+                if (new_span > content_span) {
+                    new_span = content_span;
+                }
+                float new_scroll = m.ms_scroll + t * (m.ms_span - new_span);
+                if (new_scroll < 0.0f) {
+                    new_scroll = 0.0f;
+                }
+                const float max_scroll = content_span - new_span;
+                if (new_scroll > max_scroll) {
+                    new_scroll = max_scroll;
+                }
+                state->view_span_ms   = new_span;
+                state->view_scroll_ms = new_scroll;
+            }
+            if (ImGui::IsMouseDragging(ImGuiMouseButton_Middle)) {
+                float new_scroll = m.ms_scroll - io.MouseDelta.x / m.width * m.ms_span;
+                if (new_scroll < 0.0f) {
+                    new_scroll = 0.0f;
+                }
+                const float max_scroll = content_span - m.ms_span;
+                if (new_scroll > max_scroll) {
+                    new_scroll = max_scroll;
+                }
+                state->view_scroll_ms = new_scroll;
+            }
+        }
     }
 
     // Point handles on top of everything.
@@ -339,10 +440,50 @@ void Sculptor::gui_envelope_curve(EnvelopeCurveState*              state,
             draw_list->AddCircle(center, radius + 1.5f, sustain_line_color);
         }
     }
+    draw_list->PopClipRect();
 
     draw_ruler(m);
     ImGui::SetCursorScreenPos(ImVec2(origin.x, origin.y + chart_height + sp));
     ImGui::Dummy(ImVec2(width, ruler_height));
+
+    // Thin horizontal scrollbar, always reserved.  Dragging it pans the
+    // zoomed view; at full zoom-out the thumb spans the whole track.
+    const float scrollbar_y = chart_height + sp + ruler_height + 1.0f;
+    ImGui::SetCursorScreenPos(ImVec2(origin.x, origin.y + scrollbar_y));
+    bool scroll_dragged = false;
+    bool scroll_hovered = false;
+    if (interactive) {
+        ImGui::InvisibleButton("##envscroll", ImVec2(width, scrollbar_height));
+        scroll_dragged = ImGui::IsItemActive();
+        scroll_hovered = ImGui::IsItemHovered();
+        if (scroll_dragged) {
+            float new_scroll = m.ms_scroll - ImGui::GetIO().MouseDelta.x / m.width * m.ms_span;
+            if (new_scroll < 0.0f) {
+                new_scroll = 0.0f;
+            }
+            const float max_scroll = content_span - m.ms_span;
+            if (new_scroll > max_scroll) {
+                new_scroll = max_scroll;
+            }
+            state->view_scroll_ms = new_scroll;
+        }
+    }
+    else {
+        ImGui::Dummy(ImVec2(width, scrollbar_height));
+    }
+    {
+        float x0 = m.origin_x + m.ms_scroll / content_span * m.width;
+        float x1 = m.origin_x + (m.ms_scroll + m.ms_span) / content_span * m.width;
+        if (x1 < x0 + 2.0f) {
+            x1 = x0 + 2.0f; // minimum thumb width so the handle stays visible
+        }
+        draw_list->AddRectFilled(ImVec2(m.origin_x, origin.y + scrollbar_y),
+                                 ImVec2(m.origin_x + m.width, origin.y + scrollbar_y + scrollbar_height),
+                                 chart_bg_color);
+        draw_list->AddRectFilled(ImVec2(x0, origin.y + scrollbar_y),
+                                 ImVec2(x1, origin.y + scrollbar_y + scrollbar_height),
+                                 scroll_dragged || scroll_hovered ? scrollbar_color : grid_color);
+    }
 
     // The control block always renders so the node shows its editing
     // affordances at a glance; it stays inert until the node is selected.

@@ -51,6 +51,7 @@ bool osc_slot_disabled(const Sculptor::Node& node, uint32_t slot_idx)
     }
     return false;
 }
+
 constexpr float zoom_wheel_factor  = 1.2f;              // zoom step per wheel tick
 constexpr float click_max_distance = 5.0f;              // press-release distance still a click
 constexpr float dot_pick_radius    = dot_radius + 4.0f; // dot hit-test radius
@@ -119,9 +120,18 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
     }
 
     // Wheel zoom around the mouse cursor (not during drags: zooming would
-    // rescale mouse_graph and make the dragged node jump).
+    // rescale mouse_graph and make the dragged node jump).  The mouse sits
+    // over a state widget with a 1-frame lag: wheel over the envelope chart
+    // zooms the chart, not the canvas.
+    bool state_widget_has_mouse = false;
+    for (uint32_t i = 0; i < max_nodes; ++i) {
+        if (state_widget_hovered[i]) {
+            state_widget_has_mouse = true;
+            break;
+        }
+    }
     if (ImGui::IsWindowHovered() && interaction == Interaction::idle && in_widget(mouse_screen) &&
-        io.MouseWheel != 0.0f) {
+        io.MouseWheel != 0.0f && ! state_widget_has_mouse) {
         const float       scaled      = zoom * powf(zoom_wheel_factor, io.MouseWheel);
         const float       new_zoom    = scaled < graph_min_zoom   ? graph_min_zoom
                                         : scaled > graph_max_zoom ? graph_max_zoom
@@ -255,6 +265,7 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
 
     for (uint32_t node_idx = 0; node_idx < max_nodes; ++node_idx) {
         if (! nodes.is_occupied(node_idx)) {
+            state_widget_hovered[node_idx] = false;
             continue;
         }
         Node&      node     = nodes.entries[node_idx];
@@ -273,12 +284,14 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
             uint32_t slot_idx;
             bool     dot; // draws a connector dot
         };
+
         struct Line {
             LineElem elems[max_node_slots];
             uint32_t num_elems  = 0;
             float    y          = 0.0f; // top of the line, graph space
             bool     has_widget = false;
         };
+
         Line    lines[max_node_slots];
         int32_t group_line[256]; // row_group id -> line index, -1 = none yet
         for (uint32_t g = 0; g < 256; ++g) {
@@ -644,9 +657,12 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
             ImGui::PushID(static_cast<int>(node_idx) + 100000);
             ImGui::SetCursorScreenPos(ImVec2(rect_min.x + pad, rect_max.y - pad - state_h));
             ImGui::PushClipRect(ImVec2(rect_min.x, rect_min.y), ImVec2(rect_max.x, rect_max.y), true);
-            const int widget_h = node.state_widget(node.state_widget_data);
+            const int widget_h = node.state_widget(node.state_widget_data, render_scale);
             ImGui::PopClipRect();
             state_widget_heights[node_idx] = widget_h > 0 ? static_cast<float>(widget_h) : 0.0f;
+            state_widget_hovered[node_idx] = in_rect(mouse_screen,
+                                                     vmath::vec2(rect_min.x + pad, rect_max.y - pad - state_h),
+                                                     vmath::vec2(rect_max.x - pad, rect_max.y - pad));
             ImGui::PopID();
         }
 

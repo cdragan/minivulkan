@@ -269,24 +269,31 @@ struct EnvelopeCurveState {
     // Model-space mapping frozen at drag activation so per-frame commits and
     // live span changes cannot feed back into the drag target.
     float gesture_ms_span        = 0.0f;
+    float gesture_scroll_ms      = 0.0f;
     float gesture_value_bottom   = 0.0f;
     float gesture_value_top      = 0.0f;
     float gesture_min_value      = 0.0f;
     float gesture_min_max_delta  = 0.0f;
     float gesture_grab_offset_ms = 0.0f;
     bool  read_only_notified     = false; // one overlap warning per node context
+    // x axis view: span 0 means auto-fit to the envelope; a set span is
+    // user-zoomed and pans within the envelope's extent.
+    float view_span_ms   = 0.0f;
+    float view_scroll_ms = 0.0f;
 };
 
-// Draws the envelope curve widget (chart, ms ruler, buttons, info line) at
-// the current ImGui cursor position and reports user intents through
-// *out_edit (kind none when nothing happened).  When interactive is false
-// the chart draws read-only; its chart item still claims input so clicks
-// select the node instead of starting a node drag, and the widget reserves
-// its full height in both states.
+// Draws the envelope curve widget (chart, ms ruler, scrollbar, buttons, info
+// line) at the current ImGui cursor position and reports user intents through
+// *out_edit (kind none when nothing happened).  render_scale scales the chart
+// width to the node's on-screen content size; the vertical layout is fixed.
+// When interactive is false the chart draws read-only; its chart item still
+// claims input so clicks select the node instead of starting a node drag, and
+// the widget reserves its full height in both states.
 void gui_envelope_curve(EnvelopeCurveState*              state,
                         const Synth::EnvelopeDescriptor& env,
                         bool                             interactive,
-                        EnvelopeCurveEdit*               out_edit);
+                        EnvelopeCurveEdit*               out_edit,
+                        float                            render_scale = 1.0f);
 
 // Fixed full widget height in pixels (chart, ruler, buttons, info line);
 // identical whether the node is selected or not.

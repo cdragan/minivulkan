@@ -43,8 +43,9 @@ private:
     void reproject_osc_graph(uint32_t channel, uint32_t zone);
     // State-widget entry for envelope curve editing; the per-node context
     // carries the editor pointer so the thunk can commit through the normal
-    // candidate path.
-    static int envelope_state_widget_entry(void* user_data);
+    // candidate path.  render_scale scales the chart width to the node's
+    // current on-screen content size.
+    static int envelope_state_widget_entry(void* user_data, float render_scale);
     void       do_initialize(uint32_t channel);
     void       do_delete(uint32_t channel);
     void       do_zone_join_previous(uint32_t channel, uint32_t note);

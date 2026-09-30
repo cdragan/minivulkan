@@ -55,7 +55,9 @@ constexpr uint32_t max_node_slots = 32;
 
 // Draws the optional caller state widget at the bottom of a node.
 // Returns the widget height in pixels; the height is cached one frame.
-using StateWidgetCallback = int (*)(void* user_data);
+// render_scale is the node content scale the renderer currently draws with
+// (at least 1), so the widget can match the node's on-screen size.
+using StateWidgetCallback = int (*)(void* user_data, float render_scale);
 
 struct Node {
     char                       name[64];
@@ -527,6 +529,10 @@ private:
 
     // State widget heights cached from the previous frame (1-frame lag).
     float state_widget_heights[max_nodes];
+    // Whether the mouse sat over a node's state widget last frame (1-frame
+    // lag, like the heights).  The canvas leaves wheel zoom to the widget
+    // (the envelope chart zooms itself) while the mouse is over one.
+    bool state_widget_hovered[max_nodes] = {};
 
     // Selection flags, parallel to the node pool slots.
     bool selected[max_nodes] = {};

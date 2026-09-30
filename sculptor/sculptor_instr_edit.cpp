@@ -743,7 +743,7 @@ void Sculptor::SynthEditor::reproject_osc_graph(uint32_t channel, uint32_t zone)
 // its edit requests into constrained descriptor edits committed through the
 // normal candidate path.  A drag or an edit box is ONE gesture: one undo tag
 // captured at its first edit, per-frame commits while it lasts.
-int Sculptor::SynthEditor::envelope_state_widget_entry(void* user_data)
+int Sculptor::SynthEditor::envelope_state_widget_entry(void* user_data, float render_scale)
 {
     EnvelopeWidgetContext*           ctx     = static_cast<EnvelopeWidgetContext*>(user_data);
     uint32_t                         desc_id = 0;
@@ -761,7 +761,7 @@ int Sculptor::SynthEditor::envelope_state_widget_entry(void* user_data)
         Sculptor::notify_warning("Synth: envelope points overlap; the curve is read-only");
     }
     Sculptor::EnvelopeCurveEdit edit;
-    Sculptor::gui_envelope_curve(&ctx->ui, *env, interactive, &edit);
+    Sculptor::gui_envelope_curve(&ctx->ui, *env, interactive, &edit, render_scale);
     if (edit.kind == Sculptor::EnvelopeEditKind::none) {
         return widget_height;
     }
