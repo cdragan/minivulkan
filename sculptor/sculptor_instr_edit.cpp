@@ -5,6 +5,7 @@
 #include "sculptor_bank_json.h"
 #include "sculptor_graph.h"
 #include "sculptor_instr_bank.h"
+#include "sculptor_instr_envelope_edit.h"
 #include "sculptor_notifications.h"
 #include "sculptor_osc_graph.h"
 
@@ -62,6 +63,25 @@ uint32_t                  osc_graph_zone_index   = 0;
 bool                      osc_graph_projected    = false; // mapping matches the selection
 bool                      osc_graph_reproject    = false; // deferred wholesale rebuild
 
+// Per-envelope-node state-widget contexts, indexed by graph node index and
+// rebound on every projection.  A reset on projection also aborts gestures
+// and selections, which cannot outlive the graph they were made in.  The
+// projection generation gates in-flight gestures against envelope pool
+// compaction that remaps descriptor ids without a re-projection.
+struct EnvelopeWidgetContext {
+    uint32_t                     node_idx        = Sculptor::pool_no_slot;
+    Sculptor::SynthEditor*       editor          = nullptr;
+    uint32_t                     generation      = 0;
+    Synth::EnvelopeDescriptor    gesture_start   = {};
+    uint32_t                     gesture_desc_id = 0;
+    Sculptor::UndoGroupTag       gesture_tag     = {};
+    bool                         gesture_active  = false;
+    Sculptor::EnvelopeCurveState ui;
+};
+
+EnvelopeWidgetContext envelope_widget_contexts[Sculptor::max_nodes];
+uint32_t              osc_graph_generation = 0;
+
 // Canvas popup commands are only queued during render; the add commands run
 // afterwards against the committed bank.
 enum OscCanvasCommand {
@@ -72,6 +92,7 @@ enum OscCanvasCommand {
     osc_cmd_add_parameter,
     osc_cmd_change_target_param
 };
+
 OscCanvasCommand osc_canvas_command         = osc_cmd_none;
 uint32_t         osc_canvas_retarget_node   = Sculptor::pool_no_slot; // pending osc_cmd_change_target_param
 uint32_t         osc_canvas_retarget_target = 0;                      // pending osc_cmd_change_target_param
@@ -107,6 +128,7 @@ struct OscDeleteVetoContext {
     const Sculptor::OscGraphMapping* mapping;
     Sculptor::Graph*                 graph;
 };
+
 OscDeleteVetoContext osc_veto_context = { &osc_mapping, &osc_graph };
 
 // Fixed nodes are structural: the MIDI input nodes and the oscillator sum
@@ -216,26 +238,23 @@ void osc_snapshot_node_layout(uint32_t node)
 // projection's own construction traffic, so projection events never echo
 // into commits.  Also clears the undo group tag: a re-projected graph starts
 // a new edit context.
-void reproject_osc_graph(uint32_t channel, uint32_t zone)
+
+// Resolves a graph node to its envelope descriptor in the committed bank,
+// nullptr when the node is not a live envelope instance.  Re-resolved every
+// frame so envelope pool compaction cannot leave the widget pointing at a
+// recycled descriptor.
+const Synth::EnvelopeDescriptor* envelope_widget_descriptor(uint32_t node_idx, uint32_t* out_desc_id)
 {
-    osc_graph_zone_channel = channel;
-    osc_graph_zone_index   = zone;
-    osc_graph_projected    = Sculptor::project_editor_to_graph(instr_bank, &osc_graph, &osc_mapping, channel, zone);
-    if (osc_graph_projected) {
-        for (uint32_t node = 0; node < Sculptor::max_nodes; ++node) {
-            if (osc_graph.node_occupied(node)) {
-                osc_snapshot_node_layout(node);
-            }
+    for (uint32_t i = 0; i < osc_mapping.detached_count; ++i) {
+        const Sculptor::DetachedNode& detached = osc_mapping.detached[i];
+        if (detached.node_idx != node_idx || detached.kind != 1 || detached.desc_id == 0 ||
+            detached.desc_id > instr_bank.bank.envelopes.num_allocated) {
+            continue;
         }
+        *out_desc_id = detached.desc_id;
+        return &instr_bank.bank.envelopes.entries[detached.desc_id - 1];
     }
-    // Drain until the ring is empty: a projection can queue more events
-    // than one batch holds, and leftovers would leak into the next frame's
-    // apply batch.  The buffer is sized to the ring so one pass always drains.
-    Sculptor::GraphChange discard[Sculptor::max_pending_changes];
-    while (osc_graph.take_changes(discard, Sculptor::max_pending_changes) != 0) {
-    }
-    (void)osc_graph.changes_overflowed();
-    Sculptor::undo_group_reset(&osc_undo_group);
+    return nullptr;
 }
 
 void init_osc_graph_widget()
@@ -676,6 +695,203 @@ float boundary_x_of(uint32_t note, float white_w, float black_w)
 }
 
 } // anonymous namespace
+
+void Sculptor::SynthEditor::reproject_osc_graph(uint32_t channel, uint32_t zone)
+{
+    osc_graph_zone_channel = channel;
+    osc_graph_zone_index   = zone;
+    osc_graph_projected    = Sculptor::project_editor_to_graph(instr_bank, &osc_graph, &osc_mapping, channel, zone);
+    ++osc_graph_generation;
+    // Rebind envelope state widgets from scratch: gestures and point
+    // selections cannot outlive the graph they were made in.
+    for (uint32_t node = 0; node < Sculptor::max_nodes; ++node) {
+        EnvelopeWidgetContext& ctx = envelope_widget_contexts[node];
+        ctx                        = {};
+        ctx.node_idx               = node;
+        ctx.editor                 = this;
+        ctx.generation             = osc_graph_generation;
+    }
+    if (osc_graph_projected) {
+        for (uint32_t i = 0; i < osc_mapping.detached_count; ++i) {
+            const Sculptor::DetachedNode& detached = osc_mapping.detached[i];
+            if (detached.kind == 1 && detached.node_idx != Sculptor::pool_no_slot && detached.desc_id != 0) {
+                envelope_widget_contexts[detached.node_idx].node_idx        = detached.node_idx;
+                envelope_widget_contexts[detached.node_idx].gesture_desc_id = detached.desc_id;
+                osc_graph.set_state_widget(detached.node_idx,
+                                           &envelope_state_widget_entry,
+                                           &envelope_widget_contexts[detached.node_idx],
+                                           static_cast<float>(Sculptor::envelope_widget_height()));
+            }
+        }
+        for (uint32_t node = 0; node < Sculptor::max_nodes; ++node) {
+            if (osc_graph.node_occupied(node)) {
+                osc_snapshot_node_layout(node);
+            }
+        }
+    }
+    // Drain until the ring is empty: a projection can queue more events
+    // than one batch holds, and leftovers would leak into the next frame's
+    // apply batch.  The buffer is sized to the ring so one pass always drains.
+    Sculptor::GraphChange discard[Sculptor::max_pending_changes];
+    while (osc_graph.take_changes(discard, Sculptor::max_pending_changes) != 0) {
+    }
+    (void)osc_graph.changes_overflowed();
+    Sculptor::undo_group_reset(&osc_undo_group);
+}
+
+// State-widget entry for envelope nodes: draws the curve widget and turns
+// its edit requests into constrained descriptor edits committed through the
+// normal candidate path.  A drag or an edit box is ONE gesture: one undo tag
+// captured at its first edit, per-frame commits while it lasts.
+int Sculptor::SynthEditor::envelope_state_widget_entry(void* user_data)
+{
+    EnvelopeWidgetContext*           ctx     = static_cast<EnvelopeWidgetContext*>(user_data);
+    uint32_t                         desc_id = 0;
+    const Synth::EnvelopeDescriptor* env     = envelope_widget_descriptor(ctx->node_idx, &desc_id);
+    if (env == nullptr) {
+        return 0;
+    }
+    const int widget_height = Sculptor::envelope_widget_height();
+    // Envelopes whose positions overlap (reachable only from hand-built JSON
+    // banks) are read-only: no edit can produce a valid descriptor from them.
+    const bool placed      = Sculptor::env_positions_strictly_increasing(*env);
+    const bool interactive = osc_graph.is_selected(ctx->node_idx) && placed;
+    if (osc_graph.is_selected(ctx->node_idx) && ! placed && ! ctx->ui.read_only_notified) {
+        ctx->ui.read_only_notified = true;
+        Sculptor::notify_warning("Synth: envelope points overlap; the curve is read-only");
+    }
+    Sculptor::EnvelopeCurveEdit edit;
+    Sculptor::gui_envelope_curve(&ctx->ui, *env, interactive, &edit);
+    if (edit.kind == Sculptor::EnvelopeEditKind::none) {
+        return widget_height;
+    }
+    if (edit.kind == Sculptor::EnvelopeEditKind::select_node) {
+        // Eventless selection: no undo entry, no drag, no menu.
+        osc_graph.set_selected(ctx->node_idx, true);
+        return widget_height;
+    }
+    if (edit.kind == Sculptor::EnvelopeEditKind::gesture_end) {
+        ctx->gesture_active = false;
+        return widget_height;
+    }
+
+    // A re-projection or a remapped descriptor id invalidates the gesture:
+    // abort without a final commit, the graph no longer matches what the
+    // user started dragging.
+    if (ctx->gesture_active && (ctx->generation != osc_graph_generation || ctx->gesture_desc_id != desc_id)) {
+        ctx->gesture_active = false;
+        return widget_height;
+    }
+
+    const bool gesture_edit = edit.kind == Sculptor::EnvelopeEditKind::move ||
+                              edit.kind == Sculptor::EnvelopeEditKind::set_position ||
+                              edit.kind == Sculptor::EnvelopeEditKind::set_value;
+    if (gesture_edit && ! ctx->gesture_active) {
+        ctx->gesture_start   = *env;
+        ctx->gesture_desc_id = desc_id;
+        ctx->generation      = osc_graph_generation;
+        ctx->gesture_tag     = Sculptor::UndoGroupTag{ osc_tag_fresh, ++osc_fresh_tag_serial, 0 };
+        Sculptor::undo_group_reset(&osc_undo_group);
+        ctx->gesture_active = true;
+    }
+
+    // Drag edits apply to the drag-start copy so per-frame commits never
+    // feed back into the target position; typed edits apply to the current
+    // committed descriptor, each keystroke restating the absolute value.
+    const Synth::EnvelopeDescriptor& source = edit.kind == Sculptor::EnvelopeEditKind::move ? ctx->gesture_start : *env;
+    Synth::EnvelopeDescriptor        edited;
+    bool                             ok = false;
+    switch (edit.kind) {
+        case Sculptor::EnvelopeEditKind::move:
+            ok = Sculptor::env_move_point(source, edit.point_idx, edit.position, edit.value, &edited);
+            break;
+        case Sculptor::EnvelopeEditKind::set_position:
+            ok = Sculptor::env_move_point(*env,
+                                          edit.point_idx,
+                                          edit.position,
+                                          env->points[edit.point_idx].value,
+                                          &edited);
+            break;
+        case Sculptor::EnvelopeEditKind::set_value:
+            ok = Sculptor::env_move_point(*env,
+                                          edit.point_idx,
+                                          env->points[edit.point_idx].position,
+                                          edit.value,
+                                          &edited);
+            break;
+        case Sculptor::EnvelopeEditKind::insert_before:
+            ok = Sculptor::env_insert_point(*env, edit.point_idx, false, &edited);
+            break;
+        case Sculptor::EnvelopeEditKind::insert_after:
+            ok = Sculptor::env_insert_point(*env, edit.point_idx, true, &edited);
+            break;
+        case Sculptor::EnvelopeEditKind::remove:
+            ok = Sculptor::env_remove_point(*env, edit.point_idx, &edited);
+            break;
+        case Sculptor::EnvelopeEditKind::sustain_first:
+            ok = Sculptor::env_set_sustain_first(*env, edit.point_idx, &edited);
+            break;
+        case Sculptor::EnvelopeEditKind::sustain_last:
+            ok = Sculptor::env_set_sustain_last(*env, edit.point_idx, &edited);
+            break;
+        case Sculptor::EnvelopeEditKind::none:
+        case Sculptor::EnvelopeEditKind::gesture_end:
+        case Sculptor::EnvelopeEditKind::select_node:
+            break;
+    }
+    if (! ok) {
+        if (gesture_edit) {
+            // A refused mid-gesture edit must not coalesce into the next
+            // gesture; end the gesture without publishing.
+            ctx->gesture_active = false;
+            Sculptor::undo_group_reset(&osc_undo_group);
+        }
+        else {
+            const bool insert_edit = edit.kind == Sculptor::EnvelopeEditKind::insert_before ||
+                                     edit.kind == Sculptor::EnvelopeEditKind::insert_after;
+            Sculptor::notify_warning(insert_edit ? "Synth: no room for another envelope point here"
+                                                 : "Synth: envelope edit rejected");
+        }
+        return widget_height;
+    }
+
+    candidate                                     = instr_bank;
+    candidate.bank.envelopes.entries[desc_id - 1] = edited;
+    const Sculptor::UndoGroupTag tag =
+        gesture_edit ? ctx->gesture_tag : Sculptor::UndoGroupTag{ osc_tag_fresh, ++osc_fresh_tag_serial, 0 };
+    if (! ctx->editor->commit_candidate(candidate, tag)) {
+        Sculptor::undo_group_reset(&osc_undo_group);
+        ctx->gesture_active = false;
+        return widget_height;
+    }
+
+    // Structural edits move the selection onto the affected point.
+    switch (edit.kind) {
+        case Sculptor::EnvelopeEditKind::insert_before:
+            ctx->ui.selected_point = static_cast<int32_t>(edit.point_idx);
+            break;
+        case Sculptor::EnvelopeEditKind::insert_after:
+            ctx->ui.selected_point = static_cast<int32_t>(edit.point_idx + 1);
+            break;
+        case Sculptor::EnvelopeEditKind::remove:
+            if (ctx->ui.selected_point > static_cast<int32_t>(edit.point_idx)) {
+                --ctx->ui.selected_point;
+            }
+            else if (ctx->ui.selected_point == static_cast<int32_t>(edit.point_idx)) {
+                ctx->ui.selected_point = static_cast<int32_t>(edit.point_idx) - 1;
+            }
+            break;
+        case Sculptor::EnvelopeEditKind::sustain_first:
+        case Sculptor::EnvelopeEditKind::sustain_last:
+            if (ctx->ui.selected_point >= static_cast<int32_t>(edited.num_points)) {
+                ctx->ui.selected_point = static_cast<int32_t>(edited.num_points) - 1;
+            }
+            break;
+        default:
+            break;
+    }
+    return widget_height;
+}
 
 Sculptor::SynthEditor::SynthEditor()
 {
@@ -1261,7 +1477,7 @@ void Sculptor::SynthEditor::do_osc_add_generator(bool is_env)
         Synth::LFODescriptor& lfo  = candidate.bank.lfos.entries[slot];
         lfo                        = Synth::LFODescriptor{};
         lfo.wave                   = Synth::WaveType::sine_wave;
-        lfo.period_ms              = 300; // a zero period would not oscillate
+        lfo.period_ms              = 250; // a zero period would not oscillate
         lfo.min_value              = -1.0f;
         lfo.min_max_delta          = 2.0f;
         record.index               = static_cast<uint8_t>(slot + 1);
@@ -1274,6 +1490,7 @@ void Sculptor::SynthEditor::do_osc_add_generator(bool is_env)
                          Sculptor::UndoGroupTag{ is_env ? osc_tag_add_env : osc_tag_add_lfo, channel, zone }))
         osc_graph_reproject = true;
 }
+
 // Canvas menu "Add Parameter": a free-standing Volume parameter node at
 // the menu position, via a kind-3 record; the re-projection builds the node.
 void Sculptor::SynthEditor::do_osc_add_parameter()

@@ -684,6 +684,7 @@ uint8_t Sculptor::Graph::node_visual_role(const uint32_t node_idx) const
 {
     return node_visual_roles[node_idx];
 }
+
 uint8_t Sculptor::Graph::slot_visual_role(const uint32_t node_idx, const uint32_t slot_idx) const
 {
     return slot_visual_roles[node_idx * max_node_slots + slot_idx];
@@ -755,6 +756,7 @@ void Sculptor::Graph::set_slot_input(uint32_t node_idx, uint32_t slot_idx, EndPo
     connections.entries[added].output = output;
     connections.entries[added].input  = EndPoint{ node_idx, slot_idx };
 }
+
 // Eventless connection rewrite: see the header comment. The rewrite never
 // validates semantics - callers compute structurally valid endpoints (the
 // retarget shift moves a wire within one oscillator node's row block).
@@ -769,6 +771,7 @@ void Sculptor::Graph::set_connection_input(uint32_t connection_idx, EndPoint inp
     }
     connections.entries[connection_idx].input = input;
 }
+
 void Sculptor::Graph::rename_node(uint32_t node_idx, const char* name)
 {
     if (node_idx >= max_nodes || ! nodes.is_occupied(node_idx) || ! name) {
@@ -1026,13 +1029,19 @@ void Sculptor::Graph::set_node_color(uint32_t node_idx, uint32_t packed_rgba)
     push_change(ChangeKind::color_changed, node_idx, pool_no_slot, pool_no_slot);
 }
 
-void Sculptor::Graph::set_state_widget(uint32_t node_idx, StateWidgetCallback callback, void* user_data)
+void Sculptor::Graph::set_state_widget(uint32_t            node_idx,
+                                       StateWidgetCallback callback,
+                                       void*               user_data,
+                                       float               initial_height)
 {
     if (node_idx >= max_nodes || ! nodes.is_occupied(node_idx)) {
         return;
     }
     nodes.entries[node_idx].state_widget      = callback;
     nodes.entries[node_idx].state_widget_data = user_data;
+    if (initial_height > 0.0f) {
+        state_widget_heights[node_idx] = initial_height;
+    }
 }
 
 void Sculptor::Graph::set_state_callbacks(SerializeState serialize, DeserializeState deserialize, void* user_data)
@@ -1463,6 +1472,7 @@ const Sculptor::Node& Sculptor::Graph::node(uint32_t node_idx) const
     assert(nodes.is_occupied(node_idx));
     return nodes.entries[node_idx];
 }
+
 bool Sculptor::Graph::node_occupied(uint32_t node_idx) const
 {
     return node_idx < max_nodes && nodes.is_occupied(node_idx);

@@ -20,13 +20,16 @@ public:
     ~SynthEditor() override = default;
 
     const char* get_editor_name() const override { return "Synth"; }
-    bool        create_gui_frame(uint32_t image_idx, bool* need_realloc, const UserInput& input) override;
+
+    bool create_gui_frame(uint32_t image_idx, bool* need_realloc, const UserInput& input) override;
 
     // Per-frame work that must run even when the editor is disabled: publish
     // pumping.  Called before the editors loop.
     void delayed_updates();
     bool allocate_resources() override;
+
     void free_resources() override {}
+
     bool draw_frame(VkCommandBuffer cmdbuf, uint32_t image_idx) override { return true; }
 
 private:
@@ -35,19 +38,26 @@ private:
     void rederive_zone_selection(uint32_t channel);
     void rederive_all_selections();
     bool commit_candidate(const Synth::InstrumentEditorBank& candidate, Sculptor::UndoGroupTag tag);
-    void do_initialize(uint32_t channel);
-    void do_delete(uint32_t channel);
-    void do_zone_join_previous(uint32_t channel, uint32_t note);
-    void do_zone_join_next(uint32_t channel, uint32_t note);
-    void do_zone_split_new(uint32_t channel, uint32_t note);
-    void do_zone_delete(uint32_t channel, uint32_t entry);
-    void gui_osc_graph(uint32_t channel);
-    void drain_osc_graph(uint32_t channel, uint32_t zone);
-    void run_osc_canvas_command();
-    void do_osc_add_oscillator();
-    void do_osc_add_generator(bool is_env);
-    void do_osc_add_parameter();
-    void do_osc_change_target_param(uint32_t node_idx, uint32_t new_target);
+    // Projects the bank onto the oscillator graph and binds the envelope
+    // curve state widgets onto the envelope nodes.
+    void reproject_osc_graph(uint32_t channel, uint32_t zone);
+    // State-widget entry for envelope curve editing; the per-node context
+    // carries the editor pointer so the thunk can commit through the normal
+    // candidate path.
+    static int envelope_state_widget_entry(void* user_data);
+    void       do_initialize(uint32_t channel);
+    void       do_delete(uint32_t channel);
+    void       do_zone_join_previous(uint32_t channel, uint32_t note);
+    void       do_zone_join_next(uint32_t channel, uint32_t note);
+    void       do_zone_split_new(uint32_t channel, uint32_t note);
+    void       do_zone_delete(uint32_t channel, uint32_t entry);
+    void       gui_osc_graph(uint32_t channel);
+    void       drain_osc_graph(uint32_t channel, uint32_t zone);
+    void       run_osc_canvas_command();
+    void       do_osc_add_oscillator();
+    void       do_osc_add_generator(bool is_env);
+    void       do_osc_add_parameter();
+    void       do_osc_change_target_param(uint32_t node_idx, uint32_t new_target);
 
     void gui_channel_list();
     void gui_channel_pane(uint32_t channel);

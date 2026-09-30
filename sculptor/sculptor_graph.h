@@ -286,8 +286,14 @@ public:
     void set_colors(const GraphColors& colors);                   // caller-provided default set
     void set_node_color(uint32_t node_idx, uint32_t packed_rgba); // 0 = default
 
-    // Optional state widget drawn at the bottom of the node.
-    void set_state_widget(uint32_t node_idx, StateWidgetCallback callback, void* user_data);
+    // Optional state widget drawn at the bottom of the node.  The node is
+    // laid out from the widget's height one frame before the widget's first
+    // draw reports it, so a caller that knows the height up front passes it
+    // to keep the first frame after attach laid out correctly.
+    void set_state_widget(uint32_t            node_idx,
+                          StateWidgetCallback callback,
+                          void*               user_data,
+                          float               initial_height = 0.0f);
 
     // Persistence (M4): save writes a tightly packed, versioned snapshot:
     // u16 version, graph pools, view state, colors, ghost flags, then - if

@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2021-2026 Chris Dragan
 
 #include "sculptor_osc_graph.h"
+#include "sculptor_instr_envelope_edit.h"
 
 #include <cassert>
 #include <cmath>
@@ -155,6 +156,7 @@ constexpr uint32_t param_src_op_prop(uint32_t i)
 {
     return 8u + 3u * i;
 }
+
 constexpr uint32_t param_src_scale_prop(uint32_t i)
 {
     return 9u + 3u * i;
@@ -516,14 +518,14 @@ uint32_t create_env_node(Sculptor::Graph*                 graph,
         return Sculptor::pool_no_slot;
     }
     // Records carry arbitrary (unsnapped) editor positions; the exact
-    // position overrides create_node's grid snap.
-    graph->set_node_layout(node, position, 0.0f, 0.0f);
+    // position overrides create_node's grid snap.  Envelope nodes are wider
+    // so the curve widget has room to work.
+    graph->set_node_layout(node, position, Sculptor::envelope_node_content_width, 0.0f);
     graph->add_slot(node, output_slot("Value"));
     graph->add_slot(node, real_slot("Value (min)", env.min_value));
-    graph->add_slot(node, real_slot("Value (max)", env.min_max_delta));
-    graph->add_slot(node, int_slot("sustain_first", env.sustain_first_point));
-    graph->add_slot(node, int_slot("sustain_last", env.sustain_last_point));
-    graph->add_slot(node, int_slot("num_points", env.num_points));
+    graph->add_slot(node, real_slot("Value (max)", env.min_value + 65535.0f * env.min_max_delta));
+    // Point and sustain editing lives in the curve state widget; property
+    // slots for those fields would be a second stale UI over the same data.
     return node;
 }
 
@@ -540,13 +542,11 @@ uint32_t create_lfo_node(Sculptor::Graph*            graph,
     // position overrides create_node's grid snap.
     graph->set_node_layout(node, position, 0.0f, 0.0f);
     graph->add_slot(node, output_slot("Value"));
-    graph->add_slot(node, input_slot("depth"));
-    graph->add_slot(node, input_slot("rate"));
+    graph->add_slot(node, input_slot("Depth"));
+    graph->add_slot(node, input_slot("Rate"));
     graph->add_slot(node, list_slot("Waveform", wave_names, 5, static_cast<uint32_t>(lfo.wave)));
     graph->add_slot(node, bounded_real_slot("Duty", static_cast<float>(lfo.duty) / 255.0f, 0.0f, 1.0f));
     graph->add_slot(node, int_slot("Period (ms)", lfo.period_ms));
-    graph->add_slot(node, real_slot("Value (min)", lfo.min_value));
-    graph->add_slot(node, real_slot("Value (max)", lfo.min_max_delta));
     return node;
 }
 
@@ -893,6 +893,7 @@ bool Sculptor::param_target_has_recordless_derived(const OscGraphMapping& mappin
     }
     return false;
 }
+
 // One-based ordinal of the parameter among its target's derived
 // parameters in enumeration order (== projection layer order). A kind-3
 // record stores this ordinal so re-projection pairs it with the same
@@ -1701,25 +1702,21 @@ bool Sculptor::apply_osc_graph_descriptor_edit(const Graph&           graph,
         }
         Synth::EnvelopeDescriptor& env = bank->envelopes.entries[desc_id - 1];
         if (slot.property_type == PropertyType::real) {
+            // The runtime evaluates the curve as min_value + raw_value *
+            // min_max_delta with raw_value in 0..65535, so the slots expose
+            // the effective range endpoints: the top re-derives the span
+            // (max - min) / 65535, and moving the floor pins the top.
             if (strncmp(slot.name, "Value (min)", sizeof(slot.name)) == 0) {
-                env.min_value = value.real;
+                const float max_value = env.min_value + 65535.0f * env.min_max_delta;
+                env.min_value         = value.real;
+                env.min_max_delta     = (max_value - env.min_value) / 65535.0f;
                 return true;
             }
             if (strncmp(slot.name, "Value (max)", sizeof(slot.name)) == 0) {
-                env.min_max_delta = value.real;
+                env.min_max_delta = (value.real - env.min_value) / 65535.0f;
                 return true;
             }
             return false;
-        }
-        if (slot.property_type == PropertyType::integer && value.integer >= 0 && value.integer <= 255) {
-            if (strncmp(slot.name, "sustain_first", sizeof(slot.name)) == 0) {
-                env.sustain_first_point = static_cast<uint8_t>(value.integer);
-                return true;
-            }
-            if (strncmp(slot.name, "sustain_last", sizeof(slot.name)) == 0) {
-                env.sustain_last_point = static_cast<uint8_t>(value.integer);
-                return true;
-            }
         }
         return false;
     }
@@ -1729,14 +1726,6 @@ bool Sculptor::apply_osc_graph_descriptor_edit(const Graph&           graph,
     }
     Synth::LFODescriptor& lfo = bank->lfos.entries[desc_id - 1];
     if (slot.property_type == PropertyType::real) {
-        if (strncmp(slot.name, "Value (min)", sizeof(slot.name)) == 0) {
-            lfo.min_value = value.real;
-            return true;
-        }
-        if (strncmp(slot.name, "Value (max)", sizeof(slot.name)) == 0) {
-            lfo.min_max_delta = value.real;
-            return true;
-        }
         return false;
     }
     if (slot.property_type == PropertyType::list) {
@@ -2453,6 +2442,7 @@ bool apply_node_deleted(Synth::InstrumentEditorBank* bank,
     }
     return true; // fixed nodes are vetoed upstream; nothing else carries state
 }
+
 // The missing-sum bits live in the bank (they outlive the mapping) and
 // are file-local: only this TU reads and clears them.
 void set_missing_sum_bit(Synth::InstrumentEditorBank* bank,
@@ -2530,6 +2520,19 @@ bool apply_connection_change(Synth::InstrumentEditorBank* bank,
             }
         }
     }
+    // A first LFO wire adopts an audible depth: the row's depth defaults to
+    // 0, which silences the LFO entirely, and 0 is almost never the intent.
+    if (change.kind == Sculptor::ChangeKind::connection_added && change.connection_idx < Sculptor::max_connections &&
+        graph->connection_occupied(change.connection_idx) && change.connection_input.slot_idx == param_lfo_input) {
+        const int32_t p = find_param(*mapping, change.connection_input.node_idx);
+        if (p >= 0 && graph->node_occupied(change.connection_input.node_idx)) {
+            const uint32_t param_node = mapping->params[p].node_idx;
+            if (graph->node(param_node).slots.entries[param_lfo_depth_prop].value.real == 0.0f) {
+                graph->set_slot_value(param_node, param_lfo_depth_prop, Sculptor::PropertyValue{ .real = 0.5f });
+            }
+        }
+    }
+
     // The missing-sum bits track the event, not the graph state: by the time
     // a deletion event is drained the pool slot may already be freed or
     // reused, so the endpoint pair rides in the event itself.
@@ -2891,10 +2894,12 @@ uint32_t group_depth_source(const ParamGroup& group)
 {
     return group.lfo_desc_id == 0 ? 0 : group.depth_source;
 }
+
 uint32_t group_rate_source(const ParamGroup& group)
 {
     return group.lfo_desc_id == 0 ? 0 : group.rate_source;
 }
+
 uint32_t count_surplus_params(const Synth::InstrumentEditorBank& bank,
                               uint32_t                           channel,
                               uint32_t                           zone,

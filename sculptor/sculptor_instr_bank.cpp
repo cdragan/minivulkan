@@ -31,50 +31,6 @@ static_assert(bank_json_staging_reservation + 2 * (Synth::library_max_records * 
               16 * 1024 * 1024);
 
 // Factory default state: the first-run bank the editor builds for a fresh project.
-// master_lfos: 1 = FIR cutoff sweep.
-namespace {
-// Demo master chain: reverb, compressor, then an FIR lowpass whose cutoff a 4 s triangle
-// (sawtooth at duty 0x7F) sweeps through a bank binding (base = sweep center, depth = half
-// the sweep span).
-const Synth::LFODescriptor master_lfos[1] = {
-    { Synth::WaveType::sawtooth_wave, 0x7F, 4000, 0.0f, 1.0f },
-};
-
-const Synth::EffectChainBinding recipe_master_chain = {
-    .num_effects = 3,
-    .effects = {
-        {
-            .type = Synth::EffectType::reverb,
-            .enabled = true,
-            .bindings = {
-                { 0.7f, 0, Synth::SourceOp::add, 0.0f, Synth::ModSource::none, Synth::ModSource::none, 0.0f, 0, { } },
-                { 0.5f, 0, Synth::SourceOp::add, 0.0f, Synth::ModSource::none, Synth::ModSource::none, 0.0f, 0, { } },
-                { 0.3f, 0, Synth::SourceOp::add, 0.0f, Synth::ModSource::none, Synth::ModSource::none, 0.0f, 0, { } },
-            },
-        },
-        {
-            .type = Synth::EffectType::compressor,
-            .enabled = true,
-            .bindings = {
-                { 0.3f, 0, Synth::SourceOp::add, 0.0f, Synth::ModSource::none, Synth::ModSource::none, 0.0f, 0, { } },
-                { 4.0f, 0, Synth::SourceOp::add, 0.0f, Synth::ModSource::none, Synth::ModSource::none, 0.0f, 0, { } },
-                { 0.9f, 0, Synth::SourceOp::add, 0.0f, Synth::ModSource::none, Synth::ModSource::none, 0.0f, 0, { } },
-                { 0.9995f, 0, Synth::SourceOp::add, 0.0f, Synth::ModSource::none, Synth::ModSource::none, 0.0f, 0, { } },
-                { 1.5f, 0, Synth::SourceOp::add, 0.0f, Synth::ModSource::none, Synth::ModSource::none, 0.0f, 0, { } },
-            },
-        },
-        {
-            .type = Synth::EffectType::fir,
-            .enabled = true,
-            .bindings = {
-                { 3125.0f, 1, Synth::SourceOp::add, 2875.0f, Synth::ModSource::none, Synth::ModSource::none, 0.0f, 0, { } },
-                { 0.0f, 0, Synth::SourceOp::add, 0.0f, Synth::ModSource::none, Synth::ModSource::none, 0.0f, 0, { } },
-            },
-        },
-    },
-};
-
-} // namespace
 
 bool Synth::init_default_channel(InstrumentBank* bank, uint32_t channel)
 {
@@ -106,15 +62,12 @@ void Synth::init_default_bank(InstrumentBank* bank)
     memset(bank, 0, sizeof(*bank));
     bank->drum_track_channel = 9;
 
-    // A fresh bank always has room; the master chain's LFO remap cannot fail either.
+    // A fresh bank is bare: the default instrument only, no master LFOs and
+    // no effect chains, so the instrument's own envelope is what you hear.
     if (! init_default_channel(bank, 0)) {
         return; // A fresh bank always has room for the default channel.
     }
     bank->channel_enabled[0] = 1;
-
-    uint16_t master_lfo_ids[1];
-    remap_lfos(bank, master_lfos, 1, master_lfo_ids);
-    remap_effect_chain(recipe_master_chain, master_lfo_ids, &bank->master_chain);
 }
 
 void Synth::get_zone_name(const Synth::InstrumentEditorBank* editor_bank,

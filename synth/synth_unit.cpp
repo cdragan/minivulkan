@@ -5,6 +5,7 @@
 #include "../sculptor/sculptor_bank_json.h"
 #include "../sculptor/sculptor_graph.h"
 #include "../sculptor/sculptor_instr_bank.h"
+#include "../sculptor/sculptor_instr_envelope_edit.h"
 #include "../sculptor/sculptor_instr_library.h"
 #include "../sculptor/sculptor_osc_graph.h"
 #include "midi_file.h"
@@ -24,7 +25,8 @@
         failed(#test, __FILE__, __LINE__); \
     }
 
-static int  exit_code = 0;
+static int exit_code = 0;
+
 static void failed(const char* test, const char* file, int line)
 {
     exit_code = 1;
@@ -1674,9 +1676,9 @@ int main()
         TEST(bank.channel_zones[0][0].instrument == 0);
         TEST(bank.instruments.num_allocated == 1);
         TEST(bank.envelopes.num_allocated == 0);       // bare default: no descriptors
-        TEST(bank.lfos.num_allocated == 1);            // master FIR sweep only
+        TEST(bank.lfos.num_allocated == 0);            // bare default: no master LFOs
         TEST(bank.channel_chains[0].num_effects == 0); // bare default: no chain
-        TEST(bank.master_chain.num_effects == 3);
+        TEST(bank.master_chain.num_effects == 0);      // bare default: no master effects
         // The bare default instrument: one sine layer, neutral shared routing.
         const Synth::Instrument& instr = bank.instruments.entries[0];
         TEST(instr.layer_count == 1);
@@ -1690,7 +1692,6 @@ int main()
         }
         TEST(instr.routing[Synth::mod_volume].base_value == 1.0f);
         TEST(instr.routing[Synth::mod_panning].base_value == 0.5f);
-        TEST(bank.master_chain.effects[2].bindings[0].lfo_desc_id == 1);
     }
 
     // init_default_channel into a populated bank appends a bare instrument and
@@ -3394,6 +3395,7 @@ int main()
                     char     name[Synth::library_name_len];
                     uint32_t payload_size;
                 } record = {};
+
                 snprintf(record.category, sizeof(record.category), "Cat");
                 snprintf(record.name, sizeof(record.name), "N%03u", r);
                 record.payload_size = 2;
@@ -4420,11 +4422,30 @@ int main()
         const Synth::LFODescriptor saved_lfo = bank.lfos.entries[lfo_id - 1];
         TEST(Sculptor::apply_osc_graph_descriptor_edit(graph, mapping, &bank, lfo_a, slot, edited));
         TEST(memcmp(&saved_lfo, &bank.lfos.entries[lfo_id - 1], sizeof(Synth::LFODescriptor)) == 0);
-        // Envelope content through the shared envelope instance.
+        // Envelope content through the shared envelope instance.  "Value
+        // (min)" pins the effective top: moving the floor re-derives the
+        // span so the max stays where it was.
         TEST(find_graph_slot(graph, env_node, "Value (min)", &slot));
-        edited.real = -0.75f;
+        const float old_max = bank.envelopes.entries[shared_env_id - 1].min_value +
+                              65535.0f * bank.envelopes.entries[shared_env_id - 1].min_max_delta;
+        edited.real         = -0.75f;
         TEST(Sculptor::apply_osc_graph_descriptor_edit(graph, mapping, &bank, env_node, slot, edited));
         TEST(bank.envelopes.entries[shared_env_id - 1].min_value == -0.75f);
+        TEST(approx(bank.envelopes.entries[shared_env_id - 1].min_value +
+                        65535.0f * bank.envelopes.entries[shared_env_id - 1].min_max_delta,
+                    old_max,
+                    1.0e-5f));
+        // "Value (max)" is the effective value at full scale: the descriptor
+        // stores the span (max - min) / 65535, so a full-scale point lands
+        // exactly on the max instead of multiplying it by 65535.
+        TEST(find_graph_slot(graph, env_node, "Value (max)", &slot));
+        edited.real = 1.0f;
+        TEST(Sculptor::apply_osc_graph_descriptor_edit(graph, mapping, &bank, env_node, slot, edited));
+        TEST(approx(bank.envelopes.entries[shared_env_id - 1].min_max_delta, 1.75f / 65535.0f, 1.0e-9f));
+        TEST(approx(bank.envelopes.entries[shared_env_id - 1].min_value +
+                        65535.0f * bank.envelopes.entries[shared_env_id - 1].min_max_delta,
+                    1.0f,
+                    1.0e-6f));
         // Non-descriptor slots refuse.
         edited.integer = 1;
         TEST(! Sculptor::apply_osc_graph_descriptor_edit(graph, mapping, &bank, mapping.osc_nodes[0], 0, edited));
@@ -5170,6 +5191,11 @@ int main()
     {
         static Synth::InstrumentEditorBank bank;
         Synth::init_default_bank(&bank.bank);
+        // The detached-layout bounds tests need one descriptor in the pool:
+        // ids at the allocated bound decode, one past it refuse.
+        TEST(bank.bank.lfos.allocate() == 0);
+        bank.bank.lfos.entries[0].wave      = Synth::WaveType::sine_wave;
+        bank.bank.lfos.entries[0].period_ms = 50;
         static Synth::InstrumentEditorBank restored;
         static char                        editor_json[256 * 1024];
 
@@ -5188,7 +5214,7 @@ int main()
         TEST(! decode_bank_with_editor_section(bank, editor_json, &restored));
 
         // Detached descriptor id outside the pool's allocated range (the
-        // default bank's LFO pool holds 1 descriptor, the master sweep).
+        // test bank's LFO pool holds 1 descriptor).
         build_detached_layouts_json(editor_json, sizeof(editor_json), 1, 1, 2, 4, 0, 0);
         TEST(! decode_bank_with_editor_section(bank, editor_json, &restored));
         build_detached_layouts_json(editor_json, sizeof(editor_json), 1, 1, 2, 2, 0, 0);
@@ -9067,6 +9093,315 @@ int main()
         TEST(! Synth::decode_editor_bank_json(doc, static_cast<uint32_t>(strlen(doc)), &decoded));
         snprintf(doc, sizeof(doc), "{\"instrument_editor_bank\":{},\"x\":{\"a\":1}{\"b\":2}}");
         TEST(! Synth::decode_editor_bank_json(doc, static_cast<uint32_t>(strlen(doc)), &decoded));
+    }
+
+    // Envelope curve edit constraints: the editing helpers accept only
+    // requests that leave the descriptor valid, clamp into the free
+    // neighbor range, and leave the output untouched on rejection.
+    {
+        Synth::EnvelopeDescriptor base = {};
+        base.num_points                = 4;
+        base.sustain_first_point       = 1;
+        base.sustain_last_point        = 2;
+        base.min_value                 = -1.0f;
+        base.min_max_delta             = 2.0f;
+        base.points[0]                 = { 0, 0x2000 };
+        base.points[1]                 = { 100, 0x8000 };
+        base.points[2]                 = { 200, 0x4000 };
+        base.points[3]                 = { 300, 0 };
+
+        TEST(Sculptor::env_positions_strictly_increasing(base));
+
+        // A descriptor with duplicate positions (the hand-built-JSON zero
+        // run) is a read-only source: every edit rejects and leaves the
+        // output untouched.
+        {
+            Synth::EnvelopeDescriptor bad = base;
+            bad.points[2].position        = 100;
+            TEST(! Sculptor::env_positions_strictly_increasing(bad));
+            Synth::EnvelopeDescriptor out = base;
+            TEST(! Sculptor::env_move_point(bad, 1, 50, 0x1000, &out));
+            TEST(! Sculptor::env_insert_point(bad, 1, true, &out));
+            TEST(! Sculptor::env_remove_point(bad, 2, &out));
+            TEST(! Sculptor::env_set_sustain_first(bad, 3, &out));
+            TEST(out.num_points == 4 && out.points[1].position == 100);
+            TEST(out.points[2].position == 200 && out.sustain_last_point == 2);
+        }
+        // The validator's leading run of zero positions is equally read-only
+        // for editing, and the sustain setters repair nothing there.
+        {
+            Synth::EnvelopeDescriptor bad = base;
+            bad.points[1].position        = 0;
+            TEST(! Sculptor::env_positions_strictly_increasing(bad));
+            Synth::EnvelopeDescriptor out = base;
+            TEST(! Sculptor::env_move_point(bad, 2, 50, 0x1000, &out));
+            TEST(! Sculptor::env_insert_point(bad, 2, false, &out));
+            TEST(! Sculptor::env_remove_point(bad, 3, &out));
+            TEST(! Sculptor::env_set_sustain_last(bad, 3, &out));
+            TEST(out.num_points == 4 && out.points[3].position == 300);
+        }
+        // A point count beyond the array bound rejects before any indexing.
+        {
+            Synth::EnvelopeDescriptor bad = base;
+            bad.num_points                = Synth::max_envelope_points + 1;
+            TEST(! Sculptor::env_positions_strictly_increasing(bad));
+            Synth::EnvelopeDescriptor out = base;
+            TEST(! Sculptor::env_move_point(bad, 1, 50, 0x1000, &out));
+            TEST(! Sculptor::env_insert_point(bad, 1, true, &out));
+            TEST(! Sculptor::env_remove_point(bad, 1, &out));
+            TEST(! Sculptor::env_set_sustain_first(bad, 1, &out));
+            TEST(out.num_points == 4);
+        }
+        // Sustain indices outside the point range make move/insert/remove
+        // reject, while the sustain setters can repair the descriptor.
+        {
+            Synth::EnvelopeDescriptor bad = base;
+            bad.sustain_first_point       = 2;
+            bad.sustain_last_point        = 1;
+            TEST(Sculptor::env_positions_strictly_increasing(bad));
+            Synth::EnvelopeDescriptor out = base;
+            TEST(! Sculptor::env_move_point(bad, 1, 50, 0x1000, &out));
+            TEST(! Sculptor::env_insert_point(bad, 1, true, &out));
+            TEST(! Sculptor::env_remove_point(bad, 2, &out));
+            TEST(Sculptor::env_set_sustain_last(bad, 3, &out));
+            TEST(out.sustain_first_point == 2 && out.sustain_last_point == 3);
+            TEST(out.num_points == 4 && out.points[1].position == 100);
+        }
+
+        // Out-of-range point indices reject.
+        {
+            Synth::EnvelopeDescriptor out = base;
+            TEST(! Sculptor::env_move_point(base, 4, 50, 0x1000, &out));
+            TEST(! Sculptor::env_insert_point(base, 4, true, &out));
+            TEST(! Sculptor::env_remove_point(base, 4, &out));
+            TEST(! Sculptor::env_set_sustain_last(base, 4, &out));
+            TEST(out.num_points == 4);
+        }
+
+        // Moves clamp strictly between the neighbors (the first point into
+        // [0, next-1], the last into [prev+1, 65535]).
+        {
+            Synth::EnvelopeDescriptor out = base;
+            TEST(Sculptor::env_move_point(base, 1, 150, 0xFFFF, &out));
+            TEST(out.points[1].position == 150 && out.points[1].value == 0xFFFF);
+            TEST(out.num_points == 4 && out.sustain_first_point == 1 && out.sustain_last_point == 2);
+            TEST(out.points[0].position == 0 && out.points[2].position == 200);
+        }
+        {
+            Synth::EnvelopeDescriptor out = base;
+            TEST(Sculptor::env_move_point(base, 1, 250, 0x8000, &out));
+            TEST(out.points[1].position == 199);
+        }
+        {
+            Synth::EnvelopeDescriptor out = base;
+            TEST(Sculptor::env_move_point(base, 2, 10, 0x8000, &out));
+            TEST(out.points[2].position == 101);
+        }
+        {
+            Synth::EnvelopeDescriptor out = base;
+            TEST(Sculptor::env_move_point(base, 0, 5000, 0x1234, &out));
+            TEST(out.points[0].position == 99 && out.points[0].value == 0x1234);
+        }
+        {
+            Synth::EnvelopeDescriptor out = base;
+            TEST(Sculptor::env_move_point(base, 3, 0, 0x1234, &out));
+            TEST(out.points[3].position == 201);
+            TEST(out.points[3].value == 0x1234);
+        }
+
+        // Inserts copy the reference value; interior insertions land at the
+        // midpoint of the free range, endpoint insertions just past the
+        // endpoint.
+        {
+            Synth::EnvelopeDescriptor out = base;
+            TEST(Sculptor::env_insert_point(base, 3, true, &out));
+            TEST(out.num_points == 5);
+            TEST(out.points[4].position == 301 && out.points[4].value == 0);
+            TEST(out.points[3].position == 300 && out.points[0].position == 0);
+            TEST(out.sustain_first_point == 1 && out.sustain_last_point == 2);
+        }
+        {
+            Synth::EnvelopeDescriptor out = base;
+            TEST(Sculptor::env_insert_point(base, 1, true, &out));
+            TEST(out.num_points == 5);
+            TEST(out.points[2].position == 150 && out.points[2].value == 0x8000);
+            TEST(out.sustain_first_point == 1 && out.sustain_last_point == 3);
+            // In-place insertion copies the reference value, not whatever
+            // the shift has already overwritten.
+            Synth::EnvelopeDescriptor in_place = base;
+            TEST(Sculptor::env_insert_point(in_place, 1, false, &in_place));
+            TEST(in_place.num_points == 5);
+            TEST(in_place.points[1].position == 50 && in_place.points[1].value == 0x8000);
+            TEST(in_place.points[2].position == 100 && in_place.points[2].value == 0x8000);
+        }
+        // Inserting before the sustain start shifts the whole span right.
+        {
+            Synth::EnvelopeDescriptor src = base;
+            src.points[0].position        = 100;
+            src.points[1].position        = 200;
+            src.points[2].position        = 300;
+            src.points[3].position        = 400;
+            Synth::EnvelopeDescriptor out = base;
+            TEST(Sculptor::env_insert_point(src, 0, false, &out));
+            TEST(out.num_points == 5);
+            TEST(out.points[0].position == 99);
+            TEST(out.points[1].position == 100);
+            TEST(out.sustain_first_point == 2 && out.sustain_last_point == 3);
+        }
+        // Before the first point at tick 0 has no free tick above it.
+        {
+            Synth::EnvelopeDescriptor out = base;
+            TEST(! Sculptor::env_insert_point(base, 0, false, &out));
+            TEST(out.num_points == 4);
+        }
+        // Adjacent interior points leave no free tick on either side.
+        {
+            Synth::EnvelopeDescriptor src = base;
+            src.points[1].position        = 99;
+            src.points[2].position        = 100;
+            Synth::EnvelopeDescriptor out = base;
+            TEST(! Sculptor::env_insert_point(src, 1, true, &out));
+            TEST(! Sculptor::env_insert_point(src, 2, false, &out));
+            TEST(out.num_points == 4);
+        }
+        // A last point at the top of the range leaves no room after it.
+        {
+            Synth::EnvelopeDescriptor src = base;
+            src.points[3].position        = 65535;
+            Synth::EnvelopeDescriptor out = base;
+            TEST(! Sculptor::env_insert_point(src, 3, true, &out));
+            TEST(out.num_points == 4);
+        }
+        // Single-point envelopes can only grow forward.
+        {
+            Synth::EnvelopeDescriptor src = {};
+            src.num_points                = 1;
+            src.sustain_first_point       = 0;
+            src.sustain_last_point        = 0;
+            src.points[0]                 = { 0, 0x8000 };
+            Synth::EnvelopeDescriptor out = base;
+            TEST(! Sculptor::env_insert_point(src, 0, false, &out));
+            TEST(Sculptor::env_insert_point(src, 0, true, &out));
+            TEST(out.num_points == 2);
+            TEST(out.points[1].position == 1 && out.points[1].value == 0x8000);
+            TEST(out.sustain_first_point == 0 && out.sustain_last_point == 0);
+        }
+        // The eight-point cap rejects further insertions.
+        {
+            Synth::EnvelopeDescriptor src = base;
+            src.num_points                = Synth::max_envelope_points;
+            for (uint32_t i = 1; i < Synth::max_envelope_points; ++i) {
+                src.points[i].position = static_cast<uint16_t>(i * 100);
+            }
+            Synth::EnvelopeDescriptor out = base;
+            TEST(! Sculptor::env_insert_point(src, 3, true, &out));
+            TEST(! Sculptor::env_insert_point(src, 3, false, &out));
+            TEST(out.num_points == 4);
+        }
+
+        // Removals reject point 0 and the last remaining point, shift the
+        // tail left, zero the vacated slot, and move or clamp the sustain
+        // span.
+        {
+            Synth::EnvelopeDescriptor out = base;
+            TEST(! Sculptor::env_remove_point(base, 0, &out));
+            TEST(out.num_points == 4);
+            Synth::EnvelopeDescriptor one = {};
+            one.num_points                = 1;
+            one.points[0]                 = { 0, 0x8000 };
+            TEST(! Sculptor::env_remove_point(one, 0, &out));
+            TEST(out.num_points == 4);
+        }
+        {
+            Synth::EnvelopeDescriptor out = base;
+            TEST(Sculptor::env_remove_point(base, 1, &out));
+            TEST(out.num_points == 3);
+            TEST(out.points[0].position == 0 && out.points[1].position == 200 && out.points[2].position == 300);
+            TEST(out.points[3].position == 0 && out.points[3].value == 0);
+            TEST(out.sustain_first_point == 1 && out.sustain_last_point == 1);
+        }
+        {
+            Synth::EnvelopeDescriptor out = base;
+            TEST(Sculptor::env_remove_point(base, 3, &out));
+            TEST(out.num_points == 3);
+            TEST(out.sustain_first_point == 1 && out.sustain_last_point == 2);
+        }
+        // Removing the last point of a two-point envelope clamps the
+        // sustain span back onto the survivor.
+        {
+            Synth::EnvelopeDescriptor src = {};
+            src.num_points                = 2;
+            src.sustain_first_point       = 1;
+            src.sustain_last_point        = 1;
+            src.points[0]                 = { 0, 0x2000 };
+            src.points[1]                 = { 100, 0x8000 };
+            Synth::EnvelopeDescriptor out = base;
+            TEST(Sculptor::env_remove_point(src, 1, &out));
+            TEST(out.num_points == 1);
+            TEST(out.sustain_first_point == 0 && out.sustain_last_point == 0);
+        }
+
+        // Sustain bounds move the other bound when they would cross.
+        {
+            Synth::EnvelopeDescriptor out = base;
+            TEST(Sculptor::env_set_sustain_first(base, 0, &out));
+            TEST(out.sustain_first_point == 0 && out.sustain_last_point == 2);
+            TEST(Sculptor::env_set_sustain_first(base, 3, &out));
+            TEST(out.sustain_first_point == 3 && out.sustain_last_point == 3);
+            TEST(Sculptor::env_set_sustain_last(base, 0, &out));
+            TEST(out.sustain_first_point == 0 && out.sustain_last_point == 0);
+            TEST(Sculptor::env_set_sustain_last(base, 3, &out));
+            TEST(out.sustain_first_point == 1 && out.sustain_last_point == 3);
+        }
+
+        // Tick conversions: one tick is 256 samples at 44100 Hz; ms round
+        // trip through nearest-tick rounding.
+        {
+            TEST(approx(Sculptor::envelope_ms_per_tick, 256000.0f / 44100.0f, 0.0f));
+            TEST(approx(Sculptor::envelope_ticks_to_ms(172), 172.0f * Sculptor::envelope_ms_per_tick, 0.0f));
+            TEST(Sculptor::envelope_ms_to_ticks(0.0f) == 0);
+            TEST(Sculptor::envelope_ms_to_ticks(-1.0f) == 0);
+            TEST(Sculptor::envelope_ms_to_ticks(Sculptor::envelope_ms_per_tick) == 1);
+            TEST(Sculptor::envelope_ms_to_ticks(1000.0f) == 172);
+            TEST(Sculptor::envelope_ms_to_ticks(1.0e9f) == 65535);
+            const uint16_t ticks = Sculptor::envelope_ms_to_ticks(123.0f);
+            TEST(approx(Sculptor::envelope_ticks_to_ms(ticks), 123.0f, 3.0f));
+        }
+    }
+
+    // A widget-style edit sequence on a real bank stays valid and survives
+    // the JSON round trip byte for byte.
+    {
+        static Synth::InstrumentEditorBank bank;
+        make_valid_bank(bank.bank); // instrument 0 (env 1, lfo 1) on ch0
+
+        Synth::EnvelopeDescriptor env = bank.bank.envelopes.entries[0];
+        TEST(Sculptor::env_insert_point(env, 1, true, &env));
+        TEST(Sculptor::env_move_point(env, 2, 250, 0xC000, &env));
+        TEST(Sculptor::env_remove_point(env, 1, &env));
+        TEST(Sculptor::env_set_sustain_last(env, 1, &env));
+        // Delete down to a single point, then grow again from it.
+        TEST(Sculptor::env_remove_point(env, 1, &env));
+        TEST(env.num_points == 1);
+        TEST(Sculptor::env_insert_point(env, 0, true, &env));
+        TEST(env.num_points == 2);
+        // Deleting the nonzero final point leaves a valid single-point
+        // descriptor.
+        TEST(Sculptor::env_remove_point(env, 1, &env));
+        TEST(env.num_points == 1 && env.points[0].position == 0);
+        bank.bank.envelopes.entries[0] = env;
+        TEST(Synth::validate_instrument_bank(&bank.bank));
+
+        static char    doc[128 * 1024];
+        const uint32_t len = Synth::encode_editor_bank_json(&bank, doc, sizeof(doc));
+        TEST(len > 0);
+        static Synth::InstrumentEditorBank decoded;
+        TEST(Synth::decode_editor_bank_json(doc, len, &decoded));
+        TEST(decoded.bank.envelopes.num_allocated == bank.bank.envelopes.num_allocated);
+        TEST(memcmp(&decoded.bank.envelopes.entries[0], &bank.bank.envelopes.entries[0], sizeof(env)) == 0);
+        static char    doc2[128 * 1024];
+        const uint32_t len2 = Synth::encode_editor_bank_json(&decoded, doc2, sizeof(doc2));
+        TEST(len2 == len && memcmp(doc, doc2, len) == 0);
     }
 
     return exit_code;
