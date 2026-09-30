@@ -35,24 +35,24 @@ enum class WaveType : uint8_t {
 };
 
 struct LFODescriptor {
-    WaveType wave;              // LFO wave type
-    uint8_t  duty;              // Duty for sawtooth wave (0=left, 0x7F=triangle, 0xFF=right)
-    uint16_t period_ms;         // Period of the LFO, in milliseconds
-    float    min_value;         // Minimum value produced by the LFO
-    float    min_max_delta;     // Delta between minimum and maximum value produced
+    WaveType wave;          // LFO wave type
+    uint8_t  duty;          // Duty for sawtooth wave (0=left, 0x7F=triangle, 0xFF=right)
+    uint16_t period_ms;     // Period of the LFO, in milliseconds
+    float    min_value;     // Minimum value produced by the LFO
+    float    min_max_delta; // Delta between minimum and maximum value produced
 };
 
 struct EnvelopeDescriptor {
     uint8_t num_points;
     uint8_t unused_alignment;
-    uint8_t sustain_first_point;// Index of sustain loop start point
-    uint8_t sustain_last_point; // Index of last point of sustain loop (can be same as first point)
-    float   min_value;          // Minimum value produced by the envelope
-    float   min_max_delta;      // Delta between minimum and maximum value produced
+    uint8_t sustain_first_point; // Index of sustain loop start point
+    uint8_t sustain_last_point;  // Index of last point of sustain loop (can be same as first point)
+    float   min_value;           // Minimum value produced by the envelope
+    float   min_max_delta;       // Delta between minimum and maximum value produced
 
     struct Point {
-        uint16_t position;      // Number of ticks since the beginning of the envelope
-        uint16_t value;         // Value at this position (0=min_value, 0xFFFF=min_value+min_max_delta)
+        uint16_t position; // Number of ticks since the beginning of the envelope
+        uint16_t value;    // Value at this position (0=min_value, 0xFFFF=min_value+min_max_delta)
     };
 
     Point points[max_envelope_points];
@@ -78,10 +78,10 @@ struct SourceParam {
 };
 
 enum class ParamKind : uint8_t {
-    external,   // value written from outside (a MIDI input, or the reserved sentinel)
-    envelope,   // value produced each step by the envelope generator (the per-step pre-pass)
-    lfo,        // value produced each step by the LFO generator (the per-step pre-pass)
-    plain       // base_value combined with source parameters
+    external, // value written from outside (a MIDI input, or the reserved sentinel)
+    envelope, // value produced each step by the envelope generator (the per-step pre-pass)
+    lfo,      // value produced each step by the LFO generator (the per-step pre-pass)
+    plain     // base_value combined with source parameters
 };
 
 struct ParamDescriptor {
@@ -101,6 +101,7 @@ struct ParamDescriptor {
     };
 
     ParamKind kind;
+
     union {
         EnvelopeDescriptor envelope;
         LFOParam           lfo;
@@ -117,7 +118,10 @@ struct Parameter {
     float         prev_value;
     EnvelopeState envelope;
     uint16_t      lfo_tick;
-    uint16_t      sustain_voice;  // For envelope params, used to detect when to release envelope from sustain
+    uint16_t      sustain_voice; // For envelope params, used to detect when to release envelope from sustain
+    // Envelope params only: consecutive steps whose state entered already parked on the final
+    // point while released.  The voice-lifetime rules use this to time a target's final fade tick.
+    uint16_t last_point_ticks;
 };
 
 // Evaluates the envelope at its current state and returns the value
@@ -128,6 +132,9 @@ struct Parameter {
 // - sustain  - true: state holds/loops at the sustain points
 //              false: runs through to the final point.
 float eval_envelope(const EnvelopeDescriptor& envelope, EnvelopeState* state, bool sustain);
+
+// Evaluates the envelope at the given state's position without modifying the state.
+float eval_envelope_at(const EnvelopeDescriptor& envelope, const EnvelopeState& state);
 
 // Converts a MIDI note to frequency in Hz.
 // - midi_note       - input MIDI note (69 = A4 = 440 Hz when freq_mult is 1)

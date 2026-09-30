@@ -415,7 +415,8 @@ bool read_list_prop(const Sculptor::Slot& slot, uint32_t* index)
 
 void clear_mapping(Sculptor::OscGraphMapping* mapping)
 {
-    mapping->input_node = Sculptor::pool_no_slot;
+    mapping->source_bank = nullptr;
+    mapping->input_node  = Sculptor::pool_no_slot;
     for (uint32_t i = 0; i < Sculptor::num_osc_graph_inputs; ++i) {
         mapping->input_source_slots[i] = Sculptor::pool_no_slot;
     }
@@ -816,6 +817,100 @@ void wire_param_sources(Sculptor::Graph*                 graph,
 // file scope with explicit prefixes; the file-local sections above and below
 // reach them through using-declarations.
 
+bool Sculptor::env_volume_shape_ok(const Synth::EnvelopeDescriptor& env)
+{
+    // The span must be nonnegative too: a negative delta would evaluate the
+    // interior points below the zero floor.
+    return env.min_value == 0.0f && env.min_max_delta >= 0.0f && env.points[0].value == 0 &&
+           env.points[env.num_points - 1].value == 0;
+}
+
+// Forces the volume-envelope shape: minimum 0 with the effective top preserved,
+// and the first and the last point at 0.  Returns false when the effective top
+// is negative, which cannot be preserved under the nonnegative volume range.
+static bool env_convert_to_volume_shape(Synth::EnvelopeDescriptor& env)
+{
+    const float max_value = env.min_value + 65535.0f * env.min_max_delta;
+    if (max_value < 0.0f) {
+        return false;
+    }
+    env.min_value                        = 0.0f;
+    env.min_max_delta                    = max_value / 65535.0f;
+    env.points[0].value                  = 0;
+    env.points[env.num_points - 1].value = 0;
+    return true;
+}
+
+void Sculptor::env_target_usage(const Graph&           graph,
+                                const OscGraphMapping& mapping,
+                                uint16_t               desc_id,
+                                bool*                  volume_used,
+                                bool*                  other_used,
+                                int32_t                exclude_param_idx,
+                                uint32_t               exclude_connection)
+{
+    *volume_used = false;
+    *other_used  = false;
+    for (uint32_t p = 0; p < mapping.param_count; ++p) {
+        if (static_cast<int32_t>(p) == exclude_param_idx) {
+            continue;
+        }
+        const ParamEntry& param = mapping.params[p];
+        if (param.node_idx == pool_no_slot || ! graph.node_occupied(param.node_idx)) {
+            continue;
+        }
+        const uint32_t env_conn = connection_into(graph, param.node_idx, param_env_input);
+        if (env_conn == pool_no_slot || env_conn == exclude_connection) {
+            continue;
+        }
+        const int32_t inst = find_instance(mapping, graph.get_connection(env_conn).output.node_idx);
+        if (inst < 0 || mapping.detached[inst].kind != 1 || mapping.detached[inst].desc_id != desc_id) {
+            continue;
+        }
+        if (param.target == projected_index(Synth::mod_volume)) {
+            *volume_used = true;
+        }
+        else {
+            *other_used = true;
+        }
+    }
+    // Descriptor ids live in a bank-wide pool, so users in other instruments
+    // and zones count too; the projection records the bank it read.  The
+    // projected instrument is skipped: the graph scan above is authoritative
+    // for it (it reflects pending edits and knows which parameter serves
+    // which generator, which the committed bank alone cannot attribute).
+    if (mapping.source_bank != nullptr) {
+        uint32_t self_instrument = Synth::max_instruments;
+        if (mapping.channel < Synth::max_channels && mapping.zone < Synth::max_instr_per_channel) {
+            const Synth::Zone& zone_entry = mapping.source_bank->channel_zones[mapping.channel][mapping.zone];
+            // Only a valid zone entry identifies the projected instrument; a
+            // bare bank (no zone table) has none to skip.
+            if (zone_entry.start_note != 0 && zone_entry.instrument < mapping.source_bank->instruments.num_allocated) {
+                self_instrument = zone_entry.instrument;
+            }
+        }
+        for (uint32_t instr_idx = 0; instr_idx < mapping.source_bank->instruments.num_allocated; ++instr_idx) {
+            if (instr_idx == self_instrument) {
+                continue;
+            }
+            const Synth::Instrument& instrument = mapping.source_bank->instruments.entries[instr_idx];
+            for (uint32_t layer = 0; layer < Synth::max_layers; ++layer) {
+                for (uint32_t t = 0; t < Synth::num_mod_targets; ++t) {
+                    if (instrument.layers[layer].gen[t].envelope_desc_id != desc_id) {
+                        continue;
+                    }
+                    if (static_cast<Synth::ModTarget>(t) == Synth::mod_volume) {
+                        *volume_used = true;
+                    }
+                    else {
+                        *other_used = true;
+                    }
+                }
+            }
+        }
+    }
+}
+
 // The five parameter target display names, shared by the node menus, the
 // immediate rename feedback and the projection's derived titles.
 const char* const Sculptor::param_target_names[5] = { "Volume", "Pitch", "Panning", "Lowpass", "Highpass" };
@@ -925,6 +1020,34 @@ bool Sculptor::retarget_param(Synth::InstrumentEditorBank* bank,
 {
     ParamEntry&    param      = mapping.params[param_idx];
     const uint32_t param_node = param.node_idx;
+    // The parameter's attached envelope moves with the retarget: a volume
+    // envelope may only serve the volume target, and only a volume envelope
+    // may serve it.  Retargeting onto volume converts a nonconforming
+    // descriptor; the descriptor is shared, so other users are honored.
+    const uint32_t env_conn = connection_into(graph, param_node, param_env_input);
+    if (env_conn != pool_no_slot) {
+        const int32_t env_inst = find_instance(mapping, graph.get_connection(env_conn).output.node_idx);
+        if (env_inst >= 0 && mapping.detached[env_inst].kind == 1) {
+            const uint16_t desc_id     = mapping.detached[env_inst].desc_id;
+            bool           volume_used = false;
+            bool           other_used  = false;
+            env_target_usage(graph, mapping, desc_id, &volume_used, &other_used, static_cast<int32_t>(param_idx));
+            if (new_target == projected_index(Synth::mod_volume)) {
+                if (other_used) {
+                    return false;
+                }
+                if (desc_id != 0 && desc_id <= bank->bank.envelopes.num_allocated) {
+                    Synth::EnvelopeDescriptor& env = bank->bank.envelopes.entries[desc_id - 1];
+                    if (! env_volume_shape_ok(env) && ! env_convert_to_volume_shape(env)) {
+                        return false;
+                    }
+                }
+            }
+            else if (volume_used) {
+                return false;
+            }
+        }
+    }
     // The source rows are shared routing views: the captured wiring is the
     // parameter's own routing, which moves to the new target only when the
     // destination has no serving parameter to adopt from.
@@ -1201,6 +1324,7 @@ bool Sculptor::project_instrument_to_graph(const Synth::Instrument&     instrume
         }
     }
     clear_mapping(mapping);
+    mapping->source_bank = &bank;
     graph->clear();
 
     const uint32_t layer_count =
@@ -1614,11 +1738,68 @@ bool Sculptor::osc_graph_validate(void* user_data, Graph& graph, EndPoint output
             if (static_cast<uint32_t>(target) == mapping->params[p].target) {
                 return true;
             }
-            return mapping->params[p].uid != 0 &&
-                   ! param_target_has_recordless_derived(*mapping, static_cast<uint32_t>(target));
+            if (mapping->params[p].uid == 0 ||
+                param_target_has_recordless_derived(*mapping, static_cast<uint32_t>(target))) {
+                return false;
+            }
+            // The attached envelope moves with the retarget and must respect
+            // the volume-envelope constraint at its new target.
+            const uint32_t env_conn = connection_into(graph, mapping->params[p].node_idx, param_env_input);
+            if (env_conn == pool_no_slot) {
+                return true;
+            }
+            const int32_t env_inst = find_instance(*mapping, graph.get_connection(env_conn).output.node_idx);
+            if (env_inst < 0 || mapping->detached[env_inst].kind != 1) {
+                return true;
+            }
+            bool volume_used = false;
+            bool other_used  = false;
+            env_target_usage(graph, *mapping, mapping->detached[env_inst].desc_id, &volume_used, &other_used, p);
+            if (static_cast<uint32_t>(target) == projected_index(Synth::mod_volume) && other_used) {
+                graph.set_error("Envelope already serves a non-volume target");
+                return false;
+            }
+            if (static_cast<uint32_t>(target) != projected_index(Synth::mod_volume) && volume_used) {
+                graph.set_error("Envelope already serves the volume target");
+                return false;
+            }
+            return true;
         }
-        case out_env:
-            return classify_input(*mapping, input) == in_penv;
+        case out_env: {
+            if (classify_input(*mapping, input) != in_penv) {
+                return false;
+            }
+            // A volume envelope (minimum 0, first and last point 0) serves
+            // only the volume target, and only a volume envelope serves the
+            // volume target: the descriptor is shared by every target that
+            // wires it, and the two roles want different ranges.
+            const int32_t p = find_param(*mapping, input.node_idx);
+            if (p < 0) {
+                return false;
+            }
+            const int32_t inst = find_instance(*mapping, output.node_idx);
+            if (inst < 0 || mapping->detached[inst].kind != 1) {
+                return false;
+            }
+            bool volume_used = false;
+            bool other_used  = false;
+            env_target_usage(graph,
+                             *mapping,
+                             mapping->detached[inst].desc_id,
+                             &volume_used,
+                             &other_used,
+                             -1,
+                             graph.moving_connection);
+            if (mapping->params[p].target == projected_index(Synth::mod_volume) && other_used) {
+                graph.set_error("Envelope already serves a non-volume target");
+                return false;
+            }
+            if (mapping->params[p].target != projected_index(Synth::mod_volume) && volume_used) {
+                graph.set_error("Envelope already serves the volume target");
+                return false;
+            }
+            return true;
+        }
         case out_lfo:
             return classify_input(*mapping, input) == in_plfo;
         case out_input:
@@ -1707,12 +1888,30 @@ bool Sculptor::apply_osc_graph_descriptor_edit(const Graph&           graph,
             // the effective range endpoints: the top re-derives the span
             // (max - min) / 65535, and moving the floor pins the top.
             if (strncmp(slot.name, "Value (min)", sizeof(slot.name)) == 0) {
+                // A volume envelope keeps its minimum at 0; the descriptor is
+                // shared, so the constraint follows its volume wiring.  The
+                // refusing caller reports the refused batch.
+                bool volume_used = false;
+                bool other_used  = false;
+                env_target_usage(graph, mapping, desc_id, &volume_used, &other_used);
+                if (volume_used && value.real != 0.0f) {
+                    return false;
+                }
                 const float max_value = env.min_value + 65535.0f * env.min_max_delta;
                 env.min_value         = value.real;
                 env.min_max_delta     = (max_value - env.min_value) / 65535.0f;
                 return true;
             }
             if (strncmp(slot.name, "Value (max)", sizeof(slot.name)) == 0) {
+                // A volume envelope keeps its effective top at or above its
+                // minimum; the descriptor is shared, so the constraint follows
+                // its volume wiring.
+                bool volume_used = false;
+                bool other_used  = false;
+                env_target_usage(graph, mapping, desc_id, &volume_used, &other_used);
+                if (volume_used && value.real < env.min_value) {
+                    return false;
+                }
                 env.min_max_delta = (value.real - env.min_value) / 65535.0f;
                 return true;
             }
@@ -2529,6 +2728,34 @@ bool apply_connection_change(Synth::InstrumentEditorBank* bank,
             const uint32_t param_node = mapping->params[p].node_idx;
             if (graph->node(param_node).slots.entries[param_lfo_depth_prop].value.real == 0.0f) {
                 graph->set_slot_value(param_node, param_lfo_depth_prop, Sculptor::PropertyValue{ .real = 0.5f });
+            }
+        }
+    }
+
+    // Wiring an envelope into the volume target forces the volume-envelope
+    // shape on the shared descriptor: minimum 0 with the top preserved, and
+    // the first and the last point at 0, so a note starts and ends in
+    // silence.  The wire-time validator refuses cross-target sharing, so
+    // the conversion never changes what a non-volume user hears.
+    if ((change.kind == Sculptor::ChangeKind::connection_added ||
+         change.kind == Sculptor::ChangeKind::connection_changed) &&
+        change.connection_idx < Sculptor::max_connections && graph->connection_occupied(change.connection_idx) &&
+        graph->get_connection(change.connection_idx).input.slot_idx == param_env_input) {
+        const Sculptor::Connection& connection = graph->get_connection(change.connection_idx);
+        const int32_t               p          = find_param(*mapping, connection.input.node_idx);
+        if (p >= 0 && graph->node_occupied(connection.input.node_idx) &&
+            mapping->params[p].target == projected_index(Synth::mod_volume)) {
+            const int32_t inst = find_instance(*mapping, connection.output.node_idx);
+            if (inst >= 0 && mapping->detached[inst].kind == 1 && mapping->detached[inst].desc_id != 0 &&
+                mapping->detached[inst].desc_id <= bank->bank.envelopes.num_allocated) {
+                Synth::EnvelopeDescriptor& env = bank->bank.envelopes.entries[mapping->detached[inst].desc_id - 1];
+                if (! Sculptor::env_volume_shape_ok(env)) {
+                    // A negative effective top cannot be preserved under the
+                    // nonnegative volume range; refuse the wire.
+                    if (! env_convert_to_volume_shape(env)) {
+                        return false;
+                    }
+                }
             }
         }
     }

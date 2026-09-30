@@ -7,9 +7,6 @@ layout(local_size_x_id = 0) in;
 
 layout(constant_id = 0) const uint work_group_size = 1;
 
-// Smooth volume adjustment to avoid glitches
-layout(constant_id = 3) const uint volume_adjustment_samples = 32;
-
 struct InputParams {
     uint  in_sound_offs;
     float old_volume;
@@ -45,23 +42,11 @@ void main()
         float right_in = data[input_param.in_sound_offs + gl_LocalInvocationID.x * 2 + 1];
 
         // Calculate multipliers with smooth adjustment
-        float multiplier;
-        float panning;
-        if (gl_LocalInvocationID.x < volume_adjustment_samples) {
-            const float step = float(gl_LocalInvocationID.x + 1) / float(volume_adjustment_samples);
-            multiplier = mix(input_param.old_volume,  input_param.volume,  step);
-            panning    = mix(input_param.old_panning, input_param.panning, step);
-        }
-        else {
-            multiplier = input_param.volume;
-            panning    = input_param.panning;
-        }
+        const float step = float(gl_LocalInvocationID.x) / float(work_group_size - 1u);
+        const float multiplier = mix(input_param.old_volume,  input_param.volume,  step);
+        const float panning    = mix(input_param.old_panning, input_param.panning, step);
 
-        // Channel-level pan is a linear balance law that is transparent at
-        // center (pan 0.5 -> both gains 1.0) so a single centered channel
-        // passes through unchanged.  The per-oscillator stereo balance is
-        // already applied by synth_chan_combine, so this only attenuates the
-        // opposite side as the channel pans toward an extreme.
+        // Apply channel panning
         const float left_gain  = min(1.0, 2.0 * (1.0 - panning));
         const float right_gain = min(1.0, 2.0 * panning);
 

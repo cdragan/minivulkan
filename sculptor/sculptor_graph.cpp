@@ -836,8 +836,11 @@ bool Sculptor::Graph::move_connection_end(uint32_t connection_idx, bool move_out
         return false;
     }
     if (validator) {
-        error_active = false;
-        if (! validator(validator_user_data, *this, new_output, new_input)) {
+        error_active       = false;
+        moving_connection  = connection_idx;
+        const bool allowed = validator(validator_user_data, *this, new_output, new_input);
+        moving_connection  = pool_no_slot;
+        if (! allowed) {
             if (! error_active) {
                 set_error("Connection rejected");
             }

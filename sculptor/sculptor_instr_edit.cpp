@@ -855,6 +855,22 @@ int Sculptor::SynthEditor::envelope_state_widget_entry(void* user_data)
         return widget_height;
     }
 
+    // A volume envelope keeps the volume shape: minimum 0, first and last
+    // point 0.  The constraint follows the descriptor's volume wiring, so
+    // every node aliasing the descriptor is constrained the same way.
+    bool volume_used = false;
+    bool other_used  = false;
+    Sculptor::env_target_usage(osc_graph, osc_mapping, static_cast<uint16_t>(desc_id), &volume_used, &other_used);
+    if (volume_used && ! Sculptor::env_volume_shape_ok(edited)) {
+        if (gesture_edit) {
+            ctx->gesture_active = false;
+            Sculptor::undo_group_reset(&osc_undo_group);
+        }
+        Sculptor::notify_warning(
+            "Synth: volume envelope keeps the first and the last point at 0; unwire it from Volume to edit freely");
+        return widget_height;
+    }
+
     candidate                                     = instr_bank;
     candidate.bank.envelopes.entries[desc_id - 1] = edited;
     const Sculptor::UndoGroupTag tag =

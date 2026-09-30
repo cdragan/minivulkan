@@ -107,6 +107,10 @@ struct OscGraphMapping {
     // order.  Entries are ordered by record order.
     DetachedNode detached[max_detached_nodes];
     uint32_t     detached_count;
+    // The bank the projection reads, for bank-wide descriptor usage scans
+    // (descriptor ids are shared across every instrument and zone).  Set by
+    // the projection; never dereferenced before the first projection.
+    const Synth::InstrumentBank* source_bank;
 };
 
 // Rebuilds the graph from scratch: clears every node and connection, then
@@ -242,6 +246,24 @@ uint32_t connection_into(const Graph& graph, uint32_t node_idx, uint32_t slot_id
 
 // Registry index of the parameter projected onto node_idx, or -1.
 int32_t find_param(const OscGraphMapping& mapping, uint32_t node_idx);
+
+// The volume-envelope shape: minimum 0 and the first and the last point at 0,
+// so a volume envelope starts and ends in silence.
+bool env_volume_shape_ok(const Synth::EnvelopeDescriptor& env);
+
+// Reports whether the envelope descriptor id is wired into a volume target's
+// parameter, into a non-volume target, or both.  Descriptor ids are shared by
+// every parameter that wires them and by every instrument in the bank, so the
+// answer covers all users.  exclude_param_idx / exclude_connection omit one
+// parameter (a retarget moves its own usage) or one connection (a wire move
+// re-lands it) from the scan.
+void env_target_usage(const Graph&           graph,
+                      const OscGraphMapping& mapping,
+                      uint16_t               desc_id,
+                      bool*                  volume_used,
+                      bool*                  other_used,
+                      int32_t                exclude_param_idx  = -1,
+                      uint32_t               exclude_connection = pool_no_slot);
 
 // Index of the zone's layout record with the given key, or -1.
 int32_t find_record(const Synth::InstrumentEditorBank& bank,

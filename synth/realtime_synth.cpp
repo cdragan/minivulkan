@@ -41,9 +41,6 @@ constexpr uint32_t max_voices = 64; // Max notes are playing
 using Synth::max_layers; // Max layers (oscillators) per note
 using Synth::num_fir_taps;
 
-// Smooth volume adjustment to avoid glitches
-constexpr uint32_t volume_adjustment_samples = 32;
-
 // Number of samples which have been rendered since playback started.
 uint32_t rendered_samples;
 
@@ -125,12 +122,14 @@ enum ChannelParamRole : uint32_t {
     chan_param_pressure,
     num_channel_roles
 };
+
 enum VoiceParamRole : uint32_t {
     voice_input_velocity,
     voice_input_aftertouch,
     voice_input_pressure_combine,
     num_voice_roles
 };
+
 enum OscParamRole : uint32_t {
     osc_pitch_dest,
     osc_pitch_env,
@@ -165,10 +164,12 @@ constexpr uint32_t channel_param(uint32_t channel, uint32_t role)
 {
     return channel_block_base + channel * num_channel_roles + role;
 }
+
 constexpr uint32_t voice_param(uint32_t voice, uint32_t role)
 {
     return voice_block_base + voice * num_voice_roles + role;
 }
+
 constexpr uint32_t osc_param(uint32_t osc, uint32_t role)
 {
     return osc_block_base + osc * num_osc_roles + role;
@@ -182,6 +183,7 @@ struct ModTargetNode {
     ModTarget target;
     uint32_t  dest_role;
 };
+
 constexpr ModTargetNode mod_target_nodes[] = {
     { mod_pitch, osc_pitch_dest },
     { mod_volume, osc_volume_dest },
@@ -278,6 +280,7 @@ struct ChannelCombine {
 // and uploaded every step.  params[] holds the effect's tweakable values;
 // state_offs points at its persistent state (delay lines etc.) in the device buffer.
 using Synth::max_effect_param_floats;
+
 struct EffectParams {
     uint32_t type;
     uint32_t sound_offs;
@@ -393,14 +396,13 @@ bool create_shaders()
         };
 
         static const VkSpecializationMapEntry map_entries[] = {
-            { 0, 0, 4 }, { 1, 4, 4 }, { 2, 8, 4 }, { 3, 12, 4 }, { 4, 16, 4 }, { 5, 20, 4 }, { 6, 24, 4 },
+            { 0, 0, 4 }, { 1, 4, 4 }, { 2, 8, 4 }, { 4, 12, 4 }, { 5, 16, 4 }, { 6, 20, 4 },
         };
 
         static uint32_t spec_data[] = {
             Synth::rt_step_samples,
             0,
             num_fir_taps,
-            volume_adjustment_samples,
             Synth::effect_delay_max_samples,
             Synth::effect_chorus_max_samples,
             Synth::rt_sampling_rate,
@@ -467,6 +469,8 @@ struct RunningOscillator {
     bool    clear_fir_hist; // Set on note-on of a filtered slot; the next render
                             // zeroes this slot's FIR history before the shader reads
                             // it, so a reused slot does not bleed the previous note.
+    bool    terminating;    // Set on the voice-lifetime fade block (volume gradient to zero);
+                            // the oscillator frees after that block has rendered.
 };
 
 static RunningOscillator oscillators[Synth::max_oscillators];
@@ -479,9 +483,10 @@ struct Channel {
     uint32_t chan_output_offs; // Channel data output offset
     float    volume;           // Channel volume (linear), default 1.0
     float    panning;          // Channel pan: 0 = left, 0.5 = center, 1 = right
-    float    old_volume;       // Previous step's volume, for 32-sample smoothing
-    float    old_panning;      // Previous step's panning, for 32-sample smoothing
+    float    old_volume;       // Previous step's volume, for the block gradient
+    float    old_panning;      // Previous step's panning, for the block gradient
 };
+
 static Channel mix_channels[max_mix_channels];
 
 // Dedicated interleaved-stereo master output, summed from all channels
@@ -497,6 +502,7 @@ struct FirSlot {
     uint32_t coeff_offs;
     uint32_t history_offs;
 };
+
 FirSlot fir_slots[Synth::max_oscillators];
 
 // Envelope desc id driving a target on a layer.  0 means no envelope.
@@ -963,6 +969,7 @@ static void free_oscillator(uint32_t osc_idx)
 {
     oscillators[osc_idx].osc_type[0] = WaveType::no_wave;
     oscillators[osc_idx].voice_id    = 0;
+    oscillators[osc_idx].terminating = false;
 
     for (uint32_t role = 0; role < num_osc_roles; role++) {
         param_descs[osc_param(osc_idx, role)] = {};
@@ -1205,6 +1212,7 @@ static void process_note_on(uint32_t delta_samples, const DispatchedMidiEvent& e
         osc.mod_phase   = 0.0f;
         osc.old_volume  = 0.0f; // ramp up from silence to avoid a click
         osc.old_panning = instrument.routing[mod_panning].base_value;
+        osc.terminating = false;
         osc.duty[0]     = instrument.routing[mod_duty0].base_value;
         osc.duty[1]     = instrument.routing[mod_duty1].base_value;
         osc.osc_mix     = instrument.routing[mod_osc_mix].base_value;
@@ -1547,7 +1555,23 @@ static void advance_parameters()
             const Voice&   owner         = voices[sustain_voice];
             const bool     sustain       = sustain_voice ? (owner.active && ! owner.releasing) : true;
 
-            parameters[node_idx].value = Synth::eval_envelope(gen.envelope, &parameters[node_idx].envelope, sustain);
+            Synth::Parameter& param = parameters[node_idx];
+
+            // The pair written here spans exactly this step's tick interval: value is the
+            // envelope at the starting tick, prev_value one tick ahead.  Consumers read
+            // prev_value, so a plain dest gets the end-of-step value while the carried
+            // previous dest value forms the old end of its old/new gradient.
+            const Synth::EnvelopeDescriptor& envelope_desc = gen.envelope;
+            const uint32_t                   last_point    = envelope_desc.num_points - 1;
+            const bool                       entry_parked =
+                param.envelope.point == last_point && param.envelope.tick == envelope_desc.points[last_point].position;
+
+            param.value      = Synth::eval_envelope(envelope_desc, &param.envelope, sustain);
+            param.prev_value = Synth::eval_envelope_at(envelope_desc, param.envelope);
+
+            // Count how long a released envelope has entered already parked on its final
+            // point; the volume target times its final fade tick from this (update_modulation).
+            param.last_point_ticks = static_cast<uint16_t>(entry_parked && ! sustain ? param.last_point_ticks + 1 : 0);
         }
         else if (gen.kind == Synth::ParamKind::lfo) {
             const float depth =
@@ -1574,12 +1598,27 @@ static void advance_parameters()
     Synth::propagate_parameters(parameters, param_descs, total_params);
 }
 
+// True when this oscillator's volume target is due its final fade block under the voice-lifetime
+// rules: no volume envelope, or a volume envelope whose sustain sits on the final point, fades
+// on the first released block; otherwise the envelope first runs to its final point and holds
+// there for one tick (two entered-parked steps) before the fade.
+static bool volume_termination_due(uint32_t osc_idx)
+{
+    const uint32_t                env_node = osc_param(osc_idx, osc_volume_env);
+    const Synth::ParamDescriptor& env_desc = param_descs[env_node];
+    if (env_desc.kind != Synth::ParamKind::envelope) {
+        return true;
+    }
+    const Synth::EnvelopeDescriptor& envelope = env_desc.envelope;
+    if (envelope.sustain_last_point >= envelope.num_points - 1) {
+        return true;
+    }
+    return parameters[env_node].last_point_ticks >= 2;
+}
+
 static void update_modulation()
 {
     advance_parameters();
-
-    // Resolve each live oscillator's values from the modulation graph.
-    constexpr float silence_threshold = 0.0005f;
 
     for (uint32_t osc_idx = 1; osc_idx < Synth::max_oscillators; osc_idx++) {
         RunningOscillator& osc = oscillators[osc_idx];
@@ -1595,15 +1634,19 @@ static void update_modulation()
         // Panning is a per-layer modulatable target: read its graph dest node.
         osc.panning = parameters[osc_param(osc_idx, osc_panning_dest)].value;
         // Volume: the oscillator's volume dest node, which already folds the ADSR envelope, the tremolo
-        // LFO edge and the velocity input edge.  free-on-silence keys off the raw ADSR envelope node.
-        const float vol_env_value = parameters[osc_param(osc_idx, osc_volume_env)].value;
-        osc.volume                = parameters[osc_param(osc_idx, osc_volume_dest)].value;
+        // LFO edge and the velocity input edge.
+        osc.volume = parameters[osc_param(osc_idx, osc_volume_dest)].value;
 
-        // Free the oscillator once its volume decays to silence during release.
-        // Oscillator-scope volume can release at different rates per layer index,
-        // so a voice's oscillators may free in different steps; the voice itself is
-        // finalized only when its last oscillator frees.
-        if (voice.releasing && vol_env_value < silence_threshold) {
+        // Voice lifetime: after note-off every oscillator plays one final block whose volume
+        // gradient ramps to silence, then frees.  Oscillator-scope envelopes release at different
+        // rates per layer index, so a voice's oscillators may free in different steps; the voice
+        // itself is finalized only when its last oscillator frees.
+        bool free_now = osc.terminating;
+        if (! free_now && voice.releasing && volume_termination_due(osc_idx)) {
+            osc.terminating = true;
+            osc.volume      = 0.0f; // Final block: the volume gradient ramps from the last rendered volume to silence.
+        }
+        if (free_now) {
             free_oscillator(osc_idx);
 
             // Remove this slot from the voice's live list without a search: its position is
@@ -1964,10 +2007,13 @@ static void render_audio_step()
         ShaderParams::ChannelCombineInput& param = get_param<ShaderParams::ChannelCombineInput>(cur_param_offs);
 
         param.in_sound_offs = oscillator.osc_output_offs / 4;
-        param.volume        = oscillator.volume;
-        param.panning       = oscillator.panning;
-        param.old_volume    = oscillator.old_volume;
-        param.old_panning   = oscillator.old_panning;
+        // Perceptual volume: the linear graph value maps to gain = value*value at the hand-off, so
+        // bank values and the editor stay linear while the rendered gain follows a perceptual curve
+        // that reaches true silence.
+        param.volume      = oscillator.volume * oscillator.volume;
+        param.panning     = oscillator.panning;
+        param.old_volume  = oscillator.old_volume * oscillator.old_volume;
+        param.old_panning = oscillator.old_panning;
 
         oscillator.old_volume  = oscillator.volume;
         oscillator.old_panning = oscillator.panning;
@@ -2023,8 +2069,8 @@ static void render_audio_step()
     // ======================================================================
 
     // Sum all per-channel stereo buffers into the master stereo buffer, applying
-    // each channel's volume + pan.  The master-mix shader smooths volume/pan over
-    // the first 32 samples from the previous step's values (old_*), so carry the
+    // each channel's volume + pan.  The master-mix shader interpolates volume/pan
+    // across the whole block from the previous step's values (old_*), so carry the
     // current values into old_* after emitting them.
 
     const uint32_t master_input_param_size =

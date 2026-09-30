@@ -92,12 +92,13 @@ float eval_lfo_mod(const LFODescriptor& lfo,
     return depth * (2.0f * wave - 1.0f);
 }
 
-float eval_envelope(const EnvelopeDescriptor& envelope, EnvelopeState* state, bool sustain)
+// File-local envelope evaluation: the envelope output at the given state's
+// position, without touching the state.
+static float envelope_value_at(const EnvelopeDescriptor& envelope, const EnvelopeState& state)
 {
-    uint32_t env_point = state->point;
-    uint32_t env_tick  = state->tick;
+    const uint32_t env_point = state.point;
+    const uint32_t env_tick  = state.tick;
 
-    // Apply current position of the envelope
     const EnvelopeDescriptor::Point pt1 = envelope.points[env_point];
 
     int env_value = pt1.value;
@@ -116,7 +117,20 @@ float eval_envelope(const EnvelopeDescriptor& envelope, EnvelopeState* state, bo
         }
     }
 
-    const float value = envelope.min_value + static_cast<float>(env_value) * envelope.min_max_delta;
+    return envelope.min_value + static_cast<float>(env_value) * envelope.min_max_delta;
+}
+
+float eval_envelope_at(const EnvelopeDescriptor& envelope, const EnvelopeState& state)
+{
+    return envelope_value_at(envelope, state);
+}
+
+float eval_envelope(const EnvelopeDescriptor& envelope, EnvelopeState* state, bool sustain)
+{
+    uint32_t env_point = state->point;
+    uint32_t env_tick  = state->tick;
+
+    const float value = envelope_value_at(envelope, *state);
 
     for (;;) {
         // Advance envelope
@@ -164,8 +178,13 @@ float eval_envelope(const EnvelopeDescriptor& envelope, EnvelopeState* state, bo
 void propagate_parameters(Parameter* params, const ParamDescriptor* descs, uint32_t num_params)
 {
     // Snapshot every parameter's value so all reads this step see a consistent previous
-    // state.
+    // state.  Envelope generators are exempt: their step pre-pass writes the pair (value at
+    // the step's starting tick, prev_value one tick ahead) themselves, which gives consumers
+    // an old/new pair spanning exactly this step's tick interval.
     for (uint32_t param_idx = 0; param_idx < num_params; param_idx++) {
+        if (descs[param_idx].kind == ParamKind::envelope) {
+            continue;
+        }
         params[param_idx].prev_value = params[param_idx].value;
     }
 

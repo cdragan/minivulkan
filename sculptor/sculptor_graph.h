@@ -240,6 +240,14 @@ public:
     // structural checks plus the caller validator and report failure through
     // the error overlay instead of silently returning an index.
     void set_validator(ValidationCallback callback, void* user_data);
+
+    // Connection index excluded from validation while move_connection_end
+    // re-lands an existing wire (pool_no_slot otherwise).  The validator sees
+    // the graph still in its pre-move state, so a constraint that counts the
+    // moved wire's current endpoint would refuse the move spuriously.  Managed
+    // by move_connection_end; read-only for validators.
+    uint32_t moving_connection = pool_no_slot;
+
     // Refusal convention: delete_node stays void and refuses silently for
     // bad indices; a vetoed delete also stays void, mutates nothing,
     // pushes no events and reports through the error overlay.
@@ -247,6 +255,7 @@ public:
     // caller-driven state rather than acting on a user delete.
     void set_delete_veto(NodeDeleteVeto callback, void* user_data);
     bool attempt_connection(EndPoint output, EndPoint input);
+
     // Retargets one end of a connection in place (connection_changed event).
     // A refused retarget snaps back: the connection keeps its old
     // endpoints, pushes no change events, and the refusal surfaces through
