@@ -332,38 +332,51 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
         // flowing position.
         float    value_col[8] = {};
         uint32_t max_props    = 0;
-        for (uint32_t line_idx = 0; line_idx < num_lines; ++line_idx) {
-            const Line& line      = lines[line_idx];
-            uint32_t    left_dots = 0;
-            for (uint32_t e = 0; e < line.num_elems; ++e) {
-                const Slot& slot = node.slots.entries[line.elems[e].slot_idx];
-                if (line.elems[e].dot && slot.kind != SlotKind::output) {
-                    ++left_dots;
+        for (uint32_t pass_idx = 0; pass_idx < 8; ++pass_idx) {
+            bool columns_changed = false;
+            for (uint32_t line_idx = 0; line_idx < num_lines; ++line_idx) {
+                const Line& line      = lines[line_idx];
+                uint32_t    left_dots = 0;
+                for (uint32_t e = 0; e < line.num_elems; ++e) {
+                    const Slot& slot = node.slots.entries[line.elems[e].slot_idx];
+                    if (line.elems[e].dot && slot.kind != SlotKind::output) {
+                        ++left_dots;
+                    }
                 }
+                float    cursor = pad + static_cast<float>(left_dots > 0 ? left_dots : 1) * dot_space;
+                uint32_t prop   = 0;
+                for (uint32_t e = 0; e < line.num_elems; ++e) {
+                    const Slot& slot = node.slots.entries[line.elems[e].slot_idx];
+                    if (slot.kind == SlotKind::output) {
+                        continue;
+                    }
+                    if (slot.kind != SlotKind::property) {
+                        cursor += ImGui::CalcTextSize(slot.name).x + 8.0f;
+                        continue;
+                    }
+                    const float x = cursor + ImGui::CalcTextSize(slot.name).x + 8.0f;
+                    // Chain from the aligned column exactly like the draw pass, so
+                    // no widget covers its label and the measured widths agree
+                    // with what is drawn.
+                    float widget_x = x;
+                    if (prop < 8) {
+                        if (value_col[prop] < x) {
+                            widget_x        = x;
+                            columns_changed = true;
+                        }
+                        else {
+                            widget_x = value_col[prop];
+                        }
+                        value_col[prop] = widget_x;
+                    }
+                    ++prop;
+                    cursor = widget_x + property_widget_w;
+                }
+                max_props = prop > max_props ? prop : max_props;
             }
-            float    cursor = pad + static_cast<float>(left_dots > 0 ? left_dots : 1) * dot_space;
-            uint32_t prop   = 0;
-            for (uint32_t e = 0; e < line.num_elems; ++e) {
-                const Slot& slot = node.slots.entries[line.elems[e].slot_idx];
-                if (slot.kind == SlotKind::output) {
-                    continue;
-                }
-                if (slot.kind != SlotKind::property) {
-                    cursor += ImGui::CalcTextSize(slot.name).x + 8.0f;
-                    continue;
-                }
-                const float x = cursor + ImGui::CalcTextSize(slot.name).x + 8.0f;
-                if (prop < 8) {
-                    value_col[prop] = x > value_col[prop] ? x : value_col[prop];
-                }
-                ++prop;
-                cursor = x + property_widget_w;
+            if (! columns_changed) {
+                break;
             }
-            max_props = prop > max_props ? prop : max_props;
-        }
-        for (uint32_t k = 1; k < max_props && k < 8; ++k) {
-            const float min_col = value_col[k - 1] + property_widget_w + 8.0f;
-            value_col[k]        = value_col[k] > min_col ? value_col[k] : min_col;
         }
         if (max_props > 0) {
             const float widest = value_col[max_props < 8 ? max_props - 1 : 7] + property_widget_w;
@@ -540,7 +553,11 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
                     cursor += name_w + 8.0f;
                     continue;
                 }
-                const float widget_x = line_prop < 8 ? rect_min.x + value_col[line_prop] : cursor + name_w + 8.0f;
+                const float min_widget_x = cursor + name_w + 8.0f;
+                float       widget_x     = line_prop < 8 ? rect_min.x + value_col[line_prop] : min_widget_x;
+                if (widget_x < min_widget_x) {
+                    widget_x = min_widget_x;
+                }
                 const float widget_y = y_center - frame_h * 0.5f;
                 cursor               = widget_x + property_widget_w;
                 ++line_prop;

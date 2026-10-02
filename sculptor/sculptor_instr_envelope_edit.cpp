@@ -569,7 +569,7 @@ void Sculptor::gui_envelope_curve(EnvelopeCurveState*              state,
         snprintf(
             info,
             sizeof(info),
-            "P%u  %.0f ms  %.3g%s",
+            "P%u  %.0f ms  %.4f%s",
             static_cast<uint32_t>(shown) + 1u,
             static_cast<double>(Sculptor::envelope_ticks_to_ms(env.points[shown_idx].position)),
             static_cast<double>(env.min_value + static_cast<float>(env.points[shown_idx].value) * env.min_max_delta),
@@ -605,7 +605,7 @@ void Sculptor::gui_envelope_curve(EnvelopeCurveState*              state,
         ImGui::SetNextItemWidth(70.0f);
         const bool value_editable = env.min_max_delta != 0.0f;
         ImGui::BeginDisabled(! value_editable);
-        ImGui::InputFloat("##envval", &state->value_edit_value, 0.0f, 0.0f, "%.3g");
+        ImGui::InputFloat("##envval", &state->value_edit_value, 0.0f, 0.0f, "%.4f");
         const bool value_active = ImGui::IsItemActive();
         if (value_editable && ImGui::IsItemEdited()) {
             float raw = (state->value_edit_value - env.min_value) / env.min_max_delta;
