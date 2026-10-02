@@ -67,13 +67,17 @@ void main()
             value = sinc_lowpass(x, lowpass_norm_cutoff);
         }
 
+        float norm_value = value;
+
         // High pass, band pass or band stop coefficient
         if (param.highpass_cutoff_freq > 0) {
-            value -= sinc_lowpass(x, highpass_norm_cutoff);
+            const float hp_value = sinc_lowpass(x, highpass_norm_cutoff);
+            value -= hp_value;
 
             // Band pass
             if (param.highpass_cutoff_freq < param.lowpass_cutoff_freq) {
-                value = -value;
+                value      = -value;
+                norm_value = hp_value;
             }
             // High pass or band stop
             else if (x == 0.0) {
@@ -87,7 +91,7 @@ void main()
 
         coefficients[tap] = value;
 
-        coeff_sum += value;
+        coeff_sum += norm_value * window;
     }
 
     // Normalize coefficients

@@ -520,34 +520,12 @@ static bool osc_has_filter(const Instrument& instrument, uint32_t layer_idx)
            instrument.routing[mod_highpass_cutoff].base_value != 0.0f;
 }
 
-static bool any_instrument_has_filter()
-{
-    for (uint32_t instr_idx = 0; instr_idx < synth_bank.instruments.num_allocated; instr_idx++) {
-        for (uint32_t layer_idx = 0; layer_idx < max_layers; layer_idx++) {
-            if (osc_has_filter(synth_bank.instruments.entries[instr_idx], layer_idx)) {
-                return true;
-            }
-        }
-    }
-
-    return false;
-}
-
 static void init_fir()
 {
     constexpr uint32_t coeff_bytes   = num_fir_taps * sizeof(float);
     constexpr uint32_t history_bytes = (num_fir_taps - 1) * sizeof(float);
 
     fir_slots[0] = { 0, 0 };
-
-    // Optional allocation: when no instrument declares a filter, leave all FIR
-    // offsets 0 so no device bytes are consumed at all.
-    if (! any_instrument_has_filter()) {
-        for (uint32_t osc_idx = 1; osc_idx < Synth::max_oscillators; osc_idx++) {
-            fir_slots[osc_idx] = { 0, 0 };
-        }
-        return;
-    }
 
     // Every oscillator slot gets its own coeff and history buffer so any slot
     // can play a filtered note and sweep independently; slot 0 is the reserved
