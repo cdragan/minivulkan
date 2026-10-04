@@ -154,40 +154,85 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
         zoom                          = new_zoom;
     }
 
-    // Home: fit all nodes into view.
-    if (ImGui::IsWindowHovered() && in_widget(mouse_screen) && ImGui::IsKeyPressed(ImGuiKey_Home)) {
-        bool  have_bbox = false;
-        float min_x     = 0.0f;
-        float min_y     = 0.0f;
-        float max_x     = 0.0f;
-        float max_y     = 0.0f;
+    // Home or "." fits all nodes into view.  Focus gates the shortcut so the
+    // pointer does not need to hover the canvas; hover still works before the
+    // first click gives the window focus.  Blocked while typing elsewhere.
+    if (! io.WantTextInput && (ImGui::IsWindowFocused() || ImGui::IsWindowHovered()) &&
+        (ImGui::IsKeyPressed(ImGuiKey_Home) || ImGui::IsKeyPressed(ImGuiKey_Period))) {
+        bool  have_bbox      = false;
+        float min_x          = 0.0f;
+        float min_y          = 0.0f;
+        float pos_max_x      = 0.0f;
+        float pos_max_y      = 0.0f;
+        float content_right  = 0.0f;
+        float content_bottom = 0.0f;
         for (uint32_t i = 0; i < max_nodes; ++i) {
             if (! nodes.is_occupied(i) || nodes.entries[i].ghost) {
                 continue;
             }
-            const vmath::vec2 node_max = (nodes.entries[i].position + content_sizes[i]);
+            const vmath::vec2 position(nodes.entries[i].position);
+            const vmath::vec2 node_max(position + content_sizes[i]);
             if (! have_bbox) {
-                have_bbox = true;
-                min_x     = nodes.entries[i].position.x;
-                min_y     = nodes.entries[i].position.y;
-                max_x     = node_max.x;
-                max_y     = node_max.y;
+                have_bbox      = true;
+                min_x          = position.x;
+                min_y          = position.y;
+                pos_max_x      = position.x;
+                pos_max_y      = position.y;
+                content_right  = node_max.x;
+                content_bottom = node_max.y;
                 continue;
             }
-            min_x = nodes.entries[i].position.x < min_x ? nodes.entries[i].position.x : min_x;
-            min_y = nodes.entries[i].position.y < min_y ? nodes.entries[i].position.y : min_y;
-            max_x = node_max.x > max_x ? node_max.x : max_x;
-            max_y = node_max.y > max_y ? node_max.y : max_y;
+            min_x          = position.x < min_x ? position.x : min_x;
+            min_y          = position.y < min_y ? position.y : min_y;
+            pos_max_x      = position.x > pos_max_x ? position.x : pos_max_x;
+            pos_max_y      = position.y > pos_max_y ? position.y : pos_max_y;
+            content_right  = node_max.x > content_right ? node_max.x : content_right;
+            content_bottom = node_max.y > content_bottom ? node_max.y : content_bottom;
         }
         if (have_bbox) {
-            const float bbox_w = max_x - min_x + 2.0f * fit_view_margin;
-            const float bbox_h = max_y - min_y + 2.0f * fit_view_margin;
-            const float fit_x  = widget_size.x / (bbox_w > 0.0f ? bbox_w : 1.0f);
-            const float fit_y  = widget_size.y / (bbox_h > 0.0f ? bbox_h : 1.0f);
-            const float fitted = fit_x < fit_y ? fit_x : fit_y;
-            zoom = fitted < graph_min_zoom ? graph_min_zoom : fitted > graph_max_zoom ? graph_max_zoom : fitted;
-            const vmath::vec2 center((min_x + max_x) * 0.5f, (min_y + max_y) * 0.5f);
-            view_origin = (center - (widget_size / 2.0f * zoom));
+            // Node positions scale with zoom but their boxes render at
+            // max(zoom, 1): below 1x only the positions shrink while every
+            // box keeps full screen size.  Solve each regime for the largest
+            // zoom that fits instead of scaling the whole bbox by zoom.
+            const float span_x     = pos_max_x - min_x;
+            const float span_y     = pos_max_y - min_y;
+            const float right_ext  = content_right - pos_max_x;
+            const float bottom_ext = content_bottom - pos_max_y;
+            // Above 1x everything scales uniformly.
+            const float z_hi_x = widget_size.x / (span_x + right_ext + 2.0f * fit_view_margin);
+            const float z_hi_y = widget_size.y / (span_y + bottom_ext + 2.0f * fit_view_margin);
+            const float z_hi   = z_hi_x < z_hi_y ? z_hi_x : z_hi_y;
+            float       fitted;
+            if (z_hi >= 1.0f) {
+                fitted = z_hi > graph_max_zoom ? graph_max_zoom : z_hi;
+            }
+            else {
+                // Below 1x the position span scales with zoom, the box
+                // extents stay fixed on screen.
+                const float z_lo_x =
+                    span_x > 0.0f ? (widget_size.x - right_ext - 2.0f * fit_view_margin) / span_x : 1.0f;
+                const float z_lo_y =
+                    span_y > 0.0f ? (widget_size.y - bottom_ext - 2.0f * fit_view_margin) / span_y : 1.0f;
+                float z_lo = z_lo_x < z_lo_y ? z_lo_x : z_lo_y;
+                z_lo       = z_lo > 1.0f ? 1.0f : z_lo;
+                fitted     = z_lo < graph_min_zoom ? graph_min_zoom : z_lo;
+            }
+            // Screen position of a graph point is origin + (g - view_origin) * zoom,
+            // so the visual bbox must be centered with view_origin = center - widget / (2 * zoom).
+            const float eff       = fitted >= 1.0f ? 1.0f : 1.0f / fitted;
+            float       vis_max_x = 0.0f;
+            float       vis_max_y = 0.0f;
+            for (uint32_t i = 0; i < max_nodes; ++i) {
+                if (! nodes.is_occupied(i) || nodes.entries[i].ghost) {
+                    continue;
+                }
+                const vmath::vec2 extent(nodes.entries[i].position + content_sizes[i] * eff);
+                vis_max_x = extent.x > vis_max_x ? extent.x : vis_max_x;
+                vis_max_y = extent.y > vis_max_y ? extent.y : vis_max_y;
+            }
+            zoom = fitted;
+            const vmath::vec2 center((min_x + vis_max_x) * 0.5f, (min_y + vis_max_y) * 0.5f);
+            view_origin = (center - (widget_size / (2.0f * fitted)));
         }
     }
 
