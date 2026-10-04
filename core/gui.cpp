@@ -222,8 +222,9 @@ bool init_gui(GuiClear clear)
     ImGui::StyleColorsDark();
 
     ImGuiIO& io = ImGui::GetIO();
-    io.ConfigFlags |= gui_config_flags;
-    io.IniFilename  = "assets/imgui.ini";
+    io.ConfigFlags  |= gui_config_flags;
+    io.IniFilename   = "assets/imgui.ini";
+    io.IniSavingRate = 0.25f;
 
 #ifdef _WIN32
     _mkdir("assets");
