@@ -9,6 +9,7 @@
 namespace {
 
 using Sculptor::bounded_real_slot;
+using Sculptor::connection_into;
 using Sculptor::fx_param_src_dot;
 using Sculptor::input_slot;
 using Sculptor::int_slot;
@@ -114,21 +115,6 @@ uint32_t projected_slots(const Synth::EffectChainBinding& chain, uint32_t* out_s
     return count;
 }
 
-// The live connection terminating at an input connector, or pool_no_slot.
-uint32_t connection_into(const Sculptor::Graph& graph, uint32_t node_idx, uint32_t slot_idx)
-{
-    for (uint32_t c = 0; c < Sculptor::max_connections; ++c) {
-        if (! graph.connection_occupied(c)) {
-            continue;
-        }
-        const Sculptor::Connection& connection = graph.get_connection(c);
-        if (connection.input.node_idx == node_idx && connection.input.slot_idx == slot_idx) {
-            return c;
-        }
-    }
-    return Sculptor::pool_no_slot;
-}
-
 // Compiles one parameter's MIDI source rows back into the binding's packed
 // input list: the wired rows in row order, each with the source resolved
 // from the routing node's per-source dot and Op/Amount read from the row.
@@ -177,6 +163,24 @@ bool rebuild_param_inputs(const Sculptor::Graph&              graph,
     return true;
 }
 
+// One LFO node per descriptor the chain's meaningful bindings reference or
+// the caller pinned; shared by the projection and the node-count preflight
+// so the two can never disagree on which descriptors cost a node.
+bool fx_lfo_is_projected(const Synth::EffectChainBinding& chain, const bool* pinned_lfos, uint32_t desc)
+{
+    if (pinned_lfos != nullptr && pinned_lfos[desc - 1]) {
+        return true;
+    }
+    for (uint32_t slot = 0; slot < chain.num_effects; ++slot) {
+        const uint32_t num_params = Synth::get_effect_param_floats(chain.effects[slot].type);
+        for (uint32_t param = 0; param < num_params; ++param) {
+            if (chain.effects[slot].bindings[param].lfo_desc_id == desc) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
 } // anonymous namespace
 
 const Sculptor::EffectTypeInfo& Sculptor::effect_type_info(Synth::EffectType type)
@@ -219,6 +223,24 @@ uint32_t Sculptor::fx_lfo_desc_of(const EffectGraphMapping& mapping, uint32_t no
     return 0;
 }
 
+// Number of nodes the chain's projection needs: fixed endpoints, one per
+// projected effect slot, and one per pinned-or-referenced LFO descriptor.
+// Editors preflight node-adding commands against Sculptor::max_nodes with
+// this count.
+uint32_t Sculptor::fx_projected_node_count(const Synth::InstrumentBank& bank, uint32_t chain, const bool* pinned_lfos)
+{
+    const Synth::EffectChainBinding& chain_ref = chain_at(bank, chain);
+    const bool                       is_master = chain == Synth::max_channels;
+    uint32_t                         effect_slots[Synth::max_chain_effects];
+    uint32_t                         count = 2 + (is_master ? 0u : 1u) + projected_slots(chain_ref, effect_slots);
+    for (uint32_t desc = 1; desc <= bank.lfos.num_allocated; ++desc) {
+        if (fx_lfo_is_projected(chain_ref, pinned_lfos, desc)) {
+            ++count;
+        }
+    }
+    return count;
+}
+
 bool Sculptor::project_effect_chain_to_graph(const Synth::InstrumentBank& bank,
                                              uint32_t                     chain,
                                              Graph*                       graph,
@@ -240,11 +262,11 @@ bool Sculptor::project_effect_chain_to_graph(const Synth::InstrumentBank& bank,
     const bool                       is_master = chain == Synth::max_channels;
     const Synth::EffectChainBinding& chain_ref = chain_at(bank, chain);
 
-    // The widget's callbacks and flags are projection state: every
-    // projection re-installs its own, so a pane switch cannot leave one
+    // node_state_edits_enabled is projection state: every projection
+    // starts with plain nodes.  The owning pane installs its callbacks
+    // after the projection returns, so a pane switch cannot leave one
     // pane's rules on another pane's nodes.
     graph->clear();
-    graph->connections_readonly     = false;
     graph->node_state_edits_enabled = false;
     // Fixed endpoints: the channel's combined output (all of the channel's
     // zones) or every channel's output for the master chain.
@@ -378,21 +400,9 @@ bool Sculptor::project_effect_chain_to_graph(const Synth::InstrumentBank& bank,
     // or the caller pinned, deduplicated by id.  Descriptor content edits
     // fan out to every user, including oscillators and other chains.
     for (uint32_t desc = 1; desc <= bank.lfos.num_allocated; ++desc) {
-        const bool pinned     = pinned_lfos != nullptr && pinned_lfos[desc - 1];
-        bool       referenced = pinned;
-        for (uint32_t slot = 0; slot < chain_ref.num_effects && ! referenced; ++slot) {
-            const uint32_t num_params = Synth::get_effect_param_floats(chain_ref.effects[slot].type);
-            for (uint32_t param = 0; param < num_params; ++param) {
-                if (chain_ref.effects[slot].bindings[param].lfo_desc_id == desc) {
-                    referenced = true;
-                    break;
-                }
-            }
-        }
-        if (! referenced) {
+        if (! fx_lfo_is_projected(chain_ref, pinned_lfos, desc)) {
             continue;
         }
-
         const Synth::LFODescriptor& lfo = bank.lfos.entries[desc - 1];
         char                        name[64];
         snprintf(name, sizeof(name), "LFO %u", desc);
@@ -645,6 +655,32 @@ bool Sculptor::apply_fx_graph_change(Synth::InstrumentBank*    bank,
                 if (mapping.midi_node == pool_no_slot) {
                     return false; // the master chain admits no MIDI sources
                 }
+                if (change.kind == ChangeKind::connection_changed) {
+                    // A retarget pulled the wire off another parameter's source row;
+                    // that row's packed inputs must forget the source or the move
+                    // becomes a copy.
+                    const EndPoint prev = change.connection_prev_input;
+                    if (graph.node_occupied(prev.node_idx) &&
+                        (prev.node_idx != in_point.node_idx || prev.slot_idx != in_point.slot_idx)) {
+                        const uint32_t prev_field = prev.slot_idx >= fx_param_row(0)
+                                                        ? (prev.slot_idx - fx_param_row(0)) % fx_param_stride
+                                                        : fx_param_stride;
+                        if (prev_field == 4 || prev_field == 7) {
+                            const uint32_t prev_param = (prev.slot_idx - fx_param_row(0)) / fx_param_stride;
+                            const int32_t  prev_slot  = fx_effect_slot_of(mapping, prev.node_idx);
+                            if (prev_slot >= 0 &&
+                                prev_param < Synth::get_effect_param_floats(chain.effects[prev_slot].type)) {
+                                if (! rebuild_param_inputs(graph,
+                                                           mapping,
+                                                           prev.node_idx,
+                                                           prev_param,
+                                                           &chain.effects[prev_slot].bindings[prev_param])) {
+                                    return false;
+                                }
+                            }
+                        }
+                    }
+                }
                 return rebuild_param_inputs(graph,
                                             mapping,
                                             in_point.node_idx,
@@ -767,7 +803,9 @@ void Sculptor::fx_clear_lfo_references(Synth::EffectChainBinding* chain, uint16_
     }
 }
 
-bool Sculptor::fx_new_lfo(Synth::InstrumentBank* bank, uint16_t* out_desc_id)
+// One authority for a fresh LFO descriptor's defaults; the oscillator and
+// effect editors both start from this shape.
+bool Sculptor::allocate_default_lfo(Synth::InstrumentBank* bank, uint16_t* out_desc_id)
 {
     if (bank->lfos.num_allocated >= Synth::max_lfos) {
         return false;

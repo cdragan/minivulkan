@@ -26,7 +26,7 @@ constexpr uint32_t editor_undo_depth             = 10;
 static_assert(bank_json_staging_reservation + 2 * (Synth::library_max_records * sizeof(Synth::LibraryEntry)) +
                   sizeof(Sculptor::UndoRedo) + sizeof(uint32_t) + 2 * sizeof(Synth::InstrumentBank) +
                   sizeof(Synth::BankUpdateQueue) + (6 + editor_undo_depth) * sizeof(Synth::InstrumentEditorBank) +
-                  editor_undo_depth * sizeof(uint32_t) + 64 * 1024 + // library record copy chunks
+                  2 * editor_undo_depth * sizeof(uint32_t) + 64 * 1024 + // library record copy chunks
                   Sculptor::notification_state_bytes + Sculptor::max_graph_bytes <=
               16 * 1024 * 1024);
 

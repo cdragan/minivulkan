@@ -43,7 +43,7 @@ bool submit_note_event(uint32_t channel, uint32_t note, bool note_on)
 Synth::InstrumentEditorBank instr_bank; // GUI-thread-owned editable bank (names included).
 Sculptor::UndoRedo          undo_redo;
 constexpr uint32_t          undo_depth = 10;
-uint8_t                     undo_buf[(sizeof(Synth::InstrumentEditorBank) + sizeof(uint32_t)) * undo_depth];
+uint8_t                     undo_buf[(sizeof(Synth::InstrumentEditorBank) + 2 * sizeof(uint32_t)) * undo_depth];
 
 // Queue for shipping edited banks from the GUI to the synth audio thread.
 Synth::BankUpdateQueue bank_queue;
@@ -72,8 +72,9 @@ bool                      osc_graph_reproject    = false; // deferred wholesale 
 
 // The effects graph projection: the same widget instance hosts the channel
 // and master effect chains, mutually exclusive with the oscillator
-// projection.  The chain binding is the truth; node positions are
-// session-only and re-derive on every re-projection.
+// projection. The chain binding is the truth; a moved node keeps a
+// kind-4 bank record, so its place survives re-projections, undo and file
+// saves, while untouched nodes re-derive from the deterministic layout.
 Sculptor::EffectGraphMapping fx_mapping;
 bool                         fx_graph_projected = false;
 bool                         fx_graph_reproject = false;
@@ -356,30 +357,29 @@ bool fx_node_menu(void* user_data, uint32_t node_idx)
 }
 
 // Layout of every node as the projection built it: a node whose live layout
-// still matches needs no kind-0 record, so records stay sparse.
-vmath::vec2 osc_projected_position[Sculptor::max_nodes];
-float       osc_projected_width[Sculptor::max_nodes];
-float       osc_projected_height[Sculptor::max_nodes];
+// still matches needs no layout record, so records stay sparse.
+vmath::vec2 projected_position[Sculptor::max_nodes];
+float       projected_width[Sculptor::max_nodes];
+float       projected_height[Sculptor::max_nodes];
 
 // Whether an occupied node's live layout still matches the projected
-// snapshot: a node the user has not touched needs no kind-0 record.
-bool osc_node_layout_moved(uint32_t node)
+// snapshot: a node the user has not touched needs no layout record.
+bool node_layout_moved(uint32_t node)
 {
     const Sculptor::Node& node_ref = osc_graph.node(node);
-    return node_ref.position.x != osc_projected_position[node].x ||
-           node_ref.position.y != osc_projected_position[node].y ||
-           node_ref.content_width_override != osc_projected_width[node] ||
-           node_ref.content_height_override != osc_projected_height[node];
+    return node_ref.position.x != projected_position[node].x || node_ref.position.y != projected_position[node].y ||
+           node_ref.content_width_override != projected_width[node] ||
+           node_ref.content_height_override != projected_height[node];
 }
 
 // Re-bases one node's snapshot on its live layout, after a commit or a
 // re-projection.
-void osc_snapshot_node_layout(uint32_t node)
+void snapshot_node_layout(uint32_t node)
 {
     const Sculptor::Node& node_ref = osc_graph.node(node);
-    osc_projected_position[node]   = node_ref.position;
-    osc_projected_width[node]      = node_ref.content_width_override;
-    osc_projected_height[node]     = node_ref.content_height_override;
+    projected_position[node]       = node_ref.position;
+    projected_width[node]          = node_ref.content_width_override;
+    projected_height[node]         = node_ref.content_height_override;
 }
 
 // Rebuilds the graph for one zone from the committed bank and drains the
@@ -427,12 +427,12 @@ void init_osc_graph_widget()
 // stays two undo entries while one drag gesture coalesces through the
 // unchanged tag; a multi-node drag takes a fresh unique tag, so a later
 // single-node move of the lowest node cannot amend the multi-node entry.
-uint32_t osc_moved_node(uint32_t* moved_count)
+uint32_t graph_moved_node(uint32_t* moved_count)
 {
     *moved_count    = 0;
     uint32_t lowest = Sculptor::pool_no_slot;
     for (uint32_t node = 0; node < Sculptor::max_nodes; ++node) {
-        if (! osc_graph.node_occupied(node) || ! osc_node_layout_moved(node)) {
+        if (! osc_graph.node_occupied(node) || ! node_layout_moved(node)) {
             continue;
         }
         ++*moved_count;
@@ -445,11 +445,11 @@ uint32_t osc_moved_node(uint32_t* moved_count)
 
 // Re-bases the projected-layout snapshot on the live graph after a commit, so
 // an unchanged layout never commits twice.
-void refresh_osc_projected_layout()
+void refresh_projected_layout()
 {
     for (uint32_t node = 0; node < Sculptor::max_nodes; ++node) {
         if (osc_graph.node_occupied(node)) {
-            osc_snapshot_node_layout(node);
+            snapshot_node_layout(node);
         }
     }
 }
@@ -478,7 +478,7 @@ bool sync_osc_graph_layout(Synth::InstrumentEditorBank* bank)
             continue;
         }
         const Sculptor::Node& node_ref = osc_graph.node(node);
-        const bool            moved    = osc_node_layout_moved(node);
+        const bool            moved    = node_layout_moved(node);
         if (! moved) {
             continue;
         }
@@ -637,32 +637,47 @@ void drain_bank_updates()
     }
 }
 
-void editor_snapshot()
+// The origin packs the channel and pane the edit was made in; undo/redo
+// refocus them so a whole-bank restore is never silent about what changed.
+void editor_snapshot(uint32_t origin)
 {
     undo_init_once();
 
     undo_redo.init_undo_push();
     undo_redo.push(&instr_bank, sizeof(instr_bank));
+    undo_redo.push(origin);
     undo_redo.finish_undo_push();
 
     undo_redo.clear_redo();
 }
 
-bool editor_undo()
+// The entry's origin says where its edit was made: the redo entry this
+// creates replays that edit, and the caller refocuses that channel and
+// pane so a whole-bank restore is never silent about what changed.
+bool editor_undo(uint32_t* origin)
 {
     undo_init_once();
 
     if (undo_redo.undo_empty())
         return false;
 
+    const Sculptor::UndoRedo::Snapshot snap         = undo_redo.get_snapshot();
+    uint32_t                           entry_origin = 0;
+    memcpy(&entry_origin, snap.buf + sizeof(instr_bank), sizeof entry_origin);
+
     undo_redo.init_redo_push();
     undo_redo.push(&instr_bank, sizeof(instr_bank));
+    undo_redo.push(entry_origin);
     if (! undo_redo.finish_redo_push())
         return false;
 
     undo_redo.init_undo();
+    undo_redo.pop_u32();
     undo_redo.pop(&instr_bank, sizeof(instr_bank));
     undo_redo.finish_undo();
+
+    if (origin)
+        *origin = entry_origin;
 
     // Backpressure only defers the audible switch; the restoration itself
     // succeeded, so the caller must resynchronize selections either way.
@@ -670,23 +685,34 @@ bool editor_undo()
     return true;
 }
 
-bool editor_redo()
+// A redo entry's payload reads forward, so its origin sits at the start:
+// the edit it replays becomes visible at that origin again.
+bool editor_redo(uint32_t* origin)
 {
     undo_init_once();
 
     if (undo_redo.redo_empty())
         return false;
 
+    const Sculptor::UndoRedo::Snapshot snap         = undo_redo.get_redo_snapshot();
+    uint32_t                           entry_origin = 0;
+    memcpy(&entry_origin, snap.buf, sizeof entry_origin);
+
     undo_redo.init_undo_push();
     undo_redo.push(&instr_bank, sizeof(instr_bank));
+    undo_redo.push(entry_origin);
     if (! undo_redo.finish_undo_push())
         return false;
 
     if (! undo_redo.init_redo())
         return false;
 
+    undo_redo.pop_u32();
     undo_redo.pop(&instr_bank, sizeof(instr_bank));
     undo_redo.finish_redo();
+
+    if (origin)
+        *origin = entry_origin;
 
     // Backpressure only defers the audible switch; the restoration itself
     // succeeded, so the caller must resynchronize selections either way.
@@ -722,7 +748,7 @@ bool load_editor_bank(const char* path)
         return false;
     }
 
-    editor_snapshot();
+    editor_snapshot(0);            // baseline: the first undo focus is channel 0
     instr_bank          = scratch; // names ride in the bank file
     osc_graph_reproject = true;
     fx_graph_reproject  = true;
@@ -748,7 +774,7 @@ void init_editor()
     publish_edited_bank();
 }
 
-static_assert(sizeof(undo_buf) <= undo_depth * (sizeof(Synth::InstrumentEditorBank) + sizeof(uint32_t)));
+static_assert(sizeof(undo_buf) <= undo_depth * (sizeof(Synth::InstrumentEditorBank) + 2 * sizeof(uint32_t)));
 static_assert(sizeof(Synth::BankUpdateQueue) <= 2 * sizeof(Synth::InstrumentBank) + 32);
 
 // Transactional command scratch: structural commands mutate this candidate, validate it,
@@ -842,23 +868,66 @@ float boundary_x_of(uint32_t note, float white_w, float black_w)
     return x;
 }
 
+// The chain's kind-4 record carrying a projected node's saved place, -1
+// when the node never moved.
+int32_t find_fx_layout_record(const Synth::InstrumentEditorBank& bank, uint32_t chain, const char* name)
+{
+    for (uint32_t i = 0; i < bank.graph_layout_count; ++i) {
+        const Synth::GraphNodeLayout& record = bank.graph_layout[i];
+        if (record.kind == 4 && record.channel == chain && strcmp(record.name, name) == 0) {
+            return static_cast<int32_t>(i);
+        }
+    }
+    return -1;
+}
+
+// Writes every moved fx node's place into the bank's kind-4 records: node
+// places ride the bank, so re-projections, undo/redo and file saves all
+// restore them. Returns false when a moved node would need a new record
+// but the global record list is full.
+bool sync_fx_graph_layout(Synth::InstrumentEditorBank* bank)
+{
+    const uint32_t chain = fx_mapping.chain;
+    for (uint32_t node = 0; node < Sculptor::max_nodes; ++node) {
+        if (! osc_graph.node_occupied(node) || ! node_layout_moved(node)) {
+            continue;
+        }
+        const Sculptor::Node& node_ref   = osc_graph.node(node);
+        const int32_t         record_idx = find_fx_layout_record(*bank, chain, node_ref.name);
+        if (record_idx >= 0) {
+            write_record_position(bank, record_idx, node_ref);
+            continue;
+        }
+        if (! Sculptor::graph_records_have_capacity(*bank, 1)) {
+            return false;
+        }
+        Synth::GraphNodeLayout record = {};
+        record.channel                = static_cast<uint8_t>(chain);
+        record.kind                   = 4;
+        snprintf(record.name, sizeof(record.name), "%s", node_ref.name);
+        const int32_t fresh_idx                        = static_cast<int32_t>(bank->graph_layout_count);
+        bank->graph_layout[bank->graph_layout_count++] = record;
+        write_record_position(bank, fresh_idx, node_ref);
+    }
+    return true;
+}
+
 } // anonymous namespace
 
 void Sculptor::SynthEditor::reproject_osc_graph(uint32_t channel, uint32_t zone)
 {
-    // The widget may last have hosted the effects projection: re-install the
-    // oscillator's connection grammar and clear its read-only flags.
-    osc_graph.connections_readonly = false;
+    osc_graph_zone_channel = channel;
+    osc_graph_zone_index   = zone;
+    osc_graph_projected    = Sculptor::project_editor_to_graph(instr_bank, &osc_graph, &osc_mapping, channel, zone);
+    ++osc_graph_generation;
+    // The pane's connection grammar and menus install after the projection:
+    // the widget may last have hosted the effects projection, and the
+    // projection itself owns no callbacks.
     osc_graph.set_validator(&Sculptor::osc_graph_validate, &osc_mapping);
     osc_graph.set_delete_veto(&osc_node_delete_veto, &osc_veto_context);
     osc_graph.set_canvas_menu_callback(&osc_canvas_menu, nullptr);
     osc_graph.set_node_menu_callback(&osc_node_menu, nullptr);
     fx_graph_projected = false;
-
-    osc_graph_zone_channel = channel;
-    osc_graph_zone_index   = zone;
-    osc_graph_projected    = Sculptor::project_editor_to_graph(instr_bank, &osc_graph, &osc_mapping, channel, zone);
-    ++osc_graph_generation;
     // Rebind envelope state widgets from scratch: gestures and point
     // selections cannot outlive the graph they were made in.
     for (uint32_t node = 0; node < Sculptor::max_nodes; ++node) {
@@ -882,7 +951,7 @@ void Sculptor::SynthEditor::reproject_osc_graph(uint32_t channel, uint32_t zone)
         }
         for (uint32_t node = 0; node < Sculptor::max_nodes; ++node) {
             if (osc_graph.node_occupied(node)) {
-                osc_snapshot_node_layout(node);
+                snapshot_node_layout(node);
             }
         }
     }
@@ -1137,6 +1206,18 @@ void Sculptor::SynthEditor::rederive_zone_selection(uint32_t channel)
     zone_tab_force_entry   = zone;
 }
 
+// Undo and redo restore whole-bank snapshots that are otherwise silent about
+// what changed, so the restored entry's origin refocuses the channel and
+// pane where the change becomes visible.
+void Sculptor::SynthEditor::apply_edit_origin(uint32_t origin)
+{
+    selected_target   = origin >> 1;
+    show_effects_mode = (origin & 1u) != 0;
+    // The master pane has no tab bar, so a master-focused restore leaves the
+    // channel pane's tabs untouched.
+    effects_tab_pend = selected_target == target_master ? -1 : (show_effects_mode ? 1 : 0);
+}
+
 void Sculptor::SynthEditor::rederive_all_selections()
 {
     for (uint32_t channel = 0; channel < Synth::max_channels; channel++)
@@ -1160,7 +1241,7 @@ bool Sculptor::SynthEditor::commit_candidate(const Synth::InstrumentEditorBank& 
     }
 
     if (Sculptor::undo_group_needs_snapshot(&osc_undo_group, tag)) {
-        editor_snapshot();
+        editor_snapshot((selected_target << 1) | (show_effects_mode ? 1u : 0u));
     }
     instr_bank = candidate_bank;
 
@@ -1264,7 +1345,9 @@ bool Sculptor::SynthEditor::create_gui_frame(uint32_t image_idx, bool* need_real
     // ChildWindows rule the held-note release uses.
     if (ImGui::IsWindowFocused(ImGuiFocusedFlags_ChildWindows) && ! io.WantTextInput) {
         if (is_ctrl_down() && ! is_shift_down() && ImGui::IsKeyPressed(ImGuiKey_Z)) {
-            if (editor_undo()) {
+            uint32_t origin = 0;
+            if (editor_undo(&origin)) {
+                apply_edit_origin(origin);
                 osc_graph_reproject = true;
                 fx_graph_reproject  = true;
                 rederive_all_selections();
@@ -1272,7 +1355,9 @@ bool Sculptor::SynthEditor::create_gui_frame(uint32_t image_idx, bool* need_real
         }
         if (is_ctrl_down() && ((! is_shift_down() && ImGui::IsKeyPressed(ImGuiKey_Y)) ||
                                (is_shift_down() && ImGui::IsKeyPressed(ImGuiKey_Z)))) {
-            if (editor_redo()) {
+            uint32_t origin = 0;
+            if (editor_redo(&origin)) {
+                apply_edit_origin(origin);
                 osc_graph_reproject = true;
                 fx_graph_reproject  = true;
                 rederive_all_selections();
@@ -1291,8 +1376,10 @@ bool Sculptor::SynthEditor::create_gui_frame(uint32_t image_idx, bool* need_real
     ImGui::TableSetColumnIndex(1);
     if (selected_target == target_master) {
         const float pane_h = ImGui::GetContentRegionAvail().y - ImGui::GetStyle().CellPadding.y;
-        ImGui::BeginChild("##synth_master_pane", ImVec2(0, pane_h < 0.0f ? 0.0f : pane_h), true,
-                              ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+        ImGui::BeginChild("##synth_master_pane",
+                          ImVec2(0, pane_h < 0.0f ? 0.0f : pane_h),
+                          true,
+                          ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
         gui_fx_graph(Synth::max_channels);
         ImGui::EndChild();
     }
@@ -1355,12 +1442,23 @@ void Sculptor::SynthEditor::gui_channel_pane(uint32_t channel)
     }
 
     if (ImGui::BeginTabBar("synth_mode")) {
-        if (ImGui::BeginTabItem("Oscillators")) {
+        // Undo/redo refocus the pane the restored change lives in.  The
+        // pending selection survives the one frame ImGui still reports the
+        // stale tab, then clears once the forced tab is shown.
+        const ImGuiTabItemFlags osc_flags = effects_tab_pend == 0 ? ImGuiTabItemFlags_SetSelected : 0;
+        const ImGuiTabItemFlags fx_flags  = effects_tab_pend == 1 ? ImGuiTabItemFlags_SetSelected : 0;
+        if (ImGui::BeginTabItem("Oscillators", nullptr, osc_flags)) {
             show_effects_mode = false;
+            if (osc_flags) {
+                effects_tab_pend = -1;
+            }
             ImGui::EndTabItem();
         }
-        if (ImGui::BeginTabItem("Effects")) {
+        if (ImGui::BeginTabItem("Effects", nullptr, fx_flags)) {
             show_effects_mode = true;
+            if (fx_flags) {
+                effects_tab_pend = -1;
+            }
             ImGui::EndTabItem();
         }
         ImGui::EndTabBar();
@@ -1372,8 +1470,10 @@ void Sculptor::SynthEditor::gui_channel_pane(uint32_t channel)
     if (show_effects_mode) {
         float pane_h = ImGui::GetContentRegionAvail().y - 72.0f - ImGui::GetStyle().CellPadding.y -
                        ImGui::GetStyle().ItemSpacing.y;
-        ImGui::BeginChild("##synth_pane_ph", ImVec2(0, pane_h < 0.0f ? 0.0f : pane_h), true,
-                              ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+        ImGui::BeginChild("##synth_pane_ph",
+                          ImVec2(0, pane_h < 0.0f ? 0.0f : pane_h),
+                          true,
+                          ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
         gui_fx_graph(channel);
         ImGui::EndChild();
         gui_keyboard();
@@ -1442,8 +1542,10 @@ void Sculptor::SynthEditor::gui_channel_pane(uint32_t channel)
     // window into a scrollbar.
     float pane_h =
         ImGui::GetContentRegionAvail().y - 72.0f - ImGui::GetStyle().CellPadding.y - ImGui::GetStyle().ItemSpacing.y;
-    ImGui::BeginChild("##synth_pane_ph", ImVec2(0, pane_h < 0.0f ? 0.0f : pane_h), true,
-                              ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+    ImGui::BeginChild("##synth_pane_ph",
+                      ImVec2(0, pane_h < 0.0f ? 0.0f : pane_h),
+                      true,
+                      ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
     gui_osc_graph(channel);
     ImGui::EndChild();
 
@@ -1497,10 +1599,10 @@ void Sculptor::SynthEditor::drain_osc_graph(uint32_t channel, uint32_t zone)
         // Node moves and resizes push no change events; they persist as their
         // own commit, tagged per node so one drag gesture stays one undo
         // entry.  The commit waits for the button to come up: committing per
-        // frame during a drag would run the full publish path, including the
-        // bank-file write, on every gesture frame.
+        // frame during a drag would run the full bank validation and publish
+        // path on every gesture frame.
         uint32_t       moved_count = 0;
-        const uint32_t moved_node  = osc_moved_node(&moved_count);
+        const uint32_t moved_node  = graph_moved_node(&moved_count);
         if (moved_node == Sculptor::pool_no_slot || ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
             return;
         }
@@ -1509,7 +1611,7 @@ void Sculptor::SynthEditor::drain_osc_graph(uint32_t channel, uint32_t zone)
         const uint32_t layout_tag_id0  = moved_count > 1 ? ++osc_fresh_tag_serial : moved_node;
         if (sync_osc_graph_layout(&candidate) &&
             commit_candidate(candidate, Sculptor::UndoGroupTag{ layout_tag_kind, layout_tag_id0, 0 })) {
-            refresh_osc_projected_layout();
+            refresh_projected_layout();
         }
         else {
             Sculptor::notify_error("Synth: oscillator edit refused");
@@ -1556,7 +1658,7 @@ void Sculptor::SynthEditor::drain_osc_graph(uint32_t channel, uint32_t zone)
         reproject_osc_graph(channel, zone);
         return;
     }
-    refresh_osc_projected_layout();
+    refresh_projected_layout();
     if (structural) {
         // Structural applies (layer removal, binding rewiring) rebuild the
         // whole mapping from the committed bank before more edits arrive.
@@ -1589,104 +1691,6 @@ void Sculptor::SynthEditor::run_osc_canvas_command()
     }
 }
 
-// Canvas menu "Add Oscillator": one more oscillator layer at the menu
-// position, with the model's fresh-Oscillator defaults.  Node capacity is
-// checked against the actual projected node count: a full node pool refuses
-// even below the seven-layer limit.
-
-// The fx pane's live node positions versus what the projection built: a
-// node the user has not dragged needs no record, so the layout sync stays
-// sparse.
-vmath::vec2 fx_projected_positions[Sculptor::max_nodes];
-
-bool fx_node_layout_moved(uint32_t node)
-{
-    const Sculptor::Node& node_ref = osc_graph.node(node);
-    return node_ref.position.x != fx_projected_positions[node].x ||
-           node_ref.position.y != fx_projected_positions[node].y;
-}
-
-// Lowest live fx node whose position no longer matches the projection, with
-// the number of moved nodes; pool_no_slot when nothing moved.  One moved
-// node tags per node, so repeated drags of the same node stay one undo entry
-// while a multi-node drag takes a fresh tag - the oscillator pane's scheme.
-uint32_t fx_moved_node(uint32_t* moved_count)
-{
-    *moved_count    = 0;
-    uint32_t lowest = Sculptor::pool_no_slot;
-    for (uint32_t node = 0; node < Sculptor::max_nodes; ++node) {
-        if (! osc_graph.node_occupied(node) || ! fx_node_layout_moved(node)) {
-            continue;
-        }
-        ++*moved_count;
-        if (lowest == Sculptor::pool_no_slot) {
-            lowest = node;
-        }
-    }
-    return lowest;
-}
-
-// Re-bases the projected-position snapshot on the live graph, after a
-// commit or a re-projection, so an unchanged layout never commits twice.
-void refresh_fx_projected_layout()
-{
-    for (uint32_t node = 0; node < Sculptor::max_nodes; ++node) {
-        if (osc_graph.node_occupied(node)) {
-            fx_projected_positions[node] = osc_graph.node(node).position;
-        }
-    }
-}
-
-// The chain's kind-4 record carrying a projected node's saved place, -1
-// when the node never moved.
-int32_t find_fx_layout_record(const Synth::InstrumentEditorBank& bank, uint32_t chain, const char* name)
-{
-    for (uint32_t i = 0; i < bank.graph_layout_count; ++i) {
-        const Synth::GraphNodeLayout& record = bank.graph_layout[i];
-        if (record.kind == 4 && record.channel == chain && strcmp(record.name, name) == 0) {
-            return static_cast<int32_t>(i);
-        }
-    }
-    return -1;
-}
-
-// Writes every moved fx node's position into the bank's kind-4 records:
-// node places ride the bank, so re-projections, undo/redo and file saves
-// all restore them.  Returns false when a moved node would need a new
-// record but the global record list is full.
-bool sync_fx_graph_layout(Synth::InstrumentEditorBank* bank)
-{
-    const uint32_t chain = fx_mapping.chain;
-    for (uint32_t node = 0; node < Sculptor::max_nodes; ++node) {
-        if (! osc_graph.node_occupied(node) || ! fx_node_layout_moved(node)) {
-            continue;
-        }
-        const Sculptor::Node& node_ref   = osc_graph.node(node);
-        const int32_t         record_idx = find_fx_layout_record(*bank, chain, node_ref.name);
-        if (record_idx >= 0) {
-            Synth::GraphNodeLayout& record = bank->graph_layout[record_idx];
-            record.x                       = node_ref.position.x;
-            record.y                       = node_ref.position.y;
-            record.width_override          = node_ref.content_width_override;
-            record.height_override         = node_ref.content_height_override;
-            continue;
-        }
-        if (! Sculptor::graph_records_have_capacity(*bank, 1)) {
-            return false;
-        }
-        Synth::GraphNodeLayout record = {};
-        record.channel                = static_cast<uint8_t>(chain);
-        record.kind                   = 4;
-        snprintf(record.name, sizeof(record.name), "%s", node_ref.name);
-        record.x                                       = node_ref.position.x;
-        record.y                                       = node_ref.position.y;
-        record.width_override                          = node_ref.content_width_override;
-        record.height_override                         = node_ref.content_height_override;
-        bank->graph_layout[bank->graph_layout_count++] = record;
-    }
-    return true;
-}
-
 void Sculptor::SynthEditor::reproject_fx_graph(uint32_t chain)
 {
     osc_graph_projected = false;
@@ -1713,12 +1717,11 @@ void Sculptor::SynthEditor::reproject_fx_graph(uint32_t chain)
                                       record.height_override);
         }
     }
-    refresh_fx_projected_layout();
+    refresh_projected_layout();
 
     // The pane's connection grammar and menus install after the projection:
     // the widget may last have hosted the oscillator projection, and the
     // projection itself owns no callbacks.
-    osc_graph.connections_readonly = false;
     osc_graph.set_validator(&fx_connection_validator, nullptr);
     osc_graph.set_delete_veto(&fx_node_delete_veto, nullptr);
     osc_graph.set_canvas_menu_callback(&fx_canvas_menu, nullptr);
@@ -1766,10 +1769,10 @@ void Sculptor::SynthEditor::drain_fx_graph(uint32_t chain)
         // Node moves push no change events; they persist as their own
         // commit, tagged per node so one drag gesture stays one undo entry.
         // The commit waits for the button to come up: committing per frame
-        // during a drag would run the full publish path, including the
-        // bank-file write, on every gesture frame.
+        // during a drag would run the full bank validation and publish
+        // path on every gesture frame.
         uint32_t       moved_count = 0;
-        const uint32_t moved_node  = fx_moved_node(&moved_count);
+        const uint32_t moved_node  = graph_moved_node(&moved_count);
         if (moved_node == Sculptor::pool_no_slot || ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
             return;
         }
@@ -1778,7 +1781,7 @@ void Sculptor::SynthEditor::drain_fx_graph(uint32_t chain)
         const uint32_t layout_tag_id0  = moved_count > 1 ? ++osc_fresh_tag_serial : moved_node;
         if (sync_fx_graph_layout(&candidate) &&
             commit_candidate(candidate, Sculptor::UndoGroupTag{ layout_tag_kind, layout_tag_id0, 0 })) {
-            refresh_fx_projected_layout();
+            refresh_projected_layout();
         }
         else {
             Sculptor::notify_error("Synth: effect edit refused");
@@ -1935,6 +1938,13 @@ void Sculptor::SynthEditor::do_fx_add_effect(Synth::EffectType type)
         Sculptor::notify_error("Synth: the chain already holds four effects");
         return;
     }
+
+    // Node preflight: the projection must still be able to show the chain
+    // plus one more node, or the pane would break with no way back.
+    if (Sculptor::fx_projected_node_count(instr_bank.bank, fx_mapping.chain, fx_lfo_pinned) + 1 > Sculptor::max_nodes) {
+        Sculptor::notify_error("Synth: cannot add another effect: the graph node budget is full");
+        return;
+    }
     Sculptor::fx_init_slot(&chain, chain.num_effects, type);
     chain.effects[chain.num_effects].enabled = true;
     ++chain.num_effects;
@@ -1961,7 +1971,13 @@ void Sculptor::SynthEditor::do_fx_add_lfo()
 {
     candidate        = instr_bank;
     uint16_t desc_id = 0;
-    if (! Sculptor::fx_new_lfo(&candidate.bank, &desc_id)) {
+    // Node preflight: the pin demands a node from the same pool the chain's
+    // effects and endpoints draw from; refuse before the descriptor exists.
+    if (Sculptor::fx_projected_node_count(instr_bank.bank, fx_mapping.chain, fx_lfo_pinned) + 1 > Sculptor::max_nodes) {
+        Sculptor::notify_error("Synth: cannot add an LFO: the graph node budget is full");
+        return;
+    }
+    if (! Sculptor::allocate_default_lfo(&candidate.bank, &desc_id)) {
         Sculptor::notify_error("Synth: cannot add an LFO: the descriptor pool is full");
         return;
     }
@@ -1982,13 +1998,21 @@ void Sculptor::SynthEditor::do_fx_change_type(uint32_t node_idx, Synth::EffectTy
     }
     candidate                        = instr_bank;
     Synth::EffectChainBinding& chain = Sculptor::fx_graph_chain(&candidate.bank, fx_mapping.chain);
+    // The effect keeps its place and its on/off state across a type change;
+    // only the type and its parameter defaults are replaced.
+    const bool enabled = chain.effects[slot].enabled;
     Sculptor::fx_init_slot(&chain, static_cast<uint32_t>(slot), type);
+    chain.effects[slot].enabled = enabled;
     if (! commit_candidate(candidate, Sculptor::UndoGroupTag{ fx_tag_type, node_idx, static_cast<uint32_t>(type) })) {
         return;
     }
     fx_graph_reproject = true;
 }
 
+// Canvas menu "Add Oscillator": one more oscillator layer at the menu
+// position, with the model's fresh-Oscillator defaults. Node capacity is
+// checked against the actual projected node count: a full node pool refuses
+// even below the seven-layer limit.
 void Sculptor::SynthEditor::do_osc_add_oscillator()
 {
     const uint32_t channel        = osc_graph_zone_channel;
@@ -2088,14 +2112,12 @@ void Sculptor::SynthEditor::do_osc_add_generator(bool is_env)
         record.index                   = static_cast<uint8_t>(slot + 1);
     }
     else {
-        const uint32_t        slot = candidate.bank.lfos.allocate();
-        Synth::LFODescriptor& lfo  = candidate.bank.lfos.entries[slot];
-        lfo                        = Synth::LFODescriptor{};
-        lfo.wave                   = Synth::WaveType::sine_wave;
-        lfo.period_ms              = 250; // a zero period would not oscillate
-        lfo.min_value              = -1.0f;
-        lfo.min_max_delta          = 2.0f;
-        record.index               = static_cast<uint8_t>(slot + 1);
+        uint16_t lfo_desc_id = 0;
+        if (! Sculptor::allocate_default_lfo(&candidate.bank, &lfo_desc_id)) {
+            Sculptor::notify_error("Synth: the LFO descriptor pool is full");
+            return;
+        }
+        record.index = static_cast<uint8_t>(lfo_desc_id);
     }
     record.uid = Sculptor::allocate_detached_uid(candidate, channel, zone, record.kind);
     candidate.graph_layout[candidate.graph_layout_count++] = record;

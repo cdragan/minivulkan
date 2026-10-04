@@ -239,13 +239,8 @@ OscTargetView osc_target_view(Synth::ModTarget target);
 
 // Slot index on an oscillator node holding the value row of projected
 // parameter target `projected_index` (0..4); rows are not contiguous.
-uint32_t osc_target_row(uint32_t projected_index);
-
-// The live connection terminating at an input connector, or pool_no_slot.
-uint32_t connection_into(const Graph& graph, uint32_t node_idx, uint32_t slot_idx);
-
-// Registry index of the parameter projected onto node_idx, or -1.
-int32_t find_param(const OscGraphMapping& mapping, uint32_t node_idx);
+uint32_t osc_target_row(uint32_t projected_index); // Registry index of the parameter projected onto node_idx, or -1.
+int32_t  find_param(const OscGraphMapping& mapping, uint32_t node_idx);
 
 // The volume-envelope shape: minimum 0 and the first and the last point at 0,
 // so a volume envelope starts and ends in silence.

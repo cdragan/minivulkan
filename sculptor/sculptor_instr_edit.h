@@ -37,6 +37,7 @@ private:
 
     void rederive_zone_selection(uint32_t channel);
     void rederive_all_selections();
+    void apply_edit_origin(uint32_t origin);
     bool commit_candidate(const Synth::InstrumentEditorBank& candidate, Sculptor::UndoGroupTag tag);
     // Projects the bank onto the oscillator graph and binds the envelope
     // curve state widgets onto the envelope nodes.
@@ -106,6 +107,7 @@ private:
     bool     rename_zone                     = false; // rename modal targets a zone instrument
     uint32_t rename_zone_entry               = 0;     // zone entry the rename modal targets
     bool     show_effects_mode               = false; // Oscillators/Effects choice; persists across targets
+    int32_t  effects_tab_pend                = -1;    // one-shot: select the pane tab the restored undo entry came from
 
     // Instrument library. Entries refresh on every browser open and before every
     // save; errors surface as notifications and a failed scan never opens

@@ -162,8 +162,6 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
         bool  have_bbox      = false;
         float min_x          = 0.0f;
         float min_y          = 0.0f;
-        float pos_max_x      = 0.0f;
-        float pos_max_y      = 0.0f;
         float content_right  = 0.0f;
         float content_bottom = 0.0f;
         for (uint32_t i = 0; i < max_nodes; ++i) {
@@ -176,16 +174,12 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
                 have_bbox      = true;
                 min_x          = position.x;
                 min_y          = position.y;
-                pos_max_x      = position.x;
-                pos_max_y      = position.y;
                 content_right  = node_max.x;
                 content_bottom = node_max.y;
                 continue;
             }
             min_x          = position.x < min_x ? position.x : min_x;
             min_y          = position.y < min_y ? position.y : min_y;
-            pos_max_x      = position.x > pos_max_x ? position.x : pos_max_x;
-            pos_max_y      = position.y > pos_max_y ? position.y : pos_max_y;
             content_right  = node_max.x > content_right ? node_max.x : content_right;
             content_bottom = node_max.y > content_bottom ? node_max.y : content_bottom;
         }
@@ -194,34 +188,43 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
             // max(zoom, 1): below 1x only the positions shrink while every
             // box keeps full screen size.  Solve each regime for the largest
             // zoom that fits instead of scaling the whole bbox by zoom.
-            const float span_x     = pos_max_x - min_x;
-            const float span_y     = pos_max_y - min_y;
-            const float right_ext  = content_right - pos_max_x;
-            const float bottom_ext = content_bottom - pos_max_y;
             // Above 1x everything scales uniformly.
-            const float z_hi_x = widget_size.x / (span_x + right_ext + 2.0f * fit_view_margin);
-            const float z_hi_y = widget_size.y / (span_y + bottom_ext + 2.0f * fit_view_margin);
+            const float z_hi_x = (widget_size.x - 2.0f * fit_view_margin) / (content_right - min_x);
+            const float z_hi_y = (widget_size.y - 2.0f * fit_view_margin) / (content_bottom - min_y);
             const float z_hi   = z_hi_x < z_hi_y ? z_hi_x : z_hi_y;
             float       fitted;
             if (z_hi >= 1.0f) {
                 fitted = z_hi > graph_max_zoom ? graph_max_zoom : z_hi;
             }
             else {
-                // Below 1x the position span scales with zoom, the box
-                // extents stay fixed on screen.
-                const float z_lo_x =
-                    span_x > 0.0f ? (widget_size.x - right_ext - 2.0f * fit_view_margin) / span_x : 1.0f;
-                const float z_lo_y =
-                    span_y > 0.0f ? (widget_size.y - bottom_ext - 2.0f * fit_view_margin) / span_y : 1.0f;
-                float z_lo = z_lo_x < z_lo_y ? z_lo_x : z_lo_y;
-                z_lo       = z_lo > 1.0f ? 1.0f : z_lo;
-                fitted     = z_lo < graph_min_zoom ? graph_min_zoom : z_lo;
+                // Below 1x each node constrains the zoom separately: node i
+                // needs z * (p_i - min_p) + c_i screen pixels, with the box
+                // width c_i fixed on screen.  The leftmost/topmost nodes add
+                // no z-dependent term, so they constrain nothing here.
+                float z_lo = 1.0f;
+                for (uint32_t i = 0; i < max_nodes; ++i) {
+                    if (! nodes.is_occupied(i) || nodes.entries[i].ghost) {
+                        continue;
+                    }
+                    const vmath::vec2 position(nodes.entries[i].position);
+                    if (position.x - min_x > 0.0f) {
+                        const float z_x =
+                            (widget_size.x - 2.0f * fit_view_margin - content_sizes[i].x) / (position.x - min_x);
+                        z_lo = z_x < z_lo ? z_x : z_lo;
+                    }
+                    if (position.y - min_y > 0.0f) {
+                        const float z_y =
+                            (widget_size.y - 2.0f * fit_view_margin - content_sizes[i].y) / (position.y - min_y);
+                        z_lo = z_y < z_lo ? z_y : z_lo;
+                    }
+                }
+                fitted = z_lo < graph_min_zoom ? graph_min_zoom : z_lo;
             }
             // Screen position of a graph point is origin + (g - view_origin) * zoom,
             // so the visual bbox must be centered with view_origin = center - widget / (2 * zoom).
             const float eff       = fitted >= 1.0f ? 1.0f : 1.0f / fitted;
-            float       vis_max_x = 0.0f;
-            float       vis_max_y = 0.0f;
+            float       vis_max_x = -FLT_MAX;
+            float       vis_max_y = -FLT_MAX;
             for (uint32_t i = 0; i < max_nodes; ++i) {
                 if (! nodes.is_occupied(i) || nodes.entries[i].ghost) {
                     continue;
@@ -611,7 +614,7 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
                 ++line_prop;
                 {
                     const bool connected = slot_is_connected(node_idx, slot_idx);
-                    if ((connected && ! connections_readonly) || is_ghost) {
+                    if (connected || is_ghost) {
                         // Greyed-out value text: the connection drives the value,
                         // and ghosts submit no live widgets at all.
                         char value_text[32] = {};
@@ -773,7 +776,7 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
                                   1.5f);
         draw_list->AddCircleFilled(ImVec2(mid.x, mid.y), dot_radius * 0.6f, line_color);
 
-        if (mid_hovered && ! node_hit && ! connections_readonly && ImGui::IsMouseClicked(1)) {
+        if (mid_hovered && ! node_hit && ImGui::IsMouseClicked(1)) {
 
             popup_connection = c;
             ImGui::OpenPopup("connection_menu");
@@ -1130,11 +1133,7 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
     else if (interaction == Interaction::idle && ImGui::IsWindowHovered() && in_widget(mouse_screen) &&
              ImGui::IsMouseClicked(0) && ! ImGui::IsAnyItemHovered()) {
         const EndPoint pressed_dot = dot_at(mouse_screen);
-        if (pressed_dot.node_idx != pool_no_slot && connections_readonly) {
-            // Read-only projection wires: connector presses are dead, so a
-            // click on a dot neither drags the node nor picks a wire up.
-        }
-        else if (pressed_dot.node_idx != pool_no_slot) {
+        if (pressed_dot.node_idx != pool_no_slot) {
             // A connected dot picks up its existing connection, a free dot
             // starts a new one.  ponytail: fan-out pickup takes the first
             // match; revisit only if re-dragging one of many ever matters.

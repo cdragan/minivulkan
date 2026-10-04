@@ -1187,21 +1187,6 @@ bool Sculptor::retarget_param(Synth::InstrumentEditorBank* bank,
     return true;
 }
 
-// The live connection terminating at an input connector, or pool_no_slot.
-uint32_t Sculptor::connection_into(const Graph& graph, uint32_t node_idx, uint32_t slot_idx)
-{
-    for (uint32_t i = 0; i < Sculptor::max_connections; ++i) {
-        if (! graph.connection_occupied(i)) {
-            continue;
-        }
-        const Sculptor::Connection& connection = graph.get_connection(i);
-        if (connection.input.node_idx == node_idx && connection.input.slot_idx == slot_idx) {
-            return i;
-        }
-    }
-    return Sculptor::pool_no_slot;
-}
-
 // Index of the zone's layout record with the given key, or -1.
 int32_t Sculptor::find_record(const Synth::InstrumentEditorBank& bank,
                               uint32_t                           channel,
@@ -3777,7 +3762,9 @@ void Sculptor::zone_records_drop_zone(Synth::InstrumentEditorBank* bank, uint32_
     uint32_t write = 0;
     for (uint32_t i = 0; i < bank->graph_layout_count; ++i) {
         Synth::GraphNodeLayout record = bank->graph_layout[i];
-        if (record.channel == channel) {
+        // Kind-4 records are channel-wide effect layouts, not zone state:
+        // a zone drop must neither delete nor renumber them.
+        if (record.kind != 4 && record.channel == channel) {
             if (record.zone == zone) {
                 continue;
             }

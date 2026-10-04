@@ -452,14 +452,6 @@ public:
     // the interactions stay hidden.
     bool node_state_edits_enabled;
 
-    // True when the projection's connections are read-only views of the
-    // model (the effects editor): the renderer suppresses wire pickup,
-    // creation, retargeting and the connection popup, and a connected
-    // property row stays editable - the wire documents a binding instead
-    // of driving the value.  Projection state: the projection that owns
-    // the graph sets it, like node_state_edits_enabled.
-    bool connections_readonly = false;
-
 private:
     // Event queue (ring buffer); returns false when the event was suppressed
     // (quiet rebuild) or dropped (overflow).
@@ -586,4 +578,6 @@ private:
 // stay inside the namespace.
 constexpr uint32_t pool_no_slot = ::pool_no_slot;
 
+// The live connection terminating at an input connector, or pool_no_slot.
+uint32_t connection_into(const Graph& graph, uint32_t node_idx, uint32_t slot_idx);
 } // namespace Sculptor

@@ -806,17 +806,7 @@ void Sculptor::Graph::set_slot_input(uint32_t node_idx, uint32_t slot_idx, EndPo
     }
     // The single edge entering the slot is the mirror target; fan-in never
     // exists on these input slots (the widget's connect paths enforce it).
-    uint32_t existing = pool_no_slot;
-    for (uint32_t i = 0; i < max_connections; ++i) {
-        if (! connections.is_occupied(i)) {
-            continue;
-        }
-        const Connection& connection = connections.entries[i];
-        if (connection.input.node_idx == node_idx && connection.input.slot_idx == slot_idx) {
-            existing = i;
-            break;
-        }
-    }
+    const uint32_t existing = connection_into(*this, node_idx, slot_idx);
     if (output.node_idx == pool_no_slot) {
         if (existing != pool_no_slot) {
             connections.free(existing);
@@ -1621,4 +1611,19 @@ const char* Sculptor::Graph::error_text() const
 void Sculptor::Graph::dismiss_error()
 {
     error_active = false;
+}
+
+// The live connection terminating at an input connector, or pool_no_slot.
+uint32_t Sculptor::connection_into(const Graph& graph, uint32_t node_idx, uint32_t slot_idx)
+{
+    for (uint32_t c = 0; c < Sculptor::max_connections; ++c) {
+        if (! graph.connection_occupied(c)) {
+            continue;
+        }
+        const Sculptor::Connection& connection = graph.get_connection(c);
+        if (connection.input.node_idx == node_idx && connection.input.slot_idx == slot_idx) {
+            return c;
+        }
+    }
+    return Sculptor::pool_no_slot;
 }

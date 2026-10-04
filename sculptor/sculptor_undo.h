@@ -25,6 +25,7 @@ public:
     };
 
     Snapshot get_snapshot();
+    Snapshot get_redo_snapshot();
     Snapshot get_snapshot_space();
     void     push_snapshot(uint32_t size);
 

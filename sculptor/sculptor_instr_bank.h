@@ -21,7 +21,8 @@ struct GraphNodeLayout {
     uint8_t kind;         // 0 = bound node (index = canonical 0..13),
                           // 1 = envelope instance, 2 = LFO instance
                           // (index = descriptor id 1..128),
-                          // 3 = parameter (index = dynamic target 0..4)
+                          // 3 = parameter (index = dynamic target 0..4),
+                          // 4 = effect-graph node (name = node title, channel 16 = master chain)
     uint8_t index;        // canonical index or descriptor id
     uint8_t depth_source; // detached LFO only, else 0 (ModSource value)
     uint8_t rate_source;  // detached LFO only, else 0 (ModSource value)

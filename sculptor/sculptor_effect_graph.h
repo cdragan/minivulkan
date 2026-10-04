@@ -3,9 +3,9 @@
 
 // Projection between one effect chain binding (a channel chain or the master
 // chain) and the shared graph widget.  The chain is the single source of
-// truth: the projection is a read-only view, every user edit flows back
-// through drained change events or the slot panel's transaction seam, and
-// structural edits re-project.  No ImGui here: synth_unit links this file.
+// truth: the projection mirrors it, every user edit flows back through
+// drained change events or the pane's canvas commands, and structural
+// edits re-project.  No ImGui here: synth_unit links this file.
 
 #pragma once
 
@@ -69,7 +69,9 @@ int32_t fx_effect_slot_of(const EffectGraphMapping& mapping, uint32_t node_idx);
 
 // Descriptor id an LFO node projects, or 0 when the node is not an LFO node.
 uint32_t fx_lfo_desc_of(const EffectGraphMapping& mapping, uint32_t node_idx);
-
+// Number of nodes the chain's projection needs: fixed endpoints, one per
+// projected effect slot, and one per pinned-or-referenced LFO descriptor.
+uint32_t fx_projected_node_count(const Synth::InstrumentBank& bank, uint32_t chain, const bool* pinned_lfos);
 // Rebuilds the graph from the chain: Input -> effect nodes -> Output serial
 // wires, plus one LFO node per descriptor the chain's meaningful bindings
 // reference (deduplicated by id, shared with every other chain unchanged)
@@ -125,7 +127,7 @@ void fx_clear_lfo_references(Synth::EffectChainBinding* chain, uint16_t desc_id)
 // Allocates a fresh LFO descriptor (sine, 250 ms) in the bank's pool; false
 // with the bank unmodified when the descriptor pool is full.  Wiring it to
 // a parameter row is what binds it (the apply path's connection handler).
-bool fx_new_lfo(Synth::InstrumentBank* bank, uint16_t* out_desc_id);
+bool allocate_default_lfo(Synth::InstrumentBank* bank, uint16_t* out_desc_id);
 
 // Parameter layout on an effect node: In and Out share row group 1
 // (input dot left, output dot right), Enabled sits at slot 2, then every

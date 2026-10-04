@@ -46,6 +46,20 @@ Sculptor::UndoRedo::Snapshot Sculptor::UndoRedo::get_snapshot()
     return snap;
 }
 
+Sculptor::UndoRedo::Snapshot Sculptor::UndoRedo::get_redo_snapshot()
+{
+    assert(mode == Mode::inactive);
+
+    Snapshot snap;
+    if (redo_idx != buf_size) {
+        uint32_t block_size;
+        memcpy(&block_size, buf + redo_idx, header_size);
+        snap.buf  = buf + redo_idx + header_size;
+        snap.size = block_size + header_size;
+    }
+    return snap;
+}
+
 Sculptor::UndoRedo::Snapshot Sculptor::UndoRedo::get_snapshot_space()
 {
     assert(mode == Mode::inactive);

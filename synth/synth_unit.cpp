@@ -5389,6 +5389,22 @@ int main()
         TEST(bank.graph_missing_sum[0][2] == 4);
         TEST(bank.graph_missing_sum[0][3] == 0);
 
+        // A kind-4 record is a channel-wide effect layout, not zone state:
+        // dropping a zone must neither delete nor renumber it.
+        Synth::GraphNodeLayout& fx_record = bank.graph_layout[bank.graph_layout_count++];
+        fx_record                         = {};
+        fx_record.channel                 = 0;
+        fx_record.zone                    = 0;
+        fx_record.kind                    = 4;
+        snprintf(fx_record.name, sizeof(fx_record.name), "Delay");
+        fx_record.x = 320.0f;
+        Sculptor::zone_records_drop_zone(&bank, 0, 0);
+        TEST(bank.graph_layout_count == 3); // two shifted zone records + the fx record
+        TEST(count_records_matching(bank, 0, 0, 0, 6) == 1);
+        TEST(count_records_matching(bank, 0, 1, 0, 7) == 1);
+        TEST(bank.graph_layout[2].kind == 4 && strcmp(bank.graph_layout[2].name, "Delay") == 0);
+        TEST(bank.graph_layout[2].zone == 0);
+
         add_detached_record(&bank, 0, 2, 2, 3, 9.0f, 9.0f, Synth::ModSource::none, Synth::ModSource::none, 9);
         bank.graph_missing_sum[1][0] = 0x80;
         Sculptor::channel_records_reset(&bank, 0);
@@ -9786,7 +9802,6 @@ int main()
         static Sculptor::Graph              graph;
         static Sculptor::EffectGraphMapping mapping;
         TEST(Sculptor::project_effect_chain_to_graph(bank, 0, &graph, &mapping));
-        TEST(! graph.connections_readonly); // wires are editable: drag is the reorder/bind gesture
         TEST(mapping.chain == 0);
         TEST(mapping.effect_nodes[0] != Sculptor::pool_no_slot);
         TEST(mapping.effect_nodes[1] != Sculptor::pool_no_slot);
@@ -9951,7 +9966,7 @@ int main()
 
         // New LFO: a fresh descriptor, unbound until a wire lands on a row.
         uint16_t desc_id = 0;
-        TEST(Sculptor::fx_new_lfo(&bank, &desc_id));
+        TEST(Sculptor::allocate_default_lfo(&bank, &desc_id));
         TEST(desc_id == 2);
         TEST(bank.lfos.num_allocated == 2);
         TEST(chain.effects[0].bindings[0].lfo_desc_id == 0);
@@ -9970,7 +9985,7 @@ int main()
             bank.lfos.allocate();
         }
         uint16_t refused = 0;
-        TEST(! Sculptor::fx_new_lfo(&bank, &refused));
+        TEST(! Sculptor::allocate_default_lfo(&bank, &refused));
         TEST(refused == 0);
     }
 
@@ -10106,6 +10121,23 @@ int main()
         TEST(Sculptor::apply_fx_graph_change(&bank, wire_graph, wire_mapping, wire_changes[0]));
         TEST(wire_chain.effects[0].bindings[0].num_inputs == 1);
         TEST(wire_chain.effects[0].bindings[0].inputs[0].source == Synth::ModSource::pitch_bend);
+
+        // Cross-parameter retarget: pulling the Source B wire off param 0 and
+        // dropping it on param 1's Source A moves the routing.  The row the wire
+        // left must forget the source, or the move would become a copy.
+        const uint32_t pitch_bend_wire =
+            find_fx_graph_connection(wire_graph,
+                                     { wire_mapping.midi_node, wire_mapping.midi_source_slots[0] },
+                                     { chorus, Sculptor::fx_param_src_dot(0, 1) });
+        TEST(pitch_bend_wire != Sculptor::pool_no_slot);
+        TEST(wire_graph.move_connection_end(pitch_bend_wire, false, { chorus, Sculptor::fx_param_src_dot(1, 0) }));
+        const uint32_t reroute_count = wire_graph.take_changes(wire_changes, Sculptor::max_pending_changes);
+        TEST(reroute_count == 1 && wire_changes[0].kind == Sculptor::ChangeKind::connection_changed);
+        TEST(Sculptor::apply_fx_graph_change(&bank, wire_graph, wire_mapping, wire_changes[0]));
+        TEST(wire_chain.effects[0].bindings[0].num_inputs == 0);
+        TEST(wire_chain.effects[0].bindings[1].num_inputs == 1);
+        TEST(wire_chain.effects[0].bindings[1].inputs[0].source == Synth::ModSource::pitch_bend);
+        TEST(Synth::validate_instrument_bank(&bank));
 
         // Reorder: retarget the distortion Out end of the delay's feed wire
         // onto the chorus Out dot, so the delay follows the chorus directly.
