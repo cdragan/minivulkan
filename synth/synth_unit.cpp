@@ -3,6 +3,7 @@
 
 #include "../core/rng.h"
 #include "../sculptor/sculptor_bank_json.h"
+#include "../sculptor/sculptor_effect_graph.h"
 #include "../sculptor/sculptor_graph.h"
 #include "../sculptor/sculptor_instr_bank.h"
 #include "../sculptor/sculptor_instr_envelope_edit.h"
@@ -169,6 +170,25 @@ static uint32_t find_osc_graph_connection(const Sculptor::Graph& graph, const Sc
         }
         const Sculptor::Connection& c = graph.get_connection(i);
         if (c.input.node_idx == input.node_idx && c.input.slot_idx == input.slot_idx) {
+            return i;
+        }
+    }
+    return Sculptor::pool_no_slot;
+}
+
+// Connection matching both endpoints: fx reference wires land on rows that
+// also carry property state, so endpoint identity alone is the test key.
+static uint32_t find_fx_graph_connection(const Sculptor::Graph&    graph,
+                                         const Sculptor::EndPoint& output,
+                                         const Sculptor::EndPoint& input)
+{
+    for (uint32_t i = 0; i < Sculptor::max_connections; ++i) {
+        if (! graph.connection_occupied(i)) {
+            continue;
+        }
+        const Sculptor::Connection& c = graph.get_connection(i);
+        if (c.output.node_idx == output.node_idx && c.output.slot_idx == output.slot_idx &&
+            c.input.node_idx == input.node_idx && c.input.slot_idx == input.slot_idx) {
             return i;
         }
     }
@@ -8790,43 +8810,88 @@ int main()
         TEST(Sculptor::validate_editor_metadata(legacy_decoded));
 
         // A record carrying persistence fields on the wrong kind refuses.
-        static Synth::InstrumentEditorBank bad;
-        build_parameter_fixture(&bad, &instrument);
-        Synth::GraphNodeLayout& bad_record = bad.graph_layout[bad.graph_layout_count++];
-        bad_record                         = {};
-        bad_record.channel                 = 0;
-        bad_record.zone                    = 0;
-        bad_record.kind                    = 1;
-        bad_record.index                   = 1;
-        bad_record.uid                     = 1;
-        bad_record.served                  = 0x1;
-        TEST(! Sculptor::validate_editor_metadata(bad));
-        bad_record.served     = 0;
-        bad_record.param_slot = 1;
-        TEST(! Sculptor::validate_editor_metadata(bad));
-        bad_record.param_slot = 0;
-        bad_record.served     = 0;
-        bad_record.name[0]    = 'x';
-        TEST(! Sculptor::validate_editor_metadata(bad));
-        bad_record.name[0] = 0;
-        TEST(Sculptor::validate_editor_metadata(bad));
+        Synth::GraphNodeLayout& bad = bank.graph_layout[bank.graph_layout_count++];
+        bad                         = {};
+        bad.channel                 = 0;
+        bad.zone                    = 0;
+        bad.kind                    = 1;
+        bad.index                   = 1;
+        bad.uid                     = 1;
+        bad.served                  = 0x1;
+        TEST(! Sculptor::validate_editor_metadata(bank));
+        bad.served     = 0;
+        bad.param_slot = 1;
+        TEST(! Sculptor::validate_editor_metadata(bank));
+        bad.param_slot = 0;
+        bad.served     = 0;
+        bad.name[0]    = 'x';
+        TEST(! Sculptor::validate_editor_metadata(bank));
+        bad.name[0] = 0;
+        TEST(Sculptor::validate_editor_metadata(bank));
         // A kind-3 record with out-of-range persistence fields refuses.
-        bad_record.kind   = 3;
-        bad_record.index  = 0;
-        bad_record.served = static_cast<uint8_t>(1u << Synth::max_layers);
-        TEST(! Sculptor::validate_editor_metadata(bad));
-        bad_record.served      = 0x1;
-        bad_record.env_desc_id = 3; // the fixture allocates two envelope descriptors
-        TEST(! Sculptor::validate_editor_metadata(bad));
-        bad_record.env_desc_id      = 0;
-        bad_record.lfo_depth_source = 7;
-        TEST(! Sculptor::validate_editor_metadata(bad));
-        bad_record.lfo_depth_source = 0;
-        TEST(Sculptor::validate_editor_metadata(bad));
+        bad.kind   = 3;
+        bad.index  = 0;
+        bad.served = static_cast<uint8_t>(1u << Synth::max_layers);
+        TEST(! Sculptor::validate_editor_metadata(bank));
+        bad.served      = 0x1;
+        bad.env_desc_id = 3; // the fixture allocates two envelope descriptors
+        TEST(! Sculptor::validate_editor_metadata(bank));
+        bad.env_desc_id      = 0;
+        bad.lfo_depth_source = 7;
+        TEST(! Sculptor::validate_editor_metadata(bank));
+        bad.lfo_depth_source = 0;
+        TEST(Sculptor::validate_editor_metadata(bank));
     }
 
-    // Record validation: kind 3 is accepted, kind 4 is refused, and the
-    // node-pool check counts parameter nodes.
+    // Kind-4 records (effect-graph node places): keyed by name, valid on
+    // every chain including the master, refusing wrong-kind key fields,
+    // duplicates and empty names, and round-tripping through the bank file.
+    {
+        static Synth::InstrumentEditorBank bank;
+        static Synth::Instrument           instrument = {};
+        build_parameter_fixture(&bank, &instrument);
+        Synth::GraphNodeLayout& fx = bank.graph_layout[bank.graph_layout_count++];
+        fx                         = {};
+        fx.channel                 = 0;
+        fx.zone                    = 0;
+        fx.kind                    = 4;
+        snprintf(fx.name, sizeof(fx.name), "Delay");
+        fx.x = 320.0f;
+        TEST(Sculptor::validate_editor_metadata(bank));
+        fx.channel = static_cast<uint8_t>(Sculptor::fx_master_chain);
+        TEST(Sculptor::validate_editor_metadata(bank));
+
+        static char                        doc[512 * 1024];
+        static Synth::InstrumentEditorBank decoded;
+        const uint32_t                     written = Synth::encode_editor_bank_json(&bank, doc, sizeof(doc));
+        TEST(written > 0);
+        TEST(Synth::decode_editor_bank_json(doc, written, &decoded));
+        TEST(decoded.graph_layout_count == bank.graph_layout_count);
+        TEST(strcmp(decoded.graph_layout[decoded.graph_layout_count - 1].name, "Delay") == 0);
+        TEST(decoded.graph_layout[decoded.graph_layout_count - 1].kind == 4);
+        TEST(Sculptor::validate_editor_metadata(decoded));
+
+        Synth::GraphNodeLayout& duplicate = bank.graph_layout[bank.graph_layout_count++];
+        duplicate                         = fx;
+        TEST(! Sculptor::validate_editor_metadata(bank)); // same name twice on one chain
+        bank.graph_layout_count--;
+        fx.index = 1;
+        TEST(! Sculptor::validate_editor_metadata(bank));
+        fx.index = 0;
+        fx.zone  = 1;
+        TEST(! Sculptor::validate_editor_metadata(bank));
+        fx.zone = 0;
+        fx.uid  = 1;
+        TEST(! Sculptor::validate_editor_metadata(bank));
+        fx.uid     = 0;
+        fx.name[0] = 0;
+        TEST(! Sculptor::validate_editor_metadata(bank));
+        bank.graph_layout_count--; // drop the fx record again
+        TEST(Sculptor::validate_editor_metadata(bank));
+    }
+
+    // Record validation: kind 3 is accepted and the node-pool check counts
+    // parameter nodes.
     {
         static Synth::InstrumentEditorBank bank;
         static Synth::Instrument           instrument = {};
@@ -8834,11 +8899,6 @@ int main()
         add_parameter_record(&bank, 0, 0, 0, 10.0f, 20.0f, 1);
         add_parameter_record(&bank, 0, 0, 1, 30.0f, 40.0f, 1);
         TEST(Sculptor::validate_editor_metadata(bank));
-        Synth::GraphNodeLayout& bad = bank.graph_layout[bank.graph_layout_count++];
-        bad                         = bank.graph_layout[0];
-        bad.kind                    = 4;
-        TEST(! Sculptor::validate_editor_metadata(bank));
-        bank.graph_layout_count--; // drop the bad record again
 
         // 7 fixed + 3 oscillators + 3 parameters + 2 envelope + 1 LFO
         // descriptor nodes.
@@ -8847,7 +8907,7 @@ int main()
 
     // Capacity: the reshaped projection fits the decided slot budget.
     {
-        TEST(Sculptor::max_node_slots == 32); // 15-row oscillators, 13-slot parameters
+        TEST(Sculptor::max_node_slots >= 53); // 5-param effects carrying the full modulation grammar
     }
 
     // Merge-demoted truthfulness across three groups: when B merges into
@@ -9694,6 +9754,537 @@ int main()
         static char    doc2[128 * 1024];
         const uint32_t len2 = Synth::encode_editor_bank_json(&decoded, doc2, sizeof(doc2));
         TEST(len2 == len && memcmp(doc, doc2, len) == 0);
+    }
+
+    // ---- Effects graph projection and edit paths (sculptor_effect_graph) ----
+
+    // Projection mirrors one channel chain; value edits, structural deletes,
+    // move/retype and fresh-LFO semantics all hold on a validated bank.
+    {
+        static Synth::InstrumentBank bank;
+        make_valid_bank(bank);
+        Synth::EffectChainBinding& chain = bank.channel_chains[0];
+        chain.num_effects                = 2;
+        Sculptor::fx_init_slot(&chain, 0, Synth::EffectType::distortion);
+        Sculptor::fx_init_slot(&chain, 1, Synth::EffectType::delay);
+        chain.effects[0].enabled                 = true;
+        chain.effects[0].bindings[1].lfo_desc_id = 1;
+        chain.effects[0].bindings[1].lfo_depth   = 0.5f;
+        // The same descriptor referenced from another chain: shared content.
+        Synth::EffectChainBinding& other = bank.channel_chains[1];
+        other.num_effects                = 1;
+        Sculptor::fx_init_slot(&other, 0, Synth::EffectType::chorus);
+        other.effects[0].bindings[0].lfo_desc_id = 1;
+        other.effects[0].bindings[0].lfo_depth   = 0.5f;
+        // A MIDI source rides the Mix row (channel chains only).
+        chain.effects[0].bindings[1].num_inputs       = 1;
+        chain.effects[0].bindings[1].inputs[0].source = Synth::ModSource::mod_wheel;
+        chain.effects[0].bindings[1].inputs[0].op     = Synth::SourceOp::multiply;
+        chain.effects[0].bindings[1].inputs[0].scale  = 0.5f;
+        TEST(Synth::validate_instrument_bank(&bank));
+
+        static Sculptor::Graph              graph;
+        static Sculptor::EffectGraphMapping mapping;
+        TEST(Sculptor::project_effect_chain_to_graph(bank, 0, &graph, &mapping));
+        TEST(! graph.connections_readonly); // wires are editable: drag is the reorder/bind gesture
+        TEST(mapping.chain == 0);
+        TEST(mapping.effect_nodes[0] != Sculptor::pool_no_slot);
+        TEST(mapping.effect_nodes[1] != Sculptor::pool_no_slot);
+        TEST(mapping.effect_nodes[2] == Sculptor::pool_no_slot);
+        TEST(mapping.lfo_count == 1 && mapping.lfo_nodes[0] != Sculptor::pool_no_slot);
+        TEST(mapping.lfo_nodes[1] == Sculptor::pool_no_slot);
+        TEST(graph.node(mapping.effect_nodes[0]).slots.num_allocated == 3 + Sculptor::fx_param_stride * 2);
+        TEST(graph.node(mapping.lfo_nodes[0]).slots.num_allocated == 4);
+        TEST(mapping.midi_node != Sculptor::pool_no_slot); // channel chain: MIDI routes in
+        TEST(graph.node(mapping.midi_node).slots.num_allocated == Sculptor::fx_num_input_sources);
+
+        // Serial wires plus one read-only reference wire onto the Mix row.
+        TEST(find_fx_graph_connection(graph, { mapping.input_node, 0 }, { mapping.effect_nodes[0], 0 }) !=
+             Sculptor::pool_no_slot);
+        TEST(find_fx_graph_connection(graph, { mapping.effect_nodes[0], 1 }, { mapping.effect_nodes[1], 0 }) !=
+             Sculptor::pool_no_slot);
+        TEST(find_fx_graph_connection(graph, { mapping.effect_nodes[1], 1 }, { mapping.output_node, 0 }) !=
+             Sculptor::pool_no_slot);
+        TEST(find_fx_graph_connection(graph,
+                                      { mapping.lfo_nodes[0], 0 },
+                                      { mapping.effect_nodes[0], Sculptor::fx_param_lfo_dot(1) }) !=
+             Sculptor::pool_no_slot);
+        TEST(find_fx_graph_connection(graph,
+                                      { mapping.midi_node, mapping.midi_source_slots[1] },
+                                      { mapping.effect_nodes[0], Sculptor::fx_param_src_dot(1, 0) }) !=
+             Sculptor::pool_no_slot);
+
+        // Projected values mirror the chain and the descriptor.
+        TEST(graph.node(mapping.effect_nodes[0]).slots.entries[2].value.list_index == 0);
+        TEST(graph.node(mapping.effect_nodes[0]).slots.entries[Sculptor::fx_param_row(0)].value.real ==
+             chain.effects[0].bindings[0].base_value);
+        TEST(graph.node(mapping.lfo_nodes[0]).slots.entries[3].value.integer == bank.lfos.entries[0].period_ms);
+
+        // Unwired modulation knobs stay inert; the wired rows' knobs are live.
+        TEST(graph.slot_edit_disabled(mapping.effect_nodes[0], Sculptor::fx_param_row(0) + 2));
+        TEST(graph.slot_edit_disabled(mapping.effect_nodes[0], Sculptor::fx_param_row(0) + 3));
+        TEST(! graph.slot_edit_disabled(mapping.effect_nodes[0], Sculptor::fx_param_row(1) + 2));
+        TEST(! graph.slot_edit_disabled(mapping.effect_nodes[0], Sculptor::fx_param_row(1) + 3));
+        TEST(graph.slot_edit_disabled(mapping.effect_nodes[0], Sculptor::fx_param_src_dot(0, 0) + 1));
+        TEST(graph.slot_edit_disabled(mapping.effect_nodes[0], Sculptor::fx_param_src_dot(0, 0) + 2));
+        TEST(! graph.slot_edit_disabled(mapping.effect_nodes[0], Sculptor::fx_param_src_dot(1, 0) + 1));
+        TEST(! graph.slot_edit_disabled(mapping.effect_nodes[0], Sculptor::fx_param_src_dot(1, 0) + 2));
+
+        Sculptor::GraphChange change = {};
+        change.kind                  = Sculptor::ChangeKind::value_changed;
+
+        // Enabled row: the two-option list toggles the slot.
+        change.node_idx                = mapping.effect_nodes[0];
+        change.slot_idx                = 2;
+        Sculptor::PropertyValue toggle = {};
+        toggle.list_index              = 1;
+        graph.set_slot_value(mapping.effect_nodes[0], 2, toggle);
+        TEST(Sculptor::apply_fx_graph_change(&bank, graph, mapping, change));
+        TEST(! chain.effects[0].enabled);
+        toggle.list_index = 0;
+        graph.set_slot_value(mapping.effect_nodes[0], 2, toggle);
+        TEST(Sculptor::apply_fx_graph_change(&bank, graph, mapping, change));
+        TEST(chain.effects[0].enabled);
+
+        // Parameter row: the live slot value becomes the base value.
+        change.slot_idx             = Sculptor::fx_param_row(1);
+        Sculptor::PropertyValue mix = {};
+        mix.real                    = 0.75f;
+        graph.set_slot_value(mapping.effect_nodes[0], change.slot_idx, mix);
+        TEST(Sculptor::apply_fx_graph_change(&bank, graph, mapping, change));
+        TEST(chain.effects[0].bindings[1].base_value == 0.75f);
+
+        // The Op and Depth rows ride the modulation line under the base slider.
+        change.slot_idx            = Sculptor::fx_param_row(0) + 2;
+        Sculptor::PropertyValue op = {};
+        op.list_index              = 1;
+        graph.set_slot_value(mapping.effect_nodes[0], change.slot_idx, op);
+        TEST(Sculptor::apply_fx_graph_change(&bank, graph, mapping, change));
+        TEST(chain.effects[0].bindings[0].lfo_op == Synth::SourceOp::multiply);
+        op.list_index = 0;
+        graph.set_slot_value(mapping.effect_nodes[0], change.slot_idx, op);
+        TEST(Sculptor::apply_fx_graph_change(&bank, graph, mapping, change));
+        TEST(chain.effects[0].bindings[0].lfo_op == Synth::SourceOp::add);
+
+        change.slot_idx               = Sculptor::fx_param_row(0) + 3;
+        Sculptor::PropertyValue depth = {};
+        depth.real                    = 1.25f;
+        graph.set_slot_value(mapping.effect_nodes[0], change.slot_idx, depth);
+        TEST(Sculptor::apply_fx_graph_change(&bank, graph, mapping, change));
+        TEST(chain.effects[0].bindings[0].lfo_depth == 1.25f);
+
+        // A MIDI source row edit compiles the row back into the binding's
+        // packed input list.
+        change.slot_idx                = Sculptor::fx_param_src_dot(1, 0) + 2;
+        Sculptor::PropertyValue amount = {};
+        amount.real                    = 0.25f;
+        graph.set_slot_value(mapping.effect_nodes[0], change.slot_idx, amount);
+        TEST(Sculptor::apply_fx_graph_change(&bank, graph, mapping, change));
+        TEST(chain.effects[0].bindings[1].num_inputs == 1);
+        TEST(chain.effects[0].bindings[1].inputs[0].source == Synth::ModSource::mod_wheel);
+        TEST(chain.effects[0].bindings[1].inputs[0].op == Synth::SourceOp::multiply);
+        TEST(chain.effects[0].bindings[1].inputs[0].scale == 0.25f);
+
+        // LFO descriptor edits reach every sharing chain at once.
+        change.node_idx              = mapping.lfo_nodes[0];
+        change.slot_idx              = 1;
+        Sculptor::PropertyValue wave = {};
+        wave.list_index              = 1;
+        graph.set_slot_value(mapping.lfo_nodes[0], 1, wave);
+        TEST(Sculptor::apply_fx_graph_change(&bank, graph, mapping, change));
+        TEST(bank.lfos.entries[0].wave == Synth::WaveType::sawtooth_wave);
+        wave.list_index = 0;
+        graph.set_slot_value(mapping.lfo_nodes[0], 1, wave);
+        TEST(Sculptor::apply_fx_graph_change(&bank, graph, mapping, change));
+        TEST(bank.lfos.entries[0].wave == Synth::WaveType::sine_wave);
+
+        change.slot_idx              = 2;
+        Sculptor::PropertyValue duty = {};
+        duty.real                    = 0.25f;
+        graph.set_slot_value(mapping.lfo_nodes[0], 2, duty);
+        TEST(Sculptor::apply_fx_graph_change(&bank, graph, mapping, change));
+        TEST(bank.lfos.entries[0].duty == 64);
+
+        change.slot_idx                = 3;
+        Sculptor::PropertyValue period = {};
+        period.integer                 = 500;
+        graph.set_slot_value(mapping.lfo_nodes[0], 3, period);
+        TEST(Sculptor::apply_fx_graph_change(&bank, graph, mapping, change));
+        TEST(bank.lfos.entries[0].period_ms == 500);
+        // A zero period would freeze the LFO: rejected, value kept.
+        period.integer = 0;
+        graph.set_slot_value(mapping.lfo_nodes[0], 3, period);
+        TEST(! Sculptor::apply_fx_graph_change(&bank, graph, mapping, change));
+        TEST(bank.lfos.entries[0].period_ms == 500);
+
+        // Deleting the LFO node clears only this chain's references.
+        change.kind = Sculptor::ChangeKind::node_deleted;
+        TEST(Sculptor::apply_fx_graph_change(&bank, graph, mapping, change));
+        TEST(chain.effects[0].bindings[1].lfo_desc_id == 0);
+        TEST(other.effects[0].bindings[0].lfo_desc_id == 1);
+
+        // Deleting an effect node removes the slot and shifts later slots down.
+        change.node_idx = mapping.effect_nodes[1];
+        TEST(Sculptor::apply_fx_graph_change(&bank, graph, mapping, change));
+        TEST(chain.num_effects == 1);
+        TEST(chain.effects[0].type == Synth::EffectType::distortion);
+        TEST(chain.effects[1].type == Synth::EffectType::none);
+        TEST(chain.effects[1].bindings[0].lfo_desc_id == 0);
+
+        // Splice: front, after an anchor, out of range refuses.
+        chain.num_effects = 2;
+        Sculptor::fx_init_slot(&chain, 1, Synth::EffectType::delay);
+        TEST(Sculptor::fx_splice_effect(&chain, 1, -1));
+        TEST(chain.effects[0].type == Synth::EffectType::delay);
+        TEST(chain.effects[1].type == Synth::EffectType::distortion);
+        TEST(Sculptor::fx_splice_effect(&chain, 0, 1));
+        TEST(chain.effects[0].type == Synth::EffectType::distortion);
+        TEST(chain.effects[1].type == Synth::EffectType::delay);
+        TEST(! Sculptor::fx_splice_effect(&chain, 0, 2));
+        TEST(! Sculptor::fx_splice_effect(&chain, 2, 0));
+
+        // Retype: neutral defaults, no dormant modulation of the old type.
+        Sculptor::fx_init_slot(&chain, 0, Synth::EffectType::chorus);
+        TEST(chain.effects[0].type == Synth::EffectType::chorus);
+        TEST(chain.effects[0].bindings[0].base_value == Sculptor::effect_param_default(Synth::EffectType::chorus, 0));
+        TEST(chain.effects[0].bindings[0].lfo_desc_id == 0);
+
+        // New LFO: a fresh descriptor, unbound until a wire lands on a row.
+        uint16_t desc_id = 0;
+        TEST(Sculptor::fx_new_lfo(&bank, &desc_id));
+        TEST(desc_id == 2);
+        TEST(bank.lfos.num_allocated == 2);
+        TEST(chain.effects[0].bindings[0].lfo_desc_id == 0);
+        TEST(bank.lfos.entries[1].wave == Synth::WaveType::sine_wave);
+        TEST(bank.lfos.entries[1].period_ms == 250);
+
+        // The modulation count spans every chain, disabled effects included.
+        uint32_t num_modulated = 0;
+        uint32_t state_bytes   = 0;
+        Sculptor::count_effect_budgets(bank, &num_modulated, &state_bytes);
+        TEST(num_modulated == 1); // the other chain's chorus; the fresh LFO is unwired
+        TEST(state_bytes == 0);   // fx_init_slot leaves effects disabled
+
+        // Full descriptor pool: refusal leaves the bank unmodified.
+        while (bank.lfos.num_allocated < Synth::max_lfos) {
+            bank.lfos.allocate();
+        }
+        uint16_t refused = 0;
+        TEST(! Sculptor::fx_new_lfo(&bank, &refused));
+        TEST(refused == 0);
+    }
+
+    // Deleting a node through the widget API drops its projected wires
+    // first, each drop reporting a connection event with a dead endpoint; the
+    // apply path no-ops those byproducts (the freed node carried the wire) and
+    // the node event alone removes the slot.
+    {
+        static Synth::InstrumentBank bank;
+        make_valid_bank(bank);
+        enabled_effect(bank, 0, 0, Synth::EffectType::distortion);
+        enabled_effect(bank, 0, 1, Synth::EffectType::delay);
+        TEST(Synth::validate_instrument_bank(&bank));
+
+        static Sculptor::Graph              widget_graph;
+        static Sculptor::EffectGraphMapping widget_mapping;
+        TEST(Sculptor::project_effect_chain_to_graph(bank, 0, &widget_graph, &widget_mapping));
+        // Projection quiets event reporting until the first drain re-arms
+        // the ring; drain once first, as the per-frame GUI flow does.
+        Sculptor::GraphChange widget_changes[Sculptor::max_pending_changes];
+        (void)widget_graph.take_changes(widget_changes, Sculptor::max_pending_changes);
+        widget_graph.delete_node(widget_mapping.effect_nodes[1]);
+
+        const uint32_t widget_count     = widget_graph.take_changes(widget_changes, Sculptor::max_pending_changes);
+        bool           seen_node_delete = false;
+        bool           seen_wire_drop   = false;
+        for (uint32_t i = 0; i < widget_count; ++i) {
+            seen_node_delete = seen_node_delete || widget_changes[i].kind == Sculptor::ChangeKind::node_deleted;
+            seen_wire_drop   = seen_wire_drop || widget_changes[i].kind == Sculptor::ChangeKind::connection_deleted;
+        }
+        TEST(seen_node_delete);
+        TEST(seen_wire_drop);
+
+        bool drain_ok = true;
+        for (uint32_t i = 0; i < widget_count && drain_ok; ++i) {
+            drain_ok = Sculptor::apply_fx_graph_change(&bank, widget_graph, widget_mapping, widget_changes[i]);
+        }
+        TEST(drain_ok);
+        TEST(bank.channel_chains[0].num_effects == 1);
+        TEST(bank.channel_chains[0].effects[0].type == Synth::EffectType::distortion);
+        TEST(Synth::validate_instrument_bank(&bank));
+    }
+
+    // Wire gestures: an LFO Value wire onto a parameter dot binds the
+    // descriptor, retargeting moves the binding, dragging a serial wire
+    // reorders the chain, and a serial-wire disconnect is refused (the
+    // wire carries the chain's audio).
+    {
+        static Synth::InstrumentBank bank;
+        make_valid_bank(bank);
+        enabled_effect(bank, 0, 0, Synth::EffectType::chorus);
+        enabled_effect(bank, 0, 1, Synth::EffectType::distortion);
+        enabled_effect(bank, 0, 2, Synth::EffectType::delay);
+        TEST(Synth::validate_instrument_bank(&bank));
+
+        // The projection shows descriptor 1 only through the pin: nothing
+        // references it until the first wire lands.
+        bool pinned[Synth::max_lfos] = {};
+        pinned[0]                    = true;
+
+        static Sculptor::Graph              wire_graph;
+        static Sculptor::EffectGraphMapping wire_mapping;
+        TEST(Sculptor::project_effect_chain_to_graph(bank, 0, &wire_graph, &wire_mapping, pinned));
+        TEST(wire_mapping.lfo_count == 1);
+        Sculptor::GraphChange wire_changes[Sculptor::max_pending_changes];
+        (void)wire_graph.take_changes(wire_changes, Sculptor::max_pending_changes); // re-arm the ring
+
+        Synth::EffectChainBinding& wire_chain = bank.channel_chains[0];
+        const uint32_t             chorus     = wire_mapping.effect_nodes[0];
+
+        // Bind: LFO Value -> chorus rate row.
+        TEST(
+            wire_graph.attempt_connection({ wire_mapping.lfo_nodes[0], 0 }, { chorus, Sculptor::fx_param_lfo_dot(0) }));
+        const uint32_t bind_count = wire_graph.take_changes(wire_changes, Sculptor::max_pending_changes);
+        TEST(bind_count == 1 && wire_changes[0].kind == Sculptor::ChangeKind::connection_added);
+        TEST(Sculptor::apply_fx_graph_change(&bank, wire_graph, wire_mapping, wire_changes[0]));
+        TEST(wire_chain.effects[0].bindings[0].lfo_desc_id == 1);
+        TEST(wire_chain.effects[0].bindings[0].lfo_depth == 0.5f); // depth-0 fresh binding reads as broken
+        TEST(Synth::validate_instrument_bank(&bank));
+
+        // Retarget the wire to the depth row: the old binding clears.
+        const uint32_t bind_wire = find_fx_graph_connection(wire_graph,
+                                                            { wire_mapping.lfo_nodes[0], 0 },
+                                                            { chorus, Sculptor::fx_param_lfo_dot(0) });
+        TEST(bind_wire != Sculptor::pool_no_slot);
+        TEST(wire_graph.move_connection_end(bind_wire, false, { chorus, Sculptor::fx_param_lfo_dot(1) }));
+        const uint32_t retarget_count = wire_graph.take_changes(wire_changes, Sculptor::max_pending_changes);
+        TEST(retarget_count == 1 && wire_changes[0].kind == Sculptor::ChangeKind::connection_changed);
+        TEST(Sculptor::apply_fx_graph_change(&bank, wire_graph, wire_mapping, wire_changes[0]));
+        TEST(wire_chain.effects[0].bindings[0].lfo_desc_id == 0);
+        TEST(wire_chain.effects[0].bindings[1].lfo_desc_id == 1);
+
+        // Unbind: pulling the wire off the row clears the binding.
+        wire_graph.delete_connection(bind_wire);
+        const uint32_t unbind_count = wire_graph.take_changes(wire_changes, Sculptor::max_pending_changes);
+        TEST(unbind_count == 1 && wire_changes[0].kind == Sculptor::ChangeKind::connection_deleted);
+        TEST(Sculptor::apply_fx_graph_change(&bank, wire_graph, wire_mapping, wire_changes[0]));
+        TEST(wire_chain.effects[0].bindings[1].lfo_desc_id == 0);
+
+        // MIDI route: the routing node's mod-wheel dot onto the chorus rate
+        // Source A row packs the row into the binding's input list.
+        TEST(wire_graph.attempt_connection({ wire_mapping.midi_node, wire_mapping.midi_source_slots[1] },
+                                           { chorus, Sculptor::fx_param_src_dot(0, 0) }));
+        const uint32_t midi_count = wire_graph.take_changes(wire_changes, Sculptor::max_pending_changes);
+        TEST(midi_count == 1 && wire_changes[0].kind == Sculptor::ChangeKind::connection_added);
+        TEST(Sculptor::apply_fx_graph_change(&bank, wire_graph, wire_mapping, wire_changes[0]));
+        TEST(wire_chain.effects[0].bindings[0].num_inputs == 1);
+        TEST(wire_chain.effects[0].bindings[0].inputs[0].source == Synth::ModSource::mod_wheel);
+        TEST(wire_chain.effects[0].bindings[0].inputs[0].op == Synth::SourceOp::add);
+        TEST(wire_chain.effects[0].bindings[0].inputs[0].scale == 1.0f);
+        TEST(Synth::validate_instrument_bank(&bank));
+
+        // A second source on Source B keeps both inputs, packed in row order.
+        TEST(wire_graph.attempt_connection({ wire_mapping.midi_node, wire_mapping.midi_source_slots[0] },
+                                           { chorus, Sculptor::fx_param_src_dot(0, 1) }));
+        const uint32_t midi2_count = wire_graph.take_changes(wire_changes, Sculptor::max_pending_changes);
+        TEST(midi2_count == 1);
+        TEST(Sculptor::apply_fx_graph_change(&bank, wire_graph, wire_mapping, wire_changes[0]));
+        TEST(wire_chain.effects[0].bindings[0].num_inputs == 2);
+        TEST(wire_chain.effects[0].bindings[0].inputs[1].source == Synth::ModSource::pitch_bend);
+        TEST(Synth::validate_instrument_bank(&bank));
+
+        // Unroute: pulling a source wire drops that row's input; the
+        // remaining input compacts to the front of the list.
+        const uint32_t midi_wire =
+            find_fx_graph_connection(wire_graph,
+                                     { wire_mapping.midi_node, wire_mapping.midi_source_slots[1] },
+                                     { chorus, Sculptor::fx_param_src_dot(0, 0) });
+        TEST(midi_wire != Sculptor::pool_no_slot);
+        wire_graph.delete_connection(midi_wire);
+        const uint32_t unroute_count = wire_graph.take_changes(wire_changes, Sculptor::max_pending_changes);
+        TEST(unroute_count == 1 && wire_changes[0].kind == Sculptor::ChangeKind::connection_deleted);
+        TEST(Sculptor::apply_fx_graph_change(&bank, wire_graph, wire_mapping, wire_changes[0]));
+        TEST(wire_chain.effects[0].bindings[0].num_inputs == 1);
+        TEST(wire_chain.effects[0].bindings[0].inputs[0].source == Synth::ModSource::pitch_bend);
+
+        // Reorder: retarget the distortion Out end of the delay's feed wire
+        // onto the chorus Out dot, so the delay follows the chorus directly.
+        const uint32_t delay_in_wire = find_fx_graph_connection(wire_graph,
+                                                                { wire_mapping.effect_nodes[1], 1 },
+                                                                { wire_mapping.effect_nodes[2], 0 });
+        TEST(delay_in_wire != Sculptor::pool_no_slot);
+        TEST(wire_graph.move_connection_end(delay_in_wire, true, { wire_mapping.effect_nodes[0], 1 }));
+        const uint32_t reorder_count = wire_graph.take_changes(wire_changes, Sculptor::max_pending_changes);
+        TEST(reorder_count == 1 && wire_changes[0].kind == Sculptor::ChangeKind::connection_changed);
+        TEST(Sculptor::apply_fx_graph_change(&bank, wire_graph, wire_mapping, wire_changes[0]));
+        TEST(wire_chain.effects[0].type == Synth::EffectType::chorus);
+        TEST(wire_chain.effects[1].type == Synth::EffectType::delay);
+        TEST(wire_chain.effects[2].type == Synth::EffectType::distortion);
+        TEST(Synth::validate_instrument_bank(&bank));
+
+        // The editor re-projects after every structural commit: the mapping
+        // is the projection's slot-to-node table, so a splice invalidates
+        // it.  Re-project before the next gesture, exactly like the drain.
+        TEST(Sculptor::project_effect_chain_to_graph(bank, 0, &wire_graph, &wire_mapping, pinned));
+        (void)wire_graph.take_changes(wire_changes, Sculptor::max_pending_changes);
+
+        // To the front: retarget the delay Out end of the distortion's feed
+        // wire onto the fixed input node.  The bank order is chorus, delay,
+        // distortion, so the distortion node now projects at slot 2.
+        const uint32_t distor_in_wire = find_fx_graph_connection(wire_graph,
+                                                                 { wire_mapping.effect_nodes[1], 1 },
+                                                                 { wire_mapping.effect_nodes[2], 0 });
+        TEST(distor_in_wire != Sculptor::pool_no_slot);
+        TEST(wire_graph.move_connection_end(distor_in_wire, true, { wire_mapping.input_node, 0 }));
+        const uint32_t front_count = wire_graph.take_changes(wire_changes, Sculptor::max_pending_changes);
+        TEST(front_count == 1 && wire_changes[0].kind == Sculptor::ChangeKind::connection_changed);
+        TEST(Sculptor::apply_fx_graph_change(&bank, wire_graph, wire_mapping, wire_changes[0]));
+        TEST(wire_chain.effects[0].type == Synth::EffectType::distortion);
+
+        TEST(Sculptor::project_effect_chain_to_graph(bank, 0, &wire_graph, &wire_mapping, pinned));
+        (void)wire_graph.take_changes(wire_changes, Sculptor::max_pending_changes);
+
+        // Disconnect: a serial wire refuses to die - it carries the chain's
+        // audio, so the apply path rejects the delete and the chain keeps
+        // the chorus.  The bank order is distortion, chorus, delay.
+        const uint32_t chorus_in_wire = find_fx_graph_connection(wire_graph,
+                                                                 { wire_mapping.effect_nodes[0], 1 },
+                                                                 { wire_mapping.effect_nodes[1], 0 });
+        TEST(chorus_in_wire != Sculptor::pool_no_slot);
+        wire_graph.delete_connection(chorus_in_wire);
+        (void)wire_graph.take_changes(wire_changes, Sculptor::max_pending_changes);
+        TEST(! Sculptor::apply_fx_graph_change(&bank, wire_graph, wire_mapping, wire_changes[0]));
+        TEST(wire_chain.num_effects == 3);
+        TEST(wire_chain.effects[0].type == Synth::EffectType::distortion);
+        TEST(wire_chain.effects[1].type == Synth::EffectType::chorus);
+        TEST(wire_chain.effects[2].type == Synth::EffectType::delay);
+        TEST(Synth::validate_instrument_bank(&bank));
+    }
+
+    // Master chain: LFO modulation is legal, every MIDI-driven source is not.
+    {
+        static Synth::InstrumentBank bank;
+        make_valid_bank(bank);
+        Synth::EffectChainBinding& master = bank.master_chain;
+        master.num_effects                = 1;
+        Sculptor::fx_init_slot(&master, 0, Synth::EffectType::reverb);
+        master.effects[0].enabled                 = true;
+        master.effects[0].bindings[0].lfo_desc_id = 1;
+        master.effects[0].bindings[0].lfo_depth   = 0.25f;
+        TEST(Synth::validate_instrument_bank(&bank));
+
+        static Sculptor::Graph              graph;
+        static Sculptor::EffectGraphMapping mapping;
+        TEST(Sculptor::project_effect_chain_to_graph(bank, Sculptor::fx_master_chain, &graph, &mapping));
+        TEST(mapping.chain == Sculptor::fx_master_chain);
+        TEST(mapping.lfo_count == 1);
+        TEST(mapping.midi_node == Sculptor::pool_no_slot); // the master chain has no MIDI routing node
+
+        master.effects[0].bindings[0].lfo_depth_source = Synth::ModSource::pitch_bend;
+        expect_invalid(bank);
+        master.effects[0].bindings[0].lfo_depth_source = Synth::ModSource::none;
+        master.effects[0].bindings[0].num_inputs       = 1;
+        master.effects[0].bindings[0].inputs[0].source = Synth::ModSource::mod_wheel;
+        expect_invalid(bank);
+
+        // The same direct input is channel-wide state on a channel chain.
+        // The bank validates as a whole, so the master's rejected binding must go
+        // first.
+        master.effects[0].bindings[0].num_inputs = 0;
+
+        Synth::EffectChainBinding& channel = bank.channel_chains[0];
+        channel.num_effects                = 1;
+        Sculptor::fx_init_slot(&channel, 0, Synth::EffectType::reverb);
+        channel.effects[0].enabled                      = true;
+        channel.effects[0].bindings[0].num_inputs       = 1;
+        channel.effects[0].bindings[0].inputs[0].source = Synth::ModSource::mod_wheel;
+        TEST(Synth::validate_instrument_bank(&bank));
+    }
+
+    // Widest projection: 4 effects, every parameter modulated by a distinct
+    // descriptor; 18 nodes and 17 wires stay far under the widget's pools.
+    {
+        static Synth::InstrumentBank bank;
+        make_valid_bank(bank);
+        Synth::EffectChainBinding& chain = bank.channel_chains[0];
+        chain.num_effects                = 4;
+        Sculptor::fx_init_slot(&chain, 0, Synth::EffectType::distortion);
+        Sculptor::fx_init_slot(&chain, 1, Synth::EffectType::delay);
+        Sculptor::fx_init_slot(&chain, 2, Synth::EffectType::compressor);
+        Sculptor::fx_init_slot(&chain, 3, Synth::EffectType::fir);
+        uint16_t       next_desc = 1;
+        const uint32_t max_desc  = 2 + 3 + 5 + 2;
+        while (bank.lfos.num_allocated < max_desc) {
+            const uint32_t slot               = bank.lfos.allocate();
+            bank.lfos.entries[slot].wave      = Synth::WaveType::sine_wave;
+            bank.lfos.entries[slot].period_ms = 250;
+        }
+        for (uint32_t slot = 0; slot < 4; ++slot) {
+            const uint32_t num_params = Synth::get_effect_param_floats(chain.effects[slot].type);
+            for (uint32_t param = 0; param < num_params; ++param) {
+                chain.effects[slot].bindings[param].lfo_desc_id = next_desc++;
+                chain.effects[slot].bindings[param].lfo_depth   = 0.1f;
+            }
+        }
+        TEST(Synth::validate_instrument_bank(&bank));
+
+        static Sculptor::Graph              graph;
+        static Sculptor::EffectGraphMapping mapping;
+        TEST(Sculptor::project_effect_chain_to_graph(bank, 0, &graph, &mapping));
+        TEST(mapping.lfo_count == max_desc);
+
+        // The compressor node carries the full modulation grammar: 5 params
+        // x 10 slots + In/Out/Enabled = 53, under the widget's per-node cap.
+        TEST(graph.node(mapping.effect_nodes[2]).slots.num_allocated == 3 + 5 * Sculptor::fx_param_stride);
+        uint32_t node_count = 0;
+        for (uint32_t idx = 0; idx < Sculptor::max_nodes; ++idx) {
+            if (graph.node_occupied(idx)) {
+                ++node_count;
+            }
+        }
+        TEST(node_count == 19); // input, output, MIDI, 4 effects, 12 LFOs
+
+        uint32_t num_modulated = 0;
+        uint32_t state_bytes   = 0;
+        Sculptor::count_effect_budgets(bank, &num_modulated, &state_bytes);
+        TEST(num_modulated == max_desc);
+    }
+
+    // Known runtime seam, deliberately deferred: effect-state bump allocation
+    // never reclaims, so a disable -> re-enable cycle of the worst chain
+    // exhausts the budget and preflight refuses visibly.  This test pins the
+    // seam so the editor's visible-failure surfacing keeps matching reality.
+    {
+        static Synth::InstrumentBank bank;
+        make_valid_bank(bank);
+        for (uint32_t slot = 0; slot < Synth::max_chain_effects; ++slot) {
+            enabled_effect(bank, Synth::max_channels, slot, Synth::EffectType::delay);
+        }
+        Synth::init_effect_state_region(fake_region_base);
+        static Synth::EffectExpansionPlan plan;
+        const char*                       error = nullptr;
+        TEST(Synth::preflight_effect_expansion(bank, &plan, &error));
+        static Synth::EffectChain chains[Synth::max_channels];
+        static Synth::EffectChain master;
+        FakeWriter                writer = { 1, 0, 0, 0, 0 };
+        Synth::commit_effect_expansion(bank, plan, chains, &master, fake_writer_binding(writer));
+        (void)Synth::take_effect_clear_ranges();
+
+        // Disabled slots carry no state, but the consumed budget never shrinks.
+        for (uint32_t slot = 0; slot < Synth::max_chain_effects; ++slot) {
+            bank.master_chain.effects[slot].enabled = false;
+        }
+        TEST(Synth::preflight_effect_expansion(bank, &plan, &error));
+        Synth::commit_effect_expansion(bank, plan, chains, &master, fake_writer_binding(writer));
+
+        // Re-enabling the same four delays needs fresh state at the bump
+        // position: the cumulative total exceeds the budget and preflight fails.
+        for (uint32_t slot = 0; slot < Synth::max_chain_effects; ++slot) {
+            bank.master_chain.effects[slot].enabled = true;
+        }
+        TEST(! Synth::preflight_effect_expansion(bank, &plan, &error));
+
+        Synth::init_effect_state_region(fake_region_base);
     }
 
     return exit_code;

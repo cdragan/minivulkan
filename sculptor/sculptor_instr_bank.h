@@ -56,6 +56,7 @@ struct GraphNodeLayout {
     uint8_t param_slot;
     char    name[32]; // node title override, empty = derived name
 };
+
 static_assert(sizeof(GraphNodeLayout) == 64);
 // param_slot value for a record outside the explicit ordinal scheme (added
 // parameters, retargeted parameters, edge-loss detach): it joins the
@@ -207,5 +208,8 @@ namespace Sculptor {
 bool validate_editor_metadata(const Synth::InstrumentEditorBank& bank);
 // Number of detached (kind 1/2/3) records stored for one zone.
 uint32_t count_detached_records(const Synth::InstrumentEditorBank& bank, uint32_t channel, uint32_t zone);
+// Whole-bank effect budget accounting (modulated-parameter count and static
+// enabled-state bytes), matching the bank validator's counting exactly.
+void count_effect_budgets(const Synth::InstrumentBank& bank, uint32_t* num_modulated, uint32_t* state_bytes);
 
 } // namespace Sculptor

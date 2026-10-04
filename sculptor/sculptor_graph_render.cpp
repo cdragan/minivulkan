@@ -7,9 +7,9 @@
 // never calls ImGui::Begin/End.
 
 #include "sculptor_graph.h"
+#include <stdio.h>
 
 #include <math.h>
-#include <stdio.h>
 
 namespace {
 
@@ -27,7 +27,20 @@ constexpr float node_padding      = 8.0f;                     // inner margins o
 constexpr float dot_radius        = 5.0f;                     // connector dot radius
 constexpr float dot_space         = 2.0f * dot_radius + 2.0f; // room a dot claims
 constexpr float property_widget_w = 80.0f;                    // width of inline value widgets
-constexpr float fit_view_margin   = 32.0f;                    // empty margin around Home fit
+
+// A two-option list renders as a label+radio pair, wider than the fixed
+// property widget column: reserve its measured width so the pair never
+// overlaps the element that follows it on the line.
+static float slot_widget_w(const Sculptor::Slot& slot)
+{
+    if (slot.property_type == Sculptor::PropertyType::list && slot.num_list_options == 2) {
+        return ImGui::CalcTextSize(slot.list_options[0]).x + ImGui::CalcTextSize(slot.list_options[1]).x +
+               2.0f * ImGui::GetFrameHeight() + 3.0f * ImGui::GetStyle().ItemSpacing.x;
+    }
+    return property_widget_w;
+}
+
+constexpr float fit_view_margin = 32.0f; // empty margin around Home fit
 
 // Oscillator-node rows whose widgets only make sense for the current
 // waveform/mode selection.  Slot indices follow the projection layout
@@ -139,16 +152,6 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
         const vmath::vec2 mouse_point = mouse_graph();
         view_origin                   = (mouse_point - ((mouse_screen - origin) / new_zoom));
         zoom                          = new_zoom;
-    }
-
-    // Delete: delete the selected nodes (the veto applies per node).  Only
-    // while no interaction is active (drag, retarget, connecting, rubber
-    // band) and without key repeat, so holding or dragging never re-fires the
-    // delete mid-gesture.  The text-input guard keeps an active node-rename
-    // editor from swallowing the keypress as a delete.
-    if (ImGui::IsWindowHovered() && in_widget(mouse_screen) && interaction == Interaction::idle &&
-        ImGui::IsKeyPressed(ImGuiKey_Delete, false) && ! ImGui::GetIO().WantTextInput) {
-        delete_selected();
     }
 
     // Home: fit all nodes into view.
@@ -330,8 +333,8 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
         // aligns at the widest line's offset, so values line up across
         // rows instead of trailing their labels.  Names keep their
         // flowing position.
-        float    value_col[8] = {};
-        uint32_t max_props    = 0;
+        float value_col[8] = {};
+        float max_col_end  = 0.0f;
         for (uint32_t pass_idx = 0; pass_idx < 8; ++pass_idx) {
             bool columns_changed = false;
             for (uint32_t line_idx = 0; line_idx < num_lines; ++line_idx) {
@@ -369,18 +372,18 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
                         }
                         value_col[prop] = widget_x;
                     }
+                    const float col_end = widget_x + slot_widget_w(slot);
+                    max_col_end         = col_end > max_col_end ? col_end : max_col_end;
                     ++prop;
-                    cursor = widget_x + property_widget_w;
+                    cursor = widget_x + slot_widget_w(slot);
                 }
-                max_props = prop > max_props ? prop : max_props;
             }
             if (! columns_changed) {
                 break;
             }
         }
-        if (max_props > 0) {
-            const float widest = value_col[max_props < 8 ? max_props - 1 : 7] + property_widget_w;
-            max_line_w         = widest > max_line_w ? widest : max_line_w;
+        if (max_col_end > 0.0f) {
+            max_line_w = max_col_end > max_line_w ? max_col_end : max_line_w;
         }
 
         // Line sizing: dot columns plus each element's name; property
@@ -396,7 +399,7 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
                 }
                 line_w += ImGui::CalcTextSize(slot.name).x;
                 if (slot.kind == SlotKind::property) {
-                    line_w += 8.0f + property_widget_w;
+                    line_w += 8.0f + slot_widget_w(slot);
                 }
             }
             max_line_w = line_w > max_line_w ? line_w : max_line_w;
@@ -559,11 +562,11 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
                     widget_x = min_widget_x;
                 }
                 const float widget_y = y_center - frame_h * 0.5f;
-                cursor               = widget_x + property_widget_w;
+                cursor               = widget_x + slot_widget_w(slot);
                 ++line_prop;
                 {
                     const bool connected = slot_is_connected(node_idx, slot_idx);
-                    if (connected || is_ghost) {
+                    if ((connected && ! connections_readonly) || is_ghost) {
                         // Greyed-out value text: the connection drives the value,
                         // and ghosts submit no live widgets at all.
                         char value_text[32] = {};
@@ -584,7 +587,7 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
 
                     ImGui::PushID(static_cast<int>(node_idx * max_node_slots + slot_idx));
                     ImGui::SetCursorScreenPos(ImVec2(widget_x, widget_y));
-                    ImGui::PushItemWidth(property_widget_w);
+                    ImGui::PushItemWidth(slot_widget_w(slot));
                     if (disabled) {
                         ImGui::BeginDisabled(true);
                     }
@@ -630,6 +633,7 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
                                     if (option_i > 0) {
                                         ImGui::SameLine();
                                     }
+                                    ImGui::AlignTextToFramePadding();
                                     ImGui::TextUnformatted(items[option_i]);
                                     ImGui::SameLine();
                                     ImGui::RadioButton(option_i == 0 ? "##op0" : "##op1", &radio_index, option_i);
@@ -724,7 +728,8 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
                                   1.5f);
         draw_list->AddCircleFilled(ImVec2(mid.x, mid.y), dot_radius * 0.6f, line_color);
 
-        if (mid_hovered && ! node_hit && ImGui::IsMouseClicked(1)) {
+        if (mid_hovered && ! node_hit && ! connections_readonly && ImGui::IsMouseClicked(1)) {
+
             popup_connection = c;
             ImGui::OpenPopup("connection_menu");
         }
@@ -1024,24 +1029,53 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
             set_ghost(ghost_idx, false); // pushes ghost_placed
         }
     }
-    // A right-click inside the widget with no ghost pending and no item
-    // under the mouse opens a popup: on a node the align/equal-size menu
-    // (a right-click on an unselected node selects only it; on an already
-    // selected node the current, possibly multi-node, selection is kept),
-    // on the empty canvas the add-node menu.
+
+    // Delete: delete the selected nodes (the veto applies per node).  With
+    // an empty selection the hovered node is the target: a state-widget
+    // node body is its own items, so a body click never selects the node
+    // and the key must act on what is under the mouse.  Only while no
+    // interaction is active and without key repeat, so holding or dragging
+    // never re-fires the delete mid-gesture.  The text-input guard keeps an
+    // active node-rename editor from swallowing the keypress as a delete.
+    if (ImGui::IsWindowHovered() && in_widget(mouse_screen) && interaction == Interaction::idle &&
+        ImGui::IsKeyPressed(ImGuiKey_Delete, false) && ! ImGui::GetIO().WantTextInput) {
+        const bool deleted_anything = delete_selected() > 0;
+        if (! deleted_anything) {
+            bool any_selected = false;
+            for (uint32_t i = 0; i < max_nodes; ++i) {
+                if (nodes.is_occupied(i) && is_selected(i)) {
+                    any_selected = true;
+                    break;
+                }
+            }
+            if (! any_selected && node_hit && ! nodes.entries[hit_node].ghost) {
+                delete_node(hit_node);
+            }
+        }
+    }
+
+    // A right-click inside the widget with no ghost pending opens a popup:
+    // on a node the align/equal-size menu (a right-click on an unselected
+    // node selects only it; on an already selected node the current,
+    // possibly multi-node, selection is kept), on the empty canvas the
+    // add-node menu.  Merely hovering an item does not block the menu: a
+    // state-widget node body is its own items, so the menu must open over
+    // it.  An active item (slider drag, rename editor) still owns the mouse.
     const bool canvas_right_click = interaction == Interaction::idle && ghost_idx == pool_no_slot &&
                                     ImGui::IsWindowHovered() && in_widget(mouse_screen) && ImGui::IsMouseClicked(1) &&
-                                    ! ImGui::IsAnyItemHovered();
+                                    ! ImGui::IsAnyItemActive();
     if (canvas_right_click && node_hit) {
         if (! is_selected(hit_node)) {
             select_none();
             set_selected(hit_node, true);
         }
+
         popup_node = hit_node;
         ImGui::OpenPopup("node_menu");
     }
     else if (canvas_right_click && ! node_hit) {
         popup_canvas_pos = mouse_graph();
+
         ImGui::OpenPopup("canvas_menu");
     }
 
@@ -1051,7 +1085,11 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
     else if (interaction == Interaction::idle && ImGui::IsWindowHovered() && in_widget(mouse_screen) &&
              ImGui::IsMouseClicked(0) && ! ImGui::IsAnyItemHovered()) {
         const EndPoint pressed_dot = dot_at(mouse_screen);
-        if (pressed_dot.node_idx != pool_no_slot) {
+        if (pressed_dot.node_idx != pool_no_slot && connections_readonly) {
+            // Read-only projection wires: connector presses are dead, so a
+            // click on a dot neither drags the node nor picks a wire up.
+        }
+        else if (pressed_dot.node_idx != pool_no_slot) {
             // A connected dot picks up its existing connection, a free dot
             // starts a new one.  ponytail: fan-out pickup takes the first
             // match; revisit only if re-dragging one of many ever matters.

@@ -49,9 +49,28 @@ struct Slot {
     char          list_options[8][32];
 };
 
-// Sized for the widest projected node (15 rows) plus headroom; Slot carries
-// list_options[8][32], so a larger cap would balloon every Node allocation.
-constexpr uint32_t max_node_slots = 32;
+// Shared slot construction helpers, the grammar both projections (oscillator
+// and effect) build their node rows from.
+Slot make_slot(const char* name, SlotKind kind, PropertyType property_type = PropertyType::unused);
+Slot output_slot(const char* name);
+Slot input_slot(const char* name);
+Slot real_slot(const char* name, float value);
+Slot bounded_real_slot(const char* name, float value, float min_value, float max_value, bool logarithmic = false);
+Slot int_slot(const char* name, int32_t value);
+Slot list_slot(const char* name, const char* const* option_names, uint32_t num_options, uint32_t index);
+
+// Option labels of the two-way source op list (SourceOp::add, SourceOp::multiply).
+extern const char* const source_op_names[2];
+
+// Sized for the widest projected node - a 5-param effect carrying the full
+// modulation grammar (base + LFO row + two MIDI source rows per param:
+// 3 + 5*10 = 53 slots).  Slot carries list_options[8][32], so a larger cap
+// would balloon every Node allocation.
+constexpr uint32_t max_node_slots = 56;
+
+// Labels of the channel/note modulation source roles, indexed by
+// ModSource - 1 (pitch_bend first).
+extern const char* const mod_source_names[6];
 
 // Draws the optional caller state widget at the bottom of a node.
 // Returns the widget height in pixels; the height is cached one frame.
@@ -432,6 +451,14 @@ public:
     // false, or user input is silently dropped and re-projected away.  Zero =
     // the interactions stay hidden.
     bool node_state_edits_enabled;
+
+    // True when the projection's connections are read-only views of the
+    // model (the effects editor): the renderer suppresses wire pickup,
+    // creation, retargeting and the connection popup, and a connected
+    // property row stays editable - the wire documents a binding instead
+    // of driving the value.  Projection state: the projection that owns
+    // the graph sets it, like node_state_edits_enabled.
+    bool connections_readonly = false;
 
 private:
     // Event queue (ring buffer); returns false when the event was suppressed

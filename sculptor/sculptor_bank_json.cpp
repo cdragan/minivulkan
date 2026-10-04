@@ -2240,7 +2240,8 @@ void decode_editor_record(Walker& w, uint32_t obj, Synth::GraphNodeLayout* recor
     });
     if (w.failed)
         return;
-    if (record->channel >= Synth::max_channels || record->zone >= Synth::max_instr_per_channel || record->kind > 3) {
+    if ((record->channel >= Synth::max_channels && ! (record->kind == 4 && record->channel == Synth::max_channels)) ||
+        record->zone >= Synth::max_instr_per_channel || record->kind > 4) {
         w.failed = true;
         return;
     }
@@ -2271,8 +2272,9 @@ void decode_editor_state(Walker& w, uint32_t val_idx, Synth::InstrumentEditorBan
                 decode_editor_record(w, elem, &record);
                 if (w.failed)
                     return;
-                if (record.kind != 0) {
-                    if (++detached_per_zone[record.channel][record.zone] > Synth::max_detached_per_zone) {
+                if (record.kind != 0 && record.kind != 4) {
+                    if (record.channel >= Synth::max_channels || record.zone >= Synth::max_instr_per_channel ||
+                        ++detached_per_zone[record.channel][record.zone] > Synth::max_detached_per_zone) {
                         w.failed = true;
                         return;
                     }
@@ -2281,7 +2283,8 @@ void decode_editor_state(Walker& w, uint32_t val_idx, Synth::InstrumentEditorBan
                 for (uint32_t i = 0; i < out->graph_layout_count; ++i) {
                     const Synth::GraphNodeLayout& other = out->graph_layout[i];
                     if (other.channel == record.channel && other.zone == record.zone && other.kind == record.kind &&
-                        other.index == record.index && other.uid == record.uid) {
+                        other.index == record.index && other.uid == record.uid &&
+                        (record.kind != 4 || strcmp(other.name, record.name) == 0)) {
                         return;
                     }
                 }

@@ -46,19 +46,28 @@ private:
     // candidate path.  render_scale scales the chart width to the node's
     // current on-screen content size.
     static int envelope_state_widget_entry(void* user_data, float render_scale);
-    void       do_initialize(uint32_t channel);
-    void       do_delete(uint32_t channel);
-    void       do_zone_join_previous(uint32_t channel, uint32_t note);
-    void       do_zone_join_next(uint32_t channel, uint32_t note);
-    void       do_zone_split_new(uint32_t channel, uint32_t note);
-    void       do_zone_delete(uint32_t channel, uint32_t entry);
-    void       gui_osc_graph(uint32_t channel);
-    void       drain_osc_graph(uint32_t channel, uint32_t zone);
-    void       run_osc_canvas_command();
-    void       do_osc_add_oscillator();
-    void       do_osc_add_generator(bool is_env);
-    void       do_osc_add_parameter();
-    void       do_osc_change_target_param(uint32_t node_idx, uint32_t new_target);
+    // Effects-graph counterparts: the modulation panel entry and its
+    // one-field edit dispatcher, both committing through the candidate path.
+    void reproject_fx_graph(uint32_t chain);
+    void gui_fx_graph(uint32_t chain);
+    void drain_fx_graph(uint32_t chain);
+    void run_fx_canvas_command();
+    void do_fx_add_effect(Synth::EffectType type);
+    void do_fx_add_lfo();
+    void do_fx_change_type(uint32_t node_idx, Synth::EffectType type);
+    void do_initialize(uint32_t channel);
+    void do_delete(uint32_t channel);
+    void do_zone_join_previous(uint32_t channel, uint32_t note);
+    void do_zone_join_next(uint32_t channel, uint32_t note);
+    void do_zone_split_new(uint32_t channel, uint32_t note);
+    void do_zone_delete(uint32_t channel, uint32_t entry);
+    void gui_osc_graph(uint32_t channel);
+    void drain_osc_graph(uint32_t channel, uint32_t zone);
+    void run_osc_canvas_command();
+    void do_osc_add_oscillator();
+    void do_osc_add_generator(bool is_env);
+    void do_osc_add_parameter();
+    void do_osc_change_target_param(uint32_t node_idx, uint32_t new_target);
 
     void gui_channel_list();
     void gui_channel_pane(uint32_t channel);

@@ -12,8 +12,74 @@
 #include <stdio.h>
 #include <string.h>
 
+const char* const Sculptor::source_op_names[2] = { "+", "x" };
+
+const char* const Sculptor::mod_source_names[6] = { "Pitch bend", "Mod wheel",  "Channel press.",
+                                                    "Velocity",   "Aftertouch", "Pressure (max)" };
+
+Sculptor::Slot Sculptor::make_slot(const char* name, Sculptor::SlotKind kind, Sculptor::PropertyType property_type)
+{
+    Sculptor::Slot slot = {};
+    snprintf(slot.name, sizeof(slot.name), "%s", name);
+    slot.kind          = kind;
+    slot.connectable   = false;
+    slot.property_type = property_type;
+    return slot;
+}
+
+Sculptor::Slot Sculptor::output_slot(const char* name)
+{
+    return make_slot(name, Sculptor::SlotKind::output);
+}
+
+Sculptor::Slot Sculptor::input_slot(const char* name)
+{
+    return make_slot(name, Sculptor::SlotKind::input);
+}
+
+Sculptor::Slot Sculptor::real_slot(const char* name, float value)
+{
+    Sculptor::Slot slot = make_slot(name, Sculptor::SlotKind::property, Sculptor::PropertyType::real);
+    slot.value.real     = value;
+    return slot;
+}
+
+// Bounded real: the renderer draws a slider clamped to the range.
+Sculptor::Slot Sculptor::bounded_real_slot(const char* name,
+                                           float       value,
+                                           float       min_value,
+                                           float       max_value,
+                                           bool        logarithmic)
+{
+    Sculptor::Slot slot   = real_slot(name, value);
+    slot.real_min         = min_value;
+    slot.real_max         = max_value;
+    slot.real_bounded     = true;
+    slot.real_logarithmic = logarithmic;
+    return slot;
+}
+
+Sculptor::Slot Sculptor::int_slot(const char* name, int32_t value)
+{
+    Sculptor::Slot slot = make_slot(name, Sculptor::SlotKind::property, Sculptor::PropertyType::integer);
+    slot.value.integer  = value;
+    return slot;
+}
+
+Sculptor::Slot Sculptor::list_slot(const char* name, const char* const* options, uint32_t num_options, uint32_t index)
+{
+    Sculptor::Slot slot   = make_slot(name, Sculptor::SlotKind::property, Sculptor::PropertyType::list);
+    slot.num_list_options = static_cast<uint8_t>(num_options);
+    for (uint32_t i = 0; i < num_options; ++i) {
+        snprintf(slot.list_options[i], sizeof(slot.list_options[i]), "%s", options[i]);
+    }
+    slot.value.list_index = static_cast<uint8_t>(index);
+    return slot;
+}
+
 Sculptor::GraphColors Sculptor::default_graph_colors()
 {
+
     Sculptor::GraphColors colors     = {};
     colors.node_background           = 0x2B2B2BFFu;
     colors.node_border               = 0x5A5A5AFFu;

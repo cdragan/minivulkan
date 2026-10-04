@@ -13,6 +13,7 @@ src_files += sculptor_asset_browser.cpp
 src_files += sculptor_asset_list.cpp
 src_files += sculptor_graph.cpp
 src_files += sculptor_osc_graph.cpp
+src_files += sculptor_effect_graph.cpp
 src_files += sculptor_graph_render.cpp
 src_files += sculptor_geom_edit.cpp
 src_files += sculptor_instr_edit.cpp

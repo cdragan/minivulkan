@@ -11,6 +11,16 @@
 
 namespace {
 
+using Sculptor::bounded_real_slot;
+using Sculptor::input_slot;
+using Sculptor::int_slot;
+using Sculptor::list_slot;
+using Sculptor::make_slot;
+using Sculptor::mod_source_names;
+using Sculptor::output_slot;
+using Sculptor::real_slot;
+using Sculptor::source_op_names;
+
 // The editor-facing helpers exported from sculptor_osc_graph.h are used
 // unqualified in this file's local sections.
 using Sculptor::connection_into;
@@ -47,11 +57,8 @@ uint32_t projected_target_of_index(uint32_t projected)
 
 const char* const target_names[Synth::num_mod_targets] = { "volume",       "pitch",    "panning", "Duty A",  "Duty B",
                                                            "Waveform Mix", "FM Depth", "lowpass", "highpass" };
-const char* const source_names[Sculptor::num_osc_graph_inputs] = { "Pitch bend", "Mod wheel",  "Channel press.",
-                                                                   "Velocity",   "Aftertouch", "Pressure (max)" };
-const char* const wave_names[5]                                = { "off", "sine", "saw", "pulse", "noise" };
-const char* const osc_mode_names[3]                            = { "blend", "fm", "hard sync" };
-const char* const op_names[2]                                  = { "+", "x" };
+const char* const wave_names[5]                        = { "off", "sine", "saw", "pulse", "noise" };
+const char* const osc_mode_names[3]                    = { "blend", "fm", "hard sync" };
 
 // Oscillator node slot layout.  The order is fixed: project fills slots in
 // exactly this order and compile reads properties back by index, so the two
@@ -178,65 +185,6 @@ constexpr uint32_t lfo_rate_input  = 2;
 constexpr uint32_t input_note_detune_prop = Sculptor::num_osc_graph_inputs;
 constexpr uint32_t input_osc_detune_prop  = Sculptor::num_osc_graph_inputs + 1;
 
-Sculptor::Slot make_slot(const char*            name,
-                         Sculptor::SlotKind     kind,
-                         Sculptor::PropertyType type = Sculptor::PropertyType::unused)
-{
-    Sculptor::Slot slot = {};
-    snprintf(slot.name, sizeof(slot.name), "%s", name);
-    slot.kind          = kind;
-    slot.connectable   = false;
-    slot.property_type = type;
-    return slot;
-}
-
-Sculptor::Slot output_slot(const char* name)
-{
-    return make_slot(name, Sculptor::SlotKind::output);
-}
-
-Sculptor::Slot input_slot(const char* name)
-{
-    return make_slot(name, Sculptor::SlotKind::input);
-}
-
-Sculptor::Slot real_slot(const char* name, float value)
-{
-    Sculptor::Slot slot = make_slot(name, Sculptor::SlotKind::property, Sculptor::PropertyType::real);
-    slot.value.real     = value;
-    return slot;
-}
-
-// Bounded real: the renderer draws a slider clamped to the range.
-Sculptor::Slot bounded_real_slot(const char* name, float value, float min_value, float max_value)
-{
-    Sculptor::Slot slot = real_slot(name, value);
-    slot.real_min       = min_value;
-    slot.real_max       = max_value;
-    slot.real_bounded   = true;
-    return slot;
-}
-
-Sculptor::Slot int_slot(const char* name, int32_t value)
-{
-    Sculptor::Slot slot = make_slot(name, Sculptor::SlotKind::property, Sculptor::PropertyType::integer);
-    slot.value.integer  = value;
-    return slot;
-}
-
-Sculptor::Slot list_slot(const char* name, const char* const* options, uint32_t num_options, uint32_t index)
-{
-    Sculptor::Slot slot   = make_slot(name, Sculptor::SlotKind::property, Sculptor::PropertyType::list);
-    slot.num_list_options = static_cast<uint8_t>(num_options);
-    for (uint32_t i = 0; i < num_options; ++i) {
-        snprintf(slot.list_options[i], sizeof(slot.list_options[i]), "%s", options[i]);
-    }
-    slot.value.list_index = static_cast<uint8_t>(index);
-    return slot;
-}
-
-// Shared constant value row: display units from the target view
-// (fm depth normalized to 0..1), bounded, optionally logarithmic.
 Sculptor::Slot osc_view_real_slot(const char* name, float bank_value, Synth::ModTarget target)
 {
     const Sculptor::OscTargetView view = osc_target_views[static_cast<uint32_t>(target)];
@@ -577,7 +525,7 @@ uint32_t create_param_node(Sculptor::Graph*           graph,
     Sculptor::Slot lfo_in = input_slot("LFO");
     lfo_in.row_group      = param_lfo_row_group;
     graph->add_slot(node, lfo_in);
-    Sculptor::Slot lfo_op = list_slot("Op", op_names, 2, lfo_op_index);
+    Sculptor::Slot lfo_op = list_slot("Op", source_op_names, 2, lfo_op_index);
     lfo_op.row_group      = param_lfo_row_group;
     graph->add_slot(node, lfo_op);
     Sculptor::Slot lfo_depth = real_slot("Depth", lfo_depth_init);
@@ -590,7 +538,7 @@ uint32_t create_param_node(Sculptor::Graph*           graph,
         Sculptor::Slot src_in = input_slot(i == 0 ? "Source A" : "Source B");
         src_in.row_group      = static_cast<uint8_t>(param_src0_row_group + i);
         graph->add_slot(node, src_in);
-        Sculptor::Slot src_op = list_slot("Op", op_names, 2, static_cast<uint32_t>(routing.inputs[i].op));
+        Sculptor::Slot src_op = list_slot("Op", source_op_names, 2, static_cast<uint32_t>(routing.inputs[i].op));
         src_op.row_group      = static_cast<uint8_t>(param_src0_row_group + i);
         graph->add_slot(node, src_op);
         Sculptor::Slot src_scale = real_slot("Amount", routing.inputs[i].scale);
@@ -1364,8 +1312,9 @@ bool Sculptor::project_instrument_to_graph(const Synth::Instrument&     instrume
         Synth::ModSource::pressure_combine, Synth::ModSource::pitch_bend, Synth::ModSource::mod_wheel,
     };
     for (uint32_t i = 0; i < num_osc_graph_inputs; ++i) {
-        const uint32_t source                   = static_cast<uint32_t>(input_display_order[i]);
-        mapping->input_source_slots[source - 1] = graph->add_slot(input_node, output_slot(source_names[source - 1]));
+        const uint32_t source = static_cast<uint32_t>(input_display_order[i]);
+        mapping->input_source_slots[source - 1] =
+            graph->add_slot(input_node, output_slot(mod_source_names[source - 1]));
     }
     // Random pitch offset drawn once per note for every layer, in semitones.
     graph->add_slot(input_node, bounded_real_slot("Random Note Detune", instrument.note_skew_semitones, 0.0f, 1.0f));

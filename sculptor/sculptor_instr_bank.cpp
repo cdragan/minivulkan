@@ -835,17 +835,31 @@ bool Sculptor::validate_editor_metadata(const Synth::InstrumentEditorBank& bank)
     uint16_t detached_per_zone[Synth::max_channels][Synth::max_instr_per_channel] = {};
     for (uint32_t i = 0; i < bank.graph_layout_count; ++i) {
         const Synth::GraphNodeLayout& record = bank.graph_layout[i];
-        if (record.channel >= Synth::max_channels || record.zone >= Synth::max_instr_per_channel || record.kind > 3) {
+        if (record.zone >= Synth::max_instr_per_channel || record.kind > 4 ||
+            (record.channel >= Synth::max_channels && ! (record.kind == 4 && record.channel == Synth::max_channels))) {
             return false;
+        }
+        // Effect-graph records (kind 4) key by node name instead of uid: the
+        // fx projection names its nodes deterministically per chain content
+        // ("Delay", "LFO 3", "Channel input"), and the master chain (chain
+        // index max_channels) keeps its own records.
+        if (record.kind == 4) {
+            if (record.channel > Synth::max_channels || record.zone != 0 || record.index != 0 || record.uid != 0 ||
+                record.depth_source != 0 || record.rate_source != 0 ||
+                (record.served | record.env_desc_id | record.lfo_desc_id | record.lfo_depth_source |
+                 record.lfo_rate_source | record.param_slot) != 0 ||
+                record.name[0] == 0) {
+                return false;
+            }
         }
         // Kinds 1/2/3 are detached records keyed by uid; a zero uid would
         // alias the derived (record-less) projection state.
-        if (record.kind != 0 && record.uid == 0) {
+        if (record.kind != 0 && record.kind != 4 && record.uid == 0) {
             return false;
         }
         // The partial-wiring persistence fields belong to parameter records
         // alone; anywhere else they would silently change what a record keys.
-        if (record.kind != 3 &&
+        if (record.kind != 3 && record.kind != 4 &&
             (record.served != 0 || record.env_desc_id != 0 || record.lfo_desc_id != 0 || record.lfo_depth_source != 0 ||
              record.lfo_rate_source != 0 || record.param_slot != 0 || record.name[0] != 0)) {
             return false;
@@ -883,7 +897,7 @@ bool Sculptor::validate_editor_metadata(const Synth::InstrumentEditorBank& bank)
                 return false;
             }
         }
-        else {
+        else if (record.kind != 4) {
             const uint32_t num_allocated =
                 record.kind == 1 ? bank.bank.envelopes.num_allocated : bank.bank.lfos.num_allocated;
             if (record.index == 0 || record.index > num_allocated) {
@@ -901,11 +915,13 @@ bool Sculptor::validate_editor_metadata(const Synth::InstrumentEditorBank& bank)
             ! std::isfinite(record.height_override)) {
             return false;
         }
-        // Record keys are unique: (channel, zone, kind, index, uid).
+        // Record keys are unique: (channel, zone, kind, index, uid); a kind-4
+        // record keys by name (one record per projected fx node).
         for (uint32_t j = 0; j < i; ++j) {
             const Synth::GraphNodeLayout& other = bank.graph_layout[j];
             if (other.channel == record.channel && other.zone == record.zone && other.kind == record.kind &&
-                other.index == record.index && other.uid == record.uid) {
+                other.index == record.index && other.uid == record.uid &&
+                (record.kind != 4 || strcmp(other.name, record.name) == 0)) {
                 return false;
             }
         }
@@ -942,4 +958,19 @@ bool Sculptor::validate_editor_metadata(const Synth::InstrumentEditorBank& bank)
         }
     }
     return true;
+}
+
+// Whole-bank effect budget accounting, shared by the effects editor's
+// preflights (a refused edit with a specific message reads better than the
+// commit's generic refusal).  Counts modulated parameters and the static
+// enabled-effect state bytes exactly like validate_instrument_bank does,
+// including disabled effects and slots.
+void Sculptor::count_effect_budgets(const Synth::InstrumentBank& bank, uint32_t* num_modulated, uint32_t* state_bytes)
+{
+    *num_modulated = 0;
+    *state_bytes   = 0;
+    for (uint32_t channel = 0; channel < Synth::max_channels; ++channel) {
+        validate_effect_chain(bank.channel_chains[channel], false, bank.lfos.num_allocated, num_modulated, state_bytes);
+    }
+    validate_effect_chain(bank.master_chain, true, bank.lfos.num_allocated, num_modulated, state_bytes);
 }

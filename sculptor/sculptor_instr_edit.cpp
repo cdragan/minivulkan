@@ -3,6 +3,7 @@
 
 #include "sculptor_instr_edit.h"
 #include "sculptor_bank_json.h"
+#include "sculptor_effect_graph.h"
 #include "sculptor_graph.h"
 #include "sculptor_instr_bank.h"
 #include "sculptor_instr_envelope_edit.h"
@@ -15,7 +16,6 @@
 
 #include "../core/d_printf.h"
 #include "../core/gui_imgui.h"
-#include <stdio.h>
 #include <string.h>
 #include <type_traits>
 
@@ -51,6 +51,13 @@ Synth::BankUpdateQueue bank_queue;
 bool                  bank_changes_pending = false;
 Synth::InstrumentBank pending_bank;
 
+// The disk save follows the audible publish a couple of frames behind, so a
+// mid-drag stream of publishes never queues file writes.  A crash can lose
+// the unsaved tail of an unfinished gesture; the next full save after the
+// gesture recovers the file.
+bool     save_pending         = false;
+uint32_t frames_since_publish = 0;
+
 // The oscillator graph editor: one widget instance plus its mapping, kept in
 // step with the committed bank by re-projection (selection change, undo/redo,
 // load, zone operations, structural or refused commits) and by per-frame
@@ -62,6 +69,19 @@ uint32_t                  osc_graph_zone_channel = 0;
 uint32_t                  osc_graph_zone_index   = 0;
 bool                      osc_graph_projected    = false; // mapping matches the selection
 bool                      osc_graph_reproject    = false; // deferred wholesale rebuild
+
+// The effects graph projection: the same widget instance hosts the channel
+// and master effect chains, mutually exclusive with the oscillator
+// projection.  The chain binding is the truth; node positions are
+// session-only and re-derive on every re-projection.
+Sculptor::EffectGraphMapping fx_mapping;
+bool                         fx_graph_projected = false;
+bool                         fx_graph_reproject = false;
+
+// LFO descriptors the canvas must show even while nothing references them
+// (a freshly added LFO awaiting its first wire).  Session-only view state:
+// the projection reads it, the bank never stores it.
+bool fx_lfo_pinned[Synth::max_lfos] = {};
 
 // Per-envelope-node state-widget contexts, indexed by graph node index and
 // rebound on every projection.  A reset on projection also aborts gestures
@@ -97,6 +117,19 @@ OscCanvasCommand osc_canvas_command         = osc_cmd_none;
 uint32_t         osc_canvas_retarget_node   = Sculptor::pool_no_slot; // pending osc_cmd_change_target_param
 uint32_t         osc_canvas_retarget_target = 0;                      // pending osc_cmd_change_target_param
 
+// Effects canvas and node-menu commands, queued during render and run
+// after the drain against the committed bank.
+enum FxCanvasCommand {
+    fx_cmd_none,
+    fx_cmd_add_effect,
+    fx_cmd_add_lfo,
+    fx_cmd_change_type
+};
+
+FxCanvasCommand   fx_canvas_command = fx_cmd_none;
+Synth::EffectType fx_canvas_type    = Synth::EffectType::none;
+uint32_t          fx_menu_node      = Sculptor::pool_no_slot;
+
 // Undo tags: every commit kind has its own tag so one edit never coalesces
 // into another's undo entry.  Drained batches use graph_base + change kind,
 // layout-only commits use graph_base with the moved node, and batches with
@@ -119,6 +152,16 @@ constexpr uint32_t osc_tag_add_param           = 12;
 constexpr uint32_t osc_tag_change_target_param = 13;
 constexpr uint32_t osc_tag_fresh               = osc_tag_graph_base + 12; // outside every batch kind
 uint32_t           osc_fresh_tag_serial        = 0;                       // keeps consecutive fresh tags distinct
+
+// Effects undo tags: kinds distinct from every osc tag, same grouping rules
+// (a same-tag per-frame commit amends one undo entry, a different tag
+// snapshots).  fx_tag_value and fx_tag_panel carry node/slot/field ids so a
+// slider drag stays one entry.
+constexpr uint32_t fx_tag_value     = 32;
+constexpr uint32_t fx_tag_add       = 33;
+constexpr uint32_t fx_tag_type      = 34;
+constexpr uint32_t fx_tag_add_lfo   = 35; // id0 = the fresh descriptor id
+constexpr uint32_t fx_tag_node_move = 36; // id0 = the moved node (pool index)
 
 void init_osc_graph_widget();
 
@@ -207,6 +250,111 @@ bool osc_node_menu(void* user_data, uint32_t node_idx)
     return false;
 }
 
+// The effects projection vetoes only its fixed endpoints; effect nodes are
+// freely deletable (the drain removes the chain slot) and LFO node deletion
+// clears this chain's references to the descriptor.
+bool fx_node_delete_veto(void* user_data, uint32_t node_idx)
+{
+    (void)user_data;
+    return node_idx == fx_mapping.input_node || node_idx == fx_mapping.output_node || node_idx == fx_mapping.midi_node;
+}
+
+// Connection grammar for the effects graph: a parameter dot takes an LFO's
+// Value wire (the wire is the binding), a serial In dot takes audio from
+// the fixed input or an effect's Out.  Everything else refuses with a
+// message naming the rule it broke.
+bool fx_connection_validator(void*              user_data,
+                             Sculptor::Graph&   graph,
+                             Sculptor::EndPoint output,
+                             Sculptor::EndPoint input)
+{
+    (void)user_data;
+    if (output.node_idx == input.node_idx) {
+        graph.set_error("A node cannot connect to itself");
+        return false;
+    }
+    const int32_t in_slot = Sculptor::fx_effect_slot_of(fx_mapping, input.node_idx);
+    if (in_slot >= 0 && input.slot_idx >= Sculptor::fx_param_lfo_dot(0) &&
+        (input.slot_idx - Sculptor::fx_param_lfo_dot(0)) % Sculptor::fx_param_stride == 0) {
+        if (Sculptor::fx_lfo_desc_of(fx_mapping, output.node_idx) == 0) {
+            graph.set_error("Only an LFO can modulate a parameter");
+            return false;
+        }
+        return true;
+    }
+    const uint32_t param_field = input.slot_idx >= Sculptor::fx_param_row(0)
+                                     ? (input.slot_idx - Sculptor::fx_param_row(0)) % Sculptor::fx_param_stride
+                                     : Sculptor::fx_param_stride;
+    if (in_slot >= 0 && (param_field == 4 || param_field == 7)) {
+        if (output.node_idx != fx_mapping.midi_node) {
+            graph.set_error("Effects take channel-wide MIDI sources only");
+            return false;
+        }
+        return true;
+    }
+    const bool serial_in = input.node_idx == fx_mapping.output_node || (in_slot >= 0 && input.slot_idx == 0);
+    if (! serial_in) {
+        return false;
+    }
+    const bool serial_out = output.node_idx == fx_mapping.input_node ||
+                            (Sculptor::fx_effect_slot_of(fx_mapping, output.node_idx) >= 0 && output.slot_idx == 1);
+    if (! serial_out) {
+        graph.set_error("The chain wire carries audio only");
+        return false;
+    }
+    return true;
+}
+
+// Canvas menu: the six real effect types, capped by the chain length.
+void fx_canvas_menu(void* user_data)
+{
+    (void)user_data;
+    const Synth::EffectChainBinding& chain = Sculptor::fx_graph_chain(&instr_bank.bank, fx_mapping.chain);
+    ImGui::BeginDisabled(chain.num_effects >= Synth::max_chain_effects);
+    for (uint32_t type = 1; type < Synth::num_effect_types; ++type) {
+        const Sculptor::EffectTypeInfo& info = Sculptor::effect_type_info(static_cast<Synth::EffectType>(type));
+        if (ImGui::MenuItem(info.name)) {
+            fx_canvas_command = fx_cmd_add_effect;
+            fx_canvas_type    = static_cast<Synth::EffectType>(type);
+        }
+    }
+    ImGui::EndDisabled();
+    if (ImGui::MenuItem("Add LFO")) {
+        fx_canvas_command = fx_cmd_add_lfo;
+    }
+}
+
+// Canvas menu "Add LFO": a fresh descriptor the editor pins onto this
+// canvas.  The projection shows referenced descriptors only, so a
+// not-yet-wired LFO needs its pin to stay visible and receive a first wire.
+// Node menu on effect nodes: type replacement.  Chain order is a wire
+// gesture (drag the connector), LFO nodes carry only their own rows, so
+// the callback reports no items for them.
+bool fx_node_menu(void* user_data, uint32_t node_idx)
+{
+    (void)user_data;
+    const int32_t slot = Sculptor::fx_effect_slot_of(fx_mapping, node_idx);
+    if (slot < 0) {
+        return false;
+    }
+    const Synth::EffectChainBinding& chain = Sculptor::fx_graph_chain(&instr_bank.bank, fx_mapping.chain);
+    if (ImGui::BeginMenu("Change Type")) {
+        for (uint32_t type = 1; type < Synth::num_effect_types; ++type) {
+            const bool is_current = chain.effects[slot].type == static_cast<Synth::EffectType>(type);
+            if (ImGui::MenuItem(Sculptor::effect_type_info(static_cast<Synth::EffectType>(type)).name,
+                                nullptr,
+                                false,
+                                ! is_current)) {
+                fx_canvas_command = fx_cmd_change_type;
+                fx_canvas_type    = static_cast<Synth::EffectType>(type);
+                fx_menu_node      = node_idx;
+            }
+        }
+        ImGui::EndMenu();
+    }
+    return true;
+}
+
 // Layout of every node as the projection built it: a node whose live layout
 // still matches needs no kind-0 record, so records stay sparse.
 vmath::vec2 osc_projected_position[Sculptor::max_nodes];
@@ -265,10 +413,6 @@ void init_osc_graph_widget()
     }
     inited = true;
     osc_graph.set_colors(Sculptor::default_graph_colors());
-    osc_graph.set_validator(&Sculptor::osc_graph_validate, &osc_mapping);
-    osc_graph.set_delete_veto(&osc_node_delete_veto, &osc_veto_context);
-    osc_graph.set_canvas_menu_callback(&osc_canvas_menu, nullptr);
-    osc_graph.set_node_menu_callback(&osc_node_menu, nullptr);
     // The apply path drops color/ghost events (projection state), so the
     // widget must not offer those edits.  Titles regenerate on re-projection
     // for every node except parameters (their record stores the name), so
@@ -476,9 +620,11 @@ bool publish_edited_bank()
     memcpy(pending_bank.channel_enabled, publish_enabled, sizeof(publish_enabled));
     bank_changes_pending = true;
 
-    const int save_error = Synth::save_editor_bank_file(bank_state_path, &instr_bank);
-    if (save_error)
-        Sculptor::notify_error("Synth: cannot write %s: %s", bank_state_path, strerror(save_error));
+    // The queue push is the last step on the sound path: the audio thread
+    // consumes this bank at its next step, mid-drag frames included.  The
+    // file save trails in delayed_updates, off this path.
+    save_pending         = true;
+    frames_since_publish = 0;
 
     return pump_bank_publish();
 }
@@ -579,6 +725,7 @@ bool load_editor_bank(const char* path)
     editor_snapshot();
     instr_bank          = scratch; // names ride in the bank file
     osc_graph_reproject = true;
+    fx_graph_reproject  = true;
     return publish_edited_bank();
 }
 
@@ -623,6 +770,7 @@ uint32_t save_zone_entry(const Synth::InstrumentBank& bank, uint32_t channel, in
     if (! bank.channel_enabled[channel])
         return pool_no_slot;
     const uint32_t num_zones = zone_count(bank, channel);
+
     if (num_zones == 0)
         return pool_no_slot;
     if (selected < 0 || selected >= static_cast<int32_t>(num_zones))
@@ -698,6 +846,15 @@ float boundary_x_of(uint32_t note, float white_w, float black_w)
 
 void Sculptor::SynthEditor::reproject_osc_graph(uint32_t channel, uint32_t zone)
 {
+    // The widget may last have hosted the effects projection: re-install the
+    // oscillator's connection grammar and clear its read-only flags.
+    osc_graph.connections_readonly = false;
+    osc_graph.set_validator(&Sculptor::osc_graph_validate, &osc_mapping);
+    osc_graph.set_delete_veto(&osc_node_delete_veto, &osc_veto_context);
+    osc_graph.set_canvas_menu_callback(&osc_canvas_menu, nullptr);
+    osc_graph.set_node_menu_callback(&osc_node_menu, nullptr);
+    fx_graph_projected = false;
+
     osc_graph_zone_channel = channel;
     osc_graph_zone_index   = zone;
     osc_graph_projected    = Sculptor::project_editor_to_graph(instr_bank, &osc_graph, &osc_mapping, channel, zone);
@@ -943,6 +1100,18 @@ void Sculptor::SynthEditor::delayed_updates()
     // Runs from sculptor.cpp before the editors loop, regardless of the
     // enabled flag: a disabled editor must still publish pending banks.
     pump_bank_publish();
+
+    if (save_pending) {
+        // Publishes happen during the GUI frame; two passes without a new
+        // publish mean the edit gesture ended, and the bank goes to disk.
+        ++frames_since_publish;
+        if (frames_since_publish >= 2) {
+            save_pending         = false;
+            const int save_error = Synth::save_editor_bank_file(bank_state_path, &instr_bank);
+            if (save_error)
+                Sculptor::notify_error("Synth: cannot write %s: %s", bank_state_path, strerror(save_error));
+        }
+    }
 }
 
 void Sculptor::SynthEditor::rederive_zone_selection(uint32_t channel)
@@ -1043,6 +1212,7 @@ void Sculptor::SynthEditor::do_delete(uint32_t channel)
     Sculptor::undo_group_reset(&osc_undo_group);
     if (commit_candidate(candidate, Sculptor::UndoGroupTag{ osc_tag_delete, channel, 0 }))
         osc_graph_reproject = true;
+    fx_graph_reproject = true;
 }
 
 void Sculptor::SynthEditor::release_held_note()
@@ -1089,10 +1259,14 @@ bool Sculptor::SynthEditor::create_gui_frame(uint32_t image_idx, bool* need_real
     // edited; the geometry editor gates its own shortcuts the same way, so one
     // keystroke can never undo both editors.
     const ImGuiIO& io = ImGui::GetIO();
-    if (ImGui::IsWindowFocused() && ! io.WantTextInput) {
+    // Child windows (the graph panes) hold focus while the user edits them,
+    // so the shortcut must consider the whole Synth window tree - the same
+    // ChildWindows rule the held-note release uses.
+    if (ImGui::IsWindowFocused(ImGuiFocusedFlags_ChildWindows) && ! io.WantTextInput) {
         if (is_ctrl_down() && ! is_shift_down() && ImGui::IsKeyPressed(ImGuiKey_Z)) {
             if (editor_undo()) {
                 osc_graph_reproject = true;
+                fx_graph_reproject  = true;
                 rederive_all_selections();
             }
         }
@@ -1100,12 +1274,13 @@ bool Sculptor::SynthEditor::create_gui_frame(uint32_t image_idx, bool* need_real
                                (is_shift_down() && ImGui::IsKeyPressed(ImGuiKey_Z)))) {
             if (editor_redo()) {
                 osc_graph_reproject = true;
+                fx_graph_reproject  = true;
                 rederive_all_selections();
             }
         }
     }
 
-    ImGui::BeginTable("##synth_layout", 2, ImGuiTableFlags_SizingFixedFit);
+    ImGui::BeginTable("##synth_layout", 2, ImGuiTableFlags_SizingFixedFit | ImGuiTableFlags_Resizable);
     ImGui::TableSetupColumn("##channels", ImGuiTableColumnFlags_WidthFixed, 220.0f);
     // A stretch column claims the remaining width immediately; a fit column would
     // re-fit its width over several frames and make the pane look like it animates in.
@@ -1115,7 +1290,11 @@ bool Sculptor::SynthEditor::create_gui_frame(uint32_t image_idx, bool* need_real
     gui_channel_list();
     ImGui::TableSetColumnIndex(1);
     if (selected_target == target_master) {
-        ImGui::TextDisabled("Master effects editor is not available yet");
+        const float pane_h = ImGui::GetContentRegionAvail().y - ImGui::GetStyle().CellPadding.y;
+        ImGui::BeginChild("##synth_master_pane", ImVec2(0, pane_h < 0.0f ? 0.0f : pane_h), true,
+                              ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+        gui_fx_graph(Synth::max_channels);
+        ImGui::EndChild();
     }
     else
         gui_channel_pane(selected_target);
@@ -1170,6 +1349,37 @@ void Sculptor::SynthEditor::gui_channel_pane(uint32_t channel)
     const Synth::InstrumentBank& bank      = instr_bank.bank;
     const uint32_t               num_zones = zone_count(bank, channel);
 
+    if (! bank.channel_enabled[channel]) {
+        ImGui::TextDisabled("Channel disabled - use Initialize or Load");
+        return;
+    }
+
+    if (ImGui::BeginTabBar("synth_mode")) {
+        if (ImGui::BeginTabItem("Oscillators")) {
+            show_effects_mode = false;
+            ImGui::EndTabItem();
+        }
+        if (ImGui::BeginTabItem("Effects")) {
+            show_effects_mode = true;
+            ImGui::EndTabItem();
+        }
+        ImGui::EndTabBar();
+    }
+
+    // The channel effects chain is channel-wide state: it edits with no zone
+    // selected, so it runs before the zone-table early returns. The keyboard
+    // stays available so notes sound while the chain is edited.
+    if (show_effects_mode) {
+        float pane_h = ImGui::GetContentRegionAvail().y - 72.0f - ImGui::GetStyle().CellPadding.y -
+                       ImGui::GetStyle().ItemSpacing.y;
+        ImGui::BeginChild("##synth_pane_ph", ImVec2(0, pane_h < 0.0f ? 0.0f : pane_h), true,
+                              ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+        gui_fx_graph(channel);
+        ImGui::EndChild();
+        gui_keyboard();
+        return;
+    }
+
     if (num_zones == 0) {
         // The empty-selection state: no instrument is selected, so the name box
         // and zone mutations stay disabled for this target.
@@ -1187,18 +1397,6 @@ void Sculptor::SynthEditor::gui_channel_pane(uint32_t channel)
         zone                   = 0;
         selected_zone[channel] = 0;
         zone_tab_force_entry   = 0;
-    }
-
-    if (ImGui::BeginTabBar("synth_mode")) {
-        if (ImGui::BeginTabItem("Oscillators")) {
-            show_effects_mode = false;
-            ImGui::EndTabItem();
-        }
-        if (ImGui::BeginTabItem("Effects")) {
-            show_effects_mode = true;
-            ImGui::EndTabItem();
-        }
-        ImGui::EndTabBar();
     }
 
     // The tab bar owns the visible selection; selected_zone mirrors it so keyboard
@@ -1242,21 +1440,14 @@ void Sculptor::SynthEditor::gui_channel_pane(uint32_t channel)
     // the layout adds below the placeholder: the cell padding under the row, plus the
     // item spacing before the keyboard child; otherwise the column overflows the
     // window into a scrollbar.
-    const float keyboard_h    = show_effects_mode ? 0.0f : 72.0f;
-    float       placeholder_h = ImGui::GetContentRegionAvail().y - keyboard_h - ImGui::GetStyle().CellPadding.y;
-    if (! show_effects_mode)
-        placeholder_h -= ImGui::GetStyle().ItemSpacing.y;
-    ImGui::BeginChild("##synth_pane_ph", ImVec2(0, placeholder_h < 0.0f ? 0.0f : placeholder_h), true);
-    if (show_effects_mode)
-        ImGui::TextDisabled("Effects editor is not available yet");
-    else
-        gui_osc_graph(channel);
+    float pane_h =
+        ImGui::GetContentRegionAvail().y - 72.0f - ImGui::GetStyle().CellPadding.y - ImGui::GetStyle().ItemSpacing.y;
+    ImGui::BeginChild("##synth_pane_ph", ImVec2(0, pane_h < 0.0f ? 0.0f : pane_h), true,
+                              ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+    gui_osc_graph(channel);
     ImGui::EndChild();
 
-    // Zone selection is per-channel behavior, so the keyboard lives in the
-    // channel's Oscillators view only.
-    if (! show_effects_mode)
-        gui_keyboard();
+    gui_keyboard();
 }
 
 // The Oscillators pane: the zone's instrument as an editable node graph.  The
@@ -1402,6 +1593,402 @@ void Sculptor::SynthEditor::run_osc_canvas_command()
 // position, with the model's fresh-Oscillator defaults.  Node capacity is
 // checked against the actual projected node count: a full node pool refuses
 // even below the seven-layer limit.
+
+// The fx pane's live node positions versus what the projection built: a
+// node the user has not dragged needs no record, so the layout sync stays
+// sparse.
+vmath::vec2 fx_projected_positions[Sculptor::max_nodes];
+
+bool fx_node_layout_moved(uint32_t node)
+{
+    const Sculptor::Node& node_ref = osc_graph.node(node);
+    return node_ref.position.x != fx_projected_positions[node].x ||
+           node_ref.position.y != fx_projected_positions[node].y;
+}
+
+// Lowest live fx node whose position no longer matches the projection, with
+// the number of moved nodes; pool_no_slot when nothing moved.  One moved
+// node tags per node, so repeated drags of the same node stay one undo entry
+// while a multi-node drag takes a fresh tag - the oscillator pane's scheme.
+uint32_t fx_moved_node(uint32_t* moved_count)
+{
+    *moved_count    = 0;
+    uint32_t lowest = Sculptor::pool_no_slot;
+    for (uint32_t node = 0; node < Sculptor::max_nodes; ++node) {
+        if (! osc_graph.node_occupied(node) || ! fx_node_layout_moved(node)) {
+            continue;
+        }
+        ++*moved_count;
+        if (lowest == Sculptor::pool_no_slot) {
+            lowest = node;
+        }
+    }
+    return lowest;
+}
+
+// Re-bases the projected-position snapshot on the live graph, after a
+// commit or a re-projection, so an unchanged layout never commits twice.
+void refresh_fx_projected_layout()
+{
+    for (uint32_t node = 0; node < Sculptor::max_nodes; ++node) {
+        if (osc_graph.node_occupied(node)) {
+            fx_projected_positions[node] = osc_graph.node(node).position;
+        }
+    }
+}
+
+// The chain's kind-4 record carrying a projected node's saved place, -1
+// when the node never moved.
+int32_t find_fx_layout_record(const Synth::InstrumentEditorBank& bank, uint32_t chain, const char* name)
+{
+    for (uint32_t i = 0; i < bank.graph_layout_count; ++i) {
+        const Synth::GraphNodeLayout& record = bank.graph_layout[i];
+        if (record.kind == 4 && record.channel == chain && strcmp(record.name, name) == 0) {
+            return static_cast<int32_t>(i);
+        }
+    }
+    return -1;
+}
+
+// Writes every moved fx node's position into the bank's kind-4 records:
+// node places ride the bank, so re-projections, undo/redo and file saves
+// all restore them.  Returns false when a moved node would need a new
+// record but the global record list is full.
+bool sync_fx_graph_layout(Synth::InstrumentEditorBank* bank)
+{
+    const uint32_t chain = fx_mapping.chain;
+    for (uint32_t node = 0; node < Sculptor::max_nodes; ++node) {
+        if (! osc_graph.node_occupied(node) || ! fx_node_layout_moved(node)) {
+            continue;
+        }
+        const Sculptor::Node& node_ref   = osc_graph.node(node);
+        const int32_t         record_idx = find_fx_layout_record(*bank, chain, node_ref.name);
+        if (record_idx >= 0) {
+            Synth::GraphNodeLayout& record = bank->graph_layout[record_idx];
+            record.x                       = node_ref.position.x;
+            record.y                       = node_ref.position.y;
+            record.width_override          = node_ref.content_width_override;
+            record.height_override         = node_ref.content_height_override;
+            continue;
+        }
+        if (! Sculptor::graph_records_have_capacity(*bank, 1)) {
+            return false;
+        }
+        Synth::GraphNodeLayout record = {};
+        record.channel                = static_cast<uint8_t>(chain);
+        record.kind                   = 4;
+        snprintf(record.name, sizeof(record.name), "%s", node_ref.name);
+        record.x                                       = node_ref.position.x;
+        record.y                                       = node_ref.position.y;
+        record.width_override                          = node_ref.content_width_override;
+        record.height_override                         = node_ref.content_height_override;
+        bank->graph_layout[bank->graph_layout_count++] = record;
+    }
+    return true;
+}
+
+void Sculptor::SynthEditor::reproject_fx_graph(uint32_t chain)
+{
+    osc_graph_projected = false;
+
+    fx_graph_projected =
+        Sculptor::project_effect_chain_to_graph(instr_bank.bank, chain, &osc_graph, &fx_mapping, fx_lfo_pinned);
+
+    // Moved nodes' places ride the bank as kind-4 records, so every
+    // re-projection (commits, undo/redo, tab and channel switches, file
+    // loads) restores them by name - the projection's stable node identity.
+    // set_node_layout pushes no events, so the restore cannot echo back
+    // into the edit pipeline.
+    for (uint32_t idx = 0; idx < Sculptor::max_nodes; ++idx) {
+        if (! osc_graph.node_occupied(idx)) {
+            continue;
+        }
+        const Sculptor::Node& node_ref   = osc_graph.node(idx);
+        const int32_t         record_idx = find_fx_layout_record(instr_bank, chain, node_ref.name);
+        if (record_idx >= 0) {
+            const Synth::GraphNodeLayout& record = instr_bank.graph_layout[record_idx];
+            osc_graph.set_node_layout(idx,
+                                      vmath::vec2(record.x, record.y),
+                                      record.width_override,
+                                      record.height_override);
+        }
+    }
+    refresh_fx_projected_layout();
+
+    // The pane's connection grammar and menus install after the projection:
+    // the widget may last have hosted the oscillator projection, and the
+    // projection itself owns no callbacks.
+    osc_graph.connections_readonly = false;
+    osc_graph.set_validator(&fx_connection_validator, nullptr);
+    osc_graph.set_delete_veto(&fx_node_delete_veto, nullptr);
+    osc_graph.set_canvas_menu_callback(&fx_canvas_menu, nullptr);
+    osc_graph.set_node_menu_callback(&fx_node_menu, nullptr);
+    // Projection construction is quiet; drain the ring anyway so no leftover
+    // event leaks into the next apply batch.
+    Sculptor::GraphChange discard[Sculptor::max_pending_changes];
+    while (osc_graph.take_changes(discard, Sculptor::max_pending_changes) != 0) {
+    }
+    (void)osc_graph.changes_overflowed();
+    Sculptor::undo_group_reset(&osc_undo_group);
+}
+
+// The effects pane: re-project on selection or structural change, then apply
+// drained edits per frame.  Same shape as gui_osc_graph.
+void Sculptor::SynthEditor::gui_fx_graph(uint32_t chain)
+{
+    init_osc_graph_widget();
+
+    if (fx_graph_reproject || ! fx_graph_projected || fx_mapping.chain != chain) {
+        fx_graph_reproject = false;
+        reproject_fx_graph(chain);
+    }
+
+    if (! fx_graph_projected) {
+        ImGui::TextDisabled("The effects graph did not fit this chain");
+        return;
+    }
+
+    osc_graph.render(ImGui::GetContentRegionAvail(), nullptr);
+    drain_fx_graph(chain);
+    run_fx_canvas_command();
+}
+
+void Sculptor::SynthEditor::drain_fx_graph(uint32_t chain)
+{
+    (void)chain; // the mapping carries the chain
+    Sculptor::GraphChange changes[Sculptor::max_pending_changes];
+    const uint32_t        count = osc_graph.take_changes(changes, Sculptor::max_pending_changes);
+    if (osc_graph.changes_overflowed()) {
+        reproject_fx_graph(fx_mapping.chain);
+        return;
+    }
+    if (count == 0) {
+        // Node moves push no change events; they persist as their own
+        // commit, tagged per node so one drag gesture stays one undo entry.
+        // The commit waits for the button to come up: committing per frame
+        // during a drag would run the full publish path, including the
+        // bank-file write, on every gesture frame.
+        uint32_t       moved_count = 0;
+        const uint32_t moved_node  = fx_moved_node(&moved_count);
+        if (moved_node == Sculptor::pool_no_slot || ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+            return;
+        }
+        candidate                      = instr_bank;
+        const uint32_t layout_tag_kind = moved_count > 1 ? osc_tag_fresh : fx_tag_node_move;
+        const uint32_t layout_tag_id0  = moved_count > 1 ? ++osc_fresh_tag_serial : moved_node;
+        if (sync_fx_graph_layout(&candidate) &&
+            commit_candidate(candidate, Sculptor::UndoGroupTag{ layout_tag_kind, layout_tag_id0, 0 })) {
+            refresh_fx_projected_layout();
+        }
+        else {
+            Sculptor::notify_error("Synth: effect edit refused");
+            reproject_fx_graph(fx_mapping.chain);
+        }
+        return;
+    }
+
+    // Effect-node deletions apply from the highest slot down: removing a
+    // slot shifts later slots, so ascending indices would target the wrong
+    // slot.  Value events and LFO-node deletions are order-independent.
+    uint32_t delete_order[Synth::max_chain_effects];
+    uint32_t num_deletes = 0;
+    for (uint32_t i = 0; i < count; ++i) {
+        if (changes[i].kind != Sculptor::ChangeKind::node_deleted) {
+            continue;
+        }
+        const int32_t slot = Sculptor::fx_effect_slot_of(fx_mapping, changes[i].node_idx);
+        if (slot < 0) {
+            // A deleted LFO node loses its pin with its canvas presence.
+            const uint32_t desc = Sculptor::fx_lfo_desc_of(fx_mapping, changes[i].node_idx);
+            if (desc != 0) {
+                fx_lfo_pinned[desc - 1] = false;
+            }
+            continue;
+        }
+        uint32_t insert = num_deletes++;
+        while (insert > 0 && delete_order[insert - 1] < static_cast<uint32_t>(slot)) {
+            delete_order[insert] = delete_order[insert - 1];
+            --insert;
+        }
+        delete_order[insert] = static_cast<uint32_t>(slot);
+    }
+
+    // A serial-wire disconnect is refused by the apply path: name the rule
+    // instead of the generic refusal, so the gesture's snap-back reads as
+    // intentional protection.
+    bool serial_disconnect = false;
+    for (uint32_t i = 0; i < count && ! serial_disconnect; ++i) {
+        const Sculptor::GraphChange& change = changes[i];
+        if (change.kind != Sculptor::ChangeKind::connection_deleted) {
+            continue;
+        }
+        if (! osc_graph.node_occupied(change.connection_input.node_idx) ||
+            ! osc_graph.node_occupied(change.connection_output.node_idx)) {
+            continue; // a byproduct of a node deletion in the same batch
+        }
+        const int32_t in_slot             = Sculptor::fx_effect_slot_of(fx_mapping, change.connection_input.node_idx);
+        const int32_t out_slot            = Sculptor::fx_effect_slot_of(fx_mapping, change.connection_output.node_idx);
+        const bool    into_output         = change.connection_input.node_idx == fx_mapping.output_node;
+        const bool    out_is_chain_source = out_slot >= 0 || change.connection_output.node_idx == fx_mapping.input_node;
+        if ((in_slot >= 0 && change.connection_input.slot_idx == 0 && out_is_chain_source) ||
+            (into_output && out_is_chain_source)) {
+            serial_disconnect = true;
+        }
+    }
+
+    candidate       = instr_bank;
+    bool ok         = true;
+    bool structural = false;
+    for (uint32_t i = 0; i < count && ok; ++i) {
+        const bool is_effect_delete = changes[i].kind == Sculptor::ChangeKind::node_deleted &&
+                                      Sculptor::fx_effect_slot_of(fx_mapping, changes[i].node_idx) >= 0;
+        if (is_effect_delete) {
+            continue; // applied in descending slot order below
+        }
+        structural = structural || changes[i].kind != Sculptor::ChangeKind::value_changed;
+        ok         = Sculptor::apply_fx_graph_change(&candidate.bank, osc_graph, fx_mapping, changes[i]);
+    }
+    for (uint32_t i = 0; i < num_deletes && ok; ++i) {
+        Sculptor::GraphChange delete_change = {};
+        delete_change.kind                  = Sculptor::ChangeKind::node_deleted;
+        delete_change.node_idx              = fx_mapping.effect_nodes[delete_order[i]];
+        structural                          = true;
+        ok = Sculptor::apply_fx_graph_change(&candidate.bank, osc_graph, fx_mapping, delete_change);
+    }
+    if (ok) {
+        // A batch commit is also the moment moved nodes' places persist:
+        // the sync stays sparse (only genuinely moved nodes write records).
+        ok = sync_fx_graph_layout(&candidate);
+    }
+
+    // One tag for a single-field batch so a slider drag's per-frame events
+    // amend one undo entry; mixed batches and wire gestures take a fresh
+    // unique tag (a wire edit is one discrete undo step).
+    const Sculptor::GraphChange& first = changes[0];
+    bool                         mixed = false;
+    for (uint32_t i = 1; i < count; ++i) {
+        if (changes[i].kind != first.kind || changes[i].node_idx != first.node_idx ||
+            changes[i].slot_idx != first.slot_idx) {
+            mixed = true;
+            break;
+        }
+    }
+    for (uint32_t i = 0; i < count && ! mixed; ++i) {
+        const auto kind = changes[i].kind;
+        mixed = kind == Sculptor::ChangeKind::connection_added || kind == Sculptor::ChangeKind::connection_deleted ||
+                kind == Sculptor::ChangeKind::connection_changed;
+    }
+    const Sculptor::UndoGroupTag tag = mixed ? Sculptor::UndoGroupTag{ osc_tag_fresh, ++osc_fresh_tag_serial, 0 }
+                                             : Sculptor::UndoGroupTag{ fx_tag_value, first.node_idx, first.slot_idx };
+
+    // A wire can bind one LFO too many: the bank validator would refuse the
+    // commit, so surface the budget error instead of a generic refusal.
+    uint32_t num_modulated = 0;
+    uint32_t state_bytes   = 0;
+    Sculptor::count_effect_budgets(candidate.bank, &num_modulated, &state_bytes);
+
+    if (! ok || num_modulated > Synth::max_effect_mod_params || ! commit_candidate(candidate, tag)) {
+        Sculptor::notify_error(num_modulated > Synth::max_effect_mod_params
+                                   ? "Synth: the effect modulation pool is full (32 modulated parameters)"
+                               : serial_disconnect
+                                   ? "Synth: the chain wire carries the audio - delete the effect node instead"
+                                   : "Synth: effect edit refused");
+        reproject_fx_graph(fx_mapping.chain);
+        return;
+    }
+    if (structural) {
+        fx_graph_reproject = true; // the slot layout changed, nodes re-derive
+    }
+}
+
+// Canvas and node-menu commands, run after the drain against the committed
+// bank.  Every command is one undo entry and one re-projection.
+void Sculptor::SynthEditor::run_fx_canvas_command()
+{
+    const FxCanvasCommand command = fx_canvas_command;
+    const uint32_t        node    = fx_menu_node;
+    fx_canvas_command             = fx_cmd_none;
+    fx_menu_node                  = Sculptor::pool_no_slot;
+    if (command == fx_cmd_none || ! fx_graph_projected) {
+        return;
+    }
+    switch (command) {
+        case fx_cmd_add_effect:
+            do_fx_add_effect(fx_canvas_type);
+            break;
+        case fx_cmd_add_lfo:
+            do_fx_add_lfo();
+            break;
+        case fx_cmd_change_type:
+            do_fx_change_type(node, fx_canvas_type);
+            break;
+        case fx_cmd_none:
+            break;
+    }
+}
+
+void Sculptor::SynthEditor::do_fx_add_effect(Synth::EffectType type)
+{
+    candidate                        = instr_bank;
+    Synth::EffectChainBinding& chain = Sculptor::fx_graph_chain(&candidate.bank, fx_mapping.chain);
+    if (chain.num_effects >= Synth::max_chain_effects) {
+        Sculptor::notify_error("Synth: the chain already holds four effects");
+        return;
+    }
+    Sculptor::fx_init_slot(&chain, chain.num_effects, type);
+    chain.effects[chain.num_effects].enabled = true;
+    ++chain.num_effects;
+
+    uint32_t num_modulated = 0;
+    uint32_t state_bytes   = 0;
+    Sculptor::count_effect_budgets(candidate.bank, &num_modulated, &state_bytes);
+    if (state_bytes > Synth::effect_state_budget) {
+        Sculptor::notify_error("Synth: adding this effect would exceed the effect state budget");
+        return;
+    }
+
+    if (! commit_candidate(candidate,
+                           Sculptor::UndoGroupTag{ fx_tag_add, fx_mapping.chain, static_cast<uint32_t>(type) })) {
+        return;
+    }
+    fx_graph_reproject = true;
+}
+
+// Canvas menu "Add LFO": a fresh descriptor pinned onto the canvas so the
+// projection keeps its node while nothing references it yet; wiring the
+// Value dot to a parameter is what binds it.
+void Sculptor::SynthEditor::do_fx_add_lfo()
+{
+    candidate        = instr_bank;
+    uint16_t desc_id = 0;
+    if (! Sculptor::fx_new_lfo(&candidate.bank, &desc_id)) {
+        Sculptor::notify_error("Synth: cannot add an LFO: the descriptor pool is full");
+        return;
+    }
+    if (! commit_candidate(candidate, Sculptor::UndoGroupTag{ fx_tag_add_lfo, desc_id, 0 })) {
+        return;
+    }
+    fx_lfo_pinned[desc_id - 1] = true;
+    fx_graph_reproject         = true;
+}
+
+// Type change replaces the whole slot with initialized bindings of the new
+// type, so no dormant modulation of the old type survives the reclaim.
+void Sculptor::SynthEditor::do_fx_change_type(uint32_t node_idx, Synth::EffectType type)
+{
+    const int32_t slot = Sculptor::fx_effect_slot_of(fx_mapping, node_idx);
+    if (slot < 0) {
+        return;
+    }
+    candidate                        = instr_bank;
+    Synth::EffectChainBinding& chain = Sculptor::fx_graph_chain(&candidate.bank, fx_mapping.chain);
+    Sculptor::fx_init_slot(&chain, static_cast<uint32_t>(slot), type);
+    if (! commit_candidate(candidate, Sculptor::UndoGroupTag{ fx_tag_type, node_idx, static_cast<uint32_t>(type) })) {
+        return;
+    }
+    fx_graph_reproject = true;
+}
+
 void Sculptor::SynthEditor::do_osc_add_oscillator()
 {
     const uint32_t channel        = osc_graph_zone_channel;
@@ -2070,6 +2657,7 @@ bool Sculptor::SynthEditor::do_library_load(const Synth::LibraryEntry& entry)
     Sculptor::undo_group_reset(&osc_undo_group);
     if (commit_candidate(candidate, Sculptor::UndoGroupTag{ osc_tag_load, library_channel, 0 }))
         osc_graph_reproject = true;
+    fx_graph_reproject = true;
 
     return true;
 }
