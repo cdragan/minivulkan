@@ -20,6 +20,9 @@ static std::atomic<bool> audio_producer_running;
 
 static void* audio_producer_main(void*)
 {
+    // Keep the audio thread interactive to reduce underruns
+    pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
+
     while (audio_producer_running.load(std::memory_order_relaxed)) {
         if ( ! Synth::produce_audio_batch<float, false>()) {
             constexpr uint32_t        sleep_ns   = 1'000'000;

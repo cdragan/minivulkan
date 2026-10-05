@@ -2233,7 +2233,7 @@ template <typename T, bool interleaved> static bool render_audio(uint32_t num_sa
 }
 
 constexpr uint32_t audio_ring_frames      = Synth::rt_sampling_rate;
-constexpr uint32_t audio_lead_frames      = Synth::rt_sampling_rate / 50;
+constexpr uint32_t audio_lead_frames      = Synth::rt_step_samples * 6;
 constexpr uint32_t audio_max_batch_frames = Synth::rt_step_samples * 16;
 
 // Ring buffer holding rendered sound in the platform's output format.  Sized for either
