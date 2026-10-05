@@ -42,7 +42,13 @@ void main()
 
         // Calculate multipliers with smooth adjustment
         const float step = float(gl_LocalInvocationID.x) / float(work_group_size - 1u);
-        const float multiplier = mix(input_param.old_volume,  input_param.volume,  step);
+
+        // Ease volume ramp down to 0 to avoid audible clicks
+        const float fade = input_param.volume == 0.0
+            ? step * step * step * (step * (step * 6.0 - 15.0) + 10.0)
+            : step;
+
+        const float multiplier = mix(input_param.old_volume,  input_param.volume,  fade);
         const float panning    = mix(input_param.old_panning, input_param.panning, step);
 
         // Apply volume

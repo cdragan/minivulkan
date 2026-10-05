@@ -80,6 +80,7 @@ struct Voice {
     uint8_t  osc_ids[max_layers]; // Oscillator slots owned by this voice
     uint8_t  osc_count;           // Number of live oscillator slots owned (0 = none)
     bool     releasing;           // True after note-off, until the volume envelope finishes
+    bool     note_finished;       // True after release stage is finished and the note is no longer playing
     uint32_t release_sample;      // Absolute sample to auto-release a duration-model note (0 = none)
 };
 
@@ -1126,17 +1127,25 @@ static void process_note_on(uint32_t delta_samples, const DispatchedMidiEvent& e
         route_instrument(synth_bank.channel_zones[channel], Synth::max_instr_per_channel, static_cast<uint8_t>(note));
 
     // Re-triggering a note still alive (held or releasing, possibly with some
-    // layers already silenced) reclaims it cleanly so the new note
-    // starts from a fully-allocated voice.
+    // layers already silenced) fades it out over its final block instead of cutting it, and
+    // gives up the note mapping so the new note can take it.
     const uint32_t existing_voice = note_to_voice[channel][note];
     if (existing_voice) {
-        drop_voice(existing_voice, channel, note);
+        voices[existing_voice].note_finished = true;
+        note_to_voice[channel][note]         = 0;
     }
 
-    const uint32_t voice_idx = allocate_unused_voice();
+    uint32_t voice_idx = allocate_unused_voice();
     if (! voice_idx) {
-        d_printf("All voices are active, dropping note %u on channel %u\n", note, channel);
-        return;
+        // The fading voice still holds its slots; cut it instead of dropping the note.
+        if (existing_voice) {
+            drop_voice(existing_voice, channel, note);
+            voice_idx = allocate_unused_voice();
+        }
+        if (! voice_idx) {
+            d_printf("All voices are active, dropping note %u on channel %u\n", note, channel);
+            return;
+        }
     }
     assert(voices[voice_idx].osc_count == 0);
 
@@ -1144,6 +1153,7 @@ static void process_note_on(uint32_t delta_samples, const DispatchedMidiEvent& e
     voice.channel        = static_cast<uint8_t>(channel);
     voice.active         = true;
     voice.releasing      = false;
+    voice.note_finished  = false;
     voice.release_sample = event.release_sample;
 
     note_to_voice[channel][note] = static_cast<uint8_t>(voice_idx);
@@ -1618,9 +1628,11 @@ static void update_modulation()
         // Voice lifetime: after note-off every oscillator plays one final block whose volume
         // gradient ramps to silence, then frees.  Oscillator-scope envelopes release at different
         // rates per layer index, so a voice's oscillators may free in different steps; the voice
-        // itself is finalized only when its last oscillator frees.
+        // itself is finalized only when its last oscillator frees.  A retriggered voice takes that
+        // final block immediately, without waiting for its envelope to finish releasing.
         bool free_now = osc.terminating;
-        if (! free_now && voice.releasing && volume_termination_due(osc_idx)) {
+        if (! free_now && (voice.note_finished ||
+                           (voice.releasing && volume_termination_due(osc_idx)))) {
             osc.terminating = true;
             osc.volume      = 0.0f; // Final block: the volume gradient ramps from the last rendered volume to silence.
         }
@@ -1637,7 +1649,9 @@ static void update_modulation()
             oscillators[moved_slot].layer_idx = osc.layer_idx;
 
             if (! voice.osc_count) {
-                note_to_voice[osc.midi_channel][osc.note] = 0;
+                if (! voice.note_finished) {
+                    note_to_voice[osc.midi_channel][osc.note] = 0;
+                }
                 voice.active                              = false;
 
                 // Clear the owned oscillator slot ids so a reused voice cannot
