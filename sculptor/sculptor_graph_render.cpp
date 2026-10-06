@@ -23,10 +23,11 @@ using Sculptor::max_nodes;
 using Sculptor::PropertyType;
 using Sculptor::SlotKind;
 
-constexpr float node_padding      = 8.0f;                     // inner margins of a node rect
-constexpr float dot_radius        = 5.0f;                     // connector dot radius
-constexpr float dot_space         = 2.0f * dot_radius + 2.0f; // room a dot claims
-constexpr float property_widget_w = 80.0f;                    // width of inline value widgets
+constexpr float node_padding         = 8.0f;                     // inner margins of a node rect
+constexpr float node_corner_rounding = 4.0f;                     // slight corner radius on node rects
+constexpr float dot_radius           = 5.0f;                     // connector dot radius
+constexpr float dot_space            = 2.0f * dot_radius + 2.0f; // room a dot claims
+constexpr float property_widget_w    = 80.0f;                    // width of inline value widgets
 
 // A two-option list renders as a label+radio pair, wider than the fixed
 // property widget column: reserve its measured width so the pair never
@@ -477,17 +478,21 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
                                         : visual_role == node_role_parameter && colors_.parameter_node_background != 0
                                             ? colors_.parameter_node_background
                                             : colors_.node_background);
-        draw_list->AddRectFilled(ImVec2(rect_min.x, rect_min.y), ImVec2(rect_max.x, rect_max.y), bg_color);
+        draw_list->AddRectFilled(ImVec2(rect_min.x, rect_min.y),
+                                 ImVec2(rect_max.x, rect_max.y),
+                                 bg_color,
+                                 node_corner_rounding * render_scale);
         draw_list->AddRect(ImVec2(rect_min.x, rect_min.y),
                            ImVec2(rect_max.x, rect_max.y),
                            to_imgui(visual_role == node_role_parameter && colors_.parameter_node_border != 0
                                         ? colors_.parameter_node_border
-                                        : colors_.node_border));
+                                        : colors_.node_border),
+                           node_corner_rounding * render_scale);
         if (is_selected(node_idx)) {
             draw_list->AddRect(ImVec2(rect_min.x - 2.0f, rect_min.y - 2.0f),
                                ImVec2(rect_max.x + 2.0f, rect_max.y + 2.0f),
                                to_imgui(colors_.node_selected_border),
-                               0.0f,
+                               node_corner_rounding * render_scale,
                                0,
                                2.0f);
         }
