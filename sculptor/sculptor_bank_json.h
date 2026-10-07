@@ -58,4 +58,94 @@ int save_editor_bank_file(const char* path, const InstrumentEditorBank* bank);
 // Transactional: on any failure out is left untouched.
 BankFileStatus load_editor_bank_file(const char* path, InstrumentEditorBank* out);
 
+// ---------------------------------------------------------------------------
+// Clipboard instrument documents (doc/synth_instrument_schema.json)
+// ---------------------------------------------------------------------------
+
+// One generator per layer per mod target bounds the descriptors a single
+// instrument document can reference.
+constexpr uint32_t instrument_max_envelopes = max_layers * num_mod_targets;
+constexpr uint32_t instrument_max_lfos      = max_layers * num_mod_targets;
+
+// Portable layout identity for a node derived from a copied instrument.
+enum InstrumentGraphLayoutKind : uint8_t {
+    instrument_graph_layout_canonical = 0,
+    instrument_graph_layout_envelope  = 1,
+    instrument_graph_layout_lfo       = 2,
+    instrument_graph_layout_parameter = 3
+};
+
+constexpr uint32_t instrument_graph_layout_capacity = graph_canonical_node_count + 3u * max_layers * 5u;
+static_assert(instrument_graph_layout_capacity == 114);
+
+struct InstrumentGraphLayout {
+    uint8_t kind;
+    uint8_t canonical_index;
+    uint8_t layer;
+    uint8_t target;
+    uint8_t depth_source;
+    uint8_t rate_source;
+    uint8_t parameter_ordinal;
+    float   x;
+    float   y;
+    float   width_override;
+    float   height_override;
+};
+
+// Decodes one instrument document into out_instr. Generator descriptor ids in
+// the decoded instrument are 1-based indices into out_envelopes/out_lfos
+// (0 = none), ready for remap_envelopes/remap_lfos/remap_instrument. Returns
+// false with every output untouched when the text is not a valid document. An
+// absent or empty "graph_layout" is accepted; a nonempty one is refused rather
+// than discarded, so a caller of this entry point never silently drops layout.
+bool decode_instrument_json(const char*         text,
+                            uint32_t            len,
+                            Instrument*         out_instr,
+                            EnvelopeDescriptor* out_envelopes,
+                            uint32_t*           out_envelope_count,
+                            LFODescriptor*      out_lfos,
+                            uint32_t*           out_lfo_count);
+
+// Encodes instr, resolving its generator descriptor ids against desc_bank,
+// into dest as one document. Returns the document length, or 0 when dest is
+// too small or the instrument references a descriptor the bank does not hold.
+// Equivalent to the layout overload with (nullptr, 0): the document carries an
+// empty "graph_layout" array.
+uint32_t encode_instrument_json(char*                 dest,
+                                uint32_t              dest_size,
+                                const Instrument*     instr,
+                                const InstrumentBank* desc_bank);
+
+// Layout-aware encoder overload. instr and desc_bank are always required; layout
+// may be null only when layout_count is zero, and its records must already be
+// normalized portable records resolving against the document-decoded model (see
+// Sculptor::normalize_instrument_graph_layout). dest_size must hold the document
+// plus its terminator, so a capacity one byte short of the document length + 1
+// fails instead of truncating. Returns the document length excluding the NUL the
+// caller writes, or 0 on any failure; the writer emits straight into dest, so
+// destination bytes are unspecified when it returns 0.
+uint32_t encode_instrument_json(char*                        dest,
+                                uint32_t                     dest_size,
+                                const Instrument*            instr,
+                                const InstrumentBank*        desc_bank,
+                                const InstrumentGraphLayout* layout,
+                                uint32_t                     layout_count);
+
+// Layout-aware decoder overload. All outputs are required except out_layout,
+// which may be null only when the document carries zero layout records; the
+// envelope and LFO counts always report the descriptors the instrument holds.
+// Transactional across the instrument, both descriptor arrays, the layout array
+// and all three counts: any failure - including a null or too-small layout
+// output for a nonempty array - leaves every output untouched.
+bool decode_instrument_json(const char*            text,
+                            uint32_t               len,
+                            Instrument*            out_instr,
+                            EnvelopeDescriptor*    out_envelopes,
+                            uint32_t*              out_envelope_count,
+                            LFODescriptor*         out_lfos,
+                            uint32_t*              out_lfo_count,
+                            InstrumentGraphLayout* out_layout,
+                            uint32_t               layout_capacity,
+                            uint32_t*              out_layout_count);
+
 } // namespace Synth

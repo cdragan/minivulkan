@@ -4,6 +4,7 @@
 #include "sculptor_bank_json.h"
 #include "../core/d_printf.h"
 #include "sculptor_atomic_file.h"
+#include "sculptor_instr_envelope_edit.h"
 #include "sculptor_osc_graph.h"
 
 // The vendored parser builds warning-clean under -Wall only; the format's strictness
@@ -33,65 +34,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-
-namespace {
-
-// ---------------------------------------------------------------------------
-// Shared enum spelling: one name per value, used by both encoder and decoder
-// ---------------------------------------------------------------------------
-
-constexpr uint32_t    num_waves             = 5;
-constexpr const char* wave_names[num_waves] = { "none", "sine", "sawtooth", "pulse", "noise" };
-
-constexpr uint32_t    num_osc_modes                 = 3;
-constexpr const char* osc_mode_names[num_osc_modes] = { "blend", "fm", "sync" };
-
-constexpr uint32_t    num_source_ops                  = 2;
-constexpr const char* source_op_names[num_source_ops] = { "add", "multiply" };
-
-constexpr uint32_t    num_mod_sources                   = 7;
-constexpr const char* mod_source_names[num_mod_sources] = {
-    "none", "pitch_bend", "mod_wheel", "channel_pressure", "velocity", "aftertouch", "pressure_combine"
-};
-
-constexpr const char* effect_type_names[Synth::num_effect_types] = { "none",   "distortion", "delay", "chorus",
-                                                                     "reverb", "compressor", "fir" };
-
-constexpr uint32_t    num_param_kinds                   = 4;
-constexpr const char* param_kind_names[num_param_kinds] = { "external", "envelope", "lfo", "plain" };
-
-constexpr const char* mod_target_names[Synth::num_mod_targets] = { "volume",   "pitch",          "panning",
-                                                                   "duty_a",   "duty_b",         "osc_mix",
-                                                                   "fm_index", "lowpass_cutoff", "highpass_cutoff" };
-
-static_assert(static_cast<uint32_t>(Synth::WaveType::noise_wave) == num_waves - 1);
-static_assert(static_cast<uint32_t>(Synth::ModSource::pressure_combine) == num_mod_sources - 1);
-static_assert(static_cast<uint32_t>(Synth::SourceOp::multiply) == num_source_ops - 1);
-static_assert(static_cast<uint32_t>(Synth::EffectType::fir) == Synth::num_effect_types - 1);
-static_assert(static_cast<uint32_t>(Synth::ParamKind::plain) == num_param_kinds - 1);
-static_assert(Synth::osc_mode_hard_sync == num_osc_modes - 1);
-
-// ---------------------------------------------------------------------------
-// Bounded static staging
-// ---------------------------------------------------------------------------
-
-namespace {
-// Document staging bound: the largest JSON document the codec accepts.  The
-// library's payload bound (library_payload_max) matches this by design.
-constexpr uint32_t bank_json_text_size = 1024 * 1024;
-// One token index per parser token; the decoder pins the vendored parser's
-// 16-byte token size so the key-index scratch stays a fixed fraction of the pool.
-constexpr uint32_t json_token_count = 64 * 1024 / sizeof(jsmntok_t);
-} // namespace
-
-namespace {
-
-char      json_text[bank_json_text_size];
-jsmntok_t json_tokens[json_token_count];
-
-} // namespace
-
-static_assert(sizeof(jsmntok_t) == 16); // pins the token pool: 64 KiB / 16 = 4096 tokens
 
 // ---------------------------------------------------------------------------
 // Writer (compact JSON)
@@ -210,34 +152,240 @@ struct Out {
     }
 };
 
-void key_uint(Out& o, const char* name, uint32_t v)
+struct Walker {
+    const char*      doc;
+    uint32_t         len;
+    const jsmntok_t* toks;
+    uint32_t         num_toks;
+    bool             failed;
+};
+
+// A key's decoded stream: every literal byte sequence and every \u escape
+// yields its Unicode CODE POINT, so an escaped spelling of a name equals its
+// literal UTF-8 form, two escape spellings of one code point are equal
+// regardless of hex case, and any code point matches no other spelling of
+// itself.  The grammar pass already validated escape spelling and UTF-8
+// well-formedness, so the walk cannot fail.  Streams need no whole-key buffer:
+// uniqueness and dispatch hold at any key length.
+static bool escape_code_point(const char* src, uint32_t len, uint32_t& pos, int32_t& code);
+
+struct KeySymbols {
+    const char* src;
+    uint32_t    len;
+    uint32_t    pos;
+
+    // The next symbol: a decoded code point, or -1 at the end of the key.
+    int next()
+    {
+        if (pos >= len)
+            return -1;
+
+        const char c = src[pos++];
+
+        if (c != '\\')
+            return literal_code_point(static_cast<unsigned char>(c));
+
+        const char esc = src[pos++];
+
+        switch (esc) {
+            case '"':
+                return '"';
+            case '\\':
+                return '\\';
+            case '/':
+                return '/';
+            case 'b':
+                return '\b';
+            case 'f':
+                return '\f';
+            case 'n':
+                return '\n';
+            case 'r':
+                return '\r';
+            case 't':
+                return '\t';
+            case 'u': {
+                int32_t code;
+                if (! escape_code_point(src, len, pos, code))
+                    return -1; // unreachable: the grammar pass paired the surrogates
+                return code;
+            }
+            default:
+                return -1; // unreachable: the grammar pass validated escape spelling
+        }
+    }
+
+    // Literal UTF-8: the continuation bytes follow the lead; the grammar pass
+    // already rejected every malformed spelling, so the walk cannot fail.
+    int literal_code_point(unsigned char lead)
+    {
+        if (lead < 0x80)
+            return lead;
+
+        uint32_t need;
+        uint32_t cp = lead;
+        if (lead >= 0xC2 && lead <= 0xDF) {
+            need = 1;
+            cp &= 0x1F;
+        }
+        else if (lead >= 0xE0 && lead <= 0xEF) {
+            need = 2;
+            cp &= 0x0F;
+        }
+        else if (lead >= 0xF0 && lead <= 0xF4) {
+            need = 3;
+            cp &= 0x07;
+        }
+        else
+            return -1; // unreachable: the grammar pass rejected it
+
+        if (pos + need > len)
+            return -1;
+
+        for (uint32_t k = 0; k < need; k++) {
+            const unsigned char cc = static_cast<unsigned char>(src[pos++]);
+            cp                     = (cp << 6) | (cc & 0x3F);
+        }
+        return static_cast<int>(cp);
+    }
+};
+
+// Envelope fields appear both in envelope pool entries and inside parameter entries,
+// so the member handling is shared.  num_points and the points array imply each
+// other; given only one, the other is derived.
+struct EnvelopeFields {
+    uint32_t num_points        = 0;
+    uint32_t num_point_entries = 0;
+    bool     have_count        = false;
+    bool     have_points       = false;
+};
+
+// Staged decode result. Static like every other staging in this file: the
+// codec runs only on the GUI thread.
+struct InstrumentDocState {
+    Synth::Instrument         instr;
+    Synth::EnvelopeDescriptor envelopes[Synth::instrument_max_envelopes];
+    Synth::LFODescriptor      lfos[Synth::instrument_max_lfos];
+    bool                      routing_set[Synth::num_mod_targets];
+    uint32_t                  envelope_count;
+    uint32_t                  lfo_count;
+};
+
+namespace {
+
+// ---------------------------------------------------------------------------
+// Shared enum spelling: one name per value, used by both encoder and decoder
+// ---------------------------------------------------------------------------
+
+constexpr uint32_t    num_waves             = 5;
+constexpr const char* wave_names[num_waves] = { "none", "sine", "sawtooth", "pulse", "noise" };
+
+constexpr uint32_t    num_osc_modes                 = 3;
+constexpr const char* osc_mode_names[num_osc_modes] = { "blend", "fm", "sync" };
+
+constexpr uint32_t    num_source_ops                  = 2;
+constexpr const char* source_op_names[num_source_ops] = { "add", "multiply" };
+
+constexpr uint32_t    num_mod_sources                   = 7;
+constexpr const char* mod_source_names[num_mod_sources] = {
+    "none", "pitch_bend", "mod_wheel", "channel_pressure", "velocity", "aftertouch", "pressure_combine"
+};
+
+constexpr const char* effect_type_names[Synth::num_effect_types] = { "none",   "distortion", "delay", "chorus",
+                                                                     "reverb", "compressor", "fir" };
+
+constexpr uint32_t    num_param_kinds                   = 4;
+constexpr const char* param_kind_names[num_param_kinds] = { "external", "envelope", "lfo", "plain" };
+
+constexpr const char* mod_target_names[Synth::num_mod_targets] = { "volume",   "pitch",          "panning",
+                                                                   "duty_a",   "duty_b",         "osc_mix",
+                                                                   "fm_index", "lowpass_cutoff", "highpass_cutoff" };
+
+static_assert(static_cast<uint32_t>(Synth::WaveType::noise_wave) == num_waves - 1);
+static_assert(static_cast<uint32_t>(Synth::ModSource::pressure_combine) == num_mod_sources - 1);
+static_assert(static_cast<uint32_t>(Synth::SourceOp::multiply) == num_source_ops - 1);
+static_assert(static_cast<uint32_t>(Synth::EffectType::fir) == Synth::num_effect_types - 1);
+static_assert(static_cast<uint32_t>(Synth::ParamKind::plain) == num_param_kinds - 1);
+static_assert(Synth::osc_mode_hard_sync == num_osc_modes - 1);
+
+// ---------------------------------------------------------------------------
+// Bounded static staging
+// ---------------------------------------------------------------------------
+
+// Document staging bound: the largest JSON document the codec accepts.  The
+// library's payload bound (library_payload_max) matches this by design.
+constexpr uint32_t bank_json_text_size = 1024 * 1024;
+// One token index per parser token; the decoder pins the vendored parser's
+// 16-byte token size so the key-index scratch stays a fixed fraction of the pool.
+constexpr uint32_t json_token_count = 8192;
+char               json_text[bank_json_text_size];
+jsmntok_t          json_tokens[json_token_count];
+
+// Token storage uses the parser's fixed four-int representation.
+static_assert(sizeof(jsmntok_t) == 16);
+
+// ---------------------------------------------------------------------------
+// Decoder
+// ---------------------------------------------------------------------------
+
+constexpr uint32_t invalid_index = 0xFFFFFFFFu;
+
+// Post-order key-uniqueness scratch: by the time an object checks its own keys,
+// every nested object finished checking (theirs ran during the recursive value
+// walks below), so one shared array serves all of them.
+uint32_t object_keys[json_token_count];
+
+// Resident parser storage is counted by the owner in sculptor_instr_edit.cpp.
+static_assert(sizeof(json_text) + sizeof(json_tokens) + sizeof(object_keys) == 1212416);
+
+// ---------------------------------------------------------------------------
+
+// Shared staging for the transactional decode: the GUI thread runs one decode at a
+// time, so one static scratch serves every caller (decode is not reentrant).
+Synth::InstrumentEditorBank decode_scratch;
+
+// ---------------------------------------------------------------------------
+// Clipboard instrument documents: friendly-unit JSON for one instrument
+// (doc/synth_instrument_schema.json). Decoding quantizes to the bank's
+// resolution and the encoding emits those quantized values, so a document
+// the editor copies out always pastes back.
+// ---------------------------------------------------------------------------
+
+constexpr const char instrument_format_tag[] = "synth-instrument-v1";
+
+InstrumentDocState           instrument_doc;
+Synth::InstrumentGraphLayout instrument_layout_staging[Synth::instrument_graph_layout_capacity];
+Synth::GraphNodeLayout       instrument_mapped_staging[Synth::instrument_graph_layout_capacity];
+} // namespace
+
+static void key_uint(Out& o, const char* name, uint32_t v)
 {
     o.key(name);
     o.uint_value(v);
 }
 
 // Fields whose default is zero are omitted; the decoder fills that default.
-void key_uint_nonzero(Out& o, const char* name, uint32_t v)
+static void key_uint_nonzero(Out& o, const char* name, uint32_t v)
 {
     if (v == 0)
         return;
     key_uint(o, name, v);
 }
 
-void key_float(Out& o, const char* name, float v)
+static void key_float(Out& o, const char* name, float v)
 {
     o.key(name);
     o.float_value(v);
 }
 
-void key_float_nonzero(Out& o, const char* name, float v)
+static void key_float_nonzero(Out& o, const char* name, float v)
 {
     if (v == 0.0f)
         return; // the canonical form keeps no negative zero; decode yields positive zero
     key_float(o, name, v);
 }
 
-void key_enum(Out& o, const char* name, const char* const* names, uint32_t num_names, uint32_t v)
+static void key_enum(Out& o, const char* name, const char* const* names, uint32_t num_names, uint32_t v)
 {
     if (v == 0)
         return; // the zero value of every encoded enum is its default
@@ -251,25 +399,25 @@ void key_enum(Out& o, const char* name, const char* const* names, uint32_t num_n
     o.ch('"');
 }
 
-void key_bool(Out& o, const char* name, bool v)
+static void key_bool(Out& o, const char* name, bool v)
 {
     o.key(name);
     o.bool_value(v);
 }
 
-bool gen_is_default(const Synth::LayerGen& gen)
+static bool gen_is_default(const Synth::LayerGen& gen)
 {
     return gen.envelope_desc_id == 0 && gen.lfo_desc_id == 0 && gen.lfo_op == Synth::SourceOp::add &&
            gen.lfo_depth == 0.0f && gen.lfo_depth_source == Synth::ModSource::none &&
            gen.lfo_rate_source == Synth::ModSource::none && gen.lfo_rate_scale_ms == 0.0f;
 }
 
-bool routing_is_default(const Synth::InputRouting& routing)
+static bool routing_is_default(const Synth::InputRouting& routing)
 {
     return routing.base_value == 0.0f && routing.num_inputs == 0;
 }
 
-void enc_mod_input(Out& o, const Synth::ModInput& in)
+static void enc_mod_input(Out& o, const Synth::ModInput& in)
 {
     o.ch('{');
     key_enum(o, "source", mod_source_names, num_mod_sources, static_cast<uint32_t>(in.source));
@@ -278,7 +426,7 @@ void enc_mod_input(Out& o, const Synth::ModInput& in)
     o.ch('}');
 }
 
-void enc_gen(Out& o, const Synth::LayerGen& gen)
+static void enc_gen(Out& o, const Synth::LayerGen& gen)
 {
     o.ch('{');
     key_uint_nonzero(o, "envelope_desc_id", gen.envelope_desc_id);
@@ -291,7 +439,7 @@ void enc_gen(Out& o, const Synth::LayerGen& gen)
     o.ch('}');
 }
 
-void enc_routing(Out& o, const Synth::InputRouting& routing)
+static void enc_routing(Out& o, const Synth::InputRouting& routing)
 {
     if (routing.num_inputs > Synth::max_mod_inputs) {
         o.overflow = true;
@@ -312,7 +460,7 @@ void enc_routing(Out& o, const Synth::InputRouting& routing)
     o.ch('}');
 }
 
-void enc_oscillator(Out& o, const Synth::Oscillator& osc)
+static void enc_oscillator(Out& o, const Synth::Oscillator& osc)
 {
     o.ch('{');
     key_enum(o, "wave_a", wave_names, num_waves, static_cast<uint32_t>(osc.osc_type[0]));
@@ -336,7 +484,7 @@ void enc_oscillator(Out& o, const Synth::Oscillator& osc)
     o.ch('}');
 }
 
-void enc_instrument(Out& o, const Synth::Instrument& instr)
+static void enc_instrument(Out& o, const Synth::Instrument& instr)
 {
     if (instr.layer_count > Synth::max_layers) {
         o.overflow = true;
@@ -372,7 +520,7 @@ void enc_instrument(Out& o, const Synth::Instrument& instr)
     o.ch('}');
 }
 
-void enc_envelope_members(Out& o, const Synth::EnvelopeDescriptor& env)
+static void enc_envelope_members(Out& o, const Synth::EnvelopeDescriptor& env)
 {
     if (env.num_points > Synth::max_envelope_points) {
         o.overflow = true; // unchecked standalone parameter contents
@@ -398,14 +546,14 @@ void enc_envelope_members(Out& o, const Synth::EnvelopeDescriptor& env)
     o.ch(']');
 }
 
-void enc_envelope(Out& o, const Synth::EnvelopeDescriptor& env)
+static void enc_envelope(Out& o, const Synth::EnvelopeDescriptor& env)
 {
     o.ch('{');
     enc_envelope_members(o, env);
     o.ch('}');
 }
 
-void enc_lfo(Out& o, const Synth::LFODescriptor& lfo)
+static void enc_lfo(Out& o, const Synth::LFODescriptor& lfo)
 {
     o.ch('{');
     key_enum(o, "wave", wave_names, num_waves, static_cast<uint32_t>(lfo.wave));
@@ -416,7 +564,7 @@ void enc_lfo(Out& o, const Synth::LFODescriptor& lfo)
     o.ch('}');
 }
 
-void enc_param(Out& o, const Synth::ParamDescriptor& param)
+static void enc_param(Out& o, const Synth::ParamDescriptor& param)
 {
     const uint32_t kind = static_cast<uint32_t>(param.kind);
     if (kind >= num_param_kinds) {
@@ -470,7 +618,7 @@ void enc_param(Out& o, const Synth::ParamDescriptor& param)
     o.ch('}');
 }
 
-void enc_binding(Out& o, const Synth::EffectParamBinding& binding)
+static void enc_binding(Out& o, const Synth::EffectParamBinding& binding)
 {
     if (binding.num_inputs > Synth::max_mod_inputs) {
         o.overflow = true;
@@ -497,7 +645,7 @@ void enc_binding(Out& o, const Synth::EffectParamBinding& binding)
     o.ch('}');
 }
 
-void enc_effect(Out& o, const Synth::EffectSlotBinding& slot)
+static void enc_effect(Out& o, const Synth::EffectSlotBinding& slot)
 {
     const uint32_t type = static_cast<uint32_t>(slot.type);
     if (type >= Synth::num_effect_types) {
@@ -522,7 +670,7 @@ void enc_effect(Out& o, const Synth::EffectSlotBinding& slot)
     o.ch('}');
 }
 
-void enc_chain(Out& o, const Synth::EffectChainBinding& chain)
+static void enc_chain(Out& o, const Synth::EffectChainBinding& chain)
 {
     if (chain.num_effects > Synth::max_chain_effects) {
         o.overflow = true;
@@ -540,7 +688,7 @@ void enc_chain(Out& o, const Synth::EffectChainBinding& chain)
     o.ch('}');
 }
 
-void enc_channel(Out& o, const Synth::InstrumentEditorBank& bank, uint32_t channel)
+static void enc_channel(Out& o, const Synth::InstrumentEditorBank& bank, uint32_t channel)
 {
     o.ch('{');
     key_bool(o, "enabled", bank.bank.channel_enabled[channel] != 0);
@@ -562,8 +710,6 @@ void enc_channel(Out& o, const Synth::InstrumentEditorBank& bank, uint32_t chann
     enc_chain(o, bank.bank.channel_chains[channel]);
     o.ch('}');
 }
-
-} // namespace
 
 uint32_t Synth::encode_editor_bank_json(const InstrumentEditorBank* bank, char* dest, uint32_t dest_size)
 {
@@ -697,23 +843,7 @@ uint32_t Synth::encode_editor_bank_json(const InstrumentEditorBank* bank, char* 
     return o.pos;
 }
 
-// ---------------------------------------------------------------------------
-// Decoder
-// ---------------------------------------------------------------------------
-
-namespace {
-
-constexpr uint32_t invalid_index = 0xFFFFFFFFu;
-
-struct Walker {
-    const char*      doc;
-    uint32_t         len;
-    const jsmntok_t* toks;
-    uint32_t         num_toks;
-    bool             failed;
-};
-
-bool tok_text_eq(const Walker& w, uint32_t i, const char* literal)
+static bool tok_text_eq(const Walker& w, uint32_t i, const char* literal)
 {
     const jsmntok_t& t   = w.toks[i];
     const uint32_t   len = static_cast<uint32_t>(t.end - t.start);
@@ -724,7 +854,7 @@ bool tok_text_eq(const Walker& w, uint32_t i, const char* literal)
 
 // Index one past the token's complete subtree, or invalid_index when the subtree is
 // structurally inconsistent (odd object size, non-string key, walk off the pool).
-uint32_t skip_value(const Walker& w, uint32_t i)
+static uint32_t skip_value(const Walker& w, uint32_t i)
 {
     if (i >= w.num_toks)
         return invalid_index;
@@ -765,7 +895,7 @@ uint32_t skip_value(const Walker& w, uint32_t i)
 
 // -?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?  - the whole JSON number grammar,
 // so leading zeros, lone signs and truncated exponents are rejected.
-bool number_grammar_ok(const char* s, uint32_t len)
+static bool number_grammar_ok(const char* s, uint32_t len)
 {
     uint32_t i = 0;
 
@@ -805,14 +935,14 @@ bool number_grammar_ok(const char* s, uint32_t len)
     return i == len;
 }
 
-bool is_ws(char c)
+static bool is_ws(char c)
 {
     return c == ' ' || c == '\t' || c == '\r' || c == '\n';
 }
 
 // Grammar of every primitive token, including the subtrees the schema below never
 // visits: malformed content anywhere in the document is rejected.
-bool primitive_is_valid(const Walker& w, uint32_t i)
+static bool primitive_is_valid(const Walker& w, uint32_t i)
 {
     const jsmntok_t&  t   = w.toks[i];
     const char* const s   = w.doc + t.start;
@@ -838,7 +968,7 @@ bool primitive_is_valid(const Walker& w, uint32_t i)
 // including inside unknown subtrees the schema decoder never visits.
 
 // Four hexadecimal digits at src[pos..pos+4): the value, with pos advanced.
-bool read_hex4(const char* src, uint32_t len, uint32_t& pos, uint32_t& value)
+static bool read_hex4(const char* src, uint32_t len, uint32_t& pos, uint32_t& value)
 {
     if (pos + 4 > len)
         return false;
@@ -865,7 +995,7 @@ bool read_hex4(const char* src, uint32_t len, uint32_t& pos, uint32_t& value)
 // \u escapes must appear in valid surrogate pairs, so every key has exactly
 // one decoded spelling and neither duplicate detection nor dispatch can be
 // bypassed by re-spelling.
-bool string_content_ok(const char* s, uint32_t len)
+static bool string_content_ok(const char* s, uint32_t len)
 {
     for (uint32_t i = 0; i < len;) {
         const unsigned char c = static_cast<unsigned char>(s[i]);
@@ -948,7 +1078,7 @@ bool string_content_ok(const char* s, uint32_t len)
 
 // One code point as UTF-8 (1..4 bytes); every code point the grammar accepts is
 // encodable.
-void encode_utf8(uint32_t cp, char dst[4], uint32_t& out_len)
+static void encode_utf8(uint32_t cp, char dst[4], uint32_t& out_len)
 {
     if (cp < 0x80) {
         dst[0]  = static_cast<char>(cp);
@@ -976,20 +1106,20 @@ void encode_utf8(uint32_t cp, char dst[4], uint32_t& out_len)
 
 // Where the gap to the next sibling starts: jsmn ends strings on the closing quote
 // and primitives on their terminator, but composites one past the closer.
-uint32_t token_gap_start(const jsmntok_t& t)
+static uint32_t token_gap_start(const jsmntok_t& t)
 {
     return static_cast<uint32_t>(t.end) + (t.type == JSMN_STRING ? 1 : 0);
 }
 
 // Where the token's raw source begins: jsmn starts string tokens one past their
 // opening quote; separator gaps reach up to that quote.
-uint32_t token_raw_start(const jsmntok_t& t)
+static uint32_t token_raw_start(const jsmntok_t& t)
 {
     return static_cast<uint32_t>(t.start) - (t.type == JSMN_STRING ? 1 : 0);
 }
 
 // The span [from, to) must be whitespace only.
-bool gap_is_ws(const char* doc, uint32_t from, uint32_t to)
+static bool gap_is_ws(const char* doc, uint32_t from, uint32_t to)
 {
     for (uint32_t i = from; i < to; i++)
         if (! is_ws(doc[i]))
@@ -999,7 +1129,7 @@ bool gap_is_ws(const char* doc, uint32_t from, uint32_t to)
 
 // The span [from, to) must be exactly one separator character surrounded by
 // whitespace.
-bool gap_is_sep(const char* doc, uint32_t from, uint32_t to, char sep)
+static bool gap_is_sep(const char* doc, uint32_t from, uint32_t to, char sep)
 {
     uint32_t i = from;
     while (i < to && is_ws(doc[i]))
@@ -1015,7 +1145,7 @@ bool gap_is_sep(const char* doc, uint32_t from, uint32_t to, char sep)
 // Decodes one \uXXXX escape (with surrogate pairs) into its code point.  The
 // document-wide grammar pass validated the four hex digits and paired lone
 // surrogates, so only the high/low pairing itself can fail here.
-bool escape_code_point(const char* src, uint32_t len, uint32_t& pos, int32_t& code)
+static bool escape_code_point(const char* src, uint32_t len, uint32_t& pos, int32_t& code)
 {
     uint32_t high;
     if (! read_hex4(src, len, pos, high))
@@ -1043,7 +1173,7 @@ bool escape_code_point(const char* src, uint32_t len, uint32_t& pos, int32_t& co
 // decode to the same UTF-8 bytes their literal spellings produce, so both
 // spellings of a name are interchangeable and the re-encoded document stays
 // valid JSON.
-bool unescape_string(const char* src, uint32_t len, char* dst, uint32_t dst_size)
+static bool unescape_string(const char* src, uint32_t len, char* dst, uint32_t dst_size)
 {
     if (dst_size == 0)
         return false;
@@ -1148,95 +1278,7 @@ bool unescape_string(const char* src, uint32_t len, char* dst, uint32_t dst_size
     return true;
 }
 
-// A key's decoded stream: every literal byte sequence and every \u escape
-// yields its Unicode CODE POINT, so an escaped spelling of a name equals its
-// literal UTF-8 form, two escape spellings of one code point are equal
-// regardless of hex case, and any code point matches no other spelling of
-// itself.  The grammar pass already validated escape spelling and UTF-8
-// well-formedness, so the walk cannot fail.  Streams need no whole-key buffer:
-// uniqueness and dispatch hold at any key length.
-struct KeySymbols {
-    const char* src;
-    uint32_t    len;
-    uint32_t    pos;
-
-    // The next symbol: a decoded code point, or -1 at the end of the key.
-    int next()
-    {
-        if (pos >= len)
-            return -1;
-
-        const char c = src[pos++];
-
-        if (c != '\\')
-            return literal_code_point(static_cast<unsigned char>(c));
-
-        const char esc = src[pos++];
-
-        switch (esc) {
-            case '"':
-                return '"';
-            case '\\':
-                return '\\';
-            case '/':
-                return '/';
-            case 'b':
-                return '\b';
-            case 'f':
-                return '\f';
-            case 'n':
-                return '\n';
-            case 'r':
-                return '\r';
-            case 't':
-                return '\t';
-            case 'u': {
-                int32_t code;
-                if (! escape_code_point(src, len, pos, code))
-                    return -1; // unreachable: the grammar pass paired the surrogates
-                return code;
-            }
-            default:
-                return -1; // unreachable: the grammar pass validated escape spelling
-        }
-    }
-
-    // Literal UTF-8: the continuation bytes follow the lead; the grammar pass
-    // already rejected every malformed spelling, so the walk cannot fail.
-    int literal_code_point(unsigned char lead)
-    {
-        if (lead < 0x80)
-            return lead;
-
-        uint32_t need;
-        uint32_t cp = lead;
-        if (lead >= 0xC2 && lead <= 0xDF) {
-            need = 1;
-            cp &= 0x1F;
-        }
-        else if (lead >= 0xE0 && lead <= 0xEF) {
-            need = 2;
-            cp &= 0x0F;
-        }
-        else if (lead >= 0xF0 && lead <= 0xF4) {
-            need = 3;
-            cp &= 0x07;
-        }
-        else
-            return -1; // unreachable: the grammar pass rejected it
-
-        if (pos + need > len)
-            return -1;
-
-        for (uint32_t k = 0; k < need; k++) {
-            const unsigned char cc = static_cast<unsigned char>(src[pos++]);
-            cp                     = (cp << 6) | (cc & 0x3F);
-        }
-        return static_cast<int>(cp);
-    }
-};
-
-KeySymbols key_symbols(const Walker& w, uint32_t key_idx)
+static KeySymbols key_symbols(const Walker& w, uint32_t key_idx)
 {
     const jsmntok_t& t = w.toks[key_idx];
     return { w.doc + t.start, static_cast<uint32_t>(t.end - t.start), 0 };
@@ -1244,7 +1286,7 @@ KeySymbols key_symbols(const Walker& w, uint32_t key_idx)
 
 // Dispatch comparison: schema strings compare by DECODED text, so escaped
 // spellings of a name dispatch to that name - keys and enum values alike.
-bool key_eq(const Walker& w, uint32_t key_idx, const char* literal)
+static bool key_eq(const Walker& w, uint32_t key_idx, const char* literal)
 {
     if (w.toks[key_idx].type != JSMN_STRING)
         return false;
@@ -1262,7 +1304,7 @@ bool key_eq(const Walker& w, uint32_t key_idx, const char* literal)
 
 // Duplicate detection compares DECODED key streams, so spellings of one name
 // count as the same key at any length - overflow can never weaken the check.
-bool keys_equal(const Walker& w, uint32_t a, uint32_t b)
+static bool keys_equal(const Walker& w, uint32_t a, uint32_t b)
 {
     KeySymbols sa = key_symbols(w, a);
     KeySymbols sb = key_symbols(w, b);
@@ -1277,20 +1319,11 @@ bool keys_equal(const Walker& w, uint32_t a, uint32_t b)
     }
 }
 
-// Post-order key-uniqueness scratch: by the time an object checks its own keys,
-// every nested object finished checking (theirs ran during the recursive value
-// walks below), so one shared array serves all of them.
-uint32_t object_keys[json_token_count];
-
-// The staging footprint stays inside the budget the editor's state assert
-// reserves for it (see sculptor_instr_bank.cpp).
-static_assert(sizeof(json_text) + sizeof(json_tokens) + sizeof(object_keys) == 1024 * 1024 + 64 * 1024 + 16 * 1024);
-
 // Validates one token's complete subtree: primitive and string grammar, child
 // containment, separators between children, the closer after the last child, and
 // key uniqueness in objects.  Returns the index one past the subtree, or
 // invalid_index on any violation.
-uint32_t check_value(Walker& w, uint32_t i)
+static uint32_t check_value(Walker& w, uint32_t i)
 {
     if (i >= w.num_toks)
         return invalid_index;
@@ -1404,7 +1437,7 @@ uint32_t check_value(Walker& w, uint32_t i)
     }
 }
 
-void unknown_field(Walker& w, uint32_t key_idx)
+static void unknown_field(Walker& w, uint32_t key_idx)
 {
     // The logged name is the key's decoded prefix, encoded as UTF-8 as far as the
     // bounded display buffer holds it.  A code point that no longer fits ends the
@@ -1432,7 +1465,7 @@ void unknown_field(Walker& w, uint32_t key_idx)
     d_printf("Ignored unknown bank field: %s\n", display);
 }
 
-void want_uint(Walker& w, uint32_t i, uint32_t max_value, uint32_t* out)
+static void want_uint(Walker& w, uint32_t i, uint32_t max_value, uint32_t* out)
 {
     const jsmntok_t& t = w.toks[i];
     if (t.type != JSMN_PRIMITIVE) {
@@ -1460,7 +1493,7 @@ void want_uint(Walker& w, uint32_t i, uint32_t max_value, uint32_t* out)
     *out = value;
 }
 
-void want_float(Walker& w, uint32_t i, float* out)
+static void want_float(Walker& w, uint32_t i, float* out)
 {
     const jsmntok_t& t = w.toks[i];
     if (t.type != JSMN_PRIMITIVE) {
@@ -1490,7 +1523,7 @@ void want_float(Walker& w, uint32_t i, float* out)
     *out = converted;
 }
 
-void want_bool(Walker& w, uint32_t i, bool* out)
+static void want_bool(Walker& w, uint32_t i, bool* out)
 {
     if (w.toks[i].type == JSMN_PRIMITIVE && tok_text_eq(w, i, "true"))
         *out = true;
@@ -1504,7 +1537,7 @@ void want_bool(Walker& w, uint32_t i, bool* out)
 // over-long text and content that cannot appear in bank text (control characters,
 // a \u escape for zero - which would truncate the name - or malformed
 // UTF-8).  Multi-byte UTF-8 and non-ASCII escapes are accepted.
-void want_text(Walker& w, uint32_t i, char* out, uint32_t out_size)
+static void want_text(Walker& w, uint32_t i, char* out, uint32_t out_size)
 {
     const jsmntok_t& t = w.toks[i];
     if (t.type != JSMN_STRING || out_size == 0) {
@@ -1516,7 +1549,7 @@ void want_text(Walker& w, uint32_t i, char* out, uint32_t out_size)
         w.failed = true;
 }
 
-void want_enum(Walker& w, uint32_t i, const char* const* names, uint32_t num_names, uint32_t* out)
+static void want_enum(Walker& w, uint32_t i, const char* const* names, uint32_t num_names, uint32_t* out)
 {
     if (w.toks[i].type != JSMN_STRING) {
         w.failed = true;
@@ -1534,7 +1567,7 @@ void want_enum(Walker& w, uint32_t i, const char* const* names, uint32_t num_nam
 // Walks one object token, invoking handle(key_index, value_index) for every pair.
 // The grammar pass guarantees well-formed, duplicate-free pairs; handle dispatches
 // on keys.
-template <typename F> void walk_object(Walker& w, uint32_t obj, F handle)
+template <typename F> static void walk_object(Walker& w, uint32_t obj, F handle)
 {
     const jsmntok_t& t = w.toks[obj];
     if (t.type != JSMN_OBJECT) {
@@ -1564,7 +1597,7 @@ template <typename F> void walk_object(Walker& w, uint32_t obj, F handle)
 // Walks one array token, invoking handle(element_index, element_position) for every
 // element; more elements than max_len is malformed input, fewer is fine (the missing
 // tail keeps the default fill).
-template <typename F> void walk_array(Walker& w, uint32_t arr, uint32_t max_len, F handle)
+template <typename F> static void walk_array(Walker& w, uint32_t arr, uint32_t max_len, F handle)
 {
     const jsmntok_t& t = w.toks[arr];
     if (t.type != JSMN_ARRAY || static_cast<uint32_t>(t.size) > max_len) {
@@ -1586,17 +1619,21 @@ template <typename F> void walk_array(Walker& w, uint32_t arr, uint32_t max_len,
     }
 }
 
-} // namespace
-
-namespace {
-
-void decode_mod_input(Walker& w, uint32_t obj, Synth::ModInput& in)
+// Field walk shared by the bank and document decoders; unknown_field carries
+// each format's policy (the bank skips, the document refuses) and source_set
+// tells strict callers whether "source" was present.
+static void decode_mod_input_fields(Walker&          w,
+                                    uint32_t         obj,
+                                    Synth::ModInput& in,
+                                    bool*            source_set,
+                                    void (*unknown)(Walker&, uint32_t))
 {
     walk_object(w, obj, [&](uint32_t key_idx, uint32_t val_idx) {
         uint32_t value = 0;
         if (key_eq(w, key_idx, "source")) {
             want_enum(w, val_idx, mod_source_names, num_mod_sources, &value);
-            in.source = static_cast<Synth::ModSource>(value);
+            in.source   = static_cast<Synth::ModSource>(value);
+            *source_set = true;
         }
         else if (key_eq(w, key_idx, "op")) {
             want_enum(w, val_idx, source_op_names, num_source_ops, &value);
@@ -1605,11 +1642,17 @@ void decode_mod_input(Walker& w, uint32_t obj, Synth::ModInput& in)
         else if (key_eq(w, key_idx, "scale"))
             want_float(w, val_idx, &in.scale);
         else
-            unknown_field(w, key_idx);
+            unknown(w, key_idx);
     });
 }
 
-void decode_gen(Walker& w, uint32_t obj, Synth::LayerGen& gen)
+static void decode_mod_input(Walker& w, uint32_t obj, Synth::ModInput& in)
+{
+    bool source_set; // unused: the bank format makes "source" optional
+    decode_mod_input_fields(w, obj, in, &source_set, unknown_field);
+}
+
+static void decode_gen(Walker& w, uint32_t obj, Synth::LayerGen& gen)
 {
     walk_object(w, obj, [&](uint32_t key_idx, uint32_t val_idx) {
         uint32_t value = 0;
@@ -1642,7 +1685,7 @@ void decode_gen(Walker& w, uint32_t obj, Synth::LayerGen& gen)
     });
 }
 
-void decode_routing(Walker& w, uint32_t obj, Synth::InputRouting& routing)
+static void decode_routing(Walker& w, uint32_t obj, Synth::InputRouting& routing)
 {
     walk_object(w, obj, [&](uint32_t key_idx, uint32_t val_idx) {
         if (key_eq(w, key_idx, "base_value"))
@@ -1657,7 +1700,7 @@ void decode_routing(Walker& w, uint32_t obj, Synth::InputRouting& routing)
     });
 }
 
-void decode_oscillator(Walker& w, uint32_t obj, Synth::Oscillator& osc)
+static void decode_oscillator(Walker& w, uint32_t obj, Synth::Oscillator& osc)
 {
     walk_object(w, obj, [&](uint32_t key_idx, uint32_t val_idx) {
         uint32_t value = 0;
@@ -1692,7 +1735,7 @@ void decode_oscillator(Walker& w, uint32_t obj, Synth::Oscillator& osc)
     });
 }
 
-void decode_instrument(Walker& w, uint32_t obj, Synth::Instrument& instr)
+static void decode_instrument(Walker& w, uint32_t obj, Synth::Instrument& instr)
 {
     uint32_t layer_count = 0;
     uint32_t num_layers  = 0;
@@ -1741,21 +1784,11 @@ void decode_instrument(Walker& w, uint32_t obj, Synth::Instrument& instr)
     instr.layer_count = have_count ? layer_count : (have_layers ? num_layers : 1);
 }
 
-// Envelope fields appear both in envelope pool entries and inside parameter entries,
-// so the member handling is shared.  num_points and the points array imply each
-// other; given only one, the other is derived.
-struct EnvelopeFields {
-    uint32_t num_points        = 0;
-    uint32_t num_point_entries = 0;
-    bool     have_count        = false;
-    bool     have_points       = false;
-};
-
-bool envelope_member(Walker&                    w,
-                     uint32_t                   key_idx,
-                     uint32_t                   val_idx,
-                     Synth::EnvelopeDescriptor& env,
-                     EnvelopeFields&            fields)
+static bool envelope_member(Walker&                    w,
+                            uint32_t                   key_idx,
+                            uint32_t                   val_idx,
+                            Synth::EnvelopeDescriptor& env,
+                            EnvelopeFields&            fields)
 {
     uint32_t value = 0;
 
@@ -1807,7 +1840,7 @@ bool envelope_member(Walker&                    w,
     return false;
 }
 
-void envelope_finish(Walker& w, Synth::EnvelopeDescriptor& env, const EnvelopeFields& fields)
+static void envelope_finish(Walker& w, Synth::EnvelopeDescriptor& env, const EnvelopeFields& fields)
 {
     if (w.failed)
         return;
@@ -1828,7 +1861,7 @@ void envelope_finish(Walker& w, Synth::EnvelopeDescriptor& env, const EnvelopeFi
     }
 }
 
-void decode_envelope(Walker& w, uint32_t obj, Synth::EnvelopeDescriptor& env)
+static void decode_envelope(Walker& w, uint32_t obj, Synth::EnvelopeDescriptor& env)
 {
     EnvelopeFields fields;
     walk_object(w, obj, [&](uint32_t key_idx, uint32_t val_idx) {
@@ -1838,7 +1871,7 @@ void decode_envelope(Walker& w, uint32_t obj, Synth::EnvelopeDescriptor& env)
     envelope_finish(w, env, fields);
 }
 
-void decode_lfo(Walker& w, uint32_t obj, Synth::LFODescriptor& lfo)
+static void decode_lfo(Walker& w, uint32_t obj, Synth::LFODescriptor& lfo)
 {
     walk_object(w, obj, [&](uint32_t key_idx, uint32_t val_idx) {
         uint32_t value = 0;
@@ -1863,7 +1896,7 @@ void decode_lfo(Walker& w, uint32_t obj, Synth::LFODescriptor& lfo)
     });
 }
 
-void decode_param(Walker& w, uint32_t obj, Synth::ParamDescriptor& param)
+static void decode_param(Walker& w, uint32_t obj, Synth::ParamDescriptor& param)
 {
     // "kind" selects the meaning of the remaining fields and may appear anywhere in
     // the object, so the entry is walked twice: once for the kind, once for the rest.
@@ -1958,7 +1991,7 @@ void decode_param(Walker& w, uint32_t obj, Synth::ParamDescriptor& param)
         envelope_finish(w, param.envelope, fields);
 }
 
-void decode_binding(Walker& w, uint32_t obj, Synth::EffectParamBinding& binding)
+static void decode_binding(Walker& w, uint32_t obj, Synth::EffectParamBinding& binding)
 {
     walk_object(w, obj, [&](uint32_t key_idx, uint32_t val_idx) {
         uint32_t value = 0;
@@ -1994,7 +2027,7 @@ void decode_binding(Walker& w, uint32_t obj, Synth::EffectParamBinding& binding)
     });
 }
 
-void decode_effect(Walker& w, uint32_t obj, Synth::EffectSlotBinding& slot)
+static void decode_effect(Walker& w, uint32_t obj, Synth::EffectSlotBinding& slot)
 {
     uint32_t num_params  = 0;
     bool     have_params = false;
@@ -2029,7 +2062,7 @@ void decode_effect(Walker& w, uint32_t obj, Synth::EffectSlotBinding& slot)
         w.failed = true;
 }
 
-void decode_chain(Walker& w, uint32_t obj, Synth::EffectChainBinding& chain)
+static void decode_chain(Walker& w, uint32_t obj, Synth::EffectChainBinding& chain)
 {
     walk_object(w, obj, [&](uint32_t key_idx, uint32_t val_idx) {
         if (key_eq(w, key_idx, "effects"))
@@ -2042,7 +2075,7 @@ void decode_chain(Walker& w, uint32_t obj, Synth::EffectChainBinding& chain)
     });
 }
 
-void decode_zone(Walker& w, uint32_t obj, Synth::Zone& zone)
+static void decode_zone(Walker& w, uint32_t obj, Synth::Zone& zone)
 {
     walk_object(w, obj, [&](uint32_t key_idx, uint32_t val_idx) {
         uint32_t value = 0;
@@ -2059,7 +2092,7 @@ void decode_zone(Walker& w, uint32_t obj, Synth::Zone& zone)
     });
 }
 
-void decode_channel(Walker& w, uint32_t obj, Synth::InstrumentEditorBank* out, uint32_t channel)
+static void decode_channel(Walker& w, uint32_t obj, Synth::InstrumentEditorBank* out, uint32_t channel)
 {
     walk_object(w, obj, [&](uint32_t key_idx, uint32_t val_idx) {
         if (key_eq(w, key_idx, "enabled")) {
@@ -2078,7 +2111,7 @@ void decode_channel(Walker& w, uint32_t obj, Synth::InstrumentEditorBank* out, u
     });
 }
 
-void decode_names(Walker& w, uint32_t arr, uint32_t cap, char (*names)[Synth::max_name_len])
+static void decode_names(Walker& w, uint32_t arr, uint32_t cap, char (*names)[Synth::max_name_len])
 {
     walk_array(w, arr, cap, [&](uint32_t elem, uint32_t pos) { want_text(w, elem, names[pos], Synth::max_name_len); });
 }
@@ -2088,7 +2121,7 @@ void decode_names(Walker& w, uint32_t arr, uint32_t cap, char (*names)[Synth::ma
 // dense prefix the bank invariants require.  Every allocation is checked - the
 // pool fills up when the document repeats pool arrays, and a full pool must reject
 // the document, never write past its entries.
-void decode_instruments(Walker& w, uint32_t arr, Synth::InstrumentEditorBank* out)
+static void decode_instruments(Walker& w, uint32_t arr, Synth::InstrumentEditorBank* out)
 {
     walk_array(w, arr, Synth::max_instruments, [&](uint32_t elem, uint32_t pos) {
         Synth::Instrument instr = {};
@@ -2104,7 +2137,7 @@ void decode_instruments(Walker& w, uint32_t arr, Synth::InstrumentEditorBank* ou
     });
 }
 
-void decode_envelopes(Walker& w, uint32_t arr, Synth::InstrumentEditorBank* out)
+static void decode_envelopes(Walker& w, uint32_t arr, Synth::InstrumentEditorBank* out)
 {
     walk_array(w, arr, Synth::max_envelopes, [&](uint32_t elem, uint32_t pos) {
         Synth::EnvelopeDescriptor env = {};
@@ -2120,7 +2153,7 @@ void decode_envelopes(Walker& w, uint32_t arr, Synth::InstrumentEditorBank* out)
     });
 }
 
-void decode_lfos(Walker& w, uint32_t arr, Synth::InstrumentEditorBank* out)
+static void decode_lfos(Walker& w, uint32_t arr, Synth::InstrumentEditorBank* out)
 {
     walk_array(w, arr, Synth::max_lfos, [&](uint32_t elem, uint32_t pos) {
         Synth::LFODescriptor lfo = {};
@@ -2136,7 +2169,7 @@ void decode_lfos(Walker& w, uint32_t arr, Synth::InstrumentEditorBank* out)
     });
 }
 
-void decode_parameters(Walker& w, uint32_t arr, Synth::InstrumentEditorBank* out)
+static void decode_parameters(Walker& w, uint32_t arr, Synth::InstrumentEditorBank* out)
 {
     walk_array(w, arr, Synth::max_parameters, [&](uint32_t elem, uint32_t pos) {
         Synth::ParamDescriptor param = {};
@@ -2155,7 +2188,7 @@ void decode_parameters(Walker& w, uint32_t arr, Synth::InstrumentEditorBank* out
 // One sparse layout record.  Field-level checks that do not depend on the
 // descriptor pools reject here; the descriptor-range and implied-node-count
 // checks run after the whole document decoded (decode order is free).
-void decode_editor_record(Walker& w, uint32_t obj, Synth::GraphNodeLayout* record)
+static void decode_editor_record(Walker& w, uint32_t obj, Synth::GraphNodeLayout* record)
 {
     walk_object(w, obj, [&](uint32_t key_idx, uint32_t val_idx) {
         if (key_eq(w, key_idx, "channel")) {
@@ -2262,7 +2295,7 @@ void decode_editor_record(Walker& w, uint32_t obj, Synth::GraphNodeLayout* recor
     }
 }
 
-void decode_editor_state(Walker& w, uint32_t val_idx, Synth::InstrumentEditorBank* out)
+static void decode_editor_state(Walker& w, uint32_t val_idx, Synth::InstrumentEditorBank* out)
 {
     walk_object(w, val_idx, [&](uint32_t key_idx, uint32_t inner_idx) {
         if (key_eq(w, key_idx, "layouts")) {
@@ -2311,7 +2344,7 @@ void decode_editor_state(Walker& w, uint32_t val_idx, Synth::InstrumentEditorBan
     });
 }
 
-void decode_bank(Walker& w, uint32_t obj, Synth::InstrumentEditorBank* out)
+static void decode_bank(Walker& w, uint32_t obj, Synth::InstrumentEditorBank* out)
 {
     walk_object(w, obj, [&](uint32_t key_idx, uint32_t val_idx) {
         if (key_eq(w, key_idx, "drum_track_channel")) {
@@ -2346,7 +2379,7 @@ void decode_bank(Walker& w, uint32_t obj, Synth::InstrumentEditorBank* out)
 
 // The bank every absent field defaults to: an empty, all-disabled bank with the
 // factory channel names.
-void fill_default_editor_bank(Synth::InstrumentEditorBank* bank)
+static void fill_default_editor_bank(Synth::InstrumentEditorBank* bank)
 {
     memset(bank, 0, sizeof(*bank));
     bank->bank.drum_track_channel = 9;
@@ -2354,22 +2387,18 @@ void fill_default_editor_bank(Synth::InstrumentEditorBank* bank)
         Synth::get_default_channel_name(c, bank->channel_names[c], Synth::max_name_len);
 }
 
-} // namespace
-
 // ---------------------------------------------------------------------------
 // Canonical form
 // ---------------------------------------------------------------------------
 
-namespace {
-
 // The canonical form only normalizes floats and zeroes unused bytes; every count it
 // walks was validated first (canonicalize requires a valid bank).
-float canonical_float(float v)
+static float canonical_float(float v)
 {
     return v == 0.0f && std::signbit(v) ? 0.0f : v; // no negative zero survives a decode
 }
 
-void canonicalize_name(char* name)
+static void canonicalize_name(char* name)
 {
     const void* const nul = memchr(name, 0, Synth::max_name_len);
     if (! nul) {
@@ -2380,12 +2409,12 @@ void canonicalize_name(char* name)
     memset(name + len + 1, 0, Synth::max_name_len - len - 1);
 }
 
-void canonicalize_mod_input(Synth::ModInput& in)
+static void canonicalize_mod_input(Synth::ModInput& in)
 {
     in.scale = canonical_float(in.scale);
 }
 
-void canonicalize_binding(Synth::EffectParamBinding& binding)
+static void canonicalize_binding(Synth::EffectParamBinding& binding)
 {
     binding.base_value     = canonical_float(binding.base_value);
     binding.lfo_depth      = canonical_float(binding.lfo_depth);
@@ -2398,7 +2427,7 @@ void canonicalize_binding(Synth::EffectParamBinding& binding)
                (Synth::max_mod_inputs - binding.num_inputs) * sizeof(binding.inputs[0]));
 }
 
-void canonicalize_effect(Synth::EffectSlotBinding& slot)
+static void canonicalize_effect(Synth::EffectSlotBinding& slot)
 {
     const uint32_t num_params = Synth::get_effect_param_floats(slot.type);
     for (uint32_t p = 0; p < num_params; p++)
@@ -2407,7 +2436,7 @@ void canonicalize_effect(Synth::EffectSlotBinding& slot)
         memset(&slot.bindings[num_params], 0, (Synth::max_effect_param_floats - num_params) * sizeof(slot.bindings[0]));
 }
 
-void canonicalize_chain(Synth::EffectChainBinding& chain)
+static void canonicalize_chain(Synth::EffectChainBinding& chain)
 {
     for (uint32_t s = 0; s < chain.num_effects; s++)
         canonicalize_effect(chain.effects[s]);
@@ -2420,7 +2449,7 @@ void canonicalize_chain(Synth::EffectChainBinding& chain)
 // The standalone parameters pool carries no validated content (the runtime never
 // reads it), so an entry with counts outside their arrays cannot be trusted: it is
 // stale bytes by definition and canonicalizes to zero.
-bool param_counts_in_range(const Synth::ParamDescriptor& param)
+static bool param_counts_in_range(const Synth::ParamDescriptor& param)
 {
     if (static_cast<uint32_t>(param.kind) >= num_param_kinds)
         return false;
@@ -2434,7 +2463,7 @@ bool param_counts_in_range(const Synth::ParamDescriptor& param)
     }
 }
 
-void canonicalize_param(Synth::ParamDescriptor& param)
+static void canonicalize_param(Synth::ParamDescriptor& param)
 {
     if (! param_counts_in_range(param)) {
         memset(&param, 0, sizeof(param));
@@ -2485,13 +2514,9 @@ void canonicalize_param(Synth::ParamDescriptor& param)
     param = fresh;
 }
 
-} // namespace
-
-namespace {
-
 // Brings an editor bank to the canonical form every successful decode
 // produces.  Requires a validated bank (decode validates first).
-void canonicalize_editor_bank(Synth::InstrumentEditorBank* editor_bank)
+static void canonicalize_editor_bank(Synth::InstrumentEditorBank* editor_bank)
 {
     Synth::InstrumentBank& bank = editor_bank->bank;
 
@@ -2578,26 +2603,402 @@ void canonicalize_editor_bank(Synth::InstrumentEditorBank* editor_bank)
     canonicalize_chain(bank.master_chain);
 }
 
-} // namespace
-
-// ---------------------------------------------------------------------------
-
-namespace {
-
-// Shared staging for the transactional decode: the GUI thread runs one decode at a
-// time, so one static scratch serves every caller (decode is not reentrant).
-Synth::InstrumentEditorBank decode_scratch;
-
-// Decode pipeline into decode_scratch: grammar pass, schema overlay
-// onto the defaults, then descriptor validation.
-
-bool decode_document_into_scratch(const char* text, uint32_t len)
+// Document-unit default for a target whose block (or the whole target) is
+// absent: untouched instruments stay audible and centered like the factory
+// default.
+static float doc_base_default(Synth::ModTarget target)
 {
-    // The staging text buffer is the format's document-size bound; file readers
-    // enforce it before this point and the direct entry enforces it here, so no
-    // document larger than an editor bank file can ever decode.
+    if (target == Synth::mod_volume)
+        return 1.0f;
+    if (target == Synth::mod_panning)
+        return 0.5f;
+    return 0.0f;
+}
+
+// A value is in the documented range: [min, max] where cutoffs additionally
+// allow exactly 0 (bypass); the gap below the slider floor has no meaning.
+static bool doc_value_valid(const Sculptor::OscTargetView& view, float value)
+{
+    return (value >= view.min_value || value == 0.0f) && value <= view.max_value;
+}
+
+// The instrument format is versioned by its "format" tag, so an unknown field
+// means a mismatched document: refuse instead of skipping.
+static void doc_unknown_field(Walker& w, uint32_t key_idx)
+{
+    (void)key_idx;
+    w.failed = true;
+}
+
+// Point levels are the envelope's output values in the target's display units;
+// the descriptor stores them scaled to bank units (fm_index: radians).
+// Sustain defaults to holding the last point.
+static void decode_envelope_doc(Walker& w, uint32_t obj, Synth::ModTarget target, Synth::EnvelopeDescriptor& env)
+{
+    const Sculptor::OscTargetView view = Sculptor::osc_target_view(target);
+
+    float    times[Synth::max_envelope_points]     = {};
+    float    levels[Synth::max_envelope_points]    = {};
+    uint16_t quantized[Synth::max_envelope_points] = {};
+    uint32_t num_points                            = 0;
+    uint32_t sustain_start                         = 0;
+    uint32_t sustain_end                           = 0;
+    bool     sustain_start_set                     = false;
+    bool     sustain_end_set                       = false;
+
+    walk_object(w, obj, [&](uint32_t key_idx, uint32_t val_idx) {
+        if (key_eq(w, key_idx, "points")) {
+            num_points = static_cast<uint32_t>(w.toks[val_idx].size);
+            walk_array(w, val_idx, Synth::max_envelope_points, [&](uint32_t elem, uint32_t pos) {
+                float time      = 0.0f;
+                float level     = 0.0f;
+                bool  time_set  = false;
+                bool  level_set = false;
+                walk_object(w, elem, [&](uint32_t point_key, uint32_t point_val) {
+                    if (key_eq(w, point_key, "time_seconds")) {
+                        want_float(w, point_val, &time);
+                        time_set = true;
+                    }
+                    else if (key_eq(w, point_key, "level")) {
+                        want_float(w, point_val, &level);
+                        level_set = true;
+                    }
+                    else
+                        doc_unknown_field(w, point_key);
+                });
+                if (! w.failed && (! time_set || ! level_set))
+                    w.failed = true;
+                times[pos]  = time;
+                levels[pos] = level;
+            });
+        }
+        else if (key_eq(w, key_idx, "sustain_start")) {
+            want_uint(w, val_idx, Synth::max_envelope_points - 1, &sustain_start);
+            sustain_start_set = true;
+        }
+        else if (key_eq(w, key_idx, "sustain_end")) {
+            want_uint(w, val_idx, Synth::max_envelope_points - 1, &sustain_end);
+            sustain_end_set = true;
+        }
+        else
+            doc_unknown_field(w, key_idx);
+    });
+
+    if (w.failed || num_points == 0) {
+        w.failed = true; // points are required: a one-point envelope is the minimum
+        return;
+    }
+
+    // Quantized positions define the curve, so ordering is checked on ticks: a
+    // leading run of position 0 is the descriptor's unplaced-point layout and
+    // stays valid; every placed point must advance on its predecessor.
+    const float max_time_seconds = Sculptor::envelope_ticks_to_ms(0xFFFF) / 1000.0f;
+    for (uint32_t i = 0; i < num_points; i++) {
+        if (times[i] < 0.0f || times[i] > max_time_seconds || ! std::isfinite(levels[i])) {
+            w.failed = true;
+            return;
+        }
+        const uint16_t position = Sculptor::envelope_ms_to_ticks(times[i] * 1000.0f);
+        if (i > 0 && (position < quantized[i - 1] || (position == quantized[i - 1] && position != 0))) {
+            w.failed = true;
+            return;
+        }
+        quantized[i] = position;
+    }
+
+    float min_level = levels[0];
+    float max_level = levels[0];
+    for (uint32_t i = 1; i < num_points; i++) {
+        if (levels[i] < min_level)
+            min_level = levels[i];
+        if (levels[i] > max_level)
+            max_level = levels[i];
+    }
+
+    // Sustain defaults to the last point: hold the end value until release.
+    if (! sustain_start_set)
+        sustain_start = num_points - 1;
+    if (! sustain_end_set)
+        sustain_end = num_points - 1;
+    if (sustain_start > sustain_end || sustain_end >= num_points) {
+        w.failed = true;
+        return;
+    }
+
+    // The runtime evaluates min_value + raw_value * min_max_delta, so the delta
+    // spans the level range across the 16-bit raw values, and both fields are
+    // stored in bank units (fm_index: radians).
+    env.min_value     = min_level * view.bank_scale;
+    env.min_max_delta = (max_level - min_level) * view.bank_scale / 65535.0f;
+    if (! std::isfinite(env.min_value) || ! std::isfinite(env.min_max_delta)) {
+        w.failed = true;
+        return;
+    }
+    env.num_points          = static_cast<uint8_t>(num_points);
+    env.sustain_first_point = static_cast<uint8_t>(sustain_start);
+    env.sustain_last_point  = static_cast<uint8_t>(sustain_end);
+
+    // A flat envelope (delta 0) is the constant min: every quantized value 0.
+    const float delta = max_level - min_level;
+    for (uint32_t i = 0; i < num_points; i++) {
+        env.points[i].position = quantized[i];
+        env.points[i].value =
+            delta > 0.0f ? static_cast<uint16_t>((levels[i] - min_level) / delta * 65535.0f + 0.5f) : 0;
+    }
+}
+
+// The versioned instrument document refuses unknown fields inside a mod
+// input, and "source" is required.
+static void decode_mod_input_doc(Walker& w, uint32_t obj, Synth::ModInput& input)
+{
+    bool source_set = false;
+    decode_mod_input_fields(w, obj, input, &source_set, doc_unknown_field);
+    if (w.failed || ! source_set)
+        w.failed = true;
+}
+
+// One LFO generator bound to a target. The wave and frequency are required;
+// everything else has a working default.
+static void decode_lfo_doc(Walker&               w,
+                           uint32_t              obj,
+                           Synth::ModTarget      target,
+                           Synth::LFODescriptor& lfo,
+                           Synth::LayerGen&      gen)
+{
+    const Sculptor::OscTargetView view = Sculptor::osc_target_view(target);
+
+    float    frequency_hz  = 0.0f;
+    bool     frequency_set = false;
+    bool     wave_set      = false;
+    float    duty          = 0.0f;
+    float    min_level     = view.min_value;
+    float    max_level     = view.max_value;
+    uint32_t op            = 0;
+    float    depth         = 0.0f;
+    uint32_t depth_source  = 0;
+    uint32_t rate_source   = 0;
+    float    rate_scale_ms = 0.0f;
+
+    walk_object(w, obj, [&](uint32_t key_idx, uint32_t val_idx) {
+        if (key_eq(w, key_idx, "wave")) {
+            uint32_t wave = 0;
+            want_enum(w, val_idx, wave_names, num_waves, &wave);
+            if (! w.failed && wave != static_cast<uint32_t>(Synth::WaveType::sine_wave) &&
+                wave != static_cast<uint32_t>(Synth::WaveType::sawtooth_wave)) {
+                w.failed = true; // the bank pool only holds sine and sawtooth LFOs
+            }
+            wave_set = true;
+            lfo.wave = static_cast<Synth::WaveType>(wave);
+        }
+        else if (key_eq(w, key_idx, "frequency_hz")) {
+            want_float(w, val_idx, &frequency_hz);
+            frequency_set = true;
+        }
+        else if (key_eq(w, key_idx, "duty"))
+            want_float(w, val_idx, &duty);
+        else if (key_eq(w, key_idx, "min_level"))
+            want_float(w, val_idx, &min_level);
+        else if (key_eq(w, key_idx, "max_level"))
+            want_float(w, val_idx, &max_level);
+        else if (key_eq(w, key_idx, "op"))
+            want_enum(w, val_idx, source_op_names, num_source_ops, &op);
+        else if (key_eq(w, key_idx, "depth"))
+            want_float(w, val_idx, &depth);
+        else if (key_eq(w, key_idx, "depth_source"))
+            want_enum(w, val_idx, mod_source_names, num_mod_sources, &depth_source);
+        else if (key_eq(w, key_idx, "rate_source"))
+            want_enum(w, val_idx, mod_source_names, num_mod_sources, &rate_source);
+        else if (key_eq(w, key_idx, "rate_scale_ms"))
+            want_float(w, val_idx, &rate_scale_ms);
+        else
+            doc_unknown_field(w, key_idx);
+    });
+
+    if (w.failed || ! wave_set || ! frequency_set || frequency_hz <= 0.0f) {
+        w.failed = true;
+        return;
+    }
+
+    // period_ms is a uint16, so the frequency must land in 1 ms..65535 ms.
+    const float period_ms = 1000.0f / frequency_hz;
+    if (period_ms < 1.0f || period_ms > 65535.0f || duty < 0.0f || duty > 1.0f || min_level > max_level ||
+        ! std::isfinite(min_level) || ! std::isfinite(max_level)) {
+        w.failed = true;
+        return;
+    }
+
+    lfo.duty      = static_cast<uint8_t>(duty * 255.0f + 0.5f);
+    lfo.period_ms = static_cast<uint16_t>(period_ms + 0.5f);
+    // The runtime sweeps min_value..min_value+delta with a normalized wave, so
+    // the levels store bank units directly (fm_index: radians).
+    lfo.min_value     = min_level * view.bank_scale;
+    lfo.min_max_delta = (max_level - min_level) * view.bank_scale;
+    if (! std::isfinite(lfo.min_value) || ! std::isfinite(lfo.min_max_delta)) {
+        w.failed = true;
+        return;
+    }
+
+    gen.lfo_op            = static_cast<Synth::SourceOp>(op);
+    gen.lfo_depth         = depth;
+    gen.lfo_depth_source  = static_cast<Synth::ModSource>(depth_source);
+    gen.lfo_rate_source   = static_cast<Synth::ModSource>(rate_source);
+    gen.lfo_rate_scale_ms = rate_scale_ms;
+}
+
+// An instrument's layers rarely need many distinct descriptors; reusing the
+// pool slot of an identical one keeps pasted instruments compact. The
+// descriptors are zero-initialized before decoding, so memcmp compares only
+// written content.
+template <typename Descriptor>
+static uint16_t find_matching_descriptor(const Descriptor* descriptors, uint32_t count, const Descriptor& candidate)
+{
+    for (uint32_t i = 0; i < count; i++) {
+        if (memcmp(&descriptors[i], &candidate, sizeof(Descriptor)) == 0)
+            return static_cast<uint16_t>(i + 1);
+    }
+    return 0;
+}
+
+// One target block: shared routing (base, sources) plus per-layer generators
+// (envelope, LFO). The routing is shared by every layer, so base/sources are
+// accepted from the first layer that supplies base or sources (a layer
+// with only generators does not claim the routing) and refused afterwards.
+static void decode_target_doc(Walker&             w,
+                              uint32_t            obj,
+                              Synth::ModTarget    target,
+                              Synth::Oscillator&  osc,
+                              InstrumentDocState& doc)
+{
+    const Sculptor::OscTargetView view = Sculptor::osc_target_view(target);
+
+    float base        = doc_base_default(target);
+    bool  base_set    = false;
+    bool  sources_set = false;
+
+    walk_object(w, obj, [&](uint32_t key_idx, uint32_t val_idx) {
+        if (key_eq(w, key_idx, "base")) {
+            want_float(w, val_idx, &base);
+            base_set = true;
+        }
+        else if (key_eq(w, key_idx, "envelope")) {
+            if (doc.envelope_count >= Synth::instrument_max_envelopes) {
+                w.failed = true;
+                return;
+            }
+            Synth::EnvelopeDescriptor& env = doc.envelopes[doc.envelope_count];
+            env                            = Synth::EnvelopeDescriptor{};
+            decode_envelope_doc(w, val_idx, target, env);
+            if (! w.failed) {
+                const uint16_t match             = find_matching_descriptor(doc.envelopes, doc.envelope_count, env);
+                osc.gen[target].envelope_desc_id = match != 0 ? match : static_cast<uint16_t>(doc.envelope_count + 1);
+                if (match == 0)
+                    ++doc.envelope_count;
+            }
+        }
+        else if (key_eq(w, key_idx, "lfo")) {
+            if (doc.lfo_count >= Synth::instrument_max_lfos) {
+                w.failed = true;
+                return;
+            }
+            Synth::LFODescriptor& lfo = doc.lfos[doc.lfo_count];
+            lfo                       = Synth::LFODescriptor{};
+            decode_lfo_doc(w, val_idx, target, lfo, osc.gen[target]);
+            if (! w.failed) {
+                const uint16_t match        = find_matching_descriptor(doc.lfos, doc.lfo_count, lfo);
+                osc.gen[target].lfo_desc_id = match != 0 ? match : static_cast<uint16_t>(doc.lfo_count + 1);
+                if (match == 0)
+                    ++doc.lfo_count;
+            }
+        }
+        else if (key_eq(w, key_idx, "sources")) {
+            walk_array(w, val_idx, Synth::max_mod_inputs, [&](uint32_t elem, uint32_t pos) {
+                decode_mod_input_doc(w, elem, doc.instr.routing[target].inputs[pos]);
+            });
+            doc.instr.routing[target].num_inputs = static_cast<uint16_t>(w.toks[val_idx].size);
+            sources_set                          = true;
+        }
+        else
+            doc_unknown_field(w, key_idx);
+    });
+
+    if (w.failed)
+        return;
+
+    if (! doc_value_valid(view, base)) {
+        w.failed = true;
+        return;
+    }
+
+    if (base_set || sources_set) {
+        if (doc.routing_set[target]) {
+            w.failed = true; // one layer may set the shared routing
+            return;
+        }
+        doc.routing_set[target]              = true;
+        doc.instr.routing[target].base_value = base * view.bank_scale;
+    }
+}
+
+// One oscillator layer. wave_a is the one required field.
+static void decode_layer_doc(Walker& w, uint32_t obj, Synth::Oscillator& osc, InstrumentDocState& doc)
+{
+    uint32_t wave_a       = 0;
+    bool     wave_a_set   = false;
+    uint32_t wave_b       = 0;
+    uint32_t mode         = 0;
+    float    mod_ratio    = 1.0f;
+    float    pitch_offset = 0.0f;
+
+    walk_object(w, obj, [&](uint32_t key_idx, uint32_t val_idx) {
+        if (key_eq(w, key_idx, "wave_a")) {
+            want_enum(w, val_idx, wave_names, num_waves, &wave_a);
+            wave_a_set = true;
+        }
+        else if (key_eq(w, key_idx, "wave_b"))
+            want_enum(w, val_idx, wave_names, num_waves, &wave_b);
+        else if (key_eq(w, key_idx, "mode"))
+            want_enum(w, val_idx, osc_mode_names, num_osc_modes, &mode);
+        else if (key_eq(w, key_idx, "mod_ratio"))
+            want_float(w, val_idx, &mod_ratio);
+        else if (key_eq(w, key_idx, "pitch_offset_semitones"))
+            want_float(w, val_idx, &pitch_offset);
+        else {
+            uint32_t target = 0;
+            while (target < Synth::num_mod_targets && ! key_eq(w, key_idx, mod_target_names[target]))
+                target++;
+            if (target < Synth::num_mod_targets)
+                decode_target_doc(w, val_idx, static_cast<Synth::ModTarget>(target), osc, doc);
+            else
+                doc_unknown_field(w, key_idx);
+        }
+    });
+
+    if (w.failed || ! wave_a_set)
+        w.failed = true;
+    if (w.failed)
+        return;
+
+    // An explicitly written zero ratio is bank-legal (blend ignores the ratio
+    // and FM/sync banks can hold one); only nonzero values are slider-bounded.
+    if ((mod_ratio != 0.0f && (mod_ratio < Sculptor::osc_fm_ratio_min || mod_ratio > Sculptor::osc_fm_ratio_max)) ||
+        pitch_offset < Sculptor::osc_pitch_offset_min || pitch_offset > Sculptor::osc_pitch_offset_max) {
+        w.failed = true;
+        return;
+    }
+
+    osc.osc_type[0]  = static_cast<Synth::WaveType>(wave_a);
+    osc.osc_type[1]  = static_cast<Synth::WaveType>(wave_b);
+    osc.osc_mode     = static_cast<Synth::OscMode>(mode);
+    osc.mod_ratio    = mod_ratio;
+    osc.pitch_offset = pitch_offset;
+}
+
+// One root object, nothing before or after it, grammar-clean everywhere.
+static bool parse_document(const char* text, uint32_t len, Walker& w)
+{
     if (len > bank_json_text_size)
         return false;
+
     jsmn_parser parser;
     jsmn_init(&parser);
 
@@ -2606,28 +3007,42 @@ bool decode_document_into_scratch(const char* text, uint32_t len)
                                       len,
                                       json_tokens,
                                       static_cast<unsigned int>(sizeof(json_tokens) / sizeof(json_tokens[0])));
-    if (num_tokens <= 0) {
+    if (num_tokens <= 0)
         return false;
-    }
 
-    Walker w = { text, len, json_tokens, static_cast<uint32_t>(num_tokens), false };
+    w.doc      = text;
+    w.len      = len;
+    w.toks     = json_tokens;
+    w.num_toks = static_cast<uint32_t>(num_tokens);
+    w.failed   = false;
 
-    // The document-wide grammar pass runs before any schema decoding, so malformed
-    // content is rejected everywhere - including unknown subtrees the schema walk
-    // never visits.
+    // The document-wide grammar pass runs before any schema decoding, so
+    // malformed content is rejected everywhere - including unknown subtrees the
+    // schema walk never visits.
     const uint32_t grammar_next = check_value(w, 0);
-    if (grammar_next != w.num_toks || w.failed || w.toks[0].type != JSMN_OBJECT) {
+    if (grammar_next != w.num_toks || w.failed || w.toks[0].type != JSMN_OBJECT)
         return false;
-    } // a structural violation anywhere, or tokens outside the root
 
     // Nothing may precede the root object: jsmn consumes separators without a
-    // root, so ",{}" would otherwise pass as an empty document
+    // root, so ",{}" would otherwise pass as an empty document.
     if (! gap_is_ws(text, 0, static_cast<uint32_t>(w.toks[0].start)))
         return false;
 
     for (uint32_t i = static_cast<uint32_t>(w.toks[0].end); i < len; i++)
         if (! is_ws(text[i]))
             return false; // one root object, nothing trailing
+
+    return true;
+}
+
+// Decode pipeline into decode_scratch: grammar pass, schema overlay
+// onto the defaults, then descriptor validation.
+
+static bool decode_document_into_scratch(const char* text, uint32_t len)
+{
+    Walker w = {};
+    if (! parse_document(text, len, w))
+        return false;
 
     fill_default_editor_bank(&decode_scratch);
 
@@ -2666,8 +3081,6 @@ bool decode_document_into_scratch(const char* text, uint32_t len)
 
     return true;
 }
-
-} // namespace
 
 int Synth::write_editor_bank_json(FILE* file, const InstrumentEditorBank* bank, uint32_t max_len, uint32_t* out_len)
 {
@@ -2711,6 +3124,416 @@ bool Synth::decode_editor_bank_json(const char* text, uint32_t len, InstrumentEd
     memcpy(out, &decode_scratch, sizeof(*out));
 
     return true;
+}
+
+bool Synth::decode_instrument_json(const char*         text,
+                                   uint32_t            len,
+                                   Instrument*         out_instr,
+                                   EnvelopeDescriptor* out_envelopes,
+                                   uint32_t*           out_envelope_count,
+                                   LFODescriptor*      out_lfos,
+                                   uint32_t*           out_lfo_count)
+{
+    uint32_t layout_count = 0;
+    return decode_instrument_json(text,
+                                  len,
+                                  out_instr,
+                                  out_envelopes,
+                                  out_envelope_count,
+                                  out_lfos,
+                                  out_lfo_count,
+                                  nullptr,
+                                  0,
+                                  &layout_count);
+}
+
+bool Synth::decode_instrument_json(const char*            text,
+                                   uint32_t               len,
+                                   Instrument*            out_instr,
+                                   EnvelopeDescriptor*    out_envelopes,
+                                   uint32_t*              out_envelope_count,
+                                   LFODescriptor*         out_lfos,
+                                   uint32_t*              out_lfo_count,
+                                   InstrumentGraphLayout* out_layout,
+                                   uint32_t               layout_capacity,
+                                   uint32_t*              out_layout_count)
+{
+    if (! text || ! out_instr || ! out_envelopes || ! out_envelope_count || ! out_lfos || ! out_lfo_count ||
+        ! out_layout_count)
+        return false;
+    Walker w = {};
+    if (! parse_document(text, len, w))
+        return false;
+
+    InstrumentDocState& doc = instrument_doc;
+    doc.instr               = Synth::Instrument{};
+    for (uint32_t target = 0; target < num_mod_targets; target++) {
+        const Sculptor::OscTargetView view   = Sculptor::osc_target_view(static_cast<ModTarget>(target));
+        doc.instr.routing[target].base_value = doc_base_default(static_cast<ModTarget>(target)) * view.bank_scale;
+        doc.routing_set[target]              = false;
+    }
+    doc.envelope_count = 0;
+    doc.lfo_count      = 0;
+
+    bool     format_ok    = false;
+    bool     layers_seen  = false;
+    uint32_t layer_count  = 0;
+    uint32_t layout_count = 0;
+
+    walk_object(w, 0, [&](uint32_t key_idx, uint32_t val_idx) {
+        if (key_eq(w, key_idx, "format")) {
+            if (w.toks[val_idx].type != JSMN_STRING || ! tok_text_eq(w, val_idx, instrument_format_tag))
+                w.failed = true;
+            format_ok = true;
+        }
+        else if (key_eq(w, key_idx, "note_skew_semitones")) {
+            want_float(w, val_idx, &doc.instr.note_skew_semitones);
+            if (! w.failed && (doc.instr.note_skew_semitones < 0.0f || doc.instr.note_skew_semitones > 1.0f))
+                w.failed = true;
+        }
+        else if (key_eq(w, key_idx, "layer_skew_semitones")) {
+            want_float(w, val_idx, &doc.instr.layer_skew_semitones);
+            if (! w.failed && (doc.instr.layer_skew_semitones < 0.0f || doc.instr.layer_skew_semitones > 1.0f))
+                w.failed = true;
+        }
+        else if (key_eq(w, key_idx, "layers")) {
+            layers_seen = true;
+            layer_count = static_cast<uint32_t>(w.toks[val_idx].size);
+            walk_array(w, val_idx, Synth::max_layers, [&](uint32_t elem, uint32_t pos) {
+                decode_layer_doc(w, elem, doc.instr.layers[pos], doc);
+            });
+        }
+        else if (key_eq(w, key_idx, "graph_layout")) {
+            walk_array(w, val_idx, Synth::instrument_graph_layout_capacity, [&](uint32_t elem, uint32_t pos) {
+                InstrumentGraphLayout& record = instrument_layout_staging[pos];
+                record                        = {};
+                uint32_t present              = 0;
+                walk_object(w, elem, [&](uint32_t field, uint32_t value) {
+                    const char* const keys[] = { "kind",
+                                                 "x",
+                                                 "y",
+                                                 "width",
+                                                 "height",
+                                                 "canonical_index",
+                                                 "layer",
+                                                 "target",
+                                                 "depth_source",
+                                                 "rate_source",
+                                                 "parameter_ordinal" };
+                    uint32_t          key    = 0;
+                    while (key < 11 && ! key_eq(w, field, keys[key]))
+                        ++key;
+                    if (key == 11) {
+                        w.failed = true;
+                        return;
+                    }
+                    present |= 1u << key;
+                    if (key >= 1 && key <= 4) {
+                        float number = 0;
+                        want_float(w, value, &number);
+                        if (key == 1)
+                            record.x = number;
+                        if (key == 2)
+                            record.y = number;
+                        if (key == 3)
+                            record.width_override = number;
+                        if (key == 4)
+                            record.height_override = number;
+                    }
+                    else {
+                        uint32_t number = 0;
+                        want_uint(w, value, 255, &number);
+                        if (key == 0)
+                            record.kind = static_cast<uint8_t>(number);
+                        if (key == 5)
+                            record.canonical_index = static_cast<uint8_t>(number);
+                        if (key == 6)
+                            record.layer = static_cast<uint8_t>(number);
+                        if (key == 7)
+                            record.target = static_cast<uint8_t>(number);
+                        if (key == 8)
+                            record.depth_source = static_cast<uint8_t>(number);
+                        if (key == 9)
+                            record.rate_source = static_cast<uint8_t>(number);
+                        if (key == 10)
+                            record.parameter_ordinal = static_cast<uint8_t>(number);
+                    }
+                });
+                const uint32_t locator_keys[] = { 1u << 5,
+                                                  (1u << 6) | (1u << 7),
+                                                  (1u << 6) | (1u << 7) | (1u << 8) | (1u << 9),
+                                                  (1u << 7) | (1u << 10) };
+                if (record.kind > 3 || present != (31u | locator_keys[record.kind]))
+                    w.failed = true;
+                ++layout_count;
+            });
+        }
+        else
+            doc_unknown_field(w, key_idx);
+    });
+
+    if (w.failed || ! format_ok || ! layers_seen || layer_count == 0)
+        return false;
+
+    doc.instr.layer_count = layer_count;
+
+    uint32_t mapped_count = 0;
+    if (layout_count > layout_capacity || (! out_layout && layout_count) ||
+        ! Sculptor::map_instrument_graph_layout(doc.instr,
+                                                doc.envelopes,
+                                                doc.envelope_count,
+                                                doc.lfos,
+                                                doc.lfo_count,
+                                                instrument_layout_staging,
+                                                layout_count,
+                                                instrument_mapped_staging,
+                                                Synth::instrument_graph_layout_capacity,
+                                                &mapped_count))
+        return false;
+    // Only now, with the whole document proven valid, do the caller's outputs
+    // change: every failure path above leaves them untouched.
+    memcpy(out_instr, &doc.instr, sizeof(*out_instr));
+    memcpy(out_envelopes, doc.envelopes, doc.envelope_count * sizeof(*out_envelopes));
+    memcpy(out_lfos, doc.lfos, doc.lfo_count * sizeof(*out_lfos));
+    *out_envelope_count = doc.envelope_count;
+    *out_lfo_count      = doc.lfo_count;
+    if (layout_count)
+        memcpy(out_layout, instrument_layout_staging, layout_count * sizeof(*out_layout));
+    *out_layout_count = layout_count;
+    return true;
+}
+
+uint32_t Synth::encode_instrument_json(char*                 dest,
+                                       uint32_t              dest_size,
+                                       const Instrument*     instr,
+                                       const InstrumentBank* desc_bank)
+{
+    return encode_instrument_json(dest, dest_size, instr, desc_bank, nullptr, 0);
+}
+
+uint32_t Synth::encode_instrument_json(char*                        dest,
+                                       uint32_t                     dest_size,
+                                       const Instrument*            instr,
+                                       const InstrumentBank*        desc_bank,
+                                       const InstrumentGraphLayout* layout,
+                                       uint32_t                     layout_count)
+{
+    if (! dest || ! instr || ! desc_bank || (! layout && layout_count) ||
+        layout_count > Synth::instrument_graph_layout_capacity || dest_size == 0)
+        return 0;
+    if (layout_count) {
+        const uint32_t content_length = encode_instrument_json(dest, dest_size, instr, desc_bank);
+        uint32_t       envelope_count = 0;
+        uint32_t       lfo_count      = 0;
+        uint32_t       mapped_count   = 0;
+        if (! content_length ||
+            ! decode_instrument_json(dest,
+                                     content_length,
+                                     &decode_scratch.bank.instruments.entries[0],
+                                     decode_scratch.bank.envelopes.entries,
+                                     &envelope_count,
+                                     decode_scratch.bank.lfos.entries,
+                                     &lfo_count) ||
+            ! Sculptor::map_instrument_graph_layout(decode_scratch.bank.instruments.entries[0],
+                                                    decode_scratch.bank.envelopes.entries,
+                                                    envelope_count,
+                                                    decode_scratch.bank.lfos.entries,
+                                                    lfo_count,
+                                                    layout,
+                                                    layout_count,
+                                                    instrument_mapped_staging,
+                                                    Synth::instrument_graph_layout_capacity,
+                                                    &mapped_count))
+            return 0;
+    }
+    if (instr->layer_count == 0 || instr->layer_count > max_layers)
+        return 0;
+
+    Out o = { dest, dest_size - 1, 0, false, false };
+
+    o.ch('{');
+    o.key("format");
+    o.ch('"');
+    o.str(instrument_format_tag);
+    o.ch('"');
+    o.key("note_skew_semitones");
+    o.float_value(instr->note_skew_semitones);
+    o.key("layer_skew_semitones");
+    o.float_value(instr->layer_skew_semitones);
+    o.key("layers");
+    o.ch('[');
+
+    for (uint32_t layer = 0; layer < instr->layer_count; layer++) {
+        const Oscillator& osc = instr->layers[layer];
+        if (static_cast<uint32_t>(osc.osc_type[0]) >= num_waves || static_cast<uint32_t>(osc.osc_type[1]) >= num_waves)
+            return 0;
+        if (osc.osc_mode > osc_mode_hard_sync)
+            return 0;
+
+        o.sep();
+        o.ch('{');
+        key_enum(o, "wave_a", wave_names, num_waves, static_cast<uint32_t>(osc.osc_type[0]));
+        key_enum(o, "wave_b", wave_names, num_waves, static_cast<uint32_t>(osc.osc_type[1]));
+        key_enum(o, "mode", osc_mode_names, num_osc_modes, static_cast<uint32_t>(osc.osc_mode));
+        if (osc.osc_mode != Synth::osc_mode_blend || osc.mod_ratio != 0.0f) {
+            o.key("mod_ratio");
+            o.float_value(osc.mod_ratio);
+        }
+        o.key("pitch_offset_semitones");
+        o.float_value(osc.pitch_offset);
+
+        for (uint32_t target = 0; target < num_mod_targets; target++) {
+            const ModTarget               mod_target = static_cast<ModTarget>(target);
+            const Sculptor::OscTargetView view       = Sculptor::osc_target_view(mod_target);
+
+            o.key(mod_target_names[target]);
+            o.ch('{');
+
+            // The routing is shared by every layer, so base and sources ride
+            // the first layer only.
+            if (layer == 0) {
+                o.key("base");
+                o.float_value(instr->routing[target].base_value / view.bank_scale);
+
+                const InputRouting& routing = instr->routing[target];
+                if (routing.num_inputs > max_mod_inputs)
+                    return 0;
+                if (routing.num_inputs != 0) {
+                    o.key("sources");
+                    o.ch('[');
+                    for (uint32_t input = 0; input < routing.num_inputs; input++) {
+                        const ModInput& in = routing.inputs[input];
+                        if (in.source > ModSource::pressure_combine || in.op > SourceOp::multiply)
+                            return 0;
+                        o.sep();
+                        enc_mod_input(o, in);
+                    }
+                    o.ch(']');
+                }
+            }
+
+            const LayerGen& gen = osc.gen[target];
+
+            const uint16_t env_id = gen.envelope_desc_id;
+            if (env_id != 0) {
+                if (env_id > desc_bank->envelopes.num_allocated)
+                    return 0;
+                const EnvelopeDescriptor& env = desc_bank->envelopes.entries[env_id - 1];
+                if (env.num_points == 0 || env.num_points > max_envelope_points)
+                    return 0;
+                o.key("envelope");
+                o.ch('{');
+                o.key("points");
+                o.ch('[');
+                for (uint32_t point = 0; point < env.num_points; point++) {
+                    o.sep();
+                    o.ch('{');
+                    o.key("time_seconds");
+                    o.float_value(Sculptor::envelope_ticks_to_ms(env.points[point].position) / 1000.0f);
+                    o.key("level");
+                    o.float_value((env.min_value + static_cast<float>(env.points[point].value) * env.min_max_delta) /
+                                  view.bank_scale);
+                    o.ch('}');
+                }
+                o.ch(']');
+                o.key("sustain_start");
+                o.uint_value(env.sustain_first_point);
+                o.key("sustain_end");
+                o.uint_value(env.sustain_last_point);
+                o.ch('}');
+            }
+
+            const uint16_t lfo_id = gen.lfo_desc_id;
+            if (lfo_id != 0) {
+                if (lfo_id > desc_bank->lfos.num_allocated)
+                    return 0;
+                const LFODescriptor& lfo = desc_bank->lfos.entries[lfo_id - 1];
+                if (lfo.wave > WaveType::noise_wave || lfo.period_ms == 0 || gen.lfo_op > SourceOp::multiply ||
+                    gen.lfo_depth_source > ModSource::pressure_combine ||
+                    gen.lfo_rate_source > ModSource::pressure_combine)
+                    return 0;
+                o.key("lfo");
+                o.ch('{');
+                key_enum(o, "wave", wave_names, num_waves, static_cast<uint32_t>(lfo.wave));
+                o.key("frequency_hz");
+                o.float_value(1000.0f / static_cast<float>(lfo.period_ms));
+                o.key("duty");
+                o.float_value(static_cast<float>(lfo.duty) / 255.0f);
+                o.key("min_level");
+                o.float_value(lfo.min_value / view.bank_scale);
+                o.key("max_level");
+                o.float_value((lfo.min_value + lfo.min_max_delta) / view.bank_scale);
+                key_enum(o, "op", source_op_names, num_source_ops, static_cast<uint32_t>(gen.lfo_op));
+                o.key("depth");
+                o.float_value(gen.lfo_depth);
+                key_enum(o,
+                         "depth_source",
+                         mod_source_names,
+                         num_mod_sources,
+                         static_cast<uint32_t>(gen.lfo_depth_source));
+                key_enum(o,
+                         "rate_source",
+                         mod_source_names,
+                         num_mod_sources,
+                         static_cast<uint32_t>(gen.lfo_rate_source));
+                o.key("rate_scale_ms");
+                o.float_value(gen.lfo_rate_scale_ms);
+                o.ch('}');
+            }
+
+            o.ch('}');
+        }
+
+        o.ch('}');
+    }
+
+    o.ch(']');
+    o.key("graph_layout");
+    o.ch('[');
+    for (uint32_t index = 0; index < layout_count; ++index) {
+        const InstrumentGraphLayout& record = layout[index];
+        o.sep();
+        o.ch('{');
+        o.key("kind");
+        o.uint_value(record.kind);
+        if (record.kind == 0) {
+            o.key("canonical_index");
+            o.uint_value(record.canonical_index);
+        }
+        if (record.kind == 1 || record.kind == 2) {
+            o.key("layer");
+            o.uint_value(record.layer);
+        }
+        if (record.kind != 0) {
+            o.key("target");
+            o.uint_value(record.target);
+        }
+        if (record.kind == 2) {
+            o.key("depth_source");
+            o.uint_value(record.depth_source);
+            o.key("rate_source");
+            o.uint_value(record.rate_source);
+        }
+        if (record.kind == 3) {
+            o.key("parameter_ordinal");
+            o.uint_value(record.parameter_ordinal);
+        }
+        o.key("x");
+        o.float_value(record.x);
+        o.key("y");
+        o.float_value(record.y);
+        o.key("width");
+        o.float_value(record.width_override);
+        o.key("height");
+        o.float_value(record.height_override);
+        o.ch('}');
+    }
+    o.ch(']');
+    o.ch('}');
+
+    if (o.overflow || o.invalid)
+        return 0;
+    return o.pos;
 }
 
 int Synth::save_editor_bank_file(const char* path, const InstrumentEditorBank* bank)

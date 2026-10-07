@@ -19,6 +19,49 @@
 #include <string.h>
 #include <type_traits>
 
+// Per-envelope-node state-widget contexts, indexed by graph node index and
+// rebound on every projection.  A reset on projection also aborts gestures
+// and selections, which cannot outlive the graph they were made in.  The
+// projection generation gates in-flight gestures against envelope pool
+// compaction that remaps descriptor ids without a re-projection.
+struct EnvelopeWidgetContext {
+    uint32_t                     node_idx        = Sculptor::pool_no_slot;
+    Sculptor::SynthEditor*       editor          = nullptr;
+    uint32_t                     generation      = 0;
+    Synth::EnvelopeDescriptor    gesture_start   = {};
+    uint32_t                     gesture_desc_id = 0;
+    Sculptor::UndoGroupTag       gesture_tag     = {};
+    bool                         gesture_active  = false;
+    Sculptor::EnvelopeCurveState ui;
+};
+
+// Canvas popup commands are only queued during render; the add commands run
+// afterwards against the committed bank.
+enum OscCanvasCommand {
+    osc_cmd_none,
+    osc_cmd_add_oscillator,
+    osc_cmd_add_envelope,
+    osc_cmd_add_lfo,
+    osc_cmd_add_parameter,
+    osc_cmd_change_target_param
+};
+
+// Effects canvas and node-menu commands, queued during render and run
+// after the drain against the committed bank.
+enum FxCanvasCommand {
+    fx_cmd_none,
+    fx_cmd_add_effect,
+    fx_cmd_add_lfo,
+    fx_cmd_change_type
+};
+
+// The delete veto needs the graph to report a specific refusal, so the
+// mapping rides with a pointer to the widget instance it describes.
+struct OscDeleteVetoContext {
+    const Sculptor::OscGraphMapping* mapping;
+    Sculptor::Graph*                 graph;
+};
+
 namespace {
 
 // The scan-refusal messages are shared by the save path and the browser so the
@@ -27,23 +70,9 @@ const char* const library_oversized_refusal    = "Synth: %s holds a record too l
 const char* const library_invalid_save_refusal = "Synth: %s is not a valid instrument library; saving is refused";
 const char* const library_invalid_open_refusal = "Synth: %s is invalid or unreadable";
 
-// Pressing a keyboard key submits plain note events through the synth's live-MIDI
-// input, like any external keyboard; the synth knows nothing about the editor.
-// Returns false when the event was dropped (input ring buffer full).
-bool submit_note_event(uint32_t channel, uint32_t note, bool note_on)
-{
-    Synth::MidiEvent event = {};
-    event.event            = note_on ? Synth::EvType::note_on : Synth::EvType::note_off;
-    event.channel          = static_cast<uint8_t>(channel);
-    event.note             = static_cast<uint8_t>(note);
-    event.note_data        = 127;
-    return Synth::submit_external_midi_event(event);
-}
-
 Synth::InstrumentEditorBank instr_bank; // GUI-thread-owned editable bank (names included).
 Sculptor::UndoRedo          undo_redo;
 constexpr uint32_t          undo_depth = 10;
-uint8_t                     undo_buf[(sizeof(Synth::InstrumentEditorBank) + 2 * sizeof(uint32_t)) * undo_depth];
 
 // Queue for shipping edited banks from the GUI to the synth audio thread.
 Synth::BankUpdateQueue bank_queue;
@@ -84,48 +113,12 @@ bool                         fx_graph_reproject = false;
 // the projection reads it, the bank never stores it.
 bool fx_lfo_pinned[Synth::max_lfos] = {};
 
-// Per-envelope-node state-widget contexts, indexed by graph node index and
-// rebound on every projection.  A reset on projection also aborts gestures
-// and selections, which cannot outlive the graph they were made in.  The
-// projection generation gates in-flight gestures against envelope pool
-// compaction that remaps descriptor ids without a re-projection.
-struct EnvelopeWidgetContext {
-    uint32_t                     node_idx        = Sculptor::pool_no_slot;
-    Sculptor::SynthEditor*       editor          = nullptr;
-    uint32_t                     generation      = 0;
-    Synth::EnvelopeDescriptor    gesture_start   = {};
-    uint32_t                     gesture_desc_id = 0;
-    Sculptor::UndoGroupTag       gesture_tag     = {};
-    bool                         gesture_active  = false;
-    Sculptor::EnvelopeCurveState ui;
-};
-
 EnvelopeWidgetContext envelope_widget_contexts[Sculptor::max_nodes];
 uint32_t              osc_graph_generation = 0;
 
-// Canvas popup commands are only queued during render; the add commands run
-// afterwards against the committed bank.
-enum OscCanvasCommand {
-    osc_cmd_none,
-    osc_cmd_add_oscillator,
-    osc_cmd_add_envelope,
-    osc_cmd_add_lfo,
-    osc_cmd_add_parameter,
-    osc_cmd_change_target_param
-};
-
 OscCanvasCommand osc_canvas_command         = osc_cmd_none;
 uint32_t         osc_canvas_retarget_node   = Sculptor::pool_no_slot; // pending osc_cmd_change_target_param
-uint32_t         osc_canvas_retarget_target = 0;                      // pending osc_cmd_change_target_param
-
-// Effects canvas and node-menu commands, queued during render and run
-// after the drain against the committed bank.
-enum FxCanvasCommand {
-    fx_cmd_none,
-    fx_cmd_add_effect,
-    fx_cmd_add_lfo,
-    fx_cmd_change_type
-};
+uint32_t         osc_canvas_retarget_target = 0;
 
 FxCanvasCommand   fx_canvas_command = fx_cmd_none;
 Synth::EffectType fx_canvas_type    = Synth::EffectType::none;
@@ -162,25 +155,86 @@ constexpr uint32_t fx_tag_value     = 32;
 constexpr uint32_t fx_tag_add       = 33;
 constexpr uint32_t fx_tag_type      = 34;
 constexpr uint32_t fx_tag_add_lfo   = 35; // id0 = the fresh descriptor id
-constexpr uint32_t fx_tag_node_move = 36; // id0 = the moved node (pool index)
-
-void init_osc_graph_widget();
-
-// The delete veto needs the graph to report a specific refusal, so the
-// mapping rides with a pointer to the widget instance it describes.
-struct OscDeleteVetoContext {
-    const Sculptor::OscGraphMapping* mapping;
-    Sculptor::Graph*                 graph;
-};
+constexpr uint32_t fx_tag_node_move = 36;
 
 OscDeleteVetoContext osc_veto_context = { &osc_mapping, &osc_graph };
+
+// Layout of every node as the projection built it: a node whose live layout
+// still matches needs no layout record, so records stay sparse.
+vmath::vec2 projected_position[Sculptor::max_nodes];
+float       projected_width[Sculptor::max_nodes];
+float       projected_height[Sculptor::max_nodes];
+
+static const char bank_state_path[] = "assets/instrument_bank.synth";
+
+static_assert(sizeof(Synth::BankUpdateQueue) <= 2 * sizeof(Synth::InstrumentBank) + 32);
+
+// Transactional command scratch: structural commands mutate this candidate, validate it,
+// and only then commit it over the editable bank (see commit_candidate).
+Synth::InstrumentEditorBank candidate;
+
+// One clipboard document: copy encodes into it, paste decodes out of it.
+static char                         zone_clipboard_text[64 * 1024];
+static Synth::Instrument            clipboard_decoded_instrument;
+static Synth::EnvelopeDescriptor    clipboard_decoded_envelopes[Synth::instrument_max_envelopes];
+static Synth::LFODescriptor         clipboard_decoded_lfos[Synth::instrument_max_lfos];
+static Synth::InstrumentGraphLayout clipboard_source_layout[Synth::instrument_graph_layout_capacity];
+static Synth::InstrumentGraphLayout clipboard_decoded_layout[Synth::instrument_graph_layout_capacity];
+uint8_t                             undo_buf[(sizeof(Synth::InstrumentEditorBank) + 2 * sizeof(uint32_t)) * undo_depth];
+static_assert(sizeof(undo_buf) <= undo_depth * (sizeof(Synth::InstrumentEditorBank) + 2 * sizeof(uint32_t)));
+
+// Banks: ten undo snapshots, editable/candidate/undo scratch, library load/save,
+// JSON decode and clipboard candidate. Runtime, pending publish and clipboard
+// model validation each own a distinct InstrumentBank; the queue owns two more.
+constexpr size_t editor_resident_state_bytes =
+    (undo_depth + 7) * sizeof(Synth::InstrumentEditorBank) + 3 * sizeof(Synth::InstrumentBank) + sizeof(bank_queue) +
+    1212416 +                                                  // JSON text, tokens and keys
+    sizeof(Sculptor::SynthEditor) +                            // includes the browser's entry/category arrays
+    Synth::library_max_records * sizeof(Synth::LibraryEntry) + // library rewrite index
+    64 * 1024 +                                                // library record-copy chunk
+    sizeof(undo_redo) + 2 * undo_depth * sizeof(uint32_t) + sizeof(osc_graph) + sizeof(osc_mapping) +
+    sizeof(fx_mapping) + sizeof(envelope_widget_contexts) + sizeof(fx_lfo_pinned) + sizeof(projected_position) +
+    sizeof(projected_width) + sizeof(projected_height) + sizeof(zone_clipboard_text) +
+    sizeof(clipboard_decoded_instrument) + sizeof(clipboard_decoded_envelopes) + sizeof(clipboard_decoded_lfos) +
+    sizeof(clipboard_source_layout) + sizeof(clipboard_decoded_layout) +
+    sizeof(Synth::Instrument) + // codec document model
+    Synth::instrument_max_envelopes * sizeof(Synth::EnvelopeDescriptor) +
+    Synth::instrument_max_lfos * sizeof(Synth::LFODescriptor) + Synth::num_mod_targets * sizeof(bool) +
+    2 * sizeof(uint32_t) +
+    Synth::instrument_graph_layout_capacity *
+        (sizeof(Synth::InstrumentGraphLayout) + 2 * sizeof(Synth::GraphNodeLayout)) +
+    (Synth::max_lfos + Synth::instrument_max_envelopes + Synth::instrument_max_lfos) * sizeof(uint16_t) +
+    Synth::max_name_len + Sculptor::notification_state_bytes +
+    2 * Synth::instrument_graph_layout_capacity *
+        (sizeof(Synth::InstrumentGraphLayout) + sizeof(uint8_t) * (1 + Synth::num_mod_targets) + 2) +
+    Synth::instrument_graph_layout_capacity *
+        (sizeof(Synth::InstrumentGraphLayout) + sizeof(Synth::GraphNodeLayout) + sizeof(void*)) +
+    4096; // remaining editor scalar flags, constants and alignment
+static_assert(editor_resident_state_bytes <= 16 * 1024 * 1024);
+
+} // namespace
+
+// Pressing a keyboard key submits plain note events through the synth's live-MIDI
+// input, like any external keyboard; the synth knows nothing about the editor.
+// Returns false when the event was dropped (input ring buffer full).
+static bool submit_note_event(uint32_t channel, uint32_t note, bool note_on)
+{
+    Synth::MidiEvent event = {};
+    event.event            = note_on ? Synth::EvType::note_on : Synth::EvType::note_off;
+    event.channel          = static_cast<uint8_t>(channel);
+    event.note             = static_cast<uint8_t>(note);
+    event.note_data        = 127;
+    return Synth::submit_external_midi_event(event);
+}
+
+static void init_osc_graph_widget();
 
 // Fixed nodes are structural: the MIDI input nodes and the oscillator sum
 // node cannot be deleted.  Oscillator layer nodes remove their layer and
 // generator nodes are freely deletable, so neither is vetoed - except the
 // last remaining oscillator layer: an instrument needs one layer, and a
 // commit-time refusal would delete the node for one frame and resurrect it.
-bool osc_node_delete_veto(void* user_data, uint32_t node_idx)
+static bool osc_node_delete_veto(void* user_data, uint32_t node_idx)
 {
     OscDeleteVetoContext* context = static_cast<OscDeleteVetoContext*>(user_data);
     // The context is the file-static initializer above: both pointers are
@@ -202,7 +256,7 @@ bool osc_node_delete_veto(void* user_data, uint32_t node_idx)
 
 // The canvas menu is fully caller-provided; these items cover every node
 // kind the graph can express.
-void osc_canvas_menu(void* user_data)
+static void osc_canvas_menu(void* user_data)
 {
     (void)user_data;
     if (ImGui::MenuItem("Add Oscillator")) {
@@ -223,7 +277,7 @@ void osc_canvas_menu(void* user_data)
 // five connectable targets (the target re-key; free-text renaming lives in
 // the title editor).  A derived parameter (uid == 0) cannot change target: the
 // generator bindings would re-derive the old parameter.
-bool osc_node_menu(void* user_data, uint32_t node_idx)
+static bool osc_node_menu(void* user_data, uint32_t node_idx)
 {
     (void)user_data;
     if (node_idx >= Sculptor::max_nodes || ! osc_graph.node_occupied(node_idx)) {
@@ -254,7 +308,7 @@ bool osc_node_menu(void* user_data, uint32_t node_idx)
 // The effects projection vetoes only its fixed endpoints; effect nodes are
 // freely deletable (the drain removes the chain slot) and LFO node deletion
 // clears this chain's references to the descriptor.
-bool fx_node_delete_veto(void* user_data, uint32_t node_idx)
+static bool fx_node_delete_veto(void* user_data, uint32_t node_idx)
 {
     (void)user_data;
     return node_idx == fx_mapping.input_node || node_idx == fx_mapping.output_node || node_idx == fx_mapping.midi_node;
@@ -264,10 +318,10 @@ bool fx_node_delete_veto(void* user_data, uint32_t node_idx)
 // Value wire (the wire is the binding), a serial In dot takes audio from
 // the fixed input or an effect's Out.  Everything else refuses with a
 // message naming the rule it broke.
-bool fx_connection_validator(void*              user_data,
-                             Sculptor::Graph&   graph,
-                             Sculptor::EndPoint output,
-                             Sculptor::EndPoint input)
+static bool fx_connection_validator(void*              user_data,
+                                    Sculptor::Graph&   graph,
+                                    Sculptor::EndPoint output,
+                                    Sculptor::EndPoint input)
 {
     (void)user_data;
     if (output.node_idx == input.node_idx) {
@@ -307,7 +361,7 @@ bool fx_connection_validator(void*              user_data,
 }
 
 // Canvas menu: the six real effect types, capped by the chain length.
-void fx_canvas_menu(void* user_data)
+static void fx_canvas_menu(void* user_data)
 {
     (void)user_data;
     const Synth::EffectChainBinding& chain = Sculptor::fx_graph_chain(&instr_bank.bank, fx_mapping.chain);
@@ -331,7 +385,7 @@ void fx_canvas_menu(void* user_data)
 // Node menu on effect nodes: type replacement.  Chain order is a wire
 // gesture (drag the connector), LFO nodes carry only their own rows, so
 // the callback reports no items for them.
-bool fx_node_menu(void* user_data, uint32_t node_idx)
+static bool fx_node_menu(void* user_data, uint32_t node_idx)
 {
     (void)user_data;
     const int32_t slot = Sculptor::fx_effect_slot_of(fx_mapping, node_idx);
@@ -356,15 +410,9 @@ bool fx_node_menu(void* user_data, uint32_t node_idx)
     return true;
 }
 
-// Layout of every node as the projection built it: a node whose live layout
-// still matches needs no layout record, so records stay sparse.
-vmath::vec2 projected_position[Sculptor::max_nodes];
-float       projected_width[Sculptor::max_nodes];
-float       projected_height[Sculptor::max_nodes];
-
 // Whether an occupied node's live layout still matches the projected
 // snapshot: a node the user has not touched needs no layout record.
-bool node_layout_moved(uint32_t node)
+static bool node_layout_moved(uint32_t node)
 {
     const Sculptor::Node& node_ref = osc_graph.node(node);
     return node_ref.position.x != projected_position[node].x || node_ref.position.y != projected_position[node].y ||
@@ -374,7 +422,7 @@ bool node_layout_moved(uint32_t node)
 
 // Re-bases one node's snapshot on its live layout, after a commit or a
 // re-projection.
-void snapshot_node_layout(uint32_t node)
+static void snapshot_node_layout(uint32_t node)
 {
     const Sculptor::Node& node_ref = osc_graph.node(node);
     projected_position[node]       = node_ref.position;
@@ -391,7 +439,7 @@ void snapshot_node_layout(uint32_t node)
 // nullptr when the node is not a live envelope instance.  Re-resolved every
 // frame so envelope pool compaction cannot leave the widget pointing at a
 // recycled descriptor.
-const Synth::EnvelopeDescriptor* envelope_widget_descriptor(uint32_t node_idx, uint32_t* out_desc_id)
+static const Synth::EnvelopeDescriptor* envelope_widget_descriptor(uint32_t node_idx, uint32_t* out_desc_id)
 {
     for (uint32_t i = 0; i < osc_mapping.detached_count; ++i) {
         const Sculptor::DetachedNode& detached = osc_mapping.detached[i];
@@ -405,7 +453,7 @@ const Synth::EnvelopeDescriptor* envelope_widget_descriptor(uint32_t node_idx, u
     return nullptr;
 }
 
-void init_osc_graph_widget()
+static void init_osc_graph_widget()
 {
     static bool inited = false;
     if (inited) {
@@ -427,7 +475,7 @@ void init_osc_graph_widget()
 // stays two undo entries while one drag gesture coalesces through the
 // unchanged tag; a multi-node drag takes a fresh unique tag, so a later
 // single-node move of the lowest node cannot amend the multi-node entry.
-uint32_t graph_moved_node(uint32_t* moved_count)
+static uint32_t graph_moved_node(uint32_t* moved_count)
 {
     *moved_count    = 0;
     uint32_t lowest = Sculptor::pool_no_slot;
@@ -445,7 +493,7 @@ uint32_t graph_moved_node(uint32_t* moved_count)
 
 // Re-bases the projected-layout snapshot on the live graph after a commit, so
 // an unchanged layout never commits twice.
-void refresh_projected_layout()
+static void refresh_projected_layout()
 {
     for (uint32_t node = 0; node < Sculptor::max_nodes; ++node) {
         if (osc_graph.node_occupied(node)) {
@@ -455,7 +503,7 @@ void refresh_projected_layout()
 }
 
 // Moves one existing layout record onto a node's live position.
-void write_record_position(Synth::InstrumentEditorBank* bank, int32_t record_idx, const Sculptor::Node& node_ref)
+static void write_record_position(Synth::InstrumentEditorBank* bank, int32_t record_idx, const Sculptor::Node& node_ref)
 {
     Synth::GraphNodeLayout& record = bank->graph_layout[record_idx];
     record.x                       = node_ref.position.x;
@@ -469,7 +517,7 @@ void write_record_position(Synth::InstrumentEditorBank* bank, int32_t record_idx
 // own record in place.  A node still at its projected layout writes nothing,
 // so records stay sparse.  Returns false when a moved node would need a new
 // record but the global record list is full.
-bool sync_osc_graph_layout(Synth::InstrumentEditorBank* bank)
+static bool sync_osc_graph_layout(Synth::InstrumentEditorBank* bank)
 {
     const uint32_t channel = osc_graph_zone_channel;
     const uint32_t zone    = osc_graph_zone_index;
@@ -580,7 +628,7 @@ bool sync_osc_graph_layout(Synth::InstrumentEditorBank* bank)
     return true;
 }
 
-void undo_init_once()
+static void undo_init_once()
 {
     static bool inited = false;
 
@@ -590,7 +638,7 @@ void undo_init_once()
     }
 }
 
-bool pump_bank_publish()
+static bool pump_bank_publish()
 {
     if (bank_changes_pending) {
         if (! Synth::push_bank_update(&bank_queue, pending_bank)) {
@@ -603,9 +651,7 @@ bool pump_bank_publish()
     return true;
 }
 
-static const char bank_state_path[] = "assets/instrument_bank.synth";
-
-bool publish_edited_bank()
+static bool publish_edited_bank()
 {
     if (! Synth::validate_instrument_bank(&instr_bank.bank)) {
         Sculptor::notify_error("Synth: refusing to publish an invalid instrument bank");
@@ -629,7 +675,7 @@ bool publish_edited_bank()
     return pump_bank_publish();
 }
 
-void drain_bank_updates()
+static void drain_bank_updates()
 {
     while (const Synth::InstrumentBank* const packet = Synth::peek_bank_update(&bank_queue)) {
         Synth::set_current_bank(*packet);
@@ -639,7 +685,7 @@ void drain_bank_updates()
 
 // The origin packs the channel and pane the edit was made in; undo/redo
 // refocus them so a whole-bank restore is never silent about what changed.
-void editor_snapshot(uint32_t origin)
+static void editor_snapshot(uint32_t origin)
 {
     undo_init_once();
 
@@ -654,7 +700,7 @@ void editor_snapshot(uint32_t origin)
 // The entry's origin says where its edit was made: the redo entry this
 // creates replays that edit, and the caller refocuses that channel and
 // pane so a whole-bank restore is never silent about what changed.
-bool editor_undo(uint32_t* origin)
+static bool editor_undo(uint32_t* origin)
 {
     undo_init_once();
 
@@ -687,7 +733,7 @@ bool editor_undo(uint32_t* origin)
 
 // A redo entry's payload reads forward, so its origin sits at the start:
 // the edit it replays becomes visible at that origin again.
-bool editor_redo(uint32_t* origin)
+static bool editor_redo(uint32_t* origin)
 {
     undo_init_once();
 
@@ -724,7 +770,7 @@ bool editor_redo(uint32_t* origin)
 // stages and validates before committing), so a corrupt file never leaves the
 // editable bank half-replaced.  The only caller is startup, where a missing file
 // is a fresh project and stays silent.
-bool load_editor_bank(const char* path)
+static bool load_editor_bank(const char* path)
 {
     static Synth::InstrumentEditorBank scratch;
 
@@ -748,14 +794,13 @@ bool load_editor_bank(const char* path)
         return false;
     }
 
-    editor_snapshot(0);            // baseline: the first undo focus is channel 0
     instr_bank          = scratch; // names ride in the bank file
     osc_graph_reproject = true;
     fx_graph_reproject  = true;
     return publish_edited_bank();
 }
 
-void init_editor()
+static void init_editor()
 {
     static_assert(std::is_trivially_copyable_v<Synth::InstrumentEditorBank>);
 
@@ -774,14 +819,7 @@ void init_editor()
     publish_edited_bank();
 }
 
-static_assert(sizeof(undo_buf) <= undo_depth * (sizeof(Synth::InstrumentEditorBank) + 2 * sizeof(uint32_t)));
-static_assert(sizeof(Synth::BankUpdateQueue) <= 2 * sizeof(Synth::InstrumentBank) + 32);
-
-// Transactional command scratch: structural commands mutate this candidate, validate it,
-// and only then commit it over the editable bank (see commit_candidate).
-Synth::InstrumentEditorBank candidate;
-
-uint32_t zone_count(const Synth::InstrumentBank& bank, uint32_t channel)
+static uint32_t zone_count(const Synth::InstrumentBank& bank, uint32_t channel)
 {
     uint32_t num = 0;
     while (num < Synth::max_instr_per_channel && bank.channel_zones[channel][num].start_note)
@@ -791,7 +829,7 @@ uint32_t zone_count(const Synth::InstrumentBank& bank, uint32_t channel)
 
 // The zone whose instrument Save/Save As write: the selected zone, or the note-0 zone
 // when the selection is out of range. pool_no_slot for an empty or disabled channel.
-uint32_t save_zone_entry(const Synth::InstrumentBank& bank, uint32_t channel, int32_t selected)
+static uint32_t save_zone_entry(const Synth::InstrumentBank& bank, uint32_t channel, int32_t selected)
 {
     if (! bank.channel_enabled[channel])
         return pool_no_slot;
@@ -804,7 +842,7 @@ uint32_t save_zone_entry(const Synth::InstrumentBank& bank, uint32_t channel, in
     return static_cast<uint32_t>(selected);
 }
 
-constexpr bool is_black_note(uint32_t note)
+static constexpr bool is_black_note(uint32_t note)
 {
     switch (note % 12) {
         case 1:
@@ -819,7 +857,7 @@ constexpr bool is_black_note(uint32_t note)
 }
 
 // Black keys below pitch class p within its octave: C# D# F# G# A# = pcs 1 3 6 8 10.
-constexpr uint32_t black_notes_below_pc(uint32_t pc)
+static constexpr uint32_t black_notes_below_pc(uint32_t pc)
 {
     switch (pc) {
         case 0:
@@ -846,13 +884,13 @@ constexpr uint32_t black_notes_below_pc(uint32_t pc)
 // 0-based index (0..74) of the white key a note is drawn on.  For black notes this is
 // the white key to the note's right; the black key is drawn straddling the boundary to
 // its left, so this also locates that boundary.
-constexpr uint32_t white_index_of(uint32_t note)
+static constexpr uint32_t white_index_of(uint32_t note)
 {
     return note - 5u * (note / 12u) - black_notes_below_pc(note % 12u);
 }
 
 // The note drawn on white key wk (0..74).
-constexpr uint32_t note_at_white(uint32_t wk)
+static constexpr uint32_t note_at_white(uint32_t wk)
 {
     constexpr uint32_t white_in_octave[7] = { 0, 2, 4, 5, 7, 9, 11 };
     return 12u * (wk / 7u) + white_in_octave[wk % 7u];
@@ -860,7 +898,7 @@ constexpr uint32_t note_at_white(uint32_t wk)
 
 // Left edge of the key (white or black) that starts at `note`, relative to the
 // keyboard's origin; zone boundaries are drawn here.
-float boundary_x_of(uint32_t note, float white_w, float black_w)
+static float boundary_x_of(uint32_t note, float white_w, float black_w)
 {
     float x = static_cast<float>(white_index_of(note)) * white_w;
     if (is_black_note(note))
@@ -870,7 +908,7 @@ float boundary_x_of(uint32_t note, float white_w, float black_w)
 
 // The chain's kind-4 record carrying a projected node's saved place, -1
 // when the node never moved.
-int32_t find_fx_layout_record(const Synth::InstrumentEditorBank& bank, uint32_t chain, const char* name)
+static int32_t find_fx_layout_record(const Synth::InstrumentEditorBank& bank, uint32_t chain, const char* name)
 {
     for (uint32_t i = 0; i < bank.graph_layout_count; ++i) {
         const Synth::GraphNodeLayout& record = bank.graph_layout[i];
@@ -885,7 +923,7 @@ int32_t find_fx_layout_record(const Synth::InstrumentEditorBank& bank, uint32_t 
 // places ride the bank, so re-projections, undo/redo and file saves all
 // restore them. Returns false when a moved node would need a new record
 // but the global record list is full.
-bool sync_fx_graph_layout(Synth::InstrumentEditorBank* bank)
+static bool sync_fx_graph_layout(Synth::InstrumentEditorBank* bank)
 {
     const uint32_t chain = fx_mapping.chain;
     for (uint32_t node = 0; node < Sculptor::max_nodes; ++node) {
@@ -911,8 +949,6 @@ bool sync_fx_graph_layout(Synth::InstrumentEditorBank* bank)
     }
     return true;
 }
-
-} // anonymous namespace
 
 void Sculptor::SynthEditor::reproject_osc_graph(uint32_t channel, uint32_t zone)
 {
@@ -2423,6 +2459,116 @@ void Sculptor::SynthEditor::do_zone_delete(uint32_t channel, uint32_t entry)
         osc_graph_reproject = true;
 }
 
+void Sculptor::SynthEditor::do_zone_copy_instrument(uint32_t channel, uint32_t note)
+{
+    const Synth::InstrumentBank& bank  = instr_bank.bank;
+    const int32_t                entry = static_cast<int32_t>(Synth::zone_entry_at(bank.channel_zones[channel], note));
+    if (entry < 0)
+        return;
+
+    const uint32_t           instrument = bank.channel_zones[channel][entry].instrument;
+    const Synth::Instrument& source     = bank.instruments.entries[instrument];
+    uint32_t len = Synth::encode_instrument_json(zone_clipboard_text, sizeof(zone_clipboard_text), &source, &bank);
+    uint32_t envelope_count = 0;
+    uint32_t lfo_count      = 0;
+    uint32_t source_count   = 0;
+    uint32_t layout_count   = 0;
+    if (! len ||
+        ! Synth::decode_instrument_json(zone_clipboard_text,
+                                        len,
+                                        &clipboard_decoded_instrument,
+                                        clipboard_decoded_envelopes,
+                                        &envelope_count,
+                                        clipboard_decoded_lfos,
+                                        &lfo_count) ||
+        ! Sculptor::encode_instrument_graph_layout(source,
+                                                   bank,
+                                                   instr_bank,
+                                                   channel,
+                                                   static_cast<uint32_t>(entry),
+                                                   clipboard_source_layout,
+                                                   Synth::instrument_graph_layout_capacity,
+                                                   &source_count) ||
+        ! Sculptor::normalize_instrument_graph_layout(source,
+                                                      bank.envelopes.entries,
+                                                      bank.envelopes.num_allocated,
+                                                      bank.lfos.entries,
+                                                      bank.lfos.num_allocated,
+                                                      clipboard_source_layout,
+                                                      source_count,
+                                                      clipboard_decoded_instrument,
+                                                      clipboard_decoded_envelopes,
+                                                      envelope_count,
+                                                      clipboard_decoded_lfos,
+                                                      lfo_count,
+                                                      clipboard_decoded_layout,
+                                                      Synth::instrument_graph_layout_capacity,
+                                                      &layout_count) ||
+        ! (len = Synth::encode_instrument_json(zone_clipboard_text,
+                                               sizeof(zone_clipboard_text),
+                                               &source,
+                                               &bank,
+                                               clipboard_decoded_layout,
+                                               layout_count))) {
+        Sculptor::notify_error("Synth: cannot copy zone: the instrument did not encode");
+        return;
+    }
+    zone_clipboard_text[len] = 0;
+    ImGui::SetClipboardText(zone_clipboard_text);
+}
+
+void Sculptor::SynthEditor::do_zone_paste_instrument(uint32_t channel, uint32_t note)
+{
+    const Synth::InstrumentBank& bank  = instr_bank.bank;
+    const int32_t                entry = static_cast<int32_t>(Synth::zone_entry_at(bank.channel_zones[channel], note));
+    if (entry < 0)
+        return;
+
+    const char* const text = ImGui::GetClipboardText();
+    if (! text || ! text[0]) {
+        Sculptor::notify_error("Synth: cannot paste: the clipboard holds no instrument document");
+        return;
+    }
+
+    uint32_t envelope_count = 0;
+    uint32_t lfo_count      = 0;
+    uint32_t layout_count   = 0;
+    if (! Synth::decode_instrument_json(text,
+                                        static_cast<uint32_t>(strlen(text)),
+                                        &clipboard_decoded_instrument,
+                                        clipboard_decoded_envelopes,
+                                        &envelope_count,
+                                        clipboard_decoded_lfos,
+                                        &lfo_count,
+                                        clipboard_decoded_layout,
+                                        Synth::instrument_graph_layout_capacity,
+                                        &layout_count)) {
+        Sculptor::notify_error("Synth: cannot paste: not a valid instrument document");
+        return;
+    }
+    if (! Sculptor::replace_zone_instrument_candidate(instr_bank,
+                                                      channel,
+                                                      static_cast<uint32_t>(entry),
+                                                      clipboard_decoded_instrument,
+                                                      clipboard_decoded_envelopes,
+                                                      envelope_count,
+                                                      clipboard_decoded_lfos,
+                                                      lfo_count,
+                                                      clipboard_decoded_layout,
+                                                      layout_count,
+                                                      &candidate)) {
+        Sculptor::notify_error("Synth: cannot paste: the instrument replacement was refused");
+        return;
+    }
+    // Each paste is its own undo step, so the undo focus shows the change.
+    Sculptor::undo_group_reset(&osc_undo_group);
+    selected_target   = channel;
+    show_effects_mode = false;
+    effects_tab_pend  = 0;
+    if (commit_candidate(candidate, Sculptor::UndoGroupTag{ osc_tag_fresh, ++osc_fresh_tag_serial, 0 }))
+        osc_graph_reproject = true;
+}
+
 void Sculptor::SynthEditor::gui_zone_menu()
 {
     if (zone_menu_open) {
@@ -2451,6 +2597,12 @@ void Sculptor::SynthEditor::gui_zone_menu()
         rename_zone       = true;
         rename_popup_open = true;
     }
+    if (ImGui::MenuItem("Copy to Clipboard", nullptr, false, entry >= 0))
+        do_zone_copy_instrument(channel, note);
+    // The replacement transaction evaluates capacity and reports refusal
+    // visibly, so the menu item stays enabled.
+    if (ImGui::MenuItem("Paste from Clipboard", nullptr, false, entry >= 0))
+        do_zone_paste_instrument(channel, note);
     if (ImGui::MenuItem("Add to previous zone", nullptr, false, entry > 0))
         do_zone_join_previous(channel, note);
     if (ImGui::MenuItem("Add to next zone", nullptr, false, has_next))

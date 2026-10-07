@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 // SPDX-FileCopyrightText: Copyright (c) 2021-2026 Chris Dragan
 
+#include "sculptor_instr_bank.h"
 #include "sculptor_undo.h"
 
 #include <stdio.h>
@@ -482,8 +483,61 @@ static void test_edit_origin_entry()
     TEST(ur.redo_empty());
 }
 
+// Source inspection pins the GUI startup path; real UndoRedo below exercises
+// whole-bank snapshots without running the GUI or writing persistent assets.
+static void test_startup_load_undo_baseline()
+{
+    static char source[256 * 1024];
+    FILE* const file = fopen("sculptor/sculptor_instr_edit.cpp", "rb");
+    TEST(file != nullptr);
+    if (! file)
+        return;
+    const size_t length = fread(source, 1, sizeof(source) - 1, file);
+    TEST(! ferror(file));
+    TEST(feof(file));
+    fclose(file);
+    source[length]                = 0;
+    const char* const load        = strstr(source, "static bool load_editor_bank(const char* path)");
+    const char* const startup     = load ? strstr(load, "static void init_editor()") : nullptr;
+    const char* const startup_end = startup ? strstr(startup, "static uint32_t zone_count(") : nullptr;
+    TEST(load != nullptr && startup != nullptr && startup_end != nullptr);
+    if (! load || ! startup || ! startup_end)
+        return;
+    const char* const snapshot = strstr(load, "editor_snapshot(");
+    TEST(! snapshot || snapshot >= startup_end);
+    const char* const assignment = strstr(load, "= scratch;");
+    TEST(assignment && assignment < startup);
+
+    static Synth::InstrumentEditorBank loaded;
+    static Synth::InstrumentEditorBank editable;
+    loaded                         = {};
+    loaded.bank.channel_enabled[3] = 1;
+    strcpy(loaded.channel_names[3], "Loaded channel");
+    alignas(4) static uint8_t storage[2 * (sizeof(loaded) + 2 * sizeof(uint32_t))];
+    UndoRedo                  undo;
+    undo.init(storage);
+    editable = loaded;
+    TEST(undo.undo_empty());
+    TEST(! undo.init_undo());
+
+    undo.init_undo_push();
+    undo.push(&editable, sizeof(editable));
+    undo.push(uint32_t{ 3 });
+    TEST(undo.finish_undo_push());
+    editable.bank.channel_enabled[3] = 0;
+    TEST(undo.init_undo());
+    TEST(undo.pop_u32() == 3);
+    undo.pop(&editable, sizeof(editable));
+    undo.finish_undo();
+    TEST(memcmp(&editable, &loaded, sizeof(loaded)) == 0);
+    TEST(undo.undo_empty());
+    TEST(! undo.init_undo());
+    TEST(memcmp(&editable, &loaded, sizeof(loaded)) == 0);
+}
+
 int main()
 {
+    test_startup_load_undo_baseline();
     test_edit_origin_entry();
     test_empty_state();
     test_single_undo_push_pop();

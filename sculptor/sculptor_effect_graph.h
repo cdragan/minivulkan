@@ -37,6 +37,9 @@ struct EffectTypeInfo {
 // limits: the shaders already clamp or tolerate out-of-range params.
 const EffectTypeInfo& effect_type_info(Synth::EffectType type);
 
+// Whether a meaningful effect parameter binding references this LFO descriptor.
+bool effect_chain_uses_lfo(const Synth::EffectChainBinding& chain, uint32_t descriptor_id);
+
 // Neutral, audible base value for a newly added or retyped effect slot.
 float effect_param_default(Synth::EffectType type, uint32_t param);
 

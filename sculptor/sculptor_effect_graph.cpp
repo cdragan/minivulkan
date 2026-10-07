@@ -163,14 +163,21 @@ bool rebuild_param_inputs(const Sculptor::Graph&              graph,
     return true;
 }
 
+} // anonymous namespace
+
 // One LFO node per descriptor the chain's meaningful bindings reference or
 // the caller pinned; shared by the projection and the node-count preflight
 // so the two can never disagree on which descriptors cost a node.
-bool fx_lfo_is_projected(const Synth::EffectChainBinding& chain, const bool* pinned_lfos, uint32_t desc)
+static bool fx_lfo_is_projected(const Synth::EffectChainBinding& chain, const bool* pinned_lfos, uint32_t desc)
 {
     if (pinned_lfos != nullptr && pinned_lfos[desc - 1]) {
         return true;
     }
+    return Sculptor::effect_chain_uses_lfo(chain, desc);
+}
+
+bool Sculptor::effect_chain_uses_lfo(const Synth::EffectChainBinding& chain, uint32_t desc)
+{
     for (uint32_t slot = 0; slot < chain.num_effects; ++slot) {
         const uint32_t num_params = Synth::get_effect_param_floats(chain.effects[slot].type);
         for (uint32_t param = 0; param < num_params; ++param) {
@@ -181,7 +188,6 @@ bool fx_lfo_is_projected(const Synth::EffectChainBinding& chain, const bool* pin
     }
     return false;
 }
-} // anonymous namespace
 
 const Sculptor::EffectTypeInfo& Sculptor::effect_type_info(Synth::EffectType type)
 {

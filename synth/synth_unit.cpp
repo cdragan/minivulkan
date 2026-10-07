@@ -16,15 +16,118 @@
 #include "synth_parameters.h"
 #include "synth_serialize.h"
 #include "synth_soundtrack.h"
+// The clipboard layout tests measure a document's real parser token count with the
+// vendored parser the codec itself uses, so the measurement cannot drift from the
+// parser implementation. The parser builds warning-clean under -Wall only; its
+// integer-conversion noise is silenced the same way the codec's include does.
+#if defined(__clang__) || defined(__GNUC__)
+#    pragma GCC diagnostic push
+#    pragma GCC diagnostic ignored "-Wsign-conversion"
+#endif
+#if defined(_MSC_VER)
+#    pragma warning(push)
+#    pragma warning(disable : 4245)
+#endif
+#define JSMN_STATIC
+#include "../thirdparty/jsmn/jsmn.h"
+#if defined(_MSC_VER)
+#    pragma warning(pop)
+#endif
+#if defined(__clang__) || defined(__GNUC__)
+#    pragma GCC diagnostic pop
+#endif
 #include <cmath>
 #include <float.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #define TEST(test)                         \
     if (! (test)) {                        \
         failed(#test, __FILE__, __LINE__); \
     }
+
+namespace {
+
+// Fixed portable-record bound: the nine canonical nodes plus one envelope, one
+// LFO and one parameter group per projected (layer,target) cell.
+constexpr uint32_t max_portable_records = Synth::graph_canonical_node_count + 3u * Sculptor::max_param_nodes;
+static_assert(max_portable_records == Synth::instrument_graph_layout_capacity);
+static_assert(max_portable_records == 114, "9 canonical + 35 envelopes + 35 LFOs + 35 parameter groups");
+
+// Parser token bound the clipboard codec is specified to accept.
+constexpr uint32_t clipboard_token_bound = 8192;
+constexpr uint32_t fake_region_base      = 8192;
+
+// The editor's clipboard staging capacity. The copy path encodes into
+// capacity - 1 and terminates the document itself, so a document of L payload
+// bytes needs capacity >= L + 1. This mirrors the editor's staging buffer in
+// sculptor_instr_edit.cpp; a larger document must raise that buffer, never
+// truncate the document.
+constexpr uint32_t clipboard_capacity = 64 * 1024;
+
+// One instrument document with one saved position per node kind, assembled from
+// a fixed body and a caller-supplied record list, so a rejection test changes
+// only the record under inspection.
+const char clipboard_doc_head[] =
+    "{\"format\":\"synth-instrument-v1\",\"note_skew_semitones\":0,\"layer_skew_semitones\":0,"
+    "\"layers\":[{\"wave_a\":\"sine\",\"mode\":\"fm\",\"mod_ratio\":2,\"pitch_offset_semitones\":1.5,"
+    "\"volume\":{\"base\":0.8,\"envelope\":{\"points\":[{\"time_seconds\":0,\"level\":0.0625},"
+    "{\"time_seconds\":0.25,\"level\":0.5625},{\"time_seconds\":0.5,\"level\":1.0625}],\"sustain_start\":1,"
+    "\"sustain_end\":2},\"lfo\":{\"wave\":\"sine\",\"frequency_hz\":4,\"duty\":0.25,\"depth\":0.5,"
+    "\"depth_source\":\"velocity\",\"rate_source\":\"mod_wheel\",\"rate_scale_ms\":20}},"
+    "\"pitch\":{\"base\":0,\"envelope\":{\"points\":[{\"time_seconds\":0,\"level\":0.25},"
+    "{\"time_seconds\":0.5,\"level\":-0.25}],\"sustain_start\":0,\"sustain_end\":1}},"
+    "\"panning\":{\"base\":0.5},\"lowpass_cutoff\":{\"base\":2000},\"highpass_cutoff\":{\"base\":2000}}],";
+
+// The same instrument with a volume envelope byte-identical to the pitch
+// envelope's, which the decoder interns into one descriptor and the projection
+// therefore serves from one node.
+const char clipboard_alias_head[] =
+    "{\"format\":\"synth-instrument-v1\",\"note_skew_semitones\":0,\"layer_skew_semitones\":0,"
+    "\"layers\":[{\"wave_a\":\"sine\",\"mode\":\"fm\",\"mod_ratio\":2,\"pitch_offset_semitones\":1.5,"
+    "\"volume\":{\"base\":0.8,\"envelope\":{\"points\":[{\"time_seconds\":0,\"level\":0.25},"
+    "{\"time_seconds\":0.5,\"level\":-0.25}],\"sustain_start\":0,\"sustain_end\":1}},"
+    "\"pitch\":{\"base\":0,\"envelope\":{\"points\":[{\"time_seconds\":0,\"level\":0.25},"
+    "{\"time_seconds\":0.5,\"level\":-0.25}],\"sustain_start\":0,\"sustain_end\":1}},"
+    "\"panning\":{\"base\":0.5}}],";
+
+// The five records a copy of the clipboard fixture's zone carries: the sum node
+// (canonical numbering is input 0, sum 1, oscillator layer n = 2 + n, so this
+// one-layer zone owns no canonical index above 2), the volume envelope, the
+// volume LFO with its bound source pair, and the volume and pitch parameters.
+const char clipboard_doc_records[] = "{\"kind\":0,\"canonical_index\":1,\"x\":64,\"y\":32,\"width\":0,\"height\":0},"
+                                     "{\"kind\":1,\"layer\":0,\"target\":0,\"x\":120.5,\"y\":44.25,\"width\":220,"
+                                     "\"height\":120},"
+                                     "{\"kind\":2,\"layer\":0,\"target\":0,\"depth_source\":4,\"rate_source\":2,"
+                                     "\"x\":12.5,\"y\":-8.5,\"width\":0,\"height\":0},"
+                                     "{\"kind\":3,\"target\":0,\"parameter_ordinal\":0,\"x\":60,\"y\":-40,\"width\":0,"
+                                     "\"height\":0},"
+                                     "{\"kind\":3,\"target\":1,\"parameter_ordinal\":0,\"x\":-60,\"y\":40,\"width\":0,"
+                                     "\"height\":0}";
+
+} // namespace
+
+// Every output of one clipboard decode, so a rejected document can be shown to
+// have left all of them - both descriptor arrays and all three counts -
+// byte-identical.
+struct ClipboardDecode {
+    Synth::Instrument            instr;
+    Synth::EnvelopeDescriptor    envs[Synth::instrument_max_envelopes];
+    Synth::LFODescriptor         lfos[Synth::instrument_max_lfos];
+    Synth::InstrumentGraphLayout layout[max_portable_records];
+    uint32_t                     env_count;
+    uint32_t                     lfo_count;
+    uint32_t                     layout_count;
+};
+
+struct FakeWriter {
+    uint32_t next_node;
+    uint32_t dest_count;
+    uint32_t lfo_count;
+    uint16_t last_dest_node;
+    uint16_t last_dest_lfo_node;
+};
 
 static int exit_code = 0;
 
@@ -387,36 +490,24 @@ static void build_osc_graph_small_fixture(Synth::InstrumentBank* bank,
     instrument->note_skew_semitones                         = 0.1f;
 }
 
-namespace {
-
-constexpr uint32_t fake_region_base = 8192;
-
-struct FakeWriter {
-    uint32_t next_node;
-    uint32_t dest_count;
-    uint32_t lfo_count;
-    uint16_t last_dest_node;
-    uint16_t last_dest_lfo_node;
-};
-
-uint32_t fake_alloc_node(const void* ctx)
+static uint32_t fake_alloc_node(const void* ctx)
 {
     FakeWriter& writer = *static_cast<FakeWriter*>(const_cast<void*>(ctx));
     return writer.next_node++;
 }
 
-uint16_t fake_resolve_source(const void*, Synth::ModSource, uint32_t)
+static uint16_t fake_resolve_source(const void*, Synth::ModSource, uint32_t)
 {
     return 77; // arbitrary concrete node id
 }
 
-void fake_configure_dest(const void* ctx,
-                         uint32_t    node,
-                         uint16_t    lfo_node,
-                         float,
-                         Synth::SourceOp,
-                         const Synth::SourceParam*,
-                         uint32_t)
+static void fake_configure_dest(const void* ctx,
+                                uint32_t    node,
+                                uint16_t    lfo_node,
+                                float,
+                                Synth::SourceOp,
+                                const Synth::SourceParam*,
+                                uint32_t)
 {
     FakeWriter& writer = *static_cast<FakeWriter*>(const_cast<void*>(ctx));
     writer.dest_count++;
@@ -424,13 +515,13 @@ void fake_configure_dest(const void* ctx,
     writer.last_dest_lfo_node = lfo_node;
 }
 
-void fake_configure_lfo(const void* ctx, uint32_t, uint16_t, Synth::SourceOp, float, uint16_t, uint16_t, float)
+static void fake_configure_lfo(const void* ctx, uint32_t, uint16_t, Synth::SourceOp, float, uint16_t, uint16_t, float)
 {
     FakeWriter& writer = *static_cast<FakeWriter*>(const_cast<void*>(ctx));
     writer.lfo_count++;
 }
 
-const Synth::EffectNodeWriter fake_writer_binding(FakeWriter& writer)
+static const Synth::EffectNodeWriter fake_writer_binding(FakeWriter& writer)
 {
     const Synth::EffectNodeWriter result = { &writer,
                                              fake_alloc_node,
@@ -440,10 +531,10 @@ const Synth::EffectNodeWriter fake_writer_binding(FakeWriter& writer)
     return result;
 }
 
-Synth::EffectSlotBinding* enabled_effect(Synth::InstrumentBank& bank,
-                                         uint32_t               channel,
-                                         uint32_t               slot,
-                                         Synth::EffectType      type)
+static Synth::EffectSlotBinding* enabled_effect(Synth::InstrumentBank& bank,
+                                                uint32_t               channel,
+                                                uint32_t               slot,
+                                                Synth::EffectType      type)
 {
     Synth::EffectChainBinding& chain =
         (channel < Synth::max_channels) ? bank.channel_chains[channel] : bank.master_chain;
@@ -452,8 +543,6 @@ Synth::EffectSlotBinding* enabled_effect(Synth::InstrumentBank& bank,
     chain.effects[slot].enabled = true;
     return &chain.effects[slot];
 }
-
-} // namespace
 
 // ---- Instrument graph editor test helpers ----
 
@@ -709,6 +798,495 @@ static void build_parameter_fixture(Synth::InstrumentEditorBank* bank, Synth::In
     instrument->routing[Synth::mod_pitch].base_value = -2.0f;
 
     bank->bank.instruments.entries[0] = *instrument;
+}
+
+// ---------------------------------------------------------------------------
+// Clipboard portable layout records: fixtures, measurement and comparison.
+// ---------------------------------------------------------------------------
+
+// Real parser token count of one document under the vendored parser the codec
+// uses. Returns -1 on any parse failure, including a document needing more tokens
+// than the bound: it reports "cannot be measured within the bound", never a
+// partial count.
+static int32_t count_clipboard_tokens(const char* text, uint32_t len)
+{
+    static jsmntok_t tokens[clipboard_token_bound];
+    jsmn_parser      parser;
+    jsmn_init(&parser);
+    const int parsed = jsmn_parse(&parser, text, len, tokens, clipboard_token_bound);
+    return parsed < 0 ? -1 : static_cast<int32_t>(parsed);
+}
+
+static void fill_clipboard_sentinels(ClipboardDecode* out)
+{
+    memset(out, 0x5A, sizeof(*out));
+    // The count fields sentinel at the destination capacities rather than a
+    // bit pattern: a refused decode leaves them as lengths a later call in the
+    // same block could consume, and a capacity keeps every such read in bounds.
+    out->env_count    = Synth::instrument_max_envelopes;
+    out->lfo_count    = Synth::instrument_max_lfos;
+    out->layout_count = max_portable_records;
+}
+
+static bool clipboard_sentinels_intact(const ClipboardDecode* a, const ClipboardDecode* b)
+{
+    return memcmp(a, b, sizeof(*a)) == 0;
+}
+
+// Decodes `doc` into every tracked output with `layout_capacity` slots of layout
+// output.
+static bool decode_clipboard(ClipboardDecode* out, const char* doc, uint32_t layout_capacity)
+{
+    return Synth::decode_instrument_json(doc,
+                                         static_cast<uint32_t>(strlen(doc)),
+                                         &out->instr,
+                                         out->envs,
+                                         &out->env_count,
+                                         out->lfos,
+                                         &out->lfo_count,
+                                         out->layout,
+                                         layout_capacity,
+                                         &out->layout_count);
+}
+
+// Index of the first portable record matching a locator, where a field passed as
+// 0xFF is a wildcard, or -1 when no record matches.
+static int32_t find_portable(const Synth::InstrumentGraphLayout* records,
+                             uint32_t                            count,
+                             uint32_t                            kind,
+                             uint32_t                            layer,
+                             uint32_t                            target,
+                             uint32_t                            ordinal)
+{
+    for (uint32_t i = 0; i < count; i++) {
+        const Synth::InstrumentGraphLayout& r = records[i];
+        if (kind != 0xFFu && r.kind != kind) {
+            continue;
+        }
+        if (layer != 0xFFu && r.layer != layer) {
+            continue;
+        }
+        if (target != 0xFFu && r.target != target) {
+            continue;
+        }
+        if (ordinal != 0xFFu && r.parameter_ordinal != ordinal) {
+            continue;
+        }
+        return static_cast<int32_t>(i);
+    }
+    return -1;
+}
+
+// One zone of one channel: a single layer with a distinct envelope and a distinct
+// LFO on volume (depth from velocity, rate from mod wheel) and a second distinct
+// envelope on pitch, so the instrument projects canonical, envelope, LFO and
+// parameter nodes with pairwise distinct identities. No layout records, no
+// effect chain.
+static void build_clipboard_zone_fixture(Synth::InstrumentEditorBank* bank, Synth::Instrument* instrument)
+{
+    *bank                         = {};
+    *instrument                   = {};
+    bank->bank.channel_enabled[0] = 1;
+    TEST(bank->bank.instruments.allocate() == 0);
+    bank->bank.channel_zones[0][0].start_note = 1;
+    bank->bank.channel_zones[0][0].instrument = 0;
+
+    for (uint32_t e = 0; e < 2; e++) {
+        const uint32_t slot = bank->bank.envelopes.allocate();
+        TEST(slot != pool_no_slot);
+        Synth::EnvelopeDescriptor& env = bank->bank.envelopes.entries[slot];
+        env.num_points                 = 3;
+        env.sustain_first_point        = 1;
+        env.sustain_last_point         = 2;
+        env.min_value                  = -0.5f + 0.25f * static_cast<float>(e);
+        env.min_max_delta              = 1.0f / 32768.0f;
+        for (uint32_t p = 0; p < env.num_points; p++) {
+            env.points[p].position = static_cast<uint16_t>(100 * p + 1);
+            env.points[p].value    = static_cast<uint16_t>(0x2000 + 0x4000 * p + 0x100 * e);
+        }
+    }
+    const uint32_t lfo_slot = bank->bank.lfos.allocate();
+    TEST(lfo_slot != pool_no_slot);
+    Synth::LFODescriptor& lfo = bank->bank.lfos.entries[lfo_slot];
+    lfo.wave                  = Synth::WaveType::sine_wave;
+    lfo.duty                  = 0x40;
+    lfo.period_ms             = 250;
+    lfo.min_value             = -1.0f;
+    lfo.min_max_delta         = 2.0f;
+
+    instrument->layer_count                      = 1;
+    Synth::Oscillator& osc                       = instrument->layers[0];
+    osc.osc_type[0]                              = Synth::WaveType::sine_wave;
+    osc.osc_type[1]                              = Synth::WaveType::sawtooth_wave;
+    osc.osc_mode                                 = Synth::osc_mode_fm;
+    osc.mod_ratio                                = 2.0f;
+    osc.pitch_offset                             = 1.5f;
+    osc.gen[Synth::mod_volume].envelope_desc_id  = 1;
+    osc.gen[Synth::mod_volume].lfo_desc_id       = 1;
+    osc.gen[Synth::mod_volume].lfo_op            = Synth::SourceOp::add;
+    osc.gen[Synth::mod_volume].lfo_depth         = 0.5f;
+    osc.gen[Synth::mod_volume].lfo_depth_source  = Synth::ModSource::velocity;
+    osc.gen[Synth::mod_volume].lfo_rate_source   = Synth::ModSource::mod_wheel;
+    osc.gen[Synth::mod_volume].lfo_rate_scale_ms = 20.0f;
+    osc.gen[Synth::mod_pitch].envelope_desc_id   = 2;
+
+    instrument->routing[Synth::mod_volume].base_value          = 0.8f;
+    instrument->routing[Synth::mod_pitch].base_value           = 0.0f;
+    instrument->routing[Synth::mod_panning].base_value         = 0.5f;
+    instrument->routing[Synth::mod_lowpass_cutoff].base_value  = 2000.0f;
+    instrument->routing[Synth::mod_highpass_cutoff].base_value = 2000.0f;
+    bank->bank.instruments.entries[0]                          = *instrument;
+    strcpy(bank->instrument_names[0], "Clipboard zone");
+}
+
+// Validates a hand-built instrument model by installing it, and the descriptor
+// pools its generator ids name, in a one-zone bank: the projection whose node
+// identities the normalizer keys on only exists for a model the runtime accepts.
+static bool validate_standalone_model(const Synth::Instrument&         instrument,
+                                      const Synth::EnvelopeDescriptor* envelopes,
+                                      uint32_t                         envelope_count,
+                                      const Synth::LFODescriptor*      lfos,
+                                      uint32_t                         lfo_count)
+{
+    static Synth::InstrumentBank probe_bank;
+    memset(&probe_bank, 0, sizeof(probe_bank));
+    for (uint32_t e = 0; e < envelope_count; e++) {
+        const uint32_t env_slot = probe_bank.envelopes.allocate();
+        TEST(env_slot != pool_no_slot);
+        probe_bank.envelopes.entries[env_slot] = envelopes[e];
+    }
+    for (uint32_t l = 0; l < lfo_count; l++) {
+        const uint32_t lfo_slot = probe_bank.lfos.allocate();
+        TEST(lfo_slot != pool_no_slot);
+        probe_bank.lfos.entries[lfo_slot] = lfos[l];
+    }
+    const uint32_t instrument_slot = probe_bank.instruments.allocate();
+    TEST(instrument_slot == 0);
+    probe_bank.instruments.entries[instrument_slot] = instrument;
+    probe_bank.channel_enabled[0]                   = 1;
+    probe_bank.channel_zones[0][0].start_note       = 1;
+    probe_bank.channel_zones[0][0].instrument       = static_cast<uint8_t>(instrument_slot);
+    return Synth::validate_instrument_bank(&probe_bank);
+}
+
+// Largest clipboard document: seven layers, an eight-point envelope and a
+// distinct LFO with a distinct source pair on every projected target (35 distinct
+// generator tuples, hence 35 parameter groups), two routing inputs on every
+// projected target and base values on the constant targets, plus one portable
+// record for every canonical node and for every envelope, LFO and parameter
+// group. Returns the record count.
+static uint32_t build_clipboard_max_fixture(Synth::InstrumentBank*        bank,
+                                            Synth::Instrument*            instrument,
+                                            Synth::InstrumentGraphLayout* records)
+{
+    *bank                   = {};
+    *instrument             = {};
+    instrument->layer_count = Synth::max_layers;
+    for (uint32_t layer = 0; layer < Synth::max_layers; layer++) {
+        Synth::Oscillator& osc = instrument->layers[layer];
+        osc.osc_type[0]        = Synth::WaveType::sine_wave;
+        osc.osc_type[1]        = Synth::WaveType::sawtooth_wave;
+        osc.osc_mode           = static_cast<Synth::OscMode>(layer % 3);
+        osc.mod_ratio          = 1.0f + 0.25f * static_cast<float>(layer);
+        osc.pitch_offset       = 0.5f * static_cast<float>(layer) - 1.5f;
+        for (uint32_t cell = 0; cell < 5; cell++) {
+            const Synth::ModTarget target = Synth::graph_projected_target(cell);
+
+            const uint32_t env_slot = bank->envelopes.allocate();
+            TEST(env_slot != pool_no_slot);
+            Synth::EnvelopeDescriptor& env = bank->envelopes.entries[env_slot];
+            env.num_points                 = Synth::max_envelope_points;
+            env.sustain_first_point        = 0;
+            env.sustain_last_point         = static_cast<uint8_t>(Synth::max_envelope_points - 1);
+            env.min_value                  = -0.5f + 0.03125f * static_cast<float>(env_slot);
+            env.min_max_delta              = 1.0f / 16384.0f;
+            for (uint32_t p = 0; p < env.num_points; p++) {
+                env.points[p].position = static_cast<uint16_t>(100 * p + 1 + env_slot);
+                env.points[p].value    = static_cast<uint16_t>(0x1000 + 0x2000 * p + 0x40 * env_slot);
+            }
+
+            const uint32_t lfo_slot = bank->lfos.allocate();
+            TEST(lfo_slot != pool_no_slot);
+            Synth::LFODescriptor& lfo = bank->lfos.entries[lfo_slot];
+            lfo.wave          = (lfo_slot & 1) != 0 ? Synth::WaveType::sawtooth_wave : Synth::WaveType::sine_wave;
+            lfo.duty          = static_cast<uint8_t>(0x20 + (lfo_slot % 0x60));
+            lfo.period_ms     = static_cast<uint16_t>(50 + 7 * lfo_slot);
+            lfo.min_value     = -0.5f + 0.0625f * static_cast<float>(lfo_slot);
+            lfo.min_max_delta = 0.5f + 0.125f * static_cast<float>(lfo_slot);
+
+            Synth::LayerGen& gen  = osc.gen[target];
+            gen.envelope_desc_id  = static_cast<uint16_t>(env_slot + 1);
+            gen.lfo_desc_id       = static_cast<uint16_t>(lfo_slot + 1);
+            gen.lfo_op            = ((layer + cell) % 2) != 0 ? Synth::SourceOp::multiply : Synth::SourceOp::add;
+            gen.lfo_depth         = 0.25f * static_cast<float>(layer + 1);
+            gen.lfo_depth_source  = static_cast<Synth::ModSource>(1 + ((layer + cell) % 6));
+            gen.lfo_rate_source   = static_cast<Synth::ModSource>(1 + ((layer + 2 * cell + 1) % 6));
+            gen.lfo_rate_scale_ms = 10.0f * static_cast<float>(layer + 1) + static_cast<float>(cell);
+        }
+    }
+    for (uint32_t cell = 0; cell < 5; cell++) {
+        const Synth::ModTarget target  = Synth::graph_projected_target(cell);
+        Synth::InputRouting&   routing = instrument->routing[target];
+        routing.base_value             = target == Synth::mod_volume    ? 0.75f
+                                         : target == Synth::mod_pitch   ? 0.0f
+                                         : target == Synth::mod_panning ? 0.5f
+                                                                        : 2000.0f;
+        routing.num_inputs             = 2;
+        routing.inputs[0].source       = Synth::ModSource::velocity;
+        routing.inputs[0].op           = Synth::SourceOp::add;
+        routing.inputs[0].scale        = 0.5f;
+        routing.inputs[1].source       = Synth::ModSource::mod_wheel;
+        routing.inputs[1].op           = Synth::SourceOp::multiply;
+        routing.inputs[1].scale        = -0.25f;
+    }
+    instrument->routing[Synth::mod_duty0].base_value    = 0.25f;
+    instrument->routing[Synth::mod_duty1].base_value    = 0.5f;
+    instrument->routing[Synth::mod_osc_mix].base_value  = 0.75f;
+    instrument->routing[Synth::mod_fm_index].base_value = 0.5f * 6.2831853f;
+    instrument->note_skew_semitones                     = 0.25f;
+    instrument->layer_skew_semitones                    = 0.5f;
+
+    uint32_t count = 0;
+    for (uint32_t index = 0; index < Synth::graph_canonical_node_count; index++) {
+        Synth::InstrumentGraphLayout& r = records[count++];
+        r                               = {};
+        r.kind                          = Synth::instrument_graph_layout_canonical;
+        r.canonical_index               = static_cast<uint8_t>(index);
+        r.x                             = -100.0f + static_cast<float>(index);
+        r.y                             = 12.5f * static_cast<float>(index);
+        r.width_override                = static_cast<float>(index);
+        r.height_override               = 0.0f;
+    }
+    for (uint32_t layer = 0; layer < Synth::max_layers; layer++) {
+        for (uint32_t cell = 0; cell < 5; cell++) {
+            const Synth::ModTarget target = Synth::graph_projected_target(cell);
+            const Synth::LayerGen& gen    = instrument->layers[layer].gen[target];
+            const uint32_t         seed   = layer * 5u + cell;
+
+            Synth::InstrumentGraphLayout& env = records[count++];
+            env                               = {};
+            env.kind                          = Synth::instrument_graph_layout_envelope;
+            env.layer                         = static_cast<uint8_t>(layer);
+            env.target                        = static_cast<uint8_t>(target);
+            env.x                             = 1000.0f + static_cast<float>(seed);
+            env.y                             = -250.0f + static_cast<float>(seed);
+            env.width_override                = 128.0f;
+            env.height_override               = 64.0f;
+
+            Synth::InstrumentGraphLayout& lfo = records[count++];
+            lfo                               = {};
+            lfo.kind                          = Synth::instrument_graph_layout_lfo;
+            lfo.layer                         = static_cast<uint8_t>(layer);
+            lfo.target                        = static_cast<uint8_t>(target);
+            lfo.depth_source                  = static_cast<uint8_t>(gen.lfo_depth_source);
+            lfo.rate_source                   = static_cast<uint8_t>(gen.lfo_rate_source);
+            lfo.x                             = -750.0f - static_cast<float>(seed);
+            lfo.y                             = 500.0f + static_cast<float>(seed);
+            lfo.width_override                = 0.0f;
+            lfo.height_override               = 0.0f;
+
+            Synth::InstrumentGraphLayout& param = records[count++];
+            param                               = {};
+            param.kind                          = Synth::instrument_graph_layout_parameter;
+            param.target                        = static_cast<uint8_t>(target);
+            param.parameter_ordinal             = static_cast<uint8_t>(layer);
+            param.x                             = 250.0f * static_cast<float>(layer) + static_cast<float>(cell);
+            param.y                             = 3.25f * static_cast<float>(seed);
+            param.width_override                = 240.0f;
+            param.height_override               = 120.0f;
+        }
+    }
+    TEST(count == max_portable_records);
+    return count;
+}
+
+// First occurrence of `needle` in [from,to), or nullptr.
+static const char* find_in_range(const char* from, const char* to, const char* needle)
+{
+    const size_t n = strlen(needle);
+    for (const char* p = from; p + n <= to; p++) {
+        if (strncmp(p, needle, n) == 0) {
+            return p;
+        }
+    }
+    return nullptr;
+}
+
+// This source check supports a direct negated helper guard with an immediate
+// return on failure, optionally preceded by the exact refusal notification.
+static const char* skip_source_space(const char* p, const char* end)
+{
+    while (p < end && (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n')) {
+        ++p;
+    }
+    return p;
+}
+
+static bool zone_paste_body_has_failure_guard(const char* body, const char* end)
+{
+    const char* const helper  = find_in_range(body, end, "replace_zone_instrument_candidate");
+    const char* const undo    = find_in_range(body, end, "undo_group_reset");
+    const char* const commit  = find_in_range(body, end, "commit_candidate");
+    const char* const publish = find_in_range(body, end, "push_bank_update");
+    if (! helper || (! undo && ! commit)) {
+        return false;
+    }
+    const char*       first_state = end;
+    const char* const states[]    = { undo, commit, publish };
+    for (const char* state : states) {
+        if (state && state < first_state) {
+            first_state = state;
+        }
+    }
+    const char* guard = body;
+    while ((guard = find_in_range(guard, helper, "if")) != nullptr) {
+        const char* p = skip_source_space(guard + 2, helper);
+        if (p < helper && *p == '(') {
+            p = skip_source_space(p + 1, helper);
+            if (p < helper && *p == '!') {
+                p = skip_source_space(p + 1, helper);
+                if (helper - p >= 10 && strncmp(p, "Sculptor::", 10) == 0) {
+                    p += 10;
+                }
+                if (p == helper) {
+                    break;
+                }
+            }
+        }
+        guard += 2;
+    }
+    if (! guard || helper >= first_state) {
+        return false;
+    }
+    const char* p = skip_source_space(helper + strlen("replace_zone_instrument_candidate"), first_state);
+    if (p >= first_state || *p != '(') {
+        return false;
+    }
+    int depth = 1;
+    while (++p < first_state && depth != 0) {
+        if (*p == '(') {
+            ++depth;
+        }
+        if (*p == ')') {
+            --depth;
+        }
+    }
+    p = skip_source_space(p, first_state);
+    if (depth != 0 || p >= first_state || *p != ')') {
+        return false;
+    }
+    p                 = skip_source_space(p + 1, first_state);
+    const bool braced = p < first_state && *p == '{';
+    if (braced) {
+        p = skip_source_space(p + 1, first_state);
+    }
+    constexpr char refusal_notification[] =
+        "Sculptor::notify_error(\"Synth: cannot paste: the instrument replacement was refused\");";
+    if (first_state - p >= static_cast<ptrdiff_t>(sizeof(refusal_notification) - 1) &&
+        strncmp(p, refusal_notification, sizeof(refusal_notification) - 1) == 0) {
+        p = skip_source_space(p + sizeof(refusal_notification) - 1, first_state);
+    }
+    if (first_state - p < 6 || strncmp(p, "return", 6) != 0) {
+        return false;
+    }
+    p = skip_source_space(p + 6, first_state);
+    if (p >= first_state || *p != ';') {
+        return false;
+    }
+    p = skip_source_space(p + 1, first_state);
+    return ! braced || (p < first_state && *p == '}');
+}
+
+static void check_zone_paste_source_guard_self_tests()
+{
+    const char* const correct  = "if (!Sculptor::replace_zone_instrument_candidate(a, f(b))) { return; } "
+                                 "undo_group_reset(); commit_candidate(); push_bank_update();";
+    const char* const unbraced = "if (! replace_zone_instrument_candidate(a)) return; commit_candidate();";
+    const char* const inverted = "if (replace_zone_instrument_candidate(a)) return; "
+                                 "undo_group_reset(); commit_candidate(); push_bank_update();";
+    const char* const notified =
+        "if (!Sculptor::replace_zone_instrument_candidate(a)) { "
+        "Sculptor::notify_error(\"Synth: cannot paste: the instrument replacement was refused\"); return; } commit_candidate();";
+    const char* const unsafe = "if (!Sculptor::replace_zone_instrument_candidate(a)) { commit_candidate(); return; }";
+    TEST(zone_paste_body_has_failure_guard(notified, notified + strlen(notified)));
+    TEST(! zone_paste_body_has_failure_guard(unsafe, unsafe + strlen(unsafe)));
+    TEST(zone_paste_body_has_failure_guard(correct, correct + strlen(correct)));
+    TEST(zone_paste_body_has_failure_guard(unbraced, unbraced + strlen(unbraced)));
+    TEST(! zone_paste_body_has_failure_guard(inverted, inverted + strlen(inverted)));
+}
+
+// Source-inspection evidence, not an executable GUI test: the unit target does
+// not link the GUI translation unit. Searches stay inside the command's balanced
+// body; braces and parentheses inside literals or comments are unsupported.
+static void check_zone_paste_source_ordering()
+{
+    check_zone_paste_source_guard_self_tests();
+    static char src[256 * 1024];
+    FILE* const file = fopen("sculptor/sculptor_instr_edit.cpp", "rb");
+    TEST(file != nullptr);
+    if (! file) {
+        return;
+    }
+    const size_t got = fread(src, 1, sizeof(src) - 1, file);
+    fclose(file);
+    TEST(got > 0);
+    src[got]               = 0;
+    const char* const decl = strstr(src, "Sculptor::SynthEditor::do_zone_paste_instrument");
+    TEST(decl != nullptr);
+    if (! decl) {
+        return;
+    }
+    const char* body_open = decl;
+    while (*body_open != 0 && *body_open != '{') {
+        body_open++;
+    }
+    TEST(*body_open == '{');
+    if (*body_open != '{') {
+        return;
+    }
+    const char* body_close = nullptr;
+    int         depth      = 0;
+    for (const char* p = body_open; *p != 0; p++) {
+        if (*p == '{') {
+            depth++;
+        }
+        else if (*p == '}') {
+            depth--;
+            if (depth == 0) {
+                body_close = p;
+                break;
+            }
+        }
+    }
+    TEST(body_close != nullptr);
+    if (! body_close) {
+        return;
+    }
+    TEST(zone_paste_body_has_failure_guard(body_open, body_close));
+}
+
+// Index of the first mapped editor record of `kind` keying `index`, or -1.
+static int32_t find_mapped(const Synth::GraphNodeLayout* records, uint32_t count, uint32_t kind, uint32_t index)
+{
+    for (uint32_t i = 0; i < count; i++) {
+        if (records[i].kind == kind && records[i].index == index) {
+            return static_cast<int32_t>(i);
+        }
+    }
+    return -1;
+}
+
+// Assembles one instrument document. The document's closing brace is emitted
+// here and nowhere else, so a caller-supplied record list can never duplicate
+// it, and every assembled fixture is parsed before a test reads it: a baseline
+// that is not well-formed JSON cannot silently pass.
+static uint32_t build_layout_doc(char* dest, uint32_t size, const char* head, const char* records)
+{
+    const int written = snprintf(dest, size, "%s\"graph_layout\":[%s]}", head, records);
+    TEST(written > 0 && static_cast<uint32_t>(written) < size);
+    const int32_t fixture_tokens = written > 0 ? count_clipboard_tokens(dest, static_cast<uint32_t>(written)) : -1;
+    TEST(fixture_tokens > 0);
+    return written > 0 ? static_cast<uint32_t>(written) : 0;
 }
 
 int main()
@@ -4138,7 +4716,7 @@ int main()
         memset(&bank, 0, sizeof(bank));
 
         // Dense instruments: every layer binds every target to both descriptors,
-        // so the encoded document needs far more than the 4096-token pool
+        // so the encoded document needs far more than the 8192-token pool
         const uint32_t env                                  = bank.bank.envelopes.allocate();
         bank.bank.envelopes.entries[env].num_points         = 2;
         bank.bank.envelopes.entries[env].points[1].position = 100;
@@ -4146,7 +4724,7 @@ int main()
         bank.bank.lfos.entries[lfo].wave                    = Synth::WaveType::sine_wave;
         bank.bank.lfos.entries[lfo].period_ms               = 50;
 
-        for (uint32_t i = 0; i < 4; i++) {
+        for (uint32_t i = 0; i < 8; i++) {
             const uint32_t     slot  = bank.bank.instruments.allocate();
             Synth::Instrument& instr = bank.bank.instruments.entries[slot];
             instr.layer_count        = Synth::max_layers;
@@ -9384,6 +9962,44 @@ int main()
         static Sculptor::Graph           graph;
         static Sculptor::OscGraphMapping mapping;
         TEST(Sculptor::project_editor_to_graph(bank, &graph, &mapping));
+        // A bare explicit record can claim the live env-only group even
+        // though earlier UID records name its dormant (unwired) source.
+        add_parameter_record(&bank, 0, 0, 0, 73.0f, -19.0f, static_cast<uint8_t>(Sculptor::max_param_nodes - 1));
+        Synth::GraphNodeLayout& saved = bank.graph_layout[bank.graph_layout_count - 1];
+        saved.param_slot              = 1;
+        saved.width_override          = 211.0f;
+        saved.height_override         = 97.0f;
+        TEST(Synth::validate_instrument_bank(&bank.bank));
+        TEST(Sculptor::validate_editor_metadata(bank));
+        TEST(Sculptor::project_editor_to_graph(bank, &graph, &mapping));
+        TEST(mapping.params[0].uid == saved.uid);
+        TEST(graph.node(mapping.params[0].node_idx).position.x == saved.x);
+        uint32_t parameter_count = 0;
+        Sculptor::count_projected_nodes(bank, 0, 0, &parameter_count);
+        TEST(parameter_count == mapping.param_count);
+        Synth::InstrumentGraphLayout exported[max_portable_records];
+        uint32_t                     exported_count = 0;
+        TEST(Sculptor::encode_instrument_graph_layout(bank.bank.instruments.entries[0],
+                                                      bank.bank,
+                                                      bank,
+                                                      0,
+                                                      0,
+                                                      exported,
+                                                      max_portable_records,
+                                                      &exported_count));
+        uint32_t saved_parameters = 0;
+        for (uint32_t i = 0; i < exported_count; ++i) {
+            if (exported[i].kind == 3) {
+                ++saved_parameters;
+                TEST(exported[i].target == Synth::mod_volume && exported[i].parameter_ordinal == 0);
+                TEST(exported[i].x == graph.node(mapping.params[0].node_idx).position.x);
+                TEST(exported[i].y == graph.node(mapping.params[0].node_idx).position.y);
+                TEST(exported[i].width_override == saved.width_override);
+                TEST(exported[i].height_override == saved.height_override);
+            }
+        }
+        TEST(saved_parameters == 1);
+        --bank.graph_layout_count;
         add_parameter_record(&bank, 0, 0, 0, 10.0f, 20.0f, static_cast<uint8_t>(Sculptor::max_param_nodes - 1));
         const int32_t last =
             Sculptor::find_record(bank, 0, 0, 3, 0, static_cast<uint8_t>(Sculptor::max_param_nodes - 1));
@@ -10317,6 +10933,2798 @@ int main()
         TEST(! Synth::preflight_effect_expansion(bank, &plan, &error));
 
         Synth::init_effect_state_region(fake_region_base);
+    }
+
+    // ---------------------------------------------------------------------------
+    // Clipboard instrument documents (doc/synth_instrument_schema.json): decode
+    // into a standalone instrument with 1-based local descriptor indices, encode
+    // back from a bank-resolved instrument.
+    // ---------------------------------------------------------------------------
+    {
+        const char* const doc = "{"
+                                "\"format\":\"synth-instrument-v1\","
+                                "\"note_skew_semitones\":0.25,"
+                                "\"layer_skew_semitones\":0.5,"
+                                "\"layers\":["
+                                "{"
+                                "\"wave_a\":\"sine\","
+                                "\"wave_b\":\"sawtooth\","
+                                "\"mode\":\"fm\","
+                                "\"mod_ratio\":2.0,"
+                                "\"pitch_offset_semitones\":-12.0,"
+                                "\"volume\":{"
+                                "\"base\":0.8,"
+                                "\"envelope\":{\"points\":[{\"time_seconds\":0.0,\"level\":0.0},"
+                                "{\"time_seconds\":0.25,\"level\":1.0},"
+                                "{\"time_seconds\":0.5,\"level\":0.25}],\"sustain_start\":2,\"sustain_end\":2},"
+                                "\"lfo\":{\"wave\":\"sine\",\"frequency_hz\":5.0,\"min_level\":0.0,\"max_level\":1.0,"
+                                "\"op\":\"add\",\"depth\":0.2},"
+                                "\"sources\":[{\"source\":\"velocity\",\"op\":\"add\",\"scale\":0.5},"
+                                "{\"source\":\"mod_wheel\",\"op\":\"multiply\",\"scale\":0.25}]"
+                                "},"
+                                "\"pitch\":{\"base\":1.0},"
+                                "\"panning\":{\"base\":0.5},"
+                                "\"duty_b\":{\"base\":0.5},"
+                                "\"fm_index\":{\"base\":0.75}"
+                                "}"
+                                "]"
+                                "}";
+
+        static Synth::Instrument         instr;
+        static Synth::EnvelopeDescriptor envs[Synth::instrument_max_envelopes];
+        static Synth::LFODescriptor      lfos[Synth::instrument_max_lfos];
+        uint32_t                         env_count = 999;
+        uint32_t                         lfo_count = 999;
+        TEST(Synth::decode_instrument_json(doc,
+                                           static_cast<uint32_t>(strlen(doc)),
+                                           &instr,
+                                           envs,
+                                           &env_count,
+                                           lfos,
+                                           &lfo_count));
+        TEST(instr.layer_count == 1);
+        TEST(instr.note_skew_semitones == 0.25f);
+        TEST(instr.layer_skew_semitones == 0.5f);
+        const Synth::Oscillator& osc = instr.layers[0];
+        TEST(osc.osc_type[0] == Synth::WaveType::sine_wave);
+        TEST(osc.osc_type[1] == Synth::WaveType::sawtooth_wave);
+        TEST(osc.osc_mode == Synth::osc_mode_fm);
+        TEST(osc.mod_ratio == 2.0f);
+        TEST(osc.pitch_offset == -12.0f);
+        // Untouched targets keep neutral defaults.
+        TEST(instr.routing[Synth::mod_osc_mix].base_value == 0.0f);
+        TEST(instr.routing[Synth::mod_volume].base_value == 0.8f);
+        TEST(instr.routing[Synth::mod_volume].num_inputs == 2);
+        TEST(instr.routing[Synth::mod_volume].inputs[1].source == Synth::ModSource::mod_wheel);
+        TEST(instr.routing[Synth::mod_volume].inputs[1].op == Synth::SourceOp::multiply);
+        TEST(instr.routing[Synth::mod_volume].inputs[1].scale == 0.25f);
+        TEST(instr.routing[Synth::mod_volume].inputs[0].source == Synth::ModSource::velocity);
+        TEST(instr.routing[Synth::mod_volume].inputs[0].op == Synth::SourceOp::add);
+        TEST(instr.routing[Synth::mod_volume].inputs[0].scale == 0.5f);
+        TEST(instr.routing[Synth::mod_pitch].base_value == 1.0f);
+        TEST(instr.routing[Synth::mod_panning].base_value == 0.5f);
+        TEST(instr.routing[Synth::mod_duty1].base_value == 0.5f);
+        // fm_index is 0..1 in the document, 0..2*pi radians in the bank.
+        TEST(instr.routing[Synth::mod_fm_index].base_value == 0.75f * 6.2831853f);
+        // Envelope: seconds -> ticks, levels 0..1 -> 16-bit values, min normalized to 0.
+        TEST(osc.gen[Synth::mod_volume].envelope_desc_id == 1);
+        TEST(env_count == 1);
+        const Synth::EnvelopeDescriptor& env = envs[0];
+        TEST(env.num_points == 3);
+        TEST(env.sustain_first_point == 2);
+        TEST(env.sustain_last_point == 2);
+        TEST(env.min_value == 0.0f);
+        TEST(env.min_max_delta == 1.0f / 65535.0f); // runtime: min + raw * delta spans levels 0..1
+        TEST(env.points[1].position == Sculptor::envelope_ms_to_ticks(250.0f));
+        TEST(env.points[1].value == 0xFFFF);
+        TEST(env.points[2].value == 16384); // level 0.25
+        // LFO: Hz -> period_ms, levels 0..1 -> min/delta.
+        TEST(osc.gen[Synth::mod_volume].lfo_desc_id == 1);
+        TEST(lfo_count == 1);
+        const Synth::LFODescriptor& lfo = lfos[0];
+        TEST(lfo.wave == Synth::WaveType::sine_wave);
+        TEST(lfo.period_ms == 200);
+        TEST(lfo.min_value == 0.0f);
+        TEST(osc.gen[Synth::mod_volume].lfo_op == Synth::SourceOp::add);
+        TEST(osc.gen[Synth::mod_volume].lfo_depth == 0.2f);
+
+        // Install into a bank through the remap helpers, then encode: the
+        // document must decode back to the same instrument content.
+        static Synth::InstrumentBank bank;
+        memset(&bank, 0, sizeof(bank));
+        uint16_t env_ids[Synth::instrument_max_envelopes];
+        uint16_t lfo_ids[Synth::instrument_max_lfos];
+        TEST(Synth::remap_envelopes(&bank, envs, env_count, env_ids));
+        TEST(Synth::remap_lfos(&bank, lfos, lfo_count, lfo_ids));
+        Synth::Instrument installed;
+        Synth::remap_instrument(instr, env_ids, lfo_ids, &installed);
+        const uint32_t slot = bank.instruments.allocate();
+        TEST(slot != pool_no_slot);
+        bank.instruments.entries[slot]      = installed;
+        bank.channel_zones[0][0].start_note = 1;
+        bank.channel_zones[0][0].instrument = static_cast<uint8_t>(slot);
+        TEST(Synth::validate_instrument_bank(&bank));
+
+        static char    encoded[64 * 1024];
+        const uint32_t encoded_len = Synth::encode_instrument_json(encoded, sizeof(encoded), &installed, &bank);
+        TEST(encoded_len > 0);
+        static Synth::Instrument         decoded;
+        static Synth::EnvelopeDescriptor decoded_envs[Synth::instrument_max_envelopes];
+        static Synth::LFODescriptor      decoded_lfos[Synth::instrument_max_lfos];
+        uint32_t                         decoded_env_count = 999;
+        uint32_t                         decoded_lfo_count = 999;
+        TEST(Synth::decode_instrument_json(encoded,
+                                           encoded_len,
+                                           &decoded,
+                                           decoded_envs,
+                                           &decoded_env_count,
+                                           decoded_lfos,
+                                           &decoded_lfo_count));
+        TEST(decoded.layer_count == installed.layer_count);
+        const Synth::Oscillator& decoded_osc = decoded.layers[0];
+        TEST(decoded_osc.osc_type[0] == Synth::WaveType::sine_wave);
+        TEST(decoded_osc.osc_type[1] == Synth::WaveType::sawtooth_wave);
+        TEST(decoded_osc.osc_mode == Synth::osc_mode_fm);
+        TEST(decoded_osc.mod_ratio == 2.0f);
+        TEST(decoded_osc.pitch_offset == -12.0f);
+        TEST(decoded.routing[Synth::mod_volume].base_value == 0.8f);
+        TEST(decoded.routing[Synth::mod_volume].num_inputs == 2);
+        TEST(decoded.routing[Synth::mod_volume].inputs[1].source == Synth::ModSource::mod_wheel);
+        TEST(decoded.routing[Synth::mod_volume].inputs[1].op == Synth::SourceOp::multiply);
+        TEST(decoded.routing[Synth::mod_volume].inputs[1].scale == 0.25f);
+        TEST(decoded.routing[Synth::mod_fm_index].base_value == 0.75f * 6.2831853f);
+        TEST(decoded_osc.gen[Synth::mod_volume].envelope_desc_id == 1);
+        TEST(decoded_env_count == 1);
+        TEST(decoded_envs[0].points[1].position == env.points[1].position);
+        TEST(decoded_envs[0].points[2].value == 16384);
+        TEST(decoded_envs[0].min_value == envs[0].min_value);
+        TEST(decoded_envs[0].min_max_delta == envs[0].min_max_delta);
+        TEST(decoded_osc.gen[Synth::mod_volume].lfo_desc_id == 1);
+        TEST(decoded_lfo_count == 1);
+        TEST(decoded_lfos[0].period_ms == 200);
+        TEST(decoded_osc.gen[Synth::mod_volume].lfo_depth == 0.2f);
+
+        // fm_index levels are document units 0..1; the bank stores radians, so the
+        // envelope's min/delta and the LFO's min/delta scale by 2*pi. The envelope's
+        // 16-bit values still span the level range across the delta.
+        {
+            const char* const fm_doc =
+                "{"
+                "\"format\":\"synth-instrument-v1\","
+                "\"layers\":[{"
+                "\"wave_a\":\"sine\","
+                "\"mode\":\"fm\","
+                "\"fm_index\":{"
+                "\"envelope\":{\"points\":[{\"time_seconds\":0.0,\"level\":0.25},{\"time_seconds\":0.1,\"level\":0.75}]},"
+                "\"lfo\":{\"wave\":\"sine\",\"frequency_hz\":2.0,\"min_level\":0.25,\"max_level\":0.5,\"depth\":0.1}"
+                "}}]}";
+            static Synth::Instrument         fm_instr;
+            static Synth::EnvelopeDescriptor fm_envs[Synth::instrument_max_envelopes];
+            static Synth::LFODescriptor      fm_lfos[Synth::instrument_max_lfos];
+            uint32_t                         fm_env_count = 999;
+            uint32_t                         fm_lfo_count = 999;
+            TEST(Synth::decode_instrument_json(fm_doc,
+                                               static_cast<uint32_t>(strlen(fm_doc)),
+                                               &fm_instr,
+                                               fm_envs,
+                                               &fm_env_count,
+                                               fm_lfos,
+                                               &fm_lfo_count));
+            TEST(fm_env_count == 1);
+            const float fm_scale = 6.2831853f;
+            TEST(fm_envs[0].min_value == 0.25f * fm_scale);
+            TEST(fm_envs[0].min_max_delta == 0.5f * fm_scale / 65535.0f);
+            TEST(fm_envs[0].points[1].value == 0xFFFF); // level 0.75 tops the 0.25..0.75 range
+            TEST(fm_lfo_count == 1);
+            TEST(fm_lfos[0].min_value == 0.25f * fm_scale);
+            TEST(fm_lfos[0].min_max_delta == 0.25f * fm_scale);
+            // The encoder must emit document units, or the editor's own copy cannot
+            // paste back: install into a bank, encode, decode, compare bank values.
+            static Synth::InstrumentEditorBank fm_bank;
+            fm_bank = {};
+            uint16_t fm_env_ids[Synth::instrument_max_envelopes];
+            uint16_t fm_lfo_ids[Synth::instrument_max_lfos];
+            TEST(Synth::remap_envelopes(&fm_bank.bank, fm_envs, fm_env_count, fm_env_ids));
+            TEST(Synth::remap_lfos(&fm_bank.bank, fm_lfos, fm_lfo_count, fm_lfo_ids));
+            Synth::Instrument fm_installed;
+            Synth::remap_instrument(fm_instr, fm_env_ids, fm_lfo_ids, &fm_installed);
+            const uint32_t fm_slot = fm_bank.bank.instruments.allocate();
+            TEST(fm_slot != pool_no_slot);
+            fm_bank.bank.instruments.entries[fm_slot]   = fm_installed;
+            fm_bank.bank.channel_enabled[0]             = 1;
+            fm_bank.bank.channel_zones[0][0].start_note = 1;
+            fm_bank.bank.channel_zones[0][0].instrument = static_cast<uint8_t>(fm_slot);
+            TEST(Synth::validate_instrument_bank(&fm_bank.bank));
+
+            static char    fm_text[64 * 1024];
+            const uint32_t fm_text_len =
+                Synth::encode_instrument_json(fm_text, sizeof(fm_text), &fm_installed, &fm_bank.bank);
+            TEST(fm_text_len > 0);
+            static Synth::Instrument         fm_back;
+            static Synth::EnvelopeDescriptor fm_back_envs[Synth::instrument_max_envelopes];
+            static Synth::LFODescriptor      fm_back_lfos[Synth::instrument_max_lfos];
+            uint32_t                         fm_back_env_count = 0;
+            uint32_t                         fm_back_lfo_count = 0;
+            TEST(Synth::decode_instrument_json(fm_text,
+                                               fm_text_len,
+                                               &fm_back,
+                                               fm_back_envs,
+                                               &fm_back_env_count,
+                                               fm_back_lfos,
+                                               &fm_back_lfo_count));
+            TEST(fm_back_env_count == 1);
+            TEST(fm_back_envs[0].min_value == fm_envs[0].min_value);
+            TEST(fm_back_envs[0].min_max_delta == fm_envs[0].min_max_delta);
+            TEST(fm_back_envs[0].points[1].position == fm_envs[0].points[1].position);
+            TEST(fm_back_envs[0].points[1].value == fm_envs[0].points[1].value);
+            TEST(fm_back_lfo_count == 1);
+            TEST(fm_back_lfos[0].min_value == fm_lfos[0].min_value);
+            TEST(fm_back_lfos[0].min_max_delta == fm_lfos[0].min_max_delta);
+        }
+
+        // Identical envelope descriptors on separate layers share one pool slot.
+        {
+            const char* const dup_doc =
+                "{"
+                "\"format\":\"synth-instrument-v1\","
+                "\"layers\":["
+                "{\"wave_a\":\"sine\",\"volume\":{\"envelope\":{\"points\":[{\"time_seconds\":0.1,\"level\":0.5}]}}},"
+                "{\"wave_a\":\"pulse\",\"volume\":{\"envelope\":{\"points\":[{\"time_seconds\":0.1,\"level\":0.5}]}}}"
+                "]}";
+            static Synth::Instrument         dup_instr;
+            static Synth::EnvelopeDescriptor dup_envs[Synth::instrument_max_envelopes];
+            static Synth::LFODescriptor      dup_lfos[Synth::instrument_max_lfos];
+            uint32_t                         dup_env_count = 999;
+            uint32_t                         dup_lfo_count = 999;
+            TEST(Synth::decode_instrument_json(dup_doc,
+                                               static_cast<uint32_t>(strlen(dup_doc)),
+                                               &dup_instr,
+                                               dup_envs,
+                                               &dup_env_count,
+                                               dup_lfos,
+                                               &dup_lfo_count));
+            TEST(dup_instr.layers[0].gen[Synth::mod_volume].envelope_desc_id == 1);
+            TEST(dup_instr.layers[1].gen[Synth::mod_volume].envelope_desc_id == 1);
+            TEST(dup_env_count == 1);
+        }
+
+        // Pasting over a populated zone drops its stale graph records; channel-wide
+        // effect layouts (kind 4), master-chain records, and other zones stay
+        // untouched, and the clear owns the zone's mask row.
+        {
+            static Synth::InstrumentEditorBank clear_bank;
+            clear_bank = {};
+            add_detached_record(&clear_bank, 0, 0, 1, 1, 0.0f, 0.0f, Synth::ModSource::none, Synth::ModSource::none, 0);
+            add_parameter_record(&clear_bank, 0, 0, 0, 1.0f, 2.0f, 7);
+            clear_bank.graph_layout[1].served = 2; // a parameter serving layer 1
+            add_detached_record(&clear_bank, 0, 1, 1, 1, 0.0f, 0.0f, Synth::ModSource::none, Synth::ModSource::none, 0);
+            add_detached_record(&clear_bank, 1, 0, 1, 1, 0.0f, 0.0f, Synth::ModSource::none, Synth::ModSource::none, 0);
+            add_detached_record(&clear_bank,
+                                0,
+                                0,
+                                4,
+                                1,
+                                0.0f,
+                                0.0f,
+                                Synth::ModSource::none,
+                                Synth::ModSource::none,
+                                0); // same-channel effect layout
+            add_detached_record(&clear_bank,
+                                16,
+                                0,
+                                4,
+                                1,
+                                0.0f,
+                                0.0f,
+                                Synth::ModSource::none,
+                                Synth::ModSource::none,
+                                0);                 // master-chain effect layout
+            clear_bank.graph_missing_sum[0][0] = 5; // the mask row belongs to the clear
+
+            Sculptor::zone_records_clear_zone(&clear_bank, 0, 0);
+
+            TEST(clear_bank.graph_layout_count == 4);
+            TEST(count_records_matching(clear_bank, 0, 0, 1, 1) == 0);
+            TEST(count_records_matching(clear_bank, 0, 0, 3, 0) == 0);
+            TEST(count_records_matching(clear_bank, 0, 1, 1, 1) == 1);
+            TEST(count_records_matching(clear_bank, 1, 0, 1, 1) == 1);
+            TEST(clear_bank.graph_missing_sum[0][0] == 0);
+            uint32_t effect_layouts = 0;
+            for (uint32_t r = 0; r < clear_bank.graph_layout_count; r++) {
+                if (clear_bank.graph_layout[r].kind == 4)
+                    ++effect_layouts;
+            }
+            TEST(effect_layouts == 2);
+        }
+        // Every rejection leaves the outputs byte-identical.
+        const char* const rejected_docs[] = {
+            // malformed
+            "{\"format\":\"synth-instrument-v1\",\"layers\":[]",
+            // unknown key
+            "{\"format\":\"synth-instrument-v1\",\"layers\":[],\"bogus\":1}",
+            // bad wave
+            "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"flugelhorn\"}]}",
+            // bad mode
+            "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\",\"mode\":\"granular\"}]}",
+            // out of range
+            "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\",\"pitch_offset_semitones\":13.0}]}",
+            // out of range
+            "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\",\"volume\":{\"base\":1.5}}]}",
+            // > max inputs
+            "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\",\"volume\":{\"sources\":["
+            "{\"source\":\"velocity\"},{\"source\":\"mod_wheel\"},{\"source\":\"aftertouch\"}]}}]}",
+            // unknown target
+            "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\",\"bassoon\":{\"base\":1.0}}]}",
+            // negative Hz
+            "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\",\"volume\":{\"lfo\":{\"wave\":\"sine\",\"frequency_hz\":-5.0}}}]}",
+            // period overflow
+            "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\",\"volume\":{\"lfo\":{\"wave\":\"sine\",\"frequency_hz\":0.001}}}]}",
+            // > max points
+            "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\",\"volume\":{\"envelope\":{\"points\":["
+            "{\"time_seconds\":0.0},{\"time_seconds\":0.1},{\"time_seconds\":0.2},{\"time_seconds\":0.3},"
+            "{\"time_seconds\":0.4},{\"time_seconds\":0.5},{\"time_seconds\":0.6},{\"time_seconds\":0.7},"
+            "{\"time_seconds\":0.8}]}}}]}",
+            // not ascending
+            "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\",\"volume\":{\"envelope\":{\"points\":["
+            "{\"time_seconds\":0.5,\"level\":0.5},{\"time_seconds\":0.1,\"level\":1.0}]}}}]}",
+            // wrong format tag
+            "{\"format\":\"synth-editor-9\",\"layers\":[]}",
+            // no points
+            "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\",\"volume\":{\"envelope\":{\"points\":[]}}}]}",
+            // no wave
+            "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\",\"volume\":{\"lfo\":{\"frequency_hz\":5.0}}}]}",
+            // no frequency
+            "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\",\"volume\":{\"lfo\":{\"wave\":\"sine\"}}}]}",
+            // source entry without "source"
+            "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\",\"volume\":{\"sources\":[{\"op\":\"add\",\"scale\":0.5}]}}]}",
+            // unknown field inside a source entry
+            "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\",\"volume\":{\"sources\":[{\"source\":\"velocity\",\"banana\":1}]}}]}",
+            // time beyond the tick range
+            "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\",\"volume\":{\"envelope\":{\"points\":["
+            "{\"time_seconds\":1000000.0,\"level\":0.5}]}}}]}",
+            // sub-tick collision
+            "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\",\"volume\":{\"envelope\":{\"points\":["
+            "{\"time_seconds\":0.1,\"level\":0.5},{\"time_seconds\":0.101,\"level\":1.0}]}}}]}",
+            // unsupported LFO wave (pulse)
+            "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\",\"volume\":{\"lfo\":{\"wave\":\"pulse\",\"frequency_hz\":5.0}}}]}",
+            // unsupported LFO wave (noise)
+            "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\",\"volume\":{\"lfo\":{\"wave\":\"noise\",\"frequency_hz\":5.0}}}]}",
+            // mod_ratio out of range
+            "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\",\"mode\":\"fm\",\"mod_ratio\":100.0}]}",
+            // cutoff base below the slider floor
+            "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\",\"lowpass_cutoff\":{\"base\":10.0}}]}",
+            // duplicate
+            "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\",\"wave_a\":\"sawtooth\"}]}",
+            // level span overflows the stored delta
+            "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\",\"volume\":{\"envelope\":{\"points\":[{\"time_seconds\":0,\"level\":-3e38},{\"time_seconds\":0.1,\"level\":3e38}]}}}]}",
+            // LFO span overflows the stored delta
+            "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\",\"volume\":{\"lfo\":{\"wave\":\"sine\",\"frequency_hz\":5.0,\"min_level\":-3e38,\"max_level\":3e38,\"depth\":0.5}}}]}",
+            // LFO span overflows the bank-unit conversion
+            "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\",\"fm_index\":{\"lfo\":{\"wave\":\"sine\",\"frequency_hz\":5.0,\"max_level\":3e38,\"depth\":0.5}}}]}",
+        };
+        static Synth::Instrument         reference_instr;
+        static Synth::EnvelopeDescriptor reference_envs[Synth::instrument_max_envelopes];
+        static Synth::LFODescriptor      reference_lfos[Synth::instrument_max_lfos];
+        memset(&reference_instr, 0x5A, sizeof(reference_instr));
+        memset(reference_envs, 0x5A, sizeof(reference_envs));
+        memset(reference_lfos, 0x5A, sizeof(reference_lfos));
+        for (uint32_t i = 0; i < sizeof(rejected_docs) / sizeof(rejected_docs[0]); i++) {
+            Synth::Instrument sentinel_instr;
+            memset(&sentinel_instr, 0x5A, sizeof(sentinel_instr));
+            static Synth::EnvelopeDescriptor sentinel_envs[Synth::instrument_max_envelopes];
+            static Synth::LFODescriptor      sentinel_lfos[Synth::instrument_max_lfos];
+            memset(sentinel_envs, 0x5A, sizeof(sentinel_envs));
+            memset(sentinel_lfos, 0x5A, sizeof(sentinel_lfos));
+            uint32_t sentinel_env_count = 999;
+            uint32_t sentinel_lfo_count = 999;
+            TEST(! Synth::decode_instrument_json(rejected_docs[i],
+                                                 static_cast<uint32_t>(strlen(rejected_docs[i])),
+                                                 &sentinel_instr,
+                                                 sentinel_envs,
+                                                 &sentinel_env_count,
+                                                 sentinel_lfos,
+                                                 &sentinel_lfo_count));
+            const bool untouched = sentinel_env_count == 999 && sentinel_lfo_count == 999 &&
+                                   memcmp(&sentinel_instr, &reference_instr, sizeof(sentinel_instr)) == 0 &&
+                                   memcmp(sentinel_envs, reference_envs, sizeof(reference_envs)) == 0 &&
+                                   memcmp(sentinel_lfos, reference_lfos, sizeof(reference_lfos)) == 0;
+            TEST(untouched);
+        }
+
+        // A zero ratio is bank-legal in FM/sync, a cutoff base of 0 is the bypass
+        // point, and a cutoff envelope level can quantize just below the slider
+        // floor; all of them must decode, and a copy must paste back exactly.
+        {
+            const char* const zero_ratio_doc =
+                "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\",\"mode\":\"fm\",\"mod_ratio\":0.0}]}";
+            static Synth::Instrument         zero_instr;
+            static Synth::EnvelopeDescriptor zero_envs[Synth::instrument_max_envelopes];
+            static Synth::LFODescriptor      zero_lfos[Synth::instrument_max_lfos];
+            uint32_t                         zero_env_count = 999;
+            uint32_t                         zero_lfo_count = 999;
+            TEST(Synth::decode_instrument_json(zero_ratio_doc,
+                                               static_cast<uint32_t>(strlen(zero_ratio_doc)),
+                                               &zero_instr,
+                                               zero_envs,
+                                               &zero_env_count,
+                                               zero_lfos,
+                                               &zero_lfo_count));
+            TEST(zero_instr.layers[0].osc_mode == Synth::osc_mode_fm);
+            TEST(zero_instr.layers[0].mod_ratio == 0.0f);
+
+            // The encoder must keep emitting the zero (restoring the omitted-key
+            // default of 1 would change the sound), and an omitted ratio decodes to 1.
+            {
+                static Synth::InstrumentEditorBank zero_bank;
+                zero_bank                = {};
+                const uint32_t zero_slot = zero_bank.bank.instruments.allocate();
+                TEST(zero_slot != pool_no_slot);
+                zero_bank.bank.instruments.entries[zero_slot] = zero_instr;
+                static char    zero_text[64 * 1024];
+                const uint32_t zero_text_len =
+                    Synth::encode_instrument_json(zero_text, sizeof(zero_text), &zero_instr, &zero_bank.bank);
+                TEST(zero_text_len > 0);
+                static Synth::Instrument         zero_back;
+                static Synth::EnvelopeDescriptor zero_back_envs[Synth::instrument_max_envelopes];
+                static Synth::LFODescriptor      zero_back_lfos[Synth::instrument_max_lfos];
+                uint32_t                         zero_back_env_count = 0;
+                uint32_t                         zero_back_lfo_count = 0;
+                TEST(Synth::decode_instrument_json(zero_text,
+                                                   zero_text_len,
+                                                   &zero_back,
+                                                   zero_back_envs,
+                                                   &zero_back_env_count,
+                                                   zero_back_lfos,
+                                                   &zero_back_lfo_count));
+                TEST(zero_back.layers[0].osc_mode == Synth::osc_mode_fm);
+                TEST(zero_back.layers[0].mod_ratio == 0.0f);
+            }
+
+            const char* const sync_zero_doc =
+                "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\",\"mode\":\"sync\",\"mod_ratio\":0.0}]}";
+            TEST(Synth::decode_instrument_json(sync_zero_doc,
+                                               static_cast<uint32_t>(strlen(sync_zero_doc)),
+                                               &zero_instr,
+                                               zero_envs,
+                                               &zero_env_count,
+                                               zero_lfos,
+                                               &zero_lfo_count));
+            TEST(zero_instr.layers[0].osc_mode == Synth::osc_mode_hard_sync);
+            TEST(zero_instr.layers[0].mod_ratio == 0.0f);
+
+            const char* const omitted_ratio_doc =
+                "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\",\"mode\":\"fm\"}]}";
+            TEST(Synth::decode_instrument_json(omitted_ratio_doc,
+                                               static_cast<uint32_t>(strlen(omitted_ratio_doc)),
+                                               &zero_instr,
+                                               zero_envs,
+                                               &zero_env_count,
+                                               zero_lfos,
+                                               &zero_lfo_count));
+            TEST(zero_instr.layers[0].osc_mode == Synth::osc_mode_fm);
+            TEST(zero_instr.layers[0].mod_ratio == 1.0f);
+
+            const char* const cutoff_bypass_doc =
+                "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\",\"lowpass_cutoff\":{\"base\":0.0}}]}";
+            TEST(Synth::decode_instrument_json(cutoff_bypass_doc,
+                                               static_cast<uint32_t>(strlen(cutoff_bypass_doc)),
+                                               &zero_instr,
+                                               zero_envs,
+                                               &zero_env_count,
+                                               zero_lfos,
+                                               &zero_lfo_count));
+            TEST(zero_instr.routing[Synth::mod_lowpass_cutoff].base_value == 0.0f);
+
+            const char* const cutoff_floor_doc =
+                "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\",\"lowpass_cutoff\":{\"base\":20.0}}]}";
+            TEST(Synth::decode_instrument_json(cutoff_floor_doc,
+                                               static_cast<uint32_t>(strlen(cutoff_floor_doc)),
+                                               &zero_instr,
+                                               zero_envs,
+                                               &zero_env_count,
+                                               zero_lfos,
+                                               &zero_lfo_count));
+            TEST(zero_instr.routing[Synth::mod_lowpass_cutoff].base_value == 20.0f);
+
+            // The level-20 point quantizes to raw 655, which encodes to just below
+            // 20 Hz and must re-quantize to the same raw value.
+
+            const char* const cutoff_env_doc =
+                "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\",\"lowpass_cutoff\":{\"envelope\":{\"points\":[{\"time_seconds\":0.0,\"level\":0.0},{\"time_seconds\":0.1,\"level\":20.0},{\"time_seconds\":0.2,\"level\":2000.0}]}}}]}";
+            static Synth::EnvelopeDescriptor cut_envs[Synth::instrument_max_envelopes];
+            static Synth::LFODescriptor      cut_lfos[Synth::instrument_max_lfos];
+            uint32_t                         cut_env_count = 999;
+            uint32_t                         cut_lfo_count = 999;
+            TEST(Synth::decode_instrument_json(cutoff_env_doc,
+                                               static_cast<uint32_t>(strlen(cutoff_env_doc)),
+                                               &zero_instr,
+                                               cut_envs,
+                                               &cut_env_count,
+                                               cut_lfos,
+                                               &cut_lfo_count));
+            TEST(cut_env_count == 1);
+            TEST(cut_envs[0].min_value == 0.0f);
+            TEST(cut_envs[0].points[1].value == 655); // the floor's own quantization step
+
+            static Synth::InstrumentEditorBank cut_bank;
+            cut_bank = {};
+            uint16_t cut_env_ids[Synth::instrument_max_envelopes];
+            uint16_t cut_lfo_ids[Synth::instrument_max_lfos];
+            TEST(Synth::remap_envelopes(&cut_bank.bank, cut_envs, cut_env_count, cut_env_ids));
+            TEST(Synth::remap_lfos(&cut_bank.bank, cut_lfos, cut_lfo_count, cut_lfo_ids));
+            Synth::Instrument cut_installed;
+            Synth::remap_instrument(zero_instr, cut_env_ids, cut_lfo_ids, &cut_installed);
+            const uint32_t cut_slot = cut_bank.bank.instruments.allocate();
+            TEST(cut_slot != pool_no_slot);
+            cut_bank.bank.instruments.entries[cut_slot]  = cut_installed;
+            cut_bank.bank.channel_enabled[0]             = 1;
+            cut_bank.bank.channel_zones[0][0].start_note = 1;
+            cut_bank.bank.channel_zones[0][0].instrument = static_cast<uint8_t>(cut_slot);
+            TEST(Synth::validate_instrument_bank(&cut_bank.bank));
+            static char    cut_text[64 * 1024];
+            const uint32_t cut_text_len =
+                Synth::encode_instrument_json(cut_text, sizeof(cut_text), &cut_installed, &cut_bank.bank);
+            TEST(cut_text_len > 0);
+            static Synth::Instrument         cut_back;
+            static Synth::EnvelopeDescriptor cut_back_envs[Synth::instrument_max_envelopes];
+            static Synth::LFODescriptor      cut_back_lfos[Synth::instrument_max_lfos];
+            uint32_t                         cut_back_env_count = 0;
+            uint32_t                         cut_back_lfo_count = 0;
+            TEST(Synth::decode_instrument_json(cut_text,
+                                               cut_text_len,
+                                               &cut_back,
+                                               cut_back_envs,
+                                               &cut_back_env_count,
+                                               cut_back_lfos,
+                                               &cut_back_lfo_count));
+            TEST(cut_back_env_count == 1);
+            TEST(cut_back_envs[0].points[1].value == cut_envs[0].points[1].value);
+            TEST(cut_back_envs[0].min_value == cut_envs[0].min_value);
+            TEST(cut_back_envs[0].min_max_delta == cut_envs[0].min_max_delta);
+        }
+
+        // A zone copied out of the editor by hand: LFO "Value" sweeps default to
+        // -1..1 regardless of the target's slider range, and envelope min/max
+        // slots are unbounded, so levels must decode and paste back exactly.
+        {
+            const char* const real_zone_doc =
+                "{\"format\":\"synth-instrument-v1\",\"note_skew_semitones\":0,\"layer_skew_semitones\":0,"
+                "\"layers\":[{\"wave_a\":\"sine\",\"pitch_offset_semitones\":0,\"volume\":{\"base\":0,"
+                "\"envelope\":{\"points\":[{\"time_seconds\":0,\"level\":0},{\"time_seconds\":0.0406349227,"
+                "\"level\":0.491630435},{\"time_seconds\":0.522448957,\"level\":0}],\"sustain_start\":1,"
+                "\"sustain_end\":1},\"lfo\":{\"wave\":\"sine\",\"frequency_hz\":3.33333325,\"duty\":0,"
+                "\"min_level\":0,\"max_level\":1,\"depth\":0.5,\"depth_source\":\"aftertouch\","
+                "\"rate_scale_ms\":0}},\"pitch\":{\"base\":0,\"envelope\":{\"points\":[{\"time_seconds\":0,"
+                "\"level\":0.255542845},{\"time_seconds\":0.0464399122,\"level\":1.52587891e-05},"
+                "{\"time_seconds\":0.522448957,\"level\":-0.223620966}],\"sustain_start\":1,\"sustain_end\":1}},"
+                "\"panning\":{\"base\":0.5,\"lfo\":{\"wave\":\"sine\",\"frequency_hz\":1.66666663,\"duty\":0,"
+                "\"min_level\":-1,\"max_level\":1,\"depth\":0.5,\"depth_source\":\"aftertouch\","
+                "\"rate_scale_ms\":0}},\"duty_a\":{\"base\":0.172000006},\"duty_b\":{\"base\":0.156000003},"
+                "\"osc_mix\":{\"base\":0},\"fm_index\":{\"base\":0},\"lowpass_cutoff\":{\"base\":20},"
+                "\"highpass_cutoff\":{\"base\":20}}]}";
+            static Synth::Instrument         real_instr;
+            static Synth::EnvelopeDescriptor real_envs[Synth::instrument_max_envelopes];
+            static Synth::LFODescriptor      real_lfos[Synth::instrument_max_lfos];
+            uint32_t                         real_env_count = 999;
+            uint32_t                         real_lfo_count = 999;
+            TEST(Synth::decode_instrument_json(real_zone_doc,
+                                               static_cast<uint32_t>(strlen(real_zone_doc)),
+                                               &real_instr,
+                                               real_envs,
+                                               &real_env_count,
+                                               real_lfos,
+                                               &real_lfo_count));
+            TEST(real_lfo_count == 2);
+            TEST(real_lfos[1].min_value == -1.0f); // panning LFO sweep below the slider range
+            TEST(real_lfos[1].min_max_delta == 2.0f);
+
+            static Synth::InstrumentEditorBank real_bank;
+            real_bank = {};
+            uint16_t real_env_ids[Synth::instrument_max_envelopes];
+            uint16_t real_lfo_ids[Synth::instrument_max_lfos];
+            TEST(Synth::remap_envelopes(&real_bank.bank, real_envs, real_env_count, real_env_ids));
+            TEST(Synth::remap_lfos(&real_bank.bank, real_lfos, real_lfo_count, real_lfo_ids));
+            Synth::Instrument real_installed;
+            Synth::remap_instrument(real_instr, real_env_ids, real_lfo_ids, &real_installed);
+            const uint32_t real_slot = real_bank.bank.instruments.allocate();
+            TEST(real_slot != pool_no_slot);
+            real_bank.bank.instruments.entries[real_slot] = real_installed;
+            real_bank.bank.channel_enabled[0]             = 1;
+            real_bank.bank.channel_zones[0][0].start_note = 1;
+            real_bank.bank.channel_zones[0][0].instrument = static_cast<uint8_t>(real_slot);
+            TEST(Synth::validate_instrument_bank(&real_bank.bank));
+            static char    real_text[64 * 1024];
+            const uint32_t real_text_len =
+                Synth::encode_instrument_json(real_text, sizeof(real_text), &real_installed, &real_bank.bank);
+            TEST(real_text_len > 0);
+            static Synth::Instrument         real_back;
+            static Synth::EnvelopeDescriptor real_back_envs[Synth::instrument_max_envelopes];
+            static Synth::LFODescriptor      real_back_lfos[Synth::instrument_max_lfos];
+            uint32_t                         real_back_env_count = 0;
+            uint32_t                         real_back_lfo_count = 0;
+            TEST(Synth::decode_instrument_json(real_text,
+                                               real_text_len,
+                                               &real_back,
+                                               real_back_envs,
+                                               &real_back_env_count,
+                                               real_back_lfos,
+                                               &real_back_lfo_count));
+            TEST(real_back_lfo_count == 2);
+            TEST(real_back_lfos[1].min_value == real_lfos[1].min_value);
+            TEST(real_back_lfos[1].min_max_delta == real_lfos[1].min_max_delta);
+        }
+
+        // Envelope levels sit outside the base's slider range as well: the
+        // editor's min/max slots are unbounded reals, so a volume envelope
+        // swinging past full scale must decode and stay bank-legal.
+        {
+            const char* const swing_doc =
+                "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\",\"volume\":{\"envelope\":{\"points\":[{\"time_seconds\":0,\"level\":-1.0},{\"time_seconds\":0.1,\"level\":5.0}]}}}]}";
+            static Synth::Instrument         swing_instr;
+            static Synth::EnvelopeDescriptor swing_envs[Synth::instrument_max_envelopes];
+            static Synth::LFODescriptor      swing_lfos[Synth::instrument_max_lfos];
+            uint32_t                         swing_env_count = 999;
+            uint32_t                         swing_lfo_count = 999;
+            TEST(Synth::decode_instrument_json(swing_doc,
+                                               static_cast<uint32_t>(strlen(swing_doc)),
+                                               &swing_instr,
+                                               swing_envs,
+                                               &swing_env_count,
+                                               swing_lfos,
+                                               &swing_lfo_count));
+            TEST(swing_env_count == 1);
+            TEST(swing_envs[0].min_value == -1.0f);
+            TEST(swing_envs[0].min_max_delta == 6.0f / 65535.0f);
+            TEST(swing_envs[0].points[0].value == 0);
+            TEST(swing_envs[0].points[1].value == 0xFFFF);
+            static Synth::InstrumentEditorBank swing_bank;
+            swing_bank = {};
+            uint16_t swing_env_ids[Synth::instrument_max_envelopes];
+            uint16_t swing_lfo_ids[Synth::instrument_max_lfos];
+            TEST(Synth::remap_envelopes(&swing_bank.bank, swing_envs, swing_env_count, swing_env_ids));
+            TEST(Synth::remap_lfos(&swing_bank.bank, swing_lfos, swing_lfo_count, swing_lfo_ids));
+            Synth::Instrument swing_installed;
+            Synth::remap_instrument(swing_instr, swing_env_ids, swing_lfo_ids, &swing_installed);
+            const uint32_t swing_slot = swing_bank.bank.instruments.allocate();
+            TEST(swing_slot != pool_no_slot);
+            swing_bank.bank.instruments.entries[swing_slot] = swing_installed;
+            swing_bank.bank.channel_enabled[0]              = 1;
+            swing_bank.bank.channel_zones[0][0].start_note  = 1;
+            swing_bank.bank.channel_zones[0][0].instrument  = static_cast<uint8_t>(swing_slot);
+            TEST(Synth::validate_instrument_bank(&swing_bank.bank));
+        }
+
+        // -------------------------------------------------------------------
+        // Clipboard portable layout records.
+        //
+        // Positives that own a bank assert validate_instrument_bank and
+        // validate_editor_metadata before the operation under test; hand-built instrument
+        // models assert validate_standalone_model; document rejections decode their
+        // baseline first, so each refusal isolates the record under inspection.
+        // -------------------------------------------------------------------
+        {
+            // A moved canonical, envelope, LFO and parameter node survives export,
+            // encode, decode and mapping, and lands back on the decoded node
+            // identity rather than on a numeric descriptor id.
+            static Synth::InstrumentEditorBank  ex_bank;
+            static Synth::Instrument            ex_instr;
+            static Synth::InstrumentGraphLayout ex_portable[max_portable_records];
+            static Synth::GraphNodeLayout       ex_mapped[max_portable_records];
+            static Synth::GraphNodeLayout       ex_replay_mapped[max_portable_records];
+            static char                         ex_text[clipboard_capacity];
+            build_clipboard_zone_fixture(&ex_bank, &ex_instr);
+            TEST(Synth::validate_instrument_bank(&ex_bank.bank));
+            TEST(Sculptor::validate_editor_metadata(ex_bank));
+
+            add_detached_record(&ex_bank, 0, 0, 0, 1, 64.0f, 32.0f, Synth::ModSource::none, Synth::ModSource::none, 0);
+            add_detached_record(&ex_bank,
+                                0,
+                                0,
+                                1,
+                                1,
+                                120.5f,
+                                44.25f,
+                                Synth::ModSource::none,
+                                Synth::ModSource::none,
+                                1);
+            add_detached_record(&ex_bank,
+                                0,
+                                0,
+                                2,
+                                1,
+                                12.5f,
+                                -8.5f,
+                                Synth::ModSource::velocity,
+                                Synth::ModSource::mod_wheel,
+                                1);
+            add_parameter_record(&ex_bank, 0, 0, 0, 60.0f, -40.0f, 1);
+            add_parameter_record(&ex_bank, 0, 0, 1, -60.0f, 40.0f, 1);
+            ex_bank.graph_layout[1].width_override  = 220.0f;
+            ex_bank.graph_layout[1].height_override = 120.0f;
+            // Portable parameter ordinals are zero-based, internal slots one-based.
+            ex_bank.graph_layout[3].param_slot = 1;
+            ex_bank.graph_layout[4].param_slot = 1;
+            TEST(Sculptor::validate_editor_metadata(ex_bank));
+
+            uint32_t ex_portable_count = max_portable_records;
+            TEST(Sculptor::encode_instrument_graph_layout(ex_instr,
+                                                          ex_bank.bank,
+                                                          ex_bank,
+                                                          0,
+                                                          0,
+                                                          ex_portable,
+                                                          max_portable_records,
+                                                          &ex_portable_count));
+            TEST(ex_portable_count == 5);
+            int32_t rec = find_portable(ex_portable,
+                                        ex_portable_count,
+                                        Synth::instrument_graph_layout_canonical,
+                                        0xFFu,
+                                        0xFFu,
+                                        0xFFu);
+            TEST(rec >= 0);
+            if (rec >= 0)
+                TEST(ex_portable[rec].canonical_index == 1);
+            if (rec >= 0)
+                TEST(ex_portable[rec].x == 64.0f && ex_portable[rec].y == 32.0f);
+            rec = find_portable(ex_portable,
+                                ex_portable_count,
+                                Synth::instrument_graph_layout_envelope,
+                                0,
+                                Synth::mod_volume,
+                                0xFFu);
+            TEST(rec >= 0);
+            if (rec >= 0)
+                TEST(ex_portable[rec].x == 120.5f && ex_portable[rec].width_override == 220.0f);
+            if (rec >= 0)
+                TEST(ex_portable[rec].height_override == 120.0f);
+            rec = find_portable(ex_portable,
+                                ex_portable_count,
+                                Synth::instrument_graph_layout_lfo,
+                                0,
+                                Synth::mod_volume,
+                                0xFFu);
+            TEST(rec >= 0);
+            if (rec >= 0)
+                TEST(ex_portable[rec].depth_source == static_cast<uint8_t>(Synth::ModSource::velocity));
+            if (rec >= 0)
+                TEST(ex_portable[rec].rate_source == static_cast<uint8_t>(Synth::ModSource::mod_wheel));
+            rec = find_portable(ex_portable,
+                                ex_portable_count,
+                                Synth::instrument_graph_layout_parameter,
+                                0xFFu,
+                                Synth::mod_volume,
+                                0);
+            TEST(rec >= 0);
+            if (rec >= 0)
+                TEST(ex_portable[rec].x == 60.0f);
+            rec = find_portable(ex_portable,
+                                ex_portable_count,
+                                Synth::instrument_graph_layout_parameter,
+                                0xFFu,
+                                Synth::mod_pitch,
+                                0);
+            TEST(rec >= 0);
+            if (rec >= 0)
+                TEST(ex_portable[rec].x == -60.0f);
+
+            // Exporter refusals leave the record sink and the count untouched: a
+            // destination outside the zone table, and a capacity that cannot hold what
+            // this zone exports.
+            static Synth::InstrumentGraphLayout ex_refuse[max_portable_records];
+            static Synth::InstrumentGraphLayout ex_refuse_sentinel[max_portable_records];
+            memset(ex_refuse, 0x5A, sizeof(ex_refuse));
+            memset(ex_refuse_sentinel, 0x5A, sizeof(ex_refuse_sentinel));
+            constexpr uint32_t ex_refuse_capacity = sizeof(ex_refuse) / sizeof(ex_refuse[0]);
+            uint32_t           ex_refuse_count    = ex_refuse_capacity;
+            TEST(! Sculptor::encode_instrument_graph_layout(ex_instr,
+                                                            ex_bank.bank,
+                                                            ex_bank,
+                                                            Synth::max_channels, // no such channel
+                                                            0,
+                                                            ex_refuse,
+                                                            ex_refuse_capacity,
+                                                            &ex_refuse_count));
+            TEST(ex_refuse_count == ex_refuse_capacity);
+            TEST(memcmp(ex_refuse, ex_refuse_sentinel, sizeof(ex_refuse_sentinel)) == 0);
+            TEST(! Sculptor::encode_instrument_graph_layout(ex_instr,
+                                                            ex_bank.bank,
+                                                            ex_bank,
+                                                            0,
+                                                            Synth::max_instr_per_channel, // no such zone
+                                                            ex_refuse,
+                                                            ex_refuse_capacity,
+                                                            &ex_refuse_count));
+            TEST(ex_refuse_count == ex_refuse_capacity);
+            TEST(memcmp(ex_refuse, ex_refuse_sentinel, sizeof(ex_refuse_sentinel)) == 0);
+            // A zone that exports five records cannot fit into zero slots.
+            TEST(! Sculptor::encode_instrument_graph_layout(ex_instr,
+                                                            ex_bank.bank,
+                                                            ex_bank,
+                                                            0,
+                                                            0,
+                                                            ex_refuse,
+                                                            0,
+                                                            &ex_refuse_count));
+            TEST(ex_refuse_count == ex_refuse_capacity);
+            TEST(memcmp(ex_refuse, ex_refuse_sentinel, sizeof(ex_refuse_sentinel)) == 0);
+
+            static Synth::InstrumentEditorBank ex_before;
+            ex_before             = ex_bank;
+            const uint32_t ex_len = Synth::encode_instrument_json(ex_text,
+                                                                  sizeof(ex_text),
+                                                                  &ex_instr,
+                                                                  &ex_bank.bank,
+                                                                  ex_portable,
+                                                                  ex_portable_count);
+            TEST(ex_len > 0);
+            TEST(ex_len + 1 <= clipboard_capacity);
+            TEST(strstr(ex_text, "\"graph_layout\":[") != nullptr);
+            TEST(memcmp(&ex_bank, &ex_before, sizeof(ex_bank)) == 0);
+
+            static ClipboardDecode ex_dec;
+            fill_clipboard_sentinels(&ex_dec);
+            TEST(decode_clipboard(&ex_dec, ex_text, max_portable_records));
+            TEST(ex_dec.layout_count == ex_portable_count);
+            TEST(ex_dec.env_count == 2);
+            TEST(ex_dec.lfo_count == 1);
+            TEST(ex_dec.instr.layer_count == 1);
+            TEST(ex_dec.instr.layers[0].osc_mode == Synth::osc_mode_fm);
+            TEST(ex_dec.instr.layers[0].mod_ratio == 2.0f);
+            TEST(ex_dec.instr.layers[0].gen[Synth::mod_volume].envelope_desc_id == 1);
+            TEST(ex_dec.instr.layers[0].gen[Synth::mod_volume].lfo_desc_id == 1);
+            TEST(ex_dec.instr.layers[0].gen[Synth::mod_pitch].envelope_desc_id == 2);
+            TEST(ex_dec.instr.routing[Synth::mod_volume].base_value == 0.8f);
+            TEST(ex_dec.envs[0].num_points == 3);
+            TEST(ex_dec.envs[1].num_points == 3);
+            TEST(ex_dec.lfos[0].period_ms == 250);
+            TEST(ex_dec.layout[0].kind == Synth::instrument_graph_layout_canonical);
+            TEST(find_portable(ex_dec.layout,
+                               ex_dec.layout_count,
+                               Synth::instrument_graph_layout_envelope,
+                               0,
+                               Synth::mod_volume,
+                               0xFFu) >= 0);
+
+            uint32_t ex_mapped_count = max_portable_records;
+            TEST(Sculptor::map_instrument_graph_layout(ex_dec.instr,
+                                                       ex_dec.envs,
+                                                       ex_dec.env_count,
+                                                       ex_dec.lfos,
+                                                       ex_dec.lfo_count,
+                                                       ex_dec.layout,
+                                                       ex_dec.layout_count,
+                                                       ex_mapped,
+                                                       max_portable_records,
+                                                       &ex_mapped_count));
+            TEST(ex_mapped_count == 5);
+            int32_t m = find_mapped(ex_mapped, ex_mapped_count, 0, 1);
+            TEST(m >= 0);
+            if (m >= 0)
+                TEST(ex_mapped[m].x == 64.0f && ex_mapped[m].y == 32.0f);
+            if (m >= 0)
+                TEST(ex_mapped[m].uid == 0);
+            m = find_mapped(ex_mapped, ex_mapped_count, 1, 1);
+            TEST(m >= 0);
+            if (m >= 0)
+                TEST(ex_mapped[m].x == 120.5f && ex_mapped[m].width_override == 220.0f);
+            if (m >= 0)
+                TEST(ex_mapped[m].uid != 0);
+            if (m >= 0)
+                TEST(ex_mapped[m].depth_source == 0 && ex_mapped[m].rate_source == 0);
+            m = find_mapped(ex_mapped, ex_mapped_count, 2, 1);
+            TEST(m >= 0);
+            if (m >= 0)
+                TEST(ex_mapped[m].depth_source == static_cast<uint8_t>(Synth::ModSource::velocity));
+            if (m >= 0)
+                TEST(ex_mapped[m].rate_source == static_cast<uint8_t>(Synth::ModSource::mod_wheel));
+            if (m >= 0)
+                TEST(ex_mapped[m].x == 12.5f && ex_mapped[m].uid != 0);
+            m = find_mapped(ex_mapped, ex_mapped_count, 3, Synth::mod_volume);
+            TEST(m >= 0);
+            if (m >= 0)
+                TEST(ex_mapped[m].param_slot == 1 && ex_mapped[m].x == 60.0f && ex_mapped[m].uid != 0);
+            m = find_mapped(ex_mapped, ex_mapped_count, 3, Synth::mod_pitch);
+            TEST(m >= 0);
+            if (m >= 0)
+                TEST(ex_mapped[m].param_slot == 1 && ex_mapped[m].x == -60.0f);
+
+            // Mapper refusals: a decoded locator the decoded model does not project, and
+            // a kind that is not clipboard data. Both leave the mapped sink and the count
+            // untouched; the same sink accepts the resolved records above, so only the
+            // locator differs.
+            static Synth::InstrumentGraphLayout mp_records[1];
+            static Synth::GraphNodeLayout       mp_sink[4];
+            static Synth::GraphNodeLayout       mp_sink_sentinel[4];
+            memset(mp_sink, 0x5A, sizeof(mp_sink));
+            memset(mp_sink_sentinel, 0x5A, sizeof(mp_sink_sentinel));
+            constexpr uint32_t mp_capacity = sizeof(mp_sink) / sizeof(mp_sink[0]);
+            uint32_t           mp_count    = mp_capacity;
+            const uint32_t     mp_cases    = 2;
+            for (uint32_t c = 0; c < mp_cases; c++) {
+                memset(mp_records, 0, sizeof(mp_records));
+                if (c == 0) {
+                    // The decoded instrument has one layer, so layer 1 is not projected.
+                    mp_records[0].kind   = Synth::instrument_graph_layout_envelope;
+                    mp_records[0].layer  = 1;
+                    mp_records[0].target = static_cast<uint8_t>(Synth::mod_volume);
+                }
+                else {
+                    // Effect nodes are never clipboard data.
+                    mp_records[0].kind = 4;
+                }
+                mp_records[0].x = 5.0f;
+                mp_count        = mp_capacity;
+                TEST(! Sculptor::map_instrument_graph_layout(ex_dec.instr,
+                                                             ex_dec.envs,
+                                                             ex_dec.env_count,
+                                                             ex_dec.lfos,
+                                                             ex_dec.lfo_count,
+                                                             mp_records,
+                                                             1,
+                                                             mp_sink,
+                                                             mp_capacity,
+                                                             &mp_count));
+                TEST(mp_count == mp_capacity);
+                TEST(memcmp(mp_sink, mp_sink_sentinel, sizeof(mp_sink_sentinel)) == 0);
+            }
+
+            // Re-encoding the decoded instrument with the decoded-relative records
+            // and mapping the result again reproduces the same editor records: the
+            // portable identity is stable across a second copy.
+            static Synth::InstrumentBank ex_replay_bank;
+            memset(&ex_replay_bank, 0, sizeof(ex_replay_bank));
+            uint16_t ex_env_ids[Synth::instrument_max_envelopes];
+            uint16_t ex_lfo_ids[Synth::instrument_max_lfos];
+            // The copy helpers below index their map outputs with the decoded
+            // instrument generator ids, so the replay runs only on a decode that
+            // produced the fixture's expected descriptor counts.
+            const bool ex_decoded = ex_dec.env_count == 2 && ex_dec.lfo_count == 1 && ex_dec.layout_count == 5;
+            TEST(ex_decoded);
+            if (ex_decoded) {
+                TEST(Synth::remap_envelopes(&ex_replay_bank, ex_dec.envs, ex_dec.env_count, ex_env_ids));
+                TEST(Synth::remap_lfos(&ex_replay_bank, ex_dec.lfos, ex_dec.lfo_count, ex_lfo_ids));
+                static Synth::Instrument ex_replay_instr;
+                Synth::remap_instrument(ex_dec.instr, ex_env_ids, ex_lfo_ids, &ex_replay_instr);
+                static char    ex_replay_text[clipboard_capacity];
+                const uint32_t ex_replay_len = Synth::encode_instrument_json(ex_replay_text,
+                                                                             sizeof(ex_replay_text),
+                                                                             &ex_replay_instr,
+                                                                             &ex_replay_bank,
+                                                                             ex_dec.layout,
+                                                                             ex_dec.layout_count);
+                TEST(ex_replay_len > 0);
+                static ClipboardDecode ex_replay_dec;
+                fill_clipboard_sentinels(&ex_replay_dec);
+                TEST(decode_clipboard(&ex_replay_dec, ex_replay_text, max_portable_records));
+                TEST(ex_replay_dec.layout_count == ex_dec.layout_count);
+                TEST(ex_replay_dec.env_count == ex_dec.env_count);
+                TEST(ex_replay_dec.lfo_count == ex_dec.lfo_count);
+                uint32_t ex_replay_mapped_count = max_portable_records;
+                TEST(Sculptor::map_instrument_graph_layout(ex_replay_dec.instr,
+                                                           ex_replay_dec.envs,
+                                                           ex_replay_dec.env_count,
+                                                           ex_replay_dec.lfos,
+                                                           ex_replay_dec.lfo_count,
+                                                           ex_replay_dec.layout,
+                                                           ex_replay_dec.layout_count,
+                                                           ex_replay_mapped,
+                                                           max_portable_records,
+                                                           &ex_replay_mapped_count));
+                TEST(ex_replay_mapped_count == ex_mapped_count);
+                TEST(memcmp(ex_replay_mapped, ex_mapped, ex_mapped_count * sizeof(ex_mapped[0])) == 0);
+            }
+        }
+
+        {
+            // The reclaim map is capacity-wide and exact: one entry per LFO slot,
+            // zeros for freed and never-occupied ids, one-based ids for survivors,
+            // the same map the surviving bindings are remapped with.
+            static Synth::InstrumentEditorBank rm_bank;
+            static Synth::InstrumentEditorBank rm_parallel;
+            static uint16_t                    rm_map[Synth::max_lfos];
+            make_valid_bank(rm_bank.bank); // instrument 0 owns envelope 1 and LFO 1
+            for (uint32_t extra = 0; extra < 2; extra++) {
+                const uint32_t added = rm_bank.bank.lfos.allocate();
+                TEST(added != pool_no_slot);
+                rm_bank.bank.lfos.entries[added].wave      = Synth::WaveType::sine_wave;
+                rm_bank.bank.lfos.entries[added].period_ms = static_cast<uint16_t>(90 + 40 * extra);
+            }
+            rm_bank.bank.master_chain.num_effects                        = 1;
+            rm_bank.bank.master_chain.effects[0].type                    = Synth::EffectType::distortion;
+            rm_bank.bank.master_chain.effects[0].enabled                 = true;
+            rm_bank.bank.master_chain.effects[0].bindings[0].base_value  = 1.0f;
+            rm_bank.bank.master_chain.effects[0].bindings[0].lfo_desc_id = 3; // id 2 stays unreferenced
+            TEST(Synth::validate_instrument_bank(&rm_bank.bank));
+            rm_parallel = rm_bank;
+
+            for (uint32_t i = 0; i < Synth::max_lfos; i++) {
+                rm_map[i] = 0xFFFF;
+            }
+            Synth::reclaim_unused_slots(&rm_bank, rm_map);
+
+            // In this fixture LFO 1 (instrument) and LFO 3 (master chain) survive and
+            // compact to 1 and 2; LFO 2 is referenced by nothing; every slot beyond the
+            // allocated high water mark is unoccupied and reports zero.
+            TEST(rm_map[0] == 1);
+            TEST(rm_map[1] == 0);
+            TEST(rm_map[2] == 2);
+            for (uint32_t i = 3; i < Synth::max_lfos; i++) {
+                TEST(rm_map[i] == 0);
+            }
+            TEST(rm_bank.bank.lfos.num_allocated == 2);
+            TEST(rm_bank.bank.master_chain.effects[0].bindings[0].lfo_desc_id == 2);
+            TEST(rm_bank.bank.instruments.entries[0].layers[0].gen[Synth::mod_pitch].lfo_desc_id == 1);
+            TEST(Synth::validate_instrument_bank(&rm_bank.bank));
+
+            // The one-argument overload is the same transaction without the map.
+            Synth::reclaim_unused_slots(&rm_parallel);
+            TEST(memcmp(&rm_parallel, &rm_bank, sizeof(rm_bank)) == 0);
+        }
+
+        {
+            // Descriptor identity, not descriptor id. Two byte-identical envelopes
+            // intern into one decoded descriptor, so a record naming either source
+            // cell addresses that one node.
+            static char       it_text[clipboard_capacity];
+            const char* const it_records =
+                "{\"kind\":1,\"layer\":0,\"target\":1,\"x\":33.5,\"y\":4.5,\"width\":0,\"height\":0}";
+            build_layout_doc(it_text, sizeof(it_text), clipboard_alias_head, it_records);
+            static ClipboardDecode it_dec;
+            fill_clipboard_sentinels(&it_dec);
+            TEST(decode_clipboard(&it_dec, it_text, max_portable_records));
+            TEST(it_dec.env_count == 1); // interning really happened
+            TEST(it_dec.instr.layers[0].gen[Synth::mod_volume].envelope_desc_id == 1);
+            TEST(it_dec.instr.layers[0].gen[Synth::mod_pitch].envelope_desc_id == 1);
+            TEST(it_dec.layout_count == 1);
+
+            static Synth::GraphNodeLayout it_mapped[max_portable_records];
+            uint32_t                      it_mapped_count = max_portable_records;
+            TEST(Sculptor::map_instrument_graph_layout(it_dec.instr,
+                                                       it_dec.envs,
+                                                       it_dec.env_count,
+                                                       it_dec.lfos,
+                                                       it_dec.lfo_count,
+                                                       it_dec.layout,
+                                                       it_dec.layout_count,
+                                                       it_mapped,
+                                                       max_portable_records,
+                                                       &it_mapped_count));
+            TEST(it_mapped_count == 1);
+            TEST(it_mapped[0].kind == 1 && it_mapped[0].index == 1);
+            TEST(it_mapped[0].x == 33.5f && it_mapped[0].uid != 0);
+
+            // A generator on a target the graph does not project has no node to
+            // attach to, so its record cannot resolve and the document is refused.
+            const char* const dm_head =
+                "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\",\"duty_a\":"
+                "{\"envelope\":{\"points\":[{\"time_seconds\":0,\"level\":0.25},"
+                "{\"time_seconds\":0.5,\"level\":0.75}],\"sustain_start\":0,\"sustain_end\":1}}}],";
+            static char dm_text[clipboard_capacity];
+            build_layout_doc(dm_text,
+                             sizeof(dm_text),
+                             dm_head,
+                             "{\"kind\":1,\"layer\":0,\"target\":3,\"x\":10,\"y\":10,\"width\":0,\"height\":0}");
+            static ClipboardDecode dm_attempt;
+            fill_clipboard_sentinels(&dm_attempt);
+            TEST(decode_clipboard(&dm_attempt, dm_text, max_portable_records) == false);
+            // The same document without the record decodes: the refusal is the
+            // record's, not the document's.
+            static ClipboardDecode dm_baseline;
+            fill_clipboard_sentinels(&dm_baseline);
+            build_layout_doc(dm_text, sizeof(dm_text), dm_head, "");
+            TEST(decode_clipboard(&dm_baseline, dm_text, max_portable_records));
+            TEST(dm_baseline.env_count == 1);
+            static ClipboardDecode dm_sentinel;
+            fill_clipboard_sentinels(&dm_sentinel);
+            TEST(clipboard_sentinels_intact(&dm_attempt, &dm_sentinel));
+        }
+
+        {
+            // Copy-time normalization. Source envelopes A, A' (byte-identical to A)
+            // and B give three source parameter groups on volume; the decoder interns
+            // A and A', so the decoded instrument has two. The saved positions sit on
+            // A' (source ordinal 1) and B (source ordinal 2) and must attach to
+            // decoded ordinals 0 and 1.
+            static Synth::EnvelopeDescriptor    nm_envs[3];
+            static Synth::EnvelopeDescriptor    nm_dec_envs[2];
+            static Synth::Instrument            nm_src;
+            static Synth::Instrument            nm_dec;
+            static Synth::InstrumentGraphLayout nm_records[2];
+            static Synth::InstrumentGraphLayout nm_out[4];
+            static Synth::InstrumentGraphLayout nm_swapped[2];
+            static Synth::InstrumentGraphLayout nm_swapped_out[4];
+
+            memset(nm_envs, 0, sizeof(nm_envs));
+            for (uint32_t e = 0; e < 3; e++) {
+                Synth::EnvelopeDescriptor& source_env = nm_envs[e];
+                source_env.num_points                 = 2;
+                source_env.sustain_first_point        = 0;
+                source_env.sustain_last_point         = 1;
+                source_env.points[0].position         = 0;
+                source_env.points[0].value            = 0x2000;
+                source_env.points[1].position         = 200;
+                source_env.points[1].value            = 0x8000;
+                source_env.min_value                  = e == 2 ? 0.5f : -0.25f; // B differs from A/A'
+                source_env.min_max_delta              = e == 2 ? 1.0f : 0.75f;
+            }
+            nm_dec_envs[0] = nm_envs[0];
+            nm_dec_envs[1] = nm_envs[2];
+
+            nm_src.layer_count = 3;
+            nm_dec.layer_count = 3;
+            for (uint32_t layer = 0; layer < 3; layer++) {
+                nm_src.layers[layer].osc_type[0]                             = Synth::WaveType::sine_wave;
+                nm_src.layers[layer].gen[Synth::mod_volume].envelope_desc_id = static_cast<uint16_t>(layer + 1);
+                nm_dec.layers[layer].osc_type[0]                             = Synth::WaveType::sine_wave;
+                nm_dec.layers[layer].gen[Synth::mod_volume].envelope_desc_id = layer == 2 ? 2 : 1;
+                nm_src.layers[layer].mod_ratio                               = 1.0f;
+                nm_dec.layers[layer].mod_ratio                               = 1.0f;
+            }
+            TEST(validate_standalone_model(nm_src, nm_envs, 3, nullptr, 0));
+            TEST(validate_standalone_model(nm_dec, nm_dec_envs, 2, nullptr, 0));
+
+            memset(nm_records, 0, sizeof(nm_records));
+            nm_records[0].kind              = Synth::instrument_graph_layout_parameter;
+            nm_records[0].target            = static_cast<uint8_t>(Synth::mod_volume);
+            nm_records[0].parameter_ordinal = 1; // A'
+            nm_records[0].x                 = 111.5f;
+            nm_records[0].y                 = 1.5f;
+            nm_records[1].kind              = Synth::instrument_graph_layout_parameter;
+            nm_records[1].target            = static_cast<uint8_t>(Synth::mod_volume);
+            nm_records[1].parameter_ordinal = 2; // B
+            nm_records[1].x                 = 222.5f;
+            nm_records[1].y                 = 2.5f;
+
+            uint32_t nm_count = 4;
+            TEST(Sculptor::normalize_instrument_graph_layout(nm_src,
+                                                             nm_envs,
+                                                             3,
+                                                             nullptr,
+                                                             0,
+                                                             nm_records,
+                                                             2,
+                                                             nm_dec,
+                                                             nm_dec_envs,
+                                                             2,
+                                                             nullptr,
+                                                             0,
+                                                             nm_out,
+                                                             sizeof(nm_out) / sizeof(nm_out[0]),
+                                                             &nm_count));
+            TEST(nm_count == 2);
+            int32_t n =
+                find_portable(nm_out, nm_count, Synth::instrument_graph_layout_parameter, 0xFFu, Synth::mod_volume, 0);
+            TEST(n >= 0);
+            if (n >= 0)
+                TEST(nm_out[n].x == 111.5f && nm_out[n].y == 1.5f); // source ordinal 1 -> decoded ordinal 0
+            n = find_portable(nm_out, nm_count, Synth::instrument_graph_layout_parameter, 0xFFu, Synth::mod_volume, 1);
+            TEST(n >= 0);
+            if (n >= 0)
+                TEST(nm_out[n].x == 222.5f && nm_out[n].y == 2.5f); // source ordinal 2 -> decoded ordinal 1
+            TEST(find_portable(nm_out, nm_count, 0xFFu, 0xFFu, 0xFFu, 2) == -1); // no stale third group
+
+            // Input record order does not participate in identity: the reversed
+            // input normalizes to byte-identical output.
+            nm_swapped[0]             = nm_records[1];
+            nm_swapped[1]             = nm_records[0];
+            uint32_t nm_swapped_count = 4;
+            TEST(Sculptor::normalize_instrument_graph_layout(nm_src,
+                                                             nm_envs,
+                                                             3,
+                                                             nullptr,
+                                                             0,
+                                                             nm_swapped,
+                                                             2,
+                                                             nm_dec,
+                                                             nm_dec_envs,
+                                                             2,
+                                                             nullptr,
+                                                             0,
+                                                             nm_swapped_out,
+                                                             sizeof(nm_swapped_out) / sizeof(nm_swapped_out[0]),
+                                                             &nm_swapped_count));
+            TEST(nm_swapped_count == nm_count);
+            TEST(memcmp(nm_swapped_out, nm_out, nm_count * sizeof(nm_out[0])) == 0);
+
+            // Exercise the complete copy pipeline with A/A'/B descriptor interning.
+            static Synth::InstrumentEditorBank nm_copy_bank;
+            nm_copy_bank = {};
+            nm_copy_bank.bank.instruments.allocate();
+            nm_copy_bank.bank.instruments.entries[0] = nm_src;
+            nm_copy_bank.bank.channel_enabled[0]     = 1;
+            nm_copy_bank.bank.channel_zones[0][0]    = { 1, 0 };
+            for (uint32_t envelope = 0; envelope < 3; ++envelope) {
+                nm_copy_bank.bank.envelopes.allocate();
+                nm_copy_bank.bank.envelopes.entries[envelope] = nm_envs[envelope];
+            }
+            nm_copy_bank.graph_layout_count = 2;
+            for (uint32_t record = 0; record < 2; ++record) {
+                Synth::GraphNodeLayout& saved = nm_copy_bank.graph_layout[record];
+                saved.kind                    = 3;
+                saved.uid                     = static_cast<uint8_t>(record + 1);
+                saved.param_slot              = static_cast<uint8_t>(record + 2);
+                saved.x                       = nm_records[record].x;
+                saved.y                       = nm_records[record].y;
+            }
+            static char                         nm_copy_text[clipboard_capacity];
+            static ClipboardDecode              nm_copy_decoded;
+            static Synth::InstrumentGraphLayout nm_copy_export[max_portable_records];
+            static Synth::InstrumentGraphLayout nm_copy_normalized[max_portable_records];
+            uint32_t                            nm_copy_length =
+                Synth::encode_instrument_json(nm_copy_text, sizeof(nm_copy_text), &nm_src, &nm_copy_bank.bank);
+            TEST(nm_copy_length != 0);
+            TEST(decode_clipboard(&nm_copy_decoded, nm_copy_text, max_portable_records));
+            TEST(nm_copy_decoded.env_count == 2);
+            uint32_t nm_copy_export_count = 0;
+            TEST(Sculptor::encode_instrument_graph_layout(nm_src,
+                                                          nm_copy_bank.bank,
+                                                          nm_copy_bank,
+                                                          0,
+                                                          0,
+                                                          nm_copy_export,
+                                                          max_portable_records,
+                                                          &nm_copy_export_count));
+            uint32_t nm_copy_normalized_count = 0;
+            TEST(Sculptor::normalize_instrument_graph_layout(nm_src,
+                                                             nm_envs,
+                                                             3,
+                                                             nullptr,
+                                                             0,
+                                                             nm_copy_export,
+                                                             nm_copy_export_count,
+                                                             nm_copy_decoded.instr,
+                                                             nm_copy_decoded.envs,
+                                                             nm_copy_decoded.env_count,
+                                                             nm_copy_decoded.lfos,
+                                                             nm_copy_decoded.lfo_count,
+                                                             nm_copy_normalized,
+                                                             max_portable_records,
+                                                             &nm_copy_normalized_count));
+            TEST(nm_copy_normalized_count == 2);
+            nm_copy_length = Synth::encode_instrument_json(nm_copy_text,
+                                                           sizeof(nm_copy_text),
+                                                           &nm_src,
+                                                           &nm_copy_bank.bank,
+                                                           nm_copy_normalized,
+                                                           nm_copy_normalized_count);
+            TEST(nm_copy_length != 0);
+            TEST(decode_clipboard(&nm_copy_decoded, nm_copy_text, max_portable_records));
+            TEST(nm_copy_decoded.env_count == 2 && nm_copy_decoded.layout_count == 2);
+            TEST(nm_copy_decoded.layout[0].parameter_ordinal == 0 && nm_copy_decoded.layout[0].x == 111.5f);
+            TEST(nm_copy_decoded.layout[1].parameter_ordinal == 1 && nm_copy_decoded.layout[1].x == 222.5f);
+
+            // Source-only ordinal 2 does not exist in the decoded two-group model.
+            nm_copy_normalized[1].parameter_ordinal = 2;
+            TEST(Synth::encode_instrument_json(nm_copy_text,
+                                               sizeof(nm_copy_text),
+                                               &nm_src,
+                                               &nm_copy_bank.bank,
+                                               nm_copy_normalized,
+                                               nm_copy_normalized_count) == 0);
+
+            // Envelope nodes alias the same way, and the earliest source node
+            // carrying a saved layout wins for the collapsed decoded node.
+            static Synth::InstrumentGraphLayout nm_env_records[2];
+            memset(nm_env_records, 0, sizeof(nm_env_records));
+            nm_env_records[0].kind   = Synth::instrument_graph_layout_envelope;
+            nm_env_records[0].layer  = 1; // A'
+            nm_env_records[0].target = static_cast<uint8_t>(Synth::mod_volume);
+            nm_env_records[0].x      = 33.5f;
+            nm_env_records[1].kind   = Synth::instrument_graph_layout_envelope;
+            nm_env_records[1].layer  = 0; // A
+            nm_env_records[1].target = static_cast<uint8_t>(Synth::mod_volume);
+            nm_env_records[1].x      = 11.5f;
+            static Synth::InstrumentGraphLayout nm_env_out[4];
+            uint32_t                            nm_env_count = 4;
+            TEST(Sculptor::normalize_instrument_graph_layout(nm_src,
+                                                             nm_envs,
+                                                             3,
+                                                             nullptr,
+                                                             0,
+                                                             nm_env_records,
+                                                             2,
+                                                             nm_dec,
+                                                             nm_dec_envs,
+                                                             2,
+                                                             nullptr,
+                                                             0,
+                                                             nm_env_out,
+                                                             sizeof(nm_env_out) / sizeof(nm_env_out[0]),
+                                                             &nm_env_count));
+            // A and A' are byte-identical, so the decoder interns them and both source
+            // records name the one decoded envelope node: exactly one output record,
+            // carrying the earliest source projected node's saved position and size.
+            TEST(nm_env_count == 1);
+            n = find_portable(nm_env_out,
+                              nm_env_count,
+                              Synth::instrument_graph_layout_envelope,
+                              0,
+                              Synth::mod_volume,
+                              0xFFu);
+            TEST(n >= 0);
+            if (n >= 0)
+                TEST(nm_env_out[n].x == 11.5f); // the earliest source projected node wins
+            n = find_portable(nm_env_out,
+                              nm_env_count,
+                              Synth::instrument_graph_layout_envelope,
+                              2,
+                              Synth::mod_volume,
+                              0xFFu);
+            TEST(n == -1); // B had no saved position
+            // The collapsed node's other source locator leaves no record of its own.
+            TEST(find_portable(nm_env_out,
+                               nm_env_count,
+                               Synth::instrument_graph_layout_envelope,
+                               1,
+                               Synth::mod_volume,
+                               0xFFu) == -1);
+            // With only A' saved, its position is the one that survives, re-anchored
+            // to the decoded node's earliest serving cell.
+            nm_env_records[1] = nm_env_records[0];
+            nm_env_count      = 4;
+            TEST(Sculptor::normalize_instrument_graph_layout(nm_src,
+                                                             nm_envs,
+                                                             3,
+                                                             nullptr,
+                                                             0,
+                                                             nm_env_records,
+                                                             1,
+                                                             nm_dec,
+                                                             nm_dec_envs,
+                                                             2,
+                                                             nullptr,
+                                                             0,
+                                                             nm_env_out,
+                                                             sizeof(nm_env_out) / sizeof(nm_env_out[0]),
+                                                             &nm_env_count));
+            TEST(nm_env_count == 1);
+            TEST(nm_env_out[0].layer == 0 && nm_env_out[0].x == 33.5f);
+
+            // Two LFO instances that share one descriptor but differ in their bound source
+            // pair are two distinct projected nodes, so each keeps its own saved position and
+            // its own source pair. Capacity exactly equal to the resolved count succeeds;
+            // one slot less refuses with the record sink and the count untouched.
+            static Synth::LFODescriptor na_lfos[1];
+            memset(na_lfos, 0, sizeof(na_lfos));
+            na_lfos[0].wave          = Synth::WaveType::sine_wave;
+            na_lfos[0].duty          = 0x40;
+            na_lfos[0].period_ms     = 300;
+            na_lfos[0].min_value     = -1.0f;
+            na_lfos[0].min_max_delta = 2.0f;
+
+            static Synth::Instrument na_src;
+            static Synth::Instrument na_dec;
+            na_src.layer_count = 2;
+            na_dec.layer_count = 2;
+            for (uint32_t layer = 0; layer < 2; layer++) {
+                na_src.layers[layer].osc_type[0] = Synth::WaveType::sine_wave;
+                na_dec.layers[layer].osc_type[0] = Synth::WaveType::sine_wave;
+                na_src.layers[layer].mod_ratio   = 1.0f;
+                na_dec.layers[layer].mod_ratio   = 1.0f;
+                Synth::LayerGen& src_gen         = na_src.layers[layer].gen[Synth::mod_volume];
+                Synth::LayerGen& dec_gen         = na_dec.layers[layer].gen[Synth::mod_volume];
+                src_gen.lfo_desc_id              = 1;
+                dec_gen.lfo_desc_id              = 1;
+                src_gen.lfo_op                   = Synth::SourceOp::add;
+                dec_gen.lfo_op                   = Synth::SourceOp::add;
+                src_gen.lfo_depth                = 0.5f;
+                dec_gen.lfo_depth                = 0.5f;
+                src_gen.lfo_rate_scale_ms        = 20.0f;
+                dec_gen.lfo_rate_scale_ms        = 20.0f;
+                src_gen.lfo_depth_source = layer == 0 ? Synth::ModSource::velocity : Synth::ModSource::aftertouch;
+                src_gen.lfo_rate_source  = layer == 0 ? Synth::ModSource::mod_wheel : Synth::ModSource::pitch_bend;
+                dec_gen.lfo_depth_source = src_gen.lfo_depth_source;
+                dec_gen.lfo_rate_source  = src_gen.lfo_rate_source;
+            }
+            TEST(validate_standalone_model(na_src, nullptr, 0, na_lfos, 1));
+            TEST(validate_standalone_model(na_dec, nullptr, 0, na_lfos, 1));
+
+            static Synth::InstrumentGraphLayout na_pair_records[2];
+            memset(na_pair_records, 0, sizeof(na_pair_records));
+            for (uint32_t i = 0; i < 2; i++) {
+                na_pair_records[i].kind   = Synth::instrument_graph_layout_lfo;
+                na_pair_records[i].layer  = static_cast<uint8_t>(i);
+                na_pair_records[i].target = static_cast<uint8_t>(Synth::mod_volume);
+                na_pair_records[i].depth_source =
+                    static_cast<uint8_t>(i == 0 ? Synth::ModSource::velocity : Synth::ModSource::aftertouch);
+                na_pair_records[i].rate_source =
+                    static_cast<uint8_t>(i == 0 ? Synth::ModSource::mod_wheel : Synth::ModSource::pitch_bend);
+                na_pair_records[i].x = 7.0f + static_cast<float>(i);
+                na_pair_records[i].y = -3.5f - static_cast<float>(i);
+            }
+
+            static Synth::InstrumentGraphLayout na_pair_out[4];
+            constexpr uint32_t                  na_pair_capacity = sizeof(na_pair_out) / sizeof(na_pair_out[0]);
+            uint32_t                            na_pair_count    = na_pair_capacity;
+            TEST(Sculptor::normalize_instrument_graph_layout(na_src,
+                                                             nullptr,
+                                                             0,
+                                                             na_lfos,
+                                                             1,
+                                                             na_pair_records,
+                                                             2,
+                                                             na_dec,
+                                                             nullptr,
+                                                             0,
+                                                             na_lfos,
+                                                             1,
+                                                             na_pair_out,
+                                                             na_pair_capacity,
+                                                             &na_pair_count));
+            TEST(na_pair_count == 2);
+            n = find_portable(na_pair_out,
+                              na_pair_count,
+                              Synth::instrument_graph_layout_lfo,
+                              0,
+                              Synth::mod_volume,
+                              0xFFu);
+            TEST(n >= 0);
+            if (n >= 0) {
+                TEST(na_pair_out[n].x == 7.0f && na_pair_out[n].y == -3.5f);
+                TEST(na_pair_out[n].depth_source == static_cast<uint8_t>(Synth::ModSource::velocity));
+                TEST(na_pair_out[n].rate_source == static_cast<uint8_t>(Synth::ModSource::mod_wheel));
+            }
+            n = find_portable(na_pair_out,
+                              na_pair_count,
+                              Synth::instrument_graph_layout_lfo,
+                              1,
+                              Synth::mod_volume,
+                              0xFFu);
+            TEST(n >= 0);
+            if (n >= 0) {
+                TEST(na_pair_out[n].x == 8.0f && na_pair_out[n].y == -4.5f);
+                TEST(na_pair_out[n].depth_source == static_cast<uint8_t>(Synth::ModSource::aftertouch));
+                TEST(na_pair_out[n].rate_source == static_cast<uint8_t>(Synth::ModSource::pitch_bend));
+            }
+
+            static Synth::InstrumentGraphLayout na_exact[2];
+            constexpr uint32_t                  na_exact_capacity = sizeof(na_exact) / sizeof(na_exact[0]);
+            uint32_t                            na_exact_count    = na_exact_capacity;
+            TEST(Sculptor::normalize_instrument_graph_layout(na_src,
+                                                             nullptr,
+                                                             0,
+                                                             na_lfos,
+                                                             1,
+                                                             na_pair_records,
+                                                             2,
+                                                             na_dec,
+                                                             nullptr,
+                                                             0,
+                                                             na_lfos,
+                                                             1,
+                                                             na_exact,
+                                                             na_exact_capacity,
+                                                             &na_exact_count));
+            TEST(na_exact_count == 2);
+            TEST(memcmp(na_exact, na_pair_out, sizeof(na_exact)) == 0);
+
+            static Synth::InstrumentGraphLayout na_refuse[1];
+            static Synth::InstrumentGraphLayout na_refuse_sentinel;
+            memset(na_refuse, 0x5A, sizeof(na_refuse));
+            memset(&na_refuse_sentinel, 0x5A, sizeof(na_refuse_sentinel));
+            uint32_t na_refuse_count = 1;
+            TEST(! Sculptor::normalize_instrument_graph_layout(na_src,
+                                                               nullptr,
+                                                               0,
+                                                               na_lfos,
+                                                               1,
+                                                               na_pair_records,
+                                                               2,
+                                                               na_dec,
+                                                               nullptr,
+                                                               0,
+                                                               na_lfos,
+                                                               1,
+                                                               na_refuse,
+                                                               sizeof(na_refuse) / sizeof(na_refuse[0]),
+                                                               &na_refuse_count));
+            TEST(na_refuse_count == 1);
+            TEST(memcmp(na_refuse, &na_refuse_sentinel, sizeof(na_refuse_sentinel)) == 0);
+
+            // Normalizer refusals for locators the model cannot resolve: an envelope
+            // record naming a decoded cell with no envelope bound, a canonical index past
+            // the projection, and a kind that is not clipboard data. Each leaves the output
+            // array and count untouched, so a refused normalization cannot leak a partially
+            // translated record into the clipboard.
+            static Synth::InstrumentGraphLayout nr_out[2];
+            static Synth::InstrumentGraphLayout nr_out_sentinel[2];
+            memset(nr_out, 0x5A, sizeof(nr_out));
+            memset(nr_out_sentinel, 0x5A, sizeof(nr_out_sentinel));
+            constexpr uint32_t nr_capacity = sizeof(nr_out) / sizeof(nr_out[0]);
+            uint32_t           nr_count    = nr_capacity;
+            for (uint32_t c = 0; c < 3; c++) {
+                Synth::InstrumentGraphLayout nr_rec = {};
+                if (c == 0) {
+                    // nm_dec binds envelopes to mod_volume cells only, so this cell has
+                    // no generator and nothing to attach a position to.
+                    nr_rec.kind   = Synth::instrument_graph_layout_envelope;
+                    nr_rec.layer  = 0;
+                    nr_rec.target = static_cast<uint8_t>(Synth::mod_panning);
+                }
+                else if (c == 1) {
+                    nr_rec.kind            = Synth::instrument_graph_layout_canonical;
+                    nr_rec.canonical_index = 99; // past the projection
+                }
+                else {
+                    nr_rec.kind = 4; // effect nodes are never clipboard data
+                }
+                nr_rec.x = 5.0f;
+                nr_rec.y = 6.0f;
+                nr_count = nr_capacity;
+                TEST(! Sculptor::normalize_instrument_graph_layout(nm_src,
+                                                                   nm_envs,
+                                                                   3,
+                                                                   nullptr,
+                                                                   0,
+                                                                   &nr_rec,
+                                                                   1,
+                                                                   nm_dec,
+                                                                   nm_dec_envs,
+                                                                   2,
+                                                                   nullptr,
+                                                                   0,
+                                                                   nr_out,
+                                                                   nr_capacity,
+                                                                   &nr_count));
+                TEST(nr_count == nr_capacity);
+                TEST(memcmp(nr_out, &nr_out_sentinel, sizeof(nr_out_sentinel)) == 0);
+            }
+            // An output array smaller than the normalized records refuses the whole
+            // normalization instead of truncating it: these two records normalize into two
+            // slots when there is room for them.
+            static Synth::InstrumentGraphLayout nr_tight[1];
+            static Synth::InstrumentGraphLayout nr_tight_sentinel[1];
+            memset(nr_tight, 0x5A, sizeof(nr_tight));
+            memset(nr_tight_sentinel, 0x5A, sizeof(nr_tight_sentinel));
+            uint32_t nr_tight_count = 1;
+            TEST(! Sculptor::normalize_instrument_graph_layout(nm_src,
+                                                               nm_envs,
+                                                               3,
+                                                               nullptr,
+                                                               0,
+                                                               nm_swapped,
+                                                               2,
+                                                               nm_dec,
+                                                               nm_dec_envs,
+                                                               2,
+                                                               nullptr,
+                                                               0,
+                                                               nr_tight,
+                                                               1,
+                                                               &nr_tight_count));
+            TEST(nr_tight_count == 1);
+            TEST(memcmp(nr_tight, &nr_tight_sentinel, sizeof(nr_tight_sentinel)) == 0);
+        }
+
+        {
+            // Object property order is not identity: a permuted document decodes to
+            // equal outputs, in any key order, at any nesting level.
+            static char            pp_text[clipboard_capacity];
+            static ClipboardDecode pp_canonical;
+            fill_clipboard_sentinels(&pp_canonical);
+            const uint32_t pp_len =
+                build_layout_doc(pp_text, sizeof(pp_text), clipboard_doc_head, clipboard_doc_records);
+            TEST(pp_len > 0);
+            TEST(decode_clipboard(&pp_canonical, pp_text, max_portable_records));
+            TEST(pp_canonical.layout_count == 5);
+
+            static char            pp_perm_text[clipboard_capacity];
+            static ClipboardDecode pp_perm;
+            fill_clipboard_sentinels(&pp_perm);
+            build_layout_doc(pp_perm_text,
+                             sizeof(pp_perm_text),
+                             clipboard_doc_head,
+                             "{\"height\":120,\"width\":220,\"y\":44.25,\"x\":120.5,\"target\":0,\"layer\":0,"
+                             "\"kind\":1},"
+                             "{\"y\":-40,\"parameter_ordinal\":0,\"kind\":3,\"x\":60,\"target\":0,\"height\":0,"
+                             "\"width\":0},"
+                             "{\"kind\":0,\"x\":64,\"canonical_index\":1,\"width\":0,\"y\":32,\"height\":0},"
+                             "{\"rate_source\":2,\"height\":0,\"depth_source\":4,\"kind\":2,\"width\":0,"
+                             "\"target\":0,\"y\":-8.5,\"layer\":0,\"x\":12.5},"
+                             "{\"kind\":3,\"target\":1,\"parameter_ordinal\":0,\"x\":-60,\"y\":40,\"width\":0,"
+                             "\"height\":0}");
+            TEST(decode_clipboard(&pp_perm, pp_perm_text, max_portable_records));
+            TEST(pp_perm.layout_count == pp_canonical.layout_count);
+            TEST(pp_perm.env_count == pp_canonical.env_count);
+            TEST(pp_perm.lfo_count == pp_canonical.lfo_count);
+            TEST(pp_perm.instr.layer_count == pp_canonical.instr.layer_count);
+            for (uint32_t i = 0; i < pp_canonical.layout_count; i++) {
+                const int32_t match = find_portable(pp_perm.layout,
+                                                    pp_perm.layout_count,
+                                                    pp_canonical.layout[i].kind,
+                                                    pp_canonical.layout[i].layer,
+                                                    pp_canonical.layout[i].target,
+                                                    pp_canonical.layout[i].parameter_ordinal);
+                TEST(match >= 0);
+                if (match >= 0) {
+                    TEST(memcmp(&pp_perm.layout[match], &pp_canonical.layout[i], sizeof(pp_canonical.layout[i])) == 0);
+                }
+            }
+            for (uint32_t i = 0; i < pp_canonical.env_count; i++) {
+                TEST(memcmp(&pp_perm.envs[i], &pp_canonical.envs[i], sizeof(pp_perm.envs[i])) == 0);
+            }
+
+            // Reordering the document's top-level keys is equally inert, and a
+            // required key whose value is zero is still required.
+            const char* const pp_reordered =
+                "{\"layers\":[{\"wave_a\":\"sine\",\"mode\":\"fm\",\"mod_ratio\":2,"
+                "\"pitch_offset_semitones\":1.5,\"volume\":{\"base\":0.8,"
+                "\"envelope\":{\"sustain_start\":1,\"sustain_end\":2,\"points\":["
+                "{\"level\":0.0625,\"time_seconds\":0},{\"level\":0.5625,\"time_seconds\":0.25},"
+                "{\"level\":1.0625,\"time_seconds\":0.5}]},"
+                "\"lfo\":{\"depth\":0.5,\"rate_source\":\"mod_wheel\",\"wave\":\"sine\",\"duty\":0.25,"
+                "\"frequency_hz\":4,\"depth_source\":\"velocity\",\"rate_scale_ms\":20}},"
+                "\"pitch\":{\"envelope\":{\"sustain_start\":0,\"sustain_end\":1,\"points\":["
+                "{\"level\":0.25,\"time_seconds\":0},{\"level\":-0.25,\"time_seconds\":0.5}]},"
+                "\"base\":0},\"panning\":{\"base\":0.5},\"lowpass_cutoff\":{\"base\":2000},"
+                "\"highpass_cutoff\":{\"base\":2000}}],"
+                "\"layer_skew_semitones\":0,\"note_skew_semitones\":0,\"format\":\"synth-instrument-v1\","
+                "\"graph_layout\":[{\"kind\":0,\"canonical_index\":1,\"x\":0,\"y\":0,\"width\":0,"
+                "\"height\":0}]}";
+            static ClipboardDecode pp_reorder_dec;
+            fill_clipboard_sentinels(&pp_reorder_dec);
+            TEST(decode_clipboard(&pp_reorder_dec, pp_reordered, max_portable_records));
+            TEST(pp_reorder_dec.layout_count == 1);
+            TEST(pp_reorder_dec.layout[0].x == 0.0f); // zero-valued required fields decode
+            TEST(pp_reorder_dec.env_count == 2);
+            TEST(pp_reorder_dec.lfo_count == 1);
+            TEST(pp_reorder_dec.instr.routing[Synth::mod_volume].base_value == 0.8f);
+        }
+
+        {
+            // Every malformed portable record and every locator the model cannot
+            // resolve refuses the whole document with all outputs intact. The
+            // baseline document decodes, so each refusal is the record's doing.
+            static char            ml_text[clipboard_capacity];
+            static ClipboardDecode ml_attempt;
+            static ClipboardDecode ml_sentinel;
+            fill_clipboard_sentinels(&ml_sentinel);
+            build_layout_doc(ml_text, sizeof(ml_text), clipboard_doc_head, clipboard_doc_records);
+            static ClipboardDecode ml_baseline;
+            fill_clipboard_sentinels(&ml_baseline);
+            TEST(decode_clipboard(&ml_baseline, ml_text, max_portable_records));
+            TEST(ml_baseline.layout_count == 5);
+
+            struct LayoutRejection {
+                const char* records;
+                const char* dimension;
+            };
+
+            const LayoutRejection rejections[] = {
+                { "{\"kind\":99,\"canonical_index\":0,\"x\":0,\"y\":0,\"width\":0,\"height\":0}", "unknown kind" },
+                { "{\"kind\":0,\"canonical_index\":1,\"x\":0,\"y\":0,\"width\":0,\"height\":0,\"z\":1}",
+                  "unknown key" },
+                { "{\"kind\":0,\"canonical_index\":1,\"x\":0,\"y\":0,\"width\":0}", "missing required field" },
+                { "{\"kind\":0,\"x\":0,\"y\":0,\"width\":0,\"height\":0}", "locator key omitted at value zero" },
+                { "{\"kind\":0,\"canonical_index\":\"1\",\"x\":0,\"y\":0,\"width\":0,\"height\":0}",
+                  "wrong token type" },
+                { "{\"kind\":1,\"layer\":0,\"target\":0,\"canonical_index\":0,\"x\":0,\"y\":0,\"width\":0,"
+                  "\"height\":0}",
+                  "unrelated locator key" },
+                { "{\"kind\":1,\"layer\":0,\"x\":0,\"y\":0,\"width\":0,\"height\":0}", "missing locator field" },
+                { "{\"kind\":1,\"layer\":0,\"target\":0,\"x\":0,\"y\":0,\"width\":-1,\"height\":0}", "negative width" },
+                { "{\"kind\":1,\"layer\":0,\"target\":0,\"x\":1e400,\"y\":0,\"width\":0,\"height\":0}",
+                  "overflowed number" },
+                { "{\"kind\":1,\"layer\":7,\"target\":0,\"x\":0,\"y\":0,\"width\":0,\"height\":0}",
+                  "layer out of range" },
+                { "{\"kind\":1,\"layer\":0,\"target\":99,\"x\":0,\"y\":0,\"width\":0,\"height\":0}", "unknown target" },
+                { "{\"kind\":2,\"layer\":0,\"target\":0,\"depth_source\":7,\"rate_source\":0,\"x\":0,\"y\":0,"
+                  "\"width\":0,\"height\":0}",
+                  "source out of range" },
+                { "{\"kind\":0,\"canonical_index\":9,\"x\":0,\"y\":0,\"width\":0,\"height\":0}",
+                  "canonical index beyond the bound" },
+                { "{\"kind\":3,\"target\":0,\"parameter_ordinal\":35,\"x\":0,\"y\":0,\"width\":0,\"height\":0}",
+                  "parameter ordinal beyond the bound" },
+                { "{\"kind\":1,\"layer\":0,\"target\":0,\"x\":1,\"y\":1,\"width\":0,\"height\":0},"
+                  "{\"kind\":1,\"layer\":0,\"target\":0,\"x\":2,\"y\":2,\"width\":0,\"height\":0}",
+                  "duplicate portable locator" },
+                { "{\"kind\":3,\"target\":8,\"parameter_ordinal\":0,\"x\":0,\"y\":0,\"width\":0,\"height\":0}",
+                  "unresolved locator" },
+            };
+            for (uint32_t i = 0; i < sizeof(rejections) / sizeof(rejections[0]); i++) {
+                static char ml_bad[clipboard_capacity];
+                build_layout_doc(ml_bad, sizeof(ml_bad), clipboard_doc_head, rejections[i].records);
+                fill_clipboard_sentinels(&ml_attempt);
+                if (decode_clipboard(&ml_attempt, ml_bad, max_portable_records)) {
+                    failed(rejections[i].dimension, __FILE__, __LINE__);
+                }
+                TEST(clipboard_sentinels_intact(&ml_attempt, &ml_sentinel));
+            }
+
+            // Two distinct locators that resolve to the one interned descriptor
+            // address a single node twice: refused. The one-record form of the same
+            // document decodes, so the refusal is the second locator's.
+            static char ml_alias[clipboard_capacity];
+            build_layout_doc(ml_alias,
+                             sizeof(ml_alias),
+                             clipboard_alias_head,
+                             "{\"kind\":1,\"layer\":0,\"target\":0,\"x\":1,\"y\":1,\"width\":0,\"height\":0}");
+            static ClipboardDecode ml_alias_baseline;
+            fill_clipboard_sentinels(&ml_alias_baseline);
+            TEST(decode_clipboard(&ml_alias_baseline, ml_alias, max_portable_records));
+            TEST(ml_alias_baseline.env_count == 1);
+            build_layout_doc(ml_alias,
+                             sizeof(ml_alias),
+                             clipboard_alias_head,
+                             "{\"kind\":1,\"layer\":0,\"target\":0,\"x\":1,\"y\":1,\"width\":0,\"height\":0},"
+                             "{\"kind\":1,\"layer\":0,\"target\":1,\"x\":2,\"y\":2,\"width\":0,\"height\":0}");
+            fill_clipboard_sentinels(&ml_attempt);
+            TEST(decode_clipboard(&ml_attempt, ml_alias, max_portable_records) == false);
+            TEST(clipboard_sentinels_intact(&ml_attempt, &ml_sentinel));
+
+            // Over the fixed record bound. The bound equals the number of locators the
+            // model can express, so any extra record also repeats a locator: what this
+            // pins is the refusal and the untouched outputs, not which check ran first.
+            {
+                static char ml_over[clipboard_capacity];
+                uint32_t    ml_over_pos = 0;
+                ml_over_pos += static_cast<uint32_t>(snprintf(ml_over + ml_over_pos,
+                                                              sizeof(ml_over) - ml_over_pos,
+                                                              "%s\"graph_layout\":[",
+                                                              clipboard_doc_head));
+                for (uint32_t r = 0; r <= max_portable_records; r++) {
+                    ml_over_pos += static_cast<uint32_t>(snprintf(ml_over + ml_over_pos,
+                                                                  sizeof(ml_over) - ml_over_pos,
+                                                                  "{\"kind\":0,\"canonical_index\":%u,\"x\":0,\"y\":0,"
+                                                                  "\"width\":0,\"height\":0}%s",
+                                                                  r % Synth::graph_canonical_node_count,
+                                                                  r == max_portable_records ? "" : ","));
+                }
+                // Built by hand rather than through build_layout_doc, so it closes the
+                // record array and the document object itself.
+                ml_over_pos +=
+                    static_cast<uint32_t>(snprintf(ml_over + ml_over_pos, sizeof(ml_over) - ml_over_pos, "]}"));
+                TEST(ml_over_pos < sizeof(ml_over));
+                // Assembled by hand, so it is parsed here before it is rejected for its count.
+                TEST(count_clipboard_tokens(ml_over, ml_over_pos) > 0);
+                fill_clipboard_sentinels(&ml_attempt);
+                TEST(decode_clipboard(&ml_attempt, ml_over, max_portable_records) == false);
+                TEST(clipboard_sentinels_intact(&ml_attempt, &ml_sentinel));
+            }
+        }
+
+        {
+            // Codec compatibility in both directions.
+            static char    cc_doc[clipboard_capacity];
+            const uint32_t cc_len = build_layout_doc(cc_doc, sizeof(cc_doc), clipboard_doc_head, clipboard_doc_records);
+            TEST(cc_len > 0);
+
+            // A valid nonempty layout is refused by the legacy decoder rather than
+            // silently dropped, with every legacy output left at its sentinel.
+            static ClipboardDecode cc_legacy_attempt;
+            static ClipboardDecode cc_legacy_sentinel;
+            fill_clipboard_sentinels(&cc_legacy_attempt);
+            fill_clipboard_sentinels(&cc_legacy_sentinel);
+            TEST(! Synth::decode_instrument_json(cc_doc,
+                                                 cc_len,
+                                                 &cc_legacy_attempt.instr,
+                                                 cc_legacy_attempt.envs,
+                                                 &cc_legacy_attempt.env_count,
+                                                 cc_legacy_attempt.lfos,
+                                                 &cc_legacy_attempt.lfo_count));
+            TEST(clipboard_sentinels_intact(&cc_legacy_attempt, &cc_legacy_sentinel));
+
+            // An absent or empty field decodes; the new decoder accepts both and
+            // reports a zero layout count through a null layout output while the
+            // descriptor counts stay actual.
+            static char cc_empty[clipboard_capacity];
+            build_layout_doc(cc_empty, sizeof(cc_empty), clipboard_doc_head, "");
+            static ClipboardDecode cc_empty_dec;
+            fill_clipboard_sentinels(&cc_empty_dec);
+            TEST(decode_clipboard(&cc_empty_dec, cc_empty, max_portable_records));
+            TEST(cc_empty_dec.layout_count == 0);
+            TEST(cc_empty_dec.env_count == 2);
+            TEST(cc_empty_dec.lfo_count == 1);
+            uint32_t                         cc_null_env  = 999;
+            uint32_t                         cc_null_lfo  = 999;
+            uint32_t                         cc_null_rows = 999;
+            static Synth::Instrument         cc_null_instr;
+            static Synth::EnvelopeDescriptor cc_null_envs[Synth::instrument_max_envelopes];
+            static Synth::LFODescriptor      cc_null_lfos[Synth::instrument_max_lfos];
+            TEST(Synth::decode_instrument_json(cc_empty,
+                                               static_cast<uint32_t>(strlen(cc_empty)),
+                                               &cc_null_instr,
+                                               cc_null_envs,
+                                               &cc_null_env,
+                                               cc_null_lfos,
+                                               &cc_null_lfo,
+                                               nullptr,
+                                               0,
+                                               &cc_null_rows));
+            TEST(cc_null_rows == 0);
+            TEST(cc_null_env == 2);
+            TEST(cc_null_lfo == 1);
+
+            // The same with a descriptorless instrument.
+            const char* const cc_bare = "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\"}],";
+            static char       cc_bare_doc[clipboard_capacity];
+            build_layout_doc(cc_bare_doc, sizeof(cc_bare_doc), cc_bare, "");
+            uint32_t cc_bare_env  = 999;
+            uint32_t cc_bare_lfo  = 999;
+            uint32_t cc_bare_rows = 999;
+            TEST(Synth::decode_instrument_json(cc_bare_doc,
+                                               static_cast<uint32_t>(strlen(cc_bare_doc)),
+                                               &cc_null_instr,
+                                               cc_null_envs,
+                                               &cc_bare_env,
+                                               cc_null_lfos,
+                                               &cc_bare_lfo,
+                                               nullptr,
+                                               0,
+                                               &cc_bare_rows));
+            TEST(cc_bare_rows == 0);
+            TEST(cc_bare_env == 0);
+            TEST(cc_bare_lfo == 0);
+
+            // Exact layout capacity succeeds; one slot short fails with every output
+            // untouched, as does a nonempty layout with no output at all.
+            static Synth::InstrumentGraphLayout cc_out[max_portable_records];
+            static Synth::Instrument            cc_out_instr;
+            static Synth::EnvelopeDescriptor    cc_out_envs[Synth::instrument_max_envelopes];
+            static Synth::LFODescriptor         cc_out_lfos[Synth::instrument_max_lfos];
+            uint32_t                            cc_out_env  = 999;
+            uint32_t                            cc_out_lfo  = 999;
+            uint32_t                            cc_out_rows = 999;
+            TEST(Synth::decode_instrument_json(cc_doc,
+                                               cc_len,
+                                               &cc_out_instr,
+                                               cc_out_envs,
+                                               &cc_out_env,
+                                               cc_out_lfos,
+                                               &cc_out_lfo,
+                                               cc_out,
+                                               5,
+                                               &cc_out_rows));
+            TEST(cc_out_rows == 5);
+            TEST(cc_out_env == 2);
+            TEST(cc_out_lfo == 1);
+
+            static ClipboardDecode cc_short;
+            static ClipboardDecode cc_short_sentinel;
+            fill_clipboard_sentinels(&cc_short);
+            fill_clipboard_sentinels(&cc_short_sentinel);
+            TEST(! Synth::decode_instrument_json(cc_doc,
+                                                 cc_len,
+                                                 &cc_short.instr,
+                                                 cc_short.envs,
+                                                 &cc_short.env_count,
+                                                 cc_short.lfos,
+                                                 &cc_short.lfo_count,
+                                                 cc_short.layout,
+                                                 4,
+                                                 &cc_short.layout_count));
+            TEST(clipboard_sentinels_intact(&cc_short, &cc_short_sentinel));
+            TEST(! Synth::decode_instrument_json(cc_doc,
+                                                 cc_len,
+                                                 &cc_short.instr,
+                                                 cc_short.envs,
+                                                 &cc_short.env_count,
+                                                 cc_short.lfos,
+                                                 &cc_short.lfo_count,
+                                                 nullptr,
+                                                 0,
+                                                 &cc_short.layout_count));
+            TEST(clipboard_sentinels_intact(&cc_short, &cc_short_sentinel));
+        }
+
+        {
+            // The largest clipboard document is measured against the clipboard
+            // capacity and the parser token bound, never assumed. Seven layers, an
+            // eight-point envelope and a distinct LFO on every projected target, and
+            // the full portable record set.
+            static Synth::InstrumentBank        mf_bank;
+            static Synth::Instrument            mf_instr;
+            static Synth::InstrumentGraphLayout mf_records[max_portable_records];
+            static Synth::GraphNodeLayout       mf_mapped[max_portable_records];
+            static char                         mf_text[clipboard_capacity];
+            const uint32_t                      mf_count = build_clipboard_max_fixture(&mf_bank, &mf_instr, mf_records);
+            const uint32_t                      mf_slot  = mf_bank.instruments.allocate();
+            TEST(mf_slot != pool_no_slot);
+            mf_bank.instruments.entries[mf_slot]   = mf_instr;
+            mf_bank.channel_enabled[0]             = 1;
+            mf_bank.channel_zones[0][0].start_note = 1;
+            mf_bank.channel_zones[0][0].instrument = static_cast<uint8_t>(mf_slot);
+            TEST(Synth::validate_instrument_bank(&mf_bank));
+            TEST(mf_bank.envelopes.num_allocated == 35);
+            TEST(mf_bank.lfos.num_allocated == 35);
+            TEST(mf_count == max_portable_records);
+
+            const uint32_t mf_len =
+                Synth::encode_instrument_json(mf_text, sizeof(mf_text), &mf_instr, &mf_bank, mf_records, mf_count);
+            TEST(mf_len > 0);
+            // Payload bytes exclude the terminator the caller writes; the required
+            // capacity is one byte more.
+            const int32_t mf_tokens = count_clipboard_tokens(mf_text, mf_len);
+            if (getenv("SYNTH_UNIT_MEASURE")) {
+                fprintf(stderr,
+                        "clipboard max fixture: payload %u bytes, required capacity %u bytes, %d tokens (bound %u, "
+                        "buffer %u)\n",
+                        mf_len,
+                        mf_len + 1,
+                        mf_tokens,
+                        clipboard_token_bound,
+                        clipboard_capacity);
+            }
+            TEST(mf_len + 1 <= clipboard_capacity);
+
+            // Capacity one byte short of payload + terminator fails. Destination bytes are
+            // unspecified on failure, so only the return value is asserted; the identical
+            // call at the exact capacity then succeeds with the measured length, which is
+            // what shows the short call is the capacity and not the document.
+            static char mf_short_text[clipboard_capacity];
+            TEST(Synth::encode_instrument_json(mf_short_text, mf_len, &mf_instr, &mf_bank, mf_records, mf_count) == 0);
+            static char mf_exact_text[clipboard_capacity];
+            TEST(Synth::encode_instrument_json(mf_exact_text, mf_len + 1, &mf_instr, &mf_bank, mf_records, mf_count) ==
+                 mf_len);
+            TEST(mf_tokens > 0);
+            TEST(static_cast<uint32_t>(mf_tokens) <= clipboard_token_bound);
+
+            static ClipboardDecode mf_dec;
+            fill_clipboard_sentinels(&mf_dec);
+            TEST(decode_clipboard(&mf_dec, mf_text, max_portable_records));
+            TEST(mf_dec.layout_count == max_portable_records);
+            TEST(mf_dec.env_count == 35);
+            TEST(mf_dec.lfo_count == 35);
+            TEST(mf_dec.instr.layer_count == Synth::max_layers);
+
+            uint32_t mf_mapped_count = max_portable_records;
+            TEST(Sculptor::map_instrument_graph_layout(mf_dec.instr,
+                                                       mf_dec.envs,
+                                                       mf_dec.env_count,
+                                                       mf_dec.lfos,
+                                                       mf_dec.lfo_count,
+                                                       mf_dec.layout,
+                                                       mf_dec.layout_count,
+                                                       mf_mapped,
+                                                       max_portable_records,
+                                                       &mf_mapped_count));
+            TEST(mf_mapped_count == max_portable_records);
+            for (uint32_t i = 0; i < max_portable_records; i++) {
+                TEST(mf_mapped[i].x == mf_records[i].x);
+                TEST(mf_mapped[i].y == mf_records[i].y);
+                TEST(mf_mapped[i].width_override == mf_records[i].width_override);
+                TEST(mf_mapped[i].height_override == mf_records[i].height_override);
+            }
+
+            // One slot short of the record count refuses the whole document.
+            static ClipboardDecode mf_short;
+            static ClipboardDecode mf_sentinel;
+            fill_clipboard_sentinels(&mf_short);
+            fill_clipboard_sentinels(&mf_sentinel);
+            TEST(decode_clipboard(&mf_short, mf_text, max_portable_records - 1) == false);
+            TEST(clipboard_sentinels_intact(&mf_short, &mf_sentinel));
+
+            // The same instrument through the legacy entry point is smaller by the
+            // record array alone and carries an empty layout: the layout array is the
+            // only addition to the document.
+            static char    mf_legacy[clipboard_capacity];
+            const uint32_t mf_legacy_len =
+                Synth::encode_instrument_json(mf_legacy, sizeof(mf_legacy), &mf_instr, &mf_bank);
+            TEST(mf_legacy_len > 0);
+            TEST(mf_legacy_len < mf_len);
+            TEST(strstr(mf_legacy, "\"graph_layout\":[]") != nullptr);
+
+            // A legal portable LFO record has nine key/value pairs: 19 tokens.
+            // This bounds legal layout output, not rejection order for malformed input.
+            // The instrument body is measured from this fixture's legacy encoding.
+            constexpr uint32_t max_tokens_per_record = 2u * 9u + 1u; // object + 9 keys + 9 values
+            const int32_t      mf_body_tokens        = count_clipboard_tokens(mf_legacy, mf_legacy_len);
+            TEST(mf_body_tokens > 0);
+            TEST(max_portable_records * max_tokens_per_record < clipboard_token_bound);
+            TEST(static_cast<uint64_t>(mf_body_tokens) + uint64_t{ max_portable_records } * max_tokens_per_record <
+                 uint64_t{ clipboard_token_bound });
+            if (getenv("SYNTH_UNIT_MEASURE")) {
+                fprintf(stderr,
+                        "token arithmetic: instrument body %d tokens + %u records x %u <= bound %u\n",
+                        mf_body_tokens,
+                        max_portable_records,
+                        max_tokens_per_record,
+                        clipboard_token_bound);
+            }
+        }
+
+        {
+            // Import with no generator wiring at all: canonical records resolve, and
+            // surplus records naming nodes the instrument does not have are refused.
+            const char* const      nw_head = "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\"}],";
+            static char            nw_text[clipboard_capacity];
+            static ClipboardDecode nw_dec;
+            fill_clipboard_sentinels(&nw_dec);
+            build_layout_doc(nw_text,
+                             sizeof(nw_text),
+                             nw_head,
+                             "{\"kind\":0,\"canonical_index\":0,\"x\":1,\"y\":2,\"width\":0,\"height\":0},"
+                             "{\"kind\":0,\"canonical_index\":1,\"x\":3,\"y\":4,\"width\":5,\"height\":6}");
+            TEST(decode_clipboard(&nw_dec, nw_text, max_portable_records));
+            TEST(nw_dec.layout_count == 2);
+            TEST(nw_dec.env_count == 0);
+            TEST(nw_dec.lfo_count == 0);
+            static Synth::GraphNodeLayout nw_mapped[8];
+            uint32_t                      nw_mapped_count = 8;
+            TEST(Sculptor::map_instrument_graph_layout(nw_dec.instr,
+                                                       nw_dec.envs,
+                                                       nw_dec.env_count,
+                                                       nw_dec.lfos,
+                                                       nw_dec.lfo_count,
+                                                       nw_dec.layout,
+                                                       nw_dec.layout_count,
+                                                       nw_mapped,
+                                                       8,
+                                                       &nw_mapped_count));
+            TEST(nw_mapped_count == 2);
+            TEST(find_mapped(nw_mapped, nw_mapped_count, 0, 0) >= 0);
+            TEST(find_mapped(nw_mapped, nw_mapped_count, 0, 1) >= 0);
+            TEST(nw_mapped[0].name[0] == 0);
+
+            const char* const surplus[] = {
+                "{\"kind\":0,\"canonical_index\":3,\"x\":1,\"y\":2,\"width\":0,\"height\":0}",  // oscillator layer 1
+                "{\"kind\":0,\"canonical_index\":99,\"x\":1,\"y\":2,\"width\":0,\"height\":0}", // past the bound
+                "{\"kind\":1,\"layer\":0,\"target\":0,\"x\":1,\"y\":2,\"width\":0,\"height\":0}",
+                "{\"kind\":3,\"target\":0,\"parameter_ordinal\":0,\"x\":1,\"y\":2,\"width\":0,\"height\":0}",
+            };
+            for (uint32_t i = 0; i < sizeof(surplus) / sizeof(surplus[0]); i++) {
+                static char nw_bad[clipboard_capacity];
+                build_layout_doc(nw_bad, sizeof(nw_bad), nw_head, surplus[i]);
+                static ClipboardDecode nw_attempt;
+                static ClipboardDecode nw_sentinel;
+                fill_clipboard_sentinels(&nw_sentinel);
+                fill_clipboard_sentinels(&nw_attempt);
+                TEST(decode_clipboard(&nw_attempt, nw_bad, max_portable_records) == false);
+                TEST(clipboard_sentinels_intact(&nw_attempt, &nw_sentinel));
+            }
+        }
+
+        {
+            // Candidate replacement replaces only the destination zone's layout and
+            // mask row: every other root, name, record, effect layout and channel
+            // effect title survives, and surviving effect LFO titles follow the
+            // actual descriptor renumbering.
+            static Synth::InstrumentEditorBank rp_bank;
+            static Synth::Instrument           rp_instr;
+            build_clipboard_zone_fixture(&rp_bank, &rp_instr);
+            TEST(rp_bank.bank.instruments.allocate() == 1);
+            rp_bank.bank.instruments.entries[1]         = rp_instr;
+            rp_bank.bank.channel_zones[0][1].start_note = 65;
+            rp_bank.bank.channel_zones[0][1].instrument = 1;
+            strcpy(rp_bank.instrument_names[1], "Other zone");
+            // Effect-chain titles are independent roots: the channel chain's node
+            // title and LFO title, and the master chain's LFO title. LFO 2 is
+            // referenced by nothing, LFO 3 by the channel chain, so the compaction
+            // renumbers "LFO 3" down to "LFO 2" while "LFO 1" stays.
+            add_detached_record(&rp_bank, 0, 0, 4, 0, 5.0f, 6.0f, Synth::ModSource::none, Synth::ModSource::none, 0);
+            strcpy(rp_bank.graph_layout[rp_bank.graph_layout_count - 1].name, "Delay");
+            add_detached_record(&rp_bank, 0, 0, 4, 0, 7.0f, 8.0f, Synth::ModSource::none, Synth::ModSource::none, 0);
+            strcpy(rp_bank.graph_layout[rp_bank.graph_layout_count - 1].name, "LFO 3");
+            add_detached_record(&rp_bank, 16, 0, 4, 0, 9.0f, 10.0f, Synth::ModSource::none, Synth::ModSource::none, 0);
+            strcpy(rp_bank.graph_layout[rp_bank.graph_layout_count - 1].name, "LFO 1");
+            // A detached record on the other zone, and an extant-layer mask bit per zone.
+            add_detached_record(&rp_bank, 0, 1, 1, 1, 11.0f, 12.0f, Synth::ModSource::none, Synth::ModSource::none, 1);
+            const Synth::GraphNodeLayout rp_other_record = rp_bank.graph_layout[rp_bank.graph_layout_count - 1];
+            rp_bank.graph_missing_sum[0][0]              = 1;
+            rp_bank.graph_missing_sum[0][1]              = 1;
+            for (uint32_t extra = 0; extra < 2; extra++) {
+                const uint32_t added                       = rp_bank.bank.lfos.allocate();
+                rp_bank.bank.lfos.entries[added].wave      = Synth::WaveType::sine_wave;
+                rp_bank.bank.lfos.entries[added].period_ms = static_cast<uint16_t>(120 + 30 * extra);
+            }
+            rp_bank.bank.channel_chains[0].num_effects                        = 1;
+            rp_bank.bank.channel_chains[0].effects[0].type                    = Synth::EffectType::delay;
+            rp_bank.bank.channel_chains[0].effects[0].enabled                 = true;
+            rp_bank.bank.channel_chains[0].effects[0].bindings[0].base_value  = 0.4f;
+            rp_bank.bank.channel_chains[0].effects[0].bindings[0].lfo_desc_id = 3;
+            rp_bank.bank.channel_chains[0].effects[0].bindings[0].lfo_depth   = 0.1f;
+            rp_bank.bank.master_chain.num_effects                             = 1;
+            rp_bank.bank.master_chain.effects[0].type                         = Synth::EffectType::distortion;
+            rp_bank.bank.master_chain.effects[0].enabled                      = true;
+            rp_bank.bank.master_chain.effects[0].bindings[0].base_value       = 1.0f;
+            rp_bank.bank.master_chain.effects[0].bindings[0].lfo_desc_id      = 1;
+            TEST(Synth::validate_instrument_bank(&rp_bank.bank));
+            TEST(Sculptor::validate_editor_metadata(rp_bank));
+
+            static char            rp_doc[clipboard_capacity];
+            static ClipboardDecode rp_dec;
+            build_layout_doc(rp_doc, sizeof(rp_doc), clipboard_doc_head, clipboard_doc_records);
+            fill_clipboard_sentinels(&rp_dec);
+            TEST(decode_clipboard(&rp_dec, rp_doc, max_portable_records));
+
+            static Synth::InstrumentEditorBank rp_candidate;
+            memset(&rp_candidate, 0x5A, sizeof(rp_candidate));
+            static Synth::InstrumentEditorBank rp_source_before;
+            rp_source_before       = rp_bank;
+            const bool rp_replaced = Sculptor::replace_zone_instrument_candidate(rp_bank,
+                                                                                 0,
+                                                                                 0,
+                                                                                 rp_dec.instr,
+                                                                                 rp_dec.envs,
+                                                                                 rp_dec.env_count,
+                                                                                 rp_dec.lfos,
+                                                                                 rp_dec.lfo_count,
+                                                                                 rp_dec.layout,
+                                                                                 rp_dec.layout_count,
+                                                                                 &rp_candidate);
+            TEST(rp_replaced);
+            // The candidate keeps its sentinel bytes until the transaction succeeds,
+            // so its contents are inspected only on a successful paste.
+            if (rp_replaced) {
+                TEST(memcmp(&rp_bank, &rp_source_before, sizeof(rp_bank)) == 0);
+                TEST(Synth::validate_instrument_bank(&rp_candidate.bank));
+                TEST(Sculptor::validate_editor_metadata(rp_candidate));
+
+                const uint32_t rp_dest_slot  = rp_candidate.bank.channel_zones[0][0].instrument;
+                const uint32_t rp_other_slot = rp_candidate.bank.channel_zones[0][1].instrument;
+                TEST(rp_candidate.bank.channel_zones[0][0].start_note == 1);
+                TEST(rp_candidate.bank.channel_zones[0][1].start_note == 65);
+                TEST(rp_dest_slot != rp_other_slot);
+                uint16_t rp_envelope_ids[Synth::instrument_max_envelopes] = {};
+                uint16_t rp_lfo_ids[Synth::instrument_max_lfos]           = {};
+                rp_envelope_ids[0]                                        = 3;
+                rp_envelope_ids[1]                                        = 4;
+                rp_lfo_ids[0]                                             = 3;
+                Synth::Instrument rp_expected;
+                Synth::remap_instrument(rp_dec.instr, rp_envelope_ids, rp_lfo_ids, &rp_expected);
+                TEST(memcmp(&rp_candidate.bank.instruments.entries[rp_dest_slot], &rp_expected, sizeof(rp_expected)) ==
+                     0);
+                TEST(strcmp(rp_candidate.instrument_names[rp_dest_slot], "Clipboard zone") == 0);
+                TEST(strcmp(rp_candidate.instrument_names[rp_other_slot], "Other zone") == 0);
+                TEST(Sculptor::count_detached_records(rp_candidate, 0, 1) == 1);
+                for (uint32_t r = 0; r < rp_candidate.graph_layout_count; r++) {
+                    const Synth::GraphNodeLayout& record = rp_candidate.graph_layout[r];
+                    if (record.channel == 0 && record.zone == 1) {
+                        TEST(memcmp(&record, &rp_other_record, sizeof(record)) == 0);
+                    }
+                }
+                TEST(rp_candidate.graph_missing_sum[0][0] == 0);
+                TEST(rp_candidate.graph_missing_sum[0][1] == 1);
+
+                // The destination zone's stale records are gone and it carries exactly
+                // the mapped decoded layout (the canonical record aside, which keys a
+                // bound node rather than a detached one).
+                TEST(Sculptor::count_detached_records(rp_candidate, 0, 0) == rp_dec.layout_count - 1);
+                uint32_t rp_pasted  = 0;
+                uint32_t rp_effects = 0;
+                bool     rp_delay   = false;
+                bool     rp_renamed = false;
+                bool     rp_master  = false;
+                for (uint32_t r = 0; r < rp_candidate.graph_layout_count; r++) {
+                    const Synth::GraphNodeLayout& record = rp_candidate.graph_layout[r];
+                    if (record.kind == 4) {
+                        ++rp_effects;
+                        if (record.channel == 0 && strcmp(record.name, "Delay") == 0) {
+                            rp_delay = record.x == 5.0f && record.y == 6.0f;
+                        }
+                        if (record.channel == 0 && strcmp(record.name, "LFO 2") == 0) {
+                            rp_renamed = record.x == 7.0f && record.y == 8.0f;
+                        }
+                        if (record.channel == 16 && strcmp(record.name, "LFO 1") == 0) {
+                            rp_master = record.x == 9.0f && record.y == 10.0f;
+                        }
+                        continue;
+                    }
+                    if (record.channel == 0 && record.zone == 0) {
+                        ++rp_pasted;
+                    }
+                }
+                TEST(rp_pasted == rp_dec.layout_count);
+                TEST(rp_effects == 3);
+                TEST(rp_delay);
+                TEST(rp_renamed);
+                TEST(rp_master);
+                TEST(rp_candidate.bank.lfos.num_allocated == 3);
+                TEST(rp_candidate.bank.instruments.entries[rp_dest_slot].layers[0].gen[Synth::mod_volume].lfo_desc_id ==
+                     3);
+                TEST(rp_candidate.bank.channel_chains[0].effects[0].bindings[0].lfo_desc_id == 2);
+            }
+        }
+
+        {
+            // An editor bank whose own metadata is invalid is refused before any
+            // candidate is written: the paste must not launder a broken source.
+            static Synth::InstrumentEditorBank md_bank;
+            static Synth::Instrument           md_instr;
+            build_clipboard_zone_fixture(&md_bank, &md_instr);
+            add_detached_record(&md_bank, 0, 0, 4, 0, 1.0f, 2.0f, Synth::ModSource::none, Synth::ModSource::none, 0);
+            // An effect record without a node title cannot key its node.
+            TEST(md_bank.graph_layout[md_bank.graph_layout_count - 1].name[0] == 0);
+            TEST(! Sculptor::validate_editor_metadata(md_bank));
+
+            static Synth::Instrument md_bare;
+            md_bare                       = {};
+            md_bare.layer_count           = 1;
+            md_bare.layers[0].osc_type[0] = Synth::WaveType::sine_wave;
+            md_bare.layers[0].osc_type[1] = Synth::WaveType::sine_wave;
+            md_bare.layers[0].mod_ratio   = 1.0f;
+
+            static Synth::InstrumentEditorBank md_candidate;
+            static Synth::InstrumentEditorBank md_sentinel;
+            memset(&md_candidate, 0x5A, sizeof(md_candidate));
+            memset(&md_sentinel, 0x5A, sizeof(md_sentinel));
+            TEST(! Sculptor::replace_zone_instrument_candidate(md_bank,
+                                                               0,
+                                                               0,
+                                                               md_bare,
+                                                               nullptr,
+                                                               0,
+                                                               nullptr,
+                                                               0,
+                                                               nullptr,
+                                                               0,
+                                                               &md_candidate));
+            TEST(memcmp(&md_candidate, &md_sentinel, sizeof(md_sentinel)) == 0);
+        }
+
+        {
+            // Placeholder selection and refusal sequencing.
+            //
+            // A descriptorless instrument pasted over the sole zone of a channel is
+            // valid with no descriptor at all, and the uniquely rooted destination
+            // slot is reused in place.
+            static Synth::Instrument pl_bare;
+            pl_bare                                        = {};
+            pl_bare.layer_count                            = 1;
+            pl_bare.layers[0].osc_type[0]                  = Synth::WaveType::sine_wave;
+            pl_bare.layers[0].osc_type[1]                  = Synth::WaveType::sine_wave;
+            pl_bare.layers[0].osc_mode                     = Synth::osc_mode_blend;
+            pl_bare.layers[0].mod_ratio                    = 1.0f;
+            pl_bare.routing[Synth::mod_panning].base_value = 0.5f;
+
+            static Synth::InstrumentEditorBank pl_bank;
+            static Synth::Instrument           pl_instr;
+            build_clipboard_zone_fixture(&pl_bank, &pl_instr);
+            TEST(Synth::validate_instrument_bank(&pl_bank.bank));
+            TEST(Sculptor::validate_editor_metadata(pl_bank));
+
+            static Synth::InstrumentEditorBank pl_candidate;
+            memset(&pl_candidate, 0x5A, sizeof(pl_candidate));
+            static Synth::InstrumentEditorBank pl_before;
+            pl_before = pl_bank;
+            TEST(Sculptor::replace_zone_instrument_candidate(pl_bank,
+                                                             0,
+                                                             0,
+                                                             pl_bare,
+                                                             nullptr,
+                                                             0,
+                                                             nullptr,
+                                                             0,
+                                                             nullptr,
+                                                             0,
+                                                             &pl_candidate));
+            TEST(memcmp(&pl_bank, &pl_before, sizeof(pl_bank)) == 0);
+            TEST(Synth::validate_instrument_bank(&pl_candidate.bank));
+            TEST(Sculptor::validate_editor_metadata(pl_candidate));
+            TEST(pl_candidate.bank.channel_zones[0][0].instrument == 0);
+            TEST(pl_candidate.bank.instruments.num_allocated == 1);
+            TEST(pl_candidate.bank.envelopes.num_allocated == 0); // nothing roots them any more
+            TEST(pl_candidate.bank.lfos.num_allocated == 0);
+            TEST(memcmp(&pl_candidate.bank.instruments.entries[0], &pl_bare, sizeof(pl_bare)) == 0);
+            TEST(strcmp(pl_candidate.instrument_names[0], "Clipboard zone") == 0);
+
+            // Destination arguments outside the bank refuse with the candidate
+            // untouched.
+            static Synth::InstrumentEditorBank pl_sentinel;
+            memset(&pl_sentinel, 0x5A, sizeof(pl_sentinel));
+            memset(&pl_candidate, 0x5A, sizeof(pl_candidate));
+            TEST(! Sculptor::replace_zone_instrument_candidate(pl_bank,
+                                                               Synth::max_channels,
+                                                               0,
+                                                               pl_bare,
+                                                               nullptr,
+                                                               0,
+                                                               nullptr,
+                                                               0,
+                                                               nullptr,
+                                                               0,
+                                                               &pl_candidate));
+            TEST(memcmp(&pl_candidate, &pl_sentinel, sizeof(pl_sentinel)) == 0);
+            memset(&pl_candidate, 0x5A, sizeof(pl_candidate));
+            TEST(! Sculptor::replace_zone_instrument_candidate(pl_bank,
+                                                               0,
+                                                               1, // the channel has one zone entry
+                                                               pl_bare,
+                                                               nullptr,
+                                                               0,
+                                                               nullptr,
+                                                               0,
+                                                               nullptr,
+                                                               0,
+                                                               &pl_candidate));
+            TEST(memcmp(&pl_candidate, &pl_sentinel, sizeof(pl_sentinel)) == 0);
+        }
+
+        {
+            // A fully allocated instrument pool cannot hand out a placeholder, so a
+            // uniquely rooted destination succeeds by reusing its own slot while a
+            // shared destination must refuse: the pool is full before reclaim, and an
+            // allocated-but-unrooted slot is not free.
+            static Synth::InstrumentEditorBank fp_bank;
+            fp_bank = {};
+            for (uint32_t i = 0; i < Synth::max_instruments; i++) {
+                TEST(fp_bank.bank.instruments.allocate() == i);
+                fp_bank.bank.instruments.entries[i].layer_count           = 1;
+                fp_bank.bank.instruments.entries[i].layers[0].osc_type[0] = Synth::WaveType::sine_wave;
+                fp_bank.bank.instruments.entries[i].layers[0].mod_ratio   = 1.0f;
+            }
+            fp_bank.bank.channel_enabled[0]             = 1;
+            fp_bank.bank.channel_zones[0][0].start_note = 1;
+            fp_bank.bank.channel_zones[0][0].instrument = 7;
+            TEST(Synth::validate_instrument_bank(&fp_bank.bank));
+
+            static Synth::Instrument fp_bare;
+            fp_bare                       = {};
+            fp_bare.layer_count           = 1;
+            fp_bare.layers[0].osc_type[0] = Synth::WaveType::noise_wave;
+            fp_bare.layers[0].osc_type[1] = Synth::WaveType::noise_wave;
+            fp_bare.layers[0].mod_ratio   = 1.0f;
+
+            static Synth::InstrumentEditorBank fp_candidate;
+            memset(&fp_candidate, 0x5A, sizeof(fp_candidate));
+            TEST(Sculptor::replace_zone_instrument_candidate(fp_bank,
+                                                             0,
+                                                             0,
+                                                             fp_bare,
+                                                             nullptr,
+                                                             0,
+                                                             nullptr,
+                                                             0,
+                                                             nullptr,
+                                                             0,
+                                                             &fp_candidate));
+            TEST(Synth::validate_instrument_bank(&fp_candidate.bank));
+            TEST(fp_candidate.bank.instruments.num_allocated >= 1);
+            TEST(fp_candidate.bank.instruments.entries[fp_candidate.bank.channel_zones[0][0].instrument]
+                     .layers[0]
+                     .osc_type[0] == Synth::WaveType::noise_wave);
+
+            // Same full pool, shared destination: no free or unallocated slot exists
+            // before reclaim, so the transaction refuses even though reclaim would
+            // later free unrooted slots.
+            static Synth::InstrumentEditorBank fs_bank;
+            fs_bank                                     = fp_bank;
+            fs_bank.bank.channel_zones[0][1].start_note = 65;
+            fs_bank.bank.channel_zones[0][1].instrument = 7;
+            TEST(Synth::validate_instrument_bank(&fs_bank.bank));
+
+            static Synth::InstrumentEditorBank fs_candidate;
+            static Synth::InstrumentEditorBank fs_sentinel;
+            memset(&fs_candidate, 0x5A, sizeof(fs_candidate));
+            memset(&fs_sentinel, 0x5A, sizeof(fs_sentinel));
+            TEST(! Sculptor::replace_zone_instrument_candidate(fs_bank,
+                                                               0,
+                                                               0,
+                                                               fp_bare,
+                                                               nullptr,
+                                                               0,
+                                                               nullptr,
+                                                               0,
+                                                               nullptr,
+                                                               0,
+                                                               &fs_candidate));
+            TEST(memcmp(&fs_candidate, &fs_sentinel, sizeof(fs_sentinel)) == 0);
+        }
+
+        {
+            // A shared destination with a free slot gets its own placeholder, so the
+            // other zone keeps playing the instrument it always played.
+            static Synth::InstrumentEditorBank sh_bank;
+            sh_bank = {};
+            TEST(sh_bank.bank.instruments.allocate() == 0);
+            TEST(sh_bank.bank.instruments.allocate() == 1);
+            sh_bank.bank.instruments.entries[0].layer_count           = 1;
+            sh_bank.bank.instruments.entries[0].layers[0].osc_type[0] = Synth::WaveType::sine_wave;
+            sh_bank.bank.instruments.entries[0].layers[0].mod_ratio   = 1.0f;
+            sh_bank.bank.instruments.entries[1].layer_count           = 1;
+            sh_bank.bank.instruments.entries[1].layers[0].osc_type[0] = Synth::WaveType::sawtooth_wave;
+            sh_bank.bank.instruments.entries[1].layers[0].mod_ratio   = 1.0f;
+            sh_bank.bank.channel_enabled[0]                           = 1;
+            sh_bank.bank.channel_zones[0][0].start_note               = 1;
+            sh_bank.bank.channel_zones[0][0].instrument               = 0;
+            sh_bank.bank.channel_zones[0][1].start_note               = 65;
+            sh_bank.bank.channel_zones[0][1].instrument               = 0; // shared
+            strcpy(sh_bank.instrument_names[0], "Shared");
+            TEST(Synth::validate_instrument_bank(&sh_bank.bank));
+            const Synth::Instrument sh_old = sh_bank.bank.instruments.entries[0];
+
+            static Synth::Instrument sh_bare;
+            sh_bare                       = {};
+            sh_bare.layer_count           = 1;
+            sh_bare.layers[0].osc_type[0] = Synth::WaveType::noise_wave;
+            sh_bare.layers[0].osc_type[1] = Synth::WaveType::noise_wave;
+            sh_bare.layers[0].mod_ratio   = 1.0f;
+
+            static Synth::InstrumentEditorBank sh_candidate;
+            memset(&sh_candidate, 0x5A, sizeof(sh_candidate));
+            TEST(Sculptor::replace_zone_instrument_candidate(sh_bank,
+                                                             0,
+                                                             0,
+                                                             sh_bare,
+                                                             nullptr,
+                                                             0,
+                                                             nullptr,
+                                                             0,
+                                                             nullptr,
+                                                             0,
+                                                             &sh_candidate));
+            TEST(Synth::validate_instrument_bank(&sh_candidate.bank));
+            const uint32_t sh_zone_zero = sh_candidate.bank.channel_zones[0][0].instrument;
+            const uint32_t sh_zone_one  = sh_candidate.bank.channel_zones[0][1].instrument;
+            TEST(sh_zone_zero != sh_zone_one);
+            TEST(memcmp(&sh_candidate.bank.instruments.entries[sh_zone_zero], &sh_bare, sizeof(sh_bare)) == 0);
+            TEST(memcmp(&sh_candidate.bank.instruments.entries[sh_zone_one], &sh_old, sizeof(sh_old)) == 0);
+            TEST(sh_candidate.bank.instruments.num_allocated == 2);
+            TEST(strcmp(sh_candidate.instrument_names[sh_zone_one], "Shared") == 0);
+
+            {
+                // A decoded instrument carrying descriptor references the paste does not
+                // install is refused: the source bank keeps its bytes and the candidate keeps
+                // its sentinel. The same bank accepts a bare instrument with no references, so
+                // the refusal is the reference and not the bank.
+                static Synth::InstrumentEditorBank vr_bank;
+                static Synth::Instrument           vr_instr;
+                build_clipboard_zone_fixture(&vr_bank, &vr_instr);
+
+                static Synth::Instrument vr_bare;
+                vr_bare                       = {};
+                vr_bare.layer_count           = 1;
+                vr_bare.layers[0].osc_type[0] = Synth::WaveType::noise_wave;
+                vr_bare.layers[0].mod_ratio   = 1.0f;
+                TEST(validate_standalone_model(vr_bare, nullptr, 0, nullptr, 0));
+
+                static Synth::InstrumentEditorBank vr_ok;
+                memset(&vr_ok, 0x5A, sizeof(vr_ok));
+                TEST(Sculptor::replace_zone_instrument_candidate(vr_bank,
+                                                                 0,
+                                                                 0,
+                                                                 vr_bare,
+                                                                 nullptr,
+                                                                 0,
+                                                                 nullptr,
+                                                                 0,
+                                                                 nullptr,
+                                                                 0,
+                                                                 &vr_ok));
+
+                static Synth::InstrumentEditorBank vr_candidate;
+                static Synth::InstrumentEditorBank vr_sentinel;
+                memset(&vr_candidate, 0x5A, sizeof(vr_candidate));
+                memset(&vr_sentinel, 0x5A, sizeof(vr_sentinel));
+                static Synth::InstrumentEditorBank vr_before;
+                vr_before = vr_bank;
+
+                // Envelope id past the descriptor pool, with no descriptors installed.
+                static Synth::Instrument vr_bad_env;
+                vr_bad_env = vr_bare;
+                vr_bad_env.layers[0].gen[Synth::mod_volume].envelope_desc_id =
+                    static_cast<uint16_t>(Synth::instrument_max_envelopes + 1);
+                TEST(! validate_standalone_model(vr_bad_env, nullptr, 0, nullptr, 0));
+                TEST(! Sculptor::replace_zone_instrument_candidate(vr_bank,
+                                                                   0,
+                                                                   0,
+                                                                   vr_bad_env,
+                                                                   nullptr,
+                                                                   0,
+                                                                   nullptr,
+                                                                   0,
+                                                                   nullptr,
+                                                                   0,
+                                                                   &vr_candidate));
+                TEST(memcmp(&vr_candidate, &vr_sentinel, sizeof(vr_sentinel)) == 0);
+                TEST(memcmp(&vr_bank, &vr_before, sizeof(vr_before)) == 0);
+
+                // LFO id past the descriptors that come with the instrument.
+                static Synth::LFODescriptor vr_lfo;
+                vr_lfo               = {};
+                vr_lfo.wave          = Synth::WaveType::sine_wave;
+                vr_lfo.period_ms     = 500;
+                vr_lfo.min_value     = 0.0f;
+                vr_lfo.min_max_delta = 1.0f;
+                static Synth::Instrument vr_bad_lfo;
+                vr_bad_lfo                                              = vr_bare;
+                vr_bad_lfo.layers[0].gen[Synth::mod_volume].lfo_desc_id = 2;
+                TEST(! validate_standalone_model(vr_bad_lfo, nullptr, 0, &vr_lfo, 1));
+                TEST(! Sculptor::replace_zone_instrument_candidate(vr_bank,
+                                                                   0,
+                                                                   0,
+                                                                   vr_bad_lfo,
+                                                                   nullptr,
+                                                                   0,
+                                                                   &vr_lfo,
+                                                                   1,
+                                                                   nullptr,
+                                                                   0,
+                                                                   &vr_candidate));
+                TEST(memcmp(&vr_candidate, &vr_sentinel, sizeof(vr_sentinel)) == 0);
+                TEST(memcmp(&vr_bank, &vr_before, sizeof(vr_before)) == 0);
+
+                // A layout record naming a generator the decoded instrument does not project.
+                static Synth::InstrumentGraphLayout vr_records[1];
+                memset(vr_records, 0, sizeof(vr_records));
+                vr_records[0].kind   = Synth::instrument_graph_layout_envelope;
+                vr_records[0].layer  = 0;
+                vr_records[0].target = static_cast<uint8_t>(Synth::mod_panning);
+                vr_records[0].x      = 3.0f;
+                vr_records[0].y      = 4.0f;
+                TEST(! Sculptor::replace_zone_instrument_candidate(vr_bank,
+                                                                   0,
+                                                                   0,
+                                                                   vr_bare,
+                                                                   nullptr,
+                                                                   0,
+                                                                   nullptr,
+                                                                   0,
+                                                                   vr_records,
+                                                                   1,
+                                                                   &vr_candidate));
+                TEST(memcmp(&vr_candidate, &vr_sentinel, sizeof(vr_sentinel)) == 0);
+                TEST(memcmp(&vr_bank, &vr_before, sizeof(vr_before)) == 0);
+
+                // The one refusal this fixture cannot construct: an effect LFO title colliding
+                // with a renumbered instrument LFO title after the reclaim's LFO remap. The
+                // remap is injective over survivors and effect chains are roots of their own,
+                // so no reachable input produces the collision; what does happen is the
+                // renumber rekeying the effect's title, pinned by the reclaim-map fixture.
+            }
+        }
+
+        {
+            // A disabled destination channel still classifies roots: it is enabled
+            // privately, validated and counted with the reclaim's own rule, and the
+            // original enabled flag is restored in the candidate. The replacement is
+            // observably different from the shared instrument, and the other zone keeps
+            // its own instrument bytes, name, layout records and missing-sum row.
+            static Synth::InstrumentEditorBank dc_bank;
+            dc_bank = {};
+            TEST(dc_bank.bank.instruments.allocate() == 0);
+            TEST(dc_bank.bank.instruments.allocate() == 1);
+            dc_bank.bank.instruments.entries[0].layer_count                           = 1;
+            dc_bank.bank.instruments.entries[0].layers[0].osc_type[0]                 = Synth::WaveType::sawtooth_wave;
+            dc_bank.bank.instruments.entries[0].layers[0].mod_ratio                   = 3.0f;
+            dc_bank.bank.instruments.entries[0].routing[Synth::mod_volume].base_value = 0.25f;
+            dc_bank.bank.instruments.entries[1].layer_count                           = 1;
+            dc_bank.bank.instruments.entries[1].layers[0].osc_type[0]                 = Synth::WaveType::pulse_wave;
+            dc_bank.bank.instruments.entries[1].layers[0].mod_ratio                   = 1.0f;
+            dc_bank.bank.channel_zones[0][0].start_note                               = 1;
+            dc_bank.bank.channel_zones[0][0].instrument                               = 0;
+            dc_bank.bank.channel_zones[0][1].start_note                               = 65;
+            dc_bank.bank.channel_zones[0][1].instrument = 0; // shared with the destination
+            strcpy(dc_bank.instrument_names[0], "Shared disabled");
+            // The other zone's canonical metadata needs no generator descriptor.
+            add_detached_record(&dc_bank,
+                                0,
+                                1,
+                                Synth::instrument_graph_layout_canonical,
+                                0,
+                                13.5f,
+                                14.5f,
+                                Synth::ModSource::none,
+                                Synth::ModSource::none,
+                                0);
+            dc_bank.graph_missing_sum[0][1]              = 1;
+            const Synth::GraphNodeLayout dc_other_record = dc_bank.graph_layout[dc_bank.graph_layout_count - 1];
+            // Validate the complete privately enabled state before disabling it.
+            static Synth::InstrumentEditorBank dc_enabled;
+            dc_enabled                         = dc_bank;
+            dc_enabled.bank.channel_enabled[0] = 1;
+            TEST(Synth::validate_instrument_bank(&dc_enabled.bank));
+            TEST(Sculptor::validate_editor_metadata(dc_enabled));
+            dc_bank.bank.channel_enabled[0] = 0;
+            TEST(Synth::validate_instrument_bank(&dc_bank.bank));
+            TEST(Sculptor::validate_editor_metadata(dc_bank));
+            const Synth::Instrument dc_old           = dc_bank.bank.instruments.entries[0];
+            const uint32_t          dc_other_records = Sculptor::count_detached_records(dc_bank, 0, 1);
+            const uint32_t          dc_record_count  = dc_bank.graph_layout_count;
+
+            static Synth::Instrument dc_bare;
+            dc_bare                                       = {};
+            dc_bare.layer_count                           = 1;
+            dc_bare.layers[0].osc_type[0]                 = Synth::WaveType::noise_wave;
+            dc_bare.layers[0].osc_type[1]                 = Synth::WaveType::noise_wave;
+            dc_bare.layers[0].mod_ratio                   = 1.0f;
+            dc_bare.routing[Synth::mod_volume].base_value = 0.75f;
+
+            static Synth::InstrumentEditorBank dc_candidate;
+            memset(&dc_candidate, 0x5A, sizeof(dc_candidate));
+            const bool dc_replaced = Sculptor::replace_zone_instrument_candidate(dc_bank,
+                                                                                 0,
+                                                                                 0,
+                                                                                 dc_bare,
+                                                                                 nullptr,
+                                                                                 0,
+                                                                                 nullptr,
+                                                                                 0,
+                                                                                 nullptr,
+                                                                                 0,
+                                                                                 &dc_candidate);
+            TEST(dc_replaced);
+            // Reading the candidate at all requires the transaction to have succeeded:
+            // a refused one leaves it uninitialised.
+            if (dc_replaced) {
+                TEST(Synth::validate_instrument_bank(&dc_candidate.bank));
+                TEST(dc_candidate.bank.channel_enabled[0] == 0); // restored, not left enabled
+                const uint32_t dc_zone_zero = dc_candidate.bank.channel_zones[0][0].instrument;
+                const uint32_t dc_zone_one  = dc_candidate.bank.channel_zones[0][1].instrument;
+                TEST(dc_zone_zero != dc_zone_one);
+                TEST(memcmp(&dc_candidate.bank.instruments.entries[dc_zone_zero], &dc_bare, sizeof(dc_bare)) == 0);
+                TEST(memcmp(&dc_candidate.bank.instruments.entries[dc_zone_one], &dc_old, sizeof(dc_old)) == 0);
+                TEST(strcmp(dc_candidate.instrument_names[dc_zone_one], "Shared disabled") == 0);
+                TEST(Sculptor::count_detached_records(dc_candidate, 0, 1) == dc_other_records);
+                TEST(dc_candidate.graph_layout_count == dc_record_count);
+                uint32_t preserved_other_zone_record_count = 0;
+                for (uint32_t r = 0; r < dc_candidate.graph_layout_count; r++) {
+                    const Synth::GraphNodeLayout& record = dc_candidate.graph_layout[r];
+                    if (record.channel == 0 && record.zone == 1) {
+                        ++preserved_other_zone_record_count;
+                        TEST(memcmp(&record, &dc_other_record, sizeof(record)) == 0);
+                    }
+                }
+                TEST(preserved_other_zone_record_count == 1);
+                TEST(dc_candidate.graph_missing_sum[0][1] == 1);
+            }
+
+            // A destination table that is only invalid once the channel is enabled
+            // (a zone referencing an instrument the pool does not hold) refuses the
+            // whole transaction.
+            static Synth::InstrumentEditorBank dt_bank;
+            dt_bank                                     = dc_bank;
+            dt_bank.bank.channel_zones[0][1].instrument = 200;
+            TEST(Synth::validate_instrument_bank(&dt_bank.bank)); // disabled: the table is skipped
+
+            static Synth::InstrumentEditorBank dt_candidate;
+            static Synth::InstrumentEditorBank dt_sentinel;
+            memset(&dt_candidate, 0x5A, sizeof(dt_candidate));
+            memset(&dt_sentinel, 0x5A, sizeof(dt_sentinel));
+            TEST(! Sculptor::replace_zone_instrument_candidate(dt_bank,
+                                                               0,
+                                                               0,
+                                                               dc_bare,
+                                                               nullptr,
+                                                               0,
+                                                               nullptr,
+                                                               0,
+                                                               nullptr,
+                                                               0,
+                                                               &dt_candidate));
+            TEST(memcmp(&dt_candidate, &dt_sentinel, sizeof(dt_sentinel)) == 0);
+        }
+
+        {
+            // This exercises measurement-pool overflow, not production decoder
+            // rejection order: a well-formed document exceeds the measurement bound.
+            static char ov_doc[clipboard_capacity];
+            uint32_t    ov_pos = 0;
+            ov_pos += static_cast<uint32_t>(snprintf(ov_doc + ov_pos, sizeof(ov_doc) - ov_pos, "{\"a\":["));
+            for (uint32_t t = 0; t < clipboard_token_bound && ov_pos + 4 < sizeof(ov_doc); t++) {
+                ov_pos +=
+                    static_cast<uint32_t>(snprintf(ov_doc + ov_pos, sizeof(ov_doc) - ov_pos, "%s0", t == 0 ? "" : ","));
+            }
+            ov_pos += static_cast<uint32_t>(snprintf(ov_doc + ov_pos, sizeof(ov_doc) - ov_pos, "]}"));
+            TEST(ov_pos < sizeof(ov_doc));
+            TEST(count_clipboard_tokens(ov_doc, ov_pos) == -1);
+            // A document that fits the bound still measures, so the -1 above is a bound
+            // result and not a truncation artifact of the generated prefix.
+            static const char ov_small_doc[] = "{\"a\":[0,1,2]}";
+            TEST(count_clipboard_tokens(ov_small_doc, static_cast<uint32_t>(strlen(ov_small_doc))) > 0);
+        }
+
+        {
+            // Ordering of the GUI paste command against the candidate helper.
+            check_zone_paste_source_ordering();
+        }
+
+        {
+            // Clipboard sizing estimate, measured rather than assumed: the storage
+            // one copy/paste transaction holds at once - one document buffer, one parser
+            // token pool at the specified bound, the portable and mapped record arrays, one
+            // decoded instrument with its descriptor arrays, and the reclaim map. Nothing
+            // here is treated as shared with the codec's own scratch: only physically shared
+            // buffers are counted once, so this is the clipboard's own footprint and not the
+            // editor's resident set.
+            const uint64_t clipboard_staging =
+                clipboard_capacity + uint64_t{ clipboard_token_bound } * sizeof(jsmntok_t) +
+                uint64_t{ max_portable_records } * sizeof(Synth::InstrumentGraphLayout) * 2 +
+                uint64_t{ max_portable_records } * sizeof(Synth::GraphNodeLayout) + sizeof(Synth::Instrument) +
+                uint64_t{ Synth::instrument_max_envelopes } * sizeof(Synth::EnvelopeDescriptor) +
+                uint64_t{ Synth::instrument_max_lfos } * sizeof(Synth::LFODescriptor) +
+                uint64_t{ Synth::max_lfos } * sizeof(uint16_t);
+            // Complete resident storage is bounded by the owner in sculptor_instr_edit.cpp.
+            if (getenv("SYNTH_UNIT_MEASURE")) {
+                fprintf(
+                    stderr,
+                    "clipboard staging %llu B; parser storage %llu B; clipboard text %u B; candidate bank %llu B; "
+                    "portable records %llu B; mapped records %llu B; decoded model %llu B; descriptor maps %llu B\n",
+                    static_cast<unsigned long long>(clipboard_staging),
+                    static_cast<unsigned long long>(1024u * 1024u + uint64_t{ clipboard_token_bound } *
+                                                                        (sizeof(jsmntok_t) + sizeof(uint32_t))),
+                    clipboard_capacity,
+                    static_cast<unsigned long long>(sizeof(Synth::InstrumentEditorBank)),
+                    static_cast<unsigned long long>(uint64_t{ max_portable_records } *
+                                                    sizeof(Synth::InstrumentGraphLayout)),
+                    static_cast<unsigned long long>(uint64_t{ max_portable_records } * sizeof(Synth::GraphNodeLayout)),
+                    static_cast<unsigned long long>(
+                        sizeof(Synth::Instrument) +
+                        uint64_t{ Synth::instrument_max_envelopes } * sizeof(Synth::EnvelopeDescriptor) +
+                        uint64_t{ Synth::instrument_max_lfos } * sizeof(Synth::LFODescriptor)),
+                    static_cast<unsigned long long>(2u * Synth::max_lfos * sizeof(uint16_t)));
+                fprintf(stderr,
+                        "runtime instrument bank %llu bytes; editor bank %llu bytes; bank queue %llu bytes\n",
+                        static_cast<unsigned long long>(sizeof(Synth::InstrumentBank)),
+                        static_cast<unsigned long long>(sizeof(Synth::InstrumentEditorBank)),
+                        static_cast<unsigned long long>(sizeof(Synth::BankUpdateQueue)));
+            }
+            TEST(clipboard_staging < 1024u * 1024u + 64u * 1024u + 16u * 1024u);
+        }
+
+        // The default instrument round-trips too.
+        static Synth::InstrumentBank default_bank;
+        memset(&default_bank, 0, sizeof(default_bank));
+        TEST(Synth::init_default_channel(&default_bank, 0));
+        const uint32_t default_encoded_len = Synth::encode_instrument_json(encoded,
+                                                                           sizeof(encoded),
+                                                                           &default_bank.instruments.entries[0],
+                                                                           &default_bank);
+        TEST(default_encoded_len > 0);
+        // New clipboard output includes graph_layout even when no node moved.
+        TEST(strstr(encoded, "\"graph_layout\":[]") != nullptr);
+        static Synth::Instrument         default_decoded;
+        static Synth::EnvelopeDescriptor default_envs[Synth::instrument_max_envelopes];
+        static Synth::LFODescriptor      default_lfos[Synth::instrument_max_lfos];
+        uint32_t                         default_env_count = 999;
+        uint32_t                         default_lfo_count = 999;
+        TEST(Synth::decode_instrument_json(encoded,
+                                           default_encoded_len,
+                                           &default_decoded,
+                                           default_envs,
+                                           &default_env_count,
+                                           default_lfos,
+                                           &default_lfo_count));
+        TEST(default_decoded.layer_count == 1);
+
+        // Older documents without graph_layout remain accepted, and an empty optional
+        // field is accepted by the same decoder.
+        const char* const empty_layout_doc =
+            "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\"}],\"graph_layout\":[]}";
+        static Synth::Instrument         empty_layout_instr;
+        static Synth::EnvelopeDescriptor empty_layout_envs[Synth::instrument_max_envelopes];
+        static Synth::LFODescriptor      empty_layout_lfos[Synth::instrument_max_lfos];
+        uint32_t                         empty_layout_env_count = 999;
+        uint32_t                         empty_layout_lfo_count = 999;
+        TEST(Synth::decode_instrument_json(empty_layout_doc,
+                                           static_cast<uint32_t>(strlen(empty_layout_doc)),
+                                           &empty_layout_instr,
+                                           empty_layout_envs,
+                                           &empty_layout_env_count,
+                                           empty_layout_lfos,
+                                           &empty_layout_lfo_count));
+
+        // The shipped example document stays valid: it is what users and LLMs
+        // copy from (doc/synth_instrument_example.json).
+        {
+            static char example[64 * 1024];
+            FILE* const example_file = fopen("doc/synth_instrument_example.json", "rb");
+            TEST(example_file != nullptr);
+            const size_t got = example_file ? fread(example, 1, sizeof(example) - 1, example_file) : 0;
+            if (example_file) {
+                fclose(example_file);
+            }
+            TEST(got > 0 && got < sizeof(example) - 1);
+            static Synth::Instrument         example_instr;
+            static Synth::EnvelopeDescriptor example_envs[Synth::instrument_max_envelopes];
+            static Synth::LFODescriptor      example_lfos[Synth::instrument_max_lfos];
+            uint32_t                         example_env_count = 0;
+            uint32_t                         example_lfo_count = 0;
+            if (got > 0) {
+                TEST(Synth::decode_instrument_json(example,
+                                                   static_cast<uint32_t>(got),
+                                                   &example_instr,
+                                                   example_envs,
+                                                   &example_env_count,
+                                                   example_lfos,
+                                                   &example_lfo_count));
+                TEST(example_instr.layer_count == 2);
+                TEST(example_instr.layers[0].osc_mode == Synth::osc_mode_fm);
+                TEST(example_env_count == 2);
+                TEST(example_lfo_count == 2);
+            }
+        }
     }
 
     return exit_code;

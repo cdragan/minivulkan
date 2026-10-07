@@ -23,7 +23,7 @@
 
 namespace Sculptor {
 
-// One input node per MIDI source role (every ModSource except none).
+// Six MIDI source roles (every ModSource except none) share one input node.
 constexpr uint32_t num_osc_graph_inputs = static_cast<uint32_t>(Synth::ModSource::pressure_combine);
 // The registry/record source bounds and the canonical node numbering pin the
 // same bound: a drift between the ModSource set and the canonical numbering
@@ -52,9 +52,10 @@ constexpr uint32_t max_detached_nodes = Synth::max_detached_per_zone;
 // fans out to exactly its served cells' oscillator inputs.
 constexpr uint32_t max_param_nodes = Synth::max_layers * 5;
 
-// Worst-case bound node population: 6 MIDI inputs + sum, one oscillator per
-// layer, and per (layer, target) cell one parameter, envelope and LFO node.
-static_assert(7 + Synth::max_layers + 3 * max_param_nodes <= max_nodes);
+// Worst-case bound node population: one input node for six MIDI source roles
+// plus sum, one oscillator per layer, and per (layer, target) cell one
+// parameter, envelope and LFO node.
+static_assert(Synth::graph_canonical_input_node_count + 1 + Synth::max_layers + 3 * max_param_nodes <= max_nodes);
 // Worst-case bound edge population: per layer one oscillator->sum edge, and
 // per cell one parameter->oscillator, envelope->parameter and LFO->parameter
 // edge plus two source->parameter and two source->LFO depth/rate edges.
@@ -125,6 +126,71 @@ bool project_instrument_to_graph(const Synth::Instrument&     instrument,
                                  Graph*                       graph,
                                  OscGraphMapping*             mapping);
 
+// Exports one zone's saved editor positions as portable records relative to the
+// zone's own instrument: every kind-0..3 record of (channel,zone) that resolves
+// to a projected node of `instr` is converted, effect (kind 4) records are never
+// clipboard data. Records are all-or-nothing and *out_count is the actual count
+// only on success; capacity must hold every record or the call fails.
+bool encode_instrument_graph_layout(const Synth::Instrument&           instr,
+                                    const Synth::InstrumentBank&       bank,
+                                    const Synth::InstrumentEditorBank& editor_bank,
+                                    uint32_t                           channel,
+                                    uint32_t                           zone,
+                                    Synth::InstrumentGraphLayout*      out_records,
+                                    uint32_t                           capacity,
+                                    uint32_t*                          out_count);
+// Resolves normalized decoded-relative portable records into editor layout
+// records for the decoded instrument, assigning the instance uids the projection
+// pairs records by. Unknown kinds, unresolved or duplicate locators, non-finite
+// or negative-sized positions and a capacity below the resolved count are
+// refused with every output untouched.
+bool map_instrument_graph_layout(const Synth::Instrument&            decoded_instr,
+                                 const Synth::EnvelopeDescriptor*    decoded_envs,
+                                 uint32_t                            decoded_env_count,
+                                 const Synth::LFODescriptor*         decoded_lfos,
+                                 uint32_t                            decoded_lfo_count,
+                                 const Synth::InstrumentGraphLayout* decoded_layout,
+                                 uint32_t                            decoded_layout_count,
+                                 Synth::GraphNodeLayout*             out_records,
+                                 uint32_t                            capacity,
+                                 uint32_t*                           out_count);
+
+// Copy-time normalization seam: re-anchors portable layout records exported from
+// the source zone onto the identities of the decoded document the clipboard
+// carries. Node identity follows the unchanged (layer,target) serving cells
+// through decoder quantization and descriptor interning; raw descriptor bytes and
+// numeric pool ids are never matched across the encode/decode boundary.
+//
+// Source locators resolve only against source_instr/source_envs/source_lfos, and
+// emitted locators only against the decoded model. Input pointers may be null
+// only when their paired count is zero. A source node whose cells land on
+// several decoded nodes is copied onto each; where several source nodes collapse
+// onto one decoded node, the earliest source projected node carrying a saved
+// layout wins, in fixed projection order (canonical, parameter, generator),
+// independent of input record order. Unresolved source locators are refused.
+// Duplicate decoded-node records from external JSON are refused by the mapper
+// and decoder, not by this source-to-decoded collapse selection.
+//
+// All-or-nothing: *out_count is the actual count only on success. Output records
+// are decoded-relative and ready for the layout-aware encoder overload and for
+// map_instrument_graph_layout. Editor-internal: the copy path and unit tests call
+// it, the synth player runtime never does.
+bool normalize_instrument_graph_layout(const Synth::Instrument&            source_instr,
+                                       const Synth::EnvelopeDescriptor*    source_envs,
+                                       uint32_t                            source_env_count,
+                                       const Synth::LFODescriptor*         source_lfos,
+                                       uint32_t                            source_lfo_count,
+                                       const Synth::InstrumentGraphLayout* source_layout,
+                                       uint32_t                            source_layout_count,
+                                       const Synth::Instrument&            decoded_instr,
+                                       const Synth::EnvelopeDescriptor*    decoded_envs,
+                                       uint32_t                            decoded_env_count,
+                                       const Synth::LFODescriptor*         decoded_lfos,
+                                       uint32_t                            decoded_lfo_count,
+                                       Synth::InstrumentGraphLayout*       out_layout,
+                                       uint32_t                            capacity,
+                                       uint32_t*                           out_count);
+
 // Rebuilds the instrument from the graph.  Writes every field of *out
 // (including zeroing what the graph does not express), so the result is
 // directly comparable with the projected model.  Bindings resolve from the
@@ -141,8 +207,8 @@ bool compile_graph_to_instrument(const Graph& graph, const OscGraphMapping& mapp
 // first-class and order-significant, so there is no duplicate rule.
 bool osc_graph_validate(void* user_data, Graph& graph, EndPoint output, EndPoint input);
 
-// Canonical kind-0 record index of a projected fixed node (inputs 0..5, the
-// sum node 6, oscillator layers), or pool_no_slot when the node is not
+// Canonical kind-0 record index of a projected fixed node (input 0, sum 1,
+// oscillator layers 2+n), or pool_no_slot when the node is not
 // projected or carries no canonical index (parameters and generator
 // instances are record-keyed, never canonical).
 uint32_t osc_graph_canonical_index(const OscGraphMapping& mapping, uint32_t node_idx);
@@ -232,6 +298,13 @@ struct OscTargetView {
     float bank_scale;
     bool  logarithmic;
 };
+
+// Bank-value bounds shared by the oscillator graph editor's bounded slots and
+// the clipboard instrument codec, so the two can never disagree.
+constexpr float osc_fm_ratio_min     = 0.125f;
+constexpr float osc_fm_ratio_max     = 8.0f;
+constexpr float osc_pitch_offset_min = -12.0f;
+constexpr float osc_pitch_offset_max = 12.0f;
 
 // The shared presentation view of a modulation target; the single
 // source of truth for value bounds, unit scaling and slider curve.
@@ -403,6 +476,7 @@ bool zone_records_split_copy(Synth::InstrumentEditorBank* bank, uint32_t channel
 // Drops zone `zone`'s records and mask row and shifts later zones down by one
 // (zone_delete, and joins that remove an entry).
 void zone_records_drop_zone(Synth::InstrumentEditorBank* bank, uint32_t channel, uint32_t zone);
+void zone_records_clear_zone(Synth::InstrumentEditorBank* bank, uint32_t channel, uint32_t zone);
 // Drops ALL records and mask rows of every zone of the channel (library load,
 // channel init, channel delete).
 void channel_records_reset(Synth::InstrumentEditorBank* bank, uint32_t channel);

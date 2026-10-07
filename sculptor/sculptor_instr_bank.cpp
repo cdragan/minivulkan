@@ -3,32 +3,23 @@
 
 #include "sculptor_instr_bank.h"
 #include "sculptor_graph.h"
-#include "sculptor_instr_library.h"
-#include "sculptor_notifications.h"
 #include "sculptor_osc_graph.h"
-#include "sculptor_undo.h"
 
 #include <cmath>
 #include <stdio.h>
 #include <string.h>
 
+namespace {
+
 static_assert(sizeof(Synth::InstrumentBank) <= 450'000);
 static_assert(sizeof(Synth::BankUpdateQueue) <= 2 * sizeof(Synth::InstrumentBank) + 32);
 
-// The JSON codec's staging footprint (1 MiB text + 64 KiB tokens + 16 KiB key
-// index), reserved here for the editor state budget; the codec pins its real
-// staging to the same number with its own static_assert.
-constexpr uint32_t bank_json_staging_reservation = 1024 * 1024 + 64 * 1024 + 16 * 1024;
-constexpr uint32_t editor_undo_depth             = 10;
-// One editor-resident Graph instance (the oscillator graph): the graph is
-// rebuilt from the instrument model after undo/redo, zone change and load,
-// so no graph snapshots exist and undo memory never grows with the graph.
-static_assert(bank_json_staging_reservation + 2 * (Synth::library_max_records * sizeof(Synth::LibraryEntry)) +
-                  sizeof(Sculptor::UndoRedo) + sizeof(uint32_t) + 2 * sizeof(Synth::InstrumentBank) +
-                  sizeof(Synth::BankUpdateQueue) + (6 + editor_undo_depth) * sizeof(Synth::InstrumentEditorBank) +
-                  2 * editor_undo_depth * sizeof(uint32_t) + 64 * 1024 + // library record copy chunks
-                  Sculptor::notification_state_bytes + Sculptor::max_graph_bytes <=
-              16 * 1024 * 1024);
+} // namespace
+
+const char Synth::default_channel_names[max_channels][max_name_len] = {
+    "Channel 01", "Channel 02", "Channel 03", "Channel 04", "Channel 05", "Channel 06", "Channel 07", "Channel 08",
+    "Channel 09", "Drum Track", "Channel 11", "Channel 12", "Channel 13", "Channel 14", "Channel 15", "Channel 16",
+};
 
 // Factory default state: the first-run bank the editor builds for a fresh project.
 
@@ -88,9 +79,7 @@ void Synth::get_zone_name(const Synth::InstrumentEditorBank* editor_bank,
     snprintf(out, out_size, "Zone %u", zone_entry);
 }
 
-namespace {
-
-template <typename PoolT> bool pool_is_compact(const PoolT& pool, uint32_t capacity)
+template <typename PoolT> static bool pool_is_compact(const PoolT& pool, uint32_t capacity)
 {
     for (uint32_t i = 0; i < capacity; i++) {
         if (pool.is_occupied(i)) {
@@ -106,7 +95,7 @@ template <typename PoolT> bool pool_is_compact(const PoolT& pool, uint32_t capac
     return true;
 }
 
-bool validate_envelope(const Synth::EnvelopeDescriptor& env)
+static bool validate_envelope(const Synth::EnvelopeDescriptor& env)
 {
     if (env.num_points < 1 || env.num_points > Synth::max_envelope_points) {
         return false;
@@ -137,19 +126,19 @@ bool validate_envelope(const Synth::EnvelopeDescriptor& env)
     return true;
 }
 
-bool valid_mod_source(uint32_t source)
+static bool valid_mod_source(uint32_t source)
 {
     return source <= static_cast<uint32_t>(Synth::ModSource::pressure_combine);
 }
 
-bool valid_source_op(uint32_t op)
+static bool valid_source_op(uint32_t op)
 {
     return op <= static_cast<uint32_t>(Synth::SourceOp::multiply);
 }
 
 // Effects route only channel-wide MIDI sources; per-voice sources have no voice in an
 // effect's context (the runtime applies the same restriction at expansion).
-bool is_channel_effect_source(uint32_t source)
+static bool is_channel_effect_source(uint32_t source)
 {
     return source == static_cast<uint32_t>(Synth::ModSource::none) ||
            source == static_cast<uint32_t>(Synth::ModSource::pitch_bend) ||
@@ -159,7 +148,7 @@ bool is_channel_effect_source(uint32_t source)
 
 // One effect param's binding.  The master chain admits no MIDI-driven source at all
 // (it has no channel inputs, so MIDI modulation there would be meaningless).
-bool validate_effect_param_binding(const Synth::EffectParamBinding& binding, bool is_master, uint32_t num_lfos)
+static bool validate_effect_param_binding(const Synth::EffectParamBinding& binding, bool is_master, uint32_t num_lfos)
 {
     if (! std::isfinite(binding.base_value) || ! std::isfinite(binding.lfo_depth) ||
         ! std::isfinite(binding.lfo_rate_scale)) {
@@ -205,11 +194,11 @@ bool validate_effect_param_binding(const Synth::EffectParamBinding& binding, boo
 
 // One chain: slot types, finite params, legal bindings.  Also accumulates the whole-bank
 // totals the caller checks against the modulation-pool and effect-state budgets.
-bool validate_effect_chain(const Synth::EffectChainBinding& chain,
-                           bool                             is_master,
-                           uint32_t                         num_lfos,
-                           uint32_t*                        num_modulated,
-                           uint32_t*                        state_bytes)
+static bool validate_effect_chain(const Synth::EffectChainBinding& chain,
+                                  bool                             is_master,
+                                  uint32_t                         num_lfos,
+                                  uint32_t*                        num_modulated,
+                                  uint32_t*                        state_bytes)
 {
     if (chain.num_effects > Synth::max_chain_effects) {
         return false;
@@ -246,7 +235,7 @@ bool validate_effect_chain(const Synth::EffectChainBinding& chain,
     return true;
 }
 
-bool validate_instrument(const Synth::Instrument& instrument)
+static bool validate_instrument(const Synth::Instrument& instrument)
 {
     if (instrument.layer_count < 1 || instrument.layer_count > Synth::max_layers) {
         return false;
@@ -299,13 +288,6 @@ bool validate_instrument(const Synth::Instrument& instrument)
 
     return true;
 }
-
-} // anonymous namespace
-
-const char Synth::default_channel_names[max_channels][max_name_len] = {
-    "Channel 01", "Channel 02", "Channel 03", "Channel 04", "Channel 05", "Channel 06", "Channel 07", "Channel 08",
-    "Channel 09", "Drum Track", "Channel 11", "Channel 12", "Channel 13", "Channel 14", "Channel 15", "Channel 16",
-};
 
 void Synth::get_default_channel_name(uint32_t channel, char* out, uint32_t out_size)
 {
@@ -559,13 +541,11 @@ bool Synth::validate_instrument_bank(const Synth::InstrumentBank* bank, const bo
     return true;
 }
 
-namespace {
-
 // Compacts a pool after the caller freed the unwanted slots: fills new_ids with the new
 // 1-based id of each old 1-based id (0 = removed), and moves the parallel name array
 // (indexed by old slot, nullptr when the pool has none) into the new slot order.
 template <typename T, uint32_t capacity>
-void compact_and_remap_pool(Pool<T, capacity>* pool, char (*names)[Synth::max_name_len], uint16_t* new_ids)
+static void compact_and_remap_pool(Pool<T, capacity>* pool, char (*names)[Synth::max_name_len], uint16_t* new_ids)
 {
     uint32_t old_to_new[capacity];
     pool->defragment(old_to_new);
@@ -586,9 +566,12 @@ void compact_and_remap_pool(Pool<T, capacity>* pool, char (*names)[Synth::max_na
     }
 }
 
-} // anonymous namespace
-
 void Synth::reclaim_unused_slots(Synth::InstrumentEditorBank* editor_bank)
+{
+    reclaim_unused_slots(editor_bank, nullptr);
+}
+
+void Synth::reclaim_unused_slots(Synth::InstrumentEditorBank* editor_bank, uint16_t* old_to_new_lfo_ids)
 {
     InstrumentBank* const bank = &editor_bank->bank;
     // Instruments are rooted only by enabled channels' zone tables: a disabled channel
@@ -716,6 +699,8 @@ void Synth::reclaim_unused_slots(Synth::InstrumentEditorBank* editor_bank)
 
     uint16_t lfo_ids[max_lfos];
     compact_and_remap_pool(&bank->lfos, nullptr, lfo_ids);
+    if (old_to_new_lfo_ids)
+        memcpy(old_to_new_lfo_ids, lfo_ids, sizeof(lfo_ids));
 
     for (uint32_t i = 0; i < bank->instruments.num_allocated; i++) {
 

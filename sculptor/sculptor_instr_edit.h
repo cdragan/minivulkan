@@ -62,6 +62,8 @@ private:
     void do_zone_join_next(uint32_t channel, uint32_t note);
     void do_zone_split_new(uint32_t channel, uint32_t note);
     void do_zone_delete(uint32_t channel, uint32_t entry);
+    void do_zone_copy_instrument(uint32_t channel, uint32_t note);
+    void do_zone_paste_instrument(uint32_t channel, uint32_t note);
     void gui_osc_graph(uint32_t channel);
     void drain_osc_graph(uint32_t channel, uint32_t zone);
     void run_osc_canvas_command();

@@ -11,6 +11,8 @@
 
 namespace Synth {
 
+struct InstrumentGraphLayout;
+
 // One sparse per-zone node layout
 // record.  An entry exists only for a node that was moved/resized (bound)
 // or is detached; absence means the deterministic layout applies.
@@ -18,7 +20,7 @@ struct GraphNodeLayout {
     float   x, y, width_override, height_override;
     uint8_t channel;      // 0..15
     uint8_t zone;         // 0..15
-    uint8_t kind;         // 0 = bound node (index = canonical 0..13),
+    uint8_t kind;         // 0 = bound node (index = canonical 0..8),
                           // 1 = envelope instance, 2 = LFO instance
                           // (index = descriptor id 1..128),
                           // 3 = parameter (index = dynamic target 0..4),
@@ -170,6 +172,13 @@ bool validate_instrument_bank(const InstrumentBank* bank, bool check_lfo_waves =
 // pass, and instrument_names move with their instruments.  The bank must be valid on entry
 // (descriptor ids in bounds); the result is valid whenever the input was.
 void reclaim_unused_slots(InstrumentEditorBank* bank);
+// Overload that reports the LFO renumbering it applied. old_to_new_lfo_ids may be
+// null; when non-null it receives max_lfos entries, indexed by old zero-based LFO
+// pool slot (old one-based id - 1), holding the survivor's one-based descriptor id
+// and 0 for a freed or never-allocated slot. It is exactly the map the surviving
+// instruments and effect bindings are remapped with, so a caller can re-key what
+// the bank does not own - an effect LFO's layout record name, say.
+void reclaim_unused_slots(InstrumentEditorBank* bank, uint16_t* old_to_new_lfo_ids);
 
 // Fixed-depth SPSC bank-swap queue (producer: GUI thread, consumer: the app's audio-step hook).
 // Packets hold a complete, self-consistent bank; the consumer copies it over the runtime bank
@@ -198,6 +207,31 @@ bool push_bank_update(BankUpdateQueue* queue, const InstrumentBank& bank);
 } // namespace Synth
 
 namespace Sculptor {
+
+// One GUI-free paste transaction: installs a decoded clipboard instrument and its
+// normalized layout over one zone of `source` and writes the result to
+// `out_candidate`, which must not alias `source` (aliasing is a caller precondition
+// violation, not a supported call). `source` is only read. A destination channel
+// that is disabled is enabled privately while its zone table is validated and
+// instrument roots are counted with the reclaim rule, then the original enabled
+// flag is restored. Exactly one root reuses its own instrument slot; a shared
+// destination needs a separate free or unallocated slot obtainable BEFORE reclaim
+// (an allocated-but-unrooted slot is not free). Only the destination zone's
+// non-effect layout records and its missing-sum row are replaced; effect records,
+// other zones and every other root are preserved. Invalid source metadata, an
+// invalid destination table or an unobtainable placeholder returns false with
+// `out_candidate` untouched.
+bool replace_zone_instrument_candidate(const Synth::InstrumentEditorBank&  source,
+                                       uint32_t                            channel,
+                                       uint32_t                            zone_entry,
+                                       const Synth::Instrument&            decoded_instrument,
+                                       const Synth::EnvelopeDescriptor*    decoded_envelopes,
+                                       uint32_t                            decoded_envelope_count,
+                                       const Synth::LFODescriptor*         decoded_lfos,
+                                       uint32_t                            decoded_lfo_count,
+                                       const Synth::InstrumentGraphLayout* decoded_layout,
+                                       uint32_t                            decoded_layout_count,
+                                       Synth::InstrumentEditorBank*        out_candidate);
 
 // Editor graph metadata: record accounting and validation shared by the JSON
 // codec and the editor's candidate commit.  Defined in sculptor_instr_bank.cpp

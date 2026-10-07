@@ -1,0 +1,392 @@
+{
+	"$schema": "http://json-schema.org/draft-07/schema#",
+	"$id": "synth-instrument-v1",
+	"title": "Synth instrument document",
+	"description": "One instrument for the sculptor synth, written for humans and LLMs. Units are musical: times in seconds, LFO rates in Hz, pitches in semitones, amounts 0..1. Paste into a zone with the zone right-click menu's 'Paste from Clipboard'. Copy an existing zone with 'Copy to Clipboard' to see a real document. A document is rejected whole (nothing changes) when a field is unknown or out of range, or when a required field is missing. Omitted optional fields have working defaults; nested objects must provide their own required fields. The bank's channel and master effect chains and free-standing parameters are outside this format on purpose: a document covers the instrument only.",
+	"type": "object",
+	"properties": {
+		"format": {
+			"const": "synth-instrument-v1",
+			"description": "Required document type and version identifier. The v1 decoder refuses any other value."
+		},
+		"note_skew_semitones": {
+			"type": "number",
+			"minimum": 0,
+			"maximum": 1,
+			"default": 0,
+			"description": "Random pitch skew drawn once per note."
+		},
+		"layer_skew_semitones": {
+			"type": "number",
+			"minimum": 0,
+			"maximum": 1,
+			"default": 0,
+			"description": "Random pitch skew drawn per oscillator layer."
+		},
+		"graph_layout": {
+			"type": "array",
+			"maxItems": 114,
+			"uniqueItems": true,
+			"description": "Optional portable positions and sizes of nodes derived from this instrument; no effects, names, wiring or missing-sum state. Canonical 0 is input, 1 is sum, 2+n is oscillator layer n, which must exist. Generator locators use layer and fixed numeric ModTarget; descriptor aliases resolve after the whole document parses and may have only one saved record. Parameter ordinals are zero-based extant derived target groups, not descriptor IDs. Unresolved or duplicate resolved nodes are refused. All numbers must be finite; sizes are nonnegative. Newly encoded documents always include this array.",
+			"items": {
+				"oneOf": [
+					{
+						"type": "object",
+						"properties": {
+							"kind": {
+								"type": "integer",
+								"const": 0
+							},
+							"x": {
+								"type": "number"
+							},
+							"y": {
+								"type": "number"
+							},
+							"width": {
+								"type": "number",
+								"minimum": 0
+							},
+							"height": {
+								"type": "number",
+								"minimum": 0
+							},
+							"canonical_index": {
+								"type": "integer",
+								"minimum": 0,
+								"maximum": 8
+							}
+						},
+						"required": [
+							"kind",
+							"x",
+							"y",
+							"width",
+							"height",
+							"canonical_index"
+						],
+						"additionalProperties": false
+					},
+					{
+						"type": "object",
+						"properties": {
+							"kind": {
+								"type": "integer",
+								"const": 1
+							},
+							"x": {
+								"type": "number"
+							},
+							"y": {
+								"type": "number"
+							},
+							"width": {
+								"type": "number",
+								"minimum": 0
+							},
+							"height": {
+								"type": "number",
+								"minimum": 0
+							},
+							"layer": {
+								"type": "integer",
+								"minimum": 0,
+								"maximum": 6
+							},
+							"target": {
+								"type": "integer",
+								"enum": [
+									0,
+									1,
+									2,
+									7,
+									8
+								]
+							}
+						},
+						"required": [
+							"kind",
+							"x",
+							"y",
+							"width",
+							"height",
+							"layer",
+							"target"
+						],
+						"additionalProperties": false
+					},
+					{
+						"type": "object",
+						"properties": {
+							"kind": {
+								"type": "integer",
+								"const": 2
+							},
+							"x": {
+								"type": "number"
+							},
+							"y": {
+								"type": "number"
+							},
+							"width": {
+								"type": "number",
+								"minimum": 0
+							},
+							"height": {
+								"type": "number",
+								"minimum": 0
+							},
+							"layer": {
+								"type": "integer",
+								"minimum": 0,
+								"maximum": 6
+							},
+							"target": {
+								"type": "integer",
+								"enum": [
+									0,
+									1,
+									2,
+									7,
+									8
+								]
+							},
+							"depth_source": {
+								"type": "integer",
+								"minimum": 0,
+								"maximum": 6
+							},
+							"rate_source": {
+								"type": "integer",
+								"minimum": 0,
+								"maximum": 6
+							}
+						},
+						"required": [
+							"kind",
+							"x",
+							"y",
+							"width",
+							"height",
+							"layer",
+							"target",
+							"depth_source",
+							"rate_source"
+						],
+						"additionalProperties": false
+					},
+					{
+						"type": "object",
+						"properties": {
+							"kind": {
+								"type": "integer",
+								"const": 3
+							},
+							"x": {
+								"type": "number"
+							},
+							"y": {
+								"type": "number"
+							},
+							"width": {
+								"type": "number",
+								"minimum": 0
+							},
+							"height": {
+								"type": "number",
+								"minimum": 0
+							},
+							"target": {
+								"type": "integer",
+								"enum": [
+									0,
+									1,
+									2,
+									7,
+									8
+								]
+							},
+							"parameter_ordinal": {
+								"type": "integer",
+								"minimum": 0,
+								"maximum": 6
+							}
+						},
+						"required": [
+							"kind",
+							"x",
+							"y",
+							"width",
+							"height",
+							"target",
+							"parameter_ordinal"
+						],
+						"additionalProperties": false
+					}
+				]
+			}
+		},
+		"layers": {
+			"type": "array",
+			"minItems": 1,
+			"maxItems": 7,
+			"description": "Oscillator layers mixed together in one instrument voice. The editor supports up to 7; each Add Oscillator action adds one layer.",
+			"items": { "$ref": "#/definitions/layer" }
+		}
+	},
+	"required": ["format", "layers"],
+	"additionalProperties": false,
+	"definitions": {
+		"wave": {
+			"type": "string",
+			"enum": ["none", "sine", "sawtooth", "pulse", "noise"],
+			"description": "Waveform names. A sawtooth at duty 0.5 is a triangle; a pulse at duty 0.5 is a square; set the target block 'duty_a' or 'duty_b' to place the duty."
+		},
+		"mod_target": {
+			"type": "string",
+			"enum": ["volume", "pitch", "panning", "duty_a", "duty_b", "osc_mix", "fm_index", "lowpass_cutoff", "highpass_cutoff"],
+			"description": "Modulated quantities. Units: volume, panning (0.5 = center), duty_a/duty_b, osc_mix and fm_index (1.0 = full depth) are 0..1; pitch is -24..24 semitones; the cutoffs are 20..20000 Hz, with 0 meaning the filter is bypassed. Only 'volume' defaults to 1.0 and 'panning' to 0.5; every other base defaults to 0."
+		},
+		"mod_source": {
+			"type": "string",
+			"enum": ["none", "pitch_bend", "mod_wheel", "channel_pressure", "velocity", "aftertouch", "pressure_combine"],
+			"description": "MIDI modulation sources. velocity is per-note; aftertouch is polyphonic; pressure_combine is the max of per-note aftertouch and channel pressure."
+		},
+		"source_op": {
+			"type": "string",
+			"enum": ["add", "multiply"],
+			"description": "How a value combines onto its target: added or multiplied."
+		},
+		"layer": {
+			"type": "object",
+			"description": "One oscillator. The shared routing (base, sources) may be set by the first layer that supplies base or sources for a target (a layer with only generators does not claim it); every layer has its own envelope and LFO generators.",
+			"properties": {
+				"wave_a": { "$ref": "#/definitions/wave", "description": "Required. The primary oscillator; for fm the carrier, for sync the master." },
+				"wave_b": { "$ref": "#/definitions/wave", "description": "The second oscillator; for fm the modulator, for sync the slave. Default: none." },
+				"mode": {
+					"type": "string",
+					"enum": ["blend", "fm", "sync"],
+					"default": "blend",
+					"description": "blend mixes both waves by osc_mix; fm frequency-modulates wave_a with wave_b; sync hard-syncs wave_b to wave_a."
+				},
+				"mod_ratio": {
+					"type": "number",
+					"default": 1,
+					"description": "The FM ratio (fm) or hard-sync cycle ratio (sync); 0 is a legal bank value, any nonzero value is 0.125..8; ignored by blend."
+				},
+				"pitch_offset_semitones": {
+					"type": "number",
+					"minimum": -12,
+					"maximum": 12,
+					"default": 0,
+					"description": "This oscillator's pitch offset in semitones."
+				},
+				"volume": { "$ref": "#/definitions/target_block" },
+				"pitch": { "$ref": "#/definitions/target_block" },
+				"panning": { "$ref": "#/definitions/target_block" },
+				"duty_a": { "$ref": "#/definitions/target_block" },
+				"duty_b": { "$ref": "#/definitions/target_block" },
+				"osc_mix": { "$ref": "#/definitions/target_block" },
+				"fm_index": { "$ref": "#/definitions/target_block" },
+				"lowpass_cutoff": { "$ref": "#/definitions/target_block" },
+				"highpass_cutoff": { "$ref": "#/definitions/target_block" }
+			},
+			"required": ["wave_a"],
+			"additionalProperties": false
+		},
+		"target_block": {
+			"type": "object",
+			"description": "One modulated quantity: a shared base value plus MIDI sources, with this layer's envelope and LFO generators on top.",
+			"properties": {
+				"base": {
+					"type": "number",
+					"description": "The value in the target's units (see mod_target). Defaults: volume 1.0, panning 0.5, everything else 0."
+				},
+				"envelope": { "$ref": "#/definitions/envelope" },
+				"lfo": { "$ref": "#/definitions/lfo" },
+				"sources": {
+					"type": "array",
+					"maxItems": 2,
+					"description": "MIDI inputs combined onto the base value.",
+					"items": {
+						"type": "object",
+						"properties": {
+							"source": { "$ref": "#/definitions/mod_source" },
+							"op": { "$ref": "#/definitions/source_op", "default": "add" },
+							"scale": { "type": "number", "description": "How much of the source applies; negative inverts." }
+						},
+						"required": ["source"],
+						"additionalProperties": false
+					}
+				}
+			},
+			"additionalProperties": false
+		},
+		"envelope": {
+			"type": "object",
+			"description": "The envelope this layer plays into the target. Point levels are the envelope's output values in the target's units, so a volume envelope sweeps 0..1 and a pitch envelope sweeps semitones.",
+			"properties": {
+				"points": {
+					"type": "array",
+					"minItems": 1,
+					"maxItems": 8,
+					"items": {
+						"type": "object",
+						"properties": {
+							"time_seconds": {
+								"type": "number",
+								"minimum": 0,
+								"description": "When the point is reached. Points quantize to ~5.8 ms ticks; a leading run of time 0 is allowed (the unplaced-point layout) and every later point must land on a later tick. The maximum is ~380 s."
+							},
+							"level": {
+								"type": "number",
+								"description": "The value reached, in the target's units. Generator levels are free finite values - the editor's envelope min/max slots are unbounded - so unlike the base they are not restricted to the slider range. Levels quantize to 16-bit steps; a cutoff level 0 keeps the filter bypassed at that point."
+							}
+						},
+						"required": ["time_seconds", "level"],
+						"additionalProperties": false
+					}
+				},
+				"sustain_start": {
+					"type": "integer",
+					"minimum": 0,
+					"maximum": 7,
+					"description": "First point of the sustain loop; defaults to the last point (hold the end value until release)."
+				},
+				"sustain_end": {
+					"type": "integer",
+					"minimum": 0,
+					"maximum": 7,
+					"description": "Last point of the sustain loop; must not precede sustain_start; defaults to the last point."
+				}
+			},
+			"required": ["points"],
+			"additionalProperties": false
+		},
+		"lfo": {
+			"type": "object",
+			"properties": {
+				"wave": {
+					"type": "string",
+					"enum": ["sine", "sawtooth"],
+					"description": "Required. The pool only holds sine and sawtooth LFOs; place the duty with this LFO's own 'duty' field."
+				},
+				"frequency_hz": {
+					"type": "number",
+					"exclusiveMinimum": 0,
+					"description": "Required. Cycles per second; the period must land between 1 ms and 65.535 s."
+				},
+				"duty": { "type": "number", "minimum": 0, "maximum": 1, "default": 0, "description": "Sawtooth slope (0.5 = triangle)." },
+				"min_level": { "type": "number", "description": "The LFO's low output, in the target's units; free finite values, not restricted to the base's slider range. Defaults to the target's minimum." },
+				"max_level": { "type": "number", "description": "The LFO's high output, in the target's units; free finite values, not restricted to the base's slider range. Defaults to the target's maximum." },
+				"op": { "$ref": "#/definitions/source_op", "default": "add", "description": "How the LFO combines onto the target." },
+				"depth": { "type": "number", "default": 0, "description": "How much of the LFO applies; negative inverts." },
+				"depth_source": { "$ref": "#/definitions/mod_source", "default": "none", "description": "A MIDI source scaling the depth." },
+				"rate_source": { "$ref": "#/definitions/mod_source", "default": "none", "description": "A MIDI source scaling the rate." },
+				"rate_scale_ms": { "type": "number", "default": 0, "description": "Milliseconds of period the rate source adds per unit." }
+			},
+			"required": ["wave", "frequency_hz"],
+			"additionalProperties": false
+		}
+	}
+}
