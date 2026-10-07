@@ -175,9 +175,9 @@ void reclaim_unused_slots(InstrumentEditorBank* bank);
 // Overload that reports the LFO renumbering it applied. old_to_new_lfo_ids may be
 // null; when non-null it receives max_lfos entries, indexed by old zero-based LFO
 // pool slot (old one-based id - 1), holding the survivor's one-based descriptor id
-// and 0 for a freed or never-allocated slot. It is exactly the map the surviving
-// instruments and effect bindings are remapped with, so a caller can re-key what
-// the bank does not own - an effect LFO's layout record name, say.
+// and 0 for a freed or never-allocated slot.  It is exactly the map the surviving
+// instruments and effect bindings are remapped with, so a caller can re-key
+// external caches.  Effect LFO layout names are remapped by reclaim itself.
 void reclaim_unused_slots(InstrumentEditorBank* bank, uint16_t* old_to_new_lfo_ids);
 
 // Fixed-depth SPSC bank-swap queue (producer: GUI thread, consumer: the app's audio-step hook).
@@ -232,6 +232,9 @@ bool replace_zone_instrument_candidate(const Synth::InstrumentEditorBank&  sourc
                                        const Synth::InstrumentGraphLayout* decoded_layout,
                                        uint32_t                            decoded_layout_count,
                                        Synth::InstrumentEditorBank*        out_candidate);
+
+// Record names must be terminated.  Only kind-4 names participate in identity.
+bool graph_layout_record_identity_equal(const Synth::GraphNodeLayout& a, const Synth::GraphNodeLayout& b);
 
 // Editor graph metadata: record accounting and validation shared by the JSON
 // codec and the editor's candidate commit.  Defined in sculptor_instr_bank.cpp

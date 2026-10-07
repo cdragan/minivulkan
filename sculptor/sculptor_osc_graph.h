@@ -23,6 +23,9 @@
 
 namespace Sculptor {
 
+// Only waveform/mode availability; connections, edit locks and ghosts are caller-owned.
+bool oscillator_slot_waveform_mode_disabled(const Node& node, uint32_t slot_index);
+
 // Six MIDI source roles (every ModSource except none) share one input node.
 constexpr uint32_t num_osc_graph_inputs = static_cast<uint32_t>(Synth::ModSource::pressure_combine);
 // The registry/record source bounds and the canonical node numbering pin the
@@ -129,7 +132,8 @@ bool project_instrument_to_graph(const Synth::Instrument&     instrument,
 // Exports one zone's saved editor positions as portable records relative to the
 // zone's own instrument: every kind-0..3 record of (channel,zone) that resolves
 // to a projected node of `instr` is converted, effect (kind 4) records are never
-// clipboard data. Records are all-or-nothing and *out_count is the actual count
+// clipboard data.  Unrepresented selected records and missing-sum state are refused.
+// Records are all-or-nothing and *out_count is the actual count
 // only on success; capacity must hold every record or the call fails.
 bool encode_instrument_graph_layout(const Synth::Instrument&           instr,
                                     const Synth::InstrumentBank&       bank,
@@ -155,26 +159,37 @@ bool map_instrument_graph_layout(const Synth::Instrument&            decoded_ins
                                  uint32_t                            capacity,
                                  uint32_t*                           out_count);
 
-// Copy-time normalization seam: re-anchors portable layout records exported from
-// the source zone onto the identities of the decoded document the clipboard
-// carries. Node identity follows the unchanged (layer,target) serving cells
+bool append_instrument_graph_layout(const Synth::Instrument&            instrument,
+                                    const Synth::EnvelopeDescriptor*    envelopes,
+                                    uint32_t                            envelope_count,
+                                    const Synth::LFODescriptor*         lfos,
+                                    uint32_t                            lfo_count,
+                                    const Synth::InstrumentGraphLayout* layout,
+                                    uint32_t                            layout_count,
+                                    const uint16_t*                     envelope_ids,
+                                    const uint16_t*                     lfo_ids,
+                                    uint32_t                            channel,
+                                    uint32_t                            zone,
+                                    Synth::InstrumentEditorBank*        candidate);
+
+// Source-to-decoded normalization: re-anchors portable layout records exported
+// from the source zone onto the identities of the transport-decoded document.
+// Node identity follows the unchanged (layer,target) serving cells
 // through decoder quantization and descriptor interning; raw descriptor bytes and
 // numeric pool ids are never matched across the encode/decode boundary.
 //
 // Source locators resolve only against source_instr/source_envs/source_lfos, and
-// emitted locators only against the decoded model. Input pointers may be null
-// only when their paired count is zero. A source node whose cells land on
-// several decoded nodes is copied onto each; where several source nodes collapse
-// onto one decoded node, the earliest source projected node carrying a saved
-// layout wins, in fixed projection order (canonical, parameter, generator),
-// independent of input record order. Unresolved source locators are refused.
+// emitted locators only against the decoded model.  Input pointers may be null
+// only when their paired count is zero.  Every saved source node must correspond
+// to exactly one decoded node; ambiguous collapse or split is refused instead
+// of discarding metadata.  Unresolved source locators are refused.
 // Duplicate decoded-node records from external JSON are refused by the mapper
-// and decoder, not by this source-to-decoded collapse selection.
+// and decoder, not by this source-to-decoded normalization.
 //
-// All-or-nothing: *out_count is the actual count only on success. Output records
+// All-or-nothing: *out_count is the actual count only on success.  Output records
 // are decoded-relative and ready for the layout-aware encoder overload and for
-// map_instrument_graph_layout. Editor-internal: the copy path and unit tests call
-// it, the synth player runtime never does.
+// map_instrument_graph_layout.  Editor-internal: clipboard and library transport
+// paths and unit tests call it; the synth player runtime never does.
 bool normalize_instrument_graph_layout(const Synth::Instrument&            source_instr,
                                        const Synth::EnvelopeDescriptor*    source_envs,
                                        uint32_t                            source_env_count,
@@ -281,6 +296,9 @@ bool sync_osc_graph_shared_slot(Graph*                 graph,
 // immediate rename feedback and the projection's derived titles.
 extern const char* const param_target_names[5];
 
+// Formats a projected target's derived title; target < 5 and ordinal > 0.
+void format_parameter_title(char (&name)[32], uint8_t target, uint32_t ordinal);
+
 // Parameter-node source-row input slots (rows 7..9 and 10..12; see the
 // slot layout table in sculptor_osc_graph.cpp).
 constexpr uint32_t param_src_input(uint32_t i)
@@ -374,6 +392,18 @@ bool retarget_param(Synth::InstrumentEditorBank* bank,
                     uint32_t                     zone,
                     uint32_t                     param_idx,
                     uint32_t                     new_target);
+// Creates one kind-3 record from the parameter's live wiring and layout, and
+// writes its fresh UID only into the supplied mapping.  Rename, layout sync
+// and binding reconciliation share this creation policy.  The caller owns
+// gesture eligibility, predecessor refusal and subsequent reconciliation;
+// false leaves the record list and mapping unchanged.
+bool detach_osc_graph_parameter(Synth::InstrumentEditorBank* bank,
+                                const Graph&                 graph,
+                                OscGraphMapping*             mapping,
+                                uint32_t                     channel,
+                                uint32_t                     zone,
+                                uint32_t                     param_idx);
+
 // Recomputes the binding reconciliation and the compiled instrument after
 // an eventless graph rewrite (see retarget_param); the drain does this
 // implicitly at the end of every applied batch.
@@ -467,9 +497,8 @@ void compute_publish_channel_enabled(const Synth::InstrumentEditorBank& bank, ui
 
 // Zone-table metadata mutation rules.  Records and mask rows move together.
 // zone_split_new non-first-note case: shifts zones > `zone` by +1, then copies
-// zone `zone`'s kind-0 records and mask row into zone `zone` + 1. Kind-1/2/3
-// records are NOT copied (generators and parameters are zone-local UI state;
-// the split zone's wiring re-derives deterministically).  Returns false
+// zone `zone`'s instrument records and mask row into zone `zone` + 1.
+// Channel-wide effect records are neither copied nor shifted.  Returns false
 // without mutating anything when the copied records would overflow the
 // global record list.
 bool zone_records_split_copy(Synth::InstrumentEditorBank* bank, uint32_t channel, uint32_t zone);

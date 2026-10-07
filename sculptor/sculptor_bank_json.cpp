@@ -39,12 +39,14 @@
 // Writer (compact JSON)
 // ---------------------------------------------------------------------------
 
+static bool string_content_ok(const char* s, uint32_t len);
+
 struct Out {
     char*    buf;
     uint32_t size;
     uint32_t pos;
     bool     overflow;
-    bool     invalid; // input carried a string without its terminator inside the fixed array bound
+    bool     invalid; // input string lacks a bounded terminator or well-formed UTF-8
 
     void raw(const char* s, uint32_t len)
     {
@@ -119,6 +121,7 @@ struct Out {
             return;
         }
         ch('"');
+        const uint32_t start = pos;
         for (const char* p = s; *p; ++p) {
             const char c = *p;
             switch (c) {
@@ -148,6 +151,9 @@ struct Out {
                     break;
             }
         }
+        // Escaped contents use the decoder's string grammar, including literal UTF-8.
+        if (! overflow && ! string_content_ok(buf + start, pos - start))
+            invalid = true;
         ch('"');
     }
 };
@@ -158,6 +164,7 @@ struct Walker {
     const jsmntok_t* toks;
     uint32_t         num_toks;
     bool             failed;
+    bool             strict_editor_metadata;
 };
 
 // A key's decoded stream: every literal byte sequence and every \u escape
@@ -356,6 +363,13 @@ constexpr const char instrument_format_tag[] = "synth-instrument-v1";
 InstrumentDocState           instrument_doc;
 Synth::InstrumentGraphLayout instrument_layout_staging[Synth::instrument_graph_layout_capacity];
 Synth::GraphNodeLayout       instrument_mapped_staging[Synth::instrument_graph_layout_capacity];
+
+char                         editor_export_text[64 * 1024];
+Synth::Instrument            editor_export_decoded;
+Synth::EnvelopeDescriptor    editor_export_envelopes[Synth::instrument_max_envelopes];
+Synth::LFODescriptor         editor_export_lfos[Synth::instrument_max_lfos];
+Synth::InstrumentGraphLayout editor_export_source_layout[Synth::instrument_graph_layout_capacity];
+Synth::InstrumentGraphLayout editor_export_normalized[Synth::instrument_graph_layout_capacity];
 } // namespace
 
 static void key_uint(Out& o, const char* name, uint32_t v)
@@ -2268,6 +2282,8 @@ static void decode_editor_record(Walker& w, uint32_t obj, Synth::GraphNodeLayout
         }
         else if (key_eq(w, key_idx, "name"))
             want_text(w, val_idx, record->name, sizeof(record->name));
+        else if (w.strict_editor_metadata)
+            w.failed = true;
         else
             unknown_field(w, key_idx);
     });
@@ -2312,12 +2328,13 @@ static void decode_editor_state(Walker& w, uint32_t val_idx, Synth::InstrumentEd
                         return;
                     }
                 }
-                // Duplicate keys drop the later record: one key addresses one node.
+                // One key addresses one node: compatibility decoding drops later records;
+                // strict metadata decoding refuses duplicates before any deduplication.
                 for (uint32_t i = 0; i < out->graph_layout_count; ++i) {
                     const Synth::GraphNodeLayout& other = out->graph_layout[i];
-                    if (other.channel == record.channel && other.zone == record.zone && other.kind == record.kind &&
-                        other.index == record.index && other.uid == record.uid &&
-                        (record.kind != 4 || strcmp(other.name, record.name) == 0)) {
+                    if (Sculptor::graph_layout_record_identity_equal(other, record)) {
+                        if (w.strict_editor_metadata)
+                            w.failed = true;
                         return;
                     }
                 }
@@ -2339,6 +2356,8 @@ static void decode_editor_state(Walker& w, uint32_t val_idx, Synth::InstrumentEd
                 });
             });
         }
+        else if (w.strict_editor_metadata)
+            w.failed = true;
         else
             unknown_field(w, key_idx);
     });
@@ -2939,8 +2958,12 @@ static void decode_target_doc(Walker&             w,
     }
 }
 
-// One oscillator layer. wave_a is the one required field.
-static void decode_layer_doc(Walker& w, uint32_t obj, Synth::Oscillator& osc, InstrumentDocState& doc)
+// One oscillator layer.  wave_a is the one required field.
+static void decode_layer_doc(Walker&                     w,
+                             uint32_t                    obj,
+                             Synth::Oscillator&          osc,
+                             InstrumentDocState&         doc,
+                             Synth::InstrumentJsonDomain domain)
 {
     uint32_t wave_a       = 0;
     bool     wave_a_set   = false;
@@ -2979,9 +3002,10 @@ static void decode_layer_doc(Walker& w, uint32_t obj, Synth::Oscillator& osc, In
         return;
 
     // An explicitly written zero ratio is bank-legal (blend ignores the ratio
-    // and FM/sync banks can hold one); only nonzero values are slider-bounded.
-    if ((mod_ratio != 0.0f && (mod_ratio < Sculptor::osc_fm_ratio_min || mod_ratio > Sculptor::osc_fm_ratio_max)) ||
-        pitch_offset < Sculptor::osc_pitch_offset_min || pitch_offset > Sculptor::osc_pitch_offset_max) {
+    // and FM/sync banks can hold one); clipboard nonzero ratios are slider-bounded.
+    if (domain == Synth::InstrumentJsonDomain::clipboard &&
+        ((mod_ratio != 0.0f && (mod_ratio < Sculptor::osc_fm_ratio_min || mod_ratio > Sculptor::osc_fm_ratio_max)) ||
+         pitch_offset < Sculptor::osc_pitch_offset_min || pitch_offset > Sculptor::osc_pitch_offset_max)) {
         w.failed = true;
         return;
     }
@@ -3038,12 +3062,13 @@ static bool parse_document(const char* text, uint32_t len, Walker& w)
 // Decode pipeline into decode_scratch: grammar pass, schema overlay
 // onto the defaults, then descriptor validation.
 
-static bool decode_document_into_scratch(const char* text, uint32_t len)
+static bool decode_document_into_scratch(const char* text, uint32_t len, bool strict_editor_metadata = false)
 {
     Walker w = {};
     if (! parse_document(text, len, w))
         return false;
 
+    w.strict_editor_metadata = strict_editor_metadata;
     fill_default_editor_bank(&decode_scratch);
 
     uint32_t  idx   = 1;
@@ -3105,7 +3130,7 @@ int Synth::write_editor_bank_json(FILE* file, const InstrumentEditorBank* bank, 
     return 0;
 }
 
-bool Synth::read_editor_bank_json(FILE* file, uint32_t len, InstrumentEditorBank* out)
+bool Synth::read_editor_bank_json(FILE* file, uint32_t len, InstrumentEditorBank* out, bool strict_editor_metadata)
 {
     if (len > sizeof(json_text))
         return false;
@@ -3113,7 +3138,10 @@ bool Synth::read_editor_bank_json(FILE* file, uint32_t len, InstrumentEditorBank
     if (fread(json_text, 1, len, file) != len)
         return false;
 
-    return decode_editor_bank_json(json_text, len, out);
+    if (! decode_document_into_scratch(json_text, len, strict_editor_metadata))
+        return false;
+    *out = decode_scratch;
+    return true;
 }
 
 bool Synth::decode_editor_bank_json(const char* text, uint32_t len, InstrumentEditorBank* out)
@@ -3158,6 +3186,31 @@ bool Synth::decode_instrument_json(const char*            text,
                                    uint32_t               layout_capacity,
                                    uint32_t*              out_layout_count)
 {
+    return decode_instrument_json_for_domain(text,
+                                             len,
+                                             out_instr,
+                                             out_envelopes,
+                                             out_envelope_count,
+                                             out_lfos,
+                                             out_lfo_count,
+                                             out_layout,
+                                             layout_capacity,
+                                             out_layout_count,
+                                             InstrumentJsonDomain::clipboard);
+}
+
+bool Synth::decode_instrument_json_for_domain(const char*            text,
+                                              uint32_t               len,
+                                              Instrument*            out_instr,
+                                              EnvelopeDescriptor*    out_envelopes,
+                                              uint32_t*              out_envelope_count,
+                                              LFODescriptor*         out_lfos,
+                                              uint32_t*              out_lfo_count,
+                                              InstrumentGraphLayout* out_layout,
+                                              uint32_t               layout_capacity,
+                                              uint32_t*              out_layout_count,
+                                              InstrumentJsonDomain   domain)
+{
     if (! text || ! out_instr || ! out_envelopes || ! out_envelope_count || ! out_lfos || ! out_lfo_count ||
         ! out_layout_count)
         return false;
@@ -3200,7 +3253,7 @@ bool Synth::decode_instrument_json(const char*            text,
             layers_seen = true;
             layer_count = static_cast<uint32_t>(w.toks[val_idx].size);
             walk_array(w, val_idx, Synth::max_layers, [&](uint32_t elem, uint32_t pos) {
-                decode_layer_doc(w, elem, doc.instr.layers[pos], doc);
+                decode_layer_doc(w, elem, doc.instr.layers[pos], doc, domain);
             });
         }
         else if (key_eq(w, key_idx, "graph_layout")) {
@@ -3219,16 +3272,20 @@ bool Synth::decode_instrument_json(const char*            text,
                                                  "target",
                                                  "depth_source",
                                                  "rate_source",
-                                                 "parameter_ordinal" };
+                                                 "parameter_ordinal",
+                                                 "name" };
                     uint32_t          key    = 0;
-                    while (key < 11 && ! key_eq(w, field, keys[key]))
+                    while (key < 12 && ! key_eq(w, field, keys[key]))
                         ++key;
-                    if (key == 11) {
+                    if (key == 12) {
                         w.failed = true;
                         return;
                     }
                     present |= 1u << key;
-                    if (key >= 1 && key <= 4) {
+                    if (key == 11) {
+                        want_text(w, value, record.name, sizeof(record.name));
+                    }
+                    else if (key >= 1 && key <= 4) {
                         float number = 0;
                         want_float(w, value, &number);
                         if (key == 1)
@@ -3263,7 +3320,8 @@ bool Synth::decode_instrument_json(const char*            text,
                                                   (1u << 6) | (1u << 7),
                                                   (1u << 6) | (1u << 7) | (1u << 8) | (1u << 9),
                                                   (1u << 7) | (1u << 10) };
-                if (record.kind > 3 || present != (31u | locator_keys[record.kind]))
+                if (record.kind > 3 ||
+                    (present & ~(record.kind == 3 ? 1u << 11 : 0u)) != (31u | locator_keys[record.kind]))
                     w.failed = true;
                 ++layout_count;
             });
@@ -3303,6 +3361,14 @@ bool Synth::decode_instrument_json(const char*            text,
     return true;
 }
 
+static uint32_t encode_instrument_json_for_domain(char*                               dest,
+                                                  uint32_t                            dest_size,
+                                                  const Synth::Instrument*            instr,
+                                                  const Synth::InstrumentBank*        desc_bank,
+                                                  const Synth::InstrumentGraphLayout* layout,
+                                                  uint32_t                            layout_count,
+                                                  Synth::InstrumentJsonDomain         domain);
+
 uint32_t Synth::encode_instrument_json(char*                 dest,
                                        uint32_t              dest_size,
                                        const Instrument*     instr,
@@ -3318,22 +3384,44 @@ uint32_t Synth::encode_instrument_json(char*                        dest,
                                        const InstrumentGraphLayout* layout,
                                        uint32_t                     layout_count)
 {
+    return encode_instrument_json_for_domain(dest,
+                                             dest_size,
+                                             instr,
+                                             desc_bank,
+                                             layout,
+                                             layout_count,
+                                             InstrumentJsonDomain::clipboard);
+}
+
+static uint32_t encode_instrument_json_for_domain(char*                               dest,
+                                                  uint32_t                            dest_size,
+                                                  const Synth::Instrument*            instr,
+                                                  const Synth::InstrumentBank*        desc_bank,
+                                                  const Synth::InstrumentGraphLayout* layout,
+                                                  uint32_t                            layout_count,
+                                                  Synth::InstrumentJsonDomain         domain)
+{
     if (! dest || ! instr || ! desc_bank || (! layout && layout_count) ||
         layout_count > Synth::instrument_graph_layout_capacity || dest_size == 0)
         return 0;
     if (layout_count) {
-        const uint32_t content_length = encode_instrument_json(dest, dest_size, instr, desc_bank);
-        uint32_t       envelope_count = 0;
-        uint32_t       lfo_count      = 0;
-        uint32_t       mapped_count   = 0;
+        const uint32_t content_length =
+            encode_instrument_json_for_domain(dest, dest_size, instr, desc_bank, nullptr, 0, domain);
+        uint32_t envelope_count = 0;
+        uint32_t lfo_count      = 0;
+        uint32_t mapped_count   = 0;
         if (! content_length ||
-            ! decode_instrument_json(dest,
-                                     content_length,
-                                     &decode_scratch.bank.instruments.entries[0],
-                                     decode_scratch.bank.envelopes.entries,
-                                     &envelope_count,
-                                     decode_scratch.bank.lfos.entries,
-                                     &lfo_count) ||
+            ! Synth::decode_instrument_json_for_domain(dest,
+                                                       content_length,
+                                                       &decode_scratch.bank.instruments.entries[0],
+                                                       decode_scratch.bank.envelopes.entries,
+                                                       &envelope_count,
+                                                       decode_scratch.bank.lfos.entries,
+                                                       &lfo_count,
+                                                       nullptr,
+                                                       0,
+                                                       &mapped_count,
+                                                       domain) ||
             ! Sculptor::map_instrument_graph_layout(decode_scratch.bank.instruments.entries[0],
                                                     decode_scratch.bank.envelopes.entries,
                                                     envelope_count,
@@ -3346,7 +3434,7 @@ uint32_t Synth::encode_instrument_json(char*                        dest,
                                                     &mapped_count))
             return 0;
     }
-    if (instr->layer_count == 0 || instr->layer_count > max_layers)
+    if (instr->layer_count == 0 || instr->layer_count > Synth::max_layers)
         return 0;
 
     Out o = { dest, dest_size - 1, 0, false, false };
@@ -3364,26 +3452,28 @@ uint32_t Synth::encode_instrument_json(char*                        dest,
     o.ch('[');
 
     for (uint32_t layer = 0; layer < instr->layer_count; layer++) {
-        const Oscillator& osc = instr->layers[layer];
+        const Synth::Oscillator& osc = instr->layers[layer];
         if (static_cast<uint32_t>(osc.osc_type[0]) >= num_waves || static_cast<uint32_t>(osc.osc_type[1]) >= num_waves)
             return 0;
-        if (osc.osc_mode > osc_mode_hard_sync)
+        if (osc.osc_mode > Synth::osc_mode_hard_sync)
             return 0;
 
         o.sep();
         o.ch('{');
-        key_enum(o, "wave_a", wave_names, num_waves, static_cast<uint32_t>(osc.osc_type[0]));
+        o.key("wave_a");
+        o.ch('"');
+        o.str(wave_names[static_cast<uint32_t>(osc.osc_type[0])]);
+        o.ch('"');
         key_enum(o, "wave_b", wave_names, num_waves, static_cast<uint32_t>(osc.osc_type[1]));
         key_enum(o, "mode", osc_mode_names, num_osc_modes, static_cast<uint32_t>(osc.osc_mode));
-        if (osc.osc_mode != Synth::osc_mode_blend || osc.mod_ratio != 0.0f) {
-            o.key("mod_ratio");
-            o.float_value(osc.mod_ratio);
-        }
+        // Omitted ratios decode as one, including dormant blend ratios.
+        o.key("mod_ratio");
+        o.float_value(osc.mod_ratio);
         o.key("pitch_offset_semitones");
         o.float_value(osc.pitch_offset);
 
-        for (uint32_t target = 0; target < num_mod_targets; target++) {
-            const ModTarget               mod_target = static_cast<ModTarget>(target);
+        for (uint32_t target = 0; target < Synth::num_mod_targets; target++) {
+            const Synth::ModTarget        mod_target = static_cast<Synth::ModTarget>(target);
             const Sculptor::OscTargetView view       = Sculptor::osc_target_view(mod_target);
 
             o.key(mod_target_names[target]);
@@ -3395,15 +3485,15 @@ uint32_t Synth::encode_instrument_json(char*                        dest,
                 o.key("base");
                 o.float_value(instr->routing[target].base_value / view.bank_scale);
 
-                const InputRouting& routing = instr->routing[target];
-                if (routing.num_inputs > max_mod_inputs)
+                const Synth::InputRouting& routing = instr->routing[target];
+                if (routing.num_inputs > Synth::max_mod_inputs)
                     return 0;
                 if (routing.num_inputs != 0) {
                     o.key("sources");
                     o.ch('[');
                     for (uint32_t input = 0; input < routing.num_inputs; input++) {
-                        const ModInput& in = routing.inputs[input];
-                        if (in.source > ModSource::pressure_combine || in.op > SourceOp::multiply)
+                        const Synth::ModInput& in = routing.inputs[input];
+                        if (in.source > Synth::ModSource::pressure_combine || in.op > Synth::SourceOp::multiply)
                             return 0;
                         o.sep();
                         enc_mod_input(o, in);
@@ -3412,14 +3502,14 @@ uint32_t Synth::encode_instrument_json(char*                        dest,
                 }
             }
 
-            const LayerGen& gen = osc.gen[target];
+            const Synth::LayerGen& gen = osc.gen[target];
 
             const uint16_t env_id = gen.envelope_desc_id;
             if (env_id != 0) {
                 if (env_id > desc_bank->envelopes.num_allocated)
                     return 0;
-                const EnvelopeDescriptor& env = desc_bank->envelopes.entries[env_id - 1];
-                if (env.num_points == 0 || env.num_points > max_envelope_points)
+                const Synth::EnvelopeDescriptor& env = desc_bank->envelopes.entries[env_id - 1];
+                if (env.num_points == 0 || env.num_points > Synth::max_envelope_points)
                     return 0;
                 o.key("envelope");
                 o.ch('{');
@@ -3447,10 +3537,11 @@ uint32_t Synth::encode_instrument_json(char*                        dest,
             if (lfo_id != 0) {
                 if (lfo_id > desc_bank->lfos.num_allocated)
                     return 0;
-                const LFODescriptor& lfo = desc_bank->lfos.entries[lfo_id - 1];
-                if (lfo.wave > WaveType::noise_wave || lfo.period_ms == 0 || gen.lfo_op > SourceOp::multiply ||
-                    gen.lfo_depth_source > ModSource::pressure_combine ||
-                    gen.lfo_rate_source > ModSource::pressure_combine)
+                const Synth::LFODescriptor& lfo = desc_bank->lfos.entries[lfo_id - 1];
+                if (lfo.wave > Synth::WaveType::noise_wave || lfo.period_ms == 0 ||
+                    gen.lfo_op > Synth::SourceOp::multiply ||
+                    gen.lfo_depth_source > Synth::ModSource::pressure_combine ||
+                    gen.lfo_rate_source > Synth::ModSource::pressure_combine)
                     return 0;
                 o.key("lfo");
                 o.ch('{');
@@ -3491,7 +3582,7 @@ uint32_t Synth::encode_instrument_json(char*                        dest,
     o.key("graph_layout");
     o.ch('[');
     for (uint32_t index = 0; index < layout_count; ++index) {
-        const InstrumentGraphLayout& record = layout[index];
+        const Synth::InstrumentGraphLayout& record = layout[index];
         o.sep();
         o.ch('{');
         o.key("kind");
@@ -3517,6 +3608,10 @@ uint32_t Synth::encode_instrument_json(char*                        dest,
         if (record.kind == 3) {
             o.key("parameter_ordinal");
             o.uint_value(record.parameter_ordinal);
+            if (record.name[0]) {
+                o.key("name");
+                o.text_value(record.name, sizeof(record.name));
+            }
         }
         o.key("x");
         o.float_value(record.x);
@@ -3580,4 +3675,75 @@ Synth::BankFileStatus Synth::load_editor_bank_file(const char* path, InstrumentE
     if (decode_editor_bank_json(json_text, len, out))
         return BankFileStatus::ok;
     return BankFileStatus::invalid;
+}
+
+uint32_t Sculptor::encode_editor_instrument_json(const Synth::InstrumentEditorBank& source,
+                                                 uint32_t                           channel,
+                                                 uint32_t                           zone,
+                                                 char*                              dest,
+                                                 uint32_t                           capacity,
+                                                 Synth::InstrumentJsonDomain        domain)
+{
+    if (channel >= Synth::max_channels || zone >= Synth::max_instr_per_channel ||
+        ! Synth::validate_instrument_bank(&source.bank) || ! Sculptor::validate_editor_metadata(source))
+        return 0;
+    const Synth::Zone& entry = source.bank.channel_zones[channel][zone];
+    if (! entry.start_note || entry.instrument >= source.bank.instruments.num_allocated)
+        return 0;
+    const Synth::Instrument& instrument = source.bank.instruments.entries[entry.instrument];
+    uint32_t                 env_count = 0, lfo_count = 0, source_count = 0, count = 0;
+    const uint32_t           length = encode_instrument_json_for_domain(editor_export_text,
+                                                                        sizeof(editor_export_text),
+                                                                        &instrument,
+                                                                        &source.bank,
+                                                                        nullptr,
+                                                                        0,
+                                                                        domain);
+    if (! length ||
+        ! Synth::decode_instrument_json_for_domain(editor_export_text,
+                                                   length,
+                                                   &editor_export_decoded,
+                                                   editor_export_envelopes,
+                                                   &env_count,
+                                                   editor_export_lfos,
+                                                   &lfo_count,
+                                                   nullptr,
+                                                   0,
+                                                   &count,
+                                                   domain) ||
+        ! Sculptor::encode_instrument_graph_layout(instrument,
+                                                   source.bank,
+                                                   source,
+                                                   channel,
+                                                   zone,
+                                                   editor_export_source_layout,
+                                                   Synth::instrument_graph_layout_capacity,
+                                                   &source_count) ||
+        ! Sculptor::normalize_instrument_graph_layout(instrument,
+                                                      source.bank.envelopes.entries,
+                                                      source.bank.envelopes.num_allocated,
+                                                      source.bank.lfos.entries,
+                                                      source.bank.lfos.num_allocated,
+                                                      editor_export_source_layout,
+                                                      source_count,
+                                                      editor_export_decoded,
+                                                      editor_export_envelopes,
+                                                      env_count,
+                                                      editor_export_lfos,
+                                                      lfo_count,
+                                                      editor_export_normalized,
+                                                      Synth::instrument_graph_layout_capacity,
+                                                      &count))
+        return 0;
+    const uint32_t named_length = encode_instrument_json_for_domain(editor_export_text,
+                                                                    sizeof(editor_export_text),
+                                                                    &instrument,
+                                                                    &source.bank,
+                                                                    editor_export_normalized,
+                                                                    count,
+                                                                    domain);
+    if (! named_length || ! dest || capacity <= named_length)
+        return 0;
+    memcpy(dest, editor_export_text, named_length);
+    return named_length;
 }

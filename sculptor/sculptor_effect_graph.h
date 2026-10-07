@@ -37,6 +37,15 @@ struct EffectTypeInfo {
 // limits: the shaders already clamp or tolerate out-of-range params.
 const EffectTypeInfo& effect_type_info(Synth::EffectType type);
 
+// Recognizes exact bounded decimal LFO titles; custom spellings return false.
+// A recognized title outside the descriptor pool returns descriptor id zero.
+bool parse_effect_lfo_title(const char (&name)[32], uint16_t* descriptor_id);
+
+// Translates canonical titles through a max_lfos-entry map; false leaves custom
+// titles and mapped_id untouched.  A missing mapping returns true with id zero
+// and leaves the title unchanged.
+bool translate_effect_lfo_title(char (&name)[32], const uint16_t* lfo_ids, uint16_t* mapped_id);
+
 // Whether a meaningful effect parameter binding references this LFO descriptor.
 bool effect_chain_uses_lfo(const Synth::EffectChainBinding& chain, uint32_t descriptor_id);
 

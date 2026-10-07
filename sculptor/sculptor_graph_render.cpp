@@ -8,6 +8,7 @@
 
 #include "../thirdparty/imgui/src/imgui_internal.h"
 #include "sculptor_graph.h"
+#include "sculptor_osc_graph.h"
 #include <stdio.h>
 
 #include <float.h>
@@ -44,29 +45,6 @@ static float slot_widget_w(const Sculptor::Slot& slot)
 }
 
 constexpr float fit_view_margin = 32.0f; // empty margin around Home fit
-
-// Oscillator-node rows whose widgets only make sense for the current
-// waveform/mode selection.  Slot indices follow the projection layout
-// contract in sculptor_osc_graph.cpp (15 slots; waveform b at 3, mix mode
-// at 5, fm depth at 7, fm ratio at 8).
-bool osc_slot_disabled(const Sculptor::Node& node, uint32_t slot_idx)
-{
-    if (node.slots.num_allocated != 15) {
-        return false;
-    }
-    const uint32_t wave_b = node.slots.entries[3].value.list_index;
-    const uint32_t mode   = node.slots.entries[5].value.list_index;
-    if (wave_b == 0 && (slot_idx == 4 || slot_idx == 5 || slot_idx == 6 || slot_idx == 7 || slot_idx == 8)) {
-        return true; // duty b, mix mode, waveform mix and both fm rows need waveform b
-    }
-    if (slot_idx == 7 && mode != 1) {
-        return true; // fm depth only drives the fm mix mode
-    }
-    if (slot_idx == 8 && mode == 0) {
-        return true; // fm ratio drives fm and hard sync, not blend
-    }
-    return false;
-}
 
 constexpr float zoom_wheel_factor  = 1.2f;              // zoom step per wheel tick
 constexpr float click_max_distance = 5.0f;              // press-release distance still a click
@@ -608,8 +586,9 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
                                                    to_imgui(colors_.shared_row_marker));
                     }
                 }
-                const bool disabled = slot.kind == SlotKind::property &&
-                                      (osc_slot_disabled(node, slot_idx) || slot_edit_disabled(node_idx, slot_idx));
+                const bool disabled =
+                    slot.kind == SlotKind::property &&
+                    (oscillator_slot_waveform_mode_disabled(node, slot_idx) || slot_edit_disabled(node_idx, slot_idx));
                 add_text_scaled(draw_list,
                                 vmath::vec2(cursor, y_center - line_h * render_scale * 0.5f),
                                 render_scale,

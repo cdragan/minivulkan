@@ -178,16 +178,16 @@ static char                         zone_clipboard_text[64 * 1024];
 static Synth::Instrument            clipboard_decoded_instrument;
 static Synth::EnvelopeDescriptor    clipboard_decoded_envelopes[Synth::instrument_max_envelopes];
 static Synth::LFODescriptor         clipboard_decoded_lfos[Synth::instrument_max_lfos];
-static Synth::InstrumentGraphLayout clipboard_source_layout[Synth::instrument_graph_layout_capacity];
+static Sculptor::OscGraphMapping    serialization_mapping;
 static Synth::InstrumentGraphLayout clipboard_decoded_layout[Synth::instrument_graph_layout_capacity];
 uint8_t                             undo_buf[(sizeof(Synth::InstrumentEditorBank) + 2 * sizeof(uint32_t)) * undo_depth];
 static_assert(sizeof(undo_buf) <= undo_depth * (sizeof(Synth::InstrumentEditorBank) + 2 * sizeof(uint32_t)));
 
-// Banks: ten undo snapshots, editable/candidate/undo scratch, library load/save,
-// JSON decode and clipboard candidate. Runtime, pending publish and clipboard
+// Banks: ten undo snapshots, editable/candidate/undo scratch, library record/candidate/save,
+// JSON decode and clipboard candidate.  Runtime, pending publish and clipboard
 // model validation each own a distinct InstrumentBank; the queue owns two more.
 constexpr size_t editor_resident_state_bytes =
-    (undo_depth + 7) * sizeof(Synth::InstrumentEditorBank) + 3 * sizeof(Synth::InstrumentBank) + sizeof(bank_queue) +
+    (undo_depth + 8) * sizeof(Synth::InstrumentEditorBank) + 3 * sizeof(Synth::InstrumentBank) + sizeof(bank_queue) +
     1212416 +                                                  // JSON text, tokens and keys
     sizeof(Sculptor::SynthEditor) +                            // includes the browser's entry/category arrays
     Synth::library_max_records * sizeof(Synth::LibraryEntry) + // library rewrite index
@@ -196,19 +196,23 @@ constexpr size_t editor_resident_state_bytes =
     sizeof(fx_mapping) + sizeof(envelope_widget_contexts) + sizeof(fx_lfo_pinned) + sizeof(projected_position) +
     sizeof(projected_width) + sizeof(projected_height) + sizeof(zone_clipboard_text) +
     sizeof(clipboard_decoded_instrument) + sizeof(clipboard_decoded_envelopes) + sizeof(clipboard_decoded_lfos) +
-    sizeof(clipboard_source_layout) + sizeof(clipboard_decoded_layout) +
+    sizeof(serialization_mapping) + sizeof(clipboard_decoded_layout) +
     sizeof(Synth::Instrument) + // codec document model
     Synth::instrument_max_envelopes * sizeof(Synth::EnvelopeDescriptor) +
     Synth::instrument_max_lfos * sizeof(Synth::LFODescriptor) + Synth::num_mod_targets * sizeof(bool) +
     2 * sizeof(uint32_t) +
     Synth::instrument_graph_layout_capacity *
         (sizeof(Synth::InstrumentGraphLayout) + 2 * sizeof(Synth::GraphNodeLayout)) +
-    (Synth::max_lfos + Synth::instrument_max_envelopes + Synth::instrument_max_lfos) * sizeof(uint16_t) +
-    Synth::max_name_len + Sculptor::notification_state_bytes +
+    (Synth::instrument_max_envelopes + Synth::instrument_max_lfos) * sizeof(uint16_t) + Synth::max_name_len +
+    Sculptor::notification_state_bytes +
     2 * Synth::instrument_graph_layout_capacity *
         (sizeof(Synth::InstrumentGraphLayout) + sizeof(uint8_t) * (1 + Synth::num_mod_targets) + 2) +
     Synth::instrument_graph_layout_capacity *
         (sizeof(Synth::InstrumentGraphLayout) + sizeof(Synth::GraphNodeLayout) + sizeof(void*)) +
+    2 * 64 * 1024 + 2 * sizeof(Synth::Instrument) +
+    2 * Synth::instrument_max_envelopes * sizeof(Synth::EnvelopeDescriptor) +
+    2 * Synth::instrument_max_lfos * sizeof(Synth::LFODescriptor) +
+    4 * Synth::instrument_graph_layout_capacity * sizeof(Synth::InstrumentGraphLayout) +
     4096; // remaining editor scalar flags, constants and alignment
 static_assert(editor_resident_state_bytes <= 16 * 1024 * 1024);
 
@@ -514,13 +518,15 @@ static void write_record_position(Synth::InstrumentEditorBank* bank, int32_t rec
 
 // Writes every mapped node's current layout into the bank's records: bound
 // nodes key kind-0 records by canonical index, detached nodes update their
-// own record in place.  A node still at its projected layout writes nothing,
-// so records stay sparse.  Returns false when a moved node would need a new
-// record but the global record list is full.
-static bool sync_osc_graph_layout(Synth::InstrumentEditorBank* bank)
+// own record in place.  Unmoved custom parameter titles also persist; derived
+// titles and unchanged positions need no new records.  Returns false on capacity,
+// identity or wiring refusal, leaving candidate changes for the caller to discard.
+static bool sync_osc_graph_layout(Synth::InstrumentEditorBank* bank,
+                                  Sculptor::OscGraphMapping*   private_mapping = nullptr)
 {
-    const uint32_t channel = osc_graph_zone_channel;
-    const uint32_t zone    = osc_graph_zone_index;
+    Sculptor::OscGraphMapping& mapping = private_mapping ? *private_mapping : osc_mapping;
+    const uint32_t             channel = osc_graph_zone_channel;
+    const uint32_t             zone    = osc_graph_zone_index;
     for (uint32_t node = 0; node < Sculptor::max_nodes; ++node) {
         if (! osc_graph.node_occupied(node)) {
             continue;
@@ -530,7 +536,7 @@ static bool sync_osc_graph_layout(Synth::InstrumentEditorBank* bank)
         if (! moved) {
             continue;
         }
-        const uint32_t canonical = Sculptor::osc_graph_canonical_index(osc_mapping, node);
+        const uint32_t canonical = Sculptor::osc_graph_canonical_index(mapping, node);
         if (canonical != Sculptor::pool_no_slot) {
             const int32_t record_idx = Sculptor::find_record(*bank, channel, zone, 0, canonical, 0);
             if (record_idx >= 0) {
@@ -556,8 +562,8 @@ static bool sync_osc_graph_layout(Synth::InstrumentEditorBank* bank)
         // node so a re-projection keeps the move.  A record-less derived
         // instance that the user moves gains its kind-1/2 record (fresh uid,
         // live source wires) so the move survives re-projection too.
-        for (uint32_t i = 0; i < osc_mapping.detached_count; ++i) {
-            const Sculptor::DetachedNode& entry = osc_mapping.detached[i];
+        for (uint32_t i = 0; i < mapping.detached_count; ++i) {
+            const Sculptor::DetachedNode& entry = mapping.detached[i];
             if (entry.node_idx != node) {
                 continue;
             }
@@ -566,7 +572,7 @@ static bool sync_osc_graph_layout(Synth::InstrumentEditorBank* bank)
                 if (entry.uid != 0) {
                     break; // record vanished under a live uid: nothing to update
                 }
-                if (! Sculptor::detach_osc_graph_instance(bank, osc_graph, &osc_mapping, channel, zone, i)) {
+                if (! Sculptor::detach_osc_graph_instance(bank, osc_graph, &mapping, channel, zone, i)) {
                     return false;
                 }
                 break;
@@ -581,49 +587,62 @@ static bool sync_osc_graph_layout(Synth::InstrumentEditorBank* bank)
         // re-projection.  Refused while an earlier-enumerated same-target
         // derived parameter is still record-less: the new record would
         // attach to that sibling positionally at re-projection and hijack
-        // its node, so the node keeps no record and the move stays
-        // session-only.
-        for (uint32_t i = 0; i < osc_mapping.param_count; ++i) {
-            const Sculptor::ParamEntry& param = osc_mapping.params[i];
+        // its node, so synchronization refuses the candidate.
+        for (uint32_t i = 0; i < mapping.param_count; ++i) {
+            const Sculptor::ParamEntry& param = mapping.params[i];
             if (param.node_idx != node) {
                 continue;
             }
             int32_t record_idx = Sculptor::find_record(*bank, channel, zone, 3, param.target, param.uid);
-            if (record_idx < 0 && ! Sculptor::param_has_recordless_predecessor(osc_mapping, i)) {
-                if (! Sculptor::graph_records_have_capacity(*bank, 1)) {
+            if (record_idx < 0 && ! Sculptor::param_has_recordless_predecessor(mapping, i)) {
+                if (! Sculptor::detach_osc_graph_parameter(bank, osc_graph, &mapping, channel, zone, i)) {
                     return false;
                 }
-                Synth::GraphNodeLayout record = {};
-                record.channel                = static_cast<uint8_t>(channel);
-                record.zone                   = static_cast<uint8_t>(zone);
-                record.kind                   = 3;
-                record.index                  = param.target;
-                record.param_slot             = Sculptor::param_group_ordinal(osc_mapping, i);
-                if (! Sculptor::store_param_wiring(osc_graph, osc_mapping, param, &record)) {
+                // The materialized ordinal can miscount dormant and merged
+                // siblings; refresh re-stamps it from the derived groups
+                // before the record is ever read back.
+                if (! Sculptor::refresh_osc_graph_compilation(bank, osc_graph, mapping, channel, zone))
                     return false;
-                }
-                record.uid = Sculptor::allocate_detached_uid(*bank, channel, zone, 3);
-                bank->graph_layout[bank->graph_layout_count++] = record;
-                // Write the fresh uid back into the mapping so a later move
-                // updates this record instead of appending duplicates.
-                osc_mapping.params[i].uid = record.uid;
-                record_idx                = static_cast<int32_t>(bank->graph_layout_count - 1);
-                // The naive ordinal above can miscount dormant and merged
-                // siblings; the re-stamp inside the refresh replaces it with
-                // the derived truth before the record is ever read back.
-                Sculptor::refresh_osc_graph_compilation(bank, osc_graph, osc_mapping, channel, zone);
                 // The re-stamp's merge reconciliation can remove records,
                 // shifting graph_layout indices; re-derive this record's
                 // slot by key instead of trusting the pre-refresh index.
-                record_idx = Sculptor::find_record(*bank, channel, zone, 3, record.index, record.uid);
+                record_idx = Sculptor::find_record(*bank, channel, zone, 3, param.target, param.uid);
             }
             else if (record_idx < 0) {
                 Sculptor::notify_error("Synth: the earlier parameter of this target must be renamed first");
+                return false;
             }
             if (record_idx >= 0) {
                 write_record_position(bank, record_idx, node_ref);
             }
         }
+    }
+    uint32_t title_ordinals[5] = {};
+    for (uint32_t index = 0; index < mapping.param_count; ++index) {
+        const Sculptor::ParamEntry& param = mapping.params[index];
+        if (param.node_idx == Sculptor::pool_no_slot || ! osc_graph.node_occupied(param.node_idx))
+            continue;
+        const uint32_t        ordinal = ++title_ordinals[param.target];
+        const Sculptor::Node& node    = osc_graph.node(param.node_idx);
+        if (! memchr(node.name, 0, sizeof(node.name)))
+            return false;
+        char derived[32];
+        Sculptor::format_parameter_title(derived, param.target, ordinal);
+        const int32_t saved = Sculptor::find_record(*bank, channel, zone, 3, param.target, param.uid);
+        if (saved >= 0) {
+            if (strcmp(derived, node.name) == 0)
+                memset(bank->graph_layout[saved].name, 0, sizeof(bank->graph_layout[saved].name));
+            else
+                memcpy(bank->graph_layout[saved].name, node.name, sizeof(bank->graph_layout[saved].name));
+            continue;
+        }
+        if (strcmp(derived, node.name) == 0)
+            continue;
+        Sculptor::GraphChange change = {};
+        change.kind                  = Sculptor::ChangeKind::name_changed;
+        change.node_idx              = param.node_idx;
+        if (! Sculptor::apply_osc_graph_change(bank, &osc_graph, &mapping, change, channel, zone))
+            return false;
     }
     return true;
 }
@@ -2466,50 +2485,21 @@ void Sculptor::SynthEditor::do_zone_copy_instrument(uint32_t channel, uint32_t n
     if (entry < 0)
         return;
 
-    const uint32_t           instrument = bank.channel_zones[channel][entry].instrument;
-    const Synth::Instrument& source     = bank.instruments.entries[instrument];
-    uint32_t len = Synth::encode_instrument_json(zone_clipboard_text, sizeof(zone_clipboard_text), &source, &bank);
-    uint32_t envelope_count = 0;
-    uint32_t lfo_count      = 0;
-    uint32_t source_count   = 0;
-    uint32_t layout_count   = 0;
-    if (! len ||
-        ! Synth::decode_instrument_json(zone_clipboard_text,
-                                        len,
-                                        &clipboard_decoded_instrument,
-                                        clipboard_decoded_envelopes,
-                                        &envelope_count,
-                                        clipboard_decoded_lfos,
-                                        &lfo_count) ||
-        ! Sculptor::encode_instrument_graph_layout(source,
-                                                   bank,
-                                                   instr_bank,
-                                                   channel,
-                                                   static_cast<uint32_t>(entry),
-                                                   clipboard_source_layout,
-                                                   Synth::instrument_graph_layout_capacity,
-                                                   &source_count) ||
-        ! Sculptor::normalize_instrument_graph_layout(source,
-                                                      bank.envelopes.entries,
-                                                      bank.envelopes.num_allocated,
-                                                      bank.lfos.entries,
-                                                      bank.lfos.num_allocated,
-                                                      clipboard_source_layout,
-                                                      source_count,
-                                                      clipboard_decoded_instrument,
-                                                      clipboard_decoded_envelopes,
-                                                      envelope_count,
-                                                      clipboard_decoded_lfos,
-                                                      lfo_count,
-                                                      clipboard_decoded_layout,
-                                                      Synth::instrument_graph_layout_capacity,
-                                                      &layout_count) ||
-        ! (len = Synth::encode_instrument_json(zone_clipboard_text,
-                                               sizeof(zone_clipboard_text),
-                                               &source,
-                                               &bank,
-                                               clipboard_decoded_layout,
-                                               layout_count))) {
+    candidate             = instr_bank;
+    serialization_mapping = osc_mapping;
+    if (osc_graph_projected && osc_graph_zone_channel == channel &&
+        osc_graph_zone_index == static_cast<uint32_t>(entry) &&
+        ! sync_osc_graph_layout(&candidate, &serialization_mapping)) {
+        Sculptor::notify_error("Synth: cannot copy zone: the graph layout is not representable");
+        return;
+    }
+    const uint32_t len = Sculptor::encode_editor_instrument_json(candidate,
+                                                                 channel,
+                                                                 static_cast<uint32_t>(entry),
+                                                                 zone_clipboard_text,
+                                                                 sizeof(zone_clipboard_text),
+                                                                 Synth::InstrumentJsonDomain::clipboard);
+    if (! len) {
         Sculptor::notify_error("Synth: cannot copy zone: the instrument did not encode");
         return;
     }
@@ -2560,13 +2550,13 @@ void Sculptor::SynthEditor::do_zone_paste_instrument(uint32_t channel, uint32_t 
         Sculptor::notify_error("Synth: cannot paste: the instrument replacement was refused");
         return;
     }
-    // Each paste is its own undo step, so the undo focus shows the change.
+    if (! commit_candidate(candidate, Sculptor::UndoGroupTag{ osc_tag_fresh, ++osc_fresh_tag_serial, 0 }))
+        return;
     Sculptor::undo_group_reset(&osc_undo_group);
-    selected_target   = channel;
-    show_effects_mode = false;
-    effects_tab_pend  = 0;
-    if (commit_candidate(candidate, Sculptor::UndoGroupTag{ osc_tag_fresh, ++osc_fresh_tag_serial, 0 }))
-        osc_graph_reproject = true;
+    selected_target     = channel;
+    show_effects_mode   = false;
+    effects_tab_pend    = 0;
+    osc_graph_reproject = true;
 }
 
 void Sculptor::SynthEditor::gui_zone_menu()
@@ -2680,7 +2670,14 @@ void Sculptor::SynthEditor::do_zone_split_new(uint32_t channel, uint32_t note)
     // inserts an entry and shifts later zones, moving records and mask rows.
     const bool first_note = note + 1 == bank.channel_zones[channel][entry].start_note;
 
-    candidate = instr_bank;
+    candidate             = instr_bank;
+    serialization_mapping = osc_mapping;
+    if (osc_graph_projected && osc_graph_zone_channel == channel &&
+        osc_graph_zone_index == static_cast<uint32_t>(entry) &&
+        ! sync_osc_graph_layout(&candidate, &serialization_mapping)) {
+        Sculptor::notify_error("Synth: cannot split: the graph layout is not representable");
+        return;
+    }
     if (! Synth::zone_split_new(candidate.bank.channel_zones[channel], static_cast<uint32_t>(entry), note, &candidate))
         return; // pool or table full: the menu item is grayed, but stay safe
 
@@ -2693,12 +2690,14 @@ void Sculptor::SynthEditor::do_zone_split_new(uint32_t channel, uint32_t note)
     Synth::reclaim_unused_slots(&candidate);
     // The split hands the clicked key to the new zone; select it so the tab
     // bar follows the zone the user just created.
-    selected_zone[channel] = static_cast<int32_t>(Synth::zone_entry_at(candidate.bank.channel_zones[channel], note));
-    zone_tab_force_entry   = selected_zone[channel];
-    last_clicked_note[channel] = static_cast<uint8_t>(note);
     Sculptor::undo_group_reset(&osc_undo_group);
-    if (commit_candidate(candidate, Sculptor::UndoGroupTag{ osc_tag_zone_split, channel, note }))
-        osc_graph_reproject = true;
+    if (commit_candidate(candidate, Sculptor::UndoGroupTag{ osc_tag_zone_split, channel, note })) {
+        selected_zone[channel] =
+            static_cast<int32_t>(Synth::zone_entry_at(instr_bank.bank.channel_zones[channel], note));
+        zone_tab_force_entry       = selected_zone[channel];
+        last_clicked_note[channel] = static_cast<uint8_t>(note);
+        osc_graph_reproject        = true;
+    }
 }
 
 void Sculptor::SynthEditor::gui_channel_popup()
@@ -2820,18 +2819,17 @@ bool Sculptor::SynthEditor::do_library_load(const Synth::LibraryEntry& entry)
     // channel's chain. The old instruments and the replaced chain's
     // now-unreferenced descriptors are reclaimed from the candidate.
     candidate.bank.channel_enabled[library_channel] = 1;
-    // The record replaces the channel's zoning, so its graph state resets with it.
-    Sculptor::channel_records_reset(&candidate, library_channel);
 
     // The channel takes the record's name so the library identity carries over.
     memcpy(candidate.channel_names[library_channel], entry.name, sizeof(candidate.channel_names[library_channel]));
     Synth::reclaim_unused_slots(&candidate);
+    if (! commit_candidate(candidate, Sculptor::UndoGroupTag{ osc_tag_load, library_channel, 0 }))
+        return false;
     selected_target                    = library_channel;
     last_clicked_note[library_channel] = 0;
     Sculptor::undo_group_reset(&osc_undo_group);
-    if (commit_candidate(candidate, Sculptor::UndoGroupTag{ osc_tag_load, library_channel, 0 }))
-        osc_graph_reproject = true;
-    fx_graph_reproject = true;
+    osc_graph_reproject = true;
+    fx_graph_reproject  = true;
 
     return true;
 }
@@ -2876,9 +2874,17 @@ bool Sculptor::SynthEditor::finish_library_save(const char* category, const char
     if (! instr_bank.bank.channel_enabled[library_channel] || zone_count(instr_bank.bank, library_channel) == 0)
         return false;
 
+    candidate             = instr_bank;
+    serialization_mapping = osc_mapping;
+    if ((osc_graph_projected && osc_graph_zone_channel == library_channel &&
+         ! sync_osc_graph_layout(&candidate, &serialization_mapping)) ||
+        (fx_graph_projected && fx_mapping.chain == library_channel && ! sync_fx_graph_layout(&candidate))) {
+        Sculptor::notify_error("Synth: library save failed: the graph layout is not representable");
+        return false;
+    }
     Synth::LibraryScanStatus status = Synth::library_valid;
     const int                save_error =
-        Synth::save_library_record(library_path, category, name, &instr_bank, library_channel, &status);
+        Synth::save_library_record(library_path, category, name, &candidate, library_channel, &status);
     if (save_error) {
         if (status == Synth::library_oversized)
             Sculptor::notify_error(library_oversized_refusal, library_path);

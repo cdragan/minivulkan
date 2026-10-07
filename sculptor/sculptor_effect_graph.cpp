@@ -5,6 +5,7 @@
 
 #include <assert.h>
 #include <stdio.h>
+#include <string.h>
 
 namespace {
 
@@ -174,6 +175,35 @@ static bool fx_lfo_is_projected(const Synth::EffectChainBinding& chain, const bo
         return true;
     }
     return Sculptor::effect_chain_uses_lfo(chain, desc);
+}
+
+bool Sculptor::parse_effect_lfo_title(const char (&name)[32], uint16_t* descriptor_id)
+{
+    if (! memchr(name, 0, sizeof(name)) || strncmp(name, "LFO ", 4) != 0 || ! name[4])
+        return false;
+    uint32_t id = 0;
+    for (uint32_t digit = 4; name[digit]; ++digit) {
+        if (name[digit] < '0' || name[digit] > '9' || id > Synth::max_lfos)
+            return false;
+        id = id * 10 + static_cast<uint32_t>(name[digit] - '0');
+    }
+    char expected[32];
+    snprintf(expected, sizeof(expected), "LFO %u", id);
+    if (strcmp(expected, name) != 0)
+        return false;
+    *descriptor_id = id && id <= Synth::max_lfos ? static_cast<uint16_t>(id) : 0;
+    return true;
+}
+
+bool Sculptor::translate_effect_lfo_title(char (&name)[32], const uint16_t* lfo_ids, uint16_t* mapped_id)
+{
+    uint16_t id = 0;
+    if (! parse_effect_lfo_title(name, &id))
+        return false;
+    *mapped_id = id ? lfo_ids[id - 1] : 0;
+    if (*mapped_id)
+        snprintf(name, sizeof(name), "LFO %u", *mapped_id);
+    return true;
 }
 
 bool Sculptor::effect_chain_uses_lfo(const Synth::EffectChainBinding& chain, uint32_t desc)

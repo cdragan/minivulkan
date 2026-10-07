@@ -26,12 +26,15 @@ namespace Synth {
 int write_editor_bank_json(FILE* file, const InstrumentEditorBank* bank, uint32_t max_len, uint32_t* out_len);
 
 // Reads a JSON document of len bytes from file at the current position into
-// out. Transactional: on any failure out is left untouched.
-bool read_editor_bank_json(FILE* file, uint32_t len, InstrumentEditorBank* out);
+// out.  Transactional: on any failure out is left untouched.
+// The strict library policy refuses unknown editor-metadata fields and duplicate
+// layout identities before compatibility deduplication; ordinary bank reads tolerate them.
+bool read_editor_bank_json(FILE* file, uint32_t len, InstrumentEditorBank* out, bool strict_editor_metadata = false);
 
-// Encodes the bank as one JSON document into dest. Returns the document length, or 0
+// Encodes the bank as one JSON document into dest.  Returns the document length, or 0
 // when dest is too small, a pool's num_allocated exceeds the pool capacity, or a count
-// field exceeds its array (the encoder never trusts bank metadata - the validator
+// field exceeds its array, or a string is unterminated or malformed UTF-8 (the
+// encoder never trusts bank metadata - the validator
 // accepts standalone parameter contents unchecked, so the encoder bounds-checks
 // every count-driven loop before reading).
 uint32_t encode_editor_bank_json(const InstrumentEditorBank* bank, char* dest, uint32_t dest_size);
@@ -90,6 +93,7 @@ struct InstrumentGraphLayout {
     float   y;
     float   width_override;
     float   height_override;
+    char    name[32];
 };
 
 // Decodes one instrument document into out_instr. Generator descriptor ids in
@@ -121,7 +125,8 @@ uint32_t encode_instrument_json(char*                 dest,
 // normalized portable records resolving against the document-decoded model (see
 // Sculptor::normalize_instrument_graph_layout). dest_size must hold the document
 // plus its terminator, so a capacity one byte short of the document length + 1
-// fails instead of truncating. Returns the document length excluding the NUL the
+// fails instead of truncating.  Unterminated or malformed UTF-8 titles are refused.
+// Returns the document length excluding the NUL the
 // caller writes, or 0 on any failure; the writer emits straight into dest, so
 // destination bytes are unspecified when it returns 0.
 uint32_t encode_instrument_json(char*                        dest,
@@ -148,4 +153,33 @@ bool decode_instrument_json(const char*            text,
                             uint32_t               layout_capacity,
                             uint32_t*              out_layout_count);
 
+// Validated bank transport retains finite legacy pitch/ratio outside clipboard slider bounds.
+enum class InstrumentJsonDomain : uint8_t {
+    clipboard,
+    validated_bank
+};
+
+bool decode_instrument_json_for_domain(const char*            text,
+                                       uint32_t               len,
+                                       Instrument*            out_instr,
+                                       EnvelopeDescriptor*    out_envelopes,
+                                       uint32_t*              out_envelope_count,
+                                       LFODescriptor*         out_lfos,
+                                       uint32_t*              out_lfo_count,
+                                       InstrumentGraphLayout* out_layout,
+                                       uint32_t               layout_capacity,
+                                       uint32_t*              out_layout_count,
+                                       InstrumentJsonDomain   domain);
+
 } // namespace Synth
+
+namespace Sculptor {
+// Shared clipboard/library exporter.  Returns the document length excluding the
+// caller-written NUL, or 0 with source and destination untouched on any failure.
+uint32_t encode_editor_instrument_json(const Synth::InstrumentEditorBank& source,
+                                       uint32_t                           channel,
+                                       uint32_t                           zone,
+                                       char*                              dest,
+                                       uint32_t                           capacity,
+                                       Synth::InstrumentJsonDomain        domain);
+} // namespace Sculptor

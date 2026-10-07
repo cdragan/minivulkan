@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2021-2026 Chris Dragan
 
 #include "sculptor_instr_bank.h"
+#include "sculptor_effect_graph.h"
 #include "sculptor_graph.h"
 #include "sculptor_osc_graph.h"
 
@@ -761,6 +762,19 @@ void Synth::reclaim_unused_slots(Synth::InstrumentEditorBank* editor_bank, uint1
         if (record.kind == 2 && record.index && record.index <= max_lfos)
             record.index = static_cast<uint8_t>(lfo_ids[record.index - 1]);
     }
+    uint32_t retained = 0;
+    for (uint32_t index = 0; index < editor_bank->graph_layout_count; ++index) {
+        Synth::GraphNodeLayout record = editor_bank->graph_layout[index];
+        uint16_t               new_id = 0;
+        if (record.kind == 4 && Sculptor::translate_effect_lfo_title(record.name, lfo_ids, &new_id)) {
+            const Synth::EffectChainBinding& chain =
+                record.channel < Synth::max_channels ? bank->channel_chains[record.channel] : bank->master_chain;
+            if (! new_id || ! Sculptor::effect_chain_uses_lfo(chain, new_id))
+                continue;
+        }
+        editor_bank->graph_layout[retained++] = record;
+    }
+    editor_bank->graph_layout_count = retained;
 }
 
 const Synth::InstrumentBank* Synth::peek_bank_update(Synth::BankUpdateQueue* queue)
@@ -810,6 +824,12 @@ uint32_t Sculptor::count_detached_records(const Synth::InstrumentEditorBank& ban
         }
     }
     return count;
+}
+
+bool Sculptor::graph_layout_record_identity_equal(const Synth::GraphNodeLayout& a, const Synth::GraphNodeLayout& b)
+{
+    return a.channel == b.channel && a.zone == b.zone && a.kind == b.kind && a.index == b.index && a.uid == b.uid &&
+           (a.kind != 4 || strcmp(a.name, b.name) == 0);
 }
 
 bool Sculptor::validate_editor_metadata(const Synth::InstrumentEditorBank& bank)
@@ -904,9 +924,7 @@ bool Sculptor::validate_editor_metadata(const Synth::InstrumentEditorBank& bank)
         // record keys by name (one record per projected fx node).
         for (uint32_t j = 0; j < i; ++j) {
             const Synth::GraphNodeLayout& other = bank.graph_layout[j];
-            if (other.channel == record.channel && other.zone == record.zone && other.kind == record.kind &&
-                other.index == record.index && other.uid == record.uid &&
-                (record.kind != 4 || strcmp(other.name, record.name) == 0)) {
+            if (Sculptor::graph_layout_record_identity_equal(other, record)) {
                 return false;
             }
         }

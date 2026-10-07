@@ -5,15 +5,26 @@
 
 #include "sculptor_atomic_file.h"
 #include "sculptor_bank_json.h"
+#include "sculptor_effect_graph.h"
 #include "sculptor_instr_bank.h"
+#include "sculptor_osc_graph.h"
 
 #include <errno.h>
 #include <stdio.h>
 #include <string.h>
 
 namespace {
-
 constexpr uint32_t library_file_magic = 0x42494C49;
+
+char                         library_transfer_text[64 * 1024];
+Synth::Instrument            library_transfer_decoded;
+Synth::EnvelopeDescriptor    library_transfer_envs[Synth::instrument_max_envelopes];
+Synth::LFODescriptor         library_transfer_lfos[Synth::instrument_max_lfos];
+Synth::InstrumentGraphLayout library_transfer_layout[Synth::instrument_graph_layout_capacity];
+Synth::InstrumentGraphLayout library_transfer_original_layout[Synth::instrument_graph_layout_capacity];
+
+Synth::InstrumentEditorBank library_load_candidate;
+} // namespace
 
 struct RecordHeader {
     char     category[Synth::library_category_len];
@@ -23,13 +34,11 @@ struct RecordHeader {
 
 static_assert(sizeof(RecordHeader) == 52);
 
-bool names_terminated(const char* category, const char* name)
+static bool names_terminated(const char* category, const char* name)
 {
     return memchr(category, 0, Synth::library_category_len) != nullptr &&
            memchr(name, 0, Synth::library_name_len) != nullptr;
 }
-
-} // namespace
 
 uint32_t Synth::read_library_index(const char* const               path,
                                    Synth::LibraryEntry* const      entries,
@@ -132,9 +141,7 @@ bool Synth::library_record_matches(const LibraryEntry& entry, const char* catego
            strncmp(entry.name, name, Synth::library_name_len) == 0;
 }
 
-namespace {
-
-bool validate_record(const Synth::InstrumentEditorBank* const editor_bank)
+static bool validate_record(const Synth::InstrumentEditorBank* const editor_bank)
 {
     const Synth::InstrumentBank* const bank = &editor_bank->bank;
     if (bank->parameters.num_allocated != 0)
@@ -200,6 +207,18 @@ bool validate_record(const Synth::InstrumentEditorBank* const editor_bank)
             return false;
     }
 
+    for (uint32_t index = 0; index < editor_bank->graph_layout_count; ++index) {
+        const Synth::GraphNodeLayout& record = editor_bank->graph_layout[index];
+        if (record.channel != 0 || (record.kind != 4 && ! bank->channel_zones[0][record.zone].start_note))
+            return false;
+    }
+    for (uint32_t channel = 0; channel < Synth::max_channels; ++channel) {
+        for (uint32_t zone = 0; zone < Synth::max_instr_per_channel; ++zone) {
+            if (editor_bank->graph_missing_sum[channel][zone])
+                return false;
+        }
+    }
+
     // Instrument names come from file bytes; a run without NUL would make name
     // readers run past the buffer.
     for (uint32_t slot = 0; slot < bank->instruments.num_allocated; slot++) {
@@ -224,7 +243,84 @@ bool validate_record(const Synth::InstrumentEditorBank* const editor_bank)
     return true;
 }
 
-} // namespace
+static bool transfer_zone_layout(const Synth::InstrumentEditorBank& source,
+                                 uint32_t                           channel,
+                                 uint32_t                           zone,
+                                 const uint16_t*                    env_ids,
+                                 const uint16_t*                    lfo_ids,
+                                 uint32_t                           dst_channel,
+                                 Synth::InstrumentEditorBank*       candidate)
+{
+    uint32_t       env_count = 0, lfo_count = 0, count = 0, original_count = 0;
+    const uint32_t length = Sculptor::encode_editor_instrument_json(source,
+                                                                    channel,
+                                                                    zone,
+                                                                    library_transfer_text,
+                                                                    sizeof(library_transfer_text),
+                                                                    Synth::InstrumentJsonDomain::validated_bank);
+    if (! length || ! Synth::decode_instrument_json_for_domain(library_transfer_text,
+                                                               length,
+                                                               &library_transfer_decoded,
+                                                               library_transfer_envs,
+                                                               &env_count,
+                                                               library_transfer_lfos,
+                                                               &lfo_count,
+                                                               library_transfer_layout,
+                                                               Synth::instrument_graph_layout_capacity,
+                                                               &count,
+                                                               Synth::InstrumentJsonDomain::validated_bank))
+        return false;
+    const Synth::Instrument& original =
+        source.bank.instruments.entries[source.bank.channel_zones[channel][zone].instrument];
+    return Sculptor::normalize_instrument_graph_layout(library_transfer_decoded,
+                                                       library_transfer_envs,
+                                                       env_count,
+                                                       library_transfer_lfos,
+                                                       lfo_count,
+                                                       library_transfer_layout,
+                                                       count,
+                                                       original,
+                                                       source.bank.envelopes.entries,
+                                                       source.bank.envelopes.num_allocated,
+                                                       source.bank.lfos.entries,
+                                                       source.bank.lfos.num_allocated,
+                                                       library_transfer_original_layout,
+                                                       Synth::instrument_graph_layout_capacity,
+                                                       &original_count) &&
+           Sculptor::append_instrument_graph_layout(original,
+                                                    source.bank.envelopes.entries,
+                                                    source.bank.envelopes.num_allocated,
+                                                    source.bank.lfos.entries,
+                                                    source.bank.lfos.num_allocated,
+                                                    library_transfer_original_layout,
+                                                    original_count,
+                                                    env_ids,
+                                                    lfo_ids,
+                                                    dst_channel,
+                                                    zone,
+                                                    candidate);
+}
+
+static bool transfer_effect_layout(const Synth::InstrumentEditorBank& source,
+                                   uint32_t                           channel,
+                                   const uint16_t*                    lfo_ids,
+                                   uint32_t                           dst_channel,
+                                   Synth::InstrumentEditorBank*       candidate)
+{
+    for (uint32_t index = 0; index < source.graph_layout_count; ++index) {
+        Synth::GraphNodeLayout record = source.graph_layout[index];
+        if (record.kind != 4 || record.channel != channel)
+            continue;
+        if (candidate->graph_layout_count >= Synth::max_graph_records || ! memchr(record.name, 0, sizeof(record.name)))
+            return false;
+        uint16_t id = 0;
+        if (Sculptor::translate_effect_lfo_title(record.name, lfo_ids, &id) && ! id)
+            return false;
+        record.channel                                           = static_cast<uint8_t>(dst_channel);
+        candidate->graph_layout[candidate->graph_layout_count++] = record;
+    }
+    return true;
+}
 
 bool Synth::load_library_instrument(const char* const            path,
                                     const Synth::LibraryEntry*   entry,
@@ -232,7 +328,11 @@ bool Synth::load_library_instrument(const char* const            path,
                                     uint32_t const               channel,
                                     uint16_t* const              out_first_slot)
 {
-    Synth::InstrumentBank* const dst_bank = &dst_editor_bank->bank;
+    if (! dst_editor_bank || ! entry || ! out_first_slot || ! Synth::validate_instrument_bank(&dst_editor_bank->bank) ||
+        ! Sculptor::validate_editor_metadata(*dst_editor_bank))
+        return false;
+    library_load_candidate                = *dst_editor_bank;
+    Synth::InstrumentBank* const dst_bank = &library_load_candidate.bank;
     if (entry->payload_size > Synth::library_payload_max || channel >= Synth::max_channels)
         return false;
 
@@ -256,7 +356,7 @@ bool Synth::load_library_instrument(const char* const            path,
     // untouched on failure; the merge below reads the scratch with no decode
     // between.
     static Synth::InstrumentEditorBank record_bank;
-    const bool load_ok = header_ok && Synth::read_editor_bank_json(file, entry->payload_size, &record_bank);
+    const bool load_ok = header_ok && Synth::read_editor_bank_json(file, entry->payload_size, &record_bank, true);
     fclose(file);
     if (! load_ok)
         return false;
@@ -296,10 +396,10 @@ bool Synth::load_library_instrument(const char* const            path,
                          env_ids,
                          lfo_ids,
                          &dst_bank->instruments.entries[slot]);
-        memcpy(dst_editor_bank->instrument_names[slot], record_bank.instrument_names[i], Synth::max_name_len);
+        memcpy(library_load_candidate.instrument_names[slot], record_bank.instrument_names[i], Synth::max_name_len);
     }
 
-    *out_first_slot = static_cast<uint16_t>(first_slot);
+    Sculptor::channel_records_reset(&library_load_candidate, channel);
 
     memset(dst_bank->channel_zones[channel], 0, sizeof(dst_bank->channel_zones[channel]));
     for (uint32_t zone = 0; zone < Synth::max_instr_per_channel; zone++) {
@@ -317,16 +417,25 @@ bool Synth::load_library_instrument(const char* const            path,
     // subsequent reclaim frees the replaced chain's exclusive LFOs.
     Synth::remap_effect_chain(record_bank.bank.channel_chains[0], lfo_ids, &dst_bank->channel_chains[channel]);
 
+    for (uint32_t zone = 0; zone < Synth::max_instr_per_channel && record_bank.bank.channel_zones[0][zone].start_note;
+         ++zone) {
+        if (! transfer_zone_layout(record_bank, 0, zone, env_ids, lfo_ids, channel, &library_load_candidate))
+            return false;
+    }
+    if (! transfer_effect_layout(record_bank, 0, lfo_ids, channel, &library_load_candidate) ||
+        ! Synth::validate_instrument_bank(&library_load_candidate.bank) ||
+        ! Sculptor::validate_editor_metadata(library_load_candidate))
+        return false;
+    *dst_editor_bank = library_load_candidate;
+    *out_first_slot  = static_cast<uint16_t>(first_slot);
     return true;
 }
 
-namespace {
-
-int write_library_file(const char* const                        path,
-                       const char* const                        category,
-                       const char* const                        name,
-                       const Synth::InstrumentEditorBank* const editor_bank,
-                       Synth::LibraryScanStatus* const          out_status)
+static int write_library_file(const char* const                        path,
+                              const char* const                        category,
+                              const char* const                        name,
+                              const Synth::InstrumentEditorBank* const editor_bank,
+                              Synth::LibraryScanStatus* const          out_status)
 {
     if (out_status)
         *out_status = Synth::library_invalid;
@@ -433,8 +542,6 @@ int write_library_file(const char* const                        path,
     return atomic_write_commit(path, tmp_path, file);
 }
 
-} // namespace
-
 int Synth::save_library_record(const char* const                        path,
                                const char* const                        category,
                                const char* const                        name,
@@ -446,7 +553,8 @@ int Synth::save_library_record(const char* const                        path,
         *out_status = Synth::library_invalid;
 
     const Synth::InstrumentBank* const src_bank = &src_editor_bank->bank;
-    if (channel >= Synth::max_channels || ! src_bank->channel_enabled[channel])
+    if (! Synth::validate_instrument_bank(src_bank) || ! Sculptor::validate_editor_metadata(*src_editor_bank) ||
+        channel >= Synth::max_channels || ! src_bank->channel_enabled[channel])
         return EINVAL;
 
     uint32_t num_zones = 0;
@@ -556,5 +664,12 @@ int Synth::save_library_record(const char* const                        path,
             static_cast<uint8_t>(instr_ids[src_bank->channel_zones[channel][zone].instrument]);
     }
 
+    for (uint32_t zone = 0; zone < num_zones; ++zone) {
+        if (! transfer_zone_layout(*src_editor_bank, channel, zone, env_ids, lfo_ids, 0, &reduced))
+            return EINVAL;
+    }
+    if (! transfer_effect_layout(*src_editor_bank, channel, lfo_ids, 0, &reduced) ||
+        ! Synth::validate_instrument_bank(&reduced.bank) || ! Sculptor::validate_editor_metadata(reduced))
+        return EINVAL;
     return write_library_file(path, category, name, &reduced, out_status);
 }

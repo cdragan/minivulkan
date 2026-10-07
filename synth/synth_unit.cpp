@@ -1263,6 +1263,35 @@ static void check_zone_paste_source_ordering()
         return;
     }
     TEST(zone_paste_body_has_failure_guard(body_open, body_close));
+    const char* sync = strstr(src, "static bool sync_osc_graph_layout(");
+    TEST(sync != nullptr);
+    if (sync) {
+        const char* end = strstr(sync, "static bool ");
+        if (! end || end == sync)
+            end = strstr(sync + 1, "static ");
+        TEST(end != nullptr);
+        if (end) {
+            const char* predecessor =
+                find_in_range(sync, end, "! Sculptor::param_has_recordless_predecessor(mapping, i)");
+            const char* materialize =
+                find_in_range(sync, end, "Sculptor::detach_osc_graph_parameter(bank, osc_graph, &mapping");
+            const char* refresh   = find_in_range(sync, end, "Sculptor::refresh_osc_graph_compilation");
+            const char* unchanged = find_in_range(sync, end, "if (strcmp(derived, node.name) == 0)");
+            const char* rename    = find_in_range(sync, end, "Sculptor::apply_osc_graph_change");
+            TEST(predecessor && materialize && predecessor < materialize);
+            TEST(materialize && refresh && materialize < refresh);
+            const char* derived_title =
+                find_in_range(sync, end, "Sculptor::format_parameter_title(derived, param.target, ordinal)");
+            const char* saved_title = find_in_range(sync, end, "if (saved >= 0)");
+            TEST(derived_title && saved_title && derived_title < saved_title);
+            if (saved_title && rename)
+                TEST(find_in_range(saved_title, rename, "memset(bank->graph_layout[saved].name"));
+            TEST(unchanged && rename && unchanged < rename);
+            if (unchanged && rename)
+                TEST(find_in_range(unchanged, rename, "continue;"));
+            TEST(! find_in_range(sync, end, "record.kind = 3"));
+        }
+    }
 }
 
 // Index of the first mapped editor record of `kind` keying `index`, or -1.
@@ -1287,6 +1316,1442 @@ static uint32_t build_layout_doc(char* dest, uint32_t size, const char* head, co
     const int32_t fixture_tokens = written > 0 ? count_clipboard_tokens(dest, static_cast<uint32_t>(written)) : -1;
     TEST(fixture_tokens > 0);
     return written > 0 ? static_cast<uint32_t>(written) : 0;
+}
+
+static bool export_clipboard_fixture(const Synth::InstrumentEditorBank& bank, char* text, uint32_t capacity)
+{
+    return Sculptor::encode_editor_instrument_json(bank,
+                                                   0,
+                                                   0,
+                                                   text,
+                                                   capacity,
+                                                   Synth::InstrumentJsonDomain::clipboard) != 0;
+}
+
+static void write_library_fixture(const char* path,
+                                  const char* payload,
+                                  uint32_t    length,
+                                  const char* category = "Regression",
+                                  const char* name     = "FM")
+{
+    FILE* const file = fopen(path, "wb");
+    TEST(file != nullptr);
+    if (! file) {
+        return;
+    }
+    const uint32_t header[3]  = { 0x42494c49, Synth::library_version, 1 };
+    char           record[52] = {};
+    TEST(strlen(category) < 24 && strlen(name) < 24);
+    snprintf(record, 24, "%s", category);
+    snprintf(record + 24, 24, "%s", name);
+    memcpy(record + 48, &length, 4);
+    TEST(fwrite(header, sizeof(header), 1, file) == 1);
+    TEST(fwrite(record, sizeof(record), 1, file) == 1);
+    TEST(fwrite(payload, length, 1, file) == 1);
+    TEST(fclose(file) == 0);
+}
+
+static uint32_t read_library_fixture(const char* path, char* bytes, uint32_t capacity)
+{
+    FILE* const file = fopen(path, "rb");
+    TEST(file != nullptr);
+    if (! file) {
+        return 0;
+    }
+    const size_t count = fread(bytes, 1, capacity, file);
+    TEST(feof(file) && ! ferror(file));
+    TEST(fclose(file) == 0);
+    return static_cast<uint32_t>(count);
+}
+
+static void build_named_fm_fixture(Synth::InstrumentEditorBank* bank)
+{
+    Synth::Instrument instrument;
+    build_parameter_fixture(bank, &instrument);
+    for (uint32_t layer = 0; layer < instrument.layer_count; ++layer) {
+        instrument.layers[layer].osc_type[1] = Synth::WaveType::sine_wave;
+        instrument.layers[layer].osc_mode    = Synth::osc_mode_fm;
+        instrument.layers[layer].mod_ratio   = 2.0f;
+    }
+    instrument.routing[Synth::mod_fm_index].base_value = 0.625f * 6.2831853f;
+    bank->bank.instruments.entries[0]                  = instrument;
+    strcpy(bank->instrument_names[0], "Named FM");
+    strcpy(bank->channel_names[0], "Source");
+    static Sculptor::Graph           graph;
+    static Sculptor::OscGraphMapping mapping;
+    TEST(Sculptor::project_editor_to_graph(*bank, &graph, &mapping));
+    for (uint32_t p = 0; p < mapping.param_count; ++p) {
+        if (mapping.params[p].target != 0) {
+            continue;
+        }
+        const uint8_t ordinal = Sculptor::param_group_ordinal(mapping, p);
+        add_parameter_record(bank, 0, 0, 0, 100.0f * ordinal, -30.0f * ordinal, ordinal);
+        Synth::GraphNodeLayout& record = bank->graph_layout[bank->graph_layout_count - 1];
+        record.param_slot              = ordinal;
+        record.width_override          = 200.0f + ordinal;
+        record.height_override         = 120.0f + ordinal;
+        TEST(Sculptor::store_param_wiring(graph, mapping, mapping.params[p], &record));
+        strcpy(record.name, ordinal == 1 ? "Attack \"A\"\\\n1234567890123456789" : "Body");
+    }
+    TEST(bank->graph_layout_count == 2);
+    TEST(strlen(bank->graph_layout[0].name) == 31);
+    // Record order must not substitute for the parameter's serving association.
+    const Synth::GraphNodeLayout first = bank->graph_layout[0];
+    bank->graph_layout[0]              = bank->graph_layout[1];
+    bank->graph_layout[1]              = first;
+    add_detached_record(bank, 0, 0, 0, 2, 77, 88, Synth::ModSource::none, Synth::ModSource::none, 0);
+    bank->graph_layout[2].width_override  = 321;
+    bank->graph_layout[2].height_override = 222;
+    add_detached_record(bank, 0, 0, 1, 1, 44, 55, Synth::ModSource::none, Synth::ModSource::none, 1);
+    for (uint32_t canonical = 0; canonical < 2; ++canonical) {
+        add_detached_record(bank,
+                            0,
+                            0,
+                            0,
+                            canonical,
+                            500.0f + 100.0f * static_cast<float>(canonical),
+                            -400.0f - 50.0f * static_cast<float>(canonical),
+                            Synth::ModSource::none,
+                            Synth::ModSource::none,
+                            0);
+        bank->graph_layout[bank->graph_layout_count - 1].width_override =
+            350.0f + 10.0f * static_cast<float>(canonical);
+        bank->graph_layout[bank->graph_layout_count - 1].height_override =
+            250.0f + 20.0f * static_cast<float>(canonical);
+    }
+    TEST(Synth::validate_instrument_bank(&bank->bank));
+    TEST(Sculptor::validate_editor_metadata(*bank));
+}
+
+// Model/predicate evidence combines waveform/mode availability with caller-owned gates.
+static bool fm_widget_enabled(const Sculptor::Graph& graph, uint32_t node_index)
+{
+    const Sculptor::Node& node = graph.node(node_index);
+    return ! Sculptor::oscillator_slot_waveform_mode_disabled(node, 7) && ! graph.slot_edit_disabled(node_index, 7) &&
+           ! graph.slot_is_connected(node_index, 7) && ! node.ghost;
+}
+
+static void check_named_fm_projection(const Synth::InstrumentEditorBank& bank, uint32_t channel, uint32_t zone)
+{
+    static Sculptor::Graph           graph;
+    static Sculptor::OscGraphMapping mapping;
+    const bool projected = Sculptor::project_editor_to_graph(bank, &graph, &mapping, channel, zone);
+    TEST(projected);
+    if (! projected) {
+        return;
+    }
+    const uint32_t           slot       = bank.bank.channel_zones[channel][zone].instrument;
+    const Synth::Instrument& instrument = bank.bank.instruments.entries[slot];
+    TEST(instrument.layer_count == 3);
+    TEST(approx(instrument.routing[Synth::mod_fm_index].base_value, 0.625f * 6.2831853f, 0.00001f));
+    TEST(instrument.routing[Synth::mod_volume].num_inputs == 1);
+    TEST(instrument.routing[Synth::mod_volume].inputs[0].source == Synth::ModSource::velocity);
+    TEST(instrument.routing[Synth::mod_volume].inputs[0].op == Synth::SourceOp::add);
+    TEST(instrument.routing[Synth::mod_volume].inputs[0].scale == 2.0f);
+    for (uint32_t layer = 0; layer < instrument.layer_count; ++layer) {
+        const uint32_t        node_index = mapping.osc_nodes[layer];
+        const Sculptor::Node& node       = graph.node(node_index);
+        TEST(instrument.layers[layer].osc_type[1] == Synth::WaveType::sine_wave);
+        TEST(instrument.layers[layer].osc_mode == Synth::osc_mode_fm);
+        TEST(instrument.layers[layer].mod_ratio == 2);
+        const Synth::LayerGen& generator = instrument.layers[layer].gen[Synth::mod_volume];
+        TEST(generator.envelope_desc_id != 0 && generator.lfo_desc_id != 0);
+        TEST(generator.lfo_op == Synth::SourceOp::add);
+        TEST(generator.lfo_depth == 0.5f);
+        TEST(generator.lfo_depth_source == Synth::ModSource::velocity);
+        TEST(generator.lfo_rate_source == Synth::ModSource::mod_wheel);
+        TEST(generator.lfo_rate_scale_ms == 20);
+        const Synth::EnvelopeDescriptor& envelope = bank.bank.envelopes.entries[generator.envelope_desc_id - 1];
+        TEST(envelope.num_points == 2);
+        TEST(approx(envelope.min_value + envelope.points[0].value * envelope.min_max_delta,
+                    (layer == 1 ? -0.5f : -1.0f) + 0x2000 * 2.0f,
+                    0.01f));
+        TEST(bank.bank.lfos.entries[generator.lfo_desc_id - 1].period_ms == 300);
+        TEST(fm_widget_enabled(graph, node_index));
+        TEST(approx(node.slots.entries[7].value.real, 0.625f, 0.000001f));
+        TEST(graph.slot_is_connected(node_index, 9));
+    }
+    uint32_t volume_nodes = 0;
+    for (uint32_t p = 0; p < mapping.param_count; ++p) {
+        const Sculptor::ParamEntry& param = mapping.params[p];
+        if (param.target != 0) {
+            continue;
+        }
+        ++volume_nodes;
+        const bool first = param.served == 5;
+        TEST(first || param.served == 2);
+        const Sculptor::Node& node = graph.node(param.node_idx);
+        TEST(strcmp(node.name, first ? "Attack \"A\"\\\n1234567890123456789" : "Body") == 0);
+        TEST(node.position.x == (first ? 100 : 200));
+        TEST(node.position.y == (first ? -30 : -60));
+        TEST(node.content_width_override == (first ? 201 : 202));
+        TEST(node.content_height_override == (first ? 121 : 122));
+    }
+    TEST(volume_nodes == 2);
+    const Sculptor::Node& oscillator = graph.node(mapping.osc_nodes[0]);
+    TEST(oscillator.position.x == 77 && oscillator.position.y == 88);
+    TEST(oscillator.content_width_override == 321 && oscillator.content_height_override == 222);
+    for (uint32_t canonical = 0; canonical < 2; ++canonical) {
+        const int32_t saved = Sculptor::find_record(bank, channel, zone, 0, canonical, 0);
+        TEST(saved >= 0);
+        if (saved >= 0) {
+            const Synth::GraphNodeLayout& record = bank.graph_layout[saved];
+            TEST(record.x == 500.0f + 100.0f * static_cast<float>(canonical));
+            TEST(record.y == -400.0f - 50.0f * static_cast<float>(canonical));
+            TEST(record.width_override == 350.0f + 10.0f * static_cast<float>(canonical));
+            TEST(record.height_override == 250.0f + 20.0f * static_cast<float>(canonical));
+        }
+    }
+    const Sculptor::Node& input = graph.node(mapping.input_node);
+    TEST(input.position.x == 500 && input.position.y == -400);
+    TEST(input.content_width_override == 350 && input.content_height_override == 250);
+    const Sculptor::Node& sum = graph.node(mapping.output_node);
+    TEST(sum.position.x == 600 && sum.position.y == -450);
+    TEST(sum.content_width_override == 360 && sum.content_height_override == 270);
+    Sculptor::PropertyValue wave = {};
+    wave.list_index              = 0;
+    graph.set_slot_value(mapping.osc_nodes[0], 3, wave);
+    TEST(! fm_widget_enabled(graph, mapping.osc_nodes[0]));
+    wave.list_index = 1;
+    graph.set_slot_value(mapping.osc_nodes[0], 3, wave);
+    wave.list_index = 0;
+    graph.set_slot_value(mapping.osc_nodes[0], 5, wave);
+    TEST(! fm_widget_enabled(graph, mapping.osc_nodes[0]));
+    const uint32_t node_index = mapping.osc_nodes[0];
+    for (uint32_t mode = 0; mode < 3; ++mode) {
+        wave.list_index = static_cast<uint8_t>(mode);
+        graph.set_slot_value(node_index, 5, wave);
+        TEST(Sculptor::oscillator_slot_waveform_mode_disabled(graph.node(node_index), 7) == (mode != 1));
+        TEST(Sculptor::oscillator_slot_waveform_mode_disabled(graph.node(node_index), 8) == (mode == 0));
+        wave.list_index = 0;
+        graph.set_slot_value(node_index, 3, wave);
+        for (uint32_t row = 0; row < 15; ++row) {
+            TEST(Sculptor::oscillator_slot_waveform_mode_disabled(graph.node(node_index), row) ==
+                 (row >= 4 && row <= 8));
+        }
+        wave.list_index = 1;
+        graph.set_slot_value(node_index, 3, wave);
+    }
+    wave.list_index = 1;
+    graph.set_slot_value(node_index, 5, wave);
+    TEST(fm_widget_enabled(graph, node_index));
+    graph.set_slot_edit_disabled(node_index, 7, true);
+    TEST(! Sculptor::oscillator_slot_waveform_mode_disabled(graph.node(node_index), 7));
+    TEST(! fm_widget_enabled(graph, node_index));
+    graph.set_slot_edit_disabled(node_index, 7, false);
+    TEST(fm_widget_enabled(graph, node_index));
+    graph.set_ghost(node_index, true);
+    TEST(! Sculptor::oscillator_slot_waveform_mode_disabled(graph.node(node_index), 7));
+    TEST(! fm_widget_enabled(graph, node_index));
+    graph.set_ghost(node_index, false);
+    TEST(fm_widget_enabled(graph, node_index));
+    // FM depth is not connectable; a connected volume row uses the separate connection gate.
+    TEST(! graph.slot_is_connected(node_index, 7));
+    TEST(graph.slot_is_connected(node_index, 9));
+    TEST(! Sculptor::oscillator_slot_waveform_mode_disabled(graph.node(node_index), 9));
+    TEST(fm_widget_enabled(graph, node_index));
+    TEST(! Sculptor::oscillator_slot_waveform_mode_disabled(graph.node(mapping.input_node), 7));
+}
+
+static void check_editor_instrument_round_trips()
+{
+    static Synth::InstrumentEditorBank source;
+    static Synth::InstrumentEditorBank source_before;
+    build_named_fm_fixture(&source);
+    check_named_fm_projection(source, 0, 0);
+    static char text[clipboard_capacity];
+    source_before = source;
+    TEST(export_clipboard_fixture(source, text, sizeof(text)));
+    TEST(memcmp(&source, &source_before, sizeof(source)) == 0);
+    static ClipboardDecode decoded;
+    TEST(decode_clipboard(&decoded, text, max_portable_records));
+    static Synth::InstrumentEditorBank destination;
+    Synth::Instrument                  occupied;
+    build_clipboard_zone_fixture(&destination, &occupied);
+    destination.bank.channel_enabled[2]             = 1;
+    destination.bank.channel_zones[2][0].start_note = 1;
+    destination.bank.channel_zones[2][0].instrument = 0;
+    strcpy(destination.channel_names[2], "Destination");
+    Synth::EffectSlotBinding* master =
+        enabled_effect(destination.bank, Synth::max_channels, 0, Synth::EffectType::delay);
+    master->bindings[0].lfo_desc_id = 1;
+    add_detached_record(&destination,
+                        Synth::max_channels,
+                        0,
+                        4,
+                        0,
+                        700,
+                        701,
+                        Synth::ModSource::none,
+                        Synth::ModSource::none,
+                        0);
+    strcpy(destination.graph_layout[0].name, "Delay");
+    const Synth::GraphNodeLayout       unrelated_effect = destination.graph_layout[0];
+    static Synth::InstrumentEditorBank candidate;
+    const bool                         replaced = Sculptor::replace_zone_instrument_candidate(destination,
+                                                                                              2,
+                                                                                              0,
+                                                                                              decoded.instr,
+                                                                                              decoded.envs,
+                                                                                              decoded.env_count,
+                                                                                              decoded.lfos,
+                                                                                              decoded.lfo_count,
+                                                                                              decoded.layout,
+                                                                                              decoded.layout_count,
+                                                                                              &candidate);
+    TEST(replaced);
+    if (replaced) {
+        check_named_fm_projection(candidate, 2, 0);
+        TEST(candidate.bank.channel_zones[2][0].start_note == 1);
+        TEST(strcmp(candidate.channel_names[2], "Destination") == 0);
+        TEST(strcmp(candidate.instrument_names[candidate.bank.channel_zones[2][0].instrument], "Clipboard zone") == 0);
+    }
+    // Aliased zones have independent layout but share instrument/descriptor storage.
+    const uint32_t second = source.bank.instruments.allocate();
+    TEST(second == 1);
+    source.bank.instruments.entries[second] = source.bank.instruments.entries[0];
+    strcpy(source.instrument_names[second], "Shared descriptors");
+    for (uint32_t zone = 1; zone < Synth::max_instr_per_channel; ++zone) {
+        source.bank.channel_zones[0][zone].start_note = static_cast<uint8_t>(1 + 7 * zone);
+        source.bank.channel_zones[0][zone].instrument = static_cast<uint8_t>(zone % 2);
+        const uint32_t records                        = 6;
+        for (uint32_t r = 0; r < records; ++r) {
+            Synth::GraphNodeLayout record = source.graph_layout[r];
+            record.zone                   = static_cast<uint8_t>(zone);
+            record.x += static_cast<float>(zone);
+            source.graph_layout[source.graph_layout_count++] = record;
+        }
+    }
+    const uint16_t            chain_lfo = add_detached_lfo_descriptor(&source);
+    Synth::EffectSlotBinding* effect    = enabled_effect(source.bank, 0, 0, Synth::EffectType::delay);
+    effect->bindings[0].lfo_desc_id     = chain_lfo;
+    effect->bindings[0].lfo_depth       = 0.125f;
+    add_detached_record(&source, 0, 0, 4, 0, 901, 902, Synth::ModSource::none, Synth::ModSource::none, 0);
+    strcpy(source.graph_layout[source.graph_layout_count - 1].name, "Delay");
+    add_detached_record(&source, 0, 0, 4, 0, 903, 904, Synth::ModSource::none, Synth::ModSource::none, 0);
+    strcpy(source.graph_layout[source.graph_layout_count - 1].name, "LFO 2");
+    const char* const path = "/tmp/synth_named_fm_roundtrip.tmp";
+    remove(path);
+    source_before = source;
+    TEST(Synth::save_library_record(path, "Regression", "Named FM", &source, 0) == 0);
+    TEST(memcmp(&source, &source_before, sizeof(source)) == 0);
+    Synth::LibraryEntry entry;
+    TEST(Synth::read_library_index(path, &entry, 1) == 1);
+    uint16_t output_slot = 0xBEEF;
+    TEST(Synth::load_library_instrument(path, &entry, &destination, 2, &output_slot));
+    TEST(output_slot != 0 && output_slot != 0xBEEF);
+    check_named_fm_projection(destination, 2, 0);
+    TEST(destination.bank.instruments.num_allocated == 3);
+    TEST(destination.bank.envelopes.num_allocated == 4);
+    TEST(destination.bank.lfos.num_allocated == 3);
+    for (uint32_t zone = 1; zone < Synth::max_instr_per_channel; ++zone) {
+        TEST(destination.bank.channel_zones[2][zone].instrument == output_slot + zone % 2);
+        TEST(destination.bank.channel_zones[2][zone].start_note == 1 + 7 * zone);
+        uint32_t records = 0;
+        for (uint32_t r = 0; r < destination.graph_layout_count; ++r) {
+            const Synth::GraphNodeLayout& record = destination.graph_layout[r];
+            if (record.channel == 2 && record.zone == zone && record.kind < 4) {
+                ++records;
+                if (record.kind == 0) {
+                    const float base_x = record.index == 2 ? 77.0f : 500.0f + 100.0f * static_cast<float>(record.index);
+                    TEST(record.x == base_x + static_cast<float>(zone));
+                }
+            }
+        }
+        TEST(records == 6);
+    }
+    TEST(destination.bank.channel_chains[2].effects[0].bindings[0].lfo_desc_id == 3);
+    TEST(count_records_matching(destination, 2, 0, 4, 0) == 2);
+    bool remapped_lfo_title = false;
+    bool preserved_master   = false;
+    for (uint32_t r = 0; r < destination.graph_layout_count; ++r) {
+        const Synth::GraphNodeLayout& record = destination.graph_layout[r];
+        if (record.channel == 2 && record.kind == 4 && strcmp(record.name, "LFO 3") == 0) {
+            remapped_lfo_title = record.x == 903 && record.y == 904;
+        }
+        if (record.channel == Synth::max_channels) {
+            preserved_master = memcmp(&record, &unrelated_effect, sizeof(record)) == 0;
+        }
+    }
+    TEST(remapped_lfo_title);
+    TEST(preserved_master);
+    TEST(destination.bank.master_chain.effects[0].bindings[0].lfo_desc_id == 1);
+    TEST(strcmp(destination.channel_names[2], "Destination") == 0);
+    TEST(destination.bank.channel_zones[0][0].instrument == 0);
+    destination.bank.channel_enabled[2] = 1;
+    Synth::reclaim_unused_slots(&destination);
+    check_named_fm_projection(destination, 2, 0);
+    TEST(destination.bank.lfos.num_allocated == 3);
+    TEST(Sculptor::validate_editor_metadata(destination));
+    bool reclaimed_title = false;
+    for (uint32_t r = 0; r < destination.graph_layout_count; ++r) {
+        const Synth::GraphNodeLayout& record = destination.graph_layout[r];
+        if (record.channel == 2 && record.kind == 4 && strcmp(record.name, "LFO 3") == 0)
+            reclaimed_title = true;
+    }
+    TEST(reclaimed_title);
+    remove(path);
+}
+
+static void check_new_zone_metadata_clone()
+{
+    static Synth::InstrumentEditorBank source;
+    static Synth::InstrumentEditorBank candidate;
+    build_named_fm_fixture(&source);
+    strcpy(source.graph_layout[0].name, "Parameter1");
+    source.graph_layout[3].width_override  = 280;
+    source.graph_layout[3].height_override = 180;
+    const uint32_t records                 = source.graph_layout_count;
+    candidate                              = source;
+    TEST(Synth::zone_split_new(candidate.bank.channel_zones[0], 0, 60, &candidate));
+    TEST(Sculptor::zone_records_split_copy(&candidate, 0, 0));
+    TEST(candidate.bank.channel_zones[0][0].start_note == 1);
+    TEST(candidate.bank.channel_zones[0][1].start_note == 61);
+    TEST(strcmp(candidate.instrument_names[candidate.bank.channel_zones[0][1].instrument], "Named FM") == 0);
+    TEST(candidate.graph_layout_count == 2 * records);
+    for (uint32_t r = 0; r < records; ++r) {
+        const Synth::GraphNodeLayout& original = source.graph_layout[r];
+        const int32_t cloned = Sculptor::find_record(candidate, 0, 1, original.kind, original.index, original.uid);
+        TEST(cloned >= 0);
+        if (cloned >= 0) {
+            Synth::GraphNodeLayout expected = original;
+            expected.zone                   = 1;
+            TEST(memcmp(&expected, &candidate.graph_layout[cloned], sizeof(expected)) == 0);
+        }
+    }
+    static Sculptor::Graph           graph;
+    static Sculptor::OscGraphMapping mapping;
+    TEST(Sculptor::project_editor_to_graph(candidate, &graph, &mapping, 0, 1));
+    bool named = false;
+    for (uint32_t p = 0; p < mapping.param_count; ++p) {
+        const Sculptor::Node& node = graph.node(mapping.params[p].node_idx);
+        if (strcmp(node.name, "Parameter1") == 0) {
+            named = node.position.x == source.graph_layout[0].x &&
+                    node.content_width_override == source.graph_layout[0].width_override;
+        }
+    }
+    TEST(named);
+    static Sculptor::Graph           original_graph;
+    static Sculptor::OscGraphMapping original_mapping;
+    TEST(Sculptor::project_editor_to_graph(source, &original_graph, &original_mapping, 0, 0));
+    for (uint32_t n = 0; n < Sculptor::max_nodes; ++n) {
+        if (! original_graph.node_occupied(n))
+            continue;
+        const Sculptor::Node& original = original_graph.node(n);
+        bool                  matched  = false;
+        for (uint32_t c = 0; c < Sculptor::max_nodes; ++c) {
+            if (! graph.node_occupied(c) || strcmp(original.name, graph.node(c).name) != 0)
+                continue;
+            const Sculptor::Node& clone = graph.node(c);
+            TEST(clone.position.x == original.position.x && clone.position.y == original.position.y);
+            TEST(clone.content_width_override == original.content_width_override);
+            TEST(clone.content_height_override == original.content_height_override);
+            matched = true;
+        }
+        TEST(matched);
+    }
+    TEST(Sculptor::validate_editor_metadata(candidate));
+    // Replacing the instrument at its first note does not insert or move metadata.
+    candidate = source;
+    TEST(Synth::zone_split_new(candidate.bank.channel_zones[0], 0, 0, &candidate));
+    TEST(candidate.graph_layout_count == records);
+    TEST(memcmp(source.graph_layout, candidate.graph_layout, records * sizeof(source.graph_layout[0])) == 0);
+    // Effect records belong to the channel, even when their zone byte is nonzero.
+    candidate                     = source;
+    Synth::GraphNodeLayout effect = {};
+    effect.kind                   = 4;
+    effect.zone                   = 2;
+    strcpy(effect.name, "Delay");
+    candidate.graph_layout[candidate.graph_layout_count++] = effect;
+    TEST(Sculptor::zone_records_split_copy(&candidate, 0, 0));
+    TEST(candidate.graph_layout_count == 2 * records + 1);
+    TEST(memcmp(&candidate.graph_layout[records], &effect, sizeof(effect)) == 0);
+    // The metadata helper must refuse before shifting records or missing-sum rows.
+    candidate                    = source;
+    candidate.graph_layout_count = Synth::max_graph_records - 3;
+    static Synth::InstrumentEditorBank before;
+    before = candidate;
+    TEST(! Sculptor::zone_records_split_copy(&candidate, 0, 0));
+    TEST(memcmp(&candidate, &before, sizeof(candidate)) == 0);
+}
+
+static void check_zero_fm_clipboard_library_round_trips()
+{
+    static Synth::InstrumentEditorBank source;
+    static Synth::InstrumentEditorBank destination;
+    static Synth::InstrumentEditorBank installed;
+    static ClipboardDecode             decoded;
+    static char                        text[clipboard_capacity];
+    const char* const                  path = "/tmp/synth_zero_fm_roundtrip.tmp";
+    for (uint32_t active = 0; active < 2; ++active) {
+        for (uint32_t nonzero = 0; nonzero < 2; ++nonzero) {
+            build_named_fm_fixture(&source);
+            const float depth                                                          = nonzero ? 0.625f : 0.0f;
+            const float ratio                                                          = nonzero ? 2.0f : 0.0f;
+            source.bank.instruments.entries[0].routing[Synth::mod_fm_index].base_value = depth * 6.2831853f;
+            for (uint32_t l = 0; l < source.bank.instruments.entries[0].layer_count; ++l) {
+                Synth::Oscillator& osc = source.bank.instruments.entries[0].layers[l];
+                osc.osc_type[1]        = active ? Synth::WaveType::sine_wave : Synth::WaveType::no_wave;
+                osc.osc_mode           = active ? Synth::osc_mode_fm : Synth::osc_mode_blend;
+                osc.mod_ratio          = ratio;
+            }
+            TEST(Synth::validate_instrument_bank(&source.bank));
+            TEST(export_clipboard_fixture(source, text, sizeof(text)));
+            TEST(decode_clipboard(&decoded, text, max_portable_records));
+            TEST(decoded.instr.routing[Synth::mod_fm_index].base_value == depth * 6.2831853f);
+            TEST(decoded.instr.layers[0].mod_ratio == ratio);
+            destination = source;
+            TEST(Sculptor::replace_zone_instrument_candidate(destination,
+                                                             0,
+                                                             0,
+                                                             decoded.instr,
+                                                             decoded.envs,
+                                                             decoded.env_count,
+                                                             decoded.lfos,
+                                                             decoded.lfo_count,
+                                                             decoded.layout,
+                                                             decoded.layout_count,
+                                                             &installed));
+            for (uint32_t transport = 0; transport < 2; ++transport) {
+                if (transport) {
+                    remove(path);
+                    TEST(Synth::save_library_record(path, "Regression", "Zero FM", &source, 0) == 0);
+                    Synth::LibraryEntry entry;
+                    TEST(Synth::read_library_index(path, &entry, 1) == 1);
+                    uint16_t slot = 0xBEEF;
+                    TEST(Synth::load_library_instrument(path, &entry, &destination, 2, &slot));
+                    installed = destination;
+                }
+                const uint32_t           channel = transport ? 2 : 0;
+                const Synth::Instrument& instr =
+                    installed.bank.instruments.entries[installed.bank.channel_zones[channel][0].instrument];
+                TEST(instr.routing[Synth::mod_fm_index].base_value == depth * 6.2831853f);
+                static Sculptor::Graph           graph;
+                static Sculptor::OscGraphMapping mapping;
+                TEST(Sculptor::project_editor_to_graph(installed, &graph, &mapping, channel, 0));
+                for (uint32_t l = 0; l < instr.layer_count; ++l) {
+                    TEST(instr.layers[l].mod_ratio == ratio);
+                    TEST(instr.layers[l].osc_type[1] ==
+                         (active ? Synth::WaveType::sine_wave : Synth::WaveType::no_wave));
+                    TEST(instr.layers[l].osc_mode == (active ? Synth::osc_mode_fm : Synth::osc_mode_blend));
+                    const Sculptor::Node& node = graph.node(mapping.osc_nodes[l]);
+                    TEST(node.slots.entries[7].value.real == depth);
+                    TEST(node.slots.entries[8].value.real == ratio);
+                    TEST(fm_widget_enabled(graph, mapping.osc_nodes[l]) == (active != 0));
+                }
+            }
+        }
+    }
+    // Legacy omission retains the decoder default; explicit zero is not omission.
+    const char* const omitted = "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\"}]}";
+    TEST(decode_clipboard(&decoded, omitted, max_portable_records));
+    TEST(decoded.instr.layers[0].mod_ratio == 1);
+    const char* const explicit_zero =
+        "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\",\"mod_ratio\":0,\"fm_index\":{\"base\":0}}]}";
+    TEST(decode_clipboard(&decoded, explicit_zero, max_portable_records));
+    TEST(decoded.instr.layers[0].mod_ratio == 0);
+    TEST(decoded.instr.routing[Synth::mod_fm_index].base_value == 0);
+    remove(path);
+}
+
+static void check_library_metadata_transactions()
+{
+    Synth::GraphNodeLayout a = {};
+    strcpy(a.name, "Delay");
+    for (uint32_t kind = 0; kind <= 4; ++kind) {
+        a.kind                   = static_cast<uint8_t>(kind);
+        Synth::GraphNodeLayout b = a;
+        TEST(Sculptor::graph_layout_record_identity_equal(a, b));
+        strcpy(b.name, "Other");
+        TEST(Sculptor::graph_layout_record_identity_equal(a, b) == (kind != 4));
+        b = a;
+        ++b.channel;
+        TEST(! Sculptor::graph_layout_record_identity_equal(a, b));
+        b = a;
+        ++b.zone;
+        TEST(! Sculptor::graph_layout_record_identity_equal(a, b));
+        b = a;
+        ++b.kind;
+        TEST(! Sculptor::graph_layout_record_identity_equal(a, b));
+        b = a;
+        ++b.index;
+        TEST(! Sculptor::graph_layout_record_identity_equal(a, b));
+        b = a;
+        ++b.uid;
+        TEST(! Sculptor::graph_layout_record_identity_equal(a, b));
+        b   = a;
+        b.x = 123;
+        TEST(Sculptor::graph_layout_record_identity_equal(a, b));
+    }
+    static Synth::InstrumentEditorBank identity_bank;
+    identity_bank.graph_layout_count = 2;
+    identity_bank.graph_layout[0]    = a;
+    identity_bank.graph_layout[1]    = a;
+    TEST(! Sculptor::validate_editor_metadata(identity_bank));
+    strcpy(identity_bank.graph_layout[1].name, "Other");
+    TEST(Sculptor::validate_editor_metadata(identity_bank));
+    static Synth::InstrumentEditorBank source;
+    build_named_fm_fixture(&source);
+    source.bank.channel_enabled[0] = 0;
+    static char payload[Synth::library_payload_max];
+    uint32_t    length = Synth::encode_editor_bank_json(&source, payload, sizeof(payload));
+    TEST(length > 0);
+    const char* const path = "/tmp/synth_metadata_transaction.tmp";
+    write_library_fixture(path, payload, length);
+    Synth::LibraryEntry control_entry;
+    TEST(Synth::read_library_index(path, &control_entry, 1) == 1);
+    static Synth::InstrumentEditorBank control_destination;
+    uint16_t                           control_slot = 0xBEEF;
+    TEST(Synth::load_library_instrument(path, &control_entry, &control_destination, 2, &control_slot));
+    static char before[Synth::library_payload_max + 128];
+    static char after[Synth::library_payload_max + 128];
+    // A duplicate locator with conflicting title/position must reach strict
+    // library validation before the compatible bank reader discards it.
+    char* const layouts = strstr(payload, "\"layouts\":[");
+    TEST(layouts != nullptr);
+    if (layouts) {
+        char* const insert = layouts + strlen("\"layouts\":[");
+        const char  duplicate[] =
+            "{\"channel\":0,\"zone\":0,\"kind\":3,\"index\":0,\"uid\":2,\"param_slot\":2,\"name\":\"Conflict\",\"x\":999,\"y\":888},";
+        const size_t offset = static_cast<size_t>(insert - payload);
+        memmove(insert + sizeof(duplicate) - 1, insert, length - offset + 1);
+        memcpy(insert, duplicate, sizeof(duplicate) - 1);
+        length += sizeof(duplicate) - 1;
+        static Synth::InstrumentEditorBank legacy;
+        TEST(Synth::decode_editor_bank_json(payload, length, &legacy));
+        TEST(legacy.graph_layout_count == source.graph_layout_count);
+        write_library_fixture(path, payload, length);
+        const uint32_t      file_size = read_library_fixture(path, before, sizeof(before));
+        Synth::LibraryEntry entry;
+        TEST(Synth::read_library_index(path, &entry, 1) == 1);
+        static Synth::InstrumentEditorBank destination;
+        static Synth::InstrumentEditorBank snapshot;
+        Synth::Instrument                  occupied;
+        build_clipboard_zone_fixture(&destination, &occupied);
+        snapshot             = destination;
+        uint16_t output_slot = 0xBEEF;
+        TEST(! Synth::load_library_instrument(path, &entry, &destination, 2, &output_slot));
+        TEST(memcmp(&destination, &snapshot, sizeof(destination)) == 0);
+        TEST(output_slot == 0xBEEF);
+        TEST(read_library_fixture(path, after, sizeof(after)) == file_size);
+        TEST(memcmp(before, after, file_size) == 0);
+    }
+    // Unknown metadata is tolerated by ordinary bank reads, not library imports.
+    const char* const unknown_keys[] = { "\"layouts\":[{", "\"editor\":{" };
+    for (const char* key : unknown_keys) {
+        length       = Synth::encode_editor_bank_json(&source, payload, sizeof(payload));
+        char* insert = strstr(payload, key);
+        TEST(insert != nullptr);
+        if (! insert)
+            continue;
+        insert += strlen(key);
+        const char   unknown[] = "\"future\":1,";
+        const size_t offset    = static_cast<size_t>(insert - payload);
+        memmove(insert + sizeof(unknown) - 1, insert, length - offset + 1);
+        memcpy(insert, unknown, sizeof(unknown) - 1);
+        length += sizeof(unknown) - 1;
+        static Synth::InstrumentEditorBank legacy_unknown;
+        TEST(Synth::decode_editor_bank_json(payload, length, &legacy_unknown));
+        write_library_fixture(path, payload, length);
+        const uint32_t      file_size = read_library_fixture(path, before, sizeof(before));
+        Synth::LibraryEntry entry;
+        TEST(Synth::read_library_index(path, &entry, 1) == 1);
+        static Synth::InstrumentEditorBank unknown_destination;
+        static Synth::InstrumentEditorBank unknown_snapshot;
+        unknown_snapshot     = unknown_destination;
+        uint16_t output_slot = 0xBEEF;
+        TEST(! Synth::load_library_instrument(path, &entry, &unknown_destination, 2, &output_slot));
+        TEST(memcmp(&unknown_destination, &unknown_snapshot, sizeof(unknown_destination)) == 0);
+        TEST(output_slot == 0xBEEF);
+        TEST(read_library_fixture(path, after, sizeof(after)) == file_size);
+        TEST(memcmp(before, after, file_size) == 0);
+    }
+    // Missing-sum state in a hand-crafted record cannot be silently discarded.
+    source.graph_layout_count      = 0;
+    source.graph_missing_sum[0][0] = 1;
+    length                         = Synth::encode_editor_bank_json(&source, payload, sizeof(payload));
+    TEST(length > 0);
+    write_library_fixture(path, payload, length);
+    const uint32_t      missing_sum_size = read_library_fixture(path, before, sizeof(before));
+    Synth::LibraryEntry missing_sum_entry;
+    TEST(Synth::read_library_index(path, &missing_sum_entry, 1) == 1);
+    static Synth::InstrumentEditorBank missing_sum_snapshot;
+    missing_sum_snapshot      = control_destination;
+    uint16_t missing_sum_slot = 0xBEEF;
+    TEST(! Synth::load_library_instrument(path, &missing_sum_entry, &control_destination, 2, &missing_sum_slot));
+    TEST(missing_sum_slot == 0xBEEF);
+    TEST(memcmp(&control_destination, &missing_sum_snapshot, sizeof(control_destination)) == 0);
+    TEST(read_library_fixture(path, after, sizeof(after)) == missing_sum_size);
+    TEST(memcmp(before, after, missing_sum_size) == 0);
+    build_named_fm_fixture(&source);
+    // Failed serialization must not overwrite an existing record or its source.
+    remove(path);
+    TEST(Synth::save_library_record(path, "Regression", "FM", &source, 0) == 0);
+    const uint32_t file_size = read_library_fixture(path, before, sizeof(before));
+    memset(source.graph_layout[0].name, 'x', sizeof(source.graph_layout[0].name));
+    static Synth::InstrumentEditorBank snapshot;
+    snapshot = source;
+    TEST(! export_clipboard_fixture(source, payload, sizeof(payload)));
+    TEST(Synth::save_library_record(path, "Regression", "FM", &source, 0) != 0);
+    TEST(memcmp(&source, &snapshot, sizeof(source)) == 0);
+    TEST(read_library_fixture(path, after, sizeof(after)) == file_size);
+    TEST(memcmp(before, after, file_size) == 0);
+    remove(path);
+
+    static ClipboardDecode attempted;
+    static ClipboardDecode sentinel;
+    const char* const      bad_records[] = {
+        "{\"kind\":3,\"target\":0,\"parameter_ordinal\":0,\"name\":\"1234567890123456789012345678901234\",\"x\":0,\"y\":0,\"width\":0,\"height\":0}",
+        "{\"kind\":3,\"target\":0,\"parameter_ordinal\":0,\"name\":\"bad\\q\",\"x\":0,\"y\":0,\"width\":0,\"height\":0}"
+    };
+    for (const char* record : bad_records) {
+        const int written = snprintf(payload, sizeof(payload), "%s\"graph_layout\":[%s]}", clipboard_doc_head, record);
+        TEST(written > 0 && static_cast<uint32_t>(written) < sizeof(payload));
+        fill_clipboard_sentinels(&attempted);
+        fill_clipboard_sentinels(&sentinel);
+        TEST(! decode_clipboard(&attempted, payload, max_portable_records));
+        TEST(clipboard_sentinels_intact(&attempted, &sentinel));
+    }
+}
+
+static void check_editor_round_trip_capacity_failures()
+{
+    static Synth::InstrumentEditorBank source;
+    static Synth::InstrumentEditorBank source_before;
+    static Synth::InstrumentEditorBank destination;
+    static Synth::InstrumentEditorBank destination_before;
+    static Synth::InstrumentEditorBank candidate;
+    static Synth::InstrumentEditorBank candidate_before;
+    build_named_fm_fixture(&source);
+    source_before = source;
+    char tiny[16];
+    TEST(! export_clipboard_fixture(source, tiny, sizeof(tiny)));
+    TEST(memcmp(&source, &source_before, sizeof(source)) == 0);
+    static char document[clipboard_capacity];
+    TEST(export_clipboard_fixture(source, document, sizeof(document)));
+    static ClipboardDecode decoded;
+    static ClipboardDecode sentinel;
+    fill_clipboard_sentinels(&decoded);
+    fill_clipboard_sentinels(&sentinel);
+    TEST(! decode_clipboard(&decoded, document, 1));
+    TEST(clipboard_sentinels_intact(&decoded, &sentinel));
+    TEST(decode_clipboard(&decoded, document, max_portable_records));
+    Synth::Instrument occupied;
+    build_clipboard_zone_fixture(&destination, &occupied);
+    // Copy-on-write preflights an additional instrument slot before reclaiming
+    // the unreferenced last slot; the full pool must refuse without mutation.
+    for (uint32_t slot = 1; slot < Synth::max_instruments; ++slot) {
+        TEST(destination.bank.instruments.allocate() == slot);
+        destination.bank.instruments.entries[slot] = occupied;
+    }
+    for (uint32_t channel = 0; channel < Synth::max_channels; ++channel) {
+        destination.bank.channel_enabled[channel] = 1;
+        for (uint32_t zone = 0; zone < Synth::max_instr_per_channel; ++zone) {
+            Synth::Zone& root = destination.bank.channel_zones[channel][zone];
+            root.start_note   = static_cast<uint8_t>(1 + 7 * zone);
+            root.instrument =
+                static_cast<uint8_t>((channel * Synth::max_instr_per_channel + zone) % Synth::max_instruments);
+        }
+    }
+    destination.bank.channel_zones[Synth::max_channels - 1][Synth::max_instr_per_channel - 1].instrument = 0;
+    TEST(Synth::validate_instrument_bank(&destination.bank));
+    destination_before = destination;
+    memset(&candidate, 0x5A, sizeof(candidate));
+    candidate_before = candidate;
+    TEST(! Sculptor::replace_zone_instrument_candidate(destination,
+                                                       0,
+                                                       0,
+                                                       decoded.instr,
+                                                       decoded.envs,
+                                                       decoded.env_count,
+                                                       decoded.lfos,
+                                                       decoded.lfo_count,
+                                                       decoded.layout,
+                                                       decoded.layout_count,
+                                                       &candidate));
+    TEST(memcmp(&destination, &destination_before, sizeof(destination)) == 0);
+    TEST(memcmp(&candidate, &candidate_before, sizeof(candidate)) == 0);
+    const char* const path = "/tmp/synth_roundtrip_capacity.tmp";
+    remove(path);
+    TEST(Synth::save_library_record(path, "Regression", "FM", &source, 0) == 0);
+    Synth::LibraryEntry entry;
+    TEST(Synth::read_library_index(path, &entry, 1) == 1);
+    static char    before[Synth::library_payload_max + 128];
+    static char    after[Synth::library_payload_max + 128];
+    const uint32_t bytes       = read_library_fixture(path, before, sizeof(before));
+    uint16_t       output_slot = 0xBEEF;
+    TEST(! Synth::load_library_instrument(path, &entry, &destination, 0, &output_slot));
+    TEST(output_slot == 0xBEEF);
+    TEST(memcmp(&destination, &destination_before, sizeof(destination)) == 0);
+    TEST(memcmp(&source, &source_before, sizeof(source)) == 0);
+    TEST(read_library_fixture(path, after, sizeof(after)) == bytes);
+    TEST(memcmp(before, after, bytes) == 0);
+    remove(path);
+}
+
+static void check_unrepresented_layout_refusal()
+{
+    static Synth::InstrumentEditorBank source;
+    static Synth::InstrumentEditorBank snapshot;
+    static char                        document[clipboard_capacity];
+    const char* const                  path = "/tmp/synth_unrepresented_layout.tmp";
+    static char                        before[Synth::library_payload_max + 128];
+    static char                        after[Synth::library_payload_max + 128];
+    for (uint32_t shape = 0; shape < 3; ++shape) {
+        build_named_fm_fixture(&source);
+        remove(path);
+        TEST(Synth::save_library_record(path, "Regression", "FM", &source, 0) == 0);
+        const uint32_t bytes = read_library_fixture(path, before, sizeof(before));
+        if (shape == 0) {
+            const uint16_t lfo = add_detached_lfo_descriptor(&source);
+            add_detached_record(&source, 0, 0, 2, lfo, 991, 992, Synth::ModSource::none, Synth::ModSource::none, 1);
+        }
+        else if (shape == 1) {
+            add_parameter_record(&source, 0, 0, 2, 993, 994, 3);
+            source.graph_layout[source.graph_layout_count - 1].param_slot = Synth::graph_record_param_free;
+            strcpy(source.graph_layout[source.graph_layout_count - 1].name, "Unwired");
+        }
+        else {
+            source.graph_missing_sum[0][0] = 1;
+        }
+        TEST(Synth::validate_instrument_bank(&source.bank));
+        TEST(Sculptor::validate_editor_metadata(source));
+        snapshot = source;
+        TEST(! export_clipboard_fixture(source, document, sizeof(document)));
+        TEST(Synth::save_library_record(path, "Regression", "FM", &source, 0) != 0);
+        TEST(memcmp(&source, &snapshot, sizeof(source)) == 0);
+        TEST(read_library_fixture(path, after, sizeof(after)) == bytes);
+        TEST(memcmp(before, after, bytes) == 0);
+        remove(path);
+    }
+}
+
+static void check_legacy_library_numeric_domains()
+{
+    static Synth::InstrumentEditorBank source;
+    static Synth::InstrumentEditorBank destination;
+    static char                        text[clipboard_capacity];
+    const char* const                  path = "/tmp/synth_legacy_numeric.tmp";
+    for (uint32_t values = 1; values <= 3; ++values) {
+        for (uint32_t metadata = 0; metadata < 2; ++metadata) {
+            build_named_fm_fixture(&source);
+            if (! metadata) {
+                source.graph_layout_count = 0;
+            }
+            Synth::Oscillator& osc = source.bank.instruments.entries[0].layers[0];
+            osc.pitch_offset       = values & 1 ? 13.0f : 0;
+            osc.mod_ratio          = values & 2 ? 9.0f : 2;
+            TEST(Synth::validate_instrument_bank(&source.bank));
+            const uint32_t len =
+                Synth::encode_instrument_json(text, sizeof(text), &source.bank.instruments.entries[0], &source.bank);
+            TEST(len > 0);
+            static ClipboardDecode attempted;
+            static ClipboardDecode sentinel;
+            fill_clipboard_sentinels(&attempted);
+            fill_clipboard_sentinels(&sentinel);
+            TEST(! decode_clipboard(&attempted, text, max_portable_records));
+            TEST(clipboard_sentinels_intact(&attempted, &sentinel));
+            static char legacy_payload[Synth::library_payload_max];
+            source.bank.channel_enabled[0] = 0;
+            const uint32_t legacy_length =
+                Synth::encode_editor_bank_json(&source, legacy_payload, sizeof(legacy_payload));
+            TEST(legacy_length > 0);
+            write_library_fixture(path, legacy_payload, legacy_length);
+            Synth::LibraryEntry legacy_entry;
+            TEST(Synth::read_library_index(path, &legacy_entry, 1) == 1);
+            destination          = {};
+            uint16_t legacy_slot = 0xBEEF;
+            TEST(Synth::load_library_instrument(path, &legacy_entry, &destination, 2, &legacy_slot));
+            TEST(legacy_slot == 0);
+            TEST(destination.bank.instruments.entries[0].layers[0].pitch_offset == osc.pitch_offset);
+            TEST(destination.bank.instruments.entries[0].layers[0].mod_ratio == osc.mod_ratio);
+            if (metadata) {
+                TEST(destination.graph_layout_count == source.graph_layout_count);
+            }
+            source.bank.channel_enabled[0] = 1;
+            remove(path);
+            TEST(Synth::save_library_record(path, "Legacy", "Numeric", &source, 0) == 0);
+            Synth::LibraryEntry entry;
+            TEST(Synth::read_library_index(path, &entry, 1) == 1);
+            destination          = {};
+            uint16_t output_slot = 0xBEEF;
+            TEST(Synth::load_library_instrument(path, &entry, &destination, 2, &output_slot));
+            TEST(output_slot == 0);
+            TEST(destination.bank.instruments.entries[0].layers[0].pitch_offset == osc.pitch_offset);
+            TEST(destination.bank.instruments.entries[0].layers[0].mod_ratio == osc.mod_ratio);
+            if (metadata) {
+                TEST(destination.graph_layout_count == source.graph_layout_count);
+            }
+            remove(path);
+        }
+    }
+}
+
+static void check_shared_instrument_json_domains()
+{
+    static Synth::InstrumentEditorBank source;
+    static Synth::InstrumentEditorBank snapshot;
+    static ClipboardDecode             decoded;
+    static ClipboardDecode             sentinel;
+    static char                        text[clipboard_capacity];
+    const char*                        invalid[] = {
+        "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\",\"mod_ratio\":1e999}]}",
+        "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"bad\"}]}",
+        "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\",\"volume\":{\"sources\":[{\"source\":\"bad\"}]}}]}"
+    };
+    const Synth::InstrumentJsonDomain domains[] = { Synth::InstrumentJsonDomain::clipboard,
+                                                    Synth::InstrumentJsonDomain::validated_bank };
+    for (Synth::InstrumentJsonDomain domain : domains) {
+        for (const char* document : invalid) {
+            fill_clipboard_sentinels(&decoded);
+            fill_clipboard_sentinels(&sentinel);
+            TEST(! Synth::decode_instrument_json_for_domain(document,
+                                                            static_cast<uint32_t>(strlen(document)),
+                                                            &decoded.instr,
+                                                            decoded.envs,
+                                                            &decoded.env_count,
+                                                            decoded.lfos,
+                                                            &decoded.lfo_count,
+                                                            decoded.layout,
+                                                            max_portable_records,
+                                                            &decoded.layout_count,
+                                                            domain));
+            TEST(clipboard_sentinels_intact(&decoded, &sentinel));
+        }
+        build_named_fm_fixture(&source);
+        snapshot = source;
+        TEST(Sculptor::encode_editor_instrument_json(source, 0, 0, text, sizeof(text), domain) != 0);
+        source.bank.instruments.entries[0].layers[0].mod_ratio = NAN;
+        TEST(Sculptor::encode_editor_instrument_json(source, 0, 0, text, sizeof(text), domain) == 0);
+        source                                                   = snapshot;
+        source.bank.instruments.entries[0].layers[0].osc_type[0] = static_cast<Synth::WaveType>(255);
+        TEST(Sculptor::encode_editor_instrument_json(source, 0, 0, text, sizeof(text), domain) == 0);
+        source = snapshot;
+        source.bank.instruments.entries[0].routing[Synth::mod_volume].inputs[0].source =
+            static_cast<Synth::ModSource>(255);
+        TEST(Sculptor::encode_editor_instrument_json(source, 0, 0, text, sizeof(text), domain) == 0);
+    }
+    // Titles are bounded UTF-8 strings in both transport domains.
+    const char* title_path = "/tmp/synth_invalid_title.tmp";
+    char        text_before[clipboard_capacity];
+    char        file_before[clipboard_capacity];
+    char        file_after[clipboard_capacity];
+    for (Synth::InstrumentJsonDomain domain : domains) {
+        for (uint32_t malformed = 0; malformed < 2; ++malformed) {
+            build_named_fm_fixture(&source);
+            remove(title_path);
+            TEST(Synth::save_library_record(title_path, "Regression", "Titles", &source, 0) == 0);
+            const uint32_t file_length = read_library_fixture(title_path, file_before, sizeof(file_before));
+            const uint32_t valid_length =
+                Sculptor::encode_editor_instrument_json(source, 0, 0, text, sizeof(text), domain);
+            TEST(valid_length > 0);
+            TEST(Synth::decode_instrument_json_for_domain(text,
+                                                          valid_length,
+                                                          &decoded.instr,
+                                                          decoded.envs,
+                                                          &decoded.env_count,
+                                                          decoded.lfos,
+                                                          &decoded.lfo_count,
+                                                          decoded.layout,
+                                                          max_portable_records,
+                                                          &decoded.layout_count,
+                                                          domain));
+            char title[32] = {};
+            if (malformed == 0)
+                title[0] = static_cast<char>(0xff);
+            else {
+                memset(title, 'a', 30);
+                title[30] = static_cast<char>(0xc3);
+            }
+            memcpy(source.graph_layout[0].name, title, sizeof(title));
+            snapshot = source;
+            memcpy(text_before, text, sizeof(text));
+            TEST(Sculptor::encode_editor_instrument_json(source, 0, 0, text, sizeof(text), domain) == 0);
+            TEST(memcmp(text, text_before, sizeof(text)) == 0);
+            TEST(memcmp(&source, &snapshot, sizeof(source)) == 0);
+            TEST(Synth::save_library_record(title_path, "Regression", "Titles", &source, 0) != 0);
+            TEST(memcmp(&source, &snapshot, sizeof(source)) == 0);
+            TEST(read_library_fixture(title_path, file_after, sizeof(file_after)) == file_length);
+            TEST(memcmp(file_before, file_after, file_length) == 0);
+            Synth::InstrumentGraphLayout portable[max_portable_records];
+            memcpy(portable, decoded.layout, sizeof(portable));
+            uint32_t parameter = 0;
+            while (parameter < decoded.layout_count && portable[parameter].kind != 3)
+                ++parameter;
+            TEST(parameter < decoded.layout_count);
+            if (parameter < decoded.layout_count) {
+                memcpy(portable[parameter].name, title, sizeof(title));
+                TEST(Synth::encode_instrument_json(text,
+                                                   sizeof(text),
+                                                   &decoded.instr,
+                                                   &source.bank,
+                                                   portable,
+                                                   decoded.layout_count) == 0);
+            }
+            fill_clipboard_sentinels(&decoded);
+            fill_clipboard_sentinels(&sentinel);
+            char invalid_title_doc[clipboard_capacity];
+            memcpy(invalid_title_doc, text_before, valid_length);
+            invalid_title_doc[valid_length] = 0;
+            char* title_bytes               = strstr(invalid_title_doc, "\"name\":\"Body\"");
+            TEST(title_bytes != nullptr);
+            if (title_bytes)
+                title_bytes[11] = static_cast<char>(malformed == 0 ? 0xff : 0xc3);
+            TEST(! Synth::decode_instrument_json_for_domain(invalid_title_doc,
+                                                            valid_length,
+                                                            &decoded.instr,
+                                                            decoded.envs,
+                                                            &decoded.env_count,
+                                                            decoded.lfos,
+                                                            &decoded.lfo_count,
+                                                            decoded.layout,
+                                                            max_portable_records,
+                                                            &decoded.layout_count,
+                                                            domain));
+            TEST(clipboard_sentinels_intact(&decoded, &sentinel));
+            build_named_fm_fixture(&source);
+            const uint32_t bank_length = Synth::encode_editor_bank_json(&source, file_after, sizeof(file_after));
+            TEST(bank_length > 0 && bank_length < sizeof(file_after));
+            file_after[bank_length] = 0;
+            title_bytes             = strstr(file_after, "\"name\":\"Body\"");
+            TEST(title_bytes != nullptr);
+            if (title_bytes)
+                title_bytes[11] = static_cast<char>(malformed == 0 ? 0xff : 0xc3);
+            write_library_fixture(title_path, file_after, bank_length);
+            Synth::LibraryEntry invalid_entry;
+            TEST(Synth::read_library_index(title_path, &invalid_entry, 1) == 1);
+            snapshot             = source;
+            uint16_t output_slot = 0xBEEF;
+            TEST(! Synth::load_library_instrument(title_path, &invalid_entry, &source, 1, &output_slot));
+            TEST(output_slot == 0xBEEF);
+            TEST(memcmp(&source, &snapshot, sizeof(source)) == 0);
+            memcpy(source.graph_layout[0].name, title, sizeof(title));
+            snapshot = source;
+            TEST(Synth::encode_editor_bank_json(&source, file_after, sizeof(file_after)) == 0);
+            TEST(memcmp(&source, &snapshot, sizeof(source)) == 0);
+            remove(title_path);
+        }
+        build_named_fm_fixture(&source);
+        memset(source.graph_layout[0].name, 'a', 29);
+        memcpy(source.graph_layout[0].name + 29, "\xc3\xa9", 3);
+        TEST(strlen(source.graph_layout[0].name) == 31);
+        snapshot                    = source;
+        const uint32_t valid_length = Sculptor::encode_editor_instrument_json(source, 0, 0, text, sizeof(text), domain);
+        TEST(valid_length > 0);
+        memcpy(text_before, text, sizeof(text));
+        TEST(Sculptor::encode_editor_instrument_json(source, 0, 0, text, valid_length, domain) == 0);
+        TEST(memcmp(text, text_before, sizeof(text)) == 0);
+        TEST(memcmp(&source, &snapshot, sizeof(source)) == 0);
+        TEST(Synth::decode_instrument_json_for_domain(text,
+                                                      valid_length,
+                                                      &decoded.instr,
+                                                      decoded.envs,
+                                                      &decoded.env_count,
+                                                      decoded.lfos,
+                                                      &decoded.lfo_count,
+                                                      decoded.layout,
+                                                      max_portable_records,
+                                                      &decoded.layout_count,
+                                                      domain));
+        bool found_title = false;
+        for (uint32_t index = 0; index < decoded.layout_count; ++index)
+            found_title |= strcmp(decoded.layout[index].name, source.graph_layout[0].name) == 0;
+        TEST(found_title);
+        TEST(Synth::encode_instrument_json(text,
+                                           sizeof(text),
+                                           &decoded.instr,
+                                           &source.bank,
+                                           decoded.layout,
+                                           decoded.layout_count) > 0);
+        TEST(Synth::encode_editor_bank_json(&source, file_after, sizeof(file_after)) > 0);
+        TEST(Synth::save_library_record(title_path, "Regression", "Titles", &source, 0) == 0);
+        Synth::LibraryEntry title_entry;
+        TEST(Synth::read_library_index(title_path, &title_entry, 1) == 1);
+        uint16_t output_slot = 0xBEEF;
+        TEST(Synth::load_library_instrument(title_path, &title_entry, &source, 1, &output_slot));
+        TEST(output_slot != 0xBEEF);
+        static Sculptor::Graph           imported_graph;
+        static Sculptor::OscGraphMapping imported_mapping;
+        TEST(Sculptor::project_editor_to_graph(source, &imported_graph, &imported_mapping, 1, 0));
+        bool imported_title = false;
+        for (uint32_t p = 0; p < imported_mapping.param_count; ++p) {
+            const Sculptor::ParamEntry& param = imported_mapping.params[p];
+            if (param.target != snapshot.graph_layout[0].index || param.served != snapshot.graph_layout[0].served)
+                continue;
+            const int32_t saved = Sculptor::find_record(source, 1, 0, 3, param.target, param.uid);
+            TEST(saved >= 0);
+            if (saved >= 0) {
+                TEST(source.graph_layout[saved].channel == 1 && source.graph_layout[saved].kind == 3);
+                TEST(strcmp(source.graph_layout[saved].name, snapshot.graph_layout[0].name) == 0);
+                TEST(strcmp(imported_graph.node(param.node_idx).name, snapshot.graph_layout[0].name) == 0);
+                imported_title = true;
+            }
+        }
+        TEST(imported_title);
+        remove(title_path);
+    }
+    build_named_fm_fixture(&source);
+    source.bank.instruments.entries[0].layers[0].pitch_offset = 13;
+    source.bank.instruments.entries[0].layers[0].mod_ratio    = 9;
+    const uint32_t length = Sculptor::encode_editor_instrument_json(source,
+                                                                    0,
+                                                                    0,
+                                                                    text,
+                                                                    sizeof(text),
+                                                                    Synth::InstrumentJsonDomain::validated_bank);
+    TEST(length > 0);
+    TEST(Synth::decode_instrument_json_for_domain(text,
+                                                  length,
+                                                  &decoded.instr,
+                                                  decoded.envs,
+                                                  &decoded.env_count,
+                                                  decoded.lfos,
+                                                  &decoded.lfo_count,
+                                                  decoded.layout,
+                                                  max_portable_records,
+                                                  &decoded.layout_count,
+                                                  Synth::InstrumentJsonDomain::validated_bank));
+    TEST(decoded.instr.layers[0].pitch_offset == 13 && decoded.instr.layers[0].mod_ratio == 9);
+    TEST(! decode_clipboard(&decoded, text, max_portable_records));
+
+    static char exhausted_text[Synth::library_payload_max + 1];
+    memset(exhausted_text, ' ', sizeof(exhausted_text));
+    memcpy(exhausted_text, "{}", 2);
+    for (Synth::InstrumentJsonDomain domain : domains) {
+        fill_clipboard_sentinels(&decoded);
+        fill_clipboard_sentinels(&sentinel);
+        TEST(! Synth::decode_instrument_json_for_domain(exhausted_text,
+                                                        sizeof(exhausted_text),
+                                                        &decoded.instr,
+                                                        decoded.envs,
+                                                        &decoded.env_count,
+                                                        decoded.lfos,
+                                                        &decoded.lfo_count,
+                                                        decoded.layout,
+                                                        max_portable_records,
+                                                        &decoded.layout_count,
+                                                        domain));
+        TEST(clipboard_sentinels_intact(&decoded, &sentinel));
+    }
+    uint32_t token_length =
+        static_cast<uint32_t>(snprintf(exhausted_text, sizeof(exhausted_text), "{\"instrument_editor_bank\": {"));
+    for (uint32_t key = 0; key < 5000; ++key) {
+        token_length += static_cast<uint32_t>(
+            snprintf(exhausted_text + token_length, sizeof(exhausted_text) - token_length, "\"k%u\":1,", key));
+    }
+    token_length += static_cast<uint32_t>(
+        snprintf(exhausted_text + token_length, sizeof(exhausted_text) - token_length, "\"x\":1}}"));
+    const char* token_path = "/tmp/synth_library_tokens.tmp";
+    write_library_fixture(token_path, exhausted_text, token_length);
+    Synth::LibraryEntry token_entry;
+    TEST(Synth::read_library_index(token_path, &token_entry, 1) == 1);
+    build_named_fm_fixture(&source);
+    snapshot            = source;
+    uint16_t token_slot = 0xBEEF;
+    TEST(! Synth::load_library_instrument(token_path, &token_entry, &source, 1, &token_slot));
+    TEST(token_slot == 0xBEEF);
+    TEST(memcmp(&source, &snapshot, sizeof(source)) == 0);
+    remove(token_path);
+
+    // Equal descriptor content merges parameter groups; distinct saved titles must not collapse.
+    build_named_fm_fixture(&source);
+    source.bank.envelopes.entries[1] = source.bank.envelopes.entries[0];
+    snapshot                         = source;
+    TEST(! export_clipboard_fixture(source, text, sizeof(text)));
+    const char* path = "/tmp/synth_title_collision.tmp";
+    remove(path);
+    TEST(Synth::save_library_record(path, "Regression", "Collision", &source, 0) != 0);
+    TEST(memcmp(&source, &snapshot, sizeof(source)) == 0);
+    FILE* file = fopen(path, "rb");
+    TEST(file == nullptr);
+    if (file)
+        fclose(file);
+    remove(path);
+
+    // A descriptor-less parameter wire is not representable as instrument content.
+    build_named_fm_fixture(&source);
+    source.graph_layout[0].served = 1;
+    snapshot                      = source;
+    TEST(! export_clipboard_fixture(source, text, sizeof(text)));
+    TEST(memcmp(&source, &snapshot, sizeof(source)) == 0);
+
+    build_named_fm_fixture(&source);
+    source.graph_layout[0].lfo_rate_source = static_cast<uint8_t>(Synth::ModSource::velocity);
+    snapshot                               = source;
+    TEST(! export_clipboard_fixture(source, text, sizeof(text)));
+    TEST(memcmp(&source, &snapshot, sizeof(source)) == 0);
+
+    // A private graph mapping can detach a pending move and refresh without touching live state.
+    build_named_fm_fixture(&source);
+    source.graph_layout_count = 0;
+    static Sculptor::Graph           graph;
+    static Sculptor::OscGraphMapping mapping;
+    static Sculptor::OscGraphMapping live_before;
+    static Sculptor::OscGraphMapping private_mapping;
+    static Sculptor::Graph           graph_before;
+    TEST(Sculptor::project_editor_to_graph(source, &graph, &mapping, 0, 0));
+    TEST(source.graph_layout_count == 0);
+    const uint32_t unchanged_length = Sculptor::encode_editor_instrument_json(source,
+                                                                              0,
+                                                                              0,
+                                                                              text,
+                                                                              sizeof(text),
+                                                                              Synth::InstrumentJsonDomain::clipboard);
+    TEST(unchanged_length > 0);
+    TEST(source.graph_layout_count == 0);
+    TEST(Synth::decode_instrument_json(text,
+                                       unchanged_length,
+                                       &decoded.instr,
+                                       decoded.envs,
+                                       &decoded.env_count,
+                                       decoded.lfos,
+                                       &decoded.lfo_count,
+                                       decoded.layout,
+                                       max_portable_records,
+                                       &decoded.layout_count));
+    for (uint32_t index = 0; index < decoded.layout_count; ++index)
+        TEST(decoded.layout[index].kind != 3);
+    live_before     = mapping;
+    private_mapping = mapping;
+    snapshot        = source;
+    static Synth::InstrumentEditorBank private_source;
+    private_source = source;
+    TEST(private_mapping.detached_count > 0);
+    const uint32_t node     = private_mapping.detached[0].node_idx;
+    vmath::vec2    position = graph.node(node).position;
+    position.x += 57;
+    graph.set_node_layout(node, position, 0, 0);
+    graph_before = graph;
+    TEST(Sculptor::detach_osc_graph_instance(&private_source, graph, &private_mapping, 0, 0, 0));
+    TEST(Sculptor::refresh_osc_graph_compilation(&private_source, graph, private_mapping, 0, 0));
+    TEST(Sculptor::encode_editor_instrument_json(private_source,
+                                                 0,
+                                                 0,
+                                                 text,
+                                                 sizeof(text),
+                                                 Synth::InstrumentJsonDomain::clipboard) > 0);
+    TEST(Sculptor::encode_editor_instrument_json(private_source,
+                                                 0,
+                                                 0,
+                                                 text,
+                                                 8,
+                                                 Synth::InstrumentJsonDomain::clipboard) == 0);
+    TEST(memcmp(&source, &snapshot, sizeof(source)) == 0);
+    TEST(memcmp(&mapping, &live_before, sizeof(mapping)) == 0);
+    TEST(memcmp(&graph, &graph_before, sizeof(graph)) == 0);
+    TEST(Sculptor::detach_osc_graph_instance(&source, graph, &mapping, 0, 0, 0));
+    TEST(source.graph_layout_count == 1);
+    TEST(source.graph_layout[0].x == graph.node(node).position.x);
+    // Unmoved title edits use the same name-change entry point against private state.
+    build_named_fm_fixture(&source);
+    source.graph_layout_count = 0;
+    TEST(Sculptor::project_editor_to_graph(source, &graph, &mapping, 0, 0));
+    live_before                          = mapping;
+    snapshot                             = source;
+    private_source                       = source;
+    private_mapping                      = mapping;
+    const uint32_t    parameter          = mapping.params[0].node_idx;
+    const vmath::vec2 parameter_position = graph.node(parameter).position;
+    graph.rename_node(parameter, "Attack \"A\"\\\n1234567890123456789");
+    Sculptor::GraphChange name_change = {};
+    name_change.kind                  = Sculptor::ChangeKind::name_changed;
+    name_change.node_idx              = parameter;
+    graph_before                      = graph;
+    TEST(Sculptor::apply_osc_graph_change(&private_source, &graph, &private_mapping, name_change, 0, 0));
+    TEST(memcmp(&graph, &graph_before, sizeof(graph)) == 0);
+    TEST(private_source.graph_layout_count == 1);
+    TEST(private_source.graph_layout[0].x == parameter_position.x);
+    TEST(strcmp(private_source.graph_layout[0].name, graph.node(parameter).name) == 0);
+    TEST(strlen(private_source.graph_layout[0].name) == 31);
+    TEST(export_clipboard_fixture(private_source, text, sizeof(text)));
+    TEST(memcmp(&source, &snapshot, sizeof(source)) == 0);
+    TEST(memcmp(&mapping, &live_before, sizeof(mapping)) == 0);
+    // Move synchronization materializes before compilation; rename reconciles without compiling.
+    private_source             = source;
+    private_mapping            = mapping;
+    vmath::vec2 moved_position = parameter_position;
+    moved_position.x += 43;
+    moved_position.y -= 19;
+    graph.set_node_layout(parameter, moved_position, 271, 183);
+    graph_before = graph;
+    TEST(Sculptor::detach_osc_graph_parameter(&private_source, graph, &private_mapping, 0, 0, 0));
+    TEST(private_mapping.params[0].uid != 0);
+    TEST(Sculptor::refresh_osc_graph_compilation(&private_source, graph, private_mapping, 0, 0));
+    TEST(Sculptor::apply_osc_graph_change(&private_source, &graph, &private_mapping, name_change, 0, 0));
+    TEST(private_source.graph_layout_count == 1);
+    TEST(private_source.graph_layout[0].x == moved_position.x);
+    TEST(private_source.graph_layout[0].y == moved_position.y);
+    TEST(private_source.graph_layout[0].width_override == 271);
+    TEST(private_source.graph_layout[0].height_override == 183);
+    TEST(strcmp(private_source.graph_layout[0].name, graph.node(parameter).name) == 0);
+    TEST(memcmp(&graph, &graph_before, sizeof(graph)) == 0);
+    TEST(memcmp(&mapping, &live_before, sizeof(mapping)) == 0);
+    TEST(memcmp(&source, &snapshot, sizeof(source)) == 0);
+    snapshot        = private_source;
+    private_source  = source;
+    private_mapping = mapping;
+    TEST(Sculptor::apply_osc_graph_change(&private_source, &graph, &private_mapping, name_change, 0, 0));
+    TEST(memcmp(&private_source, &snapshot, sizeof(snapshot)) == 0);
+    TEST(memcmp(&graph, &graph_before, sizeof(graph)) == 0);
+    TEST(memcmp(&mapping, &live_before, sizeof(mapping)) == 0);
+    snapshot = source;
+
+    private_source                    = source;
+    private_source.graph_layout_count = Synth::max_graph_records;
+    snapshot                          = private_source;
+    private_mapping                   = mapping;
+    TEST(! Sculptor::detach_osc_graph_parameter(&private_source, graph, &private_mapping, 0, 0, 0));
+    TEST(memcmp(&private_source, &snapshot, sizeof(snapshot)) == 0);
+    TEST(memcmp(&private_mapping, &live_before, sizeof(mapping)) == 0);
+    TEST(memcmp(&graph, &graph_before, sizeof(graph)) == 0);
+    snapshot = source;
+
+    graph.rename_node(parameter, "");
+    graph_before = graph;
+    TEST(! Sculptor::apply_osc_graph_change(&private_source, &graph, &private_mapping, name_change, 0, 0));
+    TEST(memcmp(&graph, &graph_before, sizeof(graph)) == 0);
+    graph.rename_node(parameter, "Renamed");
+    private_source                    = source;
+    private_mapping                   = mapping;
+    private_source.graph_layout_count = Synth::max_graph_records;
+    snapshot                          = private_source;
+    graph_before                      = graph;
+    TEST(! Sculptor::apply_osc_graph_change(&private_source, &graph, &private_mapping, name_change, 0, 0));
+    TEST(private_source.graph_layout_count == Synth::max_graph_records);
+    TEST(memcmp(&private_source, &snapshot, sizeof(snapshot)) == 0);
+    TEST(memcmp(&private_mapping, &live_before, sizeof(mapping)) == 0);
+    TEST(memcmp(&graph, &graph_before, sizeof(graph)) == 0);
+    TEST(memcmp(&mapping, &live_before, sizeof(mapping)) == 0);
+
+    // Refusing a later record-less sibling changes only the error overlay.
+    private_source         = source;
+    private_mapping        = mapping;
+    const uint32_t sibling = mapping.params[1].node_idx;
+    TEST(mapping.params[1].target == mapping.params[0].target);
+    graph.rename_node(sibling, "Later custom title");
+    name_change.node_idx = sibling;
+    graph_before         = graph;
+    TEST(! Sculptor::apply_osc_graph_change(&private_source, &graph, &private_mapping, name_change, 0, 0));
+    TEST(graph.has_error());
+    TEST(strcmp(graph.error_text(), "the earlier parameter of this target must be renamed first") == 0);
+    graph_before.set_error("the earlier parameter of this target must be renamed first");
+    TEST(memcmp(&graph, &graph_before, sizeof(graph)) == 0);
+    TEST(memcmp(&private_mapping, &live_before, sizeof(mapping)) == 0);
+    TEST(memcmp(&private_source, &source, sizeof(source)) == 0);
+
+    // Exact effect identities distinguish canonical spelling from custom titles.
+    const char     titles[][32] = { "LFO 1",
+                                    "LFO 128",
+                                    "LFO 0",
+                                    "LFO 129",
+                                    "LFO 1280",
+                                    "LFO 01",
+                                    "LFO +1",
+                                    "LFO 1x",
+                                    "LFO ",
+                                    "Delay",
+                                    "LFO 99999999999999999999999" };
+    const bool     recognized[] = { true, true, true, true, true, false, false, false, false, false, false };
+    const uint16_t ids[]        = { 1, Synth::max_lfos, 0, 0, 0 };
+    for (uint32_t index = 0; index < sizeof(titles) / sizeof(titles[0]); ++index) {
+        uint16_t id = 0xBEEF;
+        TEST(Sculptor::parse_effect_lfo_title(titles[index], &id) == recognized[index]);
+        TEST(id == (recognized[index] ? ids[index] : 0xBEEF));
+    }
+    char unterminated_title[32];
+    memset(unterminated_title, '1', sizeof(unterminated_title));
+    uint16_t id = 0xBEEF;
+    TEST(! Sculptor::parse_effect_lfo_title(unterminated_title, &id));
+    TEST(id == 0xBEEF);
+    uint16_t lfo_ids[Synth::max_lfos] = {};
+    for (uint32_t slot = 0; slot < Synth::max_lfos; ++slot)
+        lfo_ids[slot] = static_cast<uint16_t>(slot + 1);
+    for (uint32_t index = 0; index < sizeof(titles) / sizeof(titles[0]); ++index) {
+        char title[32];
+        memcpy(title, titles[index], sizeof(title));
+        uint16_t mapped_id = 0xBEEF;
+        TEST(Sculptor::translate_effect_lfo_title(title, lfo_ids, &mapped_id) == recognized[index]);
+        TEST(mapped_id == (recognized[index] ? ids[index] : 0xBEEF));
+        TEST(memcmp(title, titles[index], sizeof(title)) == 0);
+    }
+    char translated_title[32];
+    memcpy(translated_title, unterminated_title, sizeof(translated_title));
+    uint16_t mapped_id = 0xBEEF;
+    TEST(! Sculptor::translate_effect_lfo_title(translated_title, lfo_ids, &mapped_id));
+    TEST(mapped_id == 0xBEEF);
+    TEST(memcmp(translated_title, unterminated_title, sizeof(translated_title)) == 0);
+    strcpy(translated_title, "LFO 128");
+    lfo_ids[Synth::max_lfos - 1] = 2;
+    TEST(Sculptor::translate_effect_lfo_title(translated_title, lfo_ids, &mapped_id));
+    TEST(mapped_id == 2 && strcmp(translated_title, "LFO 2") == 0);
+    strcpy(translated_title, "LFO 1");
+    lfo_ids[0] = 0;
+    TEST(Sculptor::translate_effect_lfo_title(translated_title, lfo_ids, &mapped_id));
+    TEST(mapped_id == 0 && strcmp(translated_title, "LFO 1") == 0);
+    for (uint8_t target = 0; target < 5; ++target) {
+        char title[32];
+        char expected[32];
+        Sculptor::format_parameter_title(title, target, 1);
+        TEST(strcmp(title, Sculptor::param_target_names[target]) == 0);
+        Sculptor::format_parameter_title(title, target, 3);
+        snprintf(expected, sizeof(expected), "%s 3", Sculptor::param_target_names[target]);
+        TEST(strcmp(title, expected) == 0);
+    }
+
+    // Capacity-wide reclaim maps must keep high-slot effect titles and discard dead ones.
+    build_named_fm_fixture(&source);
+    while (source.bank.lfos.num_allocated < Synth::max_lfos) {
+        const uint32_t slot            = source.bank.lfos.allocate();
+        source.bank.lfos.entries[slot] = source.bank.lfos.entries[0];
+    }
+    Synth::EffectSlotBinding* high_effect = enabled_effect(source.bank, 0, 0, Synth::EffectType::delay);
+    high_effect->bindings[0].lfo_desc_id  = Synth::max_lfos;
+    add_detached_record(&source, 0, 0, 4, 0, 57, 59, Synth::ModSource::none, Synth::ModSource::none, 0);
+    strcpy(source.graph_layout[source.graph_layout_count - 1].name, "LFO 128");
+    add_detached_record(&source, 0, 0, 4, 0, 61, 63, Synth::ModSource::none, Synth::ModSource::none, 0);
+    strcpy(source.graph_layout[source.graph_layout_count - 1].name, "LFO 127");
+    TEST(Synth::validate_instrument_bank(&source.bank));
+    Synth::reclaim_unused_slots(&source);
+    TEST(source.bank.lfos.num_allocated == 2);
+    TEST(source.graph_layout_count == 7);
+    TEST(strcmp(source.graph_layout[6].name, "LFO 2") == 0);
+    TEST(source.graph_layout[6].x == 57 && source.graph_layout[6].y == 59);
+    TEST(source.bank.channel_chains[0].effects[0].bindings[0].lfo_desc_id == 2);
+
+    // Late zone metadata exhaustion is refused before committing any earlier zone records.
+    build_named_fm_fixture(&source);
+    source.bank.channel_enabled[0] = 0;
+    for (uint32_t zone = 1; zone < Synth::max_instr_per_channel; ++zone) {
+        source.bank.channel_zones[0][zone] = { static_cast<uint8_t>(1 + 7 * zone), 0 };
+        for (uint32_t r = 0; r < 4; ++r) {
+            Synth::GraphNodeLayout record                    = source.graph_layout[r];
+            record.zone                                      = static_cast<uint8_t>(zone);
+            source.graph_layout[source.graph_layout_count++] = record;
+        }
+    }
+    static char    payload[Synth::library_payload_max];
+    const uint32_t payload_length = Synth::encode_editor_bank_json(&source, payload, sizeof(payload));
+    TEST(payload_length > 0);
+    const char* capacity_path = "/tmp/synth_multizone_capacity.tmp";
+    write_library_fixture(capacity_path, payload, payload_length);
+    Synth::LibraryEntry entry;
+    TEST(Synth::read_library_index(capacity_path, &entry, 1) == 1);
+    build_named_fm_fixture(&private_source);
+    private_source.bank.channel_enabled[1]  = 1;
+    private_source.bank.channel_zones[1][0] = { 1, 0 };
+    while (private_source.graph_layout_count < Synth::max_graph_records - 32) {
+        Synth::GraphNodeLayout record = {};
+        record.kind                   = 4;
+        record.channel                = Synth::max_channels;
+        snprintf(record.name, sizeof(record.name), "Custom %u", private_source.graph_layout_count);
+        private_source.graph_layout[private_source.graph_layout_count++] = record;
+    }
+    snapshot      = private_source;
+    uint16_t slot = 0xBEEF;
+    TEST(! Synth::load_library_instrument(capacity_path, &entry, &private_source, 1, &slot));
+    TEST(slot == 0xBEEF);
+    TEST(memcmp(&private_source, &snapshot, sizeof(snapshot)) == 0);
+    remove(capacity_path);
 }
 
 int main()
@@ -3749,17 +5214,7 @@ int main()
         auto               attempt_load = [&](bool expect_load) {
             const uint32_t payload_len = Synth::encode_editor_bank_json(&src, text, bank_json_text_size);
             TEST(payload_len > 0 && payload_len <= Synth::library_payload_max);
-            FILE* const file = fopen(path, "wb");
-            TEST(file != nullptr);
-            const uint32_t header[3] = { 0x42494c49, Synth::library_version, 1 };
-            fwrite(header, sizeof(header), 1, file);
-            char rec[52] = {};
-            memcpy(rec, "Cat", 3);
-            memcpy(rec + 24, "Bad", 3);
-            memcpy(rec + 48, &payload_len, 4);
-            fwrite(rec, sizeof(rec), 1, file);
-            fwrite(text, payload_len, 1, file);
-            fclose(file);
+            write_library_fixture(path, text, payload_len, "Cat", "Bad");
             Synth::LibraryEntry entries[1];
             TEST(Synth::read_library_index(path, entries, 1) == 1);
             static Synth::InstrumentEditorBank scratch;
@@ -3900,18 +5355,7 @@ int main()
             // the record text, and the next attempt needs pristine text again
             TEST(Synth::encode_editor_bank_json(&fat, text, bank_json_text_size) == payload_len);
 
-            FILE* const file = fopen(path, "wb");
-            TEST(file != nullptr);
-            const uint32_t header[3] = { 0x42494c49, Synth::library_version, 1 };
-            fwrite(header, sizeof(header), 1, file);
-
-            char rec[52] = {};
-            memcpy(rec, "Cat", 3);
-            memcpy(rec + 24, "Wide", 4);
-            memcpy(rec + 48, &payload_len, 4);
-            fwrite(rec, sizeof(rec), 1, file);
-            fwrite(text, payload_len, 1, file);
-            fclose(file);
+            write_library_fixture(path, text, payload_len, "Cat", "Wide");
 
             Synth::LibraryEntry entries[4];
             TEST(Synth::read_library_index(path, entries, 4) == 1);
@@ -5933,8 +7377,8 @@ int main()
         TEST(enabled[0] == 1);
     }
 
-    // Zone-table metadata rules - split copies kind-0 records and the mask
-    // row (never kind-1/2/3) after shifting later zones; drop and reset remove.
+    // Zone-table metadata rules copy zone records and the mask row after
+    // shifting later zones; drop and reset remove.
     {
         static Synth::InstrumentEditorBank bank;
         bank = {};
@@ -5947,11 +7391,11 @@ int main()
         bank.graph_missing_sum[0][2] = 4;
 
         Sculptor::zone_records_split_copy(&bank, 0, 0);
-        TEST(bank.graph_layout_count == 5);
+        TEST(bank.graph_layout_count == 6);
         TEST(count_records_matching(bank, 0, 0, 0, 5) == 1);
         TEST(count_records_matching(bank, 0, 0, 2, 9) == 1); // detached stays in zone 0
         TEST(count_records_matching(bank, 0, 1, 0, 5) == 1); // copied kind-0 record
-        TEST(count_records_matching(bank, 0, 1, 2, 9) == 0); // ... but not the detached one
+        TEST(count_records_matching(bank, 0, 1, 2, 9) == 1); // copied generator
         TEST(count_records_matching(bank, 0, 2, 0, 6) == 1); // shifted
         TEST(count_records_matching(bank, 0, 3, 0, 7) == 1);
         TEST(bank.graph_missing_sum[0][1] == 1); // copied mask row
@@ -9978,27 +11422,20 @@ int main()
         Sculptor::count_projected_nodes(bank, 0, 0, &parameter_count);
         TEST(parameter_count == mapping.param_count);
         Synth::InstrumentGraphLayout exported[max_portable_records];
-        uint32_t                     exported_count = 0;
-        TEST(Sculptor::encode_instrument_graph_layout(bank.bank.instruments.entries[0],
-                                                      bank.bank,
-                                                      bank,
-                                                      0,
-                                                      0,
-                                                      exported,
-                                                      max_portable_records,
-                                                      &exported_count));
-        uint32_t saved_parameters = 0;
-        for (uint32_t i = 0; i < exported_count; ++i) {
-            if (exported[i].kind == 3) {
-                ++saved_parameters;
-                TEST(exported[i].target == Synth::mod_volume && exported[i].parameter_ordinal == 0);
-                TEST(exported[i].x == graph.node(mapping.params[0].node_idx).position.x);
-                TEST(exported[i].y == graph.node(mapping.params[0].node_idx).position.y);
-                TEST(exported[i].width_override == saved.width_override);
-                TEST(exported[i].height_override == saved.height_override);
-            }
-        }
-        TEST(saved_parameters == 1);
+        memset(exported, 0x6D, sizeof(exported));
+        Synth::InstrumentGraphLayout exported_before[max_portable_records];
+        memcpy(exported_before, exported, sizeof(exported));
+        uint32_t exported_count = 91;
+        TEST(! Sculptor::encode_instrument_graph_layout(bank.bank.instruments.entries[0],
+                                                        bank.bank,
+                                                        bank,
+                                                        0,
+                                                        0,
+                                                        exported,
+                                                        max_portable_records,
+                                                        &exported_count));
+        TEST(exported_count == 91);
+        TEST(memcmp(exported, exported_before, sizeof(exported)) == 0);
         --bank.graph_layout_count;
         add_parameter_record(&bank, 0, 0, 0, 10.0f, 20.0f, static_cast<uint8_t>(Sculptor::max_param_nodes - 1));
         const int32_t last =
@@ -12203,8 +13640,7 @@ int main()
                                                nm_copy_normalized,
                                                nm_copy_normalized_count) == 0);
 
-            // Envelope nodes alias the same way, and the earliest source node
-            // carrying a saved layout wins for the collapsed decoded node.
+            // Envelope aliases with two saved source layouts cannot collapse losslessly.
             static Synth::InstrumentGraphLayout nm_env_records[2];
             memset(nm_env_records, 0, sizeof(nm_env_records));
             nm_env_records[0].kind   = Synth::instrument_graph_layout_envelope;
@@ -12217,48 +13653,22 @@ int main()
             nm_env_records[1].x      = 11.5f;
             static Synth::InstrumentGraphLayout nm_env_out[4];
             uint32_t                            nm_env_count = 4;
-            TEST(Sculptor::normalize_instrument_graph_layout(nm_src,
-                                                             nm_envs,
-                                                             3,
-                                                             nullptr,
-                                                             0,
-                                                             nm_env_records,
-                                                             2,
-                                                             nm_dec,
-                                                             nm_dec_envs,
-                                                             2,
-                                                             nullptr,
-                                                             0,
-                                                             nm_env_out,
-                                                             sizeof(nm_env_out) / sizeof(nm_env_out[0]),
-                                                             &nm_env_count));
-            // A and A' are byte-identical, so the decoder interns them and both source
-            // records name the one decoded envelope node: exactly one output record,
-            // carrying the earliest source projected node's saved position and size.
-            TEST(nm_env_count == 1);
-            n = find_portable(nm_env_out,
-                              nm_env_count,
-                              Synth::instrument_graph_layout_envelope,
-                              0,
-                              Synth::mod_volume,
-                              0xFFu);
-            TEST(n >= 0);
-            if (n >= 0)
-                TEST(nm_env_out[n].x == 11.5f); // the earliest source projected node wins
-            n = find_portable(nm_env_out,
-                              nm_env_count,
-                              Synth::instrument_graph_layout_envelope,
-                              2,
-                              Synth::mod_volume,
-                              0xFFu);
-            TEST(n == -1); // B had no saved position
-            // The collapsed node's other source locator leaves no record of its own.
-            TEST(find_portable(nm_env_out,
-                               nm_env_count,
-                               Synth::instrument_graph_layout_envelope,
-                               1,
-                               Synth::mod_volume,
-                               0xFFu) == -1);
+            TEST(! Sculptor::normalize_instrument_graph_layout(nm_src,
+                                                               nm_envs,
+                                                               3,
+                                                               nullptr,
+                                                               0,
+                                                               nm_env_records,
+                                                               2,
+                                                               nm_dec,
+                                                               nm_dec_envs,
+                                                               2,
+                                                               nullptr,
+                                                               0,
+                                                               nm_env_out,
+                                                               sizeof(nm_env_out) / sizeof(nm_env_out[0]),
+                                                               &nm_env_count));
+            TEST(nm_env_count == 4);
             // With only A' saved, its position is the one that survives, re-anchored
             // to the decoded node's earliest serving cell.
             nm_env_records[1] = nm_env_records[0];
@@ -13606,51 +15016,16 @@ int main()
         }
 
         {
+            check_editor_instrument_round_trips();
+            check_new_zone_metadata_clone();
+            check_zero_fm_clipboard_library_round_trips();
+            check_library_metadata_transactions();
+            check_editor_round_trip_capacity_failures();
+            check_unrepresented_layout_refusal();
+            check_legacy_library_numeric_domains();
+            check_shared_instrument_json_domains();
             // Ordering of the GUI paste command against the candidate helper.
             check_zone_paste_source_ordering();
-        }
-
-        {
-            // Clipboard sizing estimate, measured rather than assumed: the storage
-            // one copy/paste transaction holds at once - one document buffer, one parser
-            // token pool at the specified bound, the portable and mapped record arrays, one
-            // decoded instrument with its descriptor arrays, and the reclaim map. Nothing
-            // here is treated as shared with the codec's own scratch: only physically shared
-            // buffers are counted once, so this is the clipboard's own footprint and not the
-            // editor's resident set.
-            const uint64_t clipboard_staging =
-                clipboard_capacity + uint64_t{ clipboard_token_bound } * sizeof(jsmntok_t) +
-                uint64_t{ max_portable_records } * sizeof(Synth::InstrumentGraphLayout) * 2 +
-                uint64_t{ max_portable_records } * sizeof(Synth::GraphNodeLayout) + sizeof(Synth::Instrument) +
-                uint64_t{ Synth::instrument_max_envelopes } * sizeof(Synth::EnvelopeDescriptor) +
-                uint64_t{ Synth::instrument_max_lfos } * sizeof(Synth::LFODescriptor) +
-                uint64_t{ Synth::max_lfos } * sizeof(uint16_t);
-            // Complete resident storage is bounded by the owner in sculptor_instr_edit.cpp.
-            if (getenv("SYNTH_UNIT_MEASURE")) {
-                fprintf(
-                    stderr,
-                    "clipboard staging %llu B; parser storage %llu B; clipboard text %u B; candidate bank %llu B; "
-                    "portable records %llu B; mapped records %llu B; decoded model %llu B; descriptor maps %llu B\n",
-                    static_cast<unsigned long long>(clipboard_staging),
-                    static_cast<unsigned long long>(1024u * 1024u + uint64_t{ clipboard_token_bound } *
-                                                                        (sizeof(jsmntok_t) + sizeof(uint32_t))),
-                    clipboard_capacity,
-                    static_cast<unsigned long long>(sizeof(Synth::InstrumentEditorBank)),
-                    static_cast<unsigned long long>(uint64_t{ max_portable_records } *
-                                                    sizeof(Synth::InstrumentGraphLayout)),
-                    static_cast<unsigned long long>(uint64_t{ max_portable_records } * sizeof(Synth::GraphNodeLayout)),
-                    static_cast<unsigned long long>(
-                        sizeof(Synth::Instrument) +
-                        uint64_t{ Synth::instrument_max_envelopes } * sizeof(Synth::EnvelopeDescriptor) +
-                        uint64_t{ Synth::instrument_max_lfos } * sizeof(Synth::LFODescriptor)),
-                    static_cast<unsigned long long>(2u * Synth::max_lfos * sizeof(uint16_t)));
-                fprintf(stderr,
-                        "runtime instrument bank %llu bytes; editor bank %llu bytes; bank queue %llu bytes\n",
-                        static_cast<unsigned long long>(sizeof(Synth::InstrumentBank)),
-                        static_cast<unsigned long long>(sizeof(Synth::InstrumentEditorBank)),
-                        static_cast<unsigned long long>(sizeof(Synth::BankUpdateQueue)));
-            }
-            TEST(clipboard_staging < 1024u * 1024u + 64u * 1024u + 16u * 1024u);
         }
 
         // The default instrument round-trips too.
