@@ -73,9 +73,10 @@ constexpr uint32_t max_node_slots = 56;
 extern const char* const mod_source_names[6];
 
 // Draws the optional caller state widget at the bottom of a node.
-// Returns the widget height in pixels; the height is cached one frame.
-// render_scale is the node content scale the renderer currently draws with
-// (at least 1), so the widget can match the node's on-screen size.
+// Returns the widget height in drawn pixels at render_scale (cached one
+// frame and converted back to graph units by the renderer). render_scale is
+// the node content scale the renderer currently draws with, so the widget
+// can match the node's on-screen size.
 using StateWidgetCallback = int (*)(void* user_data, float render_scale);
 
 struct Node {

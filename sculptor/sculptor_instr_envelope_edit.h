@@ -300,7 +300,9 @@ void gui_envelope_curve(EnvelopeCurveState*              state,
 
 // Fixed full widget height in pixels (chart, ruler, buttons, info line);
 // identical whether the node is selected or not.
-int envelope_widget_height();
+// Total widget height. With render_scale = 1 the height is in graph
+// units; callers drawing at a scale pass it in and get drawn pixels back.
+int envelope_widget_height(float render_scale = 1.0f);
 
 // Content width the projection gives envelope nodes so the chart fits.
 constexpr float envelope_node_content_width = 280.0f;

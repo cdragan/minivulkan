@@ -46,7 +46,8 @@ static uint32_t drain_changes(Graph& graph, GraphChange* out, uint32_t out_size)
 // (the zero-filled state is directly usable); Graph::clear() only deletes
 // nodes and popup state.  Five slots cover the widest concurrent use
 // inside one test.
-static Graph  unit_graphs[5];
+static Graph unit_graphs[5];
+
 static Graph& reset_unit_graph(uint32_t slot)
 {
     // The zero-filled state is valid: zero zoom renders as 1, idle is zero,
@@ -822,6 +823,7 @@ static void test_align_skips_ghosts_and_empty_selection()
     TEST(g.node(b).position.x == 32.0f);
     TEST(g.node(ghost).position.x == 96.0f);
 }
+
 static bool colors_state_equal(const GraphColors& a, const GraphColors& b)
 {
     return a.node_background == b.node_background && a.node_border == b.node_border &&
@@ -1764,6 +1766,7 @@ static void test_delete_selected()
     TEST(g.delete_selected() == 0);
     TEST(g.node_occupied(d));
 }
+
 static void test_delete_node_veto()
 {
     Graph& g = reset_unit_graph(0);
@@ -1830,6 +1833,7 @@ static bool veto_all_counter(void* user_data, uint32_t node_idx)
     ++*static_cast<uint32_t*>(user_data);
     return true;
 }
+
 static void test_load_bypasses_delete_veto()
 {
     Graph&  g            = reset_unit_graph(0);

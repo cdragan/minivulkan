@@ -977,7 +977,7 @@ int Sculptor::SynthEditor::envelope_state_widget_entry(void* user_data, float re
     if (env == nullptr) {
         return 0;
     }
-    const int widget_height = Sculptor::envelope_widget_height();
+    const int widget_height = Sculptor::envelope_widget_height(render_scale);
     // Envelopes whose positions overlap (reachable only from hand-built JSON
     // banks) are read-only: no edit can produce a valid descriptor from them.
     const bool placed = Sculptor::env_positions_strictly_increasing(*env);

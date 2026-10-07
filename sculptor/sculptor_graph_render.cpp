@@ -6,9 +6,11 @@
 // implements Graph::render(); it is called inside an already-open window and
 // never calls ImGui::Begin/End.
 
+#include "../thirdparty/imgui/src/imgui_internal.h"
 #include "sculptor_graph.h"
 #include <stdio.h>
 
+#include <float.h>
 #include <math.h>
 
 namespace {
@@ -76,6 +78,33 @@ ImU32 to_imgui(uint32_t packed)
     return IM_COL32((packed >> 24) & 0xFFu, (packed >> 16) & 0xFFu, (packed >> 8) & 0xFFu, packed & 0xFFu);
 }
 
+// Keep one rasterization across zoom levels so controls cannot jump at font boundaries.
+static float push_zoom_font(float scale)
+{
+    const float previous_scale = ImGui::GetCurrentWindow()->FontWindowScale;
+    ImGui::SetWindowFontScale(previous_scale * scale);
+    const ImGuiStyle& style = ImGui::GetStyle();
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(style.FramePadding.x * scale, style.FramePadding.y * scale));
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(style.ItemSpacing.x * scale, style.ItemSpacing.y * scale));
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemInnerSpacing,
+                        ImVec2(style.ItemInnerSpacing.x * scale, style.ItemInnerSpacing.y * scale));
+    ImGui::PushStyleVar(ImGuiStyleVar_GrabMinSize, style.GrabMinSize * scale);
+    return previous_scale;
+}
+
+static void pop_zoom_font(float previous_scale)
+{
+    ImGui::PopStyleVar(4);
+    ImGui::SetWindowFontScale(previous_scale);
+}
+
+// Draw-list text at zoom size: ImGui 1.89 stretches the baked glyphs when
+// AddText gets a size other than the font's baked size.
+void add_text_scaled(ImDrawList* draw_list, vmath::vec2 pos, float scale, ImU32 color, const char* text)
+{
+    draw_list->AddText(ImGui::GetFont(), ImGui::GetFontSize() * scale, ImVec2(pos.x, pos.y), color, text);
+}
+
 float snap_to_grid(float value)
 {
     return floor(value / graph_grid_spacing) * graph_grid_spacing;
@@ -86,7 +115,8 @@ float snap_to_grid(float value)
 void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
 {
     ImDrawList* const draw_list = ImGui::GetWindowDrawList();
-    const vmath::vec2 origin(ImGui::GetCursorScreenPos());
+    const ImVec2 cursor_position = ImGui::GetCursorScreenPos();
+    const vmath::vec2 origin(cursor_position.x, cursor_position.y);
     ImGuiIO&          io = ImGui::GetIO();
     const vmath::vec2 widget_size(size.x, size.y);
     const vmath::vec2 mouse_screen(io.MousePos.x, io.MousePos.y);
@@ -100,15 +130,13 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
                             ImVec2(origin.x + widget_size.x, origin.y + widget_size.y),
                             true);
 
-    // Node contents (text, widgets, dots) render at full size, so scale them
-    // by at least 1: zooming out spreads nodes apart but does not shrink
-    // their contents into overlapping mush.
-    const float render_scale = zoom < 1.0f ? 1.0f : zoom;
-
     // A zero zoom (zero-filled state) is treated as 1 everywhere below.
-    const float zoom_scale  = zoom != 0.0f ? zoom : 1.0f;
-    const auto  mouse_graph = [&]() { return (view_origin + ((mouse_screen - origin) / zoom_scale)); };
-    const auto  in_widget   = [&](vmath::vec2 pos_screen) {
+    const float zoom_scale = zoom != 0.0f ? zoom : 1.0f;
+    // Uniform zoom: node content (text, widgets, dots) renders at zoom scale
+    // at every zoom level, so zooming out yields a true miniature of the graph.
+    const float render_scale = zoom_scale;
+    const auto  mouse_graph  = [&]() { return (view_origin + ((mouse_screen - origin) / zoom_scale)); };
+    const auto  in_widget    = [&](vmath::vec2 pos_screen) {
         return pos_screen.x >= origin.x && pos_screen.y >= origin.y && pos_screen.x <= (origin + widget_size).x &&
                pos_screen.y <= (origin + widget_size).y;
     };
@@ -146,7 +174,7 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
     }
     if (ImGui::IsWindowHovered() && interaction == Interaction::idle && in_widget(mouse_screen) &&
         io.MouseWheel != 0.0f && ! state_widget_has_mouse) {
-        const float       scaled      = zoom * powf(zoom_wheel_factor, io.MouseWheel);
+        const float       scaled      = zoom_scale * powf(zoom_wheel_factor, io.MouseWheel);
         const float       new_zoom    = scaled < graph_min_zoom   ? graph_min_zoom
                                         : scaled > graph_max_zoom ? graph_max_zoom
                                                                   : scaled;
@@ -185,45 +213,17 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
             content_bottom = node_max.y > content_bottom ? node_max.y : content_bottom;
         }
         if (have_bbox) {
-            // Node positions scale with zoom but their boxes render at
-            // max(zoom, 1): below 1x only the positions shrink while every
-            // box keeps full screen size.  Solve each regime for the largest
-            // zoom that fits instead of scaling the whole bbox by zoom.
-            // Above 1x everything scales uniformly.
+            // Everything scales with zoom, so one bbox solve fits the graph.
             const float z_hi_x = (widget_size.x - 2.0f * fit_view_margin) / (content_right - min_x);
             const float z_hi_y = (widget_size.y - 2.0f * fit_view_margin) / (content_bottom - min_y);
-            const float z_hi   = z_hi_x < z_hi_y ? z_hi_x : z_hi_y;
-            float       fitted;
-            if (z_hi >= 1.0f) {
-                fitted = z_hi > graph_max_zoom ? graph_max_zoom : z_hi;
-            }
-            else {
-                // Below 1x each node constrains the zoom separately: node i
-                // needs z * (p_i - min_p) + c_i screen pixels, with the box
-                // width c_i fixed on screen.  The leftmost/topmost nodes add
-                // no z-dependent term, so they constrain nothing here.
-                float z_lo = 1.0f;
-                for (uint32_t i = 0; i < max_nodes; ++i) {
-                    if (! nodes.is_occupied(i) || nodes.entries[i].ghost) {
-                        continue;
-                    }
-                    const vmath::vec2 position(nodes.entries[i].position);
-                    if (position.x - min_x > 0.0f) {
-                        const float z_x =
-                            (widget_size.x - 2.0f * fit_view_margin - content_sizes[i].x) / (position.x - min_x);
-                        z_lo = z_x < z_lo ? z_x : z_lo;
-                    }
-                    if (position.y - min_y > 0.0f) {
-                        const float z_y =
-                            (widget_size.y - 2.0f * fit_view_margin - content_sizes[i].y) / (position.y - min_y);
-                        z_lo = z_y < z_lo ? z_y : z_lo;
-                    }
-                }
-                fitted = z_lo < graph_min_zoom ? graph_min_zoom : z_lo;
+            const float z_fit  = z_hi_x < z_hi_y ? z_hi_x : z_hi_y;
+            float       fitted = z_fit > graph_max_zoom ? graph_max_zoom : z_fit;
+            if (fitted < graph_min_zoom) {
+                fitted = graph_min_zoom;
             }
             // Screen position of a graph point is origin + (g - view_origin) * zoom,
             // so the visual bbox must be centered with view_origin = center - widget / (2 * zoom).
-            const float eff       = fitted >= 1.0f ? 1.0f : 1.0f / fitted;
+            const float eff       = 1.0f / fitted;
             float       vis_max_x = -FLT_MAX;
             float       vis_max_y = -FLT_MAX;
             for (uint32_t i = 0; i < max_nodes; ++i) {
@@ -325,7 +325,7 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
 
         // Layout: measure content (graph space, zoom applied when drawing).
         const float pad        = node_padding;
-        const float title_h    = line_h;
+        const float title_h    = line_h * render_scale;
         float       content_h  = pad + title_h;
         float       max_line_w = ImGui::CalcTextSize(node.name).x;
 
@@ -497,12 +497,14 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
                                2.0f);
         }
 
-        const vmath::vec2 title_pos = vmath::vec2(rect_min.x + pad, rect_min.y + pad);
-        draw_list->AddText(ImVec2(title_pos.x, title_pos.y),
-                           to_imgui(is_ghost ? colors_.ghost_node : colors_.node_title),
-                           node.name);
-        draw_list->AddLine(ImVec2(rect_min.x, rect_min.y + (title_h + pad) * render_scale),
-                           ImVec2(rect_max.x, rect_min.y + (title_h + pad) * render_scale),
+        const vmath::vec2 title_pos = vmath::vec2(rect_min.x + pad * render_scale, rect_min.y + pad * render_scale);
+        add_text_scaled(draw_list,
+                        title_pos,
+                        render_scale,
+                        to_imgui(is_ghost ? colors_.ghost_node : colors_.node_title),
+                        node.name);
+        draw_list->AddLine(ImVec2(rect_min.x, rect_min.y + title_h + pad * render_scale),
+                           ImVec2(rect_max.x, rect_min.y + title_h + pad * render_scale),
                            to_imgui(colors_.node_border));
 
         // Rename editor replaces the title text while active.
@@ -512,7 +514,8 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
                 renaming_focus = false;
             }
             ImGui::SetCursorScreenPos(ImVec2(title_pos.x, title_pos.y));
-            ImGui::PushItemWidth((rect_max.x - rect_min.x) - 2.0f * pad);
+            const float previous_font_scale = push_zoom_font(render_scale);
+            ImGui::PushItemWidth((rect_max.x - rect_min.x) - 2.0f * pad * render_scale);
             ImGui::PushID(static_cast<int>(node_idx));
             ImGui::InputText("##name", node.name, sizeof(node.name));
             if (ImGui::IsItemDeactivated()) {
@@ -524,8 +527,9 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
                 interaction   = Interaction::idle;
                 renaming_node = pool_no_slot;
             }
-            ImGui::PopID();
             ImGui::PopItemWidth();
+            pop_zoom_font(previous_font_scale);
+            ImGui::PopID();
         }
 
         // Line drawing: input and connectable-property dots pack at the
@@ -548,25 +552,28 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
                 const Slot& slot      = node.slots.entries[elem_slot];
                 const bool  connected = slot_is_connected(node_idx, elem_slot);
                 const float dot_x     = slot.kind == SlotKind::output
-                                            ? rect_max.x - static_cast<float>(right_dots++) * dot_space
-                                            : rect_min.x + static_cast<float>(left_dots++) * dot_space;
+                                            ? rect_max.x - static_cast<float>(right_dots++) * dot_space * render_scale
+                                            : rect_min.x + static_cast<float>(left_dots++) * dot_space * render_scale;
                 const ImU32 dot_color = to_imgui(connected                           ? colors_.connector_connected
                                                  : slot_missing(node_idx, elem_slot) ? colors_.connector_missing
                                                                                      : colors_.connector);
                 dot_positions[node_idx * max_node_slots + elem_slot] = vmath::vec2(dot_x, y_center);
                 if (connected) {
-                    draw_list->AddCircleFilled(ImVec2(dot_x, y_center), dot_radius, dot_color);
+                    draw_list->AddCircleFilled(ImVec2(dot_x, y_center), dot_radius * render_scale, dot_color);
                 }
                 else {
-                    draw_list->AddCircle(ImVec2(dot_x, y_center), dot_radius, dot_color, 0, 1.5f);
+                    draw_list->AddCircle(ImVec2(dot_x, y_center), dot_radius * render_scale, dot_color, 0, 1.5f);
                 }
                 if (slot.kind == SlotKind::output) {
                     // Output names right-align against their dot so the
                     // label sits inside the node next to the connector.
-                    const float name_w = ImGui::CalcTextSize(slot.name).x;
-                    draw_list->AddText(ImVec2(dot_x - pad - name_w, y_center - line_h * 0.5f),
-                                       to_imgui(colors_.property_value),
-                                       slot.name);
+                    const float name_w = ImGui::CalcTextSize(slot.name).x * render_scale;
+                    add_text_scaled(
+                        draw_list,
+                        vmath::vec2(dot_x - pad * render_scale - name_w, y_center - line_h * render_scale * 0.5f),
+                        render_scale,
+                        to_imgui(colors_.property_value),
+                        slot.name);
                 }
             }
 
@@ -583,7 +590,8 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
 
             // A line with no input dots still starts its names one dot
             // column in, matching the input-tagged lines beside it.
-            float    cursor    = rect_min.x + pad + static_cast<float>(left_dots > 0 ? left_dots : 1) * dot_space;
+            float cursor =
+                rect_min.x + (pad + static_cast<float>(left_dots > 0 ? left_dots : 1) * dot_space) * render_scale;
             uint32_t line_prop = 0;
             for (uint32_t e = 0; e < line.num_elems; ++e) {
                 const uint32_t slot_idx = line.elems[e].slot_idx;
@@ -591,7 +599,7 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
                 if (slot.kind == SlotKind::output) {
                     continue; // name drawn beside its dot above
                 }
-                const float name_w = ImGui::CalcTextSize(slot.name).x;
+                const float name_w = ImGui::CalcTextSize(slot.name).x * render_scale;
                 if (line_shared) {
                     line_shared = false;
                     if (colors_.shared_row_marker != 0) {
@@ -602,20 +610,22 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
                 }
                 const bool disabled = slot.kind == SlotKind::property &&
                                       (osc_slot_disabled(node, slot_idx) || slot_edit_disabled(node_idx, slot_idx));
-                draw_list->AddText(ImVec2(cursor, y_center - line_h * 0.5f),
-                                   to_imgui(disabled ? colors_.property_connected_value : colors_.property_value),
-                                   slot.name);
+                add_text_scaled(draw_list,
+                                vmath::vec2(cursor, y_center - line_h * render_scale * 0.5f),
+                                render_scale,
+                                to_imgui(disabled ? colors_.property_connected_value : colors_.property_value),
+                                slot.name);
                 if (slot.kind != SlotKind::property) {
-                    cursor += name_w + 8.0f;
+                    cursor += name_w + 8.0f * render_scale;
                     continue;
                 }
-                const float min_widget_x = cursor + name_w + 8.0f;
-                float       widget_x     = line_prop < 8 ? rect_min.x + value_col[line_prop] : min_widget_x;
+                const float min_widget_x = cursor + name_w + 8.0f * render_scale;
+                float       widget_x = line_prop < 8 ? rect_min.x + value_col[line_prop] * render_scale : min_widget_x;
                 if (widget_x < min_widget_x) {
                     widget_x = min_widget_x;
                 }
-                const float widget_y = y_center - frame_h * 0.5f;
-                cursor               = widget_x + slot_widget_w(slot);
+                const float widget_y = y_center - frame_h * render_scale * 0.5f;
+                cursor               = widget_x + slot_widget_w(slot) * render_scale;
                 ++line_prop;
                 {
                     const bool connected = slot_is_connected(node_idx, slot_idx);
@@ -632,15 +642,19 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
                         else {
                             snprintf(value_text, sizeof(value_text), "%u", slot.value.list_index);
                         }
-                        draw_list->AddText(ImVec2(widget_x, widget_y + (frame_h - line_h) * 0.5f),
-                                           to_imgui(colors_.property_connected_value),
-                                           value_text);
+                        add_text_scaled(draw_list,
+                                        vmath::vec2(widget_x, widget_y + (frame_h - line_h) * render_scale * 0.5f),
+                                        render_scale,
+                                        to_imgui(colors_.property_connected_value),
+                                        value_text);
                         continue;
                     }
 
                     ImGui::PushID(static_cast<int>(node_idx * max_node_slots + slot_idx));
+                    const float widget_width        = slot_widget_w(slot) * render_scale;
+                    const float previous_font_scale = push_zoom_font(render_scale);
                     ImGui::SetCursorScreenPos(ImVec2(widget_x, widget_y));
-                    ImGui::PushItemWidth(slot_widget_w(slot));
+                    ImGui::PushItemWidth(widget_width);
                     if (disabled) {
                         ImGui::BeginDisabled(true);
                     }
@@ -708,12 +722,12 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
                             // A SetCursorScreenPos that lands outside the window
                             // bounds must be followed by an item, or ImGui's
                             // boundary-extent error check fires on the next move.
-                            ImGui::Dummy(ImVec2(property_widget_w, ImGui::GetTextLineHeight()));
+                            ImGui::Dummy(ImVec2(property_widget_w * render_scale, ImGui::GetTextLineHeight()));
                             item_submitted = true;
                             break;
                     }
                     if (! item_submitted) {
-                        ImGui::Dummy(ImVec2(property_widget_w, ImGui::GetTextLineHeight()));
+                        ImGui::Dummy(ImVec2(property_widget_w * render_scale, ImGui::GetTextLineHeight()));
                     }
                     if (value_edited) {
                         push_change(ChangeKind::value_changed, node_idx, slot_idx, pool_no_slot);
@@ -722,6 +736,7 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
                         ImGui::EndDisabled();
                     }
                     ImGui::PopItemWidth();
+                    pop_zoom_font(previous_font_scale);
                     ImGui::PopID();
                 }
             }
@@ -730,14 +745,18 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
         // Optional caller state widget at the bottom of the node.
         if (node.state_widget && ! is_ghost) {
             ImGui::PushID(static_cast<int>(node_idx) + 100000);
-            ImGui::SetCursorScreenPos(ImVec2(rect_min.x + pad, rect_max.y - pad - state_h));
+            ImGui::SetCursorScreenPos(
+                ImVec2(rect_min.x + pad * render_scale, rect_max.y - (pad + state_h) * render_scale));
             ImGui::PushClipRect(ImVec2(rect_min.x, rect_min.y), ImVec2(rect_max.x, rect_max.y), true);
-            const int widget_h = node.state_widget(node.state_widget_data, render_scale);
+            const float previous_font_scale = push_zoom_font(render_scale);
+            const int   widget_h            = node.state_widget(node.state_widget_data, render_scale);
+            pop_zoom_font(previous_font_scale);
             ImGui::PopClipRect();
-            state_widget_heights[node_idx] = widget_h > 0 ? static_cast<float>(widget_h) : 0.0f;
-            state_widget_hovered[node_idx] = in_rect(mouse_screen,
-                                                     vmath::vec2(rect_min.x + pad, rect_max.y - pad - state_h),
-                                                     vmath::vec2(rect_max.x - pad, rect_max.y - pad));
+            state_widget_heights[node_idx] = widget_h > 0 ? static_cast<float>(widget_h) / render_scale : 0.0f;
+            state_widget_hovered[node_idx] =
+                in_rect(mouse_screen,
+                        vmath::vec2(rect_min.x + pad * render_scale, rect_max.y - (pad + state_h) * render_scale),
+                        vmath::vec2(rect_max.x - pad * render_scale, rect_max.y - pad * render_scale));
             ImGui::PopID();
         }
 
@@ -746,7 +765,7 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
         if (! is_ghost && in_rect(mouse_screen, rect_min, rect_max)) {
             node_hit  = true;
             hit_node  = node_idx;
-            title_hit = mouse_screen.y <= rect_min.y + (title_h + pad) * render_scale;
+            title_hit = mouse_screen.y <= rect_min.y + title_h + pad * render_scale;
         }
     }
 
@@ -779,7 +798,7 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
                                   ImVec2(p3.x, p3.y),
                                   line_color,
                                   1.5f);
-        draw_list->AddCircleFilled(ImVec2(mid.x, mid.y), dot_radius * 0.6f, line_color);
+        draw_list->AddCircleFilled(ImVec2(mid.x, mid.y), (dot_radius * render_scale) * 0.6f, line_color);
 
         if (mid_hovered && ! node_hit && ImGui::IsMouseClicked(1)) {
 
@@ -1029,10 +1048,7 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
             if (! io.KeyShift) {
                 select_none();
             }
-            // Below 1x zoom nodes draw at a minimum 1:1 scale, so their
-            // visible graph-space extent is larger than content_sizes; match
-            // it, otherwise a band over a visibly hit node can miss it.
-            const float band_render_scale = zoom < 1.0f ? 1.0f : zoom;
+            const float band_render_scale = zoom_scale;
             for (uint32_t i = 0; i < max_nodes; ++i) {
                 if (! nodes.is_occupied(i) || nodes.entries[i].ghost) {
                     continue;
