@@ -399,15 +399,29 @@ void Sculptor::Graph::push_connection_change(ChangeKind kind,
     change.connection_prev_input = prev_input;
 }
 
+uint32_t Sculptor::Graph::peek_changes(GraphChange* out, uint32_t capacity, bool* overflow) const
+{
+    if (! overflow) {
+        return 0;
+    }
+    *overflow = changes_overflowed_flag || capacity < changes_count || (! out && capacity);
+    if (! out) {
+        return 0;
+    }
+    const uint32_t count = capacity < changes_count ? capacity : changes_count;
+    for (uint32_t index = 0; index < count; ++index) {
+        out[index] = changes[(changes_head + index) % max_pending_changes];
+    }
+    return count;
+}
+
 uint32_t Sculptor::Graph::take_changes(GraphChange* out, uint32_t out_size)
 {
     // Any drain re-arms event reporting after a clear() rebuild.
-    changes_quiet        = false;
-    const uint32_t count = out_size < changes_count ? out_size : changes_count;
-    for (uint32_t i = 0; i < count; ++i) {
-        out[i] = changes[(changes_head + i) % max_pending_changes];
-    }
-    changes_head = (changes_head + count) % max_pending_changes;
+    changes_quiet           = false;
+    bool           overflow = false;
+    const uint32_t count    = peek_changes(out, out_size, &overflow);
+    changes_head            = (changes_head + count) % max_pending_changes;
     changes_count -= count;
     return count;
 }
@@ -549,6 +563,8 @@ void Sculptor::Graph::clear()
     // The canvas popup and the error overlay describe pre-clear state: a
     // stale popup must not delete a reused connection index, and no stale
     // error text survives a rebuild.
+    set_retarget_interceptor(nullptr, nullptr);
+    set_disconnect_interceptor(nullptr, nullptr);
     popup_connection = pool_no_slot;
     popup_node       = pool_no_slot;
     error_message[0] = 0;
@@ -675,6 +691,29 @@ void Sculptor::Graph::set_validator(ValidationCallback callback, void* user_data
 {
     validator           = callback;
     validator_user_data = user_data;
+}
+
+void Sculptor::Graph::set_retarget_interceptor(ConnectionRetargetInterceptor callback, void* user_data)
+{
+    retarget_interceptor = callback;
+    retarget_user_data   = user_data;
+}
+
+void Sculptor::Graph::set_disconnect_interceptor(ConnectionDisconnectInterceptor callback, void* user_data)
+{
+    disconnect_interceptor = callback;
+    disconnect_user_data   = user_data;
+}
+
+bool Sculptor::Graph::user_delete_connection(uint32_t connection_idx)
+{
+    if (connection_idx >= max_connections || ! connections.is_occupied(connection_idx)) {
+        return false;
+    }
+    if (! disconnect_interceptor || ! disconnect_interceptor(disconnect_user_data, connection_idx)) {
+        delete_connection(connection_idx);
+    }
+    return true;
 }
 
 void Sculptor::Graph::set_delete_veto(NodeDeleteVeto callback, void* user_data)
@@ -894,9 +933,33 @@ bool Sculptor::Graph::move_connection_end(uint32_t connection_idx, bool move_out
         return false;
     }
     const Connection& connection = connections.entries[connection_idx];
-    const EndPoint    new_output = move_output_end ? new_point : connection.output;
-    const EndPoint    new_input  = move_output_end ? connection.input : new_point;
-    const EndPoint    prev_input = connection.input;
+    if (retarget_interceptor) {
+        const ConnectionRetargetDecision decision =
+            retarget_interceptor(retarget_user_data, connection_idx, move_output_end, new_point);
+        if (decision == ConnectionRetargetDecision::handled_noop) {
+            return true;
+        }
+        if (decision == ConnectionRetargetDecision::reject) {
+            set_error("Connection rejected");
+            return false;
+        }
+        if (decision == ConnectionRetargetDecision::insert_before) {
+            if (! push_change(ChangeKind::connection_insert_before,
+                              connection.input.node_idx,
+                              pool_no_slot,
+                              connection_idx)) {
+                return false;
+            }
+            GraphChange& change          = changes[(changes_head + changes_count - 1) % max_pending_changes];
+            change.connection_output     = connection.output;
+            change.connection_input      = new_point;
+            change.connection_prev_input = connection.input;
+            return true;
+        }
+    }
+    const EndPoint new_output = move_output_end ? new_point : connection.output;
+    const EndPoint new_input  = move_output_end ? connection.input : new_point;
+    const EndPoint prev_input = connection.input;
 
     // Same rules as a fresh drop, but a refused retarget snaps back instead
     // of destroying the connection: no change events are pushed, so the

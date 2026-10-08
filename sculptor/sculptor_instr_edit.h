@@ -72,16 +72,18 @@ private:
     void do_osc_add_parameter();
     void do_osc_change_target_param(uint32_t node_idx, uint32_t new_target);
 
-    void gui_channel_list();
-    void gui_channel_pane(uint32_t channel);
-    void gui_keyboard();
-    void release_held_note();
-    void gui_channel_popup();
-    void gui_zone_menu();
-    void gui_rename_popup();
-    void gui_library_popups();
-    void gui_library_browser();
-    void gui_library_save_popups();
+    void        gui_channel_list();
+    void        gui_channel_pane(uint32_t channel);
+    void        gui_keyboard();
+    void        release_held_note();
+    void        gui_channel_popup();
+    void        gui_zone_menu();
+    void        gui_zone_menu_items(uint32_t channel, uint32_t note, bool keyboard_range);
+    static void osc_canvas_menu_entry(void* user_data);
+    void        gui_rename_popup();
+    void        gui_library_popups();
+    void        gui_library_browser();
+    void        gui_library_save_popups();
 
     bool do_library_load(const Synth::LibraryEntry& entry);
     bool save_instrument_to_library(const char* category, const char* name);
@@ -102,7 +104,6 @@ private:
     bool     channel_menu_open    = false; // deferred: OpenPopup must run outside the table ID scope
     bool     zone_menu_open       = false; // deferred: same ID-scope rule as channel_menu_open
     int32_t  zone_tab_force_entry = -1;    // one-shot: make the zone tab bar select this entry, cleared once shown
-    bool     zone_menu_from_tab   = false; // menu opened from a zone tab, not a keyboard key
 
     char     rename_buf[Synth::max_name_len] = {};
     bool     rename_popup_open               = false;

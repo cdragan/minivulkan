@@ -44,6 +44,41 @@ uint32_t encode_editor_bank_json(const InstrumentEditorBank* bank, char* dest, u
 // full success - on ANY failure out is left untouched.
 bool decode_editor_bank_json(const char* text, uint32_t len, InstrumentEditorBank* out);
 
+enum EffectsGraphLayoutKind : uint8_t {
+    effects_graph_layout_input,
+    effects_graph_layout_output,
+    effects_graph_layout_midi,
+    effects_graph_layout_effect,
+    effects_graph_layout_lfo
+};
+
+constexpr uint32_t effects_graph_layout_capacity = 128;
+
+struct EffectsGraphLayout {
+    uint8_t  kind;
+    uint16_t index; // zero-based effect slot or one-based document-local LFO id; otherwise zero
+    float    x;
+    float    y;
+    float    width_override;
+    float    height_override;
+};
+
+// Local LFO ids preserve aliases, including descriptors represented only by layout.
+struct EffectsDocument {
+    EffectChainBinding            chain;
+    Sculptor::EffectAudioTopology audio;
+    LFODescriptor                 lfos[max_lfos];
+    uint32_t                      lfo_count;
+    EffectsGraphLayout            graph_layout[effects_graph_layout_capacity];
+    uint32_t                      graph_layout_count;
+};
+
+// Strict synth-effects-v1 documents; failure leaves destination bytes untouched.
+// GUI-thread-only shared staging is non-reentrant, like the bank codec.
+bool     validate_effects_document(const EffectsDocument* document);
+uint32_t encode_effects_json(const EffectsDocument* document, char* dest, uint32_t dest_size);
+bool     decode_effects_json(const char* text, uint32_t len, EffectsDocument* out);
+
 enum class BankFileStatus {
     ok,       // a JSON document decoded into out
     absent,   // the file does not exist (a fresh project)

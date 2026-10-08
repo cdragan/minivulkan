@@ -147,6 +147,9 @@ static bool validate_record(const Synth::InstrumentEditorBank* const editor_bank
     if (bank->parameters.num_allocated != 0)
         return false;
 
+    if (editor_bank->effect_audio[Synth::max_channels].explicit_edges) {
+        return false;
+    }
     if (bank->master_chain.num_effects != 0)
         return false;
 
@@ -164,6 +167,9 @@ static bool validate_record(const Synth::InstrumentEditorBank* const editor_bank
             return false;
 
         // The whole-channel record carries the effect chain only on channel 0.
+        if (channel != 0 && editor_bank->effect_audio[channel].explicit_edges) {
+            return false;
+        }
         if (channel != 0 && bank->channel_chains[channel].num_effects != 0)
             return false;
 
@@ -301,27 +307,6 @@ static bool transfer_zone_layout(const Synth::InstrumentEditorBank& source,
                                                     candidate);
 }
 
-static bool transfer_effect_layout(const Synth::InstrumentEditorBank& source,
-                                   uint32_t                           channel,
-                                   const uint16_t*                    lfo_ids,
-                                   uint32_t                           dst_channel,
-                                   Synth::InstrumentEditorBank*       candidate)
-{
-    for (uint32_t index = 0; index < source.graph_layout_count; ++index) {
-        Synth::GraphNodeLayout record = source.graph_layout[index];
-        if (record.kind != 4 || record.channel != channel)
-            continue;
-        if (candidate->graph_layout_count >= Synth::max_graph_records || ! memchr(record.name, 0, sizeof(record.name)))
-            return false;
-        uint16_t id = 0;
-        if (Sculptor::translate_effect_lfo_title(record.name, lfo_ids, &id) && ! id)
-            return false;
-        record.channel                                           = static_cast<uint8_t>(dst_channel);
-        candidate->graph_layout[candidate->graph_layout_count++] = record;
-    }
-    return true;
-}
-
 bool Synth::load_library_instrument(const char* const            path,
                                     const Synth::LibraryEntry*   entry,
                                     Synth::InstrumentEditorBank* dst_editor_bank,
@@ -382,10 +367,8 @@ bool Synth::load_library_instrument(const char* const            path,
         env_ids[i]                        = static_cast<uint16_t>(slot + 1);
     }
 
-    for (uint32_t i = 0; i < num_lfos; i++) {
-        const uint32_t slot          = dst_bank->lfos.allocate();
-        dst_bank->lfos.entries[slot] = record_bank.bank.lfos.entries[i];
-        lfo_ids[i]                   = static_cast<uint16_t>(slot + 1);
+    if (! Synth::remap_lfos(dst_bank, record_bank.bank.lfos.entries, num_lfos, lfo_ids)) {
+        return false;
     }
 
     const uint32_t first_slot = dst_bank->instruments.num_allocated;
@@ -416,13 +399,14 @@ bool Synth::load_library_instrument(const char* const            path,
     // The record's chain replaces the target channel's chain; the load flow's
     // subsequent reclaim frees the replaced chain's exclusive LFOs.
     Synth::remap_effect_chain(record_bank.bank.channel_chains[0], lfo_ids, &dst_bank->channel_chains[channel]);
+    library_load_candidate.effect_audio[channel] = record_bank.effect_audio[0];
 
     for (uint32_t zone = 0; zone < Synth::max_instr_per_channel && record_bank.bank.channel_zones[0][zone].start_note;
          ++zone) {
         if (! transfer_zone_layout(record_bank, 0, zone, env_ids, lfo_ids, channel, &library_load_candidate))
             return false;
     }
-    if (! transfer_effect_layout(record_bank, 0, lfo_ids, channel, &library_load_candidate) ||
+    if (! Sculptor::transfer_effect_layout(&record_bank, 0, lfo_ids, channel, &library_load_candidate) ||
         ! Synth::validate_instrument_bank(&library_load_candidate.bank) ||
         ! Sculptor::validate_editor_metadata(library_load_candidate))
         return false;
@@ -599,19 +583,9 @@ int Synth::save_library_record(const char* const                        path,
         }
     }
 
-    // The channel's effect chain travels with the record; its LFO references
-    // join the keep-set so chain-only LFOs survive the roundtrip.
     const Synth::EffectChainBinding& src_chain = src_bank->channel_chains[channel];
-    if (src_chain.num_effects > Synth::max_chain_effects)
+    if (! Sculptor::collect_effect_lfos(src_editor_bank, channel, keep_lfo)) {
         return EINVAL;
-
-    for (uint32_t slot = 0; slot < src_chain.num_effects; slot++) {
-        const uint32_t num_params = Synth::get_effect_param_floats(src_chain.effects[slot].type);
-        for (uint32_t param = 0; param < num_params; param++) {
-            const uint16_t lfo_id = src_chain.effects[slot].bindings[param].lfo_desc_id;
-            if (lfo_id && lfo_id <= Synth::max_lfos)
-                keep_lfo[lfo_id - 1] = true;
-        }
     }
 
     static Synth::InstrumentEditorBank reduced;
@@ -634,9 +608,9 @@ int Synth::save_library_record(const char* const                        path,
         if (! keep_lfo[id - 1])
             continue;
 
-        const uint32_t slot             = reduced.bank.lfos.allocate();
-        reduced.bank.lfos.entries[slot] = src_bank->lfos.entries[id - 1];
-        lfo_ids[id - 1]                 = static_cast<uint16_t>(slot + 1);
+        if (! Synth::remap_lfos(&reduced.bank, src_bank->lfos.entries + id - 1, 1, lfo_ids + id - 1)) {
+            return EINVAL;
+        }
     }
 
     uint16_t instr_ids[Synth::max_instruments] = {};
@@ -657,6 +631,7 @@ int Synth::save_library_record(const char* const                        path,
     // The chain rides along with its LFO references remapped; the zero-initialized
     // map sends an out-of-range reference to none so it cannot survive the record.
     Synth::remap_effect_chain(src_chain, lfo_ids, &reduced.bank.channel_chains[0]);
+    reduced.effect_audio[0] = src_editor_bank->effect_audio[channel];
 
     for (uint32_t zone = 0; zone < num_zones; zone++) {
         reduced.bank.channel_zones[0][zone] = src_bank->channel_zones[channel][zone];
@@ -668,7 +643,7 @@ int Synth::save_library_record(const char* const                        path,
         if (! transfer_zone_layout(*src_editor_bank, channel, zone, env_ids, lfo_ids, 0, &reduced))
             return EINVAL;
     }
-    if (! transfer_effect_layout(*src_editor_bank, channel, lfo_ids, 0, &reduced) ||
+    if (! Sculptor::transfer_effect_layout(src_editor_bank, channel, lfo_ids, 0, &reduced) ||
         ! Synth::validate_instrument_bank(&reduced.bank) || ! Sculptor::validate_editor_metadata(reduced))
         return EINVAL;
     return write_library_file(path, category, name, &reduced, out_status);

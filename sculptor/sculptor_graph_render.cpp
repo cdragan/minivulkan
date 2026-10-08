@@ -748,75 +748,31 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
         }
     }
 
-    // Connections on the background channel, so they always sit under the
-    // nodes drawn on channel 1 above.
-    draw_list->ChannelsSetCurrent(0);
-    for (uint32_t c = 0; c < max_connections; ++c) {
-        if (! connections.is_occupied(c)) {
-            continue;
+    bool wire_menu_hit = false;
+    if (interaction == Interaction::idle && ! node_hit && in_widget(mouse_screen) && ImGui::IsMouseClicked(1)) {
+        for (uint32_t index = 0; index < max_connections; ++index) {
+            if (! connections.is_occupied(index)) {
+                continue;
+            }
+            const Connection& edge = connections.entries[index];
+            const vmath::vec2 from = dot_positions[edge.output.node_idx * max_node_slots + edge.output.slot_idx];
+            const vmath::vec2 to   = dot_positions[edge.input.node_idx * max_node_slots + edge.input.slot_idx];
+            const vmath::vec2 mid  = (from + to) * 0.5f;
+            const float       dx = mouse_screen.x - mid.x, dy = mouse_screen.y - mid.y;
+            if (dx * dx + dy * dy <= dot_pick_radius * dot_pick_radius) {
+                popup_connection = index;
+                wire_menu_hit    = true;
+                ImGui::OpenPopup("connection_menu");
+                break;
+            }
         }
-        const Connection& connection = connections.entries[c];
-        const vmath::vec2 p0 = dot_positions[connection.output.node_idx * max_node_slots + connection.output.slot_idx];
-        const vmath::vec2 p3 = dot_positions[connection.input.node_idx * max_node_slots + connection.input.slot_idx];
-        const float dx = fabsf(p3.x - p0.x) * 0.5f > curve_min_reach ? fabsf(p3.x - p0.x) * 0.5f : curve_min_reach;
-        const vmath::vec2 p1(p0.x + dx, p0.y);
-        const vmath::vec2 p2(p3.x - dx, p3.y);
-        // Cubic bezier point at t = 0.5.
-        const vmath::vec2 mid(
-            vmath::vec2(p0.x + 3.0f * p1.x + 3.0f * p2.x + p3.x, p0.y + 3.0f * p1.y + 3.0f * p2.y + p3.y) *
-            (1.0f / 8.0f));
-
-        const float mid_dx = mouse_screen.x - mid.x;
-        const float mid_dy = mouse_screen.y - mid.y;
-        const bool  mid_hovered =
-            in_widget(mouse_screen) && mid_dx * mid_dx + mid_dy * mid_dy <= dot_pick_radius * dot_pick_radius;
-        const ImU32 line_color = to_imgui(mid_hovered ? colors_.connector_hover : colors_.connection);
-        draw_list->AddBezierCubic(ImVec2(p0.x, p0.y),
-                                  ImVec2(p1.x, p1.y),
-                                  ImVec2(p2.x, p2.y),
-                                  ImVec2(p3.x, p3.y),
-                                  line_color,
-                                  1.5f);
-        draw_list->AddCircleFilled(ImVec2(mid.x, mid.y), (dot_radius * render_scale) * 0.6f, line_color);
-
-        if (mid_hovered && ! node_hit && ImGui::IsMouseClicked(1)) {
-
-            popup_connection = c;
-            ImGui::OpenPopup("connection_menu");
-        }
-    }
-
-    // In-progress line: anchor dot to the mouse, hollow dot at the mouse.
-    // A stale retarget anchor (connection deleted mid-drag) draws nothing.
-    const bool retarget_alive =
-        interaction != Interaction::retargeting ||
-        (retarget_connection < max_connections && connections.is_occupied(retarget_connection) &&
-         nodes.is_occupied(connecting_from.node_idx));
-    if ((interaction == Interaction::connecting || (interaction == Interaction::retargeting && retarget_alive)) &&
-        connecting_from.node_idx < max_nodes) {
-        const vmath::vec2 p0 = dot_positions[connecting_from.node_idx * max_node_slots + connecting_from.slot_idx];
-        const vmath::vec2 p3 = mouse_screen;
-        const float dx = fabsf(p3.x - p0.x) * 0.5f > curve_min_reach ? fabsf(p3.x - p0.x) * 0.5f : curve_min_reach;
-        // The curve leaves an output dot rightward, an input or property dot
-        // leftward, so dragging from an input bends away from its node.
-        const Slot&       anchor_slot = nodes.entries[connecting_from.node_idx].slots.entries[connecting_from.slot_idx];
-        const bool        anchor_is_output = anchor_slot.kind == SlotKind::output;
-        const vmath::vec2 p1(anchor_is_output ? p0.x + dx : p0.x - dx, p0.y);
-        const vmath::vec2 p2(anchor_is_output ? p3.x - dx : p3.x + dx, p3.y);
-        draw_list->AddBezierCubic(ImVec2(p0.x, p0.y),
-                                  ImVec2(p1.x, p1.y),
-                                  ImVec2(p2.x, p2.y),
-                                  ImVec2(p3.x, p3.y),
-                                  to_imgui(colors_.connector_hover),
-                                  1.5f);
-        draw_list->AddCircle(ImVec2(p3.x, p3.y), dot_radius, to_imgui(colors_.connector_hover), 0, 1.5f);
     }
 
     // Right-click menu on a hovered middle dot.
     if (ImGui::BeginPopup("connection_menu")) {
         if (ImGui::MenuItem("Delete") && popup_connection < max_connections &&
             connections.is_occupied(popup_connection)) {
-            delete_connection(popup_connection);
+            user_delete_connection(popup_connection);
         }
         ImGui::EndPopup();
     }
@@ -864,8 +820,6 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
         ImGui::EndPopup();
     }
 
-    draw_list->ChannelsMerge();
-
     // Rubber band while active (screen space so it stays crisp while panning
     // is impossible anyway: zoom is frozen during interactions).
     if (interaction == Interaction::rubber_band) {
@@ -905,6 +859,19 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
 
     // Active interaction progression.  InputText handles the renaming state;
     // the other modes end on mouse release.
+    // Cancellation wins over release, including under an error overlay.
+    if (ImGui::IsWindowHovered() && in_widget(mouse_screen) && ImGui::IsKeyPressed(ImGuiKey_Escape)) {
+        if (error_active) {
+            dismiss_error();
+        }
+        if (interaction != Interaction::renaming) {
+            interaction         = Interaction::idle;
+            retarget_connection = pool_no_slot;
+            dragged_node        = pool_no_slot;
+            title_pressed       = false;
+        }
+    }
+
     switch (interaction) {
         case Interaction::dragging_node: {
             if (! io.MouseDown[0]) {
@@ -995,8 +962,8 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
             }
             const EndPoint drop = dot_at(mouse_screen);
             if (drop.node_idx == pool_no_slot) {
-                // Released off any connector: the connection is destroyed.
-                delete_connection(retarget_connection);
+                // User disconnect policy applies to off-dot releases and the wire menu.
+                user_delete_connection(retarget_connection);
             }
             else {
                 const Connection& connection  = connections.entries[retarget_connection];
@@ -1047,27 +1014,6 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
             break;
     }
 
-    // Esc dismisses the error overlay first, then aborts connection drags
-    // (a retarget keeps its original endpoints), then drags and panning.
-    // Renaming reverts via InputText itself.
-    if (ImGui::IsWindowHovered() && in_widget(mouse_screen) && ImGui::IsKeyPressed(ImGuiKey_Escape)) {
-        if (error_active) {
-            dismiss_error();
-        }
-        else if (interaction == Interaction::connecting || interaction == Interaction::retargeting) {
-            interaction         = Interaction::idle;
-            retarget_connection = pool_no_slot;
-        }
-        else if (interaction == Interaction::rubber_band) {
-            interaction = Interaction::idle;
-        }
-        else if (interaction == Interaction::dragging_node || interaction == Interaction::panning) {
-            interaction   = Interaction::idle;
-            dragged_node  = pool_no_slot;
-            title_pressed = false;
-        }
-    }
-
     // Ghost resolution: LMB places, Esc or RMB cancels.
     if (ghost_idx != pool_no_slot && ImGui::IsWindowHovered() && in_widget(mouse_screen)) {
         if (ImGui::IsKeyPressed(ImGuiKey_Escape) || ImGui::IsMouseClicked(1)) {
@@ -1109,7 +1055,7 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
     // add-node menu.  Merely hovering an item does not block the menu: a
     // state-widget node body is its own items, so the menu must open over
     // it.  An active item (slider drag, rename editor) still owns the mouse.
-    const bool canvas_right_click = interaction == Interaction::idle && ghost_idx == pool_no_slot &&
+    const bool canvas_right_click = ! wire_menu_hit && interaction == Interaction::idle && ghost_idx == pool_no_slot &&
                                     ImGui::IsWindowHovered() && in_widget(mouse_screen) && ImGui::IsMouseClicked(1) &&
                                     ! ImGui::IsAnyItemActive();
     if (canvas_right_click && node_hit) {
@@ -1131,7 +1077,9 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
     // pending and no item takes the mouse (property widgets, state widget,
     // rename editor).
     else if (interaction == Interaction::idle && ImGui::IsWindowHovered() && in_widget(mouse_screen) &&
-             ImGui::IsMouseClicked(0) && ! ImGui::IsAnyItemHovered()) {
+             ImGui::IsMouseClicked(0) && ! ImGui::IsAnyItemActive() &&
+             ! ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId) &&
+             (dot_at(mouse_screen).node_idx != pool_no_slot || ! ImGui::IsAnyItemHovered())) {
         const EndPoint pressed_dot = dot_at(mouse_screen);
         if (pressed_dot.node_idx != pool_no_slot) {
             // A connected dot picks up its existing connection, a free dot
@@ -1199,6 +1147,66 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
             interaction = Interaction::panning;
         }
     }
+
+    // Connections on the background channel, so they always sit under the
+    // nodes drawn on channel 1 above.
+    draw_list->ChannelsSetCurrent(0);
+    for (uint32_t c = 0; c < max_connections; ++c) {
+        if (! connections.is_occupied(c) || (interaction == Interaction::retargeting && c == retarget_connection)) {
+            continue;
+        }
+        const Connection& connection = connections.entries[c];
+        const vmath::vec2 p0 = dot_positions[connection.output.node_idx * max_node_slots + connection.output.slot_idx];
+        const vmath::vec2 p3 = dot_positions[connection.input.node_idx * max_node_slots + connection.input.slot_idx];
+        const float dx = fabsf(p3.x - p0.x) * 0.5f > curve_min_reach ? fabsf(p3.x - p0.x) * 0.5f : curve_min_reach;
+        const vmath::vec2 p1(p0.x + dx, p0.y);
+        const vmath::vec2 p2(p3.x - dx, p3.y);
+        // Cubic bezier point at t = 0.5.
+        const vmath::vec2 mid(
+            vmath::vec2(p0.x + 3.0f * p1.x + 3.0f * p2.x + p3.x, p0.y + 3.0f * p1.y + 3.0f * p2.y + p3.y) *
+            (1.0f / 8.0f));
+
+        const float mid_dx = mouse_screen.x - mid.x;
+        const float mid_dy = mouse_screen.y - mid.y;
+        const bool  mid_hovered =
+            in_widget(mouse_screen) && mid_dx * mid_dx + mid_dy * mid_dy <= dot_pick_radius * dot_pick_radius;
+        const ImU32 line_color = to_imgui(mid_hovered ? colors_.connector_hover : colors_.connection);
+        draw_list->AddBezierCubic(ImVec2(p0.x, p0.y),
+                                  ImVec2(p1.x, p1.y),
+                                  ImVec2(p2.x, p2.y),
+                                  ImVec2(p3.x, p3.y),
+                                  line_color,
+                                  1.5f);
+        draw_list->AddCircleFilled(ImVec2(mid.x, mid.y), (dot_radius * render_scale) * 0.6f, line_color);
+    }
+
+    // In-progress line: anchor dot to the mouse, hollow dot at the mouse.
+    // A stale retarget anchor (connection deleted mid-drag) draws nothing.
+    const bool retarget_alive =
+        interaction != Interaction::retargeting ||
+        (retarget_connection < max_connections && connections.is_occupied(retarget_connection) &&
+         nodes.is_occupied(connecting_from.node_idx));
+    if ((interaction == Interaction::connecting || (interaction == Interaction::retargeting && retarget_alive)) &&
+        connecting_from.node_idx < max_nodes) {
+        const vmath::vec2 p0 = dot_positions[connecting_from.node_idx * max_node_slots + connecting_from.slot_idx];
+        const vmath::vec2 p3 = mouse_screen;
+        const float dx = fabsf(p3.x - p0.x) * 0.5f > curve_min_reach ? fabsf(p3.x - p0.x) * 0.5f : curve_min_reach;
+        // The curve leaves an output dot rightward, an input or property dot
+        // leftward, so dragging from an input bends away from its node.
+        const Slot&       anchor_slot = nodes.entries[connecting_from.node_idx].slots.entries[connecting_from.slot_idx];
+        const bool        anchor_is_output = anchor_slot.kind == SlotKind::output;
+        const vmath::vec2 p1(anchor_is_output ? p0.x + dx : p0.x - dx, p0.y);
+        const vmath::vec2 p2(anchor_is_output ? p3.x - dx : p3.x + dx, p3.y);
+        draw_list->AddBezierCubic(ImVec2(p0.x, p0.y),
+                                  ImVec2(p1.x, p1.y),
+                                  ImVec2(p2.x, p2.y),
+                                  ImVec2(p3.x, p3.y),
+                                  to_imgui(colors_.connector_hover),
+                                  1.5f);
+        draw_list->AddCircle(ImVec2(p3.x, p3.y), dot_radius, to_imgui(colors_.connector_hover), 0, 1.5f);
+    }
+
+    draw_list->ChannelsMerge();
 
     draw_list->PopClipRect();
     ImGui::PopID();

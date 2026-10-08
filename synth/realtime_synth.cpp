@@ -640,9 +640,6 @@ static void init_oscillator_buffers()
     master_output_offs = static_cast<uint32_t>(
         data_allocator.allocate(sizeof(float) * Synth::rt_step_samples * 2, synth_alignment).offset);
 
-    // Carve the effect-state region out of the device data buffer; the expansion
-    // bump-allocates within it (cumulative, never freed). The pinned alignment must hold
-    // on this device.
     assert(synth_alignment <= Synth::effect_state_alignment);
     const SubAllocatorBase::Chunk effect_state_region =
         data_allocator.allocate(Synth::effect_state_budget, Synth::effect_state_alignment);

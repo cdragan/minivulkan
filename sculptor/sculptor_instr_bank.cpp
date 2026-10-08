@@ -6,6 +6,7 @@
 #include "sculptor_graph.h"
 #include "sculptor_osc_graph.h"
 
+#include <assert.h>
 #include <cmath>
 #include <stdio.h>
 #include <string.h>
@@ -666,6 +667,11 @@ void Synth::reclaim_unused_slots(Synth::InstrumentEditorBank* editor_bank, uint1
             keep_env[record.index - 1] = true;
         if (record.kind == 2 && record.index && record.index <= max_lfos)
             keep_lfo[record.index - 1] = true;
+        uint16_t effect_lfo = 0;
+        if (record.kind == 4 && Sculptor::parse_effect_lfo_title(record.name, &effect_lfo) && effect_lfo &&
+            effect_lfo <= bank->lfos.num_allocated) {
+            keep_lfo[effect_lfo - 1] = true;
+        }
     }
 
     // Parameter records (kind 3) root their referenced descriptors too:
@@ -767,9 +773,7 @@ void Synth::reclaim_unused_slots(Synth::InstrumentEditorBank* editor_bank, uint1
         Synth::GraphNodeLayout record = editor_bank->graph_layout[index];
         uint16_t               new_id = 0;
         if (record.kind == 4 && Sculptor::translate_effect_lfo_title(record.name, lfo_ids, &new_id)) {
-            const Synth::EffectChainBinding& chain =
-                record.channel < Synth::max_channels ? bank->channel_chains[record.channel] : bank->master_chain;
-            if (! new_id || ! Sculptor::effect_chain_uses_lfo(chain, new_id))
+            if (! new_id)
                 continue;
         }
         editor_bank->graph_layout[retained++] = record;
@@ -832,10 +836,114 @@ bool Sculptor::graph_layout_record_identity_equal(const Synth::GraphNodeLayout& 
            (a.kind != 4 || strcmp(a.name, b.name) == 0);
 }
 
+bool Sculptor::validate_effect_audio_topology(const Synth::EffectChainBinding&     chain,
+                                              const Sculptor::EffectAudioTopology& audio)
+{
+    if (chain.num_effects > Synth::max_chain_effects || audio.explicit_edges > 1) {
+        return false;
+    }
+    bool incoming[Synth::max_chain_effects + 1] = {};
+    for (uint32_t source = 0; source <= Synth::max_chain_effects; ++source) {
+        const uint32_t destination = audio.next[source];
+        if (! audio.explicit_edges) {
+            if (destination) {
+                return false;
+            }
+            continue;
+        }
+        if (destination > Synth::max_chain_effects + 1 ||
+            (destination && source < Synth::max_chain_effects &&
+             (source >= chain.num_effects || chain.effects[source].type == Synth::EffectType::none))) {
+            return false;
+        }
+        if (! destination) {
+            continue;
+        }
+        if (incoming[destination - 1] ||
+            (destination <= Synth::max_chain_effects &&
+             (destination > chain.num_effects || chain.effects[destination - 1].type == Synth::EffectType::none))) {
+            return false;
+        }
+        incoming[destination - 1] = true;
+    }
+    for (uint32_t start = 0; start < Synth::max_chain_effects; ++start) {
+        uint32_t visited = 0;
+        uint32_t node    = start;
+        while (node < Synth::max_chain_effects) {
+            if (visited & (1u << node)) {
+                return false;
+            }
+            visited |= 1u << node;
+            const uint32_t next = audio.next[node];
+            if (! next) {
+                break;
+            }
+            node = next - 1;
+        }
+    }
+    return true;
+}
+
+bool Sculptor::compile_editor_playback_bank(const Synth::InstrumentEditorBank& source, Synth::InstrumentBank* out)
+{
+    if (! out || ! Synth::validate_instrument_bank(&source.bank) || ! validate_editor_metadata(source)) {
+        return false;
+    }
+    Synth::EffectChainBinding compiled[Synth::max_channels + 1] = {};
+    for (uint32_t owner = 0; owner <= Synth::max_channels; ++owner) {
+        const Synth::EffectChainBinding& chain =
+            owner < Synth::max_channels ? source.bank.channel_chains[owner] : source.bank.master_chain;
+        const Sculptor::EffectAudioTopology& audio  = source.effect_audio[owner];
+        Synth::EffectChainBinding&           result = compiled[owner];
+        if (! audio.explicit_edges) {
+            for (uint32_t slot = 0; slot < chain.num_effects; ++slot) {
+                if (chain.effects[slot].type != Synth::EffectType::none) {
+                    result.effects[result.num_effects++] = chain.effects[slot];
+                }
+            }
+            continue;
+        }
+        uint32_t next = audio.next[Synth::max_chain_effects];
+        while (next && next <= Synth::max_chain_effects) {
+            result.effects[result.num_effects++] = chain.effects[next - 1];
+            next                                 = audio.next[next - 1];
+        }
+        if (! next) {
+            result = {};
+        }
+    }
+    *out = source.bank;
+    for (uint32_t owner = 0; owner < Synth::max_channels; ++owner) {
+        out->channel_chains[owner] = compiled[owner];
+    }
+    out->master_chain = compiled[Synth::max_channels];
+    assert(Synth::validate_instrument_bank(out));
+    return true;
+}
+
 bool Sculptor::validate_editor_metadata(const Synth::InstrumentEditorBank& bank)
 {
     if (bank.graph_layout_count > Synth::max_graph_records) {
         return false;
+    }
+    for (uint32_t owner = 0; owner <= Synth::max_channels; ++owner) {
+        const Synth::EffectChainBinding& chain =
+            owner < Synth::max_channels ? bank.bank.channel_chains[owner] : bank.bank.master_chain;
+        bool represented[Synth::max_lfos] = {};
+        for (uint32_t index = 0; index < bank.graph_layout_count; ++index) {
+            const Synth::GraphNodeLayout& record     = bank.graph_layout[index];
+            uint16_t                      descriptor = 0;
+            if (record.kind == 4 && record.channel == owner && parse_effect_lfo_title(record.name, &descriptor)) {
+                if (! descriptor || descriptor > bank.bank.lfos.num_allocated) {
+                    return false;
+                }
+                represented[descriptor - 1] = true;
+            }
+        }
+        if (! validate_effect_audio_topology(chain, bank.effect_audio[owner]) ||
+            fx_projected_node_count(bank.bank, owner, represented) > max_nodes) {
+            return false;
+        }
     }
     uint16_t detached_per_zone[Synth::max_channels][Synth::max_instr_per_channel] = {};
     for (uint32_t i = 0; i < bank.graph_layout_count; ++i) {

@@ -27,7 +27,7 @@ struct EffectChain {
 };
 
 // Preflight result for one effect slot: where its persistent state lives in the device
-// buffer (0 = stateless), whether that state is freshly allocated and must be zeroed
+// buffer (0 = stateless), whether that state still needs initialization and must be zeroed
 // before its first shader use, and which effect the offset was sized for (a re-expansion
 // preserves the offset while the slot keeps running the same enabled effect).
 struct EffectSlotPlan {
@@ -42,7 +42,7 @@ struct EffectSlotPlan {
 struct EffectExpansionPlan {
     EffectSlotPlan slots[max_channels + 1][max_chain_effects];
     uint32_t       num_nodes;      // dest + optional LFO leaf per modulated param
-    uint32_t       consumed_bytes; // region bytes consumed if this plan commits
+    uint32_t       consumed_bytes; // live allocated bytes if this plan commits
 };
 
 // One contiguous device byte range to zero before its effect's first shader use.
@@ -57,7 +57,7 @@ struct EffectClearList {
 };
 
 // Points the expansion at the carved effect-state region inside the device data buffer and
-// resets all expansion state (plan, consumption, pending clears). The region must be
+// resets all expansion state (plan and pending clears). The region must be
 // aligned to effect_state_alignment; the host asserts the device honors that alignment.
 void init_effect_state_region(uint32_t region_base_offset);
 
@@ -66,7 +66,8 @@ void init_effect_state_region(uint32_t region_base_offset);
 // counts required modulation nodes, and enforces every rule the commit relies on: chain
 // capacity, effect types, binding validity (finite values, ops, LFO descriptors within
 // the bank pool, bounded channel-wide MIDI inputs, master chain LFO-only), the state
-// budget and the modulated-param limit. On failure returns false with a static error
+// budget and the modulated-param limit. New state uses holes outside retained live
+// ranges; fragmentation may refuse a bank whose live byte sum fits. On failure returns false with a static error
 // string and mutates nothing - the previously committed chains and state remain valid
 // and sounding.
 bool preflight_effect_expansion(const InstrumentBank& bank, EffectExpansionPlan* out_plan, const char** error);
@@ -96,7 +97,8 @@ struct EffectNodeWriter {
 
 // Applies a passing plan: fills the runtime chains from the bank (base values into
 // params[], state offsets and source nodes from the plan), records clear ranges for
-// freshly allocated state, and makes the plan current (preserving future re-expansions).
+// new or retained-unrendered state, and makes the plan current. Only the final plan
+// dispatches, so abandoned ranges need no clear.
 // Infallible by construction after a passing preflight.
 void commit_effect_expansion(const InstrumentBank&      bank,
                              const EffectExpansionPlan& plan,
@@ -104,8 +106,9 @@ void commit_effect_expansion(const InstrumentBank&      bank,
                              EffectChain*               out_master_chain,
                              const EffectNodeWriter&    writer);
 
-// Hands the clear ranges recorded since the last take to the render loop, which zeroes
-// them before any effect dispatch. Single consumer, same thread as commit.
+// Hands the latest plan's outstanding clear ranges to the render loop, which zeroes
+// them before any effect dispatch, and retires needs_clear. Single consumer, same
+// thread as commit; consume the list before another commit.
 EffectClearList take_effect_clear_ranges();
 
 } // namespace Synth

@@ -9,6 +9,18 @@
 
 #include <stdint.h>
 
+namespace Sculptor {
+
+// Implicit mode requires zero successors and derives legacy serial order.
+// Explicit successors: 0 = absent, 1..4 = payload slot + 1, 5 = Output;
+// source entry 4 is Input. No runtime connectivity is stored in the payload bank.
+struct EffectAudioTopology {
+    uint8_t explicit_edges;
+    uint8_t next[Synth::max_chain_effects + 1];
+};
+
+} // namespace Sculptor
+
 namespace Synth {
 
 struct InstrumentGraphLayout;
@@ -103,9 +115,11 @@ constexpr ModTarget graph_projected_target(uint32_t projected_index)
 
 // Instrument bank editable in GUI
 struct InstrumentEditorBank {
-    InstrumentBank bank;
-    char           instrument_names[max_instruments][max_name_len];
-    char           channel_names[max_channels][max_name_len];
+    // Authoring payload collections, not playable chains: compile before publish.
+    InstrumentBank                bank;
+    Sculptor::EffectAudioTopology effect_audio[max_channels + 1];
+    char                          instrument_names[max_instruments][max_name_len];
+    char                          channel_names[max_channels][max_name_len];
     // Editor-side per-zone graph state, sparse with a global cap.
     GraphNodeLayout graph_layout[max_graph_records];
     uint32_t        graph_layout_count;
@@ -207,6 +221,12 @@ bool push_bank_update(BankUpdateQueue* queue, const InstrumentBank& bank);
 } // namespace Synth
 
 namespace Sculptor {
+
+// Validates every fragment, including detached cycles and endpoint occupancy.
+bool validate_effect_audio_topology(const Synth::EffectChainBinding& chain, const EffectAudioTopology& audio);
+// Success-only output: complete paths compile in traversal order; incomplete
+// paths bypass dry. Detached payloads and topology never enter runtime chains.
+bool compile_editor_playback_bank(const Synth::InstrumentEditorBank& source, Synth::InstrumentBank* out);
 
 // One GUI-free paste transaction: installs a decoded clipboard instrument and its
 // normalized layout over one zone of `source` and writes the result to

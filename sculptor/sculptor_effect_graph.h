@@ -1,11 +1,8 @@
 // SPDX-License-Identifier: MIT
 // SPDX-FileCopyrightText: Copyright (c) 2021-2026 Chris Dragan
 
-// Projection between one effect chain binding (a channel chain or the master
-// chain) and the shared graph widget.  The chain is the single source of
-// truth: the projection mirrors it, every user edit flows back through
-// drained change events or the pane's canvas commands, and structural
-// edits re-project.  No ImGui here: synth_unit links this file.
+// Projection of retained editor effect payloads and audio topology into the
+// shared graph widget. Structural edits re-project; no ImGui dependency.
 
 #pragma once
 
@@ -14,7 +11,14 @@
 
 #include <stdint.h>
 
+namespace Synth {
+struct EffectsDocument;
+struct InstrumentEditorBank;
+} // namespace Synth
+
 namespace Sculptor {
+
+struct EffectAudioTopology;
 
 // One scalar effect parameter's editing metadata, in shader param order.
 struct EffectParamInfo {
@@ -76,43 +80,87 @@ struct EffectGraphMapping {
     uint32_t chain;                                   // channel index or fx_master_chain
 };
 
+// Captures validated serial audio topology; out is unchanged on refusal.
+// proposed_connection is a non-mutating optional edge appended after live edges.
+// excluded_connection omits a live wire being moved; pool_no_slot excludes none.
+bool capture_effect_audio(const Graph&                     graph,
+                          const EffectGraphMapping&        mapping,
+                          const Synth::EffectChainBinding& chain,
+                          EffectAudioTopology*             out,
+                          const Connection*                proposed_connection = nullptr,
+                          uint32_t                         excluded_connection = pool_no_slot);
+
+// Applies a bounded snapshot without consuming events.  A null capture mask records
+// all represented nodes; otherwise only selected or already persisted nodes are saved.
+// Outputs are unchanged on failure; source and output may alias.
+bool apply_effect_graph_batch(const Synth::InstrumentEditorBank* source,
+                              const Graph*                       graph,
+                              const EffectGraphMapping*          mapping,
+                              const GraphChange*                 changes,
+                              uint32_t                           count,
+                              const bool*                        capture_nodes,
+                              Synth::InstrumentEditorBank*       out);
+// Requires graph and mapping; captures the complete pending projection without consumption.
+bool stage_effect_graph_edits(const Synth::InstrumentEditorBank* source,
+                              const Graph*                       graph,
+                              const EffectGraphMapping*          mapping,
+                              Synth::InstrumentEditorBank*       out);
+// Ordinary bank presentation drops only unmatched generated effect titles.  Missing
+// descriptor references and unrecognized titles refuse without modifying the bank.
+bool normalize_effect_layout(Synth::InstrumentEditorBank* bank);
+bool change_effect_type_candidate(const Synth::InstrumentEditorBank* source,
+                                  uint32_t                           owner,
+                                  uint32_t                           slot,
+                                  Synth::EffectType                  type,
+                                  Synth::InstrumentEditorBank*       out);
+// Allocates an owner-scoped represented root.  Both outputs are success-only.
+bool add_effect_lfo_candidate(const Synth::InstrumentEditorBank* source,
+                              uint32_t                           owner,
+                              Synth::InstrumentEditorBank*       out,
+                              uint16_t*                          out_descriptor,
+                              const bool*                        pinned_lfos = nullptr);
+// Extends an initialized descriptor keep-set with bindings and owner-scoped roots.
+bool collect_effect_lfos(const Synth::InstrumentEditorBank* source, uint32_t chain, bool* keep_lfos);
+bool transfer_effect_layout(const Synth::InstrumentEditorBank* source,
+                            uint32_t                           source_chain,
+                            const uint16_t*                    lfo_ids,
+                            uint32_t                           destination_chain,
+                            Synth::InstrumentEditorBank*       candidate);
+// Null graph/mapping extracts persisted state; pending extraction never consumes events.
+bool extract_effect_chain_document(const Synth::InstrumentEditorBank* source,
+                                   uint32_t                           chain,
+                                   const Graph*                       graph,
+                                   const EffectGraphMapping*          mapping,
+                                   Synth::EffectsDocument*            out);
+// Allocates fresh LFO ids, strips MIDI for master and validates before assigning output.
+bool replace_effect_chain_candidate(const Synth::InstrumentEditorBank* source,
+                                    uint32_t                           chain,
+                                    const Synth::EffectsDocument*      document,
+                                    Synth::InstrumentEditorBank*       out_candidate,
+                                    const bool*                        pinned_lfos = nullptr);
+
 // Chain slot an effect node projects, or -1 when the node is not an effect.
 int32_t fx_effect_slot_of(const EffectGraphMapping& mapping, uint32_t node_idx);
 
 // Descriptor id an LFO node projects, or 0 when the node is not an LFO node.
 uint32_t fx_lfo_desc_of(const EffectGraphMapping& mapping, uint32_t node_idx);
+// Budget for one additional represented node, including owner roots and legacy pins.
+bool fx_can_add_node(const Synth::InstrumentEditorBank* source, uint32_t owner, const bool* pinned_lfos = nullptr);
 // Number of nodes the chain's projection needs: fixed endpoints, one per
 // projected effect slot, and one per pinned-or-referenced LFO descriptor.
 uint32_t fx_projected_node_count(const Synth::InstrumentBank& bank, uint32_t chain, const bool* pinned_lfos);
-// Rebuilds the graph from the chain: Input -> effect nodes -> Output serial
-// wires, plus one LFO node per descriptor the chain's meaningful bindings
-// reference (deduplicated by id, shared with every other chain unchanged)
-// and per entry the caller pinned (a freshly added, not yet wired LFO must
-// stay on the canvas to receive its first wire).  Each LFO node carries one
-// reference wire per parameter row it modulates.  Wires are editable: the
-// validator installed by the editor restricts what may connect, and the
-// apply path turns wire edits into chain reorders and LFO bindings.
-// Returns false only on graph capacity exhaustion, leaving the graph
-// partially rebuilt (the caller re-projects from a valid bank).
-bool project_effect_chain_to_graph(const Synth::InstrumentBank& bank,
-                                   uint32_t                     chain,
-                                   Graph*                       graph,
-                                   EffectGraphMapping*          mapping,
-                                   const bool*                  pinned_lfos = nullptr);
+// Rebuilds every retained effect node and authored audio fragment, plus unique
+// bound or pinned LFO nodes and their modulation wires. Slot mapping is authoring
+// identity, not playback order. False leaves a partial projection on exhaustion.
+bool project_effect_chain_to_graph(const Synth::InstrumentEditorBank& bank,
+                                   uint32_t                           chain,
+                                   Graph*                             graph,
+                                   EffectGraphMapping*                mapping,
+                                   const bool*                        pinned_lfos = nullptr);
 
-// Applies one drained graph change to the bank through the mapping:
-// value_changed edits Enabled rows, parameter base values, the LFO op and
-// depth rows and LFO descriptor fields (shared descriptors edit every
-// user at once); node_deleted removes an effect slot or clears this chain's
-// references to a deleted LFO node; connection edits reorder the chain
-// (a serial wire into a node places that node right after the wire's
-// source), bind or unbind LFO descriptors onto parameter rows, and refuse
-// serial-wire disconnects (the chain wire carries audio; deleting an
-// effect is the node menu's Delete).  Connection events whose endpoints
-// died with a node deleted in the same batch are byproducts and change
-// nothing.  The change carries indices only, so the slot's live value is
-// read from the graph.  Returns false when the change cannot be
-// applied.
+// Payload-only single-event seam for parameter/modulation edits and legacy raw
+// chain helper checks. Editor audio structure is captured transactionally by
+// apply_effect_graph_batch; this raw-bank seam cannot represent detached topology.
 bool apply_fx_graph_change(Synth::InstrumentBank*    bank,
                            const Graph&              graph,
                            const EffectGraphMapping& mapping,

@@ -4,6 +4,7 @@
 #include "sculptor_bank_json.h"
 #include "../core/d_printf.h"
 #include "sculptor_atomic_file.h"
+#include "sculptor_effect_graph.h"
 #include "sculptor_instr_envelope_edit.h"
 #include "sculptor_osc_graph.h"
 
@@ -165,6 +166,7 @@ struct Walker {
     uint32_t         num_toks;
     bool             failed;
     bool             strict_editor_metadata;
+    bool             strict_effects;
 };
 
 // A key's decoded stream: every literal byte sequence and every \u escape
@@ -659,7 +661,7 @@ static void enc_binding(Out& o, const Synth::EffectParamBinding& binding)
     o.ch('}');
 }
 
-static void enc_effect(Out& o, const Synth::EffectSlotBinding& slot)
+static void enc_effect(Out& o, const Synth::EffectSlotBinding& slot, bool strict = false)
 {
     const uint32_t type = static_cast<uint32_t>(slot.type);
     if (type >= Synth::num_effect_types) {
@@ -668,7 +670,13 @@ static void enc_effect(Out& o, const Synth::EffectSlotBinding& slot)
     }
 
     o.ch('{');
-    key_enum(o, "type", effect_type_names, Synth::num_effect_types, type);
+    if (strict) {
+        o.key("type");
+        o.text_value(effect_type_names[type], 32);
+    }
+    else {
+        key_enum(o, "type", effect_type_names, Synth::num_effect_types, type);
+    }
     if (slot.enabled)
         key_bool(o, "enabled", true);
     if (slot.type != Synth::EffectType::none) {
@@ -684,22 +692,27 @@ static void enc_effect(Out& o, const Synth::EffectSlotBinding& slot)
     o.ch('}');
 }
 
-static void enc_chain(Out& o, const Synth::EffectChainBinding& chain)
+static void enc_chain_content(Out& o, const Synth::EffectChainBinding& chain, bool strict = false)
 {
     if (chain.num_effects > Synth::max_chain_effects) {
         o.overflow = true;
         return;
     }
 
-    o.ch('{');
     o.key("effects");
     o.ch('[');
     for (uint32_t s = 0; s < chain.num_effects; s++) {
         o.sep();
-        enc_effect(o, chain.effects[s]);
+        enc_effect(o, chain.effects[s], strict);
     }
     o.ch(']');
-    o.ch('}');
+}
+
+static void enc_chain(Out& output, const Synth::EffectChainBinding& chain)
+{
+    output.ch('{');
+    enc_chain_content(output, chain);
+    output.ch('}');
 }
 
 static void enc_channel(Out& o, const Synth::InstrumentEditorBank& bank, uint32_t channel)
@@ -725,6 +738,16 @@ static void enc_channel(Out& o, const Synth::InstrumentEditorBank& bank, uint32_
     o.ch('}');
 }
 
+static void enc_effect_audio(Out& output, const Sculptor::EffectAudioTopology& audio)
+{
+    output.ch('[');
+    for (uint32_t index = 0; index <= Synth::max_chain_effects; ++index) {
+        output.sep();
+        output.uint_value(audio.next[index]);
+    }
+    output.ch(']');
+}
+
 uint32_t Synth::encode_editor_bank_json(const InstrumentEditorBank* bank, char* dest, uint32_t dest_size)
 {
     // Pool counts drive the loops below; unchecked metadata must never index past
@@ -735,9 +758,20 @@ uint32_t Synth::encode_editor_bank_json(const InstrumentEditorBank* bank, char* 
         bank->graph_layout_count > Synth::max_graph_records)
         return 0;
 
+    for (uint32_t owner = 0; owner <= max_channels; ++owner) {
+        const EffectChainBinding& chain =
+            owner < max_channels ? bank->bank.channel_chains[owner] : bank->bank.master_chain;
+        if (! Sculptor::validate_effect_audio_topology(chain, bank->effect_audio[owner])) {
+            return 0;
+        }
+    }
+    bool explicit_audio = false;
+    for (uint32_t owner = 0; owner <= max_channels; ++owner) {
+        explicit_audio |= bank->effect_audio[owner].explicit_edges != 0;
+    }
     Out o = { dest, dest_size, 0, false, false };
-
-    o.str("{\"instrument_editor_bank\":{");
+    o.str(explicit_audio ? "{\"instrument_editor_bank\":null,\"instrument_editor_bank_v2\":{"
+                         : "{\"instrument_editor_bank\":{");
     key_uint(o, "drum_track_channel", bank->bank.drum_track_channel);
 
     o.key("instrument_names");
@@ -802,6 +836,20 @@ uint32_t Synth::encode_editor_bank_json(const InstrumentEditorBank* bank, char* 
     // oscillator-sum masks).
     o.key("editor");
     o.ch('{');
+    if (explicit_audio) {
+        o.key("effect_audio");
+        o.ch('[');
+        for (uint32_t owner = 0; owner <= max_channels; ++owner) {
+            o.sep();
+            if (bank->effect_audio[owner].explicit_edges) {
+                enc_effect_audio(o, bank->effect_audio[owner]);
+            }
+            else {
+                o.str("null");
+            }
+        }
+        o.ch(']');
+    }
     o.key("layouts");
     o.ch('[');
     for (uint32_t i = 0; i < bank->graph_layout_count; i++) {
@@ -1453,6 +1501,10 @@ static uint32_t check_value(Walker& w, uint32_t i)
 
 static void unknown_field(Walker& w, uint32_t key_idx)
 {
+    if (w.strict_effects) {
+        w.failed = true;
+        return;
+    }
     // The logged name is the key's decoded prefix, encoded as UTF-8 as far as the
     // bounded display buffer holds it.  A code point that no longer fits ends the
     // prefix, so the log always shows a faithful head of the decoded name,
@@ -2045,10 +2097,12 @@ static void decode_effect(Walker& w, uint32_t obj, Synth::EffectSlotBinding& slo
 {
     uint32_t num_params  = 0;
     bool     have_params = false;
+    bool     have_type   = false;
 
     walk_object(w, obj, [&](uint32_t key_idx, uint32_t val_idx) {
         uint32_t value = 0;
         if (key_eq(w, key_idx, "type")) {
+            have_type = true;
             want_enum(w, val_idx, effect_type_names, Synth::num_effect_types, &value);
             slot.type = static_cast<Synth::EffectType>(value);
         }
@@ -2072,6 +2126,9 @@ static void decode_effect(Walker& w, uint32_t obj, Synth::EffectSlotBinding& slo
         return;
 
     // Params must cover exactly the fields the effect type reads.
+    if (w.strict_effects && (! have_type || (slot.type != Synth::EffectType::none && ! have_params))) {
+        w.failed = true;
+    }
     if (have_params && num_params != Synth::get_effect_param_floats(slot.type))
         w.failed = true;
 }
@@ -2311,10 +2368,38 @@ static void decode_editor_record(Walker& w, uint32_t obj, Synth::GraphNodeLayout
     }
 }
 
-static void decode_editor_state(Walker& w, uint32_t val_idx, Synth::InstrumentEditorBank* out)
+static void decode_effect_audio(Walker& walker, uint32_t token, Sculptor::EffectAudioTopology* out)
 {
+    if (walker.toks[token].type != JSMN_ARRAY || walker.toks[token].size != Synth::max_chain_effects + 1) {
+        walker.failed = true;
+        return;
+    }
+    out->explicit_edges = 1;
+    walk_array(walker, token, Synth::max_chain_effects + 1, [&](uint32_t element, uint32_t position) {
+        uint32_t value = 0;
+        want_uint(walker, element, Synth::max_chain_effects + 1, &value);
+        out->next[position] = static_cast<uint8_t>(value);
+    });
+}
+
+static void decode_editor_state(Walker& w, uint32_t val_idx, Synth::InstrumentEditorBank* out, bool v2 = false)
+{
+    bool audio_present = false;
     walk_object(w, val_idx, [&](uint32_t key_idx, uint32_t inner_idx) {
-        if (key_eq(w, key_idx, "layouts")) {
+        if (key_eq(w, key_idx, "effect_audio")) {
+            audio_present = true;
+            if (! v2 || w.toks[inner_idx].type != JSMN_ARRAY || w.toks[inner_idx].size != Synth::max_channels + 1) {
+                w.failed = true;
+                return;
+            }
+            walk_array(w, inner_idx, Synth::max_channels + 1, [&](uint32_t element, uint32_t owner) {
+                if (w.toks[element].type == JSMN_PRIMITIVE && tok_text_eq(w, element, "null")) {
+                    return;
+                }
+                decode_effect_audio(w, element, &out->effect_audio[owner]);
+            });
+        }
+        else if (key_eq(w, key_idx, "layouts")) {
             uint16_t detached_per_zone[Synth::max_channels][Synth::max_instr_per_channel] = {};
             walk_array(w, inner_idx, Synth::max_graph_records, [&](uint32_t elem, uint32_t) {
                 Synth::GraphNodeLayout record = {};
@@ -2361,10 +2446,14 @@ static void decode_editor_state(Walker& w, uint32_t val_idx, Synth::InstrumentEd
         else
             unknown_field(w, key_idx);
     });
+    if (v2 && ! audio_present) {
+        w.failed = true;
+    }
 }
 
-static void decode_bank(Walker& w, uint32_t obj, Synth::InstrumentEditorBank* out)
+static void decode_bank(Walker& w, uint32_t obj, Synth::InstrumentEditorBank* out, bool v2 = false)
 {
+    bool editor_present = false;
     walk_object(w, obj, [&](uint32_t key_idx, uint32_t val_idx) {
         if (key_eq(w, key_idx, "drum_track_channel")) {
             uint32_t value = 0;
@@ -2389,11 +2478,19 @@ static void decode_bank(Walker& w, uint32_t obj, Synth::InstrumentEditorBank* ou
             decode_names(w, val_idx, Synth::max_instruments, out->instrument_names);
         else if (key_eq(w, key_idx, "channel_names"))
             decode_names(w, val_idx, Synth::max_channels, out->channel_names);
-        else if (key_eq(w, key_idx, "editor"))
-            decode_editor_state(w, val_idx, out);
+        else if (key_eq(w, key_idx, "editor")) {
+            editor_present = true;
+            decode_editor_state(w, val_idx, out, v2);
+        }
+        else if (v2) {
+            w.failed = true;
+        }
         else
             unknown_field(w, key_idx);
     });
+    if (v2 && ! editor_present) {
+        w.failed = true;
+    }
 }
 
 // The bank every absent field defaults to: an empty, all-disabled bank with the
@@ -3071,6 +3168,7 @@ static bool decode_document_into_scratch(const char* text, uint32_t len, bool st
     w.strict_editor_metadata = strict_editor_metadata;
     fill_default_editor_bank(&decode_scratch);
 
+    bool      guard = false, legacy = false, v2 = false, root_editor = false;
     uint32_t  idx   = 1;
     const int pairs = w.toks[0].size; // the root object counts its key-value pairs
 
@@ -3082,15 +3180,31 @@ static bool decode_document_into_scratch(const char* text, uint32_t len, bool st
             w.failed = true;
             break;
         }
-        if (key_eq(w, key_idx, "instrument_editor_bank"))
-            decode_bank(w, val_idx, &decode_scratch);
-        else if (key_eq(w, key_idx, "editor"))
+        if (key_eq(w, key_idx, "instrument_editor_bank")) {
+            if (w.toks[val_idx].type == JSMN_PRIMITIVE && tok_text_eq(w, val_idx, "null")) {
+                guard = true;
+            }
+            else {
+                legacy = true;
+                decode_bank(w, val_idx, &decode_scratch);
+            }
+        }
+        else if (key_eq(w, key_idx, "instrument_editor_bank_v2")) {
+            v2                       = true;
+            const bool strict        = w.strict_editor_metadata;
+            w.strict_editor_metadata = true;
+            decode_bank(w, val_idx, &decode_scratch, true);
+            w.strict_editor_metadata = strict;
+        }
+        else if (key_eq(w, key_idx, "editor")) {
+            root_editor = true;
             decode_editor_state(w, val_idx, &decode_scratch);
+        }
         else
             unknown_field(w, key_idx);
     }
 
-    if (w.failed) {
+    if (w.failed || guard != v2 || (v2 && (legacy || root_editor))) {
         return false;
     }
 
@@ -3103,8 +3217,7 @@ static bool decode_document_into_scratch(const char* text, uint32_t len, bool st
         return false;
     }
     canonicalize_editor_bank(&decode_scratch);
-
-    return true;
+    return Sculptor::normalize_effect_layout(&decode_scratch);
 }
 
 int Synth::write_editor_bank_json(FILE* file, const InstrumentEditorBank* bank, uint32_t max_len, uint32_t* out_len)
@@ -3746,4 +3859,211 @@ uint32_t Sculptor::encode_editor_instrument_json(const Synth::InstrumentEditorBa
         return 0;
     memcpy(dest, editor_export_text, named_length);
     return named_length;
+}
+
+bool Synth::validate_effects_document(const EffectsDocument* document)
+{
+    if (! document || document->lfo_count > max_lfos || document->graph_layout_count > effects_graph_layout_capacity) {
+        return false;
+    }
+    memset(&decode_scratch, 0, sizeof(decode_scratch));
+    for (uint32_t index = 0; index < document->lfo_count; ++index) {
+        decode_scratch.bank.lfos.allocate();
+        if (! std::isfinite(document->lfos[index].min_value) || ! std::isfinite(document->lfos[index].min_max_delta)) {
+            return false;
+        }
+    }
+    memcpy(decode_scratch.bank.lfos.entries, document->lfos, document->lfo_count * sizeof(document->lfos[0]));
+    decode_scratch.bank.channel_chains[0] = document->chain;
+    if (! validate_instrument_bank(&decode_scratch.bank) ||
+        ! Sculptor::validate_effect_audio_topology(document->chain, document->audio)) {
+        return false;
+    }
+    for (uint32_t index = 0; index < document->graph_layout_count; ++index) {
+        const EffectsGraphLayout& record = document->graph_layout[index];
+        if (record.kind > effects_graph_layout_lfo || ! std::isfinite(record.x) || ! std::isfinite(record.y) ||
+            ! std::isfinite(record.width_override) || ! std::isfinite(record.height_override) ||
+            record.width_override < 0 || record.height_override < 0) {
+            return false;
+        }
+        if (record.kind == effects_graph_layout_effect) {
+            if (record.index >= document->chain.num_effects ||
+                document->chain.effects[record.index].type == EffectType::none) {
+                return false;
+            }
+        }
+        else if (record.kind == effects_graph_layout_lfo) {
+            if (! record.index || record.index > document->lfo_count) {
+                return false;
+            }
+        }
+        else if (record.index) {
+            return false;
+        }
+        for (uint32_t previous = 0; previous < index; ++previous) {
+            if (document->graph_layout[previous].kind == record.kind &&
+                document->graph_layout[previous].index == record.index) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+static const char* const      effects_layout_names[] = { "input", "output", "midi", "effect", "lfo" };
+static Synth::EffectsDocument effects_json_scratch;
+
+uint32_t Synth::encode_effects_json(const EffectsDocument* document, char* dest, uint32_t dest_size)
+{
+    if (! dest || ! validate_effects_document(document)) {
+        return 0;
+    }
+    Out output = { json_text, 65535, 0, false, false };
+    output.ch('{');
+    output.key("format");
+    output.text_value(document->audio.explicit_edges ? "synth-effects-v2" : "synth-effects-v1",
+                      sizeof("synth-effects-v1"));
+    if (document->audio.explicit_edges) {
+        output.key("audio_next");
+        enc_effect_audio(output, document->audio);
+    }
+    output.key("lfos");
+    output.ch('[');
+    for (uint32_t index = 0; index < document->lfo_count; ++index) {
+        output.sep();
+        enc_lfo(output, document->lfos[index]);
+    }
+    output.ch(']');
+    enc_chain_content(output, document->chain, true);
+    output.key("graph_layout");
+    output.ch('[');
+    for (uint32_t index = 0; index < document->graph_layout_count; ++index) {
+        const EffectsGraphLayout& record = document->graph_layout[index];
+        output.sep();
+        output.ch('{');
+        output.key("kind");
+        output.text_value(effects_layout_names[record.kind], 16);
+        if (record.kind == effects_graph_layout_effect || record.kind == effects_graph_layout_lfo) {
+            output.key(record.kind == effects_graph_layout_effect ? "slot" : "lfo_desc_id");
+            output.uint_value(record.index);
+        }
+        output.key("x");
+        output.float_value(record.x);
+        output.key("y");
+        output.float_value(record.y);
+        key_float_nonzero(output, "width_override", record.width_override);
+        key_float_nonzero(output, "height_override", record.height_override);
+        output.ch('}');
+    }
+    output.ch(']');
+    output.ch('}');
+    if (output.overflow || output.invalid || output.pos >= dest_size ||
+        ! decode_effects_json(json_text, output.pos, &effects_json_scratch)) {
+        return 0;
+    }
+    memcpy(dest, json_text, output.pos);
+    dest[output.pos] = 0;
+    return output.pos;
+}
+
+bool Synth::decode_effects_json(const char* text, uint32_t len, EffectsDocument* out)
+{
+    if (! text || ! out || len >= 65536) {
+        return false;
+    }
+    Walker walker = {};
+    if (! parse_document(text, len, walker)) {
+        return false;
+    }
+    walker.strict_effects     = true;
+    EffectsDocument& document = effects_json_scratch;
+    memset(&document, 0, sizeof(document));
+    uint32_t fields = 0;
+    bool     v2     = false;
+    walk_object(walker, 0, [&](uint32_t key_index, uint32_t value_index) {
+        if (key_eq(walker, key_index, "format")) {
+            fields |= 1;
+            v2 = tok_text_eq(walker, value_index, "synth-effects-v2");
+            if (walker.toks[value_index].type != JSMN_STRING ||
+                (! v2 && ! tok_text_eq(walker, value_index, "synth-effects-v1"))) {
+                walker.failed = true;
+            }
+        }
+        else if (key_eq(walker, key_index, "audio_next")) {
+            fields |= 16;
+            decode_effect_audio(walker, value_index, &document.audio);
+        }
+        else if (key_eq(walker, key_index, "lfos")) {
+            fields |= 2;
+            walk_array(walker, value_index, max_lfos, [&](uint32_t element, uint32_t position) {
+                decode_lfo(walker, element, document.lfos[position]);
+                document.lfo_count = position + 1;
+            });
+        }
+        else if (key_eq(walker, key_index, "effects")) {
+            fields |= 4;
+            walk_array(walker, value_index, max_chain_effects, [&](uint32_t element, uint32_t position) {
+                decode_effect(walker, element, document.chain.effects[position]);
+                document.chain.num_effects = static_cast<uint8_t>(position + 1);
+            });
+        }
+        else if (key_eq(walker, key_index, "graph_layout")) {
+            fields |= 8;
+            walk_array(walker, value_index, effects_graph_layout_capacity, [&](uint32_t element, uint32_t position) {
+                EffectsGraphLayout& record  = document.graph_layout[position];
+                uint32_t            present = 0;
+                walk_object(walker, element, [&](uint32_t layout_key, uint32_t layout_value) {
+                    uint32_t value = 0;
+                    if (key_eq(walker, layout_key, "kind")) {
+                        present |= 1;
+                        want_enum(walker, layout_value, effects_layout_names, 5, &value);
+                        record.kind = static_cast<uint8_t>(value);
+                    }
+                    else if (key_eq(walker, layout_key, "slot")) {
+                        present |= 2;
+                        want_uint(walker, layout_value, max_chain_effects - 1, &value);
+                        record.index = static_cast<uint16_t>(value);
+                    }
+                    else if (key_eq(walker, layout_key, "lfo_desc_id")) {
+                        present |= 4;
+                        want_uint(walker, layout_value, max_lfos, &value);
+                        record.index = static_cast<uint16_t>(value);
+                    }
+                    else if (key_eq(walker, layout_key, "x")) {
+                        present |= 8;
+                        want_float(walker, layout_value, &record.x);
+                    }
+                    else if (key_eq(walker, layout_key, "y")) {
+                        present |= 16;
+                        want_float(walker, layout_value, &record.y);
+                    }
+                    else if (key_eq(walker, layout_key, "width_override")) {
+                        want_float(walker, layout_value, &record.width_override);
+                    }
+                    else if (key_eq(walker, layout_key, "height_override")) {
+                        want_float(walker, layout_value, &record.height_override);
+                    }
+                    else {
+                        walker.failed = true;
+                    }
+                });
+                const uint32_t expected = 25u | (record.kind == effects_graph_layout_effect ? 2u
+                                                 : record.kind == effects_graph_layout_lfo  ? 4u
+                                                                                            : 0u);
+                if (present != expected) {
+                    walker.failed = true;
+                }
+                document.graph_layout_count = position + 1;
+            });
+        }
+        else {
+            walker.failed = true;
+        }
+    });
+    if (walker.failed || fields != (v2 ? 31u : 15u) || ! validate_effects_document(&document)) {
+        return false;
+    }
+    canonicalize_chain(document.chain);
+    *out = document;
+    return true;
 }

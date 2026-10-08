@@ -5,10 +5,19 @@
 // Uses only the public API declared in sculptor_graph.h per the approved
 // M1 plan.  TEST-macro pattern copied from sculptor_undo_unit.cpp.
 
+#include "../thirdparty/imgui/src/imgui_internal.h"
 #include "sculptor_graph.h"
+#include "sculptor_osc_graph.h"
 
 #include <stdio.h>
 #include <string.h>
+
+#ifdef GRAPH_UNIT_AUDIO_RENDER_TEST_STUB
+bool Sculptor::oscillator_slot_waveform_mode_disabled(const Sculptor::Node&, uint32_t)
+{
+    return false;
+}
+#endif
 
 static int exit_code = 0;
 
@@ -2344,8 +2353,363 @@ static void test_connectable_dynamic_value_row()
     TEST(g.node(dst).slots.entries[gain_slot].value.real == 0.9f);
 }
 
+static void test_retarget_occupied_input_without_interceptor()
+{
+    Graph&         graph  = reset_unit_graph(0);
+    const uint32_t source = graph.create_node("source", {});
+    const uint32_t other  = graph.create_node("other", {});
+    const uint32_t first  = graph.create_node("first", {});
+    const uint32_t second = graph.create_node("second", {});
+    Slot           output = {};
+    output.kind           = SlotKind::output;
+    Slot input            = {};
+    input.kind            = SlotKind::input;
+    graph.add_slot(source, output);
+    graph.add_slot(other, output);
+    graph.add_slot(first, input);
+    graph.add_slot(second, input);
+    const uint32_t wire = graph.add_connection({ source, 0 }, { first, 0 });
+    TEST(graph.add_connection({ other, 0 }, { second, 0 }) != Sculptor::pool_no_slot);
+    GraphChange changes[max_pending_changes];
+    graph.take_changes(changes, max_pending_changes);
+    TEST(! graph.move_connection_end(wire, false, { second, 0 }));
+    TEST(graph.has_error());
+    TEST(graph.take_changes(changes, max_pending_changes) == 0);
+    TEST(graph.get_connection(wire).input.node_idx == first);
+    TEST(graph.get_connection(wire).output.node_idx == source);
+    TEST(! graph.attempt_connection({ source, 0 }, { second, 0 }));
+    TEST(graph.take_changes(changes, max_pending_changes) == 0);
+}
+
+static void test_peek_changes_preserves_ring()
+{
+    Graph&         graph = reset_unit_graph(0);
+    const uint32_t node  = graph.create_node("node", {});
+    GraphChange    first[Sculptor::max_pending_changes];
+    GraphChange    second[Sculptor::max_pending_changes];
+    graph.take_changes(first, Sculptor::max_pending_changes);
+    for (uint32_t index = 0; index < 300; ++index) {
+        graph.rename_node(node, index % 2 ? "A" : "B");
+        bool           overflow = true;
+        const uint32_t count    = graph.peek_changes(first, Sculptor::max_pending_changes, &overflow);
+        TEST(count == 1 && ! overflow);
+        TEST(graph.peek_changes(second, Sculptor::max_pending_changes, &overflow) == count);
+        TEST(memcmp(first, second, count * sizeof(first[0])) == 0);
+        TEST(graph.peek_changes(nullptr, 0, &overflow) == 0 && overflow);
+        TEST(graph.take_changes(second, Sculptor::max_pending_changes) == count);
+        TEST(memcmp(first, second, count * sizeof(first[0])) == 0);
+    }
+    for (uint32_t index = 0; index <= Sculptor::max_pending_changes; ++index) {
+        graph.rename_node(node, index % 2 ? "A" : "B");
+    }
+    bool overflow = false;
+    TEST(graph.peek_changes(first, Sculptor::max_pending_changes, &overflow) == Sculptor::max_pending_changes);
+    TEST(overflow);
+    TEST(graph.peek_changes(second, 1, &overflow) == 1 && overflow);
+    TEST(graph.peek_changes(nullptr, 1, &overflow) == 0 && overflow);
+    TEST(graph.peek_changes(second, Sculptor::max_pending_changes, &overflow) == Sculptor::max_pending_changes);
+    TEST(memcmp(first, second, sizeof(first)) == 0);
+    TEST(graph.take_changes(second, Sculptor::max_pending_changes) == Sculptor::max_pending_changes);
+    TEST(memcmp(first, second, sizeof(first)) == 0);
+    TEST(graph.changes_overflowed());
+    TEST(! graph.changes_overflowed());
+}
+
+static bool cancel_user_disconnect(void* data, uint32_t connection_idx)
+{
+    uint32_t* calls = static_cast<uint32_t*>(data);
+    ++*calls;
+    return true;
+}
+
+static Sculptor::ConnectionRetargetDecision insert_before_test_interceptor(void*    data,
+                                                                           uint32_t connection_idx,
+                                                                           bool     move_output_end,
+                                                                           EndPoint target)
+{
+    return Sculptor::ConnectionRetargetDecision::insert_before;
+}
+
+static void test_user_disconnect_and_intent_capacity()
+{
+    Graph&         graph  = reset_unit_graph(0);
+    const uint32_t source = graph.create_node("source", {});
+    const uint32_t target = graph.create_node("target", {});
+    graph.add_slot(source, Sculptor::output_slot("Out"));
+    graph.add_slot(target, Sculptor::input_slot("In"));
+    const uint32_t wire = graph.add_connection({ source, 0 }, { target, 0 });
+    GraphChange    changes[max_pending_changes];
+    graph.take_changes(changes, max_pending_changes);
+    uint32_t calls = 0;
+    graph.set_disconnect_interceptor(cancel_user_disconnect, &calls);
+    TEST(! graph.user_delete_connection(pool_no_slot));
+    TEST(calls == 0);
+    const Connection original = graph.get_connection(wire);
+    TEST(graph.user_delete_connection(wire));
+    TEST(calls == 1);
+    TEST(memcmp(&original, &graph.get_connection(wire), sizeof(original)) == 0);
+    TEST(graph.take_changes(changes, max_pending_changes) == 0);
+    TEST(! graph.has_error());
+    graph.set_retarget_interceptor(insert_before_test_interceptor, nullptr);
+    for (uint32_t index = 0; index < max_pending_changes; ++index) {
+        graph.rename_node(target, index % 2 ? "A" : "B");
+    }
+    TEST(! graph.move_connection_end(wire, false, { target, 0 }));
+    bool overflow = false;
+    TEST(graph.peek_changes(changes, max_pending_changes, &overflow) == max_pending_changes);
+    TEST(overflow);
+    TEST(memcmp(&original, &graph.get_connection(wire), sizeof(original)) == 0);
+    graph.take_changes(changes, max_pending_changes);
+    TEST(graph.changes_overflowed());
+    graph.set_disconnect_interceptor(nullptr, nullptr);
+    TEST(graph.user_delete_connection(wire));
+    TEST(! graph.user_delete_connection(wire));
+    TEST(graph.take_changes(changes, max_pending_changes) == 1);
+    TEST(changes[0].kind == ChangeKind::connection_deleted);
+    // Raw node deletion bypasses the user cancellation policy.
+    const uint32_t next_wire = graph.add_connection({ source, 0 }, { target, 0 });
+    graph.take_changes(changes, max_pending_changes);
+    graph.set_disconnect_interceptor(cancel_user_disconnect, &calls);
+    graph.delete_node(target);
+    TEST(! graph.connection_occupied(next_wire));
+    TEST(calls == 1);
+    graph.clear();
+    graph.take_changes(changes, max_pending_changes);
+    const uint32_t next_source = graph.create_node("source", {});
+    const uint32_t next_target = graph.create_node("target", {});
+    graph.add_slot(next_source, Sculptor::output_slot("Out"));
+    graph.add_slot(next_target, Sculptor::input_slot("In"));
+    const uint32_t rebuilt_wire = graph.add_connection({ next_source, 0 }, { next_target, 0 });
+    graph.take_changes(changes, max_pending_changes);
+    TEST(graph.user_delete_connection(rebuilt_wire));
+    TEST(! graph.connection_occupied(rebuilt_wire));
+    TEST(calls == 1);
+    // clear also removes retarget interception: generic self wiring refuses.
+    const uint32_t self_wire = graph.add_connection({ next_source, 0 }, { next_target, 0 });
+    graph.take_changes(changes, max_pending_changes);
+    TEST(! graph.move_connection_end(self_wire, false, { next_source, 0 }));
+    TEST(graph.take_changes(changes, max_pending_changes) == 0);
+}
+
+static uint32_t render_frame(Graph& graph, ImVec2 mouse, bool down, bool escape = false, bool right = false)
+{
+    ImGuiIO& io = ImGui::GetIO();
+    io.AddMousePosEvent(mouse.x, mouse.y);
+    io.AddMouseButtonEvent(0, down);
+    io.AddMouseButtonEvent(1, right);
+    io.AddKeyEvent(ImGuiKey_Escape, escape);
+    ImGui::NewFrame();
+    ImGui::SetNextWindowPos(ImVec2(0, 0));
+    ImGui::SetNextWindowSize(ImVec2(1024, 768));
+    ImGui::Begin("graph mouse regression",
+                 nullptr,
+                 ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove);
+    graph.render(vmath::vec2(1000, 740), nullptr);
+    const ImDrawList* draw              = ImGui::GetWindowDrawList();
+    uint32_t          old_wire_vertices = 0;
+    for (const ImDrawVert& vertex : draw->VtxBuffer) {
+        if (vertex.col == IM_COL32(17, 29, 43, 255)) {
+            ++old_wire_vertices;
+        }
+    }
+    ImGui::End();
+    ImGui::Render();
+    return old_wire_vertices;
+}
+
+static ImVec2 audio_dot(const Graph& graph, uint32_t node, bool output)
+{
+    // Dot rows use the actual built-in font metrics and override-aware measured width.
+    const float line_height  = ImGui::GetFontSize();
+    const float frame_height = line_height + 2 * ImGui::GetStyle().FramePadding.y;
+    return ImVec2(8 + graph.node(node).position.x + (output ? graph.content_size(node).x : 0),
+                  8 + graph.node(node).position.y + 8 + line_height + (frame_height + 4) * 0.5f);
+}
+
+static void test_renderer_audio_endpoint_mouse_frames()
+{
+    ImGui::CreateContext();
+    ImGuiIO& io                     = ImGui::GetIO();
+    io.IniFilename                  = nullptr;
+    io.LogFilename                  = nullptr;
+    io.DisplaySize                  = ImVec2(1024, 768);
+    io.DeltaTime                    = 1.0f / 60.0f;
+    io.ConfigInputTrickleEventQueue = false;
+    unsigned char* pixels           = nullptr;
+    int            width = 0, height = 0;
+    io.Fonts->GetTexDataAsRGBA32(&pixels, &width, &height);
+    TEST(pixels && width > 0 && height > 0);
+    for (uint32_t endpoint = 0; endpoint < 2; ++endpoint) {
+        for (uint32_t action = 0; action < 8; ++action) {
+            ImGui::ClosePopupsOverWindow(nullptr, false);
+            Graph& graph = reset_unit_graph(0);
+            graph.clear();
+            GraphColors colors = Sculptor::default_graph_colors();
+            colors.connection  = 0x111D2BFF;
+            graph.set_colors(colors);
+            uint32_t nodes[3];
+            for (uint32_t i = 0; i < 3; ++i) {
+                nodes[i]     = graph.create_node("Effect", vmath::vec2(64.0f + 256.0f * float(i), 64.0f));
+                Slot in      = {};
+                in.kind      = SlotKind::input;
+                in.row_group = 1;
+                strcpy(in.name, "In");
+                Slot out      = {};
+                out.kind      = SlotKind::output;
+                out.row_group = 1;
+                strcpy(out.name, "Out");
+                TEST(graph.add_slot(nodes[i], in) == 0);
+                TEST(graph.add_slot(nodes[i], out) == 1);
+            }
+            const uint32_t wire = graph.add_connection({ nodes[0], 1 }, { nodes[1], 0 });
+            if (action == 4) {
+                graph.add_connection({ nodes[0], 1 }, { nodes[2], 0 });
+            }
+            GraphChange changes[16];
+            graph.take_changes(changes, 16);
+            render_frame(graph, ImVec2(900, 600), false);
+            const uint32_t idle_vertices = render_frame(graph, ImVec2(900, 600), false);
+            TEST(idle_vertices > 0);
+            const bool   moving_output = endpoint == 1;
+            const ImVec2 grabbed       = audio_dot(graph, nodes[moving_output ? 0 : 1], moving_output);
+            render_frame(graph, grabbed, false);
+            const uint32_t pickup_vertices = render_frame(graph, grabbed, true);
+            TEST(graph.interaction_active());
+            if (! graph.interaction_active()) {
+                render_frame(graph, grabbed, false);
+                continue;
+            }
+            TEST(pickup_vertices < idle_vertices);
+            TEST(graph.connection_occupied(wire));
+            TEST(graph.take_changes(changes, 16) == 0);
+            ImVec2 target = audio_dot(graph, nodes[2], moving_output);
+            if (action == 1 || action == 2 || action == 6 || action == 7) {
+                target = ImVec2(900, 600);
+            }
+            else if (action == 3) {
+                target = grabbed;
+            }
+            else if (action == 5) {
+                target = audio_dot(graph, nodes[2], ! moving_output);
+            }
+            const uint32_t held_vertices = render_frame(graph, target, true);
+            TEST(held_vertices < idle_vertices);
+            if (action == 0) {
+                const ImVec2 a = audio_dot(graph, nodes[0], true);
+                const ImVec2 b = audio_dot(graph, nodes[1], false);
+                render_frame(graph, ImVec2((a.x + b.x) * 0.5f, (a.y + b.y) * 0.5f), true, false, true);
+                TEST(graph.connection_popup() == Sculptor::pool_no_slot);
+                render_frame(graph, target, true);
+            }
+            if (action == 7) {
+                graph.move_connection_end(wire, false, { nodes[0], 1 });
+                TEST(graph.has_error());
+            }
+            const bool     cancel         = action == 2 || action == 6 || action == 7;
+            const uint32_t final_vertices = render_frame(graph, target, action == 2 || action == 7, cancel);
+            TEST(! graph.interaction_active());
+            const uint32_t count = graph.take_changes(changes, 16);
+            if (cancel || action == 3 || action == 5 || (action == 4 && ! moving_output)) {
+                TEST(graph.connection_occupied(wire));
+                if (graph.connection_occupied(wire)) {
+                    TEST(graph.get_connection(wire).output.node_idx == nodes[0]);
+                    TEST(graph.get_connection(wire).input.node_idx == nodes[1]);
+                }
+                TEST(count == 0);
+                if (cancel) {
+                    TEST(final_vertices >= idle_vertices);
+                }
+                if (action == 5 || (action == 4 && ! moving_output)) {
+                    TEST(graph.has_error());
+                }
+            }
+            else if (action == 1) {
+                TEST(! graph.connection_occupied(wire));
+                TEST(count == 1);
+                if (count == 1) {
+                    TEST(changes[0].kind == ChangeKind::connection_deleted);
+                }
+                TEST(! graph.has_error());
+            }
+            else {
+                TEST(graph.connection_occupied(wire));
+                if (graph.connection_occupied(wire)) {
+                    TEST(graph.get_connection(wire).output.node_idx == nodes[moving_output ? 2 : 0]);
+                    TEST(graph.get_connection(wire).input.node_idx == nodes[moving_output ? 1 : 2]);
+                }
+                TEST(count == 1);
+                if (count == 1) {
+                    TEST(changes[0].kind == ChangeKind::connection_changed);
+                }
+            }
+            render_frame(graph, ImVec2(900, 600), false);
+        }
+    }
+    const float zooms[] = { Sculptor::graph_min_zoom, Sculptor::graph_max_zoom };
+    for (float scale : zooms) {
+        for (uint32_t endpoint = 0; endpoint < 2; ++endpoint) {
+            ImGui::ClosePopupsOverWindow(nullptr, false);
+            Graph& graph = reset_unit_graph(0);
+            graph.clear();
+            graph.set_colors(Sculptor::default_graph_colors());
+            const uint32_t source  = graph.create_node("A", { 16, 16 });
+            const uint32_t target  = graph.create_node("B", { 96, 16 });
+            const uint32_t nodes[] = { source, target };
+            for (uint32_t node : nodes) {
+                Slot in       = {};
+                in.kind       = SlotKind::input;
+                in.row_group  = 1;
+                Slot out      = {};
+                out.kind      = SlotKind::output;
+                out.row_group = 1;
+                graph.add_slot(node, in);
+                graph.add_slot(node, out);
+                graph.set_node_layout(node, graph.node(node).position, 64, 64);
+            }
+            const uint32_t wire = graph.add_connection({ source, 1 }, { target, 0 });
+            GraphChange    changes[16];
+            graph.take_changes(changes, 16);
+            render_frame(graph, ImVec2(8, 8), false);
+            render_frame(graph, ImVec2(8, 8), false);
+            io.AddMouseWheelEvent(0, scale < 1 ? -100.0f : 100.0f);
+            render_frame(graph, ImVec2(8, 8), false);
+            render_frame(graph, ImVec2(8, 8), false);
+            const uint32_t node  = endpoint ? source : target;
+            const float    font  = ImGui::GetFontSize();
+            const float    frame = font + 2 * ImGui::GetStyle().FramePadding.y;
+            const ImVec2   dot(8 + graph.node(node).position.x * scale + (endpoint ? graph.content_size(node).x : 0),
+                               8 + graph.node(node).position.y * scale + (8 + font + (frame + 4) * 0.5f) * scale);
+            render_frame(graph, dot, false);
+            render_frame(graph, dot, true);
+            TEST(graph.interaction_active());
+            render_frame(graph, dot, false, true);
+            TEST(! graph.interaction_active());
+            TEST(graph.connection_occupied(wire));
+            TEST(graph.take_changes(changes, 16) == 0);
+            // Reprojection clears the old gesture before another pickup.
+            graph.clear();
+            const uint32_t fresh = graph.create_node("fresh", { 16, 16 });
+            Slot           out   = {};
+            out.kind             = SlotKind::output;
+            graph.add_slot(fresh, out);
+            render_frame(graph, ImVec2(8, 8), false);
+            const float x = 8 + 16 * scale + graph.content_size(fresh).x;
+            const float y = 8 + 16 * scale + (8 + font + (frame + 4) * 0.5f) * scale;
+            render_frame(graph, ImVec2(x, y), true);
+            TEST(graph.interaction_active());
+            render_frame(graph, ImVec2(x, y), false, true);
+            TEST(! graph.interaction_active());
+        }
+    }
+    ImGui::DestroyContext();
+}
+
 int main()
 {
+    test_renderer_audio_endpoint_mouse_frames();
+    test_user_disconnect_and_intent_capacity();
+    test_retarget_occupied_input_without_interceptor();
+    test_peek_changes_preserves_ring();
     test_create_node_distinct_indices();
     test_create_node_exhaustion_is_safe();
     test_create_node_snaps_position_to_grid();

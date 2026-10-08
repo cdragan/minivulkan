@@ -12,12 +12,16 @@
 
 #include "../synth/midi_input.h"
 #include "../synth/realtime_synth.h"
+#include "../synth/synth_effect_expansion.h"
 #include "sculptor_undo.h"
 
 #include "../core/d_printf.h"
 #include "../core/gui_imgui.h"
 #include <string.h>
 #include <type_traits>
+
+// Audio consumer publishes a bounded refusal code; only the GUI reports it.
+static std::atomic<uint32_t> effect_publish_failure{ 0 };
 
 // Per-envelope-node state-widget contexts, indexed by graph node index and
 // rebound on every projection.  A reset on projection also aborts gestures
@@ -43,7 +47,13 @@ enum OscCanvasCommand {
     osc_cmd_add_envelope,
     osc_cmd_add_lfo,
     osc_cmd_add_parameter,
-    osc_cmd_change_target_param
+    osc_cmd_change_target_param,
+    osc_cmd_zone_rename,
+    osc_cmd_zone_copy,
+    osc_cmd_zone_paste,
+    osc_cmd_zone_join_previous,
+    osc_cmd_zone_join_next,
+    osc_cmd_zone_delete
 };
 
 // Effects canvas and node-menu commands, queued during render and run
@@ -52,7 +62,9 @@ enum FxCanvasCommand {
     fx_cmd_none,
     fx_cmd_add_effect,
     fx_cmd_add_lfo,
-    fx_cmd_change_type
+    fx_cmd_change_type,
+    fx_cmd_copy,
+    fx_cmd_paste
 };
 
 // The delete veto needs the graph to report a specific refusal, so the
@@ -119,6 +131,8 @@ uint32_t              osc_graph_generation = 0;
 OscCanvasCommand osc_canvas_command         = osc_cmd_none;
 uint32_t         osc_canvas_retarget_node   = Sculptor::pool_no_slot; // pending osc_cmd_change_target_param
 uint32_t         osc_canvas_retarget_target = 0;
+uint32_t         osc_canvas_zone_channel    = 0;
+uint32_t         osc_canvas_zone_note       = 0;
 
 FxCanvasCommand   fx_canvas_command = fx_cmd_none;
 Synth::EffectType fx_canvas_type    = Synth::EffectType::none;
@@ -175,6 +189,7 @@ Synth::InstrumentEditorBank candidate;
 
 // One clipboard document: copy encodes into it, paste decodes out of it.
 static char                         zone_clipboard_text[64 * 1024];
+static Synth::EffectsDocument       effects_clipboard_document;
 static Synth::Instrument            clipboard_decoded_instrument;
 static Synth::EnvelopeDescriptor    clipboard_decoded_envelopes[Synth::instrument_max_envelopes];
 static Synth::LFODescriptor         clipboard_decoded_lfos[Synth::instrument_max_lfos];
@@ -187,6 +202,7 @@ static_assert(sizeof(undo_buf) <= undo_depth * (sizeof(Synth::InstrumentEditorBa
 // JSON decode and clipboard candidate.  Runtime, pending publish and clipboard
 // model validation each own a distinct InstrumentBank; the queue owns two more.
 constexpr size_t editor_resident_state_bytes =
+    sizeof(effect_publish_failure) + 2 * sizeof(Synth::InstrumentEditorBank) + 3 * sizeof(Synth::EffectsDocument) +
     (undo_depth + 8) * sizeof(Synth::InstrumentEditorBank) + 3 * sizeof(Synth::InstrumentBank) + sizeof(bank_queue) +
     1212416 +                                                  // JSON text, tokens and keys
     sizeof(Sculptor::SynthEditor) +                            // includes the browser's entry/category arrays
@@ -196,8 +212,8 @@ constexpr size_t editor_resident_state_bytes =
     sizeof(fx_mapping) + sizeof(envelope_widget_contexts) + sizeof(fx_lfo_pinned) + sizeof(projected_position) +
     sizeof(projected_width) + sizeof(projected_height) + sizeof(zone_clipboard_text) +
     sizeof(clipboard_decoded_instrument) + sizeof(clipboard_decoded_envelopes) + sizeof(clipboard_decoded_lfos) +
-    sizeof(serialization_mapping) + sizeof(clipboard_decoded_layout) +
-    sizeof(Synth::Instrument) + // codec document model
+    sizeof(serialization_mapping) + sizeof(clipboard_decoded_layout) + sizeof(osc_canvas_zone_channel) +
+    sizeof(osc_canvas_zone_note) + sizeof(Synth::Instrument) + // codec document model
     Synth::instrument_max_envelopes * sizeof(Synth::EnvelopeDescriptor) +
     Synth::instrument_max_lfos * sizeof(Synth::LFODescriptor) + Synth::num_mod_targets * sizeof(bool) +
     2 * sizeof(uint32_t) +
@@ -260,9 +276,9 @@ static bool osc_node_delete_veto(void* user_data, uint32_t node_idx)
 
 // The canvas menu is fully caller-provided; these items cover every node
 // kind the graph can express.
-static void osc_canvas_menu(void* user_data)
+void Sculptor::SynthEditor::osc_canvas_menu_entry(void* user_data)
 {
-    (void)user_data;
+    SynthEditor* editor = static_cast<SynthEditor*>(user_data);
     if (ImGui::MenuItem("Add Oscillator")) {
         osc_canvas_command = osc_cmd_add_oscillator;
     }
@@ -274,6 +290,12 @@ static void osc_canvas_menu(void* user_data)
     }
     if (ImGui::MenuItem("Add Parameter")) {
         osc_canvas_command = osc_cmd_add_parameter;
+    }
+    const uint32_t channel = osc_graph_zone_channel;
+    const int32_t  zone    = editor->selected_zone[channel];
+    if (zone >= 0) {
+        ImGui::Separator();
+        editor->gui_zone_menu_items(channel, instr_bank.bank.channel_zones[channel][zone].start_note - 1, false);
     }
 }
 
@@ -361,6 +383,17 @@ static bool fx_connection_validator(void*              user_data,
         graph.set_error("The chain wire carries audio only");
         return false;
     }
+    Sculptor::EffectAudioTopology audio    = {};
+    const Sculptor::Connection    proposed = { output, input };
+    if (! Sculptor::capture_effect_audio(graph,
+                                         fx_mapping,
+                                         Sculptor::fx_graph_chain(&instr_bank.bank, fx_mapping.chain),
+                                         &audio,
+                                         &proposed,
+                                         graph.moving_connection)) {
+        graph.set_error("Audio must be unbranched and acyclic");
+        return false;
+    }
     return true;
 }
 
@@ -372,7 +405,9 @@ static void fx_canvas_menu(void* user_data)
     ImGui::BeginDisabled(chain.num_effects >= Synth::max_chain_effects);
     for (uint32_t type = 1; type < Synth::num_effect_types; ++type) {
         const Sculptor::EffectTypeInfo& info = Sculptor::effect_type_info(static_cast<Synth::EffectType>(type));
-        if (ImGui::MenuItem(info.name)) {
+        char                            label[64];
+        snprintf(label, sizeof(label), "Add %s", info.name);
+        if (ImGui::MenuItem(label)) {
             fx_canvas_command = fx_cmd_add_effect;
             fx_canvas_type    = static_cast<Synth::EffectType>(type);
         }
@@ -380,6 +415,13 @@ static void fx_canvas_menu(void* user_data)
     ImGui::EndDisabled();
     if (ImGui::MenuItem("Add LFO")) {
         fx_canvas_command = fx_cmd_add_lfo;
+    }
+    ImGui::Separator();
+    if (ImGui::MenuItem("Copy Effects")) {
+        fx_canvas_command = fx_cmd_copy;
+    }
+    if (ImGui::MenuItem("Paste Effects")) {
+        fx_canvas_command = fx_cmd_paste;
     }
 }
 
@@ -677,7 +719,10 @@ static bool publish_edited_bank()
         return false;
     }
 
-    pending_bank = instr_bank.bank; // names are editor-only and never reach the audio thread
+    if (! Sculptor::compile_editor_playback_bank(instr_bank, &pending_bank)) {
+        Sculptor::notify_error("Synth: refusing to publish invalid effects topology");
+        return false;
+    }
     // A zone with a broken oscillator sum publishes its channel disabled so
     // notes cannot trigger it; the stored channel_enabled values stay 1.
     uint8_t publish_enabled[Synth::max_channels];
@@ -697,7 +742,15 @@ static bool publish_edited_bank()
 static void drain_bank_updates()
 {
     while (const Synth::InstrumentBank* const packet = Synth::peek_bank_update(&bank_queue)) {
-        Synth::set_current_bank(*packet);
+        Synth::EffectExpansionPlan plan  = {};
+        const char*                error = nullptr;
+        if (Synth::preflight_effect_expansion(*packet, &plan, &error)) {
+            Synth::set_current_bank(*packet);
+        }
+        else {
+            const uint32_t code = error && strcmp(error, "effect state has no contiguous free range") == 0 ? 1u : 2u;
+            effect_publish_failure.store(code, std::memory_order_release);
+        }
         Synth::consume_bank_update(&bank_queue);
     }
 }
@@ -938,35 +991,13 @@ static int32_t find_fx_layout_record(const Synth::InstrumentEditorBank& bank, ui
     return -1;
 }
 
-// Writes every moved fx node's place into the bank's kind-4 records: node
-// places ride the bank, so re-projections, undo/redo and file saves all
-// restore them. Returns false when a moved node would need a new record
-// but the global record list is full.
 static bool sync_fx_graph_layout(Synth::InstrumentEditorBank* bank)
 {
-    const uint32_t chain = fx_mapping.chain;
+    bool capture_nodes[Sculptor::max_nodes] = {};
     for (uint32_t node = 0; node < Sculptor::max_nodes; ++node) {
-        if (! osc_graph.node_occupied(node) || ! node_layout_moved(node)) {
-            continue;
-        }
-        const Sculptor::Node& node_ref   = osc_graph.node(node);
-        const int32_t         record_idx = find_fx_layout_record(*bank, chain, node_ref.name);
-        if (record_idx >= 0) {
-            write_record_position(bank, record_idx, node_ref);
-            continue;
-        }
-        if (! Sculptor::graph_records_have_capacity(*bank, 1)) {
-            return false;
-        }
-        Synth::GraphNodeLayout record = {};
-        record.channel                = static_cast<uint8_t>(chain);
-        record.kind                   = 4;
-        snprintf(record.name, sizeof(record.name), "%s", node_ref.name);
-        const int32_t fresh_idx                        = static_cast<int32_t>(bank->graph_layout_count);
-        bank->graph_layout[bank->graph_layout_count++] = record;
-        write_record_position(bank, fresh_idx, node_ref);
+        capture_nodes[node] = osc_graph.node_occupied(node) && node_layout_moved(node);
     }
-    return true;
+    return Sculptor::apply_effect_graph_batch(bank, &osc_graph, &fx_mapping, nullptr, 0, capture_nodes, bank);
 }
 
 void Sculptor::SynthEditor::reproject_osc_graph(uint32_t channel, uint32_t zone)
@@ -980,7 +1011,9 @@ void Sculptor::SynthEditor::reproject_osc_graph(uint32_t channel, uint32_t zone)
     // projection itself owns no callbacks.
     osc_graph.set_validator(&Sculptor::osc_graph_validate, &osc_mapping);
     osc_graph.set_delete_veto(&osc_node_delete_veto, &osc_veto_context);
-    osc_graph.set_canvas_menu_callback(&osc_canvas_menu, nullptr);
+    osc_graph.set_retarget_interceptor(nullptr, nullptr);
+    osc_graph.set_disconnect_interceptor(nullptr, nullptr);
+    osc_graph.set_canvas_menu_callback(&osc_canvas_menu_entry, this);
     osc_graph.set_node_menu_callback(&osc_node_menu, nullptr);
     fx_graph_projected = false;
     // Rebind envelope state widgets from scratch: gestures and point
@@ -1319,6 +1352,7 @@ void Sculptor::SynthEditor::do_initialize(uint32_t channel)
     }
 
     candidate.bank.channel_enabled[channel] = 1;
+    candidate.effect_audio[channel]         = {};
     Synth::get_default_channel_name(channel, candidate.channel_names[channel], Synth::max_name_len);
     // The channel's old instruments are now unreferenced by its replacement zone table.
     Synth::reclaim_unused_slots(&candidate);
@@ -1339,6 +1373,7 @@ void Sculptor::SynthEditor::do_delete(uint32_t channel)
     Synth::get_default_channel_name(channel, candidate.channel_names[channel], Synth::max_name_len);
     memset(candidate.bank.channel_zones[channel], 0, sizeof(candidate.bank.channel_zones[channel]));
     memset(&candidate.bank.channel_chains[channel], 0, sizeof(candidate.bank.channel_chains[channel]));
+    candidate.effect_audio[channel] = {};
     // Instruments the channel's old zone table referenced are now unreferenced.
     Synth::reclaim_unused_slots(&candidate);
     // The channel's graph state is replaced together with its zone tables.
@@ -1370,6 +1405,12 @@ bool Sculptor::SynthEditor::create_gui_frame(uint32_t image_idx, bool* need_real
     // Publish pumping lives in delayed_updates(), which runs every frame
     // regardless of the enabled flag.
 
+    const uint32_t failure = effect_publish_failure.exchange(0, std::memory_order_acquire);
+    if (failure) {
+        Sculptor::notify_error(
+            failure == 1 ? "Synth: effects publish refused: no contiguous state range; installed sound is unchanged"
+                         : "Synth: effects publish refused; installed sound is unchanged");
+    }
     // The held note requires the left button to be down, so a release that
     // happened while this frame was not running (editor disabled, focus loss) is
     // caught here too. Window close releases at its own site; menu opens release
@@ -1574,12 +1615,6 @@ void Sculptor::SynthEditor::gui_channel_pane(uint32_t channel)
                 selected_zone[channel] = static_cast<int32_t>(entry);
                 ImGui::EndTabItem();
             }
-            if (ImGui::IsItemHovered() && ImGui::IsMouseReleased(ImGuiMouseButton_Right)) {
-                zone_menu_channel  = channel;
-                zone_menu_note     = static_cast<uint32_t>(bank.channel_zones[channel][entry].start_note) - 1;
-                zone_menu_from_tab = true;
-                zone_menu_open     = true;
-            }
             if (ImGui::IsItemHovered())
                 ImGui::SetTooltip("%s\nfrom note %u",
                                   name,
@@ -1741,6 +1776,29 @@ void Sculptor::SynthEditor::run_osc_canvas_command()
         case osc_cmd_change_target_param:
             do_osc_change_target_param(osc_canvas_retarget_node, osc_canvas_retarget_target);
             break;
+        case osc_cmd_zone_rename:
+            menu_channel      = osc_canvas_zone_channel;
+            rename_zone_entry = Synth::zone_entry_at(instr_bank.bank.channel_zones[menu_channel], osc_canvas_zone_note);
+            rename_zone       = true;
+            rename_popup_open = true;
+            break;
+        case osc_cmd_zone_copy:
+            do_zone_copy_instrument(osc_canvas_zone_channel, osc_canvas_zone_note);
+            break;
+        case osc_cmd_zone_paste:
+            do_zone_paste_instrument(osc_canvas_zone_channel, osc_canvas_zone_note);
+            break;
+        case osc_cmd_zone_join_previous:
+            do_zone_join_previous(osc_canvas_zone_channel, osc_canvas_zone_note);
+            break;
+        case osc_cmd_zone_join_next:
+            do_zone_join_next(osc_canvas_zone_channel, osc_canvas_zone_note);
+            break;
+        case osc_cmd_zone_delete:
+            do_zone_delete(
+                osc_canvas_zone_channel,
+                Synth::zone_entry_at(instr_bank.bank.channel_zones[osc_canvas_zone_channel], osc_canvas_zone_note));
+            break;
         case osc_cmd_none:
             break;
     }
@@ -1748,10 +1806,18 @@ void Sculptor::SynthEditor::run_osc_canvas_command()
 
 void Sculptor::SynthEditor::reproject_fx_graph(uint32_t chain)
 {
+    osc_graph.set_retarget_interceptor(nullptr, nullptr);
+    osc_graph.set_disconnect_interceptor(nullptr, nullptr);
     osc_graph_projected = false;
 
+    bool pinned_lfos[Synth::max_lfos];
+    memcpy(pinned_lfos, fx_lfo_pinned, sizeof(pinned_lfos));
+    if (! Sculptor::collect_effect_lfos(&instr_bank, chain, pinned_lfos)) {
+        fx_graph_projected = false;
+        return;
+    }
     fx_graph_projected =
-        Sculptor::project_effect_chain_to_graph(instr_bank.bank, chain, &osc_graph, &fx_mapping, fx_lfo_pinned);
+        Sculptor::project_effect_chain_to_graph(instr_bank, chain, &osc_graph, &fx_mapping, pinned_lfos);
 
     // Moved nodes' places ride the bank as kind-4 records, so every
     // re-projection (commits, undo/redo, tab and channel switches, file
@@ -1779,6 +1845,8 @@ void Sculptor::SynthEditor::reproject_fx_graph(uint32_t chain)
     // projection itself owns no callbacks.
     osc_graph.set_validator(&fx_connection_validator, nullptr);
     osc_graph.set_delete_veto(&fx_node_delete_veto, nullptr);
+    osc_graph.set_retarget_interceptor(nullptr, nullptr);
+    osc_graph.set_disconnect_interceptor(nullptr, nullptr);
     osc_graph.set_canvas_menu_callback(&fx_canvas_menu, nullptr);
     osc_graph.set_node_menu_callback(&fx_node_menu, nullptr);
     // Projection construction is quiet; drain the ring anyway so no leftover
@@ -1794,6 +1862,16 @@ void Sculptor::SynthEditor::reproject_fx_graph(uint32_t chain)
 // drained edits per frame.  Same shape as gui_osc_graph.
 void Sculptor::SynthEditor::gui_fx_graph(uint32_t chain)
 {
+    const Sculptor::EffectAudioTopology& audio = instr_bank.effect_audio[chain];
+    if (audio.explicit_edges) {
+        uint32_t next = audio.next[Synth::max_chain_effects];
+        while (next && next <= Synth::max_chain_effects) {
+            next = audio.next[next - 1];
+        }
+        if (! next) {
+            ImGui::TextDisabled("Incomplete audio path - dry bypass");
+        }
+    }
     init_osc_graph_widget();
 
     if (fx_graph_reproject || ! fx_graph_projected || fx_mapping.chain != chain) {
@@ -1807,7 +1885,9 @@ void Sculptor::SynthEditor::gui_fx_graph(uint32_t chain)
     }
 
     osc_graph.render(ImGui::GetContentRegionAvail(), nullptr);
-    drain_fx_graph(chain);
+    if (fx_canvas_command != fx_cmd_copy && fx_canvas_command != fx_cmd_paste) {
+        drain_fx_graph(chain);
+    }
     run_fx_canvas_command();
 }
 
@@ -1845,80 +1925,30 @@ void Sculptor::SynthEditor::drain_fx_graph(uint32_t chain)
         return;
     }
 
-    // Effect-node deletions apply from the highest slot down: removing a
-    // slot shifts later slots, so ascending indices would target the wrong
-    // slot.  Value events and LFO-node deletions are order-independent.
-    uint32_t delete_order[Synth::max_chain_effects];
-    uint32_t num_deletes = 0;
-    for (uint32_t i = 0; i < count; ++i) {
-        if (changes[i].kind != Sculptor::ChangeKind::node_deleted) {
-            continue;
-        }
-        const int32_t slot = Sculptor::fx_effect_slot_of(fx_mapping, changes[i].node_idx);
-        if (slot < 0) {
-            // A deleted LFO node loses its pin with its canvas presence.
-            const uint32_t desc = Sculptor::fx_lfo_desc_of(fx_mapping, changes[i].node_idx);
-            if (desc != 0) {
-                fx_lfo_pinned[desc - 1] = false;
+    for (uint32_t index = 0; index < count; ++index) {
+        if (changes[index].kind == Sculptor::ChangeKind::node_deleted) {
+            const uint32_t descriptor = Sculptor::fx_lfo_desc_of(fx_mapping, changes[index].node_idx);
+            if (descriptor) {
+                fx_lfo_pinned[descriptor - 1] = false;
             }
-            continue;
-        }
-        uint32_t insert = num_deletes++;
-        while (insert > 0 && delete_order[insert - 1] < static_cast<uint32_t>(slot)) {
-            delete_order[insert] = delete_order[insert - 1];
-            --insert;
-        }
-        delete_order[insert] = static_cast<uint32_t>(slot);
-    }
-
-    // A serial-wire disconnect is refused by the apply path: name the rule
-    // instead of the generic refusal, so the gesture's snap-back reads as
-    // intentional protection.
-    bool serial_disconnect = false;
-    for (uint32_t i = 0; i < count && ! serial_disconnect; ++i) {
-        const Sculptor::GraphChange& change = changes[i];
-        if (change.kind != Sculptor::ChangeKind::connection_deleted) {
-            continue;
-        }
-        if (! osc_graph.node_occupied(change.connection_input.node_idx) ||
-            ! osc_graph.node_occupied(change.connection_output.node_idx)) {
-            continue; // a byproduct of a node deletion in the same batch
-        }
-        const int32_t in_slot             = Sculptor::fx_effect_slot_of(fx_mapping, change.connection_input.node_idx);
-        const int32_t out_slot            = Sculptor::fx_effect_slot_of(fx_mapping, change.connection_output.node_idx);
-        const bool    into_output         = change.connection_input.node_idx == fx_mapping.output_node;
-        const bool    out_is_chain_source = out_slot >= 0 || change.connection_output.node_idx == fx_mapping.input_node;
-        if ((in_slot >= 0 && change.connection_input.slot_idx == 0 && out_is_chain_source) ||
-            (into_output && out_is_chain_source)) {
-            serial_disconnect = true;
         }
     }
-
-    candidate       = instr_bank;
-    bool ok         = true;
+    bool capture_nodes[Sculptor::max_nodes] = {};
+    for (uint32_t node = 0; node < Sculptor::max_nodes; ++node) {
+        capture_nodes[node] = osc_graph.node_occupied(node) && node_layout_moved(node);
+    }
     bool structural = false;
-    for (uint32_t i = 0; i < count && ok; ++i) {
-        const bool is_effect_delete = changes[i].kind == Sculptor::ChangeKind::node_deleted &&
-                                      Sculptor::fx_effect_slot_of(fx_mapping, changes[i].node_idx) >= 0;
-        if (is_effect_delete) {
-            continue; // applied in descending slot order below
-        }
-        structural = structural || changes[i].kind != Sculptor::ChangeKind::value_changed;
-        ok         = Sculptor::apply_fx_graph_change(&candidate.bank, osc_graph, fx_mapping, changes[i]);
+    for (uint32_t index = 0; index < count; ++index) {
+        structural = structural || changes[index].kind != Sculptor::ChangeKind::value_changed;
     }
-    for (uint32_t i = 0; i < num_deletes && ok; ++i) {
-        Sculptor::GraphChange delete_change = {};
-        delete_change.kind                  = Sculptor::ChangeKind::node_deleted;
-        delete_change.node_idx              = fx_mapping.effect_nodes[delete_order[i]];
-        structural                          = true;
-        ok = Sculptor::apply_fx_graph_change(&candidate.bank, osc_graph, fx_mapping, delete_change);
-    }
-    if (ok) {
-        // A batch commit is also the moment moved nodes' places persist:
-        // the sync stays sparse (only genuinely moved nodes write records).
-        ok = sync_fx_graph_layout(&candidate);
-    }
-
+    candidate     = instr_bank;
+    const bool ok = Sculptor::apply_effect_graph_batch(&instr_bank,
+                                                       &osc_graph,
+                                                       &fx_mapping,
+                                                       changes,
+                                                       count,
+                                                       capture_nodes,
+                                                       &candidate);
     // One tag for a single-field batch so a slider drag's per-frame events
     // amend one undo entry; mixed batches and wire gestures take a fresh
     // unique tag (a wire edit is one discrete undo step).
@@ -1934,7 +1964,8 @@ void Sculptor::SynthEditor::drain_fx_graph(uint32_t chain)
     for (uint32_t i = 0; i < count && ! mixed; ++i) {
         const auto kind = changes[i].kind;
         mixed = kind == Sculptor::ChangeKind::connection_added || kind == Sculptor::ChangeKind::connection_deleted ||
-                kind == Sculptor::ChangeKind::connection_changed;
+                kind == Sculptor::ChangeKind::connection_changed ||
+                kind == Sculptor::ChangeKind::connection_insert_before;
     }
     const Sculptor::UndoGroupTag tag = mixed ? Sculptor::UndoGroupTag{ osc_tag_fresh, ++osc_fresh_tag_serial, 0 }
                                              : Sculptor::UndoGroupTag{ fx_tag_value, first.node_idx, first.slot_idx };
@@ -1948,9 +1979,7 @@ void Sculptor::SynthEditor::drain_fx_graph(uint32_t chain)
     if (! ok || num_modulated > Synth::max_effect_mod_params || ! commit_candidate(candidate, tag)) {
         Sculptor::notify_error(num_modulated > Synth::max_effect_mod_params
                                    ? "Synth: the effect modulation pool is full (32 modulated parameters)"
-                               : serial_disconnect
-                                   ? "Synth: the chain wire carries the audio - delete the effect node instead"
-                                   : "Synth: effect edit refused");
+                                   : "Synth: effect edit refused: audio must be unbranched and acyclic");
         reproject_fx_graph(fx_mapping.chain);
         return;
     }
@@ -1980,6 +2009,46 @@ void Sculptor::SynthEditor::run_fx_canvas_command()
         case fx_cmd_change_type:
             do_fx_change_type(node, fx_canvas_type);
             break;
+        case fx_cmd_copy: {
+            if (! Sculptor::extract_effect_chain_document(&instr_bank,
+                                                          fx_mapping.chain,
+                                                          &osc_graph,
+                                                          &fx_mapping,
+                                                          &effects_clipboard_document) ||
+                ! Synth::encode_effects_json(&effects_clipboard_document,
+                                             zone_clipboard_text,
+                                             sizeof(zone_clipboard_text))) {
+                Sculptor::notify_error("Synth: effects copy refused");
+                break;
+            }
+            ImGui::SetClipboardText(zone_clipboard_text);
+            break;
+        }
+        case fx_cmd_paste: {
+            const char* text = ImGui::GetClipboardText();
+            if (! text) {
+                Sculptor::notify_error("Synth: effects paste refused");
+                break;
+            }
+            uint32_t length = 0;
+            while (length < sizeof(zone_clipboard_text) && text[length]) {
+                ++length;
+            }
+            if (length == sizeof(zone_clipboard_text) ||
+                ! Synth::decode_effects_json(text, length, &effects_clipboard_document) ||
+                ! Sculptor::stage_effect_graph_edits(&instr_bank, &osc_graph, &fx_mapping, &candidate) ||
+                ! Sculptor::replace_effect_chain_candidate(&candidate,
+                                                           fx_mapping.chain,
+                                                           &effects_clipboard_document,
+                                                           &candidate,
+                                                           fx_lfo_pinned) ||
+                ! commit_candidate(candidate, Sculptor::UndoGroupTag{ osc_tag_fresh, ++osc_fresh_tag_serial, 0 })) {
+                Sculptor::notify_error("Synth: effects paste refused");
+                break;
+            }
+            reproject_fx_graph(fx_mapping.chain);
+            break;
+        }
         case fx_cmd_none:
             break;
     }
@@ -1996,9 +2065,22 @@ void Sculptor::SynthEditor::do_fx_add_effect(Synth::EffectType type)
 
     // Node preflight: the projection must still be able to show the chain
     // plus one more node, or the pane would break with no way back.
-    if (Sculptor::fx_projected_node_count(instr_bank.bank, fx_mapping.chain, fx_lfo_pinned) + 1 > Sculptor::max_nodes) {
+    if (! Sculptor::fx_can_add_node(&instr_bank, fx_mapping.chain, fx_lfo_pinned)) {
         Sculptor::notify_error("Synth: cannot add another effect: the graph node budget is full");
         return;
+    }
+    Sculptor::EffectAudioTopology& audio = candidate.effect_audio[fx_mapping.chain];
+    if (audio.explicit_edges) {
+        uint32_t source = Synth::max_chain_effects;
+        uint32_t next   = audio.next[source];
+        while (next && next <= Synth::max_chain_effects) {
+            source = next - 1;
+            next   = audio.next[source];
+        }
+        if (next == Synth::max_chain_effects + 1) {
+            audio.next[source]            = static_cast<uint8_t>(chain.num_effects + 1);
+            audio.next[chain.num_effects] = Synth::max_chain_effects + 1;
+        }
     }
     Sculptor::fx_init_slot(&chain, chain.num_effects, type);
     chain.effects[chain.num_effects].enabled = true;
@@ -2019,28 +2101,22 @@ void Sculptor::SynthEditor::do_fx_add_effect(Synth::EffectType type)
     fx_graph_reproject = true;
 }
 
-// Canvas menu "Add LFO": a fresh descriptor pinned onto the canvas so the
-// projection keeps its node while nothing references it yet; wiring the
-// Value dot to a parameter is what binds it.
+// An owner-scoped layout root keeps an unwired descriptor represented and persistent.
 void Sculptor::SynthEditor::do_fx_add_lfo()
 {
-    candidate        = instr_bank;
-    uint16_t desc_id = 0;
-    // Node preflight: the pin demands a node from the same pool the chain's
-    // effects and endpoints draw from; refuse before the descriptor exists.
-    if (Sculptor::fx_projected_node_count(instr_bank.bank, fx_mapping.chain, fx_lfo_pinned) + 1 > Sculptor::max_nodes) {
+    if (! Sculptor::fx_can_add_node(&instr_bank, fx_mapping.chain, fx_lfo_pinned)) {
         Sculptor::notify_error("Synth: cannot add an LFO: the graph node budget is full");
         return;
     }
-    if (! Sculptor::allocate_default_lfo(&candidate.bank, &desc_id)) {
-        Sculptor::notify_error("Synth: cannot add an LFO: the descriptor pool is full");
+    uint16_t descriptor = 0;
+    if (! Sculptor::add_effect_lfo_candidate(&instr_bank, fx_mapping.chain, &candidate, &descriptor, fx_lfo_pinned)) {
+        Sculptor::notify_error("Synth: cannot add an LFO: descriptor, layout or node capacity exhausted");
         return;
     }
-    if (! commit_candidate(candidate, Sculptor::UndoGroupTag{ fx_tag_add_lfo, desc_id, 0 })) {
+    if (! commit_candidate(candidate, Sculptor::UndoGroupTag{ fx_tag_add_lfo, descriptor, 0 })) {
         return;
     }
-    fx_lfo_pinned[desc_id - 1] = true;
-    fx_graph_reproject         = true;
+    fx_graph_reproject = true;
 }
 
 // Type change replaces the whole slot with initialized bindings of the new
@@ -2051,13 +2127,14 @@ void Sculptor::SynthEditor::do_fx_change_type(uint32_t node_idx, Synth::EffectTy
     if (slot < 0) {
         return;
     }
-    candidate                        = instr_bank;
-    Synth::EffectChainBinding& chain = Sculptor::fx_graph_chain(&candidate.bank, fx_mapping.chain);
-    // The effect keeps its place and its on/off state across a type change;
-    // only the type and its parameter defaults are replaced.
-    const bool enabled = chain.effects[slot].enabled;
-    Sculptor::fx_init_slot(&chain, static_cast<uint32_t>(slot), type);
-    chain.effects[slot].enabled = enabled;
+    if (! Sculptor::change_effect_type_candidate(&instr_bank,
+                                                 fx_mapping.chain,
+                                                 static_cast<uint32_t>(slot),
+                                                 type,
+                                                 &candidate)) {
+        Sculptor::notify_error("Synth: effect type change refused");
+        return;
+    }
     if (! commit_candidate(candidate, Sculptor::UndoGroupTag{ fx_tag_type, node_idx, static_cast<uint32_t>(type) })) {
         return;
     }
@@ -2441,10 +2518,9 @@ void Sculptor::SynthEditor::gui_keyboard()
         }
         else if (ImGui::IsMouseReleased(ImGuiMouseButton_Right)) {
             release_held_note(); // opening the menu releases the held note
-            zone_menu_channel  = channel;
-            zone_menu_note     = static_cast<uint32_t>(hit);
-            zone_menu_from_tab = false;
-            zone_menu_open     = true;
+            zone_menu_channel = channel;
+            zone_menu_note    = static_cast<uint32_t>(hit);
+            zone_menu_open    = true;
         }
     }
 
@@ -2568,8 +2644,12 @@ void Sculptor::SynthEditor::gui_zone_menu()
     if (! ImGui::BeginPopup("##synth_zone_menu"))
         return;
 
-    const uint32_t               channel   = zone_menu_channel;
-    const uint32_t               note      = zone_menu_note;
+    gui_zone_menu_items(zone_menu_channel, zone_menu_note, true);
+    ImGui::EndPopup();
+}
+
+void Sculptor::SynthEditor::gui_zone_menu_items(uint32_t channel, uint32_t note, bool keyboard_range)
+{
     const Synth::InstrumentBank& bank      = instr_bank.bank;
     const Synth::Zone* const     zones     = bank.channel_zones[channel];
     const int32_t                entry     = static_cast<int32_t>(Synth::zone_entry_at(zones, note));
@@ -2581,33 +2661,71 @@ void Sculptor::SynthEditor::gui_zone_menu()
     const bool first_note = entry >= 0 && note + 1 == zones[entry].start_note;
     const bool table_full = ! first_note && num_zones >= Synth::max_instr_per_channel;
 
-    if (ImGui::MenuItem("Rename zone...")) {
-        menu_channel      = channel;
-        rename_zone_entry = static_cast<uint32_t>(entry);
-        rename_zone       = true;
-        rename_popup_open = true;
+    if (! keyboard_range) {
+        osc_canvas_zone_channel = channel;
+        osc_canvas_zone_note    = note;
     }
-    if (ImGui::MenuItem("Copy to Clipboard", nullptr, false, entry >= 0))
-        do_zone_copy_instrument(channel, note);
+    if (ImGui::MenuItem("Rename zone...", nullptr, false, entry >= 0)) {
+        if (keyboard_range) {
+            menu_channel      = channel;
+            rename_zone_entry = static_cast<uint32_t>(entry);
+            rename_zone       = true;
+            rename_popup_open = true;
+        }
+        else {
+            osc_canvas_command = osc_cmd_zone_rename;
+        }
+    }
+    if (ImGui::MenuItem(keyboard_range ? "Copy to Clipboard" : "Copy Oscillators", nullptr, false, entry >= 0)) {
+        if (keyboard_range) {
+            do_zone_copy_instrument(channel, note);
+        }
+        else {
+            osc_canvas_command = osc_cmd_zone_copy;
+        }
+    }
     // The replacement transaction evaluates capacity and reports refusal
     // visibly, so the menu item stays enabled.
-    if (ImGui::MenuItem("Paste from Clipboard", nullptr, false, entry >= 0))
-        do_zone_paste_instrument(channel, note);
-    if (ImGui::MenuItem("Add to previous zone", nullptr, false, entry > 0))
-        do_zone_join_previous(channel, note);
-    if (ImGui::MenuItem("Add to next zone", nullptr, false, has_next))
-        do_zone_join_next(channel, note);
-    if (! zone_menu_from_tab) {
+    if (ImGui::MenuItem(keyboard_range ? "Paste from Clipboard" : "Paste Oscillators", nullptr, false, entry >= 0)) {
+        if (keyboard_range) {
+            do_zone_paste_instrument(channel, note);
+        }
+        else {
+            osc_canvas_command = osc_cmd_zone_paste;
+        }
+    }
+    if (ImGui::MenuItem("Add to previous zone", nullptr, false, entry > 0)) {
+        if (keyboard_range) {
+            do_zone_join_previous(channel, note);
+        }
+        else {
+            osc_canvas_command = osc_cmd_zone_join_previous;
+        }
+    }
+    if (ImGui::MenuItem("Add to next zone", nullptr, false, has_next)) {
+        if (keyboard_range) {
+            do_zone_join_next(channel, note);
+        }
+        else {
+            osc_canvas_command = osc_cmd_zone_join_next;
+        }
+    }
+    if (keyboard_range) {
         if (ImGui::MenuItem("Create new zone",
                             nullptr,
                             false,
-                            entry >= 0 && ! table_full && bank.instruments.num_allocated < Synth::max_instruments))
+                            entry >= 0 && ! table_full && bank.instruments.num_allocated < Synth::max_instruments)) {
             do_zone_split_new(channel, note);
+        }
     }
-    if (ImGui::MenuItem("Delete zone", nullptr, false, entry >= 0 && (entry > 0 || num_zones > 1)))
-        do_zone_delete(channel, static_cast<uint32_t>(entry));
-
-    ImGui::EndPopup();
+    if (ImGui::MenuItem("Delete zone", nullptr, false, entry >= 0 && (entry > 0 || num_zones > 1))) {
+        if (keyboard_range) {
+            do_zone_delete(channel, static_cast<uint32_t>(entry));
+        }
+        else {
+            osc_canvas_command = osc_cmd_zone_delete;
+        }
+    }
 }
 
 void Sculptor::SynthEditor::do_zone_join_previous(uint32_t channel, uint32_t note)
@@ -2876,9 +2994,13 @@ bool Sculptor::SynthEditor::finish_library_save(const char* category, const char
 
     candidate             = instr_bank;
     serialization_mapping = osc_mapping;
+    if (fx_graph_projected && fx_mapping.chain == library_channel &&
+        ! Sculptor::stage_effect_graph_edits(&instr_bank, &osc_graph, &fx_mapping, &candidate)) {
+        Sculptor::notify_error("Synth: library save failed: effect edits are not representable");
+        return false;
+    }
     if ((osc_graph_projected && osc_graph_zone_channel == library_channel &&
-         ! sync_osc_graph_layout(&candidate, &serialization_mapping)) ||
-        (fx_graph_projected && fx_mapping.chain == library_channel && ! sync_fx_graph_layout(&candidate))) {
+         ! sync_osc_graph_layout(&candidate, &serialization_mapping))) {
         Sculptor::notify_error("Synth: library save failed: the graph layout is not representable");
         return false;
     }

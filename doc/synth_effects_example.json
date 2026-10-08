@@ -1,0 +1,89 @@
+{
+  "format": "synth-effects-v1",
+  "lfos": [
+    {
+      "wave": "sine",
+      "duty": 127,
+      "period_ms": 500,
+      "min_value": -1,
+      "min_max_delta": 2
+    },
+    {
+      "wave": "sawtooth",
+      "period_ms": 900
+    }
+  ],
+  "effects": [
+    {
+      "type": "delay",
+      "enabled": true,
+      "params": [
+        {
+          "base_value": 4410
+        },
+        {
+          "base_value": 0.3,
+          "lfo_desc_id": 1,
+          "lfo_depth": 0.1
+        },
+        {
+          "base_value": 0.35
+        }
+      ]
+    },
+    {
+      "type": "none"
+    },
+    {
+      "type": "fir",
+      "enabled": true,
+      "params": [
+        {
+          "base_value": 8000,
+          "lfo_desc_id": 1,
+          "lfo_depth": 2000
+        },
+        {
+          "base_value": 0
+        }
+      ]
+    }
+  ],
+  "graph_layout": [
+    {
+      "kind": "input",
+      "x": 0,
+      "y": 0
+    },
+    {
+      "kind": "effect",
+      "slot": 0,
+      "x": 320,
+      "y": 0,
+      "width_override": 280
+    },
+    {
+      "kind": "effect",
+      "slot": 2,
+      "x": 880,
+      "y": 0
+    },
+    {
+      "kind": "output",
+      "x": 2560,
+      "y": 0
+    },
+    {
+      "kind": "lfo",
+      "lfo_desc_id": 1,
+      "x": 320,
+      "y": 320
+    },
+    {
+      "kind": "lfo",
+      "lfo_desc_id": 2,
+      "x": 880,
+      "y": 320
+    }
+  ]
+}

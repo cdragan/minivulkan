@@ -7,30 +7,50 @@
 #include <math.h>
 #include <string.h>
 
+// ponytail: first-fit scans at most 68 live ranges; relocation is needed to
+// admit every byte-fitting bank despite pinned-state fragmentation.
+static bool place_effect_state(const Synth::EffectExpansionPlan& plan, uint32_t base, uint32_t bytes, uint32_t* offset)
+{
+    uint32_t cursor = 0;
+    while (cursor <= Synth::effect_state_budget - bytes) {
+        uint32_t next = cursor;
+        for (uint32_t chain = 0; chain <= Synth::max_channels; ++chain) {
+            for (uint32_t slot = 0; slot < Synth::max_chain_effects; ++slot) {
+                const Synth::EffectSlotPlan& occupied = plan.slots[chain][slot];
+                if (! occupied.state_offs) {
+                    continue;
+                }
+                const uint32_t begin = occupied.state_offs - base;
+                const uint32_t end   = begin + Synth::get_effect_state_bytes(occupied.allocated_for);
+                if (cursor < end && begin < cursor + bytes && end > next) {
+                    next = end;
+                }
+            }
+        }
+        if (next == cursor) {
+            *offset = base + cursor;
+            return true;
+        }
+        cursor = next;
+    }
+    return false;
+}
+
 namespace Synth {
 
 namespace {
 
 // Effect-state region inside the device data buffer, carved once at init. Slot offsets
-// are absolute device byte offsets (region base + relative bump).
+// are absolute device byte offsets (region base + relative placement).
 uint32_t state_region_base = 0;
-
-// Bump position within the region. The suballocation never frees: the budget is
-// cumulative across re-expansions, so repeatedly enabling new effects eventually
-// exhausts it - a visible preflight failure, never a silent overflow.
-uint32_t state_consumed = 0;
 
 // The plan currently committed; a re-expansion preserves its per-slot state offsets.
 EffectExpansionPlan current_plan;
 bool                has_current_plan = false;
 
-// Clear ranges recorded by commits since the last take. A commit happens at a step
-// boundary (init or a bank publish); the render loop consumes the ranges before the
-// first effect dispatch of the step, so freshly allocated state never reads garbage.
-// Sized for the worst gap between takes: the init commit's ranges stay pending until the
-// first render step, where the drain can apply both queued banks (SPSC capacity 2) before
-// the render loop consumes - three commits in total.
-constexpr uint32_t max_pending_clears = 3 * (max_channels + 1) * max_chain_effects;
+// Only the final plan dispatches. Retained unrendered ranges carry needs_clear;
+// abandoned ranges need no fill, and final-plan ranges never overlap.
+constexpr uint32_t max_pending_clears = (max_channels + 1) * max_chain_effects;
 EffectClearRange   pending_clears[max_pending_clears];
 uint32_t           num_pending_clears = 0;
 
@@ -100,7 +120,6 @@ bool validate_effect_param_binding(const EffectParamBinding& binding, bool is_ma
 void init_effect_state_region(uint32_t region_base_offset)
 {
     state_region_base  = region_base_offset;
-    state_consumed     = 0;
     has_current_plan   = false;
     current_plan       = EffectExpansionPlan();
     num_pending_clears = 0;
@@ -113,7 +132,6 @@ bool preflight_effect_expansion(const InstrumentBank& bank, EffectExpansionPlan*
     // Built locally and copied out only on success: on failure the caller's plan (and
     // everything else) is untouched. Value-init: stateless slots must carry zero offsets.
     EffectExpansionPlan plan = {};
-    plan.consumed_bytes      = state_consumed;
 
     uint32_t num_modulated = 0;
 
@@ -154,23 +172,20 @@ bool preflight_effect_expansion(const InstrumentBank& bank, EffectExpansionPlan*
                 continue; // stateless or disabled: state_offs stays 0, nothing to clear
             }
 
-            // A slot keeps its state while it keeps running the same enabled effect;
-            // a type or enable change (or fresh state) allocates at the bump position.
-            if (prev) {
-                const EffectSlotPlan& prev_slot = prev->slots[chain_idx][slot];
-                if (prev_slot.state_offs && prev_slot.allocated_for == binding.type) {
-                    plan.slots[chain_idx][slot] = { prev_slot.state_offs, false, binding.type };
-                    continue;
-                }
-            }
-
-            const uint32_t new_consumed = plan.consumed_bytes + state_bytes;
-            if (new_consumed > effect_state_budget) {
+            if (state_bytes > effect_state_budget - plan.consumed_bytes) {
                 *error = "effect state budget exceeded";
                 return false;
             }
-            plan.slots[chain_idx][slot] = { state_region_base + plan.consumed_bytes, true, binding.type };
-            plan.consumed_bytes         = new_consumed;
+            plan.consumed_bytes += state_bytes;
+            // Reserve all compatible live ranges before placing any new state.
+            if (prev) {
+                const EffectSlotPlan& prev_slot = prev->slots[chain_idx][slot];
+                if (prev_slot.state_offs && prev_slot.allocated_for == binding.type) {
+                    plan.slots[chain_idx][slot] = prev_slot;
+                    continue;
+                }
+            }
+            plan.slots[chain_idx][slot] = { 0, true, binding.type };
         }
     }
 
@@ -179,6 +194,19 @@ bool preflight_effect_expansion(const InstrumentBank& bank, EffectExpansionPlan*
         return false;
     }
 
+    for (uint32_t chain = 0; chain <= max_channels; ++chain) {
+        for (uint32_t slot = 0; slot < max_chain_effects; ++slot) {
+            EffectSlotPlan& allocation = plan.slots[chain][slot];
+            if (allocation.needs_clear && ! allocation.state_offs &&
+                ! place_effect_state(plan,
+                                     state_region_base,
+                                     get_effect_state_bytes(allocation.allocated_for),
+                                     &allocation.state_offs)) {
+                *error = "effect state has no contiguous free range";
+                return false;
+            }
+        }
+    }
     *out_plan = plan;
     return true;
 }
@@ -189,6 +217,7 @@ void commit_effect_expansion(const InstrumentBank&      bank,
                              EffectChain*               out_master_chain,
                              const EffectNodeWriter&    writer)
 {
+    num_pending_clears = 0;
     for (uint32_t chain_idx = 0; chain_idx <= max_channels; chain_idx++) {
         const EffectChainBinding& binding = *bank_chains(bank, chain_idx);
         EffectChain& chain = (chain_idx < max_channels) ? out_channel_chains[chain_idx] : *out_master_chain;
@@ -280,13 +309,17 @@ void commit_effect_expansion(const InstrumentBank&      bank,
 
     current_plan     = plan;
     has_current_plan = true;
-    state_consumed   = plan.consumed_bytes;
 }
 
 EffectClearList take_effect_clear_ranges()
 {
     const EffectClearList list = { pending_clears, num_pending_clears };
     num_pending_clears         = 0;
+    for (uint32_t chain = 0; chain <= max_channels; ++chain) {
+        for (uint32_t slot = 0; slot < max_chain_effects; ++slot) {
+            current_plan.slots[chain][slot].needs_clear = false;
+        }
+    }
     return list;
 }
 

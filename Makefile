@@ -218,6 +218,11 @@ all_sculptor_undo_unit_src_files += $(sculptor_undo_unit_src_files)
 
 all_sculptor_graph_unit_src_files += sculptor/sculptor_graph.cpp
 all_sculptor_graph_unit_src_files += core/pool.cpp
+all_sculptor_graph_unit_src_files += sculptor/sculptor_graph_render.cpp
+all_sculptor_graph_unit_src_files += thirdparty/imgui/src/imgui.cpp
+all_sculptor_graph_unit_src_files += thirdparty/imgui/src/imgui_draw.cpp
+all_sculptor_graph_unit_src_files += thirdparty/imgui/src/imgui_tables.cpp
+all_sculptor_graph_unit_src_files += thirdparty/imgui/src/imgui_widgets.cpp
 all_sculptor_graph_unit_src_files += $(sculptor_graph_unit_src_files)
 
 all_synth_unit_src_files += $(lib_src_files)
@@ -797,3 +802,6 @@ dep_files = $(addprefix $(out_dir)/, $(addsuffix .d, $(basename $(notdir $(all_s
 shader_dep_files = $(addprefix $(shaders_out_dir)/, $(addsuffix .d, $(basename $(notdir $(all_shader_files)))))
 
 -include $(shader_dep_files)
+
+
+$(call TARGET_FILES, sculptor/sculptor_graph_unit.cpp): CFLAGS += -DGRAPH_UNIT_AUDIO_RENDER_TEST_STUB

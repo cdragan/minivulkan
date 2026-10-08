@@ -151,18 +151,19 @@ using NodeMenuCallback = bool (*)(void* user_data, uint32_t node_idx);
 // shared and it is a constant.
 
 enum class ChangeKind : uint8_t {
-    none               = 0,
-    node_added         = 1,
-    node_deleted       = 2,
-    slot_added         = 3,
-    slot_deleted       = 4,
-    connection_added   = 5,
-    connection_deleted = 6,
-    value_changed      = 7,
-    name_changed       = 8,
-    color_changed      = 9,
-    ghost_placed       = 10,
-    connection_changed = 11, // one end retargeted in place
+    none                     = 0,
+    node_added               = 1,
+    node_deleted             = 2,
+    slot_added               = 3,
+    slot_deleted             = 4,
+    connection_added         = 5,
+    connection_deleted       = 6,
+    value_changed            = 7,
+    name_changed             = 8,
+    color_changed            = 9,
+    ghost_placed             = 10,
+    connection_changed       = 11, // one end retargeted in place
+    connection_insert_before = 12, // serial reorder intent; live wire is unchanged
 };
 
 // Events carry indices, not values: the caller reads current state via the
@@ -177,11 +178,27 @@ struct GraphChange {
     // the live pool to resolve a connection event.
     EndPoint connection_output; // valid for connection_* kinds
     EndPoint connection_input;
-    // connection_changed only: the input endpoint before the retarget, so
-    // apply paths can undo derived state (mirrored siblings) that keyed on
-    // the old wire.  pool_no_slot endpoints for the other connection kinds.
+    // connection_changed and connection_insert_before: original input identity.
+    // Literal retargets undo derived state keyed on the old wire; serial
+    // reorder intents identify the grabbed effect without mutating that wire.
+    // pool_no_slot endpoints for the other connection kinds.
     EndPoint connection_prev_input;
 };
+
+enum class ConnectionRetargetDecision : uint8_t {
+    fallthrough,
+    insert_before,
+    handled_noop,
+    reject,
+};
+
+using ConnectionRetargetInterceptor = ConnectionRetargetDecision (*)(void*    user_data,
+                                                                     uint32_t connection_idx,
+                                                                     bool     move_output_end,
+                                                                     EndPoint target);
+
+// True handles a user disconnect as cancellation; false permits raw deletion.
+using ConnectionDisconnectInterceptor = bool (*)(void* user_data, uint32_t connection_idx);
 
 constexpr uint32_t max_pending_changes = 256;
 
@@ -262,6 +279,9 @@ public:
     // structural checks plus the caller validator and report failure through
     // the error overlay instead of silently returning an index.
     void set_validator(ValidationCallback callback, void* user_data);
+    // Runs before generic self/occupancy guards; insert_before captures the
+    // original input in connection_prev_input without changing the live wire.
+    void set_retarget_interceptor(ConnectionRetargetInterceptor callback, void* user_data);
 
     // Connection index excluded from validation while move_connection_end
     // re-lands an existing wire (pool_no_slot otherwise).  The validator sees
@@ -269,6 +289,9 @@ public:
     // moved wire's current endpoint would refuse the move spuriously.  Managed
     // by move_connection_end; read-only for validators.
     uint32_t moving_connection = pool_no_slot;
+    void     set_disconnect_interceptor(ConnectionDisconnectInterceptor callback, void* user_data);
+    // True means deleted or handled cancellation; false means invalid/stale index.
+    bool user_delete_connection(uint32_t connection_idx);
 
     // Refusal convention: delete_node stays void and refuses silently for
     // bad indices; a vetoed delete also stays void, mutates nothing,
@@ -359,6 +382,9 @@ public:
     // applies smooth ramps for value_changed).  Node moves push nothing.
     // If the queue overflows, changes_overflowed() returns true once and the
     // caller must resynchronize from the full graph state.
+    // Non-destructive ring read.  Overflow includes truncation or null output with
+    // nonzero capacity.  A null overflow output returns zero without touching out.
+    uint32_t peek_changes(GraphChange* out, uint32_t capacity, bool* overflow) const;
     uint32_t take_changes(GraphChange* out, uint32_t out_size);
     bool     changes_overflowed();
 
@@ -482,8 +508,12 @@ private:
     Pool<Connection, max_connections> connections = {};
 
     // Caller validation callback.
-    ValidationCallback validator           = nullptr;
-    void*              validator_user_data = nullptr;
+    ValidationCallback              validator              = nullptr;
+    void*                           validator_user_data    = nullptr;
+    ConnectionRetargetInterceptor   retarget_interceptor   = nullptr;
+    void*                           retarget_user_data     = nullptr;
+    ConnectionDisconnectInterceptor disconnect_interceptor = nullptr;
+    void*                           disconnect_user_data   = nullptr;
 
     // Caller veto for delete_node and items for the canvas popup.
     NodeDeleteVeto     delete_veto           = nullptr;
