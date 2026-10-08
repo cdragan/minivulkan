@@ -4,7 +4,6 @@
 #include "synth_effect_expansion.h"
 
 #include <assert.h>
-#include <math.h>
 #include <string.h>
 
 // ponytail: first-fit scans at most 68 live ranges; relocation is needed to
@@ -73,6 +72,11 @@ bool is_channel_effect_source(uint32_t source)
     return source <= static_cast<uint32_t>(ModSource::channel_pressure);
 }
 
+static bool finite_value(float value)
+{
+    return value - value == 0.0f;
+}
+
 // One effect param's binding. Mirrors every rule the commit relies on, so a passing
 // preflight guarantees the commit cannot index out of bounds or configure garbage:
 // finite floats, valid ops, LFO descriptors within the bank pool, bounded inputs, and
@@ -80,7 +84,7 @@ bool is_channel_effect_source(uint32_t source)
 // direct or via LFO depth/rate: it has no channel inputs).
 bool validate_effect_param_binding(const EffectParamBinding& binding, bool is_master, uint32_t num_lfos)
 {
-    if (! isfinite(binding.base_value) || ! isfinite(binding.lfo_depth) || ! isfinite(binding.lfo_rate_scale)) {
+    if (! finite_value(binding.base_value) || ! finite_value(binding.lfo_depth) || ! finite_value(binding.lfo_rate_scale)) {
         return false;
     }
     if (! valid_source_op(static_cast<uint32_t>(binding.lfo_op))) {
@@ -107,7 +111,7 @@ bool validate_effect_param_binding(const EffectParamBinding& binding, bool is_ma
         for (uint32_t input = 0; input < binding.num_inputs; input++) {
             const ModInput& mod_input = binding.inputs[input];
             if (! is_channel_effect_source(static_cast<uint32_t>(mod_input.source)) ||
-                ! valid_source_op(static_cast<uint32_t>(mod_input.op)) || ! isfinite(mod_input.scale)) {
+                ! valid_source_op(static_cast<uint32_t>(mod_input.op)) || ! finite_value(mod_input.scale)) {
                 return false;
             }
         }
@@ -241,8 +245,8 @@ void commit_effect_expansion(const InstrumentBank&      bank,
                 const EffectParamBinding& param_binding = slot_binding.bindings[param];
 
                 // Every value commit consumes is asserted, including for unmodulated params.
-                assert(isfinite(param_binding.base_value) && isfinite(param_binding.lfo_depth) &&
-                       isfinite(param_binding.lfo_rate_scale));
+                assert(finite_value(param_binding.base_value) && finite_value(param_binding.lfo_depth) &&
+                       finite_value(param_binding.lfo_rate_scale));
                 assert(param_binding.num_inputs <= max_mod_inputs);
 
                 instance.params[param] = param_binding.base_value;
@@ -260,7 +264,7 @@ void commit_effect_expansion(const InstrumentBank&      bank,
                     assert(is_channel_effect_source(static_cast<uint32_t>(param_binding.inputs[input].source)));
                     assert(param_binding.inputs[input].op == SourceOp::add ||
                            param_binding.inputs[input].op == SourceOp::multiply);
-                    assert(isfinite(param_binding.inputs[input].scale));
+                    assert(finite_value(param_binding.inputs[input].scale));
                 }
 
                 const uint32_t dest_node = writer.alloc_node(writer.ctx);

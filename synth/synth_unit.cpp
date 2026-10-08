@@ -3186,7 +3186,7 @@ static void effects_structural_regressions()
     effects_literal_topology_regressions();
     // Literal routing preserves independent payload, capacity and layout invariants.
     effects_input_gesture_regressions(&source, &candidate, &loaded, &graph, &mapping);
-    source = {};
+    memset(&source, 0, sizeof(source));
     Synth::init_default_bank(&source.bank);
     Synth::EffectChainBinding& chain = source.bank.channel_chains[0];
     chain.num_effects                = 3;
@@ -3295,7 +3295,7 @@ static void effects_structural_regressions()
     Synth::LibraryEntry      entry  = {};
     Synth::LibraryScanStatus status = Synth::library_invalid;
     TEST(Synth::read_library_index(library_path, &entry, 1, &status) == 1);
-    loaded = {};
+    memset(&loaded, 0, sizeof(loaded));
     Synth::init_default_bank(&loaded.bank);
     uint16_t instrument_slot = 0;
     TEST(Synth::load_library_instrument(library_path, &entry, &loaded, 1, &instrument_slot));
@@ -3348,7 +3348,7 @@ static void effects_structural_regressions()
             strcmp(loaded.graph_layout[index].name, "Delay") == 0 && loaded.graph_layout[index].x == 303.0f;
     }
     TEST(retained_geometry);
-    source = {};
+    memset(&source, 0, sizeof(source));
     Synth::init_default_bank(&source.bank);
     static Synth::EffectsDocument sparse_document;
     effects_clipboard_fixture(&sparse_document, true);
@@ -3375,7 +3375,7 @@ static void effects_structural_regressions()
     TEST(Sculptor::extract_effect_chain_document(&candidate, 0, nullptr, nullptr, &sparse_document));
     TEST(sparse_document.lfo_count == 3);
     // Add LFO roots belong to one owner; replacement cannot remove another owner's root or shared descriptor.
-    source = {};
+    memset(&source, 0, sizeof(source));
     Synth::init_default_bank(&source.bank);
     uint16_t descriptor = 0xBEEF;
     TEST(Sculptor::add_effect_lfo_candidate(&source, 1, &source, &descriptor));
@@ -3398,7 +3398,7 @@ static void effects_structural_regressions()
     memcpy(source.bank.channel_zones[1], source.bank.channel_zones[0], sizeof(source.bank.channel_zones[1]));
     TEST(Synth::save_library_record(library_path, "Effects", "Root", &source, 1) == 0);
     TEST(Synth::read_library_index(library_path, &entry, 1, &status) == 1);
-    loaded = {};
+    memset(&loaded, 0, sizeof(loaded));
     Synth::init_default_bank(&loaded.bank);
     TEST(Synth::load_library_instrument(library_path, &entry, &loaded, 2, &instrument_slot));
     memset(keep, 0, sizeof(keep));
@@ -3422,7 +3422,7 @@ static void effects_structural_regressions()
     static Synth::InstrumentEditorBank snapshot;
     const uint32_t                     root_owners[] = { 0, Sculptor::fx_master_chain };
     for (uint32_t owner : root_owners) {
-        source = {};
+        memset(&source, 0, sizeof(source));
         Synth::init_default_bank(&source.bank);
         for (uint32_t ordinal = 0; ordinal < 3; ++ordinal) {
             snapshot = source;
@@ -3448,7 +3448,7 @@ static void effects_structural_regressions()
 
     // The one-node GUI precommit predicate includes roots, bindings and legacy pins.
     for (uint32_t owner : root_owners) {
-        source = {};
+        memset(&source, 0, sizeof(source));
         Synth::init_default_bank(&source.bank);
         const uint32_t root_limit = Sculptor::max_nodes - (owner == Sculptor::fx_master_chain ? 2u : 3u);
         for (uint32_t index = 0; index < root_limit; ++index) {
@@ -3507,7 +3507,7 @@ static void effects_structural_regressions()
 
     // Legacy-only nodes occupy the same ordered lane as rooted and bound nodes.
     for (uint32_t owner : root_owners) {
-        source = {};
+        memset(&source, 0, sizeof(source));
         Synth::init_default_bank(&source.bank);
         TEST(Sculptor::allocate_default_lfo(&source.bank, &descriptor));
         TEST(Sculptor::add_effect_lfo_candidate(&source, owner, &source, &descriptor));
@@ -3536,7 +3536,7 @@ static void effects_structural_regressions()
     descriptor                = 0xBEEF;
     TEST(! Sculptor::add_effect_lfo_candidate(&source, 1, &candidate, &descriptor));
     TEST(descriptor == 0xBEEF && memcmp(&candidate, &snapshot, sizeof(candidate)) == 0);
-    source = {};
+    memset(&source, 0, sizeof(source));
     Synth::init_default_bank(&source.bank);
     for (uint32_t index = 0; index < Synth::max_lfos; ++index) {
         uint16_t allocated = 0;
