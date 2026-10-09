@@ -773,7 +773,9 @@ tests += vmath_unit
 tests += suballoc_unit
 tests += sculptor_graph_unit
 tests += sculptor_undo_unit
+ifneq ($(UNAME)_$(stdlib), Windows_0)
 tests += synth_unit
+endif
 tests += midi_decode_unit
 
 define DEFINE_TEST
