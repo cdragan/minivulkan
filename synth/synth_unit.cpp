@@ -1,6 +1,10 @@
 // SPDX-License-Identifier: MIT
 // SPDX-FileCopyrightText: Copyright (c) 2021-2026 Chris Dragan
 
+#ifdef _MSC_VER
+#pragma warning(disable : 4996)
+#endif
+
 #include "../core/rng.h"
 #include "../sculptor/sculptor_bank_json.h"
 #include "../sculptor/sculptor_effect_graph.h"
@@ -1652,7 +1656,7 @@ static void check_editor_instrument_round_trips()
     strcpy(source.graph_layout[source.graph_layout_count - 1].name, "Delay");
     add_detached_record(&source, 0, 0, 4, 0, 903, 904, Synth::ModSource::none, Synth::ModSource::none, 0);
     strcpy(source.graph_layout[source.graph_layout_count - 1].name, "LFO 2");
-    const char* const path = "/tmp/synth_named_fm_roundtrip.tmp";
+    const char* const path = "synth_named_fm_roundtrip.tmp";
     remove(path);
     source_before = source;
     TEST(Synth::save_library_record(path, "Regression", "Named FM", &source, 0) == 0);
@@ -1804,7 +1808,7 @@ static void check_zero_fm_clipboard_library_round_trips()
     static Synth::InstrumentEditorBank installed;
     static ClipboardDecode             decoded;
     static char                        text[clipboard_capacity];
-    const char* const                  path = "/tmp/synth_zero_fm_roundtrip.tmp";
+    const char* const                  path = "synth_zero_fm_roundtrip.tmp";
     for (uint32_t active = 0; active < 2; ++active) {
         for (uint32_t nonzero = 0; nonzero < 2; ++nonzero) {
             build_named_fm_fixture(&source);
@@ -1918,7 +1922,7 @@ static void check_library_metadata_transactions()
     static char payload[Synth::library_payload_max];
     uint32_t    length = Synth::encode_editor_bank_json(&source, payload, sizeof(payload));
     TEST(length > 0);
-    const char* const path = "/tmp/synth_metadata_transaction.tmp";
+    const char* const path = "synth_metadata_transaction.tmp";
     write_library_fixture(path, payload, length);
     Synth::LibraryEntry control_entry;
     TEST(Synth::read_library_index(path, &control_entry, 1) == 1);
@@ -2093,7 +2097,7 @@ static void check_editor_round_trip_capacity_failures()
                                                        &candidate));
     TEST(memcmp(&destination, &destination_before, sizeof(destination)) == 0);
     TEST(memcmp(&candidate, &candidate_before, sizeof(candidate)) == 0);
-    const char* const path = "/tmp/synth_roundtrip_capacity.tmp";
+    const char* const path = "synth_roundtrip_capacity.tmp";
     remove(path);
     TEST(Synth::save_library_record(path, "Regression", "FM", &source, 0) == 0);
     Synth::LibraryEntry entry;
@@ -2116,7 +2120,7 @@ static void check_unrepresented_layout_refusal()
     static Synth::InstrumentEditorBank source;
     static Synth::InstrumentEditorBank snapshot;
     static char                        document[clipboard_capacity];
-    const char* const                  path = "/tmp/synth_unrepresented_layout.tmp";
+    const char* const                  path = "synth_unrepresented_layout.tmp";
     static char                        before[Synth::library_payload_max + 128];
     static char                        after[Synth::library_payload_max + 128];
     for (uint32_t shape = 0; shape < 3; ++shape) {
@@ -2153,7 +2157,7 @@ static void check_legacy_library_numeric_domains()
     static Synth::InstrumentEditorBank source;
     static Synth::InstrumentEditorBank destination;
     static char                        text[clipboard_capacity];
-    const char* const                  path = "/tmp/synth_legacy_numeric.tmp";
+    const char* const                  path = "synth_legacy_numeric.tmp";
     for (uint32_t values = 1; values <= 3; ++values) {
         for (uint32_t metadata = 0; metadata < 2; ++metadata) {
             build_named_fm_fixture(&source);
@@ -2254,7 +2258,7 @@ static void check_shared_instrument_json_domains()
         TEST(Sculptor::encode_editor_instrument_json(source, 0, 0, text, sizeof(text), domain) == 0);
     }
     // Titles are bounded UTF-8 strings in both transport domains.
-    const char* title_path = "/tmp/synth_invalid_title.tmp";
+    const char* title_path = "synth_invalid_title.tmp";
     char        text_before[clipboard_capacity];
     char        file_before[clipboard_capacity];
     char        file_after[clipboard_capacity];
@@ -2463,7 +2467,7 @@ static void check_shared_instrument_json_domains()
     }
     token_length += static_cast<uint32_t>(
         snprintf(exhausted_text + token_length, sizeof(exhausted_text) - token_length, "\"x\":1}}"));
-    const char* token_path = "/tmp/synth_library_tokens.tmp";
+    const char* token_path = "synth_library_tokens.tmp";
     write_library_fixture(token_path, exhausted_text, token_length);
     Synth::LibraryEntry token_entry;
     TEST(Synth::read_library_index(token_path, &token_entry, 1) == 1);
@@ -2480,7 +2484,7 @@ static void check_shared_instrument_json_domains()
     source.bank.envelopes.entries[1] = source.bank.envelopes.entries[0];
     snapshot                         = source;
     TEST(! export_clipboard_fixture(source, text, sizeof(text)));
-    const char* path = "/tmp/synth_title_collision.tmp";
+    const char* path = "synth_title_collision.tmp";
     remove(path);
     TEST(Synth::save_library_record(path, "Regression", "Collision", &source, 0) != 0);
     TEST(memcmp(&source, &snapshot, sizeof(source)) == 0);
@@ -2755,7 +2759,7 @@ static void check_shared_instrument_json_domains()
     static char    payload[Synth::library_payload_max];
     const uint32_t payload_length = Synth::encode_editor_bank_json(&source, payload, sizeof(payload));
     TEST(payload_length > 0);
-    const char* capacity_path = "/tmp/synth_multizone_capacity.tmp";
+    const char* capacity_path = "synth_multizone_capacity.tmp";
     write_library_fixture(capacity_path, payload, payload_length);
     Synth::LibraryEntry entry;
     TEST(Synth::read_library_index(capacity_path, &entry, 1) == 1);
@@ -3273,14 +3277,14 @@ static void effects_structural_regressions()
     snprintf(obsolete.name, sizeof(obsolete.name), "Chorus 4");
     bool keep[Synth::max_lfos] = {};
     TEST(Sculptor::collect_effect_lfos(&source, 0, keep));
-    const char* bank_path = "/tmp/synth_effects_structural_bank.tmp";
+    const char* bank_path = "synth_effects_structural_bank.tmp";
     TEST(Synth::save_editor_bank_file(bank_path, &source) == 0);
     TEST(Synth::load_editor_bank_file(bank_path, &loaded) == Synth::BankFileStatus::ok);
     TEST(Sculptor::collect_effect_lfos(&loaded, 0, keep));
     TEST(loaded.graph_layout_count + 1 == source.graph_layout_count);
     TEST(Synth::save_editor_bank_file(bank_path, &loaded) == 0);
     remove(bank_path);
-    const char* library_path = "/tmp/synth_effects_structural_library.tmp";
+    const char* library_path = "synth_effects_structural_library.tmp";
     remove(library_path);
     loaded = source;
     memset(loaded.bank.channel_enabled, 0, sizeof(loaded.bank.channel_enabled));
@@ -3930,7 +3934,7 @@ static void effects_clipboard_regressions()
     source.bank.instruments.entries[0].layers[0].gen[Synth::mod_volume].lfo_desc_id =
         source.bank.channel_chains[0].effects[0].bindings[0].lfo_desc_id;
     saved_source             = source;
-    const char* library_path = "/tmp/synth_effects_clipboard_library.tmp";
+    const char* library_path = "synth_effects_clipboard_library.tmp";
     remove(library_path);
     TEST(Synth::save_library_record(library_path, "Effects", "Aliases", &source, 0) == 0);
     Synth::LibraryEntry      entry          = {};
@@ -6420,7 +6424,7 @@ int main()
         TEST(Synth::decode_editor_bank_json(bank_text, bank_length, &restored));
         TEST(memcmp(restored.effect_audio, authored.effect_audio, sizeof(authored.effect_audio)) == 0);
         // Detached authoring topology rides the bank codec, effects transfer and reduced library owner.
-        const char* library_path = "/tmp/synth_disconnected_effects_library.tmp";
+        const char* library_path = "synth_disconnected_effects_library.tmp";
         remove(library_path);
         TEST(Synth::save_library_record(library_path, "Effects", "Detached", &authored, 0) == 0);
         Synth::LibraryEntry entry = {};
