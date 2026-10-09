@@ -12,6 +12,7 @@
 #include "../core/d_printf.h"
 #include "../core/gui.h"
 #include "../core/gui_imgui.h"
+#include "../thirdparty/imgui/src/imgui_internal.h"
 #include "../core/memory_heap.h"
 #include "../core/minivulkan.h"
 #include "../core/mstdc.h"
@@ -153,6 +154,33 @@ static bool allocate_viewports()
     return true;
 }
 
+// Apply the default dock layout when there is no saved imgui.ini layout
+static void apply_default_dock_layout(ImGuiID dockspace_id)
+{
+    if (ImGui::DockBuilderGetNode(dockspace_id))
+        return;
+
+    const ImGuiViewport* const viewport = ImGui::GetMainViewport();
+
+    ImGui::DockBuilderAddNode(dockspace_id, ImGuiDockNodeFlags_DockSpace);
+    ImGui::DockBuilderSetNodeSize(dockspace_id, viewport->WorkSize);
+
+    ImGuiID center_id = 0;
+    ImGuiID left_id   = 0;
+    ImGui::DockBuilderSplitNode(dockspace_id, ImGuiDir_Left, 0.25f, &left_id, &center_id);
+
+    ImGuiID assets_id = 0;
+    ImGuiID debug_id  = 0;
+    ImGui::DockBuilderSplitNode(left_id, ImGuiDir_Down, 0.5f, &assets_id, &debug_id);
+
+    ImGui::DockBuilderDockWindow("Debug", debug_id);
+    ImGui::DockBuilderDockWindow("Asset Browser###AssetBrowser", assets_id);
+    ImGui::DockBuilderDockWindow("###Geometry Editor", center_id);
+    ImGui::DockBuilderDockWindow("Synth", center_id);
+
+    ImGui::DockBuilderFinish(dockspace_id);
+}
+
 static bool create_gui_frame(uint32_t image_idx)
 {
     ImGuiIO& io      = ImGui::GetIO();
@@ -216,7 +244,9 @@ static bool create_gui_frame(uint32_t image_idx)
         ImGui::EndMainMenuBar();
     }
 
-    ImGui::DockSpaceOverViewport(ImGui::GetMainViewport(), ImGuiDockNodeFlags_PassthruCentralNode);
+    const ImGuiID dockspace_id = ImHashStr("SculptorDockSpace");
+    apply_default_dock_layout(dockspace_id);
+    ImGui::DockSpaceOverViewport(ImGui::GetMainViewport(), ImGuiDockNodeFlags_PassthruCentralNode, nullptr, dockspace_id);
 
     ImGui::Begin("Debug");
     {
