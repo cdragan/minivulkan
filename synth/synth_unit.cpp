@@ -63,7 +63,7 @@ static bool project_legacy_effects(const Synth::InstrumentBank&  bank,
                                    const bool*                   pins = nullptr)
 {
     static Synth::InstrumentEditorBank authored;
-    authored      = {};
+    memset(&authored, 0, sizeof(authored));
     authored.bank = bank;
     return Sculptor::project_effect_chain_to_graph(authored, owner, graph, mapping, pins);
 }
@@ -353,7 +353,7 @@ static void build_osc_graph_max_fixture(Synth::InstrumentBank* bank,
                                         uint16_t (*env_ids)[Synth::num_mod_targets],
                                         uint16_t (*lfo_ids)[Synth::num_mod_targets])
 {
-    *bank       = {};
+    memset(bank, 0, sizeof(*bank));
     *instrument = {};
     for (uint32_t layer = 0; layer < Synth::max_layers; layer++) {
         for (uint32_t t = 0; t < Synth::num_mod_targets; t++) {
@@ -452,7 +452,7 @@ static void build_osc_graph_small_fixture(Synth::InstrumentBank* bank,
                                           uint16_t*              lfo_id,
                                           uint16_t*              volume_env_id)
 {
-    *bank       = {};
+    memset(bank, 0, sizeof(*bank));
     *instrument = {};
     TEST(bank->envelopes.allocate() == 0);
     TEST(bank->lfos.allocate() == 0);
@@ -598,7 +598,7 @@ static void add_detached_record(Synth::InstrumentEditorBank* bank,
 // a valid zone table; no layout records yet.
 static void build_zone_fixture(Synth::InstrumentEditorBank* bank, Synth::Instrument* instrument)
 {
-    *bank                  = {};
+    memset(bank, 0, sizeof(*bank));
     uint16_t shared_env_id = 0;
     uint16_t lfo_id        = 0;
     uint16_t volume_env_id = 0;
@@ -761,7 +761,7 @@ static void add_parameter_record(Synth::InstrumentEditorBank* bank,
 // carries one velocity input.  No layout records.
 static void build_parameter_fixture(Synth::InstrumentEditorBank* bank, Synth::Instrument* instrument)
 {
-    *bank                         = {};
+    memset(bank, 0, sizeof(*bank));
     *instrument                   = {};
     bank->bank.channel_enabled[0] = 1;
     TEST(bank->bank.instruments.allocate() == 0);
@@ -905,7 +905,7 @@ static int32_t find_portable(const Synth::InstrumentGraphLayout* records,
 // effect chain.
 static void build_clipboard_zone_fixture(Synth::InstrumentEditorBank* bank, Synth::Instrument* instrument)
 {
-    *bank                         = {};
+    memset(bank, 0, sizeof(*bank));
     *instrument                   = {};
     bank->bank.channel_enabled[0] = 1;
     TEST(bank->bank.instruments.allocate() == 0);
@@ -1000,7 +1000,7 @@ static uint32_t build_clipboard_max_fixture(Synth::InstrumentBank*        bank,
                                             Synth::Instrument*            instrument,
                                             Synth::InstrumentGraphLayout* records)
 {
-    *bank                   = {};
+    memset(bank, 0, sizeof(*bank));
     *instrument             = {};
     instrument->layer_count = Synth::max_layers;
     for (uint32_t layer = 0; layer < Synth::max_layers; layer++) {
@@ -2181,7 +2181,7 @@ static void check_legacy_library_numeric_domains()
             write_library_fixture(path, legacy_payload, legacy_length);
             Synth::LibraryEntry legacy_entry;
             TEST(Synth::read_library_index(path, &legacy_entry, 1) == 1);
-            destination          = {};
+            memset(&destination, 0, sizeof(destination));
             uint16_t legacy_slot = 0xBEEF;
             TEST(Synth::load_library_instrument(path, &legacy_entry, &destination, 2, &legacy_slot));
             TEST(legacy_slot == 0);
@@ -2195,7 +2195,7 @@ static void check_legacy_library_numeric_domains()
             TEST(Synth::save_library_record(path, "Legacy", "Numeric", &source, 0) == 0);
             Synth::LibraryEntry entry;
             TEST(Synth::read_library_index(path, &entry, 1) == 1);
-            destination          = {};
+            memset(&destination, 0, sizeof(destination));
             uint16_t output_slot = 0xBEEF;
             TEST(Synth::load_library_instrument(path, &entry, &destination, 2, &output_slot));
             TEST(output_slot == 0);
@@ -2864,7 +2864,7 @@ static void effects_input_gesture_regressions(Synth::InstrumentEditorBank*  sour
             if (scenario == Scenario::midi_disconnect && owner == Sculptor::fx_master_chain) {
                 continue;
             }
-            *source = {};
+            memset(source, 0, sizeof(*source));
             Synth::init_default_bank(&source->bank);
             uint16_t root = 0;
             TEST(Sculptor::add_effect_lfo_candidate(source, owner, source, &root));
@@ -3060,7 +3060,7 @@ static void effects_literal_topology_regressions()
     const uint32_t                      owners[] = { 0u, Sculptor::fx_master_chain };
     for (uint32_t owner : owners) {
         for (uint32_t endpoint = 0; endpoint < 2; ++endpoint) {
-            source = {};
+            memset(&source, 0, sizeof(source));
             Synth::init_default_bank(&source.bank);
             auto& chain       = Sculptor::fx_graph_chain(&source.bank, owner);
             chain.num_effects = 3;
@@ -3568,7 +3568,7 @@ static void effects_paste_pin_regressions()
     static Sculptor::EffectGraphMapping mapping;
     const uint32_t                      owners[] = { 0, Sculptor::fx_master_chain };
     for (uint32_t owner : owners) {
-        source = {};
+        memset(&source, 0, sizeof(source));
         Synth::init_default_bank(&source.bank);
         const uint32_t pin_limit = Sculptor::max_nodes - (owner == Sculptor::fx_master_chain ? 2u : 3u);
         bool           legacy_pins[Synth::max_lfos] = {};
@@ -3642,7 +3642,7 @@ static void effects_paste_pin_regressions()
         TEST(memcmp(&candidate, &saved_candidate, sizeof(candidate)) == 0);
         TEST(memcmp(&source, &saved_source, sizeof(source)) == 0);
 
-        source = {};
+        memset(&source, 0, sizeof(source));
         Synth::init_default_bank(&source.bank);
         uint16_t shared_descriptor = 0;
         TEST(Sculptor::allocate_default_lfo(&source.bank, &shared_descriptor));
@@ -3675,7 +3675,7 @@ static void effects_layout_classification_regressions()
     static Synth::InstrumentEditorBank  saved_candidate;
     static Sculptor::Graph              graph;
     static Sculptor::EffectGraphMapping mapping;
-    source = {};
+    memset(&source, 0, sizeof(source));
     Synth::init_default_bank(&source.bank);
     uint16_t descriptor = 0;
     TEST(Sculptor::allocate_default_lfo(&source.bank, &descriptor));
@@ -3763,7 +3763,7 @@ static void effects_clipboard_regressions()
     const uint32_t origins[] = { 0, Sculptor::fx_master_chain };
     for (uint32_t origin : origins) {
         effects_clipboard_fixture(&doc, origin != Sculptor::fx_master_chain);
-        source = {};
+        memset(&source, 0, sizeof(source));
         Synth::init_default_bank(&source.bank);
         for (uint32_t i = 0; i < 3; ++i) {
             const uint32_t id            = source.bank.lfos.allocate();
@@ -3780,7 +3780,7 @@ static void effects_clipboard_regressions()
         TEST(extracted.lfo_count == 2); // persisted source has no detached layout yet
 
         for (uint32_t destination : origins) {
-            candidate           = {};
+            memset(&candidate, 0, sizeof(candidate));
             const bool replaced = Sculptor::replace_effect_chain_candidate(&source, destination, &doc, &candidate);
             TEST(replaced);
             TEST(memcmp(&source, &saved_source, sizeof(source)) == 0);
@@ -3861,7 +3861,7 @@ static void effects_clipboard_regressions()
     }
 
     // Copy observes graph edits, but neither consumes pending events nor mutates bank.
-    source = {};
+    memset(&source, 0, sizeof(source));
     Synth::init_default_bank(&source.bank);
     effects_clipboard_fixture(&doc, true);
     for (uint32_t i = 0; i < 3; ++i) {
@@ -3923,7 +3923,7 @@ static void effects_clipboard_regressions()
 
     // Library's combined descriptor map preserves oscillator/effect sharing and represented unconnected nodes.
     effects_clipboard_fixture(&doc, true);
-    source = {};
+    memset(&source, 0, sizeof(source));
     Synth::init_default_bank(&source.bank);
     TEST(Sculptor::replace_effect_chain_candidate(&source, 0, &doc, &candidate));
     source = candidate;
@@ -3936,7 +3936,7 @@ static void effects_clipboard_regressions()
     Synth::LibraryEntry      entry          = {};
     Synth::LibraryScanStatus library_status = Synth::library_invalid;
     TEST(Synth::read_library_index(library_path, &entry, 1, &library_status) == 1);
-    loaded = {};
+    memset(&loaded, 0, sizeof(loaded));
     Synth::init_default_bank(&loaded.bank);
     uint16_t first_slot = 0xBEEF;
     TEST(Synth::load_library_instrument(library_path, &entry, &loaded, 2, &first_slot));
@@ -3948,7 +3948,7 @@ static void effects_clipboard_regressions()
     remove(library_path);
 
     // Library reduction keeps sparse original IDs ordered and never deduplicates equal descriptors.
-    source = {};
+    memset(&source, 0, sizeof(source));
     Synth::init_default_bank(&source.bank);
     for (uint32_t index = 0; index < 6; ++index) {
         uint16_t allocated = 0;
@@ -3967,7 +3967,7 @@ static void effects_clipboard_regressions()
     TEST(Synth::save_library_record(library_path, "Effects", "Sparse", &source, 0) == 0);
     TEST(memcmp(&source, &saved_source, sizeof(source)) == 0);
     TEST(Synth::read_library_index(library_path, &entry, 1, &library_status) == 1);
-    loaded = {};
+    memset(&loaded, 0, sizeof(loaded));
     Synth::init_default_bank(&loaded.bank);
     uint16_t occupied_descriptor = 0;
     TEST(Sculptor::allocate_default_lfo(&loaded.bank, &occupied_descriptor));
@@ -3989,7 +3989,7 @@ static void effects_clipboard_regressions()
     TEST(first_slot == 0xBEEF && memcmp(&loaded, &saved_candidate, sizeof(loaded)) == 0);
     remove(library_path);
     // Restore the shared-descriptor fixture for pending-edit checks.
-    source = {};
+    memset(&source, 0, sizeof(source));
     Synth::init_default_bank(&source.bank);
     TEST(Sculptor::replace_effect_chain_candidate(&source, 0, &doc, &source));
     source.bank.instruments.entries[0].layers[0].gen[Synth::mod_volume].lfo_desc_id = 1;
@@ -4161,7 +4161,7 @@ static void effects_clipboard_regressions()
 
     // Whole-bank limits: unrelated channels and disabled bindings still count.
     for (uint32_t budget = 0; budget < 3; ++budget) {
-        source = {};
+        memset(&source, 0, sizeof(source));
         Synth::init_default_bank(&source.bank);
         effects_clipboard_fixture(&doc, false);
         if (budget == 0) {

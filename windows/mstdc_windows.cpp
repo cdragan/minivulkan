@@ -722,6 +722,26 @@ RETZERO:
         }
     }
 
+    // Double variants of the two conversions above, for double operands.
+    __declspec(naked) void _dtoui3()
+    {
+        __asm {
+            movsd     xmm0, QWORD PTR [esp + 8]
+            cvttsd2si eax, xmm0
+            ret
+        }
+    }
+
+    __declspec(naked) void _dtol3()
+    {
+        __asm {
+            movsd     xmm0, QWORD PTR [esp + 8]
+            cvttsd2si eax, xmm0
+            cdq
+            ret
+        }
+    }
+
     __declspec(naked) void _ultof3()
     {
         __asm {
