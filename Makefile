@@ -336,6 +336,7 @@ LDFLAGS_gui    =
 
 ifeq ($(UNAME), Windows)
     WFLAGS += -W3
+    wFLAGS += -D_CRT_SECURE_NO_WARNINGS
 
     ifeq ($(release), 0)
         CFLAGS  += -D_DEBUG -Z7 -FS -MTd

@@ -6264,7 +6264,7 @@ int main()
     // Proposed audio capture and gesture preflight share validation without mutating the old wire.
     {
         static Synth::InstrumentEditorBank authored;
-        authored = {};
+        memset(&authored, 0, sizeof(authored));
         make_valid_bank(authored.bank);
         enabled_effect(authored.bank, 0, 0, Synth::EffectType::delay);
         enabled_effect(authored.bank, 0, 1, Synth::EffectType::chorus);
@@ -6329,7 +6329,7 @@ int main()
     // Authoring slots stay stable; only complete topology is compiled for playback.
     {
         static Synth::InstrumentEditorBank authored;
-        authored = {};
+        memset(&authored, 0, sizeof(authored));
         make_valid_bank(authored.bank);
         enabled_effect(authored.bank, 0, 0, Synth::EffectType::delay)->bindings[0].base_value  = 217.0f;
         enabled_effect(authored.bank, 0, 1, Synth::EffectType::chorus)->bindings[0].base_value = 3.25f;
@@ -6352,7 +6352,7 @@ int main()
         for (uint32_t example = 0; example < 6; ++example) {
             authored.effect_audio[0] = valid[example];
             TEST(Sculptor::validate_effect_audio_topology(retained, valid[example]));
-            playback            = {};
+            memset(&playback, 0, sizeof(playback));
             const bool compiled = Sculptor::compile_editor_playback_bank(authored, &playback);
             TEST(compiled);
             if (compiled) {
@@ -6425,7 +6425,7 @@ int main()
         TEST(Synth::save_library_record(library_path, "Effects", "Detached", &authored, 0) == 0);
         Synth::LibraryEntry entry = {};
         TEST(Synth::read_library_index(library_path, &entry, 1) == 1);
-        restored = {};
+        memset(&restored, 0, sizeof(restored));
         Synth::init_default_bank(&restored.bank);
         const Synth::EffectChainBinding other      = restored.bank.master_chain;
         uint16_t                        first_slot = 0;
@@ -6480,7 +6480,7 @@ int main()
     // The queued image is playable, never the retained authoring collection.
     {
         static Synth::InstrumentEditorBank source;
-        source = {};
+        memset(&source, 0, sizeof(source));
         make_valid_bank(source.bank);
         enabled_effect(source.bank, 0, 0, Synth::EffectType::delay)->bindings[0].base_value  = 231.0f;
         enabled_effect(source.bank, 0, 1, Synth::EffectType::chorus)->bindings[0].base_value = 4.5f;
@@ -6488,7 +6488,7 @@ int main()
         enabled_effect(source.bank, Synth::max_channels, 0, Synth::EffectType::reverb);
         source.effect_audio[Synth::max_channels] = { 1, { 0, 0, 0, 0, 1 } };
         static Synth::InstrumentBank packet, installed;
-        packet              = {};
+        memset(&packet, 0, sizeof(packet));
         installed           = source.bank;
         const bool compiled = Sculptor::compile_editor_playback_bank(source, &packet);
         TEST(compiled);
@@ -6524,7 +6524,7 @@ int main()
         source.effect_audio[0]                   = {};
         source.effect_audio[Synth::max_channels] = {};
         source.bank.channel_chains[0].effects[0] = {};
-        packet                                   = {};
+        memset(&packet, 0, sizeof(packet));
         const bool legacy                        = Sculptor::compile_editor_playback_bank(source, &packet);
         TEST(legacy);
         if (legacy) {
@@ -8975,7 +8975,7 @@ int main()
     // with the pool compaction, so detached nodes keep editing their content.
     {
         static Synth::InstrumentEditorBank bank;
-        bank                         = {};
+        memset(&bank, 0, sizeof(bank));
         bank.bank.channel_enabled[0] = 1;
         bank.bank.instruments.allocate();
         Synth::Instrument& instrument    = bank.bank.instruments.entries[0];
@@ -9228,7 +9228,7 @@ int main()
     // Layer compaction shifts missing-sum bits together with layers.
     {
         static Synth::InstrumentEditorBank bank;
-        bank                         = {};
+        memset(&bank, 0, sizeof(bank));
         bank.graph_missing_sum[3][1] = static_cast<uint8_t>((1u << 1) | (1u << 3) | (1u << 5));
         Sculptor::compact_missing_sum_bits(&bank, 3, 1, 1);
         TEST(bank.graph_missing_sum[3][1] == static_cast<uint8_t>((1u << 2) | (1u << 4)));
@@ -9239,7 +9239,7 @@ int main()
     // layer count stays valid.
     {
         static Synth::InstrumentEditorBank bank;
-        bank                                = {};
+        memset(&bank, 0, sizeof(bank));
         bank.bank.channel_enabled[0]        = 1;
         static Synth::Instrument instrument = {};
         instrument.layer_count              = 2;
@@ -9269,7 +9269,7 @@ int main()
     // once every zone is complete again.
     {
         static Synth::InstrumentEditorBank bank;
-        bank                                 = {};
+        memset(&bank, 0, sizeof(bank));
         bank.bank.channel_enabled[0]         = 1;
         bank.bank.channel_enabled[1]         = 1;
         bank.graph_missing_sum[0][0]         = 1;
@@ -9287,7 +9287,7 @@ int main()
     // shifting later zones; drop and reset remove.
     {
         static Synth::InstrumentEditorBank bank;
-        bank = {};
+        memset(&bank, 0, sizeof(bank));
         add_detached_record(&bank, 0, 0, 0, 5, 1.0f, 2.0f, Synth::ModSource::none, Synth::ModSource::none, 0);
         add_detached_record(&bank, 0, 0, 2, 9, 3.0f, 4.0f, Synth::ModSource::velocity, Synth::ModSource::none, 1);
         add_detached_record(&bank, 0, 1, 0, 6, 5.0f, 6.0f, Synth::ModSource::none, Synth::ModSource::none, 0);
@@ -9345,7 +9345,7 @@ int main()
     // accounting the record-creating operations preflight against.
     {
         static Synth::InstrumentEditorBank bank;
-        bank = {};
+        memset(&bank, 0, sizeof(bank));
         TEST(Sculptor::graph_records_have_capacity(bank, 1));
         bank.graph_layout_count = Synth::max_graph_records;
         TEST(! Sculptor::graph_records_have_capacity(bank, 1));
@@ -10802,7 +10802,7 @@ int main()
     // control ticks, 256/44100 s each).
     {
         static Synth::InstrumentEditorBank bank;
-        bank                = {};
+        memset(&bank, 0, sizeof(bank));
         const uint32_t slot = bank.bank.envelopes.allocate();
         TEST(slot != pool_no_slot);
         Synth::EnvelopeDescriptor& env = bank.bank.envelopes.entries[slot];
@@ -10848,7 +10848,7 @@ int main()
         static Synth::InstrumentEditorBank bank;
         static Synth::Instrument           instrument = {};
         do {
-            bank                         = {};
+            memset(&bank, 0, sizeof(bank));
             instrument                   = {};
             bank.bank.channel_enabled[0] = 1;
             TEST(bank.bank.instruments.allocate() == 0);
@@ -10929,7 +10929,7 @@ int main()
         static Synth::InstrumentEditorBank bank;
         static Synth::Instrument           instrument = {};
         do {
-            bank                         = {};
+            memset(&bank, 0, sizeof(bank));
             instrument                   = {};
             bank.bank.channel_enabled[0] = 1;
             TEST(bank.bank.instruments.allocate() == 0);
@@ -14464,7 +14464,7 @@ int main()
             // The encoder must emit document units, or the editor's own copy cannot
             // paste back: install into a bank, encode, decode, compare bank values.
             static Synth::InstrumentEditorBank fm_bank;
-            fm_bank = {};
+            memset(&fm_bank, 0, sizeof(fm_bank));
             uint16_t fm_env_ids[Synth::instrument_max_envelopes];
             uint16_t fm_lfo_ids[Synth::instrument_max_lfos];
             TEST(Synth::remap_envelopes(&fm_bank.bank, fm_envs, fm_env_count, fm_env_ids));
@@ -14536,7 +14536,7 @@ int main()
         // untouched, and the clear owns the zone's mask row.
         {
             static Synth::InstrumentEditorBank clear_bank;
-            clear_bank = {};
+            memset(&clear_bank, 0, sizeof(clear_bank));
             add_detached_record(&clear_bank, 0, 0, 1, 1, 0.0f, 0.0f, Synth::ModSource::none, Synth::ModSource::none, 0);
             add_parameter_record(&clear_bank, 0, 0, 0, 1.0f, 2.0f, 7);
             clear_bank.graph_layout[1].served = 2; // a parameter serving layer 1
@@ -14699,7 +14699,7 @@ int main()
             // default of 1 would change the sound), and an omitted ratio decodes to 1.
             {
                 static Synth::InstrumentEditorBank zero_bank;
-                zero_bank                = {};
+                memset(&zero_bank, 0, sizeof(zero_bank));
                 const uint32_t zero_slot = zero_bank.bank.instruments.allocate();
                 TEST(zero_slot != pool_no_slot);
                 zero_bank.bank.instruments.entries[zero_slot] = zero_instr;
@@ -14790,7 +14790,7 @@ int main()
             TEST(cut_envs[0].points[1].value == 655); // the floor's own quantization step
 
             static Synth::InstrumentEditorBank cut_bank;
-            cut_bank = {};
+            memset(&cut_bank, 0, sizeof(cut_bank));
             uint16_t cut_env_ids[Synth::instrument_max_envelopes];
             uint16_t cut_lfo_ids[Synth::instrument_max_lfos];
             TEST(Synth::remap_envelopes(&cut_bank.bank, cut_envs, cut_env_count, cut_env_ids));
@@ -14862,7 +14862,7 @@ int main()
             TEST(real_lfos[1].min_max_delta == 2.0f);
 
             static Synth::InstrumentEditorBank real_bank;
-            real_bank = {};
+            memset(&real_bank, 0, sizeof(real_bank));
             uint16_t real_env_ids[Synth::instrument_max_envelopes];
             uint16_t real_lfo_ids[Synth::instrument_max_lfos];
             TEST(Synth::remap_envelopes(&real_bank.bank, real_envs, real_env_count, real_env_ids));
@@ -14921,7 +14921,7 @@ int main()
             TEST(swing_envs[0].points[0].value == 0);
             TEST(swing_envs[0].points[1].value == 0xFFFF);
             static Synth::InstrumentEditorBank swing_bank;
-            swing_bank = {};
+            memset(&swing_bank, 0, sizeof(swing_bank));
             uint16_t swing_env_ids[Synth::instrument_max_envelopes];
             uint16_t swing_lfo_ids[Synth::instrument_max_lfos];
             TEST(Synth::remap_envelopes(&swing_bank.bank, swing_envs, swing_env_count, swing_env_ids));
@@ -15472,7 +15472,7 @@ int main()
 
             // Exercise the complete copy pipeline with A/A'/B descriptor interning.
             static Synth::InstrumentEditorBank nm_copy_bank;
-            nm_copy_bank = {};
+            memset(&nm_copy_bank, 0, sizeof(nm_copy_bank));
             nm_copy_bank.bank.instruments.allocate();
             nm_copy_bank.bank.instruments.entries[0] = nm_src;
             nm_copy_bank.bank.channel_enabled[0]     = 1;
@@ -16553,7 +16553,7 @@ int main()
             // shared destination must refuse: the pool is full before reclaim, and an
             // allocated-but-unrooted slot is not free.
             static Synth::InstrumentEditorBank fp_bank;
-            fp_bank = {};
+            memset(&fp_bank, 0, sizeof(fp_bank));
             for (uint32_t i = 0; i < Synth::max_instruments; i++) {
                 TEST(fp_bank.bank.instruments.allocate() == i);
                 fp_bank.bank.instruments.entries[i].layer_count           = 1;
@@ -16622,7 +16622,7 @@ int main()
             // A shared destination with a free slot gets its own placeholder, so the
             // other zone keeps playing the instrument it always played.
             static Synth::InstrumentEditorBank sh_bank;
-            sh_bank = {};
+            memset(&sh_bank, 0, sizeof(sh_bank));
             TEST(sh_bank.bank.instruments.allocate() == 0);
             TEST(sh_bank.bank.instruments.allocate() == 1);
             sh_bank.bank.instruments.entries[0].layer_count           = 1;
@@ -16788,7 +16788,7 @@ int main()
             // observably different from the shared instrument, and the other zone keeps
             // its own instrument bytes, name, layout records and missing-sum row.
             static Synth::InstrumentEditorBank dc_bank;
-            dc_bank = {};
+            memset(&dc_bank, 0, sizeof(dc_bank));
             TEST(dc_bank.bank.instruments.allocate() == 0);
             TEST(dc_bank.bank.instruments.allocate() == 1);
             dc_bank.bank.instruments.entries[0].layer_count                           = 1;
