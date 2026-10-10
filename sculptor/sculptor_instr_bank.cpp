@@ -150,9 +150,9 @@ static bool is_channel_effect_source(uint32_t source)
            source == static_cast<uint32_t>(Synth::ModSource::channel_pressure);
 }
 
-// One effect param's binding.  The master chain admits no MIDI-driven source at all
-// (it has no channel inputs, so MIDI modulation there would be meaningless).
-static bool validate_effect_param_binding(const Synth::EffectParamBinding& binding, bool is_master, uint32_t num_lfos)
+// One effect param's binding. Master-chain bindings follow the same source
+// rules as channel chains; the runtime resolves them from channel index 0.
+static bool validate_effect_param_binding(const Synth::EffectParamBinding& binding, uint32_t num_lfos)
 {
     if (! std::isfinite(binding.base_value) || ! std::isfinite(binding.lfo_depth) ||
         ! std::isfinite(binding.lfo_rate_scale)) {
@@ -168,28 +168,20 @@ static bool validate_effect_param_binding(const Synth::EffectParamBinding& bindi
         return false;
     }
 
-    if (is_master) {
-        if (binding.lfo_depth_source != Synth::ModSource::none || binding.lfo_rate_source != Synth::ModSource::none ||
-            binding.num_inputs) {
-            return false;
-        }
+    if (! is_channel_effect_source(static_cast<uint32_t>(binding.lfo_depth_source)) ||
+        ! is_channel_effect_source(static_cast<uint32_t>(binding.lfo_rate_source))) {
+        return false;
     }
-    else {
-        if (! is_channel_effect_source(static_cast<uint32_t>(binding.lfo_depth_source)) ||
-            ! is_channel_effect_source(static_cast<uint32_t>(binding.lfo_rate_source))) {
-            return false;
-        }
 
-        if (binding.num_inputs > Synth::max_mod_inputs) {
-            return false;
-        }
+    if (binding.num_inputs > Synth::max_mod_inputs) {
+        return false;
+    }
 
-        for (uint32_t input = 0; input < binding.num_inputs; input++) {
-            const Synth::ModInput& mod_input = binding.inputs[input];
-            if (! Synth::is_valid_effect_input(mod_input) || ! valid_source_op(static_cast<uint32_t>(mod_input.op)) ||
-                ! std::isfinite(mod_input.scale)) {
-                return false;
-            }
+    for (uint32_t input = 0; input < binding.num_inputs; input++) {
+        const Synth::ModInput& mod_input = binding.inputs[input];
+        if (! Synth::is_valid_effect_input(mod_input) || ! valid_source_op(static_cast<uint32_t>(mod_input.op)) ||
+            ! std::isfinite(mod_input.scale)) {
+            return false;
         }
     }
 
@@ -199,7 +191,6 @@ static bool validate_effect_param_binding(const Synth::EffectParamBinding& bindi
 // One chain: slot types, finite params, legal bindings.  Also accumulates the whole-bank
 // totals the caller checks against the modulation-pool and effect-state budgets.
 static bool validate_effect_chain(const Synth::EffectChainBinding& chain,
-                                  bool                             is_master,
                                   uint32_t                         num_lfos,
                                   uint32_t*                        num_modulated,
                                   uint32_t*                        state_bytes)
@@ -222,7 +213,7 @@ static bool validate_effect_chain(const Synth::EffectChainBinding& chain,
 
             const Synth::EffectParamBinding& binding = effect.bindings[param];
 
-            if (! validate_effect_param_binding(binding, is_master, num_lfos)) {
+            if (! validate_effect_param_binding(binding, num_lfos)) {
                 return false;
             }
 
@@ -530,7 +521,6 @@ bool Synth::validate_instrument_bank(const Synth::InstrumentBank* bank, const bo
 
     for (uint32_t channel = 0; channel < Synth::max_channels; channel++) {
         if (! validate_effect_chain(bank->channel_chains[channel],
-                                    false,
                                     bank->lfos.num_allocated,
                                     &num_modulated,
                                     &state_bytes)) {
@@ -538,7 +528,7 @@ bool Synth::validate_instrument_bank(const Synth::InstrumentBank* bank, const bo
         }
     }
 
-    if (! validate_effect_chain(bank->master_chain, true, bank->lfos.num_allocated, &num_modulated, &state_bytes)) {
+    if (! validate_effect_chain(bank->master_chain, bank->lfos.num_allocated, &num_modulated, &state_bytes)) {
         return false;
     }
 
@@ -1087,7 +1077,7 @@ void Sculptor::count_effect_budgets(const Synth::InstrumentBank& bank, uint32_t*
     *num_modulated = 0;
     *state_bytes   = 0;
     for (uint32_t channel = 0; channel < Synth::max_channels; ++channel) {
-        validate_effect_chain(bank.channel_chains[channel], false, bank.lfos.num_allocated, num_modulated, state_bytes);
+        validate_effect_chain(bank.channel_chains[channel], bank.lfos.num_allocated, num_modulated, state_bytes);
     }
-    validate_effect_chain(bank.master_chain, true, bank.lfos.num_allocated, num_modulated, state_bytes);
+    validate_effect_chain(bank.master_chain, bank.lfos.num_allocated, num_modulated, state_bytes);
 }

@@ -71,8 +71,9 @@ void init_effect_state_region(uint32_t region_base_offset);
 // (preserving a slot's previous offset while it keeps running the same enabled effect),
 // counts required modulation nodes, and enforces every rule the commit relies on: chain
 // capacity, effect types, binding validity (finite values, ops, LFO descriptors within
-// the bank pool, bounded channel-wide MIDI inputs, master chain LFO-only), the state
-// budget and the modulated-param limit. New state uses holes outside retained live
+// the bank pool, bounded channel-wide MIDI inputs - master chains follow the same source
+// rules as channel chains, resolved from channel index 0), the state budget and the
+// modulated-param limit. New state uses holes outside retained live
 // ranges; fragmentation may refuse a bank whose live byte sum fits. On failure returns false with a static error
 // string and mutates nothing - the previously committed chains and state remain valid
 // and sounding.
@@ -83,6 +84,9 @@ bool preflight_effect_expansion(const InstrumentBank& bank, EffectExpansionPlan*
 struct EffectNodeWriter {
     const void* ctx;
     uint32_t (*alloc_node)(const void* ctx); // next free modulation-pool node id
+    // Resolves a channel-wide source to the writer's source node id. "channel" is the
+    // MIDI channel the source resolves from: channel chains resolve from their own
+    // channel; the master chain resolves from channel index 0.
     uint16_t (*resolve_source)(const void* ctx, ModSource source, uint8_t cc_number, uint32_t channel);
     void (*configure_dest)(const void*        ctx,
                            uint32_t           node,

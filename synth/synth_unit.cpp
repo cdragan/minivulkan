@@ -2880,9 +2880,7 @@ static void effects_input_gesture_regressions(Synth::InstrumentEditorBank*  sour
     for (uint32_t owner : owners) {
         for (uint32_t example = 0; example < 20; ++example) {
             const Scenario scenario = static_cast<Scenario>(example);
-            if (scenario == Scenario::midi_disconnect && owner == Sculptor::fx_master_chain) {
-                continue;
-            }
+
             memset(source, 0, sizeof(*source));
             Synth::init_default_bank(&source->bank);
             uint16_t root = 0;
@@ -2896,16 +2894,15 @@ static void effects_input_gesture_regressions(Synth::InstrumentEditorBank*  sour
                 binding.base_value          = 100.0f + static_cast<float>(slot);
                 binding.lfo_desc_id         = root;
                 binding.lfo_depth           = 0.25f;
-                if (owner != Sculptor::fx_master_chain) {
-                    binding.num_inputs       = 1;
-                    binding.inputs[0].source = Synth::ModSource::mod_wheel;
-                    binding.inputs[0].scale  = 0.5f;
-                }
+                binding.num_inputs          = 1;
+                binding.inputs[0].source    = Synth::ModSource::mod_wheel;
+                binding.inputs[0].scale     = 0.5f;
             }
             TEST(Sculptor::add_effect_lfo_candidate(source, owner, source, &root));
             bool pins[Synth::max_lfos] = {};
             TEST(Sculptor::collect_effect_lfos(source, owner, pins));
-            TEST(Sculptor::project_effect_chain_to_graph(*source, owner, graph, mapping, pins));
+            const bool projected = Sculptor::project_effect_chain_to_graph(*source, owner, graph, mapping, pins);
+            TEST(projected);
             Sculptor::GraphChange changes[Sculptor::max_pending_changes];
             graph->take_changes(changes, Sculptor::max_pending_changes);
             for (uint32_t slot = 0; slot < 4; ++slot) {
@@ -3596,7 +3593,7 @@ static void effects_structural_regressions()
     for (uint32_t owner : root_owners) {
         memset(&source, 0, sizeof(source));
         Synth::init_default_bank(&source.bank);
-        const uint32_t root_limit = Sculptor::max_nodes - (owner == Sculptor::fx_master_chain ? 2u : 3u);
+        const uint32_t root_limit = Sculptor::max_nodes - 3u; // input, output and MIDI on every chain
         for (uint32_t index = 0; index < root_limit; ++index) {
             uint16_t allocated = 0;
             TEST(Sculptor::allocate_default_lfo(&source.bank, &allocated));
@@ -3716,7 +3713,7 @@ static void effects_paste_pin_regressions()
     for (uint32_t owner : owners) {
         memset(&source, 0, sizeof(source));
         Synth::init_default_bank(&source.bank);
-        const uint32_t pin_limit = Sculptor::max_nodes - (owner == Sculptor::fx_master_chain ? 2u : 3u);
+        const uint32_t pin_limit                    = Sculptor::max_nodes - 3u; // input, output and MIDI on every chain
         bool           legacy_pins[Synth::max_lfos] = {};
         for (uint32_t index = 0; index < pin_limit; ++index) {
             uint16_t descriptor = 0;
@@ -3806,8 +3803,7 @@ static void effects_paste_pin_regressions()
         TEST(Sculptor::replace_effect_chain_candidate(&source, owner, &document, &candidate, legacy_pins));
         memcpy(represented, legacy_pins, sizeof(represented));
         TEST(Sculptor::collect_effect_lfos(&candidate, owner, represented));
-        TEST(Sculptor::fx_projected_node_count(candidate.bank, owner, represented) ==
-             (owner == Sculptor::fx_master_chain ? 4u : 5u));
+        TEST(Sculptor::fx_projected_node_count(candidate.bank, owner, represented) == 5u);
         TEST(Sculptor::project_effect_chain_to_graph(candidate, owner, &graph, &mapping, represented));
         TEST(mapping.lfo_count == 1 && mapping.lfo_nodes[1] != Sculptor::pool_no_slot);
     }
@@ -3908,7 +3904,7 @@ static void effects_clipboard_regressions()
     // descriptors, detached LFO layout, repeated effect types and empty slots.
     const uint32_t origins[] = { 0, Sculptor::fx_master_chain };
     for (uint32_t origin : origins) {
-        effects_clipboard_fixture(&doc, origin != Sculptor::fx_master_chain);
+        effects_clipboard_fixture(&doc, true); // master documents may carry MIDI
         memset(&source, 0, sizeof(source));
         Synth::init_default_bank(&source.bank);
         for (uint32_t i = 0; i < 3; ++i) {
@@ -3952,17 +3948,9 @@ static void effects_clipboard_regressions()
                     const Synth::EffectParamBinding& old = doc.chain.effects[s].bindings[p];
                     TEST(b.base_value == old.base_value && b.lfo_depth == old.lfo_depth);
                     TEST(b.lfo_op == old.lfo_op && b.lfo_rate_scale == old.lfo_rate_scale);
-                    if (destination == Sculptor::fx_master_chain) {
-                        TEST(b.num_inputs == 0 && b.lfo_depth_source == Synth::ModSource::none &&
-                             b.lfo_rate_source == Synth::ModSource::none);
-                        TEST(b.inputs[0].source == Synth::ModSource::none &&
-                             b.inputs[1].source == Synth::ModSource::none);
-                    }
-                    else {
-                        TEST(b.num_inputs == old.num_inputs);
-                        TEST(memcmp(b.inputs, old.inputs, sizeof(b.inputs)) == 0);
-                        TEST(b.lfo_depth_source == old.lfo_depth_source && b.lfo_rate_source == old.lfo_rate_source);
-                    }
+                    TEST(b.num_inputs == old.num_inputs);
+                    TEST(memcmp(b.inputs, old.inputs, sizeof(b.inputs)) == 0);
+                    TEST(b.lfo_depth_source == old.lfo_depth_source && b.lfo_rate_source == old.lfo_rate_source);
                 }
             }
             TEST(memcmp(&candidate.bank.channel_chains[5], &source.bank.channel_chains[5], sizeof(doc.chain)) == 0);
@@ -3974,9 +3962,8 @@ static void effects_clipboard_regressions()
                         sizeof(source.bank.instruments.entries)) == 0);
             TEST(Sculptor::extract_effect_chain_document(&candidate, destination, nullptr, nullptr, &extracted));
             TEST(extracted.lfo_count == 3);
-            TEST(extracted.graph_layout_count ==
-                 (destination == Sculptor::fx_master_chain ? 8u : doc.graph_layout_count));
-            for (uint32_t i = 0; i < 8; ++i) {
+            TEST(extracted.graph_layout_count == doc.graph_layout_count);
+            for (uint32_t i = 0; i < doc.graph_layout_count; ++i) {
                 TEST(memcmp(&extracted.graph_layout[i], &doc.graph_layout[i], sizeof(doc.graph_layout[0])) == 0);
             }
             // Existing bank codec must retain the new identities and sparse layout.
@@ -5828,18 +5815,12 @@ int main()
         make_valid_bank(bank);
         bank.master_chain.num_effects                       = 1;
         bank.master_chain.effects[0].type                   = Synth::EffectType::delay;
-        bank.master_chain.effects[0].bindings[0].num_inputs = 1; // master chain: no MIDI inputs
+        bank.master_chain.effects[0].bindings[0].num_inputs = 1;
+        bank.master_chain.effects[0].bindings[0].inputs[0].source =
+            Synth::ModSource::velocity; // per-note role: refused on the master chain as on channels
         expect_invalid(bank);
     }
-    {
-        static Synth::InstrumentBank bank;
-        make_valid_bank(bank);
-        bank.master_chain.num_effects                             = 1;
-        bank.master_chain.effects[0].type                         = Synth::EffectType::delay;
-        bank.master_chain.effects[0].bindings[0].lfo_desc_id      = 1;
-        bank.master_chain.effects[0].bindings[0].lfo_depth_source = Synth::ModSource::pitch_bend; // master: LFO-only
-        expect_invalid(bank);
-    }
+
     {
         static Synth::InstrumentBank bank;
         make_valid_bank(bank);
@@ -6175,11 +6156,12 @@ int main()
         bank.channel_chains[0].effects[0].bindings[1].inputs[0].source = Synth::ModSource::velocity;
         TEST(! Synth::preflight_effect_expansion(bank, &plan, &error));
 
-        // Any MIDI source on the master chain (here: via the LFO depth source).
+        // A per-note MIDI source on the master chain (here: via the LFO depth
+        // source) stays refused, like on every channel chain.
         Synth::EffectSlotBinding* const reverb =
             enabled_effect(bank, Synth::max_channels, 0, Synth::EffectType::reverb);
         reverb->bindings[0].lfo_desc_id      = 1;
-        reverb->bindings[0].lfo_depth_source = Synth::ModSource::mod_wheel;
+        reverb->bindings[0].lfo_depth_source = Synth::ModSource::velocity;
         TEST(! Synth::preflight_effect_expansion(bank, &plan, &error));
     }
     // Only final-plan allocations require clearing after several undrained publishes.
@@ -14300,7 +14282,8 @@ int main()
         TEST(Synth::validate_instrument_bank(&bank));
     }
 
-    // Master chain: LFO modulation is legal, every MIDI-driven source is not.
+    // Master chain: LFO modulation and channel-wide MIDI sources are legal;
+    // they resolve from channel index 0.
     {
         static Synth::InstrumentBank bank;
         make_valid_bank(bank);
@@ -14317,19 +14300,15 @@ int main()
         TEST(project_legacy_effects(bank, Sculptor::fx_master_chain, &graph, &mapping));
         TEST(mapping.chain == Sculptor::fx_master_chain);
         TEST(mapping.lfo_count == 1);
-        TEST(mapping.midi_node == Sculptor::pool_no_slot); // the master chain has no MIDI routing node
+        TEST(mapping.midi_node != Sculptor::pool_no_slot);
 
         master.effects[0].bindings[0].lfo_depth_source = Synth::ModSource::pitch_bend;
-        expect_invalid(bank);
-        master.effects[0].bindings[0].lfo_depth_source = Synth::ModSource::none;
+        TEST(Synth::validate_instrument_bank(&bank));
         master.effects[0].bindings[0].num_inputs       = 1;
         master.effects[0].bindings[0].inputs[0].source = Synth::ModSource::mod_wheel;
-        expect_invalid(bank);
+        TEST(Synth::validate_instrument_bank(&bank));
 
         // The same direct input is channel-wide state on a channel chain.
-        // The bank validates as a whole, so the master's rejected binding must go
-        // first.
-        master.effects[0].bindings[0].num_inputs = 0;
 
         Synth::EffectChainBinding& channel = bank.channel_chains[0];
         channel.num_effects                = 1;
@@ -14567,8 +14546,6 @@ int main()
         expect_preflight_reject(reject_bank);
         make_cc_input_bank(reject_bank, 17, false, Synth::ModSource::mod_wheel); // non-CC, stale number
         expect_preflight_reject(reject_bank);
-        make_cc_input_bank(reject_bank, 16, true, Synth::ModSource::cc); // master stays MIDI-free
-        expect_preflight_reject(reject_bank);
 
         // cc is not admissible as an LFO depth/rate source (no number to carry).
         make_valid_bank(reject_bank);
@@ -14684,7 +14661,6 @@ int main()
         }
     }
 
-
     // A standalone-parameter LFO carries full 16-bit depth/rate parameter ids (they
     // are ParamDescriptor ids, not 7-bit controller numbers): ids above 127 decode
     // and round-trip byte-identically. Regression: the decoder once applied the
@@ -14772,8 +14748,8 @@ int main()
         TEST(Synth::validate_instrument_bank(&bank));
         make_cc_bank(bank, 31, false);
         TEST(Synth::validate_instrument_bank(&bank));
-        make_cc_bank(bank, 16, true); // master chain still admits no MIDI in M1
-        TEST(! Synth::validate_instrument_bank(&bank));
+        make_cc_bank(bank, 16, true); // master chains admit CC inputs
+        TEST(Synth::validate_instrument_bank(&bank));
 
         // cc is not admissible as an LFO depth/rate source (no number to carry).
         make_valid_bank(bank);
@@ -14866,6 +14842,459 @@ int main()
         const uint32_t stale_len =
             Synth::encode_instrument_json(stale_encoded, sizeof(stale_encoded), &stale_installed, &stale_bank);
         TEST(stale_len == 0 || strstr(stale_encoded, "cc_number") == nullptr);
+    }
+
+    // ---------------------------------------------------------------------------
+    // Master chain tests: the master chain admits the standard MIDI node
+    // sources and CC 16-31, all resolved from channel index 0; the editor
+    // validator, projection, adoption and layout machinery follow the same rules.
+    // ---------------------------------------------------------------------------
+
+    // T-M2-1: the commit resolves master standard sources from channel index 0
+    // (RC4): the recorded chain is 0, not the master chain index.
+    {
+        static Synth::InstrumentBank bank;
+        make_valid_bank(bank);
+        Synth::EffectSlotBinding* const slot = enabled_effect(bank, Synth::max_channels, 0, Synth::EffectType::reverb);
+        slot->bindings[0].num_inputs         = 1;
+        slot->bindings[0].inputs[0].source   = Synth::ModSource::mod_wheel;
+        slot->bindings[0].inputs[0].op       = Synth::SourceOp::add;
+        slot->bindings[0].inputs[0].scale    = 0.5f;
+        slot->bindings[1].num_inputs         = 2;
+        slot->bindings[1].inputs[0].source   = Synth::ModSource::pitch_bend;
+        slot->bindings[1].inputs[0].op       = Synth::SourceOp::add;
+        slot->bindings[1].inputs[0].scale    = 0.5f;
+        slot->bindings[1].inputs[1].source   = Synth::ModSource::channel_pressure;
+        slot->bindings[1].inputs[1].op       = Synth::SourceOp::multiply;
+        slot->bindings[1].inputs[1].scale    = 0.25f;
+
+        Synth::init_effect_state_region(fake_region_base);
+        static Synth::EffectExpansionPlan plan;
+        const char*                       error    = nullptr;
+        const bool                        accepted = Synth::preflight_effect_expansion(bank, &plan, &error);
+        TEST(accepted);
+        if (accepted) {
+            static Synth::EffectChain chains[Synth::max_channels];
+            static Synth::EffectChain master;
+            FakeWriter                writer = { 1, 0, 0, 0, 0 };
+            Synth::commit_effect_expansion(bank, plan, chains, &master, fake_writer_binding(writer));
+            TEST(writer.num_resolved == 3);
+            TEST(writer.resolved[0].source == Synth::ModSource::mod_wheel);
+            TEST(writer.resolved[0].chain == 0); // master resolves from channel index 0
+            TEST(writer.resolved[1].source == Synth::ModSource::pitch_bend);
+            TEST(writer.resolved[1].chain == 0);
+            TEST(writer.resolved[2].source == Synth::ModSource::channel_pressure);
+            TEST(writer.resolved[2].chain == 0);
+            TEST(writer.dest_count == 2);
+            TEST(writer.last_dest_source_param_id == 77); // the fake source node id
+            TEST(master.effects[0].src_param_id[0] == 1 && master.effects[0].src_param_id[1] == 2);
+            (void)Synth::take_effect_clear_ranges();
+        }
+    }
+
+    // T-M2-2: master CC inputs resolve from channel index 0 while a channel
+    // chain in the same bank keeps resolving from its own channel.
+    {
+        static Synth::InstrumentBank bank;
+        make_valid_bank(bank);
+        Synth::EffectSlotBinding* const master_slot =
+            enabled_effect(bank, Synth::max_channels, 0, Synth::EffectType::delay);
+        master_slot->bindings[0].num_inputs           = 1;
+        master_slot->bindings[0].inputs[0].source     = Synth::ModSource::cc;
+        master_slot->bindings[0].inputs[0].cc_number  = 16;
+        master_slot->bindings[0].inputs[0].op         = Synth::SourceOp::add;
+        master_slot->bindings[0].inputs[0].scale      = 0.5f;
+        master_slot->bindings[1].num_inputs           = 1;
+        master_slot->bindings[1].inputs[0].source     = Synth::ModSource::cc;
+        master_slot->bindings[1].inputs[0].cc_number  = 31;
+        master_slot->bindings[1].inputs[0].op         = Synth::SourceOp::multiply;
+        master_slot->bindings[1].inputs[0].scale      = 0.25f;
+        Synth::EffectSlotBinding* const channel_slot  = enabled_effect(bank, 3, 0, Synth::EffectType::delay);
+        channel_slot->bindings[0].num_inputs          = 1;
+        channel_slot->bindings[0].inputs[0].source    = Synth::ModSource::cc;
+        channel_slot->bindings[0].inputs[0].cc_number = 20;
+        channel_slot->bindings[0].inputs[0].op        = Synth::SourceOp::add;
+        channel_slot->bindings[0].inputs[0].scale     = 0.5f;
+
+        Synth::init_effect_state_region(fake_region_base);
+        static Synth::EffectExpansionPlan plan;
+        const char*                       error    = nullptr;
+        const bool                        accepted = Synth::preflight_effect_expansion(bank, &plan, &error);
+        TEST(accepted);
+        if (accepted) {
+            static Synth::EffectChain chains[Synth::max_channels];
+            static Synth::EffectChain master;
+            FakeWriter                writer = { 1, 0, 0, 0, 0 };
+            Synth::commit_effect_expansion(bank, plan, chains, &master, fake_writer_binding(writer));
+            TEST(writer.num_resolved == 3);
+            TEST(writer.resolved[0].source == Synth::ModSource::cc); // channel 3 commits first
+            TEST(writer.resolved[0].cc_number == 20);
+            TEST(writer.resolved[0].chain == 3);
+            TEST(writer.resolved[1].source == Synth::ModSource::cc);
+            TEST(writer.resolved[1].cc_number == 16);
+            TEST(writer.resolved[1].chain == 0); // master resolves from channel index 0
+            TEST(writer.resolved[2].cc_number == 31);
+            TEST(writer.resolved[2].chain == 0);
+            TEST(writer.dest_count == 3); // one dest per modulated param: channel 3's and the master's two
+            (void)Synth::take_effect_clear_ranges();
+        }
+    }
+
+    // T-M2-3: master LFO depth/rate sources follow the channel-chain rules
+    // (full relaxation): both validators admit them and the commit resolves
+    // them from channel index 0.
+    {
+        static Synth::InstrumentBank bank;
+        make_valid_bank(bank);
+        Synth::EffectSlotBinding* const slot = enabled_effect(bank, Synth::max_channels, 0, Synth::EffectType::delay);
+        slot->bindings[0].lfo_desc_id        = 1;
+        slot->bindings[0].lfo_op             = Synth::SourceOp::add;
+        slot->bindings[0].lfo_depth          = 0.25f;
+        slot->bindings[0].lfo_depth_source   = Synth::ModSource::mod_wheel;
+        slot->bindings[0].lfo_rate_source    = Synth::ModSource::none;
+        TEST(Synth::validate_instrument_bank(&bank));
+        Synth::init_effect_state_region(fake_region_base);
+        static Synth::EffectExpansionPlan plan;
+        const char*                       error    = nullptr;
+        const bool                        accepted = Synth::preflight_effect_expansion(bank, &plan, &error);
+        TEST(accepted);
+        if (accepted) {
+            static Synth::EffectChain chains[Synth::max_channels];
+            static Synth::EffectChain master;
+            FakeWriter                writer = { 1, 0, 0, 0, 0 };
+            Synth::commit_effect_expansion(bank, plan, chains, &master, fake_writer_binding(writer));
+            TEST(writer.num_resolved == 2);
+            TEST(writer.resolved[0].source == Synth::ModSource::mod_wheel); // depth
+            TEST(writer.resolved[0].chain == 0);
+            TEST(writer.resolved[1].source == Synth::ModSource::none); // rate
+            TEST(writer.resolved[1].chain == 0);
+            TEST(writer.dest_count == 1);
+            (void)Synth::take_effect_clear_ranges();
+        }
+    }
+
+    // T-M2-4: master rejections that survive M2 - per-note roles, out-of-range
+    // CC numbers and stale CC numbers mirror the channel-chain rules, pinned in
+    // both validators (preflight and the editor bank validator).
+    {
+        auto make_master_case =
+            [&](Synth::InstrumentBank& target, bool as_input, uint8_t cc_number, Synth::ModSource source) {
+                make_valid_bank(target);
+                Synth::EffectSlotBinding* const case_slot =
+                    enabled_effect(target, Synth::max_channels, 0, Synth::EffectType::delay);
+                if (as_input) {
+                    case_slot->bindings[0].num_inputs          = 1;
+                    case_slot->bindings[0].inputs[0].source    = source;
+                    case_slot->bindings[0].inputs[0].cc_number = cc_number;
+                    case_slot->bindings[0].inputs[0].op        = Synth::SourceOp::add;
+                    case_slot->bindings[0].inputs[0].scale     = 0.5f;
+                }
+                else {
+                    case_slot->bindings[0].lfo_desc_id      = 1;
+                    case_slot->bindings[0].lfo_depth        = 0.1f;
+                    case_slot->bindings[0].lfo_depth_source = source;
+                }
+            };
+        auto expect_master_refused = [&](Synth::InstrumentBank& refused) {
+            Synth::init_effect_state_region(fake_region_base);
+            static Synth::EffectExpansionPlan plan;
+            const char*                       error = nullptr;
+            TEST(! Synth::preflight_effect_expansion(refused, &plan, &error));
+            TEST(! Synth::validate_instrument_bank(&refused));
+        };
+        static Synth::InstrumentBank  bank;
+        static const Synth::ModSource per_note[] = { Synth::ModSource::velocity,
+                                                     Synth::ModSource::aftertouch,
+                                                     Synth::ModSource::pressure_combine };
+        for (uint32_t i = 0; i < sizeof(per_note) / sizeof(per_note[0]); ++i) {
+            make_master_case(bank, true, 0, per_note[i]);
+            expect_master_refused(bank);
+            make_master_case(bank, false, 0, per_note[i]);
+            expect_master_refused(bank);
+        }
+        static const uint8_t bad_numbers[] = { 0, 15, 32 };
+        for (uint32_t i = 0; i < sizeof(bad_numbers) / sizeof(bad_numbers[0]); ++i) {
+            make_master_case(bank, true, bad_numbers[i], Synth::ModSource::cc);
+            expect_master_refused(bank);
+        }
+        make_master_case(bank, true, 17, Synth::ModSource::mod_wheel); // non-CC, stale number
+        expect_master_refused(bank);
+    }
+
+    // T-M2-5: the editor bank validator mirrors the relaxed master rules (A1):
+    // standard and CC inputs are admitted on the master chain; per-note roles
+    // and bad CC numbers stay refused, and cc stays inadmissible as an LFO
+    // depth/rate source there.
+    {
+        auto make_master_editor_bank = [&](Synth::InstrumentBank& target, Synth::ModSource source, uint8_t cc_number) {
+            make_valid_bank(target);
+            Synth::EffectSlotBinding* const editor_slot =
+                enabled_effect(target, Synth::max_channels, 0, Synth::EffectType::delay);
+            editor_slot->bindings[0].num_inputs          = 1;
+            editor_slot->bindings[0].inputs[0].source    = source;
+            editor_slot->bindings[0].inputs[0].cc_number = cc_number;
+            editor_slot->bindings[0].inputs[0].op        = Synth::SourceOp::add;
+            editor_slot->bindings[0].inputs[0].scale     = 0.5f;
+        };
+        static Synth::InstrumentBank bank;
+        make_master_editor_bank(bank, Synth::ModSource::mod_wheel, 0);
+        TEST(Synth::validate_instrument_bank(&bank));
+        make_master_editor_bank(bank, Synth::ModSource::cc, 16);
+        TEST(Synth::validate_instrument_bank(&bank));
+        make_master_editor_bank(bank, Synth::ModSource::cc, 31);
+        TEST(Synth::validate_instrument_bank(&bank));
+        make_master_editor_bank(bank, Synth::ModSource::velocity, 0);
+        TEST(! Synth::validate_instrument_bank(&bank));
+        make_master_editor_bank(bank, Synth::ModSource::aftertouch, 0);
+        TEST(! Synth::validate_instrument_bank(&bank));
+        make_master_editor_bank(bank, Synth::ModSource::pressure_combine, 0);
+        TEST(! Synth::validate_instrument_bank(&bank));
+        make_master_editor_bank(bank, Synth::ModSource::cc, 15);
+        TEST(! Synth::validate_instrument_bank(&bank));
+        make_master_editor_bank(bank, Synth::ModSource::cc, 32);
+        TEST(! Synth::validate_instrument_bank(&bank));
+        make_master_editor_bank(bank, Synth::ModSource::mod_wheel, 17); // non-CC, stale number
+        TEST(! Synth::validate_instrument_bank(&bank));
+        // cc is not admissible as a master LFO depth/rate source (no number to carry).
+        make_valid_bank(bank);
+        {
+            Synth::EffectSlotBinding* const slot =
+                enabled_effect(bank, Synth::max_channels, 0, Synth::EffectType::delay);
+            slot->bindings[0].lfo_desc_id      = 1;
+            slot->bindings[0].lfo_depth        = 0.1f;
+            slot->bindings[0].lfo_depth_source = Synth::ModSource::cc;
+        }
+        TEST(! Synth::validate_instrument_bank(&bank));
+        make_valid_bank(bank);
+        {
+            Synth::EffectSlotBinding* const slot =
+                enabled_effect(bank, Synth::max_channels, 0, Synth::EffectType::delay);
+            slot->bindings[0].lfo_desc_id     = 1;
+            slot->bindings[0].lfo_depth       = 0.1f;
+            slot->bindings[0].lfo_rate_source = Synth::ModSource::cc;
+        }
+        TEST(! Synth::validate_instrument_bank(&bank));
+    }
+
+    // T-M2-6: the master chain projects with the standard MIDI node (ED2
+    // editor half): three output dots, the same node count as an identical
+    // channel chain, and a graph node named "MIDI" like on channel chains.
+    {
+        static Synth::InstrumentBank bank;
+        make_valid_bank(bank);
+        Synth::EffectSlotBinding* const master =
+            enabled_effect(bank, Synth::max_channels, 0, Synth::EffectType::reverb);
+        master->bindings[0].lfo_desc_id         = 1;
+        master->bindings[0].lfo_depth           = 0.25f;
+        Synth::EffectSlotBinding* const channel = enabled_effect(bank, 0, 0, Synth::EffectType::reverb);
+        channel->bindings[0].lfo_desc_id        = 1;
+        channel->bindings[0].lfo_depth          = 0.25f;
+        TEST(Synth::validate_instrument_bank(&bank));
+        bool pins[Synth::max_lfos] = {};
+        pins[0]                    = true;
+        TEST(Sculptor::fx_projected_node_count(bank, Sculptor::fx_master_chain, pins) ==
+             Sculptor::fx_projected_node_count(bank, 0, pins));
+        static Sculptor::Graph              graph;
+        static Sculptor::EffectGraphMapping mapping;
+        TEST(project_legacy_effects(bank, Sculptor::fx_master_chain, &graph, &mapping));
+        TEST(mapping.midi_node != Sculptor::pool_no_slot);
+        if (mapping.midi_node != Sculptor::pool_no_slot) {
+            for (uint32_t source = 0; source < Sculptor::fx_num_input_sources; ++source) {
+                TEST(mapping.midi_source_slots[source] != Sculptor::pool_no_slot); // the 3 standard dots
+                TEST(strcmp(graph.node(mapping.midi_node).name, "MIDI") == 0);     // master MIDI node identity
+            }
+        }
+    }
+
+    // A hand-authored CC input on master still projects with its row unwired,
+    // and a source-row edit on that row refuses atomically.
+    {
+        static Synth::InstrumentBank bank;
+        make_valid_bank(bank);
+        Synth::EffectSlotBinding* const slot  = enabled_effect(bank, Synth::max_channels, 0, Synth::EffectType::delay);
+        slot->bindings[0].num_inputs          = 1;
+        slot->bindings[0].inputs[0].source    = Synth::ModSource::cc;
+        slot->bindings[0].inputs[0].cc_number = 16;
+        slot->bindings[0].inputs[0].op        = Synth::SourceOp::add;
+        slot->bindings[0].inputs[0].scale     = 0.5f;
+        static Sculptor::Graph              cc_graph;
+        static Sculptor::EffectGraphMapping cc_mapping;
+        TEST(project_legacy_effects(bank, Sculptor::fx_master_chain, &cc_graph, &cc_mapping));
+        if (cc_mapping.midi_node != Sculptor::pool_no_slot) {
+            Sculptor::GraphChange cc_discard[Sculptor::max_pending_changes];
+            (void)cc_graph.take_changes(cc_discard, Sculptor::max_pending_changes);
+            Sculptor::GraphChange cc_row = {};
+            cc_row.kind                  = Sculptor::ChangeKind::value_changed;
+            cc_row.node_idx              = cc_mapping.effect_nodes[0];
+            cc_row.slot_idx              = Sculptor::fx_param_src_dot(0, 0) + 2; // the cc row's Amount
+            auto cc_value                = cc_graph.node(cc_row.node_idx).slots.entries[cc_row.slot_idx].value;
+            cc_value.real                = 0.75f;
+            cc_graph.set_slot_value(cc_row.node_idx, cc_row.slot_idx, cc_value);
+            static Synth::InstrumentBank candidate;
+            candidate                              = bank;
+            const Synth::EffectParamBinding before = bank.master_chain.effects[0].bindings[0];
+            TEST(! Sculptor::apply_fx_graph_change(&candidate, cc_graph, cc_mapping, cc_row));
+            TEST(memcmp(&candidate.master_chain.effects[0].bindings[0], &before, sizeof(before)) == 0);
+        }
+    }
+
+    // T-M2-7: adopting a channel document onto the master chain preserves the
+    // routing (A4): inputs, LFO sources and the midi layout record survive,
+    // and the adopted master chain round-trips back out.
+    {
+        static Synth::EffectsDocument      doc, extracted, rogue;
+        static Synth::InstrumentEditorBank source, candidate;
+        effects_clipboard_fixture(&doc, true);
+        memset(&source, 0, sizeof(source));
+        Synth::init_default_bank(&source.bank);
+        for (uint32_t i = 0; i < 3; ++i) {
+            const uint32_t id            = source.bank.lfos.allocate();
+            source.bank.lfos.entries[id] = doc.lfos[i];
+        }
+        Sculptor::fx_graph_chain(&source.bank, 5) = doc.chain; // the document's origin chain
+        TEST(Sculptor::replace_effect_chain_candidate(&source, Sculptor::fx_master_chain, &doc, &candidate));
+        TEST(Synth::validate_instrument_bank(&candidate.bank));
+        const Synth::EffectChainBinding& adopted = candidate.bank.master_chain;
+        for (uint32_t s = 0; s < 4; ++s) {
+            for (uint32_t p = 0; p < Synth::get_effect_param_floats(adopted.effects[s].type); ++p) {
+                const Synth::EffectParamBinding& b   = adopted.effects[s].bindings[p];
+                const Synth::EffectParamBinding& old = doc.chain.effects[s].bindings[p];
+                TEST(b.num_inputs == old.num_inputs);
+                TEST(memcmp(b.inputs, old.inputs, sizeof(b.inputs)) == 0);
+                TEST(b.lfo_depth_source == old.lfo_depth_source && b.lfo_rate_source == old.lfo_rate_source);
+            }
+        }
+        TEST(Sculptor::extract_effect_chain_document(&candidate,
+                                                     Sculptor::fx_master_chain,
+                                                     nullptr,
+                                                     nullptr,
+                                                     &extracted));
+        TEST(extracted.lfo_count == 3);
+        TEST(extracted.graph_layout_count == doc.graph_layout_count); // midi record transfers
+
+        // The negative: a per-note source in the document is refused by the
+        // document validator before adoption, so master never sees it.
+        rogue                                               = doc;
+        rogue.chain.effects[0].bindings[0].inputs[0].source = Synth::ModSource::velocity;
+        TEST(! Synth::validate_effects_document(&rogue));
+        TEST(! Sculptor::replace_effect_chain_candidate(&source, Sculptor::fx_master_chain, &rogue, &candidate));
+    }
+
+    // T-M2-8: master wire edits through the graph (ED2): the MIDI node's dots
+    // route onto master parameter rows like on any channel chain.
+    {
+        static Synth::InstrumentBank bank;
+        make_valid_bank(bank);
+        (void)enabled_effect(bank, Synth::max_channels, 0, Synth::EffectType::delay);
+        static Sculptor::Graph              graph;
+        static Sculptor::EffectGraphMapping mapping;
+        TEST(project_legacy_effects(bank, Sculptor::fx_master_chain, &graph, &mapping));
+        TEST(mapping.midi_node != Sculptor::pool_no_slot);
+        Sculptor::GraphChange changes[Sculptor::max_pending_changes];
+        (void)graph.take_changes(changes, Sculptor::max_pending_changes);
+        Synth::EffectChainBinding& chain = bank.master_chain;
+        // Connect the mod-wheel dot to param 0's Source A row.
+        TEST(graph.attempt_connection({ mapping.midi_node, mapping.midi_source_slots[1] },
+                                      { mapping.effect_nodes[0], Sculptor::fx_param_src_dot(0, 0) }));
+        const uint32_t count = graph.take_changes(changes, Sculptor::max_pending_changes);
+        TEST(count == 1 && changes[0].kind == Sculptor::ChangeKind::connection_added);
+        TEST(Sculptor::apply_fx_graph_change(&bank, graph, mapping, changes[0]));
+        TEST(chain.effects[0].bindings[0].num_inputs == 1);
+        TEST(chain.effects[0].bindings[0].inputs[0].source == Synth::ModSource::mod_wheel);
+        TEST(chain.effects[0].bindings[0].inputs[0].op == Synth::SourceOp::add);
+        TEST(chain.effects[0].bindings[0].inputs[0].scale == 1.0f);
+        TEST(Synth::validate_instrument_bank(&bank));
+        // Disconnect removes the input again.
+        const uint32_t wire = find_fx_graph_connection(graph,
+                                                       { mapping.midi_node, mapping.midi_source_slots[1] },
+                                                       { mapping.effect_nodes[0], Sculptor::fx_param_src_dot(0, 0) });
+        TEST(wire != Sculptor::pool_no_slot);
+        graph.delete_connection(wire);
+        const uint32_t dropped = graph.take_changes(changes, Sculptor::max_pending_changes);
+        TEST(dropped == 1 && changes[0].kind == Sculptor::ChangeKind::connection_deleted);
+        TEST(Sculptor::apply_fx_graph_change(&bank, graph, mapping, changes[0]));
+        TEST(chain.effects[0].bindings[0].num_inputs == 0);
+    }
+
+    // T-M2-9: pre-M2 master compatibility (DM3 as amended): a bank with master
+    // effects but no routing decodes, validates and re-encodes byte-identically;
+    // an at-ceiling pre-M2 master pane gains the +1 MIDI node under M2 and must
+    // refuse cleanly, while a bank just below the ceiling keeps loading.
+    {
+        static Synth::InstrumentEditorBank source;
+        memset(&source, 0, sizeof(source));
+        Synth::init_default_bank(&source.bank);
+        Synth::EffectChainBinding& chain = source.bank.master_chain;
+        chain.num_effects                = 1;
+        Sculptor::fx_init_slot(&chain, 0, Synth::EffectType::delay);
+        chain.effects[0].enabled = true;
+        static char    text[64 * 1024];
+        const uint32_t len = Synth::encode_editor_bank_json(&source, text, sizeof(text));
+        TEST(len > 0);
+        static Synth::InstrumentEditorBank decoded;
+        TEST(Synth::decode_editor_bank_json(text, len, &decoded));
+        TEST(Synth::validate_instrument_bank(&decoded.bank));
+        static char    again[64 * 1024];
+        const uint32_t second_len = Synth::encode_editor_bank_json(&decoded, again, sizeof(again));
+        TEST(second_len == len);
+        TEST(memcmp(text, again, len) == 0);
+    }
+    {
+        // The fixture fills the legacy two-endpoint projection (2 fixed endpoints
+        // + 4 effect nodes + 122 pinned LFO records = max_nodes exactly); the
+        // current three-fixed-node projection exceeds max_nodes, so it must
+        // refuse.
+        static Synth::InstrumentEditorBank at_ceiling;
+        memset(&at_ceiling, 0, sizeof(at_ceiling));
+        Synth::init_default_bank(&at_ceiling.bank);
+        at_ceiling.bank.master_chain.num_effects = Synth::max_chain_effects;
+        for (uint32_t slot = 0; slot < Synth::max_chain_effects; ++slot) {
+            Sculptor::fx_init_slot(&at_ceiling.bank.master_chain, slot, Synth::EffectType::delay);
+            at_ceiling.bank.master_chain.effects[slot].enabled = true;
+        }
+        const uint32_t pin_count = Sculptor::max_nodes - 2u - Synth::max_chain_effects;
+        for (uint32_t index = 0; index < pin_count; ++index) {
+            uint16_t allocated = 0;
+            TEST(Sculptor::allocate_default_lfo(&at_ceiling.bank, &allocated));
+            Synth::GraphNodeLayout& record = at_ceiling.graph_layout[at_ceiling.graph_layout_count++];
+            record                         = {};
+            record.kind                    = 4;
+            record.channel                 = static_cast<uint8_t>(Sculptor::fx_master_chain);
+            snprintf(record.name, sizeof(record.name), "LFO %u", allocated);
+        }
+        TEST(Synth::validate_instrument_bank(&at_ceiling.bank)); // the bank itself is valid
+        TEST(! Sculptor::validate_editor_metadata(at_ceiling));
+        // collect_effect_lfos refuses the same over-ceiling bank (it validates
+        // metadata first), so pin the projection-level refusal with hand-set
+        // pins matching the 122 pinned LFO records.
+        bool pins[Synth::max_lfos] = {};
+        for (uint32_t index = 0; index < pin_count; ++index) {
+            pins[index] = true;
+        }
+        static Sculptor::Graph              graph;
+        static Sculptor::EffectGraphMapping mapping;
+        TEST(! Sculptor::project_effect_chain_to_graph(at_ceiling, Sculptor::fx_master_chain, &graph, &mapping, pins));
+    }
+    {
+        static Synth::InstrumentEditorBank below;
+        memset(&below, 0, sizeof(below));
+        Synth::init_default_bank(&below.bank);
+        below.bank.master_chain.num_effects = Synth::max_chain_effects;
+        for (uint32_t slot = 0; slot < Synth::max_chain_effects; ++slot) {
+            Sculptor::fx_init_slot(&below.bank.master_chain, slot, Synth::EffectType::delay);
+            below.bank.master_chain.effects[slot].enabled = true;
+        }
+        const uint32_t pin_count = Sculptor::max_nodes - 2u - Synth::max_chain_effects - 1u;
+        for (uint32_t index = 0; index < pin_count; ++index) {
+            uint16_t allocated = 0;
+            TEST(Sculptor::allocate_default_lfo(&below.bank, &allocated));
+            Synth::GraphNodeLayout& record = below.graph_layout[below.graph_layout_count++];
+            record                         = {};
+            record.kind                    = 4;
+            record.channel                 = static_cast<uint8_t>(Sculptor::fx_master_chain);
+            snprintf(record.name, sizeof(record.name), "LFO %u", allocated);
+        }
+        TEST(Sculptor::validate_editor_metadata(below)); // below the ceiling before and after M2
     }
 
     // ---------------------------------------------------------------------------

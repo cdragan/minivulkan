@@ -113,7 +113,7 @@ struct EffectParamBinding {
     ModSource lfo_rate_source;  // none = the LFO's own period
     float     lfo_rate_scale;
     uint16_t  num_inputs;
-    ModInput  inputs[max_mod_inputs]; // channel MIDI sources (master chain: none)
+    ModInput  inputs[max_mod_inputs]; // channel MIDI sources (master chain resolves from channel index 0)
 };
 
 // One effect slot in a chain; only bindings[0..get_effect_param_floats(type)) are

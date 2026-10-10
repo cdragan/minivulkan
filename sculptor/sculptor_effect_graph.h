@@ -70,12 +70,12 @@ Synth::EffectChainBinding& fx_graph_chain(Synth::InstrumentBank* bank, uint32_t 
 constexpr uint32_t fx_num_input_sources = 3;
 
 struct EffectGraphMapping {
-    uint32_t input_node;                              // fixed source endpoint
-    uint32_t output_node;                             // fixed sink endpoint
-    uint32_t effect_nodes[Synth::max_chain_effects];  // pool_no_slot for unused or none slots
-    uint32_t lfo_nodes[Synth::max_lfos];              // by descriptor id - 1; pool_no_slot when unreferenced
-    uint32_t lfo_count;                               // number of live LFO nodes
-    uint32_t midi_node;                               // channel chains only: MIDI source node; pool_no_slot on master
+    uint32_t input_node;                             // fixed source endpoint
+    uint32_t output_node;                            // fixed sink endpoint
+    uint32_t effect_nodes[Synth::max_chain_effects]; // pool_no_slot for unused or none slots
+    uint32_t lfo_nodes[Synth::max_lfos];             // by descriptor id - 1; pool_no_slot when unreferenced
+    uint32_t lfo_count;                              // number of live LFO nodes
+    uint32_t midi_node; // MIDI source node; sources resolve from the chain's own channel, master from channel index 0
     uint32_t midi_source_slots[fx_num_input_sources]; // output dot per channel-wide MIDI source
     uint32_t chain;                                   // channel index or fx_master_chain
 };
@@ -132,7 +132,7 @@ bool extract_effect_chain_document(const Synth::InstrumentEditorBank* source,
                                    const Graph*                       graph,
                                    const EffectGraphMapping*          mapping,
                                    Synth::EffectsDocument*            out);
-// Allocates fresh LFO ids, strips MIDI for master and validates before assigning output.
+// Allocates fresh LFO ids and validates before assigning output.
 bool replace_effect_chain_candidate(const Synth::InstrumentEditorBank* source,
                                     uint32_t                           chain,
                                     const Synth::EffectsDocument*      document,

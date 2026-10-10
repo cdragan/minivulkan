@@ -93,9 +93,9 @@ static bool finite_value(float value)
 // One effect param's binding. Mirrors every rule the commit relies on, so a passing
 // preflight guarantees the commit cannot index out of bounds or configure garbage:
 // finite floats, valid ops, LFO descriptors within the bank pool, bounded inputs, and
-// channel-wide MIDI sources only (the master chain admits no MIDI-driven source at all,
-// direct or via LFO depth/rate: it has no channel inputs).
-static bool validate_effect_param_binding(const Synth::EffectParamBinding& binding, bool is_master, uint32_t num_lfos)
+// channel-wide MIDI sources only. Master-chain bindings follow the same source rules
+// as channel chains; the commit resolves their sources from channel index 0.
+static bool validate_effect_param_binding(const Synth::EffectParamBinding& binding, uint32_t num_lfos)
 {
     if (! finite_value(binding.base_value) || ! finite_value(binding.lfo_depth) ||
         ! finite_value(binding.lfo_rate_scale)) {
@@ -108,26 +108,18 @@ static bool validate_effect_param_binding(const Synth::EffectParamBinding& bindi
     if (binding.lfo_desc_id > num_lfos) {
         return false;
     }
-    if (is_master) {
-        if (binding.lfo_depth_source != Synth::ModSource::none || binding.lfo_rate_source != Synth::ModSource::none ||
-            binding.num_inputs) {
-            return false;
-        }
+    if (! is_channel_effect_source(static_cast<uint32_t>(binding.lfo_depth_source)) ||
+        ! is_channel_effect_source(static_cast<uint32_t>(binding.lfo_rate_source))) {
+        return false;
     }
-    else {
-        if (! is_channel_effect_source(static_cast<uint32_t>(binding.lfo_depth_source)) ||
-            ! is_channel_effect_source(static_cast<uint32_t>(binding.lfo_rate_source))) {
+    if (binding.num_inputs > Synth::max_mod_inputs) {
+        return false;
+    }
+    for (uint32_t input = 0; input < binding.num_inputs; input++) {
+        const Synth::ModInput& mod_input = binding.inputs[input];
+        if (! is_valid_effect_input(mod_input) || ! valid_source_op(static_cast<uint32_t>(mod_input.op)) ||
+            ! finite_value(mod_input.scale)) {
             return false;
-        }
-        if (binding.num_inputs > Synth::max_mod_inputs) {
-            return false;
-        }
-        for (uint32_t input = 0; input < binding.num_inputs; input++) {
-            const Synth::ModInput& mod_input = binding.inputs[input];
-            if (! is_valid_effect_input(mod_input) || ! valid_source_op(static_cast<uint32_t>(mod_input.op)) ||
-                ! finite_value(mod_input.scale)) {
-                return false;
-            }
         }
     }
     return true;
@@ -172,9 +164,7 @@ bool Synth::preflight_effect_expansion(const InstrumentBank& bank, EffectExpansi
             const uint32_t num_params = get_effect_param_floats(binding.type);
             for (uint32_t param = 0; param < num_params; param++) {
                 const EffectParamBinding& param_binding = binding.bindings[param];
-                if (! validate_effect_param_binding(param_binding,
-                                                    chain_idx == max_channels,
-                                                    bank.lfos.num_allocated)) {
+                if (! validate_effect_param_binding(param_binding, bank.lfos.num_allocated)) {
                     *error = "effect chain carries an invalid parameter binding";
                     return false;
                 }
@@ -235,7 +225,10 @@ void Synth::commit_effect_expansion(const InstrumentBank&      bank,
 {
     num_pending_clears = 0;
     for (uint32_t chain_idx = 0; chain_idx <= max_channels; chain_idx++) {
-        const EffectChainBinding& binding = *bank_chains(bank, chain_idx);
+        // MIDI sources resolve per chain: channel chains from their own channel,
+        // the master chain from channel index 0 (steering via channel 1).
+        const uint32_t            midi_channel = (chain_idx < max_channels) ? chain_idx : 0;
+        const EffectChainBinding& binding      = *bank_chains(bank, chain_idx);
         EffectChain& chain = (chain_idx < max_channels) ? out_channel_chains[chain_idx] : *out_master_chain;
 
         chain.num_effects = binding.num_effects;
@@ -269,9 +262,6 @@ void Synth::commit_effect_expansion(const InstrumentBank&      bank,
 
                 assert(param_binding.lfo_op == SourceOp::add || param_binding.lfo_op == SourceOp::multiply);
                 assert(param_binding.lfo_desc_id <= bank.lfos.num_allocated);
-                assert(chain_idx != max_channels ||
-                       (param_binding.num_inputs == 0 && param_binding.lfo_depth_source == ModSource::none &&
-                        param_binding.lfo_rate_source == ModSource::none));
                 for (uint32_t input = 0; input < param_binding.num_inputs; input++) {
                     assert(is_valid_effect_input(param_binding.inputs[input]));
                     assert(param_binding.inputs[input].op == SourceOp::add ||
@@ -292,8 +282,8 @@ void Synth::commit_effect_expansion(const InstrumentBank&      bank,
                         param_binding.lfo_desc_id,
                         param_binding.lfo_op,
                         param_binding.lfo_depth,
-                        writer.resolve_source(writer.ctx, param_binding.lfo_depth_source, 0, chain_idx),
-                        writer.resolve_source(writer.ctx, param_binding.lfo_rate_source, 0, chain_idx),
+                        writer.resolve_source(writer.ctx, param_binding.lfo_depth_source, 0, midi_channel),
+                        writer.resolve_source(writer.ctx, param_binding.lfo_rate_source, 0, midi_channel),
                         param_binding.lfo_rate_scale);
                 }
 
@@ -301,7 +291,7 @@ void Synth::commit_effect_expansion(const InstrumentBank&      bank,
                 for (uint32_t input = 0; input < param_binding.num_inputs; input++) {
                     const ModInput& mod_input = param_binding.inputs[input];
                     sources[input]            = {
-                        writer.resolve_source(writer.ctx, mod_input.source, mod_input.cc_number, chain_idx),
+                        writer.resolve_source(writer.ctx, mod_input.source, mod_input.cc_number, midi_channel),
                         mod_input.scale,
                         mod_input.op
                     };

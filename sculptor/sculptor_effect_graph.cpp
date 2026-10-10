@@ -285,9 +285,8 @@ uint32_t Sculptor::fx_lfo_desc_of(const EffectGraphMapping& mapping, uint32_t no
 uint32_t Sculptor::fx_projected_node_count(const Synth::InstrumentBank& bank, uint32_t chain, const bool* pinned_lfos)
 {
     const Synth::EffectChainBinding& chain_ref = chain_at(bank, chain);
-    const bool                       is_master = chain == Synth::max_channels;
     uint32_t                         effect_slots[Synth::max_chain_effects];
-    uint32_t                         count = 2 + (is_master ? 0u : 1u) + projected_slots(chain_ref, effect_slots);
+    uint32_t                         count = 3 + projected_slots(chain_ref, effect_slots);
     for (uint32_t desc = 1; desc <= bank.lfos.num_allocated; ++desc) {
         if (fx_lfo_is_projected(chain_ref, pinned_lfos, desc)) {
             ++count;
@@ -311,6 +310,7 @@ bool Sculptor::project_effect_chain_to_graph(const Synth::InstrumentEditorBank& 
     mapping->chain = chain;
     // Zero is a valid node index, so unused entries carry the pool's no-slot
     // sentinel instead of the zero-init.
+    mapping->midi_node = pool_no_slot;
     for (uint32_t slot = 0; slot < Synth::max_chain_effects; ++slot) {
         mapping->effect_nodes[slot] = pool_no_slot;
     }
@@ -332,17 +332,16 @@ bool Sculptor::project_effect_chain_to_graph(const Synth::InstrumentEditorBank& 
     mapping->input_node  = graph->create_node(is_master ? "All channels" : "Channel input", vmath::vec2(0.0f, 0.0f));
     mapping->output_node = graph->create_node(is_master ? "Master output" : "Channel output",
                                               vmath::vec2(fx_node_x(Synth::max_chain_effects), 0.0f));
-    mapping->midi_node   = pool_no_slot;
     if (mapping->input_node == pool_no_slot || mapping->output_node == pool_no_slot) {
         return false;
     }
     graph->add_slot(mapping->input_node, output_slot("Out"));
     graph->add_slot(mapping->output_node, input_slot("In"));
 
-    // The MIDI routing node, channel chains only: the master chain has no
-    // channel to take MIDI from, and bank validation rejects every MIDI
-    // source on it.  One output dot per channel-wide source.
-    if (! is_master) {
+    // The MIDI routing node: one per chain, master included (the master
+    // chain's sources resolve from channel index 0).  One output dot per
+    // channel-wide source.
+    {
         const uint32_t midi_node = graph->create_node("MIDI", vmath::vec2(0.0f, 320.0f));
         if (midi_node == pool_no_slot) {
             return false;
@@ -506,7 +505,7 @@ bool Sculptor::project_effect_chain_to_graph(const Synth::InstrumentEditorBank& 
     }
 
     // MIDI source wires: one per binding input row, from the routing node's
-    // per-source dot (channel chains only; the master chain has no node).
+    // per-source dot.
     if (mapping->midi_node != pool_no_slot) {
         for (uint32_t slot = 0; slot < chain_ref.num_effects; ++slot) {
             const uint32_t num_params = Synth::get_effect_param_floats(chain_ref.effects[slot].type);
@@ -783,7 +782,7 @@ static bool apply_fx_graph_change_internal(Synth::InstrumentBank*              b
                     return false;
                 }
                 if (mapping.midi_node == Sculptor::pool_no_slot) {
-                    return false; // the master chain admits no MIDI sources
+                    return false;
                 }
                 if (change.kind == Sculptor::ChangeKind::connection_changed) {
                     // A retarget pulled the wire off another parameter's source row;
@@ -1070,9 +1069,6 @@ static bool effect_layout_identity(const Synth::InstrumentBank& bank,
 {
     const Synth::EffectChainBinding& chain = chain_at(bank, owner);
     for (uint32_t role = 0; role <= Synth::effects_graph_layout_lfo; ++role) {
-        if (role == Synth::effects_graph_layout_midi && owner == Sculptor::fx_master_chain) {
-            continue;
-        }
         const uint32_t first = role == Synth::effects_graph_layout_lfo ? 1 : 0;
         const uint32_t count = role == Synth::effects_graph_layout_effect ? chain.num_effects
                                : role == Synth::effects_graph_layout_lfo  ? bank.lfos.num_allocated + 1
@@ -1228,9 +1224,6 @@ bool Sculptor::transfer_effect_layout(const Synth::InstrumentEditorBank* source,
         }
         if (classification == EffectLayoutClassification::invalid) {
             return false;
-        }
-        if (kind == Synth::effects_graph_layout_midi && destination_chain == fx_master_chain) {
-            continue;
         }
         if (kind == Synth::effects_graph_layout_lfo) {
             identity = lfo_ids[identity - 1];
@@ -1793,18 +1786,7 @@ bool Sculptor::replace_effect_chain_candidate(const Synth::InstrumentEditorBank*
     Synth::EffectChainBinding& destination = fx_graph_chain(&effects_candidate.bank, chain);
     Synth::remap_effect_chain(document->chain, lfo_ids, &destination);
     effects_candidate.effect_audio[chain] = document->audio;
-    if (chain == fx_master_chain) {
-        for (uint32_t slot = 0; slot < destination.num_effects; ++slot) {
-            for (uint32_t param = 0; param < Synth::get_effect_param_floats(destination.effects[slot].type); ++param) {
-                Synth::EffectParamBinding& binding = destination.effects[slot].bindings[param];
-                binding.num_inputs                 = 0;
-                memset(binding.inputs, 0, sizeof(binding.inputs));
-                binding.lfo_depth_source = Synth::ModSource::none;
-                binding.lfo_rate_source  = Synth::ModSource::none;
-            }
-        }
-    }
-    uint32_t retained = 0;
+    uint32_t retained                     = 0;
     for (uint32_t index = 0; index < effects_candidate.graph_layout_count; ++index) {
         const Synth::GraphNodeLayout& record = effects_candidate.graph_layout[index];
         if (record.kind != 4 || record.channel != chain) {
