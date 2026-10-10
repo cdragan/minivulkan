@@ -128,7 +128,9 @@ enum ChannelParamRole : uint32_t {
     chan_param_bend,
     chan_param_mod_wheel,
     chan_param_pressure,
-    chan_param_cc_0, // + slot (0..15): the channel's assignable-CC leaves (CC 16..31)
+    chan_param_volume,  // CC 7, external leaf
+    chan_param_panning, // CC 10, external leaf
+    chan_param_cc_0,    // + slot (0..15): the channel's assignable-CC leaves (CC 16..31)
     num_channel_roles = chan_param_cc_0 + Synth::num_assignable_ccs
 };
 
@@ -676,15 +678,39 @@ static void init_oscillator_buffers()
 static void init_modulation()
 {
     // Each channel's pitch bend, mod wheel and pressure are externally-driven inputs;
-    // propagate_parameters must not overwrite them with a fold.  The 16 assignable-CC
-    // leaves are likewise externally-driven (process_controller writes them).
+    // propagate_parameters must not overwrite them with a fold.  The two mix leaves
+    // (volume CC 7, panning CC 10) and the 16 assignable-CC leaves are likewise
+    // externally-driven (process_controller writes them).
     for (uint32_t channel = 0; channel < Synth::max_channels; channel++) {
         param_descs[channel_param(channel, chan_param_bend)].kind      = Synth::ParamKind::external;
         param_descs[channel_param(channel, chan_param_mod_wheel)].kind = Synth::ParamKind::external;
         param_descs[channel_param(channel, chan_param_pressure)].kind  = Synth::ParamKind::external;
+        param_descs[channel_param(channel, chan_param_volume)].kind    = Synth::ParamKind::external;
+        param_descs[channel_param(channel, chan_param_panning)].kind   = Synth::ParamKind::external;
         for (uint32_t slot = 0; slot < Synth::num_assignable_ccs; slot++) {
             param_descs[channel_param(channel, chan_param_cc_0 + slot)].kind = Synth::ParamKind::external;
         }
+    }
+
+    // Initialize every channel's mix leaves (volume CC 7, panning CC 10) at the
+    // mix_channels defaults (1.0 volume, 0.5 panning); zero-init would mute every
+    // channel at the first upload.  init_modulation runs once from init_synth
+    // before audio starts, and bank publish does not re-run initialization or
+    // reset the channel mix leaves.  Only MIDI CC 7 and CC 10 change the leaf
+    // values after initialization (propagate_parameters snapshots prev_value
+    // from the value each step, preserving them), so live values persist across
+    // publishes.  This matches bend, mod wheel, pressure and assignable-CC
+    // leaves.  The one-time guard defends the mix leaves against any future
+    // re-entry of initialization.
+    static bool mix_leaves_initialized = false;
+    if (! mix_leaves_initialized) {
+        for (uint32_t channel = 0; channel < Synth::max_channels; channel++) {
+            Synth::Parameter& volume_parameter  = parameters[channel_param(channel, chan_param_volume)];
+            Synth::Parameter& panning_parameter = parameters[channel_param(channel, chan_param_panning)];
+            volume_parameter.value = volume_parameter.prev_value = 1.0f;
+            panning_parameter.value = panning_parameter.prev_value = 0.5f;
+        }
+        mix_leaves_initialized = true;
     }
 
     // Every LSB register starts at the "no LSB seen yet" sentinel; zero-init would
@@ -1291,18 +1317,25 @@ static void process_aftertouch(uint32_t delta_samples, const DispatchedMidiEvent
 static void process_controller(uint32_t, const DispatchedMidiEvent& event)
 {
     if (event.controller == mod_wheel_cc) {
-        const uint32_t node         = channel_param(event.channel, chan_param_mod_wheel);
-        const float    value        = static_cast<float>(event.controller_data) / 127.0f;
-        parameters[node].value      = value;
-        parameters[node].prev_value = value;
+        const uint32_t node = channel_param(event.channel, chan_param_mod_wheel);
+        Synth::write_external_leaf(static_cast<float>(event.controller_data) / 127.0f,
+                                   Synth::MixLeaf{ &parameters[node].value, &parameters[node].prev_value });
+    }
+    else if (Synth::mix_cc_role(event.controller) != Synth::MixRole::none) {
+        Synth::write_mix_cc(event.controller,
+                            event.controller_data,
+                            Synth::MixLeaf{ &parameters[channel_param(event.channel, chan_param_volume)].value,
+                                            &parameters[channel_param(event.channel, chan_param_volume)].prev_value },
+                            Synth::MixLeaf{ &parameters[channel_param(event.channel, chan_param_panning)].value,
+                                            &parameters[channel_param(event.channel, chan_param_panning)].prev_value });
+        return;
     }
     else if (Synth::is_assignable_cc(event.controller)) {
         const float value =
             Synth::apply_channel_cc(&channel_cc_state[event.channel], event.controller, event.controller_data);
         const uint32_t node =
             channel_param(event.channel, chan_param_cc_0 + Synth::assignable_cc_slot(event.controller));
-        parameters[node].value      = value;
-        parameters[node].prev_value = value;
+        Synth::write_external_leaf(value, Synth::MixLeaf{ &parameters[node].value, &parameters[node].prev_value });
     }
     // Other controllers ignored.
 }
@@ -1319,10 +1352,10 @@ static void process_pitch_bend(uint32_t delta_samples, const DispatchedMidiEvent
 static void process_channel_pressure(uint32_t delta_samples, const DispatchedMidiEvent& event)
 {
     // Drive the per-channel pressure leaf (value and prev_value) so the combine reads it with zero lag.
-    const uint32_t pressure_node         = channel_param(event.channel, chan_param_pressure);
-    const float    pressure              = static_cast<float>(event.note_data) / 127.0f;
-    parameters[pressure_node].value      = pressure;
-    parameters[pressure_node].prev_value = pressure;
+    const uint32_t pressure_node = channel_param(event.channel, chan_param_pressure);
+    Synth::write_external_leaf(
+        static_cast<float>(event.note_data) / 127.0f,
+        Synth::MixLeaf{ &parameters[pressure_node].value, &parameters[pressure_node].prev_value });
 }
 
 using EventHandler = void (*)(uint32_t delta_samples, const DispatchedMidiEvent& event);
@@ -2118,6 +2151,13 @@ static void render_audio_step()
 
         const uint32_t chan_idx = chan_map[used_chan_idx];
         Channel&       channel  = mix_channels[chan_idx];
+
+        // The leaves are external, so this is the only path that moves them into
+        // the mix state; the swap below stays the only old/new fade machinery.
+        Synth::mix_leaves_to_channel(parameters[channel_param(chan_idx, chan_param_volume)].value,
+                                     parameters[channel_param(chan_idx, chan_param_panning)].value,
+                                     &channel.volume,
+                                     &channel.panning);
 
         cur_param_offs =
             master_input_param_offs + used_chan_idx * static_cast<uint32_t>(sizeof(ShaderParams::ChannelCombineInput));

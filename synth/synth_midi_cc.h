@@ -38,4 +38,36 @@ float cc_14bit_value(uint32_t msb, uint32_t lsb);
 // replaces the sentinel with the received value (including zero).
 float apply_channel_cc(ChannelCcState* state, uint32_t controller, uint8_t value);
 
+// Channel-mix CCs: CC 7 = volume, CC 10 = panning.  Plain 7-bit, outside the
+// assignable MSB (16..31) and LSB (48..63) ranges (cc_msb_base/cc_lsb_base).
+enum class MixRole : uint8_t {
+    none,
+    volume,
+    panning
+};
+MixRole mix_cc_role(uint32_t controller);
+
+// One channel's external mix leaf: the two fields of a channel parameter slot.
+struct MixLeaf {
+    float* value;
+    float* prev_value;
+};
+
+// Shared zero-lag write for one external leaf: sets value and prev_value
+// together to the normalized value.  The mod-wheel, assignable-CC and
+// pressure handlers and write_mix_cc use it.
+void write_external_leaf(float normalized, MixLeaf leaf);
+
+// Writes a channel-mix controller into the addressed leaf.  Value is
+// data/127.0f; value and prev_value are written together (zero lag, same
+// pattern as the mod wheel / pressure handlers).  Returns false for
+// controllers that are not channel-mix CCs; writes nothing in that case.
+bool write_mix_cc(uint32_t controller, uint8_t data, MixLeaf volume_leaf, MixLeaf panning_leaf);
+
+// Block-boundary handoff at the channel-to-master combine upload: copies the
+// current leaf values into the channel mix state.  Never touches the old_*
+// fields; the caller's existing swap (old = current, after the shader params
+// are emitted) stays the only old/new machinery.
+void mix_leaves_to_channel(float leaf_volume, float leaf_panning, float* volume, float* panning);
+
 } // namespace Synth

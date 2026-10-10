@@ -34,3 +34,37 @@ float Synth::apply_channel_cc(ChannelCcState* state, uint32_t controller, uint8_
     }
     return cc_14bit_value(state->msb[slot], state->lsb[slot]);
 }
+
+Synth::MixRole Synth::mix_cc_role(uint32_t controller)
+{
+    if (controller == 7) {
+        return MixRole::volume;
+    }
+    if (controller == 10) {
+        return MixRole::panning;
+    }
+    return MixRole::none;
+}
+
+void Synth::write_external_leaf(float normalized, MixLeaf leaf)
+{
+    *leaf.value      = normalized;
+    *leaf.prev_value = normalized;
+}
+
+bool Synth::write_mix_cc(uint32_t controller, uint8_t data, Synth::MixLeaf volume_leaf, Synth::MixLeaf panning_leaf)
+{
+    const MixRole role = mix_cc_role(controller);
+    if (role == MixRole::none) {
+        return false;
+    }
+    const float value = static_cast<float>(data) / 127.0f;
+    write_external_leaf(value, (role == MixRole::volume) ? volume_leaf : panning_leaf);
+    return true;
+}
+
+void Synth::mix_leaves_to_channel(float leaf_volume, float leaf_panning, float* volume, float* panning)
+{
+    *volume  = leaf_volume;
+    *panning = leaf_panning;
+}

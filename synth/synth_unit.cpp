@@ -15298,6 +15298,96 @@ int main()
     }
 
     // ---------------------------------------------------------------------------
+    // Channel mix CCs: CC 7 writes the channel volume leaf and CC 10 the
+    // channel panning leaf through the synth_midi_cc seam; the block-boundary
+    // handoff feeds the existing old/new swap at the channel-to-master upload.
+    // ---------------------------------------------------------------------------
+
+    // T-M3-1: mix CC role mapping: CC 7 -> volume, CC 10 -> panning, others
+    // -> none; the assignable-CC predicate does not claim CC 7 or CC 10.
+    {
+        TEST(Synth::mix_cc_role(7) == Synth::MixRole::volume);
+        TEST(Synth::mix_cc_role(10) == Synth::MixRole::panning);
+        static const uint32_t unmapped[] = { 1, 6, 11, 16, 48, 63, 119 };
+        for (uint32_t i = 0; i < sizeof(unmapped) / sizeof(unmapped[0]); ++i) {
+            TEST(Synth::mix_cc_role(unmapped[i]) == Synth::MixRole::none);
+        }
+        TEST(! Synth::is_assignable_cc(7));
+        TEST(! Synth::is_assignable_cc(10));
+    }
+
+    // T-M3-2: mix CC leaf write: the addressed leaf gets data/127.0f in value
+    // and prev_value together (zero lag), the other leaf stays untouched, and
+    // a non-mix controller returns false without a write.
+    {
+        float                volume_value       = -1.0f;
+        float                volume_prev_value  = -1.0f;
+        float                panning_value      = -1.0f;
+        float                panning_prev_value = -1.0f;
+        const Synth::MixLeaf volume_leaf{ &volume_value, &volume_prev_value };
+        const Synth::MixLeaf panning_leaf{ &panning_value, &panning_prev_value };
+
+        TEST(Synth::write_mix_cc(7, 0, volume_leaf, panning_leaf));
+        TEST(volume_value == 0.0f && volume_prev_value == 0.0f);
+        TEST(panning_value == -1.0f && panning_prev_value == -1.0f);
+
+        TEST(Synth::write_mix_cc(10, 127, volume_leaf, panning_leaf));
+        TEST(panning_value == 1.0f && panning_prev_value == 1.0f);
+        TEST(volume_value == 0.0f && volume_prev_value == 0.0f);
+
+        TEST(Synth::write_mix_cc(7, 64, volume_leaf, panning_leaf));
+        TEST(volume_value == 64.0f / 127.0f && volume_prev_value == 64.0f / 127.0f);
+        TEST(panning_value == 1.0f && panning_prev_value == 1.0f);
+
+        TEST(! Synth::write_mix_cc(11, 100, volume_leaf, panning_leaf));
+        TEST(volume_value == 64.0f / 127.0f && volume_prev_value == 64.0f / 127.0f);
+        TEST(panning_value == 1.0f && panning_prev_value == 1.0f);
+    }
+
+    // T-M3-3: the test captures upload values before each swap. The first
+    // pair differs after a CC write; the next unchanged block emits equal
+    // values. The test does not run the runtime upload loop.
+    {
+        float leaf_volume  = 0.0f;
+        float leaf_panning = 0.0f;
+        float volume       = 1.0f;
+        float panning      = 0.5f;
+        float old_volume   = 1.0f;
+        float old_panning  = 0.5f;
+
+        // A CC arrived during the block: the handoff moves only the current
+        // fields, so the channel stage ramps old -> current across the block.
+        leaf_volume  = 0.25f;
+        leaf_panning = 0.75f;
+        Synth::mix_leaves_to_channel(leaf_volume, leaf_panning, &volume, &panning);
+        TEST(volume == 0.25f && panning == 0.75f);
+        TEST(old_volume == 1.0f && old_panning == 0.5f);
+
+        const float emitted_old_volume  = old_volume;
+        const float emitted_volume      = volume;
+        const float emitted_old_panning = old_panning;
+        const float emitted_panning     = panning;
+        TEST(emitted_old_volume == 1.0f && emitted_volume == 0.25f);
+        TEST(emitted_old_panning == 0.5f && emitted_panning == 0.75f);
+        old_volume  = volume;
+        old_panning = panning;
+        TEST(old_volume == 0.25f && old_panning == 0.75f);
+
+        // Next block with no CC arriving: the emitted pair must already be
+        // equal, so no ramp gradient exists before the swap.
+        Synth::mix_leaves_to_channel(leaf_volume, leaf_panning, &volume, &panning);
+        TEST(volume == 0.25f && panning == 0.75f);
+        const float second_old_volume  = old_volume;
+        const float second_volume      = volume;
+        const float second_old_panning = old_panning;
+        const float second_panning     = panning;
+        TEST(second_old_volume == second_volume && second_old_panning == second_panning);
+        old_volume  = volume;
+        old_panning = panning;
+        TEST(volume == old_volume && panning == old_panning);
+    }
+
+    // ---------------------------------------------------------------------------
     // Clipboard instrument documents (doc/synth_instrument_schema.json): decode
     // into a standalone instrument with 1-based local descriptor indices, encode
     // back from a bank-resolved instrument.
