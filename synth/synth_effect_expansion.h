@@ -59,6 +59,12 @@ struct EffectClearList {
 // Points the expansion at the carved effect-state region inside the device data buffer and
 // resets all expansion state (plan and pending clears). The region must be
 // aligned to effect_state_alignment; the host asserts the device honors that alignment.
+// Effect param inputs admit the assignable CC sources: the CC number must name
+// CC 16..31, and non-CC inputs must carry no stale CC number. Shared by the
+// runtime preflight, the commit asserts and the editor bank validator, so the
+// load-time and expansion-time acceptance rules cannot diverge.
+bool is_valid_effect_input(const ModInput& input);
+
 void init_effect_state_region(uint32_t region_base_offset);
 
 // Pure preflight of a candidate bank's effect chains. Computes per-slot state placement
@@ -77,7 +83,7 @@ bool preflight_effect_expansion(const InstrumentBank& bank, EffectExpansionPlan*
 struct EffectNodeWriter {
     const void* ctx;
     uint32_t (*alloc_node)(const void* ctx); // next free modulation-pool node id
-    uint16_t (*resolve_source)(const void* ctx, ModSource source, uint32_t channel);
+    uint16_t (*resolve_source)(const void* ctx, ModSource source, uint8_t cc_number, uint32_t channel);
     void (*configure_dest)(const void*        ctx,
                            uint32_t           node,
                            uint16_t           lfo_node,

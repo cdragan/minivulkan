@@ -8,6 +8,7 @@ lib_src_files += synth/midi_file.cpp
 lib_src_files += synth/synth_parameters.cpp
 lib_src_files += synth/synth_effects.cpp
 lib_src_files += synth/synth_effect_expansion.cpp
+lib_src_files += synth/synth_midi_cc.cpp
 lib_src_files += synth/synth_instrument.cpp
 lib_src_files += synth/synth_soundtrack.cpp
 

@@ -295,9 +295,9 @@ constexpr const char* osc_mode_names[num_osc_modes] = { "blend", "fm", "sync" };
 constexpr uint32_t    num_source_ops                  = 2;
 constexpr const char* source_op_names[num_source_ops] = { "add", "multiply" };
 
-constexpr uint32_t    num_mod_sources                   = 7;
+constexpr uint32_t    num_mod_sources                   = 8;
 constexpr const char* mod_source_names[num_mod_sources] = {
-    "none", "pitch_bend", "mod_wheel", "channel_pressure", "velocity", "aftertouch", "pressure_combine"
+    "none", "pitch_bend", "mod_wheel", "channel_pressure", "velocity", "aftertouch", "pressure_combine", "cc"
 };
 
 constexpr const char* effect_type_names[Synth::num_effect_types] = { "none",   "distortion", "delay", "chorus",
@@ -311,7 +311,7 @@ constexpr const char* mod_target_names[Synth::num_mod_targets] = { "volume",   "
                                                                    "fm_index", "lowpass_cutoff", "highpass_cutoff" };
 
 static_assert(static_cast<uint32_t>(Synth::WaveType::noise_wave) == num_waves - 1);
-static_assert(static_cast<uint32_t>(Synth::ModSource::pressure_combine) == num_mod_sources - 1);
+static_assert(static_cast<uint32_t>(Synth::ModSource::cc) == num_mod_sources - 1);
 static_assert(static_cast<uint32_t>(Synth::SourceOp::multiply) == num_source_ops - 1);
 static_assert(static_cast<uint32_t>(Synth::EffectType::fir) == Synth::num_effect_types - 1);
 static_assert(static_cast<uint32_t>(Synth::ParamKind::plain) == num_param_kinds - 1);
@@ -438,6 +438,7 @@ static void enc_mod_input(Out& o, const Synth::ModInput& in)
     o.ch('{');
     key_enum(o, "source", mod_source_names, num_mod_sources, static_cast<uint32_t>(in.source));
     key_enum(o, "op", source_op_names, num_source_ops, static_cast<uint32_t>(in.op));
+    key_uint_nonzero(o, "cc_number", in.cc_number);
     key_float_nonzero(o, "scale", in.scale);
     o.ch('}');
 }
@@ -1707,6 +1708,13 @@ static void decode_mod_input_fields(Walker&          w,
         }
         else if (key_eq(w, key_idx, "scale"))
             want_float(w, val_idx, &in.scale);
+        else if (key_eq(w, key_idx, "cc_number")) {
+            // Decode through a 32-bit local (want_uint writes four bytes); never cast
+            // the &in.cc_number pointer (a four-byte write through a one-byte field).
+            // Controller numbers are 7-bit: a cc_number above 127 is refused at decode.
+            want_uint(w, val_idx, 0x7F, &value);
+            in.cc_number = static_cast<uint8_t>(value);
+        }
         else
             unknown(w, key_idx);
     });
@@ -3606,7 +3614,8 @@ static uint32_t encode_instrument_json_for_domain(char*                         
                     o.ch('[');
                     for (uint32_t input = 0; input < routing.num_inputs; input++) {
                         const Synth::ModInput& in = routing.inputs[input];
-                        if (in.source > Synth::ModSource::pressure_combine || in.op > Synth::SourceOp::multiply)
+                        if (in.source > Synth::ModSource::pressure_combine || in.op > Synth::SourceOp::multiply ||
+                            in.cc_number != 0)
                             return 0;
                         o.sep();
                         enc_mod_input(o, in);

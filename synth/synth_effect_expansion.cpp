@@ -3,6 +3,8 @@
 
 #include "synth_effect_expansion.h"
 
+#include "synth_midi_cc.h"
+
 #include <assert.h>
 #include <string.h>
 
@@ -35,8 +37,6 @@ static bool place_effect_state(const Synth::EffectExpansionPlan& plan, uint32_t 
     return false;
 }
 
-namespace Synth {
-
 namespace {
 
 // Effect-state region inside the device data buffer, carved once at init. Slot offsets
@@ -44,32 +44,45 @@ namespace {
 uint32_t state_region_base = 0;
 
 // The plan currently committed; a re-expansion preserves its per-slot state offsets.
-EffectExpansionPlan current_plan;
-bool                has_current_plan = false;
+Synth::EffectExpansionPlan current_plan;
+bool                       has_current_plan = false;
 
 // Only the final plan dispatches. Retained unrendered ranges carry needs_clear;
 // abandoned ranges need no fill, and final-plan ranges never overlap.
-constexpr uint32_t max_pending_clears = (max_channels + 1) * max_chain_effects;
-EffectClearRange   pending_clears[max_pending_clears];
-uint32_t           num_pending_clears = 0;
+constexpr uint32_t      max_pending_clears = (Synth::max_channels + 1) * Synth::max_chain_effects;
+Synth::EffectClearRange pending_clears[max_pending_clears];
+uint32_t                num_pending_clears = 0;
+
+} // namespace
 
 // Chain bindings in a fixed index scheme: [0, max_channels) are the channel chains,
 // [max_channels] is the master chain.
-const EffectChainBinding* bank_chains(const InstrumentBank& bank, uint32_t chain_idx)
+static const Synth::EffectChainBinding* bank_chains(const Synth::InstrumentBank& bank, uint32_t chain_idx)
 {
-    return (chain_idx < max_channels) ? &bank.channel_chains[chain_idx] : &bank.master_chain;
+    return (chain_idx < Synth::max_channels) ? &bank.channel_chains[chain_idx] : &bank.master_chain;
 }
 
-bool valid_source_op(uint32_t op)
+static bool valid_source_op(uint32_t op)
 {
-    return op <= static_cast<uint32_t>(SourceOp::multiply);
+    return op <= static_cast<uint32_t>(Synth::SourceOp::multiply);
 }
 
 // Effects route only channel-wide MIDI sources; per-voice sources have no voice in an
 // effect's context (the editor-side validator applies the same rule at publish).
-bool is_channel_effect_source(uint32_t source)
+static bool is_channel_effect_source(uint32_t source)
 {
-    return source <= static_cast<uint32_t>(ModSource::channel_pressure);
+    return source <= static_cast<uint32_t>(Synth::ModSource::channel_pressure);
+}
+
+// Effect param inputs admit the assignable CC sources; the CC number must name
+// CC 16..31, and non-CC inputs must carry no stale CC number. Shared with
+// the editor bank validator so load-time and expansion-time acceptance cannot diverge.
+bool Synth::is_valid_effect_input(const ModInput& input)
+{
+    if (input.source == ModSource::cc) {
+        return input.cc_number >= cc_msb_base && input.cc_number < cc_msb_base + num_assignable_ccs;
+    }
+    return is_channel_effect_source(static_cast<uint32_t>(input.source)) && input.cc_number == 0;
 }
 
 static bool finite_value(float value)
@@ -82,9 +95,10 @@ static bool finite_value(float value)
 // finite floats, valid ops, LFO descriptors within the bank pool, bounded inputs, and
 // channel-wide MIDI sources only (the master chain admits no MIDI-driven source at all,
 // direct or via LFO depth/rate: it has no channel inputs).
-bool validate_effect_param_binding(const EffectParamBinding& binding, bool is_master, uint32_t num_lfos)
+static bool validate_effect_param_binding(const Synth::EffectParamBinding& binding, bool is_master, uint32_t num_lfos)
 {
-    if (! finite_value(binding.base_value) || ! finite_value(binding.lfo_depth) || ! finite_value(binding.lfo_rate_scale)) {
+    if (! finite_value(binding.base_value) || ! finite_value(binding.lfo_depth) ||
+        ! finite_value(binding.lfo_rate_scale)) {
         return false;
     }
     if (! valid_source_op(static_cast<uint32_t>(binding.lfo_op))) {
@@ -95,7 +109,7 @@ bool validate_effect_param_binding(const EffectParamBinding& binding, bool is_ma
         return false;
     }
     if (is_master) {
-        if (binding.lfo_depth_source != ModSource::none || binding.lfo_rate_source != ModSource::none ||
+        if (binding.lfo_depth_source != Synth::ModSource::none || binding.lfo_rate_source != Synth::ModSource::none ||
             binding.num_inputs) {
             return false;
         }
@@ -105,13 +119,13 @@ bool validate_effect_param_binding(const EffectParamBinding& binding, bool is_ma
             ! is_channel_effect_source(static_cast<uint32_t>(binding.lfo_rate_source))) {
             return false;
         }
-        if (binding.num_inputs > max_mod_inputs) {
+        if (binding.num_inputs > Synth::max_mod_inputs) {
             return false;
         }
         for (uint32_t input = 0; input < binding.num_inputs; input++) {
-            const ModInput& mod_input = binding.inputs[input];
-            if (! is_channel_effect_source(static_cast<uint32_t>(mod_input.source)) ||
-                ! valid_source_op(static_cast<uint32_t>(mod_input.op)) || ! finite_value(mod_input.scale)) {
+            const Synth::ModInput& mod_input = binding.inputs[input];
+            if (! is_valid_effect_input(mod_input) || ! valid_source_op(static_cast<uint32_t>(mod_input.op)) ||
+                ! finite_value(mod_input.scale)) {
                 return false;
             }
         }
@@ -119,9 +133,7 @@ bool validate_effect_param_binding(const EffectParamBinding& binding, bool is_ma
     return true;
 }
 
-} // namespace
-
-void init_effect_state_region(uint32_t region_base_offset)
+void Synth::init_effect_state_region(uint32_t region_base_offset)
 {
     state_region_base  = region_base_offset;
     has_current_plan   = false;
@@ -129,7 +141,7 @@ void init_effect_state_region(uint32_t region_base_offset)
     num_pending_clears = 0;
 }
 
-bool preflight_effect_expansion(const InstrumentBank& bank, EffectExpansionPlan* out_plan, const char** error)
+bool Synth::preflight_effect_expansion(const InstrumentBank& bank, EffectExpansionPlan* out_plan, const char** error)
 {
     const EffectExpansionPlan* const prev = has_current_plan ? &current_plan : nullptr;
 
@@ -215,11 +227,11 @@ bool preflight_effect_expansion(const InstrumentBank& bank, EffectExpansionPlan*
     return true;
 }
 
-void commit_effect_expansion(const InstrumentBank&      bank,
-                             const EffectExpansionPlan& plan,
-                             EffectChain*               out_channel_chains, // [max_channels]
-                             EffectChain*               out_master_chain,
-                             const EffectNodeWriter&    writer)
+void Synth::commit_effect_expansion(const InstrumentBank&      bank,
+                                    const EffectExpansionPlan& plan,
+                                    EffectChain*               out_channel_chains, // [max_channels]
+                                    EffectChain*               out_master_chain,
+                                    const EffectNodeWriter&    writer)
 {
     num_pending_clears = 0;
     for (uint32_t chain_idx = 0; chain_idx <= max_channels; chain_idx++) {
@@ -261,7 +273,7 @@ void commit_effect_expansion(const InstrumentBank&      bank,
                        (param_binding.num_inputs == 0 && param_binding.lfo_depth_source == ModSource::none &&
                         param_binding.lfo_rate_source == ModSource::none));
                 for (uint32_t input = 0; input < param_binding.num_inputs; input++) {
-                    assert(is_channel_effect_source(static_cast<uint32_t>(param_binding.inputs[input].source)));
+                    assert(is_valid_effect_input(param_binding.inputs[input]));
                     assert(param_binding.inputs[input].op == SourceOp::add ||
                            param_binding.inputs[input].op == SourceOp::multiply);
                     assert(finite_value(param_binding.inputs[input].scale));
@@ -274,22 +286,25 @@ void commit_effect_expansion(const InstrumentBank&      bank,
                 if (param_binding.lfo_desc_id) {
                     lfo_node = writer.alloc_node(writer.ctx);
                     assert(lfo_node);
-                    writer.configure_lfo(writer.ctx,
-                                         lfo_node,
-                                         param_binding.lfo_desc_id,
-                                         param_binding.lfo_op,
-                                         param_binding.lfo_depth,
-                                         writer.resolve_source(writer.ctx, param_binding.lfo_depth_source, chain_idx),
-                                         writer.resolve_source(writer.ctx, param_binding.lfo_rate_source, chain_idx),
-                                         param_binding.lfo_rate_scale);
+                    writer.configure_lfo(
+                        writer.ctx,
+                        lfo_node,
+                        param_binding.lfo_desc_id,
+                        param_binding.lfo_op,
+                        param_binding.lfo_depth,
+                        writer.resolve_source(writer.ctx, param_binding.lfo_depth_source, 0, chain_idx),
+                        writer.resolve_source(writer.ctx, param_binding.lfo_rate_source, 0, chain_idx),
+                        param_binding.lfo_rate_scale);
                 }
 
                 SourceParam sources[max_mod_inputs];
                 for (uint32_t input = 0; input < param_binding.num_inputs; input++) {
                     const ModInput& mod_input = param_binding.inputs[input];
-                    sources[input]            = { writer.resolve_source(writer.ctx, mod_input.source, chain_idx),
-                                                  mod_input.scale,
-                                                  mod_input.op };
+                    sources[input]            = {
+                        writer.resolve_source(writer.ctx, mod_input.source, mod_input.cc_number, chain_idx),
+                        mod_input.scale,
+                        mod_input.op
+                    };
                 }
 
                 writer.configure_dest(writer.ctx,
@@ -315,7 +330,7 @@ void commit_effect_expansion(const InstrumentBank&      bank,
     has_current_plan = true;
 }
 
-EffectClearList take_effect_clear_ranges()
+Synth::EffectClearList Synth::take_effect_clear_ranges()
 {
     const EffectClearList list = { pending_clears, num_pending_clears };
     num_pending_clears         = 0;
@@ -326,5 +341,3 @@ EffectClearList take_effect_clear_ranges()
     }
     return list;
 }
-
-} // namespace Synth

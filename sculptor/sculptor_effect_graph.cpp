@@ -143,6 +143,14 @@ static bool rebuild_param_inputs(const Sculptor::Graph&              graph,
     if (node.slots.num_allocated <= fx_param_src_dot(param, 1) + 2) {
         return false;
     }
+    // CC inputs are not editable in the effect graph: an edit that would recompile
+    // a param carrying a CC input is refused atomically, leaving the caller's
+    // binding untouched.
+    for (uint32_t input = 0; input < binding->num_inputs; ++input) {
+        if (binding->inputs[input].source == Synth::ModSource::cc) {
+            return false;
+        }
+    }
     uint32_t num_inputs = 0;
     for (uint32_t input = 0; input < Synth::max_mod_inputs; ++input) {
         const uint32_t conn = connection_into(graph, node_idx, fx_param_src_dot(param, input));
@@ -169,6 +177,7 @@ static bool rebuild_param_inputs(const Sculptor::Graph&              graph,
         }
         Synth::ModInput& mod_input = binding->inputs[num_inputs++];
         mod_input.source           = static_cast<Synth::ModSource>(source);
+        mod_input.cc_number        = 0; // a reused slot must not carry stale CC state
         mod_input.op               = op_slot.value.list_index == 1 ? Synth::SourceOp::multiply : Synth::SourceOp::add;
         mod_input.scale            = node.slots.entries[fx_param_src_dot(param, input) + 2].value.real;
     }
@@ -793,13 +802,17 @@ static bool apply_fx_graph_change_internal(Synth::InstrumentBank*              b
                             const int32_t prev_slot = Sculptor::fx_effect_slot_of(mapping, prev.node_idx);
                             if (prev_slot >= 0 &&
                                 prev_param < Synth::get_effect_param_floats(chain.effects[prev_slot].type)) {
-                                if (! rebuild_param_inputs(graph,
-                                                           mapping,
-                                                           prev.node_idx,
-                                                           prev_param,
-                                                           &chain.effects[prev_slot].bindings[prev_param])) {
+                                // Both bindings rebuild into local copies and commit only after both
+                                // succeed: a refusal must leave the supplied bank unchanged.
+                                Synth::EffectParamBinding prev_binding = chain.effects[prev_slot].bindings[prev_param];
+                                Synth::EffectParamBinding dest_binding = chain.effects[in_slot].bindings[param];
+                                if (! rebuild_param_inputs(graph, mapping, prev.node_idx, prev_param, &prev_binding) ||
+                                    ! rebuild_param_inputs(graph, mapping, in_point.node_idx, param, &dest_binding)) {
                                     return false;
                                 }
+                                chain.effects[prev_slot].bindings[prev_param] = prev_binding;
+                                chain.effects[in_slot].bindings[param]        = dest_binding;
+                                return true;
                             }
                         }
                     }

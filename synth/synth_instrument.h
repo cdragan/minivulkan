@@ -34,13 +34,15 @@ enum class ModSource : uint8_t {
     channel_pressure,  // per-channel
     velocity,          // per-note (note-on constant)
     aftertouch,        // per-note (polyphonic aftertouch)
-    pressure_combine   // per-voice: max(per-note aftertouch, per-channel pressure)
+    pressure_combine,  // per-voice: max(per-note aftertouch, per-channel pressure)
+    cc                 // per-channel assignable CC (ModInput::cc_number selects 16..31)
 };
 
 // One input feeding a modulated quantity (volume, pitch, cutoff, ...)
 struct ModInput {
     ModSource source;
     SourceOp  op;
+    uint8_t   cc_number; // source == cc: MSB controller number (16..31 assignable); otherwise 0
     float     scale;
 };
 

@@ -2,6 +2,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2021-2026 Chris Dragan
 
 #include "sculptor_instr_bank.h"
+#include "../synth/synth_midi_cc.h"
+#include "../synth/synth_effect_expansion.h"
 #include "sculptor_effect_graph.h"
 #include "sculptor_graph.h"
 #include "sculptor_osc_graph.h"
@@ -184,8 +186,8 @@ static bool validate_effect_param_binding(const Synth::EffectParamBinding& bindi
 
         for (uint32_t input = 0; input < binding.num_inputs; input++) {
             const Synth::ModInput& mod_input = binding.inputs[input];
-            if (! is_channel_effect_source(static_cast<uint32_t>(mod_input.source)) ||
-                ! valid_source_op(static_cast<uint32_t>(mod_input.op)) || ! std::isfinite(mod_input.scale)) {
+            if (! Synth::is_valid_effect_input(mod_input) || ! valid_source_op(static_cast<uint32_t>(mod_input.op)) ||
+                ! std::isfinite(mod_input.scale)) {
                 return false;
             }
         }
@@ -281,8 +283,12 @@ static bool validate_instrument(const Synth::Instrument& instrument)
         }
 
         for (uint32_t input = 0; input < routing.num_inputs; input++) {
+            // Instrument routing admits no cc source, and a non-CC instrument input
+            // must carry no stale CC number; otherwise the shared decoder would
+            // accept and re-emit it (canonicalization hole).
             if (! valid_mod_source(static_cast<uint32_t>(routing.inputs[input].source)) ||
-                ! valid_source_op(static_cast<uint32_t>(routing.inputs[input].op))) {
+                ! valid_source_op(static_cast<uint32_t>(routing.inputs[input].op)) ||
+                routing.inputs[input].cc_number != 0) {
                 return false;
             }
         }

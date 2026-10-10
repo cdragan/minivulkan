@@ -12,6 +12,7 @@
 #include "synth_effect_expansion.h"
 #include "synth_effects.h"
 #include "synth_instrument.h"
+#include "synth_midi_cc.h"
 #include "synth_soundtrack.h"
 #include <algorithm>
 #include <atomic>
@@ -87,6 +88,11 @@ struct Voice {
 
 Voice voices[max_voices];
 
+// Raw 14-bit assignable-CC accumulators, one per MIDI channel (see synth_midi_cc.h).
+// CC state is MIDI-driven, not bank-driven, so it survives bank swaps like the mod
+// wheel does.  init_modulation seeds every LSB register with the 0xFF sentinel.
+Synth::ChannelCcState channel_cc_state[Synth::max_channels];
+
 using Synth::EffectChainBinding;
 using Synth::EffectParamBinding;
 using Synth::EffectSlotBinding;
@@ -122,7 +128,8 @@ enum ChannelParamRole : uint32_t {
     chan_param_bend,
     chan_param_mod_wheel,
     chan_param_pressure,
-    num_channel_roles
+    chan_param_cc_0, // + slot (0..15): the channel's assignable-CC leaves (CC 16..31)
+    num_channel_roles = chan_param_cc_0 + Synth::num_assignable_ccs
 };
 
 enum VoiceParamRole : uint32_t {
@@ -590,7 +597,7 @@ void stop_synth_os();
 } // namespace Synth
 
 static uint32_t writer_alloc_node(const void* ctx);
-static uint16_t writer_resolve_source(const void* ctx, Synth::ModSource source, uint32_t channel);
+static uint16_t writer_resolve_source(const void* ctx, Synth::ModSource source, uint8_t cc_number, uint32_t channel);
 static void     writer_configure_dest(const void*               ctx,
                                       uint32_t                  node,
                                       uint16_t                  lfo_node,
@@ -669,11 +676,21 @@ static void init_oscillator_buffers()
 static void init_modulation()
 {
     // Each channel's pitch bend, mod wheel and pressure are externally-driven inputs;
-    // propagate_parameters must not overwrite them with a fold.
+    // propagate_parameters must not overwrite them with a fold.  The 16 assignable-CC
+    // leaves are likewise externally-driven (process_controller writes them).
     for (uint32_t channel = 0; channel < Synth::max_channels; channel++) {
         param_descs[channel_param(channel, chan_param_bend)].kind      = Synth::ParamKind::external;
         param_descs[channel_param(channel, chan_param_mod_wheel)].kind = Synth::ParamKind::external;
         param_descs[channel_param(channel, chan_param_pressure)].kind  = Synth::ParamKind::external;
+        for (uint32_t slot = 0; slot < Synth::num_assignable_ccs; slot++) {
+            param_descs[channel_param(channel, chan_param_cc_0 + slot)].kind = Synth::ParamKind::external;
+        }
+    }
+
+    // Every LSB register starts at the "no LSB seen yet" sentinel; zero-init would
+    // mean "LSB 0 received" and corrupt MSB-only normalization (MSB/127).
+    for (uint32_t channel = 0; channel < Synth::max_channels; channel++) {
+        memset(channel_cc_state[channel].lsb, 0xFF, sizeof(channel_cc_state[channel].lsb));
     }
 }
 
@@ -986,7 +1003,7 @@ static void drop_voice(uint32_t voice_idx, uint32_t channel, uint32_t note)
 
 // Maps a binding's input-source role to the concrete parameter id of the channel or voice leaf
 // that carries its live value.  none (and anything unrecognized) maps to the value-0 sentinel.
-static uint32_t resolve_source(ModSource source, uint32_t channel, uint32_t voice_idx)
+static uint32_t resolve_source(ModSource source, uint8_t cc_number, uint32_t channel, uint32_t voice_idx)
 {
     switch (source) {
         case ModSource::pitch_bend:
@@ -995,6 +1012,11 @@ static uint32_t resolve_source(ModSource source, uint32_t channel, uint32_t voic
             return channel_param(channel, chan_param_mod_wheel);
         case ModSource::channel_pressure:
             return channel_param(channel, chan_param_pressure);
+        case ModSource::cc: {
+            const uint32_t slot = cc_number - Synth::cc_msb_base;
+            assert(slot < Synth::num_assignable_ccs); // preflight validated 16..31
+            return channel_param(channel, chan_param_cc_0 + slot);
+        }
         case ModSource::velocity:
             return voice_param(voice_idx, voice_input_velocity);
         case ModSource::aftertouch:
@@ -1013,9 +1035,9 @@ static uint32_t writer_alloc_node(const void*)
     return node;
 }
 
-static uint16_t writer_resolve_source(const void*, ModSource source, uint32_t channel)
+static uint16_t writer_resolve_source(const void*, ModSource source, uint8_t cc_number, uint32_t channel)
 {
-    return static_cast<uint16_t>(resolve_source(source, channel, 0));
+    return static_cast<uint16_t>(resolve_source(source, cc_number, channel, 0));
 }
 
 static void writer_configure_dest(const void*               ctx,
@@ -1093,8 +1115,8 @@ static void configure_target_modulation(const Instrument& instrument,
                              synth_bank.lfos.entries[gen.lfo_desc_id - 1],
                              gen.lfo_op,
                              gen.lfo_depth,
-                             static_cast<uint16_t>(resolve_source(gen.lfo_depth_source, channel, voice_idx)),
-                             static_cast<uint16_t>(resolve_source(gen.lfo_rate_source, channel, voice_idx)),
+                             static_cast<uint16_t>(resolve_source(gen.lfo_depth_source, 0, channel, voice_idx)),
+                             static_cast<uint16_t>(resolve_source(gen.lfo_rate_source, 0, channel, voice_idx)),
                              gen.lfo_rate_scale_ms);
     }
 
@@ -1102,9 +1124,9 @@ static void configure_target_modulation(const Instrument& instrument,
     Synth::SourceParam sources[Synth::max_mod_inputs];
     for (uint32_t input_idx = 0; input_idx < routing.num_inputs; input_idx++) {
         const ModInput& input = routing.inputs[input_idx];
-        sources[input_idx]    = { static_cast<uint16_t>(resolve_source(input.source, channel, voice_idx)),
-                                  input.scale,
-                                  input.op };
+        sources[input_idx] = { static_cast<uint16_t>(resolve_source(input.source, input.cc_number, channel, voice_idx)),
+                               input.scale,
+                               input.op };
     }
 
     Synth::configure_plain(&param_descs[osc_param(osc_slot, dest_role)],
@@ -1266,15 +1288,23 @@ static void process_aftertouch(uint32_t delta_samples, const DispatchedMidiEvent
     }
 }
 
-static void process_controller(uint32_t delta_samples, const DispatchedMidiEvent& event)
+static void process_controller(uint32_t, const DispatchedMidiEvent& event)
 {
-    // TODO Only the modulation wheel is supported for now; other controllers ignored.
     if (event.controller == mod_wheel_cc) {
         const uint32_t node         = channel_param(event.channel, chan_param_mod_wheel);
         const float    value        = static_cast<float>(event.controller_data) / 127.0f;
         parameters[node].value      = value;
         parameters[node].prev_value = value;
     }
+    else if (Synth::is_assignable_cc(event.controller)) {
+        const float value =
+            Synth::apply_channel_cc(&channel_cc_state[event.channel], event.controller, event.controller_data);
+        const uint32_t node =
+            channel_param(event.channel, chan_param_cc_0 + Synth::assignable_cc_slot(event.controller));
+        parameters[node].value      = value;
+        parameters[node].prev_value = value;
+    }
+    // Other controllers ignored.
 }
 
 static void process_pitch_bend(uint32_t delta_samples, const DispatchedMidiEvent& event)

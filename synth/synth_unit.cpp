@@ -18,6 +18,7 @@
 #include "synth_effect_expansion.h"
 #include "synth_effects.h"
 #include "synth_instrument.h"
+#include "synth_midi_cc.h"
 #include "synth_parameters.h"
 #include "synth_serialize.h"
 #include "synth_soundtrack.h"
@@ -152,6 +153,16 @@ struct FakeWriter {
     uint32_t lfo_count;
     uint16_t last_dest_node;
     uint16_t last_dest_lfo_node;
+    uint16_t last_dest_source_param_id;
+
+    struct Resolved {
+        Synth::ModSource source;
+        uint8_t          cc_number;
+        uint32_t         chain;
+    };
+
+    Resolved resolved[32];
+    uint32_t num_resolved;
 };
 
 static int exit_code = 0;
@@ -521,8 +532,11 @@ static uint32_t fake_alloc_node(const void* ctx)
     return writer.next_node++;
 }
 
-static uint16_t fake_resolve_source(const void*, Synth::ModSource, uint32_t)
+static uint16_t fake_resolve_source(const void* ctx, Synth::ModSource source, uint8_t cc_number, uint32_t chain)
 {
+    FakeWriter& writer = *static_cast<FakeWriter*>(const_cast<void*>(ctx));
+    assert(writer.num_resolved < 32); // recordings accumulate across every commit in the suite
+    writer.resolved[writer.num_resolved++] = { source, cc_number, chain };
     return 77; // arbitrary concrete node id
 }
 
@@ -531,13 +545,14 @@ static void fake_configure_dest(const void* ctx,
                                 uint16_t    lfo_node,
                                 float,
                                 Synth::SourceOp,
-                                const Synth::SourceParam*,
-                                uint32_t)
+                                const Synth::SourceParam* sources,
+                                uint32_t                  num_inputs)
 {
     FakeWriter& writer = *static_cast<FakeWriter*>(const_cast<void*>(ctx));
     writer.dest_count++;
-    writer.last_dest_node     = static_cast<uint16_t>(node);
-    writer.last_dest_lfo_node = lfo_node;
+    writer.last_dest_node            = static_cast<uint16_t>(node);
+    writer.last_dest_lfo_node        = lfo_node;
+    writer.last_dest_source_param_id = num_inputs ? sources[0].param_id : 0;
 }
 
 static void fake_configure_lfo(const void* ctx, uint32_t, uint16_t, Synth::SourceOp, float, uint16_t, uint16_t, float)
@@ -3271,6 +3286,131 @@ static void effects_structural_regressions()
     empty_wire.connection_output     = { mapping.input_node, 0 };
     TEST(Sculptor::apply_effect_graph_batch(&candidate, &graph, &mapping, &empty_wire, 1, nullptr, &loaded));
     TEST(loaded.bank.channel_chains[0].num_effects == 0);
+
+    // CC routing is invisible/uneditable in the effect graph, so any
+    // graph edit that would recompile a parameter carrying a CC input must
+    // refuse atomically and preserve the binding; legacy-only rebuilds must
+    // not carry stale CC numbers into the new validator.
+    {
+        static Synth::InstrumentEditorBank cc_source;
+        memset(&cc_source, 0, sizeof(cc_source));
+        Synth::init_default_bank(&cc_source.bank);
+        Synth::EffectChainBinding& cc_chain = cc_source.bank.channel_chains[0];
+        cc_chain.num_effects                = 1;
+        Sculptor::fx_init_slot(&cc_chain, 0, Synth::EffectType::delay);
+        cc_chain.effects[0].enabled           = true;
+        Synth::EffectParamBinding& cc_binding = cc_chain.effects[0].bindings[0];
+        cc_binding.num_inputs                 = 2;
+        cc_binding.inputs[0].source           = Synth::ModSource::cc;
+        cc_binding.inputs[0].cc_number        = 16;
+        cc_binding.inputs[0].op               = Synth::SourceOp::add;
+        cc_binding.inputs[0].scale            = 0.5f;
+        cc_binding.inputs[1].source           = Synth::ModSource::mod_wheel;
+        cc_binding.inputs[1].op               = Synth::SourceOp::multiply;
+        cc_binding.inputs[1].scale            = 0.25f;
+        TEST(Sculptor::project_effect_chain_to_graph(cc_source, 0, &graph, &mapping));
+        graph.take_changes(discarded, Sculptor::max_pending_changes);
+        const Synth::EffectParamBinding cc_before = cc_chain.effects[0].bindings[0];
+
+        // A source-row edit on the wired legacy row must refuse atomically.
+        Sculptor::GraphChange cc_row = {};
+        cc_row.kind                  = Sculptor::ChangeKind::value_changed;
+        cc_row.node_idx              = mapping.effect_nodes[0];
+        cc_row.slot_idx              = Sculptor::fx_param_src_dot(0, 1) + 2; // legacy row's Amount
+        auto cc_row_value            = graph.node(mapping.effect_nodes[0]).slots.entries[cc_row.slot_idx].value;
+        cc_row_value.real            = 0.75f;
+        graph.set_slot_value(mapping.effect_nodes[0], cc_row.slot_idx, cc_row_value);
+        candidate = cc_source;
+        TEST(! Sculptor::apply_fx_graph_change(&candidate.bank, graph, mapping, cc_row));
+        TEST(memcmp(&candidate.bank.channel_chains[0].effects[0].bindings[0], &cc_before, sizeof(cc_before)) == 0);
+
+        // A connection edit on the same row must refuse atomically too.
+        const Sculptor::EndPoint cc_wire_from  = { mapping.midi_node, mapping.midi_source_slots[1] };
+        const Sculptor::EndPoint cc_wire_input = { mapping.effect_nodes[0], Sculptor::fx_param_src_dot(0, 1) };
+        const uint32_t           cc_wire       = find_fx_graph_connection(graph, cc_wire_from, cc_wire_input);
+        TEST(cc_wire != Sculptor::pool_no_slot);
+        TEST(graph.user_delete_connection(cc_wire));
+        Sculptor::GraphChange cc_unwire   = {};
+        cc_unwire.kind                    = Sculptor::ChangeKind::connection_deleted;
+        cc_unwire.connection_output       = cc_wire_from;
+        cc_unwire.connection_input        = cc_wire_input;
+        candidate                         = cc_source;
+        TEST(! Sculptor::apply_fx_graph_change(&candidate.bank, graph, mapping, cc_unwire));
+        TEST(memcmp(&candidate.bank.channel_chains[0].effects[0].bindings[0], &cc_before, sizeof(cc_before)) == 0);
+        // A retarget that moves a legacy wire onto a parameter carrying a CC input
+        // must refuse atomically: the previous parameter's rebuild must not leak
+        // into the bank when the destination refuses.
+        {
+            static Synth::InstrumentEditorBank retarget_source;
+            memset(&retarget_source, 0, sizeof(retarget_source));
+            Synth::init_default_bank(&retarget_source.bank);
+            Synth::EffectChainBinding& retarget_chain = retarget_source.bank.channel_chains[0];
+            retarget_chain.num_effects                = 1;
+            Sculptor::fx_init_slot(&retarget_chain, 0, Synth::EffectType::delay);
+            retarget_chain.effects[0].enabled        = true;
+            Synth::EffectParamBinding& moved_binding = retarget_chain.effects[0].bindings[0];
+            moved_binding.num_inputs                 = 1;
+            moved_binding.inputs[0].source           = Synth::ModSource::mod_wheel;
+            moved_binding.inputs[0].op               = Synth::SourceOp::add;
+            moved_binding.inputs[0].scale            = 0.5f;
+            Synth::EffectParamBinding& cc_dest       = retarget_chain.effects[0].bindings[1];
+            cc_dest.num_inputs                       = 1;
+            cc_dest.inputs[0].source                 = Synth::ModSource::cc;
+            cc_dest.inputs[0].cc_number              = 16;
+            cc_dest.inputs[0].op                     = Synth::SourceOp::add;
+            cc_dest.inputs[0].scale                  = 0.5f;
+            TEST(Sculptor::project_effect_chain_to_graph(retarget_source, 0, &graph, &mapping));
+            graph.take_changes(discarded, Sculptor::max_pending_changes);
+            const Sculptor::EndPoint retarget_wire_from  = { mapping.midi_node, mapping.midi_source_slots[1] };
+            const Sculptor::EndPoint retarget_prev_input = { mapping.effect_nodes[0],
+                                                             Sculptor::fx_param_src_dot(0, 0) };
+            const Sculptor::EndPoint retarget_new_input = { mapping.effect_nodes[0], Sculptor::fx_param_src_dot(1, 0) };
+            const uint32_t retarget_wire = find_fx_graph_connection(graph, retarget_wire_from, retarget_prev_input);
+            TEST(retarget_wire != Sculptor::pool_no_slot);
+            TEST(graph.move_connection_end(retarget_wire, false, retarget_new_input));
+            graph.take_changes(discarded, Sculptor::max_pending_changes);
+            Sculptor::GraphChange retarget = {};
+            retarget.kind                  = Sculptor::ChangeKind::connection_changed;
+            retarget.connection_output     = retarget_wire_from;
+            retarget.connection_input      = retarget_new_input;
+            retarget.connection_prev_input = retarget_prev_input;
+            candidate                      = retarget_source;
+            TEST(! Sculptor::apply_fx_graph_change(&candidate.bank, graph, mapping, retarget));
+            TEST(memcmp(&candidate.bank, &retarget_source.bank, sizeof(candidate.bank)) == 0);
+        }
+
+        // A legacy-only binding rebuild zeroes the CC number on reconstructed
+        // inputs so a reused slot cannot carry stale state.
+        static Synth::InstrumentEditorBank legacy_source;
+        memset(&legacy_source, 0, sizeof(legacy_source));
+        Synth::init_default_bank(&legacy_source.bank);
+        Synth::EffectChainBinding& legacy_chain = legacy_source.bank.channel_chains[0];
+        legacy_chain.num_effects                = 1;
+        Sculptor::fx_init_slot(&legacy_chain, 0, Synth::EffectType::delay);
+        legacy_chain.effects[0].enabled = true;
+        Synth::EffectParamBinding& legacy_binding = legacy_chain.effects[0].bindings[0];
+        legacy_binding.num_inputs                 = 1;
+        legacy_binding.inputs[0].source           = Synth::ModSource::mod_wheel;
+        legacy_binding.inputs[0].cc_number        = 17; // stale hand-authored state
+        legacy_binding.inputs[0].op               = Synth::SourceOp::multiply;
+        legacy_binding.inputs[0].scale            = 0.25f;
+        TEST(Sculptor::project_effect_chain_to_graph(legacy_source, 0, &graph, &mapping));
+        graph.take_changes(discarded, Sculptor::max_pending_changes);
+        Sculptor::GraphChange legacy_row = {};
+        legacy_row.kind                  = Sculptor::ChangeKind::value_changed;
+        legacy_row.node_idx              = mapping.effect_nodes[0];
+        legacy_row.slot_idx              = Sculptor::fx_param_src_dot(0, 0) + 2; // wired row's Amount
+        auto legacy_row_value            = graph.node(mapping.effect_nodes[0]).slots.entries[legacy_row.slot_idx].value;
+        legacy_row_value.real            = 0.75f;
+        graph.set_slot_value(mapping.effect_nodes[0], legacy_row.slot_idx, legacy_row_value);
+        candidate = legacy_source;
+        TEST(Sculptor::apply_fx_graph_change(&candidate.bank, graph, mapping, legacy_row));
+        const Synth::ModInput& rebuilt = candidate.bank.channel_chains[0].effects[0].bindings[0].inputs[0];
+        TEST(rebuilt.source == Synth::ModSource::mod_wheel);
+        TEST(rebuilt.cc_number == 0);
+        TEST(rebuilt.op == Synth::SourceOp::multiply);
+        TEST(rebuilt.scale == 0.75f);
+    }
 
     // Ordinary files may contain obsolete generated effect titles, but not missing LFO roots.
     source.graph_layout[source.graph_layout_count] = {};
@@ -8692,7 +8832,7 @@ int main()
         static Synth::Instrument     good          = {};
         good.layer_count                           = 1;
         good.routing[Synth::mod_volume].num_inputs = 1;
-        good.routing[Synth::mod_volume].inputs[0]  = { Synth::ModSource::velocity, Synth::SourceOp::multiply, 0.5f };
+        good.routing[Synth::mod_volume].inputs[0]  = { Synth::ModSource::velocity, Synth::SourceOp::multiply, 0, 0.5f };
 
         static Sculptor::Graph           graph;
         static Sculptor::OscGraphMapping mapping;
@@ -14282,6 +14422,450 @@ int main()
         TEST(plan.consumed_bytes == 4 * Synth::get_effect_state_bytes(Synth::EffectType::delay));
 
         Synth::init_effect_state_region(fake_region_base);
+    }
+
+    // ---------------------------------------------------------------------------
+    // CC routing tests (T1-T6).  The value normalization formula:
+    // value = (MSB*128 + effective_LSB) / 16383, where effective_LSB is the
+    // received LSB once one has arrived for the slot and otherwise a copy of
+    // the MSB (0xFF sentinel in the LSB array).  The enable threshold (raw
+    // >= 8192) is intentionally out of scope here.
+    // ---------------------------------------------------------------------------
+
+    // Documented initial channel CC state: MSB registers at zero, every LSB
+    // register at the 0xFF "not yet seen" sentinel.
+    auto make_cc_state = []() {
+        Synth::ChannelCcState state;
+        memset(&state, 0, sizeof(state));
+        memset(state.lsb, 0xFF, sizeof(state.lsb));
+        return state;
+    };
+
+    // T1: cc_14bit_value implements the ruled normalization exactly.  MSB-only
+    // (sentinel) input equals MSB/127 because (MSB*129)/16383 and MSB/127 are
+    // the same real value, so exact float comparison holds.
+    {
+        TEST(Synth::cc_14bit_value(0, 0xFF) == 0.0f / 127.0f);
+        TEST(Synth::cc_14bit_value(1, 0xFF) == 1.0f / 127.0f);
+        TEST(Synth::cc_14bit_value(63, 0xFF) == 63.0f / 127.0f);
+        TEST(Synth::cc_14bit_value(64, 0xFF) == 64.0f / 127.0f);
+        TEST(Synth::cc_14bit_value(126, 0xFF) == 126.0f / 127.0f);
+        TEST(Synth::cc_14bit_value(127, 0xFF) == 127.0f / 127.0f);
+        TEST(Synth::cc_14bit_value(127, 127) == 1.0f);
+        TEST(Synth::cc_14bit_value(127, 0) == 16256.0f / 16383.0f);
+        TEST(Synth::cc_14bit_value(64, 0) == 8192.0f / 16383.0f);
+        TEST(Synth::cc_14bit_value(1, 1) == 129.0f / 16383.0f);
+        TEST(Synth::cc_14bit_value(127, 126) == (127.0f * 128.0f + 126.0f) / 16383.0f);
+    }
+
+    // T2: apply_channel_cc accumulates the MSB/LSB pair per slot and channel.
+    {
+        // MSB-only updates return MSB/127 exactly while the LSB sentinel stands.
+        Synth::ChannelCcState state = make_cc_state();
+        TEST(Synth::apply_channel_cc(&state, 16, 100) == 100.0f / 127.0f);
+        TEST(Synth::apply_channel_cc(&state, 16, 127) == 1.0f);
+        // A real LSB arrival (including ZERO) clears the sentinel and recomputes;
+        // MSB=127 then LSB=0 moves 1.0 -> 16256/16383 (accepted one-time correction).
+        TEST(Synth::apply_channel_cc(&state, 48, 0) == 16256.0f / 16383.0f);
+        TEST(Synth::apply_channel_cc(&state, 48, 30) == (127.0f * 128.0f + 30.0f) / 16383.0f);
+
+        // An LSB arriving before any MSB clears the sentinel; MSB is still 0.
+        state = make_cc_state();
+        TEST(Synth::apply_channel_cc(&state, 48, 50) == 50.0f / 16383.0f);
+        TEST(Synth::apply_channel_cc(&state, 48, 0) == 0.0f); // zero LSB also clears
+        TEST(Synth::apply_channel_cc(&state, 16, 127) == 16256.0f / 16383.0f);
+
+        // Non-assignable controllers (CC 1 among them) leave the state untouched.
+        state = make_cc_state();
+        (void)Synth::apply_channel_cc(&state, 16, 100);
+        const Synth::ChannelCcState untouched = state;
+        static const uint32_t       foreign[] = { 1, 15, 32, 33, 47, 64, 119 };
+        for (uint32_t i = 0; i < sizeof(foreign) / sizeof(foreign[0]); ++i) {
+            (void)Synth::apply_channel_cc(&state, foreign[i], 64);
+            TEST(memcmp(&state, &untouched, sizeof(state)) == 0);
+        }
+
+        // Pair rule CC n + CC n+32: pairs 16/48, 17/49 ... 31/63 land in slots 0..15.
+        state = make_cc_state();
+        Synth::apply_channel_cc(&state, 16, 100);
+        Synth::apply_channel_cc(&state, 48, 30);
+        TEST(Synth::apply_channel_cc(&state, 17, 64) == 64.0f / 127.0f); // slot 1, sentinel
+        Synth::apply_channel_cc(&state, 49, 20);
+        Synth::apply_channel_cc(&state, 31, 127);
+        TEST(Synth::apply_channel_cc(&state, 63, 0) == 16256.0f / 16383.0f); // slot 15
+        TEST(state.msb[0] == 100 && state.lsb[0] == 30);  // adjacent pair left slot 0 unchanged
+        TEST(state.msb[1] == 64 && state.lsb[1] == 20);
+        TEST(state.msb[15] == 127 && state.lsb[15] == 0);
+
+        // Channels are independent: writing one state leaves another untouched.
+        Synth::ChannelCcState other = make_cc_state();
+        (void)Synth::apply_channel_cc(&other, 16, 5);
+        TEST(other.msb[0] == 5);
+        TEST(state.msb[0] == 100 && state.lsb[0] == 30);
+    }
+
+    // T3: the runtime validator admits assignable CC inputs (16..31) on channel
+    // chains and the commit hands source, CC number and chain to the writer.
+    {
+        static Synth::InstrumentBank bank;
+        make_valid_bank(bank);
+        Synth::EffectSlotBinding* const slot  = enabled_effect(bank, 3, 0, Synth::EffectType::delay);
+        slot->bindings[0].num_inputs          = 2;
+        slot->bindings[0].inputs[0].source    = Synth::ModSource::cc;
+        slot->bindings[0].inputs[0].cc_number = 16;
+        slot->bindings[0].inputs[0].op        = Synth::SourceOp::add;
+        slot->bindings[0].inputs[0].scale     = 0.5f;
+        slot->bindings[0].inputs[1].source    = Synth::ModSource::cc;
+        slot->bindings[0].inputs[1].cc_number = 31;
+        slot->bindings[0].inputs[1].op        = Synth::SourceOp::multiply;
+        slot->bindings[0].inputs[1].scale     = 0.25f;
+        static_assert(sizeof(Synth::ModInput) == 8); // INV2: the packed input stays 8 bytes
+
+        Synth::init_effect_state_region(fake_region_base);
+        static Synth::EffectExpansionPlan plan;
+        const char*                       error = nullptr;
+        TEST(Synth::preflight_effect_expansion(bank, &plan, &error));
+        static Synth::EffectChain chains[Synth::max_channels];
+        static Synth::EffectChain master;
+        FakeWriter                writer = { 1, 0, 0, 0, 0 };
+        Synth::commit_effect_expansion(bank, plan, chains, &master, fake_writer_binding(writer));
+        TEST(writer.num_resolved == 2);
+        TEST(writer.resolved[0].source == Synth::ModSource::cc);
+        TEST(writer.resolved[0].cc_number == 16);
+        TEST(writer.resolved[0].chain == 3);
+        TEST(writer.resolved[1].source == Synth::ModSource::cc);
+        TEST(writer.resolved[1].cc_number == 31);
+        TEST(writer.resolved[1].chain == 3);
+        TEST(writer.dest_count == 1);
+        TEST(writer.last_dest_source_param_id == 77); // resolved through the real writer path
+        (void)Synth::take_effect_clear_ranges();
+
+        // The same rules reject out-of-range or misplaced CC state.
+        auto expect_preflight_reject = [](Synth::InstrumentBank& rejected) {
+            Synth::init_effect_state_region(fake_region_base);
+            static Synth::EffectExpansionPlan reject_plan;
+            const char*                       reject_error = nullptr;
+            TEST(! Synth::preflight_effect_expansion(rejected, &reject_plan, &reject_error));
+        };
+        auto make_cc_input_bank =
+            [&](Synth::InstrumentBank& target, uint8_t cc_number, bool master, Synth::ModSource source) {
+                make_valid_bank(target);
+                Synth::EffectSlotBinding* const cc_slot =
+                    enabled_effect(target, master ? Synth::max_channels : 3, 0, Synth::EffectType::delay);
+                cc_slot->bindings[0].num_inputs          = 1;
+                cc_slot->bindings[0].inputs[0].source    = source;
+                cc_slot->bindings[0].inputs[0].cc_number = cc_number;
+                cc_slot->bindings[0].inputs[0].op        = Synth::SourceOp::add;
+                cc_slot->bindings[0].inputs[0].scale     = 0.5f;
+            };
+        static Synth::InstrumentBank reject_bank;
+        make_cc_input_bank(reject_bank, 15, false, Synth::ModSource::cc);
+        expect_preflight_reject(reject_bank);
+        make_cc_input_bank(reject_bank, 32, false, Synth::ModSource::cc);
+        expect_preflight_reject(reject_bank);
+        make_cc_input_bank(reject_bank, 0, false, Synth::ModSource::cc);
+        expect_preflight_reject(reject_bank);
+        make_cc_input_bank(reject_bank, 17, false, Synth::ModSource::mod_wheel); // non-CC, stale number
+        expect_preflight_reject(reject_bank);
+        make_cc_input_bank(reject_bank, 16, true, Synth::ModSource::cc); // master stays MIDI-free
+        expect_preflight_reject(reject_bank);
+
+        // cc is not admissible as an LFO depth/rate source (no number to carry).
+        make_valid_bank(reject_bank);
+        {
+            Synth::EffectSlotBinding* const cc_slot = enabled_effect(reject_bank, 3, 0, Synth::EffectType::delay);
+            cc_slot->bindings[0].lfo_desc_id        = 1;
+            cc_slot->bindings[0].lfo_depth          = 0.1f;
+            cc_slot->bindings[0].lfo_depth_source   = Synth::ModSource::cc;
+        }
+        expect_preflight_reject(reject_bank);
+        make_valid_bank(reject_bank);
+        {
+            Synth::EffectSlotBinding* const cc_slot = enabled_effect(reject_bank, 3, 0, Synth::EffectType::delay);
+            cc_slot->bindings[0].lfo_desc_id        = 1;
+            cc_slot->bindings[0].lfo_depth          = 0.1f;
+            cc_slot->bindings[0].lfo_rate_source    = Synth::ModSource::cc;
+        }
+        expect_preflight_reject(reject_bank);
+    }
+
+    // T4: the bank JSON codec round-trips CC inputs; defaults stay omitted and
+    // the decoder refuses invalid cc_number values.
+    {
+        static Synth::InstrumentEditorBank source;
+        memset(&source, 0, sizeof(source));
+        Synth::init_default_bank(&source.bank);
+        Synth::EffectChainBinding& chain = source.bank.channel_chains[0];
+        chain.num_effects                = 1;
+        Sculptor::fx_init_slot(&chain, 0, Synth::EffectType::delay);
+        chain.effects[0].enabled                         = true;
+        chain.effects[0].bindings[0].num_inputs          = 1;
+        chain.effects[0].bindings[0].inputs[0].source    = Synth::ModSource::cc;
+        chain.effects[0].bindings[0].inputs[0].cc_number = 17;
+        chain.effects[0].bindings[0].inputs[0].op        = Synth::SourceOp::add;
+        chain.effects[0].bindings[0].inputs[0].scale     = 0.5f;
+
+        static char    text[64 * 1024];
+        const uint32_t len = Synth::encode_editor_bank_json(&source, text, sizeof(text));
+        TEST(len > 0);
+        text[len] = '\0';
+        static Synth::InstrumentEditorBank decoded;
+        TEST(Synth::decode_editor_bank_json(text, len, &decoded));
+        const Synth::ModInput& round_tripped = decoded.bank.channel_chains[0].effects[0].bindings[0].inputs[0];
+        TEST(round_tripped.source == Synth::ModSource::cc);
+        TEST(round_tripped.cc_number == 17);
+        TEST(round_tripped.op == Synth::SourceOp::add);
+        TEST(round_tripped.scale == 0.5f);
+        TEST(Synth::validate_instrument_bank(&decoded.bank));
+
+        // A legacy pitch_bend input encodes without any cc_number key.
+        static Synth::InstrumentEditorBank legacy;
+        memset(&legacy, 0, sizeof(legacy));
+        Synth::init_default_bank(&legacy.bank);
+        Synth::EffectChainBinding& legacy_chain = legacy.bank.channel_chains[0];
+        legacy_chain.num_effects                = 1;
+        Sculptor::fx_init_slot(&legacy_chain, 0, Synth::EffectType::delay);
+        legacy_chain.effects[0].enabled               = true;
+        legacy_chain.effects[0].bindings[0].num_inputs = 1;
+        legacy_chain.effects[0].bindings[0].inputs[0].source = Synth::ModSource::pitch_bend;
+        legacy_chain.effects[0].bindings[0].inputs[0].op     = Synth::SourceOp::multiply;
+        legacy_chain.effects[0].bindings[0].inputs[0].scale  = 0.25f;
+        const uint32_t legacy_len = Synth::encode_editor_bank_json(&legacy, text, sizeof(text));
+        TEST(legacy_len > 0);
+        text[legacy_len] = '\0';
+        TEST(strstr(text, "cc_number") == nullptr);
+        TEST(Synth::decode_editor_bank_json(text, legacy_len, &decoded));
+        TEST(decoded.bank.channel_chains[0].effects[0].bindings[0].inputs[0].cc_number == 0);
+        TEST(Synth::validate_instrument_bank(&decoded.bank));
+
+        // An out-of-range cc_number: decode implies validation, so the editor
+        // bank decoder itself refuses the rogue bank during its internal
+        // validate pass; the validator refuses it by any other route too.
+        static Synth::InstrumentEditorBank rogue;
+        rogue                                                                   = legacy;
+        rogue.bank.channel_chains[0].effects[0].bindings[0].inputs[0].source    = Synth::ModSource::cc;
+        rogue.bank.channel_chains[0].effects[0].bindings[0].inputs[0].cc_number = 40;
+        const uint32_t rogue_len = Synth::encode_editor_bank_json(&rogue, text, sizeof(text));
+        TEST(rogue_len > 0);
+        TEST(! Synth::decode_editor_bank_json(text, rogue_len, &decoded));
+        TEST(! Synth::validate_instrument_bank(&rogue.bank));
+        // Malformed cc_number values must fail the decoder itself, never wrap:
+        // the decode bound is 0x7F because controller numbers are 7-bit. A
+        // widened bound plus uint8_t narrowing would still alias (65552 &
+        // 0xFF == 16, 256 & 0xFF == 0), which is what the 65536/65552 rows pin;
+        // 281 (281 & 0xFF == 25, an assignable CC) pins the decode bound
+        // itself: it is refused by 0x7F but would decode under a widened
+        // 0xFFFF bound. A failed decode leaves the output untouched.
+        rogue.bank.channel_chains[0].effects[0].bindings[0].inputs[0].cc_number = 16;
+        const uint32_t wrap_len = Synth::encode_editor_bank_json(&rogue, text, sizeof(text));
+        TEST(wrap_len > 0);
+        text[wrap_len]                                  = '\0';
+        static const char* const malformed_cc_numbers[] = { "-1", "16.5", "128", "281", "65536", "65552" };
+        static const char        cc_number_key[]        = "\"cc_number\":16";
+        for (uint32_t cc_value = 0; cc_value < sizeof(malformed_cc_numbers) / sizeof(malformed_cc_numbers[0]);
+             ++cc_value) {
+            const char* const field = strstr(text, cc_number_key);
+            TEST(field != nullptr);
+            static char    spliced[64 * 1024];
+            const uint32_t prefix_len = static_cast<uint32_t>(field - text);
+            memcpy(spliced, text, prefix_len);
+            const int written = snprintf(spliced + prefix_len,
+                                         sizeof(spliced) - prefix_len,
+                                         "\"cc_number\":%s",
+                                         malformed_cc_numbers[cc_value]);
+            TEST(written > 0);
+            const uint32_t tail_len = wrap_len - prefix_len - sizeof(cc_number_key) + 1;
+            memcpy(spliced + prefix_len + written, field + sizeof(cc_number_key) - 1, tail_len);
+            const uint32_t                     spliced_len = prefix_len + static_cast<uint32_t>(written) + tail_len;
+            static Synth::InstrumentEditorBank prior;
+            prior = decoded;
+            TEST(! Synth::decode_editor_bank_json(spliced, spliced_len, &decoded));
+            TEST(memcmp(&decoded, &prior, sizeof(decoded)) == 0);
+        }
+    }
+
+
+    // A standalone-parameter LFO carries full 16-bit depth/rate parameter ids (they
+    // are ParamDescriptor ids, not 7-bit controller numbers): ids above 127 decode
+    // and round-trip byte-identically. Regression: the decoder once applied the
+    // 7-bit cc_number bound here, rejecting old banks whose ids exceeded 127.
+    {
+        static Synth::InstrumentEditorBank source;
+        memset(&source, 0, sizeof(source));
+        Synth::init_default_bank(&source.bank);
+        const uint32_t param = source.bank.parameters.allocate();
+        TEST(param != pool_no_slot);
+        Synth::LFODescriptor lfo = {};
+        lfo.wave = Synth::WaveType::sine_wave;
+        lfo.period_ms = 50;
+        Synth::configure_lfo(&source.bank.parameters.entries[param], lfo, Synth::SourceOp::add, 0.5f, 200, 300, 0.0f);
+        TEST(Synth::validate_instrument_bank(&source.bank));
+        static char text[64 * 1024];
+        const uint32_t len = Synth::encode_editor_bank_json(&source, text, sizeof(text));
+        TEST(len > 0);
+        text[len] = '\0';
+        TEST(strstr(text, "\"depth_param_id\":200") != nullptr);
+        TEST(strstr(text, "\"rate_param_id\":300") != nullptr);
+        static Synth::InstrumentEditorBank decoded;
+        TEST(Synth::decode_editor_bank_json(text, len, &decoded));
+        const Synth::ParamDescriptor& decoded_param = decoded.bank.parameters.entries[param];
+        TEST(decoded_param.kind == Synth::ParamKind::lfo);
+        TEST(decoded_param.lfo.depth_param_id == 200);
+        TEST(decoded_param.lfo.rate_param_id == 300);
+        TEST(Synth::validate_instrument_bank(&decoded.bank));
+        static char again[64 * 1024];
+        const uint32_t second_len = Synth::encode_editor_bank_json(&decoded, again, sizeof(again));
+        TEST(second_len == len);
+        TEST(memcmp(text, again, len) == 0);
+    }
+    // T5: banks saved before the feature load identically and re-encode
+    // byte-identically (the cc_number field stays omitted for zero).
+    {
+        static Synth::InstrumentEditorBank source;
+        memset(&source, 0, sizeof(source));
+        Synth::init_default_bank(&source.bank);
+        Synth::EffectChainBinding& chain = source.bank.channel_chains[0];
+        chain.num_effects                = 1;
+        Sculptor::fx_init_slot(&chain, 0, Synth::EffectType::delay);
+        chain.effects[0].enabled                      = true;
+        chain.effects[0].bindings[0].num_inputs       = 1;
+        chain.effects[0].bindings[0].inputs[0].source = Synth::ModSource::pitch_bend;
+        chain.effects[0].bindings[0].inputs[0].op     = Synth::SourceOp::multiply;
+        chain.effects[0].bindings[0].inputs[0].scale  = 0.25f;
+
+        static char    text[64 * 1024];
+        const uint32_t first_len = Synth::encode_editor_bank_json(&source, text, sizeof(text));
+        TEST(first_len > 0);
+        static Synth::InstrumentEditorBank decoded;
+        TEST(Synth::decode_editor_bank_json(text, first_len, &decoded));
+        const Synth::ModInput& input = decoded.bank.channel_chains[0].effects[0].bindings[0].inputs[0];
+        TEST(input.source == Synth::ModSource::pitch_bend);
+        TEST(input.cc_number == 0);
+        TEST(input.op == Synth::SourceOp::multiply);
+        TEST(input.scale == 0.25f);
+        TEST(Synth::validate_instrument_bank(&decoded.bank));
+
+        static char    again[64 * 1024];
+        const uint32_t second_len = Synth::encode_editor_bank_json(&decoded, again, sizeof(again));
+        TEST(second_len == first_len);
+        TEST(memcmp(text, again, first_len) == 0);
+    }
+
+    // T6: the editor bank validator mirrors the runtime rules.
+    {
+        auto make_cc_bank = [&](Synth::InstrumentBank& target, uint8_t cc_number, bool master) {
+            make_valid_bank(target);
+            Synth::EffectSlotBinding* const cc_slot =
+                enabled_effect(target, master ? Synth::max_channels : 3, 0, Synth::EffectType::delay);
+            cc_slot->bindings[0].num_inputs          = 1;
+            cc_slot->bindings[0].inputs[0].source    = Synth::ModSource::cc;
+            cc_slot->bindings[0].inputs[0].cc_number = cc_number;
+            cc_slot->bindings[0].inputs[0].op        = Synth::SourceOp::add;
+            cc_slot->bindings[0].inputs[0].scale     = 0.5f;
+        };
+        static Synth::InstrumentBank bank;
+        make_cc_bank(bank, 15, false);
+        TEST(! Synth::validate_instrument_bank(&bank));
+        make_cc_bank(bank, 32, false);
+        TEST(! Synth::validate_instrument_bank(&bank));
+        make_cc_bank(bank, 16, false);
+        TEST(Synth::validate_instrument_bank(&bank));
+        make_cc_bank(bank, 31, false);
+        TEST(Synth::validate_instrument_bank(&bank));
+        make_cc_bank(bank, 16, true); // master chain still admits no MIDI in M1
+        TEST(! Synth::validate_instrument_bank(&bank));
+
+        // cc is not admissible as an LFO depth/rate source (no number to carry).
+        make_valid_bank(bank);
+        {
+            Synth::EffectSlotBinding* const slot = enabled_effect(bank, 3, 0, Synth::EffectType::delay);
+            slot->bindings[0].lfo_desc_id        = 1;
+            slot->bindings[0].lfo_depth          = 0.1f;
+            slot->bindings[0].lfo_depth_source   = Synth::ModSource::cc;
+        }
+        TEST(! Synth::validate_instrument_bank(&bank));
+        make_valid_bank(bank);
+        {
+            Synth::EffectSlotBinding* const slot = enabled_effect(bank, 3, 0, Synth::EffectType::delay);
+            slot->bindings[0].lfo_desc_id        = 1;
+            slot->bindings[0].lfo_depth          = 0.1f;
+            slot->bindings[0].lfo_rate_source    = Synth::ModSource::cc;
+        }
+        TEST(! Synth::validate_instrument_bank(&bank));
+
+        // A non-CC input must carry no stale CC number.
+        make_valid_bank(bank);
+        {
+            Synth::EffectSlotBinding* const slot = enabled_effect(bank, 3, 0, Synth::EffectType::delay);
+            slot->bindings[0].num_inputs         = 1;
+            slot->bindings[0].inputs[0].source    = Synth::ModSource::mod_wheel;
+            slot->bindings[0].inputs[0].cc_number = 17;
+            slot->bindings[0].inputs[0].op        = Synth::SourceOp::multiply;
+            slot->bindings[0].inputs[0].scale     = 0.25f;
+        }
+        TEST(! Synth::validate_instrument_bank(&bank));
+
+        // Instrument routing refuses stale CC numbers on non-CC inputs, and the
+        // instrument document encoder never emits cc_number for a non-CC input.
+        const char* const                stale_doc = "{"
+                                                     "\"format\":\"synth-instrument-v1\","
+                                                     "\"layers\":["
+                                                     "{"
+                                                     "\"wave_a\":\"sine\","
+                                                     "\"volume\":{"
+                                                     "\"base\":0.8,"
+                                                     "\"sources\":[{\"source\":\"velocity\",\"op\":\"add\",\"scale\":0.5,"
+                                                     "\"cc_number\":17}]"
+                                                     "}"
+                                                     "}"
+                                                     "]}";
+        static Synth::Instrument         stale_instr;
+        static Synth::EnvelopeDescriptor stale_envs[Synth::instrument_max_envelopes];
+        static Synth::LFODescriptor      stale_lfos[Synth::instrument_max_lfos];
+        uint32_t                         stale_env_count = 0;
+        uint32_t                         stale_lfo_count = 0;
+        // Decode implies validation: the instrument document decoder refuses the
+        // stale CC state during its internal validate pass
+        // (map_instrument_graph_layout runs validate_instrument_bank), so the
+        // decode itself refuses instead of handing back an unvalidated instrument.
+        TEST(! Synth::decode_instrument_json(stale_doc,
+                                             static_cast<uint32_t>(strlen(stale_doc)),
+                                             &stale_instr,
+                                             stale_envs,
+                                             &stale_env_count,
+                                             stale_lfos,
+                                             &stale_lfo_count));
+
+        // The validator still refuses the stale state when it arrives by any
+        // other route (a hand-authored bank), and the encoder refuses to emit it.
+        stale_instr                                                = {};
+        stale_instr.layer_count                                    = 1;
+        stale_instr.routing[Synth::mod_volume].num_inputs          = 1;
+        stale_instr.routing[Synth::mod_volume].inputs[0].source    = Synth::ModSource::velocity;
+        stale_instr.routing[Synth::mod_volume].inputs[0].cc_number = 17;
+        stale_instr.routing[Synth::mod_volume].inputs[0].op        = Synth::SourceOp::add;
+        stale_instr.routing[Synth::mod_volume].inputs[0].scale     = 0.5f;
+        static Synth::InstrumentBank stale_bank;
+        memset(&stale_bank, 0, sizeof(stale_bank));
+        static uint16_t stale_env_ids[Synth::instrument_max_envelopes];
+        static uint16_t stale_lfo_ids[Synth::instrument_max_lfos];
+        TEST(Synth::remap_envelopes(&stale_bank, stale_envs, stale_env_count, stale_env_ids));
+        TEST(Synth::remap_lfos(&stale_bank, stale_lfos, stale_lfo_count, stale_lfo_ids));
+        Synth::Instrument stale_installed;
+        Synth::remap_instrument(stale_instr, stale_env_ids, stale_lfo_ids, &stale_installed);
+        const uint32_t stale_slot = stale_bank.instruments.allocate();
+        TEST(stale_slot != pool_no_slot);
+        stale_bank.instruments.entries[stale_slot] = stale_installed;
+        stale_bank.channel_zones[0][0].start_note  = 1;
+        stale_bank.channel_zones[0][0].instrument  = static_cast<uint8_t>(stale_slot);
+        TEST(! Synth::validate_instrument_bank(&stale_bank));
+
+        // The document encoder refuses (or at least never emits) a stale CC
+        // number on a non-CC instrument input.
+        static char    stale_encoded[16 * 1024];
+        const uint32_t stale_len =
+            Synth::encode_instrument_json(stale_encoded, sizeof(stale_encoded), &stale_installed, &stale_bank);
+        TEST(stale_len == 0 || strstr(stale_encoded, "cc_number") == nullptr);
     }
 
     // ---------------------------------------------------------------------------

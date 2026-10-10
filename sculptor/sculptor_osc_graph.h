@@ -26,11 +26,13 @@ namespace Sculptor {
 // Only waveform/mode availability; connections, edit locks and ghosts are caller-owned.
 bool oscillator_slot_waveform_mode_disabled(const Node& node, uint32_t slot_index);
 
-// Six MIDI source roles (every ModSource except none) share one input node.
+// The six instrument-supported MIDI source roles (pitch bend, mod wheel, channel
+// pressure, velocity, aftertouch and combined pressure; not the whole ModSource
+// set) share one input node.
 constexpr uint32_t num_osc_graph_inputs = static_cast<uint32_t>(Synth::ModSource::pressure_combine);
 // The registry/record source bounds and the canonical node numbering pin the
-// same bound: a drift between the ModSource set and the canonical numbering
-// must fail the build.
+// same bound: a drift between the supported-source set and the canonical
+// numbering must fail the build.
 static_assert(num_osc_graph_inputs == Synth::graph_canonical_input_count);
 
 // Free-standing envelope/LFO node instance, registered per (zone, kind,
