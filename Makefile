@@ -155,6 +155,7 @@ ifeq ($(UNAME), Windows)
     threed_src_files       += windows/main_windows.cpp
     threed_gui_src_files   += windows/gui_windows.cpp
     threed_gui_src_files   += windows/realtime_synth_windows.cpp
+    threed_gui_src_files   += windows/midi_windows.cpp
     threed_nogui_src_files += windows/nogui_windows.cpp
 
     ifeq ($(stdlib), 0)
@@ -366,6 +367,9 @@ ifeq ($(UNAME), Windows)
     win_libs += kernel32.lib
     win_libs += ole32.lib
     win_libs += user32.lib
+
+    LDFLAGS_gui += winmm.lib
+    LDFLAGS_gui += avrt.lib
 
     LDFLAGS += -nologo
     LDFLAGS += $(win_libs)
