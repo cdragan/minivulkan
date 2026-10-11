@@ -271,6 +271,9 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
                     continue;
                 }
                 const Slot& slot    = nodes.entries[n].slots.entries[s];
+                if (slot_hidden_callback && slot_hidden_callback(slot_hidden_user_data, *this, n, s)) {
+                    continue;
+                }
                 const bool  has_dot = slot.kind == SlotKind::input || slot.kind == SlotKind::output ||
                                       (slot.kind == SlotKind::property && slot.connectable);
                 if (! has_dot) {
@@ -334,6 +337,11 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
                 continue;
             }
             const Slot& slot = node.slots.entries[slot_idx];
+            // Display-filtered slots render nothing: no line, no dot,
+            // no hit target (live connection-derived row visibility).
+            if (slot_hidden_callback && slot_hidden_callback(slot_hidden_user_data, *this, node_idx, slot_idx)) {
+                continue;
+            }
             uint32_t    line_idx;
             if (slot.row_group != 0 && group_line[slot.row_group] >= 0) {
                 line_idx = static_cast<uint32_t>(group_line[slot.row_group]);

@@ -204,6 +204,13 @@ using ConnectionRetargetInterceptor = ConnectionRetargetDecision (*)(void*    us
 // True handles a user disconnect as cancellation; false permits raw deletion.
 using ConnectionDisconnectInterceptor = bool (*)(void* user_data, uint32_t connection_idx);
 
+// Caller display filter for projected slots: return true to omit the slot
+// from line layout and connector hit-testing for as long as the filter says
+// so. Used for live connection-derived row visibility (an effect parameter
+// with no modulator collapses to its value row). A display filter only:
+// slots, indices, connections and snapshots stay untouched. May be null.
+using SlotHiddenCallback = bool (*)(void* user_data, const Graph& graph, uint32_t node_idx, uint32_t slot_idx);
+
 constexpr uint32_t max_pending_changes = 256;
 
 // Shared between the data model and the renderer.
@@ -294,6 +301,8 @@ public:
     // by move_connection_end; read-only for validators.
     uint32_t moving_connection = pool_no_slot;
     void     set_disconnect_interceptor(ConnectionDisconnectInterceptor callback, void* user_data);
+    // Installs the caller's slot display filter (see SlotHiddenCallback).
+    void     set_slot_hidden_callback(SlotHiddenCallback callback, void* user_data);
     // True means deleted or handled cancellation; false means invalid/stale index.
     bool user_delete_connection(uint32_t connection_idx);
 
@@ -518,6 +527,8 @@ private:
     void*                           retarget_user_data     = nullptr;
     ConnectionDisconnectInterceptor disconnect_interceptor = nullptr;
     void*                           disconnect_user_data   = nullptr;
+    SlotHiddenCallback              slot_hidden_callback   = nullptr;
+    void*                           slot_hidden_user_data  = nullptr;
 
     // Caller veto for delete_node and items for the canvas popup.
     NodeDeleteVeto     delete_veto           = nullptr;

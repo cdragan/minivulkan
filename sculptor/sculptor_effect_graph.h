@@ -160,6 +160,18 @@ int32_t fx_effect_slot_of(const EffectGraphMapping& mapping, uint32_t node_idx);
 
 // Descriptor id an LFO node projects, or 0 when the node is not an LFO node.
 uint32_t fx_lfo_desc_of(const EffectGraphMapping& mapping, uint32_t node_idx);
+// Whether projected param `param` on an effect node carries no modulator:
+// no connection targets its base-value row (an inline wire in transit) or
+// any of its three modulator input dots. Derived live from connection
+// state at render time, never stored; the renderer collapses such a param
+// to its base-value row and hides the modulator rows.
+bool fx_param_is_collapsed(const Graph& graph, uint32_t node_idx, uint32_t param);
+// The first free modulator input dot of projected param `param` on an
+// effect node: the LFO dot for an LFO source wire, else the first free
+// Source A/B dot in row order. pool_no_slot when the wire's family has no
+// free input. Pure connection-state query; the inline value-row dot of a
+// collapsed parameter resolves its wire through this choice.
+uint32_t fx_param_free_input(const Graph& graph, uint32_t node_idx, uint32_t param, bool lfo_source);
 // Budget for one additional represented node, including owner roots and legacy pins.
 bool fx_can_add_node(const Synth::InstrumentEditorBank* source, uint32_t owner, const bool* pinned_lfos = nullptr);
 // Number of nodes the chain's projection needs: fixed endpoints, one per

@@ -431,6 +431,33 @@ static bool fx_node_delete_veto(void* user_data, uint32_t node_idx)
     return node_idx == fx_mapping.input_node || node_idx == fx_mapping.output_node || node_idx == fx_mapping.midi_node;
 }
 
+// Slot display filter for the effects graph: a parameter with no modulator
+// collapses to its base-value row, whose inline dot (connectable in the
+// projection) stands in for the row's first free modulator input. The
+// filter hides the param's modulator rows only; slot indices, slots and
+// connections stay untouched, so snapshots, undo bytes and every
+// slot-arithmetic decoder are unaffected. Visibility derives from live
+// connection state at render time (Sculptor::fx_param_is_collapsed),
+// never stored state.
+static bool fx_slot_hidden(void* user_data, const Sculptor::Graph& graph, uint32_t node_idx, uint32_t slot_idx)
+{
+    (void)user_data;
+    const int32_t effect = Sculptor::fx_effect_slot_of(fx_mapping, node_idx);
+    if (effect < 0 || slot_idx < Sculptor::fx_param_row(0)) {
+        return false;
+    }
+    const uint32_t param = (slot_idx - Sculptor::fx_param_row(0)) / Sculptor::fx_param_stride;
+    const uint32_t field = (slot_idx - Sculptor::fx_param_row(0)) % Sculptor::fx_param_stride;
+    if (field == 0) {
+        return false; // the base-value row always renders (it carries the inline dot)
+    }
+    const Synth::EffectChainBinding& chain = Sculptor::fx_graph_chain(&instr_bank.bank, fx_mapping.chain);
+    if (param >= Synth::get_effect_param_floats(chain.effects[effect].type)) {
+        return false;
+    }
+    return Sculptor::fx_param_is_collapsed(graph, node_idx, param);
+}
+
 // Connection grammar for the effects graph: a parameter dot takes an LFO's
 // Value wire (the wire is the binding), a serial In dot takes audio from
 // the fixed input or an effect's Out.  Everything else refuses with a
@@ -462,6 +489,32 @@ static bool fx_connection_validator(void*              user_data,
     if (in_slot >= 0 && (param_field == 4 || param_field == 7)) {
         if (output.node_idx != fx_mapping.midi_node) {
             graph.set_error("Effects take channel-wide MIDI sources only");
+            return false;
+        }
+        return true;
+    }
+
+    // A collapsed parameter's inline value-row dot takes the same wire
+    // families as the row's modulator inputs: an LFO's Value output binds
+    // the LFO input, a channel-wide MIDI source or added CC binds the
+    // first free source row (the apply path resolves the landing).
+    // Everything else refuses.
+    if (in_slot >= 0 && input.slot_idx >= Sculptor::fx_param_row(0) &&
+        (input.slot_idx - Sculptor::fx_param_row(0)) % Sculptor::fx_param_stride == 0) {
+        if (Sculptor::fx_lfo_desc_of(fx_mapping, output.node_idx) != 0) {
+            return true;
+        }
+        bool source_dot = false;
+        if (output.node_idx == fx_mapping.midi_node) {
+            for (uint32_t s = 0; s < Sculptor::fx_num_input_sources; ++s) {
+                source_dot = source_dot || fx_mapping.midi_source_slots[s] == output.slot_idx;
+            }
+            for (uint32_t cc = 0; cc < Synth::num_assignable_ccs; ++cc) {
+                source_dot = source_dot || fx_mapping.midi_cc_slots[cc] == output.slot_idx;
+            }
+        }
+        if (! source_dot) {
+            graph.set_error("Only an LFO or a channel-wide MIDI source can modulate a parameter");
             return false;
         }
         return true;
@@ -571,12 +624,19 @@ static bool fx_node_menu(void* user_data, uint32_t node_idx)
             ImGui::EndMenu();
         }
 
-        ImGui::Separator();
+        // The Remove list's separator goes before the first emitted item
+        // only: an empty list must not stack its separator with the
+        // widget's own post-callback separator.
+        bool emitted_remove = false;
 
         const Synth::EffectChainBinding& chain = Sculptor::fx_graph_chain(&instr_bank.bank, fx_mapping.chain);
         for (uint32_t i = 0; i < Synth::num_assignable_ccs; ++i) {
             if (! (mask & (1u << i))) {
                 continue;
+            }
+            if (! emitted_remove) {
+                ImGui::Separator();
+                emitted_remove = true;
             }
             const uint32_t cc_number = Synth::cc_msb_base + i;
             char           label[32];
@@ -1184,6 +1244,7 @@ void Sculptor::SynthEditor::reproject_osc_graph(uint32_t channel, uint32_t zone)
     osc_graph.set_disconnect_interceptor(nullptr, nullptr);
     osc_graph.set_canvas_menu_callback(&osc_canvas_menu_entry, this);
     osc_graph.set_node_menu_callback(&osc_node_menu, nullptr);
+    osc_graph.set_slot_hidden_callback(nullptr, nullptr);
     fx_graph_projected = false;
     // Rebind envelope state widgets from scratch: gestures and point
     // selections cannot outlive the graph they were made in.
@@ -2019,6 +2080,7 @@ void Sculptor::SynthEditor::reproject_fx_graph(uint32_t chain)
     osc_graph.set_disconnect_interceptor(nullptr, nullptr);
     osc_graph.set_canvas_menu_callback(&fx_canvas_menu, nullptr);
     osc_graph.set_node_menu_callback(&fx_node_menu, nullptr);
+    osc_graph.set_slot_hidden_callback(&fx_slot_hidden, nullptr);
     // Projection construction is quiet; drain the ring anyway so no leftover
     // event leaks into the next apply batch.
     Sculptor::GraphChange discard[Sculptor::max_pending_changes];

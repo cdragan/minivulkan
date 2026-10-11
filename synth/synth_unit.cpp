@@ -5386,6 +5386,151 @@ static void effects_enable_regressions()
     }
 }
 
+// Collapsed modulator rows: a parameter with no modulator projects its
+// base-value row connectable (the inline dot), the row set collapses to the
+// value row, and an inline wire on the value row binds the row's first free
+// modulator input through the same dot apply paths.
+static void effects_inline_modulator_regressions()
+{
+    static Synth::InstrumentEditorBank source;
+    static Synth::InstrumentEditorBank candidate;
+    static Sculptor::Graph graph;
+    static Sculptor::EffectGraphMapping mapping;
+    static Sculptor::GraphChange discarded[Sculptor::max_pending_changes];
+
+    // T-P4-1: the bare base-value row admits wires; a param with any
+    // modulator binding (source or LFO) closes the row again.
+    add_cc_chain_fixture(&source, 0);
+    TEST(Sculptor::project_effect_chain_to_graph(source, 0, &graph, &mapping));
+    graph.take_changes(discarded, Sculptor::max_pending_changes);
+    const Sculptor::Slot& bare_row = graph.node(mapping.effect_nodes[0]).slots.entries[Sculptor::fx_param_row(0)];
+    TEST(bare_row.kind == Sculptor::SlotKind::property);
+    TEST(bare_row.connectable);
+
+    Synth::EffectChainBinding& wired_chain = add_cc_chain_fixture(&source, 0);
+    wired_chain.effects[0].bindings[0].num_inputs = 1;
+    wired_chain.effects[0].bindings[0].inputs[0].source = Synth::ModSource::pitch_bend;
+    wired_chain.effects[0].bindings[0].inputs[0].op = Synth::SourceOp::add;
+    wired_chain.effects[0].bindings[0].inputs[0].scale = 1.0f;
+    TEST(Sculptor::project_effect_chain_to_graph(source, 0, &graph, &mapping));
+    graph.take_changes(discarded, Sculptor::max_pending_changes);
+    TEST(! graph.node(mapping.effect_nodes[0]).slots.entries[Sculptor::fx_param_row(0)].connectable);
+
+    uint16_t lfo_descriptor = 0;
+    Synth::EffectChainBinding& lfo_chain = add_cc_chain_fixture(&source, 0);
+    TEST(Sculptor::allocate_default_lfo(&source.bank, &lfo_descriptor));
+    lfo_chain.effects[0].bindings[0].lfo_desc_id = lfo_descriptor;
+    TEST(Sculptor::project_effect_chain_to_graph(source, 0, &graph, &mapping));
+    graph.take_changes(discarded, Sculptor::max_pending_changes);
+    TEST(! graph.node(mapping.effect_nodes[0]).slots.entries[Sculptor::fx_param_row(0)].connectable);
+
+    // T-P4-2: an inline wire on the bare value row binds the row's first
+    // free modulator input: an LFO output the LFO input with the fresh
+    // depth default, a channel-wide MIDI source the first free source row
+    // with the neutral op/scale. The re-projection re-lands the wire on
+    // the dot it filled.
+    add_cc_chain_fixture(&source, 0);
+    TEST(Sculptor::allocate_default_lfo(&source.bank, &lfo_descriptor));
+    bool pinned_lfos[Synth::max_lfos] = {};
+    pinned_lfos[lfo_descriptor - 1] = true;
+    TEST(Sculptor::project_effect_chain_to_graph(source, 0, &graph, &mapping, pinned_lfos));
+    graph.take_changes(discarded, Sculptor::max_pending_changes);
+    const Sculptor::EndPoint lfo_out = { mapping.lfo_nodes[lfo_descriptor - 1], 0 };
+    const Sculptor::EndPoint value_in = { mapping.effect_nodes[0], Sculptor::fx_param_row(0) };
+    TEST(graph.add_connection(lfo_out, value_in) != Sculptor::pool_no_slot);
+    Sculptor::GraphChange lfo_inline = {};
+    lfo_inline.kind = Sculptor::ChangeKind::connection_added;
+    lfo_inline.connection_output = lfo_out;
+    lfo_inline.connection_input = value_in;
+    candidate = source;
+    TEST(Sculptor::apply_fx_graph_change(&candidate.bank, graph, mapping, lfo_inline));
+    TEST(candidate.bank.channel_chains[0].effects[0].bindings[0].lfo_desc_id == lfo_descriptor);
+    TEST(candidate.bank.channel_chains[0].effects[0].bindings[0].lfo_depth == 0.5f);
+    TEST(Sculptor::project_effect_chain_to_graph(candidate, 0, &graph, &mapping, pinned_lfos));
+    graph.take_changes(discarded, Sculptor::max_pending_changes);
+    TEST(find_fx_graph_connection(graph, lfo_out, { mapping.effect_nodes[0], Sculptor::fx_param_lfo_dot(0) }) != Sculptor::pool_no_slot);
+
+    add_cc_chain_fixture(&source, 0);
+    TEST(Sculptor::project_effect_chain_to_graph(source, 0, &graph, &mapping));
+    graph.take_changes(discarded, Sculptor::max_pending_changes);
+    const Sculptor::EndPoint bend_out = { mapping.midi_node, mapping.midi_source_slots[0] };
+    const Sculptor::EndPoint inline_in = { mapping.effect_nodes[0], Sculptor::fx_param_row(0) };
+    TEST(graph.add_connection(bend_out, inline_in) != Sculptor::pool_no_slot);
+    Sculptor::GraphChange source_inline = {};
+    source_inline.kind = Sculptor::ChangeKind::connection_added;
+    source_inline.connection_output = bend_out;
+    source_inline.connection_input = inline_in;
+    candidate = source;
+    TEST(Sculptor::apply_fx_graph_change(&candidate.bank, graph, mapping, source_inline));
+    TEST(candidate.bank.channel_chains[0].effects[0].bindings[0].num_inputs == 1);
+    TEST(candidate.bank.channel_chains[0].effects[0].bindings[0].inputs[0].source == Synth::ModSource::pitch_bend);
+    TEST(candidate.bank.channel_chains[0].effects[0].bindings[0].inputs[0].op == Synth::SourceOp::add);
+    TEST(candidate.bank.channel_chains[0].effects[0].bindings[0].inputs[0].scale == 1.0f);
+    TEST(Sculptor::project_effect_chain_to_graph(candidate, 0, &graph, &mapping));
+    graph.take_changes(discarded, Sculptor::max_pending_changes);
+    TEST(find_fx_graph_connection(graph, bend_out, { mapping.effect_nodes[0], Sculptor::fx_param_src_dot(0, 0) }) != Sculptor::pool_no_slot);
+
+    // T-P4-5: retargeting a live source wire onto another param's inline
+    // dot moves the binding: the wire leaves the previous source row (its
+    // packed input forgets the source) and binds the landing row's first
+    // free source input.
+    add_cc_chain_fixture(&source, 0);
+    Synth::EffectChainBinding& two_chain = add_cc_chain_fixture(&source, 0);
+    two_chain.num_effects = 2;
+    Sculptor::fx_init_slot(&two_chain, 1, Synth::EffectType::delay);
+    TEST(Sculptor::project_effect_chain_to_graph(source, 0, &graph, &mapping));
+    graph.take_changes(discarded, Sculptor::max_pending_changes);
+    const Sculptor::EndPoint row_a = { mapping.effect_nodes[0], Sculptor::fx_param_src_dot(0, 0) };
+    TEST(graph.add_connection(bend_out, row_a) != Sculptor::pool_no_slot);
+    Sculptor::GraphChange first_bind = {};
+    first_bind.kind = Sculptor::ChangeKind::connection_added;
+    first_bind.connection_output = bend_out;
+    first_bind.connection_input = row_a;
+    candidate = source;
+    TEST(Sculptor::apply_fx_graph_change(&candidate.bank, graph, mapping, first_bind));
+    const uint32_t moved_wire = find_fx_graph_connection(graph, bend_out, row_a);
+    TEST(moved_wire != Sculptor::pool_no_slot);
+    const Sculptor::EndPoint inline_b = { mapping.effect_nodes[1], Sculptor::fx_param_row(0) };
+    graph.set_connection_input(moved_wire, inline_b);
+    Sculptor::GraphChange retarget = {};
+    retarget.kind = Sculptor::ChangeKind::connection_changed;
+    retarget.connection_output = bend_out;
+    retarget.connection_input = inline_b;
+    retarget.connection_prev_input = row_a;
+    TEST(Sculptor::apply_fx_graph_change(&candidate.bank, graph, mapping, retarget));
+    TEST(candidate.bank.channel_chains[0].effects[0].bindings[0].num_inputs == 0);
+    TEST(candidate.bank.channel_chains[0].effects[1].bindings[0].num_inputs == 1);
+    TEST(candidate.bank.channel_chains[0].effects[1].bindings[0].inputs[0].source == Synth::ModSource::pitch_bend);
+    // T-P4-3: the collapse predicate derives live from connection state:
+    // no wire on the value row or any modulator dot keeps the param
+    // collapsed; the first wire anywhere opens the row set.
+    add_cc_chain_fixture(&source, 0);
+    TEST(Sculptor::project_effect_chain_to_graph(source, 0, &graph, &mapping));
+    graph.take_changes(discarded, Sculptor::max_pending_changes);
+    const uint32_t effect_node = mapping.effect_nodes[0];
+    TEST(Sculptor::fx_param_is_collapsed(graph, effect_node, 0));
+    TEST(graph.add_connection(bend_out, { effect_node, Sculptor::fx_param_lfo_dot(0) }) != Sculptor::pool_no_slot);
+    TEST(! Sculptor::fx_param_is_collapsed(graph, effect_node, 0));
+
+    // T-P4-4: the first-free-input choice fills LFO, then Source A, then
+    // Source B, per wire family; an exhausted family refuses.
+    add_cc_chain_fixture(&source, 0);
+    TEST(Sculptor::allocate_default_lfo(&source.bank, &lfo_descriptor));
+    memset(pinned_lfos, 0, sizeof(pinned_lfos));
+    pinned_lfos[lfo_descriptor - 1] = true;
+    TEST(Sculptor::project_effect_chain_to_graph(source, 0, &graph, &mapping, pinned_lfos));
+    graph.take_changes(discarded, Sculptor::max_pending_changes);
+    TEST(Sculptor::fx_param_free_input(graph, effect_node, 0, true) == Sculptor::fx_param_lfo_dot(0));
+    TEST(Sculptor::fx_param_free_input(graph, effect_node, 0, false) == Sculptor::fx_param_src_dot(0, 0));
+    TEST(graph.add_connection(bend_out, { effect_node, Sculptor::fx_param_src_dot(0, 0) }) != Sculptor::pool_no_slot);
+    TEST(Sculptor::fx_param_free_input(graph, effect_node, 0, false) == Sculptor::fx_param_src_dot(0, 1));
+    TEST(graph.add_connection(bend_out, { effect_node, Sculptor::fx_param_src_dot(0, 1) }) != Sculptor::pool_no_slot);
+    TEST(Sculptor::fx_param_free_input(graph, effect_node, 0, false) == Sculptor::pool_no_slot);
+    TEST(graph.add_connection({ mapping.lfo_nodes[lfo_descriptor - 1], 0 }, { effect_node, Sculptor::fx_param_lfo_dot(0) }) != Sculptor::pool_no_slot);
+    TEST(Sculptor::fx_param_free_input(graph, effect_node, 0, true) == Sculptor::pool_no_slot);
+    TEST(! Sculptor::fx_param_is_collapsed(graph, effect_node, 0));
+}
+
 int main()
 {
     effects_paste_pin_regressions();
@@ -5394,6 +5539,7 @@ int main()
     effects_clipboard_regressions();
     effects_add_cc_regressions();
     effects_enable_regressions();
+    effects_inline_modulator_regressions();
     // Debug builds log skipped unknown JSON fields to stdout; the suite must stay
     // silent unless failing, and failures report on stderr, so stdout is discarded.
 #ifdef _WIN32
@@ -16099,7 +16245,7 @@ int main()
 
     // T-M2-6: the master chain projects with the standard MIDI node (ED2
     // editor half): three output dots, the same node count as an identical
-    // channel chain, and a graph node named "MIDI" like on channel chains.
+    // channel chain, and a graph node named "MIDI Inputs" like on channel chains.
     {
         static Synth::InstrumentBank bank;
         make_valid_bank(bank);
@@ -16122,7 +16268,7 @@ int main()
         if (mapping.midi_node != Sculptor::pool_no_slot) {
             for (uint32_t source = 0; source < Sculptor::fx_num_input_sources; ++source) {
                 TEST(mapping.midi_source_slots[source] != Sculptor::pool_no_slot); // the 3 standard dots
-                TEST(strcmp(graph.node(mapping.midi_node).name, "MIDI") == 0);     // master MIDI node identity
+                TEST(strcmp(graph.node(mapping.midi_node).name, "MIDI Inputs") == 0);  // master MIDI node identity
             }
         }
     }

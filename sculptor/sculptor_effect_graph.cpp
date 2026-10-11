@@ -455,6 +455,30 @@ uint32_t Sculptor::fx_lfo_desc_of(const EffectGraphMapping& mapping, uint32_t no
     return 0;
 }
 
+bool Sculptor::fx_param_is_collapsed(const Graph& graph, const uint32_t node_idx, const uint32_t param)
+{
+    return ! graph.slot_is_connected(node_idx, fx_param_row(param))
+        && ! graph.slot_is_connected(node_idx, fx_param_lfo_dot(param))
+        && ! graph.slot_is_connected(node_idx, fx_param_src_dot(param, 0))
+        && ! graph.slot_is_connected(node_idx, fx_param_src_dot(param, 1));
+}
+
+uint32_t Sculptor::fx_param_free_input(const Graph& graph, const uint32_t node_idx, const uint32_t param, const bool lfo_source)
+{
+    if (lfo_source) {
+        return graph.slot_is_connected(node_idx, fx_param_lfo_dot(param))
+            ? pool_no_slot
+            : fx_param_lfo_dot(param);
+    }
+    for (uint32_t input = 0; input < Synth::max_mod_inputs; ++input) {
+        const uint32_t dot = fx_param_src_dot(param, input);
+        if (! graph.slot_is_connected(node_idx, dot)) {
+            return dot;
+        }
+    }
+    return pool_no_slot;
+}
+
 // Number of nodes the chain's projection needs: fixed endpoints, one per
 // projected effect slot, and one per pinned-or-referenced LFO descriptor.
 // Editors preflight node-adding commands against Sculptor::max_nodes with
@@ -522,7 +546,7 @@ bool Sculptor::project_effect_chain_to_graph(const Synth::InstrumentEditorBank& 
     // chain's sources resolve from channel index 0).  One output dot per
     // channel-wide source.
     {
-        const uint32_t midi_node = graph->create_node("MIDI", vmath::vec2(0.0f, 320.0f));
+        const uint32_t midi_node = graph->create_node("MIDI Inputs", vmath::vec2(0.0f, 320.0f));
         if (midi_node == pool_no_slot) {
             return false;
         }
@@ -574,12 +598,17 @@ bool Sculptor::project_effect_chain_to_graph(const Synth::InstrumentEditorBank& 
             const uint8_t                    row_group  = static_cast<uint8_t>(2 + param);
             // The base value rides its own slider line, like an oscillator
             // parameter node's Base Value row, and stays editable while a
-            // wired LFO modulates around it.
+            // wired LFO modulates around it. A param with no modulator yet
+            // also admits wires on the row itself: the inline dot stands in
+            // for the row's first free modulator input (LFO, then Source
+            // A/B), and the apply path resolves the landing. Any binding
+            // closes the row again - the modulator rows carry the dots.
             Slot row = bounded_real_slot(param_info.name,
                                          binding.base_value,
                                          param_info.min_value,
                                          param_info.max_value,
                                          param_info.logarithmic);
+            row.connectable = binding.lfo_desc_id == 0 && binding.num_inputs == 0;
             graph->add_slot(node, row);
             // The modulation row, the oscillator editor's LFO row grammar:
             // the LFO wire lands on the dot, Op picks how the wave combines
@@ -1128,6 +1157,98 @@ static bool apply_fx_graph_change_internal(Synth::InstrumentBank*              b
                     }
                 }
                 chain.effects[in_slot].enable_input = rebuilt;
+                return true;
+            }
+
+            // A collapsed parameter's inline value-row dot (the connectable
+            // base-value row): the wire stands in for the row's first free
+            // modulator input, so the binding lands there directly - an LFO
+            // output fills the LFO input (fresh depth default), a
+            // channel-wide MIDI source or added CC appends the first free
+            // source row (neutral add/scale). The dot exists only while the
+            // param carries no modulator, so the append cannot split the
+            // packed input list. A disconnect never observes a value-row
+            // endpoint (the apply-side bind and the re-projection that
+            // re-lands the wire land in the same drain), so deletes refuse.
+            if (in_slot >= 0 && param_field == 0) {
+                if (in_point.slot_idx >= graph.node(in_point.node_idx).slots.num_allocated) {
+                    return false;
+                }
+                const uint32_t num_params = Synth::get_effect_param_floats(chain.effects[in_slot].type);
+                const uint32_t param = (in_point.slot_idx - Sculptor::fx_param_row(0)) / Sculptor::fx_param_stride;
+                if (param >= num_params) {
+                    return false;
+                }
+                if (change.kind == Sculptor::ChangeKind::connection_deleted) {
+                    return false;
+                }
+                const uint32_t desc_id = Sculptor::fx_lfo_desc_of(mapping, out_point.node_idx);
+                const bool     lfo_wire = desc_id != 0;
+                if (! lfo_wire && (mapping.midi_node == Sculptor::pool_no_slot
+                                   || out_point.node_idx != mapping.midi_node)) {
+                    return false;
+                }
+                if (Sculptor::fx_param_free_input(graph, in_point.node_idx, param, lfo_wire)
+                    == Sculptor::pool_no_slot) {
+                    return false;
+                }
+                if (change.kind == Sculptor::ChangeKind::connection_changed) {
+                    // A retarget pulled the wire off another input endpoint;
+                    // that endpoint's owned state must forget the wire or
+                    // the move becomes a copy.
+                    const Sculptor::EndPoint prev = change.connection_prev_input;
+                    if (graph.node_occupied(prev.node_idx) &&
+                        (prev.node_idx != in_point.node_idx || prev.slot_idx != in_point.slot_idx)) {
+                        const uint32_t prev_field =
+                            prev.slot_idx >= Sculptor::fx_param_row(0)
+                                ? (prev.slot_idx - Sculptor::fx_param_row(0)) % Sculptor::fx_param_stride
+                                : Sculptor::fx_param_stride;
+                        const int32_t prev_slot = Sculptor::fx_effect_slot_of(mapping, prev.node_idx);
+                        if (prev_slot >= 0 && prev_field == 1) {
+                            const uint32_t prev_param =
+                                (prev.slot_idx - Sculptor::fx_param_lfo_dot(0)) / Sculptor::fx_param_stride;
+                            if (prev_param < Synth::get_effect_param_floats(chain.effects[prev_slot].type)) {
+                                chain.effects[prev_slot].bindings[prev_param].lfo_desc_id = 0;
+                            }
+                        }
+                        else if (prev.slot_idx == Sculptor::fx_enabled_row) {
+                            fx_drop_enabled_routing(chain, prev_slot);
+                        }
+                        else {
+                            bool released = false;
+                            if (! fx_release_prev_source(graph, mapping, chain, prev, &released)) {
+                                return false;
+                            }
+                        }
+                    }
+                }
+                Synth::EffectParamBinding& binding = chain.effects[in_slot].bindings[param];
+                if (lfo_wire) {
+                    if (desc_id > bank->lfos.num_allocated) {
+                        return false;
+                    }
+                    binding.lfo_desc_id = static_cast<uint16_t>(desc_id);
+                    if (binding.lfo_depth == 0.0f) {
+                        binding.lfo_depth = 0.5f; // a depth-0 fresh binding would read as broken
+                    }
+                    return true;
+                }
+                if (binding.num_inputs >= Synth::max_mod_inputs) {
+                    return false;
+                }
+                uint32_t source   = 0;
+                uint32_t cc_index = 0;
+                fx_source_of_dot(mapping, out_point.slot_idx, &source, &cc_index);
+                if (source == 0) {
+                    return false;
+                }
+                Synth::ModInput& added = binding.inputs[binding.num_inputs++];
+                added.source    = static_cast<Synth::ModSource>(source);
+                added.cc_number = source == static_cast<uint32_t>(Synth::ModSource::cc)
+                                      ? static_cast<uint8_t>(Synth::cc_msb_base + cc_index)
+                                      : 0; // a reused slot must not carry stale CC state
+                added.op    = Synth::SourceOp::add;
+                added.scale = 1.0f;
                 return true;
             }
 

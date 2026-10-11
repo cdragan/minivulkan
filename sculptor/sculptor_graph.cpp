@@ -712,6 +712,12 @@ void Sculptor::Graph::set_disconnect_interceptor(ConnectionDisconnectInterceptor
     disconnect_user_data   = user_data;
 }
 
+void Sculptor::Graph::set_slot_hidden_callback(SlotHiddenCallback callback, void* user_data)
+{
+    slot_hidden_callback   = callback;
+    slot_hidden_user_data  = user_data;
+}
+
 bool Sculptor::Graph::user_delete_connection(uint32_t connection_idx)
 {
     if (connection_idx >= max_connections || ! connections.is_occupied(connection_idx)) {

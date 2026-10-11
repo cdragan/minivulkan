@@ -1345,7 +1345,7 @@ bool Sculptor::project_instrument_to_graph(const Synth::Instrument&     instrume
     const uint32_t layer_count =
         instrument.layer_count <= Synth::max_layers ? instrument.layer_count : Synth::max_layers;
 
-    const uint32_t input_node = graph->create_node("Inputs", vmath::vec2(0.0f, 0.0f));
+    const uint32_t input_node = graph->create_node("MIDI Inputs", vmath::vec2(0.0f, 0.0f));
     if (input_node == Sculptor::pool_no_slot) {
         return false;
     }
