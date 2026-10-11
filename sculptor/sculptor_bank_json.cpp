@@ -895,6 +895,27 @@ uint32_t Synth::encode_editor_bank_json(const InstrumentEditorBank* bank, char* 
         o.ch(']');
     }
     o.ch(']');
+
+    // The added-CC registry rides the editor section only when any chain
+    // added a CC; absence decodes to all-zero masks.
+    bool any_added_cc = false;
+    for (uint32_t c = 0; c <= Synth::max_channels; ++c) {
+        if (bank->added_cc_mask[c] != 0) {
+            any_added_cc = true;
+            break;
+        }
+    }
+
+    if (any_added_cc) {
+        o.key("added_ccs");
+        o.ch('[');
+        for (uint32_t c = 0; c <= Synth::max_channels; ++c) {
+            o.sep();
+            o.uint_value(bank->added_cc_mask[c]);
+        }
+        o.ch(']');
+    }
+
     o.ch('}');
 
     o.str("}}");
@@ -2447,6 +2468,25 @@ static void decode_editor_state(Walker& w, uint32_t val_idx, Synth::InstrumentEd
                         return;
                     out->graph_missing_sum[channel][zone] = static_cast<uint8_t>(value);
                 });
+            });
+        }
+        else if (key_eq(w, key_idx, "added_ccs")) {
+            // The registry is 17 chain masks in chain order; any other
+            // length refuses.  The length check is unconditional: legacy
+            // root files carry the key too, so the effect-audio !v2 gate
+            // does not apply here.
+            if (w.toks[inner_idx].type != JSMN_ARRAY || w.toks[inner_idx].size != Synth::max_channels + 1) {
+                w.failed = true;
+                return;
+            }
+
+            walk_array(w, inner_idx, Synth::max_channels + 1, [&](uint32_t elem, uint32_t chain) {
+                uint32_t value = 0;
+                want_uint(w, elem, 0xFFFF, &value);
+                if (w.failed) {
+                    return;
+                }
+                out->added_cc_mask[chain] = static_cast<uint16_t>(value);
             });
         }
         else if (w.strict_editor_metadata)

@@ -56,6 +56,8 @@ private:
     void do_fx_add_effect(Synth::EffectType type);
     void do_fx_add_lfo();
     void do_fx_change_type(uint32_t node_idx, Synth::EffectType type);
+    void do_fx_add_cc(uint32_t cc_number);
+    void do_fx_remove_cc(uint32_t cc_number);
     void do_initialize(uint32_t channel);
     void do_delete(uint32_t channel);
     void do_zone_join_previous(uint32_t channel, uint32_t note);

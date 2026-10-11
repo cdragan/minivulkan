@@ -399,6 +399,14 @@ bool Synth::load_library_instrument(const char* const            path,
     // The record's chain replaces the target channel's chain; the load flow's
     // subsequent reclaim frees the replaced chain's exclusive LFOs.
     Synth::remap_effect_chain(record_bank.bank.channel_chains[0], lfo_ids, &dst_bank->channel_chains[channel]);
+    // The record's saved CC additions and the incoming chain's wired CC
+    // inputs both ride into the destination chain's registry; other chains'
+    // masks stay untouched.  The OR is idempotent for a repeated load.
+    const uint16_t chain_cc_mask = static_cast<uint16_t>(
+        record_bank.added_cc_mask[0] | Sculptor::fx_chain_wired_cc_mask(dst_bank->channel_chains[channel]));
+    library_load_candidate.added_cc_mask[channel] =
+        static_cast<uint16_t>(library_load_candidate.added_cc_mask[channel] | chain_cc_mask);
+
     library_load_candidate.effect_audio[channel] = record_bank.effect_audio[0];
 
     for (uint32_t zone = 0; zone < Synth::max_instr_per_channel && record_bank.bank.channel_zones[0][zone].start_note;
@@ -632,6 +640,8 @@ int Synth::save_library_record(const char* const                        path,
     // map sends an out-of-range reference to none so it cannot survive the record.
     Synth::remap_effect_chain(src_chain, lfo_ids, &reduced.bank.channel_chains[0]);
     reduced.effect_audio[0] = src_editor_bank->effect_audio[channel];
+    // The selected source channel's CC additions travel with the record.
+    reduced.added_cc_mask[0] = src_editor_bank->added_cc_mask[channel];
 
     for (uint32_t zone = 0; zone < num_zones; zone++) {
         reduced.bank.channel_zones[0][zone] = src_bank->channel_zones[channel][zone];

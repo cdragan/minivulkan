@@ -117,6 +117,11 @@ static vmath::vec2 fx_lfo_position(uint32_t ordinal)
     return vmath::vec2(fx_node_x(ordinal), 320.0f);
 }
 
+void Sculptor::fx_cc_pair_label(uint32_t cc_number, char* name, size_t capacity)
+{
+    snprintf(name, capacity, "CC %u (+%u)", cc_number, cc_number + Synth::cc_lsb_base - Synth::cc_msb_base);
+}
+
 static uint32_t projected_slots(const Synth::EffectChainBinding& chain, uint32_t* out_slots)
 {
     uint32_t count = 0;
@@ -143,11 +148,18 @@ static bool rebuild_param_inputs(const Sculptor::Graph&              graph,
     if (node.slots.num_allocated <= fx_param_src_dot(param, 1) + 2) {
         return false;
     }
-    // CC inputs are not editable in the effect graph: an edit that would recompile
-    // a param carrying a CC input is refused atomically, leaving the caller's
-    // binding untouched.
+    // A CC input refuses the edit while its dot does not exist: a loaded
+    // M1-era bank carries wired CC rows with an empty registry, and those
+    // rows stay inert until the user adds the CC.  A dotted CC row is fully
+    // editable.  The pre-check runs before any mutation, so a refusal
+    // leaves the caller's binding byte-identical.
     for (uint32_t input = 0; input < binding->num_inputs; ++input) {
-        if (binding->inputs[input].source == Synth::ModSource::cc) {
+        if (binding->inputs[input].source != Synth::ModSource::cc) {
+            continue;
+        }
+        if (binding->inputs[input].cc_number < Synth::cc_msb_base ||
+            binding->inputs[input].cc_number >= Synth::cc_msb_base + Synth::num_assignable_ccs ||
+            mapping.midi_cc_slots[binding->inputs[input].cc_number - Synth::cc_msb_base] == Sculptor::pool_no_slot) {
             return false;
         }
     }
@@ -161,13 +173,27 @@ static bool rebuild_param_inputs(const Sculptor::Graph&              graph,
         if (output.node_idx != mapping.midi_node) {
             return false;
         }
-        uint32_t source = 0;
+        uint32_t source   = 0;
+        uint32_t cc_index = 0;
         for (uint32_t s = 0; s < Sculptor::fx_num_input_sources; ++s) {
             if (mapping.midi_source_slots[s] == output.slot_idx) {
                 source = s + 1;
                 break;
             }
         }
+
+        if (source == 0) {
+            // Added-CC dots sit after the standard slots: a hit names the
+            // assignable CC the dot carries.
+            for (uint32_t i = 0; i < Synth::num_assignable_ccs; ++i) {
+                if (mapping.midi_cc_slots[i] == output.slot_idx) {
+                    source   = static_cast<uint32_t>(Synth::ModSource::cc);
+                    cc_index = i;
+                    break;
+                }
+            }
+        }
+
         if (source == 0) {
             return false;
         }
@@ -177,11 +203,32 @@ static bool rebuild_param_inputs(const Sculptor::Graph&              graph,
         }
         Synth::ModInput& mod_input = binding->inputs[num_inputs++];
         mod_input.source           = static_cast<Synth::ModSource>(source);
-        mod_input.cc_number        = 0; // a reused slot must not carry stale CC state
+        mod_input.cc_number        = source == static_cast<uint32_t>(Synth::ModSource::cc)
+                                         ? static_cast<uint8_t>(Synth::cc_msb_base + cc_index)
+                                         : 0; // a reused slot must not carry stale CC state
         mod_input.op               = op_slot.value.list_index == 1 ? Synth::SourceOp::multiply : Synth::SourceOp::add;
         mod_input.scale            = node.slots.entries[fx_param_src_dot(param, input) + 2].value.real;
     }
     binding->num_inputs = static_cast<uint16_t>(num_inputs);
+    return true;
+}
+
+// Transactional single-binding rebuild: the rebuild writes into a local
+// copy and the commit happens only on success, so a refusal leaves the
+// destination binding byte-identical.
+static bool rebuild_param_binding(const Sculptor::Graph&              graph,
+                                  const Sculptor::EffectGraphMapping& mapping,
+                                  uint32_t                            node_idx,
+                                  uint32_t                            param,
+                                  Synth::EffectParamBinding*          binding)
+{
+    Synth::EffectParamBinding rebuilt = *binding;
+
+    if (! rebuild_param_inputs(graph, mapping, node_idx, param, &rebuilt)) {
+        return false;
+    }
+
+    *binding = rebuilt;
     return true;
 }
 
@@ -236,6 +283,33 @@ bool Sculptor::effect_chain_uses_lfo(const Synth::EffectChainBinding& chain, uin
         }
     }
     return false;
+}
+
+bool Sculptor::fx_chain_uses_cc(const Synth::EffectChainBinding& chain, uint32_t cc_number)
+{
+    if (cc_number < Synth::cc_msb_base || cc_number >= Synth::cc_msb_base + Synth::num_assignable_ccs) {
+        return false;
+    }
+    return (fx_chain_wired_cc_mask(chain) >> (cc_number - Synth::cc_msb_base)) & 1u;
+}
+
+uint16_t Sculptor::fx_chain_wired_cc_mask(const Synth::EffectChainBinding& chain)
+{
+    uint16_t mask = 0;
+    for (uint32_t slot = 0; slot < chain.num_effects; ++slot) {
+        const uint32_t num_params = Synth::get_effect_param_floats(chain.effects[slot].type);
+        for (uint32_t param = 0; param < num_params; ++param) {
+            const Synth::EffectParamBinding& binding = chain.effects[slot].bindings[param];
+            for (uint32_t input = 0; input < binding.num_inputs; ++input) {
+                if (binding.inputs[input].source == Synth::ModSource::cc &&
+                    binding.inputs[input].cc_number >= Synth::cc_msb_base &&
+                    binding.inputs[input].cc_number < Synth::cc_msb_base + Synth::num_assignable_ccs) {
+                    mask = static_cast<uint16_t>(mask | (1u << (binding.inputs[input].cc_number - Synth::cc_msb_base)));
+                }
+            }
+        }
+    }
+    return mask;
 }
 
 const Sculptor::EffectTypeInfo& Sculptor::effect_type_info(Synth::EffectType type)
@@ -317,6 +391,9 @@ bool Sculptor::project_effect_chain_to_graph(const Synth::InstrumentEditorBank& 
     for (uint32_t desc = 0; desc < Synth::max_lfos; ++desc) {
         mapping->lfo_nodes[desc] = pool_no_slot;
     }
+    for (uint32_t i = 0; i < Synth::num_assignable_ccs; ++i) {
+        mapping->midi_cc_slots[i] = pool_no_slot;
+    }
 
     const bool                       is_master = chain == Synth::max_channels;
     const Synth::EffectChainBinding& chain_ref = chain_at(bank, chain);
@@ -350,6 +427,17 @@ bool Sculptor::project_effect_chain_to_graph(const Synth::InstrumentEditorBank& 
         for (uint32_t source = 1; source <= fx_num_input_sources; ++source) {
             mapping->midi_source_slots[source - 1] =
                 graph->add_slot(midi_node, output_slot(Sculptor::mod_source_names[source - 1]));
+        }
+
+        // One output dot per added CC of the chain, ascending CC order after
+        // the standard dots.  The label names the CC number pair.
+        for (uint32_t i = 0; i < Synth::num_assignable_ccs; ++i) {
+            if (! (authored.added_cc_mask[chain] & (1u << i))) {
+                continue;
+            }
+            char label[32];
+            Sculptor::fx_cc_pair_label(Synth::cc_msb_base + i, label, sizeof(label));
+            mapping->midi_cc_slots[i] = graph->add_slot(midi_node, output_slot(label));
         }
     }
 
@@ -513,11 +601,24 @@ bool Sculptor::project_effect_chain_to_graph(const Synth::InstrumentEditorBank& 
                 const Synth::EffectParamBinding& binding = chain_ref.effects[slot].bindings[param];
                 for (uint32_t input = 0; input < binding.num_inputs; ++input) {
                     const uint32_t source = static_cast<uint32_t>(binding.inputs[input].source);
-                    if (source == 0 || source > fx_num_input_sources) {
-                        continue; // validation guarantees this; stale rows stay unwired
+                    if (source >= 1 && source <= fx_num_input_sources) {
+                        graph->add_connection(EndPoint{ mapping->midi_node, mapping->midi_source_slots[source - 1] },
+                                              EndPoint{ mapping->effect_nodes[slot], fx_param_src_dot(param, input) });
+                        continue;
                     }
-                    graph->add_connection(EndPoint{ mapping->midi_node, mapping->midi_source_slots[source - 1] },
-                                          EndPoint{ mapping->effect_nodes[slot], fx_param_src_dot(param, input) });
+
+                    // An added-CC input wires from its own dot.  A CC input
+                    // without a registry dot stays unwired.  Decode does not
+                    // synthesize registry bits.
+                    if (source == static_cast<uint32_t>(Synth::ModSource::cc) &&
+                        binding.inputs[input].cc_number >= Synth::cc_msb_base &&
+                        binding.inputs[input].cc_number < Synth::cc_msb_base + Synth::num_assignable_ccs &&
+                        mapping->midi_cc_slots[binding.inputs[input].cc_number - Synth::cc_msb_base] != pool_no_slot) {
+                        graph->add_connection(
+                            EndPoint{ mapping->midi_node,
+                                      mapping->midi_cc_slots[binding.inputs[input].cc_number - Synth::cc_msb_base] },
+                            EndPoint{ mapping->effect_nodes[slot], fx_param_src_dot(param, input) });
+                    }
                 }
             }
         }
@@ -651,9 +752,9 @@ static bool apply_fx_graph_change_internal(Synth::InstrumentBank*              b
                     case 8:
                     case 9:
                         // A MIDI source row edit: the wired rows compile
-                        // back into the binding's packed input list from the
-                        // graph.
-                        return rebuild_param_inputs(graph, mapping, change.node_idx, param, &binding);
+                        // back into the binding's packed input list from
+                        // the graph.
+                        return rebuild_param_binding(graph, mapping, change.node_idx, param, &binding);
                     default:
                         // Fields 1, 4 and 7 are input dots: an input slot
                         // never produces value events.
@@ -816,11 +917,8 @@ static bool apply_fx_graph_change_internal(Synth::InstrumentBank*              b
                         }
                     }
                 }
-                return rebuild_param_inputs(graph,
-                                            mapping,
-                                            in_point.node_idx,
-                                            param,
-                                            &chain.effects[in_slot].bindings[param]);
+                Synth::EffectParamBinding& dest = chain.effects[in_slot].bindings[param];
+                return rebuild_param_binding(graph, mapping, in_point.node_idx, param, &dest);
             }
 
             return false;
@@ -1785,6 +1883,12 @@ bool Sculptor::replace_effect_chain_candidate(const Synth::InstrumentEditorBank*
     }
     Synth::EffectChainBinding& destination = fx_graph_chain(&effects_candidate.bank, chain);
     Synth::remap_effect_chain(document->chain, lfo_ids, &destination);
+    // A pasted chain's wired CC inputs adopt their dots into the destination
+    // registry.  The union only adds dots, never removes inputs, so the
+    // destination's pre-existing additions survive.
+    effects_candidate.added_cc_mask[chain] =
+        static_cast<uint16_t>(effects_candidate.added_cc_mask[chain] | fx_chain_wired_cc_mask(destination));
+
     effects_candidate.effect_audio[chain] = document->audio;
     uint32_t retained                     = 0;
     for (uint32_t index = 0; index < effects_candidate.graph_layout_count; ++index) {

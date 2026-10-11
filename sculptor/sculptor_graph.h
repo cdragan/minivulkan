@@ -349,7 +349,7 @@ public:
                           void*               user_data,
                           float               initial_height = 0.0f);
 
-    // Persistence (M4): save writes a tightly packed, versioned snapshot:
+    // Persistence: save writes a tightly packed, versioned snapshot:
     // u16 version, graph pools, view state, colors, ghost flags, then - if
     // state hooks are installed - caller state bytes.  load restores the graph
     // and reports bytes consumed via *bytes_consumed so the caller can parse

@@ -7,6 +7,7 @@
 
 #include <atomic>
 
+#include <stddef.h>
 #include <stdint.h>
 
 namespace Sculptor {
@@ -124,10 +125,44 @@ struct InstrumentEditorBank {
     GraphNodeLayout graph_layout[max_graph_records];
     uint32_t        graph_layout_count;
     uint8_t graph_missing_sum[max_channels][max_instr_per_channel]; // [channel][zone], one bit per oscillator layer
+    // Added-CC output dots per effect chain, bit i = CC (16 + i) is added on
+    // the chain (channel index, or max_channels for the master chain).  A dot
+    // exists only when its bit is set; wiring a CC never sets or clears bits.
+    // Zero = no dot.  Self-validating: every 16-bit pattern names only valid CCs.
+    // One spare entry keeps the struct free of tail padding: whole-bank
+    // snapshots and comparisons stay stable across plain assignment, which
+    // need not copy compiler padding.
+    uint16_t added_cc_mask[max_channels + 2];
 };
 
 static_assert(std::is_trivially_copyable_v<InstrumentEditorBank>,
               "InstrumentEditorBank must be trivially copyable for byte-snapshot undo");
+
+// Byte-snapshot undo and whole-bank test comparisons compare complete
+// objects: plain assignment need not copy compiler tail padding, so the
+// last member must end at the object boundary.
+
+// InstrumentEditorBank is not standard-layout: InstrumentBank contains Pool
+// members, and Pool inherits PoolBase privately.  offsetof stays valid for
+// this use, so we suppress the offsetof warning here.  The assert must keep
+// detecting tail padding after the last member.
+#if defined(__clang__) || defined(__GNUC__)
+#    pragma GCC diagnostic push
+#    pragma GCC diagnostic ignored "-Winvalid-offsetof"
+#endif
+#if defined(_MSC_VER) && ! defined(__clang__)
+#    pragma warning(push)
+#    pragma warning(disable : 4644) // offsetof used on non-standard-layout type
+#endif
+static_assert(offsetof(InstrumentEditorBank, added_cc_mask) + sizeof(InstrumentEditorBank::added_cc_mask) ==
+                  sizeof(InstrumentEditorBank),
+              "InstrumentEditorBank must not carry tail padding");
+#if defined(_MSC_VER) && ! defined(__clang__)
+#    pragma warning(pop)
+#endif
+#if defined(__clang__) || defined(__GNUC__)
+#    pragma GCC diagnostic pop
+#endif
 
 // Factory default channel names ("Channel 01".."Channel 16", channel 10 = "Drum Track").
 extern const char default_channel_names[max_channels][max_name_len];

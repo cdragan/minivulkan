@@ -535,9 +535,37 @@ static void test_startup_load_undo_baseline()
     TEST(memcmp(&editable, &loaded, sizeof(loaded)) == 0);
 }
 
+// Byte-snapshot undo carries the added-CC registry.
+static void test_add_cc_mask_snapshot()
+{
+    static Synth::InstrumentEditorBank pushed;
+    static Synth::InstrumentEditorBank editable;
+    pushed                  = {};
+    pushed.added_cc_mask[0] = 0x0001; // CC 16 added on channel 0
+
+    alignas(4) static uint8_t storage[2 * (sizeof(pushed) + 2 * sizeof(uint32_t))];
+    UndoRedo                  undo;
+    undo.init(storage);
+
+    editable = pushed;
+    undo.init_undo_push();
+    undo.push(&editable, sizeof(editable));
+    TEST(undo.finish_undo_push());
+
+    editable.added_cc_mask[0] = 0; // the editor removes the added CC
+
+    TEST(undo.init_undo());
+    undo.pop(&editable, sizeof(editable));
+    undo.finish_undo();
+
+    TEST(editable.added_cc_mask[0] == 0x0001);
+    TEST(memcmp(&editable, &pushed, sizeof(pushed)) == 0);
+}
+
 int main()
 {
     test_startup_load_undo_baseline();
+    test_add_cc_mask_snapshot();
     test_edit_origin_entry();
     test_empty_state();
     test_single_undo_push_pop();

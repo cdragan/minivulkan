@@ -7,6 +7,7 @@
 #pragma once
 
 #include "../synth/synth_instrument.h"
+#include "../synth/synth_midi_cc.h"
 #include "sculptor_graph.h"
 
 #include <stdint.h>
@@ -50,8 +51,21 @@ bool parse_effect_lfo_title(const char (&name)[32], uint16_t* descriptor_id);
 // and leaves the title unchanged.
 bool translate_effect_lfo_title(char (&name)[32], const uint16_t* lfo_ids, uint16_t* mapped_id);
 
+// Label of one assignable CC pair: the MSB controller number and its paired
+// LSB number, matching the assignable pair grammar (CC 16 rides CC 48).
+// Writes at most capacity bytes, including the terminator.
+void fx_cc_pair_label(uint32_t cc_number, char* name, size_t capacity);
+
 // Whether a meaningful effect parameter binding references this LFO descriptor.
 bool effect_chain_uses_lfo(const Synth::EffectChainBinding& chain, uint32_t descriptor_id);
+
+// Whether a meaningful effect parameter binding input names the assignable
+// CC `cc_number` (16..31).
+bool fx_chain_uses_cc(const Synth::EffectChainBinding& chain, uint32_t cc_number);
+
+// Wired assignable-CC mask of one chain: bit i names CC (16 + i) that a
+// meaningful parameter input wires.  Pure; callers own mask mutation.
+uint16_t fx_chain_wired_cc_mask(const Synth::EffectChainBinding& chain);
 
 // Neutral, audible base value for a newly added or retyped effect slot.
 float effect_param_default(Synth::EffectType type, uint32_t param);
@@ -65,8 +79,9 @@ Synth::EffectChainBinding& fx_graph_chain(Synth::InstrumentBank* bank, uint32_t 
 
 // Where the projected nodes of one chain live in the shared graph widget.
 // Node indices are valid until the next re-projection of any graph pane.
-// Channel-wide MIDI sources only: effects are not note-triggered, so the
-// per-voice sources (velocity and aftertouch) are not routable to them.
+// The MIDI node carries the three channel-wide MIDI sources plus the
+// chain's added-CC dots: effects are not note-triggered, so the per-voice
+// sources (velocity and aftertouch) are not routable to them.
 constexpr uint32_t fx_num_input_sources = 3;
 
 struct EffectGraphMapping {
@@ -76,8 +91,9 @@ struct EffectGraphMapping {
     uint32_t lfo_nodes[Synth::max_lfos];             // by descriptor id - 1; pool_no_slot when unreferenced
     uint32_t lfo_count;                              // number of live LFO nodes
     uint32_t midi_node; // MIDI source node; sources resolve from the chain's own channel, master from channel index 0
-    uint32_t midi_source_slots[fx_num_input_sources]; // output dot per channel-wide MIDI source
-    uint32_t chain;                                   // channel index or fx_master_chain
+    uint32_t midi_source_slots[fx_num_input_sources];  // output dot per channel-wide MIDI source
+    uint32_t midi_cc_slots[Synth::num_assignable_ccs]; // output dot per added CC; pool_no_slot when absent
+    uint32_t chain;                                    // channel index or fx_master_chain
 };
 
 // Captures validated serial audio topology; out is unchanged on refusal.

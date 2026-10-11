@@ -66,7 +66,9 @@ enum FxCanvasCommand {
     fx_cmd_add_lfo,
     fx_cmd_change_type,
     fx_cmd_copy,
-    fx_cmd_paste
+    fx_cmd_paste,
+    fx_cmd_add_cc,
+    fx_cmd_remove_cc
 };
 
 // The delete veto needs the graph to report a specific refusal, so the
@@ -138,6 +140,7 @@ uint32_t         osc_canvas_zone_note       = 0;
 
 FxCanvasCommand   fx_canvas_command = fx_cmd_none;
 Synth::EffectType fx_canvas_type    = Synth::EffectType::none;
+uint32_t          fx_canvas_cc      = 0; // pending fx_cmd_add_cc / fx_cmd_remove_cc CC number
 uint32_t          fx_menu_node      = Sculptor::pool_no_slot;
 
 // Undo tags: every commit kind has its own tag so one edit never coalesces
@@ -172,6 +175,8 @@ constexpr uint32_t fx_tag_add       = 33;
 constexpr uint32_t fx_tag_type      = 34;
 constexpr uint32_t fx_tag_add_lfo   = 35; // id0 = the fresh descriptor id
 constexpr uint32_t fx_tag_node_move = 36;
+constexpr uint32_t fx_tag_add_cc    = 37; // id0 = the chain, id1 = the CC number
+constexpr uint32_t fx_tag_remove_cc = 38; // id0 = the chain, id1 = the CC number
 
 OscDeleteVetoContext osc_veto_context = { &osc_mapping, &osc_graph };
 
@@ -520,6 +525,45 @@ static void fx_canvas_menu(void* user_data)
 static bool fx_node_menu(void* user_data, uint32_t node_idx)
 {
     (void)user_data;
+    if (node_idx == fx_mapping.midi_node) {
+        // The MIDI node's menu authors the chain's added-CC output dots.  An
+        // added CC is one removable dot labeled with its CC number pair; a
+        // removal refuses while the chain still wires the CC.
+        const uint16_t mask = instr_bank.added_cc_mask[fx_mapping.chain];
+
+        if (ImGui::BeginMenu("Add CC")) {
+            for (uint32_t i = 0; i < Synth::num_assignable_ccs; ++i) {
+                const uint32_t cc_number = Synth::cc_msb_base + i;
+                char           label[32];
+                Sculptor::fx_cc_pair_label(cc_number, label, sizeof(label));
+                if (ImGui::MenuItem(label, nullptr, false, ! (mask & (1u << i)))) {
+                    fx_canvas_command = fx_cmd_add_cc;
+                    fx_canvas_cc      = cc_number;
+                }
+            }
+            ImGui::EndMenu();
+        }
+
+        ImGui::Separator();
+
+        const Synth::EffectChainBinding& chain = Sculptor::fx_graph_chain(&instr_bank.bank, fx_mapping.chain);
+        for (uint32_t i = 0; i < Synth::num_assignable_ccs; ++i) {
+            if (! (mask & (1u << i))) {
+                continue;
+            }
+            const uint32_t cc_number = Synth::cc_msb_base + i;
+            char           label[32];
+            memcpy(label, "Remove ", 7);
+            Sculptor::fx_cc_pair_label(cc_number, label + 7, sizeof(label) - 7);
+            const bool wired = Sculptor::fx_chain_uses_cc(chain, cc_number);
+            if (ImGui::MenuItem(label, nullptr, false, ! wired)) {
+                fx_canvas_command = fx_cmd_remove_cc;
+                fx_canvas_cc      = cc_number;
+            }
+        }
+        return true;
+    }
+
     const int32_t slot = Sculptor::fx_effect_slot_of(fx_mapping, node_idx);
     if (slot < 0) {
         return false;
@@ -2105,6 +2149,12 @@ void Sculptor::SynthEditor::run_fx_canvas_command()
         case fx_cmd_add_lfo:
             do_fx_add_lfo();
             break;
+        case fx_cmd_add_cc:
+            do_fx_add_cc(fx_canvas_cc);
+            break;
+        case fx_cmd_remove_cc:
+            do_fx_remove_cc(fx_canvas_cc);
+            break;
         case fx_cmd_change_type:
             do_fx_change_type(node, fx_canvas_type);
             break;
@@ -2213,6 +2263,49 @@ void Sculptor::SynthEditor::do_fx_add_lfo()
         return;
     }
     if (! commit_candidate(candidate, Sculptor::UndoGroupTag{ fx_tag_add_lfo, descriptor, 0 })) {
+        return;
+    }
+    fx_graph_reproject = true;
+}
+
+// An added CC is one output dot on the chain's MIDI node.  The registry bit
+// is the whole state: one commit and one re-projection, no node budget and
+// no descriptor.
+void Sculptor::SynthEditor::do_fx_add_cc(uint32_t cc_number)
+{
+    if (cc_number < Synth::cc_msb_base || cc_number >= Synth::cc_msb_base + Synth::num_assignable_ccs) {
+        return;
+    }
+
+    candidate = instr_bank;
+    candidate.added_cc_mask[fx_mapping.chain] =
+        static_cast<uint16_t>(candidate.added_cc_mask[fx_mapping.chain] | (1u << (cc_number - Synth::cc_msb_base)));
+
+    if (! commit_candidate(candidate, Sculptor::UndoGroupTag{ fx_tag_add_cc, fx_mapping.chain, cc_number })) {
+        return;
+    }
+    fx_graph_reproject = true;
+}
+
+// Removal refuses while the chain still wires the CC: unwiring first keeps
+// the commit atomic instead of cascading a delete through the bindings.
+void Sculptor::SynthEditor::do_fx_remove_cc(uint32_t cc_number)
+{
+    if (cc_number < Synth::cc_msb_base || cc_number >= Synth::cc_msb_base + Synth::num_assignable_ccs) {
+        return;
+    }
+
+    const Synth::EffectChainBinding& chain = Sculptor::fx_graph_chain(&instr_bank.bank, fx_mapping.chain);
+    if (Sculptor::fx_chain_uses_cc(chain, cc_number)) {
+        Sculptor::notify_error("Synth: cannot remove CC %u: unwire it first", cc_number);
+        return;
+    }
+
+    candidate = instr_bank;
+    candidate.added_cc_mask[fx_mapping.chain] =
+        static_cast<uint16_t>(candidate.added_cc_mask[fx_mapping.chain] & ~(1u << (cc_number - Synth::cc_msb_base)));
+
+    if (! commit_candidate(candidate, Sculptor::UndoGroupTag{ fx_tag_remove_cc, fx_mapping.chain, cc_number })) {
         return;
     }
     fx_graph_reproject = true;

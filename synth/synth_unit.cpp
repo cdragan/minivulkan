@@ -3284,10 +3284,11 @@ static void effects_structural_regressions()
     TEST(Sculptor::apply_effect_graph_batch(&candidate, &graph, &mapping, &empty_wire, 1, nullptr, &loaded));
     TEST(loaded.bank.channel_chains[0].num_effects == 0);
 
-    // CC routing is invisible/uneditable in the effect graph, so any
-    // graph edit that would recompile a parameter carrying a CC input must
-    // refuse atomically and preserve the binding; legacy-only rebuilds must
-    // not carry stale CC numbers into the new validator.
+    // A CC input without a registry dot stays unwired, so any graph edit
+    // that would recompile its parameter refuses atomically and preserves
+    // the binding; a CC input with a projected dot, added via the editor,
+    // compiles and is editable.  Legacy-only rebuilds must not carry stale
+    // CC numbers into the new validator.
     {
         static Synth::InstrumentEditorBank cc_source;
         memset(&cc_source, 0, sizeof(cc_source));
@@ -3334,9 +3335,11 @@ static void effects_structural_regressions()
         candidate                         = cc_source;
         TEST(! Sculptor::apply_fx_graph_change(&candidate.bank, graph, mapping, cc_unwire));
         TEST(memcmp(&candidate.bank.channel_chains[0].effects[0].bindings[0], &cc_before, sizeof(cc_before)) == 0);
-        // A retarget that moves a legacy wire onto a parameter carrying a CC input
-        // must refuse atomically: the previous parameter's rebuild must not leak
-        // into the bank when the destination refuses.
+        // A retarget that moves a legacy wire onto a parameter carrying an
+        // undotted CC input must refuse atomically: the previous parameter's
+        // rebuild must not leak into the bank when the destination refuses.
+        // An undotted CC input stays unwired and refuses recompilation; a
+        // dotted CC input, added via the editor, compiles and is editable.
         {
             static Synth::InstrumentEditorBank retarget_source;
             memset(&retarget_source, 0, sizeof(retarget_source));
@@ -4355,12 +4358,464 @@ static void effects_clipboard_regressions()
     }
 }
 
+// One enabled delay effect on the chain a CC fixture builds on.  chain is a
+// channel index or Sculptor::fx_master_chain.
+static Synth::EffectChainBinding& add_cc_chain_fixture(Synth::InstrumentEditorBank* bank, uint32_t chain)
+{
+    memset(bank, 0, sizeof(*bank));
+    Synth::init_default_bank(&bank->bank);
+    Synth::EffectChainBinding& fixture_chain = Sculptor::fx_graph_chain(&bank->bank, chain);
+    fixture_chain.num_effects                = 1;
+    Sculptor::fx_init_slot(&fixture_chain, 0, Synth::EffectType::delay);
+    fixture_chain.effects[0].enabled = true;
+    return fixture_chain;
+}
+
+// Add-CC authoring regressions.  The registry is editor state only:
+// Synth::InstrumentEditorBank::added_cc_mask never reaches the runtime bank.
+// Each added CC is one MIDI-node output dot; a wire from a CC dot decodes to
+// a ModSource::cc input with the dot's CC number.
+static void effects_add_cc_regressions()
+{
+    static Synth::InstrumentEditorBank  source;
+    static Synth::InstrumentEditorBank  candidate;
+    static Synth::InstrumentEditorBank  loaded;
+    static Sculptor::Graph              graph;
+    static Sculptor::EffectGraphMapping mapping;
+    static Sculptor::GraphChange        discarded[Sculptor::max_pending_changes];
+    static char                         payload[Synth::library_payload_max];
+    static char                         reencoded[Synth::library_payload_max];
+
+    // Registry bits project MIDI-node output dots; absent bits project none.
+    add_cc_chain_fixture(&source, 0);
+    source.added_cc_mask[0] = (1u << 0) | (1u << 15);
+
+    TEST(Sculptor::project_effect_chain_to_graph(source, 0, &graph, &mapping));
+    graph.take_changes(discarded, Sculptor::max_pending_changes);
+    TEST(graph.node(mapping.midi_node).slots.num_allocated == 5);
+    for (uint32_t s = 0; s < Sculptor::fx_num_input_sources; ++s) {
+        TEST(mapping.midi_source_slots[s] != Sculptor::pool_no_slot);
+    }
+    TEST(mapping.midi_cc_slots[0] != Sculptor::pool_no_slot);
+    TEST(mapping.midi_cc_slots[15] != Sculptor::pool_no_slot);
+    for (uint32_t i = 1; i < Synth::num_assignable_ccs - 1; ++i) {
+        TEST(mapping.midi_cc_slots[i] == Sculptor::pool_no_slot);
+    }
+    TEST(strcmp(graph.node(mapping.midi_node).slots.entries[mapping.midi_cc_slots[0]].name, "CC 16 (+48)") == 0);
+    TEST(strcmp(graph.node(mapping.midi_node).slots.entries[mapping.midi_cc_slots[15]].name, "CC 31 (+63)") == 0);
+
+    // A CC dot decodes to a ModSource::cc input; unwiring drops the input
+    // while the registry bit and the dot remain.
+    const uint32_t          cc_amount = Sculptor::fx_param_src_dot(0, 0) + 2;
+    Sculptor::PropertyValue cc_value  = graph.node(mapping.effect_nodes[0]).slots.entries[cc_amount].value;
+    cc_value.real                     = 0.5f;
+    graph.set_slot_value(mapping.effect_nodes[0], cc_amount, cc_value);
+
+    TEST(graph.add_connection({ mapping.midi_node, mapping.midi_cc_slots[0] },
+                              { mapping.effect_nodes[0], Sculptor::fx_param_src_dot(0, 0) }) != Sculptor::pool_no_slot);
+    Sculptor::GraphChange cc_connect = {};
+    cc_connect.kind                  = Sculptor::ChangeKind::connection_added;
+    cc_connect.connection_output     = { mapping.midi_node, mapping.midi_cc_slots[0] };
+    cc_connect.connection_input      = { mapping.effect_nodes[0], Sculptor::fx_param_src_dot(0, 0) };
+    candidate                        = source;
+    TEST(Sculptor::apply_fx_graph_change(&candidate.bank, graph, mapping, cc_connect));
+    TEST(candidate.bank.channel_chains[0].effects[0].bindings[0].num_inputs == 1);
+    TEST(candidate.bank.channel_chains[0].effects[0].bindings[0].inputs[0].source == Synth::ModSource::cc);
+    TEST(candidate.bank.channel_chains[0].effects[0].bindings[0].inputs[0].cc_number == Synth::cc_msb_base);
+    TEST(candidate.bank.channel_chains[0].effects[0].bindings[0].inputs[0].op == Synth::SourceOp::add);
+    TEST(candidate.bank.channel_chains[0].effects[0].bindings[0].inputs[0].scale == 0.5f);
+
+    // A later Amount edit recompiles the row and keeps the CC identity.
+    cc_value.real = 0.75f;
+    graph.set_slot_value(mapping.effect_nodes[0], cc_amount, cc_value);
+    Sculptor::GraphChange cc_edit = {};
+    cc_edit.kind                  = Sculptor::ChangeKind::value_changed;
+    cc_edit.node_idx              = mapping.effect_nodes[0];
+    cc_edit.slot_idx              = cc_amount;
+    candidate                     = source;
+    TEST(Sculptor::apply_fx_graph_change(&candidate.bank, graph, mapping, cc_edit));
+    TEST(candidate.bank.channel_chains[0].effects[0].bindings[0].num_inputs == 1);
+    TEST(candidate.bank.channel_chains[0].effects[0].bindings[0].inputs[0].source == Synth::ModSource::cc);
+    TEST(candidate.bank.channel_chains[0].effects[0].bindings[0].inputs[0].cc_number == Synth::cc_msb_base);
+    TEST(candidate.bank.channel_chains[0].effects[0].bindings[0].inputs[0].scale == 0.75f);
+
+    // Unwiring drops the cc input; the registry bit and the dot remain.
+    // The disconnect starts from the compiled candidate, so the dropped
+    // input is the wired CC row and not an empty binding.
+    TEST(candidate.bank.channel_chains[0].effects[0].bindings[0].num_inputs == 1);
+    const Sculptor::EndPoint cc_dot_output = { mapping.midi_node, mapping.midi_cc_slots[0] };
+    const Sculptor::EndPoint cc_row_input  = { mapping.effect_nodes[0], Sculptor::fx_param_src_dot(0, 0) };
+    const uint32_t           cc_wire       = find_fx_graph_connection(graph, cc_dot_output, cc_row_input);
+    TEST(cc_wire != Sculptor::pool_no_slot);
+    TEST(graph.user_delete_connection(cc_wire));
+    Sculptor::GraphChange cc_unwire = {};
+    cc_unwire.kind                  = Sculptor::ChangeKind::connection_deleted;
+    cc_unwire.connection_output     = cc_dot_output;
+    cc_unwire.connection_input      = cc_row_input;
+    TEST(Sculptor::apply_fx_graph_change(&candidate.bank, graph, mapping, cc_unwire));
+    TEST(candidate.bank.channel_chains[0].effects[0].bindings[0].num_inputs == 0);
+    TEST(source.added_cc_mask[0] == ((1u << 0) | (1u << 15)));
+    TEST(Sculptor::project_effect_chain_to_graph(source, 0, &graph, &mapping));
+    graph.take_changes(discarded, Sculptor::max_pending_changes);
+    TEST(mapping.midi_cc_slots[0] != Sculptor::pool_no_slot);
+
+    // Undotted refusals stay.  A cc 17 input with no registry bit
+    // refuses a value edit atomically even when a standard row is wired too.
+    Synth::EffectChainBinding& refusal_chain = add_cc_chain_fixture(&source, 0);
+    Synth::EffectParamBinding& refusal_row   = refusal_chain.effects[0].bindings[0];
+    refusal_row.num_inputs                   = 2;
+    refusal_row.inputs[0].source             = Synth::ModSource::cc;
+    refusal_row.inputs[0].cc_number          = 17;
+    refusal_row.inputs[0].op                 = Synth::SourceOp::add;
+    refusal_row.inputs[0].scale              = 0.5f;
+    refusal_row.inputs[1].source             = Synth::ModSource::mod_wheel;
+    refusal_row.inputs[1].op                 = Synth::SourceOp::multiply;
+    refusal_row.inputs[1].scale              = 0.25f;
+
+    TEST(Sculptor::project_effect_chain_to_graph(source, 0, &graph, &mapping));
+    graph.take_changes(discarded, Sculptor::max_pending_changes);
+    const Synth::EffectParamBinding refusal_before = refusal_row;
+    const uint32_t          refusal_amount = Sculptor::fx_param_src_dot(0, 1) + 2; // wired standard row's Amount
+    Sculptor::PropertyValue refusal_value  = graph.node(mapping.effect_nodes[0]).slots.entries[refusal_amount].value;
+    refusal_value.real                     = 0.9f;
+    graph.set_slot_value(mapping.effect_nodes[0], refusal_amount, refusal_value);
+    Sculptor::GraphChange refusal_edit = {};
+    refusal_edit.kind                  = Sculptor::ChangeKind::value_changed;
+    refusal_edit.node_idx              = mapping.effect_nodes[0];
+    refusal_edit.slot_idx              = refusal_amount;
+    candidate                          = source;
+    TEST(! Sculptor::apply_fx_graph_change(&candidate.bank, graph, mapping, refusal_edit));
+    TEST(memcmp(&candidate.bank.channel_chains[0].effects[0].bindings[0], &refusal_before, sizeof(refusal_before)) ==
+         0);
+
+    // A wire from a slot present in neither slot array refuses too (the
+    // source == 0 path).  This projection carries no CC dots, so a mapping
+    // copy with a cleared standard slot models a vanished dot.
+    Synth::EffectChainBinding& stale_chain = add_cc_chain_fixture(&source, 0);
+    Synth::EffectParamBinding& stale_row   = stale_chain.effects[0].bindings[0];
+    stale_row.num_inputs                   = 1;
+    stale_row.inputs[0].source             = Synth::ModSource::mod_wheel;
+    stale_row.inputs[0].op                 = Synth::SourceOp::add;
+    stale_row.inputs[0].scale              = 0.25f;
+    TEST(Sculptor::project_effect_chain_to_graph(source, 0, &graph, &mapping));
+    graph.take_changes(discarded, Sculptor::max_pending_changes);
+    const Synth::EffectParamBinding stale_before = stale_row;
+    Sculptor::EffectGraphMapping    stale        = mapping;
+    stale.midi_source_slots[1]                   = Sculptor::pool_no_slot;
+    const uint32_t          stale_amount         = Sculptor::fx_param_src_dot(0, 0) + 2;
+    Sculptor::PropertyValue stale_value = graph.node(mapping.effect_nodes[0]).slots.entries[stale_amount].value;
+    stale_value.real                    = 0.9f;
+    graph.set_slot_value(mapping.effect_nodes[0], stale_amount, stale_value);
+    Sculptor::GraphChange stale_edit = {};
+    stale_edit.kind                  = Sculptor::ChangeKind::value_changed;
+    stale_edit.node_idx              = mapping.effect_nodes[0];
+    stale_edit.slot_idx              = stale_amount;
+    candidate                        = source;
+    TEST(! Sculptor::apply_fx_graph_change(&candidate.bank, graph, stale, stale_edit));
+    TEST(memcmp(&candidate.bank.channel_chains[0].effects[0].bindings[0], &stale_before, sizeof(stale_before)) == 0);
+
+    // Late-failure atomicity of both direct rebuild callers.  Source A
+    // is wired valid and Source B is wired from a non-MIDI node by direct
+    // graph mutation (the retarget test's shape).  A value edit and a connect
+    // into the same parameter must both refuse with the whole bank
+    // byte-identical.
+    Synth::EffectChainBinding& atomic_chain = add_cc_chain_fixture(&source, 0);
+    Synth::EffectParamBinding& atomic_row   = atomic_chain.effects[0].bindings[0];
+    atomic_row.num_inputs                   = 2;
+    atomic_row.inputs[0].source             = Synth::ModSource::channel_pressure;
+    atomic_row.inputs[0].op                 = Synth::SourceOp::add;
+    atomic_row.inputs[0].scale              = 0.9f;
+    atomic_row.inputs[1].source             = Synth::ModSource::velocity;
+    atomic_row.inputs[1].op                 = Synth::SourceOp::multiply;
+    atomic_row.inputs[1].scale              = 0.8f;
+
+    TEST(Sculptor::project_effect_chain_to_graph(source, 0, &graph, &mapping));
+    graph.take_changes(discarded, Sculptor::max_pending_changes);
+    TEST(graph.add_connection({ mapping.input_node, 0 },
+                              { mapping.effect_nodes[0], Sculptor::fx_param_src_dot(0, 1) }) != Sculptor::pool_no_slot);
+    const uint32_t          atomic_amount = Sculptor::fx_param_src_dot(0, 0) + 2;
+    Sculptor::PropertyValue atomic_value  = graph.node(mapping.effect_nodes[0]).slots.entries[atomic_amount].value;
+    atomic_value.real                     = 0.75f;
+    graph.set_slot_value(mapping.effect_nodes[0], atomic_amount, atomic_value);
+
+    // The value handler caller: an edit on the valid leading row.
+    Sculptor::GraphChange atomic_edit = {};
+    atomic_edit.kind                  = Sculptor::ChangeKind::value_changed;
+    atomic_edit.node_idx              = mapping.effect_nodes[0];
+    atomic_edit.slot_idx              = atomic_amount;
+    candidate                         = source;
+    TEST(! Sculptor::apply_fx_graph_change(&candidate.bank, graph, mapping, atomic_edit));
+    TEST(memcmp(&candidate.bank, &source.bank, sizeof(candidate.bank)) == 0);
+
+    // The connect caller: a wire landing on the same parameter's source row.
+    Sculptor::GraphChange atomic_wire = {};
+    atomic_wire.kind                  = Sculptor::ChangeKind::connection_added;
+    atomic_wire.connection_output     = { mapping.midi_node, mapping.midi_source_slots[0] };
+    atomic_wire.connection_input      = { mapping.effect_nodes[0], Sculptor::fx_param_src_dot(0, 0) };
+    candidate                         = source;
+    TEST(! Sculptor::apply_fx_graph_change(&candidate.bank, graph, mapping, atomic_wire));
+    TEST(memcmp(&candidate.bank, &source.bank, sizeof(candidate.bank)) == 0);
+
+    // Adoption union.  Replacing a chain whose bindings wire CC 17
+    // unions CC 17 into the destination registry.  Pre-existing registry
+    // bits on the destination and on another chain survive, and the
+    // re-projection shows the dot and the wire.
+    Synth::EffectChainBinding& pasted_chain = add_cc_chain_fixture(&source, 0);
+    Synth::EffectParamBinding& pasted_row   = pasted_chain.effects[0].bindings[0];
+    pasted_row.num_inputs                   = 1;
+    pasted_row.inputs[0].source             = Synth::ModSource::cc;
+    pasted_row.inputs[0].cc_number          = 17;
+    pasted_row.inputs[0].op                 = Synth::SourceOp::add;
+    pasted_row.inputs[0].scale              = 0.5f;
+
+    memset(&loaded, 0, sizeof(loaded));
+    Synth::init_default_bank(&loaded.bank);
+    loaded.added_cc_mask[0] = 1u << 6; // a pre-existing addition on the receiving chain
+    loaded.added_cc_mask[1] = 1u << 4; // a pre-existing addition on another chain
+
+    static Synth::EffectsDocument document;
+    TEST(Sculptor::extract_effect_chain_document(&source, 0, nullptr, nullptr, &document));
+    TEST(Sculptor::replace_effect_chain_candidate(&loaded, 0, &document, &candidate));
+    TEST(candidate.added_cc_mask[0] == ((1u << 1) | (1u << 6))); // CC 17 adopted, existing bit survives
+    TEST(candidate.added_cc_mask[1] == (1u << 4));               // the other chain's bit survives
+    TEST(Sculptor::project_effect_chain_to_graph(candidate, 0, &graph, &mapping));
+    graph.take_changes(discarded, Sculptor::max_pending_changes);
+    TEST(mapping.midi_cc_slots[1] != Sculptor::pool_no_slot);
+    TEST(find_fx_graph_connection(graph,
+                                  { mapping.midi_node, mapping.midi_cc_slots[1] },
+                                  { mapping.effect_nodes[0], Sculptor::fx_param_src_dot(0, 0) }) !=
+         Sculptor::pool_no_slot);
+
+    // fx_chain_uses_cc detects a chain's own CC bindings only.
+    Synth::EffectChainBinding& uses_chain                 = add_cc_chain_fixture(&source, 0);
+    uses_chain.effects[0].bindings[0].num_inputs          = 1;
+    uses_chain.effects[0].bindings[0].inputs[0].source    = Synth::ModSource::cc;
+    uses_chain.effects[0].bindings[0].inputs[0].cc_number = 16;
+    uses_chain.effects[0].bindings[0].inputs[0].op        = Synth::SourceOp::add;
+    uses_chain.effects[0].bindings[0].inputs[0].scale     = 0.5f;
+
+    TEST(Sculptor::fx_chain_uses_cc(source.bank.channel_chains[0], 16));
+    TEST(! Sculptor::fx_chain_uses_cc(source.bank.channel_chains[0], 17));
+    TEST(! Sculptor::fx_chain_uses_cc(loaded.bank.channel_chains[1], 16));
+
+    // Bank-file persistence.  Masks ride the editor section and
+    // survive a round trip byte-identically.  A bank with mask bits and no
+    // effect-audio edges still encodes to the legacy root and carries the key.
+    // A legacy file without the key decodes with all-zero masks.  The strict
+    // v2 root still refuses unknown editor keys.
+    add_cc_chain_fixture(&source, 0);
+    source.effect_audio[0].explicit_edges           = true;
+    source.effect_audio[0].next[0]                  = Synth::max_chain_effects + 1; // effect feeds the output
+    source.added_cc_mask[0]                         = 0x0003;                       // CC 16 and CC 17
+    source.added_cc_mask[Sculptor::fx_master_chain] = 0x8000;                       // CC 31
+
+    const uint32_t v2_length = Synth::encode_editor_bank_json(&source, payload, sizeof(payload));
+    TEST(v2_length > 0);
+    TEST(strstr(payload, "\"instrument_editor_bank_v2\"") != nullptr);
+    TEST(strstr(payload, "\"added_ccs\"") != nullptr);
+    memset(&loaded, 0, sizeof(loaded));
+    TEST(Synth::decode_editor_bank_json(payload, v2_length, &loaded));
+    TEST(loaded.added_cc_mask[0] == 0x0003);
+    TEST(loaded.added_cc_mask[Sculptor::fx_master_chain] == 0x8000);
+    const uint32_t v2_again = Synth::encode_editor_bank_json(&loaded, reencoded, sizeof(reencoded));
+    TEST(v2_again == v2_length && memcmp(payload, reencoded, v2_length) == 0);
+
+    // Strict v2 refusal: an unknown key inside the editor object fails.
+    static char v2_document[sizeof(payload) + 64];
+    memcpy(v2_document, payload, v2_length);
+    char* const editor = strstr(v2_document, "\"editor\":{");
+    TEST(editor != nullptr);
+    if (editor) {
+        const char   unknown[]   = "\"future\":1,";
+        const size_t unknown_len = strlen(unknown);
+        char* const  insert      = editor + strlen("\"editor\":{");
+        const size_t offset      = static_cast<size_t>(insert - v2_document);
+        memmove(insert + unknown_len, insert, v2_length - offset + 1);
+        memcpy(insert, unknown, unknown_len);
+        memset(&loaded, 0, sizeof(loaded));
+        TEST(! Synth::decode_editor_bank_json(v2_document, v2_length + static_cast<uint32_t>(unknown_len), &loaded));
+    }
+
+    // Legacy root: mask bits with no effect-audio edges still carry the key.
+    add_cc_chain_fixture(&source, 0);
+    source.added_cc_mask[0]                         = 0x0001;
+    source.added_cc_mask[Sculptor::fx_master_chain] = 0x0002;
+    const uint32_t legacy_length                    = Synth::encode_editor_bank_json(&source, payload, sizeof(payload));
+    TEST(legacy_length > 0);
+    TEST(strncmp(payload, "{\"instrument_editor_bank\":{", strlen("{\"instrument_editor_bank\":")) == 0);
+    TEST(strstr(payload, "\"added_ccs\"") != nullptr);
+    memset(&loaded, 0, sizeof(loaded));
+    TEST(Synth::decode_editor_bank_json(payload, legacy_length, &loaded));
+    TEST(loaded.added_cc_mask[0] == 0x0001);
+    TEST(loaded.added_cc_mask[Sculptor::fx_master_chain] == 0x0002);
+
+    // A legacy bank without the key decodes with all-zero masks.
+    add_cc_chain_fixture(&source, 0);
+    const uint32_t old_length = Synth::encode_editor_bank_json(&source, payload, sizeof(payload));
+    TEST(old_length > 0);
+    TEST(strstr(payload, "\"added_ccs\"") == nullptr); // zero masks emit no key
+    memset(&loaded, 0, sizeof(loaded));
+    TEST(Synth::decode_editor_bank_json(payload, old_length, &loaded));
+    for (uint32_t c = 0; c <= Synth::max_channels; ++c) {
+        TEST(loaded.added_cc_mask[c] == 0);
+    }
+
+    // The master chain (mask index fx_master_chain) authors and
+    // decodes CC dots identically to channel chains.
+    add_cc_chain_fixture(&source, Sculptor::fx_master_chain);
+    source.added_cc_mask[Sculptor::fx_master_chain] = 1u << 2; // CC 18
+
+    TEST(Sculptor::project_effect_chain_to_graph(source, Sculptor::fx_master_chain, &graph, &mapping));
+    graph.take_changes(discarded, Sculptor::max_pending_changes);
+    TEST(mapping.chain == Sculptor::fx_master_chain);
+    TEST(graph.node(mapping.midi_node).slots.num_allocated == 4);
+    TEST(mapping.midi_cc_slots[2] != Sculptor::pool_no_slot);
+    TEST(strcmp(graph.node(mapping.midi_node).slots.entries[mapping.midi_cc_slots[2]].name, "CC 18 (+50)") == 0);
+
+    TEST(graph.add_connection({ mapping.midi_node, mapping.midi_cc_slots[2] },
+                              { mapping.effect_nodes[0], Sculptor::fx_param_src_dot(0, 0) }) != Sculptor::pool_no_slot);
+    Sculptor::GraphChange master_wire = {};
+    master_wire.kind                  = Sculptor::ChangeKind::connection_added;
+    master_wire.connection_output     = { mapping.midi_node, mapping.midi_cc_slots[2] };
+    master_wire.connection_input      = { mapping.effect_nodes[0], Sculptor::fx_param_src_dot(0, 0) };
+    candidate                         = source;
+    TEST(Sculptor::apply_fx_graph_change(&candidate.bank, graph, mapping, master_wire));
+    TEST(candidate.bank.master_chain.effects[0].bindings[0].num_inputs == 1);
+    TEST(candidate.bank.master_chain.effects[0].bindings[0].inputs[0].source == Synth::ModSource::cc);
+    TEST(candidate.bank.master_chain.effects[0].bindings[0].inputs[0].cc_number == 18);
+
+    // A wired CC row with an empty mask stays inert until its CC is added;
+    // adding an already-set bit adds no second dot.
+    Synth::EffectChainBinding& m1_chain = add_cc_chain_fixture(&source, 0);
+    Synth::EffectParamBinding& m1_row   = m1_chain.effects[0].bindings[0];
+    m1_row.num_inputs                   = 1;
+    m1_row.inputs[0].source             = Synth::ModSource::cc;
+    m1_row.inputs[0].cc_number          = 16;
+    m1_row.inputs[0].op                 = Synth::SourceOp::add;
+    m1_row.inputs[0].scale              = 0.5f;
+
+    TEST(Sculptor::project_effect_chain_to_graph(source, 0, &graph, &mapping));
+    graph.take_changes(discarded, Sculptor::max_pending_changes);
+    TEST(mapping.midi_cc_slots[0] == Sculptor::pool_no_slot); // empty mask: no dot yet
+    TEST(find_fx_graph_connection(graph,
+                                  { mapping.midi_node, mapping.midi_source_slots[0] },
+                                  { mapping.effect_nodes[0], Sculptor::fx_param_src_dot(0, 0) }) ==
+         Sculptor::pool_no_slot);
+    TEST(graph.slot_edit_disabled(mapping.effect_nodes[0], Sculptor::fx_param_src_dot(0, 0) + 1));
+    TEST(graph.slot_edit_disabled(mapping.effect_nodes[0], Sculptor::fx_param_src_dot(0, 0) + 2));
+
+    source.added_cc_mask[0] = 1u << 0;
+    TEST(Sculptor::project_effect_chain_to_graph(source, 0, &graph, &mapping));
+    graph.take_changes(discarded, Sculptor::max_pending_changes);
+    TEST(graph.node(mapping.midi_node).slots.num_allocated == 4);
+    TEST(mapping.midi_cc_slots[0] != Sculptor::pool_no_slot);
+    TEST(find_fx_graph_connection(graph,
+                                  { mapping.midi_node, mapping.midi_cc_slots[0] },
+                                  { mapping.effect_nodes[0], Sculptor::fx_param_src_dot(0, 0) }) !=
+         Sculptor::pool_no_slot);
+    TEST(! graph.slot_edit_disabled(mapping.effect_nodes[0], Sculptor::fx_param_src_dot(0, 0) + 1));
+    TEST(! graph.slot_edit_disabled(mapping.effect_nodes[0], Sculptor::fx_param_src_dot(0, 0) + 2));
+
+    const uint32_t          m1_amount = Sculptor::fx_param_src_dot(0, 0) + 2;
+    Sculptor::PropertyValue m1_value  = graph.node(mapping.effect_nodes[0]).slots.entries[m1_amount].value;
+    m1_value.real                     = 0.6f;
+    graph.set_slot_value(mapping.effect_nodes[0], m1_amount, m1_value);
+    Sculptor::GraphChange m1_edit = {};
+    m1_edit.kind                  = Sculptor::ChangeKind::value_changed;
+    m1_edit.node_idx              = mapping.effect_nodes[0];
+    m1_edit.slot_idx              = m1_amount;
+    candidate                     = source;
+    TEST(Sculptor::apply_fx_graph_change(&candidate.bank, graph, mapping, m1_edit));
+    TEST(candidate.bank.channel_chains[0].effects[0].bindings[0].num_inputs == 1);
+    TEST(candidate.bank.channel_chains[0].effects[0].bindings[0].inputs[0].source == Synth::ModSource::cc);
+    TEST(candidate.bank.channel_chains[0].effects[0].bindings[0].inputs[0].cc_number == 16);
+    TEST(candidate.bank.channel_chains[0].effects[0].bindings[0].inputs[0].scale == 0.6f);
+
+    source.added_cc_mask[0] |= 1u << 0; // re-setting the bit adds no second dot
+    TEST(Sculptor::project_effect_chain_to_graph(source, 0, &graph, &mapping));
+    TEST(graph.node(mapping.midi_node).slots.num_allocated == 4);
+
+    // Library round trip.  A save from a non-zero source channel
+    // carries that channel's mask, not channel 0's.  A load ORs the record's
+    // saved mask and the incoming chain's wired CC numbers into the receiving
+    // chain's mask; a pre-existing destination addition survives and a second
+    // load of the same record changes nothing.  Other chains' masks stay
+    // exactly as they were.  A legacy record without the key decodes with
+    // all-zero masks.
+    Synth::EffectChainBinding& library_chain                 = add_cc_chain_fixture(&source, 2);
+    library_chain.effects[0].bindings[0].num_inputs          = 1;
+    library_chain.effects[0].bindings[0].inputs[0].source    = Synth::ModSource::cc;
+    library_chain.effects[0].bindings[0].inputs[0].cc_number = 18; // wired but not in the saved mask
+    library_chain.effects[0].bindings[0].inputs[0].op        = Synth::SourceOp::add;
+    library_chain.effects[0].bindings[0].inputs[0].scale     = 0.5f;
+
+    source.added_cc_mask[2]        = (1u << 0) | (1u << 1); // CC 16 and CC 17 travel
+    source.added_cc_mask[0]        = 1u << 5;               // CC 21 on channel 0 must not travel
+    source.bank.channel_enabled[2] = true;
+    memcpy(source.bank.channel_zones[2], source.bank.channel_zones[0], sizeof(source.bank.channel_zones[2]));
+    const char* library_path = "/tmp/synth_add_cc_library.tmp";
+    TEST(Synth::save_library_record(library_path, "Regression", "CC Round", &source, 2) == 0);
+    Synth::LibraryEntry cc_entry;
+    TEST(Synth::read_library_index(library_path, &cc_entry, 1) == 1);
+
+    memset(&loaded, 0, sizeof(loaded));
+    Synth::init_default_bank(&loaded.bank);
+    uint16_t cc_slot = 0;
+    TEST(Synth::load_library_instrument(library_path, &cc_entry, &loaded, 3, &cc_slot));
+    TEST(loaded.added_cc_mask[3] == ((1u << 0) | (1u << 1) | (1u << 2))); // saved mask OR wired CC 18
+    TEST(loaded.added_cc_mask[0] == 0);                                   // channel 0's mask never travels
+
+    // A pre-existing destination addition on a different CC survives, the
+    // other chains' masks stay as they were, and a second load is idempotent.
+    memset(&loaded, 0, sizeof(loaded));
+    Synth::init_default_bank(&loaded.bank);
+    loaded.added_cc_mask[3] = 1u << 4; // pre-existing CC 20 addition
+    loaded.added_cc_mask[1] = 1u << 7; // another chain's state
+    TEST(Synth::load_library_instrument(library_path, &cc_entry, &loaded, 3, &cc_slot));
+    TEST(loaded.added_cc_mask[3] == ((1u << 0) | (1u << 1) | (1u << 2) | (1u << 4)));
+    TEST(Synth::load_library_instrument(library_path, &cc_entry, &loaded, 3, &cc_slot));
+    for (uint32_t c = 0; c <= Synth::max_channels; ++c) {
+        if (c == 1) {
+            TEST(loaded.added_cc_mask[c] == (1u << 7));
+            continue;
+        }
+        if (c == 3) {
+            TEST(loaded.added_cc_mask[c] == ((1u << 0) | (1u << 1) | (1u << 2) | (1u << 4)));
+            continue;
+        }
+        TEST(loaded.added_cc_mask[c] == 0);
+    }
+
+    // A legacy record without the key decodes with all-zero masks.
+    add_cc_chain_fixture(&source, 0); // zero masks: the encoder emits no key
+    TEST(Synth::save_library_record(library_path, "Regression", "No CC", &source, 0) == 0);
+    Synth::LibraryEntry library_entries[2];
+    TEST(Synth::read_library_index(library_path, library_entries, 2) == 2);
+    const Synth::LibraryEntry* legacy_entry = nullptr;
+    for (uint32_t i = 0; i < 2; ++i) {
+        if (Synth::library_record_matches(library_entries[i], "Regression", "No CC")) {
+            legacy_entry = &library_entries[i];
+        }
+    }
+    TEST(legacy_entry != nullptr);
+    if (legacy_entry) {
+        memset(&loaded, 0, sizeof(loaded));
+        Synth::init_default_bank(&loaded.bank);
+        TEST(Synth::load_library_instrument(library_path, legacy_entry, &loaded, 1, &cc_slot));
+        for (uint32_t c = 0; c <= Synth::max_channels; ++c) {
+            TEST(loaded.added_cc_mask[c] == 0);
+        }
+    }
+    remove(library_path);
+}
+
 int main()
 {
     effects_paste_pin_regressions();
     effects_layout_classification_regressions();
     effects_structural_regressions();
     effects_clipboard_regressions();
+    effects_add_cc_regressions();
     // Debug builds log skipped unknown JSON fields to stdout; the suite must stay
     // silent unless failing, and failures report on stderr, so stdout is discarded.
 #ifdef _WIN32
