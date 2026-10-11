@@ -26,12 +26,14 @@ enum class PropertyType : uint8_t {
     integer = 1,
     real    = 2,
     list    = 3,
+    toggle  = 4, // rendered as a checkbox
 };
 
 union PropertyValue { // active member selected by PropertyType
     int32_t integer;
     float   real;
     uint8_t list_index;
+    bool    toggle;
 };
 
 struct Slot {
@@ -58,6 +60,7 @@ Slot real_slot(const char* name, float value);
 Slot bounded_real_slot(const char* name, float value, float min_value, float max_value, bool logarithmic = false);
 Slot int_slot(const char* name, int32_t value);
 Slot list_slot(const char* name, const char* const* option_names, uint32_t num_options, uint32_t index);
+Slot toggle_slot(const char* name, bool value);
 
 // Option labels of the two-way source op list (SourceOp::add, SourceOp::multiply).
 extern const char* const source_op_names[2];
@@ -112,9 +115,10 @@ struct Connection {
 // Connection budget: the reachable worst case is one oscillator->sum edge
 // per layer plus 7 edges per parameter cell (value, envelope, LFO, two
 // source and two LFO depth/rate edges) - 252 at seven layers, the exact
-// bound pinned in sculptor_osc_graph.h; the pool holds headroom above it,
-// so no connection-budget refusal path exists.  sizeof(Connection) = 16 B,
-// absorbed by the fixed max_graph_bytes reserve.
+// bound pinned in sculptor_osc_graph.h; the effects graph adds one enable
+// edge per projected effect node (at most 4 per chain).  The pool holds
+// headroom above it, so no connection-budget refusal path exists.
+// sizeof(Connection) = 16 B, absorbed by the fixed max_graph_bytes reserve.
 constexpr uint32_t max_connections = 352;
 
 // Static size cap for one editor-resident Graph instance.  The editor state

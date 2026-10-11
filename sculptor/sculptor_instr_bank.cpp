@@ -207,6 +207,21 @@ static bool validate_effect_chain(const Synth::EffectChainBinding& chain,
             return false;
         }
 
+        // The enable routing obeys the same source rules as param inputs;
+        // the shared predicate keeps load-time and expansion-time acceptance
+        // identical.  On top of that the enable routing is CC-only by user
+        // ruling (2026-10-11): the editor wires only added-CC dots onto the
+        // Enabled row, so a routing naming a channel-wide source (bend, mod
+        // wheel, channel pressure) refuses at load, the same refuse-not-
+        // normalize rule out-of-range CC numbers follow.
+        if (! Synth::is_valid_effect_mod_input(effect.enable_input)) {
+            return false;
+        }
+        if (effect.enable_input.source != Synth::ModSource::none &&
+            effect.enable_input.source != Synth::ModSource::cc) {
+            return false;
+        }
+
         const uint32_t num_params = get_effect_param_floats(effect.type);
 
         for (uint32_t param = 0; param < num_params; param++) {
@@ -222,7 +237,10 @@ static bool validate_effect_chain(const Synth::EffectChainBinding& chain,
             }
         }
 
-        if (effect.enabled && effect.type != Synth::EffectType::none) {
+        // Routed-but-saved-off slots consume state too: the routing can flip
+        // them live mid-run.
+        if (effect.type != Synth::EffectType::none &&
+            (effect.enabled || effect.enable_input.source != Synth::ModSource::none)) {
             *state_bytes += get_effect_state_bytes(effect.type);
         }
     }
@@ -1070,8 +1088,9 @@ bool Sculptor::validate_editor_metadata(const Synth::InstrumentEditorBank& bank)
 // Whole-bank effect budget accounting, shared by the effects editor's
 // preflights (a refused edit with a specific message reads better than the
 // commit's generic refusal).  Counts modulated parameters and the static
-// enabled-effect state bytes exactly like validate_instrument_bank does,
-// including disabled effects and slots.
+// effect-state bytes exactly like validate_instrument_bank does: the scan
+// visits every slot, and a slot contributes state bytes when its type is not
+// none and it is saved-on or enable-routed.
 void Sculptor::count_effect_budgets(const Synth::InstrumentBank& bank, uint32_t* num_modulated, uint32_t* state_bytes)
 {
     *num_modulated = 0;

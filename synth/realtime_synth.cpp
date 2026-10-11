@@ -1567,11 +1567,47 @@ static void apply_effects(const EffectTarget* targets, uint32_t num_targets)
 
 // Copies each modulated effect param's current graph value into the param float the effect shader
 // reads (and compute_fir_coefficients reads for the FIR effect).  Unmodulated params (src_param_id
-// 0) keep their constant value.
-static void pull_effect_param_chain(EffectChain* chain)
+// 0) keep their constant value.  Also evaluates the enable decision for every instance and
+// records a RESET vkCmdFillBuffer on the off->on edge.
+static void pull_effect_param_chain(EffectChain* chain, bool* reset_barrier_needed)
 {
     for (uint32_t effect_idx = 0; effect_idx < chain->num_effects; effect_idx++) {
         EffectInstance& instance = chain->effects[effect_idx];
+
+        // A wired enable routing takes its live state from the resolved leaf
+        // each block; the saved checkbox governs only unwired instances.  On
+        // the off->on transition the instance state is cleared once, so a
+        // re-enabled effect starts from silence instead of replaying what its
+        // last live run left in the buffer.  instance.enabled holds the
+        // previous block's decision here, for wired and unwired instances
+        // alike: the commit seeds retained slots with it, so transitions that
+        // cross a publish stay visible.
+        const bool previous_enabled = instance.enabled;
+        bool       live_enabled     = instance.saved_enabled;
+        if (instance.enable_param_id) {
+            live_enabled = Synth::effect_live_enabled(instance.enable_param_id,
+                                                      parameters[instance.enable_param_id].value,
+                                                      instance.saved_enabled);
+        }
+        if (Synth::effect_needs_reset(previous_enabled, live_enabled) && instance.state_offs) {
+            if (! *reset_barrier_needed) {
+                // The state range was last written by a live effect run,
+                // so the fill sources the compute stage explicitly: the
+                // chained producer alone does not cover it.
+                memory_barrier(VK_ACCESS_TRANSFER_WRITE_BIT,
+                               VK_PIPELINE_STAGE_TRANSFER_BIT,
+                               VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
+                               VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+                *reset_barrier_needed = true;
+            }
+            vkCmdFillBuffer(audio_cmd_buf,
+                            buffers[data_buf].get_buffer(),
+                            instance.state_offs,
+                            Synth::get_effect_state_bytes(instance.type),
+                            0); // data
+        }
+        instance.enabled = live_enabled;
+
         if (! instance.enabled) {
             continue;
         }
@@ -1585,10 +1621,11 @@ static void pull_effect_param_chain(EffectChain* chain)
 
 static void pull_effect_params()
 {
+    bool reset_barrier_needed = false;
     for (uint32_t channel = 0; channel < max_mix_channels; channel++) {
-        pull_effect_param_chain(&channel_chains[channel]);
+        pull_effect_param_chain(&channel_chains[channel], &reset_barrier_needed);
     }
-    pull_effect_param_chain(&master_chain);
+    pull_effect_param_chain(&master_chain, &reset_barrier_needed);
 }
 
 // Advances the modulation graph one control-rate step: first compute every generator leaf's value

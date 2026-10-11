@@ -75,8 +75,8 @@ static bool is_channel_effect_source(uint32_t source)
 }
 
 // Effect param inputs admit the assignable CC sources; the CC number must name
-// CC 16..31, and non-CC inputs must carry no stale CC number. Shared with
-// the editor bank validator so load-time and expansion-time acceptance cannot diverge.
+// CC 16..31, and non-CC inputs must carry no stale CC number.  The source and
+// CC half of is_valid_effect_mod_input.
 bool Synth::is_valid_effect_input(const ModInput& input)
 {
     if (input.source == ModSource::cc) {
@@ -88,6 +88,15 @@ bool Synth::is_valid_effect_input(const ModInput& input)
 static bool finite_value(float value)
 {
     return value - value == 0.0f;
+}
+
+// Full acceptance for an effect ModInput, param input or enable routing alike.
+// Shared with the editor bank validator so load-time and expansion-time
+// acceptance cannot diverge.
+bool Synth::is_valid_effect_mod_input(const ModInput& input)
+{
+    return is_valid_effect_input(input) && valid_source_op(static_cast<uint32_t>(input.op)) &&
+           finite_value(input.scale);
 }
 
 // One effect param's binding. Mirrors every rule the commit relies on, so a passing
@@ -117,12 +126,26 @@ static bool validate_effect_param_binding(const Synth::EffectParamBinding& bindi
     }
     for (uint32_t input = 0; input < binding.num_inputs; input++) {
         const Synth::ModInput& mod_input = binding.inputs[input];
-        if (! is_valid_effect_input(mod_input) || ! valid_source_op(static_cast<uint32_t>(mod_input.op)) ||
-            ! finite_value(mod_input.scale)) {
+        if (! is_valid_effect_mod_input(mod_input)) {
             return false;
         }
     }
     return true;
+}
+
+bool Synth::effect_live_enabled(uint16_t enable_param_id, float resolved_leaf_value, bool saved_enabled)
+{
+    if (! enable_param_id) {
+        return saved_enabled;
+    }
+    // The raw 14-bit midpoint: MSB 63 tops out at 8191, MSB 64 starts at 8192.
+    constexpr float enable_threshold = 8192.0f / 16383.0f;
+    return resolved_leaf_value >= enable_threshold;
+}
+
+bool Synth::effect_needs_reset(bool previous_live_enabled, bool live_enabled)
+{
+    return ! previous_live_enabled && live_enabled;
 }
 
 void Synth::init_effect_state_region(uint32_t region_base_offset)
@@ -158,8 +181,20 @@ bool Synth::preflight_effect_expansion(const InstrumentBank& bank, EffectExpansi
                 return false;
             }
 
-            const uint32_t state_bytes =
-                (binding.enabled && binding.type != EffectType::none) ? get_effect_state_bytes(binding.type) : 0;
+            // The enable routing obeys the same source rules as param inputs,
+            // so a bank the preflight accepts cannot feed the resolve garbage.
+            if (! is_valid_effect_mod_input(binding.enable_input)) {
+                *error = "effect chain carries an invalid enable routing";
+                return false;
+            }
+
+            // Routed-but-saved-off slots reserve state too: the routing can
+            // flip them live mid-run, so their state must exist and start
+            // cleared.
+            const uint32_t state_bytes = (binding.type != EffectType::none &&
+                                          (binding.enabled || binding.enable_input.source != ModSource::none))
+                                             ? get_effect_state_bytes(binding.type)
+                                             : 0;
 
             const uint32_t num_params = get_effect_param_floats(binding.type);
             for (uint32_t param = 0; param < num_params; param++) {
@@ -234,15 +269,46 @@ void Synth::commit_effect_expansion(const InstrumentBank&      bank,
         chain.num_effects = binding.num_effects;
         for (uint32_t slot = 0; slot < max_chain_effects; slot++) {
             EffectInstance& instance = chain.effects[slot];
-            instance                 = EffectInstance();
+
+            // Captured before the overwrite: a retained slot continues from
+            // the previous instance's live enable state.
+            const EffectInstance previous = instance;
+
+            instance = EffectInstance();
             if (slot >= binding.num_effects) {
                 continue;
             }
 
             const EffectSlotBinding& slot_binding = binding.effects[slot];
             instance.type                         = slot_binding.type;
-            instance.enabled                      = slot_binding.enabled;
             instance.state_offs                   = plan.slots[chain_idx][slot].state_offs;
+
+            // The plan retains a slot's state range while it keeps running
+            // the same effect type, so a retained slot was live (or routed)
+            // continuously across the publish: its new instance continues
+            // from the previous live enable state, and a publish never looks
+            // like an off->on transition for an effect that was live
+            // immediately before it.  A fresh instance seeds from the saved
+            // checkbox bit.  Same slot-identity rule the preflight's
+            // state_offs retention uses.
+            const EffectSlotPlan& prev_slot = current_plan.slots[chain_idx][slot];
+            const bool            retained  = has_current_plan && instance.state_offs &&
+                                              prev_slot.state_offs == instance.state_offs &&
+                                              prev_slot.allocated_for == slot_binding.type;
+            instance.enabled                = retained ? previous.enabled : slot_binding.enabled;
+            instance.saved_enabled          = slot_binding.enabled;
+
+            // The wired enable routing resolves like a param source (channel
+            // chains from their own channel, the master chain from channel
+            // index 0) but consumes no modulation node: the runtime reads the
+            // resolved leaf directly at the enable control point.
+            if (slot_binding.enable_input.source != ModSource::none) {
+                assert(is_valid_effect_mod_input(slot_binding.enable_input));
+                instance.enable_param_id = writer.resolve_source(writer.ctx,
+                                                                 slot_binding.enable_input.source,
+                                                                 slot_binding.enable_input.cc_number,
+                                                                 midi_channel);
+            }
 
             const uint32_t state_bytes = get_effect_state_bytes(slot_binding.type);
             const uint32_t num_params  = get_effect_param_floats(slot_binding.type);

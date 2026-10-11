@@ -680,6 +680,14 @@ static void enc_effect(Out& o, const Synth::EffectSlotBinding& slot, bool strict
     }
     if (slot.enabled)
         key_bool(o, "enabled", true);
+
+    // The enable routing encodes only when wired, so an unwired slot keeps
+    // the omission-normalized shape old banks load from.
+    if (slot.enable_input.source != Synth::ModSource::none) {
+        o.key("enable_input");
+        enc_mod_input(o, slot.enable_input);
+    }
+
     if (slot.type != Synth::EffectType::none) {
         o.key("params");
         o.ch('[');
@@ -2140,6 +2148,9 @@ static void decode_effect(Walker& w, uint32_t obj, Synth::EffectSlotBinding& slo
             want_bool(w, val_idx, &enabled);
             slot.enabled = enabled;
         }
+        else if (key_eq(w, key_idx, "enable_input")) {
+            decode_mod_input(w, val_idx, slot.enable_input);
+        }
         else if (key_eq(w, key_idx, "params")) {
             have_params = true;
             walk_array(w, val_idx, Synth::max_effect_param_floats, [&](uint32_t elem, uint32_t pos) {
@@ -2593,6 +2604,13 @@ static void canonicalize_binding(Synth::EffectParamBinding& binding)
 
 static void canonicalize_effect(Synth::EffectSlotBinding& slot)
 {
+    // An unwired enable routing is zero by definition, so byte-comparable
+    // snapshots hold across save/load.
+    if (slot.enable_input.source == Synth::ModSource::none)
+        memset(&slot.enable_input, 0, sizeof(slot.enable_input));
+    else
+        canonicalize_mod_input(slot.enable_input);
+
     const uint32_t num_params = Synth::get_effect_param_floats(slot.type);
     for (uint32_t p = 0; p < num_params; p++)
         canonicalize_binding(slot.bindings[p]);

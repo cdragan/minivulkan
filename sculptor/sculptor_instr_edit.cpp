@@ -457,9 +457,37 @@ static bool fx_connection_validator(void*              user_data,
     const uint32_t param_field = input.slot_idx >= Sculptor::fx_param_row(0)
                                      ? (input.slot_idx - Sculptor::fx_param_row(0)) % Sculptor::fx_param_stride
                                      : Sculptor::fx_param_stride;
+    // A param source row takes channel-wide MIDI sources only: bend, mod
+    // wheel, channel pressure, and the chain's added-CC dots.
     if (in_slot >= 0 && (param_field == 4 || param_field == 7)) {
         if (output.node_idx != fx_mapping.midi_node) {
             graph.set_error("Effects take channel-wide MIDI sources only");
+            return false;
+        }
+        return true;
+    }
+
+    // The Enabled row's wire is the enable routing, and the user ruling
+    // (2026-10-11) restricts it to the chain's added-CC dots: bend, mod wheel
+    // and channel pressure refuse.  The CC dot is identified by the mapping
+    // lookup, the same way the projection and the rebuild identify it.  A
+    // none-type slot accepts the wire too: no Enabled row is projected for a
+    // none slot, so only a hand-authored bank JSON can carry such a routing;
+    // it stays runtime-inert there, but it holds the CC in the wired registry
+    // until unwired.
+    if (in_slot >= 0 && input.slot_idx == Sculptor::fx_enabled_row) {
+        bool cc_dot = false;
+        if (output.node_idx == fx_mapping.midi_node) {
+            for (uint32_t cc = 0; cc < Synth::num_assignable_ccs; ++cc) {
+                if (fx_mapping.midi_cc_slots[cc] == output.slot_idx) {
+                    cc_dot = true;
+
+                    break;
+                }
+            }
+        }
+        if (! cc_dot) {
+            graph.set_error("The Enabled row takes a CC source only");
             return false;
         }
         return true;

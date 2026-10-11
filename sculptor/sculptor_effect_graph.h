@@ -213,6 +213,11 @@ bool allocate_default_lfo(Synth::InstrumentBank* bank, uint16_t* out_desc_id);
 // editor's parameter-node grammar.
 constexpr uint32_t fx_param_stride = 10;
 
+// The Enabled row's slot index on a projected effect node (layout in the
+// fx_param_stride comment above).  The row doubles as the enable wire's
+// input endpoint.
+constexpr uint32_t fx_enabled_row = 2;
+
 // First (base-value slider) slot index of projected param `param`.
 constexpr uint32_t fx_param_row(uint32_t param)
 {

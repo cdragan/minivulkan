@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 // SPDX-FileCopyrightText: Copyright (c) 2021-2026 Chris Dragan
 
+#include "../synth/synth_midi_cc.h"
 #include "sculptor_instr_bank.h"
 #include "sculptor_undo.h"
 
@@ -562,10 +563,48 @@ static void test_add_cc_mask_snapshot()
     TEST(memcmp(&editable, &pushed, sizeof(pushed)) == 0);
 }
 
+// Byte-snapshot undo carries the enable routing and the saved checkbox:
+// connecting an enable wire snapshots the pre-connect bank, and an undo
+// restores the routing and the checkbox state byte-for-byte.
+static void test_enable_input_snapshot()
+{
+    static Synth::InstrumentEditorBank pushed;
+    static Synth::InstrumentEditorBank editable;
+    pushed                                                          = {};
+    pushed.bank.channel_chains[0].num_effects                       = 1;
+    pushed.bank.channel_chains[0].effects[0].type                   = Synth::EffectType::delay;
+    pushed.bank.channel_chains[0].effects[0].enabled                = false;
+    pushed.bank.channel_chains[0].effects[0].enable_input.source    = Synth::ModSource::cc;
+    pushed.bank.channel_chains[0].effects[0].enable_input.op        = Synth::SourceOp::add;
+    pushed.bank.channel_chains[0].effects[0].enable_input.cc_number = Synth::cc_msb_base;
+    pushed.bank.channel_chains[0].effects[0].enable_input.scale     = 1.0f;
+
+    alignas(4) static uint8_t storage[2 * (sizeof(pushed) + 2 * sizeof(uint32_t))];
+    UndoRedo                  undo;
+    undo.init(storage);
+
+    editable = pushed;
+    undo.init_undo_push();
+    undo.push(&editable, sizeof(editable));
+    TEST(undo.finish_undo_push());
+
+    editable.bank.channel_chains[0].effects[0].enable_input = Synth::ModInput{}; // the wire is disconnected
+
+    TEST(undo.init_undo());
+    undo.pop(&editable, sizeof(editable));
+    undo.finish_undo();
+
+    TEST(editable.bank.channel_chains[0].effects[0].enable_input.source == Synth::ModSource::cc);
+    TEST(editable.bank.channel_chains[0].effects[0].enable_input.cc_number == Synth::cc_msb_base);
+    TEST(editable.bank.channel_chains[0].effects[0].enabled == false);
+    TEST(memcmp(&editable, &pushed, sizeof(pushed)) == 0);
+}
+
 int main()
 {
     test_startup_load_undo_baseline();
     test_add_cc_mask_snapshot();
+    test_enable_input_snapshot();
     test_edit_origin_entry();
     test_empty_state();
     test_single_undo_push_pop();

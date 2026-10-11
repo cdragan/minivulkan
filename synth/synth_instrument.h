@@ -119,8 +119,13 @@ struct EffectParamBinding {
 // One effect slot in a chain; only bindings[0..get_effect_param_floats(type)) are
 // meaningful for the slot's type.
 struct EffectSlotBinding {
-    EffectType         type;
-    bool               enabled;
+    EffectType type;
+    bool       enabled;
+    // Wired enable source for the slot (the Enabled row's wire); zero = the
+    // saved checkbox alone decides.  A wired routing overrides the saved bit
+    // at runtime: the resolved source's leaf value reaches the threshold
+    // (raw 14-bit >= 8192).
+    ModInput           enable_input;
     EffectParamBinding bindings[max_effect_param_floats];
 };
 

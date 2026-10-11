@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2021-2026 Chris Dragan
 
 #include "sculptor_effect_graph.h"
+#include "../synth/synth_effect_expansion.h"
 #include "sculptor_bank_json.h"
 #include <cmath>
 
@@ -79,11 +80,10 @@ static void effect_layout_name(const Synth::EffectChainBinding& chain,
 
 static Slot enabled_slot(bool enabled)
 {
-    Slot slot             = make_slot("Enabled", SlotKind::property, PropertyType::list);
-    slot.num_list_options = 2;
-    snprintf(slot.list_options[0], sizeof(slot.list_options[0]), "On");
-    snprintf(slot.list_options[1], sizeof(slot.list_options[1]), "Off");
-    slot.value.list_index = enabled ? 0 : 1;
+    // The Enabled row is a checkbox that doubles as the enable wire's input:
+    // a connected row greys out and prints "wired" instead of editing.
+    Slot slot        = Sculptor::toggle_slot("Enabled", enabled);
+    slot.connectable = true;
     return slot;
 }
 
@@ -137,6 +137,65 @@ static uint32_t projected_slots(const Synth::EffectChainBinding& chain, uint32_t
 // input list: the wired rows in row order, each with the source resolved
 // from the routing node's per-source dot and Op/Amount read from the row.
 // Unwired rows drop out, so the list never carries a none source and never
+// Resolves a MIDI node output dot to the source it carries: 1..fx_num_input_sources
+// for the standard slots, or ModSource::cc with *cc_index naming the assignable CC
+// for the added-CC dots.  *source = 0 (ModSource::none) names an unknown dot.
+static void fx_source_of_dot(const Sculptor::EffectGraphMapping& mapping,
+                             uint32_t                            slot_idx,
+                             uint32_t*                           source,
+                             uint32_t*                           cc_index)
+{
+    *source = 0;
+    for (uint32_t s = 0; s < Sculptor::fx_num_input_sources; ++s) {
+        if (mapping.midi_source_slots[s] == slot_idx) {
+            *source = s + 1;
+            return;
+        }
+    }
+
+    // Added-CC dots sit after the standard slots: a hit names the assignable
+    // CC the dot carries.
+    for (uint32_t i = 0; i < Synth::num_assignable_ccs; ++i) {
+        if (mapping.midi_cc_slots[i] == slot_idx) {
+            *source   = static_cast<uint32_t>(Synth::ModSource::cc);
+            *cc_index = i;
+            return;
+        }
+    }
+}
+
+// The 0-based assignable-CC slot index a CC number maps to (-1 when the number
+// is outside CC 16..31, the only CCs an effect can wire).
+static int32_t fx_assignable_cc_index(uint32_t cc_number)
+{
+    if (cc_number < Synth::cc_msb_base || cc_number >= Synth::cc_msb_base + Synth::num_assignable_ccs) {
+        return -1;
+    }
+    return static_cast<int32_t>(cc_number - Synth::cc_msb_base);
+}
+
+// The MIDI node output dot a wired source routes from: the standard slot for
+// the fixed sources, the added-CC dot for an assignable CC.  The standard
+// slots are always projected alongside the MIDI node; only added-CC dots can
+// be absent, and a CC without its registry dot stays unwired - decode does
+// not synthesize registry bits - so the endpoint's slot comes back
+// pool_no_slot.
+static Sculptor::EndPoint fx_input_endpoint(const Sculptor::EffectGraphMapping& mapping,
+                                            uint32_t                            source,
+                                            uint32_t                            cc_number)
+{
+    if (source >= 1 && source <= Sculptor::fx_num_input_sources) {
+        return Sculptor::EndPoint{ mapping.midi_node, mapping.midi_source_slots[source - 1] };
+    }
+    if (source == static_cast<uint32_t>(Synth::ModSource::cc)) {
+        const int32_t cc_index = fx_assignable_cc_index(cc_number);
+        if (cc_index >= 0) {
+            return Sculptor::EndPoint{ mapping.midi_node, mapping.midi_cc_slots[cc_index] };
+        }
+    }
+    return Sculptor::EndPoint{ mapping.midi_node, Sculptor::pool_no_slot };
+}
+
 // desyncs from the wires.
 static bool rebuild_param_inputs(const Sculptor::Graph&              graph,
                                  const Sculptor::EffectGraphMapping& mapping,
@@ -157,9 +216,8 @@ static bool rebuild_param_inputs(const Sculptor::Graph&              graph,
         if (binding->inputs[input].source != Synth::ModSource::cc) {
             continue;
         }
-        if (binding->inputs[input].cc_number < Synth::cc_msb_base ||
-            binding->inputs[input].cc_number >= Synth::cc_msb_base + Synth::num_assignable_ccs ||
-            mapping.midi_cc_slots[binding->inputs[input].cc_number - Synth::cc_msb_base] == Sculptor::pool_no_slot) {
+        const int32_t cc_index = fx_assignable_cc_index(binding->inputs[input].cc_number);
+        if (cc_index < 0 || mapping.midi_cc_slots[cc_index] == Sculptor::pool_no_slot) {
             return false;
         }
     }
@@ -175,25 +233,7 @@ static bool rebuild_param_inputs(const Sculptor::Graph&              graph,
         }
         uint32_t source   = 0;
         uint32_t cc_index = 0;
-        for (uint32_t s = 0; s < Sculptor::fx_num_input_sources; ++s) {
-            if (mapping.midi_source_slots[s] == output.slot_idx) {
-                source = s + 1;
-                break;
-            }
-        }
-
-        if (source == 0) {
-            // Added-CC dots sit after the standard slots: a hit names the
-            // assignable CC the dot carries.
-            for (uint32_t i = 0; i < Synth::num_assignable_ccs; ++i) {
-                if (mapping.midi_cc_slots[i] == output.slot_idx) {
-                    source   = static_cast<uint32_t>(Synth::ModSource::cc);
-                    cc_index = i;
-                    break;
-                }
-            }
-        }
-
+        fx_source_of_dot(mapping, output.slot_idx, &source, &cc_index);
         if (source == 0) {
             return false;
         }
@@ -229,6 +269,58 @@ static bool rebuild_param_binding(const Sculptor::Graph&              graph,
     }
 
     *binding = rebuilt;
+    return true;
+}
+
+// Compiles the wire (if any) into an effect node's Enabled row
+// (Sculptor::fx_enabled_row) into the slot's enable routing.  The row carries
+// no Op/Amount controls, so the wired form is the neutral combine: add,
+// scale 1.  The wire's source must be an added-CC dot (user ruling
+// 2026-10-11): the standard channel-wide dots (bend, mod wheel, channel
+// pressure) refuse here too, mirroring the editor connection validator, so a
+// hand-authored graph cannot author a non-CC routing.  A CC routing refuses
+// the edit while its dot does not exist, the M1 precedent that keeps a loaded
+// routing inert until the user adds the CC; the pre-checks run before any
+// mutation, so a refusal leaves the caller's routing byte-identical.
+static bool rebuild_enable_input(const Sculptor::Graph&              graph,
+                                 const Sculptor::EffectGraphMapping& mapping,
+                                 uint32_t                            node_idx,
+                                 const Synth::ModInput&              current,
+                                 Synth::ModInput*                    out)
+{
+    if (current.source == Synth::ModSource::cc) {
+        const int32_t cc_index = fx_assignable_cc_index(current.cc_number);
+        if (cc_index < 0 || mapping.midi_cc_slots[cc_index] == Sculptor::pool_no_slot) {
+            return false;
+        }
+    }
+
+    Synth::ModInput rebuilt = {};
+
+    const uint32_t conn = connection_into(graph, node_idx, Sculptor::fx_enabled_row);
+    if (conn != Sculptor::pool_no_slot) {
+        const Sculptor::EndPoint output = graph.get_connection(conn).output;
+        if (output.node_idx != mapping.midi_node) {
+            return false;
+        }
+        uint32_t source   = 0;
+        uint32_t cc_index = 0;
+        fx_source_of_dot(mapping, output.slot_idx, &source, &cc_index);
+
+        // CC-only: a standard channel-wide dot or an unknown dot refuses.
+        if (source != static_cast<uint32_t>(Synth::ModSource::cc)) {
+            return false;
+        }
+        rebuilt.source    = Synth::ModSource::cc;
+        rebuilt.cc_number = static_cast<uint8_t>(Synth::cc_msb_base + cc_index);
+        if (! Synth::is_valid_effect_input(rebuilt)) {
+            return false;
+        }
+        rebuilt.op    = Synth::SourceOp::add;
+        rebuilt.scale = 1.0f;
+    }
+
+    *out = rebuilt;
     return true;
 }
 
@@ -287,25 +379,36 @@ bool Sculptor::effect_chain_uses_lfo(const Synth::EffectChainBinding& chain, uin
 
 bool Sculptor::fx_chain_uses_cc(const Synth::EffectChainBinding& chain, uint32_t cc_number)
 {
-    if (cc_number < Synth::cc_msb_base || cc_number >= Synth::cc_msb_base + Synth::num_assignable_ccs) {
+    const int32_t cc_index = fx_assignable_cc_index(cc_number);
+    if (cc_index < 0) {
         return false;
     }
-    return (fx_chain_wired_cc_mask(chain) >> (cc_number - Synth::cc_msb_base)) & 1u;
+    return (fx_chain_wired_cc_mask(chain) >> cc_index) & 1u;
+}
+
+// The wired-CC registry bit a routing input contributes: 0 when the input
+// is not an assignable CC.
+static uint16_t fx_cc_mask_bit(const Synth::ModInput& input)
+{
+    const int32_t cc_index = fx_assignable_cc_index(input.cc_number);
+    if (input.source != Synth::ModSource::cc || cc_index < 0) {
+        return 0;
+    }
+    return static_cast<uint16_t>(1u << cc_index);
 }
 
 uint16_t Sculptor::fx_chain_wired_cc_mask(const Synth::EffectChainBinding& chain)
 {
     uint16_t mask = 0;
     for (uint32_t slot = 0; slot < chain.num_effects; ++slot) {
+        // The enable routing joins the registry: a CC wired to the Enabled
+        // row refuses removal like a wired param source.
+        mask                      = static_cast<uint16_t>(mask | fx_cc_mask_bit(chain.effects[slot].enable_input));
         const uint32_t num_params = Synth::get_effect_param_floats(chain.effects[slot].type);
         for (uint32_t param = 0; param < num_params; ++param) {
             const Synth::EffectParamBinding& binding = chain.effects[slot].bindings[param];
             for (uint32_t input = 0; input < binding.num_inputs; ++input) {
-                if (binding.inputs[input].source == Synth::ModSource::cc &&
-                    binding.inputs[input].cc_number >= Synth::cc_msb_base &&
-                    binding.inputs[input].cc_number < Synth::cc_msb_base + Synth::num_assignable_ccs) {
-                    mask = static_cast<uint16_t>(mask | (1u << (binding.inputs[input].cc_number - Synth::cc_msb_base)));
-                }
+                mask = static_cast<uint16_t>(mask | fx_cc_mask_bit(binding.inputs[input]));
             }
         }
     }
@@ -600,27 +703,31 @@ bool Sculptor::project_effect_chain_to_graph(const Synth::InstrumentEditorBank& 
             for (uint32_t param = 0; param < num_params; ++param) {
                 const Synth::EffectParamBinding& binding = chain_ref.effects[slot].bindings[param];
                 for (uint32_t input = 0; input < binding.num_inputs; ++input) {
-                    const uint32_t source = static_cast<uint32_t>(binding.inputs[input].source);
-                    if (source >= 1 && source <= fx_num_input_sources) {
-                        graph->add_connection(EndPoint{ mapping->midi_node, mapping->midi_source_slots[source - 1] },
-                                              EndPoint{ mapping->effect_nodes[slot], fx_param_src_dot(param, input) });
+                    const Sculptor::EndPoint from =
+                        fx_input_endpoint(*mapping,
+                                          static_cast<uint32_t>(binding.inputs[input].source),
+                                          binding.inputs[input].cc_number);
+                    if (from.slot_idx == pool_no_slot) {
                         continue;
                     }
-
-                    // An added-CC input wires from its own dot.  A CC input
-                    // without a registry dot stays unwired.  Decode does not
-                    // synthesize registry bits.
-                    if (source == static_cast<uint32_t>(Synth::ModSource::cc) &&
-                        binding.inputs[input].cc_number >= Synth::cc_msb_base &&
-                        binding.inputs[input].cc_number < Synth::cc_msb_base + Synth::num_assignable_ccs &&
-                        mapping->midi_cc_slots[binding.inputs[input].cc_number - Synth::cc_msb_base] != pool_no_slot) {
-                        graph->add_connection(
-                            EndPoint{ mapping->midi_node,
-                                      mapping->midi_cc_slots[binding.inputs[input].cc_number - Synth::cc_msb_base] },
-                            EndPoint{ mapping->effect_nodes[slot], fx_param_src_dot(param, input) });
-                    }
+                    graph->add_connection(from,
+                                          EndPoint{ mapping->effect_nodes[slot], fx_param_src_dot(param, input) });
                 }
             }
+        }
+
+        // The enable routing wires from its source dot onto the Enabled row.
+        for (uint32_t slot = 0; slot < chain_ref.num_effects; ++slot) {
+            if (mapping->effect_nodes[slot] == pool_no_slot) {
+                continue;
+            }
+            const Synth::ModInput&   enable = chain_ref.effects[slot].enable_input;
+            const Sculptor::EndPoint from =
+                fx_input_endpoint(*mapping, static_cast<uint32_t>(enable.source), enable.cc_number);
+            if (from.slot_idx == pool_no_slot) {
+                continue;
+            }
+            graph->add_connection(from, EndPoint{ mapping->effect_nodes[slot], Sculptor::fx_enabled_row });
         }
     }
 
@@ -701,6 +808,53 @@ static bool splice_effect(Synth::EffectChainBinding*    chain,
                           int32_t                       after_slot,
                           Sculptor::EffectGraphMapping* mapping);
 
+// A retarget that pulled a wire off an effect's Enabled row drops that
+// effect's enable routing: the move must not leave a copy behind.
+static void fx_drop_enabled_routing(Synth::EffectChainBinding& chain, int32_t prev_slot)
+{
+    if (prev_slot >= 0) {
+        chain.effects[prev_slot].enable_input = Synth::ModInput{};
+    }
+}
+
+// A retarget pulled the wire off a parameter's source dot: that row's
+// packed inputs must forget the source or the move becomes a copy.  When
+// the previous endpoint is a source dot of an in-range parameter, rebuilds
+// that row from the graph and commits it; a caller that still owes its own
+// side a commit must rebuild it into a local copy beforehand, so a refusal
+// anywhere leaves the bank unchanged.  Returns false when the release
+// rebuild refuses; true otherwise, with *released saying whether a row was
+// released.
+static bool fx_release_prev_source(const Sculptor::Graph&              graph,
+                                   const Sculptor::EffectGraphMapping& mapping,
+                                   Synth::EffectChainBinding&          chain,
+                                   const Sculptor::EndPoint&           prev,
+                                   bool*                               released)
+{
+    *released = false;
+
+    const uint32_t prev_field = prev.slot_idx >= Sculptor::fx_param_row(0)
+                                    ? (prev.slot_idx - Sculptor::fx_param_row(0)) % Sculptor::fx_param_stride
+                                    : Sculptor::fx_param_stride;
+    if (prev_field != 4 && prev_field != 7) {
+        return true;
+    }
+
+    const uint32_t prev_param = (prev.slot_idx - Sculptor::fx_param_row(0)) / Sculptor::fx_param_stride;
+    const int32_t  prev_slot  = Sculptor::fx_effect_slot_of(mapping, prev.node_idx);
+    if (prev_slot < 0 || prev_param >= Synth::get_effect_param_floats(chain.effects[prev_slot].type)) {
+        return true;
+    }
+
+    Synth::EffectParamBinding prev_binding = chain.effects[prev_slot].bindings[prev_param];
+    if (! rebuild_param_inputs(graph, mapping, prev.node_idx, prev_param, &prev_binding)) {
+        return false;
+    }
+    chain.effects[prev_slot].bindings[prev_param] = prev_binding;
+    *released                                     = true;
+    return true;
+}
+
 static bool apply_fx_graph_change_internal(Synth::InstrumentBank*              bank,
                                            const Sculptor::Graph&              graph,
                                            const Sculptor::EffectGraphMapping& mapping,
@@ -721,9 +875,10 @@ static bool apply_fx_graph_change_internal(Synth::InstrumentBank*              b
             const Sculptor::Node& node      = graph.node(change.node_idx);
             const Sculptor::Slot& live_slot = node.slots.entries[change.slot_idx];
             if (slot >= 0) {
-                if (change.slot_idx == 2) {
-                    // The two-option Enabled list: 0 = On, 1 = Off.
-                    chain.effects[slot].enabled = live_slot.value.list_index == 0;
+                if (change.slot_idx == Sculptor::fx_enabled_row) {
+                    // The Enabled checkbox writes the saved state; a wired
+                    // row greys out and emits no value events.
+                    chain.effects[slot].enabled = live_slot.value.toggle;
                     return true;
                 }
                 if (change.slot_idx < Sculptor::fx_param_row(0)) {
@@ -859,6 +1014,11 @@ static bool apply_fx_graph_change_internal(Synth::InstrumentBank*              b
                                 chain.effects[prev_slot].bindings[prev_param].lfo_desc_id = 0;
                             }
                         }
+                        else if (prev.slot_idx == Sculptor::fx_enabled_row) {
+                            // The wire left another effect's Enabled row; its
+                            // routing drops with it.
+                            fx_drop_enabled_routing(chain, prev_slot);
+                        }
                     }
                 }
                 Synth::EffectParamBinding& binding = chain.effects[in_slot].bindings[param];
@@ -892,26 +1052,35 @@ static bool apply_fx_graph_change_internal(Synth::InstrumentBank*              b
                     const Sculptor::EndPoint prev = change.connection_prev_input;
                     if (graph.node_occupied(prev.node_idx) &&
                         (prev.node_idx != in_point.node_idx || prev.slot_idx != in_point.slot_idx)) {
-                        const uint32_t prev_field =
-                            prev.slot_idx >= Sculptor::fx_param_row(0)
-                                ? (prev.slot_idx - Sculptor::fx_param_row(0)) % Sculptor::fx_param_stride
-                                : Sculptor::fx_param_stride;
-                        if (prev_field == 4 || prev_field == 7) {
-                            const uint32_t prev_param =
-                                (prev.slot_idx - Sculptor::fx_param_row(0)) / Sculptor::fx_param_stride;
+                        if (prev.slot_idx == Sculptor::fx_enabled_row) {
                             const int32_t prev_slot = Sculptor::fx_effect_slot_of(mapping, prev.node_idx);
-                            if (prev_slot >= 0 &&
-                                prev_param < Synth::get_effect_param_floats(chain.effects[prev_slot].type)) {
-                                // Both bindings rebuild into local copies and commit only after both
-                                // succeed: a refusal must leave the supplied bank unchanged.
-                                Synth::EffectParamBinding prev_binding = chain.effects[prev_slot].bindings[prev_param];
+                            if (prev_slot >= 0) {
                                 Synth::EffectParamBinding dest_binding = chain.effects[in_slot].bindings[param];
-                                if (! rebuild_param_inputs(graph, mapping, prev.node_idx, prev_param, &prev_binding) ||
-                                    ! rebuild_param_inputs(graph, mapping, in_point.node_idx, param, &dest_binding)) {
+                                if (! rebuild_param_inputs(graph, mapping, in_point.node_idx, param, &dest_binding)) {
                                     return false;
                                 }
-                                chain.effects[prev_slot].bindings[prev_param] = prev_binding;
-                                chain.effects[in_slot].bindings[param]        = dest_binding;
+                                // The wire left the Enabled row; its routing
+                                // drops with it.
+                                fx_drop_enabled_routing(chain, prev_slot);
+                                chain.effects[in_slot].bindings[param] = dest_binding;
+                                return true;
+                            }
+                        }
+                        else {
+                            // This side rebuilds into a local copy before the
+                            // release below commits the previous row: both
+                            // sides rebuild before either commits, so a
+                            // refusal leaves the bank unchanged.
+                            Synth::EffectParamBinding dest_binding = chain.effects[in_slot].bindings[param];
+                            if (! rebuild_param_inputs(graph, mapping, in_point.node_idx, param, &dest_binding)) {
+                                return false;
+                            }
+                            bool released = false;
+                            if (! fx_release_prev_source(graph, mapping, chain, prev, &released)) {
+                                return false;
+                            }
+                            if (released) {
+                                chain.effects[in_slot].bindings[param] = dest_binding;
                                 return true;
                             }
                         }
@@ -919,6 +1088,47 @@ static bool apply_fx_graph_change_internal(Synth::InstrumentBank*              b
                 }
                 Synth::EffectParamBinding& dest = chain.effects[in_slot].bindings[param];
                 return rebuild_param_binding(graph, mapping, in_point.node_idx, param, &dest);
+            }
+
+            // The Enabled row's wire is the enable routing: connect, retarget
+            // and disconnect compile it from the graph, so the routing can
+            // never desync from the wires.
+            if (in_slot >= 0 && in_point.slot_idx == Sculptor::fx_enabled_row) {
+                if (in_point.slot_idx >= graph.node(in_point.node_idx).slots.num_allocated) {
+                    return false;
+                }
+                if (mapping.midi_node == Sculptor::pool_no_slot) {
+                    return false;
+                }
+                Synth::ModInput rebuilt = {};
+                if (! rebuild_enable_input(graph,
+                                           mapping,
+                                           in_point.node_idx,
+                                           chain.effects[in_slot].enable_input,
+                                           &rebuilt)) {
+                    return false;
+                }
+                if (change.kind == Sculptor::ChangeKind::connection_changed) {
+                    // A retarget pulled the wire off another input endpoint;
+                    // that endpoint's owned state must forget the wire or the
+                    // move becomes a copy.
+                    const Sculptor::EndPoint prev = change.connection_prev_input;
+                    if (graph.node_occupied(prev.node_idx) &&
+                        (prev.node_idx != in_point.node_idx || prev.slot_idx != in_point.slot_idx)) {
+                        // The routing itself rebuilt into a local copy above,
+                        // so a refused release refuses the whole change.
+                        bool released = false;
+                        if (! fx_release_prev_source(graph, mapping, chain, prev, &released)) {
+                            return false;
+                        }
+                        if (prev.slot_idx == Sculptor::fx_enabled_row) {
+                            // The wire moved between Enabled rows.
+                            fx_drop_enabled_routing(chain, Sculptor::fx_effect_slot_of(mapping, prev.node_idx));
+                        }
+                    }
+                }
+                chain.effects[in_slot].enable_input = rebuilt;
+                return true;
             }
 
             return false;

@@ -77,6 +77,13 @@ Sculptor::Slot Sculptor::list_slot(const char* name, const char* const* options,
     return slot;
 }
 
+Sculptor::Slot Sculptor::toggle_slot(const char* name, bool value)
+{
+    Sculptor::Slot slot = make_slot(name, Sculptor::SlotKind::property, Sculptor::PropertyType::toggle);
+    slot.value.toggle   = value;
+    return slot;
+}
+
 Sculptor::GraphColors Sculptor::default_graph_colors()
 {
 
@@ -222,7 +229,7 @@ bool parse_snapshot(const uint8_t* buffer, uint32_t buffer_size, uint32_t& off, 
                 kind > static_cast<uint8_t>(Sculptor::SlotKind::property) ||
                 ! read_bytes(buffer, buffer_size, off, &connectable, 1) ||
                 ! read_bytes(buffer, buffer_size, off, &property_type, 1) ||
-                property_type > static_cast<uint8_t>(Sculptor::PropertyType::list) ||
+                property_type > static_cast<uint8_t>(Sculptor::PropertyType::toggle) ||
                 ! read_bytes(buffer, buffer_size, off, &slot.slot.value, sizeof(slot.slot.value)) ||
                 ! read_bytes(buffer, buffer_size, off, &num_options, 1) || num_options > 8 ||
                 ! read_bytes(buffer, buffer_size, off, &slot.slot.row_group, 1)) {

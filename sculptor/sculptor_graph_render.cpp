@@ -618,6 +618,14 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
                         else if (slot.property_type == PropertyType::real) {
                             snprintf(value_text, sizeof(value_text), "%.3f", static_cast<double>(slot.value.real));
                         }
+                        else if (slot.property_type == PropertyType::toggle) {
+                            // A wired toggle has no local value: the routing
+                            // drives it.  A ghost shows the slot's own saved
+                            // value instead.
+                            snprintf(value_text,
+                                     sizeof(value_text),
+                                     connected ? "wired" : (slot.value.toggle ? "on" : "off"));
+                        }
                         else {
                             snprintf(value_text, sizeof(value_text), "%u", slot.value.list_index);
                         }
@@ -697,6 +705,10 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
                             }
                             break;
                         }
+                        case PropertyType::toggle:
+                            value_edited   = ImGui::Checkbox("##value", &node.slots.entries[slot_idx].value.toggle);
+                            item_submitted = true;
+                            break;
                         case PropertyType::unused:
                             // A SetCursorScreenPos that lands outside the window
                             // bounds must be followed by an item, or ImGui's

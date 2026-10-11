@@ -15,10 +15,22 @@ namespace Synth {
 // graph node recorded in src_param_id (0 = unmodulated constant).
 struct EffectInstance {
     EffectType type;
-    bool       enabled;
-    float      params[max_effect_param_floats];
-    uint32_t   state_offs; // byte offset into the device data buffer; 0 when stateless
-    uint16_t   src_param_id[max_effect_param_floats];
+    // Live enable state: a wired routing's per-block threshold decision, or
+    // the saved checkbox for an unwired instance.  At the enable control
+    // point this holds the previous block's decision, which is what the
+    // RESET edge compares.
+    bool enabled;
+    // The slot's saved checkbox bit as committed.  An unwired instance's
+    // live decision reads this, so a checkbox toggle crossing a publish
+    // stays visible as an off->on transition at the runtime control point.
+    bool     saved_enabled;
+    float    params[max_effect_param_floats];
+    uint32_t state_offs; // byte offset into the device data buffer; 0 when stateless
+    uint16_t src_param_id[max_effect_param_floats];
+    // Resolved leaf parameter id of the slot's wired enable routing (0 =
+    // unwired, the saved checkbox alone decides).  Filled at commit through
+    // the same per-chain channel the param sources resolve from.
+    uint16_t enable_param_id;
 };
 
 struct EffectChain {
@@ -29,7 +41,8 @@ struct EffectChain {
 // Preflight result for one effect slot: where its persistent state lives in the device
 // buffer (0 = stateless), whether that state still needs initialization and must be zeroed
 // before its first shader use, and which effect the offset was sized for (a re-expansion
-// preserves the offset while the slot keeps running the same enabled effect).
+// preserves the offset while the slot keeps running the same effect type, enabled or
+// enable-routed).
 struct EffectSlotPlan {
     uint32_t   state_offs;
     bool       needs_clear;
@@ -60,10 +73,16 @@ struct EffectClearList {
 // resets all expansion state (plan and pending clears). The region must be
 // aligned to effect_state_alignment; the host asserts the device honors that alignment.
 // Effect param inputs admit the assignable CC sources: the CC number must name
-// CC 16..31, and non-CC inputs must carry no stale CC number. Shared by the
-// runtime preflight, the commit asserts and the editor bank validator, so the
-// load-time and expansion-time acceptance rules cannot diverge.
+// CC 16..31, and non-CC inputs must carry no stale CC number.  The source and
+// CC half of is_valid_effect_mod_input, which adds the op and scale rules.
 bool is_valid_effect_input(const ModInput& input);
+
+// Full acceptance rule for an effect ModInput, param input or enable routing
+// alike: the source/CC rules of is_valid_effect_input plus an add-or-multiply
+// op and a finite scale.  Shared by the runtime preflight, the commit asserts
+// and the editor bank validator, so load-time and expansion-time acceptance
+// cannot diverge.
+bool is_valid_effect_mod_input(const ModInput& input);
 
 void init_effect_state_region(uint32_t region_base_offset);
 
@@ -108,13 +127,29 @@ struct EffectNodeWriter {
 // Applies a passing plan: fills the runtime chains from the bank (base values into
 // params[], state offsets and source nodes from the plan), records clear ranges for
 // new or retained-unrendered state, and makes the plan current. Only the final plan
-// dispatches, so abandoned ranges need no clear.
+// dispatches, so abandoned ranges need no clear.  A retained slot's instance
+// continues from the previous instance's live enable state, so a publish never
+// reads as an off->on transition for an effect that was sounding immediately
+// before it; a fresh instance seeds from the saved checkbox bit.
 // Infallible by construction after a passing preflight.
 void commit_effect_expansion(const InstrumentBank&      bank,
                              const EffectExpansionPlan& plan,
                              EffectChain*               out_channel_chains, // [max_channels]
                              EffectChain*               out_master_chain,
                              const EffectNodeWriter&    writer);
+
+// Live enable decision for one effect instance, evaluated per control block.
+// enable_param_id != 0 (wired routing): the saved checkbox is ignored and the
+// instance is live exactly when the resolved leaf value reaches the raw 14-bit
+// on-threshold: the source's raw 14-bit value >= 8192 of 16383, i.e. MSB >= 64
+// (MSB 63 tops out at 8191).  enable_param_id == 0 (unwired): the
+// saved checkbox decides, as before.
+bool effect_live_enabled(uint16_t enable_param_id, float resolved_leaf_value, bool saved_enabled);
+
+// RESET decision for one control block: the state range is cleared exactly on
+// the off->on live-enable transition, so a re-enabled effect starts from
+// silence instead of replaying the state its last live run left behind.
+bool effect_needs_reset(bool previous_live_enabled, bool live_enabled);
 
 // Hands the latest plan's outstanding clear ranges to the render loop, which zeroes
 // them before any effect dispatch, and retires needs_clear. Single consumer, same

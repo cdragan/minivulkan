@@ -4809,6 +4809,583 @@ static void effects_add_cc_regressions()
     remove(library_path);
 }
 
+// Enable-routing regressions.  EffectSlotBinding carries a ModInput
+// enable_input (zero = unwired); the Enabled row is a connectable toggle
+// property; the runtime live-enable decision resolves a wired routing's leaf
+// value against the raw 14-bit >= 8192 threshold, while an unwired one keeps
+// the saved checkbox state.  The pure helpers under test live in
+// synth_effect_expansion, the wiring in sculptor_effect_graph.
+static void effects_enable_regressions()
+{
+    static Synth::InstrumentEditorBank  source;
+    static Synth::InstrumentEditorBank  candidate;
+    static Synth::InstrumentEditorBank  decoded;
+    static Sculptor::Graph              graph;
+    static Sculptor::EffectGraphMapping mapping;
+    static Sculptor::GraphChange        discarded[Sculptor::max_pending_changes];
+    static char                         payload[Synth::library_payload_max];
+
+    const Synth::ModInput zero_input = {};
+
+    // T-M5-1: the wired threshold sits exactly between raw 14-bit 8191 and
+    // 8192 (MSB 63 vs 64).  Values arrive through the M1 capture path as two
+    // 7-bit halves, never as a prepared float.
+    {
+        Synth::ChannelCcState cc_state;
+        memset(&cc_state, 0, sizeof(cc_state));
+        memset(cc_state.lsb, 0xFF, sizeof(cc_state.lsb)); // fresh channel: no LSB seen yet
+
+        (void)Synth::apply_channel_cc(&cc_state, Synth::cc_msb_base, 63);
+        const float at_8191 = Synth::apply_channel_cc(&cc_state, Synth::cc_lsb_base, 127);
+        TEST(approx(at_8191, 8191.0f / 16383.0f, 1e-6f));
+        TEST(! Synth::effect_live_enabled(77, at_8191, true)); // a wired low beats a saved-on bit
+
+        (void)Synth::apply_channel_cc(&cc_state, Synth::cc_msb_base, 64);
+        const float at_8192 = Synth::apply_channel_cc(&cc_state, Synth::cc_lsb_base, 0);
+        TEST(approx(at_8192, 8192.0f / 16383.0f, 1e-6f));
+        TEST(Synth::effect_live_enabled(77, at_8192, false)); // a wired high beats a saved-off bit
+    }
+
+    // T-M5-2: an unwired enable keeps the saved checkbox state: the toggle
+    // write-back lands on the Enabled row's value seam.  An unwired
+    // saved-off slot stays stateless: no routing resolves, no state reserves.
+    {
+        add_cc_chain_fixture(&source, 0);
+        TEST(Sculptor::project_effect_chain_to_graph(source, 0, &graph, &mapping));
+        graph.take_changes(discarded, Sculptor::max_pending_changes);
+
+        const Sculptor::Slot& enabled_row = graph.node(mapping.effect_nodes[0]).slots.entries[Sculptor::fx_enabled_row];
+        TEST(enabled_row.property_type == Sculptor::PropertyType::toggle);
+        TEST(enabled_row.value.toggle == true); // the fixture saves the effect on
+
+        Sculptor::PropertyValue off = {};
+        off.toggle                  = false;
+        graph.set_slot_value(mapping.effect_nodes[0], Sculptor::fx_enabled_row, off);
+        Sculptor::GraphChange toggle_off = {};
+        toggle_off.kind                  = Sculptor::ChangeKind::value_changed;
+        toggle_off.node_idx              = mapping.effect_nodes[0];
+        toggle_off.slot_idx              = Sculptor::fx_enabled_row;
+        candidate                        = source;
+        TEST(Sculptor::apply_fx_graph_change(&candidate.bank, graph, mapping, toggle_off));
+        TEST(candidate.bank.channel_chains[0].effects[0].enabled == false);
+        TEST(memcmp(&candidate.bank.channel_chains[0].effects[0].enable_input, &zero_input, sizeof(zero_input)) == 0);
+
+        static Synth::InstrumentBank bank;
+        Synth::init_default_bank(&bank);
+        bank.channel_chains[0].num_effects        = 1;
+        bank.channel_chains[0].effects[0].type    = Synth::EffectType::delay;
+        bank.channel_chains[0].effects[0].enabled = false;
+
+        Synth::init_effect_state_region(fake_region_base);
+        static Synth::EffectExpansionPlan plan;
+        const char*                       error = nullptr;
+        TEST(Synth::preflight_effect_expansion(bank, &plan, &error));
+        TEST(plan.slots[0][0].state_offs == 0); // an unwired saved-off slot stays stateless
+
+        static Synth::EffectChain chains[Synth::max_channels];
+        static Synth::EffectChain master;
+        FakeWriter                writer = { 1, 0, 0, 0, 0 };
+        Synth::commit_effect_expansion(bank, plan, chains, &master, fake_writer_binding(writer));
+        TEST(chains[0].effects[0].enabled == false);
+        TEST(chains[0].effects[0].enable_param_id == 0);
+        TEST(writer.num_resolved == 0); // an unwired enable resolves nothing
+        (void)Synth::take_effect_clear_ranges();
+    }
+
+    // T-M5-3: a wired enable overrides the saved checkbox in both directions,
+    // and the commit resolves the routing so the runtime can ignore the bit.
+    {
+        static Synth::InstrumentBank bank;
+        Synth::init_default_bank(&bank);
+        bank.channel_chains[1].num_effects                       = 1;
+        bank.channel_chains[1].effects[0].type                   = Synth::EffectType::delay;
+        bank.channel_chains[1].effects[0].enabled                = true;
+        bank.channel_chains[1].effects[0].enable_input.source    = Synth::ModSource::cc;
+        bank.channel_chains[1].effects[0].enable_input.op        = Synth::SourceOp::add;
+        bank.channel_chains[1].effects[0].enable_input.cc_number = Synth::cc_msb_base;
+        bank.channel_chains[1].effects[0].enable_input.scale     = 1.0f;
+
+        Synth::init_effect_state_region(fake_region_base);
+        static Synth::EffectExpansionPlan plan;
+        const char*                       error = nullptr;
+        TEST(Synth::preflight_effect_expansion(bank, &plan, &error));
+
+        static Synth::EffectChain chains[Synth::max_channels];
+        static Synth::EffectChain master;
+        FakeWriter                writer = { 1, 0, 0, 0, 0 };
+        Synth::commit_effect_expansion(bank, plan, chains, &master, fake_writer_binding(writer));
+        TEST(writer.num_resolved == 1);
+        TEST(writer.resolved[0].source == Synth::ModSource::cc);
+        TEST(writer.resolved[0].cc_number == Synth::cc_msb_base);
+        TEST(writer.resolved[0].chain == 1); // a channel chain resolves from its own channel
+        TEST(chains[1].effects[0].enable_param_id == 77);
+        TEST(chains[1].effects[0].enabled == true); // the saved bit still commits as-is
+        (void)Synth::take_effect_clear_ranges();
+
+        TEST(! Synth::effect_live_enabled(77, 8191.0f / 16383.0f, true)); // saved on + routed off -> off
+        TEST(Synth::effect_live_enabled(77, 8192.0f / 16383.0f, false));  // saved off + routed on -> on
+    }
+
+    // T-M5-4: RESET fires exactly on the off->on live-enable transition, so a
+    // re-enabled effect starts from silence while a continuously enabled one
+    // is never cleared.
+    {
+        TEST(Synth::effect_needs_reset(false, true));
+        TEST(! Synth::effect_needs_reset(true, true));
+        TEST(! Synth::effect_needs_reset(true, false));
+        TEST(! Synth::effect_needs_reset(false, false));
+
+        // A routed effect that ran, dropped below the threshold and rose back
+        // across it clears once at the re-enable edge.
+        Synth::ChannelCcState cc_state;
+        memset(&cc_state, 0, sizeof(cc_state));
+        memset(cc_state.lsb, 0xFF, sizeof(cc_state.lsb));
+        (void)Synth::apply_channel_cc(&cc_state, Synth::cc_msb_base, 64);
+        const float live_value = Synth::apply_channel_cc(&cc_state, Synth::cc_lsb_base, 0);
+
+        bool previous = Synth::effect_live_enabled(77, live_value, true);
+        TEST(previous);
+
+        (void)Synth::apply_channel_cc(&cc_state, Synth::cc_msb_base, 63);
+        const float dropped  = Synth::apply_channel_cc(&cc_state, Synth::cc_lsb_base, 127);
+        const bool  disabled = Synth::effect_live_enabled(77, dropped, true);
+        TEST(! disabled);
+        TEST(! Synth::effect_needs_reset(previous, disabled)); // disabling clears nothing
+        previous = disabled;
+
+        (void)Synth::apply_channel_cc(&cc_state, Synth::cc_msb_base, 64);
+        const float risen     = Synth::apply_channel_cc(&cc_state, Synth::cc_lsb_base, 0);
+        const bool  reenabled = Synth::effect_live_enabled(77, risen, true);
+        TEST(reenabled);
+        TEST(Synth::effect_needs_reset(previous, reenabled)); // the re-enable edge clears
+    }
+
+    // T-M5-5: a saved-off, enable-routed effect reserves state and consumes
+    // budget like a saved-on one; the budget-exhaustion refusal keeps its
+    // existing error path.
+    {
+        static Synth::InstrumentBank bank;
+        Synth::init_default_bank(&bank);
+
+        // Three saved-on master delays plus one saved-off, enable-routed delay
+        // on channel 0: four delays, exactly the state budget.
+        bank.master_chain.num_effects = 3;
+        for (uint32_t s = 0; s < 3; ++s) {
+            bank.master_chain.effects[s].type    = Synth::EffectType::delay;
+            bank.master_chain.effects[s].enabled = true;
+        }
+        bank.channel_chains[0].num_effects                       = 1;
+        bank.channel_chains[0].effects[0].type                   = Synth::EffectType::delay;
+        bank.channel_chains[0].effects[0].enabled                = false;
+        bank.channel_chains[0].effects[0].enable_input.source    = Synth::ModSource::cc;
+        bank.channel_chains[0].effects[0].enable_input.op        = Synth::SourceOp::add;
+        bank.channel_chains[0].effects[0].enable_input.cc_number = Synth::cc_msb_base;
+        bank.channel_chains[0].effects[0].enable_input.scale     = 1.0f;
+
+        Synth::init_effect_state_region(fake_region_base);
+        static Synth::EffectExpansionPlan plan;
+        const char*                       error = nullptr;
+        TEST(Synth::preflight_effect_expansion(bank, &plan, &error));
+        TEST(plan.slots[0][0].state_offs != 0); // routed-but-bypassed still reserves state
+        TEST(plan.slots[0][0].needs_clear);
+        TEST(plan.consumed_bytes == 4 * Synth::get_effect_state_bytes(Synth::EffectType::delay));
+
+        // A fifth delay, itself saved-off but enable-routed, exceeds the
+        // budget: the preflight refuses and leaves the plan untouched.
+        bank.channel_chains[1].num_effects                       = 1;
+        bank.channel_chains[1].effects[0].type                   = Synth::EffectType::delay;
+        bank.channel_chains[1].effects[0].enabled                = false;
+        bank.channel_chains[1].effects[0].enable_input.source    = Synth::ModSource::cc;
+        bank.channel_chains[1].effects[0].enable_input.op        = Synth::SourceOp::add;
+        bank.channel_chains[1].effects[0].enable_input.cc_number = Synth::cc_msb_base + 1;
+        bank.channel_chains[1].effects[0].enable_input.scale     = 1.0f;
+        TEST(! Synth::preflight_effect_expansion(bank, &plan, &error));
+        TEST(plan.consumed_bytes == 4 * Synth::get_effect_state_bytes(Synth::EffectType::delay));
+    }
+
+    // T-M5-6: bank JSON carries the enable routing only when wired and decodes
+    // back identically; a bank without the field (a pre-M5 save) loads as
+    // unwired, because the decode zero-fills what the encoder omits (DM3).
+    {
+        add_cc_chain_fixture(&source, 0);
+        source.bank.channel_chains[0].effects[0].enabled = false;
+        Synth::ModInput& routing                         = source.bank.channel_chains[0].effects[0].enable_input;
+        routing.source                                   = Synth::ModSource::cc;
+        routing.op                                       = Synth::SourceOp::add;
+        routing.cc_number                                = Synth::cc_msb_base;
+        routing.scale                                    = 1.0f;
+
+        const uint32_t wired_len = Synth::encode_editor_bank_json(&source, payload, sizeof(payload));
+        TEST(wired_len > 0);
+        payload[wired_len] = '\0';
+        TEST(strstr(payload, "\"enable_input\"") != nullptr); // encoded when wired
+
+        TEST(Synth::decode_editor_bank_json(payload, wired_len, &decoded));
+        TEST(decoded.bank.channel_chains[0].effects[0].enabled == false);
+        TEST(decoded.bank.channel_chains[0].effects[0].enable_input.source == Synth::ModSource::cc);
+        TEST(decoded.bank.channel_chains[0].effects[0].enable_input.cc_number == Synth::cc_msb_base);
+
+        // Unwired: the key is omitted, so the same document shape serves the
+        // old-bank load and the routing decodes to the zero fill.
+        source.bank.channel_chains[0].effects[0].enable_input = zero_input;
+        const uint32_t plain_len = Synth::encode_editor_bank_json(&source, payload, sizeof(payload));
+        TEST(plain_len > 0);
+        payload[plain_len] = '\0';
+        TEST(strstr(payload, "\"enable_input\"") == nullptr);
+
+        TEST(Synth::decode_editor_bank_json(payload, plain_len, &decoded));
+        TEST(decoded.bank.channel_chains[0].effects[0].enabled == false);
+        TEST(memcmp(&decoded.bank.channel_chains[0].effects[0].enable_input, &zero_input, sizeof(zero_input)) == 0);
+    }
+
+    // T-M5-7: wiring the Enabled row is a structural edit, so the projection
+    // rebuilds it with the wire into the Enabled slot (rendered greyed);
+    // disconnecting restores the editable checkbox at the saved state.
+    {
+        add_cc_chain_fixture(&source, 0);
+        source.bank.channel_chains[0].effects[0].enabled = false; // saved off
+        source.added_cc_mask[0]                          = 1u << 0;
+
+        TEST(Sculptor::project_effect_chain_to_graph(source, 0, &graph, &mapping));
+        graph.take_changes(discarded, Sculptor::max_pending_changes);
+        const Sculptor::Slot& enabled_row = graph.node(mapping.effect_nodes[0]).slots.entries[Sculptor::fx_enabled_row];
+        TEST(enabled_row.property_type == Sculptor::PropertyType::toggle);
+        TEST(enabled_row.connectable); // the Enabled row admits wires
+        TEST(enabled_row.value.toggle == false);
+
+        const Sculptor::EndPoint cc_out    = { mapping.midi_node, mapping.midi_cc_slots[0] };
+        const Sculptor::EndPoint enable_in = { mapping.effect_nodes[0], Sculptor::fx_enabled_row };
+        TEST(graph.add_connection(cc_out, enable_in) != Sculptor::pool_no_slot);
+        Sculptor::GraphChange connect = {};
+        connect.kind                  = Sculptor::ChangeKind::connection_added;
+        connect.connection_output     = cc_out;
+        connect.connection_input      = enable_in;
+        candidate                     = source;
+        TEST(Sculptor::apply_fx_graph_change(&candidate.bank, graph, mapping, connect));
+        TEST(candidate.bank.channel_chains[0].effects[0].enable_input.source == Synth::ModSource::cc);
+        TEST(candidate.bank.channel_chains[0].effects[0].enable_input.cc_number == Synth::cc_msb_base);
+        TEST(candidate.bank.channel_chains[0].effects[0].enabled == false); // wiring keeps the saved bit
+
+        TEST(Sculptor::project_effect_chain_to_graph(candidate, 0, &graph, &mapping));
+        graph.take_changes(discarded, Sculptor::max_pending_changes);
+        TEST(find_fx_graph_connection(graph, cc_out, enable_in) != Sculptor::pool_no_slot); // the wired row rebuilds
+
+        // Disconnect: the wire drops, the routing zeroes, and the checkbox
+        // shows the previously saved state again.
+        const uint32_t wire = find_fx_graph_connection(graph, cc_out, enable_in);
+        TEST(wire != Sculptor::pool_no_slot);
+        TEST(graph.user_delete_connection(wire));
+        Sculptor::GraphChange disconnect = {};
+        disconnect.kind                  = Sculptor::ChangeKind::connection_deleted;
+        disconnect.connection_output     = cc_out;
+        disconnect.connection_input      = enable_in;
+        TEST(Sculptor::apply_fx_graph_change(&candidate.bank, graph, mapping, disconnect));
+        TEST(memcmp(&candidate.bank.channel_chains[0].effects[0].enable_input, &zero_input, sizeof(zero_input)) == 0);
+        TEST(candidate.bank.channel_chains[0].effects[0].enabled == false);
+
+        TEST(Sculptor::project_effect_chain_to_graph(candidate, 0, &graph, &mapping));
+        graph.take_changes(discarded, Sculptor::max_pending_changes);
+        TEST(find_fx_graph_connection(graph, cc_out, enable_in) == Sculptor::pool_no_slot);
+        const Sculptor::Slot& restored_row =
+            graph.node(mapping.effect_nodes[0]).slots.entries[Sculptor::fx_enabled_row];
+        TEST(restored_row.property_type == Sculptor::PropertyType::toggle);
+        TEST(restored_row.value.toggle == false);
+    }
+
+    // T-M5-8: the master chain resolves its enable routing through the
+    // master->0 chokepoint, so the same threshold governs master effects.
+    {
+        static Synth::InstrumentBank bank;
+        Synth::init_default_bank(&bank);
+        bank.master_chain.num_effects                       = 1;
+        bank.master_chain.effects[0].type                   = Synth::EffectType::delay;
+        bank.master_chain.effects[0].enabled                = false;
+        bank.master_chain.effects[0].enable_input.source    = Synth::ModSource::cc;
+        bank.master_chain.effects[0].enable_input.op        = Synth::SourceOp::add;
+        bank.master_chain.effects[0].enable_input.cc_number = Synth::cc_msb_base;
+        bank.master_chain.effects[0].enable_input.scale     = 1.0f;
+
+        Synth::init_effect_state_region(fake_region_base);
+        static Synth::EffectExpansionPlan plan;
+        const char*                       error = nullptr;
+        TEST(Synth::preflight_effect_expansion(bank, &plan, &error));
+
+        static Synth::EffectChain chains[Synth::max_channels];
+        static Synth::EffectChain master;
+        FakeWriter                writer = { 1, 0, 0, 0, 0 };
+        Synth::commit_effect_expansion(bank, plan, chains, &master, fake_writer_binding(writer));
+        TEST(writer.num_resolved == 1);
+        TEST(writer.resolved[0].source == Synth::ModSource::cc);
+        TEST(writer.resolved[0].cc_number == Synth::cc_msb_base);
+        TEST(writer.resolved[0].chain == 0); // the master chain resolves from channel index 0
+        TEST(master.effects[0].enable_param_id == 77);
+        TEST(Synth::effect_live_enabled(master.effects[0].enable_param_id, 8192.0f / 16383.0f, false));
+        (void)Synth::take_effect_clear_ranges();
+    }
+
+    // T-M5-9: an enable routing whose CC lost its registry dot stays inert
+    // the M4 way: the bank keeps the routing and the runtime still honors the
+    // raw CC, while the editor draws no wire and the Enabled row shows the
+    // saved checkbox state; a routing-recompiling edit refuses atomically.
+    {
+        add_cc_chain_fixture(&source, 0);
+        source.bank.channel_chains[0].effects[0].enabled = true; // saved on
+        Synth::ModInput& stale                           = source.bank.channel_chains[0].effects[0].enable_input;
+        stale.source                                     = Synth::ModSource::cc;
+        stale.op                                         = Synth::SourceOp::add;
+        stale.cc_number                                  = Synth::cc_msb_base + 1; // CC 17, no registry bit
+        stale.scale                                      = 1.0f;
+
+        TEST(Sculptor::project_effect_chain_to_graph(source, 0, &graph, &mapping));
+        graph.take_changes(discarded, Sculptor::max_pending_changes);
+        TEST(mapping.midi_cc_slots[1] == Sculptor::pool_no_slot); // the dot is gone
+        const Sculptor::EndPoint enable_in  = { mapping.effect_nodes[0], Sculptor::fx_enabled_row };
+        bool                     stale_wire = false;
+        for (uint32_t i = 0; i < Sculptor::max_connections; ++i) {
+            if (graph.connection_occupied(i) && graph.get_connection(i).input.node_idx == enable_in.node_idx &&
+                graph.get_connection(i).input.slot_idx == enable_in.slot_idx) {
+                stale_wire = true;
+            }
+        }
+        TEST(! stale_wire); // no wire to an absent dot
+        const Sculptor::Slot& enabled_row = graph.node(mapping.effect_nodes[0]).slots.entries[Sculptor::fx_enabled_row];
+        TEST(enabled_row.property_type == Sculptor::PropertyType::toggle);
+        TEST(enabled_row.value.toggle == true); // presentational fallback: the saved checkbox
+
+        // The enable wire participates in the wired-CC registry rules, so the
+        // undotted CC 17 still counts as wired (removal-refusal input).
+        TEST((Sculptor::fx_chain_wired_cc_mask(Sculptor::fx_graph_chain(&source.bank, 0)) & (1u << 1)) != 0);
+
+        // The runtime keeps honoring the routing: the commit resolves it and
+        // the CC threshold governs, whatever the saved checkbox says.
+        static Synth::InstrumentBank bank;
+        bank = source.bank;
+        Synth::init_effect_state_region(fake_region_base);
+        static Synth::EffectExpansionPlan plan;
+        const char*                       error = nullptr;
+        TEST(Synth::preflight_effect_expansion(bank, &plan, &error));
+        static Synth::EffectChain chains[Synth::max_channels];
+        static Synth::EffectChain master;
+        FakeWriter                writer = { 1, 0, 0, 0, 0 };
+        Synth::commit_effect_expansion(bank, plan, chains, &master, fake_writer_binding(writer));
+        TEST(chains[0].effects[0].enable_param_id == 77);
+        TEST(! Synth::effect_live_enabled(77, 8191.0f / 16383.0f, true)); // routed low beats saved-on
+        (void)Synth::take_effect_clear_ranges();
+
+        // A routing-recompiling edit on the Enabled row refuses atomically
+        // while the named CC has no dot.
+        const Sculptor::EndPoint wheel_out = { mapping.midi_node, mapping.midi_source_slots[1] };
+        TEST(graph.add_connection(wheel_out, enable_in) != Sculptor::pool_no_slot);
+        Sculptor::GraphChange reconnect = {};
+        reconnect.kind                  = Sculptor::ChangeKind::connection_added;
+        reconnect.connection_output     = wheel_out;
+        reconnect.connection_input      = enable_in;
+        candidate                       = source;
+        TEST(! Sculptor::apply_fx_graph_change(&candidate.bank, graph, mapping, reconnect));
+        TEST(memcmp(&candidate, &source, sizeof(candidate)) == 0);
+    }
+
+    // T-M5-10: the RESET decision at the runtime seam across a publish.  A
+    // saved-off routed effect that is live on both sides of a commit boundary
+    // keeps its state, so a publish never looks like an off->on transition,
+    // while a genuine off->on transition still clears - through the routing
+    // and through a saved-checkbox toggle on a retained slot.
+    {
+        static Synth::InstrumentBank bank;
+        Synth::init_default_bank(&bank);
+        bank.channel_chains[0].num_effects                       = 1;
+        bank.channel_chains[0].effects[0].type                   = Synth::EffectType::delay;
+        bank.channel_chains[0].effects[0].enabled                = false;
+        bank.channel_chains[0].effects[0].enable_input.source    = Synth::ModSource::cc;
+        bank.channel_chains[0].effects[0].enable_input.op        = Synth::SourceOp::add;
+        bank.channel_chains[0].effects[0].enable_input.cc_number = Synth::cc_msb_base;
+        bank.channel_chains[0].effects[0].enable_input.scale     = 1.0f;
+
+        Synth::init_effect_state_region(fake_region_base);
+        static Synth::EffectExpansionPlan plan;
+        const char*                       error = nullptr;
+        TEST(Synth::preflight_effect_expansion(bank, &plan, &error));
+
+        static Synth::EffectChain chains[Synth::max_channels];
+        static Synth::EffectChain master;
+        FakeWriter                writer = { 1, 0, 0, 0, 0 };
+        Synth::commit_effect_expansion(bank, plan, chains, &master, fake_writer_binding(writer));
+        (void)Synth::take_effect_clear_ranges();
+
+        Synth::EffectInstance& effect = chains[0].effects[0];
+
+        // The hand replication below mirrors pull_effect_param_chain's decision
+        // sequence (realtime_synth.cpp:1570-1594): read the previous live state,
+        // evaluate the wired/unwired threshold decision, decide the RESET edge,
+        // then write the live state back.  The runtime call itself needs a GPU,
+        // so the suite replays the same helper calls in the same order.
+        // The raw CC arrives through the capture path; the first simulated
+        // block takes the routed instance live.
+        Synth::ChannelCcState cc_state;
+        memset(&cc_state, 0, sizeof(cc_state));
+        memset(cc_state.lsb, 0xFF, sizeof(cc_state.lsb));
+        (void)Synth::apply_channel_cc(&cc_state, Synth::cc_msb_base, 64);
+        const float live_value = Synth::apply_channel_cc(&cc_state, Synth::cc_lsb_base, 0);
+
+        effect.enabled = Synth::effect_live_enabled(effect.enable_param_id, live_value, effect.saved_enabled);
+        TEST(effect.enabled);
+
+        // A publish re-commits the same bank.  The retained slot keeps its
+        // live enable state, so the next block sees no off->on edge: the
+        // lived-in tail survives an unrelated knob turn.
+        TEST(Synth::preflight_effect_expansion(bank, &plan, &error));
+        Synth::commit_effect_expansion(bank, plan, chains, &master, fake_writer_binding(writer));
+        TEST(effect.state_offs != 0); // the state range survived the publish
+
+        const bool previous_enabled = effect.enabled;
+        const bool live_enabled = Synth::effect_live_enabled(effect.enable_param_id, live_value, effect.saved_enabled);
+        TEST(! Synth::effect_needs_reset(previous_enabled, live_enabled)); // continuously live: no reset
+        effect.enabled = live_enabled;
+
+        // A genuine off->on transition still clears: the routing drops below
+        // the threshold, then rises back across it.
+        (void)Synth::apply_channel_cc(&cc_state, Synth::cc_msb_base, 63);
+        const float dropped = Synth::apply_channel_cc(&cc_state, Synth::cc_lsb_base, 127);
+        effect.enabled      = Synth::effect_live_enabled(effect.enable_param_id, dropped, effect.saved_enabled);
+        TEST(! effect.enabled);
+
+        (void)Synth::apply_channel_cc(&cc_state, Synth::cc_msb_base, 64);
+        const float risen     = Synth::apply_channel_cc(&cc_state, Synth::cc_lsb_base, 0);
+        const bool  reenabled = Synth::effect_live_enabled(effect.enable_param_id, risen, effect.saved_enabled);
+        TEST(reenabled);
+        TEST(Synth::effect_needs_reset(effect.enabled, reenabled)); // the re-enable edge clears
+
+        // Drop back below the threshold: the effect bypasses with its
+        // lived-in state still in the range.
+        (void)Synth::apply_channel_cc(&cc_state, Synth::cc_msb_base, 63);
+        const float bypassed = Synth::apply_channel_cc(&cc_state, Synth::cc_lsb_base, 127);
+        effect.enabled       = Synth::effect_live_enabled(effect.enable_param_id, bypassed, effect.saved_enabled);
+        TEST(! effect.enabled);
+
+        // Unwiring the routing while bypassed and saving the checkbox on
+        // keeps the edge visible across the publish: the commit seeds the
+        // retained slot with the previous (off) live state, so the first
+        // block still sees off->on and clears.
+        bank.channel_chains[0].effects[0].enable_input = zero_input;
+        bank.channel_chains[0].effects[0].enabled      = true;
+        TEST(Synth::preflight_effect_expansion(bank, &plan, &error));
+        Synth::commit_effect_expansion(bank, plan, chains, &master, fake_writer_binding(writer));
+        TEST(effect.state_offs != 0); // the lived-in state range is retained
+        TEST(! effect.enabled);       // seeded with the previous (bypassed) live state
+        TEST(effect.saved_enabled);   // the saved checkbox committed
+
+        const bool unwired_live = Synth::effect_live_enabled(effect.enable_param_id, 0.0f, effect.saved_enabled);
+        TEST(unwired_live);                                            // unwired: the saved checkbox decides
+        TEST(Synth::effect_needs_reset(effect.enabled, unwired_live)); // the toggle edge clears
+    }
+
+    // T-M5-11: a plain unwired checkbox toggle off->on across a publish on a
+    // stateful effect.  An unwired saved-off slot is stateless, so the
+    // on-commit allocates fresh state: the commit zero-fills it through the
+    // clear list (the runtime RESET edge only fires on retained slots, which
+    // T-M5-10's unwiring handoff covers), and the fresh instance seeds live
+    // from the saved checkbox bit.
+    {
+        static Synth::InstrumentBank bank;
+        Synth::init_default_bank(&bank);
+        bank.channel_chains[0].num_effects        = 1;
+        bank.channel_chains[0].effects[0].type    = Synth::EffectType::delay;
+        bank.channel_chains[0].effects[0].enabled = true; // saved on, unwired
+
+        Synth::init_effect_state_region(fake_region_base);
+        static Synth::EffectExpansionPlan plan;
+        const char*                       error = nullptr;
+        TEST(Synth::preflight_effect_expansion(bank, &plan, &error));
+
+        static Synth::EffectChain chains[Synth::max_channels];
+        static Synth::EffectChain master;
+        FakeWriter                writer = { 1, 0, 0, 0, 0 };
+        Synth::commit_effect_expansion(bank, plan, chains, &master, fake_writer_binding(writer));
+        TEST(chains[0].effects[0].state_offs != 0); // stateful while saved on
+        TEST(chains[0].effects[0].enable_param_id == 0);
+        TEST(chains[0].effects[0].enabled);
+        (void)Synth::take_effect_clear_ranges();
+
+        Synth::EffectInstance& effect = chains[0].effects[0];
+
+        // Toggle the checkbox off and publish: the unwired slot goes
+        // stateless, so the state range is released.
+        bank.channel_chains[0].effects[0].enabled = false;
+        TEST(Synth::preflight_effect_expansion(bank, &plan, &error));
+        Synth::commit_effect_expansion(bank, plan, chains, &master, fake_writer_binding(writer));
+        TEST(effect.state_offs == 0); // an unwired saved-off slot is stateless
+        TEST(! effect.enabled);
+
+        // Toggle back on and publish: fresh state arrives zero-filled via
+        // the commit's clear list, and the instance seeds live from the
+        // saved checkbox bit.
+        bank.channel_chains[0].effects[0].enabled = true;
+        TEST(Synth::preflight_effect_expansion(bank, &plan, &error));
+        Synth::commit_effect_expansion(bank, plan, chains, &master, fake_writer_binding(writer));
+        TEST(effect.state_offs != 0); // the state range is re-allocated
+        TEST(effect.enabled);         // seeded live from the saved checkbox bit
+        TEST(effect.saved_enabled);
+
+        const Synth::EffectClearList clears = Synth::take_effect_clear_ranges();
+        TEST(clears.count == 1);                            // the fresh state range is zero-filled
+        TEST(clears.ranges[0].offset == effect.state_offs); // ...before its first dispatch
+        TEST(clears.ranges[0].bytes == Synth::get_effect_state_bytes(Synth::EffectType::delay));
+    }
+
+    // T-M5-12: the Enabled row takes CC routings only (user ruling
+    // 2026-10-11).  Hand-authored wires from the three standard channel-wide
+    // dots (bend, mod wheel, channel pressure) refuse atomically in the
+    // rebuild, leaving the bank byte-identical and the routing unwired; a CC
+    // wire still compiles (T-M5-7).  A hand-authored bank whose enable_input
+    // names a non-CC source refuses at decode, the same refuse-not-normalize
+    // rule out-of-range CC numbers follow.
+    {
+        add_cc_chain_fixture(&source, 0);
+        source.bank.channel_chains[0].effects[0].enabled = false;
+
+        TEST(Sculptor::project_effect_chain_to_graph(source, 0, &graph, &mapping));
+        graph.take_changes(discarded, Sculptor::max_pending_changes);
+
+        const Sculptor::EndPoint enable_in = { mapping.effect_nodes[0], Sculptor::fx_enabled_row };
+        for (uint32_t standard_dot = 0; standard_dot < Sculptor::fx_num_input_sources; ++standard_dot) {
+            const Sculptor::EndPoint standard_out = { mapping.midi_node, mapping.midi_source_slots[standard_dot] };
+            TEST(graph.add_connection(standard_out, enable_in) != Sculptor::pool_no_slot);
+
+            Sculptor::GraphChange connect = {};
+            connect.kind                  = Sculptor::ChangeKind::connection_added;
+            connect.connection_output     = standard_out;
+            connect.connection_input      = enable_in;
+            candidate                     = source;
+            TEST(! Sculptor::apply_fx_graph_change(&candidate.bank, graph, mapping, connect));
+            TEST(memcmp(&candidate, &source, sizeof(candidate)) == 0); // no routing, bank untouched
+
+            // Drop the hand-authored wire so the next dot starts bare.
+            const uint32_t wire = find_fx_graph_connection(graph, standard_out, enable_in);
+            TEST(wire != Sculptor::pool_no_slot);
+            TEST(graph.user_delete_connection(wire));
+        }
+    }
+
+    // T-M5-12 (continued): the decode-side mirror of the CC-only rule.  Each
+    // standard channel-wide source in a bank's enable_input refuses the
+    // bank validation and therefore the decode itself.
+    {
+        for (uint32_t rogue_source = 1; rogue_source <= Sculptor::fx_num_input_sources; ++rogue_source) {
+            add_cc_chain_fixture(&source, 0);
+            Synth::ModInput& rogue = source.bank.channel_chains[0].effects[0].enable_input;
+            rogue.source           = static_cast<Synth::ModSource>(rogue_source); // bend / mod wheel / pressure
+            rogue.op               = Synth::SourceOp::add;
+            rogue.scale            = 1.0f;
+
+            TEST(! Synth::validate_instrument_bank(&source.bank));
+
+            const uint32_t rogue_len = Synth::encode_editor_bank_json(&source, payload, sizeof(payload));
+            TEST(rogue_len > 0);
+            TEST(! Synth::decode_editor_bank_json(payload, rogue_len, &decoded));
+        }
+    }
+}
+
 int main()
 {
     effects_paste_pin_regressions();
@@ -4816,6 +5393,7 @@ int main()
     effects_structural_regressions();
     effects_clipboard_regressions();
     effects_add_cc_regressions();
+    effects_enable_regressions();
     // Debug builds log skipped unknown JSON fields to stdout; the suite must stay
     // silent unless failing, and failures report on stderr, so stdout is discarded.
 #ifdef _WIN32
@@ -14374,7 +14952,7 @@ int main()
              Sculptor::pool_no_slot);
 
         // Projected values mirror the chain and the descriptor.
-        TEST(graph.node(mapping.effect_nodes[0]).slots.entries[2].value.list_index == 0);
+        TEST(graph.node(mapping.effect_nodes[0]).slots.entries[Sculptor::fx_enabled_row].value.toggle == true);
         TEST(graph.node(mapping.effect_nodes[0]).slots.entries[Sculptor::fx_param_row(0)].value.real ==
              chain.effects[0].bindings[0].base_value);
         TEST(graph.node(mapping.lfo_nodes[0]).slots.entries[3].value.integer == bank.lfos.entries[0].period_ms);
@@ -14392,16 +14970,16 @@ int main()
         Sculptor::GraphChange change = {};
         change.kind                  = Sculptor::ChangeKind::value_changed;
 
-        // Enabled row: the two-option list toggles the slot.
+        // Enabled row: the checkbox toggles the saved state.
         change.node_idx                = mapping.effect_nodes[0];
-        change.slot_idx                = 2;
+        change.slot_idx                = Sculptor::fx_enabled_row;
         Sculptor::PropertyValue toggle = {};
-        toggle.list_index              = 1;
-        graph.set_slot_value(mapping.effect_nodes[0], 2, toggle);
+        toggle.toggle                  = false;
+        graph.set_slot_value(mapping.effect_nodes[0], Sculptor::fx_enabled_row, toggle);
         TEST(Sculptor::apply_fx_graph_change(&bank, graph, mapping, change));
         TEST(! chain.effects[0].enabled);
-        toggle.list_index = 0;
-        graph.set_slot_value(mapping.effect_nodes[0], 2, toggle);
+        toggle.toggle = true;
+        graph.set_slot_value(mapping.effect_nodes[0], Sculptor::fx_enabled_row, toggle);
         TEST(Sculptor::apply_fx_graph_change(&bank, graph, mapping, change));
         TEST(chain.effects[0].enabled);
 
