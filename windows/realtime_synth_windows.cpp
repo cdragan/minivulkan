@@ -268,7 +268,7 @@ static void stop_workers()
     // any handle is closed.
     if (render_thread_handle) {
         SetEvent(stop_event);
-        WaitForSingleObject(render_thread_handle, WAIT_FOREVER);
+        WaitForSingleObject(render_thread_handle, INFINITE);
         CloseHandle(render_thread_handle);
         render_thread_handle = nullptr;
     }
@@ -277,7 +277,7 @@ static void stop_workers()
         SetEvent(producer_wake_event);
 
     if (producer_thread_handle) {
-        WaitForSingleObject(producer_thread_handle, WAIT_FOREVER);
+        WaitForSingleObject(producer_thread_handle, INFINITE);
         CloseHandle(producer_thread_handle);
         producer_thread_handle = nullptr;
     }

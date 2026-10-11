@@ -4753,7 +4753,7 @@ static void effects_add_cc_regressions()
     source.added_cc_mask[0]        = 1u << 5;               // CC 21 on channel 0 must not travel
     source.bank.channel_enabled[2] = true;
     memcpy(source.bank.channel_zones[2], source.bank.channel_zones[0], sizeof(source.bank.channel_zones[2]));
-    const char* library_path = "/tmp/synth_add_cc_library.tmp";
+    const char* library_path = "synth_add_cc_library.tmp";
     TEST(Synth::save_library_record(library_path, "Regression", "CC Round", &source, 2) == 0);
     Synth::LibraryEntry cc_entry;
     TEST(Synth::read_library_index(library_path, &cc_entry, 1) == 1);

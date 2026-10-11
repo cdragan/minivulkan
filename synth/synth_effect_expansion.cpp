@@ -342,15 +342,22 @@ void Synth::commit_effect_expansion(const InstrumentBank&      bank,
                 if (param_binding.lfo_desc_id) {
                     lfo_node = writer.alloc_node(writer.ctx);
                     assert(lfo_node);
-                    writer.configure_lfo(
-                        writer.ctx,
-                        lfo_node,
-                        param_binding.lfo_desc_id,
-                        param_binding.lfo_op,
-                        param_binding.lfo_depth,
-                        writer.resolve_source(writer.ctx, param_binding.lfo_depth_source, 0, midi_channel),
-                        writer.resolve_source(writer.ctx, param_binding.lfo_rate_source, 0, midi_channel),
-                        param_binding.lfo_rate_scale);
+                    // Resolve the sources into locals before the configure call.
+                    // The writer records the resolve order, and argument
+                    // evaluation order is unspecified in C++, so compilers may
+                    // disagree.  The depth source must resolve first.
+                    const uint16_t depth_source =
+                        writer.resolve_source(writer.ctx, param_binding.lfo_depth_source, 0, midi_channel);
+                    const uint16_t rate_source =
+                        writer.resolve_source(writer.ctx, param_binding.lfo_rate_source, 0, midi_channel);
+                    writer.configure_lfo(writer.ctx,
+                                         lfo_node,
+                                         param_binding.lfo_desc_id,
+                                         param_binding.lfo_op,
+                                         param_binding.lfo_depth,
+                                         depth_source,
+                                         rate_source,
+                                         param_binding.lfo_rate_scale);
                 }
 
                 SourceParam sources[max_mod_inputs];
