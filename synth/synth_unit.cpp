@@ -3155,7 +3155,9 @@ static void effects_literal_topology_regressions()
             TEST(Sculptor::stage_effect_graph_edits(&source, &graph, &mapping, &candidate));
             states[4] = candidate;
             TEST(Sculptor::fx_graph_chain(&candidate.bank, owner).num_effects == 2);
-            TEST(candidate.effect_audio[owner].next[0] == 0);
+            // Deleting a node splices the chain: the predecessor feeds the
+            // deleted node's successor (slot 0 -> compacted old slot 2).
+            TEST(candidate.effect_audio[owner].next[0] == 2);
             TEST(candidate.effect_audio[owner].next[1] == 5);
             undo.init_undo_push();
             undo.push(&source, sizeof(source));

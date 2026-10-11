@@ -101,7 +101,10 @@ void main()
 
     float value;
 
-    if (param.osc_mode == osc_mode_fm) {
+    if (type2 == no_wave) {
+        value = oscillator(type1, phase, duty1);
+    }
+    else if (param.osc_mode == osc_mode_fm) {
         // Frequency modulation: type1 is the carrier, type2 the modulator.
         // The modulator runs at its own frequency with its own phase.
         const float mod_phase = param.mod_phase + param.mod_phase_step * gl_LocalInvocationID.x;

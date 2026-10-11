@@ -837,6 +837,86 @@ void Sculptor::fx_remove_effect(Synth::EffectChainBinding* chain, uint32_t slot)
     --chain->num_effects;
 }
 
+// Deleting an effect node removes the two wires that touched it, so the
+// live-edge capture below would tear the audio path open.  Rebuild the
+// routing from the pre-deletion topology with the deleted slots bypassed:
+// the deleted node's predecessor reconnects to its successor.  A node that
+// was already bypassed in the routing contributes no seam and stays gone.
+static bool deleted_slots_contains(const uint32_t* deleted_slots, uint32_t num_deleted, uint32_t slot)
+{
+    for (uint32_t index = 0; index < num_deleted; ++index) {
+        if (deleted_slots[index] == slot) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// How many deleted slots sit below a source or target index: the compaction
+// shift that the index loses when the chain closes over the deletions.
+static uint32_t deleted_slots_below(const uint32_t* deleted_slots, uint32_t num_deleted, uint32_t value)
+{
+    uint32_t shifted = 0;
+    for (uint32_t index = 0; index < num_deleted; ++index) {
+        shifted += deleted_slots[index] < value ? 1u : 0u;
+    }
+    return shifted;
+}
+
+static void heal_deleted_effect_audio(const Sculptor::EffectAudioTopology& source_audio,
+                                      const Synth::EffectChainBinding&     original_chain,
+                                      const uint32_t*                      deleted_slots,
+                                      uint32_t                             num_deleted,
+                                      Sculptor::EffectAudioTopology*       healed)
+{
+    uint8_t working[Synth::max_chain_effects + 1] = {};
+    if (source_audio.explicit_edges) {
+        for (uint32_t source = 0; source <= Synth::max_chain_effects; ++source) {
+            working[source] = source_audio.next[source];
+        }
+    }
+    else {
+        // No explicit routing yet: the projection wires the non-none slots
+        // serially, so the pre-deletion path is input -> first effect ->
+        // ... -> Output.
+        uint32_t previous = Synth::max_chain_effects;
+        for (uint32_t slot = 0; slot < original_chain.num_effects && slot < Synth::max_chain_effects; ++slot) {
+            if (original_chain.effects[slot].type == Synth::EffectType::none) {
+                continue;
+            }
+            working[previous] = static_cast<uint8_t>(slot + 1);
+            previous          = slot;
+        }
+        if (previous != Synth::max_chain_effects) {
+            working[previous] = static_cast<uint8_t>(Synth::max_chain_effects + 1);
+        }
+    }
+
+    // Splice every deleted slot out of the list, ascending so consecutive
+    // deletions chain through the updated pointers.
+    for (uint32_t index = 0; index < num_deleted; ++index) {
+        const uint32_t deleted = deleted_slots[index];
+        for (uint32_t source = 0; source <= Synth::max_chain_effects; ++source) {
+            if (working[source] == deleted + 1) {
+                working[source] = working[deleted];
+            }
+        }
+        working[deleted] = 0;
+    }
+
+    healed->explicit_edges = 1;
+    for (uint32_t source = 0; source <= Synth::max_chain_effects; ++source) {
+        const uint32_t target = working[source];
+        if (! target || (source < Synth::max_chain_effects && deleted_slots_contains(deleted_slots, num_deleted, source))) {
+            continue;
+        }
+        const uint32_t final_source =
+            source == Synth::max_chain_effects ? source : source - deleted_slots_below(deleted_slots, num_deleted, source);
+        const uint32_t final_target = target == Synth::max_chain_effects + 1 ? target : target - deleted_slots_below(deleted_slots, num_deleted, target);
+        healed->next[final_source] = static_cast<uint8_t>(final_target);
+    }
+}
+
 static bool effect_splice_order(uint32_t count, uint32_t moved_slot, int32_t after_slot, uint32_t* order)
 {
     if (moved_slot >= count || after_slot >= static_cast<int32_t>(count) || after_slot < -1 ||
@@ -1327,6 +1407,21 @@ bool Sculptor::apply_effect_graph_batch(const Synth::InstrumentEditorBank* sourc
     source                     = &layout_source;
     effects_candidate          = *source;
     EffectGraphMapping current = *mapping;
+
+    // Deleted effect slots in the original mapping, for the routing heal
+    // that runs after the live-edge capture.
+    uint32_t deleted_slots[Synth::max_chain_effects] = {};
+    uint32_t num_deleted_slots                       = 0;
+    for (uint32_t index = 0; index < count; ++index) {
+        if (changes[index].kind != ChangeKind::node_deleted) {
+            continue;
+        }
+        const int32_t slot = fx_effect_slot_of(*mapping, changes[index].node_idx);
+        if (slot >= 0 && num_deleted_slots < Synth::max_chain_effects) {
+            deleted_slots[num_deleted_slots++] = static_cast<uint32_t>(slot);
+        }
+    }
+
     if (! capture_nodes) {
         for (uint32_t node_index = 0; node_index < max_nodes; ++node_index) {
             if (! graph->node_occupied(node_index)) {
@@ -1402,6 +1497,30 @@ bool Sculptor::apply_effect_graph_batch(const Synth::InstrumentEditorBank* sourc
     Sculptor::EffectAudioTopology audio = {};
     if (! capture_effect_audio(*graph, current, fx_graph_chain(&effects_candidate.bank, mapping->chain), &audio)) {
         return false;
+    }
+    if (num_deleted_slots) {
+        // A deleted effect node drops its two wires in the graph, so the
+        // capture holds a hole where the node sat.  Reconnect the hole from
+        // the pre-deletion routing: the predecessor feeds the successor.
+        Sculptor::EffectAudioTopology healed = {};
+        heal_deleted_effect_audio(source->effect_audio[mapping->chain],
+                                  chain_at(source->bank, mapping->chain),
+                                  deleted_slots,
+                                  num_deleted_slots,
+                                  &healed);
+        bool incoming[Synth::max_chain_effects + 1] = {};
+        for (uint32_t source_node = 0; source_node <= Synth::max_chain_effects; ++source_node) {
+            if (audio.next[source_node]) {
+                incoming[audio.next[source_node] - 1] = true;
+            }
+        }
+        for (uint32_t source_node = 0; source_node <= Synth::max_chain_effects; ++source_node) {
+            const uint32_t healed_target = healed.next[source_node];
+            if (healed_target && ! audio.next[source_node] && ! incoming[healed_target - 1]) {
+                audio.next[source_node]      = static_cast<uint8_t>(healed_target);
+                incoming[healed_target - 1] = true;
+            }
+        }
     }
     bool structural_audio = source->effect_audio[mapping->chain].explicit_edges != 0;
     for (uint32_t index = 0; index < count; ++index) {
