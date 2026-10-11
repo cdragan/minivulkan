@@ -55,7 +55,9 @@ enum OscCanvasCommand {
     osc_cmd_zone_paste,
     osc_cmd_zone_join_previous,
     osc_cmd_zone_join_next,
-    osc_cmd_zone_delete
+    osc_cmd_zone_delete,
+    osc_cmd_add_cc,
+    osc_cmd_remove_cc
 };
 
 // Effects canvas and node-menu commands, queued during render and run
@@ -137,6 +139,7 @@ uint32_t         osc_canvas_retarget_node   = Sculptor::pool_no_slot; // pending
 uint32_t         osc_canvas_retarget_target = 0;
 uint32_t         osc_canvas_zone_channel    = 0;
 uint32_t         osc_canvas_zone_note       = 0;
+uint32_t         osc_canvas_cc              = 0; // pending osc_cmd_add_cc / osc_cmd_remove_cc CC number
 
 FxCanvasCommand   fx_canvas_command = fx_cmd_none;
 Synth::EffectType fx_canvas_type    = Synth::EffectType::none;
@@ -163,6 +166,8 @@ constexpr uint32_t osc_tag_add_env             = 10;
 constexpr uint32_t osc_tag_add_lfo             = 11;
 constexpr uint32_t osc_tag_add_param           = 12;
 constexpr uint32_t osc_tag_change_target_param = 13;
+constexpr uint32_t osc_tag_add_cc              = 14;                      // id0 = the channel, id1 = the CC number
+constexpr uint32_t osc_tag_remove_cc           = 15;                      // id0 = the channel, id1 = the CC number
 constexpr uint32_t osc_tag_fresh               = osc_tag_graph_base + 12; // outside every batch kind
 uint32_t           osc_fresh_tag_serial        = 0;                       // keeps consecutive fresh tags distinct
 
@@ -390,6 +395,8 @@ void Sculptor::SynthEditor::osc_canvas_menu_entry(void* user_data)
     }
 }
 
+static bool fx_cc_removal_refused(uint32_t chain, uint32_t cc_number); // defined beside the fx menu
+
 // Node context menu: a parameter node gains a Change Target submenu of the
 // five connectable targets (the target re-key; free-text renaming lives in
 // the title editor).  A derived parameter (uid == 0) cannot change target: the
@@ -399,6 +406,63 @@ static bool osc_node_menu(void* user_data, uint32_t node_idx)
     (void)user_data;
     if (node_idx >= Sculptor::max_nodes || ! osc_graph.node_occupied(node_idx)) {
         return false;
+    }
+    if (node_idx == osc_mapping.input_node) {
+        // The Inputs node's menu authors the channel's added-CC output
+        // dots, the same registry mask the fx pane's MIDI node uses.  An
+        // added CC is one removable dot labeled with its CC number pair;
+        // a removal refuses while anything in the channel still wires
+        // the CC.
+        const uint16_t mask = instr_bank.added_cc_mask[osc_mapping.channel];
+
+        if (ImGui::BeginMenu("Add CC")) {
+            for (uint32_t i = 0; i < Synth::num_assignable_ccs; ++i) {
+                const uint32_t cc_number = Synth::cc_msb_base + i;
+                char           label[32];
+                Sculptor::fx_cc_pair_label(cc_number, label, sizeof(label));
+                if (ImGui::MenuItem(label, nullptr, false, ! (mask & (1u << i)))) {
+                    osc_canvas_command = osc_cmd_add_cc;
+                    osc_canvas_cc      = cc_number;
+                }
+            }
+            ImGui::EndMenu();
+        }
+
+        // The Remove submenu's separator goes before the submenu only:
+        // an empty list must not stack its separator with the widget's
+        // own post-callback separator.
+        bool emitted_remove = false;
+        // ImGui contract: EndMenu must run only when BeginMenu returns
+        // true; a closed submenu pushes nothing, so the items are gated
+        // on the BeginMenu return as well.
+        bool remove_menu_open = false;
+
+        for (uint32_t i = 0; i < Synth::num_assignable_ccs; ++i) {
+            if (! (mask & (1u << i))) {
+                continue;
+            }
+            if (! emitted_remove) {
+                ImGui::Separator();
+                remove_menu_open = ImGui::BeginMenu("Remove CC");
+                emitted_remove = true;
+            }
+            if (! remove_menu_open) {
+                continue;
+            }
+            const uint32_t cc_number = Synth::cc_msb_base + i;
+            char label[32];
+            memcpy(label, "Remove ", 7);
+            Sculptor::fx_cc_pair_label(cc_number, label + 7, sizeof(label) - 7);
+            const bool wired = fx_cc_removal_refused(osc_mapping.channel, cc_number);
+            if (ImGui::MenuItem(label, nullptr, false, ! wired)) {
+                osc_canvas_command = osc_cmd_remove_cc;
+                osc_canvas_cc      = cc_number;
+            }
+        }
+        if (remove_menu_open) {
+            ImGui::EndMenu();
+        }
+        return true;
     }
     for (uint32_t p = 0; p < osc_mapping.param_count; ++p) {
         if (osc_mapping.params[p].node_idx != node_idx) {
@@ -596,6 +660,18 @@ static void fx_canvas_menu(void* user_data)
     }
 }
 
+// Removal refusal is channel-wide: the registry mask is shared with the
+// oscillator pane, so a CC wired by any zone's osc routing refuses fx
+// removal too.  The master chain keeps the fx-chain-only guard: osc has no
+// master chain and channel_zones has no master row.
+static bool fx_cc_removal_refused(uint32_t chain, uint32_t cc_number)
+{
+    if (chain == Synth::max_channels) {
+        return Sculptor::fx_chain_uses_cc(Sculptor::fx_graph_chain(&instr_bank.bank, chain), cc_number);
+    }
+    return Sculptor::channel_uses_cc(instr_bank, chain, cc_number);
+}
+
 // Canvas menu "Add LFO": a fresh descriptor the editor pins onto this
 // canvas.  The projection shows referenced descriptors only, so a
 // not-yet-wired LFO needs its pin to stay visible and receive a first wire.
@@ -624,29 +700,39 @@ static bool fx_node_menu(void* user_data, uint32_t node_idx)
             ImGui::EndMenu();
         }
 
-        // The Remove list's separator goes before the first emitted item
-        // only: an empty list must not stack its separator with the
-        // widget's own post-callback separator.
+        // The Remove submenu's separator goes before the submenu only:
+        // an empty list must not stack its separator with the widget's
+        // own post-callback separator.
         bool emitted_remove = false;
+        // ImGui contract: EndMenu must run only when BeginMenu returns
+        // true; a closed submenu pushes nothing, so the items are gated
+        // on the BeginMenu return as well.
+        bool remove_menu_open = false;
 
-        const Synth::EffectChainBinding& chain = Sculptor::fx_graph_chain(&instr_bank.bank, fx_mapping.chain);
         for (uint32_t i = 0; i < Synth::num_assignable_ccs; ++i) {
             if (! (mask & (1u << i))) {
                 continue;
             }
             if (! emitted_remove) {
                 ImGui::Separator();
+                remove_menu_open = ImGui::BeginMenu("Remove CC");
                 emitted_remove = true;
             }
+            if (! remove_menu_open) {
+                continue;
+            }
             const uint32_t cc_number = Synth::cc_msb_base + i;
-            char           label[32];
+            char label[32];
             memcpy(label, "Remove ", 7);
             Sculptor::fx_cc_pair_label(cc_number, label + 7, sizeof(label) - 7);
-            const bool wired = Sculptor::fx_chain_uses_cc(chain, cc_number);
+            const bool wired = fx_cc_removal_refused(fx_mapping.chain, cc_number);
             if (ImGui::MenuItem(label, nullptr, false, ! wired)) {
                 fx_canvas_command = fx_cmd_remove_cc;
                 fx_canvas_cc      = cc_number;
             }
+        }
+        if (remove_menu_open) {
+            ImGui::EndMenu();
         }
         return true;
     }
@@ -2030,6 +2116,12 @@ void Sculptor::SynthEditor::run_osc_canvas_command()
                 osc_canvas_zone_channel,
                 Synth::zone_entry_at(instr_bank.bank.channel_zones[osc_canvas_zone_channel], osc_canvas_zone_note));
             break;
+        case osc_cmd_add_cc:
+            do_osc_add_cc(osc_canvas_cc);
+            break;
+        case osc_cmd_remove_cc:
+            do_osc_remove_cc(osc_canvas_cc);
+            break;
         case osc_cmd_none:
             break;
     }
@@ -2362,7 +2454,7 @@ void Sculptor::SynthEditor::do_fx_add_lfo()
 // no descriptor.
 void Sculptor::SynthEditor::do_fx_add_cc(uint32_t cc_number)
 {
-    if (cc_number < Synth::cc_msb_base || cc_number >= Synth::cc_msb_base + Synth::num_assignable_ccs) {
+    if (! Synth::cc_is_assignable(cc_number)) {
         return;
     }
 
@@ -2376,16 +2468,17 @@ void Sculptor::SynthEditor::do_fx_add_cc(uint32_t cc_number)
     fx_graph_reproject = true;
 }
 
-// Removal refuses while the chain still wires the CC: unwiring first keeps
-// the commit atomic instead of cascading a delete through the bindings.
+// Removal refuses while the CC is still wired channel-wide (the shared
+// registry makes an osc-wired CC refuse fx removal too); unwiring first
+// keeps the commit atomic instead of cascading a delete through the
+// bindings.  The master chain keeps the fx-chain-only guard.
 void Sculptor::SynthEditor::do_fx_remove_cc(uint32_t cc_number)
 {
-    if (cc_number < Synth::cc_msb_base || cc_number >= Synth::cc_msb_base + Synth::num_assignable_ccs) {
+    if (! Synth::cc_is_assignable(cc_number)) {
         return;
     }
 
-    const Synth::EffectChainBinding& chain = Sculptor::fx_graph_chain(&instr_bank.bank, fx_mapping.chain);
-    if (Sculptor::fx_chain_uses_cc(chain, cc_number)) {
+    if (fx_cc_removal_refused(fx_mapping.chain, cc_number)) {
         Sculptor::notify_error("Synth: cannot remove CC %u: unwire it first", cc_number);
         return;
     }
@@ -2398,6 +2491,49 @@ void Sculptor::SynthEditor::do_fx_remove_cc(uint32_t cc_number)
         return;
     }
     fx_graph_reproject = true;
+}
+
+// The oscillator pane's Add/Remove CC authors the same shared registry bit
+// as the fx pane of the channel: one commit and one re-projection, the dot
+// itself comes from the projection post-pass.
+void Sculptor::SynthEditor::do_osc_add_cc(uint32_t cc_number)
+{
+    if (! Synth::cc_is_assignable(cc_number)) {
+        return;
+    }
+
+    candidate = instr_bank;
+    candidate.added_cc_mask[osc_mapping.channel] =
+        static_cast<uint16_t>(candidate.added_cc_mask[osc_mapping.channel] | (1u << (cc_number - Synth::cc_msb_base)));
+
+    if (! commit_candidate(candidate, Sculptor::UndoGroupTag{ osc_tag_add_cc, osc_mapping.channel, cc_number })) {
+        return;
+    }
+    osc_graph_reproject = true;
+}
+
+// Removal refuses while the CC is still wired channel-wide (the fx chain or
+// any zone's osc routing); unwiring first keeps the commit atomic instead of
+// cascading a delete through the bindings.
+void Sculptor::SynthEditor::do_osc_remove_cc(uint32_t cc_number)
+{
+    if (! Synth::cc_is_assignable(cc_number)) {
+        return;
+    }
+
+    if (fx_cc_removal_refused(osc_mapping.channel, cc_number)) {
+        Sculptor::notify_error("Synth: cannot remove CC %u: unwire it first", cc_number);
+        return;
+    }
+
+    candidate = instr_bank;
+    candidate.added_cc_mask[osc_mapping.channel] =
+        static_cast<uint16_t>(candidate.added_cc_mask[osc_mapping.channel] & ~(1u << (cc_number - Synth::cc_msb_base)));
+
+    if (! commit_candidate(candidate, Sculptor::UndoGroupTag{ osc_tag_remove_cc, osc_mapping.channel, cc_number })) {
+        return;
+    }
+    osc_graph_reproject = true;
 }
 
 // Type change replaces the whole slot with initialized bindings of the new

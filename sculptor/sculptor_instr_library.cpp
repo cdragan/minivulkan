@@ -399,11 +399,23 @@ bool Synth::load_library_instrument(const char* const            path,
     // The record's chain replaces the target channel's chain; the load flow's
     // subsequent reclaim frees the replaced chain's exclusive LFOs.
     Synth::remap_effect_chain(record_bank.bank.channel_chains[0], lfo_ids, &dst_bank->channel_chains[channel]);
-    // The record's saved CC additions and the incoming chain's wired CC
-    // inputs both ride into the destination chain's registry; other chains'
-    // masks stay untouched.  The OR is idempotent for a repeated load.
-    const uint16_t chain_cc_mask = static_cast<uint16_t>(
-        record_bank.added_cc_mask[0] | Sculptor::fx_chain_wired_cc_mask(dst_bank->channel_chains[channel]));
+    // The record's saved CC additions, its instruments' wired osc CC inputs
+    // and the incoming chain's wired CC inputs all ride into the destination
+    // chain's registry; other chains' masks stay untouched.  The OR is
+    // idempotent for a repeated load.
+    uint16_t osc_cc_mask = 0;
+    for (uint32_t zone = 0; zone < Synth::max_instr_per_channel && record_bank.bank.channel_zones[0][zone].start_note;
+         ++zone) {
+        const uint32_t instr = record_bank.bank.channel_zones[0][zone].instrument;
+        if (instr >= record_bank.bank.instruments.num_allocated) {
+            continue;
+        }
+        osc_cc_mask = static_cast<uint16_t>(osc_cc_mask |
+                                            Sculptor::instrument_cc_mask(record_bank.bank.instruments.entries[instr]));
+    }
+    const uint16_t chain_cc_mask =
+        static_cast<uint16_t>(record_bank.added_cc_mask[0] | osc_cc_mask |
+                              Sculptor::fx_chain_wired_cc_mask(dst_bank->channel_chains[channel]));
     library_load_candidate.added_cc_mask[channel] =
         static_cast<uint16_t>(library_load_candidate.added_cc_mask[channel] | chain_cc_mask);
 

@@ -13,6 +13,15 @@ constexpr uint32_t cc_msb_base        = 16; // assignable MSB controllers: CC 16
 constexpr uint32_t cc_lsb_base        = 48; // paired LSB controllers:      CC 48..63
 constexpr uint32_t num_assignable_ccs = 16;
 
+// True for the assignable MSB CC range 16..31: the only cc_numbers the bank
+// validator and the editor admit for a ModSource::cc input, and the range
+// the runtime resolve_source can map onto a channel CC leaf (its slot
+// assert stays unreachable only while every admitted cc_number passes).
+constexpr bool cc_is_assignable(uint32_t cc)
+{
+    return cc >= cc_msb_base && cc < cc_msb_base + num_assignable_ccs;
+}
+
 // Raw 14-bit accumulators for one MIDI channel (CC 16-31 MSB, CC 48-63 LSB).
 // lsb[] entries start at the 0xFF sentinel ("no LSB seen yet"); valid LSB
 // values are 0..127, so 0xFF never collides with real data.

@@ -73,6 +73,8 @@ private:
     void do_osc_add_generator(bool is_env);
     void do_osc_add_parameter();
     void do_osc_change_target_param(uint32_t node_idx, uint32_t new_target);
+    void do_osc_add_cc(uint32_t cc_number);
+    void do_osc_remove_cc(uint32_t cc_number);
 
     void        gui_channel_list();
     void        gui_channel_pane(uint32_t channel);

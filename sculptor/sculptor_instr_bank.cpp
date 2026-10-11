@@ -280,6 +280,13 @@ static bool validate_instrument(const Synth::Instrument& instrument)
                 ! valid_mod_source(static_cast<uint32_t>(gen.lfo_rate_source))) {
                 return false;
             }
+
+            if (gen.lfo_depth_source == Synth::ModSource::cc || gen.lfo_rate_source == Synth::ModSource::cc) {
+                // A gen LFO source carries no cc_number, so the runtime
+                // resolve_source would index the channel parameter array
+                // out of bounds (the editor refuses the CC wire there too).
+                return false;
+            }
         }
     }
 
@@ -292,12 +299,24 @@ static bool validate_instrument(const Synth::Instrument& instrument)
         }
 
         for (uint32_t input = 0; input < routing.num_inputs; input++) {
-            // Instrument routing admits no cc source, and a non-CC instrument input
-            // must carry no stale CC number; otherwise the shared decoder would
-            // accept and re-emit it (canonicalization hole).
-            if (! valid_mod_source(static_cast<uint32_t>(routing.inputs[input].source)) ||
-                ! valid_source_op(static_cast<uint32_t>(routing.inputs[input].op)) ||
-                routing.inputs[input].cc_number != 0) {
+            const Synth::ModInput& in = routing.inputs[input];
+
+            if (! valid_source_op(static_cast<uint32_t>(in.op))) {
+                return false;
+            }
+
+            if (in.source == Synth::ModSource::cc) {
+                // The assignable cc source is admitted with cc_number 16..31
+                // (the rule that keeps the runtime resolve_source slot
+                // assert unreachable).
+                if (! Synth::cc_is_assignable(in.cc_number)) {
+                    return false;
+                }
+            }
+            else if (! valid_mod_source(static_cast<uint32_t>(in.source)) || in.cc_number != 0) {
+                // A non-CC instrument input must carry no stale CC number;
+                // otherwise the shared decoder would accept and re-emit it
+                // (canonicalization hole).
                 return false;
             }
         }

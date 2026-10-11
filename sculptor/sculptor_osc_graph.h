@@ -18,6 +18,7 @@
 #pragma once
 
 #include "../synth/synth_instrument.h"
+#include "../synth/synth_midi_cc.h"
 #include "sculptor_graph.h"
 #include "sculptor_instr_bank.h"
 
@@ -84,6 +85,8 @@ struct ParamEntry {
 struct OscGraphMapping {
     uint32_t input_node;                               // one node for all MIDI source roles
     uint32_t input_source_slots[num_osc_graph_inputs]; // indexed by ModSource - 1
+    uint32_t input_cc_slots[Synth::num_assignable_ccs]; // per assignable CC dot, pool_no_slot when absent
+    uint32_t input_detune_slots[2];                     // [0] note skew, [1] layer skew; the MIDI Inputs node's last two slots (created after the CC dots), pool_no_slot until projected
     uint32_t output_node;                              // the oscillator sum node
     uint32_t output_layer_input_slot[Synth::max_layers];
     uint32_t osc_nodes[Synth::max_layers];
@@ -120,7 +123,10 @@ struct OscGraphMapping {
 };
 
 // Rebuilds the graph from scratch: clears every node and connection, then
-// recreates the full projection.  The bank is only read.  Returns false
+// recreates the full projection.  The bank is only read.  The MIDI Inputs
+// node's slots order as: six standard output dots, then the CC dots (when
+// the optional editor mask is passed), then the two detune property rows
+// last.  Returns false
 // without touching the graph, mapping or bank when the instrument is not
 // expressible (a projected target's routing input carries the none source);
 // the refusal is also reported through the graph's error overlay.
@@ -129,7 +135,12 @@ struct OscGraphMapping {
 bool project_instrument_to_graph(const Synth::Instrument&     instrument,
                                  const Synth::InstrumentBank& bank,
                                  Graph*                       graph,
-                                 OscGraphMapping*             mapping);
+                                 OscGraphMapping*             mapping,
+                                 // Optional editor-only input: when non-null,
+                                 // one CC output dot per set bit is created
+                                 // between the standard dots and the detune
+                                 // rows.  Direct callers pass nothing.
+                                 const uint16_t*              added_cc_mask = nullptr);
 
 // Exports one zone's saved editor positions as portable records relative to the
 // zone's own instrument: every kind-0..3 record of (channel,zone) that resolves
@@ -258,6 +269,12 @@ bool project_editor_to_graph(const Synth::InstrumentEditorBank& bank,
                              OscGraphMapping*                   mapping,
                              uint32_t                           channel = 0,
                              uint32_t                           zone    = 0);
+
+// Channel-wide wired-CC scan over the shared per-channel registry: the
+// channel's fx chain OR any of its zones' osc routing inputs carries the
+// assignable CC.  Removal refusal (both panes) consults it; the master
+// chain keeps the fx-chain-only guard because osc has no master chain.
+bool channel_uses_cc(const Synth::InstrumentEditorBank& bank, uint32_t channel, uint32_t cc_number);
 
 // Applies one drained Graph change to the editor bank through the mapping
 // (per-frame apply): property edits via apply_osc_graph_descriptor_edit and

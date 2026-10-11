@@ -5531,6 +5531,698 @@ static void effects_inline_modulator_regressions()
     TEST(! Sculptor::fx_param_is_collapsed(graph, effect_node, 0));
 }
 
+// Replaces the single occurrence of `needle` in `payload` (length `len`)
+// with `replacement`, writing the patched document to `out`.  Returns the
+// patched length, or 0 when the needle does not occur exactly once or the
+// patched document does not fit.  Used to shape hand-decoded routing
+// variants the encoder itself refuses to emit.
+static uint32_t splice_single_occurrence(const char* payload,
+                                         uint32_t    len,
+                                         const char* needle,
+                                         const char* replacement,
+                                         char*       out,
+                                         uint32_t    capacity)
+{
+    const uint32_t needle_len      = static_cast<uint32_t>(strlen(needle));
+    const uint32_t replacement_len = static_cast<uint32_t>(strlen(replacement));
+
+    const char* const hit = strstr(payload, needle);
+    if (! hit) {
+        return 0;
+    }
+    if (strstr(hit + 1, needle) != nullptr) {
+        return 0; // needle is not unique in the document
+    }
+
+    const uint32_t head = static_cast<uint32_t>(hit - payload);
+    const uint32_t tail = len - head - needle_len;
+    if (head + replacement_len + tail + 1 > capacity) {
+        return 0;
+    }
+    memcpy(out, payload, head);
+    memcpy(out + head, replacement, replacement_len);
+    memcpy(out + head + replacement_len, payload + head + needle_len, tail);
+    return head + replacement_len + tail;
+}
+
+// Oscillator-pane CC authoring regressions (M6).  The registry shares the
+// per-channel added_cc_mask with the fx pane; the projection post-pass
+// adds one MIDI Inputs output dot per set bit and wires routing cc inputs
+// through it; the validator confines CC dots to the Source A/B rows; bank
+// validation and the routing encoder admit cc with cc_number 16..31 and
+// keep the non-CC-must-be-zero rule.  The menu commands are GUI-only
+// (sculptor_instr_edit.cpp is not linked into this suite), so the tests
+// drive the mask bits directly - the same shape the fx-pane registry tests
+// use.
+static void osc_cc_regressions()
+{
+    // T-M6-1: a set added_cc_mask bit projects one extra output dot on the
+    // zone's MIDI Inputs node, labeled through fx_cc_pair_label; the two
+    // Random Detune property rows sit below the CC dots as the node's last
+    // two slots, and the compile path reads them through the mapping's
+    // input_detune_slots.  Clearing the bit drops the dot.  The projected
+    // dot's slot index is the mapping's input_cc_slots entry; the labeled
+    // slot found here is its observable.
+    {
+        static Synth::InstrumentEditorBank source;
+        static Synth::Instrument           instrument = {};
+        static Sculptor::Graph             graph;
+        static Sculptor::OscGraphMapping   mapping;
+        static Sculptor::GraphChange       discarded[Sculptor::max_pending_changes];
+
+        build_zone_fixture(&source, &instrument);
+        source.added_cc_mask[0] = 1u << 0;
+        TEST(Sculptor::project_editor_to_graph(source, &graph, &mapping));
+        graph.take_changes(discarded, Sculptor::max_pending_changes);
+        TEST(graph.node(mapping.input_node).slots.num_allocated == Sculptor::num_osc_graph_inputs + 3);
+
+        char cc_label[32];
+        Sculptor::fx_cc_pair_label(Synth::cc_msb_base, cc_label, sizeof(cc_label));
+        uint32_t cc_slot = Sculptor::pool_no_slot;
+        TEST(find_graph_slot(graph, mapping.input_node, cc_label, &cc_slot));
+        if (cc_slot != Sculptor::pool_no_slot) {
+            TEST(graph.node(mapping.input_node).slots.entries[cc_slot].kind == Sculptor::SlotKind::output);
+        }
+
+        uint32_t note_detune_slot = Sculptor::pool_no_slot;
+        uint32_t osc_detune_slot  = Sculptor::pool_no_slot;
+        TEST(find_graph_slot(graph, mapping.input_node, "Random Note Detune", &note_detune_slot));
+        TEST(find_graph_slot(graph, mapping.input_node, "Random Oscillator Detune", &osc_detune_slot));
+        TEST(note_detune_slot == mapping.input_detune_slots[0]);
+        TEST(osc_detune_slot == mapping.input_detune_slots[1]);
+        TEST(note_detune_slot ==
+             graph.node(mapping.input_node).slots.num_allocated - 2);
+        TEST(osc_detune_slot == graph.node(mapping.input_node).slots.num_allocated - 1);
+
+        source.added_cc_mask[0] = 0;
+        TEST(Sculptor::project_editor_to_graph(source, &graph, &mapping));
+        graph.take_changes(discarded, Sculptor::max_pending_changes);
+        TEST(graph.node(mapping.input_node).slots.num_allocated == Sculptor::num_osc_graph_inputs + 2);
+        cc_slot = Sculptor::pool_no_slot;
+        TEST(! find_graph_slot(graph, mapping.input_node, cc_label, &cc_slot));
+    }
+
+    // T-M6-2: a CC dot wires into a parameter's Source A/B rows like any
+    // standard source, and the validator admits the pair.  The compiled
+    // routing inputs carry ModSource::cc with cc_number = cc_msb_base + dot
+    // index and op/scale read from the row; two CC dots fill both rows with
+    // distinct numbers (max_mod_inputs is structural).
+    {
+        static Synth::InstrumentEditorBank source;
+        static Synth::Instrument           instrument = {};
+        static Sculptor::Graph             graph;
+        static Sculptor::OscGraphMapping   mapping;
+        static Sculptor::GraphChange       discarded[Sculptor::max_pending_changes];
+
+        build_parameter_fixture(&source, &instrument);
+        source.bank.instruments.entries[0].routing[Synth::mod_volume].num_inputs = 0;
+        source.added_cc_mask[0]                                                  = (1u << 0) | (1u << 1);
+        TEST(Sculptor::project_editor_to_graph(source, &graph, &mapping));
+        graph.take_changes(discarded, Sculptor::max_pending_changes);
+
+        const uint32_t volume_param = find_graph_node_by_name(graph, "Volume");
+        TEST(volume_param != Sculptor::pool_no_slot);
+
+        char cc16_label[32];
+        char cc17_label[32];
+        Sculptor::fx_cc_pair_label(Synth::cc_msb_base, cc16_label, sizeof(cc16_label));
+        Sculptor::fx_cc_pair_label(Synth::cc_msb_base + 1, cc17_label, sizeof(cc17_label));
+        uint32_t cc16_slot = Sculptor::pool_no_slot;
+        uint32_t cc17_slot = Sculptor::pool_no_slot;
+        TEST(find_graph_slot(graph, mapping.input_node, cc16_label, &cc16_slot));
+        TEST(find_graph_slot(graph, mapping.input_node, cc17_label, &cc17_slot));
+
+        const Sculptor::EndPoint cc16_out = { mapping.input_node, cc16_slot };
+        const Sculptor::EndPoint cc17_out = { mapping.input_node, cc17_slot };
+        const Sculptor::EndPoint src_a    = { volume_param, Sculptor::param_src_input(0) };
+        const Sculptor::EndPoint src_b    = { volume_param, Sculptor::param_src_input(1) };
+        if (volume_param != Sculptor::pool_no_slot) {
+            // The validator admits a CC dot into a source row like a
+            // standard source output.
+            TEST(Sculptor::osc_graph_validate(&mapping, graph, cc16_out, src_a));
+        }
+
+        // add_connection refuses structurally invalid endpoints (an absent
+        // dot slot) without side effects, so the attempts are unguarded and
+        // fail red while no CC dot is projected.
+        const uint32_t wire_a = graph.add_connection(cc16_out, src_a);
+        TEST(wire_a != Sculptor::pool_no_slot);
+        const uint32_t wire_b = graph.add_connection(cc17_out, src_b);
+        TEST(wire_b != Sculptor::pool_no_slot);
+
+        if (wire_a != Sculptor::pool_no_slot && wire_b != Sculptor::pool_no_slot) {
+            // The row Amount edits are user property edits: the drained batch
+            // must carry a value_changed event per edit so the apply path
+            // covers them.  set_slot_value is eventless (the shared-routing
+            // fan-out relies on that), so the test queues the events the only
+            // way the public API offers: snapshot round trip - save with the
+            // edited values in place, revert eventlessly to the 0 defaults,
+            // then load, which pushes value_changed for every slot whose live
+            // value differs (the manual-change precedent of :3315, but
+            // queue-shaped so the drained batch applies in one loop).
+            Sculptor::PropertyValue amount = {};
+            amount.real                    = 0.5f;
+            graph.set_slot_value(volume_param, Sculptor::param_src_input(0) + 2, amount);
+            amount.real = 0.25f;
+            graph.set_slot_value(volume_param, Sculptor::param_src_input(1) + 2, amount);
+
+            static uint8_t amount_snapshot[8192] = {};
+            const uint32_t snapshot_len          = graph.save(amount_snapshot, sizeof(amount_snapshot));
+            TEST(snapshot_len > 0);
+            if (snapshot_len > 0) {
+                amount.real = 0.0f;
+                graph.set_slot_value(volume_param, Sculptor::param_src_input(0) + 2, amount);
+                graph.set_slot_value(volume_param, Sculptor::param_src_input(1) + 2, amount);
+                uint32_t consumed = 0;
+                TEST(graph.load(amount_snapshot, snapshot_len, &consumed));
+            }
+
+            static Sculptor::GraphChange changes[8] = {};
+            const uint32_t               count      = graph.take_changes(changes, 8);
+            TEST(count == 4);
+            if (count == 4) {
+                for (uint32_t c = 0; c < count; ++c) {
+                    TEST(Sculptor::apply_osc_graph_change(&source, &graph, &mapping, changes[c]));
+                }
+            }
+
+            static Synth::Instrument compiled;
+            TEST(Sculptor::compile_graph_to_instrument(graph, mapping, &compiled));
+            TEST(compiled.routing[Synth::mod_volume].num_inputs == 2);
+            TEST(compiled.routing[Synth::mod_volume].inputs[0].source == Synth::ModSource::cc);
+            TEST(compiled.routing[Synth::mod_volume].inputs[0].cc_number == Synth::cc_msb_base);
+            TEST(compiled.routing[Synth::mod_volume].inputs[0].op == Synth::SourceOp::add);
+            TEST(approx(compiled.routing[Synth::mod_volume].inputs[0].scale, 0.5f, 0.0001f));
+            TEST(compiled.routing[Synth::mod_volume].inputs[1].source == Synth::ModSource::cc);
+            TEST(compiled.routing[Synth::mod_volume].inputs[1].cc_number == Synth::cc_msb_base + 1);
+            TEST(compiled.routing[Synth::mod_volume].inputs[1].op == Synth::SourceOp::add);
+            TEST(approx(compiled.routing[Synth::mod_volume].inputs[1].scale, 0.25f, 0.0001f));
+        }
+    }
+
+    // T-M6-3: the round trip.  An instrument carrying an osc cc input
+    // re-projects through project_editor_to_graph with its wire restored
+    // (the projection post-pass wires routing inputs the standard pass skips, and
+    // the placement is what makes re-projection - not only fresh wiring -
+    // carry CC).  A cc input whose registry bit is absent projects the row
+    // unwired with inert knobs and contributes nothing to the compile; the
+    // bank still carries the input until the user adds the CC.
+    {
+        static Synth::InstrumentEditorBank source;
+        static Synth::Instrument           instrument = {};
+        static Sculptor::Graph             graph;
+        static Sculptor::OscGraphMapping   mapping;
+        static Sculptor::GraphChange       discarded[Sculptor::max_pending_changes];
+
+        build_parameter_fixture(&source, &instrument);
+        Synth::InputRouting& routing = source.bank.instruments.entries[0].routing[Synth::mod_volume];
+        routing.num_inputs           = 1;
+        routing.inputs[0].source     = Synth::ModSource::cc;
+        routing.inputs[0].op         = Synth::SourceOp::add;
+        routing.inputs[0].cc_number  = static_cast<uint8_t>(Synth::cc_msb_base);
+        routing.inputs[0].scale      = 0.5f;
+        source.added_cc_mask[0]      = 1u << 0;
+        TEST(Sculptor::project_editor_to_graph(source, &graph, &mapping));
+        graph.take_changes(discarded, Sculptor::max_pending_changes);
+
+        const uint32_t volume_param = find_graph_node_by_name(graph, "Volume");
+        TEST(volume_param != Sculptor::pool_no_slot);
+
+        char cc_label[32];
+        Sculptor::fx_cc_pair_label(Synth::cc_msb_base, cc_label, sizeof(cc_label));
+        uint32_t cc_slot = Sculptor::pool_no_slot;
+        TEST(find_graph_slot(graph, mapping.input_node, cc_label, &cc_slot));
+
+        const uint32_t wire = find_osc_graph_connection(graph, { volume_param, Sculptor::param_src_input(0) });
+        TEST(wire != Sculptor::pool_no_slot);
+
+        if (wire != Sculptor::pool_no_slot && cc_slot != Sculptor::pool_no_slot &&
+            volume_param != Sculptor::pool_no_slot) {
+            TEST(graph.get_connection(wire).output.node_idx == mapping.input_node);
+            TEST(graph.get_connection(wire).output.slot_idx == cc_slot);
+
+            static Synth::Instrument compiled;
+            TEST(Sculptor::compile_graph_to_instrument(graph, mapping, &compiled));
+            TEST(compiled.routing[Synth::mod_volume].num_inputs == 1);
+            TEST(compiled.routing[Synth::mod_volume].inputs[0].source == Synth::ModSource::cc);
+            TEST(compiled.routing[Synth::mod_volume].inputs[0].cc_number == Synth::cc_msb_base);
+            TEST(approx(compiled.routing[Synth::mod_volume].inputs[0].scale, 0.5f, 0.0001f));
+        }
+
+        // The undotted legacy shape: the row stays unwired with inert op
+        // and Amount knobs, the compile drops the input, and the bank keeps
+        // carrying it.  This pins the decode-never-synthesizes-registry-bits
+        // rule (T-M4-9 analogue).
+        build_parameter_fixture(&source, &instrument);
+        Synth::InputRouting& legacy_routing = source.bank.instruments.entries[0].routing[Synth::mod_volume];
+        legacy_routing.num_inputs           = 1;
+        legacy_routing.inputs[0].source     = Synth::ModSource::cc;
+        legacy_routing.inputs[0].op         = Synth::SourceOp::add;
+        legacy_routing.inputs[0].cc_number  = static_cast<uint8_t>(Synth::cc_msb_base);
+        legacy_routing.inputs[0].scale      = 0.5f;
+        TEST(Sculptor::project_editor_to_graph(source, &graph, &mapping));
+        graph.take_changes(discarded, Sculptor::max_pending_changes);
+
+        const uint32_t legacy_param = find_graph_node_by_name(graph, "Volume");
+        TEST(legacy_param != Sculptor::pool_no_slot);
+        if (legacy_param != Sculptor::pool_no_slot) {
+            TEST(find_osc_graph_connection(graph, { legacy_param, Sculptor::param_src_input(0) }) ==
+                 Sculptor::pool_no_slot);
+            TEST(graph.slot_edit_disabled(legacy_param, Sculptor::param_src_input(0) + 1));
+            TEST(graph.slot_edit_disabled(legacy_param, Sculptor::param_src_input(0) + 2));
+
+            static Synth::Instrument compiled;
+            TEST(Sculptor::compile_graph_to_instrument(graph, mapping, &compiled));
+            TEST(compiled.routing[Synth::mod_volume].num_inputs == 0);
+            TEST(source.bank.instruments.entries[0].routing[Synth::mod_volume].inputs[0].source ==
+                 Synth::ModSource::cc);
+        }
+    }
+
+    // T-M6-4: validator refusals.  A CC dot is a source-role output: it
+    // wires into the Source A/B rows only.  LFO depth and rate refuse with
+    // an error message (the runtime resolves cc for parameter routing
+    // inputs only), and an oscillator target row refuses as today.  A
+    // routing cc_number outside 16..31 must project its row unwired
+    // through the post-pass bound check without an out-of-bounds read,
+    // even when a dot for another CC exists.
+    {
+        static Synth::InstrumentEditorBank source;
+        static Synth::Instrument           instrument = {};
+        static Sculptor::Graph             graph;
+        static Sculptor::OscGraphMapping   mapping;
+        static Sculptor::GraphChange       discarded[Sculptor::max_pending_changes];
+
+        build_parameter_fixture(&source, &instrument);
+        source.added_cc_mask[0] = 1u << 0;
+        TEST(Sculptor::project_editor_to_graph(source, &graph, &mapping));
+        graph.take_changes(discarded, Sculptor::max_pending_changes);
+
+        const uint32_t volume_param = find_graph_node_by_name(graph, "Volume");
+        TEST(volume_param != Sculptor::pool_no_slot);
+
+        const uint32_t lfo_conn = find_osc_graph_connection(graph, { volume_param, 3 });
+        TEST(lfo_conn != Sculptor::pool_no_slot);
+
+        char cc_label[32];
+        Sculptor::fx_cc_pair_label(Synth::cc_msb_base, cc_label, sizeof(cc_label));
+        uint32_t cc_slot = Sculptor::pool_no_slot;
+        TEST(find_graph_slot(graph, mapping.input_node, cc_label, &cc_slot));
+
+        if (volume_param != Sculptor::pool_no_slot && lfo_conn != Sculptor::pool_no_slot &&
+            cc_slot != Sculptor::pool_no_slot) {
+            const uint32_t           lfo_node = graph.get_connection(lfo_conn).output.node_idx;
+            const Sculptor::EndPoint cc_out   = { mapping.input_node, cc_slot };
+
+            TEST(! Sculptor::osc_graph_validate(&mapping, graph, cc_out, { lfo_node, mapping.lfo_depth_input_slot }));
+            TEST(graph.has_error());
+            graph.dismiss_error();
+            TEST(! Sculptor::osc_graph_validate(&mapping, graph, cc_out, { lfo_node, mapping.lfo_rate_input_slot }));
+            TEST(graph.has_error());
+            graph.dismiss_error();
+            TEST(! Sculptor::osc_graph_validate(&mapping, graph, cc_out, { mapping.osc_nodes[0], 9 }));
+            TEST(Sculptor::osc_graph_validate(&mapping, graph, cc_out, { volume_param, Sculptor::param_src_input(0) }));
+        }
+
+        // Out-of-range cc numbers project unwired: the dot for CC 16
+        // exists, but neither CC 15 nor CC 32 names it, and the post-pass
+        // bound check keeps the lookup inside input_cc_slots.
+        for (uint32_t variant = 0; variant < 2; ++variant) {
+            build_parameter_fixture(&source, &instrument);
+            Synth::InputRouting& routing = source.bank.instruments.entries[0].routing[Synth::mod_volume];
+            routing.num_inputs           = 1;
+            routing.inputs[0].source     = Synth::ModSource::cc;
+            routing.inputs[0].op         = Synth::SourceOp::add;
+            routing.inputs[0].cc_number  = variant == 0
+                                               ? static_cast<uint8_t>(Synth::cc_msb_base - 1)
+                                               : static_cast<uint8_t>(Synth::cc_msb_base + Synth::num_assignable_ccs);
+            routing.inputs[0].scale      = 0.5f;
+            source.added_cc_mask[0]      = 1u << 0;
+            TEST(Sculptor::project_editor_to_graph(source, &graph, &mapping));
+            graph.take_changes(discarded, Sculptor::max_pending_changes);
+
+            const uint32_t rogue_param = find_graph_node_by_name(graph, "Volume");
+            TEST(rogue_param != Sculptor::pool_no_slot);
+            if (rogue_param != Sculptor::pool_no_slot) {
+                TEST(find_osc_graph_connection(graph, { rogue_param, Sculptor::param_src_input(0) }) ==
+                     Sculptor::pool_no_slot);
+            }
+        }
+    }
+
+    // T-M6-5: removal-refusal inputs.  The removal handlers are GUI-only
+    // (sculptor_instr_edit.cpp is not linked into this suite), so the tests
+    // pin the predicates the refusals consult.  The master chain keeps the
+    // fx-chain-only guard: fx_chain_uses_cc is true when the master chain
+    // wires the CC and stays false when only a zone's osc routing wires it,
+    // so the master case never consults channel_zones.  The channel-wide
+    // widened guard (channel_uses_cc over the fx chain OR the zone osc
+    // routings) is pinned below: it fires for the zone osc wiring and for
+    // the channel's own fx chain, not for master-chain wiring.
+    {
+        static Synth::InstrumentEditorBank source;
+        static Synth::Instrument           instrument = {};
+
+        build_zone_fixture(&source, &instrument);
+        Synth::InputRouting& routing = source.bank.instruments.entries[0].routing[Synth::mod_volume];
+        routing.num_inputs           = 1;
+        routing.inputs[0].source     = Synth::ModSource::cc;
+        routing.inputs[0].op         = Synth::SourceOp::add;
+        routing.inputs[0].cc_number  = Synth::cc_msb_base;
+        routing.inputs[0].scale      = 0.5f;
+        Synth::EffectSlotBinding* const master_slot =
+            enabled_effect(source.bank, Synth::max_channels, 0, Synth::EffectType::delay);
+        master_slot->bindings[0].num_inputs           = 1;
+        master_slot->bindings[0].inputs[0].source     = Synth::ModSource::cc;
+        master_slot->bindings[0].inputs[0].op         = Synth::SourceOp::add;
+        master_slot->bindings[0].inputs[0].cc_number  = static_cast<uint8_t>(Synth::cc_msb_base + 2);
+        master_slot->bindings[0].inputs[0].scale      = 0.5f;
+        Synth::EffectSlotBinding* const channel_slot  = enabled_effect(source.bank, 0, 0, Synth::EffectType::delay);
+        channel_slot->bindings[0].num_inputs          = 1;
+        channel_slot->bindings[0].inputs[0].source    = Synth::ModSource::cc;
+        channel_slot->bindings[0].inputs[0].op        = Synth::SourceOp::add;
+        channel_slot->bindings[0].inputs[0].cc_number = static_cast<uint8_t>(Synth::cc_msb_base + 1);
+        channel_slot->bindings[0].inputs[0].scale     = 0.5f;
+
+        TEST(Sculptor::fx_chain_uses_cc(source.bank.master_chain, Synth::cc_msb_base + 2));
+        TEST(! Sculptor::fx_chain_uses_cc(source.bank.master_chain, Synth::cc_msb_base));
+        TEST(! Sculptor::fx_chain_uses_cc(source.bank.channel_chains[0], Synth::cc_msb_base));
+
+        // The channel-wide widened guard: the zone osc routing, the
+        // channel's own fx chain, no master-chain leak, no out-of-range hit.
+        TEST(Sculptor::channel_uses_cc(source, 0, Synth::cc_msb_base));
+        TEST(Sculptor::channel_uses_cc(source, 0, Synth::cc_msb_base + 1));
+        TEST(! Sculptor::channel_uses_cc(source, 0, Synth::cc_msb_base + 2));
+        TEST(! Sculptor::channel_uses_cc(source, 0, Synth::cc_msb_base + 3));
+        TEST(! Sculptor::channel_uses_cc(source, 0, 0));
+        TEST(! Sculptor::channel_uses_cc(source, Synth::max_channels, Synth::cc_msb_base));
+
+        // An empty zone slot's instrument byte is meaningless: a channel
+        // with no zones must not alias instrument 0's wiring.
+        TEST(! Sculptor::channel_uses_cc(source, 1, Synth::cc_msb_base));
+    }
+
+    // T-M6-6: persistence.  An osc cc routing input rides the existing
+    // per-target sources arrays: the v2 bank encoder already spells cc, so
+    // bank validation is the decode-time admission gate; once admitted,
+    // encode/decode is byte-identical.  Decode refuses a cc_number outside
+    // 16..31 and a non-cc input carrying a stale cc_number; a legacy bank
+    // without osc cc decodes unchanged.
+    {
+        static Synth::InstrumentEditorBank source;
+        static Synth::Instrument           instrument = {};
+        static Synth::InstrumentEditorBank decoded;
+        static char                        payload[Synth::library_payload_max];
+        static char                        reencoded[Synth::library_payload_max];
+        static char                        patched[Synth::library_payload_max];
+
+        build_zone_fixture(&source, &instrument);
+        Synth::InputRouting& routing = source.bank.instruments.entries[0].routing[Synth::mod_volume];
+        routing.num_inputs           = 1;
+        routing.inputs[0].source     = Synth::ModSource::cc;
+        routing.inputs[0].op         = Synth::SourceOp::add;
+        routing.inputs[0].cc_number  = static_cast<uint8_t>(Synth::cc_msb_base);
+        routing.inputs[0].scale      = 0.5f;
+
+        const uint32_t encoded_len = Synth::encode_editor_bank_json(&source, payload, sizeof(payload));
+        TEST(encoded_len > 0);
+        if (encoded_len > 0) {
+            TEST(Synth::decode_editor_bank_json(payload, encoded_len, &decoded));
+            TEST(decoded.bank.instruments.entries[0].routing[Synth::mod_volume].inputs[0].source ==
+                 Synth::ModSource::cc);
+            TEST(decoded.bank.instruments.entries[0].routing[Synth::mod_volume].inputs[0].cc_number ==
+                 Synth::cc_msb_base);
+            const uint32_t again_len = Synth::encode_editor_bank_json(&decoded, reencoded, sizeof(reencoded));
+            TEST(again_len == encoded_len);
+            TEST(memcmp(payload, reencoded, encoded_len) == 0);
+        }
+
+        // Decode refusals, shaped by splicing the compact encoder output:
+        // the fixture's single velocity input is the only source spelling
+        // in the document, so the needle is unique by construction.
+        build_zone_fixture(&source, &instrument);
+        const uint32_t clean_len = Synth::encode_editor_bank_json(&source, payload, sizeof(payload));
+        TEST(clean_len > 0);
+        if (clean_len > 0) {
+            uint32_t    velocity_count = 0;
+            const char* scan           = payload;
+            while ((scan = strstr(scan, "\"source\":\"velocity\"")) != nullptr) {
+                velocity_count++;
+                scan++;
+            }
+            TEST(velocity_count == 1);
+
+            const uint32_t low_len = splice_single_occurrence(payload,
+                                                              clean_len,
+                                                              "\"source\":\"velocity\"",
+                                                              "\"source\":\"cc\",\"cc_number\":15",
+                                                              patched,
+                                                              sizeof(patched));
+            TEST(low_len > 0);
+            if (low_len > 0) {
+                TEST(! Synth::decode_editor_bank_json(patched, low_len, &decoded));
+            }
+
+            const uint32_t high_len = splice_single_occurrence(payload,
+                                                               clean_len,
+                                                               "\"source\":\"velocity\"",
+                                                               "\"source\":\"cc\",\"cc_number\":32",
+                                                               patched,
+                                                               sizeof(patched));
+            TEST(high_len > 0);
+            if (high_len > 0) {
+                TEST(! Synth::decode_editor_bank_json(patched, high_len, &decoded));
+            }
+
+            const uint32_t stale_len = splice_single_occurrence(payload,
+                                                                clean_len,
+                                                                "\"source\":\"velocity\"",
+                                                                "\"source\":\"velocity\",\"cc_number\":17",
+                                                                patched,
+                                                                sizeof(patched));
+            TEST(stale_len > 0);
+            if (stale_len > 0) {
+                TEST(! Synth::decode_editor_bank_json(patched, stale_len, &decoded));
+            }
+        }
+
+        // A legacy bank without osc cc decodes unchanged.
+        build_zone_fixture(&source, &instrument);
+        const uint32_t legacy_len = Synth::encode_editor_bank_json(&source, payload, sizeof(payload));
+        TEST(legacy_len > 0);
+        if (legacy_len > 0) {
+            TEST(Synth::decode_editor_bank_json(payload, legacy_len, &decoded));
+            TEST(decoded.bank.instruments.entries[0].routing[Synth::mod_volume].inputs[0].source ==
+                 Synth::ModSource::velocity);
+            TEST(decoded.bank.instruments.entries[0].routing[Synth::mod_volume].inputs[0].cc_number == 0);
+        }
+    }
+
+    // T-M6-7: adoption.  A library record and a clipboard zone whose
+    // instrument wires osc CC 16 OR the wired bit into the destination
+    // channel's registry mask; a pre-existing destination bit survives and
+    // a repeated load adds nothing.
+    {
+        static Synth::InstrumentEditorBank source;
+        static Synth::Instrument           instrument = {};
+        static Synth::InstrumentEditorBank destination;
+        static ClipboardDecode             decoded;
+        static char                        text[clipboard_capacity];
+
+        build_zone_fixture(&source, &instrument);
+        Synth::InputRouting& routing = source.bank.instruments.entries[0].routing[Synth::mod_volume];
+        routing.num_inputs           = 1;
+        routing.inputs[0].source     = Synth::ModSource::cc;
+        routing.inputs[0].op         = Synth::SourceOp::add;
+        routing.inputs[0].cc_number  = static_cast<uint8_t>(Synth::cc_msb_base);
+        routing.inputs[0].scale      = 0.5f;
+
+        const char* const path = "synth_osc_cc_adoption.tmp";
+        remove(path);
+        const int saved = Synth::save_library_record(path, "Regression", "CC Osc", &source, 0);
+        TEST(saved == 0);
+        if (saved == 0) {
+            Synth::LibraryEntry entry;
+            TEST(Synth::read_library_index(path, &entry, 1) == 1);
+
+            destination                  = source;
+            destination.added_cc_mask[2] = 1u << 3;
+            uint16_t output_slot         = 0;
+            TEST(Synth::load_library_instrument(path, &entry, &destination, 2, &output_slot));
+            TEST(destination.added_cc_mask[2] == ((1u << 0) | (1u << 3)));
+
+            // A repeated load is idempotent: the same bit ORs to itself.
+            TEST(Synth::load_library_instrument(path, &entry, &destination, 2, &output_slot));
+            TEST(destination.added_cc_mask[2] == ((1u << 0) | (1u << 3)));
+        }
+        remove(path);
+
+        // Zone paste adopts the same bit into the receiving channel.
+        const bool exported = export_clipboard_fixture(source, text, sizeof(text));
+        TEST(exported);
+        if (exported && decode_clipboard(&decoded, text, max_portable_records)) {
+            static Synth::InstrumentEditorBank paste_destination;
+            static Synth::Instrument           occupied;
+            static Synth::InstrumentEditorBank candidate;
+
+            build_clipboard_zone_fixture(&paste_destination, &occupied);
+            paste_destination.bank.channel_enabled[2]             = 1;
+            paste_destination.bank.channel_zones[2][0].start_note = 1;
+            paste_destination.bank.channel_zones[2][0].instrument = 0;
+            paste_destination.added_cc_mask[2]                    = 1u << 3;
+
+            const bool replaced = Sculptor::replace_zone_instrument_candidate(paste_destination,
+                                                                              2,
+                                                                              0,
+                                                                              decoded.instr,
+                                                                              decoded.envs,
+                                                                              decoded.env_count,
+                                                                              decoded.lfos,
+                                                                              decoded.lfo_count,
+                                                                              decoded.layout,
+                                                                              decoded.layout_count,
+                                                                              &candidate);
+            TEST(replaced);
+            if (replaced) {
+                TEST(candidate.added_cc_mask[2] == ((1u << 0) | (1u << 3)));
+            }
+        }
+    }
+
+    // T-M6-8: end-to-end runtime seam.  A bank whose volume routing carries
+    // a cc input modulates through the production data path: the validate
+    // preflight admits the 16..31 cc_number (the rule that keeps
+    // resolve_source's slot assert in realtime_synth.cpp unreachable),
+    // apply_channel_cc drives the channel's CC leaf exactly the way
+    // process_controller writes it, and the routing's inputs configure the
+    // volume dest whose value propagate_parameters folds.
+    // configure_target_modulation and resolve_source are static in
+    // realtime_synth.cpp and not linked here, so the block below is the
+    // production-shape replica of their cc case, built only from exported
+    // primitives and constants and mirroring realtime_synth.cpp:1032-1160.
+    {
+        static Synth::InstrumentBank runtime_bank;
+        memset(&runtime_bank, 0, sizeof(runtime_bank));
+
+        const uint32_t instr_slot = runtime_bank.instruments.allocate();
+        TEST(instr_slot == 0);
+        if (instr_slot == 0) {
+            Synth::Instrument& cc_instr                             = runtime_bank.instruments.entries[instr_slot];
+            cc_instr.layer_count                                    = 1;
+            cc_instr.layers[0].osc_type[0]                          = Synth::WaveType::sine_wave;
+            cc_instr.routing[Synth::mod_volume].base_value          = 0.8f;
+            cc_instr.routing[Synth::mod_volume].num_inputs          = 1;
+            cc_instr.routing[Synth::mod_volume].inputs[0].source    = Synth::ModSource::cc;
+            cc_instr.routing[Synth::mod_volume].inputs[0].op        = Synth::SourceOp::add;
+            cc_instr.routing[Synth::mod_volume].inputs[0].cc_number = static_cast<uint8_t>(Synth::cc_msb_base);
+            cc_instr.routing[Synth::mod_volume].inputs[0].scale     = 0.5f;
+            runtime_bank.channel_zones[0][0].start_note             = 1;
+            runtime_bank.channel_zones[0][0].instrument             = static_cast<uint8_t>(instr_slot);
+            runtime_bank.channel_enabled[0]                         = 1;
+
+            TEST(Synth::validate_instrument_bank(&runtime_bank));
+
+            // Leaf ids mirror the runtime layout: the sentinel occupies id 0
+            // and the channel CC leaves start at 1, one per assignable slot
+            // (channel_param(channel, chan_param_cc_0 + slot)).
+            constexpr uint32_t            cc_leaf_base          = 1;
+            constexpr uint32_t            replica_count         = cc_leaf_base + Synth::num_assignable_ccs + 1;
+            static Synth::ParamDescriptor descs[replica_count]  = {};
+            static Synth::Parameter       params[replica_count] = {};
+            memset(descs, 0, sizeof(descs));
+            memset(params, 0, sizeof(params));
+
+            static Synth::ChannelCcState cc_state;
+            memset(&cc_state, 0, sizeof(cc_state));
+
+            const Synth::InputRouting& volume_routing =
+                runtime_bank.instruments.entries[instr_slot].routing[Synth::mod_volume];
+            Synth::SourceParam sources[Synth::max_mod_inputs] = {};
+            uint32_t           num_sources                    = 0;
+            for (uint32_t i = 0; i < volume_routing.num_inputs && i < Synth::max_mod_inputs; ++i) {
+                const Synth::ModInput& input = volume_routing.inputs[i];
+                TEST(input.source == Synth::ModSource::cc);
+                TEST(Synth::cc_is_assignable(input.cc_number));
+                sources[num_sources].param_id =
+                    static_cast<uint16_t>(cc_leaf_base + (input.cc_number - Synth::cc_msb_base));
+                sources[num_sources].scale = input.scale;
+                sources[num_sources].op    = input.op;
+                num_sources++;
+            }
+            Synth::configure_plain(&descs[cc_leaf_base + Synth::num_assignable_ccs],
+                                   volume_routing.base_value,
+                                   0,
+                                   0,
+                                   Synth::SourceOp::add,
+                                   sources,
+                                   num_sources);
+
+            const uint32_t cc_leaf     = cc_leaf_base + 0;
+            const uint32_t volume_dest = cc_leaf_base + Synth::num_assignable_ccs;
+
+            // Stage one: CC 16 at zero keeps the volume at its base value.
+            const float closed = Synth::apply_channel_cc(&cc_state, Synth::cc_msb_base, 0);
+            TEST(approx(closed, 0.0f, 0.0001f));
+            Synth::write_external_leaf(closed,
+                                       Synth::ExternalLeaf{ &params[cc_leaf].value, &params[cc_leaf].prev_value });
+            Synth::propagate_parameters(params, descs, replica_count);
+            TEST(approx(params[volume_dest].value, 0.8f, 0.001f));
+
+            // Stage two: CC 16 at full deflection moves the volume.  The
+            // zero-initialized channel state carries lsb 0 (the 0xFF
+            // not-yet-seen sentinel exists only in freshly constructed
+            // production state), so the 14-bit value is cc_14bit_value(127, 0).
+            const float open = Synth::apply_channel_cc(&cc_state, Synth::cc_msb_base, 127);
+            TEST(approx(open, Synth::cc_14bit_value(127, 0), 0.0001f));
+            Synth::write_external_leaf(open,
+                                       Synth::ExternalLeaf{ &params[cc_leaf].value, &params[cc_leaf].prev_value });
+            Synth::propagate_parameters(params, descs, replica_count);
+            TEST(approx(params[volume_dest].value, 0.8f + 0.5f * Synth::cc_14bit_value(127, 0), 0.001f));
+        }
+    }
+
+    // T-M6-9: a gen cc source fails decode - LFO depth/rate sources carry
+    // no cc_number, so bank validation refuses cc there.
+    {
+        static Synth::InstrumentEditorBank source;
+        static Synth::Instrument           instrument = {};
+        static Synth::InstrumentEditorBank decoded;
+        static char                        payload[Synth::library_payload_max];
+        static char                        patched[Synth::library_payload_max];
+
+        build_zone_fixture(&source, &instrument);
+        source.bank.instruments.entries[0].layers[0].gen[Synth::mod_volume].lfo_depth_source =
+            Synth::ModSource::velocity;
+
+        const uint32_t clean_len = Synth::encode_editor_bank_json(&source, payload, sizeof(payload));
+        TEST(clean_len > 0);
+        if (clean_len > 0) {
+            TEST(Synth::decode_editor_bank_json(payload, clean_len, &decoded));
+
+            // The gen is the document's only lfo_depth_source spelling, so
+            // the needle is unique by construction.
+            uint32_t    depth_source_count = 0;
+            const char* scan               = payload;
+            while ((scan = strstr(scan, "\"lfo_depth_source\":\"velocity\"")) != nullptr) {
+                depth_source_count++;
+                scan++;
+            }
+            TEST(depth_source_count == 1);
+
+            const uint32_t spliced_len = splice_single_occurrence(payload,
+                                                                  clean_len,
+                                                                  "\"lfo_depth_source\":\"velocity\"",
+                                                                  "\"lfo_depth_source\":\"cc\"",
+                                                                  patched,
+                                                                  sizeof(patched));
+            TEST(spliced_len > 0);
+            if (spliced_len > 0) {
+                TEST(! Synth::decode_editor_bank_json(patched, spliced_len, &decoded));
+            }
+        }
+    }
+}
+
 int main()
 {
     effects_paste_pin_regressions();
@@ -5540,6 +6232,7 @@ int main()
     effects_add_cc_regressions();
     effects_enable_regressions();
     effects_inline_modulator_regressions();
+    osc_cc_regressions();
     // Debug builds log skipped unknown JSON fields to stdout; the suite must stay
     // silent unless failing, and failures report on stderr, so stdout is discarded.
 #ifdef _WIN32

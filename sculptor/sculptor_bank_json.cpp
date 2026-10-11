@@ -3672,8 +3672,17 @@ static uint32_t encode_instrument_json_for_domain(char*                         
                     o.ch('[');
                     for (uint32_t input = 0; input < routing.num_inputs; input++) {
                         const Synth::ModInput& in = routing.inputs[input];
-                        if (in.source > Synth::ModSource::pressure_combine || in.op > Synth::SourceOp::multiply ||
-                            in.cc_number != 0)
+                        if (in.op > Synth::SourceOp::multiply)
+                            return 0;
+                        if (in.source == Synth::ModSource::cc) {
+                            // The assignable cc source is admitted with
+                            // cc_number 16..31, like the bank validator.
+                            if (! Synth::cc_is_assignable(in.cc_number))
+                                return 0;
+                        }
+                        else if (in.source > Synth::ModSource::pressure_combine || in.cc_number != 0)
+                            // A non-CC input must carry no stale CC number
+                            // (canonicalization hole).
                             return 0;
                         o.sep();
                         enc_mod_input(o, in);

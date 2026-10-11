@@ -67,6 +67,11 @@ bool fx_chain_uses_cc(const Synth::EffectChainBinding& chain, uint32_t cc_number
 // meaningful parameter input wires.  Pure; callers own mask mutation.
 uint16_t fx_chain_wired_cc_mask(const Synth::EffectChainBinding& chain);
 
+// Wired assignable-CC mask of one instrument's osc routing: bit i names
+// CC (16 + i) that a routing input wires.  Library load and zone paste
+// OR it into the destination channel's shared registry mask.
+uint16_t instrument_cc_mask(const Synth::Instrument& instrument);
+
 // Neutral, audible base value for a newly added or retyped effect slot.
 float effect_param_default(Synth::EffectType type, uint32_t param);
 

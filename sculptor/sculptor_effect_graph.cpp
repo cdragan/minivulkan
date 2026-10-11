@@ -168,7 +168,7 @@ static void fx_source_of_dot(const Sculptor::EffectGraphMapping& mapping,
 // is outside CC 16..31, the only CCs an effect can wire).
 static int32_t fx_assignable_cc_index(uint32_t cc_number)
 {
-    if (cc_number < Synth::cc_msb_base || cc_number >= Synth::cc_msb_base + Synth::num_assignable_ccs) {
+    if (! Synth::cc_is_assignable(cc_number)) {
         return -1;
     }
     return static_cast<int32_t>(cc_number - Synth::cc_msb_base);
@@ -410,6 +410,29 @@ uint16_t Sculptor::fx_chain_wired_cc_mask(const Synth::EffectChainBinding& chain
             for (uint32_t input = 0; input < binding.num_inputs; ++input) {
                 mask = static_cast<uint16_t>(mask | fx_cc_mask_bit(binding.inputs[input]));
             }
+        }
+    }
+    return mask;
+}
+
+uint16_t Sculptor::instrument_cc_mask(const Synth::Instrument& instrument)
+{
+    uint16_t mask = 0;
+
+    for (uint32_t target = 0; target < Synth::num_mod_targets; ++target) {
+        const uint32_t num_inputs = instrument.routing[target].num_inputs <= Synth::max_mod_inputs
+                                        ? instrument.routing[target].num_inputs
+                                        : Synth::max_mod_inputs;
+
+        for (uint32_t input = 0; input < num_inputs; ++input) {
+            const Synth::ModInput& in = instrument.routing[target].inputs[input];
+            if (in.source != Synth::ModSource::cc) {
+                continue;
+            }
+            if (! Synth::cc_is_assignable(in.cc_number)) {
+                continue;
+            }
+            mask = static_cast<uint16_t>(mask | (1u << (in.cc_number - Synth::cc_msb_base)));
         }
     }
     return mask;

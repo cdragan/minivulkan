@@ -3,6 +3,7 @@
 
 #include "sculptor_osc_graph.h"
 #include "sculptor_bank_json.h"
+#include "sculptor_effect_graph.h"
 #include "sculptor_instr_envelope_edit.h"
 
 #include <cassert>
@@ -200,9 +201,7 @@ constexpr uint8_t param_src0_row_group = 2;
 constexpr uint32_t lfo_depth_input = 1;
 constexpr uint32_t lfo_rate_input  = 2;
 
-// Output node slot layout: one input per layer, then the skew properties.
-constexpr uint32_t input_note_detune_prop = Sculptor::num_osc_graph_inputs;
-constexpr uint32_t input_osc_detune_prop  = Sculptor::num_osc_graph_inputs + 1;
+// Output node slot layout: one input per layer.
 
 // Canonical kind-0 numbering is shared with the JSON codec; it lives in
 // sculptor_instr_bank.h.  Only the fixed nodes (inputs, sum, oscillators)
@@ -436,6 +435,35 @@ static bool edge_source(const Sculptor::Graph&           graph,
     return false;
 }
 
+// Resolves an inputs-node output slot to its assignable CC index; -1 when
+// the slot is not a projected CC dot.
+static int32_t input_cc_index(const Sculptor::OscGraphMapping& mapping, uint32_t slot_idx)
+{
+    if (slot_idx == Sculptor::pool_no_slot) {
+        return -1;
+    }
+
+    for (uint32_t i = 0; i < Synth::num_assignable_ccs; ++i) {
+        if (mapping.input_cc_slots[i] == slot_idx) {
+            return static_cast<int32_t>(i);
+        }
+    }
+    return -1;
+}
+
+// Resolves the assignable CC slot index feeding a connector through the
+// inputs node's CC dots; -1 when the connection does not leave a CC dot.
+static int32_t edge_cc_index(const Sculptor::Graph&           graph,
+                             const Sculptor::OscGraphMapping& mapping,
+                             uint32_t                         connection_idx)
+{
+    const uint32_t node_idx = graph.get_connection(connection_idx).output.node_idx;
+    if (node_idx != mapping.input_node) {
+        return -1;
+    }
+    return input_cc_index(mapping, graph.get_connection(connection_idx).output.slot_idx);
+}
+
 static bool read_list_prop(const Sculptor::Slot& slot, uint32_t* index)
 {
     if (slot.property_type != Sculptor::PropertyType::list || slot.value.list_index >= slot.num_list_options) {
@@ -452,12 +480,18 @@ static void clear_mapping(Sculptor::OscGraphMapping* mapping)
     for (uint32_t i = 0; i < Sculptor::num_osc_graph_inputs; ++i) {
         mapping->input_source_slots[i] = Sculptor::pool_no_slot;
     }
+    for (uint32_t i = 0; i < Synth::num_assignable_ccs; ++i) {
+        mapping->input_cc_slots[i] = Sculptor::pool_no_slot;
+    }
     mapping->output_node = Sculptor::pool_no_slot;
     for (uint32_t layer = 0; layer < Synth::max_layers; ++layer) {
         mapping->output_layer_input_slot[layer] = Sculptor::pool_no_slot;
         mapping->osc_nodes[layer]               = Sculptor::pool_no_slot;
     }
     mapping->osc_output_slot = Sculptor::pool_no_slot;
+    for (uint32_t i = 0; i < 2; ++i) {
+        mapping->input_detune_slots[i] = Sculptor::pool_no_slot;
+    }
     // Uniform node layouts; populated even when no such node exists so the
     // mapping always describes the full projection layout.
     mapping->env_output_slot      = 0;
@@ -1318,7 +1352,8 @@ bool Sculptor::store_param_wiring(const Graph&            graph,
 bool Sculptor::project_instrument_to_graph(const Synth::Instrument&     instrument,
                                            const Synth::InstrumentBank& bank,
                                            Graph*                       graph,
-                                           OscGraphMapping*             mapping)
+                                           OscGraphMapping*             mapping,
+                                           const uint16_t*              added_cc_mask)
 {
     // The graph cannot express a sourceless routing input: dropping it would
     // change synthesis on commit (the eval multiplies by the zero sentinel),
@@ -1361,11 +1396,22 @@ bool Sculptor::project_instrument_to_graph(const Synth::Instrument&     instrume
         mapping->input_source_slots[source - 1] =
             graph->add_slot(input_node, output_slot(mod_source_names[source - 1]));
     }
+    if (added_cc_mask) {
+        for (uint32_t i = 0; i < Synth::num_assignable_ccs; ++i) {
+            if (! (*added_cc_mask & (1u << i))) {
+                continue;
+            }
+            char label[32];
+            Sculptor::fx_cc_pair_label(Synth::cc_msb_base + i, label, sizeof(label));
+            mapping->input_cc_slots[i] = graph->add_slot(input_node, output_slot(label));
+        }
+    }
     // Random pitch offset drawn once per note for every layer, in semitones.
-    graph->add_slot(input_node, bounded_real_slot("Random Note Detune", instrument.note_skew_semitones, 0.0f, 1.0f));
+    mapping->input_detune_slots[0] =
+        graph->add_slot(input_node, bounded_real_slot("Random Note Detune", instrument.note_skew_semitones, 0.0f, 1.0f));
     // Independent random pitch offset drawn per layer per note, in semitones.
-    graph->add_slot(input_node,
-                    bounded_real_slot("Random Oscillator Detune", instrument.layer_skew_semitones, 0.0f, 1.0f));
+    mapping->input_detune_slots[1] =
+        graph->add_slot(input_node, bounded_real_slot("Random Oscillator Detune", instrument.layer_skew_semitones, 0.0f, 1.0f));
 
     const uint32_t output_node = graph->create_node("Oscillator Output", vmath::vec2(1024.0f, 0.0f));
     if (output_node == Sculptor::pool_no_slot) {
@@ -1695,7 +1741,8 @@ bool Sculptor::compile_graph_to_instrument(const Graph& graph, const OscGraphMap
                     continue;
                 }
                 Synth::ModSource source = Synth::ModSource::none;
-                if (! edge_source(graph, mapping, conn, &source)) {
+                const int32_t    cc_index = edge_cc_index(graph, mapping, conn);
+                if (cc_index < 0 && ! edge_source(graph, mapping, conn, &source)) {
                     return false;
                 }
                 const Node& param_node = graph.node(param.node_idx);
@@ -1707,9 +1754,18 @@ bool Sculptor::compile_graph_to_instrument(const Graph& graph, const OscGraphMap
                     return false;
                 }
                 Synth::ModInput& input = out->routing[t].inputs[num_inputs++];
-                input.source           = source;
-                input.op               = static_cast<Synth::SourceOp>(op_index);
-                input.scale            = param_node.slots.entries[param_src_scale_prop(i)].value.real;
+                if (cc_index >= 0) {
+                    // A CC wire compiles to the assignable cc source; the
+                    // validate_instrument 16..31 rule protects the runtime
+                    // resolve_source slot assert.
+                    input.source    = Synth::ModSource::cc;
+                    input.cc_number = static_cast<uint8_t>(Synth::cc_msb_base + static_cast<uint32_t>(cc_index));
+                }
+                else {
+                    input.source = source;
+                }
+                input.op    = static_cast<Synth::SourceOp>(op_index);
+                input.scale = param_node.slots.entries[param_src_scale_prop(i)].value.real;
             }
             out->routing[t].num_inputs = static_cast<uint16_t>(num_inputs);
         }
@@ -1719,8 +1775,18 @@ bool Sculptor::compile_graph_to_instrument(const Graph& graph, const OscGraphMap
     if (inputs.slots.num_allocated < num_osc_graph_inputs + 2) {
         return false;
     }
-    out->note_skew_semitones  = inputs.slots.entries[input_note_detune_prop].value.real;
-    out->layer_skew_semitones = inputs.slots.entries[input_osc_detune_prop].value.real;
+    // The detune rows are always the node's last two slots; direct
+    // project_instrument_to_graph callers (the unit tests) project without
+    // the CC post-pass, so the compile falls back to the node tail when
+    // the mapping carries no projected detune indices.
+    const uint32_t note_detune_slot = mapping.input_detune_slots[0] != pool_no_slot
+                                          ? mapping.input_detune_slots[0]
+                                          : inputs.slots.num_allocated - 2;
+    const uint32_t osc_detune_slot = mapping.input_detune_slots[1] != pool_no_slot
+                                         ? mapping.input_detune_slots[1]
+                                         : inputs.slots.num_allocated - 1;
+    out->note_skew_semitones  = inputs.slots.entries[note_detune_slot].value.real;
+    out->layer_skew_semitones = inputs.slots.entries[osc_detune_slot].value.real;
 
     return true;
 }
@@ -1818,8 +1884,21 @@ bool Sculptor::osc_graph_validate(void* user_data, Graph& graph, EndPoint output
         }
         case out_lfo:
             return classify_input(*mapping, input) == in_plfo;
-        case out_input:
-            switch (classify_input(*mapping, input)) {
+        case out_input: {
+            // A CC dot is a source-role output: the runtime resolves cc for
+            // parameter routing inputs only, so LFO depth/rate refuse it
+            // (validate_instrument refuses cc there too); oscillator target
+            // rows refuse as today.  The source-row order rule below is
+            // unchanged and type-agnostic.
+            const bool cc_dot = input_cc_index(*mapping, output.slot_idx) >= 0;
+
+            const InputKind kind = classify_input(*mapping, input);
+            if (cc_dot && kind != in_psrc) {
+                graph.set_error("CC wires into the Source rows only");
+                return false;
+            }
+
+            switch (kind) {
                 case in_psrc:
                     // Source rows are order-indexed: the add path refuses
                     // source 1 before source 0 (checked at wire time), but
@@ -1841,6 +1920,7 @@ bool Sculptor::osc_graph_validate(void* user_data, Graph& graph, EndPoint output
                 default:
                     return false;
             }
+        }
         case out_osc: {
             if (classify_input(*mapping, input) != in_sum) {
                 return false;
@@ -3354,6 +3434,74 @@ uint32_t Sculptor::count_projected_nodes(const Synth::InstrumentEditorBank& bank
     return count;
 }
 
+// CC-only wiring loop restoring the wires the standard pass skips (the CC
+// dots themselves are created by project_instrument_to_graph between the
+// standard dots and the detune rows).  The pass never re-runs
+// wire_param_sources (it would duplicate the standard wires); a routing cc
+// input whose dot is absent, or whose cc_number falls outside the
+// assignable range, leaves its row unwired - decode never synthesizes
+// registry bits.
+static void project_cc_dots(const Synth::Instrument&   instrument,
+                            Sculptor::Graph*           graph,
+                            Sculptor::OscGraphMapping* mapping)
+{
+    for (uint32_t p = 0; p < mapping->param_count; ++p) {
+        const Sculptor::ParamEntry& param = mapping->params[p];
+        if (param.node_idx == Sculptor::pool_no_slot) {
+            continue;
+        }
+        const Synth::InputRouting& routing = instrument.routing[projected_target_of_index(param.target)];
+        const uint32_t             num_inputs =
+            routing.num_inputs <= Synth::max_mod_inputs ? routing.num_inputs : Synth::max_mod_inputs;
+
+        for (uint32_t i = 0; i < num_inputs; ++i) {
+            if (routing.inputs[i].source != Synth::ModSource::cc) {
+                continue;
+            }
+            const uint32_t cc_number = routing.inputs[i].cc_number;
+            if (cc_number < Synth::cc_msb_base || cc_number - Synth::cc_msb_base >= Synth::num_assignable_ccs) {
+                continue;
+            }
+            const uint32_t cc_index = cc_number - Synth::cc_msb_base;
+            if (mapping->input_cc_slots[cc_index] == Sculptor::pool_no_slot) {
+                continue;
+            }
+            graph->add_connection(Sculptor::EndPoint{ mapping->input_node, mapping->input_cc_slots[cc_index] },
+                                  Sculptor::EndPoint{ param.node_idx, param_src_input(i) });
+        }
+    }
+}
+
+// The channel-wide removal-refusal scan: the shared per-channel registry
+// makes a CC wired by the channel's fx chain OR by any zone's osc routing
+// refuse removal in both panes.  The zone scan stops at the first empty
+// slot (an empty slot's instrument byte is meaningless, like the library
+// load).  Out-of-range channel (master-chain callers keep the fx-chain-only
+// guard) and out-of-range CC refuse nothing.
+bool Sculptor::channel_uses_cc(const Synth::InstrumentEditorBank& bank, uint32_t channel, uint32_t cc_number)
+{
+    if (channel >= Synth::max_channels || ! Synth::cc_is_assignable(cc_number)) {
+        return false;
+    }
+
+    if (Sculptor::fx_chain_uses_cc(bank.bank.channel_chains[channel], cc_number)) {
+        return true;
+    }
+
+    const uint16_t bit = static_cast<uint16_t>(1u << (cc_number - Synth::cc_msb_base));
+    for (uint32_t zone = 0; zone < Synth::max_instr_per_channel && bank.bank.channel_zones[channel][zone].start_note;
+         ++zone) {
+        const uint32_t instr = bank.bank.channel_zones[channel][zone].instrument;
+        if (instr >= bank.bank.instruments.num_allocated) {
+            continue;
+        }
+        if (Sculptor::instrument_cc_mask(bank.bank.instruments.entries[instr]) & bit) {
+            return true;
+        }
+    }
+    return false;
+}
+
 bool Sculptor::project_editor_to_graph(const Synth::InstrumentEditorBank& bank,
                                        Graph*                             graph,
                                        OscGraphMapping*                   mapping,
@@ -3370,7 +3518,8 @@ bool Sculptor::project_editor_to_graph(const Synth::InstrumentEditorBank& bank,
     if (! project_instrument_to_graph(bank.bank.instruments.entries[zone_entry.instrument],
                                       bank.bank,
                                       graph,
-                                      mapping)) {
+                                      mapping,
+                                      &bank.added_cc_mask[channel])) {
         return false;
     }
     mapping->channel = channel;
@@ -3592,6 +3741,10 @@ bool Sculptor::project_editor_to_graph(const Synth::InstrumentEditorBank& bank,
             }
         }
     }
+    // The CC post-pass runs after every wire_param_sources call site, so
+    // it is the only place CC wiring can happen (see project_cc_dots).
+    project_cc_dots(instrument, graph, mapping);
+
     install_edit_disabled_flags(graph, *mapping);
 
     return true;
@@ -4190,6 +4343,11 @@ bool Sculptor::replace_zone_instrument_candidate(const Synth::InstrumentEditorBa
                                          zone_entry,
                                          &clipboard_candidate))
         return false;
+    // The pasted instrument's wired osc CC bits ride into the receiving
+    // channel's shared registry mask; pre-existing destination bits survive
+    // and the OR is idempotent for a repeated paste.
+    clipboard_candidate.added_cc_mask[channel] =
+        static_cast<uint16_t>(clipboard_candidate.added_cc_mask[channel] | instrument_cc_mask(decoded_instrument));
     bank.channel_enabled[channel] = enabled;
     if (! Synth::validate_instrument_bank(&bank) || ! validate_editor_metadata(clipboard_candidate))
         return false;
