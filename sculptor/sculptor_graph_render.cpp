@@ -548,7 +548,8 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
                     draw_list->AddCircleFilled(ImVec2(dot_x, y_center), dot_radius * render_scale, dot_color);
                 }
                 else {
-                    draw_list->AddCircle(ImVec2(dot_x, y_center), dot_radius * render_scale, dot_color, 0, 1.5f);
+                    draw_list->AddCircleFilled(ImVec2(dot_x, y_center), dot_radius * render_scale, bg_color);
+                    draw_list->AddCircle(ImVec2(dot_x, y_center), dot_radius * render_scale, dot_color, 0, 2.5f);
                 }
                 if (slot.kind == SlotKind::output) {
                     // Output names right-align against their dot so the
