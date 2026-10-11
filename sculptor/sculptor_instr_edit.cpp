@@ -17,6 +17,8 @@
 
 #include "../core/d_printf.h"
 #include "../core/gui_imgui.h"
+#include "../core/vmath.h"
+#include <math.h>
 #include <string.h>
 #include <type_traits>
 
@@ -231,6 +233,90 @@ constexpr size_t editor_resident_state_bytes =
     4 * Synth::instrument_graph_layout_capacity * sizeof(Synth::InstrumentGraphLayout) +
     4096; // remaining editor scalar flags, constants and alignment
 static_assert(editor_resident_state_bytes <= 16 * 1024 * 1024);
+
+// Synth info panel data. The declaration in sculptor_instr_edit.h describes
+// what the panel shows; the synth runtime only exposes raw data.
+
+// Number of frames in the analysis window, about 46 ms at 44100 Hz.
+constexpr uint32_t spectrum_frames = 2048;
+
+// The FFT produces this many usable bins; the upper half mirrors the lower one.
+constexpr uint32_t spectrum_half_bins = spectrum_frames / 2;
+
+// Display bins drawn by the panel.
+constexpr uint32_t spectrum_display_bins = 64;
+
+// Height of the spectrum plot, in pixels.
+constexpr float spectrum_plot_height = 80.0f;
+
+// dB scale of the spectrum plot.  The floor is also the editor-side clamp for
+// the display-only unsynchronized peek: a torn or glitched input sample can
+// never push a displayed value outside the fixed scale.
+constexpr float spectrum_db_floor = -80.0f;
+
+// 256 entries cover the 500 ms linger window up to 512 redraws per second, so
+// a transient low level inside the window cannot be overwritten before it
+// expires at any realistic refresh rate.
+constexpr uint32_t linger_capacity = 256;
+
+// Observations older than this no longer hold the marker down.
+constexpr double linger_window_s = 0.5;
+
+// Ring of (time, level) observations behind the lingering bottom marker.
+// minimum() drops entries older than the window and returns the lowest
+// remaining one.  Entries are stored oldest-first, so one backward scan from
+// the newest entry stops at the first expired observation.
+struct SynthInfoLingerMin {
+    double   time_s[linger_capacity];
+    float    level[linger_capacity];
+    uint32_t head  = 0; // next write position
+    uint32_t count = 0;
+
+    void add(double now_s, float new_level)
+    {
+        time_s[head] = now_s;
+        level[head]  = new_level;
+
+        head = (head + 1) % linger_capacity;
+        if (count < linger_capacity)
+            count++;
+    }
+
+    // Returns false when no observation is left in the window (no marker).
+    bool minimum(double now_s, float* min_level)
+    {
+
+        bool found = false;
+        for (uint32_t i = 0; i < count; i++) {
+            const uint32_t idx = (head + linger_capacity - 1 - i) % linger_capacity;
+
+            if (now_s - time_s[idx] > linger_window_s)
+                break; // older entries are older still; the scan can stop
+
+            if (! found || level[idx] < *min_level) {
+                *min_level = level[idx];
+                found      = true;
+            }
+        }
+
+        return found;
+    }
+};
+
+float    info_twiddle_re[spectrum_half_bins];
+float    info_twiddle_im[spectrum_half_bins];
+float    info_hann[spectrum_frames];
+uint32_t info_bin_edges[spectrum_display_bins + 1]; // first FFT bin of each display bin
+bool     info_tables_ready = false;
+
+float              info_peek_l[spectrum_frames];
+float              info_peek_r[spectrum_frames];
+float              info_mono[spectrum_frames];
+float              info_fft_re[spectrum_frames];
+float              info_fft_im[spectrum_frames];
+float              info_bins[spectrum_display_bins];
+Synth::WaveType    info_osc_types[Synth::max_oscillators];
+SynthInfoLingerMin info_linger;
 
 } // namespace
 
@@ -1469,6 +1555,7 @@ bool Sculptor::SynthEditor::create_gui_frame(uint32_t image_idx, bool* need_real
     ImGui::TableNextRow();
     ImGui::TableSetColumnIndex(0);
     gui_channel_list();
+    gui_synth_info_panel();
     ImGui::TableSetColumnIndex(1);
     if (selected_target == target_master) {
         const float pane_h = ImGui::GetContentRegionAvail().y - ImGui::GetStyle().CellPadding.y;
@@ -3164,5 +3251,255 @@ void Sculptor::SynthEditor::gui_library_save_popups()
         if (ImGui::Button("Cancel"))
             ImGui::CloseCurrentPopup();
         ImGui::EndPopup();
+    }
+}
+
+// Synth info panel. The synth runtime only exposes raw data; all analysis
+// and drawing live here.
+
+// Computes the constant tables once on first use.  The panel draws from the
+// GUI thread only, so no synchronization is needed.
+static void init_spectrum_tables()
+{
+    if (info_tables_ready)
+        return;
+
+    for (uint32_t i = 0; i < spectrum_half_bins; i++) {
+        const float phase  = -2.0f * vmath::pi * static_cast<float>(i) / static_cast<float>(spectrum_frames);
+        info_twiddle_re[i] = cosf(phase);
+        info_twiddle_im[i] = sinf(phase);
+    }
+
+    // Periodic Hann window; its coherent gain is exactly 0.5.
+    for (uint32_t i = 0; i < spectrum_frames; i++)
+        info_hann[i] =
+            0.5f - 0.5f * cosf(2.0f * vmath::pi * static_cast<float>(i) / static_cast<float>(spectrum_frames));
+
+    // Log-spaced display bin edges from FFT bin 1 (sample_rate / 2048) to
+    // FFT bin 1024 (sample_rate / 2).  Edge k is floor(2^(10 * k / 64)), the
+    // first FFT bin of display bin k; the last edge is one past the highest
+    // aggregated bin, so the Nyquist bin stays included.  Low edges round to
+    // the same FFT bin several times; the display axis stays logarithmic and
+    // an empty interval samples the FFT bin nearest its logarithmic midpoint (see the
+    // aggregation below), with no later edge shifted.
+    info_bin_edges[0] = 1;
+    for (uint32_t k = 1; k <= spectrum_display_bins; k++) {
+        const double pos =
+            exp2(log2(static_cast<double>(spectrum_half_bins)) * static_cast<double>(k) / spectrum_display_bins);
+        info_bin_edges[k] = static_cast<uint32_t>(pos);
+    }
+
+    info_bin_edges[spectrum_display_bins] = spectrum_half_bins + 1;
+
+    info_tables_ready = true;
+}
+
+// In-place 2048-point radix-2 complex FFT.
+static void fft_2048(float* re, float* im)
+{
+    // Bit-reversal permutation.
+    uint32_t j = 0;
+    for (uint32_t i = 1; i < spectrum_frames; i++) {
+        uint32_t bit = spectrum_half_bins;
+        for (; j & bit; bit >>= 1)
+            j ^= bit;
+        j ^= bit;
+
+        if (i < j) {
+            float tmp = re[i];
+            re[i]     = re[j];
+            re[j]     = tmp;
+            tmp       = im[i];
+            im[i]     = im[j];
+            im[j]     = tmp;
+        }
+    }
+
+    // Butterfly passes; twiddle index steps shrink as the pass length grows.
+    for (uint32_t len = 2; len <= spectrum_frames; len <<= 1) {
+        const uint32_t half = len >> 1;
+        const uint32_t step = spectrum_frames / len;
+
+        for (uint32_t base = 0; base < spectrum_frames; base += len) {
+            for (uint32_t k = 0; k < half; k++) {
+                const uint32_t a  = base + k;
+                const uint32_t b  = a + half;
+                const float    wr = info_twiddle_re[k * step];
+                const float    wi = info_twiddle_im[k * step];
+
+                const float tr = re[b] * wr - im[b] * wi;
+                const float ti = re[b] * wi + im[b] * wr;
+
+                re[b] = re[a] - tr;
+                im[b] = im[a] - ti;
+                re[a] += tr;
+                im[a] += ti;
+            }
+        }
+    }
+}
+
+// Computes the display spectrum from a mono analysis window.
+// bins receives spectrum_display_bins dB values clamped to [-80, 0].
+static void compute_spectrum_bins(const float* mono, float* bins)
+{
+    init_spectrum_tables();
+
+    for (uint32_t i = 0; i < spectrum_frames; i++) {
+        info_fft_re[i] = mono[i] * info_hann[i];
+        info_fft_im[i] = 0.0f;
+    }
+
+    fft_2048(info_fft_re, info_fft_im);
+
+    // Max-magnitude aggregation into the log-spaced display bins.  A low
+    // interval can be empty (repeated edge); that display bin then samples
+    // the single FFT bin nearest the interval's logarithmic midpoint, so it
+    // still shows a value without shifting any later edge.
+    for (uint32_t b = 0; b < spectrum_display_bins; b++) {
+        const uint32_t lo      = info_bin_edges[b];
+        const uint32_t hi_edge = info_bin_edges[b + 1];
+
+        float magnitude = 0.0f;
+        if (hi_edge > lo) {
+            for (uint32_t k = lo; k < hi_edge; k++) {
+                const float mag = sqrtf(info_fft_re[k] * info_fft_re[k] + info_fft_im[k] * info_fft_im[k]);
+                if (mag > magnitude)
+                    magnitude = mag;
+            }
+        }
+        else {
+            // Empty interval: the nearest FFT bin to the ideal logarithmic
+            // midpoint 2^(10 * (b + 0.5) / 64), rounded to the nearest bin.
+            const double   mid = exp2(log2(static_cast<double>(spectrum_half_bins)) * (static_cast<double>(b) + 0.5) /
+                                      spectrum_display_bins);
+            const uint32_t nearest = static_cast<uint32_t>(mid + 0.5);
+            magnitude =
+                sqrtf(info_fft_re[nearest] * info_fft_re[nearest] + info_fft_im[nearest] * info_fft_im[nearest]);
+        }
+
+        // The Hann coherent gain is 0.5, so a full-scale bin-centered sine has a
+        // raw peak magnitude near N / 4.  amplitude = magnitude * 4 / N recovers
+        // the original sample amplitude before the dB conversion.
+        const float amplitude = magnitude * 4.0f / static_cast<float>(spectrum_frames);
+        const float db        = 20.0f * log10f(amplitude);
+
+        // Non-finite dB (NaN or infinity, possible when a torn or glitched
+        // input sample poisons the FFT or the logarithm) maps straight to the
+        // -80 dB floor.  The numeric clamp applies to finite values only.
+        if (! isfinite(db)) {
+            bins[b] = spectrum_db_floor;
+            continue;
+        }
+
+        if (db < spectrum_db_floor)
+            bins[b] = spectrum_db_floor;
+        else if (db > 0.0f)
+            bins[b] = 0.0f;
+        else
+            bins[b] = db;
+    }
+}
+
+// Draws the fill bar as one frame-height strip that grows from the left with
+// the current ring fill.  The level is fill / max_fill (lead plus one maximum
+// batch), the most frames the producer ever buffers, so the steady-state fill
+// stays inside the bar.  The fill is green at or above min_green_level and red
+// at or below max_red_level; between the two, the hue sweeps from red through
+// orange and yellow to green at constant brightness.  A vertical marker line
+// lingers at the lowest level seen in the past 500 ms (SynthInfoLingerMin), so
+// brief underrun refills stay visible.
+static void gui_fill_bar(const Synth::AudioRingStatus& ring)
+{
+    float level = 0.0f;
+    if (ring.max_fill_frames > 0)
+        level = static_cast<float>(ring.fill_frames) / static_cast<float>(ring.max_fill_frames);
+    if (level > 1.0f)
+        level = 1.0f;
+
+    const double now_s = ImGui::GetTime();
+    info_linger.add(now_s, level);
+
+    const ImVec2 pos    = ImGui::GetCursorScreenPos();
+    float        width  = ImGui::GetContentRegionAvail().x;
+    const float  height = ImGui::GetFrameHeight();
+    if (width < 1.0f)
+        width = 1.0f;
+
+    ImDrawList* draw = ImGui::GetWindowDrawList();
+    draw->AddRectFilled(pos, ImVec2(pos.x + width, pos.y + height), ImGui::GetColorU32(ImGuiCol_FrameBg));
+
+    constexpr float min_green_level = 0.25f;
+    constexpr float max_red_level   = min_green_level - 0.1f;
+    static_assert(max_red_level > 0.0f);
+
+    const float fill_w = level * width;
+    if (fill_w > 0.0f) {
+        float hue_t = 0.0f; // hue 0 (red) at or below max_red_level
+        if (level >= min_green_level)
+            hue_t = 1.0f;
+        else if (level > max_red_level)
+            hue_t = (level - max_red_level) / (min_green_level - max_red_level);
+
+        float r = 0.0f;
+        float g = 0.0f;
+        float b = 0.0f;
+        ImGui::ColorConvertHSVtoRGB(hue_t * (120.0f / 360.0f), 0.8f, 0.9f, r, g, b);
+        const ImU32 fill_col =
+            IM_COL32(static_cast<int>(r * 255.0f), static_cast<int>(g * 255.0f), static_cast<int>(b * 255.0f), 255);
+
+        draw->AddRectFilled(pos, ImVec2(pos.x + fill_w, pos.y + height), fill_col);
+    }
+
+    float min_level = 0.0f;
+    if (info_linger.minimum(now_s, &min_level)) {
+        float       marker_x = pos.x + min_level * width;
+        const float x_limit  = pos.x + width - 3.0f;
+        if (marker_x > x_limit)
+            marker_x = x_limit;
+        draw->AddRectFilled(ImVec2(marker_x, pos.y),
+                            ImVec2(marker_x + 3.0f, pos.y + height),
+                            ImGui::GetColorU32(ImGuiCol_PlotLinesHovered));
+    }
+
+    ImGui::Dummy(ImVec2(width, height));
+}
+
+void Sculptor::gui_synth_info_panel()
+{
+    ImGui::Separator();
+
+    const Synth::AudioRingStatus ring = Synth::get_audio_ring_status();
+
+    ImGui::TextWrapped("Underruns %u", ring.underrun_count);
+
+    gui_fill_bar(ring);
+
+    ImGui::Separator();
+
+    const uint32_t num_osc = Synth::get_oscillator_wave_types(info_osc_types, Synth::max_oscillators);
+
+    uint32_t playing = 0;
+    for (uint32_t i = 0; i < num_osc; i++) {
+        if (info_osc_types[i] != Synth::WaveType::no_wave)
+            playing++;
+    }
+
+    ImGui::Text("Oscillators playing: %u", playing);
+
+    if (Synth::peek_recent_audio(spectrum_frames, info_peek_l, info_peek_r) == spectrum_frames) {
+        for (uint32_t i = 0; i < spectrum_frames; i++)
+            info_mono[i] = (info_peek_l[i] + info_peek_r[i]) * 0.5f;
+
+        compute_spectrum_bins(info_mono, info_bins);
+
+        ImGui::PlotLines("##synth_spectrum",
+                         info_bins,
+                         spectrum_display_bins,
+                         0,
+                         nullptr,
+                         spectrum_db_floor,
+                         0.0f,
+                         ImVec2(0.0f, spectrum_plot_height));
     }
 }

@@ -17,6 +17,7 @@
 #include <atomic>
 #include <iterator>
 #include <math.h>
+#include <type_traits>
 
 #include "synth_shaders.h"
 
@@ -567,6 +568,20 @@ static bool chain_has_enabled_effect(const EffectChain& chain)
 {
     return nth_enabled_effect(chain, 0) != nullptr;
 }
+
+// Format of the live audio ring, registered by the running instantiation of
+// produce_audio_batch.  The peek accessor dispatches on it, because the
+// format is a build-time platform choice and exactly one instantiation runs
+// per build.
+enum class ActiveRingFormat : uint8_t {
+    none,
+    int16_interleaved,
+    float_interleaved,
+    float_planar
+};
+
+std::atomic<ActiveRingFormat> active_ring_format{ ActiveRingFormat::none };
+
 } // namespace
 
 namespace Synth {
@@ -2262,6 +2277,18 @@ static std::atomic<uint64_t> audio_ring_write;     // frames produced; only the 
 static std::atomic<uint64_t> audio_ring_read;      // frames consumed; only the callback stores
 static std::atomic<uint32_t> audio_underrun_count; // ring ran dry; read by the GUI indicator
 
+template <typename T, bool interleaved> static constexpr ActiveRingFormat ring_format_for()
+{
+    if constexpr (std::is_same_v<T, int16_t>) {
+        static_assert(interleaved, "int16 ring is interleaved only");
+        return ActiveRingFormat::int16_interleaved;
+    }
+    else if constexpr (interleaved)
+        return ActiveRingFormat::float_interleaved;
+    else
+        return ActiveRingFormat::float_planar;
+}
+
 // A StereoPtr addressing the ring storage at a frame offset.
 template <typename T, bool interleaved> static StereoPtr<T, interleaved> ring_stereo(uint32_t frame_offset)
 {
@@ -2305,11 +2332,16 @@ Synth::AudioRingStatus Synth::get_audio_ring_status()
 
     return { get_ringbuf_data_size(write_pos, read_pos),
              audio_lead_frames,
+             audio_lead_frames + Synth::rt_step_samples - 1,
              audio_underrun_count.load(std::memory_order_relaxed) };
 }
 
 template <typename T, bool interleaved> bool Synth::produce_audio_batch()
 {
+    // Register the live ring format for the editor's peek accessor.  One
+    // relaxed store per batch; the format is a build-time constant.
+    active_ring_format.store(ring_format_for<T, interleaved>(), std::memory_order_relaxed);
+
     const uint64_t write_pos = audio_ring_write.load(std::memory_order_relaxed);
     const uint64_t read_pos  = audio_ring_read.load(std::memory_order_acquire);
     const uint32_t available = get_ringbuf_data_size(write_pos, read_pos);
@@ -2371,6 +2403,73 @@ template <typename T, bool interleaved> uint32_t Synth::consume_audio(uint32_t n
     }
 
     return to_copy;
+}
+
+// Copies one contiguous chunk of ring frames into the caller's float channels,
+// converting from the ring's sample format on the way.
+template <typename T, bool interleaved>
+static void peek_chunk(StereoPtr<T, interleaved> src, float* left, float* right, uint32_t num_frames)
+{
+    // One interleaved traversal; the conversion is a compile-time scale
+    // (identity for float, 1 / 32768 for the full-scale int16 ring).
+    if constexpr (interleaved) {
+        constexpr float scale = std::is_same_v<T, int16_t> ? 1.0f / 32768.0f : 1.0f;
+        for (uint32_t i = 0; i < num_frames; i++) {
+            left[i]  = static_cast<float>(src.data[i * 2]) * scale;
+            right[i] = static_cast<float>(src.data[i * 2 + 1]) * scale;
+        }
+    }
+    else {
+        // Planar float ring: one bulk copy per channel.
+        copy_audio_data(StereoPtr<float, false>{ left, right }, src, num_frames);
+    }
+}
+
+// Copies the consumed history behind the read position, oldest-first.  The
+// count comes from the history, not from the unread fill: in steady state the
+// fill can drop to zero between refill batches, while the history stays valid.
+template <typename T, bool interleaved> static uint32_t peek_copy(uint32_t num_frames, float* left, float* right)
+{
+    const uint64_t read_pos = audio_ring_read.load(std::memory_order_acquire);
+
+    const uint32_t count = std::min(num_frames, static_cast<uint32_t>(std::min<uint64_t>(read_pos, audio_ring_frames)));
+
+    uint32_t copied = 0;
+    while (copied < count) {
+        const uint32_t offset = static_cast<uint32_t>((read_pos - count + copied) % audio_ring_frames);
+        const uint32_t chunk  = std::min(count - copied, Synth::get_ringbuf_contig_tail(offset, audio_ring_frames));
+        peek_chunk<T, interleaved>(ring_stereo<T, interleaved>(offset), left + copied, right + copied, chunk);
+        copied += chunk;
+    }
+
+    return copied;
+}
+
+uint32_t Synth::peek_recent_audio(uint32_t num_frames, float* left, float* right)
+{
+    switch (active_ring_format.load(std::memory_order_relaxed)) {
+        case ActiveRingFormat::int16_interleaved:
+            return peek_copy<int16_t, true>(num_frames, left, right);
+        case ActiveRingFormat::float_interleaved:
+            return peek_copy<float, true>(num_frames, left, right);
+        case ActiveRingFormat::float_planar:
+            return peek_copy<float, false>(num_frames, left, right);
+        case ActiveRingFormat::none:
+            break;
+    }
+    return 0;
+}
+
+uint32_t Synth::get_oscillator_wave_types(WaveType* dest, uint32_t max_entries)
+{
+    const uint32_t count = std::min<uint32_t>(max_entries, Synth::max_oscillators - 1);
+
+    // Slot 0 is reserved; the live slots follow it.
+    for (uint32_t i = 0; i < count; i++) {
+        dest[i] = oscillators[i + 1].osc_type[0];
+    }
+
+    return count;
 }
 
 template bool Synth::produce_audio_batch<int16_t, true>();

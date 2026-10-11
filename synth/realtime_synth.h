@@ -79,12 +79,31 @@ template <typename T, bool interleaved> bool produce_audio_batch();
 
 // Audio ring buffer health, for the GUI buffer indicator.
 struct AudioRingStatus {
-    uint32_t fill_frames;    // frames currently buffered ahead of the callback
-    uint32_t lead_frames;    // target lead the producer keeps buffered
-    uint32_t underrun_count; // times the ring ran dry and the callback got silence
+    uint32_t fill_frames;     // frames currently buffered ahead of the callback
+    uint32_t lead_frames;     // target lead the producer keeps buffered
+    uint32_t max_fill_frames; // lead plus at most one step of batch overshoot; the most frames the ring ever holds
+    uint32_t underrun_count;  // times the ring ran dry and the callback got silence
 };
 
 AudioRingStatus get_audio_ring_status();
+
+// Copies the most recent num_frames frames already delivered to the audio
+// callback (the consumed history behind the read position) into left/right.
+// Does not advance the ring read position.  Returns the number of frames
+// copied (0 until the audio callback has consumed at least one frame).
+// Display-only unsynchronized read.  The producer writes at most 5632 frames
+// ahead of the read position, which keeps the 38468 frames of retained
+// history behind the read position stable, so windows up to that size are
+// never overwritten in steady state; the panel requests 2048.  Windows
+// larger than the retained history can be overwritten mid-read; the worst
+// case is a one-frame visual glitch.
+uint32_t peek_recent_audio(uint32_t num_frames, float* left, float* right);
+
+// Writes the first wave type of every runtime oscillator slot (index 0 is
+// reserved, so it is skipped) into dest.  Returns the number of entries
+// written (max_entries or max_oscillators - 1, whichever is smaller).
+// Display-only unsynchronized read of one-byte enum values.
+uint32_t get_oscillator_wave_types(WaveType* dest, uint32_t max_entries);
 
 uint64_t get_current_timestamp_ms();
 

@@ -134,4 +134,9 @@ private:
     char confirm_name[Synth::max_name_len]     = {};
 };
 
+// Info panel under the synth channel list: underrun count, fill bar with a
+// lingering bottom marker, playing oscillator count, and a mono log-axis
+// frequency spectrum.  Reads raw data from the synth runtime only.
+void gui_synth_info_panel();
+
 } // namespace Sculptor
