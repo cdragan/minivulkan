@@ -481,7 +481,6 @@ static bool fx_connection_validator(void*              user_data,
             for (uint32_t cc = 0; cc < Synth::num_assignable_ccs; ++cc) {
                 if (fx_mapping.midi_cc_slots[cc] == output.slot_idx) {
                     cc_dot = true;
-
                     break;
                 }
             }

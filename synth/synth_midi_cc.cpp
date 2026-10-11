@@ -46,13 +46,16 @@ Synth::MixRole Synth::mix_cc_role(uint32_t controller)
     return MixRole::none;
 }
 
-void Synth::write_external_leaf(float normalized, MixLeaf leaf)
+void Synth::write_external_leaf(float normalized, ExternalLeaf leaf)
 {
     *leaf.value      = normalized;
     *leaf.prev_value = normalized;
 }
 
-bool Synth::write_mix_cc(uint32_t controller, uint8_t data, Synth::MixLeaf volume_leaf, Synth::MixLeaf panning_leaf)
+bool Synth::write_mix_cc(uint32_t            controller,
+                         uint8_t             data,
+                         Synth::ExternalLeaf volume_leaf,
+                         Synth::ExternalLeaf panning_leaf)
 {
     const MixRole role = mix_cc_role(controller);
     if (role == MixRole::none) {

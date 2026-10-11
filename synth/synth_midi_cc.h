@@ -47,22 +47,23 @@ enum class MixRole : uint8_t {
 };
 MixRole mix_cc_role(uint32_t controller);
 
-// One channel's external mix leaf: the two fields of a channel parameter slot.
-struct MixLeaf {
+// One external leaf: pointers to a parameter slot's value and prev_value
+// fields.  Every MIDI-driven source (mix CCs, mod wheel, assignable CCs,
+// pressure, bend) binds one.
+struct ExternalLeaf {
     float* value;
     float* prev_value;
 };
 
 // Shared zero-lag write for one external leaf: sets value and prev_value
-// together to the normalized value.  The mod-wheel, assignable-CC and
-// pressure handlers and write_mix_cc use it.
-void write_external_leaf(float normalized, MixLeaf leaf);
+// together to the normalized value.  Every MIDI-driven leaf handler uses it.
+void write_external_leaf(float normalized, ExternalLeaf leaf);
 
 // Writes a channel-mix controller into the addressed leaf.  Value is
 // data/127.0f; value and prev_value are written together (zero lag, same
 // pattern as the mod wheel / pressure handlers).  Returns false for
 // controllers that are not channel-mix CCs; writes nothing in that case.
-bool write_mix_cc(uint32_t controller, uint8_t data, MixLeaf volume_leaf, MixLeaf panning_leaf);
+bool write_mix_cc(uint32_t controller, uint8_t data, ExternalLeaf volume_leaf, ExternalLeaf panning_leaf);
 
 // Block-boundary handoff at the channel-to-master combine upload: copies the
 // current leaf values into the channel mix state.  Never touches the old_*

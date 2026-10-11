@@ -6389,6 +6389,19 @@ int main()
         bank.channel_enabled[1]  = 1; // zone-rule negatives exercise channel 1
     };
 
+    // Builds a valid bank whose owner chain's first slot is an enabled delay with one input row
+    // driven by source/cc_number (owner >= max_channels selects the master chain).
+    auto make_cc_input_bank =
+        [&](Synth::InstrumentBank& bank, uint32_t owner, Synth::ModSource source, uint8_t cc_number) {
+            make_valid_bank(bank);
+            Synth::EffectSlotBinding* const input_slot  = enabled_effect(bank, owner, 0, Synth::EffectType::delay);
+            input_slot->bindings[0].num_inputs          = 1;
+            input_slot->bindings[0].inputs[0].source    = source;
+            input_slot->bindings[0].inputs[0].cc_number = cc_number;
+            input_slot->bindings[0].inputs[0].op        = Synth::SourceOp::add;
+            input_slot->bindings[0].inputs[0].scale     = 0.5f;
+        };
+
     // A valid bank passes validation.
     {
         static Synth::InstrumentBank bank;
@@ -15559,25 +15572,14 @@ int main()
             const char*                       reject_error = nullptr;
             TEST(! Synth::preflight_effect_expansion(rejected, &reject_plan, &reject_error));
         };
-        auto make_cc_input_bank =
-            [&](Synth::InstrumentBank& target, uint8_t cc_number, bool master, Synth::ModSource source) {
-                make_valid_bank(target);
-                Synth::EffectSlotBinding* const cc_slot =
-                    enabled_effect(target, master ? Synth::max_channels : 3, 0, Synth::EffectType::delay);
-                cc_slot->bindings[0].num_inputs          = 1;
-                cc_slot->bindings[0].inputs[0].source    = source;
-                cc_slot->bindings[0].inputs[0].cc_number = cc_number;
-                cc_slot->bindings[0].inputs[0].op        = Synth::SourceOp::add;
-                cc_slot->bindings[0].inputs[0].scale     = 0.5f;
-            };
         static Synth::InstrumentBank reject_bank;
-        make_cc_input_bank(reject_bank, 15, false, Synth::ModSource::cc);
+        make_cc_input_bank(reject_bank, 3, Synth::ModSource::cc, 15);
         expect_preflight_reject(reject_bank);
-        make_cc_input_bank(reject_bank, 32, false, Synth::ModSource::cc);
+        make_cc_input_bank(reject_bank, 3, Synth::ModSource::cc, 32);
         expect_preflight_reject(reject_bank);
-        make_cc_input_bank(reject_bank, 0, false, Synth::ModSource::cc);
+        make_cc_input_bank(reject_bank, 3, Synth::ModSource::cc, 0);
         expect_preflight_reject(reject_bank);
-        make_cc_input_bank(reject_bank, 17, false, Synth::ModSource::mod_wheel); // non-CC, stale number
+        make_cc_input_bank(reject_bank, 3, Synth::ModSource::mod_wheel, 17); // non-CC, stale number
         expect_preflight_reject(reject_bank);
 
         // cc is not admissible as an LFO depth/rate source (no number to carry).
@@ -16012,17 +16014,13 @@ int main()
     {
         auto make_master_case =
             [&](Synth::InstrumentBank& target, bool as_input, uint8_t cc_number, Synth::ModSource source) {
-                make_valid_bank(target);
-                Synth::EffectSlotBinding* const case_slot =
-                    enabled_effect(target, Synth::max_channels, 0, Synth::EffectType::delay);
                 if (as_input) {
-                    case_slot->bindings[0].num_inputs          = 1;
-                    case_slot->bindings[0].inputs[0].source    = source;
-                    case_slot->bindings[0].inputs[0].cc_number = cc_number;
-                    case_slot->bindings[0].inputs[0].op        = Synth::SourceOp::add;
-                    case_slot->bindings[0].inputs[0].scale     = 0.5f;
+                    make_cc_input_bank(target, Synth::max_channels, source, cc_number);
                 }
                 else {
+                    make_valid_bank(target);
+                    Synth::EffectSlotBinding* const case_slot =
+                        enabled_effect(target, Synth::max_channels, 0, Synth::EffectType::delay);
                     case_slot->bindings[0].lfo_desc_id      = 1;
                     case_slot->bindings[0].lfo_depth        = 0.1f;
                     case_slot->bindings[0].lfo_depth_source = source;
@@ -16059,34 +16057,24 @@ int main()
     // and bad CC numbers stay refused, and cc stays inadmissible as an LFO
     // depth/rate source there.
     {
-        auto make_master_editor_bank = [&](Synth::InstrumentBank& target, Synth::ModSource source, uint8_t cc_number) {
-            make_valid_bank(target);
-            Synth::EffectSlotBinding* const editor_slot =
-                enabled_effect(target, Synth::max_channels, 0, Synth::EffectType::delay);
-            editor_slot->bindings[0].num_inputs          = 1;
-            editor_slot->bindings[0].inputs[0].source    = source;
-            editor_slot->bindings[0].inputs[0].cc_number = cc_number;
-            editor_slot->bindings[0].inputs[0].op        = Synth::SourceOp::add;
-            editor_slot->bindings[0].inputs[0].scale     = 0.5f;
-        };
         static Synth::InstrumentBank bank;
-        make_master_editor_bank(bank, Synth::ModSource::mod_wheel, 0);
+        make_cc_input_bank(bank, Synth::max_channels, Synth::ModSource::mod_wheel, 0);
         TEST(Synth::validate_instrument_bank(&bank));
-        make_master_editor_bank(bank, Synth::ModSource::cc, 16);
+        make_cc_input_bank(bank, Synth::max_channels, Synth::ModSource::cc, 16);
         TEST(Synth::validate_instrument_bank(&bank));
-        make_master_editor_bank(bank, Synth::ModSource::cc, 31);
+        make_cc_input_bank(bank, Synth::max_channels, Synth::ModSource::cc, 31);
         TEST(Synth::validate_instrument_bank(&bank));
-        make_master_editor_bank(bank, Synth::ModSource::velocity, 0);
+        make_cc_input_bank(bank, Synth::max_channels, Synth::ModSource::velocity, 0);
         TEST(! Synth::validate_instrument_bank(&bank));
-        make_master_editor_bank(bank, Synth::ModSource::aftertouch, 0);
+        make_cc_input_bank(bank, Synth::max_channels, Synth::ModSource::aftertouch, 0);
         TEST(! Synth::validate_instrument_bank(&bank));
-        make_master_editor_bank(bank, Synth::ModSource::pressure_combine, 0);
+        make_cc_input_bank(bank, Synth::max_channels, Synth::ModSource::pressure_combine, 0);
         TEST(! Synth::validate_instrument_bank(&bank));
-        make_master_editor_bank(bank, Synth::ModSource::cc, 15);
+        make_cc_input_bank(bank, Synth::max_channels, Synth::ModSource::cc, 15);
         TEST(! Synth::validate_instrument_bank(&bank));
-        make_master_editor_bank(bank, Synth::ModSource::cc, 32);
+        make_cc_input_bank(bank, Synth::max_channels, Synth::ModSource::cc, 32);
         TEST(! Synth::validate_instrument_bank(&bank));
-        make_master_editor_bank(bank, Synth::ModSource::mod_wheel, 17); // non-CC, stale number
+        make_cc_input_bank(bank, Synth::max_channels, Synth::ModSource::mod_wheel, 17); // non-CC, stale number
         TEST(! Synth::validate_instrument_bank(&bank));
         // cc is not admissible as a master LFO depth/rate source (no number to carry).
         make_valid_bank(bank);
@@ -16249,10 +16237,10 @@ int main()
         TEST(chain.effects[0].bindings[0].num_inputs == 0);
     }
 
-    // T-M2-9: pre-M2 master compatibility (DM3 as amended): a bank with master
-    // effects but no routing decodes, validates and re-encodes byte-identically;
-    // an at-ceiling pre-M2 master pane gains the +1 MIDI node under M2 and must
-    // refuse cleanly, while a bank just below the ceiling keeps loading.
+    // T-M2-9: legacy master compatibility (DM3 as amended): legacy banks
+    // without master routing round-trip byte-identically.  A legacy master
+    // pane already at the node limit refuses cleanly because projection
+    // includes the MIDI node; a pane one node below the limit keeps loading.
     {
         static Synth::InstrumentEditorBank source;
         memset(&source, 0, sizeof(source));
@@ -16353,12 +16341,12 @@ int main()
     // and prev_value together (zero lag), the other leaf stays untouched, and
     // a non-mix controller returns false without a write.
     {
-        float                volume_value       = -1.0f;
-        float                volume_prev_value  = -1.0f;
-        float                panning_value      = -1.0f;
-        float                panning_prev_value = -1.0f;
-        const Synth::MixLeaf volume_leaf{ &volume_value, &volume_prev_value };
-        const Synth::MixLeaf panning_leaf{ &panning_value, &panning_prev_value };
+        float                     volume_value       = -1.0f;
+        float                     volume_prev_value  = -1.0f;
+        float                     panning_value      = -1.0f;
+        float                     panning_prev_value = -1.0f;
+        const Synth::ExternalLeaf volume_leaf{ &volume_value, &volume_prev_value };
+        const Synth::ExternalLeaf panning_leaf{ &panning_value, &panning_prev_value };
 
         TEST(Synth::write_mix_cc(7, 0, volume_leaf, panning_leaf));
         TEST(volume_value == 0.0f && volume_prev_value == 0.0f);
