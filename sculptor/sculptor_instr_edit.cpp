@@ -1054,11 +1054,23 @@ static constexpr uint32_t note_at_white(uint32_t wk)
     return 12u * (wk / 7u) + white_in_octave[wk % 7u];
 }
 
+// Standard 88-key piano range: A0 (MIDI 21) to C8 (MIDI 108), 52 white keys.
+static constexpr uint32_t keyboard_first_note = 21;
+static constexpr uint32_t keyboard_last_note  = 108;
+static constexpr uint32_t keyboard_white_count = 52;
+
+// Height of the keyboard child window: 8px report margin plus the key strip.
+static constexpr float keyboard_child_h = 80.0f;
+static constexpr float keyboard_key_h   = 72.0f;
+
+// Absolute white index of the first keyboard note; drawing offsets are relative to it.
+static constexpr uint32_t keyboard_white_base = white_index_of(keyboard_first_note);
+
 // Left edge of the key (white or black) that starts at `note`, relative to the
 // keyboard's origin; zone boundaries are drawn here.
 static float boundary_x_of(uint32_t note, float white_w, float black_w)
 {
-    float x = static_cast<float>(white_index_of(note)) * white_w;
+    float x = static_cast<float>(white_index_of(note) - keyboard_white_base) * white_w;
     if (is_black_note(note))
         x -= black_w * 0.5f;
     return x;
@@ -1651,7 +1663,7 @@ void Sculptor::SynthEditor::gui_channel_pane(uint32_t channel)
     // selected, so it runs before the zone-table early returns. The keyboard
     // stays available so notes sound while the chain is edited.
     if (show_effects_mode) {
-        float pane_h = ImGui::GetContentRegionAvail().y - 72.0f - ImGui::GetStyle().CellPadding.y -
+        float pane_h = ImGui::GetContentRegionAvail().y - keyboard_child_h - ImGui::GetStyle().CellPadding.y -
                        ImGui::GetStyle().ItemSpacing.y;
         ImGui::BeginChild("##synth_pane_ph",
                           ImVec2(0, pane_h < 0.0f ? 0.0f : pane_h),
@@ -1718,7 +1730,7 @@ void Sculptor::SynthEditor::gui_channel_pane(uint32_t channel)
     // item spacing before the keyboard child; otherwise the column overflows the
     // window into a scrollbar.
     float pane_h =
-        ImGui::GetContentRegionAvail().y - 72.0f - ImGui::GetStyle().CellPadding.y - ImGui::GetStyle().ItemSpacing.y;
+        ImGui::GetContentRegionAvail().y - keyboard_child_h - ImGui::GetStyle().CellPadding.y - ImGui::GetStyle().ItemSpacing.y;
     ImGui::BeginChild("##synth_pane_ph",
                       ImVec2(0, pane_h < 0.0f ? 0.0f : pane_h),
                       true,
@@ -2468,10 +2480,10 @@ void Sculptor::SynthEditor::do_osc_change_target_param(uint32_t node_idx, uint32
 
 void Sculptor::SynthEditor::gui_keyboard()
 {
-    // Zero window padding so the 72px child holds exactly the 8px report margin and the
-    // 64px key strip; default padding would overflow the content into a scrollbar.
+    // Zero window padding so the child holds exactly the 8px report margin and the
+    // key strip; default padding would overflow the content into a scrollbar.
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
-    ImGui::BeginChild("##synth_keyboard", ImVec2(0, 72), true);
+    ImGui::BeginChild("##synth_keyboard", ImVec2(0, keyboard_child_h), true);
     ImGui::PopStyleVar();
 
     const Synth::InstrumentBank& bank           = instr_bank.bank;
@@ -2479,13 +2491,23 @@ void Sculptor::SynthEditor::gui_keyboard()
     const uint32_t               channel        = channel_target ? selected_target : 0;
     const bool                   active         = channel_target && bank.channel_enabled[channel];
 
-    const ImVec2 top     = ImGui::GetCursorScreenPos();
-    const float  width   = ImGui::GetContentRegionAvail().x;
-    const float  height  = 64.0f;
-    const ImVec2 origin  = ImVec2(top.x, top.y + 8.0f);
-    const float  white_w = width / 75.0f; // 75 white keys across the full MIDI range
-    const float  black_w = white_w * 0.6f;
-    const float  black_h = height * 0.6f;
+    const ImVec2 top    = ImGui::GetCursorScreenPos();
+    const float  width  = ImGui::GetContentRegionAvail().x;
+    const float  height = keyboard_key_h;
+    // A white key is about six times longer than it is wide on a real piano; cap the
+    // width so a wide window keeps that proportion instead of stretching the keyboard.
+    // The centered keyboard then leaves the background visible on both ends.
+    float white_w = width / static_cast<float>(keyboard_white_count);
+    if (white_w > height / 6.0f)
+        white_w = height / 6.0f;
+    const float keyboard_w = white_w * static_cast<float>(keyboard_white_count);
+    const ImVec2 origin   = ImVec2(top.x + (width - keyboard_w) * 0.5f, top.y + 8.0f);
+    const float  black_w  = white_w * 0.6f;
+    const float  black_h  = height * 0.6f;
+    // Keys end in a slightly rounded bottom edge; the strips and highlights below
+    // reuse the same corner treatment so overlays do not square it off.
+    const float key_rounding = 2.0f;
+    const ImDrawFlags bottom_rounding = ImDrawFlags_RoundCornersBottom;
 
     // Fixed piano colors: a dark theme would otherwise invert the keys.
     ImDrawList* const draw            = ImGui::GetWindowDrawList();
@@ -2494,18 +2516,29 @@ void Sculptor::SynthEditor::gui_keyboard()
     const uint32_t    color_black_key = IM_COL32(35, 35, 35, 255);
     const uint32_t    color_held      = IM_COL32(90, 160, 255, 255);
 
-    for (uint32_t wk = 0; wk < 75; wk++) {
+    for (uint32_t wk = 0; wk < keyboard_white_count; wk++) {
         const float x = origin.x + static_cast<float>(wk) * white_w;
-        draw->AddRectFilled(ImVec2(x, origin.y), ImVec2(x + white_w, origin.y + height), color_white);
-        draw->AddLine(ImVec2(x, origin.y), ImVec2(x, origin.y + height), color_line);
+        draw->AddRectFilled(ImVec2(x, origin.y),
+                            ImVec2(x + white_w, origin.y + height),
+                            color_white,
+                            key_rounding,
+                            bottom_rounding);
+        // Stop the divider short of the rounded bottom so it does not cut into the notch.
+        draw->AddLine(ImVec2(x, origin.y), ImVec2(x, origin.y + height - key_rounding), color_line);
     }
-    draw->AddLine(ImVec2(origin.x + width, origin.y), ImVec2(origin.x + width, origin.y + height), color_line);
+    draw->AddLine(ImVec2(origin.x + keyboard_w, origin.y),
+                  ImVec2(origin.x + keyboard_w, origin.y + height - key_rounding),
+                  color_line);
 
-    for (uint32_t note = 0; note < 128; note++) {
+    for (uint32_t note = keyboard_first_note; note <= keyboard_last_note; note++) {
         if (! is_black_note(note))
             continue;
         const float x = origin.x + boundary_x_of(note, white_w, black_w);
-        draw->AddRectFilled(ImVec2(x, origin.y), ImVec2(x + black_w, origin.y + black_h), color_black_key);
+        draw->AddRectFilled(ImVec2(x, origin.y),
+                            ImVec2(x + black_w, origin.y + black_h),
+                            color_black_key,
+                            key_rounding,
+                            bottom_rounding);
     }
 
     // Zone boundaries: a separator at each zone's first note, colored by zone index.
@@ -2518,7 +2551,7 @@ void Sculptor::SynthEditor::gui_keyboard()
         const Synth::Zone* const zones = bank.channel_zones[channel];
         // Zone strips: the first zone keeps the default key color; later zones tint
         // the bottom of every key they cover, white and black alike.
-        for (uint32_t note = 0; note < 128; note++) {
+        for (uint32_t note = keyboard_first_note; note <= keyboard_last_note; note++) {
             const int32_t zone = static_cast<int32_t>(Synth::zone_entry_at(zones, note));
             if (zone <= 0)
                 continue;
@@ -2526,24 +2559,36 @@ void Sculptor::SynthEditor::gui_keyboard()
             if (is_black_note(note))
                 draw->AddRectFilled(ImVec2(x, origin.y + black_h - 8.0f),
                                     ImVec2(x + black_w, origin.y + black_h),
-                                    zone_palette[zone % 8]);
+                                    zone_palette[zone % 8],
+                                    key_rounding,
+                                    bottom_rounding);
             else
                 draw->AddRectFilled(ImVec2(x, origin.y + height - 8.0f),
                                     ImVec2(x + white_w, origin.y + height),
-                                    zone_palette[zone % 8]);
+                                    zone_palette[zone % 8],
+                                    key_rounding,
+                                    bottom_rounding);
         }
         // Selection dimming: keys outside the selected zone lose contrast so the
         // selected zone reads at a glance (white keys darken, black keys lighten).
         const int32_t selected = selected_zone[channel];
         if (zone_count(bank, channel) > 1 && selected >= 0) {
-            for (uint32_t note = 0; note < 128; note++) {
+            for (uint32_t note = keyboard_first_note; note <= keyboard_last_note; note++) {
                 if (static_cast<int32_t>(Synth::zone_entry_at(zones, note)) == selected)
                     continue;
                 const float x = origin.x + boundary_x_of(note, white_w, black_w);
                 if (is_black_note(note))
-                    draw->AddRectFilled(ImVec2(x, origin.y), ImVec2(x + black_w, origin.y + black_h), 0x40ffffff);
+                    draw->AddRectFilled(ImVec2(x, origin.y),
+                                        ImVec2(x + black_w, origin.y + black_h),
+                                        0x40ffffff,
+                                        key_rounding,
+                                        bottom_rounding);
                 else
-                    draw->AddRectFilled(ImVec2(x, origin.y), ImVec2(x + white_w, origin.y + height), 0x59000000);
+                    draw->AddRectFilled(ImVec2(x, origin.y),
+                                        ImVec2(x + white_w, origin.y + height),
+                                        0x59000000,
+                                        key_rounding,
+                                        bottom_rounding);
             }
         }
 
@@ -2561,17 +2606,21 @@ void Sculptor::SynthEditor::gui_keyboard()
         const float    x     = origin.x + boundary_x_of(note, white_w, black_w);
         const float    key_w = is_black_note(note) ? black_w : white_w;
         const float    key_h = is_black_note(note) ? black_h : height;
-        draw->AddRectFilled(ImVec2(x, origin.y), ImVec2(x + key_w, origin.y + key_h), color_held);
+        draw->AddRectFilled(ImVec2(x, origin.y),
+                            ImVec2(x + key_w, origin.y + key_h),
+                            color_held,
+                            key_rounding,
+                            bottom_rounding);
     }
 
     // Hit test: black keys are on top, then white keys.
     const ImGuiIO& io    = ImGui::GetIO();
     const ImVec2   mouse = io.MousePos;
     const bool     over =
-        mouse.x >= origin.x && mouse.x < origin.x + width && mouse.y >= origin.y && mouse.y < origin.y + height;
+        mouse.x >= origin.x && mouse.x < origin.x + keyboard_w && mouse.y >= origin.y && mouse.y < origin.y + height;
     int32_t hit = -1;
     if (over) {
-        for (uint32_t note = 0; note < 128 && hit < 0; note++) {
+        for (uint32_t note = keyboard_first_note; note <= keyboard_last_note && hit < 0; note++) {
             if (! is_black_note(note))
                 continue;
             const float x = origin.x + boundary_x_of(note, white_w, black_w);
@@ -2580,8 +2629,8 @@ void Sculptor::SynthEditor::gui_keyboard()
         }
         if (hit < 0) {
             const uint32_t wk = static_cast<uint32_t>((mouse.x - origin.x) / white_w);
-            if (wk < 75)
-                hit = static_cast<int32_t>(note_at_white(wk));
+            if (wk < keyboard_white_count)
+                hit = static_cast<int32_t>(note_at_white(keyboard_white_base + wk));
         }
     }
 
