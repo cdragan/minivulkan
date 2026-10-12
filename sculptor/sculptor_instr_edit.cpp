@@ -200,7 +200,7 @@ static_assert(sizeof(Synth::BankUpdateQueue) <= 2 * sizeof(Synth::InstrumentBank
 Synth::InstrumentEditorBank candidate;
 
 // One clipboard document: copy encodes into it, paste decodes out of it.
-static char                         zone_clipboard_text[64 * 1024];
+static char                         zone_clipboard_text[128 * 1024];
 static Synth::EffectsDocument       effects_clipboard_document;
 static Synth::Instrument            clipboard_decoded_instrument;
 static Synth::EnvelopeDescriptor    clipboard_decoded_envelopes[Synth::instrument_max_envelopes];
@@ -216,7 +216,7 @@ static_assert(sizeof(undo_buf) <= undo_depth * (sizeof(Synth::InstrumentEditorBa
 constexpr size_t editor_resident_state_bytes =
     sizeof(effect_publish_failure) + 2 * sizeof(Synth::InstrumentEditorBank) + 3 * sizeof(Synth::EffectsDocument) +
     (undo_depth + 8) * sizeof(Synth::InstrumentEditorBank) + 3 * sizeof(Synth::InstrumentBank) + sizeof(bank_queue) +
-    1212416 +                                                  // JSON text, tokens and keys
+    Synth::bank_json_parser_bytes +                            // JSON text, tokens and keys
     sizeof(Sculptor::SynthEditor) +                            // includes the browser's entry/category arrays
     Synth::library_max_records * sizeof(Synth::LibraryEntry) + // library rewrite index
     64 * 1024 +                                                // library record-copy chunk
@@ -227,8 +227,7 @@ constexpr size_t editor_resident_state_bytes =
     sizeof(serialization_mapping) + sizeof(clipboard_decoded_layout) + sizeof(osc_canvas_zone_channel) +
     sizeof(osc_canvas_zone_note) + sizeof(Synth::Instrument) + // codec document model
     Synth::instrument_max_envelopes * sizeof(Synth::EnvelopeDescriptor) +
-    Synth::instrument_max_lfos * sizeof(Synth::LFODescriptor) + Synth::num_mod_targets * sizeof(bool) +
-    2 * sizeof(uint32_t) +
+    Synth::instrument_max_lfos * sizeof(Synth::LFODescriptor) + 2 * sizeof(uint32_t) +
     Synth::instrument_graph_layout_capacity *
         (sizeof(Synth::InstrumentGraphLayout) + 2 * sizeof(Synth::GraphNodeLayout)) +
     (Synth::instrument_max_envelopes + Synth::instrument_max_lfos) * sizeof(uint16_t) + Synth::max_name_len +
@@ -237,12 +236,13 @@ constexpr size_t editor_resident_state_bytes =
         (sizeof(Synth::InstrumentGraphLayout) + sizeof(uint8_t) * (1 + Synth::num_mod_targets) + 2) +
     Synth::instrument_graph_layout_capacity *
         (sizeof(Synth::InstrumentGraphLayout) + sizeof(Synth::GraphNodeLayout) + sizeof(void*)) +
-    2 * 64 * 1024 + 2 * sizeof(Synth::Instrument) +
+    2 * 128 * 1024 + 2 * sizeof(Synth::Instrument) +
     2 * Synth::instrument_max_envelopes * sizeof(Synth::EnvelopeDescriptor) +
     2 * Synth::instrument_max_lfos * sizeof(Synth::LFODescriptor) +
     4 * Synth::instrument_graph_layout_capacity * sizeof(Synth::InstrumentGraphLayout) +
     4096; // remaining editor scalar flags, constants and alignment
-static_assert(editor_resident_state_bytes <= 16 * 1024 * 1024);
+static_assert(editor_resident_state_bytes <=
+              24 * 1024 * 1024); // per-bank driver: TargetBinding (40 bytes) x 9 targets x 7 layers
 
 // Synth info panel data. The declaration in sculptor_instr_edit.h describes
 // what the panel shows; the synth runtime only exposes raw data.
@@ -396,14 +396,19 @@ void Sculptor::SynthEditor::osc_canvas_menu_entry(void* user_data)
 }
 
 static bool fx_cc_removal_refused(uint32_t chain, uint32_t cc_number); // defined beside the fx menu
+
 // Draws the shared Add/Remove CC submenus for a pane's MIDI node menu. The
 // mask is the pane's view of the per-channel registry and refusal_idx is the
 // chain/channel index the removal refusal checks; the gesture is reported
 // through the out-params so each caller maps it onto its own canvas command
 // variables.
-static void draw_cc_submenus(uint16_t mask, uint32_t refusal_idx, bool* out_add, bool* out_remove, uint32_t* out_cc_number)
+static void draw_cc_submenus(uint16_t  mask,
+                             uint32_t  refusal_idx,
+                             bool*     out_add,
+                             bool*     out_remove,
+                             uint32_t* out_cc_number)
 {
-    *out_add = false;
+    *out_add    = false;
     *out_remove = false;
 
     if (ImGui::BeginMenu("Add CC")) {
@@ -456,7 +461,7 @@ static void draw_cc_submenus(uint16_t mask, uint32_t refusal_idx, bool* out_add,
 }
 
 // Node context menu: a parameter node gains a Change Target submenu of the
-// five connectable targets (the target re-key; free-text renaming lives in
+// all mod targets (the target re-key; free-text renaming lives in
 // the title editor).  A derived parameter (uid == 0) cannot change target: the
 // generator bindings would re-derive the old parameter.
 static bool osc_node_menu(void* user_data, uint32_t node_idx)
@@ -466,26 +471,26 @@ static bool osc_node_menu(void* user_data, uint32_t node_idx)
         return false;
     }
     if (node_idx == osc_mapping.input_node) {
-        // The Inputs node's menu authors the channel's added-CC output
+        // The MIDI Inputs node's menu authors the channel's added-CC output
         // dots, the same registry mask the fx pane's MIDI node uses.  An
         // added CC is one removable dot labeled with its CC number pair;
         // a removal refuses while anything in the channel still wires
         // the CC.
-            const uint16_t mask = instr_bank.added_cc_mask[osc_mapping.channel];
+        const uint16_t mask = instr_bank.added_cc_mask[osc_mapping.channel];
 
-            bool add_cc = false;
-            bool remove_cc = false;
-            uint32_t cc_number = 0;
-            draw_cc_submenus(mask, osc_mapping.channel, &add_cc, &remove_cc, &cc_number);
-            if (add_cc) {
-                osc_canvas_command = osc_cmd_add_cc;
-                osc_canvas_cc      = cc_number;
-            }
-            else if (remove_cc) {
-                osc_canvas_command = osc_cmd_remove_cc;
-                osc_canvas_cc      = cc_number;
-            }
-            return true;
+        bool     add_cc    = false;
+        bool     remove_cc = false;
+        uint32_t cc_number = 0;
+        draw_cc_submenus(mask, osc_mapping.channel, &add_cc, &remove_cc, &cc_number);
+        if (add_cc) {
+            osc_canvas_command = osc_cmd_add_cc;
+            osc_canvas_cc      = cc_number;
+        }
+        else if (remove_cc) {
+            osc_canvas_command = osc_cmd_remove_cc;
+            osc_canvas_cc      = cc_number;
+        }
+        return true;
     }
     for (uint32_t p = 0; p < osc_mapping.param_count; ++p) {
         if (osc_mapping.params[p].node_idx != node_idx) {
@@ -494,7 +499,7 @@ static bool osc_node_menu(void* user_data, uint32_t node_idx)
         const Sculptor::ParamEntry& param = osc_mapping.params[p];
         ImGui::BeginDisabled(param.uid == 0);
         if (ImGui::BeginMenu("Change Target")) {
-            for (uint32_t target = 0; target < 5; ++target) {
+            for (uint32_t target = 0; target < Synth::num_mod_targets; ++target) {
                 if (ImGui::MenuItem(Sculptor::param_target_names[target], nullptr, false, target != param.target)) {
                     osc_canvas_retarget_node   = node_idx;
                     osc_canvas_retarget_target = target;
@@ -520,10 +525,10 @@ static bool fx_node_delete_veto(void* user_data, uint32_t node_idx)
 
 // Slot display filter for the effects graph: a parameter with no modulator
 // collapses to its base-value row, whose inline dot (connectable in the
-// projection) stands in for the row's first free modulator input. The
+// projection) stands in for the row's first free modulator input.  The
 // filter hides the param's modulator rows only; slot indices, slots and
 // connections stay untouched, so snapshots, undo bytes and every
-// slot-arithmetic decoder are unaffected. Visibility derives from live
+// slot-arithmetic decoder are unaffected.  Visibility derives from live
 // connection state at render time (Sculptor::fx_param_is_collapsed),
 // never stored state.
 static bool fx_slot_hidden(void* user_data, const Sculptor::Graph& graph, uint32_t node_idx, uint32_t slot_idx)
@@ -708,21 +713,21 @@ static bool fx_node_menu(void* user_data, uint32_t node_idx)
         // The MIDI node's menu authors the chain's added-CC output dots.  An
         // added CC is one removable dot labeled with its CC number pair; a
         // removal refuses while the chain still wires the CC.
-            const uint16_t mask = instr_bank.added_cc_mask[fx_mapping.chain];
+        const uint16_t mask = instr_bank.added_cc_mask[fx_mapping.chain];
 
-            bool add_cc = false;
-            bool remove_cc = false;
-            uint32_t cc_number = 0;
-            draw_cc_submenus(mask, fx_mapping.chain, &add_cc, &remove_cc, &cc_number);
-            if (add_cc) {
-                fx_canvas_command = fx_cmd_add_cc;
-                fx_canvas_cc      = cc_number;
-            }
-            else if (remove_cc) {
-                fx_canvas_command = fx_cmd_remove_cc;
-                fx_canvas_cc      = cc_number;
-            }
-            return true;
+        bool     add_cc    = false;
+        bool     remove_cc = false;
+        uint32_t cc_number = 0;
+        draw_cc_submenus(mask, fx_mapping.chain, &add_cc, &remove_cc, &cc_number);
+        if (add_cc) {
+            fx_canvas_command = fx_cmd_add_cc;
+            fx_canvas_cc      = cc_number;
+        }
+        else if (remove_cc) {
+            fx_canvas_command = fx_cmd_remove_cc;
+            fx_canvas_cc      = cc_number;
+        }
+        return true;
     }
 
     const int32_t slot = Sculptor::fx_effect_slot_of(fx_mapping, node_idx);
@@ -917,17 +922,15 @@ static bool sync_osc_graph_layout(Synth::InstrumentEditorBank* bank,
         // Parameter nodes carry their own kind-3 record; a record-less
         // (derived) parameter that the user moves gains one - seeded from
         // its live wiring, like a detach - so the move survives
-        // re-projection.  Refused while an earlier-enumerated same-target
-        // derived parameter is still record-less: the new record would
-        // attach to that sibling positionally at re-projection and hijack
-        // its node, so synchronization refuses the candidate.
+        // re-projection (records re-attach to their own group by tuple, or
+        // materialize free-standing).
         for (uint32_t i = 0; i < mapping.param_count; ++i) {
             const Sculptor::ParamEntry& param = mapping.params[i];
             if (param.node_idx != node) {
                 continue;
             }
             int32_t record_idx = Sculptor::find_record(*bank, channel, zone, 3, param.target, param.uid);
-            if (record_idx < 0 && ! Sculptor::param_has_recordless_predecessor(mapping, i)) {
+            if (record_idx < 0) {
                 if (! Sculptor::detach_osc_graph_parameter(bank, osc_graph, &mapping, channel, zone, i)) {
                     return false;
                 }
@@ -941,16 +944,12 @@ static bool sync_osc_graph_layout(Synth::InstrumentEditorBank* bank,
                 // slot by key instead of trusting the pre-refresh index.
                 record_idx = Sculptor::find_record(*bank, channel, zone, 3, param.target, param.uid);
             }
-            else if (record_idx < 0) {
-                Sculptor::notify_error("Synth: the earlier parameter of this target must be renamed first");
-                return false;
-            }
             if (record_idx >= 0) {
                 write_record_position(bank, record_idx, node_ref);
             }
         }
     }
-    uint32_t title_ordinals[5] = {};
+    uint32_t title_ordinals[Synth::num_mod_targets] = {};
     for (uint32_t index = 0; index < mapping.param_count; ++index) {
         const Sculptor::ParamEntry& param = mapping.params[index];
         if (param.node_idx == Sculptor::pool_no_slot || ! osc_graph.node_occupied(param.node_idx))
@@ -1260,8 +1259,8 @@ static constexpr uint32_t note_at_white(uint32_t wk)
 }
 
 // Standard 88-key piano range: A0 (MIDI 21) to C8 (MIDI 108), 52 white keys.
-static constexpr uint32_t keyboard_first_note = 21;
-static constexpr uint32_t keyboard_last_note  = 108;
+static constexpr uint32_t keyboard_first_note  = 21;
+static constexpr uint32_t keyboard_last_note   = 108;
 static constexpr uint32_t keyboard_white_count = 52;
 
 // Height of the keyboard child window: 8px report margin plus the key strip.
@@ -1926,8 +1925,8 @@ void Sculptor::SynthEditor::gui_channel_pane(uint32_t channel)
     // the layout adds below the placeholder: the cell padding under the row, plus the
     // item spacing before the keyboard child; otherwise the column overflows the
     // window into a scrollbar.
-    float pane_h =
-        ImGui::GetContentRegionAvail().y - keyboard_child_h - ImGui::GetStyle().CellPadding.y - ImGui::GetStyle().ItemSpacing.y;
+    float pane_h = ImGui::GetContentRegionAvail().y - keyboard_child_h - ImGui::GetStyle().CellPadding.y -
+                   ImGui::GetStyle().ItemSpacing.y;
     ImGui::BeginChild("##synth_pane_ph",
                       ImVec2(0, pane_h < 0.0f ? 0.0f : pane_h),
                       true,
@@ -2427,7 +2426,11 @@ void Sculptor::SynthEditor::do_fx_add_lfo()
 // wired channel-wide (the fx chain or any zone's osc routing; the master
 // chain keeps the fx-chain-only guard) - unwiring first keeps the commit
 // atomic instead of cascading a delete through the bindings.
-void Sculptor::SynthEditor::edit_added_cc_mask(uint32_t mask_idx, uint32_t cc_number, bool add, uint32_t undo_tag, bool* reproject)
+void Sculptor::SynthEditor::edit_added_cc_mask(uint32_t mask_idx,
+                                               uint32_t cc_number,
+                                               bool     add,
+                                               uint32_t undo_tag,
+                                               bool*    reproject)
 {
     if (! Synth::cc_is_assignable(cc_number)) {
         return;
@@ -2531,8 +2534,8 @@ void Sculptor::SynthEditor::do_osc_add_oscillator()
         return;
     }
 
-    const uint32_t new_layer     = instrument.layer_count;
-    const uint32_t source_layer  = Sculptor::osc_inherit_source_layer(instrument);
+    const uint32_t new_layer    = instrument.layer_count;
+    const uint32_t source_layer = Sculptor::osc_inherit_source_layer(instrument);
     if (source_layer != Sculptor::pool_no_slot) {
         // A new oscillator inherits every parameter value of the last
         // enabled oscillator: waveforms, mode, mod ratio, pitch offset
@@ -2546,7 +2549,7 @@ void Sculptor::SynthEditor::do_osc_add_oscillator()
         // Waveform A cannot be off, so a fresh layer starts on sine.
         instrument.layers[new_layer].osc_type[0] = Synth::WaveType::sine_wave;
     }
-    instrument.layer_count                   = static_cast<uint8_t>(new_layer + 1);
+    instrument.layer_count = static_cast<uint8_t>(new_layer + 1);
 
     // The new layer's node lands at the menu position via its layout record.
     Synth::GraphNodeLayout record = {};
@@ -2634,10 +2637,12 @@ void Sculptor::SynthEditor::do_osc_add_generator(bool is_env)
         osc_graph_reproject = true;
 }
 
-// Canvas menu "Add Parameter": a free-standing Volume parameter node at
-// the menu position, via a kind-3 record; the re-projection builds the node.
+// Canvas menu "Add Parameter": a free-standing parameter node at the menu
+// position, default target volume; Change Target re-keys it.  Multi-instance:
+// any number per target.
 void Sculptor::SynthEditor::do_osc_add_parameter()
 {
+    const uint32_t target         = Synth::mod_volume;
     const uint32_t channel        = osc_graph_zone_channel;
     const uint32_t zone           = osc_graph_zone_index;
     candidate                     = instr_bank;
@@ -2648,7 +2653,7 @@ void Sculptor::SynthEditor::do_osc_add_parameter()
     // The live mapping mirrors the committed bank, and the new record is
     // free-standing, so the projection adds at most one parameter node.
     char add_error[128];
-    if (osc_graph_projected && Sculptor::osc_add_parameter_refused(osc_mapping, 0, add_error, sizeof(add_error))) {
+    if (osc_graph_projected && Sculptor::osc_add_parameter_refused(osc_mapping, target, add_error, sizeof(add_error))) {
         Sculptor::notify_error("%s", add_error);
         return;
     }
@@ -2667,8 +2672,8 @@ void Sculptor::SynthEditor::do_osc_add_parameter()
     Synth::GraphNodeLayout record = {};
     record.channel                = static_cast<uint8_t>(channel);
     record.zone                   = static_cast<uint8_t>(zone);
+    record.index                  = static_cast<uint8_t>(target);
     record.kind                   = 3;
-    record.index                  = 0; // volume, projection order
     record.param_slot             = Synth::graph_record_param_free;
     const vmath::vec2 popup_pos   = osc_graph.canvas_popup_pos();
     record.x                      = popup_pos.x;
@@ -2683,10 +2688,10 @@ void Sculptor::SynthEditor::do_osc_add_parameter()
 }
 
 // Node menu "Change Target": retargets the parameter - the kind-3 record
-// re-keys, the value wires shift onto the new target's oscillator rows, and
-// the source rows adopt the destination's routing. The rewrite is eventless,
-// so the bindings and the compiled instrument refresh before the commit.
-// Names are user-owned: the node keeps its title across the retarget.
+// re-keys and the value wires shift onto the new target's oscillator rows
+// (source rows are the parameter's own state and stay put).  The rewrite is
+// eventless, so the bindings and the compiled instrument refresh before the
+// commit.  Names are user-owned: the node keeps its title across the retarget.
 void Sculptor::SynthEditor::do_osc_change_target_param(uint32_t node_idx, uint32_t new_target)
 {
     if (! osc_graph_projected || node_idx >= Sculptor::max_nodes || ! osc_graph.node_occupied(node_idx)) {
@@ -2707,20 +2712,14 @@ void Sculptor::SynthEditor::do_osc_change_target_param(uint32_t node_idx, uint32
         // A derived parameter cannot change target: the generator bindings
         // would re-derive the old parameter on the next projection.
         Sculptor::notify_error("Synth: a derived parameter cannot change target");
-        return;
-    }
-    if (new_target >= 5) {
-        Sculptor::notify_error("Synth: invalid parameter target");
+        if (new_target >= Synth::num_mod_targets) {
+            Sculptor::notify_error("Synth: invalid parameter target");
+            return;
+        }
         return;
     }
     if (new_target == param.target) {
         Sculptor::notify_error("Synth: the parameter already has that target");
-        return;
-    }
-    if (Sculptor::param_target_has_recordless_derived(osc_mapping, new_target)) {
-        // A record re-keyed into the target would attach to its derived
-        // parameter positionally at re-projection and hijack that sibling.
-        Sculptor::notify_error("Synth: cannot change target: it has a derived parameter - rename that one first");
         return;
     }
     candidate = instr_bank;
@@ -2776,13 +2775,13 @@ void Sculptor::SynthEditor::gui_keyboard()
     float white_w = width / static_cast<float>(keyboard_white_count);
     if (white_w > height / 4.0f)
         white_w = height / 4.0f;
-    const float keyboard_w = white_w * static_cast<float>(keyboard_white_count);
-    const ImVec2 origin   = ImVec2(top.x + (width - keyboard_w) * 0.5f, top.y + 8.0f);
-    const float  black_w  = white_w * 0.6f;
-    const float  black_h  = height * 0.6f;
+    const float  keyboard_w = white_w * static_cast<float>(keyboard_white_count);
+    const ImVec2 origin     = ImVec2(top.x + (width - keyboard_w) * 0.5f, top.y + 8.0f);
+    const float  black_w    = white_w * 0.6f;
+    const float  black_h    = height * 0.6f;
     // Keys end in a slightly rounded bottom edge; the strips and highlights below
     // reuse the same corner treatment so overlays do not square it off.
-    const float key_rounding = 2.0f;
+    const float       key_rounding    = 2.0f;
     const ImDrawFlags bottom_rounding = ImDrawFlags_RoundCornersBottom;
 
     // Fixed piano colors: a dark theme would otherwise invert the keys.

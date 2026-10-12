@@ -98,10 +98,8 @@ using Synth::EffectParamBinding;
 using Synth::EffectSlotBinding;
 using Synth::EffectType;
 using Synth::EnvelopeDescriptor;
-using Synth::InputRouting;
 using Synth::Instrument;
 using Synth::InstrumentBank;
-using Synth::LayerGen;
 using Synth::ModInput;
 using Synth::ModSource;
 using Synth::ModTarget;
@@ -109,6 +107,7 @@ using Synth::Oscillator;
 using Synth::OscMode;
 using Synth::SourceOp;
 using Synth::SourceParam;
+using Synth::TargetBinding;
 using Synth::WaveType;
 using enum Synth::ModTarget;
 using enum Synth::OscMode;
@@ -157,8 +156,22 @@ enum OscParamRole : uint32_t {
     osc_panning_dest,
     osc_panning_env,
     osc_panning_lfo,
+    osc_duty0_dest,
+    osc_duty0_env,
+    osc_duty0_lfo,
+    osc_duty1_dest,
+    osc_duty1_env,
+    osc_duty1_lfo,
+    osc_mix_dest,
+    osc_mix_env,
+    osc_mix_lfo,
+    osc_fm_index_dest,
+    osc_fm_index_env,
+    osc_fm_index_lfo,
     num_osc_roles
 };
+
+static_assert(num_osc_roles == 27);
 
 constexpr uint32_t channel_block_base = 1;
 constexpr uint32_t voice_block_base   = channel_block_base + Synth::max_channels * num_channel_roles;
@@ -188,8 +201,7 @@ constexpr uint32_t osc_param(uint32_t osc, uint32_t role)
 
 // Modulation targets which get graph nodes.  Each builds a node triple per layer oscillator;
 // dest_role is the triple's first role, and the env and lfo generator roles are dest_role + 1
-// and dest_role + 2.  Targets absent here are unmodulated constants read straight from the
-// target's routing base_value.
+// and dest_role + 2.
 struct ModTargetNode {
     ModTarget target;
     uint32_t  dest_role;
@@ -201,6 +213,10 @@ constexpr ModTargetNode mod_target_nodes[] = {
     { mod_lowpass_cutoff, osc_lowpass_dest },
     { mod_highpass_cutoff, osc_highpass_dest },
     { mod_panning, osc_panning_dest },
+    { mod_duty0, osc_duty0_dest },
+    { mod_duty1, osc_duty1_dest },
+    { mod_osc_mix, osc_mix_dest },
+    { mod_fm_index, osc_fm_index_dest },
 };
 
 Synth::Parameter       parameters[total_params];
@@ -267,6 +283,8 @@ struct Oscillator {
     uint32_t fir_memory_offs;
     uint32_t taps_offs;
 };
+
+static_assert(sizeof(Oscillator) == 60);
 
 constexpr uint32_t max_param_range = sizeof(Oscillator) * 256;
 
@@ -411,11 +429,7 @@ bool create_shaders()
         };
 
         static uint32_t spec_data[] = {
-            Synth::rt_step_samples,
-            0,
-            num_fir_taps,
-            Synth::effect_delay_max_samples,
-            Synth::effect_chorus_max_samples,
+            Synth::rt_step_samples,  0, num_fir_taps, Synth::effect_delay_max_samples, Synth::effect_chorus_max_samples,
             Synth::rt_sampling_rate,
         };
         spec_data[1] = vk11_props.subgroupSize;
@@ -466,8 +480,7 @@ struct RunningOscillator {
     float old_panning; // Previous panning
 
     // Resolved values written by update_modulation each step, read by the
-    // shader-param fill.  Each comes from its bound parameter or, when the
-    // target is unbound, the instrument's base value.
+    // shader-param fill.
     float volume;   // Current volume
     float panning;  // Current panning
     float pitch;    // Pitch adjustment in semitones
@@ -516,19 +529,13 @@ struct FirSlot {
 
 FirSlot fir_slots[Synth::max_oscillators];
 
-// Envelope desc id driving a target on a layer.  0 means no envelope.
-static uint16_t layer_envelope_id(const Instrument& instrument, ModTarget target, uint32_t layer_idx)
-{
-    return instrument.layers[layer_idx].gen[target].envelope_desc_id;
-}
-
 // A layer has a filter iff a cutoff target has an envelope or a nonzero base.
 static bool osc_has_filter(const Instrument& instrument, uint32_t layer_idx)
 {
-    return layer_envelope_id(instrument, mod_lowpass_cutoff, layer_idx) ||
-           layer_envelope_id(instrument, mod_highpass_cutoff, layer_idx) ||
-           instrument.routing[mod_lowpass_cutoff].base_value != 0.0f ||
-           instrument.routing[mod_highpass_cutoff].base_value != 0.0f;
+    const Oscillator& layer = instrument.layers[layer_idx];
+    return layer.targets[mod_lowpass_cutoff].envelope_desc_id || layer.targets[mod_highpass_cutoff].envelope_desc_id ||
+           layer.targets[mod_lowpass_cutoff].base_value != 0.0f ||
+           layer.targets[mod_highpass_cutoff].base_value != 0.0f;
 }
 
 static void init_fir()
@@ -1101,8 +1108,7 @@ static void configure_target_modulation(const Instrument& instrument,
                                         uint32_t          voice_idx,
                                         uint32_t          layer_idx)
 {
-    const LayerGen&     gen     = instrument.layers[layer_idx].gen[target];
-    const InputRouting& routing = instrument.routing[target];
+    const TargetBinding& binding = instrument.layers[layer_idx].targets[target];
 
     const uint32_t env_node = osc_param(osc_slot, dest_role + 1);
     const uint32_t lfo_node = osc_param(osc_slot, dest_role + 2);
@@ -1111,9 +1117,9 @@ static void configure_target_modulation(const Instrument& instrument,
     // envelope leaves it kind external (unreferenced, value 0), so it contributes no source.
     param_descs[env_node] = {};
     parameters[env_node]  = {};
-    if (gen.envelope_desc_id) {
+    if (binding.envelope_desc_id) {
         param_descs[env_node].kind         = Synth::ParamKind::envelope;
-        param_descs[env_node].envelope     = synth_bank.envelopes.entries[gen.envelope_desc_id - 1];
+        param_descs[env_node].envelope     = synth_bank.envelopes.entries[binding.envelope_desc_id - 1];
         parameters[env_node].sustain_voice = static_cast<uint16_t>(voice_idx);
     }
 
@@ -1121,32 +1127,32 @@ static void configure_target_modulation(const Instrument& instrument,
     // an LFO, otherwise it stays kind external (unreferenced, since configure_plain gets 0 below).
     param_descs[lfo_node] = {};
     parameters[lfo_node]  = {};
-    if (gen.lfo_desc_id) {
+    if (binding.lfo_desc_id) {
         Synth::configure_lfo(&param_descs[lfo_node],
-                             synth_bank.lfos.entries[gen.lfo_desc_id - 1],
-                             gen.lfo_op,
-                             gen.lfo_depth,
-                             static_cast<uint16_t>(resolve_source(gen.lfo_depth_source, 0, channel, voice_idx)),
-                             static_cast<uint16_t>(resolve_source(gen.lfo_rate_source, 0, channel, voice_idx)),
-                             gen.lfo_rate_scale_ms);
+                             synth_bank.lfos.entries[binding.lfo_desc_id - 1],
+                             binding.lfo_op,
+                             binding.lfo_depth,
+                             static_cast<uint16_t>(resolve_source(binding.lfo_depth_source, 0, channel, voice_idx)),
+                             static_cast<uint16_t>(resolve_source(binding.lfo_rate_source, 0, channel, voice_idx)),
+                             binding.lfo_rate_scale_ms);
     }
 
     // Resolve the target's routed input sources to concrete param ids.
     Synth::SourceParam sources[Synth::max_mod_inputs];
-    for (uint32_t input_idx = 0; input_idx < routing.num_inputs; input_idx++) {
-        const ModInput& input = routing.inputs[input_idx];
+    for (uint32_t input_idx = 0; input_idx < binding.num_inputs; input_idx++) {
+        const ModInput& input = binding.inputs[input_idx];
         sources[input_idx] = { static_cast<uint16_t>(resolve_source(input.source, input.cc_number, channel, voice_idx)),
                                input.scale,
                                input.op };
     }
 
     Synth::configure_plain(&param_descs[osc_param(osc_slot, dest_role)],
-                           routing.base_value,
-                           gen.envelope_desc_id ? static_cast<uint16_t>(env_node) : uint16_t(0),
-                           gen.lfo_desc_id ? static_cast<uint16_t>(lfo_node) : uint16_t(0),
-                           gen.lfo_op,
+                           binding.base_value,
+                           binding.envelope_desc_id ? static_cast<uint16_t>(env_node) : uint16_t(0),
+                           binding.lfo_desc_id ? static_cast<uint16_t>(lfo_node) : uint16_t(0),
+                           binding.lfo_op,
                            sources,
-                           routing.num_inputs);
+                           binding.num_inputs);
 }
 
 // Wraps a parameter node's value/prev_value pair as an externally-driven leaf source.
@@ -1246,15 +1252,12 @@ static void process_note_on(uint32_t delta_samples, const DispatchedMidiEvent& e
         osc.mod_ratio           = layer.mod_ratio;
         osc.pitch_offset =
             layer.pitch_offset + note_skew + Synth::random_pitch_skew(&note_skew_rng, instrument.layer_skew_semitones);
-        osc.phase       = 0.0f;
-        osc.mod_phase   = 0.0f;
-        osc.old_volume  = 0.0f; // ramp up from silence to avoid a click
-        osc.old_panning = instrument.routing[mod_panning].base_value;
+        osc.phase      = 0.0f;
+        osc.mod_phase  = 0.0f;
+        osc.old_volume = 0.0f; // ramp up from silence to avoid a click
+        // old_panning keeps its base-value seed: the dest node is stale until the first advance.
+        osc.old_panning = layer.targets[mod_panning].base_value;
         osc.terminating = false;
-        osc.duty[0]     = instrument.routing[mod_duty0].base_value;
-        osc.duty[1]     = instrument.routing[mod_duty1].base_value;
-        osc.osc_mix     = instrument.routing[mod_osc_mix].base_value;
-        osc.fm_index    = instrument.routing[mod_fm_index].base_value;
 
         // Expand each modulation target into its node triple at this oscillator's slot.
         const uint32_t osc_slot = voice.osc_ids[layer_idx];
@@ -1711,14 +1714,13 @@ static void update_modulation()
 
         Voice& voice = voices[osc.voice_id];
 
-        // Pitch adds the per-layer pitch offset on top of the layer's graph pitch
-        // node (which already folds in channel bend and the vibrato generator).
-        osc.pitch = parameters[osc_param(osc_idx, osc_pitch_dest)].value + osc.pitch_offset;
-        // Panning is a per-layer modulatable target: read its graph dest node.
-        osc.panning = parameters[osc_param(osc_idx, osc_panning_dest)].value;
-        // Volume: the oscillator's volume dest node, which already folds the ADSR envelope, the tremolo
-        // LFO edge and the velocity input edge.
-        osc.volume = parameters[osc_param(osc_idx, osc_volume_dest)].value;
+        osc.pitch    = parameters[osc_param(osc_idx, osc_pitch_dest)].value + osc.pitch_offset;
+        osc.panning  = parameters[osc_param(osc_idx, osc_panning_dest)].value;
+        osc.volume   = parameters[osc_param(osc_idx, osc_volume_dest)].value;
+        osc.duty[0]  = parameters[osc_param(osc_idx, osc_duty0_dest)].value;
+        osc.duty[1]  = parameters[osc_param(osc_idx, osc_duty1_dest)].value;
+        osc.osc_mix  = parameters[osc_param(osc_idx, osc_mix_dest)].value;
+        osc.fm_index = parameters[osc_param(osc_idx, osc_fm_index_dest)].value;
 
         // Voice lifetime: after note-off every oscillator plays one final block whose volume
         // gradient ramps to silence, then frees.  Oscillator-scope envelopes release at different
@@ -1726,8 +1728,7 @@ static void update_modulation()
         // itself is finalized only when its last oscillator frees.  A retriggered voice takes that
         // final block immediately, without waiting for its envelope to finish releasing.
         bool free_now = osc.terminating;
-        if (! free_now && (voice.note_finished ||
-                           (voice.releasing && volume_termination_due(osc_idx)))) {
+        if (! free_now && (voice.note_finished || (voice.releasing && volume_termination_due(osc_idx)))) {
             osc.terminating = true;
             osc.volume      = 0.0f; // Final block: the volume gradient ramps from the last rendered volume to silence.
         }
@@ -1747,7 +1748,7 @@ static void update_modulation()
                 if (! voice.note_finished) {
                     note_to_voice[osc.midi_channel][osc.note] = 0;
                 }
-                voice.active                              = false;
+                voice.active = false;
 
                 // Clear the owned oscillator slot ids so a reused voice cannot
                 // read stale ids.

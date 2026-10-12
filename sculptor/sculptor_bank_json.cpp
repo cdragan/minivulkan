@@ -275,7 +275,6 @@ struct InstrumentDocState {
     Synth::Instrument         instr;
     Synth::EnvelopeDescriptor envelopes[Synth::instrument_max_envelopes];
     Synth::LFODescriptor      lfos[Synth::instrument_max_lfos];
-    bool                      routing_set[Synth::num_mod_targets];
     uint32_t                  envelope_count;
     uint32_t                  lfo_count;
 };
@@ -326,7 +325,7 @@ static_assert(Synth::osc_mode_hard_sync == num_osc_modes - 1);
 constexpr uint32_t bank_json_text_size = 1024 * 1024;
 // One token index per parser token; the decoder pins the vendored parser's
 // 16-byte token size so the key-index scratch stays a fixed fraction of the pool.
-constexpr uint32_t json_token_count = 8192;
+constexpr uint32_t json_token_count = 16384;
 char               json_text[bank_json_text_size];
 jsmntok_t          json_tokens[json_token_count];
 
@@ -345,7 +344,7 @@ constexpr uint32_t invalid_index = 0xFFFFFFFFu;
 uint32_t object_keys[json_token_count];
 
 // Resident parser storage is counted by the owner in sculptor_instr_edit.cpp.
-static_assert(sizeof(json_text) + sizeof(json_tokens) + sizeof(object_keys) == 1212416);
+static_assert(sizeof(json_text) + sizeof(json_tokens) + sizeof(object_keys) == Synth::bank_json_parser_bytes);
 
 // ---------------------------------------------------------------------------
 
@@ -366,7 +365,7 @@ InstrumentDocState           instrument_doc;
 Synth::InstrumentGraphLayout instrument_layout_staging[Synth::instrument_graph_layout_capacity];
 Synth::GraphNodeLayout       instrument_mapped_staging[Synth::instrument_graph_layout_capacity];
 
-char                         editor_export_text[64 * 1024];
+char                         editor_export_text[128 * 1024];
 Synth::Instrument            editor_export_decoded;
 Synth::EnvelopeDescriptor    editor_export_envelopes[Synth::instrument_max_envelopes];
 Synth::LFODescriptor         editor_export_lfos[Synth::instrument_max_lfos];
@@ -421,14 +420,14 @@ static void key_bool(Out& o, const char* name, bool v)
     o.bool_value(v);
 }
 
-static bool gen_is_default(const Synth::LayerGen& gen)
+static bool gen_is_default(const Synth::TargetBinding& gen)
 {
     return gen.envelope_desc_id == 0 && gen.lfo_desc_id == 0 && gen.lfo_op == Synth::SourceOp::add &&
            gen.lfo_depth == 0.0f && gen.lfo_depth_source == Synth::ModSource::none &&
            gen.lfo_rate_source == Synth::ModSource::none && gen.lfo_rate_scale_ms == 0.0f;
 }
 
-static bool routing_is_default(const Synth::InputRouting& routing)
+static bool routing_is_default(const Synth::TargetBinding& routing)
 {
     return routing.base_value == 0.0f && routing.num_inputs == 0;
 }
@@ -443,7 +442,7 @@ static void enc_mod_input(Out& o, const Synth::ModInput& in)
     o.ch('}');
 }
 
-static void enc_gen(Out& o, const Synth::LayerGen& gen)
+static void enc_gen(Out& o, const Synth::TargetBinding& gen)
 {
     o.ch('{');
     key_uint_nonzero(o, "envelope_desc_id", gen.envelope_desc_id);
@@ -456,7 +455,7 @@ static void enc_gen(Out& o, const Synth::LayerGen& gen)
     o.ch('}');
 }
 
-static void enc_routing(Out& o, const Synth::InputRouting& routing)
+static void enc_routing(Out& o, const Synth::TargetBinding& routing)
 {
     if (routing.num_inputs > Synth::max_mod_inputs) {
         o.overflow = true;
@@ -489,15 +488,36 @@ static void enc_oscillator(Out& o, const Synth::Oscillator& osc)
     o.key("generators");
     o.ch('{');
     for (uint32_t t = 0; t < Synth::num_mod_targets; t++) {
-        if (gen_is_default(osc.gen[t]))
+        if (gen_is_default(osc.targets[t]))
             continue;
         o.sep();
         o.ch('"');
         o.str(mod_target_names[t]);
         o.str("\":");
-        enc_gen(o, osc.gen[t]);
+        enc_gen(o, osc.targets[t]);
     }
     o.ch('}');
+
+    // Routing is per layer; a layer whose every target sits at the zeroed
+    // binding omits the object entirely.
+    bool have_routing = false;
+    for (uint32_t t = 0; t < Synth::num_mod_targets; t++) {
+        have_routing = have_routing || ! routing_is_default(osc.targets[t]);
+    }
+    if (have_routing) {
+        o.key("routing");
+        o.ch('{');
+        for (uint32_t t = 0; t < Synth::num_mod_targets; t++) {
+            if (routing_is_default(osc.targets[t]))
+                continue;
+            o.sep();
+            o.ch('"');
+            o.str(mod_target_names[t]);
+            o.str("\":");
+            enc_routing(o, osc.targets[t]);
+        }
+        o.ch('}');
+    }
     o.ch('}');
 }
 
@@ -518,19 +538,6 @@ static void enc_instrument(Out& o, const Synth::Instrument& instr)
         enc_oscillator(o, instr.layers[layer]);
     }
     o.ch(']');
-
-    o.key("routing");
-    o.ch('{');
-    for (uint32_t t = 0; t < Synth::num_mod_targets; t++) {
-        if (routing_is_default(instr.routing[t]))
-            continue;
-        o.sep();
-        o.ch('"');
-        o.str(mod_target_names[t]);
-        o.str("\":");
-        enc_routing(o, instr.routing[t]);
-    }
-    o.ch('}');
 
     key_float_nonzero(o, "note_skew_semitones", instr.note_skew_semitones);
     key_float_nonzero(o, "layer_skew_semitones", instr.layer_skew_semitones);
@@ -1764,7 +1771,7 @@ static void decode_mod_input(Walker& w, uint32_t obj, Synth::ModInput& in)
     decode_mod_input_fields(w, obj, in, &source_set, unknown_field);
 }
 
-static void decode_gen(Walker& w, uint32_t obj, Synth::LayerGen& gen)
+static void decode_gen(Walker& w, uint32_t obj, Synth::TargetBinding& gen)
 {
     walk_object(w, obj, [&](uint32_t key_idx, uint32_t val_idx) {
         uint32_t value = 0;
@@ -1797,7 +1804,7 @@ static void decode_gen(Walker& w, uint32_t obj, Synth::LayerGen& gen)
     });
 }
 
-static void decode_routing(Walker& w, uint32_t obj, Synth::InputRouting& routing)
+static void decode_routing(Walker& w, uint32_t obj, Synth::TargetBinding& routing)
 {
     walk_object(w, obj, [&](uint32_t key_idx, uint32_t val_idx) {
         if (key_eq(w, key_idx, "base_value"))
@@ -1836,11 +1843,23 @@ static void decode_oscillator(Walker& w, uint32_t obj, Synth::Oscillator& osc)
             walk_object(w, val_idx, [&](uint32_t gen_key, uint32_t gen_val) {
                 for (uint32_t t = 0; t < Synth::num_mod_targets; t++) {
                     if (key_eq(w, gen_key, mod_target_names[t])) {
-                        decode_gen(w, gen_val, osc.gen[t]);
+                        decode_gen(w, gen_val, osc.targets[t]);
                         return;
                     }
                 }
                 unknown_field(w, gen_key);
+            });
+        else if (key_eq(w, key_idx, "routing"))
+            // This layer's own routing decodes straight into its bindings; a
+            // target the object omits keeps the zeroed binding.
+            walk_object(w, val_idx, [&](uint32_t r_key, uint32_t r_val) {
+                for (uint32_t t = 0; t < Synth::num_mod_targets; t++) {
+                    if (key_eq(w, r_key, mod_target_names[t])) {
+                        decode_routing(w, r_val, osc.targets[t]);
+                        return;
+                    }
+                }
+                unknown_field(w, r_key);
             });
         else
             unknown_field(w, key_idx);
@@ -1866,16 +1885,6 @@ static void decode_instrument(Walker& w, uint32_t obj, Synth::Instrument& instr)
                 num_layers = pos + 1;
             });
         }
-        else if (key_eq(w, key_idx, "routing"))
-            walk_object(w, val_idx, [&](uint32_t r_key, uint32_t r_val) {
-                for (uint32_t t = 0; t < Synth::num_mod_targets; t++) {
-                    if (key_eq(w, r_key, mod_target_names[t])) {
-                        decode_routing(w, r_val, instr.routing[t]);
-                        return;
-                    }
-                }
-                unknown_field(w, r_key);
-            });
         else if (key_eq(w, key_idx, "note_skew_semitones"))
             want_float(w, val_idx, &instr.note_skew_semitones);
         else if (key_eq(w, key_idx, "layer_skew_semitones"))
@@ -1911,7 +1920,7 @@ static bool envelope_member(Walker&                    w,
     if (key_eq(w, key_idx, "sustain_first")) {
         want_u8(w, val_idx, Synth::max_envelope_points - 1, &env.sustain_first_point);
         return true;
-        }
+    }
     if (key_eq(w, key_idx, "sustain_last")) {
         want_u8(w, val_idx, Synth::max_envelope_points - 1, &env.sustain_last_point);
         return true;
@@ -2450,7 +2459,10 @@ static void decode_editor_state(Walker& w, uint32_t val_idx, Synth::InstrumentEd
         else if (key_eq(w, key_idx, "missing_sum")) {
             walk_array(w, inner_idx, Synth::max_channels, [&](uint32_t row_elem, uint32_t channel) {
                 walk_array(w, row_elem, Synth::max_instr_per_channel, [&](uint32_t elem, uint32_t zone) {
-                    want_u8(w, elem, 0x7F, &out->graph_missing_sum[channel][zone]); // only the seven layer bits are meaningful
+                    want_u8(w,
+                            elem,
+                            0x7F,
+                            &out->graph_missing_sum[channel][zone]); // only the seven layer bits are meaningful
                     if (w.failed)
                         return;
                 });
@@ -2711,25 +2723,25 @@ static void canonicalize_editor_bank(Synth::InstrumentEditorBank* editor_bank)
         instr.note_skew_semitones  = canonical_float(instr.note_skew_semitones);
         instr.layer_skew_semitones = canonical_float(instr.layer_skew_semitones);
 
-        for (uint32_t t = 0; t < Synth::num_mod_targets; t++) {
-            Synth::InputRouting& routing = instr.routing[t];
-            routing.base_value           = canonical_float(routing.base_value);
-            for (uint32_t j = 0; j < routing.num_inputs; j++)
-                canonicalize_mod_input(routing.inputs[j]);
-            if (routing.num_inputs < Synth::max_mod_inputs)
-                memset(&routing.inputs[routing.num_inputs],
-                       0,
-                       (Synth::max_mod_inputs - routing.num_inputs) * sizeof(routing.inputs[0]));
-        }
-
         for (uint32_t l = 0; l < instr.layer_count; l++) {
             Synth::Oscillator& osc = instr.layers[l];
             osc.mod_ratio          = canonical_float(osc.mod_ratio);
             osc.pitch_offset       = canonical_float(osc.pitch_offset);
             for (uint32_t t = 0; t < Synth::num_mod_targets; t++) {
-                Synth::LayerGen& gen  = osc.gen[t];
-                gen.lfo_depth         = canonical_float(gen.lfo_depth);
-                gen.lfo_rate_scale_ms = canonical_float(gen.lfo_rate_scale_ms);
+                Synth::TargetBinding& binding = osc.targets[t];
+                binding.lfo_depth             = canonical_float(binding.lfo_depth);
+                binding.lfo_rate_scale_ms     = canonical_float(binding.lfo_rate_scale_ms);
+                // Routing canonicalizes per layer: layers may diverge, so each
+                // layer's base and inputs are cleaned independently.
+                binding.base_value = canonical_float(binding.base_value);
+                for (uint32_t j = 0; j < binding.num_inputs; j++) {
+                    canonicalize_mod_input(binding.inputs[j]);
+                }
+                if (binding.num_inputs < Synth::max_mod_inputs) {
+                    memset(&binding.inputs[binding.num_inputs],
+                           0,
+                           (Synth::max_mod_inputs - binding.num_inputs) * sizeof(binding.inputs[0]));
+                }
             }
         }
 
@@ -2914,7 +2926,7 @@ static void decode_lfo_doc(Walker&               w,
                            uint32_t              obj,
                            Synth::ModTarget      target,
                            Synth::LFODescriptor& lfo,
-                           Synth::LayerGen&      gen)
+                           Synth::TargetBinding& gen)
 {
     const Sculptor::OscTargetView view = Sculptor::osc_target_view(target);
 
@@ -3010,10 +3022,9 @@ static uint16_t find_matching_descriptor(const Descriptor* descriptors, uint32_t
     return 0;
 }
 
-// One target block: shared routing (base, sources) plus per-layer generators
-// (envelope, LFO). The routing is shared by every layer, so base/sources are
-// accepted from the first layer that supplies base or sources (a layer
-// with only generators does not claim the routing) and refused afterwards.
+// One target block: one layer's routing (base, sources) plus that layer's
+// generators (envelope, LFO).  Every layer owns its routing, so base and
+// sources stage straight into the decoding layer's binding.
 static void decode_target_doc(Walker&             w,
                               uint32_t            obj,
                               Synth::ModTarget    target,
@@ -3040,8 +3051,9 @@ static void decode_target_doc(Walker&             w,
             env                            = Synth::EnvelopeDescriptor{};
             decode_envelope_doc(w, val_idx, target, env);
             if (! w.failed) {
-                const uint16_t match             = find_matching_descriptor(doc.envelopes, doc.envelope_count, env);
-                osc.gen[target].envelope_desc_id = match != 0 ? match : static_cast<uint16_t>(doc.envelope_count + 1);
+                const uint16_t match = find_matching_descriptor(doc.envelopes, doc.envelope_count, env);
+                osc.targets[target].envelope_desc_id =
+                    match != 0 ? match : static_cast<uint16_t>(doc.envelope_count + 1);
                 if (match == 0)
                     ++doc.envelope_count;
             }
@@ -3053,20 +3065,20 @@ static void decode_target_doc(Walker&             w,
             }
             Synth::LFODescriptor& lfo = doc.lfos[doc.lfo_count];
             lfo                       = Synth::LFODescriptor{};
-            decode_lfo_doc(w, val_idx, target, lfo, osc.gen[target]);
+            decode_lfo_doc(w, val_idx, target, lfo, osc.targets[target]);
             if (! w.failed) {
-                const uint16_t match        = find_matching_descriptor(doc.lfos, doc.lfo_count, lfo);
-                osc.gen[target].lfo_desc_id = match != 0 ? match : static_cast<uint16_t>(doc.lfo_count + 1);
+                const uint16_t match            = find_matching_descriptor(doc.lfos, doc.lfo_count, lfo);
+                osc.targets[target].lfo_desc_id = match != 0 ? match : static_cast<uint16_t>(doc.lfo_count + 1);
                 if (match == 0)
                     ++doc.lfo_count;
             }
         }
         else if (key_eq(w, key_idx, "sources")) {
             walk_array(w, val_idx, Synth::max_mod_inputs, [&](uint32_t elem, uint32_t pos) {
-                decode_mod_input_doc(w, elem, doc.instr.routing[target].inputs[pos]);
+                decode_mod_input_doc(w, elem, osc.targets[target].inputs[pos]);
             });
-            doc.instr.routing[target].num_inputs = static_cast<uint16_t>(w.toks[val_idx].size);
-            sources_set                          = true;
+            osc.targets[target].num_inputs = static_cast<uint16_t>(w.toks[val_idx].size);
+            sources_set                    = true;
         }
         else
             doc_unknown_field(w, key_idx);
@@ -3081,12 +3093,7 @@ static void decode_target_doc(Walker&             w,
     }
 
     if (base_set || sources_set) {
-        if (doc.routing_set[target]) {
-            w.failed = true; // one layer may set the shared routing
-            return;
-        }
-        doc.routing_set[target]              = true;
-        doc.instr.routing[target].base_value = base * view.bank_scale;
+        osc.targets[target].base_value = base * view.bank_scale;
     }
 }
 
@@ -3369,9 +3376,11 @@ bool Synth::decode_instrument_json_for_domain(const char*            text,
     InstrumentDocState& doc = instrument_doc;
     doc.instr               = Synth::Instrument{};
     for (uint32_t target = 0; target < num_mod_targets; target++) {
-        const Sculptor::OscTargetView view   = Sculptor::osc_target_view(static_cast<ModTarget>(target));
-        doc.instr.routing[target].base_value = doc_base_default(static_cast<ModTarget>(target)) * view.bank_scale;
-        doc.routing_set[target]              = false;
+        const Sculptor::OscTargetView view = Sculptor::osc_target_view(static_cast<ModTarget>(target));
+        // Layer 0 keeps the document defaults for targets its blocks omit;
+        // later layers decode an omitted routing as the zeroed binding.
+        doc.instr.layers[0].targets[target].base_value =
+            doc_base_default(static_cast<ModTarget>(target)) * view.bank_scale;
     }
     doc.envelope_count = 0;
     doc.lfo_count      = 0;
@@ -3555,32 +3564,35 @@ static uint32_t encode_instrument_json_for_domain(char*                         
     if (layout_count) {
         const uint32_t content_length =
             encode_instrument_json_for_domain(dest, dest_size, instr, desc_bank, nullptr, 0, domain);
-        uint32_t envelope_count = 0;
-        uint32_t lfo_count      = 0;
-        uint32_t mapped_count   = 0;
-        if (! content_length ||
-            ! Synth::decode_instrument_json_for_domain(dest,
-                                                       content_length,
-                                                       &decode_scratch.bank.instruments.entries[0],
-                                                       decode_scratch.bank.envelopes.entries,
-                                                       &envelope_count,
-                                                       decode_scratch.bank.lfos.entries,
-                                                       &lfo_count,
-                                                       nullptr,
-                                                       0,
-                                                       &mapped_count,
-                                                       domain) ||
-            ! Sculptor::map_instrument_graph_layout(decode_scratch.bank.instruments.entries[0],
-                                                    decode_scratch.bank.envelopes.entries,
-                                                    envelope_count,
-                                                    decode_scratch.bank.lfos.entries,
-                                                    lfo_count,
-                                                    layout,
-                                                    layout_count,
-                                                    instrument_mapped_staging,
-                                                    Synth::instrument_graph_layout_capacity,
-                                                    &mapped_count))
+        uint32_t   envelope_count = 0;
+        uint32_t   lfo_count      = 0;
+        uint32_t   mapped_count   = 0;
+        const bool dec_ok = Synth::decode_instrument_json_for_domain(dest,
+                                                                     content_length,
+                                                                     &decode_scratch.bank.instruments.entries[0],
+                                                                     decode_scratch.bank.envelopes.entries,
+                                                                     &envelope_count,
+                                                                     decode_scratch.bank.lfos.entries,
+                                                                     &lfo_count,
+                                                                     nullptr,
+                                                                     0,
+                                                                     &mapped_count,
+                                                                     domain);
+
+        const bool map_ok = dec_ok && Sculptor::map_instrument_graph_layout(decode_scratch.bank.instruments.entries[0],
+                                                                            decode_scratch.bank.envelopes.entries,
+                                                                            envelope_count,
+                                                                            decode_scratch.bank.lfos.entries,
+                                                                            lfo_count,
+                                                                            layout,
+                                                                            layout_count,
+                                                                            instrument_mapped_staging,
+                                                                            Synth::instrument_graph_layout_capacity,
+                                                                            &mapped_count);
+
+        if (! content_length || ! dec_ok || ! map_ok) {
             return 0;
+        }
     }
     if (instr->layer_count == 0 || instr->layer_count > Synth::max_layers)
         return 0;
@@ -3627,13 +3639,16 @@ static uint32_t encode_instrument_json_for_domain(char*                         
             o.key(mod_target_names[target]);
             o.ch('{');
 
-            // The routing is shared by every layer, so base and sources ride
-            // the first layer only.
-            if (layer == 0) {
-                o.key("base");
-                o.float_value(instr->routing[target].base_value / view.bank_scale);
+            const Synth::TargetBinding& routing = osc.targets[target];
 
-                const Synth::InputRouting& routing = instr->routing[target];
+            // Routing is per layer.  Layer 0 always states its base: the
+            // decoder pre-seeds layer 0 with the document defaults, so an
+            // omitted base there could not express a legitimate zero.  Later
+            // layers state routing only when it is not the zeroed binding.
+            if (layer == 0 || routing.base_value != 0.0f || routing.num_inputs != 0) {
+                o.key("base");
+                o.float_value(routing.base_value / view.bank_scale);
+
                 if (routing.num_inputs > Synth::max_mod_inputs)
                     return 0;
                 if (routing.num_inputs != 0) {
@@ -3660,7 +3675,7 @@ static uint32_t encode_instrument_json_for_domain(char*                         
                 }
             }
 
-            const Synth::LayerGen& gen = osc.gen[target];
+            const Synth::TargetBinding& gen = osc.targets[target];
 
             const uint16_t env_id = gen.envelope_desc_id;
             if (env_id != 0) {

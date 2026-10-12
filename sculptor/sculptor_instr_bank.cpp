@@ -2,8 +2,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2021-2026 Chris Dragan
 
 #include "sculptor_instr_bank.h"
-#include "../synth/synth_midi_cc.h"
 #include "../synth/synth_effect_expansion.h"
+#include "../synth/synth_midi_cc.h"
 #include "sculptor_effect_graph.h"
 #include "sculptor_graph.h"
 #include "sculptor_osc_graph.h"
@@ -15,7 +15,8 @@
 
 namespace {
 
-static_assert(sizeof(Synth::InstrumentBank) <= 450'000);
+// Per-instrument driver: TargetBinding (40 bytes) x 9 targets x 7 layers.
+static_assert(sizeof(Synth::InstrumentBank) <= 768'000);
 static_assert(sizeof(Synth::BankUpdateQueue) <= 2 * sizeof(Synth::InstrumentBank) + 32);
 
 } // namespace
@@ -29,22 +30,26 @@ const char Synth::default_channel_names[max_channels][max_name_len] = {
 
 bool Synth::init_default_channel(InstrumentBank* bank, uint32_t channel)
 {
-    // A bare instrument: one sine layer in blend mode with neutral shared
-    // routing.  Only the instruments pool needs capacity: the default
-    // references no descriptors and no channel effect chain.
+    // A bare instrument: one sine layer in blend mode with neutral per-layer
+    // volume/panning bases.  Only the instruments pool needs capacity: the
+    // default references no descriptors and no channel effect chain.
     if (channel >= max_channels || bank->instruments.num_allocated + 1 > max_instruments) {
         return false;
     }
-    const uint32_t     instr                          = bank->instruments.allocate();
-    Synth::Instrument& instrument                     = bank->instruments.entries[instr];
-    instrument                                        = {};
-    instrument.layer_count                            = 1;
-    instrument.layers[0].osc_type[0]                  = Synth::WaveType::sine_wave;
-    instrument.layers[0].osc_type[1]                  = Synth::WaveType::no_wave;
-    instrument.layers[0].osc_mode                     = Synth::osc_mode_blend;
-    instrument.routing[Synth::mod_volume].base_value  = 1.0f;
-    instrument.routing[Synth::mod_panning].base_value = 0.5f;
-    bank->channel_zones[channel][0]                   = { 1, static_cast<uint8_t>(instr) };
+    const uint32_t     instr         = bank->instruments.allocate();
+    Synth::Instrument& instrument    = bank->instruments.entries[instr];
+    instrument                       = {};
+    instrument.layer_count           = 1;
+    instrument.layers[0].osc_type[0] = Synth::WaveType::sine_wave;
+    instrument.layers[0].osc_type[1] = Synth::WaveType::no_wave;
+    instrument.layers[0].osc_mode    = Synth::osc_mode_blend;
+    // Each layer owns its routing: the neutral bases seed every layer
+    // directly (no fan-out bridge).
+    for (uint32_t layer = 0; layer < max_layers; layer++) {
+        instrument.layers[layer].targets[Synth::mod_volume].base_value  = 1.0f;
+        instrument.layers[layer].targets[Synth::mod_panning].base_value = 0.5f;
+    }
+    bank->channel_zones[channel][0] = { 1, static_cast<uint8_t>(instr) };
     for (uint32_t slot = 1; slot < max_instr_per_channel; slot++) {
         bank->channel_zones[channel][slot] = {};
     }
@@ -269,54 +274,49 @@ static bool validate_instrument(const Synth::Instrument& instrument)
 
         for (uint32_t target = 0; target < Synth::num_mod_targets; target++) {
 
-            const Synth::LayerGen& gen = osc.gen[target];
+            const Synth::TargetBinding& binding = osc.targets[target];
 
-            if (! valid_source_op(static_cast<uint32_t>(gen.lfo_op))) {
+            if (! valid_source_op(static_cast<uint32_t>(binding.lfo_op))) {
                 return false;
             }
 
-            if (! valid_mod_source(static_cast<uint32_t>(gen.lfo_depth_source)) ||
-                ! valid_mod_source(static_cast<uint32_t>(gen.lfo_rate_source))) {
+            if (! valid_mod_source(static_cast<uint32_t>(binding.lfo_depth_source)) ||
+                ! valid_mod_source(static_cast<uint32_t>(binding.lfo_rate_source))) {
                 return false;
             }
 
-            if (gen.lfo_depth_source == Synth::ModSource::cc || gen.lfo_rate_source == Synth::ModSource::cc) {
-                // A gen LFO source carries no cc_number, so the runtime
+            if (binding.lfo_depth_source == Synth::ModSource::cc || binding.lfo_rate_source == Synth::ModSource::cc) {
+                // A target LFO source carries no cc_number, so the runtime
                 // resolve_source would index the channel parameter array
                 // out of bounds (the editor refuses the CC wire there too).
                 return false;
             }
-        }
-    }
 
-    for (uint32_t target = 0; target < Synth::num_mod_targets; target++) {
-
-        const Synth::InputRouting& routing = instrument.routing[target];
-
-        if (routing.num_inputs > Synth::max_mod_inputs) {
-            return false;
-        }
-
-        for (uint32_t input = 0; input < routing.num_inputs; input++) {
-            const Synth::ModInput& in = routing.inputs[input];
-
-            if (! valid_source_op(static_cast<uint32_t>(in.op))) {
+            if (binding.num_inputs > Synth::max_mod_inputs) {
                 return false;
             }
 
-            if (in.source == Synth::ModSource::cc) {
-                // The assignable cc source is admitted with cc_number 16..31
-                // (the rule that keeps the runtime resolve_source slot
-                // assert unreachable).
-                if (! Synth::cc_is_assignable(in.cc_number)) {
+            for (uint32_t input = 0; input < binding.num_inputs; input++) {
+                const Synth::ModInput& in = binding.inputs[input];
+
+                if (! valid_source_op(static_cast<uint32_t>(in.op))) {
                     return false;
                 }
-            }
-            else if (! valid_mod_source(static_cast<uint32_t>(in.source)) || in.cc_number != 0) {
-                // A non-CC instrument input must carry no stale CC number;
-                // otherwise the shared decoder would accept and re-emit it
-                // (canonicalization hole).
-                return false;
+
+                if (in.source == Synth::ModSource::cc) {
+                    // The assignable cc source is admitted with cc_number 16..31
+                    // (the rule that keeps the runtime resolve_source slot
+                    // assert unreachable).
+                    if (! Synth::cc_is_assignable(in.cc_number)) {
+                        return false;
+                    }
+                }
+                else if (! valid_mod_source(static_cast<uint32_t>(in.source)) || in.cc_number != 0) {
+                    // A non-CC instrument input must carry no stale CC number;
+                    // otherwise the shared decoder would accept and re-emit it
+                    // (canonicalization hole).
+                    return false;
+                }
             }
         }
     }
@@ -487,7 +487,7 @@ bool Synth::validate_instrument_bank(const Synth::InstrumentBank* bank, const bo
         for (uint32_t layer = 0; layer < instrument.layer_count; layer++) {
             for (uint32_t target = 0; target < Synth::num_mod_targets; target++) {
 
-                const Synth::LayerGen& gen = instrument.layers[layer].gen[target];
+                const Synth::TargetBinding& gen = instrument.layers[layer].targets[target];
 
                 if (gen.envelope_desc_id && (gen.envelope_desc_id > bank->envelopes.num_allocated ||
                                              ! bank->envelopes.is_occupied(gen.envelope_desc_id - 1))) {
@@ -660,7 +660,7 @@ void Synth::reclaim_unused_slots(Synth::InstrumentEditorBank* editor_bank, uint1
         for (uint32_t layer = 0; layer < instr.layer_count; layer++) {
             for (uint32_t target = 0; target < Synth::num_mod_targets; target++) {
 
-                const Synth::LayerGen& gen = instr.layers[layer].gen[target];
+                const Synth::TargetBinding& gen = instr.layers[layer].targets[target];
 
                 if (gen.envelope_desc_id && gen.envelope_desc_id <= max_envelopes)
                     keep_env[gen.envelope_desc_id - 1] = true;
@@ -748,7 +748,7 @@ void Synth::reclaim_unused_slots(Synth::InstrumentEditorBank* editor_bank, uint1
         for (uint32_t layer = 0; layer < instr.layer_count; layer++) {
             for (uint32_t target = 0; target < Synth::num_mod_targets; target++) {
 
-                Synth::LayerGen& gen = instr.layers[layer].gen[target];
+                Synth::TargetBinding& gen = instr.layers[layer].targets[target];
 
                 if (gen.envelope_desc_id)
                     gen.envelope_desc_id = env_ids[gen.envelope_desc_id - 1];
@@ -1020,11 +1020,11 @@ bool Sculptor::validate_editor_metadata(const Synth::InstrumentEditorBank& bank)
             }
         }
         else if (record.kind == 3) {
-            // A parameter record keys a dynamic target (projection order
-            // 0..4).  Its persistence fields name oscillator layers,
+            // A parameter record keys a dynamic ModTarget (0..num_mod_targets - 1).
+            // Its persistence fields name oscillator layers,
             // descriptor pool entries and ModSource values, so a stale
             // reference cannot push a projection read out of bounds.
-            if (record.index >= 5 || (record.served >> Synth::max_layers) != 0 ||
+            if (record.index >= Synth::num_mod_targets || (record.served >> Synth::max_layers) != 0 ||
                 record.env_desc_id > bank.bank.envelopes.num_allocated ||
                 record.lfo_desc_id > bank.bank.lfos.num_allocated ||
                 record.lfo_depth_source > Synth::graph_canonical_input_count ||

@@ -3,10 +3,10 @@
 
 #pragma once
 
-#include "synth_config.h"
-#include "synth_parameters.h"
-#include "synth_effects.h"
 #include "../core/pool.h"
+#include "synth_config.h"
+#include "synth_effects.h"
+#include "synth_parameters.h"
 
 #include <stdint.h>
 
@@ -29,13 +29,13 @@ enum ModTarget : uint8_t {
 // Modulation input source roles
 enum class ModSource : uint8_t {
     none,
-    pitch_bend,        // per-channel
-    mod_wheel,         // per-channel
-    channel_pressure,  // per-channel
-    velocity,          // per-note (note-on constant)
-    aftertouch,        // per-note (polyphonic aftertouch)
-    pressure_combine,  // per-voice: max(per-note aftertouch, per-channel pressure)
-    cc                 // per-channel assignable CC (ModInput::cc_number selects 16..31)
+    pitch_bend,       // per-channel
+    mod_wheel,        // per-channel
+    channel_pressure, // per-channel
+    velocity,         // per-note (note-on constant)
+    aftertouch,       // per-note (polyphonic aftertouch)
+    pressure_combine, // per-voice: max(per-note aftertouch, per-channel pressure)
+    cc                // per-channel assignable CC (ModInput::cc_number selects 16..31)
 };
 
 // One input feeding a modulated quantity (volume, pitch, cutoff, ...)
@@ -48,27 +48,22 @@ struct ModInput {
 
 static_assert(sizeof(ModInput) == 8);
 
-// One layer's generators for a single modulation target: an optional envelope and an optional LFO
-// (with sourceable depth and rate).  Each layer instantiates its own generators, so layers that name
-// the same descriptor id evaluate identically and in phase (the generators are deterministic in the
-// tick).
-struct LayerGen {
-    uint16_t  envelope_desc_id;
-    uint16_t  lfo_desc_id;
-    SourceOp  lfo_op;             // How the LFO is combined into the target
-    float     lfo_depth;
-    ModSource lfo_depth_source;
-    ModSource lfo_rate_source;
-    float     lfo_rate_scale_ms;
-};
-
-// Voice-wide MIDI-input routing for one modulation target, shared by all the instrument's layers:
-// a base value plus the input sources combined onto it (each added or multiplied per its op).  The
-// per-layer envelope and LFO that combine on top live in each layer's LayerGen.  No runtime state.
-struct InputRouting {
+// One layer's complete binding for a single modulation target: a base value plus the MIDI input
+// sources combined onto it (each added or multiplied per its op), then this layer's own envelope and
+// LFO generators (with sourceable depth and rate) combining on top.  Each layer instantiates its own
+// generators, so layers that name the same descriptor id evaluate identically and in phase (the
+// generators are deterministic in the tick).  No runtime state.
+struct TargetBinding {
     float     base_value;
+    float     lfo_depth;
+    float     lfo_rate_scale_ms;
     uint16_t  num_inputs;
     ModInput  inputs[max_mod_inputs];
+    uint16_t  envelope_desc_id;
+    uint16_t  lfo_desc_id;
+    SourceOp  lfo_op; // How the LFO is combined into the target
+    ModSource lfo_depth_source;
+    ModSource lfo_rate_source;
 };
 
 enum OscMode : uint32_t {
@@ -78,19 +73,18 @@ enum OscMode : uint32_t {
 };
 
 struct Oscillator {
-    WaveType osc_type[2];
-    OscMode  osc_mode;
-    float    mod_ratio;            // FM ratio or hard-sync cycle ratio
-    float    pitch_offset;         // This oscillator's pitch offset in semitones
-    LayerGen gen[num_mod_targets]; // One generator per modulated quantity (volume/panning/etc.)
+    WaveType      osc_type[2];
+    OscMode       osc_mode;
+    float         mod_ratio;                // FM ratio or hard-sync cycle ratio
+    float         pitch_offset;             // This oscillator's pitch offset in semitones
+    TargetBinding targets[num_mod_targets]; // One binding per modulated quantity (volume/panning/etc.)
 };
 
 struct Instrument {
-    uint32_t     layer_count;
-    Oscillator   layers[max_layers];
-    InputRouting routing[num_mod_targets];  // Per-target MIDI-input routing
-    float        note_skew_semitones;       // Random pitch skew applied once per note (0 = none)
-    float        layer_skew_semitones;      // Random pitch skew drawn per layer (0 = none)
+    uint32_t   layer_count;
+    Oscillator layers[max_layers];
+    float      note_skew_semitones;  // Random pitch skew applied once per note (0 = none)
+    float      layer_skew_semitones; // Random pitch skew drawn per layer (0 = none)
 };
 
 // Keyboard zone table entry. start_note stores the zone's first note + 1 (1..128), so a
@@ -106,8 +100,8 @@ struct Zone {
 // nodes at expansion time (effects are not note-triggered, so there are no envelopes).
 struct EffectParamBinding {
     float     base_value;
-    uint16_t  lfo_desc_id;      // 0 = none
-    SourceOp  lfo_op;           // how the LFO combines into the param
+    uint16_t  lfo_desc_id; // 0 = none
+    SourceOp  lfo_op;      // how the LFO combines into the param
     float     lfo_depth;
     ModSource lfo_depth_source; // none = constant depth
     ModSource lfo_rate_source;  // none = the LFO's own period
@@ -135,15 +129,15 @@ struct EffectChainBinding {
 };
 
 struct InstrumentBank {
-    Pool<Instrument,         max_instruments> instruments;
-    Pool<EnvelopeDescriptor, max_envelopes>   envelopes;
-    Pool<LFODescriptor,      max_lfos>        lfos;
-    Pool<ParamDescriptor,    max_parameters>  parameters;
+    Pool<Instrument, max_instruments>       instruments;
+    Pool<EnvelopeDescriptor, max_envelopes> envelopes;
+    Pool<LFODescriptor, max_lfos>           lfos;
+    Pool<ParamDescriptor, max_parameters>   parameters;
 
     Zone               channel_zones[max_channels][max_instr_per_channel]; // per-channel keyboard zones
-    EffectChainBinding channel_chains[max_channels]; // per-channel effect chains
-    EffectChainBinding master_chain;                 // sums all channel outputs
-    uint8_t            channel_enabled[max_channels]; // 0/1 per channel; the runtime drops note-ons on disabled channels
+    EffectChainBinding channel_chains[max_channels];                       // per-channel effect chains
+    EffectChainBinding master_chain;                                       // sums all channel outputs
+    uint8_t channel_enabled[max_channels]; // 0/1 per channel; the runtime drops note-ons on disabled channels
 };
 
 static_assert(std::is_trivially_copyable_v<InstrumentBank>,

@@ -10,8 +10,7 @@
 // is in canonical graph-expressible form: every field the graph does not
 // express is dormant - never read by the runtime - and compiles to zero.
 // Unexpressed fields include, for example, routing entries past the
-// connected inputs and all generator fields on targets the graph does not
-// project.  Descriptor pool entries are referenced by id, never copied, so
+// connected inputs.  Descriptor pool entries are referenced by id, never copied, so
 // aliased descriptor ids stay aliased and the pools are never deduplicated
 // or duplicated.
 
@@ -52,11 +51,20 @@ struct DetachedNode {
 
 constexpr uint32_t max_detached_nodes = Synth::max_detached_per_zone;
 
-// One per-target modulation recipe.  Cells of one target whose full binding
+// One per-target modulation recipe. Cells of one target whose full binding
 // tuple (envelope desc id, LFO desc id, LFO op/depth/rate scale, LFO
-// depth/rate sources) is identical merge into one parameter; the parameter
-// fans out to exactly its served cells' oscillator inputs.
+// depth/rate sources, MIDI inputs) is identical merge into one parameter;
+// the parameter wires exactly its served cells' oscillator rows.
+//
+// Registry cap: the cap is a deliberate editor budget: it bounds the number
+// of user-created parameter instances the editor accepts (35). Every real
+// UI-created instrument stays below it.  Only hand-edited JSON can exceed it;
+// the projection refuses loudly ("too many parameters") without data loss.
+// Raising it requires raising max_nodes and max_connections.
+// Raise the pools if real usage ever hits it.
 constexpr uint32_t max_param_nodes = Synth::max_layers * 5;
+// True worst-case group count the derivation can produce.
+constexpr uint32_t max_param_groups = Synth::max_layers * Synth::num_mod_targets;
 
 // Worst-case bound node population: one input node for six MIDI source roles
 // plus sum, one oscillator per layer, and per (layer, target) cell one
@@ -72,7 +80,7 @@ static_assert(Synth::max_layers + 7 * max_param_nodes <= max_connections);
 // `uid` is the kind-3 record uid, 0 while the node carries no record.
 struct ParamEntry {
     uint32_t node_idx; // pool_no_slot while the node is not projected
-    uint8_t  target;   // projected target index 0..4
+    uint8_t  target;   // ModTarget index 0..num_mod_targets - 1
     uint8_t  uid;      // kind-3 record uid; 0 while record-less
     uint32_t env_node; // bound envelope instance node, pool_no_slot when none
     uint32_t lfo_node; // bound LFO instance node, pool_no_slot when none
@@ -83,11 +91,12 @@ struct ParamEntry {
 // node indices are stable across property edits; structural edits re-project
 // and refill the whole mapping.
 struct OscGraphMapping {
-    uint32_t input_node;                               // one node for all MIDI source roles
-    uint32_t input_source_slots[num_osc_graph_inputs]; // indexed by ModSource - 1
+    uint32_t input_node;                                // one node for all MIDI source roles
+    uint32_t input_source_slots[num_osc_graph_inputs];  // indexed by ModSource - 1
     uint32_t input_cc_slots[Synth::num_assignable_ccs]; // per assignable CC dot, pool_no_slot when absent
-    uint32_t input_detune_slots[2];                     // [0] note skew, [1] layer skew; the MIDI Inputs node's last two slots (created after the CC dots), pool_no_slot until projected
-    uint32_t output_node;                              // the oscillator sum node
+    uint32_t input_detune_slots[2]; // [0] note skew, [1] layer skew; the MIDI Inputs node's last two slots (created
+                                    // after the CC dots), pool_no_slot until projected
+    uint32_t output_node;           // the oscillator sum node
     uint32_t output_layer_input_slot[Synth::max_layers];
     uint32_t osc_nodes[Synth::max_layers];
     uint32_t osc_output_slot;
@@ -123,13 +132,14 @@ struct OscGraphMapping {
 };
 
 // Rebuilds the graph from scratch: clears every node and connection, then
-// recreates the full projection.  The bank is only read.  The MIDI Inputs
-// node's slots order as: six standard output dots, then the CC dots (when
-// the optional editor mask is passed), then the two detune property rows
-// last.  Returns false
+// recreates the full projection.  The bank is only read.  Returns false
 // without touching the graph, mapping or bank when the instrument is not
-// expressible (a projected target's routing input carries the none source);
-// the refusal is also reported through the graph's error overlay.
+// expressible (any layer's routing input carries the none source, or the
+// derived parameter count exceeds the registry bound); the refusal is
+// also reported through the graph's error overlay.
+// The MIDI Inputs node's slots order as: six standard output dots, then the
+// CC dots (when the optional editor mask is passed), then the two detune
+// property rows last.
 // Deterministic: same instrument and bank produce the same node/slot/
 // connection layout.
 bool project_instrument_to_graph(const Synth::Instrument&     instrument,
@@ -140,7 +150,7 @@ bool project_instrument_to_graph(const Synth::Instrument&     instrument,
                                  // one CC output dot per set bit is created
                                  // between the standard dots and the detune
                                  // rows.  Direct callers pass nothing.
-                                 const uint16_t*              added_cc_mask = nullptr);
+                                 const uint16_t* added_cc_mask = nullptr);
 
 // Exports one zone's saved editor positions as portable records relative to the
 // zone's own instrument: every kind-0..3 record of (channel,zone) that resolves
@@ -282,11 +292,10 @@ bool project_editor_to_graph(const Synth::InstrumentEditorBank& bank,
 bool channel_uses_cc(const Synth::InstrumentEditorBank& bank, uint32_t channel, uint32_t cc_number);
 
 // Applies one drained Graph change to the editor bank through the mapping
-// (per-frame apply): property edits via apply_osc_graph_descriptor_edit and
-// the shared-routing fan-out, oscillator->sum connection_added/deleted via
-// the zone's missing-sum bits, parameter/generator wiring via rebind and
-// detach reconciliation, source-edge mirroring across same-target
-// parameters, and parameter title renames into the kind-3 record name.
+// (per-frame apply): property edits via apply_osc_graph_descriptor_edit,
+// oscillator->sum connection_added/deleted via the zone's missing-sum
+// bits, parameter/generator wiring via rebind and detach reconciliation,
+// and parameter title renames into the kind-3 record name.
 // Returns false when the change cannot be applied (e.g.
 // record-list capacity); application up to that point may already have
 // mutated the bank, so the caller refuses its whole batch and re-projects
@@ -298,17 +307,10 @@ bool apply_osc_graph_change(Synth::InstrumentEditorBank* bank,
                             uint32_t                     channel = 0,
                             uint32_t                     zone    = 0);
 
-// Shared-routing fan-out: writes `value` into every live view of the field
-// addressed by (node role, slot), without change events - the five dynamic
-// and four constant oscillator value rows, the value row of every
-// same-target parameter, and the source op/scale rows of every same-target
-// parameter.  Returns false (writes nothing) for per-layer or per-binding
-// slots.
-bool sync_osc_graph_shared_slot(Graph*                 graph,
-                                const OscGraphMapping& mapping,
-                                uint32_t               node_idx,
-                                uint32_t               slot_idx,
-                                PropertyValue          value);
+// Eventless push of a parameter's base value into every oscillator row the
+// parameter wires (its served layers' rows of its own target).  The rows
+// are the compile-time base truth; the parameter's row is the handle.
+void propagate_param_value(Graph* graph, const OscGraphMapping& mapping, uint32_t node_idx, PropertyValue value);
 
 // Full editor-metadata validation (JSON decode commit and editor candidate
 // commit) lives in sculptor_instr_bank.h next to its storage and constants.
@@ -316,11 +318,12 @@ bool sync_osc_graph_shared_slot(Graph*                 graph,
 // Pure editor-side helpers for the instrument graph editor state.
 // No ImGui here: synth_unit links this translation unit.
 
-// The five parameter target display names, shared by the node menus, the
+// The nine parameter target display names, shared by the node menus, the
 // immediate rename feedback and the projection's derived titles.
-extern const char* const param_target_names[5];
+extern const char* const param_target_names[Synth::num_mod_targets];
 
-// Formats a projected target's derived title; target < 5 and ordinal > 0.
+// Formats a parameter target's derived title; target < num_mod_targets and
+// ordinal > 0.
 void format_parameter_title(char (&name)[32], uint8_t target, uint32_t ordinal);
 
 // Parameter-node source-row input slots (rows 7..9 and 10..12; see the
@@ -351,11 +354,12 @@ constexpr float osc_pitch_offset_max = 12.0f;
 // The shared presentation view of a modulation target; the single
 // source of truth for value bounds, unit scaling and slider curve.
 OscTargetView osc_target_view(Synth::ModTarget target);
+// Slot index on an oscillator node holding row of ModTarget
+// `target` (0..8); rows are not contiguous.
+uint32_t osc_target_row(uint32_t target);
 
-// Slot index on an oscillator node holding the value row of projected
-// parameter target `projected_index` (0..4); rows are not contiguous.
-uint32_t osc_target_row(uint32_t projected_index); // Registry index of the parameter projected onto node_idx, or -1.
-int32_t  find_param(const OscGraphMapping& mapping, uint32_t node_idx);
+// Registry index of the parameter projected onto node_idx, or -1.
+int32_t find_param(const OscGraphMapping& mapping, uint32_t node_idx);
 
 // The volume-envelope shape: minimum 0 and the first and the last point at 0,
 // so a volume envelope starts and ends in silence.
@@ -383,20 +387,11 @@ int32_t find_record(const Synth::InstrumentEditorBank& bank,
                     uint32_t                           index,
                     uint8_t                            uid);
 
-// True when an earlier-enumerated same-target parameter is still record-less
-// (derived).  A record gained by the parameter at param_idx would attach to
-// that sibling positionally at re-projection (records pair with derived
-// parameters in enumeration order) and hijack its node, so the gaining
-// gesture must be refused.
-bool param_has_recordless_predecessor(const OscGraphMapping& mapping, uint32_t param_idx);
-// True when the target has a record-less (derived) parameter: a record re-keyed
-// into that target would attach to that sibling positionally at re-projection.
-bool param_target_has_recordless_derived(const OscGraphMapping& mapping, uint32_t target);
 // Add Parameter preflight: true when committing the new free-standing
 // parameter would leave the projection unable to load the zone (the
-// parameter registry is a designed static budget) or would let the new
-// bare record hijack a record-less derived sibling of the target at
-// re-projection (the same shape the rename path refuses). error receives
+// parameter registry is a designed static budget), or when the target
+// still has a record-less derived parameter a new record would claim at
+// re-projection (rename that one into a record first).  error receives
 // the user-facing refusal message.
 bool osc_add_parameter_refused(const OscGraphMapping& mapping, uint32_t target_index, char* error, uint32_t error_size);
 // One-based ordinal of the parameter among its target's derived
@@ -405,9 +400,9 @@ bool osc_add_parameter_refused(const OscGraphMapping& mapping, uint32_t target_i
 uint8_t param_group_ordinal(const OscGraphMapping& mapping, uint32_t param_idx);
 // Eventless wire-driven retarget, shared by the Change Target menu and the
 // apply path's cross-target wire drop: the kind-3 record re-keys to the new
-// target, the mapping entry flips, the parameter's value wires shift onto
-// the new target's oscillator rows, and the source rows adopt the
-// destination's routing or restore the captured wiring.
+// target, the mapping entry flips, and the parameter's value wires shift
+// onto the new target's oscillator rows (source rows are its own state and
+// stay put).
 // Returns false only when a defensive record creation hits capacity.
 bool retarget_param(Synth::InstrumentEditorBank* bank,
                     Graph&                       graph,
@@ -416,9 +411,10 @@ bool retarget_param(Synth::InstrumentEditorBank* bank,
                     uint32_t                     zone,
                     uint32_t                     param_idx,
                     uint32_t                     new_target);
+
 // Creates one kind-3 record from the parameter's live wiring and layout, and
-// writes its fresh UID only into the supplied mapping.  Rename, layout sync
-// and binding reconciliation share this creation policy.  The caller owns
+// writes its fresh UID only into the supplied mapping. Rename, layout sync
+// and binding reconciliation share this creation policy. The caller owns
 // gesture eligibility, predecessor refusal and subsequent reconciliation;
 // false leaves the record list and mapping unchanged.
 bool detach_osc_graph_parameter(Synth::InstrumentEditorBank* bank,

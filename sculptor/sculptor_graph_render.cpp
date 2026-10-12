@@ -92,8 +92,8 @@ float snap_to_grid(float value)
 
 void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
 {
-    ImDrawList* const draw_list = ImGui::GetWindowDrawList();
-    const ImVec2 cursor_position = ImGui::GetCursorScreenPos();
+    ImDrawList* const draw_list       = ImGui::GetWindowDrawList();
+    const ImVec2      cursor_position = ImGui::GetCursorScreenPos();
     const vmath::vec2 origin(cursor_position.x, cursor_position.y);
     ImGuiIO&          io = ImGui::GetIO();
     const vmath::vec2 widget_size(size.x, size.y);
@@ -270,12 +270,12 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
                 if (! nodes.entries[n].slots.is_occupied(s)) {
                     continue;
                 }
-                const Slot& slot    = nodes.entries[n].slots.entries[s];
+                const Slot& slot = nodes.entries[n].slots.entries[s];
                 if (slot_hidden_callback && slot_hidden_callback(slot_hidden_user_data, *this, n, s)) {
                     continue;
                 }
-                const bool  has_dot = slot.kind == SlotKind::input || slot.kind == SlotKind::output ||
-                                      (slot.kind == SlotKind::property && slot.connectable);
+                const bool has_dot = slot.kind == SlotKind::input || slot.kind == SlotKind::output ||
+                                     (slot.kind == SlotKind::property && slot.connectable);
                 if (! has_dot) {
                     continue;
                 }
@@ -337,12 +337,13 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
                 continue;
             }
             const Slot& slot = node.slots.entries[slot_idx];
+
             // Display-filtered slots render nothing: no line, no dot,
             // no hit target (live connection-derived row visibility).
             if (slot_hidden_callback && slot_hidden_callback(slot_hidden_user_data, *this, node_idx, slot_idx)) {
                 continue;
             }
-            uint32_t    line_idx;
+            uint32_t line_idx;
             if (slot.row_group != 0 && group_line[slot.row_group] >= 0) {
                 line_idx = static_cast<uint32_t>(group_line[slot.row_group]);
             }
@@ -564,17 +565,6 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
                 }
             }
 
-            // Shared routing rows (parameter value row + source op/scale
-            // rows) carry a marker so the fan-out target is visible at a
-            // glance; one glyph per rendered line.
-            bool line_shared = false;
-            for (uint32_t e = 0; e < line.num_elems; ++e) {
-                if (slot_visual_roles[node_idx * max_node_slots + line.elems[e].slot_idx] == slot_role_shared_row) {
-                    line_shared = true;
-                    break;
-                }
-            }
-
             // A line with no input dots still starts its names one dot
             // column in, matching the input-tagged lines beside it.
             float cursor =
@@ -587,15 +577,7 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
                     continue; // name drawn beside its dot above
                 }
                 const float name_w = ImGui::CalcTextSize(slot.name).x * render_scale;
-                if (line_shared) {
-                    line_shared = false;
-                    if (colors_.shared_row_marker != 0) {
-                        draw_list->AddCircleFilled(ImVec2(cursor - 4.0f * render_scale, y_center),
-                                                   2.0f * render_scale,
-                                                   to_imgui(colors_.shared_row_marker));
-                    }
-                }
-                const bool disabled =
+                const bool  disabled =
                     slot.kind == SlotKind::property &&
                     (oscillator_slot_waveform_mode_disabled(node, slot_idx) || slot_edit_disabled(node_idx, slot_idx));
                 add_text_scaled(draw_list,

@@ -419,20 +419,24 @@ uint16_t Sculptor::instrument_cc_mask(const Synth::Instrument& instrument)
 {
     uint16_t mask = 0;
 
-    for (uint32_t target = 0; target < Synth::num_mod_targets; ++target) {
-        const uint32_t num_inputs = instrument.routing[target].num_inputs <= Synth::max_mod_inputs
-                                        ? instrument.routing[target].num_inputs
-                                        : Synth::max_mod_inputs;
+    const uint32_t layer_count =
+        instrument.layer_count <= Synth::max_layers ? instrument.layer_count : Synth::max_layers;
+    for (uint32_t layer = 0; layer < layer_count; ++layer) {
+        for (uint32_t target = 0; target < Synth::num_mod_targets; ++target) {
+            const Synth::TargetBinding& binding = instrument.layers[layer].targets[target];
+            const uint32_t              num_inputs =
+                binding.num_inputs <= Synth::max_mod_inputs ? binding.num_inputs : Synth::max_mod_inputs;
 
-        for (uint32_t input = 0; input < num_inputs; ++input) {
-            const Synth::ModInput& in = instrument.routing[target].inputs[input];
-            if (in.source != Synth::ModSource::cc) {
-                continue;
+            for (uint32_t input = 0; input < num_inputs; ++input) {
+                const Synth::ModInput& in = binding.inputs[input];
+                if (in.source != Synth::ModSource::cc) {
+                    continue;
+                }
+                if (! Synth::cc_is_assignable(in.cc_number)) {
+                    continue;
+                }
+                mask = static_cast<uint16_t>(mask | (1u << (in.cc_number - Synth::cc_msb_base)));
             }
-            if (! Synth::cc_is_assignable(in.cc_number)) {
-                continue;
-            }
-            mask = static_cast<uint16_t>(mask | (1u << (in.cc_number - Synth::cc_msb_base)));
         }
     }
     return mask;
@@ -480,18 +484,19 @@ uint32_t Sculptor::fx_lfo_desc_of(const EffectGraphMapping& mapping, uint32_t no
 
 bool Sculptor::fx_param_is_collapsed(const Graph& graph, const uint32_t node_idx, const uint32_t param)
 {
-    return ! graph.slot_is_connected(node_idx, fx_param_row(param))
-        && ! graph.slot_is_connected(node_idx, fx_param_lfo_dot(param))
-        && ! graph.slot_is_connected(node_idx, fx_param_src_dot(param, 0))
-        && ! graph.slot_is_connected(node_idx, fx_param_src_dot(param, 1));
+    return ! graph.slot_is_connected(node_idx, fx_param_row(param)) &&
+           ! graph.slot_is_connected(node_idx, fx_param_lfo_dot(param)) &&
+           ! graph.slot_is_connected(node_idx, fx_param_src_dot(param, 0)) &&
+           ! graph.slot_is_connected(node_idx, fx_param_src_dot(param, 1));
 }
 
-uint32_t Sculptor::fx_param_free_input(const Graph& graph, const uint32_t node_idx, const uint32_t param, const bool lfo_source)
+uint32_t Sculptor::fx_param_free_input(const Graph&   graph,
+                                       const uint32_t node_idx,
+                                       const uint32_t param,
+                                       const bool     lfo_source)
 {
     if (lfo_source) {
-        return graph.slot_is_connected(node_idx, fx_param_lfo_dot(param))
-            ? pool_no_slot
-            : fx_param_lfo_dot(param);
+        return graph.slot_is_connected(node_idx, fx_param_lfo_dot(param)) ? pool_no_slot : fx_param_lfo_dot(param);
     }
     for (uint32_t input = 0; input < Synth::max_mod_inputs; ++input) {
         const uint32_t dot = fx_param_src_dot(param, input);
@@ -626,11 +631,11 @@ bool Sculptor::project_effect_chain_to_graph(const Synth::InstrumentEditorBank& 
             // for the row's first free modulator input (LFO, then Source
             // A/B), and the apply path resolves the landing. Any binding
             // closes the row again - the modulator rows carry the dots.
-            Slot row = bounded_real_slot(param_info.name,
-                                         binding.base_value,
-                                         param_info.min_value,
-                                         param_info.max_value,
-                                         param_info.logarithmic);
+            Slot row        = bounded_real_slot(param_info.name,
+                                                binding.base_value,
+                                                param_info.min_value,
+                                                param_info.max_value,
+                                                param_info.logarithmic);
             row.connectable = binding.lfo_desc_id == 0 && binding.num_inputs == 0;
             graph->add_slot(node, row);
             // The modulation row, the oscillator editor's LFO row grammar:
@@ -1185,21 +1190,21 @@ static bool apply_fx_graph_change_internal(Synth::InstrumentBank*              b
                     return false;
                 }
                 const uint32_t num_params = Synth::get_effect_param_floats(chain.effects[in_slot].type);
-                const uint32_t param = (in_point.slot_idx - Sculptor::fx_param_row(0)) / Sculptor::fx_param_stride;
+                const uint32_t param      = (in_point.slot_idx - Sculptor::fx_param_row(0)) / Sculptor::fx_param_stride;
                 if (param >= num_params) {
                     return false;
                 }
                 if (change.kind == Sculptor::ChangeKind::connection_deleted) {
                     return false;
                 }
-                const uint32_t desc_id = Sculptor::fx_lfo_desc_of(mapping, out_point.node_idx);
+                const uint32_t desc_id  = Sculptor::fx_lfo_desc_of(mapping, out_point.node_idx);
                 const bool     lfo_wire = desc_id != 0;
-                if (! lfo_wire && (mapping.midi_node == Sculptor::pool_no_slot
-                                   || out_point.node_idx != mapping.midi_node)) {
+                if (! lfo_wire &&
+                    (mapping.midi_node == Sculptor::pool_no_slot || out_point.node_idx != mapping.midi_node)) {
                     return false;
                 }
-                if (Sculptor::fx_param_free_input(graph, in_point.node_idx, param, lfo_wire)
-                    == Sculptor::pool_no_slot) {
+                if (Sculptor::fx_param_free_input(graph, in_point.node_idx, param, lfo_wire) ==
+                    Sculptor::pool_no_slot) {
                     return false;
                 }
                 if (change.kind == Sculptor::ChangeKind::connection_changed) {
@@ -1253,12 +1258,12 @@ static bool apply_fx_graph_change_internal(Synth::InstrumentBank*              b
                     return false;
                 }
                 Synth::ModInput& added = binding.inputs[binding.num_inputs++];
-                added.source    = static_cast<Synth::ModSource>(source);
-                added.cc_number = source == static_cast<uint32_t>(Synth::ModSource::cc)
-                                      ? static_cast<uint8_t>(Synth::cc_msb_base + cc_index)
-                                      : 0; // a reused slot must not carry stale CC state
-                added.op    = Synth::SourceOp::add;
-                added.scale = 1.0f;
+                added.source           = static_cast<Synth::ModSource>(source);
+                added.cc_number        = source == static_cast<uint32_t>(Synth::ModSource::cc)
+                                             ? static_cast<uint8_t>(Synth::cc_msb_base + cc_index)
+                                             : 0; // a reused slot must not carry stale CC state
+                added.op               = Synth::SourceOp::add;
+                added.scale            = 1.0f;
                 return true;
             }
 
@@ -1358,13 +1363,17 @@ static void heal_deleted_effect_audio(const Sculptor::EffectAudioTopology& sourc
     healed->explicit_edges = 1;
     for (uint32_t source = 0; source <= Synth::max_chain_effects; ++source) {
         const uint32_t target = working[source];
-        if (! target || (source < Synth::max_chain_effects && deleted_slots_contains(deleted_slots, num_deleted, source))) {
+        if (! target ||
+            (source < Synth::max_chain_effects && deleted_slots_contains(deleted_slots, num_deleted, source))) {
             continue;
         }
-        const uint32_t final_source =
-            source == Synth::max_chain_effects ? source : source - deleted_slots_below(deleted_slots, num_deleted, source);
-        const uint32_t final_target = target == Synth::max_chain_effects + 1 ? target : target - deleted_slots_below(deleted_slots, num_deleted, target);
-        healed->next[final_source] = static_cast<uint8_t>(final_target);
+        const uint32_t final_source = source == Synth::max_chain_effects
+                                          ? source
+                                          : source - deleted_slots_below(deleted_slots, num_deleted, source);
+        const uint32_t final_target = target == Synth::max_chain_effects + 1
+                                          ? target
+                                          : target - deleted_slots_below(deleted_slots, num_deleted, target);
+        healed->next[final_source]  = static_cast<uint8_t>(final_target);
     }
 }
 
@@ -1966,7 +1975,7 @@ bool Sculptor::apply_effect_graph_batch(const Synth::InstrumentEditorBank* sourc
         for (uint32_t source_node = 0; source_node <= Synth::max_chain_effects; ++source_node) {
             const uint32_t healed_target = healed.next[source_node];
             if (healed_target && ! audio.next[source_node] && ! incoming[healed_target - 1]) {
-                audio.next[source_node]      = static_cast<uint8_t>(healed_target);
+                audio.next[source_node]     = static_cast<uint8_t>(healed_target);
                 incoming[healed_target - 1] = true;
             }
         }

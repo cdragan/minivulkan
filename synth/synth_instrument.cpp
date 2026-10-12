@@ -70,14 +70,14 @@ void Synth::remap_instrument(const Instrument& src, const uint16_t* env_ids, con
     for (uint32_t layer = 0; layer < dst->layer_count; layer++) {
         for (uint32_t target = 0; target < num_mod_targets; target++) {
 
-            LayerGen& gen = dst->layers[layer].gen[target];
+            TargetBinding& binding = dst->layers[layer].targets[target];
 
-            if (gen.envelope_desc_id) {
-                gen.envelope_desc_id = env_ids[gen.envelope_desc_id - 1];
+            if (binding.envelope_desc_id) {
+                binding.envelope_desc_id = env_ids[binding.envelope_desc_id - 1];
             }
 
-            if (gen.lfo_desc_id) {
-                gen.lfo_desc_id = lfo_ids[gen.lfo_desc_id - 1];
+            if (binding.lfo_desc_id) {
+                binding.lfo_desc_id = lfo_ids[binding.lfo_desc_id - 1];
             }
         }
     }

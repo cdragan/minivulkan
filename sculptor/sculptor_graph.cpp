@@ -102,7 +102,6 @@ Sculptor::GraphColors Sculptor::default_graph_colors()
     colors.ghost_node                = 0x4A4A4A80u;
     colors.property_value            = 0xD0D0D0FFu;
     colors.property_connected_value  = 0x808080FFu;
-    colors.shared_row_marker         = 0xC0A040FFu;
     colors.parameter_node_background = 0x25304AFFu;
     colors.parameter_node_border     = 0x6078B0FFu;
     colors.error_background          = 0x602020E0u;
@@ -321,7 +320,6 @@ void Sculptor::Graph::delete_node_unvetoed(uint32_t node_idx)
     selected[node_idx]          = false;
     content_sizes[node_idx]     = vmath::vec2(0.0f, 0.0f);
     node_visual_roles[node_idx] = 0;
-    memset(&slot_visual_roles[node_idx * max_node_slots], 0, max_node_slots);
     memset(&slot_edit_disabled_flags[node_idx * max_node_slots], 0, max_node_slots);
     if (dragged_node == node_idx) {
         dragged_node = pool_no_slot;
@@ -480,8 +478,8 @@ void Sculptor::Graph::set_validator(ValidationCallback callback, void* user_data
 
 void Sculptor::Graph::set_slot_hidden_callback(SlotHiddenCallback callback, void* user_data)
 {
-    slot_hidden_callback   = callback;
-    slot_hidden_user_data  = user_data;
+    slot_hidden_callback  = callback;
+    slot_hidden_user_data = user_data;
 }
 
 bool Sculptor::Graph::user_delete_connection(uint32_t connection_idx)
@@ -489,7 +487,7 @@ bool Sculptor::Graph::user_delete_connection(uint32_t connection_idx)
     if (connection_idx >= max_connections || ! connections.is_occupied(connection_idx)) {
         return false;
     }
- delete_connection(connection_idx);
+    delete_connection(connection_idx);
     return true;
 }
 
@@ -555,22 +553,9 @@ void Sculptor::Graph::set_node_visual_role(uint32_t node_idx, uint8_t role)
     node_visual_roles[node_idx] = role;
 }
 
-void Sculptor::Graph::set_slot_visual_role(uint32_t node_idx, uint32_t slot_idx, uint8_t role)
-{
-    if (node_idx >= max_nodes || slot_idx >= max_node_slots) {
-        return;
-    }
-    slot_visual_roles[node_idx * max_node_slots + slot_idx] = role;
-}
-
 uint8_t Sculptor::Graph::node_visual_role(const uint32_t node_idx) const
 {
     return node_visual_roles[node_idx];
-}
-
-uint8_t Sculptor::Graph::slot_visual_role(const uint32_t node_idx, const uint32_t slot_idx) const
-{
-    return slot_visual_roles[node_idx * max_node_slots + slot_idx];
 }
 
 void Sculptor::Graph::set_slot_edit_disabled(uint32_t node_idx, uint32_t slot_idx, bool disabled)
@@ -710,9 +695,9 @@ bool Sculptor::Graph::move_connection_end(uint32_t connection_idx, bool move_out
         return false;
     }
     const Connection& connection = connections.entries[connection_idx];
-    const EndPoint new_output = move_output_end ? new_point : connection.output;
-    const EndPoint new_input  = move_output_end ? connection.input : new_point;
-    const EndPoint prev_input = connection.input;
+    const EndPoint    new_output = move_output_end ? new_point : connection.output;
+    const EndPoint    new_input  = move_output_end ? connection.input : new_point;
+    const EndPoint    prev_input = connection.input;
 
     // Same rules as a fresh drop, but a refused retarget snaps back instead
     // of destroying the connection: no change events are pushed, so the

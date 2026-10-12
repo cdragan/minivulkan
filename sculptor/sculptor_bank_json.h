@@ -14,6 +14,12 @@ namespace Synth {
 // static buffer whose sizes are internal to the codec's translation unit, and
 // documents or counts past the bounds are rejected rather than truncated.
 // Callers surface rejections as visible notifications.
+// Resident parser staging total the codec's translation unit allocates:
+// the 1 MiB document bound plus a 16384-token pool (16 bytes per vendored
+// parser token) plus one 4-byte key index per token.  The codec's
+// static_assert pins this total against the real buffers.
+constexpr size_t bank_json_parser_bytes = 1024u * 1024u + 16384u * (16u + 4u);
+
 // Stream operations: the codec's staging buffer never leaves its translation
 // unit; callers see only self-contained reads and writes of whole documents.
 
@@ -113,8 +119,8 @@ enum InstrumentGraphLayoutKind : uint8_t {
     instrument_graph_layout_parameter = 3
 };
 
-constexpr uint32_t instrument_graph_layout_capacity = graph_canonical_node_count + 3u * max_layers * 5u;
-static_assert(instrument_graph_layout_capacity == 114);
+constexpr uint32_t instrument_graph_layout_capacity = graph_canonical_node_count + 3u * max_layers * num_mod_targets;
+static_assert(instrument_graph_layout_capacity == 198);
 
 struct InstrumentGraphLayout {
     uint8_t kind;

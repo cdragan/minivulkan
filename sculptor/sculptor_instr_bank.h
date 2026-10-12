@@ -94,22 +94,6 @@ constexpr uint32_t graph_canonical_first_env        = graph_canonical_first_osc 
 constexpr uint32_t graph_canonical_node_count       = graph_canonical_first_env;
 static_assert(graph_canonical_node_count == 9);
 
-// The five targets the runtime can modulate per oscillator; duty A/B, osc mix
-// and FM index are per-oscillator constants carried as base values only.
-constexpr bool graph_target_projected(ModTarget target)
-{
-    return target <= mod_panning || target >= mod_lowpass_cutoff;
-}
-
-// Inverse of the projected index order: volume, pitch and panning take
-// projected indices 0..2, then lowpass and highpass take 3..4, skipping the
-// four constant targets (duty A, duty B, osc mix, FM index) that sit between
-// them in ModTarget order.
-constexpr ModTarget graph_projected_target(uint32_t projected_index)
-{
-    return static_cast<ModTarget>(projected_index < 3 ? projected_index : projected_index + 4u);
-}
-
 // Editor/dev-time bank utilities: display naming, validation (the editor validates before
 // save/publish; the build embeds the validated image, so the player runtime never validates),
 // and the GUI-to-audio bank swap queue.  None of this is linked into a minimal player.

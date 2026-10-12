@@ -97,10 +97,9 @@ struct Node {
 
 constexpr uint32_t max_nodes = 128;
 
-// Visual roles the projection can install on nodes and slots (zero = plain;
+// Visual roles the projection can install on nodes (zero = plain;
 // the renderer treats any other value as plain too).
-constexpr uint8_t node_role_parameter  = 1; // parameter node tint
-constexpr uint8_t slot_role_shared_row = 1; // shared routing row marker
+constexpr uint8_t node_role_parameter = 1; // parameter node tint
 
 struct EndPoint {
     uint32_t node_idx;
@@ -155,18 +154,18 @@ using NodeMenuCallback = bool (*)(void* user_data, uint32_t node_idx);
 // shared and it is a constant.
 
 enum class ChangeKind : uint8_t {
-    none                     = 0,
-    node_added               = 1,
-    node_deleted             = 2,
-    slot_added               = 3,
-    slot_deleted             = 4,
-    connection_added         = 5,
-    connection_deleted       = 6,
-    value_changed            = 7,
-    name_changed             = 8,
-    color_changed            = 9,
-    ghost_placed             = 10,
-    connection_changed       = 11, // one end retargeted in place
+    none               = 0,
+    node_added         = 1,
+    node_deleted       = 2,
+    slot_added         = 3,
+    slot_deleted       = 4,
+    connection_added   = 5,
+    connection_deleted = 6,
+    value_changed      = 7,
+    name_changed       = 8,
+    color_changed      = 9,
+    ghost_placed       = 10,
+    connection_changed = 11, // one end retargeted in place
 };
 
 // Events carry indices, not values: the caller reads current state via the
@@ -181,17 +180,16 @@ struct GraphChange {
     // the live pool to resolve a connection event.
     EndPoint connection_output; // valid for connection_* kinds
     EndPoint connection_input;
- // connection_changed: original input identity, so a retarget can undo
- // derived state keyed on the old wire. pool_no_slot endpoints for the
+    // connection_changed: original input identity, so a retarget can undo
+    // derived state keyed on the old wire. pool_no_slot endpoints for the
     EndPoint connection_prev_input;
 };
 
-
 // Caller display filter for projected slots: return true to omit the slot
 // from line layout and connector hit-testing for as long as the filter says
-// so. Used for live connection-derived row visibility (an effect parameter
-// with no modulator collapses to its value row). A display filter only:
-// slots, indices, connections and snapshots stay untouched. May be null.
+// so.  Used for live connection-derived row visibility (an effect parameter
+// with no modulator collapses to its value row).  A display filter only:
+// slots, indices, connections and snapshots stay untouched.  May be null.
 using SlotHiddenCallback = bool (*)(void* user_data, const Graph& graph, uint32_t node_idx, uint32_t slot_idx);
 
 constexpr uint32_t max_pending_changes = 256;
@@ -217,7 +215,6 @@ struct GraphColors { // packed 0xRRGGBBAA, converted to ImU32 at draw time
     uint32_t ghost_node;
     uint32_t property_value;            // editable value text
     uint32_t property_connected_value;  // greyed value text
-    uint32_t shared_row_marker;         // marker on rows backed by instrument-wide storage (zero = no mark)
     uint32_t parameter_node_background; // parameter node face (zero = node_background)
     uint32_t parameter_node_border;     // parameter node outline (zero = node_border)
     uint32_t error_background;          // error overlay
@@ -278,7 +275,7 @@ public:
     // by move_connection_end; read-only for validators.
     uint32_t moving_connection = pool_no_slot;
     // Installs the caller's slot display filter (see SlotHiddenCallback).
-    void     set_slot_hidden_callback(SlotHiddenCallback callback, void* user_data);
+    void set_slot_hidden_callback(SlotHiddenCallback callback, void* user_data);
     // True means deleted or handled cancellation; false means invalid/stale index.
     bool user_delete_connection(uint32_t connection_idx);
 
@@ -338,7 +335,6 @@ public:
                           void*               user_data,
                           float               initial_height = 0.0f);
 
-
     // Empty-canvas right-click popup: the menu is fully caller-provided and
     // the widget adds no items of its own; add-commands belong to the callback.
     void set_canvas_menu_callback(CanvasMenuCallback callback, void* user_data);
@@ -388,15 +384,13 @@ public:
     void set_slot_missing(uint32_t node_idx, uint32_t slot_idx, bool missing);
     bool slot_missing(uint32_t node_idx, uint32_t slot_idx) const;
 
-    // Per-node/per-slot visual roles the projection installs (zero = plain).
+    // Per-node visual roles the projection installs (zero = plain).
     // Like the missing marks, roles are projection state: clear() wipes them
     // and the projection re-installs them, so they stay out of snapshots.
     // The renderer maps a parameter node to the parameter background/border
-    // colors and a shared-row slot to the shared_row_marker glyph.
+    // colors.
     void    set_node_visual_role(uint32_t node_idx, uint8_t role);
-    void    set_slot_visual_role(uint32_t node_idx, uint32_t slot_idx, uint8_t role);
     uint8_t node_visual_role(uint32_t node_idx) const;
-    uint8_t slot_visual_role(uint32_t node_idx, uint32_t slot_idx) const;
     // A row's knobs are inert while the row's input is unconnected.
     void set_slot_edit_disabled(uint32_t node_idx, uint32_t slot_idx, bool disabled);
     bool slot_edit_disabled(uint32_t node_idx, uint32_t slot_idx) const;
@@ -485,10 +479,10 @@ private:
     Pool<Connection, max_connections> connections = {};
 
     // Caller validation callback.
-    ValidationCallback              validator              = nullptr;
-    void*                           validator_user_data    = nullptr;
-    SlotHiddenCallback              slot_hidden_callback   = nullptr;
-    void*                           slot_hidden_user_data  = nullptr;
+    ValidationCallback validator             = nullptr;
+    void*              validator_user_data   = nullptr;
+    SlotHiddenCallback slot_hidden_callback  = nullptr;
+    void*              slot_hidden_user_data = nullptr;
 
     // Caller veto for delete_node and items for the canvas popup.
     NodeDeleteVeto     delete_veto           = nullptr;
@@ -550,10 +544,9 @@ private:
     // re-projection.  One bit per (node, slot); zero-filled state = no marks.
     uint8_t slot_missing_bits[(max_nodes * max_node_slots + 7) / 8] = {};
 
-    // Per-node/per-slot visual roles (see set_node_visual_role); projection
+    // Per-node visual roles (see set_node_visual_role); projection
     // state, wiped by clear() like the missing marks.
     uint8_t node_visual_roles[max_nodes]                         = {};
-    uint8_t slot_visual_roles[max_nodes * max_node_slots]        = {};
     uint8_t slot_edit_disabled_flags[max_nodes * max_node_slots] = {};
 
     // State widget heights cached from the previous frame (1-frame lag).
@@ -573,7 +566,6 @@ private:
     // Dot screen positions recorded while drawing (1-frame lag for hit
     // tests), indexed by node_idx * max_node_slots + slot_idx.
     vmath::vec2 dot_positions[max_nodes * max_node_slots] = {};
-
 };
 
 // core/pool.h defines pool_no_slot at global scope; re-exported so callers can

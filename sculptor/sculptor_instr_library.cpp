@@ -16,7 +16,7 @@
 namespace {
 constexpr uint32_t library_file_magic = 0x42494C49;
 
-char                         library_transfer_text[64 * 1024];
+char                         library_transfer_text[128 * 1024];
 Synth::Instrument            library_transfer_decoded;
 Synth::EnvelopeDescriptor    library_transfer_envs[Synth::instrument_max_envelopes];
 Synth::LFODescriptor         library_transfer_lfos[Synth::instrument_max_lfos];
@@ -592,7 +592,7 @@ int Synth::save_library_record(const char* const                        path,
         for (uint32_t layer = 0; layer < src_instrument.layer_count; layer++) {
             for (uint32_t target = 0; target < num_mod_targets; target++) {
 
-                const LayerGen& gen = src_instrument.layers[layer].gen[target];
+                const TargetBinding& gen = src_instrument.layers[layer].targets[target];
 
                 if (gen.envelope_desc_id && gen.envelope_desc_id <= Synth::max_envelopes)
                     keep_env[gen.envelope_desc_id - 1] = true;
