@@ -351,7 +351,7 @@ ifeq ($(UNAME), Windows)
     endif
 
     ifeq ($(stdlib), 0)
-        CFLAGS += -DNOSTDLIB -D_NO_CRT_STDIO_INLINE -Zc:threadSafeInit- -GS- -Gs9999999
+        CFLAGS += -DNOSTDLIB -D_NO_CRT_STDIO_INLINE -D_ITERATOR_DEBUG_LEVEL=0 -Zc:threadSafeInit- -GS- -Gs9999999
         LDFLAGS_NODEFAULTLIB += -nodefaultlib -stack:0x100000,0x100000
     else
         LDFLAGS_NODEFAULTLIB = -stack:0x800000,0x800000
