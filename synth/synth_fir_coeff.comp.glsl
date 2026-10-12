@@ -52,9 +52,10 @@ void main()
     FIRParams param = params[gl_WorkGroupID.x];
 
     // Calculate sinc function and apply hamming window
-    const float lowpass_norm_cutoff  = float(2 * param.lowpass_cutoff_freq)  / float(sampling_freq);
-    const float highpass_norm_cutoff = float(2 * param.highpass_cutoff_freq) / float(sampling_freq);
+    const float lowpass_norm_cutoff  = float(param.lowpass_cutoff_freq)  / float(sampling_freq);
+    const float highpass_norm_cutoff = float(param.highpass_cutoff_freq) / float(sampling_freq);
     const uint  center               = (num_taps - 1) / 2;
+    const bool  passthrough          = param.lowpass_cutoff_freq == 0 && param.highpass_cutoff_freq == 0;
     float       coeff_sum            = 0;
 
     for (uint tap = gl_LocalInvocationID.x; tap < num_taps; tap += work_group_size) {
@@ -62,7 +63,7 @@ void main()
         const float x = float(tap) - float(center);
 
         // Low pass coefficient
-        float value = 0.0;
+        float value = (x == 0.0 && passthrough) ? 1.0 : 0.0;
         if (param.lowpass_cutoff_freq > 0) {
             value = sinc_lowpass(x, lowpass_norm_cutoff);
         }
@@ -82,6 +83,10 @@ void main()
             // High pass or band stop
             else if (x == 0.0) {
                 value += 1.0;
+
+                if (param.lowpass_cutoff_freq == 0) {
+                    norm_value += 1.0;
+                }
             }
         }
 
