@@ -5,6 +5,7 @@
 
 #include <assert.h>
 #include <immintrin.h>
+#include <intrin.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
@@ -62,6 +63,37 @@ extern "C" {
     {
         return 0;
     }
+
+    // The STL debug checks reference debug CRT functions even when the checked
+    // condition never fires in valid code.  The minimal runtime provides the
+    // symbols via linker aliases, which resolve only when nothing else defines them.
+    int __cdecl mstdc_crt_dbg_report(int report_type, const char* file_name, unsigned line, const char* module_name, const char* format)
+    {
+        (void)report_type;
+        (void)file_name;
+        (void)line;
+        (void)module_name;
+        (void)format;
+        return 0;
+    }
+
+    void __cdecl mstdc_invoke_watson(const wchar_t* expression, const wchar_t* function_name, const wchar_t* file_name, unsigned line, unsigned reserved)
+    {
+        (void)expression;
+        (void)function_name;
+        (void)file_name;
+        (void)line;
+        (void)reserved;
+        __fastfail(FAST_FAIL_INVALID_ARG);
+    }
+
+#ifdef _M_IX86
+#   pragma comment(linker, "/alternatename:_CrtDbgReport=_mstdc_crt_dbg_report")
+#   pragma comment(linker, "/alternatename:_invoke_watson=_mstdc_invoke_watson")
+#else
+#   pragma comment(linker, "/alternatename:_CrtDbgReport=mstdc_crt_dbg_report")
+#   pragma comment(linker, "/alternatename:_invoke_watson=mstdc_invoke_watson")
+#endif
 
 #ifndef NDEBUG
     void _wassert(const wchar_t* message, const wchar_t* filename, unsigned line)
