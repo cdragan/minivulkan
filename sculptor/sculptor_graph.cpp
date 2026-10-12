@@ -251,8 +251,8 @@ uint32_t Sculptor::Graph::create_node(const char* name, vmath::vec2 position)
     content_sizes[node_idx] = vmath::vec2(0.0f, 0.0f);
     snprintf(new_node.name, sizeof(new_node.name), "%s", name ? name : "");
     // Snap the initial position so new nodes align with the grid.
-    new_node.position = vmath::vec2(floor(position.x / graph_grid_spacing) * graph_grid_spacing,
-                                    floor(position.y / graph_grid_spacing) * graph_grid_spacing);
+    new_node.position = vmath::vec2(static_cast<float>(floor(position.x / graph_grid_spacing) * graph_grid_spacing),
+                                    static_cast<float>(floor(position.y / graph_grid_spacing) * graph_grid_spacing));
     push_change(ChangeKind::node_added, node_idx, pool_no_slot, pool_no_slot);
     return node_idx;
 }

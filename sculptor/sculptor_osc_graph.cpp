@@ -6,6 +6,7 @@
 #include "sculptor_effect_graph.h"
 #include "sculptor_instr_envelope_edit.h"
 
+#include <bit>
 #include <cassert>
 #include <cmath>
 #include <stdio.h>
@@ -1347,10 +1348,11 @@ bool Sculptor::project_instrument_to_graph(const Synth::Instrument&     instrume
 
     uint32_t param_ordinal = 0;
     for (uint32_t g = 0; g < group_count; ++g) {
-        const ParamGroup& group       = groups[g];
-        const float       y           = 128.0f * static_cast<float>(++param_ordinal);
-        const uint32_t    first_layer = group.served != 0 ? static_cast<uint32_t>(__builtin_ctz(group.served)) : 0;
-        const float       base_value =
+        const ParamGroup& group = groups[g];
+        const float       y     = 128.0f * static_cast<float>(++param_ordinal);
+        const uint32_t    first_layer =
+            group.served != 0 ? static_cast<uint32_t>(std::countr_zero(static_cast<uint32_t>(group.served))) : 0;
+        const float base_value =
             instrument.layers[first_layer].targets[group.target].base_value / osc_target_views[group.target].bank_scale;
         Synth::TargetBinding seed = {};
         seed.num_inputs           = group.binding.num_inputs;
