@@ -88,11 +88,17 @@ extern "C" {
     }
 
 #ifdef _M_IX86
-#   pragma comment(linker, "/alternatename:_CrtDbgReport=_mstdc_crt_dbg_report")
 #   pragma comment(linker, "/alternatename:_invoke_watson=_mstdc_invoke_watson")
+#   pragma comment(linker, "/alternatename:__invoke_watson=_mstdc_invoke_watson")
+#   pragma comment(linker, "/alternatename:_CrtDbgReport=_mstdc_crt_dbg_report")
+#   pragma comment(linker, "/alternatename:__CrtDbgReport=_mstdc_crt_dbg_report")
 #else
-#   pragma comment(linker, "/alternatename:_CrtDbgReport=mstdc_crt_dbg_report")
+#   pragma comment(linker, "/alternatename:invoke_watson=mstdc_invoke_watson")
 #   pragma comment(linker, "/alternatename:_invoke_watson=mstdc_invoke_watson")
+#   pragma comment(linker, "/alternatename:__invoke_watson=mstdc_invoke_watson")
+#   pragma comment(linker, "/alternatename:CrtDbgReport=mstdc_crt_dbg_report")
+#   pragma comment(linker, "/alternatename:_CrtDbgReport=mstdc_crt_dbg_report")
+#   pragma comment(linker, "/alternatename:__CrtDbgReport=mstdc_crt_dbg_report")
 #endif
 
 #ifndef NDEBUG
