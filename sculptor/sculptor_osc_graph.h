@@ -241,6 +241,11 @@ bool osc_graph_validate(void* user_data, Graph& graph, EndPoint output, EndPoint
 // instances are record-keyed, never canonical).
 uint32_t osc_graph_canonical_index(const OscGraphMapping& mapping, uint32_t node_idx);
 
+// The layer a new oscillator inherits its parameters from:  the highest
+// enabled layer, that is, the last one whose waveform A is on.  Returns
+// pool_no_slot when the instrument has no enabled layer.
+uint32_t osc_inherit_source_layer(const Synth::Instrument& instrument);
+
 // Writes one descriptor-content property edit through to the bank pool entry
 // named by the node's desc id.  Nodes sharing a desc id edit the same entry,
 // so aliasing stays consistent and repeated edits are idempotent.  Returns

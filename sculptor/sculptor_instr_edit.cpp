@@ -2503,9 +2503,11 @@ void Sculptor::SynthEditor::do_fx_change_type(uint32_t node_idx, Synth::EffectTy
 }
 
 // Canvas menu "Add Oscillator": one more oscillator layer at the menu
-// position, with the model's fresh-Oscillator defaults. Node capacity is
-// checked against the actual projected node count: a full node pool refuses
-// even below the seven-layer limit.
+// position. The new layer inherits every parameter value from the last
+// enabled oscillator; with no enabled layer it starts from the model's
+// fresh-Oscillator defaults. Node capacity is checked against the actual
+// projected node count: a full node pool refuses even below the
+// seven-layer limit.
 void Sculptor::SynthEditor::do_osc_add_oscillator()
 {
     const uint32_t channel        = osc_graph_zone_channel;
@@ -2530,9 +2532,20 @@ void Sculptor::SynthEditor::do_osc_add_oscillator()
     }
 
     const uint32_t new_layer     = instrument.layer_count;
-    instrument.layers[new_layer] = Synth::Oscillator{};
-    // Waveform A cannot be off, so a fresh layer starts on sine.
-    instrument.layers[new_layer].osc_type[0] = Synth::WaveType::sine_wave;
+    const uint32_t source_layer  = Sculptor::osc_inherit_source_layer(instrument);
+    if (source_layer != Sculptor::pool_no_slot) {
+        // A new oscillator inherits every parameter value of the last
+        // enabled oscillator: waveforms, mode, mod ratio, pitch offset
+        // and all generator bindings.  Shared routing base values are
+        // instrument-wide, not per layer, so the layer struct alone
+        // carries everything to inherit.
+        instrument.layers[new_layer] = instrument.layers[source_layer];
+    }
+    else {
+        instrument.layers[new_layer] = Synth::Oscillator{};
+        // Waveform A cannot be off, so a fresh layer starts on sine.
+        instrument.layers[new_layer].osc_type[0] = Synth::WaveType::sine_wave;
+    }
     instrument.layer_count                   = static_cast<uint8_t>(new_layer + 1);
 
     // The new layer's node lands at the menu position via its layout record.
@@ -2756,12 +2769,13 @@ void Sculptor::SynthEditor::gui_keyboard()
     const ImVec2 top    = ImGui::GetCursorScreenPos();
     const float  width  = ImGui::GetContentRegionAvail().x;
     const float  height = keyboard_key_h;
-    // A white key is about six times longer than it is wide on a real piano; cap the
-    // width so a wide window keeps that proportion instead of stretching the keyboard.
-    // The centered keyboard then leaves the background visible on both ends.
+    // A real piano white key is about six times longer than it is wide; the
+    // cap instead keeps the drawn aspect near 4:1, which makes the keys
+    // easier to hit.  The centered keyboard then leaves the background
+    // visible on both ends.
     float white_w = width / static_cast<float>(keyboard_white_count);
-    if (white_w > height / 6.0f)
-        white_w = height / 6.0f;
+    if (white_w > height / 4.0f)
+        white_w = height / 4.0f;
     const float keyboard_w = white_w * static_cast<float>(keyboard_white_count);
     const ImVec2 origin   = ImVec2(top.x + (width - keyboard_w) * 0.5f, top.y + 8.0f);
     const float  black_w  = white_w * 0.6f;

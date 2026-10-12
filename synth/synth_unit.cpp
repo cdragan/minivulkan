@@ -6239,6 +6239,156 @@ static void osc_cc_regressions()
     }
 }
 
+// T-M6-10: the editor's move commit persists a moved bound node as a kind-0
+// canonical-index record; adding a CC afterwards re-projects the graph, and
+// the moved position must survive that re-projection.
+static void osc_inputs_move_reprojection_regressions()
+{
+    static Synth::InstrumentEditorBank source;
+    static Synth::Instrument instrument = {};
+    static Sculptor::Graph graph;
+    static Sculptor::Graph regraph;
+    static Sculptor::OscGraphMapping mapping;
+    static Sculptor::OscGraphMapping remapping;
+    static Sculptor::GraphChange discarded[Sculptor::max_pending_changes];
+    build_zone_fixture(&source, &instrument);
+    TEST(Sculptor::project_editor_to_graph(source, &graph, &mapping));
+    graph.take_changes(discarded, Sculptor::max_pending_changes);
+    // Drag the MIDI Inputs node: the widget moves it live and pushes no events.
+    const vmath::vec2 moved(304.0f, 192.0f);
+    graph.set_node_layout(mapping.input_node, moved, 0, 0);
+    // The move commit syncs the layout into the candidate bank the way
+    // sync_osc_graph_layout keys bound nodes: kind 0, canonical index 0.
+    TEST(Sculptor::find_record(source, 0, 0, 0, 0, 0) < 0);
+    TEST(source.graph_layout_count < Synth::max_graph_records);
+    Synth::GraphNodeLayout& record = source.graph_layout[source.graph_layout_count++];
+    record = {};
+    record.channel = 0;
+    record.zone = 0;
+    record.kind = 0;
+    record.index = 0;
+    record.x = moved.x;
+    record.y = moved.y;
+    TEST(Synth::validate_instrument_bank(&source.bank));
+    TEST(Sculptor::validate_editor_metadata(source));
+    // Adding CC 16 commits the mask bit and re-projects the graph.
+    source.added_cc_mask[0] = 1u << 0;
+    TEST(Sculptor::project_editor_to_graph(source, &regraph, &remapping));
+    TEST(remapping.input_node != Sculptor::pool_no_slot);
+    TEST(regraph.node(remapping.input_node).position.x == moved.x);
+    TEST(regraph.node(remapping.input_node).position.y == moved.y);
+    TEST(regraph.node(remapping.input_node).slots.num_allocated == Sculptor::num_osc_graph_inputs + 3);
+}
+
+// T-M6-11: the fx pane's MIDI Inputs node move must survive the re-projection an
+// Add CC triggers: the move commits a kind-4 record keyed by the node name.
+static void fx_inputs_move_reprojection_regressions()
+{
+    static Synth::InstrumentEditorBank source;
+    static Synth::InstrumentEditorBank candidate;
+    static Sculptor::Graph graph;
+    static Sculptor::Graph regraph;
+    static Sculptor::EffectGraphMapping mapping;
+    static Sculptor::EffectGraphMapping remapping;
+    static Sculptor::GraphChange discarded[Sculptor::max_pending_changes];
+    add_cc_chain_fixture(&source, 0);
+    TEST(Sculptor::project_effect_chain_to_graph(source, 0, &graph, &mapping));
+    graph.take_changes(discarded, Sculptor::max_pending_changes);
+    // Drag the MIDI Inputs node: live move, no change event.
+    const vmath::vec2 moved(312.0f, 88.0f);
+    graph.set_node_layout(mapping.midi_node, moved, 0, 0);
+    // The fx move commit captures moved nodes into the candidate bank.
+    bool capture_nodes[Sculptor::max_nodes] = {};
+    capture_nodes[mapping.midi_node] = true;
+    TEST(Sculptor::apply_effect_graph_batch(&source, &graph, &mapping, nullptr, 0, capture_nodes, &candidate));
+    TEST(Synth::validate_instrument_bank(&candidate.bank));
+    TEST(Sculptor::validate_editor_metadata(candidate));
+
+    // Adding CC 16 commits the mask bit and re-projects the fx graph.
+    candidate.added_cc_mask[0] = 1u << 0;
+    TEST(Sculptor::project_effect_chain_to_graph(candidate, 0, &regraph, &remapping));
+    TEST(remapping.midi_node != Sculptor::pool_no_slot);
+    // The editor's re-projection post-pass restores kind-4 records by the
+    // projected node's live name; emulate it to pin the key agreement.
+    const Synth::GraphNodeLayout* restored = nullptr;
+    for (uint32_t i = 0; i < candidate.graph_layout_count && ! restored; i++) {
+        if (candidate.graph_layout[i].kind == 4 &&
+            strcmp(candidate.graph_layout[i].name, regraph.node(remapping.midi_node).name) == 0) {
+            restored = &candidate.graph_layout[i];
+        }
+    }
+    TEST(restored != nullptr);
+    TEST(restored->x == moved.x);
+    TEST(restored->y == moved.y);
+    // A kind-4 record keyed "MIDI" predates the node's retitle to
+    // "MIDI Inputs"; normalization drops it instead of refusing the bank.
+    static Synth::InstrumentEditorBank legacy;
+    legacy = source;
+    Synth::GraphNodeLayout& stale = legacy.graph_layout[legacy.graph_layout_count++];
+    stale = {};
+    stale.kind = 4;
+    strcpy(stale.name, "MIDI");
+    stale.x = 40.0f;
+    stale.y = 50.0f;
+    TEST(Sculptor::normalize_effect_layout(&legacy));
+    TEST(legacy.graph_layout_count == source.graph_layout_count);
+}
+
+// T-M6-12: a new oscillator inherits the last enabled oscillator's parameters:
+// the helper picks the highest enabled layer, the editor copies the whole
+// layer struct so every value carries over, and the projection accepts the
+// inherited layer.
+static void osc_inherit_source_regressions()
+{
+    static Synth::InstrumentEditorBank source;
+    static Synth::Instrument instrument = {};
+    build_zone_fixture(&source, &instrument);
+    TEST(instrument.layer_count == 1);
+    // The only layer is enabled, so it is the inheritance source.
+    TEST(Sculptor::osc_inherit_source_layer(instrument) == 0);
+    // Disabled layers skip: the highest ENABLED layer is the source.
+    instrument.layers[1].osc_type[0] = Synth::WaveType::no_wave;
+ instrument.layers[2].osc_type[0] = Synth::WaveType::sawtooth_wave;
+ instrument.layers[2].osc_type[1] = Synth::WaveType::pulse_wave;
+ instrument.layers[2].osc_mode = Synth::osc_mode_fm;
+ instrument.layers[2].mod_ratio = 3.0f;
+ instrument.layers[2].pitch_offset = -1.5f;
+ instrument.layers[2].gen[Synth::mod_volume].envelope_desc_id = 2;
+ instrument.layers[2].gen[Synth::mod_volume].lfo_desc_id = 1;
+ instrument.layers[2].gen[Synth::mod_volume].lfo_depth = 0.25f;
+ instrument.layers[2].gen[Synth::mod_pitch].envelope_desc_id = 1;
+ instrument.layer_count = 3;
+    TEST(Sculptor::osc_inherit_source_layer(instrument) == 2);
+    instrument.layers[2].osc_type[0] = Synth::WaveType::no_wave;
+    TEST(Sculptor::osc_inherit_source_layer(instrument) == 0);
+    // No enabled layer: fresh defaults apply in the editor.
+    instrument.layers[0].osc_type[0] = Synth::WaveType::no_wave;
+    TEST(Sculptor::osc_inherit_source_layer(instrument) == Sculptor::pool_no_slot);
+    // The editor copies the whole source layer; the result validates and
+    // projects with the inherited values on the new oscillator node.
+    instrument.layers[0].osc_type[0] = Synth::WaveType::sine_wave;
+    instrument.layers[2].osc_type[0] = Synth::WaveType::sawtooth_wave;
+    const Synth::Oscillator inherited = instrument.layers[2];
+    Synth::Instrument& entry = source.bank.instruments.entries[0];
+    entry.layers[3] = inherited;
+    entry.layer_count = 4;
+    TEST(Synth::validate_instrument_bank(&source.bank));
+    static Sculptor::Graph graph;
+    static Sculptor::OscGraphMapping mapping;
+    TEST(Sculptor::project_editor_to_graph(source, &graph, &mapping));
+    TEST(mapping.osc_nodes[3] != Sculptor::pool_no_slot);
+    TEST(memcmp(&entry.layers[3], &inherited, sizeof(Synth::Oscillator)) == 0);
+    uint32_t wave_slot = Sculptor::pool_no_slot;
+    TEST(find_graph_slot(graph, mapping.osc_nodes[3], "Waveform A", &wave_slot));
+    TEST(graph.node(mapping.osc_nodes[3]).slots.entries[wave_slot].value.list_index == 1);
+    TEST(entry.layers[3].gen[Synth::mod_volume].envelope_desc_id == 2);
+    TEST(entry.layers[3].gen[Synth::mod_volume].lfo_desc_id == 1);
+    TEST(entry.layers[3].gen[Synth::mod_pitch].envelope_desc_id == 1);
+    uint32_t wave_b_slot = Sculptor::pool_no_slot;
+    TEST(find_graph_slot(graph, mapping.osc_nodes[3], "Waveform B", &wave_b_slot));
+    TEST(graph.node(mapping.osc_nodes[3]).slots.entries[wave_b_slot].value.list_index == 3);
+}
+
 int main()
 {
     effects_paste_pin_regressions();
@@ -6249,7 +6399,9 @@ int main()
     effects_enable_regressions();
     effects_inline_modulator_regressions();
     osc_cc_regressions();
-    // Debug builds log skipped unknown JSON fields to stdout; the suite must stay
+    osc_inputs_move_reprojection_regressions();
+    fx_inputs_move_reprojection_regressions();
+    osc_inherit_source_regressions();
     // silent unless failing, and failures report on stderr, so stdout is discarded.
 #ifdef _WIN32
     freopen("NUL", "w", stdout);

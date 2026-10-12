@@ -1476,7 +1476,7 @@ static void effect_layout_name(const Synth::EffectChainBinding& chain,
             snprintf(name, capacity, "%s", owner == Sculptor::fx_master_chain ? "Master output" : "Channel output");
             break;
         case Synth::effects_graph_layout_midi:
-            snprintf(name, capacity, "MIDI");
+            snprintf(name, capacity, "MIDI Inputs");
             break;
         case Synth::effects_graph_layout_lfo:
             snprintf(name, capacity, "LFO %u", index);
@@ -1528,10 +1528,17 @@ static bool effect_layout_identity(const Synth::InstrumentBank& bank,
     return false;
 }
 
-// Only generated effect titles can be obsolete presentation.  Descriptor titles
+// Generated effect titles and the legacy "MIDI" key can be obsolete
+// presentation.  Descriptor titles
 // remain references and must resolve, even when no parameter uses the node.
 static bool obsolete_effect_title(const char* name)
 {
+    // "MIDI" keyed the MIDI node's layout record before the node was
+    // retitled "MIDI Inputs"; old saved records drop instead of refusing
+    // the load, and the moved place resets to the projection default.
+    if (strcmp(name, "MIDI") == 0) {
+        return true;
+    }
     for (uint32_t type = 1; type < Synth::num_effect_types; ++type) {
         const char* title = Sculptor::effect_type_info(static_cast<Synth::EffectType>(type)).name;
         if (strcmp(name, title) == 0) {

@@ -2981,6 +2981,21 @@ static bool apply_param_name(Synth::InstrumentEditorBank* bank,
     return true;
 }
 
+// The layer a new oscillator inherits its parameters from:  the highest
+// enabled layer, that is, the last one whose waveform A is on.  Waveform
+// A cannot be switched off in the editor, so every editor layer
+// qualifies.  Banks loaded with an off waveform A fall back to the
+// fresh defaults instead.
+uint32_t Sculptor::osc_inherit_source_layer(const Synth::Instrument& instrument)
+{
+    for (uint32_t layer = instrument.layer_count; layer > 0; --layer) {
+        if (instrument.layers[layer - 1].osc_type[0] != Synth::WaveType::no_wave) {
+            return layer - 1;
+        }
+    }
+    return Sculptor::pool_no_slot;
+}
+
 uint32_t Sculptor::osc_graph_canonical_index(const OscGraphMapping& mapping, uint32_t node_idx)
 {
     if (node_idx == pool_no_slot) {
