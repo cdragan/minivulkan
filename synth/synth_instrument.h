@@ -144,7 +144,6 @@ struct InstrumentBank {
     EffectChainBinding channel_chains[max_channels]; // per-channel effect chains
     EffectChainBinding master_chain;                 // sums all channel outputs
     uint8_t            channel_enabled[max_channels]; // 0/1 per channel; the runtime drops note-ons on disabled channels
-    uint8_t            drum_track_channel;
 };
 
 static_assert(std::is_trivially_copyable_v<InstrumentBank>,

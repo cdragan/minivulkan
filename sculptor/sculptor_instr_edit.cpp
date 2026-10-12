@@ -396,6 +396,64 @@ void Sculptor::SynthEditor::osc_canvas_menu_entry(void* user_data)
 }
 
 static bool fx_cc_removal_refused(uint32_t chain, uint32_t cc_number); // defined beside the fx menu
+// Draws the shared Add/Remove CC submenus for a pane's MIDI node menu. The
+// mask is the pane's view of the per-channel registry and refusal_idx is the
+// chain/channel index the removal refusal checks; the gesture is reported
+// through the out-params so each caller maps it onto its own canvas command
+// variables.
+static void draw_cc_submenus(uint16_t mask, uint32_t refusal_idx, bool* out_add, bool* out_remove, uint32_t* out_cc_number)
+{
+    *out_add = false;
+    *out_remove = false;
+
+    if (ImGui::BeginMenu("Add CC")) {
+        for (uint32_t i = 0; i < Synth::num_assignable_ccs; ++i) {
+            const uint32_t cc_number = Synth::cc_msb_base + i;
+            char           label[32];
+            Sculptor::fx_cc_pair_label(cc_number, label, sizeof(label));
+            if (ImGui::MenuItem(label, nullptr, false, ! (mask & (1u << i)))) {
+                *out_add       = true;
+                *out_cc_number = cc_number;
+            }
+        }
+        ImGui::EndMenu();
+    }
+
+    // The Remove submenu's separator goes before the submenu only: an
+    // empty list must not stack its separator with the widget's own
+    // post-callback separator.
+    bool emitted_remove = false;
+    // ImGui contract: EndMenu must run only when BeginMenu returns true; a
+    // closed submenu pushes nothing, so the items are gated on the
+    // BeginMenu return as well.
+    bool remove_menu_open = false;
+
+    for (uint32_t i = 0; i < Synth::num_assignable_ccs; ++i) {
+        if (! (mask & (1u << i))) {
+            continue;
+        }
+        if (! emitted_remove) {
+            ImGui::Separator();
+            remove_menu_open = ImGui::BeginMenu("Remove CC");
+            emitted_remove   = true;
+        }
+        if (! remove_menu_open) {
+            continue;
+        }
+        const uint32_t cc_number = Synth::cc_msb_base + i;
+        char           label[32];
+        memcpy(label, "Remove ", 7);
+        Sculptor::fx_cc_pair_label(cc_number, label + 7, sizeof(label) - 7);
+        const bool wired = fx_cc_removal_refused(refusal_idx, cc_number);
+        if (ImGui::MenuItem(label, nullptr, false, ! wired)) {
+            *out_remove    = true;
+            *out_cc_number = cc_number;
+        }
+    }
+    if (remove_menu_open) {
+        ImGui::EndMenu();
+    }
+}
 
 // Node context menu: a parameter node gains a Change Target submenu of the
 // five connectable targets (the target re-key; free-text renaming lives in
@@ -413,56 +471,21 @@ static bool osc_node_menu(void* user_data, uint32_t node_idx)
         // added CC is one removable dot labeled with its CC number pair;
         // a removal refuses while anything in the channel still wires
         // the CC.
-        const uint16_t mask = instr_bank.added_cc_mask[osc_mapping.channel];
+            const uint16_t mask = instr_bank.added_cc_mask[osc_mapping.channel];
 
-        if (ImGui::BeginMenu("Add CC")) {
-            for (uint32_t i = 0; i < Synth::num_assignable_ccs; ++i) {
-                const uint32_t cc_number = Synth::cc_msb_base + i;
-                char           label[32];
-                Sculptor::fx_cc_pair_label(cc_number, label, sizeof(label));
-                if (ImGui::MenuItem(label, nullptr, false, ! (mask & (1u << i)))) {
-                    osc_canvas_command = osc_cmd_add_cc;
-                    osc_canvas_cc      = cc_number;
-                }
+            bool add_cc = false;
+            bool remove_cc = false;
+            uint32_t cc_number = 0;
+            draw_cc_submenus(mask, osc_mapping.channel, &add_cc, &remove_cc, &cc_number);
+            if (add_cc) {
+                osc_canvas_command = osc_cmd_add_cc;
+                osc_canvas_cc      = cc_number;
             }
-            ImGui::EndMenu();
-        }
-
-        // The Remove submenu's separator goes before the submenu only:
-        // an empty list must not stack its separator with the widget's
-        // own post-callback separator.
-        bool emitted_remove = false;
-        // ImGui contract: EndMenu must run only when BeginMenu returns
-        // true; a closed submenu pushes nothing, so the items are gated
-        // on the BeginMenu return as well.
-        bool remove_menu_open = false;
-
-        for (uint32_t i = 0; i < Synth::num_assignable_ccs; ++i) {
-            if (! (mask & (1u << i))) {
-                continue;
-            }
-            if (! emitted_remove) {
-                ImGui::Separator();
-                remove_menu_open = ImGui::BeginMenu("Remove CC");
-                emitted_remove = true;
-            }
-            if (! remove_menu_open) {
-                continue;
-            }
-            const uint32_t cc_number = Synth::cc_msb_base + i;
-            char label[32];
-            memcpy(label, "Remove ", 7);
-            Sculptor::fx_cc_pair_label(cc_number, label + 7, sizeof(label) - 7);
-            const bool wired = fx_cc_removal_refused(osc_mapping.channel, cc_number);
-            if (ImGui::MenuItem(label, nullptr, false, ! wired)) {
+            else if (remove_cc) {
                 osc_canvas_command = osc_cmd_remove_cc;
                 osc_canvas_cc      = cc_number;
             }
-        }
-        if (remove_menu_open) {
-            ImGui::EndMenu();
-        }
-        return true;
+            return true;
     }
     for (uint32_t p = 0; p < osc_mapping.param_count; ++p) {
         if (osc_mapping.params[p].node_idx != node_idx) {
@@ -685,56 +708,21 @@ static bool fx_node_menu(void* user_data, uint32_t node_idx)
         // The MIDI node's menu authors the chain's added-CC output dots.  An
         // added CC is one removable dot labeled with its CC number pair; a
         // removal refuses while the chain still wires the CC.
-        const uint16_t mask = instr_bank.added_cc_mask[fx_mapping.chain];
+            const uint16_t mask = instr_bank.added_cc_mask[fx_mapping.chain];
 
-        if (ImGui::BeginMenu("Add CC")) {
-            for (uint32_t i = 0; i < Synth::num_assignable_ccs; ++i) {
-                const uint32_t cc_number = Synth::cc_msb_base + i;
-                char           label[32];
-                Sculptor::fx_cc_pair_label(cc_number, label, sizeof(label));
-                if (ImGui::MenuItem(label, nullptr, false, ! (mask & (1u << i)))) {
-                    fx_canvas_command = fx_cmd_add_cc;
-                    fx_canvas_cc      = cc_number;
-                }
+            bool add_cc = false;
+            bool remove_cc = false;
+            uint32_t cc_number = 0;
+            draw_cc_submenus(mask, fx_mapping.chain, &add_cc, &remove_cc, &cc_number);
+            if (add_cc) {
+                fx_canvas_command = fx_cmd_add_cc;
+                fx_canvas_cc      = cc_number;
             }
-            ImGui::EndMenu();
-        }
-
-        // The Remove submenu's separator goes before the submenu only:
-        // an empty list must not stack its separator with the widget's
-        // own post-callback separator.
-        bool emitted_remove = false;
-        // ImGui contract: EndMenu must run only when BeginMenu returns
-        // true; a closed submenu pushes nothing, so the items are gated
-        // on the BeginMenu return as well.
-        bool remove_menu_open = false;
-
-        for (uint32_t i = 0; i < Synth::num_assignable_ccs; ++i) {
-            if (! (mask & (1u << i))) {
-                continue;
-            }
-            if (! emitted_remove) {
-                ImGui::Separator();
-                remove_menu_open = ImGui::BeginMenu("Remove CC");
-                emitted_remove = true;
-            }
-            if (! remove_menu_open) {
-                continue;
-            }
-            const uint32_t cc_number = Synth::cc_msb_base + i;
-            char label[32];
-            memcpy(label, "Remove ", 7);
-            Sculptor::fx_cc_pair_label(cc_number, label + 7, sizeof(label) - 7);
-            const bool wired = fx_cc_removal_refused(fx_mapping.chain, cc_number);
-            if (ImGui::MenuItem(label, nullptr, false, ! wired)) {
+            else if (remove_cc) {
                 fx_canvas_command = fx_cmd_remove_cc;
                 fx_canvas_cc      = cc_number;
             }
-        }
-        if (remove_menu_open) {
-            ImGui::EndMenu();
-        }
-        return true;
+            return true;
     }
 
     const int32_t slot = Sculptor::fx_effect_slot_of(fx_mapping, node_idx);
@@ -1326,8 +1314,6 @@ void Sculptor::SynthEditor::reproject_osc_graph(uint32_t channel, uint32_t zone)
     // projection itself owns no callbacks.
     osc_graph.set_validator(&Sculptor::osc_graph_validate, &osc_mapping);
     osc_graph.set_delete_veto(&osc_node_delete_veto, &osc_veto_context);
-    osc_graph.set_retarget_interceptor(nullptr, nullptr);
-    osc_graph.set_disconnect_interceptor(nullptr, nullptr);
     osc_graph.set_canvas_menu_callback(&osc_canvas_menu_entry, this);
     osc_graph.set_node_menu_callback(&osc_node_menu, nullptr);
     osc_graph.set_slot_hidden_callback(nullptr, nullptr);
@@ -1359,14 +1345,7 @@ void Sculptor::SynthEditor::reproject_osc_graph(uint32_t channel, uint32_t zone)
             }
         }
     }
-    // Drain until the ring is empty: a projection can queue more events
-    // than one batch holds, and leftovers would leak into the next frame's
-    // apply batch.  The buffer is sized to the ring so one pass always drains.
-    Sculptor::GraphChange discard[Sculptor::max_pending_changes];
-    while (osc_graph.take_changes(discard, Sculptor::max_pending_changes) != 0) {
-    }
-    (void)osc_graph.changes_overflowed();
-    Sculptor::undo_group_reset(&osc_undo_group);
+    drain_projection_ring();
 }
 
 // State-widget entry for envelope nodes: draws the curve widget and turns
@@ -1989,6 +1968,47 @@ void Sculptor::SynthEditor::gui_osc_graph(uint32_t channel)
     run_osc_canvas_command();
 }
 
+// Commits a finished node drag: moves and resizes push no change events; they
+// persist as their own commit, tagged per node so one drag gesture stays one
+// undo entry. The commit waits for the button to come up: committing per
+// frame during a drag would run the full bank validation and publish path on
+// every gesture frame. Returns false when the commit is refused and the pane
+// must reproject; a multi-node drag takes a fresh tag.
+bool Sculptor::SynthEditor::commit_graph_node_move(bool osc_pane, uint32_t node_tag, const char* refusal_text)
+{
+    uint32_t       moved_count = 0;
+    const uint32_t moved_node  = graph_moved_node(&moved_count);
+    if (moved_node == Sculptor::pool_no_slot || ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+        return true; // nothing finished this frame
+    }
+
+    candidate                      = instr_bank;
+    const uint32_t layout_tag_kind = moved_count > 1 ? osc_tag_fresh : node_tag;
+    const uint32_t layout_tag_id0  = moved_count > 1 ? ++osc_fresh_tag_serial : moved_node;
+    const bool     ok = (osc_pane ? sync_osc_graph_layout(&candidate) : sync_fx_graph_layout(&candidate)) &&
+                        commit_candidate(candidate, Sculptor::UndoGroupTag{ layout_tag_kind, layout_tag_id0, 0 });
+    if (ok) {
+        refresh_projected_layout();
+    }
+    else {
+        Sculptor::notify_error("%s", refusal_text);
+    }
+    return ok;
+}
+
+// Drains and discards everything queued in the graph's event ring: a
+// projection can queue more events than one batch holds, and leftovers
+// would leak into the next frame's apply batch. The buffer is sized to the
+// ring so one pass always drains.
+void Sculptor::SynthEditor::drain_projection_ring()
+{
+    Sculptor::GraphChange discard[Sculptor::max_pending_changes];
+    while (osc_graph.take_changes(discard, Sculptor::max_pending_changes) != 0) {
+    }
+    (void)osc_graph.changes_overflowed();
+    Sculptor::undo_group_reset(&osc_undo_group);
+}
+
 void Sculptor::SynthEditor::drain_osc_graph(uint32_t channel, uint32_t zone)
 {
     // One frame's events always fit one batch: a smaller buffer would split
@@ -2003,25 +2023,7 @@ void Sculptor::SynthEditor::drain_osc_graph(uint32_t channel, uint32_t zone)
         return;
     }
     if (count == 0) {
-        // Node moves and resizes push no change events; they persist as their
-        // own commit, tagged per node so one drag gesture stays one undo
-        // entry.  The commit waits for the button to come up: committing per
-        // frame during a drag would run the full bank validation and publish
-        // path on every gesture frame.
-        uint32_t       moved_count = 0;
-        const uint32_t moved_node  = graph_moved_node(&moved_count);
-        if (moved_node == Sculptor::pool_no_slot || ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
-            return;
-        }
-        candidate                      = instr_bank;
-        const uint32_t layout_tag_kind = moved_count > 1 ? osc_tag_fresh : osc_tag_graph_base;
-        const uint32_t layout_tag_id0  = moved_count > 1 ? ++osc_fresh_tag_serial : moved_node;
-        if (sync_osc_graph_layout(&candidate) &&
-            commit_candidate(candidate, Sculptor::UndoGroupTag{ layout_tag_kind, layout_tag_id0, 0 })) {
-            refresh_projected_layout();
-        }
-        else {
-            Sculptor::notify_error("Synth: oscillator edit refused");
+        if (! commit_graph_node_move(true, osc_tag_graph_base, "Synth: oscillator edit refused")) {
             reproject_osc_graph(channel, zone);
         }
         return;
@@ -2106,10 +2108,10 @@ void Sculptor::SynthEditor::run_osc_canvas_command()
             do_zone_paste_instrument(osc_canvas_zone_channel, osc_canvas_zone_note);
             break;
         case osc_cmd_zone_join_previous:
-            do_zone_join_previous(osc_canvas_zone_channel, osc_canvas_zone_note);
+            do_zone_join(osc_canvas_zone_channel, osc_canvas_zone_note, true);
             break;
         case osc_cmd_zone_join_next:
-            do_zone_join_next(osc_canvas_zone_channel, osc_canvas_zone_note);
+            do_zone_join(osc_canvas_zone_channel, osc_canvas_zone_note, false);
             break;
         case osc_cmd_zone_delete:
             do_zone_delete(
@@ -2129,8 +2131,6 @@ void Sculptor::SynthEditor::run_osc_canvas_command()
 
 void Sculptor::SynthEditor::reproject_fx_graph(uint32_t chain)
 {
-    osc_graph.set_retarget_interceptor(nullptr, nullptr);
-    osc_graph.set_disconnect_interceptor(nullptr, nullptr);
     osc_graph_projected = false;
 
     bool pinned_lfos[Synth::max_lfos];
@@ -2168,18 +2168,10 @@ void Sculptor::SynthEditor::reproject_fx_graph(uint32_t chain)
     // projection itself owns no callbacks.
     osc_graph.set_validator(&fx_connection_validator, nullptr);
     osc_graph.set_delete_veto(&fx_node_delete_veto, nullptr);
-    osc_graph.set_retarget_interceptor(nullptr, nullptr);
-    osc_graph.set_disconnect_interceptor(nullptr, nullptr);
     osc_graph.set_canvas_menu_callback(&fx_canvas_menu, nullptr);
     osc_graph.set_node_menu_callback(&fx_node_menu, nullptr);
     osc_graph.set_slot_hidden_callback(&fx_slot_hidden, nullptr);
-    // Projection construction is quiet; drain the ring anyway so no leftover
-    // event leaks into the next apply batch.
-    Sculptor::GraphChange discard[Sculptor::max_pending_changes];
-    while (osc_graph.take_changes(discard, Sculptor::max_pending_changes) != 0) {
-    }
-    (void)osc_graph.changes_overflowed();
-    Sculptor::undo_group_reset(&osc_undo_group);
+    drain_projection_ring();
 }
 
 // The effects pane: re-project on selection or structural change, then apply
@@ -2210,14 +2202,13 @@ void Sculptor::SynthEditor::gui_fx_graph(uint32_t chain)
 
     osc_graph.render(ImGui::GetContentRegionAvail(), nullptr);
     if (fx_canvas_command != fx_cmd_copy && fx_canvas_command != fx_cmd_paste) {
-        drain_fx_graph(chain);
+        drain_fx_graph();
     }
     run_fx_canvas_command();
 }
 
-void Sculptor::SynthEditor::drain_fx_graph(uint32_t chain)
+void Sculptor::SynthEditor::drain_fx_graph()
 {
-    (void)chain; // the mapping carries the chain
     Sculptor::GraphChange changes[Sculptor::max_pending_changes];
     const uint32_t        count = osc_graph.take_changes(changes, Sculptor::max_pending_changes);
     if (osc_graph.changes_overflowed()) {
@@ -2225,25 +2216,7 @@ void Sculptor::SynthEditor::drain_fx_graph(uint32_t chain)
         return;
     }
     if (count == 0) {
-        // Node moves push no change events; they persist as their own
-        // commit, tagged per node so one drag gesture stays one undo entry.
-        // The commit waits for the button to come up: committing per frame
-        // during a drag would run the full bank validation and publish
-        // path on every gesture frame.
-        uint32_t       moved_count = 0;
-        const uint32_t moved_node  = graph_moved_node(&moved_count);
-        if (moved_node == Sculptor::pool_no_slot || ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
-            return;
-        }
-        candidate                      = instr_bank;
-        const uint32_t layout_tag_kind = moved_count > 1 ? osc_tag_fresh : fx_tag_node_move;
-        const uint32_t layout_tag_id0  = moved_count > 1 ? ++osc_fresh_tag_serial : moved_node;
-        if (sync_fx_graph_layout(&candidate) &&
-            commit_candidate(candidate, Sculptor::UndoGroupTag{ layout_tag_kind, layout_tag_id0, 0 })) {
-            refresh_projected_layout();
-        }
-        else {
-            Sculptor::notify_error("Synth: effect edit refused");
+        if (! commit_graph_node_move(false, fx_tag_node_move, "Synth: effect edit refused")) {
             reproject_fx_graph(fx_mapping.chain);
         }
         return;
@@ -2288,8 +2261,7 @@ void Sculptor::SynthEditor::drain_fx_graph(uint32_t chain)
     for (uint32_t i = 0; i < count && ! mixed; ++i) {
         const auto kind = changes[i].kind;
         mixed = kind == Sculptor::ChangeKind::connection_added || kind == Sculptor::ChangeKind::connection_deleted ||
-                kind == Sculptor::ChangeKind::connection_changed ||
-                kind == Sculptor::ChangeKind::connection_insert_before;
+                kind == Sculptor::ChangeKind::connection_changed;
     }
     const Sculptor::UndoGroupTag tag = mixed ? Sculptor::UndoGroupTag{ osc_tag_fresh, ++osc_fresh_tag_serial, 0 }
                                              : Sculptor::UndoGroupTag{ fx_tag_value, first.node_idx, first.slot_idx };
@@ -2449,91 +2421,63 @@ void Sculptor::SynthEditor::do_fx_add_lfo()
     fx_graph_reproject = true;
 }
 
-// An added CC is one output dot on the chain's MIDI node.  The registry bit
-// is the whole state: one commit and one re-projection, no node budget and
-// no descriptor.
+// One added-CC registry-bit edit shared by both panes' handlers: the mask
+// bit is the whole added-CC state, so add and remove are one candidate
+// commit each, then a re-projection. Removal refuses while the CC is still
+// wired channel-wide (the fx chain or any zone's osc routing; the master
+// chain keeps the fx-chain-only guard) - unwiring first keeps the commit
+// atomic instead of cascading a delete through the bindings.
+void Sculptor::SynthEditor::edit_added_cc_mask(uint32_t mask_idx, uint32_t cc_number, bool add, uint32_t undo_tag, bool* reproject)
+{
+    if (! Synth::cc_is_assignable(cc_number)) {
+        return;
+    }
+
+    if (! add && fx_cc_removal_refused(mask_idx, cc_number)) {
+        Sculptor::notify_error("Synth: cannot remove CC %u: unwire it first", cc_number);
+        return;
+    }
+
+    candidate = instr_bank;
+    if (add) {
+        candidate.added_cc_mask[mask_idx] =
+            static_cast<uint16_t>(candidate.added_cc_mask[mask_idx] | (1u << (cc_number - Synth::cc_msb_base)));
+    }
+    else {
+        candidate.added_cc_mask[mask_idx] =
+            static_cast<uint16_t>(candidate.added_cc_mask[mask_idx] & ~(1u << (cc_number - Synth::cc_msb_base)));
+    }
+
+    if (! commit_candidate(candidate, Sculptor::UndoGroupTag{ undo_tag, mask_idx, cc_number })) {
+        return;
+    }
+    *reproject = true;
+}
+
+// fx pane: add a CC output dot to the chain's MIDI node.
 void Sculptor::SynthEditor::do_fx_add_cc(uint32_t cc_number)
 {
-    if (! Synth::cc_is_assignable(cc_number)) {
-        return;
-    }
-
-    candidate = instr_bank;
-    candidate.added_cc_mask[fx_mapping.chain] =
-        static_cast<uint16_t>(candidate.added_cc_mask[fx_mapping.chain] | (1u << (cc_number - Synth::cc_msb_base)));
-
-    if (! commit_candidate(candidate, Sculptor::UndoGroupTag{ fx_tag_add_cc, fx_mapping.chain, cc_number })) {
-        return;
-    }
-    fx_graph_reproject = true;
+    edit_added_cc_mask(fx_mapping.chain, cc_number, true, fx_tag_add_cc, &fx_graph_reproject);
 }
 
-// Removal refuses while the CC is still wired channel-wide (the shared
-// registry makes an osc-wired CC refuse fx removal too); unwiring first
-// keeps the commit atomic instead of cascading a delete through the
-// bindings.  The master chain keeps the fx-chain-only guard.
+// fx pane: remove a CC output dot once its wires are unwound.
 void Sculptor::SynthEditor::do_fx_remove_cc(uint32_t cc_number)
 {
-    if (! Synth::cc_is_assignable(cc_number)) {
-        return;
-    }
-
-    if (fx_cc_removal_refused(fx_mapping.chain, cc_number)) {
-        Sculptor::notify_error("Synth: cannot remove CC %u: unwire it first", cc_number);
-        return;
-    }
-
-    candidate = instr_bank;
-    candidate.added_cc_mask[fx_mapping.chain] =
-        static_cast<uint16_t>(candidate.added_cc_mask[fx_mapping.chain] & ~(1u << (cc_number - Synth::cc_msb_base)));
-
-    if (! commit_candidate(candidate, Sculptor::UndoGroupTag{ fx_tag_remove_cc, fx_mapping.chain, cc_number })) {
-        return;
-    }
-    fx_graph_reproject = true;
+    edit_added_cc_mask(fx_mapping.chain, cc_number, false, fx_tag_remove_cc, &fx_graph_reproject);
 }
 
-// The oscillator pane's Add/Remove CC authors the same shared registry bit
-// as the fx pane of the channel: one commit and one re-projection, the dot
-// itself comes from the projection post-pass.
+// osc pane: add a CC output dot to the Inputs node - the same shared
+// registry bit the fx pane of the channel edits; the dot comes from the
+// projection post-pass.
 void Sculptor::SynthEditor::do_osc_add_cc(uint32_t cc_number)
 {
-    if (! Synth::cc_is_assignable(cc_number)) {
-        return;
-    }
-
-    candidate = instr_bank;
-    candidate.added_cc_mask[osc_mapping.channel] =
-        static_cast<uint16_t>(candidate.added_cc_mask[osc_mapping.channel] | (1u << (cc_number - Synth::cc_msb_base)));
-
-    if (! commit_candidate(candidate, Sculptor::UndoGroupTag{ osc_tag_add_cc, osc_mapping.channel, cc_number })) {
-        return;
-    }
-    osc_graph_reproject = true;
+    edit_added_cc_mask(osc_mapping.channel, cc_number, true, osc_tag_add_cc, &osc_graph_reproject);
 }
 
-// Removal refuses while the CC is still wired channel-wide (the fx chain or
-// any zone's osc routing); unwiring first keeps the commit atomic instead of
-// cascading a delete through the bindings.
+// osc pane: remove a CC output dot once its wires are unwound.
 void Sculptor::SynthEditor::do_osc_remove_cc(uint32_t cc_number)
 {
-    if (! Synth::cc_is_assignable(cc_number)) {
-        return;
-    }
-
-    if (fx_cc_removal_refused(osc_mapping.channel, cc_number)) {
-        Sculptor::notify_error("Synth: cannot remove CC %u: unwire it first", cc_number);
-        return;
-    }
-
-    candidate = instr_bank;
-    candidate.added_cc_mask[osc_mapping.channel] =
-        static_cast<uint16_t>(candidate.added_cc_mask[osc_mapping.channel] & ~(1u << (cc_number - Synth::cc_msb_base)));
-
-    if (! commit_candidate(candidate, Sculptor::UndoGroupTag{ osc_tag_remove_cc, osc_mapping.channel, cc_number })) {
-        return;
-    }
-    osc_graph_reproject = true;
+    edit_added_cc_mask(osc_mapping.channel, cc_number, false, osc_tag_remove_cc, &osc_graph_reproject);
 }
 
 // Type change replaces the whole slot with initialized bindings of the new
@@ -3150,7 +3094,7 @@ void Sculptor::SynthEditor::gui_zone_menu_items(uint32_t channel, uint32_t note,
     }
     if (ImGui::MenuItem("Add to previous zone", nullptr, false, entry > 0)) {
         if (keyboard_range) {
-            do_zone_join_previous(channel, note);
+            do_zone_join(channel, note, true);
         }
         else {
             osc_canvas_command = osc_cmd_zone_join_previous;
@@ -3158,7 +3102,7 @@ void Sculptor::SynthEditor::gui_zone_menu_items(uint32_t channel, uint32_t note,
     }
     if (ImGui::MenuItem("Add to next zone", nullptr, false, has_next)) {
         if (keyboard_range) {
-            do_zone_join_next(channel, note);
+            do_zone_join(channel, note, false);
         }
         else {
             osc_canvas_command = osc_cmd_zone_join_next;
@@ -3182,52 +3126,41 @@ void Sculptor::SynthEditor::gui_zone_menu_items(uint32_t channel, uint32_t note,
     }
 }
 
-void Sculptor::SynthEditor::do_zone_join_previous(uint32_t channel, uint32_t note)
+// Joins the zone holding note into its previous or next neighbor: the two
+// zones merge and the emptied one drops.
+void Sculptor::SynthEditor::do_zone_join(uint32_t channel, uint32_t note, bool previous)
 {
     const Synth::InstrumentBank& bank  = instr_bank.bank;
     const int32_t                entry = static_cast<int32_t>(Synth::zone_entry_at(bank.channel_zones[channel], note));
-    if (entry <= 0)
+    if (previous && entry <= 0) {
         return;
+    }
+    if (! previous && (entry < 0 || static_cast<uint32_t>(entry) + 1 >= zone_count(bank, channel))) {
+        return;
+    }
 
     candidate = instr_bank;
-    if (! Synth::zone_join_previous(candidate.bank.channel_zones[channel], static_cast<uint32_t>(entry), note))
+    const bool joined =
+        previous ? Synth::zone_join_previous(candidate.bank.channel_zones[channel], static_cast<uint32_t>(entry), note)
+                 : Synth::zone_join_next(candidate.bank.channel_zones[channel], static_cast<uint32_t>(entry), note);
+    if (! joined) {
         return;
+    }
 
     // The dropped entry (when the joined zone became empty) shifts later zones
     // down, so its records and mask row move with the zone table.
-    if (zone_count(candidate.bank, channel) < zone_count(instr_bank.bank, channel))
+    if (zone_count(candidate.bank, channel) < zone_count(instr_bank.bank, channel)) {
         Sculptor::zone_records_drop_zone(&candidate, channel, static_cast<uint32_t>(entry));
+    }
 
     // The zone may have been dropped and its instrument orphaned.
     Synth::reclaim_unused_slots(&candidate);
     last_clicked_note[channel] = static_cast<uint8_t>(note);
     Sculptor::undo_group_reset(&osc_undo_group);
-    if (commit_candidate(candidate, Sculptor::UndoGroupTag{ osc_tag_join_prev, channel, note }))
+    if (commit_candidate(candidate,
+                         Sculptor::UndoGroupTag{ previous ? osc_tag_join_prev : osc_tag_join_next, channel, note })) {
         osc_graph_reproject = true;
-}
-
-void Sculptor::SynthEditor::do_zone_join_next(uint32_t channel, uint32_t note)
-{
-    const Synth::InstrumentBank& bank  = instr_bank.bank;
-    const int32_t                entry = static_cast<int32_t>(Synth::zone_entry_at(bank.channel_zones[channel], note));
-    if (entry < 0 || static_cast<uint32_t>(entry) + 1 >= zone_count(bank, channel))
-        return;
-
-    candidate = instr_bank;
-    if (! Synth::zone_join_next(candidate.bank.channel_zones[channel], static_cast<uint32_t>(entry), note))
-        return;
-
-    // The dropped entry (when the joined zone became empty) shifts later zones
-    // down, so its records and mask row move with the zone table.
-    if (zone_count(candidate.bank, channel) < zone_count(instr_bank.bank, channel))
-        Sculptor::zone_records_drop_zone(&candidate, channel, static_cast<uint32_t>(entry));
-
-    // The zone may have been dropped and its instrument orphaned.
-    Synth::reclaim_unused_slots(&candidate);
-    last_clicked_note[channel] = static_cast<uint8_t>(note);
-    Sculptor::undo_group_reset(&osc_undo_group);
-    if (commit_candidate(candidate, Sculptor::UndoGroupTag{ osc_tag_join_next, channel, note }))
-        osc_graph_reproject = true;
+    }
 }
 
 void Sculptor::SynthEditor::do_zone_split_new(uint32_t channel, uint32_t note)

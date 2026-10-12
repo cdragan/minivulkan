@@ -24,11 +24,6 @@ bool Sculptor::is_shift_down()
     return ImGui::IsKeyDown(ImGuiKey_LeftShift) || ImGui::IsKeyDown(ImGuiKey_RightShift);
 }
 
-void Sculptor::Editor::set_object_name(const char* new_name)
-{
-    snprintf(object_name, sizeof(object_name), "%s", new_name);
-}
-
 vmath::vec2 Sculptor::Editor::get_rel_mouse_pos(const UserInput& input)
 {
     const vmath::vec2 abs_window_pos = ImGui::GetItemRectMin();

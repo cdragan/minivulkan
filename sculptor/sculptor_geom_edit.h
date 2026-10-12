@@ -194,7 +194,6 @@ class GeometryEditor: public Editor {
         void draw_axis_indicator(ImDrawList* dl, float vp_max_x, float vp_max_y) const;
         void switch_mode(Mode new_mode);
         vmath::vec3 compute_move_delta(const UserInput& input) const;
-        void move_selected_vertices(const vmath::vec3& delta);
         void apply_move(const UserInput& input);
         void apply_extrude(const UserInput& input);
         // Applies interim rotation over pivot point to the camera

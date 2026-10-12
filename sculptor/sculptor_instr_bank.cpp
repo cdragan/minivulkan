@@ -55,7 +55,6 @@ bool Synth::init_default_channel(InstrumentBank* bank, uint32_t channel)
 void Synth::init_default_bank(InstrumentBank* bank)
 {
     memset(bank, 0, sizeof(*bank));
-    bank->drum_track_channel = 9;
 
     // A fresh bank is bare: the default instrument only, no master LFOs and
     // no effect chains, so the instrument's own envelope is what you hear.

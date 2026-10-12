@@ -50,18 +50,21 @@ private:
     // Effects-graph counterparts: the modulation panel entry and its
     // one-field edit dispatcher, both committing through the candidate path.
     void reproject_fx_graph(uint32_t chain);
+    void drain_projection_ring();
+    bool commit_graph_node_move(bool osc_pane, uint32_t node_tag, const char* refusal_text);
     void gui_fx_graph(uint32_t chain);
-    void drain_fx_graph(uint32_t chain);
+    void drain_fx_graph();
     void run_fx_canvas_command();
     void do_fx_add_effect(Synth::EffectType type);
     void do_fx_add_lfo();
     void do_fx_change_type(uint32_t node_idx, Synth::EffectType type);
+    // One added-CC registry-bit edit shared by both panes' handlers.
+    void edit_added_cc_mask(uint32_t mask_idx, uint32_t cc_number, bool add, uint32_t undo_tag, bool* reproject);
     void do_fx_add_cc(uint32_t cc_number);
     void do_fx_remove_cc(uint32_t cc_number);
     void do_initialize(uint32_t channel);
     void do_delete(uint32_t channel);
-    void do_zone_join_previous(uint32_t channel, uint32_t note);
-    void do_zone_join_next(uint32_t channel, uint32_t note);
+    void do_zone_join(uint32_t channel, uint32_t note, bool previous);
     void do_zone_split_new(uint32_t channel, uint32_t note);
     void do_zone_delete(uint32_t channel, uint32_t entry);
     void do_zone_copy_instrument(uint32_t channel, uint32_t note);

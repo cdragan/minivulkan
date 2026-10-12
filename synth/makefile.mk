@@ -4,7 +4,6 @@
 #gui_project_name = synth
 
 lib_src_files += synth/midi_decode.cpp
-lib_src_files += synth/midi_file.cpp
 lib_src_files += synth/synth_parameters.cpp
 lib_src_files += synth/synth_effects.cpp
 lib_src_files += synth/synth_effect_expansion.cpp
@@ -22,6 +21,8 @@ synth_unit_src_files += sculptor/sculptor_bank_json.cpp
 synth_unit_src_files += sculptor/sculptor_graph.cpp
 synth_unit_src_files += sculptor/sculptor_osc_graph.cpp
 synth_unit_src_files += sculptor/sculptor_effect_graph.cpp
+synth_unit_src_files += synth/midi_file.cpp
+synth_unit_src_files += synth/synth_soundtrack_codec.cpp
 
 midi_decode_unit_src_files += synth/midi_decode_unit.cpp
 

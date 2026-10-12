@@ -6,6 +6,7 @@
 #include "../core/vmath.h"
 #include "../core/vulkan_functions.h"
 #include <stdint.h>
+#include <stdio.h>
 
 #ifdef __APPLE__
 #    define CTRL_KEY "Cmd "
@@ -25,7 +26,7 @@ class Editor {
         Editor& operator=(const Editor&) = delete;
         virtual ~Editor() = default;
 
-        void set_object_name(const char* new_name);
+        void set_object_name(const char* new_name) { snprintf(object_name, sizeof(object_name), "%s", new_name); }
         const char* get_object_name() const { return object_name; }
 
         struct UserInput {

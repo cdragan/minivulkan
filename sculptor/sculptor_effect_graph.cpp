@@ -811,18 +811,6 @@ static int32_t fx_serial_placement(const Sculptor::Graph&              graph,
                                    uint32_t                            effect_count,
                                    int32_t*                            after)
 {
-    if (change.kind == Sculptor::ChangeKind::connection_insert_before) {
-        const Sculptor::EndPoint grabbed     = change.connection_prev_input;
-        const Sculptor::EndPoint target      = change.connection_input;
-        const int32_t            moved       = Sculptor::fx_effect_slot_of(mapping, grabbed.node_idx);
-        const int32_t            destination = Sculptor::fx_effect_slot_of(mapping, target.node_idx);
-        if (moved < 0 || grabbed.slot_idx != 0 || target.slot_idx != 0 || ! graph.node_occupied(grabbed.node_idx) ||
-            ! graph.node_occupied(target.node_idx) || (destination < 0 && target.node_idx != mapping.output_node)) {
-            return fx_serial_refused;
-        }
-        *after = destination < 0 ? static_cast<int32_t>(effect_count) - 1 : destination - 1;
-        return moved == destination || *after == moved ? fx_serial_noop : moved;
-    }
     if (change.kind != Sculptor::ChangeKind::connection_added &&
         change.kind != Sculptor::ChangeKind::connection_changed &&
         change.kind != Sculptor::ChangeKind::connection_deleted) {
@@ -1008,7 +996,6 @@ static bool apply_fx_graph_change_internal(Synth::InstrumentBank*              b
                 return true;
             }
             return false;
-        case Sculptor::ChangeKind::connection_insert_before:
         case Sculptor::ChangeKind::connection_added:
         case Sculptor::ChangeKind::connection_changed:
         case Sculptor::ChangeKind::connection_deleted: {
@@ -1918,9 +1905,6 @@ bool Sculptor::apply_effect_graph_batch(const Synth::InstrumentEditorBank* sourc
             (! graph->node_occupied(change.node_idx) ||
              change.slot_idx >= graph->node(change.node_idx).slots.num_allocated)) {
             continue;
-        }
-        if (change.kind == ChangeKind::connection_insert_before) {
-            return false;
         }
         if (change.kind == ChangeKind::connection_added || change.kind == ChangeKind::connection_deleted ||
             change.kind == ChangeKind::connection_changed) {

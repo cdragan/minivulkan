@@ -781,7 +781,6 @@ uint32_t Synth::encode_editor_bank_json(const InstrumentEditorBank* bank, char* 
     Out o = { dest, dest_size, 0, false, false };
     o.str(explicit_audio ? "{\"instrument_editor_bank\":null,\"instrument_editor_bank_v2\":{"
                          : "{\"instrument_editor_bank\":{");
-    key_uint(o, "drum_track_channel", bank->bank.drum_track_channel);
 
     o.key("instrument_names");
     o.ch('[');
@@ -1589,6 +1588,19 @@ static void want_uint(Walker& w, uint32_t i, uint32_t max_value, uint32_t* out)
     *out = value;
 }
 
+// One-byte variant of want_uint: same grammar and bound refusal, storing
+// through a one-byte pointer directly (no 32-bit staging local). On failure
+// the destination is left untouched; the caller refuses the whole document
+// via w.failed.
+static void want_u8(Walker& w, uint32_t i, uint32_t max_value, uint8_t* out)
+{
+    uint32_t value = 0;
+    want_uint(w, i, max_value, &value);
+    if (! w.failed) {
+        *out = static_cast<uint8_t>(value);
+    }
+}
+
 static void want_float(Walker& w, uint32_t i, float* out)
 {
     const jsmntok_t& t = w.toks[i];
@@ -1738,11 +1750,8 @@ static void decode_mod_input_fields(Walker&          w,
         else if (key_eq(w, key_idx, "scale"))
             want_float(w, val_idx, &in.scale);
         else if (key_eq(w, key_idx, "cc_number")) {
-            // Decode through a 32-bit local (want_uint writes four bytes); never cast
-            // the &in.cc_number pointer (a four-byte write through a one-byte field).
             // Controller numbers are 7-bit: a cc_number above 127 is refused at decode.
-            want_uint(w, val_idx, 0x7F, &value);
-            in.cc_number = static_cast<uint8_t>(value);
+            want_u8(w, val_idx, 0x7F, &in.cc_number);
         }
         else
             unknown(w, key_idx);
@@ -1893,7 +1902,6 @@ static bool envelope_member(Walker&                    w,
                             Synth::EnvelopeDescriptor& env,
                             EnvelopeFields&            fields)
 {
-    uint32_t value = 0;
 
     if (key_eq(w, key_idx, "num_points")) {
         want_uint(w, val_idx, Synth::max_envelope_points, &fields.num_points);
@@ -1901,13 +1909,11 @@ static bool envelope_member(Walker&                    w,
         return true;
     }
     if (key_eq(w, key_idx, "sustain_first")) {
-        want_uint(w, val_idx, Synth::max_envelope_points - 1, &value);
-        env.sustain_first_point = static_cast<uint8_t>(value);
+        want_u8(w, val_idx, Synth::max_envelope_points - 1, &env.sustain_first_point);
         return true;
-    }
+        }
     if (key_eq(w, key_idx, "sustain_last")) {
-        want_uint(w, val_idx, Synth::max_envelope_points - 1, &value);
-        env.sustain_last_point = static_cast<uint8_t>(value);
+        want_u8(w, val_idx, Synth::max_envelope_points - 1, &env.sustain_last_point);
         return true;
     }
     if (key_eq(w, key_idx, "min_value")) {
@@ -2189,14 +2195,13 @@ static void decode_chain(Walker& w, uint32_t obj, Synth::EffectChainBinding& cha
 static void decode_zone(Walker& w, uint32_t obj, Synth::Zone& zone)
 {
     walk_object(w, obj, [&](uint32_t key_idx, uint32_t val_idx) {
-        uint32_t value = 0;
         if (key_eq(w, key_idx, "start")) {
-            want_uint(w, val_idx, 127, &value);
-            zone.start_note = static_cast<uint8_t>(value + 1);
+            uint8_t start = 0;
+            want_u8(w, val_idx, 127, &start);
+            zone.start_note = static_cast<uint8_t>(start + 1);
         }
         else if (key_eq(w, key_idx, "instrument")) {
-            want_uint(w, val_idx, Synth::max_instruments - 1, &value);
-            zone.instrument = static_cast<uint8_t>(value);
+            want_u8(w, val_idx, Synth::max_instruments - 1, &zone.instrument);
         }
         else
             unknown_field(w, key_idx);
@@ -2303,24 +2308,16 @@ static void decode_editor_record(Walker& w, uint32_t obj, Synth::GraphNodeLayout
 {
     walk_object(w, obj, [&](uint32_t key_idx, uint32_t val_idx) {
         if (key_eq(w, key_idx, "channel")) {
-            uint32_t value = 0;
-            want_uint(w, val_idx, 0xFF, &value);
-            record->channel = static_cast<uint8_t>(value);
+            want_u8(w, val_idx, 0xFF, &record->channel);
         }
         else if (key_eq(w, key_idx, "zone")) {
-            uint32_t value = 0;
-            want_uint(w, val_idx, 0xFF, &value);
-            record->zone = static_cast<uint8_t>(value);
+            want_u8(w, val_idx, 0xFF, &record->zone);
         }
         else if (key_eq(w, key_idx, "kind")) {
-            uint32_t value = 0;
-            want_uint(w, val_idx, 0xFF, &value);
-            record->kind = static_cast<uint8_t>(value);
+            want_u8(w, val_idx, 0xFF, &record->kind);
         }
         else if (key_eq(w, key_idx, "index")) {
-            uint32_t value = 0;
-            want_uint(w, val_idx, 0xFF, &value);
-            record->index = static_cast<uint8_t>(value);
+            want_u8(w, val_idx, 0xFF, &record->index);
         }
         else if (key_eq(w, key_idx, "x"))
             want_float(w, val_idx, &record->x);
@@ -2331,51 +2328,33 @@ static void decode_editor_record(Walker& w, uint32_t obj, Synth::GraphNodeLayout
         else if (key_eq(w, key_idx, "height"))
             want_float(w, val_idx, &record->height_override);
         else if (key_eq(w, key_idx, "depth_source")) {
-            uint32_t value = 0;
-            want_uint(w, val_idx, 0xFF, &value);
-            record->depth_source = static_cast<uint8_t>(value);
+            want_u8(w, val_idx, 0xFF, &record->depth_source);
         }
         else if (key_eq(w, key_idx, "rate_source")) {
-            uint32_t value = 0;
-            want_uint(w, val_idx, 0xFF, &value);
-            record->rate_source = static_cast<uint8_t>(value);
+            want_u8(w, val_idx, 0xFF, &record->rate_source);
         }
         else if (key_eq(w, key_idx, "uid")) {
-            uint32_t value = 0;
-            want_uint(w, val_idx, 0xFF, &value);
-            record->uid = static_cast<uint8_t>(value);
+            want_u8(w, val_idx, 0xFF, &record->uid);
         }
         // Kind-3 partial-wiring persistence; the keys are optional and
         // decode to zero when absent.
         else if (key_eq(w, key_idx, "served")) {
-            uint32_t value = 0;
-            want_uint(w, val_idx, 0xFF, &value);
-            record->served = static_cast<uint8_t>(value);
+            want_u8(w, val_idx, 0xFF, &record->served);
         }
         else if (key_eq(w, key_idx, "env_desc_id")) {
-            uint32_t value = 0;
-            want_uint(w, val_idx, 0xFF, &value);
-            record->env_desc_id = static_cast<uint8_t>(value);
+            want_u8(w, val_idx, 0xFF, &record->env_desc_id);
         }
         else if (key_eq(w, key_idx, "lfo_desc_id")) {
-            uint32_t value = 0;
-            want_uint(w, val_idx, 0xFF, &value);
-            record->lfo_desc_id = static_cast<uint8_t>(value);
+            want_u8(w, val_idx, 0xFF, &record->lfo_desc_id);
         }
         else if (key_eq(w, key_idx, "lfo_depth_source")) {
-            uint32_t value = 0;
-            want_uint(w, val_idx, 0xFF, &value);
-            record->lfo_depth_source = static_cast<uint8_t>(value);
+            want_u8(w, val_idx, 0xFF, &record->lfo_depth_source);
         }
         else if (key_eq(w, key_idx, "lfo_rate_source")) {
-            uint32_t value = 0;
-            want_uint(w, val_idx, 0xFF, &value);
-            record->lfo_rate_source = static_cast<uint8_t>(value);
+            want_u8(w, val_idx, 0xFF, &record->lfo_rate_source);
         }
         else if (key_eq(w, key_idx, "param_slot")) {
-            uint32_t value = 0;
-            want_uint(w, val_idx, 0xFF, &value);
-            record->param_slot = static_cast<uint8_t>(value);
+            want_u8(w, val_idx, 0xFF, &record->param_slot);
         }
         else if (key_eq(w, key_idx, "name"))
             want_text(w, val_idx, record->name, sizeof(record->name));
@@ -2416,9 +2395,7 @@ static void decode_effect_audio(Walker& walker, uint32_t token, Sculptor::Effect
     }
     out->explicit_edges = 1;
     walk_array(walker, token, Synth::max_chain_effects + 1, [&](uint32_t element, uint32_t position) {
-        uint32_t value = 0;
-        want_uint(walker, element, Synth::max_chain_effects + 1, &value);
-        out->next[position] = static_cast<uint8_t>(value);
+        want_u8(walker, element, Synth::max_chain_effects + 1, &out->next[position]);
     });
 }
 
@@ -2473,11 +2450,9 @@ static void decode_editor_state(Walker& w, uint32_t val_idx, Synth::InstrumentEd
         else if (key_eq(w, key_idx, "missing_sum")) {
             walk_array(w, inner_idx, Synth::max_channels, [&](uint32_t row_elem, uint32_t channel) {
                 walk_array(w, row_elem, Synth::max_instr_per_channel, [&](uint32_t elem, uint32_t zone) {
-                    uint32_t value = 0;
-                    want_uint(w, elem, 0x7F, &value); // only the seven layer bits are meaningful
+                    want_u8(w, elem, 0x7F, &out->graph_missing_sum[channel][zone]); // only the seven layer bits are meaningful
                     if (w.failed)
                         return;
-                    out->graph_missing_sum[channel][zone] = static_cast<uint8_t>(value);
                 });
             });
         }
@@ -2514,12 +2489,7 @@ static void decode_bank(Walker& w, uint32_t obj, Synth::InstrumentEditorBank* ou
 {
     bool editor_present = false;
     walk_object(w, obj, [&](uint32_t key_idx, uint32_t val_idx) {
-        if (key_eq(w, key_idx, "drum_track_channel")) {
-            uint32_t value = 0;
-            want_uint(w, val_idx, 0xFF, &value);
-            out->bank.drum_track_channel = static_cast<uint8_t>(value);
-        }
-        else if (key_eq(w, key_idx, "instruments"))
+        if (key_eq(w, key_idx, "instruments"))
             decode_instruments(w, val_idx, out);
         else if (key_eq(w, key_idx, "envelopes"))
             decode_envelopes(w, val_idx, out);
@@ -2557,7 +2527,6 @@ static void decode_bank(Walker& w, uint32_t obj, Synth::InstrumentEditorBank* ou
 static void fill_default_editor_bank(Synth::InstrumentEditorBank* bank)
 {
     memset(bank, 0, sizeof(*bank));
-    bank->bank.drum_track_channel = 9;
     for (uint32_t c = 0; c < Synth::max_channels; c++)
         Synth::get_default_channel_name(c, bank->channel_names[c], Synth::max_name_len);
 }
@@ -3477,22 +3446,22 @@ bool Synth::decode_instrument_json_for_domain(const char*            text,
                             record.height_override = number;
                     }
                     else {
-                        uint32_t number = 0;
-                        want_uint(w, value, 255, &number);
+                        uint8_t number = 0;
+                        want_u8(w, value, 255, &number);
                         if (key == 0)
-                            record.kind = static_cast<uint8_t>(number);
+                            record.kind = number;
                         if (key == 5)
-                            record.canonical_index = static_cast<uint8_t>(number);
+                            record.canonical_index = number;
                         if (key == 6)
-                            record.layer = static_cast<uint8_t>(number);
+                            record.layer = number;
                         if (key == 7)
-                            record.target = static_cast<uint8_t>(number);
+                            record.target = number;
                         if (key == 8)
-                            record.depth_source = static_cast<uint8_t>(number);
+                            record.depth_source = number;
                         if (key == 9)
-                            record.rate_source = static_cast<uint8_t>(number);
+                            record.rate_source = number;
                         if (key == 10)
-                            record.parameter_ordinal = static_cast<uint8_t>(number);
+                            record.parameter_ordinal = number;
                     }
                 });
                 const uint32_t locator_keys[] = { 1u << 5,

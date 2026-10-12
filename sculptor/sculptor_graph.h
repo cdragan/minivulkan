@@ -167,7 +167,6 @@ enum class ChangeKind : uint8_t {
     color_changed            = 9,
     ghost_placed             = 10,
     connection_changed       = 11, // one end retargeted in place
-    connection_insert_before = 12, // serial reorder intent; live wire is unchanged
 };
 
 // Events carry indices, not values: the caller reads current state via the
@@ -182,27 +181,11 @@ struct GraphChange {
     // the live pool to resolve a connection event.
     EndPoint connection_output; // valid for connection_* kinds
     EndPoint connection_input;
-    // connection_changed and connection_insert_before: original input identity.
-    // Literal retargets undo derived state keyed on the old wire; serial
-    // reorder intents identify the grabbed effect without mutating that wire.
-    // pool_no_slot endpoints for the other connection kinds.
+ // connection_changed: original input identity, so a retarget can undo
+ // derived state keyed on the old wire. pool_no_slot endpoints for the
     EndPoint connection_prev_input;
 };
 
-enum class ConnectionRetargetDecision : uint8_t {
-    fallthrough,
-    insert_before,
-    handled_noop,
-    reject,
-};
-
-using ConnectionRetargetInterceptor = ConnectionRetargetDecision (*)(void*    user_data,
-                                                                     uint32_t connection_idx,
-                                                                     bool     move_output_end,
-                                                                     EndPoint target);
-
-// True handles a user disconnect as cancellation; false permits raw deletion.
-using ConnectionDisconnectInterceptor = bool (*)(void* user_data, uint32_t connection_idx);
 
 // Caller display filter for projected slots: return true to omit the slot
 // from line layout and connector hit-testing for as long as the filter says
@@ -256,10 +239,7 @@ enum class AlignKind : uint8_t {
     equal_height = 5,
 };
 
-// Optional caller-state serialization hooks, appended to graph snapshots so
 // undo/redo and files include caller state (e.g. synth patch parameters).
-using SerializeState   = uint32_t (*)(void* user_data, uint8_t* buffer, uint32_t buffer_size);
-using DeserializeState = bool (*)(void* user_data, const uint8_t* buffer, uint32_t buffer_size);
 
 class Graph {
 public:
@@ -290,9 +270,6 @@ public:
     // structural checks plus the caller validator and report failure through
     // the error overlay instead of silently returning an index.
     void set_validator(ValidationCallback callback, void* user_data);
-    // Runs before generic self/occupancy guards; insert_before captures the
-    // original input in connection_prev_input without changing the live wire.
-    void set_retarget_interceptor(ConnectionRetargetInterceptor callback, void* user_data);
 
     // Connection index excluded from validation while move_connection_end
     // re-lands an existing wire (pool_no_slot otherwise).  The validator sees
@@ -300,7 +277,6 @@ public:
     // moved wire's current endpoint would refuse the move spuriously.  Managed
     // by move_connection_end; read-only for validators.
     uint32_t moving_connection = pool_no_slot;
-    void     set_disconnect_interceptor(ConnectionDisconnectInterceptor callback, void* user_data);
     // Installs the caller's slot display filter (see SlotHiddenCallback).
     void     set_slot_hidden_callback(SlotHiddenCallback callback, void* user_data);
     // True means deleted or handled cancellation; false means invalid/stale index.
@@ -309,8 +285,8 @@ public:
     // Refusal convention: delete_node stays void and refuses silently for
     // bad indices; a vetoed delete also stays void, mutates nothing,
     // pushes no events and reports through the error overlay.
-    // Snapshot restoration (load) bypasses the veto: it restores
-    // caller-driven state rather than acting on a user delete.
+    // Caller-driven rebuild (projection, bank load) bypasses the veto:
+    // it replaces state wholesale rather than acting on a user delete.
     void set_delete_veto(NodeDeleteVeto callback, void* user_data);
     bool attempt_connection(EndPoint output, EndPoint input);
 
@@ -362,16 +338,6 @@ public:
                           void*               user_data,
                           float               initial_height = 0.0f);
 
-    // Persistence: save writes a tightly packed, versioned snapshot:
-    // u16 version, graph pools, view state, colors, ghost flags, then - if
-    // state hooks are installed - caller state bytes.  load restores the graph
-    // and reports bytes consumed via *bytes_consumed so the caller can parse
-    // its own tail; the same snapshot doubles as the UndoRedo entry and file
-    // payload (Sculptor::Geometry pattern).
-    // Application is event-based: load diffs the live state against the
-    // incoming snapshot and enqueues the difference as normal GraphChange
-    // events, so a live synth ramps surgically instead of being rebuilt.
-    void set_state_callbacks(SerializeState serialize, DeserializeState deserialize, void* user_data);
 
     // Empty-canvas right-click popup: the menu is fully caller-provided and
     // the widget adds no items of its own; add-commands belong to the callback.
@@ -382,8 +348,6 @@ public:
     // Graph-space position of the right-click that opened the canvas popup,
     // for callers that place added nodes at the menu point.
     vmath::vec2 canvas_popup_pos() const;
-    uint32_t    save(uint8_t* buffer, uint32_t buffer_size) const; // returns bytes
-    bool        load(const uint8_t* buffer, uint32_t buffer_size, uint32_t* bytes_consumed);
 
     // True while a state-mutating interaction is in progress (drag, edit...).
     // The caller uses the false->true edge to push a pre-change snapshot and
@@ -523,10 +487,6 @@ private:
     // Caller validation callback.
     ValidationCallback              validator              = nullptr;
     void*                           validator_user_data    = nullptr;
-    ConnectionRetargetInterceptor   retarget_interceptor   = nullptr;
-    void*                           retarget_user_data     = nullptr;
-    ConnectionDisconnectInterceptor disconnect_interceptor = nullptr;
-    void*                           disconnect_user_data   = nullptr;
     SlotHiddenCallback              slot_hidden_callback   = nullptr;
     void*                           slot_hidden_user_data  = nullptr;
 
@@ -614,10 +574,6 @@ private:
     // tests), indexed by node_idx * max_node_slots + slot_idx.
     vmath::vec2 dot_positions[max_nodes * max_node_slots] = {};
 
-    // Persistence hooks (M4)
-    SerializeState   serialize_state   = nullptr;
-    DeserializeState deserialize_state = nullptr;
-    void*            state_user_data   = nullptr;
 };
 
 // core/pool.h defines pool_no_slot at global scope; re-exported so callers can

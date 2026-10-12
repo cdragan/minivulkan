@@ -33,6 +33,21 @@ constexpr uint32_t soundtrack_end_of_channel = 0x0FFFFFFFu;
 // Offset applied to a 14-bit MIDI pitch-bend value; MidiEvent stores it centered on zero.
 constexpr int soundtrack_pitch_bend_center = 0x2000;
 
+// Decodes a variable-length quantity at *ptr and advances it past the terminator
+// (7 bits per byte, MSB-first, high bit marks continuation). Unbounded: the encoded
+// stream guarantees termination (end_of_channel sentinel / SMF track end). Note the
+// bounded SMF variant in midi_file.cpp keeps its own bounds-checked reader.
+inline uint32_t decode_vlq(const uint8_t** ptr)
+{
+    uint32_t value = 0;
+    uint8_t  byte;
+    do {
+        byte  = *(*ptr)++;
+        value = (value << 7) | (byte & 0x7Fu);
+    } while (byte & 0x80u);
+    return value;
+}
+
 // Per-channel plane pointers into a caller-owned byte buffer.  Mirrors the player's extern arrays
 // so the build-time converter can emit these planes verbatim.
 struct Soundtrack {

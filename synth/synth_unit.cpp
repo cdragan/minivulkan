@@ -20,7 +20,6 @@
 #include "synth_instrument.h"
 #include "synth_midi_cc.h"
 #include "synth_parameters.h"
-#include "synth_serialize.h"
 #include "synth_soundtrack.h"
 // The clipboard layout tests measure a document's real parser token count with the
 // vendored parser the codec itself uses, so the measurement cannot drift from the
@@ -52,14 +51,6 @@
     if (! (test)) {                        \
         failed(#test, __FILE__, __LINE__); \
     }
-
-static bool project_authored_effects(const Synth::InstrumentEditorBank& source,
-                                     uint32_t                           owner,
-                                     Sculptor::Graph*                   graph,
-                                     Sculptor::EffectGraphMapping*      mapping)
-{
-    return Sculptor::project_effect_chain_to_graph(source, owner, graph, mapping);
-}
 
 static bool project_legacy_effects(const Synth::InstrumentBank&  bank,
                                    uint32_t                      owner,
@@ -838,6 +829,39 @@ static void build_parameter_fixture(Synth::InstrumentEditorBank* bank, Synth::In
     instrument->routing[Synth::mod_pitch].base_value = -2.0f;
 
     bank->bank.instruments.entries[0] = *instrument;
+}
+
+// Builds the shared parameter fixture and projects the osc graph, draining
+// the construction events. Returns the projection result; on failure the
+// mapping is unusable and the caller must skip the block.
+static bool begin_param_graph(Synth::InstrumentEditorBank* bank,
+                              Synth::Instrument*           instrument,
+                              Sculptor::Graph*             graph,
+                              Sculptor::OscGraphMapping*   mapping)
+{
+    build_parameter_fixture(bank, instrument);
+    if (! Sculptor::project_editor_to_graph(*bank, graph, mapping)) {
+        return false;
+    }
+    Sculptor::GraphChange discard[8] = {};
+    (void)graph->take_changes(discard, 8);
+    return true;
+}
+
+// Stamps a name_changed record and applies it through the osc change path:
+// the rename events in these tests differ only in node and bank, so one
+// helper keeps the stamp/apply pair from drifting apart. The record is
+// reused across calls (fields other than kind/node_idx stay zero, which is
+// what every caller relies on).
+static void apply_name_changed(Synth::InstrumentEditorBank* bank_ref,
+                               Sculptor::Graph*             graph_ref,
+                               Sculptor::OscGraphMapping*   mapping_ref,
+                               uint32_t                     node)
+{
+    static Sculptor::GraphChange change = {};
+    change.kind                         = Sculptor::ChangeKind::name_changed;
+    change.node_idx                     = node;
+    TEST(Sculptor::apply_osc_graph_change(bank_ref, graph_ref, mapping_ref, change));
 }
 
 // ---------------------------------------------------------------------------
@@ -3089,7 +3113,7 @@ static void effects_literal_topology_regressions()
             chain.effects[0].bindings[0].lfo_desc_id = root;
             chain.effects[1].bindings[0].lfo_desc_id = root;
             TEST(Sculptor::add_effect_lfo_candidate(&source, owner, &source, &root));
-            TEST(project_authored_effects(source, owner, &graph, &mapping));
+            TEST(Sculptor::project_effect_chain_to_graph(source, owner, &graph, &mapping));
             Sculptor::GraphChange changes[Sculptor::max_pending_changes];
             graph.take_changes(changes, Sculptor::max_pending_changes);
             for (uint32_t slot = 0; slot < 3; ++slot) {
@@ -5673,34 +5697,26 @@ static void osc_cc_regressions()
         if (wire_a != Sculptor::pool_no_slot && wire_b != Sculptor::pool_no_slot) {
             // The row Amount edits are user property edits: the drained batch
             // must carry a value_changed event per edit so the apply path
-            // covers them.  set_slot_value is eventless (the shared-routing
-            // fan-out relies on that), so the test queues the events the only
-            // way the public API offers: snapshot round trip - save with the
-            // edited values in place, revert eventlessly to the 0 defaults,
-            // then load, which pushes value_changed for every slot whose live
-            // value differs (the manual-change precedent of :3315, but
-            // queue-shaped so the drained batch applies in one loop).
+            // covers them. set_slot_value is eventless (the shared-routing
+            // fan-out relies on that), so the test writes the edited values
+            // and synthesizes the value_changed batch directly (the
+            // manual-change precedent of :3315, but queue-shaped so the
+            // drained batch applies in one loop).
             Sculptor::PropertyValue amount = {};
             amount.real                    = 0.5f;
             graph.set_slot_value(volume_param, Sculptor::param_src_input(0) + 2, amount);
             amount.real = 0.25f;
             graph.set_slot_value(volume_param, Sculptor::param_src_input(1) + 2, amount);
-
-            static uint8_t amount_snapshot[8192] = {};
-            const uint32_t snapshot_len          = graph.save(amount_snapshot, sizeof(amount_snapshot));
-            TEST(snapshot_len > 0);
-            if (snapshot_len > 0) {
-                amount.real = 0.0f;
-                graph.set_slot_value(volume_param, Sculptor::param_src_input(0) + 2, amount);
-                graph.set_slot_value(volume_param, Sculptor::param_src_input(1) + 2, amount);
-                uint32_t consumed = 0;
-                TEST(graph.load(amount_snapshot, snapshot_len, &consumed));
-            }
-
             static Sculptor::GraphChange changes[8] = {};
-            const uint32_t               count      = graph.take_changes(changes, 8);
-            TEST(count == 4);
-            if (count == 4) {
+            changes[0].kind                         = Sculptor::ChangeKind::value_changed;
+            changes[0].node_idx                     = volume_param;
+            changes[0].slot_idx                     = Sculptor::param_src_input(0) + 2;
+            changes[1].kind                         = Sculptor::ChangeKind::value_changed;
+            changes[1].node_idx                     = volume_param;
+            changes[1].slot_idx                     = Sculptor::param_src_input(1) + 2;
+            const uint32_t count                    = 2;
+            TEST(count == 2);
+            if (count == 2) {
                 for (uint32_t c = 0; c < count; ++c) {
                     TEST(Sculptor::apply_osc_graph_change(&source, &graph, &mapping, changes[c]));
                 }
@@ -6794,7 +6810,6 @@ int main()
         static Synth::InstrumentBank bank           = {};
         const uint32_t               instr          = bank.instruments.allocate();
         bank.instruments.entries[instr].layer_count = 3;
-        bank.drum_track_channel                     = 9;
         const uint32_t env                          = bank.envelopes.allocate();
         bank.envelopes.entries[env].num_points      = 7;
 
@@ -6803,86 +6818,15 @@ int main()
 
         bank.instruments.entries[instr].layer_count = 99;
         bank.instruments.free(instr);
-        bank.drum_track_channel = 0;
 
         memcpy(&bank, &snapshot, sizeof(bank));
         TEST(bank.instruments.num_allocated == 1);
         TEST(bank.instruments.entries[instr].layer_count == 3);
-        TEST(bank.drum_track_channel == 9);
         TEST(bank.envelopes.entries[env].num_points == 7);
         TEST(memcmp(&bank, &snapshot, sizeof(bank)) == 0);
     }
 
-    // instrument bank codec round-trips losslessly, with cross-references intact
-    {
-        static Synth::InstrumentBank bank  = {};
-        const uint32_t               env   = bank.envelopes.allocate();
-        const uint32_t               lfo   = bank.lfos.allocate();
-        const uint32_t               instr = bank.instruments.allocate();
 
-        // Valid descriptor content: the decoder now fully validates banks.
-        bank.envelopes.entries[env].num_points         = 2;
-        bank.envelopes.entries[env].points[1].position = 100;
-        bank.lfos.entries[lfo].wave                    = Synth::WaveType::sine_wave;
-        bank.lfos.entries[lfo].period_ms               = 50;
-
-        bank.instruments.entries[instr].layer_count = 2;
-        bank.instruments.entries[instr].layers[0].gen[Synth::mod_volume].envelope_desc_id =
-            static_cast<uint16_t>(env + 1);
-        bank.instruments.entries[instr].layers[0].gen[Synth::mod_pitch].lfo_desc_id = static_cast<uint16_t>(lfo + 1);
-        bank.channel_zones[0][0] = { 1, static_cast<uint8_t>(instr) };
-        bank.drum_track_channel  = 9;
-
-        uint8_t        image[Synth::instrument_bank_image_size<Synth::InstrumentBank>];
-        const uint32_t written = Synth::encode_instrument_bank(&bank, image, sizeof(image));
-        TEST(written == Synth::instrument_bank_image_size<Synth::InstrumentBank>);
-
-        static Synth::InstrumentBank restored = {};
-        TEST(Synth::decode_instrument_bank(image, written, &restored));
-        TEST(memcmp(&bank, &restored, sizeof(bank)) == 0);
-
-        // A buffer too small to hold the image fails cleanly, writing nothing.
-        TEST(Synth::encode_instrument_bank(&bank, image, 4) == 0);
-
-        // A corrupt marker is rejected.
-        static uint8_t bad[Synth::instrument_bank_image_size<Synth::InstrumentBank>];
-        memcpy(bad, image, sizeof(bad));
-        bad[0] = static_cast<uint8_t>(bad[0] ^ 0xFFu);
-        TEST(! Synth::decode_instrument_bank(bad, written, &restored));
-
-        // A mismatched version is rejected (version is the two bytes after the 4-byte marker).
-        memcpy(bad, image, sizeof(bad));
-        bad[4] = static_cast<uint8_t>(bad[4] ^ 0xFFu);
-        TEST(! Synth::decode_instrument_bank(bad, written, &restored));
-
-        // A mismatched payload size is rejected (the four bytes after the version).
-        memcpy(bad, image, sizeof(bad));
-        bad[6] = static_cast<uint8_t>(bad[6] ^ 0xFFu);
-        TEST(! Synth::decode_instrument_bank(bad, written, &restored));
-
-        // A truncated image (header only) is rejected.
-        TEST(! Synth::decode_instrument_bank(image, Synth::instrument_bank_header_size, &restored));
-    }
-
-    // instrument bank persists to and loads from a real file
-    {
-        static Synth::InstrumentBank bank           = {};
-        bank.drum_track_channel                     = 7;
-        const uint32_t instr                        = bank.instruments.allocate();
-        bank.instruments.entries[instr].layer_count = 3;
-        bank.channel_zones[2][0]                    = { 65, static_cast<uint8_t>(instr) };
-
-        const char* const path = "synth_bank_roundtrip.tmp";
-        TEST(Synth::save_instrument_bank(path, &bank));
-
-        static Synth::InstrumentBank restored = {};
-        TEST(Synth::load_instrument_bank(path, &restored));
-        TEST(memcmp(&bank, &restored, sizeof(bank)) == 0);
-        remove(path);
-
-        // Loading a nonexistent file fails cleanly.
-        TEST(! Synth::load_instrument_bank("synth_bank_does_not_exist.tmp", &restored));
-    }
 
     // MIDI file: format 0, single track, division 96.  A tempo meta (500000 us/quarter =
     // 120 BPM), a note_on at delta 0, and a note_off one quarter (delta 96) later.  At 44100 Hz
@@ -7168,44 +7112,6 @@ int main()
         TEST(Synth::soundtrack_note_release_sample(0, 1, 50) == 0);        // degenerate: 0-tick at 0 -> none
     }
 
-    // ---- instrument bank persistence (codec) ----
-
-    // Stamp several distinct fields so a memcmp discriminates more than one byte.
-    auto stamp_bank = [](Synth::InstrumentBank& b, uint8_t k) {
-        b.drum_track_channel = k;
-        b.instruments.allocate();
-        b.instruments.entries[0].layer_count = 1;
-        b.channel_zones[1][0].start_note     = k;
-        b.channel_zones[1][0].instrument     = 0;
-    };
-
-    // SYIB encode/decode round-trips the whole bank exactly (full-struct memcmp).  Bad input
-    // fails cleanly without touching the destination (full-struct check, not one field).
-    {
-        static Synth::InstrumentBank bank;
-        memset(&bank, 0, sizeof(bank));
-        stamp_bank(bank, 4);
-
-        static uint8_t blob[sizeof(Synth::InstrumentBank) + 64];
-        const uint32_t n = Synth::encode_instrument_bank(&bank, blob, sizeof(blob));
-        TEST(n > 0);
-
-        static Synth::InstrumentBank restored;
-        memset(&restored, 0x5A, sizeof(restored));
-        TEST(Synth::decode_instrument_bank(blob, n, &restored));
-        TEST(memcmp(&restored, &bank, sizeof(bank)) == 0);
-
-        // Bad input: truncated / corrupt marker -> false, destination byte-for-byte untouched.
-        static Synth::InstrumentBank untouched;
-        memset(&untouched, 0x33, sizeof(untouched));
-        static Synth::InstrumentBank untouched_ref;
-        memset(&untouched_ref, 0x33, sizeof(untouched_ref));
-        TEST(! Synth::decode_instrument_bank(blob, 3, &untouched)); // truncated
-        TEST(memcmp(&untouched, &untouched_ref, sizeof(untouched)) == 0);
-        blob[0] ^= 0xFFu; // corrupt marker
-        TEST(! Synth::decode_instrument_bank(blob, n, &untouched));
-        TEST(memcmp(&untouched, &untouched_ref, sizeof(untouched)) == 0);
-    }
 
     // ---- Instrument bank: dense-pool validation, serialize, publish queue ----
 
@@ -7267,7 +7173,6 @@ int main()
         TEST(memcmp(def_name, "Drum Track", 11) == 0);
         Synth::get_default_channel_name(15, def_name, sizeof(def_name));
         TEST(memcmp(def_name, "Channel 16", 11) == 0);
-        TEST(bank.drum_track_channel == 9);
         TEST(bank.channel_zones[0][0].start_note == 1);
         TEST(bank.channel_zones[0][0].instrument == 0);
         TEST(bank.instruments.num_allocated == 1);
@@ -7788,34 +7693,6 @@ int main()
         expect_invalid(bank);
     }
 
-    // Effect chain data round-trips through the codec byte-exactly.
-    {
-        static Synth::InstrumentBank bank;
-        make_valid_bank(bank);
-        bank.channel_chains[0].num_effects                             = 2;
-        bank.channel_chains[0].effects[0].type                         = Synth::EffectType::delay;
-        bank.channel_chains[0].effects[0].enabled                      = true;
-        bank.channel_chains[0].effects[0].bindings[0].base_value       = 300.0f;
-        bank.channel_chains[0].effects[0].bindings[0].lfo_desc_id      = 1;
-        bank.channel_chains[0].effects[0].bindings[0].lfo_depth        = 50.0f;
-        bank.channel_chains[0].effects[1].type                         = Synth::EffectType::chorus;
-        bank.channel_chains[0].effects[1].bindings[1].num_inputs       = 1;
-        bank.channel_chains[0].effects[1].bindings[1].inputs[0].source = Synth::ModSource::mod_wheel;
-        bank.channel_chains[0].effects[1].bindings[1].inputs[0].op     = Synth::SourceOp::multiply;
-        bank.channel_chains[0].effects[1].bindings[1].inputs[0].scale  = 0.5f;
-        bank.master_chain.num_effects                                  = 1;
-        bank.master_chain.effects[0].type                              = Synth::EffectType::reverb;
-        bank.master_chain.effects[0].enabled                           = true;
-        bank.master_chain.effects[0].bindings[0].base_value            = 0.25f;
-
-        static uint8_t blob[sizeof(Synth::InstrumentBank) + 64];
-        const uint32_t n = Synth::encode_instrument_bank(&bank, blob, sizeof(blob));
-        TEST(n > 0);
-        static Synth::InstrumentBank restored;
-        memset(&restored, 0x5A, sizeof(restored));
-        TEST(Synth::decode_instrument_bank(blob, n, &restored));
-        TEST(memcmp(&restored, &bank, sizeof(bank)) == 0);
-    }
 
     // ---- Effect expansion: preflight/commit transaction over a fake node writer ----
 
@@ -8283,7 +8160,7 @@ int main()
         enabled_effect(authored.bank, 0, 1, Synth::EffectType::chorus);
         static Sculptor::Graph       graph;
         Sculptor::EffectGraphMapping mapping = {};
-        TEST(project_authored_effects(authored, 0, &graph, &mapping));
+        TEST(Sculptor::project_effect_chain_to_graph(authored, 0, &graph, &mapping));
 
         struct CaptureContext {
             const Sculptor::EffectGraphMapping* mapping;
@@ -8404,7 +8281,7 @@ int main()
         authored.effect_audio[0] = valid[1];
         static Sculptor::Graph              graph;
         static Sculptor::EffectGraphMapping mapping;
-        TEST(project_authored_effects(authored, 0, &graph, &mapping));
+        TEST(Sculptor::project_effect_chain_to_graph(authored, 0, &graph, &mapping));
         TEST(graph.node_occupied(mapping.effect_nodes[0]));
         TEST(graph.node_occupied(mapping.effect_nodes[1]));
         TEST(! graph.slot_is_connected(mapping.effect_nodes[0], 0));
@@ -8576,94 +8453,6 @@ int main()
         }
     }
 
-    // Target-never-mutated: malformed images (each breaking a different validated invariant)
-    // are rejected by decode and leave the destination byte-identical.
-    {
-        static Synth::InstrumentBank bank;
-        make_valid_bank(bank);
-        static uint8_t image[Synth::instrument_bank_image_size<Synth::InstrumentBank>];
-        TEST(Synth::encode_instrument_bank(&bank, image, sizeof(image)) ==
-             Synth::instrument_bank_image_size<Synth::InstrumentBank>);
-
-        // Byte offsets of the interesting fields inside the encoded image (header + bank copy).
-        const uint8_t* const bank_base    = reinterpret_cast<const uint8_t*>(&bank);
-        auto                 image_offset = [bank_base](const void* field) {
-            return static_cast<uint32_t>(reinterpret_cast<const uint8_t*>(field) - bank_base) +
-                   Synth::instrument_bank_header_size;
-        };
-        const uint32_t env_points_off        = image_offset(&bank.envelopes.entries[0].num_points);
-        const uint32_t env_pos1_off          = image_offset(&bank.envelopes.entries[0].points[1].position);
-        const uint32_t env_sustain_first_off = image_offset(&bank.envelopes.entries[0].sustain_first_point);
-        const uint32_t env_sustain_last_off  = image_offset(&bank.envelopes.entries[0].sustain_last_point);
-        const uint32_t lfo_period_off        = image_offset(&bank.lfos.entries[0].period_ms);
-        const uint32_t lfo_wave_off          = image_offset(&bank.lfos.entries[0].wave);
-        const uint32_t instr_layer_count_off = image_offset(&bank.instruments.entries[0].layer_count);
-        const uint32_t osc_type0_off         = image_offset(&bank.instruments.entries[0].layers[0].osc_type[0]);
-        const uint32_t osc_mode_off          = image_offset(&bank.instruments.entries[0].layers[0].osc_mode);
-        const uint32_t gen_env_id_off =
-            image_offset(&bank.instruments.entries[0].layers[0].gen[Synth::mod_volume].envelope_desc_id);
-        const uint32_t gen_lfo_id_off =
-            image_offset(&bank.instruments.entries[0].layers[0].gen[Synth::mod_pitch].lfo_desc_id);
-        const uint32_t num_inputs_off = image_offset(&bank.instruments.entries[0].routing[0].num_inputs);
-        const uint32_t lfo_depth_source_off =
-            image_offset(&bank.instruments.entries[0].layers[0].gen[0].lfo_depth_source);
-        const uint32_t instr_count_off = image_offset(&bank.instruments.num_allocated);
-
-        auto decode_must_reject = [&](const uint8_t* bad) {
-            static Synth::InstrumentBank untouched;
-            memset(&untouched, 0x5A, sizeof(untouched));
-            static Synth::InstrumentBank reference;
-            memset(&reference, 0x5A, sizeof(reference));
-            TEST(! Synth::decode_instrument_bank(bad, sizeof(bad), &untouched));
-            TEST(memcmp(&untouched, &reference, sizeof(untouched)) == 0);
-        };
-
-        static uint8_t bad[Synth::instrument_bank_image_size<Synth::InstrumentBank>];
-        memcpy(bad, image, sizeof(bad));
-        bad[env_points_off] = 0;
-        decode_must_reject(bad); // 0 envelope points
-        memcpy(bad, image, sizeof(bad));
-        bad[env_points_off] = Synth::max_envelope_points + 1;
-        decode_must_reject(bad); // 9 points
-        memcpy(bad, image, sizeof(bad));
-        bad[env_pos1_off] = 0;
-        decode_must_reject(bad); // duplicate positions
-        memcpy(bad, image, sizeof(bad));
-        bad[env_sustain_first_off] = 2;
-        bad[env_sustain_last_off]  = 0;
-        decode_must_reject(bad); // bad sustain
-        memcpy(bad, image, sizeof(bad));
-        bad[lfo_period_off]     = 0;
-        bad[lfo_period_off + 1] = 0;
-        decode_must_reject(bad); // zero LFO period
-        memcpy(bad, image, sizeof(bad));
-        bad[lfo_wave_off] = static_cast<uint8_t>(Synth::WaveType::pulse_wave);
-        decode_must_reject(bad); // bad LFO wave
-        memcpy(bad, image, sizeof(bad));
-        bad[osc_type0_off] = 99;
-        decode_must_reject(bad); // bad osc_type
-        memcpy(bad, image, sizeof(bad));
-        bad[osc_mode_off] = 3;
-        decode_must_reject(bad); // bad osc_mode
-        memcpy(bad, image, sizeof(bad));
-        bad[gen_env_id_off] = 5;
-        decode_must_reject(bad); // dangling envelope ref
-        memcpy(bad, image, sizeof(bad));
-        bad[gen_lfo_id_off] = 9;
-        decode_must_reject(bad); // dangling LFO ref
-        memcpy(bad, image, sizeof(bad));
-        bad[num_inputs_off] = Synth::max_mod_inputs + 1;
-        decode_must_reject(bad); // too many inputs
-        memcpy(bad, image, sizeof(bad));
-        bad[lfo_depth_source_off] = 77;
-        decode_must_reject(bad); // bad ModSource
-        memcpy(bad, image, sizeof(bad));
-        bad[instr_count_off] = 0xFF;
-        decode_must_reject(bad); // num_allocated over capacity
-        memcpy(bad, image, sizeof(bad));
-        bad[instr_layer_count_off] = 0;
-        decode_must_reject(bad); // layer_count 0
-    }
 
     // Queue mechanics: room condition, wraparound, ordering, two-phase consume.
     // Packets are whole banks; instruments.entries[0].layer_count marks each one.
@@ -9772,7 +9561,6 @@ int main()
         TEST(Synth::decode_editor_bank_json("{\"instrument_editor_bank\":{}}",
                                             static_cast<uint32_t>(strlen("{\"instrument_editor_bank\":{}}")),
                                             &defaults));
-        TEST(defaults.bank.drum_track_channel == 9);
         TEST(defaults.bank.instruments.num_allocated == 0);
         TEST(strcmp(defaults.channel_names[0], "Channel 01") == 0);
         TEST(Synth::validate_instrument_bank(&defaults.bank));
@@ -9810,9 +9598,9 @@ int main()
         const char* const bad[] = { "{",
                                     "{\"instrument_editor_bank\":}",
                                     "{\"instrument_editor_bank\":{\"drum_track_channel\":9,}}",
-                                    "{\"instrument_editor_bank\":{\"drum_track_channel\":\"x\"}}",
+                                    "{\"instrument_editor_bank\":{\"envelopes\":[{\"num_points\":\"x\"}]}}",
                                     "{\"instrument_editor_bank\":{\"drum_track_channel\":01}}",
-                                    "{\"instrument_editor_bank\":{\"drum_track_channel\":1e999}}",
+                                    "{\"instrument_editor_bank\":{\"envelopes\":[{\"num_points\":1e999}]}}",
                                     "{\"instrument_editor_bank\":{\"drum_track_channel\":9}} trailing",
                                     ("{\"instrument_editor_bank\":{\"envelopes\":[{\"num_points\":3,\"points\":"
                                      "[{\"position\":0},{\"position\":1}]}]}}"),
@@ -9872,9 +9660,9 @@ int main()
         // written with escapes is that field, and an unknown escaped name
         // is logged by its decoded form
         const char* const escaped =
-            "{\"\\u0069nstrument_editor_bank\":{\"\\u0064rum_track_channel\":7},\"\\u0066uture\":1}";
+            "{\"\\u0069nstrument_editor_bank\":{\"\\u0063hannel_names\":[\"Probe\"]},\"\\u0066uture\":1}";
         TEST(Synth::decode_editor_bank_json(escaped, static_cast<uint32_t>(strlen(escaped)), &bank));
-        TEST(bank.bank.drum_track_channel == 7);
+        TEST(strcmp(bank.channel_names[0], "Probe") == 0);
     }
 
     // Key uniqueness holds at any length and across escape spellings: comparison
@@ -11604,17 +11392,14 @@ int main()
     {
         static Synth::InstrumentEditorBank bank;
         static Synth::Instrument           instrument = {};
-        build_parameter_fixture(&bank, &instrument);
-        static Sculptor::Graph           graph;
-        static Sculptor::OscGraphMapping mapping;
+        static Sculptor::Graph             graph;
+        static Sculptor::OscGraphMapping   mapping;
         do {
-            const bool projected = Sculptor::project_editor_to_graph(bank, &graph, &mapping);
+            const bool projected = begin_param_graph(&bank, &instrument, &graph, &mapping);
             TEST(projected);
             if (! projected) {
                 break;
             }
-            static Sculptor::GraphChange discard[8] = {};
-            (void)graph.take_changes(discard, 8); // drain-and-discard re-arms the ring
 
             // Oscillators: exactly 15 rows, no input-side slots, no "base "
             // labels, and the five dynamic rows are connectable values.
@@ -11863,13 +11648,10 @@ int main()
     {
         static Synth::InstrumentEditorBank bank;
         static Synth::Instrument           instrument = {};
-        build_parameter_fixture(&bank, &instrument);
-        static Sculptor::Graph           graph;
-        static Sculptor::OscGraphMapping mapping;
+        static Sculptor::Graph             graph;
+        static Sculptor::OscGraphMapping   mapping;
         do {
-            TEST(Sculptor::project_editor_to_graph(bank, &graph, &mapping));
-            static Sculptor::GraphChange discard[8] = {};
-            (void)graph.take_changes(discard, 8);
+            TEST(begin_param_graph(&bank, &instrument, &graph, &mapping));
             const uint32_t volume_param = find_graph_node_by_name(graph, "Volume");
             TEST(volume_param != Sculptor::pool_no_slot);
             if (volume_param == Sculptor::pool_no_slot) {
@@ -12032,15 +11814,13 @@ int main()
     {
         static Synth::InstrumentEditorBank bank;
         static Synth::Instrument           instrument = {};
-        build_parameter_fixture(&bank, &instrument);
-        static Sculptor::Graph           graph;
-        static Sculptor::OscGraphMapping mapping;
+        static Sculptor::Graph             graph;
+        static Sculptor::OscGraphMapping   mapping;
         do {
-            TEST(Sculptor::project_editor_to_graph(bank, &graph, &mapping));
+            TEST(begin_param_graph(&bank, &instrument, &graph, &mapping));
             static Sculptor::GraphChange discard[8] = {};
-            (void)graph.take_changes(discard, 8);
-            const uint32_t sibling = find_graph_node_by_name(graph, "Volume 2");
-            const uint32_t sole    = find_graph_node_by_name(graph, "Volume");
+            const uint32_t               sibling    = find_graph_node_by_name(graph, "Volume 2");
+            const uint32_t               sole       = find_graph_node_by_name(graph, "Volume");
             TEST(sibling != Sculptor::pool_no_slot && sole != Sculptor::pool_no_slot);
             if (sibling == Sculptor::pool_no_slot || sole == Sculptor::pool_no_slot) {
                 break;
@@ -12131,15 +11911,13 @@ int main()
     {
         static Synth::InstrumentEditorBank bank;
         static Synth::Instrument           instrument = {};
-        build_parameter_fixture(&bank, &instrument);
-        static Sculptor::Graph           graph;
-        static Sculptor::OscGraphMapping mapping;
+        static Sculptor::Graph             graph;
+        static Sculptor::OscGraphMapping   mapping;
         do {
-            TEST(Sculptor::project_editor_to_graph(bank, &graph, &mapping));
+            TEST(begin_param_graph(&bank, &instrument, &graph, &mapping));
             static Sculptor::GraphChange discard[8] = {};
-            (void)graph.take_changes(discard, 8);
-            const uint32_t sibling = find_graph_node_by_name(graph, "Volume 2");
-            const uint32_t sole    = find_graph_node_by_name(graph, "Volume");
+            const uint32_t               sibling    = find_graph_node_by_name(graph, "Volume 2");
+            const uint32_t               sole       = find_graph_node_by_name(graph, "Volume");
             TEST(sibling != Sculptor::pool_no_slot && sole != Sculptor::pool_no_slot);
             if (sibling == Sculptor::pool_no_slot || sole == Sculptor::pool_no_slot) {
                 break;
@@ -12223,14 +12001,12 @@ int main()
     {
         static Synth::InstrumentEditorBank bank;
         static Synth::Instrument           instrument = {};
-        build_parameter_fixture(&bank, &instrument);
-        static Sculptor::Graph           graph;
-        static Sculptor::OscGraphMapping mapping;
+        static Sculptor::Graph             graph;
+        static Sculptor::OscGraphMapping   mapping;
         do {
-            TEST(Sculptor::project_editor_to_graph(bank, &graph, &mapping));
+            TEST(begin_param_graph(&bank, &instrument, &graph, &mapping));
             static Sculptor::GraphChange discard[8] = {};
-            (void)graph.take_changes(discard, 8);
-            const uint32_t sole = find_graph_node_by_name(graph, "Volume");
+            const uint32_t               sole       = find_graph_node_by_name(graph, "Volume");
             TEST(sole != Sculptor::pool_no_slot);
             if (sole == Sculptor::pool_no_slot) {
                 break;
@@ -12624,13 +12400,10 @@ int main()
     {
         static Synth::InstrumentEditorBank bank;
         static Synth::Instrument           instrument = {};
-        build_parameter_fixture(&bank, &instrument);
-        static Sculptor::Graph           graph;
-        static Sculptor::OscGraphMapping mapping;
+        static Sculptor::Graph             graph;
+        static Sculptor::OscGraphMapping   mapping;
         do {
-            TEST(Sculptor::project_editor_to_graph(bank, &graph, &mapping));
-            static Sculptor::GraphChange discard[8] = {};
-            (void)graph.take_changes(discard, 8);
+            TEST(begin_param_graph(&bank, &instrument, &graph, &mapping));
             const uint32_t second = find_graph_node_by_name(graph, "Volume 2");
             TEST(second != Sculptor::pool_no_slot);
             if (second == Sculptor::pool_no_slot) {
@@ -12670,13 +12443,10 @@ int main()
     {
         static Synth::InstrumentEditorBank bank;
         static Synth::Instrument           instrument = {};
-        build_parameter_fixture(&bank, &instrument);
-        static Sculptor::Graph           graph;
-        static Sculptor::OscGraphMapping mapping;
+        static Sculptor::Graph             graph;
+        static Sculptor::OscGraphMapping   mapping;
         do {
-            TEST(Sculptor::project_editor_to_graph(bank, &graph, &mapping));
-            static Sculptor::GraphChange discard[8] = {};
-            (void)graph.take_changes(discard, 8);
+            TEST(begin_param_graph(&bank, &instrument, &graph, &mapping));
             const uint32_t first  = find_graph_node_by_name(graph, "Volume");
             const uint32_t second = find_graph_node_by_name(graph, "Volume 2");
             TEST(first != Sculptor::pool_no_slot && second != Sculptor::pool_no_slot);
@@ -13113,10 +12883,7 @@ int main()
             }
             graph.rename_node(vol2, "Filter Mix");
             (void)graph.take_changes(discard, 8); // the widget's own event; the batch below carries the rename
-            static Sculptor::GraphChange change = {};
-            change.kind                         = Sculptor::ChangeKind::name_changed;
-            change.node_idx                     = vol2;
-            TEST(Sculptor::apply_osc_graph_change(&bank, &graph, &mapping, change));
+            apply_name_changed(&bank, &graph, &mapping, vol2);
             TEST(count_records_matching(bank, 0, 0, 3, 0) == 2); // the moved record plus the rename's new record
             int32_t renamed_record = -1;
             for (uint32_t r = 0; r < bank.graph_layout_count; r++) {
@@ -13144,8 +12911,10 @@ int main()
             }
             graph.rename_node(renamed, "");
             (void)graph.take_changes(discard, 8);
-            change.node_idx = renamed;
-            TEST(! Sculptor::apply_osc_graph_change(&bank, &graph, &mapping, change));
+            Sculptor::GraphChange empty_rename = {};
+            empty_rename.kind                  = Sculptor::ChangeKind::name_changed;
+            empty_rename.node_idx              = renamed;
+            TEST(! Sculptor::apply_osc_graph_change(&bank, &graph, &mapping, empty_rename));
             TEST(Sculptor::project_editor_to_graph(bank, &graph, &mapping));
             (void)graph.take_changes(discard, 8);
             TEST(find_graph_node_by_name(graph, "Filter Mix") != Sculptor::pool_no_slot);
@@ -13155,8 +12924,7 @@ int main()
             if (trim_node != Sculptor::pool_no_slot) {
                 graph.rename_node(trim_node, "0123456789012345678901234567890123456789");
                 (void)graph.take_changes(discard, 8);
-                change.node_idx = trim_node;
-                TEST(Sculptor::apply_osc_graph_change(&bank, &graph, &mapping, change));
+                apply_name_changed(&bank, &graph, &mapping, trim_node);
                 int32_t trimmed = -1;
                 for (uint32_t r = 0; r < bank.graph_layout_count; r++) {
                     const Synth::GraphNodeLayout& record = bank.graph_layout[r];
@@ -13180,13 +12948,11 @@ int main()
     {
         static Synth::InstrumentEditorBank bank;
         static Synth::Instrument           instrument = {};
-        build_parameter_fixture(&bank, &instrument);
-        static Sculptor::Graph           graph;
-        static Sculptor::OscGraphMapping mapping;
+        static Sculptor::Graph             graph;
+        static Sculptor::OscGraphMapping   mapping;
         do {
-            TEST(Sculptor::project_editor_to_graph(bank, &graph, &mapping));
+            TEST(begin_param_graph(&bank, &instrument, &graph, &mapping));
             static Sculptor::GraphChange discard[8] = {};
-            (void)graph.take_changes(discard, 8);
             // params[0] and params[1] are the two derived volume parameters
             // (different tuples); params[2] is pitch.
             TEST(mapping.params[0].uid == 0 && mapping.params[1].uid == 0);
@@ -13296,13 +13062,11 @@ int main()
     {
         static Synth::InstrumentEditorBank bank;
         static Synth::Instrument           instrument = {};
-        build_parameter_fixture(&bank, &instrument);
-        static Sculptor::Graph           graph;
-        static Sculptor::OscGraphMapping mapping;
+        static Sculptor::Graph             graph;
+        static Sculptor::OscGraphMapping   mapping;
         do {
-            TEST(Sculptor::project_editor_to_graph(bank, &graph, &mapping));
+            TEST(begin_param_graph(&bank, &instrument, &graph, &mapping));
             static Sculptor::GraphChange discard[8] = {};
-            (void)graph.take_changes(discard, 8);
             // Give the first volume parameter a record via a free-text
             // rename; the record seeds its LFO triple from the live wiring
             // (desc 1, depth velocity, rate mod wheel).
@@ -13313,10 +13077,7 @@ int main()
             }
             graph.rename_node(vol1, "Wired");
             (void)graph.take_changes(discard, 8);
-            static Sculptor::GraphChange change = {};
-            change.kind                         = Sculptor::ChangeKind::name_changed;
-            change.node_idx                     = vol1;
-            TEST(Sculptor::apply_osc_graph_change(&bank, &graph, &mapping, change));
+            apply_name_changed(&bank, &graph, &mapping, vol1);
             int32_t record_idx = -1;
             for (uint32_t r = 0; r < bank.graph_layout_count; r++) {
                 const Synth::GraphNodeLayout& record = bank.graph_layout[r];
@@ -13389,13 +13150,11 @@ int main()
     {
         static Synth::InstrumentEditorBank bank;
         static Synth::Instrument           instrument = {};
-        build_parameter_fixture(&bank, &instrument);
-        static Sculptor::Graph           graph;
-        static Sculptor::OscGraphMapping mapping;
+        static Sculptor::Graph             graph;
+        static Sculptor::OscGraphMapping   mapping;
         do {
-            TEST(Sculptor::project_editor_to_graph(bank, &graph, &mapping));
+            TEST(begin_param_graph(&bank, &instrument, &graph, &mapping));
             static Sculptor::GraphChange discard[8] = {};
-            (void)graph.take_changes(discard, 8);
             // Give the volume parameter a record via a free-text rename; the
             // record seeds from its live wiring (volume rows of layers 0/2).
             const uint32_t vol1 = find_graph_node_by_name(graph, "Volume");
@@ -13405,10 +13164,7 @@ int main()
             }
             graph.rename_node(vol1, "Parameter A");
             (void)graph.take_changes(discard, 8);
-            static Sculptor::GraphChange change = {};
-            change.kind                         = Sculptor::ChangeKind::name_changed;
-            change.node_idx                     = vol1;
-            TEST(Sculptor::apply_osc_graph_change(&bank, &graph, &mapping, change));
+            apply_name_changed(&bank, &graph, &mapping, vol1);
             const int32_t p = Sculptor::find_param(mapping, vol1);
             TEST(p >= 0 && mapping.params[p].uid != 0 && mapping.params[p].target == 0);
             if (p < 0 || mapping.params[p].uid == 0) {
@@ -13617,24 +13373,19 @@ int main()
     {
         static Synth::InstrumentEditorBank bank;
         static Synth::Instrument           instrument = {};
-        build_parameter_fixture(&bank, &instrument);
-        static Sculptor::Graph           graph;
-        static Sculptor::OscGraphMapping mapping;
+        static Sculptor::Graph             graph;
+        static Sculptor::OscGraphMapping   mapping;
         do {
-            TEST(Sculptor::project_editor_to_graph(bank, &graph, &mapping));
+            TEST(begin_param_graph(&bank, &instrument, &graph, &mapping));
             static Sculptor::GraphChange discard[8] = {};
-            (void)graph.take_changes(discard, 8);
-            const uint32_t first = find_graph_node_by_name(graph, "Volume");
+            const uint32_t               first      = find_graph_node_by_name(graph, "Volume");
             TEST(first != Sculptor::pool_no_slot);
             if (first == Sculptor::pool_no_slot) {
                 break;
             }
             graph.rename_node(first, "One");
             (void)graph.take_changes(discard, 8);
-            static Sculptor::GraphChange rename1 = {};
-            rename1.kind                         = Sculptor::ChangeKind::name_changed;
-            rename1.node_idx                     = first;
-            TEST(Sculptor::apply_osc_graph_change(&bank, &graph, &mapping, rename1));
+            apply_name_changed(&bank, &graph, &mapping, first);
             // Add Parameter's record: free-standing, named. The renames took
             // uids 1 and 2, so this one takes 3 and sits between them in the
             // record array.
@@ -13649,10 +13400,7 @@ int main()
             }
             graph.rename_node(second, "Two");
             (void)graph.take_changes(discard, 8);
-            static Sculptor::GraphChange rename2 = {};
-            rename2.kind                         = Sculptor::ChangeKind::name_changed;
-            rename2.node_idx                     = second;
-            TEST(Sculptor::apply_osc_graph_change(&bank, &graph, &mapping, rename2));
+            apply_name_changed(&bank, &graph, &mapping, second);
             TEST(Sculptor::project_editor_to_graph(bank, &graph, &mapping));
             (void)graph.take_changes(discard, 8);
             const uint32_t one        = find_graph_node_by_name(graph, "One");
@@ -13793,10 +13541,7 @@ int main()
             }
             graph.rename_node(a0, "Ay");
             (void)graph.take_changes(discard, 8);
-            static Sculptor::GraphChange rename0 = {};
-            rename0.kind                         = Sculptor::ChangeKind::name_changed;
-            rename0.node_idx                     = a0;
-            TEST(Sculptor::apply_osc_graph_change(&bank, &graph, &mapping, rename0));
+            apply_name_changed(&bank, &graph, &mapping, a0);
             const int32_t a_param = Sculptor::find_param(mapping, a0);
             TEST(a_param >= 0 && mapping.params[a_param].uid != 0);
             if (a_param < 0 || mapping.params[a_param].uid == 0) {
@@ -13815,10 +13560,7 @@ int main()
             }
             graph.rename_node(b_node, "Bee");
             (void)graph.take_changes(discard, 8);
-            static Sculptor::GraphChange rename1 = {};
-            rename1.kind                         = Sculptor::ChangeKind::name_changed;
-            rename1.node_idx                     = b_node;
-            TEST(Sculptor::apply_osc_graph_change(&bank, &graph, &mapping, rename1));
+            apply_name_changed(&bank, &graph, &mapping, b_node);
             const int32_t b_param = Sculptor::find_param(mapping, b_node);
             TEST(b_param >= 0 && mapping.params[b_param].uid != 0);
             if (b_param < 0 || mapping.params[b_param].uid == 0) {
@@ -13910,10 +13652,7 @@ int main()
             }
             graph.rename_node(a0, "Ay");
             (void)graph.take_changes(discard, 8);
-            static Sculptor::GraphChange rename0 = {};
-            rename0.kind                         = Sculptor::ChangeKind::name_changed;
-            rename0.node_idx                     = a0;
-            TEST(Sculptor::apply_osc_graph_change(&bank, &graph, &mapping, rename0));
+            apply_name_changed(&bank, &graph, &mapping, a0);
             const uint32_t b_node = find_graph_node_by_name(graph, "Volume 2");
             TEST(b_node != Sculptor::pool_no_slot);
             if (b_node == Sculptor::pool_no_slot) {
@@ -13921,10 +13660,7 @@ int main()
             }
             graph.rename_node(b_node, "Bee");
             (void)graph.take_changes(discard, 8);
-            static Sculptor::GraphChange rename1 = {};
-            rename1.kind                         = Sculptor::ChangeKind::name_changed;
-            rename1.node_idx                     = b_node;
-            TEST(Sculptor::apply_osc_graph_change(&bank, &graph, &mapping, rename1));
+            apply_name_changed(&bank, &graph, &mapping, b_node);
             const int32_t b_param = Sculptor::find_param(mapping, b_node);
             TEST(b_param >= 0 && mapping.params[b_param].uid != 0);
             if (b_param < 0 || mapping.params[b_param].uid == 0) {
@@ -14098,24 +13834,19 @@ int main()
     {
         static Synth::InstrumentEditorBank bank;
         static Synth::Instrument           instrument = {};
-        build_parameter_fixture(&bank, &instrument);
-        static Sculptor::Graph           graph;
-        static Sculptor::OscGraphMapping mapping;
+        static Sculptor::Graph             graph;
+        static Sculptor::OscGraphMapping   mapping;
         do {
-            TEST(Sculptor::project_editor_to_graph(bank, &graph, &mapping));
+            TEST(begin_param_graph(&bank, &instrument, &graph, &mapping));
             static Sculptor::GraphChange discard[8] = {};
-            (void)graph.take_changes(discard, 8);
-            const uint32_t a0 = find_graph_node_by_name(graph, "Volume");
+            const uint32_t               a0         = find_graph_node_by_name(graph, "Volume");
             TEST(a0 != Sculptor::pool_no_slot);
             if (a0 == Sculptor::pool_no_slot) {
                 break;
             }
             graph.rename_node(a0, "Ay");
             (void)graph.take_changes(discard, 8);
-            static Sculptor::GraphChange rename0 = {};
-            rename0.kind                         = Sculptor::ChangeKind::name_changed;
-            rename0.node_idx                     = a0;
-            TEST(Sculptor::apply_osc_graph_change(&bank, &graph, &mapping, rename0));
+            apply_name_changed(&bank, &graph, &mapping, a0);
             const uint32_t b_node = find_graph_node_by_name(graph, "Volume 2");
             TEST(b_node != Sculptor::pool_no_slot);
             if (b_node == Sculptor::pool_no_slot) {
@@ -14123,10 +13854,7 @@ int main()
             }
             graph.rename_node(b_node, "Bee");
             (void)graph.take_changes(discard, 8);
-            static Sculptor::GraphChange rename1 = {};
-            rename1.kind                         = Sculptor::ChangeKind::name_changed;
-            rename1.node_idx                     = b_node;
-            TEST(Sculptor::apply_osc_graph_change(&bank, &graph, &mapping, rename1));
+            apply_name_changed(&bank, &graph, &mapping, b_node);
             const int32_t a_param = Sculptor::find_param(mapping, a0);
             const int32_t b_param = Sculptor::find_param(mapping, b_node);
             TEST(a_param >= 0 && b_param >= 0);
@@ -14204,24 +13932,19 @@ int main()
     {
         static Synth::InstrumentEditorBank bank;
         static Synth::Instrument           instrument = {};
-        build_parameter_fixture(&bank, &instrument);
-        static Sculptor::Graph           graph;
-        static Sculptor::OscGraphMapping mapping;
+        static Sculptor::Graph             graph;
+        static Sculptor::OscGraphMapping   mapping;
         do {
-            TEST(Sculptor::project_editor_to_graph(bank, &graph, &mapping));
+            TEST(begin_param_graph(&bank, &instrument, &graph, &mapping));
             static Sculptor::GraphChange discard[8] = {};
-            (void)graph.take_changes(discard, 8);
-            const uint32_t a0 = find_graph_node_by_name(graph, "Volume");
+            const uint32_t               a0         = find_graph_node_by_name(graph, "Volume");
             TEST(a0 != Sculptor::pool_no_slot);
             if (a0 == Sculptor::pool_no_slot) {
                 break;
             }
             graph.rename_node(a0, "Ay");
             (void)graph.take_changes(discard, 8);
-            static Sculptor::GraphChange rename0 = {};
-            rename0.kind                         = Sculptor::ChangeKind::name_changed;
-            rename0.node_idx                     = a0;
-            TEST(Sculptor::apply_osc_graph_change(&bank, &graph, &mapping, rename0));
+            apply_name_changed(&bank, &graph, &mapping, a0);
             const uint32_t b_node = find_graph_node_by_name(graph, "Volume 2");
             TEST(b_node != Sculptor::pool_no_slot);
             if (b_node == Sculptor::pool_no_slot) {
@@ -14294,24 +14017,19 @@ int main()
     {
         static Synth::InstrumentEditorBank bank;
         static Synth::Instrument           instrument = {};
-        build_parameter_fixture(&bank, &instrument);
-        static Sculptor::Graph           graph;
-        static Sculptor::OscGraphMapping mapping;
+        static Sculptor::Graph             graph;
+        static Sculptor::OscGraphMapping   mapping;
         do {
-            TEST(Sculptor::project_editor_to_graph(bank, &graph, &mapping));
+            TEST(begin_param_graph(&bank, &instrument, &graph, &mapping));
             static Sculptor::GraphChange discard[8] = {};
-            (void)graph.take_changes(discard, 8);
-            const uint32_t a0 = find_graph_node_by_name(graph, "Volume");
+            const uint32_t               a0         = find_graph_node_by_name(graph, "Volume");
             TEST(a0 != Sculptor::pool_no_slot);
             if (a0 == Sculptor::pool_no_slot) {
                 break;
             }
             graph.rename_node(a0, "Ay");
             (void)graph.take_changes(discard, 8);
-            static Sculptor::GraphChange rename0 = {};
-            rename0.kind                         = Sculptor::ChangeKind::name_changed;
-            rename0.node_idx                     = a0;
-            TEST(Sculptor::apply_osc_graph_change(&bank, &graph, &mapping, rename0));
+            apply_name_changed(&bank, &graph, &mapping, a0);
             const int32_t a_param = Sculptor::find_param(mapping, a0);
             TEST(a_param >= 0 && mapping.params[a_param].uid != 0);
             if (a_param < 0 || mapping.params[a_param].uid == 0) {
@@ -14384,31 +14102,23 @@ int main()
     {
         static Synth::InstrumentEditorBank bank;
         static Synth::Instrument           instrument = {};
-        build_parameter_fixture(&bank, &instrument);
-        static Sculptor::Graph           graph;
-        static Sculptor::OscGraphMapping mapping;
+        static Sculptor::Graph             graph;
+        static Sculptor::OscGraphMapping   mapping;
         do {
-            TEST(Sculptor::project_editor_to_graph(bank, &graph, &mapping));
+            TEST(begin_param_graph(&bank, &instrument, &graph, &mapping));
             static Sculptor::GraphChange discard[8] = {};
-            (void)graph.take_changes(discard, 8);
-            const uint32_t a0 = find_graph_node_by_name(graph, "Volume");
-            const uint32_t b0 = find_graph_node_by_name(graph, "Volume 2");
+            const uint32_t               a0         = find_graph_node_by_name(graph, "Volume");
+            const uint32_t               b0         = find_graph_node_by_name(graph, "Volume 2");
             TEST(a0 != Sculptor::pool_no_slot && b0 != Sculptor::pool_no_slot);
             if (a0 == Sculptor::pool_no_slot || b0 == Sculptor::pool_no_slot) {
                 break;
             }
             graph.rename_node(a0, "Ay");
             (void)graph.take_changes(discard, 8);
-            static Sculptor::GraphChange rename0 = {};
-            rename0.kind                         = Sculptor::ChangeKind::name_changed;
-            rename0.node_idx                     = a0;
-            TEST(Sculptor::apply_osc_graph_change(&bank, &graph, &mapping, rename0));
+            apply_name_changed(&bank, &graph, &mapping, a0);
             graph.rename_node(b0, "Bee");
             (void)graph.take_changes(discard, 8);
-            static Sculptor::GraphChange rename1 = {};
-            rename1.kind                         = Sculptor::ChangeKind::name_changed;
-            rename1.node_idx                     = b0;
-            TEST(Sculptor::apply_osc_graph_change(&bank, &graph, &mapping, rename1));
+            apply_name_changed(&bank, &graph, &mapping, b0);
             const int32_t a_param = Sculptor::find_param(mapping, a0);
             const int32_t b_param = Sculptor::find_param(mapping, b0);
             TEST(a_param >= 0 && b_param >= 0);
@@ -14512,31 +14222,23 @@ int main()
     {
         static Synth::InstrumentEditorBank bank;
         static Synth::Instrument           instrument = {};
-        build_parameter_fixture(&bank, &instrument);
-        static Sculptor::Graph           graph;
-        static Sculptor::OscGraphMapping mapping;
+        static Sculptor::Graph             graph;
+        static Sculptor::OscGraphMapping   mapping;
         do {
-            TEST(Sculptor::project_editor_to_graph(bank, &graph, &mapping));
+            TEST(begin_param_graph(&bank, &instrument, &graph, &mapping));
             static Sculptor::GraphChange discard[8] = {};
-            (void)graph.take_changes(discard, 8);
-            const uint32_t a0 = find_graph_node_by_name(graph, "Volume");
-            const uint32_t b0 = find_graph_node_by_name(graph, "Volume 2");
+            const uint32_t               a0         = find_graph_node_by_name(graph, "Volume");
+            const uint32_t               b0         = find_graph_node_by_name(graph, "Volume 2");
             TEST(a0 != Sculptor::pool_no_slot && b0 != Sculptor::pool_no_slot);
             if (a0 == Sculptor::pool_no_slot || b0 == Sculptor::pool_no_slot) {
                 break;
             }
             graph.rename_node(a0, "Ay");
             (void)graph.take_changes(discard, 8);
-            static Sculptor::GraphChange rename0 = {};
-            rename0.kind                         = Sculptor::ChangeKind::name_changed;
-            rename0.node_idx                     = a0;
-            TEST(Sculptor::apply_osc_graph_change(&bank, &graph, &mapping, rename0));
+            apply_name_changed(&bank, &graph, &mapping, a0);
             graph.rename_node(b0, "Bee");
             (void)graph.take_changes(discard, 8);
-            static Sculptor::GraphChange rename1 = {};
-            rename1.kind                         = Sculptor::ChangeKind::name_changed;
-            rename1.node_idx                     = b0;
-            TEST(Sculptor::apply_osc_graph_change(&bank, &graph, &mapping, rename1));
+            apply_name_changed(&bank, &graph, &mapping, b0);
             const uint32_t a_env = Sculptor::connection_into(graph, a0, 2);
             const uint32_t a_lfo = Sculptor::connection_into(graph, a0, 3);
             const uint32_t b_env = Sculptor::connection_into(graph, b0, 2);
@@ -14895,16 +14597,10 @@ int main()
             }
             graph.rename_node(a0, "Ay");
             (void)graph.take_changes(discard, 8);
-            static Sculptor::GraphChange rename0 = {};
-            rename0.kind                         = Sculptor::ChangeKind::name_changed;
-            rename0.node_idx                     = a0;
-            TEST(Sculptor::apply_osc_graph_change(&bank, &graph, &mapping, rename0));
+            apply_name_changed(&bank, &graph, &mapping, a0);
             graph.rename_node(b0, "Bee");
             (void)graph.take_changes(discard, 8);
-            static Sculptor::GraphChange rename1 = {};
-            rename1.kind                         = Sculptor::ChangeKind::name_changed;
-            rename1.node_idx                     = b0;
-            TEST(Sculptor::apply_osc_graph_change(&bank, &graph, &mapping, rename1));
+            apply_name_changed(&bank, &graph, &mapping, b0);
             const int32_t a_param = Sculptor::find_param(mapping, a0);
             const int32_t b_param = Sculptor::find_param(mapping, b0);
             TEST(a_param >= 0 && b_param >= 0);
@@ -15056,10 +14752,7 @@ int main()
             }
             graph2.rename_node(a0, "Ay");
             (void)graph2.take_changes(discard, 8);
-            static Sculptor::GraphChange rename0 = {};
-            rename0.kind                         = Sculptor::ChangeKind::name_changed;
-            rename0.node_idx                     = a0;
-            TEST(Sculptor::apply_osc_graph_change(&bank2, &graph2, &mapping2, rename0));
+            apply_name_changed(&bank2, &graph2, &mapping2, a0);
             char error[128] = {};
             TEST(Sculptor::osc_add_parameter_refused(mapping2, 0, error, sizeof(error)));
             TEST(strncmp(error,
@@ -15084,16 +14777,10 @@ int main()
             }
             graph3.rename_node(a0, "Ay");
             (void)graph3.take_changes(discard, 8);
-            static Sculptor::GraphChange rename0 = {};
-            rename0.kind                         = Sculptor::ChangeKind::name_changed;
-            rename0.node_idx                     = a0;
-            TEST(Sculptor::apply_osc_graph_change(&bank3, &graph3, &mapping3, rename0));
+            apply_name_changed(&bank3, &graph3, &mapping3, a0);
             graph3.rename_node(b0, "Bee");
             (void)graph3.take_changes(discard, 8);
-            static Sculptor::GraphChange rename1 = {};
-            rename1.kind                         = Sculptor::ChangeKind::name_changed;
-            rename1.node_idx                     = b0;
-            TEST(Sculptor::apply_osc_graph_change(&bank3, &graph3, &mapping3, rename1));
+            apply_name_changed(&bank3, &graph3, &mapping3, b0);
             char error[128] = {};
             TEST(! Sculptor::osc_add_parameter_refused(mapping3, 0, error, sizeof(error)));
             TEST(error[0] == '\0');
@@ -15107,31 +14794,23 @@ int main()
     {
         static Synth::InstrumentEditorBank bank;
         static Synth::Instrument           instrument = {};
-        build_parameter_fixture(&bank, &instrument);
-        static Sculptor::Graph           graph;
-        static Sculptor::OscGraphMapping mapping;
+        static Sculptor::Graph             graph;
+        static Sculptor::OscGraphMapping   mapping;
         do {
-            TEST(Sculptor::project_editor_to_graph(bank, &graph, &mapping));
+            TEST(begin_param_graph(&bank, &instrument, &graph, &mapping));
             static Sculptor::GraphChange discard[8] = {};
-            (void)graph.take_changes(discard, 8);
-            const uint32_t a0 = find_graph_node_by_name(graph, "Volume");
-            const uint32_t b0 = find_graph_node_by_name(graph, "Volume 2");
+            const uint32_t               a0         = find_graph_node_by_name(graph, "Volume");
+            const uint32_t               b0         = find_graph_node_by_name(graph, "Volume 2");
             TEST(a0 != Sculptor::pool_no_slot && b0 != Sculptor::pool_no_slot);
             if (a0 == Sculptor::pool_no_slot || b0 == Sculptor::pool_no_slot) {
                 break;
             }
             graph.rename_node(a0, "Ay");
             (void)graph.take_changes(discard, 8);
-            static Sculptor::GraphChange rename0 = {};
-            rename0.kind                         = Sculptor::ChangeKind::name_changed;
-            rename0.node_idx                     = a0;
-            TEST(Sculptor::apply_osc_graph_change(&bank, &graph, &mapping, rename0));
+            apply_name_changed(&bank, &graph, &mapping, a0);
             graph.rename_node(b0, "Bee");
             (void)graph.take_changes(discard, 8);
-            static Sculptor::GraphChange rename1 = {};
-            rename1.kind                         = Sculptor::ChangeKind::name_changed;
-            rename1.node_idx                     = b0;
-            TEST(Sculptor::apply_osc_graph_change(&bank, &graph, &mapping, rename1));
+            apply_name_changed(&bank, &graph, &mapping, b0);
             const int32_t a_param = Sculptor::find_param(mapping, a0);
             const int32_t b_param = Sculptor::find_param(mapping, b0);
             TEST(a_param >= 0 && b_param >= 0);

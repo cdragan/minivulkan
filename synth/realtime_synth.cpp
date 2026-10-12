@@ -908,15 +908,7 @@ static bool get_next_midi_event(DispatchedMidiEvent* event, uint32_t end_samples
 
     for (;;) {
         const uint8_t* encoded_delta_time = Synth::midi_delta_times[channel];
-
-        // Decode delta time, which is encoded as a variable-length quantity
-        // (7 bits per byte, MSB-first, high bit marks continuation).
-        uint32_t delta_time = 0;
-        uint8_t  delta_byte;
-        do {
-            delta_byte = *(encoded_delta_time++);
-            delta_time = (delta_time << 7) | (delta_byte & 0x7Fu);
-        } while (delta_byte & 0x80u);
+        const uint32_t delta_time         = Synth::decode_vlq(&encoded_delta_time);
 
         const uint32_t delta_samples = delta_time * samples_per_midi_tick;
         const uint32_t event_samples = channel_samples[channel] + delta_samples;
@@ -956,15 +948,8 @@ static bool get_next_midi_event(DispatchedMidiEvent* event, uint32_t end_samples
         // A note_on carries a stored tick duration; schedule its auto-release.  Stored 0 means
         // unbounded (no stored note_off); a stored value v means v - 1 ticks.
         if (event_code == static_cast<uint8_t>(Synth::EvType::note_on)) {
-            const uint8_t* duration_ptr = Synth::midi_note_durations[channel];
-            uint32_t       stored       = 0;
-            for (;;) {
-                const uint8_t byte = *(duration_ptr++);
-                stored             = (stored << 7) | (byte & 0x7Fu);
-                if ((byte & 0x80u) == 0) {
-                    break;
-                }
-            }
+            const uint8_t* duration_ptr         = Synth::midi_note_durations[channel];
+            const uint32_t stored               = Synth::decode_vlq(&duration_ptr);
             Synth::midi_note_durations[channel] = duration_ptr;
 
             event->release_sample = Synth::soundtrack_note_release_sample(event->time, stored, samples_per_midi_tick);
@@ -1164,13 +1149,19 @@ static void configure_target_modulation(const Instrument& instrument,
                            routing.num_inputs);
 }
 
+// Wraps a parameter node's value/prev_value pair as an externally-driven leaf source.
+static Synth::ExternalLeaf leaf(uint32_t node)
+{
+    return Synth::ExternalLeaf{ &parameters[node].value, &parameters[node].prev_value };
+}
+
 // Seeds an externally-driven leaf (a MIDI input source) with an initial value+prev so a consumer
 // reads it with zero lag on the first step.
 static void set_input_leaf(uint32_t node, float value)
 {
     param_descs[node]      = {};
     param_descs[node].kind = Synth::ParamKind::external;
-    Synth::write_external_leaf(value, Synth::ExternalLeaf{ &parameters[node].value, &parameters[node].prev_value });
+    Synth::write_external_leaf(value, leaf(node));
 }
 
 static void process_note_on(uint32_t delta_samples, const DispatchedMidiEvent& event)
@@ -1308,9 +1299,7 @@ static void process_aftertouch(uint32_t delta_samples, const DispatchedMidiEvent
         // Drive the per-note aftertouch leaf (value and prev_value) so the combine reads it with zero lag.
         const uint32_t aftertouch_node = voice_param(voice_idx, voice_input_aftertouch);
         const float    pressure        = static_cast<float>(event.note_data) / 127.0f;
-        Synth::write_external_leaf(
-            pressure,
-            Synth::ExternalLeaf{ &parameters[aftertouch_node].value, &parameters[aftertouch_node].prev_value });
+        Synth::write_external_leaf(pressure, leaf(aftertouch_node));
     }
 }
 
@@ -1318,17 +1307,13 @@ static void process_controller(uint32_t, const DispatchedMidiEvent& event)
 {
     if (event.controller == mod_wheel_cc) {
         const uint32_t node = channel_param(event.channel, chan_param_mod_wheel);
-        Synth::write_external_leaf(static_cast<float>(event.controller_data) / 127.0f,
-                                   Synth::ExternalLeaf{ &parameters[node].value, &parameters[node].prev_value });
+        Synth::write_external_leaf(static_cast<float>(event.controller_data) / 127.0f, leaf(node));
     }
     else if (Synth::mix_cc_role(event.controller) != Synth::MixRole::none) {
-        Synth::write_mix_cc(
-            event.controller,
-            event.controller_data,
-            Synth::ExternalLeaf{ &parameters[channel_param(event.channel, chan_param_volume)].value,
-                                 &parameters[channel_param(event.channel, chan_param_volume)].prev_value },
-            Synth::ExternalLeaf{ &parameters[channel_param(event.channel, chan_param_panning)].value,
-                                 &parameters[channel_param(event.channel, chan_param_panning)].prev_value });
+        Synth::write_mix_cc(event.controller,
+                            event.controller_data,
+                            leaf(channel_param(event.channel, chan_param_volume)),
+                            leaf(channel_param(event.channel, chan_param_panning)));
         return;
     }
     else if (Synth::is_assignable_cc(event.controller)) {
@@ -1336,7 +1321,7 @@ static void process_controller(uint32_t, const DispatchedMidiEvent& event)
             Synth::apply_channel_cc(&channel_cc_state[event.channel], event.controller, event.controller_data);
         const uint32_t node =
             channel_param(event.channel, chan_param_cc_0 + Synth::assignable_cc_slot(event.controller));
-        Synth::write_external_leaf(value, Synth::ExternalLeaf{ &parameters[node].value, &parameters[node].prev_value });
+        Synth::write_external_leaf(value, leaf(node));
     }
     // Other controllers ignored.
 }
@@ -1346,17 +1331,14 @@ static void process_pitch_bend(uint32_t delta_samples, const DispatchedMidiEvent
     // Drive the channel bend leaf (value and prev_value) so consumers read it with zero lag.
     const uint32_t bend_node = channel_param(event.channel, chan_param_bend);
     const float    bend      = Synth::pitch_bend_to_semitones(event.pitch_bend, default_pitch_bend_range_semitones);
-    Synth::write_external_leaf(bend,
-                               Synth::ExternalLeaf{ &parameters[bend_node].value, &parameters[bend_node].prev_value });
+    Synth::write_external_leaf(bend, leaf(bend_node));
 }
 
 static void process_channel_pressure(uint32_t delta_samples, const DispatchedMidiEvent& event)
 {
     // Drive the per-channel pressure leaf (value and prev_value) so the combine reads it with zero lag.
     const uint32_t pressure_node = channel_param(event.channel, chan_param_pressure);
-    Synth::write_external_leaf(
-        static_cast<float>(event.note_data) / 127.0f,
-        Synth::ExternalLeaf{ &parameters[pressure_node].value, &parameters[pressure_node].prev_value });
+    Synth::write_external_leaf(static_cast<float>(event.note_data) / 127.0f, leaf(pressure_node));
 }
 
 using EventHandler = void (*)(uint32_t delta_samples, const DispatchedMidiEvent& event);
