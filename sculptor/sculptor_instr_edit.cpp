@@ -523,14 +523,14 @@ static bool fx_node_delete_veto(void* user_data, uint32_t node_idx)
     return node_idx == fx_mapping.input_node || node_idx == fx_mapping.output_node || node_idx == fx_mapping.midi_node;
 }
 
-// Slot display filter for the effects graph: a parameter with no modulator
-// collapses to its base-value row, whose inline dot (connectable in the
-// projection) stands in for the row's first free modulator input.  The
-// filter hides the param's modulator rows only; slot indices, slots and
-// connections stay untouched, so snapshots, undo bytes and every
-// slot-arithmetic decoder are unaffected.  Visibility derives from live
-// connection state at render time (Sculptor::fx_param_is_collapsed),
-// never stored state.
+// Slot display filter for the effects graph: only a parameter's connected
+// modulator rows render.  A param with no modulator collapses to its
+// base-value row, whose inline dot (connectable in the projection) stands
+// in for the row's first free modulator input.  The filter hides only the
+// param's unconnected modulator rows; slot indices, slots and connections
+// stay untouched, so snapshots, undo bytes and every slot-arithmetic
+// decoder are unaffected.  Visibility derives from live connection state
+// at render time (Sculptor::fx_param_field_hidden), never stored state.
 static bool fx_slot_hidden(void* user_data, const Sculptor::Graph& graph, uint32_t node_idx, uint32_t slot_idx)
 {
     (void)user_data;
@@ -538,16 +538,19 @@ static bool fx_slot_hidden(void* user_data, const Sculptor::Graph& graph, uint32
     if (effect < 0 || slot_idx < Sculptor::fx_param_row(0)) {
         return false;
     }
+
     const uint32_t param = (slot_idx - Sculptor::fx_param_row(0)) / Sculptor::fx_param_stride;
     const uint32_t field = (slot_idx - Sculptor::fx_param_row(0)) % Sculptor::fx_param_stride;
     if (field == 0) {
         return false; // the base-value row always renders (it carries the inline dot)
     }
+
     const Synth::EffectChainBinding& chain = Sculptor::fx_graph_chain(&instr_bank.bank, fx_mapping.chain);
     if (param >= Synth::get_effect_param_floats(chain.effects[effect].type)) {
         return false;
     }
-    return Sculptor::fx_param_is_collapsed(graph, node_idx, param);
+
+    return Sculptor::fx_param_field_hidden(graph, node_idx, param, field);
 }
 
 // Connection grammar for the effects graph: a parameter dot takes an LFO's

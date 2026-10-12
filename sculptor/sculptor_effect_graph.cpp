@@ -493,6 +493,26 @@ bool Sculptor::fx_param_is_collapsed(const Graph& graph, const uint32_t node_idx
            ! graph.slot_is_connected(node_idx, fx_param_src_dot(param, 1));
 }
 
+bool Sculptor::fx_param_field_hidden(const Graph&   graph,
+                                     const uint32_t node_idx,
+                                     const uint32_t param,
+                                     const uint32_t field)
+{
+    if (field == 0) {
+        return false;
+    }
+
+    if (field <= 3) {
+        return ! graph.slot_is_connected(node_idx, fx_param_lfo_dot(param));
+    }
+
+    if (field <= 6) {
+        return ! graph.slot_is_connected(node_idx, fx_param_src_dot(param, 0));
+    }
+
+    return ! graph.slot_is_connected(node_idx, fx_param_src_dot(param, 1));
+}
+
 uint32_t Sculptor::fx_param_free_input(const Graph&   graph,
                                        const uint32_t node_idx,
                                        const uint32_t param,
@@ -627,26 +647,19 @@ bool Sculptor::project_effect_chain_to_graph(const Synth::InstrumentEditorBank& 
             const EffectParamInfo&           param_info = info.params[param];
             const Synth::EffectParamBinding& binding    = effect.bindings[param];
             const uint8_t                    row_group  = static_cast<uint8_t>(2 + param);
-            // The base value rides its own slider line, like an oscillator
-            // parameter node's Base Value row, and stays editable while a
-            // wired LFO modulates around it. A param with no modulator yet
-            // also admits wires on the row itself: the inline dot stands in
-            // for the row's first free modulator input (LFO, then Source
-            // A/B), and the apply path resolves the landing. Any binding
-            // closes the row again - the modulator rows carry the dots.
-            // FIR: a disabled edge (zero cutoff) displays at the slider extreme
-            // the user pushed it to, so touching the slider does not re-enable
-            // the edge at the opposite end of the range.
+
             float display_value = binding.base_value;
             if (effect.type == Synth::EffectType::fir && binding.base_value == 0.0f) {
                 display_value = (param == 0) ? param_info.max_value : param_info.min_value;
             }
+
             Slot row        = bounded_real_slot(param_info.name,
                                                 display_value,
                                                 param_info.min_value,
                                                 param_info.max_value,
                                                 param_info.logarithmic);
-            row.connectable = binding.lfo_desc_id == 0 && binding.num_inputs == 0;
+
+            row.connectable = binding.lfo_desc_id == 0 || binding.num_inputs < Synth::max_mod_inputs;
             graph->add_slot(node, row);
             // The modulation row, the oscillator editor's LFO row grammar:
             // the LFO wire lands on the dot, Op picks how the wave combines
@@ -1208,9 +1221,9 @@ static bool apply_fx_graph_change_internal(Synth::InstrumentBank*              b
             // modulator input, so the binding lands there directly - an LFO
             // output fills the LFO input (fresh depth default), a
             // channel-wide MIDI source or added CC appends the first free
-            // source row (neutral add/scale). The dot exists only while the
-            // param carries no modulator, so the append cannot split the
-            // packed input list. A disconnect never observes a value-row
+            // source row (neutral add/scale).  The dot stays while any
+            // modulator family has a free input, so the append cannot split
+            // the packed input list.  A disconnect never observes a value-row
             // endpoint (the apply-side bind and the re-projection that
             // re-lands the wire land in the same drain), so deletes refuse.
             if (in_slot >= 0 && param_field == 0) {

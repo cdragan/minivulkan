@@ -167,10 +167,18 @@ int32_t fx_effect_slot_of(const EffectGraphMapping& mapping, uint32_t node_idx);
 uint32_t fx_lfo_desc_of(const EffectGraphMapping& mapping, uint32_t node_idx);
 // Whether projected param `param` on an effect node carries no modulator:
 // no connection targets its base-value row (an inline wire in transit) or
-// any of its three modulator input dots. Derived live from connection
-// state at render time, never stored; the renderer collapses such a param
-// to its base-value row and hides the modulator rows.
+// any of its three modulator input dots.  Derived live from connection
+// state, never stored.
 bool fx_param_is_collapsed(const Graph& graph, uint32_t node_idx, uint32_t param);
+// Per-family modulator-row visibility for projected param `param`: field 0
+// (the base-value row) always renders; fields 1..3 (LFO dot/op/depth) render
+// iff the param's LFO dot is connected; fields 4..6 / 7..9 (each Source
+// dot/op/amount row) render iff that Source dot is connected.  Derived live
+// from connection state at render time, never stored; slot arithmetic,
+// connections, snapshots and undo bytes are untouched.  Public seam: the
+// render filter fx_slot_hidden is static in the editor TU, so the unit
+// suite needs this callable render-visibility query.
+bool fx_param_field_hidden(const Graph& graph, uint32_t node_idx, uint32_t param, uint32_t field);
 // The first free modulator input dot of projected param `param` on an
 // effect node: the LFO dot for an LFO source wire, else the first free
 // Source A/B dot in row order. pool_no_slot when the wire's family has no

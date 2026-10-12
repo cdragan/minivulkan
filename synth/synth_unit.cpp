@@ -5601,14 +5601,19 @@ static void effects_inline_modulator_regressions()
     static Sculptor::EffectGraphMapping mapping;
     static Sculptor::GraphChange        discarded[Sculptor::max_pending_changes];
 
-    // T-P4-1: the bare base-value row admits wires; a param with any
-    // modulator binding (source or LFO) closes the row again.
+    // T-P4-1: the bare base-value row admits wires; the inline dot stays
+    // connectable while any family still has a free input.  It closes only
+    // when every family input is taken (T-P4-9).
     add_cc_chain_fixture(&source, 0);
     TEST(Sculptor::project_effect_chain_to_graph(source, 0, &graph, &mapping));
     graph.take_changes(discarded, Sculptor::max_pending_changes);
     const Sculptor::Slot& bare_row = graph.node(mapping.effect_nodes[0]).slots.entries[Sculptor::fx_param_row(0)];
     TEST(bare_row.kind == Sculptor::SlotKind::property);
     TEST(bare_row.connectable);
+    TEST(! Sculptor::fx_param_field_hidden(graph, mapping.effect_nodes[0], 0, 0)); // the base row always renders
+    for (uint32_t field = 1; field < 10; ++field) {
+        TEST(Sculptor::fx_param_field_hidden(graph, mapping.effect_nodes[0], 0, field)); // no modulator row renders
+    }
 
     Synth::EffectChainBinding& wired_chain              = add_cc_chain_fixture(&source, 0);
     wired_chain.effects[0].bindings[0].num_inputs       = 1;
@@ -5617,7 +5622,8 @@ static void effects_inline_modulator_regressions()
     wired_chain.effects[0].bindings[0].inputs[0].scale  = 1.0f;
     TEST(Sculptor::project_effect_chain_to_graph(source, 0, &graph, &mapping));
     graph.take_changes(discarded, Sculptor::max_pending_changes);
-    TEST(! graph.node(mapping.effect_nodes[0]).slots.entries[Sculptor::fx_param_row(0)].connectable);
+    // the LFO family stays free
+    TEST(graph.node(mapping.effect_nodes[0]).slots.entries[Sculptor::fx_param_row(0)].connectable);
 
     uint16_t                   lfo_descriptor = 0;
     Synth::EffectChainBinding& lfo_chain      = add_cc_chain_fixture(&source, 0);
@@ -5625,7 +5631,8 @@ static void effects_inline_modulator_regressions()
     lfo_chain.effects[0].bindings[0].lfo_desc_id = lfo_descriptor;
     TEST(Sculptor::project_effect_chain_to_graph(source, 0, &graph, &mapping));
     graph.take_changes(discarded, Sculptor::max_pending_changes);
-    TEST(! graph.node(mapping.effect_nodes[0]).slots.entries[Sculptor::fx_param_row(0)].connectable);
+    // the source family stays free
+    TEST(graph.node(mapping.effect_nodes[0]).slots.entries[Sculptor::fx_param_row(0)].connectable);
 
     // T-P4-2: an inline wire on the bare value row binds the row's first
     // free modulator input: an LFO output the LFO input with the fresh
@@ -5708,7 +5715,7 @@ static void effects_inline_modulator_regressions()
     TEST(candidate.bank.channel_chains[0].effects[1].bindings[0].inputs[0].source == Synth::ModSource::pitch_bend);
     // T-P4-3: the collapse predicate derives live from connection state:
     // no wire on the value row or any modulator dot keeps the param
-    // collapsed; the first wire anywhere opens the row set.
+    // collapsed.
     add_cc_chain_fixture(&source, 0);
     TEST(Sculptor::project_effect_chain_to_graph(source, 0, &graph, &mapping));
     graph.take_changes(discarded, Sculptor::max_pending_changes);
@@ -5735,6 +5742,131 @@ static void effects_inline_modulator_regressions()
                               { effect_node, Sculptor::fx_param_lfo_dot(0) }) != Sculptor::pool_no_slot);
     TEST(Sculptor::fx_param_free_input(graph, effect_node, 0, true) == Sculptor::pool_no_slot);
     TEST(! Sculptor::fx_param_is_collapsed(graph, effect_node, 0));
+
+    // T-P4-6: per-family row visibility - with exactly one LFO wire on a
+    // param, the LFO row renders and both MIDI source rows stay hidden.
+    add_cc_chain_fixture(&source, 0);
+    TEST(Sculptor::allocate_default_lfo(&source.bank, &lfo_descriptor));
+    memset(pinned_lfos, 0, sizeof(pinned_lfos));
+    pinned_lfos[lfo_descriptor - 1] = true;
+    TEST(Sculptor::project_effect_chain_to_graph(source, 0, &graph, &mapping, pinned_lfos));
+    graph.take_changes(discarded, Sculptor::max_pending_changes);
+    TEST(graph.add_connection({ mapping.lfo_nodes[lfo_descriptor - 1], 0 },
+                              { effect_node, Sculptor::fx_param_lfo_dot(0) }) != Sculptor::pool_no_slot);
+    TEST(! Sculptor::fx_param_field_hidden(graph, effect_node, 0, 0)); // the base row always renders
+    TEST(! Sculptor::fx_param_field_hidden(graph, effect_node, 0, 1));
+    TEST(! Sculptor::fx_param_field_hidden(graph, effect_node, 0, 2));
+    TEST(! Sculptor::fx_param_field_hidden(graph, effect_node, 0, 3)); // the connected LFO row renders
+    TEST(Sculptor::fx_param_field_hidden(graph, effect_node, 0, 4));
+    TEST(Sculptor::fx_param_field_hidden(graph, effect_node, 0, 5));
+    TEST(Sculptor::fx_param_field_hidden(graph, effect_node, 0, 6)); // Source A stays hidden
+    TEST(Sculptor::fx_param_field_hidden(graph, effect_node, 0, 7));
+    TEST(Sculptor::fx_param_field_hidden(graph, effect_node, 0, 8));
+    TEST(Sculptor::fx_param_field_hidden(graph, effect_node, 0, 9)); // Source B stays hidden
+
+    // T-P4-7: with one MIDI source wire on Source A, that source row
+    // renders and the LFO row and Source B stay hidden.
+    add_cc_chain_fixture(&source, 0);
+    TEST(Sculptor::project_effect_chain_to_graph(source, 0, &graph, &mapping));
+    graph.take_changes(discarded, Sculptor::max_pending_changes);
+    TEST(graph.add_connection(bend_out, { effect_node, Sculptor::fx_param_src_dot(0, 0) }) != Sculptor::pool_no_slot);
+    TEST(! Sculptor::fx_param_field_hidden(graph, effect_node, 0, 0));
+    TEST(Sculptor::fx_param_field_hidden(graph, effect_node, 0, 1));
+    TEST(Sculptor::fx_param_field_hidden(graph, effect_node, 0, 2));
+    TEST(Sculptor::fx_param_field_hidden(graph, effect_node, 0, 3)); // the LFO row stays hidden
+    TEST(! Sculptor::fx_param_field_hidden(graph, effect_node, 0, 4));
+    TEST(! Sculptor::fx_param_field_hidden(graph, effect_node, 0, 5));
+    TEST(! Sculptor::fx_param_field_hidden(graph, effect_node, 0, 6)); // the connected Source A row renders
+    TEST(Sculptor::fx_param_field_hidden(graph, effect_node, 0, 7));
+    TEST(Sculptor::fx_param_field_hidden(graph, effect_node, 0, 8));
+    TEST(Sculptor::fx_param_field_hidden(graph, effect_node, 0, 9)); // Source B stays hidden
+
+    // T-P4-8: with modulators on two families, every connected family's
+    // row renders and the unconnected family stays hidden; adding the last
+    // family opens its row too.
+    add_cc_chain_fixture(&source, 0);
+    TEST(Sculptor::allocate_default_lfo(&source.bank, &lfo_descriptor));
+    memset(pinned_lfos, 0, sizeof(pinned_lfos));
+    pinned_lfos[lfo_descriptor - 1] = true;
+    TEST(Sculptor::project_effect_chain_to_graph(source, 0, &graph, &mapping, pinned_lfos));
+    graph.take_changes(discarded, Sculptor::max_pending_changes);
+    TEST(graph.add_connection({ mapping.lfo_nodes[lfo_descriptor - 1], 0 },
+                              { effect_node, Sculptor::fx_param_lfo_dot(0) }) != Sculptor::pool_no_slot);
+    TEST(graph.add_connection(bend_out, { effect_node, Sculptor::fx_param_src_dot(0, 0) }) != Sculptor::pool_no_slot);
+    TEST(! Sculptor::fx_param_field_hidden(graph, effect_node, 0, 1)); // the connected LFO row renders
+    TEST(! Sculptor::fx_param_field_hidden(graph, effect_node, 0, 4)); // the connected Source A row renders
+    TEST(Sculptor::fx_param_field_hidden(graph, effect_node, 0, 7));   // the unconnected Source B stays hidden
+    TEST(graph.add_connection(bend_out, { effect_node, Sculptor::fx_param_src_dot(0, 1) }) != Sculptor::pool_no_slot);
+    TEST(! Sculptor::fx_param_field_hidden(graph, effect_node, 0, 7)); // the connected Source B row renders
+
+    // T-P4-9: a wire dropped on the base-value row while another family is
+    // already connected lands on that family's dot after re-projection;
+    // with every family input taken the base-row dot closes again.
+    Synth::EffectChainBinding& hand_wired              = add_cc_chain_fixture(&source, 0);
+    hand_wired.effects[0].bindings[0].num_inputs       = 1;
+    hand_wired.effects[0].bindings[0].inputs[0].source = Synth::ModSource::pitch_bend;
+    hand_wired.effects[0].bindings[0].inputs[0].op     = Synth::SourceOp::add;
+    hand_wired.effects[0].bindings[0].inputs[0].scale  = 1.0f;
+    TEST(Sculptor::allocate_default_lfo(&source.bank, &lfo_descriptor));
+    memset(pinned_lfos, 0, sizeof(pinned_lfos));
+    pinned_lfos[lfo_descriptor - 1] = true;
+    TEST(Sculptor::project_effect_chain_to_graph(source, 0, &graph, &mapping, pinned_lfos));
+    graph.take_changes(discarded, Sculptor::max_pending_changes);
+    const Sculptor::EndPoint lfo_drop_out = { mapping.lfo_nodes[lfo_descriptor - 1], 0 };
+    const Sculptor::EndPoint base_row_in  = { effect_node, Sculptor::fx_param_row(0) };
+    TEST(graph.add_connection(lfo_drop_out, base_row_in) != Sculptor::pool_no_slot);
+    Sculptor::GraphChange lfo_drop = {};
+    lfo_drop.kind                  = Sculptor::ChangeKind::connection_added;
+    lfo_drop.connection_output     = lfo_drop_out;
+    lfo_drop.connection_input      = base_row_in;
+    candidate                      = source;
+    TEST(Sculptor::apply_fx_graph_change(&candidate.bank, graph, mapping, lfo_drop));
+    TEST(candidate.bank.channel_chains[0].effects[0].bindings[0].lfo_desc_id == lfo_descriptor);
+    TEST(candidate.bank.channel_chains[0].effects[0].bindings[0].lfo_depth == 0.5f);
+    TEST(Sculptor::project_effect_chain_to_graph(candidate, 0, &graph, &mapping, pinned_lfos));
+    graph.take_changes(discarded, Sculptor::max_pending_changes);
+    TEST(find_fx_graph_connection(graph, lfo_drop_out, { mapping.effect_nodes[0], Sculptor::fx_param_lfo_dot(0) }) !=
+         Sculptor::pool_no_slot);
+    TEST(find_fx_graph_connection(graph, lfo_drop_out, { mapping.effect_nodes[0], Sculptor::fx_param_row(0) }) ==
+         Sculptor::pool_no_slot);
+
+    // The mirror: with the LFO family connected, a source wire dropped on
+    // the base row binds Source A; a second wire on Source B fills the
+    // last input and the base-row dot closes.
+    add_cc_chain_fixture(&source, 0);
+    TEST(Sculptor::allocate_default_lfo(&source.bank, &lfo_descriptor));
+    memset(pinned_lfos, 0, sizeof(pinned_lfos));
+    pinned_lfos[lfo_descriptor - 1]                                  = true;
+    source.bank.channel_chains[0].effects[0].bindings[0].lfo_desc_id = lfo_descriptor;
+    TEST(Sculptor::project_effect_chain_to_graph(source, 0, &graph, &mapping, pinned_lfos));
+    graph.take_changes(discarded, Sculptor::max_pending_changes);
+    const Sculptor::EndPoint fresh_base_row = { effect_node, Sculptor::fx_param_row(0) };
+    TEST(graph.add_connection(bend_out, fresh_base_row) != Sculptor::pool_no_slot);
+    Sculptor::GraphChange source_drop = {};
+    source_drop.kind                  = Sculptor::ChangeKind::connection_added;
+    source_drop.connection_output     = bend_out;
+    source_drop.connection_input      = fresh_base_row;
+    candidate                         = source;
+    TEST(Sculptor::apply_fx_graph_change(&candidate.bank, graph, mapping, source_drop));
+    TEST(candidate.bank.channel_chains[0].effects[0].bindings[0].num_inputs == 1);
+    TEST(candidate.bank.channel_chains[0].effects[0].bindings[0].inputs[0].source == Synth::ModSource::pitch_bend);
+    TEST(Sculptor::project_effect_chain_to_graph(candidate, 0, &graph, &mapping, pinned_lfos));
+    graph.take_changes(discarded, Sculptor::max_pending_changes);
+    TEST(find_fx_graph_connection(graph, bend_out, { mapping.effect_nodes[0], Sculptor::fx_param_src_dot(0, 0) }) !=
+         Sculptor::pool_no_slot);
+    const Sculptor::EndPoint wheel_out = { mapping.midi_node, mapping.midi_source_slots[1] };
+    const Sculptor::EndPoint source_b  = { effect_node, Sculptor::fx_param_src_dot(0, 1) };
+    TEST(graph.add_connection(wheel_out, source_b) != Sculptor::pool_no_slot);
+    Sculptor::GraphChange second_source = {};
+    second_source.kind                  = Sculptor::ChangeKind::connection_added;
+    second_source.connection_output     = wheel_out;
+    second_source.connection_input      = source_b;
+    TEST(Sculptor::apply_fx_graph_change(&candidate.bank, graph, mapping, second_source));
+    TEST(candidate.bank.channel_chains[0].effects[0].bindings[0].num_inputs == 2);
+    TEST(candidate.bank.channel_chains[0].effects[0].bindings[0].inputs[1].source == Synth::ModSource::mod_wheel);
+    TEST(Sculptor::project_effect_chain_to_graph(candidate, 0, &graph, &mapping, pinned_lfos));
+    graph.take_changes(discarded, Sculptor::max_pending_changes);
+    TEST(! graph.node(effect_node).slots.entries[Sculptor::fx_param_row(0)].connectable); // every family input taken
 }
 
 // Replaces the single occurrence of `needle` in `payload` (length `len`)
