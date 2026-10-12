@@ -31,10 +31,13 @@ static const char* const fx_lfo_wave_names[2] = { "Sine", "Sawtooth" };
 // The six real effect types' node rows, in shader param order.  Slider
 // bounds are editing aids only: the shaders clamp delay samples, chorus
 // depth and FIR cutoffs themselves, so out-of-range values stay audible and
-// safe.  A zero FIR cutoff disables that edge.
+// safe.  FIR: the editor writes a zero cutoff when a lowpass slider
+// reaches its 22050 Hz maximum or a highpass slider reaches its 20 Hz
+// minimum, so the sliders can reach the off state.  A zero FIR cutoff
+// (JSON only) disables that edge too.
 static const Sculptor::EffectTypeInfo effect_type_table[Synth::num_effect_types] = {
     { "None", { {} }, 0 },
-    { "Distortion", { { "Drive", 0.0f, 16.0f, true }, { "Mix", 0.0f, 1.0f, false }, {}, {}, {} }, 2 },
+    { "Distortion", { { "Drive", 1.0f, 16.0f, true }, { "Mix", 0.0f, 1.0f, false }, {}, {}, {} }, 2 },
     { "Delay",
       { { "Samples", 256.0f, 44100.0f, true },
         { "Feedback", 0.0f, 0.95f, false },
@@ -43,7 +46,7 @@ static const Sculptor::EffectTypeInfo effect_type_table[Synth::num_effect_types]
         {} },
       3 },
     { "Chorus",
-      { { "Rate Hz", 0.01f, 10.0f, true }, { "Depth", 0.0f, 64.0f, false }, { "Mix", 0.0f, 1.0f, false }, {}, {} },
+      { { "Rate Hz", 0.1f, 10.0f, true }, { "Depth", 0.0f, 64.0f, false }, { "Mix", 0.0f, 1.0f, false }, {}, {} },
       3 },
     { "Reverb",
       { { "Room", 0.0f, 1.0f, false }, { "Damping", 0.0f, 1.0f, false }, { "Wet", 0.0f, 1.0f, false }, {}, {} },
@@ -631,8 +634,15 @@ bool Sculptor::project_effect_chain_to_graph(const Synth::InstrumentEditorBank& 
             // for the row's first free modulator input (LFO, then Source
             // A/B), and the apply path resolves the landing. Any binding
             // closes the row again - the modulator rows carry the dots.
+            // FIR: a disabled edge (zero cutoff) displays at the slider extreme
+            // the user pushed it to, so touching the slider does not re-enable
+            // the edge at the opposite end of the range.
+            float display_value = binding.base_value;
+            if (effect.type == Synth::EffectType::fir && binding.base_value == 0.0f) {
+                display_value = (param == 0) ? param_info.max_value : param_info.min_value;
+            }
             Slot row        = bounded_real_slot(param_info.name,
-                                                binding.base_value,
+                                                display_value,
                                                 param_info.min_value,
                                                 param_info.max_value,
                                                 param_info.logarithmic);
@@ -937,9 +947,27 @@ static bool apply_fx_graph_change_internal(Synth::InstrumentBank*              b
                 }
                 Synth::EffectParamBinding& binding = chain.effects[slot].bindings[param];
                 switch (field) {
-                    case 0:
-                        binding.base_value = live_slot.value.real;
+                    case 0: {
+                        // FIR edges turn off at their slider extremes: at the 20 Hz
+                        // minimum the 1025-tap kernel cannot resolve the edge and the
+                        // result is silence, and at the 22050 Hz maximum the edge is
+                        // transparent. Both extremes write the zero cutoff "off" state,
+                        // for lowpass and highpass alike.
+                        // The synth keeps the raw Hz values untouched.
+                        float base_value = live_slot.value.real;
+                        if (chain.effects[slot].type == Synth::EffectType::fir) {
+                            const Sculptor::EffectTypeInfo& fir_info =
+                                Sculptor::effect_type_info(Synth::EffectType::fir);
+                            const Sculptor::EffectParamInfo& fir_param = fir_info.params[param];
+                            const bool                       at_extreme =
+                                base_value <= fir_param.min_value || base_value >= fir_param.max_value;
+                            if (param <= 1 && at_extreme) {
+                                base_value = 0.0f;
+                            }
+                        }
+                        binding.base_value = base_value;
                         return true;
+                    }
                     case 2:
                         binding.lfo_op =
                             live_slot.value.list_index == 1 ? Synth::SourceOp::multiply : Synth::SourceOp::add;
