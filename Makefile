@@ -134,6 +134,7 @@ ifeq ($(UNAME), Linux)
     endif
     threed_src_files           += linux/main_linux.cpp
     threed_src_files           += linux/realtime_synth_linux.cpp
+    threed_gui_src_files       += linux/midi_linux.cpp
 endif
 
 ifeq ($(UNAME), Darwin)
@@ -145,7 +146,7 @@ ifeq ($(UNAME), Darwin)
         threed_nogui_src_files += macos/nogui_macos.mm
     endif
     threed_gui_src_files   += macos/gui_macos.mm
-    threed_gui_src_files   += macos/realtime_synth_macos.cpp
+    threed_src_files       += macos/realtime_synth_macos.cpp
     threed_gui_src_files   += macos/midi_macos.cpp
 
     midi_test_sender_src_files += macos/midi_test_sender.cpp
@@ -154,7 +155,7 @@ endif
 ifeq ($(UNAME), Windows)
     threed_src_files       += windows/main_windows.cpp
     threed_gui_src_files   += windows/gui_windows.cpp
-    threed_gui_src_files   += windows/realtime_synth_windows.cpp
+    threed_src_files       += windows/realtime_synth_windows.cpp
     threed_gui_src_files   += windows/midi_windows.cpp
     threed_nogui_src_files += windows/nogui_windows.cpp
 
@@ -367,9 +368,9 @@ ifeq ($(UNAME), Windows)
     win_libs += kernel32.lib
     win_libs += ole32.lib
     win_libs += user32.lib
+    win_libs += avrt.lib
 
     LDFLAGS_gui += winmm.lib
-    LDFLAGS_gui += avrt.lib
 
     LDFLAGS += -nologo
     LDFLAGS += $(win_libs)
@@ -461,9 +462,9 @@ ifeq ($(UNAME), Darwin)
     frameworks += Cocoa
     frameworks += CoreVideo
     frameworks += Quartz
+    frameworks += AudioToolbox
 
     gui_frameworks += GameController
-    gui_frameworks += AudioToolbox
     gui_frameworks += CoreMIDI
 
     ifneq ($(ARCH), $(shell uname -m))
@@ -629,6 +630,10 @@ $(foreach target,$(nogui_targets),$(call GUI_PATH,$(target))): LINK = $(LINK_C)
 endif
 
 $(foreach target,$(gui_targets),$(call GUI_PATH,$(target))): SUBSYSTEMFLAGS = $(LDFLAGS_gui)
+
+ifeq ($(UNAME), Linux)
+$(foreach target,$(gui_targets) $(nogui_targets),$(call GUI_PATH,$(target))): LDFLAGS += -lasound -lpthread
+endif
 
 $(foreach target,$(gui_targets) $(nogui_targets),$(eval $(call GUI_LINK_RULE,$(target),$(all_$(target)_src_files))))
 
@@ -811,3 +816,5 @@ shader_dep_files = $(addprefix $(shaders_out_dir)/, $(addsuffix .d, $(basename $
 
 
 $(call TARGET_FILES, sculptor/sculptor_graph_unit.cpp): CFLAGS += -DGRAPH_UNIT_AUDIO_RENDER_TEST_STUB
+
+$(call TARGET_FILES, synth/realtime_synth.cpp): CFLAGS += -I$(gen_headers_dir)

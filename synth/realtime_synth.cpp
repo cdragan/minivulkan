@@ -600,10 +600,6 @@ std::atomic<ActiveRingFormat> active_ring_format{ ActiveRingFormat::none };
 
 } // namespace
 
-namespace Synth {
-bool init_synth_os();
-void stop_synth_os();
-} // namespace Synth
 
 static uint32_t writer_alloc_node(const void* ctx);
 static uint16_t writer_resolve_source(const void* ctx, Synth::ModSource source, uint8_t cc_number, uint32_t channel);

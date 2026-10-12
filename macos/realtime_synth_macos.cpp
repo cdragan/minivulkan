@@ -56,8 +56,6 @@ static OSStatus render_callback(void*                       in_ref_con,
 
 namespace Synth {
 
-bool init_midi_os();
-void stop_midi_os();
 
 bool init_synth_os()
 {

@@ -3,7 +3,6 @@
 
 #include "../core/d_printf.h"
 #include "../synth/realtime_synth.h"
-#include "realtime_synth_os.h"
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>

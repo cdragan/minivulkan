@@ -4,7 +4,6 @@
 #include "../core/d_printf.h"
 #include "../synth/midi_decode.h"
 #include "../synth/midi_input.h"
-#include "realtime_synth_os.h"
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>

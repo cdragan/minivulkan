@@ -3,13 +3,11 @@
 
 #include "realtime_synth.h"
 
-// Builds without live MIDI input (the minimal playback build) link this placeholder, so the
-// audio loop's per-step pump compiles to nothing.
-
-namespace Synth {
-
-void pump_live_midi()
+bool Synth::init_midi_os()
 {
+    return true;
 }
 
-} // namespace Synth
+void Synth::stop_midi_os() {}
+
+void Synth::pump_live_midi() {}

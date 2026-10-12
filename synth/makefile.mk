@@ -26,8 +26,8 @@ synth_unit_src_files += synth/synth_soundtrack_codec.cpp
 
 midi_decode_unit_src_files += synth/midi_decode_unit.cpp
 
-threed_gui_src_files += synth/realtime_synth.cpp
-threed_gui_src_files += synth/empty_midi_soundtrack.cpp
+threed_src_files += synth/realtime_synth.cpp
+threed_src_files += synth/empty_midi_soundtrack.cpp
 threed_gui_src_files += synth/midi_input.cpp
 
 threed_nogui_src_files += synth/midi_input_none.cpp

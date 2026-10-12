@@ -70,6 +70,10 @@ void apply_midi_event(const MidiEvent& event);
 
 // Drains live MIDI input into the synth
 void pump_live_midi();
+bool init_synth_os();
+void stop_synth_os();
+bool init_midi_os();
+void stop_midi_os();
 
 // Fills the caller's output channels from the audio ring buffer
 template <typename T, bool interleaved> uint32_t consume_audio(uint32_t num_frames, T* channel0, T* channel1);
