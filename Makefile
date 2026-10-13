@@ -441,6 +441,9 @@ ifeq ($(UNAME), Linux)
         CFLAGS  += -DLINUX_USE_XCB
     endif
 
+    # Disable assertions in C++ library to avoid pulling in libstdc++
+    CXXFLAGS += -D_GLIBCXX_NO_ASSERTIONS
+
     # Required for dlopen() for Vulkan loader
     LDFLAGS += -ldl
     # Required for truncf()
