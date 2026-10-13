@@ -35,7 +35,7 @@ static void check_gui_result(VkResult imgui_error)
 
 static PFN_vkVoidFunction load_vk_function(const char* name, void* cookie)
 {
-    if (strstr(name, "vkGetPhysicalDevice") || strstr(name, "vkDestroySurface"))
+    if (strstr(name, "vkGetPhysicalDevice") || strstr(name, "vkDestroySurface") || strstr(name, "vkEnumeratePhysicalDevices"))
         return vkGetInstanceProcAddr(vk_instance, name);
     return vkGetDeviceProcAddr(vk_dev, name);
 }
@@ -232,7 +232,7 @@ bool init_gui(GuiClear clear)
     mkdir("assets", 0755);
 #endif
 
-    if ( ! ImGui_ImplVulkan_LoadFunctions(load_vk_function, nullptr))
+    if ( ! ImGui_ImplVulkan_LoadFunctions(VK_API_VERSION_1_4, load_vk_function))
         return false;
 
     static VkDescriptorPoolSize pool_sizes[] = {
@@ -265,6 +265,7 @@ bool init_gui(GuiClear clear)
         return false;
 
     ImGui_ImplVulkan_InitInfo init_info = { };
+    init_info.ApiVersion      = VK_API_VERSION_1_4;
     init_info.Instance        = vk_instance;
     init_info.PhysicalDevice  = vk_phys_dev;
     init_info.Device          = vk_dev;
@@ -274,53 +275,11 @@ bool init_gui(GuiClear clear)
     init_info.MinImageCount   = vk_num_swapchain_images;
     init_info.ImageCount      = vk_num_swapchain_images;
     init_info.CheckVkResultFn = check_gui_result;
-    if ( ! ImGui_ImplVulkan_Init(&init_info, vk_gui_render_pass)) {
+    init_info.PipelineInfoMain.RenderPass = vk_gui_render_pass;
+    if ( ! ImGui_ImplVulkan_Init(&init_info)) {
         d_printf("Failed to initialize Vulkan GUI\n");
         return false;
     }
-
-    // Send fonts to GPU
-    CommandBuffers<1> cmd_buf;
-    if ( ! allocate_command_buffers(&cmd_buf))
-        return false;
-
-    if ( ! reset_and_begin_command_buffer(cmd_buf.bufs[0]))
-        return false;
-
-    if ( ! ImGui_ImplVulkan_CreateFontsTexture(cmd_buf.bufs[0])) {
-        d_printf("Failed to create GUI font texture\n");
-        return false;
-    }
-
-    res = CHK(vkEndCommandBuffer(cmd_buf.bufs[0]));
-    if (res != VK_SUCCESS)
-        return false;
-
-    static const VkPipelineStageFlags dst_stage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
-
-    static VkSubmitInfo submit_info = {
-        VK_STRUCTURE_TYPE_SUBMIT_INFO,
-        nullptr,
-        0,                  // waitSemaphoreCount
-        nullptr,            // pWaitSemaphored
-        &dst_stage,         // pWaitDstStageMask
-        1,                  // commandBufferCount
-        cmd_buf.bufs,
-        0,                  // signalSemaphoreCount
-        nullptr             // pSignalSemaphores
-    };
-
-    res = CHK(vkQueueSubmit(vk_graphics_queue, 1, &submit_info, vk_fens[fen_copy_to_dev]));
-    if (res != VK_SUCCESS)
-        return false;
-
-    if ( ! wait_and_reset_fence(fen_copy_to_dev))
-        return false;
-
-    ImGui_ImplVulkan_DestroyFontUploadObjects();
-
-    GET_VK_DEV_FUNCTION(vkDestroyCommandPool, vk_dev);
-    vkDestroyCommandPool(vk_dev, cmd_buf.pool, nullptr);
 
     return true;
 }

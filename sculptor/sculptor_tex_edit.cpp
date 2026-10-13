@@ -118,7 +118,7 @@ bool Sculptor::TextureEditor::allocate_resources()
     }
 
     if ( ! thumbnail_descriptor) {
-        thumbnail_descriptor = ImGui_ImplVulkan_AddTexture(thumbnail_sampler,
+        thumbnail_descriptor = ImGui_ImplVulkan_AddTexture(
                                                             thumbnail_atlas.get_view(),
                                                             VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     }

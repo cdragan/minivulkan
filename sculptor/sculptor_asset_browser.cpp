@@ -44,12 +44,12 @@ bool Sculptor::AssetBrowser::render_tab_button(AssetTab tab)
     if (is_active) {
         const ImU32 tab_bg = ImGui::GetColorU32(ImGuiCol_Tab, 1.8f);
         draw_list->AddRectFilled(btn_min, btn_max, tab_bg,
-                                 rounding, ImDrawFlags_RoundCornersLeft);
+                                 rounding, ImDrawFlags_RoundLeft);
     }
     else if (is_hovered) {
         const ImU32 hover_bg = ImGui::GetColorU32(ImGuiCol_TabHovered, 0.5f);
         draw_list->AddRectFilled(btn_min, btn_max, hover_bg,
-                                 rounding, ImDrawFlags_RoundCornersLeft);
+                                 rounding, ImDrawFlags_RoundLeft);
     }
 
     // Draw the icon image on top
@@ -124,7 +124,7 @@ bool Sculptor::AssetBrowser::allocate_resources()
         if ( ! load_png(assets, sizeof(assets), &icon_image))
             return false;
 
-        icon_texture = ImGui_ImplVulkan_AddTexture(icon_sampler,
+        icon_texture = ImGui_ImplVulkan_AddTexture(
                                                     icon_image.get_view(),
                                                     VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 

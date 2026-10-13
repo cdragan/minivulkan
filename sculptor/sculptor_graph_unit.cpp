@@ -1476,10 +1476,11 @@ static void test_renderer_audio_endpoint_mouse_frames()
     io.DisplaySize                  = ImVec2(1024, 768);
     io.DeltaTime                    = 1.0f / 60.0f;
     io.ConfigInputTrickleEventQueue = false;
-    unsigned char* pixels           = nullptr;
-    int            width = 0, height = 0;
-    io.Fonts->GetTexDataAsRGBA32(&pixels, &width, &height);
-    TEST(pixels && width > 0 && height > 0);
+    io.BackendFlags |= ImGuiBackendFlags_RendererHasTextures; // the test does not use a real renderer backend
+    ImGui::NewFrame();
+    ImGui::EndFrame();
+    ImTextureData* tex = io.Fonts->TexData;
+    TEST(tex && tex->Pixels && tex->Width > 0 && tex->Height > 0);
     for (uint32_t endpoint = 0; endpoint < 2; ++endpoint) {
         for (uint32_t action = 0; action < 8; ++action) {
             ImGui::ClosePopupsOverWindow(nullptr, false);

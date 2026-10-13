@@ -355,7 +355,7 @@ bool Sculptor::GeometryEditor::allocate_resources()
         if (! load_png(toolbar, sizeof(toolbar), &toolbar_image))
             return false;
 
-        toolbar_texture = ImGui_ImplVulkan_AddTexture(point_sampler,
+        toolbar_texture = ImGui_ImplVulkan_AddTexture(
                                                       toolbar_image.get_view(),
                                                       VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     }
@@ -547,7 +547,7 @@ bool Sculptor::GeometryEditor::alloc_view_resources(View*     dst_view,
             VK_FUNCTION(vkUpdateDescriptorSets)(vk_dev, 1, &write_desc, 0, nullptr);
         }
         else {
-            res.gui_texture = ImGui_ImplVulkan_AddTexture(viewport_sampler,
+            res.gui_texture = ImGui_ImplVulkan_AddTexture(
                                                           res.color.get_view(),
                                                           VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
         }

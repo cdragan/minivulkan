@@ -2637,7 +2637,7 @@ void Sculptor::SynthEditor::gui_keyboard()
     // Keys end in a slightly rounded bottom edge; the strips and highlights below
     // reuse the same corner treatment so overlays do not square it off.
     const float       key_rounding    = 2.0f;
-    const ImDrawFlags bottom_rounding = ImDrawFlags_RoundCornersBottom;
+    const ImDrawFlags bottom_rounding = ImDrawFlags_RoundBottom;
 
     // Fixed piano colors: a dark theme would otherwise invert the keys.
     ImDrawList* const draw            = ImGui::GetWindowDrawList();

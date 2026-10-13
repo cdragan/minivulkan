@@ -246,7 +246,7 @@ static bool create_gui_frame(uint32_t image_idx)
 
     const ImGuiID dockspace_id = ImHashStr("SculptorDockSpace");
     apply_default_dock_layout(dockspace_id);
-    ImGui::DockSpaceOverViewport(ImGui::GetMainViewport(), ImGuiDockNodeFlags_PassthruCentralNode, nullptr, dockspace_id);
+    ImGui::DockSpaceOverViewport(dockspace_id, ImGui::GetMainViewport(), ImGuiDockNodeFlags_PassthruCentralNode);
 
     ImGui::Begin("Debug");
     {

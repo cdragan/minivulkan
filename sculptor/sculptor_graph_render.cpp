@@ -60,7 +60,8 @@ ImU32 to_imgui(uint32_t packed)
 static float push_zoom_font(float scale)
 {
     const float previous_scale = ImGui::GetCurrentWindow()->FontWindowScale;
-    ImGui::SetWindowFontScale(previous_scale * scale);
+    ImGui::GetCurrentWindow()->FontWindowScale = previous_scale * scale;
+    ImGui::UpdateCurrentFontSize(0.0f);
     const ImGuiStyle& style = ImGui::GetStyle();
     ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(style.FramePadding.x * scale, style.FramePadding.y * scale));
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(style.ItemSpacing.x * scale, style.ItemSpacing.y * scale));
@@ -73,7 +74,8 @@ static float push_zoom_font(float scale)
 static void pop_zoom_font(float previous_scale)
 {
     ImGui::PopStyleVar(4);
-    ImGui::SetWindowFontScale(previous_scale);
+    ImGui::GetCurrentWindow()->FontWindowScale = previous_scale;
+    ImGui::UpdateCurrentFontSize(0.0f);
 }
 
 // Draw-list text at zoom size: ImGui 1.89 stretches the baked glyphs when
@@ -475,7 +477,6 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
                                ImVec2(rect_max.x + 2.0f, rect_max.y + 2.0f),
                                to_imgui(colors_.node_selected_border),
                                node_corner_rounding * render_scale,
-                               0,
                                2.0f);
         }
 
