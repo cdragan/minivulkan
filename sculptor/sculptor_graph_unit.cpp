@@ -996,12 +996,12 @@ static void canvas_menu_adds_node(void* user_data)
     static_cast<Graph*>(user_data)->create_node("canvas", vmath::vec2(0.0f, 0.0f));
 }
 
-// Connection capacity covers the editor's worst-case oscillator graph (252
-// reachable edges at seven layers); the pool must hold every reachable
-// state, not just the common one.
-static void test_connection_capacity_raised_to_352()
+// Connection capacity covers the editor's worst-case oscillator graph (385
+// reachable edges at seven layers with per-target blocks); the pool must
+// hold every reachable state, not just the common one.
+static void test_connection_capacity_raised_to_512()
 {
-    TEST(max_connections == 352);
+    TEST(max_connections == 512);
 
     Graph& g = reset_unit_graph(0);
     g.clear();
@@ -1011,24 +1011,24 @@ static void test_connection_capacity_raised_to_352()
     out_slot.kind = SlotKind::output;
     TEST(g.add_slot(source, out_slot) != Sculptor::pool_no_slot);
 
-    // 352 single-connection inputs across eleven sink nodes (32 slots each,
+    // 512 single-connection inputs across sixteen sink nodes (120 slots each,
     // the full per-node slot pool).
     Slot in_slot       = {};
     in_slot.kind       = SlotKind::input;
-    uint32_t sinks[11] = {};
-    for (uint32_t sink = 0; sink < 11; ++sink) {
+    uint32_t sinks[16] = {};
+    for (uint32_t sink = 0; sink < 16; ++sink) {
         sinks[sink] = g.create_node("sink", vmath::vec2(0.0f, 0.0f));
         TEST(sinks[sink] != Sculptor::pool_no_slot);
         for (uint32_t s = 0; s < max_node_slots; ++s) {
             TEST(g.add_slot(sinks[sink], in_slot) != Sculptor::pool_no_slot);
         }
     }
-    for (uint32_t i = 0; i < 352; ++i) {
+    for (uint32_t i = 0; i < 512; ++i) {
         const EndPoint out = { source, 0 };
         const EndPoint in  = { sinks[i / max_node_slots], i % max_node_slots };
         TEST(g.add_connection(out, in) != Sculptor::pool_no_slot);
     }
-    TEST(g.connection_count() == 352);
+    TEST(g.connection_count() == 512);
 }
 
 // Per-slot "missing" render state, editor-settable so the renderer draws
@@ -1395,41 +1395,41 @@ static void test_user_disconnect_and_intent_capacity()
     const uint32_t wire = graph.add_connection({ source, 0 }, { target, 0 });
     GraphChange    changes[max_pending_changes];
     graph.take_changes(changes, max_pending_changes);
- // The pending-change ring saturates: an event beyond capacity is
- // dropped and reported through the overflow flag, never silently
- // wedging later edits.
- for (uint32_t index = 0; index < max_pending_changes; ++index) {
-  graph.rename_node(target, index % 2 ? "A" : "B");
- }
- graph.rename_node(target, "overflow-probe");
- bool overflow = false;
- TEST(graph.peek_changes(changes, max_pending_changes, &overflow) == max_pending_changes);
- TEST(overflow);
- graph.take_changes(changes, max_pending_changes);
- TEST(graph.changes_overflowed());
- TEST(graph.user_delete_connection(wire));
- TEST(! graph.user_delete_connection(wire));
- TEST(graph.take_changes(changes, max_pending_changes) == 1);
- TEST(changes[0].kind == ChangeKind::connection_deleted);
- const uint32_t next_wire = graph.add_connection({ source, 0 }, { target, 0 });
- graph.take_changes(changes, max_pending_changes);
- graph.delete_node(target);
- TEST(! graph.connection_occupied(next_wire));
- graph.clear();
- graph.take_changes(changes, max_pending_changes);
- const uint32_t next_source = graph.create_node("source", {});
- const uint32_t next_target = graph.create_node("target", {});
- graph.add_slot(next_source, Sculptor::output_slot("Out"));
- graph.add_slot(next_target, Sculptor::input_slot("In"));
- const uint32_t rebuilt_wire = graph.add_connection({ next_source, 0 }, { next_target, 0 });
- graph.take_changes(changes, max_pending_changes);
- TEST(graph.user_delete_connection(rebuilt_wire));
- TEST(! graph.connection_occupied(rebuilt_wire));
- // Generic self wiring refuses on structural grounds alone.
- const uint32_t self_wire = graph.add_connection({ next_source, 0 }, { next_target, 0 });
- graph.take_changes(changes, max_pending_changes);
- TEST(! graph.move_connection_end(self_wire, false, { next_source, 0 }));
- TEST(graph.take_changes(changes, max_pending_changes) == 0);
+    // The pending-change ring saturates: an event beyond capacity is
+    // dropped and reported through the overflow flag, never silently
+    // wedging later edits.
+    for (uint32_t index = 0; index < max_pending_changes; ++index) {
+        graph.rename_node(target, index % 2 ? "A" : "B");
+    }
+    graph.rename_node(target, "overflow-probe");
+    bool overflow = false;
+    TEST(graph.peek_changes(changes, max_pending_changes, &overflow) == max_pending_changes);
+    TEST(overflow);
+    graph.take_changes(changes, max_pending_changes);
+    TEST(graph.changes_overflowed());
+    TEST(graph.user_delete_connection(wire));
+    TEST(! graph.user_delete_connection(wire));
+    TEST(graph.take_changes(changes, max_pending_changes) == 1);
+    TEST(changes[0].kind == ChangeKind::connection_deleted);
+    const uint32_t next_wire = graph.add_connection({ source, 0 }, { target, 0 });
+    graph.take_changes(changes, max_pending_changes);
+    graph.delete_node(target);
+    TEST(! graph.connection_occupied(next_wire));
+    graph.clear();
+    graph.take_changes(changes, max_pending_changes);
+    const uint32_t next_source = graph.create_node("source", {});
+    const uint32_t next_target = graph.create_node("target", {});
+    graph.add_slot(next_source, Sculptor::output_slot("Out"));
+    graph.add_slot(next_target, Sculptor::input_slot("In"));
+    const uint32_t rebuilt_wire = graph.add_connection({ next_source, 0 }, { next_target, 0 });
+    graph.take_changes(changes, max_pending_changes);
+    TEST(graph.user_delete_connection(rebuilt_wire));
+    TEST(! graph.connection_occupied(rebuilt_wire));
+    // Generic self wiring refuses on structural grounds alone.
+    const uint32_t self_wire = graph.add_connection({ next_source, 0 }, { next_target, 0 });
+    graph.take_changes(changes, max_pending_changes);
+    TEST(! graph.move_connection_end(self_wire, false, { next_source, 0 }));
+    TEST(graph.take_changes(changes, max_pending_changes) == 0);
 }
 
 static uint32_t render_frame(Graph& graph, ImVec2 mouse, bool down, bool escape = false, bool right = false)
@@ -1659,7 +1659,7 @@ int main()
     test_delete_node_frees_index_and_drops_connections();
     test_add_delete_connection_basics();
     test_clear_resets_popup_and_error();
-    test_connection_capacity_raised_to_352();
+    test_connection_capacity_raised_to_512();
     test_slot_missing_flag_api();
     test_eventless_slot_value_write();
     test_eventless_slot_input_write();

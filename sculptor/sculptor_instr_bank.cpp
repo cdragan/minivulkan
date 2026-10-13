@@ -706,21 +706,6 @@ void Synth::reclaim_unused_slots(Synth::InstrumentEditorBank* editor_bank, uint1
         }
     }
 
-    // Parameter records (kind 3) root their referenced descriptors too:
-    // a record's wiring persists across gestures that leave no value
-    // wires, so the record may be the only referencer an envelope or LFO
-    // has.
-    for (uint32_t r = 0; r < editor_bank->graph_layout_count; r++) {
-        const GraphNodeLayout& record = editor_bank->graph_layout[r];
-        if (record.kind != 3) {
-            continue;
-        }
-        if (record.env_desc_id && record.env_desc_id <= max_envelopes)
-            keep_env[record.env_desc_id - 1] = true;
-        if (record.lfo_desc_id && record.lfo_desc_id <= max_lfos)
-            keep_lfo[record.lfo_desc_id - 1] = true;
-    }
-
     const uint32_t num_envelopes = bank->envelopes.num_allocated;
     for (uint32_t i = 0; i < num_envelopes; i++) {
         if (! keep_env[i])
@@ -757,20 +742,6 @@ void Synth::reclaim_unused_slots(Synth::InstrumentEditorBank* editor_bank, uint1
                     gen.lfo_desc_id = lfo_ids[gen.lfo_desc_id - 1];
             }
         }
-    }
-
-    // Parameter records' descriptor references follow the same remap: a
-    // stale id after compaction would either name a different descriptor
-    // or exceed num_allocated and fail validation forever.
-    for (uint32_t r = 0; r < editor_bank->graph_layout_count; r++) {
-        GraphNodeLayout& record = editor_bank->graph_layout[r];
-        if (record.kind != 3) {
-            continue;
-        }
-        if (record.env_desc_id)
-            record.env_desc_id = static_cast<uint8_t>(env_ids[record.env_desc_id - 1]);
-        if (record.lfo_desc_id)
-            record.lfo_desc_id = static_cast<uint8_t>(lfo_ids[record.lfo_desc_id - 1]);
     }
 
     for (uint32_t chain = 0; chain <= Synth::max_channels; chain++) {
@@ -854,8 +825,7 @@ uint32_t Sculptor::count_detached_records(const Synth::InstrumentEditorBank& ban
     uint32_t count = 0;
     for (uint32_t i = 0; i < bank.graph_layout_count; ++i) {
         const Synth::GraphNodeLayout& record = bank.graph_layout[i];
-        if (record.channel == channel && record.zone == zone &&
-            (record.kind == 1 || record.kind == 2 || record.kind == 3)) {
+        if (record.channel == channel && record.zone == zone && (record.kind == 1 || record.kind == 2)) {
             ++count;
         }
     }
@@ -980,7 +950,7 @@ bool Sculptor::validate_editor_metadata(const Synth::InstrumentEditorBank& bank)
     uint16_t detached_per_zone[Synth::max_channels][Synth::max_instr_per_channel] = {};
     for (uint32_t i = 0; i < bank.graph_layout_count; ++i) {
         const Synth::GraphNodeLayout& record = bank.graph_layout[i];
-        if (record.zone >= Synth::max_instr_per_channel || record.kind > 4 ||
+        if (record.zone >= Synth::max_instr_per_channel || ! Synth::editor_record_kind_valid(record.kind) ||
             (record.channel >= Synth::max_channels && ! (record.kind == 4 && record.channel == Synth::max_channels))) {
             return false;
         }
@@ -990,23 +960,18 @@ bool Sculptor::validate_editor_metadata(const Synth::InstrumentEditorBank& bank)
         // index max_channels) keeps its own records.
         if (record.kind == 4) {
             if (record.channel > Synth::max_channels || record.zone != 0 || record.index != 0 || record.uid != 0 ||
-                record.depth_source != 0 || record.rate_source != 0 ||
-                (record.served | record.env_desc_id | record.lfo_desc_id | record.lfo_depth_source |
-                 record.lfo_rate_source | record.param_slot) != 0 ||
-                record.name[0] == 0) {
+                record.depth_source != 0 || record.rate_source != 0 || record.name[0] == 0) {
                 return false;
             }
         }
-        // Kinds 1/2/3 are detached records keyed by uid; a zero uid would
+        // Kinds 1/2 are detached records keyed by uid; a zero uid would
         // alias the derived (record-less) projection state.
         if (record.kind != 0 && record.kind != 4 && record.uid == 0) {
             return false;
         }
-        // The partial-wiring persistence fields belong to parameter records
-        // alone; anywhere else they would silently change what a record keys.
-        if (record.kind != 3 && record.kind != 4 &&
-            (record.served != 0 || record.env_desc_id != 0 || record.lfo_desc_id != 0 || record.lfo_depth_source != 0 ||
-             record.lfo_rate_source != 0 || record.param_slot != 0 || record.name[0] != 0)) {
+        // Bound and generator records carry no title override: a kind-4 record
+        // keys by name, everything else keys by index.
+        if (record.kind != 4 && record.name[0] != 0) {
             return false;
         }
         if (record.kind == 0) {
@@ -1016,29 +981,6 @@ bool Sculptor::validate_editor_metadata(const Synth::InstrumentEditorBank& bank)
             // Bound nodes are keyed by canonical index alone: a nonzero uid
             // would create a second key for the same node.
             if (record.uid != 0) {
-                return false;
-            }
-        }
-        else if (record.kind == 3) {
-            // A parameter record keys a dynamic ModTarget (0..num_mod_targets - 1).
-            // Its persistence fields name oscillator layers,
-            // descriptor pool entries and ModSource values, so a stale
-            // reference cannot push a projection read out of bounds.
-            if (record.index >= Synth::num_mod_targets || (record.served >> Synth::max_layers) != 0 ||
-                record.env_desc_id > bank.bank.envelopes.num_allocated ||
-                record.lfo_desc_id > bank.bank.lfos.num_allocated ||
-                record.lfo_depth_source > Synth::graph_canonical_input_count ||
-                record.lfo_rate_source > Synth::graph_canonical_input_count) {
-                return false;
-            }
-            if (++detached_per_zone[record.channel][record.zone] > Synth::max_detached_per_zone) {
-                return false;
-            }
-            // Served bits name oscillator layers of the zone's instrument: a
-            // bit at or above its actual layer count is stale.
-            const Synth::Zone& zone_entry = bank.bank.channel_zones[record.channel][record.zone];
-            if (zone_entry.start_note != 0 && zone_entry.instrument < bank.bank.instruments.num_allocated &&
-                (record.served >> bank.bank.instruments.entries[zone_entry.instrument].layer_count) != 0) {
                 return false;
             }
         }
@@ -1069,18 +1011,15 @@ bool Sculptor::validate_editor_metadata(const Synth::InstrumentEditorBank& bank)
             }
         }
     }
-    // The implied projected node count per zone must fit the node pool,
-    // and the implied parameter count must fit the static parameter
-    // registry: the projection refuses beyond it, which would leave the
-    // zone's oscillator editor unavailable. count_projected_nodes mirrors
-    // the projection's attachment decisions (ordinal trust, tuple
-    // verification, positional pairing, dormant surplus), so a bank that
-    // passes here is one the projection can always materialize.
+    // The implied projected node count per zone must fit the node pool:
+    // the projection refuses beyond it, which would leave the zone's
+    // oscillator editor unavailable.  count_projected_nodes mirrors the
+    // projection's materialization (layers, generator instances, record
+    // surplus), so a bank that passes here is one the projection can
+    // always materialize.
     for (uint32_t channel = 0; channel < Synth::max_channels; ++channel) {
         for (uint32_t zone = 0; zone < Synth::max_instr_per_channel; ++zone) {
-            uint32_t parameter_count = 0;
-            if (Sculptor::count_projected_nodes(bank, channel, zone, &parameter_count) > Sculptor::max_nodes ||
-                parameter_count > Sculptor::max_param_nodes) {
+            if (Sculptor::count_projected_nodes(bank, channel, zone) > Sculptor::max_nodes) {
                 return false;
             }
             // A missing-sum bit must reference an existing oscillator layer:

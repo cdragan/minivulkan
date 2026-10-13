@@ -87,27 +87,25 @@ Sculptor::Slot Sculptor::toggle_slot(const char* name, bool value)
 Sculptor::GraphColors Sculptor::default_graph_colors()
 {
 
-    Sculptor::GraphColors colors     = {};
-    colors.node_background           = 0x2B2B2BFFu;
-    colors.node_border               = 0x5A5A5AFFu;
-    colors.node_selected_border      = 0xFFFFFFFFu;
-    colors.node_title                = 0xE0E0E0FFu;
-    colors.grid_line                 = 0x353535FFu;
-    colors.grid_axis                 = 0x404040FFu;
-    colors.connector                 = 0x909090FFu;
-    colors.connector_hover           = 0xFFFFFFE0u;
-    colors.connector_connected       = 0xE0E0E0FFu;
-    colors.connector_missing         = 0xFF4040FFu;
-    colors.connection                = 0xC0C0C0FFu;
-    colors.ghost_node                = 0x4A4A4A80u;
-    colors.property_value            = 0xD0D0D0FFu;
-    colors.property_connected_value  = 0x808080FFu;
-    colors.parameter_node_background = 0x25304AFFu;
-    colors.parameter_node_border     = 0x6078B0FFu;
-    colors.error_background          = 0x602020E0u;
-    colors.error_text                = 0xFFE0E0FFu;
-    colors.selection_outline         = 0xFFFFFFFFu;
-    colors.selection_band            = 0xFFFFFF30u;
+    Sculptor::GraphColors colors    = {};
+    colors.node_background          = 0x2B2B2BFFu;
+    colors.node_border              = 0x5A5A5AFFu;
+    colors.node_selected_border     = 0xFFFFFFFFu;
+    colors.node_title               = 0xE0E0E0FFu;
+    colors.grid_line                = 0x353535FFu;
+    colors.grid_axis                = 0x404040FFu;
+    colors.connector                = 0x909090FFu;
+    colors.connector_hover          = 0xFFFFFFE0u;
+    colors.connector_connected      = 0xE0E0E0FFu;
+    colors.connector_missing        = 0xFF4040FFu;
+    colors.connection               = 0xC0C0C0FFu;
+    colors.ghost_node               = 0x4A4A4A80u;
+    colors.property_value           = 0xD0D0D0FFu;
+    colors.property_connected_value = 0x808080FFu;
+    colors.error_background         = 0x602020E0u;
+    colors.error_text               = 0xFFE0E0FFu;
+    colors.selection_outline        = 0xFFFFFFFFu;
+    colors.selection_band           = 0xFFFFFF30u;
 
     return colors;
 }
@@ -317,9 +315,8 @@ void Sculptor::Graph::delete_node_unvetoed(uint32_t node_idx)
         retarget_connection = pool_no_slot;
     }
     nodes.free(node_idx);
-    selected[node_idx]          = false;
-    content_sizes[node_idx]     = vmath::vec2(0.0f, 0.0f);
-    node_visual_roles[node_idx] = 0;
+    selected[node_idx]      = false;
+    content_sizes[node_idx] = vmath::vec2(0.0f, 0.0f);
     memset(&slot_edit_disabled_flags[node_idx * max_node_slots], 0, max_node_slots);
     if (dragged_node == node_idx) {
         dragged_node = pool_no_slot;
@@ -543,19 +540,6 @@ bool Sculptor::Graph::slot_missing(uint32_t node_idx, uint32_t slot_idx) const
     }
     const uint32_t bit = node_idx * max_node_slots + slot_idx;
     return (slot_missing_bits[bit / 8u] & (1u << (bit % 8u))) != 0;
-}
-
-void Sculptor::Graph::set_node_visual_role(uint32_t node_idx, uint8_t role)
-{
-    if (node_idx >= max_nodes) {
-        return;
-    }
-    node_visual_roles[node_idx] = role;
-}
-
-uint8_t Sculptor::Graph::node_visual_role(const uint32_t node_idx) const
-{
-    return node_visual_roles[node_idx];
 }
 
 void Sculptor::Graph::set_slot_edit_disabled(uint32_t node_idx, uint32_t slot_idx, bool disabled)

@@ -30,62 +30,38 @@ struct InstrumentGraphLayout;
 // record.  An entry exists only for a node that was moved/resized (bound)
 // or is detached; absence means the deterministic layout applies.
 struct GraphNodeLayout {
-    float   x, y, width_override, height_override;
+    float   x;
+    float   y;
+    float   width_override;
+    float   height_override;
     uint8_t channel;      // 0..15
     uint8_t zone;         // 0..15
     uint8_t kind;         // 0 = bound node (index = canonical 0..8),
                           // 1 = envelope instance, 2 = LFO instance
                           // (index = descriptor id 1..128),
-                          // 3 = parameter (index = dynamic target 0..4),
                           // 4 = effect-graph node (name = node title, channel 16 = master chain)
     uint8_t index;        // canonical index or descriptor id
     uint8_t depth_source; // detached LFO only, else 0 (ModSource value)
     uint8_t rate_source;  // detached LFO only, else 0 (ModSource value)
     uint8_t uid;          // detached instance id, 0 for bound
-    // Kind-3 partial-wiring persistence (zero = not stored): a wired
-    // constant parameter compiles to a zero generator cell that the
-    // projection cannot distinguish from unwired, so the in-progress
-    // wiring survives re-projection only through these fields.  served
-    // bit i means the parameter value-wires oscillator layer i;
-    // env_desc_id/lfo_desc_id name the instances wired into the
-    // parameter's envelope/LFO inputs; the lfo source pair completes the
-    // kind-2 instance key that identifies the LFO; name overrides the
-    // derived node title.  Kind 0/1/2 records must keep all of them zero.
-    uint8_t served;
-    uint8_t env_desc_id;
-    uint8_t lfo_desc_id;
-    uint8_t lfo_depth_source; // ModSource value
-    uint8_t lfo_rate_source;  // ModSource value
-                              // Kind-3 record pairing: how the record binds to the target's derived
-                              // parameters at projection. 1..254 = binds to the k-th derived
-                              // same-target parameter in layer order; reconcile_bindings re-stamps
-                              // these ordinals to the current derived order whenever the graph
-                              // re-derives. 0 and 255 = the record joins the target's uid-order
-                              // positional attach over the groups left unclaimed, and only
-                              // materializes its own node when no eligible group remains; a record
-                              // carrying stored generator state binds only a group carrying the
-                              // same tuple (in either pass), and a tuple-less record carrying
-                              // persisted value wires binds only a tuple-less carrier group. An
-                              // explicit ordinal beyond the target's group count makes the
-                              // projection distrust the explicit pass wholesale and attach every
-                              // record positionally. Kinds 0/1/2 must keep zero.
-    uint8_t param_slot;
-    char    name[32]; // node title override, empty = derived name
+    char    name[32];     // node title override, empty = derived name
 };
 
-static_assert(sizeof(GraphNodeLayout) == 64);
-// param_slot value for a record outside the explicit ordinal scheme (added
-// parameters, retargeted parameters, edge-loss detach): it joins the
-// target's uid-order positional attach over unclaimed groups and
-// materializes a surplus node when no eligible group remains.
-constexpr uint8_t graph_record_param_free = 255;
+static_assert(sizeof(GraphNodeLayout) == 56);
+
+// The record kinds the editor model holds; any other kind in decoded
+// metadata is an unknown record and is rejected like any malformed field.
+inline bool editor_record_kind_valid(uint8_t kind)
+{
+    return kind == 0 || kind == 1 || kind == 2 || kind == 4;
+}
 
 constexpr uint32_t max_graph_records     = 1280; // global record cap
 constexpr uint32_t max_detached_per_zone = 120;  // per-(channel, zone) detached cap
 
 // Canonical bound-node numbering for kind-0 layout records, shared by the
 // graph projection and the JSON codec: the inputs node 0, the sum node 1,
-// oscillator layers 2..8. Parameters and generator instances are
+// oscillator layers 2..8. Generator instances are
 // record-keyed (descriptor/target + uid), never canonical.
 constexpr uint32_t graph_canonical_input_count      = 6; // MIDI source roles (ModSource except none)
 constexpr uint32_t graph_canonical_input_node_count = 1; // all source roles share one node
@@ -283,7 +259,7 @@ bool graph_layout_record_identity_equal(const Synth::GraphNodeLayout& a, const S
 // within each zone's layer count, and the implied projected node count per
 // zone within the node pool.
 bool validate_editor_metadata(const Synth::InstrumentEditorBank& bank);
-// Number of detached (kind 1/2/3) records stored for one zone.
+// Number of detached (kind 1/2) records stored for one zone.
 uint32_t count_detached_records(const Synth::InstrumentEditorBank& bank, uint32_t channel, uint32_t zone);
 // Whole-bank effect budget accounting (modulated-parameter count and static
 // enabled-state bytes), matching the bank validator's counting exactly.

@@ -65,11 +65,13 @@ Slot toggle_slot(const char* name, bool value);
 // Option labels of the two-way source op list (SourceOp::add, SourceOp::multiply).
 extern const char* const source_op_names[2];
 
-// Sized for the widest projected node - a 5-param effect carrying the full
-// modulation grammar (base + LFO row + two MIDI source rows per param:
-// 3 + 5*10 = 53 slots).  Slot carries list_options[8][32], so a larger cap
-// would balloon every Node allocation.
-constexpr uint32_t max_node_slots = 56;
+// Sized for the widest projected node - the oscillator:  15 fixed slots
+// plus one 11-slot modulation block per ModTarget after its row
+// (15 + 9*11 = 114).
+// The widest effect (a 5-param effect's 3 + 5*10 = 53 slots) is well
+// under it.  Slot carries list_options[8][32], so a larger cap would
+// balloon every Node allocation.
+constexpr uint32_t max_node_slots = 120;
 
 // Labels of the channel/note modulation source roles, indexed by
 // ModSource - 1 (pitch_bend first).
@@ -95,11 +97,7 @@ struct Node {
     void*                      state_widget_data;
 };
 
-constexpr uint32_t max_nodes = 128;
-
-// Visual roles the projection can install on nodes (zero = plain;
-// the renderer treats any other value as plain too).
-constexpr uint8_t node_role_parameter = 1; // parameter node tint
+constexpr uint32_t max_nodes = 144;
 
 struct EndPoint {
     uint32_t node_idx;
@@ -112,19 +110,20 @@ struct Connection {
 };
 
 // Connection budget: the reachable worst case is one oscillator->sum edge
-// per layer plus 7 edges per parameter cell (value, envelope, LFO, two
-// source and two LFO depth/rate edges) - 252 at seven layers, the exact
-// bound pinned in sculptor_osc_graph.h; the effects graph adds one enable
-// edge per projected effect node (at most 4 per chain).  The pool holds
-// headroom above it, so no connection-budget refusal path exists.
+// per layer, four direct modulator edges per (layer, target) cell
+// (envelope, LFO and two MIDI sources) and up to two source edges per
+// distinct LFO instance key - 385 at seven layers, the bound pinned in
+// sculptor_osc_graph.h; the effects graph adds one enable edge per
+// projected effect node (at most 4 per chain).  The pool holds headroom
+// above it, so no connection-budget refusal path exists.
 // sizeof(Connection) = 16 B, absorbed by the fixed max_graph_bytes reserve.
-constexpr uint32_t max_connections = 352;
+constexpr uint32_t max_connections = 512;
 
 // Static size cap for one editor-resident Graph instance.  The editor state
 // budget in sculptor_instr_bank.cpp reserves exactly this much per graph;
 // a capacity raise that outgrows it must fail the build instead of silently
 // busting that reserve.
-constexpr uint32_t max_graph_bytes = 5 * 1024 * 1024;
+constexpr uint32_t max_graph_bytes = 6 * 1024 * 1024;
 
 // Caller validation for connection attempts.  Runs after the widget's
 // structural checks (endpoint kinds, bounds, single connection per input);
@@ -213,11 +212,9 @@ struct GraphColors { // packed 0xRRGGBBAA, converted to ImU32 at draw time
     uint32_t connector_missing;   // unconnected dot flagged missing (zero = no red mark)
     uint32_t connection;
     uint32_t ghost_node;
-    uint32_t property_value;            // editable value text
-    uint32_t property_connected_value;  // greyed value text
-    uint32_t parameter_node_background; // parameter node face (zero = node_background)
-    uint32_t parameter_node_border;     // parameter node outline (zero = node_border)
-    uint32_t error_background;          // error overlay
+    uint32_t property_value;           // editable value text
+    uint32_t property_connected_value; // greyed value text
+    uint32_t error_background;         // error overlay
     uint32_t error_text;
     uint32_t selection_outline; // outline around selected nodes
     uint32_t selection_band;    // rubber band fill/outline
@@ -384,13 +381,6 @@ public:
     void set_slot_missing(uint32_t node_idx, uint32_t slot_idx, bool missing);
     bool slot_missing(uint32_t node_idx, uint32_t slot_idx) const;
 
-    // Per-node visual roles the projection installs (zero = plain).
-    // Like the missing marks, roles are projection state: clear() wipes them
-    // and the projection re-installs them, so they stay out of snapshots.
-    // The renderer maps a parameter node to the parameter background/border
-    // colors.
-    void    set_node_visual_role(uint32_t node_idx, uint8_t role);
-    uint8_t node_visual_role(uint32_t node_idx) const;
     // A row's knobs are inert while the row's input is unconnected.
     void set_slot_edit_disabled(uint32_t node_idx, uint32_t slot_idx, bool disabled);
     bool slot_edit_disabled(uint32_t node_idx, uint32_t slot_idx) const;
@@ -400,9 +390,8 @@ public:
     bool slot_is_connected(uint32_t node_idx, uint32_t slot_idx) const;
 
     // Per-node title-rename opt-in: the osc graph disables node-state edits
-    // graph-wide, so parameter nodes opt in one by one.  Projection state
-    // like the visual roles - clear() wipes it and the projection
-    // re-installs it.
+    // graph-wide, so nodes opt in one by one. Projection state: clear()
+    // wipes it and the projection re-installs it.
     void set_node_renamable(uint32_t node_idx, bool renamable);
 
     // Eventless property write: sets a property slot's value WITHOUT
@@ -544,9 +533,6 @@ private:
     // re-projection.  One bit per (node, slot); zero-filled state = no marks.
     uint8_t slot_missing_bits[(max_nodes * max_node_slots + 7) / 8] = {};
 
-    // Per-node visual roles (see set_node_visual_role); projection
-    // state, wiped by clear() like the missing marks.
-    uint8_t node_visual_roles[max_nodes]                         = {};
     uint8_t slot_edit_disabled_flags[max_nodes * max_node_slots] = {};
 
     // State widget heights cached from the previous frame (1-frame lag).

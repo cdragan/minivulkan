@@ -48,8 +48,6 @@ enum OscCanvasCommand {
     osc_cmd_add_oscillator,
     osc_cmd_add_envelope,
     osc_cmd_add_lfo,
-    osc_cmd_add_parameter,
-    osc_cmd_change_target_param,
     osc_cmd_zone_rename,
     osc_cmd_zone_copy,
     osc_cmd_zone_paste,
@@ -134,12 +132,10 @@ bool fx_lfo_pinned[Synth::max_lfos] = {};
 EnvelopeWidgetContext envelope_widget_contexts[Sculptor::max_nodes];
 uint32_t              osc_graph_generation = 0;
 
-OscCanvasCommand osc_canvas_command         = osc_cmd_none;
-uint32_t         osc_canvas_retarget_node   = Sculptor::pool_no_slot; // pending osc_cmd_change_target_param
-uint32_t         osc_canvas_retarget_target = 0;
-uint32_t         osc_canvas_zone_channel    = 0;
-uint32_t         osc_canvas_zone_note       = 0;
-uint32_t         osc_canvas_cc              = 0; // pending osc_cmd_add_cc / osc_cmd_remove_cc CC number
+OscCanvasCommand osc_canvas_command      = osc_cmd_none;
+uint32_t         osc_canvas_zone_channel = 0;
+uint32_t         osc_canvas_zone_note    = 0;
+uint32_t         osc_canvas_cc           = 0; // pending osc_cmd_add_cc / osc_cmd_remove_cc CC number
 
 FxCanvasCommand   fx_canvas_command = fx_cmd_none;
 Synth::EffectType fx_canvas_type    = Synth::EffectType::none;
@@ -152,24 +148,24 @@ uint32_t          fx_menu_node      = Sculptor::pool_no_slot;
 // no single-field identity (two different change kinds in one frame, or a
 // multi-node layout gesture) take a fresh unique tag so they never amend a
 // batch-shaped or node-shaped entry.
-constexpr uint32_t osc_tag_graph_base          = 16;
-constexpr uint32_t osc_tag_init                = 1;
-constexpr uint32_t osc_tag_delete              = 2;
-constexpr uint32_t osc_tag_join_prev           = 3;
-constexpr uint32_t osc_tag_join_next           = 4;
-constexpr uint32_t osc_tag_zone_split          = 5;
-constexpr uint32_t osc_tag_zone_drop           = 6;
-constexpr uint32_t osc_tag_rename              = 7;
-constexpr uint32_t osc_tag_load                = 8;
-constexpr uint32_t osc_tag_add_osc             = 9;
-constexpr uint32_t osc_tag_add_env             = 10;
-constexpr uint32_t osc_tag_add_lfo             = 11;
-constexpr uint32_t osc_tag_add_param           = 12;
-constexpr uint32_t osc_tag_change_target_param = 13;
-constexpr uint32_t osc_tag_add_cc              = 14;                      // id0 = the channel, id1 = the CC number
-constexpr uint32_t osc_tag_remove_cc           = 15;                      // id0 = the channel, id1 = the CC number
-constexpr uint32_t osc_tag_fresh               = osc_tag_graph_base + 12; // outside every batch kind
-uint32_t           osc_fresh_tag_serial        = 0;                       // keeps consecutive fresh tags distinct
+constexpr uint32_t osc_tag_graph_base = 16;
+constexpr uint32_t osc_tag_init       = 1;
+constexpr uint32_t osc_tag_delete     = 2;
+constexpr uint32_t osc_tag_join_prev  = 3;
+constexpr uint32_t osc_tag_join_next  = 4;
+constexpr uint32_t osc_tag_zone_split = 5;
+constexpr uint32_t osc_tag_zone_drop  = 6;
+constexpr uint32_t osc_tag_rename     = 7;
+constexpr uint32_t osc_tag_load       = 8;
+constexpr uint32_t osc_tag_add_osc    = 9;
+constexpr uint32_t osc_tag_add_env    = 10;
+constexpr uint32_t osc_tag_add_lfo    = 11;
+// Undo tags are session-local batch keys, so renumbering or reusing
+// ids never affects saved state.
+constexpr uint32_t osc_tag_add_cc       = 12;                      // id0 = the channel, id1 = the CC number
+constexpr uint32_t osc_tag_remove_cc    = 13;                      // id0 = the channel, id1 = the CC number
+constexpr uint32_t osc_tag_fresh        = osc_tag_graph_base + 10; // outside every batch kind
+uint32_t           osc_fresh_tag_serial = 0;                       // keeps consecutive fresh tags distinct
 
 // Effects undo tags: kinds distinct from every osc tag, same grouping rules
 // (a same-tag per-frame commit amends one undo entry, a different tag
@@ -242,7 +238,10 @@ constexpr size_t editor_resident_state_bytes =
     4 * Synth::instrument_graph_layout_capacity * sizeof(Synth::InstrumentGraphLayout) +
     4096; // remaining editor scalar flags, constants and alignment
 static_assert(editor_resident_state_bytes <=
-              24 * 1024 * 1024); // per-bank driver: TargetBinding (40 bytes) x 9 targets x 7 layers
+              32 * 1024 * 1024); // per-bank driver: the oscillator graph pre-provisions nine
+                                 // 11-slot target blocks per node (max_node_slots 120), which
+                                 // grows sizeof(Graph) to 5,604,096 bytes; the resident total
+                                 // measures 26,846,436 bytes (26.8 MB)
 
 // Synth info panel data. The declaration in sculptor_instr_edit.h describes
 // what the panel shows; the synth runtime only exposes raw data.
@@ -384,9 +383,6 @@ void Sculptor::SynthEditor::osc_canvas_menu_entry(void* user_data)
     if (ImGui::MenuItem("Add LFO")) {
         osc_canvas_command = osc_cmd_add_lfo;
     }
-    if (ImGui::MenuItem("Add Parameter")) {
-        osc_canvas_command = osc_cmd_add_parameter;
-    }
     const uint32_t channel = osc_graph_zone_channel;
     const int32_t  zone    = editor->selected_zone[channel];
     if (zone >= 0) {
@@ -460,10 +456,6 @@ static void draw_cc_submenus(uint16_t  mask,
     }
 }
 
-// Node context menu: a parameter node gains a Change Target submenu of the
-// all mod targets (the target re-key; free-text renaming lives in
-// the title editor).  A derived parameter (uid == 0) cannot change target: the
-// generator bindings would re-derive the old parameter.
 static bool osc_node_menu(void* user_data, uint32_t node_idx)
 {
     (void)user_data;
@@ -492,25 +484,8 @@ static bool osc_node_menu(void* user_data, uint32_t node_idx)
         }
         return true;
     }
-    for (uint32_t p = 0; p < osc_mapping.param_count; ++p) {
-        if (osc_mapping.params[p].node_idx != node_idx) {
-            continue;
-        }
-        const Sculptor::ParamEntry& param = osc_mapping.params[p];
-        ImGui::BeginDisabled(param.uid == 0);
-        if (ImGui::BeginMenu("Change Target")) {
-            for (uint32_t target = 0; target < Synth::num_mod_targets; ++target) {
-                if (ImGui::MenuItem(Sculptor::param_target_names[target], nullptr, false, target != param.target)) {
-                    osc_canvas_retarget_node   = node_idx;
-                    osc_canvas_retarget_target = target;
-                    osc_canvas_command         = osc_cmd_change_target_param;
-                }
-            }
-            ImGui::EndMenu();
-        }
-        ImGui::EndDisabled();
-        return true;
-    }
+    // Node context menu: only the MIDI Inputs node has a menu here (the
+    // added-CC output dots); every other node is plain.
     return false;
 }
 
@@ -551,6 +526,31 @@ static bool fx_slot_hidden(void* user_data, const Sculptor::Graph& graph, uint32
     }
 
     return Sculptor::fx_param_field_hidden(graph, node_idx, param, field);
+}
+
+// The oscillator projection's modulator-row filter: a target block's
+// family rows render only while their family dot carries a wire (the fx
+// param_field pattern).  Visibility derives from live connection state at
+// render time (Sculptor::osc_target_field_hidden), never stored state.
+static bool osc_slot_hidden(void* user_data, const Sculptor::Graph& graph, uint32_t node_idx, uint32_t slot_idx)
+{
+    (void)user_data;
+    bool is_osc = false;
+    for (uint32_t layer = 0; layer < Synth::max_layers && ! is_osc; ++layer) {
+        is_osc = osc_mapping.osc_nodes[layer] == node_idx;
+    }
+
+    if (! is_osc) {
+        return false;
+    }
+
+    uint32_t target = 0;
+    uint32_t field  = 0;
+    if (! Sculptor::osc_target_block_field(slot_idx, &target, &field)) {
+        return false;
+    }
+
+    return Sculptor::osc_target_field_hidden(graph, node_idx, target, field);
 }
 
 // Connection grammar for the effects graph: a parameter dot takes an LFO's
@@ -807,10 +807,7 @@ static void init_osc_graph_widget()
     inited = true;
     osc_graph.set_colors(Sculptor::default_graph_colors());
     // The apply path drops color/ghost events (projection state), so the
-    // widget must not offer those edits.  Titles regenerate on re-projection
-    // for every node except parameters (their record stores the name), so
-    // the projection opts parameter nodes into the title editor one by one
-    // through the per-node renamable flag.
+    // widget must not offer those edits.  Titles regenerate on re-projection.
     osc_graph.node_state_edits_enabled = false;
 }
 
@@ -859,8 +856,7 @@ static void write_record_position(Synth::InstrumentEditorBank* bank, int32_t rec
 
 // Writes every mapped node's current layout into the bank's records: bound
 // nodes key kind-0 records by canonical index, detached nodes update their
-// own record in place.  Unmoved custom parameter titles also persist; derived
-// titles and unchanged positions need no new records.  Returns false on capacity,
+// own record in place. Unmoved nodes need no new records. Returns false on capacity,
 // identity or wiring refusal, leaving candidate changes for the caller to discard.
 static bool sync_osc_graph_layout(Synth::InstrumentEditorBank* bank,
                                   Sculptor::OscGraphMapping*   private_mapping = nullptr)
@@ -921,64 +917,8 @@ static bool sync_osc_graph_layout(Synth::InstrumentEditorBank* bank,
             write_record_position(bank, record_idx, node_ref);
             break;
         }
+    }
 
-        // Parameter nodes carry their own kind-3 record; a record-less
-        // (derived) parameter that the user moves gains one - seeded from
-        // its live wiring, like a detach - so the move survives
-        // re-projection (records re-attach to their own group by tuple, or
-        // materialize free-standing).
-        for (uint32_t i = 0; i < mapping.param_count; ++i) {
-            const Sculptor::ParamEntry& param = mapping.params[i];
-            if (param.node_idx != node) {
-                continue;
-            }
-            int32_t record_idx = Sculptor::find_record(*bank, channel, zone, 3, param.target, param.uid);
-            if (record_idx < 0) {
-                if (! Sculptor::detach_osc_graph_parameter(bank, osc_graph, &mapping, channel, zone, i)) {
-                    return false;
-                }
-                // The materialized ordinal can miscount dormant and merged
-                // siblings; refresh re-stamps it from the derived groups
-                // before the record is ever read back.
-                if (! Sculptor::refresh_osc_graph_compilation(bank, osc_graph, mapping, channel, zone))
-                    return false;
-                // The re-stamp's merge reconciliation can remove records,
-                // shifting graph_layout indices; re-derive this record's
-                // slot by key instead of trusting the pre-refresh index.
-                record_idx = Sculptor::find_record(*bank, channel, zone, 3, param.target, param.uid);
-            }
-            if (record_idx >= 0) {
-                write_record_position(bank, record_idx, node_ref);
-            }
-        }
-    }
-    uint32_t title_ordinals[Synth::num_mod_targets] = {};
-    for (uint32_t index = 0; index < mapping.param_count; ++index) {
-        const Sculptor::ParamEntry& param = mapping.params[index];
-        if (param.node_idx == Sculptor::pool_no_slot || ! osc_graph.node_occupied(param.node_idx))
-            continue;
-        const uint32_t        ordinal = ++title_ordinals[param.target];
-        const Sculptor::Node& node    = osc_graph.node(param.node_idx);
-        if (! memchr(node.name, 0, sizeof(node.name)))
-            return false;
-        char derived[32];
-        Sculptor::format_parameter_title(derived, param.target, ordinal);
-        const int32_t saved = Sculptor::find_record(*bank, channel, zone, 3, param.target, param.uid);
-        if (saved >= 0) {
-            if (strcmp(derived, node.name) == 0)
-                memset(bank->graph_layout[saved].name, 0, sizeof(bank->graph_layout[saved].name));
-            else
-                memcpy(bank->graph_layout[saved].name, node.name, sizeof(bank->graph_layout[saved].name));
-            continue;
-        }
-        if (strcmp(derived, node.name) == 0)
-            continue;
-        Sculptor::GraphChange change = {};
-        change.kind                  = Sculptor::ChangeKind::name_changed;
-        change.node_idx              = param.node_idx;
-        if (! Sculptor::apply_osc_graph_change(bank, &osc_graph, &mapping, change, channel, zone))
-            return false;
-    }
     return true;
 }
 
@@ -1318,7 +1258,7 @@ void Sculptor::SynthEditor::reproject_osc_graph(uint32_t channel, uint32_t zone)
     osc_graph.set_delete_veto(&osc_node_delete_veto, &osc_veto_context);
     osc_graph.set_canvas_menu_callback(&osc_canvas_menu_entry, this);
     osc_graph.set_node_menu_callback(&osc_node_menu, nullptr);
-    osc_graph.set_slot_hidden_callback(nullptr, nullptr);
+    osc_graph.set_slot_hidden_callback(&osc_slot_hidden, nullptr);
     fx_graph_projected = false;
     // Rebind envelope state widgets from scratch: gestures and point
     // selections cannot outlive the graph they were made in.
@@ -1376,7 +1316,7 @@ int Sculptor::SynthEditor::envelope_state_widget_entry(void* user_data, float re
     }
     if (osc_graph.is_selected(ctx->node_idx) && unwired && ! ctx->ui.unwired_notified) {
         ctx->ui.unwired_notified = true;
-        Sculptor::notify_warning("Synth: envelope is not wired to a parameter; connect it to edit");
+        Sculptor::notify_warning("Synth: envelope is not wired to a target; connect it to edit");
     }
     Sculptor::EnvelopeCurveEdit edit;
     Sculptor::gui_envelope_curve(&ctx->ui,
@@ -2091,12 +2031,6 @@ void Sculptor::SynthEditor::run_osc_canvas_command()
         case osc_cmd_add_lfo:
             do_osc_add_generator(false);
             break;
-        case osc_cmd_add_parameter:
-            do_osc_add_parameter();
-            break;
-        case osc_cmd_change_target_param:
-            do_osc_change_target_param(osc_canvas_retarget_node, osc_canvas_retarget_target);
-            break;
         case osc_cmd_zone_rename:
             menu_channel      = osc_canvas_zone_channel;
             rename_zone_entry = Synth::zone_entry_at(instr_bank.bank.channel_zones[menu_channel], osc_canvas_zone_note);
@@ -2638,121 +2572,6 @@ void Sculptor::SynthEditor::do_osc_add_generator(bool is_env)
     if (commit_candidate(candidate,
                          Sculptor::UndoGroupTag{ is_env ? osc_tag_add_env : osc_tag_add_lfo, channel, zone }))
         osc_graph_reproject = true;
-}
-
-// Canvas menu "Add Parameter": a free-standing parameter node at the menu
-// position, default target volume; Change Target re-keys it.  Multi-instance:
-// any number per target.
-void Sculptor::SynthEditor::do_osc_add_parameter()
-{
-    const uint32_t target         = Synth::mod_volume;
-    const uint32_t channel        = osc_graph_zone_channel;
-    const uint32_t zone           = osc_graph_zone_index;
-    candidate                     = instr_bank;
-    const Synth::Zone& zone_entry = candidate.bank.channel_zones[channel][zone];
-    if (zone_entry.start_note == 0 || zone_entry.instrument >= candidate.bank.instruments.num_allocated) {
-        return;
-    }
-    // The live mapping mirrors the committed bank, and the new record is
-    // free-standing, so the projection adds at most one parameter node.
-    char add_error[128];
-    if (osc_graph_projected && Sculptor::osc_add_parameter_refused(osc_mapping, target, add_error, sizeof(add_error))) {
-        Sculptor::notify_error("%s", add_error);
-        return;
-    }
-
-    // Same preflights as Add Envelope/LFO, minus the descriptor pool:
-    // node pool, record list and the per-zone detached cap.
-    if (Sculptor::count_projected_nodes(candidate, channel, zone) + 1 > Sculptor::max_nodes) {
-        Sculptor::notify_error("Synth: cannot add a parameter: the graph is full");
-        return;
-    }
-    if (Sculptor::count_detached_records(candidate, channel, zone) >= Sculptor::max_detached_nodes ||
-        ! Sculptor::graph_records_have_capacity(candidate, 1)) {
-        Sculptor::notify_error("Synth: cannot add a parameter: the graph state is full");
-        return;
-    }
-    Synth::GraphNodeLayout record = {};
-    record.channel                = static_cast<uint8_t>(channel);
-    record.zone                   = static_cast<uint8_t>(zone);
-    record.index                  = static_cast<uint8_t>(target);
-    record.kind                   = 3;
-    record.param_slot             = Synth::graph_record_param_free;
-    const vmath::vec2 popup_pos   = osc_graph.canvas_popup_pos();
-    record.x                      = popup_pos.x;
-    record.y                      = popup_pos.y;
-    record.uid                    = Sculptor::allocate_detached_uid(candidate, channel, zone, 3);
-    snprintf(record.name, sizeof(record.name), "Parameter %u", record.uid);
-    candidate.graph_layout[candidate.graph_layout_count++] = record;
-    Sculptor::undo_group_reset(&osc_undo_group);
-    if (commit_candidate(candidate, Sculptor::UndoGroupTag{ osc_tag_add_param, channel, zone })) {
-        osc_graph_reproject = true;
-    }
-}
-
-// Node menu "Change Target": retargets the parameter - the kind-3 record
-// re-keys and the value wires shift onto the new target's oscillator rows
-// (source rows are the parameter's own state and stay put).  The rewrite is
-// eventless, so the bindings and the compiled instrument refresh before the
-// commit.  Names are user-owned: the node keeps its title across the retarget.
-void Sculptor::SynthEditor::do_osc_change_target_param(uint32_t node_idx, uint32_t new_target)
-{
-    if (! osc_graph_projected || node_idx >= Sculptor::max_nodes || ! osc_graph.node_occupied(node_idx)) {
-        return;
-    }
-    const uint32_t     channel    = osc_graph_zone_channel;
-    const uint32_t     zone       = osc_graph_zone_index;
-    const Synth::Zone& zone_entry = instr_bank.bank.channel_zones[channel][zone];
-    if (zone_entry.start_note == 0 || zone_entry.instrument >= instr_bank.bank.instruments.num_allocated) {
-        return;
-    }
-    const int32_t found = Sculptor::find_param(osc_mapping, node_idx);
-    if (found < 0) {
-        return;
-    }
-    Sculptor::ParamEntry& param = osc_mapping.params[found];
-    if (param.uid == 0) {
-        // A derived parameter cannot change target: the generator bindings
-        // would re-derive the old parameter on the next projection.
-        Sculptor::notify_error("Synth: a derived parameter cannot change target");
-        if (new_target >= Synth::num_mod_targets) {
-            Sculptor::notify_error("Synth: invalid parameter target");
-            return;
-        }
-        return;
-    }
-    if (new_target == param.target) {
-        Sculptor::notify_error("Synth: the parameter already has that target");
-        return;
-    }
-    candidate = instr_bank;
-    if (! Sculptor::retarget_param(&candidate,
-                                   osc_graph,
-                                   osc_mapping,
-                                   channel,
-                                   zone,
-                                   static_cast<uint32_t>(found),
-                                   new_target)) {
-        Sculptor::notify_error("Synth: cannot change target: the graph state is full");
-        return;
-    }
-    // The wire rewrite is eventless, so no drained batch will compile the
-    // moved routing: refresh the bindings and the compiled instrument here,
-    // before the commit.
-    if (! Sculptor::refresh_osc_graph_compilation(&candidate, osc_graph, osc_mapping, channel, zone)) {
-        Sculptor::notify_error("Synth: oscillator edit refused");
-        reproject_osc_graph(channel, zone);
-        return;
-    }
-    Sculptor::undo_group_reset(&osc_undo_group);
-    if (! commit_candidate(candidate, Sculptor::UndoGroupTag{ osc_tag_change_target_param, node_idx, 0 })) {
-        // Refused commit: the flipped mapping target and the retargeted node must
-        // not linger in the graph; re-derive it from the committed bank (the
-        // same recovery the refusal paths in drain_osc_graph use).
-        reproject_osc_graph(channel, zone);
-        return;
-    }
-    osc_graph_reproject = true;
 }
 
 void Sculptor::SynthEditor::gui_keyboard()

@@ -458,22 +458,17 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
         // The drawn rect must use the override-aware height, not the auto
         // content height, or equal-height renders as nothing and bottom/
         // right aligns land short of the reference edge.
-        const vmath::vec2 rect_max    = (rect_min + (vmath::vec2(content_w, node_h) * render_scale));
-        const uint8_t     visual_role = node_visual_roles[node_idx];
-        const ImU32 bg_color = to_imgui(is_ghost                   ? colors_.ghost_node
-                                        : node.color_override != 0 ? node.color_override
-                                        : visual_role == node_role_parameter && colors_.parameter_node_background != 0
-                                            ? colors_.parameter_node_background
-                                            : colors_.node_background);
+        const vmath::vec2 rect_max = (rect_min + (vmath::vec2(content_w, node_h) * render_scale));
+        const ImU32       bg_color = to_imgui(is_ghost                   ? colors_.ghost_node
+                                              : node.color_override != 0 ? node.color_override
+                                                                         : colors_.node_background);
         draw_list->AddRectFilled(ImVec2(rect_min.x, rect_min.y),
                                  ImVec2(rect_max.x, rect_max.y),
                                  bg_color,
                                  node_corner_rounding * render_scale);
         draw_list->AddRect(ImVec2(rect_min.x, rect_min.y),
                            ImVec2(rect_max.x, rect_max.y),
-                           to_imgui(visual_role == node_role_parameter && colors_.parameter_node_border != 0
-                                        ? colors_.parameter_node_border
-                                        : colors_.node_border),
+                           to_imgui(colors_.node_border),
                            node_corner_rounding * render_scale);
         if (is_selected(node_idx)) {
             draw_list->AddRect(ImVec2(rect_min.x - 2.0f, rect_min.y - 2.0f),

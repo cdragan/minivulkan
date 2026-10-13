@@ -36,10 +36,10 @@ constexpr uint32_t num_osc_graph_inputs = static_cast<uint32_t>(Synth::ModSource
 static_assert(num_osc_graph_inputs == Synth::graph_canonical_input_count);
 
 // Free-standing envelope/LFO node instance, registered per (zone, kind,
-// descriptor, LFO sources).  Every envelope/LFO node is an instance:
-// parameters bind instances through their envelope/LFO input wires, and an
-// instance no parameter references stays free-standing, backed by a
-// kind-1/2 layout record once it carries editor state.
+// descriptor, LFO sources).  Every envelope/LFO node is an instance: a
+// wire out of the instance binds it to its target cell, and an unwired
+// instance stays free-standing, backed by a kind-1/2 layout record once
+// it carries editor state.
 struct DetachedNode {
     uint32_t node_idx;     // pool_no_slot while the node is not projected
     uint8_t  kind;         // 1 = envelope, 2 = LFO
@@ -51,41 +51,92 @@ struct DetachedNode {
 
 constexpr uint32_t max_detached_nodes = Synth::max_detached_per_zone;
 
-// One per-target modulation recipe. Cells of one target whose full binding
-// tuple (envelope desc id, LFO desc id, LFO op/depth/rate scale, LFO
-// depth/rate sources, MIDI inputs) is identical merge into one parameter;
-// the parameter wires exactly its served cells' oscillator rows.
-//
-// Registry cap: the cap is a deliberate editor budget: it bounds the number
-// of user-created parameter instances the editor accepts (35). Every real
-// UI-created instrument stays below it.  Only hand-edited JSON can exceed it;
-// the projection refuses loudly ("too many parameters") without data loss.
-// Raising it requires raising max_nodes and max_connections.
-// Raise the pools if real usage ever hits it.
-constexpr uint32_t max_param_nodes = Synth::max_layers * 5;
-// True worst-case group count the derivation can produce.
-constexpr uint32_t max_param_groups = Synth::max_layers * Synth::num_mod_targets;
+// The instance registry spans every detached generator node the graph
+// can hold: the node pool minus the always-present fixed nodes (the
+// MIDI input node and the sum node). It is sized independently of the
+// detached-record cap and of the layer count, so a low-layer projection
+// with record-driven surplus instances still fits; the node pool itself
+// enforces the layer-dependent budget.
+constexpr uint32_t max_osc_instances = max_nodes - (Synth::graph_canonical_input_node_count + 1);
+static_assert(2 * Synth::max_layers * Synth::num_mod_targets <= max_osc_instances);
 
-// Worst-case bound node population: one input node for six MIDI source roles
-// plus sum, one oscillator per layer, and per (layer, target) cell one
-// parameter, envelope and LFO node.
-static_assert(Synth::graph_canonical_input_node_count + 1 + Synth::max_layers + 3 * max_param_nodes <= max_nodes);
-// Worst-case bound edge population: per layer one oscillator->sum edge, and
-// per cell one parameter->oscillator, envelope->parameter and LFO->parameter
-// edge plus two source->parameter and two source->LFO depth/rate edges.
-static_assert(Synth::max_layers + 7 * max_param_nodes <= max_connections);
+// The nine per-target modulation blocks live on the oscillator node
+// itself: each ModTarget's 11-slot block sits directly after its value
+// row slot, so the block's modulator rows render under the row they
+// attach to (the fx pattern).  See the block helpers below for the
+// field map.  Row visibility is derived live from connection state;
+// slots, connections, snapshots and undo bytes never encode it.
 
-// One projected parameter node: identity is its target; duplicates of one
-// target are disambiguated by enumeration order ("Volume", "Volume 2").
-// `uid` is the kind-3 record uid, 0 while the node carries no record.
-struct ParamEntry {
-    uint32_t node_idx; // pool_no_slot while the node is not projected
-    uint8_t  target;   // ModTarget index 0..num_mod_targets - 1
-    uint8_t  uid;      // kind-3 record uid; 0 while record-less
-    uint32_t env_node; // bound envelope instance node, pool_no_slot when none
-    uint32_t lfo_node; // bound LFO instance node, pool_no_slot when none
-    uint8_t  served;   // bitset of layers whose oscillator input wires here
+// Worst-case bound node population: one input node for six MIDI source
+// roles plus sum, one oscillator per layer, and per (layer, target) cell
+// one envelope and one LFO instance.
+static_assert(Synth::graph_canonical_input_node_count + 1 + Synth::max_layers +
+                  2 * Synth::max_layers * Synth::num_mod_targets <=
+              max_nodes);
+// Worst-case bound edge population: per layer one oscillator->sum edge,
+// per cell one envelope, one LFO and two source edges, and per distinct
+// LFO instance key up to two source edges into its depth/rate inputs.
+static_assert(Synth::max_layers + 6 * Synth::max_layers * Synth::num_mod_targets <= max_connections);
+
+// Oscillator node slot grammar: 15 fixed slots (oscillator properties
+// and target value rows, order pinned by osc_target_row_slot below),
+// and every ModTarget owns one 11-slot modulation block directly after
+// its value row.  Block field 0 is the envelope input dot (its own
+// renderer line), fields 1..4 the LFO row (dot, op, depth, rate
+// scale), fields 5..7 the Source A row and fields 8..10 the Source B
+// row (dot, op, amount each).  Row-group ids are per (target, row):
+// the LFO row groups 3*t + 1, the source rows 3*t + 2 and 3*t + 3; the
+// envelope dot and the fixed slots own their lines (group 0).
+constexpr uint32_t osc_slot_count          = 15;
+constexpr uint32_t osc_target_block_stride = 11;
+
+// The value row of each ModTarget on an oscillator node.  The rows are
+// not contiguous: the duty rows interleave with the oscillator
+// properties, and the rows after an earlier target's block shift down
+// by that block.  Indexed by ModTarget.
+constexpr uint32_t osc_target_row_slot[Synth::num_mod_targets] = {
+    53,  // volume
+    77,  // pitch
+    65,  // pan
+    2,   // duty a
+    15,  // duty b
+    28,  // waveform mix
+    40,  // fm depth
+    90,  // lowpass
+    102, // highpass
 };
+
+// First slot of target `target`'s modulation block on an oscillator
+// node: directly after its value row.
+constexpr uint32_t osc_target_block_base(uint32_t target)
+{
+    return osc_target_row_slot[target] + 1u;
+}
+
+// The envelope input dot of target `target`'s block: an envelope wire's
+// input endpoint.
+constexpr uint32_t osc_target_env_dot(uint32_t target)
+{
+    return osc_target_block_base(target);
+}
+
+// The LFO input dot of target `target`'s block: an LFO wire's input
+// endpoint.
+constexpr uint32_t osc_target_lfo_dot(uint32_t target)
+{
+    return osc_target_block_base(target) + 1u;
+}
+
+// The MIDI source input dot of target `target`'s block, source row
+// `input` (0 = Source A, 1 = Source B).
+constexpr uint32_t osc_target_src_dot(uint32_t target, uint32_t input)
+{
+    return osc_target_block_base(target) + 5u + 3u * input;
+}
+
+// Last block end fits the slot pool; the nine row slots are spaced far
+// enough apart that no block reaches the next row (smallest gap 12).
+static_assert(osc_target_row_slot[Synth::num_mod_targets - 1] + osc_target_block_stride <= max_node_slots);
 
 // Where every projected piece of the model landed in the graph.  Slot and
 // node indices are stable across property edits; structural edits re-project
@@ -100,30 +151,23 @@ struct OscGraphMapping {
     uint32_t output_layer_input_slot[Synth::max_layers];
     uint32_t osc_nodes[Synth::max_layers];
     uint32_t osc_output_slot;
-    // Uniform generator/parameter node layouts; populated even when no such
-    // node exists so the mapping always describes the full layout.
+    // Uniform generator node layout; populated even when no such node
+    // exists so the mapping always describes the full layout.
     uint32_t env_output_slot;
     uint32_t lfo_output_slot;
     uint32_t lfo_depth_input_slot;
     uint32_t lfo_rate_input_slot;
-    uint32_t param_output_slot;
 
     // The (channel, zone) the projection sourced; apply paths route mask bits
     // and record updates through it.
     uint32_t channel;
     uint32_t zone;
 
-    // Parameter-node registry, in derivation order (targets in ModTarget
-    // order, cells in layer order, groups in first-cell order; detached
-    // record surplus appends after).
-    ParamEntry params[max_param_nodes];
-    uint32_t   param_count;
-
-    // Generator-instance registry, rebuilt by the projection.  Derived
+    // Generator-instance registry, rebuilt by the projection. Derived
     // instances come first (one per distinct (kind, descriptor, sources)
-    // key, in first-use order); record-driven surplus appends in record
-    // order.  Entries are ordered by record order.
-    DetachedNode detached[max_detached_nodes];
+    // key, in first-use order); record-driven surplus appends after them
+    // in record order.
+    DetachedNode detached[max_osc_instances];
     uint32_t     detached_count;
     // The bank the projection reads, for bank-wide descriptor usage scans
     // (descriptor ids are shared across every instrument and zone).  Set by
@@ -135,8 +179,8 @@ struct OscGraphMapping {
 // recreates the full projection.  The bank is only read.  Returns false
 // without touching the graph, mapping or bank when the instrument is not
 // expressible (any layer's routing input carries the none source, or the
-// derived parameter count exceeds the registry bound); the refusal is
-// also reported through the graph's error overlay.
+// graph node pool cannot hold the derived generator instances); the
+// refusal is also reported through the graph's error overlay.
 // The MIDI Inputs node's slots order as: six standard output dots, then the
 // CC dots (when the optional editor mask is passed), then the two detune
 // property rows last.
@@ -153,7 +197,7 @@ bool project_instrument_to_graph(const Synth::Instrument&     instrument,
                                  const uint16_t* added_cc_mask = nullptr);
 
 // Exports one zone's saved editor positions as portable records relative to the
-// zone's own instrument: every kind-0..3 record of (channel,zone) that resolves
+// zone's own instrument: every registered record of (channel,zone) that resolves
 // to a projected node of `instr` is converted, effect (kind 4) records are never
 // clipboard data.  Unrepresented selected records and missing-sum state are refused.
 // Records are all-or-nothing and *out_count is the actual count
@@ -238,17 +282,21 @@ bool normalize_instrument_graph_layout(const Synth::Instrument&            sourc
 bool compile_graph_to_instrument(const Graph& graph, const OscGraphMapping& mapping, Synth::Instrument* out);
 
 // Grammar validator, installable with Graph::set_validator.  The allowed
-// edge set is exactly: parameter -> same-target oscillator value row,
-// envelope -> parameter envelope input, LFO -> parameter LFO input, MIDI
-// input -> parameter source input or LFO depth/rate source, and oscillator
-// -> sum node layer input.  Duplicate source -> target pairs are
-// first-class and order-significant, so there is no duplicate rule.
+// edge set is exactly: envelope -> a target block's envelope dot (base
+// value row drop or direct dot), LFO -> a target block's LFO dot (same
+// two landing forms), MIDI input (standard role or added CC dot) -> a
+// target block's free Source dot (base row drop takes the first free
+// one), and oscillator -> sum node layer input.  A family dot admits one
+// wire only, so fresh connections onto an occupied dot refuse; moving an
+// existing wire's either end stays valid.  Duplicate source -> target
+// pairs are first-class and order-significant, so there is no duplicate
+// rule.
 bool osc_graph_validate(void* user_data, Graph& graph, EndPoint output, EndPoint input);
 
 // Canonical kind-0 record index of a projected fixed node (input 0, sum 1,
 // oscillator layers 2+n), or pool_no_slot when the node is not
-// projected or carries no canonical index (parameters and generator
-// instances are record-keyed, never canonical).
+// projected or carries no canonical index (generator instances are
+// record-keyed, never canonical).
 uint32_t osc_graph_canonical_index(const OscGraphMapping& mapping, uint32_t node_idx);
 
 // The layer a new oscillator inherits its parameters from:  the highest
@@ -272,13 +320,12 @@ bool apply_osc_graph_descriptor_edit(const Graph&           graph,
 // Full projection from the editor bank: rebuilds the graph from the zone's
 // instrument plus the bank's editor-side state - kind-1/2 records attach to
 // derived generator instances (or materialize surplus free-standing nodes),
-// kind-3 records attach to derived parameters by (target, ordinal) or
-// materialize detached extra parameters, masked oscillator->sum edges stay
-// deleted, and the surviving missing-sum bits re-apply the per-slot missing
-// flags.  The bank is only read.  Returns false when the zone has no
-// instrument or the instrument is not expressible; mid-walk failures can
-// leave the graph partially rebuilt, so the caller re-projects on false and
-// must not keep the graph or mapping state.
+// masked oscillator->sum edges stay deleted, and the surviving missing-sum
+// bits re-apply the per-slot missing flags.  The bank is only read.
+// Returns false when the zone has no instrument or the instrument is not
+// expressible; mid-walk failures can leave the graph partially rebuilt, so
+// the caller re-projects on false and must not keep the graph or mapping
+// state.
 bool project_editor_to_graph(const Synth::InstrumentEditorBank& bank,
                              Graph*                             graph,
                              OscGraphMapping*                   mapping,
@@ -294,8 +341,8 @@ bool channel_uses_cc(const Synth::InstrumentEditorBank& bank, uint32_t channel, 
 // Applies one drained Graph change to the editor bank through the mapping
 // (per-frame apply): property edits via apply_osc_graph_descriptor_edit,
 // oscillator->sum connection_added/deleted via the zone's missing-sum
-// bits, parameter/generator wiring via rebind and detach reconciliation,
-// and parameter title renames into the kind-3 record name.
+// bits, base-target-row drops via the eventless family-dot relocation,
+// and generator wiring via the detach reconciliation.
 // Returns false when the change cannot be applied (e.g.
 // record-list capacity); application up to that point may already have
 // mutated the bank, so the caller refuses its whole batch and re-projects
@@ -307,31 +354,11 @@ bool apply_osc_graph_change(Synth::InstrumentEditorBank* bank,
                             uint32_t                     channel = 0,
                             uint32_t                     zone    = 0);
 
-// Eventless push of a parameter's base value into every oscillator row the
-// parameter wires (its served layers' rows of its own target).  The rows
-// are the compile-time base truth; the parameter's row is the handle.
-void propagate_param_value(Graph* graph, const OscGraphMapping& mapping, uint32_t node_idx, PropertyValue value);
-
 // Full editor-metadata validation (JSON decode commit and editor candidate
 // commit) lives in sculptor_instr_bank.h next to its storage and constants.
 
 // Pure editor-side helpers for the instrument graph editor state.
 // No ImGui here: synth_unit links this translation unit.
-
-// The nine parameter target display names, shared by the node menus, the
-// immediate rename feedback and the projection's derived titles.
-extern const char* const param_target_names[Synth::num_mod_targets];
-
-// Formats a parameter target's derived title; target < num_mod_targets and
-// ordinal > 0.
-void format_parameter_title(char (&name)[32], uint8_t target, uint32_t ordinal);
-
-// Parameter-node source-row input slots (rows 7..9 and 10..12; see the
-// slot layout table in sculptor_osc_graph.cpp).
-constexpr uint32_t param_src_input(uint32_t i)
-{
-    return 7u + 3u * i;
-}
 
 // Presentation view of a modulation target's value: node rows and
 // parameter base values show display units, the bank stores
@@ -358,25 +385,34 @@ OscTargetView osc_target_view(Synth::ModTarget target);
 // `target` (0..8); rows are not contiguous.
 uint32_t osc_target_row(uint32_t target);
 
-// Registry index of the parameter projected onto node_idx, or -1.
-int32_t find_param(const OscGraphMapping& mapping, uint32_t node_idx);
+// Decodes an oscillator-node block slot into its (target, field):
+// false when the slot is one of the fixed slots (a property or a target
+// value row) or past the last block.
+bool osc_target_block_field(uint32_t slot_idx, uint32_t* target, uint32_t* field);
+
+// Per-family modulator-row visibility for target `target`'s block on an
+// oscillator node: field 0 (the envelope dot) renders iff the envelope
+// dot is connected; fields 1..4 render iff the LFO dot is connected;
+// fields 5..7 / 8..10 render iff that Source dot is connected.  Derived
+// live from connection state at render time, never stored.
+// Public seam: the render filter osc_slot_hidden is static in the editor
+// TU, so the unit suite needs this callable render-visibility query.
+bool osc_target_field_hidden(const Graph& graph, uint32_t node_idx, uint32_t target, uint32_t field);
 
 // The volume-envelope shape: minimum 0 and the first and the last point at 0,
 // so a volume envelope starts and ends in silence.
 bool env_volume_shape_ok(const Synth::EnvelopeDescriptor& env);
 
-// Reports whether the envelope descriptor id is wired into a volume target's
-// parameter, into a non-volume target, or both.  Descriptor ids are shared by
-// every parameter that wires them and by every instrument in the bank, so the
-// answer covers all users.  exclude_param_idx / exclude_connection omit one
-// parameter (a retarget moves its own usage) or one connection (a wire move
-// re-lands it) from the scan.
+// Reports whether the envelope descriptor id serves a volume target, a
+// non-volume target, or both.  Descriptor ids are shared by every cell that
+// wires them and by every instrument in the bank, so the answer covers all
+// users.  exclude_connection omits one connection (a wire move re-lands it)
+// from the scan.
 void env_target_usage(const Graph&           graph,
                       const OscGraphMapping& mapping,
                       uint16_t               desc_id,
                       bool*                  volume_used,
                       bool*                  other_used,
-                      int32_t                exclude_param_idx  = -1,
                       uint32_t               exclude_connection = pool_no_slot);
 
 // Index of the zone's layout record with the given key, or -1.
@@ -387,45 +423,8 @@ int32_t find_record(const Synth::InstrumentEditorBank& bank,
                     uint32_t                           index,
                     uint8_t                            uid);
 
-// Add Parameter preflight: true when committing the new free-standing
-// parameter would leave the projection unable to load the zone (the
-// parameter registry is a designed static budget), or when the target
-// still has a record-less derived parameter a new record would claim at
-// re-projection (rename that one into a record first).  error receives
-// the user-facing refusal message.
-bool osc_add_parameter_refused(const OscGraphMapping& mapping, uint32_t target_index, char* error, uint32_t error_size);
-// One-based ordinal of the parameter among its target's derived
-// parameters in enumeration order; stored in kind-3 records (param_slot)
-// so re-projection pairs them by group, not by uid order.
-uint8_t param_group_ordinal(const OscGraphMapping& mapping, uint32_t param_idx);
-// Eventless wire-driven retarget, shared by the Change Target menu and the
-// apply path's cross-target wire drop: the kind-3 record re-keys to the new
-// target, the mapping entry flips, and the parameter's value wires shift
-// onto the new target's oscillator rows (source rows are its own state and
-// stay put).
-// Returns false only when a defensive record creation hits capacity.
-bool retarget_param(Synth::InstrumentEditorBank* bank,
-                    Graph&                       graph,
-                    OscGraphMapping&             mapping,
-                    uint32_t                     channel,
-                    uint32_t                     zone,
-                    uint32_t                     param_idx,
-                    uint32_t                     new_target);
-
-// Creates one kind-3 record from the parameter's live wiring and layout, and
-// writes its fresh UID only into the supplied mapping. Rename, layout sync
-// and binding reconciliation share this creation policy. The caller owns
-// gesture eligibility, predecessor refusal and subsequent reconciliation;
-// false leaves the record list and mapping unchanged.
-bool detach_osc_graph_parameter(Synth::InstrumentEditorBank* bank,
-                                const Graph&                 graph,
-                                OscGraphMapping*             mapping,
-                                uint32_t                     channel,
-                                uint32_t                     zone,
-                                uint32_t                     param_idx);
-
-// Recomputes the binding reconciliation and the compiled instrument after
-// an eventless graph rewrite (see retarget_param); the drain does this
+// Recomputes the generator-record reconciliation and the compiled
+// instrument after an eventless graph rewrite; the drain does this
 // implicitly at the end of every applied batch.
 bool refresh_osc_graph_compilation(Synth::InstrumentEditorBank* bank,
                                    Graph&                       graph,
@@ -433,32 +432,13 @@ bool refresh_osc_graph_compilation(Synth::InstrumentEditorBank* bank,
                                    uint32_t                     channel,
                                    uint32_t                     zone);
 
-// Copies a parameter's live wiring into a kind-3 record's persistence
-// fields: served bits from the parameter's value wires, and the
-// envelope/LFO descriptor ids plus the LFO source pair from the bound
-// instance nodes (0s when an input is unwired).  The LFO sources resolve
-// from the live depth/rate edges into the bound instance, so a mid-session
-// rewire is what the record stores; the record triple then still matches
-// the instance at re-projection. The record's name persists as the user
-// set it and never follows the wires. Returns false when a source edge
-// cannot be resolved.
-bool store_param_wiring(const Graph&            graph,
-                        const OscGraphMapping&  mapping,
-                        const ParamEntry&       param,
-                        Synth::GraphNodeLayout* record);
-
 // One sparse per-zone node layout record lives in sculptor_instr_bank.h
 // next to its storage inside InstrumentEditorBank.
 
 // Node population the projection derives for one zone: fixed nodes,
-// oscillators, parameters, generator instances and record-driven surplus.
+// oscillators, generator instances and record-driven surplus.
 // Preflights (record capacity, node pool) count against it.
-// parameter_count optionally receives the implied parameter count
-// (derived groups plus materialized surplus parameters).
-uint32_t count_projected_nodes(const Synth::InstrumentEditorBank& bank,
-                               uint32_t                           channel,
-                               uint32_t                           zone,
-                               uint32_t*                          parameter_count = nullptr);
+uint32_t count_projected_nodes(const Synth::InstrumentEditorBank& bank, uint32_t channel, uint32_t zone);
 
 // A group tag identifies one editable FIELD ({kind, id0, id1}). The editor
 // pushes an undo snapshot only when the tag differs from the last commit's

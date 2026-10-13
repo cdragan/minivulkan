@@ -115,12 +115,11 @@ constexpr uint32_t instrument_max_lfos      = max_layers * num_mod_targets;
 enum InstrumentGraphLayoutKind : uint8_t {
     instrument_graph_layout_canonical = 0,
     instrument_graph_layout_envelope  = 1,
-    instrument_graph_layout_lfo       = 2,
-    instrument_graph_layout_parameter = 3
+    instrument_graph_layout_lfo       = 2
 };
 
-constexpr uint32_t instrument_graph_layout_capacity = graph_canonical_node_count + 3u * max_layers * num_mod_targets;
-static_assert(instrument_graph_layout_capacity == 198);
+constexpr uint32_t instrument_graph_layout_capacity = graph_canonical_node_count + 2u * max_layers * num_mod_targets;
+static_assert(instrument_graph_layout_capacity == 135);
 
 struct InstrumentGraphLayout {
     uint8_t kind;
@@ -129,7 +128,6 @@ struct InstrumentGraphLayout {
     uint8_t target;
     uint8_t depth_source;
     uint8_t rate_source;
-    uint8_t parameter_ordinal;
     float   x;
     float   y;
     float   width_override;
@@ -140,9 +138,11 @@ struct InstrumentGraphLayout {
 // Decodes one instrument document into out_instr. Generator descriptor ids in
 // the decoded instrument are 1-based indices into out_envelopes/out_lfos
 // (0 = none), ready for remap_envelopes/remap_lfos/remap_instrument. Returns
-// false with every output untouched when the text is not a valid document. An
-// absent or empty "graph_layout" is accepted; a nonempty one is refused rather
-// than discarded, so a caller of this entry point never silently drops layout.
+// false with every output untouched when the text is not a valid document.  An
+// absent or empty "graph_layout" is accepted.  Registered layout records
+// require layout output: a document that carries them is refused rather than
+// silently dropping layout.  Unregistered record kinds are skipped by the
+// decoder.
 bool decode_instrument_json(const char*         text,
                             uint32_t            len,
                             Instrument*         out_instr,

@@ -25,9 +25,9 @@
 		},
 		"graph_layout": {
 			"type": "array",
-			"maxItems": 114,
+			"maxItems": 135,
 			"uniqueItems": true,
-			"description": "Optional portable positions and sizes of nodes derived from this instrument; no effects, wiring or missing-sum state; optional custom parameter names.  Canonical 0 is input, 1 is sum, 2+n is oscillator layer n, which must exist.  Generator locators use layer and fixed numeric ModTarget; descriptor aliases resolve after the whole document parses and may have only one saved record.  Parameter ordinals are zero-based extant derived target groups, not descriptor IDs.  Unresolved or duplicate resolved nodes are refused.  All numbers must be finite; sizes are nonnegative.  Newly encoded documents always include this array.",
+			"description": "Optional portable positions and sizes of nodes derived from this instrument; no effects, wiring or missing-sum state.  Canonical 0 is input, 1 is sum, 2+n is oscillator layer n, which must exist.  Generator locators use layer and fixed numeric ModTarget; descriptor aliases resolve after the whole document parses and may have only one saved record.  Unresolved or duplicate resolved nodes are refused.  All numbers must be finite; sizes are nonnegative.  Newly encoded documents always include this array.",
 			"items": {
 				"oneOf": [
 					{
@@ -172,59 +172,6 @@
 							"target",
 							"depth_source",
 							"rate_source"
-						],
-						"additionalProperties": false
-					},
-					{
-						"type": "object",
-						"properties": {
-							"kind": {
-								"type": "integer",
-								"const": 3
-							},
-							"x": {
-								"type": "number"
-							},
-							"y": {
-								"type": "number"
-							},
-							"width": {
-								"type": "number",
-								"minimum": 0
-							},
-							"height": {
-								"type": "number",
-								"minimum": 0
-							},
-							"target": {
-								"type": "integer",
-								"enum": [
-									0,
-									1,
-									2,
-									7,
-									8
-								]
-							},
-							"name": {
-								"type": "string",
-								"maxLength": 31,
-								"description": "Custom parameter title; must fit 31 UTF-8 bytes and cannot contain NUL."
-							},
-							"parameter_ordinal": {
-								"type": "integer",
-								"minimum": 0,
-								"maximum": 6
-							}
-						},
-						"required": [
-							"kind",
-							"x",
-							"y",
-							"width",
-							"height",
-							"target",
-							"parameter_ordinal"
 						],
 						"additionalProperties": false
 					}

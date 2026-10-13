@@ -882,16 +882,6 @@ uint32_t Synth::encode_editor_bank_json(const InstrumentEditorBank* bank, char* 
         key_uint(o, "depth_source", record.depth_source);
         key_uint(o, "rate_source", record.rate_source);
         key_uint(o, "uid", record.uid);
-        // Kind-3 partial-wiring persistence; the keys are optional and
-        // decode to zero when absent.
-        key_uint(o, "served", record.served);
-        key_uint(o, "env_desc_id", record.env_desc_id);
-        key_uint(o, "lfo_desc_id", record.lfo_desc_id);
-        key_uint(o, "lfo_depth_source", record.lfo_depth_source);
-        key_uint(o, "lfo_rate_source", record.lfo_rate_source);
-        // Absent when zero: a zero ordinal joins the target's uid-order
-        // positional attach.
-        key_uint_nonzero(o, "param_slot", record.param_slot);
         o.key("name");
         o.text_value(record.name, sizeof(record.name));
         o.ch('}');
@@ -2345,26 +2335,6 @@ static void decode_editor_record(Walker& w, uint32_t obj, Synth::GraphNodeLayout
         else if (key_eq(w, key_idx, "uid")) {
             want_u8(w, val_idx, 0xFF, &record->uid);
         }
-        // Kind-3 partial-wiring persistence; the keys are optional and
-        // decode to zero when absent.
-        else if (key_eq(w, key_idx, "served")) {
-            want_u8(w, val_idx, 0xFF, &record->served);
-        }
-        else if (key_eq(w, key_idx, "env_desc_id")) {
-            want_u8(w, val_idx, 0xFF, &record->env_desc_id);
-        }
-        else if (key_eq(w, key_idx, "lfo_desc_id")) {
-            want_u8(w, val_idx, 0xFF, &record->lfo_desc_id);
-        }
-        else if (key_eq(w, key_idx, "lfo_depth_source")) {
-            want_u8(w, val_idx, 0xFF, &record->lfo_depth_source);
-        }
-        else if (key_eq(w, key_idx, "lfo_rate_source")) {
-            want_u8(w, val_idx, 0xFF, &record->lfo_rate_source);
-        }
-        else if (key_eq(w, key_idx, "param_slot")) {
-            want_u8(w, val_idx, 0xFF, &record->param_slot);
-        }
         else if (key_eq(w, key_idx, "name"))
             want_text(w, val_idx, record->name, sizeof(record->name));
         else if (w.strict_editor_metadata)
@@ -2375,7 +2345,7 @@ static void decode_editor_record(Walker& w, uint32_t obj, Synth::GraphNodeLayout
     if (w.failed)
         return;
     if ((record->channel >= Synth::max_channels && ! (record->kind == 4 && record->channel == Synth::max_channels)) ||
-        record->zone >= Synth::max_instr_per_channel || record->kind > 4) {
+        record->zone >= Synth::max_instr_per_channel || ! Synth::editor_record_kind_valid(record->kind)) {
         w.failed = true;
         return;
     }
@@ -2388,9 +2358,7 @@ static void decode_editor_record(Walker& w, uint32_t obj, Synth::GraphNodeLayout
     }
     // Source bytes name ModSource values; none (0) is valid.
     if (record->depth_source > static_cast<uint8_t>(Synth::ModSource::pressure_combine) ||
-        record->rate_source > static_cast<uint8_t>(Synth::ModSource::pressure_combine) ||
-        record->lfo_depth_source > static_cast<uint8_t>(Synth::ModSource::pressure_combine) ||
-        record->lfo_rate_source > static_cast<uint8_t>(Synth::ModSource::pressure_combine)) {
+        record->rate_source > static_cast<uint8_t>(Synth::ModSource::pressure_combine)) {
         w.failed = true;
         return;
     }
@@ -3414,74 +3382,111 @@ bool Synth::decode_instrument_json_for_domain(const char*            text,
             });
         }
         else if (key_eq(w, key_idx, "graph_layout")) {
-            walk_array(w, val_idx, Synth::instrument_graph_layout_capacity, [&](uint32_t elem, uint32_t pos) {
-                InstrumentGraphLayout& record = instrument_layout_staging[pos];
-                record                        = {};
-                uint32_t present              = 0;
-                walk_object(w, elem, [&](uint32_t field, uint32_t value) {
-                    const char* const keys[] = { "kind",
-                                                 "x",
-                                                 "y",
-                                                 "width",
-                                                 "height",
-                                                 "canonical_index",
-                                                 "layer",
-                                                 "target",
-                                                 "depth_source",
-                                                 "rate_source",
-                                                 "parameter_ordinal",
-                                                 "name" };
-                    uint32_t          key    = 0;
-                    while (key < 12 && ! key_eq(w, field, keys[key]))
-                        ++key;
-                    if (key == 12) {
+            // Record ordering: every record is decoded and classified before
+            // any capacity accounting, so unregistered kinds are skipped by
+            // the generic path and the portable capacity only ever counts
+            // registered records.
+            const jsmntok_t& arr = w.toks[val_idx];
+            if (arr.type != JSMN_ARRAY) {
+                w.failed = true;
+            }
+            else {
+                uint32_t  idx    = val_idx + 1;
+                uint32_t  staged = 0;
+                const int elems  = arr.size;
+                for (int element_index = 0; element_index < elems && ! w.failed; element_index++) {
+                    const uint32_t elem = idx;
+                    idx                 = skip_value(w, elem);
+                    if (idx == invalid_index) {
                         w.failed = true;
-                        return;
+                        break;
                     }
-                    present |= 1u << key;
-                    if (key == 11) {
-                        want_text(w, value, record.name, sizeof(record.name));
+
+                    InstrumentGraphLayout record  = {};
+                    uint32_t              present = 0;
+                    walk_object(w, elem, [&](uint32_t field, uint32_t value) {
+                        const char* const keys[] = { "kind",        "x",      "y",
+                                                     "width",       "height", "canonical_index",
+                                                     "layer",       "target", "depth_source",
+                                                     "rate_source", "name" };
+                        uint32_t          key    = 0;
+                        while (key < 11 && ! key_eq(w, field, keys[key])) {
+                            ++key;
+                        }
+                        if (key == 11) {
+                            w.failed = true;
+                            return;
+                        }
+
+                        present |= 1u << key;
+                        if (key == 10) {
+                            want_text(w, value, record.name, sizeof(record.name));
+                        }
+                        else if (key >= 1 && key <= 4) {
+                            float number = 0;
+                            want_float(w, value, &number);
+                            if (key == 1) {
+                                record.x = number;
+                            }
+                            if (key == 2) {
+                                record.y = number;
+                            }
+                            if (key == 3) {
+                                record.width_override = number;
+                            }
+                            if (key == 4) {
+                                record.height_override = number;
+                            }
+                        }
+                        else {
+                            uint8_t number = 0;
+                            want_u8(w, value, 255, &number);
+                            if (key == 0) {
+                                record.kind = number;
+                            }
+                            if (key == 5) {
+                                record.canonical_index = number;
+                            }
+                            if (key == 6) {
+                                record.layer = number;
+                            }
+                            if (key == 7) {
+                                record.target = number;
+                            }
+                            if (key == 8) {
+                                record.depth_source = number;
+                            }
+                            if (key == 9) {
+                                record.rate_source = number;
+                            }
+                        }
+                    });
+                    if (w.failed) {
+                        break;
                     }
-                    else if (key >= 1 && key <= 4) {
-                        float number = 0;
-                        want_float(w, value, &number);
-                        if (key == 1)
-                            record.x = number;
-                        if (key == 2)
-                            record.y = number;
-                        if (key == 3)
-                            record.width_override = number;
-                        if (key == 4)
-                            record.height_override = number;
+
+                    // Unregistered kinds are skipped before capacity counts them.
+                    if (record.kind > 2) {
+                        continue;
                     }
-                    else {
-                        uint8_t number = 0;
-                        want_u8(w, value, 255, &number);
-                        if (key == 0)
-                            record.kind = number;
-                        if (key == 5)
-                            record.canonical_index = number;
-                        if (key == 6)
-                            record.layer = number;
-                        if (key == 7)
-                            record.target = number;
-                        if (key == 8)
-                            record.depth_source = number;
-                        if (key == 9)
-                            record.rate_source = number;
-                        if (key == 10)
-                            record.parameter_ordinal = number;
+
+                    const uint32_t locator_keys[] = { 1u << 5,
+                                                      (1u << 6) | (1u << 7),
+                                                      (1u << 6) | (1u << 7) | (1u << 8) | (1u << 9) };
+                    if (present != (31u | locator_keys[record.kind])) {
+                        w.failed = true;
+                        break;
                     }
-                });
-                const uint32_t locator_keys[] = { 1u << 5,
-                                                  (1u << 6) | (1u << 7),
-                                                  (1u << 6) | (1u << 7) | (1u << 8) | (1u << 9),
-                                                  (1u << 7) | (1u << 10) };
-                if (record.kind > 3 ||
-                    (present & ~(record.kind == 3 ? 1u << 11 : 0u)) != (31u | locator_keys[record.kind]))
-                    w.failed = true;
-                ++layout_count;
-            });
+
+                    if (staged >= Synth::instrument_graph_layout_capacity) {
+                        w.failed = true;
+                        break;
+                    }
+
+                    instrument_layout_staging[staged++] = record;
+                }
+                layout_count = staged;
+            }
         }
         else
             doc_unknown_field(w, key_idx);
@@ -3777,14 +3782,6 @@ static uint32_t encode_instrument_json_for_domain(char*                         
             o.uint_value(record.depth_source);
             o.key("rate_source");
             o.uint_value(record.rate_source);
-        }
-        if (record.kind == 3) {
-            o.key("parameter_ordinal");
-            o.uint_value(record.parameter_ordinal);
-            if (record.name[0]) {
-                o.key("name");
-                o.text_value(record.name, sizeof(record.name));
-            }
         }
         o.key("x");
         o.float_value(record.x);

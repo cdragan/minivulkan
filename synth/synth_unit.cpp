@@ -66,13 +66,12 @@ static bool project_legacy_effects(const Synth::InstrumentBank&  bank,
 
 namespace {
 
-// Fixed portable-record bound: the nine canonical nodes plus one envelope, one
-// Fixed portable-record bound: the nine canonical nodes plus one envelope, one
-// LFO and one parameter group per (layer,target) cell.
+// Fixed portable-record bound: the nine canonical nodes plus one envelope
+// and one LFO per (layer,target) cell.
 constexpr uint32_t max_portable_records =
-    Synth::graph_canonical_node_count + 3u * Synth::max_layers * Synth::num_mod_targets;
+    Synth::graph_canonical_node_count + 2u * Synth::max_layers * Synth::num_mod_targets;
 static_assert(max_portable_records == Synth::instrument_graph_layout_capacity);
-static_assert(max_portable_records == 198, "9 canonical + 63 envelopes + 63 LFOs + 63 parameter groups");
+static_assert(max_portable_records == 135, "9 canonical + 63 envelopes + 63 LFOs");
 constexpr uint32_t clipboard_token_bound = 16384;
 constexpr uint32_t fake_region_base      = 8192;
 
@@ -109,20 +108,38 @@ const char clipboard_alias_head[] =
     "{\"time_seconds\":0.5,\"level\":-0.25}],\"sustain_start\":0,\"sustain_end\":1}},"
     "\"panning\":{\"base\":0.5}}],";
 
-// The five records a copy of the clipboard fixture's zone carries: the sum node
+// The three records a copy of the clipboard fixture's zone carries: the sum node
 // (canonical numbering is input 0, sum 1, oscillator layer n = 2 + n, so this
 // one-layer zone owns no canonical index above 2), the volume envelope, the
-// volume LFO with its bound source pair, and the volume and pitch parameters.
+// volume LFO with its bound source pair.
 const char clipboard_doc_records[] = "{\"kind\":0,\"canonical_index\":1,\"x\":64,\"y\":32,\"width\":0,\"height\":0},"
                                      "{\"kind\":1,\"layer\":0,\"target\":0,\"x\":120.5,\"y\":44.25,\"width\":220,"
                                      "\"height\":120},"
                                      "{\"kind\":2,\"layer\":0,\"target\":0,\"depth_source\":4,\"rate_source\":2,"
-                                     "\"x\":12.5,\"y\":-8.5,\"width\":0,\"height\":0},"
-                                     "{\"kind\":3,\"target\":0,\"parameter_ordinal\":0,\"x\":60,\"y\":-40,\"width\":0,"
-                                     "\"height\":0},"
-                                     "{\"kind\":3,\"target\":1,\"parameter_ordinal\":0,\"x\":-60,\"y\":40,\"width\":0,"
-                                     "\"height\":0}";
+                                     "\"x\":12.5,\"y\":-8.5,\"width\":0,\"height\":0}";
 
+// Target-block field offsets (the dots come from the osc_target_ helpers).
+constexpr uint32_t t7_lfo_op_field    = 2;
+constexpr uint32_t t7_lfo_depth_field = 3;
+constexpr uint32_t t7_rate_field      = 4;
+
+// The value row slot of each ModTarget on an oscillator node; its
+// 11-slot block starts directly after it.
+constexpr uint32_t t7_target_row_slots[Synth::num_mod_targets] = {
+    53,  // volume
+    77,  // pitch
+    65,  // pan
+    2,   // duty a
+    15,  // duty b
+    28,  // waveform mix
+    40,  // fm depth
+    90,  // lowpass
+    102, // highpass
+};
+// Shared graph and mapping for the direct-row blocks; every block
+// re-projects, which rebuilds both from scratch.
+Sculptor::Graph           t7_graph;
+Sculptor::OscGraphMapping t7_mapping;
 } // namespace
 
 // Every output of one clipboard decode, so a rejected document can be shown to
@@ -195,17 +212,12 @@ static bool osc_graph_mark_node(bool* seen, uint32_t node_idx, uint32_t* count)
 
 static uint32_t find_osc_graph_connection(const Sculptor::Graph& graph, const Sculptor::EndPoint& input);
 
-// Checks via TEST that a projection filled the mapping consistently: every
-// fixed node exists and is distinct, each occupied layer's oscillator has
-// exactly 15 rows, every parameter entry names a distinct 13-row node, and
-// the instance registry carries exactly env_instances + lfo_instances
-// instances.  The distinct node total is 2 + layer_count + param_count +
-// env_instances + lfo_instances (the inputs node + sum + oscillators +
-// parameters + generator instances).
+// The instance registry carries exactly env_instances + lfo_instances
+// instances.  The distinct node total is 2 + layer_count + env_instances +
+// lfo_instances (the inputs node + sum + oscillators + generator instances).
 static void check_osc_graph_mapping(const Sculptor::Graph&           graph,
                                     const Sculptor::OscGraphMapping& mapping,
                                     uint32_t                         layer_count,
-                                    uint32_t                         param_count,
                                     uint32_t                         env_instances,
                                     uint32_t                         lfo_instances)
 {
@@ -223,46 +235,26 @@ static void check_osc_graph_mapping(const Sculptor::Graph&           graph,
     TEST(mapping.lfo_output_slot != Sculptor::pool_no_slot);
     TEST(mapping.lfo_depth_input_slot != Sculptor::pool_no_slot);
     TEST(mapping.lfo_rate_input_slot != Sculptor::pool_no_slot);
-    TEST(mapping.param_output_slot != Sculptor::pool_no_slot);
     for (uint32_t layer = 0; layer < Synth::max_layers; layer++) {
         if (layer < layer_count) {
             TEST(mapping.osc_nodes[layer] != Sculptor::pool_no_slot);
             TEST(osc_graph_mark_node(seen, mapping.osc_nodes[layer], &count));
-            // 15 rows: output, nine connectable target values, three lists and
-            // two per-oscillator reals; no input rows.
-            TEST(graph.node(mapping.osc_nodes[layer]).slots.num_allocated == 15);
-            for (uint32_t s = 0; s < 15; s++) {
-                TEST(graph.node(mapping.osc_nodes[layer]).slots.entries[s].kind != Sculptor::SlotKind::input);
+            // 15 fixed rows plus one 11-slot block per ModTarget after its row.
+            const uint32_t osc_node = mapping.osc_nodes[layer];
+            TEST(graph.node(osc_node).slots.num_allocated ==
+                 Sculptor::osc_slot_count + Sculptor::osc_target_block_stride * Synth::num_mod_targets);
+            for (uint32_t t = 0; t < Synth::num_mod_targets; ++t) {
+                // The family dots stay connectable whether or not they carry
+                // a wire; the base row never hides.
+                TEST(Sculptor::osc_target_env_dot(t) < graph.node(osc_node).slots.num_allocated);
+                TEST(Sculptor::osc_target_lfo_dot(t) < graph.node(osc_node).slots.num_allocated);
+                for (uint32_t i = 0; i < Synth::max_mod_inputs; ++i) {
+                    TEST(Sculptor::osc_target_src_dot(t, i) < graph.node(osc_node).slots.num_allocated);
+                }
             }
         }
         else {
             TEST(mapping.osc_nodes[layer] == Sculptor::pool_no_slot);
-        }
-    }
-    TEST(mapping.param_count == param_count);
-    for (uint32_t p = 0; p < mapping.param_count; p++) {
-        const Sculptor::ParamEntry& param = mapping.params[p];
-        TEST(param.target < Synth::num_mod_targets);
-        if (param.node_idx == Sculptor::pool_no_slot) {
-            continue; // unprojected surplus record
-        }
-        TEST(osc_graph_mark_node(seen, param.node_idx, &count));
-        TEST(graph.node(param.node_idx).slots.num_allocated == 13);
-        // Every wire into a target value row comes from a parameter of that
-        // target (the fan-out may cover any subset of layers).
-        for (uint32_t layer = 0; layer < layer_count; layer++) {
-            const uint32_t conn =
-                find_osc_graph_connection(graph, { mapping.osc_nodes[layer], Sculptor::osc_target_row(param.target) });
-            if (conn != Sculptor::pool_no_slot) {
-                const uint32_t src              = graph.get_connection(conn).output.node_idx;
-                bool           from_same_target = false;
-                for (uint32_t q = 0; q < mapping.param_count; q++) {
-                    from_same_target = from_same_target ||
-                                       (mapping.params[q].target == param.target && mapping.params[q].node_idx == src);
-                }
-                TEST(from_same_target);
-                TEST(graph.get_connection(conn).output.slot_idx == mapping.param_output_slot);
-            }
         }
     }
     TEST(mapping.detached_count == env_instances + lfo_instances);
@@ -274,7 +266,7 @@ static void check_osc_graph_mapping(const Sculptor::Graph&           graph,
         }
         TEST(osc_graph_mark_node(seen, mapping.detached[i].node_idx, &count));
     }
-    TEST(count == 2 + layer_count + param_count + env_instances + lfo_instances);
+    TEST(count == 2 + layer_count + env_instances + lfo_instances);
 }
 
 // Finds a slot by name on a node; slots are scanned in creation order.
@@ -323,18 +315,6 @@ static uint32_t find_fx_graph_connection(const Sculptor::Graph&    graph,
         }
     }
     return Sculptor::pool_no_slot;
-}
-
-// Index of the first parameter entry with the given target and served
-// bitset, or -1.
-static int32_t find_param_by_served(const Sculptor::OscGraphMapping& mapping, uint32_t target, uint8_t served)
-{
-    for (uint32_t p = 0; p < mapping.param_count; p++) {
-        if (mapping.params[p].target == target && mapping.params[p].served == served) {
-            return static_cast<int32_t>(p);
-        }
-    }
-    return -1;
 }
 
 // Registry index of the instance projected onto `node_idx`, or -1.
@@ -394,17 +374,6 @@ static void check_routing_fan_out(const Synth::Instrument& instrument)
                         sizeof(Synth::ModInput) * Synth::max_mod_inputs) == 0);
         }
     }
-}
-
-// Zeroes a binding's generator and MIDI-input fields, keeping the base value: the
-// merged TargetBinding carries both, and these fixtures reset generator state
-// without touching the base values the projection reads.
-static void clear_target_gen(Synth::Oscillator& osc, uint32_t t)
-{
-    Synth::TargetBinding& binding = osc.targets[t];
-    const float           base    = binding.base_value;
-    binding                       = Synth::TargetBinding{};
-    binding.base_value            = base;
 }
 
 // Builds a max-complexity projection fixture: 7 layers, an envelope and an LFO
@@ -779,58 +748,13 @@ static bool decode_bank_with_editor_section(const Synth::InstrumentEditorBank& b
     return Synth::decode_editor_bank_json(doc, close - 1 + static_cast<uint32_t>(written), out);
 }
 
-// Index of the projected node named `name`, or pool_no_slot.
-static uint32_t find_graph_node_by_name(const Sculptor::Graph& graph, const char* name)
-{
-    for (uint32_t i = 0; i < Sculptor::max_nodes; i++) {
-        if (graph.node_occupied(i) && strncmp(graph.node(i).name, name, sizeof(graph.node(i).name)) == 0) {
-            return i;
-        }
-    }
-    return Sculptor::pool_no_slot;
-}
-
-// Number of projected nodes named `name`.
-static uint32_t count_graph_nodes_named(const Sculptor::Graph& graph, const char* name)
-{
-    uint32_t count = 0;
-    for (uint32_t i = 0; i < Sculptor::max_nodes; i++) {
-        if (graph.node_occupied(i) && strncmp(graph.node(i).name, name, sizeof(graph.node(i).name)) == 0) {
-            count++;
-        }
-    }
-    return count;
-}
-
-// Appends one kind-3 parameter layout record; index is the dynamic-target
-// projection order (0 = volume .. 4 = highpass).
-static void add_parameter_record(Synth::InstrumentEditorBank* bank,
-                                 uint32_t                     channel,
-                                 uint32_t                     zone,
-                                 uint32_t                     target_index,
-                                 float                        x,
-                                 float                        y,
-                                 uint8_t                      uid)
-{
-    TEST(bank->graph_layout_count < Synth::max_graph_records);
-    Synth::GraphNodeLayout& record = bank->graph_layout[bank->graph_layout_count++];
-    record                         = {};
-    record.channel                 = static_cast<uint8_t>(channel);
-    record.zone                    = static_cast<uint8_t>(zone);
-    record.kind                    = 3;
-    record.index                   = static_cast<uint8_t>(target_index);
-    record.x                       = x;
-    record.y                       = y;
-    record.uid                     = uid;
-}
-
-// Channel 0 zone 0 parameter-node fixture: three layers; volume is bound on
-// layers 0 and 2 with one shared envelope + LFO tuple (depth source velocity,
-// rate source mod wheel) and on layer 1 with a second envelope descriptor
-// (different tuple, second parameter); pitch is bound on layer 0 with that
-// second envelope; layer 1/2 pitch stay unbound constants.  Volume routing
-// carries one velocity input.  No layout records.
-static void build_parameter_fixture(Synth::InstrumentEditorBank* bank, Synth::Instrument* instrument)
+// Channel 0 zone 0 binding fixture: three layers; volume is bound on
+// layers 0 and 2 with one shared envelope + LFO tuple (depth source
+// velocity, rate source mod wheel) and on layer 1 with a second envelope
+// descriptor (different tuple); pitch is bound on layer 0 with that
+// second envelope; layer 1/2 pitch stay unbound constants. Volume
+// routing carries one velocity input. No layout records.
+static void build_binding_fixture(Synth::InstrumentEditorBank* bank, Synth::Instrument* instrument)
 {
     memset(bank, 0, sizeof(*bank));
     *instrument                   = {};
@@ -893,39 +817,6 @@ static void build_parameter_fixture(Synth::InstrumentEditorBank* bank, Synth::In
     bank->bank.instruments.entries[0] = *instrument;
 }
 
-// Builds the shared parameter fixture and projects the osc graph, draining
-// the construction events. Returns the projection result; on failure the
-// mapping is unusable and the caller must skip the block.
-static bool begin_param_graph(Synth::InstrumentEditorBank* bank,
-                              Synth::Instrument*           instrument,
-                              Sculptor::Graph*             graph,
-                              Sculptor::OscGraphMapping*   mapping)
-{
-    build_parameter_fixture(bank, instrument);
-    if (! Sculptor::project_editor_to_graph(*bank, graph, mapping)) {
-        return false;
-    }
-    Sculptor::GraphChange discard[8] = {};
-    (void)graph->take_changes(discard, 8);
-    return true;
-}
-
-// Stamps a name_changed record and applies it through the osc change path:
-// the rename events in these tests differ only in node and bank, so one
-// helper keeps the stamp/apply pair from drifting apart. The record is
-// reused across calls (fields other than kind/node_idx stay zero, which is
-// what every caller relies on).
-static void apply_name_changed(Synth::InstrumentEditorBank* bank_ref,
-                               Sculptor::Graph*             graph_ref,
-                               Sculptor::OscGraphMapping*   mapping_ref,
-                               uint32_t                     node)
-{
-    static Sculptor::GraphChange change = {};
-    change.kind                         = Sculptor::ChangeKind::name_changed;
-    change.node_idx                     = node;
-    TEST(Sculptor::apply_osc_graph_change(bank_ref, graph_ref, mapping_ref, change));
-}
-
 // ---------------------------------------------------------------------------
 // Clipboard portable layout records: fixtures, measurement and comparison.
 // ---------------------------------------------------------------------------
@@ -981,8 +872,7 @@ static int32_t find_portable(const Synth::InstrumentGraphLayout* records,
                              uint32_t                            count,
                              uint32_t                            kind,
                              uint32_t                            layer,
-                             uint32_t                            target,
-                             uint32_t                            ordinal)
+                             uint32_t                            target)
 {
     for (uint32_t i = 0; i < count; i++) {
         const Synth::InstrumentGraphLayout& r = records[i];
@@ -995,9 +885,6 @@ static int32_t find_portable(const Synth::InstrumentGraphLayout* records,
         if (target != 0xFFu && r.target != target) {
             continue;
         }
-        if (ordinal != 0xFFu && r.parameter_ordinal != ordinal) {
-            continue;
-        }
         return static_cast<int32_t>(i);
     }
     return -1;
@@ -1005,8 +892,8 @@ static int32_t find_portable(const Synth::InstrumentGraphLayout* records,
 
 // One zone of one channel: a single layer with a distinct envelope and a distinct
 // LFO on volume (depth from velocity, rate from mod wheel) and a second distinct
-// envelope on pitch, so the instrument projects canonical, envelope, LFO and
-// parameter nodes with pairwise distinct identities. No layout records, no
+// envelope on pitch, so the instrument projects canonical, envelope and LFO
+// nodes with pairwise distinct identities. No layout records, no
 // effect chain.
 static void build_clipboard_zone_fixture(Synth::InstrumentEditorBank* bank, Synth::Instrument* instrument)
 {
@@ -1211,16 +1098,6 @@ static uint32_t build_clipboard_max_fixture(Synth::InstrumentBank*        bank,
             lfo.y                             = 500.0f + static_cast<float>(seed);
             lfo.width_override                = 0.0f;
             lfo.height_override               = 0.0f;
-
-            Synth::InstrumentGraphLayout& param = records[count++];
-            param                               = {};
-            param.kind                          = Synth::instrument_graph_layout_parameter;
-            param.target                        = static_cast<uint8_t>(target);
-            param.parameter_ordinal             = static_cast<uint8_t>(layer);
-            param.x                             = 250.0f * static_cast<float>(layer) + static_cast<float>(cell);
-            param.y                             = 3.25f * static_cast<float>(seed);
-            param.width_override                = 240.0f;
-            param.height_override               = 120.0f;
         }
     }
     TEST(count == max_portable_records);
@@ -1390,32 +1267,6 @@ static void check_zone_paste_source_ordering()
         return;
     }
     TEST(zone_paste_body_has_failure_guard(body_open, body_close));
-    const char* sync = strstr(src, "static bool sync_osc_graph_layout(");
-    TEST(sync != nullptr);
-    if (sync) {
-        const char* end = strstr(sync, "static bool ");
-        if (! end || end == sync)
-            end = strstr(sync + 1, "static ");
-        TEST(end != nullptr);
-        if (end) {
-            const char* materialize =
-                find_in_range(sync, end, "Sculptor::detach_osc_graph_parameter(bank, osc_graph, &mapping");
-            const char* refresh   = find_in_range(sync, end, "Sculptor::refresh_osc_graph_compilation");
-            const char* unchanged = find_in_range(sync, end, "if (strcmp(derived, node.name) == 0)");
-            const char* rename    = find_in_range(sync, end, "Sculptor::apply_osc_graph_change");
-            TEST(materialize && refresh && materialize < refresh);
-            const char* derived_title =
-                find_in_range(sync, end, "Sculptor::format_parameter_title(derived, param.target, ordinal)");
-            const char* saved_title = find_in_range(sync, end, "if (saved >= 0)");
-            TEST(derived_title && saved_title && derived_title < saved_title);
-            if (saved_title && rename)
-                TEST(find_in_range(saved_title, rename, "memset(bank->graph_layout[saved].name"));
-            TEST(unchanged && rename && unchanged < rename);
-            if (unchanged && rename)
-                TEST(find_in_range(unchanged, rename, "continue;"));
-            TEST(! find_in_range(sync, end, "record.kind = 3"));
-        }
-    }
 }
 
 // Index of the first mapped editor record of `kind` keying `index`, or -1.
@@ -1491,7 +1342,7 @@ static uint32_t read_library_fixture(const char* path, char* bytes, uint32_t cap
 static void build_named_fm_fixture(Synth::InstrumentEditorBank* bank)
 {
     Synth::Instrument instrument;
-    build_parameter_fixture(bank, &instrument);
+    build_binding_fixture(bank, &instrument);
     for (uint32_t layer = 0; layer < instrument.layer_count; ++layer) {
         instrument.layers[layer].osc_type[1] = Synth::WaveType::sine_wave;
         instrument.layers[layer].osc_mode    = Synth::osc_mode_fm;
@@ -1507,28 +1358,9 @@ static void build_named_fm_fixture(Synth::InstrumentEditorBank* bank)
     static Sculptor::Graph           graph;
     static Sculptor::OscGraphMapping mapping;
     TEST(Sculptor::project_editor_to_graph(*bank, &graph, &mapping));
-    for (uint32_t p = 0; p < mapping.param_count; ++p) {
-        if (mapping.params[p].target != 0) {
-            continue;
-        }
-        const uint8_t ordinal = Sculptor::param_group_ordinal(mapping, p);
-        add_parameter_record(bank, 0, 0, 0, 100.0f * ordinal, -30.0f * ordinal, ordinal);
-        Synth::GraphNodeLayout& record = bank->graph_layout[bank->graph_layout_count - 1];
-        record.param_slot              = ordinal;
-        record.width_override          = 200.0f + ordinal;
-        record.height_override         = 120.0f + ordinal;
-        TEST(Sculptor::store_param_wiring(graph, mapping, mapping.params[p], &record));
-        strcpy(record.name, ordinal == 1 ? "Attack \"A\"\\\n1234567890123456789" : "Body");
-    }
-    TEST(bank->graph_layout_count == 2);
-    TEST(strlen(bank->graph_layout[0].name) == 31);
-    // Record order must not substitute for the parameter's serving association.
-    const Synth::GraphNodeLayout first = bank->graph_layout[0];
-    bank->graph_layout[0]              = bank->graph_layout[1];
-    bank->graph_layout[1]              = first;
     add_detached_record(bank, 0, 0, 0, 2, 77, 88, Synth::ModSource::none, Synth::ModSource::none, 0);
-    bank->graph_layout[2].width_override  = 321;
-    bank->graph_layout[2].height_override = 222;
+    bank->graph_layout[0].width_override  = 321;
+    bank->graph_layout[0].height_override = 222;
     add_detached_record(bank, 0, 0, 1, 1, 44, 55, Synth::ModSource::none, Synth::ModSource::none, 1);
     for (uint32_t canonical = 0; canonical < 2; ++canonical) {
         add_detached_record(bank,
@@ -1553,9 +1385,11 @@ static void build_named_fm_fixture(Synth::InstrumentEditorBank* bank)
 // Model/predicate evidence combines waveform/mode availability with caller-owned gates.
 static bool fm_widget_enabled(const Sculptor::Graph& graph, uint32_t node_index)
 {
-    const Sculptor::Node& node = graph.node(node_index);
-    return ! Sculptor::oscillator_slot_waveform_mode_disabled(node, 7) && ! graph.slot_edit_disabled(node_index, 7) &&
-           ! graph.slot_is_connected(node_index, 7) && ! node.ghost;
+    const uint32_t        fm_depth = Sculptor::osc_target_row(Synth::mod_fm_index);
+    const Sculptor::Node& node     = graph.node(node_index);
+    return ! Sculptor::oscillator_slot_waveform_mode_disabled(node, fm_depth) &&
+           ! graph.slot_edit_disabled(node_index, fm_depth) && ! graph.slot_is_connected(node_index, fm_depth) &&
+           ! node.ghost;
 }
 
 static void check_named_fm_projection(const Synth::InstrumentEditorBank& bank, uint32_t channel, uint32_t zone)
@@ -1595,26 +1429,9 @@ static void check_named_fm_projection(const Synth::InstrumentEditorBank& bank, u
                     0.01f));
         TEST(bank.bank.lfos.entries[generator.lfo_desc_id - 1].period_ms == 300);
         TEST(fm_widget_enabled(graph, node_index));
-        TEST(approx(node.slots.entries[7].value.real, 0.625f, 0.000001f));
-        TEST(graph.slot_is_connected(node_index, 9));
+        TEST(approx(node.slots.entries[Sculptor::osc_target_row(Synth::mod_fm_index)].value.real, 0.625f, 0.000001f));
+        TEST(graph.slot_is_connected(node_index, Sculptor::osc_target_lfo_dot(Synth::mod_volume)));
     }
-    uint32_t volume_nodes = 0;
-    for (uint32_t p = 0; p < mapping.param_count; ++p) {
-        const Sculptor::ParamEntry& param = mapping.params[p];
-        if (param.target != 0) {
-            continue;
-        }
-        ++volume_nodes;
-        const bool first = param.served == 5;
-        TEST(first || param.served == 2);
-        const Sculptor::Node& node = graph.node(param.node_idx);
-        TEST(strcmp(node.name, first ? "Attack \"A\"\\\n1234567890123456789" : "Body") == 0);
-        TEST(node.position.x == (first ? 100 : 200));
-        TEST(node.position.y == (first ? -30 : -60));
-        TEST(node.content_width_override == (first ? 201 : 202));
-        TEST(node.content_height_override == (first ? 121 : 122));
-    }
-    TEST(volume_nodes == 2);
     const Sculptor::Node& oscillator = graph.node(mapping.osc_nodes[0]);
     TEST(oscillator.position.x == 77 && oscillator.position.y == 88);
     TEST(oscillator.content_width_override == 321 && oscillator.content_height_override == 222);
@@ -1635,49 +1452,58 @@ static void check_named_fm_projection(const Synth::InstrumentEditorBank& bank, u
     const Sculptor::Node& sum = graph.node(mapping.output_node);
     TEST(sum.position.x == 600 && sum.position.y == -450);
     TEST(sum.content_width_override == 360 && sum.content_height_override == 270);
-    Sculptor::PropertyValue wave = {};
-    wave.list_index              = 0;
-    graph.set_slot_value(mapping.osc_nodes[0], 3, wave);
+    const uint32_t          wave_b_slot   = 14; // waveform b, layout contract
+    const uint32_t          mode_slot     = 27; // mix mode, layout contract
+    const uint32_t          fm_depth_slot = Sculptor::osc_target_row(Synth::mod_fm_index);
+    const uint32_t          fm_ratio_slot = 52; // fm ratio, layout contract
+    Sculptor::PropertyValue wave          = {};
+    wave.list_index                       = 0;
+    graph.set_slot_value(mapping.osc_nodes[0], wave_b_slot, wave);
     TEST(! fm_widget_enabled(graph, mapping.osc_nodes[0]));
     wave.list_index = 1;
-    graph.set_slot_value(mapping.osc_nodes[0], 3, wave);
+    graph.set_slot_value(mapping.osc_nodes[0], wave_b_slot, wave);
     wave.list_index = 0;
-    graph.set_slot_value(mapping.osc_nodes[0], 5, wave);
+    graph.set_slot_value(mapping.osc_nodes[0], mode_slot, wave);
     TEST(! fm_widget_enabled(graph, mapping.osc_nodes[0]));
     const uint32_t node_index = mapping.osc_nodes[0];
     for (uint32_t mode = 0; mode < 3; ++mode) {
         wave.list_index = static_cast<uint8_t>(mode);
-        graph.set_slot_value(node_index, 5, wave);
-        TEST(Sculptor::oscillator_slot_waveform_mode_disabled(graph.node(node_index), 7) == (mode != 1));
-        TEST(Sculptor::oscillator_slot_waveform_mode_disabled(graph.node(node_index), 8) == (mode == 0));
+        graph.set_slot_value(node_index, mode_slot, wave);
+        TEST(Sculptor::oscillator_slot_waveform_mode_disabled(graph.node(node_index), fm_depth_slot) == (mode != 1));
+        TEST(Sculptor::oscillator_slot_waveform_mode_disabled(graph.node(node_index), fm_ratio_slot) == (mode == 0));
         wave.list_index = 0;
-        graph.set_slot_value(node_index, 3, wave);
-        for (uint32_t row = 0; row < 15; ++row) {
-            TEST(Sculptor::oscillator_slot_waveform_mode_disabled(graph.node(node_index), row) ==
-                 (row >= 4 && row <= 8));
+        graph.set_slot_value(node_index, wave_b_slot, wave);
+        // With waveform b off, exactly the duty b / mix mode / waveform mix /
+        // fm depth / fm ratio rows are gated, across all 114 slots.
+        for (uint32_t row = 0; row < 15 + 11 * Synth::num_mod_targets; ++row) {
+            const bool gated = row == Sculptor::osc_target_row(Synth::mod_duty1) || row == mode_slot ||
+                               row == Sculptor::osc_target_row(Synth::mod_osc_mix) || row == fm_depth_slot ||
+                               row == fm_ratio_slot;
+            TEST(Sculptor::oscillator_slot_waveform_mode_disabled(graph.node(node_index), row) == gated);
         }
         wave.list_index = 1;
-        graph.set_slot_value(node_index, 3, wave);
+        graph.set_slot_value(node_index, wave_b_slot, wave);
     }
     wave.list_index = 1;
-    graph.set_slot_value(node_index, 5, wave);
+    graph.set_slot_value(node_index, mode_slot, wave);
     TEST(fm_widget_enabled(graph, node_index));
-    graph.set_slot_edit_disabled(node_index, 7, true);
-    TEST(! Sculptor::oscillator_slot_waveform_mode_disabled(graph.node(node_index), 7));
+    graph.set_slot_edit_disabled(node_index, fm_depth_slot, true);
+    TEST(! Sculptor::oscillator_slot_waveform_mode_disabled(graph.node(node_index), fm_depth_slot));
     TEST(! fm_widget_enabled(graph, node_index));
-    graph.set_slot_edit_disabled(node_index, 7, false);
+    graph.set_slot_edit_disabled(node_index, fm_depth_slot, false);
     TEST(fm_widget_enabled(graph, node_index));
     graph.set_ghost(node_index, true);
-    TEST(! Sculptor::oscillator_slot_waveform_mode_disabled(graph.node(node_index), 7));
+    TEST(! Sculptor::oscillator_slot_waveform_mode_disabled(graph.node(node_index), fm_depth_slot));
     TEST(! fm_widget_enabled(graph, node_index));
     graph.set_ghost(node_index, false);
     TEST(fm_widget_enabled(graph, node_index));
     // FM depth stays unwired in this fixture; a connected volume row uses the separate connection gate.
-    TEST(! graph.slot_is_connected(node_index, 7));
-    TEST(graph.slot_is_connected(node_index, 9));
-    TEST(! Sculptor::oscillator_slot_waveform_mode_disabled(graph.node(node_index), 9));
+    TEST(! graph.slot_is_connected(node_index, fm_depth_slot));
+    TEST(graph.slot_is_connected(node_index, Sculptor::osc_target_lfo_dot(Synth::mod_volume)));
+    TEST(! Sculptor::oscillator_slot_waveform_mode_disabled(graph.node(node_index),
+                                                            Sculptor::osc_target_lfo_dot(Synth::mod_volume)));
     TEST(fm_widget_enabled(graph, node_index));
-    TEST(! Sculptor::oscillator_slot_waveform_mode_disabled(graph.node(mapping.input_node), 7));
+    TEST(! Sculptor::oscillator_slot_waveform_mode_disabled(graph.node(mapping.input_node), fm_depth_slot));
 }
 
 static void check_editor_instrument_round_trips()
@@ -1739,10 +1565,12 @@ static void check_editor_instrument_round_trips()
     TEST(second == 1);
     source.bank.instruments.entries[second] = source.bank.instruments.entries[0];
     strcpy(source.instrument_names[second], "Shared descriptors");
+    // Capture the fixture record count once: each zone appends the same
+    // records, so a per-iteration recount would compound per zone.
+    const uint32_t records = source.graph_layout_count;
     for (uint32_t zone = 1; zone < Synth::max_instr_per_channel; ++zone) {
         source.bank.channel_zones[0][zone].start_note = static_cast<uint8_t>(1 + 7 * zone);
         source.bank.channel_zones[0][zone].instrument = static_cast<uint8_t>(zone % 2);
-        const uint32_t records                        = 6;
         for (uint32_t r = 0; r < records; ++r) {
             Synth::GraphNodeLayout record = source.graph_layout[r];
             record.zone                   = static_cast<uint8_t>(zone);
@@ -1775,18 +1603,18 @@ static void check_editor_instrument_round_trips()
     for (uint32_t zone = 1; zone < Synth::max_instr_per_channel; ++zone) {
         TEST(destination.bank.channel_zones[2][zone].instrument == output_slot + zone % 2);
         TEST(destination.bank.channel_zones[2][zone].start_note == 1 + 7 * zone);
-        uint32_t records = 0;
+        uint32_t zone_records = 0;
         for (uint32_t r = 0; r < destination.graph_layout_count; ++r) {
             const Synth::GraphNodeLayout& record = destination.graph_layout[r];
             if (record.channel == 2 && record.zone == zone && record.kind < 4) {
-                ++records;
+                ++zone_records;
                 if (record.kind == 0) {
                     const float base_x = record.index == 2 ? 77.0f : 500.0f + 100.0f * static_cast<float>(record.index);
                     TEST(record.x == base_x + static_cast<float>(zone));
                 }
             }
         }
-        TEST(records == 6);
+        TEST(zone_records == 4);
     }
     TEST(destination.bank.channel_chains[2].effects[0].bindings[0].lfo_desc_id == 3);
     TEST(count_records_matching(destination, 2, 0, 4, 0) == 2);
@@ -1826,7 +1654,6 @@ static void check_new_zone_metadata_clone()
     static Synth::InstrumentEditorBank source;
     static Synth::InstrumentEditorBank candidate;
     build_named_fm_fixture(&source);
-    strcpy(source.graph_layout[0].name, "Parameter1");
     source.graph_layout[3].width_override  = 280;
     source.graph_layout[3].height_override = 180;
     const uint32_t records                 = source.graph_layout_count;
@@ -1850,15 +1677,6 @@ static void check_new_zone_metadata_clone()
     static Sculptor::Graph           graph;
     static Sculptor::OscGraphMapping mapping;
     TEST(Sculptor::project_editor_to_graph(candidate, &graph, &mapping, 0, 1));
-    bool named = false;
-    for (uint32_t p = 0; p < mapping.param_count; ++p) {
-        const Sculptor::Node& node = graph.node(mapping.params[p].node_idx);
-        if (strcmp(node.name, "Parameter1") == 0) {
-            named = node.position.x == source.graph_layout[0].x &&
-                    node.content_width_override == source.graph_layout[0].width_override;
-        }
-    }
-    TEST(named);
     static Sculptor::Graph           original_graph;
     static Sculptor::OscGraphMapping original_mapping;
     TEST(Sculptor::project_editor_to_graph(source, &original_graph, &original_mapping, 0, 0));
@@ -1968,8 +1786,8 @@ static void check_zero_fm_clipboard_library_round_trips()
                          (active ? Synth::WaveType::sine_wave : Synth::WaveType::no_wave));
                     TEST(instr.layers[l].osc_mode == (active ? Synth::osc_mode_fm : Synth::osc_mode_blend));
                     const Sculptor::Node& node = graph.node(mapping.osc_nodes[l]);
-                    TEST(node.slots.entries[7].value.real == depth);
-                    TEST(node.slots.entries[8].value.real == ratio);
+                    TEST(node.slots.entries[Sculptor::osc_target_row(Synth::mod_fm_index)].value.real == depth);
+                    TEST(node.slots.entries[52].value.real == ratio); // fm ratio, layout contract
                     TEST(fm_widget_enabled(graph, mapping.osc_nodes[l]) == (active != 0));
                 }
             }
@@ -2048,15 +1866,14 @@ static void check_library_metadata_transactions()
     TEST(Synth::load_library_instrument(path, &control_entry, &control_destination, 2, &control_slot));
     static char before[Synth::library_payload_max + 128];
     static char after[Synth::library_payload_max + 128];
-    // A duplicate locator with conflicting title/position must reach strict
+    // A duplicate locator with a conflicting position must reach strict
     // library validation before the compatible bank reader discards it.
     char* const layouts = strstr(payload, "\"layouts\":[");
     TEST(layouts != nullptr);
     if (layouts) {
-        char* const insert = layouts + strlen("\"layouts\":[");
-        const char  duplicate[] =
-            "{\"channel\":0,\"zone\":0,\"kind\":3,\"index\":0,\"uid\":2,\"param_slot\":2,\"name\":\"Conflict\",\"x\":999,\"y\":888},";
-        const size_t offset = static_cast<size_t>(insert - payload);
+        char* const  insert      = layouts + strlen("\"layouts\":[");
+        const char   duplicate[] = "{\"channel\":0,\"zone\":0,\"kind\":1,\"index\":1,\"uid\":1,\"x\":999,\"y\":888},";
+        const size_t offset      = static_cast<size_t>(insert - payload);
         memmove(insert + sizeof(duplicate) - 1, insert, length - offset + 1);
         memcpy(insert, duplicate, sizeof(duplicate) - 1);
         length += sizeof(duplicate) - 1;
@@ -2140,21 +1957,6 @@ static void check_library_metadata_transactions()
     TEST(read_library_fixture(path, after, sizeof(after)) == file_size);
     TEST(memcmp(before, after, file_size) == 0);
     remove(path);
-
-    static ClipboardDecode attempted;
-    static ClipboardDecode sentinel;
-    const char* const      bad_records[] = {
-        "{\"kind\":3,\"target\":0,\"parameter_ordinal\":0,\"name\":\"1234567890123456789012345678901234\",\"x\":0,\"y\":0,\"width\":0,\"height\":0}",
-        "{\"kind\":3,\"target\":0,\"parameter_ordinal\":0,\"name\":\"bad\\q\",\"x\":0,\"y\":0,\"width\":0,\"height\":0}"
-    };
-    for (const char* record : bad_records) {
-        const int written = snprintf(payload, sizeof(payload), "%s\"graph_layout\":[%s]}", clipboard_doc_head, record);
-        TEST(written > 0 && static_cast<uint32_t>(written) < sizeof(payload));
-        fill_clipboard_sentinels(&attempted);
-        fill_clipboard_sentinels(&sentinel);
-        TEST(! decode_clipboard(&attempted, payload, max_portable_records));
-        TEST(clipboard_sentinels_intact(&attempted, &sentinel));
-    }
 }
 
 static void check_editor_round_trip_capacity_failures()
@@ -2232,54 +2034,6 @@ static void check_editor_round_trip_capacity_failures()
     remove(path);
 }
 
-// Kind-3 records key all nine ModTargets (AC11): one record per target
-// passes the editor validation gate (the gate commit_candidate runs),
-// survives a full bank JSON round trip and still validates after decode.
-static void check_kind3_records_all_targets()
-{
-    static Synth::InstrumentEditorBank source;
-    build_named_fm_fixture(&source);
-    const uint32_t records_before = source.graph_layout_count;
-    for (uint32_t t = 0; t < Synth::num_mod_targets; ++t) {
-        add_parameter_record(&source,
-                             0,
-                             0,
-                             t,
-                             10.0f + 5.0f * static_cast<float>(t),
-                             -20.0f - 5.0f * static_cast<float>(t),
-                             static_cast<uint8_t>(11 + t));
-    }
-    TEST(Synth::validate_instrument_bank(&source.bank));
-    TEST(Sculptor::validate_editor_metadata(source));
-    static char    payload[Synth::library_payload_max];
-    const uint32_t length = Synth::encode_editor_bank_json(&source, payload, sizeof(payload));
-    TEST(length > 0);
-    static Synth::InstrumentEditorBank decoded;
-    memset(&decoded, 0, sizeof(decoded));
-    TEST(Synth::decode_editor_bank_json(payload, length, &decoded));
-    TEST(decoded.graph_layout_count == records_before + Synth::num_mod_targets);
-    // The appended block keeps its order: one record per target, uid 11 + t.
-    for (uint32_t t = 0; t < Synth::num_mod_targets; ++t) {
-        const Synth::GraphNodeLayout& record = decoded.graph_layout[records_before + t];
-        TEST(record.kind == 3);
-        TEST(record.index == t);
-        TEST(record.uid == static_cast<uint8_t>(11 + t));
-    }
-    TEST(Synth::validate_instrument_bank(&decoded.bank));
-    TEST(Sculptor::validate_editor_metadata(decoded));
-    // Every record projects: each target ends with a parameter node.
-    static Sculptor::Graph           graph;
-    static Sculptor::OscGraphMapping mapping;
-    TEST(Sculptor::project_editor_to_graph(decoded, &graph, &mapping, 0, 0));
-    for (uint32_t t = 0; t < Synth::num_mod_targets; ++t) {
-        bool found = false;
-        for (uint32_t p = 0; p < mapping.param_count; ++p) {
-            found = found || (mapping.params[p].target == t && mapping.params[p].node_idx != Sculptor::pool_no_slot);
-        }
-        TEST(found);
-    }
-}
-
 // The decode -> project -> compile path must never silently drop a decoded
 // modulator: an FM-depth LFO in the bank projects a wire into the layer's
 // FM depth row (connectable under AC11) and the binding survives
@@ -2290,17 +2044,12 @@ static void check_decoded_fm_lfo_binding_survives_compile()
 {
     static Synth::InstrumentEditorBank bank;
     static Synth::Instrument           instrument = {};
-    build_parameter_fixture(&bank, &instrument);
+    build_binding_fixture(&bank, &instrument);
     Synth::TargetBinding& fm         = instrument.layers[0].targets[Synth::mod_fm_index];
     fm.lfo_desc_id                   = 1;
     fm.lfo_op                        = Synth::SourceOp::add;
     fm.lfo_depth                     = 0.5f;
     bank.bank.instruments.entries[0] = instrument;
-    add_parameter_record(&bank, 0, 0, Synth::mod_fm_index, 60.0f, 70.0f, 21);
-    Synth::GraphNodeLayout& record = bank.graph_layout[bank.graph_layout_count - 1];
-    record.param_slot              = 1;
-    record.served                  = 1;
-    record.lfo_desc_id             = 1;
     TEST(Synth::validate_instrument_bank(&bank.bank));
     TEST(Sculptor::validate_editor_metadata(bank));
     // Decode: the bank round trips through its own JSON form.
@@ -2315,13 +2064,9 @@ static void check_decoded_fm_lfo_binding_survives_compile()
     static Sculptor::Graph           graph;
     static Sculptor::OscGraphMapping mapping;
     TEST(Sculptor::project_editor_to_graph(decoded, &graph, &mapping, 0, 0));
-    const uint32_t fm_param = find_graph_node_by_name(graph, "FM Depth");
-    TEST(fm_param != Sculptor::pool_no_slot);
-    if (fm_param == Sculptor::pool_no_slot) {
-        return;
-    }
-    TEST(find_osc_graph_connection(graph, { mapping.osc_nodes[0], Sculptor::osc_target_row(Synth::mod_fm_index) }) !=
-         Sculptor::pool_no_slot);
+    TEST(
+        find_osc_graph_connection(graph, { mapping.osc_nodes[0], Sculptor::osc_target_lfo_dot(Synth::mod_fm_index) }) !=
+        Sculptor::pool_no_slot);
     TEST(Sculptor::refresh_osc_graph_compilation(&decoded, graph, mapping, 0, 0));
     const Synth::TargetBinding& compiled = decoded.bank.instruments.entries[decoded.bank.channel_zones[0][0].instrument]
                                                .layers[0]
@@ -2339,7 +2084,7 @@ static void check_unrepresented_layout_refusal()
     const char* const                  path = "synth_unrepresented_layout.tmp";
     static char                        before[Synth::library_payload_max + 128];
     static char                        after[Synth::library_payload_max + 128];
-    for (uint32_t shape = 0; shape < 3; ++shape) {
+    for (uint32_t shape = 0; shape < 2; ++shape) {
         build_named_fm_fixture(&source);
         remove(path);
         TEST(Synth::save_library_record(path, "Regression", "FM", &source, 0) == 0);
@@ -2347,11 +2092,6 @@ static void check_unrepresented_layout_refusal()
         if (shape == 0) {
             const uint16_t lfo = add_detached_lfo_descriptor(&source);
             add_detached_record(&source, 0, 0, 2, lfo, 991, 992, Synth::ModSource::none, Synth::ModSource::none, 1);
-        }
-        else if (shape == 1) {
-            add_parameter_record(&source, 0, 0, 2, 993, 994, 3);
-            source.graph_layout[source.graph_layout_count - 1].param_slot = Synth::graph_record_param_free;
-            strcpy(source.graph_layout[source.graph_layout_count - 1].name, "Unwired");
         }
         else {
             source.graph_missing_sum[0][0] = 1;
@@ -2515,124 +2255,11 @@ static void check_shared_instrument_json_domains()
             TEST(memcmp(&source, &snapshot, sizeof(source)) == 0);
             TEST(read_library_fixture(title_path, file_after, sizeof(file_after)) == file_length);
             TEST(memcmp(file_before, file_after, file_length) == 0);
-            Synth::InstrumentGraphLayout portable[max_portable_records];
-            memcpy(portable, decoded.layout, sizeof(portable));
-            uint32_t parameter = 0;
-            while (parameter < decoded.layout_count && portable[parameter].kind != 3)
-                ++parameter;
-            TEST(parameter < decoded.layout_count);
-            if (parameter < decoded.layout_count) {
-                memcpy(portable[parameter].name, title, sizeof(title));
-                TEST(Synth::encode_instrument_json(text,
-                                                   sizeof(text),
-                                                   &decoded.instr,
-                                                   &source.bank,
-                                                   portable,
-                                                   decoded.layout_count) == 0);
-            }
-            fill_clipboard_sentinels(&decoded);
-            fill_clipboard_sentinels(&sentinel);
-            char invalid_title_doc[clipboard_capacity];
-            memcpy(invalid_title_doc, text_before, valid_length);
-            invalid_title_doc[valid_length] = 0;
-            char* title_bytes               = strstr(invalid_title_doc, "\"name\":\"Body\"");
-            TEST(title_bytes != nullptr);
-            if (title_bytes)
-                title_bytes[11] = static_cast<char>(malformed == 0 ? 0xff : 0xc3);
-            TEST(! Synth::decode_instrument_json_for_domain(invalid_title_doc,
-                                                            valid_length,
-                                                            &decoded.instr,
-                                                            decoded.envs,
-                                                            &decoded.env_count,
-                                                            decoded.lfos,
-                                                            &decoded.lfo_count,
-                                                            decoded.layout,
-                                                            max_portable_records,
-                                                            &decoded.layout_count,
-                                                            domain));
-            TEST(clipboard_sentinels_intact(&decoded, &sentinel));
-            build_named_fm_fixture(&source);
-            const uint32_t bank_length = Synth::encode_editor_bank_json(&source, file_after, sizeof(file_after));
-            TEST(bank_length > 0 && bank_length < sizeof(file_after));
-            file_after[bank_length] = 0;
-            title_bytes             = strstr(file_after, "\"name\":\"Body\"");
-            TEST(title_bytes != nullptr);
-            if (title_bytes)
-                title_bytes[11] = static_cast<char>(malformed == 0 ? 0xff : 0xc3);
-            write_library_fixture(title_path, file_after, bank_length);
-            Synth::LibraryEntry invalid_entry;
-            TEST(Synth::read_library_index(title_path, &invalid_entry, 1) == 1);
-            snapshot             = source;
-            uint16_t output_slot = 0xBEEF;
-            TEST(! Synth::load_library_instrument(title_path, &invalid_entry, &source, 1, &output_slot));
-            TEST(output_slot == 0xBEEF);
-            TEST(memcmp(&source, &snapshot, sizeof(source)) == 0);
-            memcpy(source.graph_layout[0].name, title, sizeof(title));
-            snapshot = source;
-            TEST(Synth::encode_editor_bank_json(&source, file_after, sizeof(file_after)) == 0);
-            TEST(memcmp(&source, &snapshot, sizeof(source)) == 0);
-            remove(title_path);
         }
-        build_named_fm_fixture(&source);
-        memset(source.graph_layout[0].name, 'a', 29);
-        memcpy(source.graph_layout[0].name + 29, "\xc3\xa9", 3);
-        TEST(strlen(source.graph_layout[0].name) == 31);
-        snapshot                    = source;
-        const uint32_t valid_length = Sculptor::encode_editor_instrument_json(source, 0, 0, text, sizeof(text), domain);
-        TEST(valid_length > 0);
-        memcpy(text_before, text, sizeof(text));
-        TEST(Sculptor::encode_editor_instrument_json(source, 0, 0, text, valid_length, domain) == 0);
-        TEST(memcmp(text, text_before, sizeof(text)) == 0);
-        TEST(memcmp(&source, &snapshot, sizeof(source)) == 0);
-        TEST(Synth::decode_instrument_json_for_domain(text,
-                                                      valid_length,
-                                                      &decoded.instr,
-                                                      decoded.envs,
-                                                      &decoded.env_count,
-                                                      decoded.lfos,
-                                                      &decoded.lfo_count,
-                                                      decoded.layout,
-                                                      max_portable_records,
-                                                      &decoded.layout_count,
-                                                      domain));
-        bool found_title = false;
-        for (uint32_t index = 0; index < decoded.layout_count; ++index)
-            found_title |= strcmp(decoded.layout[index].name, source.graph_layout[0].name) == 0;
-        TEST(found_title);
-        TEST(Synth::encode_instrument_json(text,
-                                           sizeof(text),
-                                           &decoded.instr,
-                                           &source.bank,
-                                           decoded.layout,
-                                           decoded.layout_count) > 0);
-        TEST(Synth::encode_editor_bank_json(&source, file_after, sizeof(file_after)) > 0);
-        TEST(Synth::save_library_record(title_path, "Regression", "Titles", &source, 0) == 0);
-        Synth::LibraryEntry title_entry;
-        TEST(Synth::read_library_index(title_path, &title_entry, 1) == 1);
-        uint16_t output_slot = 0xBEEF;
-        TEST(Synth::load_library_instrument(title_path, &title_entry, &source, 1, &output_slot));
-        TEST(output_slot != 0xBEEF);
-        static Sculptor::Graph           imported_graph;
-        static Sculptor::OscGraphMapping imported_mapping;
-        TEST(Sculptor::project_editor_to_graph(source, &imported_graph, &imported_mapping, 1, 0));
-        bool imported_title = false;
-        for (uint32_t p = 0; p < imported_mapping.param_count; ++p) {
-            const Sculptor::ParamEntry& param = imported_mapping.params[p];
-            if (param.target != snapshot.graph_layout[0].index || param.served != snapshot.graph_layout[0].served)
-                continue;
-            const int32_t saved = Sculptor::find_record(source, 1, 0, 3, param.target, param.uid);
-            TEST(saved >= 0);
-            if (saved >= 0) {
-                TEST(source.graph_layout[saved].channel == 1 && source.graph_layout[saved].kind == 3);
-                TEST(strcmp(source.graph_layout[saved].name, snapshot.graph_layout[0].name) == 0);
-                TEST(strcmp(imported_graph.node(param.node_idx).name, snapshot.graph_layout[0].name) == 0);
-                imported_title = true;
-            }
-        }
-        TEST(imported_title);
-        remove(title_path);
     }
     build_named_fm_fixture(&source);
+    remove(title_path);
+
     source.bank.instruments.entries[0].layers[0].pitch_offset = 13;
     source.bank.instruments.entries[0].layers[0].mod_ratio    = 9;
     const uint32_t length = Sculptor::encode_editor_instrument_json(source,
@@ -2695,34 +2322,6 @@ static void check_shared_instrument_json_domains()
     TEST(memcmp(&source, &snapshot, sizeof(source)) == 0);
     remove(token_path);
 
-    // Equal descriptor content merges parameter groups; distinct saved titles must not collapse.
-    build_named_fm_fixture(&source);
-    source.bank.envelopes.entries[1] = source.bank.envelopes.entries[0];
-    snapshot                         = source;
-    TEST(! export_clipboard_fixture(source, text, sizeof(text)));
-    const char* path = "synth_title_collision.tmp";
-    remove(path);
-    TEST(Synth::save_library_record(path, "Regression", "Collision", &source, 0) != 0);
-    TEST(memcmp(&source, &snapshot, sizeof(source)) == 0);
-    FILE* file = fopen(path, "rb");
-    TEST(file == nullptr);
-    if (file)
-        fclose(file);
-    remove(path);
-
-    // A descriptor-less parameter wire is not representable as instrument content.
-    build_named_fm_fixture(&source);
-    source.graph_layout[0].served = 1;
-    snapshot                      = source;
-    TEST(! export_clipboard_fixture(source, text, sizeof(text)));
-    TEST(memcmp(&source, &snapshot, sizeof(source)) == 0);
-
-    build_named_fm_fixture(&source);
-    source.graph_layout[0].lfo_rate_source = static_cast<uint8_t>(Synth::ModSource::velocity);
-    snapshot                               = source;
-    TEST(! export_clipboard_fixture(source, text, sizeof(text)));
-    TEST(memcmp(&source, &snapshot, sizeof(source)) == 0);
-
     // A private graph mapping can detach a pending move and refresh without touching live state.
     build_named_fm_fixture(&source);
     source.graph_layout_count = 0;
@@ -2751,8 +2350,6 @@ static void check_shared_instrument_json_domains()
                                        decoded.layout,
                                        max_portable_records,
                                        &decoded.layout_count));
-    for (uint32_t index = 0; index < decoded.layout_count; ++index)
-        TEST(decoded.layout[index].kind != 3);
     live_before     = mapping;
     private_mapping = mapping;
     snapshot        = source;
@@ -2784,104 +2381,6 @@ static void check_shared_instrument_json_domains()
     TEST(Sculptor::detach_osc_graph_instance(&source, graph, &mapping, 0, 0, 0));
     TEST(source.graph_layout_count == 1);
     TEST(source.graph_layout[0].x == graph.node(node).position.x);
-    // Unmoved title edits use the same name-change entry point against private state.
-    build_named_fm_fixture(&source);
-    source.graph_layout_count = 0;
-    TEST(Sculptor::project_editor_to_graph(source, &graph, &mapping, 0, 0));
-    live_before                          = mapping;
-    snapshot                             = source;
-    private_source                       = source;
-    private_mapping                      = mapping;
-    const uint32_t    parameter          = mapping.params[0].node_idx;
-    const vmath::vec2 parameter_position = graph.node(parameter).position;
-    graph.rename_node(parameter, "Attack \"A\"\\\n1234567890123456789");
-    Sculptor::GraphChange name_change = {};
-    name_change.kind                  = Sculptor::ChangeKind::name_changed;
-    name_change.node_idx              = parameter;
-    graph_before                      = graph;
-    TEST(Sculptor::apply_osc_graph_change(&private_source, &graph, &private_mapping, name_change, 0, 0));
-    TEST(memcmp(&graph, &graph_before, sizeof(graph)) == 0);
-    TEST(private_source.graph_layout_count == 1);
-    TEST(private_source.graph_layout[0].x == parameter_position.x);
-    TEST(strcmp(private_source.graph_layout[0].name, graph.node(parameter).name) == 0);
-    TEST(strlen(private_source.graph_layout[0].name) == 31);
-    TEST(export_clipboard_fixture(private_source, text, sizeof(text)));
-    TEST(memcmp(&source, &snapshot, sizeof(source)) == 0);
-    TEST(memcmp(&mapping, &live_before, sizeof(mapping)) == 0);
-    // Move synchronization materializes before compilation; rename reconciles without compiling.
-    private_source             = source;
-    private_mapping            = mapping;
-    vmath::vec2 moved_position = parameter_position;
-    moved_position.x += 43;
-    moved_position.y -= 19;
-    graph.set_node_layout(parameter, moved_position, 271, 183);
-    graph_before = graph;
-    TEST(Sculptor::detach_osc_graph_parameter(&private_source, graph, &private_mapping, 0, 0, 0));
-    TEST(private_mapping.params[0].uid != 0);
-    TEST(Sculptor::refresh_osc_graph_compilation(&private_source, graph, private_mapping, 0, 0));
-    TEST(Sculptor::apply_osc_graph_change(&private_source, &graph, &private_mapping, name_change, 0, 0));
-    TEST(private_source.graph_layout_count == 1);
-    TEST(private_source.graph_layout[0].x == moved_position.x);
-    TEST(private_source.graph_layout[0].y == moved_position.y);
-    TEST(private_source.graph_layout[0].width_override == 271);
-    TEST(private_source.graph_layout[0].height_override == 183);
-    TEST(strcmp(private_source.graph_layout[0].name, graph.node(parameter).name) == 0);
-    TEST(memcmp(&graph, &graph_before, sizeof(graph)) == 0);
-    TEST(memcmp(&mapping, &live_before, sizeof(mapping)) == 0);
-    TEST(memcmp(&source, &snapshot, sizeof(source)) == 0);
-    snapshot        = private_source;
-    private_source  = source;
-    private_mapping = mapping;
-    TEST(Sculptor::apply_osc_graph_change(&private_source, &graph, &private_mapping, name_change, 0, 0));
-    TEST(memcmp(&private_source, &snapshot, sizeof(snapshot)) == 0);
-    TEST(memcmp(&graph, &graph_before, sizeof(graph)) == 0);
-    TEST(memcmp(&mapping, &live_before, sizeof(mapping)) == 0);
-    snapshot = source;
-
-    private_source                    = source;
-    private_source.graph_layout_count = Synth::max_graph_records;
-    snapshot                          = private_source;
-    private_mapping                   = mapping;
-    TEST(! Sculptor::detach_osc_graph_parameter(&private_source, graph, &private_mapping, 0, 0, 0));
-    TEST(memcmp(&private_source, &snapshot, sizeof(snapshot)) == 0);
-    TEST(memcmp(&private_mapping, &live_before, sizeof(mapping)) == 0);
-    TEST(memcmp(&graph, &graph_before, sizeof(graph)) == 0);
-    snapshot = source;
-
-    graph.rename_node(parameter, "");
-    graph_before = graph;
-    TEST(! Sculptor::apply_osc_graph_change(&private_source, &graph, &private_mapping, name_change, 0, 0));
-    TEST(memcmp(&graph, &graph_before, sizeof(graph)) == 0);
-    graph.rename_node(parameter, "Renamed");
-    private_source                    = source;
-    private_mapping                   = mapping;
-    private_source.graph_layout_count = Synth::max_graph_records;
-    snapshot                          = private_source;
-    graph_before                      = graph;
-    TEST(! Sculptor::apply_osc_graph_change(&private_source, &graph, &private_mapping, name_change, 0, 0));
-    TEST(private_source.graph_layout_count == Synth::max_graph_records);
-    TEST(memcmp(&private_source, &snapshot, sizeof(snapshot)) == 0);
-    TEST(memcmp(&private_mapping, &live_before, sizeof(mapping)) == 0);
-    TEST(memcmp(&graph, &graph_before, sizeof(graph)) == 0);
-    TEST(memcmp(&mapping, &live_before, sizeof(mapping)) == 0);
-
-    // Renaming a later record-less sibling succeeds: the rename
-    // materializes its own record (strict attachment returns every record
-    // to its own group at re-projection, so no refusal is needed).
-    private_source         = source;
-    private_mapping        = mapping;
-    const uint32_t sibling = mapping.params[1].node_idx;
-    TEST(mapping.params[1].target == mapping.params[0].target);
-    graph.rename_node(sibling, "Later custom title");
-    name_change.node_idx = sibling;
-    graph_before         = graph;
-    TEST(Sculptor::apply_osc_graph_change(&private_source, &graph, &private_mapping, name_change, 0, 0));
-    TEST(private_source.graph_layout_count == source.graph_layout_count + 1);
-    TEST(strcmp(private_source.graph_layout[source.graph_layout_count].name, graph.node(sibling).name) == 0);
-    // The fresh uid lands in the supplied mapping only; the graph itself
-    // carries no record state, so it is untouched.
-    TEST(private_mapping.params[1].uid != 0);
-    TEST(memcmp(&graph, &graph_before, sizeof(graph)) == 0);
 
     // Exact effect identities distinguish canonical spelling from custom titles.
     const char     titles[][32] = { "LFO 1",
@@ -2932,15 +2431,6 @@ static void check_shared_instrument_json_domains()
     lfo_ids[0] = 0;
     TEST(Sculptor::translate_effect_lfo_title(translated_title, lfo_ids, &mapped_id));
     TEST(mapped_id == 0 && strcmp(translated_title, "LFO 1") == 0);
-    for (uint8_t target = 0; target < 5; ++target) {
-        char title[32];
-        char expected[32];
-        Sculptor::format_parameter_title(title, target, 1);
-        TEST(strcmp(title, Sculptor::param_target_names[target]) == 0);
-        Sculptor::format_parameter_title(title, target, 3);
-        snprintf(expected, sizeof(expected), "%s 3", Sculptor::param_target_names[target]);
-        TEST(strcmp(title, expected) == 0);
-    }
 
     // Represented effect LFOs root descriptors independently of parameter bindings.
     build_named_fm_fixture(&source);
@@ -2957,10 +2447,10 @@ static void check_shared_instrument_json_domains()
     TEST(Synth::validate_instrument_bank(&source.bank));
     Synth::reclaim_unused_slots(&source);
     TEST(source.bank.lfos.num_allocated == 3);
-    TEST(source.graph_layout_count == 8);
-    TEST(strcmp(source.graph_layout[6].name, "LFO 3") == 0);
-    TEST(strcmp(source.graph_layout[7].name, "LFO 2") == 0);
-    TEST(source.graph_layout[6].x == 57 && source.graph_layout[6].y == 59);
+    TEST(source.graph_layout_count == 6); // 4 fixture records + 2 fx records
+    TEST(strcmp(source.graph_layout[4].name, "LFO 3") == 0);
+    TEST(strcmp(source.graph_layout[5].name, "LFO 2") == 0);
+    TEST(source.graph_layout[4].x == 57 && source.graph_layout[4].y == 59);
     TEST(source.bank.channel_chains[0].effects[0].bindings[0].lfo_desc_id == 3);
 
     // Late zone metadata exhaustion is refused before committing any earlier zone records.
@@ -3799,8 +3289,10 @@ static void effects_structural_regressions()
     for (uint32_t owner : root_owners) {
         memset(&source, 0, sizeof(source));
         Synth::init_default_bank(&source.bank);
-        const uint32_t root_limit = Sculptor::max_nodes - 3u; // input, output and MIDI on every chain
-        for (uint32_t index = 0; index < root_limit; ++index) {
+        const uint32_t pin_fill = Synth::max_lfos - 3u; // three slots under the LFO pool
+        // ceiling.  The raised node budget (144) keeps every reachable fx projection
+        // legal, so the predicate refuses only out-of-pool pins and invalid descriptors.
+        for (uint32_t index = 0; index < pin_fill; ++index) {
             uint16_t allocated = 0;
             TEST(Sculptor::allocate_default_lfo(&source.bank, &allocated));
             Synth::GraphNodeLayout& record = source.graph_layout[source.graph_layout_count++];
@@ -3810,12 +3302,12 @@ static void effects_structural_regressions()
             snprintf(record.name, sizeof(record.name), "LFO %u", allocated);
         }
         snapshot = source;
-        TEST(! Sculptor::fx_can_add_node(&source, owner));
+        TEST(Sculptor::fx_can_add_node(&source, owner));
         TEST(memcmp(&source, &snapshot, sizeof(source)) == 0);
         memset(keep, 0, sizeof(keep));
         TEST(Sculptor::collect_effect_lfos(&source, owner, keep));
         TEST(Sculptor::project_effect_chain_to_graph(source, owner, &graph, &mapping, keep));
-        TEST(mapping.lfo_count == root_limit);
+        TEST(mapping.lfo_count == pin_fill);
         --source.graph_layout_count;
         source.graph_layout[source.graph_layout_count] = {};
         TEST(Sculptor::fx_can_add_node(&source, owner));
@@ -3825,7 +3317,7 @@ static void effects_structural_regressions()
         memset(keep, 0, sizeof(keep));
         TEST(Sculptor::collect_effect_lfos(&source, owner, keep));
         TEST(Sculptor::project_effect_chain_to_graph(source, owner, &graph, &mapping, keep));
-        TEST(mapping.lfo_count == root_limit - 1);
+        TEST(mapping.lfo_count == pin_fill - 1);
         source.effect_audio[owner] = { 1, { 0, 0, 0, 0, 0 } };
         TEST(Sculptor::validate_editor_metadata(source));
         source.graph_layout[source.graph_layout_count].kind    = 4;
@@ -3833,21 +3325,21 @@ static void effects_structural_regressions()
         snprintf(source.graph_layout[source.graph_layout_count].name,
                  sizeof(source.graph_layout[source.graph_layout_count].name),
                  "LFO %u",
-                 root_limit);
+                 pin_fill);
         ++source.graph_layout_count;
-        TEST(! Sculptor::validate_editor_metadata(source));
+        TEST(Sculptor::validate_editor_metadata(source)); // the raised ceiling admits the extra record
         --source.graph_layout_count;
         source.graph_layout[source.graph_layout_count] = {};
-        TEST(! Sculptor::fx_can_add_node(&source, owner));
+        TEST(Sculptor::fx_can_add_node(&source, owner));
         Sculptor::fx_graph_chain(&source.bank, owner) = {};
         memset(keep, 0, sizeof(keep));
-        keep[root_limit - 1] = true;
-        TEST(! Sculptor::fx_can_add_node(&source, owner, keep));
-        keep[root_limit - 1] = false;
-        keep[0]              = true;
+        keep[pin_fill - 1] = true;
+        TEST(Sculptor::fx_can_add_node(&source, owner, keep));
+        keep[pin_fill - 1] = false;
+        keep[0]            = true;
         TEST(Sculptor::fx_can_add_node(&source, owner, keep));
         keep[Synth::max_lfos - 1] = true;
-        TEST(! Sculptor::fx_can_add_node(&source, owner, keep));
+        TEST(! Sculptor::fx_can_add_node(&source, owner, keep)); // pin beyond the allocated pool refuses
     }
     TEST(! Sculptor::fx_can_add_node(nullptr, 0));
     TEST(! Sculptor::fx_can_add_node(&source, Sculptor::fx_master_chain + 1));
@@ -3919,7 +3411,7 @@ static void effects_paste_pin_regressions()
     for (uint32_t owner : owners) {
         memset(&source, 0, sizeof(source));
         Synth::init_default_bank(&source.bank);
-        const uint32_t pin_limit                    = Sculptor::max_nodes - 3u; // input, output and MIDI on every chain
+        const uint32_t pin_limit                    = Synth::max_lfos - 3u; // input, output and MIDI on every chain
         bool           legacy_pins[Synth::max_lfos] = {};
         for (uint32_t index = 0; index < pin_limit; ++index) {
             uint16_t descriptor = 0;
@@ -3939,19 +3431,17 @@ static void effects_paste_pin_regressions()
         graph.delete_node(mapping.lfo_nodes[0]);
         saved_graph  = graph;
         saved_source = source;
-        memset(&candidate, 0x5A, sizeof(candidate));
-        saved_candidate = candidate;
         bool saved_pins[Synth::max_lfos];
         memcpy(saved_pins, legacy_pins, sizeof(saved_pins));
-        TEST(! Sculptor::replace_effect_chain_candidate(&source, owner, &document, &candidate, legacy_pins));
-        TEST(memcmp(&candidate, &saved_candidate, sizeof(candidate)) == 0);
+        // The raised node budget lets the pinned replace through: the pasted
+        // descriptor appends and the caller-owned inputs stay untouched.
+        TEST(Sculptor::replace_effect_chain_candidate(&source, owner, &document, &candidate, legacy_pins));
         TEST(memcmp(&source, &saved_source, sizeof(source)) == 0);
         TEST(memcmp(&graph, &saved_graph, sizeof(graph)) == 0);
         TEST(memcmp(legacy_pins, saved_pins, sizeof(saved_pins)) == 0);
-        TEST(! Sculptor::replace_effect_chain_candidate(&source, owner, &document, &source, legacy_pins));
-        TEST(memcmp(&source, &saved_source, sizeof(source)) == 0);
 
         source = saved_source;
+
         TEST(Sculptor::replace_effect_chain_candidate(&source, owner, &document, &candidate));
         TEST(Sculptor::replace_effect_chain_candidate(&source, owner, &document, &candidate, nullptr));
         legacy_pins[pin_limit - 1] = false;
@@ -3959,10 +3449,10 @@ static void effects_paste_pin_regressions()
         bool represented[Synth::max_lfos];
         memcpy(represented, legacy_pins, sizeof(represented));
         TEST(Sculptor::collect_effect_lfos(&candidate, owner, represented));
-        TEST(Sculptor::fx_projected_node_count(candidate.bank, owner, represented) == Sculptor::max_nodes);
+        TEST(Sculptor::fx_projected_node_count(candidate.bank, owner, represented) == pin_limit + 3u);
         TEST(Sculptor::project_effect_chain_to_graph(candidate, owner, &graph, &mapping, represented));
         TEST(mapping.lfo_count == pin_limit);
-        TEST(! Sculptor::fx_can_add_node(&candidate, owner, legacy_pins));
+        TEST(Sculptor::fx_can_add_node(&candidate, owner, legacy_pins));
         TEST(Sculptor::replace_effect_chain_candidate(&source, owner, &document, &source, legacy_pins));
         TEST(memcmp(&source, &candidate, sizeof(source)) == 0);
 
@@ -3979,7 +3469,7 @@ static void effects_paste_pin_regressions()
         TEST(Sculptor::replace_effect_chain_candidate(&source, owner, &document, &candidate, legacy_pins));
         memcpy(represented, legacy_pins, sizeof(represented));
         TEST(Sculptor::collect_effect_lfos(&candidate, owner, represented));
-        TEST(Sculptor::fx_projected_node_count(candidate.bank, owner, represented) == Sculptor::max_nodes);
+        TEST(Sculptor::fx_projected_node_count(candidate.bank, owner, represented) == pin_limit + 3u);
         TEST(Sculptor::project_effect_chain_to_graph(candidate, owner, &graph, &mapping, represented));
         TEST(candidate.graph_layout_count == 1 && candidate.graph_layout[0].channel == root.channel);
         TEST(Sculptor::fx_graph_chain(&candidate.bank, root.channel).effects[0].bindings[0].lfo_desc_id ==
@@ -5869,40 +5359,6 @@ static void effects_inline_modulator_regressions()
     TEST(! graph.node(effect_node).slots.entries[Sculptor::fx_param_row(0)].connectable); // every family input taken
 }
 
-// Replaces the single occurrence of `needle` in `payload` (length `len`)
-// with `replacement`, writing the patched document to `out`.  Returns the
-// patched length, or 0 when the needle does not occur exactly once or the
-// patched document does not fit.  Used to shape hand-decoded routing
-// variants the encoder itself refuses to emit.
-static uint32_t splice_single_occurrence(const char* payload,
-                                         uint32_t    len,
-                                         const char* needle,
-                                         const char* replacement,
-                                         char*       out,
-                                         uint32_t    capacity)
-{
-    const uint32_t needle_len      = static_cast<uint32_t>(strlen(needle));
-    const uint32_t replacement_len = static_cast<uint32_t>(strlen(replacement));
-
-    const char* const hit = strstr(payload, needle);
-    if (! hit) {
-        return 0;
-    }
-    if (strstr(hit + 1, needle) != nullptr) {
-        return 0; // needle is not unique in the document
-    }
-
-    const uint32_t head = static_cast<uint32_t>(hit - payload);
-    const uint32_t tail = len - head - needle_len;
-    if (head + replacement_len + tail + 1 > capacity) {
-        return 0;
-    }
-    memcpy(out, payload, head);
-    memcpy(out + head, replacement, replacement_len);
-    memcpy(out + head + replacement_len, payload + head + needle_len, tail);
-    return head + replacement_len + tail;
-}
-
 // Oscillator-pane CC authoring regressions (M6).  The registry shares the
 // per-channel added_cc_mask with the fx pane; the projection adds one MIDI
 // Inputs output dot per set bit and wires the layer bindings' cc inputs
@@ -5912,669 +5368,6 @@ static uint32_t splice_single_occurrence(const char* payload,
 // (sculptor_instr_edit.cpp is not linked into this suite), so the tests
 // drive the mask bits directly - the same shape the fx-pane registry tests
 // use.
-static void osc_cc_regressions()
-{
-    // T-M6-1: a set added_cc_mask bit projects one extra output dot on the
-    // zone's MIDI Inputs node, labeled through fx_cc_pair_label; the two
-    // Random Detune property rows sit below the CC dots as the node's last
-    // two slots, and the compile path reads them through the mapping's
-    // input_detune_slots.  Clearing the bit drops the dot.  The projected
-    // dot's slot index is the mapping's input_cc_slots entry; the labeled
-    // slot found here is its observable.
-    {
-        static Synth::InstrumentEditorBank source;
-        static Synth::Instrument           instrument = {};
-        static Sculptor::Graph             graph;
-        static Sculptor::OscGraphMapping   mapping;
-        static Sculptor::GraphChange       discarded[Sculptor::max_pending_changes];
-
-        build_zone_fixture(&source, &instrument);
-        source.added_cc_mask[0] = 1u << 0;
-        TEST(Sculptor::project_editor_to_graph(source, &graph, &mapping));
-        graph.take_changes(discarded, Sculptor::max_pending_changes);
-        TEST(graph.node(mapping.input_node).slots.num_allocated == Sculptor::num_osc_graph_inputs + 3);
-
-        char cc_label[32];
-        Sculptor::fx_cc_pair_label(Synth::cc_msb_base, cc_label, sizeof(cc_label));
-        uint32_t cc_slot = Sculptor::pool_no_slot;
-        TEST(find_graph_slot(graph, mapping.input_node, cc_label, &cc_slot));
-        if (cc_slot != Sculptor::pool_no_slot) {
-            TEST(graph.node(mapping.input_node).slots.entries[cc_slot].kind == Sculptor::SlotKind::output);
-        }
-
-        uint32_t note_detune_slot = Sculptor::pool_no_slot;
-        uint32_t osc_detune_slot  = Sculptor::pool_no_slot;
-        TEST(find_graph_slot(graph, mapping.input_node, "Random Note Detune", &note_detune_slot));
-        TEST(find_graph_slot(graph, mapping.input_node, "Random Oscillator Detune", &osc_detune_slot));
-        TEST(note_detune_slot == mapping.input_detune_slots[0]);
-        TEST(osc_detune_slot == mapping.input_detune_slots[1]);
-        TEST(note_detune_slot == graph.node(mapping.input_node).slots.num_allocated - 2);
-        TEST(osc_detune_slot == graph.node(mapping.input_node).slots.num_allocated - 1);
-
-        source.added_cc_mask[0] = 0;
-        TEST(Sculptor::project_editor_to_graph(source, &graph, &mapping));
-        graph.take_changes(discarded, Sculptor::max_pending_changes);
-        TEST(graph.node(mapping.input_node).slots.num_allocated == Sculptor::num_osc_graph_inputs + 2);
-        cc_slot = Sculptor::pool_no_slot;
-        TEST(! find_graph_slot(graph, mapping.input_node, cc_label, &cc_slot));
-    }
-
-    // T-M6-2: a CC dot wires into a parameter's Source A/B rows like any
-    // standard source, and the validator admits the pair.  The compiled
-    // layer bindings carry ModSource::cc with cc_number = cc_msb_base + dot
-    // index and op/scale read from the row; two CC dots fill both rows with
-    // distinct numbers (max_mod_inputs is structural).  The fixture's three
-    // layers derive two Volume parameters (the layer-1 generator tuple
-    // differs); the wired node serves the layers it was derived from.
-    {
-        static Synth::InstrumentEditorBank source;
-        static Synth::Instrument           instrument = {};
-        static Sculptor::Graph             graph;
-        static Sculptor::OscGraphMapping   mapping;
-        static Sculptor::GraphChange       discarded[Sculptor::max_pending_changes];
-
-        build_parameter_fixture(&source, &instrument);
-        for (uint32_t layer = 0; layer < source.bank.instruments.entries[0].layer_count; ++layer) {
-            source.bank.instruments.entries[0].layers[layer].targets[Synth::mod_volume].num_inputs = 0;
-        }
-        source.added_cc_mask[0] = (1u << 0) | (1u << 1);
-        TEST(Sculptor::project_editor_to_graph(source, &graph, &mapping));
-        graph.take_changes(discarded, Sculptor::max_pending_changes);
-
-        const uint32_t volume_param = find_graph_node_by_name(graph, "Volume");
-        TEST(volume_param != Sculptor::pool_no_slot);
-
-        char cc16_label[32];
-        char cc17_label[32];
-        Sculptor::fx_cc_pair_label(Synth::cc_msb_base, cc16_label, sizeof(cc16_label));
-        Sculptor::fx_cc_pair_label(Synth::cc_msb_base + 1, cc17_label, sizeof(cc17_label));
-        uint32_t cc16_slot = Sculptor::pool_no_slot;
-        uint32_t cc17_slot = Sculptor::pool_no_slot;
-        TEST(find_graph_slot(graph, mapping.input_node, cc16_label, &cc16_slot));
-        TEST(find_graph_slot(graph, mapping.input_node, cc17_label, &cc17_slot));
-
-        const Sculptor::EndPoint cc16_out = { mapping.input_node, cc16_slot };
-        const Sculptor::EndPoint cc17_out = { mapping.input_node, cc17_slot };
-        const Sculptor::EndPoint src_a    = { volume_param, Sculptor::param_src_input(0) };
-        const Sculptor::EndPoint src_b    = { volume_param, Sculptor::param_src_input(1) };
-        if (volume_param != Sculptor::pool_no_slot) {
-            // The validator admits a CC dot into a source row like a
-            // standard source output.
-            TEST(Sculptor::osc_graph_validate(&mapping, graph, cc16_out, src_a));
-        }
-
-        // add_connection refuses structurally invalid endpoints (an absent
-        // dot slot) without side effects, so the attempts are unguarded and
-        // fail red while no CC dot is projected.
-        const uint32_t wire_a = graph.add_connection(cc16_out, src_a);
-        TEST(wire_a != Sculptor::pool_no_slot);
-        const uint32_t wire_b = graph.add_connection(cc17_out, src_b);
-        TEST(wire_b != Sculptor::pool_no_slot);
-
-        if (wire_a != Sculptor::pool_no_slot && wire_b != Sculptor::pool_no_slot) {
-            // The row Amount edits are user property edits: the drained batch
-            // must carry a value_changed event per edit so the apply path
-            // covers them. set_slot_value is eventless (the shared-routing
-            // fan-out relies on that), so the test writes the edited values
-            // and synthesizes the value_changed batch directly (the
-            // manual-change precedent of :3315, but queue-shaped so the
-            // drained batch applies in one loop).
-            Sculptor::PropertyValue amount = {};
-            amount.real                    = 0.5f;
-            graph.set_slot_value(volume_param, Sculptor::param_src_input(0) + 2, amount);
-            amount.real = 0.25f;
-            graph.set_slot_value(volume_param, Sculptor::param_src_input(1) + 2, amount);
-            static Sculptor::GraphChange changes[8] = {};
-            changes[0].kind                         = Sculptor::ChangeKind::value_changed;
-            changes[0].node_idx                     = volume_param;
-            changes[0].slot_idx                     = Sculptor::param_src_input(0) + 2;
-            changes[1].kind                         = Sculptor::ChangeKind::value_changed;
-            changes[1].node_idx                     = volume_param;
-            changes[1].slot_idx                     = Sculptor::param_src_input(1) + 2;
-            const uint32_t count                    = 2;
-            TEST(count == 2);
-            if (count == 2) {
-                for (uint32_t c = 0; c < count; ++c) {
-                    TEST(Sculptor::apply_osc_graph_change(&source, &graph, &mapping, changes[c]));
-                }
-            }
-
-            static Synth::Instrument compiled;
-            TEST(Sculptor::compile_graph_to_instrument(graph, mapping, &compiled));
-            // The wired Volume node serves the layers sharing its generator
-            // tuple (0 and 2); the differing layer-1 tuple derives its own
-            // unwired parameter.
-            TEST(compiled.layers[0].targets[Synth::mod_volume].num_inputs == 2);
-            TEST(compiled.layers[2].targets[Synth::mod_volume].num_inputs == 2);
-            TEST(compiled.layers[1].targets[Synth::mod_volume].num_inputs == 0);
-            TEST(compiled.layers[0].targets[Synth::mod_volume].inputs[0].source == Synth::ModSource::cc);
-            TEST(compiled.layers[0].targets[Synth::mod_volume].inputs[0].cc_number == Synth::cc_msb_base);
-            TEST(compiled.layers[0].targets[Synth::mod_volume].inputs[0].op == Synth::SourceOp::add);
-            TEST(approx(compiled.layers[0].targets[Synth::mod_volume].inputs[0].scale, 0.5f, 0.0001f));
-            TEST(compiled.layers[0].targets[Synth::mod_volume].inputs[1].source == Synth::ModSource::cc);
-            TEST(compiled.layers[0].targets[Synth::mod_volume].inputs[1].cc_number == Synth::cc_msb_base + 1);
-            TEST(compiled.layers[0].targets[Synth::mod_volume].inputs[1].op == Synth::SourceOp::add);
-            TEST(approx(compiled.layers[0].targets[Synth::mod_volume].inputs[1].scale, 0.25f, 0.0001f));
-            TEST(compiled.layers[2].targets[Synth::mod_volume].inputs[0].source == Synth::ModSource::cc);
-            TEST(compiled.layers[2].targets[Synth::mod_volume].inputs[1].cc_number == Synth::cc_msb_base + 1);
-        }
-    }
-
-    // T-M6-3: the round trip.  An instrument carrying an osc cc input
-    // re-projects through project_editor_to_graph with its wire restored
-    // (the projection wires the bindings' cc inputs the standard pass skips,
-    // and the placement is what makes re-projection - not only fresh wiring -
-    // carry CC).  A cc input whose registry bit is absent projects the row
-    // unwired with inert knobs and contributes nothing to the compile; the
-    // bank still carries the input until the user adds the CC.
-    {
-        static Synth::InstrumentEditorBank source;
-        static Synth::Instrument           instrument = {};
-        static Sculptor::Graph             graph;
-        static Sculptor::OscGraphMapping   mapping;
-        static Sculptor::GraphChange       discarded[Sculptor::max_pending_changes];
-
-        build_parameter_fixture(&source, &instrument);
-        Synth::TargetBinding& routing = source.bank.instruments.entries[0].layers[0].targets[Synth::mod_volume];
-        routing.num_inputs            = 1;
-        routing.inputs[0].source      = Synth::ModSource::cc;
-        routing.inputs[0].op          = Synth::SourceOp::add;
-        routing.inputs[0].cc_number   = static_cast<uint8_t>(Synth::cc_msb_base);
-        routing.inputs[0].scale       = 0.5f;
-        fan_out_routing(source.bank.instruments.entries[0]);
-        source.added_cc_mask[0] = 1u << 0;
-        TEST(Sculptor::project_editor_to_graph(source, &graph, &mapping));
-        graph.take_changes(discarded, Sculptor::max_pending_changes);
-
-        const uint32_t volume_param = find_graph_node_by_name(graph, "Volume");
-        TEST(volume_param != Sculptor::pool_no_slot);
-
-        char cc_label[32];
-        Sculptor::fx_cc_pair_label(Synth::cc_msb_base, cc_label, sizeof(cc_label));
-        uint32_t cc_slot = Sculptor::pool_no_slot;
-        TEST(find_graph_slot(graph, mapping.input_node, cc_label, &cc_slot));
-
-        const uint32_t wire = find_osc_graph_connection(graph, { volume_param, Sculptor::param_src_input(0) });
-        TEST(wire != Sculptor::pool_no_slot);
-
-        if (wire != Sculptor::pool_no_slot && cc_slot != Sculptor::pool_no_slot &&
-            volume_param != Sculptor::pool_no_slot) {
-            TEST(graph.get_connection(wire).output.node_idx == mapping.input_node);
-            TEST(graph.get_connection(wire).output.slot_idx == cc_slot);
-
-            static Synth::Instrument compiled;
-            TEST(Sculptor::compile_graph_to_instrument(graph, mapping, &compiled));
-            // Every live layer's binding carries the fanned-out cc input, so
-            // every derived Volume parameter re-lands its wire and compiles
-            // it back onto its served cells.
-            for (uint32_t layer = 0; layer < compiled.layer_count; ++layer) {
-                TEST(compiled.layers[layer].targets[Synth::mod_volume].num_inputs == 1);
-                TEST(compiled.layers[layer].targets[Synth::mod_volume].inputs[0].source == Synth::ModSource::cc);
-                TEST(compiled.layers[layer].targets[Synth::mod_volume].inputs[0].cc_number == Synth::cc_msb_base);
-                TEST(approx(compiled.layers[layer].targets[Synth::mod_volume].inputs[0].scale, 0.5f, 0.0001f));
-            }
-        }
-
-        // The undotted legacy shape: the row stays unwired with inert op
-        // and Amount knobs, the compile drops the input, and the bank keeps
-        // carrying it.  This pins the decode-never-synthesizes-registry-bits
-        // rule (T-M4-9 analogue).
-        build_parameter_fixture(&source, &instrument);
-        Synth::TargetBinding& legacy_routing = source.bank.instruments.entries[0].layers[0].targets[Synth::mod_volume];
-        legacy_routing.num_inputs            = 1;
-        legacy_routing.inputs[0].source      = Synth::ModSource::cc;
-        legacy_routing.inputs[0].op          = Synth::SourceOp::add;
-        legacy_routing.inputs[0].cc_number   = static_cast<uint8_t>(Synth::cc_msb_base);
-        legacy_routing.inputs[0].scale       = 0.5f;
-        fan_out_routing(source.bank.instruments.entries[0]);
-        TEST(Sculptor::project_editor_to_graph(source, &graph, &mapping));
-        graph.take_changes(discarded, Sculptor::max_pending_changes);
-
-        const uint32_t legacy_param = find_graph_node_by_name(graph, "Volume");
-        TEST(legacy_param != Sculptor::pool_no_slot);
-        if (legacy_param != Sculptor::pool_no_slot) {
-            TEST(find_osc_graph_connection(graph, { legacy_param, Sculptor::param_src_input(0) }) ==
-                 Sculptor::pool_no_slot);
-            TEST(graph.slot_edit_disabled(legacy_param, Sculptor::param_src_input(0) + 1));
-            TEST(graph.slot_edit_disabled(legacy_param, Sculptor::param_src_input(0) + 2));
-
-            static Synth::Instrument compiled;
-            TEST(Sculptor::compile_graph_to_instrument(graph, mapping, &compiled));
-            for (uint32_t layer = 0; layer < compiled.layer_count; ++layer) {
-                TEST(compiled.layers[layer].targets[Synth::mod_volume].num_inputs == 0);
-            }
-            TEST(source.bank.instruments.entries[0].layers[0].targets[Synth::mod_volume].inputs[0].source ==
-                 Synth::ModSource::cc);
-        }
-    }
-
-    // T-M6-4: validator refusals.  A CC dot is a source-role output: it
-    // wires into the Source A/B rows only.  LFO depth and rate refuse with
-    // an error message (the runtime resolves cc for parameter routing
-    // inputs only), and an oscillator target row refuses as today.  A
-    // routing cc_number outside 16..31 must project its row unwired
-    // through the projection's bound check without an out-of-bounds read,
-    // even when a dot for another CC exists.
-    {
-        static Synth::InstrumentEditorBank source;
-        static Synth::Instrument           instrument = {};
-        static Sculptor::Graph             graph;
-        static Sculptor::OscGraphMapping   mapping;
-        static Sculptor::GraphChange       discarded[Sculptor::max_pending_changes];
-
-        build_parameter_fixture(&source, &instrument);
-        source.added_cc_mask[0] = 1u << 0;
-        TEST(Sculptor::project_editor_to_graph(source, &graph, &mapping));
-        graph.take_changes(discarded, Sculptor::max_pending_changes);
-
-        const uint32_t volume_param = find_graph_node_by_name(graph, "Volume");
-        TEST(volume_param != Sculptor::pool_no_slot);
-
-        const uint32_t lfo_conn = find_osc_graph_connection(graph, { volume_param, 3 });
-        TEST(lfo_conn != Sculptor::pool_no_slot);
-
-        char cc_label[32];
-        Sculptor::fx_cc_pair_label(Synth::cc_msb_base, cc_label, sizeof(cc_label));
-        uint32_t cc_slot = Sculptor::pool_no_slot;
-        TEST(find_graph_slot(graph, mapping.input_node, cc_label, &cc_slot));
-
-        if (volume_param != Sculptor::pool_no_slot && lfo_conn != Sculptor::pool_no_slot &&
-            cc_slot != Sculptor::pool_no_slot) {
-            const uint32_t           lfo_node = graph.get_connection(lfo_conn).output.node_idx;
-            const Sculptor::EndPoint cc_out   = { mapping.input_node, cc_slot };
-
-            TEST(! Sculptor::osc_graph_validate(&mapping, graph, cc_out, { lfo_node, mapping.lfo_depth_input_slot }));
-            TEST(graph.has_error());
-            graph.dismiss_error();
-            TEST(! Sculptor::osc_graph_validate(&mapping, graph, cc_out, { lfo_node, mapping.lfo_rate_input_slot }));
-            TEST(graph.has_error());
-            graph.dismiss_error();
-            TEST(! Sculptor::osc_graph_validate(&mapping, graph, cc_out, { mapping.osc_nodes[0], 9 }));
-            TEST(Sculptor::osc_graph_validate(&mapping, graph, cc_out, { volume_param, Sculptor::param_src_input(0) }));
-        }
-
-        // Out-of-range cc numbers project unwired: the dot for CC 16
-        // exists, but neither CC 15 nor CC 32 names it, and the projection's
-        // bound check keeps the lookup inside input_cc_slots.
-        for (uint32_t variant = 0; variant < 2; ++variant) {
-            build_parameter_fixture(&source, &instrument);
-            Synth::TargetBinding& routing = source.bank.instruments.entries[0].layers[0].targets[Synth::mod_volume];
-            routing.num_inputs            = 1;
-            routing.inputs[0].source      = Synth::ModSource::cc;
-            routing.inputs[0].op          = Synth::SourceOp::add;
-            routing.inputs[0].cc_number   = variant == 0
-                                                ? static_cast<uint8_t>(Synth::cc_msb_base - 1)
-                                                : static_cast<uint8_t>(Synth::cc_msb_base + Synth::num_assignable_ccs);
-            routing.inputs[0].scale       = 0.5f;
-            fan_out_routing(source.bank.instruments.entries[0]);
-            source.added_cc_mask[0] = 1u << 0;
-            TEST(Sculptor::project_editor_to_graph(source, &graph, &mapping));
-            graph.take_changes(discarded, Sculptor::max_pending_changes);
-
-            const uint32_t rogue_param = find_graph_node_by_name(graph, "Volume");
-            TEST(rogue_param != Sculptor::pool_no_slot);
-            if (rogue_param != Sculptor::pool_no_slot) {
-                TEST(find_osc_graph_connection(graph, { rogue_param, Sculptor::param_src_input(0) }) ==
-                     Sculptor::pool_no_slot);
-            }
-        }
-    }
-
-    // T-M6-5: removal-refusal inputs.  The removal handlers are GUI-only
-    // (sculptor_instr_edit.cpp is not linked into this suite), so the tests
-    // pin the predicates the refusals consult.  The master chain keeps the
-    // fx-chain-only guard: fx_chain_uses_cc is true when the master chain
-    // wires the CC and stays false when only a zone's osc routing wires it,
-    // so the master case never consults channel_zones.  The channel-wide
-    // widened guard (channel_uses_cc over the fx chain OR the zone osc
-    // bindings) is pinned below: it fires for the zone osc wiring and for
-    // the channel's own fx chain, not for master-chain wiring.
-    {
-        static Synth::InstrumentEditorBank source;
-        static Synth::Instrument           instrument = {};
-
-        build_zone_fixture(&source, &instrument);
-        Synth::TargetBinding& routing = source.bank.instruments.entries[0].layers[0].targets[Synth::mod_volume];
-        routing.num_inputs            = 1;
-        routing.inputs[0].source      = Synth::ModSource::cc;
-        routing.inputs[0].op          = Synth::SourceOp::add;
-        routing.inputs[0].cc_number   = Synth::cc_msb_base;
-        routing.inputs[0].scale       = 0.5f;
-        Synth::EffectSlotBinding* const master_slot =
-            enabled_effect(source.bank, Synth::max_channels, 0, Synth::EffectType::delay);
-        master_slot->bindings[0].num_inputs           = 1;
-        master_slot->bindings[0].inputs[0].source     = Synth::ModSource::cc;
-        master_slot->bindings[0].inputs[0].op         = Synth::SourceOp::add;
-        master_slot->bindings[0].inputs[0].cc_number  = static_cast<uint8_t>(Synth::cc_msb_base + 2);
-        master_slot->bindings[0].inputs[0].scale      = 0.5f;
-        Synth::EffectSlotBinding* const channel_slot  = enabled_effect(source.bank, 0, 0, Synth::EffectType::delay);
-        channel_slot->bindings[0].num_inputs          = 1;
-        channel_slot->bindings[0].inputs[0].source    = Synth::ModSource::cc;
-        channel_slot->bindings[0].inputs[0].op        = Synth::SourceOp::add;
-        channel_slot->bindings[0].inputs[0].cc_number = static_cast<uint8_t>(Synth::cc_msb_base + 1);
-        channel_slot->bindings[0].inputs[0].scale     = 0.5f;
-
-        TEST(Sculptor::fx_chain_uses_cc(source.bank.master_chain, Synth::cc_msb_base + 2));
-        TEST(! Sculptor::fx_chain_uses_cc(source.bank.master_chain, Synth::cc_msb_base));
-        TEST(! Sculptor::fx_chain_uses_cc(source.bank.channel_chains[0], Synth::cc_msb_base));
-
-        // The channel-wide widened guard: the zone osc binding, the
-        // channel's own fx chain, no master-chain leak, no out-of-range hit.
-        TEST(Sculptor::channel_uses_cc(source, 0, Synth::cc_msb_base));
-        TEST(Sculptor::channel_uses_cc(source, 0, Synth::cc_msb_base + 1));
-        TEST(! Sculptor::channel_uses_cc(source, 0, Synth::cc_msb_base + 2));
-        TEST(! Sculptor::channel_uses_cc(source, 0, Synth::cc_msb_base + 3));
-        TEST(! Sculptor::channel_uses_cc(source, 0, 0));
-        TEST(! Sculptor::channel_uses_cc(source, Synth::max_channels, Synth::cc_msb_base));
-
-        // An empty zone slot's instrument byte is meaningless: a channel
-        // with no zones must not alias instrument 0's wiring.
-        TEST(! Sculptor::channel_uses_cc(source, 1, Synth::cc_msb_base));
-    }
-
-    // T-M6-6: persistence.  An osc cc routing input rides the existing
-    // per-layer sources arrays: the bank encoder already spells cc, so
-    // bank validation is the decode-time admission gate; once admitted,
-    // encode/decode is byte-identical.  Decode refuses a cc_number outside
-    // 16..31 and a non-cc input carrying a stale cc_number; a legacy bank
-    // without osc cc decodes unchanged.
-    {
-        static Synth::InstrumentEditorBank source;
-        static Synth::Instrument           instrument = {};
-        static Synth::InstrumentEditorBank decoded;
-        static char                        payload[Synth::library_payload_max];
-        static char                        reencoded[Synth::library_payload_max];
-        static char                        patched[Synth::library_payload_max];
-
-        build_zone_fixture(&source, &instrument);
-        Synth::TargetBinding& routing = source.bank.instruments.entries[0].layers[0].targets[Synth::mod_volume];
-        routing.num_inputs            = 1;
-        routing.inputs[0].source      = Synth::ModSource::cc;
-        routing.inputs[0].op          = Synth::SourceOp::add;
-        routing.inputs[0].cc_number   = static_cast<uint8_t>(Synth::cc_msb_base);
-        routing.inputs[0].scale       = 0.5f;
-
-        const uint32_t encoded_len = Synth::encode_editor_bank_json(&source, payload, sizeof(payload));
-        TEST(encoded_len > 0);
-        if (encoded_len > 0) {
-            TEST(Synth::decode_editor_bank_json(payload, encoded_len, &decoded));
-            TEST(decoded.bank.instruments.entries[0].layers[0].targets[Synth::mod_volume].inputs[0].source ==
-                 Synth::ModSource::cc);
-            TEST(decoded.bank.instruments.entries[0].layers[0].targets[Synth::mod_volume].inputs[0].cc_number ==
-                 Synth::cc_msb_base);
-            const uint32_t again_len = Synth::encode_editor_bank_json(&decoded, reencoded, sizeof(reencoded));
-            TEST(again_len == encoded_len);
-            TEST(memcmp(payload, reencoded, encoded_len) == 0);
-        }
-
-        // Decode refusals, shaped by splicing the compact encoder output:
-        // the fixture's single velocity input is the only source spelling
-        // in the document, so the needle is unique by construction.
-        build_zone_fixture(&source, &instrument);
-        const uint32_t clean_len = Synth::encode_editor_bank_json(&source, payload, sizeof(payload));
-        TEST(clean_len > 0);
-        if (clean_len > 0) {
-            uint32_t    velocity_count = 0;
-            const char* scan           = payload;
-            while ((scan = strstr(scan, "\"source\":\"velocity\"")) != nullptr) {
-                velocity_count++;
-                scan++;
-            }
-            TEST(velocity_count == 1);
-
-            const uint32_t low_len = splice_single_occurrence(payload,
-                                                              clean_len,
-                                                              "\"source\":\"velocity\"",
-                                                              "\"source\":\"cc\",\"cc_number\":15",
-                                                              patched,
-                                                              sizeof(patched));
-            TEST(low_len > 0);
-            if (low_len > 0) {
-                TEST(! Synth::decode_editor_bank_json(patched, low_len, &decoded));
-            }
-
-            const uint32_t high_len = splice_single_occurrence(payload,
-                                                               clean_len,
-                                                               "\"source\":\"velocity\"",
-                                                               "\"source\":\"cc\",\"cc_number\":32",
-                                                               patched,
-                                                               sizeof(patched));
-            TEST(high_len > 0);
-            if (high_len > 0) {
-                TEST(! Synth::decode_editor_bank_json(patched, high_len, &decoded));
-            }
-
-            const uint32_t stale_len = splice_single_occurrence(payload,
-                                                                clean_len,
-                                                                "\"source\":\"velocity\"",
-                                                                "\"source\":\"velocity\",\"cc_number\":17",
-                                                                patched,
-                                                                sizeof(patched));
-            TEST(stale_len > 0);
-            if (stale_len > 0) {
-                TEST(! Synth::decode_editor_bank_json(patched, stale_len, &decoded));
-            }
-        }
-
-        // A legacy bank without osc cc decodes unchanged.
-        build_zone_fixture(&source, &instrument);
-        const uint32_t legacy_len = Synth::encode_editor_bank_json(&source, payload, sizeof(payload));
-        TEST(legacy_len > 0);
-        if (legacy_len > 0) {
-            TEST(Synth::decode_editor_bank_json(payload, legacy_len, &decoded));
-            TEST(decoded.bank.instruments.entries[0].layers[0].targets[Synth::mod_volume].inputs[0].source ==
-                 Synth::ModSource::velocity);
-            TEST(decoded.bank.instruments.entries[0].layers[0].targets[Synth::mod_volume].inputs[0].cc_number == 0);
-        }
-    }
-
-    // T-M6-7: adoption.  A library record and a clipboard zone whose
-    // instrument wires osc CC 16 OR the wired bit into the destination
-    // channel's registry mask; a pre-existing destination bit survives and
-    // a repeated load adds nothing.
-    {
-        static Synth::InstrumentEditorBank source;
-        static Synth::Instrument           instrument = {};
-        static Synth::InstrumentEditorBank destination;
-        static ClipboardDecode             decoded;
-        static char                        text[clipboard_capacity];
-
-        build_zone_fixture(&source, &instrument);
-        Synth::TargetBinding& routing = source.bank.instruments.entries[0].layers[0].targets[Synth::mod_volume];
-        routing.num_inputs            = 1;
-        routing.inputs[0].source      = Synth::ModSource::cc;
-        routing.inputs[0].op          = Synth::SourceOp::add;
-        routing.inputs[0].cc_number   = static_cast<uint8_t>(Synth::cc_msb_base);
-        routing.inputs[0].scale       = 0.5f;
-
-        const char* const path = "synth_osc_cc_adoption.tmp";
-        remove(path);
-        const int saved = Synth::save_library_record(path, "Regression", "CC Osc", &source, 0);
-        TEST(saved == 0);
-        if (saved == 0) {
-            Synth::LibraryEntry entry;
-            TEST(Synth::read_library_index(path, &entry, 1) == 1);
-
-            destination                  = source;
-            destination.added_cc_mask[2] = 1u << 3;
-            uint16_t output_slot         = 0;
-            TEST(Synth::load_library_instrument(path, &entry, &destination, 2, &output_slot));
-            TEST(destination.added_cc_mask[2] == ((1u << 0) | (1u << 3)));
-
-            // A repeated load is idempotent: the same bit ORs to itself.
-            TEST(Synth::load_library_instrument(path, &entry, &destination, 2, &output_slot));
-            TEST(destination.added_cc_mask[2] == ((1u << 0) | (1u << 3)));
-        }
-        remove(path);
-
-        // Zone paste adopts the same bit into the receiving channel.
-        const bool exported = export_clipboard_fixture(source, text, sizeof(text));
-        TEST(exported);
-        if (exported && decode_clipboard(&decoded, text, max_portable_records)) {
-            static Synth::InstrumentEditorBank paste_destination;
-            static Synth::Instrument           occupied;
-            static Synth::InstrumentEditorBank candidate;
-
-            build_clipboard_zone_fixture(&paste_destination, &occupied);
-            paste_destination.bank.channel_enabled[2]             = 1;
-            paste_destination.bank.channel_zones[2][0].start_note = 1;
-            paste_destination.bank.channel_zones[2][0].instrument = 0;
-            paste_destination.added_cc_mask[2]                    = 1u << 3;
-
-            const bool replaced = Sculptor::replace_zone_instrument_candidate(paste_destination,
-                                                                              2,
-                                                                              0,
-                                                                              decoded.instr,
-                                                                              decoded.envs,
-                                                                              decoded.env_count,
-                                                                              decoded.lfos,
-                                                                              decoded.lfo_count,
-                                                                              decoded.layout,
-                                                                              decoded.layout_count,
-                                                                              &candidate);
-            TEST(replaced);
-            if (replaced) {
-                TEST(candidate.added_cc_mask[2] == ((1u << 0) | (1u << 3)));
-            }
-        }
-    }
-
-    // T-M6-8: end-to-end runtime seam.  A bank whose layer-0 volume binding
-    // carries a cc input modulates through the production data path: the
-    // validate preflight admits the 16..31 cc_number (the rule that keeps
-    // resolve_source's slot assert in realtime_synth.cpp unreachable),
-    // apply_channel_cc drives the channel's CC leaf exactly the way
-    // process_controller writes it, and the binding's inputs configure the
-    // volume dest whose value propagate_parameters folds.
-    // configure_target_modulation and resolve_source are static in
-    // realtime_synth.cpp and not linked here, so the block below is the
-    // production-shape replica of their cc case, built only from exported
-    // primitives and constants and mirroring realtime_synth.cpp:1039-1171.
-    {
-        static Synth::InstrumentBank runtime_bank;
-        memset(&runtime_bank, 0, sizeof(runtime_bank));
-
-        const uint32_t instr_slot = runtime_bank.instruments.allocate();
-        TEST(instr_slot == 0);
-        if (instr_slot == 0) {
-            Synth::Instrument&    cc_instr              = runtime_bank.instruments.entries[instr_slot];
-            Synth::TargetBinding& cc_volume             = cc_instr.layers[0].targets[Synth::mod_volume];
-            cc_instr.layer_count                        = 1;
-            cc_instr.layers[0].osc_type[0]              = Synth::WaveType::sine_wave;
-            cc_volume.base_value                        = 0.8f;
-            cc_volume.num_inputs                        = 1;
-            cc_volume.inputs[0].source                  = Synth::ModSource::cc;
-            cc_volume.inputs[0].op                      = Synth::SourceOp::add;
-            cc_volume.inputs[0].cc_number               = static_cast<uint8_t>(Synth::cc_msb_base);
-            cc_volume.inputs[0].scale                   = 0.5f;
-            runtime_bank.channel_zones[0][0].start_note = 1;
-            runtime_bank.channel_zones[0][0].instrument = static_cast<uint8_t>(instr_slot);
-            runtime_bank.channel_enabled[0]             = 1;
-
-            TEST(Synth::validate_instrument_bank(&runtime_bank));
-
-            // Leaf ids mirror the runtime layout: the sentinel occupies id 0
-            // and the channel CC leaves start at 1, one per assignable slot
-            // (channel_param(channel, chan_param_cc_0 + slot)).
-            constexpr uint32_t            cc_leaf_base          = 1;
-            constexpr uint32_t            replica_count         = cc_leaf_base + Synth::num_assignable_ccs + 1;
-            static Synth::ParamDescriptor descs[replica_count]  = {};
-            static Synth::Parameter       params[replica_count] = {};
-            memset(descs, 0, sizeof(descs));
-            memset(params, 0, sizeof(params));
-
-            static Synth::ChannelCcState cc_state;
-            memset(&cc_state, 0, sizeof(cc_state));
-
-            const Synth::TargetBinding& volume_binding =
-                runtime_bank.instruments.entries[instr_slot].layers[0].targets[Synth::mod_volume];
-            Synth::SourceParam sources[Synth::max_mod_inputs] = {};
-            uint32_t           num_sources                    = 0;
-            for (uint32_t i = 0; i < volume_binding.num_inputs && i < Synth::max_mod_inputs; ++i) {
-                const Synth::ModInput& input = volume_binding.inputs[i];
-                TEST(input.source == Synth::ModSource::cc);
-                TEST(Synth::cc_is_assignable(input.cc_number));
-                sources[num_sources].param_id =
-                    static_cast<uint16_t>(cc_leaf_base + (input.cc_number - Synth::cc_msb_base));
-                sources[num_sources].scale = input.scale;
-                sources[num_sources].op    = input.op;
-                num_sources++;
-            }
-            Synth::configure_plain(&descs[cc_leaf_base + Synth::num_assignable_ccs],
-                                   volume_binding.base_value,
-                                   0,
-                                   0,
-                                   Synth::SourceOp::add,
-                                   sources,
-                                   num_sources);
-
-            const uint32_t cc_leaf     = cc_leaf_base + 0;
-            const uint32_t volume_dest = cc_leaf_base + Synth::num_assignable_ccs;
-
-            // Stage one: CC 16 at zero keeps the volume at its base value.
-            const float closed = Synth::apply_channel_cc(&cc_state, Synth::cc_msb_base, 0);
-            TEST(approx(closed, 0.0f, 0.0001f));
-            Synth::write_external_leaf(closed,
-                                       Synth::ExternalLeaf{ &params[cc_leaf].value, &params[cc_leaf].prev_value });
-            Synth::propagate_parameters(params, descs, replica_count);
-            TEST(approx(params[volume_dest].value, 0.8f, 0.001f));
-
-            // Stage two: CC 16 at full deflection moves the volume.  The
-            // zero-initialized channel state carries lsb 0 (the 0xFF
-            // not-yet-seen sentinel exists only in freshly constructed
-            // production state), so the 14-bit value is cc_14bit_value(127, 0).
-            const float open = Synth::apply_channel_cc(&cc_state, Synth::cc_msb_base, 127);
-            TEST(approx(open, Synth::cc_14bit_value(127, 0), 0.0001f));
-            Synth::write_external_leaf(open,
-                                       Synth::ExternalLeaf{ &params[cc_leaf].value, &params[cc_leaf].prev_value });
-            Synth::propagate_parameters(params, descs, replica_count);
-            TEST(approx(params[volume_dest].value, 0.8f + 0.5f * Synth::cc_14bit_value(127, 0), 0.001f));
-        }
-    }
-
-    // T-M6-9: a target LFO cc source fails decode - LFO depth/rate sources
-    // carry no cc_number, so bank validation refuses cc there.
-    {
-        static Synth::InstrumentEditorBank source;
-        static Synth::Instrument           instrument = {};
-        static Synth::InstrumentEditorBank decoded;
-        static char                        payload[Synth::library_payload_max];
-        static char                        patched[Synth::library_payload_max];
-
-        build_zone_fixture(&source, &instrument);
-        source.bank.instruments.entries[0].layers[0].targets[Synth::mod_volume].lfo_depth_source =
-            Synth::ModSource::velocity;
-
-        const uint32_t clean_len = Synth::encode_editor_bank_json(&source, payload, sizeof(payload));
-        TEST(clean_len > 0);
-        if (clean_len > 0) {
-            TEST(Synth::decode_editor_bank_json(payload, clean_len, &decoded));
-
-            // The volume binding is the document's only lfo with a
-            // depth_source spelling, so the needle is unique by construction.
-            // (The bank format spells generator sources as lfo_depth_source.)
-            uint32_t    depth_source_count = 0;
-            const char* scan               = payload;
-            while ((scan = strstr(scan, "\"lfo_depth_source\":\"velocity\"")) != nullptr) {
-                depth_source_count++;
-                scan++;
-            }
-            TEST(depth_source_count == 1);
-
-            const uint32_t spliced_len = splice_single_occurrence(payload,
-                                                                  clean_len,
-                                                                  "\"lfo_depth_source\":\"velocity\"",
-                                                                  "\"lfo_depth_source\":\"cc\"",
-                                                                  patched,
-                                                                  sizeof(patched));
-            TEST(spliced_len > 0);
-            if (spliced_len > 0) {
-                TEST(! Synth::decode_editor_bank_json(patched, spliced_len, &decoded));
-            }
-        }
-    }
-}
-
 // T-M6-10: the editor's move commit persists a moved bound node as a kind-0
 // canonical-index record; adding a CC afterwards re-projects the graph, and
 // the moved position must survive that re-projection.
@@ -6725,6 +5518,1752 @@ static void osc_inherit_source_regressions()
     TEST(graph.node(mapping.osc_nodes[3]).slots.entries[wave_b_slot].value.list_index == 3);
 }
 
+// Direct per-connection modulator rows: every oscillator node keeps its
+// 15 fixed slots and adds one 11-slot block per ModTarget directly after
+// its value row (block_base(t) = osc_target_row_slot[t] + 1); field 0 is
+// the env dot, 1 the LFO dot, 2 the LFO op, 3 the LFO depth, 4 the rate
+// scale, 5 and 8 the source dots, 6/7 and 9/10 the op/amount widgets;
+// row groups are 3*t+1..3 and the env dot owns its line. Row visibility
+// is the live predicate osc_target_field_hidden(graph, node, target, field).
+
+// Index of the first projected detached generator matching (kind, desc_id),
+// or -1.  kind is 1 = envelope, 2 = LFO; desc_id is the 1-based pool id.
+static int32_t find_detached_by_desc(const Sculptor::OscGraphMapping& mapping, uint32_t kind, uint32_t desc_id)
+{
+    for (uint32_t i = 0; i < mapping.detached_count; i++) {
+        if (mapping.detached[i].kind == kind && mapping.detached[i].desc_id == desc_id &&
+            mapping.detached[i].node_idx != Sculptor::pool_no_slot) {
+            return static_cast<int32_t>(i);
+        }
+    }
+    return -1;
+}
+
+// One layer whose nine targets each bind an envelope, an LFO and two MIDI
+// inputs.  Volume keeps a volume-shaped descriptor (id 1); the other eight
+// targets share one non-volume descriptor (id 2).  One LFO descriptor (id 1)
+// serves every cell, so the projection derives exactly three generator
+// instances and no parameter nodes.
+static void build_full_block_fixture(Synth::InstrumentBank* bank, Synth::Instrument* instrument)
+{
+    memset(bank, 0, sizeof(*bank));
+    *instrument = {};
+    TEST(bank->envelopes.allocate() == 0);
+    TEST(bank->envelopes.allocate() == 1);
+    Synth::EnvelopeDescriptor& vol_env   = bank->envelopes.entries[0];
+    vol_env.num_points                   = 2;
+    vol_env.sustain_first_point          = 0;
+    vol_env.sustain_last_point           = 1;
+    vol_env.min_value                    = 0.0f;
+    vol_env.min_max_delta                = 1.0f / 65535.0f;
+    vol_env.points[0]                    = { 0, 0 };
+    vol_env.points[1]                    = { 100, 0xFFFF };
+    bank->envelopes.entries[1]           = vol_env;
+    bank->envelopes.entries[1].min_value = -0.5f; // non-volume shape
+    TEST(bank->lfos.allocate() == 0);
+    Synth::LFODescriptor& lfo = bank->lfos.entries[0];
+    lfo.wave                  = Synth::WaveType::sine_wave;
+    lfo.period_ms             = 250;
+    lfo.min_value             = -1.0f;
+    lfo.min_max_delta         = 2.0f;
+
+    instrument->layer_count           = 1;
+    instrument->layers[0].osc_type[0] = Synth::WaveType::sawtooth_wave;
+    for (uint32_t t = 0; t < Synth::num_mod_targets; t++) {
+        Synth::TargetBinding& gen = instrument->layers[0].targets[t];
+        gen.envelope_desc_id      = t == Synth::mod_volume ? 1 : 2;
+        gen.lfo_desc_id           = 1;
+        gen.lfo_op                = (t % 2) != 0 ? Synth::SourceOp::multiply : Synth::SourceOp::add;
+        gen.lfo_depth             = 0.25f * static_cast<float>(t + 1);
+        gen.lfo_rate_scale_ms     = 10.0f * static_cast<float>(t + 1);
+        gen.num_inputs            = 2;
+        gen.inputs[0].source      = Synth::ModSource::velocity;
+        gen.inputs[0].op          = Synth::SourceOp::add;
+        gen.inputs[0].scale       = 0.5f * static_cast<float>(t + 1);
+        gen.inputs[1].source      = Synth::ModSource::mod_wheel;
+        gen.inputs[1].op          = Synth::SourceOp::multiply;
+        gen.inputs[1].scale       = -0.25f * static_cast<float>(t + 1);
+    }
+}
+
+// Checks one target block's dot/field grammar and its seeded values against
+// the binding that produced it: the envelope row is the dot only, the LFO
+// row carries op + depth + rate scale, and the source rows carry op + scale.
+static void check_target_block_grammar(const Sculptor::Node& osc, uint32_t target, const Synth::TargetBinding& gen)
+{
+    const uint32_t base = Sculptor::osc_target_block_base(target);
+    TEST(Sculptor::osc_target_row(target) == t7_target_row_slots[target]);
+    TEST(base == t7_target_row_slots[target] + 1); // the block follows its row
+    TEST(osc.slots.entries[base - 1].connectable); // the row slot itself
+    TEST(Sculptor::osc_target_env_dot(target) == base + 0);
+    TEST(Sculptor::osc_target_lfo_dot(target) == base + 1);
+    TEST(Sculptor::osc_target_src_dot(target, 0) == base + 5);
+    TEST(Sculptor::osc_target_src_dot(target, 1) == base + 8);
+
+    const Sculptor::Slot& env_dot = osc.slots.entries[base];
+    TEST(env_dot.kind == Sculptor::SlotKind::input);
+    TEST(strncmp(env_dot.name, "Envelope", sizeof(env_dot.name)) == 0);
+    TEST(env_dot.row_group == 0); // the env dot owns its line
+
+    const Sculptor::Slot& lfo_dot = osc.slots.entries[base + 1];
+    TEST(lfo_dot.kind == Sculptor::SlotKind::input);
+    TEST(strncmp(lfo_dot.name, "LFO", sizeof(lfo_dot.name)) == 0);
+    const uint8_t lfo_group = static_cast<uint8_t>(3 * target + 1);
+    TEST(strncmp(osc.slots.entries[base + t7_lfo_op_field].name,
+                 "Op",
+                 sizeof(osc.slots.entries[base + t7_lfo_op_field].name)) == 0);
+    TEST(osc.slots.entries[base + t7_lfo_op_field].property_type == Sculptor::PropertyType::list);
+    TEST(osc.slots.entries[base + t7_lfo_op_field].num_list_options == 2);
+    TEST(strncmp(osc.slots.entries[base + t7_lfo_depth_field].name,
+                 "Depth",
+                 sizeof(osc.slots.entries[base + t7_lfo_depth_field].name)) == 0);
+    TEST(strncmp(osc.slots.entries[base + t7_rate_field].name,
+                 "Rate x",
+                 sizeof(osc.slots.entries[base + t7_rate_field].name)) == 0);
+    for (uint32_t f = 1; f <= 4; f++) {
+        TEST(osc.slots.entries[base + f].row_group == lfo_group);
+    }
+    TEST(osc.slots.entries[base + t7_lfo_op_field].value.list_index == static_cast<uint32_t>(gen.lfo_op));
+    TEST(approx(osc.slots.entries[base + t7_lfo_depth_field].value.real, gen.lfo_depth, 1.0e-6f));
+    TEST(approx(osc.slots.entries[base + t7_rate_field].value.real, gen.lfo_rate_scale_ms, 1.0e-4f));
+
+    for (uint32_t i = 0; i < Synth::max_mod_inputs; i++) {
+        const uint32_t        dot     = Sculptor::osc_target_src_dot(target, i);
+        const Sculptor::Slot& src_dot = osc.slots.entries[dot];
+        TEST(src_dot.kind == Sculptor::SlotKind::input);
+        TEST(strncmp(src_dot.name, i == 0 ? "Source A" : "Source B", sizeof(src_dot.name)) == 0);
+        const uint8_t src_group = static_cast<uint8_t>(3 * target + 2 + i);
+        for (uint32_t f = 0; f <= 2; f++) {
+            TEST(osc.slots.entries[dot + f].row_group == src_group);
+        }
+        const Sculptor::Slot& op = osc.slots.entries[dot + 1];
+        TEST(op.property_type == Sculptor::PropertyType::list);
+        TEST(op.num_list_options == 2);
+        TEST(op.value.list_index == static_cast<uint32_t>(gen.inputs[i].op));
+        const Sculptor::Slot& scale = osc.slots.entries[dot + 2];
+        TEST(strncmp(scale.name, "Amount", sizeof(scale.name)) == 0);
+        TEST(approx(scale.value.real, gen.inputs[i].scale, 1.0e-6f));
+    }
+}
+
+// T-M7-4 (O1): no parameter node is ever projected. No node keeps the
+// 13-slot parameter grammar.
+static void check_no_param_nodes(const Sculptor::Graph& graph)
+{
+    for (uint32_t i = 0; i < Sculptor::max_nodes; i++) {
+        if (! graph.node_occupied(i)) {
+            continue;
+        }
+        TEST(graph.node(i).slots.num_allocated != 13);
+    }
+}
+
+// One editor-bank projection of the small fixture, drained; false skips the
+// caller's block.
+static bool begin_small_graph(Synth::InstrumentEditorBank* bank,
+                              Sculptor::Graph*             graph,
+                              Sculptor::OscGraphMapping*   mapping)
+{
+    static Synth::Instrument instrument;
+    build_zone_fixture(bank, &instrument);
+    if (! Sculptor::project_editor_to_graph(*bank, graph, mapping)) {
+        return false;
+    }
+    Sculptor::GraphChange discard[8] = {};
+    (void)graph->take_changes(discard, 8);
+    return true;
+}
+
+static void osc_direct_modulator_regressions()
+{
+    static Sculptor::GraphChange discarded[Sculptor::max_pending_changes];
+
+    // T-M7-1 (O4/O9): the per-target block grammar on one oscillator with
+    // all nine targets fully bound; every family row carries its seeded
+    // binding values, and the C5 waveform/mode guard keeps working on the
+    // widened node.
+    {
+        static Synth::InstrumentBank bank;
+        static Synth::Instrument     instrument;
+        build_full_block_fixture(&bank, &instrument);
+        static Sculptor::Graph           graph;
+        static Sculptor::OscGraphMapping mapping;
+        TEST(Sculptor::project_instrument_to_graph(instrument, bank, &graph, &mapping));
+        check_no_param_nodes(graph);
+        TEST(mapping.osc_nodes[0] != Sculptor::pool_no_slot);
+        if (mapping.osc_nodes[0] != Sculptor::pool_no_slot) {
+            const Sculptor::Node& osc = graph.node(mapping.osc_nodes[0]);
+            // 15 fixed slots plus nine 11-slot target blocks.
+            TEST(osc.slots.num_allocated == 15 + 11 * Synth::num_mod_targets);
+            for (uint32_t t = 0; t < Synth::num_mod_targets; t++) {
+                check_target_block_grammar(osc, t, instrument.layers[0].targets[t]);
+            }
+            // C5 regression: the waveform/mode guard must not early-out on
+            // the widened slot count. Wave B starts off and the mode starts
+            // on blend, so the duty b / mix mode / waveform mix / fm depth / fm
+            // ratio rows are disabled and nothing else is.
+            const uint32_t wave_b_slot    = 14; // waveform b, layout contract
+            const uint32_t mode_slot      = 27; // mix mode, layout contract
+            const uint32_t fm_depth_slot  = Sculptor::osc_target_row(Synth::mod_fm_index);
+            const uint32_t fm_ratio_slot  = 52; // fm ratio, layout contract
+            const uint32_t gated_slots[5] = { Sculptor::osc_target_row(Synth::mod_duty1),
+                                              mode_slot,
+                                              Sculptor::osc_target_row(Synth::mod_osc_mix),
+                                              fm_depth_slot,
+                                              fm_ratio_slot };
+            for (uint32_t g = 0; g < 5; g++) {
+                TEST(Sculptor::oscillator_slot_waveform_mode_disabled(osc, gated_slots[g]));
+            }
+            TEST(! Sculptor::oscillator_slot_waveform_mode_disabled(osc, 1));
+            TEST(! Sculptor::oscillator_slot_waveform_mode_disabled(osc, Sculptor::osc_target_row(Synth::mod_volume)));
+            // Wave B on and FM mode: the guard rules that no longer apply
+            // release their rows.
+            Sculptor::PropertyValue selection = {};
+            selection.list_index              = 1;
+            graph.set_slot_value(mapping.osc_nodes[0], wave_b_slot, selection); // Waveform B
+            selection.list_index = 1;
+            graph.set_slot_value(mapping.osc_nodes[0], mode_slot, selection); // Mix Mode: FM
+            for (uint32_t g = 0; g < 5; g++) {
+                TEST(! Sculptor::oscillator_slot_waveform_mode_disabled(osc, gated_slots[g]));
+            }
+            selection.list_index = 0;
+            graph.set_slot_value(mapping.osc_nodes[0], mode_slot, selection); // blend again
+            TEST(Sculptor::oscillator_slot_waveform_mode_disabled(osc, fm_depth_slot));
+            TEST(Sculptor::oscillator_slot_waveform_mode_disabled(osc, fm_ratio_slot));
+            TEST(! Sculptor::oscillator_slot_waveform_mode_disabled(osc, 4));
+        }
+    }
+
+    // T-M7-2 (O2/O3, C2/C3): wires dropped on base target rows commit onto
+    // their family's dot in the dropped-on target's block; the compiled
+    // bindings carry the connected generators; re-projection reproduces the
+    // family wiring; the relocation is eventless (second drain empty).
+    {
+        static Synth::InstrumentEditorBank source;
+        static Synth::InstrumentEditorBank candidate;
+        if (begin_small_graph(&source, &t7_graph, &t7_mapping)) {
+            // A CC dot for the fourth family.
+            source.added_cc_mask[0] = 1u << 0;
+            TEST(Sculptor::project_editor_to_graph(source, &t7_graph, &t7_mapping));
+            (void)t7_graph.take_changes(discarded, Sculptor::max_pending_changes);
+
+            const int32_t env_inst = find_detached_by_desc(t7_mapping, 1, 1); // pitch env, non-volume
+            const int32_t lfo_inst = find_detached_by_desc(t7_mapping, 2, 1);
+            TEST(env_inst >= 0 && lfo_inst >= 0);
+            if (env_inst >= 0 && lfo_inst >= 0) {
+                const Sculptor::EndPoint env_out      = { t7_mapping.detached[env_inst].node_idx,
+                                                          t7_mapping.env_output_slot };
+                const Sculptor::EndPoint lfo_out      = { t7_mapping.detached[lfo_inst].node_idx,
+                                                          t7_mapping.lfo_output_slot };
+                const uint32_t           velocity_idx = static_cast<uint32_t>(Synth::ModSource::velocity) - 1;
+                const Sculptor::EndPoint velocity_out = { t7_mapping.input_node,
+                                                          t7_mapping.input_source_slots[velocity_idx] };
+                char                     cc_label[32];
+                Sculptor::fx_cc_pair_label(Synth::cc_msb_base, cc_label, sizeof(cc_label));
+                uint32_t cc_slot = Sculptor::pool_no_slot;
+                TEST(find_graph_slot(t7_graph, t7_mapping.input_node, cc_label, &cc_slot));
+                const Sculptor::EndPoint cc_out       = { t7_mapping.input_node, cc_slot };
+                const uint32_t           osc          = t7_mapping.osc_nodes[0];
+                const Sculptor::EndPoint lowpass_row  = { osc, Sculptor::osc_target_row(Synth::mod_lowpass_cutoff) };
+                const Sculptor::EndPoint highpass_row = { osc, Sculptor::osc_target_row(Synth::mod_highpass_cutoff) };
+                const Sculptor::EndPoint panning_row  = { osc, Sculptor::osc_target_row(Synth::mod_panning) };
+                const Sculptor::EndPoint duty0_row    = { osc, Sculptor::osc_target_row(Synth::mod_duty0) };
+
+                // The validator admits every family onto its base row.
+                TEST(Sculptor::osc_graph_validate(&t7_mapping, t7_graph, env_out, lowpass_row));
+                TEST(Sculptor::osc_graph_validate(&t7_mapping, t7_graph, lfo_out, highpass_row));
+                TEST(Sculptor::osc_graph_validate(&t7_mapping, t7_graph, velocity_out, panning_row));
+                TEST(Sculptor::osc_graph_validate(&t7_mapping, t7_graph, cc_out, duty0_row));
+
+                TEST(t7_graph.add_connection(env_out, lowpass_row) != Sculptor::pool_no_slot);
+                TEST(t7_graph.add_connection(lfo_out, highpass_row) != Sculptor::pool_no_slot);
+                TEST(t7_graph.add_connection(velocity_out, panning_row) != Sculptor::pool_no_slot);
+                TEST(t7_graph.add_connection(cc_out, duty0_row) != Sculptor::pool_no_slot);
+                Sculptor::GraphChange changes[8] = {};
+                const uint32_t        count      = t7_graph.take_changes(changes, 8);
+                TEST(count == 4);
+                candidate = source;
+                for (uint32_t i = 0; i < count; i++) {
+                    TEST(Sculptor::apply_osc_graph_change(&candidate, &t7_graph, &t7_mapping, changes[i]));
+                }
+                // C3: the relocation rewrites endpoints eventlessly, so a
+                // second drain is empty and no deferred base-row delete can
+                // trip a refusal.
+                TEST(t7_graph.take_changes(changes, 8) == 0);
+
+                // Every wire re-landed on its family dot; no wire stays on
+                // a base row.
+                TEST(find_osc_graph_connection(t7_graph,
+                                               { osc, Sculptor::osc_target_env_dot(Synth::mod_lowpass_cutoff) }) !=
+                     Sculptor::pool_no_slot);
+                TEST(find_osc_graph_connection(t7_graph,
+                                               { osc, Sculptor::osc_target_lfo_dot(Synth::mod_highpass_cutoff) }) !=
+                     Sculptor::pool_no_slot);
+                TEST(
+                    find_osc_graph_connection(t7_graph, { osc, Sculptor::osc_target_src_dot(Synth::mod_panning, 0) }) !=
+                    Sculptor::pool_no_slot);
+                TEST(find_osc_graph_connection(t7_graph, { osc, Sculptor::osc_target_src_dot(Synth::mod_duty0, 0) }) !=
+                     Sculptor::pool_no_slot);
+                TEST(find_osc_graph_connection(t7_graph, lowpass_row) == Sculptor::pool_no_slot);
+                TEST(find_osc_graph_connection(t7_graph, highpass_row) == Sculptor::pool_no_slot);
+                TEST(find_osc_graph_connection(t7_graph, panning_row) == Sculptor::pool_no_slot);
+                TEST(find_osc_graph_connection(t7_graph, duty0_row) == Sculptor::pool_no_slot);
+
+                // The compiled bindings carry the connected generators and
+                // the seeded neutral row values.
+                static Synth::Instrument compiled;
+                TEST(Sculptor::compile_graph_to_instrument(t7_graph, t7_mapping, &compiled));
+                TEST(compiled.layers[0].targets[Synth::mod_lowpass_cutoff].envelope_desc_id == 1);
+                TEST(compiled.layers[0].targets[Synth::mod_highpass_cutoff].lfo_desc_id == 1);
+                TEST(compiled.layers[0].targets[Synth::mod_highpass_cutoff].lfo_op == Synth::SourceOp::add);
+                TEST(approx(compiled.layers[0].targets[Synth::mod_highpass_cutoff].lfo_depth, 0.5f, 1.0e-6f));
+                TEST(compiled.layers[0].targets[Synth::mod_highpass_cutoff].lfo_depth_source == Synth::ModSource::none);
+                TEST(compiled.layers[0].targets[Synth::mod_highpass_cutoff].lfo_rate_source == Synth::ModSource::none);
+                TEST(approx(compiled.layers[0].targets[Synth::mod_highpass_cutoff].lfo_rate_scale_ms, 0.0f, 1.0e-6f));
+                TEST(compiled.layers[0].targets[Synth::mod_panning].num_inputs == 1);
+                TEST(compiled.layers[0].targets[Synth::mod_panning].inputs[0].source == Synth::ModSource::velocity);
+                TEST(compiled.layers[0].targets[Synth::mod_panning].inputs[0].op == Synth::SourceOp::add);
+                TEST(approx(compiled.layers[0].targets[Synth::mod_panning].inputs[0].scale, 1.0f, 1.0e-6f));
+                TEST(compiled.layers[0].targets[Synth::mod_duty0].num_inputs == 1);
+                TEST(compiled.layers[0].targets[Synth::mod_duty0].inputs[0].source == Synth::ModSource::cc);
+                TEST(compiled.layers[0].targets[Synth::mod_duty0].inputs[0].cc_number == Synth::cc_msb_base);
+                TEST(compiled.layers[0].targets[Synth::mod_duty0].inputs[0].op == Synth::SourceOp::add);
+                TEST(approx(compiled.layers[0].targets[Synth::mod_duty0].inputs[0].scale, 1.0f, 1.0e-6f));
+                // Untouched bindings stay untouched.
+                TEST(compiled.layers[0].targets[Synth::mod_volume].envelope_desc_id == 2);
+                TEST(approx(compiled.layers[0].targets[Synth::mod_volume].inputs[0].scale, 2.0f, 1.0e-6f));
+                // The seeded row values landed in the slots too.
+                const uint32_t highpass_base = Sculptor::osc_target_block_base(Synth::mod_highpass_cutoff);
+                TEST(t7_graph.node(osc).slots.entries[highpass_base + t7_lfo_op_field].value.list_index == 0);
+                TEST(approx(t7_graph.node(osc).slots.entries[highpass_base + t7_lfo_depth_field].value.real,
+                            0.5f,
+                            1.0e-6f));
+                TEST(approx(t7_graph.node(osc).slots.entries[highpass_base + t7_rate_field].value.real, 0.0f, 1.0e-6f));
+                const uint32_t panning_base = Sculptor::osc_target_block_base(Synth::mod_panning);
+                TEST(approx(t7_graph.node(osc).slots.entries[panning_base + 7].value.real, 1.0f, 1.0e-6f));
+
+                // Re-projection of the applied bank reproduces the family
+                // wiring and projects no parameter nodes.
+                TEST(Sculptor::project_editor_to_graph(candidate, &t7_graph, &t7_mapping));
+                (void)t7_graph.take_changes(discarded, Sculptor::max_pending_changes);
+                check_no_param_nodes(t7_graph);
+                TEST(find_osc_graph_connection(
+                         t7_graph,
+                         { t7_mapping.osc_nodes[0], Sculptor::osc_target_env_dot(Synth::mod_lowpass_cutoff) }) !=
+                     Sculptor::pool_no_slot);
+                TEST(find_osc_graph_connection(
+                         t7_graph,
+                         { t7_mapping.osc_nodes[0], Sculptor::osc_target_lfo_dot(Synth::mod_highpass_cutoff) }) !=
+                     Sculptor::pool_no_slot);
+                TEST(find_osc_graph_connection(
+                         t7_graph,
+                         { t7_mapping.osc_nodes[0], Sculptor::osc_target_src_dot(Synth::mod_panning, 0) }) !=
+                     Sculptor::pool_no_slot);
+            }
+        }
+    }
+
+    // T-M7-3 (O3/O5): row visibility derives from live connection state.
+    // Unconnected family rows hide, connected rows render, the base row
+    // never hides, and deleting the wire hides the row again with the
+    // compiled binding zeroed.
+    {
+        static Synth::InstrumentEditorBank source;
+        static Synth::InstrumentEditorBank candidate;
+        if (begin_small_graph(&source, &t7_graph, &t7_mapping)) {
+            // Bind the lowpass LFO so the projection wires the block's LFO
+            // dot.
+            source.bank.instruments.entries[0].layers[0].targets[Synth::mod_lowpass_cutoff].lfo_desc_id = 1;
+            TEST(Sculptor::project_editor_to_graph(source, &t7_graph, &t7_mapping));
+            (void)t7_graph.take_changes(discarded, Sculptor::max_pending_changes);
+            const uint32_t osc = t7_mapping.osc_nodes[0];
+            TEST(osc != Sculptor::pool_no_slot);
+            if (osc != Sculptor::pool_no_slot) {
+                // Unconnected families hide; the connected LFO row renders.
+                for (uint32_t f = 0; f <= 10; f++) {
+                    const bool connected_lfo = f >= 1 && f <= 4;
+                    TEST(Sculptor::osc_target_field_hidden(t7_graph, osc, Synth::mod_lowpass_cutoff, f) ==
+                         ! connected_lfo);
+                }
+                // The base row is never hidden: it stays the standing drop
+                // target.
+                TEST(t7_graph.node(osc).slots.entries[Sculptor::osc_target_row(Synth::mod_lowpass_cutoff)].connectable);
+                // Wires on the env dot and both source dots open their rows.
+                const int32_t env_inst = find_detached_by_desc(t7_mapping, 1, 1);
+                TEST(env_inst >= 0);
+                if (env_inst >= 0) {
+                    const Sculptor::EndPoint env_out      = { t7_mapping.detached[env_inst].node_idx,
+                                                              t7_mapping.env_output_slot };
+                    const uint32_t           velocity_idx = static_cast<uint32_t>(Synth::ModSource::velocity) - 1;
+                    const Sculptor::EndPoint velocity_out = { t7_mapping.input_node,
+                                                              t7_mapping.input_source_slots[velocity_idx] };
+                    const uint32_t           wheel_idx    = static_cast<uint32_t>(Synth::ModSource::mod_wheel) - 1;
+                    const Sculptor::EndPoint wheel_out    = { t7_mapping.input_node,
+                                                              t7_mapping.input_source_slots[wheel_idx] };
+                    TEST(t7_graph.add_connection(env_out,
+                                                 { osc, Sculptor::osc_target_env_dot(Synth::mod_lowpass_cutoff) }) !=
+                         Sculptor::pool_no_slot);
+                    TEST(t7_graph.add_connection(velocity_out,
+                                                 { osc, Sculptor::osc_target_src_dot(Synth::mod_lowpass_cutoff, 0) }) !=
+                         Sculptor::pool_no_slot);
+                    TEST(t7_graph.add_connection(wheel_out,
+                                                 { osc, Sculptor::osc_target_src_dot(Synth::mod_lowpass_cutoff, 1) }) !=
+                         Sculptor::pool_no_slot);
+                    TEST(! Sculptor::osc_target_field_hidden(t7_graph, osc, Synth::mod_lowpass_cutoff, 0));
+                    for (uint32_t f = 5; f <= 10; f++) {
+                        TEST(! Sculptor::osc_target_field_hidden(t7_graph, osc, Synth::mod_lowpass_cutoff, f));
+                    }
+                    // The three direct-dot wires drain and apply first; the O5
+                    // delete below must be the only pending change.
+                    candidate                           = source;
+                    Sculptor::GraphChange pending[8]    = {};
+                    uint32_t              pending_count = t7_graph.take_changes(pending, 8);
+                    TEST(pending_count == 3);
+                    for (uint32_t i = 0; i < pending_count; i++) {
+                        TEST(Sculptor::apply_osc_graph_change(&candidate, &t7_graph, &t7_mapping, pending[i]));
+                    }
+                    // O5: deleting the wire hides the row again.
+                    const uint32_t lfo_wire =
+                        find_osc_graph_connection(t7_graph,
+                                                  { osc, Sculptor::osc_target_lfo_dot(Synth::mod_lowpass_cutoff) });
+                    TEST(lfo_wire != Sculptor::pool_no_slot);
+                    if (lfo_wire != Sculptor::pool_no_slot) {
+                        t7_graph.delete_connection(lfo_wire);
+                        for (uint32_t f = 1; f <= 4; f++) {
+                            TEST(Sculptor::osc_target_field_hidden(t7_graph, osc, Synth::mod_lowpass_cutoff, f));
+                        }
+                        TEST(! Sculptor::osc_target_field_hidden(t7_graph, osc, Synth::mod_lowpass_cutoff, 0));
+                        TEST(! Sculptor::osc_target_field_hidden(t7_graph, osc, Synth::mod_lowpass_cutoff, 5));
+                        // The compiled binding zeroes once the deletion
+                        // applies: the family's fields go dormant on their
+                        // own, nothing stored clears them.
+                        Sculptor::GraphChange changes[8] = {};
+                        const uint32_t        count      = t7_graph.take_changes(changes, 8);
+                        TEST(count == 1);
+                        candidate = source;
+                        TEST(Sculptor::apply_osc_graph_change(&candidate, &t7_graph, &t7_mapping, changes[0]));
+                        static Synth::Instrument compiled;
+                        TEST(Sculptor::compile_graph_to_instrument(t7_graph, t7_mapping, &compiled));
+                        TEST(compiled.layers[0].targets[Synth::mod_lowpass_cutoff].lfo_desc_id == 0);
+                        TEST(approx(compiled.layers[0].targets[Synth::mod_lowpass_cutoff].lfo_depth, 0.0f, 1.0e-6f));
+                        TEST(approx(compiled.layers[0].targets[Synth::mod_lowpass_cutoff].lfo_rate_scale_ms,
+                                    0.0f,
+                                    1.0e-6f));
+                        // Re-projection keeps the row hidden (nothing is
+                        // stored about visibility).
+                        TEST(Sculptor::project_editor_to_graph(candidate, &t7_graph, &t7_mapping));
+                        (void)t7_graph.take_changes(discarded, Sculptor::max_pending_changes);
+                        for (uint32_t f = 1; f <= 4; f++) {
+                            TEST(Sculptor::osc_target_field_hidden(t7_graph,
+                                                                   t7_mapping.osc_nodes[0],
+                                                                   Synth::mod_lowpass_cutoff,
+                                                                   f));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // T-M7-4 (O1): zero parameter nodes across every fixture shape.
+    {
+        static Synth::InstrumentBank bank;
+        static Synth::Instrument     instrument;
+        uint16_t                     shared_env_id = 0;
+        uint16_t                     lfo_id        = 0;
+        uint16_t                     volume_env_id = 0;
+        build_osc_graph_small_fixture(&bank, &instrument, &shared_env_id, &lfo_id, &volume_env_id);
+        TEST(Sculptor::project_instrument_to_graph(instrument, bank, &t7_graph, &t7_mapping));
+        check_no_param_nodes(t7_graph);
+
+        build_full_block_fixture(&bank, &instrument);
+        TEST(Sculptor::project_instrument_to_graph(instrument, bank, &t7_graph, &t7_mapping));
+        check_no_param_nodes(t7_graph);
+
+        static Synth::InstrumentEditorBank editor_bank;
+        if (begin_small_graph(&editor_bank, &t7_graph, &t7_mapping)) {
+            check_no_param_nodes(t7_graph);
+        }
+
+        static Synth::InstrumentEditorBank binding_bank;
+        static Synth::Instrument           binding_instrument;
+        build_binding_fixture(&binding_bank, &binding_instrument);
+        TEST(Sculptor::project_editor_to_graph(binding_bank, &t7_graph, &t7_mapping));
+        (void)t7_graph.take_changes(discarded, Sculptor::max_pending_changes);
+        check_no_param_nodes(t7_graph);
+
+        uint16_t env_ids[Synth::max_layers][Synth::num_mod_targets];
+        uint16_t lfo_ids[Synth::max_layers][Synth::num_mod_targets];
+        build_osc_graph_max_fixture(&bank, &instrument, env_ids, lfo_ids);
+        TEST(Sculptor::project_instrument_to_graph(instrument, bank, &t7_graph, &t7_mapping));
+        check_no_param_nodes(t7_graph);
+    }
+
+    // The project -> compile round trip stays bit-identical for direct
+    // modulator rows: the adapted max fixture, a multi-layer instrument
+    // whose cells carry per-layer binding tuples, and an envelope alias
+    // shared across cells and layers.
+    {
+        static Synth::InstrumentBank bank;
+        static Synth::Instrument     instrument;
+        static Synth::InstrumentBank bank_image;
+        static Synth::Instrument     compiled;
+        uint16_t                     env_ids[Synth::max_layers][Synth::num_mod_targets];
+        uint16_t                     lfo_ids[Synth::max_layers][Synth::num_mod_targets];
+        build_osc_graph_max_fixture(&bank, &instrument, env_ids, lfo_ids);
+        bank_image = bank;
+        TEST(Sculptor::project_instrument_to_graph(instrument, bank, &t7_graph, &t7_mapping));
+        // The instance registry keeps its 35 + 35 generator instances.
+        TEST(t7_mapping.detached_count == 70);
+        TEST(Sculptor::compile_graph_to_instrument(t7_graph, t7_mapping, &compiled));
+        TEST(memcmp(&instrument, &compiled, sizeof(Synth::Instrument)) == 0);
+        TEST(memcmp(&bank_image, &bank, sizeof(Synth::InstrumentBank)) == 0);
+
+        // Multi-layer per-cell binding tuples: layers 0 and 2 share one
+        // volume tuple, layer 1 differs; compile writes each layer's own
+        // block state, so the shared tuple carries over bit-identically.
+        memset(&bank, 0, sizeof(bank));
+        instrument = {};
+        TEST(bank.envelopes.allocate() == 0);
+        TEST(bank.envelopes.allocate() == 1);
+        Synth::EnvelopeDescriptor& env1 = bank.envelopes.entries[0];
+        env1.num_points                 = 2;
+        env1.sustain_first_point        = 0;
+        env1.sustain_last_point         = 1;
+        env1.min_value                  = -1.0f;
+        env1.min_max_delta              = 2.0f;
+        env1.points[0]                  = { 0, 0x2000 };
+        env1.points[1]                  = { 100, 0x4000 };
+        bank.envelopes.entries[1]       = env1;
+        TEST(bank.lfos.allocate() == 0);
+        bank.lfos.entries[0].wave      = Synth::WaveType::sine_wave;
+        bank.lfos.entries[0].period_ms = 300;
+        Synth::TargetBinding shared    = {};
+        shared.envelope_desc_id        = 1;
+        shared.lfo_desc_id             = 1;
+        shared.lfo_op                  = Synth::SourceOp::add;
+        shared.lfo_depth               = 0.5f;
+        shared.lfo_depth_source        = Synth::ModSource::velocity;
+        shared.lfo_rate_source         = Synth::ModSource::mod_wheel;
+        shared.lfo_rate_scale_ms       = 20.0f;
+        instrument.layer_count         = 3;
+        for (uint32_t layer = 0; layer < 3; layer++) {
+            instrument.layers[layer].osc_type[0] = Synth::WaveType::sawtooth_wave;
+        }
+        instrument.layers[0].targets[Synth::mod_volume] = shared;
+        instrument.layers[2].targets[Synth::mod_volume] = shared;
+        Synth::TargetBinding other                      = shared;
+        other.envelope_desc_id                          = 2;
+        instrument.layers[1].targets[Synth::mod_volume] = other;
+        // The env-2 instance also serves layer 0's pitch cell (one node
+        // aliasing across targets and layers).
+        instrument.layers[0].targets[Synth::mod_pitch].envelope_desc_id = 2;
+        instrument.layers[0].targets[Synth::mod_volume].base_value      = 0.8f;
+        instrument.layers[1].targets[Synth::mod_volume].base_value      = 0.3f;
+        instrument.layers[2].targets[Synth::mod_volume].base_value      = 0.9f;
+        TEST(Sculptor::project_instrument_to_graph(instrument, bank, &t7_graph, &t7_mapping));
+        check_no_param_nodes(t7_graph);
+        // Two envelope instances (desc 1 and desc 2) and one LFO instance.
+        TEST(t7_mapping.detached_count == 3);
+        TEST(Sculptor::compile_graph_to_instrument(t7_graph, t7_mapping, &compiled));
+        TEST(memcmp(&instrument, &compiled, sizeof(Synth::Instrument)) == 0);
+        // Each served cell carries its own block rows with the tuple
+        // values; the base values stay per layer.
+        for (uint32_t layer = 0; layer < 3; layer++) {
+            const uint32_t        base = Sculptor::osc_target_block_base(Synth::mod_volume);
+            const Sculptor::Node& osc  = t7_graph.node(t7_mapping.osc_nodes[layer]);
+            TEST(osc.slots.entries[base + t7_lfo_op_field].value.list_index ==
+                 static_cast<uint32_t>(Synth::SourceOp::add));
+            TEST(approx(osc.slots.entries[base + t7_lfo_depth_field].value.real, 0.5f, 1.0e-6f));
+            TEST(approx(osc.slots.entries[base + t7_rate_field].value.real, 20.0f, 1.0e-4f));
+        }
+        // The env-2 instance wires into layer 1 volume and layer 0 pitch.
+        const int32_t env2 = find_detached_by_desc(t7_mapping, 1, 2);
+        TEST(env2 >= 0);
+        if (env2 >= 0) {
+            const uint32_t env_node = t7_mapping.detached[env2].node_idx;
+            const uint32_t vol1_wire =
+                find_osc_graph_connection(t7_graph,
+                                          { t7_mapping.osc_nodes[1], Sculptor::osc_target_env_dot(Synth::mod_volume) });
+            const uint32_t pitch_wire =
+                find_osc_graph_connection(t7_graph,
+                                          { t7_mapping.osc_nodes[0], Sculptor::osc_target_env_dot(Synth::mod_pitch) });
+            TEST(vol1_wire != Sculptor::pool_no_slot && pitch_wire != Sculptor::pool_no_slot);
+            if (vol1_wire != Sculptor::pool_no_slot && pitch_wire != Sculptor::pool_no_slot) {
+                TEST(t7_graph.get_connection(vol1_wire).output.node_idx == env_node);
+                TEST(t7_graph.get_connection(pitch_wire).output.node_idx == env_node);
+            }
+        }
+    }
+
+    // T-M7-8 (O9): one (layer, target) carries envelope + LFO + two MIDI
+    // sources at once, each on its own row, and the compiled binding
+    // carries all four.
+    {
+        static Synth::InstrumentBank bank;
+        static Synth::Instrument     instrument;
+        build_full_block_fixture(&bank, &instrument);
+        TEST(Sculptor::project_instrument_to_graph(instrument, bank, &t7_graph, &t7_mapping));
+        check_no_param_nodes(t7_graph);
+        const uint32_t osc = t7_mapping.osc_nodes[0];
+        TEST(osc != Sculptor::pool_no_slot);
+        if (osc != Sculptor::pool_no_slot) {
+            const uint32_t env_dot   = Sculptor::osc_target_env_dot(Synth::mod_volume);
+            const uint32_t lfo_dot   = Sculptor::osc_target_lfo_dot(Synth::mod_volume);
+            const uint32_t src0      = Sculptor::osc_target_src_dot(Synth::mod_volume, 0);
+            const uint32_t src1      = Sculptor::osc_target_src_dot(Synth::mod_volume, 1);
+            const uint32_t env_wire  = find_osc_graph_connection(t7_graph, { osc, env_dot });
+            const uint32_t lfo_wire  = find_osc_graph_connection(t7_graph, { osc, lfo_dot });
+            const uint32_t src0_wire = find_osc_graph_connection(t7_graph, { osc, src0 });
+            const uint32_t src1_wire = find_osc_graph_connection(t7_graph, { osc, src1 });
+            TEST(env_wire != Sculptor::pool_no_slot && lfo_wire != Sculptor::pool_no_slot);
+            TEST(src0_wire != Sculptor::pool_no_slot && src1_wire != Sculptor::pool_no_slot);
+            if (env_wire != Sculptor::pool_no_slot && lfo_wire != Sculptor::pool_no_slot &&
+                src0_wire != Sculptor::pool_no_slot && src1_wire != Sculptor::pool_no_slot) {
+                const int32_t env_inst =
+                    find_instance_by_node(t7_mapping, t7_graph.get_connection(env_wire).output.node_idx);
+                const int32_t lfo_inst =
+                    find_instance_by_node(t7_mapping, t7_graph.get_connection(lfo_wire).output.node_idx);
+                TEST(env_inst >= 0 && lfo_inst >= 0);
+                if (env_inst >= 0 && lfo_inst >= 0) {
+                    TEST(t7_mapping.detached[env_inst].desc_id == 1); // the volume envelope
+                    TEST(t7_mapping.detached[lfo_inst].desc_id == 1);
+                    TEST(t7_graph.get_connection(src0_wire).output.slot_idx ==
+                         t7_mapping.input_source_slots[static_cast<uint32_t>(Synth::ModSource::velocity) - 1]);
+                    TEST(t7_graph.get_connection(src1_wire).output.slot_idx ==
+                         t7_mapping.input_source_slots[static_cast<uint32_t>(Synth::ModSource::mod_wheel) - 1]);
+                }
+                static Synth::Instrument compiled;
+                TEST(Sculptor::compile_graph_to_instrument(t7_graph, t7_mapping, &compiled));
+                const Synth::TargetBinding& gen = compiled.layers[0].targets[Synth::mod_volume];
+                TEST(gen.envelope_desc_id == 1 && gen.lfo_desc_id == 1);
+                TEST(gen.lfo_op == Synth::SourceOp::add);
+                TEST(approx(gen.lfo_depth, 0.25f, 1.0e-6f));
+                TEST(approx(gen.lfo_rate_scale_ms, 10.0f, 1.0e-4f));
+                TEST(gen.num_inputs == 2);
+                TEST(gen.inputs[0].source == Synth::ModSource::velocity);
+                TEST(approx(gen.inputs[0].scale, 0.5f, 1.0e-6f));
+                TEST(gen.inputs[1].source == Synth::ModSource::mod_wheel);
+                TEST(approx(gen.inputs[1].scale, -0.25f, 1.0e-6f));
+                // Each family row stays on its own renderer line.
+                TEST(t7_graph.node(osc).slots.entries[env_dot].row_group == 0);
+                TEST(t7_graph.node(osc).slots.entries[lfo_dot].row_group == 1);
+                TEST(t7_graph.node(osc).slots.entries[src0].row_group == 2);
+                TEST(t7_graph.node(osc).slots.entries[src1].row_group == 3);
+            }
+        }
+    }
+
+    // T-M7-9 (I5): undo/redo and snapshot round-trips for the new
+    // connection types (envelope, LFO, standard MIDI and CC) and a
+    // family-field edit.
+    {
+        static Synth::InstrumentEditorBank source;
+        static Synth::InstrumentEditorBank candidate;
+        static Synth::InstrumentEditorBank wired;
+        static Synth::Instrument           compiled;
+        if (begin_small_graph(&source, &t7_graph, &t7_mapping)) {
+            // One assignable CC dot so the MIDI and CC wires ride the
+            // same undo/redo snapshots (I5).
+            source.added_cc_mask[0] = 1u << 0;
+            TEST(Sculptor::project_editor_to_graph(source, &t7_graph, &t7_mapping));
+            (void)t7_graph.take_changes(discarded, Sculptor::max_pending_changes);
+            const int32_t env_inst = find_detached_by_desc(t7_mapping, 1, 1);
+            const int32_t lfo_inst = find_detached_by_desc(t7_mapping, 2, 1);
+            TEST(env_inst >= 0 && lfo_inst >= 0);
+            if (env_inst >= 0 && lfo_inst >= 0) {
+                const Sculptor::EndPoint env_out      = { t7_mapping.detached[env_inst].node_idx,
+                                                          t7_mapping.env_output_slot };
+                const Sculptor::EndPoint lfo_out      = { t7_mapping.detached[lfo_inst].node_idx,
+                                                          t7_mapping.lfo_output_slot };
+                const uint32_t           osc          = t7_mapping.osc_nodes[0];
+                const Sculptor::EndPoint lowpass_row  = { osc, Sculptor::osc_target_row(Synth::mod_lowpass_cutoff) };
+                const Sculptor::EndPoint highpass_row = { osc, Sculptor::osc_target_row(Synth::mod_highpass_cutoff) };
+                TEST(t7_graph.add_connection(env_out, lowpass_row) != Sculptor::pool_no_slot);
+                TEST(t7_graph.add_connection(lfo_out, highpass_row) != Sculptor::pool_no_slot);
+                const uint32_t           velocity_idx = static_cast<uint32_t>(Synth::ModSource::velocity) - 1;
+                const Sculptor::EndPoint velocity_out = { t7_mapping.input_node,
+                                                          t7_mapping.input_source_slots[velocity_idx] };
+                char                     cc_label[32];
+                Sculptor::fx_cc_pair_label(Synth::cc_msb_base, cc_label, sizeof(cc_label));
+                uint32_t cc_slot = Sculptor::pool_no_slot;
+                TEST(find_graph_slot(t7_graph, t7_mapping.input_node, cc_label, &cc_slot));
+                const Sculptor::EndPoint cc_out      = { t7_mapping.input_node, cc_slot };
+                const Sculptor::EndPoint panning_row = { osc, Sculptor::osc_target_row(Synth::mod_panning) };
+                const Sculptor::EndPoint duty_row    = { osc, Sculptor::osc_target_row(Synth::mod_duty0) };
+                TEST(t7_graph.add_connection(velocity_out, panning_row) != Sculptor::pool_no_slot);
+                TEST(t7_graph.add_connection(cc_out, duty_row) != Sculptor::pool_no_slot);
+                Sculptor::GraphChange changes[8] = {};
+                const uint32_t        count      = t7_graph.take_changes(changes, 8);
+                TEST(count == 4);
+
+                // Whole-bank undo: the pre-wire bank restores bit-identically
+                // and re-projects with no family wiring.
+                static uint8_t     undo_storage[sizeof(Synth::InstrumentEditorBank) * 4 + 256];
+                Sculptor::UndoRedo undo;
+                undo.init(undo_storage);
+                undo.init_undo_push();
+                undo.push(&source, sizeof(source));
+                TEST(undo.finish_undo_push());
+                candidate = source;
+                for (uint32_t i = 0; i < count; i++) {
+                    TEST(Sculptor::apply_osc_graph_change(&candidate, &t7_graph, &t7_mapping, changes[i]));
+                }
+                const Sculptor::EndPoint panning_src0 = { osc, Sculptor::osc_target_src_dot(Synth::mod_panning, 0) };
+                const Sculptor::EndPoint duty_src0    = { osc, Sculptor::osc_target_src_dot(Synth::mod_duty0, 0) };
+                // The MIDI and CC base-row drops relocated onto their
+                // source dots in the same drain.
+                TEST(find_osc_graph_connection(t7_graph, panning_src0) != Sculptor::pool_no_slot);
+                TEST(find_osc_graph_connection(t7_graph, duty_src0) != Sculptor::pool_no_slot);
+                wired = candidate;
+                undo.init_redo_push();
+                undo.push(&wired, sizeof(wired));
+                TEST(undo.finish_redo_push());
+                TEST(undo.init_undo());
+                undo.pop(&candidate, sizeof(candidate));
+                undo.finish_undo();
+                TEST(memcmp(&candidate, &source, sizeof(source)) == 0);
+                TEST(Sculptor::project_editor_to_graph(candidate, &t7_graph, &t7_mapping));
+                (void)t7_graph.take_changes(discarded, Sculptor::max_pending_changes);
+                TEST(find_osc_graph_connection(
+                         t7_graph,
+                         { t7_mapping.osc_nodes[0], Sculptor::osc_target_env_dot(Synth::mod_lowpass_cutoff) }) ==
+                     Sculptor::pool_no_slot);
+                TEST(find_osc_graph_connection(t7_graph, panning_src0) == Sculptor::pool_no_slot);
+                TEST(find_osc_graph_connection(t7_graph, duty_src0) == Sculptor::pool_no_slot);
+                // Redo restores the wired bank and its rows.
+                TEST(undo.init_redo());
+                undo.pop(&candidate, sizeof(candidate));
+                undo.finish_redo();
+                TEST(memcmp(&candidate, &wired, sizeof(wired)) == 0);
+                TEST(Sculptor::project_editor_to_graph(candidate, &t7_graph, &t7_mapping));
+                (void)t7_graph.take_changes(discarded, Sculptor::max_pending_changes);
+                TEST(find_osc_graph_connection(
+                         t7_graph,
+                         { t7_mapping.osc_nodes[0], Sculptor::osc_target_env_dot(Synth::mod_lowpass_cutoff) }) !=
+                     Sculptor::pool_no_slot);
+                TEST(find_osc_graph_connection(t7_graph, panning_src0) != Sculptor::pool_no_slot);
+                TEST(find_osc_graph_connection(t7_graph, duty_src0) != Sculptor::pool_no_slot);
+                // A family-field edit writes through to the compiled
+                // binding and undoes back to the wired snapshot.
+                const uint32_t depth_slot =
+                    Sculptor::osc_target_block_base(Synth::mod_highpass_cutoff) + t7_lfo_depth_field;
+                Sculptor::PropertyValue depth = {};
+                depth.real                    = 0.25f;
+                t7_graph.set_slot_value(t7_mapping.osc_nodes[0], depth_slot, depth);
+                Sculptor::GraphChange edit[8] = {};
+                edit[0].kind                  = Sculptor::ChangeKind::value_changed;
+                edit[0].node_idx              = t7_mapping.osc_nodes[0];
+                edit[0].slot_idx              = depth_slot;
+                undo.init_undo_push();
+                undo.push(&candidate, sizeof(candidate));
+                TEST(undo.finish_undo_push());
+                TEST(Sculptor::apply_osc_graph_change(&candidate, &t7_graph, &t7_mapping, edit[0]));
+                TEST(Sculptor::compile_graph_to_instrument(t7_graph, t7_mapping, &compiled));
+                TEST(approx(compiled.layers[0].targets[Synth::mod_highpass_cutoff].lfo_depth, 0.25f, 1.0e-6f));
+                TEST(undo.init_undo());
+                undo.pop(&candidate, sizeof(candidate));
+                undo.finish_undo();
+                TEST(memcmp(&candidate, &wired, sizeof(wired)) == 0);
+            }
+        }
+    }
+
+    // T-M7-10 (validator edges, C2/C8): capacity and wrong-family
+    // refusals, the volume rule both directions, output-end retargets,
+    // input-end target moves, the base-row delete refusal, the per-cell
+    // source order and the stray-connection compile refusal.
+    {
+        static Synth::InstrumentEditorBank source;
+        static Synth::InstrumentEditorBank candidate;
+        if (begin_small_graph(&source, &t7_graph, &t7_mapping)) {
+            Synth::Instrument& instr = source.bank.instruments.entries[0];
+            // Bindings that pre-wire the dots the capacity refusals need:
+            // lowpass carries the shared non-volume envelope and two MIDI
+            // sources, highpass carries the LFO, duty0 carries a third
+            // non-volume envelope.
+            instr.layers[0].targets[Synth::mod_lowpass_cutoff].envelope_desc_id = 1;
+            instr.layers[0].targets[Synth::mod_lowpass_cutoff].num_inputs       = 2;
+            instr.layers[0].targets[Synth::mod_lowpass_cutoff].inputs[0].source = Synth::ModSource::velocity;
+            instr.layers[0].targets[Synth::mod_lowpass_cutoff].inputs[0].op     = Synth::SourceOp::add;
+            instr.layers[0].targets[Synth::mod_lowpass_cutoff].inputs[0].scale  = 1.0f;
+            instr.layers[0].targets[Synth::mod_lowpass_cutoff].inputs[1].source = Synth::ModSource::mod_wheel;
+            instr.layers[0].targets[Synth::mod_lowpass_cutoff].inputs[1].op     = Synth::SourceOp::multiply;
+            instr.layers[0].targets[Synth::mod_lowpass_cutoff].inputs[1].scale  = 1.0f;
+            instr.layers[0].targets[Synth::mod_highpass_cutoff].lfo_desc_id     = 1;
+            TEST(source.bank.envelopes.allocate() == 2);
+            Synth::EnvelopeDescriptor& env3                            = source.bank.envelopes.entries[2];
+            env3                                                       = Synth::EnvelopeDescriptor{};
+            env3.num_points                                            = 2;
+            env3.sustain_first_point                                   = 0;
+            env3.sustain_last_point                                    = 1;
+            env3.min_value                                             = -0.5f;
+            env3.min_max_delta                                         = 2.0f;
+            env3.points[0]                                             = { 0, 0x4000 };
+            env3.points[1]                                             = { 100, 0xC000 };
+            instr.layers[0].targets[Synth::mod_duty0].envelope_desc_id = 3;
+            TEST(source.bank.lfos.allocate() == 1);
+            Synth::LFODescriptor& lfo2                              = source.bank.lfos.entries[1];
+            lfo2                                                    = Synth::LFODescriptor{};
+            lfo2.wave                                               = Synth::WaveType::sine_wave;
+            lfo2.period_ms                                          = 300;
+            lfo2.min_value                                          = -1.0f;
+            lfo2.min_max_delta                                      = 2.0f;
+            instr.layers[0].targets[Synth::mod_panning].lfo_desc_id = 2;
+            source.added_cc_mask[0]                                 = 1u << 0;
+            TEST(Sculptor::project_editor_to_graph(source, &t7_graph, &t7_mapping));
+            (void)t7_graph.take_changes(discarded, Sculptor::max_pending_changes);
+            t7_graph.set_validator(Sculptor::osc_graph_validate, &t7_mapping);
+            candidate = source;
+
+            const int32_t env1  = find_detached_by_desc(t7_mapping, 1, 1);
+            const int32_t env2  = find_detached_by_desc(t7_mapping, 1, 2);
+            const int32_t env3i = find_detached_by_desc(t7_mapping, 1, 3);
+            const int32_t lfo1  = find_detached_by_desc(t7_mapping, 2, 1);
+            TEST(env1 >= 0 && env2 >= 0 && env3i >= 0 && lfo1 >= 0);
+            if (env1 >= 0 && env2 >= 0 && env3i >= 0 && lfo1 >= 0) {
+                const Sculptor::EndPoint env1_out = { t7_mapping.detached[env1].node_idx, t7_mapping.env_output_slot };
+                const Sculptor::EndPoint env2_out = { t7_mapping.detached[env2].node_idx, t7_mapping.env_output_slot };
+                const Sculptor::EndPoint env3_out = { t7_mapping.detached[env3i].node_idx, t7_mapping.env_output_slot };
+                const Sculptor::EndPoint lfo_out  = { t7_mapping.detached[lfo1].node_idx, t7_mapping.lfo_output_slot };
+                const uint32_t           velocity_idx = static_cast<uint32_t>(Synth::ModSource::velocity) - 1;
+                const Sculptor::EndPoint velocity_out = { t7_mapping.input_node,
+                                                          t7_mapping.input_source_slots[velocity_idx] };
+                const uint32_t           wheel_idx    = static_cast<uint32_t>(Synth::ModSource::mod_wheel) - 1;
+                const Sculptor::EndPoint wheel_out    = { t7_mapping.input_node,
+                                                          t7_mapping.input_source_slots[wheel_idx] };
+                char                     cc_label[32];
+                Sculptor::fx_cc_pair_label(Synth::cc_msb_base, cc_label, sizeof(cc_label));
+                uint32_t cc_slot = Sculptor::pool_no_slot;
+                TEST(find_graph_slot(t7_graph, t7_mapping.input_node, cc_label, &cc_slot));
+                const Sculptor::EndPoint cc_out       = { t7_mapping.input_node, cc_slot };
+                const uint32_t           osc          = t7_mapping.osc_nodes[0];
+                const Sculptor::EndPoint lowpass_row  = { osc, Sculptor::osc_target_row(Synth::mod_lowpass_cutoff) };
+                const Sculptor::EndPoint highpass_row = { osc, Sculptor::osc_target_row(Synth::mod_highpass_cutoff) };
+                const Sculptor::EndPoint volume_row   = { osc, Sculptor::osc_target_row(Synth::mod_volume) };
+                const Sculptor::EndPoint panning_row  = { osc, Sculptor::osc_target_row(Synth::mod_panning) };
+                const Sculptor::EndPoint panning_env  = { osc, Sculptor::osc_target_env_dot(Synth::mod_panning) };
+                const Sculptor::EndPoint panning_lfo  = { osc, Sculptor::osc_target_lfo_dot(Synth::mod_panning) };
+                const Sculptor::EndPoint panning_src0 = { osc, Sculptor::osc_target_src_dot(Synth::mod_panning, 0) };
+
+                // C8: one envelope per (layer, target) - the lowpass env
+                // dot is taken by the projection wiring.
+                TEST(! Sculptor::osc_graph_validate(&t7_mapping, t7_graph, env2_out, lowpass_row));
+                TEST(! Sculptor::osc_graph_validate(&t7_mapping, t7_graph, env3_out, lowpass_row));
+                // One LFO per (layer, target): the highpass LFO dot is
+                // taken by the projection wiring.
+                TEST(! Sculptor::osc_graph_validate(&t7_mapping, t7_graph, lfo_out, highpass_row));
+                // max_mod_inputs sources: both lowpass source dots are
+                // taken by the projection wiring.
+                TEST(! Sculptor::osc_graph_validate(&t7_mapping, t7_graph, cc_out, lowpass_row));
+                TEST(! Sculptor::osc_graph_validate(&t7_mapping, t7_graph, velocity_out, lowpass_row));
+                // The volume rule, both directions: a volume-shaped
+                // descriptor never serves a non-volume row, a non-volume
+                // descriptor never serves the volume row.
+                TEST(! Sculptor::osc_graph_validate(&t7_mapping, t7_graph, env2_out, panning_row));
+                TEST(! Sculptor::osc_graph_validate(&t7_mapping, t7_graph, env3_out, volume_row));
+                // Wrong-family refusals: sources, CC dots, envelopes and
+                // LFOs never touch each other's dots.
+                TEST(! Sculptor::osc_graph_validate(&t7_mapping, t7_graph, velocity_out, panning_env));
+                TEST(! Sculptor::osc_graph_validate(&t7_mapping, t7_graph, velocity_out, panning_lfo));
+                TEST(! Sculptor::osc_graph_validate(&t7_mapping, t7_graph, cc_out, panning_env)); // Source rows only
+                TEST(! Sculptor::osc_graph_validate(&t7_mapping, t7_graph, cc_out, panning_lfo));
+                TEST(! Sculptor::osc_graph_validate(&t7_mapping, t7_graph, lfo_out, panning_env));
+                TEST(! Sculptor::osc_graph_validate(&t7_mapping, t7_graph, env1_out, panning_lfo));
+                TEST(! Sculptor::osc_graph_validate(&t7_mapping, t7_graph, env1_out, panning_src0));
+                TEST(! Sculptor::osc_graph_validate(&t7_mapping, t7_graph, lfo_out, panning_src0));
+
+                // C2: moving an existing wire's output end stays valid, and
+                // the input end may move to another target's same-family
+                // dot but never onto another family's dot.
+                const uint32_t env_wire =
+                    find_osc_graph_connection(t7_graph,
+                                              { osc, Sculptor::osc_target_env_dot(Synth::mod_lowpass_cutoff) });
+                TEST(env_wire != Sculptor::pool_no_slot);
+                if (env_wire != Sculptor::pool_no_slot) {
+                    TEST(t7_graph.move_connection_end(env_wire, true, env3_out)); // output-end retarget
+                    Sculptor::GraphChange moves[8] = {};
+                    uint32_t              moved    = t7_graph.take_changes(moves, 8);
+                    TEST(moved == 1);
+                    for (uint32_t i = 0; i < moved; i++) {
+                        TEST(Sculptor::apply_osc_graph_change(&candidate, &t7_graph, &t7_mapping, moves[i]));
+                    }
+                    TEST(t7_graph.move_connection_end(env_wire, false, panning_env)); // input-end target move
+                    moved = t7_graph.take_changes(moves, 8);
+                    TEST(moved == 1);
+                    for (uint32_t i = 0; i < moved; i++) {
+                        TEST(Sculptor::apply_osc_graph_change(&candidate, &t7_graph, &t7_mapping, moves[i]));
+                    }
+                    TEST(! t7_graph.move_connection_end(env_wire, false, panning_lfo)); // wrong family
+                    (void)t7_graph.take_changes(moves, 8);
+                }
+
+                // C2 family coverage: the LFO wire moves like the envelope
+                // wire - the output end retargets to the second LFO
+                // instance and the input end moves to another target's
+                // free LFO dot.
+                const int32_t lfo2i = find_detached_by_desc(t7_mapping, 2, 2);
+                TEST(lfo2i >= 0);
+                const uint32_t lfo_wire =
+                    find_osc_graph_connection(t7_graph,
+                                              { osc, Sculptor::osc_target_lfo_dot(Synth::mod_highpass_cutoff) });
+                TEST(lfo_wire != Sculptor::pool_no_slot);
+                if (lfo2i >= 0 && lfo_wire != Sculptor::pool_no_slot) {
+                    const Sculptor::EndPoint lfo2_out = { t7_mapping.detached[lfo2i].node_idx,
+                                                          t7_mapping.lfo_output_slot };
+                    TEST(t7_graph.move_connection_end(lfo_wire, true, lfo2_out)); // output-end retarget
+                    Sculptor::GraphChange lfo_moves[8] = {};
+                    uint32_t              lfo_moved    = t7_graph.take_changes(lfo_moves, 8);
+                    TEST(lfo_moved == 1);
+                    for (uint32_t i = 0; i < lfo_moved; i++) {
+                        TEST(Sculptor::apply_osc_graph_change(&candidate, &t7_graph, &t7_mapping, lfo_moves[i]));
+                    }
+                    const Sculptor::EndPoint duty_lfo = { osc, Sculptor::osc_target_lfo_dot(Synth::mod_duty0) };
+                    TEST(t7_graph.move_connection_end(lfo_wire, false, duty_lfo)); // input-end target move
+                    lfo_moved = t7_graph.take_changes(lfo_moves, 8);
+                    TEST(lfo_moved == 1);
+                    for (uint32_t i = 0; i < lfo_moved; i++) {
+                        TEST(Sculptor::apply_osc_graph_change(&candidate, &t7_graph, &t7_mapping, lfo_moves[i]));
+                    }
+                    TEST(! t7_graph.move_connection_end(lfo_wire, false, panning_env)); // wrong family
+                    (void)t7_graph.take_changes(lfo_moves, 8);
+                }
+
+                // Per-cell source order: a wire dropped on the base row
+                // fills the first free source dot (source 0 before 1), even
+                // when source 1 was wired directly first.
+                TEST(t7_graph.add_connection(velocity_out,
+                                             { osc, Sculptor::osc_target_src_dot(Synth::mod_panning, 1) }) !=
+                     Sculptor::pool_no_slot);
+                Sculptor::GraphChange adds[8] = {};
+                uint32_t              added   = t7_graph.take_changes(adds, 8);
+                TEST(added == 1);
+                for (uint32_t i = 0; i < added; i++) {
+                    TEST(Sculptor::apply_osc_graph_change(&candidate, &t7_graph, &t7_mapping, adds[i]));
+                }
+                TEST(Sculptor::osc_graph_validate(&t7_mapping, t7_graph, wheel_out, panning_row));
+                TEST(t7_graph.add_connection(wheel_out, panning_row) != Sculptor::pool_no_slot);
+                added = t7_graph.take_changes(adds, 8);
+                TEST(added == 1);
+                for (uint32_t i = 0; i < added; i++) {
+                    TEST(Sculptor::apply_osc_graph_change(&candidate, &t7_graph, &t7_mapping, adds[i]));
+                }
+                TEST(find_osc_graph_connection(t7_graph, panning_src0) != Sculptor::pool_no_slot);
+
+                // C2 family coverage for the standard MIDI and CC wires:
+                // output-end replacement and input-end movement, mirroring
+                // the envelope and LFO wires.
+                const uint32_t midi_wire = find_osc_graph_connection(t7_graph, panning_src0);
+                TEST(midi_wire != Sculptor::pool_no_slot);
+                if (midi_wire != Sculptor::pool_no_slot) {
+                    TEST(t7_graph.move_connection_end(midi_wire, true, velocity_out)); // output-end replacement
+                    Sculptor::GraphChange wire_moves[8] = {};
+                    uint32_t              wire_moved    = t7_graph.take_changes(wire_moves, 8);
+                    TEST(wire_moved == 1);
+                    for (uint32_t i = 0; i < wire_moved; i++) {
+                        TEST(Sculptor::apply_osc_graph_change(&candidate, &t7_graph, &t7_mapping, wire_moves[i]));
+                    }
+                    const Sculptor::EndPoint duty_src0 = { osc, Sculptor::osc_target_src_dot(Synth::mod_duty0, 0) };
+                    TEST(t7_graph.move_connection_end(midi_wire, false, duty_src0)); // input-end target move
+                    wire_moved = t7_graph.take_changes(wire_moves, 8);
+                    TEST(wire_moved == 1);
+                    for (uint32_t i = 0; i < wire_moved; i++) {
+                        TEST(Sculptor::apply_osc_graph_change(&candidate, &t7_graph, &t7_mapping, wire_moves[i]));
+                    }
+                }
+                // CC wire: the mask's CC dot wires the pitch row's first
+                // free source dot, then moves like the others.
+                const Sculptor::EndPoint pitch_row = { osc, Sculptor::osc_target_row(Synth::mod_pitch) };
+                TEST(t7_graph.add_connection(cc_out, pitch_row) != Sculptor::pool_no_slot);
+                Sculptor::GraphChange cc_adds[8] = {};
+                uint32_t              cc_added   = t7_graph.take_changes(cc_adds, 8);
+                TEST(cc_added == 1);
+                for (uint32_t i = 0; i < cc_added; i++) {
+                    TEST(Sculptor::apply_osc_graph_change(&candidate, &t7_graph, &t7_mapping, cc_adds[i]));
+                }
+                const Sculptor::EndPoint pitch_src0 = { osc, Sculptor::osc_target_src_dot(Synth::mod_pitch, 0) };
+                const uint32_t           cc_wire    = find_osc_graph_connection(t7_graph, pitch_src0);
+                TEST(cc_wire != Sculptor::pool_no_slot);
+                if (cc_wire != Sculptor::pool_no_slot) {
+                    const Sculptor::EndPoint highpass_src0 = { osc,
+                                                               Sculptor::osc_target_src_dot(Synth::mod_highpass_cutoff,
+                                                                                            0) };
+                    TEST(t7_graph.move_connection_end(cc_wire, false, highpass_src0)); // input-end target move
+                    Sculptor::GraphChange cc_moves[8] = {};
+                    uint32_t              cc_moved    = t7_graph.take_changes(cc_moves, 8);
+                    TEST(cc_moved == 1);
+                    for (uint32_t i = 0; i < cc_moved; i++) {
+                        TEST(Sculptor::apply_osc_graph_change(&candidate, &t7_graph, &t7_mapping, cc_moves[i]));
+                    }
+                    TEST(t7_graph.move_connection_end(cc_wire, true, velocity_out)); // output-end replacement
+                    cc_moved = t7_graph.take_changes(cc_moves, 8);
+                    TEST(cc_moved == 1);
+                    for (uint32_t i = 0; i < cc_moved; i++) {
+                        TEST(Sculptor::apply_osc_graph_change(&candidate, &t7_graph, &t7_mapping, cc_moves[i]));
+                    }
+                }
+
+                // A delete whose endpoint is still a base row is refused:
+                // the apply-side bind and the relocation land in the same
+                // drain, so a delete never observes a base-row endpoint.
+                Sculptor::GraphChange del = {};
+                del.kind                  = Sculptor::ChangeKind::connection_deleted;
+                del.connection_output     = wheel_out;
+                del.connection_input      = panning_row;
+                TEST(! Sculptor::apply_osc_graph_change(&candidate, &t7_graph, &t7_mapping, del));
+
+                // A stray base-row connection injected headlessly (raw add,
+                // no validator) makes the compile refuse: a connection
+                // still ending on a base target row is an invariant
+                // violation.
+                TEST(t7_graph.add_connection(velocity_out, lowpass_row) != Sculptor::pool_no_slot);
+                static Synth::Instrument compiled;
+                TEST(! Sculptor::compile_graph_to_instrument(t7_graph, t7_mapping, &compiled));
+            }
+            t7_graph.set_validator(nullptr, nullptr);
+        }
+    }
+
+    // T-M7-11: the max fixture keeps its shape (seven oscillators, 35
+    // envelope + 35 LFO instances) and gains the per-target block grammar
+    // on every layer; the parameter counts leave the mapping checks.
+    {
+        static Synth::InstrumentBank bank;
+        static Synth::Instrument     instrument;
+        uint16_t                     env_ids[Synth::max_layers][Synth::num_mod_targets];
+        uint16_t                     lfo_ids[Synth::max_layers][Synth::num_mod_targets];
+        build_osc_graph_max_fixture(&bank, &instrument, env_ids, lfo_ids);
+        TEST(Sculptor::project_instrument_to_graph(instrument, bank, &t7_graph, &t7_mapping));
+        check_no_param_nodes(t7_graph);
+        TEST(t7_mapping.detached_count == 70);
+        for (uint32_t layer = 0; layer < Synth::max_layers; layer++) {
+            TEST(t7_mapping.osc_nodes[layer] != Sculptor::pool_no_slot);
+            if (t7_mapping.osc_nodes[layer] == Sculptor::pool_no_slot) {
+                continue;
+            }
+            const Sculptor::Node& osc = t7_graph.node(t7_mapping.osc_nodes[layer]);
+            TEST(osc.slots.num_allocated == 15 + 11 * Synth::num_mod_targets);
+            for (uint32_t t = 0; t < Synth::num_mod_targets; t++) {
+                check_target_block_grammar(osc, t, instrument.layers[layer].targets[t]);
+            }
+        }
+    }
+
+    // Compile refuses a corrupted mapping whose oscillator node run has a
+    // gap: the projected layer run must stay contiguous.
+    {
+        static Synth::InstrumentBank bank;
+        static Synth::Instrument     instrument;
+        uint16_t                     env_ids[Synth::max_layers][Synth::num_mod_targets];
+        uint16_t                     lfo_ids[Synth::max_layers][Synth::num_mod_targets];
+        build_osc_graph_max_fixture(&bank, &instrument, env_ids, lfo_ids);
+        static Sculptor::Graph           graph;
+        static Sculptor::OscGraphMapping mapping;
+        TEST(Sculptor::project_instrument_to_graph(instrument, bank, &graph, &mapping));
+        TEST(mapping.osc_nodes[0] != Sculptor::pool_no_slot);
+        TEST(mapping.osc_nodes[Synth::max_layers - 1] != Sculptor::pool_no_slot);
+        const uint32_t saved = mapping.osc_nodes[3];
+        mapping.osc_nodes[3] = Sculptor::pool_no_slot;
+        static Synth::Instrument compiled;
+        TEST(! Sculptor::compile_graph_to_instrument(graph, mapping, &compiled));
+        mapping.osc_nodes[3] = saved;
+        TEST(Sculptor::compile_graph_to_instrument(graph, mapping, &compiled));
+    }
+
+    // Registry capacity: every target of every layer bound with distinct
+    // generator keys projects the full 2*layers*targets instance registry.
+    // The legal all-cells projection needs 126 distinct instance keys - more
+    // than the detached-record cap - so the registry is sized for the node
+    // pool, not for the record cap.
+    {
+        static Synth::InstrumentBank bank;
+        static Synth::Instrument     instrument;
+        Synth::init_default_bank(&bank);
+        instrument             = Synth::Instrument{};
+        instrument.layer_count = Synth::max_layers;
+        for (uint32_t cell = 0; cell < Synth::max_layers * Synth::num_mod_targets; cell++) {
+            const uint32_t layer    = cell / Synth::num_mod_targets;
+            const uint32_t target   = cell % Synth::num_mod_targets;
+            const uint32_t env_slot = bank.envelopes.allocate();
+            TEST(env_slot != Sculptor::pool_no_slot);
+            Synth::EnvelopeDescriptor& env = bank.envelopes.entries[env_slot];
+            env                            = Synth::EnvelopeDescriptor{};
+            env.num_points                 = 2;
+            env.sustain_first_point        = 0;
+            env.sustain_last_point         = 1;
+            env.min_value                  = -0.5f;
+            env.min_max_delta              = 2.0f;
+            env.points[0]                  = { 0, 0x4000 };
+            env.points[1]                  = { 100, 0xC000 };
+            const uint32_t lfo_slot        = bank.lfos.allocate();
+            TEST(lfo_slot != Sculptor::pool_no_slot);
+            Synth::LFODescriptor& lfo                                 = bank.lfos.entries[lfo_slot];
+            lfo                                                       = Synth::LFODescriptor{};
+            lfo.wave                                                  = Synth::WaveType::sine_wave;
+            lfo.period_ms                                             = 300;
+            lfo.min_value                                             = -1.0f;
+            lfo.min_max_delta                                         = 2.0f;
+            instrument.layers[layer].targets[target].envelope_desc_id = static_cast<uint16_t>(env_slot + 1);
+            instrument.layers[layer].targets[target].lfo_desc_id      = static_cast<uint16_t>(lfo_slot + 1);
+        }
+        static Sculptor::Graph           graph;
+        static Sculptor::OscGraphMapping mapping;
+        TEST(Sculptor::project_instrument_to_graph(instrument, bank, &graph, &mapping));
+        TEST(mapping.detached_count == 2 * Synth::max_layers * Synth::num_mod_targets);
+        check_no_param_nodes(graph);
+    }
+    // Registry capacity, low layer count: one layer binds all nine targets
+    // (18 derived instances) and 120 surplus envelope records append 120
+    // more generators, so the projection builds 141 nodes - within the
+    // node pool but past any layer-count-sized registry. Metadata
+    // validation accepts the shape and the projection succeeds.
+    {
+        static Synth::InstrumentEditorBank low_bank;
+        static Synth::Instrument           instrument;
+        memset(&low_bank, 0, sizeof(low_bank));
+        instrument             = Synth::Instrument{};
+        instrument.layer_count = 1;
+        for (uint32_t target = 0; target < Synth::num_mod_targets; target++) {
+            const uint32_t env_slot = low_bank.bank.envelopes.allocate();
+            TEST(env_slot != pool_no_slot);
+            Synth::EnvelopeDescriptor& env = low_bank.bank.envelopes.entries[env_slot];
+            env                            = Synth::EnvelopeDescriptor{};
+            env.num_points                 = 2;
+            env.sustain_first_point        = 0;
+            env.sustain_last_point         = 1;
+            env.min_value                  = -0.5f;
+            env.min_max_delta              = 2.0f;
+            env.points[0]                  = { 0, 0x4000 };
+            env.points[1]                  = { 100, 0xC000 };
+            const uint32_t lfo_slot        = low_bank.bank.lfos.allocate();
+            TEST(lfo_slot != pool_no_slot);
+            Synth::LFODescriptor& lfo                             = low_bank.bank.lfos.entries[lfo_slot];
+            lfo                                                   = Synth::LFODescriptor{};
+            lfo.wave                                              = Synth::WaveType::sine_wave;
+            lfo.period_ms                                         = 300;
+            lfo.min_value                                         = -1.0f;
+            lfo.min_max_delta                                     = 2.0f;
+            instrument.layers[0].targets[target].envelope_desc_id = static_cast<uint16_t>(env_slot + 1);
+            instrument.layers[0].targets[target].lfo_desc_id      = static_cast<uint16_t>(lfo_slot + 1);
+        }
+        // One unbound envelope descriptor carries all 120 surplus records.
+        const uint32_t surplus_env = low_bank.bank.envelopes.allocate();
+        TEST(surplus_env != pool_no_slot);
+        Synth::EnvelopeDescriptor& surplus = low_bank.bank.envelopes.entries[surplus_env];
+        surplus                            = low_bank.bank.envelopes.entries[0];
+        low_bank.bank.channel_enabled[0]   = 1;
+        TEST(low_bank.bank.instruments.allocate() == 0);
+        low_bank.bank.instruments.entries[0]         = instrument;
+        low_bank.bank.channel_zones[0][0].start_note = 1;
+        low_bank.bank.channel_zones[0][0].instrument = 0;
+        for (uint32_t i = 0; i < Synth::max_detached_per_zone; i++) {
+            add_detached_record(&low_bank,
+                                0,
+                                0,
+                                1,
+                                surplus_env + 1,
+                                11.0f,
+                                22.0f,
+                                Synth::ModSource::none,
+                                Synth::ModSource::none,
+                                static_cast<uint8_t>(i + 1));
+        }
+        TEST(Sculptor::validate_editor_metadata(low_bank));
+        static Sculptor::Graph           low_graph;
+        static Sculptor::OscGraphMapping low_mapping;
+        TEST(Sculptor::project_editor_to_graph(low_bank, &low_graph, &low_mapping));
+        TEST(low_mapping.detached_count == 2 * Synth::num_mod_targets + Synth::max_detached_per_zone);
+        check_no_param_nodes(low_graph);
+    }
+
+    // C1 persistence: deleting a generator's last wire keeps the generator
+    // projected with a layout record across re-projection.
+    {
+        static Synth::InstrumentEditorBank source;
+        if (begin_small_graph(&source, &t7_graph, &t7_mapping)) {
+            TEST(source.graph_layout_count == 0); // record-less derived instances
+            const int32_t lfo_inst = find_detached_by_desc(t7_mapping, 2, 1);
+            TEST(lfo_inst >= 0);
+            if (lfo_inst >= 0) {
+                const uint32_t lfo_node = t7_mapping.detached[lfo_inst].node_idx;
+                // The LFO's last reference edge is the wire into the volume
+                // block's LFO dot.
+                const uint32_t wire = find_osc_graph_connection(
+                    t7_graph,
+                    { t7_mapping.osc_nodes[0], Sculptor::osc_target_lfo_dot(Synth::mod_volume) });
+                TEST(wire != Sculptor::pool_no_slot);
+                if (wire != Sculptor::pool_no_slot) {
+                    TEST(t7_graph.get_connection(wire).output.node_idx == lfo_node);
+                    t7_graph.delete_connection(wire);
+                    Sculptor::GraphChange changes[8] = {};
+                    const uint32_t        count      = t7_graph.take_changes(changes, 8);
+                    TEST(count == 1);
+                    for (uint32_t i = 0; i < count; i++) {
+                        TEST(Sculptor::apply_osc_graph_change(&source, &t7_graph, &t7_mapping, changes[i]));
+                    }
+                    // The record-less, unreferenced generator gains a
+                    // layout record.
+                    TEST(count_records_matching(source, 0, 0, 2, 1) == 1);
+                    // Re-projection keeps the free-standing generator
+                    // projected.
+                    TEST(Sculptor::project_editor_to_graph(source, &t7_graph, &t7_mapping));
+                    (void)t7_graph.take_changes(discarded, Sculptor::max_pending_changes);
+                    const int32_t still = find_detached_by_desc(t7_mapping, 2, 1);
+                    TEST(still >= 0);
+                    if (still >= 0) {
+                        TEST(t7_mapping.detached[still].node_idx != Sculptor::pool_no_slot);
+                        TEST(t7_mapping.detached[still].uid != 0);
+                    }
+                }
+            }
+        }
+    }
+
+    // C1 persistence: a free-standing LFO's depth/rate source records
+    // follow the live edges across re-projection and undo/redo.
+    {
+        static Synth::InstrumentEditorBank source;
+        static Synth::Instrument           instrument;
+        build_zone_fixture(&source, &instrument);
+        const uint16_t free_lfo = add_detached_lfo_descriptor(&source);
+        add_detached_record(&source,
+                            0,
+                            0,
+                            2,
+                            free_lfo,
+                            120.0f,
+                            60.0f,
+                            Synth::ModSource::none,
+                            Synth::ModSource::none,
+                            1);
+        TEST(Sculptor::project_editor_to_graph(source, &t7_graph, &t7_mapping));
+        (void)t7_graph.take_changes(discarded, Sculptor::max_pending_changes);
+        const int32_t inst = find_detached_by_desc(t7_mapping, 2, free_lfo);
+        TEST(inst >= 0); // the record materializes the free-standing node
+        if (inst >= 0) {
+            const uint32_t           node         = t7_mapping.detached[inst].node_idx;
+            const uint32_t           velocity_idx = static_cast<uint32_t>(Synth::ModSource::velocity) - 1;
+            const Sculptor::EndPoint velocity_out = { t7_mapping.input_node,
+                                                      t7_mapping.input_source_slots[velocity_idx] };
+            // Validator-enabled depth/rate regression: the standard MIDI
+            // source output into the LFO depth and rate inputs passes
+            // osc_graph_validate (the C1(b) raw add below deliberately
+            // bypasses it), and the same inputs refuse a CC dot.
+            t7_graph.set_validator(Sculptor::osc_graph_validate, &t7_mapping);
+            TEST(Sculptor::osc_graph_validate(&t7_mapping,
+                                              t7_graph,
+                                              velocity_out,
+                                              { node, t7_mapping.lfo_depth_input_slot }));
+            TEST(Sculptor::osc_graph_validate(&t7_mapping,
+                                              t7_graph,
+                                              velocity_out,
+                                              { node, t7_mapping.lfo_rate_input_slot }));
+            {
+                static Sculptor::Graph             cc_graph;
+                static Sculptor::OscGraphMapping   cc_mapping;
+                static Synth::InstrumentEditorBank cc_probe;
+                static Synth::Instrument           cc_instr = {};
+                build_zone_fixture(&cc_probe, &cc_instr);
+                cc_probe.added_cc_mask[0] = 1u << 0;
+                const uint16_t probe_lfo  = add_detached_lfo_descriptor(&cc_probe);
+                add_detached_record(&cc_probe,
+                                    0,
+                                    0,
+                                    2,
+                                    probe_lfo,
+                                    120.0f,
+                                    60.0f,
+                                    Synth::ModSource::none,
+                                    Synth::ModSource::none,
+                                    1);
+                TEST(Sculptor::project_editor_to_graph(cc_probe, &cc_graph, &cc_mapping));
+                (void)cc_graph.take_changes(discarded, Sculptor::max_pending_changes);
+                char cc_label[32];
+                Sculptor::fx_cc_pair_label(Synth::cc_msb_base, cc_label, sizeof(cc_label));
+                uint32_t cc_slot = Sculptor::pool_no_slot;
+                TEST(find_graph_slot(cc_graph, cc_mapping.input_node, cc_label, &cc_slot));
+                TEST(cc_slot != Sculptor::pool_no_slot);
+                const int32_t probe_inst = find_detached_by_desc(cc_mapping, 2, probe_lfo);
+                TEST(probe_inst >= 0);
+                if (cc_slot != Sculptor::pool_no_slot && probe_inst >= 0) {
+                    TEST(! Sculptor::osc_graph_validate(
+                        &cc_mapping,
+                        cc_graph,
+                        { cc_mapping.input_node, cc_slot },
+                        { cc_mapping.detached[probe_inst].node_idx, cc_mapping.lfo_depth_input_slot }));
+                }
+            }
+            t7_graph.set_validator(nullptr, nullptr);
+            TEST(t7_graph.add_connection(velocity_out, { node, t7_mapping.lfo_depth_input_slot }) !=
+                 Sculptor::pool_no_slot);
+            Sculptor::GraphChange changes[8] = {};
+            const uint32_t        count      = t7_graph.take_changes(changes, 8);
+            TEST(count == 1);
+            // Whole-bank undo around the rewire.
+            static uint8_t     undo_storage[sizeof(Synth::InstrumentEditorBank) * 4 + 256];
+            Sculptor::UndoRedo undo;
+            undo.init(undo_storage);
+            undo.init_undo_push();
+            undo.push(&source, sizeof(source));
+            TEST(undo.finish_undo_push());
+            TEST(Sculptor::apply_osc_graph_change(&source, &t7_graph, &t7_mapping, changes[0]));
+            // The record followed the live edge.
+            const Synth::GraphNodeLayout* record = nullptr;
+            for (uint32_t i = 0; i < source.graph_layout_count; i++) {
+                if (source.graph_layout[i].kind == 2 && source.graph_layout[i].uid == 1) {
+                    record = &source.graph_layout[i];
+                }
+            }
+            TEST(record != nullptr);
+            if (record) {
+                TEST(record->depth_source == static_cast<uint8_t>(Synth::ModSource::velocity));
+            }
+            static Synth::InstrumentEditorBank wired;
+            wired = source;
+            undo.init_redo_push();
+            undo.push(&wired, sizeof(wired));
+            TEST(undo.finish_redo_push());
+            // Undo: the record reverts and re-projection has no depth wire.
+            TEST(undo.init_undo());
+            undo.pop(&source, sizeof(source));
+            undo.finish_undo();
+            TEST(Sculptor::project_editor_to_graph(source, &t7_graph, &t7_mapping));
+            (void)t7_graph.take_changes(discarded, Sculptor::max_pending_changes);
+            const int32_t undone = find_detached_by_desc(t7_mapping, 2, free_lfo);
+            TEST(undone >= 0);
+            if (undone >= 0) {
+                TEST(find_osc_graph_connection(t7_graph,
+                                               { t7_mapping.detached[undone].node_idx,
+                                                 t7_mapping.lfo_depth_input_slot }) == Sculptor::pool_no_slot);
+            }
+            // Redo: the record carries the source again and re-projection
+            // restores the wire.
+            TEST(undo.init_redo());
+            undo.pop(&source, sizeof(source));
+            undo.finish_redo();
+            TEST(Sculptor::project_editor_to_graph(source, &t7_graph, &t7_mapping));
+            (void)t7_graph.take_changes(discarded, Sculptor::max_pending_changes);
+            const int32_t redone = find_detached_by_desc(t7_mapping, 2, free_lfo);
+            TEST(redone >= 0);
+            if (redone >= 0) {
+                TEST(find_osc_graph_connection(t7_graph,
+                                               { t7_mapping.detached[redone].node_idx,
+                                                 t7_mapping.lfo_depth_input_slot }) != Sculptor::pool_no_slot);
+                // Unwiring zeroes the record's source again.
+                const uint32_t depth_wire = find_osc_graph_connection(
+                    t7_graph,
+                    { t7_mapping.detached[redone].node_idx, t7_mapping.lfo_depth_input_slot });
+                t7_graph.delete_connection(depth_wire);
+                const uint32_t deleted = t7_graph.take_changes(changes, 8);
+                TEST(deleted == 1);
+                TEST(Sculptor::apply_osc_graph_change(&source, &t7_graph, &t7_mapping, changes[0]));
+                const Synth::GraphNodeLayout* unwired = nullptr;
+                for (uint32_t i = 0; i < source.graph_layout_count; i++) {
+                    if (source.graph_layout[i].kind == 2 && source.graph_layout[i].uid == 1) {
+                        unwired = &source.graph_layout[i];
+                    }
+                }
+                TEST(unwired != nullptr);
+                if (unwired) {
+                    TEST(unwired->depth_source == 0);
+                }
+            }
+        }
+    }
+}
+
+// Replaces the single occurrence of `needle` in `payload` (length `len`)
+// with `replacement`, writing the patched document to `out`. Returns the
+// patched length, or 0 when the needle does not occur exactly once or the
+// patched document does not fit. Used to shape hand-decoded routing
+// variants the encoder itself refuses to emit.
+static uint32_t splice_single_occurrence(const char* payload,
+                                         uint32_t    len,
+                                         const char* needle,
+                                         const char* replacement,
+                                         char*       out,
+                                         uint32_t    capacity)
+{
+    const uint32_t    needle_len      = static_cast<uint32_t>(strlen(needle));
+    const uint32_t    replacement_len = static_cast<uint32_t>(strlen(replacement));
+    const char* const hit             = strstr(payload, needle);
+    if (! hit) {
+        return 0;
+    }
+    if (strstr(hit + 1, needle) != nullptr) {
+        return 0; // needle is not unique in the document
+    }
+    const uint32_t head = static_cast<uint32_t>(hit - payload);
+    const uint32_t tail = len - head - needle_len;
+    if (head + replacement_len + tail + 1 > capacity) {
+        return 0;
+    }
+    memcpy(out, payload, head);
+    memcpy(out + head, replacement, replacement_len);
+    memcpy(out + head + replacement_len, payload + head + needle_len, tail);
+    return head + replacement_len + tail;
+}
+
+// Oscillator-pane CC regressions (M6 carry-over). The registry shares the
+// per-channel added_cc_mask with the fx pane; the projection adds one MIDI
+// Inputs output dot per set bit and the layer bindings' cc inputs wire the
+// oscillator source rows through it; the validator confines CC dots to the
+// Source rows; bank validation and the routing encoder admit cc with
+// cc_number 16..31 and keep the non-CC-must-be-zero rule. The menu commands
+// are GUI-only (sculptor_instr_edit.cpp is not linked into this suite), so
+// the tests drive the mask bits directly - the same shape the fx-pane
+// registry tests use.
+static void osc_cc_regressions()
+{
+    static Sculptor::GraphChange discarded[Sculptor::max_pending_changes];
+
+    // T-M6-1: the editor CC mask projects one CC output dot per set bit
+    // (labeled like the fx pane's pairs), the wired cell compiles the cc
+    // input, and clearing the mask bit drops the dot so the re-projection
+    // leaves the cell unwired and the compile drops the input.
+    {
+        static Synth::InstrumentEditorBank source;
+        static Synth::Instrument           instrument = {};
+        static Sculptor::Graph             graph;
+        static Sculptor::OscGraphMapping   mapping;
+        build_zone_fixture(&source, &instrument);
+        Synth::TargetBinding& routing = source.bank.instruments.entries[0].layers[0].targets[Synth::mod_volume];
+        routing.num_inputs            = 1;
+        routing.inputs[0].source      = Synth::ModSource::cc;
+        routing.inputs[0].op          = Synth::SourceOp::add;
+        routing.inputs[0].cc_number   = Synth::cc_msb_base;
+        routing.inputs[0].scale       = 0.5f;
+        source.added_cc_mask[0]       = 1u << 0;
+        TEST(Sculptor::project_editor_to_graph(source, &graph, &mapping));
+        (void)graph.take_changes(discarded, Sculptor::max_pending_changes);
+        char cc_label[32];
+        Sculptor::fx_cc_pair_label(Synth::cc_msb_base, cc_label, sizeof(cc_label));
+        uint32_t cc_slot = Sculptor::pool_no_slot;
+        TEST(find_graph_slot(graph, mapping.input_node, cc_label, &cc_slot));
+        TEST(mapping.input_cc_slots[0] == cc_slot);
+        // The detune rows stay the MIDI Inputs node's last two slots.
+        uint32_t note_detune_slot = Sculptor::pool_no_slot;
+        uint32_t osc_detune_slot  = Sculptor::pool_no_slot;
+        TEST(find_graph_slot(graph, mapping.input_node, "Random Note Detune", &note_detune_slot));
+        TEST(find_graph_slot(graph, mapping.input_node, "Random Oscillator Detune", &osc_detune_slot));
+        TEST(note_detune_slot == mapping.input_detune_slots[0]);
+        TEST(osc_detune_slot == mapping.input_detune_slots[1]);
+        TEST(note_detune_slot == graph.node(mapping.input_node).slots.num_allocated - 2);
+        TEST(osc_detune_slot == graph.node(mapping.input_node).slots.num_allocated - 1);
+        static Synth::Instrument compiled;
+        TEST(Sculptor::compile_graph_to_instrument(graph, mapping, &compiled));
+        TEST(compiled.layers[0].targets[Synth::mod_volume].num_inputs == 1);
+        TEST(compiled.layers[0].targets[Synth::mod_volume].inputs[0].source == Synth::ModSource::cc);
+        TEST(compiled.layers[0].targets[Synth::mod_volume].inputs[0].cc_number == Synth::cc_msb_base);
+        source.added_cc_mask[0] = 0;
+        TEST(Sculptor::project_editor_to_graph(source, &graph, &mapping));
+        (void)graph.take_changes(discarded, Sculptor::max_pending_changes);
+        TEST(mapping.input_cc_slots[0] == Sculptor::pool_no_slot);
+        uint32_t gone_slot = Sculptor::pool_no_slot;
+        TEST(! find_graph_slot(graph, mapping.input_node, cc_label, &gone_slot));
+        TEST(Sculptor::compile_graph_to_instrument(graph, mapping, &compiled));
+        TEST(compiled.layers[0].targets[Synth::mod_volume].num_inputs == 0);
+        // The bank keeps carrying the undotted routing.
+        TEST(source.bank.instruments.entries[0].layers[0].targets[Synth::mod_volume].inputs[0].source ==
+             Synth::ModSource::cc);
+    }
+
+    // T-M6-3 (undotted legacy shape): a cc routing with no registry bit
+    // projects the source rows unwired, the compile drops the input, and
+    // the bank keeps carrying it. This pins the
+    // decode-never-synthesizes-registry-bits rule (T-M4-9 analogue).
+    {
+        static Synth::InstrumentEditorBank source;
+        static Synth::Instrument           instrument = {};
+        static Sculptor::Graph             graph;
+        static Sculptor::OscGraphMapping   mapping;
+        build_zone_fixture(&source, &instrument);
+        Synth::TargetBinding& legacy_routing = source.bank.instruments.entries[0].layers[0].targets[Synth::mod_volume];
+        legacy_routing.num_inputs            = 1;
+        legacy_routing.inputs[0].source      = Synth::ModSource::cc;
+        legacy_routing.inputs[0].op          = Synth::SourceOp::add;
+        legacy_routing.inputs[0].cc_number   = static_cast<uint8_t>(Synth::cc_msb_base);
+        legacy_routing.inputs[0].scale       = 0.5f;
+        TEST(Sculptor::project_editor_to_graph(source, &graph, &mapping));
+        (void)graph.take_changes(discarded, Sculptor::max_pending_changes);
+        const uint32_t osc = mapping.osc_nodes[0];
+        TEST(osc != Sculptor::pool_no_slot);
+        if (osc != Sculptor::pool_no_slot) {
+            TEST(find_osc_graph_connection(graph, { osc, Sculptor::osc_target_src_dot(Synth::mod_volume, 0) }) ==
+                 Sculptor::pool_no_slot);
+            TEST(find_osc_graph_connection(graph, { osc, Sculptor::osc_target_src_dot(Synth::mod_volume, 1) }) ==
+                 Sculptor::pool_no_slot);
+            static Synth::Instrument compiled;
+            TEST(Sculptor::compile_graph_to_instrument(graph, mapping, &compiled));
+            for (uint32_t layer = 0; layer < compiled.layer_count; ++layer) {
+                TEST(compiled.layers[layer].targets[Synth::mod_volume].num_inputs == 0);
+            }
+            TEST(source.bank.instruments.entries[0].layers[0].targets[Synth::mod_volume].inputs[0].source ==
+                 Synth::ModSource::cc);
+        }
+    }
+
+    // T-M6-5: removal-refusal inputs. The removal handlers are GUI-only
+    // (sculptor_instr_edit.cpp is not linked into this suite), so the tests
+    // pin the predicates the refusals consult. The master chain keeps the
+    // fx-chain-only guard: fx_chain_uses_cc is true when the master chain
+    // wires the CC and stays false when only a zone's osc routing wires it,
+    // so the master case never consults channel_zones. The channel-wide
+    // widened guard (channel_uses_cc over the fx chain OR the zone osc
+    // bindings) is pinned below: it fires for the zone osc wiring and for
+    // the channel's own fx chain, not for master-chain wiring.
+    {
+        static Synth::InstrumentEditorBank source;
+        static Synth::Instrument           instrument = {};
+        build_zone_fixture(&source, &instrument);
+        Synth::TargetBinding& routing = source.bank.instruments.entries[0].layers[0].targets[Synth::mod_volume];
+        routing.num_inputs            = 1;
+        routing.inputs[0].source      = Synth::ModSource::cc;
+        routing.inputs[0].op          = Synth::SourceOp::add;
+        routing.inputs[0].cc_number   = Synth::cc_msb_base;
+        routing.inputs[0].scale       = 0.5f;
+        Synth::EffectSlotBinding* const master_slot =
+            enabled_effect(source.bank, Synth::max_channels, 0, Synth::EffectType::delay);
+        master_slot->bindings[0].num_inputs           = 1;
+        master_slot->bindings[0].inputs[0].source     = Synth::ModSource::cc;
+        master_slot->bindings[0].inputs[0].op         = Synth::SourceOp::add;
+        master_slot->bindings[0].inputs[0].cc_number  = static_cast<uint8_t>(Synth::cc_msb_base + 2);
+        master_slot->bindings[0].inputs[0].scale      = 0.5f;
+        Synth::EffectSlotBinding* const channel_slot  = enabled_effect(source.bank, 0, 0, Synth::EffectType::delay);
+        channel_slot->bindings[0].num_inputs          = 1;
+        channel_slot->bindings[0].inputs[0].source    = Synth::ModSource::cc;
+        channel_slot->bindings[0].inputs[0].op        = Synth::SourceOp::add;
+        channel_slot->bindings[0].inputs[0].cc_number = static_cast<uint8_t>(Synth::cc_msb_base + 1);
+        channel_slot->bindings[0].inputs[0].scale     = 0.5f;
+        TEST(Sculptor::fx_chain_uses_cc(source.bank.master_chain, Synth::cc_msb_base + 2));
+        TEST(! Sculptor::fx_chain_uses_cc(source.bank.master_chain, Synth::cc_msb_base));
+        TEST(! Sculptor::fx_chain_uses_cc(source.bank.channel_chains[0], Synth::cc_msb_base));
+        // The channel-wide widened guard: the zone osc binding, the
+        // channel's own fx chain, no master-chain leak, no out-of-range hit.
+        TEST(Sculptor::channel_uses_cc(source, 0, Synth::cc_msb_base));
+        TEST(Sculptor::channel_uses_cc(source, 0, Synth::cc_msb_base + 1));
+        TEST(! Sculptor::channel_uses_cc(source, 0, Synth::cc_msb_base + 2));
+        TEST(! Sculptor::channel_uses_cc(source, 0, Synth::cc_msb_base + 3));
+        TEST(! Sculptor::channel_uses_cc(source, 0, 0));
+        TEST(! Sculptor::channel_uses_cc(source, Synth::max_channels, Synth::cc_msb_base));
+        // An empty zone slot's instrument byte is meaningless: a channel
+        // with no zones must not alias instrument 0's wiring.
+        TEST(! Sculptor::channel_uses_cc(source, 1, Synth::cc_msb_base));
+    }
+
+    // T-M6-6: persistence. An osc cc routing input rides the existing
+    // per-layer sources arrays: the bank encoder already spells cc, so
+    // bank validation is the decode-time admission gate; once admitted,
+    // encode/decode is byte-identical. Decode refuses a cc_number outside
+    // 16..31 and a non-cc input carrying a stale cc_number; a legacy bank
+    // without osc cc decodes unchanged.
+    {
+        static Synth::InstrumentEditorBank source;
+        static Synth::Instrument           instrument = {};
+        static Synth::InstrumentEditorBank decoded;
+        static char                        payload[Synth::library_payload_max];
+        static char                        reencoded[Synth::library_payload_max];
+        static char                        patched[Synth::library_payload_max];
+        build_zone_fixture(&source, &instrument);
+        Synth::TargetBinding& routing = source.bank.instruments.entries[0].layers[0].targets[Synth::mod_volume];
+        routing.num_inputs            = 1;
+        routing.inputs[0].source      = Synth::ModSource::cc;
+        routing.inputs[0].op          = Synth::SourceOp::add;
+        routing.inputs[0].cc_number   = static_cast<uint8_t>(Synth::cc_msb_base);
+        routing.inputs[0].scale       = 0.5f;
+        const uint32_t encoded_len    = Synth::encode_editor_bank_json(&source, payload, sizeof(payload));
+        TEST(encoded_len > 0);
+        if (encoded_len > 0) {
+            TEST(Synth::decode_editor_bank_json(payload, encoded_len, &decoded));
+            TEST(decoded.bank.instruments.entries[0].layers[0].targets[Synth::mod_volume].inputs[0].source ==
+                 Synth::ModSource::cc);
+            TEST(decoded.bank.instruments.entries[0].layers[0].targets[Synth::mod_volume].inputs[0].cc_number ==
+                 Synth::cc_msb_base);
+            const uint32_t again_len = Synth::encode_editor_bank_json(&decoded, reencoded, sizeof(reencoded));
+            TEST(again_len == encoded_len);
+            TEST(memcmp(payload, reencoded, encoded_len) == 0);
+        }
+        // Decode refusals, shaped by splicing the compact encoder output:
+        // the fixture's single velocity input is the only source spelling
+        // in the document, so the needle is unique by construction.
+        build_zone_fixture(&source, &instrument);
+        const uint32_t clean_len = Synth::encode_editor_bank_json(&source, payload, sizeof(payload));
+        TEST(clean_len > 0);
+        if (clean_len > 0) {
+            uint32_t    velocity_count = 0;
+            const char* scan           = payload;
+            while ((scan = strstr(scan, "\"source\":\"velocity\"")) != nullptr) {
+                velocity_count++;
+                scan++;
+            }
+            TEST(velocity_count == 1);
+            const uint32_t low_len = splice_single_occurrence(payload,
+                                                              clean_len,
+                                                              "\"source\":\"velocity\"",
+                                                              "\"source\":\"cc\",\"cc_number\":15",
+                                                              patched,
+                                                              sizeof(patched));
+            TEST(low_len > 0);
+            if (low_len > 0) {
+                TEST(! Synth::decode_editor_bank_json(patched, low_len, &decoded));
+            }
+            const uint32_t high_len = splice_single_occurrence(payload,
+                                                               clean_len,
+                                                               "\"source\":\"velocity\"",
+                                                               "\"source\":\"cc\",\"cc_number\":32",
+                                                               patched,
+                                                               sizeof(patched));
+            TEST(high_len > 0);
+            if (high_len > 0) {
+                TEST(! Synth::decode_editor_bank_json(patched, high_len, &decoded));
+            }
+            const uint32_t stale_len = splice_single_occurrence(payload,
+                                                                clean_len,
+                                                                "\"source\":\"velocity\"",
+                                                                "\"source\":\"velocity\",\"cc_number\":17",
+                                                                patched,
+                                                                sizeof(patched));
+            TEST(stale_len > 0);
+            if (stale_len > 0) {
+                TEST(! Synth::decode_editor_bank_json(patched, stale_len, &decoded));
+            }
+        }
+        // A legacy bank without osc cc decodes unchanged.
+        build_zone_fixture(&source, &instrument);
+        const uint32_t legacy_len = Synth::encode_editor_bank_json(&source, payload, sizeof(payload));
+        TEST(legacy_len > 0);
+        if (legacy_len > 0) {
+            TEST(Synth::decode_editor_bank_json(payload, legacy_len, &decoded));
+            TEST(decoded.bank.instruments.entries[0].layers[0].targets[Synth::mod_volume].inputs[0].source ==
+                 Synth::ModSource::velocity);
+            TEST(decoded.bank.instruments.entries[0].layers[0].targets[Synth::mod_volume].inputs[0].cc_number == 0);
+        }
+    }
+
+    // T-M6-8: end-to-end runtime seam. A bank whose layer-0 volume binding
+    // carries a cc input modulates through the production data path: the
+    // validate preflight admits the 16..31 cc_number (the rule that keeps
+    // resolve_source's slot assert in realtime_synth.cpp unreachable),
+    // apply_channel_cc drives the channel's CC leaf exactly the way
+    // process_controller writes it, and the binding's inputs configure the
+    // volume dest whose value propagate_parameters folds.
+    // configure_target_modulation and resolve_source are static in
+    // realtime_synth.cpp and not linked here, so the block below is the
+    // production-shape replica of their cc case, built only from exported
+    // primitives and constants and mirroring realtime_synth.cpp:1039-1171.
+    {
+        static Synth::InstrumentBank runtime_bank;
+        memset(&runtime_bank, 0, sizeof(runtime_bank));
+        const uint32_t instr_slot = runtime_bank.instruments.allocate();
+        TEST(instr_slot == 0);
+        if (instr_slot == 0) {
+            Synth::Instrument&    cc_instr              = runtime_bank.instruments.entries[instr_slot];
+            Synth::TargetBinding& cc_volume             = cc_instr.layers[0].targets[Synth::mod_volume];
+            cc_instr.layer_count                        = 1;
+            cc_instr.layers[0].osc_type[0]              = Synth::WaveType::sine_wave;
+            cc_volume.base_value                        = 0.8f;
+            cc_volume.num_inputs                        = 1;
+            cc_volume.inputs[0].source                  = Synth::ModSource::cc;
+            cc_volume.inputs[0].op                      = Synth::SourceOp::add;
+            cc_volume.inputs[0].cc_number               = static_cast<uint8_t>(Synth::cc_msb_base);
+            cc_volume.inputs[0].scale                   = 0.5f;
+            runtime_bank.channel_zones[0][0].start_note = 1;
+            runtime_bank.channel_zones[0][0].instrument = static_cast<uint8_t>(instr_slot);
+            runtime_bank.channel_enabled[0]             = 1;
+            TEST(Synth::validate_instrument_bank(&runtime_bank));
+            // Leaf ids mirror the runtime layout: the sentinel occupies id 0
+            // and the channel CC leaves start at 1, one per assignable slot
+            // (channel_param(channel, chan_param_cc_0 + slot)).
+            constexpr uint32_t            cc_leaf_base          = 1;
+            constexpr uint32_t            replica_count         = cc_leaf_base + Synth::num_assignable_ccs + 1;
+            static Synth::ParamDescriptor descs[replica_count]  = {};
+            static Synth::Parameter       params[replica_count] = {};
+            memset(descs, 0, sizeof(descs));
+            memset(params, 0, sizeof(params));
+            static Synth::ChannelCcState cc_state;
+            memset(&cc_state, 0, sizeof(cc_state));
+            const Synth::TargetBinding& volume_binding =
+                runtime_bank.instruments.entries[instr_slot].layers[0].targets[Synth::mod_volume];
+            Synth::SourceParam sources[Synth::max_mod_inputs] = {};
+            uint32_t           num_sources                    = 0;
+            for (uint32_t i = 0; i < volume_binding.num_inputs && i < Synth::max_mod_inputs; ++i) {
+                const Synth::ModInput& input = volume_binding.inputs[i];
+                TEST(input.source == Synth::ModSource::cc);
+                TEST(Synth::cc_is_assignable(input.cc_number));
+                sources[num_sources].param_id =
+                    static_cast<uint16_t>(cc_leaf_base + (input.cc_number - Synth::cc_msb_base));
+                sources[num_sources].scale = input.scale;
+                sources[num_sources].op    = input.op;
+                num_sources++;
+            }
+            Synth::configure_plain(&descs[cc_leaf_base + Synth::num_assignable_ccs],
+                                   volume_binding.base_value,
+                                   0,
+                                   0,
+                                   Synth::SourceOp::add,
+                                   sources,
+                                   num_sources);
+            const uint32_t cc_leaf     = cc_leaf_base + 0;
+            const uint32_t volume_dest = cc_leaf_base + Synth::num_assignable_ccs;
+            // Stage one: CC 16 at zero keeps the volume at its base value.
+            const float closed = Synth::apply_channel_cc(&cc_state, Synth::cc_msb_base, 0);
+            TEST(approx(closed, 0.0f, 0.0001f));
+            Synth::write_external_leaf(closed,
+                                       Synth::ExternalLeaf{ &params[cc_leaf].value, &params[cc_leaf].prev_value });
+            Synth::propagate_parameters(params, descs, replica_count);
+            TEST(approx(params[volume_dest].value, 0.8f, 0.001f));
+            // Stage two: CC 16 at full deflection moves the volume. The
+            // zero-initialized channel state carries lsb 0 (the 0xFF
+            // not-yet-seen sentinel exists only in freshly constructed
+            // production state), so the 14-bit value is cc_14bit_value(127, 0).
+            const float open = Synth::apply_channel_cc(&cc_state, Synth::cc_msb_base, 127);
+            TEST(approx(open, Synth::cc_14bit_value(127, 0), 0.0001f));
+            Synth::write_external_leaf(open,
+                                       Synth::ExternalLeaf{ &params[cc_leaf].value, &params[cc_leaf].prev_value });
+            Synth::propagate_parameters(params, descs, replica_count);
+            TEST(approx(params[volume_dest].value, 0.8f + 0.5f * Synth::cc_14bit_value(127, 0), 0.001f));
+        }
+    }
+
+    // T-M6-9: a target LFO cc source fails decode - LFO depth/rate sources
+    // carry no cc_number, so bank validation refuses cc there.
+    {
+        static Synth::InstrumentEditorBank source;
+        static Synth::Instrument           instrument = {};
+        static Synth::InstrumentEditorBank decoded;
+        static char                        payload[Synth::library_payload_max];
+        static char                        patched[Synth::library_payload_max];
+        build_zone_fixture(&source, &instrument);
+        source.bank.instruments.entries[0].layers[0].targets[Synth::mod_volume].lfo_depth_source =
+            Synth::ModSource::velocity;
+        const uint32_t clean_len = Synth::encode_editor_bank_json(&source, payload, sizeof(payload));
+        TEST(clean_len > 0);
+        if (clean_len > 0) {
+            TEST(Synth::decode_editor_bank_json(payload, clean_len, &decoded));
+            // The volume binding is the document's only lfo with a
+            // depth_source spelling, so the needle is unique by construction.
+            // (The bank format spells generator sources as lfo_depth_source.)
+            uint32_t    depth_source_count = 0;
+            const char* scan               = payload;
+            while ((scan = strstr(scan, "\"lfo_depth_source\":\"velocity\"")) != nullptr) {
+                depth_source_count++;
+                scan++;
+            }
+            TEST(depth_source_count == 1);
+            const uint32_t spliced_len = splice_single_occurrence(payload,
+                                                                  clean_len,
+                                                                  "\"lfo_depth_source\":\"velocity\"",
+                                                                  "\"lfo_depth_source\":\"cc\"",
+                                                                  patched,
+                                                                  sizeof(patched));
+            TEST(spliced_len > 0);
+            if (spliced_len > 0) {
+                TEST(! Synth::decode_editor_bank_json(patched, spliced_len, &decoded));
+            }
+        }
+    }
+}
+
 int main()
 {
     effects_paste_pin_regressions();
@@ -6734,10 +7273,11 @@ int main()
     effects_add_cc_regressions();
     effects_enable_regressions();
     effects_inline_modulator_regressions();
-    osc_cc_regressions();
     osc_inputs_move_reprojection_regressions();
     fx_inputs_move_reprojection_regressions();
     osc_inherit_source_regressions();
+    osc_direct_modulator_regressions();
+    osc_cc_regressions();
     // silent unless failing, and failures report on stderr, so stdout is discarded.
 #ifdef _WIN32
     freopen("NUL", "w", stdout);
@@ -10626,8 +11166,8 @@ int main()
     // ---- Oscillator-graph projection (sculptor_osc_graph) ----
 
     // Max-complexity round-trip: a fully populated instrument projects to the
-    // full graph (7 fixed nodes + 7 oscillators + 35 parameters + 35 envelope
-    // and 35 LFO instances = 119 nodes, 252 edges) and compiles back
+    // full graph (2 canonical + 7 oscillators + 35 envelope and 35 LFO
+    // instances = 79 nodes, 217 edges) and compiles back
     // bit-identically, with the descriptor pools untouched (no dedup or
     // duplication) and the aliasing pattern preserved.
     {
@@ -10641,37 +11181,29 @@ int main()
         static Sculptor::Graph           graph;
         static Sculptor::OscGraphMapping mapping;
         TEST(Sculptor::project_instrument_to_graph(instrument, bank, &graph, &mapping));
-        check_osc_graph_mapping(graph, mapping, Synth::max_layers, 35, 35, 35);
-        TEST(graph.connection_count() == 252);
+        check_osc_graph_mapping(graph, mapping, Synth::max_layers, 35, 35);
+        TEST(graph.connection_count() == 217);
 
         // Re-projection onto a populated graph resets it deterministically.
         TEST(Sculptor::project_instrument_to_graph(instrument, bank, &graph, &mapping));
-        check_osc_graph_mapping(graph, mapping, Synth::max_layers, 35, 35, 35);
-        TEST(graph.connection_count() == 252);
+        check_osc_graph_mapping(graph, mapping, Synth::max_layers, 35, 35);
+        TEST(graph.connection_count() == 217);
 
         static Synth::Instrument compiled;
         TEST(Sculptor::compile_graph_to_instrument(graph, mapping, &compiled));
         TEST(memcmp(&instrument, &compiled, sizeof(Synth::Instrument)) == 0);
         TEST(memcmp(&bank_image, &bank, sizeof(Synth::InstrumentBank)) == 0);
 
-        // The aliased LFO descriptor serves two parameters through two distinct
+        // The aliased LFO descriptor serves two cells through two distinct
         // instances (their depth/rate sources differ); both compiled cells
         // carry the shared desc id.
-        const int32_t pitch_cell  = find_param_by_served(mapping, 1, static_cast<uint8_t>(1u << 1));
-        const int32_t volume_cell = find_param_by_served(mapping, 0, static_cast<uint8_t>(1u << 4));
-        TEST(pitch_cell >= 0 && volume_cell >= 0);
-        if (pitch_cell >= 0 && volume_cell >= 0) {
-            TEST(mapping.params[pitch_cell].lfo_node != mapping.params[volume_cell].lfo_node);
-            const int32_t lfo_a = find_instance_by_node(mapping, mapping.params[pitch_cell].lfo_node);
-            const int32_t lfo_b = find_instance_by_node(mapping, mapping.params[volume_cell].lfo_node);
-            TEST(lfo_a >= 0 && lfo_b >= 0);
-            if (lfo_a >= 0 && lfo_b >= 0) {
-                TEST(mapping.detached[lfo_a].desc_id == lfo_ids[1][Synth::mod_pitch]);
-                TEST(mapping.detached[lfo_b].desc_id == lfo_ids[1][Synth::mod_pitch]);
+        uint32_t alias_instances = 0;
+        for (uint32_t i = 0; i < mapping.detached_count; ++i) {
+            if (mapping.detached[i].kind == 2 && mapping.detached[i].desc_id == lfo_ids[1][Synth::mod_pitch]) {
+                ++alias_instances;
             }
         }
-        TEST(compiled.layers[1].targets[Synth::mod_pitch].lfo_desc_id == lfo_ids[1][Synth::mod_pitch]);
-        TEST(compiled.layers[4].targets[Synth::mod_volume].lfo_desc_id == lfo_ids[1][Synth::mod_pitch]);
+        TEST(alias_instances == 2);
     }
 
     // Minimal round-trip: one unbound oscillator layer projects to the fixed
@@ -10685,7 +11217,7 @@ int main()
         static Sculptor::Graph           graph;
         static Sculptor::OscGraphMapping mapping;
         TEST(Sculptor::project_instrument_to_graph(instrument, bank, &graph, &mapping));
-        check_osc_graph_mapping(graph, mapping, 1, 0, 0, 0);
+        check_osc_graph_mapping(graph, mapping, 1, 0, 0);
         TEST(graph.connection_count() == 1);
         static Synth::Instrument compiled;
         TEST(Sculptor::compile_graph_to_instrument(graph, mapping, &compiled));
@@ -10700,381 +11232,6 @@ int main()
         TEST(graph.node(mapping.osc_nodes[0]).slots.entries[1].value.list_index == 1);
         TEST(Sculptor::compile_graph_to_instrument(graph, mapping, &compiled));
         TEST(compiled.layers[0].osc_type[0] == Synth::WaveType::sawtooth_wave);
-    }
-
-    // Grammar validator: the allowed edge set is exactly parameter -> its own
-    // target's oscillator value row, envelope -> parameter envelope input,
-    // LFO -> parameter LFO input, MIDI input -> parameter source input or LFO
-    // depth/rate source, and the layer-matched oscillator -> sum connections.
-    // A repeated allowed pair stays allowed: duplicate inputs are first-class
-    // and order-significant, so there is no duplicate-source rule.
-    {
-        static Synth::InstrumentBank bank;
-        static Synth::Instrument     instrument    = {};
-        uint16_t                     shared_env_id = 0;
-        uint16_t                     lfo_id        = 0;
-        uint16_t                     volume_env_id = 0;
-        build_osc_graph_small_fixture(&bank, &instrument, &shared_env_id, &lfo_id, &volume_env_id);
-        static Sculptor::Graph           graph;
-        static Sculptor::OscGraphMapping mapping;
-        TEST(Sculptor::project_instrument_to_graph(instrument, bank, &graph, &mapping));
-        check_osc_graph_mapping(graph, mapping, 1, 2, 2, 1);
-        TEST(graph.connection_count() == 7); // 2 osc wires + 2 env + 1 lfo + 1 source + 1 sum
-
-        const Sculptor::EndPoint volume_out   = { mapping.params[0].node_idx, mapping.param_output_slot };
-        const Sculptor::EndPoint pitch_out    = { mapping.params[1].node_idx, mapping.param_output_slot };
-        const Sculptor::EndPoint osc_out      = { mapping.osc_nodes[0], mapping.osc_output_slot };
-        const Sculptor::EndPoint env_out      = { mapping.params[0].env_node, mapping.env_output_slot };
-        const Sculptor::EndPoint lfo_out      = { mapping.params[0].lfo_node, mapping.lfo_output_slot };
-        const uint32_t           velocity_idx = static_cast<uint32_t>(Synth::ModSource::velocity) - 1;
-        const Sculptor::EndPoint input_out    = { mapping.input_node, mapping.input_source_slots[velocity_idx] };
-        const Sculptor::EndPoint volume_row   = { mapping.osc_nodes[0], 9 };
-        const Sculptor::EndPoint pitch_row    = { mapping.osc_nodes[0], 11 };
-        const Sculptor::EndPoint env_in       = { mapping.params[1].node_idx, 2 };
-        const Sculptor::EndPoint lfo_in       = { mapping.params[0].node_idx, 3 };
-        const Sculptor::EndPoint src_in       = { mapping.params[0].node_idx, 7 };
-        const Sculptor::EndPoint depth_in     = { mapping.params[0].lfo_node, mapping.lfo_depth_input_slot };
-        const Sculptor::EndPoint rate_in      = { mapping.params[0].lfo_node, mapping.lfo_rate_input_slot };
-        const Sculptor::EndPoint sum_in       = { mapping.output_node, mapping.output_layer_input_slot[0] };
-        TEST(Sculptor::osc_graph_validate(&mapping, graph, volume_out, volume_row));
-        TEST(Sculptor::osc_graph_validate(&mapping, graph, pitch_out, pitch_row));
-        // The volume envelope (desc 2) already serves the volume target, so it
-        // cannot also serve pitch; the pitch envelope (desc 1) can.
-        TEST(! Sculptor::osc_graph_validate(&mapping, graph, env_out, env_in));
-        const Sculptor::EndPoint pitch_env_out = { mapping.params[1].env_node, mapping.env_output_slot };
-        TEST(Sculptor::osc_graph_validate(&mapping, graph, pitch_env_out, env_in));
-        TEST(Sculptor::osc_graph_validate(&mapping, graph, lfo_out, lfo_in));
-        TEST(Sculptor::osc_graph_validate(&mapping, graph, input_out, src_in));
-        TEST(Sculptor::osc_graph_validate(&mapping, graph, input_out, depth_in));
-        TEST(Sculptor::osc_graph_validate(&mapping, graph, input_out, rate_in));
-        TEST(Sculptor::osc_graph_validate(&mapping, graph, osc_out, sum_in));
-        // The same source -> same target pair validates twice.
-        TEST(Sculptor::osc_graph_validate(&mapping, graph, input_out, src_in));
-        TEST(Sculptor::osc_graph_validate(&mapping, graph, input_out, src_in));
-        // Everything outside the allowed set is refused. These two
-        // parameters are derived (uid == 0), so even a cross-target drop
-        // that would retarget a record-backed parameter is refused for them.
-        TEST(! Sculptor::osc_graph_validate(&mapping, graph, volume_out, pitch_row)); // derived, cross-target
-        TEST(! Sculptor::osc_graph_validate(&mapping, graph, pitch_out, volume_row)); // derived, cross-target
-        TEST(! Sculptor::osc_graph_validate(&mapping, graph, lfo_out, env_in));       // lfo into an envelope input
-        TEST(! Sculptor::osc_graph_validate(&mapping, graph, env_out, lfo_in));       // envelope into an LFO input
-        TEST(! Sculptor::osc_graph_validate(&mapping, graph, env_out, src_in));       // envelope into a source input
-        TEST(! Sculptor::osc_graph_validate(&mapping,
-                                            graph,
-                                            input_out,
-                                            volume_row));                         // sources never reach oscillator rows
-        TEST(! Sculptor::osc_graph_validate(&mapping, graph, input_out, sum_in)); // inputs never reach the sum directly
-        TEST(! Sculptor::osc_graph_validate(&mapping, graph, env_out, sum_in));
-        TEST(! Sculptor::osc_graph_validate(&mapping, graph, osc_out, env_in)); // oscillators feed only the sum
-        // Installed as the widget validator: a grammar refusal reports through
-        // the error overlay, a grammatically valid pair connects.
-        graph.set_validator(Sculptor::osc_graph_validate, &mapping);
-        TEST(! graph.attempt_connection(env_out, lfo_in));
-        TEST(graph.has_error());
-        graph.dismiss_error();
-        TEST(graph.attempt_connection(input_out, depth_in));
-    }
-
-    // Descriptor-content property edits write through to the bank pool entry
-    // named by the node's desc id; instances sharing a desc id edit the same
-    // entry, so aliasing stays consistent and repeated edits are idempotent.
-    {
-        static Synth::InstrumentBank bank;
-        static Synth::Instrument     instrument    = {};
-        uint16_t                     shared_env_id = 0;
-        uint16_t                     lfo_id        = 0;
-        uint16_t                     volume_env_id = 0;
-        build_osc_graph_small_fixture(&bank, &instrument, &shared_env_id, &lfo_id, &volume_env_id);
-        // A second LFO instance on the same descriptor id (its depth source
-        // differs, so the registry keeps two nodes).
-        instrument.layers[0].targets[Synth::mod_pitch].lfo_desc_id      = lfo_id;
-        instrument.layers[0].targets[Synth::mod_pitch].lfo_depth_source = Synth::ModSource::aftertouch;
-        static Sculptor::Graph           graph;
-        static Sculptor::OscGraphMapping mapping;
-        TEST(Sculptor::project_instrument_to_graph(instrument, bank, &graph, &mapping));
-        check_osc_graph_mapping(graph, mapping, 1, 2, 2, 2);
-        const uint32_t env_node = mapping.params[0].env_node;
-        const uint32_t lfo_a    = mapping.params[0].lfo_node;
-        const uint32_t lfo_b    = mapping.params[1].lfo_node;
-        TEST(env_node != Sculptor::pool_no_slot && lfo_a != Sculptor::pool_no_slot && lfo_b != Sculptor::pool_no_slot);
-        TEST(lfo_a != lfo_b);
-        const int32_t inst_a = find_instance_by_node(mapping, lfo_a);
-        const int32_t inst_b = find_instance_by_node(mapping, lfo_b);
-        TEST(inst_a >= 0 && inst_b >= 0);
-        if (inst_a >= 0 && inst_b >= 0) {
-            TEST(mapping.detached[inst_a].desc_id == lfo_id);
-            TEST(mapping.detached[inst_b].desc_id == lfo_id);
-        }
-        // Edits through either aliased node hit the same pool entry.
-        uint32_t slot = 0;
-        TEST(find_graph_slot(graph, lfo_a, "Period (ms)", &slot));
-        Sculptor::PropertyValue edited = {};
-        edited.integer                 = 400;
-        TEST(Sculptor::apply_osc_graph_descriptor_edit(graph, mapping, &bank, lfo_a, slot, edited));
-        TEST(bank.lfos.entries[lfo_id - 1].period_ms == 400);
-        TEST(find_graph_slot(graph, lfo_b, "Period (ms)", &slot));
-        edited.integer = 450;
-        TEST(Sculptor::apply_osc_graph_descriptor_edit(graph, mapping, &bank, lfo_b, slot, edited));
-        TEST(bank.lfos.entries[lfo_id - 1].period_ms == 450);
-        // Repeating the edit through the first node is idempotent.
-        const Synth::LFODescriptor saved_lfo = bank.lfos.entries[lfo_id - 1];
-        TEST(Sculptor::apply_osc_graph_descriptor_edit(graph, mapping, &bank, lfo_a, slot, edited));
-        TEST(memcmp(&saved_lfo, &bank.lfos.entries[lfo_id - 1], sizeof(Synth::LFODescriptor)) == 0);
-        // Envelope content through the pitch envelope instance (the volume
-        // envelope pins its minimum to 0 while it serves the volume target).
-        // "Value (min)" pins the effective top: moving the floor re-derives
-        // the span so the max stays where it was.
-        const uint32_t pitch_env_node = mapping.params[1].env_node;
-        TEST(find_graph_slot(graph, pitch_env_node, "Value (min)", &slot));
-        const float old_max = bank.envelopes.entries[shared_env_id - 1].min_value +
-                              65535.0f * bank.envelopes.entries[shared_env_id - 1].min_max_delta;
-        edited.real         = -0.75f;
-        TEST(Sculptor::apply_osc_graph_descriptor_edit(graph, mapping, &bank, pitch_env_node, slot, edited));
-        TEST(bank.envelopes.entries[shared_env_id - 1].min_value == -0.75f);
-        TEST(approx(bank.envelopes.entries[shared_env_id - 1].min_value +
-                        65535.0f * bank.envelopes.entries[shared_env_id - 1].min_max_delta,
-                    old_max,
-                    1.0e-5f));
-        // "Value (max)" is the effective value at full scale: the descriptor
-        // stores the span (max - min) / 65535, so a full-scale point lands
-        // exactly on the max instead of multiplying it by 65535.
-        TEST(find_graph_slot(graph, pitch_env_node, "Value (max)", &slot));
-        edited.real = 1.0f;
-        TEST(Sculptor::apply_osc_graph_descriptor_edit(graph, mapping, &bank, pitch_env_node, slot, edited));
-        TEST(approx(bank.envelopes.entries[shared_env_id - 1].min_max_delta, 1.75f / 65535.0f, 1.0e-9f));
-        TEST(approx(bank.envelopes.entries[shared_env_id - 1].min_value +
-                        65535.0f * bank.envelopes.entries[shared_env_id - 1].min_max_delta,
-                    1.0f,
-                    1.0e-6f));
-        // The volume envelope keeps its minimum: a nonzero floor is refused,
-        // and 0 (already the value) applies as a no-op.
-        TEST(find_graph_slot(graph, env_node, "Value (min)", &slot));
-        edited.real = -0.75f;
-        TEST(! Sculptor::apply_osc_graph_descriptor_edit(graph, mapping, &bank, env_node, slot, edited));
-        edited.real = 0.0f;
-        TEST(Sculptor::apply_osc_graph_descriptor_edit(graph, mapping, &bank, env_node, slot, edited));
-        // Non-descriptor slots refuse.
-        edited.integer = 1;
-        TEST(! Sculptor::apply_osc_graph_descriptor_edit(graph, mapping, &bank, mapping.osc_nodes[0], 0, edited));
-    }
-
-    // Wiring an envelope into the volume target forces the volume-envelope
-    // shape on the shared descriptor: minimum 0 with the effective top
-    // preserved, and the first and the last point at 0.
-    {
-        static Synth::InstrumentEditorBank bank;
-        static Synth::Instrument           instrument = {};
-        build_zone_fixture(&bank, &instrument);
-        static Sculptor::Graph           graph;
-        static Sculptor::OscGraphMapping mapping;
-        TEST(Sculptor::project_editor_to_graph(bank, &graph, &mapping));
-        Sculptor::GraphChange discard[8] = {};
-        graph.take_changes(discard, 8);
-        // Unwire the pitch envelope (desc 1, non-conforming: min -0.5, first
-        // point 0x4000) so the test starts from a free descriptor.
-        const uint32_t pitch_env_conn = find_osc_graph_connection(graph, { mapping.params[1].node_idx, 2 });
-        TEST(pitch_env_conn != Sculptor::pool_no_slot);
-        graph.delete_connection(pitch_env_conn);
-        graph.take_changes(discard, 8);
-        TEST(graph.add_connection(Sculptor::EndPoint{ mapping.params[1].env_node, mapping.env_output_slot },
-                                  Sculptor::EndPoint{ mapping.params[0].node_idx, 2 }));
-        Sculptor::GraphChange drained[8] = {};
-        const uint32_t        n          = graph.take_changes(drained, 8);
-        TEST(n == 1);
-        TEST(Sculptor::apply_osc_graph_change(&bank, &graph, &mapping, drained[0]));
-        const Synth::EnvelopeDescriptor& converted = bank.bank.envelopes.entries[0];
-        TEST(converted.min_value == 0.0f);
-        // The effective top (min + 65535 * delta) is preserved through the conversion.
-        TEST(approx(converted.min_value + 65535.0f * converted.min_max_delta, -0.5f + 65535.0f * 1.5f, 1.0e-2f));
-        TEST(converted.points[0].value == 0 && converted.points[converted.num_points - 1].value == 0);
-    }
-
-    // A volume envelope keeps its effective top at or above its minimum: a
-    // negative top is refused, a nonnegative one applies.
-    {
-        static Synth::InstrumentBank bank;
-        static Synth::Instrument     instrument    = {};
-        uint16_t                     shared_env_id = 0;
-        uint16_t                     lfo_id        = 0;
-        uint16_t                     volume_env_id = 0;
-        build_osc_graph_small_fixture(&bank, &instrument, &shared_env_id, &lfo_id, &volume_env_id);
-        static Sculptor::Graph           graph;
-        static Sculptor::OscGraphMapping mapping;
-        TEST(Sculptor::project_instrument_to_graph(instrument, bank, &graph, &mapping));
-        uint32_t                slot_idx = 0;
-        Sculptor::PropertyValue edited   = {};
-        const uint32_t          env_node = mapping.params[0].env_node;
-        TEST(find_graph_slot(graph, env_node, "Value (max)", &slot_idx));
-        edited.real = -1.0f;
-        TEST(! Sculptor::apply_osc_graph_descriptor_edit(graph, mapping, &bank, env_node, slot_idx, edited));
-        edited.real = 0.5f;
-        TEST(Sculptor::apply_osc_graph_descriptor_edit(graph, mapping, &bank, env_node, slot_idx, edited));
-        TEST(approx(bank.envelopes.entries[volume_env_id - 1].min_value +
-                        65535.0f * bank.envelopes.entries[volume_env_id - 1].min_max_delta,
-                    0.5f,
-                    1.0e-5f));
-    }
-
-    // Retargeting moves the attached envelope with the parameter: moving a
-    // nonconforming envelope onto the volume target converts it, and moving a
-    // volume envelope off volume is allowed.
-    {
-        static Synth::InstrumentEditorBank bank;
-        static Synth::Instrument           instrument = {};
-        build_zone_fixture(&bank, &instrument);
-        static Sculptor::Graph           graph;
-        static Sculptor::OscGraphMapping mapping;
-        TEST(Sculptor::project_editor_to_graph(bank, &graph, &mapping));
-        // The pitch parameter carries the nonconforming desc 1; retargeting it
-        // onto the volume row converts the descriptor.
-        TEST(Sculptor::retarget_param(&bank,
-                                      graph,
-                                      mapping,
-                                      0,
-                                      0,
-                                      1,
-                                      static_cast<uint32_t>(Synth::mod_volume))); // projected volume row
-        const Synth::EnvelopeDescriptor& converted = bank.bank.envelopes.entries[0];
-        TEST(converted.min_value == 0.0f);
-        TEST(approx(converted.min_value + 65535.0f * converted.min_max_delta, -0.5f + 65535.0f * 1.5f, 1.0e-2f));
-        TEST(converted.points[0].value == 0 && converted.points[converted.num_points - 1].value == 0);
-        // Moving the volume parameter (desc 2) onto the pitch row is allowed;
-        // the descriptor keeps its shape.
-        TEST(Sculptor::retarget_param(&bank,
-                                      graph,
-                                      mapping,
-                                      0,
-                                      0,
-                                      0,
-                                      static_cast<uint32_t>(Synth::mod_pitch))); // projected pitch row
-    }
-
-    // Descriptor ids are bank-wide: a descriptor wired to volume in one
-    // instrument conflicts with a non-volume use in another, visible through
-    // the same usage scan.
-    {
-        Synth::InstrumentBank bank = {};
-        TEST(bank.envelopes.allocate() == 0);
-        Synth::EnvelopeDescriptor& env = bank.envelopes.entries[0];
-        env.num_points                 = 2;
-        env.min_value                  = 0.0f;
-        env.min_max_delta              = 1.0f / 65535.0f;
-        env.points[0]                  = { 0, 0 };
-        env.points[1]                  = { 100, 0xFFFF };
-        TEST(bank.instruments.allocate() == 0);
-        TEST(bank.instruments.allocate() == 1);
-        bank.instruments.entries[0].layers[0].targets[Synth::mod_volume].envelope_desc_id = 1;
-        bank.instruments.entries[1].layers[0].targets[Synth::mod_pitch].envelope_desc_id  = 1;
-        static Sculptor::Graph           graph;
-        static Sculptor::OscGraphMapping mapping;
-        TEST(Sculptor::project_instrument_to_graph(bank.instruments.entries[1], bank, &graph, &mapping));
-        bool volume_used = false;
-        bool other_used  = false;
-        Sculptor::env_target_usage(graph, mapping, 1, &volume_used, &other_used);
-        TEST(volume_used && other_used);
-        // Wiring the shared descriptor into instrument 1's volume row is refused.
-        const Sculptor::EndPoint env_out      = { mapping.params[1].env_node, mapping.env_output_slot };
-        const Sculptor::EndPoint volume_input = { mapping.params[0].node_idx, 2 };
-        TEST(! Sculptor::osc_graph_validate(&mapping, graph, env_out, volume_input));
-    }
-    // An envelope whose output is unwired cannot affect the sound: its
-    // curve editor goes read-only (the widget checks the output wire).
-    // Row-level: a parameter row's knobs are inert exactly when that row's
-    // input is unconnected.
-    {
-        static Synth::InstrumentEditorBank bank;
-        static Synth::Instrument           instrument = {};
-        build_zone_fixture(&bank, &instrument);
-        const uint32_t env_slot = bank.bank.envelopes.allocate();
-        TEST(env_slot != pool_no_slot);
-        Synth::EnvelopeDescriptor& env = bank.bank.envelopes.entries[env_slot];
-        env.num_points                 = 2;
-        env.min_value                  = -1.0f;
-        env.min_max_delta              = 2.0f / 65535.0f;
-        env.points[0]                  = { 0, 0 };
-        env.points[1]                  = { 100, 0xFFFF };
-        add_detached_record(&bank,
-                            0,
-                            0,
-                            1,
-                            env_slot + 1,
-                            50.0f,
-                            60.0f,
-                            Synth::ModSource::none,
-                            Synth::ModSource::none,
-                            8);
-        const uint16_t lfo_desc = add_detached_lfo_descriptor(&bank);
-        add_detached_record(&bank, 0, 0, 2, lfo_desc, 70.0f, 80.0f, Synth::ModSource::none, Synth::ModSource::none, 9);
-        static Sculptor::Graph           graph;
-        static Sculptor::OscGraphMapping mapping;
-        TEST(Sculptor::project_editor_to_graph(bank, &graph, &mapping));
-        TEST(mapping.detached_count == 5); // two derived envs + derived LFO + two surplus
-        // Checks projected envelope wiring only: the widget derives its
-        // read-only decision from the envelope's output wire, but the
-        // ImGui-side application of that decision is not unit-testable.
-        TEST(graph.slot_is_connected(mapping.detached[0].node_idx, mapping.env_output_slot));
-        TEST(graph.slot_is_connected(mapping.detached[1].node_idx, mapping.env_output_slot));
-        TEST(! graph.slot_is_connected(mapping.detached[3].node_idx, mapping.env_output_slot));
-        // Row level: a parameter row's knobs are inert exactly when that
-        // row's input is unconnected.  Param slot layout: 4..6 LFO row
-        // knobs (op, depth, rate scale), 8..9 source 0 (op, scale),
-        // 11..12 source 1.
-        uint32_t volume_param = pool_no_slot;
-        uint32_t pitch_param  = pool_no_slot;
-        for (uint32_t p = 0; p < mapping.param_count; ++p) {
-            if (mapping.params[p].target == static_cast<uint32_t>(Synth::mod_volume)) {
-                volume_param = mapping.params[p].node_idx;
-            }
-            if (mapping.params[p].target == static_cast<uint32_t>(Synth::mod_pitch)) {
-                pitch_param = mapping.params[p].node_idx;
-            }
-        }
-        TEST(volume_param != pool_no_slot && pitch_param != pool_no_slot);
-        // The fixture binds the LFO to volume and routes velocity into
-        // volume's first source row; every other row input is unconnected.
-        for (uint32_t slot_idx = 4; slot_idx <= 6; ++slot_idx) {
-            TEST(! graph.slot_edit_disabled(volume_param, slot_idx));
-            TEST(graph.slot_edit_disabled(pitch_param, slot_idx));
-        }
-        TEST(! graph.slot_edit_disabled(volume_param, 8) && ! graph.slot_edit_disabled(volume_param, 9));
-        TEST(graph.slot_edit_disabled(pitch_param, 8) && graph.slot_edit_disabled(pitch_param, 9));
-        TEST(graph.slot_edit_disabled(volume_param, 11) && graph.slot_edit_disabled(volume_param, 12));
-        TEST(graph.slot_edit_disabled(pitch_param, 11) && graph.slot_edit_disabled(pitch_param, 12));
-    }
-    // Detaching the volume LFO leaves the parameter's LFO row unconnected:
-    // its knobs grey out at the next projection.
-    {
-        static Synth::InstrumentEditorBank bank;
-        static Synth::Instrument           instrument = {};
-        build_zone_fixture(&bank, &instrument);
-        Synth::Oscillator& layer = bank.bank.instruments.entries[0].layers[0];
-        layer.targets[static_cast<uint32_t>(Synth::mod_volume)].lfo_desc_id      = 0;
-        layer.targets[static_cast<uint32_t>(Synth::mod_volume)].lfo_depth_source = Synth::ModSource::none;
-        layer.targets[static_cast<uint32_t>(Synth::mod_volume)].lfo_rate_source  = Synth::ModSource::none;
-        add_detached_record(&bank,
-                            0,
-                            0,
-                            2,
-                            1,
-                            111.0f,
-                            222.0f,
-                            Synth::ModSource::velocity,
-                            Synth::ModSource::mod_wheel,
-                            1);
-        static Sculptor::Graph           graph;
-        static Sculptor::OscGraphMapping mapping;
-        TEST(Sculptor::project_editor_to_graph(bank, &graph, &mapping));
-        uint32_t volume_param = pool_no_slot;
-        for (uint32_t p = 0; p < mapping.param_count; ++p) {
-            if (mapping.params[p].target == static_cast<uint32_t>(Synth::mod_volume)) {
-                volume_param = mapping.params[p].node_idx;
-            }
-        }
-        TEST(volume_param != pool_no_slot);
-        for (uint32_t slot_idx = 4; slot_idx <= 6; ++slot_idx) {
-            TEST(graph.slot_edit_disabled(volume_param, slot_idx));
-        }
-        TEST(! graph.slot_edit_disabled(volume_param, 8) && ! graph.slot_edit_disabled(volume_param, 9));
     }
 
     // Projection refuses instruments it cannot express: a routing input with
@@ -11108,271 +11265,6 @@ int main()
         TEST(graph.connection_count() == connections_before);
         TEST(mapping.output_node == output_before);
         TEST(memcmp(&bank_image, &bank, sizeof(Synth::InstrumentBank)) == 0);
-    }
-
-    // Compile resolves generator bindings from the live edges into each
-    // parameter, not from projection-time state: deleting an edge unbinds the
-    // wired cells, retargeting an edge moves the binding, and a bound LFO with
-    // no depth edge yields lfo_depth_source none.
-    {
-        static Synth::InstrumentBank bank;
-        static Synth::Instrument     instrument    = {};
-        uint16_t                     shared_env_id = 0;
-        uint16_t                     lfo_id        = 0;
-        uint16_t                     volume_env_id = 0;
-        build_osc_graph_small_fixture(&bank, &instrument, &shared_env_id, &lfo_id, &volume_env_id);
-        static Sculptor::Graph           graph;
-        static Sculptor::OscGraphMapping mapping;
-        static Synth::Instrument         compiled;
-
-        // (a) Deleting the volume envelope edge unbinds volume only.
-        TEST(Sculptor::project_instrument_to_graph(instrument, bank, &graph, &mapping));
-        static Synth::Instrument expected                              = instrument;
-        expected.layers[0].targets[Synth::mod_volume].envelope_desc_id = 0;
-        const uint32_t env_conn = find_osc_graph_connection(graph, { mapping.params[0].node_idx, 2 });
-        TEST(env_conn != Sculptor::pool_no_slot);
-        graph.delete_connection(env_conn);
-        TEST(Sculptor::compile_graph_to_instrument(graph, mapping, &compiled));
-        TEST(memcmp(&expected, &compiled, sizeof(Synth::Instrument)) == 0);
-
-        // (b) Retargeting the volume envelope to pitch moves the binding:
-        // pitch bound, volume unbound, bit-identical to a model built that way.
-        TEST(Sculptor::project_instrument_to_graph(instrument, bank, &graph, &mapping));
-        expected                                                       = instrument;
-        expected.layers[0].targets[Synth::mod_volume].envelope_desc_id = 0;
-        const uint32_t pitch_env_conn = find_osc_graph_connection(graph, { mapping.params[1].node_idx, 2 });
-        TEST(pitch_env_conn != Sculptor::pool_no_slot);
-        graph.delete_connection(pitch_env_conn);
-        const uint32_t volume_env_conn = find_osc_graph_connection(graph, { mapping.params[0].node_idx, 2 });
-        TEST(volume_env_conn != Sculptor::pool_no_slot);
-        TEST(graph.move_connection_end(volume_env_conn, false, { mapping.params[1].node_idx, 2 }));
-        expected.layers[0].targets[Synth::mod_pitch].envelope_desc_id = volume_env_id;
-        TEST(Sculptor::compile_graph_to_instrument(graph, mapping, &compiled));
-        TEST(memcmp(&expected, &compiled, sizeof(Synth::Instrument)) == 0);
-
-        // (c) A bound LFO with no depth edge yields lfo_depth_source none.
-        instrument.layers[0].targets[Synth::mod_volume].lfo_depth_source = Synth::ModSource::channel_pressure;
-        TEST(Sculptor::project_instrument_to_graph(instrument, bank, &graph, &mapping));
-        expected                                                       = instrument;
-        expected.layers[0].targets[Synth::mod_volume].lfo_depth_source = Synth::ModSource::none;
-        const uint32_t depth_conn =
-            find_osc_graph_connection(graph, { mapping.params[0].lfo_node, mapping.lfo_depth_input_slot });
-        TEST(depth_conn != Sculptor::pool_no_slot);
-        graph.delete_connection(depth_conn);
-        TEST(Sculptor::compile_graph_to_instrument(graph, mapping, &compiled));
-        TEST(memcmp(&expected, &compiled, sizeof(Synth::Instrument)) == 0);
-    }
-
-    // Detached lifecycle: the editor projection places free-standing generator
-    // instances from the bank's kind-1/2 records, content edits write through
-    // to the shared descriptor pool entry, stored LFO sources re-route on
-    // re-projection, and re-binding moves the record back onto the derived
-    // instance instead of duplicating it.
-    {
-        static Synth::InstrumentEditorBank bank;
-        static Synth::Instrument           instrument = {};
-        build_zone_fixture(&bank, &instrument);
-        const uint16_t         lfo_desc    = instrument.layers[0].targets[Synth::mod_volume].lfo_desc_id;
-        const Synth::ModSource saved_depth = instrument.layers[0].targets[Synth::mod_volume].lfo_depth_source;
-        const Synth::ModSource saved_rate  = instrument.layers[0].targets[Synth::mod_volume].lfo_rate_source;
-        // Detach the volume LFO: clear the binding, store a detached record
-        // with its own position, uid and LFO sources.
-        instrument.layers[0].targets[Synth::mod_volume].lfo_desc_id      = 0;
-        instrument.layers[0].targets[Synth::mod_volume].lfo_depth_source = Synth::ModSource::none;
-        instrument.layers[0].targets[Synth::mod_volume].lfo_rate_source  = Synth::ModSource::none;
-        bank.bank.instruments.entries[0]                                 = instrument;
-        const uint16_t desc_id                                           = add_detached_lfo_descriptor(&bank);
-        add_detached_record(&bank,
-                            0,
-                            0,
-                            2,
-                            desc_id,
-                            111.0f,
-                            222.0f,
-                            Synth::ModSource::velocity,
-                            Synth::ModSource::mod_wheel,
-                            1);
-        static Sculptor::Graph           graph;
-        static Sculptor::OscGraphMapping mapping;
-        TEST(Sculptor::project_editor_to_graph(bank, &graph, &mapping));
-        TEST(mapping.detached_count == 3); // two derived envelopes + surplus LFO
-        TEST(mapping.detached[2].kind == 2);
-        TEST(mapping.detached[2].desc_id == desc_id);
-        TEST(mapping.detached[2].uid == 1);
-        TEST(static_cast<Synth::ModSource>(mapping.detached[2].depth_source) == Synth::ModSource::velocity);
-        TEST(static_cast<Synth::ModSource>(mapping.detached[2].rate_source) == Synth::ModSource::mod_wheel);
-        const uint32_t node = mapping.detached[2].node_idx;
-        TEST(node != Sculptor::pool_no_slot);
-        TEST(graph.node(node).position.x == 111.0f && graph.node(node).position.y == 222.0f);
-        uint32_t slot = 0;
-        TEST(find_graph_slot(graph, node, "Period (ms)", &slot));
-        TEST(graph.node(node).slots.entries[slot].value.integer == 300);
-        // Depth/rate source edges follow the record's stored sources; there is
-        // no parameter wire because the node is free-standing.
-        const uint32_t velocity_idx = static_cast<uint32_t>(Synth::ModSource::velocity) - 1;
-        const uint32_t wheel_idx    = static_cast<uint32_t>(Synth::ModSource::mod_wheel) - 1;
-        const uint32_t depth_conn   = find_osc_graph_connection(graph, { node, mapping.lfo_depth_input_slot });
-        TEST(depth_conn != Sculptor::pool_no_slot);
-        if (depth_conn != Sculptor::pool_no_slot) {
-            TEST(graph.get_connection(depth_conn).output.slot_idx == mapping.input_source_slots[velocity_idx]);
-        }
-        const uint32_t rate_conn = find_osc_graph_connection(graph, { node, mapping.lfo_rate_input_slot });
-        TEST(rate_conn != Sculptor::pool_no_slot);
-        if (rate_conn != Sculptor::pool_no_slot) {
-            TEST(graph.get_connection(rate_conn).output.slot_idx == mapping.input_source_slots[wheel_idx]);
-        }
-        TEST(find_osc_graph_connection(graph, { mapping.params[0].node_idx, 3 }) == Sculptor::pool_no_slot);
-        TEST(find_osc_graph_connection(graph, { mapping.params[1].node_idx, 3 }) == Sculptor::pool_no_slot);
-        // Content edits write through to the shared pool entry.
-        Sculptor::PropertyValue edited = {};
-        edited.integer                 = 400;
-        TEST(Sculptor::apply_osc_graph_descriptor_edit(graph, mapping, &bank.bank, node, slot, edited));
-        TEST(bank.bank.lfos.entries[desc_id - 1].period_ms == 400);
-        // Editing the record's stored sources re-routes on re-projection.
-        bank.graph_layout[0].depth_source = static_cast<uint8_t>(Synth::ModSource::aftertouch);
-        bank.graph_layout[0].rate_source  = static_cast<uint8_t>(Synth::ModSource::none);
-        TEST(Sculptor::project_editor_to_graph(bank, &graph, &mapping));
-        const uint32_t rerouted = mapping.detached[2].node_idx;
-        TEST(rerouted != Sculptor::pool_no_slot);
-        const uint32_t touch_idx = static_cast<uint32_t>(Synth::ModSource::aftertouch) - 1;
-        const uint32_t depth2    = find_osc_graph_connection(graph, { rerouted, mapping.lfo_depth_input_slot });
-        TEST(depth2 != Sculptor::pool_no_slot);
-        if (depth2 != Sculptor::pool_no_slot) {
-            TEST(graph.get_connection(depth2).output.slot_idx == mapping.input_source_slots[touch_idx]);
-        }
-        TEST(find_osc_graph_connection(graph, { rerouted, mapping.lfo_rate_input_slot }) == Sculptor::pool_no_slot);
-        // Re-attach: restore the binding; the record is consumed and the
-        // derived instance carries the LFO again.
-        instrument.layers[0].targets[Synth::mod_volume].lfo_desc_id      = lfo_desc;
-        instrument.layers[0].targets[Synth::mod_volume].lfo_depth_source = saved_depth;
-        instrument.layers[0].targets[Synth::mod_volume].lfo_rate_source  = saved_rate;
-        bank.bank.instruments.entries[0]                                 = instrument;
-        bank.graph_layout_count                                          = 0;
-        TEST(Sculptor::project_editor_to_graph(bank, &graph, &mapping));
-        TEST(mapping.detached_count == 3);
-        TEST(mapping.params[0].lfo_node != Sculptor::pool_no_slot);
-        const int32_t lfo_inst = find_instance_by_node(mapping, mapping.params[0].lfo_node);
-        TEST(lfo_inst >= 0 && mapping.detached[lfo_inst].desc_id == lfo_desc);
-        TEST(find_osc_graph_connection(graph, { mapping.params[0].node_idx, 3 }) != Sculptor::pool_no_slot);
-        // The fixture's LFO binding carries no depth/rate sources, so the
-        // re-attached instance has no source edges.
-        TEST(find_osc_graph_connection(graph, { mapping.params[0].lfo_node, mapping.lfo_depth_input_slot }) ==
-             Sculptor::pool_no_slot);
-        // Disconnect again: the record returns with a fresh uid and position.
-        instrument.layers[0].targets[Synth::mod_volume].lfo_desc_id      = 0;
-        instrument.layers[0].targets[Synth::mod_volume].lfo_depth_source = Synth::ModSource::none;
-        instrument.layers[0].targets[Synth::mod_volume].lfo_rate_source  = Synth::ModSource::none;
-        bank.bank.instruments.entries[0]                                 = instrument;
-        add_detached_record(&bank,
-                            0,
-                            0,
-                            2,
-                            desc_id,
-                            111.0f,
-                            222.0f,
-                            Synth::ModSource::velocity,
-                            Synth::ModSource::mod_wheel,
-                            2);
-        TEST(Sculptor::project_editor_to_graph(bank, &graph, &mapping));
-        TEST(mapping.detached_count == 3);
-        TEST(mapping.detached[2].uid == 2);
-        TEST(graph.node(mapping.detached[2].node_idx).position.x == 111.0f);
-        // Delete: dropping the record frees the descriptor at reclamation.
-        bank.graph_layout_count = 0;
-        Synth::reclaim_unused_slots(&bank);
-        TEST(! bank.bank.lfos.is_occupied(desc_id - 1));
-        TEST(Sculptor::project_editor_to_graph(bank, &graph, &mapping));
-        TEST(mapping.detached_count == 2);
-    }
-
-    // Aliased detached instances: two detached LFOs share one descriptor id but
-    // keep their own positions and sources; the pair survives save/load and
-    // re-projection, a content edit through either node hits the shared entry,
-    // and re-binding one leaves the other free-standing.
-    {
-        static Synth::InstrumentEditorBank bank;
-        static Synth::Instrument           instrument = {};
-        build_zone_fixture(&bank, &instrument);
-        const uint16_t desc_id = add_detached_lfo_descriptor(&bank);
-        add_detached_record(&bank,
-                            0,
-                            0,
-                            2,
-                            desc_id,
-                            10.0f,
-                            20.0f,
-                            Synth::ModSource::velocity,
-                            Synth::ModSource::mod_wheel,
-                            1);
-        add_detached_record(&bank,
-                            0,
-                            0,
-                            2,
-                            desc_id,
-                            30.0f,
-                            40.0f,
-                            Synth::ModSource::aftertouch,
-                            Synth::ModSource::none,
-                            2);
-        static Sculptor::Graph           graph;
-        static Sculptor::OscGraphMapping mapping;
-        TEST(Sculptor::project_editor_to_graph(bank, &graph, &mapping));
-        TEST(mapping.detached_count == 5); // two derived envs + derived LFO + two surplus LFOs
-        const uint32_t node_a = mapping.detached[3].node_idx;
-        const uint32_t node_b = mapping.detached[4].node_idx;
-        TEST(node_a != Sculptor::pool_no_slot && node_b != Sculptor::pool_no_slot && node_a != node_b);
-        TEST(graph.node(node_a).position.x == 10.0f && graph.node(node_a).position.y == 20.0f);
-        TEST(graph.node(node_b).position.x == 30.0f && graph.node(node_b).position.y == 40.0f);
-        // A content edit through either node hits the shared entry.
-        uint32_t slot = 0;
-        TEST(find_graph_slot(graph, node_a, "Period (ms)", &slot));
-        Sculptor::PropertyValue edited = {};
-        edited.integer                 = 450;
-        TEST(Sculptor::apply_osc_graph_descriptor_edit(graph, mapping, &bank.bank, node_a, slot, edited));
-        TEST(bank.bank.lfos.entries[desc_id - 1].period_ms == 450);
-        // The pair survives save/load byte-identically.
-        static char                        editor_json[256 * 1024];
-        static Synth::InstrumentEditorBank restored;
-        const uint32_t written = Synth::encode_editor_bank_json(&bank, editor_json, sizeof(editor_json));
-        TEST(written > 0);
-        TEST(Synth::decode_editor_bank_json(editor_json, written, &restored));
-        TEST(memcmp(bank.graph_layout, restored.graph_layout, sizeof(bank.graph_layout)) == 0);
-        TEST(memcmp(bank.graph_missing_sum, restored.graph_missing_sum, sizeof(bank.graph_missing_sum)) == 0);
-        TEST(Sculptor::project_editor_to_graph(restored, &graph, &mapping));
-        TEST(mapping.detached_count == 5); // two derived envs + derived LFO + two surplus LFOs
-        const uint32_t depth_a =
-            find_osc_graph_connection(graph, { mapping.detached[3].node_idx, mapping.lfo_depth_input_slot });
-        TEST(depth_a != Sculptor::pool_no_slot);
-        if (depth_a != Sculptor::pool_no_slot) {
-            TEST(graph.get_connection(depth_a).output.slot_idx ==
-                 mapping.input_source_slots[static_cast<uint32_t>(Synth::ModSource::velocity) - 1]);
-        }
-        const uint32_t depth_b =
-            find_osc_graph_connection(graph, { mapping.detached[4].node_idx, mapping.lfo_depth_input_slot });
-        TEST(depth_b != Sculptor::pool_no_slot);
-        if (depth_b != Sculptor::pool_no_slot) {
-            TEST(graph.get_connection(depth_b).output.slot_idx ==
-                 mapping.input_source_slots[static_cast<uint32_t>(Synth::ModSource::aftertouch) - 1]);
-        }
-        TEST(find_osc_graph_connection(graph, { mapping.detached[4].node_idx, mapping.lfo_rate_input_slot }) ==
-             Sculptor::pool_no_slot);
-        // Reconnect one: the gen binding matching record A's sources consumes
-        // that record; record B stays free-standing.
-        instrument.layers[0].targets[Synth::mod_volume].lfo_desc_id      = desc_id;
-        instrument.layers[0].targets[Synth::mod_volume].lfo_depth_source = Synth::ModSource::velocity;
-        instrument.layers[0].targets[Synth::mod_volume].lfo_rate_source  = Synth::ModSource::mod_wheel;
-        restored.bank.instruments.entries[0]                             = instrument;
-        restored.graph_layout[0]    = restored.graph_layout[1]; // drop record A, keep B
-        restored.graph_layout_count = 1;
-        TEST(Sculptor::project_editor_to_graph(restored, &graph, &mapping));
-        TEST(mapping.detached_count == 4);
-        TEST(mapping.detached[1].uid == 0); // derived instance for the binding
-        TEST(mapping.detached[3].uid == 2); // record B still free-standing
-        const uint32_t vol_lfo_conn = find_osc_graph_connection(graph, { mapping.params[0].node_idx, 3 });
-        TEST(vol_lfo_conn != Sculptor::pool_no_slot);
-        if (vol_lfo_conn != Sculptor::pool_no_slot) {
-            TEST(graph.get_connection(vol_lfo_conn).output.node_idx == mapping.params[0].lfo_node);
-        }
     }
 
     // Reclamation remaps kind-1/2 records' descriptor ids together
@@ -11411,114 +11303,6 @@ int main()
         TEST(bank.graph_layout_count == 1);
         TEST(bank.graph_layout[0].kind == 1);
         TEST(bank.graph_layout[0].index == 1);
-    }
-
-    // Deleting a bound generator node clears every binding it served in the
-    // same drained batch: the delete survives a re-projection instead of
-    // resurrecting the node.
-    {
-        static Synth::InstrumentEditorBank bank;
-        static Synth::Instrument           instrument = {};
-        build_zone_fixture(&bank, &instrument);
-        static Sculptor::Graph           graph;
-        static Sculptor::OscGraphMapping mapping;
-        TEST(Sculptor::project_editor_to_graph(bank, &graph, &mapping));
-        Sculptor::GraphChange discard[8] = {};
-        graph.take_changes(discard, 8);
-        const uint32_t env_node = mapping.params[0].env_node;
-        TEST(env_node != Sculptor::pool_no_slot);
-        graph.delete_node(env_node);
-        Sculptor::GraphChange drained[8] = {};
-        const uint32_t        n          = graph.take_changes(drained, 8);
-        TEST(n == 2); // one envelope wire + the node itself
-        for (uint32_t i = 0; i < n; i++) {
-            TEST(Sculptor::apply_osc_graph_change(&bank, &graph, &mapping, drained[i]));
-        }
-        TEST(bank.bank.instruments.entries[0].layers[0].targets[Synth::mod_volume].envelope_desc_id == 0);
-        TEST(bank.bank.instruments.entries[0].layers[0].targets[Synth::mod_pitch].envelope_desc_id == 1);
-        TEST(bank.bank.envelopes.is_occupied(0)); // the descriptor itself is untouched
-        TEST(Sculptor::project_editor_to_graph(bank, &graph, &mapping));
-        TEST(mapping.params[0].env_node == Sculptor::pool_no_slot);
-        TEST(mapping.params[1].env_node != Sculptor::pool_no_slot);
-        TEST(mapping.detached_count == 2); // the pitch envelope + the LFO instance remain
-        TEST(count_graph_nodes_named(graph, "Envelope 2") == 0);
-    }
-
-    // Disconnecting a bound generator keeps its single record: the detached
-    // instance reuses it instead of appending a duplicate record key, and
-    // reconnecting re-attaches to the same record.
-    {
-        static Synth::InstrumentEditorBank bank;
-        static Synth::Instrument           instrument = {};
-        build_zone_fixture(&bank, &instrument);
-        const Synth::Instrument original = instrument;
-        add_detached_record(&bank, 0, 0, 1, 2, 100.0f, 40.0f, Synth::ModSource::none, Synth::ModSource::none, 1);
-        static Sculptor::Graph           graph;
-        static Sculptor::OscGraphMapping mapping;
-        TEST(Sculptor::project_editor_to_graph(bank, &graph, &mapping));
-        Sculptor::GraphChange discard[8] = {};
-        graph.take_changes(discard, 8);
-        const uint32_t env_node = mapping.params[0].env_node; // the volume envelope owns desc 2
-        TEST(env_node != Sculptor::pool_no_slot);
-        TEST(graph.node(env_node).position.x == 100.0f); // the record attached
-        // Disconnect both served parameters.
-        const uint32_t conn_a = find_osc_graph_connection(graph, { mapping.params[0].node_idx, 2 });
-        const uint32_t conn_b = find_osc_graph_connection(graph, { mapping.params[1].node_idx, 2 });
-        TEST(conn_a != Sculptor::pool_no_slot && conn_b != Sculptor::pool_no_slot);
-        graph.delete_connection(conn_a);
-        graph.delete_connection(conn_b);
-        Sculptor::GraphChange drained[8] = {};
-        const uint32_t        n          = graph.take_changes(drained, 8);
-        TEST(n == 2);
-        for (uint32_t i = 0; i < n; i++) {
-            TEST(Sculptor::apply_osc_graph_change(&bank, &graph, &mapping, drained[i]));
-        }
-        // The record survives exactly once; no duplicate key was appended.
-        TEST(count_records_matching(bank, 0, 0, 1, 2) == 1);
-        TEST(Sculptor::validate_editor_metadata(bank));
-        TEST(Sculptor::project_editor_to_graph(bank, &graph, &mapping));
-        TEST(count_records_matching(bank, 0, 0, 1, 2) == 1);
-        TEST(mapping.detached_count == 3);
-        uint32_t recorded = 0;
-        for (uint32_t i = 0; i < mapping.detached_count; ++i) {
-            if (mapping.detached[i].kind == 1 && mapping.detached[i].uid == 1) {
-                recorded = mapping.detached[i].node_idx;
-            }
-        }
-        TEST(recorded != 0);
-        TEST(graph.node(recorded).position.x == 100.0f);
-        // Reconnect: the binding re-attaches to the same record.
-        bank.bank.instruments.entries[0] = original;
-        TEST(Sculptor::project_editor_to_graph(bank, &graph, &mapping));
-        TEST(count_records_matching(bank, 0, 0, 1, 2) == 1);
-        recorded = 0;
-        for (uint32_t i = 0; i < mapping.detached_count; ++i) {
-            if (mapping.detached[i].kind == 1 && mapping.detached[i].uid == 1) {
-                recorded = mapping.detached[i].node_idx;
-            }
-        }
-        TEST(recorded != 0 && recorded == mapping.params[0].env_node);
-    }
-
-    // Free-standing instances resolve through the registry in the widget
-    // validator, so connecting a detached LFO into a parameter's LFO input is
-    // accepted while mismatches stay refused.
-    {
-        static Synth::InstrumentEditorBank bank;
-        static Synth::Instrument           instrument = {};
-        build_zone_fixture(&bank, &instrument);
-        const uint16_t lfo_desc = add_detached_lfo_descriptor(&bank);
-        add_detached_record(&bank, 0, 0, 2, lfo_desc, 5.0f, 6.0f, Synth::ModSource::none, Synth::ModSource::none, 1);
-        static Sculptor::Graph           graph;
-        static Sculptor::OscGraphMapping mapping;
-        TEST(Sculptor::project_editor_to_graph(bank, &graph, &mapping));
-        TEST(mapping.detached_count == 4); // two derived envs + derived LFO + surplus LFO
-        graph.set_validator(Sculptor::osc_graph_validate, &mapping);
-        const Sculptor::EndPoint lfo_out = { mapping.detached[3].node_idx, mapping.lfo_output_slot };
-        // The volume parameter's LFO input is bound in this fixture; the pitch
-        // parameter's is free.
-        TEST(graph.attempt_connection(lfo_out, { mapping.params[1].node_idx, 3 }));
-        TEST(! graph.attempt_connection(lfo_out, { mapping.params[1].node_idx, 2 }));
     }
 
     // Applying the drained connection events maintains the zone's
@@ -11786,12 +11570,12 @@ int main()
         bank.bank.instruments.entries[0]         = instrument;
         bank.bank.channel_zones[0][0].start_note = 1;
         bank.bank.channel_zones[0][0].instrument = 0;
-        TEST(Sculptor::count_projected_nodes(bank, 0, 0) == 114);
+        TEST(Sculptor::count_projected_nodes(bank, 0, 0) == 79);
 
         static Synth::InstrumentEditorBank minimal;
         static Synth::Instrument           minimal_instrument = {};
         build_zone_fixture(&minimal, &minimal_instrument);
-        TEST(Sculptor::count_projected_nodes(minimal, 0, 0) == 8);
+        TEST(Sculptor::count_projected_nodes(minimal, 0, 0) == 6);
     }
 
     // Undo group tags coalesce consecutive edits of one editable field.
@@ -11909,8 +11693,8 @@ int main()
             }
         }
 
-        // Overfull implied node projection: the max fixture implies 114 nodes;
-        // 15 detached records push it past 128, 14 land exactly on 128.
+        // Overfull implied node projection: the max fixture implies 79 nodes;
+        // 66 detached records push it past 144, 65 land exactly on 144.
         static Synth::InstrumentBank       model_bank;
         static Synth::InstrumentEditorBank max_bank;
         static Synth::Instrument           instrument = {};
@@ -11923,1273 +11707,10 @@ int main()
         max_bank.bank.instruments.entries[0]         = instrument;
         max_bank.bank.channel_zones[0][0].start_note = 1;
         max_bank.bank.channel_zones[0][0].instrument = 0;
-        build_detached_layouts_json(editor_json, sizeof(editor_json), 1, 15, 2, 1, 0, 0);
+        build_detached_layouts_json(editor_json, sizeof(editor_json), 1, 66, 2, 1, 0, 0);
         TEST(! decode_bank_with_editor_section(max_bank, editor_json, &restored));
-        build_detached_layouts_json(editor_json, sizeof(editor_json), 1, 14, 2, 1, 0, 0);
+        build_detached_layouts_json(editor_json, sizeof(editor_json), 1, 65, 2, 1, 0, 0);
         TEST(decode_bank_with_editor_section(max_bank, editor_json, &restored));
-    }
-
-    // A parameter's base-value edit pushes eventlessly into every oscillator
-    // row the parameter wires (its served layers' rows of its own target);
-    // other targets keep their values, and no change events echo.
-    {
-        static Synth::InstrumentBank bank;
-        static Synth::Instrument     instrument    = {};
-        uint16_t                     shared_env_id = 0;
-        uint16_t                     lfo_id        = 0;
-        uint16_t                     volume_env_id = 0;
-        build_osc_graph_small_fixture(&bank, &instrument, &shared_env_id, &lfo_id, &volume_env_id);
-        instrument.layer_count            = 2;
-        instrument.layers[1]              = instrument.layers[0];
-        instrument.layers[1].pitch_offset = 3.75f; // per-layer contrast
-        static Sculptor::Graph           graph;
-        static Sculptor::OscGraphMapping mapping;
-        TEST(Sculptor::project_instrument_to_graph(instrument, bank, &graph, &mapping));
-        uint32_t pitch_offset_slot = 0;
-        TEST(find_graph_slot(graph, mapping.osc_nodes[0], "Pitch Offset", &pitch_offset_slot));
-        uint32_t volume_slot = 0;
-        TEST(find_graph_slot(graph, mapping.osc_nodes[0], "Volume", &volume_slot));
-        // Layer 1's pitch offset is a per-layer value; nothing fans into it.
-        TEST(graph.node(mapping.osc_nodes[1]).slots.entries[pitch_offset_slot].value.real == 3.75f);
-        Sculptor::PropertyValue edited = {};
-        edited.real                    = 3.0f;
-        Sculptor::propagate_param_value(&graph, mapping, mapping.params[0].node_idx, edited);
-        // The volume parameter serves both layers (identical tuples merge),
-        // so both oscillators' volume rows follow.
-        TEST(graph.node(mapping.osc_nodes[0]).slots.entries[volume_slot].value.real == 3.0f);
-        TEST(graph.node(mapping.osc_nodes[1]).slots.entries[volume_slot].value.real == 3.0f);
-        // The pitch parameter's row is untouched (other target): it keeps its
-        // seeded base, layer 0's pitch base value of -2.0.
-        TEST(graph.node(mapping.params[1].node_idx).slots.entries[1].value.real == -2.0f);
-        // Eventless: the rewrite echoes no change events.
-        Sculptor::GraphChange changes[4] = {};
-        TEST(graph.take_changes(changes, 4) == 0);
-    }
-    // Parameter nodes: free-standing per-target modulation recipes wired to
-    // oscillator target inputs.  Oscillators shrink to 15 rows with connectable
-    // dynamic values and no direct generator connectors; a parameter wire is
-    // the only thing that attaches gen bindings.
-    {
-        static Synth::InstrumentEditorBank bank;
-        static Synth::Instrument           instrument = {};
-        static Sculptor::Graph             graph;
-        static Sculptor::OscGraphMapping   mapping;
-        do {
-            const bool projected = begin_param_graph(&bank, &instrument, &graph, &mapping);
-            TEST(projected);
-            if (! projected) {
-                break;
-            }
-
-            // Oscillators: exactly 15 rows, no input-side slots, no "base "
-            // labels, and all nine dynamic rows are connectable values.
-            for (uint32_t layer = 0; layer < 3; layer++) {
-                const Sculptor::Node& osc = graph.node(mapping.osc_nodes[layer]);
-                TEST(osc.slots.num_allocated == 15);
-                for (uint32_t s = 0; s < 15; s++) {
-                    TEST(osc.slots.entries[s].kind != Sculptor::SlotKind::input);
-                    TEST(strncmp(osc.slots.entries[s].name, "base ", 5) != 0);
-                }
-                // AC11 (Choice B, user-approved): all nine targets are uniformly
-                // modulate-able, so every oscillator value row admits wires.
-                for (uint32_t t = 0; t < Synth::num_mod_targets; t++) {
-                    TEST(osc.slots.entries[Sculptor::osc_target_row(t)].connectable);
-                }
-            }
-
-            // One parameter per distinct binding tuple: "Volume" serves
-            // layers 0 and 2, "Volume 2" serves layer 1, "Pitch" serves
-            // layer 0. Parameters carry the six-row recipe (13 slots with
-            // the row compaction).
-            const uint32_t volume_param  = find_graph_node_by_name(graph, "Volume");
-            const uint32_t second_volume = find_graph_node_by_name(graph, "Volume 2");
-            const uint32_t pitch_param   = find_graph_node_by_name(graph, "Pitch");
-            TEST(volume_param != Sculptor::pool_no_slot);
-            TEST(second_volume != Sculptor::pool_no_slot);
-            TEST(pitch_param != Sculptor::pool_no_slot);
-            if (volume_param == Sculptor::pool_no_slot || second_volume == Sculptor::pool_no_slot ||
-                pitch_param == Sculptor::pool_no_slot) {
-                break;
-            }
-            TEST(graph.node(volume_param).slots.num_allocated == 13);
-            TEST(graph.node(second_volume).slots.num_allocated == 13);
-            TEST(graph.node(pitch_param).slots.num_allocated == 13);
-
-            // Each parameter fans out to exactly its served cells' target
-            // inputs (osc row 1 = volume, row 2 = pitch).
-            const uint32_t to_layer_0 = find_osc_graph_connection(graph, { mapping.osc_nodes[0], 9 });
-            const uint32_t to_layer_1 = find_osc_graph_connection(graph, { mapping.osc_nodes[1], 9 });
-            const uint32_t to_layer_2 = find_osc_graph_connection(graph, { mapping.osc_nodes[2], 9 });
-            TEST(to_layer_0 != Sculptor::pool_no_slot);
-            TEST(to_layer_1 != Sculptor::pool_no_slot);
-            TEST(to_layer_2 != Sculptor::pool_no_slot);
-            if (to_layer_0 != Sculptor::pool_no_slot && to_layer_1 != Sculptor::pool_no_slot &&
-                to_layer_2 != Sculptor::pool_no_slot) {
-                TEST(graph.get_connection(to_layer_0).output.node_idx == volume_param);
-                TEST(graph.get_connection(to_layer_1).output.node_idx == second_volume);
-                TEST(graph.get_connection(to_layer_2).output.node_idx == volume_param);
-            }
-            const uint32_t to_pitch = find_osc_graph_connection(graph, { mapping.osc_nodes[0], 11 });
-            TEST(to_pitch != Sculptor::pool_no_slot);
-            if (to_pitch != Sculptor::pool_no_slot) {
-                TEST(graph.get_connection(to_pitch).output.node_idx == pitch_param);
-            }
-            TEST(find_osc_graph_connection(graph, { mapping.osc_nodes[1], 11 }) == Sculptor::pool_no_slot);
-            TEST(find_osc_graph_connection(graph, { mapping.osc_nodes[2], 11 }) == Sculptor::pool_no_slot);
-
-            // Compile round-trips: served cells keep their binding tuple,
-            // unwired inputs are constants, and the fixture's per-layer routing
-            // survives verbatim.
-            static Synth::Instrument compiled;
-            TEST(Sculptor::compile_graph_to_instrument(graph, mapping, &compiled));
-            TEST(memcmp(&instrument, &compiled, sizeof(Synth::Instrument)) == 0);
-            TEST(compiled.layers[1].targets[Synth::mod_pitch].envelope_desc_id == 0);
-            TEST(compiled.layers[2].targets[Synth::mod_pitch].lfo_desc_id == 0);
-            TEST(compiled.layers[2].targets[Synth::mod_pitch].lfo_depth_source == Synth::ModSource::none);
-            TEST(compiled.layers[0].targets[Synth::mod_volume].base_value == 0.8f);
-            TEST(compiled.layers[0].targets[Synth::mod_volume].num_inputs == 1);
-            TEST(compiled.layers[0].targets[Synth::mod_volume].inputs[0].source == Synth::ModSource::velocity);
-            TEST(compiled.layers[0].targets[Synth::mod_volume].inputs[0].scale == 2.0f);
-            // Per-layer base values: the parameter's value row is an editing handle
-            // that eventlessly pushes into every oscillator row the parameter wires;
-            // an oscillator inline row is that layer's own storage.
-            Sculptor::PropertyValue edited = {};
-            edited.real                    = 0.25f;
-            Sculptor::propagate_param_value(&graph, mapping, volume_param, edited);
-            TEST(Sculptor::compile_graph_to_instrument(graph, mapping, &compiled));
-            TEST(compiled.layers[0].targets[Synth::mod_volume].base_value == 0.25f);
-            TEST(compiled.layers[2].targets[Synth::mod_volume].base_value == 0.25f);
-            TEST(compiled.layers[1].targets[Synth::mod_volume].base_value == 0.8f); // "Volume 2" serves layer 1
-            graph.set_slot_value(mapping.osc_nodes[1], 9, edited);
-            TEST(Sculptor::compile_graph_to_instrument(graph, mapping, &compiled));
-            TEST(compiled.layers[0].targets[Synth::mod_volume].base_value == 0.25f);
-            TEST(compiled.layers[0].targets[Synth::mod_pitch].base_value == -2.0f); // other target untouched
-
-            // T4 (behavior preservation): after the graph edits and recompiles, the routed
-            // input still modulates every live layer - each layer keeps the same base and
-            // sources; dormant layers stay zero (the compiled image touches live cells only).
-            for (uint32_t layer = 0; layer < instrument.layer_count; layer++) {
-                TEST(compiled.layers[layer].targets[Synth::mod_volume].base_value == 0.25f);
-                TEST(compiled.layers[layer].targets[Synth::mod_volume].num_inputs == 1);
-                TEST(compiled.layers[layer].targets[Synth::mod_volume].inputs[0].source == Synth::ModSource::velocity);
-                TEST(memcmp(&compiled.layers[layer].targets[Synth::mod_volume].inputs[0],
-                            &compiled.layers[0].targets[Synth::mod_volume].inputs[0],
-                            sizeof(Synth::ModInput) * Synth::max_mod_inputs) == 0);
-            }
-            static Sculptor::GraphChange drained[4] = {};
-            TEST(graph.take_changes(drained, 4) == 0); // eventless views
-        } while (false);
-    }
-
-    // Grouping determinism: the same bank state projects the same parameter
-    // node set and order on every projection, and the merge rule honors the
-    // full binding tuple - two cells sharing one LFO descriptor but differing
-    // in lfo_depth_source stay two parameters and compile with their own
-    // per-cell source fields.
-    {
-        static Synth::InstrumentEditorBank bank;
-        static Synth::Instrument           instrument = {};
-        build_parameter_fixture(&bank, &instrument);
-        static Sculptor::Graph           graph_a;
-        static Sculptor::Graph           graph_b;
-        static Sculptor::OscGraphMapping mapping_a;
-        static Sculptor::OscGraphMapping mapping_b;
-        do {
-            TEST(Sculptor::project_editor_to_graph(bank, &graph_a, &mapping_a));
-            TEST(Sculptor::project_editor_to_graph(bank, &graph_b, &mapping_b));
-            uint32_t occupied = 0;
-            for (uint32_t i = 0; i < Sculptor::max_nodes; i++) {
-                TEST(graph_a.node_occupied(i) == graph_b.node_occupied(i));
-                if (graph_a.node_occupied(i)) {
-                    occupied++;
-                    TEST(strncmp(graph_a.node(i).name, graph_b.node(i).name, sizeof(graph_a.node(i).name)) == 0);
-                }
-            }
-            TEST(occupied > 0);
-            TEST(find_graph_node_by_name(graph_a, "Volume") != Sculptor::pool_no_slot);
-            TEST(find_graph_node_by_name(graph_a, "Volume 2") != Sculptor::pool_no_slot);
-            TEST(find_graph_node_by_name(graph_a, "Pitch") != Sculptor::pool_no_slot);
-
-            // Same LFO descriptor, different depth source: no merge.
-            instrument.layers[2].targets[Synth::mod_volume].lfo_depth_source = Synth::ModSource::aftertouch;
-            bank.bank.instruments.entries[0]                                 = instrument;
-            static Sculptor::Graph           graph_c;
-            static Sculptor::OscGraphMapping mapping_c;
-            TEST(Sculptor::project_editor_to_graph(bank, &graph_c, &mapping_c));
-            TEST(count_graph_nodes_named(graph_c, "Volume") == 1);
-            TEST(count_graph_nodes_named(graph_c, "Volume 2") == 1);
-            TEST(count_graph_nodes_named(graph_c, "Volume 3") == 1);
-            const uint32_t first = find_graph_node_by_name(graph_c, "Volume");
-            const uint32_t third = find_graph_node_by_name(graph_c, "Volume 3");
-            TEST(first != Sculptor::pool_no_slot && third != Sculptor::pool_no_slot);
-            if (first == Sculptor::pool_no_slot || third == Sculptor::pool_no_slot) {
-                break;
-            }
-            TEST(find_osc_graph_connection(graph_c, { mapping_c.osc_nodes[0], 9 }) != Sculptor::pool_no_slot);
-            TEST(find_osc_graph_connection(graph_c, { mapping_c.osc_nodes[2], 9 }) != Sculptor::pool_no_slot);
-            static Synth::Instrument compiled;
-            TEST(Sculptor::compile_graph_to_instrument(graph_c, mapping_c, &compiled));
-            TEST(compiled.layers[0].targets[Synth::mod_volume].lfo_depth_source == Synth::ModSource::velocity);
-            TEST(compiled.layers[1].targets[Synth::mod_volume].lfo_depth_source == Synth::ModSource::velocity);
-            TEST(compiled.layers[2].targets[Synth::mod_volume].lfo_depth_source == Synth::ModSource::aftertouch);
-            TEST(compiled.layers[2].targets[Synth::mod_volume].lfo_desc_id == 1); // same descriptor
-            TEST(memcmp(&instrument, &compiled, sizeof(Synth::Instrument)) == 0);
-        } while (false);
-    }
-
-    // Old banks migrate purely by re-derivation: a bank whose zone state is
-    // only gen/routing (no parameter records) projects parameter nodes,
-    // compiles byte-identically, and keeps routing.inputs verbatim.
-    {
-        static Synth::InstrumentEditorBank bank;
-        static Synth::Instrument           instrument = {};
-        build_parameter_fixture(&bank, &instrument);
-        TEST(bank.graph_layout_count == 0); // everything derives from gen/routing
-        static Sculptor::Graph           graph;
-        static Sculptor::OscGraphMapping mapping;
-        do {
-            TEST(Sculptor::project_editor_to_graph(bank, &graph, &mapping));
-            TEST(find_graph_node_by_name(graph, "Volume") != Sculptor::pool_no_slot);
-            TEST(find_graph_node_by_name(graph, "Volume 2") != Sculptor::pool_no_slot);
-            TEST(find_graph_node_by_name(graph, "Pitch") != Sculptor::pool_no_slot);
-            if (find_graph_node_by_name(graph, "Volume") == Sculptor::pool_no_slot) {
-                break;
-            }
-            static Synth::Instrument compiled;
-            TEST(Sculptor::compile_graph_to_instrument(graph, mapping, &compiled));
-            TEST(memcmp(&instrument, &compiled, sizeof(Synth::Instrument)) == 0);
-            TEST(compiled.layers[0].targets[Synth::mod_volume].num_inputs == 1);
-            TEST(compiled.layers[0].targets[Synth::mod_volume].inputs[0].source == Synth::ModSource::velocity);
-            TEST(compiled.layers[0].targets[Synth::mod_volume].inputs[0].scale == 2.0f);
-            TEST(compiled.layers[0].targets[Synth::mod_volume].inputs[0].op == Synth::SourceOp::add);
-        } while (false);
-    }
-
-    // Source rows are per-parameter state (R2): wiring a MIDI source into one
-    // parameter's source input defines only that parameter's served cells;
-    // the sibling keeps its own rows, so the two edit paths no longer
-    // compile identically.
-    {
-        static Synth::InstrumentEditorBank bank;
-        static Synth::Instrument           instrument = {};
-        build_parameter_fixture(&bank, &instrument);
-        bank.bank.instruments.entries[0].layers[0].targets[Synth::mod_volume].num_inputs = 0;
-        static Sculptor::Graph           graph;
-        static Sculptor::OscGraphMapping mapping;
-        static Synth::Instrument         compiled_a;
-        do {
-            TEST(Sculptor::project_editor_to_graph(bank, &graph, &mapping));
-            static Sculptor::GraphChange discard[8] = {};
-            (void)graph.take_changes(discard, 8);
-            const uint32_t first  = find_graph_node_by_name(graph, "Volume");
-            const uint32_t second = find_graph_node_by_name(graph, "Volume 2");
-            TEST(first != Sculptor::pool_no_slot && second != Sculptor::pool_no_slot);
-            if (first == Sculptor::pool_no_slot || second == Sculptor::pool_no_slot) {
-                break;
-            }
-            const uint32_t           velocity_idx = static_cast<uint32_t>(Synth::ModSource::velocity) - 1;
-            const Sculptor::EndPoint velocity_out = { mapping.input_node, mapping.input_source_slots[velocity_idx] };
-
-            // Wire source 0 on the first parameter through the real event path.
-            TEST(graph.add_connection(velocity_out, Sculptor::EndPoint{ first, 7 }) != Sculptor::pool_no_slot);
-            static Sculptor::GraphChange changes[8] = {};
-            const uint32_t               count      = graph.take_changes(changes, 8);
-            TEST(count == 1);
-            if (count != 1) {
-                break;
-            }
-            TEST(Sculptor::apply_osc_graph_change(&bank, &graph, &mapping, changes[0]));
-
-            // The sibling keeps its own fixture-seeded wire (same source, no echo).
-            const uint32_t sibling_wire = find_osc_graph_connection(graph, { second, 7 });
-            TEST(sibling_wire != Sculptor::pool_no_slot);
-            if (sibling_wire != Sculptor::pool_no_slot) {
-                TEST(graph.get_connection(sibling_wire).output.slot_idx == mapping.input_source_slots[velocity_idx]);
-            }
-            static Sculptor::GraphChange echo[4] = {};
-            TEST(graph.take_changes(echo, 4) == 0);
-            TEST(Sculptor::compile_graph_to_instrument(graph, mapping, &compiled_a));
-            TEST(compiled_a.layers[0].targets[Synth::mod_volume].num_inputs == 1);
-            TEST(compiled_a.layers[0].targets[Synth::mod_volume].inputs[0].source == Synth::ModSource::velocity);
-            TEST(compiled_a.layers[0].targets[Synth::mod_pitch].num_inputs == 0); // other target untouched
-
-            // Wiring the sibling instead compiles to its own routing.
-            build_parameter_fixture(&bank, &instrument);
-            bank.bank.instruments.entries[0].layers[0].targets[Synth::mod_volume].num_inputs = 0;
-            TEST(Sculptor::project_editor_to_graph(bank, &graph, &mapping));
-            (void)graph.take_changes(discard, 8);
-            const uint32_t second_2 = find_graph_node_by_name(graph, "Volume 2");
-            TEST(second_2 != Sculptor::pool_no_slot);
-            if (second_2 == Sculptor::pool_no_slot) {
-                break;
-            }
-            TEST(graph.add_connection(velocity_out, Sculptor::EndPoint{ second_2, 7 }) != Sculptor::pool_no_slot);
-            const uint32_t count_2 = graph.take_changes(changes, 8);
-            TEST(count_2 == 1);
-            if (count_2 != 1) {
-                break;
-            }
-            TEST(Sculptor::apply_osc_graph_change(&bank, &graph, &mapping, changes[0]));
-            static Synth::Instrument compiled_b;
-            TEST(Sculptor::compile_graph_to_instrument(graph, mapping, &compiled_b));
-            // Per-parameter recipes (R2/AC9): a source wire defines the touched
-            // parameter's served cells only - the sibling keeps its own rows, so the
-            // two edit paths no longer compile identically.  Layer 0 gains only
-            // through "Volume" (path a); layer 1's velocity comes from its own
-            // group in both paths.
-            TEST(compiled_a.layers[0].targets[Synth::mod_volume].num_inputs == 1);
-            TEST(compiled_b.layers[0].targets[Synth::mod_volume].num_inputs == 0);
-            for (uint32_t layer = 1; layer < 3; layer++) {
-                TEST(compiled_a.layers[layer].targets[Synth::mod_volume].num_inputs == 1);
-                TEST(compiled_a.layers[layer].targets[Synth::mod_volume].inputs[0].source ==
-                     Synth::ModSource::velocity);
-                TEST(compiled_b.layers[layer].targets[Synth::mod_volume].num_inputs == 1);
-                TEST(compiled_b.layers[layer].targets[Synth::mod_volume].inputs[0].source ==
-                     Synth::ModSource::velocity);
-            }
-        } while (false);
-    }
-
-    // LFO depth/rate sources: the bound LFO node keeps its MIDI-source
-    // depth/rate wires and compile lands them in gen[l][t] for every served
-    // cell; unwiring one served cell resets that cell's whole binding and
-    // leaves the sibling untouched.
-    {
-        static Synth::InstrumentEditorBank bank;
-        static Synth::Instrument           instrument = {};
-        static Sculptor::Graph             graph;
-        static Sculptor::OscGraphMapping   mapping;
-        do {
-            TEST(begin_param_graph(&bank, &instrument, &graph, &mapping));
-            const uint32_t volume_param = find_graph_node_by_name(graph, "Volume");
-            TEST(volume_param != Sculptor::pool_no_slot);
-            if (volume_param == Sculptor::pool_no_slot) {
-                break;
-            }
-            const uint32_t lfo_conn = find_osc_graph_connection(graph, { volume_param, 3 });
-            TEST(lfo_conn != Sculptor::pool_no_slot);
-            if (lfo_conn == Sculptor::pool_no_slot) {
-                break;
-            }
-            const uint32_t lfo_node = graph.get_connection(lfo_conn).output.node_idx;
-            TEST(find_osc_graph_connection(graph, { lfo_node, mapping.lfo_depth_input_slot }) !=
-                 Sculptor::pool_no_slot);
-            TEST(find_osc_graph_connection(graph, { lfo_node, mapping.lfo_rate_input_slot }) != Sculptor::pool_no_slot);
-
-            static Synth::Instrument compiled;
-            TEST(Sculptor::compile_graph_to_instrument(graph, mapping, &compiled));
-            TEST(compiled.layers[0].targets[Synth::mod_volume].lfo_depth_source == Synth::ModSource::velocity);
-            TEST(compiled.layers[0].targets[Synth::mod_volume].lfo_rate_source == Synth::ModSource::mod_wheel);
-            TEST(compiled.layers[2].targets[Synth::mod_volume].lfo_depth_source == Synth::ModSource::velocity);
-            TEST(compiled.layers[2].targets[Synth::mod_volume].lfo_rate_source == Synth::ModSource::mod_wheel);
-
-            const uint32_t wire = find_osc_graph_connection(graph, { mapping.osc_nodes[2], 9 });
-            TEST(wire != Sculptor::pool_no_slot);
-            if (wire == Sculptor::pool_no_slot) {
-                break;
-            }
-            graph.delete_connection(wire);
-            static Sculptor::GraphChange changes[4] = {};
-            const uint32_t               count      = graph.take_changes(changes, 4);
-            TEST(count == 1);
-            if (count != 1) {
-                break;
-            }
-            TEST(Sculptor::apply_osc_graph_change(&bank, &graph, &mapping, changes[0]));
-            TEST(Sculptor::compile_graph_to_instrument(graph, mapping, &compiled));
-            TEST(compiled.layers[2].targets[Synth::mod_volume].envelope_desc_id == 0);
-            TEST(compiled.layers[2].targets[Synth::mod_volume].lfo_desc_id == 0);
-            TEST(compiled.layers[2].targets[Synth::mod_volume].lfo_depth_source == Synth::ModSource::none);
-            TEST(compiled.layers[2].targets[Synth::mod_volume].lfo_rate_source == Synth::ModSource::none);
-            TEST(compiled.layers[0].targets[Synth::mod_volume].lfo_depth_source == Synth::ModSource::velocity);
-        } while (false);
-    }
-
-    // Validator refusals: a parameter output only drives its own target's
-    // oscillator rows, envelope and LFO inputs are not interchangeable, only
-    // MIDI sources enter source inputs, and MIDI sources wire nowhere but
-    // source rows and LFO depth/rate inputs.
-    {
-        static Synth::InstrumentEditorBank bank;
-        static Synth::Instrument           instrument = {};
-        build_parameter_fixture(&bank, &instrument);
-        static Sculptor::Graph           graph;
-        static Sculptor::OscGraphMapping mapping;
-        do {
-            TEST(Sculptor::project_editor_to_graph(bank, &graph, &mapping));
-            const uint32_t volume_param = find_graph_node_by_name(graph, "Volume");
-            TEST(volume_param != Sculptor::pool_no_slot);
-            if (volume_param == Sculptor::pool_no_slot) {
-                break;
-            }
-            const uint32_t env_conn = find_osc_graph_connection(graph, { volume_param, 2 });
-            const uint32_t lfo_conn = find_osc_graph_connection(graph, { volume_param, 3 });
-            TEST(env_conn != Sculptor::pool_no_slot && lfo_conn != Sculptor::pool_no_slot);
-            if (env_conn == Sculptor::pool_no_slot || lfo_conn == Sculptor::pool_no_slot) {
-                break;
-            }
-            const Sculptor::EndPoint env_out      = graph.get_connection(env_conn).output;
-            const Sculptor::EndPoint lfo_out      = graph.get_connection(lfo_conn).output;
-            const Sculptor::EndPoint param_out    = { volume_param, 0 };
-            const uint32_t           velocity_idx = static_cast<uint32_t>(Synth::ModSource::velocity) - 1;
-            const Sculptor::EndPoint velocity_out = { mapping.input_node, mapping.input_source_slots[velocity_idx] };
-
-            TEST(! Sculptor::osc_graph_validate(&mapping, graph, param_out, { mapping.osc_nodes[0], 11 }));
-            TEST(! Sculptor::osc_graph_validate(&mapping, graph, lfo_out, { volume_param, 2 }));
-            TEST(! Sculptor::osc_graph_validate(&mapping, graph, env_out, { volume_param, 3 }));
-            TEST(! Sculptor::osc_graph_validate(&mapping, graph, env_out, { volume_param, 7 }));
-            TEST(! Sculptor::osc_graph_validate(&mapping, graph, velocity_out, { mapping.osc_nodes[0], 9 }));
-        } while (false);
-    }
-
-    // Source-order refusal: wiring source 1 while source 0 is unwired on
-    // the same parameter is refused with a specific message.
-    {
-        static Synth::InstrumentEditorBank bank;
-        static Synth::Instrument           instrument = {};
-        build_parameter_fixture(&bank, &instrument);
-        bank.bank.instruments.entries[0].layers[0].targets[Synth::mod_volume].num_inputs = 0;
-        static Sculptor::Graph           graph;
-        static Sculptor::OscGraphMapping mapping;
-        do {
-            TEST(Sculptor::project_editor_to_graph(bank, &graph, &mapping));
-            static Sculptor::GraphChange discard[8] = {};
-            (void)graph.take_changes(discard, 8);
-            const uint32_t first = find_graph_node_by_name(graph, "Volume");
-            TEST(first != Sculptor::pool_no_slot);
-            if (first == Sculptor::pool_no_slot) {
-                break;
-            }
-            TEST(strcmp(graph.node(first).name, "Volume") == 0);
-            const uint32_t           velocity_idx = static_cast<uint32_t>(Synth::ModSource::velocity) - 1;
-            const Sculptor::EndPoint velocity_out = { mapping.input_node, mapping.input_source_slots[velocity_idx] };
-            TEST(! Sculptor::osc_graph_validate(&mapping, graph, velocity_out, Sculptor::EndPoint{ first, 10 }));
-            TEST(graph.has_error());
-            TEST(strcmp(graph.error_text(), "Wire source 0 first") == 0);
-        } while (false);
-    }
-
-    // Deleting a parameter clears the gen bindings of the cells it served,
-    // leaves sibling parameters' own rows untouched, and removes its kind-3
-    // record so it cannot resurrect on re-projection.
-    {
-        static Synth::InstrumentEditorBank bank;
-        static Synth::Instrument           instrument = {};
-        build_parameter_fixture(&bank, &instrument);
-        add_parameter_record(&bank, 0, 0, 0, 10.0f, 20.0f, 1);
-        add_parameter_record(&bank, 0, 0, 0, 30.0f, 40.0f, 2);
-        static Sculptor::Graph           graph;
-        static Sculptor::OscGraphMapping mapping;
-        do {
-            TEST(Sculptor::project_editor_to_graph(bank, &graph, &mapping));
-            static Sculptor::GraphChange discard[8] = {};
-            (void)graph.take_changes(discard, 8);
-            const uint32_t first  = find_graph_node_by_name(graph, "Volume");
-            const uint32_t second = find_graph_node_by_name(graph, "Volume 2");
-            TEST(first != Sculptor::pool_no_slot && second != Sculptor::pool_no_slot);
-            if (first == Sculptor::pool_no_slot || second == Sculptor::pool_no_slot) {
-                break;
-            }
-            TEST(count_records_matching(bank, 0, 0, 3, 0) == 2);
-
-            graph.delete_node(first);
-            static Sculptor::GraphChange changes[8] = {};
-            const uint32_t               count      = graph.take_changes(changes, 8);
-            TEST(count >= 1);
-            for (uint32_t i = 0; i < count; i++) {
-                TEST(Sculptor::apply_osc_graph_change(&bank, &graph, &mapping, changes[i]));
-            }
-
-            TEST(Sculptor::project_editor_to_graph(bank, &graph, &mapping));
-            TEST(count_graph_nodes_named(graph, "Volume") == 1);   // the sibling, renamed by order
-            TEST(count_graph_nodes_named(graph, "Volume 2") == 0); // no resurrection
-            TEST(count_records_matching(bank, 0, 0, 3, 0) == 1);   // only the sibling's record
-            static Synth::Instrument compiled;
-            TEST(Sculptor::compile_graph_to_instrument(graph, mapping, &compiled));
-            TEST(compiled.layers[0].targets[Synth::mod_volume].envelope_desc_id == 0);
-            TEST(compiled.layers[0].targets[Synth::mod_volume].lfo_desc_id == 0);
-            TEST(compiled.layers[2].targets[Synth::mod_volume].envelope_desc_id == 0);
-            TEST(compiled.layers[2].targets[Synth::mod_volume].lfo_desc_id == 0);
-            TEST(compiled.layers[1].targets[Synth::mod_volume].envelope_desc_id == 2); // sibling untouched
-            TEST(compiled.layers[1].targets[Synth::mod_volume].lfo_desc_id == 1);
-            // The deleted parameter took its served cells' routing with it (its
-            // group is record-less and therefore inert); the sibling's layer
-            // keeps its own input.
-            TEST(compiled.layers[0].targets[Synth::mod_volume].num_inputs == 0);
-            TEST(compiled.layers[1].targets[Synth::mod_volume].num_inputs == 1);
-            TEST(compiled.layers[1].targets[Synth::mod_volume].inputs[0].source == Synth::ModSource::velocity);
-        } while (false);
-    }
-
-    // Deleting the ONLY parameter of a target with MIDI inputs kills the
-    // routing with it: the drained batch's store compiles zero inputs once no
-    // serving parameter exists, and re-projection derives no carrier.
-    {
-        static Synth::InstrumentEditorBank bank;
-        static Synth::Instrument           instrument = {};
-        static Sculptor::Graph             graph;
-        static Sculptor::OscGraphMapping   mapping;
-        do {
-            TEST(begin_param_graph(&bank, &instrument, &graph, &mapping));
-            static Sculptor::GraphChange discard[8] = {};
-            const uint32_t               sibling    = find_graph_node_by_name(graph, "Volume 2");
-            const uint32_t               sole       = find_graph_node_by_name(graph, "Volume");
-            TEST(sibling != Sculptor::pool_no_slot && sole != Sculptor::pool_no_slot);
-            if (sibling == Sculptor::pool_no_slot || sole == Sculptor::pool_no_slot) {
-                break;
-            }
-            TEST(strcmp(graph.node(sibling).name, "Volume 2") == 0);
-            TEST(strcmp(graph.node(sole).name, "Volume") == 0);
-            // Retire the sibling so "Volume" is the target's only parameter.
-            graph.delete_node(sibling);
-            static Sculptor::GraphChange changes[8] = {};
-            uint32_t                     count      = graph.take_changes(changes, 8);
-            TEST(count >= 1);
-            if (count == 0) {
-                break;
-            }
-            for (uint32_t i = 0; i < count; i++) {
-                TEST(Sculptor::apply_osc_graph_change(&bank, &graph, &mapping, changes[i]));
-            }
-            TEST(bank.bank.instruments.entries[0].layers[0].targets[Synth::mod_volume].num_inputs == 1);
-            // Deleting the last serving parameter zeroes the routing inputs.
-            graph.delete_node(sole);
-            count = graph.take_changes(changes, 8);
-            TEST(count >= 1);
-            if (count == 0) {
-                break;
-            }
-            for (uint32_t i = 0; i < count; i++) {
-                TEST(Sculptor::apply_osc_graph_change(&bank, &graph, &mapping, changes[i]));
-            }
-            TEST(bank.bank.instruments.entries[0].layers[0].targets[Synth::mod_volume].num_inputs == 0);
-            // Re-projection derives no parameter for the target: no bound
-            // cells and no MIDI inputs are left.
-            TEST(Sculptor::project_editor_to_graph(bank, &graph, &mapping));
-            (void)graph.take_changes(discard, 8);
-            TEST(find_graph_node_by_name(graph, "Volume") == Sculptor::pool_no_slot);
-            TEST(bank.bank.instruments.entries[0].layers[0].targets[Synth::mod_volume].num_inputs == 0);
-            static Synth::Instrument compiled;
-            TEST(Sculptor::compile_graph_to_instrument(graph, mapping, &compiled));
-            TEST(compiled.layers[0].targets[Synth::mod_volume].num_inputs == 0);
-        } while (false);
-    }
-    // Deleting a derived parameter of a target with MIDI routing inputs
-    // zeroes the routing and the gen bindings of every cell it served.
-    {
-        static Synth::InstrumentEditorBank bank;
-        static Synth::Instrument           instrument = {};
-        build_parameter_fixture(&bank, &instrument);
-        Synth::TargetBinding& pitch_routing = bank.bank.instruments.entries[0].layers[0].targets[Synth::mod_pitch];
-        pitch_routing.num_inputs            = 1;
-        pitch_routing.inputs[0].source      = Synth::ModSource::velocity;
-        pitch_routing.inputs[0].op          = Synth::SourceOp::add;
-        pitch_routing.inputs[0].scale       = 1.0f;
-        static Sculptor::Graph           graph;
-        static Sculptor::OscGraphMapping mapping;
-        do {
-            TEST(Sculptor::project_editor_to_graph(bank, &graph, &mapping));
-            static Sculptor::GraphChange discard[8] = {};
-            (void)graph.take_changes(discard, 8);
-            const uint32_t pitch = find_graph_node_by_name(graph, "Pitch");
-            TEST(pitch != Sculptor::pool_no_slot);
-            if (pitch == Sculptor::pool_no_slot) {
-                break;
-            }
-            graph.delete_node(pitch);
-            static Sculptor::GraphChange changes[8] = {};
-            const uint32_t               count      = graph.take_changes(changes, 8);
-            TEST(count >= 1);
-            if (count == 0) {
-                break;
-            }
-            for (uint32_t i = 0; i < count; i++) {
-                TEST(Sculptor::apply_osc_graph_change(&bank, &graph, &mapping, changes[i]));
-            }
-            TEST(bank.bank.instruments.entries[0].layers[0].targets[Synth::mod_pitch].num_inputs == 0);
-            for (uint32_t layer = 0; layer < Synth::max_layers; ++layer) {
-                TEST(bank.bank.instruments.entries[0].layers[layer].targets[Synth::mod_pitch].envelope_desc_id == 0);
-                TEST(bank.bank.instruments.entries[0].layers[layer].targets[Synth::mod_pitch].lfo_desc_id == 0);
-            }
-            TEST(Sculptor::project_editor_to_graph(bank, &graph, &mapping));
-            (void)graph.take_changes(discard, 8);
-            TEST(find_graph_node_by_name(graph, "Pitch") == Sculptor::pool_no_slot);
-            TEST(bank.bank.instruments.entries[0].layers[0].targets[Synth::mod_pitch].num_inputs == 0);
-        } while (false);
-    }
-    // Disconnecting the last serving parameter's VALUE wires detaches it into
-    // a record-backed inert node: the routing inputs compile to zero, the gen
-    // bindings clear, and re-projection re-materializes the parameter with no
-    // wires at all (no value wires, no source wires).
-    {
-        static Synth::InstrumentEditorBank bank;
-        static Synth::Instrument           instrument = {};
-        static Sculptor::Graph             graph;
-        static Sculptor::OscGraphMapping   mapping;
-        do {
-            TEST(begin_param_graph(&bank, &instrument, &graph, &mapping));
-            static Sculptor::GraphChange discard[8] = {};
-            const uint32_t               sibling    = find_graph_node_by_name(graph, "Volume 2");
-            const uint32_t               sole       = find_graph_node_by_name(graph, "Volume");
-            TEST(sibling != Sculptor::pool_no_slot && sole != Sculptor::pool_no_slot);
-            if (sibling == Sculptor::pool_no_slot || sole == Sculptor::pool_no_slot) {
-                break;
-            }
-            // Retire the sibling so "Volume" is the last serving parameter.
-            graph.delete_node(sibling);
-            static Sculptor::GraphChange changes[8] = {};
-            uint32_t                     count      = graph.take_changes(changes, 8);
-            TEST(count >= 1);
-            if (count == 0) {
-                break;
-            }
-            for (uint32_t i = 0; i < count; i++) {
-                TEST(Sculptor::apply_osc_graph_change(&bank, &graph, &mapping, changes[i]));
-            }
-            // Disconnect both value wires (oscillator volume rows 1 <- "Volume").
-            uint32_t value_wires = 0;
-            for (uint32_t c = 0; c < Sculptor::max_connections; ++c) {
-                if (! graph.connection_occupied(c)) {
-                    continue;
-                }
-                const Sculptor::Connection& connection = graph.get_connection(c);
-                if (connection.output.node_idx == sole && connection.output.slot_idx == 0) {
-                    graph.delete_connection(c);
-                    ++value_wires;
-                }
-            }
-            TEST(value_wires == 2);
-            count = graph.take_changes(changes, 8);
-            TEST(count >= 1);
-            if (count == 0) {
-                break;
-            }
-            for (uint32_t i = 0; i < count; i++) {
-                TEST(Sculptor::apply_osc_graph_change(&bank, &graph, &mapping, changes[i]));
-            }
-            TEST(bank.bank.instruments.entries[0].layers[0].targets[Synth::mod_volume].num_inputs == 0);
-            for (uint32_t layer = 0; layer < Synth::max_layers; ++layer) {
-                TEST(bank.bank.instruments.entries[0].layers[layer].targets[Synth::mod_volume].envelope_desc_id == 0);
-                TEST(bank.bank.instruments.entries[0].layers[layer].targets[Synth::mod_volume].lfo_desc_id == 0);
-            }
-            TEST(count_records_matching(bank, 0, 0, 3, 0) == 1); // detached record
-            // Re-projection: the record materializes an inert record-backed
-            // parameter with no wires at all.
-            TEST(Sculptor::project_editor_to_graph(bank, &graph, &mapping));
-            (void)graph.take_changes(discard, 8);
-            const uint32_t inert = find_graph_node_by_name(graph, "Volume");
-            TEST(inert != Sculptor::pool_no_slot);
-            if (inert == Sculptor::pool_no_slot) {
-                break;
-            }
-            uint32_t outgoing    = 0;
-            uint32_t value_rows  = 0;
-            uint32_t source_rows = 0;
-            for (uint32_t c = 0; c < Sculptor::max_connections; ++c) {
-                if (! graph.connection_occupied(c)) {
-                    continue;
-                }
-                const Sculptor::Connection& connection = graph.get_connection(c);
-                if (connection.output.node_idx == inert) {
-                    ++outgoing;
-                }
-                if (connection.input.node_idx == inert &&
-                    (connection.input.slot_idx == 7 || connection.input.slot_idx == 10)) {
-                    ++source_rows;
-                }
-                for (uint32_t layer = 0; layer < Synth::max_layers; ++layer) {
-                    if (connection.input.node_idx == mapping.osc_nodes[layer] && connection.input.slot_idx == 1) {
-                        ++value_rows;
-                    }
-                }
-            }
-            TEST(outgoing == 0);
-            TEST(value_rows == 0);
-            TEST(source_rows == 0);
-            TEST(bank.bank.instruments.entries[0].layers[0].targets[Synth::mod_volume].num_inputs == 0);
-        } while (false);
-    }
-    // Disconnecting a MIDI SOURCE wire decrements the routing inputs and the
-    // wire stays gone across re-projection.
-    {
-        static Synth::InstrumentEditorBank bank;
-        static Synth::Instrument           instrument = {};
-        static Sculptor::Graph             graph;
-        static Sculptor::OscGraphMapping   mapping;
-        do {
-            TEST(begin_param_graph(&bank, &instrument, &graph, &mapping));
-            static Sculptor::GraphChange discard[8] = {};
-            const uint32_t               sole       = find_graph_node_by_name(graph, "Volume");
-            TEST(sole != Sculptor::pool_no_slot);
-            if (sole == Sculptor::pool_no_slot) {
-                break;
-            }
-            const uint32_t source_wire = find_osc_graph_connection(graph, Sculptor::EndPoint{ sole, 7 });
-            TEST(source_wire != Sculptor::pool_no_slot);
-            if (source_wire == Sculptor::pool_no_slot) {
-                break;
-            }
-            graph.delete_connection(source_wire);
-            static Sculptor::GraphChange changes[8] = {};
-            const uint32_t               count      = graph.take_changes(changes, 8);
-            TEST(count >= 1);
-            if (count == 0) {
-                break;
-            }
-            for (uint32_t i = 0; i < count; i++) {
-                TEST(Sculptor::apply_osc_graph_change(&bank, &graph, &mapping, changes[i]));
-            }
-            TEST(bank.bank.instruments.entries[0].layers[0].targets[Synth::mod_volume].num_inputs == 0);
-            TEST(Sculptor::project_editor_to_graph(bank, &graph, &mapping));
-            (void)graph.take_changes(discard, 8);
-            const uint32_t reprojected = find_graph_node_by_name(graph, "Volume");
-            TEST(reprojected != Sculptor::pool_no_slot);
-            TEST(find_osc_graph_connection(graph, Sculptor::EndPoint{ reprojected, 7 }) == Sculptor::pool_no_slot);
-            TEST(bank.bank.instruments.entries[0].layers[0].targets[Synth::mod_volume].num_inputs == 0);
-        } while (false);
-    }
-    // Renaming a record-backed parameter (the model sequence behind the
-    // node-menu Rename): the kind-3 record re-keys to the new target and the
-    // value wires retarget onto the new rows, so the drained batch compiles
-    // the source inputs into the NEW target's routing and clears the old
-    // target's; re-projection rebuilds the node under its new name.
-    {
-        static Synth::InstrumentEditorBank bank;
-        static Synth::Instrument           instrument = {};
-        build_parameter_fixture(&bank, &instrument);
-        add_parameter_record(&bank, 0, 0, 0, 10.0f, 20.0f, 5); // kind-3 volume record
-        static Sculptor::Graph           graph;
-        static Sculptor::OscGraphMapping mapping;
-        do {
-            TEST(Sculptor::project_editor_to_graph(bank, &graph, &mapping));
-            static Sculptor::GraphChange discard[8] = {};
-            (void)graph.take_changes(discard, 8);
-            // The record attaches to the first derived volume parameter.
-            const uint32_t renamed = find_graph_node_by_name(graph, "Volume");
-            TEST(renamed != Sculptor::pool_no_slot);
-            if (renamed == Sculptor::pool_no_slot) {
-                break;
-            }
-            int32_t entry = -1;
-            for (uint32_t p = 0; p < mapping.param_count; ++p) {
-                if (mapping.params[p].node_idx == renamed) {
-                    entry = static_cast<int32_t>(p);
-                }
-            }
-            TEST(entry >= 0 && mapping.params[entry].uid == 5);
-            if (entry < 0 || mapping.params[entry].uid != 5) {
-                break;
-            }
-            // Retire the sibling so the rename carries the whole volume routing.
-            const uint32_t sibling = find_graph_node_by_name(graph, "Volume 2");
-            TEST(sibling != Sculptor::pool_no_slot);
-            if (sibling == Sculptor::pool_no_slot) {
-                break;
-            }
-            graph.delete_node(sibling);
-            static Sculptor::GraphChange changes[8] = {};
-            uint32_t                     count      = graph.take_changes(changes, 8);
-            TEST(count >= 1);
-            if (count == 0) {
-                break;
-            }
-            for (uint32_t i = 0; i < count; i++) {
-                TEST(Sculptor::apply_osc_graph_change(&bank, &graph, &mapping, changes[i]));
-            }
-            // Re-key the record volume -> panning and move the mapping entry.
-            int32_t record_idx = -1;
-            for (uint32_t r = 0; r < bank.graph_layout_count; ++r) {
-                const Synth::GraphNodeLayout& record = bank.graph_layout[r];
-                if (record.channel == 0 && record.zone == 0 && record.kind == 3 && record.index == 0 &&
-                    record.uid == 5) {
-                    record_idx = static_cast<int32_t>(r);
-                    break;
-                }
-            }
-            TEST(record_idx >= 0);
-            if (record_idx < 0) {
-                break;
-            }
-            bank.graph_layout[record_idx].index = 2;
-            mapping.params[entry].target        = 2;
-            // Retarget the wires onto the panning row.
-            uint32_t moved_wires = 0;
-            for (uint32_t c = 0; c < Sculptor::max_connections; ++c) {
-                if (! graph.connection_occupied(c)) {
-                    continue;
-                }
-                const Sculptor::Connection& connection = graph.get_connection(c);
-                if (connection.output.node_idx != renamed || connection.output.slot_idx != 0) {
-                    continue;
-                }
-                TEST(graph.move_connection_end(
-                    c,
-                    false,
-                    Sculptor::EndPoint{ connection.input.node_idx, Sculptor::osc_target_row(2) }));
-                ++moved_wires;
-            }
-            TEST(moved_wires == 2);
-            count = graph.take_changes(changes, 8);
-            TEST(count >= 1);
-            if (count == 0) {
-                break;
-            }
-            for (uint32_t i = 0; i < count; i++) {
-                TEST(Sculptor::apply_osc_graph_change(&bank, &graph, &mapping, changes[i]));
-            }
-            TEST(bank.bank.instruments.entries[0].layers[0].targets[Synth::mod_panning].num_inputs == 1);
-            TEST(bank.bank.instruments.entries[0].layers[0].targets[Synth::mod_panning].inputs[0].source ==
-                 Synth::ModSource::velocity);
-            TEST(bank.bank.instruments.entries[0].layers[0].targets[Synth::mod_volume].num_inputs == 0);
-            TEST(bank.bank.instruments.entries[0].layers[0].targets[Synth::mod_panning].envelope_desc_id == 1);
-            TEST(bank.bank.instruments.entries[0].layers[0].targets[Synth::mod_volume].envelope_desc_id == 0);
-            // Re-projection rebuilds the node under its new name with the
-            // source wire attached to the new target's routing.
-            TEST(Sculptor::project_editor_to_graph(bank, &graph, &mapping));
-            (void)graph.take_changes(discard, 8);
-            const uint32_t panning = find_graph_node_by_name(graph, "Panning");
-            TEST(panning != Sculptor::pool_no_slot);
-            TEST(find_graph_node_by_name(graph, "Volume") == Sculptor::pool_no_slot);
-            if (panning != Sculptor::pool_no_slot) {
-                TEST(find_osc_graph_connection(graph, Sculptor::EndPoint{ panning, 7 }) != Sculptor::pool_no_slot);
-            }
-            TEST(bank.bank.instruments.entries[0].layers[0].targets[Synth::mod_volume].num_inputs == 0);
-            TEST(bank.bank.instruments.entries[0].layers[0].targets[Synth::mod_panning].num_inputs == 1);
-        } while (false);
-    }
-    // Renaming a record-backed parameter into a LOWER-indexed target that
-    // already has a serving parameter with different sources: the
-    // destination's routing is authoritative, so the renamed parameter's
-    // source rows adopt the resident's wiring and the compiled routing keeps
-    // the resident's sources; the old target's routing dies (it has no
-    // serving parameter left).
-    {
-        static Synth::InstrumentEditorBank bank;
-        static Synth::Instrument           instrument = {};
-        build_parameter_fixture(&bank, &instrument);
-        Synth::TargetBinding& pitch_routing = instrument.layers[0].targets[Synth::mod_pitch];
-        pitch_routing.num_inputs            = 1;
-        pitch_routing.inputs[0].source      = Synth::ModSource::mod_wheel;
-        pitch_routing.inputs[0].op          = Synth::SourceOp::add;
-        pitch_routing.inputs[0].scale       = 1.0f;
-        bank.bank.instruments.entries[0]    = instrument;
-        add_parameter_record(&bank, 0, 0, 1, 30.0f, 40.0f, 6); // kind-3 pitch record
-        static Sculptor::Graph           graph;
-        static Sculptor::OscGraphMapping mapping;
-        do {
-            TEST(Sculptor::project_editor_to_graph(bank, &graph, &mapping));
-            static Sculptor::GraphChange discard[8] = {};
-            (void)graph.take_changes(discard, 8);
-            const uint32_t volume_node = find_graph_node_by_name(graph, "Volume");
-            const uint32_t pitch_node  = find_graph_node_by_name(graph, "Pitch");
-            TEST(volume_node != Sculptor::pool_no_slot && pitch_node != Sculptor::pool_no_slot);
-            if (volume_node == Sculptor::pool_no_slot || pitch_node == Sculptor::pool_no_slot) {
-                break;
-            }
-            int32_t entry = -1;
-            for (uint32_t p = 0; p < mapping.param_count; ++p) {
-                if (mapping.params[p].node_idx == pitch_node) {
-                    entry = static_cast<int32_t>(p);
-                }
-            }
-            TEST(entry >= 0 && mapping.params[entry].uid == 6);
-            if (entry < 0 || mapping.params[entry].uid != 6) {
-                break;
-            }
-            // The renamed parameter's own routing differs from the resident's.
-            const uint32_t wheel_idx = static_cast<uint32_t>(Synth::ModSource::mod_wheel) - 1;
-            const uint32_t own_wire  = find_osc_graph_connection(graph, Sculptor::EndPoint{ pitch_node, 7 });
-            TEST(own_wire != Sculptor::pool_no_slot);
-            if (own_wire == Sculptor::pool_no_slot) {
-                break;
-            }
-            TEST(graph.get_connection(own_wire).output.slot_idx == mapping.input_source_slots[wheel_idx]);
-            // Rename Pitch -> volume: re-key the record, flip the mapping
-            // target, then retarget the value wire.  The volume row of layer 0
-            // is wired by the resident, so the retarget is refused and the
-            // wire is deleted (the refused edit is the visible loss).
-            int32_t record_idx = -1;
-            for (uint32_t r = 0; r < bank.graph_layout_count; ++r) {
-                const Synth::GraphNodeLayout& record = bank.graph_layout[r];
-                if (record.channel == 0 && record.zone == 0 && record.kind == 3 && record.index == 1 &&
-                    record.uid == 6) {
-                    record_idx = static_cast<int32_t>(r);
-                    break;
-                }
-            }
-            TEST(record_idx >= 0);
-            if (record_idx < 0) {
-                break;
-            }
-            bank.graph_layout[record_idx].index = 0;
-            mapping.params[entry].target        = 0;
-            const uint32_t value_wire           = find_osc_graph_connection(graph, { mapping.osc_nodes[0], 11 });
-            TEST(value_wire != Sculptor::pool_no_slot);
-            if (value_wire == Sculptor::pool_no_slot) {
-                break;
-            }
-            TEST(graph.get_connection(value_wire).output.node_idx == pitch_node);
-            TEST(! graph.move_connection_end(value_wire, false, Sculptor::EndPoint{ mapping.osc_nodes[0], 9 }));
-            graph.delete_connection(value_wire);
-            // The eventless source-row adoption: the resident (Volume, the
-            // first other serving parameter of the new target) carries the
-            // destination's routing, so the renamed parameter's rows mirror
-            // it (its own mod_wheel wiring is dropped).
-            const uint32_t resident_wire = find_osc_graph_connection(graph, Sculptor::EndPoint{ volume_node, 7 });
-            TEST(resident_wire != Sculptor::pool_no_slot);
-            if (resident_wire == Sculptor::pool_no_slot) {
-                break;
-            }
-            graph.set_slot_input(pitch_node, 7, graph.get_connection(resident_wire).output);
-            graph.set_slot_input(pitch_node, 10, Sculptor::EndPoint{ Sculptor::pool_no_slot, Sculptor::pool_no_slot });
-            static Sculptor::GraphChange changes[8] = {};
-            uint32_t                     count      = graph.take_changes(changes, 8);
-            TEST(count == 1);
-            if (count != 1) {
-                break;
-            }
-            TEST(Sculptor::apply_osc_graph_change(&bank, &graph, &mapping, changes[0]));
-            // The compiled routing keeps the resident's sources and the old
-            // target's routing died with its last serving parameter.
-            TEST(bank.bank.instruments.entries[0].layers[0].targets[Synth::mod_volume].num_inputs == 1);
-            TEST(bank.bank.instruments.entries[0].layers[0].targets[Synth::mod_volume].inputs[0].source ==
-                 Synth::ModSource::velocity);
-            TEST(bank.bank.instruments.entries[0].layers[0].targets[Synth::mod_pitch].num_inputs == 0);
-            TEST(bank.bank.instruments.entries[0].layers[0].targets[Synth::mod_pitch].envelope_desc_id == 0);
-            // The renamed parameter's source rows now mirror the resident's
-            // wiring (identical views, order-independent carrier pick).
-            const uint32_t velocity_idx = static_cast<uint32_t>(Synth::ModSource::velocity) - 1;
-            const uint32_t adopted      = find_osc_graph_connection(graph, Sculptor::EndPoint{ pitch_node, 7 });
-            TEST(adopted != Sculptor::pool_no_slot);
-            if (adopted != Sculptor::pool_no_slot) {
-                TEST(graph.get_connection(adopted).output.slot_idx == mapping.input_source_slots[velocity_idx]);
-            }
-            TEST(find_osc_graph_connection(graph, Sculptor::EndPoint{ pitch_node, 10 }) == Sculptor::pool_no_slot);
-            // Re-projection: the old target is gone (no Pitch node, its
-            // routing dead), and the re-keyed record attaches to the new
-            // target's first derived parameter, whose views show the same
-            // resident routing.
-            TEST(Sculptor::project_editor_to_graph(bank, &graph, &mapping));
-            (void)graph.take_changes(discard, 8);
-            TEST(find_graph_node_by_name(graph, "Pitch") == Sculptor::pool_no_slot);
-            const uint32_t attached = find_graph_node_by_name(graph, "Volume");
-            TEST(attached != Sculptor::pool_no_slot);
-            if (attached != Sculptor::pool_no_slot) {
-                const uint32_t attached_wire = find_osc_graph_connection(graph, Sculptor::EndPoint{ attached, 7 });
-                TEST(attached_wire != Sculptor::pool_no_slot);
-                if (attached_wire != Sculptor::pool_no_slot) {
-                    TEST(graph.get_connection(attached_wire).output.slot_idx ==
-                         mapping.input_source_slots[velocity_idx]);
-                }
-            }
-            TEST(bank.bank.instruments.entries[0].layers[0].targets[Synth::mod_volume].num_inputs == 1);
-            TEST(bank.bank.instruments.entries[0].layers[0].targets[Synth::mod_pitch].num_inputs == 0);
-        } while (false);
-    }
-    // A delete_selected batch holding a non-last oscillator plus another
-    // state-bearing node must not refuse: remove_osc_layer compacts the
-    // mapping's oscillator run like the instrument's layers, so the later
-    // events in the batch recompile against a gapless run instead of
-    // failing the compile and resurrecting the deleted nodes.
-    {
-        static Synth::InstrumentEditorBank bank;
-        static Synth::Instrument           instrument = {};
-        build_parameter_fixture(&bank, &instrument);
-        instrument.layers[1].osc_type[0] = Synth::WaveType::sine_wave;
-        instrument.layers[2].osc_type[0] = Synth::WaveType::pulse_wave;
-        bank.bank.instruments.entries[0] = instrument;
-        static Sculptor::Graph           graph;
-        static Sculptor::OscGraphMapping mapping;
-        do {
-            TEST(Sculptor::project_editor_to_graph(bank, &graph, &mapping));
-            static Sculptor::GraphChange discard[8] = {};
-            (void)graph.take_changes(discard, 8);
-            const uint32_t osc_a   = mapping.osc_nodes[0];
-            const uint32_t osc_b   = mapping.osc_nodes[1];
-            const uint32_t osc_c   = mapping.osc_nodes[2];
-            const uint32_t volume2 = find_graph_node_by_name(graph, "Volume 2");
-            TEST(osc_a != Sculptor::pool_no_slot && osc_b != Sculptor::pool_no_slot &&
-                 osc_c != Sculptor::pool_no_slot && volume2 != Sculptor::pool_no_slot);
-            if (osc_a == Sculptor::pool_no_slot || volume2 == Sculptor::pool_no_slot) {
-                break;
-            }
-            // One gesture: both deletions drain as a single batch.
-            graph.delete_node(osc_a);
-            graph.delete_node(volume2);
-            static Sculptor::GraphChange changes[16] = {};
-            const uint32_t               count       = graph.take_changes(changes, 16);
-            TEST(count > 0);
-            if (count == 0) {
-                break;
-            }
-            bool ok = true;
-            for (uint32_t i = 0; i < count; i++) {
-                ok = Sculptor::apply_osc_graph_change(&bank, &graph, &mapping, changes[i]) && ok;
-            }
-            TEST(ok); // no refusal: the compacted run has no gap to reject
-            if (! ok) {
-                break;
-            }
-            // Layers compacted, the mapping run matches, no stale missing-sum
-            // bit flags the survivor's intact edge.
-            TEST(bank.bank.instruments.entries[0].layer_count == 2);
-            TEST(bank.bank.instruments.entries[0].layers[0].osc_type[0] == Synth::WaveType::sine_wave);
-            TEST(bank.bank.instruments.entries[0].layers[1].osc_type[0] == Synth::WaveType::pulse_wave);
-            TEST(mapping.osc_nodes[0] == osc_b && mapping.osc_nodes[1] == osc_c);
-            TEST(mapping.osc_nodes[2] == Sculptor::pool_no_slot);
-            TEST(bank.graph_missing_sum[0][0] == 0);
-            TEST(find_graph_node_by_name(graph, "Volume 2") == Sculptor::pool_no_slot);
-            // Re-projection keeps the deletions: nothing resurrects.
-            TEST(Sculptor::project_editor_to_graph(bank, &graph, &mapping));
-            (void)graph.take_changes(discard, 8);
-            TEST(bank.bank.instruments.entries[0].layer_count == 2);
-            TEST(count_graph_nodes_named(graph, "Volume") == 1);
-            TEST(count_graph_nodes_named(graph, "Volume 2") == 0);
-            TEST(mapping.osc_nodes[2] == Sculptor::pool_no_slot);
-        } while (false);
-    }
-    // Two oscillators selected in one gesture: both layer removals apply in
-    // one drained batch, and a wire that dies with the second oscillator must
-    // not mark the survivor's intact sum edge missing.
-    {
-        static Synth::InstrumentEditorBank bank;
-        static Synth::Instrument           instrument = {};
-        build_parameter_fixture(&bank, &instrument);
-        instrument.layers[1].osc_type[0] = Synth::WaveType::sine_wave;
-        instrument.layers[2].osc_type[0] = Synth::WaveType::pulse_wave;
-        bank.bank.instruments.entries[0] = instrument;
-        static Sculptor::Graph           graph;
-        static Sculptor::OscGraphMapping mapping;
-        do {
-            TEST(Sculptor::project_editor_to_graph(bank, &graph, &mapping));
-            static Sculptor::GraphChange discard[8] = {};
-            (void)graph.take_changes(discard, 8);
-            const uint32_t osc_a = mapping.osc_nodes[0];
-            const uint32_t osc_b = mapping.osc_nodes[1];
-            const uint32_t osc_c = mapping.osc_nodes[2];
-            TEST(osc_a != Sculptor::pool_no_slot && osc_b != Sculptor::pool_no_slot && osc_c != Sculptor::pool_no_slot);
-            if (osc_c == Sculptor::pool_no_slot) {
-                break;
-            }
-            graph.delete_node(osc_a);
-            graph.delete_node(osc_b);
-            static Sculptor::GraphChange changes[16] = {};
-            const uint32_t               count       = graph.take_changes(changes, 16);
-            TEST(count > 0);
-            if (count == 0) {
-                break;
-            }
-            bool ok = true;
-            for (uint32_t i = 0; i < count; i++) {
-                ok = Sculptor::apply_osc_graph_change(&bank, &graph, &mapping, changes[i]) && ok;
-            }
-            TEST(ok);
-            if (! ok) {
-                break;
-            }
-            TEST(bank.bank.instruments.entries[0].layer_count == 1);
-            TEST(bank.bank.instruments.entries[0].layers[0].osc_type[0] == Synth::WaveType::pulse_wave);
-            TEST(mapping.osc_nodes[0] == osc_c);
-            TEST(mapping.osc_nodes[1] == Sculptor::pool_no_slot);
-            TEST(mapping.osc_nodes[2] == Sculptor::pool_no_slot);
-            TEST(bank.graph_missing_sum[0][0] == 0); // the survivor's sum edge is intact
-            TEST(bank.bank.instruments.entries[0].layers[0].targets[Synth::mod_volume].num_inputs == 1);
-            TEST(Sculptor::project_editor_to_graph(bank, &graph, &mapping));
-            (void)graph.take_changes(discard, 8);
-            TEST(bank.bank.instruments.entries[0].layer_count == 1);
-            // Volume 2 lost its oscillator edge with b and detaches to a
-            // kind-3 record. Its stored tuple (envelope 2) does not match
-            // the surviving group's tuple, so the record keeps its own
-            // identity and materializes a free-standing inert node instead
-            // of renaming the survivor.
-            TEST(count_graph_nodes_named(graph, "Volume") == 1);
-            TEST(count_graph_nodes_named(graph, "Volume 2") == 1);
-            TEST(mapping.osc_nodes[1] == Sculptor::pool_no_slot);
-        } while (false);
-    }
-
-    // Retargeting a parameter wire from parameter A to parameter B rebinds
-    // the served cells to B's binding tuple.
-    {
-        static Synth::InstrumentEditorBank bank;
-        static Synth::Instrument           instrument = {};
-        static Sculptor::Graph             graph;
-        static Sculptor::OscGraphMapping   mapping;
-        do {
-            TEST(begin_param_graph(&bank, &instrument, &graph, &mapping));
-            const uint32_t second = find_graph_node_by_name(graph, "Volume 2");
-            TEST(second != Sculptor::pool_no_slot);
-            if (second == Sculptor::pool_no_slot) {
-                break;
-            }
-            const uint32_t wire = find_osc_graph_connection(graph, { mapping.osc_nodes[0], 9 });
-            TEST(wire != Sculptor::pool_no_slot);
-            if (wire == Sculptor::pool_no_slot) {
-                break;
-            }
-            TEST(graph.move_connection_end(wire, true, Sculptor::EndPoint{ second, 0 }));
-            static Sculptor::GraphChange changes[4] = {};
-            const uint32_t               count      = graph.take_changes(changes, 4);
-            TEST(count == 1);
-            if (count != 1) {
-                break;
-            }
-            TEST(Sculptor::apply_osc_graph_change(&bank, &graph, &mapping, changes[0]));
-            const uint32_t retargeted = find_osc_graph_connection(graph, { mapping.osc_nodes[0], 9 });
-            TEST(retargeted != Sculptor::pool_no_slot);
-            if (retargeted != Sculptor::pool_no_slot) {
-                TEST(graph.get_connection(retargeted).output.node_idx == second);
-            }
-            static Synth::Instrument compiled;
-            TEST(Sculptor::compile_graph_to_instrument(graph, mapping, &compiled));
-            TEST(compiled.layers[0].targets[Synth::mod_volume].envelope_desc_id == 2); // B's tuple
-            TEST(compiled.layers[0].targets[Synth::mod_volume].lfo_desc_id == 1);
-            TEST(compiled.layers[0].targets[Synth::mod_volume].lfo_depth_source == Synth::ModSource::velocity);
-            TEST(compiled.layers[2].targets[Synth::mod_volume].envelope_desc_id == 1); // A keeps its cell
-        } while (false);
-    }
-
-    // Retargeting a source wire OFF a parameter source row drops exactly that
-    // parameter's input: the compiled routing loses once and no stale wire
-    // keeps it alive; the sibling keeps its own row.  Retargeting back INTO
-    // the freed source row restores the input.
-    {
-        static Synth::InstrumentEditorBank bank;
-        static Synth::Instrument           instrument = {};
-        static Sculptor::Graph             graph;
-        static Sculptor::OscGraphMapping   mapping;
-        do {
-            TEST(begin_param_graph(&bank, &instrument, &graph, &mapping));
-            const uint32_t first  = find_graph_node_by_name(graph, "Volume");
-            const uint32_t second = find_graph_node_by_name(graph, "Volume 2");
-            TEST(first != Sculptor::pool_no_slot && second != Sculptor::pool_no_slot);
-            if (first == Sculptor::pool_no_slot || second == Sculptor::pool_no_slot) {
-                break;
-            }
-            const uint32_t src_wire = find_osc_graph_connection(graph, { first, 7 });
-            const uint32_t lfo_conn = find_osc_graph_connection(graph, { first, 3 });
-            TEST(src_wire != Sculptor::pool_no_slot && lfo_conn != Sculptor::pool_no_slot);
-            if (src_wire == Sculptor::pool_no_slot || lfo_conn == Sculptor::pool_no_slot) {
-                break;
-            }
-            const uint32_t lfo_node = graph.get_connection(lfo_conn).output.node_idx;
-            const uint32_t velocity_slot =
-                mapping.input_source_slots[static_cast<uint32_t>(Synth::ModSource::velocity) - 1];
-            TEST(graph.get_connection(src_wire).output.slot_idx == velocity_slot);
-            const uint32_t depth_slot = mapping.lfo_depth_input_slot;
-
-            // Free the fixture's LFO depth input, then retarget the source-0
-            // wire onto it.
-            const uint32_t depth_wire = find_osc_graph_connection(graph, { lfo_node, depth_slot });
-            TEST(depth_wire != Sculptor::pool_no_slot);
-            if (depth_wire == Sculptor::pool_no_slot) {
-                break;
-            }
-            graph.delete_connection(depth_wire);
-            static Sculptor::GraphChange changes[8] = {};
-            uint32_t                     count      = graph.take_changes(changes, 8);
-            TEST(count >= 1);
-            if (count == 0) {
-                break;
-            }
-            for (uint32_t i = 0; i < count; i++) {
-                TEST(Sculptor::apply_osc_graph_change(&bank, &graph, &mapping, changes[i]));
-            }
-
-            TEST(graph.move_connection_end(src_wire, false, Sculptor::EndPoint{ lfo_node, depth_slot }));
-            count = graph.take_changes(changes, 8);
-            TEST(count == 1);
-            if (count != 1) {
-                break;
-            }
-            TEST(Sculptor::apply_osc_graph_change(&bank, &graph, &mapping, changes[0]));
-            TEST(find_osc_graph_connection(graph, { first, 7 }) == Sculptor::pool_no_slot);
-            TEST(find_osc_graph_connection(graph, { second, 7 }) !=
-                 Sculptor::pool_no_slot); // the sibling keeps its own row
-            const uint32_t moved = find_osc_graph_connection(graph, { lfo_node, depth_slot });
-            TEST(moved != Sculptor::pool_no_slot);
-            if (moved == Sculptor::pool_no_slot) {
-                break;
-            }
-            TEST(graph.get_connection(moved).output.slot_idx == velocity_slot);
-            static Synth::Instrument compiled;
-            TEST(Sculptor::compile_graph_to_instrument(graph, mapping, &compiled));
-            TEST(compiled.layers[0].targets[Synth::mod_volume].num_inputs == 0);
-            TEST(compiled.layers[0].targets[Synth::mod_volume].inputs[0].source == Synth::ModSource::none);
-
-            // Retargeting back INTO the freed source row restores the input.
-            TEST(graph.move_connection_end(moved, false, Sculptor::EndPoint{ first, 7 }));
-            count = graph.take_changes(changes, 8);
-            TEST(count == 1);
-            if (count != 1) {
-                break;
-            }
-            TEST(Sculptor::apply_osc_graph_change(&bank, &graph, &mapping, changes[0]));
-            TEST(find_osc_graph_connection(graph, { first, 7 }) != Sculptor::pool_no_slot);
-            TEST(Sculptor::compile_graph_to_instrument(graph, mapping, &compiled));
-            TEST(compiled.layers[0].targets[Synth::mod_volume].num_inputs == 1);
-        } while (false);
-    }
-
-    // Kind-3 parameter records round-trip through the editor JSON section
-    // with stable uids and dedup on the record key; old files without kind-3
-    // records still load; stale kind-0 records over unbound cells are dropped
-    // at migration while bound ones are re-keyed to their descriptor.
-    {
-        static Synth::InstrumentEditorBank bank;
-        static Synth::Instrument           instrument = {};
-        build_parameter_fixture(&bank, &instrument);
-        static char                        editor_json[1024];
-        static Synth::InstrumentEditorBank decoded;
-        do {
-            snprintf(
-                editor_json,
-                sizeof(editor_json),
-                "{\"layouts\":["
-                "{\"channel\":0,\"zone\":0,\"kind\":3,\"index\":0,\"x\":10.0,\"y\":20.0,\"width\":0.0,\"height\":0.0,\"uid\":1},"
-                "{\"channel\":0,\"zone\":0,\"kind\":3,\"index\":0,\"x\":30.0,\"y\":40.0,\"width\":0.0,\"height\":0.0,\"uid\":2},"
-                "{\"channel\":0,\"zone\":0,\"kind\":3,\"index\":1,\"x\":50.0,\"y\":60.0,\"width\":0.0,\"height\":0.0,\"uid\":1}]}");
-            const bool decoded_ok = decode_bank_with_editor_section(bank, editor_json, &decoded);
-            TEST(decoded_ok); // kind 3 is a valid record kind
-            if (! decoded_ok) {
-                break;
-            }
-            TEST(decoded.graph_layout_count == 3);
-            TEST(decoded.graph_layout[0].kind == 3 && decoded.graph_layout[0].index == 0);
-            TEST(decoded.graph_layout[0].uid == 1);
-            TEST(decoded.graph_layout[0].x == 10.0f && decoded.graph_layout[0].y == 20.0f);
-            TEST(decoded.graph_layout[1].uid == 2);
-            TEST(decoded.graph_layout[2].index == 1);
-
-            // uid stability across a re-encode.
-            static char    doc[512 * 1024];
-            const uint32_t len = Synth::encode_editor_bank_json(&decoded, doc, sizeof(doc));
-            TEST(len > 0);
-            static Synth::InstrumentEditorBank again;
-            TEST(Synth::decode_editor_bank_json(doc, len, &again));
-            TEST(again.graph_layout_count == decoded.graph_layout_count);
-            TEST(memcmp(decoded.graph_layout,
-                        again.graph_layout,
-                        decoded.graph_layout_count * sizeof(Synth::GraphNodeLayout)) == 0);
-
-            // Duplicate record keys dedup: the later record is dropped.
-            snprintf(
-                editor_json,
-                sizeof(editor_json),
-                "{\"layouts\":["
-                "{\"channel\":0,\"zone\":0,\"kind\":3,\"index\":0,\"x\":1.0,\"y\":2.0,\"width\":0.0,\"height\":0.0,\"uid\":5},"
-                "{\"channel\":0,\"zone\":0,\"kind\":3,\"index\":0,\"x\":9.0,\"y\":9.0,\"width\":0.0,\"height\":0.0,\"uid\":5}]}");
-            TEST(decode_bank_with_editor_section(bank, editor_json, &decoded));
-            TEST(decoded.graph_layout_count == 1);
-            if (decoded.graph_layout_count == 1) {
-                TEST(decoded.graph_layout[0].x == 1.0f); // first record kept
-            }
-
-            // Old files: a detached-envelope record still loads unchanged.
-            build_detached_layouts_json(editor_json, sizeof(editor_json), 1, 1, 1, 1, 0, 0);
-            TEST(decode_bank_with_editor_section(bank, editor_json, &decoded));
-
-        } while (false);
     }
 
     // Add Envelope's default descriptor (do_osc_add_generator's construction
@@ -13236,1878 +11757,13 @@ int main()
         TEST(approx(Synth::eval_envelope(env, &state, false), 0.0f, 1e-4f));
     }
 
-    // Partial-wiring persistence: a kind-3 record with served bits plus
-    // envelope/LFO references against zero generator cells materializes
-    // the parameter with all its wires and its stored name - wiring the
-    // live instrument tuple does not express, so the record alone carries
-    // it across re-projection.
-    {
-        static Synth::InstrumentEditorBank bank;
-        static Synth::Instrument           instrument = {};
-        do {
-            memset(&bank, 0, sizeof(bank));
-            instrument                   = {};
-            bank.bank.channel_enabled[0] = 1;
-            TEST(bank.bank.instruments.allocate() == 0);
-            bank.bank.channel_zones[0][0].start_note = 1;
-            bank.bank.channel_zones[0][0].instrument = 0;
-            const uint32_t env_slot                  = bank.bank.envelopes.allocate();
-            TEST(env_slot != pool_no_slot);
-            Synth::EnvelopeDescriptor& env = bank.bank.envelopes.entries[env_slot];
-            env.num_points                 = 2;
-            env.sustain_first_point        = 0;
-            env.sustain_last_point         = 1;
-            env.min_value                  = -1.0f;
-            env.min_max_delta              = 2.0f;
-            env.points[0].position         = 0;
-            env.points[0].value            = 0x2000;
-            env.points[1].position         = 100;
-            env.points[1].value            = 0x4000;
-            const uint32_t lfo_slot        = bank.bank.lfos.allocate();
-            TEST(lfo_slot != pool_no_slot);
-            Synth::LFODescriptor& lfo = bank.bank.lfos.entries[lfo_slot];
-            lfo.wave                  = Synth::WaveType::sine_wave;
-            lfo.period_ms             = 300;
-            lfo.min_value             = -1.0f;
-            lfo.min_max_delta         = 2.0f;
-
-            instrument.layer_count                                     = 2;
-            instrument.layers[0].osc_type[0]                           = Synth::WaveType::sine_wave;
-            instrument.layers[1].osc_type[0]                           = Synth::WaveType::sine_wave;
-            instrument.layers[0].targets[Synth::mod_volume].base_value = 1.0f;
-            bank.bank.instruments.entries[0]                           = instrument;
-
-            add_detached_record(&bank, 0, 0, 1, 1, 10.0f, 20.0f, Synth::ModSource::none, Synth::ModSource::none, 1);
-            add_detached_record(&bank, 0, 0, 2, 1, 30.0f, 40.0f, Synth::ModSource::none, Synth::ModSource::none, 1);
-            add_parameter_record(&bank, 0, 0, 0, 50.0f, 60.0f, 1);
-            Synth::GraphNodeLayout& param_record = bank.graph_layout[bank.graph_layout_count - 1];
-            param_record.served                  = 0x3;
-            param_record.env_desc_id             = 1;
-            param_record.lfo_desc_id             = 1;
-            snprintf(param_record.name, sizeof(param_record.name), "My Param");
-
-            static Sculptor::Graph           graph;
-            static Sculptor::OscGraphMapping mapping;
-            TEST(Sculptor::project_editor_to_graph(bank, &graph, &mapping));
-            static Sculptor::GraphChange discard[8] = {};
-            (void)graph.take_changes(discard, 8);
-            TEST(mapping.param_count == 1);
-            const uint32_t param_node = mapping.params[0].node_idx;
-            TEST(find_graph_node_by_name(graph, "My Param") == param_node);
-            TEST(graph.node(param_node).renamable);             // parameter nodes own their stored title
-            TEST(! graph.node(mapping.osc_nodes[0]).renamable); // oscillator titles derive
-            TEST(mapping.params[0].served == 0x3);
-            for (uint32_t layer = 0; layer < 2; layer++) {
-                const uint32_t wire = find_osc_graph_connection(graph, { mapping.osc_nodes[layer], 9 });
-                TEST(wire != Sculptor::pool_no_slot);
-                if (wire != Sculptor::pool_no_slot) {
-                    TEST(graph.get_connection(wire).output.node_idx == param_node);
-                }
-            }
-            const uint32_t env_wire = find_osc_graph_connection(graph, { param_node, 2 });
-            TEST(env_wire != Sculptor::pool_no_slot);
-            if (env_wire != Sculptor::pool_no_slot) {
-                TEST(mapping.params[0].env_node == graph.get_connection(env_wire).output.node_idx);
-            }
-            const uint32_t lfo_wire = find_osc_graph_connection(graph, { param_node, 3 });
-            TEST(lfo_wire != Sculptor::pool_no_slot);
-            if (lfo_wire != Sculptor::pool_no_slot) {
-                TEST(mapping.params[0].lfo_node == graph.get_connection(lfo_wire).output.node_idx);
-            }
-        } while (false);
-    }
-
-    // The evaporation scenario end-to-end: connecting a record-backed
-    // parameter (zero generator tuple) to an oscillator row and re-projecting
-    // keeps the wire - the value wire through the apply path, the envelope
-    // input wire likewise; both are editor state the generator tuple cannot
-    // express, so only the record persists them.
-    {
-        static Synth::InstrumentEditorBank bank;
-        static Synth::Instrument           instrument = {};
-        do {
-            memset(&bank, 0, sizeof(bank));
-            instrument                   = {};
-            bank.bank.channel_enabled[0] = 1;
-            TEST(bank.bank.instruments.allocate() == 0);
-            bank.bank.channel_zones[0][0].start_note = 1;
-            bank.bank.channel_zones[0][0].instrument = 0;
-            const uint32_t env_slot                  = bank.bank.envelopes.allocate();
-            TEST(env_slot != pool_no_slot);
-            Synth::EnvelopeDescriptor& env                             = bank.bank.envelopes.entries[env_slot];
-            env.num_points                                             = 2;
-            env.sustain_first_point                                    = 0;
-            env.sustain_last_point                                     = 1;
-            env.min_value                                              = -1.0f;
-            env.min_max_delta                                          = 2.0f;
-            env.points[0].position                                     = 0;
-            env.points[0].value                                        = 0x2000;
-            env.points[1].position                                     = 100;
-            env.points[1].value                                        = 0x4000;
-            instrument.layer_count                                     = 1;
-            instrument.layers[0].osc_type[0]                           = Synth::WaveType::sine_wave;
-            instrument.layers[0].targets[Synth::mod_volume].base_value = 1.0f;
-            bank.bank.instruments.entries[0]                           = instrument;
-
-            add_detached_record(&bank, 0, 0, 1, 1, 10.0f, 20.0f, Synth::ModSource::none, Synth::ModSource::none, 1);
-            add_parameter_record(&bank, 0, 0, 0, 50.0f, 60.0f, 1);
-
-            static Sculptor::Graph           graph;
-            static Sculptor::OscGraphMapping mapping;
-            TEST(Sculptor::project_editor_to_graph(bank, &graph, &mapping));
-            static Sculptor::GraphChange discard[8] = {};
-            (void)graph.take_changes(discard, 8);
-            TEST(mapping.param_count == 1);
-            const uint32_t param_node = mapping.params[0].node_idx;
-            TEST(find_osc_graph_connection(graph, { mapping.osc_nodes[0], 9 }) == Sculptor::pool_no_slot);
-            // Connect the parameter's value output to the layer-0 volume row.
-            TEST(graph.add_connection(Sculptor::EndPoint{ param_node, mapping.param_output_slot },
-                                      Sculptor::EndPoint{ mapping.osc_nodes[0], 9 }) != Sculptor::pool_no_slot);
-            // Wire the envelope instance into the parameter's envelope input.
-            const uint32_t env_node = mapping.detached[0].node_idx;
-            TEST(mapping.detached[0].kind == 1);
-            TEST(graph.add_connection(Sculptor::EndPoint{ env_node, mapping.env_output_slot },
-                                      Sculptor::EndPoint{ param_node, 2 }) != Sculptor::pool_no_slot);
-            static Sculptor::GraphChange changes[8] = {};
-            const uint32_t               count      = graph.take_changes(changes, 8);
-            TEST(count == 2);
-            if (count != 2) {
-                break;
-            }
-            for (uint32_t i = 0; i < count; i++) {
-                TEST(Sculptor::apply_osc_graph_change(&bank, &graph, &mapping, changes[i]));
-            }
-            TEST(bank.graph_layout[bank.graph_layout_count - 1].served == 0x1);
-            TEST(bank.graph_layout[bank.graph_layout_count - 1].env_desc_id == 1);
-            TEST(bank.bank.instruments.entries[0].layers[0].targets[Synth::mod_volume].envelope_desc_id == 1);
-            // Re-projection keeps both wires.
-            TEST(Sculptor::project_editor_to_graph(bank, &graph, &mapping));
-            (void)graph.take_changes(discard, 8);
-            TEST(mapping.param_count >= 1);
-            const uint32_t reprojected = find_graph_node_by_name(graph, "Volume");
-            TEST(reprojected != Sculptor::pool_no_slot);
-            if (reprojected != Sculptor::pool_no_slot) {
-                TEST(find_osc_graph_connection(graph, { mapping.osc_nodes[0], 9 }) != Sculptor::pool_no_slot);
-                TEST(find_osc_graph_connection(graph, { reprojected, 2 }) != Sculptor::pool_no_slot);
-            }
-        } while (false);
-    }
-
-    // Write-side sync: the record fields follow the live wires.  Disconnecting
-    // a value wire clears the served bit; deleting an oscillator layer shifts
-    // the bits like the missing-sum bits and the kind-0 oscillator records.
-    {
-        static Synth::InstrumentEditorBank bank;
-        static Synth::Instrument           instrument = {};
-        build_parameter_fixture(&bank, &instrument);
-        add_parameter_record(&bank, 0, 0, 0, 10.0f, 20.0f, 5); // attaches to the first derived volume parameter
-        static Sculptor::Graph           graph;
-        static Sculptor::OscGraphMapping mapping;
-        do {
-            TEST(Sculptor::project_editor_to_graph(bank, &graph, &mapping));
-            static Sculptor::GraphChange discard[8] = {};
-            (void)graph.take_changes(discard, 8);
-            int32_t record_idx = -1;
-            for (uint32_t r = 0; r < bank.graph_layout_count; r++) {
-                const Synth::GraphNodeLayout& record = bank.graph_layout[r];
-                if (record.kind == 3 && record.index == 0 && record.uid == 5) {
-                    record_idx = static_cast<int32_t>(r);
-                }
-            }
-            TEST(record_idx >= 0);
-            if (record_idx < 0) {
-                break;
-            }
-            // The attached parameter serves layers 0 and 2 (the shared tuple).
-            uint32_t vol_node = Sculptor::pool_no_slot;
-            for (uint32_t p = 0; p < mapping.param_count; p++) {
-                if (mapping.params[p].uid == 5) {
-                    vol_node = mapping.params[p].node_idx;
-                }
-            }
-            TEST(vol_node != Sculptor::pool_no_slot);
-            if (vol_node == Sculptor::pool_no_slot) {
-                break;
-            }
-            const uint32_t wire = find_osc_graph_connection(graph, { mapping.osc_nodes[0], 9 });
-            TEST(wire != Sculptor::pool_no_slot);
-            if (wire == Sculptor::pool_no_slot) {
-                break;
-            }
-            TEST(graph.get_connection(wire).output.node_idx == vol_node);
-            graph.delete_connection(wire);
-            static Sculptor::GraphChange changes[8] = {};
-            const uint32_t               count      = graph.take_changes(changes, 8);
-            TEST(count >= 1);
-            if (count == 0) {
-                break;
-            }
-            for (uint32_t i = 0; i < count; i++) {
-                TEST(Sculptor::apply_osc_graph_change(&bank, &graph, &mapping, changes[i]));
-            }
-            TEST(bank.graph_layout[record_idx].served == 0x4); // layer-0 bit gone, layer-2 bit kept
-            TEST(bank.bank.instruments.entries[0].layers[0].targets[Synth::mod_volume].envelope_desc_id == 0);
-            TEST(bank.bank.instruments.entries[0].layers[2].targets[Synth::mod_volume].envelope_desc_id == 1);
-
-            // Layer deletion compacts the served bits: deleting layer 1 moves
-            // the layer-2 bit down to layer 1 (and shifts the kind-0 record).
-            graph.delete_node(mapping.osc_nodes[1]);
-            const uint32_t count_2 = graph.take_changes(changes, 8);
-            TEST(count_2 >= 1);
-            if (count_2 == 0) {
-                break;
-            }
-            for (uint32_t i = 0; i < count_2; i++) {
-                TEST(Sculptor::apply_osc_graph_change(&bank, &graph, &mapping, changes[i]));
-            }
-            TEST(bank.graph_layout[record_idx].served == 0x2); // layer-2 bit compacted into layer 1
-            TEST(bank.bank.instruments.entries[0].layer_count == 2);
-            TEST(bank.bank.instruments.entries[0].layers[1].targets[Synth::mod_volume].envelope_desc_id == 1);
-        } while (false);
-    }
-
-    // Naming: Add Parameter's record names the node "Parameter %u" (uid);
-    // a free-text rename through the name_changed apply path writes the
-    // record, creates one for a derived parameter, survives re-projection,
-    // refuses an empty name and trims to the record's 31 characters.
-    {
-        static Synth::InstrumentEditorBank bank;
-        static Synth::Instrument           instrument = {};
-        build_parameter_fixture(&bank, &instrument);
-        const uint8_t added_uid = Sculptor::allocate_detached_uid(bank, 0, 0, 3);
-        add_parameter_record(&bank, 0, 0, 0, 10.0f, 20.0f, added_uid);
-        snprintf(bank.graph_layout[bank.graph_layout_count - 1].name,
-                 sizeof(bank.graph_layout[0].name),
-                 "Parameter %u",
-                 added_uid);
-        static Sculptor::Graph           graph;
-        static Sculptor::OscGraphMapping mapping;
-        do {
-            TEST(Sculptor::project_editor_to_graph(bank, &graph, &mapping));
-            static Sculptor::GraphChange discard[8] = {};
-            (void)graph.take_changes(discard, 8);
-            TEST(find_graph_node_by_name(graph, "Parameter 1") != Sculptor::pool_no_slot);
-            TEST(find_graph_node_by_name(graph, "Volume") == Sculptor::pool_no_slot); // the record attached to it
-
-            // Free rename of the OTHER (derived, record-less) volume parameter.
-            const uint32_t vol2 = find_graph_node_by_name(graph, "Volume 2");
-            TEST(vol2 != Sculptor::pool_no_slot);
-            if (vol2 == Sculptor::pool_no_slot) {
-                break;
-            }
-            graph.rename_node(vol2, "Filter Mix");
-            (void)graph.take_changes(discard, 8); // the widget's own event; the batch below carries the rename
-            apply_name_changed(&bank, &graph, &mapping, vol2);
-            TEST(count_records_matching(bank, 0, 0, 3, 0) == 2); // the moved record plus the rename's new record
-            int32_t renamed_record = -1;
-            for (uint32_t r = 0; r < bank.graph_layout_count; r++) {
-                const Synth::GraphNodeLayout& record = bank.graph_layout[r];
-                if (record.kind == 3 && record.index == 0 && strcmp(record.name, "Filter Mix") == 0) {
-                    renamed_record = static_cast<int32_t>(r);
-                }
-            }
-            TEST(renamed_record >= 0);
-            if (renamed_record < 0) {
-                break;
-            }
-            TEST(bank.graph_layout[renamed_record].uid != 0);
-            TEST(bank.graph_layout[renamed_record].served == 0x2); // seeded from the live wiring (layer 1)
-            TEST(Sculptor::project_editor_to_graph(bank, &graph, &mapping));
-            (void)graph.take_changes(discard, 8);
-            TEST(find_graph_node_by_name(graph, "Filter Mix") != Sculptor::pool_no_slot);
-            TEST(find_graph_node_by_name(graph, "Volume 2") == Sculptor::pool_no_slot);
-
-            // An empty rename refuses: the old name survives.
-            const uint32_t renamed = find_graph_node_by_name(graph, "Filter Mix");
-            TEST(renamed != Sculptor::pool_no_slot);
-            if (renamed == Sculptor::pool_no_slot) {
-                break;
-            }
-            graph.rename_node(renamed, "");
-            (void)graph.take_changes(discard, 8);
-            Sculptor::GraphChange empty_rename = {};
-            empty_rename.kind                  = Sculptor::ChangeKind::name_changed;
-            empty_rename.node_idx              = renamed;
-            TEST(! Sculptor::apply_osc_graph_change(&bank, &graph, &mapping, empty_rename));
-            TEST(Sculptor::project_editor_to_graph(bank, &graph, &mapping));
-            (void)graph.take_changes(discard, 8);
-            TEST(find_graph_node_by_name(graph, "Filter Mix") != Sculptor::pool_no_slot);
-
-            // A name longer than the record stores trims to 31 characters.
-            const uint32_t trim_node = find_graph_node_by_name(graph, "Filter Mix");
-            if (trim_node != Sculptor::pool_no_slot) {
-                graph.rename_node(trim_node, "0123456789012345678901234567890123456789");
-                (void)graph.take_changes(discard, 8);
-                apply_name_changed(&bank, &graph, &mapping, trim_node);
-                int32_t trimmed = -1;
-                for (uint32_t r = 0; r < bank.graph_layout_count; r++) {
-                    const Synth::GraphNodeLayout& record = bank.graph_layout[r];
-                    if (record.kind == 3 && record.index == 0 && strncmp(record.name, "0123456789", 10) == 0) {
-                        trimmed = static_cast<int32_t>(r);
-                    }
-                }
-                TEST(trimmed >= 0);
-                if (trimmed >= 0) {
-                    TEST(strlen(bank.graph_layout[trimmed].name) == 31);
-                }
-            }
-        } while (false);
-    }
-
-    // Derived-sibling rename: each parameter materializes its own record on
-    // rename, and strict attachment (class + tuple/served matching) returns
-    // every record to its own group at re-projection, so either sibling can
-    // be renamed first and no record ever lands on the wrong parameter.
-    {
-        static Synth::InstrumentEditorBank bank;
-        static Synth::Instrument           instrument = {};
-        static Sculptor::Graph             graph;
-        static Sculptor::OscGraphMapping   mapping;
-        do {
-            TEST(begin_param_graph(&bank, &instrument, &graph, &mapping));
-            static Sculptor::GraphChange discard[8] = {};
-            // params[0] and params[1] are the two derived volume parameters
-            // (different tuples); params[2] is pitch.
-            TEST(mapping.params[0].uid == 0 && mapping.params[1].uid == 0);
-
-            // Renaming the SECOND volume parameter creates its record.
-            const uint32_t vol2 = find_graph_node_by_name(graph, "Volume 2");
-            TEST(vol2 != Sculptor::pool_no_slot);
-            if (vol2 == Sculptor::pool_no_slot) {
-                break;
-            }
-            graph.rename_node(vol2, "Second Name");
-            (void)graph.take_changes(discard, 8); // the widget's own event; the batch below carries the rename
-            static Sculptor::GraphChange change = {};
-            change.kind                         = Sculptor::ChangeKind::name_changed;
-            change.node_idx                     = vol2;
-            TEST(Sculptor::apply_osc_graph_change(&bank, &graph, &mapping, change));
-            TEST(count_records_matching(bank, 0, 0, 3, 0) == 1);
-
-            // Re-projection: the record re-attaches to its own group (the
-            // layer-1 parameter), leaving the first sibling record-less.
-            TEST(Sculptor::project_editor_to_graph(bank, &graph, &mapping));
-            (void)graph.take_changes(discard, 8);
-            TEST(mapping.params[0].uid == 0 && mapping.params[1].uid != 0);
-            TEST(find_graph_node_by_name(graph, "Volume") != Sculptor::pool_no_slot);
-            TEST(find_graph_node_by_name(graph, "Second Name") != Sculptor::pool_no_slot);
-
-            // Renaming the FIRST sibling succeeds too; its record seeds
-            // from its own wiring (layers 0 and 2).
-            const uint32_t vol1 = find_graph_node_by_name(graph, "Volume");
-            TEST(vol1 != Sculptor::pool_no_slot);
-            if (vol1 == Sculptor::pool_no_slot) {
-                break;
-            }
-            graph.rename_node(vol1, "First Name");
-            (void)graph.take_changes(discard, 8);
-            change.node_idx = vol1;
-            TEST(Sculptor::apply_osc_graph_change(&bank, &graph, &mapping, change));
-            TEST(count_records_matching(bank, 0, 0, 3, 0) == 2);
-            int32_t first_record = -1;
-            for (uint32_t r = 0; r < bank.graph_layout_count; r++) {
-                const Synth::GraphNodeLayout& record = bank.graph_layout[r];
-                if (record.kind == 3 && strcmp(record.name, "First Name") == 0) {
-                    first_record = static_cast<int32_t>(r);
-                }
-            }
-            TEST(first_record >= 0);
-            if (first_record < 0) {
-                break;
-            }
-            TEST(bank.graph_layout[first_record].served == 0x5);
-
-            // Re-projection keeps both records on their own parameters.
-            TEST(Sculptor::project_editor_to_graph(bank, &graph, &mapping));
-            (void)graph.take_changes(discard, 8);
-            const uint32_t first_node  = find_graph_node_by_name(graph, "First Name");
-            const uint32_t second_node = find_graph_node_by_name(graph, "Second Name");
-            TEST(first_node != Sculptor::pool_no_slot && second_node != Sculptor::pool_no_slot);
-            TEST(find_graph_node_by_name(graph, "Volume") == Sculptor::pool_no_slot);
-            // No hijack: the first parameter kept the layer-0/2 wiring, the
-            // second its layer-1 wiring.
-            int32_t named_first  = -1;
-            int32_t named_second = -1;
-            for (uint32_t r = 0; r < bank.graph_layout_count; r++) {
-                const Synth::GraphNodeLayout& record = bank.graph_layout[r];
-                if (record.kind == 3 && strcmp(record.name, "First Name") == 0) {
-                    named_first = static_cast<int32_t>(r);
-                }
-                if (record.kind == 3 && strcmp(record.name, "Second Name") == 0) {
-                    named_second = static_cast<int32_t>(r);
-                }
-            }
-            TEST(named_first >= 0 && named_second >= 0);
-            if (named_first >= 0 && named_second >= 0) {
-                TEST(bank.graph_layout[named_first].served == 0x5);
-                TEST(bank.graph_layout[named_second].served == 0x2);
-            }
-        } while (false);
-    }
-    // LFO depth rewire: a record-backed parameter's LFO binding survives a
-    // mid-session rewire of the bound instance's depth input.  The record
-    // triple resolves from the live depth/rate edges, so the rewire is what
-    // the record stores and the parameter's LFO wire re-attaches at
-    // re-projection.
-    {
-        static Synth::InstrumentEditorBank bank;
-        static Synth::Instrument           instrument = {};
-        static Sculptor::Graph             graph;
-        static Sculptor::OscGraphMapping   mapping;
-        do {
-            TEST(begin_param_graph(&bank, &instrument, &graph, &mapping));
-            static Sculptor::GraphChange discard[8] = {};
-            // Give the first volume parameter a record via a free-text
-            // rename; the record seeds its LFO triple from the live wiring
-            // (desc 1, depth velocity, rate mod wheel).
-            const uint32_t vol1 = find_graph_node_by_name(graph, "Volume");
-            TEST(vol1 != Sculptor::pool_no_slot);
-            if (vol1 == Sculptor::pool_no_slot) {
-                break;
-            }
-            graph.rename_node(vol1, "Wired");
-            (void)graph.take_changes(discard, 8);
-            apply_name_changed(&bank, &graph, &mapping, vol1);
-            int32_t record_idx = -1;
-            for (uint32_t r = 0; r < bank.graph_layout_count; r++) {
-                const Synth::GraphNodeLayout& record = bank.graph_layout[r];
-                if (record.kind == 3 && strcmp(record.name, "Wired") == 0) {
-                    record_idx = static_cast<int32_t>(r);
-                }
-            }
-            TEST(record_idx >= 0);
-            if (record_idx < 0) {
-                break;
-            }
-            TEST(bank.graph_layout[record_idx].lfo_desc_id == 1);
-            TEST(static_cast<Synth::ModSource>(bank.graph_layout[record_idx].lfo_depth_source) ==
-                 Synth::ModSource::velocity);
-
-            // Rewire the bound LFO instance's depth input to pitch bend.
-            const uint32_t lfo_node = mapping.params[0].lfo_node;
-            TEST(lfo_node != Sculptor::pool_no_slot);
-            const uint32_t depth_conn = find_osc_graph_connection(graph, { lfo_node, mapping.lfo_depth_input_slot });
-            TEST(depth_conn != Sculptor::pool_no_slot);
-            if (depth_conn == Sculptor::pool_no_slot) {
-                break;
-            }
-            TEST(graph.get_connection(depth_conn).output.slot_idx ==
-                 mapping.input_source_slots[static_cast<uint32_t>(Synth::ModSource::velocity) - 1]);
-            graph.delete_connection(depth_conn);
-            const uint32_t bend_idx = static_cast<uint32_t>(Synth::ModSource::pitch_bend) - 1;
-            TEST(graph.add_connection(Sculptor::EndPoint{ mapping.input_node, mapping.input_source_slots[bend_idx] },
-                                      Sculptor::EndPoint{ lfo_node, mapping.lfo_depth_input_slot }) !=
-                 Sculptor::pool_no_slot);
-            static Sculptor::GraphChange changes[8] = {};
-            const uint32_t               count      = graph.take_changes(changes, 8);
-            TEST(count == 2);
-            if (count != 2) {
-                break;
-            }
-            for (uint32_t i = 0; i < count; i++) {
-                TEST(Sculptor::apply_osc_graph_change(&bank, &graph, &mapping, changes[i]));
-            }
-            TEST(bank.graph_layout[record_idx].lfo_desc_id == 1);
-            TEST(static_cast<Synth::ModSource>(bank.graph_layout[record_idx].lfo_depth_source) ==
-                 Synth::ModSource::pitch_bend);
-            TEST(bank.bank.instruments.entries[0].layers[0].targets[Synth::mod_volume].lfo_depth_source ==
-                 Synth::ModSource::pitch_bend);
-
-            // Re-projection re-attaches the parameter's LFO wire: the record
-            // triple matches the rewired instance.
-            TEST(Sculptor::project_editor_to_graph(bank, &graph, &mapping));
-            (void)graph.take_changes(discard, 8);
-            const uint32_t wired_node = find_graph_node_by_name(graph, "Wired");
-            TEST(wired_node != Sculptor::pool_no_slot);
-            if (wired_node == Sculptor::pool_no_slot) {
-                break;
-            }
-            TEST(mapping.params[0].lfo_node != Sculptor::pool_no_slot);
-            const uint32_t lfo_wire = find_osc_graph_connection(graph, { wired_node, 3 });
-            TEST(lfo_wire != Sculptor::pool_no_slot);
-            if (lfo_wire != Sculptor::pool_no_slot) {
-                TEST(graph.get_connection(lfo_wire).output.node_idx == mapping.params[0].lfo_node);
-            }
-        } while (false);
-    }
-
-    // Wire-driven retarget: dropping (or dragging) a record-backed
-    // parameter's value wire onto a different target's oscillator row
-    // retargets the parameter. The record re-keys, the parameter's other
-    // value wires shift to the new target's rows, the node keeps its
-    // user-chosen name, and the compile routes the new target while the old
-    // target keeps its remaining serving parameters.
-    {
-        static Synth::InstrumentEditorBank bank;
-        static Synth::Instrument           instrument = {};
-        static Sculptor::Graph             graph;
-        static Sculptor::OscGraphMapping   mapping;
-        do {
-            TEST(begin_param_graph(&bank, &instrument, &graph, &mapping));
-            static Sculptor::GraphChange discard[8] = {};
-            // Give the volume parameter a record via a free-text rename; the
-            // record seeds from its live wiring (volume rows of layers 0/2).
-            const uint32_t vol1 = find_graph_node_by_name(graph, "Volume");
-            TEST(vol1 != Sculptor::pool_no_slot);
-            if (vol1 == Sculptor::pool_no_slot) {
-                break;
-            }
-            graph.rename_node(vol1, "Parameter A");
-            (void)graph.take_changes(discard, 8);
-            apply_name_changed(&bank, &graph, &mapping, vol1);
-            const int32_t p = Sculptor::find_param(mapping, vol1);
-            TEST(p >= 0 && mapping.params[p].uid != 0 && mapping.params[p].target == 0);
-            if (p < 0 || mapping.params[p].uid == 0) {
-                break;
-            }
-            // Multi-instance parameters (R2): dropping onto any target's row is
-            // accepted - the record re-keys and the former target keeps its
-            // remaining serving parameters.
-            const Sculptor::EndPoint param_out = { vol1, mapping.param_output_slot };
-            const Sculptor::EndPoint pitch_row = { mapping.osc_nodes[0], 11 };
-            TEST(Sculptor::osc_graph_validate(&mapping, graph, param_out, pitch_row));
-            const Sculptor::EndPoint panning_row = { mapping.osc_nodes[0], 10 };
-            TEST(Sculptor::osc_graph_validate(&mapping, graph, param_out, panning_row));
-            TEST(graph.add_connection(param_out, panning_row) != Sculptor::pool_no_slot);
-            static Sculptor::GraphChange changes[8] = {};
-            const uint32_t               num        = graph.take_changes(changes, 8);
-            TEST(num == 1);
-            if (num != 1) {
-                break;
-            }
-            TEST(Sculptor::apply_osc_graph_change(&bank, &graph, &mapping, changes[0]));
-            // The record and the mapping entry carry the new target and the node
-            // kept its user-chosen name.
-            TEST(mapping.params[p].target == 2);
-            const int32_t record_idx = Sculptor::find_record(bank, 0, 0, 3, 2, mapping.params[p].uid);
-            TEST(record_idx >= 0 && bank.graph_layout[record_idx].index == 2);
-            TEST(strcmp(graph.node(vol1).name, "Parameter A") == 0);
-            // The parameter's wires all sit on panning rows now: the layer-0
-            // volume wire was freed (the dropped wire occupies that row) and
-            // the layer-2 wire shifted, so each touched row carries exactly
-            // one edge from this parameter.
-            uint32_t panning_wires = 0;
-            uint32_t volume_wires  = 0;
-            for (uint32_t c = 0; c < Sculptor::max_connections; c++) {
-                if (! graph.connection_occupied(c)) {
-                    continue;
-                }
-                const Sculptor::Connection& connection = graph.get_connection(c);
-                if (connection.output.node_idx != vol1 || connection.output.slot_idx != mapping.param_output_slot) {
-                    continue;
-                }
-                if (connection.input.node_idx == mapping.osc_nodes[0] && connection.input.slot_idx == 10) {
-                    panning_wires++;
-                }
-                if (connection.input.node_idx == mapping.osc_nodes[0] && connection.input.slot_idx == 9) {
-                    volume_wires++;
-                }
-            }
-            TEST(panning_wires == 1 && volume_wires == 0);
-            // The parameter served layers 0 and 2: the layer-2 rows shifted too.
-            uint32_t panning_wires_2 = 0;
-            uint32_t volume_wires_2  = 0;
-            for (uint32_t c = 0; c < Sculptor::max_connections; c++) {
-                if (! graph.connection_occupied(c)) {
-                    continue;
-                }
-                const Sculptor::Connection& connection = graph.get_connection(c);
-                if (connection.output.node_idx != vol1 || connection.output.slot_idx != mapping.param_output_slot) {
-                    continue;
-                }
-                if (connection.input.node_idx == mapping.osc_nodes[2] && connection.input.slot_idx == 10) {
-                    panning_wires_2++;
-                }
-                if (connection.input.node_idx == mapping.osc_nodes[0] && connection.input.slot_idx == 9) {
-                    volume_wires_2++;
-                }
-            }
-            TEST(panning_wires_2 == 1 && volume_wires_2 == 0);
-            // The compile routes the parameter's source wiring into the new
-            // target; the old target keeps its remaining serving parameter.
-            const Synth::Instrument& compiled = bank.bank.instruments.entries[0];
-            TEST(compiled.layers[0].targets[Synth::mod_panning].num_inputs == 1);
-            TEST(compiled.layers[0].targets[Synth::mod_panning].inputs[0].source == Synth::ModSource::velocity);
-            TEST(compiled.layers[0].targets[Synth::mod_volume].num_inputs ==
-                 0); // the moved parameter took the volume routing with it
-            // Re-projection is stable: the record drives the same rows.
-            TEST(Sculptor::project_editor_to_graph(bank, &graph, &mapping));
-            (void)graph.take_changes(discard, 8);
-            TEST(find_graph_node_by_name(graph, "Parameter A") != Sculptor::pool_no_slot);
-            // Re-projection rebuilt the mapping: re-find the parameter by node.
-            const int32_t p2 = Sculptor::find_param(mapping, find_graph_node_by_name(graph, "Parameter A"));
-            TEST(p2 >= 0 && mapping.params[p2].target == 2 && mapping.params[p2].uid != 0);
-            // Dragging the wire's input end to the lowpass row retargets again.
-            const uint32_t wire = Sculptor::connection_into(graph, mapping.osc_nodes[0], 10);
-            TEST(wire != Sculptor::pool_no_slot);
-            if (wire == Sculptor::pool_no_slot) {
-                break;
-            }
-            TEST(graph.move_connection_end(wire, false, Sculptor::EndPoint{ mapping.osc_nodes[0], 13 }));
-            static Sculptor::GraphChange moves[8] = {};
-            const uint32_t               moved    = graph.take_changes(moves, 8);
-            TEST(moved == 1);
-            if (moved != 1) {
-                break;
-            }
-            TEST(Sculptor::apply_osc_graph_change(&bank, &graph, &mapping, moves[0]));
-            TEST(mapping.params[p2].target ==
-                 static_cast<uint32_t>(Synth::mod_lowpass_cutoff)); // row 13 is the lowpass row
-            const int32_t record_idx2 = Sculptor::find_record(bank,
-                                                              0,
-                                                              0,
-                                                              3,
-                                                              static_cast<uint8_t>(Synth::mod_lowpass_cutoff),
-                                                              mapping.params[p2].uid);
-            TEST(record_idx2 >= 0);
-            // A cross-target drop bypassing the validator is refused by the apply
-            // path's defensive guard, and re-projection clears the stray wire.
-            TEST(graph.add_connection(param_out, pitch_row) != Sculptor::pool_no_slot);
-            static Sculptor::GraphChange strays[8] = {};
-            const uint32_t               strayed   = graph.take_changes(strays, 8);
-            TEST(strayed == 1);
-            if (strayed != 1) {
-                break;
-            }
-            TEST(! Sculptor::apply_osc_graph_change(&bank, &graph, &mapping, strays[0]));
-            TEST(Sculptor::project_editor_to_graph(bank, &graph, &mapping));
-            (void)graph.take_changes(discard, 8);
-            const int32_t p3 = Sculptor::find_param(mapping, find_graph_node_by_name(graph, "Parameter A"));
-            TEST(p3 >= 0 && mapping.params[p3].target == static_cast<uint32_t>(Synth::mod_lowpass_cutoff) &&
-                 mapping.params[p3].uid != 0);
-            const uint32_t param_a = mapping.params[p3].node_idx;
-            TEST(param_a != Sculptor::pool_no_slot);
-            uint32_t pitch_wires = 0;
-            for (uint32_t c = 0; c < Sculptor::max_connections; c++) {
-                if (! graph.connection_occupied(c)) {
-                    continue;
-                }
-                const Sculptor::Connection& connection = graph.get_connection(c);
-                if (connection.output.node_idx == param_a && connection.output.slot_idx == mapping.param_output_slot &&
-                    connection.input.node_idx == mapping.osc_nodes[0] && connection.input.slot_idx == 11) {
-                    pitch_wires++;
-                }
-            }
-            TEST(pitch_wires == 0);
-        } while (false);
-    }
-
-    // Record pairing survives uid order: a record whose uid is lower than
-    // its sibling's must not steal the sibling's group. The records below
-    // are the state after renaming "Volume 2" first and "Volume" second
-    // (uid 1 carries ordinal 2, uid 2 carries ordinal 1); the explicit
-    // ordinals pair each record with its own group, while the legacy
-    // uid-order positional attach would transpose them.
-    {
-        static Synth::InstrumentEditorBank bank;
-        static Synth::Instrument           instrument = {};
-        build_parameter_fixture(&bank, &instrument);
-        // uid 1 renamed second: it belongs to the second-derived group
-        // ("Volume 2", serving layer 1). uid 2 renamed first: the first
-        // derived group ("Volume", serving layers 0 and 2).
-        add_parameter_record(&bank, 0, 0, 0, 10.0f, 20.0f, 1);
-        bank.graph_layout[bank.graph_layout_count - 1].param_slot = 2;
-        snprintf(bank.graph_layout[bank.graph_layout_count - 1].name,
-                 sizeof(bank.graph_layout[bank.graph_layout_count - 1].name),
-                 "Alpha");
-        add_parameter_record(&bank, 0, 0, 0, 30.0f, 40.0f, 2);
-        bank.graph_layout[bank.graph_layout_count - 1].param_slot = 1;
-        snprintf(bank.graph_layout[bank.graph_layout_count - 1].name,
-                 sizeof(bank.graph_layout[bank.graph_layout_count - 1].name),
-                 "Beta");
-        static Sculptor::Graph           graph;
-        static Sculptor::OscGraphMapping mapping;
-        do {
-            TEST(Sculptor::project_editor_to_graph(bank, &graph, &mapping));
-            static Sculptor::GraphChange discard[8] = {};
-            (void)graph.take_changes(discard, 8);
-            const uint32_t alpha = find_graph_node_by_name(graph, "Alpha");
-            const uint32_t beta  = find_graph_node_by_name(graph, "Beta");
-            TEST(alpha != Sculptor::pool_no_slot && beta != Sculptor::pool_no_slot);
-            if (alpha == Sculptor::pool_no_slot || beta == Sculptor::pool_no_slot) {
-                break;
-            }
-            // Alpha is layer 1's parameter: one value wire into layer 1's row,
-            // none into layer 0's. Beta serves layers 0 and 2.
-            uint32_t alpha_layer1 = 0;
-            uint32_t alpha_layer0 = 0;
-            uint32_t beta_layer1  = 0;
-            uint32_t beta_layer0  = 0;
-            for (uint32_t c = 0; c < Sculptor::max_connections; c++) {
-                if (! graph.connection_occupied(c)) {
-                    continue;
-                }
-                const Sculptor::Connection& connection = graph.get_connection(c);
-                if (connection.output.slot_idx != mapping.param_output_slot) {
-                    continue;
-                }
-                if (connection.input.node_idx == mapping.osc_nodes[1] && connection.input.slot_idx == 9) {
-                    if (connection.output.node_idx == alpha) {
-                        alpha_layer1++;
-                    }
-                    if (connection.output.node_idx == beta) {
-                        beta_layer1++;
-                    }
-                }
-                if (connection.input.node_idx == mapping.osc_nodes[0] && connection.input.slot_idx == 9) {
-                    if (connection.output.node_idx == alpha) {
-                        alpha_layer0++;
-                    }
-                    if (connection.output.node_idx == beta) {
-                        beta_layer0++;
-                    }
-                }
-            }
-            TEST(alpha_layer1 == 1 && alpha_layer0 == 0);
-            TEST(beta_layer1 == 0 && beta_layer0 == 1);
-        } while (false);
-    }
-
-    // Rename, add-parameter, rename interleave: the added parameter's
-    // record sits between the two renamed ones in record-array order.
-    // The explicit ordinals keep each rename on its own group and the
-    // added record materializes free-standing instead of hijacking a
-    // group. (uid order here matches layer order; the out-of-uid-order
-    // test above carries the transposition proof.)
-    {
-        static Synth::InstrumentEditorBank bank;
-        static Synth::Instrument           instrument = {};
-        static Sculptor::Graph             graph;
-        static Sculptor::OscGraphMapping   mapping;
-        do {
-            TEST(begin_param_graph(&bank, &instrument, &graph, &mapping));
-            static Sculptor::GraphChange discard[8] = {};
-            const uint32_t               first      = find_graph_node_by_name(graph, "Volume");
-            TEST(first != Sculptor::pool_no_slot);
-            if (first == Sculptor::pool_no_slot) {
-                break;
-            }
-            graph.rename_node(first, "One");
-            (void)graph.take_changes(discard, 8);
-            apply_name_changed(&bank, &graph, &mapping, first);
-            // Add Parameter's record: free-standing, named. The renames took
-            // uids 1 and 2, so this one takes 3 and sits between them in the
-            // record array.
-            add_parameter_record(&bank, 0, 0, 0, 50.0f, 60.0f, 3);
-            Synth::GraphNodeLayout& added = bank.graph_layout[bank.graph_layout_count - 1];
-            added.param_slot              = Synth::graph_record_param_free;
-            snprintf(added.name, sizeof(added.name), "Parameter 1");
-            const uint32_t second = find_graph_node_by_name(graph, "Volume 2");
-            TEST(second != Sculptor::pool_no_slot);
-            if (second == Sculptor::pool_no_slot) {
-                break;
-            }
-            graph.rename_node(second, "Two");
-            (void)graph.take_changes(discard, 8);
-            apply_name_changed(&bank, &graph, &mapping, second);
-            TEST(Sculptor::project_editor_to_graph(bank, &graph, &mapping));
-            (void)graph.take_changes(discard, 8);
-            const uint32_t one        = find_graph_node_by_name(graph, "One");
-            const uint32_t two        = find_graph_node_by_name(graph, "Two");
-            const uint32_t added_node = find_graph_node_by_name(graph, "Parameter 1");
-            TEST(one != Sculptor::pool_no_slot && two != Sculptor::pool_no_slot &&
-                 added_node != Sculptor::pool_no_slot);
-            if (one == Sculptor::pool_no_slot || two == Sculptor::pool_no_slot ||
-                added_node == Sculptor::pool_no_slot) {
-                break;
-            }
-            uint32_t one_layer0        = 0;
-            uint32_t two_layer1        = 0;
-            uint32_t added_value_wires = 0;
-            for (uint32_t c = 0; c < Sculptor::max_connections; c++) {
-                if (! graph.connection_occupied(c)) {
-                    continue;
-                }
-                const Sculptor::Connection& connection = graph.get_connection(c);
-                if (connection.output.slot_idx != mapping.param_output_slot) {
-                    continue;
-                }
-                if (connection.output.node_idx == added_node) {
-                    added_value_wires++;
-                }
-                if (connection.output.node_idx == one && connection.input.node_idx == mapping.osc_nodes[0] &&
-                    connection.input.slot_idx == 9) {
-                    one_layer0++;
-                }
-                if (connection.output.node_idx == two && connection.input.node_idx == mapping.osc_nodes[1] &&
-                    connection.input.slot_idx == 9) {
-                    two_layer1++;
-                }
-            }
-            TEST(one_layer0 == 1 && two_layer1 == 1);
-            TEST(added_value_wires == 0);
-        } while (false);
-    }
-
-    // Stale-ordinal consistency: a record whose ordinal names no existing
-    // group disables the explicit pass for that target, so every record of
-    // the target takes the uid-order positional fallback (the retired
-    // semantics that handle renumbered positions correctly). Here the
-    // surviving group's record (uid 1, ordinal 2 - its group outlived the
-    // first group and now sits alone) must win the single group via the
-    // uid-order fallback; the stale record (uid 2, ordinal 1, whose group
-    // died) materializes free-standing. Without the guard, uid 2 would
-    // bind the group by position and uid 1 would duplicate the node - the
-    // reverse pairing.
-    {
-        static Synth::InstrumentEditorBank bank;
-        static Synth::Instrument           instrument = {};
-        build_parameter_fixture(&bank, &instrument);
-        // The projection reads the bank's instrument entry, not the local
-        // fixture copy: zero the gen cells there.
-        clear_target_gen(bank.bank.instruments.entries[0].layers[1], Synth::mod_volume);
-        clear_target_gen(bank.bank.instruments.entries[0].layers[2], Synth::mod_volume);
-        add_parameter_record(&bank, 0, 0, 0, 10.0f, 20.0f, 1);
-        bank.graph_layout[bank.graph_layout_count - 1].param_slot = 2;
-        snprintf(bank.graph_layout[bank.graph_layout_count - 1].name,
-                 sizeof(bank.graph_layout[bank.graph_layout_count - 1].name),
-                 "Live");
-        add_parameter_record(&bank, 0, 0, 0, 30.0f, 40.0f, 2);
-        bank.graph_layout[bank.graph_layout_count - 1].param_slot = 1;
-        snprintf(bank.graph_layout[bank.graph_layout_count - 1].name,
-                 sizeof(bank.graph_layout[bank.graph_layout_count - 1].name),
-                 "Stale");
-        static Sculptor::Graph           graph;
-        static Sculptor::OscGraphMapping mapping;
-        do {
-
-            TEST(Sculptor::project_editor_to_graph(bank, &graph, &mapping));
-            static Sculptor::GraphChange discard[8] = {};
-            (void)graph.take_changes(discard, 8);
-            const uint32_t stale = find_graph_node_by_name(graph, "Stale");
-            const uint32_t live  = find_graph_node_by_name(graph, "Live");
-            TEST(stale != Sculptor::pool_no_slot && live != Sculptor::pool_no_slot);
-            if (stale == Sculptor::pool_no_slot || live == Sculptor::pool_no_slot) {
-                break;
-            }
-            // Live owns the single volume group: one value wire into layer 0's
-            // row. Stale is the surplus materialization: no value wires.
-            uint32_t live_wires  = 0;
-            uint32_t stale_wires = 0;
-            for (uint32_t c = 0; c < Sculptor::max_connections; c++) {
-                if (! graph.connection_occupied(c)) {
-                    continue;
-                }
-                const Sculptor::Connection& connection = graph.get_connection(c);
-                if (connection.output.slot_idx != mapping.param_output_slot) {
-                    continue;
-                }
-                if (connection.output.node_idx == live && connection.input.node_idx == mapping.osc_nodes[0] &&
-                    connection.input.slot_idx == 9) {
-                    live_wires++;
-                }
-                if (connection.output.node_idx == stale &&
-                    (connection.input.slot_idx == 9 || connection.input.slot_idx == 10 ||
-                     connection.input.slot_idx == 11 || connection.input.slot_idx == 13 ||
-                     connection.input.slot_idx == 14) &&
-                    connection.input.node_idx == mapping.osc_nodes[0]) {
-                    stale_wires++;
-                }
-            }
-            TEST(live_wires == 1);
-            TEST(stale_wires == 0);
-        } while (false);
-    }
-
-    // Group-death ordinal truthfulness: a record stamped while its parameter
-    // owned a derived group must stay truthful when a sibling group dies.
-    // Three volume groups A (layers 0/2), B (layer 1), C (layer 3); renaming
-    // A then B stamps their records with ordinals 1 and 2. Deleting A's
-    // value wires kills A's group: A's own record slot becomes free-standing
-    // and the post-reconcile re-stamp moves B's ordinal to 1, so
-    // re-projection binds B's record to B's own group - not to C's.
-    {
-        static Synth::InstrumentEditorBank bank;
-        static Synth::Instrument           instrument = {};
-        build_parameter_fixture(&bank, &instrument);
-        Synth::Instrument& banked                   = bank.bank.instruments.entries[0];
-        banked.layer_count                          = 4;
-        Synth::TargetBinding third_tuple            = banked.layers[0].targets[Synth::mod_volume];
-        third_tuple.lfo_depth                       = 0.25f;
-        banked.layers[3].targets[Synth::mod_volume] = third_tuple;
-        static Sculptor::Graph           graph;
-        static Sculptor::OscGraphMapping mapping;
-        do {
-            TEST(Sculptor::project_editor_to_graph(bank, &graph, &mapping));
-            static Sculptor::GraphChange discard[8] = {};
-            (void)graph.take_changes(discard, 8);
-            // The rename-order guard forces renaming A before B; both records
-            // carry truthful ordinals (1 and 2) while both groups live.
-            const uint32_t a0 = find_graph_node_by_name(graph, "Volume");
-            TEST(a0 != Sculptor::pool_no_slot);
-            if (a0 == Sculptor::pool_no_slot) {
-                break;
-            }
-            graph.rename_node(a0, "Ay");
-            (void)graph.take_changes(discard, 8);
-            apply_name_changed(&bank, &graph, &mapping, a0);
-            const int32_t a_param = Sculptor::find_param(mapping, a0);
-            TEST(a_param >= 0 && mapping.params[a_param].uid != 0);
-            if (a_param < 0 || mapping.params[a_param].uid == 0) {
-                break;
-            }
-            const uint32_t ay_uid    = mapping.params[a_param].uid;
-            const int32_t  ay_record = Sculptor::find_record(bank, 0, 0, 3, 0, static_cast<uint8_t>(ay_uid));
-            TEST(ay_record >= 0);
-            if (ay_record < 0) {
-                break;
-            }
-            const uint32_t b_node = find_graph_node_by_name(graph, "Volume 2");
-            TEST(b_node != Sculptor::pool_no_slot);
-            if (b_node == Sculptor::pool_no_slot) {
-                break;
-            }
-            graph.rename_node(b_node, "Bee");
-            (void)graph.take_changes(discard, 8);
-            apply_name_changed(&bank, &graph, &mapping, b_node);
-            const int32_t b_param = Sculptor::find_param(mapping, b_node);
-            TEST(b_param >= 0 && mapping.params[b_param].uid != 0);
-            if (b_param < 0 || mapping.params[b_param].uid == 0) {
-                break;
-            }
-            const uint32_t bee_uid    = mapping.params[b_param].uid;
-            const int32_t  bee_record = Sculptor::find_record(bank, 0, 0, 3, 0, static_cast<uint8_t>(bee_uid));
-            TEST(bee_record >= 0 && bank.graph_layout[bee_record].param_slot == 2);
-            if (bee_record < 0 || bank.graph_layout[bee_record].param_slot != 2) {
-                break;
-            }
-            // Delete both of Ay's value wires (it serves layers 0 and 2); the
-            // second deletion kills A's group. The graph is mutated directly (the
-            // way the editor does it) and the drained deletion events sync the
-            // model.
-            const uint32_t a_node = find_graph_node_by_name(graph, "Ay");
-            TEST(a_node != Sculptor::pool_no_slot);
-            if (a_node == Sculptor::pool_no_slot) {
-                break;
-            }
-            for (uint32_t layer = 0; layer < 3; layer++) {
-                const uint32_t wire = Sculptor::connection_into(graph, mapping.osc_nodes[layer], 9);
-                if (wire == Sculptor::pool_no_slot || graph.get_connection(wire).output.node_idx != a_node) {
-                    continue;
-                }
-                graph.delete_connection(wire);
-                static Sculptor::GraphChange deletion[8] = {};
-                const uint32_t               moved       = graph.take_changes(deletion, 8);
-                for (uint32_t e = 0; e < moved; e++) {
-                    TEST(Sculptor::apply_osc_graph_change(&bank, &graph, &mapping, deletion[e]));
-                }
-            }
-            TEST(bank.graph_layout[bee_record].param_slot == 1);
-            TEST(bank.graph_layout[ay_record].param_slot == Synth::graph_record_param_free);
-            TEST(Sculptor::project_editor_to_graph(bank, &graph, &mapping));
-            (void)graph.take_changes(discard, 8);
-            const uint32_t bee = find_graph_node_by_name(graph, "Bee");
-            TEST(bee != Sculptor::pool_no_slot);
-            if (bee == Sculptor::pool_no_slot) {
-                break;
-            }
-            // Bee owns its own group: one value wire into layer 1's row, none
-            // into layer 3's (C's row).
-            uint32_t bee_layer1 = 0;
-            uint32_t bee_layer3 = 0;
-            for (uint32_t c = 0; c < Sculptor::max_connections; c++) {
-                if (! graph.connection_occupied(c)) {
-                    continue;
-                }
-                const Sculptor::Connection& connection = graph.get_connection(c);
-                if (connection.output.node_idx != bee || connection.output.slot_idx != mapping.param_output_slot) {
-                    continue;
-                }
-                if (connection.input.node_idx == mapping.osc_nodes[1] && connection.input.slot_idx == 9) {
-                    bee_layer1++;
-                }
-                if (connection.input.node_idx == mapping.osc_nodes[3] && connection.input.slot_idx == 9) {
-                    bee_layer3++;
-                }
-            }
-            TEST(bee_layer1 == 1 && bee_layer3 == 0);
-        } while (false);
-    }
-
-    // Node-deletion truthfulness: deleting a parameter node drops its wires
-    // and its record before any event drains, so no reconcile runs while the
-    // node still exists. apply_node_deleted reconciles after removing the
-    // record: the survivors' ordinals are re-stamped (Bee 2 -> 1) and the
-    // re-projection binds Bee to its own group, not to C's.
-    {
-        static Synth::InstrumentEditorBank bank;
-        static Synth::Instrument           instrument = {};
-        build_parameter_fixture(&bank, &instrument);
-        Synth::Instrument& banked                   = bank.bank.instruments.entries[0];
-        banked.layer_count                          = 4;
-        Synth::TargetBinding third_tuple            = banked.layers[0].targets[Synth::mod_volume];
-        third_tuple.lfo_depth                       = 0.25f;
-        banked.layers[3].targets[Synth::mod_volume] = third_tuple;
-        static Sculptor::Graph           graph;
-        static Sculptor::OscGraphMapping mapping;
-        do {
-            TEST(Sculptor::project_editor_to_graph(bank, &graph, &mapping));
-            static Sculptor::GraphChange discard[8] = {};
-            (void)graph.take_changes(discard, 8);
-            const uint32_t a0 = find_graph_node_by_name(graph, "Volume");
-            TEST(a0 != Sculptor::pool_no_slot);
-            if (a0 == Sculptor::pool_no_slot) {
-                break;
-            }
-            graph.rename_node(a0, "Ay");
-            (void)graph.take_changes(discard, 8);
-            apply_name_changed(&bank, &graph, &mapping, a0);
-            const uint32_t b_node = find_graph_node_by_name(graph, "Volume 2");
-            TEST(b_node != Sculptor::pool_no_slot);
-            if (b_node == Sculptor::pool_no_slot) {
-                break;
-            }
-            graph.rename_node(b_node, "Bee");
-            (void)graph.take_changes(discard, 8);
-            apply_name_changed(&bank, &graph, &mapping, b_node);
-            const int32_t b_param = Sculptor::find_param(mapping, b_node);
-            TEST(b_param >= 0 && mapping.params[b_param].uid != 0);
-            if (b_param < 0 || mapping.params[b_param].uid == 0) {
-                break;
-            }
-            const uint32_t bee_uid    = mapping.params[b_param].uid;
-            const int32_t  bee_record = Sculptor::find_record(bank, 0, 0, 3, 0, static_cast<uint8_t>(bee_uid));
-            TEST(bee_record >= 0 && bank.graph_layout[bee_record].param_slot == 2);
-            if (bee_record < 0 || bank.graph_layout[bee_record].param_slot != 2) {
-                break;
-            }
-            const uint32_t a_node = find_graph_node_by_name(graph, "Ay");
-            TEST(a_node != Sculptor::pool_no_slot);
-            if (a_node == Sculptor::pool_no_slot) {
-                break;
-            }
-            graph.delete_node(a_node);
-            static Sculptor::GraphChange batch[16] = {};
-            const uint32_t               moved     = graph.take_changes(batch, 16);
-            for (uint32_t e = 0; e < moved; e++) {
-                TEST(Sculptor::apply_osc_graph_change(&bank, &graph, &mapping, batch[e]));
-            }
-            TEST(bank.graph_layout[bee_record].param_slot == 1);
-            TEST(Sculptor::project_editor_to_graph(bank, &graph, &mapping));
-            (void)graph.take_changes(discard, 8);
-            const uint32_t bee = find_graph_node_by_name(graph, "Bee");
-            TEST(bee != Sculptor::pool_no_slot);
-            if (bee == Sculptor::pool_no_slot) {
-                break;
-            }
-            uint32_t bee_layer1 = 0;
-            uint32_t bee_layer3 = 0;
-            for (uint32_t c = 0; c < Sculptor::max_connections; c++) {
-                if (! graph.connection_occupied(c)) {
-                    continue;
-                }
-                const Sculptor::Connection& connection = graph.get_connection(c);
-                if (connection.output.node_idx != bee || connection.output.slot_idx != mapping.param_output_slot) {
-                    continue;
-                }
-                if (connection.input.node_idx == mapping.osc_nodes[1] && connection.input.slot_idx == 9) {
-                    bee_layer1++;
-                }
-                if (connection.input.node_idx == mapping.osc_nodes[3] && connection.input.slot_idx == 9) {
-                    bee_layer3++;
-                }
-            }
-            TEST(bee_layer1 == 1 && bee_layer3 == 0);
-        } while (false);
-    }
-
-    // Multi-death composition: two same-target groups dying in one batch
-    // must leave the survivors' ordinals truthful with no per-death
-    // bookkeeping order. Four volume groups A (layers 0/2), B (1), C (3),
-    // D (4); renaming A, B, C stamps ordinals 1, 2, 3. Deleting A's and B's
-    // wires kills both groups; C's ordinal must end at 1 (counting deaths
-    // against the un-renumbered mapping would leave C at 2) and C's record
-    // must bind C's own row at re-projection.
-    {
-        static Synth::InstrumentEditorBank bank;
-        static Synth::Instrument           instrument = {};
-        build_parameter_fixture(&bank, &instrument);
-        Synth::Instrument& banked                   = bank.bank.instruments.entries[0];
-        banked.layer_count                          = 5;
-        Synth::TargetBinding third_tuple            = banked.layers[0].targets[Synth::mod_volume];
-        third_tuple.lfo_depth                       = 0.25f;
-        banked.layers[3].targets[Synth::mod_volume] = third_tuple;
-        Synth::TargetBinding fourth_tuple           = third_tuple;
-        fourth_tuple.lfo_depth                      = 0.125f;
-        banked.layers[4].targets[Synth::mod_volume] = fourth_tuple;
-        static Sculptor::Graph           graph;
-        static Sculptor::OscGraphMapping mapping;
-        do {
-            TEST(Sculptor::project_editor_to_graph(bank, &graph, &mapping));
-            static Sculptor::GraphChange discard[8] = {};
-            (void)graph.take_changes(discard, 8);
-            static Sculptor::GraphChange rename = {};
-            rename.kind                         = Sculptor::ChangeKind::name_changed;
-            const char*    old_names[3]         = { "Volume", "Volume 2", "Volume 3" };
-            const char*    new_names[3]         = { "Ay", "Bee", "Sea" };
-            const uint32_t nodes[3]             = {
-                find_graph_node_by_name(graph, old_names[0]),
-                find_graph_node_by_name(graph, old_names[1]),
-                find_graph_node_by_name(graph, old_names[2]),
-            };
-            for (uint32_t i = 0; i < 3; i++) {
-                TEST(nodes[i] != Sculptor::pool_no_slot);
-                if (nodes[i] == Sculptor::pool_no_slot) {
-                    break;
-                }
-                graph.rename_node(nodes[i], new_names[i]);
-                (void)graph.take_changes(discard, 8);
-                rename.node_idx = nodes[i];
-                TEST(Sculptor::apply_osc_graph_change(&bank, &graph, &mapping, rename));
-            }
-            const uint32_t c_node = find_graph_node_by_name(graph, "Sea");
-            TEST(c_node != Sculptor::pool_no_slot);
-            if (c_node == Sculptor::pool_no_slot) {
-                break;
-            }
-            const int32_t c_param = Sculptor::find_param(mapping, c_node);
-            TEST(c_param >= 0 && mapping.params[c_param].uid != 0);
-            if (c_param < 0 || mapping.params[c_param].uid == 0) {
-                break;
-            }
-            const uint32_t sea_uid    = mapping.params[c_param].uid;
-            const int32_t  sea_record = Sculptor::find_record(bank, 0, 0, 3, 0, static_cast<uint8_t>(sea_uid));
-            TEST(sea_record >= 0 && bank.graph_layout[sea_record].param_slot == 3);
-            if (sea_record < 0 || bank.graph_layout[sea_record].param_slot != 3) {
-                break;
-            }
-            const uint32_t a_node = find_graph_node_by_name(graph, "Ay");
-            const uint32_t b_node = find_graph_node_by_name(graph, "Bee");
-            TEST(a_node != Sculptor::pool_no_slot && b_node != Sculptor::pool_no_slot);
-            if (a_node == Sculptor::pool_no_slot || b_node == Sculptor::pool_no_slot) {
-                break;
-            }
-            // Delete A's value wires (layers 0 and 2) and B's (layer 1) in one
-            // graph rewrite, then drain the whole batch once: both group deaths
-            // compose inside a single apply pass.
-            for (uint32_t layer = 0; layer < 5; layer++) {
-                const uint32_t wire = Sculptor::connection_into(graph, mapping.osc_nodes[layer], 9);
-                if (wire == Sculptor::pool_no_slot) {
-                    continue;
-                }
-                const uint32_t out = graph.get_connection(wire).output.node_idx;
-                if (out != a_node && out != b_node) {
-                    continue;
-                }
-                graph.delete_connection(wire);
-            }
-            static Sculptor::GraphChange batch[16] = {};
-            const uint32_t               moved     = graph.take_changes(batch, 16);
-            for (uint32_t e = 0; e < moved; e++) {
-                TEST(Sculptor::apply_osc_graph_change(&bank, &graph, &mapping, batch[e]));
-            }
-            TEST(bank.graph_layout[sea_record].param_slot == 1);
-            TEST(Sculptor::project_editor_to_graph(bank, &graph, &mapping));
-            (void)graph.take_changes(discard, 8);
-            const uint32_t sea = find_graph_node_by_name(graph, "Sea");
-            TEST(sea != Sculptor::pool_no_slot);
-            if (sea == Sculptor::pool_no_slot) {
-                break;
-            }
-            uint32_t sea_layer3 = 0;
-            uint32_t sea_layer4 = 0;
-            for (uint32_t c = 0; c < Sculptor::max_connections; c++) {
-                if (! graph.connection_occupied(c)) {
-                    continue;
-                }
-                const Sculptor::Connection& connection = graph.get_connection(c);
-                if (connection.output.node_idx != sea || connection.output.slot_idx != mapping.param_output_slot) {
-                    continue;
-                }
-                if (connection.input.node_idx == mapping.osc_nodes[3] && connection.input.slot_idx == 9) {
-                    sea_layer3++;
-                }
-                if (connection.input.node_idx == mapping.osc_nodes[4] && connection.input.slot_idx == 9) {
-                    sea_layer4++;
-                }
-            }
-            TEST(sea_layer3 == 1 && sea_layer4 == 0);
-        } while (false);
-    }
-
-    // Reordering without death: moving A's layer-0 value wire to B changes
-    // the derived enumeration order (B now serves the lower layer first)
-    // while both groups stay alive. The post-reconcile re-stamp updates both
-    // records (Bee 2 -> 1, Ay 1 -> 2) so re-projection pairs each record
-    // with its own group.
-    {
-        static Synth::InstrumentEditorBank bank;
-        static Synth::Instrument           instrument = {};
-        static Sculptor::Graph             graph;
-        static Sculptor::OscGraphMapping   mapping;
-        do {
-            TEST(begin_param_graph(&bank, &instrument, &graph, &mapping));
-            static Sculptor::GraphChange discard[8] = {};
-            const uint32_t               a0         = find_graph_node_by_name(graph, "Volume");
-            TEST(a0 != Sculptor::pool_no_slot);
-            if (a0 == Sculptor::pool_no_slot) {
-                break;
-            }
-            graph.rename_node(a0, "Ay");
-            (void)graph.take_changes(discard, 8);
-            apply_name_changed(&bank, &graph, &mapping, a0);
-            const uint32_t b_node = find_graph_node_by_name(graph, "Volume 2");
-            TEST(b_node != Sculptor::pool_no_slot);
-            if (b_node == Sculptor::pool_no_slot) {
-                break;
-            }
-            graph.rename_node(b_node, "Bee");
-            (void)graph.take_changes(discard, 8);
-            apply_name_changed(&bank, &graph, &mapping, b_node);
-            const int32_t a_param = Sculptor::find_param(mapping, a0);
-            const int32_t b_param = Sculptor::find_param(mapping, b_node);
-            TEST(a_param >= 0 && b_param >= 0);
-            if (a_param < 0 || b_param < 0) {
-                break;
-            }
-            TEST(mapping.params[a_param].uid != 0 && mapping.params[b_param].uid != 0);
-            if (mapping.params[a_param].uid == 0 || mapping.params[b_param].uid == 0) {
-                break;
-            }
-            const uint32_t ay_uid     = mapping.params[a_param].uid;
-            const uint32_t bee_uid    = mapping.params[b_param].uid;
-            const int32_t  ay_record  = Sculptor::find_record(bank, 0, 0, 3, 0, static_cast<uint8_t>(ay_uid));
-            const int32_t  bee_record = Sculptor::find_record(bank, 0, 0, 3, 0, static_cast<uint8_t>(bee_uid));
-            TEST(ay_record >= 0 && bee_record >= 0);
-            if (ay_record < 0 || bee_record < 0) {
-                break;
-            }
-            TEST(bank.graph_layout[ay_record].param_slot == 1 && bank.graph_layout[bee_record].param_slot == 2);
-            if (bank.graph_layout[ay_record].param_slot != 1 || bank.graph_layout[bee_record].param_slot != 2) {
-                break;
-            }
-            // Move A's layer-0 wire to B: drop it, then wire B's output into
-            // the same row input (the editor's own mutation + drained events).
-            const uint32_t a_wire = Sculptor::connection_into(graph, mapping.osc_nodes[0], 9);
-            TEST(a_wire != Sculptor::pool_no_slot && graph.get_connection(a_wire).output.node_idx == a0);
-            if (a_wire == Sculptor::pool_no_slot || graph.get_connection(a_wire).output.node_idx != a0) {
-                break;
-            }
-            graph.delete_connection(a_wire);
-            const uint32_t moved_wire = graph.add_connection(Sculptor::EndPoint{ b_node, mapping.param_output_slot },
-                                                             Sculptor::EndPoint{ mapping.osc_nodes[0], 9 });
-            TEST(moved_wire != Sculptor::pool_no_slot);
-            static Sculptor::GraphChange batch[8] = {};
-            const uint32_t               moved    = graph.take_changes(batch, 8);
-            for (uint32_t e = 0; e < moved; e++) {
-                TEST(Sculptor::apply_osc_graph_change(&bank, &graph, &mapping, batch[e]));
-            }
-            TEST(bank.graph_layout[bee_record].param_slot == 1 && bank.graph_layout[ay_record].param_slot == 2);
-            TEST(Sculptor::project_editor_to_graph(bank, &graph, &mapping));
-            (void)graph.take_changes(discard, 8);
-            const uint32_t bee = find_graph_node_by_name(graph, "Bee");
-            const uint32_t ay  = find_graph_node_by_name(graph, "Ay");
-            TEST(bee != Sculptor::pool_no_slot && ay != Sculptor::pool_no_slot);
-            if (bee == Sculptor::pool_no_slot || ay == Sculptor::pool_no_slot) {
-                break;
-            }
-            uint32_t bee_rows = 0;
-            uint32_t ay_rows  = 0;
-            for (uint32_t c = 0; c < Sculptor::max_connections; c++) {
-                if (! graph.connection_occupied(c)) {
-                    continue;
-                }
-                const Sculptor::Connection& connection = graph.get_connection(c);
-                if (connection.input.slot_idx != 9) {
-                    continue;
-                }
-                if (connection.output.node_idx == bee && connection.output.slot_idx == mapping.param_output_slot) {
-                    bee_rows++;
-                }
-                if (connection.output.node_idx == ay && connection.output.slot_idx == mapping.param_output_slot) {
-                    ay_rows++;
-                }
-            }
-            TEST(bee_rows == 2 && ay_rows == 1);
-        } while (false);
-    }
-
-    // Deflation truthfulness: a record-less derived group occupies a group
-    // at re-projection, so the re-stamp must count it even though no record
-    // pairs with it. Renaming only A and then moving A's layer-0 wire to the
-    // record-less B makes B the first derived group; A's ordinal must become
-    // 2. Skipping record-less parameters would stamp A as 1 and the explicit
-    // pass would bind A's record to B's group (name theft on re-projection).
-    {
-        static Synth::InstrumentEditorBank bank;
-        static Synth::Instrument           instrument = {};
-        static Sculptor::Graph             graph;
-        static Sculptor::OscGraphMapping   mapping;
-        do {
-            TEST(begin_param_graph(&bank, &instrument, &graph, &mapping));
-            static Sculptor::GraphChange discard[8] = {};
-            const uint32_t               a0         = find_graph_node_by_name(graph, "Volume");
-            TEST(a0 != Sculptor::pool_no_slot);
-            if (a0 == Sculptor::pool_no_slot) {
-                break;
-            }
-            graph.rename_node(a0, "Ay");
-            (void)graph.take_changes(discard, 8);
-            apply_name_changed(&bank, &graph, &mapping, a0);
-            const uint32_t b_node = find_graph_node_by_name(graph, "Volume 2");
-            TEST(b_node != Sculptor::pool_no_slot);
-            if (b_node == Sculptor::pool_no_slot) {
-                break;
-            }
-            TEST(Sculptor::find_param(mapping, b_node) >= 0 &&
-                 mapping.params[Sculptor::find_param(mapping, b_node)].uid == 0);
-            const int32_t a_param = Sculptor::find_param(mapping, a0);
-            TEST(a_param >= 0 && mapping.params[a_param].uid != 0);
-            if (a_param < 0 || mapping.params[a_param].uid == 0) {
-                break;
-            }
-            const int32_t ay_record =
-                Sculptor::find_record(bank, 0, 0, 3, 0, static_cast<uint8_t>(mapping.params[a_param].uid));
-            TEST(ay_record >= 0 && bank.graph_layout[ay_record].param_slot == 1);
-            if (ay_record < 0) {
-                break;
-            }
-            // Move A's layer-0 wire to B in one graph rewrite.
-            const uint32_t a_wire = Sculptor::connection_into(graph, mapping.osc_nodes[0], 9);
-            TEST(a_wire != Sculptor::pool_no_slot && graph.get_connection(a_wire).output.node_idx == a0);
-            if (a_wire == Sculptor::pool_no_slot || graph.get_connection(a_wire).output.node_idx != a0) {
-                break;
-            }
-            graph.delete_connection(a_wire);
-            const uint32_t moved_wire = graph.add_connection(Sculptor::EndPoint{ b_node, mapping.param_output_slot },
-                                                             Sculptor::EndPoint{ mapping.osc_nodes[0], 9 });
-            TEST(moved_wire != Sculptor::pool_no_slot);
-            static Sculptor::GraphChange batch[8] = {};
-            const uint32_t               moved    = graph.take_changes(batch, 8);
-            for (uint32_t e = 0; e < moved; e++) {
-                TEST(Sculptor::apply_osc_graph_change(&bank, &graph, &mapping, batch[e]));
-            }
-            TEST(bank.graph_layout[ay_record].param_slot == 2);
-            TEST(Sculptor::project_editor_to_graph(bank, &graph, &mapping));
-            const uint32_t ay = find_graph_node_by_name(graph, "Ay");
-            const uint32_t vl = find_graph_node_by_name(graph, "Volume");
-            TEST(ay != Sculptor::pool_no_slot && vl != Sculptor::pool_no_slot);
-            if (ay == Sculptor::pool_no_slot || vl == Sculptor::pool_no_slot) {
-                break;
-            }
-            uint32_t ay_rows   = 0;
-            uint32_t vl_layers = 0;
-            for (uint32_t c = 0; c < Sculptor::max_connections; c++) {
-                if (! graph.connection_occupied(c)) {
-                    continue;
-                }
-                const Sculptor::Connection& connection = graph.get_connection(c);
-                if (connection.output.slot_idx != mapping.param_output_slot) {
-                    continue;
-                }
-                if (connection.output.node_idx == ay) {
-                    ay_rows++;
-                }
-                if (connection.output.node_idx == vl && (connection.input.node_idx == mapping.osc_nodes[0] ||
-                                                         connection.input.node_idx == mapping.osc_nodes[1])) {
-                    vl_layers++;
-                }
-            }
-            TEST(ay_rows == 1 && vl_layers == 2);
-        } while (false);
-    }
-
-    // Dormant parameter truthfulness: disconnecting a renamed parameter's
-    // envelope and LFO leaves its value wires live but compiles them to zero
-    // bindings, so the parameter leaves the derived order. Its explicit
-    // ordinal must demote to free-standing, and the tuple-class rules must
-    // keep the dormant record from claiming the sibling's live group at
-    // re-projection (which would resurrect modulation the user removed).
-    {
-        static Synth::InstrumentEditorBank bank;
-        static Synth::Instrument           instrument = {};
-        static Sculptor::Graph             graph;
-        static Sculptor::OscGraphMapping   mapping;
-        do {
-            TEST(begin_param_graph(&bank, &instrument, &graph, &mapping));
-            static Sculptor::GraphChange discard[8] = {};
-            const uint32_t               a0         = find_graph_node_by_name(graph, "Volume");
-            TEST(a0 != Sculptor::pool_no_slot);
-            if (a0 == Sculptor::pool_no_slot) {
-                break;
-            }
-            graph.rename_node(a0, "Ay");
-            (void)graph.take_changes(discard, 8);
-            apply_name_changed(&bank, &graph, &mapping, a0);
-            const int32_t a_param = Sculptor::find_param(mapping, a0);
-            TEST(a_param >= 0 && mapping.params[a_param].uid != 0);
-            if (a_param < 0 || mapping.params[a_param].uid == 0) {
-                break;
-            }
-            const int32_t ay_record =
-                Sculptor::find_record(bank, 0, 0, 3, 0, static_cast<uint8_t>(mapping.params[a_param].uid));
-            TEST(ay_record >= 0 && bank.graph_layout[ay_record].param_slot == 1);
-            if (ay_record < 0) {
-                break;
-            }
-            // Disconnect A's envelope and LFO in one graph rewrite.
-            const uint32_t env_wire = Sculptor::connection_into(graph, a0, 2);
-            const uint32_t lfo_wire = Sculptor::connection_into(graph, a0, 3);
-            TEST(env_wire != Sculptor::pool_no_slot && lfo_wire != Sculptor::pool_no_slot);
-            if (env_wire == Sculptor::pool_no_slot || lfo_wire == Sculptor::pool_no_slot) {
-                break;
-            }
-            graph.delete_connection(env_wire);
-            graph.delete_connection(lfo_wire);
-            static Sculptor::GraphChange batch[8] = {};
-            const uint32_t               moved    = graph.take_changes(batch, 8);
-            for (uint32_t e = 0; e < moved; e++) {
-                TEST(Sculptor::apply_osc_graph_change(&bank, &graph, &mapping, batch[e]));
-            }
-            // Disconnecting the generators leaves the MIDI input wired, and inputs
-            // are part of the binding tuple: the parameter still occupies a
-            // derived group, so its explicit ordinal survives (no demote).
-            TEST(bank.graph_layout[ay_record].param_slot == 1);
-            TEST(Sculptor::project_editor_to_graph(bank, &graph, &mapping));
-            const uint32_t ay = find_graph_node_by_name(graph, "Ay");
-            // The free-standing record enumerates first (name_params counts the
-            // full registry order, then the record title overrides), so the
-            // surviving derived group node carries the "Volume 2" default title.
-            const uint32_t vl = find_graph_node_by_name(graph, "Volume 2");
-            TEST(ay != Sculptor::pool_no_slot && vl != Sculptor::pool_no_slot);
-            if (ay == Sculptor::pool_no_slot || vl == Sculptor::pool_no_slot) {
-                break;
-            }
-            // The sibling keeps exactly its own wiring; the dormant record
-            // must not have injected its layer-0/2 wires into the sibling.
-            uint32_t vl_layer0 = 0;
-            uint32_t ay_rows   = 0;
-            for (uint32_t c = 0; c < Sculptor::max_connections; c++) {
-                if (! graph.connection_occupied(c)) {
-                    continue;
-                }
-                const Sculptor::Connection& connection = graph.get_connection(c);
-                if (connection.output.slot_idx != mapping.param_output_slot) {
-                    continue;
-                }
-                if (connection.output.node_idx == vl && connection.input.node_idx == mapping.osc_nodes[0]) {
-                    vl_layer0++;
-                }
-                if (connection.output.node_idx == ay) {
-                    ay_rows++;
-                }
-            }
-            TEST(vl_layer0 == 0 && ay_rows == 2);
-            // The served cells compile to zero bindings: no modulation left.
-            const Synth::Instrument& banked = bank.bank.instruments.entries[0];
-            TEST(banked.layers[0].targets[Synth::mod_volume].envelope_desc_id == 0);
-            TEST(banked.layers[0].targets[Synth::mod_volume].lfo_desc_id == 0);
-            TEST(banked.layers[2].targets[Synth::mod_volume].envelope_desc_id == 0);
-            TEST(banked.layers[2].targets[Synth::mod_volume].lfo_desc_id == 0);
-            TEST(banked.layers[1].targets[Synth::mod_volume].envelope_desc_id == 2);
-        } while (false);
-    }
-
-    // Tuple merge: rewiring B's envelope onto A's envelope instance and
-    // matching B's LFO row turns B's tuple identical to A's, so the two
-    // parameters merge into one derived group at the next projection. The
-    // merge-aware re-stamp keeps A's ordinal and demotes B's to
-    // free-standing; re-projection must keep both identities (B's record
-    // materializes its own surplus node instead of stealing the group).
-    {
-        static Synth::InstrumentEditorBank bank;
-        static Synth::Instrument           instrument = {};
-        static Sculptor::Graph             graph;
-        static Sculptor::OscGraphMapping   mapping;
-        do {
-            TEST(begin_param_graph(&bank, &instrument, &graph, &mapping));
-            static Sculptor::GraphChange discard[8] = {};
-            const uint32_t               a0         = find_graph_node_by_name(graph, "Volume");
-            const uint32_t               b0         = find_graph_node_by_name(graph, "Volume 2");
-            TEST(a0 != Sculptor::pool_no_slot && b0 != Sculptor::pool_no_slot);
-            if (a0 == Sculptor::pool_no_slot || b0 == Sculptor::pool_no_slot) {
-                break;
-            }
-            graph.rename_node(a0, "Ay");
-            (void)graph.take_changes(discard, 8);
-            apply_name_changed(&bank, &graph, &mapping, a0);
-            graph.rename_node(b0, "Bee");
-            (void)graph.take_changes(discard, 8);
-            apply_name_changed(&bank, &graph, &mapping, b0);
-            const int32_t a_param = Sculptor::find_param(mapping, a0);
-            const int32_t b_param = Sculptor::find_param(mapping, b0);
-            TEST(a_param >= 0 && b_param >= 0);
-            if (a_param < 0 || b_param < 0) {
-                break;
-            }
-            TEST(mapping.params[a_param].uid != 0 && mapping.params[b_param].uid != 0);
-            const int32_t ay_record =
-                Sculptor::find_record(bank, 0, 0, 3, 0, static_cast<uint8_t>(mapping.params[a_param].uid));
-            const int32_t bee_record =
-                Sculptor::find_record(bank, 0, 0, 3, 0, static_cast<uint8_t>(mapping.params[b_param].uid));
-            TEST(ay_record >= 0 && bee_record >= 0);
-            if (ay_record < 0 || bee_record < 0) {
-                break;
-            }
-            TEST(bank.graph_layout[ay_record].param_slot == 1 && bank.graph_layout[bee_record].param_slot == 2);
-            // Rewire B onto A's envelope and LFO instances and copy A's LFO
-            // row values; all validator-legal gestures.
-            uint32_t env1 = Sculptor::pool_no_slot;
-            uint32_t lfo1 = Sculptor::pool_no_slot;
-            for (uint32_t d = 0; d < mapping.detached_count; d++) {
-                if (mapping.detached[d].kind == 1 && mapping.detached[d].desc_id == 1) {
-                    env1 = mapping.detached[d].node_idx;
-                }
-                if (mapping.detached[d].kind == 2 && mapping.detached[d].desc_id == 1) {
-                    lfo1 = mapping.detached[d].node_idx;
-                }
-            }
-            TEST(env1 != Sculptor::pool_no_slot && lfo1 != Sculptor::pool_no_slot);
-            if (env1 == Sculptor::pool_no_slot || lfo1 == Sculptor::pool_no_slot) {
-                break;
-            }
-            const uint32_t b_env_wire = Sculptor::connection_into(graph, b0, 2);
-            TEST(b_env_wire != Sculptor::pool_no_slot);
-            if (b_env_wire == Sculptor::pool_no_slot) {
-                break;
-            }
-            graph.delete_connection(b_env_wire);
-            TEST(graph.add_connection(Sculptor::EndPoint{ env1, 0 }, Sculptor::EndPoint{ b0, 2 }) !=
-                 Sculptor::pool_no_slot);
-            TEST(graph.add_connection(Sculptor::EndPoint{ lfo1, 0 }, Sculptor::EndPoint{ b0, 3 }) !=
-                 Sculptor::pool_no_slot);
-            Sculptor::PropertyValue op_copy = {};
-            op_copy.list_index              = graph.node(a0).slots.entries[4].value.list_index;
-            graph.set_slot_value(b0, 4, op_copy);
-            Sculptor::PropertyValue depth_copy = {};
-            depth_copy.real                    = graph.node(a0).slots.entries[5].value.real;
-            graph.set_slot_value(b0, 5, depth_copy);
-            Sculptor::PropertyValue rate_copy = {};
-            rate_copy.real                    = graph.node(a0).slots.entries[6].value.real;
-            graph.set_slot_value(b0, 6, rate_copy);
-            static Sculptor::GraphChange batch[8] = {};
-            const uint32_t               moved    = graph.take_changes(batch, 8);
-            for (uint32_t e = 0; e < moved; e++) {
-                TEST(Sculptor::apply_osc_graph_change(&bank, &graph, &mapping, batch[e]));
-            }
-            TEST(Sculptor::refresh_osc_graph_compilation(&bank, graph, mapping, 0, 0));
-            TEST(bank.graph_layout[ay_record].param_slot == 1);
-            TEST(bank.graph_layout[bee_record].param_slot == Synth::graph_record_param_free);
-            TEST(Sculptor::project_editor_to_graph(bank, &graph, &mapping));
-            const uint32_t ay  = find_graph_node_by_name(graph, "Ay");
-            const uint32_t bee = find_graph_node_by_name(graph, "Bee");
-            TEST(ay != Sculptor::pool_no_slot && bee != Sculptor::pool_no_slot);
-            if (ay == Sculptor::pool_no_slot || bee == Sculptor::pool_no_slot) {
-                break;
-            }
-            uint32_t ay_rows  = 0;
-            uint32_t bee_rows = 0;
-            for (uint32_t c = 0; c < Sculptor::max_connections; c++) {
-                if (! graph.connection_occupied(c)) {
-                    continue;
-                }
-                const Sculptor::Connection& connection = graph.get_connection(c);
-                if (connection.output.slot_idx != mapping.param_output_slot) {
-                    continue;
-                }
-                if (connection.output.node_idx == ay) {
-                    ay_rows++;
-                }
-                if (connection.output.node_idx == bee) {
-                    bee_rows++;
-                }
-            }
-            // The merged group is one parameter: its owner wires every served
-            // row, including the layer the merged-away record used to drive.
-            // The merged-away record stays surplus and finds its rows
-            // occupied, so it materializes as an inert identity.
-            TEST(ay_rows == 3);
-            TEST(bee_rows == 0);
-            // The merged tuple still compiles: layer 1 carries A's envelope.
-            TEST(bank.bank.instruments.entries[0].layers[1].targets[Synth::mod_volume].envelope_desc_id == 1);
-        } while (false);
-    }
-
-    // Pure-MIDI carrier: disconnecting every generator input from both
-    // renamed parameters leaves the target's MIDI routing alive (value
-    // wires keep the parameters serving), so the projection derives the
-    // single zero-tuple carrier group. The first serving parameter claims
-    // it via the uid-order fallback; the dormant sibling materializes its
-    // own inert node. No modulation may return, and the routing must stay.
-    {
-        static Synth::InstrumentEditorBank bank;
-        static Synth::Instrument           instrument = {};
-        static Sculptor::Graph             graph;
-        static Sculptor::OscGraphMapping   mapping;
-        do {
-            TEST(begin_param_graph(&bank, &instrument, &graph, &mapping));
-            static Sculptor::GraphChange discard[8] = {};
-            const uint32_t               a0         = find_graph_node_by_name(graph, "Volume");
-            const uint32_t               b0         = find_graph_node_by_name(graph, "Volume 2");
-            TEST(a0 != Sculptor::pool_no_slot && b0 != Sculptor::pool_no_slot);
-            if (a0 == Sculptor::pool_no_slot || b0 == Sculptor::pool_no_slot) {
-                break;
-            }
-            graph.rename_node(a0, "Ay");
-            (void)graph.take_changes(discard, 8);
-            apply_name_changed(&bank, &graph, &mapping, a0);
-            graph.rename_node(b0, "Bee");
-            (void)graph.take_changes(discard, 8);
-            apply_name_changed(&bank, &graph, &mapping, b0);
-            const uint32_t a_env = Sculptor::connection_into(graph, a0, 2);
-            const uint32_t a_lfo = Sculptor::connection_into(graph, a0, 3);
-            const uint32_t b_env = Sculptor::connection_into(graph, b0, 2);
-            const uint32_t b_lfo = Sculptor::connection_into(graph, b0, 3);
-            TEST(a_env != Sculptor::pool_no_slot && a_lfo != Sculptor::pool_no_slot);
-            TEST(b_env != Sculptor::pool_no_slot && b_lfo != Sculptor::pool_no_slot);
-            if (a_env == Sculptor::pool_no_slot || a_lfo == Sculptor::pool_no_slot || b_env == Sculptor::pool_no_slot ||
-                b_lfo == Sculptor::pool_no_slot) {
-                break;
-            }
-            graph.delete_connection(a_env);
-            graph.delete_connection(a_lfo);
-            graph.delete_connection(b_env);
-            graph.delete_connection(b_lfo);
-            static Sculptor::GraphChange batch[8] = {};
-            const uint32_t               moved    = graph.take_changes(batch, 8);
-            for (uint32_t e = 0; e < moved; e++) {
-                TEST(Sculptor::apply_osc_graph_change(&bank, &graph, &mapping, batch[e]));
-            }
-            // The batch's reconciles see the fully-disconnected graph
-            // state (graph mutations land before the drained events
-            // apply): the first serving parameter takes the carrier with
-            // its explicit ordinal kept, and the sibling demotes to
-            // free-standing. The carrier claim is therefore explicit,
-            // not a positional fallback.
-            const int32_t a_carrier = Sculptor::find_param(mapping, a0);
-            const int32_t b_carrier = Sculptor::find_param(mapping, b0);
-            TEST(a_carrier >= 0 && b_carrier >= 0);
-            if (a_carrier < 0 || b_carrier < 0) {
-                break;
-            }
-            TEST(mapping.params[a_carrier].uid != 0 && mapping.params[b_carrier].uid != 0);
-            const int32_t ay_carrier =
-                Sculptor::find_record(bank, 0, 0, 3, 0, static_cast<uint8_t>(mapping.params[a_carrier].uid));
-            const int32_t bee_carrier =
-                Sculptor::find_record(bank, 0, 0, 3, 0, static_cast<uint8_t>(mapping.params[b_carrier].uid));
-            TEST(ay_carrier >= 0 && bee_carrier >= 0);
-            if (ay_carrier < 0 || bee_carrier < 0) {
-                break;
-            }
-            TEST(bank.graph_layout[ay_carrier].param_slot == 1);
-            TEST(bank.graph_layout[bee_carrier].param_slot == Synth::graph_record_param_free);
-            // A demoted (free-standing) record must still claim the
-            // carrier through the uid-order positional pass: the tuple
-            // rules let a dormant record bind the zero-tuple carrier.
-            bank.graph_layout[ay_carrier].param_slot = Synth::graph_record_param_free;
-            TEST(Sculptor::project_editor_to_graph(bank, &graph, &mapping));
-            const uint32_t ay  = find_graph_node_by_name(graph, "Ay");
-            const uint32_t bee = find_graph_node_by_name(graph, "Bee");
-            TEST(ay != Sculptor::pool_no_slot && bee != Sculptor::pool_no_slot);
-            if (ay == Sculptor::pool_no_slot || bee == Sculptor::pool_no_slot) {
-                break;
-            }
-            // No modulation anywhere on the volume target, but the MIDI
-            // routing survives through the carrier parameter.
-            const Synth::Instrument& banked = bank.bank.instruments.entries[0];
-            for (uint32_t layer = 0; layer < 3; layer++) {
-                TEST(banked.layers[layer].targets[Synth::mod_volume].envelope_desc_id == 0);
-                TEST(banked.layers[layer].targets[Synth::mod_volume].lfo_desc_id == 0);
-            }
-            TEST(banked.layers[0].targets[Synth::mod_volume].num_inputs == 1);
-            uint32_t ay_rows  = 0;
-            uint32_t bee_rows = 0;
-            for (uint32_t c = 0; c < Sculptor::max_connections; c++) {
-                if (! graph.connection_occupied(c)) {
-                    continue;
-                }
-                const Sculptor::Connection& connection = graph.get_connection(c);
-                if (connection.output.slot_idx != mapping.param_output_slot) {
-                    continue;
-                }
-                if (connection.output.node_idx == ay) {
-                    ay_rows++;
-                }
-                if (connection.output.node_idx == bee) {
-                    bee_rows++;
-                }
-            }
-            // The carrier is one MIDI-driven parameter: the claiming
-            // parameter wires every served row; the dormant record
-            // materializes as an inert surplus identity.
-            TEST(ay_rows == 3);
-            TEST(bee_rows == 0);
-        } while (false);
-    }
-
-    // Source rows pack the connector and its inline widgets onto one
-    // renderer line: the input, op and scale slots of each mod input share
-    // a row group, distinct across inputs. Unshared slots would render one
-    // line per widget and overflow the parameter node's row budget.
-    {
-        static Synth::InstrumentEditorBank bank;
-        static Synth::Instrument           instrument = {};
-        build_parameter_fixture(&bank, &instrument);
-        static Sculptor::Graph           graph;
-        static Sculptor::OscGraphMapping mapping;
-        do {
-            TEST(Sculptor::project_editor_to_graph(bank, &graph, &mapping));
-            TEST(mapping.param_count >= 1);
-            if (mapping.param_count < 1) {
-                break;
-            }
-            const Sculptor::Node& node = graph.node(mapping.params[0].node_idx);
-            TEST(node.slots.entries[7].row_group == node.slots.entries[8].row_group);
-            TEST(node.slots.entries[8].row_group == node.slots.entries[9].row_group);
-            TEST(node.slots.entries[10].row_group == node.slots.entries[11].row_group);
-            TEST(node.slots.entries[11].row_group == node.slots.entries[12].row_group);
-            TEST(node.slots.entries[7].row_group != node.slots.entries[10].row_group);
-            TEST(node.slots.entries[3].row_group == node.slots.entries[4].row_group);
-            TEST(node.slots.entries[4].row_group == node.slots.entries[5].row_group);
-            TEST(node.slots.entries[5].row_group == node.slots.entries[6].row_group);
-        } while (false);
-    }
-
-    // A surplus (free-standing) parameter node carries the parameter tint
-    // like any derived parameter: the visual roles install after the record
-    // surplus appends.
-    {
-        static Synth::InstrumentEditorBank bank;
-        static Synth::Instrument           instrument = {};
-        build_parameter_fixture(&bank, &instrument);
-        for (uint32_t layer = 0; layer < Synth::max_layers; layer++) {
-            for (uint32_t t = 0; t < Synth::num_mod_targets; t++) {
-                clear_target_gen(bank.bank.instruments.entries[0].layers[layer], t);
-            }
-        }
-        static Sculptor::Graph           graph;
-        static Sculptor::OscGraphMapping mapping;
-        do {
-            // With no generator bindings and no MIDI routing the
-            // instrument-only projection has zero parameters, so the bare
-            // record below materializes a true surplus node (no carrier
-            // group forms for it to attach to).
-            TEST(Sculptor::project_editor_to_graph(bank, &graph, &mapping));
-            TEST(mapping.param_count == 0);
-            add_parameter_record(&bank, 0, 0, 0, 10.0f, 20.0f, 1);
-            TEST(Sculptor::project_editor_to_graph(bank, &graph, &mapping));
-            TEST(mapping.param_count == 1);
-            if (mapping.param_count != 1) {
-                break;
-            }
-            const uint32_t node = mapping.params[0].node_idx;
-            TEST(graph.node_visual_role(node) == Sculptor::node_role_parameter);
-        } while (false);
-    }
-
-    // Parameter registry bound: the projection materializes one parameter
-    // node per surplus record, and max_param_nodes is a designed static
-    // budget. With no derived groups, the 35th free-standing parameter
-    // still projects; the 36th must fail the projection (the editor's Add
-    // Parameter guards this bound before committing).
-    {
-        static Synth::InstrumentEditorBank bank;
-        static Synth::Instrument           instrument = {};
-        build_parameter_fixture(&bank, &instrument);
-        for (uint32_t layer = 0; layer < Synth::max_layers; layer++) {
-            for (uint32_t t = 0; t < Synth::num_mod_targets; t++) {
-                clear_target_gen(bank.bank.instruments.entries[0].layers[layer], t);
-            }
-        }
-        for (uint32_t uid = 1; uid <= Sculptor::max_param_nodes; uid++) {
-            add_parameter_record(&bank, 0, 0, 0, 10.0f, 20.0f, static_cast<uint8_t>(uid));
-        }
-        static Sculptor::Graph           graph;
-        static Sculptor::OscGraphMapping mapping;
-        TEST(Sculptor::project_editor_to_graph(bank, &graph, &mapping));
-        TEST(mapping.param_count == Sculptor::max_param_nodes);
-        add_parameter_record(&bank, 0, 0, 0, 10.0f, 20.0f, static_cast<uint8_t>(Sculptor::max_param_nodes + 1));
-        TEST(! Sculptor::project_editor_to_graph(bank, &graph, &mapping));
-    }
-
-    // JSON compatibility: the kind-3 persistence fields round-trip through the
-    // bank file, and a record written before the fields existed decodes to
-    // the zero state (no name override, no wires).
-    {
-        static Synth::InstrumentEditorBank bank;
-        static Synth::Instrument           instrument = {};
-        build_parameter_fixture(&bank, &instrument);
-        add_parameter_record(&bank, 0, 0, 0, 10.0f, 20.0f, 3);
-        Synth::GraphNodeLayout& record = bank.graph_layout[bank.graph_layout_count - 1];
-        record.served                  = 0x5;
-        record.env_desc_id             = 1;
-        record.lfo_desc_id             = 1;
-        record.lfo_depth_source        = static_cast<uint8_t>(Synth::ModSource::velocity);
-        record.lfo_rate_source         = static_cast<uint8_t>(Synth::ModSource::mod_wheel);
-        record.param_slot              = 2;
-        snprintf(record.name, sizeof(record.name), "Persisted");
-        static char                        doc[512 * 1024];
-        static Synth::InstrumentEditorBank decoded;
-        const uint32_t                     written = Synth::encode_editor_bank_json(&bank, doc, sizeof(doc));
-        TEST(written > 0);
-        TEST(Synth::decode_editor_bank_json(doc, written, &decoded));
-        TEST(memcmp(bank.graph_layout, decoded.graph_layout, sizeof(bank.graph_layout)) == 0);
-        TEST(strcmp(decoded.graph_layout[0].name, "Persisted") == 0);
-        TEST(decoded.graph_layout[0].param_slot == 2);
-        TEST(Sculptor::validate_editor_metadata(decoded));
-
-        // A legacy record (no new keys) loads with the zero state.  The splice
-        // helper decodes the base bank's own editor section too, so the
-        // legacy record is the spliced one (uid 1; the fixture's record has
-        // uid 3).
-        static char    legacy[64 * 1024];
-        const uint32_t legacy_len = build_detached_layouts_json(legacy, sizeof(legacy), 1, 1, 3, 0, 0, 0);
-        TEST(legacy_len > 0);
-        static Synth::InstrumentEditorBank legacy_decoded;
-        TEST(decode_bank_with_editor_section(bank, legacy, &legacy_decoded));
-        int32_t legacy_idx = -1;
-        for (uint32_t r = 0; r < legacy_decoded.graph_layout_count; r++) {
-            const Synth::GraphNodeLayout& legacy_record = legacy_decoded.graph_layout[r];
-            if (legacy_record.kind == 3 && legacy_record.uid == 1) {
-                legacy_idx = static_cast<int32_t>(r);
-            }
-        }
-        TEST(legacy_idx >= 0);
-        if (legacy_idx >= 0) {
-            TEST(legacy_decoded.graph_layout[legacy_idx].served == 0);
-            TEST(legacy_decoded.graph_layout[legacy_idx].env_desc_id == 0);
-            TEST(legacy_decoded.graph_layout[legacy_idx].lfo_desc_id == 0);
-            TEST(legacy_decoded.graph_layout[legacy_idx].param_slot == 0);
-            TEST(legacy_decoded.graph_layout[legacy_idx].name[0] == 0);
-        }
-        TEST(Sculptor::validate_editor_metadata(legacy_decoded));
-
-        // A record carrying persistence fields on the wrong kind refuses.
-        Synth::GraphNodeLayout& bad = bank.graph_layout[bank.graph_layout_count++];
-        bad                         = {};
-        bad.channel                 = 0;
-        bad.zone                    = 0;
-        bad.kind                    = 1;
-        bad.index                   = 1;
-        bad.uid                     = 1;
-        bad.served                  = 0x1;
-        TEST(! Sculptor::validate_editor_metadata(bank));
-        bad.served     = 0;
-        bad.param_slot = 1;
-        TEST(! Sculptor::validate_editor_metadata(bank));
-        bad.param_slot = 0;
-        bad.served     = 0;
-        bad.name[0]    = 'x';
-        TEST(! Sculptor::validate_editor_metadata(bank));
-        bad.name[0] = 0;
-        TEST(Sculptor::validate_editor_metadata(bank));
-        // A kind-3 record with out-of-range persistence fields refuses.
-        bad.kind   = 3;
-        bad.index  = 0;
-        bad.served = static_cast<uint8_t>(1u << Synth::max_layers);
-        TEST(! Sculptor::validate_editor_metadata(bank));
-        bad.served      = 0x1;
-        bad.env_desc_id = 3; // the fixture allocates two envelope descriptors
-        TEST(! Sculptor::validate_editor_metadata(bank));
-        bad.env_desc_id      = 0;
-        bad.lfo_depth_source = 7;
-        TEST(! Sculptor::validate_editor_metadata(bank));
-        bad.lfo_depth_source = 0;
-        TEST(Sculptor::validate_editor_metadata(bank));
-    }
-
     // Kind-4 records (effect-graph node places): keyed by name, valid on
     // every chain including the master, refusing wrong-kind key fields,
     // duplicates and empty names, and round-tripping through the bank file.
     {
         static Synth::InstrumentEditorBank bank;
         static Synth::Instrument           instrument = {};
-        build_parameter_fixture(&bank, &instrument);
+        build_binding_fixture(&bank, &instrument);
         Synth::GraphNodeLayout& fx = bank.graph_layout[bank.graph_layout_count++];
         fx                         = {};
         fx.channel                 = 0;
@@ -15150,701 +11806,9 @@ int main()
         TEST(Sculptor::validate_editor_metadata(bank));
     }
 
-    // Record validation: kind 3 is accepted and the node-pool check counts
-    // parameter nodes.
-    {
-        static Synth::InstrumentEditorBank bank;
-        static Synth::Instrument           instrument = {};
-        build_parameter_fixture(&bank, &instrument);
-        add_parameter_record(&bank, 0, 0, 0, 10.0f, 20.0f, 1);
-        add_parameter_record(&bank, 0, 0, 1, 30.0f, 40.0f, 1);
-        TEST(Sculptor::validate_editor_metadata(bank));
-
-        // 7 fixed + 3 oscillators + 3 parameters + 2 envelope + 1 LFO
-        // descriptor nodes.
-        TEST(Sculptor::count_projected_nodes(bank, 0, 0) == 11);
-    }
-
     // Capacity: the reshaped projection fits the decided slot budget.
     {
         TEST(Sculptor::max_node_slots >= 53); // 5-param effects carrying the full modulation grammar
-    }
-
-    // Merge-demoted truthfulness across three groups: when B merges into
-    // A, B's demoted record must not claim the unrelated recordless C
-    // group at re-projection. Tuple-class matching alone would let it:
-    // C is tuple-bearing and unclaimed, and the claim would rename C's
-    // node and inject B's LFO wiring into it.
-    {
-        static Synth::InstrumentEditorBank bank;
-        static Synth::Instrument           instrument = {};
-        build_parameter_fixture(&bank, &instrument);
-        // A third volume group: layer 2's tuple becomes envelope-1 only.
-        bank.bank.instruments.entries[0].layers[2].targets[Synth::mod_volume].lfo_desc_id = 0;
-        static Sculptor::Graph           graph;
-        static Sculptor::OscGraphMapping mapping;
-        do {
-            TEST(Sculptor::project_editor_to_graph(bank, &graph, &mapping));
-            static Sculptor::GraphChange discard[8] = {};
-            (void)graph.take_changes(discard, 8);
-            const uint32_t a0 = find_graph_node_by_name(graph, "Volume");
-            const uint32_t b0 = find_graph_node_by_name(graph, "Volume 2");
-            const uint32_t c0 = find_graph_node_by_name(graph, "Volume 3");
-            TEST(a0 != Sculptor::pool_no_slot && b0 != Sculptor::pool_no_slot && c0 != Sculptor::pool_no_slot);
-            if (a0 == Sculptor::pool_no_slot || b0 == Sculptor::pool_no_slot || c0 == Sculptor::pool_no_slot) {
-                break;
-            }
-            graph.rename_node(a0, "Ay");
-            (void)graph.take_changes(discard, 8);
-            apply_name_changed(&bank, &graph, &mapping, a0);
-            graph.rename_node(b0, "Bee");
-            (void)graph.take_changes(discard, 8);
-            apply_name_changed(&bank, &graph, &mapping, b0);
-            const int32_t a_param = Sculptor::find_param(mapping, a0);
-            const int32_t b_param = Sculptor::find_param(mapping, b0);
-            TEST(a_param >= 0 && b_param >= 0);
-            if (a_param < 0 || b_param < 0) {
-                break;
-            }
-            const int32_t ay_record =
-                Sculptor::find_record(bank, 0, 0, 3, 0, static_cast<uint8_t>(mapping.params[a_param].uid));
-            const int32_t bee_record =
-                Sculptor::find_record(bank, 0, 0, 3, 0, static_cast<uint8_t>(mapping.params[b_param].uid));
-            TEST(ay_record >= 0 && bee_record >= 0);
-            if (ay_record < 0 || bee_record < 0) {
-                break;
-            }
-            // Rewire B onto A's generator instances and copy A's LFO row
-            // values; all validator-legal gestures. All mutations land
-            // before the drained batch applies, so every reconcile during
-            // the drain sees the final state.
-            uint32_t env1 = Sculptor::pool_no_slot;
-            uint32_t lfo1 = Sculptor::pool_no_slot;
-            for (uint32_t d = 0; d < mapping.detached_count; d++) {
-                if (mapping.detached[d].kind == 1 && mapping.detached[d].desc_id == 1) {
-                    env1 = mapping.detached[d].node_idx;
-                }
-                if (mapping.detached[d].kind == 2 && mapping.detached[d].desc_id == 1) {
-                    lfo1 = mapping.detached[d].node_idx;
-                }
-            }
-            TEST(env1 != Sculptor::pool_no_slot && lfo1 != Sculptor::pool_no_slot);
-            if (env1 == Sculptor::pool_no_slot || lfo1 == Sculptor::pool_no_slot) {
-                break;
-            }
-            const uint32_t b_env_wire = Sculptor::connection_into(graph, b0, 2);
-            TEST(b_env_wire != Sculptor::pool_no_slot);
-            if (b_env_wire == Sculptor::pool_no_slot) {
-                break;
-            }
-            graph.delete_connection(b_env_wire);
-            TEST(graph.add_connection(Sculptor::EndPoint{ env1, 0 }, Sculptor::EndPoint{ b0, 2 }) !=
-                 Sculptor::pool_no_slot);
-            TEST(graph.add_connection(Sculptor::EndPoint{ lfo1, 0 }, Sculptor::EndPoint{ b0, 3 }) !=
-                 Sculptor::pool_no_slot);
-            Sculptor::PropertyValue op_copy = {};
-            op_copy.list_index              = graph.node(a0).slots.entries[4].value.list_index;
-            graph.set_slot_value(b0, 4, op_copy);
-            Sculptor::PropertyValue depth_copy = {};
-            depth_copy.real                    = graph.node(a0).slots.entries[5].value.real;
-            graph.set_slot_value(b0, 5, depth_copy);
-            Sculptor::PropertyValue rate_copy = {};
-            rate_copy.real                    = graph.node(a0).slots.entries[6].value.real;
-            graph.set_slot_value(b0, 6, rate_copy);
-            static Sculptor::GraphChange batch[8] = {};
-            const uint32_t               moved    = graph.take_changes(batch, 8);
-            for (uint32_t e = 0; e < moved; e++) {
-                TEST(Sculptor::apply_osc_graph_change(&bank, &graph, &mapping, batch[e]));
-            }
-            // The merge-aware re-stamp keeps A's ordinal and demotes B's.
-            TEST(bank.graph_layout[ay_record].param_slot == 1);
-            TEST(bank.graph_layout[bee_record].param_slot == Synth::graph_record_param_free);
-            TEST(Sculptor::project_editor_to_graph(bank, &graph, &mapping));
-            const uint32_t ay  = find_graph_node_by_name(graph, "Ay");
-            const uint32_t bee = find_graph_node_by_name(graph, "Bee");
-            const uint32_t cc  = find_graph_node_by_name(graph, "Volume 2");
-            TEST(ay != Sculptor::pool_no_slot && bee != Sculptor::pool_no_slot && cc != Sculptor::pool_no_slot);
-            if (ay == Sculptor::pool_no_slot || bee == Sculptor::pool_no_slot || cc == Sculptor::pool_no_slot) {
-                break;
-            }
-            // B's record keeps its own identity: it materializes an inert
-            // surplus node and leaves C's recordless group untouched.
-            // Re-resolve the instance node after the re-projection: the
-            // rebuild recreates the detached nodes.
-            env1 = Sculptor::pool_no_slot;
-            for (uint32_t d = 0; d < mapping.detached_count; d++) {
-                if (mapping.detached[d].kind == 1 && mapping.detached[d].desc_id == 1) {
-                    env1 = mapping.detached[d].node_idx;
-                }
-            }
-            TEST(env1 != Sculptor::pool_no_slot);
-            uint32_t bee_rows      = 0;
-            uint32_t c_env_wires   = 0;
-            uint32_t c_lfo_wires   = 0;
-            uint32_t c_env_from_e1 = 0;
-            for (uint32_t c = 0; c < Sculptor::max_connections; c++) {
-                if (! graph.connection_occupied(c)) {
-                    continue;
-                }
-                const Sculptor::Connection& connection = graph.get_connection(c);
-                if (connection.output.node_idx == bee && connection.output.slot_idx == mapping.param_output_slot) {
-                    bee_rows++;
-                }
-                if (connection.input.node_idx == cc && connection.input.slot_idx == 2) {
-                    c_env_wires++;
-                    if (connection.output.node_idx == env1) {
-                        c_env_from_e1++;
-                    }
-                }
-                if (connection.input.node_idx == cc && connection.input.slot_idx == 3) {
-                    c_lfo_wires++;
-                }
-            }
-            TEST(bee_rows == 0);
-            TEST(c_env_wires == 1 && c_env_from_e1 == 1);
-            TEST(c_lfo_wires == 0);
-        } while (false);
-    }
-
-    // The Add Parameter preflight predicate refuses at the registry bound
-    // and while a record-less derived sibling could be hijacked, and stays
-    // silent when every derived parameter carries its record.
-    {
-        static Synth::InstrumentEditorBank bank;
-        static Synth::Instrument           instrument = {};
-        build_parameter_fixture(&bank, &instrument);
-        for (uint32_t layer = 0; layer < Synth::max_layers; layer++) {
-            for (uint32_t t = 0; t < Synth::num_mod_targets; t++) {
-                clear_target_gen(bank.bank.instruments.entries[0].layers[layer], t);
-            }
-        }
-        for (uint32_t uid = 1; uid <= Sculptor::max_param_nodes; uid++) {
-            add_parameter_record(&bank, 0, 0, 0, 10.0f, 20.0f, static_cast<uint8_t>(uid));
-        }
-        static Sculptor::Graph           graph;
-        static Sculptor::OscGraphMapping mapping;
-        do {
-            TEST(Sculptor::project_editor_to_graph(bank, &graph, &mapping));
-            TEST(mapping.param_count == Sculptor::max_param_nodes);
-            char error[128] = {};
-            TEST(Sculptor::osc_add_parameter_refused(mapping, 0, error, sizeof(error)));
-            TEST(strncmp(error,
-                         "Synth: cannot add a parameter: the parameter registry is full",
-                         sizeof("Synth: cannot add a parameter: the parameter registry is full")) == 0);
-        } while (false);
-        // A target with a record-less derived sibling refuses: a new record
-        // would claim that sibling positionally at re-projection and
-        // overwrite its identity.  Rename it into a record first.
-        static Synth::InstrumentEditorBank bank2;
-        static Synth::Instrument           instrument2 = {};
-        build_parameter_fixture(&bank2, &instrument2);
-        static Sculptor::Graph           graph2;
-        static Sculptor::OscGraphMapping mapping2;
-        do {
-            TEST(Sculptor::project_editor_to_graph(bank2, &graph2, &mapping2));
-            static Sculptor::GraphChange discard[8] = {};
-            (void)graph2.take_changes(discard, 8);
-            const uint32_t a0 = find_graph_node_by_name(graph2, "Volume");
-            TEST(a0 != Sculptor::pool_no_slot);
-            if (a0 == Sculptor::pool_no_slot) {
-                break;
-            }
-            graph2.rename_node(a0, "Ay");
-            (void)graph2.take_changes(discard, 8);
-            apply_name_changed(&bank2, &graph2, &mapping2, a0);
-            char error[128] = {};
-            TEST(Sculptor::osc_add_parameter_refused(mapping2, 0, error, sizeof(error)));
-            TEST(strncmp(error,
-                         "Synth: cannot add a parameter: rename the target's earlier parameter first",
-                         sizeof("Synth: cannot add a parameter: rename the target's earlier parameter first")) == 0);
-        } while (false);
-        // Clean case: both fixture parameters renamed, nothing refuses.
-        static Synth::InstrumentEditorBank bank3;
-        static Synth::Instrument           instrument3 = {};
-        build_parameter_fixture(&bank3, &instrument3);
-        static Sculptor::Graph           graph3;
-        static Sculptor::OscGraphMapping mapping3;
-        do {
-            TEST(Sculptor::project_editor_to_graph(bank3, &graph3, &mapping3));
-            static Sculptor::GraphChange discard[8] = {};
-            (void)graph3.take_changes(discard, 8);
-            const uint32_t a0 = find_graph_node_by_name(graph3, "Volume");
-            const uint32_t b0 = find_graph_node_by_name(graph3, "Volume 2");
-            TEST(a0 != Sculptor::pool_no_slot && b0 != Sculptor::pool_no_slot);
-            if (a0 == Sculptor::pool_no_slot || b0 == Sculptor::pool_no_slot) {
-                break;
-            }
-            graph3.rename_node(a0, "Ay");
-            (void)graph3.take_changes(discard, 8);
-            apply_name_changed(&bank3, &graph3, &mapping3, a0);
-            graph3.rename_node(b0, "Bee");
-            (void)graph3.take_changes(discard, 8);
-            apply_name_changed(&bank3, &graph3, &mapping3, b0);
-            char error[128] = {};
-            TEST(! Sculptor::osc_add_parameter_refused(mapping3, 0, error, sizeof(error)));
-            TEST(error[0] == '\0');
-        } while (false);
-        // Multi-instance projection: a new record beside a record-backed
-        // sibling materializes its own node at re-projection (the parameter
-        // count increases) and the sibling keeps its identity and ordinal.
-        {
-            static Synth::InstrumentEditorBank bank4;
-            static Synth::Instrument           instrument4 = {};
-            build_parameter_fixture(&bank4, &instrument4);
-            // Only one volume group: the second volume tuple is cleared so
-            // the new record cannot claim a record-less sibling group.
-            clear_target_gen(bank4.bank.instruments.entries[0].layers[1], Synth::mod_volume);
-            static Sculptor::Graph           graph4;
-            static Sculptor::OscGraphMapping mapping4;
-            do {
-                TEST(Sculptor::project_editor_to_graph(bank4, &graph4, &mapping4));
-                static Sculptor::GraphChange discard[8] = {};
-                (void)graph4.take_changes(discard, 8);
-                const uint32_t a0 = find_graph_node_by_name(graph4, "Volume");
-                TEST(a0 != Sculptor::pool_no_slot);
-                if (a0 == Sculptor::pool_no_slot) {
-                    break;
-                }
-                graph4.rename_node(a0, "Ay");
-                (void)graph4.take_changes(discard, 8);
-                static Sculptor::GraphChange rename0 = {};
-                rename0.kind                         = Sculptor::ChangeKind::name_changed;
-                rename0.node_idx                     = a0;
-                TEST(Sculptor::apply_osc_graph_change(&bank4, &graph4, &mapping4, rename0));
-                const int32_t a_param = Sculptor::find_param(mapping4, a0);
-                TEST(a_param >= 0 && mapping4.params[a_param].uid != 0);
-                if (a_param < 0 || mapping4.params[a_param].uid == 0) {
-                    break;
-                }
-                const uint8_t ay_uid = mapping4.params[a_param].uid;
-                // The preflight stays silent: no record-less derived sibling
-                // remains for the target.
-                char error[128] = {};
-                TEST(! Sculptor::osc_add_parameter_refused(mapping4, Synth::mod_volume, error, sizeof(error)));
-                const uint32_t params_before = mapping4.param_count;
-                add_parameter_record(&bank4, 0, 0, Synth::mod_volume, 11.0f, 22.0f, 9);
-                TEST(Sculptor::project_editor_to_graph(bank4, &graph4, &mapping4));
-                TEST(mapping4.param_count == params_before + 1);
-                // The sibling keeps its identity: same uid on the renamed
-                // node, same explicit ordinal; the new record materializes
-                // its own free-standing node.
-                const uint32_t ay0 = find_graph_node_by_name(graph4, "Ay");
-                TEST(ay0 != Sculptor::pool_no_slot);
-                const int32_t ay_after = Sculptor::find_param(mapping4, ay0);
-                TEST(ay_after >= 0 && mapping4.params[ay_after].uid == ay_uid);
-                TEST(find_graph_node_by_name(graph4, "Volume 2") != Sculptor::pool_no_slot);
-                const int32_t ay_record = Sculptor::find_record(bank4, 0, 0, 3, Synth::mod_volume, ay_uid);
-                TEST(ay_record >= 0 && bank4.graph_layout[ay_record].param_slot == 1);
-            } while (false);
-        }
-        // Nonzero zone: a record added to zone 1 lands in zone 1's
-        // projection only - zone 0's projection never sees it.
-        {
-            static Synth::InstrumentEditorBank bank5;
-            static Synth::Instrument           instrument5 = {};
-            build_parameter_fixture(&bank5, &instrument5);
-            bank5.bank.channel_zones[0][1].start_note = 61;
-            bank5.bank.channel_zones[0][1].instrument = 0;
-            add_parameter_record(&bank5, 0, 1, Synth::mod_volume, 13.0f, 31.0f, 7);
-            static Sculptor::Graph           graph5;
-            static Sculptor::OscGraphMapping mapping5;
-            do {
-                TEST(Sculptor::project_editor_to_graph(bank5, &graph5, &mapping5, 0, 1));
-                TEST(mapping5.zone == 1);
-                bool zone1_has_uid = false;
-                for (uint32_t p = 0; p < mapping5.param_count; ++p) {
-                    zone1_has_uid = zone1_has_uid || mapping5.params[p].uid == 7;
-                }
-                TEST(zone1_has_uid);
-                TEST(Sculptor::project_editor_to_graph(bank5, &graph5, &mapping5, 0, 0));
-                bool zone0_has_uid = false;
-                for (uint32_t p = 0; p < mapping5.param_count; ++p) {
-                    zone0_has_uid = zone0_has_uid || mapping5.params[p].uid == 7;
-                }
-                TEST(! zone0_has_uid);
-            } while (false);
-        }
-    }
-
-    // Eventless LFO-row edits merge groups through the value_changed
-    // path: two groups differing only in one LFO row value merge when a
-    // value_changed event aligns the value, with no explicit refresh and
-    // without any wiring change.
-    {
-        static Synth::InstrumentEditorBank bank;
-        static Synth::Instrument           instrument = {};
-        static Sculptor::Graph             graph;
-        static Sculptor::OscGraphMapping   mapping;
-        do {
-            TEST(begin_param_graph(&bank, &instrument, &graph, &mapping));
-            static Sculptor::GraphChange discard[8] = {};
-            const uint32_t               a0         = find_graph_node_by_name(graph, "Volume");
-            const uint32_t               b0         = find_graph_node_by_name(graph, "Volume 2");
-            TEST(a0 != Sculptor::pool_no_slot && b0 != Sculptor::pool_no_slot);
-            if (a0 == Sculptor::pool_no_slot || b0 == Sculptor::pool_no_slot) {
-                break;
-            }
-            graph.rename_node(a0, "Ay");
-            (void)graph.take_changes(discard, 8);
-            apply_name_changed(&bank, &graph, &mapping, a0);
-            graph.rename_node(b0, "Bee");
-            (void)graph.take_changes(discard, 8);
-            apply_name_changed(&bank, &graph, &mapping, b0);
-            const int32_t a_param = Sculptor::find_param(mapping, a0);
-            const int32_t b_param = Sculptor::find_param(mapping, b0);
-            TEST(a_param >= 0 && b_param >= 0);
-            if (a_param < 0 || b_param < 0) {
-                break;
-            }
-            const int32_t ay_record =
-                Sculptor::find_record(bank, 0, 0, 3, 0, static_cast<uint8_t>(mapping.params[a_param].uid));
-            const int32_t bee_record =
-                Sculptor::find_record(bank, 0, 0, 3, 0, static_cast<uint8_t>(mapping.params[b_param].uid));
-            TEST(ay_record >= 0 && bee_record >= 0);
-            if (ay_record < 0 || bee_record < 0) {
-                break;
-            }
-            // Rewire B onto A's generator instances eventlessly (the
-            // apply-side mirroring API pushes no events, so no reconcile
-            // runs mid-rewrite and B's explicit ordinal survives), then
-            // make the depth row the only tuple difference.
-            uint32_t env1 = Sculptor::pool_no_slot;
-            uint32_t lfo1 = Sculptor::pool_no_slot;
-            for (uint32_t d = 0; d < mapping.detached_count; d++) {
-                if (mapping.detached[d].kind == 1 && mapping.detached[d].desc_id == 1) {
-                    env1 = mapping.detached[d].node_idx;
-                }
-                if (mapping.detached[d].kind == 2 && mapping.detached[d].desc_id == 1) {
-                    lfo1 = mapping.detached[d].node_idx;
-                }
-            }
-            TEST(env1 != Sculptor::pool_no_slot && lfo1 != Sculptor::pool_no_slot);
-            if (env1 == Sculptor::pool_no_slot || lfo1 == Sculptor::pool_no_slot) {
-                break;
-            }
-            graph.set_slot_input(b0, 2, Sculptor::EndPoint{ env1, 0 });
-            graph.set_slot_input(b0, 3, Sculptor::EndPoint{ lfo1, 0 });
-            Sculptor::PropertyValue op_copy = {};
-            op_copy.list_index              = graph.node(a0).slots.entries[4].value.list_index;
-            graph.set_slot_value(b0, 4, op_copy);
-            Sculptor::PropertyValue rate_copy = {};
-            rate_copy.real                    = graph.node(a0).slots.entries[6].value.real;
-            graph.set_slot_value(b0, 6, rate_copy);
-            Sculptor::PropertyValue depth_copy = {};
-            depth_copy.real                    = graph.node(a0).slots.entries[5].value.real + 50.0f;
-            graph.set_slot_value(b0, 5, depth_copy);
-            TEST(Sculptor::refresh_osc_graph_compilation(&bank, graph, mapping, 0, 0));
-            TEST(bank.graph_layout[ay_record].param_slot == 1);
-            TEST(bank.graph_layout[bee_record].param_slot == 2);
-            // The value_changed event aligns the depth row: the groups
-            // merge through apply_value_change's reconcile, before any
-            // explicit refresh.
-            depth_copy.real = graph.node(a0).slots.entries[5].value.real;
-            graph.set_slot_value(b0, 5, depth_copy);
-            static Sculptor::GraphChange batch[8] = {};
-            batch[0].kind                         = Sculptor::ChangeKind::value_changed;
-            batch[0].node_idx                     = b0;
-            batch[0].slot_idx                     = 5;
-            TEST(Sculptor::apply_osc_graph_change(&bank, &graph, &mapping, batch[0]));
-            TEST(bank.graph_layout[ay_record].param_slot == 1);
-            TEST(bank.graph_layout[bee_record].param_slot == Synth::graph_record_param_free);
-            // The merged tuple compiles: both layers carry the same LFO
-            // depth now.
-            TEST(bank.bank.instruments.entries[0].layers[0].targets[Synth::mod_volume].lfo_depth ==
-                 bank.bank.instruments.entries[0].layers[1].targets[Synth::mod_volume].lfo_depth);
-        } while (false);
-    }
-
-    // Source-row edits reconcile too: two groups differing only in one
-    // source Amount merge when a value_changed event aligns the amount,
-    // the merged-away record's ordinal demotes immediately (renamed in
-    // reverse group order, so its uid order differs from group order),
-    // and the re-projection keeps the surviving record's explicit ordinal
-    // trusted instead of falling back to stale uid-order attachment.
-    {
-        static Synth::InstrumentEditorBank bank;
-        static Synth::Instrument           instrument = {};
-        build_parameter_fixture(&bank, &instrument);
-        // Make the two volume groups differ only in the velocity source's
-        // Amount: layer 1 joins the shared tuple but keeps scale 3.0.
-        bank.bank.instruments.entries[0].layers[1].targets[Synth::mod_volume].envelope_desc_id = 1;
-        bank.bank.instruments.entries[0].layers[1].targets[Synth::mod_volume].inputs[0].scale  = 3.0f;
-        static Sculptor::Graph           graph;
-        static Sculptor::OscGraphMapping mapping;
-        do {
-            TEST(Sculptor::project_editor_to_graph(bank, &graph, &mapping));
-            static Sculptor::GraphChange discard[8] = {};
-            (void)graph.take_changes(discard, 8);
-            const uint32_t a0 = find_graph_node_by_name(graph, "Volume");
-            const uint32_t b0 = find_graph_node_by_name(graph, "Volume 2");
-            TEST(a0 != Sculptor::pool_no_slot && b0 != Sculptor::pool_no_slot);
-            if (a0 == Sculptor::pool_no_slot || b0 == Sculptor::pool_no_slot) {
-                break;
-            }
-            // Reversed rename order: the second group is named first.
-            graph.rename_node(b0, "Bee");
-            (void)graph.take_changes(discard, 8);
-            static Sculptor::GraphChange rename1 = {};
-            rename1.kind                         = Sculptor::ChangeKind::name_changed;
-            rename1.node_idx                     = b0;
-            TEST(Sculptor::apply_osc_graph_change(&bank, &graph, &mapping, rename1));
-            graph.rename_node(a0, "Ay");
-            (void)graph.take_changes(discard, 8);
-            static Sculptor::GraphChange rename0 = {};
-            rename0.kind                         = Sculptor::ChangeKind::name_changed;
-            rename0.node_idx                     = a0;
-            TEST(Sculptor::apply_osc_graph_change(&bank, &graph, &mapping, rename0));
-            const int32_t a_param = Sculptor::find_param(mapping, a0);
-            const int32_t b_param = Sculptor::find_param(mapping, b0);
-            TEST(a_param >= 0 && b_param >= 0);
-            if (a_param < 0 || b_param < 0) {
-                break;
-            }
-            const int32_t ay_record =
-                Sculptor::find_record(bank, 0, 0, 3, 0, static_cast<uint8_t>(mapping.params[a_param].uid));
-            const int32_t bee_record =
-                Sculptor::find_record(bank, 0, 0, 3, 0, static_cast<uint8_t>(mapping.params[b_param].uid));
-            TEST(ay_record >= 0 && bee_record >= 0);
-            if (ay_record < 0 || bee_record < 0) {
-                break;
-            }
-            const uint8_t ay_uid  = static_cast<uint8_t>(mapping.params[a_param].uid);
-            const uint8_t bee_uid = static_cast<uint8_t>(mapping.params[b_param].uid);
-            TEST(bank.graph_layout[ay_record].param_slot == 1);
-            TEST(bank.graph_layout[bee_record].param_slot == 2);
-            // The value_changed event aligns the Source A Amount row
-            // (parameter slot 9 is the first source row's Amount): the
-            // groups merge through apply_value_change's reconcile.
-            Sculptor::PropertyValue scale_copy = {};
-            scale_copy.real                    = graph.node(a0).slots.entries[9].value.real;
-            graph.set_slot_value(b0, 9, scale_copy);
-            static Sculptor::GraphChange batch[8] = {};
-            batch[0].kind                         = Sculptor::ChangeKind::value_changed;
-            batch[0].node_idx                     = b0;
-            batch[0].slot_idx                     = 9;
-            TEST(Sculptor::apply_osc_graph_change(&bank, &graph, &mapping, batch[0]));
-            TEST(bank.graph_layout[ay_record].param_slot == 1);
-            TEST(bank.graph_layout[bee_record].param_slot == Synth::graph_record_param_free);
-            // The merged tuple compiles: both layers carry the same source
-            // Amount now.
-            TEST(bank.bank.instruments.entries[0].layers[0].targets[Synth::mod_volume].inputs[0].scale ==
-                 bank.bank.instruments.entries[0].layers[1].targets[Synth::mod_volume].inputs[0].scale);
-            // Re-projection: no stale ordinals - the surviving record keeps
-            // its explicit ordinal and stays attached to the merged group;
-            // the merged-away record stays free and serves only its own
-            // layer's surplus node.
-            TEST(Sculptor::project_editor_to_graph(bank, &graph, &mapping));
-            TEST(bank.graph_layout[ay_record].param_slot == 1);
-            TEST(bank.graph_layout[bee_record].param_slot == Synth::graph_record_param_free);
-            uint32_t ay_node  = Sculptor::pool_no_slot;
-            uint32_t bee_node = Sculptor::pool_no_slot;
-            for (uint32_t p = 0; p < mapping.param_count; ++p) {
-                if (mapping.params[p].uid == ay_uid) {
-                    ay_node = p;
-                }
-                if (mapping.params[p].uid == bee_uid) {
-                    bee_node = p;
-                }
-            }
-            TEST(ay_node != Sculptor::pool_no_slot && bee_node != Sculptor::pool_no_slot);
-            TEST(mapping.params[ay_node].served == 0x7);
-            TEST(mapping.params[bee_node].served == 0x2);
-        } while (false);
-    }
-
-    // The implied parameter count is a validation bound: 35 free-standing
-    // parameters validate, 36 do not (the projection would refuse the
-    // 36th and leave the zone's oscillator editor unavailable).
-    {
-        static Synth::InstrumentEditorBank bank;
-        static Synth::Instrument           instrument = {};
-        build_parameter_fixture(&bank, &instrument);
-        for (uint32_t layer = 0; layer < Synth::max_layers; layer++) {
-            for (uint32_t t = 0; t < Synth::num_mod_targets; t++) {
-                clear_target_gen(bank.bank.instruments.entries[0].layers[layer], t);
-            }
-        }
-        for (uint32_t uid = 1; uid <= Sculptor::max_param_nodes; uid++) {
-            add_parameter_record(&bank, 0, 0, 0, 10.0f, 20.0f, static_cast<uint8_t>(uid));
-        }
-        TEST(Sculptor::validate_editor_metadata(bank));
-        add_parameter_record(&bank, 0, 0, 0, 10.0f, 20.0f, static_cast<uint8_t>(Sculptor::max_param_nodes + 1));
-        TEST(! Sculptor::validate_editor_metadata(bank));
-    }
-
-    // The validation parameter bound follows the projection's attachment
-    // decisions, not raw record counts: dormant records (persisted value
-    // wires, no generator tuple) cannot attach to the fixture's derived
-    // groups and every one of them materializes a parameter node. With the
-    // two derived groups, 33 dormant records sit exactly at the bound and
-    // the 34th crosses it.
-    {
-        static Synth::InstrumentEditorBank bank;
-        static Synth::Instrument           instrument = {};
-        build_parameter_fixture(&bank, &instrument);
-        // The fixture's two derived groups (volume env1+lfo1 and pitch
-        // env2, both on layer 0), no MIDI routing: dormant records have no
-        // carrier to claim.
-        for (uint32_t layer = 1; layer < Synth::max_layers; layer++) {
-            clear_target_gen(bank.bank.instruments.entries[0].layers[layer], Synth::mod_volume);
-        }
-        for (uint32_t uid = 1; uid < Sculptor::max_param_nodes - 1; uid++) {
-            add_parameter_record(&bank, 0, 0, 0, 10.0f, 20.0f, static_cast<uint8_t>(uid));
-            const int32_t rec = Sculptor::find_record(bank, 0, 0, 3, 0, static_cast<uint8_t>(uid));
-            TEST(rec >= 0);
-            if (rec < 0) {
-                break;
-            }
-            bank.graph_layout[rec].served = 1;
-        }
-        TEST(Sculptor::validate_editor_metadata(bank));
-        add_parameter_record(&bank, 0, 0, 0, 10.0f, 20.0f, static_cast<uint8_t>(Sculptor::max_param_nodes - 1));
-        const int32_t last =
-            Sculptor::find_record(bank, 0, 0, 3, 0, static_cast<uint8_t>(Sculptor::max_param_nodes - 1));
-        TEST(last >= 0);
-        if (last >= 0) {
-            bank.graph_layout[last].served = 1;
-        }
-        TEST(! Sculptor::validate_editor_metadata(bank));
-    }
-
-    // A record whose persisted tuple names a different generator than the
-    // derived groups cannot attach either (the persisted-tuple
-    // verification), so it also materializes a parameter node at the
-    // validation bound.
-    {
-        static Synth::InstrumentEditorBank bank;
-        static Synth::Instrument           instrument = {};
-        build_parameter_fixture(&bank, &instrument);
-        for (uint32_t layer = 1; layer < Synth::max_layers; layer++) {
-            clear_target_gen(bank.bank.instruments.entries[0].layers[layer], Synth::mod_volume);
-        }
-        for (uint32_t uid = 1; uid < Sculptor::max_param_nodes - 1; uid++) {
-            add_parameter_record(&bank, 0, 0, 0, 10.0f, 20.0f, static_cast<uint8_t>(uid));
-            const int32_t rec = Sculptor::find_record(bank, 0, 0, 3, 0, static_cast<uint8_t>(uid));
-            TEST(rec >= 0);
-            if (rec < 0) {
-                break;
-            }
-            bank.graph_layout[rec].env_desc_id = 2;
-        }
-        TEST(Sculptor::validate_editor_metadata(bank));
-        add_parameter_record(&bank, 0, 0, 0, 10.0f, 20.0f, static_cast<uint8_t>(Sculptor::max_param_nodes - 1));
-        const int32_t last =
-            Sculptor::find_record(bank, 0, 0, 3, 0, static_cast<uint8_t>(Sculptor::max_param_nodes - 1));
-        TEST(last >= 0);
-        if (last >= 0) {
-            bank.graph_layout[last].env_desc_id = 2;
-        }
-        TEST(! Sculptor::validate_editor_metadata(bank));
-    }
-
-    // An env-only derived group whose gen cell carries dormant LFO source
-    // fields must compare against the projection's live tuple, which zeros
-    // the sources while no LFO edge exists: a record naming the dormant
-    // source cannot attach, so the validation bound must treat it as
-    // surplus exactly like the projection does.
-    {
-        static Synth::InstrumentEditorBank bank;
-        static Synth::Instrument           instrument = {};
-        build_parameter_fixture(&bank, &instrument);
-        for (uint32_t layer = 0; layer < Synth::max_layers; layer++) {
-            clear_target_gen(bank.bank.instruments.entries[0].layers[layer], Synth::mod_volume);
-        }
-        // One env-only volume group on layer 0 with a dormant depth source.
-        Synth::TargetBinding& gen = bank.bank.instruments.entries[0].layers[0].targets[Synth::mod_volume];
-        gen.envelope_desc_id      = 1;
-        gen.lfo_desc_id           = 0;
-        gen.lfo_depth_source      = Synth::ModSource::velocity;
-        gen.lfo_rate_source       = Synth::ModSource::none;
-        for (uint32_t uid = 1; uid < Sculptor::max_param_nodes - 1; uid++) {
-            add_parameter_record(&bank, 0, 0, 0, 10.0f, 20.0f, static_cast<uint8_t>(uid));
-            const int32_t rec = Sculptor::find_record(bank, 0, 0, 3, 0, static_cast<uint8_t>(uid));
-            TEST(rec >= 0);
-            if (rec < 0) {
-                break;
-            }
-            bank.graph_layout[rec].served           = 1;
-            bank.graph_layout[rec].env_desc_id      = 1;
-            bank.graph_layout[rec].lfo_depth_source = static_cast<uint8_t>(Synth::ModSource::velocity);
-        }
-        TEST(Sculptor::validate_editor_metadata(bank));
-        static Sculptor::Graph           graph;
-        static Sculptor::OscGraphMapping mapping;
-        TEST(Sculptor::project_editor_to_graph(bank, &graph, &mapping));
-        // A bare explicit record can claim the live env-only group even
-        // though earlier UID records name its dormant (unwired) source.
-        add_parameter_record(&bank, 0, 0, 0, 73.0f, -19.0f, static_cast<uint8_t>(Sculptor::max_param_nodes - 1));
-        Synth::GraphNodeLayout& saved = bank.graph_layout[bank.graph_layout_count - 1];
-        saved.param_slot              = 1;
-        saved.width_override          = 211.0f;
-        saved.height_override         = 97.0f;
-        TEST(Synth::validate_instrument_bank(&bank.bank));
-        TEST(Sculptor::validate_editor_metadata(bank));
-        TEST(Sculptor::project_editor_to_graph(bank, &graph, &mapping));
-        TEST(mapping.params[0].uid == saved.uid);
-        TEST(graph.node(mapping.params[0].node_idx).position.x == saved.x);
-        uint32_t parameter_count = 0;
-        Sculptor::count_projected_nodes(bank, 0, 0, &parameter_count);
-        TEST(parameter_count == mapping.param_count);
-        Synth::InstrumentGraphLayout exported[max_portable_records];
-        memset(exported, 0x6D, sizeof(exported));
-        Synth::InstrumentGraphLayout exported_before[max_portable_records];
-        memcpy(exported_before, exported, sizeof(exported));
-        uint32_t exported_count = 91;
-        TEST(! Sculptor::encode_instrument_graph_layout(bank.bank.instruments.entries[0],
-                                                        bank.bank,
-                                                        bank,
-                                                        0,
-                                                        0,
-                                                        exported,
-                                                        max_portable_records,
-                                                        &exported_count));
-        TEST(exported_count == 91);
-        TEST(memcmp(exported, exported_before, sizeof(exported)) == 0);
-        --bank.graph_layout_count;
-        add_parameter_record(&bank, 0, 0, 0, 10.0f, 20.0f, static_cast<uint8_t>(Sculptor::max_param_nodes - 1));
-        const int32_t last =
-            Sculptor::find_record(bank, 0, 0, 3, 0, static_cast<uint8_t>(Sculptor::max_param_nodes - 1));
-        TEST(last >= 0);
-        if (last >= 0) {
-            bank.graph_layout[last].served           = 1;
-            bank.graph_layout[last].env_desc_id      = 1;
-            bank.graph_layout[last].lfo_depth_source = static_cast<uint8_t>(Synth::ModSource::velocity);
-        }
-        TEST(! Sculptor::validate_editor_metadata(bank));
-    }
-
-    // Reclaim roots and remaps kind-3 records' descriptor references: a
-    // record may be the only referencer of an envelope, and a stale id
-    // after compaction would fail validation forever.
-    {
-        static Synth::InstrumentEditorBank bank;
-        static Synth::Instrument           instrument = {};
-        build_parameter_fixture(&bank, &instrument);
-        // Only the records reference envelope 2: clear the gens that use it.
-        for (uint32_t layer = 1; layer < Synth::max_layers; layer++) {
-            clear_target_gen(bank.bank.instruments.entries[0].layers[layer], Synth::mod_volume);
-        }
-        add_parameter_record(&bank, 0, 0, 0, 10.0f, 20.0f, 1);
-        const int32_t rec = Sculptor::find_record(bank, 0, 0, 3, 0, 1);
-        TEST(rec >= 0);
-        if (rec >= 0) {
-            bank.graph_layout[rec].env_desc_id = 2;
-        }
-        Synth::reclaim_unused_slots(&bank);
-        TEST(bank.bank.envelopes.num_allocated == 2);
-        TEST(rec < 0 || bank.graph_layout[rec].env_desc_id == 2);
-        // A third descriptor referenced by nothing is freed, and the
-        // record's reference to the last descriptor remaps down.
-        const uint32_t third = bank.bank.envelopes.allocate();
-        TEST(third != pool_no_slot);
-        if (third != pool_no_slot) {
-            bank.bank.envelopes.entries[third] = Synth::EnvelopeDescriptor{};
-        }
-        Synth::reclaim_unused_slots(&bank);
-        TEST(bank.bank.envelopes.num_allocated == 2);
-        TEST(rec < 0 || bank.graph_layout[rec].env_desc_id == 2);
     }
 
     // The envelope evaluator holds the start value on unplaced descriptors:
@@ -15874,7 +11838,7 @@ int main()
         static Synth::InstrumentEditorBank bank;
         static Synth::InstrumentEditorBank decoded;
         static Synth::Instrument           instrument = {};
-        build_parameter_fixture(&bank, &instrument);
+        build_binding_fixture(&bank, &instrument);
         static char doc[512];
         snprintf(doc, sizeof(doc), "{\"instrument_editor_bank\":{}{\"editor\":{}}}");
         TEST(! Synth::decode_editor_bank_json(doc, static_cast<uint32_t>(strlen(doc)), &decoded));
@@ -17545,10 +13509,9 @@ int main()
         TEST(memcmp(text, again, len) == 0);
     }
     {
-        // The fixture fills the legacy two-endpoint projection (2 fixed endpoints
-        // + 4 effect nodes + 122 pinned LFO records = max_nodes exactly); the
-        // current three-fixed-node projection exceeds max_nodes, so it must
-        // refuse.
+        // The node ceiling (144) sits above every reachable fx projection
+        // (3 fixed nodes + 4 effects + 128 pinned LFOs = 135), so a master
+        // pane pinning the full LFO pool validates and projects.
         static Synth::InstrumentEditorBank at_ceiling;
         memset(&at_ceiling, 0, sizeof(at_ceiling));
         Synth::init_default_bank(&at_ceiling.bank);
@@ -17557,8 +13520,8 @@ int main()
             Sculptor::fx_init_slot(&at_ceiling.bank.master_chain, slot, Synth::EffectType::delay);
             at_ceiling.bank.master_chain.effects[slot].enabled = true;
         }
-        const uint32_t pin_count = Sculptor::max_nodes - 2u - Synth::max_chain_effects;
-        for (uint32_t index = 0; index < pin_count; ++index) {
+        bool pins[Synth::max_lfos] = {};
+        for (uint32_t index = 0; index < Synth::max_lfos; ++index) {
             uint16_t allocated = 0;
             TEST(Sculptor::allocate_default_lfo(&at_ceiling.bank, &allocated));
             Synth::GraphNodeLayout& record = at_ceiling.graph_layout[at_ceiling.graph_layout_count++];
@@ -17567,39 +13530,11 @@ int main()
             record.channel                 = static_cast<uint8_t>(Sculptor::fx_master_chain);
             snprintf(record.name, sizeof(record.name), "LFO %u", allocated);
         }
-        TEST(Synth::validate_instrument_bank(&at_ceiling.bank)); // the bank itself is valid
-        TEST(! Sculptor::validate_editor_metadata(at_ceiling));
-        // collect_effect_lfos refuses the same over-ceiling bank (it validates
-        // metadata first), so pin the projection-level refusal with hand-set
-        // pins matching the 122 pinned LFO records.
-        bool pins[Synth::max_lfos] = {};
-        for (uint32_t index = 0; index < pin_count; ++index) {
-            pins[index] = true;
-        }
+        TEST(Synth::validate_instrument_bank(&at_ceiling.bank));
+        TEST(Sculptor::validate_editor_metadata(at_ceiling));
         static Sculptor::Graph              graph;
         static Sculptor::EffectGraphMapping mapping;
-        TEST(! Sculptor::project_effect_chain_to_graph(at_ceiling, Sculptor::fx_master_chain, &graph, &mapping, pins));
-    }
-    {
-        static Synth::InstrumentEditorBank below;
-        memset(&below, 0, sizeof(below));
-        Synth::init_default_bank(&below.bank);
-        below.bank.master_chain.num_effects = Synth::max_chain_effects;
-        for (uint32_t slot = 0; slot < Synth::max_chain_effects; ++slot) {
-            Sculptor::fx_init_slot(&below.bank.master_chain, slot, Synth::EffectType::delay);
-            below.bank.master_chain.effects[slot].enabled = true;
-        }
-        const uint32_t pin_count = Sculptor::max_nodes - 2u - Synth::max_chain_effects - 1u;
-        for (uint32_t index = 0; index < pin_count; ++index) {
-            uint16_t allocated = 0;
-            TEST(Sculptor::allocate_default_lfo(&below.bank, &allocated));
-            Synth::GraphNodeLayout& record = below.graph_layout[below.graph_layout_count++];
-            record                         = {};
-            record.kind                    = 4;
-            record.channel                 = static_cast<uint8_t>(Sculptor::fx_master_chain);
-            snprintf(record.name, sizeof(record.name), "LFO %u", allocated);
-        }
-        TEST(Sculptor::validate_editor_metadata(below)); // below the ceiling before and after M2
+        TEST(Sculptor::project_effect_chain_to_graph(at_ceiling, Sculptor::fx_master_chain, &graph, &mapping, pins));
     }
 
     // ---------------------------------------------------------------------------
@@ -18117,8 +14052,6 @@ int main()
             static Synth::InstrumentEditorBank clear_bank;
             memset(&clear_bank, 0, sizeof(clear_bank));
             add_detached_record(&clear_bank, 0, 0, 1, 1, 0.0f, 0.0f, Synth::ModSource::none, Synth::ModSource::none, 0);
-            add_parameter_record(&clear_bank, 0, 0, 0, 1.0f, 2.0f, 7);
-            clear_bank.graph_layout[1].served = 2; // a parameter serving layer 1
             add_detached_record(&clear_bank, 0, 1, 1, 1, 0.0f, 0.0f, Synth::ModSource::none, Synth::ModSource::none, 0);
             add_detached_record(&clear_bank, 1, 0, 1, 1, 0.0f, 0.0f, Synth::ModSource::none, Synth::ModSource::none, 0);
             add_detached_record(&clear_bank,
@@ -18525,7 +14458,7 @@ int main()
         // baseline first, so each refusal isolates the record under inspection.
         // -------------------------------------------------------------------
         {
-            // A moved canonical, envelope, LFO and parameter node survives export,
+            // A moved canonical, envelope or LFO node survives export,
             // encode, decode and mapping, and lands back on the decoded node
             // identity rather than on a numeric descriptor id.
             static Synth::InstrumentEditorBank  ex_bank;
@@ -18559,13 +14492,8 @@ int main()
                                 Synth::ModSource::velocity,
                                 Synth::ModSource::mod_wheel,
                                 1);
-            add_parameter_record(&ex_bank, 0, 0, 0, 60.0f, -40.0f, 1);
-            add_parameter_record(&ex_bank, 0, 0, 1, -60.0f, 40.0f, 1);
             ex_bank.graph_layout[1].width_override  = 220.0f;
             ex_bank.graph_layout[1].height_override = 120.0f;
-            // Portable parameter ordinals are zero-based, internal slots one-based.
-            ex_bank.graph_layout[3].param_slot = 1;
-            ex_bank.graph_layout[4].param_slot = 1;
             TEST(Sculptor::validate_editor_metadata(ex_bank));
 
             uint32_t ex_portable_count = max_portable_records;
@@ -18577,13 +14505,9 @@ int main()
                                                           ex_portable,
                                                           max_portable_records,
                                                           &ex_portable_count));
-            TEST(ex_portable_count == 5);
-            int32_t rec = find_portable(ex_portable,
-                                        ex_portable_count,
-                                        Synth::instrument_graph_layout_canonical,
-                                        0xFFu,
-                                        0xFFu,
-                                        0xFFu);
+            TEST(ex_portable_count == 3);
+            int32_t rec =
+                find_portable(ex_portable, ex_portable_count, Synth::instrument_graph_layout_canonical, 0xFFu, 0xFFu);
             TEST(rec >= 0);
             if (rec >= 0)
                 TEST(ex_portable[rec].canonical_index == 1);
@@ -18593,42 +14517,19 @@ int main()
                                 ex_portable_count,
                                 Synth::instrument_graph_layout_envelope,
                                 0,
-                                Synth::mod_volume,
-                                0xFFu);
+                                Synth::mod_volume);
             TEST(rec >= 0);
             if (rec >= 0)
                 TEST(ex_portable[rec].x == 120.5f && ex_portable[rec].width_override == 220.0f);
             if (rec >= 0)
                 TEST(ex_portable[rec].height_override == 120.0f);
-            rec = find_portable(ex_portable,
-                                ex_portable_count,
-                                Synth::instrument_graph_layout_lfo,
-                                0,
-                                Synth::mod_volume,
-                                0xFFu);
+            rec =
+                find_portable(ex_portable, ex_portable_count, Synth::instrument_graph_layout_lfo, 0, Synth::mod_volume);
             TEST(rec >= 0);
             if (rec >= 0)
                 TEST(ex_portable[rec].depth_source == static_cast<uint8_t>(Synth::ModSource::velocity));
             if (rec >= 0)
                 TEST(ex_portable[rec].rate_source == static_cast<uint8_t>(Synth::ModSource::mod_wheel));
-            rec = find_portable(ex_portable,
-                                ex_portable_count,
-                                Synth::instrument_graph_layout_parameter,
-                                0xFFu,
-                                Synth::mod_volume,
-                                0);
-            TEST(rec >= 0);
-            if (rec >= 0)
-                TEST(ex_portable[rec].x == 60.0f);
-            rec = find_portable(ex_portable,
-                                ex_portable_count,
-                                Synth::instrument_graph_layout_parameter,
-                                0xFFu,
-                                Synth::mod_pitch,
-                                0);
-            TEST(rec >= 0);
-            if (rec >= 0)
-                TEST(ex_portable[rec].x == -60.0f);
 
             // Exporter refusals leave the record sink and the count untouched: a
             // destination outside the zone table, and a capacity that cannot hold what
@@ -18705,8 +14606,7 @@ int main()
                                ex_dec.layout_count,
                                Synth::instrument_graph_layout_envelope,
                                0,
-                               Synth::mod_volume,
-                               0xFFu) >= 0);
+                               Synth::mod_volume) >= 0);
 
             uint32_t ex_mapped_count = max_portable_records;
             TEST(Sculptor::map_instrument_graph_layout(ex_dec.instr,
@@ -18719,7 +14619,7 @@ int main()
                                                        ex_mapped,
                                                        max_portable_records,
                                                        &ex_mapped_count));
-            TEST(ex_mapped_count == 5);
+            TEST(ex_mapped_count == 3);
             int32_t m = find_mapped(ex_mapped, ex_mapped_count, 0, 1);
             TEST(m >= 0);
             if (m >= 0)
@@ -18742,14 +14642,6 @@ int main()
                 TEST(ex_mapped[m].rate_source == static_cast<uint8_t>(Synth::ModSource::mod_wheel));
             if (m >= 0)
                 TEST(ex_mapped[m].x == 12.5f && ex_mapped[m].uid != 0);
-            m = find_mapped(ex_mapped, ex_mapped_count, 3, Synth::mod_volume);
-            TEST(m >= 0);
-            if (m >= 0)
-                TEST(ex_mapped[m].param_slot == 1 && ex_mapped[m].x == 60.0f && ex_mapped[m].uid != 0);
-            m = find_mapped(ex_mapped, ex_mapped_count, 3, Synth::mod_pitch);
-            TEST(m >= 0);
-            if (m >= 0)
-                TEST(ex_mapped[m].param_slot == 1 && ex_mapped[m].x == -60.0f);
 
             // Mapper refusals: a decoded locator the decoded model does not project, and
             // a kind that is not clipboard data. Both leave the mapped sink and the count
@@ -18801,7 +14693,7 @@ int main()
             // The copy helpers below index their map outputs with the decoded
             // instrument generator ids, so the replay runs only on a decode that
             // produced the fixture's expected descriptor counts.
-            const bool ex_decoded = ex_dec.env_count == 2 && ex_dec.lfo_count == 1 && ex_dec.layout_count == 5;
+            const bool ex_decoded = ex_dec.env_count == 2 && ex_dec.lfo_count == 1 && ex_dec.layout_count == 3;
             TEST(ex_decoded);
             if (ex_decoded) {
                 TEST(Synth::remap_envelopes(&ex_replay_bank, ex_dec.envs, ex_dec.env_count, ex_env_ids));
@@ -18951,20 +14843,16 @@ int main()
         }
 
         {
-            // Copy-time normalization. Source envelopes A, A' (byte-identical to A)
-            // and B give three source parameter groups on volume; the decoder interns
-            // A and A', so the decoded instrument has two. The saved positions sit on
-            // A' (source ordinal 1) and B (source ordinal 2) and must attach to
-            // decoded ordinals 0 and 1.
-            static Synth::EnvelopeDescriptor    nm_envs[3];
-            static Synth::EnvelopeDescriptor    nm_dec_envs[2];
-            static Synth::Instrument            nm_src;
-            static Synth::Instrument            nm_dec;
-            static Synth::InstrumentGraphLayout nm_records[2];
-            static Synth::InstrumentGraphLayout nm_out[4];
-            static Synth::InstrumentGraphLayout nm_swapped[2];
-            static Synth::InstrumentGraphLayout nm_swapped_out[4];
-
+            // Generator-layout normalization guarantees: an envelope-layout
+            // alias collision refuses, a single saved record re-anchors to
+            // the decoded node's earliest serving cell, distinct LFO source
+            // pairs keep distinct instances and positions, capacity exactly
+            // matching the resolved count succeeds, and every refusal leaves
+            // the output array and count untouched.
+            static Synth::EnvelopeDescriptor nm_envs[3];
+            static Synth::EnvelopeDescriptor nm_dec_envs[2];
+            static Synth::Instrument         nm_src;
+            static Synth::Instrument         nm_dec;
             memset(nm_envs, 0, sizeof(nm_envs));
             for (uint32_t e = 0; e < 3; e++) {
                 Synth::EnvelopeDescriptor& source_env = nm_envs[e];
@@ -18994,146 +14882,8 @@ int main()
             TEST(validate_standalone_model(nm_src, nm_envs, 3, nullptr, 0));
             TEST(validate_standalone_model(nm_dec, nm_dec_envs, 2, nullptr, 0));
 
-            memset(nm_records, 0, sizeof(nm_records));
-            nm_records[0].kind              = Synth::instrument_graph_layout_parameter;
-            nm_records[0].target            = static_cast<uint8_t>(Synth::mod_volume);
-            nm_records[0].parameter_ordinal = 1; // A'
-            nm_records[0].x                 = 111.5f;
-            nm_records[0].y                 = 1.5f;
-            nm_records[1].kind              = Synth::instrument_graph_layout_parameter;
-            nm_records[1].target            = static_cast<uint8_t>(Synth::mod_volume);
-            nm_records[1].parameter_ordinal = 2; // B
-            nm_records[1].x                 = 222.5f;
-            nm_records[1].y                 = 2.5f;
-
-            uint32_t nm_count = 4;
-            TEST(Sculptor::normalize_instrument_graph_layout(nm_src,
-                                                             nm_envs,
-                                                             3,
-                                                             nullptr,
-                                                             0,
-                                                             nm_records,
-                                                             2,
-                                                             nm_dec,
-                                                             nm_dec_envs,
-                                                             2,
-                                                             nullptr,
-                                                             0,
-                                                             nm_out,
-                                                             sizeof(nm_out) / sizeof(nm_out[0]),
-                                                             &nm_count));
-            TEST(nm_count == 2);
-            int32_t n =
-                find_portable(nm_out, nm_count, Synth::instrument_graph_layout_parameter, 0xFFu, Synth::mod_volume, 0);
-            TEST(n >= 0);
-            if (n >= 0)
-                TEST(nm_out[n].x == 111.5f && nm_out[n].y == 1.5f); // source ordinal 1 -> decoded ordinal 0
-            n = find_portable(nm_out, nm_count, Synth::instrument_graph_layout_parameter, 0xFFu, Synth::mod_volume, 1);
-            TEST(n >= 0);
-            if (n >= 0)
-                TEST(nm_out[n].x == 222.5f && nm_out[n].y == 2.5f); // source ordinal 2 -> decoded ordinal 1
-            TEST(find_portable(nm_out, nm_count, 0xFFu, 0xFFu, 0xFFu, 2) == -1); // no stale third group
-
-            // Input record order does not participate in identity: the reversed
-            // input normalizes to byte-identical output.
-            nm_swapped[0]             = nm_records[1];
-            nm_swapped[1]             = nm_records[0];
-            uint32_t nm_swapped_count = 4;
-            TEST(Sculptor::normalize_instrument_graph_layout(nm_src,
-                                                             nm_envs,
-                                                             3,
-                                                             nullptr,
-                                                             0,
-                                                             nm_swapped,
-                                                             2,
-                                                             nm_dec,
-                                                             nm_dec_envs,
-                                                             2,
-                                                             nullptr,
-                                                             0,
-                                                             nm_swapped_out,
-                                                             sizeof(nm_swapped_out) / sizeof(nm_swapped_out[0]),
-                                                             &nm_swapped_count));
-            TEST(nm_swapped_count == nm_count);
-            TEST(memcmp(nm_swapped_out, nm_out, nm_count * sizeof(nm_out[0])) == 0);
-
-            // Exercise the complete copy pipeline with A/A'/B descriptor interning.
-            static Synth::InstrumentEditorBank nm_copy_bank;
-            memset(&nm_copy_bank, 0, sizeof(nm_copy_bank));
-            nm_copy_bank.bank.instruments.allocate();
-            nm_copy_bank.bank.instruments.entries[0] = nm_src;
-            nm_copy_bank.bank.channel_enabled[0]     = 1;
-            nm_copy_bank.bank.channel_zones[0][0]    = { 1, 0 };
-            for (uint32_t envelope = 0; envelope < 3; ++envelope) {
-                nm_copy_bank.bank.envelopes.allocate();
-                nm_copy_bank.bank.envelopes.entries[envelope] = nm_envs[envelope];
-            }
-            nm_copy_bank.graph_layout_count = 2;
-            for (uint32_t record = 0; record < 2; ++record) {
-                Synth::GraphNodeLayout& saved = nm_copy_bank.graph_layout[record];
-                saved.kind                    = 3;
-                saved.uid                     = static_cast<uint8_t>(record + 1);
-                saved.param_slot              = static_cast<uint8_t>(record + 2);
-                saved.x                       = nm_records[record].x;
-                saved.y                       = nm_records[record].y;
-            }
-            static char                         nm_copy_text[clipboard_capacity];
-            static ClipboardDecode              nm_copy_decoded;
-            static Synth::InstrumentGraphLayout nm_copy_export[max_portable_records];
-            static Synth::InstrumentGraphLayout nm_copy_normalized[max_portable_records];
-            uint32_t                            nm_copy_length =
-                Synth::encode_instrument_json(nm_copy_text, sizeof(nm_copy_text), &nm_src, &nm_copy_bank.bank);
-            TEST(nm_copy_length != 0);
-            TEST(decode_clipboard(&nm_copy_decoded, nm_copy_text, max_portable_records));
-            TEST(nm_copy_decoded.env_count == 2);
-            uint32_t nm_copy_export_count = 0;
-            TEST(Sculptor::encode_instrument_graph_layout(nm_src,
-                                                          nm_copy_bank.bank,
-                                                          nm_copy_bank,
-                                                          0,
-                                                          0,
-                                                          nm_copy_export,
-                                                          max_portable_records,
-                                                          &nm_copy_export_count));
-            uint32_t nm_copy_normalized_count = 0;
-            TEST(Sculptor::normalize_instrument_graph_layout(nm_src,
-                                                             nm_envs,
-                                                             3,
-                                                             nullptr,
-                                                             0,
-                                                             nm_copy_export,
-                                                             nm_copy_export_count,
-                                                             nm_copy_decoded.instr,
-                                                             nm_copy_decoded.envs,
-                                                             nm_copy_decoded.env_count,
-                                                             nm_copy_decoded.lfos,
-                                                             nm_copy_decoded.lfo_count,
-                                                             nm_copy_normalized,
-                                                             max_portable_records,
-                                                             &nm_copy_normalized_count));
-            TEST(nm_copy_normalized_count == 2);
-            nm_copy_length = Synth::encode_instrument_json(nm_copy_text,
-                                                           sizeof(nm_copy_text),
-                                                           &nm_src,
-                                                           &nm_copy_bank.bank,
-                                                           nm_copy_normalized,
-                                                           nm_copy_normalized_count);
-            TEST(nm_copy_length != 0);
-            TEST(decode_clipboard(&nm_copy_decoded, nm_copy_text, max_portable_records));
-            TEST(nm_copy_decoded.env_count == 2 && nm_copy_decoded.layout_count == 2);
-            TEST(nm_copy_decoded.layout[0].parameter_ordinal == 0 && nm_copy_decoded.layout[0].x == 111.5f);
-            TEST(nm_copy_decoded.layout[1].parameter_ordinal == 1 && nm_copy_decoded.layout[1].x == 222.5f);
-
-            // Source-only ordinal 2 does not exist in the decoded two-group model.
-            nm_copy_normalized[1].parameter_ordinal = 2;
-            TEST(Synth::encode_instrument_json(nm_copy_text,
-                                               sizeof(nm_copy_text),
-                                               &nm_src,
-                                               &nm_copy_bank.bank,
-                                               nm_copy_normalized,
-                                               nm_copy_normalized_count) == 0);
-
-            // Envelope aliases with two saved source layouts cannot collapse losslessly.
+            // Envelope aliases with two saved source layouts cannot collapse losslessly:
+            // both source records resolve to the one decoded envelope node.
             static Synth::InstrumentGraphLayout nm_env_records[2];
             memset(nm_env_records, 0, sizeof(nm_env_records));
             nm_env_records[0].kind   = Synth::instrument_graph_layout_envelope;
@@ -19185,9 +14935,10 @@ int main()
             TEST(nm_env_out[0].layer == 0 && nm_env_out[0].x == 33.5f);
 
             // Two LFO instances that share one descriptor but differ in their bound source
-            // pair are two distinct projected nodes, so each keeps its own saved position and
-            // its own source pair. Capacity exactly equal to the resolved count succeeds;
-            // one slot less refuses with the record sink and the count untouched.
+            // pair are two distinct projected nodes, so each keeps its own saved position
+            // and its own source pair. Capacity exactly equal to the resolved count
+            // succeeds; one slot less refuses with the record sink and the count
+            // untouched.
             static Synth::LFODescriptor na_lfos[1];
             memset(na_lfos, 0, sizeof(na_lfos));
             na_lfos[0].wave          = Synth::WaveType::sine_wave;
@@ -19236,7 +14987,6 @@ int main()
                 na_pair_records[i].x = 7.0f + static_cast<float>(i);
                 na_pair_records[i].y = -3.5f - static_cast<float>(i);
             }
-
             static Synth::InstrumentGraphLayout na_pair_out[4];
             constexpr uint32_t                  na_pair_capacity = sizeof(na_pair_out) / sizeof(na_pair_out[0]);
             uint32_t                            na_pair_count    = na_pair_capacity;
@@ -19256,31 +15006,22 @@ int main()
                                                              na_pair_capacity,
                                                              &na_pair_count));
             TEST(na_pair_count == 2);
-            n = find_portable(na_pair_out,
-                              na_pair_count,
-                              Synth::instrument_graph_layout_lfo,
-                              0,
-                              Synth::mod_volume,
-                              0xFFu);
-            TEST(n >= 0);
-            if (n >= 0) {
-                TEST(na_pair_out[n].x == 7.0f && na_pair_out[n].y == -3.5f);
-                TEST(na_pair_out[n].depth_source == static_cast<uint8_t>(Synth::ModSource::velocity));
-                TEST(na_pair_out[n].rate_source == static_cast<uint8_t>(Synth::ModSource::mod_wheel));
+            int32_t record_index =
+                find_portable(na_pair_out, na_pair_count, Synth::instrument_graph_layout_lfo, 0, Synth::mod_volume);
+            TEST(record_index >= 0);
+            if (record_index >= 0) {
+                TEST(na_pair_out[record_index].x == 7.0f && na_pair_out[record_index].y == -3.5f);
+                TEST(na_pair_out[record_index].depth_source == static_cast<uint8_t>(Synth::ModSource::velocity));
+                TEST(na_pair_out[record_index].rate_source == static_cast<uint8_t>(Synth::ModSource::mod_wheel));
             }
-            n = find_portable(na_pair_out,
-                              na_pair_count,
-                              Synth::instrument_graph_layout_lfo,
-                              1,
-                              Synth::mod_volume,
-                              0xFFu);
-            TEST(n >= 0);
-            if (n >= 0) {
-                TEST(na_pair_out[n].x == 8.0f && na_pair_out[n].y == -4.5f);
-                TEST(na_pair_out[n].depth_source == static_cast<uint8_t>(Synth::ModSource::aftertouch));
-                TEST(na_pair_out[n].rate_source == static_cast<uint8_t>(Synth::ModSource::pitch_bend));
+            record_index =
+                find_portable(na_pair_out, na_pair_count, Synth::instrument_graph_layout_lfo, 1, Synth::mod_volume);
+            TEST(record_index >= 0);
+            if (record_index >= 0) {
+                TEST(na_pair_out[record_index].x == 8.0f && na_pair_out[record_index].y == -4.5f);
+                TEST(na_pair_out[record_index].depth_source == static_cast<uint8_t>(Synth::ModSource::aftertouch));
+                TEST(na_pair_out[record_index].rate_source == static_cast<uint8_t>(Synth::ModSource::pitch_bend));
             }
-
             static Synth::InstrumentGraphLayout na_exact[2];
             constexpr uint32_t                  na_exact_capacity = sizeof(na_exact) / sizeof(na_exact[0]);
             uint32_t                            na_exact_count    = na_exact_capacity;
@@ -19301,7 +15042,6 @@ int main()
                                                              &na_exact_count));
             TEST(na_exact_count == 2);
             TEST(memcmp(na_exact, na_pair_out, sizeof(na_exact)) == 0);
-
             static Synth::InstrumentGraphLayout na_refuse[1];
             static Synth::InstrumentGraphLayout na_refuse_sentinel;
             memset(na_refuse, 0x5A, sizeof(na_refuse));
@@ -19326,10 +15066,10 @@ int main()
             TEST(memcmp(na_refuse, &na_refuse_sentinel, sizeof(na_refuse_sentinel)) == 0);
 
             // Normalizer refusals for locators the model cannot resolve: an envelope
-            // record naming a decoded cell with no envelope bound, a canonical index past
-            // the projection, and a kind that is not clipboard data. Each leaves the output
-            // array and count untouched, so a refused normalization cannot leak a partially
-            // translated record into the clipboard.
+            // record naming a decoded cell with no generator bound, a canonical index
+            // past the projection, and a kind that is not clipboard data. Each leaves
+            // the output array and count untouched, so a refused normalization cannot
+            // leak a partially translated record into the clipboard.
             static Synth::InstrumentGraphLayout nr_out[2];
             static Synth::InstrumentGraphLayout nr_out_sentinel[2];
             memset(nr_out, 0x5A, sizeof(nr_out));
@@ -19373,106 +15113,32 @@ int main()
                 TEST(nr_count == nr_capacity);
                 TEST(memcmp(nr_out, &nr_out_sentinel, sizeof(nr_out_sentinel)) == 0);
             }
+
             // An output array smaller than the normalized records refuses the whole
-            // normalization instead of truncating it: these two records normalize into two
-            // slots when there is room for them.
+            // normalization instead of truncating it: these two records normalize into
+            // two slots when there is room for them.
             static Synth::InstrumentGraphLayout nr_tight[1];
             static Synth::InstrumentGraphLayout nr_tight_sentinel[1];
             memset(nr_tight, 0x5A, sizeof(nr_tight));
             memset(nr_tight_sentinel, 0x5A, sizeof(nr_tight_sentinel));
             uint32_t nr_tight_count = 1;
-            TEST(! Sculptor::normalize_instrument_graph_layout(nm_src,
-                                                               nm_envs,
-                                                               3,
+            TEST(! Sculptor::normalize_instrument_graph_layout(na_src,
                                                                nullptr,
                                                                0,
-                                                               nm_swapped,
+                                                               na_lfos,
+                                                               1,
+                                                               na_pair_records,
                                                                2,
-                                                               nm_dec,
-                                                               nm_dec_envs,
-                                                               2,
+                                                               na_dec,
                                                                nullptr,
                                                                0,
+                                                               na_lfos,
+                                                               1,
                                                                nr_tight,
                                                                1,
                                                                &nr_tight_count));
             TEST(nr_tight_count == 1);
             TEST(memcmp(nr_tight, &nr_tight_sentinel, sizeof(nr_tight_sentinel)) == 0);
-        }
-
-        {
-            // Object property order is not identity: a permuted document decodes to
-            // equal outputs, in any key order, at any nesting level.
-            static char            pp_text[clipboard_capacity];
-            static ClipboardDecode pp_canonical;
-            fill_clipboard_sentinels(&pp_canonical);
-            const uint32_t pp_len =
-                build_layout_doc(pp_text, sizeof(pp_text), clipboard_doc_head, clipboard_doc_records);
-            TEST(pp_len > 0);
-            TEST(decode_clipboard(&pp_canonical, pp_text, max_portable_records));
-            TEST(pp_canonical.layout_count == 5);
-
-            static char            pp_perm_text[clipboard_capacity];
-            static ClipboardDecode pp_perm;
-            fill_clipboard_sentinels(&pp_perm);
-            build_layout_doc(pp_perm_text,
-                             sizeof(pp_perm_text),
-                             clipboard_doc_head,
-                             "{\"height\":120,\"width\":220,\"y\":44.25,\"x\":120.5,\"target\":0,\"layer\":0,"
-                             "\"kind\":1},"
-                             "{\"y\":-40,\"parameter_ordinal\":0,\"kind\":3,\"x\":60,\"target\":0,\"height\":0,"
-                             "\"width\":0},"
-                             "{\"kind\":0,\"x\":64,\"canonical_index\":1,\"width\":0,\"y\":32,\"height\":0},"
-                             "{\"rate_source\":2,\"height\":0,\"depth_source\":4,\"kind\":2,\"width\":0,"
-                             "\"target\":0,\"y\":-8.5,\"layer\":0,\"x\":12.5},"
-                             "{\"kind\":3,\"target\":1,\"parameter_ordinal\":0,\"x\":-60,\"y\":40,\"width\":0,"
-                             "\"height\":0}");
-            TEST(decode_clipboard(&pp_perm, pp_perm_text, max_portable_records));
-            TEST(pp_perm.layout_count == pp_canonical.layout_count);
-            TEST(pp_perm.env_count == pp_canonical.env_count);
-            TEST(pp_perm.lfo_count == pp_canonical.lfo_count);
-            TEST(pp_perm.instr.layer_count == pp_canonical.instr.layer_count);
-            for (uint32_t i = 0; i < pp_canonical.layout_count; i++) {
-                const int32_t match = find_portable(pp_perm.layout,
-                                                    pp_perm.layout_count,
-                                                    pp_canonical.layout[i].kind,
-                                                    pp_canonical.layout[i].layer,
-                                                    pp_canonical.layout[i].target,
-                                                    pp_canonical.layout[i].parameter_ordinal);
-                TEST(match >= 0);
-                if (match >= 0) {
-                    TEST(memcmp(&pp_perm.layout[match], &pp_canonical.layout[i], sizeof(pp_canonical.layout[i])) == 0);
-                }
-            }
-            for (uint32_t i = 0; i < pp_canonical.env_count; i++) {
-                TEST(memcmp(&pp_perm.envs[i], &pp_canonical.envs[i], sizeof(pp_perm.envs[i])) == 0);
-            }
-
-            // Reordering the document's top-level keys is equally inert, and a
-            // required key whose value is zero is still required.
-            const char* const pp_reordered =
-                "{\"layers\":[{\"wave_a\":\"sine\",\"mode\":\"fm\",\"mod_ratio\":2,"
-                "\"pitch_offset_semitones\":1.5,\"volume\":{\"base\":0.8,"
-                "\"envelope\":{\"sustain_start\":1,\"sustain_end\":2,\"points\":["
-                "{\"level\":0.0625,\"time_seconds\":0},{\"level\":0.5625,\"time_seconds\":0.25},"
-                "{\"level\":1.0625,\"time_seconds\":0.5}]},"
-                "\"lfo\":{\"depth\":0.5,\"rate_source\":\"mod_wheel\",\"wave\":\"sine\",\"duty\":0.25,"
-                "\"frequency_hz\":4,\"depth_source\":\"velocity\",\"rate_scale_ms\":20}},"
-                "\"pitch\":{\"envelope\":{\"sustain_start\":0,\"sustain_end\":1,\"points\":["
-                "{\"level\":0.25,\"time_seconds\":0},{\"level\":-0.25,\"time_seconds\":0.5}]},"
-                "\"base\":0},\"panning\":{\"base\":0.5},\"lowpass_cutoff\":{\"base\":2000},"
-                "\"highpass_cutoff\":{\"base\":2000}}],"
-                "\"layer_skew_semitones\":0,\"note_skew_semitones\":0,\"format\":\"synth-instrument-v1\","
-                "\"graph_layout\":[{\"kind\":0,\"canonical_index\":1,\"x\":0,\"y\":0,\"width\":0,"
-                "\"height\":0}]}";
-            static ClipboardDecode pp_reorder_dec;
-            fill_clipboard_sentinels(&pp_reorder_dec);
-            TEST(decode_clipboard(&pp_reorder_dec, pp_reordered, max_portable_records));
-            TEST(pp_reorder_dec.layout_count == 1);
-            TEST(pp_reorder_dec.layout[0].x == 0.0f); // zero-valued required fields decode
-            TEST(pp_reorder_dec.env_count == 2);
-            TEST(pp_reorder_dec.lfo_count == 1);
-            TEST(pp_reorder_dec.instr.layers[0].targets[Synth::mod_volume].base_value == 0.8f);
         }
 
         {
@@ -19487,7 +15153,7 @@ int main()
             static ClipboardDecode ml_baseline;
             fill_clipboard_sentinels(&ml_baseline);
             TEST(decode_clipboard(&ml_baseline, ml_text, max_portable_records));
-            TEST(ml_baseline.layout_count == 5);
+            TEST(ml_baseline.layout_count == 3);
 
             struct LayoutRejection {
                 const char* records;
@@ -19495,7 +15161,6 @@ int main()
             };
 
             const LayoutRejection rejections[] = {
-                { "{\"kind\":99,\"canonical_index\":0,\"x\":0,\"y\":0,\"width\":0,\"height\":0}", "unknown kind" },
                 { "{\"kind\":0,\"canonical_index\":1,\"x\":0,\"y\":0,\"width\":0,\"height\":0,\"z\":1}",
                   "unknown key" },
                 { "{\"kind\":0,\"canonical_index\":1,\"x\":0,\"y\":0,\"width\":0}", "missing required field" },
@@ -19517,13 +15182,9 @@ int main()
                   "source out of range" },
                 { "{\"kind\":0,\"canonical_index\":9,\"x\":0,\"y\":0,\"width\":0,\"height\":0}",
                   "canonical index beyond the bound" },
-                { "{\"kind\":3,\"target\":0,\"parameter_ordinal\":35,\"x\":0,\"y\":0,\"width\":0,\"height\":0}",
-                  "parameter ordinal beyond the bound" },
                 { "{\"kind\":1,\"layer\":0,\"target\":0,\"x\":1,\"y\":1,\"width\":0,\"height\":0},"
                   "{\"kind\":1,\"layer\":0,\"target\":0,\"x\":2,\"y\":2,\"width\":0,\"height\":0}",
                   "duplicate portable locator" },
-                { "{\"kind\":3,\"target\":8,\"parameter_ordinal\":0,\"x\":0,\"y\":0,\"width\":0,\"height\":0}",
-                  "unresolved locator" },
             };
             for (uint32_t i = 0; i < sizeof(rejections) / sizeof(rejections[0]); i++) {
                 static char ml_bad[clipboard_capacity];
@@ -19535,9 +15196,21 @@ int main()
                 TEST(clipboard_sentinels_intact(&ml_attempt, &ml_sentinel));
             }
 
-            // Two distinct locators that resolve to the one interned descriptor
-            // address a single node twice: refused. The one-record form of the same
-            // document decodes, so the refusal is the second locator's.
+            // An unregistered record kind is skipped by the generic decode path:
+            // it neither refuses the document nor counts toward the portable
+            // capacity.
+            static char            ml_skip[clipboard_capacity];
+            static ClipboardDecode ml_skip_attempt;
+            fill_clipboard_sentinels(&ml_skip_attempt);
+            build_layout_doc(ml_skip,
+                             sizeof(ml_skip),
+                             clipboard_doc_head,
+                             "{\"kind\":99,\"canonical_index\":0,\"x\":0,\"y\":0,\"width\":0,\"height\":0}");
+            TEST(decode_clipboard(&ml_skip_attempt, ml_skip, max_portable_records));
+            TEST(ml_skip_attempt.layout_count == 0);
+            // Two distinct locators resolve to one interned descriptor: refused.
+            // The one-record form of the same document decodes, so the refusal
+            // is the second locator's.
             static char ml_alias[clipboard_capacity];
             build_layout_doc(ml_alias,
                              sizeof(ml_alias),
@@ -19677,9 +15350,9 @@ int main()
                                                cc_out_lfos,
                                                &cc_out_lfo,
                                                cc_out,
-                                               5,
+                                               3,
                                                &cc_out_rows));
-            TEST(cc_out_rows == 5);
+            TEST(cc_out_rows == 3);
             TEST(cc_out_env == 2);
             TEST(cc_out_lfo == 1);
 
@@ -19695,7 +15368,7 @@ int main()
                                                  cc_short.lfos,
                                                  &cc_short.lfo_count,
                                                  cc_short.layout,
-                                                 4,
+                                                 2,
                                                  &cc_short.layout_count));
             TEST(clipboard_sentinels_intact(&cc_short, &cc_short_sentinel));
             TEST(! Synth::decode_instrument_json(cc_doc,
@@ -19864,7 +15537,6 @@ int main()
                 "{\"kind\":0,\"canonical_index\":3,\"x\":1,\"y\":2,\"width\":0,\"height\":0}",  // oscillator layer 1
                 "{\"kind\":0,\"canonical_index\":99,\"x\":1,\"y\":2,\"width\":0,\"height\":0}", // past the bound
                 "{\"kind\":1,\"layer\":0,\"target\":0,\"x\":1,\"y\":2,\"width\":0,\"height\":0}",
-                "{\"kind\":3,\"target\":0,\"parameter_ordinal\":0,\"x\":1,\"y\":2,\"width\":0,\"height\":0}",
             };
             for (uint32_t i = 0; i < sizeof(surplus) / sizeof(surplus[0]); i++) {
                 static char nw_bad[clipboard_capacity];
@@ -20517,7 +16189,6 @@ int main()
             check_library_metadata_transactions();
             check_editor_round_trip_capacity_failures();
             check_unrepresented_layout_refusal();
-            check_kind3_records_all_targets();
             check_decoded_fm_lfo_binding_survives_compile();
             check_legacy_library_numeric_domains();
             check_shared_instrument_json_domains();

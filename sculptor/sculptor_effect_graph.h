@@ -234,8 +234,7 @@ bool allocate_default_lfo(Synth::InstrumentBank* bank, uint16_t* out_desc_id);
 // (input dot left, output dot right), Enabled sits at slot 2, then every
 // parameter owns ten consecutive slots: its base-value slider on its own
 // line, the LFO modulation row (input dot, op list, depth), then the two
-// MIDI source rows (input dot, op list, amount each) - the oscillator
-// editor's parameter-node grammar.
+// MIDI source rows (input dot, op list, amount each).
 constexpr uint32_t fx_param_stride = 10;
 
 // The Enabled row's slot index on a projected effect node (layout in the
