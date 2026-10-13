@@ -68,9 +68,9 @@ static_assert(2 * Synth::max_layers * Synth::num_mod_targets <= max_osc_instance
 // slots, connections, snapshots and undo bytes never encode it.
 
 // Worst-case bound node population: one input node for six MIDI source
-// roles plus sum, one oscillator per layer, and per (layer, target) cell
-// one envelope and one LFO instance.
-static_assert(Synth::graph_canonical_input_node_count + 1 + Synth::max_layers +
+// roles, the instrument-parameters node and sum, one oscillator per
+// layer, and per (layer, target) cell one envelope and one LFO instance.
+static_assert(Synth::graph_canonical_input_node_count + 2 + Synth::max_layers +
                   2 * Synth::max_layers * Synth::num_mod_targets <=
               max_nodes);
 // Worst-case bound edge population: per layer one oscillator->sum edge,
@@ -145,9 +145,9 @@ struct OscGraphMapping {
     uint32_t input_node;                                // one node for all MIDI source roles
     uint32_t input_source_slots[num_osc_graph_inputs];  // indexed by ModSource - 1
     uint32_t input_cc_slots[Synth::num_assignable_ccs]; // per assignable CC dot, pool_no_slot when absent
-    uint32_t input_detune_slots[2]; // [0] note skew, [1] layer skew; the MIDI Inputs node's last two slots (created
-                                    // after the CC dots), pool_no_slot until projected
-    uint32_t output_node;           // the oscillator sum node
+    uint32_t instrument_node;                           // "Instrument Parameters" node, pool_no_slot when unprojected
+    uint32_t instrument_slots[3]; // [0] note skew, [1] layer skew, [2] release; node's property slots
+    uint32_t output_node;         // the oscillator sum node
     uint32_t output_layer_input_slot[Synth::max_layers];
     uint32_t osc_nodes[Synth::max_layers];
     uint32_t osc_output_slot;
@@ -182,8 +182,9 @@ struct OscGraphMapping {
 // graph node pool cannot hold the derived generator instances); the
 // refusal is also reported through the graph's error overlay.
 // The MIDI Inputs node's slots order as: six standard output dots, then the
-// CC dots (when the optional editor mask is passed), then the two detune
-// property rows last.
+// CC dots (when the optional editor mask is passed).  The instrument's
+// detune and release rows live on a dedicated "Instrument Parameters" node
+// created right after the MIDI Inputs node.
 // Deterministic: same instrument and bank produce the same node/slot/
 // connection layout.
 bool project_instrument_to_graph(const Synth::Instrument&     instrument,
@@ -399,8 +400,8 @@ bool osc_target_block_field(uint32_t slot_idx, uint32_t* target, uint32_t* field
 // TU, so the unit suite needs this callable render-visibility query.
 bool osc_target_field_hidden(const Graph& graph, uint32_t node_idx, uint32_t target, uint32_t field);
 
-// The volume-envelope shape: minimum 0 and the first and the last point at 0,
-// so a volume envelope starts and ends in silence.
+// The volume-envelope shape: minimum 0 and the first point at 0, so a
+// volume envelope starts in silence (tail values remain authored).
 bool env_volume_shape_ok(const Synth::EnvelopeDescriptor& env);
 
 // Reports whether the envelope descriptor id serves a volume target, a

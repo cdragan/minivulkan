@@ -85,6 +85,8 @@ struct Instrument {
     Oscillator layers[max_layers];
     float      note_skew_semitones;  // Random pitch skew applied once per note (0 = none)
     float      layer_skew_semitones; // Random pitch skew drawn per layer (0 = none)
+    float      release_seconds;      // Sustain decay length in seconds (0 = legacy hold/loop);
+                                     // applies to the volume target only, runtime-interpreted
 };
 
 // Keyboard zone table entry. start_note stores the zone's first note + 1 (1..128), so a

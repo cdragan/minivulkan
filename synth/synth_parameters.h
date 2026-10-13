@@ -44,7 +44,7 @@ struct LFODescriptor {
 
 struct EnvelopeDescriptor {
     uint8_t num_points;
-    uint8_t unused_alignment;
+    uint8_t ping_pong;           // Sustain span bounces between its ends instead of looping (multi-point spans only)
     uint8_t sustain_first_point; // Index of sustain loop start point
     uint8_t sustain_last_point;  // Index of last point of sustain loop (can be same as first point)
     float   min_value;           // Minimum value produced by the envelope
@@ -63,6 +63,7 @@ struct EnvelopeDescriptor {
 struct EnvelopeState {
     uint16_t tick;
     uint16_t point;
+    uint8_t  reverse; // Ping-pong direction: 0 = forward, 1 = backward
 };
 
 enum class SourceOp : uint8_t {
@@ -129,7 +130,9 @@ struct Parameter {
 // the state by one tick.
 // - evenlope - the envelope to evaluate
 // - state    - current state (updated by one tick)
-// - sustain  - true: state holds/loops at the sustain points
+// - sustain  - true: state holds/loops at the sustain points (a ping-pong
+//              multi-point span reverses direction at both span ends instead
+//              of looping back)
 //              false: runs through to the final point.
 float eval_envelope(const EnvelopeDescriptor& envelope, EnvelopeState* state, bool sustain);
 
@@ -153,6 +156,30 @@ float pitch_bend_to_semitones(int16_t centered_bend, float range_semitones);
 // - amount_semitones - random output range's magnitude; note: 0 returns 0 without advancing RNG,
 //                      so a zero skew is deterministic and unchanged.
 float random_pitch_skew(RNG* rng, float amount_semitones);
+
+// Level where the sustain decay ends and the voice frees: 1/1024, about
+// -60 dB (log2 == -10 exactly).
+constexpr float sustain_decay_cutoff = 1.0f / 1024.0f;
+
+// Converts an instrument release in seconds to control-step ticks
+// (rt_step_samples * 1000 / rt_sampling_rate per step).  Values > 0 round to
+// at least 1 tick; 0 (and negative or NaN input, which no decoded bank can
+// carry) returns 0 = the legacy hold/loop behavior; an out-of-range value
+// saturates at UINT32_MAX instead of trapping on the float-to-unsigned
+// conversion.
+uint32_t sustain_decay_ticks(float release_seconds);
+
+// Per-step multiplier so the decaying level crosses sustain_decay_cutoff at
+// exactly tick `total_ticks`: exp2(log2(cutoff) / total_ticks).
+// total_ticks == 0 returns 1.0 (no decay).
+float sustain_decay_per_tick(uint32_t total_ticks);
+
+// Sustain-decay termination gate: true when the decay owns this
+// oscillator's termination and the envelope-completion fade must be
+// skipped (the completed dest level is still audible).  `decaying` is only
+// ever true for release-set oscillators, so a release of 0 never skips.
+// Exists as a pure predicate so the termination gating is unit-testable.
+bool sustain_decay_owns_termination(bool decaying, float dest_value);
 
 // Evaluates a Low Frequency Oscillator
 // - lfo           - the LFO descriptor

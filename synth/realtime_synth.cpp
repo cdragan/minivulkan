@@ -83,6 +83,8 @@ struct Voice {
     uint8_t  osc_count;           // Number of live oscillator slots owned (0 = none)
     bool     releasing;           // True after note-off, until the volume envelope finishes
     bool     note_finished;       // True after release stage is finished and the note is no longer playing
+    bool     sustained;           // Key is up but the sustain pedal holds the voice
+    uint32_t release_total_ticks; // Instrument release in control steps (0 = legacy hold/loop)
     uint32_t release_sample;      // Absolute sample to auto-release a duration-model note (0 = none)
 };
 
@@ -495,6 +497,11 @@ struct RunningOscillator {
                             // it, so a reused slot does not bleed the previous note.
     bool    terminating;    // Set on the voice-lifetime fade block (volume gradient to zero);
                             // the oscillator frees after that block has rendered.
+
+    float    decay_mult;   // Per-step multiplier, precomputed once at note-on (one exp2)
+    float    decay_factor; // Running factor; 1.0 until decay starts
+    uint32_t decay_tick;   // Steps since decay started
+    bool     decaying;     // Sustain decay active (only ever true when release is set)
 };
 
 static RunningOscillator oscillators[Synth::max_oscillators];
@@ -983,15 +990,35 @@ static void process_note_off(uint32_t delta_samples, const DispatchedMidiEvent& 
     if (voice_idx) {
         assert(voices[voice_idx].active);
 
-        voices[voice_idx].releasing = true;
+        if (channel_cc_state[channel].sustain_pedal_down) {
+            voices[voice_idx].sustained = true; // the pedal holds the voice; note-off defers
+        }
+        else {
+            voices[voice_idx].releasing = true; // an already-releasing voice keeps fading
+        }
+    }
+}
+
+// Pedal-up sweep: every key-up-held voice on the channel releases through the
+// same path as key-up.
+static void release_sustained_voices(uint32_t channel)
+{
+    for (uint32_t voice_idx = 1; voice_idx < max_voices; voice_idx++) {
+        Voice& voice = voices[voice_idx];
+        if (voice.active && voice.sustained && voice.channel == channel) {
+            voice.sustained = false;
+            voice.releasing = true;
+        }
     }
 }
 
 static void free_oscillator(uint32_t osc_idx)
 {
-    oscillators[osc_idx].osc_type[0] = WaveType::no_wave;
-    oscillators[osc_idx].voice_id    = 0;
-    oscillators[osc_idx].terminating = false;
+    oscillators[osc_idx].osc_type[0]  = WaveType::no_wave;
+    oscillators[osc_idx].voice_id     = 0;
+    oscillators[osc_idx].terminating  = false;
+    oscillators[osc_idx].decaying     = false; // slot reuse and bank publishes cannot leak decay state
+    oscillators[osc_idx].decay_factor = 1.0f;
 
     for (uint32_t role = 0; role < num_osc_roles; role++) {
         param_descs[osc_param(osc_idx, role)] = {};
@@ -1206,6 +1233,7 @@ static void process_note_on(uint32_t delta_samples, const DispatchedMidiEvent& e
     voice.active         = true;
     voice.releasing      = false;
     voice.note_finished  = false;
+    voice.sustained      = false;
     voice.release_sample = event.release_sample;
 
     note_to_voice[channel][note] = static_cast<uint8_t>(voice_idx);
@@ -1213,6 +1241,8 @@ static void process_note_on(uint32_t delta_samples, const DispatchedMidiEvent& e
     const Instrument& instrument  = synth_bank.instruments.entries[target_instrument];
     const uint32_t    layer_count = instrument.layer_count;
     assert(layer_count >= 1 && layer_count <= max_layers);
+
+    voice.release_total_ticks = Synth::sustain_decay_ticks(instrument.release_seconds);
 
     // Per-voice input leaves the bindings route from.  velocity is the note's constant; aftertouch
     // starts at zero (driven by poly-aftertouch events); pressure_combine is recomputed each step as
@@ -1252,8 +1282,12 @@ static void process_note_on(uint32_t delta_samples, const DispatchedMidiEvent& e
         osc.mod_phase  = 0.0f;
         osc.old_volume = 0.0f; // ramp up from silence to avoid a click
         // old_panning keeps its base-value seed: the dest node is stale until the first advance.
-        osc.old_panning = layer.targets[mod_panning].base_value;
-        osc.terminating = false;
+        osc.old_panning  = layer.targets[mod_panning].base_value;
+        osc.terminating  = false;
+        osc.decay_mult   = Synth::sustain_decay_per_tick(voice.release_total_ticks);
+        osc.decay_factor = 1.0f;
+        osc.decay_tick   = 0;
+        osc.decaying     = false;
 
         // Expand each modulation target into its node triple at this oscillator's slot.
         const uint32_t osc_slot = voice.osc_ids[layer_idx];
@@ -1304,7 +1338,14 @@ static void process_aftertouch(uint32_t delta_samples, const DispatchedMidiEvent
 
 static void process_controller(uint32_t, const DispatchedMidiEvent& event)
 {
-    if (event.controller == mod_wheel_cc) {
+    if (event.controller == Synth::sustain_pedal_cc) {
+        const bool was_down = channel_cc_state[event.channel].sustain_pedal_down;
+        const bool down     = Synth::apply_sustain_pedal(&channel_cc_state[event.channel], event.controller_data);
+        if (was_down && ! down) {
+            release_sustained_voices(event.channel);
+        }
+    }
+    else if (event.controller == mod_wheel_cc) {
         const uint32_t node = channel_param(event.channel, chan_param_mod_wheel);
         Synth::write_external_leaf(static_cast<float>(event.controller_data) / 127.0f, leaf(node));
     }
@@ -1681,16 +1722,31 @@ static void advance_parameters()
 }
 
 // True when this oscillator's volume target is due its final fade block under the voice-lifetime
-// rules: no volume envelope, or a volume envelope whose sustain sits on the final point, fades
-// on the first released block; otherwise the envelope first runs to its final point and holds
-// there for one tick (two entered-parked steps) before the fade.
+// rules: a running instrument release decay owns termination while it is still incomplete and the
+// dest level is audible (it keeps decaying through note-off and frees at the cutoff); otherwise no
+// volume envelope, or a volume envelope whose sustain sits on the final point, fades on the first
+// released block; otherwise the envelope first runs to its final point and holds there for one tick
+// (two entered-parked steps) before the fade.
 static bool volume_termination_due(uint32_t osc_idx)
 {
     const uint32_t                env_node = osc_param(osc_idx, osc_volume_env);
     const Synth::ParamDescriptor& env_desc = param_descs[env_node];
+
+    const Voice& voice = voices[oscillators[osc_idx].voice_id];
+    if (voice.release_total_ticks && oscillators[osc_idx].decaying) {
+        if (oscillators[osc_idx].decay_tick >= voice.release_total_ticks) {
+            return true;
+        }
+        if (Synth::sustain_decay_owns_termination(oscillators[osc_idx].decaying,
+                                                  parameters[osc_param(osc_idx, osc_volume_dest)].value)) {
+            return false;
+        }
+    }
+
     if (env_desc.kind != Synth::ParamKind::envelope) {
         return true;
     }
+
     const Synth::EnvelopeDescriptor& envelope = env_desc.envelope;
     if (envelope.sustain_last_point >= envelope.num_points - 1) {
         return true;
@@ -1710,21 +1766,52 @@ static void update_modulation()
 
         Voice& voice = voices[osc.voice_id];
 
-        osc.pitch    = parameters[osc_param(osc_idx, osc_pitch_dest)].value + osc.pitch_offset;
-        osc.panning  = parameters[osc_param(osc_idx, osc_panning_dest)].value;
-        osc.volume   = parameters[osc_param(osc_idx, osc_volume_dest)].value;
+        osc.pitch   = parameters[osc_param(osc_idx, osc_pitch_dest)].value + osc.pitch_offset;
+        osc.panning = parameters[osc_param(osc_idx, osc_panning_dest)].value;
+
+        const float    dest_value = parameters[osc_param(osc_idx, osc_volume_dest)].value;
+        const uint32_t env_node   = osc_param(osc_idx, osc_volume_env);
+        osc.volume                = dest_value;
+        if (voice.release_total_ticks && param_descs[env_node].kind == Synth::ParamKind::envelope) {
+            if (! osc.decaying) {
+                const Synth::EnvelopeDescriptor& env_desc  = param_descs[env_node].envelope;
+                const Synth::EnvelopeState&      env_state = parameters[env_node].envelope;
+                if (voice.active && ! voice.releasing && env_state.point >= env_desc.sustain_first_point &&
+                    env_state.point <= env_desc.sustain_last_point) {
+                    osc.decaying     = true;
+                    osc.decay_tick   = 0;
+                    osc.decay_factor = 1.0f;
+                }
+            }
+            else {
+                ++osc.decay_tick;
+                osc.decay_factor *= osc.decay_mult;
+                osc.volume = dest_value * osc.decay_factor;
+            }
+        }
+        else if (voice.release_total_ticks && ! osc.decaying) {
+            // No volume envelope: the instrument release still decays, starting at note
+            // onset (the no-envelope analog of sustain entry).  decay_mult and
+            // decay_factor carry their note-on values, so nothing is recomputed here.
+            if (voice.active && ! voice.releasing) {
+                osc.decaying   = true;
+                osc.decay_tick = 0;
+            }
+        }
+        else if (voice.release_total_ticks) {
+            // The decay advances every step once started, held or released.
+            ++osc.decay_tick;
+            osc.decay_factor *= osc.decay_mult;
+            osc.volume = dest_value * osc.decay_factor;
+        }
         osc.duty[0]  = parameters[osc_param(osc_idx, osc_duty0_dest)].value;
         osc.duty[1]  = parameters[osc_param(osc_idx, osc_duty1_dest)].value;
         osc.osc_mix  = parameters[osc_param(osc_idx, osc_mix_dest)].value;
         osc.fm_index = parameters[osc_param(osc_idx, osc_fm_index_dest)].value;
 
-        // Voice lifetime: after note-off every oscillator plays one final block whose volume
-        // gradient ramps to silence, then frees.  Oscillator-scope envelopes release at different
-        // rates per layer index, so a voice's oscillators may free in different steps; the voice
-        // itself is finalized only when its last oscillator frees.  A retriggered voice takes that
-        // final block immediately, without waiting for its envelope to finish releasing.
         bool free_now = osc.terminating;
-        if (! free_now && (voice.note_finished || (voice.releasing && volume_termination_due(osc_idx)))) {
+        if (! free_now && (voice.note_finished || (voice.releasing && volume_termination_due(osc_idx)) ||
+                           (osc.decaying && osc.decay_tick >= voice.release_total_ticks))) {
             osc.terminating = true;
             osc.volume      = 0.0f; // Final block: the volume gradient ramps from the last rendered volume to silence.
         }

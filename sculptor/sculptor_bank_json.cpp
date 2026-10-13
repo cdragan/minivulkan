@@ -541,6 +541,7 @@ static void enc_instrument(Out& o, const Synth::Instrument& instr)
 
     key_float_nonzero(o, "note_skew_semitones", instr.note_skew_semitones);
     key_float_nonzero(o, "layer_skew_semitones", instr.layer_skew_semitones);
+    key_float_nonzero(o, "release_seconds", instr.release_seconds);
     o.ch('}');
 }
 
@@ -554,6 +555,7 @@ static void enc_envelope_members(Out& o, const Synth::EnvelopeDescriptor& env)
     key_uint(o, "num_points", env.num_points);
     key_uint_nonzero(o, "sustain_first", env.sustain_first_point);
     key_uint_nonzero(o, "sustain_last", env.sustain_last_point);
+    key_uint_nonzero(o, "ping_pong", env.ping_pong);
     key_float_nonzero(o, "min_value", env.min_value);
     key_float_nonzero(o, "min_max_delta", env.min_max_delta);
 
@@ -1638,6 +1640,16 @@ static void want_bool(Walker& w, uint32_t i, bool* out)
         w.failed = true;
 }
 
+// Reads one instrument release in seconds: parses the float and enforces the
+// decoder's range policy (finite, 0..3600).  Both JSON forms share the policy.
+static void want_release_seconds(Walker& w, uint32_t val_idx, float* value)
+{
+    want_float(w, val_idx, value);
+    if (! w.failed && (! std::isfinite(*value) || *value < 0.0f || *value > 3600.0f)) {
+        w.failed = true;
+    }
+}
+
 // Reads a STRING token into out (NUL-terminated), unescaping JSON escapes.  Rejects
 // over-long text and content that cannot appear in bank text (control characters,
 // a \u escape for zero - which would truncate the name - or malformed
@@ -1879,6 +1891,9 @@ static void decode_instrument(Walker& w, uint32_t obj, Synth::Instrument& instr)
             want_float(w, val_idx, &instr.note_skew_semitones);
         else if (key_eq(w, key_idx, "layer_skew_semitones"))
             want_float(w, val_idx, &instr.layer_skew_semitones);
+        else if (key_eq(w, key_idx, "release_seconds")) {
+            want_release_seconds(w, val_idx, &instr.release_seconds);
+        }
         else
             unknown_field(w, key_idx);
     });
@@ -1913,6 +1928,10 @@ static bool envelope_member(Walker&                    w,
     }
     if (key_eq(w, key_idx, "sustain_last")) {
         want_u8(w, val_idx, Synth::max_envelope_points - 1, &env.sustain_last_point);
+        return true;
+    }
+    if (key_eq(w, key_idx, "ping_pong")) {
+        want_u8(w, val_idx, 1, &env.ping_pong);
         return true;
     }
     if (key_eq(w, key_idx, "min_value")) {
@@ -1977,6 +1996,14 @@ static void decode_envelope(Walker& w, uint32_t obj, Synth::EnvelopeDescriptor& 
             unknown_field(w, key_idx);
     });
     envelope_finish(w, env, fields);
+
+    // With ping-pong off, a multi-point span loops seamlessly by
+    // construction: the span's last point value is forced to the first
+    // point's value.  An unset span stays a single-point span (defaults 0),
+    // so nothing is forced there.
+    if (! env.ping_pong && env.sustain_last_point > env.sustain_first_point) {
+        env.points[env.sustain_last_point].value = env.points[env.sustain_first_point].value;
+    }
 }
 
 static void decode_lfo(Walker& w, uint32_t obj, Synth::LFODescriptor& lfo)
@@ -2351,8 +2378,19 @@ static void decode_editor_record(Walker& w, uint32_t obj, Synth::GraphNodeLayout
     }
     // Kind 0 keys a bound node in the fixed canonical numbering (inputs, sum
     // node, oscillator layers), and only by index: a nonzero uid would
-    // create a second key for one node.
+    // create a second key for one node.  Kind 5 keys the zone's Instrument
+    // Parameters node alone, so its index and uid are unused and must be 0.
     if (record->kind == 0 && (record->index >= Synth::graph_canonical_node_count || record->uid != 0)) {
+        w.failed = true;
+        return;
+    }
+    if (record->kind == 5 && (record->index != 0 || record->uid != 0)) {
+        w.failed = true;
+        return;
+    }
+    // Kind 5 is not a detached instance: the LFO wiring-source fields are
+    // reserved for kinds 1/2 and must stay zero.
+    if (record->kind == 5 && (record->depth_source != 0 || record->rate_source != 0)) {
         w.failed = true;
         return;
     }
@@ -2400,7 +2438,7 @@ static void decode_editor_state(Walker& w, uint32_t val_idx, Synth::InstrumentEd
                 decode_editor_record(w, elem, &record);
                 if (w.failed)
                     return;
-                if (record.kind != 0 && record.kind != 4) {
+                if (record.kind != 0 && record.kind != 4 && record.kind != 5) {
                     if (record.channel >= Synth::max_channels || record.zone >= Synth::max_instr_per_channel ||
                         ++detached_per_zone[record.channel][record.zone] > Synth::max_detached_per_zone) {
                         w.failed = true;
@@ -2609,9 +2647,11 @@ static void canonicalize_param(Synth::ParamDescriptor& param)
             fresh.kind                     = param.kind;
             fresh.envelope                 = param.envelope;
             Synth::EnvelopeDescriptor& env = fresh.envelope;
-            env.unused_alignment           = 0;
-            env.min_value                  = canonical_float(env.min_value);
-            env.min_max_delta              = canonical_float(env.min_max_delta);
+            // The decoded ping_pong flag is 0/1; clamp so union-arm rebuilds stay
+            // arm-independent.
+            env.ping_pong     = env.ping_pong ? 1 : 0;
+            env.min_value     = canonical_float(env.min_value);
+            env.min_max_delta = canonical_float(env.min_max_delta);
             memset(&env.points[env.num_points],
                    0,
                    (Synth::max_envelope_points - env.num_points) * sizeof(env.points[0]));
@@ -2671,7 +2711,7 @@ static void canonicalize_editor_bank(Synth::InstrumentEditorBank* editor_bank)
 
     for (uint32_t i = 0; i < bank.envelopes.num_allocated; i++) {
         Synth::EnvelopeDescriptor& env = bank.envelopes.entries[i];
-        env.unused_alignment           = 0;
+        env.ping_pong                  = env.ping_pong ? 1 : 0;
         env.min_value                  = canonical_float(env.min_value);
         env.min_max_delta              = canonical_float(env.min_max_delta);
         memset(&env.points[env.num_points], 0, (Synth::max_envelope_points - env.num_points) * sizeof(env.points[0]));
@@ -2690,6 +2730,7 @@ static void canonicalize_editor_bank(Synth::InstrumentEditorBank* editor_bank)
         Synth::Instrument& instr   = bank.instruments.entries[i];
         instr.note_skew_semitones  = canonical_float(instr.note_skew_semitones);
         instr.layer_skew_semitones = canonical_float(instr.layer_skew_semitones);
+        instr.release_seconds      = canonical_float(instr.release_seconds);
 
         for (uint32_t l = 0; l < instr.layer_count; l++) {
             Synth::Oscillator& osc = instr.layers[l];
@@ -2763,7 +2804,7 @@ static void doc_unknown_field(Walker& w, uint32_t key_idx)
 
 // Point levels are the envelope's output values in the target's display units;
 // the descriptor stores them scaled to bank units (fm_index: radians).
-// Sustain defaults to holding the last point.
+// Sustain defaults to the last point.
 static void decode_envelope_doc(Walker& w, uint32_t obj, Synth::ModTarget target, Synth::EnvelopeDescriptor& env)
 {
     const Sculptor::OscTargetView view = Sculptor::osc_target_view(target);
@@ -2776,6 +2817,7 @@ static void decode_envelope_doc(Walker& w, uint32_t obj, Synth::ModTarget target
     uint32_t sustain_end                           = 0;
     bool     sustain_start_set                     = false;
     bool     sustain_end_set                       = false;
+    uint8_t  ping_pong                             = 0;
 
     walk_object(w, obj, [&](uint32_t key_idx, uint32_t val_idx) {
         if (key_eq(w, key_idx, "points")) {
@@ -2811,6 +2853,9 @@ static void decode_envelope_doc(Walker& w, uint32_t obj, Synth::ModTarget target
             want_uint(w, val_idx, Synth::max_envelope_points - 1, &sustain_end);
             sustain_end_set = true;
         }
+        else if (key_eq(w, key_idx, "ping_pong")) {
+            want_u8(w, val_idx, 1, &ping_pong);
+        }
         else
             doc_unknown_field(w, key_idx);
     });
@@ -2837,6 +2882,17 @@ static void decode_envelope_doc(Walker& w, uint32_t obj, Synth::ModTarget target
         quantized[i] = position;
     }
 
+    // With ping-pong off, the effective sustain span's last point is
+    // forced to the first point's value so the span loops seamlessly.
+    // The effective span uses the unset defaults (the last point)
+    // because the raw fields are defaulted only later; normalizing a
+    // decode that later fails validation is harmless.
+    const uint32_t start_eff = sustain_start_set ? sustain_start : num_points - 1;
+    const uint32_t end_eff   = sustain_end_set ? sustain_end : num_points - 1;
+    if (ping_pong == 0 && end_eff > start_eff) {
+        levels[end_eff] = levels[start_eff];
+    }
+
     float min_level = levels[0];
     float max_level = levels[0];
     for (uint32_t i = 1; i < num_points; i++) {
@@ -2846,7 +2902,7 @@ static void decode_envelope_doc(Walker& w, uint32_t obj, Synth::ModTarget target
             max_level = levels[i];
     }
 
-    // Sustain defaults to the last point: hold the end value until release.
+    // Sustain defaults to the last point.
     if (! sustain_start_set)
         sustain_start = num_points - 1;
     if (! sustain_end_set)
@@ -2867,6 +2923,7 @@ static void decode_envelope_doc(Walker& w, uint32_t obj, Synth::ModTarget target
     }
     env.num_points          = static_cast<uint8_t>(num_points);
     env.sustain_first_point = static_cast<uint8_t>(sustain_start);
+    env.ping_pong           = ping_pong;
     env.sustain_last_point  = static_cast<uint8_t>(sustain_end);
 
     // A flat envelope (delta 0) is the constant min: every quantized value 0.
@@ -3374,6 +3431,9 @@ bool Synth::decode_instrument_json_for_domain(const char*            text,
             if (! w.failed && (doc.instr.layer_skew_semitones < 0.0f || doc.instr.layer_skew_semitones > 1.0f))
                 w.failed = true;
         }
+        else if (key_eq(w, key_idx, "release_seconds")) {
+            want_release_seconds(w, val_idx, &doc.instr.release_seconds);
+        }
         else if (key_eq(w, key_idx, "layers")) {
             layers_seen = true;
             layer_count = static_cast<uint32_t>(w.toks[val_idx].size);
@@ -3613,6 +3673,7 @@ static uint32_t encode_instrument_json_for_domain(char*                         
     o.float_value(instr->note_skew_semitones);
     o.key("layer_skew_semitones");
     o.float_value(instr->layer_skew_semitones);
+    key_float_nonzero(o, "release_seconds", instr->release_seconds);
     o.key("layers");
     o.ch('[');
 
@@ -3708,6 +3769,7 @@ static uint32_t encode_instrument_json_for_domain(char*                         
                 o.uint_value(env.sustain_first_point);
                 o.key("sustain_end");
                 o.uint_value(env.sustain_last_point);
+                key_uint_nonzero(o, "ping_pong", env.ping_pong);
                 o.ch('}');
             }
 

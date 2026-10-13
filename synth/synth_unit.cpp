@@ -212,9 +212,13 @@ static bool osc_graph_mark_node(bool* seen, uint32_t node_idx, uint32_t* count)
 
 static uint32_t find_osc_graph_connection(const Sculptor::Graph& graph, const Sculptor::EndPoint& input);
 
-// The instance registry carries exactly env_instances + lfo_instances
-// instances.  The distinct node total is 2 + layer_count + env_instances +
-// lfo_instances (the inputs node + sum + oscillators + generator instances).
+// Checks via TEST that a projection filled the mapping consistently: every
+// fixed node exists and is distinct, each occupied layer's oscillator has
+// exactly 15 rows plus its target blocks, and the instance registry
+// carries exactly env_instances + lfo_instances instances. The distinct
+// node total is 3 + layer_count + env_instances + lfo_instances (the
+// inputs node + the instrument parameters node + sum + oscillators +
+// generator instances).
 static void check_osc_graph_mapping(const Sculptor::Graph&           graph,
                                     const Sculptor::OscGraphMapping& mapping,
                                     uint32_t                         layer_count,
@@ -225,6 +229,8 @@ static void check_osc_graph_mapping(const Sculptor::Graph&           graph,
     uint32_t count                     = 0;
     TEST(mapping.input_node != Sculptor::pool_no_slot);
     TEST(osc_graph_mark_node(seen, mapping.input_node, &count));
+    TEST(mapping.instrument_node != Sculptor::pool_no_slot);
+    TEST(osc_graph_mark_node(seen, mapping.instrument_node, &count));
     for (uint32_t idx = 0; idx < Sculptor::num_osc_graph_inputs; idx++) {
         TEST(mapping.input_source_slots[idx] != Sculptor::pool_no_slot);
     }
@@ -266,7 +272,7 @@ static void check_osc_graph_mapping(const Sculptor::Graph&           graph,
         }
         TEST(osc_graph_mark_node(seen, mapping.detached[i].node_idx, &count));
     }
-    TEST(count == 2 + layer_count + env_instances + lfo_instances);
+    TEST(count == 3 + layer_count + env_instances + lfo_instances);
 }
 
 // Finds a slot by name on a node; slots are scanned in creation order.
@@ -506,7 +512,7 @@ static void build_osc_graph_small_fixture(Synth::InstrumentBank* bank,
 
     // The volume target carries its own envelope descriptor: descriptors are
     // shared by every target that wires them, and the volume shape (minimum 0,
-    // first and last point 0) cannot serve a non-volume target, so volume and
+    // first point 0) cannot serve a non-volume target, so volume and
     // pitch can never share one.  This fixture's volume curve deliberately
     // keeps the pre-constraint content (a legacy bank state the runtime must
     // still play).
@@ -5406,7 +5412,7 @@ static void osc_inputs_move_reprojection_regressions()
     TEST(remapping.input_node != Sculptor::pool_no_slot);
     TEST(regraph.node(remapping.input_node).position.x == moved.x);
     TEST(regraph.node(remapping.input_node).position.y == moved.y);
-    TEST(regraph.node(remapping.input_node).slots.num_allocated == Sculptor::num_osc_graph_inputs + 3);
+    TEST(regraph.node(remapping.input_node).slots.num_allocated == Sculptor::num_osc_graph_inputs + 1);
 }
 
 // T-M6-11: the fx pane's MIDI Inputs node move must survive the re-projection an
@@ -6941,15 +6947,30 @@ static void osc_cc_regressions()
         uint32_t cc_slot = Sculptor::pool_no_slot;
         TEST(find_graph_slot(graph, mapping.input_node, cc_label, &cc_slot));
         TEST(mapping.input_cc_slots[0] == cc_slot);
-        // The detune rows stay the MIDI Inputs node's last two slots.
+        // The detune rows live on the dedicated Instrument Parameters node.
         uint32_t note_detune_slot = Sculptor::pool_no_slot;
         uint32_t osc_detune_slot  = Sculptor::pool_no_slot;
-        TEST(find_graph_slot(graph, mapping.input_node, "Random Note Detune", &note_detune_slot));
-        TEST(find_graph_slot(graph, mapping.input_node, "Random Oscillator Detune", &osc_detune_slot));
-        TEST(note_detune_slot == mapping.input_detune_slots[0]);
-        TEST(osc_detune_slot == mapping.input_detune_slots[1]);
-        TEST(note_detune_slot == graph.node(mapping.input_node).slots.num_allocated - 2);
-        TEST(osc_detune_slot == graph.node(mapping.input_node).slots.num_allocated - 1);
+        TEST(find_graph_slot(graph, mapping.instrument_node, "Random Note Detune", &note_detune_slot));
+        TEST(find_graph_slot(graph, mapping.instrument_node, "Random Oscillator Detune", &osc_detune_slot));
+        TEST(note_detune_slot == mapping.instrument_slots[0]);
+        TEST(osc_detune_slot == mapping.instrument_slots[1]);
+        // The detune rows drain through the value_changed apply path: the
+        // event routes the Instrument Parameters node's edits into the
+        // zone's compiled instrument.
+        Sculptor::PropertyValue detune_edit = {};
+        detune_edit.real                    = 0.4f;
+        graph.set_slot_value(mapping.instrument_node, mapping.instrument_slots[0], detune_edit);
+        Sculptor::GraphChange detune_change = {};
+        detune_change.kind                  = Sculptor::ChangeKind::value_changed;
+        detune_change.node_idx              = mapping.instrument_node;
+        detune_change.slot_idx              = mapping.instrument_slots[0];
+        TEST(Sculptor::apply_osc_graph_change(&source, &graph, &mapping, detune_change));
+        TEST(source.bank.instruments.entries[0].note_skew_semitones == 0.4f);
+        detune_edit.real = 0.9f;
+        graph.set_slot_value(mapping.instrument_node, mapping.instrument_slots[1], detune_edit);
+        detune_change.slot_idx = mapping.instrument_slots[1];
+        TEST(Sculptor::apply_osc_graph_change(&source, &graph, &mapping, detune_change));
+        TEST(source.bank.instruments.entries[0].layer_skew_semitones == 0.9f);
         static Synth::Instrument compiled;
         TEST(Sculptor::compile_graph_to_instrument(graph, mapping, &compiled));
         TEST(compiled.layers[0].targets[Synth::mod_volume].num_inputs == 1);
@@ -7264,6 +7285,425 @@ static void osc_cc_regressions()
     }
 }
 
+// Source-inspection evidence for the no-envelope instrument release: pins the
+// production code to the decay-decision policy mirrored in the tests above
+// (the unit does not link realtime_synth.cpp).  Not proof of the runtime
+// fade or free behavior itself.
+static void check_release_decay_source_pins()
+{
+    static char src[256 * 1024];
+    FILE* const file = fopen("synth/realtime_synth.cpp", "rb");
+    TEST(file != nullptr);
+    if (! file) {
+        return;
+    }
+    const size_t got = fread(src, 1, sizeof(src) - 1, file);
+    fclose(file);
+    TEST(got > 0);
+    src[got]           = 0;
+    const char* update = strstr(src, "static void update_modulation()");
+    const char* term   = strstr(src, "static bool volume_termination_due(uint32_t osc_idx)");
+    TEST(update != nullptr && term != nullptr);
+    if (! update || ! term) {
+        return;
+    }
+    const char* update_end = strstr(update + 1, "\nstatic ");
+    const char* term_end   = strstr(term + 1, "\nstatic ");
+    TEST(update_end != nullptr && term_end != nullptr);
+    if (! update_end || ! term_end) {
+        return;
+    }
+
+    // The production volume multiplication: both advance branches scale the
+    // dest level by the running decay factor.
+    const char* first_mul = find_in_range(update, update_end, "osc.volume = dest_value * osc.decay_factor;");
+    TEST(first_mul != nullptr);
+    if (first_mul) {
+        TEST(find_in_range(first_mul + 1, update_end, "osc.volume = dest_value * osc.decay_factor;") != nullptr);
+    }
+
+    // The termination-gate ordering: the decay gate precedes the
+    // no-envelope early return, so a decaying oscillator owns termination
+    // while incomplete and the dest level is audible.
+    const char* gate = find_in_range(term, term_end, "if (voice.release_total_ticks && oscillators[osc_idx].decaying)");
+    const char* noenv = find_in_range(term, term_end, "if (env_desc.kind != Synth::ParamKind::envelope)");
+    TEST(gate != nullptr && noenv != nullptr && gate < noenv);
+
+    // The cutoff-lifetime disjunct: the free condition frees a decaying
+    // oscillator at the cutoff with or without a note-off event (the held
+    // voice reaches it through this disjunct, since volume_termination_due
+    // is release-only).
+    TEST(find_in_range(update, update_end, "osc.decaying && osc.decay_tick >= voice.release_total_ticks") != nullptr);
+}
+
+// Instrument Parameters node regressions: the dedicated node carries the
+// note/layer detune and release rows, its edits drain through the
+// value_changed apply path, and the envelope Ping-Pong toggle snaps the
+// sustain span with the decode rule.
+static void osc_instrument_node_regressions()
+{
+    // Slot projection: the three property rows live on the dedicated node
+    // with values seeded from the instrument fields; MIDI Inputs contains
+    // only source-output slots.
+    {
+        static Synth::InstrumentEditorBank source;
+        static Synth::Instrument           instrument = {};
+        static Sculptor::Graph             graph;
+        static Sculptor::OscGraphMapping   mapping;
+        static Sculptor::GraphChange       discarded[Sculptor::max_pending_changes];
+
+        build_zone_fixture(&source, &instrument);
+        TEST(Sculptor::project_editor_to_graph(source, &graph, &mapping));
+        graph.take_changes(discarded, Sculptor::max_pending_changes);
+        TEST(mapping.instrument_node != Sculptor::pool_no_slot);
+        uint32_t note_slot    = Sculptor::pool_no_slot;
+        uint32_t layer_slot   = Sculptor::pool_no_slot;
+        uint32_t release_slot = Sculptor::pool_no_slot;
+        TEST(find_graph_slot(graph, mapping.instrument_node, "Random Note Detune", &note_slot));
+        TEST(find_graph_slot(graph, mapping.instrument_node, "Random Oscillator Detune", &layer_slot));
+        TEST(find_graph_slot(graph, mapping.instrument_node, "Release (s)", &release_slot));
+        TEST(note_slot == mapping.instrument_slots[0]);
+        TEST(layer_slot == mapping.instrument_slots[1]);
+        TEST(release_slot == mapping.instrument_slots[2]);
+        TEST(graph.node(mapping.instrument_node).slots.entries[note_slot].value.real == instrument.note_skew_semitones);
+        TEST(graph.node(mapping.instrument_node).slots.entries[layer_slot].value.real ==
+             instrument.layer_skew_semitones);
+        TEST(graph.node(mapping.instrument_node).slots.entries[release_slot].value.real == instrument.release_seconds);
+        TEST(! find_graph_slot(graph, mapping.input_node, "Random Note Detune", &note_slot));
+    }
+
+    // Release drain: a slot write plus a real value_changed event moves the
+    // bank field immediately (set_slot_value alone is eventless, so a
+    // direct compile call here would bypass the node_role routing).  A
+    // zero seed compiles back as zero.
+    {
+        static Synth::InstrumentEditorBank source;
+        static Synth::Instrument           instrument = {};
+        static Sculptor::Graph             graph;
+        static Sculptor::OscGraphMapping   mapping;
+        static Sculptor::GraphChange       discarded[Sculptor::max_pending_changes];
+
+        build_zone_fixture(&source, &instrument);
+        TEST(Sculptor::project_editor_to_graph(source, &graph, &mapping));
+        graph.take_changes(discarded, Sculptor::max_pending_changes);
+        TEST(source.bank.instruments.entries[0].release_seconds == 0.0f);
+        TEST(graph.node(mapping.instrument_node).slots.entries[mapping.instrument_slots[2]].value.real == 0.0f);
+
+        Sculptor::PropertyValue release_edit = {};
+        release_edit.real                    = 12.5f;
+        graph.set_slot_value(mapping.instrument_node, mapping.instrument_slots[2], release_edit);
+        Sculptor::GraphChange release_change = {};
+        release_change.kind                  = Sculptor::ChangeKind::value_changed;
+        release_change.node_idx              = mapping.instrument_node;
+        release_change.slot_idx              = mapping.instrument_slots[2];
+        TEST(Sculptor::apply_osc_graph_change(&source, &graph, &mapping, release_change));
+        TEST(source.bank.instruments.entries[0].release_seconds == 12.5f);
+    }
+
+    // Sentinel fallback: a mapping the projection did not build (no
+    // instrument node) compiles with the three fields at the
+    // Instrument{} zero-init instead of failing or reading wild slots.
+    {
+        static Synth::InstrumentEditorBank source;
+        static Synth::Instrument           instrument = {};
+        static Sculptor::Graph             graph;
+        static Sculptor::OscGraphMapping   mapping;
+        static Sculptor::GraphChange       discarded[Sculptor::max_pending_changes];
+
+        build_zone_fixture(&source, &instrument);
+        TEST(Sculptor::project_editor_to_graph(source, &graph, &mapping));
+        graph.take_changes(discarded, Sculptor::max_pending_changes);
+        mapping.instrument_node = Sculptor::pool_no_slot;
+        for (uint32_t i = 0; i < 3; ++i) {
+            mapping.instrument_slots[i] = Sculptor::pool_no_slot;
+        }
+        static Synth::Instrument compiled;
+        TEST(Sculptor::compile_graph_to_instrument(graph, mapping, &compiled));
+        TEST(compiled.note_skew_semitones == 0.0f);
+        TEST(compiled.layer_skew_semitones == 0.0f);
+        TEST(compiled.release_seconds == 0.0f);
+    }
+
+    // Ping-pong toggle snap: toggling a multi-point span off snaps the live
+    // span end to the span start immediately (no reload); toggling on moves
+    // no points; a single-point span toggles off without a point write.
+    {
+        static Synth::InstrumentEditorBank source;
+        static Synth::Instrument           instrument = {};
+        static Sculptor::Graph             graph;
+        static Sculptor::OscGraphMapping   mapping;
+        static Sculptor::GraphChange       discarded[Sculptor::max_pending_changes];
+
+        build_zone_fixture(&source, &instrument);
+        // The volume envelope's descriptor gets a multi-point sustain span
+        // with unequal endpoints and ping-pong on.
+        source.bank.envelopes.entries[1].ping_pong           = 1;
+        source.bank.envelopes.entries[1].sustain_first_point = 1;
+        source.bank.envelopes.entries[1].sustain_last_point  = 2;
+        TEST(Sculptor::project_editor_to_graph(source, &graph, &mapping));
+        graph.take_changes(discarded, Sculptor::max_pending_changes);
+        int32_t env_instance = find_detached_by_desc(mapping, 1, 2);
+        TEST(env_instance >= 0);
+        uint32_t env_node = mapping.detached[env_instance].node_idx;
+        TEST(env_node != Sculptor::pool_no_slot);
+        TEST(env_node != Sculptor::pool_no_slot);
+        uint32_t ping_pong_slot = Sculptor::pool_no_slot;
+        TEST(find_graph_slot(graph, env_node, "Ping-Pong", &ping_pong_slot));
+        TEST(graph.node(env_node).slots.entries[ping_pong_slot].value.toggle == true);
+        TEST(source.bank.envelopes.entries[1].points[2].value != source.bank.envelopes.entries[1].points[1].value);
+
+        // Toggle off: the span end snaps to the span start immediately.
+        Sculptor::PropertyValue toggle_edit = {};
+        toggle_edit.toggle                  = false;
+        graph.set_slot_value(env_node, ping_pong_slot, toggle_edit);
+        Sculptor::GraphChange toggle_change = {};
+        toggle_change.kind                  = Sculptor::ChangeKind::value_changed;
+        toggle_change.node_idx              = env_node;
+        toggle_change.slot_idx              = ping_pong_slot;
+        TEST(Sculptor::apply_osc_graph_change(&source, &graph, &mapping, toggle_change));
+        TEST(source.bank.envelopes.entries[1].ping_pong == 0);
+        TEST(source.bank.envelopes.entries[1].points[2].value == source.bank.envelopes.entries[1].points[1].value);
+
+        // Toggle on with unequal endpoints: no point moves.
+        source.bank.envelopes.entries[1].ping_pong       = 0;
+        source.bank.envelopes.entries[1].points[2].value = 0xC000;
+        TEST(Sculptor::project_editor_to_graph(source, &graph, &mapping));
+        graph.take_changes(discarded, Sculptor::max_pending_changes);
+        env_instance = find_detached_by_desc(mapping, 1, 2);
+        TEST(env_instance >= 0);
+        env_node = mapping.detached[env_instance].node_idx;
+        TEST(find_graph_slot(graph, env_node, "Ping-Pong", &ping_pong_slot));
+        toggle_edit.toggle = true;
+        graph.set_slot_value(env_node, ping_pong_slot, toggle_edit);
+        toggle_change.node_idx = env_node;
+        toggle_change.slot_idx = ping_pong_slot;
+        TEST(Sculptor::apply_osc_graph_change(&source, &graph, &mapping, toggle_change));
+        TEST(source.bank.envelopes.entries[1].ping_pong == 1);
+        TEST(source.bank.envelopes.entries[1].points[2].value == 0xC000);
+        TEST(source.bank.envelopes.entries[1].points[2].value != source.bank.envelopes.entries[1].points[1].value);
+
+        // Single-point span: toggling off flips the flag and writes no point.
+        source.bank.envelopes.entries[1].ping_pong           = 1;
+        source.bank.envelopes.entries[1].sustain_first_point = 1;
+        source.bank.envelopes.entries[1].sustain_last_point  = 1;
+        TEST(Sculptor::project_editor_to_graph(source, &graph, &mapping));
+        graph.take_changes(discarded, Sculptor::max_pending_changes);
+        env_instance = find_detached_by_desc(mapping, 1, 2);
+        TEST(env_instance >= 0);
+        env_node = mapping.detached[env_instance].node_idx;
+        TEST(find_graph_slot(graph, env_node, "Ping-Pong", &ping_pong_slot));
+        toggle_edit.toggle = false;
+        graph.set_slot_value(env_node, ping_pong_slot, toggle_edit);
+        toggle_change.node_idx = env_node;
+        toggle_change.slot_idx = ping_pong_slot;
+        TEST(Sculptor::apply_osc_graph_change(&source, &graph, &mapping, toggle_change));
+        TEST(source.bank.envelopes.entries[1].ping_pong == 0);
+        TEST(source.bank.envelopes.entries[1].points[1].value == 0x8000);
+        TEST(source.bank.envelopes.entries[1].points[2].value == 0xC000);
+
+        // Already-equal span endpoints: toggling off flips the flag and
+        // writes no point.
+        source.bank.envelopes.entries[1].ping_pong          = 1;
+        source.bank.envelopes.entries[1].sustain_last_point = 2;
+        source.bank.envelopes.entries[1].points[2].value    = source.bank.envelopes.entries[1].points[1].value;
+        TEST(Sculptor::project_editor_to_graph(source, &graph, &mapping));
+        graph.take_changes(discarded, Sculptor::max_pending_changes);
+        env_instance = find_detached_by_desc(mapping, 1, 2);
+        TEST(env_instance >= 0);
+        env_node = mapping.detached[env_instance].node_idx;
+        TEST(find_graph_slot(graph, env_node, "Ping-Pong", &ping_pong_slot));
+        toggle_edit.toggle = false;
+        graph.set_slot_value(env_node, ping_pong_slot, toggle_edit);
+        toggle_change.node_idx = env_node;
+        toggle_change.slot_idx = ping_pong_slot;
+        TEST(Sculptor::apply_osc_graph_change(&source, &graph, &mapping, toggle_change));
+        TEST(source.bank.envelopes.entries[1].ping_pong == 0);
+        TEST(source.bank.envelopes.entries[1].points[2].value == source.bank.envelopes.entries[1].points[1].value);
+    }
+}
+
+// Instrument Parameters node position persistence: the node has no
+// canonical slot, so its kind-5 layout record keys the zone alone; the
+// decode accepts it with the kind-0 sanity rules, the projection applies
+// the saved position, and a bank without the record keeps the default.
+static void osc_instrument_node_layout_regressions()
+{
+    static Synth::InstrumentEditorBank source;
+    static Synth::Instrument           instrument = {};
+    static Sculptor::Graph             graph;
+    static Sculptor::OscGraphMapping   mapping;
+    static Sculptor::GraphChange       discarded[Sculptor::max_pending_changes];
+
+    build_zone_fixture(&source, &instrument);
+    TEST(Sculptor::project_editor_to_graph(source, &graph, &mapping));
+    graph.take_changes(discarded, Sculptor::max_pending_changes);
+    const vmath::vec2 default_position = graph.node(mapping.instrument_node).position;
+
+    // A saved kind-5 record re-applies the moved position and size
+    // overrides on re-projection.
+    Synth::GraphNodeLayout record                    = {};
+    record.channel                                   = 0;
+    record.zone                                      = 0;
+    record.kind                                      = 5;
+    record.x                                         = 304.0f;
+    record.y                                         = 192.0f;
+    record.width_override                            = 96.0f;
+    source.graph_layout[source.graph_layout_count++] = record;
+    TEST(Sculptor::validate_editor_metadata(source));
+
+    static Sculptor::Graph           moved_graph;
+    static Sculptor::OscGraphMapping moved_mapping;
+    TEST(Sculptor::project_editor_to_graph(source, &moved_graph, &moved_mapping));
+    TEST(moved_graph.node(moved_mapping.instrument_node).position.x == 304.0f);
+    TEST(moved_graph.node(moved_mapping.instrument_node).position.y == 192.0f);
+    TEST(moved_graph.node(moved_mapping.instrument_node).content_width_override == 96.0f);
+
+    // The record round-trips through the editor JSON section unchanged.
+    static Synth::InstrumentEditorBank decoded;
+    char                               doc[16 * 1024];
+    const uint32_t                     written = Synth::encode_editor_bank_json(&source, doc, sizeof(doc));
+    TEST(written > 0);
+    TEST(Synth::decode_editor_bank_json(doc, written, &decoded));
+    TEST(Sculptor::validate_editor_metadata(decoded));
+    static Sculptor::Graph           regraph;
+    static Sculptor::OscGraphMapping remapping;
+    TEST(Sculptor::project_editor_to_graph(decoded, &regraph, &remapping));
+    TEST(regraph.node(remapping.instrument_node).position.x == 304.0f);
+    TEST(regraph.node(remapping.instrument_node).position.y == 192.0f);
+
+    // The kind-5 record is bank-only metadata: the portable instrument
+    // document must still encode (the exporter refuses unrepresented zone
+    // records) and must not carry the record.
+    const Synth::InstrumentJsonDomain domains[] = { Synth::InstrumentJsonDomain::clipboard,
+                                                    Synth::InstrumentJsonDomain::validated_bank };
+    for (Synth::InstrumentJsonDomain domain : domains) {
+        static char text[clipboard_capacity];
+        TEST(Sculptor::encode_editor_instrument_json(source, 0, 0, text, sizeof(text), domain) != 0);
+        TEST(! strstr(text, "\"kind\":5"));
+    }
+
+    // Legacy record set: without the kind-5 record the node keeps its
+    // deterministic default position.
+    source.graph_layout_count = 0;
+    static Sculptor::Graph           legacy_graph;
+    static Sculptor::OscGraphMapping legacy_mapping;
+    TEST(Sculptor::project_editor_to_graph(source, &legacy_graph, &legacy_mapping));
+    TEST(legacy_graph.node(legacy_mapping.instrument_node).position.x == default_position.x);
+    TEST(legacy_graph.node(legacy_mapping.instrument_node).position.y == default_position.y);
+
+    // Kind-5 sanity: a nonzero uid or index refuses in the validate pass,
+    // and both the decode and the validate pass still refuse kind 6.  The
+    // LFO wiring-source fields are reserved for detached instances and
+    // refuse on kind 5 in both passes.
+    {
+        static Synth::InstrumentEditorBank bad = {};
+        build_zone_fixture(&bad, &instrument);
+        Synth::GraphNodeLayout malformed           = {};
+        malformed.channel                          = 0;
+        malformed.zone                             = 0;
+        malformed.kind                             = 5;
+        malformed.uid                              = 1;
+        malformed.x                                = 1.0f;
+        malformed.y                                = 2.0f;
+        bad.graph_layout[bad.graph_layout_count++] = malformed;
+        TEST(! Sculptor::validate_editor_metadata(bad));
+
+        static Synth::InstrumentEditorBank indexed = {};
+        build_zone_fixture(&indexed, &instrument);
+        Synth::GraphNodeLayout with_index                  = malformed;
+        with_index.uid                                     = 0;
+        with_index.index                                   = 3;
+        indexed.graph_layout[indexed.graph_layout_count++] = with_index;
+        TEST(! Sculptor::validate_editor_metadata(indexed));
+
+        static Synth::InstrumentEditorBank kind6_bank = {};
+        build_zone_fixture(&kind6_bank, &instrument);
+        Synth::GraphNodeLayout kind6                             = malformed;
+        kind6.uid                                                = 0;
+        kind6.index                                              = 0;
+        kind6.kind                                               = 6;
+        kind6_bank.graph_layout[kind6_bank.graph_layout_count++] = kind6;
+        TEST(! Sculptor::validate_editor_metadata(kind6_bank));
+
+        static Synth::InstrumentEditorBank depth_wired = {};
+        build_zone_fixture(&depth_wired, &instrument);
+        Synth::GraphNodeLayout depth_record                        = malformed;
+        depth_record.uid                                           = 0;
+        depth_record.index                                         = 0;
+        depth_record.depth_source                                  = 1;
+        depth_wired.graph_layout[depth_wired.graph_layout_count++] = depth_record;
+        TEST(! Sculptor::validate_editor_metadata(depth_wired));
+
+        static Synth::InstrumentEditorBank rate_wired = {};
+        build_zone_fixture(&rate_wired, &instrument);
+        Synth::GraphNodeLayout rate_record                       = malformed;
+        rate_record.uid                                          = 0;
+        rate_record.index                                        = 0;
+        rate_record.rate_source                                  = 1;
+        rate_wired.graph_layout[rate_wired.graph_layout_count++] = rate_record;
+        TEST(! Sculptor::validate_editor_metadata(rate_wired));
+
+        char      overkind[256];
+        const int printed = snprintf(overkind,
+                                     sizeof(overkind),
+                                     "{\"layouts\":[{\"channel\":0,\"zone\":0,\"kind\":6,"
+                                     "\"x\":1.0,\"y\":2.0,\"width\":0.0,\"height\":0.0}]}");
+        TEST(printed > 0);
+        static Synth::InstrumentEditorBank refused;
+        TEST(! decode_bank_with_editor_section(source, overkind, &refused));
+
+        // A kind-5 record with a nonzero uid refuses in the decode too.
+        char      baduid[256];
+        const int uid_printed = snprintf(baduid,
+                                         sizeof(baduid),
+                                         "{\"layouts\":[{\"channel\":0,\"zone\":0,\"kind\":5,\"uid\":2,"
+                                         "\"x\":1.0,\"y\":2.0,\"width\":0.0,\"height\":0.0}]}");
+        TEST(uid_printed > 0);
+        TEST(! decode_bank_with_editor_section(source, baduid, &refused));
+
+        // A kind-5 record with a nonzero index refuses in the decode too.
+        char      badindex[256];
+        const int index_printed = snprintf(badindex,
+                                           sizeof(badindex),
+                                           "{\"layouts\":[{\"channel\":0,\"zone\":0,\"kind\":5,\"index\":3,"
+                                           "\"x\":1.0,\"y\":2.0,\"width\":0.0,\"height\":0.0}]}");
+        TEST(index_printed > 0);
+        TEST(! decode_bank_with_editor_section(source, badindex, &refused));
+
+        // A kind-5 record with a wiring source refuses in the decode too.
+        char      wired_json[256];
+        const int wired_printed = snprintf(wired_json,
+                                           sizeof(wired_json),
+                                           "{\"layouts\":[{\"channel\":0,\"zone\":0,\"kind\":5,\"depth_source\":1,"
+                                           "\"x\":1.0,\"y\":2.0,\"width\":0.0,\"height\":0.0}]}");
+        TEST(wired_printed > 0);
+        TEST(! decode_bank_with_editor_section(source, wired_json, &refused));
+
+        char      rate_json[256];
+        const int rate_printed = snprintf(rate_json,
+                                          sizeof(rate_json),
+                                          "{\"layouts\":[{\"channel\":0,\"zone\":0,\"kind\":5,\"rate_source\":1,"
+                                          "\"x\":1.0,\"y\":2.0,\"width\":0.0,\"height\":0.0}]}");
+        TEST(rate_printed > 0);
+        TEST(! decode_bank_with_editor_section(source, rate_json, &refused));
+
+        // A plain kind-5 record decodes and applies through the editor JSON.
+        char      good[256];
+        const int good_printed = snprintf(good,
+                                          sizeof(good),
+                                          "{\"layouts\":[{\"channel\":0,\"zone\":0,\"kind\":5,"
+                                          "\"x\":304.0,\"y\":192.0,\"width\":0.0,\"height\":0.0}]}");
+        TEST(good_printed > 0);
+        static Synth::InstrumentEditorBank applied;
+        TEST(decode_bank_with_editor_section(source, good, &applied));
+        static Sculptor::Graph           applied_graph;
+        static Sculptor::OscGraphMapping applied_mapping;
+        TEST(Sculptor::project_editor_to_graph(applied, &applied_graph, &applied_mapping));
+        TEST(applied_graph.node(applied_mapping.instrument_node).position.x == 304.0f);
+        TEST(applied_graph.node(applied_mapping.instrument_node).position.y == 192.0f);
+    }
+}
+
 int main()
 {
     effects_paste_pin_regressions();
@@ -7277,6 +7717,8 @@ int main()
     fx_inputs_move_reprojection_regressions();
     osc_inherit_source_regressions();
     osc_direct_modulator_regressions();
+    osc_instrument_node_regressions();
+    osc_instrument_node_layout_regressions();
     osc_cc_regressions();
     // silent unless failing, and failures report on stderr, so stdout is discarded.
 #ifdef _WIN32
@@ -7392,6 +7834,270 @@ int main()
         const float advanced = Synth::eval_envelope(env, &peek_state, true);
         TEST(approx(advanced, peeked, 0.0f));
         TEST(peek_state.tick == 2 && peek_state.point == 1);
+    }
+
+    // Piano-type sustain envelope semantics.  A single-point span parks
+    // forever; a multi-point span loops back to the span start with
+    // ping-pong off; ping-pong reverses direction at both span ends; the
+    // decay helpers cross the cutoff exactly at T; and the termination
+    // predicate gates on the decay and the dest level.
+    {
+        Synth::EnvelopeDescriptor env = {};
+        env.num_points                = 4;
+        env.sustain_first_point       = 1;
+        env.sustain_last_point        = 2;
+        env.min_value                 = 0.0f;
+        env.min_max_delta             = 1.0f / 65535.0f;
+        env.points[0]                 = { 0, 0 };      // start at min
+        env.points[1]                 = { 2, 0x4000 }; // span start: quarter level
+        env.points[2]                 = { 4, 0x8000 }; // span end: half level
+        env.points[3]                 = { 6, 0 };      // release to min
+
+        // Walks a sustained envelope until its state parks on the given span
+        // point, so the recorded sequences below are independent of the
+        // approach phase.
+        auto walk_to_span_point = [&env](Synth::EnvelopeState* state, uint32_t point) {
+            for (;;) {
+                Synth::eval_envelope(env, state, true);
+                if (state->point == point && state->tick == env.points[point].position) {
+                    return;
+                }
+            }
+        };
+
+        // A single-point span at a non-final position holds its value
+        // indefinitely while sustained.
+        {
+            Synth::EnvelopeDescriptor single = env;
+            single.sustain_first_point       = 1;
+            single.sustain_last_point        = 1;
+            Synth::EnvelopeState state       = { 0, 0 };
+            walk_to_span_point(&state, 1);
+            float value = Synth::eval_envelope(single, &state, true);
+            TEST(approx(value, 0x4000 / 65535.0f, 0.01f));
+            TEST(state.point == 1 && state.tick == single.points[1].position);
+            for (uint32_t tick = 0; tick < 100; tick++) {
+                value = Synth::eval_envelope(single, &state, true);
+            }
+            TEST(approx(value, 0x4000 / 65535.0f, 0.01f));
+            TEST(state.point == 1 && state.tick == single.points[1].position);
+        }
+
+        // With ping-pong off, the multi-point span loops back to the
+        // span start, and the sampled value sequence is periodic.
+        {
+            Synth::EnvelopeState state = { 0, 0 };
+            walk_to_span_point(&state, 2);
+            uint32_t ticks[6];
+            float    values[6];
+            for (uint32_t i = 0; i < 6; i++) {
+                ticks[i]  = state.tick;
+                values[i] = Synth::eval_envelope(env, &state, true);
+            }
+            // The loop-back jump advances one tick in the same eval, so the
+            // sampled span-end and interior ticks alternate and the value
+            // sequence is periodic with period 2.
+            TEST(ticks[0] == 4 && ticks[1] == 3 && ticks[2] == 4);
+            TEST(ticks[3] == 3 && ticks[4] == 4 && ticks[5] == 3);
+            TEST(values[0] == values[2] && values[1] == values[3]);
+            TEST(values[2] == values[4] && values[3] == values[5]);
+        }
+
+        // With ping-pong on, the span plays forward then backward,
+        // reversing continuously at both span ends, indefinitely.
+        {
+            Synth::EnvelopeDescriptor bounce = env;
+            bounce.ping_pong                 = 1;
+            Synth::EnvelopeState state       = { 0, 0 };
+            walk_to_span_point(&state, 2);
+            uint32_t ticks[8];
+            float    values[8];
+            for (uint32_t i = 0; i < 8; i++) {
+                ticks[i]  = state.tick;
+                values[i] = Synth::eval_envelope(bounce, &state, true);
+            }
+            TEST(ticks[0] == 4 && ticks[1] == 3 && ticks[2] == 2 && ticks[3] == 3);
+            TEST(ticks[4] == 4 && ticks[5] == 3 && ticks[6] == 2 && ticks[7] == 3);
+            TEST(values[0] == values[4] && values[1] == values[5]);
+            TEST(values[2] == values[6] && values[3] == values[7]);
+            // A single-point span ignores the ping-pong flag and parks.
+            Synth::EnvelopeDescriptor single  = env;
+            single.ping_pong                  = 1;
+            single.sustain_first_point        = 1;
+            single.sustain_last_point         = 1;
+            Synth::EnvelopeState single_state = { 0, 0 };
+            walk_to_span_point(&single_state, 1);
+            float single_value = Synth::eval_envelope(single, &single_state, true);
+            for (uint32_t tick = 0; tick < 50; tick++) {
+                single_value = Synth::eval_envelope(single, &single_state, true);
+            }
+            TEST(approx(single_value, 0x4000 / 65535.0f, 0.01f));
+            TEST(single_state.point == 1 && single_state.tick == single.points[1].position);
+        }
+
+        // The per-tick multiplier lands the factor on the cutoff after
+        // exactly T worth of control steps, regardless of the release length.
+        {
+            TEST(Synth::sustain_decay_cutoff == 1.0f / 1024.0f);
+            TEST(Synth::sustain_decay_per_tick(0) == 1.0f); // no decay
+            TEST(Synth::sustain_decay_ticks(0.0f) == 0);    // legacy gate
+            TEST(Synth::sustain_decay_ticks(-1.0f) == 0);   // never decays
+            TEST(Synth::sustain_decay_ticks(1.0e-9f) == 1); // any positive release decays at least one step
+            // One control step is 256/44100 s, so 1 s rounds to 172 steps.
+            const uint32_t ticks_1s = Synth::sustain_decay_ticks(1.0f);
+            TEST(ticks_1s == 172);
+            const uint32_t ticks_15s = Synth::sustain_decay_ticks(15.0f);
+            TEST(ticks_15s == 2584);
+            const float mult_1s  = Synth::sustain_decay_per_tick(ticks_1s);
+            const float mult_15s = Synth::sustain_decay_per_tick(ticks_15s);
+            TEST(mult_1s < mult_15s && mult_15s < 1.0f); // longer release: slower decay
+            float factor_1s = 1.0f;
+            for (uint32_t i = 0; i < ticks_1s; i++) {
+                factor_1s *= mult_1s;
+            }
+            TEST(approx(factor_1s, 1.0f / 1024.0f, 0.0002f));
+            float factor_15s = 1.0f;
+            for (uint32_t i = 0; i < ticks_15s; i++) {
+                factor_15s *= mult_15s;
+            }
+            TEST(approx(factor_15s, 1.0f / 1024.0f, 0.0002f));
+            // An out-of-range release saturates instead of trapping on the
+            // float-to-unsigned conversion.
+            TEST(Synth::sustain_decay_ticks(1.0e30f) == UINT32_MAX);
+        }
+
+        // The termination gate predicate.  A decaying oscillator whose
+        // dest level is still audible owns its termination (the completion
+        // fade would cut a still-decaying note); a silent dest falls back to
+        // the existing completion rule, and a non-decaying oscillator never
+        // skips it.
+        {
+            TEST(Synth::sustain_decay_owns_termination(true, 0.5f));
+            TEST(! Synth::sustain_decay_owns_termination(true, 0.0f));
+            TEST(! Synth::sustain_decay_owns_termination(false, 0.5f));
+            TEST(! Synth::sustain_decay_owns_termination(false, 0.0f));
+        }
+
+        // Instrument release without a volume envelope: decay-decision
+        // tests over a mirror of the engine's decision policy.
+        // realtime_synth.cpp is not linked into this unit, so the mirror
+        // pins the policy and the source-inspection checks that follow pin
+        // the production code to the same policy.  These are NOT proof of
+        // the runtime fade or free behavior itself: the real fade block and
+        // voice freeing run in realtime_synth.cpp and are covered by the
+        // manual audio smoke.  The held-cutoff free path is also
+        // un-mirrored: volume_termination_due is release-only, so a held
+        // voice reaching the cutoff frees through the cutoff disjunct in
+        // the free condition (checked by source inspection below).
+        {
+            struct MirrorOsc {
+                bool     decaying;
+                uint32_t decay_tick;
+                float    decay_factor;
+                float    decay_mult;
+            };
+
+            const uint32_t total_ticks = Synth::sustain_decay_ticks(1.0f); // 172 steps to the cutoff
+            const float    mult        = Synth::sustain_decay_per_tick(total_ticks);
+
+            // One control step of the engine's no-envelope volume path: the
+            // decay starts on the first held step and advances every step
+            // once started, held or released.
+            auto engine_step = [](MirrorOsc* osc, bool held, uint32_t release_ticks) {
+                if (release_ticks && ! osc->decaying) {
+                    if (held) {
+                        osc->decaying   = true;
+                        osc->decay_tick = 0;
+                    }
+                }
+                else if (release_ticks && osc->decaying) {
+                    ++osc->decay_tick;
+                    osc->decay_factor *= osc->decay_mult;
+                }
+            };
+            // Mirrors volume_termination_due's gate order: the decay gate
+            // precedes the no-envelope early return, so a mid-decay note-off
+            // keeps decaying while the dest level is audible.
+            auto termination_due = [](const MirrorOsc& osc, float dest_value, uint32_t release_ticks) {
+                if (release_ticks && osc.decaying) {
+                    if (osc.decay_tick >= release_ticks) {
+                        return true;
+                    }
+                    if (Synth::sustain_decay_owns_termination(osc.decaying, dest_value)) {
+                        return false;
+                    }
+                }
+                return true; // no envelope: the early return owns the rest
+            };
+
+            // (a) Hold a note with no envelope and release > 0: the volume
+            // decays while held and the voice reaches the cutoff at ~T,
+            // freeing without a key event.
+            {
+                MirrorOsc osc             = { false, 0, 1.0f, mult };
+                float     previous_volume = 0.8f;
+                for (uint32_t step = 0; step <= total_ticks; ++step) {
+                    engine_step(&osc, true, total_ticks);
+                    const float volume = 0.8f * osc.decay_factor;
+                    if (osc.decaying && step > 0) {
+                        TEST(volume < previous_volume); // decays while held
+                    }
+                    previous_volume = volume;
+                }
+                TEST(osc.decaying && osc.decay_tick == total_ticks);
+                TEST(termination_due(osc, 0.8f, total_ticks)); // frees at the cutoff
+            }
+
+            // (b) Note-off mid-decay: the decay runs through to the cutoff
+            // with no jump, then the real fade block takes over.
+            {
+                MirrorOsc osc = { false, 0, 1.0f, mult };
+                for (uint32_t step = 0; step < 50; ++step) {
+                    engine_step(&osc, true, total_ticks);
+                }
+                TEST(osc.decaying && osc.decay_tick == 49);
+                float previous_volume = 0.8f * osc.decay_factor;
+                bool  smooth          = true;
+                for (uint32_t step = 50; step < total_ticks; ++step) {
+                    engine_step(&osc, false, total_ticks); // released: decay continues
+                    const float volume = 0.8f * osc.decay_factor;
+                    if (volume >= previous_volume) { // still decaying smoothly, no jump
+                        smooth = false;
+                    }
+                    previous_volume = volume;
+                }
+                TEST(smooth);
+                TEST(osc.decay_tick == total_ticks - 1);
+                TEST(! termination_due(osc, 0.8f, total_ticks)); // owns termination mid-decay
+                engine_step(&osc, false, total_ticks);
+                TEST(osc.decay_tick == total_ticks);
+                TEST(termination_due(osc, 0.8f, total_ticks));
+            }
+
+            // (c) Release 0: legacy immediate fade on note-off; no decay ever
+            // starts.
+            {
+                MirrorOsc osc = { false, 0, 1.0f, mult };
+                for (uint32_t step = 0; step < 10; ++step) {
+                    engine_step(&osc, true, 0);
+                }
+                TEST(! osc.decaying && osc.decay_tick == 0);
+                TEST(termination_due(osc, 0.8f, 0)); // fade on the first released block
+            }
+
+            // (d) Dest 0: the decay gate falls through and the voice frees
+            // on release like the legacy rule.
+            {
+                MirrorOsc osc = { false, 0, 1.0f, mult };
+                for (uint32_t step = 0; step < 10; ++step) {
+                    engine_step(&osc, true, total_ticks);
+                }
+                TEST(osc.decaying && osc.decay_tick == 9);
+                TEST(termination_due(osc, 0.0f, total_ticks));
+            }
+        }
+
+        check_release_decay_source_pins();
     }
 
     // pitch bend -> semitones: centered 14-bit value scaled by the bend range.
@@ -11166,8 +11872,8 @@ int main()
     // ---- Oscillator-graph projection (sculptor_osc_graph) ----
 
     // Max-complexity round-trip: a fully populated instrument projects to the
-    // full graph (2 canonical + 7 oscillators + 35 envelope and 35 LFO
-    // instances = 79 nodes, 217 edges) and compiles back
+    // full graph (3 fixed nodes + 7 oscillators + 35 envelope and 35 LFO
+    // instances = 80 nodes, 217 edges) and compiles back
     // bit-identically, with the descriptor pools untouched (no dedup or
     // duplication) and the aliasing pattern preserved.
     {
@@ -11207,7 +11913,7 @@ int main()
     }
 
     // Minimal round-trip: one unbound oscillator layer projects to the fixed
-    // nodes plus one oscillator (8 nodes, one hard connection) and compiles
+    // nodes plus one oscillator (4 nodes, one hard connection) and compiles
     // back bit-identically.
     {
         static Synth::InstrumentBank bank;
@@ -11570,12 +12276,12 @@ int main()
         bank.bank.instruments.entries[0]         = instrument;
         bank.bank.channel_zones[0][0].start_note = 1;
         bank.bank.channel_zones[0][0].instrument = 0;
-        TEST(Sculptor::count_projected_nodes(bank, 0, 0) == 79);
+        TEST(Sculptor::count_projected_nodes(bank, 0, 0) == 80);
 
         static Synth::InstrumentEditorBank minimal;
         static Synth::Instrument           minimal_instrument = {};
         build_zone_fixture(&minimal, &minimal_instrument);
-        TEST(Sculptor::count_projected_nodes(minimal, 0, 0) == 6);
+        TEST(Sculptor::count_projected_nodes(minimal, 0, 0) == 7);
     }
 
     // Undo group tags coalesce consecutive edits of one editable field.
@@ -11693,8 +12399,8 @@ int main()
             }
         }
 
-        // Overfull implied node projection: the max fixture implies 79 nodes;
-        // 66 detached records push it past 144, 65 land exactly on 144.
+        // Overfull implied node projection: the max fixture implies 80 nodes;
+        // 65 detached records push it past 144, 64 land exactly on 144.
         static Synth::InstrumentBank       model_bank;
         static Synth::InstrumentEditorBank max_bank;
         static Synth::Instrument           instrument = {};
@@ -11707,10 +12413,15 @@ int main()
         max_bank.bank.instruments.entries[0]         = instrument;
         max_bank.bank.channel_zones[0][0].start_note = 1;
         max_bank.bank.channel_zones[0][0].instrument = 0;
-        build_detached_layouts_json(editor_json, sizeof(editor_json), 1, 66, 2, 1, 0, 0);
-        TEST(! decode_bank_with_editor_section(max_bank, editor_json, &restored));
         build_detached_layouts_json(editor_json, sizeof(editor_json), 1, 65, 2, 1, 0, 0);
+        TEST(! decode_bank_with_editor_section(max_bank, editor_json, &restored));
+        build_detached_layouts_json(editor_json, sizeof(editor_json), 1, 64, 2, 1, 0, 0);
         TEST(decode_bank_with_editor_section(max_bank, editor_json, &restored));
+        // The accepted boundary fills the node pool exactly: the projection
+        // still succeeds at 80 + 64 = 144 nodes.
+        static Sculptor::Graph           boundary_graph;
+        static Sculptor::OscGraphMapping boundary_mapping;
+        TEST(Sculptor::project_editor_to_graph(restored, &boundary_graph, &boundary_mapping));
     }
 
     // Add Envelope's default descriptor (do_osc_add_generator's construction
@@ -12777,6 +13488,27 @@ int main()
         TEST(state.msb[0] == 100 && state.lsb[0] == 30);
     }
 
+    // Sustain pedal: the CC 64 threshold sits between 63 and 64, and the
+    // per-channel pedal state is independent.  CC 64 is neither an
+    // assignable CC nor a mix CC, so the pedal branch reuses no existing
+    // routing.
+    {
+        Synth::ChannelCcState pedal_state = make_cc_state();
+        TEST(! Synth::apply_sustain_pedal(&pedal_state, 63));
+        TEST(! pedal_state.sustain_pedal_down);
+        TEST(Synth::apply_sustain_pedal(&pedal_state, 64));
+        TEST(pedal_state.sustain_pedal_down);
+        TEST(Synth::apply_sustain_pedal(&pedal_state, 127));
+        TEST(! Synth::apply_sustain_pedal(&pedal_state, 0));
+        TEST(! pedal_state.sustain_pedal_down);
+        Synth::ChannelCcState other_pedal = make_cc_state();
+        TEST(! other_pedal.sustain_pedal_down);
+        TEST(Synth::apply_sustain_pedal(&pedal_state, 64));
+        TEST(pedal_state.sustain_pedal_down && ! other_pedal.sustain_pedal_down);
+        TEST(! Synth::is_assignable_cc(Synth::sustain_pedal_cc));
+        TEST(Synth::mix_cc_role(Synth::sustain_pedal_cc) == Synth::MixRole::none);
+    }
+
     // T3: the runtime validator admits assignable CC inputs (16..31) on channel
     // chains and the commit hands source, CC number and chain to the writer.
     {
@@ -12942,6 +13674,271 @@ int main()
             TEST(! Synth::decode_editor_bank_json(spliced, spliced_len, &decoded));
             TEST(memcmp(&decoded, &prior, sizeof(decoded)) == 0);
         }
+    }
+
+    // Piano-type sustain bank JSON: decode normalization and the
+    // release_seconds/ping_pong round trip.
+    {
+        Synth::Instrument         instr;
+        Synth::EnvelopeDescriptor envs[Synth::instrument_max_envelopes];
+        Synth::LFODescriptor      lfos[Synth::instrument_max_lfos];
+        uint32_t                  env_count = 0;
+        uint32_t                  lfo_count = 0;
+
+        // Four-point volume envelope, span [1, 3], unequal endpoints.
+        static const char unequal_doc[] =
+            "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\",\"volume\":{\"base\":1,"
+            "\"envelope\":{\"points\":[{\"time_seconds\":0,\"level\":0},{\"time_seconds\":0.1,\"level\":1},"
+            "{\"time_seconds\":0.2,\"level\":0.5},{\"time_seconds\":0.3,\"level\":0.25}],"
+            "\"sustain_start\":1,\"sustain_end\":3}}}]}";
+
+        // With ping-pong off, the decoded multi-point span loads with the
+        // span's last point value forced to the first point's value.
+        TEST(Synth::decode_instrument_json(unequal_doc,
+                                           sizeof(unequal_doc) - 1,
+                                           &instr,
+                                           envs,
+                                           &env_count,
+                                           lfos,
+                                           &lfo_count));
+        TEST(env_count == 1);
+        TEST(envs[0].sustain_first_point == 1 && envs[0].sustain_last_point == 3);
+        TEST(envs[0].points[3].value == envs[0].points[1].value);
+        TEST(envs[0].points[2].value != envs[0].points[1].value); // interior points stay authored
+
+        // Edge case: only sustain_end set at the final point defaults to a
+        // single-point span, so nothing is snapped.
+        static const char end_only_doc[] =
+            "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\",\"volume\":{\"base\":1,"
+            "\"envelope\":{\"points\":[{\"time_seconds\":0,\"level\":0},{\"time_seconds\":0.1,\"level\":1},"
+            "{\"time_seconds\":0.2,\"level\":0.5},{\"time_seconds\":0.3,\"level\":0.25}],"
+            "\"sustain_end\":3}}}]}";
+        TEST(Synth::decode_instrument_json(end_only_doc,
+                                           sizeof(end_only_doc) - 1,
+                                           &instr,
+                                           envs,
+                                           &env_count,
+                                           lfos,
+                                           &lfo_count));
+        TEST(envs[0].sustain_first_point == 3 && envs[0].sustain_last_point == 3);
+        // The final point keeps its authored level (0.25 -> 0x4000): a snap to
+        // the span start (level 0) or to the first point (level 1) would fail.
+        TEST(envs[0].points[3].value == 0x4000);
+        TEST(envs[0].points[3].value != envs[0].points[0].value);
+
+        // Edge case: only sustain_start set below the final point forms an
+        // effective multi-point span, so the snap fires.
+        static const char start_only_doc[] =
+            "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\",\"volume\":{\"base\":1,"
+            "\"envelope\":{\"points\":[{\"time_seconds\":0,\"level\":0},{\"time_seconds\":0.1,\"level\":1},"
+            "{\"time_seconds\":0.2,\"level\":0.5},{\"time_seconds\":0.3,\"level\":0.25}],"
+            "\"sustain_start\":1}}}]}";
+        TEST(Synth::decode_instrument_json(start_only_doc,
+                                           sizeof(start_only_doc) - 1,
+                                           &instr,
+                                           envs,
+                                           &env_count,
+                                           lfos,
+                                           &lfo_count));
+        TEST(envs[0].sustain_first_point == 1 && envs[0].sustain_last_point == 3);
+        TEST(envs[0].points[3].value == envs[0].points[1].value);
+
+        // Ping-pong on preserves the authored unequal endpoints.
+        static const char ping_pong_doc[] =
+            "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\",\"volume\":{\"base\":1,"
+            "\"envelope\":{\"points\":[{\"time_seconds\":0,\"level\":0},{\"time_seconds\":0.1,\"level\":1},"
+            "{\"time_seconds\":0.2,\"level\":0.5},{\"time_seconds\":0.3,\"level\":0.25}],"
+            "\"sustain_start\":1,\"sustain_end\":3,\"ping_pong\":1}}}]}";
+        TEST(Synth::decode_instrument_json(ping_pong_doc,
+                                           sizeof(ping_pong_doc) - 1,
+                                           &instr,
+                                           envs,
+                                           &env_count,
+                                           lfos,
+                                           &lfo_count));
+        TEST(envs[0].ping_pong == 1);
+        TEST(envs[0].points[3].value != envs[0].points[1].value);
+
+        // Re-encode keeps the normalized value: decode the unequal document
+        // again, then round-trip the normalized envelope through a
+        // descriptor bank.
+        TEST(Synth::decode_instrument_json(unequal_doc,
+                                           sizeof(unequal_doc) - 1,
+                                           &instr,
+                                           envs,
+                                           &env_count,
+                                           lfos,
+                                           &lfo_count));
+        // Static storage: an InstrumentBank is far too large for the stack.
+        static Synth::InstrumentBank desc_bank = {};
+        desc_bank                              = {};
+        desc_bank.envelopes.num_allocated      = env_count;
+        for (uint32_t i = 0; i < env_count; i++) {
+            desc_bank.envelopes.entries[i] = envs[i];
+        }
+        static char    doc_text[8192]; // static: 8 KB is too much stack
+        const uint32_t doc_len = Synth::encode_instrument_json(doc_text, sizeof(doc_text), &instr, &desc_bank);
+        TEST(doc_len > 0);
+        TEST(Synth::decode_instrument_json(doc_text, doc_len, &instr, envs, &env_count, lfos, &lfo_count));
+        TEST(envs[0].points[3].value == envs[0].points[1].value);
+
+        // The release and ping-pong fields round-trip; absent fields
+        // decode as 0; invalid values are refused.
+        static const char defaults_doc[] = "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\"}]}";
+        TEST(Synth::decode_instrument_json(defaults_doc,
+                                           sizeof(defaults_doc) - 1,
+                                           &instr,
+                                           envs,
+                                           &env_count,
+                                           lfos,
+                                           &lfo_count));
+        TEST(instr.release_seconds == 0.0f);
+
+        static const char release_doc[] =
+            "{\"format\":\"synth-instrument-v1\",\"release_seconds\":12.5,"
+            "\"layers\":[{\"wave_a\":\"sine\",\"volume\":{\"base\":1,\"envelope\":{"
+            "\"points\":[{\"time_seconds\":0,\"level\":0},{\"time_seconds\":0.1,\"level\":1}],"
+            "\"sustain_start\":1,\"sustain_end\":1,\"ping_pong\":1}}}]}";
+        TEST(Synth::decode_instrument_json(release_doc,
+                                           sizeof(release_doc) - 1,
+                                           &instr,
+                                           envs,
+                                           &env_count,
+                                           lfos,
+                                           &lfo_count));
+        TEST(instr.release_seconds == 12.5f);
+        TEST(env_count == 1 && envs[0].ping_pong == 1);
+        desc_bank.envelopes.num_allocated = env_count;
+        for (uint32_t i = 0; i < env_count; i++) {
+            desc_bank.envelopes.entries[i] = envs[i];
+        }
+        const uint32_t release_len = Synth::encode_instrument_json(doc_text, sizeof(doc_text), &instr, &desc_bank);
+        TEST(release_len > 0);
+        TEST(Synth::decode_instrument_json(doc_text, release_len, &instr, envs, &env_count, lfos, &lfo_count));
+        TEST(instr.release_seconds == 12.5f);
+        TEST(envs[0].ping_pong == 1);
+
+        // The decoder refuses a negative, oversized or non-finite release and
+        // a ping-pong flag above 1.
+        static const char negative_release_doc[] =
+            "{\"format\":\"synth-instrument-v1\",\"release_seconds\":-1,\"layers\":[{\"wave_a\":\"sine\"}]}";
+        TEST(! Synth::decode_instrument_json(negative_release_doc,
+                                             sizeof(negative_release_doc) - 1,
+                                             &instr,
+                                             envs,
+                                             &env_count,
+                                             lfos,
+                                             &lfo_count));
+        static const char oversized_release_doc[] =
+            "{\"format\":\"synth-instrument-v1\",\"release_seconds\":3601,\"layers\":[{\"wave_a\":\"sine\"}]}";
+        TEST(! Synth::decode_instrument_json(oversized_release_doc,
+                                             sizeof(oversized_release_doc) - 1,
+                                             &instr,
+                                             envs,
+                                             &env_count,
+                                             lfos,
+                                             &lfo_count));
+        static const char infinite_release_doc[] =
+            "{\"format\":\"synth-instrument-v1\",\"release_seconds\":1e400,\"layers\":[{\"wave_a\":\"sine\"}]}";
+        TEST(! Synth::decode_instrument_json(infinite_release_doc,
+                                             sizeof(infinite_release_doc) - 1,
+                                             &instr,
+                                             envs,
+                                             &env_count,
+                                             lfos,
+                                             &lfo_count));
+        static const char ping_pong_two_doc[] =
+            "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\",\"volume\":{\"base\":1,"
+            "\"envelope\":{\"points\":[{\"time_seconds\":0,\"level\":0},{\"time_seconds\":0.1,\"level\":1}],"
+            "\"sustain_start\":1,\"sustain_end\":1,\"ping_pong\":2}}}]}";
+        TEST(! Synth::decode_instrument_json(ping_pong_two_doc,
+                                             sizeof(ping_pong_two_doc) - 1,
+                                             &instr,
+                                             envs,
+                                             &env_count,
+                                             lfos,
+                                             &lfo_count));
+
+        // Pool (editor bank) form: the fields round-trip and the absent
+        // defaults stay 0.
+        static Synth::InstrumentEditorBank pool_source;
+        build_named_fm_fixture(&pool_source);
+        pool_source.bank.instruments.entries[0].release_seconds = 3.5f;
+        pool_source.bank.envelopes.entries[0].ping_pong         = 1;
+        static char pool_payload[Synth::library_payload_max];
+        uint32_t    pool_len = Synth::encode_editor_bank_json(&pool_source, pool_payload, sizeof(pool_payload));
+        TEST(pool_len > 0);
+        static Synth::InstrumentEditorBank pool_decoded;
+        TEST(Synth::decode_editor_bank_json(pool_payload, pool_len, &pool_decoded));
+        TEST(pool_decoded.bank.instruments.entries[0].release_seconds == 3.5f);
+        TEST(pool_decoded.bank.envelopes.entries[0].ping_pong == 1);
+
+        // Pool form: a multi-point span with unequal endpoints, ping-pong
+        // off, decodes normalized.
+        Synth::EnvelopeDescriptor& pool_env = pool_source.bank.envelopes.entries[0];
+        pool_env.ping_pong                  = 0;
+        pool_env.sustain_first_point        = 0;
+        pool_env.sustain_last_point         = 1;
+        pool_env.points[0].value            = 0x2000;
+        pool_env.points[1].value            = 0x4000;
+        TEST(pool_env.num_points == 2); // the default fixture envelope carries two points
+        pool_len = Synth::encode_editor_bank_json(&pool_source, pool_payload, sizeof(pool_payload));
+        TEST(pool_len > 0);
+        TEST(Synth::decode_editor_bank_json(pool_payload, pool_len, &pool_decoded));
+        TEST(pool_decoded.bank.envelopes.entries[0].points[1].value ==
+             pool_decoded.bank.envelopes.entries[0].points[0].value);
+
+        // Pool form: absent fields decode as 0.
+        pool_source.bank.instruments.entries[0].release_seconds = 0.0f;
+        pool_env.ping_pong                                      = 0;
+        pool_len = Synth::encode_editor_bank_json(&pool_source, pool_payload, sizeof(pool_payload));
+        TEST(pool_len > 0);
+        TEST(Synth::decode_editor_bank_json(pool_payload, pool_len, &pool_decoded));
+        TEST(pool_decoded.bank.instruments.entries[0].release_seconds == 0.0f);
+        TEST(pool_decoded.bank.envelopes.entries[0].ping_pong == 0);
+
+        // Pool form: the decoder refuses an out-of-range release.  Each splice
+        // starts from a fresh encode and rewrites only the encoded number, so
+        // the payload stays valid JSON and the value rejection itself is what
+        // fails the decode.
+        pool_source.bank.instruments.entries[0].release_seconds = 3.5f;
+        pool_len = Synth::encode_editor_bank_json(&pool_source, pool_payload, sizeof(pool_payload));
+        TEST(pool_len > 0);
+        char* number_field = strstr(pool_payload, ":3.5}");
+        TEST(number_field != nullptr);
+        if (number_field) {
+            // "-1" is one byte shorter than "3.5": shift the payload tail left.
+            memmove(number_field + 3, number_field + 4, strlen(number_field + 4) + 1);
+            memcpy(number_field + 1, "-1", 2);
+            TEST(! Synth::decode_editor_bank_json(pool_payload, pool_len - 1, &pool_decoded));
+        }
+        pool_len = Synth::encode_editor_bank_json(&pool_source, pool_payload, sizeof(pool_payload));
+        TEST(pool_len > 0);
+        number_field = strstr(pool_payload, ":3.5}");
+        TEST(number_field != nullptr);
+        if (number_field) {
+            memcpy(number_field + 1, "1e4", 3); // 10000 s exceeds the bound
+            TEST(! Synth::decode_editor_bank_json(pool_payload, pool_len, &pool_decoded));
+        }
+
+        // A negative zero release decodes into the canonical positive zero:
+        // the bounds accept -0.0, so canonicalization owns the sign.
+        pool_len = Synth::encode_editor_bank_json(&pool_source, pool_payload, sizeof(pool_payload));
+        TEST(pool_len > 0);
+        number_field = strstr(pool_payload, ":3.5}");
+        TEST(number_field != nullptr);
+        if (number_field) {
+            memmove(number_field + 3, number_field + 4, strlen(number_field + 4) + 1); // "-0" is one byte shorter
+            memcpy(number_field + 1, "-0", 2);
+            TEST(Synth::decode_editor_bank_json(pool_payload, pool_len - 1, &pool_decoded));
+            TEST(pool_decoded.bank.instruments.entries[0].release_seconds == 0.0f);
+            TEST(! std::signbit(pool_decoded.bank.instruments.entries[0].release_seconds));
+        }
+        static char    pool_reencoded[Synth::library_payload_max];
+        const uint32_t reencoded_len =
+            Synth::encode_editor_bank_json(&pool_decoded, pool_reencoded, sizeof(pool_reencoded));
+        TEST(reencoded_len > 0);
+        TEST(strstr(pool_reencoded, "release_seconds") == nullptr); // zero is omitted on encode
     }
 
     // A standalone-parameter LFO carries full 16-bit depth/rate parameter ids (they

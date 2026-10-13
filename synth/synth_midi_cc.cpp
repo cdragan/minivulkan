@@ -35,6 +35,12 @@ float Synth::apply_channel_cc(ChannelCcState* state, uint32_t controller, uint8_
     return cc_14bit_value(state->msb[slot], state->lsb[slot]);
 }
 
+bool Synth::apply_sustain_pedal(ChannelCcState* state, uint8_t value)
+{
+    state->sustain_pedal_down = value >= 64;
+    return state->sustain_pedal_down;
+}
+
 Synth::MixRole Synth::mix_cc_role(uint32_t controller)
 {
     if (controller == 7) {

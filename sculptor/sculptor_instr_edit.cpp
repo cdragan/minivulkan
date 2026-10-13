@@ -344,11 +344,12 @@ static bool submit_note_event(uint32_t channel, uint32_t note, bool note_on)
 
 static void init_osc_graph_widget();
 
-// Fixed nodes are structural: the MIDI input nodes and the oscillator sum
-// node cannot be deleted.  Oscillator layer nodes remove their layer and
-// generator nodes are freely deletable, so neither is vetoed - except the
-// last remaining oscillator layer: an instrument needs one layer, and a
-// commit-time refusal would delete the node for one frame and resurrect it.
+// Fixed nodes are structural: the MIDI input nodes, the Instrument
+// Parameters node and the oscillator sum node cannot be deleted.
+// Oscillator layer nodes remove their layer and generator nodes are freely
+// deletable, so neither is vetoed - except the last remaining oscillator
+// layer: an instrument needs one layer, and a commit-time refusal would
+// delete the node for one frame and resurrect it.
 static bool osc_node_delete_veto(void* user_data, uint32_t node_idx)
 {
     OscDeleteVetoContext* context = static_cast<OscDeleteVetoContext*>(user_data);
@@ -357,6 +358,9 @@ static bool osc_node_delete_veto(void* user_data, uint32_t node_idx)
     // nodes, so there is nothing to null-check here.
     const Sculptor::OscGraphMapping* mapping = context->mapping;
     if (mapping->input_node == node_idx) {
+        return true;
+    }
+    if (mapping->instrument_node == node_idx) {
         return true;
     }
     if (mapping->output_node == node_idx) {
@@ -854,8 +858,42 @@ static void write_record_position(Synth::InstrumentEditorBank* bank, int32_t rec
     record.height_override         = node_ref.content_height_override;
 }
 
+// Updates or appends one bound-node layout record keyed by (channel, zone,
+// kind, index): the position and size overrides follow the node, and a
+// missing record appends when the array has capacity.  Kind 0 keys the
+// canonical fixed nodes; kind 5 keys the zone's Instrument Parameters node.
+// Returns false when the record array lacks capacity.
+static bool store_bound_layout(Synth::InstrumentEditorBank* bank,
+                               const uint32_t               channel,
+                               const uint32_t               zone,
+                               const uint8_t                kind,
+                               const uint8_t                index,
+                               const Sculptor::Node&        node_ref)
+{
+    const int32_t record_idx = Sculptor::find_record(*bank, channel, zone, kind, index, 0);
+    if (record_idx >= 0) {
+        write_record_position(bank, record_idx, node_ref);
+        return true;
+    }
+    if (! Sculptor::graph_records_have_capacity(*bank, 1)) {
+        return false;
+    }
+    Synth::GraphNodeLayout record                  = {};
+    record.channel                                 = static_cast<uint8_t>(channel);
+    record.zone                                    = static_cast<uint8_t>(zone);
+    record.kind                                    = kind;
+    record.index                                   = index;
+    record.x                                       = node_ref.position.x;
+    record.y                                       = node_ref.position.y;
+    record.width_override                          = node_ref.content_width_override;
+    record.height_override                         = node_ref.content_height_override;
+    bank->graph_layout[bank->graph_layout_count++] = record;
+    return true;
+}
+
 // Writes every mapped node's current layout into the bank's records: bound
-// nodes key kind-0 records by canonical index, detached nodes update their
+// nodes key kind-0 records by canonical index, the Instrument Parameters
+// node keys a kind-5 record by zone alone, and detached nodes update their
 // own record in place. Unmoved nodes need no new records. Returns false on capacity,
 // identity or wiring refusal, leaving candidate changes for the caller to discard.
 static bool sync_osc_graph_layout(Synth::InstrumentEditorBank* bank,
@@ -875,24 +913,18 @@ static bool sync_osc_graph_layout(Synth::InstrumentEditorBank* bank,
         }
         const uint32_t canonical = Sculptor::osc_graph_canonical_index(mapping, node);
         if (canonical != Sculptor::pool_no_slot) {
-            const int32_t record_idx = Sculptor::find_record(*bank, channel, zone, 0, canonical, 0);
-            if (record_idx >= 0) {
-                write_record_position(bank, record_idx, node_ref);
-                continue;
-            }
-            if (! Sculptor::graph_records_have_capacity(*bank, 1)) {
+            if (! store_bound_layout(bank, channel, zone, 0, static_cast<uint8_t>(canonical), node_ref)) {
                 return false;
             }
-            Synth::GraphNodeLayout record                  = {};
-            record.channel                                 = static_cast<uint8_t>(channel);
-            record.zone                                    = static_cast<uint8_t>(zone);
-            record.kind                                    = 0;
-            record.index                                   = static_cast<uint8_t>(canonical);
-            record.x                                       = node_ref.position.x;
-            record.y                                       = node_ref.position.y;
-            record.width_override                          = node_ref.content_width_override;
-            record.height_override                         = node_ref.content_height_override;
-            bank->graph_layout[bank->graph_layout_count++] = record;
+            continue;
+        }
+        if (node == mapping.instrument_node) {
+            // The Instrument Parameters node is structural but not canonically
+            // numbered: its move persists as a kind-5 layout record keyed by
+            // the zone alone, so a re-projection restores the position.
+            if (! store_bound_layout(bank, channel, zone, 5, 0, node_ref)) {
+                return false;
+            }
             continue;
         }
         // Detached nodes carry their own record; its position follows the
@@ -1418,9 +1450,10 @@ int Sculptor::SynthEditor::envelope_state_widget_entry(void* user_data, float re
         return widget_height;
     }
 
-    // A volume envelope keeps the volume shape: minimum 0, first and last
-    // point 0.  The constraint follows the descriptor's volume wiring, so
-    // every node aliasing the descriptor is constrained the same way.
+    // A volume envelope keeps the volume shape: minimum 0 and first point
+    // 0; tail values remain authored.  The constraint follows the
+    // descriptor's volume wiring, so every node aliasing the descriptor is
+    // constrained the same way.
     bool volume_used = false;
     bool other_used  = false;
     Sculptor::env_target_usage(osc_graph, osc_mapping, static_cast<uint16_t>(desc_id), &volume_used, &other_used);
@@ -1430,7 +1463,7 @@ int Sculptor::SynthEditor::envelope_state_widget_entry(void* user_data, float re
             Sculptor::undo_group_reset(&osc_undo_group);
         }
         Sculptor::notify_warning(
-            "Synth: volume envelope keeps the first and the last point at 0; unwire it from Volume to edit freely");
+            "Synth: volume envelope keeps the first point at 0; unwire it from Volume to edit freely");
         return widget_height;
     }
 

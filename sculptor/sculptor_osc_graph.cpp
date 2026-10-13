@@ -382,6 +382,9 @@ static NodeRole node_role(const Sculptor::OscGraphMapping& mapping, uint32_t nod
     if (mapping.input_node == node_idx) {
         return role_input;
     }
+    if (mapping.instrument_node == node_idx) {
+        return role_input;
+    }
     if (mapping.output_node == node_idx) {
         return role_output;
     }
@@ -527,8 +530,9 @@ static void clear_mapping(Sculptor::OscGraphMapping* mapping)
         mapping->osc_nodes[layer]               = Sculptor::pool_no_slot;
     }
     mapping->osc_output_slot = Sculptor::pool_no_slot;
-    for (uint32_t i = 0; i < 2; ++i) {
-        mapping->input_detune_slots[i] = Sculptor::pool_no_slot;
+    mapping->instrument_node = Sculptor::pool_no_slot;
+    for (uint32_t i = 0; i < 3; ++i) {
+        mapping->instrument_slots[i] = Sculptor::pool_no_slot;
     }
     // Uniform node layouts; populated even when no such node exists so the
     // mapping always describes the full projection layout.
@@ -645,6 +649,7 @@ static uint32_t create_env_node(Sculptor::Graph*                 graph,
     graph->add_slot(node, output_slot("Value"));
     graph->add_slot(node, real_slot("Value (min)", env.min_value));
     graph->add_slot(node, real_slot("Value (max)", env.min_value + 65535.0f * env.min_max_delta));
+    graph->add_slot(node, Sculptor::toggle_slot("Ping-Pong", env.ping_pong != 0));
     // Point and sustain editing lives in the curve state widget; property
     // slots for those fields would be a second stale UI over the same data.
     return node;
@@ -794,12 +799,13 @@ bool Sculptor::env_volume_shape_ok(const Synth::EnvelopeDescriptor& env)
 {
     // The span must be nonnegative too: a negative delta would evaluate the
     // interior points below the zero floor.
-    return env.min_value == 0.0f && env.min_max_delta >= 0.0f && env.points[0].value == 0 &&
-           env.points[env.num_points - 1].value == 0;
+    // Tail values remain authored (a sustain release may end above 0); only
+    // the first point stays pinned at 0 so a note still starts in silence.
+    return env.min_value == 0.0f && env.min_max_delta >= 0.0f && env.points[0].value == 0;
 }
 
 // Forces the volume-envelope shape: minimum 0 with the effective top preserved,
-// and the first and the last point at 0.  Returns false when the effective top
+// and the first point at 0 (tail values remain authored).  Returns false when the effective top
 // is negative, which cannot be preserved under the nonnegative volume range.
 static bool env_convert_to_volume_shape(Synth::EnvelopeDescriptor& env)
 {
@@ -807,10 +813,9 @@ static bool env_convert_to_volume_shape(Synth::EnvelopeDescriptor& env)
     if (max_value < 0.0f) {
         return false;
     }
-    env.min_value                        = 0.0f;
-    env.min_max_delta                    = max_value / 65535.0f;
-    env.points[0].value                  = 0;
-    env.points[env.num_points - 1].value = 0;
+    env.min_value       = 0.0f;
+    env.min_max_delta   = max_value / 65535.0f;
+    env.points[0].value = 0;
     return true;
 }
 
@@ -1001,14 +1006,24 @@ bool Sculptor::project_instrument_to_graph(const Synth::Instrument&     instrume
             mapping->input_cc_slots[i] = graph->add_slot(input_node, output_slot(label));
         }
     }
+    // The note/layer detune and release rows live on a dedicated node
+    // beside MIDI Inputs, so they survive CC-dot changes and stay
+    // editable as one group.
+    const uint32_t instrument_node = graph->create_node("Instrument Parameters", vmath::vec2(0.0f, 512.0f));
+    if (instrument_node == Sculptor::pool_no_slot) {
+        return false;
+    }
+    mapping->instrument_node = instrument_node;
     // Random pitch offset drawn once per note for every layer, in semitones.
-    mapping->input_detune_slots[0] =
-        graph->add_slot(input_node,
+    mapping->instrument_slots[0] =
+        graph->add_slot(instrument_node,
                         bounded_real_slot("Random Note Detune", instrument.note_skew_semitones, 0.0f, 1.0f));
     // Independent random pitch offset drawn per layer per note, in semitones.
-    mapping->input_detune_slots[1] =
-        graph->add_slot(input_node,
+    mapping->instrument_slots[1] =
+        graph->add_slot(instrument_node,
                         bounded_real_slot("Random Oscillator Detune", instrument.layer_skew_semitones, 0.0f, 1.0f));
+    mapping->instrument_slots[2] =
+        graph->add_slot(instrument_node, bounded_real_slot("Release (s)", instrument.release_seconds, 0.0f, 30.0f));
 
     const uint32_t output_node = graph->create_node("Oscillator Output", vmath::vec2(1024.0f, 0.0f));
     if (output_node == Sculptor::pool_no_slot) {
@@ -1280,20 +1295,24 @@ bool Sculptor::compile_graph_to_instrument(const Graph& graph, const OscGraphMap
         }
     }
 
-    const Node& inputs = graph.node(mapping.input_node);
-    if (inputs.slots.num_allocated < num_osc_graph_inputs + 2) {
-        return false;
+    // Instrument-parameter rows live on the dedicated node; direct
+    // project_instrument_to_graph callers (the unit tests) always project
+    // it, so a missing node means a hand-built graph: parameters stay at
+    // the Instrument{} zero-init instead of a slot read.
+    if (mapping.instrument_node != pool_no_slot) {
+        const Node& params = graph.node(mapping.instrument_node);
+        if (params.slots.num_allocated < 3) {
+            return false;
+        }
+        for (uint32_t i = 0; i < 3; ++i) {
+            if (mapping.instrument_slots[i] == pool_no_slot) {
+                return false;
+            }
+        }
+        out->note_skew_semitones  = params.slots.entries[mapping.instrument_slots[0]].value.real;
+        out->layer_skew_semitones = params.slots.entries[mapping.instrument_slots[1]].value.real;
+        out->release_seconds      = params.slots.entries[mapping.instrument_slots[2]].value.real;
     }
-    // The detune rows are always the node's last two slots; direct
-    // project_instrument_to_graph callers (the unit tests) project without
-    // the CC post-pass, so the compile falls back to the node tail when
-    // the mapping carries no projected detune indices.
-    const uint32_t note_detune_slot =
-        mapping.input_detune_slots[0] != pool_no_slot ? mapping.input_detune_slots[0] : inputs.slots.num_allocated - 2;
-    const uint32_t osc_detune_slot =
-        mapping.input_detune_slots[1] != pool_no_slot ? mapping.input_detune_slots[1] : inputs.slots.num_allocated - 1;
-    out->note_skew_semitones  = inputs.slots.entries[note_detune_slot].value.real;
-    out->layer_skew_semitones = inputs.slots.entries[osc_detune_slot].value.real;
     // Invariant: every wire into an oscillator lands on a block family
     // dot.  A connection still ending on a base target row means a
     // headless caller bypassed the relocation, and compiling it would
@@ -1531,6 +1550,17 @@ bool Sculptor::apply_osc_graph_descriptor_edit(const Graph&           graph,
                 return true;
             }
             return false;
+        }
+        if (slot.property_type == PropertyType::toggle && strncmp(slot.name, "Ping-Pong", sizeof(slot.name)) == 0) {
+            // Toggling a multi-point sustain span off snaps the live span end to
+            // the span start immediately (same rule as decode,
+            // sculptor_bank_json.cpp).  Events carry no old value, so the
+            // previous flag state comes from the descriptor itself.
+            if (env.ping_pong && ! value.toggle && env.sustain_last_point > env.sustain_first_point) {
+                env.points[env.sustain_last_point].value = env.points[env.sustain_first_point].value;
+            }
+            env.ping_pong = value.toggle ? 1 : 0;
+            return true;
         }
         return false;
     }
@@ -1976,9 +2006,9 @@ static bool apply_connection_change(Synth::InstrumentEditorBank* bank,
 
     // Wiring an envelope into the volume target forces the volume-envelope
     // shape on the shared descriptor: minimum 0 with the top preserved, and
-    // the first and the last point at 0, so a note starts and ends in
-    // silence.  The wire-time validator refuses cross-target sharing, so
-    // the conversion never changes what a non-volume user hears.
+    // the first point at 0, so a note starts in silence.  The wire-time
+    // validator refuses cross-target sharing, so the conversion never changes
+    // what a non-volume user hears.
     if ((change.kind == Sculptor::ChangeKind::connection_added ||
          change.kind == Sculptor::ChangeKind::connection_changed) &&
         change.connection_idx < Sculptor::max_connections && graph->connection_occupied(change.connection_idx)) {
@@ -2204,11 +2234,11 @@ bool Sculptor::refresh_osc_graph_compilation(Synth::InstrumentEditorBank* bank,
 
 uint32_t Sculptor::count_projected_nodes(const Synth::InstrumentEditorBank& bank, uint32_t channel, uint32_t zone)
 {
-    // Fixed inputs + sum node, then whatever the zone's instrument and the
-    // zone's records add: oscillator layers, generator instances and
-    // record surplus (a record that attaches to a derived instance adds
-    // no node).
-    uint32_t count = Synth::graph_canonical_input_node_count + 1;
+    // Fixed inputs, the instrument-parameters node and the sum node, then
+    // whatever the zone's instrument and the zone's records add: oscillator
+    // layers, generator instances and record surplus (a record that
+    // attaches to a derived instance adds no node).
+    uint32_t count = Synth::graph_canonical_input_node_count + 2;
     if (channel >= Synth::max_channels || zone >= Synth::max_instr_per_channel) {
         return count;
     }
@@ -2357,6 +2387,18 @@ bool Sculptor::project_editor_to_graph(const Synth::InstrumentEditorBank& bank,
                                    vmath::vec2(record.x, record.y),
                                    record.width_override,
                                    record.height_override);
+            continue;
+        }
+        if (record.kind == 5) {
+            // The Instrument Parameters node is structural but not canonically
+            // numbered: its layout record keys the zone alone and re-applies
+            // the saved position and size overrides when it exists.
+            if (mapping->instrument_node != pool_no_slot) {
+                graph->set_node_layout(mapping->instrument_node,
+                                       vmath::vec2(record.x, record.y),
+                                       record.width_override,
+                                       record.height_override);
+            }
             continue;
         }
         if (record.kind == 1 || record.kind == 2) {
@@ -2891,7 +2933,11 @@ bool Sculptor::encode_instrument_graph_layout(const Synth::Instrument&          
     }
     for (uint32_t record = 0; record < editor_bank.graph_layout_count; ++record) {
         const Synth::GraphNodeLayout& saved = editor_bank.graph_layout[record];
-        if (saved.channel == channel && saved.zone == zone && saved.kind != 4 && ! represented[record]) {
+        // Kinds 4 and 5 are bank-only records that never enter the portable
+        // document: effect-graph nodes and the Instrument Parameters node's
+        // position stay out of the clipboard/library format.
+        if (saved.channel == channel && saved.zone == zone && saved.kind != 4 && saved.kind != 5 &&
+            ! represented[record]) {
             return false;
         }
     }

@@ -965,8 +965,9 @@ bool Sculptor::validate_editor_metadata(const Synth::InstrumentEditorBank& bank)
             }
         }
         // Kinds 1/2 are detached records keyed by uid; a zero uid would
-        // alias the derived (record-less) projection state.
-        if (record.kind != 0 && record.kind != 4 && record.uid == 0) {
+        // alias the derived (record-less) projection state.  Kind 5 is a
+        // bound-node analog and carries uid 0 by definition.
+        if (record.kind != 0 && record.kind != 4 && record.kind != 5 && record.uid == 0) {
             return false;
         }
         // Bound and generator records carry no title override: a kind-4 record
@@ -981,6 +982,14 @@ bool Sculptor::validate_editor_metadata(const Synth::InstrumentEditorBank& bank)
             // Bound nodes are keyed by canonical index alone: a nonzero uid
             // would create a second key for the same node.
             if (record.uid != 0) {
+                return false;
+            }
+        }
+        else if (record.kind == 5) {
+            // The Instrument Parameters node's record keys the zone alone;
+            // index and uid are unused and must stay 0, and the LFO
+            // wiring-source fields are reserved for kinds 1/2.
+            if (record.index != 0 || record.uid != 0 || record.depth_source != 0 || record.rate_source != 0) {
                 return false;
             }
         }

@@ -28,7 +28,12 @@ constexpr bool cc_is_assignable(uint32_t cc)
 struct ChannelCcState {
     uint8_t msb[num_assignable_ccs];
     uint8_t lsb[num_assignable_ccs]; // 0xFF = not yet seen
+    bool    sustain_pedal_down;      // CC 64 at or above 64: note-offs are held until the pedal lifts
 };
+
+// Sustain pedal controller number (standard MIDI); outside the assignable
+// (16..31, 48..63) and mix (7, 10) ranges, so it reuses no existing routing.
+constexpr uint32_t sustain_pedal_cc = 64;
 
 // True for the assignable controllers (CC 16..31 and their LSB pairs 48..63).
 bool is_assignable_cc(uint32_t controller);
@@ -46,6 +51,10 @@ float cc_14bit_value(uint32_t msb, uint32_t lsb);
 // value.  Non-assignable controllers leave the state untouched.  An LSB event
 // replaces the sentinel with the received value (including zero).
 float apply_channel_cc(ChannelCcState* state, uint32_t controller, uint8_t value);
+
+// Applies one sustain-pedal (CC 64) event to the channel state: the pedal is
+// down at value >= 64.  Returns the new pedal-down flag.
+bool apply_sustain_pedal(ChannelCcState* state, uint8_t value);
 
 // Channel-mix CCs: CC 7 = volume, CC 10 = panning.  Plain 7-bit, outside the
 // assignable MSB (16..31) and LSB (48..63) ranges (cc_msb_base/cc_lsb_base).

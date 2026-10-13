@@ -39,7 +39,8 @@ struct GraphNodeLayout {
     uint8_t kind;         // 0 = bound node (index = canonical 0..8),
                           // 1 = envelope instance, 2 = LFO instance
                           // (index = descriptor id 1..128),
-                          // 4 = effect-graph node (name = node title, channel 16 = master chain)
+                          // 4 = effect-graph node (name = node title, channel 16 = master chain),
+                          // 5 = Instrument Parameters node (index and uid unused, 0)
     uint8_t index;        // canonical index or descriptor id
     uint8_t depth_source; // detached LFO only, else 0 (ModSource value)
     uint8_t rate_source;  // detached LFO only, else 0 (ModSource value)
@@ -53,7 +54,7 @@ static_assert(sizeof(GraphNodeLayout) == 56);
 // metadata is an unknown record and is rejected like any malformed field.
 inline bool editor_record_kind_valid(uint8_t kind)
 {
-    return kind == 0 || kind == 1 || kind == 2 || kind == 4;
+    return kind == 0 || kind == 1 || kind == 2 || kind == 4 || kind == 5;
 }
 
 constexpr uint32_t max_graph_records     = 1280; // global record cap

@@ -132,41 +132,87 @@ float eval_envelope(const EnvelopeDescriptor& envelope, EnvelopeState* state, bo
 
     const float value = envelope_value_at(envelope, *state);
 
-    for (;;) {
-        // Advance envelope
-        if (! sustain || env_point < envelope.sustain_last_point) {
-
-            const uint32_t next_point = env_point + 1;
-            if (next_point < envelope.num_points) {
+    // Ping-pong sustain span: the direction reverses at both span ends
+    // instead of looping back to the span start.  Single-point spans (and
+    // ping_pong off) keep the legacy loop below.
+    if (sustain && envelope.ping_pong && envelope.sustain_last_point > envelope.sustain_first_point) {
+        if (! state->reverse) {
+            if (env_point < envelope.sustain_last_point) {
+                // Ordinary forward advance through the span, as without ping-pong.
+                const uint32_t next_point = env_point + 1;
                 ++env_tick;
-
-                // Advance envelope point
-                const uint32_t next_tick = envelope.points[next_point].position;
-                if (env_tick == next_tick) {
+                if (env_tick == envelope.points[next_point].position) {
                     env_point = next_point;
                 }
             }
             else {
-                assert(env_tick == envelope.points[envelope.num_points - 1].position);
+                // Parked at the span end: reverse and step back immediately.
+                state->reverse = 1;
+                --env_point;
+                --env_tick;
+                if (env_tick < envelope.points[env_point].position) {
+                    env_tick = envelope.points[env_point].position; // zero-gap points clamp in place
+                }
             }
         }
-        // Apply sustain loop
+        else if (env_tick > envelope.points[env_point].position) {
+            --env_tick; // stepping backward through the current segment
+        }
+        else if (env_point > envelope.sustain_first_point) {
+            // Parked at a segment start: continue into the previous segment's tail.
+            --env_point;
+            --env_tick;
+            if (env_tick < envelope.points[env_point].position) {
+                env_tick = envelope.points[env_point].position; // zero-gap points clamp in place
+            }
+        }
         else {
-            assert(env_point == envelope.sustain_last_point);
-
-            if (env_point == envelope.sustain_first_point) {
-                assert(env_tick == envelope.points[env_point].position);
-            }
-            else {
-                assert(env_tick == envelope.points[env_point].position);
-                env_point = envelope.sustain_first_point;
-                env_tick  = envelope.points[env_point].position;
-
-                // Loop back and try to advance to next tick from envelope start
-                continue;
+            // Parked at the span start: bounce back to the forward direction.
+            state->reverse            = 0;
+            const uint32_t next_point = env_point + 1;
+            ++env_tick;
+            if (env_tick == envelope.points[next_point].position) {
+                env_point = next_point;
             }
         }
-        break;
+    }
+    else {
+        for (;;) {
+            // Advance envelope
+            if (! sustain || env_point < envelope.sustain_last_point) {
+
+                const uint32_t next_point = env_point + 1;
+                if (next_point < envelope.num_points) {
+                    ++env_tick;
+
+                    // Advance envelope point
+                    const uint32_t next_tick = envelope.points[next_point].position;
+                    if (env_tick == next_tick) {
+                        env_point = next_point;
+                    }
+                }
+                else {
+                    assert(env_tick == envelope.points[envelope.num_points - 1].position);
+                }
+            }
+            // Apply sustain loop
+            else {
+                assert(env_point == envelope.sustain_last_point);
+
+                if (env_point == envelope.sustain_first_point) {
+                    assert(env_tick == envelope.points[env_point].position);
+                }
+                else {
+                    assert(env_tick == envelope.points[env_point].position);
+                    env_point = envelope.sustain_first_point;
+                    env_tick  = envelope.points[env_point].position;
+
+                    // Loop back and try to advance to next tick from envelope start
+                    continue;
+                }
+            }
+            break;
+        }
     }
 
     state->point = static_cast<uint16_t>(env_point);
@@ -275,3 +321,41 @@ uint32_t get_ringbuf_contig_tail(const uint64_t pos, const uint32_t capacity)
 }
 
 } // namespace Synth
+
+uint32_t Synth::sustain_decay_ticks(const float release_seconds)
+{
+    // Zero (and negative or NaN, which no decoded bank can carry) is the
+    // legacy gate: no decay.
+    if (! (release_seconds > 0.0f)) {
+        return 0;
+    }
+
+    // One control step is rt_step_samples / rt_sampling_rate seconds.
+    const float ticks = release_seconds * static_cast<float>(rt_sampling_rate) / static_cast<float>(rt_step_samples);
+
+    // Saturate instead of trapping on an out-of-range float-to-unsigned
+    // conversion (hand-built JSON is adversarial even though the decoder
+    // bounds the value to 3600 s).
+    if (! (ticks < 4.0e9f)) {
+        return UINT32_MAX;
+    }
+
+    // Round to nearest, but any positive release decays for at least one step.
+    const uint32_t rounded = static_cast<uint32_t>(ticks + 0.5f);
+    return rounded ? rounded : 1;
+}
+
+float Synth::sustain_decay_per_tick(const uint32_t total_ticks)
+{
+    // exp2(log2(cutoff) / total_ticks): the factor crosses the cutoff at
+    // exactly tick total_ticks.  No decay without a release length.
+    return total_ticks ? mstd::exp2(-10.0f / static_cast<float>(total_ticks)) : 1.0f;
+}
+
+bool Synth::sustain_decay_owns_termination(const bool decaying, const float dest_value)
+{
+    // The decay owns termination only while the completed dest level is still
+    // audible; a silent dest frees through the existing completion rule
+    // (the factor times 0 is 0).
+    return decaying && dest_value != 0.0f;
+}

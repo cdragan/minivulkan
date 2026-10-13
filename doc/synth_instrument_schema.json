@@ -23,6 +23,13 @@
 			"default": 0,
 			"description": "Random pitch skew drawn per oscillator layer."
 		},
+		"release_seconds": {
+			"type": "number",
+			"minimum": 0,
+			"maximum": 3600,
+			"default": 0,
+			"description": "Sustain decay length: once a layer's volume envelope enters its sustain span, the whole volume decays exponentially toward silence over this many seconds, through the release as well.  0 keeps the legacy hold/loop behavior."
+		},
 		"graph_layout": {
 			"type": "array",
 			"maxItems": 135,
@@ -310,6 +317,13 @@
 					"minimum": 0,
 					"maximum": 7,
 					"description": "Last point of the sustain loop; must not precede sustain_start; defaults to the last point."
+				},
+				"ping_pong": {
+					"type": "integer",
+					"minimum": 0,
+					"maximum": 1,
+					"default": 0,
+					"description": "Multi-point sustain spans bounce between their ends instead of looping back to the span start; requires more than one point in the span.  0 keeps the legacy loop."
 				}
 			},
 			"required": ["points"],
