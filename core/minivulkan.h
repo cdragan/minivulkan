@@ -134,8 +134,8 @@ class Image;
 bool allocate_depth_buffers(Image (&depth_buffers)[max_swapchain_size], uint32_t num_depth_buffers);
 
 struct CommandBuffersBase {
-    VkCommandPool   pool    = VK_NULL_HANDLE;
-    VkCommandBuffer bufs[1] = { };
+    VkCommandPool   pool                     = VK_NULL_HANDLE;
+    VkCommandBuffer bufs[max_swapchain_size] = { };
 };
 
 bool reset_and_begin_command_buffer(VkCommandBuffer cmd_buf);
@@ -155,9 +155,6 @@ inline bool allocate_command_buffers_once(CommandBuffersBase* bufs,
 template<uint32_t num_buffers>
 struct CommandBuffers: public CommandBuffersBase {
     static constexpr uint32_t size() { return num_buffers; }
-
-    private:
-        VkCommandBuffer tail[num_buffers - 1] = { };
 };
 
 template<>

@@ -2316,7 +2316,8 @@ template <> void prepare_copy_audio_step_to_host<float, false>(uint32_t offset)
                        &push);       // pValues
 }
 
-template <typename T, bool interleaved> static bool render_audio(uint32_t num_samples)
+template<typename T, bool interleaved>
+static bool render_audio(uint32_t num_samples)
 {
     assert(num_samples % Synth::rt_step_samples == 0 && num_samples > 0);
 
@@ -2342,7 +2343,10 @@ template <typename T, bool interleaved> static bool render_audio(uint32_t num_sa
     if (! send_to_device_and_wait(audio_cmd_buf, vk_compute_queue, fen_compute))
         return false;
 
-    return buffers[output_buf].invalidate();
+    if (! buffers[output_buf].invalidate())
+        return false;
+
+    return true;
 }
 
 constexpr uint32_t audio_ring_frames      = Synth::rt_sampling_rate;

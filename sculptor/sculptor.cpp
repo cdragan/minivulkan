@@ -315,7 +315,7 @@ bool draw_frame(uint32_t image_idx, uint64_t time_ms, VkFence queue_fence, uint3
 
     static CommandBuffers<max_swapchain_size> bufs;
 
-    if (! allocate_command_buffers_once(&bufs, vk_num_swapchain_images))
+    if (! allocate_command_buffers_once(&bufs, max_swapchain_size))
         return false;
 
     const VkCommandBuffer buf = bufs.bufs[image_idx];

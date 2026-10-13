@@ -1137,6 +1137,7 @@ static bool update_resolution()
 bool allocate_command_buffers(CommandBuffersBase* bufs, uint32_t num_buffers, uint32_t queue_family_index)
 {
     assert(bufs->pool == VK_NULL_HANDLE);
+    assert(num_buffers <= max_swapchain_size);
 
     static VkCommandPoolCreateInfo create_info = {
         VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
