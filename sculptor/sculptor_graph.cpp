@@ -102,6 +102,29 @@ Sculptor::Slot Sculptor::toggle_slot(const char* name, bool value)
     return slot;
 }
 
+void Sculptor::append_mod_source_row(Sculptor::Graph* graph,
+                                     uint32_t         node,
+                                     uint32_t         input_idx,
+                                     uint8_t          row_group,
+                                     uint32_t         op_index,
+                                     float            amount)
+{
+    Sculptor::Slot src_dot = input_slot(input_idx == 0 ? "Source A" : "Source B");
+    src_dot.row_group      = row_group;
+    src_dot.child_row      = true;
+    graph->add_slot(node, src_dot);
+
+    Sculptor::Slot src_op = list_slot("Op", source_op_names, 2, op_index);
+    src_op.row_group      = row_group;
+    src_op.child_row      = true;
+    graph->add_slot(node, src_op);
+
+    Sculptor::Slot src_amount = real_slot("Amount", amount);
+    src_amount.row_group      = row_group;
+    src_amount.child_row      = true;
+    graph->add_slot(node, src_amount);
+}
+
 Sculptor::GraphColors Sculptor::default_graph_colors()
 {
 

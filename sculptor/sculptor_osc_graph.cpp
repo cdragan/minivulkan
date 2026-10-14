@@ -267,32 +267,35 @@ enum TargetFamily {
 // compile reads through when a wire lands later.
 static void append_target_block(Graph* graph, uint32_t node, Synth::ModTarget target, const Synth::TargetBinding& gen)
 {
-    const uint32_t t = static_cast<uint32_t>(target);
-    graph->add_slot(node, input_slot("Envelope"));
+    const uint32_t t       = static_cast<uint32_t>(target);
+    Sculptor::Slot env_dot = input_slot("Envelope");
+    env_dot.child_row      = true;
+    graph->add_slot(node, env_dot);
     Sculptor::Slot lfo_dot = input_slot("LFO");
     lfo_dot.row_group      = static_cast<uint8_t>(3 * t + 1);
+    lfo_dot.child_row      = true;
     graph->add_slot(node, lfo_dot);
     Sculptor::Slot lfo_op = list_slot("Op", source_op_names, 2, static_cast<uint32_t>(gen.lfo_op));
     lfo_op.row_group      = static_cast<uint8_t>(3 * t + 1);
+    lfo_op.child_row      = true;
     graph->add_slot(node, lfo_op);
     Sculptor::Slot lfo_depth = real_slot("Depth", gen.lfo_depth);
     lfo_depth.row_group      = static_cast<uint8_t>(3 * t + 1);
+    lfo_depth.child_row      = true;
     graph->add_slot(node, lfo_depth);
     Sculptor::Slot rate_scale = real_slot("Rate x", gen.lfo_rate_scale_ms);
     rate_scale.row_group      = static_cast<uint8_t>(3 * t + 1);
+    rate_scale.child_row      = true;
     graph->add_slot(node, rate_scale);
     for (uint32_t i = 0; i < Synth::max_mod_inputs; ++i) {
-        Sculptor::Slot src_dot = input_slot(i == 0 ? "Source A" : "Source B");
-        src_dot.row_group      = static_cast<uint8_t>(3 * t + 2 + i);
-        graph->add_slot(node, src_dot);
-        const Synth::SourceOp op     = i < gen.num_inputs ? gen.inputs[i].op : Synth::SourceOp::add;
-        const float           scale  = i < gen.num_inputs ? gen.inputs[i].scale : 0.0f;
-        Sculptor::Slot        src_op = list_slot("Op", source_op_names, 2, static_cast<uint32_t>(op));
-        src_op.row_group             = static_cast<uint8_t>(3 * t + 2 + i);
-        graph->add_slot(node, src_op);
-        Sculptor::Slot src_scale = real_slot("Amount", scale);
-        src_scale.row_group      = static_cast<uint8_t>(3 * t + 2 + i);
-        graph->add_slot(node, src_scale);
+        const Synth::SourceOp op    = i < gen.num_inputs ? gen.inputs[i].op : Synth::SourceOp::add;
+        const float           scale = i < gen.num_inputs ? gen.inputs[i].scale : 0.0f;
+        Sculptor::append_mod_source_row(graph,
+                                        node,
+                                        i,
+                                        static_cast<uint8_t>(3 * t + 2 + i),
+                                        static_cast<uint32_t>(op),
+                                        scale);
     }
 }
 

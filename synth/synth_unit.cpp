@@ -6229,6 +6229,88 @@ static void fx_lfo_binding_seed_regressions()
     TEST(seeded.lfo_depth == 0.25f);
 }
 
+// The oscillator and effect projections tag every modulator block slot with
+// child_row = true, and leave base-value rows, fixed slots, and
+// non-oscillator / non-effect node slots at child_row = false.
+static void child_row_projection_regressions()
+{
+    static Synth::InstrumentEditorBank source;
+    static Synth::Instrument           instrument = {};
+    static Sculptor::Graph             graph;
+    static Sculptor::OscGraphMapping   mapping;
+    build_zone_fixture(&source, &instrument);
+    TEST(Sculptor::project_editor_to_graph(source, &graph, &mapping));
+
+    const uint32_t osc_node = mapping.osc_nodes[0];
+    TEST(osc_node != Sculptor::pool_no_slot);
+    const Sculptor::Node& osc = graph.node(osc_node);
+    for (uint32_t t = 0; t < Synth::num_mod_targets; ++t) {
+        TEST(! osc.slots.entries[Sculptor::osc_target_row(t)].child_row);
+        TEST(osc.slots.entries[Sculptor::osc_target_env_dot(t)].child_row);
+        for (uint32_t f = 0; f <= 3; ++f) {
+            TEST(osc.slots.entries[Sculptor::osc_target_lfo_dot(t) + f].child_row);
+        }
+        for (uint32_t input = 0; input < Synth::max_mod_inputs; ++input) {
+            for (uint32_t f = 0; f <= 2; ++f) {
+                TEST(osc.slots.entries[Sculptor::osc_target_src_dot(t, input) + f].child_row);
+            }
+        }
+    }
+    TEST(! osc.slots.entries[mapping.osc_output_slot].child_row);
+    for (uint32_t s = 0; s < osc.slots.num_allocated; ++s) {
+        uint32_t   block_target = 0;
+        uint32_t   block_field  = 0;
+        const bool is_block     = Sculptor::osc_target_block_field(s, &block_target, &block_field);
+        TEST(osc.slots.entries[s].child_row == is_block);
+    }
+
+    const uint32_t non_osc_nodes[] = { mapping.input_node, mapping.instrument_node, mapping.output_node };
+    for (uint32_t node_idx : non_osc_nodes) {
+        TEST(node_idx != Sculptor::pool_no_slot);
+        const Sculptor::Node& node = graph.node(node_idx);
+        for (uint32_t s = 0; s < node.slots.num_allocated; ++s) {
+            TEST(! node.slots.entries[s].child_row);
+        }
+    }
+    TEST(mapping.detached_count >= 2);
+    for (uint32_t i = 0; i < mapping.detached_count; ++i) {
+        const uint32_t node_idx = mapping.detached[i].node_idx;
+        TEST(node_idx != Sculptor::pool_no_slot);
+        const Sculptor::Node& node = graph.node(node_idx);
+        for (uint32_t s = 0; s < node.slots.num_allocated; ++s) {
+            TEST(! node.slots.entries[s].child_row);
+        }
+    }
+
+    static Sculptor::EffectGraphMapping fx_mapping;
+    Synth::EffectChainBinding&          chain = add_cc_chain_fixture(&source, 0);
+    Sculptor::fx_init_slot(&chain, 0, Synth::EffectType::compressor);
+    chain.effects[0].enabled = true;
+    TEST(Sculptor::project_effect_chain_to_graph(source, 0, &graph, &fx_mapping));
+
+    const uint32_t fx_node = fx_mapping.effect_nodes[0];
+    TEST(fx_node != Sculptor::pool_no_slot);
+    const Sculptor::Node& fx = graph.node(fx_node);
+    TEST(! fx.slots.entries[0].child_row);
+    TEST(! fx.slots.entries[1].child_row);
+    TEST(! fx.slots.entries[2].child_row);
+    for (uint32_t param = 0; param < Sculptor::effect_type_info(Synth::EffectType::compressor).num_params; ++param) {
+        const uint32_t base = Sculptor::fx_param_row(param);
+        TEST(! fx.slots.entries[base].child_row);
+        for (uint32_t field = 1; field < Sculptor::fx_param_stride; ++field) {
+            TEST(fx.slots.entries[base + field].child_row);
+        }
+    }
+    const uint32_t non_fx_nodes[] = { fx_mapping.input_node, fx_mapping.output_node, fx_mapping.midi_node };
+    for (uint32_t node_idx : non_fx_nodes) {
+        TEST(node_idx != Sculptor::pool_no_slot);
+        const Sculptor::Node& node = graph.node(node_idx);
+        for (uint32_t s = 0; s < node.slots.num_allocated; ++s) {
+            TEST(! node.slots.entries[s].child_row);
+        }
+    }
+}
+
 // T-M6-12: a new oscillator inherits the last enabled oscillator's parameters:
 // the helper picks the highest enabled layer, the editor copies the whole
 // layer struct so every value carries over, and the projection accepts the
@@ -9863,6 +9945,7 @@ int main()
     fx_drop_anchor_flag_regressions();
     fx_add_lfo_modeled_regressions();
     fx_lfo_binding_seed_regressions();
+    child_row_projection_regressions();
     osc_inherit_source_regressions();
     osc_direct_modulator_regressions();
     osc_instrument_node_regressions();

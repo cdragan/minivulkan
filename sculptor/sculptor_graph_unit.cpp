@@ -1458,6 +1458,24 @@ static void test_user_disconnect_and_intent_capacity()
     TEST(graph.take_changes(changes, max_pending_changes) == 0);
 }
 
+static const ImDrawList* begin_rendered_graph_frame(Graph& graph)
+{
+    ImGui::NewFrame();
+    ImGui::SetNextWindowPos(ImVec2(0, 0));
+    ImGui::SetNextWindowSize(ImVec2(1024, 768));
+    ImGui::Begin("graph mouse regression",
+                 nullptr,
+                 ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove);
+    graph.render(vmath::vec2(1000, 740), nullptr);
+    return ImGui::GetWindowDrawList();
+}
+
+static void end_rendered_graph_frame()
+{
+    ImGui::End();
+    ImGui::Render();
+}
+
 static uint32_t render_frame(Graph&        graph,
                              ImVec2        mouse,
                              bool          down,
@@ -1472,14 +1490,7 @@ static uint32_t render_frame(Graph&        graph,
     io.AddMouseButtonEvent(0, down);
     io.AddMouseButtonEvent(1, right);
     io.AddKeyEvent(ImGuiKey_Escape, escape);
-    ImGui::NewFrame();
-    ImGui::SetNextWindowPos(ImVec2(0, 0));
-    ImGui::SetNextWindowSize(ImVec2(1024, 768));
-    ImGui::Begin("graph mouse regression",
-                 nullptr,
-                 ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove);
-    graph.render(vmath::vec2(1000, 740), nullptr);
-    const ImDrawList* draw              = ImGui::GetWindowDrawList();
+    const ImDrawList* draw              = begin_rendered_graph_frame(graph);
     uint32_t          old_wire_vertices = 0;
     uint32_t          markers           = 0;
     for (const ImDrawVert& vertex : draw->VtxBuffer) {
@@ -1494,8 +1505,7 @@ static uint32_t render_frame(Graph&        graph,
             ++markers;
         }
     }
-    ImGui::End();
-    ImGui::Render();
+    end_rendered_graph_frame();
     if (marker_count != nullptr) {
         *marker_count = markers;
     }
@@ -1508,7 +1518,7 @@ static ImVec2 audio_dot(const Graph& graph, uint32_t node, bool output)
     const float line_height  = ImGui::GetFontSize();
     const float frame_height = line_height + 2 * ImGui::GetStyle().FramePadding.y;
     return ImVec2(8 + graph.node(node).position.x + (output ? graph.content_size(node).x : 0),
-                  8 + graph.node(node).position.y + 8 + line_height + (frame_height + 4) * 0.5f);
+                  8 + graph.node(node).position.y + 8 + line_height + 4 + (frame_height + 4) * 0.5f);
 }
 
 // Renderer-harness context setup shared by every renderer-driven test
@@ -1671,7 +1681,7 @@ static void test_renderer_audio_endpoint_mouse_frames()
             const float    font  = ImGui::GetFontSize();
             const float    frame = font + 2 * ImGui::GetStyle().FramePadding.y;
             const ImVec2   dot(8 + graph.node(node).position.x * scale + (endpoint ? graph.content_size(node).x : 0),
-                               8 + graph.node(node).position.y * scale + (8 + font + (frame + 4) * 0.5f) * scale);
+                               8 + graph.node(node).position.y * scale + (8 + font + 4 + (frame + 4) * 0.5f) * scale);
             render_frame(graph, dot, false);
             render_frame(graph, dot, true);
             TEST(graph.interaction_active());
@@ -1687,13 +1697,177 @@ static void test_renderer_audio_endpoint_mouse_frames()
             graph.add_slot(fresh, out);
             render_frame(graph, ImVec2(8, 8), false);
             const float x = 8 + 16 * scale + graph.content_size(fresh).x;
-            const float y = 8 + 16 * scale + (8 + font + (frame + 4) * 0.5f) * scale;
+            const float y = 8 + 16 * scale + (8 + font + 4 + (frame + 4) * 0.5f) * scale;
             render_frame(graph, ImVec2(x, y), true);
             TEST(graph.interaction_active());
             render_frame(graph, ImVec2(x, y), false, true);
             TEST(! graph.interaction_active());
         }
     }
+    ImGui::DestroyContext();
+}
+
+struct ElbowSegment {
+    ImVec2 p1;
+    ImVec2 p2;
+};
+
+static bool hide_slots_from(void* user_data, const Graph& graph, uint32_t node_idx, uint32_t slot_idx)
+{
+    (void)graph;
+    (void)node_idx;
+    return slot_idx >= *static_cast<const uint32_t*>(user_data);
+}
+
+static void build_three_slot_mod_node(Graph& graph, bool mark_children)
+{
+    graph.clear();
+    graph.set_colors(Sculptor::default_graph_colors());
+    const uint32_t node = graph.create_node("Osc", vmath::vec2(32.0f, 32.0f));
+    TEST(node != Sculptor::pool_no_slot);
+
+    Slot volume        = Sculptor::real_slot("Volume", 0.5f);
+    volume.connectable = true;
+    TEST(graph.add_slot(node, volume) == 0);
+
+    Slot env      = Sculptor::input_slot("Envelope");
+    env.child_row = mark_children;
+    TEST(graph.add_slot(node, env) == 1);
+
+    Slot lfo      = Sculptor::input_slot("LFO");
+    lfo.child_row = mark_children;
+    TEST(graph.add_slot(node, lfo) == 2);
+}
+
+static uint32_t render_and_collect_connector_lines(Graph&        graph,
+                                                   ElbowSegment* segments,
+                                                   uint32_t      segment_cap,
+                                                   uint32_t*     out_segment_count)
+{
+    const ImDrawList* draw   = begin_rendered_graph_frame(graph);
+    const uint32_t    packed = Sculptor::default_graph_colors().connector;
+    const ImU32       connector_col =
+        IM_COL32((packed >> 24) & 0xFFu, (packed >> 16) & 0xFFu, (packed >> 8) & 0xFFu, packed & 0xFFu);
+    uint32_t connector_vtx = 0;
+    for (const ImDrawVert& vertex : draw->VtxBuffer) {
+        if (vertex.col == connector_col) {
+            ++connector_vtx;
+        }
+    }
+    uint32_t       seg_count = 0;
+    const uint32_t vtx_count = static_cast<uint32_t>(draw->VtxBuffer.Size);
+    for (uint32_t i = 0; i + 3 < vtx_count;) {
+        const ImDrawVert& v0 = draw->VtxBuffer[static_cast<int>(i)];
+        const ImDrawVert& v1 = draw->VtxBuffer[static_cast<int>(i + 1)];
+        const ImDrawVert& v2 = draw->VtxBuffer[static_cast<int>(i + 2)];
+        const ImDrawVert& v3 = draw->VtxBuffer[static_cast<int>(i + 3)];
+        if (v0.col == connector_col && v1.col == connector_col && v2.col == connector_col && v3.col == connector_col) {
+            const bool vertical   = v0.pos.y == v1.pos.y && v2.pos.y == v3.pos.y && v0.pos.x == v2.pos.x &&
+                                    v1.pos.x == v3.pos.x && v0.pos.y != v2.pos.y;
+            const bool horizontal = v0.pos.x == v1.pos.x && v2.pos.x == v3.pos.x && v0.pos.y == v2.pos.y &&
+                                    v1.pos.y == v3.pos.y && v0.pos.x != v2.pos.x;
+            if (vertical || horizontal) {
+                if (segments != nullptr && seg_count < segment_cap) {
+                    segments[seg_count].p1 = ImVec2(0.5f * (v0.pos.x + v1.pos.x), 0.5f * (v0.pos.y + v1.pos.y));
+                    segments[seg_count].p2 = ImVec2(0.5f * (v2.pos.x + v3.pos.x), 0.5f * (v2.pos.y + v3.pos.y));
+                }
+                ++seg_count;
+                i += 4;
+                continue;
+            }
+        }
+        ++i;
+    }
+    end_rendered_graph_frame();
+    if (out_segment_count != nullptr) {
+        *out_segment_count = seg_count;
+    }
+    return connector_vtx;
+}
+
+// Node height includes the 4 px title-to-first-row spacing, child rows
+// indent by tree_indent (14 px), hidden child rows draw no elbow, and each
+// visible child row draws a two-segment sharp-cornered elbow continuing the
+// vertical spine from the parent down through sibling child rows.
+static void test_renderer_title_spacing_and_child_row_elbows()
+{
+    create_renderer_context();
+
+    Graph& graph = reset_unit_graph(0);
+    graph.clear();
+    graph.set_colors(Sculptor::default_graph_colors());
+    const uint32_t single_node = graph.create_node("N", vmath::vec2(32.0f, 32.0f));
+    TEST(single_node != Sculptor::pool_no_slot);
+    Slot single_in = Sculptor::input_slot("In");
+    TEST(graph.add_slot(single_node, single_in) == 0);
+    render_frame(graph, ImVec2(900.0f, 600.0f), false);
+    const float title_h = ImGui::GetTextLineHeightWithSpacing();
+    const float frame_h = ImGui::GetFrameHeight();
+    TEST(graph.content_size(single_node).y == 8.0f + title_h + 4.0f + (frame_h + 4.0f) + 8.0f);
+
+    graph.clear();
+    const uint32_t top_node   = graph.create_node("N", vmath::vec2(32.0f, 32.0f));
+    const uint32_t child_node = graph.create_node("N", vmath::vec2(256.0f, 32.0f));
+    TEST(top_node != Sculptor::pool_no_slot);
+    TEST(child_node != Sculptor::pool_no_slot);
+    Slot top_slot        = Sculptor::input_slot("Envelope");
+    Slot child_slot      = top_slot;
+    child_slot.child_row = true;
+    TEST(graph.add_slot(top_node, top_slot) == 0);
+    TEST(graph.add_slot(child_node, child_slot) == 0);
+    render_frame(graph, ImVec2(900.0f, 600.0f), false);
+    TEST(graph.content_size(child_node).x == graph.content_size(top_node).x + 14.0f);
+
+    uint32_t seg_count = 0;
+    build_three_slot_mod_node(graph, false);
+    const uint32_t baseline_verts = render_and_collect_connector_lines(graph, nullptr, 0, &seg_count);
+    TEST(baseline_verts > 0);
+    TEST(seg_count == 0);
+
+    uint32_t min_hidden = 1;
+    graph.set_slot_hidden_callback(&hide_slots_from, &min_hidden);
+    build_three_slot_mod_node(graph, false);
+    const uint32_t hidden_base_verts = render_and_collect_connector_lines(graph, nullptr, 0, &seg_count);
+    TEST(seg_count == 0);
+    build_three_slot_mod_node(graph, true);
+    const uint32_t hidden_child_verts = render_and_collect_connector_lines(graph, nullptr, 0, &seg_count);
+    TEST(hidden_child_verts == hidden_base_verts);
+    TEST(seg_count == 0);
+
+    min_hidden = 2;
+    build_three_slot_mod_node(graph, false);
+    const uint32_t one_vis_base_verts = render_and_collect_connector_lines(graph, nullptr, 0, &seg_count);
+    TEST(seg_count == 0);
+    ElbowSegment segs[4] = {};
+    build_three_slot_mod_node(graph, true);
+    const uint32_t one_vis_child_verts = render_and_collect_connector_lines(graph, segs, 4, &seg_count);
+    TEST(one_vis_child_verts == one_vis_base_verts + 8);
+    TEST(seg_count == 2);
+
+    graph.set_slot_hidden_callback(nullptr, nullptr);
+    build_three_slot_mod_node(graph, true);
+    const uint32_t two_vis_child_verts = render_and_collect_connector_lines(graph, segs, 4, &seg_count);
+    TEST(two_vis_child_verts == baseline_verts + 16);
+    TEST(seg_count == 4);
+    if (seg_count == 4) {
+        // First child elbow: vertical spine down to corner, horizontal arm right.
+        TEST(segs[0].p1.x == segs[0].p2.x);
+        TEST(segs[0].p1.y < segs[0].p2.y);
+        TEST(segs[1].p1.x == segs[0].p2.x);
+        TEST(segs[1].p1.y == segs[0].p2.y);
+        TEST(segs[1].p2.y == segs[1].p1.y);
+        TEST(segs[1].p2.x > segs[1].p1.x);
+        // Second child elbow: vertical spine continues from first child's y_center.
+        TEST(segs[2].p1.x == segs[0].p1.x);
+        TEST(segs[2].p2.x == segs[2].p1.x);
+        TEST(segs[2].p1.y == segs[0].p2.y);
+        TEST(segs[2].p2.y > segs[2].p1.y);
+        TEST(segs[3].p1.x == segs[2].p2.x);
+        TEST(segs[3].p1.y == segs[2].p2.y);
+        TEST(segs[3].p2.y == segs[3].p1.y);
+        TEST(segs[3].p2.x == segs[1].p2.x);
+    }
+
     ImGui::DestroyContext();
 }
 
@@ -1801,14 +1975,7 @@ static bool marker_has_vertex_near(const MarkerVertex* vertices, uint32_t count,
 // are.
 static ImVec2 rendered_dot_center(Graph& graph)
 {
-    ImGui::NewFrame();
-    ImGui::SetNextWindowPos(ImVec2(0, 0));
-    ImGui::SetNextWindowSize(ImVec2(1024, 768));
-    ImGui::Begin("graph mouse regression",
-                 nullptr,
-                 ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove);
-    graph.render(vmath::vec2(1000, 740), nullptr);
-    const ImDrawList* draw  = ImGui::GetWindowDrawList();
+    const ImDrawList* draw  = begin_rendered_graph_frame(graph);
     float             sum_x = 0.0f;
     float             sum_y = 0.0f;
     uint32_t          ring  = 0;
@@ -1819,8 +1986,7 @@ static ImVec2 rendered_dot_center(Graph& graph)
             ++ring;
         }
     }
-    ImGui::End();
-    ImGui::Render();
+    end_rendered_graph_frame();
     TEST(ring > 0);
     return ImVec2(sum_x / static_cast<float>(ring), sum_y / static_cast<float>(ring));
 }
@@ -2193,7 +2359,7 @@ static void test_drop_menu_non_eligible_anchors_cancel()
     const float  frame = font + 2.0f * ImGui::GetStyle().FramePadding.y;
     const ImVec2 dot   = audio_dot(graph, anchor, false);
     // The point sits on the body node's second line, clear of its dots.
-    const ImVec2 on_body(8.0f + 256.0f + 30.0f, 8.0f + 256.0f + 8.0f + font + (frame + 4.0f) * 1.5f);
+    const ImVec2 on_body(8.0f + 256.0f + 30.0f, 8.0f + 256.0f + 8.0f + font + 4.0f + (frame + 4.0f) * 1.5f);
     render_frame(graph, ImVec2(900.0f, 600.0f), false);
     render_frame(graph, dot, false);
     render_frame(graph, dot, true);
@@ -2445,6 +2611,7 @@ static void test_drop_menu_eligible_model_rule()
 int main()
 {
     test_renderer_audio_endpoint_mouse_frames();
+    test_renderer_title_spacing_and_child_row_elbows();
     test_drop_menu_eligible_model_rule();
     test_drop_menu_dismissal_paths_leave_graph_unchanged();
     test_drop_menu_pending_wire_frozen_at_release_point();

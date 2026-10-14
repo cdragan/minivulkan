@@ -44,6 +44,7 @@ struct Slot {
     PropertyValue value;
     uint8_t       num_list_options; // for list properties
     uint8_t       row_group;        // 0 = own line; nonzero packs same-id slots onto one renderer line
+    bool          child_row;        // indented modulator row with an elbow tree line under its parent row
     float         real_min;         // bounded reals and bounded integer sliders clamp to [real_min, real_max]
     float         real_max;
     bool          real_bounded;
@@ -57,6 +58,8 @@ struct Slot {
 // at 312.
 static_assert(sizeof(Slot) == 312, "Slot size drifted; the drop_menu flag must stay within the 312-byte size budget");
 
+class Graph;
+
 // Shared slot construction helpers, the grammar both projections (oscillator
 // and effect) build their node rows from.
 Slot make_slot(const char* name, SlotKind kind, PropertyType property_type = PropertyType::unused);
@@ -68,6 +71,12 @@ Slot int_slot(const char* name, int32_t value);
 Slot bounded_int_slot(const char* name, int32_t value, int32_t min_value, int32_t max_value);
 Slot list_slot(const char* name, const char* const* option_names, uint32_t num_options, uint32_t index);
 Slot toggle_slot(const char* name, bool value);
+void append_mod_source_row(Graph*   graph,
+                           uint32_t node,
+                           uint32_t input_idx,
+                           uint8_t  row_group,
+                           uint32_t op_index,
+                           float    amount);
 
 // Option labels of the two-way source op list (SourceOp::add, SourceOp::multiply).
 extern const char* const source_op_names[2];

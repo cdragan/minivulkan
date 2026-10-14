@@ -710,13 +710,16 @@ bool Sculptor::project_effect_chain_to_graph(const Synth::InstrumentEditorBank& 
             // broken controls.
             Slot lfo_dot      = input_slot("LFO");
             lfo_dot.row_group = row_group;
+            lfo_dot.child_row = true;
             graph->add_slot(node, lfo_dot);
             Slot op =
                 list_slot("Op", Sculptor::source_op_names, 2, binding.lfo_op == Synth::SourceOp::multiply ? 1u : 0u);
             op.row_group                  = row_group;
+            op.child_row                  = true;
             const uint32_t op_slot_idx    = graph->add_slot(node, op);
             Slot           depth          = real_slot("Depth", binding.lfo_depth);
             depth.row_group               = row_group;
+            depth.child_row               = true;
             const uint32_t depth_slot_idx = graph->add_slot(node, depth);
             if (binding.lfo_desc_id == 0) {
                 graph->set_slot_edit_disabled(node, op_slot_idx, true);
@@ -728,20 +731,15 @@ bool Sculptor::project_effect_chain_to_graph(const Synth::InstrumentEditorBank& 
             // Rows past num_inputs show neutral defaults; the knobs stay
             // inert until a wire arrives.
             for (uint32_t input = 0; input < Synth::max_mod_inputs; ++input) {
-                const uint8_t src_row_group = static_cast<uint8_t>(8 + 2 * param + input);
-                Slot          src_dot       = input_slot(input == 0 ? "Source A" : "Source B");
-                src_dot.row_group           = src_row_group;
-                graph->add_slot(node, src_dot);
                 const Synth::SourceOp src_op =
                     input < binding.num_inputs ? binding.inputs[input].op : Synth::SourceOp::add;
-                Slot op_row =
-                    list_slot("Op", Sculptor::source_op_names, 2, src_op == Synth::SourceOp::multiply ? 1u : 0u);
-                op_row.row_group = src_row_group;
-                graph->add_slot(node, op_row);
-                const float src_scale  = input < binding.num_inputs ? binding.inputs[input].scale : 1.0f;
-                Slot        amount_row = real_slot("Amount", src_scale);
-                amount_row.row_group   = src_row_group;
-                graph->add_slot(node, amount_row);
+                const float src_scale = input < binding.num_inputs ? binding.inputs[input].scale : 1.0f;
+                Sculptor::append_mod_source_row(graph,
+                                                node,
+                                                input,
+                                                static_cast<uint8_t>(8 + 2 * param + input),
+                                                src_op == Synth::SourceOp::multiply ? 1u : 0u,
+                                                src_scale);
             }
         }
     }

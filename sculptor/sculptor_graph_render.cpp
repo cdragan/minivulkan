@@ -28,10 +28,15 @@ using Sculptor::SlotKind;
 using Sculptor::snap_to_grid;
 
 constexpr float node_padding         = 8.0f;                     // inner margins of a node rect
+constexpr float title_row_spacing    = 0.5f * node_padding;      // vertical gap between title underline and row 0
 constexpr float node_corner_rounding = 4.0f;                     // slight corner radius on node rects
 constexpr float dot_radius           = 5.0f;                     // connector dot radius
 constexpr float dot_space            = 2.0f * dot_radius + 2.0f; // room a dot claims
 constexpr float property_widget_w    = 80.0f;                    // width of inline value widgets
+constexpr float tree_indent          = 14.0f;                    // horizontal indent of child modulator rows
+constexpr float tree_elbow_x         = 5.0f;                     // elbow vertical spine x offset from parent label
+constexpr float tree_elbow_end       = 11.0f;                    // elbow horizontal arm end x offset from parent label
+constexpr float tree_line_width      = 1.0f;                     // stroke width of child-row elbow lines
 
 // A two-option list renders as a label+radio pair, wider than the fixed
 // property widget column: reserve its measured width so the pair never
@@ -305,7 +310,7 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
         // Layout: measure content (graph space, zoom applied when drawing).
         const float pad        = node_padding;
         const float title_h    = line_h * render_scale;
-        float       content_h  = pad + title_h;
+        float       content_h  = pad + title_h + title_row_spacing;
         float       max_line_w = ImGui::CalcTextSize(node.name).x;
 
         // Lines: every slot belongs to the line of its row_group (0 = own
@@ -321,6 +326,7 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
             uint32_t num_elems  = 0;
             float    y          = 0.0f; // top of the line, graph space
             bool     has_widget = false;
+            bool     child_row  = false;
         };
 
         Line    lines[max_node_slots];
@@ -352,6 +358,7 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
                 }
                 lines[line_idx].num_elems  = 0;
                 lines[line_idx].has_widget = false;
+                lines[line_idx].child_row  = slot.child_row;
             }
             Line& line                          = lines[line_idx];
             line.elems[line.num_elems].slot_idx = slot_idx;
@@ -380,7 +387,8 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
                         ++left_dots;
                     }
                 }
-                float    cursor = pad + static_cast<float>(left_dots > 0 ? left_dots : 1) * dot_space;
+                float    cursor = pad + static_cast<float>(left_dots > 0 ? left_dots : 1) * dot_space +
+                                  (line.child_row ? tree_indent : 0.0f);
                 uint32_t prop   = 0;
                 for (uint32_t e = 0; e < line.num_elems; ++e) {
                     const Slot& slot = node.slots.entries[line.elems[e].slot_idx];
@@ -425,7 +433,7 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
         // half padding so connector rows breathe as loosely as widget rows.
         for (uint32_t line_idx = 0; line_idx < num_lines; ++line_idx) {
             Line& line   = lines[line_idx];
-            float line_w = 0.0f;
+            float line_w = line.child_row ? tree_indent : 0.0f;
             for (uint32_t e = 0; e < line.num_elems; ++e) {
                 const Slot& slot = node.slots.entries[line.elems[e].slot_idx];
                 if (line.elems[e].dot) {
@@ -567,8 +575,28 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
 
             // A line with no input dots still starts its names one dot
             // column in, matching the input-tagged lines beside it.
-            float cursor =
+            const float base_label_x =
                 rect_min.x + (pad + static_cast<float>(left_dots > 0 ? left_dots : 1) * dot_space) * render_scale;
+            if (line.child_row) {
+                const float elbow_x     = base_label_x + tree_elbow_x * render_scale;
+                const float elbow_end_x = base_label_x + tree_elbow_end * render_scale;
+                float       spine_top_y = rect_min.y + line.y * render_scale;
+                if (line_idx > 0) {
+                    const Line& prev_line     = lines[line_idx - 1];
+                    const float prev_y_center = rect_min.y + (prev_line.y + 0.5f * line_span) * render_scale;
+                    spine_top_y = prev_line.child_row ? prev_y_center : (prev_y_center + 0.5f * line_h * render_scale);
+                }
+                const ImU32 elbow_color = to_imgui(colors_.connector);
+                draw_list->AddLine(ImVec2(elbow_x, spine_top_y),
+                                   ImVec2(elbow_x, y_center),
+                                   elbow_color,
+                                   tree_line_width);
+                draw_list->AddLine(ImVec2(elbow_x, y_center),
+                                   ImVec2(elbow_end_x, y_center),
+                                   elbow_color,
+                                   tree_line_width);
+            }
+            float    cursor    = base_label_x + (line.child_row ? tree_indent * render_scale : 0.0f);
             uint32_t line_prop = 0;
             for (uint32_t e = 0; e < line.num_elems; ++e) {
                 const uint32_t slot_idx = line.elems[e].slot_idx;
