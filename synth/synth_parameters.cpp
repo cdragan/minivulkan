@@ -359,3 +359,121 @@ bool Synth::sustain_decay_owns_termination(const bool decaying, const float dest
     // (the factor times 0 is 0).
     return decaying && dest_value != 0.0f;
 }
+
+float Synth::oscillator_final_pitch(const int   midi_note,
+                                    const int   octave_offset,
+                                    const float pitch_offset,
+                                    const float pitch_value)
+{
+    return static_cast<float>(midi_note) + 12.0f * static_cast<float>(octave_offset) + pitch_offset + pitch_value;
+}
+
+bool Synth::oscillator_pitch_in_gate(const float final_pitch)
+{
+    // Inclusive bounds, no rounding; NaN compares false and rejects.
+    return final_pitch >= 0.0f && final_pitch <= 127.0f;
+}
+
+float Synth::pitch_to_frequency(const float absolute_pitch, const uint32_t freq_mult)
+{
+    return note_to_frequency(69, absolute_pitch - 69.0f, freq_mult);
+}
+
+bool Synth::oscillator_fir_cutoffs(const float    effective_pitch,
+                                   const float    effective_spread,
+                                   const uint32_t freq_mult,
+                                   float*         lowpass_hz,
+                                   float*         highpass_hz)
+{
+    // A single NaN-safe test: NaN, 0 and negatives all read as filter-off.
+    if (! (effective_spread > 0.0f)) {
+        return false;
+    }
+    *lowpass_hz  = pitch_to_frequency(effective_pitch + effective_spread, freq_mult);
+    *highpass_hz = pitch_to_frequency(effective_pitch - effective_spread, freq_mult);
+    if (*highpass_hz < oscillator_fir_highpass_floor_hz) {
+        *highpass_hz = 0.0f; // Transport "edge off" so the shader runs pure lowpass.
+    }
+    return true;
+}
+
+void Synth::oscillator_fir_band_guard(uint32_t* lowpass_cutoff_freq, uint32_t* highpass_cutoff_freq)
+{
+    if (*highpass_cutoff_freq == 0 || *highpass_cutoff_freq < *lowpass_cutoff_freq) {
+        return; // Pure lowpass, or already a band-pass with nonzero bandwidth.
+    }
+    if (*lowpass_cutoff_freq >= max_cutoff_hz) {
+        *highpass_cutoff_freq = *lowpass_cutoff_freq - 1; // Both clamped: widen downward.
+    }
+    else {
+        *lowpass_cutoff_freq = *highpass_cutoff_freq + 1; // Zero bandwidth: widen upward.
+    }
+}
+
+uint32_t Synth::fir_effective_span(const float slope_percent)
+{
+    // NaN-safe clamp: NaN fails both comparisons and reads as the minimum.
+    const float slope =
+        (slope_percent >= 1.0f && slope_percent <= 100.0f) ? slope_percent : (slope_percent > 100.0f ? 100.0f : 1.0f);
+    const float    half    = static_cast<float>(num_fir_taps - 1) * 0.5f * slope / 100.0f;
+    const uint32_t rounded = static_cast<uint32_t>(half + 0.5f); // round half up, mirroring cutoff_hz_to_int
+    return 2 * rounded + 1;
+}
+
+float Synth::eval_sourced_lfo(const ParamDescriptor::LFOParam& gen,
+                              const float                      depth_source_value,
+                              const float                      rate_source_value,
+                              const uint32_t                   lfo_tick)
+{
+    const float depth = gen.depth_param_id ? depth_source_value * gen.depth : gen.depth;
+    // A rate source offsets the LFO's own period (ms) by source * rate_scale_ms; without one,
+    // period 0 tells eval_lfo_mod to use the descriptor period unchanged.  Clamp the offset
+    // result to at least 1 ms so an editor-supplied scale can never drive the period negative
+    // (unsigned underflow) or to zero (a divide-by-zero in the LFO phase).
+    const float    base_ms   = static_cast<float>(gen.lfo.period_ms);
+    const float    offset_ms = base_ms + rate_source_value * gen.rate_scale_ms;
+    const uint32_t period    = gen.rate_param_id ? static_cast<uint32_t>(offset_ms > 1.0f ? offset_ms : 1.0f) : 0;
+    return eval_lfo_mod(gen.lfo, lfo_tick, rt_step_samples, rt_sampling_rate, period, depth, gen.op);
+}
+
+float Synth::param_onset_value(const Parameter* params, const ParamDescriptor* descs, const uint16_t param_id)
+{
+    const ParamDescriptor& desc = descs[param_id];
+
+    switch (desc.kind) {
+        case ParamKind::external:
+            // The leaf's current value is the MIDI state at the note-on event.
+            return params[param_id].value;
+
+        case ParamKind::envelope:
+            // At note-on the state was just cleared, so this is the first
+            // point's value; the state stays untouched.
+            return eval_envelope_at(desc.envelope, params[param_id].envelope);
+
+        case ParamKind::lfo:
+            // Tick-zero evaluation from the current leaf values, mirroring the
+            // advance branch without advancing the tick or touching any state.
+            return eval_sourced_lfo(desc.lfo,
+                                    params[desc.lfo.depth_param_id].value,
+                                    params[desc.lfo.rate_param_id].value,
+                                    0);
+
+        case ParamKind::plain:
+        default: {
+            // Same composition as propagate_parameters, but every source is
+            // evaluated at its onset value.
+            float value = desc.plain.base_value;
+            for (uint32_t source_idx = 0; source_idx < desc.plain.num_sources; source_idx++) {
+                const SourceParam& source       = desc.plain.sources[source_idx];
+                const float        contribution = source.scale * param_onset_value(params, descs, source.param_id);
+                if (source.op == SourceOp::add) {
+                    value += contribution;
+                }
+                else {
+                    value *= contribution;
+                }
+            }
+            return value;
+        }
+    }
+}

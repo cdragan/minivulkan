@@ -71,7 +71,7 @@ namespace {
 constexpr uint32_t max_portable_records =
     Synth::graph_canonical_node_count + 2u * Synth::max_layers * Synth::num_mod_targets;
 static_assert(max_portable_records == Synth::instrument_graph_layout_capacity);
-static_assert(max_portable_records == 135, "9 canonical + 63 envelopes + 63 LFOs");
+static_assert(max_portable_records == 121, "9 canonical + 56 envelopes + 56 LFOs");
 constexpr uint32_t clipboard_token_bound = 16384;
 constexpr uint32_t fake_region_base      = 8192;
 
@@ -94,7 +94,7 @@ const char clipboard_doc_head[] =
     "\"depth_source\":\"velocity\",\"rate_source\":\"mod_wheel\",\"rate_scale_ms\":20}},"
     "\"pitch\":{\"base\":0,\"envelope\":{\"points\":[{\"time_seconds\":0,\"level\":0.25},"
     "{\"time_seconds\":0.5,\"level\":-0.25}],\"sustain_start\":0,\"sustain_end\":1}},"
-    "\"panning\":{\"base\":0.5},\"lowpass_cutoff\":{\"base\":2000},\"highpass_cutoff\":{\"base\":2000}}],";
+    "\"panning\":{\"base\":0.5},\"fir_pitch_spread\":{\"base\":3}}],";
 
 // The same instrument with a volume envelope byte-identical to the pitch
 // envelope's, which the decoder interns into one descriptor and the projection
@@ -126,15 +126,14 @@ constexpr uint32_t t7_rate_field      = 4;
 // The value row slot of each ModTarget on an oscillator node; its
 // 11-slot block starts directly after it.
 constexpr uint32_t t7_target_row_slots[Synth::num_mod_targets] = {
-    53,  // volume
-    77,  // pitch
-    65,  // pan
-    2,   // duty a
-    15,  // duty b
-    28,  // waveform mix
-    40,  // fm depth
-    90,  // lowpass
-    102, // highpass
+    53, // volume
+    77, // pitch
+    65, // pan
+    2,  // duty a
+    15, // duty b
+    28, // waveform mix
+    40, // fm depth
+    91, // fir pitch spread
 };
 // Shared graph and mapping for the direct-row blocks; every block
 // re-projects, which rebuilds both from scratch.
@@ -190,14 +189,15 @@ static bool approx(float left, float right, float eps)
     return diff <= eps;
 }
 
-// True for the five targets these fixtures wire modulators and MIDI inputs
-// onto (volume, pitch, panning, lowpass, highpass).  Under AC11 all nine
+// True for the four targets these fixtures wire modulators and MIDI
+// inputs onto (volume, pitch, panning, FIR spread).  Under AC11 all eight
 // targets are uniformly modulate-able; the remaining four (duty A/B, osc
-// mix and FM depth) keep base-only bindings here purely to bound fixture size.
+// mix and FM depth) keep base-only bindings here purely to bound fixture
+// size.
 static bool osc_graph_target(Synth::ModTarget target)
 {
     return target == Synth::mod_volume || target == Synth::mod_pitch || target == Synth::mod_panning ||
-           target == Synth::mod_lowpass_cutoff || target == Synth::mod_highpass_cutoff;
+           target == Synth::mod_fir_spread;
 }
 
 static bool osc_graph_mark_node(bool* seen, uint32_t node_idx, uint32_t* count)
@@ -245,7 +245,7 @@ static void check_osc_graph_mapping(const Sculptor::Graph&           graph,
         if (layer < layer_count) {
             TEST(mapping.osc_nodes[layer] != Sculptor::pool_no_slot);
             TEST(osc_graph_mark_node(seen, mapping.osc_nodes[layer], &count));
-            // 15 fixed rows plus one 11-slot block per ModTarget after its row.
+            // 16 fixed rows plus one 11-slot block per ModTarget after its row.
             const uint32_t osc_node = mapping.osc_nodes[layer];
             TEST(graph.node(osc_node).slots.num_allocated ==
                  Sculptor::osc_slot_count + Sculptor::osc_target_block_stride * Synth::num_mod_targets);
@@ -459,8 +459,8 @@ static void build_osc_graph_max_fixture(Synth::InstrumentBank* bank,
             gen.lfo_rate_scale_ms     = 10.0f * static_cast<float>(layer + 1) + static_cast<float>(t);
         }
     }
-    TEST(env_count == 35);
-    TEST(lfo_count == 34); // 35 bindings minus the one alias
+    TEST(env_count == 28);
+    TEST(lfo_count == 27); // 28 bindings minus the one alias
 
     for (uint32_t t = 0; t < Synth::num_mod_targets; t++) {
         Synth::TargetBinding& routing = instrument->layers[0].targets[t];
@@ -949,12 +949,11 @@ static void build_clipboard_zone_fixture(Synth::InstrumentEditorBank* bank, Synt
     osc.targets[Synth::mod_volume].lfo_rate_scale_ms = 20.0f;
     osc.targets[Synth::mod_pitch].envelope_desc_id   = 2;
 
-    instrument->layers[0].targets[Synth::mod_volume].base_value          = 0.8f;
-    instrument->layers[0].targets[Synth::mod_pitch].base_value           = 0.0f;
-    instrument->layers[0].targets[Synth::mod_panning].base_value         = 0.5f;
-    instrument->layers[0].targets[Synth::mod_lowpass_cutoff].base_value  = 2000.0f;
-    instrument->layers[0].targets[Synth::mod_highpass_cutoff].base_value = 2000.0f;
-    bank->bank.instruments.entries[0]                                    = *instrument;
+    instrument->layers[0].targets[Synth::mod_volume].base_value     = 0.8f;
+    instrument->layers[0].targets[Synth::mod_pitch].base_value      = 0.0f;
+    instrument->layers[0].targets[Synth::mod_panning].base_value    = 0.5f;
+    instrument->layers[0].targets[Synth::mod_fir_spread].base_value = 3.0f;
+    bank->bank.instruments.entries[0]                               = *instrument;
     strcpy(bank->instrument_names[0], "Clipboard zone");
 }
 
@@ -1046,10 +1045,11 @@ static uint32_t build_clipboard_max_fixture(Synth::InstrumentBank*        bank,
     for (uint32_t cell = 0; cell < Synth::num_mod_targets; cell++) {
         const Synth::ModTarget target  = static_cast<Synth::ModTarget>(cell);
         Synth::TargetBinding&  routing = instrument->layers[0].targets[target];
-        routing.base_value             = target == Synth::mod_volume    ? 0.75f
-                                         : target == Synth::mod_pitch   ? 0.0f
-                                         : target == Synth::mod_panning ? 0.5f
-                                                                        : 2000.0f;
+        routing.base_value             = target == Synth::mod_volume       ? 0.75f
+                                         : target == Synth::mod_pitch      ? 0.0f
+                                         : target == Synth::mod_panning    ? 0.5f
+                                         : target == Synth::mod_fir_spread ? 3.0f
+                                                                           : 2000.0f;
         routing.num_inputs             = 2;
         routing.inputs[0].source       = Synth::ModSource::velocity;
         routing.inputs[0].op           = Synth::SourceOp::add;
@@ -1673,8 +1673,8 @@ static void check_named_fm_projection(const Synth::InstrumentEditorBank& bank, u
         wave.list_index = 0;
         graph.set_slot_value(node_index, wave_b_slot, wave);
         // With waveform b off, exactly the duty b / mix mode / waveform mix /
-        // fm depth / fm ratio rows are gated, across all 114 slots.
-        for (uint32_t row = 0; row < 15 + 11 * Synth::num_mod_targets; ++row) {
+        // fm depth / fm ratio rows are gated, across all 104 slots.
+        for (uint32_t row = 0; row < 16 + 11 * Synth::num_mod_targets; ++row) {
             const bool gated = row == Sculptor::osc_target_row(Synth::mod_duty1) || row == mode_slot ||
                                row == Sculptor::osc_target_row(Synth::mod_osc_mix) || row == fm_depth_slot ||
                                row == fm_ratio_slot;
@@ -2283,14 +2283,25 @@ static void check_unrepresented_layout_refusal()
     const char* const                  path = "synth_unrepresented_layout.tmp";
     static char                        before[Synth::library_payload_max + 128];
     static char                        after[Synth::library_payload_max + 128];
-    for (uint32_t shape = 0; shape < 2; ++shape) {
+    for (uint32_t shape = 0; shape < 3; ++shape) {
         build_named_fm_fixture(&source);
         remove(path);
         TEST(Synth::save_library_record(path, "Regression", "FM", &source, 0) == 0);
         const uint32_t bytes = read_library_fixture(path, before, sizeof(before));
         if (shape == 0) {
+            // A detached LFO record wired to nothing projects no node.
+            // Its descriptor is validly allocated, so the portable export
+            // drops the record (logged) instead of refusing: the graph UI
+            // cannot repair an invisible node, and the totality check
+            // exempts exactly this debris.
             const uint16_t lfo = add_detached_lfo_descriptor(&source);
             add_detached_record(&source, 0, 0, 2, lfo, 991, 992, Synth::ModSource::none, Synth::ModSource::none, 1);
+        }
+        else if (shape == 1) {
+            // An unallocated descriptor id is outside the drop exemption:
+            // the metadata validation refuses the record outright, and the
+            // export fails with the library file untouched.
+            add_detached_record(&source, 0, 0, 2, 250, 991, 992, Synth::ModSource::none, Synth::ModSource::none, 1);
         }
         else {
             source.graph_missing_sum[0][0] = 1;
@@ -2304,13 +2315,28 @@ static void check_unrepresented_layout_refusal()
             source.phantom_count       = 1;
         }
         TEST(Synth::validate_instrument_bank(&source.bank));
-        TEST(Sculptor::validate_editor_metadata(source));
         snapshot = source;
-        TEST(! export_clipboard_fixture(source, document, sizeof(document)));
-        TEST(Synth::save_library_record(path, "Regression", "FM", &source, 0) != 0);
-        TEST(memcmp(&source, &snapshot, sizeof(source)) == 0);
-        TEST(read_library_fixture(path, after, sizeof(after)) == bytes);
-        TEST(memcmp(before, after, bytes) == 0);
+        if (shape == 0) {
+            TEST(Sculptor::validate_editor_metadata(source));
+            TEST(export_clipboard_fixture(source, document, sizeof(document)));
+            // The exported portable layout carries no record for the
+            // dropped detached node.
+            static ClipboardDecode drop_decode;
+            TEST(decode_clipboard(&drop_decode, document, max_portable_records));
+            bool dropped_record_gone = true;
+            for (uint32_t i = 0; i < drop_decode.layout_count; i++) {
+                dropped_record_gone =
+                    dropped_record_gone && ! (drop_decode.layout[i].x == 991.0f && drop_decode.layout[i].y == 992.0f);
+            }
+            TEST(dropped_record_gone);
+        }
+        else {
+            TEST(! export_clipboard_fixture(source, document, sizeof(document)));
+            TEST(Synth::save_library_record(path, "Regression", "FM", &source, 0) != 0);
+            TEST(memcmp(&source, &snapshot, sizeof(source)) == 0);
+            TEST(read_library_fixture(path, after, sizeof(after)) == bytes);
+            TEST(memcmp(before, after, bytes) == 0);
+        }
         remove(path);
     }
 }
@@ -2350,26 +2376,33 @@ static void check_legacy_library_numeric_domains()
             TEST(Synth::read_library_index(path, &legacy_entry, 1) == 1);
             memset(&destination, 0, sizeof(destination));
             uint16_t legacy_slot = 0xBEEF;
-            TEST(Synth::load_library_instrument(path, &legacy_entry, &destination, 2, &legacy_slot));
-            TEST(legacy_slot == 0);
-            TEST(destination.bank.instruments.entries[0].layers[0].pitch_offset == osc.pitch_offset);
-            TEST(destination.bank.instruments.entries[0].layers[0].mod_ratio == osc.mod_ratio);
-            if (metadata) {
-                TEST(destination.graph_layout_count == source.graph_layout_count);
+            // Out-of-range pitch offsets reject the saved-bank load.
+            TEST(Synth::load_library_instrument(path, &legacy_entry, &destination, 2, &legacy_slot) == ! (values & 1));
+            TEST(legacy_slot == (values & 1 ? 0xBEEF : 0));
+            if (! (values & 1)) {
+                TEST(destination.bank.instruments.entries[0].layers[0].pitch_offset == osc.pitch_offset);
+                TEST(destination.bank.instruments.entries[0].layers[0].mod_ratio == osc.mod_ratio);
+                if (metadata) {
+                    TEST(destination.graph_layout_count == source.graph_layout_count);
+                }
             }
             source.bank.channel_enabled[0] = 1;
             remove(path);
-            TEST(Synth::save_library_record(path, "Legacy", "Numeric", &source, 0) == 0);
-            Synth::LibraryEntry entry;
-            TEST(Synth::read_library_index(path, &entry, 1) == 1);
-            memset(&destination, 0, sizeof(destination));
-            uint16_t output_slot = 0xBEEF;
-            TEST(Synth::load_library_instrument(path, &entry, &destination, 2, &output_slot));
-            TEST(output_slot == 0);
-            TEST(destination.bank.instruments.entries[0].layers[0].pitch_offset == osc.pitch_offset);
-            TEST(destination.bank.instruments.entries[0].layers[0].mod_ratio == osc.mod_ratio);
-            if (metadata) {
-                TEST(destination.graph_layout_count == source.graph_layout_count);
+            // The library save path verifies its own encode-decode round
+            // trip against the shared decode validation.
+            TEST((Synth::save_library_record(path, "Legacy", "Numeric", &source, 0) == 0) == ! (values & 1));
+            if (! (values & 1)) {
+                Synth::LibraryEntry entry;
+                TEST(Synth::read_library_index(path, &entry, 1) == 1);
+                memset(&destination, 0, sizeof(destination));
+                uint16_t output_slot = 0xBEEF;
+                TEST(Synth::load_library_instrument(path, &entry, &destination, 2, &output_slot));
+                TEST(output_slot == 0);
+                TEST(destination.bank.instruments.entries[0].layers[0].pitch_offset == osc.pitch_offset);
+                TEST(destination.bank.instruments.entries[0].layers[0].mod_ratio == osc.mod_ratio);
+                if (metadata) {
+                    TEST(destination.graph_layout_count == source.graph_layout_count);
+                }
             }
             remove(path);
         }
@@ -2467,17 +2500,38 @@ static void check_shared_instrument_json_domains()
     build_named_fm_fixture(&source);
     remove(title_path);
 
+    // Out-of-range pitch offsets refuse the editor encode: the encoder
+    // verifies its own encode-decode round trip against the shared decode
+    // validation.
     source.bank.instruments.entries[0].layers[0].pitch_offset = 13;
     source.bank.instruments.entries[0].layers[0].mod_ratio    = 9;
-    const uint32_t length = Sculptor::encode_editor_instrument_json(source,
-                                                                    0,
-                                                                    0,
-                                                                    text,
-                                                                    sizeof(text),
-                                                                    Synth::InstrumentJsonDomain::validated_bank);
-    TEST(length > 0);
+    for (Synth::InstrumentJsonDomain domain : domains) {
+        TEST(Sculptor::encode_editor_instrument_json(source, 0, 0, text, sizeof(text), domain) == 0);
+    }
+
+    // The octave range rejects the encode the same way, with every other
+    // control value in range.
+    source.bank.instruments.entries[0].layers[0].pitch_offset  = 2.0f;
+    source.bank.instruments.entries[0].layers[0].mod_ratio     = 2.0f;
+    source.bank.instruments.entries[0].layers[0].octave_offset = 13;
+    for (Synth::InstrumentJsonDomain domain : domains) {
+        TEST(Sculptor::encode_editor_instrument_json(source, 0, 0, text, sizeof(text), domain) == 0);
+    }
+    source.bank.instruments.entries[0].layers[0].octave_offset = 0;
+
+    // An in-range control still round-trips through validated_bank (the
+    // clipboard decode keeps refusing the out-of-slider-range ratio).
+    source.bank.instruments.entries[0].layers[0].mod_ratio = 9;
+    const uint32_t in_range_length =
+        Sculptor::encode_editor_instrument_json(source,
+                                                0,
+                                                0,
+                                                text,
+                                                sizeof(text),
+                                                Synth::InstrumentJsonDomain::validated_bank);
+    TEST(in_range_length > 0);
     TEST(Synth::decode_instrument_json_for_domain(text,
-                                                  length,
+                                                  in_range_length,
                                                   &decoded.instr,
                                                   decoded.envs,
                                                   &decoded.env_count,
@@ -2487,8 +2541,29 @@ static void check_shared_instrument_json_domains()
                                                   max_portable_records,
                                                   &decoded.layout_count,
                                                   Synth::InstrumentJsonDomain::validated_bank));
-    TEST(decoded.instr.layers[0].pitch_offset == 13 && decoded.instr.layers[0].mod_ratio == 9);
+    TEST(decoded.instr.layers[0].pitch_offset == 2.0f && decoded.instr.layers[0].mod_ratio == 9.0f);
     TEST(! decode_clipboard(&decoded, text, max_portable_records));
+
+    // The octave range rejects alone: an out-of-range octave fails decode
+    // even with every other control value in range.
+    const char* const octave_out_of_range = "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\","
+                                            "\"pitch_offset_semitones\":2.0,\"octave_offset\":13}]}";
+    for (Synth::InstrumentJsonDomain domain : domains) {
+        fill_clipboard_sentinels(&decoded);
+        fill_clipboard_sentinels(&sentinel);
+        TEST(! Synth::decode_instrument_json_for_domain(octave_out_of_range,
+                                                        static_cast<uint32_t>(strlen(octave_out_of_range)),
+                                                        &decoded.instr,
+                                                        decoded.envs,
+                                                        &decoded.env_count,
+                                                        decoded.lfos,
+                                                        &decoded.lfo_count,
+                                                        decoded.layout,
+                                                        max_portable_records,
+                                                        &decoded.layout_count,
+                                                        domain));
+        TEST(clipboard_sentinels_intact(&decoded, &sentinel));
+    }
 
     static char exhausted_text[Synth::library_payload_max + 1];
     memset(exhausted_text, ' ', sizeof(exhausted_text));
@@ -2715,10 +2790,15 @@ static void effects_clipboard_fixture(Synth::EffectsDocument* doc, bool midi)
         for (uint32_t p = 0; p < Synth::get_effect_param_floats(slot.type); ++p) {
             Synth::EffectParamBinding& b = slot.bindings[p];
             b.base_value                 = -123.5f + static_cast<float>(s * 10 + p);
-            b.lfo_desc_id                = static_cast<uint16_t>(s == 3 ? 2 : 1);
-            b.lfo_op                     = Synth::SourceOp::multiply;
-            b.lfo_depth                  = 0.75f;
-            b.lfo_rate_scale             = 432.0f;
+            if (slot.type == Synth::EffectType::fir && p == 2) {
+                // The FIR slope percent needs a valid integer base; the
+                // generic formula's negative fractional value is invalid.
+                b.base_value = 100.0f;
+            }
+            b.lfo_desc_id    = static_cast<uint16_t>(s == 3 ? 2 : 1);
+            b.lfo_op         = Synth::SourceOp::multiply;
+            b.lfo_depth      = 0.75f;
+            b.lfo_rate_scale = 432.0f;
             if (midi) {
                 b.lfo_depth_source = Synth::ModSource::mod_wheel;
                 b.lfo_rate_source  = Synth::ModSource::pitch_bend;
@@ -3792,6 +3872,15 @@ static void effects_layout_classification_regressions()
     }
 }
 
+// The splice helper is defined near its main users below; the FIR slope
+// splice tests need it before that point.
+static uint32_t splice_single_occurrence(const char* payload,
+                                         uint32_t    len,
+                                         const char* needle,
+                                         const char* replacement,
+                                         char*       out,
+                                         uint32_t    capacity);
+
 static void effects_clipboard_regressions()
 {
     static Synth::EffectsDocument       doc, decoded, saved_doc, extracted;
@@ -3935,7 +4024,12 @@ static void effects_clipboard_regressions()
     for (uint32_t type = 1; type < Synth::num_effect_types; ++type) {
         effects_clipboard_fixture(&doc, true);
         doc.chain.effects[0].type = static_cast<Synth::EffectType>(type);
-        const uint32_t n          = Synth::encode_effects_json(&doc, text, sizeof(text));
+        if (type == static_cast<uint32_t>(Synth::EffectType::fir)) {
+            // The retyped slot keeps the delay fixture's fractional third
+            // binding; the FIR slope percent needs a valid integer base.
+            doc.chain.effects[0].bindings[2].base_value = 100.0f;
+        }
+        const uint32_t n = Synth::encode_effects_json(&doc, text, sizeof(text));
         TEST(n > 0);
         TEST(Synth::decode_effects_json(text, n, &decoded));
         if (n) {
@@ -3944,7 +4038,195 @@ static void effects_clipboard_regressions()
             TEST(decoded.lfo_count == 3 && decoded.graph_layout_count == 9);
             TEST(decoded.chain.effects[0].type == doc.chain.effects[0].type);
         }
+    } // FIR slope carrier tests: the third FIR binding round-trips through
+    // the editor bank dialect and the strict effects document, fractional
+    // and out-of-range slope tokens refuse the whole document
+    // pre-narrowing, a 2-param FIR document fails decode in both carriers,
+    // and an absent or modulation-only third base decodes as 100.
+    {
+        static Synth::EffectsDocument doc;
+        static char                   text[65536];
+        static char                   bank_text[65536];
+        effects_clipboard_fixture(&doc, true);
+        doc.chain.effects[0].type                   = Synth::EffectType::fir;
+        doc.chain.effects[0].bindings[0]            = {};
+        doc.chain.effects[0].bindings[1]            = {};
+        doc.chain.effects[0].bindings[2]            = {};
+        doc.chain.effects[0].bindings[0].base_value = 8000.0f;
+        doc.chain.effects[0].bindings[2].base_value = 37.0f;
+        const uint32_t n                            = Synth::encode_effects_json(&doc, text, sizeof(text));
+        TEST(n > 0);
+        TEST(strstr(text, "{\"base_value\":37}") != nullptr);
+        static Synth::EffectsDocument decoded;
+        TEST(Synth::decode_effects_json(text, n, &decoded));
+        TEST(decoded.chain.effects[0].type == Synth::EffectType::fir);
+        TEST(decoded.chain.effects[0].bindings[2].base_value == 37.0f);
+        TEST(Synth::encode_effects_json(&decoded, bank_text, sizeof(bank_text)) == n);
+        // The canonical re-encode of an absent base writes the explicit
+        // default: a spliced-out third base decodes as 100 and round-trips.
+        auto decode_with_effect_slope = [](const char* third_binding_json) {
+            static Synth::EffectsDocument slope_doc;
+            effects_clipboard_fixture(&slope_doc, true);
+            slope_doc.chain.effects[0].type                   = Synth::EffectType::fir;
+            slope_doc.chain.effects[0].bindings[0]            = {};
+            slope_doc.chain.effects[0].bindings[1]            = {};
+            slope_doc.chain.effects[0].bindings[2]            = {};
+            slope_doc.chain.effects[0].bindings[0].base_value = 8000.0f;
+            slope_doc.chain.effects[0].bindings[2].base_value = 37.0f;
+            static char    encoded[65536];
+            const uint32_t len = Synth::encode_effects_json(&slope_doc, encoded, sizeof(encoded));
+            TEST(len > 0);
+            const char* const obj = "{\"base_value\":37}";
+            static char       spliced[65536];
+            const uint32_t    spliced_len =
+                splice_single_occurrence(encoded, len, obj, third_binding_json, spliced, sizeof(spliced));
+            TEST(spliced_len > 0);
+            if (! spliced_len) {
+                return false;
+            }
+            static Synth::EffectsDocument out;
+            return Synth::decode_effects_json(spliced, spliced_len, &out);
+        };
+        TEST(decode_with_effect_slope("{\"base_value\":37}")); // the splice itself decodes
+        TEST(! decode_with_effect_slope("{\"base_value\":0}"));
+        TEST(! decode_with_effect_slope("{\"base_value\":101}"));
+        TEST(! decode_with_effect_slope("{\"base_value\":50.5}"));
+        TEST(! decode_with_effect_slope("{\"base_value\":1e2}"));
+        // An absent base value is a success row: the third binding decodes
+        // as the 100 default and the canonical re-encode emits it.
+        {
+            static Synth::EffectsDocument absent;
+            effects_clipboard_fixture(&absent, true);
+            absent.chain.effects[0].type                   = Synth::EffectType::fir;
+            absent.chain.effects[0].bindings[0]            = {};
+            absent.chain.effects[0].bindings[1]            = {};
+            absent.chain.effects[0].bindings[2]            = {};
+            absent.chain.effects[0].bindings[0].base_value = 8000.0f;
+            absent.chain.effects[0].bindings[2].base_value = 37.0f;
+            static char    encoded[65536];
+            const uint32_t len = Synth::encode_effects_json(&absent, encoded, sizeof(encoded));
+            TEST(len > 0);
+            const char* const obj = "{\"base_value\":37}";
+            static char       spliced[65536];
+            const uint32_t    spliced_len = splice_single_occurrence(encoded, len, obj, "{}", spliced, sizeof(spliced));
+            TEST(spliced_len > 0);
+            static Synth::EffectsDocument out;
+            TEST(Synth::decode_effects_json(spliced, spliced_len, &out));
+            TEST(out.chain.effects[0].bindings[2].base_value == 100.0f);
+            TEST(Synth::encode_effects_json(&out, text, sizeof(text)) > 0);
+            TEST(strstr(text, "\"base_value\":100") != nullptr);
+        }
+        // A modulation-only third binding keeps the default base and the
+        // supplied modulation fields.
+        {
+            static Synth::EffectsDocument modulated;
+            effects_clipboard_fixture(&modulated, true);
+            modulated.chain.effects[0].type                   = Synth::EffectType::fir;
+            modulated.chain.effects[0].bindings[0]            = {};
+            modulated.chain.effects[0].bindings[1]            = {};
+            modulated.chain.effects[0].bindings[2]            = {};
+            modulated.chain.effects[0].bindings[0].base_value = 8000.0f;
+            modulated.chain.effects[0].bindings[2].base_value = 37.0f;
+            static char    encoded[65536];
+            const uint32_t len = Synth::encode_effects_json(&modulated, encoded, sizeof(encoded));
+            TEST(len > 0);
+            const char* const obj  = "{\"base_value\":37}";
+            const char* const repl = "{\"lfo_desc_id\":1,\"lfo_depth\":0.5}";
+            static char       spliced[65536];
+            const uint32_t    spliced_len = splice_single_occurrence(encoded, len, obj, repl, spliced, sizeof(spliced));
+            TEST(spliced_len > 0);
+            static Synth::EffectsDocument out;
+            TEST(Synth::decode_effects_json(spliced, spliced_len, &out));
+            TEST(out.chain.effects[0].bindings[2].base_value == 100.0f);
+            TEST(out.chain.effects[0].bindings[2].lfo_desc_id == 1);
+            TEST(out.chain.effects[0].bindings[2].lfo_depth == 0.5f);
+        }
+        // A 2-param FIR effect document fails decode: the params array must
+        // cover exactly the fields the effect type reads.
+        {
+            static Synth::EffectsDocument two_param;
+            effects_clipboard_fixture(&two_param, true);
+            two_param.chain.effects[0].type                   = Synth::EffectType::fir;
+            two_param.chain.effects[0].bindings[0]            = {};
+            two_param.chain.effects[0].bindings[1]            = {};
+            two_param.chain.effects[0].bindings[2]            = {};
+            two_param.chain.effects[0].bindings[0].base_value = 8000.0f;
+            two_param.chain.effects[0].bindings[2].base_value = 37.0f;
+            static char    encoded[65536];
+            const uint32_t len = Synth::encode_effects_json(&two_param, encoded, sizeof(encoded));
+            TEST(len > 0);
+            const char* const first_binding = "{\"base_value\":8000},";
+            static char       spliced[65536];
+            const uint32_t    spliced_len =
+                splice_single_occurrence(encoded, len, first_binding, "", spliced, sizeof(spliced));
+            TEST(spliced_len > 0);
+            static Synth::EffectsDocument out;
+            TEST(! Synth::decode_effects_json(spliced, spliced_len, &out));
+        }
+        // The editor bank dialect carrier: a FIR effect with a nondefault
+        // slope round-trips, bad slope spellings refuse the whole bank, and
+        // a 2-param FIR effect refuses the bank too.
+        {
+            static Synth::InstrumentEditorBank bank;
+            Synth::init_default_bank(&bank.bank);
+            enabled_effect(bank.bank, 0, 0, Synth::EffectType::fir);
+            bank.bank.channel_chains[0].effects[0].bindings[0].base_value = 8000.0f;
+            bank.bank.channel_chains[0].effects[0].bindings[2].base_value = 37.0f;
+            TEST(Synth::validate_instrument_bank(&bank.bank));
+            static char    payload[Synth::library_payload_max];
+            const uint32_t payload_len = Synth::encode_editor_bank_json(&bank, payload, sizeof(payload));
+            TEST(payload_len > 0);
+            TEST(strstr(payload, "{\"base_value\":37}") != nullptr);
+            static Synth::InstrumentEditorBank decoded_bank;
+            memset(&decoded_bank, 0, sizeof(decoded_bank));
+            TEST(Synth::decode_editor_bank_json(payload, payload_len, &decoded_bank));
+            TEST(decoded_bank.bank.channel_chains[0].effects[0].type == Synth::EffectType::fir);
+            TEST(decoded_bank.bank.channel_chains[0].effects[0].bindings[2].base_value == 37.0f);
+            auto decode_with_bank_slope = [](const char* third_binding_json) {
+                static Synth::InstrumentEditorBank slope_bank;
+                Synth::init_default_bank(&slope_bank.bank);
+                enabled_effect(slope_bank.bank, 0, 0, Synth::EffectType::fir);
+                slope_bank.bank.channel_chains[0].effects[0].bindings[0].base_value = 8000.0f;
+                slope_bank.bank.channel_chains[0].effects[0].bindings[2].base_value = 37.0f;
+                static char    bank_payload[Synth::library_payload_max];
+                const uint32_t bank_len =
+                    Synth::encode_editor_bank_json(&slope_bank, bank_payload, sizeof(bank_payload));
+                TEST(bank_len > 0);
+                const char* const obj = "{\"base_value\":37}";
+                static char       spliced[Synth::library_payload_max];
+                const uint32_t    spliced_len =
+                    splice_single_occurrence(bank_payload, bank_len, obj, third_binding_json, spliced, sizeof(spliced));
+                TEST(spliced_len > 0);
+                if (! spliced_len) {
+                    return false;
+                }
+                static Synth::InstrumentEditorBank out;
+                memset(&out, 0, sizeof(out));
+                return Synth::decode_editor_bank_json(spliced, spliced_len, &out);
+            };
+            TEST(decode_with_bank_slope("{\"base_value\":37}"));
+            TEST(! decode_with_bank_slope("{\"base_value\":0}"));
+            TEST(! decode_with_bank_slope("{\"base_value\":101}"));
+            TEST(! decode_with_bank_slope("{\"base_value\":50.5}"));
+            TEST(! decode_with_bank_slope("{\"base_value\":1e2}"));
+            TEST(decode_with_bank_slope("{}"));
+            // Dropping the first binding leaves a 2-param FIR effect: refuse.
+            {
+                static char    bank_payload[Synth::library_payload_max];
+                const uint32_t bank_len = Synth::encode_editor_bank_json(&bank, bank_payload, sizeof(bank_payload));
+                TEST(bank_len > 0);
+                const char* const first_binding = "{\"base_value\":8000},";
+                static char       spliced[Synth::library_payload_max];
+                const uint32_t    spliced_len =
+                    splice_single_occurrence(bank_payload, bank_len, first_binding, "", spliced, sizeof(spliced));
+                TEST(spliced_len > 0);
+                static Synth::InstrumentEditorBank out;
+                memset(&out, 0, sizeof(out));
+                TEST(! Synth::decode_editor_bank_json(spliced, spliced_len, &out));
+            }
+        }
     }
+
     // The authored example uses the production codec, including aliases and a layout-only LFO.
     FILE* example_file = fopen("doc/synth_effects_example.json", "rb");
     TEST(example_file != nullptr);
@@ -5974,6 +6256,7 @@ static void osc_inherit_source_regressions()
     instrument.layers[2].targets[Synth::mod_volume].lfo_desc_id      = 1;
     instrument.layers[2].targets[Synth::mod_volume].lfo_depth        = 0.25f;
     instrument.layers[2].targets[Synth::mod_pitch].envelope_desc_id  = 1;
+    instrument.layers[2].fir_slope_percent                           = 37;
     instrument.layer_count                                           = 3;
     TEST(Sculptor::osc_inherit_source_layer(instrument) == 2);
     instrument.layers[2].osc_type[0] = Synth::WaveType::no_wave;
@@ -6001,13 +6284,14 @@ static void osc_inherit_source_regressions()
     TEST(entry.layers[3].targets[Synth::mod_volume].envelope_desc_id == 2);
     TEST(entry.layers[3].targets[Synth::mod_volume].lfo_desc_id == 1);
     TEST(entry.layers[3].targets[Synth::mod_pitch].envelope_desc_id == 1);
+    TEST(entry.layers[3].fir_slope_percent == 37); // the copy carries the slope
     uint32_t wave_b_slot = Sculptor::pool_no_slot;
     TEST(find_graph_slot(graph, mapping.osc_nodes[3], "Waveform B", &wave_b_slot));
     TEST(graph.node(mapping.osc_nodes[3]).slots.entries[wave_b_slot].value.list_index == 3);
 }
 
 // Direct per-connection modulator rows: every oscillator node keeps its
-// 15 fixed slots and adds one 11-slot block per ModTarget directly after
+// 16 fixed slots and adds one 11-slot block per ModTarget directly after
 // its value row (block_base(t) = osc_target_row_slot[t] + 1); field 0 is
 // the env dot, 1 the LFO dot, 2 the LFO op, 3 the LFO depth, 4 the rate
 // scale, 5 and 8 the source dots, 6/7 and 9/10 the op/amount widgets;
@@ -6027,8 +6311,8 @@ static int32_t find_detached_by_desc(const Sculptor::OscGraphMapping& mapping, u
     return -1;
 }
 
-// One layer whose nine targets each bind an envelope, an LFO and two MIDI
-// inputs.  Volume keeps a volume-shaped descriptor (id 1); the other eight
+// One layer whose eight targets each bind an envelope, an LFO and two MIDI
+// inputs.  Volume keeps a volume-shaped descriptor (id 1); the other seven
 // targets share one non-volume descriptor (id 2).  One LFO descriptor (id 1)
 // serves every cell, so the projection derives exactly three generator
 // instances and no parameter nodes.
@@ -6167,8 +6451,8 @@ static void osc_direct_modulator_regressions()
     static Sculptor::GraphChange discarded[Sculptor::max_pending_changes];
 
     // T-M7-1 (O4/O9): the per-target block grammar on one oscillator with
-    // all nine targets fully bound; every family row carries its seeded
-    // binding values, and the C5 waveform/mode guard keeps working on the
+    // all eight targets fully bound; every family row carries its seeded
+    // binding values, and the waveform/mode guard keeps working on the
     // widened node.
     {
         static Synth::InstrumentBank bank;
@@ -6181,13 +6465,13 @@ static void osc_direct_modulator_regressions()
         TEST(mapping.osc_nodes[0] != Sculptor::pool_no_slot);
         if (mapping.osc_nodes[0] != Sculptor::pool_no_slot) {
             const Sculptor::Node& osc = graph.node(mapping.osc_nodes[0]);
-            // 15 fixed slots plus nine 11-slot target blocks.
-            TEST(osc.slots.num_allocated == 15 + 11 * Synth::num_mod_targets);
+            // 16 fixed slots plus eight 11-slot target blocks.
+            TEST(osc.slots.num_allocated == 16 + 11 * Synth::num_mod_targets);
             for (uint32_t t = 0; t < Synth::num_mod_targets; t++) {
                 check_target_block_grammar(osc, t, instrument.layers[0].targets[t]);
             }
-            // C5 regression: the waveform/mode guard must not early-out on
-            // the widened slot count. Wave B starts off and the mode starts
+            // Regression: the waveform/mode guard must not early-out on
+            // the widened slot count.  Wave B starts off and the mode starts
             // on blend, so the duty b / mix mode / waveform mix / fm depth / fm
             // ratio rows are disabled and nothing else is.
             const uint32_t wave_b_slot    = 14; // waveform b, layout contract
@@ -6250,21 +6534,21 @@ static void osc_direct_modulator_regressions()
                 Sculptor::fx_cc_pair_label(Synth::cc_msb_base, cc_label, sizeof(cc_label));
                 uint32_t cc_slot = Sculptor::pool_no_slot;
                 TEST(find_graph_slot(t7_graph, t7_mapping.input_node, cc_label, &cc_slot));
-                const Sculptor::EndPoint cc_out       = { t7_mapping.input_node, cc_slot };
-                const uint32_t           osc          = t7_mapping.osc_nodes[0];
-                const Sculptor::EndPoint lowpass_row  = { osc, Sculptor::osc_target_row(Synth::mod_lowpass_cutoff) };
-                const Sculptor::EndPoint highpass_row = { osc, Sculptor::osc_target_row(Synth::mod_highpass_cutoff) };
-                const Sculptor::EndPoint panning_row  = { osc, Sculptor::osc_target_row(Synth::mod_panning) };
-                const Sculptor::EndPoint duty0_row    = { osc, Sculptor::osc_target_row(Synth::mod_duty0) };
+                const Sculptor::EndPoint cc_out      = { t7_mapping.input_node, cc_slot };
+                const uint32_t           osc         = t7_mapping.osc_nodes[0];
+                const Sculptor::EndPoint spread_row  = { osc, Sculptor::osc_target_row(Synth::mod_fir_spread) };
+                const Sculptor::EndPoint duty1_row   = { osc, Sculptor::osc_target_row(Synth::mod_duty1) };
+                const Sculptor::EndPoint panning_row = { osc, Sculptor::osc_target_row(Synth::mod_panning) };
+                const Sculptor::EndPoint duty0_row   = { osc, Sculptor::osc_target_row(Synth::mod_duty0) };
 
                 // The validator admits every family onto its base row.
-                TEST(Sculptor::osc_graph_validate(&t7_mapping, t7_graph, env_out, lowpass_row));
-                TEST(Sculptor::osc_graph_validate(&t7_mapping, t7_graph, lfo_out, highpass_row));
+                TEST(Sculptor::osc_graph_validate(&t7_mapping, t7_graph, env_out, spread_row));
+                TEST(Sculptor::osc_graph_validate(&t7_mapping, t7_graph, lfo_out, duty1_row));
                 TEST(Sculptor::osc_graph_validate(&t7_mapping, t7_graph, velocity_out, panning_row));
                 TEST(Sculptor::osc_graph_validate(&t7_mapping, t7_graph, cc_out, duty0_row));
 
-                TEST(t7_graph.add_connection(env_out, lowpass_row) != Sculptor::pool_no_slot);
-                TEST(t7_graph.add_connection(lfo_out, highpass_row) != Sculptor::pool_no_slot);
+                TEST(t7_graph.add_connection(env_out, spread_row) != Sculptor::pool_no_slot);
+                TEST(t7_graph.add_connection(lfo_out, duty1_row) != Sculptor::pool_no_slot);
                 TEST(t7_graph.add_connection(velocity_out, panning_row) != Sculptor::pool_no_slot);
                 TEST(t7_graph.add_connection(cc_out, duty0_row) != Sculptor::pool_no_slot);
                 Sculptor::GraphChange changes[8] = {};
@@ -6281,19 +6565,18 @@ static void osc_direct_modulator_regressions()
 
                 // Every wire re-landed on its family dot; no wire stays on
                 // a base row.
-                TEST(find_osc_graph_connection(t7_graph,
-                                               { osc, Sculptor::osc_target_env_dot(Synth::mod_lowpass_cutoff) }) !=
-                     Sculptor::pool_no_slot);
-                TEST(find_osc_graph_connection(t7_graph,
-                                               { osc, Sculptor::osc_target_lfo_dot(Synth::mod_highpass_cutoff) }) !=
+                TEST(
+                    find_osc_graph_connection(t7_graph, { osc, Sculptor::osc_target_env_dot(Synth::mod_fir_spread) }) !=
+                    Sculptor::pool_no_slot);
+                TEST(find_osc_graph_connection(t7_graph, { osc, Sculptor::osc_target_lfo_dot(Synth::mod_duty1) }) !=
                      Sculptor::pool_no_slot);
                 TEST(
                     find_osc_graph_connection(t7_graph, { osc, Sculptor::osc_target_src_dot(Synth::mod_panning, 0) }) !=
                     Sculptor::pool_no_slot);
                 TEST(find_osc_graph_connection(t7_graph, { osc, Sculptor::osc_target_src_dot(Synth::mod_duty0, 0) }) !=
                      Sculptor::pool_no_slot);
-                TEST(find_osc_graph_connection(t7_graph, lowpass_row) == Sculptor::pool_no_slot);
-                TEST(find_osc_graph_connection(t7_graph, highpass_row) == Sculptor::pool_no_slot);
+                TEST(find_osc_graph_connection(t7_graph, spread_row) == Sculptor::pool_no_slot);
+                TEST(find_osc_graph_connection(t7_graph, duty1_row) == Sculptor::pool_no_slot);
                 TEST(find_osc_graph_connection(t7_graph, panning_row) == Sculptor::pool_no_slot);
                 TEST(find_osc_graph_connection(t7_graph, duty0_row) == Sculptor::pool_no_slot);
 
@@ -6301,13 +6584,13 @@ static void osc_direct_modulator_regressions()
                 // the seeded neutral row values.
                 static Synth::Instrument compiled;
                 TEST(Sculptor::compile_graph_to_instrument(t7_graph, t7_mapping, &compiled));
-                TEST(compiled.layers[0].targets[Synth::mod_lowpass_cutoff].envelope_desc_id == 1);
-                TEST(compiled.layers[0].targets[Synth::mod_highpass_cutoff].lfo_desc_id == 1);
-                TEST(compiled.layers[0].targets[Synth::mod_highpass_cutoff].lfo_op == Synth::SourceOp::add);
-                TEST(approx(compiled.layers[0].targets[Synth::mod_highpass_cutoff].lfo_depth, 0.5f, 1.0e-6f));
-                TEST(compiled.layers[0].targets[Synth::mod_highpass_cutoff].lfo_depth_source == Synth::ModSource::none);
-                TEST(compiled.layers[0].targets[Synth::mod_highpass_cutoff].lfo_rate_source == Synth::ModSource::none);
-                TEST(approx(compiled.layers[0].targets[Synth::mod_highpass_cutoff].lfo_rate_scale_ms, 0.0f, 1.0e-6f));
+                TEST(compiled.layers[0].targets[Synth::mod_fir_spread].envelope_desc_id == 1);
+                TEST(compiled.layers[0].targets[Synth::mod_duty1].lfo_desc_id == 1);
+                TEST(compiled.layers[0].targets[Synth::mod_duty1].lfo_op == Synth::SourceOp::add);
+                TEST(approx(compiled.layers[0].targets[Synth::mod_duty1].lfo_depth, 0.5f, 1.0e-6f));
+                TEST(compiled.layers[0].targets[Synth::mod_duty1].lfo_depth_source == Synth::ModSource::none);
+                TEST(compiled.layers[0].targets[Synth::mod_duty1].lfo_rate_source == Synth::ModSource::none);
+                TEST(approx(compiled.layers[0].targets[Synth::mod_duty1].lfo_rate_scale_ms, 0.0f, 1.0e-6f));
                 TEST(compiled.layers[0].targets[Synth::mod_panning].num_inputs == 1);
                 TEST(compiled.layers[0].targets[Synth::mod_panning].inputs[0].source == Synth::ModSource::velocity);
                 TEST(compiled.layers[0].targets[Synth::mod_panning].inputs[0].op == Synth::SourceOp::add);
@@ -6321,12 +6604,12 @@ static void osc_direct_modulator_regressions()
                 TEST(compiled.layers[0].targets[Synth::mod_volume].envelope_desc_id == 2);
                 TEST(approx(compiled.layers[0].targets[Synth::mod_volume].inputs[0].scale, 2.0f, 1.0e-6f));
                 // The seeded row values landed in the slots too.
-                const uint32_t highpass_base = Sculptor::osc_target_block_base(Synth::mod_highpass_cutoff);
-                TEST(t7_graph.node(osc).slots.entries[highpass_base + t7_lfo_op_field].value.list_index == 0);
-                TEST(approx(t7_graph.node(osc).slots.entries[highpass_base + t7_lfo_depth_field].value.real,
+                const uint32_t duty1_base = Sculptor::osc_target_block_base(Synth::mod_duty1);
+                TEST(t7_graph.node(osc).slots.entries[duty1_base + t7_lfo_op_field].value.list_index == 0);
+                TEST(approx(t7_graph.node(osc).slots.entries[duty1_base + t7_lfo_depth_field].value.real,
                             0.5f,
                             1.0e-6f));
-                TEST(approx(t7_graph.node(osc).slots.entries[highpass_base + t7_rate_field].value.real, 0.0f, 1.0e-6f));
+                TEST(approx(t7_graph.node(osc).slots.entries[duty1_base + t7_rate_field].value.real, 0.0f, 1.0e-6f));
                 const uint32_t panning_base = Sculptor::osc_target_block_base(Synth::mod_panning);
                 TEST(approx(t7_graph.node(osc).slots.entries[panning_base + 7].value.real, 1.0f, 1.0e-6f));
 
@@ -6337,11 +6620,11 @@ static void osc_direct_modulator_regressions()
                 check_no_param_nodes(t7_graph);
                 TEST(find_osc_graph_connection(
                          t7_graph,
-                         { t7_mapping.osc_nodes[0], Sculptor::osc_target_env_dot(Synth::mod_lowpass_cutoff) }) !=
+                         { t7_mapping.osc_nodes[0], Sculptor::osc_target_env_dot(Synth::mod_fir_spread) }) !=
                      Sculptor::pool_no_slot);
                 TEST(find_osc_graph_connection(
                          t7_graph,
-                         { t7_mapping.osc_nodes[0], Sculptor::osc_target_lfo_dot(Synth::mod_highpass_cutoff) }) !=
+                         { t7_mapping.osc_nodes[0], Sculptor::osc_target_lfo_dot(Synth::mod_duty1) }) !=
                      Sculptor::pool_no_slot);
                 TEST(find_osc_graph_connection(
                          t7_graph,
@@ -6359,9 +6642,9 @@ static void osc_direct_modulator_regressions()
         static Synth::InstrumentEditorBank source;
         static Synth::InstrumentEditorBank candidate;
         if (begin_small_graph(&source, &t7_graph, &t7_mapping)) {
-            // Bind the lowpass LFO so the projection wires the block's LFO
+            // Bind the FIR spread LFO so the projection wires the block's LFO
             // dot.
-            source.bank.instruments.entries[0].layers[0].targets[Synth::mod_lowpass_cutoff].lfo_desc_id = 1;
+            source.bank.instruments.entries[0].layers[0].targets[Synth::mod_fir_spread].lfo_desc_id = 1;
             TEST(Sculptor::project_editor_to_graph(source, &t7_graph, &t7_mapping));
             (void)t7_graph.take_changes(discarded, Sculptor::max_pending_changes);
             const uint32_t osc = t7_mapping.osc_nodes[0];
@@ -6370,12 +6653,11 @@ static void osc_direct_modulator_regressions()
                 // Unconnected families hide; the connected LFO row renders.
                 for (uint32_t f = 0; f <= 10; f++) {
                     const bool connected_lfo = f >= 1 && f <= 4;
-                    TEST(Sculptor::osc_target_field_hidden(t7_graph, osc, Synth::mod_lowpass_cutoff, f) ==
-                         ! connected_lfo);
+                    TEST(Sculptor::osc_target_field_hidden(t7_graph, osc, Synth::mod_fir_spread, f) == ! connected_lfo);
                 }
                 // The base row is never hidden: it stays the standing drop
                 // target.
-                TEST(t7_graph.node(osc).slots.entries[Sculptor::osc_target_row(Synth::mod_lowpass_cutoff)].connectable);
+                TEST(t7_graph.node(osc).slots.entries[Sculptor::osc_target_row(Synth::mod_fir_spread)].connectable);
                 // Wires on the env dot and both source dots open their rows.
                 const int32_t env_inst = find_detached_by_desc(t7_mapping, 1, 1);
                 TEST(env_inst >= 0);
@@ -6389,17 +6671,17 @@ static void osc_direct_modulator_regressions()
                     const Sculptor::EndPoint wheel_out    = { t7_mapping.input_node,
                                                               t7_mapping.input_source_slots[wheel_idx] };
                     TEST(t7_graph.add_connection(env_out,
-                                                 { osc, Sculptor::osc_target_env_dot(Synth::mod_lowpass_cutoff) }) !=
+                                                 { osc, Sculptor::osc_target_env_dot(Synth::mod_fir_spread) }) !=
                          Sculptor::pool_no_slot);
                     TEST(t7_graph.add_connection(velocity_out,
-                                                 { osc, Sculptor::osc_target_src_dot(Synth::mod_lowpass_cutoff, 0) }) !=
+                                                 { osc, Sculptor::osc_target_src_dot(Synth::mod_fir_spread, 0) }) !=
                          Sculptor::pool_no_slot);
                     TEST(t7_graph.add_connection(wheel_out,
-                                                 { osc, Sculptor::osc_target_src_dot(Synth::mod_lowpass_cutoff, 1) }) !=
+                                                 { osc, Sculptor::osc_target_src_dot(Synth::mod_fir_spread, 1) }) !=
                          Sculptor::pool_no_slot);
-                    TEST(! Sculptor::osc_target_field_hidden(t7_graph, osc, Synth::mod_lowpass_cutoff, 0));
+                    TEST(! Sculptor::osc_target_field_hidden(t7_graph, osc, Synth::mod_fir_spread, 0));
                     for (uint32_t f = 5; f <= 10; f++) {
-                        TEST(! Sculptor::osc_target_field_hidden(t7_graph, osc, Synth::mod_lowpass_cutoff, f));
+                        TEST(! Sculptor::osc_target_field_hidden(t7_graph, osc, Synth::mod_fir_spread, f));
                     }
                     // The three direct-dot wires drain and apply first; the O5
                     // delete below must be the only pending change.
@@ -6413,15 +6695,15 @@ static void osc_direct_modulator_regressions()
                     // O5: deleting the wire hides the row again.
                     const uint32_t lfo_wire =
                         find_osc_graph_connection(t7_graph,
-                                                  { osc, Sculptor::osc_target_lfo_dot(Synth::mod_lowpass_cutoff) });
+                                                  { osc, Sculptor::osc_target_lfo_dot(Synth::mod_fir_spread) });
                     TEST(lfo_wire != Sculptor::pool_no_slot);
                     if (lfo_wire != Sculptor::pool_no_slot) {
                         t7_graph.delete_connection(lfo_wire);
                         for (uint32_t f = 1; f <= 4; f++) {
-                            TEST(Sculptor::osc_target_field_hidden(t7_graph, osc, Synth::mod_lowpass_cutoff, f));
+                            TEST(Sculptor::osc_target_field_hidden(t7_graph, osc, Synth::mod_fir_spread, f));
                         }
-                        TEST(! Sculptor::osc_target_field_hidden(t7_graph, osc, Synth::mod_lowpass_cutoff, 0));
-                        TEST(! Sculptor::osc_target_field_hidden(t7_graph, osc, Synth::mod_lowpass_cutoff, 5));
+                        TEST(! Sculptor::osc_target_field_hidden(t7_graph, osc, Synth::mod_fir_spread, 0));
+                        TEST(! Sculptor::osc_target_field_hidden(t7_graph, osc, Synth::mod_fir_spread, 5));
                         // The compiled binding zeroes once the deletion
                         // applies: the family's fields go dormant on their
                         // own, nothing stored clears them.
@@ -6432,11 +6714,10 @@ static void osc_direct_modulator_regressions()
                         TEST(Sculptor::apply_osc_graph_change(&candidate, &t7_graph, &t7_mapping, changes[0]));
                         static Synth::Instrument compiled;
                         TEST(Sculptor::compile_graph_to_instrument(t7_graph, t7_mapping, &compiled));
-                        TEST(compiled.layers[0].targets[Synth::mod_lowpass_cutoff].lfo_desc_id == 0);
-                        TEST(approx(compiled.layers[0].targets[Synth::mod_lowpass_cutoff].lfo_depth, 0.0f, 1.0e-6f));
-                        TEST(approx(compiled.layers[0].targets[Synth::mod_lowpass_cutoff].lfo_rate_scale_ms,
-                                    0.0f,
-                                    1.0e-6f));
+                        TEST(compiled.layers[0].targets[Synth::mod_fir_spread].lfo_desc_id == 0);
+                        TEST(approx(compiled.layers[0].targets[Synth::mod_fir_spread].lfo_depth, 0.0f, 1.0e-6f));
+                        TEST(
+                            approx(compiled.layers[0].targets[Synth::mod_fir_spread].lfo_rate_scale_ms, 0.0f, 1.0e-6f));
                         // Re-projection keeps the row hidden (nothing is
                         // stored about visibility).
                         TEST(Sculptor::project_editor_to_graph(candidate, &t7_graph, &t7_mapping));
@@ -6444,7 +6725,7 @@ static void osc_direct_modulator_regressions()
                         for (uint32_t f = 1; f <= 4; f++) {
                             TEST(Sculptor::osc_target_field_hidden(t7_graph,
                                                                    t7_mapping.osc_nodes[0],
-                                                                   Synth::mod_lowpass_cutoff,
+                                                                   Synth::mod_fir_spread,
                                                                    f));
                         }
                     }
@@ -6501,8 +6782,8 @@ static void osc_direct_modulator_regressions()
         build_osc_graph_max_fixture(&bank, &instrument, env_ids, lfo_ids);
         bank_image = bank;
         TEST(Sculptor::project_instrument_to_graph(instrument, bank, &t7_graph, &t7_mapping));
-        // The instance registry keeps its 35 + 35 generator instances.
-        TEST(t7_mapping.detached_count == 70);
+        // The instance registry keeps its 28 + 28 generator instances.
+        TEST(t7_mapping.detached_count == 56);
         TEST(Sculptor::compile_graph_to_instrument(t7_graph, t7_mapping, &compiled));
         TEST(memcmp(&instrument, &compiled, sizeof(Synth::Instrument)) == 0);
         TEST(memcmp(&bank_image, &bank, sizeof(Synth::InstrumentBank)) == 0);
@@ -6660,15 +6941,15 @@ static void osc_direct_modulator_regressions()
             const int32_t lfo_inst = find_detached_by_desc(t7_mapping, 2, 1);
             TEST(env_inst >= 0 && lfo_inst >= 0);
             if (env_inst >= 0 && lfo_inst >= 0) {
-                const Sculptor::EndPoint env_out      = { t7_mapping.detached[env_inst].node_idx,
-                                                          t7_mapping.env_output_slot };
-                const Sculptor::EndPoint lfo_out      = { t7_mapping.detached[lfo_inst].node_idx,
-                                                          t7_mapping.lfo_output_slot };
-                const uint32_t           osc          = t7_mapping.osc_nodes[0];
-                const Sculptor::EndPoint lowpass_row  = { osc, Sculptor::osc_target_row(Synth::mod_lowpass_cutoff) };
-                const Sculptor::EndPoint highpass_row = { osc, Sculptor::osc_target_row(Synth::mod_highpass_cutoff) };
-                TEST(t7_graph.add_connection(env_out, lowpass_row) != Sculptor::pool_no_slot);
-                TEST(t7_graph.add_connection(lfo_out, highpass_row) != Sculptor::pool_no_slot);
+                const Sculptor::EndPoint env_out    = { t7_mapping.detached[env_inst].node_idx,
+                                                        t7_mapping.env_output_slot };
+                const Sculptor::EndPoint lfo_out    = { t7_mapping.detached[lfo_inst].node_idx,
+                                                        t7_mapping.lfo_output_slot };
+                const uint32_t           osc        = t7_mapping.osc_nodes[0];
+                const Sculptor::EndPoint spread_row = { osc, Sculptor::osc_target_row(Synth::mod_fir_spread) };
+                const Sculptor::EndPoint duty1_row  = { osc, Sculptor::osc_target_row(Synth::mod_duty1) };
+                TEST(t7_graph.add_connection(env_out, spread_row) != Sculptor::pool_no_slot);
+                TEST(t7_graph.add_connection(lfo_out, duty1_row) != Sculptor::pool_no_slot);
                 const uint32_t           velocity_idx = static_cast<uint32_t>(Synth::ModSource::velocity) - 1;
                 const Sculptor::EndPoint velocity_out = { t7_mapping.input_node,
                                                           t7_mapping.input_source_slots[velocity_idx] };
@@ -6715,7 +6996,7 @@ static void osc_direct_modulator_regressions()
                 (void)t7_graph.take_changes(discarded, Sculptor::max_pending_changes);
                 TEST(find_osc_graph_connection(
                          t7_graph,
-                         { t7_mapping.osc_nodes[0], Sculptor::osc_target_env_dot(Synth::mod_lowpass_cutoff) }) ==
+                         { t7_mapping.osc_nodes[0], Sculptor::osc_target_env_dot(Synth::mod_fir_spread) }) ==
                      Sculptor::pool_no_slot);
                 TEST(find_osc_graph_connection(t7_graph, panning_src0) == Sculptor::pool_no_slot);
                 TEST(find_osc_graph_connection(t7_graph, duty_src0) == Sculptor::pool_no_slot);
@@ -6728,14 +7009,13 @@ static void osc_direct_modulator_regressions()
                 (void)t7_graph.take_changes(discarded, Sculptor::max_pending_changes);
                 TEST(find_osc_graph_connection(
                          t7_graph,
-                         { t7_mapping.osc_nodes[0], Sculptor::osc_target_env_dot(Synth::mod_lowpass_cutoff) }) !=
+                         { t7_mapping.osc_nodes[0], Sculptor::osc_target_env_dot(Synth::mod_fir_spread) }) !=
                      Sculptor::pool_no_slot);
                 TEST(find_osc_graph_connection(t7_graph, panning_src0) != Sculptor::pool_no_slot);
                 TEST(find_osc_graph_connection(t7_graph, duty_src0) != Sculptor::pool_no_slot);
                 // A family-field edit writes through to the compiled
                 // binding and undoes back to the wired snapshot.
-                const uint32_t depth_slot =
-                    Sculptor::osc_target_block_base(Synth::mod_highpass_cutoff) + t7_lfo_depth_field;
+                const uint32_t depth_slot     = Sculptor::osc_target_block_base(Synth::mod_duty1) + t7_lfo_depth_field;
                 Sculptor::PropertyValue depth = {};
                 depth.real                    = 0.25f;
                 t7_graph.set_slot_value(t7_mapping.osc_nodes[0], depth_slot, depth);
@@ -6748,7 +7028,7 @@ static void osc_direct_modulator_regressions()
                 TEST(undo.finish_undo_push());
                 TEST(Sculptor::apply_osc_graph_change(&candidate, &t7_graph, &t7_mapping, edit[0]));
                 TEST(Sculptor::compile_graph_to_instrument(t7_graph, t7_mapping, &compiled));
-                TEST(approx(compiled.layers[0].targets[Synth::mod_highpass_cutoff].lfo_depth, 0.25f, 1.0e-6f));
+                TEST(approx(compiled.layers[0].targets[Synth::mod_duty1].lfo_depth, 0.25f, 1.0e-6f));
                 TEST(undo.init_undo());
                 undo.pop(&candidate, sizeof(candidate));
                 undo.finish_undo();
@@ -6767,18 +7047,18 @@ static void osc_direct_modulator_regressions()
         if (begin_small_graph(&source, &t7_graph, &t7_mapping)) {
             Synth::Instrument& instr = source.bank.instruments.entries[0];
             // Bindings that pre-wire the dots the capacity refusals need:
-            // lowpass carries the shared non-volume envelope and two MIDI
-            // sources, highpass carries the LFO, duty0 carries a third
+            // FIR spread carries the shared non-volume envelope and two MIDI
+            // sources, duty b carries the LFO, duty0 carries a third
             // non-volume envelope.
-            instr.layers[0].targets[Synth::mod_lowpass_cutoff].envelope_desc_id = 1;
-            instr.layers[0].targets[Synth::mod_lowpass_cutoff].num_inputs       = 2;
-            instr.layers[0].targets[Synth::mod_lowpass_cutoff].inputs[0].source = Synth::ModSource::velocity;
-            instr.layers[0].targets[Synth::mod_lowpass_cutoff].inputs[0].op     = Synth::SourceOp::add;
-            instr.layers[0].targets[Synth::mod_lowpass_cutoff].inputs[0].scale  = 1.0f;
-            instr.layers[0].targets[Synth::mod_lowpass_cutoff].inputs[1].source = Synth::ModSource::mod_wheel;
-            instr.layers[0].targets[Synth::mod_lowpass_cutoff].inputs[1].op     = Synth::SourceOp::multiply;
-            instr.layers[0].targets[Synth::mod_lowpass_cutoff].inputs[1].scale  = 1.0f;
-            instr.layers[0].targets[Synth::mod_highpass_cutoff].lfo_desc_id     = 1;
+            instr.layers[0].targets[Synth::mod_fir_spread].envelope_desc_id = 1;
+            instr.layers[0].targets[Synth::mod_fir_spread].num_inputs       = 2;
+            instr.layers[0].targets[Synth::mod_fir_spread].inputs[0].source = Synth::ModSource::velocity;
+            instr.layers[0].targets[Synth::mod_fir_spread].inputs[0].op     = Synth::SourceOp::add;
+            instr.layers[0].targets[Synth::mod_fir_spread].inputs[0].scale  = 1.0f;
+            instr.layers[0].targets[Synth::mod_fir_spread].inputs[1].source = Synth::ModSource::mod_wheel;
+            instr.layers[0].targets[Synth::mod_fir_spread].inputs[1].op     = Synth::SourceOp::multiply;
+            instr.layers[0].targets[Synth::mod_fir_spread].inputs[1].scale  = 1.0f;
+            instr.layers[0].targets[Synth::mod_duty1].lfo_desc_id           = 1;
             TEST(source.bank.envelopes.allocate() == 2);
             Synth::EnvelopeDescriptor& env3                            = source.bank.envelopes.entries[2];
             env3                                                       = Synth::EnvelopeDescriptor{};
@@ -6826,25 +7106,25 @@ static void osc_direct_modulator_regressions()
                 TEST(find_graph_slot(t7_graph, t7_mapping.input_node, cc_label, &cc_slot));
                 const Sculptor::EndPoint cc_out       = { t7_mapping.input_node, cc_slot };
                 const uint32_t           osc          = t7_mapping.osc_nodes[0];
-                const Sculptor::EndPoint lowpass_row  = { osc, Sculptor::osc_target_row(Synth::mod_lowpass_cutoff) };
-                const Sculptor::EndPoint highpass_row = { osc, Sculptor::osc_target_row(Synth::mod_highpass_cutoff) };
+                const Sculptor::EndPoint spread_row   = { osc, Sculptor::osc_target_row(Synth::mod_fir_spread) };
+                const Sculptor::EndPoint duty1_row    = { osc, Sculptor::osc_target_row(Synth::mod_duty1) };
                 const Sculptor::EndPoint volume_row   = { osc, Sculptor::osc_target_row(Synth::mod_volume) };
                 const Sculptor::EndPoint panning_row  = { osc, Sculptor::osc_target_row(Synth::mod_panning) };
                 const Sculptor::EndPoint panning_env  = { osc, Sculptor::osc_target_env_dot(Synth::mod_panning) };
                 const Sculptor::EndPoint panning_lfo  = { osc, Sculptor::osc_target_lfo_dot(Synth::mod_panning) };
                 const Sculptor::EndPoint panning_src0 = { osc, Sculptor::osc_target_src_dot(Synth::mod_panning, 0) };
 
-                // C8: one envelope per (layer, target) - the lowpass env
+                // C8: one envelope per (layer, target) - the spread env
                 // dot is taken by the projection wiring.
-                TEST(! Sculptor::osc_graph_validate(&t7_mapping, t7_graph, env2_out, lowpass_row));
-                TEST(! Sculptor::osc_graph_validate(&t7_mapping, t7_graph, env3_out, lowpass_row));
-                // One LFO per (layer, target): the highpass LFO dot is
+                TEST(! Sculptor::osc_graph_validate(&t7_mapping, t7_graph, env2_out, spread_row));
+                TEST(! Sculptor::osc_graph_validate(&t7_mapping, t7_graph, env3_out, spread_row));
+                // One LFO per (layer, target): the duty b LFO dot is
                 // taken by the projection wiring.
-                TEST(! Sculptor::osc_graph_validate(&t7_mapping, t7_graph, lfo_out, highpass_row));
-                // max_mod_inputs sources: both lowpass source dots are
+                TEST(! Sculptor::osc_graph_validate(&t7_mapping, t7_graph, lfo_out, duty1_row));
+                // max_mod_inputs sources: both spread source dots are
                 // taken by the projection wiring.
-                TEST(! Sculptor::osc_graph_validate(&t7_mapping, t7_graph, cc_out, lowpass_row));
-                TEST(! Sculptor::osc_graph_validate(&t7_mapping, t7_graph, velocity_out, lowpass_row));
+                TEST(! Sculptor::osc_graph_validate(&t7_mapping, t7_graph, cc_out, spread_row));
+                TEST(! Sculptor::osc_graph_validate(&t7_mapping, t7_graph, velocity_out, spread_row));
                 // The volume rule, both directions: a volume-shaped
                 // descriptor never serves a non-volume row, a non-volume
                 // descriptor never serves the volume row.
@@ -6865,8 +7145,7 @@ static void osc_direct_modulator_regressions()
                 // the input end may move to another target's same-family
                 // dot but never onto another family's dot.
                 const uint32_t env_wire =
-                    find_osc_graph_connection(t7_graph,
-                                              { osc, Sculptor::osc_target_env_dot(Synth::mod_lowpass_cutoff) });
+                    find_osc_graph_connection(t7_graph, { osc, Sculptor::osc_target_env_dot(Synth::mod_fir_spread) });
                 TEST(env_wire != Sculptor::pool_no_slot);
                 if (env_wire != Sculptor::pool_no_slot) {
                     TEST(t7_graph.move_connection_end(env_wire, true, env3_out)); // output-end retarget
@@ -6893,8 +7172,7 @@ static void osc_direct_modulator_regressions()
                 const int32_t lfo2i = find_detached_by_desc(t7_mapping, 2, 2);
                 TEST(lfo2i >= 0);
                 const uint32_t lfo_wire =
-                    find_osc_graph_connection(t7_graph,
-                                              { osc, Sculptor::osc_target_lfo_dot(Synth::mod_highpass_cutoff) });
+                    find_osc_graph_connection(t7_graph, { osc, Sculptor::osc_target_lfo_dot(Synth::mod_duty1) });
                 TEST(lfo_wire != Sculptor::pool_no_slot);
                 if (lfo2i >= 0 && lfo_wire != Sculptor::pool_no_slot) {
                     const Sculptor::EndPoint lfo2_out = { t7_mapping.detached[lfo2i].node_idx,
@@ -6973,10 +7251,8 @@ static void osc_direct_modulator_regressions()
                 const uint32_t           cc_wire    = find_osc_graph_connection(t7_graph, pitch_src0);
                 TEST(cc_wire != Sculptor::pool_no_slot);
                 if (cc_wire != Sculptor::pool_no_slot) {
-                    const Sculptor::EndPoint highpass_src0 = { osc,
-                                                               Sculptor::osc_target_src_dot(Synth::mod_highpass_cutoff,
-                                                                                            0) };
-                    TEST(t7_graph.move_connection_end(cc_wire, false, highpass_src0)); // input-end target move
+                    const Sculptor::EndPoint duty1_src0 = { osc, Sculptor::osc_target_src_dot(Synth::mod_duty1, 0) };
+                    TEST(t7_graph.move_connection_end(cc_wire, false, duty1_src0)); // input-end target move
                     Sculptor::GraphChange cc_moves[8] = {};
                     uint32_t              cc_moved    = t7_graph.take_changes(cc_moves, 8);
                     TEST(cc_moved == 1);
@@ -7004,7 +7280,7 @@ static void osc_direct_modulator_regressions()
                 // no validator) makes the compile refuse: a connection
                 // still ending on a base target row is an invariant
                 // violation.
-                TEST(t7_graph.add_connection(velocity_out, lowpass_row) != Sculptor::pool_no_slot);
+                TEST(t7_graph.add_connection(velocity_out, spread_row) != Sculptor::pool_no_slot);
                 static Synth::Instrument compiled;
                 TEST(! Sculptor::compile_graph_to_instrument(t7_graph, t7_mapping, &compiled));
             }
@@ -7012,8 +7288,8 @@ static void osc_direct_modulator_regressions()
         }
     }
 
-    // T-M7-11: the max fixture keeps its shape (seven oscillators, 35
-    // envelope + 35 LFO instances) and gains the per-target block grammar
+    // T-M7-11: the max fixture keeps its shape (seven oscillators, 28
+    // envelope + 28 LFO instances) and gains the per-target block grammar
     // on every layer; the parameter counts leave the mapping checks.
     {
         static Synth::InstrumentBank bank;
@@ -7023,14 +7299,14 @@ static void osc_direct_modulator_regressions()
         build_osc_graph_max_fixture(&bank, &instrument, env_ids, lfo_ids);
         TEST(Sculptor::project_instrument_to_graph(instrument, bank, &t7_graph, &t7_mapping));
         check_no_param_nodes(t7_graph);
-        TEST(t7_mapping.detached_count == 70);
+        TEST(t7_mapping.detached_count == 56);
         for (uint32_t layer = 0; layer < Synth::max_layers; layer++) {
             TEST(t7_mapping.osc_nodes[layer] != Sculptor::pool_no_slot);
             if (t7_mapping.osc_nodes[layer] == Sculptor::pool_no_slot) {
                 continue;
             }
             const Sculptor::Node& osc = t7_graph.node(t7_mapping.osc_nodes[layer]);
-            TEST(osc.slots.num_allocated == 15 + 11 * Synth::num_mod_targets);
+            TEST(osc.slots.num_allocated == 16 + 11 * Synth::num_mod_targets);
             for (uint32_t t = 0; t < Synth::num_mod_targets; t++) {
                 check_target_block_grammar(osc, t, instrument.layers[layer].targets[t]);
             }
@@ -7060,7 +7336,7 @@ static void osc_direct_modulator_regressions()
 
     // Registry capacity: every target of every layer bound with distinct
     // generator keys projects the full 2*layers*targets instance registry.
-    // The legal all-cells projection needs 126 distinct instance keys - more
+    // The legal all-cells projection needs 112 distinct instance keys - more
     // than the detached-record cap - so the registry is sized for the node
     // pool, not for the record cap.
     {
@@ -7100,10 +7376,10 @@ static void osc_direct_modulator_regressions()
         TEST(mapping.detached_count == 2 * Synth::max_layers * Synth::num_mod_targets);
         check_no_param_nodes(graph);
     }
-    // Registry capacity, low layer count: one layer binds all nine targets
-    // (18 derived instances) and 120 surplus envelope records append 120
-    // more generators, so the projection builds 141 nodes - within the
-    // node pool but past any layer-count-sized registry. Metadata
+    // Registry capacity, low layer count: one layer binds all eight targets
+    // (16 derived instances) and 120 surplus envelope records append 120
+    // more generators, so the projection builds 139 nodes - within the
+    // node pool but past any layer-count-sized registry.  Metadata
     // validation accepts the shape and the projection succeeds.
     {
         static Synth::InstrumentEditorBank low_bank;
@@ -7816,6 +8092,1396 @@ static void check_release_decay_source_pins()
     // voice reaches it through this disjunct, since volume_termination_due
     // is release-only).
     TEST(find_in_range(update, update_end, "osc.decaying && osc.decay_tick >= voice.release_total_ticks") != nullptr);
+}
+
+// Oscillator pitch editing and note-on pitch gate: the shared helpers, the runtime
+// wiring (source pins), the projection/compile path for the octave offset
+// slot and the trigger-time rejection mirror.
+static void check_osc_pitch_gating()
+{
+    // Absolute pitch composition and conversion: the octave shift doubles
+    // the frequency, and no consumer adds the base note a second time.
+    TEST(approx(Synth::pitch_to_frequency(Synth::oscillator_final_pitch(69, 0, 0, 0), 1), 440.0f, 0.001f));
+    TEST(approx(Synth::pitch_to_frequency(Synth::oscillator_final_pitch(69, 1, 0, 0), 1), 880.0f, 0.001f));
+    TEST(approx(Synth::pitch_to_frequency(Synth::oscillator_final_pitch(69, 0, 0, 0), 3), 1320.0f, 0.001f));
+    TEST(Synth::oscillator_final_pitch(60, -1, 3.5f, -2.25f) == 49.25f);
+
+    // Gate predicate: inclusive bounds, no rounding.
+    TEST(Synth::oscillator_pitch_in_gate(0.0f));
+    TEST(Synth::oscillator_pitch_in_gate(127.0f));
+    TEST(! Synth::oscillator_pitch_in_gate(-0.5f));
+    TEST(! Synth::oscillator_pitch_in_gate(127.5f));
+    TEST(! Synth::oscillator_pitch_in_gate(-12.0f));
+    TEST(! Synth::oscillator_pitch_in_gate(139.0f));
+    TEST(Synth::oscillator_final_pitch(60, 12, 0, 0) == 204.0f);
+    TEST(! Synth::oscillator_pitch_in_gate(Synth::oscillator_final_pitch(60, 12, 0, 0)));
+
+    // param_onset_value: read-only trigger-time evaluation of a configured
+    // parameter node.
+    {
+        static Synth::Parameter       params[8];
+        static Synth::ParamDescriptor descs[8];
+        memset(params, 0, sizeof(params));
+        memset(descs, 0, sizeof(descs));
+
+        // External leaf: the leaf's current value, value and prev seeded alike.
+        descs[1].kind = Synth::ParamKind::external;
+        Synth::write_external_leaf(3.25f, Synth::ExternalLeaf{ &params[1].value, &params[1].prev_value });
+        TEST(params[1].value == params[1].prev_value);
+        TEST(Synth::param_onset_value(params, descs, 1) == 3.25f);
+
+        // Plain add: base 1.0 + scale 2 * source 3.25.
+        descs[2].kind              = Synth::ParamKind::plain;
+        descs[2].plain.base_value  = 1.0f;
+        descs[2].plain.num_sources = 1;
+        descs[2].plain.sources[0]  = { 1, 2.0f, Synth::SourceOp::add };
+        TEST(Synth::param_onset_value(params, descs, 2) == 7.5f);
+
+        // Plain multiply: base 2.0 * scale 0.5 * source 3.25.
+        descs[3].kind              = Synth::ParamKind::plain;
+        descs[3].plain.base_value  = 2.0f;
+        descs[3].plain.num_sources = 1;
+        descs[3].plain.sources[0]  = { 1, 0.5f, Synth::SourceOp::multiply };
+        TEST(approx(Synth::param_onset_value(params, descs, 3), 3.25f, 1.0e-6f));
+
+        // Envelope: the onset is the first point's value at the cleared
+        // note-on state, and the state stays untouched.  The first point sits
+        // inside the gate while one advanced tick already reads outside it,
+        // so the straddle pins the no-advance rule.
+        descs[4]                              = {};
+        descs[4].kind                         = Synth::ParamKind::envelope;
+        descs[4].envelope.num_points          = 2;
+        descs[4].envelope.sustain_first_point = 0;
+        descs[4].envelope.sustain_last_point  = 1;
+        descs[4].envelope.min_value           = 0.0f;
+        descs[4].envelope.min_max_delta       = 200.0f / 65535.0f;
+        descs[4].envelope.points[0]           = { 0, 0 };
+        descs[4].envelope.points[1]           = { 1, 0xFFFF };
+        const float envelope_onset            = Synth::param_onset_value(params, descs, 4);
+        TEST(envelope_onset == 0.0f);
+        TEST(Synth::oscillator_pitch_in_gate(envelope_onset));
+        TEST(params[4].envelope.tick == 0 && params[4].envelope.point == 0);
+        Synth::EnvelopeState advanced = params[4].envelope;
+        advanced.tick                 = 1;
+        TEST(approx(Synth::eval_envelope_at(descs[4].envelope, advanced), 200.0f, 1.0e-3f));
+        TEST(! Synth::oscillator_pitch_in_gate(Synth::eval_envelope_at(descs[4].envelope, advanced)));
+
+        // LFO: tick-zero evaluation with external depth/rate source leaves,
+        // and the LFO tick stays zero (no state advance).
+        descs[5]                 = {};
+        Synth::LFODescriptor lfo = {};
+        lfo.wave                 = Synth::WaveType::sine_wave;
+        lfo.duty                 = 0x7F;
+        lfo.period_ms            = 100;
+        lfo.min_value            = -1.0f;
+        lfo.min_max_delta        = 2.0f;
+        Synth::configure_lfo(&descs[5], lfo, Synth::SourceOp::multiply, 0.5f, 6, 7, 10.0f);
+        descs[6].kind = Synth::ParamKind::external;
+        Synth::write_external_leaf(0.8f, Synth::ExternalLeaf{ &params[6].value, &params[6].prev_value });
+        // The onset must read the leaf's current value: driving prev_value to 0 makes a
+        // prev_value-reading regression collapse the depth (result 1.0) and fail here.
+        params[6].prev_value = 0.0f;
+        descs[7].kind        = Synth::ParamKind::external;
+        Synth::write_external_leaf(0.0f, Synth::ExternalLeaf{ &params[7].value, &params[7].prev_value });
+        params[5] = {};
+        // Sine at tick 0 reads wave 0.5, so multiply depth 0.5 * leaf 0.8
+        // yields 1 - 0.4 * 0.5 = 0.8.
+        TEST(approx(Synth::param_onset_value(params, descs, 5), 0.8f, 1.0e-4f));
+        TEST(params[5].lfo_tick == 0);
+
+        // Sourced-rate transport: the rate source's value offsets the period, so the
+        // same node reads differently at tick 1 with different rate values.  At tick 0
+        // the sine wave is period-independent, which is why the transport check needs
+        // the later tick.
+        Synth::ParamDescriptor::LFOParam rate_gen = {};
+        rate_gen.lfo                              = lfo; // sine, 100 ms
+        rate_gen.op                               = Synth::SourceOp::add;
+        rate_gen.depth                            = 1.0f;
+        rate_gen.rate_param_id                    = 7;
+        rate_gen.rate_scale_ms                    = 100.0f;
+        TEST(approx(Synth::eval_sourced_lfo(rate_gen, 1.0f, 0.0f, 0),
+                    Synth::eval_sourced_lfo(rate_gen, 1.0f, 1.0f, 0),
+                    1.0e-6f));
+        TEST(! approx(Synth::eval_sourced_lfo(rate_gen, 1.0f, 0.0f, 1),
+                      Synth::eval_sourced_lfo(rate_gen, 1.0f, 1.0f, 1),
+                      1.0e-3f));
+        // Without a rate source the descriptor period passes through unchanged.
+        rate_gen.rate_param_id = 0;
+        TEST(approx(Synth::eval_sourced_lfo(rate_gen, 1.0f, 0.0f, 1),
+                    Synth::eval_sourced_lfo(rate_gen, 1.0f, 900.0f, 1),
+                    1.0e-6f));
+
+        // No mutation: a full snapshot before and after every call above.
+        static Synth::Parameter       params_snapshot[8];
+        static Synth::ParamDescriptor descs_snapshot[8];
+        memcpy(params_snapshot, params, sizeof(params));
+        memcpy(descs_snapshot, descs, sizeof(descs));
+        (void)Synth::param_onset_value(params, descs, 2);
+        (void)Synth::param_onset_value(params, descs, 4);
+        (void)Synth::param_onset_value(params, descs, 5);
+        TEST(memcmp(params_snapshot, params, sizeof(params)) == 0);
+        TEST(memcmp(descs_snapshot, descs, sizeof(descs)) == 0);
+
+        // Later-leaf-write ordering: the verdict is computed once from the
+        // onset state; a same-batch write after it cannot change the verdict.
+        const bool verdict = Synth::oscillator_pitch_in_gate(
+            Synth::oscillator_final_pitch(69, 0, 0, Synth::param_onset_value(params, descs, 2)));
+        TEST(verdict);
+        Synth::write_external_leaf(900.0f, Synth::ExternalLeaf{ &params[1].value, &params[1].prev_value });
+        TEST(! Synth::oscillator_pitch_in_gate(
+            Synth::oscillator_final_pitch(69, 0, 0, Synth::param_onset_value(params, descs, 2))));
+        // Documentation, not a state check: the runtime consumes the verdict captured
+        // at the event, never a re-read against later leaf writes.
+        TEST(verdict);
+    }
+
+    // Trigger-time mirror: the note-on verdict flows through the
+    // update_modulation free path exactly like a terminated oscillator
+    // (free_now reads terminating first, a live oscillator enters termination
+    // only through the voice-lifetime guard, and the free branch compacts the
+    // voice's live list).
+    {
+        struct MirrorOsc {
+            bool     alive; // the no_wave analog of an occupied slot
+            bool     terminating;
+            float    volume;
+            uint8_t  layer_idx;
+            bool     decaying;   // release decay running
+            uint32_t decay_tick; // steps since the decay started
+            bool     faded;      // took the guard's final fade block
+            bool     freed;
+        };
+
+        struct MirrorVoice {
+            uint32_t osc_count;
+            uint8_t  osc_ids[3];
+            bool     active;
+            bool     note_mapped;
+            bool     releasing;
+            bool     note_finished;
+            uint32_t release_total_ticks;
+        };
+
+        // One update_modulation pass over a two-slot pool (slot 0 unused,
+        // mirroring the 1-based slot iteration and the no_wave skip).  The
+        // third guard disjunct is mirrored exactly; the second disjunct
+        // (releasing + volume_termination_due) is pinned on the production
+        // source below instead of mirrored.
+        auto modulation_step = [](MirrorVoice* voice, MirrorOsc* oscs) {
+            for (uint32_t slot = 1; slot <= 2; ++slot) {
+                MirrorOsc& osc = oscs[slot];
+                if (! osc.alive) {
+                    continue;
+                }
+                const bool free_now = osc.terminating;
+                if (! free_now && (voice->note_finished || (voice->releasing && osc.decaying &&
+                                                            osc.decay_tick >= voice->release_total_ticks))) {
+                    osc.terminating = true;
+                    osc.volume      = 0.0f; // Final fade block renders this step; the slot frees next step.
+                    osc.faded       = true;
+                }
+                if (free_now) {
+                    osc.freed = true;
+                    osc.alive = false;
+                    TEST(voice->osc_count != 0);
+                    --voice->osc_count;
+                    const uint8_t moved           = voice->osc_ids[voice->osc_count];
+                    voice->osc_ids[osc.layer_idx] = moved;
+                    oscs[moved].layer_idx         = osc.layer_idx;
+                    if (! voice->osc_count) {
+                        voice->active      = false;
+                        voice->note_mapped = false;
+                    }
+                }
+            }
+        };
+
+        // The verdicts come from the same helpers the runtime calls: one
+        // accepted layer (note 69) and one rejected layer (octave +12 -> 204).
+        const bool in_gate     = Synth::oscillator_pitch_in_gate(Synth::oscillator_final_pitch(69, 0, 0, 0));
+        const bool out_of_gate = ! Synth::oscillator_pitch_in_gate(Synth::oscillator_final_pitch(69, 12, 0, 0));
+        TEST(in_gate && out_of_gate);
+
+        // (a) One accepted + one rejected layer: the rejected slot frees on
+        // the first step and the accepted layer keeps its osc_ids position.
+        {
+            MirrorOsc   oscs[3] = {};
+            MirrorVoice voice   = {};
+            voice.osc_count     = 2;
+            voice.osc_ids[0]    = 1;
+            voice.osc_ids[1]    = 2;
+            voice.active        = true;
+            voice.note_mapped   = true;
+            oscs[1].alive       = true; // accepted layer renders on
+            oscs[1].layer_idx   = 0;
+            oscs[2].alive       = true; // rejected at note-on, volume 0
+            oscs[2].layer_idx   = 1;
+            oscs[2].terminating = out_of_gate;
+            oscs[2].volume      = 0.0f;
+            modulation_step(&voice, oscs);
+            TEST(oscs[2].freed);
+            TEST(! oscs[1].freed && oscs[1].alive);
+            TEST(voice.osc_count == 1 && voice.osc_ids[0] == 1);
+            TEST(voice.active && voice.note_mapped);
+        }
+
+        // (b) All layers rejected: the voice empties, deactivates and gives up
+        // the note mapping.
+        {
+            MirrorOsc   oscs[3] = {};
+            MirrorVoice voice   = {};
+            voice.osc_count     = 2;
+            voice.osc_ids[0]    = 1;
+            voice.osc_ids[1]    = 2;
+            voice.active        = true;
+            voice.note_mapped   = true;
+            oscs[1].alive       = true;
+            oscs[1].layer_idx   = 0;
+            oscs[1].terminating = true;
+            oscs[2].alive       = true;
+            oscs[2].layer_idx   = 1;
+            oscs[2].terminating = true;
+            modulation_step(&voice, oscs);
+            TEST(oscs[1].freed && oscs[2].freed);
+            TEST(voice.osc_count == 0);
+            TEST(! voice.active && ! voice.note_mapped);
+        }
+
+        // (c) Rejection alongside release/fade: with the voice releasing and the
+        // slots' release decay past its cutoff, the rejected slot (free_now
+        // already true) frees on the first step without taking the guard's fade
+        // branch, while a live slot in the same state fades first (volume zeroed,
+        // terminating set) and frees only on the next step.
+        {
+            MirrorOsc   oscs[3]       = {};
+            MirrorVoice voice         = {};
+            voice.osc_count           = 2;
+            voice.osc_ids[0]          = 1;
+            voice.osc_ids[1]          = 2;
+            voice.active              = true;
+            voice.releasing           = true;
+            voice.release_total_ticks = 10;
+            oscs[1].alive             = true; // rejected at note-on, volume 0
+            oscs[1].layer_idx         = 0;
+            oscs[1].terminating       = true;
+            oscs[2].alive             = true; // live, release decay past the cutoff
+            oscs[2].layer_idx         = 1;
+            oscs[2].decaying          = true;
+            oscs[2].decay_tick        = 10;
+            oscs[2].volume            = 0.5f;
+            modulation_step(&voice, oscs);
+            TEST(oscs[1].freed && ! oscs[1].faded); // freed on step 1, no fade block
+            TEST(! oscs[2].freed && oscs[2].faded && oscs[2].volume == 0.0f);
+            TEST(voice.osc_count == 1 && voice.osc_ids[0] == 2);
+            TEST(voice.active);
+            modulation_step(&voice, oscs);
+            TEST(oscs[2].freed);
+            TEST(voice.osc_count == 0 && ! voice.active);
+        }
+    }
+
+    // Runtime wiring source pins.
+    {
+        static char src[256 * 1024];
+        FILE* const file = fopen("synth/realtime_synth.cpp", "rb");
+        TEST(file != nullptr);
+        if (! file) {
+            return;
+        }
+        const size_t got = fread(src, 1, sizeof(src) - 1, file);
+        fclose(file);
+        TEST(got > 0);
+        src[got] = 0;
+
+        const char* const note_on     = strstr(src, "static void process_note_on(");
+        const char* const note_on_end = note_on ? strstr(note_on + 1, "\nstatic ") : nullptr;
+        const char* const update      = strstr(src, "static void update_modulation()");
+        const char* const update_end  = update ? strstr(update + 1, "\nstatic ") : nullptr;
+        const char* const render      = strstr(src, "static void render_audio_step()");
+        const char*       render_end  = nullptr;
+        if (render) {
+            render_end = strstr(render + 1, "\nstatic ");
+            if (! render_end) {
+                render_end = src + got;
+            }
+        }
+        TEST(note_on != nullptr && note_on_end != nullptr);
+        TEST(update != nullptr && update_end != nullptr);
+        TEST(render != nullptr);
+        if (! note_on || ! note_on_end || ! update || ! update_end || ! render) {
+            return;
+        }
+
+        auto count_in_range = [](const char* begin, const char* end, const char* needle) {
+            uint32_t count = 0;
+            for (const char* hit = begin ? strstr(begin, needle) : nullptr; hit && hit < end;
+                 hit             = strstr(hit + 1, needle)) {
+                count++;
+            }
+            return count;
+        };
+
+        // The absolute-pitch write into osc.pitch inside update_modulation.
+        TEST(find_in_range(update, update_end, "Synth::oscillator_final_pitch(static_cast<int>(osc.note)") != nullptr);
+
+        // The phase step consumes the absolute pitch through the dedicated
+        // helper, and neither the old note+pitch spelling nor its cast-bearing
+        // form appears in the render range.
+        TEST(find_in_range(render, render_end, "Synth::pitch_to_frequency(oscillator.pitch, oscillator.freq_mult)") !=
+             nullptr);
+        TEST(find_in_range(render, render_end, "note_to_frequency(oscillator.note,") == nullptr);
+        TEST(find_in_range(render, render_end, "static_cast<int>(oscillator.note)") == nullptr);
+
+        // The gate evaluation sits inside process_note_on, after the mod
+        // target configuration loop and before the FIR setup loop: exactly one
+        // onset evaluation and one gate predicate per note-on, followed by both
+        // rejection writes.
+        const char* const configure_loop =
+            find_in_range(note_on, note_on_end, "for (const ModTargetNode& node : mod_target_nodes)");
+        TEST(configure_loop != nullptr);
+        if (! configure_loop) {
+            return;
+        }
+        const char* const onset_call =
+            find_in_range(configure_loop, note_on_end, "Synth::param_onset_value(parameters,");
+        TEST(onset_call != nullptr);
+        if (! onset_call) {
+            return;
+        }
+        TEST(count_in_range(configure_loop, note_on_end, "Synth::param_onset_value(parameters,") == 1);
+        TEST(count_in_range(configure_loop, note_on_end, "Synth::oscillator_pitch_in_gate(") == 1);
+        const char* const rejection   = find_in_range(onset_call, note_on_end, "osc.terminating = true;");
+        const char* const volume_zero = find_in_range(onset_call, note_on_end, "osc.volume      = 0.0f;");
+        TEST(rejection != nullptr && volume_zero != nullptr);
+        TEST(onset_call < rejection && rejection < volume_zero);
+        TEST(find_in_range(rejection, note_on_end, "if (osc_has_filter(instrument, layer_idx))") != nullptr);
+        TEST(find_in_range(note_on, note_on_end, "= layer.octave_offset;") != nullptr);
+
+        // One sourced-LFO policy: eval_sourced_lfo is called exactly once in the
+        // runtime (advance_parameters' advance branch, with the previous-step leaf
+        // values), and the tick advance stays with the caller.
+        TEST(count_in_range(src, src + got, "Synth::eval_sourced_lfo(") == 1);
+        const char* const advance     = strstr(src, "static void advance_parameters()");
+        const char*       advance_end = nullptr;
+        if (advance) {
+            advance_end = strstr(advance + 1, "\nstatic ");
+            if (! advance_end) {
+                advance_end = src + got;
+            }
+        }
+        TEST(advance != nullptr);
+        const char* const sourced_lfo =
+            find_in_range(advance ? advance : src, advance_end, "Synth::eval_sourced_lfo(gen.lfo,");
+        TEST(sourced_lfo != nullptr);
+        if (! sourced_lfo) {
+            return;
+        }
+        TEST(find_in_range(sourced_lfo, advance_end, "parameters[gen.lfo.depth_param_id].prev_value") != nullptr);
+        TEST(find_in_range(sourced_lfo, advance_end, "parameters[node_idx].lfo_tick++") != nullptr);
+
+        // Guard/reset/free ordering in update_modulation: free_now reads
+        // terminating before the voice-lifetime guard, the guard precedes the
+        // free branch, and the free branch compacts the voice's live list.
+        const char* const free_now = find_in_range(update, update_end, "bool free_now = osc.terminating;");
+        const char* const guard =
+            find_in_range(update,
+                          update_end,
+                          "voice.note_finished || (voice.releasing && volume_termination_due(osc_idx))");
+        const char* const free_call = find_in_range(update, update_end, "free_oscillator(osc_idx);");
+        const char* const compact   = find_in_range(update, update_end, "voice.osc_ids[osc.layer_idx]");
+        TEST(free_now != nullptr && guard != nullptr && free_call != nullptr && compact != nullptr);
+        TEST(free_now < guard && guard < free_call && free_call < compact);
+        // The update loop itself skips freed slots.
+        TEST(find_in_range(update, update_end, "if (osc.osc_type[0] == WaveType::no_wave)") != nullptr);
+
+        // Active-wave exclusion: all three render loops (oscillator count,
+        // shader-param fill, mix-graph channel count) skip freed slots, and the
+        // FIR count/dispatch pair in compute_fir_coefficients skips them too, so
+        // a rejected oscillator can never be dispatched.
+        TEST(count_in_range(render, render_end, "if (oscillator.osc_type[0] == WaveType::no_wave)") == 3);
+        TEST(find_in_range(src, src + got, "if (osc.osc_type[0] == WaveType::no_wave || ! osc.fir_taps_offs)") !=
+             nullptr);
+        TEST(find_in_range(
+                 src,
+                 src + got,
+                 "oscillators[osc_idx].osc_type[0] != WaveType::no_wave && oscillators[osc_idx].fir_taps_offs") !=
+             nullptr);
+
+        // The FIR-history clear pass checks only clear_fir_hist: a rejected
+        // filtered slot receives one harmless, idempotent history fill.
+        const char* const clear_pass = strstr(src, "// Clear FIR history buffer for new notes");
+        TEST(clear_pass != nullptr);
+        const char* const clear_check =
+            find_in_range(clear_pass, src + got, "if (! oscillators[osc_idx].clear_fir_hist)");
+        TEST(clear_check != nullptr);
+        TEST(strstr(clear_check, "no_wave") == nullptr || strstr(clear_check, "no_wave") > clear_check + 512);
+
+        // Event/update/render ordering: the note-on verdict is computed inside
+        // the event pass, before the modulation step that frees the slot and
+        // before the coefficient and render dispatches.
+        const char* const events     = find_in_range(render, render_end, "process_events(start_samples, end_samples);");
+        const char* const modulation = find_in_range(render, render_end, "update_modulation();");
+        const char* const coefficients = find_in_range(render, render_end, "compute_fir_coefficients();");
+        TEST(events != nullptr && modulation != nullptr && coefficients != nullptr);
+        TEST(events < modulation && modulation < coefficients);
+        // FIR pitch spread runtime wiring: the dest triple feeds a single
+        // spread write in update_modulation, the transition re-engages FIR
+        // history clearing, and the coefficient pipeline consumes the
+        // spread-scaled cutoffs.  The removed cutoff spellings appear
+        // nowhere in the runtime.
+        const char* const spread_write = find_in_range(update, update_end, "osc.spread  = new_spread;");
+        TEST(spread_write != nullptr);
+        TEST(count_in_range(update, update_end, "osc.spread  = new_spread;") == 1);
+        const char* const spread_guard = find_in_range(update, update_end, "osc.spread <= 0.0f && new_spread > 0.0f");
+        TEST(spread_guard != nullptr && spread_guard < spread_write);
+        TEST(find_in_range(update, update_end, "osc.clear_fir_hist = true;") != nullptr);
+        TEST(find_in_range(update,
+                           update_end,
+                           "const float new_spread = parameters[osc_param(osc_idx, osc_spread_dest)].value;") !=
+             nullptr);
+        TEST(count_in_range(src, src + got, "Synth::oscillator_fir_cutoffs(osc.pitch, osc.spread, osc.freq_mult") == 1);
+        const char* const fir_cutoffs =
+            find_in_range(src, src + got, "Synth::oscillator_fir_cutoffs(osc.pitch, osc.spread, osc.freq_mult");
+        TEST(fir_cutoffs != nullptr);
+        if (fir_cutoffs) {
+            const char* const fir_guard =
+                find_in_range(fir_cutoffs, src + got, "Synth::oscillator_fir_band_guard(&lowpass, &highpass);");
+            TEST(fir_guard != nullptr);
+            TEST(find_in_range(fir_cutoffs, src + got, "cutoff_hz_to_int(lowpass_hz);") != nullptr);
+            TEST(find_in_range(fir_cutoffs, src + got, "cutoff_hz_to_int(highpass_hz);") != nullptr);
+            TEST(find_in_range(fir_cutoffs,
+                               fir_guard,
+                               "continue; // Effective spread <= 0: passthrough, no coefficient dispatch.") != nullptr);
+        }
+        TEST(find_in_range(src, src + got, "oscillators[osc_idx].spread > 0.0f) {") != nullptr);
+        TEST(find_in_range(
+                 src,
+                 src + got,
+                 "param.taps_offs            = (oscillator.spread > 0.0f) ? oscillator.fir_taps_offs / 4 : 0;") !=
+             nullptr);
+        TEST(strstr(src, "osc_lowpass_dest") == nullptr);
+        TEST(strstr(src, "osc_highpass_dest") == nullptr);
+        TEST(strstr(src, "mod_lowpass_cutoff") == nullptr);
+        TEST(strstr(src, "mod_highpass_cutoff") == nullptr);
+        // The F3 reserve predicate reads the spread target with all four
+        // wiring terms.
+        const char* const has_filter =
+            find_in_range(src,
+                          src + got,
+                          "static bool osc_has_filter(const Synth::Instrument& instrument, uint32_t layer_idx)");
+        TEST(has_filter != nullptr);
+        if (has_filter) {
+            const char* const has_filter_end = strstr(has_filter + 1, "\nstatic ");
+            TEST(has_filter_end != nullptr);
+            if (has_filter_end) {
+                TEST(find_in_range(has_filter, has_filter_end, "layer.targets[Synth::mod_fir_spread]") != nullptr);
+                TEST(find_in_range(has_filter, has_filter_end, "spread.base_value != 0.0f") != nullptr);
+                TEST(find_in_range(has_filter, has_filter_end, "spread.envelope_desc_id") != nullptr);
+                TEST(find_in_range(has_filter, has_filter_end, "spread.lfo_desc_id") != nullptr);
+                TEST(find_in_range(has_filter, has_filter_end, "spread.num_inputs") != nullptr);
+            }
+            // F4 shader-branch pin: the transported integer 0 is what selects
+            // pure lowpass, so the coefficient shader's highpass stage must key
+            // on the positive-edge test.
+            {
+                static char shader_src[64 * 1024];
+                FILE* const shader_file = fopen("synth/synth_fir_coeff.comp.glsl", "rb");
+                TEST(shader_file != nullptr);
+                if (shader_file) {
+                    const size_t shader_got = fread(shader_src, 1, sizeof(shader_src) - 1, shader_file);
+                    fclose(shader_file);
+                    TEST(shader_got > 0);
+                    shader_src[shader_got] = 0;
+                    TEST(strstr(shader_src, "if (param.highpass_cutoff_freq > 0)") != nullptr);
+                    TEST(strstr(shader_src, "param.highpass_cutoff_freq == 0") != nullptr);
+                }
+            }
+        }
+    }
+
+    // Projection and compile path: the Pitch Offset row is a bounded bare
+    // input (no slider), the Octave Offset row is a bounded integer slider at
+    // slot 90, and the compile path validates the octave before narrowing.
+    {
+        static Synth::InstrumentEditorBank source;
+        static Synth::Instrument           instrument = {};
+        static Sculptor::Graph             graph;
+        static Sculptor::OscGraphMapping   mapping;
+        static Sculptor::GraphChange       discarded[Sculptor::max_pending_changes];
+
+        build_zone_fixture(&source, &instrument);
+        TEST(Sculptor::project_editor_to_graph(source, &graph, &mapping));
+        graph.take_changes(discarded, Sculptor::max_pending_changes);
+
+        uint32_t pitch_slot  = Sculptor::pool_no_slot;
+        uint32_t octave_slot = Sculptor::pool_no_slot;
+        TEST(find_graph_slot(graph, mapping.osc_nodes[0], "Pitch Offset", &pitch_slot));
+        TEST(find_graph_slot(graph, mapping.osc_nodes[0], "Octave Offset", &octave_slot));
+        TEST(pitch_slot == 89);
+        TEST(octave_slot == 90);
+        const Sculptor::Slot& pitch_row = graph.node(mapping.osc_nodes[0]).slots.entries[pitch_slot];
+        TEST(pitch_row.property_type == Sculptor::PropertyType::real);
+        TEST(! pitch_row.real_bounded); // a bare input box, not a slider
+        TEST(pitch_row.real_min == Sculptor::osc_pitch_offset_min);
+        TEST(pitch_row.real_max == Sculptor::osc_pitch_offset_max);
+        TEST(pitch_row.value.real == instrument.layers[0].pitch_offset);
+        const Sculptor::Slot& octave_row = graph.node(mapping.osc_nodes[0]).slots.entries[octave_slot];
+        TEST(octave_row.property_type == Sculptor::PropertyType::integer);
+        TEST(octave_row.int_bounded);
+        TEST(octave_row.real_min == static_cast<float>(Sculptor::osc_octave_offset_min));
+        TEST(octave_row.real_max == static_cast<float>(Sculptor::osc_octave_offset_max));
+        TEST(octave_row.value.integer == 0);
+        const Sculptor::OscTargetView spread_view = Sculptor::osc_target_view(Synth::mod_fir_spread);
+        TEST(spread_view.min_value == 0.0f && spread_view.max_value == 36.0f);
+        TEST(spread_view.bank_scale == 1.0f && ! spread_view.logarithmic);
+        TEST(Sculptor::osc_target_row(Synth::mod_fir_spread) == 91);
+
+        // Round-trip: an octave edit applies through the value_changed path,
+        // lands in the bank and reprojection shows it again.
+        Sculptor::PropertyValue octave_edit = {};
+        octave_edit.integer                 = -3;
+        graph.set_slot_value(mapping.osc_nodes[0], octave_slot, octave_edit);
+        Sculptor::GraphChange octave_change = {};
+        octave_change.kind                  = Sculptor::ChangeKind::value_changed;
+        octave_change.node_idx              = mapping.osc_nodes[0];
+        octave_change.slot_idx              = octave_slot;
+        TEST(Sculptor::apply_osc_graph_change(&source, &graph, &mapping, octave_change));
+        TEST(source.bank.instruments.entries[0].layers[0].octave_offset == -3);
+
+        static Synth::InstrumentEditorBank reprojected_source = source;
+        static Sculptor::Graph             reprojected_graph;
+        static Sculptor::OscGraphMapping   reprojected_mapping;
+        TEST(Sculptor::project_editor_to_graph(reprojected_source, &reprojected_graph, &reprojected_mapping));
+        TEST(find_graph_slot(reprojected_graph, reprojected_mapping.osc_nodes[0], "Octave Offset", &octave_slot));
+        TEST(reprojected_graph.node(reprojected_mapping.osc_nodes[0]).slots.entries[octave_slot].value.integer == -3);
+
+        // Endpoint values compile; an out-of-range edit refuses the projection.
+        static Synth::Instrument compiled;
+        TEST(Sculptor::compile_graph_to_instrument(graph, mapping, &compiled));
+        TEST(compiled.layers[0].octave_offset == -3);
+        const int32_t octave_endpoints[2] = { -12, 12 };
+        for (const int32_t endpoint : octave_endpoints) {
+            octave_edit.integer = endpoint;
+            graph.set_slot_value(mapping.osc_nodes[0], octave_slot, octave_edit);
+            TEST(Sculptor::apply_osc_graph_change(&source, &graph, &mapping, octave_change));
+            TEST(source.bank.instruments.entries[0].layers[0].octave_offset == endpoint);
+            TEST(Sculptor::compile_graph_to_instrument(graph, mapping, &compiled));
+            TEST(compiled.layers[0].octave_offset == endpoint);
+        }
+        octave_edit.integer = 13;
+        graph.set_slot_value(mapping.osc_nodes[0], octave_slot, octave_edit);
+        TEST(! Sculptor::apply_osc_graph_change(&source, &graph, &mapping, octave_change));
+        TEST(! Sculptor::compile_graph_to_instrument(graph, mapping, &compiled));
+        // The refused edit leaves the compiled bank at the last good value.
+        TEST(source.bank.instruments.entries[0].layers[0].octave_offset == 12);
+    }
+    // The FIR Slope row: the bounded integer slider at slot 103, seeded
+    // from the bank field, round-tripping through the value_changed apply
+    // path, and refusing out-of-range compile reads.
+    {
+        static Synth::InstrumentEditorBank source;
+        static Synth::Instrument           instrument = {};
+        static Sculptor::Graph             graph;
+        static Sculptor::OscGraphMapping   mapping;
+        static Sculptor::GraphChange       discarded[Sculptor::max_pending_changes];
+        build_zone_fixture(&source, &instrument);
+        source.bank.instruments.entries[0].layers[0].fir_slope_percent = 37;
+        TEST(Sculptor::project_editor_to_graph(source, &graph, &mapping));
+        graph.take_changes(discarded, Sculptor::max_pending_changes);
+        uint32_t slope_slot = Sculptor::pool_no_slot;
+        TEST(find_graph_slot(graph, mapping.osc_nodes[0], "FIR Slope", &slope_slot));
+        TEST(slope_slot == 103);
+        const Sculptor::Slot& slope_row = graph.node(mapping.osc_nodes[0]).slots.entries[slope_slot];
+        TEST(slope_row.property_type == Sculptor::PropertyType::integer);
+        TEST(slope_row.int_bounded);
+        TEST(slope_row.real_min == 1.0f);
+        TEST(slope_row.real_max == 100.0f);
+        TEST(slope_row.value.integer == 37);
+        Sculptor::PropertyValue slope_edit = {};
+        slope_edit.integer                 = 64;
+        graph.set_slot_value(mapping.osc_nodes[0], slope_slot, slope_edit);
+        Sculptor::GraphChange slope_change = {};
+        slope_change.kind                  = Sculptor::ChangeKind::value_changed;
+        slope_change.node_idx              = mapping.osc_nodes[0];
+        slope_change.slot_idx              = slope_slot;
+        TEST(Sculptor::apply_osc_graph_change(&source, &graph, &mapping, slope_change));
+        TEST(source.bank.instruments.entries[0].layers[0].fir_slope_percent == 64);
+        static Synth::Instrument compiled;
+        TEST(Sculptor::compile_graph_to_instrument(graph, mapping, &compiled));
+        TEST(compiled.layers[0].fir_slope_percent == 64);
+        // A stale slot value outside 1..100 refuses the apply and the
+        // compile, mirroring the octave_offset guard.
+        slope_edit.integer = 0;
+        graph.set_slot_value(mapping.osc_nodes[0], slope_slot, slope_edit);
+        TEST(! Sculptor::apply_osc_graph_change(&source, &graph, &mapping, slope_change));
+        TEST(! Sculptor::compile_graph_to_instrument(graph, mapping, &compiled));
+        slope_edit.integer = 101;
+        graph.set_slot_value(mapping.osc_nodes[0], slope_slot, slope_edit);
+        TEST(! Sculptor::apply_osc_graph_change(&source, &graph, &mapping, slope_change));
+        TEST(! Sculptor::compile_graph_to_instrument(graph, mapping, &compiled));
+    }
+
+    // The FIR effect node: 33 slots (In/Out/Enabled + 3 params x 10), the
+    // slope row is a bounded integer slider whose commit never writes the
+    // zero-cutoff "off" state, which stays reserved for the two cutoff
+    // rows at their slider extremes.
+    {
+        static Synth::InstrumentEditorBank authored;
+        Synth::init_default_bank(&authored.bank);
+        enabled_effect(authored.bank, 0, 0, Synth::EffectType::fir);
+        authored.bank.channel_chains[0].effects[0].bindings[0].base_value = 8000.0f;
+        authored.bank.channel_chains[0].effects[0].bindings[1].base_value = 0.0f;
+        authored.bank.channel_chains[0].effects[0].bindings[2].base_value = 37.0f;
+        TEST(Synth::validate_instrument_bank(&authored.bank));
+        static Sculptor::Graph              graph;
+        static Sculptor::EffectGraphMapping mapping;
+        TEST(Sculptor::project_effect_chain_to_graph(authored, 0, &graph, &mapping));
+        TEST(graph.node(mapping.effect_nodes[0]).slots.num_allocated == 3 + 3 * Sculptor::fx_param_stride);
+        uint32_t lowpass_row   = Sculptor::pool_no_slot;
+        uint32_t highpass_row  = Sculptor::pool_no_slot;
+        uint32_t slope_row_idx = Sculptor::pool_no_slot;
+        TEST(find_graph_slot(graph, mapping.effect_nodes[0], "Lowpass Hz", &lowpass_row));
+        TEST(find_graph_slot(graph, mapping.effect_nodes[0], "Highpass Hz", &highpass_row));
+        TEST(find_graph_slot(graph, mapping.effect_nodes[0], "FIR Slope", &slope_row_idx));
+        TEST(lowpass_row == Sculptor::fx_param_row(0));
+        TEST(highpass_row == Sculptor::fx_param_row(1));
+        TEST(slope_row_idx == Sculptor::fx_param_row(2));
+        const Sculptor::Slot& hp_row = graph.node(mapping.effect_nodes[0]).slots.entries[highpass_row];
+        TEST(hp_row.value.real == 20.0f); // zero cutoff displays the minimum edge
+        const Sculptor::Slot& slope_row2 = graph.node(mapping.effect_nodes[0]).slots.entries[slope_row_idx];
+        TEST(slope_row2.property_type == Sculptor::PropertyType::integer);
+        TEST(slope_row2.int_bounded);
+        TEST(slope_row2.real_min == 1.0f && slope_row2.real_max == 100.0f);
+        TEST(slope_row2.value.integer == 37);
+        // The slope commit lands as an integer base; its slider extremes
+        // are valid values, never the zero-cutoff off state.
+        Sculptor::GraphChange change                      = {};
+        change.kind                                       = Sculptor::ChangeKind::value_changed;
+        change.node_idx                                   = mapping.effect_nodes[0];
+        change.slot_idx                                   = slope_row_idx;
+        Sculptor::PropertyValue            value          = {};
+        static Synth::InstrumentEditorBank candidate      = authored;
+        const int32_t                      slope_values[] = { 55, 1, 100 };
+        for (const int32_t slope : slope_values) {
+            value.integer = slope;
+            graph.set_slot_value(mapping.effect_nodes[0], slope_row_idx, value);
+            candidate = authored;
+            TEST(Sculptor::apply_fx_graph_change(&candidate.bank, graph, mapping, change));
+            TEST(candidate.bank.channel_chains[0].effects[0].bindings[2].base_value == static_cast<float>(slope));
+        }
+        // The cutoff rows still write the zero "off" state at their extremes.
+        change.slot_idx = lowpass_row;
+        value.real      = 20.0f;
+        graph.set_slot_value(mapping.effect_nodes[0], lowpass_row, value);
+        candidate = authored;
+        TEST(Sculptor::apply_fx_graph_change(&candidate.bank, graph, mapping, change));
+        TEST(candidate.bank.channel_chains[0].effects[0].bindings[0].base_value == 0.0f);
+        change.slot_idx = highpass_row;
+        value.real      = 22050.0f;
+        graph.set_slot_value(mapping.effect_nodes[0], highpass_row, value);
+        candidate = authored;
+        TEST(Sculptor::apply_fx_graph_change(&candidate.bank, graph, mapping, change));
+        TEST(candidate.bank.channel_chains[0].effects[0].bindings[1].base_value == 0.0f);
+    }
+}
+
+// FIR Slope helpers: the effective-span law, the full-span byte identity
+// against the old fixed-window spelling, and the narrow-span zero tail.
+static void check_fir_slope_helpers()
+{
+    // Law table: the odd span grows from 11 taps at 1 percent to the full
+    // 1025-tap kernel at 100.
+    {
+        static const struct {
+            float    percent;
+            uint32_t span;
+        } law[] = {
+            { 1.0f, 11 },   { 10.0f, 103 },  { 25.0f, 257 },
+            { 50.0f, 513 }, { 99.0f, 1015 }, { 100.0f, Synth::num_fir_taps },
+        };
+
+        for (const auto& row : law) {
+            TEST(Synth::fir_effective_span(row.percent) == row.span);
+        }
+    }
+    // Monotonic non-decreasing over the integer sweep, every result odd.
+    {
+        uint32_t previous = 0;
+        for (uint32_t percent = 1; percent <= 100; percent++) {
+            const uint32_t span = Synth::fir_effective_span(static_cast<float>(percent));
+            TEST(span >= previous);
+            TEST((span & 1u) == 1u);
+            previous = span;
+        }
+        TEST(previous == Synth::num_fir_taps);
+        // A fractional grid stays monotonic and odd.
+        previous = 0;
+        for (uint32_t step = 1; step < 200; step++) {
+            const uint32_t span = Synth::fir_effective_span(static_cast<float>(step) * 0.5f);
+            TEST(span >= previous);
+            TEST((span & 1u) == 1u);
+            previous = span;
+        }
+    }
+    // Out-of-range clamps: 0, negatives and NaN read as the 1 percent
+    // minimum; values above 100 (including +inf) read as the full span.
+    {
+        const float nan_slope = 0.0f / 0.0f;
+        const float inf_slope = 1.0f / 0.0f;
+        TEST(Synth::fir_effective_span(0.0f) == 11);
+        TEST(Synth::fir_effective_span(-3.0f) == 11);
+        TEST(Synth::fir_effective_span(nan_slope) == 11);
+        TEST(Synth::fir_effective_span(101.0f) == Synth::num_fir_taps);
+        TEST(Synth::fir_effective_span(inf_slope) == Synth::num_fir_taps);
+    }
+    // Byte-identity mirror: at the full span the span-parameterized window
+    // reproduces the old fixed (num_taps - 1) spelling bit for bit, with
+    // the same float association order.
+    {
+        constexpr uint32_t taps   = Synth::num_fir_taps;
+        constexpr uint32_t center = taps / 2;
+        constexpr float    pi     = 3.141592653589793f;
+        static float       old_windows[taps];
+        static float       new_windows[taps];
+        for (uint32_t tap = 0; tap < taps; tap++) {
+            const float x         = static_cast<float>(tap) - static_cast<float>(center);
+            old_windows[tap]      = 0.42f -
+                                    0.5f * cosf((2.0f * pi * static_cast<float>(tap)) / static_cast<float>(taps - 1)) +
+                                    0.08f * cosf((4.0f * pi * static_cast<float>(tap)) / static_cast<float>(taps - 1));
+            const float half_span = static_cast<float>(taps) * 0.5f - 0.5f;
+            const float wpos      = x + half_span;
+            const float span_m1   = static_cast<float>(taps - 1);
+            const bool  in_span   = wpos >= 0.0f && wpos <= span_m1;
+            new_windows[tap] =
+                in_span ? 0.42f - 0.5f * cosf((2.0f * pi * wpos) / span_m1) + 0.08f * cosf((4.0f * pi * wpos) / span_m1)
+                        : 0.0f;
+        }
+        TEST(memcmp(old_windows, new_windows, sizeof(old_windows)) == 0);
+    }
+    // Narrow-span mirror at 103 taps: taps outside the span are exactly
+    // zero, in-span taps match an independent direct Blackman evaluation of
+    // a standalone 103-tap window, and the in-span window sum stays positive.
+    // The sum is only a window-sum sanity check; it says nothing about the
+    // shader's normalization denominator.
+    {
+        constexpr uint32_t taps      = Synth::num_fir_taps;
+        constexpr uint32_t center    = taps / 2;
+        constexpr uint32_t span      = 103;
+        constexpr float    pi        = 3.141592653589793f;
+        const float        half_span = static_cast<float>(span) * 0.5f - 0.5f;
+        const float        span_m1   = static_cast<float>(span - 1);
+        static float       windows[Synth::num_fir_taps];
+        float              window_sum = 0.0f;
+        for (uint32_t tap = 0; tap < taps; tap++) {
+            const float x       = static_cast<float>(tap) - static_cast<float>(center);
+            const float wpos    = x + half_span;
+            const bool  in_span = wpos >= 0.0f && wpos <= span_m1;
+            const float window =
+                in_span ? 0.42f - 0.5f * cosf((2.0f * pi * wpos) / span_m1) + 0.08f * cosf((4.0f * pi * wpos) / span_m1)
+                        : 0.0f;
+            windows[tap] = window;
+            TEST(in_span || window == 0.0f);
+            if (in_span) {
+                TEST(window != 0.0f);
+                window_sum += window;
+            }
+        }
+        // Independent evaluation: the canonical Blackman over a standalone
+        // 103-tap window, compared tap for tap against the span-derived form.
+        for (uint32_t k = 0; k < span; k++) {
+            const float direct =
+                0.42f - 0.5f * cosf((2.0f * pi * k) / span_m1) + 0.08f * cosf((4.0f * pi * k) / span_m1);
+            TEST(windows[center - span / 2 + k] == direct);
+        }
+        TEST(window_sum > 0.0f);
+    }
+    // Runtime source pins: exactly two window_span dispatch fills (the
+    // oscillator loop and the effect chain walk), the trigger copy, the
+    // RunningOscillator field, and no editor-facing "FIR Slope" string.
+    {
+        static char src[256 * 1024];
+        FILE* const file = fopen("synth/realtime_synth.cpp", "rb");
+        TEST(file != nullptr);
+        if (! file) {
+            return;
+        }
+        const size_t got = fread(src, 1, sizeof(src) - 1, file);
+        fclose(file);
+        TEST(got > 0);
+        src[got]       = 0;
+        uint32_t fills = 0; // alignment-tolerant: the dispatch fills may be
+                            // column-aligned by the formatter
+        for (const char* hit = strstr(src, "Synth::fir_effective_span("); hit;
+             hit             = strstr(hit + 1, "Synth::fir_effective_span(")) {
+            fills++;
+        }
+        TEST(fills == 2);
+        { // param.window_span appears at exactly the two dispatch sites.
+            uint32_t span_sites = 0;
+            for (const char* hit = strstr(src, "param.window_span"); hit; hit = strstr(hit + 1, "param.window_span")) {
+                span_sites++;
+            }
+            TEST(span_sites == 2);
+        }
+        TEST(strstr(src, "Synth::fir_effective_span(instance.params[2])") != nullptr);
+        TEST(strstr(src, "= layer.fir_slope_percent;") != nullptr);
+        TEST(strstr(src, "uint8_t fir_slope_percent;") != nullptr);
+        TEST(strstr(src, "FIR Slope") == nullptr);
+    }
+}
+
+// Host mirror of the FIR coefficient shader's binary32 arithmetic for one
+// cutoff pair and span: the signed windowed kernel, the denominator terms and
+// the stored coefficients.  The response sums are then reduced with the
+// shader's summation shape and re-evaluated independently in double precision.
+struct FirCoeffMirror {
+    float coefficients[Synth::num_fir_taps];
+    float norm_terms[Synth::num_fir_taps]; // norm_value * window, the coeff_sum path
+    float cos_terms[Synth::num_fir_taps];
+    float sin_terms[Synth::num_fir_taps];
+    float old_denominator;  // coeff_sum: the unchanged normalization sum
+    float band_denominator; // stored denominator: center magnitude for band-pass, coeff_sum otherwise
+    float center_freq;
+};
+
+// Emulates the shader's summation shape: each invocation accumulates its
+// strided taps in tap order, subgroupAdd sums each subgroup's lanes in lane
+// order, and the subgroup-0 stage sums the partials in subgroup order.
+static float fir_test_subgroup_sum(const float* terms, uint32_t work_group, uint32_t subgroup)
+{
+    constexpr uint32_t taps          = Synth::num_fir_taps;
+    const uint32_t     num_subgroups = work_group / subgroup;
+    float              total         = 0.0f;
+    for (uint32_t s = 0; s < num_subgroups; s++) {
+        float sub = 0.0f;
+        for (uint32_t lane = s * subgroup; lane < (s + 1) * subgroup; lane++) {
+            float lane_sum = 0.0f;
+            for (uint32_t tap = lane; tap < taps; tap += work_group) {
+                lane_sum += terms[tap];
+            }
+            sub += lane_sum;
+        }
+        total += sub;
+    }
+    return total;
+}
+
+// Mirror of the coefficient shader's band-pass denominator selection: a
+// degenerate complex magnitude falls back to the coeff_sum path, and a
+// degenerate fallback leaves the coefficients unscaled.
+static float fir_test_bandpass_denominator(float cos_sum, float sin_sum, float fallback)
+{
+    const float q           = cos_sum * cos_sum + sin_sum * sin_sum;
+    const float m           = sqrtf(q);
+    float       denominator = m;
+    if (m == 0.0f || std::isnan(cos_sum) || std::isnan(sin_sum) || std::isinf(cos_sum) || std::isinf(sin_sum) ||
+        std::isnan(q) || std::isinf(q) || std::isnan(m)) {
+        denominator = fallback;
+    }
+    if (denominator == 0.0f || std::isnan(denominator) || std::isinf(denominator)) {
+        denominator = 1.0f;
+    }
+    return denominator;
+}
+
+// Host mirror of the coefficient shader for one integer cutoff pair and span.
+static void fir_test_mirror(uint32_t        lowpass_hz,
+                            uint32_t        highpass_hz,
+                            uint32_t        span,
+                            uint32_t        work_group,
+                            uint32_t        subgroup,
+                            FirCoeffMirror* out)
+{
+    constexpr uint32_t taps   = Synth::num_fir_taps;
+    constexpr uint32_t center = (taps - 1) / 2;
+    constexpr float    pi     = 3.141592653589793f;
+    const float        fs     = static_cast<float>(Synth::rt_sampling_rate);
+
+    const float lowpass_norm  = static_cast<float>(lowpass_hz) / fs;
+    const float highpass_norm = static_cast<float>(highpass_hz) / fs;
+    out->center_freq          = (static_cast<float>(highpass_hz) + static_cast<float>(lowpass_hz)) * 0.5f;
+    const float center_w      = 2.0f * pi * out->center_freq / fs;
+    const float half_span     = static_cast<float>(span) * 0.5f - 0.5f;
+    const float span_m1       = static_cast<float>(span - 1u);
+
+    for (uint32_t tap = 0; tap < taps; tap++) {
+        const float x = static_cast<float>(tap) - static_cast<float>(center);
+
+        float value = (x == 0.0f && lowpass_hz == 0 && highpass_hz == 0) ? 1.0f : 0.0f;
+        if (lowpass_hz > 0) {
+            value = (x == 0.0f) ? 2.0f * lowpass_norm : sinf(2.0f * pi * lowpass_norm * x) / (pi * x);
+        }
+
+        float norm_value = value;
+
+        if (highpass_hz > 0) {
+            const float hp_value = (x == 0.0f) ? 2.0f * highpass_norm : sinf(2.0f * pi * highpass_norm * x) / (pi * x);
+            value -= hp_value;
+            if (highpass_hz < lowpass_hz) {
+                value      = -value;
+                norm_value = hp_value;
+            }
+            else if (x == 0.0f) {
+                value += 1.0f;
+                if (lowpass_hz == 0) {
+                    norm_value += 1.0f;
+                }
+            }
+        }
+
+        const float wpos    = x + half_span;
+        const bool  in_span = wpos >= 0.0f && wpos <= span_m1;
+        const float window =
+            in_span ? 0.42f - 0.5f * cosf((2.0f * pi * wpos) / span_m1) + 0.08f * cosf((4.0f * pi * wpos) / span_m1)
+                    : 0.0f;
+        value *= window;
+
+        out->coefficients[tap] = value;
+        out->norm_terms[tap]   = norm_value * window;
+        if (in_span && highpass_hz > 0 && highpass_hz < lowpass_hz) {
+            out->cos_terms[tap] = value * cosf(center_w * x);
+            out->sin_terms[tap] = value * sinf(center_w * x);
+        }
+        else {
+            out->cos_terms[tap] = 0.0f;
+            out->sin_terms[tap] = 0.0f;
+        }
+    }
+
+    out->old_denominator  = fir_test_subgroup_sum(out->norm_terms, work_group, subgroup);
+    const float cos_sum   = fir_test_subgroup_sum(out->cos_terms, work_group, subgroup);
+    const float sin_sum   = fir_test_subgroup_sum(out->sin_terms, work_group, subgroup);
+    out->band_denominator = fir_test_bandpass_denominator(cos_sum, sin_sum, out->old_denominator);
+}
+
+// Independent double precision response magnitude of a binary32 kernel, with
+// causal tap coordinates (phase taken from the tap index itself): the causal
+// kernel differs from the centered one by a unit-magnitude phase factor only,
+// so this validates the centered measurement's magnitude against the causal
+// convolution the runtime applies.
+static double fir_test_response(const float* coefficients, double center_freq)
+{
+    constexpr uint32_t taps = Synth::num_fir_taps;
+    const double       w    = 2.0 * 3.141592653589793 * center_freq / static_cast<double>(Synth::rt_sampling_rate);
+    double             real = 0.0;
+    double             imag = 0.0;
+    for (uint32_t tap = 0; tap < taps; tap++) {
+        const double c = static_cast<double>(coefficients[tap]);
+        if (c == 0.0) {
+            continue;
+        }
+        const double phase = w * static_cast<double>(tap);
+        real += c * cos(phase);
+        imag -= c * sin(phase);
+    }
+    return sqrt(real * real + imag * imag);
+}
+
+// Stores the shader's per-tap binary32 division by the selected denominator
+// (the band-center magnitude for band-pass, the unchanged coeff_sum path
+// otherwise) and evaluates the stored outputs' response magnitude.
+static double fir_test_stored_response(const FirCoeffMirror& mirror, double freq, float* stored)
+{
+    constexpr uint32_t taps = Synth::num_fir_taps;
+    for (uint32_t tap = 0; tap < taps; tap++) {
+        stored[tap] = mirror.coefficients[tap] / mirror.band_denominator;
+        TEST(std::isfinite(stored[tap]));
+    }
+    return fir_test_response(stored, freq);
+}
+
+// Normalized center-response tolerance.  Near-Nyquist one-Hz pairs lose more
+// precision to binary32 sinc arguments (about 1600 radians at the span edges),
+// so they get the looser bound.
+static double fir_test_unity_tolerance(uint32_t lowpass_hz, uint32_t highpass_hz)
+{
+    const double center = 0.5 * (static_cast<double>(lowpass_hz) + static_cast<double>(highpass_hz));
+    const bool   near_nyquist_narrow =
+        (0.5 * static_cast<double>(Synth::rt_sampling_rate) - center) < 100.0 && (lowpass_hz - highpass_hz) <= 2;
+    return near_nyquist_narrow ? 1e-3 : 1e-4;
+}
+
+// Host quantizer mirror of cutoff_hz_to_int in realtime_synth.cpp (the
+// production helper is pinned by a source check below).
+static uint32_t fir_test_quantize_cutoff(float value)
+{
+    if (value <= 0.0f) {
+        return 0;
+    }
+    if (value <= 1.0f) {
+        return 1;
+    }
+    if (value >= static_cast<float>(Synth::max_cutoff_hz)) {
+        return Synth::max_cutoff_hz;
+    }
+    return static_cast<uint32_t>(value + 0.5f);
+}
+
+// Band-pass gain: the coefficient shader normalizes the kernel's actual complex
+// response magnitude to 1 at the arithmetic band center for every span,
+// verified here by a binary32 host mirror with subgroup-shaped summation and
+// an independent double precision response evaluation.
+static void check_fir_bandpass_gain()
+{
+    constexpr uint32_t    taps   = Synth::num_fir_taps;
+    constexpr uint32_t    center = (taps - 1) / 2;
+    static FirCoeffMirror mirror;
+    static float          stored[Synth::num_fir_taps];
+
+    // Spot pairs from the measured host response table: the pre-change center
+    // gains are pinned to show the regression fails on the old denominator,
+    // and the normalized response is unity in both subgroup shapes.  The old
+    // gain references are double precision values; the binary32 mirror may
+    // deviate from them by up to about a thousandth relative near Nyquist, so
+    // the pins use a 2e-3 relative tolerance.
+    constexpr float pi = 3.141592653589793f;
+    {
+        static const struct {
+            uint32_t lowpass_hz;
+            uint32_t highpass_hz;
+            uint32_t span;
+            double   old_gain;
+        } spots[] = {
+            { 880, 220, 11, 2.95233438 },         { 880, 220, taps, 1.00023440 },
+            { 441, 440, 11, 0.00225391524 },      { 441, 440, taps, 0.00975174565 },
+            { 22049, 22048, 11, 0.000190476168 }, { 22049, 22048, taps, 0.0194805887 },
+            { 2, 1, taps, 0.998850774 },          { 466, 415, 11, 0.121851303 },
+            { 466, 415, taps, 0.469485529 },
+        };
+
+        // Reduction shapes the production shader can actually consume: its
+        // second stage runs only in subgroup 0, whose lanes load one partial
+        // each, so the subgroup count must not exceed the subgroup size.
+        static const uint32_t shapes[][2] = { { 256, 32 }, { 256, 16 } };
+        for (const auto& shape : shapes) {
+            TEST(shape[0] / shape[1] <= shape[1]);
+            for (const auto& spot : spots) {
+                fir_test_mirror(spot.lowpass_hz, spot.highpass_hz, spot.span, shape[0], shape[1], &mirror);
+                // Taps outside the span are exactly zero and every stored
+                // coefficient is finite.
+                for (uint32_t tap = 0; tap < taps; tap++) {
+                    TEST(std::isfinite(mirror.coefficients[tap]));
+                    if (tap < center - (spot.span - 1) / 2 || tap > center + (spot.span - 1) / 2) {
+                        TEST(mirror.coefficients[tap] == 0.0f);
+                    }
+                }
+                const double magnitude =
+                    fir_test_response(mirror.coefficients, static_cast<double>(mirror.center_freq));
+                TEST(std::isfinite(magnitude));
+                TEST(fabs(magnitude / static_cast<double>(mirror.old_denominator) / spot.old_gain - 1.0) <= 2e-3);
+                const double stored_magnitude =
+                    fir_test_stored_response(mirror, static_cast<double>(mirror.center_freq), stored);
+                TEST(std::isfinite(stored_magnitude));
+                TEST(fabs(stored_magnitude - 1.0) <= fir_test_unity_tolerance(spot.lowpass_hz, spot.highpass_hz));
+            }
+        }
+    }
+
+    // Slope sweep over direct effect pairs: unity at the band center for every
+    // integer slope and for fractional effect slopes.
+    {
+        static const struct {
+            uint32_t lowpass_hz;
+            uint32_t highpass_hz;
+        } pairs[] = { { 880, 220 }, { 441, 440 }, { 22049, 22048 }, { 2, 1 }, { 466, 415 } };
+
+        static const float fractional_slopes[] = { 1.5f, 37.25f };
+        for (const auto& pair : pairs) {
+            for (uint32_t slope = 1; slope <= 100; slope++) {
+                const uint32_t span = Synth::fir_effective_span(static_cast<float>(slope));
+                fir_test_mirror(pair.lowpass_hz, pair.highpass_hz, span, 256, 32, &mirror);
+                const double magnitude =
+                    fir_test_stored_response(mirror, static_cast<double>(mirror.center_freq), stored);
+                TEST(fabs(magnitude - 1.0) <= fir_test_unity_tolerance(pair.lowpass_hz, pair.highpass_hz));
+            }
+            for (const float slope : fractional_slopes) {
+                const uint32_t span = Synth::fir_effective_span(slope);
+                fir_test_mirror(pair.lowpass_hz, pair.highpass_hz, span, 256, 32, &mirror);
+                const double magnitude =
+                    fir_test_stored_response(mirror, static_cast<double>(mirror.center_freq), stored);
+                TEST(fabs(magnitude - 1.0) <= fir_test_unity_tolerance(pair.lowpass_hz, pair.highpass_hz));
+            }
+        }
+    }
+
+    // The sub-1-Hz floor transports a low edge as pure lowpass; the unchanged
+    // coeff_sum normalization keeps the DC gain at unity there.
+    {
+        float lowpass_edge  = 0.0f;
+        float highpass_edge = 0.0f;
+        TEST(Synth::oscillator_fir_cutoffs(-36.0f, 12.0f, 1, &lowpass_edge, &highpass_edge));
+        TEST(highpass_edge == 0.0f);
+        const uint32_t lowpass = fir_test_quantize_cutoff(lowpass_edge);
+        TEST(lowpass > 0);
+        static const uint32_t spans[] = { 11, taps };
+        for (const uint32_t span : spans) {
+            fir_test_mirror(lowpass, 0, span, 256, 32, &mirror);
+            const double dc = fir_test_stored_response(mirror, 0.0, stored);
+            TEST(fabs(dc - 1.0) <= 1e-4);
+        }
+    }
+
+    // Oscillator grid through the real edge composition, quantization, guard
+    // and span helpers: unity at the band center for every valid band-pass
+    // case; floor-killed pure lowpass cases classify into the DC check.
+    {
+        static const float    pitches[] = { 0.0f, 36.0f, 69.0f, 96.0f, 127.0f };
+        static const float    spreads[] = { 1e-9f, 0.1f, 1.0f, 12.0f, 36.0f };
+        static const uint32_t mults[]   = { 1, 3 };
+        for (const float pitch : pitches) {
+            for (const float spread : spreads) {
+                for (const uint32_t mult : mults) {
+                    float lowpass_edge  = 0.0f;
+                    float highpass_edge = 0.0f;
+                    if (! Synth::oscillator_fir_cutoffs(pitch, spread, mult, &lowpass_edge, &highpass_edge)) {
+                        continue; // effective spread <= 0: passthrough, no dispatch
+                    }
+                    uint32_t lowpass  = fir_test_quantize_cutoff(lowpass_edge);
+                    uint32_t highpass = fir_test_quantize_cutoff(highpass_edge); // 0 when the floor killed the edge
+                    Synth::oscillator_fir_band_guard(&lowpass, &highpass);
+                    for (uint32_t slope = 1; slope <= 100; slope++) {
+                        const uint32_t span = Synth::fir_effective_span(static_cast<float>(slope));
+                        if (highpass == 0) {
+                            fir_test_mirror(lowpass, 0, span, 256, 32, &mirror);
+                            const double dc = fir_test_stored_response(mirror, 0.0, stored);
+                            TEST(fabs(dc - 1.0) <= 1e-4);
+                            continue;
+                        }
+                        TEST(highpass < lowpass);
+                        fir_test_mirror(lowpass, highpass, span, 256, 32, &mirror);
+                        const double magnitude =
+                            fir_test_stored_response(mirror, static_cast<double>(mirror.center_freq), stored);
+                        TEST(fabs(magnitude - 1.0) <= fir_test_unity_tolerance(lowpass, highpass));
+                    }
+                }
+            }
+        }
+    }
+
+    // Unchanged branches: pure lowpass keeps the coefficient-DC-sum
+    // normalization (unity DC gain) and pure highpass keeps the center-window
+    // denominator, not an exact Nyquist gain.  Passthrough, equal-edge impulse
+    // and band-stop cases fail the pinned band-pass predicate, so they stay on
+    // the old paths by construction.
+    {
+        static const uint32_t spans[] = { 11, taps };
+        for (const uint32_t span : spans) {
+            fir_test_mirror(880, 0, span, 256, 32, &mirror);
+            const double dc = fir_test_stored_response(mirror, 0.0, stored);
+            TEST(fabs(dc - 1.0) <= 1e-4);
+
+            fir_test_mirror(0, 880, span, 256, 32, &mirror);
+            const float half_span     = static_cast<float>(span) * 0.5f - 0.5f;
+            const float span_m1       = static_cast<float>(span - 1);
+            const float center_window = 0.42f - 0.5f * cosf((2.0f * pi * half_span) / span_m1) +
+                                        0.08f * cosf((4.0f * pi * half_span) / span_m1);
+            TEST(mirror.old_denominator == center_window);
+            TEST(fabs(static_cast<double>(mirror.old_denominator) - 1.0) <= 1e-4);
+        }
+    }
+
+    // Degenerate denominator guards, mirrored from the shader's selection:
+    // zero sums, NaN, infinity and squared-magnitude underflow fall back to
+    // the coeff_sum path (sign preserved); a degenerate fallback becomes 1;
+    // a small but valid magnitude is used without an epsilon floor.
+    {
+        const float nan_value = 0.0f / 0.0f;
+        const float inf_value = 1.0f / 0.0f;
+        TEST(fir_test_bandpass_denominator(0.0f, 0.0f, 0.5f) == 0.5f);
+        TEST(fir_test_bandpass_denominator(0.0f, 0.0f, -0.5f) == -0.5f);
+        TEST(fir_test_bandpass_denominator(nan_value, 0.0f, 0.5f) == 0.5f);
+        TEST(fir_test_bandpass_denominator(0.0f, inf_value, 0.5f) == 0.5f);
+        TEST(fir_test_bandpass_denominator(1e-25f, 0.0f, 0.25f) == 0.25f);
+        const float small_magnitude = fir_test_bandpass_denominator(1e-10f, 0.0f, 0.25f);
+        TEST(small_magnitude > 0.0f && small_magnitude < 1e-9f);
+        TEST(fir_test_bandpass_denominator(0.0f, 0.0f, 0.0f) == 1.0f);
+        TEST(fir_test_bandpass_denominator(0.0f, 0.0f, nan_value) == 1.0f);
+        TEST(fir_test_bandpass_denominator(0.0f, 0.0f, inf_value) == 1.0f);
+        TEST(fir_test_bandpass_denominator(nan_value, nan_value, nan_value) == 1.0f);
+    }
+
+    // Production source pins: the band-pass predicate, the weighted windowed
+    // sums, the extended reduction and the degenerate guards live in the
+    // shipped shader, so the host mirror cannot pass while the shader still
+    // normalizes band-pass coefficients by the old denominator.  The
+    // quantizer mirror mirrors the exact production helper.
+    {
+        static char shader_src[64 * 1024];
+        FILE* const shader_file = fopen("synth/synth_fir_coeff.comp.glsl", "rb");
+        TEST(shader_file != nullptr);
+        if (shader_file) {
+            const size_t shader_got = fread(shader_src, 1, sizeof(shader_src) - 1, shader_file);
+            fclose(shader_file);
+            TEST(shader_got > 0);
+            shader_src[shader_got] = 0;
+            TEST(strstr(shader_src,
+                        "param.highpass_cutoff_freq > 0 && param.highpass_cutoff_freq < param.lowpass_cutoff_freq") !=
+                 nullptr);
+            TEST(strstr(shader_src, "cos_sum += value * cos(center_w * x);") != nullptr);
+            TEST(strstr(shader_src, "sin_sum += value * sin(center_w * x);") != nullptr);
+            TEST(strstr(shader_src, "norm_cos[gl_SubgroupID]") != nullptr);
+            TEST(strstr(shader_src, "norm_sin[gl_SubgroupID]") != nullptr);
+            TEST(strstr(shader_src, "norm_cos[gl_SubgroupInvocationID]") != nullptr);
+            TEST(strstr(shader_src, "norm_sin[gl_SubgroupInvocationID]") != nullptr);
+            TEST(strstr(shader_src, "sqrt(q)") != nullptr);
+            TEST(strstr(shader_src, "isnan(cos_sum)") != nullptr);
+            TEST(strstr(shader_src, "isnan(sin_sum)") != nullptr);
+            TEST(strstr(shader_src, "isinf(cos_sum)") != nullptr);
+            TEST(strstr(shader_src, "isinf(sin_sum)") != nullptr);
+            TEST(strstr(shader_src, "isnan(q)") != nullptr);
+            TEST(strstr(shader_src, "isinf(q)") != nullptr);
+            TEST(strstr(shader_src, "isnan(m)") != nullptr);
+            TEST(strstr(shader_src, "denominator = coeff_sum;") != nullptr);
+            TEST(strstr(shader_src, "denominator = 1.0;") != nullptr);
+            TEST(strstr(shader_src, "coefficients[tap] / norm_sum[0]") != nullptr);
+            // The pre-existing branch pins survive: band-pass coefficients are
+            // still the negated lowpass difference selected by the
+            // positive-highpass test, and the old coeff_sum write is intact.
+            TEST(strstr(shader_src, "if (param.highpass_cutoff_freq > 0)") != nullptr);
+            TEST(strstr(shader_src, "param.highpass_cutoff_freq == 0") != nullptr);
+            TEST(strstr(shader_src, "norm_sum[0] = coeff_sum;") != nullptr);
+        }
+
+        static char runtime_src[256 * 1024];
+        FILE* const runtime_file = fopen("synth/realtime_synth.cpp", "rb");
+        TEST(runtime_file != nullptr);
+        if (runtime_file) {
+            const size_t runtime_got = fread(runtime_src, 1, sizeof(runtime_src) - 1, runtime_file);
+            fclose(runtime_file);
+            TEST(runtime_got > 0);
+            runtime_src[runtime_got] = 0;
+            TEST(strstr(runtime_src, "static uint32_t cutoff_hz_to_int(float value)") != nullptr);
+        }
+    }
+}
+
+// FIR pitch spread helpers: the band-pass edge composition, the sub-1-Hz
+// highpass floor transport, the integer bandwidth guard and the
+// spread-driven monotonicity contract.
+static void check_fir_spread_helpers()
+{
+    float lowpass_hz  = 0.0f;
+    float highpass_hz = 0.0f;
+    TEST(Synth::oscillator_fir_cutoffs(69.0f, 12.0f, 1, &lowpass_hz, &highpass_hz));
+    TEST(approx(lowpass_hz, Synth::pitch_to_frequency(81.0f, 1), 0.001f));
+    TEST(approx(highpass_hz, Synth::pitch_to_frequency(57.0f, 1), 0.001f));
+    TEST(approx(lowpass_hz, 880.0f, 0.001f)); // absolute anchor
+    TEST(approx(highpass_hz, 220.0f, 0.001f));
+    // The frequency multiplier scales both edges.
+    TEST(Synth::oscillator_fir_cutoffs(69.0f, 12.0f, 3, &lowpass_hz, &highpass_hz));
+    TEST(approx(lowpass_hz, 2640.0f, 0.001f));
+    TEST(approx(highpass_hz, 660.0f, 0.001f));
+    // Filter-off spellings: zero, negative and NaN spreads are passthrough.
+    TEST(! Synth::oscillator_fir_cutoffs(69.0f, 0.0f, 1, &lowpass_hz, &highpass_hz));
+    TEST(! Synth::oscillator_fir_cutoffs(69.0f, -0.5f, 1, &lowpass_hz, &highpass_hz));
+    const float nan_spread = 0.0f / 0.0f;
+    TEST(! Synth::oscillator_fir_cutoffs(69.0f, nan_spread, 1, &lowpass_hz, &highpass_hz));
+    // The sub-1-Hz highpass edge transports as exactly 0 Hz (pure lowpass),
+    // while a comfortably-above-floor edge stays a real band-pass edge.
+    TEST(Synth::oscillator_fir_cutoffs(-36.0f, 12.0f, 1, &lowpass_hz, &highpass_hz));
+    TEST(approx(lowpass_hz, Synth::pitch_to_frequency(-24.0f, 1), 0.001f));
+    TEST(approx(lowpass_hz, 2.04f, 0.01f));
+    TEST(highpass_hz == 0.0f); // floor-killed: converts to integer 0, not 1
+    TEST(Synth::oscillator_fir_cutoffs(69.0f, 12.0f, 1, &lowpass_hz, &highpass_hz));
+    TEST(highpass_hz > Synth::oscillator_fir_highpass_floor_hz);
+    // The integer bandwidth guard keeps a positive spread audible.
+    uint32_t lowpass  = 440;
+    uint32_t highpass = 440;
+    Synth::oscillator_fir_band_guard(&lowpass, &highpass);
+    TEST(lowpass == 441 && highpass == 440); // zero bandwidth widens upward
+    lowpass  = Synth::max_cutoff_hz;
+    highpass = Synth::max_cutoff_hz;
+    Synth::oscillator_fir_band_guard(&lowpass, &highpass);
+    TEST(lowpass == Synth::max_cutoff_hz && highpass == Synth::max_cutoff_hz - 1); // ceiling widens downward
+    lowpass  = 441;
+    highpass = 440;
+    Synth::oscillator_fir_band_guard(&lowpass, &highpass);
+    TEST(lowpass == 441 && highpass == 440); // a real band-pass is untouched
+    lowpass  = 440;
+    highpass = 0;
+    Synth::oscillator_fir_band_guard(&lowpass, &highpass);
+    TEST(lowpass == 440 && highpass == 0); // pure lowpass is untouched
+    lowpass  = 440;
+    highpass = 441;
+    Synth::oscillator_fir_band_guard(&lowpass, &highpass);
+    TEST(lowpass == 442 && highpass == 441); // defensive inverted-input repair
+    // Monotonicity sweep: a true return always yields finite, ordered edges.
+    const float    pitches[] = { -36.0f, 0.0f, 69.0f, 127.0f };
+    const float    spreads[] = { 0.5f, 3.0f, 12.0f, 36.0f };
+    const uint32_t mults[]   = { 1, 2, 3 };
+    for (const float pitch : pitches) {
+        for (const float spread : spreads) {
+            for (const uint32_t mult : mults) {
+                float lo = 0.0f;
+                float hi = 0.0f;
+                if (Synth::oscillator_fir_cutoffs(pitch, spread, mult, &lo, &hi)) {
+                    TEST(lo == lo && hi == hi); // not NaN
+                    TEST(hi <= lo);
+                }
+            }
+        }
+    }
+    // F3 mirrors: the note-on reserve predicate and the engage transition,
+    // driven by real binding fields and the production transition shape.
+    {
+        Synth::Instrument mirror_instr = {};
+        mirror_instr.layer_count       = 1;
+        auto has_filter                = [](const Synth::Instrument& instrument, uint32_t layer_idx) {
+            const Synth::Oscillator&    layer  = instrument.layers[layer_idx];
+            const Synth::TargetBinding& spread = layer.targets[Synth::mod_fir_spread];
+            return spread.base_value != 0.0f || spread.envelope_desc_id != 0 || spread.lfo_desc_id != 0 ||
+                   spread.num_inputs != 0;
+        };
+        // Reserved by base value alone.
+        mirror_instr.layers[0].targets[Synth::mod_fir_spread].base_value = 3.0f;
+        TEST(has_filter(mirror_instr, 0));
+        // A zero base with no wiring is passthrough; each wiring term alone
+        // reserves the slot at note-on.
+        mirror_instr.layers[0].targets[Synth::mod_fir_spread].base_value = 0.0f;
+        TEST(! has_filter(mirror_instr, 0));
+        mirror_instr.layers[0].targets[Synth::mod_fir_spread].lfo_desc_id = 1;
+        TEST(has_filter(mirror_instr, 0));
+        mirror_instr.layers[0].targets[Synth::mod_fir_spread].lfo_desc_id = 0;
+        mirror_instr.layers[0].targets[Synth::mod_fir_spread].num_inputs  = 1;
+        TEST(has_filter(mirror_instr, 0));
+        mirror_instr.layers[0].targets[Synth::mod_fir_spread].num_inputs       = 0;
+        mirror_instr.layers[0].targets[Synth::mod_fir_spread].envelope_desc_id = 1;
+        TEST(has_filter(mirror_instr, 0));
+        // The engage transition: passthrough while the dest value stays
+        // <= 0, engaged on the first positive step, and re-engaged after
+        // every return to passthrough.
+        const bool  fir_taps_offs = true;
+        float       spread        = 0.0f;
+        const float dest_values[] = { -1.0f, 0.0f, 0.5f, 0.5f, 0.0f, 2.0f };
+        uint32_t    engage_count  = 0;
+        for (const float new_spread : dest_values) {
+            if (fir_taps_offs && spread <= 0.0f && new_spread > 0.0f) {
+                ++engage_count; // clear_fir_hist: the frozen history holds stale audio
+            }
+            spread = new_spread;
+        }
+        TEST(engage_count == 2);
+        TEST(spread == 2.0f);
+    }
+    // Schema identity: the mod_target enum carries the spread target and
+    // no removed cutoff spellings, so a future schema edit cannot
+    // silently reintroduce them.
+    {
+        static char schema_src[32 * 1024];
+        FILE* const schema_file = fopen("doc/synth_instrument_schema.json", "rb");
+        TEST(schema_file != nullptr);
+        if (schema_file) {
+            const size_t schema_got = fread(schema_src, 1, sizeof(schema_src) - 1, schema_file);
+            fclose(schema_file);
+            TEST(schema_got > 0);
+            schema_src[schema_got] = 0;
+            TEST(strstr(schema_src,
+                        "\"enum\": [\"volume\", \"pitch\", \"panning\", \"duty_a\", \"duty_b\", \"osc_mix\", "
+                        "\"fm_index\", \"fir_pitch_spread\"]") != nullptr);
+            TEST(strstr(schema_src, "lowpass_cutoff") == nullptr);
+            TEST(strstr(schema_src, "highpass_cutoff") == nullptr);
+        }
+    }
 }
 
 // Instrument Parameters node regressions: the dedicated node carries the
@@ -8586,6 +10252,11 @@ int main()
         check_release_decay_source_pins();
     }
 
+    check_osc_pitch_gating();
+    check_fir_spread_helpers();
+    check_fir_slope_helpers();
+    check_fir_bandpass_gain();
+
     // pitch bend -> semitones: centered 14-bit value scaled by the bend range.
     // center (0) -> no bend; full deflection -> +/- range; half -> ~half range.
     TEST(approx(Synth::pitch_bend_to_semitones(0, 2.0f), 0.0f, 0.001f));
@@ -8600,7 +10271,7 @@ int main()
     TEST(Synth::get_effect_param_floats(Synth::EffectType::chorus) == 3);
     TEST(Synth::get_effect_param_floats(Synth::EffectType::reverb) == 3);
     TEST(Synth::get_effect_param_floats(Synth::EffectType::compressor) == 5);
-    TEST(Synth::get_effect_param_floats(Synth::EffectType::fir) == 2);
+    TEST(Synth::get_effect_param_floats(Synth::EffectType::fir) == 3);
     TEST(Synth::get_effect_state_floats(Synth::EffectType::distortion) == 0);
     TEST(Synth::get_effect_state_floats(Synth::EffectType::delay) == 88201);
     TEST(Synth::get_effect_state_floats(Synth::EffectType::chorus) == 4412);
@@ -9380,14 +11051,15 @@ int main()
     // Builds a small valid bank: one instrument, one envelope, one LFO, one zone.
     auto make_valid_bank = [](Synth::InstrumentBank& bank) {
         memset(&bank, 0, sizeof(bank));
-        const uint32_t env                             = bank.envelopes.allocate();
-        bank.envelopes.entries[env].num_points         = 2;
-        bank.envelopes.entries[env].points[1].position = 100;
-        const uint32_t lfo                             = bank.lfos.allocate();
-        bank.lfos.entries[lfo].wave                    = Synth::WaveType::sine_wave;
-        bank.lfos.entries[lfo].period_ms               = 50;
-        const uint32_t instr                           = bank.instruments.allocate();
-        bank.instruments.entries[instr].layer_count    = 1;
+        const uint32_t env                                          = bank.envelopes.allocate();
+        bank.envelopes.entries[env].num_points                      = 2;
+        bank.envelopes.entries[env].points[1].position              = 100;
+        const uint32_t lfo                                          = bank.lfos.allocate();
+        bank.lfos.entries[lfo].wave                                 = Synth::WaveType::sine_wave;
+        bank.lfos.entries[lfo].period_ms                            = 50;
+        const uint32_t instr                                        = bank.instruments.allocate();
+        bank.instruments.entries[instr].layer_count                 = 1;
+        bank.instruments.entries[instr].layers[0].fir_slope_percent = 100;
         bank.instruments.entries[instr].layers[0].targets[Synth::mod_volume].envelope_desc_id =
             static_cast<uint16_t>(env + 1);
         bank.instruments.entries[instr].layers[0].targets[Synth::mod_pitch].lfo_desc_id =
@@ -9457,6 +11129,61 @@ int main()
         }
         TEST(instr.layers[0].targets[Synth::mod_volume].base_value == 1.0f);
         TEST(instr.layers[0].targets[Synth::mod_panning].base_value == 0.5f);
+    }
+    // FIR Slope factory regression: every value-initialized construction
+    // path seeds the 100 default, so a factory-fresh bank projects,
+    // validates and compiles without an out-of-range slot refusal.
+    {
+        static Synth::InstrumentBank bank;
+        Synth::init_default_bank(&bank);
+        TEST(bank.instruments.num_allocated == 1);
+        for (uint32_t layer = 0; layer < bank.instruments.entries[0].layer_count; layer++) {
+            TEST(bank.instruments.entries[0].layers[layer].fir_slope_percent == 100);
+        }
+        static Synth::Oscillator fresh_osc = {};
+        TEST(fresh_osc.fir_slope_percent == 100);
+        static Synth::InstrumentEditorBank editor_bank;
+        Synth::init_default_bank(&editor_bank.bank);
+        TEST(Synth::validate_instrument_bank(&editor_bank.bank));
+        static Sculptor::Graph           factory_graph;
+        static Sculptor::OscGraphMapping factory_mapping;
+        TEST(Sculptor::project_editor_to_graph(editor_bank, &factory_graph, &factory_mapping));
+        static Synth::InstrumentBank factory_playback;
+        TEST(Sculptor::compile_editor_playback_bank(editor_bank, &factory_playback));
+        TEST(factory_playback.instruments.entries[factory_playback.channel_zones[0][0].instrument]
+                 .layers[0]
+                 .fir_slope_percent == 100);
+        static Synth::InstrumentEditorBank channel_bank;
+        Synth::init_default_bank(&channel_bank.bank);
+        TEST(Synth::init_default_channel(&channel_bank.bank, 3));
+        const uint32_t fresh_slot = channel_bank.bank.channel_zones[3][0].instrument;
+        TEST(channel_bank.bank.instruments.entries[fresh_slot].layers[0].fir_slope_percent == 100);
+    }
+    // FIR Slope removal reset regression: deleting an oscillator node through
+    // the linked graph path compacts the layers, the surviving layer keeps
+    // its own slope, and the vacated tail slot resets to the 100 default,
+    // which is what a re-added layer starts from when it is not inherited.
+    {
+        static Synth::InstrumentEditorBank rm_bank;
+        static Sculptor::Graph             rm_graph;
+        static Sculptor::OscGraphMapping   rm_mapping;
+        Synth::init_default_bank(&rm_bank.bank);
+        Synth::Instrument& rm_entry = rm_bank.bank.instruments.entries[rm_bank.bank.channel_zones[0][0].instrument];
+        rm_entry.layers[1]          = rm_entry.layers[0];
+        rm_entry.layers[0].fir_slope_percent = 63; // the survivor keeps its own slope
+        rm_entry.layers[1].fir_slope_percent = 37;
+        rm_entry.layer_count                 = 2;
+        TEST(Synth::validate_instrument_bank(&rm_bank.bank));
+        TEST(Sculptor::project_editor_to_graph(rm_bank, &rm_graph, &rm_mapping));
+        TEST(rm_mapping.osc_nodes[1] != Sculptor::pool_no_slot);
+        Sculptor::GraphChange rm_change = {};
+        rm_change.kind                  = Sculptor::ChangeKind::node_deleted;
+        rm_change.node_idx              = rm_mapping.osc_nodes[1];
+        TEST(Sculptor::apply_osc_graph_change(&rm_bank, &rm_graph, &rm_mapping, rm_change));
+        TEST(rm_entry.layer_count == 1);
+        TEST(rm_entry.layers[0].fir_slope_percent == 63);
+        TEST(rm_entry.layers[Synth::max_layers - 1].fir_slope_percent == 100);
+        TEST(rm_mapping.osc_nodes[1] == Sculptor::pool_no_slot);
     }
 
     // init_default_channel into a populated bank appends a bare instrument and
@@ -9994,7 +11721,32 @@ int main()
         TEST(clears.ranges[0].offset == fake_region_base);
         TEST(clears.ranges[0].bytes == Synth::get_effect_state_bytes(Synth::EffectType::delay));
         TEST(Synth::take_effect_clear_ranges().count == 0); // consumed once
+    } // a modulated FIR slope binding expands like any other
+    // parameter - the preflight consumes one mod-param entry and the
+    // commit fills params[2] from the bank's base value.
+    {
+        static Synth::InstrumentBank bank;
+        make_valid_bank(bank);
+        Synth::EffectSlotBinding* const fir = enabled_effect(bank, 0, 0, Synth::EffectType::fir);
+        fir->bindings[2].base_value         = 37.0f;
+        fir->bindings[2].lfo_desc_id        = 1;
+        fir->bindings[2].lfo_depth          = 0.5f;
+        TEST(Synth::validate_instrument_bank(&bank));
+        Synth::init_effect_state_region(fake_region_base);
+        static Synth::EffectExpansionPlan plan;
+        const char*                       error = nullptr;
+        TEST(Synth::preflight_effect_expansion(bank, &plan, &error));
+        static Synth::EffectChain chains[Synth::max_channels];
+        static Synth::EffectChain master;
+        FakeWriter                writer = { 50, 0, 0, 0, 0 };
+        Synth::commit_effect_expansion(bank, plan, chains, &master, fake_writer_binding(writer));
+        TEST(chains[0].num_effects == 1);
+        TEST(chains[0].effects[0].type == Synth::EffectType::fir);
+        TEST(chains[0].effects[0].params[2] == 37.0f);
+        TEST(writer.dest_count == 1 && writer.lfo_count == 1);
+        (void)Synth::take_effect_clear_ranges();
     }
+
     // An unchanged slot keeps its state offset and emits no clear; a type change re-allocates.
     {
         static Synth::InstrumentBank bank;
@@ -11020,6 +12772,7 @@ int main()
         bank.bank.lfos.entries[1].period_ms = 80;
         TEST(bank.bank.instruments.allocate() == 1);
         bank.bank.instruments.entries[1].layer_count                                           = 1;
+        bank.bank.instruments.entries[1].layers[0].fir_slope_percent                           = 100;
         bank.bank.instruments.entries[1].layers[0].targets[Synth::mod_volume].envelope_desc_id = 2;
         bank.bank.instruments.entries[1].layers[0].targets[Synth::mod_pitch].lfo_desc_id       = 2;
         memcpy(bank.instrument_names[1], "Saved", 6);
@@ -11120,9 +12873,10 @@ int main()
         src.bank.instruments.allocate();
         src.bank.instruments.entries[0].layer_count = 1;
         memcpy(src.instrument_names[0], "Chained", 8);
-        src.bank.channel_zones[0][0].start_note = 1;
-        src.bank.channel_zones[0][0].instrument = 0;
-        src.bank.channel_enabled[0]             = 1;
+        src.bank.instruments.entries[0].layers[0].fir_slope_percent = 100;
+        src.bank.channel_zones[0][0].start_note                     = 1;
+        src.bank.channel_zones[0][0].instrument                     = 0;
+        src.bank.channel_enabled[0]                                 = 1;
         TEST(src.bank.lfos.allocate() == 0);
         src.bank.lfos.entries[0].wave                                 = Synth::WaveType::sine_wave;
         src.bank.lfos.entries[0].period_ms                            = 80;
@@ -11228,9 +12982,10 @@ int main()
         src.bank.instruments.allocate();
         src.bank.instruments.entries[0].layer_count = 1;
         memcpy(src.instrument_names[0], "Loaded", 7);
-        src.bank.channel_zones[0][0].start_note = 1;
-        src.bank.channel_zones[0][0].instrument = 0;
-        src.bank.channel_enabled[0]             = 1;
+        src.bank.instruments.entries[0].layers[0].fir_slope_percent = 100;
+        src.bank.channel_zones[0][0].start_note                     = 1;
+        src.bank.channel_zones[0][0].instrument                     = 0;
+        src.bank.channel_enabled[0]                                 = 1;
         TEST(Synth::validate_instrument_bank(&src.bank));
         const char* const load_path = "synth_library_load.tmp";
         TEST(Synth::save_library_record(load_path, "Cat", "Inst", &src, 0) == 0);
@@ -11278,6 +13033,7 @@ int main()
         src.bank.envelopes.entries[0] = env;
         src.bank.instruments.allocate();
         src.bank.instruments.entries[0].layer_count                                           = 1;
+        src.bank.instruments.entries[0].layers[0].fir_slope_percent                           = 100;
         src.bank.instruments.entries[0].layers[0].targets[Synth::mod_volume].envelope_desc_id = 1;
         src.bank.channel_zones[0][0].start_note                                               = 1;
         src.bank.channel_zones[0][0].instrument                                               = 0;
@@ -11659,6 +13415,11 @@ int main()
     {
         static Synth::InstrumentEditorBank bank;
         Synth::init_default_bank(&bank.bank);
+        // The phantom store's Oscillator members carry the slope default on
+        // construction.  Decode canonicalizes the unused store to zero, so the
+        // fixture normalizes the same way before the byte comparison.
+        memset(bank.phantoms, 0, sizeof(bank.phantoms));
+        bank.phantom_count = 0;
         // The per-layer format stores live layers only, so normalize the fixture
         // the way decode's canonicalization does.
         zero_dormant_layers(bank.bank.instruments.entries[0]);
@@ -11696,7 +13457,8 @@ int main()
             Synth::Instrument& routed_instr = routed.bank.instruments.entries[0];
             routed_instr.layer_count        = 3;
             for (uint32_t layer = 0; layer < 3; layer++) {
-                routed_instr.layers[layer].osc_type[0] = Synth::WaveType::sine_wave;
+                routed_instr.layers[layer].osc_type[0]       = Synth::WaveType::sine_wave;
+                routed_instr.layers[layer].fir_slope_percent = 100;
             }
             // Layer 0: two ordered volume inputs, negative pitch base.
             routed_instr.layers[0].targets[Synth::mod_volume].base_value = 0.8f;
@@ -12152,6 +13914,7 @@ int main()
         // input beyond num_inputs, envelope points beyond num_points, a name tail
         // after shortening, and a negative zero
         bank.bank.instruments.entries[0].layers[2].pitch_offset                                = 3.5f;
+        bank.bank.instruments.entries[0].layers[2].octave_offset                               = 5;
         bank.bank.instruments.entries[0].layers[0].targets[Synth::mod_panning].num_inputs      = 1;
         bank.bank.instruments.entries[0].layers[0].targets[Synth::mod_panning].inputs[1].scale = 7.0f;
         bank.bank.envelopes.entries[0].points[7].position                                      = 999;
@@ -12174,6 +13937,7 @@ int main()
         TEST(round1.bank.envelopes.entries[1].points[1].position == 0);
         TEST(round1.bank.lfos.entries[1].period_ms == 0);
         TEST(round1.bank.instruments.entries[0].layers[2].pitch_offset == 0.0f);
+        TEST(round1.bank.instruments.entries[0].layers[2].octave_offset == 0);
         TEST(round1.bank.instruments.entries[0].layers[0].targets[Synth::mod_panning].inputs[1].scale == 0.0f);
         TEST(round1.bank.envelopes.entries[0].points[7].position == 0);
         TEST(round1.instrument_names[0][3] == 0);
@@ -12356,8 +14120,8 @@ int main()
     // ---- Oscillator-graph projection (sculptor_osc_graph) ----
 
     // Max-complexity round-trip: a fully populated instrument projects to the
-    // full graph (3 fixed nodes + 7 oscillators + 35 envelope and 35 LFO
-    // instances = 80 nodes, 217 edges) and compiles back
+    // full graph (3 fixed nodes + 7 oscillators + 28 envelope and 28 LFO
+    // instances = 66 nodes, 175 edges) and compiles back
     // bit-identically, with the descriptor pools untouched (no dedup or
     // duplication) and the aliasing pattern preserved.
     {
@@ -12371,13 +14135,13 @@ int main()
         static Sculptor::Graph           graph;
         static Sculptor::OscGraphMapping mapping;
         TEST(Sculptor::project_instrument_to_graph(instrument, bank, &graph, &mapping));
-        check_osc_graph_mapping(graph, mapping, Synth::max_layers, 35, 35);
-        TEST(graph.connection_count() == 217);
+        check_osc_graph_mapping(graph, mapping, Synth::max_layers, 28, 28);
+        TEST(graph.connection_count() == 175);
 
         // Re-projection onto a populated graph resets it deterministically.
         TEST(Sculptor::project_instrument_to_graph(instrument, bank, &graph, &mapping));
-        check_osc_graph_mapping(graph, mapping, Synth::max_layers, 35, 35);
-        TEST(graph.connection_count() == 217);
+        check_osc_graph_mapping(graph, mapping, Synth::max_layers, 28, 28);
+        TEST(graph.connection_count() == 175);
 
         static Synth::Instrument compiled;
         TEST(Sculptor::compile_graph_to_instrument(graph, mapping, &compiled));
@@ -15322,7 +17086,7 @@ int main()
         bank.bank.instruments.entries[0]         = instrument;
         bank.bank.channel_zones[0][0].start_note = 1;
         bank.bank.channel_zones[0][0].instrument = 0;
-        TEST(Sculptor::count_projected_nodes(bank, 0, 0) == 80);
+        TEST(Sculptor::count_projected_nodes(bank, 0, 0) == 66);
 
         static Synth::InstrumentEditorBank minimal;
         static Synth::Instrument           minimal_instrument = {};
@@ -15625,8 +17389,8 @@ int main()
             }
         }
 
-        // Overfull implied node projection: the max fixture implies 80 nodes;
-        // 65 detached records push it past 144, 64 land exactly on 144.
+        // Overfull implied node projection: the max fixture implies 66 nodes;
+        // 79 detached records push it past 144, 78 land exactly on 144.
         static Synth::InstrumentBank       model_bank;
         static Synth::InstrumentEditorBank max_bank;
         static Synth::Instrument           instrument = {};
@@ -15639,12 +17403,12 @@ int main()
         max_bank.bank.instruments.entries[0]         = instrument;
         max_bank.bank.channel_zones[0][0].start_note = 1;
         max_bank.bank.channel_zones[0][0].instrument = 0;
-        build_detached_layouts_json(editor_json, sizeof(editor_json), 1, 65, 2, 1, 0, 0);
+        build_detached_layouts_json(editor_json, sizeof(editor_json), 1, 79, 2, 1, 0, 0);
         TEST(! decode_bank_with_editor_section(max_bank, editor_json, &restored));
-        build_detached_layouts_json(editor_json, sizeof(editor_json), 1, 64, 2, 1, 0, 0);
+        build_detached_layouts_json(editor_json, sizeof(editor_json), 1, 78, 2, 1, 0, 0);
         TEST(decode_bank_with_editor_section(max_bank, editor_json, &restored));
         // The accepted boundary fills the node pool exactly: the projection
-        // still succeeds at 80 + 64 = 144 nodes.
+        // still succeeds at 66 + 78 = 144 nodes.
         static Sculptor::Graph           boundary_graph;
         static Sculptor::OscGraphMapping boundary_mapping;
         TEST(Sculptor::project_editor_to_graph(restored, &boundary_graph, &boundary_mapping));
@@ -16551,7 +18315,7 @@ int main()
     }
 
     // Widest projection: 4 effects, every parameter modulated by a distinct
-    // descriptor; 18 nodes and 17 wires stay far under the widget's pools.
+    // descriptor; 19 nodes and 18 wires stay far under the widget's pools.
     {
         static Synth::InstrumentBank bank;
         make_valid_bank(bank);
@@ -16562,7 +18326,7 @@ int main()
         Sculptor::fx_init_slot(&chain, 2, Synth::EffectType::compressor);
         Sculptor::fx_init_slot(&chain, 3, Synth::EffectType::fir);
         uint16_t       next_desc = 1;
-        const uint32_t max_desc  = 2 + 3 + 5 + 2;
+        const uint32_t max_desc  = 2 + 3 + 5 + 3;
         while (bank.lfos.num_allocated < max_desc) {
             const uint32_t slot               = bank.lfos.allocate();
             bank.lfos.entries[slot].wave      = Synth::WaveType::sine_wave;
@@ -16591,7 +18355,7 @@ int main()
                 ++node_count;
             }
         }
-        TEST(node_count == 19); // input, output, MIDI, 4 effects, 12 LFOs
+        TEST(node_count == 20); // input, output, MIDI, 4 effects, 13 LFOs
 
         uint32_t num_modulated = 0;
         uint32_t state_bytes   = 0;
@@ -17867,6 +19631,7 @@ int main()
                                 "\"mode\":\"fm\","
                                 "\"mod_ratio\":2.0,"
                                 "\"pitch_offset_semitones\":-12.0,"
+                                "\"octave_offset\":5,"
                                 "\"volume\":{"
                                 "\"base\":0.8,"
                                 "\"envelope\":{\"points\":[{\"time_seconds\":0.0,\"level\":0.0},"
@@ -17906,6 +19671,7 @@ int main()
         TEST(osc.osc_mode == Synth::osc_mode_fm);
         TEST(osc.mod_ratio == 2.0f);
         TEST(osc.pitch_offset == -12.0f);
+        TEST(osc.octave_offset == 5);
         // Untouched targets keep neutral defaults.
         TEST(instr.layers[0].targets[Synth::mod_osc_mix].base_value == 0.0f);
         TEST(instr.layers[0].targets[Synth::mod_volume].base_value == 0.8f);
@@ -17982,6 +19748,7 @@ int main()
         TEST(decoded_osc.osc_mode == Synth::osc_mode_fm);
         TEST(decoded_osc.mod_ratio == 2.0f);
         TEST(decoded_osc.pitch_offset == -12.0f);
+        TEST(decoded_osc.octave_offset == 5);
         TEST(decoded.layers[0].targets[Synth::mod_volume].base_value == 0.8f);
         TEST(decoded.layers[0].targets[Synth::mod_volume].num_inputs == 2);
         TEST(decoded.layers[0].targets[Synth::mod_volume].inputs[1].source == Synth::ModSource::mod_wheel);
@@ -17998,6 +19765,289 @@ int main()
         TEST(decoded_lfo_count == 1);
         TEST(decoded_lfos[0].period_ms == 200);
         TEST(decoded_osc.targets[Synth::mod_volume].lfo_depth == 0.2f);
+
+        // -------------------------------------------------------------------
+        // Octave Offset serialization: the key round-trips through every
+        // instrument JSON domain and the saved-bank dialect, absent decodes 0,
+        // and every out-of-range or non-integer spelling fails decode.  Pitch
+        // Offset validates in every domain too.
+        // -------------------------------------------------------------------
+        {
+            static Synth::InstrumentEditorBank octave_source;
+            static ClipboardDecode             octave_decoded;
+            static ClipboardDecode             octave_sentinel;
+            static char                        text[clipboard_capacity];
+
+            // Both instrument domains preserve the octave.
+            const Synth::InstrumentJsonDomain both_domains[2] = { Synth::InstrumentJsonDomain::clipboard,
+                                                                  Synth::InstrumentJsonDomain::validated_bank };
+            build_named_fm_fixture(&octave_source);
+            octave_source.bank.instruments.entries[0].layers[0].octave_offset = -3;
+            for (const Synth::InstrumentJsonDomain domain : both_domains) {
+                TEST(Sculptor::encode_editor_instrument_json(octave_source, 0, 0, text, sizeof(text), domain) != 0);
+                fill_clipboard_sentinels(&octave_decoded);
+                fill_clipboard_sentinels(&octave_sentinel);
+                TEST(Synth::decode_instrument_json_for_domain(text,
+                                                              static_cast<uint32_t>(strlen(text)),
+                                                              &octave_decoded.instr,
+                                                              octave_decoded.envs,
+                                                              &octave_decoded.env_count,
+                                                              octave_decoded.lfos,
+                                                              &octave_decoded.lfo_count,
+                                                              octave_decoded.layout,
+                                                              max_portable_records,
+                                                              &octave_decoded.layout_count,
+                                                              domain));
+                TEST(octave_decoded.instr.layers[0].octave_offset == -3);
+            }
+
+            // An absent key decodes as the zeroed default.
+            const char* const no_octave_doc = "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\","
+                                              "\"pitch_offset_semitones\":2.0}]}";
+            {
+                static Synth::Instrument         plain_instr;
+                static Synth::EnvelopeDescriptor plain_envs[Synth::instrument_max_envelopes];
+                static Synth::LFODescriptor      plain_lfos[Synth::instrument_max_lfos];
+                uint32_t                         plain_env_count = 999;
+                uint32_t                         plain_lfo_count = 999;
+                TEST(Synth::decode_instrument_json(no_octave_doc,
+                                                   static_cast<uint32_t>(strlen(no_octave_doc)),
+                                                   &plain_instr,
+                                                   plain_envs,
+                                                   &plain_env_count,
+                                                   plain_lfos,
+                                                   &plain_lfo_count));
+                TEST(plain_instr.layers[0].octave_offset == 0);
+                TEST(plain_instr.layers[0].pitch_offset == 2.0f);
+            }
+
+            // Saved-bank dialect: encode and decode preserve the octave; a zero
+            // octave omits the key and decodes back to 0.
+            static char    payload[Synth::library_payload_max];
+            const uint32_t octave_length = Synth::encode_editor_bank_json(&octave_source, payload, sizeof(payload));
+            TEST(octave_length > 0);
+            static Synth::InstrumentEditorBank bank_decoded;
+            memset(&bank_decoded, 0, sizeof(bank_decoded));
+            TEST(Synth::decode_editor_bank_json(payload, octave_length, &bank_decoded));
+            TEST(bank_decoded.bank.instruments.entries[0].layers[0].octave_offset == -3);
+            octave_source.bank.instruments.entries[0].layers[0].octave_offset = 0;
+            const uint32_t zero_octave_length =
+                Synth::encode_editor_bank_json(&octave_source, payload, sizeof(payload));
+            TEST(zero_octave_length > 0);
+            TEST(strstr(payload, "octave_offset") == nullptr); // zero omits the key
+            memset(&bank_decoded, 0, sizeof(bank_decoded));
+            TEST(Synth::decode_editor_bank_json(payload, zero_octave_length, &bank_decoded));
+            TEST(bank_decoded.bank.instruments.entries[0].layers[0].octave_offset == 0);
+
+            // Out-of-range and non-integer spellings fail the bank decode: each
+            // one is spliced over the encoded value of a bank holding -3.
+            auto decode_with_octave_spelling = [](const char* spelling) {
+                static Synth::InstrumentEditorBank spelling_source;
+                build_named_fm_fixture(&spelling_source);
+                spelling_source.bank.instruments.entries[0].layers[0].octave_offset = -3;
+                static char    spelling_payload[Synth::library_payload_max];
+                const uint32_t spelling_length =
+                    Synth::encode_editor_bank_json(&spelling_source, spelling_payload, sizeof(spelling_payload));
+                TEST(spelling_length > 0);
+                const char* const key = "\"octave_offset\":-3";
+                const char* const hit = strstr(spelling_payload, key);
+                TEST(hit != nullptr);
+                if (! hit) {
+                    return false;
+                }
+                const uint32_t key_len      = static_cast<uint32_t>(strlen(key));
+                const uint32_t prefix       = static_cast<uint32_t>(hit - spelling_payload);
+                const uint32_t suffix       = spelling_length - prefix - key_len;
+                const uint32_t spelling_len = static_cast<uint32_t>(strlen(spelling));
+                static char    spelling_doc[Synth::library_payload_max];
+                memcpy(spelling_doc, spelling_payload, prefix);
+                memcpy(spelling_doc + prefix, key, 16); // the key text without the value
+                memcpy(spelling_doc + prefix + 16, spelling, spelling_len);
+                memcpy(spelling_doc + prefix + 16 + spelling_len, hit + key_len, suffix);
+                static Synth::InstrumentEditorBank spelling_decoded;
+                memset(&spelling_decoded, 0, sizeof(spelling_decoded));
+                return Synth::decode_editor_bank_json(spelling_doc,
+                                                      prefix + 16 + spelling_len + suffix,
+                                                      &spelling_decoded);
+            };
+            TEST(decode_with_octave_spelling("-3")); // the splice itself decodes
+            TEST(! decode_with_octave_spelling("13"));
+            TEST(! decode_with_octave_spelling("-13"));
+            TEST(! decode_with_octave_spelling("1.5"));
+            TEST(! decode_with_octave_spelling("1.00000001"));
+            TEST(! decode_with_octave_spelling("12.0000001"));
+
+            // Both instrument domains reject every bad octave spelling at the
+            // token level, before any binary32 narrowing.
+            const char* const octave_values[] = { "13", "-13", "1.5", "1.00000001", "12.0000001" };
+            for (const char* spelling : octave_values) {
+                char octave_doc[256];
+                TEST(snprintf(octave_doc,
+                              sizeof(octave_doc),
+                              "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\","
+                              "\"pitch_offset_semitones\":2.0,\"octave_offset\":%s}]}",
+                              spelling) > 0);
+                for (const Synth::InstrumentJsonDomain domain : both_domains) {
+                    fill_clipboard_sentinels(&octave_decoded);
+                    fill_clipboard_sentinels(&octave_sentinel);
+                    TEST(! Synth::decode_instrument_json_for_domain(octave_doc,
+                                                                    static_cast<uint32_t>(strlen(octave_doc)),
+                                                                    &octave_decoded.instr,
+                                                                    octave_decoded.envs,
+                                                                    &octave_decoded.env_count,
+                                                                    octave_decoded.lfos,
+                                                                    &octave_decoded.lfo_count,
+                                                                    octave_decoded.layout,
+                                                                    max_portable_records,
+                                                                    &octave_decoded.layout_count,
+                                                                    domain));
+                    TEST(clipboard_sentinels_intact(&octave_decoded, &octave_sentinel));
+                }
+            }
+        }
+        // -----------------------------------------------------------------
+        // FIR Slope serialization: the key round-trips through every
+        // instrument JSON domain and the saved-bank dialect, absent decodes
+        // 100, the portable encoder always emits it, the bank encoder omits
+        // the default, and every out-of-range or non-integer spelling fails
+        // decode before any binary32 narrowing.
+        // -----------------------------------------------------------------
+        {
+            static Synth::InstrumentEditorBank slope_source;
+            static ClipboardDecode             slope_decoded;
+            static ClipboardDecode             slope_sentinel;
+            static char                        text[clipboard_capacity];
+            const Synth::InstrumentJsonDomain  both_domains[2] = { Synth::InstrumentJsonDomain::clipboard,
+                                                                   Synth::InstrumentJsonDomain::validated_bank };
+            build_named_fm_fixture(&slope_source);
+            slope_source.bank.instruments.entries[0].layers[0].fir_slope_percent = 37;
+            for (const Synth::InstrumentJsonDomain domain : both_domains) {
+                TEST(Sculptor::encode_editor_instrument_json(slope_source, 0, 0, text, sizeof(text), domain) != 0);
+                fill_clipboard_sentinels(&slope_decoded);
+                fill_clipboard_sentinels(&slope_sentinel);
+                TEST(Synth::decode_instrument_json_for_domain(text,
+                                                              static_cast<uint32_t>(strlen(text)),
+                                                              &slope_decoded.instr,
+                                                              slope_decoded.envs,
+                                                              &slope_decoded.env_count,
+                                                              slope_decoded.lfos,
+                                                              &slope_decoded.lfo_count,
+                                                              slope_decoded.layout,
+                                                              max_portable_records,
+                                                              &slope_decoded.layout_count,
+                                                              domain));
+                TEST(slope_decoded.instr.layers[0].fir_slope_percent == 37);
+            }
+            // The portable dialect always emits the key; the bank dialect
+            // omits it at the 100 default.
+            TEST(Sculptor::encode_editor_instrument_json(slope_source,
+                                                         0,
+                                                         0,
+                                                         text,
+                                                         sizeof(text),
+                                                         Synth::InstrumentJsonDomain::clipboard) != 0);
+            TEST(strstr(text, "fir_slope") != nullptr);
+            // An absent key decodes as the default 100.
+            const char* const no_slope_doc = "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\","
+                                             "\"pitch_offset_semitones\":2.0}]}";
+            {
+                static Synth::Instrument         plain_instr;
+                static Synth::EnvelopeDescriptor plain_envs[Synth::instrument_max_envelopes];
+                static Synth::LFODescriptor      plain_lfos[Synth::instrument_max_lfos];
+                uint32_t                         plain_env_count = 999;
+                uint32_t                         plain_lfo_count = 999;
+                TEST(Synth::decode_instrument_json(no_slope_doc,
+                                                   static_cast<uint32_t>(strlen(no_slope_doc)),
+                                                   &plain_instr,
+                                                   plain_envs,
+                                                   &plain_env_count,
+                                                   plain_lfos,
+                                                   &plain_lfo_count));
+                TEST(plain_instr.layers[0].fir_slope_percent == 100);
+                TEST(plain_instr.layers[0].pitch_offset == 2.0f);
+            }
+            // Saved-bank dialect: encode and decode preserve the slope; the
+            // default omits the key and decodes back to 100.
+            static char    payload[Synth::library_payload_max];
+            const uint32_t slope_length = Synth::encode_editor_bank_json(&slope_source, payload, sizeof(payload));
+            TEST(slope_length > 0);
+            TEST(strstr(payload, "\"fir_slope\":37") != nullptr);
+            static Synth::InstrumentEditorBank bank_decoded;
+            memset(&bank_decoded, 0, sizeof(bank_decoded));
+            TEST(Synth::decode_editor_bank_json(payload, slope_length, &bank_decoded));
+            TEST(bank_decoded.bank.instruments.entries[0].layers[0].fir_slope_percent == 37);
+            slope_source.bank.instruments.entries[0].layers[0].fir_slope_percent = 100;
+            const uint32_t default_slope_length =
+                Synth::encode_editor_bank_json(&slope_source, payload, sizeof(payload));
+            TEST(default_slope_length > 0);
+            TEST(strstr(payload, "fir_slope") == nullptr); // default omits the key
+            memset(&bank_decoded, 0, sizeof(bank_decoded));
+            TEST(Synth::decode_editor_bank_json(payload, default_slope_length, &bank_decoded));
+            TEST(bank_decoded.bank.instruments.entries[0].layers[0].fir_slope_percent == 100);
+            // Out-of-range and non-integer spellings fail the bank decode:
+            // each one is spliced over the encoded value of a bank holding 37.
+            auto decode_with_slope_spelling = [](const char* spelling) {
+                static Synth::InstrumentEditorBank spelling_source;
+                build_named_fm_fixture(&spelling_source);
+                spelling_source.bank.instruments.entries[0].layers[0].fir_slope_percent = 37;
+                static char    spelling_payload[Synth::library_payload_max];
+                const uint32_t spelling_length =
+                    Synth::encode_editor_bank_json(&spelling_source, spelling_payload, sizeof(spelling_payload));
+                TEST(spelling_length > 0);
+                const char* const key = "\"fir_slope\":37";
+                static char       repl[32];
+                memcpy(repl, "\"fir_slope\":", 12);
+                memcpy(repl + 12, spelling, strlen(spelling));
+                repl[12 + strlen(spelling)] = 0;
+                static char    spelling_doc[Synth::library_payload_max];
+                const uint32_t spliced_len = splice_single_occurrence(spelling_payload,
+                                                                      spelling_length,
+                                                                      key,
+                                                                      repl,
+                                                                      spelling_doc,
+                                                                      sizeof(spelling_doc));
+                TEST(spliced_len > 0);
+                if (! spliced_len) {
+                    return false;
+                }
+                static Synth::InstrumentEditorBank spelling_decoded;
+                memset(&spelling_decoded, 0, sizeof(spelling_decoded));
+                return Synth::decode_editor_bank_json(spelling_doc, spliced_len, &spelling_decoded);
+            };
+            TEST(decode_with_slope_spelling("37")); // the splice itself decodes
+            TEST(! decode_with_slope_spelling("0"));
+            TEST(! decode_with_slope_spelling("101"));
+            TEST(! decode_with_slope_spelling("-1"));
+            TEST(! decode_with_slope_spelling("50.5"));
+            TEST(! decode_with_slope_spelling("1e2"));
+            // Both instrument domains reject every bad slope spelling at the
+            // token level, before any binary32 narrowing.
+            const char* const slope_values[] = { "0", "101", "-1", "50.5", "1e2", "\"sine\"", "true" };
+            for (const char* spelling : slope_values) {
+                char slope_doc[256];
+                TEST(snprintf(slope_doc,
+                              sizeof(slope_doc),
+                              "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\","
+                              "\"pitch_offset_semitones\":2.0,\"fir_slope\":%s}]}",
+                              spelling) > 0);
+                for (const Synth::InstrumentJsonDomain domain : both_domains) {
+                    fill_clipboard_sentinels(&slope_decoded);
+                    fill_clipboard_sentinels(&slope_sentinel);
+                    TEST(! Synth::decode_instrument_json_for_domain(slope_doc,
+                                                                    static_cast<uint32_t>(strlen(slope_doc)),
+                                                                    &slope_decoded.instr,
+                                                                    slope_decoded.envs,
+                                                                    &slope_decoded.env_count,
+                                                                    slope_decoded.lfos,
+                                                                    &slope_decoded.lfo_count,
+                                                                    slope_decoded.layout,
+                                                                    max_portable_records,
+                                                                    &slope_decoded.layout_count,
+                                                                    domain));
+                    TEST(clipboard_sentinels_intact(&slope_decoded, &slope_sentinel));
+                }
+            }
+        }
 
         // fm_index levels are document units 0..1; the bank stores radians, so the
         // envelope's min/delta and the LFO's min/delta scale by 2*pi. The envelope's
@@ -18206,6 +20256,7 @@ int main()
             doc_instr.layer_count = 3;
             for (uint32_t layer = 0; layer < 3; layer++) {
                 doc_instr.layers[layer].osc_type[0] = Synth::WaveType::sine_wave;
+                doc_instr.layers[layer].fir_slope_percent = 100;
             }
             // Layer 0: two ordered volume sources, duty B and mix bases.
             doc_instr.layers[0].targets[Synth::mod_volume].base_value  = 0.8f;
@@ -18369,8 +20420,15 @@ int main()
             "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\",\"volume\":{\"lfo\":{\"wave\":\"noise\",\"frequency_hz\":5.0}}}]}",
             // mod_ratio out of range
             "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\",\"mode\":\"fm\",\"mod_ratio\":100.0}]}",
-            // cutoff base below the slider floor
-            "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\",\"lowpass_cutoff\":{\"base\":10.0}}]}",
+            // spread base above the slider ceiling: the true double value is out of
+            // range even though its binary32 narrowing would round back into it
+            "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\",\"fir_pitch_spread\":{\"base\":36.0000001}}]}",
+            // negative spread underflow: the double is below 0 while its binary32
+            // narrowing is negative zero, which a post-narrowing check would accept
+            "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\",\"fir_pitch_spread\":{\"base\":-1e-50}}]}",
+            // spread base out of range, plain spellings
+            "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\",\"fir_pitch_spread\":{\"base\":37}}]}",
+            "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\",\"fir_pitch_spread\":{\"base\":-0.5}}]}",
             // duplicate
             "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\",\"wave_a\":\"sawtooth\"}]}",
             // level span overflows the stored delta
@@ -18409,9 +20467,10 @@ int main()
             TEST(untouched);
         }
 
-        // A zero ratio is bank-legal in FM/sync, a cutoff base of 0 is the bypass
-        // point, and a cutoff envelope level can quantize just below the slider
-        // floor; all of them must decode, and a copy must paste back exactly.
+        // A zero ratio is bank-legal in FM/sync, a spread base of 0 is the
+        // bypass point, and a spread envelope level can quantize just below
+        // the slider floor; all of them must decode, and a copy must paste
+        // back exactly.
         {
             const char* const zero_ratio_doc =
                 "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\",\"mode\":\"fm\",\"mod_ratio\":0.0}]}";
@@ -18482,83 +20541,205 @@ int main()
             TEST(zero_instr.layers[0].osc_mode == Synth::osc_mode_fm);
             TEST(zero_instr.layers[0].mod_ratio == 1.0f);
 
-            const char* const cutoff_bypass_doc =
-                "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\",\"lowpass_cutoff\":{\"base\":0.0}}]}";
-            TEST(Synth::decode_instrument_json(cutoff_bypass_doc,
-                                               static_cast<uint32_t>(strlen(cutoff_bypass_doc)),
+            const char* const spread_zero_doc =
+                "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\",\"fir_pitch_spread\":{\"base\":0.0}}]}";
+            TEST(Synth::decode_instrument_json(spread_zero_doc,
+                                               static_cast<uint32_t>(strlen(spread_zero_doc)),
                                                &zero_instr,
                                                zero_envs,
                                                &zero_env_count,
                                                zero_lfos,
                                                &zero_lfo_count));
-            TEST(zero_instr.layers[0].targets[Synth::mod_lowpass_cutoff].base_value == 0.0f);
+            TEST(zero_instr.layers[0].targets[Synth::mod_fir_spread].base_value == 0.0f);
 
-            const char* const cutoff_floor_doc =
-                "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\",\"lowpass_cutoff\":{\"base\":20.0}}]}";
-            TEST(Synth::decode_instrument_json(cutoff_floor_doc,
-                                               static_cast<uint32_t>(strlen(cutoff_floor_doc)),
+            const char* const spread_max_doc =
+                "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\",\"fir_pitch_spread\":{\"base\":36.0}}]}";
+            TEST(Synth::decode_instrument_json(spread_max_doc,
+                                               static_cast<uint32_t>(strlen(spread_max_doc)),
                                                &zero_instr,
                                                zero_envs,
                                                &zero_env_count,
                                                zero_lfos,
                                                &zero_lfo_count));
-            TEST(zero_instr.layers[0].targets[Synth::mod_lowpass_cutoff].base_value == 20.0f);
+            TEST(zero_instr.layers[0].targets[Synth::mod_fir_spread].base_value == 36.0f);
 
-            // The level-20 point quantizes to raw 655, which encodes to just below
-            // 20 Hz and must re-quantize to the same raw value.
+            // The level-2 point quantizes to raw 4369, which encodes to just
+            // below 2 and must re-quantize to the same raw value.
 
-            const char* const cutoff_env_doc =
-                "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\",\"lowpass_cutoff\":{\"envelope\":{\"points\":[{\"time_seconds\":0.0,\"level\":0.0},{\"time_seconds\":0.1,\"level\":20.0},{\"time_seconds\":0.2,\"level\":2000.0}]}}}]}";
-            static Synth::EnvelopeDescriptor cut_envs[Synth::instrument_max_envelopes];
-            static Synth::LFODescriptor      cut_lfos[Synth::instrument_max_lfos];
-            uint32_t                         cut_env_count = 999;
-            uint32_t                         cut_lfo_count = 999;
-            TEST(Synth::decode_instrument_json(cutoff_env_doc,
-                                               static_cast<uint32_t>(strlen(cutoff_env_doc)),
+            const char* const spread_env_doc =
+                "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\",\"fir_pitch_spread\":{\"envelope\":{\"points\":[{\"time_seconds\":0.0,\"level\":0.0},{\"time_seconds\":0.1,\"level\":2.0},{\"time_seconds\":0.2,\"level\":30.0}]}}}]}";
+            static Synth::EnvelopeDescriptor spread_envs[Synth::instrument_max_envelopes];
+            static Synth::LFODescriptor      spread_lfos[Synth::instrument_max_lfos];
+            uint32_t                         spread_env_count = 999;
+            uint32_t                         spread_lfo_count = 999;
+            TEST(Synth::decode_instrument_json(spread_env_doc,
+                                               static_cast<uint32_t>(strlen(spread_env_doc)),
                                                &zero_instr,
-                                               cut_envs,
-                                               &cut_env_count,
-                                               cut_lfos,
-                                               &cut_lfo_count));
-            TEST(cut_env_count == 1);
-            TEST(cut_envs[0].min_value == 0.0f);
-            TEST(cut_envs[0].points[1].value == 655); // the floor's own quantization step
+                                               spread_envs,
+                                               &spread_env_count,
+                                               spread_lfos,
+                                               &spread_lfo_count));
+            TEST(spread_env_count == 1);
+            TEST(spread_envs[0].min_value == 0.0f);
+            TEST(spread_envs[0].points[1].value == 4369); // the level-2 point's own quantization step
 
-            static Synth::InstrumentEditorBank cut_bank;
-            memset(&cut_bank, 0, sizeof(cut_bank));
-            uint16_t cut_env_ids[Synth::instrument_max_envelopes];
-            uint16_t cut_lfo_ids[Synth::instrument_max_lfos];
-            TEST(Synth::remap_envelopes(&cut_bank.bank, cut_envs, cut_env_count, cut_env_ids));
-            TEST(Synth::remap_lfos(&cut_bank.bank, cut_lfos, cut_lfo_count, cut_lfo_ids));
-            Synth::Instrument cut_installed;
-            Synth::remap_instrument(zero_instr, cut_env_ids, cut_lfo_ids, &cut_installed);
-            const uint32_t cut_slot = cut_bank.bank.instruments.allocate();
-            TEST(cut_slot != pool_no_slot);
-            cut_bank.bank.instruments.entries[cut_slot]  = cut_installed;
-            cut_bank.bank.channel_enabled[0]             = 1;
-            cut_bank.bank.channel_zones[0][0].start_note = 1;
-            cut_bank.bank.channel_zones[0][0].instrument = static_cast<uint8_t>(cut_slot);
-            TEST(Synth::validate_instrument_bank(&cut_bank.bank));
-            static char    cut_text[64 * 1024];
-            const uint32_t cut_text_len =
-                Synth::encode_instrument_json(cut_text, sizeof(cut_text), &cut_installed, &cut_bank.bank);
-            TEST(cut_text_len > 0);
-            static Synth::Instrument         cut_back;
-            static Synth::EnvelopeDescriptor cut_back_envs[Synth::instrument_max_envelopes];
-            static Synth::LFODescriptor      cut_back_lfos[Synth::instrument_max_lfos];
-            uint32_t                         cut_back_env_count = 0;
-            uint32_t                         cut_back_lfo_count = 0;
-            TEST(Synth::decode_instrument_json(cut_text,
-                                               cut_text_len,
-                                               &cut_back,
-                                               cut_back_envs,
-                                               &cut_back_env_count,
-                                               cut_back_lfos,
-                                               &cut_back_lfo_count));
-            TEST(cut_back_env_count == 1);
-            TEST(cut_back_envs[0].points[1].value == cut_envs[0].points[1].value);
-            TEST(cut_back_envs[0].min_value == cut_envs[0].min_value);
-            TEST(cut_back_envs[0].min_max_delta == cut_envs[0].min_max_delta);
+            static Synth::InstrumentEditorBank spread_bank;
+            memset(&spread_bank, 0, sizeof(spread_bank));
+            uint16_t spread_env_ids[Synth::instrument_max_envelopes];
+            uint16_t spread_lfo_ids[Synth::instrument_max_lfos];
+            TEST(Synth::remap_envelopes(&spread_bank.bank, spread_envs, spread_env_count, spread_env_ids));
+            TEST(Synth::remap_lfos(&spread_bank.bank, spread_lfos, spread_lfo_count, spread_lfo_ids));
+            Synth::Instrument spread_installed;
+            Synth::remap_instrument(zero_instr, spread_env_ids, spread_lfo_ids, &spread_installed);
+            const uint32_t spread_slot = spread_bank.bank.instruments.allocate();
+            TEST(spread_slot != pool_no_slot);
+            spread_bank.bank.instruments.entries[spread_slot] = spread_installed;
+            spread_bank.bank.channel_enabled[0]               = 1;
+            spread_bank.bank.channel_zones[0][0].start_note   = 1;
+            spread_bank.bank.channel_zones[0][0].instrument   = static_cast<uint8_t>(spread_slot);
+            TEST(Synth::validate_instrument_bank(&spread_bank.bank));
+            static char    spread_text[64 * 1024];
+            const uint32_t spread_text_len =
+                Synth::encode_instrument_json(spread_text, sizeof(spread_text), &spread_installed, &spread_bank.bank);
+            TEST(spread_text_len > 0);
+            static Synth::Instrument         spread_back;
+            static Synth::EnvelopeDescriptor spread_back_envs[Synth::instrument_max_envelopes];
+            static Synth::LFODescriptor      spread_back_lfos[Synth::instrument_max_lfos];
+            uint32_t                         spread_back_env_count = 0;
+            uint32_t                         spread_back_lfo_count = 0;
+            TEST(Synth::decode_instrument_json(spread_text,
+                                               spread_text_len,
+                                               &spread_back,
+                                               spread_back_envs,
+                                               &spread_back_env_count,
+                                               spread_back_lfos,
+                                               &spread_back_lfo_count));
+            TEST(spread_back_env_count == 1);
+            TEST(spread_back_envs[0].points[1].value == spread_envs[0].points[1].value);
+            TEST(spread_back_envs[0].min_value == spread_envs[0].min_value);
+            TEST(spread_back_envs[0].min_max_delta == spread_envs[0].min_max_delta);
+        }
+        // Editor dialect: a fractional spread base decodes exactly, and an
+        // absent key decodes the zeroed binding.
+        const char* const spread_half_doc =
+            "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\",\"fir_pitch_spread\":{\"base\":2.5}}]}";
+        const char* const no_spread_doc  = "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\"}]}";
+        const char* const spread_docs[2] = { spread_half_doc, no_spread_doc };
+        for (const char* const spread_doc : spread_docs) {
+            static Synth::Instrument         half_instr;
+            static Synth::EnvelopeDescriptor half_envs[Synth::instrument_max_envelopes];
+            static Synth::LFODescriptor      half_lfos[Synth::instrument_max_lfos];
+            uint32_t                         half_env_count = 999;
+            uint32_t                         half_lfo_count = 999;
+            TEST(Synth::decode_instrument_json(spread_doc,
+                                               static_cast<uint32_t>(strlen(spread_doc)),
+                                               &half_instr,
+                                               half_envs,
+                                               &half_env_count,
+                                               half_lfos,
+                                               &half_lfo_count));
+            TEST(half_instr.layers[0].targets[Synth::mod_fir_spread].base_value ==
+                 (spread_doc == spread_half_doc ? 2.5f : 0.0f));
+        }
+        // Removed cutoff keys: both dialects ignore them, and
+        // the spread target stays at its zeroed default.
+        const char* const removed_keys_doc = "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\","
+                                             "\"lowpass_cutoff\":{\"base\":2000},\"highpass_cutoff\":{\"base\":500}}]}";
+        {
+            static Synth::Instrument         removed_instr;
+            static Synth::EnvelopeDescriptor removed_envs[Synth::instrument_max_envelopes];
+            static Synth::LFODescriptor      removed_lfos[Synth::instrument_max_lfos];
+            uint32_t                         removed_env_count = 999;
+            uint32_t                         removed_lfo_count = 999;
+            TEST(Synth::decode_instrument_json(removed_keys_doc,
+                                               static_cast<uint32_t>(strlen(removed_keys_doc)),
+                                               &removed_instr,
+                                               removed_envs,
+                                               &removed_env_count,
+                                               removed_lfos,
+                                               &removed_lfo_count));
+            TEST(removed_instr.layers[0].targets[Synth::mod_fir_spread].base_value == 0.0f);
+        }
+        // Saved-bank dialect: a spread base round-trips, out-of-range and
+        // underflow spellings fail before narrowing, and an absent key
+        // decodes 0.  The splice mirrors the octave-offset pattern above.
+        {
+            static Synth::InstrumentEditorBank spread_splice_source;
+            build_named_fm_fixture(&spread_splice_source);
+            spread_splice_source.bank.instruments.entries[0].layers[0].targets[Synth::mod_fir_spread].base_value = 3.0f;
+            static char    spread_payload[Synth::library_payload_max];
+            const uint32_t spread_payload_len =
+                Synth::encode_editor_bank_json(&spread_splice_source, spread_payload, sizeof(spread_payload));
+            TEST(spread_payload_len > 0);
+            auto decode_with_spread_spelling = [&](const char* spelling) {
+                const char* const key = "\"fir_pitch_spread\":{\"base_value\":";
+                const char* const hit = strstr(spread_payload, key);
+                TEST(hit != nullptr);
+                if (! hit) {
+                    return false;
+                }
+                const char* const value_begin = hit + strlen(key);
+                const char*       value_end   = value_begin;
+                while (*value_end && *value_end != ',' && *value_end != '}') {
+                    ++value_end;
+                }
+                const uint32_t prefix       = static_cast<uint32_t>(hit - spread_payload);
+                const uint32_t suffix       = spread_payload_len - static_cast<uint32_t>(value_end - spread_payload);
+                const uint32_t spelling_len = static_cast<uint32_t>(strlen(spelling));
+                static char    spelling_doc[Synth::library_payload_max];
+                memcpy(spelling_doc, spread_payload, prefix);
+                memcpy(spelling_doc + prefix, key, strlen(key));
+                memcpy(spelling_doc + prefix + strlen(key), spelling, spelling_len);
+                memcpy(spelling_doc + prefix + strlen(key) + spelling_len, value_end, suffix);
+                static Synth::InstrumentEditorBank spelling_decoded;
+                memset(&spelling_decoded, 0, sizeof(spelling_decoded));
+                return Synth::decode_editor_bank_json(spelling_doc,
+                                                      prefix + strlen(key) + spelling_len + suffix,
+                                                      &spelling_decoded);
+            };
+            TEST(decode_with_spread_spelling("3"));   // the splice itself decodes
+            TEST(decode_with_spread_spelling("2.5")); // a fractional base round-trips
+            TEST(! decode_with_spread_spelling("37"));
+            TEST(! decode_with_spread_spelling("-0.5"));
+            TEST(! decode_with_spread_spelling("36.0000001"));
+            TEST(! decode_with_spread_spelling("-1e-50"));
+            // An absent key decodes the zeroed binding: a zero base omits the
+            // key entirely.
+            spread_splice_source.bank.instruments.entries[0].layers[0].targets[Synth::mod_fir_spread].base_value = 0.0f;
+            const uint32_t zero_payload_len =
+                Synth::encode_editor_bank_json(&spread_splice_source, spread_payload, sizeof(spread_payload));
+            TEST(zero_payload_len > 0);
+            TEST(strstr(spread_payload, "fir_pitch_spread") == nullptr);
+            static Synth::InstrumentEditorBank zero_decoded;
+            memset(&zero_decoded, 0, sizeof(zero_decoded));
+            TEST(Synth::decode_editor_bank_json(spread_payload, zero_payload_len, &zero_decoded));
+            TEST(zero_decoded.bank.instruments.entries[0].layers[0].targets[Synth::mod_fir_spread].base_value == 0.0f);
+            // The removed cutoff keys stay tolerated under the bank dialect's
+            // routing object too: the splice must still decode.
+            spread_splice_source.bank.instruments.entries[0].layers[0].targets[Synth::mod_volume].base_value = 0.8f;
+            const uint32_t routing_payload_len =
+                Synth::encode_editor_bank_json(&spread_splice_source, spread_payload, sizeof(spread_payload));
+            TEST(routing_payload_len > 0);
+            const char* const routing_key = "\"routing\":{";
+            const char* const routing_hit = strstr(spread_payload, routing_key);
+            TEST(routing_hit != nullptr);
+            if (routing_hit) {
+                const char* const removed_keys =
+                    "\"lowpass_cutoff\":{\"base_value\":2000},\"highpass_cutoff\":{\"base_value\":500},";
+                const uint32_t prefix = static_cast<uint32_t>(routing_hit - spread_payload) + strlen(routing_key);
+                const uint32_t suffix = routing_payload_len - prefix;
+                static char    routing_doc[Synth::library_payload_max];
+                memcpy(routing_doc, spread_payload, prefix);
+                const int removed_len =
+                    snprintf(routing_doc + prefix, sizeof(routing_doc) - prefix, "%s", removed_keys);
+                TEST(removed_len > 0);
+                memcpy(routing_doc + prefix + removed_len, spread_payload + prefix, suffix);
+                static Synth::InstrumentEditorBank routing_decoded;
+                memset(&routing_decoded, 0, sizeof(routing_decoded));
+                TEST(Synth::decode_editor_bank_json(routing_doc,
+                                                    prefix + static_cast<uint32_t>(removed_len) + suffix,
+                                                    &routing_decoded));
+            }
         }
 
         // A zone copied out of the editor by hand: LFO "Value" sweeps default to
@@ -18578,8 +20759,8 @@ int main()
                 "\"panning\":{\"base\":0.5,\"lfo\":{\"wave\":\"sine\",\"frequency_hz\":1.66666663,\"duty\":0,"
                 "\"min_level\":-1,\"max_level\":1,\"depth\":0.5,\"depth_source\":\"aftertouch\","
                 "\"rate_scale_ms\":0}},\"duty_a\":{\"base\":0.172000006},\"duty_b\":{\"base\":0.156000003},"
-                "\"osc_mix\":{\"base\":0},\"fm_index\":{\"base\":0},\"lowpass_cutoff\":{\"base\":20},"
-                "\"highpass_cutoff\":{\"base\":20}}]}";
+                "\"osc_mix\":{\"base\":0},\"fm_index\":{\"base\":0},"
+                "\"fir_pitch_spread\":{\"base\":3}}]}";
             static Synth::Instrument         real_instr;
             static Synth::EnvelopeDescriptor real_envs[Synth::instrument_max_envelopes];
             static Synth::LFODescriptor      real_lfos[Synth::instrument_max_lfos];
@@ -18794,6 +20975,63 @@ int main()
                                                             &ex_refuse_count));
             TEST(ex_refuse_count == ex_refuse_capacity);
             TEST(memcmp(ex_refuse, ex_refuse_sentinel, sizeof(ex_refuse_sentinel)) == 0);
+            // Encode-side exemption controls, called directly so they reach the
+            // encoder's own bound rather than the metadata validation.
+            {
+                // An unrepresented kind-1 record whose descriptor id exceeds the
+                // envelope pool's allocation is refused by the encoder: the bound
+                // sits in its metadata precondition and again at the exemption
+                // itself.
+                Synth::InstrumentEditorBank ex_over = ex_bank;
+                add_detached_record(&ex_over,
+                                    0,
+                                    0,
+                                    1,
+                                    5,
+                                    71.0f,
+                                    72.0f,
+                                    Synth::ModSource::none,
+                                    Synth::ModSource::none,
+                                    1);
+                TEST(! Sculptor::encode_instrument_graph_layout(ex_instr,
+                                                                ex_over.bank,
+                                                                ex_over,
+                                                                0,
+                                                                0,
+                                                                ex_refuse,
+                                                                ex_refuse_capacity,
+                                                                &ex_refuse_count));
+                TEST(ex_refuse_count == ex_refuse_capacity);
+                TEST(memcmp(ex_refuse, ex_refuse_sentinel, sizeof(ex_refuse_sentinel)) == 0);
+                // An unrepresented kind-1 record with a validly allocated
+                // descriptor id takes the exemption: the export succeeds and the
+                // dropped record produces no output.
+                Synth::InstrumentEditorBank ex_alloc = ex_bank;
+                TEST(ex_alloc.bank.envelopes.allocate() == 2);
+                ex_alloc.bank.envelopes.entries[2] = ex_alloc.bank.envelopes.entries[0];
+                add_detached_record(&ex_alloc,
+                                    0,
+                                    0,
+                                    1,
+                                    3,
+                                    71.0f,
+                                    72.0f,
+                                    Synth::ModSource::none,
+                                    Synth::ModSource::none,
+                                    1);
+                static Synth::InstrumentGraphLayout ex_alloc_out[max_portable_records];
+                uint32_t                            ex_alloc_count = max_portable_records;
+                TEST(Sculptor::encode_instrument_graph_layout(ex_instr,
+                                                              ex_alloc.bank,
+                                                              ex_alloc,
+                                                              0,
+                                                              0,
+                                                              ex_alloc_out,
+                                                              max_portable_records,
+                                                              &ex_alloc_count));
+                TEST(ex_alloc_count == ex_portable_count);
+                TEST(memcmp(ex_alloc_out, ex_portable, ex_portable_count * sizeof(ex_portable[0])) == 0);
+            }
 
             static Synth::InstrumentEditorBank ex_before;
             ex_before             = ex_bank;
@@ -18867,7 +21105,7 @@ int main()
                 TEST(ex_mapped[m].x == 12.5f && ex_mapped[m].uid != 0);
 
             // Mapper refusals: a decoded locator the decoded model does not project, and
-            // a kind that is not clipboard data. Both leave the mapped sink and the count
+            // a kind that is not clipboard data.  Both leave the mapped sink and the count
             // untouched; the same sink accepts the resolved records above, so only the
             // locator differs.
             static Synth::InstrumentGraphLayout mp_records[1];
@@ -18881,10 +21119,10 @@ int main()
             for (uint32_t c = 0; c < mp_cases; c++) {
                 memset(mp_records, 0, sizeof(mp_records));
                 if (c == 0) {
-                    // The decoded instrument has one layer, so layer 1 is not projected.
-                    mp_records[0].kind   = Synth::instrument_graph_layout_envelope;
-                    mp_records[0].layer  = 1;
-                    mp_records[0].target = static_cast<uint8_t>(Synth::mod_volume);
+                    // A canonical index past the projection is unresolvable debris
+                    // the mapping refuses: only kinds 1/2 are droppable.
+                    mp_records[0].kind            = Synth::instrument_graph_layout_canonical;
+                    mp_records[0].canonical_index = 9;
                 }
                 else {
                     // Effect nodes are never clipboard data.
@@ -19288,11 +21526,12 @@ int main()
             TEST(na_refuse_count == 1);
             TEST(memcmp(na_refuse, &na_refuse_sentinel, sizeof(na_refuse_sentinel)) == 0);
 
-            // Normalizer refusals for locators the model cannot resolve: an envelope
-            // record naming a decoded cell with no generator bound, a canonical index
-            // past the projection, and a kind that is not clipboard data. Each leaves
-            // the output array and count untouched, so a refused normalization cannot
-            // leak a partially translated record into the clipboard.
+            // Normalizer refusals: an unknown kind, a canonical index past the
+            // projection, and a kind that is not clipboard data.  Each leaves
+            // array and count untouched, so a refused normalization cannot
+            // leak a partially translated record into the clipboard.  A
+            // kind-1/2 locator the model cannot resolve is dropped instead
+            // (the removed cutoff targets), pinned by the drop tests below.
             static Synth::InstrumentGraphLayout nr_out[2];
             static Synth::InstrumentGraphLayout nr_out_sentinel[2];
             memset(nr_out, 0x5A, sizeof(nr_out));
@@ -19302,11 +21541,7 @@ int main()
             for (uint32_t c = 0; c < 3; c++) {
                 Synth::InstrumentGraphLayout nr_rec = {};
                 if (c == 0) {
-                    // nm_dec binds envelopes to mod_volume cells only, so this cell has
-                    // no generator and nothing to attach a position to.
-                    nr_rec.kind   = Synth::instrument_graph_layout_envelope;
-                    nr_rec.layer  = 0;
-                    nr_rec.target = static_cast<uint8_t>(Synth::mod_panning);
+                    nr_rec.kind = 3; // unknown kinds are never clipboard data
                 }
                 else if (c == 1) {
                     nr_rec.kind            = Synth::instrument_graph_layout_canonical;
@@ -19397,12 +21632,6 @@ int main()
                 { "{\"kind\":1,\"layer\":0,\"target\":0,\"x\":0,\"y\":0,\"width\":-1,\"height\":0}", "negative width" },
                 { "{\"kind\":1,\"layer\":0,\"target\":0,\"x\":1e400,\"y\":0,\"width\":0,\"height\":0}",
                   "overflowed number" },
-                { "{\"kind\":1,\"layer\":7,\"target\":0,\"x\":0,\"y\":0,\"width\":0,\"height\":0}",
-                  "layer out of range" },
-                { "{\"kind\":1,\"layer\":0,\"target\":99,\"x\":0,\"y\":0,\"width\":0,\"height\":0}", "unknown target" },
-                { "{\"kind\":2,\"layer\":0,\"target\":0,\"depth_source\":7,\"rate_source\":0,\"x\":0,\"y\":0,"
-                  "\"width\":0,\"height\":0}",
-                  "source out of range" },
                 { "{\"kind\":0,\"canonical_index\":9,\"x\":0,\"y\":0,\"width\":0,\"height\":0}",
                   "canonical index beyond the bound" },
                 { "{\"kind\":1,\"layer\":0,\"target\":0,\"x\":1,\"y\":1,\"width\":0,\"height\":0},"
@@ -19417,6 +21646,27 @@ int main()
                     failed(rejections[i].dimension, __FILE__, __LINE__);
                 }
                 TEST(clipboard_sentinels_intact(&ml_attempt, &ml_sentinel));
+            }
+            // A kind-1/2 locator the model cannot resolve (layer, target, or mod
+            // source past its bound) is dropped with a console note instead of
+            // refusing the document: these are stale modulator positions
+            // arriving from older banks and clips.
+            const LayoutRejection drops[] = {
+                { "{\"kind\":1,\"layer\":7,\"target\":0,\"x\":0,\"y\":0,\"width\":0,\"height\":0}",
+                  "dropped layer out of range" },
+                { "{\"kind\":1,\"layer\":0,\"target\":99,\"x\":0,\"y\":0,\"width\":0,\"height\":0}",
+                  "dropped unknown target" },
+                { "{\"kind\":2,\"layer\":0,\"target\":0,\"depth_source\":7,\"rate_source\":0,\"x\":0,\"y\":0,"
+                  "\"width\":0,\"height\":0}",
+                  "dropped source out of range" },
+            };
+            for (uint32_t i = 0; i < sizeof(drops) / sizeof(drops[0]); i++) {
+                static char ml_bad[clipboard_capacity];
+                build_layout_doc(ml_bad, sizeof(ml_bad), clipboard_doc_head, drops[i].records);
+                fill_clipboard_sentinels(&ml_attempt);
+                TEST(decode_clipboard(&ml_attempt, ml_bad, max_portable_records));
+                TEST(ml_attempt.layout_count == 1); // the raw record survives the drop
+                TEST(ml_attempt.layout[0].x == 0.0f && ml_attempt.layout[0].y == 0.0f);
             }
 
             // An unregistered record kind is skipped by the generic decode path:
@@ -19625,8 +21875,8 @@ int main()
             mf_bank.channel_zones[0][0].start_note = 1;
             mf_bank.channel_zones[0][0].instrument = static_cast<uint8_t>(mf_slot);
             TEST(Synth::validate_instrument_bank(&mf_bank));
-            TEST(mf_bank.envelopes.num_allocated == 63);
-            TEST(mf_bank.lfos.num_allocated == 63);
+            TEST(mf_bank.envelopes.num_allocated == 56);
+            TEST(mf_bank.lfos.num_allocated == 56);
             TEST(mf_count == max_portable_records);
 
             const uint32_t mf_len =
@@ -19663,8 +21913,8 @@ int main()
             fill_clipboard_sentinels(&mf_dec);
             TEST(decode_clipboard(&mf_dec, mf_text, max_portable_records));
             TEST(mf_dec.layout_count == max_portable_records);
-            TEST(mf_dec.env_count == 63);
-            TEST(mf_dec.lfo_count == 63);
+            TEST(mf_dec.env_count == 56);
+            TEST(mf_dec.lfo_count == 56);
             TEST(mf_dec.instr.layer_count == Synth::max_layers);
 
             uint32_t mf_mapped_count = max_portable_records;
@@ -19759,7 +22009,6 @@ int main()
             const char* const surplus[] = {
                 "{\"kind\":0,\"canonical_index\":3,\"x\":1,\"y\":2,\"width\":0,\"height\":0}",  // oscillator layer 1
                 "{\"kind\":0,\"canonical_index\":99,\"x\":1,\"y\":2,\"width\":0,\"height\":0}", // past the bound
-                "{\"kind\":1,\"layer\":0,\"target\":0,\"x\":1,\"y\":2,\"width\":0,\"height\":0}",
             };
             for (uint32_t i = 0; i < sizeof(surplus) / sizeof(surplus[0]); i++) {
                 static char nw_bad[clipboard_capacity];
@@ -19770,6 +22019,213 @@ int main()
                 fill_clipboard_sentinels(&nw_attempt);
                 TEST(decode_clipboard(&nw_attempt, nw_bad, max_portable_records) == false);
                 TEST(clipboard_sentinels_intact(&nw_attempt, &nw_sentinel));
+            }
+            // A kind-1 locator the decoded model cannot resolve is dropped by the
+            // mapping/normalization entry points, not by the decode: the record is
+            // retained raw here and skipped (with a console note) later.
+            static char            nw_drop[clipboard_capacity];
+            static ClipboardDecode nw_drop_attempt;
+            build_layout_doc(nw_drop,
+                             sizeof(nw_drop),
+                             nw_head,
+                             "{\"kind\":1,\"layer\":0,\"target\":0,\"x\":1,\"y\":2,\"width\":0,\"height\":0}");
+            fill_clipboard_sentinels(&nw_drop_attempt);
+            TEST(decode_clipboard(&nw_drop_attempt, nw_drop, max_portable_records));
+            TEST(nw_drop_attempt.layout_count == 1);
+        }
+        // Carrier 2: an old portable document (library-transfer shape)
+        // carries removed cutoff bindings and cutoff-target layout records
+        // (kind 1 target 7, kind 2 target 8).  The decode succeeds, the
+        // cutoff records are dropped by the mapping/normalization entry
+        // points (logged, never reinterpreted), and the recognized volume
+        // record survives with its position and uid.
+        {
+            static char old_doc[clipboard_capacity];
+            const int   old_written =
+                snprintf(old_doc,
+                         sizeof(old_doc),
+                         "{\"format\":\"synth-instrument-v1\",\"note_skew_semitones\":0,\"layer_skew_semitones\":0,"
+                         "\"layers\":[{\"wave_a\":\"sine\",\"volume\":{\"base\":0.8,"
+                         "\"envelope\":{\"points\":[{\"time_seconds\":0,\"level\":0.5},"
+                         "{\"time_seconds\":0.5,\"level\":0.25}]}},"
+                         "\"lowpass_cutoff\":{\"base\":2000},\"highpass_cutoff\":{\"base\":500}}],"
+                         "\"graph_layout\":["
+                         "{\"kind\":1,\"layer\":0,\"target\":7,\"x\":10,\"y\":11,\"width\":0,\"height\":0},"
+                         "{\"kind\":2,\"layer\":0,\"target\":8,\"depth_source\":%u,\"rate_source\":0,"
+                         "\"x\":12,\"y\":13,\"width\":0,\"height\":0},"
+                         "{\"kind\":1,\"layer\":0,\"target\":0,\"x\":14,\"y\":15,\"width\":0,\"height\":0}]}",
+                         static_cast<unsigned>(Synth::ModSource::velocity));
+            TEST(old_written > 0 && static_cast<uint32_t>(old_written) < sizeof(old_doc));
+            static Synth::Instrument            old_instr;
+            static Synth::EnvelopeDescriptor    old_envs[Synth::instrument_max_envelopes];
+            static Synth::LFODescriptor         old_lfos[Synth::instrument_max_lfos];
+            static Synth::InstrumentGraphLayout old_layout[max_portable_records];
+            uint32_t                            old_env_count    = 999;
+            uint32_t                            old_lfo_count    = 999;
+            uint32_t                            old_layout_count = 999;
+            TEST(Synth::decode_instrument_json_for_domain(old_doc,
+                                                          static_cast<uint32_t>(old_written),
+                                                          &old_instr,
+                                                          old_envs,
+                                                          &old_env_count,
+                                                          old_lfos,
+                                                          &old_lfo_count,
+                                                          old_layout,
+                                                          max_portable_records,
+                                                          &old_layout_count,
+                                                          Synth::InstrumentJsonDomain::validated_bank));
+            TEST(old_layout_count == 3); // the raw records survive the decode
+            static Synth::GraphNodeLayout old_mapped[4];
+            uint32_t                      old_mapped_count = 4;
+            TEST(Sculptor::map_instrument_graph_layout(old_instr,
+                                                       old_envs,
+                                                       old_env_count,
+                                                       old_lfos,
+                                                       old_lfo_count,
+                                                       old_layout,
+                                                       old_layout_count,
+                                                       old_mapped,
+                                                       4,
+                                                       &old_mapped_count));
+            TEST(old_mapped_count == 1); // exactly the recognized record
+            TEST(old_mapped[0].kind == 1);
+            TEST(old_mapped[0].x == 14.0f && old_mapped[0].y == 15.0f);
+            TEST(old_mapped[0].uid != 0);
+            static Synth::InstrumentGraphLayout old_normalized[4];
+            uint32_t                            old_normalized_count = 4;
+            TEST(Sculptor::normalize_instrument_graph_layout(old_instr,
+                                                             old_envs,
+                                                             old_env_count,
+                                                             old_lfos,
+                                                             old_lfo_count,
+                                                             old_layout,
+                                                             old_layout_count,
+                                                             old_instr,
+                                                             old_envs,
+                                                             old_env_count,
+                                                             old_lfos,
+                                                             old_lfo_count,
+                                                             old_normalized,
+                                                             4,
+                                                             &old_normalized_count));
+            TEST(old_normalized_count == 1);
+            TEST(old_normalized[0].x == 14.0f && old_normalized[0].y == 15.0f);
+            // Control: a spread envelope makes target 7 live again, and the
+            // same record now resolves onto the spread node.
+            static char new_doc[clipboard_capacity];
+            const int   new_written =
+                snprintf(new_doc,
+                         sizeof(new_doc),
+                         "{\"format\":\"synth-instrument-v1\",\"note_skew_semitones\":0,\"layer_skew_semitones\":0,"
+                         "\"layers\":[{\"wave_a\":\"sine\",\"fir_pitch_spread\":{\"base\":3,"
+                         "\"envelope\":{\"points\":[{\"time_seconds\":0,\"level\":0.5},"
+                         "{\"time_seconds\":0.5,\"level\":0.25}]}}}],"
+                         "\"graph_layout\":["
+                         "{\"kind\":1,\"layer\":0,\"target\":7,\"x\":21,\"y\":22,\"width\":0,\"height\":0}]}");
+            TEST(new_written > 0 && static_cast<uint32_t>(new_written) < sizeof(new_doc));
+            static Synth::Instrument            new_instr;
+            static Synth::EnvelopeDescriptor    new_envs[Synth::instrument_max_envelopes];
+            static Synth::LFODescriptor         new_lfos[Synth::instrument_max_lfos];
+            static Synth::InstrumentGraphLayout new_layout[max_portable_records];
+            uint32_t                            new_env_count    = 999;
+            uint32_t                            new_lfo_count    = 999;
+            uint32_t                            new_layout_count = 999;
+            TEST(Synth::decode_instrument_json_for_domain(new_doc,
+                                                          static_cast<uint32_t>(new_written),
+                                                          &new_instr,
+                                                          new_envs,
+                                                          &new_env_count,
+                                                          new_lfos,
+                                                          &new_lfo_count,
+                                                          new_layout,
+                                                          max_portable_records,
+                                                          &new_layout_count,
+                                                          Synth::InstrumentJsonDomain::validated_bank));
+            TEST(new_env_count == 1 && new_layout_count == 1);
+            static Synth::GraphNodeLayout new_mapped[4];
+            uint32_t                      new_mapped_count = 4;
+            TEST(Sculptor::map_instrument_graph_layout(new_instr,
+                                                       new_envs,
+                                                       new_env_count,
+                                                       new_lfos,
+                                                       new_lfo_count,
+                                                       new_layout,
+                                                       new_layout_count,
+                                                       new_mapped,
+                                                       4,
+                                                       &new_mapped_count));
+            TEST(new_mapped_count == 1);
+            TEST(new_mapped[0].kind == 1);
+            TEST(new_mapped[0].x == 21.0f && new_mapped[0].y == 22.0f);
+            TEST(new_mapped[0].uid != 0);
+            // Direct-struct controls (JSON bypassed): an unknown kind and a
+            // non-empty record name stay fatal through the direct API.
+            static Synth::GraphNodeLayout       control_out[4];
+            uint32_t                            control_count = 4;
+            static Synth::InstrumentGraphLayout control_records[1];
+            memset(control_records, 0, sizeof(control_records));
+            control_records[0].kind   = 3;
+            control_records[0].layer  = 0;
+            control_records[0].target = 0;
+            control_records[0].x      = 1.0f;
+            control_records[0].y      = 2.0f;
+            TEST(! Sculptor::map_instrument_graph_layout(new_instr,
+                                                         new_envs,
+                                                         new_env_count,
+                                                         new_lfos,
+                                                         new_lfo_count,
+                                                         control_records,
+                                                         1,
+                                                         control_out,
+                                                         4,
+                                                         &control_count));
+            TEST(control_count == 4);
+            control_records[0].kind = Synth::instrument_graph_layout_envelope;
+            strcpy(control_records[0].name, "Stale");
+            TEST(! Sculptor::map_instrument_graph_layout(new_instr,
+                                                         new_envs,
+                                                         new_env_count,
+                                                         new_lfos,
+                                                         new_lfo_count,
+                                                         control_records,
+                                                         1,
+                                                         control_out,
+                                                         4,
+                                                         &control_count));
+            TEST(control_count == 4);
+            TEST(! Sculptor::normalize_instrument_graph_layout(new_instr,
+                                                               new_envs,
+                                                               new_env_count,
+                                                               new_lfos,
+                                                               new_lfo_count,
+                                                               control_records,
+                                                               1,
+                                                               new_instr,
+                                                               new_envs,
+                                                               new_env_count,
+                                                               new_lfos,
+                                                               new_lfo_count,
+                                                               old_normalized,
+                                                               4,
+                                                               &old_normalized_count));
+            // Source pin: the skip is logged by both mapping entry points.
+            {
+                static char graph_src[256 * 1024];
+                FILE* const graph_file = fopen("sculptor/sculptor_osc_graph.cpp", "rb");
+                TEST(graph_file != nullptr);
+                if (graph_file) {
+                    const size_t graph_got = fread(graph_src, 1, sizeof(graph_src) - 1, graph_file);
+                    fclose(graph_file);
+                    TEST(graph_got > 0);
+                    graph_src[graph_got]   = 0;
+                    const char* pin_cursor = graph_src;
+                    uint32_t    pin_hits   = 0;
+                    while ((pin_cursor = strstr(pin_cursor, "Ignored unresolvable graph layout record")) != nullptr) {
+                        ++pin_hits;
+                        ++pin_cursor;
+                    }
+                    TEST(pin_hits == 2); // logged by the shared mapping walk helper and the encode-side exemption
+                }
             }
         }
 
@@ -20249,14 +22705,15 @@ int main()
                 TEST(memcmp(&vr_candidate, &vr_sentinel, sizeof(vr_sentinel)) == 0);
                 TEST(memcmp(&vr_bank, &vr_before, sizeof(vr_before)) == 0);
 
-                // A layout record naming a generator the decoded instrument does not project.
+                // A layout record the decoded instrument cannot resolve at all (kind 0
+                // past the projection) still refuses the candidate: only kinds 1/2 are
+                // droppable removed-target debris.
                 static Synth::InstrumentGraphLayout vr_records[1];
                 memset(vr_records, 0, sizeof(vr_records));
-                vr_records[0].kind   = Synth::instrument_graph_layout_envelope;
-                vr_records[0].layer  = 0;
-                vr_records[0].target = static_cast<uint8_t>(Synth::mod_panning);
-                vr_records[0].x      = 3.0f;
-                vr_records[0].y      = 4.0f;
+                vr_records[0].kind            = Synth::instrument_graph_layout_canonical;
+                vr_records[0].canonical_index = 9;
+                vr_records[0].x               = 3.0f;
+                vr_records[0].y               = 4.0f;
                 TEST(! Sculptor::replace_zone_instrument_candidate(vr_bank,
                                                                    0,
                                                                    0,

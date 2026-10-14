@@ -305,9 +305,9 @@ constexpr const char* effect_type_names[Synth::num_effect_types] = { "none",   "
 constexpr uint32_t    num_param_kinds                   = 4;
 constexpr const char* param_kind_names[num_param_kinds] = { "external", "envelope", "lfo", "plain" };
 
-constexpr const char* mod_target_names[Synth::num_mod_targets] = { "volume",   "pitch",          "panning",
-                                                                   "duty_a",   "duty_b",         "osc_mix",
-                                                                   "fm_index", "lowpass_cutoff", "highpass_cutoff" };
+constexpr const char* mod_target_names[Synth::num_mod_targets] = {
+    "volume", "pitch", "panning", "duty_a", "duty_b", "osc_mix", "fm_index", "fir_pitch_spread"
+};
 
 static_assert(static_cast<uint32_t>(Synth::WaveType::noise_wave) == num_waves - 1);
 static_assert(static_cast<uint32_t>(Synth::ModSource::cc) == num_mod_sources - 1);
@@ -484,6 +484,14 @@ static void enc_oscillator(Out& o, const Synth::Oscillator& osc)
     key_enum(o, "mode", osc_mode_names, num_osc_modes, osc.osc_mode);
     key_float_nonzero(o, "mod_ratio", osc.mod_ratio);
     key_float_nonzero(o, "pitch_offset", osc.pitch_offset);
+    key_float_nonzero(o, "octave_offset", static_cast<float>(osc.octave_offset));
+
+    // The default slope omits the key, matching the nonzero-key omission
+    // convention of this encoder.
+    if (osc.fir_slope_percent != 100) {
+        o.key("fir_slope");
+        o.uint_value(osc.fir_slope_percent);
+    }
 
     o.key("generators");
     o.ch('{');
@@ -1577,19 +1585,14 @@ static void unknown_field(Walker& w, uint32_t key_idx)
     d_printf("Ignored unknown bank field: %s\n", display);
 }
 
-static void want_uint(Walker& w, uint32_t i, uint32_t max_value, uint32_t* out)
+// Bounded unsigned-magnitude token walk shared by want_uint (full token slice)
+// and want_int (sign-stripped slice): digit validation and per-step bound
+// refusal.  Leading zeros are rejected by the document-wide grammar pass, so the
+// digit walk plus the per-step bound check needs no separate overflow guard for
+// the small bounds used here.  On failure the walker is flagged and the
+// destination is left untouched.
+static void want_bounded_magnitude(Walker& w, const char* s, uint32_t len, uint32_t max_value, uint32_t* out)
 {
-    const jsmntok_t& t = w.toks[i];
-    if (t.type != JSMN_PRIMITIVE) {
-        w.failed = true;
-        return;
-    }
-
-    const char* const s   = w.doc + t.start;
-    const uint32_t    len = static_cast<uint32_t>(t.end - t.start);
-
-    // Leading zeros are rejected by the document-wide grammar pass, so the digit
-    // walk plus the per-step bound check needs no separate overflow guard.
     uint32_t value = 0;
     for (uint32_t c = 0; c < len; c++) {
         if (s[c] < '0' || s[c] > '9') {
@@ -1605,6 +1608,43 @@ static void want_uint(Walker& w, uint32_t i, uint32_t max_value, uint32_t* out)
     *out = value;
 }
 
+// Validates the parsed double against [min, max] BEFORE the binary32
+// narrowing, so spellings that would round into or out of the range are
+// judged on their true value.  Unlike want_float, the encoder's
+// finite-extrema round-trip property does not hold here; bounded slider
+// bases never approach the float range.
+static void want_bounded_real(Walker& w, uint32_t key_idx, double min, double max, float* out)
+{
+    const jsmntok_t& t = w.toks[key_idx];
+    if (t.type != JSMN_PRIMITIVE) {
+        w.failed = true;
+        return;
+    }
+    const char* const s   = w.doc + t.start;
+    const uint32_t    len = static_cast<uint32_t>(t.end - t.start);
+    if (! number_grammar_ok(s, len)) {
+        w.failed = true;
+        return;
+    }
+    const double value = strtod(s, nullptr);
+    if (value < min || value > max) {
+        w.failed = true;
+        return;
+    }
+    *out = static_cast<float>(value);
+}
+
+static void want_uint(Walker& w, uint32_t i, uint32_t max_value, uint32_t* out)
+{
+    const jsmntok_t& t = w.toks[i];
+    if (t.type != JSMN_PRIMITIVE) {
+        w.failed = true;
+        return;
+    }
+
+    want_bounded_magnitude(w, w.doc + t.start, static_cast<uint32_t>(t.end - t.start), max_value, out);
+}
+
 // One-byte variant of want_uint: same grammar and bound refusal, storing
 // through a one-byte pointer directly (no 32-bit staging local). On failure
 // the destination is left untouched; the caller refuses the whole document
@@ -1615,6 +1655,41 @@ static void want_u8(Walker& w, uint32_t i, uint32_t max_value, uint8_t* out)
     want_uint(w, i, max_value, &value);
     if (! w.failed) {
         *out = static_cast<uint8_t>(value);
+    }
+}
+
+// Bounded signed integer parsed straight from the token, before any binary32
+// narrowing: the shared magnitude walk rejects '.', 'e'/'E' and any other
+// non-digit spelling, and range-checks during accumulation.  On failure the
+// destination is left untouched; the caller refuses the whole document via
+// w.failed.
+static void want_int(Walker& w, uint32_t i, int32_t min_value, int32_t max_value, int32_t* out)
+{
+    const jsmntok_t& t = w.toks[i];
+    if (t.type != JSMN_PRIMITIVE) {
+        w.failed = true;
+        return;
+    }
+
+    const char* const s   = w.doc + t.start;
+    const uint32_t    len = static_cast<uint32_t>(t.end - t.start);
+
+    uint32_t pos      = 0;
+    bool     negative = false;
+    if (pos < len && s[pos] == '-') {
+        negative = true;
+        pos++;
+    }
+    if (pos == len) { // an empty token or a lone minus
+        w.failed = true;
+        return;
+    }
+
+    const uint32_t magnitude_limit = negative ? static_cast<uint32_t>(-min_value) : static_cast<uint32_t>(max_value);
+    uint32_t       magnitude       = 0;
+    want_bounded_magnitude(w, s + pos, len - pos, magnitude_limit, &magnitude);
+    if (! w.failed) {
+        *out = negative ? -static_cast<int32_t>(magnitude) : static_cast<int32_t>(magnitude);
     }
 }
 
@@ -1824,11 +1899,18 @@ static void decode_gen(Walker& w, uint32_t obj, Synth::TargetBinding& gen)
     });
 }
 
-static void decode_routing(Walker& w, uint32_t obj, Synth::TargetBinding& routing)
+static void decode_routing(Walker& w, uint32_t obj, Synth::ModTarget target, Synth::TargetBinding& routing)
 {
     walk_object(w, obj, [&](uint32_t key_idx, uint32_t val_idx) {
-        if (key_eq(w, key_idx, "base_value"))
-            want_float(w, val_idx, &routing.base_value);
+        if (key_eq(w, key_idx, "base_value")) {
+            // The spread base is slider-bounded [0, 36] semitones, validated
+            // before the binary32 narrowing; every other target keeps the
+            // generic free-level parsing.
+            if (target == Synth::mod_fir_spread)
+                want_bounded_real(w, val_idx, 0.0, 36.0, &routing.base_value);
+            else
+                want_float(w, val_idx, &routing.base_value);
+        }
         else if (key_eq(w, key_idx, "inputs"))
             walk_array(w, val_idx, Synth::max_mod_inputs, [&](uint32_t elem, uint32_t pos) {
                 decode_mod_input(w, elem, routing.inputs[pos]);
@@ -1841,6 +1923,8 @@ static void decode_routing(Walker& w, uint32_t obj, Synth::TargetBinding& routin
 
 static void decode_oscillator(Walker& w, uint32_t obj, Synth::Oscillator& osc)
 {
+    int32_t octave_offset = 0;
+    int32_t fir_slope     = 100;
     walk_object(w, obj, [&](uint32_t key_idx, uint32_t val_idx) {
         uint32_t value = 0;
         if (key_eq(w, key_idx, "wave_a")) {
@@ -1859,6 +1943,10 @@ static void decode_oscillator(Walker& w, uint32_t obj, Synth::Oscillator& osc)
             want_float(w, val_idx, &osc.mod_ratio);
         else if (key_eq(w, key_idx, "pitch_offset"))
             want_float(w, val_idx, &osc.pitch_offset);
+        else if (key_eq(w, key_idx, "octave_offset"))
+            want_int(w, val_idx, Sculptor::osc_octave_offset_min, Sculptor::osc_octave_offset_max, &octave_offset);
+        else if (key_eq(w, key_idx, "fir_slope"))
+            want_int(w, val_idx, 1, 100, &fir_slope);
         else if (key_eq(w, key_idx, "generators"))
             walk_object(w, val_idx, [&](uint32_t gen_key, uint32_t gen_val) {
                 for (uint32_t t = 0; t < Synth::num_mod_targets; t++) {
@@ -1875,7 +1963,7 @@ static void decode_oscillator(Walker& w, uint32_t obj, Synth::Oscillator& osc)
             walk_object(w, val_idx, [&](uint32_t r_key, uint32_t r_val) {
                 for (uint32_t t = 0; t < Synth::num_mod_targets; t++) {
                     if (key_eq(w, r_key, mod_target_names[t])) {
-                        decode_routing(w, r_val, osc.targets[t]);
+                        decode_routing(w, r_val, static_cast<Synth::ModTarget>(t), osc.targets[t]);
                         return;
                     }
                 }
@@ -1884,6 +1972,24 @@ static void decode_oscillator(Walker& w, uint32_t obj, Synth::Oscillator& osc)
         else
             unknown_field(w, key_idx);
     });
+
+    if (w.failed)
+        return;
+
+    osc.octave_offset = static_cast<int8_t>(octave_offset);
+    // want_int rejects out-of-range magnitudes outright; a negative spelling
+    // whose magnitude fits the maximum still needs this explicit range check.
+    if (fir_slope < 1 || fir_slope > 100) {
+        w.failed = true;
+    }
+    osc.fir_slope_percent = static_cast<uint8_t>(fir_slope);
+
+    // Pitch offsets are bounded in every domain: a bank holding an
+    // out-of-range offset could never round-trip through the editor.
+    if (! w.failed &&
+        (osc.pitch_offset < Sculptor::osc_pitch_offset_min || osc.pitch_offset > Sculptor::osc_pitch_offset_max)) {
+        w.failed = true;
+    }
 }
 
 static void decode_instrument(Walker& w, uint32_t obj, Synth::Instrument& instr)
@@ -2180,11 +2286,46 @@ static void decode_binding(Walker& w, uint32_t obj, Synth::EffectParamBinding& b
     });
 }
 
+// Pre-narrowing FIR slope validation: the binding walk narrows
+// base_value through want_float's permissive grammar, so fractional spellings
+// such as 50.5 or 1e2 would otherwise reach the percent field.  Element 2 of a
+// FIR effect's params array is re-read with want_int's integer grammar; an
+// omitted base_value defaults to 100 while every supplied modulation field
+// (already decoded by the binding walk) is preserved.
+static void decode_fir_slope(Walker& w, uint32_t params_token, Synth::EffectSlotBinding& slot)
+{
+    walk_array(w, params_token, Synth::max_effect_param_floats, [&](uint32_t elem, uint32_t pos) {
+        if (pos != 2) {
+            return;
+        }
+        bool have_base = false;
+        walk_object(w, elem, [&](uint32_t key_idx, uint32_t val_idx) {
+            if (key_eq(w, key_idx, "base_value")) {
+                have_base     = true;
+                int32_t slope = 0;
+                want_int(w, val_idx, 1, 100, &slope);
+                // want_int rejects out-of-range magnitudes outright; a negative
+                // spelling whose magnitude fits the maximum still needs this check.
+                if (! w.failed && (slope < 1 || slope > 100)) {
+                    w.failed = true;
+                }
+                if (! w.failed) {
+                    slot.bindings[2].base_value = static_cast<float>(slope);
+                }
+            }
+        });
+        if (! w.failed && ! have_base) {
+            slot.bindings[2].base_value = 100.0f;
+        }
+    });
+}
+
 static void decode_effect(Walker& w, uint32_t obj, Synth::EffectSlotBinding& slot)
 {
-    uint32_t num_params  = 0;
-    bool     have_params = false;
-    bool     have_type   = false;
+    uint32_t num_params   = 0;
+    uint32_t params_token = 0;
+    bool     have_params  = false;
+    bool     have_type    = false;
 
     walk_object(w, obj, [&](uint32_t key_idx, uint32_t val_idx) {
         uint32_t value = 0;
@@ -2202,7 +2343,8 @@ static void decode_effect(Walker& w, uint32_t obj, Synth::EffectSlotBinding& slo
             decode_mod_input(w, val_idx, slot.enable_input);
         }
         else if (key_eq(w, key_idx, "params")) {
-            have_params = true;
+            have_params  = true;
+            params_token = val_idx;
             walk_array(w, val_idx, Synth::max_effect_param_floats, [&](uint32_t elem, uint32_t pos) {
                 decode_binding(w, elem, slot.bindings[pos]);
                 num_params = pos + 1;
@@ -2221,6 +2363,8 @@ static void decode_effect(Walker& w, uint32_t obj, Synth::EffectSlotBinding& slo
     }
     if (have_params && num_params != Synth::get_effect_param_floats(slot.type))
         w.failed = true;
+    if (! w.failed && have_params && slot.type == Synth::EffectType::fir)
+        decode_fir_slope(w, params_token, slot);
 }
 
 static void decode_chain(Walker& w, uint32_t obj, Synth::EffectChainBinding& chain)
@@ -3135,7 +3279,13 @@ static void decode_target_doc(Walker&             w,
 
     walk_object(w, obj, [&](uint32_t key_idx, uint32_t val_idx) {
         if (key_eq(w, key_idx, "base")) {
-            want_float(w, val_idx, &base);
+            // The spread base is slider-bounded [0, 36] semitones, validated
+            // before the binary32 narrowing; every other target keeps the
+            // generic free-level parsing.
+            if (target == Synth::mod_fir_spread)
+                want_bounded_real(w, val_idx, 0.0, 36.0, &base);
+            else
+                want_float(w, val_idx, &base);
             base_set = true;
         }
         else if (key_eq(w, key_idx, "envelope")) {
@@ -3200,13 +3350,14 @@ static void decode_layer_doc(Walker&                     w,
                              InstrumentDocState&         doc,
                              Synth::InstrumentJsonDomain domain)
 {
-    uint32_t wave_a       = 0;
-    bool     wave_a_set   = false;
-    uint32_t wave_b       = 0;
-    uint32_t mode         = 0;
-    float    mod_ratio    = 1.0f;
-    float    pitch_offset = 0.0f;
-
+    uint32_t wave_a        = 0;
+    bool     wave_a_set    = false;
+    uint32_t wave_b        = 0;
+    uint32_t mode          = 0;
+    float    mod_ratio     = 1.0f;
+    float    pitch_offset  = 0.0f;
+    int32_t  octave_offset = 0;
+    int32_t  fir_slope     = 100;
     walk_object(w, obj, [&](uint32_t key_idx, uint32_t val_idx) {
         if (key_eq(w, key_idx, "wave_a")) {
             want_enum(w, val_idx, wave_names, num_waves, &wave_a);
@@ -3220,12 +3371,21 @@ static void decode_layer_doc(Walker&                     w,
             want_float(w, val_idx, &mod_ratio);
         else if (key_eq(w, key_idx, "pitch_offset_semitones"))
             want_float(w, val_idx, &pitch_offset);
+        else if (key_eq(w, key_idx, "octave_offset"))
+            want_int(w, val_idx, Sculptor::osc_octave_offset_min, Sculptor::osc_octave_offset_max, &octave_offset);
+        else if (key_eq(w, key_idx, "fir_slope"))
+            want_int(w, val_idx, 1, 100, &fir_slope);
         else {
             uint32_t target = 0;
             while (target < Synth::num_mod_targets && ! key_eq(w, key_idx, mod_target_names[target]))
                 target++;
             if (target < Synth::num_mod_targets)
                 decode_target_doc(w, val_idx, static_cast<Synth::ModTarget>(target), osc, doc);
+            else if (key_eq(w, key_idx, "lowpass_cutoff") || key_eq(w, key_idx, "highpass_cutoff")) {
+                // Removed cutoff targets: old clipboard/library documents
+                // load with their cutoff bindings dropped; their layout
+                // records are dropped by the mapping paths.
+            }
             else
                 doc_unknown_field(w, key_idx);
         }
@@ -3238,18 +3398,31 @@ static void decode_layer_doc(Walker&                     w,
 
     // An explicitly written zero ratio is bank-legal (blend ignores the ratio
     // and FM/sync banks can hold one); clipboard nonzero ratios are slider-bounded.
-    if (domain == Synth::InstrumentJsonDomain::clipboard &&
-        ((mod_ratio != 0.0f && (mod_ratio < Sculptor::osc_fm_ratio_min || mod_ratio > Sculptor::osc_fm_ratio_max)) ||
-         pitch_offset < Sculptor::osc_pitch_offset_min || pitch_offset > Sculptor::osc_pitch_offset_max)) {
+    if (domain == Synth::InstrumentJsonDomain::clipboard && mod_ratio != 0.0f &&
+        (mod_ratio < Sculptor::osc_fm_ratio_min || mod_ratio > Sculptor::osc_fm_ratio_max)) {
         w.failed = true;
         return;
     }
 
-    osc.osc_type[0]  = static_cast<Synth::WaveType>(wave_a);
-    osc.osc_type[1]  = static_cast<Synth::WaveType>(wave_b);
-    osc.osc_mode     = static_cast<Synth::OscMode>(mode);
-    osc.mod_ratio    = mod_ratio;
-    osc.pitch_offset = pitch_offset;
+    // Pitch offsets are bounded in every domain: a bank holding an
+    // out-of-range offset could never round-trip through the editor.
+    if (pitch_offset < Sculptor::osc_pitch_offset_min || pitch_offset > Sculptor::osc_pitch_offset_max) {
+        w.failed = true;
+        return;
+    }
+
+    osc.osc_type[0]   = static_cast<Synth::WaveType>(wave_a);
+    osc.osc_type[1]   = static_cast<Synth::WaveType>(wave_b);
+    osc.osc_mode      = static_cast<Synth::OscMode>(mode);
+    osc.mod_ratio     = mod_ratio;
+    osc.pitch_offset  = pitch_offset;
+    osc.octave_offset = static_cast<int8_t>(octave_offset);
+    // want_int rejects out-of-range magnitudes outright; a negative spelling
+    // whose magnitude fits the maximum still needs this explicit range check.
+    if (fir_slope < 1 || fir_slope > 100) {
+        w.failed = true;
+    }
+    osc.fir_slope_percent = static_cast<uint8_t>(fir_slope);
 }
 
 // One root object, nothing before or after it, grammar-clean everywhere.
@@ -3850,6 +4023,10 @@ static uint32_t encode_instrument_json_for_domain(char*                         
         o.float_value(osc.mod_ratio);
         o.key("pitch_offset_semitones");
         o.float_value(osc.pitch_offset);
+        o.key("octave_offset");
+        o.float_value(static_cast<float>(osc.octave_offset));
+        o.key("fir_slope");
+        o.uint_value(osc.fir_slope_percent);
 
         for (uint32_t target = 0; target < Synth::num_mod_targets; target++) {
             const Synth::ModTarget        mod_target = static_cast<Synth::ModTarget>(target);

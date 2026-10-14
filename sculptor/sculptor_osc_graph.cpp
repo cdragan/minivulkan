@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2021-2026 Chris Dragan
 
 #include "sculptor_osc_graph.h"
+#include "../core/d_printf.h"
 #include "sculptor_bank_json.h"
 #include "sculptor_effect_graph.h"
 #include "sculptor_instr_envelope_edit.h"
@@ -75,7 +76,7 @@ struct PortableNode {
     uint8_t                      served[Synth::num_mod_targets];
 };
 
-static_assert(sizeof(PortableNode) == sizeof(Synth::InstrumentGraphLayout) + Synth::num_mod_targets + 3);
+static_assert(sizeof(PortableNode) == (sizeof(Synth::InstrumentGraphLayout) + 1 + Synth::num_mod_targets + 3) / 4 * 4);
 
 namespace {
 PortableNode                        clipboard_source_nodes[Synth::instrument_graph_layout_capacity];
@@ -95,12 +96,11 @@ char                        clipboard_destination_name[Synth::max_name_len];
 static_assert(static_cast<uint32_t>(Synth::mod_panning) == 2);
 static_assert(static_cast<uint32_t>(Synth::mod_duty0) == 3);
 static_assert(static_cast<uint32_t>(Synth::mod_fm_index) == 6);
-static_assert(static_cast<uint32_t>(Synth::mod_lowpass_cutoff) == 7);
-static_assert(Synth::num_mod_targets == 9);
+static_assert(Synth::num_mod_targets == 8);
 static_assert(Synth::max_mod_inputs == 2);
 
-const char* const target_names[Synth::num_mod_targets] = { "volume",       "pitch",    "panning", "Duty A",  "Duty B",
-                                                           "Waveform Mix", "FM Depth", "lowpass", "highpass" };
+const char* const target_names[Synth::num_mod_targets] = { "volume", "pitch",        "panning",  "Duty A",
+                                                           "Duty B", "Waveform Mix", "FM Depth", "FIR Pitch Spread" };
 const char* const wave_names[5]                        = { "off", "sine", "saw", "pulse", "noise" };
 const char* const osc_mode_names[3]                    = { "blend", "fm", "hard sync" };
 
@@ -127,26 +127,27 @@ const char* const osc_mode_names[3]                    = { "blend", "fm", "hard 
 //   77       pitch (per-layer base value)
 //   78..88   pitch's 11-slot modulation block
 //   89       pitch offset (per oscillator)
-//   90       lowpass (per-layer base value)
-//   91..101  lowpass's 11-slot modulation block
-//   102      highpass (per-layer base value)
-//   103..113 highpass's 11-slot modulation block
-// Every target value row (2, 15, 28, 40, 53, 65, 77, 90, 102) is
-// connectable: all nine targets are uniformly modulate-able, so each
-// admits a modulator wire.  Each target's 11-slot modulation block
-// sits directly after its value row (see the block helpers in
+//   90       octave offset (per oscillator, [-12, +12] whole octaves)
+// 91          fir pitch spread (per-layer base value, [0, 36] semitones)
+// 92..102 fir pitch spread's 11-slot modulation block
+// 103 fir slope (per oscillator, [1, 100] percent)
+// Every target value row (2, 15, 28, 40, 53, 65, 77, 91) is
+// connectable: all eight targets are uniformly modulate-able, so each
+// row's 11-slot block follows its value row (see the block helpers in
 // sculptor_osc_graph.h); block field 0 is the envelope dot, so it
 // renders on the line under the row the block attaches to.
-constexpr uint32_t osc_waveform_a_prop   = 1;
-constexpr uint32_t osc_waveform_b_prop   = 14;
-constexpr uint32_t osc_mode_prop         = 27;
-constexpr uint32_t osc_fm_ratio_prop     = 52;
-constexpr uint32_t osc_pitch_offset_prop = 89;
+constexpr uint32_t osc_waveform_a_prop    = 1;
+constexpr uint32_t osc_waveform_b_prop    = 14;
+constexpr uint32_t osc_mode_prop          = 27;
+constexpr uint32_t osc_fm_ratio_prop      = 52;
+constexpr uint32_t osc_pitch_offset_prop  = 89;
+constexpr uint32_t osc_octave_offset_prop = 90;
+constexpr uint32_t osc_fir_slope_prop     = 103;
 
 // Per-target presentation views: the single source of truth for value
 // bounds, bank-unit scaling and slider curve.  Oscillator rows and
 // parameter base values show display units; the bank stores scaled
-// units (radians for fm depth, Hz for the cutoffs).
+// units (radians for fm depth).
 constexpr Sculptor::OscTargetView osc_target_views[Synth::num_mod_targets] = {
     { 0.0f, 1.0f, 1.0f, false },       // volume
     { -24.0f, 24.0f, 1.0f, false },    // pitch (semitones)
@@ -155,8 +156,7 @@ constexpr Sculptor::OscTargetView osc_target_views[Synth::num_mod_targets] = {
     { 0.0f, 1.0f, 1.0f, false },       // duty b
     { 0.0f, 1.0f, 1.0f, false },       // waveform mix
     { 0.0f, 1.0f, 6.2831853f, false }, // fm depth (1.0 == 2*pi radians)
-    { 20.0f, 20000.0f, 1.0f, true },   // lowpass (Hz)
-    { 20.0f, 20000.0f, 1.0f, true },   // highpass (Hz)
+    { 0.0f, 36.0f, 1.0f, false },      // fir pitch spread (semitones)
 };
 
 // Envelope node slot layout: 0 output, then descriptor-content properties.
@@ -616,21 +616,29 @@ static void project_osc_node(Sculptor::Graph*           graph,
     graph->add_slot(node,
                     osc_view_connectable_slot("Pitch", osc.targets[Synth::mod_pitch].base_value, Synth::mod_pitch));
     append_target_block(graph, node, Synth::mod_pitch, osc.targets[Synth::mod_pitch]);
+    // A bounded bare input box: the renderer clamps edits to the stored
+    // range without rendering a slider (the saved-bank decode rejects
+    // out-of-range values, so the GUI must never produce one).  Convention:
+    // populated min/max on an unbounded real slot (real_bounded false) means
+    // clamp-on-edit; the renderer's guard is min < max.
+    Sculptor::Slot pitch_offset_slot = Sculptor::real_slot("Pitch Offset", osc.pitch_offset);
+    pitch_offset_slot.real_min       = Sculptor::osc_pitch_offset_min;
+    pitch_offset_slot.real_max       = Sculptor::osc_pitch_offset_max;
+    graph->add_slot(node, pitch_offset_slot);
     graph->add_slot(node,
-                    bounded_real_slot("Pitch Offset",
-                                      osc.pitch_offset,
-                                      Sculptor::osc_pitch_offset_min,
-                                      Sculptor::osc_pitch_offset_max));
+                    Sculptor::bounded_int_slot("Octave Offset",
+                                               osc.octave_offset,
+                                               Sculptor::osc_octave_offset_min,
+                                               Sculptor::osc_octave_offset_max));
     graph->add_slot(node,
-                    osc_view_connectable_slot("Lowpass",
-                                              osc.targets[Synth::mod_lowpass_cutoff].base_value,
-                                              Synth::mod_lowpass_cutoff));
-    append_target_block(graph, node, Synth::mod_lowpass_cutoff, osc.targets[Synth::mod_lowpass_cutoff]);
-    graph->add_slot(node,
-                    osc_view_connectable_slot("Highpass",
-                                              osc.targets[Synth::mod_highpass_cutoff].base_value,
-                                              Synth::mod_highpass_cutoff));
-    append_target_block(graph, node, Synth::mod_highpass_cutoff, osc.targets[Synth::mod_highpass_cutoff]);
+                    osc_view_connectable_slot(target_names[7],
+                                              osc.targets[Synth::mod_fir_spread].base_value,
+                                              Synth::mod_fir_spread));
+    append_target_block(graph, node, Synth::mod_fir_spread, osc.targets[Synth::mod_fir_spread]);
+    // FIR Slope: a plain per-oscillator property like Octave Offset, always
+    // active (it does not join the waveform/mode gating set) and never
+    // connectable.
+    graph->add_slot(node, Sculptor::bounded_int_slot("FIR Slope", osc.fir_slope_percent, 1, 100));
 }
 
 // Node construction shared by the derived projection and record-driven
@@ -1281,9 +1289,19 @@ static bool read_oscillator_layer(const Sculptor::Graph&           graph,
     if (! read_list_prop(slots[osc_mode_prop], &index)) {
         return false;
     }
-    osc.osc_mode     = static_cast<Synth::OscMode>(index);
-    osc.mod_ratio    = slots[osc_fm_ratio_prop].value.real;
-    osc.pitch_offset = slots[osc_pitch_offset_prop].value.real;
+    osc.osc_mode         = static_cast<Synth::OscMode>(index);
+    osc.mod_ratio        = slots[osc_fm_ratio_prop].value.real;
+    osc.pitch_offset     = slots[osc_pitch_offset_prop].value.real;
+    const int32_t octave = slots[osc_octave_offset_prop].value.integer;
+    if (octave < Sculptor::osc_octave_offset_min || octave > Sculptor::osc_octave_offset_max) {
+        return false;
+    }
+    osc.octave_offset   = static_cast<int8_t>(octave);
+    const int32_t slope = slots[osc_fir_slope_prop].value.integer;
+    if (slope < 1 || slope > 100) {
+        return false;
+    }
+    osc.fir_slope_percent = static_cast<uint8_t>(slope);
 
     for (uint32_t t = 0; t < Synth::num_mod_targets; ++t) {
         const Synth::ModTarget target = static_cast<Synth::ModTarget>(t);
@@ -3214,13 +3232,23 @@ static uint32_t derive_portable_nodes(const Synth::Instrument& instrument, Porta
     return count;
 }
 
+// Structural validity of a portable layout record: a NUL-terminated EMPTY
+// name (the portable encoder deliberately leaves names empty), finite
+// position and non-negative size overrides.  A record failing this is
+// document corruption; only a structurally valid record that resolves to no
+// node may be dropped as removable-target debris.
+static bool record_structure_ok(const Synth::InstrumentGraphLayout& record)
+{
+    return memchr(record.name, 0, sizeof(record.name)) && record.name[0] == 0 && std::isfinite(record.x) &&
+           std::isfinite(record.y) && std::isfinite(record.width_override) && std::isfinite(record.height_override) &&
+           record.width_override >= 0 && record.height_override >= 0;
+}
+
 static uint32_t resolve_portable_node(const Synth::InstrumentGraphLayout& record,
                                       const PortableNode*                 nodes,
                                       uint32_t                            count)
 {
-    if (! memchr(record.name, 0, sizeof(record.name)) || record.name[0] || ! std::isfinite(record.x) ||
-        ! std::isfinite(record.y) || ! std::isfinite(record.width_override) ||
-        ! std::isfinite(record.height_override) || record.width_override < 0 || record.height_override < 0)
+    if (! record_structure_ok(record))
         return pool_no_slot;
     for (uint32_t node = 0; node < count; ++node) {
         const PortableNode& candidate = nodes[node];
@@ -3247,6 +3275,41 @@ static void copy_portable_position(Synth::InstrumentGraphLayout*       destinati
     memcpy(destination->name, source.name, sizeof(destination->name));
 }
 
+// Shared per-record drop policy for the layout mapping and normalization
+// walks: structurally checks one record, resolves it against the node
+// pool, and classifies the outcome.  A structurally valid kind-1/2 record
+// that resolves to nothing is droppable removed-target debris, logged
+// here; canonical (kind 0) and unknown kinds are self-inconsistency the
+// caller must refuse.  The callers own claims, ordering and compaction.
+enum PortableRecordVerdict {
+    portable_record_invalid,
+    portable_record_skipped,
+    portable_record_resolved
+};
+
+static PortableRecordVerdict classify_portable_record(const Synth::InstrumentGraphLayout& record,
+                                                      const PortableNode*                 nodes,
+                                                      uint32_t                            node_count,
+                                                      uint32_t*                           out_node)
+{
+    if (! record_structure_ok(record)) {
+        return portable_record_invalid; // Document corruption, not removable-target debris.
+    }
+    const uint32_t node = resolve_portable_node(record, nodes, node_count);
+    if (node != pool_no_slot) {
+        *out_node = node;
+        return portable_record_resolved;
+    }
+    if (record.kind == 1 || record.kind == 2) {
+        d_printf("Ignored unresolvable graph layout record: kind %u layer %u target %u\n",
+                 static_cast<unsigned>(record.kind),
+                 static_cast<unsigned>(record.layer),
+                 static_cast<unsigned>(record.target));
+        return portable_record_skipped;
+    }
+    return portable_record_invalid;
+}
+
 bool Sculptor::map_instrument_graph_layout(const Synth::Instrument&            instrument,
                                            const Synth::EnvelopeDescriptor*    envelopes,
                                            uint32_t                            envelope_count,
@@ -3267,13 +3330,21 @@ bool Sculptor::map_instrument_graph_layout(const Synth::Instrument&            i
     bool                          claimed[Synth::instrument_graph_layout_capacity] = {};
     Synth::GraphNodeLayout* const records                                          = clipboard_mapped_records;
     memset(records, 0, sizeof(clipboard_mapped_records));
+    uint32_t count = 0;
     for (uint32_t index = 0; index < layout_count; ++index) {
-        const uint32_t node = resolve_portable_node(layout[index], nodes, node_count);
-        if (node == pool_no_slot || claimed[node]) {
-            return false;
+        uint32_t                    node    = 0;
+        const PortableRecordVerdict verdict = classify_portable_record(layout[index], nodes, node_count, &node);
+        if (verdict == portable_record_skipped) {
+            continue; // No output record, no claim, no uid.
+        }
+        if (verdict == portable_record_invalid) {
+            return false; // Self-inconsistent record, not removable debris.
+        }
+        if (claimed[node]) {
+            return false; // A duplicate claim keeps the surviving uids unique.
         }
         claimed[node]                  = true;
-        Synth::GraphNodeLayout& record = records[index];
+        Synth::GraphNodeLayout& record = records[count++];
         record.kind                    = layout[index].kind;
         record.index                   = nodes[node].index;
         record.depth_source            = layout[index].kind == 2 ? layout[index].depth_source : 0;
@@ -3285,9 +3356,9 @@ bool Sculptor::map_instrument_graph_layout(const Synth::Instrument&            i
         record.height_override         = layout[index].height_override;
         memcpy(record.name, layout[index].name, sizeof(record.name));
     }
-    if (layout_count)
-        memcpy(out_records, records, layout_count * sizeof(records[0]));
-    *out_count = layout_count;
+    if (count)
+        memcpy(out_records, records, count * sizeof(records[0]));
+    *out_count = count;
     return true;
 }
 
@@ -3320,9 +3391,18 @@ bool Sculptor::normalize_instrument_graph_layout(const Synth::Instrument&       
     const Synth::InstrumentGraphLayout** const saved         = clipboard_saved_layout;
     memset(saved, 0, sizeof(clipboard_saved_layout));
     for (uint32_t index = 0; index < source_layout_count; ++index) {
-        const uint32_t node = resolve_portable_node(source_layout[index], source_nodes, source_count);
-        if (node == pool_no_slot || saved[node])
+        uint32_t                    node = 0;
+        const PortableRecordVerdict verdict =
+            classify_portable_record(source_layout[index], source_nodes, source_count, &node);
+        if (verdict == portable_record_skipped) {
+            continue; // Dropped records never enter saved[], never match a
+                      // decoded node, and never fire the tail totality check.
+        }
+        if (verdict == portable_record_invalid) {
             return false;
+        }
+        if (saved[node])
+            return false; // A duplicate claim keeps the surviving uids unique.
         saved[node] = &source_layout[index];
     }
     Synth::InstrumentGraphLayout* const records = clipboard_portable_records;
@@ -3436,6 +3516,19 @@ bool Sculptor::encode_instrument_graph_layout(const Synth::Instrument&          
         // position stay out of the clipboard/library format.
         if (saved.channel == channel && saved.zone == zone && saved.kind != 4 && saved.kind != 5 &&
             ! represented[record]) {
+            // An unrepresented envelope/LFO record whose descriptor id is
+            // allocated (1-based) is eligible for the exemption: it is
+            // dropped, logged, instead of failing an export the graph UI
+            // cannot repair.  Every other unrepresented record still fails.
+            const bool allocated_modulator =
+                (saved.kind == 1 && saved.index != 0 && saved.index <= bank.envelopes.num_allocated) ||
+                (saved.kind == 2 && saved.index != 0 && saved.index <= bank.lfos.num_allocated);
+            if (allocated_modulator) {
+                d_printf("Ignored unresolvable graph layout record: kind %u descriptor %u\n",
+                         static_cast<unsigned>(saved.kind),
+                         static_cast<unsigned>(saved.index));
+                continue;
+            }
             return false;
         }
     }

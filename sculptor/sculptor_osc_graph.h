@@ -60,7 +60,7 @@ constexpr uint32_t max_detached_nodes = Synth::max_detached_per_zone;
 constexpr uint32_t max_osc_instances = max_nodes - (Synth::graph_canonical_input_node_count + 1);
 static_assert(2 * Synth::max_layers * Synth::num_mod_targets <= max_osc_instances);
 
-// The nine per-target modulation blocks live on the oscillator node
+// The eight per-target modulation blocks live on the oscillator node
 // itself: each ModTarget's 11-slot block sits directly after its value
 // row slot, so the block's modulator rows render under the row they
 // attach to (the fx pattern).  See the block helpers below for the
@@ -78,8 +78,9 @@ static_assert(Synth::graph_canonical_input_node_count + 2 + Synth::max_layers +
 // LFO instance key up to two source edges into its depth/rate inputs.
 static_assert(Synth::max_layers + 6 * Synth::max_layers * Synth::num_mod_targets <= max_connections);
 
-// Oscillator node slot grammar: 15 fixed slots (oscillator properties
-// and target value rows, order pinned by osc_target_row_slot below),
+// Oscillator node slot grammar: 16 fixed slots (oscillator properties,
+// the FIR slope property and target value rows, order pinned by
+// osc_target_row_slot below),
 // and every ModTarget owns one 11-slot modulation block directly after
 // its value row.  Block field 0 is the envelope input dot (its own
 // renderer line), fields 1..4 the LFO row (dot, op, depth, rate
@@ -87,7 +88,7 @@ static_assert(Synth::max_layers + 6 * Synth::max_layers * Synth::num_mod_targets
 // row (dot, op, amount each).  Row-group ids are per (target, row):
 // the LFO row groups 3*t + 1, the source rows 3*t + 2 and 3*t + 3; the
 // envelope dot and the fixed slots own their lines (group 0).
-constexpr uint32_t osc_slot_count          = 15;
+constexpr uint32_t osc_slot_count          = 16;
 constexpr uint32_t osc_target_block_stride = 11;
 
 // The value row of each ModTarget on an oscillator node.  The rows are
@@ -95,15 +96,14 @@ constexpr uint32_t osc_target_block_stride = 11;
 // properties, and the rows after an earlier target's block shift down
 // by that block.  Indexed by ModTarget.
 constexpr uint32_t osc_target_row_slot[Synth::num_mod_targets] = {
-    53,  // volume
-    77,  // pitch
-    65,  // pan
-    2,   // duty a
-    15,  // duty b
-    28,  // waveform mix
-    40,  // fm depth
-    90,  // lowpass
-    102, // highpass
+    53, // volume
+    77, // pitch
+    65, // pan
+    2,  // duty a
+    15, // duty b
+    28, // waveform mix
+    40, // fm depth
+    91, // fir pitch spread
 };
 
 // First slot of target `target`'s modulation block on an oscillator
@@ -134,7 +134,7 @@ constexpr uint32_t osc_target_src_dot(uint32_t target, uint32_t input)
     return osc_target_block_base(target) + 5u + 3u * input;
 }
 
-// Last block end fits the slot pool; the nine row slots are spaced far
+// Last block end fits the slot pool; the eight row slots are spaced far
 // enough apart that no block reaches the next row (smallest gap 12).
 static_assert(osc_target_row_slot[Synth::num_mod_targets - 1] + osc_target_block_stride <= max_node_slots);
 
@@ -227,9 +227,13 @@ bool encode_instrument_graph_layout(const Synth::Instrument&           instr,
                                     uint32_t*                          out_count);
 // Resolves normalized decoded-relative portable records into editor layout
 // records for the decoded instrument, assigning the instance uids the projection
-// pairs records by. Unknown kinds, unresolved or duplicate locators, non-finite
-// or negative-sized positions and a capacity below the resolved count are
-// refused with every output untouched.
+// pairs records by. Unknown kinds, unresolved canonical (kind 0) locators,
+// duplicate locators, non-finite or negative-sized positions and a capacity
+// below the input count are refused with every output untouched.  One narrow
+// relaxation: a structurally valid envelope/LFO record (kind 1 or 2) that
+// resolves to no node - the removed oscillator cutoff targets - is skipped,
+// logged and compacted away, so *out_count is the SURVIVING record count
+// (no caller may assume it equals the input count).
 bool map_instrument_graph_layout(const Synth::Instrument&            decoded_instr,
                                  const Synth::EnvelopeDescriptor*    decoded_envs,
                                  uint32_t                            decoded_env_count,
@@ -264,7 +268,9 @@ bool append_instrument_graph_layout(const Synth::Instrument&            instrume
 // emitted locators only against the decoded model.  Input pointers may be null
 // only when their paired count is zero.  Every saved source node must correspond
 // to exactly one decoded node; ambiguous collapse or split is refused instead
-// of discarding metadata.  Unresolved source locators are refused.
+// of discarding metadata.  Unresolved source locators are refused, except a structurally valid
+// kind-1/2 source locator that resolves to no node (a removed cutoff target):
+// it is skipped, logged and excluded from the normalization.
 // Duplicate decoded-node records from external JSON are refused by the mapper
 // and decoder, not by this source-to-decoded normalization.
 //
@@ -411,7 +417,7 @@ bool apply_osc_graph_change(Synth::InstrumentEditorBank* bank,
 
 // Presentation view of a modulation target's value: node rows and
 // parameter base values show display units, the bank stores
-// bank_scale-scaled units (radians for fm depth, Hz for cutoffs).
+// bank_scale-scaled units (radians for fm depth).
 // max_value == min_value means unbounded.
 struct OscTargetView {
     float min_value;
@@ -427,11 +433,16 @@ constexpr float osc_fm_ratio_max     = 8.0f;
 constexpr float osc_pitch_offset_min = -12.0f;
 constexpr float osc_pitch_offset_max = 12.0f;
 
+// Octave offset bounds, shared by the bounded integer slider, the
+// compile-path validation and the JSON validators.
+constexpr int osc_octave_offset_min = -12;
+constexpr int osc_octave_offset_max = 12;
+
 // The shared presentation view of a modulation target; the single
 // source of truth for value bounds, unit scaling and slider curve.
 OscTargetView osc_target_view(Synth::ModTarget target);
 // Slot index on an oscillator node holding row of ModTarget
-// `target` (0..8); rows are not contiguous.
+// `target` (0..7); rows are not contiguous.
 uint32_t osc_target_row(uint32_t target);
 
 // Decodes an oscillator-node block slot into its (target, field):

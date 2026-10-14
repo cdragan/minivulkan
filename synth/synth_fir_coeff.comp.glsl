@@ -19,6 +19,7 @@ struct FIRParams {
 
     uint highpass_cutoff_freq;  // High pass frequency (if 0, it's a pure low pass)
     uint lowpass_cutoff_freq;   // Low pass frequency (if 0, it's a pure high pass)
+    uint window_span;           // Effective odd window span in taps, 11..num_taps (num_taps = full sharpness)
 };
 
 layout(binding = 0) writeonly buffer data_buf { float data[]; };
@@ -31,6 +32,8 @@ layout(push_constant) uniform global_param_buf {
 
 shared float coefficients[num_taps];
 shared float norm_sum[work_group_size / subgroup_size];
+shared float norm_cos[work_group_size / subgroup_size];
+shared float norm_sin[work_group_size / subgroup_size];
 
 const float pi = 3.141592653589793;
 
@@ -56,7 +59,12 @@ void main()
     const float highpass_norm_cutoff = float(param.highpass_cutoff_freq) / float(sampling_freq);
     const uint  center               = (num_taps - 1) / 2;
     const bool  passthrough          = param.lowpass_cutoff_freq == 0 && param.highpass_cutoff_freq == 0;
+    const bool  bandpass             = param.highpass_cutoff_freq > 0 && param.highpass_cutoff_freq < param.lowpass_cutoff_freq;
+    const float center_freq          = (float(param.highpass_cutoff_freq) + float(param.lowpass_cutoff_freq)) * 0.5;
+    const float center_w             = 2.0 * pi * center_freq / float(sampling_freq);
     float       coeff_sum            = 0;
+    float       cos_sum              = 0;
+    float       sin_sum              = 0;
 
     for (uint tap = gl_LocalInvocationID.x; tap < num_taps; tap += work_group_size) {
 
@@ -91,18 +99,41 @@ void main()
         }
 
         //const float window = 0.54 - 0.46 * cos((2 * pi * tap) / (num_taps - 1)); // Hamming
-        const float window = 0.42 - 0.5 * cos((2 * pi * tap) / (num_taps - 1)) + 0.08 * cos((4 * pi * tap) / (num_taps - 1)); // Blackman
+
+        // Blackman over the effective span: taps outside the span are exactly
+        // zero, and at the full span (window_span == num_taps) this is the
+        // fixed-window expression bit for bit.
+        const float half_span = float(param.window_span) * 0.5 - 0.5;  // (window_span - 1) / 2
+        const float wpos      = x + half_span;                         // 0..window_span - 1 inside the span
+        const float span_m1   = float(param.window_span - 1u);
+        const bool  in_span   = wpos >= 0.0 && wpos <= span_m1;
+        const float window    = in_span
+            ? (0.42 - 0.5 * cos((2 * pi * wpos) / span_m1) + 0.08 * cos((4 * pi * wpos) / span_m1))
+            : 0.0;
         value *= window;
 
         coefficients[tap] = value;
 
         coeff_sum += norm_value * window;
+
+        if (bandpass && in_span) {
+            cos_sum += value * cos(center_w * x);
+            sin_sum += value * sin(center_w * x);
+        }
     }
 
     // Normalize coefficients
     coeff_sum = subgroupAdd(coeff_sum);
     if (subgroupElect()) {
         norm_sum[gl_SubgroupID] = coeff_sum;
+    }
+    if (bandpass) {
+        cos_sum = subgroupAdd(cos_sum);
+        sin_sum = subgroupAdd(sin_sum);
+        if (subgroupElect()) {
+            norm_cos[gl_SubgroupID] = cos_sum;
+            norm_sin[gl_SubgroupID] = sin_sum;
+        }
     }
 
     barrier();
@@ -115,7 +146,30 @@ void main()
 
         coeff_sum = subgroupAdd(coeff_sum);
 
-        if (subgroupElect()) {
+        if (bandpass) {
+            cos_sum = 0;
+            sin_sum = 0;
+            if (gl_SubgroupInvocationID < (work_group_size / gl_SubgroupSize)) {
+                cos_sum = norm_cos[gl_SubgroupInvocationID];
+                sin_sum = norm_sin[gl_SubgroupInvocationID];
+            }
+
+            cos_sum = subgroupAdd(cos_sum);
+            sin_sum = subgroupAdd(sin_sum);
+
+            if (subgroupElect()) {
+                const float q           = cos_sum * cos_sum + sin_sum * sin_sum;
+                const float m           = sqrt(q);
+                float       denominator = m;
+                if (m == 0.0 || isnan(cos_sum) || isnan(sin_sum) || isinf(cos_sum) || isinf(sin_sum) || isnan(q) || isinf(q) || isnan(m)) {
+                    denominator = coeff_sum;
+                }
+                if (denominator == 0.0 || isnan(denominator) || isinf(denominator)) {
+                    denominator = 1.0;
+                }
+                norm_sum[0] = denominator;
+            }
+        } else if (subgroupElect()) {
             norm_sum[0] = coeff_sum;
         }
     }

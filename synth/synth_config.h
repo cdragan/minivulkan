@@ -10,6 +10,10 @@ namespace Synth {
 // Sampling frequency, i.e. frequency of the produced audio buffer.
 constexpr uint32_t rt_sampling_rate = 44100;
 
+// Nyquist-clamped integer cutoff ceiling shared by the runtime quantizer and
+// the FIR band-pass bandwidth guard.
+constexpr uint32_t max_cutoff_hz = rt_sampling_rate / 2 - 1;
+
 // Maximum number of supported MIDI channels.
 constexpr uint32_t max_channels = 16;
 
@@ -51,8 +55,8 @@ constexpr uint32_t max_oscillators = 64;
 constexpr uint32_t effect_buffer_bytes = 2 * 1024 * 1024;
 
 // Effect delay-line capacities.
-constexpr uint32_t effect_delay_max_samples  = rt_sampling_rate;       // 1 s
-constexpr uint32_t effect_chorus_max_samples = rt_sampling_rate / 20;  // 50 ms
+constexpr uint32_t effect_delay_max_samples  = rt_sampling_rate;      // 1 s
+constexpr uint32_t effect_chorus_max_samples = rt_sampling_rate / 20; // 50 ms
 
 // Freeverb tuning: comb and allpass delay lengths are published at freeverb_base_rate and
 // scaled to rt_sampling_rate (see get_freeverb_scaled_length in synth_effects.h).

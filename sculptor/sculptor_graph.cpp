@@ -74,6 +74,16 @@ Sculptor::Slot Sculptor::int_slot(const char* name, int32_t value)
     return slot;
 }
 
+// Bounded integer: the renderer draws a slider clamped to the range.
+Sculptor::Slot Sculptor::bounded_int_slot(const char* name, int32_t value, int32_t min_value, int32_t max_value)
+{
+    Sculptor::Slot slot = int_slot(name, value);
+    slot.real_min       = static_cast<float>(min_value);
+    slot.real_max       = static_cast<float>(max_value);
+    slot.int_bounded    = true;
+    return slot;
+}
+
 Sculptor::Slot Sculptor::list_slot(const char* name, const char* const* options, uint32_t num_options, uint32_t index)
 {
     Sculptor::Slot slot   = make_slot(name, Sculptor::SlotKind::property, Sculptor::PropertyType::list);

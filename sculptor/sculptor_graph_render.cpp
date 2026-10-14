@@ -640,7 +640,18 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
                     bool value_edited   = false;
                     switch (slot.property_type) {
                         case PropertyType::integer:
-                            value_edited   = ImGui::InputInt("##value", &node.slots.entries[slot_idx].value.integer);
+                            if (slot.int_bounded) {
+                                // AlwaysClamp also bounds the slider's ctrl-click text entry.
+                                value_edited = ImGui::SliderInt("##value",
+                                                                &node.slots.entries[slot_idx].value.integer,
+                                                                static_cast<int>(slot.real_min),
+                                                                static_cast<int>(slot.real_max),
+                                                                "%d",
+                                                                ImGuiSliderFlags_AlwaysClamp);
+                            }
+                            else {
+                                value_edited = ImGui::InputInt("##value", &node.slots.entries[slot_idx].value.integer);
+                            }
                             item_submitted = true;
                             break;
                         case PropertyType::real:
@@ -655,6 +666,21 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
                             }
                             else {
                                 value_edited = ImGui::InputFloat("##value", &node.slots.entries[slot_idx].value.real);
+                                // Clamp-on-edit keeps a bounded bare input
+                                // inside its range (the saved-bank JSON decode
+                                // rejects out-of-range values, so the GUI must
+                                // never produce one).  Unbounded slots zero-init
+                                // to min == max == 0, so the guard leaves them
+                                // free.
+                                if (value_edited && slot.real_min < slot.real_max) {
+                                    float& edited_real = node.slots.entries[slot_idx].value.real;
+                                    if (edited_real < slot.real_min) {
+                                        edited_real = slot.real_min;
+                                    }
+                                    if (edited_real > slot.real_max) {
+                                        edited_real = slot.real_max;
+                                    }
+                                }
                             }
                             item_submitted = true;
                             break;

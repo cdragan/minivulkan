@@ -58,7 +58,13 @@ static const Sculptor::EffectTypeInfo effect_type_table[Synth::num_effect_types]
         { "Release", 0.0f, 1.0f, false },
         { "Makeup", 0.0f, 4.0f, false } },
       5 },
-    { "FIR", { { "Lowpass Hz", 20.0f, 22050.0f, true }, { "Highpass Hz", 20.0f, 22050.0f, true }, {}, {}, {} }, 2 },
+    { "FIR",
+      { { "Lowpass Hz", 20.0f, 22050.0f, true },
+        { "Highpass Hz", 20.0f, 22050.0f, true },
+        { "FIR Slope", 1.0f, 100.0f, false },
+        {},
+        {} },
+      3 },
 };
 
 // Neutral, audible defaults: a freshly added effect must change the sound
@@ -71,7 +77,7 @@ static const float effect_default_params[Synth::num_effect_types][Synth::max_eff
     { 0.6f, 6.0f, 0.5f, 0.0f, 0.0f },      // chorus
     { 0.84f, 0.5f, 0.3f, 0.0f, 0.0f },     // reverb: freeverb room
     { 0.5f, 4.0f, 0.0f, 0.999f, 1.0f },    // compressor
-    { 8000.0f, 0.0f, 0.0f, 0.0f, 0.0f },   // fir
+    { 8000.0f, 0.0f, 100.0f, 0.0f, 0.0f }, // fir: full 1025-tap window slope
 };
 
 static void effect_layout_name(const Synth::EffectChainBinding& chain,
@@ -663,15 +669,31 @@ bool Sculptor::project_effect_chain_to_graph(const Synth::InstrumentEditorBank& 
             const uint8_t                    row_group  = static_cast<uint8_t>(2 + param);
 
             float display_value = binding.base_value;
-            if (effect.type == Synth::EffectType::fir && binding.base_value == 0.0f) {
+            if (effect.type == Synth::EffectType::fir && param <= 1 && binding.base_value == 0.0f) {
                 display_value = (param == 0) ? param_info.max_value : param_info.min_value;
             }
 
-            Slot row        = bounded_real_slot(param_info.name,
-                                                display_value,
-                                                param_info.min_value,
-                                                param_info.max_value,
-                                                param_info.logarithmic);
+            Slot row;
+            if (effect.type == Synth::EffectType::fir && param == 2) {
+                // The FIR slope percent is an integer 1..100: the bounded integer
+                // slider, not a bounded real row.  The editor never writes a zero
+                // slope base, so no zero-cutoff display special case applies here.
+                int32_t slope = static_cast<int32_t>(binding.base_value);
+                if (slope < 1) {
+                    slope = 1;
+                }
+                if (slope > 100) {
+                    slope = 100;
+                }
+                row = Sculptor::bounded_int_slot(param_info.name, slope, 1, 100);
+            }
+            else {
+                row = bounded_real_slot(param_info.name,
+                                        display_value,
+                                        param_info.min_value,
+                                        param_info.max_value,
+                                        param_info.logarithmic);
+            }
 
             row.connectable = binding.lfo_desc_id == 0 || binding.num_inputs < Synth::max_mod_inputs;
             // The drop-menu anchor: the always-visible base row opens the
@@ -989,6 +1011,20 @@ static bool apply_fx_graph_change_internal(Synth::InstrumentBank*              b
                         // The synth keeps the raw Hz values untouched.
                         float base_value = live_slot.value.real;
                         if (chain.effects[slot].type == Synth::EffectType::fir) {
+                            if (param == 2) {
+                                // The FIR slope percent is an integer 1..100; its slider
+                                // extremes are valid values, not an "off" state, so the
+                                // zero-writing rule below never fires for it.
+                                int32_t slope = live_slot.value.integer;
+                                if (slope < 1) {
+                                    slope = 1;
+                                }
+                                if (slope > 100) {
+                                    slope = 100;
+                                }
+                                binding.base_value = static_cast<float>(slope);
+                                return true;
+                            }
                             const Sculptor::EffectTypeInfo& fir_info =
                                 Sculptor::effect_type_info(Synth::EffectType::fir);
                             const Sculptor::EffectParamInfo& fir_param = fir_info.params[param];

@@ -71,17 +71,24 @@ uint32_t get_effect_state_bytes(EffectType type)
     return align_effect_state_bytes(effect_state_floats(type) * sizeof(float));
 }
 
-uint32_t get_effect_param_floats(EffectType type)
+} // namespace Synth
+
+uint32_t Synth::get_effect_param_floats(Synth::EffectType type)
 {
     switch (type) {
-        case EffectType::distortion: return 2;
-        case EffectType::delay:      return 3;
-        case EffectType::chorus:     return 3;
-        case EffectType::reverb:     return 3;
-        case EffectType::compressor: return 5;
-        case EffectType::fir:        return 2;  // lowpass cutoff Hz, highpass cutoff Hz (0 = edge disabled)
-        default:                     return 0;
+        case Synth::EffectType::distortion:
+            return 2;
+        case Synth::EffectType::delay:
+            return 3;
+        case Synth::EffectType::chorus:
+            return 3;
+        case Synth::EffectType::reverb:
+            return 3;
+        case Synth::EffectType::compressor:
+            return 5;
+        case Synth::EffectType::fir:
+            return 3; // lowpass cutoff Hz, highpass cutoff Hz, FIR slope percent
+        default:
+            return 0;
     }
 }
-
-} // namespace Synth

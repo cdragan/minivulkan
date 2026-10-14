@@ -44,9 +44,10 @@ struct Slot {
     PropertyValue value;
     uint8_t       num_list_options; // for list properties
     uint8_t       row_group;        // 0 = own line; nonzero packs same-id slots onto one renderer line
-    float         real_min;         // bounded reals render as a slider clamped to [real_min, real_max]
+    float         real_min;         // bounded reals and bounded integer sliders clamp to [real_min, real_max]
     float         real_max;
     bool          real_bounded;
+    bool          int_bounded;      // integer slots render as a slider clamped to [real_min, real_max]
     bool          real_logarithmic; // bounded slider uses a logarithmic curve
     bool          drop_menu;        // release-over-empty-canvas opens the caller creation menu (projection state)
     char          list_options[8][32];
@@ -64,15 +65,16 @@ Slot input_slot(const char* name);
 Slot real_slot(const char* name, float value);
 Slot bounded_real_slot(const char* name, float value, float min_value, float max_value, bool logarithmic = false);
 Slot int_slot(const char* name, int32_t value);
+Slot bounded_int_slot(const char* name, int32_t value, int32_t min_value, int32_t max_value);
 Slot list_slot(const char* name, const char* const* option_names, uint32_t num_options, uint32_t index);
 Slot toggle_slot(const char* name, bool value);
 
 // Option labels of the two-way source op list (SourceOp::add, SourceOp::multiply).
 extern const char* const source_op_names[2];
 
-// Sized for the widest projected node - the oscillator:  15 fixed slots
+// Sized for the widest projected node - the oscillator: 16 fixed slots
 // plus one 11-slot modulation block per ModTarget after its row
-// (15 + 9*11 = 114).
+// (16 + 8*11 = 104).
 // The widest effect (a 5-param effect's 3 + 5*10 = 53 slots) is well
 // under it.  Slot carries list_options[8][32], so a larger cap would
 // balloon every Node allocation.

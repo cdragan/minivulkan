@@ -21,8 +21,7 @@ enum ModTarget : uint8_t {
     mod_duty1,
     mod_osc_mix,
     mod_fm_index,
-    mod_lowpass_cutoff,
-    mod_highpass_cutoff,
+    mod_fir_spread,
     num_mod_targets
 };
 
@@ -73,10 +72,15 @@ enum OscMode : uint32_t {
 };
 
 struct Oscillator {
-    WaveType      osc_type[2];
-    OscMode       osc_mode;
-    float         mod_ratio;                // FM ratio or hard-sync cycle ratio
-    float         pitch_offset;             // This oscillator's pitch offset in semitones
+    WaveType osc_type[2];
+    OscMode  osc_mode;
+    float    mod_ratio;    // FM ratio or hard-sync cycle ratio
+    float    pitch_offset; // This oscillator's pitch offset in semitones
+    int8_t octave_offset;  // Whole-octave pitch shift, counted in whole octaves: 12 * octave_offset semitones are added
+                           // to the pitch
+    // FIR window slope percent 1..100; 100 = the full 1025-tap span (sharpest).
+    // The member default seeds every value-initialized construction path.
+    uint8_t       fir_slope_percent = 100;
     TargetBinding targets[num_mod_targets]; // One binding per modulated quantity (volume/panning/etc.)
 };
 

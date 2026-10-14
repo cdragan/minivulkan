@@ -32,7 +32,7 @@
 		},
 		"graph_layout": {
 			"type": "array",
-			"maxItems": 135,
+			"maxItems": 121,
 			"uniqueItems": true,
 			"description": "Optional portable positions and sizes of nodes derived from this instrument; no effects, wiring or missing-sum state.  Canonical 0 is input, 1 is sum, 2+n is oscillator layer n, which must exist.  Generator locators use layer and fixed numeric ModTarget; descriptor aliases resolve after the whole document parses and may have only one saved record.  Unresolved or duplicate resolved nodes are refused.  All numbers must be finite; sizes are nonnegative.  Newly encoded documents always include this array.",
 			"items": {
@@ -203,8 +203,8 @@
 		},
 		"mod_target": {
 			"type": "string",
-			"enum": ["volume", "pitch", "panning", "duty_a", "duty_b", "osc_mix", "fm_index", "lowpass_cutoff", "highpass_cutoff"],
-			"description": "Modulated quantities. Units: volume, panning (0.5 = center), duty_a/duty_b, osc_mix and fm_index (1.0 = full depth) are 0..1; pitch is -24..24 semitones; the cutoffs are 20..20000 Hz, with 0 meaning the filter is bypassed. Only 'volume' defaults to 1.0 and 'panning' to 0.5; every other base defaults to 0."
+			"enum": ["volume", "pitch", "panning", "duty_a", "duty_b", "osc_mix", "fm_index", "fir_pitch_spread"],
+			"description": "Modulated quantities. Units: volume, panning (0.5 = center), duty_a/duty_b, osc_mix and fm_index (1.0 = full depth) are 0..1; pitch is -24..24 semitones; fir_pitch_spread is 0..36 semitones; 0 means the oscillator's filter is bypassed. Only 'volume' defaults to 1.0 and 'panning' to 0.5; every other base defaults to 0."
 		},
 		"mod_source": {
 			"type": "string",
@@ -240,6 +240,20 @@
 					"default": 0,
 					"description": "This oscillator's pitch offset in semitones."
 				},
+				"octave_offset": {
+					"type": "integer",
+					"minimum": -12,
+					"maximum": 12,
+					"default": 0,
+					"description": "Whole-octave pitch shift; 12 * octave_offset semitones are added to the oscillator pitch."
+				},
+"fir_slope": {
+					"type": "integer",
+					"minimum": 1,
+					"maximum": 100,
+					"default": 100,
+					"description": "FIR window slope percent; 100 is the sharpest response (the full 1025-tap window), lower values widen the transition band."
+				},
 				"volume": { "$ref": "#/definitions/target_block" },
 				"pitch": { "$ref": "#/definitions/target_block" },
 				"panning": { "$ref": "#/definitions/target_block" },
@@ -247,8 +261,7 @@
 				"duty_b": { "$ref": "#/definitions/target_block" },
 				"osc_mix": { "$ref": "#/definitions/target_block" },
 				"fm_index": { "$ref": "#/definitions/target_block" },
-				"lowpass_cutoff": { "$ref": "#/definitions/target_block" },
-				"highpass_cutoff": { "$ref": "#/definitions/target_block" }
+				"fir_pitch_spread": { "$ref": "#/definitions/target_block" }
 			},
 			"required": ["wave_a"],
 			"additionalProperties": false
@@ -299,7 +312,7 @@
 							},
 							"level": {
 								"type": "number",
-								"description": "The value reached, in the target's units. Generator levels are free finite values - the editor's envelope min/max slots are unbounded - so unlike the base they are not restricted to the slider range. Levels quantize to 16-bit steps; a cutoff level 0 keeps the filter bypassed at that point."
+								"description": "The value reached, in the target's units. Generator levels are free finite values - the editor's envelope min/max slots are unbounded - so unlike the base they are not restricted to the slider range. Levels quantize to 16-bit steps; a spread level <= 0 bypasses the oscillator's filter at that point (generator levels stay free finite values, negatives included, clamped at use)."
 							}
 						},
 						"required": ["time_seconds", "level"],

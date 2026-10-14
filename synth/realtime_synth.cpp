@@ -149,12 +149,9 @@ enum OscParamRole : uint32_t {
     osc_volume_dest,
     osc_volume_env,
     osc_volume_lfo,
-    osc_lowpass_dest,
-    osc_lowpass_env,
-    osc_lowpass_lfo,
-    osc_highpass_dest,
-    osc_highpass_env,
-    osc_highpass_lfo,
+    osc_spread_dest,
+    osc_spread_env,
+    osc_spread_lfo,
     osc_panning_dest,
     osc_panning_env,
     osc_panning_lfo,
@@ -173,7 +170,7 @@ enum OscParamRole : uint32_t {
     num_osc_roles
 };
 
-static_assert(num_osc_roles == 27);
+static_assert(num_osc_roles == 24);
 
 constexpr uint32_t channel_block_base = 1;
 constexpr uint32_t voice_block_base   = channel_block_base + Synth::max_channels * num_channel_roles;
@@ -212,8 +209,7 @@ struct ModTargetNode {
 constexpr ModTargetNode mod_target_nodes[] = {
     { mod_pitch, osc_pitch_dest },
     { mod_volume, osc_volume_dest },
-    { mod_lowpass_cutoff, osc_lowpass_dest },
-    { mod_highpass_cutoff, osc_highpass_dest },
+    { mod_fir_spread, osc_spread_dest },
     { mod_panning, osc_panning_dest },
     { mod_duty0, osc_duty0_dest },
     { mod_duty1, osc_duty1_dest },
@@ -265,6 +261,7 @@ struct FIRCoeff {
     uint32_t taps_offs;
     uint32_t highpass_cutoff_freq;
     uint32_t lowpass_cutoff_freq;
+    uint32_t window_span; // Effective odd window span in taps, 11..num_taps (num_taps = full sharpness)
 };
 
 // synth_oscillator shader
@@ -474,6 +471,9 @@ struct RunningOscillator {
     uint32_t osc_mode;        // osc_mode_blend, osc_mode_fm or osc_mode_hard_sync
     float    mod_ratio;       // FM: modulator/carrier freq ratio.  Hard sync: slave cycles per master cycle
     float    pitch_offset;    // Per-oscillator pitch offset in semitones (instrument constant for this note's layers)
+    int8_t   octave_offset;   // Whole-octave pitch shift: 12 * octave_offset semitones are added to the pitch
+                              // (instrument constant for this note's layer)
+    uint8_t fir_slope_percent; // FIR window slope percent 1..100; 100 = the full tap span (sharpest)
 
     // Current phase state
     float phase;       // Current position of the oscillator
@@ -485,7 +485,10 @@ struct RunningOscillator {
     // shader-param fill.
     float volume;   // Current volume
     float panning;  // Current panning
-    float pitch;    // Pitch adjustment in semitones
+    float pitch;    // Absolute equivalent MIDI pitch (69 = A4), resolved by update_modulation from
+                    // note + octave offset + pitch offset/skews + the modulated pitch target value
+    float spread;   // FIR Pitch Spread in semitones, from the spread target's dest
+                    // node; <= 0 means the oscillator's FIR is off
     float duty[2];  // Duty cycle for sawtooth and pulse oscillator (0..1)
     float osc_mix;  // Mix between osc_type[0] and osc_type[1] (0..1)
     float fm_index; // FM modulation depth
@@ -495,8 +498,9 @@ struct RunningOscillator {
     bool    clear_fir_hist; // Set on note-on of a filtered slot; the next render
                             // zeroes this slot's FIR history before the shader reads
                             // it, so a reused slot does not bleed the previous note.
-    bool    terminating;    // Set on the voice-lifetime fade block (volume gradient to zero);
-                            // the oscillator frees after that block has rendered.
+    bool    terminating;    // Schedules removal on the next modulation step.  Normal voice-lifetime
+                            // termination frees after its final fade block has rendered; a note-on
+                            // pitch-gate rejection frees before anything renders.
 
     float    decay_mult;   // Per-step multiplier, precomputed once at note-on (one exp2)
     float    decay_factor; // Running factor; 1.0 until decay starts
@@ -536,15 +540,7 @@ struct FirSlot {
 
 FirSlot fir_slots[Synth::max_oscillators];
 
-// A layer has a filter iff a cutoff target has an envelope or a nonzero base.
-static bool osc_has_filter(const Instrument& instrument, uint32_t layer_idx)
-{
-    const Oscillator& layer = instrument.layers[layer_idx];
-    return layer.targets[mod_lowpass_cutoff].envelope_desc_id || layer.targets[mod_highpass_cutoff].envelope_desc_id ||
-           layer.targets[mod_lowpass_cutoff].base_value != 0.0f ||
-           layer.targets[mod_highpass_cutoff].base_value != 0.0f;
-}
-
+// A layer carries a filter iff its spread target can modulate at all: a
 static void init_fir()
 {
     constexpr uint32_t coeff_bytes   = num_fir_taps * sizeof(float);
@@ -607,6 +603,16 @@ std::atomic<ActiveRingFormat> active_ring_format{ ActiveRingFormat::none };
 
 } // namespace
 
+// A layer carries a filter iff its spread target can modulate at all: a
+// nonzero base, an envelope, an LFO, or any routed input.  Spread is the
+// only oscillator filter, and a base-0 LFO/MIDI routing still produces
+// positive spread at runtime, so the slot must be reserved at note-on.
+static bool osc_has_filter(const Synth::Instrument& instrument, uint32_t layer_idx)
+{
+    const Synth::Oscillator&    layer  = instrument.layers[layer_idx];
+    const Synth::TargetBinding& spread = layer.targets[Synth::mod_fir_spread];
+    return spread.base_value != 0.0f || spread.envelope_desc_id || spread.lfo_desc_id || spread.num_inputs;
+}
 
 static uint32_t writer_alloc_node(const void* ctx);
 static uint16_t writer_resolve_source(const void* ctx, Synth::ModSource source, uint8_t cc_number, uint32_t channel);
@@ -1276,6 +1282,8 @@ static void process_note_on(uint32_t delta_samples, const DispatchedMidiEvent& e
         osc.osc_type[1]         = layer.osc_type[1];
         osc.osc_mode            = layer.osc_mode;
         osc.mod_ratio           = layer.mod_ratio;
+        osc.octave_offset       = layer.octave_offset;
+        osc.fir_slope_percent   = layer.fir_slope_percent;
         osc.pitch_offset =
             layer.pitch_offset + note_skew + Synth::random_pitch_skew(&note_skew_rng, instrument.layer_skew_semitones);
         osc.phase      = 0.0f;
@@ -1300,9 +1308,28 @@ static void process_note_on(uint32_t delta_samples, const DispatchedMidiEvent& e
                                         voice_idx,
                                         layer_idx);
         }
+
+        // Trigger-time gate: the oscillator only sounds when its final
+        // equivalent MIDI pitch at note-on lies within [0, 127].  The onset
+        // evaluation is read-only, so no parameter state moves here.
+        const float onset_pitch = Synth::oscillator_final_pitch(
+            static_cast<int>(osc.note),
+            osc.octave_offset,
+            osc.pitch_offset,
+            Synth::param_onset_value(parameters,
+                                     param_descs,
+                                     static_cast<uint16_t>(osc_param(osc_slot, osc_pitch_dest))));
+        if (! Synth::oscillator_pitch_in_gate(onset_pitch)) {
+            // Trigger-time rejection: the oscillator never sounds.  The normal
+            // termination path frees it on the first modulation step, so the
+            // voice's other oscillators and the voice lifetime machinery are
+            // untouched.
+            osc.terminating = true;
+            osc.volume      = 0.0f;
+        }
     }
 
-    // Set up each oscillator's FIR once cutoff bindings are resolved.
+    // Set up each oscillator's FIR once spread bindings are resolved.
     for (uint32_t layer_idx = 0; layer_idx < layer_count; ++layer_idx) {
         RunningOscillator& osc      = oscillators[voice.osc_ids[layer_idx]];
         const uint32_t     osc_slot = voice.osc_ids[layer_idx];
@@ -1697,23 +1724,11 @@ static void advance_parameters()
             param.last_point_ticks = static_cast<uint16_t>(entry_parked && ! sustain ? param.last_point_ticks + 1 : 0);
         }
         else if (gen.kind == Synth::ParamKind::lfo) {
-            const float depth =
-                gen.lfo.depth_param_id ? parameters[gen.lfo.depth_param_id].prev_value * gen.lfo.depth : gen.lfo.depth;
-            // A rate source offsets the LFO's own period (ms) by source * rate_scale_ms; without one,
-            // period 0 tells eval_lfo_mod to use the descriptor period unchanged.  Clamp the offset
-            // result to at least 1 ms so an editor-supplied scale can never drive the period negative
-            // (unsigned underflow) or to zero (a divide-by-zero in the LFO phase).
-            const float    base_ms   = static_cast<float>(gen.lfo.lfo.period_ms);
-            const float    offset_ms = base_ms + parameters[gen.lfo.rate_param_id].prev_value * gen.lfo.rate_scale_ms;
-            const uint32_t period =
-                gen.lfo.rate_param_id ? static_cast<uint32_t>(offset_ms > 1.0f ? offset_ms : 1.0f) : 0;
-            parameters[node_idx].value = Synth::eval_lfo_mod(gen.lfo.lfo,
-                                                             parameters[node_idx].lfo_tick,
-                                                             Synth::rt_step_samples,
-                                                             Synth::rt_sampling_rate,
-                                                             period,
-                                                             depth,
-                                                             gen.lfo.op);
+            // One-step delay: the depth/rate source leaves read prev_value.
+            parameters[node_idx].value = Synth::eval_sourced_lfo(gen.lfo,
+                                                                 parameters[gen.lfo.depth_param_id].prev_value,
+                                                                 parameters[gen.lfo.rate_param_id].prev_value,
+                                                                 parameters[node_idx].lfo_tick);
             parameters[node_idx].lfo_tick++;
         }
     }
@@ -1766,7 +1781,15 @@ static void update_modulation()
 
         Voice& voice = voices[osc.voice_id];
 
-        osc.pitch   = parameters[osc_param(osc_idx, osc_pitch_dest)].value + osc.pitch_offset;
+        osc.pitch              = Synth::oscillator_final_pitch(static_cast<int>(osc.note),
+                                                               osc.octave_offset,
+                                                               osc.pitch_offset,
+                                                               parameters[osc_param(osc_idx, osc_pitch_dest)].value);
+        const float new_spread = parameters[osc_param(osc_idx, osc_spread_dest)].value;
+        if (osc.fir_taps_offs && osc.spread <= 0.0f && new_spread > 0.0f) {
+            osc.clear_fir_hist = true; // Re-engaged filter: the frozen history holds stale audio.
+        }
+        osc.spread  = new_spread;
         osc.panning = parameters[osc_param(osc_idx, osc_panning_dest)].value;
 
         const float    dest_value = parameters[osc_param(osc_idx, osc_volume_dest)].value;
@@ -1849,13 +1872,12 @@ static uint32_t cutoff_hz_to_int(float value)
     }
 
     constexpr uint32_t min_cutoff_hz = 1;
-    const uint32_t     max_cutoff_hz = Synth::rt_sampling_rate / 2 - 1;
 
     if (value <= static_cast<float>(min_cutoff_hz)) {
         return min_cutoff_hz;
     }
-    if (value >= static_cast<float>(max_cutoff_hz)) {
-        return max_cutoff_hz;
+    if (value >= static_cast<float>(Synth::max_cutoff_hz)) {
+        return Synth::max_cutoff_hz;
     }
 
     return static_cast<uint32_t>(value + 0.5f);
@@ -1873,7 +1895,7 @@ static void set_effect_fir_coeffs(const EffectChain& chain, uint32_t* cur_param_
         param.taps_offs               = instance.state_offs / 4;
         param.lowpass_cutoff_freq     = cutoff_hz_to_int(instance.params[0]);
         param.highpass_cutoff_freq    = cutoff_hz_to_int(instance.params[1]);
-
+        param.window_span             = Synth::fir_effective_span(instance.params[2]);
         *cur_param_offs += static_cast<uint32_t>(sizeof(ShaderParams::FIRCoeff));
     }
 }
@@ -1895,7 +1917,8 @@ static void compute_fir_coefficients()
 {
     uint32_t num_active_filters = 0;
     for (uint32_t osc_idx = 1; osc_idx < Synth::max_oscillators; osc_idx++) {
-        if (oscillators[osc_idx].osc_type[0] != WaveType::no_wave && oscillators[osc_idx].fir_taps_offs) {
+        if (oscillators[osc_idx].osc_type[0] != WaveType::no_wave && oscillators[osc_idx].fir_taps_offs &&
+            oscillators[osc_idx].spread > 0.0f) {
             ++num_active_filters;
         }
     }
@@ -1919,11 +1942,19 @@ static void compute_fir_coefficients()
             continue;
         }
 
-        ShaderParams::FIRCoeff& param = get_param<ShaderParams::FIRCoeff>(cur_param_offs);
-        param.taps_offs               = osc.fir_taps_offs / 4;
-        param.lowpass_cutoff_freq     = cutoff_hz_to_int(parameters[osc_param(osc_idx, osc_lowpass_dest)].value);
-        param.highpass_cutoff_freq    = cutoff_hz_to_int(parameters[osc_param(osc_idx, osc_highpass_dest)].value);
-
+        ShaderParams::FIRCoeff& param       = get_param<ShaderParams::FIRCoeff>(cur_param_offs);
+        float                   lowpass_hz  = 0.0f;
+        float                   highpass_hz = 0.0f;
+        if (! Synth::oscillator_fir_cutoffs(osc.pitch, osc.spread, osc.freq_mult, &lowpass_hz, &highpass_hz)) {
+            continue; // Effective spread <= 0: passthrough, no coefficient dispatch.
+        }
+        uint32_t lowpass  = cutoff_hz_to_int(lowpass_hz);
+        uint32_t highpass = cutoff_hz_to_int(highpass_hz); // 0 when the helper floor-killed the edge.
+        Synth::oscillator_fir_band_guard(&lowpass, &highpass);
+        param.taps_offs            = osc.fir_taps_offs / 4;
+        param.lowpass_cutoff_freq  = lowpass;
+        param.highpass_cutoff_freq = highpass;
+        param.window_span          = Synth::fir_effective_span(static_cast<float>(osc.fir_slope_percent));
         cur_param_offs += static_cast<uint32_t>(sizeof(ShaderParams::FIRCoeff));
     }
 
@@ -2085,8 +2116,7 @@ static void render_audio_step()
 
         ShaderParams::Oscillator& param = get_param<ShaderParams::Oscillator>(cur_param_offs);
 
-        const float note_freq =
-            Synth::note_to_frequency(static_cast<int>(oscillator.note), oscillator.pitch, oscillator.freq_mult);
+        const float note_freq = Synth::pitch_to_frequency(oscillator.pitch, oscillator.freq_mult);
         const float phase_step =
             (static_cast<float>(Synth::rt_step_samples) * note_freq) / static_cast<float>(Synth::rt_sampling_rate);
 
@@ -2111,7 +2141,7 @@ static void render_audio_step()
         param.mod_phase            = oscillator.mod_phase;
         param.mod_phase_step       = mod_phase_step / static_cast<float>(Synth::rt_step_samples);
         param.fir_memory_offs      = oscillator.fir_memory_offs / 4;
-        param.taps_offs            = oscillator.fir_taps_offs / 4;
+        param.taps_offs            = (oscillator.spread > 0.0f) ? oscillator.fir_taps_offs / 4 : 0;
 
         oscillator.phase += phase_step;
         oscillator.mod_phase += mod_phase_step;

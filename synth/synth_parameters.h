@@ -145,6 +145,59 @@ float eval_envelope_at(const EnvelopeDescriptor& envelope, const EnvelopeState& 
 // - freq_mult       - scales the base frequency.
 float note_to_frequency(int midi_note, float pitch_semitones, uint32_t freq_mult);
 
+// Final equivalent MIDI pitch of an oscillator: base note + 12 * octave_offset +
+// per-oscillator pitch offset (including random skews) + modulated pitch target value.
+// The result is an ABSOLUTE equivalent MIDI pitch (69 = A4).
+float oscillator_final_pitch(int midi_note, int octave_offset, float pitch_offset, float pitch_value);
+
+// Note-on trigger gate: an oscillator only sounds when its final equivalent
+// MIDI pitch lies within [0, 127] inclusive.
+bool oscillator_pitch_in_gate(float final_pitch);
+
+// Converts an absolute equivalent MIDI pitch to frequency in Hz: 69 = A4 = 440 Hz at
+// freq_mult 1.  Equivalent to note_to_frequency(69, absolute_pitch - 69.0f, freq_mult);
+// the subtraction keeps fractional pitches exact (no integer rounding).
+float pitch_to_frequency(float absolute_pitch, uint32_t freq_mult);
+
+// Effective FIR band-pass cutoffs for one oscillator: the lowpass edge sits
+// `effective_spread` semitones above the absolute equivalent MIDI pitch, the
+// highpass edge the same distance below, both converted to Hz at the
+// oscillator's frequency multiplier.  Returns false when the filter is off:
+// non-positive or NaN effective_spread disables filtering and the caller
+// must skip coefficient dispatch for the oscillator; generator levels stay
+// free finite values, so negatives are normal.
+// A highpass edge below oscillator_fir_highpass_floor_hz is transported as
+// exactly 0 Hz, because the coefficient shader reaches its pure-lowpass form
+// only at highpass_cutoff_freq == 0 while cutoff_hz_to_int maps any positive
+// sub-1-Hz value to the 1 Hz floor (a band-pass edge, not a disabled one).
+bool oscillator_fir_cutoffs(float    effective_pitch,
+                            float    effective_spread,
+                            uint32_t freq_mult,
+                            float*   lowpass_hz,
+                            float*   highpass_hz);
+
+// Highpass edges under this Hz are heard as no highpass at all; at or above
+// it the edge stays a (quantized) band-pass edge.
+constexpr float oscillator_fir_highpass_floor_hz = 1.0f;
+
+// The coefficient shader's band-pass branch requires highpass < lowpass;
+// equal positive edges cancel to a normalized impulse (passthrough). A
+// positive spread must therefore keep at least 1 Hz of bandwidth after
+// integer-Hz quantization: when the quantized pair has none, this pushes the
+// lowpass edge up 1 Hz, or pulls the highpass edge down 1 Hz when the
+// lowpass already sits at the quantizer's ceiling (both edges clamped at
+// max_cutoff_hz).  A zero highpass (pure lowpass) is left untouched.
+void oscillator_fir_band_guard(uint32_t* lowpass_cutoff_freq, uint32_t* highpass_cutoff_freq);
+
+// Effective FIR window span in taps for a FIR Slope percent.  The input clamps
+// to [1, 100] (NaN reads as the minimum); the result is the odd tap count
+// 2 * round_half_up((num_taps - 1) / 2 * slope / 100) + 1, so slope 100 maps to
+// the full num_fir_taps span (the window itself is byte-identical to the fixed
+// window; band-pass coefficients are instead normalized to unity gain at the
+// band center) and slope 1 maps to 11 taps - the sane minimum; a degenerate
+// one-tap span is unreachable.  Monotonically non-decreasing in the slope.
+uint32_t fir_effective_span(float slope_percent);
+
 // Converts a MIDI pitch-bend value to pitch offset in semitones
 // - centered_bend   - 0 = no bend, range [-8192, 8191]
 // - range_semttones - output pitch offset range, in semitones, scaled so full
@@ -205,6 +258,22 @@ float eval_lfo_mod(const LFODescriptor& lfo,
                    float                depth,
                    SourceOp             op);
 
+// Evaluates one sourced LFO node: the descriptor depth scales the depth source's
+// value, the rate source's value offsets the LFO's own period (ms) by rate_scale_ms,
+// and the offset result clamps to at least 1 ms (0 = use the descriptor period
+// unchanged; the clamp keeps an editor-supplied scale from driving the period
+// negative (unsigned underflow) or to zero (a divide-by-zero in the LFO phase)).
+// - gen                - the node's LFO generator descriptor
+// - depth_source_value - depth source leaf value (the advancing caller's previous
+//                        step value, the note-on onset value in the trigger caller)
+// - rate_source_value  - rate source leaf value, same snapshot rule
+// - lfo_tick           - evaluation tick (the advancing caller's current tick, 0 at note-on)
+// Pure: mutates nothing, so the advancing caller keeps its own tick increment.
+float eval_sourced_lfo(const ParamDescriptor::LFOParam& gen,
+                       float                            depth_source_value,
+                       float                            rate_source_value,
+                       uint32_t                         lfo_tick);
+
 // Calculates frames available to read from a ring buffer.
 uint32_t get_ringbuf_data_size(uint64_t write_pos, uint64_t read_pos);
 
@@ -213,6 +282,15 @@ uint32_t get_ringbuf_avail_space(uint64_t write_pos, uint64_t read_pos, uint32_t
 
 // Calculates fontiguous frames from pos to the end of the buffer before it wraps (read or write pos).
 uint32_t get_ringbuf_contig_tail(uint64_t pos, uint32_t capacity);
+
+// Note-on trigger evaluation of a configured parameter node: plain nodes combine
+// base_value with each source's onset value; envelope nodes evaluate at their onset
+// state (first point, state untouched); LFO nodes evaluate at tick 0 with their
+// depth/rate sources' onset values, without advancing the LFO tick.  External leaves
+// read their current value (the MIDI state at the note-on event; note-on setup seeds
+// value+prev identically via write_external_leaf).
+// Descriptor graphs are acyclic and shallow, so recursion is bounded.
+float param_onset_value(const Parameter* params, const ParamDescriptor* descs, uint16_t param_id);
 
 // Advances the parameters
 void propagate_parameters(Parameter* params, const ParamDescriptor* descs, uint32_t num_params);
