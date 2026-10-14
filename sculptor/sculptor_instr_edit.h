@@ -122,8 +122,8 @@ private:
     bool     rename_popup_open               = false;
     bool     rename_zone                     = false; // rename modal targets a zone instrument
     uint32_t rename_zone_entry               = 0;     // zone entry the rename modal targets
-    bool     show_effects_mode               = false; // Oscillators/Effects choice; persists across targets
-    int32_t  effects_tab_pend                = -1;    // one-shot: select the pane tab the restored undo entry came from
+    bool     show_effects_mode               = false; // zone vs Effects view; persists across targets
+    int32_t  effects_tab_pend                = -1; // one-shot: force-select the Effects tab after an undo/redo restore
 
     // Instrument library. Entries refresh on every browser open and before every
     // save; errors surface as notifications and a failed scan never opens

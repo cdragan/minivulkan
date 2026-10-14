@@ -17,6 +17,7 @@
 namespace Sculptor {
 
 bool is_ctrl_down();
+bool is_actual_ctrl_down();
 bool is_shift_down();
 
 class Editor {

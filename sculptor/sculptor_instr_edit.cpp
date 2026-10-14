@@ -1186,8 +1186,17 @@ static void drain_bank_updates()
     }
 }
 
-// The origin packs the channel and pane the edit was made in; undo/redo
-// refocus them so a whole-bank restore is never silent about what changed.
+// The origin packs the target (bits 1-5), pane (bit 0) and zone entry
+// (bits 6-10) the edit was made in; undo/redo refocus them so a whole-bank
+// restore is never silent about what changed.  Zone entry 31 means none
+// (master view or effects pane).
+constexpr uint32_t origin_zone_none = 31;
+
+static uint32_t make_edit_origin(uint32_t target, bool effects_mode, uint32_t zone_entry)
+{
+    return ((target << 1) | (effects_mode ? 1u : 0u) | (zone_entry << 6));
+}
+
 static void editor_snapshot(uint32_t origin)
 {
     undo_init_once();
@@ -1716,7 +1725,8 @@ void Sculptor::SynthEditor::rederive_zone_selection(uint32_t channel)
     // unallocated instrument, and a disabled channel's table may hold stale bytes.
     if (! bank.channel_enabled[channel] || bank.channel_zones[channel][0].start_note == 0) {
         selected_zone[channel] = -1;
-        zone_tab_force_entry   = -1;
+        if (channel == selected_target)
+            zone_tab_force_entry = -1;
         return;
     }
     // The zone tab bar owns the selection; keep it while it still names a live
@@ -1729,7 +1739,8 @@ void Sculptor::SynthEditor::rederive_zone_selection(uint32_t channel)
         zone = static_cast<int32_t>(
             Synth::zone_entry_at(bank.channel_zones[channel], 0)); // zone 0 always starts at note 0
     selected_zone[channel] = zone;
-    zone_tab_force_entry   = zone;
+    if (channel == selected_target && ! show_effects_mode)
+        zone_tab_force_entry = zone;
 }
 
 // Undo and redo restore whole-bank snapshots that are otherwise silent about
@@ -1737,11 +1748,34 @@ void Sculptor::SynthEditor::rederive_zone_selection(uint32_t channel)
 // pane where the change becomes visible.
 void Sculptor::SynthEditor::apply_edit_origin(uint32_t origin)
 {
-    selected_target   = origin >> 1;
-    show_effects_mode = (origin & 1u) != 0;
+    selected_target           = (origin >> 1) & 31u;
+    show_effects_mode         = (origin & 1u) != 0;
+    const uint32_t zone_entry = (origin >> 6) & 31u;
     // The master pane has no tab bar, so a master-focused restore leaves the
     // channel pane's tabs untouched.
-    effects_tab_pend = selected_target == target_master ? -1 : (show_effects_mode ? 1 : 0);
+    if (selected_target == target_master) {
+        effects_tab_pend = -1;
+        return;
+    }
+    if (show_effects_mode) {
+        effects_tab_pend     = 1;
+        zone_tab_force_entry = -1; // an Effects restore must not fight a stale zone refocus
+    }
+    else {
+        // Oscillator changes refocus the zone tab of the zone the edit was
+        // made in; the merged bar has no separate Oscillators tab.
+        effects_tab_pend = -1;
+        if (zone_entry < Synth::max_instr_per_channel) {
+            selected_zone[selected_target] = static_cast<int32_t>(zone_entry);
+            zone_tab_force_entry           = static_cast<int32_t>(zone_entry);
+        }
+        else {
+            // No zone entry was recorded (none selected at commit time); keep
+            // the current selection.
+            const int32_t zone   = selected_zone[selected_target];
+            zone_tab_force_entry = zone < 0 ? 0 : zone;
+        }
+    }
 }
 
 void Sculptor::SynthEditor::rederive_all_selections()
@@ -1767,7 +1801,10 @@ bool Sculptor::SynthEditor::commit_candidate(const Synth::InstrumentEditorBank& 
     }
 
     if (Sculptor::undo_group_needs_snapshot(&osc_undo_group, tag)) {
-        editor_snapshot((selected_target << 1) | (show_effects_mode ? 1u : 0u));
+        const uint32_t zone_entry = (selected_target == target_master || selected_zone[selected_target] < 0)
+                                        ? origin_zone_none
+                                        : static_cast<uint32_t>(selected_zone[selected_target]);
+        editor_snapshot(make_edit_origin(selected_target, show_effects_mode, zone_entry));
     }
     instr_bank = candidate_bank;
 
@@ -1976,19 +2013,31 @@ void Sculptor::SynthEditor::gui_channel_pane(uint32_t channel)
         return;
     }
 
-    if (ImGui::BeginTabBar("synth_mode")) {
-        // Undo/redo refocus the pane the restored change lives in.  The
-        // pending selection survives the one frame ImGui still reports the
-        // stale tab, then clears once the forced tab is shown.
-        const ImGuiTabItemFlags osc_flags = effects_tab_pend == 0 ? ImGuiTabItemFlags_SetSelected : 0;
-        const ImGuiTabItemFlags fx_flags  = effects_tab_pend == 1 ? ImGuiTabItemFlags_SetSelected : 0;
-        if (ImGui::BeginTabItem("Oscillators", nullptr, osc_flags)) {
-            show_effects_mode = false;
-            if (osc_flags) {
-                effects_tab_pend = -1;
+    if (ImGui::BeginTabBar("zone_tabs")) {
+        for (uint32_t entry = 0; entry < num_zones; entry++) {
+            char name[Synth::max_name_len];
+            Synth::get_zone_name(&instr_bank, channel, entry, name, sizeof(name));
+            char label[32];
+            if (strlen(name) > 14)
+                snprintf(label, sizeof(label), "%.11s...###zone%u", name, entry);
+            else
+                snprintf(label, sizeof(label), "%s###zone%u", name, entry);
+            ImGuiTabItemFlags tab_flags = 0;
+            if (zone_tab_force_entry == static_cast<int32_t>(entry))
+                tab_flags |= ImGuiTabItemFlags_SetSelected;
+            if (ImGui::BeginTabItem(label, nullptr, tab_flags)) {
+                if (zone_tab_force_entry == static_cast<int32_t>(entry))
+                    zone_tab_force_entry = -1; // one-shot consumed once the bar shows the tab
+                selected_zone[channel] = static_cast<int32_t>(entry);
+                show_effects_mode      = false;
+                ImGui::EndTabItem();
             }
-            ImGui::EndTabItem();
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("%s\nfrom note %u",
+                                  name,
+                                  static_cast<uint32_t>(bank.channel_zones[channel][entry].start_note) - 1);
         }
+        const ImGuiTabItemFlags fx_flags = effects_tab_pend == 1 ? ImGuiTabItemFlags_SetSelected : 0;
         if (ImGui::BeginTabItem("Effects", nullptr, fx_flags)) {
             show_effects_mode = true;
             if (fx_flags) {
@@ -2016,12 +2065,10 @@ void Sculptor::SynthEditor::gui_channel_pane(uint32_t channel)
     }
 
     if (num_zones == 0) {
-        // The empty-selection state: no instrument is selected, so the name box
-        // and zone mutations stay disabled for this target.
-        if (bank.channel_enabled[channel])
-            ImGui::TextDisabled("No zones - use Initialize or Load");
-        else
-            ImGui::TextDisabled("Channel disabled - use Initialize or Load");
+        // Unreachable in steady state: with no zones the bar holds only the
+        // Effects tab, so the selection above sets effects mode.  Kept as a
+        // guard so a stale mode flag still shows the empty-state message.
+        ImGui::TextDisabled("No zones - use Initialize or Load");
         return;
     }
 
@@ -2032,34 +2079,6 @@ void Sculptor::SynthEditor::gui_channel_pane(uint32_t channel)
         zone                   = 0;
         selected_zone[channel] = 0;
         zone_tab_force_entry   = 0;
-    }
-
-    // The tab bar owns the visible selection; selected_zone mirrors it so keyboard
-    // clicks and rederivation stay in sync in both directions.
-    if (ImGui::BeginTabBar("zone_tabs")) {
-        for (uint32_t entry = 0; entry < num_zones; entry++) {
-            char name[Synth::max_name_len];
-            Synth::get_zone_name(&instr_bank, channel, entry, name, sizeof(name));
-            char label[32];
-            if (strlen(name) > 14)
-                snprintf(label, sizeof(label), "%.11s...###zone%u", name, entry);
-            else
-                snprintf(label, sizeof(label), "%s###zone%u", name, entry);
-            ImGuiTabItemFlags tab_flags = 0;
-            if (zone_tab_force_entry == static_cast<int32_t>(entry))
-                tab_flags |= ImGuiTabItemFlags_SetSelected;
-            if (ImGui::BeginTabItem(label, nullptr, tab_flags)) {
-                if (zone_tab_force_entry == static_cast<int32_t>(entry))
-                    zone_tab_force_entry = -1; // one-shot consumed once the bar shows the tab
-                selected_zone[channel] = static_cast<int32_t>(entry);
-                ImGui::EndTabItem();
-            }
-            if (ImGui::IsItemHovered())
-                ImGui::SetTooltip("%s\nfrom note %u",
-                                  name,
-                                  static_cast<uint32_t>(bank.channel_zones[channel][entry].start_note) - 1);
-        }
-        ImGui::EndTabBar();
     }
 
     ImGui::Separator();
@@ -3351,10 +3370,11 @@ void Sculptor::SynthEditor::do_zone_paste_instrument(uint32_t channel, uint32_t 
     if (! commit_candidate(candidate, Sculptor::UndoGroupTag{ osc_tag_fresh, ++osc_fresh_tag_serial, 0 }))
         return;
     Sculptor::undo_group_reset(&osc_undo_group);
-    selected_target     = channel;
-    show_effects_mode   = false;
-    effects_tab_pend    = 0;
-    osc_graph_reproject = true;
+    selected_target        = channel;
+    show_effects_mode      = false;
+    selected_zone[channel] = entry;
+    zone_tab_force_entry   = entry;
+    osc_graph_reproject    = true;
 }
 
 void Sculptor::SynthEditor::gui_zone_menu()
@@ -4124,6 +4144,6 @@ void Sculptor::gui_synth_info_panel()
                          nullptr,
                          spectrum_db_floor,
                          0.0f,
-                         ImVec2(0.0f, spectrum_plot_height));
+                         ImVec2(ImGui::GetContentRegionAvail().x, spectrum_plot_height));
     }
 }

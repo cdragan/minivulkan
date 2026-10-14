@@ -531,13 +531,12 @@ bool Sculptor::GeometryEditor::alloc_view_resources(View*     dst_view,
                 0,              // dstBinding
                 0,              // dstArrayElement
                 1,              // descriptorCount
-                VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
                 &image_info,
                 nullptr, // pBufferInfo
                 nullptr  // pTexelBufferView
             };
 
-            image_info.sampler   = viewport_sampler;
             image_info.imageView = res.color.get_view();
             write_desc.dstSet    = res.gui_texture;
 
@@ -1119,7 +1118,7 @@ void Sculptor::GeometryEditor::handle_mouse_actions(const UserInput& input, bool
         if (mouse_moved) {
             if (mode == Mode::move || mode == Mode::extrude)
                 mouse_action = Action::execute;
-            else if (ImGui::IsKeyDown(ImGuiKey_LeftCtrl) || ImGui::IsKeyDown(ImGuiKey_RightCtrl))
+            else if (is_actual_ctrl_down())
                 mouse_action = Action::rotate;
             else if (shift) {
 
@@ -1162,7 +1161,7 @@ void Sculptor::GeometryEditor::handle_mouse_actions(const UserInput& input, bool
         switch (mouse_action) {
 
             case Action::rotate:
-                if (! ImGui::IsKeyDown(ImGuiKey_LeftCtrl) && ! ImGui::IsKeyDown(ImGuiKey_RightCtrl))
+                if (! is_actual_ctrl_down())
                     release_mouse();
                 else if (mouse_moved) {
                     constexpr float rot_scale_factor = 0.3f;

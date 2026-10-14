@@ -6,8 +6,10 @@
 
 #include <stdio.h>
 
-bool Sculptor::is_ctrl_down()
+bool Sculptor::is_actual_ctrl_down()
 {
+    // On MacOS Ctrl and Super are swapped, but this function wants
+    // to check real Ctrl key
 #ifdef __APPLE__
     constexpr ImGuiKey left_ctrl  = ImGuiKey_LeftSuper;
     constexpr ImGuiKey right_ctrl = ImGuiKey_RightSuper;
@@ -17,6 +19,11 @@ bool Sculptor::is_ctrl_down()
 #endif
 
     return ImGui::IsKeyDown(left_ctrl) || ImGui::IsKeyDown(right_ctrl);
+}
+
+bool Sculptor::is_ctrl_down()
+{
+    return ImGui::IsKeyDown(ImGuiKey_LeftCtrl) || ImGui::IsKeyDown(ImGuiKey_RightCtrl);
 }
 
 bool Sculptor::is_shift_down()

@@ -58,7 +58,7 @@ static void load_gui_config()
             if (found_dock_space_viewport)
                 break;
 
-            found_dock_space_viewport = begins_with(line, line_len, "[Window][DockSpaceViewport_");
+            found_dock_space_viewport = begins_with(line, line_len, "[Window][WindowOverViewport_");
         }
         else if (found_dock_space_viewport) {
             *eol = 0;
