@@ -50,6 +50,24 @@ struct GraphNodeLayout {
 
 static_assert(sizeof(GraphNodeLayout) == 56);
 
+// One stored phantom shell: the oscillator parameters of a red-marked
+// (missing-sum) layer, keyed by (channel, zone, layer).  The compiled
+// instrument omits red-marked layers, so this is the only home the
+// disconnected layer's parameters have while its wire is gone.
+struct PhantomOscillator {
+    Synth::Oscillator osc;
+    uint8_t           channel; // 0..15
+    uint8_t           zone;    // 0..15
+    uint8_t           layer;   // 0..6
+};
+
+// Fixed phantom-store capacity: it covers every zone of the bank carrying
+// one red-marked layer (256 zones).  A capture that would
+// exceed the capacity refuses the disconnection - the apply path's batch
+// refusal re-projects the wire back - like every other capacity refusal,
+// so exhaustion loses nothing silently.
+constexpr uint32_t max_phantom_entries = 256;
+
 // The record kinds the editor model holds; any other kind in decoded
 // metadata is an unknown record and is rejected like any malformed field.
 inline bool editor_record_kind_valid(uint8_t kind)
@@ -86,6 +104,17 @@ struct InstrumentEditorBank {
     GraphNodeLayout graph_layout[max_graph_records];
     uint32_t        graph_layout_count;
     uint8_t graph_missing_sum[max_channels][max_instr_per_channel]; // [channel][zone], one bit per oscillator layer
+    // Phantom shells: a red-marked (missing-sum) layer keeps its oscillator
+    // parameters here, because the compiled instrument omits red-marked
+    // layers and would otherwise lose them.  Entries are keyed by
+    // (channel, zone, layer), one layer index per entry, aligned with the
+    // graph_missing_sum bits: an entry exists only while its row's bit is
+    // set, and every set bit carries its entry (validate_editor_metadata
+    // enforces the pairing; the load path migrates banks saved before the
+    // store existed).  Editor-side only: phantoms never cross a library or
+    // runtime boundary.
+    PhantomOscillator phantoms[max_phantom_entries];
+    uint32_t          phantom_count;
     // Added-CC output dots per effect chain, bit i = CC (16 + i) is added on
     // the chain (channel index, or max_channels for the master chain).  A dot
     // exists only when its bit is set; wiring a CC never sets or clears bits.
@@ -257,8 +286,8 @@ bool graph_layout_record_identity_equal(const Synth::GraphNodeLayout& a, const S
 // so every binary that links the editor bank links its validation too.
 // validate_editor_metadata: record bounds, descriptor ids within their pools,
 // per-zone and global record caps, duplicate record keys, missing-sum bits
-// within each zone's layer count, and the implied projected node count per
-// zone within the node pool.
+// within each zone's projected row run, and the implied projected node
+// count per zone within the node pool.
 bool validate_editor_metadata(const Synth::InstrumentEditorBank& bank);
 // Number of detached (kind 1/2) records stored for one zone.
 uint32_t count_detached_records(const Synth::InstrumentEditorBank& bank, uint32_t channel, uint32_t zone);

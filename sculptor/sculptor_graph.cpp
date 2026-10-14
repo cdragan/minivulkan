@@ -17,6 +17,14 @@ const char* const Sculptor::source_op_names[2] = { "+", "x" };
 const char* const Sculptor::mod_source_names[6] = { "Pitch bend", "Mod wheel",  "Channel press.",
                                                     "Velocity",   "Aftertouch", "Pressure (max)" };
 
+// Pure floor-to-grid math, shared by the renderer and the drop-menu
+// consumers; the negative direction snaps toward negative infinity, not
+// toward zero.
+float Sculptor::snap_to_grid(float value)
+{
+    return static_cast<float>(floor(value / graph_grid_spacing) * graph_grid_spacing);
+}
+
 Sculptor::Slot Sculptor::make_slot(const char* name, Sculptor::SlotKind kind, Sculptor::PropertyType property_type)
 {
     Sculptor::Slot slot = {};
@@ -235,6 +243,19 @@ bool Sculptor::Graph::slot_is_connected(uint32_t node_idx, uint32_t slot_idx) co
     return false;
 }
 
+// The release path and the projections must agree on exactly which anchors
+// open the drop menu: the slot is flagged at projection time and
+// unconnected (connected dots retarget existing connections).
+bool Sculptor::Graph::drop_menu_eligible(EndPoint anchor) const
+{
+    if (anchor.node_idx >= max_nodes || ! nodes.is_occupied(anchor.node_idx) || anchor.slot_idx >= max_node_slots ||
+        ! nodes.entries[anchor.node_idx].slots.is_occupied(anchor.slot_idx)) {
+        return false;
+    }
+    const Slot& slot = nodes.entries[anchor.node_idx].slots.entries[anchor.slot_idx];
+    return slot.drop_menu && ! slot_is_connected(anchor.node_idx, anchor.slot_idx);
+}
+
 uint32_t Sculptor::Graph::create_node(const char* name, vmath::vec2 position)
 {
     const uint32_t node_idx = nodes.allocate();
@@ -249,8 +270,7 @@ uint32_t Sculptor::Graph::create_node(const char* name, vmath::vec2 position)
     content_sizes[node_idx] = vmath::vec2(0.0f, 0.0f);
     snprintf(new_node.name, sizeof(new_node.name), "%s", name ? name : "");
     // Snap the initial position so new nodes align with the grid.
-    new_node.position = vmath::vec2(static_cast<float>(floor(position.x / graph_grid_spacing) * graph_grid_spacing),
-                                    static_cast<float>(floor(position.y / graph_grid_spacing) * graph_grid_spacing));
+    new_node.position = vmath::vec2(Sculptor::snap_to_grid(position.x), Sculptor::snap_to_grid(position.y));
     push_change(ChangeKind::node_added, node_idx, pool_no_slot, pool_no_slot);
     return node_idx;
 }
@@ -314,6 +334,13 @@ void Sculptor::Graph::delete_node_unvetoed(uint32_t node_idx)
         interaction         = Interaction::idle;
         retarget_connection = pool_no_slot;
     }
+    // Same for an open drop menu anchored to the deleted node: a stale mode
+    // would keep reading a freed (possibly reused) pool slot.
+    if (interaction == Interaction::drop_menu && drop_menu_from.node_idx == node_idx) {
+        interaction     = Interaction::idle;
+        drop_menu_from  = EndPoint{ pool_no_slot, pool_no_slot };
+        drop_menu_point = {};
+    }
     nodes.free(node_idx);
     selected[node_idx]      = false;
     content_sizes[node_idx] = vmath::vec2(0.0f, 0.0f);
@@ -357,6 +384,8 @@ void Sculptor::Graph::clear()
     renaming_node       = pool_no_slot;
     retarget_connection = pool_no_slot;
     connecting_from     = EndPoint{ pool_no_slot, pool_no_slot };
+    drop_menu_from      = EndPoint{ pool_no_slot, pool_no_slot };
+    drop_menu_point     = {};
     // Missing marks belong to the pre-rebuild projection; stale bits would
     // hand red dots to reused (node, slot) indices.
     memset(slot_missing_bits, 0, sizeof(slot_missing_bits));
@@ -386,6 +415,14 @@ void Sculptor::Graph::remove_slot(uint32_t node_idx, uint32_t slot_idx)
             (connection.input.node_idx == node_idx && connection.input.slot_idx == slot_idx)) {
             delete_connection(i);
         }
+    }
+    // Same as delete_node: an open drop menu anchored to the removed slot
+    // must not survive it reading a freed (possibly reused) pool slot.
+    if (interaction == Interaction::drop_menu && drop_menu_from.node_idx == node_idx &&
+        drop_menu_from.slot_idx == slot_idx) {
+        interaction     = Interaction::idle;
+        drop_menu_from  = EndPoint{ pool_no_slot, pool_no_slot };
+        drop_menu_point = {};
     }
     nodes.entries[node_idx].slots.free(slot_idx);
     push_change(ChangeKind::slot_deleted, node_idx, slot_idx, pool_no_slot);
@@ -479,6 +516,12 @@ void Sculptor::Graph::set_slot_hidden_callback(SlotHiddenCallback callback, void
     slot_hidden_user_data = user_data;
 }
 
+void Sculptor::Graph::set_slot_gray_callback(SlotGrayCallback callback, void* user_data)
+{
+    slot_gray_callback  = callback;
+    slot_gray_user_data = user_data;
+}
+
 bool Sculptor::Graph::user_delete_connection(uint32_t connection_idx)
 {
     if (connection_idx >= max_connections || ! connections.is_occupied(connection_idx)) {
@@ -498,6 +541,12 @@ void Sculptor::Graph::set_canvas_menu_callback(CanvasMenuCallback callback, void
 {
     canvas_menu_callback  = callback;
     canvas_menu_user_data = user_data;
+}
+
+void Sculptor::Graph::set_drop_menu_callback(DropMenuCallback callback, void* user_data)
+{
+    drop_menu_callback  = callback;
+    drop_menu_user_data = user_data;
 }
 
 void Sculptor::Graph::set_node_menu_callback(NodeMenuCallback callback, void* user_data)
@@ -903,6 +952,8 @@ void Sculptor::Graph::set_state_widget(uint32_t            node_idx,
     }
 }
 
+// Reports any non-idle interaction mode, including the non-mutating drop
+// menu; see the declaration in sculptor_graph.h for the caller contract.
 bool Sculptor::Graph::interaction_active() const
 {
     return interaction != Interaction::idle;
@@ -969,6 +1020,16 @@ uint32_t Sculptor::Graph::connection_popup() const
 vmath::vec2 Sculptor::Graph::canvas_popup_pos() const
 {
     return popup_canvas_pos;
+}
+
+Sculptor::EndPoint Sculptor::Graph::drop_menu_anchor() const
+{
+    return drop_menu_from;
+}
+
+vmath::vec2 Sculptor::Graph::drop_menu_pos() const
+{
+    return drop_menu_point;
 }
 
 const char* Sculptor::Graph::error_text() const

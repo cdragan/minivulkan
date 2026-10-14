@@ -773,7 +773,7 @@ uint32_t Synth::encode_editor_bank_json(const InstrumentEditorBank* bank, char* 
     if (bank->bank.instruments.num_allocated > Synth::max_instruments ||
         bank->bank.envelopes.num_allocated > Synth::max_envelopes || bank->bank.lfos.num_allocated > Synth::max_lfos ||
         bank->bank.parameters.num_allocated > Synth::max_parameters ||
-        bank->graph_layout_count > Synth::max_graph_records)
+        bank->graph_layout_count > Synth::max_graph_records || bank->phantom_count > Synth::max_phantom_entries)
         return 0;
 
     for (uint32_t owner = 0; owner <= max_channels; ++owner) {
@@ -899,6 +899,24 @@ uint32_t Synth::encode_editor_bank_json(const InstrumentEditorBank* bank, char* 
             o.uint_value(bank->graph_missing_sum[c][z]);
         }
         o.ch(']');
+    }
+    o.ch(']');
+
+    // The phantom shells ride beside the missing bits: one entry per
+    // red-marked row, keyed by (channel, zone, layer).  Absence decodes to
+    // an empty store (the loader migrates older documents).
+    o.key("phantoms");
+    o.ch('[');
+    for (uint32_t i = 0; i < bank->phantom_count; ++i) {
+        const Synth::PhantomOscillator& entry = bank->phantoms[i];
+        o.sep();
+        o.ch('{');
+        key_uint(o, "channel", entry.channel);
+        key_uint(o, "zone", entry.zone);
+        key_uint(o, "layer", entry.layer);
+        o.key("oscillator");
+        enc_oscillator(o, entry.osc);
+        o.ch('}');
     }
     o.ch(']');
 
@@ -2414,6 +2432,50 @@ static void decode_effect_audio(Walker& walker, uint32_t token, Sculptor::Effect
     });
 }
 
+// One phantom-shell entry: key fields plus the oscillator body.  The
+// last entry for a key wins (hand-edited duplicates collapse through
+// set_phantom_entry, which also owns the store's capacity), and an
+// entry without an oscillator body is malformed input.
+static void decode_phantom_entry(Walker& w, uint32_t obj, Synth::InstrumentEditorBank* out)
+{
+    uint8_t           channel      = 0;
+    uint8_t           zone         = 0;
+    uint8_t           layer        = 0;
+    bool              have_channel = false;
+    bool              have_zone    = false;
+    bool              have_layer   = false;
+    bool              have_osc     = false;
+    Synth::Oscillator osc          = {};
+    walk_object(w, obj, [&](uint32_t key_idx, uint32_t val_idx) {
+        if (key_eq(w, key_idx, "channel")) {
+            want_u8(w, val_idx, Synth::max_channels - 1, &channel);
+            have_channel = true;
+        }
+        else if (key_eq(w, key_idx, "zone")) {
+            want_u8(w, val_idx, Synth::max_instr_per_channel - 1, &zone);
+            have_zone = true;
+        }
+        else if (key_eq(w, key_idx, "layer")) {
+            want_u8(w, val_idx, Synth::max_layers - 1, &layer);
+            have_layer = true;
+        }
+        else if (key_eq(w, key_idx, "oscillator")) {
+            decode_oscillator(w, val_idx, osc);
+            have_osc = true;
+        }
+        else {
+            unknown_field(w, key_idx);
+        }
+    });
+    if (w.failed || ! have_channel || ! have_zone || ! have_layer || ! have_osc) {
+        w.failed = true;
+        return;
+    }
+    if (! Sculptor::set_phantom_entry(out, channel, zone, layer, osc)) {
+        w.failed = true;
+    }
+}
+
 static void decode_editor_state(Walker& w, uint32_t val_idx, Synth::InstrumentEditorBank* out, bool v2 = false)
 {
     bool audio_present = false;
@@ -2472,6 +2534,15 @@ static void decode_editor_state(Walker& w, uint32_t val_idx, Synth::InstrumentEd
                     if (w.failed)
                         return;
                 });
+            });
+        }
+        else if (key_eq(w, key_idx, "phantoms")) {
+            walk_array(w, inner_idx, w.num_toks, [&](uint32_t elem, uint32_t) {
+                if (w.toks[elem].type != JSMN_OBJECT) {
+                    w.failed = true;
+                    return;
+                }
+                decode_phantom_entry(w, elem, out);
             });
         }
         else if (key_eq(w, key_idx, "added_ccs")) {
@@ -3274,7 +3345,89 @@ static bool decode_document_into_scratch(const char* text, uint32_t len, bool st
     if (w.failed || guard != v2 || (v2 && (legacy || root_editor))) {
         return false;
     }
+    bool captured[Synth::max_instruments] = {};
+    // Legacy migration: documents saved before the phantom store kept
+    // every layer's parameters in the instrument itself (the compile did
+    // not omit red-marked layers), so a set bit without an entry captures
+    // the instrument's layer at that index.  New documents always carry
+    // the store, and older validation refused bits at or beyond the
+    // layer count, so the captured index is always a live layer.
+    for (uint32_t channel = 0; channel < Synth::max_channels; ++channel) {
+        for (uint32_t zone = 0; zone < Synth::max_instr_per_channel; ++zone) {
+            const uint8_t bits = decode_scratch.graph_missing_sum[channel][zone];
+            if (bits == 0) {
+                continue;
+            }
+            const Synth::Zone& zone_entry = decode_scratch.bank.channel_zones[channel][zone];
+            if (zone_entry.start_note == 0 || zone_entry.instrument >= decode_scratch.bank.instruments.num_allocated) {
+                return false;
+            }
+            const Synth::Instrument& instrument = decode_scratch.bank.instruments.entries[zone_entry.instrument];
+            for (uint32_t layer = 0; layer < Synth::max_layers; ++layer) {
+                if ((bits & (1u << layer)) == 0 ||
+                    Sculptor::find_phantom_entry(decode_scratch, channel, zone, layer) >= 0) {
+                    continue;
+                }
+                if (decode_scratch.phantom_count >= Synth::max_phantom_entries ||
+                    ! Sculptor::set_phantom_entry(&decode_scratch, channel, zone, layer, instrument.layers[layer])) {
+                    return false;
+                }
+                captured[zone_entry.instrument] = true;
+            }
+        }
+    }
 
+    // The legacy instrument compiled every layer, so the shell captures
+    // above leave the connected layers at their legacy indices while
+    // validation counts connected layers only: compact the connected
+    // layers in order and the count follows.  Only an instrument that
+    // actually captured a shell compacts: a fresh document's store is
+    // already connected-shaped.  A captured instrument whose live
+    // references carry differing masks - clean (zero) references
+    // included - is refused: a single compiled instrument cannot
+    // represent per-zone shells.
+    for (uint32_t i = 0; i < decode_scratch.bank.instruments.num_allocated; ++i) {
+        uint8_t first_bits = 0;
+        bool    referenced = false;
+        bool    differing  = false;
+        for (uint32_t channel = 0; channel < Synth::max_channels; ++channel) {
+            for (uint32_t zone = 0; zone < Synth::max_instr_per_channel; ++zone) {
+                const Synth::Zone& zone_entry = decode_scratch.bank.channel_zones[channel][zone];
+                if (zone_entry.start_note == 0 || zone_entry.instrument != i) {
+                    continue;
+                }
+                const uint8_t bits = decode_scratch.graph_missing_sum[channel][zone];
+                if (! referenced) {
+                    first_bits = bits;
+                    referenced = true;
+                }
+                else if (bits != first_bits) {
+                    differing = true;
+                }
+            }
+        }
+        if (! captured[i]) {
+            continue;
+        }
+        if (differing) {
+            return false;
+        }
+        Synth::Instrument& instrument = decode_scratch.bank.instruments.entries[i];
+        uint32_t           write      = 0;
+        for (uint32_t layer = 0; layer < instrument.layer_count; ++layer) {
+            if ((first_bits & (1u << layer)) != 0) {
+                continue;
+            }
+            if (write != layer) {
+                instrument.layers[write] = instrument.layers[layer];
+            }
+            ++write;
+        }
+        for (uint32_t layer = write; layer < Synth::max_layers; ++layer) {
+            instrument.layers[layer] = Synth::Oscillator{};
+        }
+        instrument.layer_count = static_cast<uint8_t>(write);
+    }
     if (! Synth::validate_instrument_bank(&decode_scratch.bank, false)) {
         return false;
     }

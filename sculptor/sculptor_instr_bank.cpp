@@ -252,75 +252,77 @@ static bool validate_effect_chain(const Synth::EffectChainBinding& chain,
     return true;
 }
 
-static bool validate_instrument(const Synth::Instrument& instrument)
+// The oscillator semantic rules one layer (compiled or phantom) must
+// satisfy: mode and waveform ranges, target LFO source legality and the
+// modulation input table.
+static bool validate_oscillator_body(const Synth::Oscillator& osc)
 {
-    if (instrument.layer_count < 1 || instrument.layer_count > Synth::max_layers) {
+    if (osc.osc_mode >= 3) {
         return false;
     }
-
-    for (uint32_t layer = 0; layer < instrument.layer_count; layer++) {
-
-        const Synth::Oscillator& osc = instrument.layers[layer];
-
-        if (osc.osc_mode >= 3) {
+    for (uint32_t w = 0; w < 2; w++) {
+        if (static_cast<uint32_t>(osc.osc_type[w]) > static_cast<uint32_t>(Synth::WaveType::noise_wave)) {
             return false;
         }
-
-        for (uint32_t w = 0; w < 2; w++) {
-            if (static_cast<uint32_t>(osc.osc_type[w]) > static_cast<uint32_t>(Synth::WaveType::noise_wave)) {
-                return false;
-            }
+    }
+    for (uint32_t target = 0; target < Synth::num_mod_targets; target++) {
+        const Synth::TargetBinding& binding = osc.targets[target];
+        if (! valid_source_op(static_cast<uint32_t>(binding.lfo_op))) {
+            return false;
         }
-
-        for (uint32_t target = 0; target < Synth::num_mod_targets; target++) {
-
-            const Synth::TargetBinding& binding = osc.targets[target];
-
-            if (! valid_source_op(static_cast<uint32_t>(binding.lfo_op))) {
+        if (! valid_mod_source(static_cast<uint32_t>(binding.lfo_depth_source)) ||
+            ! valid_mod_source(static_cast<uint32_t>(binding.lfo_rate_source))) {
+            return false;
+        }
+        if (binding.lfo_depth_source == Synth::ModSource::cc || binding.lfo_rate_source == Synth::ModSource::cc) {
+            // A target LFO source carries no cc_number, so the runtime
+            // resolve_source would index the channel parameter array
+            // out of bounds (the editor refuses the CC wire there too).
+            return false;
+        }
+        if (binding.num_inputs > Synth::max_mod_inputs) {
+            return false;
+        }
+        for (uint32_t input = 0; input < binding.num_inputs; input++) {
+            const Synth::ModInput& in = binding.inputs[input];
+            if (! valid_source_op(static_cast<uint32_t>(in.op))) {
                 return false;
             }
-
-            if (! valid_mod_source(static_cast<uint32_t>(binding.lfo_depth_source)) ||
-                ! valid_mod_source(static_cast<uint32_t>(binding.lfo_rate_source))) {
-                return false;
-            }
-
-            if (binding.lfo_depth_source == Synth::ModSource::cc || binding.lfo_rate_source == Synth::ModSource::cc) {
-                // A target LFO source carries no cc_number, so the runtime
-                // resolve_source would index the channel parameter array
-                // out of bounds (the editor refuses the CC wire there too).
-                return false;
-            }
-
-            if (binding.num_inputs > Synth::max_mod_inputs) {
-                return false;
-            }
-
-            for (uint32_t input = 0; input < binding.num_inputs; input++) {
-                const Synth::ModInput& in = binding.inputs[input];
-
-                if (! valid_source_op(static_cast<uint32_t>(in.op))) {
+            if (in.source == Synth::ModSource::cc) {
+                // The assignable cc source is admitted with cc_number 16..31
+                // (the rule that keeps the runtime resolve_source slot
+                // assert unreachable).
+                if (! Synth::cc_is_assignable(in.cc_number)) {
                     return false;
                 }
-
-                if (in.source == Synth::ModSource::cc) {
-                    // The assignable cc source is admitted with cc_number 16..31
-                    // (the rule that keeps the runtime resolve_source slot
-                    // assert unreachable).
-                    if (! Synth::cc_is_assignable(in.cc_number)) {
-                        return false;
-                    }
-                }
-                else if (! valid_mod_source(static_cast<uint32_t>(in.source)) || in.cc_number != 0) {
-                    // A non-CC instrument input must carry no stale CC number;
-                    // otherwise the shared decoder would accept and re-emit it
-                    // (canonicalization hole).
-                    return false;
-                }
+            }
+            else if (! valid_mod_source(static_cast<uint32_t>(in.source)) || in.cc_number != 0) {
+                // A non-CC instrument input must carry no stale CC number;
+                // otherwise the shared decoder would accept and re-emit it
+                // (canonicalization hole).
+                return false;
             }
         }
     }
+    return true;
+}
 
+static bool validate_instrument(const Synth::Instrument& instrument)
+{
+    // layer_count 0 is valid editor-side: a zone whose every layer is
+    // red-marked (missing-sum) compiles to zero connected layers.  The
+    // runtime never sees such an instrument published with audible
+    // output - missing bits disable the zone's channel - and the
+    // projection materializes the phantom shells, so the editor stays
+    // functional.
+    if (instrument.layer_count > Synth::max_layers) {
+        return false;
+    }
+    for (uint32_t layer = 0; layer < instrument.layer_count; layer++) {
+        if (! validate_oscillator_body(instrument.layers[layer])) {
+            return false;
+        }
+    }
     return true;
 }
 
@@ -671,6 +673,20 @@ void Synth::reclaim_unused_slots(Synth::InstrumentEditorBank* editor_bank, uint1
         }
     }
 
+    // Phantom shells root their bindings too: a generator serving only
+    // a disconnected row has no compiled layer and need not carry a
+    // detached record, so without this the reclaim would free it and
+    // the shell would lose its sound for good.
+    for (uint32_t i = 0; i < editor_bank->phantom_count; i++) {
+        const Synth::PhantomOscillator& entry = editor_bank->phantoms[i];
+        for (uint32_t target = 0; target < Synth::num_mod_targets; target++) {
+            const Synth::TargetBinding& gen = entry.osc.targets[target];
+            if (gen.envelope_desc_id && gen.envelope_desc_id <= max_envelopes)
+                keep_env[gen.envelope_desc_id - 1] = true;
+            if (gen.lfo_desc_id && gen.lfo_desc_id <= max_lfos)
+                keep_lfo[gen.lfo_desc_id - 1] = true;
+        }
+    }
     for (uint32_t chain = 0; chain <= Synth::max_channels; chain++) {
 
         const Synth::EffectChainBinding& binding =
@@ -744,6 +760,16 @@ void Synth::reclaim_unused_slots(Synth::InstrumentEditorBank* editor_bank, uint1
         }
     }
 
+    for (uint32_t i = 0; i < editor_bank->phantom_count; i++) {
+        Synth::PhantomOscillator& entry = editor_bank->phantoms[i];
+        for (uint32_t target = 0; target < Synth::num_mod_targets; target++) {
+            Synth::TargetBinding& gen = entry.osc.targets[target];
+            if (gen.envelope_desc_id)
+                gen.envelope_desc_id = env_ids[gen.envelope_desc_id - 1];
+            if (gen.lfo_desc_id)
+                gen.lfo_desc_id = lfo_ids[gen.lfo_desc_id - 1];
+        }
+    }
     for (uint32_t chain = 0; chain <= Synth::max_channels; chain++) {
 
         Synth::EffectChainBinding* const binding =
@@ -925,7 +951,12 @@ bool Sculptor::compile_editor_playback_bank(const Synth::InstrumentEditorBank& s
 
 bool Sculptor::validate_editor_metadata(const Synth::InstrumentEditorBank& bank)
 {
-    if (bank.graph_layout_count > Synth::max_graph_records) {
+    // Direct in-memory callers bypass the decoder, so every count the
+    // scan below iterates or indexes with is bounded here, before any
+    // count-driven lookup, node counting or pool indexing.
+    if (bank.graph_layout_count > Synth::max_graph_records || bank.phantom_count > Synth::max_phantom_entries ||
+        bank.bank.instruments.num_allocated > Synth::max_instruments ||
+        bank.bank.envelopes.num_allocated > Synth::max_envelopes || bank.bank.lfos.num_allocated > Synth::max_lfos) {
         return false;
     }
     for (uint32_t owner = 0; owner <= Synth::max_channels; ++owner) {
@@ -1031,19 +1062,85 @@ bool Sculptor::validate_editor_metadata(const Synth::InstrumentEditorBank& bank)
             if (Sculptor::count_projected_nodes(bank, channel, zone) > Sculptor::max_nodes) {
                 return false;
             }
-            // A missing-sum bit must reference an existing oscillator layer:
-            // a bit beyond the zone's layer count would mark a sum input
-            // that does not exist and disable the channel for nothing.
+            // A missing-sum bit must reference a row of the zone's projected
+            // node run: the run hosts every red-marked row (its phantom shell)
+            // and the connected layers compacted around the red rows, and ends
+            // at the first row that is neither.  A bit at or beyond the run's
+            // free row marks a sum input no node exists for and would disable
+            // the channel for nothing.  Every set bit must also carry its
+            // phantom store entry, and every entry must belong to a set bit -
+            // the pairing keeps the compiled instrument and the shells
+            // consistent.
+            const uint8_t bits = bank.graph_missing_sum[channel][zone];
+            if ((bits & static_cast<uint8_t>(~0x7Fu)) != 0) {
+                return false;
+            }
             uint32_t           layers     = 0;
             const Synth::Zone& zone_entry = bank.bank.channel_zones[channel][zone];
+            // A zone without an instrument has no rows to mark.
+            if (bits != 0 &&
+                (zone_entry.start_note == 0 || zone_entry.instrument >= bank.bank.instruments.num_allocated)) {
+                return false;
+            }
             if (zone_entry.start_note != 0 && zone_entry.instrument < bank.bank.instruments.num_allocated) {
                 const Synth::Instrument& instrument = bank.bank.instruments.entries[zone_entry.instrument];
                 layers = instrument.layer_count <= Synth::max_layers ? instrument.layer_count : Synth::max_layers;
             }
-            // layers is clamped to max_layers, so the shift covers every
-            // layer count including a full one: any bit at or beyond the
-            // layer count (a stray high bit) invalidates.
-            if ((bank.graph_missing_sum[channel][zone] >> layers) != 0) {
+            const uint32_t run_length = Sculptor::osc_row_run_length(layers, bits);
+            for (uint32_t row = 0; row < Synth::max_layers; ++row) {
+                if ((bits & (1u << row)) == 0) {
+                    continue;
+                }
+                if (row >= run_length || Sculptor::find_phantom_entry(bank, channel, zone, row) < 0) {
+                    return false;
+                }
+            }
+            // Every connected layer must fit inside the projected run: a
+            // layer_count + red-row count above max_layers would make the
+            // projection silently drop the last connected layer.
+            uint32_t red_rows = 0;
+            for (uint32_t row = 0; row < Synth::max_layers; ++row) {
+                red_rows += (bits >> row) & 1u;
+            }
+            if (layers + red_rows > Synth::max_layers) {
+                return false;
+            }
+        }
+    }
+    // Direct in-memory callers bypass the decoder's set_phantom_entry
+    // dedup, so the entries' key uniqueness is checked here (the store's
+    // count bound sits at the validator entrance, before the count-driven
+    // reads above).
+    // The store holds nothing outside live keys: an entry whose bit is
+    // unset has no red row to project from.  Each entry's payload must
+    // satisfy the oscillator semantic rules and reference occupied
+    // descriptors, exactly like a compiled layer.
+    for (uint32_t i = 0; i < bank.phantom_count; ++i) {
+        const Synth::PhantomOscillator& entry = bank.phantoms[i];
+        if (entry.channel >= Synth::max_channels || entry.zone >= Synth::max_instr_per_channel ||
+            entry.layer >= Synth::max_layers) {
+            return false;
+        }
+        if ((bank.graph_missing_sum[entry.channel][entry.zone] & (1u << entry.layer)) == 0) {
+            return false;
+        }
+        if (! validate_oscillator_body(entry.osc)) {
+            return false;
+        }
+        for (uint32_t target = 0; target < Synth::num_mod_targets; target++) {
+            const Synth::TargetBinding& gen = entry.osc.targets[target];
+            if (gen.envelope_desc_id && (gen.envelope_desc_id > bank.bank.envelopes.num_allocated ||
+                                         ! bank.bank.envelopes.is_occupied(gen.envelope_desc_id - 1))) {
+                return false;
+            }
+            if (gen.lfo_desc_id &&
+                (gen.lfo_desc_id > bank.bank.lfos.num_allocated || ! bank.bank.lfos.is_occupied(gen.lfo_desc_id - 1))) {
+                return false;
+            }
+        }
+        for (uint32_t j = 0; j < i; ++j) {
+            const Synth::PhantomOscillator& other = bank.phantoms[j];
+            if (other.channel == entry.channel && other.zone == entry.zone && other.layer == entry.layer) {
                 return false;
             }
         }

@@ -165,6 +165,11 @@ int32_t fx_effect_slot_of(const EffectGraphMapping& mapping, uint32_t node_idx);
 
 // Descriptor id an LFO node projects, or 0 when the node is not an LFO node.
 uint32_t fx_lfo_desc_of(const EffectGraphMapping& mapping, uint32_t node_idx);
+
+// Initialization of a freshly wired effect-LFO binding: one policy for
+// the drop, drag and canvas pathways, so the descriptor assignment and
+// the audible depth seed cannot drift apart.
+void fx_seed_effect_lfo_binding(Synth::EffectParamBinding* binding, uint32_t desc_id);
 // Whether projected param `param` on an effect node carries no modulator:
 // no connection targets its base-value row (an inline wire in transit) or
 // any of its three modulator input dots.  Derived live from connection

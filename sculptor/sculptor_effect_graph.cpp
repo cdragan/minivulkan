@@ -485,6 +485,17 @@ uint32_t Sculptor::fx_lfo_desc_of(const EffectGraphMapping& mapping, uint32_t no
     return 0;
 }
 
+void Sculptor::fx_seed_effect_lfo_binding(Synth::EffectParamBinding* binding, uint32_t desc_id)
+{
+    // One descriptor-assignment and depth-seed policy serves the drop,
+    // drag and canvas pathways, so the fresh-binding default can only
+    // change in one place.
+    binding->lfo_desc_id = static_cast<uint16_t>(desc_id);
+    if (binding->lfo_depth == 0.0f) {
+        binding->lfo_depth = 0.5f; // a depth-0 fresh binding would read as broken
+    }
+}
+
 bool Sculptor::fx_param_is_collapsed(const Graph& graph, const uint32_t node_idx, const uint32_t param)
 {
     return ! graph.slot_is_connected(node_idx, fx_param_row(param)) &&
@@ -575,6 +586,10 @@ bool Sculptor::project_effect_chain_to_graph(const Synth::InstrumentEditorBank& 
 
     const bool                       is_master = chain == Synth::max_channels;
     const Synth::EffectChainBinding& chain_ref = chain_at(bank, chain);
+    uint32_t                         slots[Synth::max_chain_effects];
+    // Computed before node creation: the output node's lane follows the
+    // last projected effect.
+    const uint32_t num_projected = projected_slots(chain_ref, slots);
 
     // node_state_edits_enabled is projection state: every projection
     // starts with plain nodes.  The owning pane installs its callbacks
@@ -583,10 +598,12 @@ bool Sculptor::project_effect_chain_to_graph(const Synth::InstrumentEditorBank& 
     graph->clear();
     graph->node_state_edits_enabled = false;
     // Fixed endpoints: the channel's combined output (all of the channel's
-    // zones) or every channel's output for the master chain.
-    mapping->input_node  = graph->create_node(is_master ? "All channels" : "Channel input", vmath::vec2(0.0f, 0.0f));
-    mapping->output_node = graph->create_node(is_master ? "Master output" : "Channel output",
-                                              vmath::vec2(fx_node_x(Synth::max_chain_effects), 0.0f));
+    // zones) or every channel's output for the master chain.  The output
+    // node sits one step right of the last projected effect, so the lane
+    // never overlaps a projected effect node.
+    mapping->input_node = graph->create_node(is_master ? "All channels" : "Channel input", vmath::vec2(0.0f, 0.0f));
+    mapping->output_node =
+        graph->create_node(is_master ? "Master output" : "Channel output", vmath::vec2(fx_node_x(num_projected), 0.0f));
     if (mapping->input_node == pool_no_slot || mapping->output_node == pool_no_slot) {
         return false;
     }
@@ -618,9 +635,6 @@ bool Sculptor::project_effect_chain_to_graph(const Synth::InstrumentEditorBank& 
             mapping->midi_cc_slots[i] = graph->add_slot(midi_node, output_slot(label));
         }
     }
-
-    uint32_t       slots[Synth::max_chain_effects];
-    const uint32_t num_projected = projected_slots(chain_ref, slots);
 
     for (uint32_t i = 0; i < num_projected; ++i) {
         const uint32_t                  slot   = slots[i];
@@ -660,6 +674,12 @@ bool Sculptor::project_effect_chain_to_graph(const Synth::InstrumentEditorBank& 
                                                 param_info.logarithmic);
 
             row.connectable = binding.lfo_desc_id == 0 || binding.num_inputs < Synth::max_mod_inputs;
+            // The drop-menu anchor: the always-visible base row opens the
+            // Add LFO menu while the parameter carries no wire at all and
+            // modulator capacity remains.  Projection state only; the seam
+            // re-checks the unconnected half at click time.
+            row.drop_menu =
+                binding.lfo_desc_id == 0 && binding.num_inputs == 0 && binding.num_inputs < Synth::max_mod_inputs;
             graph->add_slot(node, row);
             // The modulation row, the oscillator editor's LFO row grammar:
             // the LFO wire lands on the dot, Op picks how the wave combines
@@ -1107,10 +1127,7 @@ static bool apply_fx_graph_change_internal(Synth::InstrumentBank*              b
                     }
                 }
                 Synth::EffectParamBinding& binding = chain.effects[in_slot].bindings[param];
-                binding.lfo_desc_id                = static_cast<uint16_t>(desc_id);
-                if (binding.lfo_depth == 0.0f) {
-                    binding.lfo_depth = 0.5f; // a depth-0 fresh binding would read as broken
-                }
+                Sculptor::fx_seed_effect_lfo_binding(&binding, desc_id);
                 return true;
             }
 
@@ -1283,10 +1300,7 @@ static bool apply_fx_graph_change_internal(Synth::InstrumentBank*              b
                     if (desc_id > bank->lfos.num_allocated) {
                         return false;
                     }
-                    binding.lfo_desc_id = static_cast<uint16_t>(desc_id);
-                    if (binding.lfo_depth == 0.0f) {
-                        binding.lfo_depth = 0.5f; // a depth-0 fresh binding would read as broken
-                    }
+                    Sculptor::fx_seed_effect_lfo_binding(&binding, desc_id);
                     return true;
                 }
                 if (binding.num_inputs >= Synth::max_mod_inputs) {

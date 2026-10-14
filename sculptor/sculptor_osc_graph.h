@@ -195,7 +195,21 @@ bool project_instrument_to_graph(const Synth::Instrument&     instrument,
                                  // one CC output dot per set bit is created
                                  // between the standard dots and the detune
                                  // rows.  Direct callers pass nothing.
-                                 const uint16_t* added_cc_mask = nullptr);
+                                 const uint16_t* added_cc_mask = nullptr,
+                                 // Optional editor-only input: the zone's
+                                 // missing-sum bits (graph_missing_sum), so a
+                                 // red-marked layer row is flagged as a
+                                 // drop-menu anchor at projection time.  Direct
+                                 // callers pass nothing.
+                                 const uint8_t* missing_sum_mask = nullptr,
+                                 // Optional editor-only input: one phantom
+                                 // shell per row, indexed like
+                                 // missing_sum_mask.  A red-marked row
+                                 // projects its entry; with no pointer (or an
+                                 // entry the caller left at the fresh
+                                 // default), the row projects a fresh-default
+                                 // shell.  Direct callers pass nothing.
+                                 const Synth::Oscillator* phantom_layers = nullptr);
 
 // Exports one zone's saved editor positions as portable records relative to the
 // zone's own instrument: every registered record of (channel,zone) that resolves
@@ -305,6 +319,40 @@ uint32_t osc_graph_canonical_index(const OscGraphMapping& mapping, uint32_t node
 // pool_no_slot when the instrument has no enabled layer.
 uint32_t osc_inherit_source_layer(const Synth::Instrument& instrument);
 
+// The waveform pair a newly added oscillator starts with: copied from the
+// highest-index connected oscillator of the zone's run; when the run has
+// no connected row, from the run's last row (a phantom shell); an empty
+// run keeps the existing fresh default (sine with B off).  Test seam: the
+// add consumer lives in the editor TU, so the unit suite needs the
+// callable inheritance query.
+struct OscInheritedType {
+    Synth::WaveType wave_a;
+    Synth::WaveType wave_b;
+};
+
+OscInheritedType osc_inherited_type(const Synth::InstrumentEditorBank& bank, uint32_t channel, uint32_t zone);
+
+// The zone's projected row-run policy, shared by the projection, the
+// node-count walk, the metadata validator and the editor consumers: a
+// red-marked (missing-sum) row hosts its phantom shell, the connected
+// layers compact around the red rows in order, and the run ends at the
+// first row that is neither red-marked nor carrying a remaining
+// connected layer (the free row).
+// The run's length: the free row that ends it, or max_layers when the
+// run fills every row.
+uint32_t osc_row_run_length(uint32_t layer_count, uint8_t missing_bits);
+// Whether the row is red-marked (hosts a phantom shell, no compiled layer).
+bool osc_row_is_red(uint8_t missing_bits, uint32_t row);
+// The number of connected (non-red) rows strictly below the row: the
+// compiled index a connected row compacts to.
+uint32_t osc_row_connected_below(uint8_t missing_bits, uint32_t row);
+// The gray add dot's row on the Oscillator Output node: one row
+// behind the last connected row of the run, or the run's length when
+// nothing is connected (every run row renders red).  The visibility
+// predicate, the projection's drop flags and the gray-dot color seam
+// share this one row.
+uint32_t osc_row_gray_slot(uint32_t run_length, uint8_t missing_bits);
+
 // Writes one descriptor-content property edit through to the bank pool entry
 // named by the node's desc id.  Nodes sharing a desc id edit the same entry,
 // so aliasing stays consistent and repeated edits are idempotent.  Returns
@@ -400,9 +448,25 @@ bool osc_target_block_field(uint32_t slot_idx, uint32_t* target, uint32_t* field
 // TU, so the unit suite needs this callable render-visibility query.
 bool osc_target_field_hidden(const Graph& graph, uint32_t node_idx, uint32_t target, uint32_t field);
 
-// The volume-envelope shape: minimum 0 and the first point at 0, so a
+// Progressive layer visibility on the Oscillator Output node: the
+// visible rows extend to the gray add slot (one row behind the last
+// connected row, or the run's length when nothing is connected); the
+// trailing shells past the gray slot and every row above it hide - a
+// hidden slot renders no connector and no dot hit target.  A non-layer
+// slot index - including the no-slot sentinel - never hides.
+// Pure render-state predicate: all seven slots stay allocated, only the
+// filter hides rows.
+bool osc_layer_slot_hidden(uint32_t slot_idx, const OscGraphMapping& mapping, uint8_t missing_bits);
 // volume envelope starts in silence (tail values remain authored).
 bool env_volume_shape_ok(const Synth::EnvelopeDescriptor& env);
+
+// Forces the volume-envelope shape on a descriptor: minimum 0 with the
+// effective top preserved, and the first and the last raw point at 0.
+// Returns false when the effective top is negative, which cannot be
+// preserved under the nonnegative volume range.  The apply path runs it
+// when a wire lands on a volume target; the drop-commit preset runs it
+// before the commit.
+bool env_convert_to_volume_shape(Synth::EnvelopeDescriptor& env);
 
 // Reports whether the envelope descriptor id serves a volume target, a
 // non-volume target, or both.  Descriptor ids are shared by every cell that
@@ -485,6 +549,18 @@ bool detach_osc_graph_instance(Synth::InstrumentEditorBank* bank,
                                uint32_t                     zone,
                                uint32_t                     registry_idx);
 
+// Index of the (channel, zone, layer) phantom entry, or -1 when none.
+int32_t find_phantom_entry(const Synth::InstrumentEditorBank& bank, uint32_t channel, uint32_t zone, uint32_t layer);
+// Drops one zone-layer's phantom entry; a no-op when the row has none.
+void clear_phantom_entry(Synth::InstrumentEditorBank* bank, uint32_t channel, uint32_t zone, uint32_t layer);
+// Writes one zone-layer's entry (updates in place, otherwise appends);
+// false when appending would exceed the store's fixed capacity.
+bool set_phantom_entry(Synth::InstrumentEditorBank* bank,
+                       uint32_t                     channel,
+                       uint32_t                     zone,
+                       uint32_t                     layer,
+                       const Synth::Oscillator&     osc);
+
 // Shifts the zone's missing-sum bits together with an oscillator layer
 // compaction: bits above `removed_layer` move down by one.
 void compact_missing_sum_bits(Synth::InstrumentEditorBank* bank,
@@ -492,8 +568,9 @@ void compact_missing_sum_bits(Synth::InstrumentEditorBank* bank,
                               uint32_t                     zone,
                               uint32_t                     removed_layer);
 // Publish-time channel_enabled mask: a channel publishes enabled only when no
-// zone of the channel has a missing-sum bit.  The bank's stored
-// channel_enabled values are left untouched (they stay 1).
+// zone of the channel has a missing-sum bit and no zone's instrument has
+// zero layers (a zero-layer instrument never publishes audibly).  The
+// bank's stored channel_enabled values are left untouched (they stay 1).
 void compute_publish_channel_enabled(const Synth::InstrumentEditorBank& bank, uint8_t out_enabled[Synth::max_channels]);
 
 // Zone-table metadata mutation rules.  Records and mask rows move together.

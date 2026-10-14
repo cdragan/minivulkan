@@ -25,6 +25,7 @@ using Sculptor::max_node_slots;
 using Sculptor::max_nodes;
 using Sculptor::PropertyType;
 using Sculptor::SlotKind;
+using Sculptor::snap_to_grid;
 
 constexpr float node_padding         = 8.0f;                     // inner margins of a node rect
 constexpr float node_corner_rounding = 4.0f;                     // slight corner radius on node rects
@@ -83,11 +84,6 @@ static void pop_zoom_font(float previous_scale)
 void add_text_scaled(ImDrawList* draw_list, vmath::vec2 pos, float scale, ImU32 color, const char* text)
 {
     draw_list->AddText(ImGui::GetFont(), ImGui::GetFontSize() * scale, ImVec2(pos.x, pos.y), color, text);
-}
-
-float snap_to_grid(float value)
-{
-    return floor(value / graph_grid_spacing) * graph_grid_spacing;
 }
 
 } // namespace
@@ -537,9 +533,17 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
                 const float dot_x     = slot.kind == SlotKind::output
                                             ? rect_max.x - static_cast<float>(right_dots++) * dot_space * render_scale
                                             : rect_min.x + static_cast<float>(left_dots++) * dot_space * render_scale;
-                const ImU32 dot_color = to_imgui(connected                           ? colors_.connector_connected
-                                                 : slot_missing(node_idx, elem_slot) ? colors_.connector_missing
-                                                                                     : colors_.connector);
+                bool        missing   = slot_missing(node_idx, elem_slot);
+                // The gray add dot renders in the neutral color even while
+                // its missing mark stays set for the compile skip (the
+                // Oscillator Output's gray slot on a trailing shell).
+                if (missing && slot_gray_callback &&
+                    slot_gray_callback(slot_gray_user_data, *this, node_idx, elem_slot)) {
+                    missing = false;
+                }
+                const ImU32 dot_color                                = to_imgui(connected ? colors_.connector_connected
+                                                                                : missing ? colors_.connector_missing
+                                                                                          : colors_.connector);
                 dot_positions[node_idx * max_node_slots + elem_slot] = vmath::vec2(dot_x, y_center);
                 if (connected) {
                     draw_list->AddCircleFilled(ImVec2(dot_x, y_center), dot_radius * render_scale, dot_color);
@@ -819,6 +823,28 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
         ImGui::EndPopup();
     }
 
+    // Drop menu opened by releasing a connecting drag over empty canvas:
+    // fully caller-provided items like the canvas menu.  Every dismissal
+    // route (Esc, click elsewhere, chosen item) funnels through the
+    // popup-closed check below, which only returns the widget to idle: the
+    // mode pushes no change events and touches no model state.
+    if (interaction == Interaction::drop_menu && ! ImGui::IsPopupOpen("drop_menu")) {
+        interaction     = Interaction::idle;
+        drop_menu_from  = EndPoint{ pool_no_slot, pool_no_slot };
+        drop_menu_point = {};
+    }
+    if (interaction == Interaction::drop_menu && ImGui::BeginPopup("drop_menu")) {
+        // The shared Esc block skips this mode, so Esc closes the popup from
+        // inside it; the popup-closed check then applies the cleanup.
+        if (ImGui::IsKeyPressed(ImGuiKey_Escape)) {
+            ImGui::CloseCurrentPopup();
+        }
+        if (drop_menu_callback) {
+            drop_menu_callback(drop_menu_user_data);
+        }
+        ImGui::EndPopup();
+    }
+
     // Rubber band while active (screen space so it stays crisp while panning
     // is impossible anyway: zoom is frozen during interactions).
     if (interaction == Interaction::rubber_band) {
@@ -859,11 +885,14 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
     // Active interaction progression.  InputText handles the renaming state;
     // the other modes end on mouse release.
     // Cancellation wins over release, including under an error overlay.
+    // The drop-menu mode is excluded: its popup owns Esc through the
+    // CloseCurrentPopup in the seam above, and the popup-closed check
+    // applies the standard cleanup.
     if (ImGui::IsWindowHovered() && in_widget(mouse_screen) && ImGui::IsKeyPressed(ImGuiKey_Escape)) {
         if (error_active) {
             dismiss_error();
         }
-        if (interaction != Interaction::renaming) {
+        if (interaction != Interaction::renaming && interaction != Interaction::drop_menu) {
             interaction         = Interaction::idle;
             retarget_connection = pool_no_slot;
             dragged_node        = pool_no_slot;
@@ -933,7 +962,11 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
                 break;
             }
             // Released over a dot: connect in whichever direction the drag
-            // goes.  Released elsewhere: cancel, nothing added.
+            // goes.  Released over empty canvas on an eligible anchor: open
+            // the caller creation menu at the release point.  Released
+            // elsewhere: cancel, nothing added.  Empty canvas means no dot
+            // and no node body under the drop, and releases outside the
+            // widget always cancel.
             const EndPoint drop = dot_at(mouse_screen);
             if (drop.node_idx != pool_no_slot) {
                 const Slot& from_slot = nodes.entries[connecting_from.node_idx].slots.entries[connecting_from.slot_idx];
@@ -944,6 +977,15 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
                     input_end  = connecting_from;
                 }
                 attempt_connection(output_end, input_end);
+            }
+            else if (in_widget(mouse_screen) && ! node_hit && drop_menu_eligible(connecting_from) &&
+                     drop_menu_callback) {
+                interaction     = Interaction::drop_menu;
+                drop_menu_from  = connecting_from;
+                drop_menu_point = mouse_graph();
+
+                ImGui::OpenPopup("drop_menu");
+                break;
             }
             interaction = Interaction::idle;
             break;
@@ -1009,6 +1051,7 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
             break;
         }
         case Interaction::renaming:
+        case Interaction::drop_menu: // the popup seam above owns this mode
         case Interaction::idle:
             break;
     }
@@ -1179,20 +1222,27 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
         draw_list->AddCircleFilled(ImVec2(mid.x, mid.y), (dot_radius * render_scale) * 0.6f, line_color);
     }
 
-    // In-progress line: anchor dot to the mouse, hollow dot at the mouse.
+    // Pending wire: anchor dot to the mouse during a drag, or to the stored
+    // release point while the drop menu is open.  Hollow dot at the far end.
     // A stale retarget anchor (connection deleted mid-drag) draws nothing.
     const bool retarget_alive =
         interaction != Interaction::retargeting ||
         (retarget_connection < max_connections && connections.is_occupied(retarget_connection) &&
          nodes.is_occupied(connecting_from.node_idx));
-    if ((interaction == Interaction::connecting || (interaction == Interaction::retargeting && retarget_alive)) &&
-        connecting_from.node_idx < max_nodes) {
-        const vmath::vec2 p0 = dot_positions[connecting_from.node_idx * max_node_slots + connecting_from.slot_idx];
-        const vmath::vec2 p3 = mouse_screen;
+    // The drop menu freezes the wire at the release point; zoom_scale (not
+    // raw zoom: a zero zoom renders as 1) keeps the endpoint right there.
+    const EndPoint pending_anchor = interaction == Interaction::drop_menu ? drop_menu_from : connecting_from;
+    if ((interaction == Interaction::connecting || interaction == Interaction::drop_menu ||
+         (interaction == Interaction::retargeting && retarget_alive)) &&
+        pending_anchor.node_idx < max_nodes) {
+        const vmath::vec2 p0 = dot_positions[pending_anchor.node_idx * max_node_slots + pending_anchor.slot_idx];
+        const vmath::vec2 p3 = interaction == Interaction::drop_menu
+                                   ? (origin + ((drop_menu_point - view_origin) * zoom_scale))
+                                   : mouse_screen;
         const float dx = fabsf(p3.x - p0.x) * 0.5f > curve_min_reach ? fabsf(p3.x - p0.x) * 0.5f : curve_min_reach;
         // The curve leaves an output dot rightward, an input or property dot
         // leftward, so dragging from an input bends away from its node.
-        const Slot&       anchor_slot = nodes.entries[connecting_from.node_idx].slots.entries[connecting_from.slot_idx];
+        const Slot&       anchor_slot = nodes.entries[pending_anchor.node_idx].slots.entries[pending_anchor.slot_idx];
         const bool        anchor_is_output = anchor_slot.kind == SlotKind::output;
         const vmath::vec2 p1(anchor_is_output ? p0.x + dx : p0.x - dx, p0.y);
         const vmath::vec2 p2(anchor_is_output ? p3.x - dx : p3.x + dx, p3.y);

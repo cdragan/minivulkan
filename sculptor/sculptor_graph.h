@@ -48,8 +48,13 @@ struct Slot {
     float         real_max;
     bool          real_bounded;
     bool          real_logarithmic; // bounded slider uses a logarithmic curve
+    bool          drop_menu;        // release-over-empty-canvas opens the caller creation menu (projection state)
     char          list_options[8][32];
 };
+
+// The drop-menu flag consumes spare padding capacity, keeping sizeof(Slot)
+// at 312.
+static_assert(sizeof(Slot) == 312, "Slot size drifted; the drop_menu flag must stay within the 312-byte size budget");
 
 // Shared slot construction helpers, the grammar both projections (oscillator
 // and effect) build their node rows from.
@@ -141,6 +146,11 @@ using NodeDeleteVeto = bool (*)(void* user_data, uint32_t node_idx);
 // fully caller-provided (the widget adds no items of its own). May be null.
 using CanvasMenuCallback = void (*)(void* user_data);
 
+// Caller items for the drop menu opened when a connecting drag from an
+// eligible slot releases over empty canvas; fully caller-provided like the
+// canvas menu.  May be null.
+using DropMenuCallback = void (*)(void* user_data);
+
 // Caller items for the node right-click popup, invoked with the right-clicked
 // node before the widget's built-in items.  Returns true when items were added
 // (the widget then separates them from its own).  May be null.
@@ -191,6 +201,13 @@ struct GraphChange {
 // slots, indices, connections and snapshots stay untouched.  May be null.
 using SlotHiddenCallback = bool (*)(void* user_data, const Graph& graph, uint32_t node_idx, uint32_t slot_idx);
 
+// Caller gray-dot override for projected slots: return true to render the
+// slot's unconnected dot in the neutral color even while its missing mark
+// stays set (the Oscillator Output's gray add dot on a trailing shell's
+// slot, whose mark feeds the compile skip).  A renderer read-only hook.
+// May be null.
+using SlotGrayCallback = bool (*)(void* user_data, const Graph& graph, uint32_t node_idx, uint32_t slot_idx);
+
 constexpr uint32_t max_pending_changes = 256;
 
 // Shared between the data model and the renderer.
@@ -198,6 +215,10 @@ constexpr float graph_grid_spacing    = 16.0f; // nodes and drags snap to this
 constexpr int   graph_grid_axis_cells = 4;     // stronger line every N cells
 constexpr float graph_min_zoom        = 0.25f;
 constexpr float graph_max_zoom        = 4.0f;
+
+// Floors to the shared 16 px grid: node placement, drag moves and drop-menu
+// landing positions all snap through this one spelling.
+float snap_to_grid(float value);
 
 struct GraphColors { // packed 0xRRGGBBAA, converted to ImU32 at draw time
     uint32_t node_background;
@@ -273,6 +294,8 @@ public:
     uint32_t moving_connection = pool_no_slot;
     // Installs the caller's slot display filter (see SlotHiddenCallback).
     void set_slot_hidden_callback(SlotHiddenCallback callback, void* user_data);
+    // Installs the caller's gray-dot override (see SlotGrayCallback).
+    void set_slot_gray_callback(SlotGrayCallback callback, void* user_data);
     // True means deleted or handled cancellation; false means invalid/stale index.
     bool user_delete_connection(uint32_t connection_idx);
 
@@ -342,9 +365,21 @@ public:
     // for callers that place added nodes at the menu point.
     vmath::vec2 canvas_popup_pos() const;
 
-    // True while a state-mutating interaction is in progress (drag, edit...).
-    // The caller uses the false->true edge to push a pre-change snapshot and
-    // groups all changes of one interaction into a single undo entry.
+    // Empty-canvas drop menu: installs the caller items shown when a
+    // connecting drag from an eligible slot releases over empty canvas.
+    void set_drop_menu_callback(DropMenuCallback callback, void* user_data);
+    // The anchor slot and the graph-space release point of the drag that
+    // opened the drop menu; valid while the menu is open.
+    EndPoint    drop_menu_anchor() const;
+    vmath::vec2 drop_menu_pos() const;
+    // True when a release over empty canvas from this endpoint opens the
+    // drop menu: slot flagged at projection time and not connected.
+    bool drop_menu_eligible(EndPoint anchor) const;
+
+    // True while any interaction is in progress (drag, edit...), including the
+    // drop-menu mode, which is active but changes no model state.  The caller
+    // uses the false->true edge to push a pre-change snapshot and groups all
+    // changes of one interaction into a single undo entry.
     bool interaction_active() const;
 
     // Change notification: every mutation pushes an event.  take_changes
@@ -472,6 +507,8 @@ private:
     void*              validator_user_data   = nullptr;
     SlotHiddenCallback slot_hidden_callback  = nullptr;
     void*              slot_hidden_user_data = nullptr;
+    SlotGrayCallback   slot_gray_callback    = nullptr;
+    void*              slot_gray_user_data   = nullptr;
 
     // Caller veto for delete_node and items for the canvas popup.
     NodeDeleteVeto     delete_veto           = nullptr;
@@ -480,6 +517,8 @@ private:
     NodeMenuCallback   node_menu_callback    = nullptr;
     void*              node_menu_user_data   = nullptr;
     void*              canvas_menu_user_data = nullptr;
+    DropMenuCallback   drop_menu_callback    = nullptr;
+    void*              drop_menu_user_data   = nullptr;
 
     // Error overlay state.
     char        error_message[128]           = {};
@@ -510,6 +549,7 @@ private:
         connecting    = 4, // dragging a new connection from a free dot
         retargeting   = 5, // dragging one end of an existing connection
         rubber_band   = 6, // Ctrl + drag selection rectangle on empty canvas
+        drop_menu     = 7, // creation menu open after a drop on empty canvas
     };
     Interaction interaction = Interaction::idle;
     uint32_t    dragged_node;
@@ -527,6 +567,11 @@ private:
     uint32_t    popup_connection;            //  connection shown in the Delete popup
     uint32_t    popup_node;                  //  node shown in the align/Delete popup
     vmath::vec2 popup_canvas_pos = {};       //  right-click point for the canvas popup add
+    // Drop-menu mode: the anchor and the release point stay frozen while the
+    // menu is open; cleared with the other popup state by the dismissal
+    // check, the anchor-deletion guards and clear().
+    EndPoint    drop_menu_from  = EndPoint{ ::pool_no_slot, ::pool_no_slot };
+    vmath::vec2 drop_menu_point = {};
 
     // Per-slot "missing" render state (red unconnected dot), editor-settable.
     // Kept out of graph snapshots: the editor re-applies the marks after every

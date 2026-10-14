@@ -44,6 +44,26 @@ using Sculptor::PropertyType;
 using Sculptor::Slot;
 using Sculptor::SlotKind;
 
+namespace {
+
+// Unique marker color standing in for the pending-wire stroke in the
+// frozen-wire test: connector_hover is the color the in-progress wire
+// and the connection mid-dot hover share.
+constexpr uint32_t marker_wire_color = IM_COL32(0x0A, 0xCD, 0x0A, 0xFF);
+
+struct MarkerVertex {
+    float x;
+    float y;
+};
+
+// Drop-menu test state: the callback counts invocations; the close request
+// turns the next invocation into an item click that closes the popup itself.
+uint32_t drop_menu_invocations = 0;
+bool     drop_menu_item_chosen = false;
+bool     drop_menu_close_item  = false;
+
+} // namespace
+
 static uint32_t drain_changes(Graph& graph, GraphChange* out, uint32_t out_size)
 {
     const uint32_t count = graph.take_changes(out, out_size);
@@ -1171,6 +1191,10 @@ static void test_canvas_menu_callback_api()
 // clear() must leave no stale interaction state behind: the error overlay
 // is dismissed and the canvas popup target is reset so the renderer's
 // Delete item cannot act on a reused connection index.
+// Defined with the drop-menu renderer tests below: the drop-menu fields are
+// renderer-set private state, so clear()'s reset needs one real menu open.
+static void test_clear_resets_drop_menu_state();
+
 static void test_clear_resets_popup_and_error()
 {
     Graph& g = reset_unit_graph(0);
@@ -1211,6 +1235,8 @@ static void test_clear_resets_popup_and_error()
     TEST(g.add_connection(EndPoint{ node_c, 0 }, EndPoint{ node_d, 0 }) != Sculptor::pool_no_slot);
     TEST(! g.has_error());
     TEST(g.connection_popup() == Sculptor::pool_no_slot);
+
+    test_clear_resets_drop_menu_state();
 }
 
 // Row groups pack several slots of one node onto a single renderer line
@@ -1432,7 +1458,14 @@ static void test_user_disconnect_and_intent_capacity()
     TEST(graph.take_changes(changes, max_pending_changes) == 0);
 }
 
-static uint32_t render_frame(Graph& graph, ImVec2 mouse, bool down, bool escape = false, bool right = false)
+static uint32_t render_frame(Graph&        graph,
+                             ImVec2        mouse,
+                             bool          down,
+                             bool          escape       = false,
+                             bool          right        = false,
+                             uint32_t*     marker_count = nullptr,
+                             MarkerVertex* marker_out   = nullptr,
+                             uint32_t      marker_cap   = 0)
 {
     ImGuiIO& io = ImGui::GetIO();
     io.AddMousePosEvent(mouse.x, mouse.y);
@@ -1448,13 +1481,24 @@ static uint32_t render_frame(Graph& graph, ImVec2 mouse, bool down, bool escape 
     graph.render(vmath::vec2(1000, 740), nullptr);
     const ImDrawList* draw              = ImGui::GetWindowDrawList();
     uint32_t          old_wire_vertices = 0;
+    uint32_t          markers           = 0;
     for (const ImDrawVert& vertex : draw->VtxBuffer) {
         if (vertex.col == IM_COL32(17, 29, 43, 255)) {
             ++old_wire_vertices;
         }
+        else if (marker_count != nullptr && vertex.col == marker_wire_color) {
+            if (marker_out != nullptr && markers < marker_cap) {
+                marker_out[markers].x = vertex.pos.x;
+                marker_out[markers].y = vertex.pos.y;
+            }
+            ++markers;
+        }
     }
     ImGui::End();
     ImGui::Render();
+    if (marker_count != nullptr) {
+        *marker_count = markers;
+    }
     return old_wire_vertices;
 }
 
@@ -1467,7 +1511,9 @@ static ImVec2 audio_dot(const Graph& graph, uint32_t node, bool output)
                   8 + graph.node(node).position.y + 8 + line_height + (frame_height + 4) * 0.5f);
 }
 
-static void test_renderer_audio_endpoint_mouse_frames()
+// Renderer-harness context setup shared by every renderer-driven test
+// (1024x768 display, no ini or log output).
+static void create_renderer_context()
 {
     ImGui::CreateContext();
     ImGuiIO& io                     = ImGui::GetIO();
@@ -1481,6 +1527,11 @@ static void test_renderer_audio_endpoint_mouse_frames()
     ImGui::EndFrame();
     ImTextureData* tex = io.Fonts->TexData;
     TEST(tex && tex->Pixels && tex->Width > 0 && tex->Height > 0);
+}
+
+static void test_renderer_audio_endpoint_mouse_frames()
+{
+    create_renderer_context();
     for (uint32_t endpoint = 0; endpoint < 2; ++endpoint) {
         for (uint32_t action = 0; action < 8; ++action) {
             ImGui::ClosePopupsOverWindow(nullptr, false);
@@ -1613,7 +1664,7 @@ static void test_renderer_audio_endpoint_mouse_frames()
             graph.take_changes(changes, 16);
             render_frame(graph, ImVec2(8, 8), false);
             render_frame(graph, ImVec2(8, 8), false);
-            io.AddMouseWheelEvent(0, scale < 1 ? -100.0f : 100.0f);
+            ImGui::GetIO().AddMouseWheelEvent(0, scale < 1 ? -100.0f : 100.0f);
             render_frame(graph, ImVec2(8, 8), false);
             render_frame(graph, ImVec2(8, 8), false);
             const uint32_t node  = endpoint ? source : target;
@@ -1646,15 +1697,768 @@ static void test_renderer_audio_endpoint_mouse_frames()
     ImGui::DestroyContext();
 }
 
+// Builds the anchor: one node with one connectable parameter on its
+// first line, flagged for the drop menu or left unflagged.
+static uint32_t add_param_anchor(Graph& graph, vmath::vec2 position, bool flagged)
+{
+    const uint32_t node = graph.create_node("osc", position);
+    TEST(node != Sculptor::pool_no_slot);
+    Slot param          = {};
+    param.kind          = SlotKind::property;
+    param.connectable   = true;
+    param.property_type = PropertyType::real;
+    param.value.real    = 0.5f;
+    param.drop_menu     = flagged;
+    snprintf(param.name, sizeof(param.name), "volume");
+    TEST(graph.add_slot(node, param) == 0);
+    return node;
+}
+
+static void test_drop_menu_callback(void* user_data)
+{
+    (void)user_data;
+    ++drop_menu_invocations;
+    if (drop_menu_close_item) {
+        ImGui::CloseCurrentPopup();
+        drop_menu_item_chosen = true;
+    }
+}
+
+static uint32_t count_occupied_nodes(const Graph& graph)
+{
+    uint32_t count = 0;
+    for (uint32_t i = 0; i < max_nodes; ++i) {
+        if (graph.node_occupied(i)) {
+            ++count;
+        }
+    }
+    return count;
+}
+
+// Drives the harness from idle to an open drop menu: press the anchor
+// parameter dot, drag to the release point, let go, then one frame so the
+// popup opens and the callback runs.  The optional explicit screen-space
+// anchor overrides the audio_dot-based press math (which assumes zoom 1
+// and zero view origin) for pan/zoom tests that pass the transformed
+// position.
+static void open_drop_menu(Graph&        graph,
+                           uint32_t      anchor_node,
+                           uint32_t      anchor_slot,
+                           ImVec2        release,
+                           const ImVec2* anchor_dot_screen = nullptr)
+{
+    Sculptor::DropMenuCallback install = &test_drop_menu_callback;
+    graph.set_drop_menu_callback(install, nullptr);
+
+    // One settle frame first: audio_dot measures live font metrics, which
+    // a fresh context only has after its first NewFrame.
+    render_frame(graph, ImVec2(900.0f, 600.0f), false);
+    const ImVec2 dot = anchor_dot_screen ? *anchor_dot_screen : audio_dot(graph, anchor_node, false);
+    render_frame(graph, dot, false);
+    render_frame(graph, dot, true);
+    TEST(graph.interaction_active());
+    render_frame(graph, release, true);
+    render_frame(graph, release, false);
+    TEST(graph.interaction_active());
+    TEST(graph.drop_menu_anchor().node_idx == anchor_node);
+    TEST(graph.drop_menu_anchor().slot_idx == anchor_slot);
+    render_frame(graph, release, false); // popup opens, callback runs
+    TEST(graph.interaction_active());
+    TEST(drop_menu_invocations > 0);
+}
+
+static bool marker_vertices_equal(const MarkerVertex* a, const MarkerVertex* b, uint32_t count)
+{
+    for (uint32_t i = 0; i < count; ++i) {
+        if (a[i].x != b[i].x || a[i].y != b[i].y) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// True when any captured marker vertex sits within `tolerance` of `point`:
+// the analytic position of the wire's anchor or hollow endpoint.
+static bool marker_has_vertex_near(const MarkerVertex* vertices, uint32_t count, ImVec2 point, float tolerance)
+{
+    for (uint32_t i = 0; i < count; ++i) {
+        const float dx = vertices[i].x - point.x;
+        const float dy = vertices[i].y - point.y;
+        if (dx * dx + dy * dy <= tolerance * tolerance) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// The anchor dot's true on-screen center, measured from the rendered
+// unconnected-connector ring (the graph under test has exactly one dot, so
+// the one gray ring is unambiguous).  The audio_dot formula is only exact
+// enough in identity view: the dot pick radius is a constant 9 px on
+// screen, so the formula's few-px row-offset error scales past it at
+// extreme zoom and a formula-based press would grab the node body instead.
+// The press itself is not the assertion; the analytic view checks below
+// are.
+static ImVec2 rendered_dot_center(Graph& graph)
+{
+    ImGui::NewFrame();
+    ImGui::SetNextWindowPos(ImVec2(0, 0));
+    ImGui::SetNextWindowSize(ImVec2(1024, 768));
+    ImGui::Begin("graph mouse regression",
+                 nullptr,
+                 ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove);
+    graph.render(vmath::vec2(1000, 740), nullptr);
+    const ImDrawList* draw  = ImGui::GetWindowDrawList();
+    float             sum_x = 0.0f;
+    float             sum_y = 0.0f;
+    uint32_t          ring  = 0;
+    for (const ImDrawVert& vertex : draw->VtxBuffer) {
+        if (vertex.col == IM_COL32(0x90, 0x90, 0x90, 0xFF)) { // the default connector color
+            sum_x += vertex.pos.x;
+            sum_y += vertex.pos.y;
+            ++ring;
+        }
+    }
+    ImGui::End();
+    ImGui::Render();
+    TEST(ring > 0);
+    return ImVec2(sum_x / static_cast<float>(ring), sum_y / static_cast<float>(ring));
+}
+
+// Pure-math model test of the exported grid snap: floor to the 16 px grid
+// with no graph state involved.  Exactly at a half step snaps down, and
+// negative inputs snap toward negative infinity, not toward zero.
+static void test_snap_to_grid_values()
+{
+    TEST(Sculptor::snap_to_grid(0.0f) == 0.0f);
+    TEST(Sculptor::snap_to_grid(7.9f) == 0.0f); // below the half step
+    TEST(Sculptor::snap_to_grid(8.0f) == 0.0f); // at the half step snaps down
+    TEST(Sculptor::snap_to_grid(8.1f) == 0.0f); // above the half step, same cell
+    TEST(Sculptor::snap_to_grid(15.9f) == 0.0f);
+    TEST(Sculptor::snap_to_grid(16.0f) == 16.0f); // on-grid input stays
+    TEST(Sculptor::snap_to_grid(23.9f) == 16.0f);
+    TEST(Sculptor::snap_to_grid(24.0f) == 16.0f); // half step of the next cell
+    TEST(Sculptor::snap_to_grid(24.1f) == 16.0f);
+    TEST(Sculptor::snap_to_grid(31.9f) == 16.0f);
+    TEST(Sculptor::snap_to_grid(32.0f) == 32.0f);
+    TEST(Sculptor::snap_to_grid(-0.1f) == -16.0f);
+    TEST(Sculptor::snap_to_grid(-8.0f) == -16.0f); // at the half step snaps down
+    TEST(Sculptor::snap_to_grid(-15.9f) == -16.0f);
+    TEST(Sculptor::snap_to_grid(-16.0f) == -16.0f);
+    TEST(Sculptor::snap_to_grid(-17.0f) == -32.0f);
+}
+
+// Every dismissal route (Esc, click elsewhere, item click) returns the
+// widget to idle, clears the seam state and creates nothing.
+static void test_drop_menu_dismissal_paths_leave_graph_unchanged()
+{
+    create_renderer_context();
+
+    for (uint32_t path = 0; path < 3; ++path) {
+        ImGui::ClosePopupsOverWindow(nullptr, false);
+        drop_menu_invocations = 0;
+        drop_menu_item_chosen = false;
+        drop_menu_close_item  = path == 2;
+
+        Graph& graph = reset_unit_graph(0);
+        graph.clear();
+        graph.set_colors(Sculptor::default_graph_colors());
+        const uint32_t anchor = add_param_anchor(graph, vmath::vec2(16.0f, 16.0f), true);
+        GraphChange    changes[max_pending_changes];
+        graph.take_changes(changes, max_pending_changes);
+
+        const ImVec2 release(700.0f, 600.0f);
+        open_drop_menu(graph, anchor, 0, release);
+        const uint32_t baseline_nodes = count_occupied_nodes(graph);
+
+        if (path == 0) {
+            // Esc closes the popup from inside the widget's popup branch.
+            render_frame(graph, release, false, true);
+        }
+        else if (path == 1) {
+            // Click outside the widget: the dismissal click must not start
+            // a pan or any other interaction.
+            render_frame(graph, ImVec2(1016.0f, 762.0f), true);
+            render_frame(graph, ImVec2(1016.0f, 762.0f), false);
+        }
+        else {
+            // Item click: the caller menu entry closed the popup itself.
+            TEST(drop_menu_item_chosen);
+        }
+
+        // Dismissal resolves on the frame after the closing event.
+        render_frame(graph, release, false);
+
+        TEST(! graph.interaction_active());
+        TEST(count_occupied_nodes(graph) == baseline_nodes);
+        TEST(graph.connection_count() == 0);
+        TEST(! graph.has_error());
+        TEST(graph.take_changes(changes, max_pending_changes) == 0);
+        TEST(graph.drop_menu_anchor().node_idx == Sculptor::pool_no_slot);
+        TEST(graph.drop_menu_pos().x == 0.0f);
+        TEST(graph.drop_menu_pos().y == 0.0f);
+    }
+    ImGui::DestroyContext();
+}
+
+// The pending wire stays drawn from the anchor dot to the
+// release point while the menu is open, frozen against mouse moves.
+static void test_drop_menu_pending_wire_frozen_at_release_point()
+{
+    create_renderer_context();
+
+    ImGui::ClosePopupsOverWindow(nullptr, false);
+    drop_menu_invocations = 0;
+    drop_menu_item_chosen = false;
+    drop_menu_close_item  = false;
+
+    Graph& graph = reset_unit_graph(0);
+    graph.clear();
+    GraphColors colors     = Sculptor::default_graph_colors();
+    colors.connector_hover = 0x0ACD0AFFu; // the marker color
+    graph.set_colors(colors);
+    const uint32_t anchor = add_param_anchor(graph, vmath::vec2(16.0f, 16.0f), true);
+    GraphChange    changes[max_pending_changes];
+    graph.take_changes(changes, max_pending_changes);
+
+    // The probe touches no dot and no connection mid-dot, so only the
+    // pending wire can carry the marker color.
+    const ImVec2 probe(300.0f, 650.0f);
+    const ImVec2 release(700.0f, 600.0f);
+
+    uint32_t marker_count = 0;
+    render_frame(graph, probe, false, false, false, &marker_count);
+    const uint32_t idle_baseline = marker_count;
+
+    MarkerVertex before[512];
+    MarkerVertex after[512];
+
+    open_drop_menu(graph, anchor, 0, release);
+    const vmath::vec2 pos_before = graph.drop_menu_pos();
+    TEST(pos_before.x != 0.0f || pos_before.y != 0.0f);
+
+    render_frame(graph, release, false, false, false, &marker_count, before, 512);
+    const uint32_t open_count = marker_count;
+    TEST(open_count > idle_baseline);
+
+    // Mouse moves elsewhere: the wire endpoint must stay at the release
+    // point, not follow the mouse.
+    render_frame(graph, probe, false, false, false, &marker_count);
+    render_frame(graph, probe, false, false, false, &marker_count, after, 512);
+    const uint32_t moved_count = marker_count;
+    TEST(moved_count == open_count);
+    TEST(marker_vertices_equal(before, after, moved_count));
+    TEST(graph.drop_menu_pos().x == pos_before.x);
+    TEST(graph.drop_menu_pos().y == pos_before.y);
+
+    // Dismissal removes the wire back to the idle baseline.
+    render_frame(graph, ImVec2(1016.0f, 762.0f), true);
+    render_frame(graph, ImVec2(1016.0f, 762.0f), false);
+    TEST(! graph.interaction_active());
+    render_frame(graph, probe, false, false, false, &marker_count);
+    TEST(marker_count == idle_baseline);
+    ImGui::DestroyContext();
+}
+
+// The pending wire freezes in identity view coordinates: with a zoomed or
+// panned view the wire endpoint stays at the true release point, mapped
+// back through the live view state, and dismissal returns the idle
+// baseline.
+static void test_drop_menu_pending_wire_identity_view()
+{
+    create_renderer_context();
+    ImGui::ClosePopupsOverWindow(nullptr, false);
+    drop_menu_invocations = 0;
+    drop_menu_item_chosen = false;
+    drop_menu_close_item  = false;
+
+    MarkerVertex before[512];
+    MarkerVertex after[512];
+    GraphChange  changes[max_pending_changes];
+    const ImVec2 origin(8.0f, 8.0f); // widget content origin in the harness window
+
+    // Zoom leg: wheel-zoom to both bounds with the mouse parked at the
+    // widget origin corner (the retarget zoom test's trick), which keeps
+    // the view origin at zero, so every screen position stays analytic
+    // (origin + graph position * scale).
+    const float zooms[] = { Sculptor::graph_min_zoom, Sculptor::graph_max_zoom };
+    for (float scale : zooms) {
+        ImGui::ClosePopupsOverWindow(nullptr, false);
+        drop_menu_invocations = 0;
+        drop_menu_close_item  = false;
+        Graph& graph          = reset_unit_graph(0);
+        graph.clear();
+        GraphColors colors     = Sculptor::default_graph_colors();
+        colors.connector_hover = 0x0ACD0AFFu; // the marker color
+        graph.set_colors(colors);
+        const uint32_t anchor = add_param_anchor(graph, vmath::vec2(16.0f, 16.0f), true);
+        graph.take_changes(changes, max_pending_changes);
+
+        render_frame(graph, origin, false);
+        render_frame(graph, origin, false);
+        ImGui::GetIO().AddMouseWheelEvent(0, scale < 1 ? -100.0f : 100.0f);
+        render_frame(graph, origin, false);
+        render_frame(graph, origin, false);
+        // The view state itself is verified implicitly: with the zoom
+        // applied and the view origin at zero, drop_menu_pos() below maps
+        // the release screen position back to release_graph exactly.
+
+        // The probe touches no dot and no connection mid-dot, so only the
+        // pending wire can carry the marker color.
+        const ImVec2 probe(300.0f, 650.0f);
+        uint32_t     marker_count = 0;
+        render_frame(graph, probe, false, false, false, &marker_count);
+        const uint32_t idle_baseline = marker_count;
+
+        // Release over empty canvas inside the widget at this zoom: the
+        // graph-space release point maps to the analytic screen position.
+        const vmath::vec2 release_graph = scale < 1 ? vmath::vec2(700.0f, 600.0f) : vmath::vec2(200.0f, 160.0f);
+        const ImVec2      release(origin.x + release_graph.x * scale, origin.y + release_graph.y * scale);
+        const ImVec2      anchor_screen = rendered_dot_center(graph);
+
+        open_drop_menu(graph, anchor, 0, release, &anchor_screen);
+
+        // While the menu is open the wire endpoint is the stored release
+        // point mapped back through the view: with a zero view origin the
+        // mapping is exact, so the hollow endpoint must sit at the release
+        // screen position and the wire must leave the transformed anchor.
+        render_frame(graph, release, false, false, false, &marker_count, before, 512);
+        const uint32_t open_count = marker_count;
+        TEST(open_count > idle_baseline);
+        TEST(marker_has_vertex_near(before, open_count, release, 2.0f));
+        TEST(marker_has_vertex_near(before, open_count, anchor_screen, 2.0f));
+        TEST(graph.drop_menu_pos().x == release_graph.x); // power-of-two scales divide exactly
+        TEST(graph.drop_menu_pos().y == release_graph.y);
+
+        // Mouse moves elsewhere: the wire stays frozen at the release point.
+        render_frame(graph, probe, false, false, false, &marker_count);
+        render_frame(graph, probe, false, false, false, &marker_count, after, 512);
+        TEST(marker_count == open_count);
+        TEST(marker_vertices_equal(before, after, marker_count));
+
+        // Dismissal removes the wire back to this zoom's idle baseline.
+        render_frame(graph, ImVec2(1016.0f, 762.0f), true);
+        render_frame(graph, ImVec2(1016.0f, 762.0f), false);
+        TEST(! graph.interaction_active());
+        render_frame(graph, probe, false, false, false, &marker_count);
+        TEST(marker_count == idle_baseline);
+    }
+
+    // Pan leg: pan the identity view by a known screen delta first, which
+    // shifts the view origin by exactly -D, then open the menu from the
+    // transformed anchor and assert the frozen endpoint at the analytic
+    // release position in the panned view.
+    ImGui::ClosePopupsOverWindow(nullptr, false);
+    drop_menu_invocations = 0;
+    drop_menu_close_item  = false;
+    Graph& graph          = reset_unit_graph(0);
+    graph.clear();
+    GraphColors colors     = Sculptor::default_graph_colors();
+    colors.connector_hover = 0x0ACD0AFFu; // the marker color
+    graph.set_colors(colors);
+    const uint32_t anchor = add_param_anchor(graph, vmath::vec2(16.0f, 16.0f), true);
+    graph.take_changes(changes, max_pending_changes);
+
+    const ImVec2 pan_start(500.0f, 400.0f); // empty canvas far from the anchor node
+    const ImVec2 pan_delta(120.0f, 60.0f);
+    render_frame(graph, pan_start, false);
+    render_frame(graph, pan_start, true); // press on empty canvas: panning starts
+    render_frame(graph, ImVec2(pan_start.x + pan_delta.x, pan_start.y + pan_delta.y), true);
+    render_frame(graph, ImVec2(pan_start.x + pan_delta.x, pan_start.y + pan_delta.y), false);
+    TEST(! graph.interaction_active());
+    // The pan itself is verified implicitly: with the view origin shifted
+    // by exactly -D, the transformed anchor press below grabs the dot and
+    // drop_menu_pos() reports the graph-space position under the release
+    // point (release_graph, not release_graph + D).
+
+    const ImVec2 probe(300.0f, 650.0f);
+    uint32_t     marker_count = 0;
+    render_frame(graph, probe, false, false, false, &marker_count);
+    const uint32_t idle_baseline = marker_count;
+
+    const vmath::vec2 release_graph(600.0f, 500.0f);
+    // Screen = origin + (graph - view_origin) = origin + graph + D at zoom 1.
+    const ImVec2 release(origin.x + release_graph.x + pan_delta.x, origin.y + release_graph.y + pan_delta.y);
+    const ImVec2 anchor_screen = rendered_dot_center(graph);
+
+    open_drop_menu(graph, anchor, 0, release, &anchor_screen);
+
+    render_frame(graph, release, false, false, false, &marker_count, before, 512);
+    const uint32_t open_count = marker_count;
+    TEST(open_count > idle_baseline);
+    TEST(marker_has_vertex_near(before, open_count, release, 2.0f));
+    TEST(marker_has_vertex_near(before, open_count, anchor_screen, 2.0f));
+    TEST(graph.drop_menu_pos().x == release_graph.x); // the mouse sits over release_graph in the panned view
+    TEST(graph.drop_menu_pos().y == release_graph.y);
+
+    render_frame(graph, probe, false, false, false, &marker_count);
+    render_frame(graph, probe, false, false, false, &marker_count, after, 512);
+    TEST(marker_count == open_count);
+    TEST(marker_vertices_equal(before, after, marker_count));
+
+    render_frame(graph, ImVec2(1016.0f, 762.0f), true);
+    render_frame(graph, ImVec2(1016.0f, 762.0f), false);
+    TEST(! graph.interaction_active());
+    render_frame(graph, probe, false, false, false, &marker_count);
+    TEST(marker_count == idle_baseline);
+
+    ImGui::DestroyContext();
+}
+
+// Unflagged dot kinds cancel on an empty-canvas
+// release, and a release over a node body opens no menu either.
+static void test_drop_menu_non_eligible_anchors_cancel()
+{
+    create_renderer_context();
+
+    for (uint32_t kind = 0; kind < 3; ++kind) {
+        ImGui::ClosePopupsOverWindow(nullptr, false);
+        drop_menu_invocations = 0;
+        drop_menu_item_chosen = false;
+        drop_menu_close_item  = false;
+
+        Graph& graph = reset_unit_graph(0);
+        graph.clear();
+        graph.set_colors(Sculptor::default_graph_colors());
+        const uint32_t node = graph.create_node(kind == 2 ? "param" : "Effect", vmath::vec2(16.0f, 16.0f));
+        TEST(node != Sculptor::pool_no_slot);
+        Slot slot = {};
+        if (kind == 0) {
+            slot.kind = SlotKind::output;
+            snprintf(slot.name, sizeof(slot.name), "Out");
+        }
+        else if (kind == 1) {
+            slot.kind = SlotKind::input;
+            snprintf(slot.name, sizeof(slot.name), "In");
+        }
+        else {
+            slot.kind          = SlotKind::property;
+            slot.connectable   = true;
+            slot.property_type = PropertyType::real;
+            slot.value.real    = 0.5f;
+            snprintf(slot.name, sizeof(slot.name), "volume");
+        }
+        // No drop_menu flag: eligibility is projection state, so unflagged
+        // dots cancel whatever their kind.
+        TEST(graph.add_slot(node, slot) == 0);
+        GraphChange changes[max_pending_changes];
+        graph.take_changes(changes, max_pending_changes);
+        graph.set_drop_menu_callback(&test_drop_menu_callback, nullptr);
+
+        const ImVec2 release(700.0f, 600.0f);
+        // One settle frame first: audio_dot measures live font metrics, which
+        // a fresh context only has after its first NewFrame.
+        render_frame(graph, ImVec2(900.0f, 600.0f), false);
+        const ImVec2 dot = audio_dot(graph, node, kind == 0);
+        render_frame(graph, dot, false);
+        render_frame(graph, dot, true);
+        TEST(graph.interaction_active());
+        render_frame(graph, release, true);
+        render_frame(graph, release, false);
+        render_frame(graph, release, false);
+
+        TEST(! graph.interaction_active());
+        TEST(drop_menu_invocations == 0);
+        TEST(graph.connection_count() == 0);
+        TEST(graph.take_changes(changes, max_pending_changes) == 0);
+        TEST(graph.drop_menu_anchor().node_idx == Sculptor::pool_no_slot);
+    }
+
+    // Flagged anchor, but the release lands on a node body: empty canvas
+    // means no dot and no node under the drop, so no menu opens there.
+    ImGui::ClosePopupsOverWindow(nullptr, false);
+    drop_menu_invocations = 0;
+    drop_menu_item_chosen = false;
+    drop_menu_close_item  = false;
+
+    Graph& graph = reset_unit_graph(0);
+    graph.clear();
+    graph.set_colors(Sculptor::default_graph_colors());
+    const uint32_t anchor = add_param_anchor(graph, vmath::vec2(16.0f, 16.0f), true);
+    const uint32_t body   = graph.create_node("B", vmath::vec2(256.0f, 256.0f));
+    TEST(body != Sculptor::pool_no_slot);
+    Slot out = {};
+    out.kind = SlotKind::output;
+    snprintf(out.name, sizeof(out.name), "Out");
+    TEST(graph.add_slot(body, out) == 0);
+    Slot in = {};
+    in.kind = SlotKind::input;
+    snprintf(in.name, sizeof(in.name), "In");
+    TEST(graph.add_slot(body, in) == 1);
+    GraphChange changes[max_pending_changes];
+    graph.take_changes(changes, max_pending_changes);
+    graph.set_drop_menu_callback(&test_drop_menu_callback, nullptr);
+
+    const float  font  = ImGui::GetFontSize();
+    const float  frame = font + 2.0f * ImGui::GetStyle().FramePadding.y;
+    const ImVec2 dot   = audio_dot(graph, anchor, false);
+    // The point sits on the body node's second line, clear of its dots.
+    const ImVec2 on_body(8.0f + 256.0f + 30.0f, 8.0f + 256.0f + 8.0f + font + (frame + 4.0f) * 1.5f);
+    render_frame(graph, ImVec2(900.0f, 600.0f), false);
+    render_frame(graph, dot, false);
+    render_frame(graph, dot, true);
+    TEST(graph.interaction_active());
+    render_frame(graph, on_body, true);
+    render_frame(graph, on_body, false);
+    render_frame(graph, on_body, false);
+
+    TEST(! graph.interaction_active());
+    TEST(drop_menu_invocations == 0);
+    TEST(graph.take_changes(changes, max_pending_changes) == 0);
+    TEST(graph.drop_menu_anchor().node_idx == Sculptor::pool_no_slot);
+
+    // Release outside the widget: drops landing on other UI always cancel,
+    // no menu opens and the callback never runs.
+    {
+        ImGui::ClosePopupsOverWindow(nullptr, false);
+        drop_menu_invocations = 0;
+        drop_menu_item_chosen = false;
+        drop_menu_close_item  = false;
+
+        Graph& outside_graph = reset_unit_graph(0);
+        outside_graph.clear();
+        outside_graph.set_colors(Sculptor::default_graph_colors());
+        const uint32_t outside_anchor = add_param_anchor(outside_graph, vmath::vec2(16.0f, 16.0f), true);
+        TEST(outside_anchor != Sculptor::pool_no_slot);
+        GraphChange drop_changes[max_pending_changes];
+        outside_graph.take_changes(drop_changes, max_pending_changes);
+        outside_graph.set_drop_menu_callback(&test_drop_menu_callback, nullptr);
+
+        // One settle frame first: audio_dot measures live font metrics, which
+        // a fresh context only has after its first NewFrame.
+        render_frame(outside_graph, ImVec2(900.0f, 600.0f), false);
+        const ImVec2 anchor_dot = audio_dot(outside_graph, outside_anchor, false);
+        render_frame(outside_graph, anchor_dot, false);
+        render_frame(outside_graph, anchor_dot, true);
+        TEST(outside_graph.interaction_active());
+        const ImVec2 outside(1016.0f, 762.0f);
+        render_frame(outside_graph, outside, true);
+        render_frame(outside_graph, outside, false);
+        render_frame(outside_graph, outside, false);
+
+        TEST(! outside_graph.interaction_active());
+        TEST(drop_menu_invocations == 0);
+        TEST(outside_graph.take_changes(drop_changes, max_pending_changes) == 0);
+        TEST(outside_graph.drop_menu_anchor().node_idx == Sculptor::pool_no_slot);
+    }
+    ImGui::DestroyContext();
+}
+
+// A connected flagged dot retargets its existing wire; the
+// empty-canvas release keeps the disconnect policy and never opens the menu.
+static void test_drop_menu_connected_flagged_dot_retargets()
+{
+    create_renderer_context();
+
+    ImGui::ClosePopupsOverWindow(nullptr, false);
+    drop_menu_invocations = 0;
+    drop_menu_item_chosen = false;
+    drop_menu_close_item  = false;
+
+    Graph& graph = reset_unit_graph(0);
+    graph.clear();
+    graph.set_colors(Sculptor::default_graph_colors());
+    const uint32_t source = graph.create_node("src", vmath::vec2(16.0f, 16.0f));
+    TEST(source != Sculptor::pool_no_slot);
+    Slot out = {};
+    out.kind = SlotKind::output;
+    snprintf(out.name, sizeof(out.name), "Out");
+    TEST(graph.add_slot(source, out) != Sculptor::pool_no_slot);
+    const uint32_t anchor = add_param_anchor(graph, vmath::vec2(256.0f, 256.0f), true);
+    TEST(graph.add_connection(EndPoint{ source, 0 }, EndPoint{ anchor, 0 }) != Sculptor::pool_no_slot);
+    GraphChange changes[max_pending_changes];
+    graph.take_changes(changes, max_pending_changes);
+    graph.set_drop_menu_callback(&test_drop_menu_callback, nullptr);
+
+    const ImVec2 release(700.0f, 600.0f);
+    // One settle frame first: audio_dot measures live font metrics, which a
+    // fresh context only has after its first NewFrame.
+    render_frame(graph, ImVec2(900.0f, 600.0f), false);
+    const ImVec2 dot = audio_dot(graph, anchor, false);
+    render_frame(graph, dot, false);
+    render_frame(graph, dot, true);
+    // The connected dot picks up its existing wire (retargeting), it does
+    // not start a fresh connecting drag.
+    TEST(graph.interaction_active());
+    render_frame(graph, release, true);
+    render_frame(graph, release, false);
+    render_frame(graph, release, false);
+
+    TEST(! graph.interaction_active());
+    TEST(drop_menu_invocations == 0);
+    TEST(graph.connection_count() == 0);
+    TEST(graph.drop_menu_pos().x == 0.0f);
+    TEST(graph.drop_menu_pos().y == 0.0f);
+    bool           found_deleted = false;
+    GraphChange    drained[max_pending_changes];
+    const uint32_t count = graph.take_changes(drained, max_pending_changes);
+    for (uint32_t i = 0; i < count; ++i) {
+        found_deleted = found_deleted || drained[i].kind == ChangeKind::connection_deleted;
+    }
+    TEST(found_deleted);
+    TEST(! graph.has_error());
+    ImGui::DestroyContext();
+}
+
+// Deleting or slot-removing the open menu's anchor cancels the mode: a
+// stale drop_menu_from would keep reading a freed (possibly reused) pool
+// slot, and no wire may draw from whatever reuses the index.
+static void test_drop_menu_anchor_deletion_cancels_mode()
+{
+    create_renderer_context();
+
+    for (uint32_t route = 0; route < 2; ++route) {
+        ImGui::ClosePopupsOverWindow(nullptr, false);
+        drop_menu_invocations = 0;
+        drop_menu_item_chosen = false;
+        drop_menu_close_item  = false;
+
+        Graph& graph = reset_unit_graph(0);
+        graph.clear();
+        GraphColors colors     = Sculptor::default_graph_colors();
+        colors.connector_hover = 0x0ACD0AFFu; // the marker color
+        graph.set_colors(colors);
+        const uint32_t anchor = add_param_anchor(graph, vmath::vec2(16.0f, 16.0f), true);
+        TEST(anchor != Sculptor::pool_no_slot);
+        GraphChange changes[max_pending_changes];
+        graph.take_changes(changes, max_pending_changes);
+
+        open_drop_menu(graph, anchor, 0, ImVec2(700.0f, 600.0f));
+
+        if (route == 0) {
+            graph.delete_node(anchor);
+        }
+        else {
+            graph.remove_slot(anchor, 0);
+        }
+
+        // The mode dies with the anchor; one rendered frame must not
+        // resurrect it or draw a wire off stale state.
+        uint32_t marker_count = 0;
+        render_frame(graph, ImVec2(700.0f, 600.0f), false, false, false, &marker_count);
+        TEST(! graph.interaction_active());
+        TEST(graph.drop_menu_anchor().node_idx == Sculptor::pool_no_slot);
+        TEST(graph.drop_menu_anchor().slot_idx == Sculptor::pool_no_slot);
+        TEST(graph.drop_menu_pos().x == 0.0f);
+        TEST(graph.drop_menu_pos().y == 0.0f);
+        TEST(marker_count == 0);
+        const uint32_t count = graph.take_changes(changes, max_pending_changes);
+        TEST(count == 1);
+        if (count == 1) {
+            TEST(changes[0].kind == (route == 0 ? ChangeKind::node_deleted : ChangeKind::slot_deleted));
+        }
+
+        // A reused node pool index must not be mistaken for the old anchor.
+        if (route == 0) {
+            const uint32_t reused = graph.create_node("reused", vmath::vec2(16.0f, 16.0f));
+            TEST(reused == anchor);
+            render_frame(graph, ImVec2(700.0f, 600.0f), false, false, false, &marker_count);
+            TEST(! graph.interaction_active());
+            TEST(marker_count == 0);
+            const uint32_t reused_count = graph.take_changes(changes, max_pending_changes);
+            TEST(reused_count == 1);
+            if (reused_count == 1) {
+                TEST(changes[0].kind == ChangeKind::node_added);
+            }
+        }
+    }
+    ImGui::DestroyContext();
+}
+
+// clear() must reset the drop-menu mode with the rest of the popup state;
+// the fields are renderer-set private state, so this drives one real open.
+static void test_clear_resets_drop_menu_state()
+{
+    create_renderer_context();
+
+    ImGui::ClosePopupsOverWindow(nullptr, false);
+    drop_menu_invocations = 0;
+    drop_menu_item_chosen = false;
+    drop_menu_close_item  = false;
+
+    Graph& graph = reset_unit_graph(0);
+    graph.clear();
+    graph.set_colors(Sculptor::default_graph_colors());
+    const uint32_t anchor = add_param_anchor(graph, vmath::vec2(16.0f, 16.0f), true);
+    open_drop_menu(graph, anchor, 0, ImVec2(700.0f, 600.0f));
+
+    graph.clear();
+    TEST(! graph.interaction_active());
+    TEST(graph.drop_menu_anchor().node_idx == Sculptor::pool_no_slot);
+    TEST(graph.drop_menu_anchor().slot_idx == Sculptor::pool_no_slot);
+    TEST(graph.drop_menu_pos().x == 0.0f);
+    TEST(graph.drop_menu_pos().y == 0.0f);
+    ImGui::DestroyContext();
+}
+
+// Direct model test of the eligibility predicate: the release path and the
+// projections must agree on exactly which anchors open the menu.
+static void test_drop_menu_eligible_model_rule()
+{
+    Graph& graph = reset_unit_graph(0);
+    graph.clear();
+
+    const uint32_t node = graph.create_node("osc", vmath::vec2(0.0f, 0.0f));
+    const uint32_t src  = graph.create_node("src", vmath::vec2(64.0f, 0.0f));
+    TEST(node != Sculptor::pool_no_slot);
+    TEST(src != Sculptor::pool_no_slot);
+
+    Slot flagged          = {};
+    flagged.kind          = SlotKind::property;
+    flagged.connectable   = true;
+    flagged.property_type = PropertyType::real;
+    flagged.drop_menu     = true;
+    snprintf(flagged.name, sizeof(flagged.name), "volume");
+    const uint32_t flag_free      = graph.add_slot(node, flagged); // flagged, unconnected
+    const uint32_t flag_connected = graph.add_slot(node, flagged); // flagged, wired below
+    TEST(flag_free != Sculptor::pool_no_slot);
+    TEST(flag_connected != Sculptor::pool_no_slot);
+
+    Slot unflagged      = flagged;
+    unflagged.drop_menu = false;
+    snprintf(unflagged.name, sizeof(unflagged.name), "tone");
+    const uint32_t plain_param = graph.add_slot(node, unflagged); // connectable, unflagged
+    TEST(plain_param != Sculptor::pool_no_slot);
+    Slot plain_in          = {};
+    plain_in.kind          = SlotKind::input;
+    const uint32_t in_slot = graph.add_slot(node, plain_in); // unflagged input
+    TEST(in_slot != Sculptor::pool_no_slot);
+    Slot out = {};
+    out.kind = SlotKind::output;
+    TEST(graph.add_slot(src, out) != Sculptor::pool_no_slot);
+    TEST(graph.add_connection(EndPoint{ src, 0 }, EndPoint{ node, flag_connected }) != Sculptor::pool_no_slot);
+
+    // Flagged and unconnected is the only eligible shape.
+    TEST(graph.drop_menu_eligible(EndPoint{ node, flag_free }));
+    TEST(! graph.drop_menu_eligible(EndPoint{ node, flag_connected }));
+    TEST(! graph.drop_menu_eligible(EndPoint{ node, plain_param }));
+    TEST(! graph.drop_menu_eligible(EndPoint{ node, in_slot }));
+
+    // Bounds and occupancy refusals, no flag can make them eligible.
+    TEST(! graph.drop_menu_eligible(EndPoint{ Sculptor::pool_no_slot, 0 }));
+    TEST(! graph.drop_menu_eligible(EndPoint{ max_nodes, 0 }));
+    TEST(! graph.drop_menu_eligible(EndPoint{ max_nodes - 1, 0 })); // unoccupied node slot
+    TEST(! graph.drop_menu_eligible(EndPoint{ node, max_node_slots }));
+    TEST(! graph.drop_menu_eligible(EndPoint{ node, max_node_slots - 1 })); // unallocated slot
+}
+
 int main()
 {
     test_renderer_audio_endpoint_mouse_frames();
+    test_drop_menu_eligible_model_rule();
+    test_drop_menu_dismissal_paths_leave_graph_unchanged();
+    test_drop_menu_pending_wire_frozen_at_release_point();
+    test_drop_menu_pending_wire_identity_view();
+    test_drop_menu_non_eligible_anchors_cancel();
+    test_drop_menu_connected_flagged_dot_retargets();
+    test_drop_menu_anchor_deletion_cancels_mode();
     test_user_disconnect_and_intent_capacity();
     test_retarget_occupied_input_without_interceptor();
     test_peek_changes_preserves_ring();
     test_create_node_distinct_indices();
     test_create_node_exhaustion_is_safe();
     test_create_node_snaps_position_to_grid();
+    test_snap_to_grid_values();
     test_add_slot_grows_within_limit();
     test_add_slot_overflow_returns_no_slot();
     test_delete_node_frees_index_and_drops_connections();

@@ -244,6 +244,10 @@ static Sculptor::Slot osc_view_connectable_slot(const char* name, float display_
 {
     Sculptor::Slot slot = osc_view_display_slot(name, display_value, target);
     slot.connectable    = true;
+    // The drop-menu anchor: exactly the nine target value rows take
+    // creation menus when a drag from the row's dot releases over empty
+    // canvas.
+    slot.drop_menu = true;
     return slot;
 }
 
@@ -555,7 +559,7 @@ static void clear_mapping(Sculptor::OscGraphMapping* mapping)
 
 static void project_osc_node(Sculptor::Graph*           graph,
                              uint32_t                   layer,
-                             const Synth::Instrument&   instrument,
+                             const Synth::Oscillator&   osc,
                              Sculptor::OscGraphMapping* mapping)
 {
     char name[32];
@@ -564,8 +568,7 @@ static void project_osc_node(Sculptor::Graph*           graph,
     if (node == Sculptor::pool_no_slot) {
         return;
     }
-    mapping->osc_nodes[layer]    = node;
-    const Synth::Oscillator& osc = instrument.layers[layer];
+    mapping->osc_nodes[layer] = node;
 
     mapping->osc_output_slot = graph->add_slot(node, output_slot("Output"));
 
@@ -690,17 +693,18 @@ static void append_instance_key(InstanceKey* keys, uint32_t& count, const Instan
     }
 }
 
-// Deterministic derivation: targets in ModTarget order, cells in layer
-// order, one key per (kind, descriptor, sources) tuple in first-use
-// order.  A binding's envelope key comes before its LFO key.
-static uint32_t derive_instance_keys(const Synth::Instrument& instrument, InstanceKey* keys)
+// Deterministic derivation: one key per distinct (kind, descriptor,
+// sources) tuple over the projected rows, in target order then row
+// order: the deterministic instance numbering the projection and the
+// node-count check share.  A binding's envelope key comes before its
+// LFO key.  rows[row] names the oscillator the row projects; the walk
+// covers rows 0..run_length - 1.
+static uint32_t derive_row_instance_keys(const Synth::Oscillator* const* rows, uint32_t run_length, InstanceKey* keys)
 {
-    uint32_t       count = 0;
-    const uint32_t layer_count =
-        instrument.layer_count <= Synth::max_layers ? instrument.layer_count : Synth::max_layers;
+    uint32_t count = 0;
     for (uint32_t target_idx = 0; target_idx < Synth::num_mod_targets; ++target_idx) {
-        for (uint32_t layer = 0; layer < layer_count; ++layer) {
-            const Synth::TargetBinding& gen = instrument.layers[layer].targets[target_idx];
+        for (uint32_t row = 0; row < run_length; ++row) {
+            const Synth::TargetBinding& gen = rows[row]->targets[target_idx];
             if (gen.envelope_desc_id != 0) {
                 const InstanceKey key = { 1, static_cast<uint8_t>(gen.envelope_desc_id), 0, 0 };
                 append_instance_key(keys, count, key);
@@ -715,6 +719,18 @@ static uint32_t derive_instance_keys(const Synth::Instrument& instrument, Instan
         }
     }
     return count;
+}
+
+static uint32_t derive_instance_keys(const Synth::Instrument& instrument, InstanceKey* keys)
+{
+    const Synth::Oscillator* rows[Synth::max_layers] = {};
+    uint32_t                 run_length              = 0;
+    const uint32_t           layer_count =
+        instrument.layer_count <= Synth::max_layers ? instrument.layer_count : Synth::max_layers;
+    for (; run_length < layer_count; ++run_length) {
+        rows[run_length] = &instrument.layers[run_length];
+    }
+    return derive_row_instance_keys(rows, run_length, keys);
 }
 
 // Wires one target block's source rows from the cell binding's MIDI
@@ -807,7 +823,10 @@ bool Sculptor::env_volume_shape_ok(const Synth::EnvelopeDescriptor& env)
 // Forces the volume-envelope shape: minimum 0 with the effective top preserved,
 // and the first point at 0 (tail values remain authored).  Returns false when the effective top
 // is negative, which cannot be preserved under the nonnegative volume range.
-static bool env_convert_to_volume_shape(Synth::EnvelopeDescriptor& env)
+// The drop-commit preset converts a freshly allocated descriptor before the
+// commit, so a volume binding never lands in the bipolar default shape the
+// apply path would have to convert (or the validator refuse).
+bool Sculptor::env_convert_to_volume_shape(Synth::EnvelopeDescriptor& env)
 {
     const float max_value = env.min_value + 65535.0f * env.min_max_delta;
     if (max_value < 0.0f) {
@@ -833,6 +852,41 @@ bool Sculptor::osc_target_field_hidden(const Graph& graph, uint32_t node_idx, ui
     }
     const uint32_t src = field < 8 ? 0 : 1;
     return connection_into(graph, node_idx, osc_target_src_dot(target, src)) == pool_no_slot;
+}
+
+// The gray add dot's row on the Oscillator Output node: one row
+// behind the last connected row of the run, or the run's length when
+// nothing is connected (every run row renders red).  The visibility
+// predicate, the projection's drop flags and the gray-dot color seam
+// share this one row.
+uint32_t Sculptor::osc_row_gray_slot(uint32_t run_length, uint8_t missing_bits)
+{
+    for (uint32_t row = run_length; row > 0; --row) {
+        if (! Sculptor::osc_row_is_red(missing_bits, row - 1)) {
+            return row;
+        }
+    }
+    return run_length;
+}
+
+bool Sculptor::osc_layer_slot_hidden(uint32_t slot_idx, const OscGraphMapping& mapping, uint8_t missing_bits)
+{
+    // The projected run is the number of consecutively projected oscillator
+    // nodes; the projection compacts layers, so the first no-slot entry ends
+    // the run.
+    uint32_t run_length = 0;
+    while (run_length < Synth::max_layers && mapping.osc_nodes[run_length] != pool_no_slot) {
+        ++run_length;
+    }
+    // The visible rows extend to the gray slot (one row behind the last
+    // connected row, or the run's length when nothing is connected); the
+    // trailing shells past it and every row above hide.
+    for (uint32_t layer = 0; layer < Synth::max_layers; ++layer) {
+        if (mapping.output_layer_input_slot[layer] == slot_idx) {
+            return layer > Sculptor::osc_row_gray_slot(run_length, missing_bits);
+        }
+    }
+    return false; // a non-layer slot index, including the no-slot sentinel
 }
 
 void Sculptor::env_target_usage(const Graph&           graph,
@@ -954,7 +1008,9 @@ bool Sculptor::project_instrument_to_graph(const Synth::Instrument&     instrume
                                            const Synth::InstrumentBank& bank,
                                            Graph*                       graph,
                                            OscGraphMapping*             mapping,
-                                           const uint16_t*              added_cc_mask)
+                                           const uint16_t*              added_cc_mask,
+                                           const uint8_t*               missing_sum_mask,
+                                           const Synth::Oscillator*     phantom_layers)
 {
     // The graph cannot express a sourceless routing input: dropping it would
     // change synthesis on commit (the eval multiplies by the zero sentinel),
@@ -1025,28 +1081,59 @@ bool Sculptor::project_instrument_to_graph(const Synth::Instrument&     instrume
     mapping->instrument_slots[2] =
         graph->add_slot(instrument_node, bounded_real_slot("Release (s)", instrument.release_seconds, 0.0f, 30.0f));
 
+    // The zone's projected row run: a red-marked row hosts its phantom
+    // shell (the resolved entry the caller passes; with no phantom pointer
+    // a fresh default shell) and the connected layers compact around the
+    // red rows in order - the compiled instrument's i-th layer is the
+    // i-th connected row, so the projection and the compile agree through
+    // a full round trip.  The run ends at the first row that is neither
+    // red-marked nor carrying a remaining connected layer: the free row.
+    Synth::Oscillator fresh_shell = {};
+    // Waveform A cannot be off, so an empty shell starts on sine.
+    fresh_shell.osc_type[0]                          = Synth::WaveType::sine_wave;
+    const uint8_t            missing_bits            = missing_sum_mask != nullptr ? *missing_sum_mask : 0;
+    const uint32_t           run_length              = Sculptor::osc_row_run_length(layer_count, missing_bits);
+    const Synth::Oscillator* rows[Synth::max_layers] = {};
+    uint32_t                 connected               = 0;
+    for (uint32_t row = 0; row < run_length; ++row) {
+        rows[row] = Sculptor::osc_row_is_red(missing_bits, row)
+                        ? (phantom_layers != nullptr ? &phantom_layers[row] : &fresh_shell)
+                        : &instrument.layers[connected++];
+    }
     const uint32_t output_node = graph->create_node("Oscillator Output", vmath::vec2(1024.0f, 0.0f));
     if (output_node == Sculptor::pool_no_slot) {
         return false;
     }
     mapping->output_node = output_node;
+    // The gray add slot (one row behind the last connected row, or the
+    // run's length when nothing is connected) anchors the drop flags.
+    const uint32_t gray_row = Sculptor::osc_row_gray_slot(run_length, missing_bits);
     for (uint32_t layer = 0; layer < Synth::max_layers; ++layer) {
         char name[32];
         snprintf(name, sizeof(name), "Layer %u", layer + 1);
-        mapping->output_layer_input_slot[layer] = graph->add_slot(output_node, input_slot(name));
+        Sculptor::Slot slot = input_slot(name);
+        // The drop-menu anchors: the red-marked (missing-sum) rows below
+        // the gray slot keep their add dots, and the gray slot itself
+        // offers the free dot.  The trailing shells past the gray slot and
+        // every row above it offer nothing.
+        // Occupied, unmarked rows stay unflagged.
+        slot.drop_menu = layer == gray_row || (layer < gray_row && Sculptor::osc_row_is_red(missing_bits, layer));
+        mapping->output_layer_input_slot[layer] = graph->add_slot(output_node, slot);
     }
 
-    for (uint32_t layer = 0; layer < layer_count; ++layer) {
-        project_osc_node(graph, layer, instrument, mapping);
-        if (mapping->osc_nodes[layer] == Sculptor::pool_no_slot) {
+    for (uint32_t row = 0; row < run_length; ++row) {
+        project_osc_node(graph, row, *rows[row], mapping);
+        if (mapping->osc_nodes[row] == Sculptor::pool_no_slot) {
             return false;
         }
     }
 
     // Deterministic derivation: one key per distinct (kind, descriptor,
-    // sources) tuple, then the envelope/LFO instance nodes.
+    // sources) tuple over the projected rows (phantom shells included, so
+    // a shell's bindings re-derive on re-projection), then the
+    // envelope/LFO instance nodes.
     InstanceKey    keys[2 * Synth::max_layers * Synth::num_mod_targets];
-    const uint32_t key_count = derive_instance_keys(instrument, keys);
+    const uint32_t key_count = derive_row_instance_keys(rows, run_length, keys);
     uint32_t       env_seq   = 0;
     uint32_t       lfo_seq   = 0;
     for (uint32_t k = 0; k < key_count; ++k) {
@@ -1088,10 +1175,10 @@ bool Sculptor::project_instrument_to_graph(const Synth::Instrument&     instrume
         entry.rate_source   = key.rate_source;
     }
 
-    for (uint32_t layer = 0; layer < layer_count; ++layer) {
-        const uint32_t osc_node = mapping->osc_nodes[layer];
+    for (uint32_t row = 0; row < run_length; ++row) {
+        const uint32_t osc_node = mapping->osc_nodes[row];
         for (uint32_t t = 0; t < Synth::num_mod_targets; ++t) {
-            const Synth::TargetBinding& gen = instrument.layers[layer].targets[t];
+            const Synth::TargetBinding& gen = rows[row]->targets[t];
             if (gen.envelope_desc_id != 0) {
                 uint32_t best = Sculptor::pool_no_slot;
                 for (uint32_t i = 0; i < mapping->detached_count; ++i) {
@@ -1150,11 +1237,247 @@ bool Sculptor::project_instrument_to_graph(const Synth::Instrument&     instrume
         }
     }
 
-    // Structural hard connections: every oscillator feeds its sum input.
-    for (uint32_t layer = 0; layer < layer_count; ++layer) {
-        if (graph->add_connection(EndPoint{ mapping->osc_nodes[layer], mapping->osc_output_slot },
-                                  EndPoint{ mapping->output_node, mapping->output_layer_input_slot[layer] }) ==
+    // Structural hard connections: every connected oscillator feeds its
+    // own sum input row; a red-marked row's phantom shell stays unwired.
+    for (uint32_t row = 0; row < run_length; ++row) {
+        if (missing_sum_mask != nullptr && (*missing_sum_mask & (1u << row)) != 0) {
+            continue;
+        }
+        if (graph->add_connection(EndPoint{ mapping->osc_nodes[row], mapping->osc_output_slot },
+                                  EndPoint{ mapping->output_node, mapping->output_layer_input_slot[row] }) ==
             Sculptor::pool_no_slot) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// Reads one oscillator layer back from its projected node's slots: the
+// inverse of project_osc_node's slot layout.  The compile reads one layer
+// per connected row, and the phantom capture stores the layer a
+// disconnection removes from the compiled instrument.
+static bool read_oscillator_layer(const Sculptor::Graph&           graph,
+                                  const Sculptor::OscGraphMapping& mapping,
+                                  uint32_t                         layer,
+                                  Synth::Oscillator*               osc_out)
+{
+    const Sculptor::Node& node = graph.node(mapping.osc_nodes[layer]);
+    if (node.slots.num_allocated < osc_slot_count) {
+        return false;
+    }
+
+    const Sculptor::Slot* slots = node.slots.entries;
+    Synth::Oscillator&    osc   = *osc_out;
+
+    uint32_t index = 0;
+    if (! read_list_prop(slots[osc_waveform_a_prop], &index)) {
+        return false;
+    }
+    osc.osc_type[0] = static_cast<Synth::WaveType>(index + 1);
+    if (! read_list_prop(slots[osc_waveform_b_prop], &index)) {
+        return false;
+    }
+    osc.osc_type[1] = static_cast<Synth::WaveType>(index);
+    if (! read_list_prop(slots[osc_mode_prop], &index)) {
+        return false;
+    }
+    osc.osc_mode     = static_cast<Synth::OscMode>(index);
+    osc.mod_ratio    = slots[osc_fm_ratio_prop].value.real;
+    osc.pitch_offset = slots[osc_pitch_offset_prop].value.real;
+
+    for (uint32_t t = 0; t < Synth::num_mod_targets; ++t) {
+        const Synth::ModTarget target = static_cast<Synth::ModTarget>(t);
+        // Each layer owns its cell: the base value always comes from the
+        // layer's own row (display units scaled to bank units); the
+        // block rows wired to it contribute the modulators only.  A
+        // family dot with no wire leaves the family's fields dormant
+        // (they compile to zero), so rewiring rebinds without
+        // re-projection.
+        Synth::TargetBinding gen = {};
+        gen.base_value           = slots[osc_target_prop(target)].value.real * osc_target_views[t].bank_scale;
+        // A connection still ending on the base target row is a
+        // validator/apply invariant violation: the apply path relocates
+        // every committed wire onto its family dot before this runs.
+        if (connection_into(graph, mapping.osc_nodes[layer], osc_target_prop(target)) != pool_no_slot) {
+            return false;
+        }
+        const uint32_t env_conn = connection_into(graph, mapping.osc_nodes[layer], osc_target_env_dot(t));
+        if (env_conn != pool_no_slot) {
+            const int32_t inst = find_instance(mapping, graph.get_connection(env_conn).output.node_idx);
+            if (inst < 0 || mapping.detached[inst].kind != 1) {
+                return false;
+            }
+            gen.envelope_desc_id = mapping.detached[inst].desc_id;
+        }
+        const uint32_t lfo_conn = connection_into(graph, mapping.osc_nodes[layer], osc_target_lfo_dot(t));
+        if (lfo_conn != pool_no_slot) {
+            const int32_t inst = find_instance(mapping, graph.get_connection(lfo_conn).output.node_idx);
+            if (inst < 0 || mapping.detached[inst].kind != 2) {
+                return false;
+            }
+            gen.lfo_desc_id = mapping.detached[inst].desc_id;
+            // Depth/rate sources resolve from the edges into the bound
+            // LFO instance; no edge means the source stays none.
+            const uint32_t depth_conn =
+                connection_into(graph, mapping.detached[inst].node_idx, mapping.lfo_depth_input_slot);
+            if (depth_conn != pool_no_slot && ! edge_source(graph, mapping, depth_conn, &gen.lfo_depth_source)) {
+                return false;
+            }
+            const uint32_t rate_conn =
+                connection_into(graph, mapping.detached[inst].node_idx, mapping.lfo_rate_input_slot);
+            if (rate_conn != pool_no_slot && ! edge_source(graph, mapping, rate_conn, &gen.lfo_rate_source)) {
+                return false;
+            }
+            uint32_t lfo_index = 0;
+            if (! read_list_prop(slots[osc_target_lfo_dot(t) + 1], &lfo_index)) {
+                return false;
+            }
+            gen.lfo_op            = static_cast<Synth::SourceOp>(lfo_index);
+            gen.lfo_depth         = slots[osc_target_lfo_dot(t) + 2].value.real;
+            gen.lfo_rate_scale_ms = slots[osc_target_lfo_dot(t) + 3].value.real;
+        }
+        uint32_t num_inputs = 0;
+        for (uint32_t i = 0; i < Synth::max_mod_inputs; ++i) {
+            const uint32_t dot  = osc_target_src_dot(t, i);
+            const uint32_t conn = connection_into(graph, mapping.osc_nodes[layer], dot);
+            if (conn == pool_no_slot) {
+                continue;
+            }
+            const int32_t    cc_index = edge_cc_index(graph, mapping, conn);
+            Synth::ModSource source   = Synth::ModSource::none;
+            if (cc_index < 0 && ! edge_source(graph, mapping, conn, &source)) {
+                return false;
+            }
+            if (node.slots.num_allocated <= dot + 2) {
+                return false;
+            }
+            uint32_t op_index = 0;
+            if (! read_list_prop(slots[dot + 1], &op_index)) {
+                return false;
+            }
+            Synth::ModInput& input = gen.inputs[num_inputs++];
+            if (cc_index >= 0) {
+                // A CC wire compiles to the assignable cc source; the
+                // validate_instrument 16..31 rule protects the runtime
+                // resolve_source slot assert.
+                input.source    = Synth::ModSource::cc;
+                input.cc_number = static_cast<uint8_t>(Synth::cc_msb_base + static_cast<uint32_t>(cc_index));
+            }
+            else {
+                input.source = source;
+            }
+            input.op    = static_cast<Synth::SourceOp>(op_index);
+            input.scale = slots[dot + 2].value.real;
+        }
+        gen.num_inputs = static_cast<uint16_t>(num_inputs);
+        osc.targets[t] = gen;
+    }
+    return true;
+}
+
+// The phantom store's pool helpers: entries are kept compacted in array
+// order (a stable order the JSON codec and the zone operations rely on),
+// one per (channel, zone, layer) key.
+
+// Index of the (channel, zone, layer) entry, or -1 when the row has none.
+int32_t Sculptor::find_phantom_entry(const Synth::InstrumentEditorBank& bank,
+                                     uint32_t                           channel,
+                                     uint32_t                           zone,
+                                     uint32_t                           layer)
+{
+    if (channel >= Synth::max_channels || zone >= Synth::max_instr_per_channel || layer >= Synth::max_layers) {
+        return -1;
+    }
+    for (uint32_t i = 0; i < bank.phantom_count; ++i) {
+        const Synth::PhantomOscillator& entry = bank.phantoms[i];
+        if (entry.channel == channel && entry.zone == zone && entry.layer == layer) {
+            return static_cast<int32_t>(i);
+        }
+    }
+    return -1;
+}
+
+// Removes the entry at index and closes the gap, preserving order.
+static void remove_phantom_entry_at(Synth::InstrumentEditorBank* bank, uint32_t index)
+{
+    if (index >= bank->phantom_count) {
+        return;
+    }
+    memmove(&bank->phantoms[index],
+            &bank->phantoms[index + 1],
+            (bank->phantom_count - index - 1) * sizeof(bank->phantoms[0]));
+    bank->phantom_count--;
+}
+
+// Writes one zone-layer's entry: the entry updates in place when it
+// exists, otherwise it appends.  Returns false when appending would
+// exceed the store's fixed capacity.
+bool Sculptor::set_phantom_entry(Synth::InstrumentEditorBank* bank,
+                                 uint32_t                     channel,
+                                 uint32_t                     zone,
+                                 uint32_t                     layer,
+                                 const Synth::Oscillator&     osc)
+{
+    if (channel >= Synth::max_channels || zone >= Synth::max_instr_per_channel || layer >= Synth::max_layers) {
+        return false;
+    }
+    const int32_t existing = Sculptor::find_phantom_entry(*bank, channel, zone, layer);
+    if (existing >= 0) {
+        bank->phantoms[existing].osc = osc;
+        return true;
+    }
+    if (bank->phantom_count >= Synth::max_phantom_entries) {
+        return false;
+    }
+    Synth::PhantomOscillator& entry = bank->phantoms[bank->phantom_count++];
+    entry.osc                       = osc;
+    entry.channel                   = static_cast<uint8_t>(channel);
+    entry.zone                      = static_cast<uint8_t>(zone);
+    entry.layer                     = static_cast<uint8_t>(layer);
+    return true;
+}
+
+// Drops one zone-layer's entry; a no-op when the row has none.
+void Sculptor::clear_phantom_entry(Synth::InstrumentEditorBank* bank, uint32_t channel, uint32_t zone, uint32_t layer)
+{
+    const int32_t existing = Sculptor::find_phantom_entry(*bank, channel, zone, layer);
+    if (existing >= 0) {
+        remove_phantom_entry_at(bank, static_cast<uint32_t>(existing));
+    }
+}
+
+// Captures every red-marked row's shell parameters from its node into the
+// phantom store: the compiled instrument omits red-marked rows, so the
+// store is the only home those parameters have.  The capture at the
+// deletion event preserves the disconnected oscillator; later edits and
+// wire changes to the shell keep the entry in step, so a re-wired shell
+// compiles back to exactly the parameters the node last held.  An entry
+// is written only while its row's bit is set, and it is invalidated with
+// the bit, so a still-red layer's existing entry is never replaced by
+// another oscillator's capture.  Returns false when a row without an
+// entry cannot get one (the store is full): the caller refuses the batch
+// and re-projection restores the pre-event state.
+static bool refresh_phantom_entries(Synth::InstrumentEditorBank*     bank,
+                                    const Sculptor::Graph&           graph,
+                                    const Sculptor::OscGraphMapping& mapping,
+                                    uint32_t                         channel,
+                                    uint32_t                         zone)
+{
+    if (channel >= Synth::max_channels || zone >= Synth::max_instr_per_channel) {
+        return true;
+    }
+    const uint8_t bits = bank->graph_missing_sum[channel][zone];
+    if (bits == 0) {
+        return true;
+    }
+    for (uint32_t layer = 0; layer < Synth::max_layers; ++layer) {
+        if ((bits & (1u << layer)) == 0 || mapping.osc_nodes[layer] == Sculptor::pool_no_slot ||
+            ! graph.node_occupied(mapping.osc_nodes[layer])) {
+            continue;
+        }
+        Synth::Oscillator captured = {};
+        if (read_oscillator_layer(graph, mapping, layer, &captured) &&
+            ! Sculptor::set_phantom_entry(bank, channel, zone, layer, captured)) {
             return false;
         }
     }
@@ -1179,121 +1502,25 @@ bool Sculptor::compile_graph_to_instrument(const Graph& graph, const OscGraphMap
         return false;
     }
 
-    out->layer_count = layer_count;
-
+    // Red-marked rows are omitted from the compiled instrument: the
+    // compiled layers compact in order (the first connected layer becomes
+    // compiled layer 0 and so on) and the count covers connected layers
+    // only, so a disconnected oscillator stops reaching the synth.  The
+    // red state is read from the sum side's missing mark, which the
+    // connection events and the projection keep in step with the
+    // missing-sum bits.  A graph whose every row is red-marked compiles to
+    // a silent, valid instrument with layer_count 0.
+    uint32_t compiled_count = 0;
     for (uint32_t layer = 0; layer < layer_count; ++layer) {
-        const Node& node = graph.node(mapping.osc_nodes[layer]);
-        if (node.slots.num_allocated < osc_slot_count) {
+        if (graph.slot_missing(mapping.output_node, mapping.output_layer_input_slot[layer])) {
+            continue;
+        }
+        if (! read_oscillator_layer(graph, mapping, layer, &out->layers[compiled_count])) {
             return false;
         }
-
-        const Slot*        slots = node.slots.entries;
-        Synth::Oscillator& osc   = out->layers[layer];
-
-        uint32_t index = 0;
-        if (! read_list_prop(slots[osc_waveform_a_prop], &index)) {
-            return false;
-        }
-        osc.osc_type[0] = static_cast<Synth::WaveType>(index + 1);
-        if (! read_list_prop(slots[osc_waveform_b_prop], &index)) {
-            return false;
-        }
-        osc.osc_type[1] = static_cast<Synth::WaveType>(index);
-        if (! read_list_prop(slots[osc_mode_prop], &index)) {
-            return false;
-        }
-        osc.osc_mode     = static_cast<Synth::OscMode>(index);
-        osc.mod_ratio    = slots[osc_fm_ratio_prop].value.real;
-        osc.pitch_offset = slots[osc_pitch_offset_prop].value.real;
-
-        for (uint32_t t = 0; t < Synth::num_mod_targets; ++t) {
-            const Synth::ModTarget target = static_cast<Synth::ModTarget>(t);
-            // Each layer owns its cell: the base value always comes from the
-            // layer's own row (display units scaled to bank units); the
-            // block rows wired to it contribute the modulators only.  A
-            // family dot with no wire leaves the family's fields dormant
-            // (they compile to zero), so rewiring rebinds without
-            // re-projection.
-            Synth::TargetBinding gen = {};
-            gen.base_value           = slots[osc_target_prop(target)].value.real * osc_target_views[t].bank_scale;
-            // A connection still ending on the base target row is a
-            // validator/apply invariant violation: the apply path relocates
-            // every committed wire onto its family dot before this runs.
-            if (connection_into(graph, mapping.osc_nodes[layer], osc_target_prop(target)) != pool_no_slot) {
-                return false;
-            }
-            const uint32_t env_conn = connection_into(graph, mapping.osc_nodes[layer], osc_target_env_dot(t));
-            if (env_conn != pool_no_slot) {
-                const int32_t inst = find_instance(mapping, graph.get_connection(env_conn).output.node_idx);
-                if (inst < 0 || mapping.detached[inst].kind != 1) {
-                    return false;
-                }
-                gen.envelope_desc_id = mapping.detached[inst].desc_id;
-            }
-            const uint32_t lfo_conn = connection_into(graph, mapping.osc_nodes[layer], osc_target_lfo_dot(t));
-            if (lfo_conn != pool_no_slot) {
-                const int32_t inst = find_instance(mapping, graph.get_connection(lfo_conn).output.node_idx);
-                if (inst < 0 || mapping.detached[inst].kind != 2) {
-                    return false;
-                }
-                gen.lfo_desc_id = mapping.detached[inst].desc_id;
-                // Depth/rate sources resolve from the edges into the bound
-                // LFO instance; no edge means the source stays none.
-                const uint32_t depth_conn =
-                    connection_into(graph, mapping.detached[inst].node_idx, mapping.lfo_depth_input_slot);
-                if (depth_conn != pool_no_slot && ! edge_source(graph, mapping, depth_conn, &gen.lfo_depth_source)) {
-                    return false;
-                }
-                const uint32_t rate_conn =
-                    connection_into(graph, mapping.detached[inst].node_idx, mapping.lfo_rate_input_slot);
-                if (rate_conn != pool_no_slot && ! edge_source(graph, mapping, rate_conn, &gen.lfo_rate_source)) {
-                    return false;
-                }
-                uint32_t lfo_index = 0;
-                if (! read_list_prop(slots[osc_target_lfo_dot(t) + 1], &lfo_index)) {
-                    return false;
-                }
-                gen.lfo_op            = static_cast<Synth::SourceOp>(lfo_index);
-                gen.lfo_depth         = slots[osc_target_lfo_dot(t) + 2].value.real;
-                gen.lfo_rate_scale_ms = slots[osc_target_lfo_dot(t) + 3].value.real;
-            }
-            uint32_t num_inputs = 0;
-            for (uint32_t i = 0; i < Synth::max_mod_inputs; ++i) {
-                const uint32_t dot  = osc_target_src_dot(t, i);
-                const uint32_t conn = connection_into(graph, mapping.osc_nodes[layer], dot);
-                if (conn == pool_no_slot) {
-                    continue;
-                }
-                const int32_t    cc_index = edge_cc_index(graph, mapping, conn);
-                Synth::ModSource source   = Synth::ModSource::none;
-                if (cc_index < 0 && ! edge_source(graph, mapping, conn, &source)) {
-                    return false;
-                }
-                if (node.slots.num_allocated <= dot + 2) {
-                    return false;
-                }
-                uint32_t op_index = 0;
-                if (! read_list_prop(slots[dot + 1], &op_index)) {
-                    return false;
-                }
-                Synth::ModInput& input = gen.inputs[num_inputs++];
-                if (cc_index >= 0) {
-                    // A CC wire compiles to the assignable cc source; the
-                    // validate_instrument 16..31 rule protects the runtime
-                    // resolve_source slot assert.
-                    input.source    = Synth::ModSource::cc;
-                    input.cc_number = static_cast<uint8_t>(Synth::cc_msb_base + static_cast<uint32_t>(cc_index));
-                }
-                else {
-                    input.source = source;
-                }
-                input.op    = static_cast<Synth::SourceOp>(op_index);
-                input.scale = slots[dot + 2].value.real;
-            }
-            gen.num_inputs = static_cast<uint16_t>(num_inputs);
-            osc.targets[t] = gen;
-        }
+        ++compiled_count;
     }
+    out->layer_count = compiled_count;
 
     // Instrument-parameter rows live on the dedicated node; direct
     // project_instrument_to_graph callers (the unit tests) always project
@@ -1752,7 +1979,19 @@ static bool apply_value_change(Synth::InstrumentEditorBank* bank,
     switch (node_role(*mapping, change.node_idx)) {
         case role_osc:
             // Per-layer values: the edited row is that layer's own base; no sibling
-            // view syncs.
+            // view syncs.  A red-marked row is a phantom shell the compile
+            // omits, so its edit refreshes the row's phantom store entry
+            // (the shell stays editable and its parameters survive
+            // re-projection).
+            for (uint32_t row = 0; row < Synth::max_layers; ++row) {
+                if (mapping->osc_nodes[row] == change.node_idx &&
+                    (bank->graph_missing_sum[channel][zone] & (1u << row)) != 0) {
+                    if (! refresh_phantom_entries(bank, *graph, *mapping, channel, zone)) {
+                        return false;
+                    }
+                    break;
+                }
+            }
             return store_compiled_instrument(bank, *graph, *mapping, channel, zone);
         case role_env:
         case role_lfo:
@@ -1776,6 +2015,7 @@ static bool apply_value_change(Synth::InstrumentEditorBank* bank,
 // records are descriptor-keyed, so no record remapping beyond the
 // oscillator range is needed.
 static bool remove_osc_layer(Synth::InstrumentEditorBank* bank,
+                             Sculptor::Graph*             graph,
                              Sculptor::OscGraphMapping*   mapping,
                              uint32_t                     channel,
                              uint32_t                     zone,
@@ -1789,14 +2029,26 @@ static bool remove_osc_layer(Synth::InstrumentEditorBank* bank,
         return false;
     }
     Synth::Instrument& instrument = bank->bank.instruments.entries[zone_entry.instrument];
-    if (layer >= instrument.layer_count) {
-        return true;
+    const uint8_t      bits       = bank->graph_missing_sum[channel][zone];
+    // A red-marked row is a phantom shell: removing it drops the shell and
+    // its store entry without touching the compiled layers, which count
+    // connected layers only.  A connected row removes its own compiled
+    // layer, the one at the number of connected rows above it.
+    if ((bits & (1u << layer)) == 0) {
+        uint32_t compiled_layer = 0;
+        for (uint32_t l = 0; l < layer; ++l) {
+            if ((bits & (1u << l)) == 0) {
+                ++compiled_layer;
+            }
+        }
+        if (compiled_layer < instrument.layer_count) {
+            for (uint32_t l = compiled_layer; l + 1 < Synth::max_layers; ++l) {
+                instrument.layers[l] = instrument.layers[l + 1];
+            }
+            instrument.layers[Synth::max_layers - 1] = Synth::Oscillator{};
+            instrument.layer_count--;
+        }
     }
-    for (uint32_t l = layer; l + 1 < Synth::max_layers; ++l) {
-        instrument.layers[l] = instrument.layers[l + 1];
-    }
-    instrument.layers[Synth::max_layers - 1] = Synth::Oscillator{};
-    instrument.layer_count--;
 
     Sculptor::compact_missing_sum_bits(bank, channel, zone, layer);
 
@@ -1818,13 +2070,28 @@ static bool remove_osc_layer(Synth::InstrumentEditorBank* bank,
     bank->graph_layout_count = write;
 
     // The mapping's oscillator run compacts exactly like the instrument's
-    // layers and the missing-sum bits above: osc_nodes[layer] always names
-    // the node of instrument layer `layer`, so a multi-node delete batch whose
-    // later events recompile the instrument never sees a gap in the run.
+    // layers and the missing-sum bits above: osc_nodes[l] names the node of
+    // projected row l (connected layers and phantom shells share one run,
+    // instrument layers hold connected layers only), so a multi-node delete
+    // batch whose later events recompile the instrument never sees a gap in
+    // the run.
     for (uint32_t l = layer; l + 1 < Synth::max_layers; ++l) {
         mapping->osc_nodes[l] = mapping->osc_nodes[l + 1];
     }
     mapping->osc_nodes[Synth::max_layers - 1] = Sculptor::pool_no_slot;
+    // The compile reads the red state from the sum side's slot_missing
+    // marks, so the compaction must realign them with the compacted
+    // mapping and bits before the batch's final compile: a mark left at
+    // a shifted row would skip a surviving connected layer (and include
+    // the shell instead).
+    const uint8_t compacted_bits = bank->graph_missing_sum[channel][zone];
+    for (uint32_t l = 0; l < Synth::max_layers; ++l) {
+        const bool missing = (compacted_bits & (1u << l)) != 0;
+        graph->set_slot_missing(mapping->output_node, mapping->output_layer_input_slot[l], missing);
+        if (mapping->osc_nodes[l] != Sculptor::pool_no_slot) {
+            graph->set_slot_missing(mapping->osc_nodes[l], mapping->osc_output_slot, missing);
+        }
+    }
     return true;
 }
 
@@ -1861,7 +2128,7 @@ static bool apply_node_deleted(Synth::InstrumentEditorBank* bank,
             // their last serving modulator).  When another oscillator of this
             // batch is still pending deletion, the store defers to that
             // node_deleted's final compile.
-            if (! remove_osc_layer(bank, mapping, channel, zone, layer)) {
+            if (! remove_osc_layer(bank, graph, mapping, channel, zone, layer)) {
                 return false;
             }
             if (! reconcile_generator_records(bank, graph, mapping, channel, zone)) {
@@ -2026,7 +2293,7 @@ static bool apply_connection_change(Synth::InstrumentEditorBank* bank,
                 if (! Sculptor::env_volume_shape_ok(env)) {
                     // A negative effective top cannot be preserved under the
                     // nonnegative volume range; refuse the wire.
-                    if (! env_convert_to_volume_shape(env)) {
+                    if (! Sculptor::env_convert_to_volume_shape(env)) {
                         return false;
                     }
                 }
@@ -2075,6 +2342,11 @@ static bool apply_connection_change(Synth::InstrumentEditorBank* bank,
             if (change.connection_input.slot_idx == mapping->output_layer_input_slot[layer] &&
                 change.connection_output.node_idx == mapping->osc_nodes[layer]) {
                 const bool missing = change.kind == Sculptor::ChangeKind::connection_deleted;
+                if (! missing) {
+                    // The layer is connected again: its shell is no longer a
+                    // phantom, so the store entry dies with the bit.
+                    Sculptor::clear_phantom_entry(bank, channel, zone, layer);
+                }
                 set_missing_sum_bit(bank, channel, zone, layer, missing);
                 // Both unconnected endpoints of the broken edge carry the red
                 // mark: the sum input and the oscillator output.
@@ -2084,6 +2356,17 @@ static bool apply_connection_change(Synth::InstrumentEditorBank* bank,
                 }
             }
         }
+    }
+
+    // Phantom capture runs after the missing-bit block, so the row a
+    // deletion just disconnected captures the oscillator the node still
+    // holds - the compile below omits red-marked rows, and the store is
+    // the only home the disconnected layer's parameters keep.  A capture
+    // that does not fit the store refuses the batch; the refusal's
+    // re-projection restores the wire, so the disconnection simply does
+    // not happen until the store has room.
+    if (! refresh_phantom_entries(bank, *graph, *mapping, channel, zone)) {
+        return false;
     }
 
     if (! reconcile_generator_records(bank, graph, mapping, channel, zone)) {
@@ -2105,6 +2388,37 @@ uint32_t Sculptor::osc_inherit_source_layer(const Synth::Instrument& instrument)
         }
     }
     return Sculptor::pool_no_slot;
+}
+
+uint32_t Sculptor::osc_row_run_length(uint32_t layer_count, uint8_t missing_bits)
+{
+    uint32_t connected = 0;
+    for (uint32_t row = 0; row < Synth::max_layers; ++row) {
+        if ((missing_bits & (1u << row)) != 0) {
+            continue;
+        }
+        if (connected >= layer_count) {
+            return row;
+        }
+        ++connected;
+    }
+    return Synth::max_layers;
+}
+
+bool Sculptor::osc_row_is_red(uint8_t missing_bits, uint32_t row)
+{
+    return row < Synth::max_layers && (missing_bits & (1u << row)) != 0;
+}
+
+uint32_t Sculptor::osc_row_connected_below(uint8_t missing_bits, uint32_t row)
+{
+    uint32_t connected = 0;
+    for (uint32_t below = 0; below < row && below < Synth::max_layers; ++below) {
+        if ((missing_bits & (1u << below)) == 0) {
+            ++connected;
+        }
+    }
+    return connected;
 }
 
 uint32_t Sculptor::osc_graph_canonical_index(const OscGraphMapping& mapping, uint32_t node_idx)
@@ -2232,6 +2546,39 @@ bool Sculptor::refresh_osc_graph_compilation(Synth::InstrumentEditorBank* bank,
     return store_compiled_instrument(bank, graph, mapping, channel, zone);
 }
 
+// Fills resolved[] for the zone's red-marked rows: the phantom store's
+// entry where one is valid, the fresh default shell where a red-marked row
+// has no store entry.  Production keeps every set bit covered (the event
+// capture writes an entry when a bit is set and the load path migrates
+// banks saved before the store existed), so the fresh default is a
+// last-resort shell for direct callers that hand-set bits without one.
+static void resolve_phantom_rows(const Synth::InstrumentEditorBank& bank,
+                                 uint32_t                           channel,
+                                 uint32_t                           zone,
+                                 Synth::Oscillator                  resolved[Synth::max_layers])
+{
+    if (channel >= Synth::max_channels || zone >= Synth::max_instr_per_channel) {
+        return;
+    }
+    const uint8_t bits = bank.graph_missing_sum[channel][zone];
+    for (uint32_t layer = 0; layer < Synth::max_layers; ++layer) {
+        if ((bits & (1u << layer)) == 0) {
+            continue;
+        }
+        const int32_t entry = Sculptor::find_phantom_entry(bank, channel, zone, layer);
+        if (entry >= 0) {
+            resolved[layer] = bank.phantoms[entry].osc;
+            continue;
+        }
+        // Reachable only for direct callers that hand-set bits without the
+        // store entry validate_editor_metadata requires: the shell
+        // projects from the fresh default instead.
+        resolved[layer] = Synth::Oscillator{};
+        // Waveform A cannot be off, so an empty shell starts on sine.
+        resolved[layer].osc_type[0] = Synth::WaveType::sine_wave;
+    }
+}
+
 uint32_t Sculptor::count_projected_nodes(const Synth::InstrumentEditorBank& bank, uint32_t channel, uint32_t zone)
 {
     // Fixed inputs, the instrument-parameters node and the sum node, then
@@ -2247,10 +2594,21 @@ uint32_t Sculptor::count_projected_nodes(const Synth::InstrumentEditorBank& bank
         return count;
     }
     const Synth::Instrument& instrument = bank.bank.instruments.entries[zone_entry.instrument];
-    count += instrument.layer_count <= Synth::max_layers ? instrument.layer_count : Synth::max_layers;
 
+    Synth::Oscillator resolved[Synth::max_layers] = {};
+    resolve_phantom_rows(bank, channel, zone, resolved);
+    const Synth::Oscillator* rows[Synth::max_layers] = {};
+    const uint32_t           layer_count =
+        instrument.layer_count <= Synth::max_layers ? instrument.layer_count : Synth::max_layers;
+    const uint8_t  missing_bits = bank.graph_missing_sum[channel][zone];
+    const uint32_t run_length   = Sculptor::osc_row_run_length(layer_count, missing_bits);
+    uint32_t       connected    = 0;
+    for (uint32_t row = 0; row < run_length; ++row) {
+        rows[row] = Sculptor::osc_row_is_red(missing_bits, row) ? &resolved[row] : &instrument.layers[connected++];
+    }
+    count += run_length;
     InstanceKey    keys[2 * Synth::max_layers * Synth::num_mod_targets];
-    const uint32_t key_count = derive_instance_keys(instrument, keys);
+    const uint32_t key_count = derive_row_instance_keys(rows, run_length, keys);
     for (uint32_t k = 0; k < key_count; ++k) {
         const uint32_t num_allocated =
             keys[k].kind == 1 ? bank.bank.envelopes.num_allocated : bank.bank.lfos.num_allocated;
@@ -2291,6 +2649,52 @@ uint32_t Sculptor::count_projected_nodes(const Synth::InstrumentEditorBank& bank
         }
     }
     return count;
+}
+
+// The waveform pair a newly added oscillator starts with: the zone's rows
+// are scanned top to bottom and the last connected row's pair wins; when
+// the run has no connected row, the run's last row (a phantom shell)
+// supplies it; an empty run keeps the fresh default (sine with B off).
+Sculptor::OscInheritedType Sculptor::osc_inherited_type(const Synth::InstrumentEditorBank& bank,
+                                                        uint32_t                           channel,
+                                                        uint32_t                           zone)
+{
+    OscInheritedType inherited = {};
+    inherited.wave_a           = Synth::WaveType::sine_wave;
+    inherited.wave_b           = Synth::WaveType::no_wave;
+    if (channel >= Synth::max_channels || zone >= Synth::max_instr_per_channel) {
+        return inherited;
+    }
+    const Synth::Zone& zone_entry = bank.bank.channel_zones[channel][zone];
+    if (zone_entry.start_note == 0 || zone_entry.instrument >= bank.bank.instruments.num_allocated) {
+        return inherited;
+    }
+    const Synth::Instrument& instrument = bank.bank.instruments.entries[zone_entry.instrument];
+    const uint8_t            bits       = bank.graph_missing_sum[channel][zone];
+    const uint32_t           layer_count =
+        instrument.layer_count <= Synth::max_layers ? instrument.layer_count : Synth::max_layers;
+    const uint32_t    run_length                  = Sculptor::osc_row_run_length(layer_count, bits);
+    Synth::Oscillator resolved[Synth::max_layers] = {};
+    resolve_phantom_rows(bank, channel, zone, resolved);
+    uint32_t                 connected      = 0;
+    const Synth::Oscillator* last_connected = nullptr;
+    for (uint32_t row = 0; row < run_length; ++row) {
+        if (Sculptor::osc_row_is_red(bits, row)) {
+            continue;
+        }
+        last_connected = &instrument.layers[connected++];
+    }
+    if (last_connected != nullptr) {
+        inherited.wave_a = last_connected->osc_type[0];
+        inherited.wave_b = last_connected->osc_type[1];
+        return inherited;
+    }
+    if (run_length > 0) {
+        // No connected row: the run's last row is a phantom shell.
+        inherited.wave_a = resolved[run_length - 1].osc_type[0];
+        inherited.wave_b = resolved[run_length - 1].osc_type[1];
+    }
+    return inherited;
 }
 
 // The channel-wide removal-refusal scan: the shared per-channel registry
@@ -2336,11 +2740,15 @@ bool Sculptor::project_editor_to_graph(const Synth::InstrumentEditorBank& bank,
     if (zone_entry.start_note == 0 || zone_entry.instrument >= bank.bank.instruments.num_allocated) {
         return false;
     }
+    Synth::Oscillator resolved_phantoms[Synth::max_layers] = {};
+    resolve_phantom_rows(bank, channel, zone, resolved_phantoms);
     if (! project_instrument_to_graph(bank.bank.instruments.entries[zone_entry.instrument],
                                       bank.bank,
                                       graph,
                                       mapping,
-                                      &bank.added_cc_mask[channel])) {
+                                      &bank.added_cc_mask[channel],
+                                      &bank.graph_missing_sum[channel][zone],
+                                      resolved_phantoms)) {
         return false;
     }
     mapping->channel = channel;
@@ -2520,16 +2928,46 @@ void Sculptor::compact_missing_sum_bits(Synth::InstrumentEditorBank* bank,
         }
     }
     bank->graph_missing_sum[channel][zone] = compacted;
+    // The phantom store rides the same compaction: the removed row's entry
+    // is dropped and this zone's entries above it shift down one layer
+    // index, so an entry's layer always matches its red-marked row.
+    for (uint32_t i = 0; i < bank->phantom_count;) {
+        if (bank->phantoms[i].channel == channel && bank->phantoms[i].zone == zone) {
+            if (bank->phantoms[i].layer == removed_layer) {
+                remove_phantom_entry_at(bank, i);
+                continue;
+            }
+            if (bank->phantoms[i].layer > removed_layer) {
+                bank->phantoms[i].layer--;
+            }
+        }
+        ++i;
+    }
 }
 
 void Sculptor::compute_publish_channel_enabled(const Synth::InstrumentEditorBank& bank,
                                                uint8_t                            out_enabled[Synth::max_channels])
 {
-    // The stored channel_enabled values stay untouched; a channel publishes
-    // disabled only while one of its zones holds a broken oscillator sum.
+    // The stored channel_enabled values stay untouched; a channel
+    // publishes disabled while one of its zones holds a broken oscillator
+    // sum, or while a playable zone's instrument has no connected layer
+    // (layer_count 0 reaches the runtime's layer_count >= 1 assertion
+    // even without a missing bit, so the publication refuses it).
     for (uint32_t channel = 0; channel < Synth::max_channels; ++channel) {
-        out_enabled[channel] =
-            (bank.bank.channel_enabled[channel] != 0 && ! channel_has_missing_sum(bank, channel)) ? 1 : 0;
+        bool silent = channel_has_missing_sum(bank, channel);
+        if (! silent) {
+            for (uint32_t zone = 0; zone < Synth::max_instr_per_channel; ++zone) {
+                const Synth::Zone& zone_entry = bank.bank.channel_zones[channel][zone];
+                if (zone_entry.start_note == 0 || zone_entry.instrument >= bank.bank.instruments.num_allocated) {
+                    continue;
+                }
+                if (bank.bank.instruments.entries[zone_entry.instrument].layer_count == 0) {
+                    silent = true;
+                    break;
+                }
+            }
+        }
+        out_enabled[channel] = (bank.bank.channel_enabled[channel] != 0 && ! silent) ? 1 : 0;
     }
 }
 
@@ -2550,7 +2988,23 @@ bool Sculptor::zone_records_split_copy(Synth::InstrumentEditorBank* bank, uint32
     if (bank->graph_layout_count + record_count > Synth::max_graph_records) {
         return false;
     }
-    // Shift later zones first, then copy: records and mask rows move together.
+    // The clone's phantom entries must fit the store too, so a refusal
+    // leaves every record, mask row and store entry untouched.
+    uint32_t                 source_phantom_count = 0;
+    Synth::PhantomOscillator source_phantoms[Synth::max_layers];
+    for (uint32_t i = 0; i < bank->phantom_count; ++i) {
+        if (bank->phantoms[i].channel == channel && bank->phantoms[i].zone == zone) {
+            if (source_phantom_count >= Synth::max_layers) {
+                return false;
+            }
+            source_phantoms[source_phantom_count++] = bank->phantoms[i];
+        }
+    }
+    if (bank->phantom_count + source_phantom_count > Synth::max_phantom_entries) {
+        return false;
+    }
+    // Shift later zones first, then copy: records, mask rows and store
+    // entries move together.
     for (uint32_t i = 0; i < bank->graph_layout_count; ++i) {
         Synth::GraphNodeLayout& record = bank->graph_layout[i];
         if (record.kind != 4 && record.channel == channel && record.zone > zone) {
@@ -2561,6 +3015,18 @@ bool Sculptor::zone_records_split_copy(Synth::InstrumentEditorBank* bank, uint32
         bank->graph_missing_sum[channel][z] = bank->graph_missing_sum[channel][z - 1];
     }
     bank->graph_missing_sum[channel][zone + 1] = bank->graph_missing_sum[channel][zone];
+    // The phantom store rows move with the bits: later zones shift down,
+    // and the cloned zone carries the source zone's entries.
+    for (uint32_t i = 0; i < bank->phantom_count; ++i) {
+        if (bank->phantoms[i].channel == channel && bank->phantoms[i].zone > zone) {
+            bank->phantoms[i].zone++;
+        }
+    }
+    for (uint32_t i = 0; i < source_phantom_count; ++i) {
+        Synth::PhantomOscillator copy         = source_phantoms[i];
+        copy.zone                             = static_cast<uint8_t>(zone + 1);
+        bank->phantoms[bank->phantom_count++] = copy;
+    }
 
     for (uint32_t i = 0; i < bank->graph_layout_count; ++i) {
         const Synth::GraphNodeLayout& record = bank->graph_layout[i];
@@ -2609,6 +3075,22 @@ void Sculptor::zone_records_drop_zone(Synth::InstrumentEditorBank* bank, uint32_
         bank->graph_missing_sum[channel][z] = bank->graph_missing_sum[channel][z + 1];
     }
     bank->graph_missing_sum[channel][Synth::max_instr_per_channel - 1] = 0;
+    // The phantom store rows move with the bits: the dropped zone's
+    // entries go and later zones shift down.
+    for (uint32_t i = 0; i < bank->phantom_count;) {
+        if (bank->phantoms[i].channel != channel) {
+            ++i;
+            continue;
+        }
+        if (bank->phantoms[i].zone == zone) {
+            remove_phantom_entry_at(bank, i);
+            continue;
+        }
+        if (bank->phantoms[i].zone > zone) {
+            bank->phantoms[i].zone--;
+        }
+        ++i;
+    }
 }
 
 void Sculptor::zone_records_clear_zone(Synth::InstrumentEditorBank* bank, uint32_t channel, uint32_t zone)
@@ -2618,6 +3100,14 @@ void Sculptor::zone_records_clear_zone(Synth::InstrumentEditorBank* bank, uint32
     }
     filter_zone_records(bank, channel, zone, false);
     bank->graph_missing_sum[channel][zone] = 0;
+    // The zone's phantom entries go with its bits.
+    for (uint32_t i = 0; i < bank->phantom_count;) {
+        if (bank->phantoms[i].channel == channel && bank->phantoms[i].zone == zone) {
+            remove_phantom_entry_at(bank, i);
+            continue;
+        }
+        ++i;
+    }
 }
 
 void Sculptor::channel_records_reset(Synth::InstrumentEditorBank* bank, uint32_t channel)
@@ -2635,6 +3125,14 @@ void Sculptor::channel_records_reset(Synth::InstrumentEditorBank* bank, uint32_t
     bank->graph_layout_count = write;
     for (uint32_t zone = 0; zone < Synth::max_instr_per_channel; ++zone) {
         bank->graph_missing_sum[channel][zone] = 0;
+    }
+    // The channel's phantom entries go with its bits.
+    for (uint32_t i = 0; i < bank->phantom_count;) {
+        if (bank->phantoms[i].channel == channel) {
+            remove_phantom_entry_at(bank, i);
+            continue;
+        }
+        ++i;
     }
 }
 

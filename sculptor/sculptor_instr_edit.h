@@ -56,7 +56,7 @@ private:
     void drain_fx_graph();
     void run_fx_canvas_command();
     void do_fx_add_effect(Synth::EffectType type);
-    void do_fx_add_lfo();
+    void do_fx_add_lfo(bool from_drop);
     void do_fx_change_type(uint32_t node_idx, Synth::EffectType type);
     // One added-CC registry-bit edit shared by both panes' handlers.
     void edit_added_cc_mask(uint32_t mask_idx, uint32_t cc_number, bool add, uint32_t undo_tag, bool* reproject);
@@ -72,8 +72,16 @@ private:
     void gui_osc_graph(uint32_t channel);
     void drain_osc_graph(uint32_t channel, uint32_t zone);
     void run_osc_canvas_command();
-    void do_osc_add_oscillator();
-    void do_osc_add_generator(bool is_env);
+    // The canvas menu passes the unsnapped popup position and appends at the
+    // compiled layer count (a storage index, not a projected row); the drop
+    // variants pass the snapped release position and the dragged row - both
+    // converge on one append routine that lands the fresh oscillator after
+    // the last existing row (the shell at the dragged red row is never
+    // modified).  A generator drop also passes the binding cell to preset;
+    // the detached-canvas variants pass the sentinels (max_layers /
+    // num_mod_targets) and create a free-standing node only.
+    void do_osc_add_oscillator(vmath::vec2 position, uint32_t dragged_row);
+    void do_osc_add_generator(bool is_env, vmath::vec2 position, uint32_t bind_layer, uint32_t bind_target);
     void do_osc_add_cc(uint32_t cc_number);
     void do_osc_remove_cc(uint32_t cc_number);
 
