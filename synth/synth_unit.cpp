@@ -4044,9 +4044,6 @@ static void effects_clipboard_regressions()
     // pre-narrowing, a 2-param FIR document fails decode in both carriers,
     // and an absent or modulation-only third base decodes as 100.
     {
-        static Synth::EffectsDocument doc;
-        static char                   text[65536];
-        static char                   bank_text[65536];
         effects_clipboard_fixture(&doc, true);
         doc.chain.effects[0].type                   = Synth::EffectType::fir;
         doc.chain.effects[0].bindings[0]            = {};
@@ -4057,7 +4054,6 @@ static void effects_clipboard_regressions()
         const uint32_t n                            = Synth::encode_effects_json(&doc, text, sizeof(text));
         TEST(n > 0);
         TEST(strstr(text, "{\"base_value\":37}") != nullptr);
-        static Synth::EffectsDocument decoded;
         TEST(Synth::decode_effects_json(text, n, &decoded));
         TEST(decoded.chain.effects[0].type == Synth::EffectType::fir);
         TEST(decoded.chain.effects[0].bindings[2].base_value == 37.0f);
@@ -8889,8 +8885,8 @@ static void check_fir_slope_helpers()
         // Independent evaluation: the canonical Blackman over a standalone
         // 103-tap window, compared tap for tap against the span-derived form.
         for (uint32_t k = 0; k < span; k++) {
-            const float direct =
-                0.42f - 0.5f * cosf((2.0f * pi * k) / span_m1) + 0.08f * cosf((4.0f * pi * k) / span_m1);
+            const float direct = 0.42f - 0.5f * cosf((2.0f * pi * static_cast<float>(k)) / span_m1) +
+                                 0.08f * cosf((4.0f * pi * static_cast<float>(k)) / span_m1);
             TEST(windows[center - span / 2 + k] == direct);
         }
         TEST(window_sum > 0.0f);
