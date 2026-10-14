@@ -2582,14 +2582,17 @@ static void decode_effect_audio(Walker& walker, uint32_t token, Sculptor::Effect
 // entry without an oscillator body is malformed input.
 static void decode_phantom_entry(Walker& w, uint32_t obj, Synth::InstrumentEditorBank* out)
 {
-    uint8_t           channel      = 0;
-    uint8_t           zone         = 0;
-    uint8_t           layer        = 0;
-    bool              have_channel = false;
-    bool              have_zone    = false;
-    bool              have_layer   = false;
-    bool              have_osc     = false;
-    Synth::Oscillator osc          = {};
+    uint8_t channel      = 0;
+    uint8_t zone         = 0;
+    uint8_t layer        = 0;
+    bool    have_channel = false;
+    bool    have_zone    = false;
+    bool    have_layer   = false;
+    bool    have_osc     = false;
+
+    Synth::Oscillator osc;
+    memset(&osc, 0, sizeof(osc));
+
     walk_object(w, obj, [&](uint32_t key_idx, uint32_t val_idx) {
         if (key_eq(w, key_idx, "channel")) {
             want_u8(w, val_idx, Synth::max_channels - 1, &channel);
