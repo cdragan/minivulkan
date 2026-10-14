@@ -189,6 +189,7 @@ static bool approx(float left, float right, float eps)
     return diff <= eps;
 }
 
+
 // True for the four targets these fixtures wire modulators and MIDI
 // inputs onto (volume, pitch, panning, FIR spread).  Under AC11 all eight
 // targets are uniformly modulate-able; the remaining four (duty A/B, osc
@@ -8904,13 +8905,11 @@ static void check_fir_slope_helpers()
     // Out-of-range clamps: 0, negatives and NaN read as the 1 percent
     // minimum; values above 100 (including +inf) read as the full span.
     {
-        const float nan_slope = 0.0f / 0.0f;
-        const float inf_slope = 1.0f / 0.0f;
         TEST(Synth::fir_effective_span(0.0f) == 11);
         TEST(Synth::fir_effective_span(-3.0f) == 11);
-        TEST(Synth::fir_effective_span(nan_slope) == 11);
+        TEST(Synth::fir_effective_span(NAN) == 11);
         TEST(Synth::fir_effective_span(101.0f) == Synth::num_fir_taps);
-        TEST(Synth::fir_effective_span(inf_slope) == Synth::num_fir_taps);
+        TEST(Synth::fir_effective_span(INFINITY) == Synth::num_fir_taps);
     }
     // Byte-identity mirror: at the full span the span-parameterized window
     // reproduces the old fixed (num_taps - 1) spelling bit for bit, with
@@ -9363,19 +9362,17 @@ static void check_fir_bandpass_gain()
     // the coeff_sum path (sign preserved); a degenerate fallback becomes 1;
     // a small but valid magnitude is used without an epsilon floor.
     {
-        const float nan_value = 0.0f / 0.0f;
-        const float inf_value = 1.0f / 0.0f;
         TEST(fir_test_bandpass_denominator(0.0f, 0.0f, 0.5f) == 0.5f);
         TEST(fir_test_bandpass_denominator(0.0f, 0.0f, -0.5f) == -0.5f);
-        TEST(fir_test_bandpass_denominator(nan_value, 0.0f, 0.5f) == 0.5f);
-        TEST(fir_test_bandpass_denominator(0.0f, inf_value, 0.5f) == 0.5f);
+        TEST(fir_test_bandpass_denominator(NAN, 0.0f, 0.5f) == 0.5f);
+        TEST(fir_test_bandpass_denominator(0.0f, INFINITY, 0.5f) == 0.5f);
         TEST(fir_test_bandpass_denominator(1e-25f, 0.0f, 0.25f) == 0.25f);
         const float small_magnitude = fir_test_bandpass_denominator(1e-10f, 0.0f, 0.25f);
         TEST(small_magnitude > 0.0f && small_magnitude < 1e-9f);
         TEST(fir_test_bandpass_denominator(0.0f, 0.0f, 0.0f) == 1.0f);
-        TEST(fir_test_bandpass_denominator(0.0f, 0.0f, nan_value) == 1.0f);
-        TEST(fir_test_bandpass_denominator(0.0f, 0.0f, inf_value) == 1.0f);
-        TEST(fir_test_bandpass_denominator(nan_value, nan_value, nan_value) == 1.0f);
+        TEST(fir_test_bandpass_denominator(0.0f, 0.0f, NAN) == 1.0f);
+        TEST(fir_test_bandpass_denominator(0.0f, 0.0f, INFINITY) == 1.0f);
+        TEST(fir_test_bandpass_denominator(NAN, NAN, NAN) == 1.0f);
     }
 
     // Production source pins: the band-pass predicate, the weighted windowed
@@ -9452,8 +9449,7 @@ static void check_fir_spread_helpers()
     // Filter-off spellings: zero, negative and NaN spreads are passthrough.
     TEST(! Synth::oscillator_fir_cutoffs(69.0f, 0.0f, 1, &lowpass_hz, &highpass_hz));
     TEST(! Synth::oscillator_fir_cutoffs(69.0f, -0.5f, 1, &lowpass_hz, &highpass_hz));
-    const float nan_spread = 0.0f / 0.0f;
-    TEST(! Synth::oscillator_fir_cutoffs(69.0f, nan_spread, 1, &lowpass_hz, &highpass_hz));
+    TEST(! Synth::oscillator_fir_cutoffs(69.0f, NAN, 1, &lowpass_hz, &highpass_hz));
     // The sub-1-Hz highpass edge transports as exactly 0 Hz (pure lowpass),
     // while a comfortably-above-floor edge stays a real band-pass edge.
     TEST(Synth::oscillator_fir_cutoffs(-36.0f, 12.0f, 1, &lowpass_hz, &highpass_hz));
@@ -20765,15 +20761,17 @@ int main()
                 const uint32_t prefix       = static_cast<uint32_t>(hit - spread_payload);
                 const uint32_t suffix       = spread_payload_len - static_cast<uint32_t>(value_end - spread_payload);
                 const uint32_t spelling_len = static_cast<uint32_t>(strlen(spelling));
+                const uint32_t key_len = static_cast<uint32_t>(strlen(key));
+
                 static char    spelling_doc[Synth::library_payload_max];
                 memcpy(spelling_doc, spread_payload, prefix);
-                memcpy(spelling_doc + prefix, key, strlen(key));
-                memcpy(spelling_doc + prefix + strlen(key), spelling, spelling_len);
-                memcpy(spelling_doc + prefix + strlen(key) + spelling_len, value_end, suffix);
+                memcpy(spelling_doc + prefix, key, key_len);
+                memcpy(spelling_doc + prefix + key_len, spelling, spelling_len);
+                memcpy(spelling_doc + prefix + key_len + spelling_len, value_end, suffix);
                 static Synth::InstrumentEditorBank spelling_decoded;
                 memset(&spelling_decoded, 0, sizeof(spelling_decoded));
                 return Synth::decode_editor_bank_json(spelling_doc,
-                                                      prefix + strlen(key) + spelling_len + suffix,
+                                                      prefix + key_len + spelling_len + suffix,
                                                       &spelling_decoded);
             };
             TEST(decode_with_spread_spelling("3"));   // the splice itself decodes
@@ -20805,7 +20803,8 @@ int main()
             if (routing_hit) {
                 const char* const removed_keys =
                     "\"lowpass_cutoff\":{\"base_value\":2000},\"highpass_cutoff\":{\"base_value\":500},";
-                const uint32_t prefix = static_cast<uint32_t>(routing_hit - spread_payload) + strlen(routing_key);
+                const uint32_t routing_key_len = static_cast<uint32_t>(strlen(routing_key));
+                const uint32_t prefix = static_cast<uint32_t>(routing_hit - spread_payload) + routing_key_len;
                 const uint32_t suffix = routing_payload_len - prefix;
                 static char    routing_doc[Synth::library_payload_max];
                 memcpy(routing_doc, spread_payload, prefix);
