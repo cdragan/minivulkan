@@ -47,6 +47,7 @@ case "$UNAME" in
     Darwin)
         run cp -r Out/release_nostdlib/example.app Out/artifacts
         run cp -r Out/release/sculptor.app Out/artifacts
+        rm -rf Out/artifacts/*.app/Contents/Frameworks
         ;;
     CYGWIN*|MINGW*|MSYS*)
         run cp Out/release_nostdlib/example.exe{,.map} Out/artifacts
