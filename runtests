@@ -39,9 +39,13 @@ case "$UNAME" in
     Darwin)
         run cp -r Out/release_nostdlib/example.app Out/artifacts
         run rm -rf Out/artifacts/*.app/Contents/Frameworks
+        run make -j $JOBS -k debug=0 stdlib=1 sculptor
+        run cp -r Out/release/sculptor.app Out/artifacts
         ;;
     CYGWIN*|MINGW*|MSYS*)
         run cp Out/release_nostdlib/example.exe{,.map} Out/artifacts
+        run make -j $JOBS -k debug=0 stdlib=1 sculptor
+        run cp Out/release/sculptor.exe{,.map} Out/artifacts
         ;;
 esac
 
