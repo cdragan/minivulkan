@@ -137,8 +137,9 @@ static void service_passes(IAudioClient*       audio_client,
         }
     }
 
-    if (stream_lost)
+    if (stream_lost) {
         d_printf("WASAPI audio stream was invalidated\n");
+    }
 }
 
 static DWORD WINAPI render_thread_main(LPVOID)
@@ -156,12 +157,14 @@ static DWORD WINAPI render_thread_main(LPVOID)
     // we never raise the thread to TIME_CRITICAL ourselves.
     DWORD  mmcss_index  = 0;
     HANDLE mmcss_handle = AvSetMmThreadCharacteristicsW(L"Pro Audio", &mmcss_index);
-    if (! mmcss_handle)
+    if (! mmcss_handle) {
         d_printf("Failed to register the audio thread with MMCSS\n");
+    }
 
     bool ok = SUCCEEDED(CoInitializeEx(nullptr, COINIT_MULTITHREADED));
-    if (! ok)
+    if (! ok) {
         d_printf("Failed to initialize COM for audio\n");
+    }
     else
         com_initialized = true;
 
@@ -303,8 +306,9 @@ static void stop_workers()
 bool Synth::init_synth_os()
 {
     // Live MIDI input is nice to have; audio still initializes without it.
-    if (! init_midi_os())
+    if (! init_midi_os()) {
         d_printf("Live MIDI input unavailable\n");
+    }
 
     audio_ready_event   = CreateEvent(nullptr, FALSE, FALSE, nullptr);
     stop_event          = CreateEvent(nullptr, TRUE, FALSE, nullptr);
@@ -312,8 +316,9 @@ bool Synth::init_synth_os()
     handshake_event     = CreateEvent(nullptr, TRUE, FALSE, nullptr);
 
     bool ok = audio_ready_event && stop_event && producer_wake_event && handshake_event;
-    if (! ok)
+    if (! ok) {
         d_printf("Failed to create the audio worker events\n");
+    }
 
     // Start the producer first, so the ring fills while the render worker
     // prepares and prefills the endpoint buffer.
@@ -340,8 +345,9 @@ bool Synth::init_synth_os()
         // endpoint buffer and started the stream, or after it failed.
         const DWORD wait_result = WaitForSingleObject(handshake_event, handshake_timeout_ms);
         ok = wait_result == WAIT_OBJECT_0 && render_worker_result.load(std::memory_order_acquire) == 1;
-        if (! ok)
+        if (! ok) {
             d_printf("Audio output initialization failed\n");
+        }
     }
 
     if (! ok) {
