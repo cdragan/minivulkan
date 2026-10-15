@@ -15,6 +15,7 @@
 using Sculptor::bounded_real_slot;
 using Sculptor::input_slot;
 using Sculptor::int_slot;
+using Sculptor::lfo_wave_names;
 using Sculptor::list_slot;
 using Sculptor::make_slot;
 using Sculptor::mod_source_names;
@@ -676,8 +677,11 @@ static uint32_t create_lfo_node(Sculptor::Graph*            graph,
     graph->add_slot(node, output_slot("Value"));
     graph->add_slot(node, input_slot("Depth"));
     graph->add_slot(node, input_slot("Rate"));
-    graph->add_slot(node, list_slot("Waveform", wave_names, 5, static_cast<uint32_t>(lfo.wave)));
-    graph->add_slot(node, bounded_real_slot("Duty", static_cast<float>(lfo.duty) / 255.0f, 0.0f, 1.0f));
+    graph->add_slot(node, list_slot("Waveform", lfo_wave_names, 2, lfo.wave == Synth::WaveType::sine_wave ? 0 : 1));
+    // Duty shapes sawtooth only: sine has no phase to widen.
+    const uint32_t duty_idx =
+        graph->add_slot(node, bounded_real_slot("Duty", static_cast<float>(lfo.duty) / 255.0f, 0.0f, 1.0f));
+    graph->set_slot_edit_disabled(node, duty_idx, lfo.wave == Synth::WaveType::sine_wave);
     graph->add_slot(node, int_slot("Period (ms)", lfo.period_ms));
     return node;
 }
@@ -1813,20 +1817,23 @@ bool Sculptor::apply_osc_graph_descriptor_edit(const Graph&           graph,
     }
     Synth::LFODescriptor& lfo = bank->lfos.entries[desc_id - 1];
     if (slot.property_type == PropertyType::real) {
-        return false;
+        if (strncmp(slot.name, "Duty", sizeof(slot.name)) != 0 || ! (value.real >= 0.0f && value.real <= 1.0f)) {
+            return false;
+        }
+
+        lfo.duty = static_cast<uint8_t>(value.real * 255.0f + 0.5f);
+        return true;
     }
     if (slot.property_type == PropertyType::list) {
         if (strncmp(slot.name, "Waveform", sizeof(slot.name)) != 0 || value.list_index >= slot.num_list_options) {
             return false;
         }
-        lfo.wave = static_cast<Synth::WaveType>(value.list_index);
+        // The two-option wave list keeps the descriptor inside the runtime's
+        // sine/sawtooth palette.
+        lfo.wave = value.list_index == 0 ? Synth::WaveType::sine_wave : Synth::WaveType::sawtooth_wave;
         return true;
     }
     if (slot.property_type == PropertyType::integer && value.integer >= 0) {
-        if (strncmp(slot.name, "Duty", sizeof(slot.name)) == 0 && value.real >= 0.0f && value.real <= 1.0f) {
-            lfo.duty = static_cast<uint8_t>(value.real * 255.0f + 0.5f);
-            return true;
-        }
         if (strncmp(slot.name, "Period (ms)", sizeof(slot.name)) == 0 && value.integer <= 65535) {
             lfo.period_ms = static_cast<uint16_t>(value.integer);
             return true;
@@ -1977,6 +1984,57 @@ static bool store_compiled_instrument(Synth::InstrumentEditorBank*     bank,
     return true;
 }
 
+// Syncs every projected instance of one LFO descriptor: wave, duty, and
+// period slots are views of the shared descriptor, and Duty editability
+// follows the wave list.  Value edits never reproject, so one edit
+// through one node must update the sibling nodes silently.
+static void sync_lfo_descriptor_views(Synth::InstrumentEditorBank*     bank,
+                                      Sculptor::Graph*                 graph,
+                                      const Sculptor::OscGraphMapping& mapping,
+                                      uint32_t                         node_idx)
+{
+    uint32_t desc_id = 0;
+    for (uint32_t i = 0; i < mapping.detached_count; ++i) {
+        if (mapping.detached[i].kind == 2 && mapping.detached[i].node_idx == node_idx) {
+            desc_id = mapping.detached[i].desc_id;
+        }
+    }
+
+    if (desc_id == 0 || desc_id > bank->bank.lfos.num_allocated) {
+        return;
+    }
+
+    const Synth::LFODescriptor& lfo = bank->bank.lfos.entries[desc_id - 1];
+    for (uint32_t i = 0; i < mapping.detached_count; ++i) {
+        const Sculptor::DetachedNode& entry = mapping.detached[i];
+        if (entry.kind != 2 || entry.desc_id != desc_id || entry.node_idx == Sculptor::pool_no_slot) {
+            continue;
+        }
+
+        const Sculptor::Node& node = graph->node(entry.node_idx);
+        for (uint32_t slot = 0; slot < node.slots.num_allocated; ++slot) {
+            const Sculptor::Slot&   slot_ref = node.slots.entries[slot];
+            Sculptor::PropertyValue value    = {};
+            if (strncmp(slot_ref.name, "Waveform", sizeof(slot_ref.name)) == 0) {
+                value.list_index = lfo.wave == Synth::WaveType::sine_wave ? 0 : 1;
+                graph->set_slot_value(entry.node_idx, slot, value);
+            }
+
+            if (strncmp(slot_ref.name, "Duty", sizeof(slot_ref.name)) == 0) {
+                value.real = static_cast<float>(lfo.duty) / 255.0f;
+                graph->set_slot_value(entry.node_idx, slot, value);
+            }
+
+            if (strncmp(slot_ref.name, "Period (ms)", sizeof(slot_ref.name)) == 0) {
+                value.integer = lfo.period_ms;
+                graph->set_slot_value(entry.node_idx, slot, value);
+            }
+        }
+
+        refresh_lfo_duty_disabled(*graph, entry.node_idx);
+    }
+}
+
 static bool apply_value_change(Synth::InstrumentEditorBank* bank,
                                Sculptor::Graph*             graph,
                                Sculptor::OscGraphMapping*   mapping,
@@ -2010,13 +2068,19 @@ static bool apply_value_change(Synth::InstrumentEditorBank* bank,
             }
             return store_compiled_instrument(bank, *graph, *mapping, channel, zone);
         case role_env:
-        case role_lfo:
-            return apply_osc_graph_descriptor_edit(*graph,
-                                                   *mapping,
-                                                   &bank->bank,
-                                                   change.node_idx,
-                                                   change.slot_idx,
-                                                   slot.value);
+        case role_lfo: {
+            const bool applied = apply_osc_graph_descriptor_edit(*graph,
+                                                                 *mapping,
+                                                                 &bank->bank,
+                                                                 change.node_idx,
+                                                                 change.slot_idx,
+                                                                 slot.value);
+            if (applied) {
+                sync_lfo_descriptor_views(bank, graph, *mapping, change.node_idx);
+            }
+
+            return applied;
+        }
         case role_input:
         case role_output:
             return store_compiled_instrument(bank, *graph, *mapping, channel, zone);

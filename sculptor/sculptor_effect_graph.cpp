@@ -15,6 +15,7 @@ using Sculptor::connection_into;
 using Sculptor::fx_param_src_dot;
 using Sculptor::input_slot;
 using Sculptor::int_slot;
+using Sculptor::lfo_wave_names;
 using Sculptor::list_slot;
 using Sculptor::make_slot;
 using Sculptor::output_slot;
@@ -23,10 +24,6 @@ using Sculptor::real_slot;
 using Sculptor::PropertyType;
 using Sculptor::Slot;
 using Sculptor::SlotKind;
-
-// Effect LFO waves the runtime can evaluate (eval_lfo_mod); pulse and noise
-// would trip the runtime's palette assert, and bank validation rejects them.
-static const char* const fx_lfo_wave_names[2] = { "Sine", "Sawtooth" };
 
 // The six real effect types' node rows, in shader param order.  Slider
 // bounds are editing aids only: the shaders clamp delay samples, chorus
@@ -100,8 +97,8 @@ static Slot wave_slot(Synth::WaveType wave)
 {
     Slot slot             = make_slot("Waveform", SlotKind::property, PropertyType::list);
     slot.num_list_options = 2;
-    snprintf(slot.list_options[0], sizeof(slot.list_options[0]), "%s", fx_lfo_wave_names[0]);
-    snprintf(slot.list_options[1], sizeof(slot.list_options[1]), "%s", fx_lfo_wave_names[1]);
+    snprintf(slot.list_options[0], sizeof(slot.list_options[0]), "%s", lfo_wave_names[0]);
+    snprintf(slot.list_options[1], sizeof(slot.list_options[1]), "%s", lfo_wave_names[1]);
     slot.value.list_index = wave == Synth::WaveType::sine_wave ? 0 : 1;
     return slot;
 }
@@ -787,7 +784,10 @@ bool Sculptor::project_effect_chain_to_graph(const Synth::InstrumentEditorBank& 
 
         graph->add_slot(node, output_slot("Value"));
         graph->add_slot(node, wave_slot(lfo.wave));
-        graph->add_slot(node, bounded_real_slot("Duty", static_cast<float>(lfo.duty) / 255.0f, 0.0f, 1.0f, false));
+        // Duty shapes sawtooth only: sine has no phase to widen.
+        const uint32_t duty_idx =
+            graph->add_slot(node, bounded_real_slot("Duty", static_cast<float>(lfo.duty) / 255.0f, 0.0f, 1.0f, false));
+        graph->set_slot_edit_disabled(node, duty_idx, lfo.wave == Synth::WaveType::sine_wave);
         graph->add_slot(node, int_slot("Period (ms)", lfo.period_ms));
     }
 
@@ -1065,7 +1065,7 @@ static bool apply_fx_graph_change_internal(Synth::InstrumentBank*              b
                     return true;
                 }
                 if (change.slot_idx == 2) {
-                    if (live_slot.value.real < 0.0f || live_slot.value.real > 1.0f) {
+                    if (! (live_slot.value.real >= 0.0f && live_slot.value.real <= 1.0f)) {
                         return false;
                     }
                     lfo.duty = static_cast<uint8_t>(live_slot.value.real * 255.0f + 0.5f);
@@ -1930,6 +1930,36 @@ bool Sculptor::capture_effect_audio(const Graph&                     graph,
     }
     *out = audio;
     return true;
+}
+
+// Sets one projected LFO node's Duty editability from its wave list: duty
+// shapes sawtooth only, and plain value edits never reproject the node.
+void Sculptor::refresh_lfo_duty_disabled(Sculptor::Graph& graph, uint32_t node)
+{
+    if (node >= Sculptor::max_nodes || ! graph.node_occupied(node)) {
+        return;
+    }
+
+    const Sculptor::Node& node_ref = graph.node(node);
+    uint32_t              wave_idx = Sculptor::pool_no_slot;
+    uint32_t              duty_idx = Sculptor::pool_no_slot;
+    for (uint32_t slot = 0; slot < node_ref.slots.num_allocated; ++slot) {
+        const Sculptor::Slot& slot_ref = node_ref.slots.entries[slot];
+        if (strncmp(slot_ref.name, "Waveform", sizeof(slot_ref.name)) == 0) {
+            wave_idx = slot;
+        }
+
+        if (strncmp(slot_ref.name, "Duty", sizeof(slot_ref.name)) == 0) {
+            duty_idx = slot;
+        }
+    }
+
+    if (wave_idx == Sculptor::pool_no_slot || duty_idx == Sculptor::pool_no_slot) {
+        return;
+    }
+
+    const bool sine = node_ref.slots.entries[wave_idx].value.list_index == 0;
+    graph.set_slot_edit_disabled(node, duty_idx, sine);
 }
 
 bool Sculptor::apply_effect_graph_batch(const Synth::InstrumentEditorBank* source,

@@ -7123,6 +7123,96 @@ static void osc_direct_modulator_regressions()
         }
     }
 
+    // Oscillator LFO descriptor edits: the real Duty slot applies, NaN is
+    // refused, and every projected instance sharing the descriptor stays
+    // in step (wave value, duty value, and Duty editability).
+    {
+        static Synth::InstrumentEditorBank source;
+        static Synth::InstrumentEditorBank candidate;
+        if (begin_small_graph(&source, &t7_graph, &t7_mapping)) {
+            candidate = source;
+
+            // Alias a second instance onto the projected LFO descriptor
+            // with different modulation sources, then reproject: the two
+            // nodes are separate views of one shared descriptor.
+            uint32_t holder_layer  = Synth::max_layers;
+            uint32_t holder_target = Synth::num_mod_targets;
+            for (uint32_t layer = 0; layer < Synth::max_layers && holder_layer == Synth::max_layers; ++layer) {
+                for (uint32_t t = 0; t < Synth::num_mod_targets; ++t) {
+                    if (source.bank.instruments.entries[0].layers[layer].targets[t].lfo_desc_id == 1) {
+                        holder_layer  = layer;
+                        holder_target = t;
+                        break;
+                    }
+                }
+            }
+
+            TEST(holder_layer < Synth::max_layers);
+            Synth::TargetBinding alias = source.bank.instruments.entries[0].layers[holder_layer].targets[holder_target];
+            alias.lfo_depth_source     = Synth::ModSource::mod_wheel;
+            alias.lfo_rate_source      = Synth::ModSource::channel_pressure;
+            source.bank.instruments.entries[0]
+                .layers[(holder_layer + 2) % Synth::max_layers]
+                .targets[Synth::mod_volume] = alias;
+            TEST(Sculptor::project_editor_to_graph(source, &t7_graph, &t7_mapping));
+            (void)t7_graph.take_changes(discarded, Sculptor::max_pending_changes);
+
+            const int32_t  edited       = find_detached_by_desc(t7_mapping, 2, 1);
+            const uint32_t aliased_desc = 1;
+            TEST(edited >= 0);
+            if (edited >= 0) {
+                const uint32_t node      = t7_mapping.detached[edited].node_idx;
+                uint32_t       duty_slot = Sculptor::pool_no_slot;
+                uint32_t       wave_slot = Sculptor::pool_no_slot;
+                TEST(find_graph_slot(t7_graph, node, "Duty", &duty_slot));
+                TEST(find_graph_slot(t7_graph, node, "Waveform", &wave_slot));
+
+                Sculptor::GraphChange edit = {};
+                edit.kind                  = Sculptor::ChangeKind::value_changed;
+                edit.node_idx              = node;
+                edit.slot_idx              = duty_slot;
+
+                // Duty applies through the real slot.
+                Sculptor::PropertyValue duty = {};
+                duty.real                    = 0.25f;
+                t7_graph.set_slot_value(node, duty_slot, duty);
+                TEST(Sculptor::apply_osc_graph_change(&candidate, &t7_graph, &t7_mapping, edit));
+                TEST(candidate.bank.lfos.entries[aliased_desc - 1].duty == 64);
+
+                // NaN is refused and leaves the descriptor unchanged.
+                Sculptor::PropertyValue nan_duty = {};
+                nan_duty.real                    = NAN;
+                t7_graph.set_slot_value(node, duty_slot, nan_duty);
+                TEST(! Sculptor::apply_osc_graph_change(&candidate, &t7_graph, &t7_mapping, edit));
+                TEST(candidate.bank.lfos.entries[aliased_desc - 1].duty == 64);
+
+                // A wave edit syncs every instance sharing the descriptor.
+                edit.slot_idx               = wave_slot;
+                Sculptor::PropertyValue saw = {};
+                saw.list_index              = 1;
+                t7_graph.set_slot_value(node, wave_slot, saw);
+                TEST(Sculptor::apply_osc_graph_change(&candidate, &t7_graph, &t7_mapping, edit));
+                TEST(candidate.bank.lfos.entries[aliased_desc - 1].wave == Synth::WaveType::sawtooth_wave);
+                for (uint32_t i = 0; i < t7_mapping.detached_count; ++i) {
+                    const Sculptor::DetachedNode& entry = t7_mapping.detached[i];
+                    if (entry.kind != 2 || entry.desc_id != aliased_desc || entry.node_idx == Sculptor::pool_no_slot) {
+                        continue;
+                    }
+
+                    uint32_t alias_wave = Sculptor::pool_no_slot;
+                    uint32_t alias_duty = Sculptor::pool_no_slot;
+                    TEST(find_graph_slot(t7_graph, entry.node_idx, "Waveform", &alias_wave));
+                    TEST(find_graph_slot(t7_graph, entry.node_idx, "Duty", &alias_duty));
+                    TEST(t7_graph.node(entry.node_idx).slots.entries[alias_wave].value.list_index == 1);
+                    TEST(approx(t7_graph.node(entry.node_idx).slots.entries[alias_duty].value.real,
+                                64.0f / 255.0f,
+                                1.0e-6f));
+                    TEST(! t7_graph.slot_edit_disabled(entry.node_idx, alias_duty));
+                }
+            }
+        }
+    }
+
     // T-M7-10 (validator edges, C2/C8): capacity and wrong-family
     // refusals, the volume rule both directions, output-end retargets,
     // input-end target moves, the base-row delete refusal, the per-cell

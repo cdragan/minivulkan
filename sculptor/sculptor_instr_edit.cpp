@@ -2464,6 +2464,14 @@ void Sculptor::SynthEditor::drain_fx_graph()
                                                        count,
                                                        capture_nodes,
                                                        &candidate);
+    if (ok) {
+        for (uint32_t desc = 1; desc <= Synth::max_lfos; ++desc) {
+            const uint32_t lfo_node = fx_mapping.lfo_nodes[desc - 1];
+            if (lfo_node != Sculptor::pool_no_slot) {
+                Sculptor::refresh_lfo_duty_disabled(osc_graph, lfo_node);
+            }
+        }
+    }
     // One tag for a single-field batch so a slider drag's per-frame events
     // amend one undo entry; mixed batches and wire gestures take a fresh
     // unique tag (a wire edit is one discrete undo step).
@@ -3246,7 +3254,9 @@ void Sculptor::SynthEditor::gui_keyboard()
         if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
             const int32_t zone =
                 static_cast<int32_t>(Synth::zone_entry_at(bank.channel_zones[channel], static_cast<uint32_t>(hit)));
-            if (zone >= 0) {
+            // In effects mode the keyboard only previews: the view must not jump
+            // to another zone's tab.
+            if (zone >= 0 && ! show_effects_mode) {
                 selected_zone[channel]     = zone;
                 last_clicked_note[channel] = static_cast<uint8_t>(hit);
                 zone_tab_force_entry       = zone; // keyboard click moves the tab bar too

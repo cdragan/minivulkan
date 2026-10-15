@@ -13,6 +13,10 @@
 #include <string.h>
 
 const char* const Sculptor::source_op_names[2] = { "+", "x" };
+// Effect and oscillator LFO waves the runtime can evaluate (eval_lfo_mod);
+// pulse and noise would trip the runtime's palette assert, and bank
+// validation rejects them.
+const char* const Sculptor::lfo_wave_names[2] = { "Sine", "Sawtooth" };
 
 const char* const Sculptor::mod_source_names[6] = { "Pitch bend", "Mod wheel",  "Channel press.",
                                                     "Velocity",   "Aftertouch", "Pressure (max)" };

@@ -88,6 +88,8 @@ void append_lfo_row(Graph*    graph,
 
 // Option labels of the two-way source op list (SourceOp::add, SourceOp::multiply).
 extern const char* const source_op_names[2];
+// Option labels of the two-way LFO wave list (sine, sawtooth).
+extern const char* const lfo_wave_names[2];
 
 // Sized for the widest projected node - the oscillator: 16 fixed slots
 // plus one 11-slot modulation block per ModTarget after its row

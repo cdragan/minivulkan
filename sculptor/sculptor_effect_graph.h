@@ -121,6 +121,9 @@ bool apply_effect_graph_batch(const Synth::InstrumentEditorBank* source,
                               uint32_t                           count,
                               const bool*                        capture_nodes,
                               Synth::InstrumentEditorBank*       out);
+// Sets one projected LFO node's Duty editability from its wave list: duty
+// shapes sawtooth only, and plain value edits never reproject the node.
+void refresh_lfo_duty_disabled(Graph& graph, uint32_t node);
 // Requires graph and mapping; captures the complete pending projection without consumption.
 bool stage_effect_graph_edits(const Synth::InstrumentEditorBank* source,
                               const Graph*                       graph,
