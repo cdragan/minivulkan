@@ -245,8 +245,13 @@ bool init_gui(GuiClear clear)
             0
         },
     };
-    pool_sizes[0].descriptorCount = gui_num_descriptors;
-    pool_sizes[1].descriptorCount = gui_num_descriptors;
+
+    const unsigned num_sampler_descriptors = gui_num_descriptors < IMGUI_IMPL_VULKAN_MINIMUM_SAMPLER_POOL_SIZE
+        ? IMGUI_IMPL_VULKAN_MINIMUM_SAMPLER_POOL_SIZE : gui_num_descriptors;
+    const unsigned num_image_descriptors   = gui_num_descriptors < IMGUI_IMPL_VULKAN_MINIMUM_SAMPLED_IMAGE_POOL_SIZE
+        ? IMGUI_IMPL_VULKAN_MINIMUM_SAMPLED_IMAGE_POOL_SIZE : gui_num_descriptors;
+    pool_sizes[0].descriptorCount = num_sampler_descriptors;
+    pool_sizes[1].descriptorCount = num_image_descriptors;
 
     static VkDescriptorPoolCreateInfo pool_create_info = {
         VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
@@ -257,7 +262,7 @@ bool init_gui(GuiClear clear)
         pool_sizes
     };
 
-    pool_create_info.maxSets = gui_num_descriptors;
+    pool_create_info.maxSets = num_sampler_descriptors + num_image_descriptors;
 
     VkDescriptorPool desc_pool;
 
