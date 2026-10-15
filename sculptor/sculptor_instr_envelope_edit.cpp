@@ -17,8 +17,6 @@ constexpr float dotted_dash      = 3.0f;
 constexpr float dotted_gap       = 3.0f;
 constexpr float min_span_ms      = 40.0f;
 constexpr float scrollbar_height = 10.0f;
-// Inner margin the node renderer leaves around node content.
-constexpr float node_pad = 8.0f;
 
 constexpr ImU32 curve_color        = IM_COL32(210, 210, 210, 255);
 constexpr ImU32 hold_segment_color = IM_COL32(150, 150, 150, 255);
