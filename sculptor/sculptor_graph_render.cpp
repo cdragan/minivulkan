@@ -93,6 +93,53 @@ void add_text_scaled(ImDrawList* draw_list, vmath::vec2 pos, float scale, ImU32 
 
 } // namespace
 
+static bool in_rect(vmath::vec2 pos, vmath::vec2 rect_min, vmath::vec2 rect_max)
+{
+    return pos.x >= rect_min.x && pos.y >= rect_min.y && pos.x <= rect_max.x && pos.y <= rect_max.y;
+}
+
+Sculptor::EndPoint Sculptor::Graph::find_hovered_connector(vmath::vec2 mouse_screen) const
+{
+    EndPoint result       = { pool_no_slot, pool_no_slot };
+    float    best_dist_sq = dot_pick_radius * dot_pick_radius;
+
+    for (uint32_t node_idx = 0; node_idx < max_nodes; ++node_idx) {
+        if (! nodes.is_occupied(node_idx) || nodes.entries[node_idx].ghost) {
+            continue;
+        }
+
+        for (uint32_t slot_idx = 0; slot_idx < max_node_slots; ++slot_idx) {
+            if (! nodes.entries[node_idx].slots.is_occupied(slot_idx)) {
+                continue;
+            }
+
+            const Slot& slot = nodes.entries[node_idx].slots.entries[slot_idx];
+            if (slot_hidden_callback && slot_hidden_callback(slot_hidden_user_data, *this, node_idx, slot_idx)) {
+                continue;
+            }
+
+            const bool has_dot = slot.kind == SlotKind::input || slot.kind == SlotKind::output ||
+                                 (slot.kind == SlotKind::property && slot.connectable);
+            if (! has_dot) {
+                continue;
+            }
+
+            const vmath::vec2 dot_pos = dot_positions[node_idx * max_node_slots + slot_idx];
+            const float       delta_x = mouse_screen.x - dot_pos.x;
+            const float       delta_y = mouse_screen.y - dot_pos.y;
+            const float       dist_sq = delta_x * delta_x + delta_y * delta_y;
+
+            if (dist_sq <= best_dist_sq) {
+                best_dist_sq    = dist_sq;
+                result.node_idx = node_idx;
+                result.slot_idx = slot_idx;
+            }
+        }
+    }
+
+    return result;
+}
+
 void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
 {
     ImDrawList* const draw_list       = ImGui::GetWindowDrawList();
@@ -115,35 +162,11 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
     const float zoom_scale = zoom != 0.0f ? zoom : 1.0f;
     // Uniform zoom: node content (text, widgets, dots) renders at zoom scale
     // at every zoom level, so zooming out yields a true miniature of the graph.
-    const float render_scale = zoom_scale;
-    const auto  mouse_graph  = [&]() { return (view_origin + ((mouse_screen - origin) / zoom_scale)); };
-    const auto  in_widget    = [&](vmath::vec2 pos_screen) {
-        return pos_screen.x >= origin.x && pos_screen.y >= origin.y && pos_screen.x <= (origin + widget_size).x &&
-               pos_screen.y <= (origin + widget_size).y;
-    };
-    const auto in_rect = [&](vmath::vec2 pos_screen, vmath::vec2 rect_min, vmath::vec2 rect_max) {
-        return pos_screen.x >= rect_min.x && pos_screen.y >= rect_min.y && pos_screen.x <= rect_max.x &&
-               pos_screen.y <= rect_max.y;
-    };
-
-    // Ghost nodes follow the mouse until placed or cancelled; position is
-    // updated before layout so the node draws at the mouse position.  Hover
-    // inside the widget is required: without it io.MousePos is -FLT_MAX
-    // off-screen when the window loses focus.
-    uint32_t ghost_idx = pool_no_slot;
-    if (ImGui::IsWindowHovered() && in_widget(mouse_screen)) {
-        for (uint32_t i = 0; i < max_nodes; ++i) {
-            if (nodes.is_occupied(i) && nodes.entries[i].ghost) {
-                ghost_idx      = i;
-                Node& ghost    = nodes.entries[i];
-                ghost.position = vmath::vec2(snap_to_grid(mouse_graph().x), snap_to_grid(mouse_graph().y));
-                break;
-            }
-        }
-    }
+    const float render_scale    = zoom_scale;
+    const bool  mouse_in_widget = in_rect(mouse_screen, origin, origin + widget_size);
 
     // Wheel zoom around the mouse cursor (not during drags: zooming would
-    // rescale mouse_graph and make the dragged node jump).  The mouse sits
+    // rescale the view and make the dragged node jump).  The mouse sits
     // over a state widget with a 1-frame lag: wheel over the envelope chart
     // zooms the chart, not the canvas.
     bool state_widget_has_mouse = false;
@@ -153,15 +176,15 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
             break;
         }
     }
-    if (ImGui::IsWindowHovered() && interaction == Interaction::idle && in_widget(mouse_screen) &&
+    if (ImGui::IsWindowHovered() && interaction == Interaction::idle && mouse_in_widget &&
         io.MouseWheel != 0.0f && ! state_widget_has_mouse) {
-        const float       scaled      = zoom_scale * powf(zoom_wheel_factor, io.MouseWheel);
-        const float       new_zoom    = scaled < graph_min_zoom   ? graph_min_zoom
-                                        : scaled > graph_max_zoom ? graph_max_zoom
-                                                                  : scaled;
-        const vmath::vec2 mouse_point = mouse_graph();
-        view_origin                   = (mouse_point - ((mouse_screen - origin) / new_zoom));
-        zoom                          = new_zoom;
+        const float scaled   = zoom_scale * powf(zoom_wheel_factor, io.MouseWheel);
+        const float new_zoom = scaled < graph_min_zoom   ? graph_min_zoom
+                               : scaled > graph_max_zoom ? graph_max_zoom
+                                                         : scaled;
+
+        view_origin = view_origin + (mouse_screen - origin) / zoom_scale - (mouse_screen - origin) / new_zoom;
+        zoom        = new_zoom;
     }
 
     // Home or "." fits all nodes into view.  Focus gates the shortcut so the
@@ -221,6 +244,24 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
         }
     }
 
+    const vmath::vec2 mouse_point = view_origin + (mouse_screen - origin) / zoom_scale;
+
+    // Ghost nodes follow the mouse until placed or cancelled; position is
+    // updated before layout so the node draws at the mouse position.  Hover
+    // inside the widget is required: without it io.MousePos is -FLT_MAX
+    // off-screen when the window loses focus.
+    uint32_t ghost_idx = pool_no_slot;
+    if (ImGui::IsWindowHovered() && mouse_in_widget) {
+        for (uint32_t i = 0; i < max_nodes; ++i) {
+            if (nodes.is_occupied(i) && nodes.entries[i].ghost) {
+                ghost_idx      = i;
+                Node& ghost    = nodes.entries[i];
+                ghost.position = vmath::vec2(snap_to_grid(mouse_point.x), snap_to_grid(mouse_point.y));
+                break;
+            }
+        }
+    }
+
     // Grid, aligned to graph space, stronger line every N cells.
     {
         const int32_t first_col = static_cast<int32_t>(floor(view_origin.x / graph_grid_spacing));
@@ -255,47 +296,6 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
     // their widgets on channel 1, so lines never paint over node bodies.
     draw_list->ChannelsSplit(2);
     draw_list->ChannelsSetCurrent(1);
-
-    // Dot under the mouse, from the previous frame's recorded positions
-    // (1-frame lag, same accepted trade-off as the state-widget heights).
-    // Ghost nodes expose no live dots and non-connectable property slots
-    // have no dot at all.
-    const auto dot_at = [&](vmath::vec2 pos_screen) {
-        EndPoint result;
-        result.node_idx = pool_no_slot;
-        result.slot_idx = pool_no_slot;
-        float best_sq   = dot_pick_radius * dot_pick_radius;
-        for (uint32_t n = 0; n < max_nodes; ++n) {
-            if (! nodes.is_occupied(n) || nodes.entries[n].ghost) {
-                continue;
-            }
-            for (uint32_t s = 0; s < max_node_slots; ++s) {
-                if (! nodes.entries[n].slots.is_occupied(s)) {
-                    continue;
-                }
-                const Slot& slot = nodes.entries[n].slots.entries[s];
-                if (slot_hidden_callback && slot_hidden_callback(slot_hidden_user_data, *this, n, s)) {
-                    continue;
-                }
-                const bool has_dot = slot.kind == SlotKind::input || slot.kind == SlotKind::output ||
-                                     (slot.kind == SlotKind::property && slot.connectable);
-                if (! has_dot) {
-                    continue;
-                }
-                const vmath::vec2 d       = dot_positions[n * max_node_slots + s];
-                const float       dx      = pos_screen.x - d.x;
-                const float       dy      = pos_screen.y - d.y;
-                const float       dist_sq = dx * dx + dy * dy;
-                if (dist_sq <= best_sq) {
-                    best_sq         = dist_sq;
-                    result.node_idx = n;
-                    result.slot_idx = s;
-                }
-            }
-        }
-        return result;
-    };
-
     const float line_h  = ImGui::GetTextLineHeightWithSpacing();
     const float frame_h = ImGui::GetFrameHeight();
 
@@ -806,7 +806,7 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
     }
 
     bool wire_menu_hit = false;
-    if (interaction == Interaction::idle && ! node_hit && in_widget(mouse_screen) && ImGui::IsMouseClicked(1)) {
+    if (interaction == Interaction::idle && ! node_hit && mouse_in_widget && ImGui::IsMouseClicked(1)) {
         for (uint32_t index = 0; index < max_connections; ++index) {
             if (! connections.is_occupied(index)) {
                 continue;
@@ -902,11 +902,10 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
     // Rubber band while active (screen space so it stays crisp while panning
     // is impossible anyway: zoom is frozen during interactions).
     if (interaction == Interaction::rubber_band) {
-        const vmath::vec2 band_now   = mouse_graph();
-        const float       band_min_x = band_start.x < band_now.x ? band_start.x : band_now.x;
-        const float       band_min_y = band_start.y < band_now.y ? band_start.y : band_now.y;
-        const float       band_max_x = band_start.x > band_now.x ? band_start.x : band_now.x;
-        const float       band_max_y = band_start.y > band_now.y ? band_start.y : band_now.y;
+        const float       band_min_x = band_start.x < mouse_point.x ? band_start.x : mouse_point.x;
+        const float       band_min_y = band_start.y < mouse_point.y ? band_start.y : mouse_point.y;
+        const float       band_max_x = band_start.x > mouse_point.x ? band_start.x : mouse_point.x;
+        const float       band_max_y = band_start.y > mouse_point.y ? band_start.y : mouse_point.y;
         const vmath::vec2 scr_min    = (origin + ((vmath::vec2(band_min_x, band_min_y) - view_origin) * zoom_scale));
         const vmath::vec2 scr_max    = (origin + ((vmath::vec2(band_max_x, band_max_y) - view_origin) * zoom_scale));
         draw_list->AddRectFilled(ImVec2(scr_min.x, scr_min.y),
@@ -942,7 +941,7 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
     // The drop-menu mode is excluded: its popup owns Esc through the
     // CloseCurrentPopup in the seam above, and the popup-closed check
     // applies the standard cleanup.
-    if (ImGui::IsWindowHovered() && in_widget(mouse_screen) && ImGui::IsKeyPressed(ImGuiKey_Escape)) {
+    if (ImGui::IsWindowHovered() && mouse_in_widget && ImGui::IsKeyPressed(ImGuiKey_Escape)) {
         if (error_active) {
             dismiss_error();
         }
@@ -987,8 +986,8 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
             }
             if (dragged_node != pool_no_slot && nodes.is_occupied(dragged_node)) {
                 Node&             node = nodes.entries[dragged_node];
-                const vmath::vec2 target(snap_to_grid(mouse_graph().x - drag_offset.x),
-                                         snap_to_grid(mouse_graph().y - drag_offset.y));
+                const vmath::vec2 target(snap_to_grid(mouse_point.x - drag_offset.x),
+                                         snap_to_grid(mouse_point.y - drag_offset.y));
                 const vmath::vec2 delta = (target - node.position);
                 node.position           = target;
                 // Multi-selection: the dragged node leads; the rest follow
@@ -1021,7 +1020,7 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
             // elsewhere: cancel, nothing added.  Empty canvas means no dot
             // and no node body under the drop, and releases outside the
             // widget always cancel.
-            const EndPoint drop = dot_at(mouse_screen);
+            const EndPoint drop = find_hovered_connector(mouse_screen);
             if (drop.node_idx != pool_no_slot) {
                 const Slot& from_slot = nodes.entries[connecting_from.node_idx].slots.entries[connecting_from.slot_idx];
                 EndPoint    output_end = connecting_from;
@@ -1032,11 +1031,11 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
                 }
                 attempt_connection(output_end, input_end);
             }
-            else if (in_widget(mouse_screen) && ! node_hit && drop_menu_eligible(connecting_from) &&
+            else if (mouse_in_widget && ! node_hit && drop_menu_eligible(connecting_from) &&
                      drop_menu_callback) {
                 interaction     = Interaction::drop_menu;
                 drop_menu_from  = connecting_from;
-                drop_menu_point = mouse_graph();
+                drop_menu_point = mouse_point;
 
                 ImGui::OpenPopup("drop_menu");
                 break;
@@ -1055,7 +1054,7 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
                 retarget_connection = pool_no_slot;
                 break;
             }
-            const EndPoint drop = dot_at(mouse_screen);
+            const EndPoint drop = find_hovered_connector(mouse_screen);
             if (drop.node_idx == pool_no_slot) {
                 // User disconnect policy applies to off-dot releases and the wire menu.
                 user_delete_connection(retarget_connection);
@@ -1077,11 +1076,10 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
             if (io.MouseDown[0]) {
                 break;
             }
-            const vmath::vec2 band_now   = mouse_graph();
-            const float       band_min_x = band_start.x < band_now.x ? band_start.x : band_now.x;
-            const float       band_min_y = band_start.y < band_now.y ? band_start.y : band_now.y;
-            const float       band_max_x = band_start.x > band_now.x ? band_start.x : band_now.x;
-            const float       band_max_y = band_start.y > band_now.y ? band_start.y : band_now.y;
+            const float band_min_x = band_start.x < mouse_point.x ? band_start.x : mouse_point.x;
+            const float band_min_y = band_start.y < mouse_point.y ? band_start.y : mouse_point.y;
+            const float band_max_x = band_start.x > mouse_point.x ? band_start.x : mouse_point.x;
+            const float band_max_y = band_start.y > mouse_point.y ? band_start.y : mouse_point.y;
             // The band replaces the selection unless Shift is held (which
             // adds to it): Ctrl is the band modifier here because plain drag
             // pans, so without this any earlier stray selection would ride
@@ -1111,7 +1109,7 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
     }
 
     // Ghost resolution: LMB places, Esc or RMB cancels.
-    if (ghost_idx != pool_no_slot && ImGui::IsWindowHovered() && in_widget(mouse_screen)) {
+    if (ghost_idx != pool_no_slot && ImGui::IsWindowHovered() && mouse_in_widget) {
         if (ImGui::IsKeyPressed(ImGuiKey_Escape) || ImGui::IsMouseClicked(1)) {
             delete_node(ghost_idx);
         }
@@ -1127,7 +1125,7 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
     // interaction is active and without key repeat, so holding or dragging
     // never re-fires the delete mid-gesture.  The text-input guard keeps an
     // active node-rename editor from swallowing the keypress as a delete.
-    if (ImGui::IsWindowHovered() && in_widget(mouse_screen) && interaction == Interaction::idle &&
+    if (ImGui::IsWindowHovered() && mouse_in_widget && interaction == Interaction::idle &&
         ImGui::IsKeyPressed(ImGuiKey_Delete, false) && ! ImGui::GetIO().WantTextInput) {
         const bool deleted_anything = delete_selected() > 0;
         if (! deleted_anything) {
@@ -1152,7 +1150,7 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
     // state-widget node body is its own items, so the menu must open over
     // it.  An active item (slider drag, rename editor) still owns the mouse.
     const bool canvas_right_click = ! wire_menu_hit && interaction == Interaction::idle && ghost_idx == pool_no_slot &&
-                                    ImGui::IsWindowHovered() && in_widget(mouse_screen) && ImGui::IsMouseClicked(1) &&
+                                    ImGui::IsWindowHovered() && mouse_in_widget && ImGui::IsMouseClicked(1) &&
                                     ! ImGui::IsAnyItemActive();
     if (canvas_right_click && node_hit) {
         if (! is_selected(hit_node)) {
@@ -1164,7 +1162,7 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
         ImGui::OpenPopup("node_menu");
     }
     else if (canvas_right_click && ! node_hit) {
-        popup_canvas_pos = mouse_graph();
+        popup_canvas_pos = mouse_point;
 
         ImGui::OpenPopup("canvas_menu");
     }
@@ -1172,11 +1170,10 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
     // New press-starts, only inside the widget rect and when no ghost is
     // pending and no item takes the mouse (property widgets, state widget,
     // rename editor).
-    else if (interaction == Interaction::idle && ImGui::IsWindowHovered() && in_widget(mouse_screen) &&
+    else if (interaction == Interaction::idle && ImGui::IsWindowHovered() && mouse_in_widget &&
              ImGui::IsMouseClicked(0) && ! ImGui::IsAnyItemActive() &&
-             ! ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId) &&
-             (dot_at(mouse_screen).node_idx != pool_no_slot || ! ImGui::IsAnyItemHovered())) {
-        const EndPoint pressed_dot = dot_at(mouse_screen);
+             ! ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId)) {
+        const EndPoint pressed_dot = find_hovered_connector(mouse_screen);
         if (pressed_dot.node_idx != pool_no_slot) {
             // A connected dot picks up its existing connection, a free dot
             // starts a new one.  ponytail: fan-out pickup takes the first
@@ -1214,33 +1211,35 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
                 connecting_from     = pressed_dot;
             }
         }
-        else if (node_hit) {
-            if (io.KeyShift) {
-                // Shift-click toggles the node in or out of the selection
-                // without starting a drag.
-                set_selected(hit_node, ! is_selected(hit_node));
+        else if (! ImGui::IsAnyItemHovered()) {
+            if (node_hit) {
+                if (io.KeyShift) {
+                    // Shift-click toggles the node in or out of the selection
+                    // without starting a drag.
+                    set_selected(hit_node, ! is_selected(hit_node));
+                }
+                else {
+                    // Plain click on an unselected node selects only it; on an
+                    // already selected node the multi-selection is kept so the
+                    // drag below moves all selected nodes.
+                    if (! is_selected(hit_node)) {
+                        select_none();
+                        set_selected(hit_node, true);
+                    }
+                    interaction   = Interaction::dragging_node;
+                    dragged_node  = hit_node;
+                    drag_offset   = (mouse_point - nodes.entries[hit_node].position);
+                    title_pressed = title_hit;
+                }
+            }
+            else if (io.KeyCtrl) {
+                interaction = Interaction::rubber_band;
+                band_start  = mouse_point;
             }
             else {
-                // Plain click on an unselected node selects only it; on an
-                // already selected node the multi-selection is kept so the
-                // drag below moves all selected nodes.
-                if (! is_selected(hit_node)) {
-                    select_none();
-                    set_selected(hit_node, true);
-                }
-                interaction   = Interaction::dragging_node;
-                dragged_node  = hit_node;
-                drag_offset   = (mouse_graph() - nodes.entries[hit_node].position);
-                title_pressed = title_hit;
+                select_none();
+                interaction = Interaction::panning;
             }
-        }
-        else if (io.KeyCtrl) {
-            interaction = Interaction::rubber_band;
-            band_start  = mouse_graph();
-        }
-        else {
-            select_none();
-            interaction = Interaction::panning;
         }
     }
 
@@ -1265,7 +1264,7 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
         const float mid_dx = mouse_screen.x - mid.x;
         const float mid_dy = mouse_screen.y - mid.y;
         const bool  mid_hovered =
-            in_widget(mouse_screen) && mid_dx * mid_dx + mid_dy * mid_dy <= dot_pick_radius * dot_pick_radius;
+            mouse_in_widget && mid_dx * mid_dx + mid_dy * mid_dy <= dot_pick_radius * dot_pick_radius;
         const ImU32 line_color = to_imgui(mid_hovered ? colors_.connector_hover : colors_.connection);
         draw_list->AddBezierCubic(ImVec2(p0.x, p0.y),
                                   ImVec2(p1.x, p1.y),

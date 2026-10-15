@@ -486,6 +486,8 @@ public:
     bool node_state_edits_enabled;
 
 private:
+    EndPoint find_hovered_connector(vmath::vec2 mouse_screen) const;
+
     // Event queue (ring buffer); returns false when the event was suppressed
     // (quiet rebuild) or dropped (overflow).
     bool push_change(ChangeKind kind, uint32_t node_idx, uint32_t slot_idx, uint32_t connection_idx);
