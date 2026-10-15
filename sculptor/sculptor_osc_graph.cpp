@@ -100,7 +100,7 @@ static_assert(Synth::num_mod_targets == 8);
 static_assert(Synth::max_mod_inputs == 2);
 
 const char* const target_names[Synth::num_mod_targets] = { "volume", "pitch",        "panning",  "Duty A",
-                                                           "Duty B", "Waveform Mix", "FM Depth", "FIR Pitch Spread" };
+                                                           "Duty B", "Waveform Mix", "FM Depth", "Bandpass Spread" };
 const char* const wave_names[5]                        = { "off", "sine", "saw", "pulse", "noise" };
 const char* const osc_mode_names[3]                    = { "blend", "fm", "hard sync" };
 
@@ -638,9 +638,6 @@ static void project_osc_node(Sculptor::Graph*           graph,
                                               osc.targets[Synth::mod_fir_spread].base_value,
                                               Synth::mod_fir_spread));
     append_target_block(graph, node, Synth::mod_fir_spread, osc.targets[Synth::mod_fir_spread]);
-    // FIR Slope: a plain per-oscillator property like Octave Offset, always
-    // active (it does not join the waveform/mode gating set) and never
-    // connectable.
     graph->add_slot(node, Sculptor::bounded_int_slot("FIR Slope", osc.fir_slope_percent, 1, 100));
 }
 
