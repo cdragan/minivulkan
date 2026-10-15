@@ -237,11 +237,16 @@ bool init_gui(GuiClear clear)
 
     static VkDescriptorPoolSize pool_sizes[] = {
         {
-            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,  // type
-            0                                           // descriptorCount
-        }
+            VK_DESCRIPTOR_TYPE_SAMPLER,
+            0
+        },
+        {
+            VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
+            0
+        },
     };
     pool_sizes[0].descriptorCount = gui_num_descriptors;
+    pool_sizes[1].descriptorCount = gui_num_descriptors;
 
     static VkDescriptorPoolCreateInfo pool_create_info = {
         VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
