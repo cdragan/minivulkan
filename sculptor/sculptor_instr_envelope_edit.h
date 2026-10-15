@@ -285,12 +285,10 @@ struct EnvelopeCurveState {
 
 // Draws the envelope curve widget (chart, ms ruler, scrollbar, buttons, info
 // line) at the current ImGui cursor position and reports user intents through
-// *out_edit (kind none when nothing happened).  render_scale scales the chart
-// width to the node's on-screen content size; the vertical layout is fixed.
-// dim draws the curve at reduced alpha for a chart that cannot be edited.
-// When interactive is false the chart draws read-only; its chart item still
-// claims input so clicks select the node instead of starting a node drag, and
-// the widget reserves its full height in both states.
+// *out_edit (kind none when nothing happened).  The caller sets the chart width through the item width stack;
+// render_scale scales the vertical layout. dim draws the curve at reduced alpha for a chart that cannot be edited. When
+// interactive is false the chart draws read-only; its chart item still claims input so clicks select the node instead
+// of starting a node drag, and the widget reserves its full height in both states.
 void gui_envelope_curve(EnvelopeCurveState*              state,
                         const Synth::EnvelopeDescriptor& env,
                         bool                             interactive,
@@ -305,6 +303,6 @@ void gui_envelope_curve(EnvelopeCurveState*              state,
 int envelope_widget_height(float render_scale = 1.0f);
 
 // Content width the projection gives envelope nodes so the chart fits.
-constexpr float envelope_node_content_width = 280.0f;
+constexpr float envelope_node_content_width = 560.0f;
 
 } // namespace Sculptor

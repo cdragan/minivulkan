@@ -262,30 +262,25 @@ enum TargetFamily {
 // target's value row (the caller adds the osc node's slots in row
 // order), seeded from the cell binding: fields 2..4 carry the LFO
 // op/depth/rate scale, fields 6..7 and 9..10 the MIDI source op/amount
-// pairs.  Dots come first, their widgets follow on the same renderer
-// line; inputs past num_inputs seed the neutral add/0 grammar the
-// compile reads through when a wire lands later.
+// pairs.  Op shares its input row.  Depth, Rate x, and Amount use
+// separate nested rows.  Inputs past num_inputs seed the neutral
+// add/0 grammar the compile reads through when a wire lands later.
 static void append_target_block(Graph* graph, uint32_t node, Synth::ModTarget target, const Synth::TargetBinding& gen)
 {
     const uint32_t t       = static_cast<uint32_t>(target);
     Sculptor::Slot env_dot = input_slot("Envelope");
     env_dot.child_row      = true;
     graph->add_slot(node, env_dot);
-    Sculptor::Slot lfo_dot = input_slot("LFO");
-    lfo_dot.row_group      = static_cast<uint8_t>(3 * t + 1);
-    lfo_dot.child_row      = true;
-    graph->add_slot(node, lfo_dot);
-    Sculptor::Slot lfo_op = list_slot("Op", source_op_names, 2, static_cast<uint32_t>(gen.lfo_op));
-    lfo_op.row_group      = static_cast<uint8_t>(3 * t + 1);
-    lfo_op.child_row      = true;
-    graph->add_slot(node, lfo_op);
-    Sculptor::Slot lfo_depth = real_slot("Depth", gen.lfo_depth);
-    lfo_depth.row_group      = static_cast<uint8_t>(3 * t + 1);
-    lfo_depth.child_row      = true;
-    graph->add_slot(node, lfo_depth);
+    Sculptor::append_lfo_row(graph,
+                             node,
+                             static_cast<uint8_t>(3 * t + 1),
+                             static_cast<uint32_t>(gen.lfo_op),
+                             gen.lfo_depth,
+                             nullptr,
+                             nullptr);
     Sculptor::Slot rate_scale = real_slot("Rate x", gen.lfo_rate_scale_ms);
-    rate_scale.row_group      = static_cast<uint8_t>(3 * t + 1);
     rate_scale.child_row      = true;
+    rate_scale.child_level    = 2;
     graph->add_slot(node, rate_scale);
     for (uint32_t i = 0; i < Synth::max_mod_inputs; ++i) {
         const Synth::SourceOp op    = i < gen.num_inputs ? gen.inputs[i].op : Synth::SourceOp::add;

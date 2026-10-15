@@ -16,7 +16,7 @@ constexpr float point_radius     = 3.5f;
 constexpr float dotted_dash      = 3.0f;
 constexpr float dotted_gap       = 3.0f;
 constexpr float min_span_ms      = 40.0f;
-constexpr float scrollbar_height = 4.0f;
+constexpr float scrollbar_height = 10.0f;
 // Inner margin the node renderer leaves around node content.
 constexpr float node_pad = 8.0f;
 
@@ -258,8 +258,7 @@ void Sculptor::gui_envelope_curve(EnvelopeCurveState*              state,
                                   float                            render_scale,
                                   bool                             dim)
 {
-    *out_edit         = {};
-    const float width = (envelope_node_content_width - 2.0f * node_pad) * render_scale;
+    *out_edit = {};
     // x view: auto-fit until the user zooms; a set span is clamped into the
     // envelope's extent every frame so shrinking content pulls the view back.
     const float content_span = chart_span_ms(env);
@@ -295,6 +294,7 @@ void Sculptor::gui_envelope_curve(EnvelopeCurveState*              state,
     }
     const ImVec2       origin      = ImGui::GetCursorScreenPos();
     ImDrawList*        draw_list   = ImGui::GetWindowDrawList();
+    const float        width       = ImGui::CalcItemWidth() > 0.0f ? ImGui::CalcItemWidth() : 1.0f;
     const float        chart_h     = chart_height * render_scale;
     const float        ruler_h     = ruler_height * render_scale;
     const float        scrollbar_h = scrollbar_height * render_scale;

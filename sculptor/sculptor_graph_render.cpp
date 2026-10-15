@@ -32,7 +32,7 @@ constexpr float title_row_spacing    = 0.5f * node_padding;      // vertical gap
 constexpr float node_corner_rounding = 4.0f;                     // slight corner radius on node rects
 constexpr float dot_radius           = 5.0f;                     // connector dot radius
 constexpr float dot_space            = 2.0f * dot_radius + 2.0f; // room a dot claims
-constexpr float property_widget_w    = 80.0f;                    // width of inline value widgets
+constexpr float property_widget_w    = 160.0f;                   // width of inline value widgets
 constexpr float tree_indent          = 14.0f;                    // horizontal indent of child modulator rows
 constexpr float tree_elbow_x         = 5.0f;                     // elbow vertical spine x offset from parent label
 constexpr float tree_elbow_end       = 11.0f;                    // elbow horizontal arm end x offset from parent label
@@ -65,7 +65,7 @@ ImU32 to_imgui(uint32_t packed)
 // Keep one rasterization across zoom levels so controls cannot jump at font boundaries.
 static float push_zoom_font(float scale)
 {
-    const float previous_scale = ImGui::GetCurrentWindow()->FontWindowScale;
+    const float previous_scale                 = ImGui::GetCurrentWindow()->FontWindowScale;
     ImGui::GetCurrentWindow()->FontWindowScale = previous_scale * scale;
     ImGui::UpdateCurrentFontSize(0.0f);
     const ImGuiStyle& style = ImGui::GetStyle();
@@ -176,8 +176,8 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
             break;
         }
     }
-    if (ImGui::IsWindowHovered() && interaction == Interaction::idle && mouse_in_widget &&
-        io.MouseWheel != 0.0f && ! state_widget_has_mouse) {
+    if (ImGui::IsWindowHovered() && interaction == Interaction::idle && mouse_in_widget && io.MouseWheel != 0.0f &&
+        ! state_widget_has_mouse) {
         const float scaled   = zoom_scale * powf(zoom_wheel_factor, io.MouseWheel);
         const float new_zoom = scaled < graph_min_zoom   ? graph_min_zoom
                                : scaled > graph_max_zoom ? graph_max_zoom
@@ -326,7 +326,9 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
             uint32_t num_elems  = 0;
             float    y          = 0.0f; // top of the line, graph space
             bool     has_widget = false;
-            bool     child_row  = false;
+
+            bool    child_row   = false;
+            uint8_t child_level = 0; // tree depth of a child_row line, 1 = first nesting level
         };
 
         Line    lines[max_node_slots];
@@ -356,9 +358,10 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
                 if (slot.row_group != 0) {
                     group_line[slot.row_group] = static_cast<int32_t>(line_idx);
                 }
-                lines[line_idx].num_elems  = 0;
-                lines[line_idx].has_widget = false;
-                lines[line_idx].child_row  = slot.child_row;
+                lines[line_idx].num_elems   = 0;
+                lines[line_idx].has_widget  = false;
+                lines[line_idx].child_row   = slot.child_row;
+                lines[line_idx].child_level = slot.child_row ? (slot.child_level ? slot.child_level : 1u) : 0u;
             }
             Line& line                          = lines[line_idx];
             line.elems[line.num_elems].slot_idx = slot_idx;
@@ -388,7 +391,7 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
                     }
                 }
                 float    cursor = pad + static_cast<float>(left_dots > 0 ? left_dots : 1) * dot_space +
-                                  (line.child_row ? tree_indent : 0.0f);
+                                  (line.child_row ? tree_indent * line.child_level : 0.0f);
                 uint32_t prop   = 0;
                 for (uint32_t e = 0; e < line.num_elems; ++e) {
                     const Slot& slot = node.slots.entries[line.elems[e].slot_idx];
@@ -433,7 +436,7 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
         // half padding so connector rows breathe as loosely as widget rows.
         for (uint32_t line_idx = 0; line_idx < num_lines; ++line_idx) {
             Line& line   = lines[line_idx];
-            float line_w = line.child_row ? tree_indent : 0.0f;
+            float line_w = line.child_row ? tree_indent * line.child_level : 0.0f;
             for (uint32_t e = 0; e < line.num_elems; ++e) {
                 const Slot& slot = node.slots.entries[line.elems[e].slot_idx];
                 if (line.elems[e].dot) {
@@ -578,9 +581,10 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
             const float base_label_x =
                 rect_min.x + (pad + static_cast<float>(left_dots > 0 ? left_dots : 1) * dot_space) * render_scale;
             if (line.child_row) {
-                const float elbow_x     = base_label_x + tree_elbow_x * render_scale;
-                const float elbow_end_x = base_label_x + tree_elbow_end * render_scale;
-                float       spine_top_y = rect_min.y + line.y * render_scale;
+                const float elbow_base_x = base_label_x + (line.child_level - 1) * tree_indent * render_scale;
+                const float elbow_x      = elbow_base_x + tree_elbow_x * render_scale;
+                const float elbow_end_x  = elbow_base_x + tree_elbow_end * render_scale;
+                float       spine_top_y  = rect_min.y + line.y * render_scale;
                 if (line_idx > 0) {
                     const Line& prev_line     = lines[line_idx - 1];
                     const float prev_y_center = rect_min.y + (prev_line.y + 0.5f * line_span) * render_scale;
@@ -596,7 +600,7 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
                                    elbow_color,
                                    tree_line_width);
             }
-            float    cursor    = base_label_x + (line.child_row ? tree_indent * render_scale : 0.0f);
+            float    cursor    = base_label_x + (line.child_row ? tree_indent * line.child_level * render_scale : 0.0f);
             uint32_t line_prop = 0;
             for (uint32_t e = 0; e < line.num_elems; ++e) {
                 const uint32_t slot_idx = line.elems[e].slot_idx;
@@ -784,9 +788,11 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
             ImGui::SetCursorScreenPos(
                 ImVec2(rect_min.x + pad * render_scale, rect_max.y - (pad + state_h) * render_scale));
             ImGui::PushClipRect(ImVec2(rect_min.x, rect_min.y), ImVec2(rect_max.x, rect_max.y), true);
+            ImGui::PushItemWidth((rect_max.x - rect_min.x) - 2.0f * pad * render_scale);
             const float previous_font_scale = push_zoom_font(render_scale);
             const int   widget_h            = node.state_widget(node.state_widget_data, render_scale);
             pop_zoom_font(previous_font_scale);
+            ImGui::PopItemWidth();
             ImGui::PopClipRect();
             state_widget_heights[node_idx] = widget_h > 0 ? static_cast<float>(widget_h) / render_scale : 0.0f;
             state_widget_hovered[node_idx] =
@@ -1031,8 +1037,7 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
                 }
                 attempt_connection(output_end, input_end);
             }
-            else if (mouse_in_widget && ! node_hit && drop_menu_eligible(connecting_from) &&
-                     drop_menu_callback) {
+            else if (mouse_in_widget && ! node_hit && drop_menu_eligible(connecting_from) && drop_menu_callback) {
                 interaction     = Interaction::drop_menu;
                 drop_menu_from  = connecting_from;
                 drop_menu_point = mouse_point;

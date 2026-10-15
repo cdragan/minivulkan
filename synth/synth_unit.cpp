@@ -189,7 +189,6 @@ static bool approx(float left, float right, float eps)
     return diff <= eps;
 }
 
-
 // True for the four targets these fixtures wire modulators and MIDI
 // inputs onto (volume, pitch, panning, FIR spread).  Under AC11 all eight
 // targets are uniformly modulate-able; the remaining four (duty A/B, osc
@@ -6471,9 +6470,14 @@ static void check_target_block_grammar(const Sculptor::Node& osc, uint32_t targe
     TEST(strncmp(osc.slots.entries[base + t7_rate_field].name,
                  "Rate x",
                  sizeof(osc.slots.entries[base + t7_rate_field].name)) == 0);
-    for (uint32_t f = 1; f <= 4; f++) {
+    for (uint32_t f = 1; f <= 2; f++) {
         TEST(osc.slots.entries[base + f].row_group == lfo_group);
     }
+    // Depth and Rate x nest one tree level deeper on their own lines.
+    TEST(osc.slots.entries[base + t7_lfo_depth_field].row_group == 0);
+    TEST(osc.slots.entries[base + t7_lfo_depth_field].child_level == 2);
+    TEST(osc.slots.entries[base + t7_rate_field].row_group == 0);
+    TEST(osc.slots.entries[base + t7_rate_field].child_level == 2);
     TEST(osc.slots.entries[base + t7_lfo_op_field].value.list_index == static_cast<uint32_t>(gen.lfo_op));
     TEST(approx(osc.slots.entries[base + t7_lfo_depth_field].value.real, gen.lfo_depth, 1.0e-6f));
     TEST(approx(osc.slots.entries[base + t7_rate_field].value.real, gen.lfo_rate_scale_ms, 1.0e-4f));
@@ -6484,9 +6488,12 @@ static void check_target_block_grammar(const Sculptor::Node& osc, uint32_t targe
         TEST(src_dot.kind == Sculptor::SlotKind::input);
         TEST(strncmp(src_dot.name, i == 0 ? "Source A" : "Source B", sizeof(src_dot.name)) == 0);
         const uint8_t src_group = static_cast<uint8_t>(3 * target + 2 + i);
-        for (uint32_t f = 0; f <= 2; f++) {
+        for (uint32_t f = 0; f <= 1; f++) {
             TEST(osc.slots.entries[dot + f].row_group == src_group);
         }
+        // Amount nests one tree level deeper on its own line.
+        TEST(osc.slots.entries[dot + 2].row_group == 0);
+        TEST(osc.slots.entries[dot + 2].child_level == 2);
         const Sculptor::Slot& op = osc.slots.entries[dot + 1];
         TEST(op.property_type == Sculptor::PropertyType::list);
         TEST(op.num_list_options == 2);
@@ -20330,7 +20337,7 @@ int main()
             memset(&doc_instr, 0, sizeof(doc_instr));
             doc_instr.layer_count = 3;
             for (uint32_t layer = 0; layer < 3; layer++) {
-                doc_instr.layers[layer].osc_type[0] = Synth::WaveType::sine_wave;
+                doc_instr.layers[layer].osc_type[0]       = Synth::WaveType::sine_wave;
                 doc_instr.layers[layer].fir_slope_percent = 100;
             }
             // Layer 0: two ordered volume sources, duty B and mix bases.
@@ -20761,9 +20768,9 @@ int main()
                 const uint32_t prefix       = static_cast<uint32_t>(hit - spread_payload);
                 const uint32_t suffix       = spread_payload_len - static_cast<uint32_t>(value_end - spread_payload);
                 const uint32_t spelling_len = static_cast<uint32_t>(strlen(spelling));
-                const uint32_t key_len = static_cast<uint32_t>(strlen(key));
+                const uint32_t key_len      = static_cast<uint32_t>(strlen(key));
 
-                static char    spelling_doc[Synth::library_payload_max];
+                static char spelling_doc[Synth::library_payload_max];
                 memcpy(spelling_doc, spread_payload, prefix);
                 memcpy(spelling_doc + prefix, key, key_len);
                 memcpy(spelling_doc + prefix + key_len, spelling, spelling_len);
@@ -20804,8 +20811,8 @@ int main()
                 const char* const removed_keys =
                     "\"lowpass_cutoff\":{\"base_value\":2000},\"highpass_cutoff\":{\"base_value\":500},";
                 const uint32_t routing_key_len = static_cast<uint32_t>(strlen(routing_key));
-                const uint32_t prefix = static_cast<uint32_t>(routing_hit - spread_payload) + routing_key_len;
-                const uint32_t suffix = routing_payload_len - prefix;
+                const uint32_t prefix          = static_cast<uint32_t>(routing_hit - spread_payload) + routing_key_len;
+                const uint32_t suffix          = routing_payload_len - prefix;
                 static char    routing_doc[Synth::library_payload_max];
                 memcpy(routing_doc, spread_payload, prefix);
                 const int removed_len =

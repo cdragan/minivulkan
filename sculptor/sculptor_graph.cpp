@@ -120,9 +120,45 @@ void Sculptor::append_mod_source_row(Sculptor::Graph* graph,
     graph->add_slot(node, src_op);
 
     Sculptor::Slot src_amount = real_slot("Amount", amount);
-    src_amount.row_group      = row_group;
     src_amount.child_row      = true;
+    src_amount.child_level    = 2;
     graph->add_slot(node, src_amount);
+}
+
+// Adds the LFO row shared by the oscillator and effect projections: the
+// LFO wire lands on the dot, Op picks how the wave combines with the
+// base, and Depth sets the strength on its own nested line.  Either
+// output pointer may be null.
+void Sculptor::append_lfo_row(Sculptor::Graph* graph,
+                              uint32_t         node,
+                              uint8_t          row_group,
+                              uint32_t         op_index,
+                              float            depth,
+                              uint32_t*        op_slot,
+                              uint32_t*        depth_slot)
+{
+    Sculptor::Slot lfo_dot = input_slot("LFO");
+    lfo_dot.row_group      = row_group;
+    lfo_dot.child_row      = true;
+    graph->add_slot(node, lfo_dot);
+
+    Sculptor::Slot lfo_op = list_slot("Op", source_op_names, 2, op_index);
+    lfo_op.row_group      = row_group;
+    lfo_op.child_row      = true;
+    const uint32_t op_idx = graph->add_slot(node, lfo_op);
+
+    Sculptor::Slot lfo_depth = real_slot("Depth", depth);
+    lfo_depth.child_row      = true;
+    lfo_depth.child_level    = 2;
+    const uint32_t depth_idx = graph->add_slot(node, lfo_depth);
+
+    if (op_slot != nullptr) {
+        *op_slot = op_idx;
+    }
+
+    if (depth_slot != nullptr) {
+        *depth_slot = depth_idx;
+    }
 }
 
 Sculptor::GraphColors Sculptor::default_graph_colors()

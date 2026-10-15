@@ -708,19 +708,15 @@ bool Sculptor::project_effect_chain_to_graph(const Synth::InstrumentEditorBank& 
             // with the base, Depth sets the strength.  The knobs stay inert
             // until a wire arrives, so an unmodulated row never reads as
             // broken controls.
-            Slot lfo_dot      = input_slot("LFO");
-            lfo_dot.row_group = row_group;
-            lfo_dot.child_row = true;
-            graph->add_slot(node, lfo_dot);
-            Slot op =
-                list_slot("Op", Sculptor::source_op_names, 2, binding.lfo_op == Synth::SourceOp::multiply ? 1u : 0u);
-            op.row_group                  = row_group;
-            op.child_row                  = true;
-            const uint32_t op_slot_idx    = graph->add_slot(node, op);
-            Slot           depth          = real_slot("Depth", binding.lfo_depth);
-            depth.row_group               = row_group;
-            depth.child_row               = true;
-            const uint32_t depth_slot_idx = graph->add_slot(node, depth);
+            uint32_t op_slot_idx    = 0;
+            uint32_t depth_slot_idx = 0;
+            Sculptor::append_lfo_row(graph,
+                                     node,
+                                     row_group,
+                                     binding.lfo_op == Synth::SourceOp::multiply ? 1u : 0u,
+                                     binding.lfo_depth,
+                                     &op_slot_idx,
+                                     &depth_slot_idx);
             if (binding.lfo_desc_id == 0) {
                 graph->set_slot_edit_disabled(node, op_slot_idx, true);
                 graph->set_slot_edit_disabled(node, depth_slot_idx, true);

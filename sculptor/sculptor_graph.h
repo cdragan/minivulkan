@@ -45,6 +45,7 @@ struct Slot {
     uint8_t       num_list_options; // for list properties
     uint8_t       row_group;        // 0 = own line; nonzero packs same-id slots onto one renderer line
     bool          child_row;        // indented modulator row with an elbow tree line under its parent row
+    uint8_t       child_level;      // tree depth of a child_row slot; 0 renders as one level
     float         real_min;         // bounded reals and bounded integer sliders clamp to [real_min, real_max]
     float         real_max;
     bool          real_bounded;
@@ -54,8 +55,8 @@ struct Slot {
     char          list_options[8][32];
 };
 
-// The drop-menu flag consumes spare padding capacity, keeping sizeof(Slot)
-// at 312.
+// The drop-menu and child-level fields consume spare padding capacity, keeping
+// sizeof(Slot) at 312.
 static_assert(sizeof(Slot) == 312, "Slot size drifted; the drop_menu flag must stay within the 312-byte size budget");
 
 class Graph;
@@ -77,6 +78,13 @@ void append_mod_source_row(Graph*   graph,
                            uint8_t  row_group,
                            uint32_t op_index,
                            float    amount);
+void append_lfo_row(Graph*    graph,
+                    uint32_t  node,
+                    uint8_t   row_group,
+                    uint32_t  op_index,
+                    float     depth,
+                    uint32_t* op_slot,
+                    uint32_t* depth_slot);
 
 // Option labels of the two-way source op list (SourceOp::add, SourceOp::multiply).
 extern const char* const source_op_names[2];
