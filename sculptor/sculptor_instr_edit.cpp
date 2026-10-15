@@ -1808,8 +1808,9 @@ bool Sculptor::SynthEditor::commit_candidate(const Synth::InstrumentEditorBank& 
     }
     instr_bank = candidate_bank;
 
-    if (! publish_edited_bank())
+    if (! publish_edited_bank()) {
         d_printf("Synth: bank publish backpressured; will retry\n");
+    }
 
     rederive_all_selections();
     return true;

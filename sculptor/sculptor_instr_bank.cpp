@@ -342,7 +342,7 @@ uint32_t Synth::zone_entry_at(const Zone* zones, uint32_t note)
     for (uint32_t entry = 0; entry < max_instr_per_channel; entry++) {
         if (zones[entry].start_note == 0)
             break;
-        if (note >= zones[entry].start_note - 1)
+        if (note >= zones[entry].start_note - 1u)
             found = entry;
         else
             break; // later zones start even higher

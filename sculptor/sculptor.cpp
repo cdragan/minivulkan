@@ -118,8 +118,9 @@ bool init_assets()
         return false;
 
     // TODO find a better place
-    if (! Synth::init_synth())
+    if (! Synth::init_synth()) {
         d_printf("Synth initialization failed; continuing without audio\n");
+    }
 
     return true;
 }

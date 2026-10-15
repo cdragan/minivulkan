@@ -66,7 +66,8 @@ bool MemoryHeap::allocate_memory(const VkMemoryRequirements& requirements,
                                  VkDeviceSize*               offset,
                                  VkDeviceSize*               size)
 {
-    const SubAllocatorBase::Chunk chunk = suballoc.allocate(requirements.size, requirements.alignment);
+    const SubAllocatorBase::Chunk chunk = suballoc.allocate(static_cast<size_t>(requirements.size),
+                                                            static_cast<size_t>(requirements.alignment));
 
     if (chunk.offset >= heap_size) {
         d_printf("Not enough device memory\n");

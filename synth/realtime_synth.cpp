@@ -863,7 +863,7 @@ template <typename T, bool interleaved> struct StereoPtr {
     static StereoPtr<T, interleaved> from_buffer(Buffer& buffer)
     {
         T* const     ptr  = buffer.get_ptr<T>();
-        const size_t size = buffer.size();
+        const size_t size = static_cast<size_t>(buffer.size());
         return { ptr, ptr + (size / (2 * sizeof(T))) };
     }
 };
