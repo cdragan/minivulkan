@@ -49,11 +49,10 @@ template<>
 struct vec<2> {
     union {
         struct {
-            alignas(2 * sizeof(float))
             float x;
             float y;
         };
-        alignas(2 * sizeof(float)) float data[2];
+        float data[2];
     };
 
     vec() = default;
