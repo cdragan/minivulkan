@@ -465,8 +465,8 @@ void Sculptor::Geometry::extrude_faces(const uint8_t* const face_sel,
             assert(count <= 2);
 
             const Edge& edge = obj_edges[edge_idx];
-            outer_corner[edge.vertices[0]] += (count == 1) ? 1 : -1;
-            outer_corner[edge.vertices[3]] += (count == 1) ? 1 : -1;
+            outer_corner[edge.vertices[0]] += static_cast<uint8_t>((count == 1) ? 1 : -1);
+            outer_corner[edge.vertices[3]] += static_cast<uint8_t>((count == 1) ? 1 : -1);
         }
     }
 
@@ -714,7 +714,6 @@ void Sculptor::Geometry::validate_face(uint32_t face_id)
 
     for (uint32_t i_edge = 0; i_edge < 4; i_edge++) {
         const auto [edge_idx, inverse] = get_edge_idx(face, i_edge);
-        assert(edge_idx >= 0);
         assert(static_cast<uint32_t>(edge_idx) < num_edges);
         const Edge& edge    = obj_edges[edge_idx];
 

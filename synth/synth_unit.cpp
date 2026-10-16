@@ -13235,12 +13235,12 @@ int main()
 
         graph.set_validator(
             [](void* data, Sculptor::Graph& live, Sculptor::EndPoint output, Sculptor::EndPoint input) {
-                const auto&                   context  = *static_cast<CaptureContext*>(data);
+                const auto&                   capture  = *static_cast<CaptureContext*>(data);
                 const Sculptor::Connection    proposed = { output, input };
                 Sculptor::EffectAudioTopology audio    = {};
                 return Sculptor::capture_effect_audio(live,
-                                                      *context.mapping,
-                                                      *context.chain,
+                                                      *capture.mapping,
+                                                      *capture.chain,
                                                       &audio,
                                                       &proposed,
                                                       live.moving_connection);

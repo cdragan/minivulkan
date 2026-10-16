@@ -327,7 +327,7 @@ bool Synth::load_library_instrument(const char* const            path,
 
     RecordHeader record_header;
 
-    const long header_offset = static_cast<long>(entry->payload_offset - sizeof(RecordHeader));
+    const long header_offset = static_cast<long>(entry->payload_offset - static_cast<uint32_t>(sizeof(RecordHeader)));
 
     // Ensure the record in the library did not change since we loaded the index
     const bool header_ok = fseek(file, header_offset, SEEK_SET) == 0 &&
@@ -497,7 +497,7 @@ static int write_library_file(const char* const                        path,
             if (Synth::library_record_matches(entries[i], category, name))
                 continue;
 
-            const uint32_t header_offset = entries[i].payload_offset - sizeof(RecordHeader);
+            const uint32_t header_offset = entries[i].payload_offset - static_cast<uint32_t>(sizeof(RecordHeader));
             const uint32_t record_size   = sizeof(RecordHeader) + entries[i].payload_size;
 
             ok = fseek(old, static_cast<long>(header_offset), SEEK_SET) == 0;
@@ -610,7 +610,7 @@ int Synth::save_library_record(const char* const                        path,
 
     static Synth::InstrumentEditorBank reduced;
 
-    memset(&reduced, 0, sizeof(reduced));
+    memset(static_cast<void*>(&reduced), 0, sizeof(reduced));
 
     uint16_t env_ids[Synth::max_envelopes] = {};
     uint16_t lfo_ids[Synth::max_lfos]      = {};

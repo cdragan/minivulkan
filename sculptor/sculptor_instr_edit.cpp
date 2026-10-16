@@ -1998,10 +1998,9 @@ void Sculptor::SynthEditor::gui_channel_list()
     ImGui::Separator();
 
     for (uint32_t channel = 0; channel < Synth::max_channels; channel++) {
-        const bool        enabled = bank.channel_enabled[channel];
-        const char* const name    = instr_bank.channel_names[channel];
+        const char* const name = instr_bank.channel_names[channel];
 
-        if (enabled) {
+        if (bank.channel_enabled[channel]) {
             char item_id[Synth::max_name_len + 8];
             snprintf(item_id, sizeof(item_id), "%s##chan%u", name, channel);
             if (ImGui::Selectable(item_id, selected_target == channel)) {
