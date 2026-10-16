@@ -111,21 +111,24 @@ void Sculptor::append_mod_source_row(Sculptor::Graph* graph,
                                      uint32_t         input_idx,
                                      uint8_t          row_group,
                                      uint32_t         op_index,
-                                     float            amount)
+                                     float            amount,
+                                     uint8_t          level_base)
 {
     Sculptor::Slot src_dot = input_slot(input_idx == 0 ? "Source A" : "Source B");
     src_dot.row_group      = row_group;
     src_dot.child_row      = true;
+    src_dot.child_level    = level_base;
     graph->add_slot(node, src_dot);
 
     Sculptor::Slot src_op = list_slot("Op", source_op_names, 2, op_index);
     src_op.row_group      = row_group;
     src_op.child_row      = true;
+    src_op.child_level    = level_base;
     graph->add_slot(node, src_op);
 
     Sculptor::Slot src_amount = real_slot("Amount", amount);
     src_amount.child_row      = true;
-    src_amount.child_level    = 2;
+    src_amount.child_level    = static_cast<uint8_t>(level_base + 1);
     graph->add_slot(node, src_amount);
 }
 
@@ -139,21 +142,24 @@ void Sculptor::append_lfo_row(Sculptor::Graph* graph,
                               uint32_t         op_index,
                               float            depth,
                               uint32_t*        op_slot,
-                              uint32_t*        depth_slot)
+                              uint32_t*        depth_slot,
+                              uint8_t          level_base)
 {
     Sculptor::Slot lfo_dot = input_slot("LFO");
     lfo_dot.row_group      = row_group;
     lfo_dot.child_row      = true;
+    lfo_dot.child_level    = level_base;
     graph->add_slot(node, lfo_dot);
 
     Sculptor::Slot lfo_op = list_slot("Op", source_op_names, 2, op_index);
     lfo_op.row_group      = row_group;
     lfo_op.child_row      = true;
+    lfo_op.child_level    = level_base;
     const uint32_t op_idx = graph->add_slot(node, lfo_op);
 
     Sculptor::Slot lfo_depth = real_slot("Depth", depth);
     lfo_depth.child_row      = true;
-    lfo_depth.child_level    = 2;
+    lfo_depth.child_level    = static_cast<uint8_t>(level_base + 1);
     const uint32_t depth_idx = graph->add_slot(node, lfo_depth);
 
     if (op_slot != nullptr) {

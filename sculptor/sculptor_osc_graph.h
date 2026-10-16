@@ -86,7 +86,11 @@ static_assert(Synth::max_layers + 6 * Synth::max_layers * Synth::num_mod_targets
 // unlabeled envelope depth sharing the dot's renderer line, fields 2..5 the LFO row (dot, op, depth, rate scale),
 // fields 6..8 the Source A row and fields 9..11 the Source B row (dot, op, amount each).  Row-group ids are per
 // (target, row): the LFO row groups 3*t + 1, the source rows 3*t + 2 and 3*t + 3, the envelope row 3*t + 4; the fixed
-// slots own their lines (group 0).
+// slots own their lines (group 0). Four value rows nest as children of a
+// parent row: duty and pad tone under their waveform rows, waveform mix /
+// fm depth / fm ratio under mix mode, pitch offset / octave offset under
+// pitch, and the fir pitch spread / fir slope rows under filter type. A
+// nested row's whole modulation block shifts one tree level deeper.
 constexpr uint32_t osc_slot_count          = 19;
 constexpr uint32_t osc_target_block_stride = 12;
 

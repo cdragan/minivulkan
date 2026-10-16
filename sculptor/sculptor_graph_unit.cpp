@@ -1871,6 +1871,102 @@ static void test_renderer_title_spacing_and_child_row_elbows()
     ImGui::DestroyContext();
 }
 
+// A deeper child row keeps the shallower columns' rails running past it:
+// a level-2 row draws the level-1 rail beside itself down to the next
+// sibling row, so the parent's rail stays continuous.
+static void test_renderer_child_row_sibling_rails()
+{
+    create_renderer_context();
+
+    Graph& graph = reset_unit_graph(0);
+    graph.clear();
+    graph.set_colors(Sculptor::default_graph_colors());
+    const uint32_t node = graph.create_node("N", vmath::vec2(32.0f, 32.0f));
+    TEST(node != Sculptor::pool_no_slot);
+    Slot volume        = Sculptor::real_slot("Volume", 0.5f);
+    volume.connectable = true;
+    TEST(graph.add_slot(node, volume) == 0);
+    Slot env      = Sculptor::input_slot("Envelope");
+    env.child_row = true;
+    TEST(graph.add_slot(node, env) == 1);
+    Slot rate        = Sculptor::real_slot("Rate x", 1.0f);
+    rate.child_row   = true;
+    rate.child_level = 2;
+    TEST(graph.add_slot(node, rate) == 2);
+    Slot src      = Sculptor::input_slot("Source A");
+    src.child_row = true;
+    TEST(graph.add_slot(node, src) == 3);
+
+    ElbowSegment segs[8]   = {};
+    uint32_t     seg_count = 0;
+    render_and_collect_connector_lines(graph, segs, 8, &seg_count);
+    // Envelope spine + arm, rate spine + arm + level-1 rail, source spine + arm.
+    TEST(seg_count == 7);
+    if (seg_count == 7) {
+        // The rate row's rail sits on the level-1 column and continues the
+        // envelope's spine down through the rate row.
+        TEST(segs[4].p1.x == segs[4].p2.x);
+        TEST(segs[4].p1.x == segs[0].p1.x);
+        TEST(segs[4].p1.y == segs[0].p2.y);
+        TEST(segs[4].p2.y > segs[4].p1.y);
+        // The rate row's own spine sits one indent deeper.
+        TEST(segs[2].p1.x == segs[0].p1.x + 14.0f);
+        TEST(segs[2].p1.y == segs[0].p2.y);
+        // The source row's spine continues the level-1 rail from the rate row.
+        TEST(segs[5].p1.x == segs[0].p1.x);
+        TEST(segs[5].p1.y == segs[4].p2.y);
+        TEST(segs[5].p2.y > segs[5].p1.y);
+    }
+
+    // A deeper last child row must not draw a dangling rail: with no later
+    // sibling the level-1 rail stops at the level-1 row's own elbow.
+    Graph& tail_graph = reset_unit_graph(0);
+    tail_graph.clear();
+    tail_graph.set_colors(Sculptor::default_graph_colors());
+    const uint32_t tail_node = tail_graph.create_node("N", vmath::vec2(32.0f, 32.0f));
+    TEST(tail_node != Sculptor::pool_no_slot);
+    Slot tail_volume        = Sculptor::real_slot("Volume", 0.5f);
+    tail_volume.connectable = true;
+    TEST(tail_graph.add_slot(tail_node, tail_volume) == 0);
+    Slot tail_env      = Sculptor::input_slot("Envelope");
+    tail_env.child_row = true;
+    TEST(tail_graph.add_slot(tail_node, tail_env) == 1);
+    Slot tail_rate        = Sculptor::real_slot("Rate x", 1.0f);
+    tail_rate.child_row   = true;
+    tail_rate.child_level = 2;
+    TEST(tail_graph.add_slot(tail_node, tail_rate) == 2);
+
+    seg_count = 0;
+    render_and_collect_connector_lines(tail_graph, segs, 8, &seg_count);
+    // Envelope spine + arm, rate spine + arm; no rail beside the rate row.
+    TEST(seg_count == 4);
+
+    // A flat row after the deeper row also ends the rail: the run left the
+    // parent's child list, so the rail must not cross it.
+    Graph& flat_graph = reset_unit_graph(0);
+    flat_graph.clear();
+    flat_graph.set_colors(Sculptor::default_graph_colors());
+    const uint32_t flat_node = flat_graph.create_node("N", vmath::vec2(32.0f, 32.0f));
+    TEST(flat_node != Sculptor::pool_no_slot);
+    Slot flat_volume        = Sculptor::real_slot("Volume", 0.5f);
+    flat_volume.connectable = true;
+    TEST(flat_graph.add_slot(flat_node, flat_volume) == 0);
+    Slot flat_env      = Sculptor::input_slot("Envelope");
+    flat_env.child_row = true;
+    TEST(flat_graph.add_slot(flat_node, flat_env) == 1);
+    Slot flat_rate        = Sculptor::real_slot("Rate x", 1.0f);
+    flat_rate.child_row   = true;
+    flat_rate.child_level = 2;
+    TEST(flat_graph.add_slot(flat_node, flat_rate) == 2);
+    TEST(flat_graph.add_slot(flat_node, Sculptor::real_slot("Pan", 0.0f)) == 3);
+
+    seg_count = 0;
+    render_and_collect_connector_lines(flat_graph, segs, 8, &seg_count);
+    TEST(seg_count == 4);
+
+    ImGui::DestroyContext();
+}
+
 // Builds the anchor: one node with one connectable parameter on its
 // first line, flagged for the drop menu or left unflagged.
 static uint32_t add_param_anchor(Graph& graph, vmath::vec2 position, bool flagged)
@@ -2612,6 +2708,7 @@ int main()
 {
     test_renderer_audio_endpoint_mouse_frames();
     test_renderer_title_spacing_and_child_row_elbows();
+    test_renderer_child_row_sibling_rails();
     test_drop_menu_eligible_model_rule();
     test_drop_menu_dismissal_paths_leave_graph_unchanged();
     test_drop_menu_pending_wire_frozen_at_release_point();

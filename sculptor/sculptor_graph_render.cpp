@@ -599,6 +599,35 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
                                    ImVec2(elbow_end_x, y_center),
                                    elbow_color,
                                    tree_line_width);
+                // Sibling rails: a deeper child row keeps the shallower
+                // columns' spines running past it, but only down to a
+                // later sibling row that still owns that column. Without
+                // the scan the rail dangles when the deeper rows end the
+                // parent's child run (last or hidden rows).
+                for (uint32_t rail_level = 1; rail_level < line.child_level; ++rail_level) {
+                    bool rail_needed = false;
+                    for (uint32_t next_line = line_idx + 1; next_line < num_lines; ++next_line) {
+                        if (!lines[next_line].child_row) {
+                            break;
+                        }
+                        if (lines[next_line].child_level == rail_level) {
+                            rail_needed = true;
+                            break;
+                        }
+                        if (lines[next_line].child_level < rail_level) {
+                            break;
+                        }
+                    }
+                    if (!rail_needed) {
+                        continue;
+                    }
+                    const float rail_x =
+                        base_label_x + (static_cast<float>(rail_level - 1) * tree_indent + tree_elbow_x) * render_scale;
+                    draw_list->AddLine(ImVec2(rail_x, spine_top_y),
+                                       ImVec2(rail_x, y_center),
+                                       elbow_color,
+                                       tree_line_width);
+                }
             }
             float    cursor    = base_label_x + (line.child_row ? tree_indent * line.child_level * render_scale : 0.0f);
             uint32_t line_prop = 0;

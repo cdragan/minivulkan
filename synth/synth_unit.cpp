@@ -6650,7 +6650,9 @@ static void child_row_projection_regressions()
     TEST(osc_node != Sculptor::pool_no_slot);
     const Sculptor::Node& osc = graph.node(osc_node);
     for (uint32_t t = 0; t < Synth::num_mod_targets; ++t) {
-        TEST(! osc.slots.entries[Sculptor::osc_target_row(t)].child_row);
+        // Duty, pad tone, mix, fm and filter-spread rows nest under
+        // their parent rows; volume, pan and pitch stay at the top level.
+        TEST(osc.slots.entries[Sculptor::osc_target_row(t)].child_row == (t >= 3));
         TEST(osc.slots.entries[Sculptor::osc_target_env_dot(t)].child_row);
         for (uint32_t f = 0; f <= 3; ++f) {
             TEST(osc.slots.entries[Sculptor::osc_target_lfo_dot(t) + f].child_row);
@@ -6663,10 +6665,16 @@ static void child_row_projection_regressions()
     }
     TEST(! osc.slots.entries[mapping.osc_output_slot].child_row);
     for (uint32_t s = 0; s < osc.slots.num_allocated; ++s) {
-        uint32_t   block_target = 0;
-        uint32_t   block_field  = 0;
-        const bool is_block     = Sculptor::osc_target_block_field(s, &block_target, &block_field);
-        TEST(osc.slots.entries[s].child_row == is_block);
+        uint32_t   block_target       = 0;
+        uint32_t   block_field        = 0;
+        const bool is_block           = Sculptor::osc_target_block_field(s, &block_target, &block_field);
+        bool       child_row_expected = is_block;
+        for (uint32_t t = 3; t < Synth::num_mod_targets; ++t) {
+            child_row_expected = child_row_expected || s == Sculptor::osc_target_row(t);
+        }
+        // Pitch offset, octave offset and fir slope nest under their parents.
+        child_row_expected = child_row_expected || s == 134 || s == 135 || s == 150;
+        TEST(osc.slots.entries[s].child_row == child_row_expected);
     }
 
     const uint32_t non_osc_nodes[] = { mapping.input_node, mapping.instrument_node, mapping.output_node };
@@ -6850,7 +6858,10 @@ static void build_full_block_fixture(Synth::InstrumentBank* bank, Synth::Instrum
 static void check_target_block_grammar(const Sculptor::Node& osc, uint32_t target, const Synth::TargetBinding& gen)
 {
 
-    const uint32_t base = Sculptor::osc_target_block_base(target);
+    // Targets from duty a on nest under their parent rows (volume, pan and
+    // pitch stay at the top level), so their whole block shifts one deeper.
+    const uint8_t  level_base = target >= 3 ? 2 : 1;
+    const uint32_t base       = Sculptor::osc_target_block_base(target);
     TEST(Sculptor::osc_target_row(target) == t7_target_row_slots[target]);
     TEST(base == t7_target_row_slots[target] + 1); // the block follows its row
     TEST(osc.slots.entries[base - 1].connectable); // the row slot itself
@@ -6868,8 +6879,8 @@ static void check_target_block_grammar(const Sculptor::Node& osc, uint32_t targe
     TEST(env_depth.property_type == Sculptor::PropertyType::real);
     TEST(env_depth.name[0] == '\0'); // unlabeled: the dot's label names the line
     TEST(env_depth.row_group == 4 * target + 4);
-    TEST(env_depth.child_level == 0); // level 0: one line with the dot
-    TEST(env_depth.real_bounded);     // rendered as a slider
+    TEST(env_depth.child_level == level_base); // one line with the dot
+    TEST(env_depth.real_bounded);              // rendered as a slider
     TEST(env_depth.real_min == 0.0f && env_depth.real_max == 1.0f);
     TEST(approx(env_depth.value.real, gen.envelope_depth, 1.0e-6f));
 
@@ -6893,9 +6904,9 @@ static void check_target_block_grammar(const Sculptor::Node& osc, uint32_t targe
     }
     // Depth and Rate x nest one tree level deeper on their own lines.
     TEST(osc.slots.entries[base + t7_lfo_depth_field].row_group == 0);
-    TEST(osc.slots.entries[base + t7_lfo_depth_field].child_level == 2);
+    TEST(osc.slots.entries[base + t7_lfo_depth_field].child_level == level_base + 1);
     TEST(osc.slots.entries[base + t7_rate_field].row_group == 0);
-    TEST(osc.slots.entries[base + t7_rate_field].child_level == 2);
+    TEST(osc.slots.entries[base + t7_rate_field].child_level == level_base + 1);
     TEST(osc.slots.entries[base + t7_lfo_op_field].value.list_index == static_cast<uint32_t>(gen.lfo_op));
     TEST(approx(osc.slots.entries[base + t7_lfo_depth_field].value.real, gen.lfo_depth, 1.0e-6f));
     TEST(approx(osc.slots.entries[base + t7_rate_field].value.real, gen.lfo_rate_scale_ms, 1.0e-4f));
@@ -6911,7 +6922,7 @@ static void check_target_block_grammar(const Sculptor::Node& osc, uint32_t targe
         }
         // Amount nests one tree level deeper on its own line.
         TEST(osc.slots.entries[dot + 2].row_group == 0);
-        TEST(osc.slots.entries[dot + 2].child_level == 2);
+        TEST(osc.slots.entries[dot + 2].child_level == level_base + 1);
         const Sculptor::Slot& op = osc.slots.entries[dot + 1];
         TEST(op.property_type == Sculptor::PropertyType::list);
         TEST(op.num_list_options == 2);

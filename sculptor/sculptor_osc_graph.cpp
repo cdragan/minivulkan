@@ -351,10 +351,12 @@ static Sculptor::Slot osc_view_display_slot(const char*       name,
 static Sculptor::Slot osc_view_connectable_slot(const char*       name,
                                                 float             display_value,
                                                 Synth::ModTarget  target,
-                                                Synth::FilterType fir_type = Synth::fir_bandpass)
+                                                bool              child_row = false,
+                                                Synth::FilterType fir_type  = Synth::fir_bandpass)
 {
     Sculptor::Slot slot = osc_view_display_slot(name, display_value, target, fir_type);
     slot.connectable    = true;
+    slot.child_row      = child_row;
     // The drop-menu anchor: exactly the ten target value rows take
     // creation menus when a drag from the row's dot releases over empty
     // canvas.
@@ -376,17 +378,24 @@ enum TargetFamily {
 // 10..11 the MIDI source op/amount pairs.  Op shares its input row.
 // Depth, Rate x, and Amount use separate nested rows.  Inputs past
 // num_inputs seed the neutral add/0 grammar the compile reads through
-// when a wire lands later.
-static void append_target_block(Graph* graph, uint32_t node, Synth::ModTarget target, const Synth::TargetBinding& gen)
+// when a wire lands later.  Level_base shifts the whole block one tree
+// level deeper: nested value rows pass 2, flat rows keep the default 1.
+static void append_target_block(Graph*                      graph,
+                                uint32_t                    node,
+                                Synth::ModTarget            target,
+                                const Synth::TargetBinding& gen,
+                                uint8_t                     level_base = 1)
 {
     const uint32_t t       = static_cast<uint32_t>(target);
     Sculptor::Slot env_dot = input_slot("Envelope");
     env_dot.child_row      = true;
+    env_dot.child_level    = level_base;
     env_dot.row_group      = static_cast<uint8_t>(4 * t + 4);
     ;
     graph->add_slot(node, env_dot);
     Sculptor::Slot env_depth = bounded_real_slot("", gen.envelope_depth, 0.0f, 1.0f, false);
     env_depth.child_row      = true;
+    env_depth.child_level    = level_base;
     env_depth.row_group      = static_cast<uint8_t>(4 * t + 4);
     ;
     graph->add_slot(node, env_depth);
@@ -396,10 +405,11 @@ static void append_target_block(Graph* graph, uint32_t node, Synth::ModTarget ta
                              static_cast<uint32_t>(gen.lfo_op),
                              gen.lfo_depth,
                              nullptr,
-                             nullptr);
+                             nullptr,
+                             level_base);
     Sculptor::Slot rate_scale = real_slot("Rate x", gen.lfo_rate_scale_ms);
     rate_scale.child_row      = true;
-    rate_scale.child_level    = 2;
+    rate_scale.child_level    = static_cast<uint8_t>(level_base + 1);
     graph->add_slot(node, rate_scale);
     for (uint32_t i = 0; i < Synth::max_mod_inputs; ++i) {
         const Synth::SourceOp op    = i < gen.num_inputs ? gen.inputs[i].op : Synth::SourceOp::add;
@@ -409,7 +419,8 @@ static void append_target_block(Graph* graph, uint32_t node, Synth::ModTarget ta
                                         i,
                                         static_cast<uint8_t>(4 * t + 2 + i),
                                         static_cast<uint32_t>(op),
-                                        scale);
+                                        scale,
+                                        level_base);
     }
 }
 
@@ -699,41 +710,49 @@ static void project_osc_node(Sculptor::Graph*           graph,
                   osc.osc_type[0] == Synth::WaveType::no_wave ? 0 : static_cast<uint32_t>(osc.osc_type[0]) - 1));
     graph->add_slot(
         node,
-        osc_view_connectable_slot(target_names[3], osc.targets[Synth::mod_duty0].base_value, Synth::mod_duty0));
+        osc_view_connectable_slot(target_names[3], osc.targets[Synth::mod_duty0].base_value, Synth::mod_duty0, true));
     // One 12-slot modulation block per ModTarget, directly after the
     // target's value row, seeded from the layer's own binding
     // (display-unit fields carry the raw values; only the base rows are
     // scaled).
-    append_target_block(graph, node, Synth::mod_duty0, osc.targets[Synth::mod_duty0]);
-    graph->add_slot(
-        node,
-        osc_view_connectable_slot(target_names[9], osc.targets[Synth::mod_pad_tilt0].base_value, Synth::mod_pad_tilt0));
-    append_target_block(graph, node, Synth::mod_pad_tilt0, osc.targets[Synth::mod_pad_tilt0]);
+    append_target_block(graph, node, Synth::mod_duty0, osc.targets[Synth::mod_duty0], 2);
+    graph->add_slot(node,
+                    osc_view_connectable_slot(target_names[9],
+                                              osc.targets[Synth::mod_pad_tilt0].base_value,
+                                              Synth::mod_pad_tilt0,
+                                              true));
+    append_target_block(graph, node, Synth::mod_pad_tilt0, osc.targets[Synth::mod_pad_tilt0], 2);
     graph->add_slot(node, list_slot("Waveform B", wave_names, 6, static_cast<uint32_t>(osc.osc_type[1])));
     graph->add_slot(
         node,
-        osc_view_connectable_slot(target_names[4], osc.targets[Synth::mod_duty1].base_value, Synth::mod_duty1));
-    append_target_block(graph, node, Synth::mod_duty1, osc.targets[Synth::mod_duty1]);
+        osc_view_connectable_slot(target_names[4], osc.targets[Synth::mod_duty1].base_value, Synth::mod_duty1, true));
+    append_target_block(graph, node, Synth::mod_duty1, osc.targets[Synth::mod_duty1], 2);
     graph->add_slot(node,
                     osc_view_connectable_slot(target_names[10],
                                               osc.targets[Synth::mod_pad_tilt1].base_value,
-                                              Synth::mod_pad_tilt1));
-    append_target_block(graph, node, Synth::mod_pad_tilt1, osc.targets[Synth::mod_pad_tilt1]);
+                                              Synth::mod_pad_tilt1,
+                                              true));
+    append_target_block(graph, node, Synth::mod_pad_tilt1, osc.targets[Synth::mod_pad_tilt1], 2);
     graph->add_slot(node, list_slot("Mix Mode", osc_mode_names, 4, static_cast<uint32_t>(osc.osc_mode)));
-    graph->add_slot(
-        node,
-        osc_view_connectable_slot(target_names[5], osc.targets[Synth::mod_osc_mix].base_value, Synth::mod_osc_mix));
-    append_target_block(graph, node, Synth::mod_osc_mix, osc.targets[Synth::mod_osc_mix]);
+    graph->add_slot(node,
+                    osc_view_connectable_slot(target_names[5],
+                                              osc.targets[Synth::mod_osc_mix].base_value,
+                                              Synth::mod_osc_mix,
+                                              true));
+    append_target_block(graph, node, Synth::mod_osc_mix, osc.targets[Synth::mod_osc_mix], 2);
     graph->add_slot(node,
                     osc_view_connectable_slot(target_names[6],
                                               osc.targets[Synth::mod_fm_index].base_value /
                                                   osc_target_views[Synth::mod_fm_index].bank_scale,
-                                              Synth::mod_fm_index));
-    append_target_block(graph, node, Synth::mod_fm_index, osc.targets[Synth::mod_fm_index]);
-    graph->add_slot(
-        node,
-        osc_view_connectable_slot(target_names[8], osc.targets[Synth::mod_fm_ratio].base_value, Synth::mod_fm_ratio));
-    append_target_block(graph, node, Synth::mod_fm_ratio, osc.targets[Synth::mod_fm_ratio]);
+                                              Synth::mod_fm_index,
+                                              true));
+    append_target_block(graph, node, Synth::mod_fm_index, osc.targets[Synth::mod_fm_index], 2);
+    graph->add_slot(node,
+                    osc_view_connectable_slot(target_names[8],
+                                              osc.targets[Synth::mod_fm_ratio].base_value,
+                                              Synth::mod_fm_ratio,
+                                              true));
+    append_target_block(graph, node, Synth::mod_fm_ratio, osc.targets[Synth::mod_fm_ratio], 2);
     graph->add_slot(node,
                     osc_view_connectable_slot("Volume", osc.targets[Synth::mod_volume].base_value, Synth::mod_volume));
     append_target_block(graph, node, Synth::mod_volume, osc.targets[Synth::mod_volume]);
@@ -751,12 +770,14 @@ static void project_osc_node(Sculptor::Graph*           graph,
     Sculptor::Slot pitch_offset_slot = Sculptor::real_slot("Pitch Offset", osc.pitch_offset);
     pitch_offset_slot.real_min       = Sculptor::osc_pitch_offset_min;
     pitch_offset_slot.real_max       = Sculptor::osc_pitch_offset_max;
+    pitch_offset_slot.child_row      = true;
     graph->add_slot(node, pitch_offset_slot);
-    graph->add_slot(node,
-                    Sculptor::bounded_int_slot("Octave Offset",
-                                               osc.octave_offset,
-                                               Sculptor::osc_octave_offset_min,
-                                               Sculptor::osc_octave_offset_max));
+    Sculptor::Slot octave_offset_slot = Sculptor::bounded_int_slot("Octave Offset",
+                                                                   osc.octave_offset,
+                                                                   Sculptor::osc_octave_offset_min,
+                                                                   Sculptor::osc_octave_offset_max);
+    octave_offset_slot.child_row      = true;
+    graph->add_slot(node, octave_offset_slot);
     graph->add_slot(
         node,
         list_slot("Filter Type", filter_type_names, Synth::num_filter_types, static_cast<uint32_t>(osc.fir_type)));
@@ -764,9 +785,12 @@ static void project_osc_node(Sculptor::Graph*           graph,
                     osc_view_connectable_slot(fir_spread_names[osc.fir_type],
                                               fir_spread_display_value(osc),
                                               Synth::mod_fir_spread,
+                                              true,
                                               osc.fir_type));
-    append_target_block(graph, node, Synth::mod_fir_spread, osc.targets[Synth::mod_fir_spread]);
-    graph->add_slot(node, Sculptor::bounded_int_slot("FIR Slope", osc.fir_slope_percent, 1, 100));
+    append_target_block(graph, node, Synth::mod_fir_spread, osc.targets[Synth::mod_fir_spread], 2);
+    Sculptor::Slot fir_slope_slot = Sculptor::bounded_int_slot("FIR Slope", osc.fir_slope_percent, 1, 100);
+    fir_slope_slot.child_row      = true;
+    graph->add_slot(node, fir_slope_slot);
 }
 
 // Node construction shared by the derived projection and record-driven

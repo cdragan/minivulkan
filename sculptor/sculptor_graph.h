@@ -77,14 +77,16 @@ void append_mod_source_row(Graph*   graph,
                            uint32_t input_idx,
                            uint8_t  row_group,
                            uint32_t op_index,
-                           float    amount);
+                           float    amount,
+                           uint8_t  level_base = 1);
 void append_lfo_row(Graph*    graph,
                     uint32_t  node,
                     uint8_t   row_group,
                     uint32_t  op_index,
                     float     depth,
                     uint32_t* op_slot,
-                    uint32_t* depth_slot);
+                    uint32_t* depth_slot,
+                    uint8_t   level_base = 1);
 
 // Option labels of the two-way source op list (SourceOp::add, SourceOp::multiply).
 extern const char* const source_op_names[2];
