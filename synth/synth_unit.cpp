@@ -19737,7 +19737,7 @@ int main()
                                          "\"cc_number\":%s",
                                          malformed_cc_numbers[cc_value]);
             TEST(written > 0);
-            const uint32_t tail_len = wrap_len - prefix_len - sizeof(cc_number_key) + 1;
+            const uint32_t tail_len = wrap_len - prefix_len - static_cast<uint32_t>(sizeof(cc_number_key)) + 1;
             memcpy(spliced + prefix_len + written, field + sizeof(cc_number_key) - 1, tail_len);
             const uint32_t                     spliced_len = prefix_len + static_cast<uint32_t>(written) + tail_len;
             static Synth::InstrumentEditorBank prior;

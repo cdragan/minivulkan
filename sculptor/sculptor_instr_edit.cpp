@@ -2036,7 +2036,7 @@ void Sculptor::SynthEditor::gui_channel_pane(uint32_t channel)
         for (uint32_t entry = 0; entry < num_zones; entry++) {
             char name[Synth::max_name_len];
             Synth::get_zone_name(&instr_bank, channel, entry, name, sizeof(name));
-            char label[32];
+            char label[64];
             if (strlen(name) > 14)
                 snprintf(label, sizeof(label), "%.11s...###zone%u", name, entry);
             else
@@ -3875,7 +3875,7 @@ void Sculptor::SynthEditor::gui_library_browser()
     else {
         ImGui::BeginChild("##synth_lib_cats", ImVec2(180, 280), true);
         for (uint32_t c = 0; c < library_num_categories; c++) {
-            char label[Synth::library_category_len + 8];
+            char label[Synth::library_category_len + 16];
             snprintf(label,
                      sizeof(label),
                      "%s##cat%u",
