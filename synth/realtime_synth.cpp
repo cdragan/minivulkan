@@ -67,7 +67,8 @@ typedef uint8_t NoteToVoice[128];
 NoteToVoice     note_to_voice[Synth::max_channels];
 
 // Random pitch skew: a few cents of analog-style drift, applied per note and per layer.
-constexpr uint32_t note_skew_seed = 0x5eed1234u;
+constexpr uint32_t note_skew_seed     = 0x5eed1234u;
+constexpr uint32_t noise_start_stride = 0x9e3779b9u; // Spreads note-on noise starts across the 32 bit range
 
 // Default pitch bend range in semitones (standard MIDI default is +/- 2)
 constexpr float default_pitch_bend_range_semitones = 2.0f;
@@ -207,14 +208,9 @@ struct ModTargetNode {
 };
 
 constexpr ModTargetNode mod_target_nodes[] = {
-    { mod_pitch, osc_pitch_dest },
-    { mod_volume, osc_volume_dest },
-    { mod_fir_spread, osc_spread_dest },
-    { mod_panning, osc_panning_dest },
-    { mod_duty0, osc_duty0_dest },
-    { mod_duty1, osc_duty1_dest },
-    { mod_osc_mix, osc_mix_dest },
-    { mod_fm_index, osc_fm_index_dest },
+    { mod_pitch, osc_pitch_dest },     { mod_volume, osc_volume_dest },     { mod_fir_spread, osc_spread_dest },
+    { mod_panning, osc_panning_dest }, { mod_duty0, osc_duty0_dest },       { mod_duty1, osc_duty1_dest },
+    { mod_osc_mix, osc_mix_dest },     { mod_fm_index, osc_fm_index_dest },
 };
 
 Synth::Parameter       parameters[total_params];
@@ -281,9 +277,10 @@ struct Oscillator {
     // Optional filter parameters
     uint32_t fir_memory_offs;
     uint32_t taps_offs;
+    uint32_t noise_counter;
 };
 
-static_assert(sizeof(Oscillator) == 60);
+static_assert(sizeof(Oscillator) == 64);
 
 constexpr uint32_t max_param_range = sizeof(Oscillator) * 256;
 
@@ -460,26 +457,28 @@ template <typename T> T& get_param(uint32_t offset)
 
 struct RunningOscillator {
     // Constants which don't change for this oscillator's instance's life time
-    uint32_t midi_channel;    // MIDI channel on which this note was played
-    uint32_t output_channel;  // Output (mixing) channel for this MIDI channel/note
-    uint32_t note;            // MIDI note
-    uint32_t freq_mult;       // Frequency multiplier for component frequencies (1 for base frequency)
-    WaveType osc_type[2];     // Two oscillator types
-    uint32_t osc_output_offs; // Oscillator data output offset
-    uint32_t fir_memory_offs; // FIR filter memory offset
-    uint32_t fir_taps_offs;   // FIR filter taps offset
-    uint32_t osc_mode;        // osc_mode_blend, osc_mode_fm or osc_mode_hard_sync
-    float    mod_ratio;       // FM: modulator/carrier freq ratio.  Hard sync: slave cycles per master cycle
-    float    pitch_offset;    // Per-oscillator pitch offset in semitones (instrument constant for this note's layers)
-    int8_t   octave_offset;   // Whole-octave pitch shift: 12 * octave_offset semitones are added to the pitch
-                              // (instrument constant for this note's layer)
-    uint8_t fir_slope_percent; // FIR window slope percent 1..100; 100 = the full tap span (sharpest)
+    uint32_t midi_channel;      // MIDI channel on which this note was played
+    uint32_t output_channel;    // Output (mixing) channel for this MIDI channel/note
+    uint32_t note;              // MIDI note
+    uint32_t freq_mult;         // Frequency multiplier for component frequencies (1 for base frequency)
+    WaveType osc_type[2];       // Two oscillator types
+    uint32_t osc_output_offs;   // Oscillator data output offset
+    uint32_t fir_memory_offs;   // FIR filter memory offset
+    uint32_t fir_taps_offs;     // FIR filter taps offset
+    uint32_t osc_mode;          // osc_mode_blend, osc_mode_fm or osc_mode_hard_sync
+    float    mod_ratio;         // FM: modulator/carrier freq ratio.  Hard sync: slave cycles per master cycle
+    float    pitch_offset;      // Per-oscillator pitch offset in semitones (instrument constant for this note's layers)
+    int8_t   octave_offset;     // Whole-octave pitch shift: 12 * octave_offset semitones are added to the pitch
+                                // (instrument constant for this note's layer)
+    uint8_t  fir_slope_percent; // FIR window slope percent 1..100; 100 = the full tap span (sharpest)
+    Synth::FilterType fir_type; // Band-pass: spread in semitones.  Low-pass/high-pass: spread is a fixed cutoff in Hz
 
     // Current phase state
-    float phase;       // Current position of the oscillator
-    float mod_phase;   // Current position of the FM modulator
-    float old_volume;  // Previous volume
-    float old_panning; // Previous panning
+    float    phase;         // Current position of the oscillator
+    float    mod_phase;     // Current position of the FM modulator
+    uint32_t noise_counter; // Sample index of the noise stream, advanced every step
+    float    old_volume;    // Previous volume
+    float    old_panning;   // Previous panning
 
     // Resolved values written by update_modulation each step, read by the
     // shader-param fill.
@@ -511,6 +510,9 @@ struct RunningOscillator {
 static RunningOscillator oscillators[Synth::max_oscillators];
 
 RNG note_skew_rng; // Shared generator for per-note pitch skew
+
+// Gives every note-on its own noise start, so repeated notes do not repeat the same noise.
+static uint32_t noise_start_counter;
 
 static constexpr uint32_t max_mix_channels = Synth::max_channels;
 
@@ -611,6 +613,11 @@ static bool osc_has_filter(const Synth::Instrument& instrument, uint32_t layer_i
 {
     const Synth::Oscillator&    layer  = instrument.layers[layer_idx];
     const Synth::TargetBinding& spread = layer.targets[Synth::mod_fir_spread];
+
+    if (layer.fir_type == Synth::fir_off) {
+        return false;
+    }
+
     return spread.base_value != 0.0f || spread.envelope_desc_id || spread.lfo_desc_id || spread.num_inputs;
 }
 
@@ -662,6 +669,8 @@ static void init_oscillator_buffers()
     assert(Synth::num_channels <= max_mix_channels);
 
     note_skew_rng.init(note_skew_seed);
+
+    noise_start_counter = 0;
 
     for (uint32_t channel = 0; channel < max_mix_channels; channel++) {
         mix_channels[channel].chan_output_offs = static_cast<uint32_t>(
@@ -1284,6 +1293,7 @@ static void process_note_on(uint32_t delta_samples, const DispatchedMidiEvent& e
         osc.mod_ratio           = layer.mod_ratio;
         osc.octave_offset       = layer.octave_offset;
         osc.fir_slope_percent   = layer.fir_slope_percent;
+        osc.fir_type            = layer.fir_type;
         osc.pitch_offset =
             layer.pitch_offset + note_skew + Synth::random_pitch_skew(&note_skew_rng, instrument.layer_skew_semitones);
         osc.phase      = 0.0f;
@@ -1296,6 +1306,9 @@ static void process_note_on(uint32_t delta_samples, const DispatchedMidiEvent& e
         osc.decay_factor = 1.0f;
         osc.decay_tick   = 0;
         osc.decaying     = false;
+
+        noise_start_counter += noise_start_stride;
+        osc.noise_counter = noise_start_counter;
 
         // Expand each modulation target into its node triple at this oscillator's slot.
         const uint32_t osc_slot = voice.osc_ids[layer_idx];
@@ -1945,12 +1958,19 @@ static void compute_fir_coefficients()
         ShaderParams::FIRCoeff& param       = get_param<ShaderParams::FIRCoeff>(cur_param_offs);
         float                   lowpass_hz  = 0.0f;
         float                   highpass_hz = 0.0f;
-        if (! Synth::oscillator_fir_cutoffs(osc.pitch, osc.spread, osc.freq_mult, &lowpass_hz, &highpass_hz)) {
+        if (! Synth::oscillator_fir_cutoffs(osc.pitch,
+                                            osc.spread,
+                                            osc.freq_mult,
+                                            osc.fir_type,
+                                            &lowpass_hz,
+                                            &highpass_hz)) {
             continue; // Effective spread <= 0: passthrough, no coefficient dispatch.
         }
         uint32_t lowpass  = cutoff_hz_to_int(lowpass_hz);
         uint32_t highpass = cutoff_hz_to_int(highpass_hz); // 0 when the helper floor-killed the edge.
-        Synth::oscillator_fir_band_guard(&lowpass, &highpass);
+        if (osc.fir_type == Synth::fir_bandpass) {         // A single-edge type keeps its zero edge.
+            Synth::oscillator_fir_band_guard(&lowpass, &highpass);
+        }
         param.taps_offs            = osc.fir_taps_offs / 4;
         param.lowpass_cutoff_freq  = lowpass;
         param.highpass_cutoff_freq = highpass;
@@ -2141,10 +2161,13 @@ static void render_audio_step()
         param.mod_phase            = oscillator.mod_phase;
         param.mod_phase_step       = mod_phase_step / static_cast<float>(Synth::rt_step_samples);
         param.fir_memory_offs      = oscillator.fir_memory_offs / 4;
-        param.taps_offs            = (oscillator.spread > 0.0f) ? oscillator.fir_taps_offs / 4 : 0;
+        param.taps_offs =
+            (oscillator.spread > 0.0f && oscillator.fir_type != Synth::fir_off) ? oscillator.fir_taps_offs / 4 : 0;
+        param.noise_counter = oscillator.noise_counter;
 
         oscillator.phase += phase_step;
         oscillator.mod_phase += mod_phase_step;
+        oscillator.noise_counter += Synth::rt_step_samples;
 
         cur_param_offs += static_cast<uint32_t>(sizeof(ShaderParams::Oscillator));
     }
@@ -2433,8 +2456,7 @@ template <> void prepare_copy_audio_step_to_host<float, false>(uint32_t offset)
                        &push);       // pValues
 }
 
-template<typename T, bool interleaved>
-static bool render_audio(uint32_t num_samples)
+template <typename T, bool interleaved> static bool render_audio(uint32_t num_samples)
 {
     assert(num_samples % Synth::rt_step_samples == 0 && num_samples > 0);
 

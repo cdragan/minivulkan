@@ -2197,7 +2197,8 @@ void Sculptor::SynthEditor::drain_osc_graph(uint32_t channel, uint32_t zone)
     bool structural = false;
     for (uint32_t i = 0; i < count && ok; ++i) {
         const Sculptor::GraphChange& change = changes[i];
-        structural                          = structural || change.kind != Sculptor::ChangeKind::value_changed;
+        structural                          = structural || change.kind != Sculptor::ChangeKind::value_changed ||
+                                              Sculptor::osc_change_restructures(osc_mapping, change);
         ok = Sculptor::apply_osc_graph_change(&candidate, &osc_graph, &osc_mapping, change, channel, zone);
     }
     if (ok) {

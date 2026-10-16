@@ -100,10 +100,20 @@ static_assert(static_cast<uint32_t>(Synth::mod_fm_index) == 6);
 static_assert(Synth::num_mod_targets == 8);
 static_assert(Synth::max_mod_inputs == 2);
 
-const char* const target_names[Synth::num_mod_targets] = { "volume", "pitch",        "panning",  "Duty A",
-                                                           "Duty B", "Waveform Mix", "FM Depth", "Bandpass Spread" };
-const char* const wave_names[5]                        = { "off", "sine", "saw", "pulse", "noise" };
-const char* const osc_mode_names[3]                    = { "blend", "fm", "hard sync" };
+const char* const target_names[Synth::num_mod_targets]       = { "volume", "pitch",        "panning",  "Duty A",
+                                                                 "Duty B", "Waveform Mix", "FM Depth", "Band spread" };
+const char* const wave_names[5]                              = { "off", "sine", "saw", "pulse", "noise" };
+const char* const osc_mode_names[3]                          = { "blend", "fm", "hard sync" };
+const char* const filter_type_names[Synth::num_filter_types] = { "off", "bandpass", "lowpass", "highpass" };
+
+// Dropdown order puts "off" first.  The stored enum order is fixed: zero must
+
+// The FIR spread row's label, indexed by the stored FilterType value.
+
+const char* const fir_spread_names[Synth::num_filter_types] = { "Filter Off",
+                                                                "Band Spread",
+                                                                "Cutoff (Hz)",
+                                                                "Cutoff (Hz)" };
 
 // Oscillator node slot layout.  The order is fixed: project fills slots in
 // exactly this order and compile reads properties back by index, so the two
@@ -129,10 +139,11 @@ const char* const osc_mode_names[3]                    = { "blend", "fm", "hard 
 //   78..88   pitch's 11-slot modulation block
 //   89       pitch offset (per oscillator)
 //   90       octave offset (per oscillator, [-12, +12] whole octaves)
-// 91          fir pitch spread (per-layer base value, [0, 36] semitones)
-// 92..102 fir pitch spread's 11-slot modulation block
-// 103 fir slope (per oscillator, [1, 100] percent)
-// Every target value row (2, 15, 28, 40, 53, 65, 77, 91) is
+// 91 filter type (per oscillator, list)
+// 92 fir pitch spread (per-layer base value; band-pass: [0, 36] semitones, low-pass/high-pass: cutoff in Hz)
+// 93..103 fir pitch spread's 11-slot modulation block
+// 104 fir slope (per oscillator, [1, 100] percent)
+// Every target value row (2, 15, 28, 40, 53, 65, 77, 92) is
 // connectable: all eight targets are uniformly modulate-able, so each
 // row's 11-slot block follows its value row (see the block helpers in
 // sculptor_osc_graph.h); block field 0 is the envelope dot, so it
@@ -143,7 +154,8 @@ constexpr uint32_t osc_mode_prop          = 27;
 constexpr uint32_t osc_fm_ratio_prop      = 52;
 constexpr uint32_t osc_pitch_offset_prop  = 89;
 constexpr uint32_t osc_octave_offset_prop = 90;
-constexpr uint32_t osc_fir_slope_prop     = 103;
+constexpr uint32_t osc_fir_slope_prop     = 104;
+constexpr uint32_t osc_fir_type_prop      = 91;
 
 // Per-target presentation views: the single source of truth for value
 // bounds, bank-unit scaling and slider curve.  Oscillator rows and
@@ -159,6 +171,16 @@ constexpr Sculptor::OscTargetView osc_target_views[Synth::num_mod_targets] = {
     { 0.0f, 1.0f, 6.2831853f, false }, // fm depth (1.0 == 2*pi radians)
     { 0.0f, 36.0f, 1.0f, false },      // fir pitch spread (semitones)
 };
+
+// Low-pass and high-pass cutoff slider.  The editor writes a zero cutoff (edge off)
+// when a low-pass slider reaches the maximum or a high-pass slider reaches the
+// minimum, like the effect FIR sliders.  A zero cutoff stays valid in the JSON.
+constexpr float                   osc_fir_cutoff_min_hz = 20.0f;
+constexpr float                   osc_fir_cutoff_max_hz = 22050.0f;
+constexpr Sculptor::OscTargetView osc_fir_cutoff_view   = { osc_fir_cutoff_min_hz, osc_fir_cutoff_max_hz, 1.0f, true };
+
+// Filter off keeps the old value of either unit, so it accepts both ranges.
+constexpr Sculptor::OscTargetView osc_fir_off_view = { 0.0f, osc_fir_cutoff_max_hz, 1.0f, false };
 
 // Envelope node slot layout: 0 output, then descriptor-content properties.
 
@@ -180,7 +202,8 @@ constexpr uint32_t canonical_node_count = Synth::graph_canonical_node_count;
 // Oscillator-node rows whose widgets only make sense for the current
 // waveform/mode selection.  Slot indices follow the projection layout
 // contract in sculptor_osc_graph.cpp (waveform b, mix mode and fm ratio,
-// plus the duty b, waveform mix and fm depth rows, need waveform b).
+// plus the duty b, waveform mix and fm depth rows, need waveform b; the
+// cutoff row, its block and the fir slope need a filter type other than off).
 bool Sculptor::oscillator_slot_waveform_mode_disabled(const Sculptor::Node& node, uint32_t slot_idx)
 {
     if (node.slots.num_allocated < osc_slot_count) {
@@ -200,6 +223,13 @@ bool Sculptor::oscillator_slot_waveform_mode_disabled(const Sculptor::Node& node
     }
     if (slot_idx == osc_fm_ratio_prop && mode == 0) {
         return true; // fm ratio drives fm and hard sync, not blend
+    }
+    const uint32_t fir_type = node.slots.entries[osc_fir_type_prop].value.list_index;
+    if (fir_type == static_cast<uint32_t>(Synth::fir_off)) {
+        const uint32_t spread = osc_target_row_slot[static_cast<uint32_t>(Synth::mod_fir_spread)];
+        if ((slot_idx >= spread && slot_idx < osc_fir_slope_prop) || slot_idx == osc_fir_slope_prop) {
+            return true; // the cutoff row, its block and the slope are unused with the filter off
+        }
     }
     return false;
 }
@@ -230,9 +260,61 @@ static bool osc_row_is_target(uint32_t slot_idx)
     return osc_row_target_index(slot_idx) >= 0;
 }
 
-static Sculptor::Slot osc_view_display_slot(const char* name, float display_value, Synth::ModTarget target)
+static Sculptor::OscTargetView target_view_for(Synth::ModTarget target, Synth::FilterType fir_type)
 {
-    const Sculptor::OscTargetView view = osc_target_views[static_cast<uint32_t>(target)];
+    if (target == Synth::mod_fir_spread) {
+        if (fir_type == Synth::fir_lowpass || fir_type == Synth::fir_highpass) {
+            return osc_fir_cutoff_view;
+        }
+        if (fir_type == Synth::fir_off) {
+            return osc_fir_off_view;
+        }
+    }
+    return osc_target_views[static_cast<uint32_t>(target)];
+}
+
+// Spread row value in slider units: a zero low-pass cutoff shows at the maximum,
+// a zero high-pass cutoff at the minimum.
+static float fir_spread_display_value(const Synth::Oscillator& osc)
+{
+    const float base = osc.targets[Synth::mod_fir_spread].base_value;
+    if (base == 0.0f && osc.fir_type == Synth::fir_lowpass) {
+        return osc_fir_cutoff_max_hz;
+    }
+    if (base == 0.0f && osc.fir_type == Synth::fir_highpass) {
+        return osc_fir_cutoff_min_hz;
+    }
+    return base;
+}
+
+// Inverse of fir_spread_display_value, with the slider range applied.  A type change keeps the number,
+// so the range clamp also converts the old unit.  Filter off keeps the value.
+static float fir_spread_bank_value(Synth::FilterType fir_type, float value)
+{
+    if (fir_type == Synth::fir_lowpass) {
+        if (! (value > 0.0f) || value >= osc_fir_cutoff_max_hz) {
+            return 0.0f;
+        }
+        return value < osc_fir_cutoff_min_hz ? osc_fir_cutoff_min_hz : value;
+    }
+    if (fir_type == Synth::fir_highpass) {
+        if (! (value > osc_fir_cutoff_min_hz)) {
+            return 0.0f;
+        }
+        return value > osc_fir_cutoff_max_hz ? osc_fir_cutoff_max_hz : value;
+    }
+    if (fir_type == Synth::fir_bandpass) {
+        return value > 36.0f ? 36.0f : value;
+    }
+    return value;
+}
+
+static Sculptor::Slot osc_view_display_slot(const char*       name,
+                                            float             display_value,
+                                            Synth::ModTarget  target,
+                                            Synth::FilterType fir_type = Synth::fir_bandpass)
+{
+    const Sculptor::OscTargetView view = target_view_for(target, fir_type);
     Sculptor::Slot                slot = bounded_real_slot(name, display_value, view.min_value, view.max_value);
     slot.real_logarithmic              = view.logarithmic;
     return slot;
@@ -241,9 +323,12 @@ static Sculptor::Slot osc_view_display_slot(const char* name, float display_valu
 // Connectable target value row: the layer's own base value, editable
 // regardless of wiring; direct modulator wires drive the modulators on
 // top (the block's envelope/LFO/Source dots), never the base.
-static Sculptor::Slot osc_view_connectable_slot(const char* name, float display_value, Synth::ModTarget target)
+static Sculptor::Slot osc_view_connectable_slot(const char*       name,
+                                                float             display_value,
+                                                Synth::ModTarget  target,
+                                                Synth::FilterType fir_type = Synth::fir_bandpass)
 {
-    Sculptor::Slot slot = osc_view_display_slot(name, display_value, target);
+    Sculptor::Slot slot = osc_view_display_slot(name, display_value, target, fir_type);
     slot.connectable    = true;
     // The drop-menu anchor: exactly the nine target value rows take
     // creation menus when a drag from the row's dot releases over empty
@@ -629,10 +714,14 @@ static void project_osc_node(Sculptor::Graph*           graph,
                                                osc.octave_offset,
                                                Sculptor::osc_octave_offset_min,
                                                Sculptor::osc_octave_offset_max));
+    graph->add_slot(
+        node,
+        list_slot("Filter Type", filter_type_names, Synth::num_filter_types, static_cast<uint32_t>(osc.fir_type)));
     graph->add_slot(node,
-                    osc_view_connectable_slot(target_names[7],
-                                              osc.targets[Synth::mod_fir_spread].base_value,
-                                              Synth::mod_fir_spread));
+                    osc_view_connectable_slot(fir_spread_names[osc.fir_type],
+                                              fir_spread_display_value(osc),
+                                              Synth::mod_fir_spread,
+                                              osc.fir_type));
     append_target_block(graph, node, Synth::mod_fir_spread, osc.targets[Synth::mod_fir_spread]);
     graph->add_slot(node, Sculptor::bounded_int_slot("FIR Slope", osc.fir_slope_percent, 1, 100));
 }
@@ -964,9 +1053,15 @@ void Sculptor::env_target_usage(const Graph&           graph,
     }
 }
 
-Sculptor::OscTargetView Sculptor::osc_target_view(Synth::ModTarget target)
+Sculptor::OscTargetView Sculptor::osc_target_view(Synth::ModTarget target, Synth::FilterType fir_type)
 {
-    return osc_target_views[static_cast<uint32_t>(target)];
+    return target_view_for(target, fir_type);
+}
+
+bool Sculptor::osc_change_restructures(const Sculptor::OscGraphMapping& mapping, const Sculptor::GraphChange& change)
+{
+    return change.kind == Sculptor::ChangeKind::value_changed && change.slot_idx == osc_fir_type_prop &&
+           node_role(mapping, change.node_idx) == role_osc;
 }
 
 // Slot index on an oscillator node holding the value row of ModTarget
@@ -1302,6 +1397,11 @@ static bool read_oscillator_layer(const Sculptor::Graph&           graph,
     }
     osc.fir_slope_percent = static_cast<uint8_t>(slope);
 
+    if (! read_list_prop(slots[osc_fir_type_prop], &index)) {
+        return false;
+    }
+    osc.fir_type = static_cast<Synth::FilterType>(index);
+
     for (uint32_t t = 0; t < Synth::num_mod_targets; ++t) {
         const Synth::ModTarget target = static_cast<Synth::ModTarget>(t);
         // Each layer owns its cell: the base value always comes from the
@@ -1312,6 +1412,9 @@ static bool read_oscillator_layer(const Sculptor::Graph&           graph,
         // re-projection.
         Synth::TargetBinding gen = {};
         gen.base_value           = slots[osc_target_prop(target)].value.real * osc_target_views[t].bank_scale;
+        if (target == Synth::mod_fir_spread) {
+            gen.base_value = fir_spread_bank_value(osc.fir_type, gen.base_value);
+        }
         // A connection still ending on the base target row is a
         // validator/apply invariant violation: the apply path relocates
         // every committed wire onto its family dot before this runs.

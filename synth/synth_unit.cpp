@@ -133,7 +133,7 @@ constexpr uint32_t t7_target_row_slots[Synth::num_mod_targets] = {
     15, // duty b
     28, // waveform mix
     40, // fm depth
-    91, // fir pitch spread
+    92, // fir pitch spread
 };
 // Shared graph and mapping for the direct-row blocks; every block
 // re-projects, which rebuilds both from scratch.
@@ -1110,12 +1110,53 @@ static uint32_t build_clipboard_max_fixture(Synth::InstrumentBank*        bank,
     return count;
 }
 
-// First occurrence of `needle` in [from,to), or nullptr.
+// First occurrence of `needle` in [from,to), or nullptr.  The match is
+// whitespace-flexible so the pins survive clang-format line wrapping: a
+// space in the needle matches any whitespace run, and a newline in the
+// needle matches only a newline, which keeps function-boundary pins exact.
+static bool pin_char_matches(char source_char, char needle_char)
+{
+    if (needle_char == '\n') {
+        return source_char == '\n';
+    }
+    if (needle_char == ' ' || needle_char == '\t' || needle_char == '\r' || needle_char == '\n') {
+        return source_char == ' ' || source_char == '\t' || source_char == '\r' || source_char == '\n';
+    }
+    return source_char == needle_char;
+}
+
+static bool pin_matches_at(const char* source, const char* end, const char* needle)
+{
+    const char* source_pos = source;
+    const char* needle_pos = needle;
+    while (*needle_pos) {
+        if (source_pos >= end || ! pin_char_matches(*source_pos, *needle_pos)) {
+            return false;
+        }
+        const bool needle_space = (*needle_pos != '\n');
+        const bool source_space =
+            (*source_pos == ' ' || *source_pos == '\t' || *source_pos == '\r' || *source_pos == '\n');
+        if (needle_space && source_space) {
+            while (source_pos < end &&
+                   (*source_pos == ' ' || *source_pos == '\t' || *source_pos == '\r' || *source_pos == '\n')) {
+                ++source_pos;
+            }
+            while (*needle_pos && *needle_pos != '\n' &&
+                   (*needle_pos == ' ' || *needle_pos == '\t' || *needle_pos == '\r')) {
+                ++needle_pos;
+            }
+            continue;
+        }
+        ++source_pos;
+        ++needle_pos;
+    }
+    return true;
+}
+
 static const char* find_in_range(const char* from, const char* to, const char* needle)
 {
-    const size_t n = strlen(needle);
-    for (const char* p = from; p + n <= to; p++) {
-        if (strncmp(p, needle, n) == 0) {
+    for (const char* p = from; p < to; p++) {
+        if (pin_matches_at(p, to, needle)) {
             return p;
         }
     }
@@ -1673,8 +1714,8 @@ static void check_named_fm_projection(const Synth::InstrumentEditorBank& bank, u
         wave.list_index = 0;
         graph.set_slot_value(node_index, wave_b_slot, wave);
         // With waveform b off, exactly the duty b / mix mode / waveform mix /
-        // fm depth / fm ratio rows are gated, across all 104 slots.
-        for (uint32_t row = 0; row < 16 + 11 * Synth::num_mod_targets; ++row) {
+        // fm depth / fm ratio rows are gated, across all 105 slots.
+        for (uint32_t row = 0; row < Sculptor::osc_slot_count + 11 * Synth::num_mod_targets; ++row) {
             const bool gated = row == Sculptor::osc_target_row(Synth::mod_duty1) || row == mode_slot ||
                                row == Sculptor::osc_target_row(Synth::mod_osc_mix) || row == fm_depth_slot ||
                                row == fm_ratio_slot;
@@ -6552,7 +6593,7 @@ static void osc_direct_modulator_regressions()
         if (mapping.osc_nodes[0] != Sculptor::pool_no_slot) {
             const Sculptor::Node& osc = graph.node(mapping.osc_nodes[0]);
             // 16 fixed slots plus eight 11-slot target blocks.
-            TEST(osc.slots.num_allocated == 16 + 11 * Synth::num_mod_targets);
+            TEST(osc.slots.num_allocated == Sculptor::osc_slot_count + 11 * Synth::num_mod_targets);
             for (uint32_t t = 0; t < Synth::num_mod_targets; t++) {
                 check_target_block_grammar(osc, t, instrument.layers[0].targets[t]);
             }
@@ -7482,7 +7523,7 @@ static void osc_direct_modulator_regressions()
                 continue;
             }
             const Sculptor::Node& osc = t7_graph.node(t7_mapping.osc_nodes[layer]);
-            TEST(osc.slots.num_allocated == 16 + 11 * Synth::num_mod_targets);
+            TEST(osc.slots.num_allocated == Sculptor::osc_slot_count + 11 * Synth::num_mod_targets);
             for (uint32_t t = 0; t < Synth::num_mod_targets; t++) {
                 check_target_block_grammar(osc, t, instrument.layers[layer].targets[t]);
             }
@@ -8590,9 +8631,16 @@ static void check_osc_pitch_gating()
 
         auto count_in_range = [](const char* begin, const char* end, const char* needle) {
             uint32_t count = 0;
-            for (const char* hit = begin ? strstr(begin, needle) : nullptr; hit && hit < end;
-                 hit             = strstr(hit + 1, needle)) {
+            if (! begin) {
+                return count;
+            }
+            for (const char* p = begin; p < end;) {
+                const char* hit = find_in_range(p, end, needle);
+                if (! hit) {
+                    break;
+                }
                 count++;
+                p = hit + 1;
             }
             return count;
         };
@@ -8730,11 +8778,12 @@ static void check_osc_pitch_gating()
                                "continue; // Effective spread <= 0: passthrough, no coefficient dispatch.") != nullptr);
         }
         TEST(find_in_range(src, src + got, "oscillators[osc_idx].spread > 0.0f) {") != nullptr);
-        TEST(find_in_range(
-                 src,
-                 src + got,
-                 "param.taps_offs            = (oscillator.spread > 0.0f) ? oscillator.fir_taps_offs / 4 : 0;") !=
-             nullptr);
+        TEST(
+            find_in_range(
+                src,
+                src + got,
+                "param.taps_offs            = (oscillator.spread > 0.0f && oscillator.fir_type != Synth::fir_off) ? oscillator.fir_taps_offs / 4 : 0;") !=
+            nullptr);
         TEST(strstr(src, "osc_lowpass_dest") == nullptr);
         TEST(strstr(src, "osc_highpass_dest") == nullptr);
         TEST(strstr(src, "mod_lowpass_cutoff") == nullptr);
@@ -8810,7 +8859,7 @@ static void check_osc_pitch_gating()
         const Sculptor::OscTargetView spread_view = Sculptor::osc_target_view(Synth::mod_fir_spread);
         TEST(spread_view.min_value == 0.0f && spread_view.max_value == 36.0f);
         TEST(spread_view.bank_scale == 1.0f && ! spread_view.logarithmic);
-        TEST(Sculptor::osc_target_row(Synth::mod_fir_spread) == 91);
+        TEST(Sculptor::osc_target_row(Synth::mod_fir_spread) == 92);
 
         // Round-trip: an octave edit applies through the value_changed path,
         // lands in the bank and reprojection shows it again.
@@ -8866,7 +8915,7 @@ static void check_osc_pitch_gating()
         graph.take_changes(discarded, Sculptor::max_pending_changes);
         uint32_t slope_slot = Sculptor::pool_no_slot;
         TEST(find_graph_slot(graph, mapping.osc_nodes[0], "FIR Slope", &slope_slot));
-        TEST(slope_slot == 103);
+        TEST(slope_slot == 104);
         const Sculptor::Slot& slope_row = graph.node(mapping.osc_nodes[0]).slots.entries[slope_slot];
         TEST(slope_row.property_type == Sculptor::PropertyType::integer);
         TEST(slope_row.int_bounded);
@@ -8895,6 +8944,86 @@ static void check_osc_pitch_gating()
         graph.set_slot_value(mapping.osc_nodes[0], slope_slot, slope_edit);
         TEST(! Sculptor::apply_osc_graph_change(&source, &graph, &mapping, slope_change));
         TEST(! Sculptor::compile_graph_to_instrument(graph, mapping, &compiled));
+    }
+
+    // A type switch from low-pass to band-pass caps the carried cutoff at
+    // the spread maximum, so the shared value never escapes the new range.
+    {
+        static Synth::InstrumentEditorBank source;
+        static Synth::Instrument           instrument = {};
+        static Sculptor::Graph             graph;
+        static Sculptor::OscGraphMapping   mapping;
+        static Sculptor::GraphChange       discarded[Sculptor::max_pending_changes];
+        build_zone_fixture(&source, &instrument);
+        source.bank.instruments.entries[0].layers[0].fir_type                                  = Synth::fir_lowpass;
+        source.bank.instruments.entries[0].layers[0].targets[Synth::mod_fir_spread].base_value = 440.0f;
+        TEST(Sculptor::project_editor_to_graph(source, &graph, &mapping));
+        graph.take_changes(discarded, Sculptor::max_pending_changes);
+        uint32_t type_slot = Sculptor::pool_no_slot;
+        TEST(find_graph_slot(graph, mapping.osc_nodes[0], "Filter Type", &type_slot));
+        Sculptor::PropertyValue type_edit = {};
+        type_edit.list_index =
+            1; // bandpass, at dropdown position 1 // bandpass // bandpass, after the leading "off" entry
+        graph.set_slot_value(mapping.osc_nodes[0], type_slot, type_edit);
+        Sculptor::GraphChange type_change = {};
+        type_change.kind                  = Sculptor::ChangeKind::value_changed;
+        type_change.node_idx              = mapping.osc_nodes[0];
+        type_change.slot_idx              = type_slot;
+        TEST(Sculptor::apply_osc_graph_change(&source, &graph, &mapping, type_change));
+        TEST(source.bank.instruments.entries[0].layers[0].targets[Synth::mod_fir_spread].base_value == 36.0f);
+        static Sculptor::Graph           regraph;
+        static Sculptor::OscGraphMapping remapping;
+        TEST(Sculptor::project_editor_to_graph(source, &regraph, &remapping));
+        const uint32_t spread_row = Sculptor::osc_target_row(Synth::mod_fir_spread);
+        TEST(regraph.node(remapping.osc_nodes[0]).slots.entries[spread_row].value.real == 36.0f);
+    }
+
+    // With the filter off, the cutoff row, its block and the slope gray out.
+    {
+        static Synth::InstrumentEditorBank source;
+        static Synth::Instrument           instrument = {};
+        static Sculptor::Graph             graph;
+        static Sculptor::OscGraphMapping   mapping;
+        build_zone_fixture(&source, &instrument);
+        source.bank.instruments.entries[0].layers[0].fir_type = Synth::fir_off;
+        TEST(Sculptor::project_editor_to_graph(source, &graph, &mapping));
+        const Sculptor::Node& node          = graph.node(mapping.osc_nodes[0]);
+        const uint32_t        spread        = Sculptor::osc_target_row(Synth::mod_fir_spread);
+        const uint32_t        fir_type_row  = spread - 1;  // the Filter Type list sits before the cutoff row
+        const uint32_t        fir_slope_row = spread + 12; // the cutoff row plus its 11-slot block
+        TEST(Sculptor::oscillator_slot_waveform_mode_disabled(node, spread));
+        TEST(Sculptor::oscillator_slot_waveform_mode_disabled(node, spread + 5));
+        TEST(Sculptor::oscillator_slot_waveform_mode_disabled(node, fir_slope_row));
+        TEST(! Sculptor::oscillator_slot_waveform_mode_disabled(node, fir_type_row));
+        TEST(! Sculptor::oscillator_slot_waveform_mode_disabled(node, Sculptor::osc_target_row(Synth::mod_volume)));
+        source.bank.instruments.entries[0].layers[0].fir_type = Synth::fir_bandpass;
+        static Sculptor::Graph           bandpass_graph;
+        static Sculptor::OscGraphMapping bandpass_mapping;
+        TEST(Sculptor::project_editor_to_graph(source, &bandpass_graph, &bandpass_mapping));
+        const Sculptor::Node& bandpass_node = bandpass_graph.node(bandpass_mapping.osc_nodes[0]);
+        TEST(! Sculptor::oscillator_slot_waveform_mode_disabled(bandpass_node,
+                                                                Sculptor::osc_target_row(Synth::mod_fir_spread)));
+        TEST(! Sculptor::oscillator_slot_waveform_mode_disabled(bandpass_node, fir_slope_row));
+    }
+
+    // The cutoff row label follows the selected filter type.
+    {
+        static Synth::InstrumentEditorBank source;
+        static Synth::Instrument           instrument = {};
+        static Sculptor::Graph             graph;
+        static Sculptor::OscGraphMapping   mapping;
+        build_zone_fixture(&source, &instrument);
+        const uint32_t           spread                            = Sculptor::osc_target_row(Synth::mod_fir_spread);
+        static const char* const expected[Synth::num_filter_types] = { "Filter Off",
+                                                                       "Band Spread",
+                                                                       "Cutoff (Hz)",
+                                                                       "Cutoff (Hz)" };
+        for (uint32_t type = 0; type < Synth::num_filter_types; type++) {
+            source.bank.instruments.entries[0].layers[0].fir_type = static_cast<Synth::FilterType>(type);
+            TEST(Sculptor::project_editor_to_graph(source, &graph, &mapping));
+            const Sculptor::Slot& row = graph.node(mapping.osc_nodes[0]).slots.entries[spread];
+            TEST(strncmp(row.name, expected[type], sizeof(row.name)) == 0);
+        }
     }
 
     // The FIR effect node: 33 slots (In/Out/Enabled + 3 params x 10), the
@@ -8965,15 +9094,20 @@ static void check_osc_pitch_gating()
 // against the old fixed-window spelling, and the narrow-span zero tail.
 static void check_fir_slope_helpers()
 {
-    // Law table: the odd span grows from 11 taps at 1 percent to the full
-    // 1025-tap kernel at 100.
+    // Law table: the odd span grows exponentially from 11 taps at 1 percent to the
+    // full 1025-tap kernel at 100 (11 * (1025 / 11) ^ ((slope - 1) / 99)).
     {
         static const struct {
             float    percent;
             uint32_t span;
         } law[] = {
-            { 1.0f, 11 },   { 10.0f, 103 },  { 25.0f, 257 },
-            { 50.0f, 513 }, { 99.0f, 1015 }, { 100.0f, Synth::num_fir_taps },
+            { 1.0f, 11 },
+            { 10.0f, 17 },
+            { 25.0f, 33 },
+            { 50.0f, 103 },
+            { 75.0f, 325 },
+            { 99.0f, 979 },
+            { 100.0f, Synth::num_fir_taps },
         };
 
         for (const auto& row : law) {
@@ -9032,10 +9166,9 @@ static void check_fir_slope_helpers()
         }
         TEST(memcmp(old_windows, new_windows, sizeof(old_windows)) == 0);
     }
-    // Narrow-span mirror at 103 taps: taps outside the span are exactly
-    // zero, in-span taps match an independent direct Blackman evaluation of
-    // a standalone 103-tap window, and the in-span window sum stays positive.
-    // The sum is only a window-sum sanity check; it says nothing about the
+    // Narrow-span mirror at 103 taps (the span of FIR Slope 50 under the exponential law): taps outside the span are
+    // exactly zero, in-span taps match an independent direct Blackman evaluation of a standalone 103-tap window, and
+    // the in-span window sum stays positive. The sum is only a window-sum sanity check; it says nothing about the
     // shader's normalization denominator.
     {
         constexpr uint32_t taps      = Synth::num_fir_taps;
@@ -9099,7 +9232,7 @@ static void check_fir_slope_helpers()
         }
         TEST(strstr(src, "Synth::fir_effective_span(instance.params[2])") != nullptr);
         TEST(strstr(src, "= layer.fir_slope_percent;") != nullptr);
-        TEST(strstr(src, "uint8_t fir_slope_percent;") != nullptr);
+        TEST(strstr(src, "fir_slope_percent; // FIR window slope") != nullptr);
         TEST(strstr(src, "FIR Slope") == nullptr);
     }
 }
@@ -9383,7 +9516,7 @@ static void check_fir_bandpass_gain()
     {
         float lowpass_edge  = 0.0f;
         float highpass_edge = 0.0f;
-        TEST(Synth::oscillator_fir_cutoffs(-36.0f, 12.0f, 1, &lowpass_edge, &highpass_edge));
+        TEST(Synth::oscillator_fir_cutoffs(-36.0f, 12.0f, 1, Synth::fir_bandpass, &lowpass_edge, &highpass_edge));
         TEST(highpass_edge == 0.0f);
         const uint32_t lowpass = fir_test_quantize_cutoff(lowpass_edge);
         TEST(lowpass > 0);
@@ -9407,7 +9540,12 @@ static void check_fir_bandpass_gain()
                 for (const uint32_t mult : mults) {
                     float lowpass_edge  = 0.0f;
                     float highpass_edge = 0.0f;
-                    if (! Synth::oscillator_fir_cutoffs(pitch, spread, mult, &lowpass_edge, &highpass_edge)) {
+                    if (! Synth::oscillator_fir_cutoffs(pitch,
+                                                        spread,
+                                                        mult,
+                                                        Synth::fir_bandpass,
+                                                        &lowpass_edge,
+                                                        &highpass_edge)) {
                         continue; // effective spread <= 0: passthrough, no dispatch
                     }
                     uint32_t lowpass  = fir_test_quantize_cutoff(lowpass_edge);
@@ -9534,27 +9672,38 @@ static void check_fir_spread_helpers()
 {
     float lowpass_hz  = 0.0f;
     float highpass_hz = 0.0f;
-    TEST(Synth::oscillator_fir_cutoffs(69.0f, 12.0f, 1, &lowpass_hz, &highpass_hz));
+    TEST(Synth::oscillator_fir_cutoffs(69.0f, 12.0f, 1, Synth::fir_bandpass, &lowpass_hz, &highpass_hz));
     TEST(approx(lowpass_hz, Synth::pitch_to_frequency(81.0f, 1), 0.001f));
     TEST(approx(highpass_hz, Synth::pitch_to_frequency(57.0f, 1), 0.001f));
     TEST(approx(lowpass_hz, 880.0f, 0.001f)); // absolute anchor
     TEST(approx(highpass_hz, 220.0f, 0.001f));
     // The frequency multiplier scales both edges.
-    TEST(Synth::oscillator_fir_cutoffs(69.0f, 12.0f, 3, &lowpass_hz, &highpass_hz));
+    TEST(Synth::oscillator_fir_cutoffs(69.0f, 12.0f, 3, Synth::fir_bandpass, &lowpass_hz, &highpass_hz));
     TEST(approx(lowpass_hz, 2640.0f, 0.001f));
     TEST(approx(highpass_hz, 660.0f, 0.001f));
     // Filter-off spellings: zero, negative and NaN spreads are passthrough.
-    TEST(! Synth::oscillator_fir_cutoffs(69.0f, 0.0f, 1, &lowpass_hz, &highpass_hz));
-    TEST(! Synth::oscillator_fir_cutoffs(69.0f, -0.5f, 1, &lowpass_hz, &highpass_hz));
-    TEST(! Synth::oscillator_fir_cutoffs(69.0f, NAN, 1, &lowpass_hz, &highpass_hz));
+    TEST(! Synth::oscillator_fir_cutoffs(69.0f, 0.0f, 1, Synth::fir_bandpass, &lowpass_hz, &highpass_hz));
+    TEST(! Synth::oscillator_fir_cutoffs(69.0f, -0.5f, 1, Synth::fir_bandpass, &lowpass_hz, &highpass_hz));
+    TEST(! Synth::oscillator_fir_cutoffs(69.0f, NAN, 1, Synth::fir_bandpass, &lowpass_hz, &highpass_hz));
     // The sub-1-Hz highpass edge transports as exactly 0 Hz (pure lowpass),
     // while a comfortably-above-floor edge stays a real band-pass edge.
-    TEST(Synth::oscillator_fir_cutoffs(-36.0f, 12.0f, 1, &lowpass_hz, &highpass_hz));
+    TEST(Synth::oscillator_fir_cutoffs(-36.0f, 12.0f, 1, Synth::fir_bandpass, &lowpass_hz, &highpass_hz));
     TEST(approx(lowpass_hz, Synth::pitch_to_frequency(-24.0f, 1), 0.001f));
     TEST(approx(lowpass_hz, 2.04f, 0.01f));
     TEST(highpass_hz == 0.0f); // floor-killed: converts to integer 0, not 1
-    TEST(Synth::oscillator_fir_cutoffs(69.0f, 12.0f, 1, &lowpass_hz, &highpass_hz));
+    TEST(Synth::oscillator_fir_cutoffs(69.0f, 12.0f, 1, Synth::fir_bandpass, &lowpass_hz, &highpass_hz));
     TEST(highpass_hz > Synth::oscillator_fir_highpass_floor_hz);
+    // Filter types: low-pass and high-pass take the value as a fixed Hz cutoff
+    // (no key tracking, no freq_mult), off never filters.
+    TEST(Synth::oscillator_fir_cutoffs(69.0f, 440.0f, 3, Synth::fir_lowpass, &lowpass_hz, &highpass_hz));
+    TEST(lowpass_hz == 440.0f && highpass_hz == 0.0f);
+    TEST(Synth::oscillator_fir_cutoffs(10.0f, 1000.0f, 1, Synth::fir_highpass, &lowpass_hz, &highpass_hz));
+    TEST(lowpass_hz == 0.0f && highpass_hz == 1000.0f);
+    TEST(! Synth::oscillator_fir_cutoffs(69.0f, 12.0f, 1, Synth::fir_off, &lowpass_hz, &highpass_hz));
+    TEST(! Synth::oscillator_fir_cutoffs(69.0f, 0.0f, 1, Synth::fir_lowpass, &lowpass_hz, &highpass_hz));
+    TEST(! Synth::oscillator_fir_cutoffs(69.0f, -1.0f, 1, Synth::fir_highpass, &lowpass_hz, &highpass_hz));
+    TEST(! Synth::oscillator_fir_cutoffs(69.0f, NAN, 1, Synth::fir_lowpass, &lowpass_hz, &highpass_hz));
+
     // The integer bandwidth guard keeps a positive spread audible.
     uint32_t lowpass  = 440;
     uint32_t highpass = 440;
@@ -9585,7 +9734,7 @@ static void check_fir_spread_helpers()
             for (const uint32_t mult : mults) {
                 float lo = 0.0f;
                 float hi = 0.0f;
-                if (Synth::oscillator_fir_cutoffs(pitch, spread, mult, &lo, &hi)) {
+                if (Synth::oscillator_fir_cutoffs(pitch, spread, mult, Synth::fir_bandpass, &lo, &hi)) {
                     TEST(lo == lo && hi == hi); // not NaN
                     TEST(hi <= lo);
                 }
@@ -20137,6 +20286,39 @@ int main()
                                                    &plain_lfo_count));
                 TEST(plain_instr.layers[0].fir_slope_percent == 100);
                 TEST(plain_instr.layers[0].pitch_offset == 2.0f);
+                // fir_type: absent = band-pass; the key may follow the target blocks, and a
+                // low-pass spread base is a Hz value up to 22050 while band-pass stays 0..36.
+                TEST(plain_instr.layers[0].fir_type == Synth::fir_bandpass);
+                const char* const lowpass_doc = "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\","
+                                                "\"fir_pitch_spread\":{\"base\":440.0},\"fir_type\":\"lowpass\"}]}";
+                TEST(Synth::decode_instrument_json(lowpass_doc,
+                                                   static_cast<uint32_t>(strlen(lowpass_doc)),
+                                                   &plain_instr,
+                                                   plain_envs,
+                                                   &plain_env_count,
+                                                   plain_lfos,
+                                                   &plain_lfo_count));
+                TEST(plain_instr.layers[0].fir_type == Synth::fir_lowpass);
+                TEST(plain_instr.layers[0].targets[Synth::mod_fir_spread].base_value == 440.0f);
+                const char* const bandpass_hz_doc =
+                    "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\","
+                    "\"fir_pitch_spread\":{\"base\":440.0}}]}";
+                TEST(! Synth::decode_instrument_json(bandpass_hz_doc,
+                                                     static_cast<uint32_t>(strlen(bandpass_hz_doc)),
+                                                     &plain_instr,
+                                                     plain_envs,
+                                                     &plain_env_count,
+                                                     plain_lfos,
+                                                     &plain_lfo_count));
+                const char* const bad_type_doc =
+                    "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\",\"fir_type\":\"notch\"}]}";
+                TEST(! Synth::decode_instrument_json(bad_type_doc,
+                                                     static_cast<uint32_t>(strlen(bad_type_doc)),
+                                                     &plain_instr,
+                                                     plain_envs,
+                                                     &plain_env_count,
+                                                     plain_lfos,
+                                                     &plain_lfo_count));
             }
             // Saved-bank dialect: encode and decode preserve the slope; the
             // default omits the key and decodes back to 100.

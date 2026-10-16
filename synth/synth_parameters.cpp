@@ -6,6 +6,7 @@
 #include "../core/rng.h"
 #include "../core/vecfloat.h"
 #include "../core/vmath.h"
+#include "synth_instrument.h"
 #include <assert.h>
 
 namespace Synth {
@@ -379,21 +380,37 @@ float Synth::pitch_to_frequency(const float absolute_pitch, const uint32_t freq_
     return note_to_frequency(69, absolute_pitch - 69.0f, freq_mult);
 }
 
-bool Synth::oscillator_fir_cutoffs(const float    effective_pitch,
-                                   const float    effective_spread,
-                                   const uint32_t freq_mult,
-                                   float*         lowpass_hz,
-                                   float*         highpass_hz)
+bool Synth::oscillator_fir_cutoffs(const float      effective_pitch,
+                                   const float      effective_spread,
+                                   const uint32_t   freq_mult,
+                                   const FilterType type,
+                                   float*           lowpass_hz,
+                                   float*           highpass_hz)
 {
     // A single NaN-safe test: NaN, 0 and negatives all read as filter-off.
-    if (! (effective_spread > 0.0f)) {
+    if (type == fir_off || ! (effective_spread > 0.0f)) {
         return false;
     }
+
+    if (type == fir_lowpass) {
+        *lowpass_hz  = effective_spread;
+        *highpass_hz = 0.0f;
+        return true;
+    }
+
+    if (type == fir_highpass) {
+        *lowpass_hz  = 0.0f; // Transport "edge off" so the shader runs pure highpass.
+        *highpass_hz = effective_spread;
+        return true;
+    }
+
     *lowpass_hz  = pitch_to_frequency(effective_pitch + effective_spread, freq_mult);
     *highpass_hz = pitch_to_frequency(effective_pitch - effective_spread, freq_mult);
+
     if (*highpass_hz < oscillator_fir_highpass_floor_hz) {
         *highpass_hz = 0.0f; // Transport "edge off" so the shader runs pure lowpass.
     }
+
     return true;
 }
 
@@ -413,11 +430,19 @@ void Synth::oscillator_fir_band_guard(uint32_t* lowpass_cutoff_freq, uint32_t* h
 uint32_t Synth::fir_effective_span(const float slope_percent)
 {
     // NaN-safe clamp: NaN fails both comparisons and reads as the minimum.
-    const float slope =
-        (slope_percent >= 1.0f && slope_percent <= 100.0f) ? slope_percent : (slope_percent > 100.0f ? 100.0f : 1.0f);
-    const float    half    = static_cast<float>(num_fir_taps - 1) * 0.5f * slope / 100.0f;
-    const uint32_t rounded = static_cast<uint32_t>(half + 0.5f); // round half up, mirroring cutoff_hz_to_int
-    return 2 * rounded + 1;
+    // The endpoints are forced, so the approximate exp2 cannot miss them.
+    if (! (slope_percent > 1.0f)) {
+        return 11;
+    }
+    if (slope_percent >= 100.0f) {
+        return num_fir_taps;
+    }
+
+    // log2(num_fir_taps / 11) is 6.541976...
+    const float    exponent = 6.541977f * (slope_percent - 1.0f) / 99.0f;
+    const float    span     = 11.0f * mstd::exp2(exponent);
+    const uint32_t odd      = 2 * static_cast<uint32_t>((span - 1.0f) * 0.5f + 0.5f) + 1; // round half up
+    return odd < num_fir_taps ? odd : num_fir_taps;
 }
 
 float Synth::eval_sourced_lfo(const ParamDescriptor::LFOParam& gen,

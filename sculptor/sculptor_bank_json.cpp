@@ -291,6 +291,10 @@ constexpr const char* wave_names[num_waves] = { "none", "sine", "sawtooth", "pul
 constexpr uint32_t    num_osc_modes                 = 3;
 constexpr const char* osc_mode_names[num_osc_modes] = { "blend", "fm", "sync" };
 
+constexpr uint32_t num_filter_types = Synth::num_filter_types;
+// Indexed by the stored FilterType value, so this order is fixed once banks ship.
+constexpr const char* filter_type_names[num_filter_types] = { "off", "bandpass", "lowpass", "highpass" };
+
 constexpr uint32_t    num_source_ops                  = 2;
 constexpr const char* source_op_names[num_source_ops] = { "add", "multiply" };
 
@@ -414,6 +418,20 @@ static void key_enum(Out& o, const char* name, const char* const* names, uint32_
     o.ch('"');
 }
 
+// Writes the oscillator filter type.  Unlike key_enum, the zero value ("off")
+// is spelled out: an absent key decodes as band-pass, the historic default of
+// documents written before the type existed.
+static void key_fir_type(Out& o, const Synth::Oscillator& osc)
+{
+    if (osc.fir_type == Synth::fir_bandpass) {
+        return;
+    }
+    o.key("fir_type");
+    o.ch('"');
+    o.str(filter_type_names[static_cast<uint32_t>(osc.fir_type)]);
+    o.ch('"');
+}
+
 static void key_bool(Out& o, const char* name, bool v)
 {
     o.key(name);
@@ -492,6 +510,7 @@ static void enc_oscillator(Out& o, const Synth::Oscillator& osc)
         o.key("fir_slope");
         o.uint_value(osc.fir_slope_percent);
     }
+    key_fir_type(o, osc);
 
     o.key("generators");
     o.ch('{');
@@ -1899,15 +1918,39 @@ static void decode_gen(Walker& w, uint32_t obj, Synth::TargetBinding& gen)
     });
 }
 
-static void decode_routing(Walker& w, uint32_t obj, Synth::ModTarget target, Synth::TargetBinding& routing)
+// The filter type decides the spread base bounds, but its key may follow the target
+// blocks in the object.  This pre-pass reads it first.  Absent means band-pass.
+// The main walk skips the key.
+static Synth::FilterType prescan_fir_type(Walker& w, uint32_t obj)
+{
+    uint32_t type = Synth::fir_bandpass;
+
+    walk_object(w, obj, [&](uint32_t key_idx, uint32_t val_idx) {
+        if (key_eq(w, key_idx, "fir_type")) {
+            want_enum(w, val_idx, filter_type_names, num_filter_types, &type);
+        }
+    });
+
+    return static_cast<Synth::FilterType>(type);
+}
+
+static void decode_routing(Walker&               w,
+                           uint32_t              obj,
+                           Synth::ModTarget      target,
+                           Synth::FilterType     fir_type,
+                           Synth::TargetBinding& routing)
 {
     walk_object(w, obj, [&](uint32_t key_idx, uint32_t val_idx) {
         if (key_eq(w, key_idx, "base_value")) {
-            // The spread base is slider-bounded [0, 36] semitones, validated
-            // before the binary32 narrowing; every other target keeps the
-            // generic free-level parsing.
+            // The spread base is slider-bounded (semitones or Hz by filter type),
+            // validated before the binary32 narrowing; every other target keeps
+            // the generic free-level parsing.
             if (target == Synth::mod_fir_spread)
-                want_bounded_real(w, val_idx, 0.0, 36.0, &routing.base_value);
+                want_bounded_real(w,
+                                  val_idx,
+                                  0.0,
+                                  static_cast<double>(Sculptor::osc_target_view(target, fir_type).max_value),
+                                  &routing.base_value);
             else
                 want_float(w, val_idx, &routing.base_value);
         }
@@ -1923,8 +1966,9 @@ static void decode_routing(Walker& w, uint32_t obj, Synth::ModTarget target, Syn
 
 static void decode_oscillator(Walker& w, uint32_t obj, Synth::Oscillator& osc)
 {
-    int32_t octave_offset = 0;
-    int32_t fir_slope     = 100;
+    int32_t                 octave_offset = 0;
+    int32_t                 fir_slope     = 100;
+    const Synth::FilterType fir_type      = prescan_fir_type(w, obj);
     walk_object(w, obj, [&](uint32_t key_idx, uint32_t val_idx) {
         uint32_t value = 0;
         if (key_eq(w, key_idx, "wave_a")) {
@@ -1947,6 +1991,9 @@ static void decode_oscillator(Walker& w, uint32_t obj, Synth::Oscillator& osc)
             want_int(w, val_idx, Sculptor::osc_octave_offset_min, Sculptor::osc_octave_offset_max, &octave_offset);
         else if (key_eq(w, key_idx, "fir_slope"))
             want_int(w, val_idx, 1, 100, &fir_slope);
+        else if (key_eq(w, key_idx, "fir_type")) {
+            // Read by prescan_fir_type before the routing blocks.
+        }
         else if (key_eq(w, key_idx, "generators"))
             walk_object(w, val_idx, [&](uint32_t gen_key, uint32_t gen_val) {
                 for (uint32_t t = 0; t < Synth::num_mod_targets; t++) {
@@ -1963,7 +2010,7 @@ static void decode_oscillator(Walker& w, uint32_t obj, Synth::Oscillator& osc)
             walk_object(w, val_idx, [&](uint32_t r_key, uint32_t r_val) {
                 for (uint32_t t = 0; t < Synth::num_mod_targets; t++) {
                     if (key_eq(w, r_key, mod_target_names[t])) {
-                        decode_routing(w, r_val, static_cast<Synth::ModTarget>(t), osc.targets[t]);
+                        decode_routing(w, r_val, static_cast<Synth::ModTarget>(t), fir_type, osc.targets[t]);
                         return;
                     }
                 }
@@ -1983,6 +2030,7 @@ static void decode_oscillator(Walker& w, uint32_t obj, Synth::Oscillator& osc)
         w.failed = true;
     }
     osc.fir_slope_percent = static_cast<uint8_t>(fir_slope);
+    osc.fir_type          = fir_type;
 
     // Pitch offsets are bounded in every domain: a bank holding an
     // out-of-range offset could never round-trip through the editor.
@@ -3023,9 +3071,13 @@ static void doc_unknown_field(Walker& w, uint32_t key_idx)
 // Point levels are the envelope's output values in the target's display units;
 // the descriptor stores them scaled to bank units (fm_index: radians).
 // Sustain defaults to the last point.
-static void decode_envelope_doc(Walker& w, uint32_t obj, Synth::ModTarget target, Synth::EnvelopeDescriptor& env)
+static void decode_envelope_doc(Walker&                    w,
+                                uint32_t                   obj,
+                                Synth::ModTarget           target,
+                                Synth::FilterType          fir_type,
+                                Synth::EnvelopeDescriptor& env)
 {
-    const Sculptor::OscTargetView view = Sculptor::osc_target_view(target);
+    const Sculptor::OscTargetView view = Sculptor::osc_target_view(target, fir_type);
 
     float    times[Synth::max_envelope_points]     = {};
     float    levels[Synth::max_envelope_points]    = {};
@@ -3168,22 +3220,22 @@ static void decode_mod_input_doc(Walker& w, uint32_t obj, Synth::ModInput& input
 static void decode_lfo_doc(Walker&               w,
                            uint32_t              obj,
                            Synth::ModTarget      target,
+                           Synth::FilterType     fir_type,
                            Synth::LFODescriptor& lfo,
                            Synth::TargetBinding& gen)
 {
-    const Sculptor::OscTargetView view = Sculptor::osc_target_view(target);
-
-    float    frequency_hz  = 0.0f;
-    bool     frequency_set = false;
-    bool     wave_set      = false;
-    float    duty          = 0.0f;
-    float    min_level     = view.min_value;
-    float    max_level     = view.max_value;
-    uint32_t op            = 0;
-    float    depth         = 0.0f;
-    uint32_t depth_source  = 0;
-    uint32_t rate_source   = 0;
-    float    rate_scale_ms = 0.0f;
+    const Sculptor::OscTargetView view          = Sculptor::osc_target_view(target, fir_type);
+    float                         frequency_hz  = 0.0f;
+    bool                          frequency_set = false;
+    bool                          wave_set      = false;
+    float                         duty          = 0.0f;
+    float                         min_level     = view.min_value;
+    float                         max_level     = view.max_value;
+    uint32_t                      op            = 0;
+    float                         depth         = 0.0f;
+    uint32_t                      depth_source  = 0;
+    uint32_t                      rate_source   = 0;
+    float                         rate_scale_ms = 0.0f;
 
     walk_object(w, obj, [&](uint32_t key_idx, uint32_t val_idx) {
         if (key_eq(w, key_idx, "wave")) {
@@ -3271,10 +3323,11 @@ static uint16_t find_matching_descriptor(const Descriptor* descriptors, uint32_t
 static void decode_target_doc(Walker&             w,
                               uint32_t            obj,
                               Synth::ModTarget    target,
+                              Synth::FilterType   fir_type,
                               Synth::Oscillator&  osc,
                               InstrumentDocState& doc)
 {
-    const Sculptor::OscTargetView view = Sculptor::osc_target_view(target);
+    const Sculptor::OscTargetView view = Sculptor::osc_target_view(target, fir_type);
 
     float base        = doc_base_default(target);
     bool  base_set    = false;
@@ -3282,11 +3335,11 @@ static void decode_target_doc(Walker&             w,
 
     walk_object(w, obj, [&](uint32_t key_idx, uint32_t val_idx) {
         if (key_eq(w, key_idx, "base")) {
-            // The spread base is slider-bounded [0, 36] semitones, validated
-            // before the binary32 narrowing; every other target keeps the
-            // generic free-level parsing.
+            // The spread base is slider-bounded (semitones or Hz by filter type),
+            // validated before the binary32 narrowing; every other target keeps
+            // the generic free-level parsing.
             if (target == Synth::mod_fir_spread)
-                want_bounded_real(w, val_idx, 0.0, 36.0, &base);
+                want_bounded_real(w, val_idx, 0.0, static_cast<double>(view.max_value), &base);
             else
                 want_float(w, val_idx, &base);
             base_set = true;
@@ -3298,7 +3351,7 @@ static void decode_target_doc(Walker&             w,
             }
             Synth::EnvelopeDescriptor& env = doc.envelopes[doc.envelope_count];
             env                            = Synth::EnvelopeDescriptor{};
-            decode_envelope_doc(w, val_idx, target, env);
+            decode_envelope_doc(w, val_idx, target, fir_type, env);
             if (! w.failed) {
                 const uint16_t match = find_matching_descriptor(doc.envelopes, doc.envelope_count, env);
                 osc.targets[target].envelope_desc_id =
@@ -3314,7 +3367,7 @@ static void decode_target_doc(Walker&             w,
             }
             Synth::LFODescriptor& lfo = doc.lfos[doc.lfo_count];
             lfo                       = Synth::LFODescriptor{};
-            decode_lfo_doc(w, val_idx, target, lfo, osc.targets[target]);
+            decode_lfo_doc(w, val_idx, target, fir_type, lfo, osc.targets[target]);
             if (! w.failed) {
                 const uint16_t match            = find_matching_descriptor(doc.lfos, doc.lfo_count, lfo);
                 osc.targets[target].lfo_desc_id = match != 0 ? match : static_cast<uint16_t>(doc.lfo_count + 1);
@@ -3353,14 +3406,15 @@ static void decode_layer_doc(Walker&                     w,
                              InstrumentDocState&         doc,
                              Synth::InstrumentJsonDomain domain)
 {
-    uint32_t wave_a        = 0;
-    bool     wave_a_set    = false;
-    uint32_t wave_b        = 0;
-    uint32_t mode          = 0;
-    float    mod_ratio     = 1.0f;
-    float    pitch_offset  = 0.0f;
-    int32_t  octave_offset = 0;
-    int32_t  fir_slope     = 100;
+    uint32_t                wave_a        = 0;
+    bool                    wave_a_set    = false;
+    uint32_t                wave_b        = 0;
+    uint32_t                mode          = 0;
+    float                   mod_ratio     = 1.0f;
+    float                   pitch_offset  = 0.0f;
+    int32_t                 octave_offset = 0;
+    int32_t                 fir_slope     = 100;
+    const Synth::FilterType fir_type      = prescan_fir_type(w, obj);
     walk_object(w, obj, [&](uint32_t key_idx, uint32_t val_idx) {
         if (key_eq(w, key_idx, "wave_a")) {
             want_enum(w, val_idx, wave_names, num_waves, &wave_a);
@@ -3378,12 +3432,15 @@ static void decode_layer_doc(Walker&                     w,
             want_int(w, val_idx, Sculptor::osc_octave_offset_min, Sculptor::osc_octave_offset_max, &octave_offset);
         else if (key_eq(w, key_idx, "fir_slope"))
             want_int(w, val_idx, 1, 100, &fir_slope);
+        else if (key_eq(w, key_idx, "fir_type")) {
+            // Read by prescan_fir_type before the target blocks.
+        }
         else {
             uint32_t target = 0;
             while (target < Synth::num_mod_targets && ! key_eq(w, key_idx, mod_target_names[target]))
                 target++;
             if (target < Synth::num_mod_targets)
-                decode_target_doc(w, val_idx, static_cast<Synth::ModTarget>(target), osc, doc);
+                decode_target_doc(w, val_idx, static_cast<Synth::ModTarget>(target), fir_type, osc, doc);
             else if (key_eq(w, key_idx, "lowpass_cutoff") || key_eq(w, key_idx, "highpass_cutoff")) {
                 // Removed cutoff targets: old clipboard/library documents
                 // load with their cutoff bindings dropped; their layout
@@ -3426,6 +3483,7 @@ static void decode_layer_doc(Walker&                     w,
         w.failed = true;
     }
     osc.fir_slope_percent = static_cast<uint8_t>(fir_slope);
+    osc.fir_type          = fir_type;
 }
 
 // One root object, nothing before or after it, grammar-clean everywhere.
@@ -4030,6 +4088,7 @@ static uint32_t encode_instrument_json_for_domain(char*                         
         o.float_value(static_cast<float>(osc.octave_offset));
         o.key("fir_slope");
         o.uint_value(osc.fir_slope_percent);
+        key_fir_type(o, osc);
 
         for (uint32_t target = 0; target < Synth::num_mod_targets; target++) {
             const Synth::ModTarget        mod_target = static_cast<Synth::ModTarget>(target);

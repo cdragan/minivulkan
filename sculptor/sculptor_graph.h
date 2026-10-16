@@ -91,9 +91,9 @@ extern const char* const source_op_names[2];
 // Option labels of the two-way LFO wave list (sine, sawtooth).
 extern const char* const lfo_wave_names[2];
 
-// Sized for the widest projected node - the oscillator: 16 fixed slots
+// Sized for the widest projected node - the oscillator: 17 fixed slots
 // plus one 11-slot modulation block per ModTarget after its row
-// (16 + 8*11 = 104).
+// (17 + 8*11 = 105).
 // The widest effect (a 5-param effect's 3 + 5*10 = 53 slots) is well
 // under it.  Slot carries list_options[8][32], so a larger cap would
 // balloon every Node allocation.

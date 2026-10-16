@@ -204,7 +204,7 @@
 		"mod_target": {
 			"type": "string",
 			"enum": ["volume", "pitch", "panning", "duty_a", "duty_b", "osc_mix", "fm_index", "fir_pitch_spread"],
-			"description": "Modulated quantities. Units: volume, panning (0.5 = center), duty_a/duty_b, osc_mix and fm_index (1.0 = full depth) are 0..1; pitch is -24..24 semitones; fir_pitch_spread is 0..36 semitones; 0 means the oscillator's filter is bypassed. Only 'volume' defaults to 1.0 and 'panning' to 0.5; every other base defaults to 0."
+			"description": "Modulated quantities. Units: volume, panning (0.5 = center), duty_a/duty_b, osc_mix and fm_index (1.0 = full depth) are 0..1; pitch is -24..24 semitones; fir_pitch_spread depends on the layer fir_type: bandpass = spread in semitones 0..36 around the note pitch; lowpass and highpass = fixed cutoff in Hz 0..22050 with no key tracking; 0 means the oscillator's filter is bypassed. Only 'volume' defaults to 1.0 and 'panning' to 0.5; every other base defaults to 0."
 		},
 		"mod_source": {
 			"type": "string",
@@ -252,7 +252,13 @@
 					"minimum": 1,
 					"maximum": 100,
 					"default": 100,
-					"description": "FIR window slope percent; 100 is the sharpest response (the full 1025-tap window), lower values widen the transition band."
+					"description": "FIR window slope percent; 100 is the sharpest response (the full 1025-tap window), lower values widen the transition band. The window span grows exponentially with the percent: 11 taps at 1, 1025 taps at 100."
+				},
+				"fir_type": {
+					"type": "string",
+					"enum": ["off", "bandpass", "lowpass", "highpass"],
+					"default": "bandpass",
+					"description": "Oscillator filter type. bandpass uses fir_pitch_spread as a spread in semitones (0..36) around the note pitch; lowpass and highpass use it as a fixed cutoff in Hz (0..22050); off disables the filter."
 				},
 				"volume": { "$ref": "#/definitions/target_block" },
 				"pitch": { "$ref": "#/definitions/target_block" },

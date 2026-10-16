@@ -78,8 +78,8 @@ static_assert(Synth::graph_canonical_input_node_count + 2 + Synth::max_layers +
 // LFO instance key up to two source edges into its depth/rate inputs.
 static_assert(Synth::max_layers + 6 * Synth::max_layers * Synth::num_mod_targets <= max_connections);
 
-// Oscillator node slot grammar: 16 fixed slots (oscillator properties,
-// the FIR slope property and target value rows, order pinned by
+// Oscillator node slot grammar: 17 fixed slots (oscillator properties,
+// the FIR slope and filter type properties and target value rows, order pinned by
 // osc_target_row_slot below),
 // and every ModTarget owns one 11-slot modulation block directly after
 // its value row.  Block field 0 is the envelope input dot (its own
@@ -88,7 +88,7 @@ static_assert(Synth::max_layers + 6 * Synth::max_layers * Synth::num_mod_targets
 // row (dot, op, amount each).  Row-group ids are per (target, row):
 // the LFO row groups 3*t + 1, the source rows 3*t + 2 and 3*t + 3; the
 // envelope dot and the fixed slots own their lines (group 0).
-constexpr uint32_t osc_slot_count          = 16;
+constexpr uint32_t osc_slot_count          = 17;
 constexpr uint32_t osc_target_block_stride = 11;
 
 // The value row of each ModTarget on an oscillator node.  The rows are
@@ -103,7 +103,7 @@ constexpr uint32_t osc_target_row_slot[Synth::num_mod_targets] = {
     15, // duty b
     28, // waveform mix
     40, // fm depth
-    91, // fir pitch spread
+    92, // fir pitch spread
 };
 
 // First slot of target `target`'s modulation block on an oscillator
@@ -440,7 +440,12 @@ constexpr int osc_octave_offset_max = 12;
 
 // The shared presentation view of a modulation target; the single
 // source of truth for value bounds, unit scaling and slider curve.
-OscTargetView osc_target_view(Synth::ModTarget target);
+// The FIR spread target changes with the layer's filter type: semitones for band-pass (and off),
+// a fixed cutoff in Hz for low-pass and high-pass.  Other targets ignore the type.
+OscTargetView osc_target_view(Synth::ModTarget target, Synth::FilterType fir_type = Synth::fir_bandpass);
+// True when a value change needs a wholesale reprojection.  The filter type changes the spread
+// row's label and range.
+bool osc_change_restructures(const OscGraphMapping& mapping, const GraphChange& change);
 // Slot index on an oscillator node holding row of ModTarget
 // `target` (0..7); rows are not contiguous.
 uint32_t osc_target_row(uint32_t target);

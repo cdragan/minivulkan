@@ -159,22 +159,30 @@ bool oscillator_pitch_in_gate(float final_pitch);
 // the subtraction keeps fractional pitches exact (no integer rounding).
 float pitch_to_frequency(float absolute_pitch, uint32_t freq_mult);
 
-// Effective FIR band-pass cutoffs for one oscillator: the lowpass edge sits
-// `effective_spread` semitones above the absolute equivalent MIDI pitch, the
-// highpass edge the same distance below, both converted to Hz at the
-// oscillator's frequency multiplier.  Returns false when the filter is off:
-// non-positive or NaN effective_spread disables filtering and the caller
-// must skip coefficient dispatch for the oscillator; generator levels stay
-// free finite values, so negatives are normal.
-// A highpass edge below oscillator_fir_highpass_floor_hz is transported as
-// exactly 0 Hz, because the coefficient shader reaches its pure-lowpass form
-// only at highpass_cutoff_freq == 0 while cutoff_hz_to_int maps any positive
-// sub-1-Hz value to the 1 Hz floor (a band-pass edge, not a disabled one).
-bool oscillator_fir_cutoffs(float    effective_pitch,
-                            float    effective_spread,
-                            uint32_t freq_mult,
-                            float*   lowpass_hz,
-                            float*   highpass_hz);
+enum FilterType : uint8_t; // Defined in synth_instrument.h.
+
+// Effective FIR cutoffs for one oscillator, by filter type.
+// Band-pass: the lowpass edge sits `effective_spread` semitones above the
+// absolute equivalent MIDI pitch, the highpass edge the same distance below,
+// both converted to Hz at the oscillator's frequency multiplier.
+// Low-pass and high-pass: `effective_spread` is a fixed cutoff in Hz.  It is
+// not scaled by freq_mult and does not follow the pitch.  The unused edge is
+// exactly 0 Hz, which the coefficient shader reads as "edge off".
+// Returns false when the filter is off: fir_off, or a non-positive or NaN
+// effective_spread.  The caller must then skip coefficient dispatch for the
+// oscillator.  Generator levels stay free finite values, so negatives are
+// normal.
+// A band-pass highpass edge below oscillator_fir_highpass_floor_hz is
+// transported as exactly 0 Hz, because the coefficient shader reaches its
+// pure-lowpass form only at highpass_cutoff_freq == 0 while cutoff_hz_to_int
+// maps any positive sub-1-Hz value to the 1 Hz floor (a band-pass edge, not a
+// disabled one).
+bool oscillator_fir_cutoffs(float      effective_pitch,
+                            float      effective_spread,
+                            uint32_t   freq_mult,
+                            FilterType type,
+                            float*     lowpass_hz,
+                            float*     highpass_hz);
 
 // Highpass edges under this Hz are heard as no highpass at all; at or above
 // it the edge stays a (quantized) band-pass edge.
@@ -189,13 +197,14 @@ constexpr float oscillator_fir_highpass_floor_hz = 1.0f;
 // max_cutoff_hz).  A zero highpass (pure lowpass) is left untouched.
 void oscillator_fir_band_guard(uint32_t* lowpass_cutoff_freq, uint32_t* highpass_cutoff_freq);
 
-// Effective FIR window span in taps for a FIR Slope percent.  The input clamps
-// to [1, 100] (NaN reads as the minimum); the result is the odd tap count
-// 2 * round_half_up((num_taps - 1) / 2 * slope / 100) + 1, so slope 100 maps to
-// the full num_fir_taps span (the window itself is byte-identical to the fixed
+// Effective FIR window span in taps for a FIR Slope percent.  The percent
+// clamps to [1, 100] (NaN reads as the minimum).  The span grows
+// exponentially: 11 * (num_fir_taps / 11) ^ ((slope - 1) / 99), rounded to an
+// odd tap count.  Slope 1 gives exactly 11 taps (the sane minimum; a
+// degenerate one-tap span is unreachable) and slope 100 gives exactly the
+// full num_fir_taps span (the window itself is byte-identical to the fixed
 // window; band-pass coefficients are instead normalized to unity gain at the
-// band center) and slope 1 maps to 11 taps - the sane minimum; a degenerate
-// one-tap span is unreachable.  Monotonically non-decreasing in the slope.
+// band center).  Monotonically non-decreasing in the slope.
 uint32_t fir_effective_span(float slope_percent);
 
 // Converts a MIDI pitch-bend value to pitch offset in semitones

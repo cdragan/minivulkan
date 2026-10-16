@@ -14,6 +14,7 @@ const uint sine_wave     = 1;
 const uint sawtooth_wave = 2;
 const uint pulse_wave    = 3;
 const uint noise_wave    = 4;
+const uint noise_salt    = 0x5bd1e995u; // Decorrelates the second oscillator's noise
 
 const float two_pi = 6.283185307179586;
 
@@ -37,6 +38,7 @@ struct OscillatorParams {
     // Optional filter parameters
     uint  fir_memory_offs;  // Offset of FIR filter's memory
     uint  taps_offs;        // Offset of FIR filter's taps
+    uint  noise_counter;    // Sample index into the noise stream, independent of pitch
 };
 
 layout(binding = 0) buffer data_buf { float data[]; };
@@ -52,7 +54,7 @@ uint pcg_hash(uint state)
     return (word >> 22u) ^ word;
 }
 
-float oscillator(uint osc_type, float phase, float duty)
+float oscillator(uint osc_type, float phase, float duty, uint noise_index)
 {
     if (osc_type == sine_wave) {
         return sin(two_pi * phase);
@@ -82,7 +84,7 @@ float oscillator(uint osc_type, float phase, float duty)
         return (phase < duty) ? 1.0 : -1.0;
     }
     else { // noise_wave
-        const uint uvalue = pcg_hash(uint(floor(phase * 3)));
+        const uint uvalue = pcg_hash(noise_index);
         return (float(uvalue & 0xFFFFu) / 32767.5) - 1.0;
     }
 }
@@ -91,10 +93,12 @@ void main()
 {
     const OscillatorParams param = params[gl_WorkGroupID.x];
 
-    // Apply first oscillator
     const float phase = param.phase + param.phase_step * gl_LocalInvocationID.x;
 
-    const uint  type1 = param.osc_type[0];
+    // Noise advances per sample, not per phase, so its spectrum does not depend on pitch.
+    const uint noise_index = param.noise_counter + gl_LocalInvocationID.x;
+
+    const uint type1 = param.osc_type[0];
     const float duty1 = param.duty[0];
     const uint  type2 = param.osc_type[1];
     const float duty2 = param.duty[1];
@@ -102,29 +106,29 @@ void main()
     float value;
 
     if (type2 == no_wave) {
-        value = oscillator(type1, phase, duty1);
+        value = oscillator(type1, phase, duty1, noise_index);
     }
     else if (param.osc_mode == osc_mode_fm) {
         // Frequency modulation: type1 is the carrier, type2 the modulator.
         // The modulator runs at its own frequency with its own phase.
         const float mod_phase = param.mod_phase + param.mod_phase_step * gl_LocalInvocationID.x;
-        const float modulator = oscillator(type2, mod_phase, duty2);
+        const float modulator = oscillator(type2, mod_phase, duty2, noise_index ^ noise_salt);
 
-        value = oscillator(type1, phase + param.fm_index * modulator, duty1);
+        value = oscillator(type1, phase + param.fm_index * modulator, duty1, noise_index);
     }
     else if (param.osc_mode == osc_mode_hard_sync) {
         // Hard sync: type1 is the master providing the note frequency, type2 is
         // the slave whose phase resets each time the master phase wraps.  The
         // slave is stateless, derived from the master phase.  mod_ratio is
         // reused here as the sync ratio (slave cycles per master cycle).
-        value = oscillator(type2, fract(param.mod_ratio * fract(phase)), duty2);
+        value = oscillator(type2, fract(param.mod_ratio * fract(phase)), duty2, noise_index ^ noise_salt);
     }
     else {
         // Blend mode: mix the two oscillators by osc_mix.
-        value = oscillator(type1, phase, duty1);
+        value = oscillator(type1, phase, duty1, noise_index);
 
         if (type2 != no_wave) {
-            value = mix(value, oscillator(type2, phase, duty2), param.osc_mix);
+            value = mix(value, oscillator(type2, phase, duty2, noise_index ^ noise_salt), param.osc_mix);
         }
     }
 
