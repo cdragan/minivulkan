@@ -1880,7 +1880,7 @@ static void update_modulation()
 // Rounds a cutoff in Hz to the int the coeff shader wants; <=0 disables the edge, else clamped to [1, Nyquist-1].
 static uint32_t cutoff_hz_to_int(float value)
 {
-    if (value <= 0.0f) {
+    if (! (value > 0.0f)) {
         return 0;
     }
 

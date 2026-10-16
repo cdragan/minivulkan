@@ -25,7 +25,7 @@ int mstd::strcmp(const char* s1, const char* s2)
     uint8_t c1;
 
     do {
-        c1 = static_cast<uint8_t>(*(s1++));
+        c1               = static_cast<uint8_t>(*(s1++));
         const uint8_t c2 = static_cast<uint8_t>(*(s2++));
 
         const int diff = static_cast<int>(c1) - static_cast<int>(c2);
@@ -40,6 +40,13 @@ int mstd::strcmp(const char* s1, const char* s2)
 
 float mstd::exp2(float x)
 {
+    if (! (x > -126.0f)) {
+        return 0.0f;
+    }
+    if (x > 127.0f) {
+        x = 127.0f;
+    }
+
     // modff()
     const float integral = truncf(x);
     const float frac     = x - integral;
@@ -60,7 +67,7 @@ float mstd::exp2(float x)
     const int int_integral = static_cast<int>(integral);
 
     convert.f = poly;
-    convert.i += int_integral << 23;
+    convert.i = static_cast<int>(static_cast<uint32_t>(convert.i) + (static_cast<uint32_t>(int_integral) << 23));
 
     return convert.f;
 }
