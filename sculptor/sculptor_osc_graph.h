@@ -60,7 +60,7 @@ constexpr uint32_t max_detached_nodes = Synth::max_detached_per_zone;
 constexpr uint32_t max_osc_instances = max_nodes - (Synth::graph_canonical_input_node_count + 1);
 static_assert(2 * Synth::max_layers * Synth::num_mod_targets <= max_osc_instances);
 
-// The nine per-target modulation blocks live on the oscillator node
+// The eleven per-target modulation blocks live on the oscillator node
 // itself: each ModTarget's 12-slot block sits directly after its value
 // row slot, so the block's modulator rows render under the row they
 // attach to (the fx pattern).  See the block helpers below for the
@@ -78,7 +78,7 @@ static_assert(Synth::graph_canonical_input_node_count + 2 + Synth::max_layers +
 // LFO instance key up to two source edges into its depth/rate inputs.
 static_assert(Synth::max_layers + 6 * Synth::max_layers * Synth::num_mod_targets <= max_connections);
 
-// Oscillator node slot grammar: 17 fixed slots (oscillator properties,
+// Oscillator node slot grammar: 19 fixed slots (oscillator properties,
 // the FIR slope and filter type properties and target value rows, order pinned by
 // osc_target_row_slot below),
 // and every ModTarget owns one 12-slot modulation block directly after
@@ -87,7 +87,7 @@ static_assert(Synth::max_layers + 6 * Synth::max_layers * Synth::num_mod_targets
 // fields 6..8 the Source A row and fields 9..11 the Source B row (dot, op, amount each).  Row-group ids are per
 // (target, row): the LFO row groups 3*t + 1, the source rows 3*t + 2 and 3*t + 3, the envelope row 3*t + 4; the fixed
 // slots own their lines (group 0).
-constexpr uint32_t osc_slot_count          = 17;
+constexpr uint32_t osc_slot_count          = 19;
 constexpr uint32_t osc_target_block_stride = 12;
 
 // The value row of each ModTarget on an oscillator node.  The rows are
@@ -95,15 +95,17 @@ constexpr uint32_t osc_target_block_stride = 12;
 // properties, and the rows after an earlier target's block shift down
 // by that block.  Indexed by ModTarget.
 constexpr uint32_t osc_target_row_slot[Synth::num_mod_targets] = {
-    69,  // volume
-    95,  // pitch
-    82,  // pan
+    95,  // volume
+    121, // pitch
+    108, // pan
     2,   // duty a
-    16,  // duty b
-    30,  // waveform mix
-    43,  // fm depth
-    111, // fir pitch spread
-    56,  // fm ratio
+    29,  // duty b
+    56,  // waveform mix
+    69,  // fm depth
+    137, // fir pitch spread
+    82,  // fm ratio
+    15,  // pad tone a
+    42,  // pad tone b
 };
 
 // First slot of target `target`'s modulation block on an oscillator
@@ -141,13 +143,15 @@ constexpr uint32_t osc_target_src_dot(uint32_t target, uint32_t input)
     return osc_target_block_base(target) + 6u + 3u * input;
 }
 
-// Last block end fits the slot pool; the nine row slots are spaced far
+// Last block end fits the slot pool; the eleven row slots are spaced far
 // enough apart that no block reaches the next row (smallest base-row
-// gap 13, between fm ratio row 56 and volume row 69; the tightest
-// margin is fm ratio's block end one slot before the volume row).  The
+// gap 13, between duty a row 2 and pad tone a row 15; every block
+// ends one slot before the next row).  The
 // pinned target is the highest row, not the last enum member, so later
 // appends cannot make the check vacuous.
 static_assert(osc_target_row_slot[Synth::mod_fir_spread] + osc_target_block_stride <= max_node_slots);
+static_assert(osc_target_row_slot[Synth::mod_pad_tilt1] + osc_target_block_stride <
+              osc_target_row_slot[Synth::mod_osc_mix]);
 static_assert(osc_target_row_slot[Synth::mod_fm_ratio] + osc_target_block_stride <
               osc_target_row_slot[Synth::mod_volume]);
 
@@ -461,7 +465,7 @@ OscTargetView osc_target_view(Synth::ModTarget target, Synth::FilterType fir_typ
 // row's label and range.
 bool osc_change_restructures(const OscGraphMapping& mapping, const GraphChange& change);
 // Slot index on an oscillator node holding row of ModTarget
-// `target` (0..8); rows are not contiguous.
+// `target` (0..10); rows are not contiguous.
 uint32_t osc_target_row(uint32_t target);
 
 // Decodes an oscillator-node block slot into its (target, field):

@@ -23,6 +23,8 @@ enum ModTarget : uint8_t {
     mod_fm_index,
     mod_fir_spread,
     mod_fm_ratio,
+    mod_pad_tilt0,
+    mod_pad_tilt1,
     num_mod_targets
 };
 

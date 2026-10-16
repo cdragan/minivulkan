@@ -9,12 +9,20 @@ layout(constant_id = 0) const uint work_group_size = 1;
 
 layout(constant_id = 2) const uint num_taps = 1025;
 
+layout(constant_id = 6) const uint sampling_rate = 1;
+
 const uint no_wave       = 0;
 const uint sine_wave     = 1;
 const uint sawtooth_wave = 2;
 const uint pulse_wave    = 3;
 const uint noise_wave    = 4;
+const uint pad_wave      = 5;
 const uint noise_salt    = 0x5bd1e995u; // Decorrelates the second oscillator's noise
+
+// Pad wave time base wraps every 2^20 samples; drift rates are quantized to
+// whole cycles per wrap period so the pad stays phase-continuous across the mask.
+const uint pad_time_wrap = 1u << 20;
+const float inv_pad_time_wrap = 1.0f / 1048576.0f;
 
 const float two_pi = 6.283185307179586;
 
@@ -27,10 +35,9 @@ struct OscillatorParams {
     uint  out_sound_offs;   // Offset of output sound data
     float phase;            // Initial phase value at first sample to render, 1 is equivalent to wave length
     float phase_step;       // Phase step between samples, derived from oscillator's and sampling frequencies
-    uint  osc_type[2];      // Two oscillator types
+    uint  osc_pack;         // Bits 0-7: osc_type[0], 8-15: osc_type[1], 16-23: osc_mode, 24-31 spare (zero)
     float duty[2];          // Duty cycle for sawtooth and pulse oscillator [0..1]
     float osc_mix;          // Mixing between osc_type[0] and osc_type[1] [0..1]
-    uint  osc_mode;         // osc_mode_blend, osc_mode_fm, osc_mode_hard_sync or osc_mode_ring_mod
     float mod_ratio;        // FM: modulator frequency / carrier frequency.  Hard sync: slave cycles per master cycle.  Ring mod: carrier cycles per master cycle
     float fm_index;         // FM modulation depth
     float mod_phase;        // Modulator's initial phase value at first sample to render
@@ -40,6 +47,8 @@ struct OscillatorParams {
     uint  fir_memory_offs;  // Offset of FIR filter's memory
     uint  taps_offs;        // Offset of FIR filter's taps
     uint  noise_counter;    // Sample index into the noise stream, independent of pitch
+    uint  note_seed;        // Per-note constant: the note-on noise counter, never advanced
+    float pad_tilt[2];      // Pad spectral tilt: harmonic exponent is 1 + clamp(tilt, -1, 1)
 };
 
 layout(binding = 0) buffer data_buf { float data[]; };
@@ -55,7 +64,61 @@ uint pcg_hash(uint state)
     return (word >> 22u) ^ word;
 }
 
-float oscillator(uint osc_type, float phase, float duty, uint noise_index)
+// PAD-style additive tone: sums the band-limited harmonic series of the base
+// frequency.  Each harmonic holds a fixed random phase and drifts slowly and
+// independently in phase, which approximates the smeared, decorrelated
+// spectrum of a PADsynth wavetable without storing one.  duty scales the
+// wander depth; pad_tilt sets the spectral exponent (1 + clamp(tilt, -1, 1)).
+float pad_oscillator(float phase, float duty, float tilt, uint seed, float pad_time, float phase_step)
+{
+    // Silent when the fundamental is at or above Nyquist; otherwise at least one
+    // harmonic sounds, and a harmonic sitting exactly on Nyquist is excluded.
+    if (phase_step >= 0.5) {
+        return 0.0;
+    }
+    const float harmonic_limit = 0.5 / max(phase_step, 1e-9) - 1e-6;
+    const uint  num_harmonics  = uint(min(24.0, floor(harmonic_limit)));
+
+    // Duty sets the wander depth (about 2 percent at duty 1).  The spectral tilt
+    // is separate: exponent 1 + clamp(tilt, -1, 1), so 0 keeps the saw-like 1/n
+    // spectrum, +1 gives 1/n^2 (mellow) and -1 gives a flat spectrum.
+    const float duty_depth = clamp(duty, 0.0, 1.0);
+    const float wander_ratio = duty_depth * 0.02;
+    const float base_freq = phase_step * float(sampling_rate);
+    const float exponent = 1.0 + clamp(tilt, -1.0, 1.0);
+
+    float value = 0.0;
+    float norm = 0.0;
+
+    for (uint n = 1u; n <= num_harmonics; n++) {
+        const float nfloat = float(n);
+        const float rand_a = float(pcg_hash(seed ^ (n * 0x85ebca6bu))) / 4294967296.0;
+        const float rand_b = float(pcg_hash(seed ^ (n * 0x9e3779b9u))) / 4294967296.0;
+        const float rand_c = float(pcg_hash(seed ^ (n * 0xc2b2ae35u))) / 4294967296.0;
+
+        // Fixed random phase decorrelates the harmonic from note onset.
+        const float phase_offs = two_pi * rand_a;
+
+        // Drift rate quantized to 3..10 cycles per wrap period, which is
+        // k * sampling_rate / 1048576 Hz.  Whole cycles per wrap keep the wave
+        // phase-continuous when the masked time base wraps.
+        const float k = 3.0 + float(uint(8.0 * rand_b));
+
+        // The amplitude divides by the drift rate, so the pitch deviation stays
+        // at wander_ratio of the harmonic's frequency regardless of the drawn rate.
+        const float wander_amp = wander_ratio * nfloat * base_freq * float(pad_time_wrap) /
+            (two_pi * k * float(sampling_rate));
+        const float wander = wander_amp * sin(two_pi * (k * pad_time + rand_c));
+
+        const float amp = 1.0 / pow(nfloat, exponent);
+        value += amp * sin(two_pi * (nfloat * phase + wander) + phase_offs);
+        norm  += amp;
+    }
+
+    return value / max(norm, 1e-9);
+}
+
+float oscillator(uint osc_type, float phase, float duty, float tilt, uint noise_index, uint note_seed, float pad_time, float phase_step)
 {
     if (osc_type == sine_wave) {
         return sin(two_pi * phase);
@@ -84,6 +147,9 @@ float oscillator(uint osc_type, float phase, float duty, uint noise_index)
 
         return (phase < duty) ? 1.0 : -1.0;
     }
+    else if (osc_type == pad_wave) {
+        return pad_oscillator(phase, duty, tilt, note_seed, pad_time, phase_step);
+    }
     else { // noise_wave
         const uint uvalue = pcg_hash(noise_index);
         return (float(uvalue & 0xFFFFu) / 32767.5) - 1.0;
@@ -99,46 +165,58 @@ void main()
     // Noise advances per sample, not per phase, so its spectrum does not depend on pitch.
     const uint noise_index = param.noise_counter + gl_LocalInvocationID.x;
 
-    const uint type1 = param.osc_type[0];
+    // Pad wave time base: the unsalted noise counter masked to the wrap period.
+    const float pad_time = float(noise_index & (pad_time_wrap - 1u)) * inv_pad_time_wrap;
+
+    // Per-note seeds: the pad's random draws hash from the note seed, and the
+    // noise key is the note seed run through pcg_hash so it is decorrelated
+    // from the time base; oscillator B is salted to stay decorrelated from A.
+    const uint note_seed = param.note_seed;
+    const uint noise_key = pcg_hash(note_seed);
+
+    const uint type1 = param.osc_pack & 0xFFu;
     const float duty1 = param.duty[0];
-    const uint  type2 = param.osc_type[1];
+    const uint  type2 = (param.osc_pack >> 8) & 0xFFu;
     const float duty2 = param.duty[1];
+    const float tilt1 = param.pad_tilt[0];
+    const float tilt2 = param.pad_tilt[1];
+    const uint  osc_mode = (param.osc_pack >> 16) & 0xFFu;
 
     float value;
 
     if (type2 == no_wave) {
-        value = oscillator(type1, phase, duty1, noise_index);
+        value = oscillator(type1, phase, duty1, tilt1, noise_index ^ noise_key, note_seed, pad_time, param.phase_step);
     }
-    else if (param.osc_mode == osc_mode_fm) {
+    else if (osc_mode == osc_mode_fm) {
         // Frequency modulation: type1 is the carrier, type2 the modulator.
         // The modulator runs at its own frequency with its own phase.
         const float mod_phase = param.mod_phase + param.mod_phase_step * gl_LocalInvocationID.x;
-        const float modulator = oscillator(type2, mod_phase, duty2, noise_index ^ noise_salt);
+        const float modulator = oscillator(type2, mod_phase, duty2, tilt2, noise_index ^ noise_key ^ noise_salt, note_seed ^ noise_salt, pad_time, param.mod_phase_step);
 
-        value = oscillator(type1, phase + param.fm_index * modulator, duty1, noise_index);
+        value = oscillator(type1, phase + param.fm_index * modulator, duty1, tilt1, noise_index ^ noise_key, note_seed, pad_time, param.phase_step);
     }
-    else if (param.osc_mode == osc_mode_hard_sync) {
+    else if (osc_mode == osc_mode_hard_sync) {
         // Hard sync: type1 is the master providing the note frequency, type2 is
         // the slave whose phase resets each time the master phase wraps.  The
         // slave is stateless, derived from the master phase.  mod_ratio is
         // reused here as the sync ratio (slave cycles per master cycle).
-        value = oscillator(type2, fract(param.mod_ratio * fract(phase)), duty2, noise_index ^ noise_salt);
+        value = oscillator(type2, fract(param.mod_ratio * fract(phase)), duty2, tilt2, noise_index ^ noise_key ^ noise_salt, note_seed ^ noise_salt, pad_time, param.mod_ratio * param.phase_step);
     }
-    else if (param.osc_mode == osc_mode_ring_mod) {
+    else if (osc_mode == osc_mode_ring_mod) {
         // Ring mod: type1 is the note-tied master, type2 is the carrier evaluated
         // at mod_ratio times the master phase.  Stateless, like hard sync.
         // osc_mix crossfades the dry master to the product.
-        const float carrier = oscillator(type2, fract(param.mod_ratio * fract(phase)), duty2, noise_index ^ noise_salt);
+        const float carrier = oscillator(type2, fract(param.mod_ratio * fract(phase)), duty2, tilt2, noise_index ^ noise_salt, note_seed ^ noise_salt, pad_time, param.mod_ratio * param.phase_step);
 
-        value = oscillator(type1, phase, duty1, noise_index);
+        value = oscillator(type1, phase, duty1, tilt1, noise_index ^ noise_key, note_seed, pad_time, param.phase_step);
         value = mix(value, value * carrier, param.osc_mix);
     }
     else {
         // Blend mode: mix the two oscillators by osc_mix.
-        value = oscillator(type1, phase, duty1, noise_index);
+        value = oscillator(type1, phase, duty1, tilt1, noise_index ^ noise_key, note_seed, pad_time, param.phase_step);
 
         if (type2 != no_wave) {
-            value = mix(value, oscillator(type2, phase, duty2, noise_index ^ noise_salt), param.osc_mix);
+            value = mix(value, oscillator(type2, phase, duty2, tilt2, noise_index ^ noise_key ^ noise_salt, note_seed ^ noise_salt, pad_time, param.phase_step), param.osc_mix);
         }
     }
 

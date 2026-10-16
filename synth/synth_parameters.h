@@ -31,7 +31,9 @@ enum class WaveType : uint8_t {
     // +---          +--+              -------+
     pulse_wave,
     // White noise
-    noise_wave
+    noise_wave,
+    // Pad, live additive harmonic sum with slow per-harmonic wander
+    pad_wave
 };
 
 struct LFODescriptor {

@@ -32,7 +32,7 @@
 		},
 		"graph_layout": {
 			"type": "array",
-			"maxItems": 135,
+			"maxItems": 163,
 			"uniqueItems": true,
 			"description": "Optional portable positions and sizes of nodes derived from this instrument; no effects, wiring or missing-sum state.  Canonical 0 is input, 1 is sum, 2+n is oscillator layer n, which must exist.  Generator locators use layer and fixed numeric ModTarget; descriptor aliases resolve after the whole document parses and may have only one saved record.  Unresolved or duplicate resolved nodes are refused.  All numbers must be finite; sizes are nonnegative.  Newly encoded documents always include this array.",
 			"items": {
@@ -198,13 +198,13 @@
 	"definitions": {
 		"wave": {
 			"type": "string",
-			"enum": ["none", "sine", "sawtooth", "pulse", "noise"],
-			"description": "Waveform names. A sawtooth at duty 0.5 is a triangle; a pulse at duty 0.5 is a square; set the target block 'duty_a' or 'duty_b' to place the duty."
+			"enum": ["none", "sine", "sawtooth", "pulse", "noise", "pad"],
+			"description": "Waveform names. A sawtooth at duty 0.5 is a triangle; a pulse at duty 0.5 is a square; set the target block 'duty_a' or 'duty_b' to place the duty.  Pad uses duty as the harmonic wander depth (0 = locked, 1 = deepest)."
 		},
 		"mod_target": {
 			"type": "string",
-			"enum": ["volume", "pitch", "panning", "duty_a", "duty_b", "osc_mix", "fm_index", "fir_pitch_spread", "fm_ratio"],
-			"description": "Modulated quantities. Units: volume, panning (0.5 = center), duty_a/duty_b, osc_mix and fm_index (1.0 = full depth) are 0..1; pitch is -24..24 semitones; fir_pitch_spread depends on the layer fir_type: bandpass = spread in semitones 0..36 around the note pitch; lowpass and highpass = fixed cutoff in Hz 0..22050 with no key tracking; 0 means the oscillator's filter is bypassed; fm_ratio is the ratio, slider-bounded 0.125..8 (0 stays bank-legal as the legacy unset carrier value). Only 'volume' defaults to 1.0 and 'panning' to 0.5, fm_ratio inherits the layer's legacy mod_ratio when its block is absent, and every other base defaults to 0."
+			"enum": ["volume", "pitch", "panning", "duty_a", "duty_b", "osc_mix", "fm_index", "fir_pitch_spread", "fm_ratio", "pad_tone_a", "pad_tone_b"],
+			"description": "Modulated quantities. Units: volume, panning (0.5 = center), duty_a/duty_b, osc_mix and fm_index (1.0 = full depth) are 0..1; pitch is -24..24 semitones; fir_pitch_spread depends on the layer fir_type: bandpass = spread in semitones 0..36 around the note pitch; lowpass and highpass = fixed cutoff in Hz 0..22050 with no key tracking; 0 means the oscillator's filter is bypassed; fm_ratio is the ratio, slider-bounded 0.125..8 (0 stays bank-legal as the legacy unset carrier value). Only 'volume' defaults to 1.0 and 'panning' to 0.5, fm_ratio inherits the layer's legacy mod_ratio when its block is absent, and every other base defaults to 0. pad_tone_a/pad_tone_b is the per-oscillator pad spectral tilt in -1..+1: the harmonic exponent is 1 + value (0 = saw-like 1/n spectrum, +1 = mellow 1/n^2, -1 = flat/brightest), inert for non-pad waves."
 		},
 		"mod_source": {
 			"type": "string",
@@ -268,7 +268,9 @@
 				"osc_mix": { "$ref": "#/definitions/target_block" },
 				"fm_index": { "$ref": "#/definitions/target_block" },
 				"fir_pitch_spread": { "$ref": "#/definitions/target_block" },
-				"fm_ratio": { "$ref": "#/definitions/target_block" }
+				"fm_ratio": { "$ref": "#/definitions/target_block" },
+				"pad_tone_a": { "$ref": "#/definitions/target_block" },
+				"pad_tone_b": { "$ref": "#/definitions/target_block" }
 			},
 			"required": ["wave_a"],
 			"additionalProperties": false

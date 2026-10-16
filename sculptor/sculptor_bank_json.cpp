@@ -286,8 +286,8 @@ namespace {
 // Shared enum spelling: one name per value, used by both encoder and decoder
 // ---------------------------------------------------------------------------
 
-constexpr uint32_t    num_waves             = 5;
-constexpr const char* wave_names[num_waves] = { "none", "sine", "sawtooth", "pulse", "noise" };
+constexpr uint32_t    num_waves             = 6;
+constexpr const char* wave_names[num_waves] = { "none", "sine", "sawtooth", "pulse", "noise", "pad" };
 
 constexpr uint32_t    num_osc_modes                 = 4;
 constexpr const char* osc_mode_names[num_osc_modes] = { "blend", "fm", "sync", "ring_mod" };
@@ -310,11 +310,12 @@ constexpr const char* effect_type_names[Synth::num_effect_types] = { "none",   "
 constexpr uint32_t    num_param_kinds                   = 4;
 constexpr const char* param_kind_names[num_param_kinds] = { "external", "envelope", "lfo", "plain" };
 
-constexpr const char* mod_target_names[Synth::num_mod_targets] = { "volume",  "pitch",   "panning",  "duty_a",
-                                                                   "duty_b",  "osc_mix", "fm_index", "fir_pitch_spread",
-                                                                   "fm_ratio" };
+constexpr const char* mod_target_names[Synth::num_mod_targets] = {
+    "volume",           "pitch",    "panning",    "duty_a",    "duty_b", "osc_mix", "fm_index",
+    "fir_pitch_spread", "fm_ratio", "pad_tone_a", "pad_tone_b"
+};
 
-static_assert(static_cast<uint32_t>(Synth::WaveType::noise_wave) == num_waves - 1);
+static_assert(static_cast<uint32_t>(Synth::WaveType::pad_wave) == num_waves - 1);
 static_assert(static_cast<uint32_t>(Synth::ModSource::cc) == num_mod_sources - 1);
 static_assert(static_cast<uint32_t>(Synth::SourceOp::multiply) == num_source_ops - 1);
 static_assert(static_cast<uint32_t>(Synth::EffectType::fir) == Synth::num_effect_types - 2);
@@ -2223,6 +2224,8 @@ static void decode_lfo(Walker& w, uint32_t obj, Synth::LFODescriptor& lfo)
         uint32_t value = 0;
         if (key_eq(w, key_idx, "wave")) {
             want_enum(w, val_idx, wave_names, num_waves, &value);
+            if (value > static_cast<uint32_t>(Synth::WaveType::noise_wave))
+                w.failed = true; // LFO decode accepts waves only up to noise_wave
             lfo.wave = static_cast<Synth::WaveType>(value);
         }
         else if (key_eq(w, key_idx, "duty")) {
@@ -3443,8 +3446,9 @@ static void decode_target_doc(Walker&             w,
             doc_unknown_field(w, key_idx);
     });
 
-    if (w.failed)
+    if (w.failed) {
         return;
+    }
 
     if (! doc_value_valid(view, base)) {
         w.failed = true;

@@ -15,8 +15,8 @@
 
 namespace {
 
-// Per-instrument driver: TargetBinding (40 bytes) x 9 targets x 7 layers.
-static_assert(sizeof(Synth::InstrumentBank) <= 896'000);
+// Per-instrument driver: TargetBinding (40 bytes) x 11 targets x 7 layers.
+static_assert(sizeof(Synth::InstrumentBank) <= 1'024'000);
 static_assert(sizeof(Synth::BankUpdateQueue) <= 2 * sizeof(Synth::InstrumentBank) + 32);
 
 } // namespace
@@ -261,7 +261,7 @@ static bool validate_oscillator_body(const Synth::Oscillator& osc)
         return false;
     }
     for (uint32_t w = 0; w < 2; w++) {
-        if (static_cast<uint32_t>(osc.osc_type[w]) > static_cast<uint32_t>(Synth::WaveType::noise_wave)) {
+        if (static_cast<uint32_t>(osc.osc_type[w]) > static_cast<uint32_t>(Synth::WaveType::pad_wave)) {
             return false;
         }
     }

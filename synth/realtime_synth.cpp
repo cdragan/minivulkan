@@ -171,10 +171,16 @@ enum OscParamRole : uint32_t {
     osc_fm_ratio_dest,
     osc_fm_ratio_env,
     osc_fm_ratio_lfo,
+    osc_pad_tilt0_dest,
+    osc_pad_tilt0_env,
+    osc_pad_tilt0_lfo,
+    osc_pad_tilt1_dest,
+    osc_pad_tilt1_env,
+    osc_pad_tilt1_lfo,
     num_osc_roles
 };
 
-static_assert(num_osc_roles == 27);
+static_assert(num_osc_roles == 33);
 
 constexpr uint32_t channel_block_base = 1;
 constexpr uint32_t voice_block_base   = channel_block_base + Synth::max_channels * num_channel_roles;
@@ -211,10 +217,13 @@ struct ModTargetNode {
 };
 
 constexpr ModTargetNode mod_target_nodes[] = {
-    { mod_pitch, osc_pitch_dest },     { mod_volume, osc_volume_dest },     { mod_fir_spread, osc_spread_dest },
-    { mod_panning, osc_panning_dest }, { mod_duty0, osc_duty0_dest },       { mod_duty1, osc_duty1_dest },
-    { mod_osc_mix, osc_mix_dest },     { mod_fm_index, osc_fm_index_dest }, { mod_fm_ratio, osc_fm_ratio_dest },
+    { mod_pitch, osc_pitch_dest },         { mod_volume, osc_volume_dest },       { mod_fir_spread, osc_spread_dest },
+    { mod_panning, osc_panning_dest },     { mod_duty0, osc_duty0_dest },         { mod_duty1, osc_duty1_dest },
+    { mod_osc_mix, osc_mix_dest },         { mod_fm_index, osc_fm_index_dest },   { mod_fm_ratio, osc_fm_ratio_dest },
+    { mod_pad_tilt0, osc_pad_tilt0_dest }, { mod_pad_tilt1, osc_pad_tilt1_dest },
 };
+static_assert(sizeof(mod_target_nodes) / sizeof(mod_target_nodes[0]) == Synth::num_mod_targets,
+              "mod target table must cover every ModTarget");
 
 Synth::Parameter       parameters[total_params];
 Synth::ParamDescriptor param_descs[total_params];
@@ -268,10 +277,9 @@ struct Oscillator {
     uint32_t out_sound_offs;
     float    phase;
     float    phase_step;
-    uint32_t osc_type[2]; // WaveType, raw uint to match the shader layout
+    uint32_t osc_pack; // Bits 0-7: osc_type[0], 8-15: osc_type[1], 16-23: osc_mode, 24-31 spare (zero)
     float    duty[2];
     float    osc_mix;
-    uint32_t osc_mode;
     float    mod_ratio; // FM: modulator/carrier freq ratio.  Hard sync: slave cycles per master cycle
     float    fm_index;
     float    mod_phase;
@@ -281,9 +289,11 @@ struct Oscillator {
     uint32_t fir_memory_offs;
     uint32_t taps_offs;
     uint32_t noise_counter;
+    uint32_t note_seed;   // Per-note constant: the note-on noise counter, never advanced
+    float    pad_tilt[2]; // Pad spectral tilt; harmonic exponent is 1 + clamp(tilt, -1, 1).
 };
 
-static_assert(sizeof(Oscillator) == 64);
+static_assert(sizeof(Oscillator) == 68);
 
 constexpr uint32_t max_param_range = sizeof(Oscillator) * 256;
 
@@ -480,20 +490,22 @@ struct RunningOscillator {
     float    phase;         // Current position of the oscillator
     float    mod_phase;     // Current position of the FM modulator
     uint32_t noise_counter; // Sample index of the noise stream, advanced every step
+    uint32_t note_seed;     // Per-note constant copy of the note-on noise counter, never advanced
     float    old_volume;    // Previous volume
     float    old_panning;   // Previous panning
 
     // Resolved values written by update_modulation each step, read by the
     // shader-param fill.
-    float volume;   // Current volume
-    float panning;  // Current panning
-    float pitch;    // Absolute equivalent MIDI pitch (69 = A4), resolved by update_modulation from
-                    // note + octave offset + pitch offset/skews + the modulated pitch target value
-    float spread;   // FIR Pitch Spread in semitones, from the spread target's dest
-                    // node; <= 0 means the oscillator's FIR is off
-    float duty[2];  // Duty cycle for sawtooth and pulse oscillator (0..1)
-    float osc_mix;  // Mix between osc_type[0] and osc_type[1] (0..1)
-    float fm_index; // FM modulation depth
+    float volume;      // Current volume
+    float panning;     // Current panning
+    float pitch;       // Absolute equivalent MIDI pitch (69 = A4), resolved by update_modulation from
+                       // note + octave offset + pitch offset/skews + the modulated pitch target value
+    float spread;      // FIR Pitch Spread in semitones, from the spread target's dest
+                       // node; <= 0 means the oscillator's FIR is off
+    float duty[2];     // Duty cycle for sawtooth and pulse oscillator (0..1)
+    float pad_tilt[2]; // Pad spectral tilt; harmonic exponent is 1 + clamp(tilt, -1, 1).
+    float osc_mix;     // Mix between osc_type[0] and osc_type[1] (0..1)
+    float fm_index;    // FM modulation depth
 
     uint8_t layer_idx;      // This oscillator's index in its voice's osc_ids list
     uint8_t voice_id;       // Voice which owns this oscillator (0 = none/free)
@@ -1314,6 +1326,7 @@ static void process_note_on(uint32_t delta_samples, const DispatchedMidiEvent& e
 
         noise_start_counter += noise_start_stride;
         osc.noise_counter = noise_start_counter;
+        osc.note_seed     = noise_start_counter;
 
         // Expand each modulation target into its node triple at this oscillator's slot.
         const uint32_t osc_slot = voice.osc_ids[layer_idx];
@@ -1845,10 +1858,12 @@ static void update_modulation()
             osc.decay_factor *= osc.decay_mult;
             osc.volume = dest_value * osc.decay_factor;
         }
-        osc.duty[0]  = parameters[osc_param(osc_idx, osc_duty0_dest)].value;
-        osc.duty[1]  = parameters[osc_param(osc_idx, osc_duty1_dest)].value;
-        osc.osc_mix  = parameters[osc_param(osc_idx, osc_mix_dest)].value;
-        osc.fm_index = parameters[osc_param(osc_idx, osc_fm_index_dest)].value;
+        osc.duty[0]     = parameters[osc_param(osc_idx, osc_duty0_dest)].value;
+        osc.duty[1]     = parameters[osc_param(osc_idx, osc_duty1_dest)].value;
+        osc.pad_tilt[0] = parameters[osc_param(osc_idx, osc_pad_tilt0_dest)].value;
+        osc.pad_tilt[1] = parameters[osc_param(osc_idx, osc_pad_tilt1_dest)].value;
+        osc.osc_mix     = parameters[osc_param(osc_idx, osc_mix_dest)].value;
+        osc.fm_index    = parameters[osc_param(osc_idx, osc_fm_index_dest)].value;
         // The ratio clamps like the static row: legacy 0 ratios play at the
         // slider floor and hand-written out-of-range values stay in bounds.
         const float ratio_dest = parameters[osc_param(osc_idx, osc_fm_ratio_dest)].value;
@@ -2154,12 +2169,12 @@ static void render_audio_step()
         param.out_sound_offs = oscillator.osc_output_offs / 4;
         param.phase          = oscillator.phase;
         param.phase_step     = phase_step / static_cast<float>(Synth::rt_step_samples);
-        param.osc_type[0]    = static_cast<uint32_t>(oscillator.osc_type[0]);
-        param.osc_type[1]    = static_cast<uint32_t>(oscillator.osc_type[1]);
+        param.osc_pack       = static_cast<uint32_t>(oscillator.osc_type[0]) |
+                               (static_cast<uint32_t>(oscillator.osc_type[1]) << 8) |
+                               (static_cast<uint32_t>(oscillator.osc_mode) << 16);
         param.duty[0]        = oscillator.duty[0];
         param.duty[1]        = oscillator.duty[1];
         param.osc_mix        = oscillator.osc_mix;
-        param.osc_mode       = oscillator.osc_mode;
         param.mod_ratio      = oscillator.mod_ratio;
         param.fm_index       = oscillator.fm_index;
 
@@ -2175,6 +2190,9 @@ static void render_audio_step()
         param.taps_offs =
             (oscillator.spread > 0.0f && oscillator.fir_type != Synth::fir_off) ? oscillator.fir_taps_offs / 4 : 0;
         param.noise_counter = oscillator.noise_counter;
+        param.note_seed     = oscillator.note_seed;
+        param.pad_tilt[0]   = oscillator.pad_tilt[0];
+        param.pad_tilt[1]   = oscillator.pad_tilt[1];
 
         oscillator.phase += phase_step;
         oscillator.mod_phase += mod_phase_step;
