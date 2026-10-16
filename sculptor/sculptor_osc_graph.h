@@ -60,8 +60,8 @@ constexpr uint32_t max_detached_nodes = Synth::max_detached_per_zone;
 constexpr uint32_t max_osc_instances = max_nodes - (Synth::graph_canonical_input_node_count + 1);
 static_assert(2 * Synth::max_layers * Synth::num_mod_targets <= max_osc_instances);
 
-// The eight per-target modulation blocks live on the oscillator node
-// itself: each ModTarget's 11-slot block sits directly after its value
+// The nine per-target modulation blocks live on the oscillator node
+// itself: each ModTarget's 12-slot block sits directly after its value
 // row slot, so the block's modulator rows render under the row they
 // attach to (the fx pattern).  See the block helpers below for the
 // field map.  Row visibility is derived live from connection state;
@@ -95,14 +95,15 @@ constexpr uint32_t osc_target_block_stride = 12;
 // properties, and the rows after an earlier target's block shift down
 // by that block.  Indexed by ModTarget.
 constexpr uint32_t osc_target_row_slot[Synth::num_mod_targets] = {
-    57, // volume
-    83, // pitch
-    70, // pan
-    2,  // duty a
-    16, // duty b
-    30, // waveform mix
-    43, // fm depth
-    99, // fir pitch spread
+    69,  // volume
+    95,  // pitch
+    82,  // pan
+    2,   // duty a
+    16,  // duty b
+    30,  // waveform mix
+    43,  // fm depth
+    111, // fir pitch spread
+    56,  // fm ratio
 };
 
 // First slot of target `target`'s modulation block on an oscillator
@@ -140,9 +141,15 @@ constexpr uint32_t osc_target_src_dot(uint32_t target, uint32_t input)
     return osc_target_block_base(target) + 6u + 3u * input;
 }
 
-// Last block end fits the slot pool; the eight row slots are spaced far
-// enough apart that no block reaches the next row (smallest gap 13).
-static_assert(osc_target_row_slot[Synth::num_mod_targets - 1] + osc_target_block_stride <= max_node_slots);
+// Last block end fits the slot pool; the nine row slots are spaced far
+// enough apart that no block reaches the next row (smallest base-row
+// gap 13, between fm ratio row 56 and volume row 69; the tightest
+// margin is fm ratio's block end one slot before the volume row).  The
+// pinned target is the highest row, not the last enum member, so later
+// appends cannot make the check vacuous.
+static_assert(osc_target_row_slot[Synth::mod_fir_spread] + osc_target_block_stride <= max_node_slots);
+static_assert(osc_target_row_slot[Synth::mod_fm_ratio] + osc_target_block_stride <
+              osc_target_row_slot[Synth::mod_volume]);
 
 // Where every projected piece of the model landed in the graph.  Slot and
 // node indices are stable across property edits; structural edits re-project
@@ -433,9 +440,10 @@ struct OscTargetView {
 };
 
 // Bank-value bounds shared by the oscillator graph editor's bounded slots and
-// the clipboard instrument codec, so the two can never disagree.
-constexpr float osc_fm_ratio_min     = 0.125f;
-constexpr float osc_fm_ratio_max     = 8.0f;
+// the clipboard instrument codec, so the two can never disagree.  The
+// values live in the synth header so the runtime clamp shares them.
+constexpr float osc_fm_ratio_min     = Synth::osc_mod_ratio_min;
+constexpr float osc_fm_ratio_max     = Synth::osc_mod_ratio_max;
 constexpr float osc_pitch_offset_min = -12.0f;
 constexpr float osc_pitch_offset_max = 12.0f;
 
@@ -453,7 +461,7 @@ OscTargetView osc_target_view(Synth::ModTarget target, Synth::FilterType fir_typ
 // row's label and range.
 bool osc_change_restructures(const OscGraphMapping& mapping, const GraphChange& change);
 // Slot index on an oscillator node holding row of ModTarget
-// `target` (0..7); rows are not contiguous.
+// `target` (0..8); rows are not contiguous.
 uint32_t osc_target_row(uint32_t target);
 
 // Decodes an oscillator-node block slot into its (target, field):

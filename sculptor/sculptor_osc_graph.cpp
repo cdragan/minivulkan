@@ -98,13 +98,15 @@ char                        clipboard_destination_name[Synth::max_name_len];
 static_assert(static_cast<uint32_t>(Synth::mod_panning) == 2);
 static_assert(static_cast<uint32_t>(Synth::mod_duty0) == 3);
 static_assert(static_cast<uint32_t>(Synth::mod_fm_index) == 6);
-static_assert(Synth::num_mod_targets == 8);
+static_assert(Synth::num_mod_targets == 9);
+static_assert(static_cast<uint32_t>(Synth::mod_fm_ratio) == 8);
 static_assert(Synth::max_mod_inputs == 2);
 
-const char* const target_names[Synth::num_mod_targets]       = { "volume", "pitch",        "panning",  "Duty A",
-                                                                 "Duty B", "Waveform Mix", "FM Depth", "Band spread" };
-const char* const wave_names[5]                              = { "off", "sine", "saw", "pulse", "noise" };
-const char* const osc_mode_names[3]                          = { "blend", "fm", "hard sync" };
+const char* const target_names[Synth::num_mod_targets] = { "volume",   "pitch",       "panning",
+                                                           "Duty A",   "Duty B",      "Waveform Mix",
+                                                           "FM Depth", "Band spread", "FM Ratio" };
+const char* const wave_names[5]                        = { "off", "sine", "saw", "pulse", "noise" };
+const char* const osc_mode_names[4] = { "blend", "frequency modulation", "hard sync", "ring modulation" };
 const char* const filter_type_names[Synth::num_filter_types] = { "off", "bandpass", "lowpass", "highpass" };
 
 // Dropdown order puts "off" first.  The stored enum order is fixed: zero must
@@ -131,21 +133,22 @@ const char* const fir_spread_names[Synth::num_filter_types] = { "Filter Off",
 // 31..42 waveform mix's 12-slot modulation block
 // 43 fm depth (per-layer value)
 // 44..55 fm depth's 12-slot modulation block
-// 56 fm ratio (per oscillator)
-// 57 volume (per-layer base value)
-// 58..69 volume's 12-slot modulation block
-// 70 pan (per-layer base value)
-// 71..82 pan's 12-slot modulation block
-// 83 pitch (per-layer base value)
-// 84..95 pitch's 12-slot modulation block
-// 96 pitch offset (per oscillator)
-// 97 octave offset (per oscillator, [-12, +12] whole octaves)
-// 98 filter type (per oscillator, list)
-// 99 fir pitch spread (per-layer base value; band-pass: [0, 36] semitones, low-pass/high-pass: cutoff in Hz)
-// 100..111 fir pitch spread's 12-slot modulation block
-// 112 fir slope (per oscillator, [1, 100] percent)
-// Every target value row (2, 16, 30, 43, 57, 70, 83, 99) is
-// connectable: all eight targets are uniformly modulate-able, so each
+// 56 fm ratio (per-layer base value)
+// 57..68 fm ratio's 12-slot modulation block
+// 69 volume (per-layer base value)
+// 70..81 volume's 12-slot modulation block
+// 82 pan (per-layer base value)
+// 83..94 pan's 12-slot modulation block
+// 95 pitch (per-layer base value)
+// 96..107 pitch's 12-slot modulation block
+// 108 pitch offset (per oscillator)
+// 109 octave offset (per oscillator, [-12, +12] whole octaves)
+// 110 filter type (per oscillator, list)
+// 111 fir pitch spread (per-layer base value; band-pass: [0, 36] semitones, low-pass/high-pass: cutoff in Hz)
+// 112..123 fir pitch spread's 12-slot modulation block
+// 124 fir slope (per oscillator, [1, 100] percent)
+// Every target value row (2, 16, 30, 43, 56, 69, 82, 95, 111) is
+// connectable: all nine targets are uniformly modulate-able, so each
 // row's 12-slot block follows its value row (see the block helpers in
 // sculptor_osc_graph.h); block field 0 is the envelope dot, so it
 // renders on the line under the row the block attaches to, and field 1
@@ -154,23 +157,24 @@ constexpr uint32_t osc_waveform_a_prop    = 1;
 constexpr uint32_t osc_waveform_b_prop    = 15;
 constexpr uint32_t osc_mode_prop          = 29;
 constexpr uint32_t osc_fm_ratio_prop      = 56;
-constexpr uint32_t osc_pitch_offset_prop  = 96;
-constexpr uint32_t osc_octave_offset_prop = 97;
-constexpr uint32_t osc_fir_slope_prop     = 112;
-constexpr uint32_t osc_fir_type_prop      = 98;
+constexpr uint32_t osc_pitch_offset_prop  = 108;
+constexpr uint32_t osc_octave_offset_prop = 109;
+constexpr uint32_t osc_fir_slope_prop     = 124;
+constexpr uint32_t osc_fir_type_prop      = 110;
 // Per-target presentation views: the single source of truth for value
 // bounds, bank-unit scaling and slider curve.  Oscillator rows and
 // parameter base values show display units; the bank stores scaled
 // units (radians for fm depth).
 constexpr Sculptor::OscTargetView osc_target_views[Synth::num_mod_targets] = {
-    { 0.0f, 1.0f, 1.0f, false },       // volume
-    { -24.0f, 24.0f, 1.0f, false },    // pitch (semitones)
-    { 0.0f, 1.0f, 1.0f, false },       // pan (0.5 = center)
-    { 0.0f, 1.0f, 1.0f, false },       // duty a
-    { 0.0f, 1.0f, 1.0f, false },       // duty b
-    { 0.0f, 1.0f, 1.0f, false },       // waveform mix
-    { 0.0f, 1.0f, 6.2831853f, false }, // fm depth (1.0 == 2*pi radians)
-    { 0.0f, 36.0f, 1.0f, false },      // fir pitch spread (semitones)
+    { 0.0f, 1.0f, 1.0f, false },                                         // volume
+    { -24.0f, 24.0f, 1.0f, false },                                      // pitch (semitones)
+    { 0.0f, 1.0f, 1.0f, false },                                         // pan (0.5 = center)
+    { 0.0f, 1.0f, 1.0f, false },                                         // duty a
+    { 0.0f, 1.0f, 1.0f, false },                                         // duty b
+    { 0.0f, 1.0f, 1.0f, false },                                         // waveform mix
+    { 0.0f, 1.0f, 6.2831853f, false },                                   // fm depth (1.0 == 2*pi radians)
+    { 0.0f, 36.0f, 1.0f, false },                                        // fir pitch spread (semitones)
+    { Synth::osc_mod_ratio_min, Synth::osc_mod_ratio_max, 1.0f, false }, // fm ratio
 };
 
 // Low-pass and high-pass cutoff slider.  The editor writes a zero cutoff (edge off)
@@ -223,7 +227,7 @@ bool Sculptor::oscillator_slot_waveform_mode_disabled(const Sculptor::Node& node
         return true; // fm depth only drives the fm mix mode
     }
     if (slot_idx == osc_fm_ratio_prop && mode == 0) {
-        return true; // fm ratio drives fm and hard sync, not blend
+        return true; // fm ratio drives fm, hard sync and ring mod, not blend
     }
     const uint32_t fir_type = node.slots.entries[osc_fir_type_prop].value.list_index;
     if (fir_type == static_cast<uint32_t>(Synth::fir_off)) {
@@ -674,7 +678,7 @@ static void project_osc_node(Sculptor::Graph*           graph,
     graph->add_slot(
         node,
         osc_view_connectable_slot(target_names[3], osc.targets[Synth::mod_duty0].base_value, Synth::mod_duty0));
-    // One 11-slot modulation block per ModTarget, directly after the
+    // One 12-slot modulation block per ModTarget, directly after the
     // target's value row, seeded from the layer's own binding
     // (display-unit fields carry the raw values; only the base rows are
     // scaled).
@@ -684,7 +688,7 @@ static void project_osc_node(Sculptor::Graph*           graph,
         node,
         osc_view_connectable_slot(target_names[4], osc.targets[Synth::mod_duty1].base_value, Synth::mod_duty1));
     append_target_block(graph, node, Synth::mod_duty1, osc.targets[Synth::mod_duty1]);
-    graph->add_slot(node, list_slot("Mix Mode", osc_mode_names, 3, static_cast<uint32_t>(osc.osc_mode)));
+    graph->add_slot(node, list_slot("Mix Mode", osc_mode_names, 4, static_cast<uint32_t>(osc.osc_mode)));
     graph->add_slot(
         node,
         osc_view_connectable_slot(target_names[5], osc.targets[Synth::mod_osc_mix].base_value, Synth::mod_osc_mix));
@@ -697,7 +701,8 @@ static void project_osc_node(Sculptor::Graph*           graph,
     append_target_block(graph, node, Synth::mod_fm_index, osc.targets[Synth::mod_fm_index]);
     graph->add_slot(
         node,
-        bounded_real_slot("FM Ratio", osc.mod_ratio, Sculptor::osc_fm_ratio_min, Sculptor::osc_fm_ratio_max));
+        osc_view_connectable_slot(target_names[8], osc.targets[Synth::mod_fm_ratio].base_value, Synth::mod_fm_ratio));
+    append_target_block(graph, node, Synth::mod_fm_ratio, osc.targets[Synth::mod_fm_ratio]);
     graph->add_slot(node,
                     osc_view_connectable_slot("Volume", osc.targets[Synth::mod_volume].base_value, Synth::mod_volume));
     append_target_block(graph, node, Synth::mod_volume, osc.targets[Synth::mod_volume]);
@@ -1393,7 +1398,6 @@ static bool read_oscillator_layer(const Sculptor::Graph&           graph,
         return false;
     }
     osc.osc_mode         = static_cast<Synth::OscMode>(index);
-    osc.mod_ratio        = slots[osc_fm_ratio_prop].value.real;
     osc.pitch_offset     = slots[osc_pitch_offset_prop].value.real;
     const int32_t octave = slots[osc_octave_offset_prop].value.integer;
     if (octave < Sculptor::osc_octave_offset_min || octave > Sculptor::osc_octave_offset_max) {
@@ -1505,6 +1509,7 @@ static bool read_oscillator_layer(const Sculptor::Graph&           graph,
         gen.num_inputs = static_cast<uint16_t>(num_inputs);
         osc.targets[t] = gen;
     }
+    osc.mod_ratio = osc.targets[Synth::mod_fm_ratio].base_value;
     return true;
 }
 

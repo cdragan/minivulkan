@@ -22,8 +22,13 @@ enum ModTarget : uint8_t {
     mod_osc_mix,
     mod_fm_index,
     mod_fir_spread,
+    mod_fm_ratio,
     num_mod_targets
 };
+
+// Clamp bounds for the mod_fm_ratio target and the mod_ratio field (slider range).
+constexpr float osc_mod_ratio_min = 0.125f;
+constexpr float osc_mod_ratio_max = 8.0f;
 
 // Modulation input source roles
 enum class ModSource : uint8_t {
@@ -87,13 +92,17 @@ enum FilterType : uint8_t {
 enum OscMode : uint32_t {
     osc_mode_blend     = 0, // Mix osc_type[0] and osc_type[1] by osc_mix
     osc_mode_fm        = 1, // osc_type[0] is carrier, osc_type[1] is modulator
-    osc_mode_hard_sync = 2  // osc_type[0] sets master frequency, osc_type[1] is the hard-synced slave
+    osc_mode_hard_sync = 2, // osc_type[0] sets master frequency, osc_type[1] is the hard-synced slave
+    osc_mode_ring_mod = 3 // osc 1 is the note-tied master; osc 2 is the ring-mod carrier evaluated at mod_ratio * osc 1
+                          // phase; osc_mix crossfades dry osc 1 to the product
 };
 
 struct Oscillator {
     WaveType osc_type[2];
     OscMode  osc_mode;
-    float    mod_ratio;    // FM ratio or hard-sync cycle ratio
+    float    mod_ratio;    // FM ratio, hard-sync cycle ratio or ring-mod carrier ratio; note-on seeds the
+                           // running oscillator from this scalar (layer.mod_ratio), and target
+                           // configuration independently reads the mod_fm_ratio binding's base_value
     float    pitch_offset; // This oscillator's pitch offset in semitones
     int8_t octave_offset;  // Whole-octave pitch shift, counted in whole octaves: 12 * octave_offset semitones are added
                            // to the pitch

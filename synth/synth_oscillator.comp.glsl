@@ -21,6 +21,7 @@ const float two_pi = 6.283185307179586;
 const uint osc_mode_blend     = 0;  // Mix osc_type[0] and osc_type[1] by osc_mix (default)
 const uint osc_mode_fm        = 1;  // osc_type[0] is carrier, osc_type[1] is modulator
 const uint osc_mode_hard_sync = 2;  // osc_type[0] sets master frequency, osc_type[1] is the hard-synced slave
+const uint osc_mode_ring_mod  = 3;  // osc_type[0] is the note-tied master, osc_type[1] is the ring-mod carrier
 
 struct OscillatorParams {
     uint  out_sound_offs;   // Offset of output sound data
@@ -29,8 +30,8 @@ struct OscillatorParams {
     uint  osc_type[2];      // Two oscillator types
     float duty[2];          // Duty cycle for sawtooth and pulse oscillator [0..1]
     float osc_mix;          // Mixing between osc_type[0] and osc_type[1] [0..1]
-    uint  osc_mode;         // osc_mode_blend, osc_mode_fm or osc_mode_hard_sync
-    float mod_ratio;        // FM: modulator frequency / carrier frequency.  Hard sync: slave cycles per master cycle
+    uint  osc_mode;         // osc_mode_blend, osc_mode_fm, osc_mode_hard_sync or osc_mode_ring_mod
+    float mod_ratio;        // FM: modulator frequency / carrier frequency.  Hard sync: slave cycles per master cycle.  Ring mod: carrier cycles per master cycle
     float fm_index;         // FM modulation depth
     float mod_phase;        // Modulator's initial phase value at first sample to render
     float mod_phase_step;   // Modulator's phase step between samples
@@ -122,6 +123,15 @@ void main()
         // slave is stateless, derived from the master phase.  mod_ratio is
         // reused here as the sync ratio (slave cycles per master cycle).
         value = oscillator(type2, fract(param.mod_ratio * fract(phase)), duty2, noise_index ^ noise_salt);
+    }
+    else if (param.osc_mode == osc_mode_ring_mod) {
+        // Ring mod: type1 is the note-tied master, type2 is the carrier evaluated
+        // at mod_ratio times the master phase.  Stateless, like hard sync.
+        // osc_mix crossfades the dry master to the product.
+        const float carrier = oscillator(type2, fract(param.mod_ratio * fract(phase)), duty2, noise_index ^ noise_salt);
+
+        value = oscillator(type1, phase, duty1, noise_index);
+        value = mix(value, value * carrier, param.osc_mix);
     }
     else {
         // Blend mode: mix the two oscillators by osc_mix.

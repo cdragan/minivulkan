@@ -168,10 +168,13 @@ enum OscParamRole : uint32_t {
     osc_fm_index_dest,
     osc_fm_index_env,
     osc_fm_index_lfo,
+    osc_fm_ratio_dest,
+    osc_fm_ratio_env,
+    osc_fm_ratio_lfo,
     num_osc_roles
 };
 
-static_assert(num_osc_roles == 24);
+static_assert(num_osc_roles == 27);
 
 constexpr uint32_t channel_block_base = 1;
 constexpr uint32_t voice_block_base   = channel_block_base + Synth::max_channels * num_channel_roles;
@@ -210,7 +213,7 @@ struct ModTargetNode {
 constexpr ModTargetNode mod_target_nodes[] = {
     { mod_pitch, osc_pitch_dest },     { mod_volume, osc_volume_dest },     { mod_fir_spread, osc_spread_dest },
     { mod_panning, osc_panning_dest }, { mod_duty0, osc_duty0_dest },       { mod_duty1, osc_duty1_dest },
-    { mod_osc_mix, osc_mix_dest },     { mod_fm_index, osc_fm_index_dest },
+    { mod_osc_mix, osc_mix_dest },     { mod_fm_index, osc_fm_index_dest }, { mod_fm_ratio, osc_fm_ratio_dest },
 };
 
 Synth::Parameter       parameters[total_params];
@@ -1846,6 +1849,12 @@ static void update_modulation()
         osc.duty[1]  = parameters[osc_param(osc_idx, osc_duty1_dest)].value;
         osc.osc_mix  = parameters[osc_param(osc_idx, osc_mix_dest)].value;
         osc.fm_index = parameters[osc_param(osc_idx, osc_fm_index_dest)].value;
+        // The ratio clamps like the static row: legacy 0 ratios play at the
+        // slider floor and hand-written out-of-range values stay in bounds.
+        const float ratio_dest = parameters[osc_param(osc_idx, osc_fm_ratio_dest)].value;
+        osc.mod_ratio          = ratio_dest < Synth::osc_mod_ratio_min   ? Synth::osc_mod_ratio_min
+                                 : ratio_dest > Synth::osc_mod_ratio_max ? Synth::osc_mod_ratio_max
+                                                                         : ratio_dest;
 
         bool free_now = osc.terminating;
         if (! free_now && (voice.note_finished || (voice.releasing && volume_termination_due(osc_idx)) ||

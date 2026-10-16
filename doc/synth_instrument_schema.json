@@ -32,7 +32,7 @@
 		},
 		"graph_layout": {
 			"type": "array",
-			"maxItems": 121,
+			"maxItems": 135,
 			"uniqueItems": true,
 			"description": "Optional portable positions and sizes of nodes derived from this instrument; no effects, wiring or missing-sum state.  Canonical 0 is input, 1 is sum, 2+n is oscillator layer n, which must exist.  Generator locators use layer and fixed numeric ModTarget; descriptor aliases resolve after the whole document parses and may have only one saved record.  Unresolved or duplicate resolved nodes are refused.  All numbers must be finite; sizes are nonnegative.  Newly encoded documents always include this array.",
 			"items": {
@@ -203,8 +203,8 @@
 		},
 		"mod_target": {
 			"type": "string",
-			"enum": ["volume", "pitch", "panning", "duty_a", "duty_b", "osc_mix", "fm_index", "fir_pitch_spread"],
-			"description": "Modulated quantities. Units: volume, panning (0.5 = center), duty_a/duty_b, osc_mix and fm_index (1.0 = full depth) are 0..1; pitch is -24..24 semitones; fir_pitch_spread depends on the layer fir_type: bandpass = spread in semitones 0..36 around the note pitch; lowpass and highpass = fixed cutoff in Hz 0..22050 with no key tracking; 0 means the oscillator's filter is bypassed. Only 'volume' defaults to 1.0 and 'panning' to 0.5; every other base defaults to 0."
+			"enum": ["volume", "pitch", "panning", "duty_a", "duty_b", "osc_mix", "fm_index", "fir_pitch_spread", "fm_ratio"],
+			"description": "Modulated quantities. Units: volume, panning (0.5 = center), duty_a/duty_b, osc_mix and fm_index (1.0 = full depth) are 0..1; pitch is -24..24 semitones; fir_pitch_spread depends on the layer fir_type: bandpass = spread in semitones 0..36 around the note pitch; lowpass and highpass = fixed cutoff in Hz 0..22050 with no key tracking; 0 means the oscillator's filter is bypassed; fm_ratio is the ratio, slider-bounded 0.125..8 (0 stays bank-legal as the legacy unset carrier value). Only 'volume' defaults to 1.0 and 'panning' to 0.5, fm_ratio inherits the layer's legacy mod_ratio when its block is absent, and every other base defaults to 0."
 		},
 		"mod_source": {
 			"type": "string",
@@ -221,17 +221,17 @@
 			"description": "One oscillator. The shared routing (base, sources) may be set by the first layer that supplies base or sources for a target (a layer with only generators does not claim it); every layer has its own envelope and LFO generators.",
 			"properties": {
 				"wave_a": { "$ref": "#/definitions/wave", "description": "Required. The primary oscillator; for fm the carrier, for sync the master." },
-				"wave_b": { "$ref": "#/definitions/wave", "description": "The second oscillator; for fm the modulator, for sync the slave. Default: none." },
+				"wave_b": { "$ref": "#/definitions/wave", "description": "The second oscillator; for fm the modulator, for sync the slave, for ring_mod the carrier. Default: none." },
 				"mode": {
 					"type": "string",
-					"enum": ["blend", "fm", "sync"],
+					"enum": ["blend", "fm", "sync", "ring_mod"],
 					"default": "blend",
-					"description": "blend mixes both waves by osc_mix; fm frequency-modulates wave_a with wave_b; sync hard-syncs wave_b to wave_a."
+					"description": "blend mixes both waves by osc_mix; fm frequency-modulates wave_a with wave_b; sync hard-syncs wave_b to wave_a; ring_mod multiplies wave_a by wave_b evaluated at mod_ratio * wave_a's phase, with osc_mix crossfading the dry wave_a to the product."
 				},
 				"mod_ratio": {
 					"type": "number",
 					"default": 1,
-					"description": "The FM ratio (fm) or hard-sync cycle ratio (sync); 0 is a legal bank value, any nonzero value is 0.125..8; ignored by blend."
+					"description": "The FM ratio (fm) or hard-sync cycle ratio (sync); 0 is a legal bank value, any nonzero value is 0.125..8; ignored by blend. For ring_mod it is the carrier ratio. The static value mirrors the fm_ratio target base for compatibility."
 				},
 				"pitch_offset_semitones": {
 					"type": "number",
@@ -267,7 +267,8 @@
 				"duty_b": { "$ref": "#/definitions/target_block" },
 				"osc_mix": { "$ref": "#/definitions/target_block" },
 				"fm_index": { "$ref": "#/definitions/target_block" },
-				"fir_pitch_spread": { "$ref": "#/definitions/target_block" }
+				"fir_pitch_spread": { "$ref": "#/definitions/target_block" },
+				"fm_ratio": { "$ref": "#/definitions/target_block" }
 			},
 			"required": ["wave_a"],
 			"additionalProperties": false
@@ -278,7 +279,7 @@
 			"properties": {
 				"base": {
 					"type": "number",
-					"description": "The value in the target's units (see mod_target). Defaults: volume 1.0, panning 0.5, everything else 0."
+					"description": "The value in the target's units (see mod_target). Defaults: volume 1.0, panning 0.5, fm_ratio 1.0, everything else 0. The fm_ratio default applies on layer 0, whose targets are pre-seeded to these defaults, and on any layer whose fm_ratio block states sources without base; a later-layer fm_ratio block that states neither base nor sources keeps the zeroed binding; a wholly absent fm_ratio block instead inherits the layer's legacy mod_ratio scalar (see mod_target)."
 				},
 				"envelope": { "$ref": "#/definitions/envelope" },
 				"lfo": { "$ref": "#/definitions/lfo" },

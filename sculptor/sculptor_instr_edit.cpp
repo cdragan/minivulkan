@@ -273,7 +273,7 @@ constexpr size_t editor_resident_state_bytes =
 static_assert(editor_resident_state_bytes <=
               32 * 1024 * 1024); // per-bank driver: the oscillator graph pre-provisions nine
                                  // 11-slot target blocks per node (max_node_slots 120), which
-                                 // grows sizeof(Graph) to 5,604,096 bytes; the resident total
+                                 // grows sizeof(Graph) to 1,036,040 bytes; the resident total
 // measures 28,792,116 bytes (28.8 MB).  The phantom-shell pool
 // contributes 20 live InstrumentEditorBank copies x (256 x
 // sizeof(PhantomOscillator) = 97,280 bytes + a 4-byte count) =

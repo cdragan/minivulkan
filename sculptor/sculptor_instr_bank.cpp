@@ -16,7 +16,7 @@
 namespace {
 
 // Per-instrument driver: TargetBinding (40 bytes) x 9 targets x 7 layers.
-static_assert(sizeof(Synth::InstrumentBank) <= 768'000);
+static_assert(sizeof(Synth::InstrumentBank) <= 896'000);
 static_assert(sizeof(Synth::BankUpdateQueue) <= 2 * sizeof(Synth::InstrumentBank) + 32);
 
 } // namespace
@@ -257,7 +257,7 @@ static bool validate_effect_chain(const Synth::EffectChainBinding& chain,
 // modulation input table.
 static bool validate_oscillator_body(const Synth::Oscillator& osc)
 {
-    if (osc.osc_mode >= 3) {
+    if (osc.osc_mode > Synth::osc_mode_ring_mod) {
         return false;
     }
     for (uint32_t w = 0; w < 2; w++) {

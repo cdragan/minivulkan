@@ -119,7 +119,7 @@ enum InstrumentGraphLayoutKind : uint8_t {
 };
 
 constexpr uint32_t instrument_graph_layout_capacity = graph_canonical_node_count + 2u * max_layers * num_mod_targets;
-static_assert(instrument_graph_layout_capacity == 121);
+static_assert(instrument_graph_layout_capacity == 135);
 
 struct InstrumentGraphLayout {
     uint8_t kind;

@@ -3,6 +3,7 @@
 
 #include "sculptor_bank_json.h"
 #include "../core/d_printf.h"
+#include "../core/vmath.h"
 #include "sculptor_atomic_file.h"
 #include "sculptor_effect_graph.h"
 #include "sculptor_instr_envelope_edit.h"
@@ -288,8 +289,8 @@ namespace {
 constexpr uint32_t    num_waves             = 5;
 constexpr const char* wave_names[num_waves] = { "none", "sine", "sawtooth", "pulse", "noise" };
 
-constexpr uint32_t    num_osc_modes                 = 3;
-constexpr const char* osc_mode_names[num_osc_modes] = { "blend", "fm", "sync" };
+constexpr uint32_t    num_osc_modes                 = 4;
+constexpr const char* osc_mode_names[num_osc_modes] = { "blend", "fm", "sync", "ring_mod" };
 
 constexpr uint32_t num_filter_types = Synth::num_filter_types;
 // Indexed by the stored FilterType value, so this order is fixed once banks ship.
@@ -309,9 +310,9 @@ constexpr const char* effect_type_names[Synth::num_effect_types] = { "none",   "
 constexpr uint32_t    num_param_kinds                   = 4;
 constexpr const char* param_kind_names[num_param_kinds] = { "external", "envelope", "lfo", "plain" };
 
-constexpr const char* mod_target_names[Synth::num_mod_targets] = {
-    "volume", "pitch", "panning", "duty_a", "duty_b", "osc_mix", "fm_index", "fir_pitch_spread"
-};
+constexpr const char* mod_target_names[Synth::num_mod_targets] = { "volume",  "pitch",   "panning",  "duty_a",
+                                                                   "duty_b",  "osc_mix", "fm_index", "fir_pitch_spread",
+                                                                   "fm_ratio" };
 
 static_assert(static_cast<uint32_t>(Synth::WaveType::noise_wave) == num_waves - 1);
 static_assert(static_cast<uint32_t>(Synth::ModSource::cc) == num_mod_sources - 1);
@@ -319,7 +320,7 @@ static_assert(static_cast<uint32_t>(Synth::SourceOp::multiply) == num_source_ops
 static_assert(static_cast<uint32_t>(Synth::EffectType::fir) == Synth::num_effect_types - 2);
 static_assert(static_cast<uint32_t>(Synth::EffectType::ring_mod) == Synth::num_effect_types - 1);
 static_assert(static_cast<uint32_t>(Synth::ParamKind::plain) == num_param_kinds - 1);
-static_assert(Synth::osc_mode_hard_sync == num_osc_modes - 1);
+static_assert(Synth::osc_mode_ring_mod == num_osc_modes - 1);
 
 // ---------------------------------------------------------------------------
 // Bounded static staging
@@ -530,26 +531,35 @@ static void enc_oscillator(Out& o, const Synth::Oscillator& osc)
     }
     o.ch('}');
 
-    // Routing is per layer; a layer whose every target sits at the zeroed
-    // binding omits the object entirely.
-    bool have_routing = false;
+    // Routing is per layer; the object is always emitted.  The only
+    // exception is the zeroed-binding-with-zero-scalar case: fm_ratio
+    // with a zeroed binding and a zero scalar is omitted, because
+    // decode backfills the target from the scalar whenever no block
+    // names fm_ratio (see decode_oscillator).  A zeroed binding's
+    // base stays zero even when the scalar is nonzero; the special
+    // branch below emits the scalar instead, so the nonzero value
+    // survives the round trip.
+    o.key("routing");
+    o.ch('{');
     for (uint32_t t = 0; t < Synth::num_mod_targets; t++) {
-        have_routing = have_routing || ! routing_is_default(osc.targets[t]);
-    }
-    if (have_routing) {
-        o.key("routing");
-        o.ch('{');
-        for (uint32_t t = 0; t < Synth::num_mod_targets; t++) {
-            if (routing_is_default(osc.targets[t]))
-                continue;
-            o.sep();
-            o.ch('"');
-            o.str(mod_target_names[t]);
-            o.str("\":");
+        const bool fm_ratio = t == static_cast<uint32_t>(Synth::mod_fm_ratio);
+        if (routing_is_default(osc.targets[t]) && (! fm_ratio || osc.mod_ratio == 0.0f)) {
+            continue;
+        }
+        o.sep();
+        o.ch('"');
+        o.str(mod_target_names[t]);
+        o.str("\":");
+        if (fm_ratio && routing_is_default(osc.targets[t])) {
+            o.ch('{');
+            key_float_nonzero(o, "base_value", osc.mod_ratio);
+            o.ch('}');
+        }
+        else {
             enc_routing(o, osc.targets[t]);
         }
-        o.ch('}');
     }
+    o.ch('}');
     o.ch('}');
 }
 
@@ -1974,11 +1984,20 @@ static void decode_routing(Walker&               w,
     });
 }
 
+// Legacy inheritance clamp shared by the bank and document decoders:
+// exactly zero stays zero (the legacy unset carrier value); anything
+// else is clamped to the slider range.
+static float clamp_legacy_mod_ratio(float ratio)
+{
+    return ratio != 0.0f ? vmath::clamp(ratio, Synth::osc_mod_ratio_min, Synth::osc_mod_ratio_max) : 0.0f;
+}
+
 static void decode_oscillator(Walker& w, uint32_t obj, Synth::Oscillator& osc)
 {
-    int32_t                 octave_offset = 0;
-    int32_t                 fir_slope     = 100;
-    const Synth::FilterType fir_type      = prescan_fir_type(w, obj);
+    bool                    fm_ratio_routed = false;
+    int32_t                 octave_offset   = 0;
+    int32_t                 fir_slope       = 100;
+    const Synth::FilterType fir_type        = prescan_fir_type(w, obj);
     walk_object(w, obj, [&](uint32_t key_idx, uint32_t val_idx) {
         uint32_t value = 0;
         if (key_eq(w, key_idx, "wave_a")) {
@@ -2016,10 +2035,13 @@ static void decode_oscillator(Walker& w, uint32_t obj, Synth::Oscillator& osc)
             });
         else if (key_eq(w, key_idx, "routing"))
             // This layer's own routing decodes straight into its bindings; a
-            // target the object omits keeps the zeroed binding.
+            // target the object omits keeps the zeroed binding (fm_ratio is
+            // backfilled from the scalar below when no block names it).
             walk_object(w, val_idx, [&](uint32_t r_key, uint32_t r_val) {
                 for (uint32_t t = 0; t < Synth::num_mod_targets; t++) {
                     if (key_eq(w, r_key, mod_target_names[t])) {
+                        if (t == static_cast<uint32_t>(Synth::mod_fm_ratio))
+                            fm_ratio_routed = true;
                         decode_routing(w, r_val, static_cast<Synth::ModTarget>(t), fir_type, osc.targets[t]);
                         return;
                     }
@@ -2047,6 +2069,13 @@ static void decode_oscillator(Walker& w, uint32_t obj, Synth::Oscillator& osc)
     if (! w.failed &&
         (osc.pitch_offset < Sculptor::osc_pitch_offset_min || osc.pitch_offset > Sculptor::osc_pitch_offset_max)) {
         w.failed = true;
+    }
+
+    // Legacy banks state only the scalar mod_ratio; when no routing block
+    // names fm_ratio the target inherits it, clamped to the slider range
+    // when nonzero (0 stays 0).
+    if (! fm_ratio_routed) {
+        osc.targets[Synth::mod_fm_ratio].base_value = clamp_legacy_mod_ratio(osc.mod_ratio);
     }
 }
 
@@ -3052,15 +3081,23 @@ static void canonicalize_editor_bank(Synth::InstrumentEditorBank* editor_bank)
     canonicalize_chain(bank.master_chain);
 }
 
-// Document-unit default for a target whose block (or the whole target) is
-// absent: untouched instruments stay audible and centered like the factory
-// default.
+// Document-unit default for a target whose block states sources but
+// omits base (base_set || sources_set gates the assignment in
+// decode_target_doc), and the layer-0 preseed value: untouched
+// instruments stay audible and centered like the factory default.
+// Only layer 0 is pre-seeded to these defaults; later layers begin
+// with zeroed bindings, so a later-layer block that states neither
+// base nor sources keeps the zeroed base.  A wholly absent fm_ratio
+// block instead inherits the layer's mod_ratio scalar
+// (decode_layer_doc).
 static float doc_base_default(Synth::ModTarget target)
 {
     if (target == Synth::mod_volume)
         return 1.0f;
     if (target == Synth::mod_panning)
         return 0.5f;
+    if (target == Synth::mod_fm_ratio)
+        return 1.0f;
     return 0.0f;
 }
 
@@ -3431,6 +3468,7 @@ static void decode_layer_doc(Walker&                     w,
     uint32_t                wave_b        = 0;
     uint32_t                mode          = 0;
     float                   mod_ratio     = 1.0f;
+    bool                    fm_ratio_set  = false;
     float                   pitch_offset  = 0.0f;
     int32_t                 octave_offset = 0;
     int32_t                 fir_slope     = 100;
@@ -3459,8 +3497,14 @@ static void decode_layer_doc(Walker&                     w,
             uint32_t target = 0;
             while (target < Synth::num_mod_targets && ! key_eq(w, key_idx, mod_target_names[target]))
                 target++;
-            if (target < Synth::num_mod_targets)
+            if (target < Synth::num_mod_targets) {
+                // Monotonic like the bank decoder's fm_ratio_routed: an
+                // explicit fm_ratio block stays authoritative no matter which
+                // target keys follow it.
+                if (target == static_cast<uint32_t>(Synth::mod_fm_ratio))
+                    fm_ratio_set = true;
                 decode_target_doc(w, val_idx, static_cast<Synth::ModTarget>(target), fir_type, osc, doc);
+            }
             else if (key_eq(w, key_idx, "lowpass_cutoff") || key_eq(w, key_idx, "highpass_cutoff")) {
                 // Removed cutoff targets: old clipboard/library documents
                 // load with their cutoff bindings dropped; their layout
@@ -3491,10 +3535,16 @@ static void decode_layer_doc(Walker&                     w,
         return;
     }
 
-    osc.osc_type[0]   = static_cast<Synth::WaveType>(wave_a);
-    osc.osc_type[1]   = static_cast<Synth::WaveType>(wave_b);
-    osc.osc_mode      = static_cast<Synth::OscMode>(mode);
-    osc.mod_ratio     = mod_ratio;
+    osc.osc_type[0] = static_cast<Synth::WaveType>(wave_a);
+    osc.osc_type[1] = static_cast<Synth::WaveType>(wave_b);
+    osc.osc_mode    = static_cast<Synth::OscMode>(mode);
+    osc.mod_ratio   = mod_ratio;
+    // Legacy documents state only the scalar ratio; when the document has
+    // no fm_ratio block the target inherits it, clamped to the slider
+    // range when nonzero (0 stays 0).
+    if (! fm_ratio_set) {
+        osc.targets[Synth::mod_fm_ratio].base_value = clamp_legacy_mod_ratio(mod_ratio);
+    }
     osc.pitch_offset  = pitch_offset;
     osc.octave_offset = static_cast<int8_t>(octave_offset);
     // want_int rejects out-of-range magnitudes outright; a negative spelling
@@ -3809,8 +3859,10 @@ bool Synth::decode_instrument_json_for_domain(const char*            text,
     doc.instr               = Synth::Instrument{};
     for (uint32_t target = 0; target < num_mod_targets; target++) {
         const Sculptor::OscTargetView view = Sculptor::osc_target_view(static_cast<ModTarget>(target));
-        // Layer 0 keeps the document defaults for targets its blocks omit;
-        // later layers decode an omitted routing as the zeroed binding.
+        // Layer 0 keeps the document defaults for targets whose blocks omit
+        // base; later layers decode an omitted routing as the zeroed binding.
+        // A wholly absent fm_ratio block instead inherits the layer's scalar
+        // (decode_layer_doc).
         doc.instr.layers[0].targets[target].base_value =
             doc_base_default(static_cast<ModTarget>(target)) * view.bank_scale;
     }
@@ -4088,7 +4140,7 @@ static uint32_t encode_instrument_json_for_domain(char*                         
         const Synth::Oscillator& osc = instr->layers[layer];
         if (static_cast<uint32_t>(osc.osc_type[0]) >= num_waves || static_cast<uint32_t>(osc.osc_type[1]) >= num_waves)
             return 0;
-        if (osc.osc_mode > Synth::osc_mode_hard_sync)
+        if (osc.osc_mode > Synth::osc_mode_ring_mod)
             return 0;
 
         o.sep();

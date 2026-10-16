@@ -92,12 +92,12 @@ extern const char* const source_op_names[2];
 extern const char* const lfo_wave_names[2];
 
 // Sized for the widest projected node - the oscillator: 17 fixed slots
-// plus one 11-slot modulation block per ModTarget after its row
-// (17 + 8*11 = 105).
+// plus one 12-slot modulation block per ModTarget after its row.
+// The high-water mark is the fir slope row at slot 124, so 125 slots.
 // The widest effect (a 5-param effect's 3 + 5*10 = 53 slots) is well
 // under it.  Slot carries list_options[8][32], so a larger cap would
 // balloon every Node allocation.
-constexpr uint32_t max_node_slots = 120;
+constexpr uint32_t max_node_slots = 125;
 
 // Labels of the channel/note modulation source roles, indexed by
 // ModSource - 1 (pitch_bend first).
