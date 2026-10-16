@@ -589,14 +589,18 @@ void Sculptor::gui_envelope_curve(EnvelopeCurveState*              state,
             state->position_edit_ms = Sculptor::envelope_ticks_to_ms(env.points[sel].position);
         }
         ImGui::SetNextItemWidth(70.0f * render_scale);
+        ImGui::PushItemFlag(ImGuiItemFlags_LiveEditOnInputScalar, true);
         ImGui::InputFloat("##envpos", &state->position_edit_ms, 0.0f, 0.0f, "%.0f");
+        ImGui::PopItemFlag();
         const bool active = ImGui::IsItemActive();
         if (ImGui::IsItemEdited()) {
             out_edit->kind      = EnvelopeEditKind::set_position;
             out_edit->point_idx = sel;
             out_edit->position  = Sculptor::envelope_ms_to_ticks(state->position_edit_ms);
         }
-        if (state->position_box_active && ! active) {
+        // The final commit can land on the same frame the box deactivates; a
+        // gesture_end emitted then would clobber that edit.
+        if (state->position_box_active && ! active && out_edit->kind == EnvelopeEditKind::none) {
             out_edit->kind = EnvelopeEditKind::gesture_end;
         }
         state->position_box_active = active;
@@ -609,7 +613,9 @@ void Sculptor::gui_envelope_curve(EnvelopeCurveState*              state,
         ImGui::SetNextItemWidth(70.0f * render_scale);
         const bool value_editable = env.min_max_delta != 0.0f;
         ImGui::BeginDisabled(! value_editable);
+        ImGui::PushItemFlag(ImGuiItemFlags_LiveEditOnInputScalar, true);
         ImGui::InputFloat("##envval", &state->value_edit_value, 0.0f, 0.0f, "%.4f");
+        ImGui::PopItemFlag();
         const bool value_active = ImGui::IsItemActive();
         if (value_editable && ImGui::IsItemEdited()) {
             float raw = (state->value_edit_value - env.min_value) / env.min_max_delta;
@@ -623,7 +629,7 @@ void Sculptor::gui_envelope_curve(EnvelopeCurveState*              state,
             out_edit->point_idx = sel;
             out_edit->value     = static_cast<uint16_t>(raw + 0.5f);
         }
-        if (state->value_box_active && ! value_active) {
+        if (state->value_box_active && ! value_active && out_edit->kind == EnvelopeEditKind::none) {
             out_edit->kind = EnvelopeEditKind::gesture_end;
         }
         state->value_box_active = value_active;
