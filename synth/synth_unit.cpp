@@ -4356,6 +4356,26 @@ static void effects_clipboard_regressions()
                 TEST(! Synth::decode_editor_bank_json(spliced, spliced_len, &out));
             }
         }
+        // ring_mod: distinctive rate/mix values must survive the bank codec
+        // round-trip, and the encoded type name must appear verbatim.
+        {
+            static Synth::InstrumentEditorBank bank;
+            Synth::init_default_bank(&bank.bank);
+            enabled_effect(bank.bank, 0, 0, Synth::EffectType::ring_mod);
+            bank.bank.channel_chains[0].effects[0].bindings[0].base_value = 234.5f;
+            bank.bank.channel_chains[0].effects[0].bindings[1].base_value = 0.75f;
+            TEST(Synth::validate_instrument_bank(&bank.bank));
+            static char    payload[Synth::library_payload_max];
+            const uint32_t payload_len = Synth::encode_editor_bank_json(&bank, payload, sizeof(payload));
+            TEST(payload_len > 0);
+            TEST(strstr(payload, "\"ring_mod\"") != nullptr);
+            static Synth::InstrumentEditorBank decoded_bank;
+            memset(&decoded_bank, 0, sizeof(decoded_bank));
+            TEST(Synth::decode_editor_bank_json(payload, payload_len, &decoded_bank));
+            TEST(decoded_bank.bank.channel_chains[0].effects[0].type == Synth::EffectType::ring_mod);
+            TEST(decoded_bank.bank.channel_chains[0].effects[0].bindings[0].base_value == 234.5f);
+            TEST(decoded_bank.bank.channel_chains[0].effects[0].bindings[1].base_value == 0.75f);
+        }
     }
 
     // The authored example uses the production codec, including aliases and a layout-only LFO.
@@ -10803,12 +10823,14 @@ int main()
     TEST(Synth::get_effect_param_floats(Synth::EffectType::reverb) == 3);
     TEST(Synth::get_effect_param_floats(Synth::EffectType::compressor) == 5);
     TEST(Synth::get_effect_param_floats(Synth::EffectType::fir) == 3);
+    TEST(Synth::get_effect_param_floats(Synth::EffectType::ring_mod) == 2);
     TEST(Synth::get_effect_state_floats(Synth::EffectType::distortion) == 0);
     TEST(Synth::get_effect_state_floats(Synth::EffectType::delay) == 88201);
     TEST(Synth::get_effect_state_floats(Synth::EffectType::chorus) == 4412);
     TEST(Synth::get_effect_state_floats(Synth::EffectType::reverb) == 25191);
     TEST(Synth::get_effect_state_floats(Synth::EffectType::compressor) == 1);
     TEST(Synth::get_effect_state_floats(Synth::EffectType::fir) == 3074);
+    TEST(Synth::get_effect_state_floats(Synth::EffectType::ring_mod) == 1);
     TEST(Synth::get_effect_param_floats(Synth::EffectType::none) == 0);
     TEST(Synth::get_effect_state_floats(Synth::EffectType::none) == 0);
 

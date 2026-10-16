@@ -17,6 +17,7 @@ enum class EffectType : uint8_t {
     reverb,
     compressor,
     fir,
+    ring_mod,
     num_types
 };
 

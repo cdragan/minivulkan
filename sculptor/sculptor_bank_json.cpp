@@ -304,7 +304,7 @@ constexpr const char* mod_source_names[num_mod_sources] = {
 };
 
 constexpr const char* effect_type_names[Synth::num_effect_types] = { "none",   "distortion", "delay", "chorus",
-                                                                     "reverb", "compressor", "fir" };
+                                                                     "reverb", "compressor", "fir",   "ring_mod" };
 
 constexpr uint32_t    num_param_kinds                   = 4;
 constexpr const char* param_kind_names[num_param_kinds] = { "external", "envelope", "lfo", "plain" };
@@ -316,7 +316,8 @@ constexpr const char* mod_target_names[Synth::num_mod_targets] = {
 static_assert(static_cast<uint32_t>(Synth::WaveType::noise_wave) == num_waves - 1);
 static_assert(static_cast<uint32_t>(Synth::ModSource::cc) == num_mod_sources - 1);
 static_assert(static_cast<uint32_t>(Synth::SourceOp::multiply) == num_source_ops - 1);
-static_assert(static_cast<uint32_t>(Synth::EffectType::fir) == Synth::num_effect_types - 1);
+static_assert(static_cast<uint32_t>(Synth::EffectType::fir) == Synth::num_effect_types - 2);
+static_assert(static_cast<uint32_t>(Synth::EffectType::ring_mod) == Synth::num_effect_types - 1);
 static_assert(static_cast<uint32_t>(Synth::ParamKind::plain) == num_param_kinds - 1);
 static_assert(Synth::osc_mode_hard_sync == num_osc_modes - 1);
 

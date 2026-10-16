@@ -16,6 +16,7 @@ const uint effect_chorus     = 3u;
 const uint effect_reverb     = 4u;
 const uint effect_compressor = 5u;
 const uint effect_fir        = 6u;
+const uint effect_ring_mod   = 7u;
 
 struct EffectParams {
     uint  type;
@@ -358,6 +359,37 @@ vec2 apply_fir(in EffectParams eff)
     return vec2(acc_left, acc_right);
 }
 
+// Ring modulation: out = mix(in, in * sin(2*pi*phase), mix).  state[0] is the
+// carrier phase accumulator, advanced across steps so the carrier stays
+// continuous between steps.
+vec2 apply_ring_mod(in EffectParams eff)
+{
+    const float rate_hz    = eff.params[0];
+    const float mix_amount = eff.params[1];
+    const float base_phase = data[eff.state_offs];
+
+    const float pi = 3.14159265358979;
+
+    const float phase = base_phase + float(gl_LocalInvocationID.x) * rate_hz / float(sampling_rate);
+
+    const float in_left  = samples_left[gl_LocalInvocationID.x];
+    const float in_right = samples_right[gl_LocalInvocationID.x];
+
+    // fract() keeps the carrier argument small at high rates.
+    const float carrier = sin(2.0 * pi * fract(phase));
+    const vec2  result =
+        vec2(mix(in_left, in_left * carrier, mix_amount), mix(in_right, in_right * carrier, mix_amount));
+
+    barrier();
+
+    // The barrier guarantees every lane has read the base phase before lane 0 overwrites it.
+    if (gl_LocalInvocationID.x == 0u) {
+        data[eff.state_offs] = fract(base_phase + float(work_group_size) * rate_hz / float(sampling_rate));
+    }
+
+    return result;
+}
+
 void main()
 {
     const EffectParams eff = effects[gl_WorkGroupID.x];
@@ -386,6 +418,9 @@ void main()
     }
     else if (eff.type == effect_fir) {
         result = apply_fir(eff);
+    }
+    else if (eff.type == effect_ring_mod) {
+        result = apply_ring_mod(eff);
     }
 
     data[eff.sound_offs + gl_LocalInvocationID.x * 2]     = result.x;

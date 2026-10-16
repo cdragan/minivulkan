@@ -833,7 +833,7 @@ static bool fx_connection_validator(void*              user_data,
     return true;
 }
 
-// Canvas menu: the six real effect types, capped by the chain length.
+// Canvas menu: the seven real effect types, capped by the chain length.
 static void fx_canvas_menu(void* user_data)
 {
     (void)user_data;

@@ -25,7 +25,8 @@ using Sculptor::PropertyType;
 using Sculptor::Slot;
 using Sculptor::SlotKind;
 
-// The six real effect types' node rows, in shader param order.  Slider
+namespace {
+// The seven real effect types' node rows, in shader param order.  Slider
 // bounds are editing aids only: the shaders clamp delay samples, chorus
 // depth and FIR cutoffs themselves, so out-of-range values stay audible and
 // safe.  FIR: the editor writes a zero cutoff when a lowpass slider
@@ -62,6 +63,7 @@ static const Sculptor::EffectTypeInfo effect_type_table[Synth::num_effect_types]
         {},
         {} },
       3 },
+    { "Ring Modulator", { { "Rate Hz", 0.1f, 10000.0f, true }, { "Mix", 0.0f, 1.0f, false }, {}, {}, {} }, 2 },
 };
 
 // Neutral, audible defaults: a freshly added effect must change the sound
@@ -75,7 +77,9 @@ static const float effect_default_params[Synth::num_effect_types][Synth::max_eff
     { 0.84f, 0.5f, 0.3f, 0.0f, 0.0f },     // reverb: freeverb room
     { 0.5f, 4.0f, 0.0f, 0.999f, 1.0f },    // compressor
     { 8000.0f, 0.0f, 100.0f, 0.0f, 0.0f }, // fir: full 1025-tap window slope
+    { 100.0f, 1.0f, 0.0f, 0.0f, 0.0f },    // ring_mod: 100 Hz, full mix
 };
+} // anonymous namespace
 
 static void effect_layout_name(const Synth::EffectChainBinding& chain,
                                uint32_t                         owner,

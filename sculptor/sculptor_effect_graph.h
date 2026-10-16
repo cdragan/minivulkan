@@ -37,7 +37,7 @@ struct EffectTypeInfo {
     uint8_t         num_params;
 };
 
-// Display metadata for the six real effect types; the index is the type.
+// Display metadata for the seven real effect types; the index is the type.
 // The bounds are editing aids (sliders clamp on interaction), not DSP
 // limits: the shaders already clamp or tolerate out-of-range params.
 const EffectTypeInfo& effect_type_info(Synth::EffectType type);
