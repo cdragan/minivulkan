@@ -895,11 +895,11 @@ struct ImGuiPackedDate
     ImU16   Month : 4;  // Month (1-12)
     ImU16   Day : 5;    // Day (1-31)
 
-    ImGuiPackedDate()                           { Year = Month = Day = 0; }
-    ImGuiPackedDate(int yyyymmdd)               { Year = (ImU16)((yyyymmdd / 10000) - 2000); Month = (ImU16)((yyyymmdd / 100) % 100); Day = (ImU16)(yyyymmdd % 100); } // Pack
+    ImGuiPackedDate()                           { Year = 0; Month = 0; Day = 0; }
+    ImGuiPackedDate(int yyyymmdd)               { Year = ((yyyymmdd / 10000) - 2000) & 127; Month = ((yyyymmdd / 100) % 100) & 15; Day = (yyyymmdd % 100) & 31; } // Pack
     bool                IsValid()               { return (Year && Month && Day); }
     int                 Unpack() const          { return (Year && Month && Day) ? ((Year + 2000) * 10000) + (Month * 100) + Day : 0; }      // Unpack
-    void                SubtractMonths(int m)   { while (m > 0) { Year -= Month == 1; Month = (Month == 1) ? 12 : Month - 1; m--; } }       // FIXME-OPT: Stupid but enough for what we do with it.
+    void                SubtractMonths(int m)   { while (m > 0) { Year = (Year - (Month == 1)) & 127; Month = ((Month == 1) ? 12 : Month - 1) & 15; m--; } }       // FIXME-OPT: Stupid but enough for what we do with it.
 };
 
 // Helper: ImGuiStorage
