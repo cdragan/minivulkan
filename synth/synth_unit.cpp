@@ -513,7 +513,7 @@ static void build_osc_graph_small_fixture(Synth::InstrumentBank* bank,
 
     // The volume target carries its own envelope descriptor: descriptors are
     // shared by every target that wires them, and the volume shape (minimum 0,
-    // first point 0) cannot serve a non-volume target, so volume and
+    // nonnegative range) cannot serve a non-volume target, so volume and
     // pitch can never share one.  This fixture's volume curve deliberately
     // keeps the pre-constraint content (a legacy bank state the runtime must
     // still play).
@@ -15346,8 +15346,8 @@ int main()
 
     // Drop-commit preset: a fresh binding on mod_volume whose descriptor
     // carries the drop-shaped default (the bipolar default converted before
-    // commit: minimum 0 with the effective top preserved, first and last
-    // raw point 0) passes env_volume_shape_ok, derives the family wire and
+    // commit: minimum 0 with the effective top preserved, point values
+    // authored) passes env_volume_shape_ok, derives the family wire and
     // keeps the family row visible; the same bipolar default on a
     // non-volume target keeps the bipolar shape and still derives its wire.
     {
@@ -15372,16 +15372,19 @@ int main()
         const uint32_t env_slot = bank.envelopes.allocate();
         TEST(env_slot == 0);
         bank.envelopes.entries[env_slot] = bipolar;
-        const float top_before           = bipolar.min_value + 65535.0f * bipolar.min_max_delta;
+        // Author a non-zero onset: the conversion must leave it alone.
+        bank.envelopes.entries[env_slot].points[0].value = 0x4000;
+        const float top_before                           = bipolar.min_value + 65535.0f * bipolar.min_max_delta;
         TEST(Sculptor::env_convert_to_volume_shape(bank.envelopes.entries[env_slot]));
         // The effective top is preserved: the converted floor sits at 0 and
         // the delta carries the whole span.
         const Synth::EnvelopeDescriptor& converted = bank.envelopes.entries[env_slot];
         TEST(converted.min_value == 0.0f);
         TEST(converted.min_value + 65535.0f * converted.min_max_delta == top_before);
-        TEST(converted.points[0].value == 0);
-        // The release tail stays authored: the sustain-aware conversion pins
-        // only the first point, so the authored middle value survives.
+        // The conversion pins only the range: the authored onset and the
+        // release tail survive (the runtime ramps volume from silence at
+        // note-on, so a non-zero first point is safe).
+        TEST(converted.points[0].value == 0x4000);
         TEST(converted.points[2].value == 0x8000);
         TEST(Sculptor::env_volume_shape_ok(bank.envelopes.entries[env_slot]));
 
@@ -15419,6 +15422,31 @@ int main()
         TEST(find_osc_graph_connection(pitch_graph, { pitch_node, Sculptor::osc_target_env_dot(Synth::mod_pitch) }) !=
              Sculptor::pool_no_slot);
         TEST(! Sculptor::osc_target_field_hidden(pitch_graph, pitch_node, Synth::mod_pitch, 0));
+    }
+
+    // The volume shape constraint is exactly the nonnegative range: a
+    // non-zero first point is accepted, a non-zero minimum and a negative
+    // delta are refused, and the conversion refuses a negative effective
+    // top without touching the descriptor.
+    {
+        Synth::EnvelopeDescriptor shaped = {};
+        shaped.min_value                 = 0.0f;
+        shaped.min_max_delta             = 1.0f / 65535.0f;
+        shaped.points[0].value           = 0x4000;
+        TEST(Sculptor::env_volume_shape_ok(shaped));
+        shaped.min_value = 0.5f;
+        TEST(! Sculptor::env_volume_shape_ok(shaped));
+        shaped.min_value     = 0.0f;
+        shaped.min_max_delta = -1.0f / 65535.0f;
+        TEST(! Sculptor::env_volume_shape_ok(shaped));
+        shaped.min_max_delta   = 1.0f / 65535.0f;
+        shaped.min_value       = -2.0f;
+        shaped.points[1].value = 0x8000;
+        TEST(! Sculptor::env_convert_to_volume_shape(shaped));
+        TEST(shaped.min_value == -2.0f);
+        TEST(shaped.min_max_delta == 1.0f / 65535.0f);
+        TEST(shaped.points[0].value == 0x4000);
+        TEST(shaped.points[1].value == 0x8000);
     }
 
     // A pull from the gray dot on a trailing shell's slot swaps in place

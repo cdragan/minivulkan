@@ -911,13 +911,14 @@ bool Sculptor::env_volume_shape_ok(const Synth::EnvelopeDescriptor& env)
 {
     // The span must be nonnegative too: a negative delta would evaluate the
     // interior points below the zero floor.
-    // Tail values remain authored (a sustain release may end above 0); only
-    // the first point stays pinned at 0 so a note still starts in silence.
-    return env.min_value == 0.0f && env.min_max_delta >= 0.0f && env.points[0].value == 0;
+    // Tail values remain authored (a sustain release may end above 0), and
+    // the first point's value is authored like every other point: the
+    // runtime ramps volume from silence at note-on.
+    return env.min_value == 0.0f && env.min_max_delta >= 0.0f;
 }
 
-// Forces the volume-envelope shape: minimum 0 with the effective top preserved,
-// and the first point at 0 (tail values remain authored).  Returns false when the effective top
+// Forces the volume-envelope shape: minimum 0 with the effective top preserved;
+// raw point values stay authored.  Returns false when the effective top
 // is negative, which cannot be preserved under the nonnegative volume range.
 // The drop-commit preset converts a freshly allocated descriptor before the
 // commit, so a volume binding never lands in the bipolar default shape the
@@ -928,9 +929,8 @@ bool Sculptor::env_convert_to_volume_shape(Synth::EnvelopeDescriptor& env)
     if (max_value < 0.0f) {
         return false;
     }
-    env.min_value       = 0.0f;
-    env.min_max_delta   = max_value / 65535.0f;
-    env.points[0].value = 0;
+    env.min_value     = 0.0f;
+    env.min_max_delta = max_value / 65535.0f;
     return true;
 }
 
@@ -1698,7 +1698,7 @@ bool Sculptor::osc_graph_validate(void* user_data, Graph& graph, EndPoint output
             // base value row resolves the dot in the apply path, a direct
             // dot drop names it here.  One envelope per (layer, target):
             // the destination dot must be free.  A volume envelope
-            // (minimum 0, first and last point 0) serves only the volume
+            // (minimum 0, nonnegative span) serves only the volume
             // target, and only a volume envelope serves the volume target:
             // the descriptor is shared by every target that wires it, and
             // the two roles want different ranges.
@@ -2455,8 +2455,8 @@ static bool apply_connection_change(Synth::InstrumentEditorBank* bank,
     }
 
     // Wiring an envelope into the volume target forces the volume-envelope
-    // shape on the shared descriptor: minimum 0 with the top preserved, and
-    // the first point at 0, so a note starts in silence.  The wire-time
+    // shape on the shared descriptor: minimum 0 with the top preserved; raw
+    // point values, including the first, stay as drawn.  The wire-time
     // validator refuses cross-target sharing, so the conversion never changes
     // what a non-volume user hears.
     if ((change.kind == Sculptor::ChangeKind::connection_added ||

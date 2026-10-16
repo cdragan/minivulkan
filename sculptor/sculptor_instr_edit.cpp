@@ -1646,8 +1646,8 @@ int Sculptor::SynthEditor::envelope_state_widget_entry(void* user_data, float re
         return widget_height;
     }
 
-    // A volume envelope keeps the volume shape: minimum 0 and first point
-    // 0; tail values remain authored.  The constraint follows the
+    // A volume envelope keeps the volume shape: minimum 0 and a nonnegative
+    // range; point values remain authored.  The constraint follows the
     // descriptor's volume wiring, so every node aliasing the descriptor is
     // constrained the same way.
     bool volume_used = false;
@@ -1659,7 +1659,7 @@ int Sculptor::SynthEditor::envelope_state_widget_entry(void* user_data, float re
             Sculptor::undo_group_reset(&osc_undo_group);
         }
         Sculptor::notify_warning(
-            "Synth: volume envelope keeps the first point at 0; unwire it from Volume to edit freely");
+            "Synth: volume envelope keeps a nonnegative range; unwire it from Volume to edit freely");
         return widget_height;
     }
 

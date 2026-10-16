@@ -473,11 +473,11 @@ bool osc_target_field_hidden(const Graph& graph, uint32_t node_idx, uint32_t tar
 // Pure render-state predicate: all seven slots stay allocated, only the
 // filter hides rows.
 bool osc_layer_slot_hidden(uint32_t slot_idx, const OscGraphMapping& mapping, uint8_t missing_bits);
-// volume envelope starts in silence (tail values remain authored).
+// Volume envelope keeps a nonnegative range (tail and first-point values remain authored).
 bool env_volume_shape_ok(const Synth::EnvelopeDescriptor& env);
 
 // Forces the volume-envelope shape on a descriptor: minimum 0 with the
-// effective top preserved, and the first and the last raw point at 0.
+// effective top preserved; raw point values stay authored.
 // Returns false when the effective top is negative, which cannot be
 // preserved under the nonnegative volume range.  The apply path runs it
 // when a wire lands on a volume target; the drop-commit preset runs it
