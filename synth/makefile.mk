@@ -23,6 +23,7 @@ synth_unit_src_files += sculptor/sculptor_osc_graph.cpp
 synth_unit_src_files += sculptor/sculptor_effect_graph.cpp
 synth_unit_src_files += synth/midi_file.cpp
 synth_unit_src_files += synth/synth_soundtrack_codec.cpp
+synth_unit_src_files += synth/midi_input.cpp
 
 midi_decode_unit_src_files += synth/midi_decode_unit.cpp
 

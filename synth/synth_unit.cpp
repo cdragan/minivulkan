@@ -15,6 +15,7 @@
 #include "../sculptor/sculptor_osc_graph.h"
 #include "../sculptor/sculptor_undo.h"
 #include "midi_file.h"
+#include "midi_input.h"
 #include "synth_effect_expansion.h"
 #include "synth_effects.h"
 #include "synth_instrument.h"
@@ -10172,8 +10173,106 @@ static void osc_instrument_node_layout_regressions()
     }
 }
 
+// realtime_synth.cpp is not linked into this unit.  pump_live_midi in
+// midi_input.cpp calls apply_midi_event, so this no-op stub swallows the
+// drained events.
+void Synth::apply_midi_event(const Synth::MidiEvent&) {}
+
+static bool submit_test_midi_event(Synth::EvType type, uint32_t channel, uint32_t note, uint32_t data)
+{
+    Synth::MidiEvent event;
+    memset(&event, 0, sizeof(event));
+
+    event.event     = type;
+    event.channel   = static_cast<uint8_t>(channel);
+    event.note      = static_cast<uint8_t>(note);
+    event.note_data = static_cast<uint8_t>(data);
+
+    return Synth::submit_external_midi_event(event);
+}
+
+static bool external_note_held(uint32_t channel, uint32_t note)
+{
+    uint32_t held[4];
+    Synth::get_external_held_notes(channel, held);
+
+    return ((held[note >> 5] >> (note & 31u)) & 1u) != 0;
+}
+
+static bool external_channel_clear(uint32_t channel)
+{
+    uint32_t held[4];
+    Synth::get_external_held_notes(channel, held);
+
+    return held[0] == 0 && held[1] == 0 && held[2] == 0 && held[3] == 0;
+}
+
+static void external_held_notes_regressions()
+{
+    using Synth::EvType;
+
+    // note_on sets the bit only on its own channel.
+    TEST(submit_test_midi_event(EvType::note_on, 2, 60, 100));
+    TEST(external_note_held(2, 60));
+    TEST(! external_note_held(3, 60));
+    TEST(external_channel_clear(3));
+
+    // Multiple notes coexist, also across word boundaries.
+    TEST(submit_test_midi_event(EvType::note_on, 2, 64, 90));
+    TEST(submit_test_midi_event(EvType::note_on, 2, 127, 90));
+    TEST(submit_test_midi_event(EvType::note_on, 2, 0, 90));
+    TEST(external_note_held(2, 60));
+    TEST(external_note_held(2, 64));
+    TEST(external_note_held(2, 127));
+    TEST(external_note_held(2, 0));
+
+    // Channels are independent.
+    TEST(submit_test_midi_event(EvType::note_on, 5, 60, 100));
+    TEST(submit_test_midi_event(EvType::note_off, 5, 60, 0));
+    TEST(! external_note_held(5, 60));
+    TEST(external_note_held(2, 60));
+
+    // note_off clears only its own note.
+    TEST(submit_test_midi_event(EvType::note_off, 2, 60, 64));
+    TEST(! external_note_held(2, 60));
+    TEST(external_note_held(2, 64));
+
+    // note_on with velocity 0 clears the note.
+    TEST(submit_test_midi_event(EvType::note_on, 2, 64, 0));
+    TEST(! external_note_held(2, 64));
+
+    // Out-of-range channel and note are ignored.
+    submit_test_midi_event(EvType::note_on, Synth::max_channels, 60, 100);
+    submit_test_midi_event(EvType::note_on, 2, 200, 100);
+    TEST(! external_note_held(2, 60));
+    TEST(! external_note_held(2, 200 & 127));
+
+    // A controller event whose controller byte aliases note 60 does not set
+    // or clear a bit.  Note 60 held on channel 4 must stay held.
+    TEST(submit_test_midi_event(EvType::note_on, 4, 60, 100));
+    submit_test_midi_event(EvType::controller, 2, 60, 100);
+    submit_test_midi_event(EvType::controller, 4, 60, 0);
+    TEST(! external_note_held(2, 60));
+    TEST(external_note_held(4, 60));
+    TEST(submit_test_midi_event(EvType::note_off, 4, 60, 0));
+
+    // An invalid channel query writes zeros.
+    TEST(external_channel_clear(Synth::max_channels));
+
+    // Clear the remaining notes, then check that every channel is clear.
+    TEST(submit_test_midi_event(EvType::note_off, 2, 127, 0));
+    TEST(submit_test_midi_event(EvType::note_off, 2, 0, 0));
+    for (uint32_t channel = 0; channel < Synth::max_channels; channel++) {
+        TEST(external_channel_clear(channel));
+    }
+
+    // Drain the ring.  The stub above swallows the events.
+    Synth::pump_live_midi();
+}
+
 int main()
 {
+    external_held_notes_regressions();
     effects_paste_pin_regressions();
     effects_layout_classification_regressions();
     effects_structural_regressions();

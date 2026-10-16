@@ -1430,6 +1430,25 @@ static float boundary_x_of(uint32_t note, float white_w, float black_w)
     return x;
 }
 
+// Muted pastel color of a zone, shared by the keyboard strips and the zone tab
+// swatch.  Neighbor indices alternate warm and cool hues so adjacent zones
+// differ.
+static uint32_t zone_color(uint32_t entry)
+{
+    static const uint32_t palette[8] = {
+        IM_COL32(220, 140, 150, 255), // rose
+        IM_COL32(140, 200, 150, 255), // sage
+        IM_COL32(220, 200, 125, 255), // sand
+        IM_COL32(130, 170, 225, 255), // sky
+        IM_COL32(230, 165, 120, 255), // peach
+        IM_COL32(120, 200, 200, 255), // teal
+        IM_COL32(205, 145, 200, 255), // mauve
+        IM_COL32(175, 150, 220, 255)  // lavender
+    };
+
+    return palette[entry % 8];
+}
+
 // The chain's kind-4 record carrying a projected node's saved place, -1
 // when the node never moved.
 static int32_t find_fx_layout_record(const Synth::InstrumentEditorBank& bank, uint32_t chain, const char* name)
@@ -2026,14 +2045,29 @@ void Sculptor::SynthEditor::gui_channel_pane(uint32_t channel)
             ImGuiTabItemFlags tab_flags = 0;
             if (zone_tab_force_entry == static_cast<int32_t>(entry))
                 tab_flags |= ImGuiTabItemFlags_SetSelected;
-            if (ImGui::BeginTabItem(label, nullptr, tab_flags)) {
+            const bool tab_open = ImGui::BeginTabItem(label, nullptr, tab_flags);
+            // Get the tab hover state before the swatch Dummy replaces the last item.
+            const bool tab_hovered = ImGui::IsItemHovered();
+            {
+                // Show the zone color on every tab header so users correlate tabs with
+                // the zone strips on the keyboard.  The last item is the tab header.
+                const ImVec2      min  = ImGui::GetItemRectMin();
+                const ImVec2      max  = ImGui::GetItemRectMax();
+                ImDrawList* const draw = ImGui::GetWindowDrawList();
+                draw->AddRectFilled(ImVec2(min.x, min.y),
+                                    ImVec2(max.x, min.y + 3.0f),
+                                    zone_color(entry),
+                                    ImGui::GetStyle().TabRounding,
+                                    ImDrawFlags_RoundTop);
+            }
+            if (tab_open) {
                 if (zone_tab_force_entry == static_cast<int32_t>(entry))
                     zone_tab_force_entry = -1; // one-shot consumed once the bar shows the tab
                 selected_zone[channel] = static_cast<int32_t>(entry);
                 show_effects_mode      = false;
                 ImGui::EndTabItem();
             }
-            if (ImGui::IsItemHovered())
+            if (tab_hovered)
                 ImGui::SetTooltip("%s\nfrom note %u",
                                   name,
                                   static_cast<uint32_t>(bank.channel_zones[channel][entry].start_note) - 1);
@@ -2041,6 +2075,9 @@ void Sculptor::SynthEditor::gui_channel_pane(uint32_t channel)
         const ImGuiTabItemFlags fx_flags = effects_tab_pend == 1 ? ImGuiTabItemFlags_SetSelected : 0;
         if (ImGui::BeginTabItem("Effects", nullptr, fx_flags)) {
             show_effects_mode = true;
+            // The effects chain is channel-wide, so no zone is selected in effects
+            // mode and the keyboard shows no emphasized strip.
+            selected_zone[channel] = -1;
             if (fx_flags) {
                 effects_tab_pend = -1;
             }
@@ -3119,23 +3156,37 @@ void Sculptor::SynthEditor::gui_keyboard()
     const ImVec2 origin     = ImVec2(top.x + (width - keyboard_w) * 0.5f, top.y + 8.0f);
     const float  black_w    = white_w * 0.6f;
     const float  black_h    = height * 0.6f;
-    // Keys end in a slightly rounded bottom edge; the strips and highlights below
-    // reuse the same corner treatment so overlays do not square it off.
+    // Keys and zone margin strips use the same slightly rounded corners.
     const float       key_rounding    = 2.0f;
     const ImDrawFlags bottom_rounding = ImDrawFlags_RoundBottom;
 
     // Fixed piano colors: a dark theme would otherwise invert the keys.
-    ImDrawList* const draw            = ImGui::GetWindowDrawList();
-    const uint32_t    color_white     = IM_COL32(240, 240, 240, 255);
-    const uint32_t    color_line      = IM_COL32(120, 120, 120, 255);
-    const uint32_t    color_black_key = IM_COL32(35, 35, 35, 255);
-    const uint32_t    color_held      = IM_COL32(90, 160, 255, 255);
+    ImDrawList* const draw                = ImGui::GetWindowDrawList();
+    const uint32_t    color_white         = IM_COL32(240, 240, 240, 255);
+    const uint32_t    color_line          = IM_COL32(120, 120, 120, 255);
+    const uint32_t    color_black_key     = IM_COL32(35, 35, 35, 255);
+    const uint32_t    color_white_pressed = IM_COL32(200, 200, 200, 255);
+    const uint32_t    color_black_pressed = IM_COL32(95, 95, 95, 255);
+    const uint32_t    color_boundary      = IM_COL32(70, 70, 70, 255);
+
+    // Pressed keys: notes held in the input registry (external MIDI and the
+    // submitted mouse note) plus the mouse-held note.  Channel 0 is only a
+    // placeholder for the master target, so the master target shows none.
+    uint32_t held[4] = {};
+    if (channel_target) {
+        Synth::get_external_held_notes(channel, held);
+
+        if (held_note_active && held_note_channel == channel && held_note < 128)
+            held[held_note >> 5] |= 1u << (held_note & 31u);
+    }
 
     for (uint32_t wk = 0; wk < keyboard_white_count; wk++) {
-        const float x = origin.x + static_cast<float>(wk) * white_w;
+        const float    x       = origin.x + static_cast<float>(wk) * white_w;
+        const uint32_t note    = note_at_white(keyboard_white_base + wk);
+        const bool     pressed = ((held[note >> 5] >> (note & 31u)) & 1u) != 0;
         draw->AddRectFilled(ImVec2(x, origin.y),
                             ImVec2(x + white_w, origin.y + height),
-                            color_white,
+                            pressed ? color_white_pressed : color_white,
                             key_rounding,
                             bottom_rounding);
         // Stop the divider short of the rounded bottom so it does not cut into the notch.
@@ -3148,84 +3199,62 @@ void Sculptor::SynthEditor::gui_keyboard()
     for (uint32_t note = keyboard_first_note; note <= keyboard_last_note; note++) {
         if (! is_black_note(note))
             continue;
-        const float x = origin.x + boundary_x_of(note, white_w, black_w);
+        const float x       = origin.x + boundary_x_of(note, white_w, black_w);
+        const bool  pressed = ((held[note >> 5] >> (note & 31u)) & 1u) != 0;
         draw->AddRectFilled(ImVec2(x, origin.y),
                             ImVec2(x + black_w, origin.y + black_h),
-                            color_black_key,
+                            pressed ? color_black_pressed : color_black_key,
                             key_rounding,
                             bottom_rounding);
     }
 
-    // Zone boundaries: a separator at each zone's first note, colored by zone index.
     if (active) {
-        static const uint32_t zone_palette[8] = { IM_COL32(255, 80, 80, 255),   IM_COL32(80, 255, 120, 255),
-                                                  IM_COL32(80, 160, 255, 255),  IM_COL32(255, 200, 60, 255),
-                                                  IM_COL32(200, 100, 255, 255), IM_COL32(60, 220, 220, 255),
-                                                  IM_COL32(255, 120, 200, 255), IM_COL32(180, 180, 80, 255) };
+        const Synth::Zone* const zones    = bank.channel_zones[channel];
+        const int32_t            selected = selected_zone[channel];
+        const bool               emphasis = zone_count(bank, channel) > 1 && selected >= 0;
 
-        const Synth::Zone* const zones = bank.channel_zones[channel];
-        // Zone strips: the first zone keeps the default key color; later zones tint
-        // the bottom of every key they cover, white and black alike.
-        for (uint32_t note = keyboard_first_note; note <= keyboard_last_note; note++) {
-            const int32_t zone = static_cast<int32_t>(Synth::zone_entry_at(zones, note));
-            if (zone <= 0)
+        // Zone strips: one continuous strip per zone in the top margin, above
+        // the keys.  With more than one zone, strips of unselected zones dim
+        // to about 60% alpha so the selected zone reads at a glance.
+        for (uint32_t entry = 0; entry < Synth::max_instr_per_channel; entry++) {
+            if (zones[entry].start_note == 0)
+                break;
+
+            const uint32_t start    = zones[entry].start_note - 1u;
+            const bool     has_next = entry + 1 < Synth::max_instr_per_channel && zones[entry + 1].start_note != 0;
+            const uint32_t end      = has_next ? zones[entry + 1].start_note - 1u : 128u;
+            if (start > keyboard_last_note)
+                break;
+            if (end <= keyboard_first_note)
                 continue;
-            const float x = origin.x + boundary_x_of(note, white_w, black_w);
-            if (is_black_note(note))
-                draw->AddRectFilled(ImVec2(x, origin.y + black_h - 8.0f),
-                                    ImVec2(x + black_w, origin.y + black_h),
-                                    zone_palette[zone % 8],
-                                    key_rounding,
-                                    bottom_rounding);
-            else
-                draw->AddRectFilled(ImVec2(x, origin.y + height - 8.0f),
-                                    ImVec2(x + white_w, origin.y + height),
-                                    zone_palette[zone % 8],
-                                    key_rounding,
-                                    bottom_rounding);
-        }
-        // Selection dimming: keys outside the selected zone lose contrast so the
-        // selected zone reads at a glance (white keys darken, black keys lighten).
-        const int32_t selected = selected_zone[channel];
-        if (zone_count(bank, channel) > 1 && selected >= 0) {
-            for (uint32_t note = keyboard_first_note; note <= keyboard_last_note; note++) {
-                if (static_cast<int32_t>(Synth::zone_entry_at(zones, note)) == selected)
-                    continue;
-                const float x = origin.x + boundary_x_of(note, white_w, black_w);
-                if (is_black_note(note))
-                    draw->AddRectFilled(ImVec2(x, origin.y),
-                                        ImVec2(x + black_w, origin.y + black_h),
-                                        0x40ffffff,
-                                        key_rounding,
-                                        bottom_rounding);
-                else
-                    draw->AddRectFilled(ImVec2(x, origin.y),
-                                        ImVec2(x + white_w, origin.y + height),
-                                        0x59000000,
-                                        key_rounding,
-                                        bottom_rounding);
-            }
+
+            // Clamp to the keyboard range so boundary_x_of only sees drawn notes.
+            const float x0 = start <= keyboard_first_note ? 0.0f : boundary_x_of(start, white_w, black_w);
+            const float x1 = end > keyboard_last_note ? keyboard_w : boundary_x_of(end, white_w, black_w);
+
+            uint32_t color = zone_color(entry);
+            if (emphasis && static_cast<int32_t>(entry) != selected)
+                color = (color & ~IM_COL32_A_MASK) | (150u << IM_COL32_A_SHIFT);
+
+            draw->AddRectFilled(ImVec2(origin.x + x0, top.y + 2.0f),
+                                ImVec2(origin.x + x1, origin.y - 1.0f),
+                                color,
+                                key_rounding);
         }
 
+        // Zone boundaries: a line at the first note of each zone after the
+        // first, drawn last so it stays visible on pressed keys.
         for (uint32_t entry = 1; entry < Synth::max_instr_per_channel; entry++) {
             if (zones[entry].start_note == 0)
                 break;
-            const float x = origin.x + boundary_x_of(zones[entry].start_note - 1, white_w, black_w);
-            draw->AddLine(ImVec2(x, origin.y), ImVec2(x, origin.y + height), zone_palette[entry % 8]);
-        }
-    }
 
-    // The held note is highlighted on top of everything else.
-    if (held_note_active && held_note_channel == channel) {
-        const uint32_t note  = held_note;
-        const float    x     = origin.x + boundary_x_of(note, white_w, black_w);
-        const float    key_w = is_black_note(note) ? black_w : white_w;
-        const float    key_h = is_black_note(note) ? black_h : height;
-        draw->AddRectFilled(ImVec2(x, origin.y),
-                            ImVec2(x + key_w, origin.y + key_h),
-                            color_held,
-                            key_rounding,
-                            bottom_rounding);
+            const uint32_t note = zones[entry].start_note - 1u;
+            if (note <= keyboard_first_note || note > keyboard_last_note)
+                continue;
+
+            const float x = origin.x + boundary_x_of(note, white_w, black_w);
+            draw->AddLine(ImVec2(x, origin.y), ImVec2(x, origin.y + height), color_boundary, 2.0f);
+        }
     }
 
     // Hit test: black keys are on top, then white keys.
