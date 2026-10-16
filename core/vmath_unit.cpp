@@ -28,6 +28,15 @@ static void failed(const char* test, const char* file, int line)
 
 int main()
 {
+    // mstd::exp2 stays finite and defined for extreme inputs.
+    {
+        TEST(mstd::exp2(0.0f) == 1.0f);
+        TEST(mstd::exp2(8.0f) == 256.0f);
+        TEST(mstd::exp2(-4.0f) == 0.0625f);
+        TEST(mstd::exp2(-150.0f) == 0.0f);
+        TEST(mstd::exp2(NAN) == 0.0f);
+        TEST(mstd::exp2(200.0f) == mstd::exp2(127.0f));
+    }
     //////////////////////////////////////////////////////////////////////////////////////////
     // exp2
 
