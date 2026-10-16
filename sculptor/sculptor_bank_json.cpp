@@ -2681,7 +2681,7 @@ static void decode_phantom_entry(Walker& w, uint32_t obj, Synth::InstrumentEdito
     bool    have_osc     = false;
 
     Synth::Oscillator osc;
-    memset(&osc, 0, sizeof(osc));
+    memset(static_cast<void*>(&osc), 0, sizeof(osc));
 
     walk_object(w, obj, [&](uint32_t key_idx, uint32_t val_idx) {
         if (key_eq(w, key_idx, "channel")) {
@@ -3002,7 +3002,7 @@ static void canonicalize_editor_bank(Synth::InstrumentEditorBank* editor_bank)
     // Unused pool entries and name slots carry no information; zeroing them makes
     // the decoded image independent of the editing history that produced the file.
     for (uint32_t i = bank.instruments.num_allocated; i < Synth::max_instruments; i++) {
-        memset(&bank.instruments.entries[i], 0, sizeof(bank.instruments.entries[i]));
+        memset(static_cast<void*>(&bank.instruments.entries[i]), 0, sizeof(bank.instruments.entries[i]));
         memset(editor_bank->instrument_names[i], 0, Synth::max_name_len);
     }
     for (uint32_t i = bank.envelopes.num_allocated; i < Synth::max_envelopes; i++)
@@ -3064,7 +3064,7 @@ static void canonicalize_editor_bank(Synth::InstrumentEditorBank* editor_bank)
         }
 
         if (instr.layer_count < Synth::max_layers)
-            memset(&instr.layers[instr.layer_count],
+            memset(static_cast<void*>(&instr.layers[instr.layer_count]),
                    0,
                    (Synth::max_layers - instr.layer_count) * sizeof(instr.layers[0]));
     }
@@ -4458,7 +4458,7 @@ bool Synth::validate_effects_document(const EffectsDocument* document)
     if (! document || document->lfo_count > max_lfos || document->graph_layout_count > effects_graph_layout_capacity) {
         return false;
     }
-    memset(&decode_scratch, 0, sizeof(decode_scratch));
+    memset(static_cast<void*>(&decode_scratch), 0, sizeof(decode_scratch));
     for (uint32_t index = 0; index < document->lfo_count; ++index) {
         decode_scratch.bank.lfos.allocate();
         if (! std::isfinite(document->lfos[index].min_value) || ! std::isfinite(document->lfos[index].min_max_delta)) {

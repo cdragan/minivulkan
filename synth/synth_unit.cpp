@@ -60,7 +60,7 @@ static bool project_legacy_effects(const Synth::InstrumentBank&  bank,
                                    const bool*                   pins = nullptr)
 {
     static Synth::InstrumentEditorBank authored;
-    memset(&authored, 0, sizeof(authored));
+    memset(static_cast<void*>(&authored), 0, sizeof(authored));
     authored.bank = bank;
     return Sculptor::project_effect_chain_to_graph(authored, owner, graph, mapping, pins);
 }
@@ -365,7 +365,7 @@ static void fan_out_routing(Synth::Instrument& instrument)
 static void zero_dormant_layers(Synth::Instrument& instrument)
 {
     if (instrument.layer_count < Synth::max_layers) {
-        memset(&instrument.layers[instrument.layer_count],
+        memset(static_cast<void*>(&instrument.layers[instrument.layer_count]),
                0,
                (Synth::max_layers - instrument.layer_count) * sizeof(instrument.layers[0]));
     }
@@ -398,7 +398,7 @@ static void build_osc_graph_max_fixture(Synth::InstrumentBank* bank,
                                         uint16_t (*env_ids)[Synth::num_mod_targets],
                                         uint16_t (*lfo_ids)[Synth::num_mod_targets])
 {
-    memset(bank, 0, sizeof(*bank));
+    memset(static_cast<void*>(bank), 0, sizeof(*bank));
     *instrument = {};
     for (uint32_t layer = 0; layer < Synth::max_layers; layer++) {
         for (uint32_t t = 0; t < Synth::num_mod_targets; t++) {
@@ -503,7 +503,7 @@ static void build_osc_graph_small_fixture(Synth::InstrumentBank* bank,
                                           uint16_t*              lfo_id,
                                           uint16_t*              volume_env_id)
 {
-    memset(bank, 0, sizeof(*bank));
+    memset(static_cast<void*>(bank), 0, sizeof(*bank));
     *instrument = {};
     TEST(bank->envelopes.allocate() == 0);
     TEST(bank->lfos.allocate() == 0);
@@ -659,7 +659,7 @@ static void add_detached_record(Synth::InstrumentEditorBank* bank,
 // a valid zone table; no layout records yet.
 static void build_zone_fixture(Synth::InstrumentEditorBank* bank, Synth::Instrument* instrument)
 {
-    memset(bank, 0, sizeof(*bank));
+    memset(static_cast<void*>(bank), 0, sizeof(*bank));
     uint16_t shared_env_id = 0;
     uint16_t lfo_id        = 0;
     uint16_t volume_env_id = 0;
@@ -777,7 +777,7 @@ static bool decode_bank_with_editor_section(const Synth::InstrumentEditorBank& b
 // routing carries one velocity input. No layout records.
 static void build_binding_fixture(Synth::InstrumentEditorBank* bank, Synth::Instrument* instrument)
 {
-    memset(bank, 0, sizeof(*bank));
+    memset(static_cast<void*>(bank), 0, sizeof(*bank));
     *instrument                   = {};
     bank->bank.channel_enabled[0] = 1;
     TEST(bank->bank.instruments.allocate() == 0);
@@ -857,7 +857,7 @@ static int32_t count_clipboard_tokens(const char* text, uint32_t len)
 
 static void fill_clipboard_sentinels(ClipboardDecode* out)
 {
-    memset(out, 0x5A, sizeof(*out));
+    memset(static_cast<void*>(out), 0x5A, sizeof(*out));
     // The count fields sentinel at the destination capacities rather than a
     // bit pattern: a refused decode leaves them as lengths a later call in the
     // same block could consume, and a capacity keeps every such read in bounds.
@@ -918,7 +918,7 @@ static int32_t find_portable(const Synth::InstrumentGraphLayout* records,
 // effect chain.
 static void build_clipboard_zone_fixture(Synth::InstrumentEditorBank* bank, Synth::Instrument* instrument)
 {
-    memset(bank, 0, sizeof(*bank));
+    memset(static_cast<void*>(bank), 0, sizeof(*bank));
     *instrument                   = {};
     bank->bank.channel_enabled[0] = 1;
     TEST(bank->bank.instruments.allocate() == 0);
@@ -983,7 +983,7 @@ static bool validate_standalone_model(const Synth::Instrument&         instrumen
                                       uint32_t                         lfo_count)
 {
     static Synth::InstrumentBank probe_bank;
-    memset(&probe_bank, 0, sizeof(probe_bank));
+    memset(static_cast<void*>(&probe_bank), 0, sizeof(probe_bank));
     for (uint32_t e = 0; e < envelope_count; e++) {
         const uint32_t env_slot = probe_bank.envelopes.allocate();
         TEST(env_slot != pool_no_slot);
@@ -1013,7 +1013,7 @@ static uint32_t build_clipboard_max_fixture(Synth::InstrumentBank*        bank,
                                             Synth::Instrument*            instrument,
                                             Synth::InstrumentGraphLayout* records)
 {
-    memset(bank, 0, sizeof(*bank));
+    memset(static_cast<void*>(bank), 0, sizeof(*bank));
     *instrument             = {};
     instrument->layer_count = Synth::max_layers;
     for (uint32_t layer = 0; layer < Synth::max_layers; layer++) {
@@ -2251,7 +2251,7 @@ static void check_library_metadata_transactions()
     remove(path);
     TEST(Synth::save_library_record(path, "Regression", "FM", &source, 0) == 0);
     const uint32_t file_size = read_library_fixture(path, before, sizeof(before));
-    memset(source.graph_layout[0].name, 'x', sizeof(source.graph_layout[0].name));
+    memset(static_cast<void*>(source.graph_layout[0].name), 'x', sizeof(source.graph_layout[0].name));
     static Synth::InstrumentEditorBank snapshot;
     snapshot = source;
     TEST(! export_clipboard_fixture(source, payload, sizeof(payload)));
@@ -2304,7 +2304,7 @@ static void check_editor_round_trip_capacity_failures()
     destination.bank.channel_zones[Synth::max_channels - 1][Synth::max_instr_per_channel - 1].instrument = 0;
     TEST(Synth::validate_instrument_bank(&destination.bank));
     destination_before = destination;
-    memset(&candidate, 0x5A, sizeof(candidate));
+    memset(static_cast<void*>(&candidate), 0x5A, sizeof(candidate));
     candidate_before = candidate;
     TEST(! Sculptor::replace_zone_instrument_candidate(destination,
                                                        0,
@@ -2360,7 +2360,7 @@ static void check_decoded_fm_lfo_binding_survives_compile()
     const uint32_t length = Synth::encode_editor_bank_json(&bank, payload, sizeof(payload));
     TEST(length > 0);
     static Synth::InstrumentEditorBank decoded;
-    memset(&decoded, 0, sizeof(decoded));
+    memset(static_cast<void*>(&decoded), 0, sizeof(decoded));
     TEST(Synth::decode_editor_bank_json(payload, length, &decoded));
     // Project and recompile: the FM depth row is wired and the LFO binding
     // lands back in the compiled instrument.
@@ -2478,7 +2478,7 @@ static void check_legacy_library_numeric_domains()
             write_library_fixture(path, legacy_payload, legacy_length);
             Synth::LibraryEntry legacy_entry;
             TEST(Synth::read_library_index(path, &legacy_entry, 1) == 1);
-            memset(&destination, 0, sizeof(destination));
+            memset(static_cast<void*>(&destination), 0, sizeof(destination));
             uint16_t legacy_slot = 0xBEEF;
             // Out-of-range pitch offsets reject the saved-bank load.
             TEST(Synth::load_library_instrument(path, &legacy_entry, &destination, 2, &legacy_slot) == ! (values & 1));
@@ -2498,7 +2498,7 @@ static void check_legacy_library_numeric_domains()
             if (! (values & 1)) {
                 Synth::LibraryEntry entry;
                 TEST(Synth::read_library_index(path, &entry, 1) == 1);
-                memset(&destination, 0, sizeof(destination));
+                memset(static_cast<void*>(&destination), 0, sizeof(destination));
                 uint16_t output_slot = 0xBEEF;
                 TEST(Synth::load_library_instrument(path, &entry, &destination, 2, &output_slot));
                 TEST(output_slot == 0);
@@ -2586,7 +2586,7 @@ static void check_shared_instrument_json_domains()
             if (malformed == 0)
                 title[0] = static_cast<char>(0xff);
             else {
-                memset(title, 'a', 30);
+                memset(static_cast<void*>(title), 'a', 30);
                 title[30] = static_cast<char>(0xc3);
             }
             memcpy(source.graph_layout[0].name, title, sizeof(title));
@@ -2670,7 +2670,7 @@ static void check_shared_instrument_json_domains()
     }
 
     static char exhausted_text[Synth::library_payload_max + 1];
-    memset(exhausted_text, ' ', sizeof(exhausted_text));
+    memset(static_cast<void*>(exhausted_text), ' ', sizeof(exhausted_text));
     memcpy(exhausted_text, "{}", 2);
     for (Synth::InstrumentJsonDomain domain : domains) {
         fill_clipboard_sentinels(&decoded);
@@ -2788,7 +2788,7 @@ static void check_shared_instrument_json_domains()
         TEST(id == (recognized[index] ? ids[index] : 0xBEEF));
     }
     char unterminated_title[32];
-    memset(unterminated_title, '1', sizeof(unterminated_title));
+    memset(static_cast<void*>(unterminated_title), '1', sizeof(unterminated_title));
     uint16_t id = 0xBEEF;
     TEST(! Sculptor::parse_effect_lfo_title(unterminated_title, &id));
     TEST(id == 0xBEEF);
@@ -2877,7 +2877,7 @@ static void check_shared_instrument_json_domains()
 
 static void effects_clipboard_fixture(Synth::EffectsDocument* doc, bool midi)
 {
-    memset(doc, 0, sizeof(*doc));
+    memset(static_cast<void*>(doc), 0, sizeof(*doc));
     doc->lfo_count = 3;
     for (uint32_t i = 0; i < doc->lfo_count; ++i) {
         doc->lfos[i] = { Synth::WaveType::sine_wave, 127, 333, -2.0f, 4.0f };
@@ -2965,7 +2965,7 @@ static void effects_input_gesture_regressions(Synth::InstrumentEditorBank*  sour
         for (uint32_t example = 0; example < 20; ++example) {
             const Scenario scenario = static_cast<Scenario>(example);
 
-            memset(source, 0, sizeof(*source));
+            memset(static_cast<void*>(source), 0, sizeof(*source));
             Synth::init_default_bank(&source->bank);
             uint16_t root = 0;
             TEST(Sculptor::add_effect_lfo_candidate(source, owner, source, &root));
@@ -3182,7 +3182,7 @@ static void envelope_depth_serialization_regressions()
     // The scaled shape re-encodes with the key and decodes back. The encoder
     // resolves descriptor ids against a bank, so stage the decoded envelope in.
     static Synth::InstrumentBank rt_bank;
-    memset(&rt_bank, 0, sizeof(rt_bank));
+    memset(static_cast<void*>(&rt_bank), 0, sizeof(rt_bank));
     rt_bank.envelopes.entries[0]    = envs[0];
     rt_bank.envelopes.num_allocated = 1;
     TEST(Synth::encode_instrument_json(text, sizeof(text), &instr, &rt_bank) > 0);
@@ -3226,7 +3226,7 @@ static void envelope_depth_serialization_regressions()
     TEST(length > 0);
     TEST(strstr(payload, "\"envelope_depth\":0.25") != nullptr);
     static Synth::InstrumentEditorBank bank_decoded;
-    memset(&bank_decoded, 0, sizeof(bank_decoded));
+    memset(static_cast<void*>(&bank_decoded), 0, sizeof(bank_decoded));
     TEST(Synth::decode_editor_bank_json(payload, length, &bank_decoded));
     TEST(bank_decoded.bank.instruments.entries[0].layers[0].targets[Synth::mod_volume].envelope_depth == 0.25f);
     for (uint32_t layer = 0; layer < Synth::max_layers; layer++) {
@@ -3250,7 +3250,7 @@ static void effects_literal_topology_regressions()
     const uint32_t                      owners[] = { 0u, Sculptor::fx_master_chain };
     for (uint32_t owner : owners) {
         for (uint32_t endpoint = 0; endpoint < 2; ++endpoint) {
-            memset(&source, 0, sizeof(source));
+            memset(static_cast<void*>(&source), 0, sizeof(source));
             Synth::init_default_bank(&source.bank);
             auto& chain       = Sculptor::fx_graph_chain(&source.bank, owner);
             chain.num_effects = 3;
@@ -3288,7 +3288,7 @@ static void effects_literal_topology_regressions()
             const uint32_t count = graph.peek_changes(changes, Sculptor::max_pending_changes, &endpoint_overflow);
             TEST(! endpoint_overflow);
             TEST(count == 1);
-            memset(&candidate, 0xA5, sizeof(candidate));
+            memset(static_cast<void*>(&candidate), 0xA5, sizeof(candidate));
             const bool detached = Sculptor::stage_effect_graph_edits(&source, &graph, &mapping, &candidate);
             TEST(detached);
             TEST(memcmp(&source, &before, sizeof(source)) == 0);
@@ -3378,7 +3378,7 @@ static void effects_structural_regressions()
     effects_literal_topology_regressions();
     // Literal routing preserves independent payload, capacity and layout invariants.
     effects_input_gesture_regressions(&source, &candidate, &loaded, &graph, &mapping);
-    memset(&source, 0, sizeof(source));
+    memset(static_cast<void*>(&source), 0, sizeof(source));
     Synth::init_default_bank(&source.bank);
     Synth::EffectChainBinding& chain = source.bank.channel_chains[0];
     chain.num_effects                = 3;
@@ -3465,7 +3465,7 @@ static void effects_structural_regressions()
     // CC numbers into the new validator.
     {
         static Synth::InstrumentEditorBank cc_source;
-        memset(&cc_source, 0, sizeof(cc_source));
+        memset(static_cast<void*>(&cc_source), 0, sizeof(cc_source));
         Synth::init_default_bank(&cc_source.bank);
         Synth::EffectChainBinding& cc_chain = cc_source.bank.channel_chains[0];
         cc_chain.num_effects                = 1;
@@ -3516,7 +3516,7 @@ static void effects_structural_regressions()
         // dotted CC input, added via the editor, compiles and is editable.
         {
             static Synth::InstrumentEditorBank retarget_source;
-            memset(&retarget_source, 0, sizeof(retarget_source));
+            memset(static_cast<void*>(&retarget_source), 0, sizeof(retarget_source));
             Synth::init_default_bank(&retarget_source.bank);
             Synth::EffectChainBinding& retarget_chain = retarget_source.bank.channel_chains[0];
             retarget_chain.num_effects                = 1;
@@ -3556,7 +3556,7 @@ static void effects_structural_regressions()
         // A legacy-only binding rebuild zeroes the CC number on reconstructed
         // inputs so a reused slot cannot carry stale state.
         static Synth::InstrumentEditorBank legacy_source;
-        memset(&legacy_source, 0, sizeof(legacy_source));
+        memset(static_cast<void*>(&legacy_source), 0, sizeof(legacy_source));
         Synth::init_default_bank(&legacy_source.bank);
         Synth::EffectChainBinding& legacy_chain = legacy_source.bank.channel_chains[0];
         legacy_chain.num_effects                = 1;
@@ -3603,9 +3603,9 @@ static void effects_structural_regressions()
     const char* library_path = "synth_effects_structural_library.tmp";
     remove(library_path);
     loaded = source;
-    memset(loaded.bank.channel_enabled, 0, sizeof(loaded.bank.channel_enabled));
+    memset(static_cast<void*>(loaded.bank.channel_enabled), 0, sizeof(loaded.bank.channel_enabled));
     for (uint32_t owner = 1; owner < Synth::max_channels; ++owner) {
-        memset(loaded.bank.channel_zones[owner], 0, sizeof(loaded.bank.channel_zones[owner]));
+        memset(static_cast<void*>(loaded.bank.channel_zones[owner]), 0, sizeof(loaded.bank.channel_zones[owner]));
     }
     const uint32_t legacy_length = Synth::encode_editor_bank_json(&loaded, text, sizeof(text));
     TEST(legacy_length > 0);
@@ -3615,7 +3615,7 @@ static void effects_structural_regressions()
     Synth::LibraryEntry      entry  = {};
     Synth::LibraryScanStatus status = Synth::library_invalid;
     TEST(Synth::read_library_index(library_path, &entry, 1, &status) == 1);
-    memset(&loaded, 0, sizeof(loaded));
+    memset(static_cast<void*>(&loaded), 0, sizeof(loaded));
     Synth::init_default_bank(&loaded.bank);
     uint16_t instrument_slot = 0;
     TEST(Synth::load_library_instrument(library_path, &entry, &loaded, 1, &instrument_slot));
@@ -3668,7 +3668,7 @@ static void effects_structural_regressions()
             strcmp(loaded.graph_layout[index].name, "Delay") == 0 && loaded.graph_layout[index].x == 303.0f;
     }
     TEST(retained_geometry);
-    memset(&source, 0, sizeof(source));
+    memset(static_cast<void*>(&source), 0, sizeof(source));
     Synth::init_default_bank(&source.bank);
     static Synth::EffectsDocument sparse_document;
     effects_clipboard_fixture(&sparse_document, true);
@@ -3695,12 +3695,12 @@ static void effects_structural_regressions()
     TEST(Sculptor::extract_effect_chain_document(&candidate, 0, nullptr, nullptr, &sparse_document));
     TEST(sparse_document.lfo_count == 3);
     // Add LFO roots belong to one owner; replacement cannot remove another owner's root or shared descriptor.
-    memset(&source, 0, sizeof(source));
+    memset(static_cast<void*>(&source), 0, sizeof(source));
     Synth::init_default_bank(&source.bank);
     uint16_t descriptor = 0xBEEF;
     TEST(Sculptor::add_effect_lfo_candidate(&source, 1, &source, &descriptor));
     TEST(descriptor == 1 && source.graph_layout_count == 1);
-    memset(keep, 0, sizeof(keep));
+    memset(static_cast<void*>(keep), 0, sizeof(keep));
     TEST(Sculptor::collect_effect_lfos(&source, 0, keep));
     TEST(! keep[0]);
     TEST(Sculptor::collect_effect_lfos(&source, 1, keep));
@@ -3718,10 +3718,10 @@ static void effects_structural_regressions()
     memcpy(source.bank.channel_zones[1], source.bank.channel_zones[0], sizeof(source.bank.channel_zones[1]));
     TEST(Synth::save_library_record(library_path, "Effects", "Root", &source, 1) == 0);
     TEST(Synth::read_library_index(library_path, &entry, 1, &status) == 1);
-    memset(&loaded, 0, sizeof(loaded));
+    memset(static_cast<void*>(&loaded), 0, sizeof(loaded));
     Synth::init_default_bank(&loaded.bank);
     TEST(Synth::load_library_instrument(library_path, &entry, &loaded, 2, &instrument_slot));
-    memset(keep, 0, sizeof(keep));
+    memset(static_cast<void*>(keep), 0, sizeof(keep));
     TEST(Sculptor::collect_effect_lfos(&loaded, 2, keep));
     TEST(keep[0]);
     remove(library_path);
@@ -3742,14 +3742,14 @@ static void effects_structural_regressions()
     static Synth::InstrumentEditorBank snapshot;
     const uint32_t                     root_owners[] = { 0, Sculptor::fx_master_chain };
     for (uint32_t owner : root_owners) {
-        memset(&source, 0, sizeof(source));
+        memset(static_cast<void*>(&source), 0, sizeof(source));
         Synth::init_default_bank(&source.bank);
         for (uint32_t ordinal = 0; ordinal < 3; ++ordinal) {
             snapshot = source;
             TEST(Sculptor::add_effect_lfo_candidate(&source, owner, &candidate, &descriptor));
             TEST(memcmp(&source, &snapshot, sizeof(source)) == 0);
             source = candidate;
-            memset(keep, 0, sizeof(keep));
+            memset(static_cast<void*>(keep), 0, sizeof(keep));
             TEST(Sculptor::collect_effect_lfos(&source, owner, keep));
             TEST(Sculptor::project_effect_chain_to_graph(source, owner, &graph, &mapping, keep));
             const uint32_t                node_index       = mapping.lfo_nodes[descriptor - 1];
@@ -3768,7 +3768,7 @@ static void effects_structural_regressions()
 
     // The one-node GUI precommit predicate includes roots, bindings and legacy pins.
     for (uint32_t owner : root_owners) {
-        memset(&source, 0, sizeof(source));
+        memset(static_cast<void*>(&source), 0, sizeof(source));
         Synth::init_default_bank(&source.bank);
         const uint32_t pin_fill = Synth::max_lfos - 3u; // three slots under the LFO pool
         // ceiling.  The raised node budget (150) keeps every reachable fx projection
@@ -3785,7 +3785,7 @@ static void effects_structural_regressions()
         snapshot = source;
         TEST(Sculptor::fx_can_add_node(&source, owner));
         TEST(memcmp(&source, &snapshot, sizeof(source)) == 0);
-        memset(keep, 0, sizeof(keep));
+        memset(static_cast<void*>(keep), 0, sizeof(keep));
         TEST(Sculptor::collect_effect_lfos(&source, owner, keep));
         TEST(Sculptor::project_effect_chain_to_graph(source, owner, &graph, &mapping, keep));
         TEST(mapping.lfo_count == pin_fill);
@@ -3795,7 +3795,7 @@ static void effects_structural_regressions()
         Sculptor::fx_init_slot(&Sculptor::fx_graph_chain(&source.bank, owner), 0, Synth::EffectType::distortion);
         Sculptor::fx_graph_chain(&source.bank, owner).num_effects                        = 1;
         Sculptor::fx_graph_chain(&source.bank, owner).effects[0].bindings[0].lfo_desc_id = 1;
-        memset(keep, 0, sizeof(keep));
+        memset(static_cast<void*>(keep), 0, sizeof(keep));
         TEST(Sculptor::collect_effect_lfos(&source, owner, keep));
         TEST(Sculptor::project_effect_chain_to_graph(source, owner, &graph, &mapping, keep));
         TEST(mapping.lfo_count == pin_fill - 1);
@@ -3813,7 +3813,7 @@ static void effects_structural_regressions()
         source.graph_layout[source.graph_layout_count] = {};
         TEST(Sculptor::fx_can_add_node(&source, owner));
         Sculptor::fx_graph_chain(&source.bank, owner) = {};
-        memset(keep, 0, sizeof(keep));
+        memset(static_cast<void*>(keep), 0, sizeof(keep));
         keep[pin_fill - 1] = true;
         TEST(Sculptor::fx_can_add_node(&source, owner, keep));
         keep[pin_fill - 1] = false;
@@ -3829,7 +3829,7 @@ static void effects_structural_regressions()
 
     // Legacy-only nodes occupy the same ordered lane as rooted and bound nodes.
     for (uint32_t owner : root_owners) {
-        memset(&source, 0, sizeof(source));
+        memset(static_cast<void*>(&source), 0, sizeof(source));
         Synth::init_default_bank(&source.bank);
         TEST(Sculptor::allocate_default_lfo(&source.bank, &descriptor));
         TEST(Sculptor::add_effect_lfo_candidate(&source, owner, &source, &descriptor));
@@ -3837,7 +3837,7 @@ static void effects_structural_regressions()
         lane_chain.num_effects                = 1;
         Sculptor::fx_init_slot(&lane_chain, 0, Synth::EffectType::distortion);
         lane_chain.effects[0].bindings[0].lfo_desc_id = descriptor;
-        memset(keep, 0, sizeof(keep));
+        memset(static_cast<void*>(keep), 0, sizeof(keep));
         keep[0]  = true;
         snapshot = source;
         TEST(Sculptor::add_effect_lfo_candidate(&source, owner, &candidate, &descriptor, keep));
@@ -3858,7 +3858,7 @@ static void effects_structural_regressions()
     descriptor                = 0xBEEF;
     TEST(! Sculptor::add_effect_lfo_candidate(&source, 1, &candidate, &descriptor));
     TEST(descriptor == 0xBEEF && memcmp(&candidate, &snapshot, sizeof(candidate)) == 0);
-    memset(&source, 0, sizeof(source));
+    memset(static_cast<void*>(&source), 0, sizeof(source));
     Synth::init_default_bank(&source.bank);
     for (uint32_t index = 0; index < Synth::max_lfos; ++index) {
         uint16_t allocated = 0;
@@ -3890,7 +3890,7 @@ static void effects_paste_pin_regressions()
     static Sculptor::EffectGraphMapping mapping;
     const uint32_t                      owners[] = { 0, Sculptor::fx_master_chain };
     for (uint32_t owner : owners) {
-        memset(&source, 0, sizeof(source));
+        memset(static_cast<void*>(&source), 0, sizeof(source));
         Synth::init_default_bank(&source.bank);
         const uint32_t pin_limit                    = Synth::max_lfos - 3u; // input, output and MIDI on every chain
         bool           legacy_pins[Synth::max_lfos] = {};
@@ -3962,7 +3962,7 @@ static void effects_paste_pin_regressions()
         TEST(memcmp(&candidate, &saved_candidate, sizeof(candidate)) == 0);
         TEST(memcmp(&source, &saved_source, sizeof(source)) == 0);
 
-        memset(&source, 0, sizeof(source));
+        memset(static_cast<void*>(&source), 0, sizeof(source));
         Synth::init_default_bank(&source.bank);
         uint16_t shared_descriptor = 0;
         TEST(Sculptor::allocate_default_lfo(&source.bank, &shared_descriptor));
@@ -3975,7 +3975,7 @@ static void effects_paste_pin_regressions()
         document.graph_layout_count                       = 1;
         document.graph_layout[0].kind                     = Synth::effects_graph_layout_lfo;
         document.graph_layout[0].index                    = 1;
-        memset(legacy_pins, 0, sizeof(legacy_pins));
+        memset(static_cast<void*>(legacy_pins), 0, sizeof(legacy_pins));
         legacy_pins[1] = true;
         TEST(Sculptor::replace_effect_chain_candidate(&source, owner, &document, &candidate, legacy_pins));
         memcpy(represented, legacy_pins, sizeof(represented));
@@ -3994,7 +3994,7 @@ static void effects_layout_classification_regressions()
     static Synth::InstrumentEditorBank  saved_candidate;
     static Sculptor::Graph              graph;
     static Sculptor::EffectGraphMapping mapping;
-    memset(&source, 0, sizeof(source));
+    memset(static_cast<void*>(&source), 0, sizeof(source));
     Synth::init_default_bank(&source.bank);
     uint16_t descriptor = 0;
     TEST(Sculptor::allocate_default_lfo(&source.bank, &descriptor));
@@ -4091,7 +4091,7 @@ static void effects_clipboard_regressions()
     const uint32_t origins[] = { 0, Sculptor::fx_master_chain };
     for (uint32_t origin : origins) {
         effects_clipboard_fixture(&doc, true); // master documents may carry MIDI
-        memset(&source, 0, sizeof(source));
+        memset(static_cast<void*>(&source), 0, sizeof(source));
         Synth::init_default_bank(&source.bank);
         for (uint32_t i = 0; i < 3; ++i) {
             const uint32_t id            = source.bank.lfos.allocate();
@@ -4108,7 +4108,7 @@ static void effects_clipboard_regressions()
         TEST(extracted.lfo_count == 2); // persisted source has no detached layout yet
 
         for (uint32_t destination : origins) {
-            memset(&candidate, 0, sizeof(candidate));
+            memset(static_cast<void*>(&candidate), 0, sizeof(candidate));
             const bool replaced = Sculptor::replace_effect_chain_candidate(&source, destination, &doc, &candidate);
             TEST(replaced);
             TEST(memcmp(&source, &saved_source, sizeof(source)) == 0);
@@ -4180,7 +4180,7 @@ static void effects_clipboard_regressions()
     }
 
     // Copy observes graph edits, but neither consumes pending events nor mutates bank.
-    memset(&source, 0, sizeof(source));
+    memset(static_cast<void*>(&source), 0, sizeof(source));
     Synth::init_default_bank(&source.bank);
     effects_clipboard_fixture(&doc, true);
     for (uint32_t i = 0; i < 3; ++i) {
@@ -4368,7 +4368,7 @@ static void effects_clipboard_regressions()
             TEST(payload_len > 0);
             TEST(strstr(payload, "{\"base_value\":37}") != nullptr);
             static Synth::InstrumentEditorBank decoded_bank;
-            memset(&decoded_bank, 0, sizeof(decoded_bank));
+            memset(static_cast<void*>(&decoded_bank), 0, sizeof(decoded_bank));
             TEST(Synth::decode_editor_bank_json(payload, payload_len, &decoded_bank));
             TEST(decoded_bank.bank.channel_chains[0].effects[0].type == Synth::EffectType::fir);
             TEST(decoded_bank.bank.channel_chains[0].effects[0].bindings[2].base_value == 37.0f);
@@ -4391,7 +4391,7 @@ static void effects_clipboard_regressions()
                     return false;
                 }
                 static Synth::InstrumentEditorBank out;
-                memset(&out, 0, sizeof(out));
+                memset(static_cast<void*>(&out), 0, sizeof(out));
                 return Synth::decode_editor_bank_json(spliced, spliced_len, &out);
             };
             TEST(decode_with_bank_slope("{\"base_value\":37}"));
@@ -4411,7 +4411,7 @@ static void effects_clipboard_regressions()
                     splice_single_occurrence(bank_payload, bank_len, first_binding, "", spliced, sizeof(spliced));
                 TEST(spliced_len > 0);
                 static Synth::InstrumentEditorBank out;
-                memset(&out, 0, sizeof(out));
+                memset(static_cast<void*>(&out), 0, sizeof(out));
                 TEST(! Synth::decode_editor_bank_json(spliced, spliced_len, &out));
             }
         }
@@ -4429,7 +4429,7 @@ static void effects_clipboard_regressions()
             TEST(payload_len > 0);
             TEST(strstr(payload, "\"ring_mod\"") != nullptr);
             static Synth::InstrumentEditorBank decoded_bank;
-            memset(&decoded_bank, 0, sizeof(decoded_bank));
+            memset(static_cast<void*>(&decoded_bank), 0, sizeof(decoded_bank));
             TEST(Synth::decode_editor_bank_json(payload, payload_len, &decoded_bank));
             TEST(decoded_bank.bank.channel_chains[0].effects[0].type == Synth::EffectType::ring_mod);
             TEST(decoded_bank.bank.channel_chains[0].effects[0].bindings[0].base_value == 234.5f);
@@ -4457,7 +4457,7 @@ static void effects_clipboard_regressions()
             TEST(mode_payload_len > 0);
             TEST(strstr(mode_payload, "\"ring_mod\"") != nullptr);
             static Synth::InstrumentEditorBank mode_decoded;
-            memset(&mode_decoded, 0, sizeof(mode_decoded));
+            memset(static_cast<void*>(&mode_decoded), 0, sizeof(mode_decoded));
             TEST(Synth::decode_editor_bank_json(mode_payload, mode_payload_len, &mode_decoded));
             const Synth::Oscillator& mode_back = mode_decoded.bank.instruments.entries[0].layers[0];
             TEST(mode_back.osc_mode == Synth::osc_mode_ring_mod);
@@ -4471,7 +4471,7 @@ static void effects_clipboard_regressions()
             static char clip_text[clipboard_capacity];
             TEST(export_clipboard_fixture(mode_bank, clip_text, sizeof(clip_text)));
             static ClipboardDecode clip;
-            memset(&clip, 0, sizeof(clip));
+            memset(static_cast<void*>(&clip), 0, sizeof(clip));
             TEST(decode_clipboard(&clip, clip_text, max_portable_records));
             TEST(clip.instr.layers[0].osc_mode == Synth::osc_mode_ring_mod);
             TEST(clip.instr.layers[0].mod_ratio == 1.5f);
@@ -4485,7 +4485,7 @@ static void effects_clipboard_regressions()
                 "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\",\"duty_b\":{\"base\":0.25},"
                 "\"osc_mix\":{\"base\":0.75},\"mode\":\"ring_mod\",\"wave_b\":\"sawtooth\",\"mod_ratio\":1.5}]}";
             static ClipboardDecode reordered;
-            memset(&reordered, 0, sizeof(reordered));
+            memset(static_cast<void*>(&reordered), 0, sizeof(reordered));
             TEST(decode_clipboard(&reordered, reordered_doc, max_portable_records));
             TEST(reordered.instr.layers[0].osc_mode == Synth::osc_mode_ring_mod);
             TEST(reordered.instr.layers[0].mod_ratio == 1.5f);
@@ -4525,7 +4525,7 @@ static void effects_clipboard_regressions()
             TEST(ratio_payload_len > 0);
             TEST(strstr(ratio_payload, "\"fm_ratio\"") != nullptr);
             static Synth::InstrumentEditorBank ratio_decoded;
-            memset(&ratio_decoded, 0, sizeof(ratio_decoded));
+            memset(static_cast<void*>(&ratio_decoded), 0, sizeof(ratio_decoded));
             TEST(Synth::decode_editor_bank_json(ratio_payload, ratio_payload_len, &ratio_decoded));
             const Synth::Oscillator& ratio_back = ratio_decoded.bank.instruments.entries[0].layers[0];
             TEST(ratio_back.targets[Synth::mod_fm_ratio].base_value == 1.5f);
@@ -4536,7 +4536,7 @@ static void effects_clipboard_regressions()
             static char ratio_clip[clipboard_capacity];
             TEST(export_clipboard_fixture(ratio_bank, ratio_clip, sizeof(ratio_clip)));
             static ClipboardDecode ratio_clip_decoded;
-            memset(&ratio_clip_decoded, 0, sizeof(ratio_clip_decoded));
+            memset(static_cast<void*>(&ratio_clip_decoded), 0, sizeof(ratio_clip_decoded));
             TEST(decode_clipboard(&ratio_clip_decoded, ratio_clip, max_portable_records));
             TEST(ratio_clip_decoded.lfo_count == 1);
             TEST(ratio_clip_decoded.instr.layers[0].targets[Synth::mod_fm_ratio].base_value == 1.5f);
@@ -4555,7 +4555,7 @@ static void effects_clipboard_regressions()
                                                                 "\"channels\":[{},{},{},{\"zones\":[{\"start\":0,\"instrument\":0}]}]}}";
                 const uint32_t                     legacy_len = static_cast<uint32_t>(strlen(legacy_doc));
                 static Synth::InstrumentEditorBank legacy_decoded;
-                memset(&legacy_decoded, 0, sizeof(legacy_decoded));
+                memset(static_cast<void*>(&legacy_decoded), 0, sizeof(legacy_decoded));
                 TEST(Synth::decode_editor_bank_json(legacy_doc, legacy_len, &legacy_decoded));
                 const Synth::Oscillator& legacy_back = legacy_decoded.bank.instruments.entries[0].layers[0];
                 TEST(legacy_back.mod_ratio == 2.0f);
@@ -4570,7 +4570,7 @@ static void effects_clipboard_regressions()
                     "\"oscillator\":{\"wave_a\":\"sine\",\"mod_ratio\":2,\"routing\":{}}}]}}}";
                 const uint32_t                     phantom_len = static_cast<uint32_t>(strlen(phantom_doc));
                 static Synth::InstrumentEditorBank phantom_decoded;
-                memset(&phantom_decoded, 0, sizeof(phantom_decoded));
+                memset(static_cast<void*>(&phantom_decoded), 0, sizeof(phantom_decoded));
                 TEST(Synth::decode_editor_bank_json(phantom_doc, phantom_len, &phantom_decoded));
                 TEST(phantom_decoded.phantom_count == 1);
                 TEST(phantom_decoded.phantoms[0].osc.mod_ratio == 2.0f);
@@ -4587,21 +4587,21 @@ static void effects_clipboard_regressions()
                 const char* const ratio_absent_doc =
                     "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\"}]}";
                 static ClipboardDecode ratio_absent;
-                memset(&ratio_absent, 0, sizeof(ratio_absent));
+                memset(static_cast<void*>(&ratio_absent), 0, sizeof(ratio_absent));
                 TEST(decode_clipboard(&ratio_absent, ratio_absent_doc, max_portable_records));
                 TEST(ratio_absent.instr.layers[0].mod_ratio == 1.0f);
                 TEST(ratio_absent.instr.layers[0].targets[Synth::mod_fm_ratio].base_value == 1.0f);
                 const char* const ratio_three_doc =
                     "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\",\"mod_ratio\":3}]}";
                 static ClipboardDecode ratio_three;
-                memset(&ratio_three, 0, sizeof(ratio_three));
+                memset(static_cast<void*>(&ratio_three), 0, sizeof(ratio_three));
                 TEST(decode_clipboard(&ratio_three, ratio_three_doc, max_portable_records));
                 TEST(ratio_three.instr.layers[0].mod_ratio == 3.0f);
                 TEST(ratio_three.instr.layers[0].targets[Synth::mod_fm_ratio].base_value == 3.0f);
                 const char* const ratio_zero_doc =
                     "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\",\"mod_ratio\":0}]}";
                 static ClipboardDecode ratio_zero;
-                memset(&ratio_zero, 0, sizeof(ratio_zero));
+                memset(static_cast<void*>(&ratio_zero), 0, sizeof(ratio_zero));
                 TEST(decode_clipboard(&ratio_zero, ratio_zero_doc, max_portable_records));
                 TEST(ratio_zero.instr.layers[0].mod_ratio == 0.0f);
                 TEST(ratio_zero.instr.layers[0].targets[Synth::mod_fm_ratio].base_value == 0.0f);
@@ -4609,7 +4609,7 @@ static void effects_clipboard_regressions()
                     "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\",\"fm_ratio\":{\"base\":1.5},"
                     "\"mode\":\"fm\",\"mod_ratio\":1.5}]}";
                 static ClipboardDecode ratio_reordered;
-                memset(&ratio_reordered, 0, sizeof(ratio_reordered));
+                memset(static_cast<void*>(&ratio_reordered), 0, sizeof(ratio_reordered));
                 TEST(decode_clipboard(&ratio_reordered, ratio_reordered_doc, max_portable_records));
                 TEST(ratio_reordered.instr.layers[0].mod_ratio == 1.5f);
                 TEST(ratio_reordered.instr.layers[0].targets[Synth::mod_fm_ratio].base_value == 1.5f);
@@ -4620,7 +4620,7 @@ static void effects_clipboard_regressions()
                     "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\","
                     "\"mod_ratio\":3,\"fm_ratio\":{\"base\":1.5},\"volume\":{\"base\":1.0}}]}";
                 static ClipboardDecode ratio_after_target;
-                memset(&ratio_after_target, 0, sizeof(ratio_after_target));
+                memset(static_cast<void*>(&ratio_after_target), 0, sizeof(ratio_after_target));
                 TEST(decode_clipboard(&ratio_after_target, ratio_after_target_doc, max_portable_records));
                 TEST(ratio_after_target.instr.layers[0].mod_ratio == 3.0f);
                 TEST(ratio_after_target.instr.layers[0].targets[Synth::mod_fm_ratio].base_value == 1.5f);
@@ -4642,7 +4642,7 @@ static void effects_clipboard_regressions()
 
     // Library's combined descriptor map preserves oscillator/effect sharing and represented unconnected nodes.
     effects_clipboard_fixture(&doc, true);
-    memset(&source, 0, sizeof(source));
+    memset(static_cast<void*>(&source), 0, sizeof(source));
     Synth::init_default_bank(&source.bank);
     TEST(Sculptor::replace_effect_chain_candidate(&source, 0, &doc, &candidate));
     source = candidate;
@@ -4655,7 +4655,7 @@ static void effects_clipboard_regressions()
     Synth::LibraryEntry      entry          = {};
     Synth::LibraryScanStatus library_status = Synth::library_invalid;
     TEST(Synth::read_library_index(library_path, &entry, 1, &library_status) == 1);
-    memset(&loaded, 0, sizeof(loaded));
+    memset(static_cast<void*>(&loaded), 0, sizeof(loaded));
     Synth::init_default_bank(&loaded.bank);
     uint16_t first_slot = 0xBEEF;
     TEST(Synth::load_library_instrument(library_path, &entry, &loaded, 2, &first_slot));
@@ -4667,7 +4667,7 @@ static void effects_clipboard_regressions()
     remove(library_path);
 
     // Library reduction keeps sparse original IDs ordered and never deduplicates equal descriptors.
-    memset(&source, 0, sizeof(source));
+    memset(static_cast<void*>(&source), 0, sizeof(source));
     Synth::init_default_bank(&source.bank);
     for (uint32_t index = 0; index < 6; ++index) {
         uint16_t allocated = 0;
@@ -4686,7 +4686,7 @@ static void effects_clipboard_regressions()
     TEST(Synth::save_library_record(library_path, "Effects", "Sparse", &source, 0) == 0);
     TEST(memcmp(&source, &saved_source, sizeof(source)) == 0);
     TEST(Synth::read_library_index(library_path, &entry, 1, &library_status) == 1);
-    memset(&loaded, 0, sizeof(loaded));
+    memset(static_cast<void*>(&loaded), 0, sizeof(loaded));
     Synth::init_default_bank(&loaded.bank);
     uint16_t occupied_descriptor = 0;
     TEST(Sculptor::allocate_default_lfo(&loaded.bank, &occupied_descriptor));
@@ -4708,7 +4708,7 @@ static void effects_clipboard_regressions()
     TEST(first_slot == 0xBEEF && memcmp(&loaded, &saved_candidate, sizeof(loaded)) == 0);
     remove(library_path);
     // Restore the shared-descriptor fixture for pending-edit checks.
-    memset(&source, 0, sizeof(source));
+    memset(static_cast<void*>(&source), 0, sizeof(source));
     Synth::init_default_bank(&source.bank);
     TEST(Sculptor::replace_effect_chain_candidate(&source, 0, &doc, &source));
     source.bank.instruments.entries[0].layers[0].targets[Synth::mod_volume].lfo_desc_id = 1;
@@ -4759,7 +4759,7 @@ static void effects_clipboard_regressions()
     TEST(memcmp(&graph, &saved_graph, sizeof(graph)) == 0);
 
     // Byte and token bounds are checked before destination publication.
-    memset(text, ' ', sizeof(text));
+    memset(static_cast<void*>(text), ' ', sizeof(text));
     TEST(! Synth::decode_effects_json(text, sizeof(text), &decoded));
     const char prefix[] = "{\"format\":\"synth-effects-v1\",\"lfos\":[],\"effects\":[],\"graph_layout\":[],\"extra\":[";
     uint32_t   text_length = sizeof(prefix) - 1;
@@ -4818,13 +4818,13 @@ static void effects_clipboard_regressions()
         "{\"format\":\"synth-effects-v1\",\"lfos\":[],\"effects\":[{\"type\":\"distortion\",\"params\":[{\"base_value\":1e999},{}]}],\"graph_layout\":[]}"
     };
     for (const char* bad : nested_invalid) {
-        memset(&decoded, 0xA5, sizeof(decoded));
+        memset(static_cast<void*>(&decoded), 0xA5, sizeof(decoded));
         saved_doc = decoded;
         TEST(! Synth::decode_effects_json(bad, static_cast<uint32_t>(strlen(bad)), &decoded));
         TEST(memcmp(&decoded, &saved_doc, sizeof(decoded)) == 0);
     }
     for (const char* bad : malformed) {
-        memset(&decoded, 0xA5, sizeof(decoded));
+        memset(static_cast<void*>(&decoded), 0xA5, sizeof(decoded));
         saved_doc = decoded;
         TEST(! Synth::decode_effects_json(bad, static_cast<uint32_t>(strlen(bad)), &decoded));
         TEST(memcmp(&decoded, &saved_doc, sizeof(decoded)) == 0);
@@ -4865,11 +4865,11 @@ static void effects_clipboard_regressions()
                 doc.chain.effects[0].type = Synth::EffectType::num_types;
                 break;
         }
-        memset(text, 'Q', sizeof(text));
+        memset(static_cast<void*>(text), 'Q', sizeof(text));
         memcpy(saved_text, text, sizeof(text));
         TEST(Synth::encode_effects_json(&doc, text, sizeof(text)) == 0);
         TEST(memcmp(text, saved_text, sizeof(text)) == 0);
-        memset(&candidate, 0x5A, sizeof(candidate));
+        memset(static_cast<void*>(&candidate), 0x5A, sizeof(candidate));
         saved_candidate = candidate;
         TEST(! Sculptor::replace_effect_chain_candidate(&source, Sculptor::fx_master_chain, &doc, &candidate));
         TEST(memcmp(&candidate, &saved_candidate, sizeof(candidate)) == 0);
@@ -4880,7 +4880,7 @@ static void effects_clipboard_regressions()
 
     // Whole-bank limits: unrelated channels and disabled bindings still count.
     for (uint32_t budget = 0; budget < 3; ++budget) {
-        memset(&source, 0, sizeof(source));
+        memset(static_cast<void*>(&source), 0, sizeof(source));
         Synth::init_default_bank(&source.bank);
         effects_clipboard_fixture(&doc, false);
         if (budget == 0) {
@@ -4933,7 +4933,7 @@ static void effects_clipboard_regressions()
         }
         TEST(Synth::validate_instrument_bank(&source.bank));
         saved_source = source;
-        memset(&candidate, 0x5A, sizeof(candidate));
+        memset(static_cast<void*>(&candidate), 0x5A, sizeof(candidate));
         saved_candidate = candidate;
         TEST(! Sculptor::replace_effect_chain_candidate(&source, 0, &doc, &candidate));
         TEST(memcmp(&candidate, &saved_candidate, sizeof(candidate)) == 0);
@@ -4945,7 +4945,7 @@ static void effects_clipboard_regressions()
 // channel index or Sculptor::fx_master_chain.
 static Synth::EffectChainBinding& add_cc_chain_fixture(Synth::InstrumentEditorBank* bank, uint32_t chain)
 {
-    memset(bank, 0, sizeof(*bank));
+    memset(static_cast<void*>(bank), 0, sizeof(*bank));
     Synth::init_default_bank(&bank->bank);
     Synth::EffectChainBinding& fixture_chain = Sculptor::fx_graph_chain(&bank->bank, chain);
     fixture_chain.num_effects                = 1;
@@ -5151,7 +5151,7 @@ static void effects_add_cc_regressions()
     pasted_row.inputs[0].op                 = Synth::SourceOp::add;
     pasted_row.inputs[0].scale              = 0.5f;
 
-    memset(&loaded, 0, sizeof(loaded));
+    memset(static_cast<void*>(&loaded), 0, sizeof(loaded));
     Synth::init_default_bank(&loaded.bank);
     loaded.added_cc_mask[0] = 1u << 6; // a pre-existing addition on the receiving chain
     loaded.added_cc_mask[1] = 1u << 4; // a pre-existing addition on another chain
@@ -5196,7 +5196,7 @@ static void effects_add_cc_regressions()
     TEST(v2_length > 0);
     TEST(strstr(payload, "\"instrument_editor_bank_v2\"") != nullptr);
     TEST(strstr(payload, "\"added_ccs\"") != nullptr);
-    memset(&loaded, 0, sizeof(loaded));
+    memset(static_cast<void*>(&loaded), 0, sizeof(loaded));
     TEST(Synth::decode_editor_bank_json(payload, v2_length, &loaded));
     TEST(loaded.added_cc_mask[0] == 0x0003);
     TEST(loaded.added_cc_mask[Sculptor::fx_master_chain] == 0x8000);
@@ -5215,7 +5215,7 @@ static void effects_add_cc_regressions()
         const size_t offset      = static_cast<size_t>(insert - v2_document);
         memmove(insert + unknown_len, insert, v2_length - offset + 1);
         memcpy(insert, unknown, unknown_len);
-        memset(&loaded, 0, sizeof(loaded));
+        memset(static_cast<void*>(&loaded), 0, sizeof(loaded));
         TEST(! Synth::decode_editor_bank_json(v2_document, v2_length + static_cast<uint32_t>(unknown_len), &loaded));
     }
 
@@ -5227,7 +5227,7 @@ static void effects_add_cc_regressions()
     TEST(legacy_length > 0);
     TEST(strncmp(payload, "{\"instrument_editor_bank\":{", strlen("{\"instrument_editor_bank\":")) == 0);
     TEST(strstr(payload, "\"added_ccs\"") != nullptr);
-    memset(&loaded, 0, sizeof(loaded));
+    memset(static_cast<void*>(&loaded), 0, sizeof(loaded));
     TEST(Synth::decode_editor_bank_json(payload, legacy_length, &loaded));
     TEST(loaded.added_cc_mask[0] == 0x0001);
     TEST(loaded.added_cc_mask[Sculptor::fx_master_chain] == 0x0002);
@@ -5237,7 +5237,7 @@ static void effects_add_cc_regressions()
     const uint32_t old_length = Synth::encode_editor_bank_json(&source, payload, sizeof(payload));
     TEST(old_length > 0);
     TEST(strstr(payload, "\"added_ccs\"") == nullptr); // zero masks emit no key
-    memset(&loaded, 0, sizeof(loaded));
+    memset(static_cast<void*>(&loaded), 0, sizeof(loaded));
     TEST(Synth::decode_editor_bank_json(payload, old_length, &loaded));
     for (uint32_t c = 0; c <= Synth::max_channels; ++c) {
         TEST(loaded.added_cc_mask[c] == 0);
@@ -5341,7 +5341,7 @@ static void effects_add_cc_regressions()
     Synth::LibraryEntry cc_entry;
     TEST(Synth::read_library_index(library_path, &cc_entry, 1) == 1);
 
-    memset(&loaded, 0, sizeof(loaded));
+    memset(static_cast<void*>(&loaded), 0, sizeof(loaded));
     Synth::init_default_bank(&loaded.bank);
     uint16_t cc_slot = 0;
     TEST(Synth::load_library_instrument(library_path, &cc_entry, &loaded, 3, &cc_slot));
@@ -5350,7 +5350,7 @@ static void effects_add_cc_regressions()
 
     // A pre-existing destination addition on a different CC survives, the
     // other chains' masks stay as they were, and a second load is idempotent.
-    memset(&loaded, 0, sizeof(loaded));
+    memset(static_cast<void*>(&loaded), 0, sizeof(loaded));
     Synth::init_default_bank(&loaded.bank);
     loaded.added_cc_mask[3] = 1u << 4; // pre-existing CC 20 addition
     loaded.added_cc_mask[1] = 1u << 7; // another chain's state
@@ -5382,7 +5382,7 @@ static void effects_add_cc_regressions()
     }
     TEST(legacy_entry != nullptr);
     if (legacy_entry) {
-        memset(&loaded, 0, sizeof(loaded));
+        memset(static_cast<void*>(&loaded), 0, sizeof(loaded));
         Synth::init_default_bank(&loaded.bank);
         TEST(Synth::load_library_instrument(library_path, legacy_entry, &loaded, 1, &cc_slot));
         for (uint32_t c = 0; c <= Synth::max_channels; ++c) {
@@ -5415,8 +5415,8 @@ static void effects_enable_regressions()
     // 7-bit halves, never as a prepared float.
     {
         Synth::ChannelCcState cc_state;
-        memset(&cc_state, 0, sizeof(cc_state));
-        memset(cc_state.lsb, 0xFF, sizeof(cc_state.lsb)); // fresh channel: no LSB seen yet
+        memset(static_cast<void*>(&cc_state), 0, sizeof(cc_state));
+        memset(static_cast<void*>(cc_state.lsb), 0xFF, sizeof(cc_state.lsb)); // fresh channel: no LSB seen yet
 
         (void)Synth::apply_channel_cc(&cc_state, Synth::cc_msb_base, 63);
         const float at_8191 = Synth::apply_channel_cc(&cc_state, Synth::cc_lsb_base, 127);
@@ -5521,8 +5521,8 @@ static void effects_enable_regressions()
         // A routed effect that ran, dropped below the threshold and rose back
         // across it clears once at the re-enable edge.
         Synth::ChannelCcState cc_state;
-        memset(&cc_state, 0, sizeof(cc_state));
-        memset(cc_state.lsb, 0xFF, sizeof(cc_state.lsb));
+        memset(static_cast<void*>(&cc_state), 0, sizeof(cc_state));
+        memset(static_cast<void*>(cc_state.lsb), 0xFF, sizeof(cc_state.lsb));
         (void)Synth::apply_channel_cc(&cc_state, Synth::cc_msb_base, 64);
         const float live_value = Synth::apply_channel_cc(&cc_state, Synth::cc_lsb_base, 0);
 
@@ -5805,8 +5805,8 @@ static void effects_enable_regressions()
         // The raw CC arrives through the capture path; the first simulated
         // block takes the routed instance live.
         Synth::ChannelCcState cc_state;
-        memset(&cc_state, 0, sizeof(cc_state));
-        memset(cc_state.lsb, 0xFF, sizeof(cc_state.lsb));
+        memset(static_cast<void*>(&cc_state), 0, sizeof(cc_state));
+        memset(static_cast<void*>(cc_state.lsb), 0xFF, sizeof(cc_state.lsb));
         (void)Synth::apply_channel_cc(&cc_state, Synth::cc_msb_base, 64);
         const float live_value = Synth::apply_channel_cc(&cc_state, Synth::cc_lsb_base, 0);
 
@@ -6108,7 +6108,7 @@ static void effects_inline_modulator_regressions()
     // Source B, per wire family; an exhausted family refuses.
     add_cc_chain_fixture(&source, 0);
     TEST(Sculptor::allocate_default_lfo(&source.bank, &lfo_descriptor));
-    memset(pinned_lfos, 0, sizeof(pinned_lfos));
+    memset(static_cast<void*>(pinned_lfos), 0, sizeof(pinned_lfos));
     pinned_lfos[lfo_descriptor - 1] = true;
     TEST(Sculptor::project_effect_chain_to_graph(source, 0, &graph, &mapping, pinned_lfos));
     graph.take_changes(discarded, Sculptor::max_pending_changes);
@@ -6127,7 +6127,7 @@ static void effects_inline_modulator_regressions()
     // param, the LFO row renders and both MIDI source rows stay hidden.
     add_cc_chain_fixture(&source, 0);
     TEST(Sculptor::allocate_default_lfo(&source.bank, &lfo_descriptor));
-    memset(pinned_lfos, 0, sizeof(pinned_lfos));
+    memset(static_cast<void*>(pinned_lfos), 0, sizeof(pinned_lfos));
     pinned_lfos[lfo_descriptor - 1] = true;
     TEST(Sculptor::project_effect_chain_to_graph(source, 0, &graph, &mapping, pinned_lfos));
     graph.take_changes(discarded, Sculptor::max_pending_changes);
@@ -6166,7 +6166,7 @@ static void effects_inline_modulator_regressions()
     // family opens its row too.
     add_cc_chain_fixture(&source, 0);
     TEST(Sculptor::allocate_default_lfo(&source.bank, &lfo_descriptor));
-    memset(pinned_lfos, 0, sizeof(pinned_lfos));
+    memset(static_cast<void*>(pinned_lfos), 0, sizeof(pinned_lfos));
     pinned_lfos[lfo_descriptor - 1] = true;
     TEST(Sculptor::project_effect_chain_to_graph(source, 0, &graph, &mapping, pinned_lfos));
     graph.take_changes(discarded, Sculptor::max_pending_changes);
@@ -6188,7 +6188,7 @@ static void effects_inline_modulator_regressions()
     hand_wired.effects[0].bindings[0].inputs[0].op     = Synth::SourceOp::add;
     hand_wired.effects[0].bindings[0].inputs[0].scale  = 1.0f;
     TEST(Sculptor::allocate_default_lfo(&source.bank, &lfo_descriptor));
-    memset(pinned_lfos, 0, sizeof(pinned_lfos));
+    memset(static_cast<void*>(pinned_lfos), 0, sizeof(pinned_lfos));
     pinned_lfos[lfo_descriptor - 1] = true;
     TEST(Sculptor::project_effect_chain_to_graph(source, 0, &graph, &mapping, pinned_lfos));
     graph.take_changes(discarded, Sculptor::max_pending_changes);
@@ -6215,7 +6215,7 @@ static void effects_inline_modulator_regressions()
     // last input and the base-row dot closes.
     add_cc_chain_fixture(&source, 0);
     TEST(Sculptor::allocate_default_lfo(&source.bank, &lfo_descriptor));
-    memset(pinned_lfos, 0, sizeof(pinned_lfos));
+    memset(static_cast<void*>(pinned_lfos), 0, sizeof(pinned_lfos));
     pinned_lfos[lfo_descriptor - 1]                                  = true;
     source.bank.channel_chains[0].effects[0].bindings[0].lfo_desc_id = lfo_descriptor;
     TEST(Sculptor::project_effect_chain_to_graph(source, 0, &graph, &mapping, pinned_lfos));
@@ -6587,7 +6587,7 @@ static void fx_add_lfo_modeled_regressions()
     }
     TEST(full.bank.lfos.num_allocated == Synth::max_lfos);
     TEST(Synth::validate_instrument_bank(&full.bank));
-    memset(&refused, 0x5A, sizeof(refused));
+    memset(static_cast<void*>(&refused), 0x5A, sizeof(refused));
     refused_sentinel = refused;
     TEST(! Sculptor::add_effect_lfo_candidate(&full, 0, &refused, &descriptor));
     TEST(memcmp(&refused, &refused_sentinel, sizeof(refused)) == 0);
@@ -6802,7 +6802,7 @@ static int32_t find_detached_by_desc(const Sculptor::OscGraphMapping& mapping, u
 // instances and no parameter nodes.
 static void build_full_block_fixture(Synth::InstrumentBank* bank, Synth::Instrument* instrument)
 {
-    memset(bank, 0, sizeof(*bank));
+    memset(static_cast<void*>(bank), 0, sizeof(*bank));
     *instrument = {};
     TEST(bank->envelopes.allocate() == 0);
     TEST(bank->envelopes.allocate() == 1);
@@ -7299,7 +7299,7 @@ static void osc_direct_modulator_regressions()
         // Multi-layer per-cell binding tuples: layers 0 and 2 share one
         // volume tuple, layer 1 differs; compile writes each layer's own
         // block state, so the shared tuple carries over bit-identically.
-        memset(&bank, 0, sizeof(bank));
+        memset(static_cast<void*>(&bank), 0, sizeof(bank));
         instrument = {};
         TEST(bank.envelopes.allocate() == 0);
         TEST(bank.envelopes.allocate() == 1);
@@ -7982,7 +7982,7 @@ static void osc_direct_modulator_regressions()
     {
         static Synth::InstrumentEditorBank low_bank;
         static Synth::Instrument           instrument;
-        memset(&low_bank, 0, sizeof(low_bank));
+        memset(static_cast<void*>(&low_bank), 0, sizeof(low_bank));
         instrument             = Synth::Instrument{};
         instrument.layer_count = 1;
         for (uint32_t target = 0; target < Synth::num_mod_targets; target++) {
@@ -8530,7 +8530,7 @@ static void osc_cc_regressions()
     // primitives and constants and mirroring realtime_synth.cpp:1039-1171.
     {
         static Synth::InstrumentBank runtime_bank;
-        memset(&runtime_bank, 0, sizeof(runtime_bank));
+        memset(static_cast<void*>(&runtime_bank), 0, sizeof(runtime_bank));
         const uint32_t instr_slot = runtime_bank.instruments.allocate();
         TEST(instr_slot == 0);
         if (instr_slot == 0) {
@@ -8555,10 +8555,10 @@ static void osc_cc_regressions()
             constexpr uint32_t            replica_count         = cc_leaf_base + Synth::num_assignable_ccs + 1;
             static Synth::ParamDescriptor descs[replica_count]  = {};
             static Synth::Parameter       params[replica_count] = {};
-            memset(descs, 0, sizeof(descs));
-            memset(params, 0, sizeof(params));
+            memset(static_cast<void*>(descs), 0, sizeof(descs));
+            memset(static_cast<void*>(params), 0, sizeof(params));
             static Synth::ChannelCcState cc_state;
-            memset(&cc_state, 0, sizeof(cc_state));
+            memset(static_cast<void*>(&cc_state), 0, sizeof(cc_state));
             const Synth::TargetBinding& volume_binding =
                 runtime_bank.instruments.entries[instr_slot].layers[0].targets[Synth::mod_volume];
             Synth::SourceParam sources[Synth::max_mod_inputs] = {};
@@ -8723,8 +8723,8 @@ static void check_osc_pitch_gating()
     {
         static Synth::Parameter       params[8];
         static Synth::ParamDescriptor descs[8];
-        memset(params, 0, sizeof(params));
-        memset(descs, 0, sizeof(descs));
+        memset(static_cast<void*>(params), 0, sizeof(params));
+        memset(static_cast<void*>(descs), 0, sizeof(descs));
 
         // External leaf: the leaf's current value, value and prev seeded alike.
         descs[1].kind = Synth::ParamKind::external;
@@ -10566,7 +10566,7 @@ void Synth::apply_midi_event(const Synth::MidiEvent&) {}
 static bool submit_test_midi_event(Synth::EvType type, uint32_t channel, uint32_t note, uint32_t data)
 {
     Synth::MidiEvent event;
-    memset(&event, 0, sizeof(event));
+    memset(static_cast<void*>(&event), 0, sizeof(event));
 
     event.event     = type;
     event.channel   = static_cast<uint8_t>(channel);
@@ -10700,7 +10700,7 @@ static void check_pad_json_codec()
                                            rt_lfos,
                                            &rt_lfo_count));
         static Synth::InstrumentEditorBank rt_bank;
-        memset(&rt_bank, 0, sizeof(rt_bank));
+        memset(static_cast<void*>(&rt_bank), 0, sizeof(rt_bank));
         const uint32_t rt_slot = rt_bank.bank.instruments.allocate();
         TEST(rt_slot != pool_no_slot);
         rt_bank.bank.instruments.entries[rt_slot] = rt_instr;
@@ -10744,7 +10744,7 @@ static void check_pad_json_codec()
         static const char pad_bank_lfo_doc[] =
             "{\"instrument_editor_bank\":{\"lfos\":[{\"wave\":\"pad\",\"period_ms\":100}]}}";
         static Synth::InstrumentEditorBank bank_guarded;
-        memset(&bank_guarded, 0, sizeof(bank_guarded));
+        memset(static_cast<void*>(&bank_guarded), 0, sizeof(bank_guarded));
         TEST(! Synth::decode_editor_bank_json(pad_bank_lfo_doc,
                                               static_cast<uint32_t>(strlen(pad_bank_lfo_doc)),
                                               &bank_guarded));
@@ -10821,7 +10821,7 @@ static void check_pad_tilt_json_codec()
                                            rt_lfos,
                                            &rt_lfo_count));
         static Synth::InstrumentEditorBank rt_bank;
-        memset(&rt_bank, 0, sizeof(rt_bank));
+        memset(static_cast<void*>(&rt_bank), 0, sizeof(rt_bank));
         const uint32_t rt_slot = rt_bank.bank.instruments.allocate();
         TEST(rt_slot != pool_no_slot);
         rt_bank.bank.instruments.entries[rt_slot] = rt_instr;
@@ -11668,7 +11668,7 @@ int main()
 
         // The validator accepts divergent per-layer routing.
         static Synth::InstrumentBank probe_bank;
-        memset(&probe_bank, 0, sizeof(probe_bank));
+        memset(static_cast<void*>(&probe_bank), 0, sizeof(probe_bank));
         const uint32_t slot = probe_bank.instruments.allocate();
         TEST(slot != pool_no_slot);
         probe_bank.instruments.entries[slot] = instrument;
@@ -12092,7 +12092,7 @@ int main()
 
     // Builds a small valid bank: one instrument, one envelope, one LFO, one zone.
     auto make_valid_bank = [](Synth::InstrumentBank& bank) {
-        memset(&bank, 0, sizeof(bank));
+        memset(static_cast<void*>(&bank), 0, sizeof(bank));
         const uint32_t env                                          = bank.envelopes.allocate();
         bank.envelopes.entries[env].num_points                      = 2;
         bank.envelopes.entries[env].points[1].position              = 100;
@@ -12232,7 +12232,7 @@ int main()
     // allocates no descriptors and no channel effect chain.
     {
         static Synth::InstrumentBank bank;
-        memset(&bank, 0, sizeof(bank));
+        memset(static_cast<void*>(&bank), 0, sizeof(bank));
         TEST(bank.envelopes.allocate() == 0);
         bank.envelopes.entries[0].num_points         = 2;
         bank.envelopes.entries[0].points[1].position = 100;
@@ -12266,7 +12266,7 @@ int main()
     // space, leaving the bank byte-for-byte untouched.
     {
         static Synth::InstrumentBank bank;
-        memset(&bank, 0, sizeof(bank));
+        memset(static_cast<void*>(&bank), 0, sizeof(bank));
         bank.instruments.entries[0].layer_count = 1;
         for (uint32_t i = 0; i < Synth::max_instruments; i++) {
             TEST(bank.instruments.allocate() == i);
@@ -13209,7 +13209,7 @@ int main()
     // Proposed audio capture and gesture preflight share validation without mutating the old wire.
     {
         static Synth::InstrumentEditorBank authored;
-        memset(&authored, 0, sizeof(authored));
+        memset(static_cast<void*>(&authored), 0, sizeof(authored));
         make_valid_bank(authored.bank);
         enabled_effect(authored.bank, 0, 0, Synth::EffectType::delay);
         enabled_effect(authored.bank, 0, 1, Synth::EffectType::chorus);
@@ -13275,7 +13275,7 @@ int main()
     {
         static Synth::InstrumentEditorBank restored;
         static Synth::InstrumentEditorBank authored;
-        memset(&authored, 0, sizeof(authored));
+        memset(static_cast<void*>(&authored), 0, sizeof(authored));
         make_valid_bank(authored.bank);
         enabled_effect(authored.bank, 0, 0, Synth::EffectType::delay)->bindings[0].base_value  = 217.0f;
         enabled_effect(authored.bank, 0, 1, Synth::EffectType::chorus)->bindings[0].base_value = 3.25f;
@@ -13298,7 +13298,7 @@ int main()
         for (uint32_t example = 0; example < 6; ++example) {
             authored.effect_audio[0] = valid[example];
             TEST(Sculptor::validate_effect_audio_topology(retained, valid[example]));
-            memset(&playback, 0, sizeof(playback));
+            memset(static_cast<void*>(&playback), 0, sizeof(playback));
             const bool compiled = Sculptor::compile_editor_playback_bank(authored, &playback);
             TEST(compiled);
             if (compiled) {
@@ -13328,7 +13328,7 @@ int main()
         for (const auto& audio : invalid) {
             authored.effect_audio[0] = audio;
             TEST(! Sculptor::validate_effect_audio_topology(retained, audio));
-            memset(&playback, 0xA5, sizeof(playback));
+            memset(static_cast<void*>(&playback), 0xA5, sizeof(playback));
             static Synth::InstrumentBank before;
             memcpy(&before, &playback, sizeof(before));
             TEST(! Sculptor::compile_editor_playback_bank(authored, &playback));
@@ -13370,7 +13370,7 @@ int main()
         TEST(Synth::save_library_record(library_path, "Effects", "Detached", &authored, 0) == 0);
         Synth::LibraryEntry entry = {};
         TEST(Synth::read_library_index(library_path, &entry, 1) == 1);
-        memset(&restored, 0, sizeof(restored));
+        memset(static_cast<void*>(&restored), 0, sizeof(restored));
         Synth::init_default_bank(&restored.bank);
         const Synth::EffectChainBinding other      = restored.bank.master_chain;
         uint16_t                        first_slot = 0;
@@ -13390,7 +13390,7 @@ int main()
             "{\"format\":\"synth-effects-v3\",\"effects\":[]}",
         };
         for (const char* invalid_document : invalid_documents) {
-            memset(&decoded, 0xA5, sizeof(decoded));
+            memset(static_cast<void*>(&decoded), 0xA5, sizeof(decoded));
             Synth::EffectsDocument unchanged;
             memcpy(&unchanged, &decoded, sizeof(decoded));
             TEST(! Synth::decode_effects_json(invalid_document,
@@ -13404,7 +13404,7 @@ int main()
         };
         for (const char* envelope : envelopes) {
             // A v2 payload without the required owner metadata must refuse, not default serial.
-            memset(&restored, 0xA5, sizeof(restored));
+            memset(static_cast<void*>(&restored), 0xA5, sizeof(restored));
             static Synth::InstrumentEditorBank unchanged;
             memcpy(&unchanged, &restored, sizeof(restored));
             TEST(! Synth::decode_editor_bank_json(envelope, static_cast<uint32_t>(strlen(envelope)), &restored));
@@ -13425,7 +13425,7 @@ int main()
     // The queued image is playable, never the retained authoring collection.
     {
         static Synth::InstrumentEditorBank source;
-        memset(&source, 0, sizeof(source));
+        memset(static_cast<void*>(&source), 0, sizeof(source));
         make_valid_bank(source.bank);
         enabled_effect(source.bank, 0, 0, Synth::EffectType::delay)->bindings[0].base_value  = 231.0f;
         enabled_effect(source.bank, 0, 1, Synth::EffectType::chorus)->bindings[0].base_value = 4.5f;
@@ -13433,7 +13433,7 @@ int main()
         enabled_effect(source.bank, Synth::max_channels, 0, Synth::EffectType::reverb);
         source.effect_audio[Synth::max_channels] = { 1, { 0, 0, 0, 0, 1 } };
         static Synth::InstrumentBank packet, installed;
-        memset(&packet, 0, sizeof(packet));
+        memset(static_cast<void*>(&packet), 0, sizeof(packet));
         installed           = source.bank;
         const bool compiled = Sculptor::compile_editor_playback_bank(source, &packet);
         TEST(compiled);
@@ -13469,7 +13469,7 @@ int main()
         source.effect_audio[0]                   = {};
         source.effect_audio[Synth::max_channels] = {};
         source.bank.channel_chains[0].effects[0] = {};
-        memset(&packet, 0, sizeof(packet));
+        memset(static_cast<void*>(&packet), 0, sizeof(packet));
         const bool legacy = Sculptor::compile_editor_playback_bank(source, &packet);
         TEST(legacy);
         if (legacy) {
@@ -13512,7 +13512,7 @@ int main()
     // Packets are whole banks; instruments.entries[0].layer_count marks each one.
     {
         static Synth::BankUpdateQueue queue;
-        memset(&queue, 0, sizeof(queue));
+        memset(static_cast<void*>(&queue), 0, sizeof(queue));
 
         static Synth::InstrumentBank bank = {};
         bank.instruments.allocate();
@@ -13582,7 +13582,7 @@ int main()
         static Synth::InstrumentBank  banks[2];
         static Synth::InstrumentBank  runtime;
         static Synth::BankUpdateQueue queue;
-        memset(&queue, 0, sizeof(queue));
+        memset(static_cast<void*>(&queue), 0, sizeof(queue));
         make_valid_bank(banks[0]);
         make_valid_bank(banks[1]);
         banks[0].instruments.entries[0].layers[0].targets[Synth::mod_volume].base_value = 0.25f;
@@ -13837,7 +13837,7 @@ int main()
         TEST(entries[0].payload_size > 0 && entries[0].payload_size <= Synth::library_payload_max);
 
         static Synth::InstrumentEditorBank record;
-        memset(&record, 0, sizeof(record));
+        memset(static_cast<void*>(&record), 0, sizeof(record));
         uint16_t load_slot = 0;
         TEST(Synth::load_library_instrument(path, &entries[0], &record, 0, &load_slot));
         TEST(load_slot == 0);
@@ -13860,7 +13860,7 @@ int main()
         TEST(Synth::save_library_record(path, "Pads", "Renamed", &bank, 1) == 0);
         TEST(Synth::read_library_index(path, entries, Synth::library_max_records) == 2);
         TEST(strcmp(entries[1].name, "Renamed") == 0);
-        memset(&record, 0, sizeof(record));
+        memset(static_cast<void*>(&record), 0, sizeof(record));
         TEST(Synth::load_library_instrument(path, &entries[1], &record, 0, &load_slot));
         TEST(strcmp(record.instrument_names[1], "Saved") == 0);
         TEST(strcmp(bank.instrument_names[1], "Saved") == 0);
@@ -13892,7 +13892,7 @@ int main()
         Synth::LibraryEntry entries[Synth::library_max_records];
         TEST(Synth::read_library_index(path, entries, Synth::library_max_records) == 1);
         static Synth::InstrumentEditorBank record;
-        memset(&record, 0, sizeof(record));
+        memset(static_cast<void*>(&record), 0, sizeof(record));
         uint16_t load_slot = 0;
         TEST(Synth::load_library_instrument(path, &entries[0], &record, 0, &load_slot));
         TEST(Synth::validate_instrument_bank(&record.bank));
@@ -13911,7 +13911,7 @@ int main()
     // frees the replaced chain's exclusive descriptors with the old instruments.
     {
         static Synth::InstrumentEditorBank src;
-        memset(&src, 0, sizeof(src));
+        memset(static_cast<void*>(&src), 0, sizeof(src));
         src.bank.instruments.allocate();
         src.bank.instruments.entries[0].layer_count = 1;
         memcpy(src.instrument_names[0], "Chained", 8);
@@ -13982,7 +13982,7 @@ int main()
             Synth::LibraryEntry entries[1];
             TEST(Synth::read_library_index(path, entries, 1) == 1);
             static Synth::InstrumentEditorBank scratch;
-            memset(&scratch, 0, sizeof(scratch));
+            memset(static_cast<void*>(&scratch), 0, sizeof(scratch));
             uint16_t load_slot = 0;
             TEST(Synth::load_library_instrument(path, &entries[0], &scratch, 0, &load_slot) == expect_load);
         };
@@ -14020,7 +14020,7 @@ int main()
     // repeated load/delete cycles keep the pool bounded through reclaim.
     {
         static Synth::InstrumentEditorBank src;
-        memset(&src, 0, sizeof(src));
+        memset(static_cast<void*>(&src), 0, sizeof(src));
         src.bank.instruments.allocate();
         src.bank.instruments.entries[0].layer_count = 1;
         memcpy(src.instrument_names[0], "Loaded", 7);
@@ -14050,7 +14050,7 @@ int main()
             TEST(Synth::load_library_instrument(load_path, &load_entries[0], &bank, 2, &slot));
             bank.bank.channel_enabled[2] = 1;
             Synth::reclaim_unused_slots(&bank);
-            memset(bank.bank.channel_zones[2], 0, sizeof(bank.bank.channel_zones[2]));
+            memset(static_cast<void*>(bank.bank.channel_zones[2]), 0, sizeof(bank.bank.channel_zones[2]));
             bank.bank.channel_enabled[2] = 0;
             Synth::reclaim_unused_slots(&bank);
             TEST(Synth::validate_instrument_bank(&bank.bank));
@@ -14062,7 +14062,7 @@ int main()
     // A pool without space refuses the load with the bank unmodified.
     {
         static Synth::InstrumentEditorBank src;
-        memset(&src, 0, sizeof(src));
+        memset(static_cast<void*>(&src), 0, sizeof(src));
         src.bank.envelopes.allocate();
         Synth::EnvelopeDescriptor env = {};
         env.num_points                = 1;
@@ -14127,7 +14127,7 @@ int main()
             TEST(Synth::read_library_index(path, entries, 4) == 1);
 
             static Synth::InstrumentEditorBank scratch;
-            memset(&scratch, 0, sizeof(scratch));
+            memset(static_cast<void*>(&scratch), 0, sizeof(scratch));
 
             uint16_t load_slot = 0;
 
@@ -14208,7 +14208,7 @@ int main()
         fwrite(rec, sizeof(rec), 1, file);
 
         static uint8_t junk[64 * 1024];
-        memset(junk, 0x5a, sizeof(junk));
+        memset(static_cast<void*>(junk), 0x5a, sizeof(junk));
         for (uint32_t written = 0; written < huge; written += static_cast<uint32_t>(sizeof(junk))) {
             const uint32_t chunk = huge - written < static_cast<uint32_t>(sizeof(junk))
                                        ? huge - written
@@ -14267,7 +14267,7 @@ int main()
             const uint32_t corrupt_header[3] = { 0x42494C49, Synth::library_version, 1 };
             TEST(fwrite(corrupt_header, sizeof(corrupt_header), 1, corrupt) == 1);
             char bad_record[Synth::library_category_len + Synth::library_name_len + 4] = {};
-            memset(bad_record, 'x', sizeof(bad_record) - 4);
+            memset(static_cast<void*>(bad_record), 'x', sizeof(bad_record) - 4);
             const uint32_t payload_size = 2;
             memcpy(bad_record + sizeof(bad_record) - 4, &payload_size, 4);
             TEST(fwrite(bad_record, sizeof(bad_record), 1, corrupt) == 1);
@@ -14339,7 +14339,7 @@ int main()
         TEST(Synth::read_library_index(path, entries, 4) == 1);
 
         static Synth::InstrumentEditorBank scratch;
-        memset(&scratch, 0, sizeof(scratch));
+        memset(static_cast<void*>(&scratch), 0, sizeof(scratch));
         uint16_t load_slot = 0;
         TEST(! Synth::load_library_instrument(path, &entries[0], &scratch, 0, &load_slot));
 
@@ -14360,14 +14360,14 @@ int main()
         fwrite(header, sizeof(header), 1, file);
 
         char bad_category[52] = {};
-        memset(bad_category, 'x', Synth::library_category_len);
+        memset(static_cast<void*>(bad_category), 'x', Synth::library_category_len);
         memcpy(bad_category + 48, &small, 4);
         fwrite(bad_category, sizeof(bad_category), 1, file);
         fwrite("1234", 4, 1, file);
 
         char bad_name[52] = {};
         memcpy(bad_name, "Cat", 3);
-        memset(bad_name + 24, 'y', Synth::library_name_len);
+        memset(static_cast<void*>(bad_name + 24), 'y', Synth::library_name_len);
         memcpy(bad_name + 48, &small, 4);
         fwrite(bad_name, sizeof(bad_name), 1, file);
         fwrite("5678", 4, 1, file);
@@ -14460,7 +14460,7 @@ int main()
         // The phantom store's Oscillator members carry the slope default on
         // construction.  Decode canonicalizes the unused store to zero, so the
         // fixture normalizes the same way before the byte comparison.
-        memset(bank.phantoms, 0, sizeof(bank.phantoms));
+        memset(static_cast<void*>(bank.phantoms), 0, sizeof(bank.phantoms));
         bank.phantom_count = 0;
         // The per-layer format stores live layers only, so normalize the fixture
         // the way decode's canonicalization does.
@@ -14493,7 +14493,7 @@ int main()
         // a save/load byte-for-byte.
         {
             static Synth::InstrumentEditorBank routed;
-            memset(&routed, 0, sizeof(routed));
+            memset(static_cast<void*>(&routed), 0, sizeof(routed));
             routed.bank.channel_enabled[0] = 1;
             TEST(routed.bank.instruments.allocate() == 0);
             Synth::Instrument& routed_instr = routed.bank.instruments.entries[0];
@@ -14565,11 +14565,11 @@ int main()
             static Synth::InstrumentEditorBank unterminated;
             make_valid_bank(unterminated.bank);
             unterminated.bank.instruments.num_allocated = 1;
-            memset(unterminated.instrument_names[0], 'x', Synth::max_name_len);
+            memset(static_cast<void*>(unterminated.instrument_names[0]), 'x', Synth::max_name_len);
             char small_buffer[64 * 1024];
             TEST(Synth::encode_editor_bank_json(&unterminated, small_buffer, sizeof(small_buffer)) == 0);
-            memset(unterminated.instrument_names[0], 0, Synth::max_name_len);
-            memset(unterminated.channel_names[0], 'y', Synth::max_name_len);
+            memset(static_cast<void*>(unterminated.instrument_names[0]), 0, Synth::max_name_len);
+            memset(static_cast<void*>(unterminated.channel_names[0]), 'y', Synth::max_name_len);
             TEST(Synth::encode_editor_bank_json(&unterminated, small_buffer, sizeof(small_buffer)) == 0);
             // The encoder's %.9g spelling of the finite float extrema round-trips:
             // 3.40282347e+38 sits just past the exact float32 maximum read as a double,
@@ -14596,11 +14596,11 @@ int main()
                 // file reader; an oversized input is refused and leaves the bank
                 // untouched.
                 static char oversized[1024 * 1024 + 16];
-                memset(oversized, ' ', sizeof(oversized));
+                memset(static_cast<void*>(oversized), ' ', sizeof(oversized));
                 oversized[0] = '{';
                 oversized[1] = '}';
                 static Synth::InstrumentEditorBank untouched;
-                memset(&untouched, 0x3C, sizeof(untouched));
+                memset(static_cast<void*>(&untouched), 0x3C, sizeof(untouched));
                 TEST(! Synth::decode_editor_bank_json(oversized, sizeof(oversized), &untouched));
                 TEST(static_cast<unsigned char>(untouched.channel_names[0][0]) == 0x3C);
                 // A Unicode escape decodes to the same bytes as its literal UTF-8
@@ -14679,7 +14679,7 @@ int main()
             fwrite("SYIB\4\0\0\0stale-bytes", 1, 20, binary);
             fclose(binary);
             static Synth::InstrumentEditorBank binary_bank;
-            memset(&binary_bank, 0x3C, sizeof(binary_bank));
+            memset(static_cast<void*>(&binary_bank), 0x3C, sizeof(binary_bank));
             TEST(Synth::load_editor_bank_file(binary_path, &binary_bank) == Synth::BankFileStatus::invalid);
             const uint8_t* const sentinel  = reinterpret_cast<const uint8_t*>(&binary_bank);
             bool                 untouched = true;
@@ -14743,7 +14743,7 @@ int main()
 
         for (uint32_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
             // The destination holds a recognizable pattern; every failure keeps it
-            memset(&bank, 0x5A, sizeof(bank));
+            memset(static_cast<void*>(&bank), 0x5A, sizeof(bank));
             TEST(! Synth::decode_editor_bank_json(bad[i], static_cast<uint32_t>(strlen(bad[i])), &bank));
             const bool unchanged =
                 static_cast<const uint8_t*>(static_cast<const void*>(&bank))[0] == 0x5A &&
@@ -14753,7 +14753,7 @@ int main()
 
         // A semantically invalid document (zero-period LFO) is rejected by the
         // validation stage, and the destination is still untouched
-        memset(&bank, 0x5A, sizeof(bank));
+        memset(static_cast<void*>(&bank), 0x5A, sizeof(bank));
         const char* const semantic = "{\"instrument_editor_bank\":{\"lfos\":[{}]}}";
         TEST(! Synth::decode_editor_bank_json(semantic, static_cast<uint32_t>(strlen(semantic)), &bank));
         TEST(static_cast<const uint8_t*>(static_cast<const void*>(&bank))[0] == 0x5A);
@@ -14812,10 +14812,10 @@ int main()
         // 256 literal 'a's vs "\u0061" + 255 'a's: both decode to 256 'a's
         uint32_t len = 0;
         len += static_cast<uint32_t>(snprintf(doc + len, sizeof(doc) - len, "{\"future\":{\""));
-        memset(doc + len, 'a', 256);
+        memset(static_cast<void*>(doc + len), 'a', 256);
         len += 256;
         len += static_cast<uint32_t>(snprintf(doc + len, sizeof(doc) - len, "\":1,\"\\u0061"));
-        memset(doc + len, 'a', 255);
+        memset(static_cast<void*>(doc + len), 'a', 255);
         len += 255;
         len += static_cast<uint32_t>(snprintf(doc + len, sizeof(doc) - len, "\":2}}"));
         TEST(len < sizeof(doc));
@@ -14829,7 +14829,7 @@ int main()
         // shows the DECODED prefix - never the raw escape text
         len = 0;
         len += static_cast<uint32_t>(snprintf(doc + len, sizeof(doc) - len, "{\"\\u0066uture\":1,\""));
-        memset(doc + len, 'x', 300);
+        memset(static_cast<void*>(doc + len), 'x', 300);
         len += 300;
         len += static_cast<uint32_t>(snprintf(doc + len, sizeof(doc) - len, "\":2}"));
         TEST(len < sizeof(doc));
@@ -15000,7 +15000,7 @@ int main()
     // is refused by the save instead of writing an unloadable file.
     {
         static Synth::InstrumentEditorBank bank;
-        memset(&bank, 0, sizeof(bank));
+        memset(static_cast<void*>(&bank), 0, sizeof(bank));
 
         // Dense instruments: every layer binds every target to both descriptors,
         // so the encoded document needs far more than the 16384-token pool
@@ -15102,14 +15102,14 @@ int main()
         static uint8_t chunk[64 * 1024];
         // The codec's document bound, duplicated because the codec keeps it internal.
         constexpr uint32_t bank_json_text_size = 1024 * 1024;
-        memset(chunk, 0x61, sizeof(chunk));
+        memset(static_cast<void*>(chunk), 0x61, sizeof(chunk));
         for (uint32_t written = 0; written <= bank_json_text_size; written += sizeof(chunk))
             fwrite(chunk, sizeof(chunk), 1, big);
         fclose(big);
         // The loader refuses documents past the parse buffer and leaves the
         // destination untouched.
         static Synth::InstrumentEditorBank toobig_bank;
-        memset(&toobig_bank, 0x5A, sizeof(toobig_bank));
+        memset(static_cast<void*>(&toobig_bank), 0x5A, sizeof(toobig_bank));
         TEST(Synth::load_editor_bank_file(big_path, &toobig_bank) == Synth::BankFileStatus::too_large);
         const uint8_t* const sentinel  = reinterpret_cast<const uint8_t*>(&toobig_bank);
         bool                 untouched = true;
@@ -15267,7 +15267,7 @@ int main()
     // with the pool compaction, so detached nodes keep editing their content.
     {
         static Synth::InstrumentEditorBank bank;
-        memset(&bank, 0, sizeof(bank));
+        memset(static_cast<void*>(&bank), 0, sizeof(bank));
         bank.bank.channel_enabled[0] = 1;
         bank.bank.instruments.allocate();
         Synth::Instrument& instrument    = bank.bank.instruments.entries[0];
@@ -15669,7 +15669,7 @@ int main()
     // the row after the last visible row.
     {
         static Synth::InstrumentEditorBank bank;
-        memset(&bank, 0, sizeof(bank));
+        memset(static_cast<void*>(&bank), 0, sizeof(bank));
         bank.bank.channel_enabled[0] = 1;
         TEST(bank.bank.instruments.allocate() == 0);
         bank.bank.instruments.entries[0].layer_count = 0;
@@ -15705,7 +15705,7 @@ int main()
     // single gray dot renders on the row behind the run.
     {
         static Synth::InstrumentEditorBank bank;
-        memset(&bank, 0, sizeof(bank));
+        memset(static_cast<void*>(&bank), 0, sizeof(bank));
         bank.bank.channel_enabled[0] = 1;
         TEST(bank.bank.instruments.allocate() == 0);
         bank.bank.instruments.entries[0].layer_count = 0;
@@ -15910,7 +15910,7 @@ int main()
     // every dot keeps its (disabled-entry) menu and none is a free dot.
     {
         static Synth::InstrumentEditorBank bank;
-        memset(&bank, 0, sizeof(bank));
+        memset(static_cast<void*>(&bank), 0, sizeof(bank));
         bank.bank.channel_enabled[0] = 1;
         TEST(bank.bank.instruments.allocate() == 0);
         bank.bank.instruments.entries[0].layer_count = 0;
@@ -15946,7 +15946,7 @@ int main()
     for (uint32_t layer_count = 0; layer_count <= Synth::max_layers; ++layer_count) {
         static Synth::InstrumentBank bank;
         static Synth::Instrument     instrument = {};
-        memset(&bank, 0, sizeof(bank));
+        memset(static_cast<void*>(&bank), 0, sizeof(bank));
         instrument             = {};
         instrument.layer_count = layer_count;
         for (uint32_t layer = 0; layer < layer_count; ++layer) {
@@ -15975,7 +15975,7 @@ int main()
     {
         static Synth::InstrumentBank bank;
         static Synth::Instrument     instrument = {};
-        memset(&bank, 0, sizeof(bank));
+        memset(static_cast<void*>(&bank), 0, sizeof(bank));
         // The canvas command's bipolar default: three points, sustain over
         // the middle, -1..+1 span, attack to full and a release tail to
         // neutral.
@@ -16028,7 +16028,7 @@ int main()
         // derives its wire and its visible row.
         static Synth::InstrumentBank pitch_bank;
         static Synth::Instrument     pitch_instrument = {};
-        memset(&pitch_bank, 0, sizeof(pitch_bank));
+        memset(static_cast<void*>(&pitch_bank), 0, sizeof(pitch_bank));
         const uint32_t pitch_env_slot = pitch_bank.envelopes.allocate();
         TEST(pitch_env_slot == 0);
         pitch_bank.envelopes.entries[pitch_env_slot] = bipolar;
@@ -16091,7 +16091,7 @@ int main()
         static Synth::InstrumentBank       model_bank;
         static Synth::InstrumentEditorBank bank;
         static Synth::Instrument           instrument = {};
-        memset(&model_bank, 0, sizeof(model_bank));
+        memset(static_cast<void*>(&model_bank), 0, sizeof(model_bank));
         instrument.layer_count = 6;
         for (uint32_t layer = 0; layer < 6; ++layer) {
             instrument.layers[layer].osc_type[0] = static_cast<Synth::WaveType>(1 + (layer % 4));
@@ -16732,7 +16732,7 @@ int main()
         static Synth::InstrumentBank       model_bank;
         static Synth::InstrumentEditorBank bank;
         static Synth::Instrument           instrument = {};
-        memset(&model_bank, 0, sizeof(model_bank));
+        memset(static_cast<void*>(&model_bank), 0, sizeof(model_bank));
         instrument.layer_count = 4;
         for (uint32_t layer = 0; layer < 4; ++layer) {
             instrument.layers[layer].osc_type[0] = static_cast<Synth::WaveType>(1 + layer);
@@ -16936,7 +16936,7 @@ int main()
         static Synth::InstrumentBank       model_bank;
         static Synth::InstrumentEditorBank bank;
         static Synth::Instrument           instrument = {};
-        memset(&model_bank, 0, sizeof(model_bank));
+        memset(static_cast<void*>(&model_bank), 0, sizeof(model_bank));
         instrument.layer_count = 4;
         for (uint32_t layer = 0; layer < 4; ++layer) {
             instrument.layers[layer].osc_type[0] = static_cast<Synth::WaveType>(1 + layer);
@@ -17040,7 +17040,7 @@ int main()
         // land after the shell, but the type still comes from the
         // highest-index connected row (row 2), not from the shell.
         static Synth::InstrumentEditorBank bank;
-        memset(&bank, 0, sizeof(bank));
+        memset(static_cast<void*>(&bank), 0, sizeof(bank));
         bank.bank.channel_enabled[0] = 1;
         TEST(bank.bank.instruments.allocate() == 0);
         bank.bank.instruments.entries[0].layer_count = 3;
@@ -17068,7 +17068,7 @@ int main()
         // Branch 1, mid shell: the shell sits between connected rows; the
         // highest-index connected row (row 3, compiled layer 2) still wins.
         static Synth::InstrumentEditorBank mid_bank;
-        memset(&mid_bank, 0, sizeof(mid_bank));
+        memset(static_cast<void*>(&mid_bank), 0, sizeof(mid_bank));
         mid_bank.bank.channel_enabled[0] = 1;
         TEST(mid_bank.bank.instruments.allocate() == 0);
         mid_bank.bank.instruments.entries[0].layer_count = 3;
@@ -17096,7 +17096,7 @@ int main()
         // Branch 2, no connected row: seven shells fill the run and the last
         // row's shell (layer 6) supplies the type.
         static Synth::InstrumentEditorBank shells_bank;
-        memset(&shells_bank, 0, sizeof(shells_bank));
+        memset(static_cast<void*>(&shells_bank), 0, sizeof(shells_bank));
         shells_bank.bank.channel_enabled[0] = 1;
         TEST(shells_bank.bank.instruments.allocate() == 0);
         shells_bank.bank.instruments.entries[0].layer_count = 0;
@@ -17121,7 +17121,7 @@ int main()
         // Branch 3, empty run: no connected row and no shell keeps the fresh
         // default type (sine with B off).
         static Synth::InstrumentEditorBank empty_bank;
-        memset(&empty_bank, 0, sizeof(empty_bank));
+        memset(static_cast<void*>(&empty_bank), 0, sizeof(empty_bank));
         empty_bank.bank.channel_enabled[0] = 1;
         TEST(empty_bank.bank.instruments.allocate() == 0);
         empty_bank.bank.instruments.entries[0].layer_count = 0;
@@ -17646,7 +17646,7 @@ int main()
     // descriptor id.
     {
         static Synth::InstrumentEditorBank bank;
-        memset(&bank, 0, sizeof(bank));
+        memset(static_cast<void*>(&bank), 0, sizeof(bank));
         bank.bank.channel_enabled[0]        = 1;
         static Synth::Instrument instrument = {};
         instrument.layer_count              = 1;
@@ -17732,7 +17732,7 @@ int main()
     // voice a zero-layer instrument, so publication must never enable it.
     {
         static Synth::InstrumentEditorBank bank;
-        memset(&bank, 0, sizeof(bank));
+        memset(static_cast<void*>(&bank), 0, sizeof(bank));
         bank.bank.channel_enabled[0]        = 1;
         static Synth::Instrument instrument = {};
         TEST(bank.bank.instruments.allocate() == 0);
@@ -17853,7 +17853,7 @@ int main()
     // early lookup.
     {
         static Synth::InstrumentEditorBank bank;
-        memset(&bank, 0, sizeof(bank));
+        memset(static_cast<void*>(&bank), 0, sizeof(bank));
         bank.bank.channel_enabled[0]        = 1;
         static Synth::Instrument instrument = {};
         instrument.layer_count              = 1;
@@ -17957,7 +17957,7 @@ int main()
     // Layer compaction shifts missing-sum bits together with layers.
     {
         static Synth::InstrumentEditorBank bank;
-        memset(&bank, 0, sizeof(bank));
+        memset(static_cast<void*>(&bank), 0, sizeof(bank));
         bank.graph_missing_sum[3][1] = static_cast<uint8_t>((1u << 1) | (1u << 3) | (1u << 5));
         Sculptor::compact_missing_sum_bits(&bank, 3, 1, 1);
         TEST(bank.graph_missing_sum[3][1] == static_cast<uint8_t>((1u << 2) | (1u << 4)));
@@ -17970,7 +17970,7 @@ int main()
     // the projection relies on.
     {
         static Synth::InstrumentEditorBank bank;
-        memset(&bank, 0, sizeof(bank));
+        memset(static_cast<void*>(&bank), 0, sizeof(bank));
         bank.bank.channel_enabled[0]        = 1;
         static Synth::Instrument instrument = {};
         instrument.layer_count              = 2;
@@ -18033,7 +18033,7 @@ int main()
         TEST(Sculptor::validate_editor_metadata(bank));
         // A zone without an instrument has no rows to mark.
         static Synth::InstrumentEditorBank dead;
-        memset(&dead, 0, sizeof(dead));
+        memset(static_cast<void*>(&dead), 0, sizeof(dead));
         dead.bank.channel_enabled[0] = 1;
         dead.graph_missing_sum[0][0] = 1;
         TEST(! Sculptor::validate_editor_metadata(dead));
@@ -18043,7 +18043,7 @@ int main()
     // once every zone is complete again.
     {
         static Synth::InstrumentEditorBank bank;
-        memset(&bank, 0, sizeof(bank));
+        memset(static_cast<void*>(&bank), 0, sizeof(bank));
         bank.bank.channel_enabled[0]         = 1;
         bank.bank.channel_enabled[1]         = 1;
         bank.graph_missing_sum[0][0]         = 1;
@@ -18061,7 +18061,7 @@ int main()
     // shifting later zones; drop and reset remove.
     {
         static Synth::InstrumentEditorBank bank;
-        memset(&bank, 0, sizeof(bank));
+        memset(static_cast<void*>(&bank), 0, sizeof(bank));
         add_detached_record(&bank, 0, 0, 0, 5, 1.0f, 2.0f, Synth::ModSource::none, Synth::ModSource::none, 0);
         add_detached_record(&bank, 0, 0, 2, 9, 3.0f, 4.0f, Synth::ModSource::velocity, Synth::ModSource::none, 1);
         add_detached_record(&bank, 0, 1, 0, 6, 5.0f, 6.0f, Synth::ModSource::none, Synth::ModSource::none, 0);
@@ -18119,7 +18119,7 @@ int main()
     // accounting the record-creating operations preflight against.
     {
         static Synth::InstrumentEditorBank bank;
-        memset(&bank, 0, sizeof(bank));
+        memset(static_cast<void*>(&bank), 0, sizeof(bank));
         TEST(Sculptor::graph_records_have_capacity(bank, 1));
         bank.graph_layout_count = Synth::max_graph_records;
         TEST(! Sculptor::graph_records_have_capacity(bank, 1));
@@ -18220,7 +18220,7 @@ int main()
     // outside the operated zone stay untouched.
     {
         static Synth::InstrumentEditorBank bank;
-        memset(&bank, 0, sizeof(bank));
+        memset(static_cast<void*>(&bank), 0, sizeof(bank));
         Synth::Oscillator payload = {};
         payload.pitch_offset      = 1.0f;
         TEST(Sculptor::set_phantom_entry(&bank, 3, 1, 1, payload));
@@ -18243,7 +18243,7 @@ int main()
         // A zone split clones the source zone's entries under the clone's
         // zone key.
         static Synth::InstrumentEditorBank split;
-        memset(&split, 0, sizeof(split));
+        memset(static_cast<void*>(&split), 0, sizeof(split));
         payload.pitch_offset = 7.0f;
         TEST(Sculptor::set_phantom_entry(&split, 0, 0, 0, payload));
         split.graph_missing_sum[0][0] = 1u;
@@ -18491,7 +18491,7 @@ int main()
     // control ticks, 256/44100 s each).
     {
         static Synth::InstrumentEditorBank bank;
-        memset(&bank, 0, sizeof(bank));
+        memset(static_cast<void*>(&bank), 0, sizeof(bank));
         const uint32_t slot = bank.bank.envelopes.allocate();
         TEST(slot != pool_no_slot);
         Synth::EnvelopeDescriptor& env = bank.bank.envelopes.entries[slot];
@@ -19480,8 +19480,8 @@ int main()
     // register at the 0xFF "not yet seen" sentinel.
     auto make_cc_state = []() {
         Synth::ChannelCcState state;
-        memset(&state, 0, sizeof(state));
-        memset(state.lsb, 0xFF, sizeof(state.lsb));
+        memset(static_cast<void*>(&state), 0, sizeof(state));
+        memset(static_cast<void*>(state.lsb), 0xFF, sizeof(state.lsb));
         return state;
     };
 
@@ -19645,7 +19645,7 @@ int main()
     // the decoder refuses invalid cc_number values.
     {
         static Synth::InstrumentEditorBank source;
-        memset(&source, 0, sizeof(source));
+        memset(static_cast<void*>(&source), 0, sizeof(source));
         Synth::init_default_bank(&source.bank);
         Synth::EffectChainBinding& chain = source.bank.channel_chains[0];
         chain.num_effects                = 1;
@@ -19672,7 +19672,7 @@ int main()
 
         // A legacy pitch_bend input encodes without any cc_number key.
         static Synth::InstrumentEditorBank legacy;
-        memset(&legacy, 0, sizeof(legacy));
+        memset(static_cast<void*>(&legacy), 0, sizeof(legacy));
         Synth::init_default_bank(&legacy.bank);
         Synth::EffectChainBinding& legacy_chain = legacy.bank.channel_chains[0];
         legacy_chain.num_effects                = 1;
@@ -20007,7 +20007,7 @@ int main()
     // 7-bit cc_number bound here, rejecting old banks whose ids exceeded 127.
     {
         static Synth::InstrumentEditorBank source;
-        memset(&source, 0, sizeof(source));
+        memset(static_cast<void*>(&source), 0, sizeof(source));
         Synth::init_default_bank(&source.bank);
         const uint32_t param = source.bank.parameters.allocate();
         TEST(param != pool_no_slot);
@@ -20038,7 +20038,7 @@ int main()
     // byte-identically (the cc_number field stays omitted for zero).
     {
         static Synth::InstrumentEditorBank source;
-        memset(&source, 0, sizeof(source));
+        memset(static_cast<void*>(&source), 0, sizeof(source));
         Synth::init_default_bank(&source.bank);
         Synth::EffectChainBinding& chain = source.bank.channel_chains[0];
         chain.num_effects                = 1;
@@ -20162,7 +20162,7 @@ int main()
         stale_instr.layers[0].targets[Synth::mod_volume].inputs[0].op        = Synth::SourceOp::add;
         stale_instr.layers[0].targets[Synth::mod_volume].inputs[0].scale     = 0.5f;
         static Synth::InstrumentBank stale_bank;
-        memset(&stale_bank, 0, sizeof(stale_bank));
+        memset(static_cast<void*>(&stale_bank), 0, sizeof(stale_bank));
         static uint16_t stale_env_ids[Synth::instrument_max_envelopes];
         static uint16_t stale_lfo_ids[Synth::instrument_max_lfos];
         TEST(Synth::remap_envelopes(&stale_bank, stale_envs, stale_env_count, stale_env_ids));
@@ -20471,7 +20471,7 @@ int main()
         static Synth::EffectsDocument      doc, extracted, rogue;
         static Synth::InstrumentEditorBank source, candidate;
         effects_clipboard_fixture(&doc, true);
-        memset(&source, 0, sizeof(source));
+        memset(static_cast<void*>(&source), 0, sizeof(source));
         Synth::init_default_bank(&source.bank);
         for (uint32_t i = 0; i < 3; ++i) {
             const uint32_t id            = source.bank.lfos.allocate();
@@ -20548,7 +20548,7 @@ int main()
     // includes the MIDI node; a pane one node below the limit keeps loading.
     {
         static Synth::InstrumentEditorBank source;
-        memset(&source, 0, sizeof(source));
+        memset(static_cast<void*>(&source), 0, sizeof(source));
         Synth::init_default_bank(&source.bank);
         Synth::EffectChainBinding& chain = source.bank.master_chain;
         chain.num_effects                = 1;
@@ -20570,7 +20570,7 @@ int main()
         // (3 fixed nodes + 4 effects + 128 pinned LFOs = 135), so a master
         // pane pinning the full LFO pool validates and projects.
         static Synth::InstrumentEditorBank at_ceiling;
-        memset(&at_ceiling, 0, sizeof(at_ceiling));
+        memset(static_cast<void*>(&at_ceiling), 0, sizeof(at_ceiling));
         Synth::init_default_bank(&at_ceiling.bank);
         at_ceiling.bank.master_chain.num_effects = Synth::max_chain_effects;
         for (uint32_t slot = 0; slot < Synth::max_chain_effects; ++slot) {
@@ -20782,7 +20782,7 @@ int main()
         // Install into a bank through the remap helpers, then encode: the
         // document must decode back to the same instrument content.
         static Synth::InstrumentBank bank;
-        memset(&bank, 0, sizeof(bank));
+        memset(static_cast<void*>(&bank), 0, sizeof(bank));
         uint16_t env_ids[Synth::instrument_max_envelopes];
         uint16_t lfo_ids[Synth::instrument_max_lfos];
         TEST(Synth::remap_envelopes(&bank, envs, env_count, env_ids));
@@ -20897,7 +20897,7 @@ int main()
             const uint32_t octave_length = Synth::encode_editor_bank_json(&octave_source, payload, sizeof(payload));
             TEST(octave_length > 0);
             static Synth::InstrumentEditorBank bank_decoded;
-            memset(&bank_decoded, 0, sizeof(bank_decoded));
+            memset(static_cast<void*>(&bank_decoded), 0, sizeof(bank_decoded));
             TEST(Synth::decode_editor_bank_json(payload, octave_length, &bank_decoded));
             TEST(bank_decoded.bank.instruments.entries[0].layers[0].octave_offset == -3);
             octave_source.bank.instruments.entries[0].layers[0].octave_offset = 0;
@@ -20905,7 +20905,7 @@ int main()
                 Synth::encode_editor_bank_json(&octave_source, payload, sizeof(payload));
             TEST(zero_octave_length > 0);
             TEST(strstr(payload, "octave_offset") == nullptr); // zero omits the key
-            memset(&bank_decoded, 0, sizeof(bank_decoded));
+            memset(static_cast<void*>(&bank_decoded), 0, sizeof(bank_decoded));
             TEST(Synth::decode_editor_bank_json(payload, zero_octave_length, &bank_decoded));
             TEST(bank_decoded.bank.instruments.entries[0].layers[0].octave_offset == 0);
 
@@ -20935,7 +20935,7 @@ int main()
                 memcpy(spelling_doc + prefix + 16, spelling, spelling_len);
                 memcpy(spelling_doc + prefix + 16 + spelling_len, hit + key_len, suffix);
                 static Synth::InstrumentEditorBank spelling_decoded;
-                memset(&spelling_decoded, 0, sizeof(spelling_decoded));
+                memset(static_cast<void*>(&spelling_decoded), 0, sizeof(spelling_decoded));
                 return Synth::decode_editor_bank_json(spelling_doc,
                                                       prefix + 16 + spelling_len + suffix,
                                                       &spelling_decoded);
@@ -21076,7 +21076,7 @@ int main()
             TEST(slope_length > 0);
             TEST(strstr(payload, "\"fir_slope\":37") != nullptr);
             static Synth::InstrumentEditorBank bank_decoded;
-            memset(&bank_decoded, 0, sizeof(bank_decoded));
+            memset(static_cast<void*>(&bank_decoded), 0, sizeof(bank_decoded));
             TEST(Synth::decode_editor_bank_json(payload, slope_length, &bank_decoded));
             TEST(bank_decoded.bank.instruments.entries[0].layers[0].fir_slope_percent == 37);
             slope_source.bank.instruments.entries[0].layers[0].fir_slope_percent = 100;
@@ -21084,7 +21084,7 @@ int main()
                 Synth::encode_editor_bank_json(&slope_source, payload, sizeof(payload));
             TEST(default_slope_length > 0);
             TEST(strstr(payload, "fir_slope") == nullptr); // default omits the key
-            memset(&bank_decoded, 0, sizeof(bank_decoded));
+            memset(static_cast<void*>(&bank_decoded), 0, sizeof(bank_decoded));
             TEST(Synth::decode_editor_bank_json(payload, default_slope_length, &bank_decoded));
             TEST(bank_decoded.bank.instruments.entries[0].layers[0].fir_slope_percent == 100);
             // Out-of-range and non-integer spellings fail the bank decode:
@@ -21114,7 +21114,7 @@ int main()
                     return false;
                 }
                 static Synth::InstrumentEditorBank spelling_decoded;
-                memset(&spelling_decoded, 0, sizeof(spelling_decoded));
+                memset(static_cast<void*>(&spelling_decoded), 0, sizeof(spelling_decoded));
                 return Synth::decode_editor_bank_json(spelling_doc, spliced_len, &spelling_decoded);
             };
             TEST(decode_with_slope_spelling("37")); // the splice itself decodes
@@ -21189,7 +21189,7 @@ int main()
             // The encoder must emit document units, or the editor's own copy cannot
             // paste back: install into a bank, encode, decode, compare bank values.
             static Synth::InstrumentEditorBank fm_bank;
-            memset(&fm_bank, 0, sizeof(fm_bank));
+            memset(static_cast<void*>(&fm_bank), 0, sizeof(fm_bank));
             uint16_t fm_env_ids[Synth::instrument_max_envelopes];
             uint16_t fm_lfo_ids[Synth::instrument_max_lfos];
             TEST(Synth::remap_envelopes(&fm_bank.bank, fm_envs, fm_env_count, fm_env_ids));
@@ -21316,7 +21316,7 @@ int main()
 
             // Install into a bank through the remap helpers: the routed inputs must survive.
             static Synth::InstrumentBank routed_bank;
-            memset(&routed_bank, 0, sizeof(routed_bank));
+            memset(static_cast<void*>(&routed_bank), 0, sizeof(routed_bank));
             uint16_t routed_env_ids[Synth::instrument_max_envelopes];
             uint16_t routed_lfo_ids[Synth::instrument_max_lfos];
             TEST(Synth::remap_envelopes(&routed_bank, routed_envs, routed_env_count, routed_env_ids));
@@ -21355,7 +21355,7 @@ int main()
         // their own base and sources, and decode preserves the divergence.
         {
             static Synth::Instrument doc_instr;
-            memset(&doc_instr, 0, sizeof(doc_instr));
+            memset(static_cast<void*>(&doc_instr), 0, sizeof(doc_instr));
             doc_instr.layer_count = 3;
             for (uint32_t layer = 0; layer < 3; layer++) {
                 doc_instr.layers[layer].osc_type[0]       = Synth::WaveType::sine_wave;
@@ -21385,7 +21385,7 @@ int main()
             // Layer 2 carries no routing at all.
 
             static Synth::InstrumentBank desc_bank;
-            memset(&desc_bank, 0, sizeof(desc_bank));
+            memset(static_cast<void*>(&desc_bank), 0, sizeof(desc_bank));
             static char    doc_text[64 * 1024];
             const uint32_t doc_len = Synth::encode_instrument_json(doc_text, sizeof(doc_text), &doc_instr, &desc_bank);
             TEST(doc_len > 0);
@@ -21427,7 +21427,7 @@ int main()
         // untouched, and the clear owns the zone's mask row.
         {
             static Synth::InstrumentEditorBank clear_bank;
-            memset(&clear_bank, 0, sizeof(clear_bank));
+            memset(static_cast<void*>(&clear_bank), 0, sizeof(clear_bank));
             add_detached_record(&clear_bank, 0, 0, 1, 1, 0.0f, 0.0f, Synth::ModSource::none, Synth::ModSource::none, 0);
             add_detached_record(&clear_bank, 0, 1, 1, 1, 0.0f, 0.0f, Synth::ModSource::none, Synth::ModSource::none, 0);
             add_detached_record(&clear_bank, 1, 0, 1, 1, 0.0f, 0.0f, Synth::ModSource::none, Synth::ModSource::none, 0);
@@ -21544,16 +21544,16 @@ int main()
         static Synth::Instrument         reference_instr;
         static Synth::EnvelopeDescriptor reference_envs[Synth::instrument_max_envelopes];
         static Synth::LFODescriptor      reference_lfos[Synth::instrument_max_lfos];
-        memset(&reference_instr, 0x5A, sizeof(reference_instr));
-        memset(reference_envs, 0x5A, sizeof(reference_envs));
-        memset(reference_lfos, 0x5A, sizeof(reference_lfos));
+        memset(static_cast<void*>(&reference_instr), 0x5A, sizeof(reference_instr));
+        memset(static_cast<void*>(reference_envs), 0x5A, sizeof(reference_envs));
+        memset(static_cast<void*>(reference_lfos), 0x5A, sizeof(reference_lfos));
         for (uint32_t i = 0; i < sizeof(rejected_docs) / sizeof(rejected_docs[0]); i++) {
             Synth::Instrument sentinel_instr;
-            memset(&sentinel_instr, 0x5A, sizeof(sentinel_instr));
+            memset(static_cast<void*>(&sentinel_instr), 0x5A, sizeof(sentinel_instr));
             static Synth::EnvelopeDescriptor sentinel_envs[Synth::instrument_max_envelopes];
             static Synth::LFODescriptor      sentinel_lfos[Synth::instrument_max_lfos];
-            memset(sentinel_envs, 0x5A, sizeof(sentinel_envs));
-            memset(sentinel_lfos, 0x5A, sizeof(sentinel_lfos));
+            memset(static_cast<void*>(sentinel_envs), 0x5A, sizeof(sentinel_envs));
+            memset(static_cast<void*>(sentinel_lfos), 0x5A, sizeof(sentinel_lfos));
             uint32_t sentinel_env_count = 999;
             uint32_t sentinel_lfo_count = 999;
             TEST(! Synth::decode_instrument_json(rejected_docs[i],
@@ -21596,7 +21596,7 @@ int main()
             // default of 1 would change the sound), and an omitted ratio decodes to 1.
             {
                 static Synth::InstrumentEditorBank zero_bank;
-                memset(&zero_bank, 0, sizeof(zero_bank));
+                memset(static_cast<void*>(&zero_bank), 0, sizeof(zero_bank));
                 const uint32_t zero_slot = zero_bank.bank.instruments.allocate();
                 TEST(zero_slot != pool_no_slot);
                 zero_bank.bank.instruments.entries[zero_slot] = zero_instr;
@@ -21687,7 +21687,7 @@ int main()
             TEST(spread_envs[0].points[1].value == 4369); // the level-2 point's own quantization step
 
             static Synth::InstrumentEditorBank spread_bank;
-            memset(&spread_bank, 0, sizeof(spread_bank));
+            memset(static_cast<void*>(&spread_bank), 0, sizeof(spread_bank));
             uint16_t spread_env_ids[Synth::instrument_max_envelopes];
             uint16_t spread_lfo_ids[Synth::instrument_max_lfos];
             TEST(Synth::remap_envelopes(&spread_bank.bank, spread_envs, spread_env_count, spread_env_ids));
@@ -21798,7 +21798,7 @@ int main()
                 memcpy(spelling_doc + prefix + key_len, spelling, spelling_len);
                 memcpy(spelling_doc + prefix + key_len + spelling_len, value_end, suffix);
                 static Synth::InstrumentEditorBank spelling_decoded;
-                memset(&spelling_decoded, 0, sizeof(spelling_decoded));
+                memset(static_cast<void*>(&spelling_decoded), 0, sizeof(spelling_decoded));
                 return Synth::decode_editor_bank_json(spelling_doc,
                                                       prefix + key_len + spelling_len + suffix,
                                                       &spelling_decoded);
@@ -21817,7 +21817,7 @@ int main()
             TEST(zero_payload_len > 0);
             TEST(strstr(spread_payload, "fir_pitch_spread") == nullptr);
             static Synth::InstrumentEditorBank zero_decoded;
-            memset(&zero_decoded, 0, sizeof(zero_decoded));
+            memset(static_cast<void*>(&zero_decoded), 0, sizeof(zero_decoded));
             TEST(Synth::decode_editor_bank_json(spread_payload, zero_payload_len, &zero_decoded));
             TEST(zero_decoded.bank.instruments.entries[0].layers[0].targets[Synth::mod_fir_spread].base_value == 0.0f);
             // The removed cutoff keys stay tolerated under the bank dialect's
@@ -21842,7 +21842,7 @@ int main()
                 TEST(removed_len > 0);
                 memcpy(routing_doc + prefix + removed_len, spread_payload + prefix, suffix);
                 static Synth::InstrumentEditorBank routing_decoded;
-                memset(&routing_decoded, 0, sizeof(routing_decoded));
+                memset(static_cast<void*>(&routing_decoded), 0, sizeof(routing_decoded));
                 TEST(Synth::decode_editor_bank_json(routing_doc,
                                                     prefix + static_cast<uint32_t>(removed_len) + suffix,
                                                     &routing_decoded));
@@ -21885,7 +21885,7 @@ int main()
             TEST(real_lfos[1].min_max_delta == 2.0f);
 
             static Synth::InstrumentEditorBank real_bank;
-            memset(&real_bank, 0, sizeof(real_bank));
+            memset(static_cast<void*>(&real_bank), 0, sizeof(real_bank));
             uint16_t real_env_ids[Synth::instrument_max_envelopes];
             uint16_t real_lfo_ids[Synth::instrument_max_lfos];
             TEST(Synth::remap_envelopes(&real_bank.bank, real_envs, real_env_count, real_env_ids));
@@ -21944,7 +21944,7 @@ int main()
             TEST(swing_envs[0].points[0].value == 0);
             TEST(swing_envs[0].points[1].value == 0xFFFF);
             static Synth::InstrumentEditorBank swing_bank;
-            memset(&swing_bank, 0, sizeof(swing_bank));
+            memset(static_cast<void*>(&swing_bank), 0, sizeof(swing_bank));
             uint16_t swing_env_ids[Synth::instrument_max_envelopes];
             uint16_t swing_lfo_ids[Synth::instrument_max_lfos];
             TEST(Synth::remap_envelopes(&swing_bank.bank, swing_envs, swing_env_count, swing_env_ids));
@@ -22047,8 +22047,8 @@ int main()
             // this zone exports.
             static Synth::InstrumentGraphLayout ex_refuse[max_portable_records];
             static Synth::InstrumentGraphLayout ex_refuse_sentinel[max_portable_records];
-            memset(ex_refuse, 0x5A, sizeof(ex_refuse));
-            memset(ex_refuse_sentinel, 0x5A, sizeof(ex_refuse_sentinel));
+            memset(static_cast<void*>(ex_refuse), 0x5A, sizeof(ex_refuse));
+            memset(static_cast<void*>(ex_refuse_sentinel), 0x5A, sizeof(ex_refuse_sentinel));
             constexpr uint32_t ex_refuse_capacity = sizeof(ex_refuse) / sizeof(ex_refuse[0]);
             uint32_t           ex_refuse_count    = ex_refuse_capacity;
             TEST(! Sculptor::encode_instrument_graph_layout(ex_instr,
@@ -22218,13 +22218,13 @@ int main()
             static Synth::InstrumentGraphLayout mp_records[1];
             static Synth::GraphNodeLayout       mp_sink[4];
             static Synth::GraphNodeLayout       mp_sink_sentinel[4];
-            memset(mp_sink, 0x5A, sizeof(mp_sink));
-            memset(mp_sink_sentinel, 0x5A, sizeof(mp_sink_sentinel));
+            memset(static_cast<void*>(mp_sink), 0x5A, sizeof(mp_sink));
+            memset(static_cast<void*>(mp_sink_sentinel), 0x5A, sizeof(mp_sink_sentinel));
             constexpr uint32_t mp_capacity = sizeof(mp_sink) / sizeof(mp_sink[0]);
             uint32_t           mp_count    = mp_capacity;
             const uint32_t     mp_cases    = 2;
             for (uint32_t c = 0; c < mp_cases; c++) {
-                memset(mp_records, 0, sizeof(mp_records));
+                memset(static_cast<void*>(mp_records), 0, sizeof(mp_records));
                 if (c == 0) {
                     // A canonical index past the projection is unresolvable debris
                     // the mapping refuses: only kinds 1/2 are droppable.
@@ -22255,7 +22255,7 @@ int main()
             // and mapping the result again reproduces the same editor records: the
             // portable identity is stable across a second copy.
             static Synth::InstrumentBank ex_replay_bank;
-            memset(&ex_replay_bank, 0, sizeof(ex_replay_bank));
+            memset(static_cast<void*>(&ex_replay_bank), 0, sizeof(ex_replay_bank));
             uint16_t ex_env_ids[Synth::instrument_max_envelopes];
             uint16_t ex_lfo_ids[Synth::instrument_max_lfos];
             // The copy helpers below index their map outputs with the decoded
@@ -22421,7 +22421,7 @@ int main()
             static Synth::EnvelopeDescriptor nm_dec_envs[2];
             static Synth::Instrument         nm_src;
             static Synth::Instrument         nm_dec;
-            memset(nm_envs, 0, sizeof(nm_envs));
+            memset(static_cast<void*>(nm_envs), 0, sizeof(nm_envs));
             for (uint32_t e = 0; e < 3; e++) {
                 Synth::EnvelopeDescriptor& source_env = nm_envs[e];
                 source_env.num_points                 = 2;
@@ -22453,7 +22453,7 @@ int main()
             // Envelope aliases with two saved source layouts cannot collapse losslessly:
             // both source records resolve to the one decoded envelope node.
             static Synth::InstrumentGraphLayout nm_env_records[2];
-            memset(nm_env_records, 0, sizeof(nm_env_records));
+            memset(static_cast<void*>(nm_env_records), 0, sizeof(nm_env_records));
             nm_env_records[0].kind   = Synth::instrument_graph_layout_envelope;
             nm_env_records[0].layer  = 1; // A'
             nm_env_records[0].target = static_cast<uint8_t>(Synth::mod_volume);
@@ -22508,7 +22508,7 @@ int main()
             // succeeds; one slot less refuses with the record sink and the count
             // untouched.
             static Synth::LFODescriptor na_lfos[1];
-            memset(na_lfos, 0, sizeof(na_lfos));
+            memset(static_cast<void*>(na_lfos), 0, sizeof(na_lfos));
             na_lfos[0].wave          = Synth::WaveType::sine_wave;
             na_lfos[0].duty          = 0x40;
             na_lfos[0].period_ms     = 300;
@@ -22543,7 +22543,7 @@ int main()
             TEST(validate_standalone_model(na_dec, nullptr, 0, na_lfos, 1));
 
             static Synth::InstrumentGraphLayout na_pair_records[2];
-            memset(na_pair_records, 0, sizeof(na_pair_records));
+            memset(static_cast<void*>(na_pair_records), 0, sizeof(na_pair_records));
             for (uint32_t i = 0; i < 2; i++) {
                 na_pair_records[i].kind   = Synth::instrument_graph_layout_lfo;
                 na_pair_records[i].layer  = static_cast<uint8_t>(i);
@@ -22612,8 +22612,8 @@ int main()
             TEST(memcmp(na_exact, na_pair_out, sizeof(na_exact)) == 0);
             static Synth::InstrumentGraphLayout na_refuse[1];
             static Synth::InstrumentGraphLayout na_refuse_sentinel;
-            memset(na_refuse, 0x5A, sizeof(na_refuse));
-            memset(&na_refuse_sentinel, 0x5A, sizeof(na_refuse_sentinel));
+            memset(static_cast<void*>(na_refuse), 0x5A, sizeof(na_refuse));
+            memset(static_cast<void*>(&na_refuse_sentinel), 0x5A, sizeof(na_refuse_sentinel));
             uint32_t na_refuse_count = 1;
             TEST(! Sculptor::normalize_instrument_graph_layout(na_src,
                                                                nullptr,
@@ -22641,8 +22641,8 @@ int main()
             // (the removed cutoff targets), pinned by the drop tests below.
             static Synth::InstrumentGraphLayout nr_out[2];
             static Synth::InstrumentGraphLayout nr_out_sentinel[2];
-            memset(nr_out, 0x5A, sizeof(nr_out));
-            memset(nr_out_sentinel, 0x5A, sizeof(nr_out_sentinel));
+            memset(static_cast<void*>(nr_out), 0x5A, sizeof(nr_out));
+            memset(static_cast<void*>(nr_out_sentinel), 0x5A, sizeof(nr_out_sentinel));
             constexpr uint32_t nr_capacity = sizeof(nr_out) / sizeof(nr_out[0]);
             uint32_t           nr_count    = nr_capacity;
             for (uint32_t c = 0; c < 3; c++) {
@@ -22684,8 +22684,8 @@ int main()
             // two slots when there is room for them.
             static Synth::InstrumentGraphLayout nr_tight[1];
             static Synth::InstrumentGraphLayout nr_tight_sentinel[1];
-            memset(nr_tight, 0x5A, sizeof(nr_tight));
-            memset(nr_tight_sentinel, 0x5A, sizeof(nr_tight_sentinel));
+            memset(static_cast<void*>(nr_tight), 0x5A, sizeof(nr_tight));
+            memset(static_cast<void*>(nr_tight_sentinel), 0x5A, sizeof(nr_tight_sentinel));
             uint32_t nr_tight_count = 1;
             TEST(! Sculptor::normalize_instrument_graph_layout(na_src,
                                                                nullptr,
@@ -23270,7 +23270,7 @@ int main()
             static Synth::GraphNodeLayout       control_out[4];
             uint32_t                            control_count = 4;
             static Synth::InstrumentGraphLayout control_records[1];
-            memset(control_records, 0, sizeof(control_records));
+            memset(static_cast<void*>(control_records), 0, sizeof(control_records));
             control_records[0].kind   = 3;
             control_records[0].layer  = 0;
             control_records[0].target = 0;
@@ -23404,7 +23404,7 @@ int main()
             TEST(decode_clipboard(&rp_dec, rp_doc, max_portable_records));
 
             static Synth::InstrumentEditorBank rp_candidate;
-            memset(&rp_candidate, 0x5A, sizeof(rp_candidate));
+            memset(static_cast<void*>(&rp_candidate), 0x5A, sizeof(rp_candidate));
             static Synth::InstrumentEditorBank rp_source_before;
             rp_source_before       = rp_bank;
             const bool rp_replaced = Sculptor::replace_zone_instrument_candidate(rp_bank,
@@ -23514,8 +23514,8 @@ int main()
 
             static Synth::InstrumentEditorBank md_candidate;
             static Synth::InstrumentEditorBank md_sentinel;
-            memset(&md_candidate, 0x5A, sizeof(md_candidate));
-            memset(&md_sentinel, 0x5A, sizeof(md_sentinel));
+            memset(static_cast<void*>(&md_candidate), 0x5A, sizeof(md_candidate));
+            memset(static_cast<void*>(&md_sentinel), 0x5A, sizeof(md_sentinel));
             TEST(! Sculptor::replace_zone_instrument_candidate(md_bank,
                                                                0,
                                                                0,
@@ -23552,7 +23552,7 @@ int main()
             TEST(Sculptor::validate_editor_metadata(pl_bank));
 
             static Synth::InstrumentEditorBank pl_candidate;
-            memset(&pl_candidate, 0x5A, sizeof(pl_candidate));
+            memset(static_cast<void*>(&pl_candidate), 0x5A, sizeof(pl_candidate));
             static Synth::InstrumentEditorBank pl_before;
             pl_before = pl_bank;
             TEST(Sculptor::replace_zone_instrument_candidate(pl_bank,
@@ -23579,8 +23579,8 @@ int main()
             // Destination arguments outside the bank refuse with the candidate
             // untouched.
             static Synth::InstrumentEditorBank pl_sentinel;
-            memset(&pl_sentinel, 0x5A, sizeof(pl_sentinel));
-            memset(&pl_candidate, 0x5A, sizeof(pl_candidate));
+            memset(static_cast<void*>(&pl_sentinel), 0x5A, sizeof(pl_sentinel));
+            memset(static_cast<void*>(&pl_candidate), 0x5A, sizeof(pl_candidate));
             TEST(! Sculptor::replace_zone_instrument_candidate(pl_bank,
                                                                Synth::max_channels,
                                                                0,
@@ -23593,7 +23593,7 @@ int main()
                                                                0,
                                                                &pl_candidate));
             TEST(memcmp(&pl_candidate, &pl_sentinel, sizeof(pl_sentinel)) == 0);
-            memset(&pl_candidate, 0x5A, sizeof(pl_candidate));
+            memset(static_cast<void*>(&pl_candidate), 0x5A, sizeof(pl_candidate));
             TEST(! Sculptor::replace_zone_instrument_candidate(pl_bank,
                                                                0,
                                                                1, // the channel has one zone entry
@@ -23614,7 +23614,7 @@ int main()
             // shared destination must refuse: the pool is full before reclaim, and an
             // allocated-but-unrooted slot is not free.
             static Synth::InstrumentEditorBank fp_bank;
-            memset(&fp_bank, 0, sizeof(fp_bank));
+            memset(static_cast<void*>(&fp_bank), 0, sizeof(fp_bank));
             for (uint32_t i = 0; i < Synth::max_instruments; i++) {
                 TEST(fp_bank.bank.instruments.allocate() == i);
                 fp_bank.bank.instruments.entries[i].layer_count           = 1;
@@ -23634,7 +23634,7 @@ int main()
             fp_bare.layers[0].mod_ratio   = 1.0f;
 
             static Synth::InstrumentEditorBank fp_candidate;
-            memset(&fp_candidate, 0x5A, sizeof(fp_candidate));
+            memset(static_cast<void*>(&fp_candidate), 0x5A, sizeof(fp_candidate));
             TEST(Sculptor::replace_zone_instrument_candidate(fp_bank,
                                                              0,
                                                              0,
@@ -23663,8 +23663,8 @@ int main()
 
             static Synth::InstrumentEditorBank fs_candidate;
             static Synth::InstrumentEditorBank fs_sentinel;
-            memset(&fs_candidate, 0x5A, sizeof(fs_candidate));
-            memset(&fs_sentinel, 0x5A, sizeof(fs_sentinel));
+            memset(static_cast<void*>(&fs_candidate), 0x5A, sizeof(fs_candidate));
+            memset(static_cast<void*>(&fs_sentinel), 0x5A, sizeof(fs_sentinel));
             TEST(! Sculptor::replace_zone_instrument_candidate(fs_bank,
                                                                0,
                                                                0,
@@ -23683,7 +23683,7 @@ int main()
             // A shared destination with a free slot gets its own placeholder, so the
             // other zone keeps playing the instrument it always played.
             static Synth::InstrumentEditorBank sh_bank;
-            memset(&sh_bank, 0, sizeof(sh_bank));
+            memset(static_cast<void*>(&sh_bank), 0, sizeof(sh_bank));
             TEST(sh_bank.bank.instruments.allocate() == 0);
             TEST(sh_bank.bank.instruments.allocate() == 1);
             sh_bank.bank.instruments.entries[0].layer_count           = 1;
@@ -23709,7 +23709,7 @@ int main()
             sh_bare.layers[0].mod_ratio   = 1.0f;
 
             static Synth::InstrumentEditorBank sh_candidate;
-            memset(&sh_candidate, 0x5A, sizeof(sh_candidate));
+            memset(static_cast<void*>(&sh_candidate), 0x5A, sizeof(sh_candidate));
             TEST(Sculptor::replace_zone_instrument_candidate(sh_bank,
                                                              0,
                                                              0,
@@ -23747,7 +23747,7 @@ int main()
                 TEST(validate_standalone_model(vr_bare, nullptr, 0, nullptr, 0));
 
                 static Synth::InstrumentEditorBank vr_ok;
-                memset(&vr_ok, 0x5A, sizeof(vr_ok));
+                memset(static_cast<void*>(&vr_ok), 0x5A, sizeof(vr_ok));
                 TEST(Sculptor::replace_zone_instrument_candidate(vr_bank,
                                                                  0,
                                                                  0,
@@ -23762,8 +23762,8 @@ int main()
 
                 static Synth::InstrumentEditorBank vr_candidate;
                 static Synth::InstrumentEditorBank vr_sentinel;
-                memset(&vr_candidate, 0x5A, sizeof(vr_candidate));
-                memset(&vr_sentinel, 0x5A, sizeof(vr_sentinel));
+                memset(static_cast<void*>(&vr_candidate), 0x5A, sizeof(vr_candidate));
+                memset(static_cast<void*>(&vr_sentinel), 0x5A, sizeof(vr_sentinel));
                 static Synth::InstrumentEditorBank vr_before;
                 vr_before = vr_bank;
 
@@ -23816,7 +23816,7 @@ int main()
                 // past the projection) still refuses the candidate: only kinds 1/2 are
                 // droppable removed-target debris.
                 static Synth::InstrumentGraphLayout vr_records[1];
-                memset(vr_records, 0, sizeof(vr_records));
+                memset(static_cast<void*>(vr_records), 0, sizeof(vr_records));
                 vr_records[0].kind            = Synth::instrument_graph_layout_canonical;
                 vr_records[0].canonical_index = 9;
                 vr_records[0].x               = 3.0f;
@@ -23850,7 +23850,7 @@ int main()
             // observably different from the shared instrument, and the other zone keeps
             // its own instrument bytes, name, layout records and missing-sum row.
             static Synth::InstrumentEditorBank dc_bank;
-            memset(&dc_bank, 0, sizeof(dc_bank));
+            memset(static_cast<void*>(&dc_bank), 0, sizeof(dc_bank));
             TEST(dc_bank.bank.instruments.allocate() == 0);
             TEST(dc_bank.bank.instruments.allocate() == 1);
             dc_bank.bank.instruments.entries[0].layer_count           = 1;
@@ -23907,7 +23907,7 @@ int main()
             dc_bare.layers[0].targets[Synth::mod_volume].base_value = 0.75f;
 
             static Synth::InstrumentEditorBank dc_candidate;
-            memset(&dc_candidate, 0x5A, sizeof(dc_candidate));
+            memset(static_cast<void*>(&dc_candidate), 0x5A, sizeof(dc_candidate));
             const bool dc_replaced = Sculptor::replace_zone_instrument_candidate(dc_bank,
                                                                                  0,
                                                                                  0,
@@ -23955,8 +23955,8 @@ int main()
 
             static Synth::InstrumentEditorBank dt_candidate;
             static Synth::InstrumentEditorBank dt_sentinel;
-            memset(&dt_candidate, 0x5A, sizeof(dt_candidate));
-            memset(&dt_sentinel, 0x5A, sizeof(dt_sentinel));
+            memset(static_cast<void*>(&dt_candidate), 0x5A, sizeof(dt_candidate));
+            memset(static_cast<void*>(&dt_sentinel), 0x5A, sizeof(dt_sentinel));
             TEST(! Sculptor::replace_zone_instrument_candidate(dt_bank,
                                                                0,
                                                                0,
@@ -24010,7 +24010,7 @@ int main()
 
         // The default instrument round-trips too.
         static Synth::InstrumentBank default_bank;
-        memset(&default_bank, 0, sizeof(default_bank));
+        memset(static_cast<void*>(&default_bank), 0, sizeof(default_bank));
         TEST(Synth::init_default_channel(&default_bank, 0));
         const uint32_t default_encoded_len = Synth::encode_instrument_json(encoded,
                                                                            sizeof(encoded),

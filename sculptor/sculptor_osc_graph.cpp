@@ -1646,7 +1646,7 @@ static bool refresh_phantom_entries(Synth::InstrumentEditorBank*     bank,
         }
 
         Synth::Oscillator captured;
-        memset(&captured, 0, sizeof(captured));
+        memset(static_cast<void*>(&captured), 0, sizeof(captured));
 
         if (read_oscillator_layer(graph, mapping, layer, &captured) &&
             ! Sculptor::set_phantom_entry(bank, channel, zone, layer, captured)) {
