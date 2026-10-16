@@ -16,6 +16,7 @@ constexpr uint32_t midi_buffer_capacity = 1024;
 Synth::MidiEvent      midi_event_buffer[midi_buffer_capacity];
 std::atomic<uint64_t> midi_write;
 std::atomic<uint64_t> midi_read;
+std::atomic<uint64_t> midi_event_serial;
 std::atomic_flag      submit_lock = ATOMIC_FLAG_INIT;
 
 } // anonymous namespace
@@ -40,6 +41,9 @@ void Synth::pump_live_midi()
 
 bool Synth::submit_external_midi_event(const Synth::MidiEvent& event)
 {
+    // Any MIDI event counts as GUI activity, even one dropped on overflow.
+    midi_event_serial.fetch_add(1, std::memory_order_relaxed);
+
     // Spinlock serializes the two producers; the critical section is a few
     // stores, so spinning is negligible.
     while (submit_lock.test_and_set(std::memory_order_acquire)) {
@@ -82,4 +86,9 @@ void Synth::get_external_held_notes(uint32_t channel, uint32_t* held_mask)
     for (uint32_t i = 0; i < 4; i++) {
         held_mask[i] = channel < max_channels ? external_held_notes[channel][i].load(std::memory_order_relaxed) : 0;
     }
+}
+
+uint64_t Synth::get_external_midi_event_count()
+{
+    return midi_event_serial.load(std::memory_order_relaxed);
 }

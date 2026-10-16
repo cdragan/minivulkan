@@ -16,6 +16,7 @@
 #include "../core/minivulkan.h"
 #include "../core/mstdc.h"
 #include "../core/vmath.h"
+#include "../synth/midi_input.h"
 #include "../synth/realtime_synth.h"
 #include "../thirdparty/imgui/src/imgui_internal.h"
 
@@ -72,7 +73,14 @@ bool skip_frame(struct Window* w)
 
     // TODO check if any editor is animating
 
-    if (gui_has_pending_events())
+    static uint64_t last_midi_event_count = 0;
+
+    const uint64_t midi_event_count = Synth::get_external_midi_event_count();
+    const bool     new_midi_events  = midi_event_count != last_midi_event_count;
+
+    last_midi_event_count = midi_event_count;
+
+    if (gui_has_pending_events() || new_midi_events)
         skip_count = 0;
     else if (skip_count < max_skip_count)
         ++skip_count;

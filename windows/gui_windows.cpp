@@ -3,6 +3,7 @@
 
 #include "main_windows.h"
 
+#include "../core/minivulkan.h"
 #include "../thirdparty/imgui/src/backends/imgui_impl_win32.h"
 
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
@@ -28,9 +29,23 @@ bool need_redraw(struct Window* w)
     return true;
 }
 
+static void CALLBACK redraw_timer_proc(HWND, UINT, UINT_PTR, DWORD)
+{
+    gui_new_frame();
+
+    if (skip_frame(nullptr))
+        return;
+
+    draw_frame();
+}
+
 void gui_init(HWND hwnd)
 {
     ImGui_ImplWin32_Init(hwnd);
+
+    constexpr UINT redraw_timeout_ms = 16;
+
+    SetTimer(nullptr, 1, redraw_timeout_ms, redraw_timer_proc);
 }
 
 void gui_new_frame()

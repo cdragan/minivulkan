@@ -18,4 +18,8 @@ bool submit_external_midi_event(const MidiEvent& event);
 // Writes zeros for an invalid channel.
 void get_external_held_notes(uint32_t channel, uint32_t* held_mask);
 
+// Returns the total number of MIDI events submitted so far. The GUI compares
+// consecutive values to detect new MIDI activity and redraw when it changes.
+uint64_t get_external_midi_event_count();
+
 } // namespace Synth
