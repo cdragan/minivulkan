@@ -681,7 +681,7 @@ static void project_osc_node(Sculptor::Graph*           graph,
 {
     char name[32];
     snprintf(name, sizeof(name), "Oscillator %u", layer + 1);
-    const uint32_t node = graph->create_node(name, vmath::vec2(512.0f, 256.0f * static_cast<float>(layer)));
+    const uint32_t node = graph->create_node(name, vmath::vec2(512.0f, 128.0f + 256.0f * static_cast<float>(layer)));
     if (node == Sculptor::pool_no_slot) {
         return;
     }
@@ -1183,7 +1183,9 @@ bool Sculptor::project_instrument_to_graph(const Synth::Instrument&     instrume
     const uint32_t layer_count =
         instrument.layer_count <= Synth::max_layers ? instrument.layer_count : Synth::max_layers;
 
-    const uint32_t input_node = graph->create_node("MIDI Inputs", vmath::vec2(0.0f, 0.0f));
+    // MIDI Inputs starts low enough that the Instrument Parameters node
+    // fits right above it, so both are inside the default view.
+    const uint32_t input_node = graph->create_node("MIDI Inputs", vmath::vec2(0.0f, 128.0f));
     if (input_node == Sculptor::pool_no_slot) {
         return false;
     }
@@ -1210,9 +1212,10 @@ bool Sculptor::project_instrument_to_graph(const Synth::Instrument&     instrume
         }
     }
     // The note/layer detune and release rows live on a dedicated node
-    // beside MIDI Inputs, so they survive CC-dot changes and stay
-    // editable as one group.
-    const uint32_t instrument_node = graph->create_node("Instrument Parameters", vmath::vec2(0.0f, 512.0f));
+    // right above MIDI Inputs (same X), so they survive CC-dot changes
+    // and stay editable as one group.  The offset clears the node's own
+    // rendered height (three rows); saved layout records override it.
+    const uint32_t instrument_node = graph->create_node("Instrument Parameters", vmath::vec2(0.0f, 0.0f));
     if (instrument_node == Sculptor::pool_no_slot) {
         return false;
     }
@@ -1247,7 +1250,7 @@ bool Sculptor::project_instrument_to_graph(const Synth::Instrument&     instrume
                         ? (phantom_layers != nullptr ? &phantom_layers[row] : &fresh_shell)
                         : &instrument.layers[connected++];
     }
-    const uint32_t output_node = graph->create_node("Oscillator Output", vmath::vec2(1024.0f, 0.0f));
+    const uint32_t output_node = graph->create_node("Oscillator Output", vmath::vec2(1024.0f, 128.0f));
     if (output_node == Sculptor::pool_no_slot) {
         return false;
     }
