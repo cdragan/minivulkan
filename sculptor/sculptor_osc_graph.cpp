@@ -358,11 +358,11 @@ static void append_target_block(Graph* graph, uint32_t node, Synth::ModTarget ta
     const uint32_t t       = static_cast<uint32_t>(target);
     Sculptor::Slot env_dot = input_slot("Envelope");
     env_dot.child_row      = true;
-    env_dot.row_group      = 3 * t + 4; // the dot shares its line with the depth
+    env_dot.row_group      = static_cast<uint8_t>(3 * t + 4);
     graph->add_slot(node, env_dot);
     Sculptor::Slot env_depth = bounded_real_slot("", gen.envelope_depth, 0.0f, 1.0f, false);
     env_depth.child_row      = true;
-    env_depth.row_group      = 3 * t + 4;
+    env_depth.row_group      = static_cast<uint8_t>(3 * t + 4);
     graph->add_slot(node, env_depth);
     Sculptor::append_lfo_row(graph,
                              node,
