@@ -278,6 +278,7 @@ void configure_lfo(ParamDescriptor*     desc,
 void configure_plain(ParamDescriptor*   desc,
                      float              base_value,
                      uint16_t           env_param_id,
+                     float              env_scale,
                      uint16_t           lfo_param_id,
                      SourceOp           lfo_op,
                      const SourceParam* inputs,
@@ -291,7 +292,7 @@ void configure_plain(ParamDescriptor*   desc,
     uint32_t num_sources = 0;
 
     if (env_param_id) {
-        desc->plain.sources[num_sources++] = { env_param_id, 1.0f, SourceOp::add };
+        desc->plain.sources[num_sources++] = { env_param_id, env_scale, SourceOp::add };
     }
 
     if (lfo_param_id) {

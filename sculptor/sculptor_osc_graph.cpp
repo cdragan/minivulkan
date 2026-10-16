@@ -29,6 +29,7 @@ using Sculptor::osc_slot_count;
 using Sculptor::osc_target_block_base;
 using Sculptor::osc_target_block_field;
 using Sculptor::osc_target_block_stride;
+using Sculptor::osc_target_env_depth;
 using Sculptor::osc_target_env_dot;
 using Sculptor::osc_target_lfo_dot;
 using Sculptor::osc_target_row_slot;
@@ -115,48 +116,48 @@ const char* const fir_spread_names[Synth::num_filter_types] = { "Filter Off",
                                                                 "Cutoff (Hz)",
                                                                 "Cutoff (Hz)" };
 
-// Oscillator node slot layout.  The order is fixed: project fills slots in
+// Oscillator node slot layout. The order is fixed: project fills slots in
 // exactly this order and compile reads properties back by index, so the two
 // stay consistent by construction.
-//   0        output
-//   1        waveform a (list)
-//   2        duty a (per-layer value, [0, 1])
-//   3..13    duty a's 11-slot modulation block
-//   14       waveform b (list)
-//   15       duty b (per-layer value, [0, 1])
-//   16..26   duty b's 11-slot modulation block
-//   27       mix mode (list)
-//   28       waveform mix (per-layer value, [0, 1])
-//   29..39   waveform mix's 11-slot modulation block
-//   40       fm depth (per-layer value)
-//   41..51   fm depth's 11-slot modulation block
-//   52       fm ratio (per oscillator)
-//   53       volume (per-layer base value)
-//   54..64   volume's 11-slot modulation block
-//   65       pan (per-layer base value)
-//   66..76   pan's 11-slot modulation block
-//   77       pitch (per-layer base value)
-//   78..88   pitch's 11-slot modulation block
-//   89       pitch offset (per oscillator)
-//   90       octave offset (per oscillator, [-12, +12] whole octaves)
-// 91 filter type (per oscillator, list)
-// 92 fir pitch spread (per-layer base value; band-pass: [0, 36] semitones, low-pass/high-pass: cutoff in Hz)
-// 93..103 fir pitch spread's 11-slot modulation block
-// 104 fir slope (per oscillator, [1, 100] percent)
-// Every target value row (2, 15, 28, 40, 53, 65, 77, 92) is
+// 0 output
+// 1 waveform a (list)
+// 2 duty a (per-layer value, [0, 1])
+// 3..14 duty a's 12-slot modulation block
+// 15 waveform b (list)
+// 16 duty b (per-layer value, [0, 1])
+// 17..28 duty b's 12-slot modulation block
+// 29 mix mode (list)
+// 30 waveform mix (per-layer value, [0, 1])
+// 31..42 waveform mix's 12-slot modulation block
+// 43 fm depth (per-layer value)
+// 44..55 fm depth's 12-slot modulation block
+// 56 fm ratio (per oscillator)
+// 57 volume (per-layer base value)
+// 58..69 volume's 12-slot modulation block
+// 70 pan (per-layer base value)
+// 71..82 pan's 12-slot modulation block
+// 83 pitch (per-layer base value)
+// 84..95 pitch's 12-slot modulation block
+// 96 pitch offset (per oscillator)
+// 97 octave offset (per oscillator, [-12, +12] whole octaves)
+// 98 filter type (per oscillator, list)
+// 99 fir pitch spread (per-layer base value; band-pass: [0, 36] semitones, low-pass/high-pass: cutoff in Hz)
+// 100..111 fir pitch spread's 12-slot modulation block
+// 112 fir slope (per oscillator, [1, 100] percent)
+// Every target value row (2, 16, 30, 43, 57, 70, 83, 99) is
 // connectable: all eight targets are uniformly modulate-able, so each
-// row's 11-slot block follows its value row (see the block helpers in
+// row's 12-slot block follows its value row (see the block helpers in
 // sculptor_osc_graph.h); block field 0 is the envelope dot, so it
-// renders on the line under the row the block attaches to.
+// renders on the line under the row the block attaches to, and field 1
+// is the envelope depth's nested row.
 constexpr uint32_t osc_waveform_a_prop    = 1;
-constexpr uint32_t osc_waveform_b_prop    = 14;
-constexpr uint32_t osc_mode_prop          = 27;
-constexpr uint32_t osc_fm_ratio_prop      = 52;
-constexpr uint32_t osc_pitch_offset_prop  = 89;
-constexpr uint32_t osc_octave_offset_prop = 90;
-constexpr uint32_t osc_fir_slope_prop     = 104;
-constexpr uint32_t osc_fir_type_prop      = 91;
-
+constexpr uint32_t osc_waveform_b_prop    = 15;
+constexpr uint32_t osc_mode_prop          = 29;
+constexpr uint32_t osc_fm_ratio_prop      = 56;
+constexpr uint32_t osc_pitch_offset_prop  = 96;
+constexpr uint32_t osc_octave_offset_prop = 97;
+constexpr uint32_t osc_fir_slope_prop     = 112;
+constexpr uint32_t osc_fir_type_prop      = 98;
 // Per-target presentation views: the single source of truth for value
 // bounds, bank-unit scaling and slider curve.  Oscillator rows and
 // parameter base values show display units; the bank stores scaled
@@ -344,19 +345,25 @@ enum TargetFamily {
     family_src
 };
 
-// Adds target `target`'s 11-slot modulation block directly after the
+// Adds target `target`'s 12-slot modulation block directly after the
 // target's value row (the caller adds the osc node's slots in row
-// order), seeded from the cell binding: fields 2..4 carry the LFO
-// op/depth/rate scale, fields 6..7 and 9..10 the MIDI source op/amount
-// pairs.  Op shares its input row.  Depth, Rate x, and Amount use
-// separate nested rows.  Inputs past num_inputs seed the neutral
-// add/0 grammar the compile reads through when a wire lands later.
+// order), seeded from the cell binding: field 1 carries the envelope
+// depth, fields 3..5 the LFO op/depth/rate scale, fields 7..8 and
+// 10..11 the MIDI source op/amount pairs.  Op shares its input row.
+// Depth, Rate x, and Amount use separate nested rows.  Inputs past
+// num_inputs seed the neutral add/0 grammar the compile reads through
+// when a wire lands later.
 static void append_target_block(Graph* graph, uint32_t node, Synth::ModTarget target, const Synth::TargetBinding& gen)
 {
     const uint32_t t       = static_cast<uint32_t>(target);
     Sculptor::Slot env_dot = input_slot("Envelope");
     env_dot.child_row      = true;
+    env_dot.row_group      = 3 * t + 4; // the dot shares its line with the depth
     graph->add_slot(node, env_dot);
+    Sculptor::Slot env_depth = bounded_real_slot("", gen.envelope_depth, 0.0f, 1.0f, false);
+    env_depth.child_row      = true;
+    env_depth.row_group      = 3 * t + 4;
+    graph->add_slot(node, env_depth);
     Sculptor::append_lfo_row(graph,
                              node,
                              static_cast<uint8_t>(3 * t + 1),
@@ -452,14 +459,14 @@ static bool decode_osc_input(const Sculptor::OscGraphMapping& mapping,
         *dot    = osc_target_env_dot(*target);
         return true;
     }
-    if (block_field == 1) {
+    if (block_field == 2) {
         *family = family_lfo;
         *dot    = osc_target_lfo_dot(*target);
         return true;
     }
-    if (block_field == 5 || block_field == 8) {
+    if (block_field == 6 || block_field == 9) {
         *family = family_src;
-        *dot    = osc_target_src_dot(*target, block_field == 5 ? 0 : 1);
+        *dot    = osc_target_src_dot(*target, block_field == 6 ? 0 : 1);
         return true;
     }
     return false;
@@ -889,8 +896,10 @@ static void install_edit_disabled_flags(Sculptor::Graph* graph, const Sculptor::
             continue;
         }
         for (uint32_t t = 0; t < Synth::num_mod_targets; ++t) {
+            const bool env_wired = graph->slot_is_connected(node, osc_target_env_dot(t));
+            graph->set_slot_edit_disabled(node, osc_target_env_depth(t), ! env_wired);
             const bool lfo_wired = graph->slot_is_connected(node, osc_target_lfo_dot(t));
-            for (uint32_t f = 2; f <= 4; ++f) {
+            for (uint32_t f = 3; f <= 5; ++f) {
                 graph->set_slot_edit_disabled(node, osc_target_block_base(t) + f, ! lfo_wired);
             }
             for (uint32_t i = 0; i < Synth::max_mod_inputs; ++i) {
@@ -940,13 +949,13 @@ bool Sculptor::env_convert_to_volume_shape(Synth::EnvelopeDescriptor& env)
 // connectable and always renders its value.
 bool Sculptor::osc_target_field_hidden(const Graph& graph, uint32_t node_idx, uint32_t target, uint32_t field)
 {
-    if (field == 0) {
+    if (field <= 1) {
         return connection_into(graph, node_idx, osc_target_env_dot(target)) == pool_no_slot;
     }
-    if (field <= 4) {
+    if (field <= 5) {
         return connection_into(graph, node_idx, osc_target_lfo_dot(target)) == pool_no_slot;
     }
-    const uint32_t src = field < 8 ? 0 : 1;
+    const uint32_t src = field < 9 ? 0 : 1;
     return connection_into(graph, node_idx, osc_target_src_dot(target, src)) == pool_no_slot;
 }
 
@@ -1422,6 +1431,10 @@ static bool read_oscillator_layer(const Sculptor::Graph&           graph,
             return false;
         }
         const uint32_t env_conn = connection_into(graph, mapping.osc_nodes[layer], osc_target_env_dot(t));
+        // The depth slot mirrors the binding whether or not an envelope is
+        // wired, so the projection round trip is bit-identical even for the
+        // dormant field.
+        gen.envelope_depth = slots[osc_target_env_depth(t)].value.real;
         if (env_conn != pool_no_slot) {
             const int32_t inst = find_instance(mapping, graph.get_connection(env_conn).output.node_idx);
             if (inst < 0 || mapping.detached[inst].kind != 1) {
@@ -2395,6 +2408,13 @@ static bool relocate_base_row_wire(Sculptor::Graph*                 graph,
     }
 
     graph->set_connection_input(connection_idx, Sculptor::EndPoint{ connection.input.node_idx, landing });
+    if (wire_family == family_env &&
+        graph->node(connection.input.node_idx).slots.entries[landing + 1].value.real == 0.0f) {
+        // A first envelope wire adopts the legacy unscaled amount: the
+        // row's depth defaults to 0, which silences the envelope entirely,
+        // and 0 is almost never the intent.
+        graph->set_slot_value(connection.input.node_idx, landing + 1, Sculptor::PropertyValue{ .real = 1.0f });
+    }
     if (wire_family == family_lfo &&
         graph->node(connection.input.node_idx).slots.entries[landing + 2].value.real == 0.0f) {
         // A first LFO wire adopts an audible depth: the row's depth

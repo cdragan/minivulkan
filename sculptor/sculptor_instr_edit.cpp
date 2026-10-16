@@ -3098,7 +3098,14 @@ void Sculptor::SynthEditor::do_osc_add_generator(bool        is_env,
             return;
         }
         if (instrument) {
-            instrument->layers[compiled_layer].targets[bind_target].envelope_desc_id = static_cast<uint16_t>(slot + 1);
+            Synth::TargetBinding& cell = instrument->layers[compiled_layer].targets[bind_target];
+            cell.envelope_desc_id      = static_cast<uint16_t>(slot + 1);
+            // Drop-created envelopes seed the legacy unscaled amount,
+            // mirroring the drag pathway: a zero depth silences the
+            // envelope entirely, while a nonzero authored depth stays.
+            if (cell.envelope_depth == 0.0f) {
+                cell.envelope_depth = 1.0f;
+            }
         }
         record.index = static_cast<uint8_t>(slot + 1);
     }

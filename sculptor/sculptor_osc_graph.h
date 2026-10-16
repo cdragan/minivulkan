@@ -81,29 +81,28 @@ static_assert(Synth::max_layers + 6 * Synth::max_layers * Synth::num_mod_targets
 // Oscillator node slot grammar: 17 fixed slots (oscillator properties,
 // the FIR slope and filter type properties and target value rows, order pinned by
 // osc_target_row_slot below),
-// and every ModTarget owns one 11-slot modulation block directly after
-// its value row.  Block field 0 is the envelope input dot (its own
-// renderer line), fields 1..4 the LFO row (dot, op, depth, rate
-// scale), fields 5..7 the Source A row and fields 8..10 the Source B
-// row (dot, op, amount each).  Row-group ids are per (target, row):
-// the LFO row groups 3*t + 1, the source rows 3*t + 2 and 3*t + 3; the
-// envelope dot and the fixed slots own their lines (group 0).
+// and every ModTarget owns one 12-slot modulation block directly after
+// its value row.  Block field 0 is the envelope input dot, field 1 the
+// unlabeled envelope depth sharing the dot's renderer line, fields 2..5 the LFO row (dot, op, depth, rate scale),
+// fields 6..8 the Source A row and fields 9..11 the Source B row (dot, op, amount each).  Row-group ids are per
+// (target, row): the LFO row groups 3*t + 1, the source rows 3*t + 2 and 3*t + 3, the envelope row 3*t + 4; the fixed
+// slots own their lines (group 0).
 constexpr uint32_t osc_slot_count          = 17;
-constexpr uint32_t osc_target_block_stride = 11;
+constexpr uint32_t osc_target_block_stride = 12;
 
 // The value row of each ModTarget on an oscillator node.  The rows are
 // not contiguous: the duty rows interleave with the oscillator
 // properties, and the rows after an earlier target's block shift down
 // by that block.  Indexed by ModTarget.
 constexpr uint32_t osc_target_row_slot[Synth::num_mod_targets] = {
-    53, // volume
-    77, // pitch
-    65, // pan
+    57, // volume
+    83, // pitch
+    70, // pan
     2,  // duty a
-    15, // duty b
-    28, // waveform mix
-    40, // fm depth
-    92, // fir pitch spread
+    16, // duty b
+    30, // waveform mix
+    43, // fm depth
+    99, // fir pitch spread
 };
 
 // First slot of target `target`'s modulation block on an oscillator
@@ -120,22 +119,29 @@ constexpr uint32_t osc_target_env_dot(uint32_t target)
     return osc_target_block_base(target);
 }
 
+// The envelope depth slot of target `target`'s block: the per-binding
+// multiplier on the bound envelope's contribution into the target.
+constexpr uint32_t osc_target_env_depth(uint32_t target)
+{
+    return osc_target_block_base(target) + 1u;
+}
+
 // The LFO input dot of target `target`'s block: an LFO wire's input
 // endpoint.
 constexpr uint32_t osc_target_lfo_dot(uint32_t target)
 {
-    return osc_target_block_base(target) + 1u;
+    return osc_target_block_base(target) + 2u;
 }
 
 // The MIDI source input dot of target `target`'s block, source row
 // `input` (0 = Source A, 1 = Source B).
 constexpr uint32_t osc_target_src_dot(uint32_t target, uint32_t input)
 {
-    return osc_target_block_base(target) + 5u + 3u * input;
+    return osc_target_block_base(target) + 6u + 3u * input;
 }
 
 // Last block end fits the slot pool; the eight row slots are spaced far
-// enough apart that no block reaches the next row (smallest gap 12).
+// enough apart that no block reaches the next row (smallest gap 13).
 static_assert(osc_target_row_slot[Synth::num_mod_targets - 1] + osc_target_block_stride <= max_node_slots);
 
 // Where every projected piece of the model landed in the graph.  Slot and

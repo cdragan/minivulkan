@@ -313,10 +313,13 @@ void configure_lfo(ParamDescriptor*     desc,
                    uint16_t             lfo_rate_param_id,
                    float                lfo_rate_scale);
 
-// Configures a modulated parameter, composed of multiple input parameters
+// Configures a modulated parameter, composed of multiple input parameters.
+// env_scale multiplies the envelope source's contribution; 1 is the legacy
+// unscaled behavior.
 void configure_plain(ParamDescriptor*   desc,
                      float              base_value,
                      uint16_t           env_param_id,
+                     float              env_scale,
                      uint16_t           lfo_param_id,
                      SourceOp           lfo_op,
                      const SourceParam* inputs,

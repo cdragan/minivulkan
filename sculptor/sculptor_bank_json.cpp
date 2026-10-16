@@ -464,6 +464,10 @@ static void enc_gen(Out& o, const Synth::TargetBinding& gen)
 {
     o.ch('{');
     key_uint_nonzero(o, "envelope_desc_id", gen.envelope_desc_id);
+    if (gen.envelope_desc_id != 0 && gen.envelope_depth != 1.0f) {
+        o.key("envelope_depth");
+        o.float_value(gen.envelope_depth);
+    }
     key_uint_nonzero(o, "lfo_desc_id", gen.lfo_desc_id);
     key_enum(o, "lfo_op", source_op_names, num_source_ops, static_cast<uint32_t>(gen.lfo_op));
     key_float_nonzero(o, "lfo_depth", gen.lfo_depth);
@@ -1887,12 +1891,17 @@ static void decode_mod_input(Walker& w, uint32_t obj, Synth::ModInput& in)
 
 static void decode_gen(Walker& w, uint32_t obj, Synth::TargetBinding& gen)
 {
+    // Absent key = the legacy unscaled contribution; the pre-set survives
+    // memset-zeroed decode targets.
+    gen.envelope_depth = 1.0f;
     walk_object(w, obj, [&](uint32_t key_idx, uint32_t val_idx) {
         uint32_t value = 0;
         if (key_eq(w, key_idx, "envelope_desc_id")) {
             want_uint(w, val_idx, Synth::max_envelopes, &value);
             gen.envelope_desc_id = static_cast<uint16_t>(value);
         }
+        else if (key_eq(w, key_idx, "envelope_depth"))
+            want_float(w, val_idx, &gen.envelope_depth);
         else if (key_eq(w, key_idx, "lfo_desc_id")) {
             want_uint(w, val_idx, Synth::max_lfos, &value);
             gen.lfo_desc_id = static_cast<uint16_t>(value);
@@ -3005,6 +3014,7 @@ static void canonicalize_editor_bank(Synth::InstrumentEditorBank* editor_bank)
             for (uint32_t t = 0; t < Synth::num_mod_targets; t++) {
                 Synth::TargetBinding& binding = osc.targets[t];
                 binding.lfo_depth             = canonical_float(binding.lfo_depth);
+                binding.envelope_depth        = canonical_float(binding.envelope_depth);
                 binding.lfo_rate_scale_ms     = canonical_float(binding.lfo_rate_scale_ms);
                 // Routing canonicalizes per layer: layers may diverge, so each
                 // layer's base and inputs are cleaned independently.
@@ -3075,7 +3085,8 @@ static void decode_envelope_doc(Walker&                    w,
                                 uint32_t                   obj,
                                 Synth::ModTarget           target,
                                 Synth::FilterType          fir_type,
-                                Synth::EnvelopeDescriptor& env)
+                                Synth::EnvelopeDescriptor& env,
+                                float*                     amount)
 {
     const Sculptor::OscTargetView view = Sculptor::osc_target_view(target, fir_type);
 
@@ -3085,6 +3096,7 @@ static void decode_envelope_doc(Walker&                    w,
     uint32_t num_points                            = 0;
     uint32_t sustain_start                         = 0;
     uint32_t sustain_end                           = 0;
+    float    depth                                 = 1.0f;
     bool     sustain_start_set                     = false;
     bool     sustain_end_set                       = false;
     uint8_t  ping_pong                             = 0;
@@ -3126,6 +3138,8 @@ static void decode_envelope_doc(Walker&                    w,
         else if (key_eq(w, key_idx, "ping_pong")) {
             want_u8(w, val_idx, 1, &ping_pong);
         }
+        else if (key_eq(w, key_idx, "depth"))
+            want_float(w, val_idx, &depth);
         else
             doc_unknown_field(w, key_idx);
     });
@@ -3202,6 +3216,9 @@ static void decode_envelope_doc(Walker&                    w,
         env.points[i].position = quantized[i];
         env.points[i].value =
             delta > 0.0f ? static_cast<uint16_t>((levels[i] - min_level) / delta * 65535.0f + 0.5f) : 0;
+    }
+    if (amount) {
+        *amount = depth;
     }
 }
 
@@ -3351,11 +3368,13 @@ static void decode_target_doc(Walker&             w,
             }
             Synth::EnvelopeDescriptor& env = doc.envelopes[doc.envelope_count];
             env                            = Synth::EnvelopeDescriptor{};
-            decode_envelope_doc(w, val_idx, target, fir_type, env);
+            float env_depth                = 1.0f;
+            decode_envelope_doc(w, val_idx, target, fir_type, env, &env_depth);
             if (! w.failed) {
                 const uint16_t match = find_matching_descriptor(doc.envelopes, doc.envelope_count, env);
                 osc.targets[target].envelope_desc_id =
                     match != 0 ? match : static_cast<uint16_t>(doc.envelope_count + 1);
+                osc.targets[target].envelope_depth = env_depth;
                 if (match == 0)
                     ++doc.envelope_count;
             }
@@ -4162,6 +4181,11 @@ static uint32_t encode_instrument_json_for_domain(char*                         
                 o.key("sustain_end");
                 o.uint_value(env.sustain_last_point);
                 key_uint_nonzero(o, "ping_pong", env.ping_pong);
+                // The depth rides beside the shape; 1 is the default and omits the key.
+                if (gen.envelope_depth != 1.0f) {
+                    o.key("depth");
+                    o.float_value(gen.envelope_depth);
+                }
                 o.ch('}');
             }
 

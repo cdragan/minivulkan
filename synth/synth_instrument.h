@@ -53,12 +53,18 @@ static_assert(sizeof(ModInput) == 8);
 // generators, so layers that name the same descriptor id evaluate identically and in phase (the
 // generators are deterministic in the tick).  No runtime state.
 struct TargetBinding {
-    float     base_value;
-    float     lfo_depth;
-    float     lfo_rate_scale_ms;
-    uint16_t  num_inputs;
-    ModInput  inputs[max_mod_inputs];
-    uint16_t  envelope_desc_id;
+    float    base_value;
+    float    lfo_depth;
+    float    lfo_rate_scale_ms;
+    uint16_t num_inputs;
+    ModInput inputs[max_mod_inputs];
+    uint16_t envelope_desc_id;
+    // Per-binding multiplier on the envelope generator's contribution into
+    // this target.  The shared descriptor stays untouched, so several
+    // targets can reuse one envelope shape at different amounts.  The
+    // decoded default is 1 (the legacy unscaled contribution); 0 silences
+    // the contribution while the wire stays bound.
+    float     envelope_depth;
     uint16_t  lfo_desc_id;
     SourceOp  lfo_op; // How the LFO is combined into the target
     ModSource lfo_depth_source;
