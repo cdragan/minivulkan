@@ -1,14 +1,17 @@
 // SPDX-License-Identifier: MIT
 // SPDX-FileCopyrightText: Copyright (c) 2021-2026 Chris Dragan
 
-#include "vmath.h"
 #include "mstdc.h"
 #include "vecfloat.h"
+#include "vmath.h"
 #include <iterator>
 #include <math.h>
 #include <stdio.h>
 
-#define TEST(test) if ( ! (test)) { failed(#test, __FILE__, __LINE__); }
+#define TEST(test)                         \
+    if (! (test)) {                        \
+        failed(#test, __FILE__, __LINE__); \
+    }
 
 static int exit_code = 0;
 
@@ -20,8 +23,7 @@ static bool is_near(float value1, float value2, float max_error = 0.005f)
 static void failed(const char* test, const char* file, int line)
 {
     exit_code = 1;
-    fprintf(stderr, "%s:%d: Error: Failed condition %s\n",
-            file, line, test);
+    fprintf(stderr, "%s:%d: Error: Failed condition %s\n", file, line, test);
 }
 
 int main()
@@ -134,12 +136,12 @@ int main()
     //////////////////////////////////////////////////////////////////////////////////////////
     // constants
 
-    TEST(is_near(vmath::pi,             3.141592f));
-    TEST(is_near(vmath::pi_half,        1.570796f));
-    TEST(is_near(vmath::pi_squared,     9.869604f));
-    TEST(is_near(vmath::two_pi,         6.283185f));
+    TEST(is_near(vmath::pi, 3.141592f));
+    TEST(is_near(vmath::pi_half, 1.570796f));
+    TEST(is_near(vmath::pi_squared, 9.869604f));
+    TEST(is_near(vmath::two_pi, 6.283185f));
     TEST(is_near(vmath::radians(60.0f), 1.047197f));
-    TEST(is_near(vmath::degrees(1.0f),  57.295779f));
+    TEST(is_near(vmath::degrees(1.0f), 57.295779f));
 
     //////////////////////////////////////////////////////////////////////////////////////////
     // sincos
@@ -157,16 +159,18 @@ int main()
 
         const vmath::sin_cos_result sc = vmath::sincos(radians);
 
-        if ( ! is_near(sc.cos, exp_cos)) {
-            fprintf(stderr, "Error: cos %f is %f but should be %f\n",
+        if (! is_near(sc.cos, exp_cos)) {
+            fprintf(stderr,
+                    "Error: cos %f is %f but should be %f\n",
                     static_cast<double>(radians),
                     static_cast<double>(sc.cos),
                     static_cast<double>(exp_cos));
             exit_code = 1;
         }
 
-        if ( ! is_near(sc.sin, exp_sin)) {
-            fprintf(stderr, "Error: sin %f is %f but should be %f\n",
+        if (! is_near(sc.sin, exp_sin)) {
+            fprintf(stderr,
+                    "Error: sin %f is %f but should be %f\n",
                     static_cast<double>(radians),
                     static_cast<double>(sc.sin),
                     static_cast<double>(exp_sin));
@@ -202,8 +206,9 @@ int main()
 
             const float cur_cos = sc.cos[i];
 
-            if ( ! is_near(cur_cos, exp_cos[i])) {
-                fprintf(stderr, "Error: cos %f at position %d is %f but should be %f\n",
+            if (! is_near(cur_cos, exp_cos[i])) {
+                fprintf(stderr,
+                        "Error: cos %f at position %d is %f but should be %f\n",
                         static_cast<double>(in_radians[i]),
                         i,
                         static_cast<double>(cur_cos),
@@ -213,8 +218,9 @@ int main()
 
             const float cur_sin = sc.sin[i];
 
-            if ( ! is_near(cur_sin, exp_sin[i])) {
-                fprintf(stderr, "Error: sin %f at position %d is %f but should be %f\n",
+            if (! is_near(cur_sin, exp_sin[i])) {
+                fprintf(stderr,
+                        "Error: sin %f at position %d is %f but should be %f\n",
                         static_cast<double>(in_radians[i]),
                         i,
                         static_cast<double>(cur_sin),
@@ -237,7 +243,7 @@ int main()
 
     // vec2(x)
     {
-        const vmath::vec2 v{42};
+        const vmath::vec2 v{ 42 };
 
         TEST(v.x == 42);
         TEST(v.y == 42);
@@ -245,7 +251,7 @@ int main()
 
     // vec2(x, y), access
     {
-        const vmath::vec2 v{8, 9};
+        const vmath::vec2 v{ 8, 9 };
 
         TEST(v.x == 8);
         TEST(v.y == 9);
@@ -259,8 +265,8 @@ int main()
 
     // vec2(float*)
     {
-        const float xy[] = { -10, -11 };
-        const vmath::vec2 v{xy};
+        const float       xy[] = { -10, -11 };
+        const vmath::vec2 v{ xy };
 
         TEST(v.x == -10);
         TEST(v.y == -11);
@@ -282,7 +288,7 @@ int main()
 
     // vec2(vec3)
     {
-        const vmath::vec2 v{vmath::vec3{10, 11, 12}};
+        const vmath::vec2 v{ vmath::vec3{ 10, 11, 12 } };
 
         TEST(v.x == 10);
         TEST(v.y == 11);
@@ -290,7 +296,7 @@ int main()
 
     // vec2(vec4)
     {
-        const vmath::vec2 v{vmath::vec4{13, 14, 15}};
+        const vmath::vec2 v{ vmath::vec4{ 13, 14, 15 } };
 
         TEST(v.x == 13);
         TEST(v.y == 14);
@@ -298,20 +304,20 @@ int main()
 
     // vec2::operator== and !=
     {
-        const vmath::vec2 v1{1, 2};
-        const vmath::vec2 v2{1, 2};
-        const vmath::vec2 v3{-1, 2};
-        const vmath::vec2 v4{1, -2};
-        const vmath::vec2 v5{-1, -2};
+        const vmath::vec2 v1{ 1, 2 };
+        const vmath::vec2 v2{ 1, 2 };
+        const vmath::vec2 v3{ -1, 2 };
+        const vmath::vec2 v4{ 1, -2 };
+        const vmath::vec2 v5{ -1, -2 };
 
         TEST(v1 == v1);
         TEST(v1 == v2);
-        TEST( ! (v1 == v3));
-        TEST( ! (v1 == v4));
-        TEST( ! (v1 == v5));
+        TEST(! (v1 == v3));
+        TEST(! (v1 == v4));
+        TEST(! (v1 == v5));
 
-        TEST( ! (v1 != v1));
-        TEST( ! (v1 != v2));
+        TEST(! (v1 != v1));
+        TEST(! (v1 != v2));
         TEST(v1 != v3);
         TEST(v1 != v4);
         TEST(v1 != v5);
@@ -319,7 +325,7 @@ int main()
 
     // vec2::operator- (negation)
     {
-        const vmath::vec2 v1{3, 4};
+        const vmath::vec2 v1{ 3, 4 };
         const vmath::vec2 v2 = -v1;
 
         TEST(v2.x == -3);
@@ -328,8 +334,8 @@ int main()
 
     // vec2::operator+=
     {
-        vmath::vec2 v1{1, 2};
-        const vmath::vec2 v2{3, -3};
+        vmath::vec2       v1{ 1, 2 };
+        const vmath::vec2 v2{ 3, -3 };
 
         v1 += v2;
 
@@ -339,8 +345,8 @@ int main()
 
     // vec2::operator-=
     {
-        vmath::vec2 v1{1, 2};
-        const vmath::vec2 v2{3, -3};
+        vmath::vec2       v1{ 1, 2 };
+        const vmath::vec2 v2{ 3, -3 };
 
         v1 -= v2;
 
@@ -350,8 +356,8 @@ int main()
 
     // vec2::operator*=
     {
-        vmath::vec2 v1{1, 2};
-        const vmath::vec2 v2{3, -3};
+        vmath::vec2       v1{ 1, 2 };
+        const vmath::vec2 v2{ 3, -3 };
 
         v1 *= v2;
 
@@ -361,7 +367,7 @@ int main()
 
     // vec2::operator*=
     {
-        vmath::vec2 v1{2, 3};
+        vmath::vec2 v1{ 2, 3 };
 
         v1 *= 4;
 
@@ -371,8 +377,8 @@ int main()
 
     // vec2::operator/=
     {
-        vmath::vec2 v1{21, 24};
-        const vmath::vec2 v2{7, 6};
+        vmath::vec2       v1{ 21, 24 };
+        const vmath::vec2 v2{ 7, 6 };
 
         v1 /= v2;
 
@@ -382,7 +388,7 @@ int main()
 
     // vec2::operator/=
     {
-        vmath::vec2 v1{35, 14};
+        vmath::vec2 v1{ 35, 14 };
 
         v1 /= 7;
 
@@ -392,8 +398,8 @@ int main()
 
     // dot_product(vec2)
     {
-        const vmath::vec2 v1{2, 4};
-        const vmath::vec2 v2{3, 5};
+        const vmath::vec2 v1{ 2, 4 };
+        const vmath::vec2 v2{ 3, 5 };
 
         const float dp = vmath::dot_product(v1, v2);
 
@@ -413,7 +419,7 @@ int main()
 
     // vec3(x)
     {
-        const vmath::vec3 v{42};
+        const vmath::vec3 v{ 42 };
 
         TEST(v.x == 42);
         TEST(v.y == 42);
@@ -422,7 +428,7 @@ int main()
 
     // vec3(x, y, z), access
     {
-        const vmath::vec3 v{21, 22, 23};
+        const vmath::vec3 v{ 21, 22, 23 };
 
         TEST(v.x == 21);
         TEST(v.y == 22);
@@ -439,8 +445,8 @@ int main()
 
     // vec3(float*)
     {
-        const float xyz[] = { -10, -11, -12 };
-        const vmath::vec3 v{xyz};
+        const float       xyz[] = { -10, -11, -12 };
+        const vmath::vec3 v{ xyz };
 
         TEST(v.x == -10);
         TEST(v.y == -11);
@@ -466,7 +472,7 @@ int main()
 
     // vec3(vec2)
     {
-        const vmath::vec3 v{vmath::vec2{8, 9}};
+        const vmath::vec3 v{ vmath::vec2{ 8, 9 } };
 
         TEST(v.x == 8);
         TEST(v.y == 9);
@@ -475,7 +481,7 @@ int main()
 
     // vec3(vec2, z)
     {
-        const vmath::vec3 v{vmath::vec2{9, 7}, 6};
+        const vmath::vec3 v{ vmath::vec2{ 9, 7 }, 6 };
 
         TEST(v.x == 9);
         TEST(v.y == 7);
@@ -484,7 +490,7 @@ int main()
 
     // vec3(vec4)
     {
-        const vmath::vec3 v{vmath::vec4{13, 14, 15, 16}};
+        const vmath::vec3 v{ vmath::vec4{ 13, 14, 15, 16 } };
 
         TEST(v.x == 13);
         TEST(v.y == 14);
@@ -493,22 +499,22 @@ int main()
 
     // vec3::operator== and !=
     {
-        const vmath::vec3 v1{1, 2, 3};
-        const vmath::vec3 v2{1, 2, 3};
-        const vmath::vec3 v3{-1, 2, 3};
-        const vmath::vec3 v4{1, -2, 3};
-        const vmath::vec3 v5{1, 2, -3};
-        const vmath::vec3 v6{-1, -2, -3};
+        const vmath::vec3 v1{ 1, 2, 3 };
+        const vmath::vec3 v2{ 1, 2, 3 };
+        const vmath::vec3 v3{ -1, 2, 3 };
+        const vmath::vec3 v4{ 1, -2, 3 };
+        const vmath::vec3 v5{ 1, 2, -3 };
+        const vmath::vec3 v6{ -1, -2, -3 };
 
         TEST(v1 == v1);
         TEST(v1 == v2);
-        TEST( ! (v1 == v3));
-        TEST( ! (v1 == v4));
-        TEST( ! (v1 == v5));
-        TEST( ! (v1 == v6));
+        TEST(! (v1 == v3));
+        TEST(! (v1 == v4));
+        TEST(! (v1 == v5));
+        TEST(! (v1 == v6));
 
-        TEST( ! (v1 != v1));
-        TEST( ! (v1 != v2));
+        TEST(! (v1 != v1));
+        TEST(! (v1 != v2));
         TEST(v1 != v3);
         TEST(v1 != v4);
         TEST(v1 != v5);
@@ -517,7 +523,7 @@ int main()
 
     // vec3::operator- (negation)
     {
-        const vmath::vec3 v1{3, 4, 5};
+        const vmath::vec3 v1{ 3, 4, 5 };
         const vmath::vec3 v2 = -v1;
 
         TEST(v2.x == -3);
@@ -527,8 +533,8 @@ int main()
 
     // vec3::operator+=
     {
-        vmath::vec3 v1{1, 2, 3};
-        const vmath::vec3 v2{3, -3, 10};
+        vmath::vec3       v1{ 1, 2, 3 };
+        const vmath::vec3 v2{ 3, -3, 10 };
 
         v1 += v2;
 
@@ -539,8 +545,8 @@ int main()
 
     // vec3::operator-=
     {
-        vmath::vec3 v1{1, 2, 3};
-        const vmath::vec3 v2{3, -3, 10};
+        vmath::vec3       v1{ 1, 2, 3 };
+        const vmath::vec3 v2{ 3, -3, 10 };
 
         v1 -= v2;
 
@@ -551,8 +557,8 @@ int main()
 
     // vec3::operator*=
     {
-        vmath::vec3 v1{1, 2, -3};
-        const vmath::vec3 v2{3, -3, 4};
+        vmath::vec3       v1{ 1, 2, -3 };
+        const vmath::vec3 v2{ 3, -3, 4 };
 
         v1 *= v2;
 
@@ -563,7 +569,7 @@ int main()
 
     // vec3::operator*=
     {
-        vmath::vec3 v1{2, 3, 4};
+        vmath::vec3 v1{ 2, 3, 4 };
 
         v1 *= 4;
 
@@ -574,8 +580,8 @@ int main()
 
     // vec3::operator/=
     {
-        vmath::vec3 v1{21, 24, 26};
-        const vmath::vec3 v2{7, 6, 2};
+        vmath::vec3       v1{ 21, 24, 26 };
+        const vmath::vec3 v2{ 7, 6, 2 };
 
         v1 /= v2;
 
@@ -586,7 +592,7 @@ int main()
 
     // vec3::operator/=
     {
-        vmath::vec3 v1{35, 14, -56};
+        vmath::vec3 v1{ 35, 14, -56 };
 
         v1 /= 7;
 
@@ -597,8 +603,8 @@ int main()
 
     // dot_product(vec3)
     {
-        const vmath::vec3 v1{2, 4, -1};
-        const vmath::vec3 v2{3, 5, 7};
+        const vmath::vec3 v1{ 2, 4, -1 };
+        const vmath::vec3 v2{ 3, 5, 7 };
 
         const float dp = vmath::dot_product(v1, v2);
 
@@ -607,8 +613,8 @@ int main()
 
     // dot_product3(float4)
     {
-        const vmath::float4 v1{2, 4, -1, 2};
-        const vmath::float4 v2{3, 5, 7, 6};
+        const vmath::float4 v1{ 2, 4, -1, 2 };
+        const vmath::float4 v2{ 3, 5, 7, 6 };
 
         const vmath::float4 dp = vmath::dot_product3(v1, v2);
 
@@ -631,7 +637,7 @@ int main()
 
     // vec4(x)
     {
-        const vmath::vec4 v{42};
+        const vmath::vec4 v{ 42 };
 
         TEST(v.x == 42);
         TEST(v.y == 42);
@@ -641,7 +647,7 @@ int main()
 
     // vec4(x, y, z)
     {
-        const vmath::vec4 v{21, 22, 23};
+        const vmath::vec4 v{ 21, 22, 23 };
 
         TEST(v.x == 21);
         TEST(v.y == 22);
@@ -651,7 +657,7 @@ int main()
 
     // vec4(x, y, z, w), access
     {
-        const vmath::vec4 v{21, 22, 23, 24};
+        const vmath::vec4 v{ 21, 22, 23, 24 };
 
         TEST(v.x == 21);
         TEST(v.y == 22);
@@ -671,8 +677,8 @@ int main()
 
     // vec4(float*)
     {
-        const float xyzw[] = { -10, -11, -12, -13 };
-        const vmath::vec4 v{xyzw};
+        const float       xyzw[] = { -10, -11, -12, -13 };
+        const vmath::vec4 v{ xyzw };
 
         TEST(v.x == -10);
         TEST(v.y == -11);
@@ -702,7 +708,7 @@ int main()
 
     // vec4(vec2)
     {
-        const vmath::vec4 v{vmath::vec2{8, 9}};
+        const vmath::vec4 v{ vmath::vec2{ 8, 9 } };
 
         TEST(v.x == 8);
         TEST(v.y == 9);
@@ -712,7 +718,7 @@ int main()
 
     // vec4(vec2, z)
     {
-        const vmath::vec4 v{vmath::vec2{9, 7}, 6};
+        const vmath::vec4 v{ vmath::vec2{ 9, 7 }, 6 };
 
         TEST(v.x == 9);
         TEST(v.y == 7);
@@ -722,7 +728,7 @@ int main()
 
     // vec4(vec2, z, w)
     {
-        const vmath::vec4 v{vmath::vec2{9, 7}, 6, 8};
+        const vmath::vec4 v{ vmath::vec2{ 9, 7 }, 6, 8 };
 
         TEST(v.x == 9);
         TEST(v.y == 7);
@@ -732,7 +738,7 @@ int main()
 
     // vec4(vec3)
     {
-        const vmath::vec4 v{vmath::vec3{9, 7, 8}};
+        const vmath::vec4 v{ vmath::vec3{ 9, 7, 8 } };
 
         TEST(v.x == 9);
         TEST(v.y == 7);
@@ -742,7 +748,7 @@ int main()
 
     // vec4(vec3, w)
     {
-        const vmath::vec4 v{vmath::vec3{9, 7, 8}, 6};
+        const vmath::vec4 v{ vmath::vec3{ 9, 7, 8 }, 6 };
 
         TEST(v.x == 9);
         TEST(v.y == 7);
@@ -752,24 +758,24 @@ int main()
 
     // vec4::operator== and !=
     {
-        const vmath::vec4 v1{1, 2, 3, 4};
-        const vmath::vec4 v2{1, 2, 3, 4};
-        const vmath::vec4 v3{-1, 2, 3, 4};
-        const vmath::vec4 v4{1, -2, 3, 4};
-        const vmath::vec4 v5{1, 2, -3, 4};
-        const vmath::vec4 v6{1, 2, 3, -4};
-        const vmath::vec4 v7{-1, -2, -3, -4};
+        const vmath::vec4 v1{ 1, 2, 3, 4 };
+        const vmath::vec4 v2{ 1, 2, 3, 4 };
+        const vmath::vec4 v3{ -1, 2, 3, 4 };
+        const vmath::vec4 v4{ 1, -2, 3, 4 };
+        const vmath::vec4 v5{ 1, 2, -3, 4 };
+        const vmath::vec4 v6{ 1, 2, 3, -4 };
+        const vmath::vec4 v7{ -1, -2, -3, -4 };
 
         TEST(v1 == v1);
         TEST(v1 == v2);
-        TEST( ! (v1 == v3));
-        TEST( ! (v1 == v4));
-        TEST( ! (v1 == v5));
-        TEST( ! (v1 == v6));
-        TEST( ! (v1 == v7));
+        TEST(! (v1 == v3));
+        TEST(! (v1 == v4));
+        TEST(! (v1 == v5));
+        TEST(! (v1 == v6));
+        TEST(! (v1 == v7));
 
-        TEST( ! (v1 != v1));
-        TEST( ! (v1 != v2));
+        TEST(! (v1 != v1));
+        TEST(! (v1 != v2));
         TEST(v1 != v3);
         TEST(v1 != v4);
         TEST(v1 != v5);
@@ -779,16 +785,15 @@ int main()
 
     // float4::operator== and !=
     {
-        const vmath::float4 v1{1, 2, 3, 4};
-        const vmath::float4 v2{1, 2, 3, 4};
-        const vmath::float4 v3{-1, 2, 3, 4};
-        const vmath::float4 v4{1, -2, 3, 4};
-        const vmath::float4 v5{1, 2, -3, 4};
-        const vmath::float4 v6{1, 2, 3, -4};
-        const vmath::float4 v7{-1, -2, -3, -4};
+        const vmath::float4 v1{ 1, 2, 3, 4 };
+        const vmath::float4 v2{ 1, 2, 3, 4 };
+        const vmath::float4 v3{ -1, 2, 3, 4 };
+        const vmath::float4 v4{ 1, -2, 3, 4 };
+        const vmath::float4 v5{ 1, 2, -3, 4 };
+        const vmath::float4 v6{ 1, 2, 3, -4 };
+        const vmath::float4 v7{ -1, -2, -3, -4 };
 
-        const auto check = [](float f, bool is_true) -> bool
-        {
+        const auto check = [](float f, bool is_true) -> bool {
             const uint32_t u = *reinterpret_cast<uint32_t*>(&f);
             if (is_true)
                 return u == ~0U;
@@ -817,49 +822,49 @@ int main()
         TEST(check(cmp[1], true));
         TEST(check(cmp[2], true));
         TEST(check(cmp[3], true));
-        TEST(!cmp.all());
+        TEST(! cmp.all());
 
         cmp = v1 == v4;
         TEST(check(cmp[0], true));
         TEST(check(cmp[1], false));
         TEST(check(cmp[2], true));
         TEST(check(cmp[3], true));
-        TEST(!cmp.all());
+        TEST(! cmp.all());
 
         cmp = v1 == v5;
         TEST(check(cmp[0], true));
         TEST(check(cmp[1], true));
         TEST(check(cmp[2], false));
         TEST(check(cmp[3], true));
-        TEST(!cmp.all());
+        TEST(! cmp.all());
 
         cmp = v1 == v6;
         TEST(check(cmp[0], true));
         TEST(check(cmp[1], true));
         TEST(check(cmp[2], true));
         TEST(check(cmp[3], false));
-        TEST(!cmp.all());
+        TEST(! cmp.all());
 
         cmp = v1 == v7;
         TEST(check(cmp[0], false));
         TEST(check(cmp[1], false));
         TEST(check(cmp[2], false));
         TEST(check(cmp[3], false));
-        TEST(!cmp.all());
+        TEST(! cmp.all());
 
         cmp = v1 != v1;
         TEST(check(cmp[0], false));
         TEST(check(cmp[1], false));
         TEST(check(cmp[2], false));
         TEST(check(cmp[3], false));
-        TEST(!cmp.any());
+        TEST(! cmp.any());
 
         cmp = v1 != v2;
         TEST(check(cmp[0], false));
         TEST(check(cmp[1], false));
         TEST(check(cmp[2], false));
         TEST(check(cmp[3], false));
-        TEST(!cmp.any());
+        TEST(! cmp.any());
 
         cmp = v1 != v3;
         TEST(check(cmp[0], true));
@@ -899,7 +904,7 @@ int main()
 
     // vec4::operator- (negation)
     {
-        const vmath::vec4 v1{3, 4, 5, 6};
+        const vmath::vec4 v1{ 3, 4, 5, 6 };
         const vmath::vec4 v2 = -v1;
 
         TEST(v2.x == -3);
@@ -910,8 +915,8 @@ int main()
 
     // vec4::operator+=
     {
-        vmath::vec4 v1{1, 2, 3, -2};
-        const vmath::vec4 v2{3, -3, 10, 9};
+        vmath::vec4       v1{ 1, 2, 3, -2 };
+        const vmath::vec4 v2{ 3, -3, 10, 9 };
 
         v1 += v2;
 
@@ -923,8 +928,8 @@ int main()
 
     // vec4::operator-=
     {
-        vmath::vec4 v1{1, 2, 3};
-        const vmath::vec4 v2{3, -3, 10};
+        vmath::vec4       v1{ 1, 2, 3 };
+        const vmath::vec4 v2{ 3, -3, 10 };
 
         v1 -= v2;
 
@@ -935,8 +940,8 @@ int main()
 
     // vec4::operator*=
     {
-        vmath::vec4 v1{1, 2, -3, 4};
-        const vmath::vec4 v2{3, -3, 4, 5};
+        vmath::vec4       v1{ 1, 2, -3, 4 };
+        const vmath::vec4 v2{ 3, -3, 4, 5 };
 
         v1 *= v2;
 
@@ -948,7 +953,7 @@ int main()
 
     // vec4::operator*=
     {
-        vmath::vec4 v1{2, 3, 4, 5};
+        vmath::vec4 v1{ 2, 3, 4, 5 };
 
         v1 *= 4;
 
@@ -960,8 +965,8 @@ int main()
 
     // vec4::operator/=
     {
-        vmath::vec4 v1{21, 24, 26, 45};
-        const vmath::vec4 v2{7, 6, 2, 5};
+        vmath::vec4       v1{ 21, 24, 26, 45 };
+        const vmath::vec4 v2{ 7, 6, 2, 5 };
 
         v1 /= v2;
 
@@ -973,7 +978,7 @@ int main()
 
     // vec4::operator/=
     {
-        vmath::vec4 v1{35, 14, -56, 21};
+        vmath::vec4 v1{ 35, 14, -56, 21 };
 
         v1 /= 7;
 
@@ -985,8 +990,8 @@ int main()
 
     // dot_product(vec4)
     {
-        const vmath::vec4 v1{2, 4, -1, 6};
-        const vmath::vec4 v2{3, 5, 7, 8};
+        const vmath::vec4 v1{ 2, 4, -1, 6 };
+        const vmath::vec4 v2{ 3, 5, 7, 8 };
 
         const float dp = vmath::dot_product(v1, v2);
 
@@ -998,7 +1003,7 @@ int main()
 
     // conjugate
     {
-        const vmath::quat q{1, 2, 3, 4};
+        const vmath::quat q{ 1, 2, 3, 4 };
         const vmath::quat c = vmath::conjugate(q);
 
         TEST(c.x == -1);
@@ -1009,7 +1014,7 @@ int main()
 
     // quat::operator-
     {
-        const vmath::quat q{1, 2, 3, 4};
+        const vmath::quat q{ 1, 2, 3, 4 };
         const vmath::quat c = -q;
 
         TEST(c.x == -1);
@@ -1020,7 +1025,7 @@ int main()
 
     // normalize
     {
-        const vmath::quat q{10.0f, 10.0f, 10.0f, 10.0f};
+        const vmath::quat q{ 10.0f, 10.0f, 10.0f, 10.0f };
         const vmath::quat n = vmath::normalize(q);
 
         TEST(is_near(n.x, 0.5f));
@@ -1031,24 +1036,24 @@ int main()
 
     // quat, axis, angle
     {
-        const vmath::quat q{vmath::vec3{0, 0, 1}, vmath::pi_half};
-        const vmath::vec3 v{q.rotate(vmath::vec3{1, 0, 0})};
+        const vmath::quat q{ vmath::vec3{ 0, 0, 1 }, vmath::pi_half };
+        const vmath::vec3 v{ q.rotate(vmath::vec3{ 1, 0, 0 }) };
 
         TEST(is_near(v.x, 0));
         TEST(is_near(v.y, 1));
         TEST(is_near(v.z, 0));
     }
     {
-        const vmath::quat q{vmath::vec3{0, 1, 0}, vmath::pi_half};
-        const vmath::vec3 v{q.rotate(vmath::vec3{0, 0, 1})};
+        const vmath::quat q{ vmath::vec3{ 0, 1, 0 }, vmath::pi_half };
+        const vmath::vec3 v{ q.rotate(vmath::vec3{ 0, 0, 1 }) };
 
         TEST(is_near(v.x, 1));
         TEST(is_near(v.y, 0));
         TEST(is_near(v.z, 0));
     }
     {
-        const vmath::quat q{vmath::vec3{1, 0, 0}, vmath::pi_half};
-        const vmath::vec3 v{q.rotate(vmath::vec3{0, 1, 0})};
+        const vmath::quat q{ vmath::vec3{ 1, 0, 0 }, vmath::pi_half };
+        const vmath::vec3 v{ q.rotate(vmath::vec3{ 0, 1, 0 }) };
 
         TEST(is_near(v.x, 0));
         TEST(is_near(v.y, 0));
@@ -1057,24 +1062,24 @@ int main()
 
     // quat, euler_xyz
     {
-        const vmath::quat q = vmath::quat::from_euler(vmath::vec3{0, 0, vmath::pi_half});
-        const vmath::vec3 v{q.rotate(vmath::vec3{1, 0, 0})};
+        const vmath::quat q = vmath::quat::from_euler(vmath::vec3{ 0, 0, vmath::pi_half });
+        const vmath::vec3 v{ q.rotate(vmath::vec3{ 1, 0, 0 }) };
 
         TEST(is_near(v.x, 0));
         TEST(is_near(v.y, 1));
         TEST(is_near(v.z, 0));
     }
     {
-        const vmath::quat q = vmath::quat::from_euler(vmath::vec3{0, vmath::pi_half, 0});
-        const vmath::vec3 v{q.rotate(vmath::vec3{0, 0, 1})};
+        const vmath::quat q = vmath::quat::from_euler(vmath::vec3{ 0, vmath::pi_half, 0 });
+        const vmath::vec3 v{ q.rotate(vmath::vec3{ 0, 0, 1 }) };
 
         TEST(is_near(v.x, 1));
         TEST(is_near(v.y, 0));
         TEST(is_near(v.z, 0));
     }
     {
-        const vmath::quat q = vmath::quat::from_euler(vmath::vec3{vmath::pi_half, 0, 0});
-        const vmath::vec3 v{q.rotate(vmath::vec3{0, 1, 0})};
+        const vmath::quat q = vmath::quat::from_euler(vmath::vec3{ vmath::pi_half, 0, 0 });
+        const vmath::vec3 v{ q.rotate(vmath::vec3{ 0, 1, 0 }) };
 
         TEST(is_near(v.x, 0));
         TEST(is_near(v.y, 0));
@@ -1099,12 +1104,9 @@ int main()
 
     // mat4(float*)
     {
-        const float raw[] = { 10, 20, 30, 40,
-                              11, 21, 31, 41,
-                              12, 22, 32, 42,
-                              13, 23, 33, 43 };
+        const float raw[] = { 10, 20, 30, 40, 11, 21, 31, 41, 12, 22, 32, 42, 13, 23, 33, 43 };
 
-        const vmath::mat4 m{raw};
+        const vmath::mat4 m{ raw };
 
         TEST(m.a00 == 10);
         TEST(m.a10 == 20);
@@ -1194,18 +1196,12 @@ int main()
 
     // mat4::operator*
     {
-        const float raw1[] = { 2, 3, 5, 7,
-                               11, 13, 17, 19,
-                               23, 29, 31, 37,
-                               41, 43, 47, 53 };
+        const float raw1[] = { 2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47, 53 };
 
-        const float raw2[] = { 59, 61, 67, 71,
-                               73, 79, 83, 89,
-                               97, 101, 103, 107,
-                               109, 113, 127, 131 };
+        const float raw2[] = { 59, 61, 67, 71, 73, 79, 83, 89, 97, 101, 103, 107, 109, 113, 127, 131 };
 
-        const vmath::mat4 m1{raw1};
-        const vmath::mat4 m2{raw2};
+        const vmath::mat4 m1{ raw1 };
+        const vmath::mat4 m2{ raw2 };
 
         const vmath::mat4 m3 = m1 * m2;
 
@@ -1231,13 +1227,10 @@ int main()
     {
         const float raw1[] = { 59, 61, 67, 71 };
 
-        const float raw2[] = { 2, 3, 5, 7,
-                               11, 13, 17, 19,
-                               23, 29, 31, 37,
-                               41, 43, 47, 53 };
+        const float raw2[] = { 2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47, 53 };
 
-        const vmath::vec4 v{raw1};
-        const vmath::mat4 m{raw2};
+        const vmath::vec4 v{ raw1 };
+        const vmath::mat4 m{ raw2 };
 
         const vmath::vec4 result = v * m;
 
@@ -1251,13 +1244,10 @@ int main()
     {
         const float raw1[] = { 59, 61, 67, 71 };
 
-        const float raw2[] = { 2, 11, 23, 41,
-                               3, 13, 29, 43,
-                               5, 17, 31, 47,
-                               7, 19, 37, 53 };
+        const float raw2[] = { 2, 11, 23, 41, 3, 13, 29, 43, 5, 17, 31, 47, 7, 19, 37, 53 };
 
-        const vmath::vec4 v{raw1};
-        const vmath::mat4 m{raw2};
+        const vmath::vec4 v{ raw1 };
+        const vmath::mat4 m{ raw2 };
 
         const vmath::vec4 result = m * v;
 
@@ -1291,7 +1281,7 @@ int main()
 
     // translate(vec3)
     {
-        const vmath::mat4 m = vmath::translate(vmath::vec3{6, 7, 8});
+        const vmath::mat4 m = vmath::translate(vmath::vec3{ 6, 7, 8 });
 
         TEST(m.a00 == 1);
         TEST(m.a01 == 0);
@@ -1335,7 +1325,7 @@ int main()
 
     // scale(vec3)
     {
-        const vmath::mat4 m = vmath::scale(vmath::vec3{6, 7, 8});
+        const vmath::mat4 m = vmath::scale(vmath::vec3{ 6, 7, 8 });
 
         TEST(m.a00 == 6);
         TEST(m.a01 == 0);
