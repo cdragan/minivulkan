@@ -1720,7 +1720,9 @@ static void check_named_fm_projection(const Synth::InstrumentEditorBank& bank, u
         for (uint32_t row = 0; row < Sculptor::osc_slot_count + 12 * Synth::num_mod_targets; ++row) {
             const bool gated = row == Sculptor::osc_target_row(Synth::mod_duty1) || row == mode_slot ||
                                row == Sculptor::osc_target_row(Synth::mod_osc_mix) || row == fm_depth_slot ||
-                               row == fm_ratio_slot;
+                               row == fm_ratio_slot ||
+                               (row >= Sculptor::osc_target_row(Synth::mod_fir_spread) &&
+                                row <= Sculptor::osc_target_row(Synth::mod_fir_spread) + 13); // spread row, block and slope
             TEST(Sculptor::oscillator_slot_waveform_mode_disabled(graph.node(node_index), row) == gated);
         }
         wave.list_index = 1;
@@ -21265,6 +21267,7 @@ int main()
         {
             static Synth::InstrumentEditorBank spread_splice_source;
             build_named_fm_fixture(&spread_splice_source);
+            spread_splice_source.bank.instruments.entries[0].layers[0].fir_type = Synth::fir_bandpass;
             spread_splice_source.bank.instruments.entries[0].layers[0].targets[Synth::mod_fir_spread].base_value = 3.0f;
             static char    spread_payload[Synth::library_payload_max];
             const uint32_t spread_payload_len =

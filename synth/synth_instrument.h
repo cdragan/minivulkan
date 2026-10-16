@@ -74,7 +74,8 @@ struct TargetBinding {
 // Oscillator FIR filter type.  The numeric values are stored in bank memory, so the order is frozen once
 // banks ship.  "off" is zero so zeroed memory never dispatches a filter.  Band-pass uses the fir spread
 // target as a spread in semitones around the note pitch.  Low-pass and high-pass use it as a fixed cutoff
-// in Hz.  New layers default to band-pass through the member initializer, not through the zero value.
+// in Hz.  New layers default to off through the member initializer, so a fresh
+// oscillator starts with the filter disabled.
 enum FilterType : uint8_t {
     fir_off      = 0,
     fir_bandpass = 1,
@@ -99,7 +100,7 @@ struct Oscillator {
     // FIR window slope percent 1..100; 100 = the full 1025-tap span (sharpest).
     // The member default seeds every value-initialized construction path.
     uint8_t       fir_slope_percent = 100;
-    FilterType    fir_type          = fir_bandpass;
+    FilterType    fir_type          = fir_off;
     TargetBinding targets[num_mod_targets]; // One binding per modulated quantity (volume/panning/etc.)
 };
 
