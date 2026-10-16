@@ -2372,7 +2372,7 @@ bool Sculptor::replace_effect_chain_candidate(const Synth::InstrumentEditorBank*
     }
     effects_candidate.graph_layout_count = retained;
     // A local bank lets the same title/identity transfer serve library and clipboard payloads.
-    memset(&layout_source, 0, sizeof(layout_source));
+    memset(static_cast<void*>(&layout_source), 0, sizeof(layout_source));
     layout_source.bank.channel_chains[0]  = document->chain;
     layout_source.bank.lfos.num_allocated = document->lfo_count;
     for (uint32_t index = 0; index < document->graph_layout_count; ++index) {

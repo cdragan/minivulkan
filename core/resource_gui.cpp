@@ -18,5 +18,5 @@ void Buffer::free()
     if (size)
         heap->free_memory(offset, size);
 
-    memset(this, 0, sizeof(*this));
+    memset(static_cast<void*>(this), 0, sizeof(*this));
 }

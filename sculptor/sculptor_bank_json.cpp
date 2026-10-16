@@ -2849,7 +2849,7 @@ static void decode_bank(Walker& w, uint32_t obj, Synth::InstrumentEditorBank* ou
 // factory channel names.
 static void fill_default_editor_bank(Synth::InstrumentEditorBank* bank)
 {
-    memset(bank, 0, sizeof(*bank));
+    memset(static_cast<void*>(bank), 0, sizeof(*bank));
     for (uint32_t c = 0; c < Synth::max_channels; c++)
         Synth::get_default_channel_name(c, bank->channel_names[c], Synth::max_name_len);
 }

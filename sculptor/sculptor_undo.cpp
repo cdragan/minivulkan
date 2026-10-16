@@ -221,7 +221,7 @@ void Sculptor::UndoRedo::push(const void* data, size_t size)
 
     memcpy(dest_ptr, data, size);
 
-    cur_size += size;
+    cur_size += static_cast<uint32_t>(size);
 }
 
 void Sculptor::UndoRedo::push(uint32_t v)

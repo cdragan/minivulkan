@@ -250,7 +250,7 @@ void Image::free()
     if (alloc_size)
         owning_heap->free_memory(heap_offset, alloc_size);
 
-    memset(this, 0, sizeof(*this));
+    memset(static_cast<void*>(this), 0, sizeof(*this));
 }
 
 bool Buffer::allocate(Usage              heap_usage,

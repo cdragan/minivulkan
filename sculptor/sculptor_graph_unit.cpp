@@ -81,7 +81,7 @@ static Graph& reset_unit_graph(uint32_t slot)
 {
     // The zero-filled state is valid: zero zoom renders as 1, idle is zero,
     // and colors stay unset until the owner assigns a palette.
-    memset(&unit_graphs[slot], 0, sizeof(Graph));
+    memset(static_cast<void*>(&unit_graphs[slot]), 0, sizeof(Graph));
     return unit_graphs[slot];
 }
 
