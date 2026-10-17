@@ -2211,8 +2211,11 @@ static void render_audio_step()
         param.pad_tilt[0]   = oscillator.pad_tilt[0];
         param.pad_tilt[1]   = oscillator.pad_tilt[1];
 
+        // Wrap the phases so float precision does not degrade on long notes.
         oscillator.phase += phase_step;
+        oscillator.phase -= floorf(oscillator.phase);
         oscillator.mod_phase += mod_phase_step;
+        oscillator.mod_phase -= floorf(oscillator.mod_phase);
         oscillator.noise_counter += Synth::rt_step_samples;
 
         cur_param_offs += static_cast<uint32_t>(sizeof(ShaderParams::Oscillator));

@@ -118,8 +118,44 @@ float pad_oscillator(float phase, float duty, float tilt, uint seed, float pad_t
     return value / max(norm, 1e-9);
 }
 
+// Band-limited step residual (PolyBLEP).  t is the phase in [0, 1) and dt the phase
+// step per sample.  Add (jump / 2) * poly_blep(phase - discontinuity) to the naive
+// wave, so a step of height jump at phase 0 does not alias.
+float poly_blep(float t, float dt)
+{
+    if (t < dt) {
+        t /= dt;
+        return t + t - t * t - 1.0;
+    }
+    else if (t > 1.0 - dt) {
+        t = (t - 1.0) / dt;
+        return t * t + t + t + 1.0;
+    }
+
+    return 0.0;
+}
+
+// Integral of poly_blep (PolyBLAMP) for a change of slope.  Add
+// (slope_change / 2) * dt * poly_blamp(phase - kink, dt) to the naive wave.
+float poly_blamp(float t, float dt)
+{
+    if (t < dt) {
+        t = 1.0 - t / dt;
+        return t * t * t / 3.0;
+    }
+    else if (t > 1.0 - dt) {
+        t = 1.0 + (t - 1.0) / dt;
+        return t * t * t / 3.0;
+    }
+
+    return 0.0;
+}
+
 float oscillator(uint osc_type, float phase, float duty, float tilt, uint noise_index, uint note_seed, float pad_time, float phase_step)
 {
+    // Wave edges are band-limited, so the wave does not alias at high pitch.
+    const float step_dt = min(phase_step, 0.5);
+
     if (osc_type == sine_wave) {
         return sin(two_pi * phase);
     }
@@ -129,9 +165,12 @@ float oscillator(uint osc_type, float phase, float duty, float tilt, uint noise_
         float value = 2.0 * phase;
 
         if (duty < 0.0001) {
-            value = 2.0 - value;
+            // Falling ramp: step up at the wrap.
+            return 1.0 - value + poly_blep(phase, step_dt);
         }
         else if (duty > 0.999) {
+            // Rising ramp: step down at the wrap.
+            return value - 1.0 - poly_blep(phase, step_dt);
         }
         else if (phase < duty) {
             value /= duty;
@@ -140,12 +179,21 @@ float oscillator(uint osc_type, float phase, float duty, float tilt, uint noise_
             value = (2.0 - value) / (1.0 - duty);
         }
 
-        return value - 1.0;
+        // Two slope changes: at the wrap and at the duty point, equal and opposite.
+        // The kink window cannot exceed half of the shorter segment, or the
+        // large slope change would overshoot.
+        const float kink_dt = min(step_dt, 0.5 * min(duty, 1.0 - duty));
+        const float kink_half = 1.0 / (duty * (1.0 - duty));
+        const float correction = poly_blamp(phase, kink_dt) - poly_blamp(fract(phase - duty), kink_dt);
+
+        return value - 1.0 + kink_half * kink_dt * correction;
     }
     else if (osc_type == pulse_wave) {
         phase = fract(phase);
 
-        return (phase < duty) ? 1.0 : -1.0;
+        const float value = (phase < duty) ? 1.0 : -1.0;
+
+        return value + poly_blep(phase, step_dt) - poly_blep(fract(phase - duty), step_dt);
     }
     else if (osc_type == pad_wave) {
         return pad_oscillator(phase, duty, tilt, note_seed, pad_time, phase_step);
