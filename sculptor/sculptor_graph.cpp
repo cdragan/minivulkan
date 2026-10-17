@@ -451,8 +451,12 @@ void Sculptor::Graph::clear()
     // Pool entries keep their bytes after deletion.  clear() resets the
     // retained pool storage so freed node bytes never survive a rebuild.
     // Normal creation is safe regardless: create_node() value-initializes
-    // each entry.
-    nodes = Pool<Node, max_nodes>();
+    // each entry.  Reset per entry instead of assigning a fresh Pool
+    // temporary: the temporary is pool-sized and overflows the 8 MiB main
+    // stack under AddressSanitizer now that the pool holds 178 nodes.
+    for (uint32_t i = 0; i < max_nodes; ++i) {
+        nodes.entries[i] = Node{};
+    }
     // The canvas popup and the error overlay describe pre-clear state: a
     // stale popup must not delete a reused connection index, and no stale
     // error text survives a rebuild.

@@ -274,8 +274,8 @@ constexpr size_t editor_resident_state_bytes =
     4 * Synth::instrument_graph_layout_capacity * sizeof(Synth::InstrumentGraphLayout) +
     4096; // remaining editor scalar flags, constants and alignment
 static_assert(editor_resident_state_bytes <=
-              48 * 1024 * 1024); // // per-bank driver: the oscillator graph pre-provisions eleven
-                                 // 12-slot target blocks per node (max_node_slots 151), which
+              48 * 1024 * 1024); // // per-bank driver: the oscillator graph pre-provisions twelve
+                                 // 12-slot target blocks per node (max_node_slots 163), which
                                  // grows sizeof(Graph); the resident total stays far
 // below the 48 MiB assert.  The phantom-shell pool
 // contributes 20 live InstrumentEditorBank copies x (256 x

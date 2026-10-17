@@ -72,7 +72,7 @@ namespace {
 constexpr uint32_t max_portable_records =
     Synth::graph_canonical_node_count + 2u * Synth::max_layers * Synth::num_mod_targets;
 static_assert(max_portable_records == Synth::instrument_graph_layout_capacity);
-static_assert(max_portable_records == 163, "9 canonical + 77 envelopes + 77 LFOs");
+static_assert(max_portable_records == 177, "9 canonical + 84 envelopes + 84 LFOs");
 constexpr uint32_t clipboard_token_bound = 16384;
 constexpr uint32_t fake_region_base      = 8192;
 
@@ -139,6 +139,7 @@ constexpr uint32_t t7_target_row_slots[Synth::num_mod_targets] = {
     82,  // fm ratio
     15,  // pad tone a
     42,  // pad tone b
+    149, // fir slope
 };
 // Shared graph and mapping for the direct-row blocks; every block
 // re-projects, which rebuilds both from scratch.
@@ -195,10 +196,10 @@ static bool approx(float left, float right, float eps)
 }
 
 // True for the four targets these fixtures wire modulators and MIDI
-// inputs onto (volume, pitch, panning, FIR spread). All eleven targets
-// are uniformly modulate-able; the remaining seven (FM ratio, pad tone
-// A/B, duty A/B, osc mix and FM depth) keep base-only bindings here
-// purely to bound fixture size.
+// inputs onto (volume, pitch, panning, FIR spread). All twelve targets
+// are uniformly modulate-able; the remaining eight (FM ratio, pad tone
+// A/B, duty A/B, osc mix, FM depth and FIR slope) keep base-only
+// bindings here purely to bound fixture size.
 static bool osc_graph_target(Synth::ModTarget target)
 {
     return target == Synth::mod_volume || target == Synth::mod_pitch || target == Synth::mod_panning ||
@@ -468,7 +469,13 @@ static void build_osc_graph_max_fixture(Synth::InstrumentBank* bank,
 
     for (uint32_t t = 0; t < Synth::num_mod_targets; t++) {
         Synth::TargetBinding& routing = instrument->layers[0].targets[t];
-        routing.base_value            = -1.0f + 0.25f * static_cast<float>(t);
+        if (t == Synth::mod_fir_slope) {
+            // The FIR slope base is an integer percent 1..100; this fixture's
+            // formula would produce a fractional base, so the binding stays
+            // zeroed here (the scalar carries the value).
+            continue;
+        }
+        routing.base_value = -1.0f + 0.25f * static_cast<float>(t);
         if (! osc_graph_target(static_cast<Synth::ModTarget>(t))) {
             continue; // duty A/B, osc mix and FM depth keep no routed inputs here
         }
@@ -1061,6 +1068,7 @@ static uint32_t build_clipboard_max_fixture(Synth::InstrumentBank*        bank,
                                          : target == Synth::mod_panning    ? 0.5f
                                          : target == Synth::mod_fm_ratio   ? 1.5f
                                          : target == Synth::mod_fir_spread ? 3.0f
+                                         : target == Synth::mod_fir_slope  ? 37.0f
                                                                            : 2000.0f;
         routing.num_inputs             = 2;
         routing.inputs[0].source       = Synth::ModSource::velocity;
@@ -1733,19 +1741,19 @@ static void check_named_fm_projection(const Synth::InstrumentEditorBank& bank, u
         graph.set_slot_value(node_index, wave_b_slot, wave);
         // With waveform b off, exactly the duty b / mix mode / waveform mix /
         // fm depth / fm ratio rows plus both pad tone families and the spread family are gated,
-        // across all 151 slots. Waveform a is not pad in this fixture.
+        // across all 162 slots. Waveform a is not pad in this fixture.
         const uint32_t wave_a_list  = graph.node(node_index).slots.entries[1].value.list_index;
         const bool     tone_a_gated = wave_a_list != static_cast<uint32_t>(Synth::WaveType::pad_wave) - 1;
         const uint32_t tone0        = Sculptor::osc_target_row(Synth::mod_pad_tilt0);
         const uint32_t tone1        = Sculptor::osc_target_row(Synth::mod_pad_tilt1);
         for (uint32_t row = 0; row < Sculptor::osc_slot_count + 12 * Synth::num_mod_targets; ++row) {
-            const bool gated = row == Sculptor::osc_target_row(Synth::mod_duty1) || row == mode_slot ||
-                               row == Sculptor::osc_target_row(Synth::mod_osc_mix) || row == fm_depth_slot ||
-                               row == fm_ratio_slot ||
-                               (tone_a_gated && row >= tone0 && row <= tone0 + Sculptor::osc_target_block_stride) ||
-                               (row >= tone1 && row <= tone1 + Sculptor::osc_target_block_stride) ||
-                               (row >= Sculptor::osc_target_row(Synth::mod_fir_spread) &&
-                                row <= Sculptor::osc_target_row(Synth::mod_fir_spread) + 13);
+            const bool gated =
+                row == Sculptor::osc_target_row(Synth::mod_duty1) || row == mode_slot ||
+                row == Sculptor::osc_target_row(Synth::mod_osc_mix) || row == fm_depth_slot || row == fm_ratio_slot ||
+                (tone_a_gated && row >= tone0 && row <= tone0 + Sculptor::osc_target_block_stride) ||
+                (row >= tone1 && row <= tone1 + Sculptor::osc_target_block_stride) ||
+                (row >= Sculptor::osc_target_row(Synth::mod_fir_spread) &&
+                 row <= Sculptor::osc_target_row(Synth::mod_fir_slope) + Sculptor::osc_target_block_stride);
             TEST(Sculptor::oscillator_slot_waveform_mode_disabled(graph.node(node_index), row) == gated);
         }
         wave.list_index = 1;
@@ -1767,7 +1775,9 @@ static void check_named_fm_projection(const Synth::InstrumentEditorBank& bank, u
             const bool gated = (row >= tone_b_row && row <= tone_b_row + Sculptor::osc_target_block_stride) ||
                                row == Sculptor::osc_target_row(Synth::mod_duty1) || row == mode_slot ||
                                row == Sculptor::osc_target_row(Synth::mod_osc_mix) || row == fm_depth_slot ||
-                               row == fm_ratio_slot || (row >= spread_row && row <= spread_row + 13);
+                               row == fm_ratio_slot ||
+                               (row >= spread_row && row <= Sculptor::osc_target_row(Synth::mod_fir_slope) +
+                                                                Sculptor::osc_target_block_stride);
             TEST(Sculptor::oscillator_slot_waveform_mode_disabled(graph.node(node_index), row) == gated);
         }
     }
@@ -1779,7 +1789,8 @@ static void check_named_fm_projection(const Synth::InstrumentEditorBank& bank, u
     {
         const uint32_t spread_row = Sculptor::osc_target_row(Synth::mod_fir_spread);
         for (uint32_t row = 0; row < Sculptor::osc_slot_count + 12 * Synth::num_mod_targets; ++row) {
-            const bool gated = (row >= spread_row && row <= spread_row + 13) ||
+            const bool gated = (row >= spread_row && row <= Sculptor::osc_target_row(Synth::mod_fir_slope) +
+                                                                Sculptor::osc_target_block_stride) ||
                                row == Sculptor::osc_target_row(Synth::mod_osc_mix);
             TEST(Sculptor::oscillator_slot_waveform_mode_disabled(graph.node(node_index), row) == gated);
         }
@@ -7035,7 +7046,7 @@ static void osc_inherit_source_regressions()
 }
 
 // Direct per-connection modulator rows: every oscillator node keeps its
-// 19 fixed slots and adds one 12-slot block per ModTarget directly after
+// 18 fixed slots and adds one 12-slot block per ModTarget directly after
 // its value row (block_base(t) = osc_target_row_slot[t] + 1); field 0 is
 // the env dot, 1 the env depth, 2 the LFO dot, 3 the LFO op, 4 the LFO
 // depth, 5 the rate scale, 6 and 9 the source dots, 7/8 and 10/11 the
@@ -7056,8 +7067,8 @@ static int32_t find_detached_by_desc(const Sculptor::OscGraphMapping& mapping, u
     return -1;
 }
 
-// One layer whose eleven targets each bind an envelope, an LFO and two MIDI
-// inputs.  Volume keeps a volume-shaped descriptor (id 1); the other ten
+// One layer whose twelve targets each bind an envelope, an LFO and two MIDI
+// inputs.  Volume keeps a volume-shaped descriptor (id 1); the other eleven
 // targets share one non-volume descriptor (id 2).  One LFO descriptor (id 1)
 // serves every cell, so the projection derives exactly three generator
 // instances and no parameter nodes.
@@ -7219,7 +7230,7 @@ static void osc_direct_modulator_regressions()
     static Sculptor::GraphChange discarded[Sculptor::max_pending_changes];
 
     // T-M7-1 (O4/O9): the per-target block grammar on one oscillator with
-    // all eleven targets fully bound; every family row carries its seeded
+    // all twelve targets fully bound; every family row carries its seeded
     // binding values, and the waveform/mode guard keeps working on the
     // widened node.
     {
@@ -7233,7 +7244,7 @@ static void osc_direct_modulator_regressions()
         TEST(mapping.osc_nodes[0] != Sculptor::pool_no_slot);
         if (mapping.osc_nodes[0] != Sculptor::pool_no_slot) {
             const Sculptor::Node& osc = graph.node(mapping.osc_nodes[0]);
-            // 19 fixed slots plus eleven 12-slot target blocks.
+            // 18 fixed slots plus twelve 12-slot target blocks.
             TEST(osc.slots.num_allocated == Sculptor::osc_slot_count + 12 * Synth::num_mod_targets);
             for (uint32_t t = 0; t < Synth::num_mod_targets; t++) {
                 check_target_block_grammar(osc, t, instrument.layers[0].targets[t]);
@@ -8240,8 +8251,8 @@ static void osc_direct_modulator_regressions()
         TEST(mapping.detached_count == 2 * Synth::max_layers * Synth::num_mod_targets);
         check_no_param_nodes(graph);
     }
-    // Registry capacity, low layer count: one layer binds all eleven targets
-    // (22 derived instances) and 120 surplus envelope records append 120
+    // Registry capacity, low layer count: one layer binds all twelve targets
+    // (24 derived instances) and 120 surplus envelope records append 120
     // more generators, so the projection builds 145 nodes - within the
     // node pool but past any layer-count-sized registry.  Metadata
     // validation accepts the shape and the projection succeeds.
@@ -8908,6 +8919,240 @@ static void osc_cc_regressions()
     }
 }
 
+// Full-wiring fixture for the maximum-population projection check: every
+// (layer, target) cell binds its own envelope and LFO descriptors plus two
+// routed inputs, so the projection hits the exact node, instance and
+// connection budgets.  Deliberately separate from
+// build_osc_graph_max_fixture, whose partial wiring (four targets, layer-0-
+// only inputs, one aliased LFO) other tests depend on.
+static void build_fir_slope_max_fixture(Synth::InstrumentBank* bank,
+                                        Synth::Instrument*     instrument,
+                                        uint16_t (*env_ids)[Synth::num_mod_targets],
+                                        uint16_t (*lfo_ids)[Synth::num_mod_targets])
+{
+    memset(static_cast<void*>(bank), 0, sizeof(*bank));
+    *instrument = {};
+    for (uint32_t layer = 0; layer < Synth::max_layers; layer++) {
+        for (uint32_t t = 0; t < Synth::num_mod_targets; t++) {
+            env_ids[layer][t] = 0;
+            lfo_ids[layer][t] = 0;
+        }
+    }
+
+    instrument->layer_count = Synth::max_layers;
+    for (uint32_t layer = 0; layer < Synth::max_layers; layer++) {
+        Synth::Oscillator& osc = instrument->layers[layer];
+        osc.osc_type[0]        = static_cast<Synth::WaveType>(1 + (layer % 4));
+        osc.osc_type[1]        = static_cast<Synth::WaveType>(1 + ((layer + 2) % 4));
+        osc.osc_mode           = static_cast<Synth::OscMode>(layer % 3);
+        osc.mod_ratio          = 1.0f + 0.25f * static_cast<float>(layer);
+        for (uint32_t t = 0; t < Synth::num_mod_targets; t++) {
+            const uint32_t env_slot = bank->envelopes.allocate();
+            TEST(env_slot != pool_no_slot);
+            env_ids[layer][t]              = static_cast<uint16_t>(env_slot + 1);
+            Synth::EnvelopeDescriptor& env = bank->envelopes.entries[env_slot];
+            env.num_points                 = 2;
+            env.sustain_first_point        = 0;
+            env.sustain_last_point         = 1;
+            env.min_value                  = -1.0f;
+            env.min_max_delta              = 2.0f;
+            env.points[0]                  = { 0, 0x4000 };
+            env.points[1]                  = { 300, 0x8000 };
+
+            const uint32_t lfo_slot = bank->lfos.allocate();
+            TEST(lfo_slot != pool_no_slot);
+            lfo_ids[layer][t]         = static_cast<uint16_t>(lfo_slot + 1);
+            Synth::LFODescriptor& lfo = bank->lfos.entries[lfo_slot];
+            lfo.wave                  = Synth::WaveType::sine_wave;
+            lfo.duty                  = 0x40;
+            lfo.period_ms             = static_cast<uint16_t>(100 + 37 * lfo_slot);
+            lfo.min_value             = -1.0f;
+            lfo.min_max_delta         = 2.0f;
+
+            Synth::TargetBinding& gen = osc.targets[t];
+            gen.envelope_desc_id      = env_ids[layer][t];
+            gen.lfo_desc_id           = lfo_ids[layer][t];
+            gen.lfo_op                = ((layer + t) % 2) != 0 ? Synth::SourceOp::multiply : Synth::SourceOp::add;
+            gen.lfo_depth             = 0.25f * static_cast<float>(layer + 1);
+            gen.lfo_depth_source      = static_cast<Synth::ModSource>(1 + ((layer + t) % 6));
+            gen.lfo_rate_source       = static_cast<Synth::ModSource>(1 + ((layer + 2 * t + 1) % 6));
+            gen.lfo_rate_scale_ms     = 10.0f * static_cast<float>(layer + 1) + static_cast<float>(t);
+            gen.base_value            = -1.0f + 0.25f * static_cast<float>(t);
+            gen.num_inputs            = 2;
+            gen.inputs[0].source      = Synth::ModSource::pitch_bend;
+            gen.inputs[0].op          = Synth::SourceOp::add;
+            gen.inputs[0].scale       = 0.5f * static_cast<float>(t);
+            gen.inputs[1].source      = Synth::ModSource::mod_wheel;
+            gen.inputs[1].op          = Synth::SourceOp::multiply;
+            gen.inputs[1].scale       = -0.25f * static_cast<float>(t) - 0.5f;
+        }
+        // The compile syncs each layer's mod_ratio from its fm_ratio base;
+        // the fixture mirrors that so the projection reads consistent rows.
+        instrument->layers[layer].targets[Synth::mod_fm_ratio].base_value = instrument->layers[layer].mod_ratio;
+    }
+}
+
+// The FIR Slope row is a connectable target row with a 12-slot
+// block appended at 150..161, no existing row shifts, the disabled
+// predicate covers the widened range exactly on filter-off layers, and the
+// maximum-population projection hits the exact node/instance/connection
+// budgets.
+static void osc_fir_slope_projection_regressions()
+{
+    // Three-layer fixture: layer 0 band-pass with a spread base, a routed
+    // slope base and a detached envelope; layer 1 filter-off with the scalar
+    // slope; layer 2 band-pass with a routed slope input.
+    static Synth::InstrumentBank     model_bank;
+    static Synth::Instrument         instrument;
+    static Sculptor::Graph           graph;
+    static Sculptor::OscGraphMapping mapping;
+    static Sculptor::GraphChange     discarded[Sculptor::max_pending_changes];
+    memset(static_cast<void*>(&model_bank), 0, sizeof(model_bank));
+    instrument = {};
+    TEST(model_bank.envelopes.allocate() == 0);
+    Synth::EnvelopeDescriptor& env = model_bank.envelopes.entries[0];
+    env.num_points                 = 2;
+    env.sustain_first_point        = 0;
+    env.sustain_last_point         = 1;
+    env.min_value                  = -0.5f;
+    env.min_max_delta              = 1.5f;
+    env.points[0]                  = { 0, 0x4000 };
+    env.points[1]                  = { 200, 0x8000 };
+
+    instrument.layer_count                                              = 3;
+    instrument.layers[0].osc_type[0]                                    = Synth::WaveType::sine_wave;
+    instrument.layers[0].osc_type[1]                                    = Synth::WaveType::pulse_wave;
+    instrument.layers[0].osc_mode                                       = Synth::osc_mode_blend;
+    instrument.layers[0].mod_ratio                                      = 2.0f;
+    instrument.layers[0].fir_slope_percent                              = 37;
+    instrument.layers[0].fir_type                                       = Synth::fir_bandpass;
+    instrument.layers[0].targets[Synth::mod_fir_spread].base_value      = 12.0f;
+    instrument.layers[0].targets[Synth::mod_fir_slope].base_value       = 64.0f;
+    instrument.layers[0].targets[Synth::mod_pitch].envelope_desc_id     = 1; // projects the detached env node
+    instrument.layers[1].osc_type[0]                                    = Synth::WaveType::sine_wave;
+    instrument.layers[1].osc_type[1]                                    = Synth::WaveType::pulse_wave;
+    instrument.layers[1].osc_mode                                       = Synth::osc_mode_blend;
+    instrument.layers[1].mod_ratio                                      = 2.0f;
+    instrument.layers[1].fir_slope_percent                              = 37;
+    instrument.layers[1].fir_type                                       = Synth::fir_off;
+    instrument.layers[2].osc_type[0]                                    = Synth::WaveType::sine_wave;
+    instrument.layers[2].osc_type[1]                                    = Synth::WaveType::pulse_wave;
+    instrument.layers[2].osc_mode                                       = Synth::osc_mode_blend;
+    instrument.layers[2].mod_ratio                                      = 2.0f;
+    instrument.layers[2].fir_type                                       = Synth::fir_bandpass;
+    instrument.layers[2].targets[Synth::mod_fir_spread].base_value      = 3.0f;
+    instrument.layers[2].targets[Synth::mod_fir_slope].num_inputs       = 1;
+    instrument.layers[2].targets[Synth::mod_fir_slope].inputs[0].source = Synth::ModSource::velocity;
+    instrument.layers[2].targets[Synth::mod_fir_slope].inputs[0].op     = Synth::SourceOp::add;
+    instrument.layers[2].targets[Synth::mod_fir_slope].inputs[0].scale  = 1.0f;
+    for (uint32_t layer = 0; layer < instrument.layer_count; ++layer) {
+        instrument.layers[layer].targets[Synth::mod_fm_ratio].base_value = instrument.layers[layer].mod_ratio;
+    }
+
+    TEST(Sculptor::project_instrument_to_graph(instrument, model_bank, &graph, &mapping));
+    (void)graph.take_changes(discarded, Sculptor::max_pending_changes);
+    TEST(mapping.osc_nodes[0] != Sculptor::pool_no_slot);
+    const Sculptor::Node& osc = graph.node(mapping.osc_nodes[0]);
+
+    // The block is appended: 18 fixed rows plus one 12-slot block per
+    // target, pinned against the literal 162.
+    const uint32_t expected_slots =
+        Sculptor::osc_slot_count + Synth::num_mod_targets * Sculptor::osc_target_block_stride;
+    TEST(osc.slots.num_allocated == expected_slots);
+    TEST(expected_slots == 162);
+
+    // Slot 149 stays the FIR Slope row and becomes connectable.
+    TEST(Sculptor::osc_target_row_slot[Synth::mod_fir_slope] == 149);
+    TEST(Sculptor::osc_target_row(Synth::mod_fir_slope) == 149);
+    {
+        const Sculptor::Slot& row = osc.slots.entries[149];
+        TEST(row.connectable);
+        TEST(row.drop_menu);
+        TEST(strncmp(row.name, "FIR Slope", sizeof(row.name)) == 0);
+        TEST(row.property_type == Sculptor::PropertyType::integer);
+    }
+    // The block follows the row: the env dot at 150 and the source dots at
+    // 156/159, all twelve slots allocated.
+    TEST(Sculptor::osc_target_env_dot(Synth::mod_fir_slope) == 150);
+    TEST(Sculptor::osc_target_src_dot(Synth::mod_fir_slope, 0) == 156);
+    TEST(Sculptor::osc_target_src_dot(Synth::mod_fir_slope, 1) == 159);
+    {
+        const Sculptor::Slot& env_dot = osc.slots.entries[150];
+        TEST(env_dot.kind == Sculptor::SlotKind::input);
+        TEST(strncmp(env_dot.name, "Envelope", sizeof(env_dot.name)) == 0);
+        const Sculptor::Slot& src_a = osc.slots.entries[156];
+        TEST(src_a.kind == Sculptor::SlotKind::input);
+        TEST(strncmp(src_a.name, "Source A", sizeof(src_a.name)) == 0);
+        const Sculptor::Slot& src_b = osc.slots.entries[159];
+        TEST(src_b.kind == Sculptor::SlotKind::input);
+        TEST(strncmp(src_b.name, "Source B", sizeof(src_b.name)) == 0);
+    }
+    // No existing row shifted.
+    TEST(Sculptor::osc_target_row_slot[Synth::mod_volume] == 95);
+    TEST(Sculptor::osc_target_row_slot[Synth::mod_fir_spread] == 136);
+    // Literal budget pins: a future drift cannot pass silently.
+    TEST(Sculptor::max_nodes == 178);
+    TEST(Sculptor::max_node_slots == 163);
+
+    // Disabled state matches the filter-off predicate: the fir-off layer
+    // grays the whole 136..161 range; the band-pass layers keep every slot
+    // of the range active.
+    for (uint32_t s = 136; s <= 161; s++) {
+        TEST(Sculptor::oscillator_slot_waveform_mode_disabled(graph.node(mapping.osc_nodes[1]), s));
+        TEST(! Sculptor::oscillator_slot_waveform_mode_disabled(osc, s));
+        TEST(! Sculptor::oscillator_slot_waveform_mode_disabled(graph.node(mapping.osc_nodes[2]), s));
+    }
+
+    // Display: a routed base wins over the scalar; a wired base of zero
+    // clamps to 1 at the display boundary (the integer percent domain); a
+    // zeroed binding shows the scalar, even with the filter off.
+    TEST(osc.slots.entries[149].value.integer == 64);
+    TEST(graph.node(mapping.osc_nodes[2]).slots.entries[149].value.integer == 1);
+    TEST(graph.node(mapping.osc_nodes[1]).slots.entries[149].value.integer == 37);
+
+    // An envelope wired into the slope block's env dot compiles onto the
+    // slope binding; the wired row is the binding's base, so the routed
+    // base survives compilation and a wired base of zero clamps to 1.
+    const int32_t env_inst = find_detached_by_desc(mapping, 1, 1);
+    TEST(env_inst >= 0);
+    if (env_inst >= 0) {
+        const Sculptor::EndPoint env_out       = { mapping.detached[env_inst].node_idx, mapping.env_output_slot };
+        const Sculptor::EndPoint slope_env_dot = { mapping.osc_nodes[0],
+                                                   Sculptor::osc_target_env_dot(Synth::mod_fir_slope) };
+        TEST(Sculptor::osc_graph_validate(&mapping, graph, env_out, slope_env_dot));
+        TEST(graph.add_connection(env_out, slope_env_dot) != Sculptor::pool_no_slot);
+        static Synth::Instrument compiled;
+        TEST(Sculptor::compile_graph_to_instrument(graph, mapping, &compiled));
+        TEST(compiled.layers[0].targets[Synth::mod_fir_slope].envelope_desc_id == 1);
+        TEST(compiled.layers[0].targets[Synth::mod_fir_slope].base_value == 64.0f);
+        TEST(compiled.layers[2].targets[Synth::mod_fir_slope].base_value == 1.0f);
+    }
+
+    // Maximum population: seven layers with every target block fully wired
+    // hit the exact node, instance and connection budgets (equality, so an
+    // off-by-one in any budget assert fails here first).
+    {
+        static Synth::InstrumentBank     max_bank;
+        static Synth::Instrument         max_instrument;
+        static uint16_t                  env_ids[Synth::max_layers][Synth::num_mod_targets];
+        static uint16_t                  lfo_ids[Synth::max_layers][Synth::num_mod_targets];
+        static Sculptor::Graph           max_graph;
+        static Sculptor::OscGraphMapping max_mapping;
+        build_fir_slope_max_fixture(&max_bank, &max_instrument, env_ids, lfo_ids);
+        TEST(Sculptor::project_instrument_to_graph(max_instrument, max_bank, &max_graph, &max_mapping));
+        check_osc_graph_mapping(max_graph,
+                                max_mapping,
+                                Synth::max_layers,
+                                Synth::max_layers * Synth::num_mod_targets,
+                                Synth::max_layers * Synth::num_mod_targets);
+        TEST(max_mapping.detached_count == 2 * Synth::max_layers * Synth::num_mod_targets);
+        TEST(max_mapping.detached_count == 168);
+        TEST(max_mapping.detached_count <= Sculptor::max_osc_instances);
+        TEST(max_graph.connection_count() == 511);
+        TEST(max_graph.connection_count() <= Sculptor::max_connections);
+    }
+}
+
 // Source-inspection evidence for realtime_synth.cpp behavior the unit does not
 // link: the no-envelope release policy and the FM Ratio clamp, mirrored in the
 // tests above.  Not proof of the runtime behavior itself.
@@ -9565,7 +9810,7 @@ static void check_osc_pitch_gating()
         // The refused edit leaves the compiled bank at the last good value.
         TEST(source.bank.instruments.entries[0].layers[0].octave_offset == 12);
     }
-    // The FIR Slope row: the bounded integer slider at slot 124, seeded
+    // The FIR Slope row: the bounded integer slider at slot 149, seeded
     // from the bank field, round-tripping through the value_changed apply
     // path, and refusing out-of-range compile reads.
     {
@@ -9888,18 +10133,223 @@ static void check_fir_slope_helpers()
             fills++;
         }
         TEST(fills == 2);
-        { // param.window_span appears at exactly the two dispatch sites.
+        { // The two window_span dispatch fills; the staged spelling keeps
+            // exactly two member writes.
             uint32_t span_sites = 0;
-            for (const char* hit = strstr(src, "param.window_span"); hit; hit = strstr(hit + 1, "param.window_span")) {
+            for (const char* hit = strstr(src, ".window_span"); hit; hit = strstr(hit + 1, ".window_span")) {
                 span_sites++;
             }
             TEST(span_sites == 2);
         }
         TEST(strstr(src, "Synth::fir_effective_span(instance.params[2])") != nullptr);
-        TEST(strstr(src, "= layer.fir_slope_percent;") != nullptr);
-        TEST(strstr(src, "fir_slope_percent; // FIR window slope") != nullptr);
         TEST(strstr(src, "FIR Slope") == nullptr);
+        // The appended mod-target wiring, the per-step direct dest feed and
+        // the note-on seed rule; the runtime copies the slope value into the
+        // dest parameter every step, never a static percent member.
+        TEST(strstr(src, "{ mod_fir_slope, osc_fir_slope_dest }") != nullptr);
+        TEST(find_in_range(src, src + got, "osc_fir_slope_dest, osc_fir_slope_env, osc_fir_slope_lfo") != nullptr);
+        TEST(strstr(src, "osc_fir_slope_seed_value") != nullptr);
+        TEST(strstr(src, "fir_effective_span(osc.fir_slope)") != nullptr);
+        TEST(strstr(src, "slope_dest > 0.0f") == nullptr);
+        TEST(strstr(src, "fir_slope_percent;") == nullptr); // the dead per-note copy stays deleted
+        // The zero-active early return still comes first, the
+        // decision precedes the dispatch sequence, the snapshot refresh
+        // happens only on dispatch, the taps-cleared flag has exactly its
+        // two set sites with one inside the consumed-clear batch branch,
+        // and the staging bound keeps its formula.
+        {
+            const char* const early_return = strstr(src, "if (! num_active_filters)");
+            const char* const decision     = strstr(src, "fir_coeff_cache_action(");
+            const char* const refresh      = strstr(src, "fir_coeff_prev_count = num_active_filters");
+            TEST(early_return != nullptr);
+            TEST(decision != nullptr);
+            TEST(refresh != nullptr);
+            if (early_return && decision && refresh) {
+                const char* const staging = strstr(src, "stage_effect_fir_coeffs(");
+                TEST(staging != nullptr);
+                if (staging) {
+                    TEST(early_return < staging);
+                }
+                TEST(decision < refresh);
+            }
+            uint32_t cleared_sites = 0;
+            for (const char* hit = strstr(src, "fir_taps_cleared = true"); hit;
+                 hit             = strstr(hit + 1, "fir_taps_cleared = true")) {
+                cleared_sites++;
+            }
+            TEST(cleared_sites == 2);
+            const char* const clear_branch = strstr(src, "effect_clears.count");
+            TEST(clear_branch != nullptr);
+            TEST(clear_branch && strstr(clear_branch, "fir_taps_cleared = true") != nullptr);
+            TEST(strstr(src, "max_fir_coeff_entries") != nullptr);
+            TEST(strstr(src, "(Synth::max_oscillators - 1) + (Synth::max_channels + 1) * Synth::max_chain_effects") !=
+                 nullptr);
+        }
     }
+}
+
+// The FIR slope binding-presence rule, the shared seed
+// value, and the propagation-level proof that the note-on seed lives in the
+// plain descriptor base (a value-only seed would be clobbered by the first
+// propagate_parameters step).
+static void osc_fir_slope_seed_regressions()
+{
+    // Zeroed binding: no base, no inputs, no ids -> the scalar carries.
+    {
+        Synth::TargetBinding zeroed = {};
+        TEST(! Synth::osc_fir_slope_binding_present(zeroed));
+        TEST(Synth::osc_fir_slope_seed_value(zeroed, 37) == 37.0f);
+    }
+    // Present binding with a zero base: the routed base wins, never the
+    // scalar; the display and compile boundaries clamp it into 1..100.
+    {
+        Synth::TargetBinding routed_zero = {};
+        routed_zero.lfo_desc_id          = 1;
+        TEST(Synth::osc_fir_slope_binding_present(routed_zero));
+        TEST(Synth::osc_fir_slope_seed_value(routed_zero, 37) == 0.0f);
+    }
+    // A routed base overrides the scalar.
+    {
+        Synth::TargetBinding based = {};
+        based.base_value           = 50.0f;
+        TEST(Synth::osc_fir_slope_binding_present(based));
+        TEST(Synth::osc_fir_slope_seed_value(based, 100) == 50.0f);
+    }
+    // An out-of-domain routed base is invalid state (both JSON decoders
+    // refuse it); the helper passes it through untouched and the runtime
+    // span-side clamp is fir_effective_span's job (already tested).
+    {
+        Synth::TargetBinding negative = {};
+        negative.base_value           = -3.0f;
+        TEST(Synth::osc_fir_slope_seed_value(negative, 37) == -3.0f);
+    }
+    // Each presence carrier alone flips the predicate; depth/op/scale
+    // fields without a bound id or input do not.
+    {
+        Synth::TargetBinding carrier = {};
+        carrier.base_value           = 1.0f;
+        TEST(Synth::osc_fir_slope_binding_present(carrier));
+        carrier            = {};
+        carrier.num_inputs = 1;
+        TEST(Synth::osc_fir_slope_binding_present(carrier));
+        carrier                  = {};
+        carrier.envelope_desc_id = 1;
+        TEST(Synth::osc_fir_slope_binding_present(carrier));
+        carrier             = {};
+        carrier.lfo_desc_id = 1;
+        TEST(Synth::osc_fir_slope_binding_present(carrier));
+        carrier                   = {};
+        carrier.lfo_depth         = 0.5f;
+        carrier.lfo_op            = Synth::SourceOp::multiply;
+        carrier.lfo_rate_scale_ms = 10.0f;
+        TEST(! Synth::osc_fir_slope_binding_present(carrier));
+        TEST(Synth::osc_fir_slope_seed_value(carrier, 42) == 42.0f);
+    }
+    // The seed enters the plain descriptor base (base_value +
+    // base_extra at the configure_plain call), so every propagate step
+    // restarts from it and the legacy scalar survives indefinitely.
+    {
+        Synth::ParamDescriptor descs[3]  = {}; // 0 sentinel, 1 slope dest
+        Synth::Parameter       params[3] = {};
+        Synth::TargetBinding   zeroed    = {};
+        const float            extra     = Synth::osc_fir_slope_binding_present(zeroed) ? 0.0f : 37.0f;
+        TEST(extra == 37.0f);
+        Synth::configure_plain(&descs[1], zeroed.base_value + extra, 0, 0.0f, 0, Synth::SourceOp::add, nullptr, 0);
+        for (uint32_t step = 0; step < 3; step++) {
+            Synth::propagate_parameters(params, descs, 3);
+            TEST(approx(params[1].value, 37.0f, 1.0e-6f));
+        }
+        // Routed-zero companion: a present binding configures with zero
+        // extra, so the routed base 0 stays 0 and the scalar is never
+        // inherited.
+        Synth::TargetBinding routed = {};
+        routed.num_inputs           = 1;
+        routed.inputs[0].source     = Synth::ModSource::velocity;
+        routed.inputs[0].op         = Synth::SourceOp::add;
+        routed.inputs[0].scale      = 1.0f;
+        TEST(Synth::osc_fir_slope_binding_present(routed));
+        TEST(Synth::osc_fir_slope_seed_value(routed, 37) == 0.0f);
+        const Synth::SourceParam velocity_input = { 2, 1.0f, Synth::SourceOp::add };
+        Synth::configure_plain(&descs[1],
+                               routed.base_value + 0.0f,
+                               0,
+                               0.0f,
+                               0,
+                               Synth::SourceOp::add,
+                               &velocity_input,
+                               1);
+        params[2].value = 0.0f; // the routed input's onset value
+        for (uint32_t step = 0; step < 3; step++) {
+            Synth::propagate_parameters(params, descs, 3);
+            TEST(approx(params[1].value, 0.0f, 1.0e-6f));
+        }
+    }
+}
+
+// The pure FIR coefficient cache decision.  Entries are 4-word
+// records (taps_offs, highpass, lowpass, window_span); a prev_entry_count
+// of 0 means "no valid snapshot".
+static void fir_coeff_cache_action_regressions()
+{
+    uint32_t prev[8] = {};
+    uint32_t cur[8]  = {};
+    prev[0]          = 1000;
+    prev[1]          = 220;
+    prev[2]          = 880;
+    prev[3]          = 513;
+    prev[4]          = 2000;
+    prev[5]          = 330;
+    prev[6]          = 990;
+    prev[7]          = 257;
+    memcpy(cur, prev, sizeof(cur));
+
+    // Unchanged consecutive snapshots skip the dispatch.
+    TEST(Synth::fir_coeff_cache_action(prev, 2, cur, 2, false) == Synth::fir_coeff_skip);
+    // A changed cutoff word dispatches.
+    cur[2] = 900;
+    TEST(Synth::fir_coeff_cache_action(prev, 2, cur, 2, false) == Synth::fir_coeff_dispatch);
+    memcpy(cur, prev, sizeof(cur));
+    // A changed span word dispatches.
+    cur[3] = 103;
+    TEST(Synth::fir_coeff_cache_action(prev, 2, cur, 2, false) == Synth::fir_coeff_dispatch);
+    memcpy(cur, prev, sizeof(cur));
+    // A changed taps offset (active-set membership) dispatches.
+    cur[4] = 2100;
+    TEST(Synth::fir_coeff_cache_action(prev, 2, cur, 2, false) == Synth::fir_coeff_dispatch);
+    memcpy(cur, prev, sizeof(cur));
+    // A count change in either direction dispatches.
+    TEST(Synth::fir_coeff_cache_action(prev, 2, cur, 1, false) == Synth::fir_coeff_dispatch);
+    TEST(Synth::fir_coeff_cache_action(prev, 1, cur, 2, false) == Synth::fir_coeff_dispatch);
+    // Zero active filters invalidate the snapshot; no dispatch happens at
+    // the zero-active early return.
+    TEST(Synth::fir_coeff_cache_action(prev, 2, cur, 0, false) == Synth::fir_coeff_invalidate);
+    // The zero-to-any edge: an invalid snapshot dispatches.
+    TEST(Synth::fir_coeff_cache_action(prev, 0, cur, 2, false) == Synth::fir_coeff_dispatch);
+    // Effect-reset invalidation: cleared taps dispatch even when the words
+    // are identical.
+    TEST(Synth::fir_coeff_cache_action(prev, 2, cur, 2, true) == Synth::fir_coeff_dispatch);
+    // Cleared taps with no active filters still only invalidate.
+    TEST(Synth::fir_coeff_cache_action(prev, 2, cur, 0, true) == Synth::fir_coeff_invalidate);
+
+    // The same decision over the production record layout: four-member
+    // coefficient structs, compared bytewise (the runtime passes FIRCoeff
+    // arrays, never a reinterpreted word array).
+    struct CoeffRecord {
+        uint32_t taps_offs;
+        uint32_t highpass_cutoff_freq;
+        uint32_t lowpass_cutoff_freq;
+        uint32_t window_span;
+    };
+
+    static_assert(sizeof(CoeffRecord) == Synth::fir_coeff_entry_words * sizeof(uint32_t));
+    CoeffRecord rec_prev[2] = { { 1000, 220, 880, 513 }, { 2000, 330, 990, 257 } };
+    CoeffRecord rec_cur[2]  = { { 1000, 220, 880, 513 }, { 2000, 330, 990, 257 } };
+    TEST(Synth::fir_coeff_cache_action(rec_prev, 2, rec_cur, 2, false) == Synth::fir_coeff_skip);
+    rec_cur[1].window_span = 103;
+    TEST(Synth::fir_coeff_cache_action(rec_prev, 2, rec_cur, 2, false) == Synth::fir_coeff_dispatch);
+    rec_cur[1]           = rec_prev[1];
+    rec_cur[0].taps_offs = 2100;
+    TEST(Synth::fir_coeff_cache_action(rec_prev, 2, rec_cur, 2, false) == Synth::fir_coeff_dispatch);
 }
 
 // Host mirror of the FIR coefficient shader's binary32 arithmetic for one
@@ -10462,10 +10912,15 @@ static void check_fir_spread_helpers()
             schema_src[schema_got] = 0;
             TEST(strstr(schema_src,
                         "\"enum\": [\"volume\", \"pitch\", \"panning\", \"duty_a\", \"duty_b\", \"osc_mix\", "
-                        "\"fm_index\", \"fir_pitch_spread\", \"fm_ratio\", \"pad_tone_a\", \"pad_tone_b\"]") !=
-                 nullptr);
+                        "\"fm_index\", \"fir_pitch_spread\", \"fm_ratio\", \"pad_tone_a\", \"pad_tone_b\", "
+                        "\"fir_slope\"]") != nullptr);
             TEST(strstr(schema_src, "lowpass_cutoff") == nullptr);
             TEST(strstr(schema_src, "highpass_cutoff") == nullptr);
+            // Both generator-layout target enums admit the appended slope
+            // target, so a slope generator layout record is schema-valid.
+            const char* const layout_enum = strstr(schema_src, "\"enum\": [0, 1, 2, 7, 8, 11]");
+            TEST(layout_enum != nullptr);
+            TEST(layout_enum == nullptr || strstr(layout_enum + 1, "\"enum\": [0, 1, 2, 7, 8, 11]") != nullptr);
         }
     }
 }
@@ -12165,6 +12620,9 @@ int main()
     check_osc_pitch_gating();
     check_fir_spread_helpers();
     check_fir_slope_helpers();
+    osc_fir_slope_seed_regressions();
+    fir_coeff_cache_action_regressions();
+    osc_fir_slope_projection_regressions();
     check_fir_bandpass_gain();
 
     // pitch bend -> semitones: centered 14-bit value scaled by the bend range.
@@ -19338,7 +19796,7 @@ int main()
         }
 
         // Overfull implied node projection: the max fixture implies 66 nodes;
-        // 99 detached records push it past 164, 98 land exactly on 164.
+        // 113 detached records push it past 178, 112 land exactly on 178.
         static Synth::InstrumentBank       model_bank;
         static Synth::InstrumentEditorBank max_bank;
         static Synth::Instrument           instrument = {};
@@ -19351,12 +19809,12 @@ int main()
         max_bank.bank.instruments.entries[0]         = instrument;
         max_bank.bank.channel_zones[0][0].start_note = 1;
         max_bank.bank.channel_zones[0][0].instrument = 0;
-        build_detached_layouts_json(editor_json, sizeof(editor_json), 1, 99, 2, 1, 0, 0);
+        build_detached_layouts_json(editor_json, sizeof(editor_json), 1, 113, 2, 1, 0, 0);
         TEST(! decode_bank_with_editor_section(max_bank, editor_json, &restored));
-        build_detached_layouts_json(editor_json, sizeof(editor_json), 1, 98, 2, 1, 0, 0);
+        build_detached_layouts_json(editor_json, sizeof(editor_json), 1, 112, 2, 1, 0, 0);
         TEST(decode_bank_with_editor_section(max_bank, editor_json, &restored));
         // The accepted boundary fills the node pool exactly: the projection
-        // still succeeds at 66 + 98 = 164 nodes.
+        // still succeeds at 66 + 112 = 178 nodes.
         static Sculptor::Graph           boundary_graph;
         static Sculptor::OscGraphMapping boundary_mapping;
         TEST(Sculptor::project_editor_to_graph(restored, &boundary_graph, &boundary_mapping));
@@ -22014,9 +22472,10 @@ int main()
             TEST(! decode_with_slope_spelling("-1"));
             TEST(! decode_with_slope_spelling("50.5"));
             TEST(! decode_with_slope_spelling("1e2"));
+            TEST(! decode_with_slope_spelling("-4294967295"));
             // Both instrument domains reject every bad slope spelling at the
             // token level, before any binary32 narrowing.
-            const char* const slope_values[] = { "0", "101", "-1", "50.5", "1e2", "\"sine\"", "true" };
+            const char* const slope_values[] = { "0", "101", "-1", "50.5", "1e2", "-4294967295", "\"sine\"", "true" };
             for (const char* spelling : slope_values) {
                 char slope_doc[256];
                 TEST(snprintf(slope_doc,
@@ -22040,6 +22499,326 @@ int main()
                                                                     domain));
                     TEST(clipboard_sentinels_intact(&slope_decoded, &slope_sentinel));
                 }
+            }
+            // Slope routing round-trip: a fir_slope routing block decodes
+            // onto the 12th target and survives a second encode/decode
+            // pass in both editor dialects.
+            {
+                const char* const slope_routing_doc =
+                    "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\","
+                    "\"routing\":{\"fir_slope\":{\"base_value\":37,"
+                    "\"inputs\":[{\"source\":\"velocity\",\"op\":\"add\",\"scale\":1.0}]}}}]}";
+                static Synth::Instrument         routed_instr;
+                static Synth::EnvelopeDescriptor routed_envs[Synth::instrument_max_envelopes];
+                static Synth::LFODescriptor      routed_lfos[Synth::instrument_max_lfos];
+                uint32_t                         routed_env_count = 999;
+                uint32_t                         routed_lfo_count = 999;
+                TEST(Synth::decode_instrument_json(slope_routing_doc,
+                                                   static_cast<uint32_t>(strlen(slope_routing_doc)),
+                                                   &routed_instr,
+                                                   routed_envs,
+                                                   &routed_env_count,
+                                                   routed_lfos,
+                                                   &routed_lfo_count));
+                TEST(routed_instr.layers[0].targets[Synth::mod_fir_slope].base_value == 37.0f);
+                TEST(routed_instr.layers[0].targets[Synth::mod_fir_slope].num_inputs == 1);
+                TEST(routed_instr.layers[0].targets[Synth::mod_fir_slope].inputs[0].source ==
+                     Synth::ModSource::velocity);
+                TEST(routed_instr.layers[0].targets[Synth::mod_fir_slope].inputs[0].op == Synth::SourceOp::add);
+                TEST(routed_instr.layers[0].targets[Synth::mod_fir_slope].inputs[0].scale == 1.0f);
+
+                static Synth::InstrumentEditorBank routed_source;
+                build_named_fm_fixture(&routed_source);
+                routed_source.bank.instruments.entries[0].layers[0].targets[Synth::mod_fir_slope] =
+                    routed_instr.layers[0].targets[Synth::mod_fir_slope];
+                for (const Synth::InstrumentJsonDomain domain : both_domains) {
+                    TEST(Sculptor::encode_editor_instrument_json(routed_source, 0, 0, text, sizeof(text), domain) != 0);
+                    fill_clipboard_sentinels(&slope_decoded);
+                    fill_clipboard_sentinels(&slope_sentinel);
+                    TEST(Synth::decode_instrument_json_for_domain(text,
+                                                                  static_cast<uint32_t>(strlen(text)),
+                                                                  &slope_decoded.instr,
+                                                                  slope_decoded.envs,
+                                                                  &slope_decoded.env_count,
+                                                                  slope_decoded.lfos,
+                                                                  &slope_decoded.lfo_count,
+                                                                  slope_decoded.layout,
+                                                                  max_portable_records,
+                                                                  &slope_decoded.layout_count,
+                                                                  domain));
+                    TEST(slope_decoded.instr.layers[0].targets[Synth::mod_fir_slope].base_value == 37.0f);
+                    TEST(slope_decoded.instr.layers[0].targets[Synth::mod_fir_slope].num_inputs == 1);
+                    TEST(slope_decoded.instr.layers[0].targets[Synth::mod_fir_slope].inputs[0].source ==
+                         Synth::ModSource::velocity);
+                    TEST(slope_decoded.instr.layers[0].targets[Synth::mod_fir_slope].inputs[0].op ==
+                         Synth::SourceOp::add);
+                    TEST(slope_decoded.instr.layers[0].targets[Synth::mod_fir_slope].inputs[0].scale == 1.0f);
+                }
+            }
+            // The slope base is an integer percent 1..100 in both dialects:
+            // out-of-range and fractional spellings are invalid state, so the
+            // encoder can never emit a base its decoder rejects.
+            {
+                static Synth::InstrumentEditorBank bad_bank;
+                const char* const                  bad_bases[] = { "0", "101", "-1", "37.5", "1e2", "-4294967295" };
+                for (const char* bad : bad_bases) {
+                    char bad_doc[384];
+                    // Document dialect target block.
+                    TEST(snprintf(bad_doc,
+                                  sizeof(bad_doc),
+                                  "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\","
+                                  "\"fir_slope\":{\"base\":%s,\"sources\":[{\"source\":\"velocity\"}]}}]}",
+                                  bad) > 0);
+                    for (const Synth::InstrumentJsonDomain domain : both_domains) {
+                        fill_clipboard_sentinels(&slope_decoded);
+                        fill_clipboard_sentinels(&slope_sentinel);
+                        TEST(! Synth::decode_instrument_json_for_domain(bad_doc,
+                                                                        static_cast<uint32_t>(strlen(bad_doc)),
+                                                                        &slope_decoded.instr,
+                                                                        slope_decoded.envs,
+                                                                        &slope_decoded.env_count,
+                                                                        slope_decoded.lfos,
+                                                                        &slope_decoded.lfo_count,
+                                                                        slope_decoded.layout,
+                                                                        max_portable_records,
+                                                                        &slope_decoded.layout_count,
+                                                                        domain));
+                        TEST(clipboard_sentinels_intact(&slope_decoded, &slope_sentinel));
+                    }
+                    // Document dialect bank-style routing alias.
+                    TEST(snprintf(bad_doc,
+                                  sizeof(bad_doc),
+                                  "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\","
+                                  "\"routing\":{\"fir_slope\":{\"base_value\":%s}}}]}",
+                                  bad) > 0);
+                    for (const Synth::InstrumentJsonDomain domain : both_domains) {
+                        fill_clipboard_sentinels(&slope_decoded);
+                        fill_clipboard_sentinels(&slope_sentinel);
+                        TEST(! Synth::decode_instrument_json_for_domain(bad_doc,
+                                                                        static_cast<uint32_t>(strlen(bad_doc)),
+                                                                        &slope_decoded.instr,
+                                                                        slope_decoded.envs,
+                                                                        &slope_decoded.env_count,
+                                                                        slope_decoded.lfos,
+                                                                        &slope_decoded.lfo_count,
+                                                                        slope_decoded.layout,
+                                                                        max_portable_records,
+                                                                        &slope_decoded.layout_count,
+                                                                        domain));
+                        TEST(clipboard_sentinels_intact(&slope_decoded, &slope_sentinel));
+                    }
+                    // Saved-bank dialect: the same fixture with a valid base
+                    // decodes, proving the rejections below fail on the slope
+                    // grammar rather than on malformed JSON.
+                    {
+                        static Synth::InstrumentEditorBank good_bank;
+                        char                               good_doc[384];
+                        TEST(snprintf(good_doc,
+                                      sizeof(good_doc),
+                                      "{\"instrument_editor_bank\":{\"instruments\":"
+                                      "[{\"layer_count\":1,\"layers\":[{\"wave_a\":\"sine\","
+                                      "\"routing\":{\"fir_slope\":{\"base_value\":37}}}]}],"
+                                      "\"channels\":[{},{},{},{\"zones\":[{\"start\":0,\"instrument\":0}]}]}}") > 0);
+                        memset(static_cast<void*>(&good_bank), 0, sizeof(good_bank));
+                        TEST(Synth::decode_editor_bank_json(good_doc,
+                                                            static_cast<uint32_t>(strlen(good_doc)),
+                                                            &good_bank));
+                        TEST(good_bank.bank.instruments.entries[0].layers[0].targets[Synth::mod_fir_slope].base_value ==
+                             37.0f);
+                        TEST(good_bank.bank.instruments.entries[0].layers[0].targets[Synth::mod_fir_slope].num_inputs ==
+                             0);
+                    }
+                    TEST(snprintf(bad_doc,
+                                  sizeof(bad_doc),
+                                  "{\"instrument_editor_bank\":{\"instruments\":"
+                                  "[{\"layer_count\":1,\"layers\":[{\"wave_a\":\"sine\","
+                                  "\"routing\":{\"fir_slope\":{\"base_value\":%s}}}]}],"
+                                  "\"channels\":[{},{},{},{\"zones\":[{\"start\":0,\"instrument\":0}]}]}}",
+                                  bad) > 0);
+                    memset(static_cast<void*>(&bad_bank), 0, sizeof(bad_bank));
+                    TEST(! Synth::decode_editor_bank_json(bad_doc, static_cast<uint32_t>(strlen(bad_doc)), &bad_bank));
+                }
+            }
+            // A binding carrying only dormant generator fields (no base, no
+            // inputs, no bound descriptor) is not routed: the scalar key
+            // survives the save/reload round-trip unchanged.
+            {
+                static Synth::InstrumentEditorBank dormant_source;
+                build_named_fm_fixture(&dormant_source);
+                dormant_source.bank.instruments.entries[0].layers[0].fir_slope_percent                       = 37;
+                dormant_source.bank.instruments.entries[0].layers[0].targets[Synth::mod_fir_slope].lfo_depth = 0.5f;
+                for (const Synth::InstrumentJsonDomain domain : both_domains) {
+                    const uint32_t dormant_len =
+                        Sculptor::encode_editor_instrument_json(dormant_source, 0, 0, text, sizeof(text), domain);
+                    TEST(dormant_len != 0 && dormant_len < sizeof(text));
+                    text[dormant_len] = '\0'; // the encoder returns a length, it does not terminate
+                    TEST(strstr(text, "\"fir_slope\":37") != nullptr);
+                    TEST(strstr(text, "\"routing\":{\"fir_slope\"") == nullptr);
+                    if (domain == Synth::InstrumentJsonDomain::clipboard) {
+                        // The clipboard layer object has no generators section, so
+                        // the only fir_slope key is the scalar.
+                        TEST(strstr(text, "\"fir_slope\":{") == nullptr);
+                    }
+                    fill_clipboard_sentinels(&slope_decoded);
+                    fill_clipboard_sentinels(&slope_sentinel);
+                    TEST(Synth::decode_instrument_json_for_domain(text,
+                                                                  static_cast<uint32_t>(strlen(text)),
+                                                                  &slope_decoded.instr,
+                                                                  slope_decoded.envs,
+                                                                  &slope_decoded.env_count,
+                                                                  slope_decoded.lfos,
+                                                                  &slope_decoded.lfo_count,
+                                                                  slope_decoded.layout,
+                                                                  max_portable_records,
+                                                                  &slope_decoded.layout_count,
+                                                                  domain));
+                    TEST(slope_decoded.instr.layers[0].fir_slope_percent == 37);
+                    TEST(slope_decoded.instr.layers[0].targets[Synth::mod_fir_slope].base_value == 0.0f);
+                    TEST(slope_decoded.instr.layers[0].targets[Synth::mod_fir_slope].num_inputs == 0);
+                    TEST(slope_decoded.instr.layers[0].targets[Synth::mod_fir_slope].lfo_desc_id == 0);
+                }
+            }
+            // Old banks: a scalar slope with no routing key decodes with
+            // the 12th target zeroed and the scalar preserved.
+            {
+                static Synth::Instrument         legacy_instr;
+                static Synth::EnvelopeDescriptor legacy_envs[Synth::instrument_max_envelopes];
+                static Synth::LFODescriptor      legacy_lfos[Synth::instrument_max_lfos];
+                uint32_t                         legacy_env_count = 999;
+                uint32_t                         legacy_lfo_count = 999;
+                const char* const                legacy_slope_doc =
+                    "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\",\"fir_slope\":37}]}";
+                TEST(Synth::decode_instrument_json(legacy_slope_doc,
+                                                   static_cast<uint32_t>(strlen(legacy_slope_doc)),
+                                                   &legacy_instr,
+                                                   legacy_envs,
+                                                   &legacy_env_count,
+                                                   legacy_lfos,
+                                                   &legacy_lfo_count));
+                TEST(legacy_instr.layers[0].fir_slope_percent == 37);
+                TEST(legacy_instr.layers[0].targets[Synth::mod_fir_slope].base_value == 0.0f);
+                TEST(legacy_instr.layers[0].targets[Synth::mod_fir_slope].num_inputs == 0);
+                TEST(legacy_instr.layers[0].targets[Synth::mod_fir_slope].envelope_desc_id == 0);
+                TEST(legacy_instr.layers[0].targets[Synth::mod_fir_slope].lfo_desc_id == 0);
+                // The same legacy shape through the saved-bank codec.
+                const char* const legacy_bank_doc =
+                    "{\"instrument_editor_bank\":{\"instruments\":"
+                    "[{\"layer_count\":1,\"layers\":[{\"wave_a\":\"sine\",\"fir_slope\":37,"
+                    "\"routing\":{}}]}],"
+                    "\"channels\":[{},{},{},{\"zones\":[{\"start\":0,\"instrument\":0}]}]}}";
+                static Synth::InstrumentEditorBank legacy_bank;
+                memset(static_cast<void*>(&legacy_bank), 0, sizeof(legacy_bank));
+                TEST(Synth::decode_editor_bank_json(legacy_bank_doc,
+                                                    static_cast<uint32_t>(strlen(legacy_bank_doc)),
+                                                    &legacy_bank));
+                TEST(legacy_bank.bank.instruments.entries[0].layers[0].fir_slope_percent == 37);
+                TEST(legacy_bank.bank.instruments.entries[0].layers[0].targets[Synth::mod_fir_slope].base_value ==
+                     0.0f);
+                TEST(legacy_bank.bank.instruments.entries[0].layers[0].targets[Synth::mod_fir_slope].num_inputs == 0);
+            }
+            // A schema-conformant document may state a routed slope block
+            // without a base (the decode default 0): decode, clipboard-encode
+            // and decode again reproduce the base-0 binding exactly, so the
+            // encoder never emits a base its own decoder rejects.
+            {
+                const char* const sources_only_doc =
+                    "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\","
+                    "\"fir_slope\":{\"sources\":[{\"source\":\"velocity\"}]}}]}";
+                static Synth::Instrument         sources_instr;
+                static Synth::EnvelopeDescriptor sources_envs[Synth::instrument_max_envelopes];
+                static Synth::LFODescriptor      sources_lfos[Synth::instrument_max_lfos];
+                uint32_t                         sources_env_count = 999;
+                uint32_t                         sources_lfo_count = 999;
+                TEST(Synth::decode_instrument_json(sources_only_doc,
+                                                   static_cast<uint32_t>(strlen(sources_only_doc)),
+                                                   &sources_instr,
+                                                   sources_envs,
+                                                   &sources_env_count,
+                                                   sources_lfos,
+                                                   &sources_lfo_count));
+                TEST(sources_instr.layers[0].targets[Synth::mod_fir_slope].base_value == 0.0f);
+                TEST(sources_instr.layers[0].targets[Synth::mod_fir_slope].num_inputs == 1);
+                TEST(sources_instr.layers[0].targets[Synth::mod_fir_slope].inputs[0].source ==
+                     Synth::ModSource::velocity);
+                slope_source.bank.instruments.entries[0].layers[0] = sources_instr.layers[0];
+                const uint32_t sources_len =
+                    Sculptor::encode_editor_instrument_json(slope_source,
+                                                            0,
+                                                            0,
+                                                            text,
+                                                            sizeof(text),
+                                                            Synth::InstrumentJsonDomain::clipboard);
+                TEST(sources_len != 0 && sources_len < sizeof(text));
+                text[sources_len] = '\0'; // the encoder returns a length, it does not terminate
+                // The clipboard slope block states its sources but no base.
+                TEST(strstr(text, "\"fir_slope\":{\"sources\"") != nullptr);
+                for (const Synth::InstrumentJsonDomain domain : both_domains) {
+                    fill_clipboard_sentinels(&slope_decoded);
+                    fill_clipboard_sentinels(&slope_sentinel);
+                    TEST(Synth::decode_instrument_json_for_domain(text,
+                                                                  static_cast<uint32_t>(strlen(text)),
+                                                                  &slope_decoded.instr,
+                                                                  slope_decoded.envs,
+                                                                  &slope_decoded.env_count,
+                                                                  slope_decoded.lfos,
+                                                                  &slope_decoded.lfo_count,
+                                                                  slope_decoded.layout,
+                                                                  max_portable_records,
+                                                                  &slope_decoded.layout_count,
+                                                                  domain));
+                    TEST(slope_decoded.instr.layers[0].targets[Synth::mod_fir_slope].base_value == 0.0f);
+                    TEST(slope_decoded.instr.layers[0].targets[Synth::mod_fir_slope].num_inputs == 1);
+                    TEST(slope_decoded.instr.layers[0].targets[Synth::mod_fir_slope].inputs[0].source ==
+                         Synth::ModSource::velocity);
+                }
+            }
+            // The published schema's generator-layout target enums admit the
+            // slope target: a slope-bound generator layout record decodes
+            // with its target preserved.
+            {
+                const char* const slope_layout_doc =
+                    "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\"}],"
+                    "\"graph_layout\":[{\"kind\":1,\"x\":0,\"y\":0,\"width\":0,\"height\":0,"
+                    "\"layer\":0,\"target\":11}]}";
+                for (const Synth::InstrumentJsonDomain domain : both_domains) {
+                    fill_clipboard_sentinels(&slope_decoded);
+                    fill_clipboard_sentinels(&slope_sentinel);
+                    TEST(Synth::decode_instrument_json_for_domain(slope_layout_doc,
+                                                                  static_cast<uint32_t>(strlen(slope_layout_doc)),
+                                                                  &slope_decoded.instr,
+                                                                  slope_decoded.envs,
+                                                                  &slope_decoded.env_count,
+                                                                  slope_decoded.lfos,
+                                                                  &slope_decoded.lfo_count,
+                                                                  slope_decoded.layout,
+                                                                  max_portable_records,
+                                                                  &slope_decoded.layout_count,
+                                                                  domain));
+                    TEST(slope_decoded.layout_count == 1);
+                    TEST(slope_decoded.layout[0].kind == 1);
+                    TEST(slope_decoded.layout[0].target == 11);
+                }
+            }
+            // Default omission: a zeroed binding with the scalar default
+            // emits no fir_slope keys in either dialect.
+            {
+                static Synth::InstrumentEditorBank default_source;
+                build_named_fm_fixture(&default_source);
+                default_source.bank.instruments.entries[0].layers[0].fir_slope_percent = 100;
+                TEST(Sculptor::encode_editor_instrument_json(default_source,
+                                                             0,
+                                                             0,
+                                                             text,
+                                                             sizeof(text),
+                                                             Synth::InstrumentJsonDomain::clipboard) != 0);
+                TEST(strstr(text, "fir_slope") == nullptr);
+                TEST(Sculptor::encode_editor_instrument_json(default_source,
+                                                             0,
+                                                             0,
+                                                             text,
+                                                             sizeof(text),
+                                                             Synth::InstrumentJsonDomain::validated_bank) != 0);
+                TEST(strstr(text, "fir_slope") == nullptr);
             }
         }
 
@@ -23873,8 +24652,8 @@ int main()
             mf_bank.channel_zones[0][0].start_note = 1;
             mf_bank.channel_zones[0][0].instrument = static_cast<uint8_t>(mf_slot);
             TEST(Synth::validate_instrument_bank(&mf_bank));
-            TEST(mf_bank.envelopes.num_allocated == 77);
-            TEST(mf_bank.lfos.num_allocated == 77);
+            TEST(mf_bank.envelopes.num_allocated == 84);
+            TEST(mf_bank.lfos.num_allocated == 84);
             TEST(mf_count == max_portable_records);
 
             const uint32_t mf_len =
@@ -23911,8 +24690,8 @@ int main()
             fill_clipboard_sentinels(&mf_dec);
             TEST(decode_clipboard(&mf_dec, mf_text, max_portable_records));
             TEST(mf_dec.layout_count == max_portable_records);
-            TEST(mf_dec.env_count == 77);
-            TEST(mf_dec.lfo_count == 77);
+            TEST(mf_dec.env_count == 84);
+            TEST(mf_dec.lfo_count == 84);
             TEST(mf_dec.instr.layer_count == Synth::max_layers);
 
             uint32_t mf_mapped_count = max_portable_records;

@@ -607,7 +607,7 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
                 for (uint32_t rail_level = 1; rail_level < line.child_level; ++rail_level) {
                     bool rail_needed = false;
                     for (uint32_t next_line = line_idx + 1; next_line < num_lines; ++next_line) {
-                        if (!lines[next_line].child_row) {
+                        if (! lines[next_line].child_row) {
                             break;
                         }
                         if (lines[next_line].child_level == rail_level) {
@@ -618,7 +618,7 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
                             break;
                         }
                     }
-                    if (!rail_needed) {
+                    if (! rail_needed) {
                         continue;
                     }
                     const float rail_x =

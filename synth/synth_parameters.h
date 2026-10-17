@@ -235,6 +235,27 @@ void oscillator_fir_band_guard(uint32_t* lowpass_cutoff_freq, uint32_t* highpass
 // band center).  Monotonically non-decreasing in the slope.
 uint32_t fir_effective_span(float slope_percent);
 
+// What to do with the cached FIR coefficient param block this step.
+enum FirCoeffCacheAction {
+    fir_coeff_skip,       // The previously dispatched coefficients still match: no dispatch.
+    fir_coeff_dispatch,   // Build and dispatch a fresh coefficient computation.
+    fir_coeff_invalidate, // No active filters: drop the snapshot, dispatch nothing.
+};
+
+// Words per FIRCoeff entry: taps_offs, highpass, lowpass, window_span (four uint32_t members,
+// no padding, so a byte compare over the entry covers every member).
+constexpr uint32_t fir_coeff_entry_words = 4;
+
+// Decide what to do with the FIR coefficient cache this step.  prev_entries and cur_entries point
+// at fir_coeff_entry_words-word entries (the FIRCoeff param records, compared bytewise);
+// prev_entry_count 0 means "no valid snapshot".  taps_cleared is set when effect-state clears or
+// live RESET fills ran this step (they may have zeroed FIR coefficient taps).
+FirCoeffCacheAction fir_coeff_cache_action(const void* prev_entries,
+                                           uint32_t    prev_entry_count,
+                                           const void* cur_entries,
+                                           uint32_t    cur_entry_count,
+                                           bool        taps_cleared);
+
 // Converts a MIDI pitch-bend value to pitch offset in semitones
 // - centered_bend   - 0 = no bend, range [-8192, 8191]
 // - range_semttones - output pitch offset range, in semitones, scaled so full

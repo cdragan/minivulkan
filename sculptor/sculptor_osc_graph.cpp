@@ -98,14 +98,14 @@ char                        clipboard_destination_name[Synth::max_name_len];
 static_assert(static_cast<uint32_t>(Synth::mod_panning) == 2);
 static_assert(static_cast<uint32_t>(Synth::mod_duty0) == 3);
 static_assert(static_cast<uint32_t>(Synth::mod_fm_index) == 6);
-static_assert(Synth::num_mod_targets == 11);
+static_assert(Synth::num_mod_targets == 12);
 static_assert(static_cast<uint32_t>(Synth::mod_fm_ratio) == 8);
 static_assert(static_cast<uint32_t>(Synth::mod_pad_tilt0) == 9);
 static_assert(Synth::max_mod_inputs == 2);
 
-const char* const target_names[Synth::num_mod_targets] = { "volume",   "pitch",        "panning",   "Duty A",
-                                                           "Duty B",   "Waveform Mix", "FM Depth",  "Band spread",
-                                                           "FM Ratio", "Pad Tone A",   "Pad Tone B" };
+const char* const target_names[Synth::num_mod_targets] = { "volume",   "pitch",        "panning",    "Duty A",
+                                                           "Duty B",   "Waveform Mix", "FM Depth",   "Band spread",
+                                                           "FM Ratio", "Pad Tone A",   "Pad Tone B", "FIR Slope" };
 const char* const wave_names[6]                        = { "off", "sine", "saw", "pulse", "noise", "pad" };
 const char* const osc_mode_names[4] = { "blend", "frequency modulation", "hard sync", "ring modulation" };
 const char* const filter_type_names[Synth::num_filter_types] = { "off", "bandpass", "lowpass", "highpass" };
@@ -147,13 +147,15 @@ const char* const fir_spread_names[Synth::num_filter_types] = { "Filter Off",
 // 121 pitch (per-layer base value)
 // 122..133 pitch's 12-slot modulation block
 // 134 octave offset (per oscillator, [-12, +12] whole octaves)
-// 136 filter type (per oscillator, list)
+// 135 filter type (per oscillator, list)
 // 136 fir pitch spread (per-layer base value; band-pass: [0, 36] semitones, low-pass/high-pass: cutoff in Hz)
-// 138..149 fir pitch spread's 12-slot modulation block
-// 149 fir slope (per oscillator, [1, 100] percent)
-// Every target value row (2, 15, 29, 42, 56, 69, 82, 95, 108, 121, 137) is
-// connectable: all eleven targets are uniformly modulate-able, so each
-// row's 12-slot block follows its value row (see the block helpers in
+// 137..148 fir pitch spread's 12-slot modulation block
+// 149 fir slope (per-layer effective slope, integer percent; the unrouted
+//     display is the layer's fir_slope scalar, per the shared seed rule)
+// 150..161 fir slope's 12-slot modulation block
+// Every target value row (2, 15, 29, 42, 56, 69, 82, 95, 108, 121, 136,
+// 149) is connectable: all twelve targets are uniformly modulate-able, so
+// each row's 12-slot block follows its value row (see the block helpers in
 // sculptor_osc_graph.h); block field 0 is the envelope dot, so it
 // renders on the line under the row the block attaches to, and field 1
 // is the envelope depth's nested row.
@@ -180,6 +182,7 @@ constexpr Sculptor::OscTargetView osc_target_views[Synth::num_mod_targets] = {
     { Synth::osc_mod_ratio_min, Synth::osc_mod_ratio_max, 1.0f, false }, // fm ratio
     { -1.0f, 1.0f, 1.0f, false },                                        // pad tone a
     { -1.0f, 1.0f, 1.0f, false },                                        // pad tone b
+    { 1.0f, 100.0f, 1.0f, false },                                       // fir slope (percent)
 };
 
 // Low-pass and high-pass cutoff slider.  The editor writes a zero cutoff (edge off)
@@ -256,8 +259,10 @@ bool Sculptor::oscillator_slot_waveform_mode_disabled(const Sculptor::Node& node
     const uint32_t fir_type = node.slots.entries[osc_fir_type_prop].value.list_index;
     if (fir_type == static_cast<uint32_t>(Synth::fir_off)) {
         const uint32_t spread = osc_target_row_slot[static_cast<uint32_t>(Synth::mod_fir_spread)];
-        if ((slot_idx >= spread && slot_idx < osc_fir_slope_prop) || slot_idx == osc_fir_slope_prop) {
-            return true; // the cutoff row, its block and the slope are unused with the filter off
+        const uint32_t slope_end =
+            osc_target_row_slot[static_cast<uint32_t>(Synth::mod_fir_slope)] + osc_target_block_stride;
+        if (slot_idx >= spread && slot_idx <= slope_end) {
+            return true; // the cutoff row, its block, the slope row and its block are unused with the filter off
         }
     }
     return false;
@@ -789,9 +794,20 @@ static void project_osc_node(Sculptor::Graph*           graph,
                                               true,
                                               osc.fir_type));
     append_target_block(graph, node, Synth::mod_fir_spread, osc.targets[Synth::mod_fir_spread], 2);
-    Sculptor::Slot fir_slope_slot = Sculptor::bounded_int_slot("FIR Slope", osc.fir_slope_percent, 1, 100);
-    fir_slope_slot.child_row      = true;
+    // The FIR Slope row stays an integer-percent slot: it displays the effective slope (the routed
+    // base when the binding is present, the layer's fir_slope scalar otherwise, per the shared
+    // seed rule the runtime note-on uses), clamped to 1..100 before the integer cast.  Compile
+    // reads a wired row back into the binding base; an unwired layer keeps its zeroed binding and
+    // the scalar carries the value.
+    const float slope_seed = Synth::osc_fir_slope_seed_value(osc.targets[Synth::mod_fir_slope], osc.fir_slope_percent);
+    const float slope_display = slope_seed < 1.0f ? 1.0f : slope_seed > 100.0f ? 100.0f : slope_seed;
+    Sculptor::Slot fir_slope_slot =
+        Sculptor::bounded_int_slot("FIR Slope", static_cast<int32_t>(slope_display + 0.5f), 1, 100);
+    fir_slope_slot.child_row   = true;
+    fir_slope_slot.connectable = true;
+    fir_slope_slot.drop_menu   = true;
     graph->add_slot(node, fir_slope_slot);
+    append_target_block(graph, node, Synth::mod_fir_slope, osc.targets[Synth::mod_fir_slope], 2);
 }
 
 // Node construction shared by the derived projection and record-driven
@@ -1464,10 +1480,27 @@ static bool read_oscillator_layer(const Sculptor::Graph&           graph,
     }
     osc.octave_offset   = static_cast<int8_t>(octave);
     const int32_t slope = slots[osc_fir_slope_prop].value.integer;
-    if (slope < 1 || slope > 100) {
+    // The FIR Slope row displays the effective slope: the routed base when the slope binding is
+    // wired, the fir_slope scalar otherwise; both are integer percents 1..100.  An unwired
+    // out-of-range row is a corrupt scalar and refuses like the octave guard; a wired row supplies
+    // the binding's base and also refreshes the dormant scalar.
+    const bool slope_wired =
+        connection_into(graph,
+                        mapping.osc_nodes[layer],
+                        osc_target_env_dot(static_cast<uint32_t>(Synth::mod_fir_slope))) != pool_no_slot ||
+        connection_into(graph,
+                        mapping.osc_nodes[layer],
+                        osc_target_lfo_dot(static_cast<uint32_t>(Synth::mod_fir_slope))) != pool_no_slot ||
+        connection_into(graph,
+                        mapping.osc_nodes[layer],
+                        osc_target_src_dot(static_cast<uint32_t>(Synth::mod_fir_slope), 0)) != pool_no_slot ||
+        connection_into(graph,
+                        mapping.osc_nodes[layer],
+                        osc_target_src_dot(static_cast<uint32_t>(Synth::mod_fir_slope), 1)) != pool_no_slot;
+    if (! slope_wired && (slope < 1 || slope > 100)) {
         return false;
     }
-    osc.fir_slope_percent = static_cast<uint8_t>(slope);
+    osc.fir_slope_percent = static_cast<uint8_t>(slope < 1 ? 1 : slope > 100 ? 100 : slope);
 
     if (! read_list_prop(slots[osc_fir_type_prop], &index)) {
         return false;
@@ -1476,14 +1509,25 @@ static bool read_oscillator_layer(const Sculptor::Graph&           graph,
 
     for (uint32_t t = 0; t < Synth::num_mod_targets; ++t) {
         const Synth::ModTarget target = static_cast<Synth::ModTarget>(t);
-        // Each layer owns its cell: the base value always comes from the
-        // layer's own row (display units scaled to bank units); the
-        // block rows wired to it contribute the modulators only.  A
-        // family dot with no wire leaves the family's fields dormant
-        // (they compile to zero), so rewiring rebinds without
-        // re-projection.
+        // Each layer owns its cell: the base value comes from the layer's
+        // own row (display units scaled to bank units), except the FIR
+        // slope, whose wired base is the integer-percent row itself and
+        // whose unwired binding stays zeroed; the block rows wired to a
+        // target contribute the modulators only.  A family dot with no
+        // wire leaves the family's fields dormant (they compile to
+        // zero), so rewiring rebinds without re-projection.
         Synth::TargetBinding gen = {};
-        gen.base_value           = slots[osc_target_prop(target)].value.real * osc_target_views[t].bank_scale;
+        if (target == Synth::mod_fir_slope) {
+            // While wired, the row is the binding's base: the routed base is the row's integer
+            // percent, already clamped into fir_slope_percent above.  An unwired layer keeps its
+            // zeroed binding; the scalar refreshed above carries the value.
+            if (slope_wired) {
+                gen.base_value = osc.fir_slope_percent;
+            }
+        }
+        else {
+            gen.base_value = slots[osc_target_prop(target)].value.real * osc_target_views[t].bank_scale;
+        }
         if (target == Synth::mod_fir_spread) {
             gen.base_value = fir_spread_bank_value(osc.fir_type, gen.base_value);
         }

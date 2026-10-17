@@ -482,6 +482,42 @@ uint32_t Synth::fir_effective_span(const float slope_percent)
     return odd < num_fir_taps ? odd : num_fir_taps;
 }
 
+Synth::FirCoeffCacheAction Synth::fir_coeff_cache_action(const void*    prev_entries,
+                                                         const uint32_t prev_entry_count,
+                                                         const void*    cur_entries,
+                                                         const uint32_t cur_entry_count,
+                                                         const bool     taps_cleared)
+{
+    // Zero active filters: no dispatch, and the retained snapshot must not survive an inactive
+    // step (the next activation dispatches regardless of what the bytes say).
+    if (! cur_entry_count) {
+        return fir_coeff_invalidate;
+    }
+    // The taps content was zeroed by effect-state clears or RESET fills this step, so it is not
+    // what the retained snapshot describes; this also covers reactivation after a cleared gap.
+    if (taps_cleared) {
+        return fir_coeff_dispatch;
+    }
+    // First dispatch, or reactivation after an invalidated step.
+    if (! prev_entry_count) {
+        return fir_coeff_dispatch;
+    }
+    // The active set's size changed.
+    if (prev_entry_count != cur_entry_count) {
+        return fir_coeff_dispatch;
+    }
+    // Bytewise compare over every entry, including taps_offs (the active-set membership carrier).
+    const uint32_t bytes = cur_entry_count * fir_coeff_entry_words * static_cast<uint32_t>(sizeof(uint32_t));
+    const uint8_t* prev  = static_cast<const uint8_t*>(prev_entries);
+    const uint8_t* cur   = static_cast<const uint8_t*>(cur_entries);
+    for (uint32_t i = 0; i < bytes; i++) {
+        if (prev[i] != cur[i]) {
+            return fir_coeff_dispatch;
+        }
+    }
+    return fir_coeff_skip;
+}
+
 float Synth::eval_sourced_lfo(const ParamDescriptor::LFOParam& gen,
                               const float                      depth_source_value,
                               const float                      rate_source_value,

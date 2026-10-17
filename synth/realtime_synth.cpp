@@ -177,10 +177,13 @@ enum OscParamRole : uint32_t {
     osc_pad_tilt1_dest,
     osc_pad_tilt1_env,
     osc_pad_tilt1_lfo,
+    osc_fir_slope_dest,
+    osc_fir_slope_env,
+    osc_fir_slope_lfo,
     num_osc_roles
 };
 
-static_assert(num_osc_roles == 33);
+static_assert(num_osc_roles == 36);
 
 constexpr uint32_t channel_block_base = 1;
 constexpr uint32_t voice_block_base   = channel_block_base + Synth::max_channels * num_channel_roles;
@@ -220,7 +223,7 @@ constexpr ModTargetNode mod_target_nodes[] = {
     { mod_pitch, osc_pitch_dest },         { mod_volume, osc_volume_dest },       { mod_fir_spread, osc_spread_dest },
     { mod_panning, osc_panning_dest },     { mod_duty0, osc_duty0_dest },         { mod_duty1, osc_duty1_dest },
     { mod_osc_mix, osc_mix_dest },         { mod_fm_index, osc_fm_index_dest },   { mod_fm_ratio, osc_fm_ratio_dest },
-    { mod_pad_tilt0, osc_pad_tilt0_dest }, { mod_pad_tilt1, osc_pad_tilt1_dest },
+    { mod_pad_tilt0, osc_pad_tilt0_dest }, { mod_pad_tilt1, osc_pad_tilt1_dest }, { mod_fir_slope, osc_fir_slope_dest },
 };
 static_assert(sizeof(mod_target_nodes) / sizeof(mod_target_nodes[0]) == Synth::num_mod_targets,
               "mod target table must cover every ModTarget");
@@ -482,7 +485,6 @@ struct RunningOscillator {
     float             mod_ratio;       // FM: modulator/carrier freq ratio.  Hard sync: slave cycles per master cycle
     int8_t            octave_offset;   // Whole-octave pitch shift: 12 * octave_offset semitones are added to the pitch
                                        // (instrument constant for this note's layer)
-    uint8_t           fir_slope_percent; // FIR window slope percent 1..100; 100 = the full tap span (sharpest)
     Synth::FilterType fir_type; // Band-pass: spread in semitones.  Low-pass/high-pass: spread is a fixed cutoff in Hz
 
     // Current phase state
@@ -501,6 +503,7 @@ struct RunningOscillator {
                        // note + octave offset + pitch offset/skews + the modulated pitch target value
     float spread;      // FIR Pitch Spread in semitones, from the spread target's dest
                        // node; <= 0 means the oscillator's FIR is off
+    float fir_slope;   // FIR window slope percent, from the slope target's dest node
     float duty[2];     // Duty cycle for sawtooth and pulse oscillator (0..1)
     float pad_tilt[2]; // Pad spectral tilt; harmonic exponent is 1 + clamp(tilt, -1, 1).
     float osc_mix;     // Mix between osc_type[0] and osc_type[1] (0..1)
@@ -616,6 +619,21 @@ enum class ActiveRingFormat : uint8_t {
 };
 
 std::atomic<ActiveRingFormat> active_ring_format{ ActiveRingFormat::none };
+
+// FIR coefficient staging and snapshot: the per-step param block is built into the staging array,
+// compared against the last dispatched snapshot and only re-dispatched when the active filter set,
+// any coefficient input or the taps content changed.  The snapshot records the last dispatched
+// inputs and is refreshed only on dispatch; the GPU taps are written by the coefficient dispatch
+// and may be zeroed by effect-state clears or live off->on RESET fills, whose hooks set
+// fir_taps_cleared in the same step, before the decision.
+constexpr uint32_t max_fir_coeff_entries =
+    (Synth::max_oscillators - 1) + (Synth::max_channels + 1) * Synth::max_chain_effects;
+static_assert(sizeof(ShaderParams::FIRCoeff) == Synth::fir_coeff_entry_words * sizeof(uint32_t));
+static_assert(max_fir_coeff_entries * sizeof(ShaderParams::FIRCoeff) <= ShaderParams::max_param_range);
+ShaderParams::FIRCoeff fir_coeff_stage[max_fir_coeff_entries];
+ShaderParams::FIRCoeff fir_coeff_prev[max_fir_coeff_entries];
+uint32_t               fir_coeff_prev_count = 0; // 0 = no valid snapshot
+bool                   fir_taps_cleared     = false;
 
 } // namespace
 
@@ -1331,7 +1349,6 @@ static void process_note_on(uint32_t delta_samples, const DispatchedMidiEvent& e
         osc.osc_mode            = layer.osc_mode;
         osc.mod_ratio           = layer.mod_ratio;
         osc.octave_offset       = layer.octave_offset;
-        osc.fir_slope_percent   = layer.fir_slope_percent;
         osc.fir_type            = layer.fir_type;
         // The per-note pitch skew rides on the pitch target: it joins the
         // binding's base value in the dest parameter's initial state.
@@ -1354,6 +1371,18 @@ static void process_note_on(uint32_t delta_samples, const DispatchedMidiEvent& e
         // Expand each modulation target into its node triple at this oscillator's slot.
         const uint32_t osc_slot = voice.osc_ids[layer_idx];
         for (const ModTargetNode& node : mod_target_nodes) {
+            float base_extra = node.target == Synth::mod_pitch ? note_skew + layer_skew : 0.0f;
+            if (node.target == Synth::mod_fir_slope) {
+                // Legacy scalar inheritance: an unrouted (zeroed) slope binding starts from the
+                // layer's fir_slope scalar, a routed one from its own base.  The seed enters the
+                // plain descriptor base (configure_plain writes base_value + base_extra), not the
+                // running parameter value: propagation restarts the dest from the descriptor base
+                // every step, so a value-only seed would be clobbered and the legacy slope would
+                // collapse to the 11-tap floor.
+                base_extra =
+                    Synth::osc_fir_slope_seed_value(layer.targets[Synth::mod_fir_slope], layer.fir_slope_percent) -
+                    layer.targets[Synth::mod_fir_slope].base_value;
+            }
             configure_target_modulation(instrument,
                                         node.target,
                                         node.dest_role,
@@ -1361,7 +1390,7 @@ static void process_note_on(uint32_t delta_samples, const DispatchedMidiEvent& e
                                         channel,
                                         voice_idx,
                                         layer_idx,
-                                        node.target == Synth::mod_pitch ? note_skew + layer_skew : 0.0f);
+                                        base_extra);
         }
 
         // Trigger-time gate: the oscillator only sounds when its final
@@ -1669,6 +1698,10 @@ static void apply_effects(const EffectTarget* targets, uint32_t num_targets)
     }
 }
 
+// FIR coefficient staging and snapshot live in the file's anonymous
+// namespace above; compute_fir_coefficients builds, compares and dispatches
+// the block.
+
 // Copies each modulated effect param's current graph value into the param float the effect shader
 // reads (and compute_fir_coefficients reads for the FIR effect).  Unmodulated params (src_param_id
 // 0) keep their constant value.  Also evaluates the enable decision for every instance and
@@ -1709,6 +1742,9 @@ static void pull_effect_param_chain(EffectChain* chain, bool* reset_barrier_need
                             instance.state_offs,
                             Synth::get_effect_state_bytes(instance.type),
                             0); // data
+            // A FIR effect's coefficient taps live at the head of this state range, so the fill
+            // may have zeroed them; the coefficient snapshot must not survive it.
+            fir_taps_cleared = true;
         }
         instance.enabled = live_enabled;
 
@@ -1887,6 +1923,10 @@ static void update_modulation()
         osc.mod_ratio          = ratio_dest < Synth::osc_mod_ratio_min   ? Synth::osc_mod_ratio_min
                                  : ratio_dest > Synth::osc_mod_ratio_max ? Synth::osc_mod_ratio_max
                                                                          : ratio_dest;
+        // The slope feeds the span clamp directly: a routed modulation overdriven through zero
+        // continues smoothly into fir_effective_span's 11-tap floor instead of jumping back to the
+        // note-on scalar's span.
+        osc.fir_slope = parameters[osc_param(osc_idx, osc_fir_slope_dest)].value;
 
         bool free_now = osc.terminating;
         if (! free_now && (voice.note_finished || (voice.releasing && volume_termination_due(osc_idx)) ||
@@ -1939,23 +1979,6 @@ static uint32_t cutoff_hz_to_int(float value)
     return static_cast<uint32_t>(value + 0.5f);
 }
 
-static void set_effect_fir_coeffs(const EffectChain& chain, uint32_t* cur_param_offs)
-{
-    for (uint32_t effect_idx = 0; effect_idx < chain.num_effects; effect_idx++) {
-        const EffectInstance& instance = chain.effects[effect_idx];
-        if (! instance.enabled || instance.type != Synth::EffectType::fir) {
-            continue;
-        }
-
-        ShaderParams::FIRCoeff& param = get_param<ShaderParams::FIRCoeff>(*cur_param_offs);
-        param.taps_offs               = instance.state_offs / 4;
-        param.lowpass_cutoff_freq     = cutoff_hz_to_int(instance.params[0]);
-        param.highpass_cutoff_freq    = cutoff_hz_to_int(instance.params[1]);
-        param.window_span             = Synth::fir_effective_span(instance.params[2]);
-        *cur_param_offs += static_cast<uint32_t>(sizeof(ShaderParams::FIRCoeff));
-    }
-}
-
 static uint32_t count_effect_fir(const EffectChain& chain)
 {
     uint32_t count = 0;
@@ -1984,23 +2007,30 @@ static void compute_fir_coefficients()
     }
     num_active_filters += count_effect_fir(master_chain);
 
+    // Read-and-clear the zeroing flag before the decision: the clear and RESET hooks above ran
+    // earlier in this step.
+    const bool taps_cleared = fir_taps_cleared;
+    fir_taps_cleared        = false;
+
     if (! num_active_filters) {
+        // No dispatch with zero active filters; the retained snapshot must not survive an inactive
+        // step, so the next activation dispatches regardless of what the bytes say.
+        fir_coeff_prev_count = 0;
         return;
     }
 
-    const uint32_t param_size = num_active_filters * static_cast<uint32_t>(sizeof(ShaderParams::FIRCoeff));
-    const uint32_t param_offs = static_cast<uint32_t>(param_allocator.allocate(param_size, synth_alignment).offset);
-
-    uint32_t cur_param_offs = param_offs;
+    // Build the staging block in a deterministic order (oscillators, channel chains, master), so
+    // the staged-entry count matches num_active_filters (the cutoff-skip condition matches the
+    // count condition).
+    uint32_t staged = 0;
     for (uint32_t osc_idx = 1; osc_idx < Synth::max_oscillators; osc_idx++) {
         const RunningOscillator& osc = oscillators[osc_idx];
         if (osc.osc_type[0] == WaveType::no_wave || ! osc.fir_taps_offs) {
             continue;
         }
 
-        ShaderParams::FIRCoeff& param       = get_param<ShaderParams::FIRCoeff>(cur_param_offs);
-        float                   lowpass_hz  = 0.0f;
-        float                   highpass_hz = 0.0f;
+        float lowpass_hz  = 0.0f;
+        float highpass_hz = 0.0f;
         if (! Synth::oscillator_fir_cutoffs(osc.pitch,
                                             osc.spread,
                                             osc.freq_mult,
@@ -2014,17 +2044,50 @@ static void compute_fir_coefficients()
         if (osc.fir_type == Synth::fir_bandpass) {         // A single-edge type keeps its zero edge.
             Synth::oscillator_fir_band_guard(&lowpass, &highpass);
         }
-        param.taps_offs            = osc.fir_taps_offs / 4;
-        param.lowpass_cutoff_freq  = lowpass;
-        param.highpass_cutoff_freq = highpass;
-        param.window_span          = Synth::fir_effective_span(static_cast<float>(osc.fir_slope_percent));
-        cur_param_offs += static_cast<uint32_t>(sizeof(ShaderParams::FIRCoeff));
+        ShaderParams::FIRCoeff& param = fir_coeff_stage[staged++];
+        param.taps_offs               = osc.fir_taps_offs / 4;
+        param.lowpass_cutoff_freq     = lowpass;
+        param.highpass_cutoff_freq    = highpass;
+        param.window_span             = Synth::fir_effective_span(osc.fir_slope);
     }
 
+    // Stages one effect chain's FIR entries into the staging array, after the oscillator entries.
+    auto stage_effect_fir_coeffs = [](const EffectChain& chain, uint32_t* cur_entry) {
+        for (uint32_t effect_idx = 0; effect_idx < chain.num_effects; effect_idx++) {
+            const EffectInstance& instance = chain.effects[effect_idx];
+            if (! instance.enabled || instance.type != Synth::EffectType::fir) {
+                continue;
+            }
+
+            ShaderParams::FIRCoeff& param = fir_coeff_stage[(*cur_entry)++];
+            param.taps_offs               = instance.state_offs / 4;
+            param.lowpass_cutoff_freq     = cutoff_hz_to_int(instance.params[0]);
+            param.highpass_cutoff_freq    = cutoff_hz_to_int(instance.params[1]);
+            param.window_span             = Synth::fir_effective_span(instance.params[2]);
+        }
+    };
     for (uint32_t chan_idx = 0; chan_idx < max_mix_channels; chan_idx++) {
-        set_effect_fir_coeffs(channel_chains[chan_idx], &cur_param_offs);
+        stage_effect_fir_coeffs(channel_chains[chan_idx], &staged);
     }
-    set_effect_fir_coeffs(master_chain, &cur_param_offs);
+    stage_effect_fir_coeffs(master_chain, &staged);
+    assert(staged == num_active_filters);
+
+    // Skip the dispatch when the previous computation already produced these coefficients and the
+    // taps are intact; dispatch otherwise.
+    if (Synth::fir_coeff_cache_action(fir_coeff_prev,
+                                      fir_coeff_prev_count,
+                                      fir_coeff_stage,
+                                      num_active_filters,
+                                      taps_cleared) == Synth::fir_coeff_skip) {
+        return;
+    }
+
+    const uint32_t param_size = num_active_filters * static_cast<uint32_t>(sizeof(ShaderParams::FIRCoeff));
+    const uint32_t param_offs = static_cast<uint32_t>(param_allocator.allocate(param_size, synth_alignment).offset);
+
+    // The staging array is copied synchronously into the allocated parameter-buffer region before
+    // dispatch: the GPU descriptors reference the parameter buffer, never this reusable array.
+    memcpy(buffers[param_buf].get_ptr<uint8_t>(param_offs), fir_coeff_stage, param_size);
 
     memory_barrier(VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
 
@@ -2045,6 +2108,11 @@ static void compute_fir_coefficients()
                        &sampling_freq);       // pValues
 
     vkCmdDispatch(audio_cmd_buf, num_active_filters, 1, 1);
+
+    // The snapshot now describes what this dispatch computes; refresh it only here, never on a
+    // skipped step.
+    memcpy(fir_coeff_prev, fir_coeff_stage, param_size);
+    fir_coeff_prev_count = num_active_filters;
 }
 
 static void render_audio_step()
@@ -2076,6 +2144,9 @@ static void render_audio_step()
                             effect_clears.ranges[range_idx].bytes,
                             0); // data
         }
+        // Conservative: any consumed clear batch may have zeroed FIR coefficient taps, so the
+        // snapshot is invalid even when the staged coefficients compare equal.
+        fir_taps_cleared = true;
     }
 
     process_events(start_samples, end_samples);

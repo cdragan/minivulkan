@@ -32,7 +32,7 @@
 		},
 		"graph_layout": {
 			"type": "array",
-			"maxItems": 163,
+			"maxItems": 177,
 			"uniqueItems": true,
 			"description": "Optional portable positions and sizes of nodes derived from this instrument; no effects, wiring or missing-sum state.  Canonical 0 is input, 1 is sum, 2+n is oscillator layer n, which must exist.  Generator locators use layer and fixed numeric ModTarget; descriptor aliases resolve after the whole document parses and may have only one saved record.  Unresolved or duplicate resolved nodes are refused.  All numbers must be finite; sizes are nonnegative.  Newly encoded documents always include this array.",
 			"items": {
@@ -102,13 +102,7 @@
 							},
 							"target": {
 								"type": "integer",
-								"enum": [
-									0,
-									1,
-									2,
-									7,
-									8
-								]
+								"enum": [0, 1, 2, 7, 8, 11]
 							}
 						},
 						"required": [
@@ -150,13 +144,7 @@
 							},
 							"target": {
 								"type": "integer",
-								"enum": [
-									0,
-									1,
-									2,
-									7,
-									8
-								]
+								"enum": [0, 1, 2, 7, 8, 11]
 							},
 							"depth_source": {
 								"type": "integer",
@@ -203,8 +191,8 @@
 		},
 		"mod_target": {
 			"type": "string",
-			"enum": ["volume", "pitch", "panning", "duty_a", "duty_b", "osc_mix", "fm_index", "fir_pitch_spread", "fm_ratio", "pad_tone_a", "pad_tone_b"],
-			"description": "Modulated quantities. Units: volume, panning (0.5 = center), duty_a/duty_b, osc_mix and fm_index (1.0 = full depth) are 0..1; pitch is -24..24 semitones; fir_pitch_spread depends on the layer fir_type: bandpass = spread in semitones 0..36 around the note pitch; lowpass and highpass = fixed cutoff in Hz 0..22050 with no key tracking; 0 means the oscillator's filter is bypassed; fm_ratio is the ratio, slider-bounded 0.125..8 (0 stays bank-legal as the legacy unset carrier value). Only 'volume' defaults to 1.0 and 'panning' to 0.5, fm_ratio inherits the layer's legacy mod_ratio when its block is absent, and every other base defaults to 0. pad_tone_a/pad_tone_b is the per-oscillator pad spectral tilt in -1..+1: the harmonic exponent is 1 + value (0 = saw-like 1/n spectrum, +1 = mellow 1/n^2, -1 = flat/brightest), inert for non-pad waves."
+			"enum": ["volume", "pitch", "panning", "duty_a", "duty_b", "osc_mix", "fm_index", "fir_pitch_spread", "fm_ratio", "pad_tone_a", "pad_tone_b", "fir_slope"],
+			"description": "Modulated quantities. Units: volume, panning (0.5 = center), duty_a/duty_b, osc_mix and fm_index (1.0 = full depth) are 0..1; pitch is -24..24 semitones; fir_pitch_spread depends on the layer fir_type: bandpass = spread in semitones 0..36 around the note pitch; lowpass and highpass = fixed cutoff in Hz 0..22050 with no key tracking; 0 means the oscillator's filter is bypassed; fm_ratio is the ratio, slider-bounded 0.125..8 (0 stays bank-legal as the legacy unset carrier value). Only 'volume' defaults to 1.0 and 'panning' to 0.5, fm_ratio inherits the layer's legacy mod_ratio when its block is absent, and every other base defaults to 0. pad_tone_a/pad_tone_b is the per-oscillator pad spectral tilt in -1..+1: the harmonic exponent is 1 + value (0 = saw-like 1/n spectrum, +1 = mellow 1/n^2, -1 = flat/brightest), inert for non-pad waves. fir_slope is the FIR window slope as an integer percent 1..100; an unrouted layer carries it in the layer's fir_slope scalar, a routed one in the target block's base."
 		},
 		"mod_source": {
 			"type": "string",
@@ -240,13 +228,19 @@
 					"default": 0,
 					"description": "Whole-octave pitch shift; 12 * octave_offset semitones are added to the oscillator pitch."
 				},
-"fir_slope": {
-					"type": "integer",
-					"minimum": 1,
-					"maximum": 100,
-					"default": 100,
-					"description": "FIR window slope percent; 100 is the sharpest response (the full 1025-tap window), lower values widen the transition band. The window span grows exponentially with the percent: 11 taps at 1, 1025 taps at 100."
-				},
+			"fir_slope": {
+				"oneOf": [
+					{
+						"type": "integer",
+						"minimum": 1,
+						"maximum": 100,
+						"default": 100,
+						"description": "FIR window slope percent; 100 is the sharpest response (the full 1025-tap window), lower values widen the transition band. The window span grows exponentially with the percent: 11 taps at 1, 1025 taps at 100. Only present while the layer's fir_slope target is unrouted; a routed layer states the target block instead and the scalar re-decodes to the default 100."
+					},
+					{ "$ref": "#/definitions/target_block" }
+				],
+				"description": "FIR window slope: the integer percent scalar when the layer's fir_slope target is unrouted, or that target's block (its base is the integer percent 1..100, see mod_target) when it is routed. The two forms never appear together in one layer object."
+			},
 				"fir_type": {
 					"type": "string",
 					"enum": ["off", "bandpass", "lowpass", "highpass"],
@@ -263,9 +257,37 @@
 				"fir_pitch_spread": { "$ref": "#/definitions/target_block" },
 				"fm_ratio": { "$ref": "#/definitions/target_block" },
 				"pad_tone_a": { "$ref": "#/definitions/target_block" },
-				"pad_tone_b": { "$ref": "#/definitions/target_block" }
+				"pad_tone_b": { "$ref": "#/definitions/target_block" },
+				"routing": {
+					"type": "object",
+					"description": "Bank-style routing alias: keyed by mod_target name, each value a bank routing block. Accepted so a routing block can share a layer with the fir_slope scalar key; documents written by the encoder never include it.",
+					"additionalProperties": { "$ref": "#/definitions/bank_routing_block" }
+				}
 			},
 			"required": ["wave_a"],
+			"additionalProperties": false
+		},
+		"bank_routing_block": {
+			"type": "object",
+			"description": "The saved-bank spelling of one target's routing: base_value in the target's units (for fir_slope, an integer percent 1..100) and up to two MIDI inputs.",
+			"properties": {
+				"base_value": { "type": "number" },
+				"inputs": {
+					"type": "array",
+					"maxItems": 2,
+					"items": {
+						"type": "object",
+						"properties": {
+							"source": { "$ref": "#/definitions/mod_source" },
+							"op": { "$ref": "#/definitions/source_op" },
+							"cc_number": { "type": "integer" },
+							"scale": { "type": "number" }
+						},
+						"required": ["source"],
+						"additionalProperties": false
+					}
+				}
+			},
 			"additionalProperties": false
 		},
 		"target_block": {

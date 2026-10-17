@@ -311,8 +311,8 @@ constexpr uint32_t    num_param_kinds                   = 4;
 constexpr const char* param_kind_names[num_param_kinds] = { "external", "envelope", "lfo", "plain" };
 
 constexpr const char* mod_target_names[Synth::num_mod_targets] = {
-    "volume",           "pitch",    "panning",    "duty_a",    "duty_b", "osc_mix", "fm_index",
-    "fir_pitch_spread", "fm_ratio", "pad_tone_a", "pad_tone_b"
+    "volume",           "pitch",    "panning",    "duty_a",     "duty_b",   "osc_mix", "fm_index",
+    "fir_pitch_spread", "fm_ratio", "pad_tone_a", "pad_tone_b", "fir_slope"
 };
 
 static_assert(static_cast<uint32_t>(Synth::WaveType::pad_wave) == num_waves - 1);
@@ -1719,12 +1719,34 @@ static void want_int(Walker& w, uint32_t i, int32_t min_value, int32_t max_value
         w.failed = true;
         return;
     }
+    // An int32 magnitude has at most 10 digits; longer spellings would make
+    // the digit walk's own per-step bound check wrap, so refuse them first.
+    if (len - pos > 10) {
+        w.failed = true;
+        return;
+    }
 
-    const uint32_t magnitude_limit = negative ? static_cast<uint32_t>(-min_value) : static_cast<uint32_t>(max_value);
-    uint32_t       magnitude       = 0;
+    uint32_t magnitude_limit;
+    if (! negative) {
+        magnitude_limit = static_cast<uint32_t>(max_value);
+    }
+    else if (min_value >= 0) {
+        // A nonnegative minimum admits no negative spelling: a zero magnitude
+        // limit rejects every negative token at the digit walk (only "-0"
+        // decodes, as zero, for the caller's own range check to judge).
+        magnitude_limit = 0;
+    }
+    else {
+        // The minimum's magnitude as unsigned arithmetic: -(min_value + 1) + 1
+        // stays inside int32 for every minimum, including INT32_MIN.
+        magnitude_limit = static_cast<uint32_t>(-(min_value + 1)) + 1;
+    }
+    uint32_t magnitude = 0;
     want_bounded_magnitude(w, s + pos, len - pos, magnitude_limit, &magnitude);
     if (! w.failed) {
-        *out = negative ? -static_cast<int32_t>(magnitude) : static_cast<int32_t>(magnitude);
+        // The negation goes through unsigned arithmetic so the INT32_MIN
+        // magnitude stays defined.
+        *out = negative ? static_cast<int32_t>(0u - magnitude) : static_cast<int32_t>(magnitude);
     }
 }
 
@@ -1964,14 +1986,26 @@ static void decode_routing(Walker&               w,
     walk_object(w, obj, [&](uint32_t key_idx, uint32_t val_idx) {
         if (key_eq(w, key_idx, "base_value")) {
             // The spread base is slider-bounded (semitones or Hz by filter type),
-            // validated before the binary32 narrowing; every other target keeps
-            // the generic free-level parsing.
+            // validated before the binary32 narrowing; the FIR slope base is an
+            // integer percent 1..100 like the layer scalar; every other target
+            // keeps the generic free-level parsing.
             if (target == Synth::mod_fir_spread)
                 want_bounded_real(w,
                                   val_idx,
                                   0.0,
                                   static_cast<double>(Sculptor::osc_target_view(target, fir_type).max_value),
                                   &routing.base_value);
+            else if (target == Synth::mod_fir_slope) {
+                int32_t base_int = 0;
+                want_int(w, val_idx, 1, 100, &base_int);
+                // want_int rejects negative spellings and out-of-range
+                // magnitudes outright; this explicit range check stays as
+                // defense in depth.
+                if (base_int < 1 || base_int > 100)
+                    w.failed = true;
+                else
+                    routing.base_value = static_cast<float>(base_int);
+            }
             else
                 want_float(w, val_idx, &routing.base_value);
         }
@@ -1982,6 +2016,31 @@ static void decode_routing(Walker&               w,
             });
         else
             unknown_field(w, key_idx);
+    });
+}
+
+// The name-keyed routing dispatch shared by the saved-bank decoder and the
+// document decoder's "routing" alias: each key names a target, an explicit
+// fm_ratio block stays authoritative (monotonic tracking), and the target's
+// routing block decodes straight into the caller's oscillator.  Only the
+// unknown-field policy differs between the callers.
+static void decode_routing_object(Walker&            w,
+                                  uint32_t           val_idx,
+                                  Synth::FilterType  fir_type,
+                                  Synth::Oscillator& osc,
+                                  bool&              fm_ratio_routed,
+                                  void (*unknown_target)(Walker&, uint32_t))
+{
+    walk_object(w, val_idx, [&](uint32_t r_key, uint32_t r_val) {
+        for (uint32_t t = 0; t < Synth::num_mod_targets; t++) {
+            if (key_eq(w, r_key, mod_target_names[t])) {
+                if (t == static_cast<uint32_t>(Synth::mod_fm_ratio))
+                    fm_ratio_routed = true;
+                decode_routing(w, r_val, static_cast<Synth::ModTarget>(t), fir_type, osc.targets[t]);
+                return;
+            }
+        }
+        unknown_target(w, r_key);
     });
 }
 
@@ -2039,17 +2098,7 @@ static void decode_oscillator(Walker& w, uint32_t obj, Synth::Oscillator& osc)
             // This layer's own routing decodes straight into its bindings; a
             // target the object omits keeps the zeroed binding (fm_ratio is
             // backfilled from the scalar below when no block names it).
-            walk_object(w, val_idx, [&](uint32_t r_key, uint32_t r_val) {
-                for (uint32_t t = 0; t < Synth::num_mod_targets; t++) {
-                    if (key_eq(w, r_key, mod_target_names[t])) {
-                        if (t == static_cast<uint32_t>(Synth::mod_fm_ratio))
-                            fm_ratio_routed = true;
-                        decode_routing(w, r_val, static_cast<Synth::ModTarget>(t), fir_type, osc.targets[t]);
-                        return;
-                    }
-                }
-                unknown_field(w, r_key);
-            });
+            decode_routing_object(w, val_idx, fir_type, osc, fm_ratio_routed, unknown_field);
         else
             unknown_field(w, key_idx);
     });
@@ -2058,8 +2107,8 @@ static void decode_oscillator(Walker& w, uint32_t obj, Synth::Oscillator& osc)
         return;
 
     osc.octave_offset = static_cast<int8_t>(octave_offset);
-    // want_int rejects out-of-range magnitudes outright; a negative spelling
-    // whose magnitude fits the maximum still needs this explicit range check.
+    // want_int rejects negative spellings and out-of-range magnitudes
+    // outright; this explicit range check stays as defense in depth.
     if (fir_slope < 1 || fir_slope > 100) {
         w.failed = true;
     }
@@ -2417,8 +2466,9 @@ static void decode_fir_slope(Walker& w, uint32_t params_token, Synth::EffectSlot
                 have_base     = true;
                 int32_t slope = 0;
                 want_int(w, val_idx, 1, 100, &slope);
-                // want_int rejects out-of-range magnitudes outright; a negative
-                // spelling whose magnitude fits the maximum still needs this check.
+                // want_int rejects negative spellings and out-of-range
+                // magnitudes outright; this explicit range check stays as
+                // defense in depth.
                 if (! w.failed && (slope < 1 || slope > 100)) {
                     w.failed = true;
                 }
@@ -3417,10 +3467,22 @@ static void decode_target_doc(Walker&             w,
     walk_object(w, obj, [&](uint32_t key_idx, uint32_t val_idx) {
         if (key_eq(w, key_idx, "base")) {
             // The spread base is slider-bounded (semitones or Hz by filter type),
-            // validated before the binary32 narrowing; every other target keeps
-            // the generic free-level parsing.
+            // validated before the binary32 narrowing; the FIR slope base is an
+            // integer percent 1..100 like the layer scalar; every other target
+            // keeps the generic free-level parsing.
             if (target == Synth::mod_fir_spread)
                 want_bounded_real(w, val_idx, 0.0, static_cast<double>(view.max_value), &base);
+            else if (target == Synth::mod_fir_slope) {
+                int32_t base_int = 0;
+                want_int(w, val_idx, 1, 100, &base_int);
+                // want_int rejects negative spellings and out-of-range
+                // magnitudes outright; this explicit range check stays as
+                // defense in depth.
+                if (base_int < 1 || base_int > 100)
+                    w.failed = true;
+                else
+                    base = static_cast<float>(base_int);
+            }
             else
                 want_float(w, val_idx, &base);
             base_set = true;
@@ -3515,8 +3577,17 @@ static void decode_layer_doc(Walker&                     w,
             want_float(w, val_idx, &pitch_offset);
         else if (key_eq(w, key_idx, "octave_offset"))
             want_int(w, val_idx, Sculptor::osc_octave_offset_min, Sculptor::osc_octave_offset_max, &octave_offset);
-        else if (key_eq(w, key_idx, "fir_slope"))
-            want_int(w, val_idx, 1, 100, &fir_slope);
+        else if (key_eq(w, key_idx, "fir_slope")) {
+            // The FIR Slope target block shares the layer scalar's key: the token
+            // kind disambiguates (an object is the routing block, a number the
+            // legacy scalar).
+            if (w.toks[val_idx].type == JSMN_OBJECT) {
+                decode_target_doc(w, val_idx, Synth::mod_fir_slope, fir_type, osc, doc);
+            }
+            else {
+                want_int(w, val_idx, 1, 100, &fir_slope);
+            }
+        }
         else if (key_eq(w, key_idx, "fir_type")) {
             // Read by prescan_fir_type before the target blocks.
         }
@@ -3531,6 +3602,11 @@ static void decode_layer_doc(Walker&                     w,
                 if (target == static_cast<uint32_t>(Synth::mod_fm_ratio))
                     fm_ratio_set = true;
                 decode_target_doc(w, val_idx, static_cast<Synth::ModTarget>(target), fir_type, osc, doc);
+            }
+            else if (key_eq(w, key_idx, "routing")) {
+                // Bank-style routing object, accepted as a portable alias so a routing block can
+                // share a layer with the fir_slope scalar key without colliding.
+                decode_routing_object(w, val_idx, fir_type, osc, fm_ratio_set, doc_unknown_field);
             }
             else if (key_eq(w, key_idx, "lowpass_cutoff") || key_eq(w, key_idx, "highpass_cutoff")) {
                 // Removed cutoff targets: old clipboard/library documents
@@ -3579,8 +3655,8 @@ static void decode_layer_doc(Walker&                     w,
                                                             pitch_view.min_value,
                                                             pitch_view.max_value);
     osc.octave_offset                        = static_cast<int8_t>(octave_offset);
-    // want_int rejects out-of-range magnitudes outright; a negative spelling
-    // whose magnitude fits the maximum still needs this explicit range check.
+    // want_int rejects negative spellings and out-of-range magnitudes
+    // outright; this explicit range check stays as defense in depth.
     if (fir_slope < 1 || fir_slope > 100) {
         w.failed = true;
     }
@@ -4188,13 +4264,29 @@ static uint32_t encode_instrument_json_for_domain(char*                         
         o.float_value(osc.mod_ratio);
         o.key("octave_offset");
         o.float_value(static_cast<float>(osc.octave_offset));
-        o.key("fir_slope");
-        o.uint_value(osc.fir_slope_percent);
+        // The FIR Slope target block shares the scalar's key, so the two never appear
+        // together in one layer object (the grammar pass refuses duplicate keys): a
+        // routed layer states the block and drops the dormant scalar, an unrouted one
+        // states the scalar alone and keeps its zeroed binding.  "Routed" is the same
+        // binding-presence rule the runtime and the display use, so dormant generator
+        // fields alone never drop the scalar.
+        const Synth::TargetBinding& slope_binding = osc.targets[Synth::mod_fir_slope];
+        const bool                  slope_routed  = Synth::osc_fir_slope_binding_present(slope_binding);
+        if (! slope_routed && osc.fir_slope_percent != 100) {
+            o.key("fir_slope");
+            o.uint_value(osc.fir_slope_percent);
+        }
         key_fir_type(o, osc);
 
         for (uint32_t target = 0; target < Synth::num_mod_targets; target++) {
             const Synth::ModTarget        mod_target = static_cast<Synth::ModTarget>(target);
             const Sculptor::OscTargetView view       = Sculptor::osc_target_view(mod_target);
+
+            if (mod_target == Synth::mod_fir_slope && ! slope_routed) {
+                // Zeroed slope binding: the scalar key above carries the value, and
+                // omitting the block is lossless (the layer-0 default base is 0).
+                continue;
+            }
 
             o.key(mod_target_names[target]);
             o.ch('{');
@@ -4205,9 +4297,15 @@ static uint32_t encode_instrument_json_for_domain(char*                         
             // decoder pre-seeds layer 0 with the document defaults, so an
             // omitted base there could not express a legitimate zero.  Later
             // layers state routing only when it is not the zeroed binding.
+            // Exception: the FIR slope target decodes an omitted base as 0
+            // (its own legitimate zero), so a base-0 routed slope block omits
+            // the key and reloads with the same zero instead of stating a
+            // base its integer grammar rejects.
             if (layer == 0 || routing.base_value != 0.0f || routing.num_inputs != 0) {
-                o.key("base");
-                o.float_value(routing.base_value / view.bank_scale);
+                if (mod_target != Synth::mod_fir_slope || routing.base_value != 0.0f) {
+                    o.key("base");
+                    o.float_value(routing.base_value / view.bank_scale);
+                }
 
                 if (routing.num_inputs > Synth::max_mod_inputs)
                     return 0;

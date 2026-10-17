@@ -25,6 +25,7 @@ enum ModTarget : uint8_t {
     mod_fm_ratio,
     mod_pad_tilt0,
     mod_pad_tilt1,
+    mod_fir_slope,
     num_mod_targets
 };
 
@@ -178,6 +179,16 @@ struct InstrumentBank {
 
 static_assert(std::is_trivially_copyable_v<InstrumentBank>,
               "InstrumentBank must be trivially copyable for byte-snapshot undo and save/load");
+
+// True when the binding carries anything at all: a nonzero base, at least one routed MIDI input,
+// or a bound envelope/LFO descriptor.  Depth/rate-scale/op fields without a bound id or input do
+// not make a binding present.
+bool osc_fir_slope_binding_present(const TargetBinding& binding);
+
+// The slope value a layer starts from: the routed base when the binding is present, the
+// pre-existing scalar otherwise.  One spelling shared by the note-on seed, the editor display and
+// the tests.
+float osc_fir_slope_seed_value(const TargetBinding& binding, uint8_t fir_slope_percent);
 
 uint8_t route_instrument(const Zone* zones, uint32_t num_zones, uint8_t note);
 

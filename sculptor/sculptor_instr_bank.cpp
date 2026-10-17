@@ -15,8 +15,8 @@
 
 namespace {
 
-// Per-instrument driver: TargetBinding (40 bytes) x 11 targets x 7 layers.
-static_assert(sizeof(Synth::InstrumentBank) <= 1'024'000);
+// Per-instrument driver: TargetBinding (48 bytes) x 12 targets x 7 layers.
+static_assert(sizeof(Synth::InstrumentBank) <= 1'114'112);
 static_assert(sizeof(Synth::BankUpdateQueue) <= 2 * sizeof(Synth::InstrumentBank) + 32);
 
 } // namespace

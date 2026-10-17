@@ -60,7 +60,7 @@ constexpr uint32_t max_detached_nodes = Synth::max_detached_per_zone;
 constexpr uint32_t max_osc_instances = max_nodes - (Synth::graph_canonical_input_node_count + 1);
 static_assert(2 * Synth::max_layers * Synth::num_mod_targets <= max_osc_instances);
 
-// The eleven per-target modulation blocks live on the oscillator node
+// The twelve per-target modulation blocks live on the oscillator node
 // itself: each ModTarget's 12-slot block sits directly after its value
 // row slot, so the block's modulator rows render under the row they
 // attach to (the fx pattern).  See the block helpers below for the
@@ -91,7 +91,7 @@ static_assert(Synth::max_layers + 6 * Synth::max_layers * Synth::num_mod_targets
 // fm depth / fm ratio under mix mode, octave offset under
 // pitch, and the fir pitch spread / fir slope rows under filter type. A
 // nested row's whole modulation block shifts one tree level deeper.
-constexpr uint32_t osc_slot_count = 18;
+constexpr uint32_t osc_slot_count          = 18;
 constexpr uint32_t osc_target_block_stride = 12;
 
 // The value row of each ModTarget on an oscillator node.  The rows are
@@ -110,6 +110,7 @@ constexpr uint32_t osc_target_row_slot[Synth::num_mod_targets] = {
     82,  // fm ratio
     15,  // pad tone a
     42,  // pad tone b
+    149, // fir slope
 };
 
 // First slot of target `target`'s modulation block on an oscillator
@@ -147,12 +148,13 @@ constexpr uint32_t osc_target_src_dot(uint32_t target, uint32_t input)
     return osc_target_block_base(target) + 6u + 3u * input;
 }
 
-// Last block end fits the slot pool; the eleven row slots are spaced far
+// Last block end fits the slot pool; the twelve row slots are spaced far
 // enough apart that no block reaches the next row (smallest base-row
 // gap 13, between duty a row 2 and pad tone a row 15; every block
 // ends one slot before the next row).  The
-// pinned target is the highest row, not the last enum member, so later
-// appends cannot make the check vacuous.
+// pinned target is the appended FIR slope block, the current highest row;
+// extend the pin when a later append raises the high-water mark.
+static_assert(osc_target_row_slot[Synth::mod_fir_slope] + osc_target_block_stride <= max_node_slots);
 static_assert(osc_target_row_slot[Synth::mod_fir_spread] + osc_target_block_stride <= max_node_slots);
 static_assert(osc_target_row_slot[Synth::mod_pad_tilt1] + osc_target_block_stride <
               osc_target_row_slot[Synth::mod_osc_mix]);
