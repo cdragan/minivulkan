@@ -241,9 +241,9 @@ static void handle_key_release(xcb_key_release_event_t* event)
 static int map_mouse_button(int button)
 {
     switch (button) {
-        case 1: return ImGuiPopupFlags_MouseButtonLeft;
-        case 2: return ImGuiPopupFlags_MouseButtonMiddle;
-        case 3: return ImGuiPopupFlags_MouseButtonRight;
+        case 1: return ImGuiMouseButton_Left;
+        case 2: return ImGuiMouseButton_Middle;
+        case 3: return ImGuiMouseButton_Right;
 
         default:
             break;
