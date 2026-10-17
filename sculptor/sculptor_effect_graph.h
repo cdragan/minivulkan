@@ -166,6 +166,14 @@ bool replace_effect_chain_candidate(const Synth::InstrumentEditorBank* source,
 // Chain slot an effect node projects, or -1 when the node is not an effect.
 int32_t fx_effect_slot_of(const EffectGraphMapping& mapping, uint32_t node_idx);
 
+// The previous and next projected effect slots around `slot`, or -1 when a
+// side has none.  Dormant (type none) slots project no node, so adjacency
+// follows the same projected slot list the projection builds.  Pure.
+void fx_adjacent_projected_slots(const Synth::EffectChainBinding& chain,
+                                 uint32_t                         slot,
+                                 int32_t*                         previous,
+                                 int32_t*                         next);
+
 // Descriptor id an LFO node projects, or 0 when the node is not an LFO node.
 uint32_t fx_lfo_desc_of(const EffectGraphMapping& mapping, uint32_t node_idx);
 
@@ -223,6 +231,17 @@ void fx_remove_effect(Synth::EffectChainBinding* chain, uint32_t slot);
 // after_slot is negative, right after after_slot otherwise.  False when a
 // slot is out of range; caller guards the no-op (moved == after).
 bool fx_splice_effect(Synth::EffectChainBinding* chain, uint32_t moved_slot, int32_t after_slot);
+
+// Exchanges two slots' complete bindings. Callers guard range and
+// occupancy; the helper asserts nothing beyond that.
+void fx_exchange_effect_slots(Synth::EffectChainBinding* chain, uint32_t slot_a, uint32_t slot_b);
+
+// Remaps explicit-edge audio routing through the exchange of two slots:
+// successor rows and successor values both permute through the swap, so
+// each effect keeps its wiring, while the input row keeps its index and
+// the output marker keeps its value.  Only meaningful when explicit_edges is
+// set; a zeroed next[] stays zero.
+void fx_swap_effect_audio(EffectAudioTopology* audio, uint32_t slot_a, uint32_t slot_b);
 
 // Re-initializes a slot to a new type with neutral base values and every
 // modulation field cleared, so a retyped slot never carries dormant

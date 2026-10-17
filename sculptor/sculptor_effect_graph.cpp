@@ -492,6 +492,33 @@ uint32_t Sculptor::fx_lfo_desc_of(const EffectGraphMapping& mapping, uint32_t no
     return 0;
 }
 
+void Sculptor::fx_adjacent_projected_slots(const Synth::EffectChainBinding& chain,
+                                           uint32_t                         slot,
+                                           int32_t*                         previous,
+                                           int32_t*                         next)
+{
+    *previous = -1;
+    *next     = -1;
+    uint32_t       slots[Synth::max_chain_effects];
+    const uint32_t count    = projected_slots(chain, slots);
+    uint32_t       position = count;
+    for (uint32_t i = 0; i < count; ++i) {
+        if (slots[i] == slot) {
+            position = i;
+            break;
+        }
+    }
+    if (position == count) {
+        return;
+    }
+    if (position > 0) {
+        *previous = static_cast<int32_t>(slots[position - 1]);
+    }
+    if (position + 1 < count) {
+        *next = static_cast<int32_t>(slots[position + 1]);
+    }
+}
+
 void Sculptor::fx_seed_effect_lfo_binding(Synth::EffectParamBinding* binding, uint32_t desc_id)
 {
     // One descriptor-assignment and depth-seed policy serves the drop,
@@ -1517,6 +1544,30 @@ static bool splice_effect(Synth::EffectChainBinding*    chain,
 bool Sculptor::fx_splice_effect(Synth::EffectChainBinding* chain, uint32_t moved_slot, int32_t after_slot)
 {
     return splice_effect(chain, moved_slot, after_slot, nullptr);
+}
+
+void Sculptor::fx_exchange_effect_slots(Synth::EffectChainBinding* chain, uint32_t slot_a, uint32_t slot_b)
+{
+    const Synth::EffectSlotBinding temporary = chain->effects[slot_a];
+    chain->effects[slot_a]                   = chain->effects[slot_b];
+    chain->effects[slot_b]                   = temporary;
+}
+
+void Sculptor::fx_swap_effect_audio(EffectAudioTopology* audio, uint32_t slot_a, uint32_t slot_b)
+{
+    uint8_t swapped[Synth::max_chain_effects + 1];
+    for (uint32_t row = 0; row <= Synth::max_chain_effects; ++row) {
+        uint32_t value = audio->next[row];
+        if (value >= 1 && value <= Synth::max_chain_effects) {
+            const uint32_t successor = value - 1;
+            value                    = (successor == slot_a ? slot_b : successor == slot_b ? slot_a : successor) + 1;
+        }
+        // Absent edges (0) and the output marker (max_chain_effects + 1)
+        // pass through unchanged; the input row's index sits above every
+        // slot, so only slot rows relocate.
+        swapped[row == slot_a ? slot_b : row == slot_b ? slot_a : row] = static_cast<uint8_t>(value);
+    }
+    memcpy(audio->next, swapped, sizeof(swapped));
 }
 
 void Sculptor::fx_init_slot(Synth::EffectChainBinding* chain, uint32_t slot, Synth::EffectType type)

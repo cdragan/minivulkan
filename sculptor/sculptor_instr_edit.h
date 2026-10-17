@@ -58,6 +58,9 @@ private:
     void do_fx_add_effect(Synth::EffectType type);
     void do_fx_add_lfo(bool from_drop);
     void do_fx_change_type(uint32_t node_idx, Synth::EffectType type);
+    // Exchanges the node's effect with its adjacent projected neighbor
+    // (direction -1 = previous, +1 = next); a missing neighbor does nothing.
+    void do_fx_swap(uint32_t node_idx, int32_t direction);
     // One added-CC registry-bit edit shared by both panes' handlers.
     void edit_added_cc_mask(uint32_t mask_idx, uint32_t cc_number, bool add, uint32_t undo_tag, bool* reproject);
     void do_fx_add_cc(uint32_t cc_number);

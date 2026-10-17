@@ -74,6 +74,8 @@ enum FxCanvasCommand {
     fx_cmd_paste,
     fx_cmd_add_cc,
     fx_cmd_remove_cc,
+    fx_cmd_swap_prev,
+    fx_cmd_swap_next,
     // Drop-menu variant: the anchor was classified at click time and the
     // payload rides the file-local fx_drop_command state below.
     fx_cmd_drop_add_lfo
@@ -211,6 +213,7 @@ constexpr uint32_t fx_tag_add_lfo   = 35; // id0 = the fresh descriptor id
 constexpr uint32_t fx_tag_node_move = 36;
 constexpr uint32_t fx_tag_add_cc    = 37; // id0 = the chain, id1 = the CC number
 constexpr uint32_t fx_tag_remove_cc = 38; // id0 = the chain, id1 = the CC number
+constexpr uint32_t fx_tag_swap      = 39; // id0 = the chain, id1 = the moved slot
 
 OscDeleteVetoContext osc_veto_context = { &osc_mapping, &osc_graph };
 
@@ -882,9 +885,9 @@ static bool fx_cc_removal_refused(uint32_t chain, uint32_t cc_number)
 // Canvas menu "Add LFO": a fresh descriptor the editor pins onto this
 // canvas.  The projection shows referenced descriptors only, so a
 // not-yet-wired LFO needs its pin to stay visible and receive a first wire.
-// Node menu on effect nodes: type replacement.  Chain order is a wire
-// gesture (drag the connector), LFO nodes carry only their own rows, so
-// the callback reports no items for them.
+// Node menu on effect nodes: type replacement and adjacent swap.  LFO
+// nodes carry only their own rows, so the callback reports no items for
+// them.
 static bool fx_node_menu(void* user_data, uint32_t node_idx)
 {
     (void)user_data;
@@ -927,6 +930,17 @@ static bool fx_node_menu(void* user_data, uint32_t node_idx)
             }
         }
         ImGui::EndMenu();
+    }
+    int32_t previous = -1;
+    int32_t next     = -1;
+    Sculptor::fx_adjacent_projected_slots(chain, static_cast<uint32_t>(slot), &previous, &next);
+    if (previous >= 0 && ImGui::MenuItem("Swap With Previous")) {
+        fx_canvas_command = fx_cmd_swap_prev;
+        fx_menu_node      = node_idx;
+    }
+    if (next >= 0 && ImGui::MenuItem("Swap With Next")) {
+        fx_canvas_command = fx_cmd_swap_next;
+        fx_menu_node      = node_idx;
     }
     return true;
 }
@@ -2588,6 +2602,12 @@ void Sculptor::SynthEditor::run_fx_canvas_command()
         case fx_cmd_change_type:
             do_fx_change_type(node, fx_canvas_type);
             break;
+        case fx_cmd_swap_prev:
+            do_fx_swap(node, -1);
+            break;
+        case fx_cmd_swap_next:
+            do_fx_swap(node, 1);
+            break;
         case fx_cmd_copy: {
             if (! Sculptor::extract_effect_chain_document(&instr_bank,
                                                           fx_mapping.chain,
@@ -2806,6 +2826,49 @@ void Sculptor::SynthEditor::do_fx_change_type(uint32_t node_idx, Synth::EffectTy
         return;
     }
     if (! commit_candidate(candidate, Sculptor::UndoGroupTag{ fx_tag_type, node_idx, static_cast<uint32_t>(type) })) {
+        return;
+    }
+    fx_graph_reproject = true;
+}
+
+// Adjacent swap: one undo entry exchanging the two slots' payloads and,
+// with explicit edges, their routing rows.  The re-projection rebuilds the
+// mapping and wires, so no live mapping permutation happens here.
+void Sculptor::SynthEditor::do_fx_swap(uint32_t node_idx, int32_t direction)
+{
+    // A deleted node's mapping entry survives until the next projection
+    // re-runs.  Refuse rather than resolve it onto a surviving effect.
+    if (! osc_graph.node_occupied(node_idx)) {
+        return;
+    }
+    const int32_t slot = Sculptor::fx_effect_slot_of(fx_mapping, node_idx);
+    if (slot < 0) {
+        return;
+    }
+    int32_t previous = -1;
+    int32_t next     = -1;
+    Sculptor::fx_adjacent_projected_slots(Sculptor::fx_graph_chain(&instr_bank.bank, fx_mapping.chain),
+                                          static_cast<uint32_t>(slot),
+                                          &previous,
+                                          &next);
+    const int32_t neighbor = direction < 0 ? previous : next;
+    if (neighbor < 0) {
+        return;
+    }
+    candidate                                = instr_bank;
+    Synth::EffectChainBinding& chain         = Sculptor::fx_graph_chain(&candidate.bank, fx_mapping.chain);
+    const uint32_t             moved         = static_cast<uint32_t>(slot);
+    const uint32_t             neighbor_slot = static_cast<uint32_t>(neighbor);
+    // The exchange uses the two projected slots directly, so a dormant
+    // (type none) slot between the pair cannot diverge the chain
+    // permutation from the audio remap the way a splice across the hole
+    // would.
+    Sculptor::fx_exchange_effect_slots(&chain, moved, neighbor_slot);
+    Sculptor::EffectAudioTopology& audio = candidate.effect_audio[fx_mapping.chain];
+    if (audio.explicit_edges) {
+        Sculptor::fx_swap_effect_audio(&audio, moved, neighbor_slot);
+    }
+    if (! commit_candidate(candidate, Sculptor::UndoGroupTag{ fx_tag_swap, fx_mapping.chain, moved })) {
         return;
     }
     fx_graph_reproject = true;

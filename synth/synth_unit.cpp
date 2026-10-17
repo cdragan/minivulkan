@@ -6635,6 +6635,259 @@ static void fx_lfo_binding_seed_regressions()
     TEST(seeded.lfo_depth == 0.25f);
 }
 
+// Dense-chain adjacent-splice equivalence regressions. The production swap
+// path is fx_exchange_effect_slots; this test pins the adjacent-splice
+// primitive: swap with next splices the moved slot after its successor
+// (after_slot = slot + 1), swap with previous splices it after slot - 2,
+// which is the front when that is negative. Both forms must produce an
+// exact exchange of the two slots.
+static void fx_adjacent_splice_swap_regressions()
+{
+    const auto fresh = []() {
+        Synth::EffectChainBinding chain = {};
+        chain.num_effects               = 3;
+        for (uint32_t slot = 0; slot < 3; ++slot) {
+            Sculptor::fx_init_slot(&chain, slot, Synth::EffectType::delay);
+            chain.effects[slot].enabled                 = slot != 1;
+            chain.effects[slot].bindings[0].base_value  = 1.0f + float(slot);
+            chain.effects[slot].bindings[0].lfo_desc_id = static_cast<uint16_t>(slot + 1);
+            chain.effects[slot].enable_input.source     = static_cast<Synth::ModSource>(slot + 1);
+        }
+        return chain;
+    };
+    Synth::EffectChainBinding chain = fresh();
+    // Swap with next, first slot: [1, 2, 3] -> [2, 1, 3].
+    TEST(Sculptor::fx_splice_effect(&chain, 0, 1));
+    TEST(chain.effects[0].bindings[0].base_value == 2.0f);
+    TEST(chain.effects[1].bindings[0].base_value == 1.0f);
+    TEST(chain.effects[2].bindings[0].base_value == 3.0f);
+    TEST(chain.effects[2].bindings[0].lfo_desc_id == 3);
+    TEST(chain.effects[2].enable_input.source == Synth::ModSource::channel_pressure);
+    // Swap with previous, middle slot (after_slot = slot - 2 = -1, front):
+    // [1, 2, 3] -> [2, 1, 3].  Params and the enabled flag travel.
+    chain = fresh();
+    TEST(Sculptor::fx_splice_effect(&chain, 1, static_cast<int32_t>(1) - 2));
+    TEST(chain.effects[0].bindings[0].base_value == 2.0f);
+    TEST(chain.effects[0].enabled == false);
+    TEST(chain.effects[0].bindings[0].lfo_desc_id == 2);
+    TEST(chain.effects[0].enable_input.source == Synth::ModSource::mod_wheel);
+    TEST(chain.effects[1].bindings[0].base_value == 1.0f);
+    TEST(chain.effects[1].enabled == true);
+    TEST(chain.effects[1].bindings[0].lfo_desc_id == 1);
+    TEST(chain.effects[1].enable_input.source == Synth::ModSource::pitch_bend);
+    TEST(chain.effects[2].bindings[0].base_value == 3.0f);
+    // Swap with next, middle slot: [1, 2, 3] -> [1, 3, 2].
+    chain = fresh();
+    TEST(Sculptor::fx_splice_effect(&chain, 1, 2));
+    TEST(chain.effects[0].bindings[0].base_value == 1.0f);
+    TEST(chain.effects[1].bindings[0].base_value == 3.0f);
+    TEST(chain.effects[2].bindings[0].base_value == 2.0f);
+    // Swap with previous, last slot (after_slot = slot - 2 = 0):
+    // [1, 2, 3] -> [1, 3, 2].
+    chain = fresh();
+    TEST(Sculptor::fx_splice_effect(&chain, 2, static_cast<int32_t>(2) - 2));
+    TEST(chain.effects[0].bindings[0].base_value == 1.0f);
+    TEST(chain.effects[1].bindings[0].base_value == 3.0f);
+    TEST(chain.effects[2].bindings[0].base_value == 2.0f);
+    // The first slot has no previous: the splice refuses untouched.
+    chain = fresh();
+    TEST(! Sculptor::fx_splice_effect(&chain, 0, static_cast<int32_t>(0) - 2));
+    TEST(chain.effects[0].bindings[0].base_value == 1.0f);
+    TEST(chain.effects[1].bindings[0].base_value == 2.0f);
+    TEST(chain.effects[2].bindings[0].base_value == 3.0f);
+}
+
+// The explicit-edge audio topology remap exchanges two slots: both the
+// successor rows of the swapped slots and every successor value that
+// references them permute through the exchange, while the input row keeps
+// its index (next[max_chain_effects]) and the output marker keeps its
+// value (max_chain_effects + 1).  Encoded next[] values: 0 = none,
+// 1..4 = slot + 1, 5 = output.
+static void fx_swap_effect_audio_regressions()
+{
+    {
+        // Serial path input->slot0->slot1->slot2->output; swapping slots 0
+        // and 1 keeps the wiring of each effect: the path becomes
+        // input->slot1->slot0->slot2->output.
+        Sculptor::EffectAudioTopology audio = { 1, { 2, 3, 5, 0, 1 } };
+        Sculptor::fx_swap_effect_audio(&audio, 0, 1);
+        const Sculptor::EffectAudioTopology expected = { 1, { 3, 1, 5, 0, 2 } };
+        TEST(memcmp(&audio, &expected, sizeof(audio)) == 0);
+    }
+    {
+        // The chain payloads are exchanged to match the swapped routing;
+        // the swapped bank passes topology validation.
+        static Synth::InstrumentEditorBank bank;
+        memset(static_cast<void*>(&bank), 0, sizeof(bank));
+        Synth::init_default_bank(&bank.bank);
+        Synth::EffectChainBinding& chain = bank.bank.channel_chains[0];
+        chain.num_effects                = 3;
+        for (uint32_t slot = 0; slot < 3; ++slot) {
+            Sculptor::fx_init_slot(&chain, slot, Synth::EffectType::delay);
+            chain.effects[slot].enabled                = true;
+            chain.effects[slot].bindings[0].base_value = 1.0f + float(slot);
+        }
+        Sculptor::fx_exchange_effect_slots(&chain, 0, 1);
+        Sculptor::EffectAudioTopology& audio = bank.effect_audio[0];
+        audio                                = { 1, { 2, 3, 5, 0, 1 } };
+        Sculptor::fx_swap_effect_audio(&audio, 0, 1);
+        const Sculptor::EffectAudioTopology expected = { 1, { 3, 1, 5, 0, 2 } };
+        TEST(memcmp(&audio, &expected, sizeof(audio)) == 0);
+        TEST(Sculptor::validate_effect_audio_topology(chain, audio));
+        TEST(Synth::validate_instrument_bank(&bank.bank));
+        TEST(Sculptor::validate_editor_metadata(bank));
+    }
+    {
+        // Bypassed middle slot: input->slot0->slot2 with slot1 absent.
+        // After swapping slots 0 and 1 the path is input->slot1->slot2 with
+        // slot0 bypassed, and validation still passes.
+        static Synth::InstrumentEditorBank bank;
+        memset(static_cast<void*>(&bank), 0, sizeof(bank));
+        Synth::init_default_bank(&bank.bank);
+        Synth::EffectChainBinding& chain = bank.bank.channel_chains[0];
+        chain.num_effects                = 3;
+        for (uint32_t slot = 0; slot < 3; ++slot) {
+            Sculptor::fx_init_slot(&chain, slot, Synth::EffectType::delay);
+            chain.effects[slot].enabled                = true;
+            chain.effects[slot].bindings[0].base_value = 1.0f + float(slot);
+        }
+        Sculptor::fx_exchange_effect_slots(&chain, 0, 1);
+        Sculptor::EffectAudioTopology& audio = bank.effect_audio[0];
+        audio                                = { 1, { 3, 0, 5, 0, 1 } };
+        Sculptor::fx_swap_effect_audio(&audio, 0, 1);
+        const Sculptor::EffectAudioTopology expected = { 1, { 0, 3, 5, 0, 2 } };
+        TEST(memcmp(&audio, &expected, sizeof(audio)) == 0);
+        TEST(Sculptor::validate_effect_audio_topology(chain, audio));
+        TEST(Synth::validate_instrument_bank(&bank.bank));
+        TEST(Sculptor::validate_editor_metadata(bank));
+    }
+    {
+        // Implicit routing: no explicit edges, the swap touches nothing.
+        Sculptor::EffectAudioTopology audio = {};
+        Sculptor::fx_swap_effect_audio(&audio, 0, 1);
+        TEST(audio.explicit_edges == 0);
+        static const uint8_t zero[Synth::max_chain_effects + 1] = {};
+        TEST(memcmp(audio.next, zero, sizeof(zero)) == 0);
+    }
+}
+
+// Adjacency follows the projected slot list: dormant (type none) slots
+// project no node, so they are skipped and never appear as neighbors.
+static void fx_adjacent_projected_slots_regressions()
+{
+    const auto chain_with_hole = [](uint32_t dormant) {
+        Synth::EffectChainBinding chain = {};
+        chain.num_effects               = 3;
+        for (uint32_t slot = 0; slot < 3; ++slot) {
+            if (slot != dormant) {
+                Sculptor::fx_init_slot(&chain, slot, Synth::EffectType::delay);
+            }
+        }
+        return chain;
+    };
+    {
+        // [A, none, B]: slot 0 has no previous and slot 2 as next; the
+        // dormant slot projects no node and has no neighbors.
+        const Synth::EffectChainBinding chain    = chain_with_hole(1);
+        int32_t                         previous = -1;
+        int32_t                         next     = -1;
+        Sculptor::fx_adjacent_projected_slots(chain, 0, &previous, &next);
+        TEST(previous == -1 && next == 2);
+        Sculptor::fx_adjacent_projected_slots(chain, 1, &previous, &next);
+        TEST(previous == -1 && next == -1);
+        Sculptor::fx_adjacent_projected_slots(chain, 2, &previous, &next);
+        TEST(previous == 0 && next == -1);
+    }
+    {
+        // [none, A, B]: slot 1 has no previous and slot 2 as next.
+        const Synth::EffectChainBinding chain    = chain_with_hole(0);
+        int32_t                         previous = -1;
+        int32_t                         next     = -1;
+        Sculptor::fx_adjacent_projected_slots(chain, 1, &previous, &next);
+        TEST(previous == -1 && next == 2);
+        Sculptor::fx_adjacent_projected_slots(chain, 2, &previous, &next);
+        TEST(previous == 1 && next == -1);
+        Sculptor::fx_adjacent_projected_slots(chain, 0, &previous, &next);
+        TEST(previous == -1 && next == -1);
+    }
+    {
+        // [A, B, none]: slot 0 has no previous and slot 1 as next.
+        const Synth::EffectChainBinding chain    = chain_with_hole(2);
+        int32_t                         previous = -1;
+        int32_t                         next     = -1;
+        Sculptor::fx_adjacent_projected_slots(chain, 0, &previous, &next);
+        TEST(previous == -1 && next == 1);
+        Sculptor::fx_adjacent_projected_slots(chain, 1, &previous, &next);
+        TEST(previous == 0 && next == -1);
+        Sculptor::fx_adjacent_projected_slots(chain, 2, &previous, &next);
+        TEST(previous == -1 && next == -1);
+    }
+    {
+        // Dense chain: adjacency is the raw slot adjacency.
+        const Synth::EffectChainBinding chain    = chain_with_hole(3);
+        int32_t                         previous = -1;
+        int32_t                         next     = -1;
+        Sculptor::fx_adjacent_projected_slots(chain, 0, &previous, &next);
+        TEST(previous == -1 && next == 1);
+        Sculptor::fx_adjacent_projected_slots(chain, 1, &previous, &next);
+        TEST(previous == 0 && next == 2);
+        Sculptor::fx_adjacent_projected_slots(chain, 2, &previous, &next);
+        TEST(previous == 1 && next == -1);
+    }
+}
+
+// A dormant middle slot must not confuse an exchange: the two projected
+// slots trade complete bindings, including the LFO binding and the
+// enable input, and the explicit-edge routing keeps each effect wired.
+static void fx_exchange_effect_slots_regressions()
+{
+    Synth::EffectChainBinding chain = {};
+    chain.num_effects               = 3;
+    Sculptor::fx_init_slot(&chain, 0, Synth::EffectType::delay);
+    Sculptor::fx_init_slot(&chain, 2, Synth::EffectType::chorus);
+    chain.effects[0].enabled                 = true;
+    chain.effects[0].bindings[0].base_value  = 1.0f;
+    chain.effects[0].bindings[0].lfo_desc_id = 3;
+    chain.effects[0].enable_input.source     = Synth::ModSource::pitch_bend;
+    chain.effects[2].enabled                 = false;
+    chain.effects[2].bindings[0].base_value  = 2.0f;
+    chain.effects[2].bindings[0].lfo_desc_id = 5;
+    chain.effects[2].enable_input.source     = Synth::ModSource::channel_pressure;
+    Sculptor::fx_exchange_effect_slots(&chain, 0, 2);
+    TEST(chain.effects[0].type == Synth::EffectType::chorus);
+    TEST(chain.effects[0].enabled == false);
+    TEST(chain.effects[0].bindings[0].base_value == 2.0f);
+    TEST(chain.effects[0].bindings[0].lfo_desc_id == 5);
+    TEST(chain.effects[0].enable_input.source == Synth::ModSource::channel_pressure);
+    TEST(chain.effects[1].type == Synth::EffectType::none);
+    TEST(chain.effects[2].type == Synth::EffectType::delay);
+    TEST(chain.effects[2].enabled == true);
+    TEST(chain.effects[2].bindings[0].base_value == 1.0f);
+    TEST(chain.effects[2].bindings[0].lfo_desc_id == 3);
+    TEST(chain.effects[2].enable_input.source == Synth::ModSource::pitch_bend);
+    {
+        // Serial routing input->A(slot 0)->B(slot 2)->output, with the
+        // dormant slot 1 bypassed; after the exchange the path is
+        // input->A(slot 2)->B(slot 0)->output and validation passes.
+        static Synth::InstrumentEditorBank bank;
+        memset(static_cast<void*>(&bank), 0, sizeof(bank));
+        Synth::init_default_bank(&bank.bank);
+        Synth::EffectChainBinding& bank_chain = bank.bank.channel_chains[0];
+        bank_chain.num_effects                = 3;
+        Sculptor::fx_init_slot(&bank_chain, 0, Synth::EffectType::delay);
+        Sculptor::fx_init_slot(&bank_chain, 2, Synth::EffectType::chorus);
+        Sculptor::EffectAudioTopology& audio = bank.effect_audio[0];
+        audio                                = { 1, { 3, 0, 5, 0, 1 } };
+        Sculptor::fx_exchange_effect_slots(&bank_chain, 0, 2);
+        Sculptor::fx_swap_effect_audio(&audio, 0, 2);
+        const Sculptor::EffectAudioTopology expected = { 1, { 5, 0, 1, 0, 3 } };
+        TEST(memcmp(&audio, &expected, sizeof(audio)) == 0);
+        TEST(Sculptor::validate_effect_audio_topology(bank_chain, audio));
+        TEST(Synth::validate_instrument_bank(&bank.bank));
+        TEST(Sculptor::validate_editor_metadata(bank));
+    }
+}
+
 // The oscillator and effect projections tag every modulator block slot with
 // child_row = true, and leave base-value rows, fixed slots, and
 // non-oscillator / non-effect node slots at child_row = false.
@@ -11379,6 +11632,10 @@ int main()
     fx_drop_anchor_flag_regressions();
     fx_add_lfo_modeled_regressions();
     fx_lfo_binding_seed_regressions();
+    fx_adjacent_splice_swap_regressions();
+    fx_swap_effect_audio_regressions();
+    fx_adjacent_projected_slots_regressions();
+    fx_exchange_effect_slots_regressions();
     child_row_projection_regressions();
     osc_inherit_source_regressions();
     osc_direct_modulator_regressions();
