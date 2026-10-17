@@ -8,6 +8,7 @@
 #include "../core/minivulkan.h"
 
 #include <errno.h>
+#include <poll.h>
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
@@ -356,18 +357,40 @@ static bool create_window(Window* w)
 
 static int event_loop(Window* w)
 {
-    bool blocking = false;
-
     while ( ! w->quit) {
-        const int status = blocking ? wl_display_dispatch(w->display)
-                                    : wl_display_dispatch_pending(w->display);
-        if (status == -1) {
+        if (wl_display_dispatch_pending(w->display) == -1) {
             d_printf("Failed to dispatch Wayland events: %s\n", strerror(errno));
             break;
         }
 
-        blocking = ! need_redraw(w) && skip_frame(w);
-        if (blocking)
+        wl_display_flush(w->display);
+
+        bool needs_update = need_redraw(w);
+
+        if ( ! is_full_screen() && ! needs_update) {
+            constexpr int wakeup_ms = 16;
+
+            pollfd fd_info = {
+                wl_display_get_fd(w->display),
+                POLLIN,
+                0
+            };
+
+            const int poll_status = poll(&fd_info, 1, wakeup_ms);
+
+            if (poll_status > 0) {
+                const int dispatched = wl_display_dispatch(w->display);
+
+                if (dispatched == -1) {
+                    d_printf("Failed to dispatch Wayland events: %s\n", strerror(errno));
+                    break;
+                }
+
+                needs_update = dispatched > 0;
+            }
+        }
+
+        if ( ! needs_update && skip_frame(w))
             continue;
 
         if ( ! draw_frame())
