@@ -33,8 +33,6 @@
 
 const char app_name[] = "Sculptor";
 
-vmath::vec4 Sculptor::Editor::debug_color{ 0.5f, 0.5f, 0.5f, 1.0f };
-
 const int gui_config_flags = ImGuiConfigFlags_NavEnableKeyboard | ImGuiConfigFlags_DockingEnable;
 
 static Sculptor::AssetBrowser   asset_browser;
@@ -110,6 +108,9 @@ bool init_assets()
     geometry_editor.set_object_name("unnamed");
     texture_editor.set_asset_browser(&asset_browser);
 
+    // Hidden for now, the editor can be re-enabled by setting enabled to true
+    asset_browser.enabled = false;
+
     Sculptor::TextureStore& tex_store = texture_editor.get_store();
     asset_browser.register_tab(Sculptor::AssetBrowser::AssetTab::textures,
                                tex_store.slots,
@@ -174,18 +175,8 @@ static void apply_default_dock_layout(ImGuiID dockspace_id)
     ImGui::DockBuilderAddNode(dockspace_id, ImGuiDockNodeFlags_DockSpace);
     ImGui::DockBuilderSetNodeSize(dockspace_id, viewport->WorkSize);
 
-    ImGuiID center_id = 0;
-    ImGuiID left_id   = 0;
-    ImGui::DockBuilderSplitNode(dockspace_id, ImGuiDir_Left, 0.25f, &left_id, &center_id);
-
-    ImGuiID assets_id = 0;
-    ImGuiID debug_id  = 0;
-    ImGui::DockBuilderSplitNode(left_id, ImGuiDir_Down, 0.5f, &assets_id, &debug_id);
-
-    ImGui::DockBuilderDockWindow("Debug", debug_id);
-    ImGui::DockBuilderDockWindow("Asset Browser###AssetBrowser", assets_id);
-    ImGui::DockBuilderDockWindow("###Geometry Editor", center_id);
-    ImGui::DockBuilderDockWindow("Synth", center_id);
+    ImGui::DockBuilderDockWindow("###Geometry Editor", dockspace_id);
+    ImGui::DockBuilderDockWindow("Synth", dockspace_id);
 
     ImGui::DockBuilderFinish(dockspace_id);
 }
@@ -256,34 +247,6 @@ static bool create_gui_frame(uint32_t image_idx)
     const ImGuiID dockspace_id = ImHashStr("SculptorDockSpace");
     apply_default_dock_layout(dockspace_id);
     ImGui::DockSpaceOverViewport(dockspace_id, ImGui::GetMainViewport(), ImGuiDockNodeFlags_PassthruCentralNode);
-
-    ImGui::Begin("Debug");
-    {
-        const ImVec2 win_size = ImGui::GetWindowSize();
-        ImGui::Text("Window Size: %d x %d", static_cast<int>(win_size.x), static_cast<int>(win_size.y));
-        const ImVec2 vp_size = ImGui::GetMainViewport()->Size;
-        ImGui::Text("Viewport Size: %d x %d", static_cast<int>(vp_size.x), static_cast<int>(vp_size.y));
-        ImGui::Text("Surface Size: %u x %u", vk_surface_caps.currentExtent.width, vk_surface_caps.currentExtent.height);
-
-        ImGui::Separator();
-
-        for (Sculptor::Editor* editor : editors) {
-            char name[128];
-            snprintf(name, sizeof(name), "%s: %s", editor->get_editor_name(), editor->get_object_name());
-            ImGui::Checkbox(name, &editor->enabled);
-        }
-
-        ImGui::Separator();
-
-        ImGui::ColorPicker4("Debug Color", &Sculptor::Editor::debug_color[0], ImGuiColorEditFlags_NoAlpha);
-        ImGui::Text("Float: %.3f, %.3f, %.3f",
-                    static_cast<double>(Sculptor::Editor::debug_color[0]),
-                    static_cast<double>(Sculptor::Editor::debug_color[1]),
-                    static_cast<double>(Sculptor::Editor::debug_color[2]));
-
-        ImGui::Separator();
-    }
-    ImGui::End();
 
     bool viewports_changed = false;
 
