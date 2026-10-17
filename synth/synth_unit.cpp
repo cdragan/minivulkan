@@ -10311,7 +10311,7 @@ static void osc_instrument_node_regressions()
         build_zone_fixture(&source, &instrument);
         // The volume envelope's descriptor gets a multi-point sustain span
         // with unequal endpoints and ping-pong on.
-        source.bank.envelopes.entries[1].ping_pong           = 1;
+        source.bank.envelopes.entries[1].flags               = Synth::envelope_ping_pong;
         source.bank.envelopes.entries[1].sustain_first_point = 1;
         source.bank.envelopes.entries[1].sustain_last_point  = 2;
         TEST(Sculptor::project_editor_to_graph(source, &graph, &mapping));
@@ -10335,11 +10335,11 @@ static void osc_instrument_node_regressions()
         toggle_change.node_idx              = env_node;
         toggle_change.slot_idx              = ping_pong_slot;
         TEST(Sculptor::apply_osc_graph_change(&source, &graph, &mapping, toggle_change));
-        TEST(source.bank.envelopes.entries[1].ping_pong == 0);
+        TEST((source.bank.envelopes.entries[1].flags & Synth::envelope_ping_pong) == 0);
         TEST(source.bank.envelopes.entries[1].points[2].value == source.bank.envelopes.entries[1].points[1].value);
 
         // Toggle on with unequal endpoints: no point moves.
-        source.bank.envelopes.entries[1].ping_pong       = 0;
+        source.bank.envelopes.entries[1].flags           = 0;
         source.bank.envelopes.entries[1].points[2].value = 0xC000;
         TEST(Sculptor::project_editor_to_graph(source, &graph, &mapping));
         graph.take_changes(discarded, Sculptor::max_pending_changes);
@@ -10352,12 +10352,12 @@ static void osc_instrument_node_regressions()
         toggle_change.node_idx = env_node;
         toggle_change.slot_idx = ping_pong_slot;
         TEST(Sculptor::apply_osc_graph_change(&source, &graph, &mapping, toggle_change));
-        TEST(source.bank.envelopes.entries[1].ping_pong == 1);
+        TEST((source.bank.envelopes.entries[1].flags & Synth::envelope_ping_pong) != 0);
         TEST(source.bank.envelopes.entries[1].points[2].value == 0xC000);
         TEST(source.bank.envelopes.entries[1].points[2].value != source.bank.envelopes.entries[1].points[1].value);
 
         // Single-point span: toggling off flips the flag and writes no point.
-        source.bank.envelopes.entries[1].ping_pong           = 1;
+        source.bank.envelopes.entries[1].flags               = Synth::envelope_ping_pong;
         source.bank.envelopes.entries[1].sustain_first_point = 1;
         source.bank.envelopes.entries[1].sustain_last_point  = 1;
         TEST(Sculptor::project_editor_to_graph(source, &graph, &mapping));
@@ -10371,13 +10371,13 @@ static void osc_instrument_node_regressions()
         toggle_change.node_idx = env_node;
         toggle_change.slot_idx = ping_pong_slot;
         TEST(Sculptor::apply_osc_graph_change(&source, &graph, &mapping, toggle_change));
-        TEST(source.bank.envelopes.entries[1].ping_pong == 0);
+        TEST((source.bank.envelopes.entries[1].flags & Synth::envelope_ping_pong) == 0);
         TEST(source.bank.envelopes.entries[1].points[1].value == 0x8000);
         TEST(source.bank.envelopes.entries[1].points[2].value == 0xC000);
 
         // Already-equal span endpoints: toggling off flips the flag and
         // writes no point.
-        source.bank.envelopes.entries[1].ping_pong          = 1;
+        source.bank.envelopes.entries[1].flags              = Synth::envelope_ping_pong;
         source.bank.envelopes.entries[1].sustain_last_point = 2;
         source.bank.envelopes.entries[1].points[2].value    = source.bank.envelopes.entries[1].points[1].value;
         TEST(Sculptor::project_editor_to_graph(source, &graph, &mapping));
@@ -10391,7 +10391,7 @@ static void osc_instrument_node_regressions()
         toggle_change.node_idx = env_node;
         toggle_change.slot_idx = ping_pong_slot;
         TEST(Sculptor::apply_osc_graph_change(&source, &graph, &mapping, toggle_change));
-        TEST(source.bank.envelopes.entries[1].ping_pong == 0);
+        TEST((source.bank.envelopes.entries[1].flags & Synth::envelope_ping_pong) == 0);
         TEST(source.bank.envelopes.entries[1].points[2].value == source.bank.envelopes.entries[1].points[1].value);
     }
 }
@@ -10973,6 +10973,388 @@ static void check_pad_tilt_json_codec()
     }
 }
 
+// Envelope Quick Release regressions: the pure jump-target helpers and their
+// state contract, the release-timing sequence mirroring the engine's per-step
+// order, and the flag's JSON round-trips plus the envelope-node toggle slot.
+// realtime_synth.cpp is not linked into this unit, so the timing test mirrors
+// the engine step order (release, then advance, then the termination check
+// with the entered-already-parked count) the same way the decay mirror above
+// pins its policy.
+static void check_quick_release_regressions()
+{
+    // The jump-target selection.  The scan is inclusive from the
+    // sustain end point, compares effective values (min_max_delta may be
+    // negative or zero), skips higher-valued points, picks the first value
+    // <= the current one, falls back to the final point when nothing
+    // qualifies, and refuses targets that are not strictly ahead.
+    {
+        Synth::EnvelopeDescriptor env = {};
+        env.num_points                = 5;
+        env.sustain_first_point       = 2;
+        env.sustain_last_point        = 2;
+        env.min_value                 = 0.0f;
+        env.min_max_delta             = 1.0f / 65535.0f;
+        env.points[0]                 = { 0, 0x4000 }; // note-off anchor: quarter level
+        env.points[1]                 = { 2, 0xC000 };
+        env.points[2]                 = { 4, 0x8000 }; // sustain end: above the anchor
+        env.points[3]                 = { 6, 0x3000 }; // first point at/below the anchor
+        env.points[4]                 = { 8, 0 };      // final point
+
+        // The span end itself is scanned and the higher point 2 is skipped:
+        // the first at/below value wins and the state parks on it.  The
+        // reversed seed makes the cleared-direction assertion real.
+        Synth::EnvelopeState state = { 0, 0, 1 };
+        TEST(Synth::quick_release_target(env, state) == 3);
+        TEST(Synth::apply_quick_release(env, &state));
+        TEST(state.point == 3 && state.tick == env.points[3].position);
+        TEST(state.reverse == 0); // forward after the jump
+
+        // The target helper is pure: a seeded reverse flag survives it.
+        Synth::EnvelopeState pure_state = { 0, 0, 1 };
+        TEST(Synth::quick_release_target(env, pure_state) == 3);
+        TEST(pure_state.point == 0 && pure_state.tick == 0 && pure_state.reverse == 1);
+
+        // No qualifying point: every point after the sustain end sits above
+        // the current value, so the fallback target is the final point.
+        Synth::EnvelopeDescriptor rising = env;
+        rising.points[3]                 = { 6, 0xE000 }; // both later points above the anchor
+        rising.points[4]                 = { 8, 0x8000 };
+        Synth::EnvelopeState low_state   = { 0, 0 };
+        TEST(Synth::quick_release_target(rising, low_state) == 4);
+        TEST(Synth::apply_quick_release(rising, &low_state));
+        TEST(low_state.point == 4 && low_state.tick == rising.points[4].position);
+
+        // A target on the current position is not strictly ahead: apply
+        // refuses and leaves the state, including the reverse flag, intact.
+        Synth::EnvelopeState parked_state = { 6, 3, 1 };
+        TEST(Synth::quick_release_target(env, parked_state) == 3);
+        TEST(! Synth::apply_quick_release(env, &parked_state));
+        TEST(parked_state.point == 3 && parked_state.tick == 6 && parked_state.reverse == 1);
+
+        // A target behind the current position is refused the same way.
+        Synth::EnvelopeDescriptor behind = env;
+        behind.points[2]                 = { 4, 0x2000 }; // below the current point's value
+        Synth::EnvelopeState past_state  = { 6, 3, 0 };
+        TEST(Synth::quick_release_target(behind, past_state) == 2);
+        TEST(! Synth::apply_quick_release(behind, &past_state));
+        TEST(past_state.point == 3 && past_state.tick == 6);
+    }
+
+    // Inverted range: min_max_delta may be negative, so the scan must
+    // follow effective values; a raw comparison would pick point 3 (raw
+    // 0x2000 <= 0x8000) where the effective order picks point 2.
+    {
+        Synth::EnvelopeDescriptor inverted  = {};
+        inverted.num_points                 = 4;
+        inverted.sustain_first_point        = 2;
+        inverted.sustain_last_point         = 2;
+        inverted.min_value                  = 1.0f;
+        inverted.min_max_delta              = -1.0f / 65535.0f;
+        inverted.points[0]                  = { 0, 0x8000 }; // current effective 0.5
+        inverted.points[1]                  = { 2, 0x4000 }; // effective 0.75
+        inverted.points[2]                  = { 4, 0xC000 }; // effective 0.25: first at/below
+        inverted.points[3]                  = { 6, 0x2000 }; // effective 0.875
+        Synth::EnvelopeState inverted_state = { 0, 0 };
+        TEST(Synth::quick_release_target(inverted, inverted_state) == 2);
+        TEST(Synth::apply_quick_release(inverted, &inverted_state));
+        TEST(inverted_state.point == 2 && inverted_state.tick == 4);
+    }
+
+    // Flat range: a zero delta makes every effective value equal, so the
+    // scan start (the sustain end) qualifies.
+    {
+        Synth::EnvelopeDescriptor flat  = {};
+        flat.num_points                 = 4;
+        flat.sustain_first_point        = 2;
+        flat.sustain_last_point         = 2;
+        flat.min_value                  = 0.5f;
+        flat.min_max_delta              = 0.0f;
+        flat.points[0]                  = { 0, 0x1234 }; // raw values are irrelevant at delta 0
+        flat.points[1]                  = { 2, 0x1234 };
+        flat.points[2]                  = { 4, 0x1234 };
+        flat.points[3]                  = { 6, 0x1234 };
+        Synth::EnvelopeState flat_state = { 0, 0 };
+        TEST(Synth::quick_release_target(flat, flat_state) == 2);
+        TEST(Synth::apply_quick_release(flat, &flat_state));
+        TEST(flat_state.point == 2 && flat_state.tick == 4);
+    }
+
+    // The jump's state contract.  After a non-final jump the state
+    // parks exactly on the target point, so the next released eval returns
+    // the target's value and advances forward; after a final-point jump the
+    // released eval stays safely parked (the tick = target position
+    // convention must satisfy eval_envelope's parked asserts).
+    {
+        Synth::EnvelopeDescriptor env = {};
+        env.num_points                = 5;
+        env.sustain_first_point       = 2;
+        env.sustain_last_point        = 2;
+        env.min_value                 = 0.0f;
+        env.min_max_delta             = 1.0f / 65535.0f;
+        env.points[0]                 = { 0, 0x4000 };
+        env.points[1]                 = { 2, 0xC000 };
+        env.points[2]                 = { 4, 0x8000 };
+        env.points[3]                 = { 6, 0x3000 };
+        env.points[4]                 = { 8, 0 };
+
+        Synth::EnvelopeState state = { 0, 0 };
+        TEST(Synth::apply_quick_release(env, &state));
+        const float target_value = Synth::eval_envelope(env, &state, false);
+        TEST(approx(target_value, 0x3000 / 65535.0f, 0.0001f));
+        TEST(state.point == 3 && state.tick == 7); // one tick toward the final point
+
+        Synth::EnvelopeDescriptor rising = env;
+        rising.points[3]                 = { 6, 0xE000 };
+        rising.points[4]                 = { 8, 0x1000 };
+        Synth::EnvelopeState end_state   = { 0, 0 };
+        TEST(Synth::apply_quick_release(rising, &end_state));
+        const float end_value = Synth::eval_envelope(rising, &end_state, false);
+        TEST(approx(end_value, 0x1000 / 65535.0f, 0.0001f));
+        TEST(end_state.point == 4 && end_state.tick == 8);
+        const float parked_value = Synth::eval_envelope(rising, &end_state, false);
+        TEST(approx(parked_value, 0x1000 / 65535.0f, 0.0001f));
+        TEST(end_state.point == 4 && end_state.tick == 8);
+    }
+
+    // The release timing through the real call order.  The engine per
+    // control step, for a released envelope parameter: record whether the
+    // state entered the step already parked on the final point, advance the
+    // envelope once, bump the entered-parked count when released (reset
+    // otherwise), then run the termination check (advance_parameters then
+    // update_modulation's volume_termination_due order).
+    {
+        Synth::EnvelopeDescriptor env = {};
+        env.num_points                = 4;
+        env.sustain_first_point       = 3;
+        env.sustain_last_point        = 3; // sustain end is the final point
+        env.min_value                 = 0.0f;
+        env.min_max_delta             = 1.0f / 65535.0f;
+        env.points[0]                 = { 0, 0 };
+        env.points[1]                 = { 2, 0x4000 };
+        env.points[2]                 = { 4, 0x8000 };
+        env.points[3]                 = { 6, 0 };
+        const uint32_t final_point    = env.num_points - 1;
+
+        Synth::EnvelopeState state        = { 0, 0 };
+        uint16_t             parked_ticks = 0; // mirrors Parameter::last_point_ticks
+        auto                 engine_step  = [&](bool held) {
+            const bool entry_parked = state.point == final_point && state.tick == env.points[final_point].position;
+            Synth::eval_envelope(env, &state, held);
+            if (! held) {
+                parked_ticks = entry_parked ? static_cast<uint16_t>(parked_ticks + 1) : 0;
+            }
+            else {
+                parked_ticks = 0;
+            }
+            return parked_ticks >= 2;
+        };
+
+        // Quick release off, note-off mid-attack: the envelope plays
+        // through; the steps before and including the arrival at the final
+        // point are not due, and termination comes after the standard two
+        // entered-parked ticks.
+        for (uint32_t step = 0; step < 4; step++) {
+            TEST(! engine_step(true));
+        }
+        TEST(state.point == 2 && state.tick == 4);
+        TEST(! engine_step(false)); // still approaching the final point: not due
+        TEST(state.point == 2 && state.tick == 5);
+        TEST(! engine_step(false)); // arrival during release: count 0, not due
+        TEST(state.point == 3 && state.tick == 6);
+        TEST(! engine_step(false)); // one parked tick: count 1, not due
+        TEST(state.point == 3 && state.tick == 6);
+        TEST(engine_step(false)); // two parked ticks: count 2, due
+
+        // Release beginning parked: the first released step entered already
+        // parked (count 1), the second completes (count 2).
+        parked_ticks = 0;
+        state        = { 0, 0 };
+        for (uint32_t step = 0; step < 16; step++) {
+            engine_step(true);
+            if (state.point == final_point && state.tick == env.points[final_point].position) {
+                break;
+            }
+        }
+        TEST(state.point == final_point && state.tick == env.points[final_point].position);
+        TEST(! engine_step(false)); // first released step: count 1, not due
+        TEST(engine_step(false));   // second released step: count 2, due
+
+        // Quick release off, ping-pong span reversing at note-off: the
+        // released run continues forward past the span end without bouncing
+        // or flipping direction.
+        {
+            Synth::EnvelopeDescriptor bounce      = {};
+            bounce.num_points                     = 4;
+            bounce.sustain_first_point            = 1;
+            bounce.sustain_last_point             = 2;
+            bounce.min_value                      = 0.0f;
+            bounce.min_max_delta                  = 1.0f / 65535.0f;
+            bounce.points[0]                      = { 0, 0 };
+            bounce.points[1]                      = { 2, 0x4000 };
+            bounce.points[2]                      = { 4, 0x8000 };
+            bounce.points[3]                      = { 6, 0 };
+            bounce.flags                          = Synth::envelope_ping_pong;
+            Synth::EnvelopeState bounce_state     = { 0, 0 };
+            auto                 walk_to_span_end = [&bounce](Synth::EnvelopeState* walk_state) {
+                while (! (walk_state->point == 2 && walk_state->tick == bounce.points[2].position)) {
+                    Synth::eval_envelope(bounce, walk_state, true);
+                }
+            };
+            walk_to_span_end(&bounce_state);
+            Synth::eval_envelope(bounce, &bounce_state,
+                                 true); // reverses off the span end
+            TEST(bounce_state.reverse == 1);
+            TEST(Synth::eval_envelope(bounce, &bounce_state, false) != 0.0f); // forward into the span end
+            TEST(bounce_state.point == 2 && bounce_state.tick == 4);          // no bounce back into the span
+            TEST(Synth::eval_envelope(bounce, &bounce_state, false) != 0.0f);
+            TEST(bounce_state.point == 2 && bounce_state.tick == 5); // one tick per step toward the end
+            TEST(Synth::eval_envelope(bounce, &bounce_state, false) != 0.0f);
+            TEST(bounce_state.point == 3 && bounce_state.tick == 6);
+        }
+    }
+
+    // The quick_release flag survives a bank round-trip, and a document
+    // without the key decodes with the flag off (a zero flag emits no key).
+    {
+        static Synth::InstrumentEditorBank source;
+        static Synth::Instrument           instrument = {};
+        build_zone_fixture(&source, &instrument);
+        source.bank.envelopes.entries[1].flags = Synth::envelope_ping_pong | Synth::envelope_quick_release;
+        static char    payload[Synth::library_payload_max];
+        const uint32_t length = Synth::encode_editor_bank_json(&source, payload, sizeof(payload));
+        TEST(length > 0);
+        TEST(strstr(payload, "\"quick_release\":1") != nullptr);
+        static Synth::InstrumentEditorBank loaded;
+        memset(static_cast<void*>(&loaded), 0, sizeof(loaded));
+        TEST(Synth::decode_editor_bank_json(payload, length, &loaded));
+        TEST((loaded.bank.envelopes.entries[1].flags & Synth::envelope_quick_release) != 0);
+        TEST((loaded.bank.envelopes.entries[1].flags & Synth::envelope_ping_pong) != 0);
+
+        source.bank.envelopes.entries[1].flags = Synth::envelope_ping_pong;
+        const uint32_t legacy_length           = Synth::encode_editor_bank_json(&source, payload, sizeof(payload));
+        TEST(legacy_length > 0);
+        TEST(strstr(payload, "\"quick_release\"") == nullptr);
+        memset(static_cast<void*>(&loaded), 0, sizeof(loaded));
+        TEST(Synth::decode_editor_bank_json(payload, legacy_length, &loaded));
+        TEST(loaded.bank.envelopes.entries[1].flags == Synth::envelope_ping_pong);
+    }
+
+    // The instrument-document format carries the flag the same way.
+    {
+        Synth::Instrument         instr;
+        Synth::EnvelopeDescriptor envs[Synth::instrument_max_envelopes];
+        Synth::LFODescriptor      lfos[Synth::instrument_max_lfos];
+        uint32_t                  env_count = 0;
+        uint32_t                  lfo_count = 0;
+
+        static const char flagged_doc[] = "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\","
+                                          "\"volume\":{\"base\":1,\"envelope\":{"
+                                          "\"points\":[{\"time_seconds\":0,\"level\":0},{\"time_seconds\":0.1,"
+                                          "\"level\":1}],"
+                                          "\"sustain_start\":1,\"sustain_end\":1,\"ping_pong\":1,\"quick_"
+                                          "release\":1}}}]}";
+        TEST(Synth::decode_instrument_json(flagged_doc,
+                                           sizeof(flagged_doc) - 1,
+                                           &instr,
+                                           envs,
+                                           &env_count,
+                                           lfos,
+                                           &lfo_count));
+        TEST(env_count == 1);
+        TEST((envs[0].flags & Synth::envelope_quick_release) != 0);
+        TEST((envs[0].flags & Synth::envelope_ping_pong) != 0);
+
+        // Round-trip through the encoder keeps both bits.
+        static Synth::InstrumentBank desc_bank = {};
+        desc_bank                              = {};
+        desc_bank.envelopes.num_allocated      = env_count;
+        for (uint32_t i = 0; i < env_count; i++) {
+            desc_bank.envelopes.entries[i] = envs[i];
+        }
+        static char    doc_text[8192]; // static: 8 KB is too much stack
+        const uint32_t doc_len = Synth::encode_instrument_json(doc_text, sizeof(doc_text), &instr, &desc_bank);
+        TEST(doc_len > 0);
+        TEST(strstr(doc_text, "\"quick_release\":1") != nullptr);
+        TEST(Synth::decode_instrument_json(doc_text, doc_len, &instr, envs, &env_count, lfos, &lfo_count));
+        TEST((envs[0].flags & Synth::envelope_quick_release) != 0);
+        TEST((envs[0].flags & Synth::envelope_ping_pong) != 0);
+
+        // An envelope without either flag key decodes with flags 0.
+        static const char unflagged_doc[] = "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\","
+                                            "\"volume\":{\"base\":1,\"envelope\":{"
+                                            "\"points\":[{\"time_seconds\":0,\"level\":0},{\"time_seconds\":0.1,"
+                                            "\"level\":1}],"
+                                            "\"sustain_start\":1,\"sustain_end\":1}}}]}";
+        TEST(Synth::decode_instrument_json(unflagged_doc,
+                                           sizeof(unflagged_doc) - 1,
+                                           &instr,
+                                           envs,
+                                           &env_count,
+                                           lfos,
+                                           &lfo_count));
+        TEST(env_count == 1);
+        TEST(envs[0].flags == 0);
+    }
+
+    // The Quick Release toggle slot on the envelope node flips the
+    // flag bit in the bank descriptor, mirroring the Ping-Pong toggle, and
+    // leaves the ping-pong bit alone.
+    {
+        static Synth::InstrumentEditorBank source;
+        static Synth::Instrument           instrument = {};
+        static Sculptor::Graph             graph;
+        static Sculptor::OscGraphMapping   mapping;
+        static Sculptor::GraphChange       discarded[Sculptor::max_pending_changes];
+
+        build_zone_fixture(&source, &instrument);
+        source.bank.envelopes.entries[1].sustain_first_point = 1;
+        source.bank.envelopes.entries[1].sustain_last_point  = 2;
+        source.bank.envelopes.entries[1].flags = Synth::envelope_ping_pong | Synth::envelope_quick_release;
+        TEST(Sculptor::project_editor_to_graph(source, &graph, &mapping));
+        graph.take_changes(discarded, Sculptor::max_pending_changes);
+        const int32_t env_instance = find_detached_by_desc(mapping, 1, 2);
+        TEST(env_instance >= 0);
+        const uint32_t env_node = mapping.detached[env_instance].node_idx;
+        TEST(env_node != Sculptor::pool_no_slot);
+        uint32_t quick_release_slot = Sculptor::pool_no_slot;
+        TEST(find_graph_slot(graph, env_node, "Quick Release", &quick_release_slot));
+        TEST(graph.node(env_node).slots.entries[quick_release_slot].value.toggle == true);
+
+        Sculptor::PropertyValue toggle_edit = {};
+        toggle_edit.toggle                  = false;
+        graph.set_slot_value(env_node, quick_release_slot, toggle_edit);
+        Sculptor::GraphChange toggle_change = {};
+        toggle_change.kind                  = Sculptor::ChangeKind::value_changed;
+        toggle_change.node_idx              = env_node;
+        toggle_change.slot_idx              = quick_release_slot;
+        TEST(Sculptor::apply_osc_graph_change(&source, &graph, &mapping, toggle_change));
+        TEST((source.bank.envelopes.entries[1].flags & Synth::envelope_quick_release) == 0);
+        TEST((source.bank.envelopes.entries[1].flags & Synth::envelope_ping_pong) != 0); // sibling bit survives
+
+        toggle_edit.toggle = true;
+        graph.set_slot_value(env_node, quick_release_slot, toggle_edit);
+        toggle_change.node_idx = env_node;
+        toggle_change.slot_idx = quick_release_slot;
+        TEST(Sculptor::apply_osc_graph_change(&source, &graph, &mapping, toggle_change));
+        TEST((source.bank.envelopes.entries[1].flags & Synth::envelope_quick_release) != 0);
+
+        // Toggling Ping-Pong leaves the quick-release bit alone too.
+        uint32_t ping_pong_slot = Sculptor::pool_no_slot;
+        TEST(find_graph_slot(graph, env_node, "Ping-Pong", &ping_pong_slot));
+        toggle_edit.toggle     = false;
+        toggle_change.slot_idx = ping_pong_slot;
+        graph.set_slot_value(env_node, ping_pong_slot, toggle_edit);
+        TEST(Sculptor::apply_osc_graph_change(&source, &graph, &mapping, toggle_change));
+        TEST((source.bank.envelopes.entries[1].flags & Synth::envelope_quick_release) != 0);
+        TEST((source.bank.envelopes.entries[1].flags & Synth::envelope_ping_pong) == 0);
+        toggle_edit.toggle = true;
+        graph.set_slot_value(env_node, ping_pong_slot, toggle_edit);
+        TEST(Sculptor::apply_osc_graph_change(&source, &graph, &mapping, toggle_change));
+        TEST((source.bank.envelopes.entries[1].flags & Synth::envelope_quick_release) != 0);
+        TEST((source.bank.envelopes.entries[1].flags & Synth::envelope_ping_pong) != 0);
+    }
+}
+
 int main()
 {
     external_held_notes_regressions();
@@ -11184,7 +11566,7 @@ int main()
         // reversing continuously at both span ends, indefinitely.
         {
             Synth::EnvelopeDescriptor bounce = env;
-            bounce.ping_pong                 = 1;
+            bounce.flags                     = Synth::envelope_ping_pong;
             Synth::EnvelopeState state       = { 0, 0 };
             walk_to_span_point(&state, 2);
             uint32_t ticks[8];
@@ -11199,7 +11581,7 @@ int main()
             TEST(values[2] == values[6] && values[3] == values[7]);
             // A single-point span ignores the ping-pong flag and parks.
             Synth::EnvelopeDescriptor single  = env;
-            single.ping_pong                  = 1;
+            single.flags                      = Synth::envelope_ping_pong;
             single.sustain_first_point        = 1;
             single.sustain_last_point         = 1;
             Synth::EnvelopeState single_state = { 0, 0 };
@@ -19909,7 +20291,7 @@ int main()
                                            &env_count,
                                            lfos,
                                            &lfo_count));
-        TEST(envs[0].ping_pong == 1);
+        TEST((envs[0].flags & Synth::envelope_ping_pong) != 0);
         TEST(envs[0].points[3].value != envs[0].points[1].value);
 
         // Re-encode keeps the normalized value: decode the unequal document
@@ -19960,7 +20342,7 @@ int main()
                                            lfos,
                                            &lfo_count));
         TEST(instr.release_seconds == 12.5f);
-        TEST(env_count == 1 && envs[0].ping_pong == 1);
+        TEST(env_count == 1 && (envs[0].flags & Synth::envelope_ping_pong) != 0);
         desc_bank.envelopes.num_allocated = env_count;
         for (uint32_t i = 0; i < env_count; i++) {
             desc_bank.envelopes.entries[i] = envs[i];
@@ -19969,7 +20351,7 @@ int main()
         TEST(release_len > 0);
         TEST(Synth::decode_instrument_json(doc_text, release_len, &instr, envs, &env_count, lfos, &lfo_count));
         TEST(instr.release_seconds == 12.5f);
-        TEST(envs[0].ping_pong == 1);
+        TEST((envs[0].flags & Synth::envelope_ping_pong) != 0);
 
         // The decoder refuses a negative, oversized or non-finite release and
         // a ping-pong flag above 1.
@@ -20011,25 +20393,36 @@ int main()
                                              &env_count,
                                              lfos,
                                              &lfo_count));
+        static const char quick_release_two_doc[] =
+            "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\",\"volume\":{\"base\":1,"
+            "\"envelope\":{\"points\":[{\"time_seconds\":0,\"level\":0},{\"time_seconds\":0.1,\"level\":1}],"
+            "\"sustain_start\":1,\"sustain_end\":1,\"quick_release\":2}}}]}";
+        TEST(! Synth::decode_instrument_json(quick_release_two_doc,
+                                             sizeof(quick_release_two_doc) - 1,
+                                             &instr,
+                                             envs,
+                                             &env_count,
+                                             lfos,
+                                             &lfo_count));
 
         // Pool (editor bank) form: the fields round-trip and the absent
         // defaults stay 0.
         static Synth::InstrumentEditorBank pool_source;
         build_named_fm_fixture(&pool_source);
         pool_source.bank.instruments.entries[0].release_seconds = 3.5f;
-        pool_source.bank.envelopes.entries[0].ping_pong         = 1;
+        pool_source.bank.envelopes.entries[0].flags             = Synth::envelope_ping_pong;
         static char pool_payload[Synth::library_payload_max];
         uint32_t    pool_len = Synth::encode_editor_bank_json(&pool_source, pool_payload, sizeof(pool_payload));
         TEST(pool_len > 0);
         static Synth::InstrumentEditorBank pool_decoded;
         TEST(Synth::decode_editor_bank_json(pool_payload, pool_len, &pool_decoded));
         TEST(pool_decoded.bank.instruments.entries[0].release_seconds == 3.5f);
-        TEST(pool_decoded.bank.envelopes.entries[0].ping_pong == 1);
+        TEST((pool_decoded.bank.envelopes.entries[0].flags & Synth::envelope_ping_pong) != 0);
 
         // Pool form: a multi-point span with unequal endpoints, ping-pong
         // off, decodes normalized.
         Synth::EnvelopeDescriptor& pool_env = pool_source.bank.envelopes.entries[0];
-        pool_env.ping_pong                  = 0;
+        pool_env.flags                      = 0;
         pool_env.sustain_first_point        = 0;
         pool_env.sustain_last_point         = 1;
         pool_env.points[0].value            = 0x2000;
@@ -20043,12 +20436,12 @@ int main()
 
         // Pool form: absent fields decode as 0.
         pool_source.bank.instruments.entries[0].release_seconds = 0.0f;
-        pool_env.ping_pong                                      = 0;
+        pool_env.flags                                          = 0;
         pool_len = Synth::encode_editor_bank_json(&pool_source, pool_payload, sizeof(pool_payload));
         TEST(pool_len > 0);
         TEST(Synth::decode_editor_bank_json(pool_payload, pool_len, &pool_decoded));
         TEST(pool_decoded.bank.instruments.entries[0].release_seconds == 0.0f);
-        TEST(pool_decoded.bank.envelopes.entries[0].ping_pong == 0);
+        TEST((pool_decoded.bank.envelopes.entries[0].flags & Synth::envelope_ping_pong) == 0);
 
         // Pool form: the decoder refuses an out-of-range release.  Each splice
         // starts from a fresh encode and rewrites only the encoded number, so
@@ -24097,6 +24490,7 @@ int main()
             check_shared_instrument_json_domains();
             check_pad_json_codec();
             check_pad_tilt_json_codec();
+            check_quick_release_regressions();
             // Ordering of the GUI paste command against the candidate helper.
             check_zone_paste_source_ordering();
             check_osc_add_source_contract();

@@ -1010,6 +1010,28 @@ static bool get_next_midi_event(DispatchedMidiEvent* event, uint32_t end_samples
     return true;
 }
 
+// Enters a voice's release: marks it releasing (an already-releasing voice
+// keeps fading and must never jump twice) and, for every quick-release
+// envelope parameter owned by the voice, jumps the envelope forward to its
+// release target.  All release entry points call this before the next
+// update_modulation() step, so the jump lands before the next envelope
+// evaluation.
+static void begin_voice_release(uint32_t voice_idx)
+{
+    Voice& voice = voices[voice_idx];
+    if (voice.releasing) {
+        return;
+    }
+    voice.releasing = true;
+    for (uint32_t node_idx = 1; node_idx < total_params; node_idx++) {
+        if (param_descs[node_idx].kind == Synth::ParamKind::envelope &&
+            parameters[node_idx].sustain_voice == voice_idx &&
+            (param_descs[node_idx].envelope.flags & Synth::envelope_quick_release) != 0) {
+            Synth::apply_quick_release(param_descs[node_idx].envelope, &parameters[node_idx].envelope);
+        }
+    }
+}
+
 static void process_note_off(uint32_t delta_samples, const DispatchedMidiEvent& event)
 {
     const uint32_t channel   = event.channel;
@@ -1023,7 +1045,7 @@ static void process_note_off(uint32_t delta_samples, const DispatchedMidiEvent& 
             voices[voice_idx].sustained = true; // the pedal holds the voice; note-off defers
         }
         else {
-            voices[voice_idx].releasing = true; // an already-releasing voice keeps fading
+            begin_voice_release(voice_idx);
         }
     }
 }
@@ -1036,7 +1058,7 @@ static void release_sustained_voices(uint32_t channel)
         Voice& voice = voices[voice_idx];
         if (voice.active && voice.sustained && voice.channel == channel) {
             voice.sustained = false;
-            voice.releasing = true;
+            begin_voice_release(voice_idx);
         }
     }
 }
@@ -1770,10 +1792,10 @@ static void advance_parameters()
 
 // True when this oscillator's volume target is due its final fade block under the voice-lifetime
 // rules: a running instrument release decay owns termination while it is still incomplete and the
-// dest level is audible (it keeps decaying through note-off and frees at the cutoff); otherwise no
-// volume envelope, or a volume envelope whose sustain sits on the final point, fades on the first
-// released block; otherwise the envelope first runs to its final point and holds there for one tick
-// (two entered-parked steps) before the fade.
+// dest level is audible (it keeps decaying through note-off and frees at the cutoff); an
+// oscillator without a volume envelope fades on the first released block; every released
+// envelope that ends parked at the final point completes after the standard two entered-parked
+// steps, then the final fade.
 static bool volume_termination_due(uint32_t osc_idx)
 {
     const uint32_t                env_node = osc_param(osc_idx, osc_volume_env);
@@ -1791,11 +1813,6 @@ static bool volume_termination_due(uint32_t osc_idx)
     }
 
     if (env_desc.kind != Synth::ParamKind::envelope) {
-        return true;
-    }
-
-    const Synth::EnvelopeDescriptor& envelope = env_desc.envelope;
-    if (envelope.sustain_last_point >= envelope.num_points - 1) {
         return true;
     }
     return parameters[env_node].last_point_ticks >= 2;
@@ -2068,7 +2085,7 @@ static void render_audio_step()
         Voice& voice = voices[voice_idx];
         if (voice.active && ! voice.releasing && voice.release_sample) {
             if (voice.release_sample <= end_samples) {
-                voice.releasing = true;
+                begin_voice_release(voice_idx);
             }
         }
     }

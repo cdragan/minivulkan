@@ -597,7 +597,8 @@ static void enc_envelope_members(Out& o, const Synth::EnvelopeDescriptor& env)
     key_uint(o, "num_points", env.num_points);
     key_uint_nonzero(o, "sustain_first", env.sustain_first_point);
     key_uint_nonzero(o, "sustain_last", env.sustain_last_point);
-    key_uint_nonzero(o, "ping_pong", env.ping_pong);
+    key_uint_nonzero(o, "ping_pong", (env.flags & Synth::envelope_ping_pong) != 0);
+    key_uint_nonzero(o, "quick_release", (env.flags & Synth::envelope_quick_release) != 0);
     key_float_nonzero(o, "min_value", env.min_value);
     key_float_nonzero(o, "min_max_delta", env.min_max_delta);
 
@@ -2128,6 +2129,17 @@ static void decode_instrument(Walker& w, uint32_t obj, Synth::Instrument& instr)
     instr.layer_count = have_count ? layer_count : (have_layers ? num_layers : 1);
 }
 
+// Decodes one envelope flag key (the value must be 0 or 1) and merges its bit
+// into flags when nonzero; a failed decode merges nothing.
+static void decode_envelope_flag(Walker& w, uint32_t val_idx, uint8_t flag_mask, uint8_t* flags)
+{
+    uint8_t flag = 0;
+    want_u8(w, val_idx, 1, &flag);
+    if (flag) {
+        *flags |= flag_mask;
+    }
+}
+
 static bool envelope_member(Walker&                    w,
                             uint32_t                   key_idx,
                             uint32_t                   val_idx,
@@ -2149,7 +2161,12 @@ static bool envelope_member(Walker&                    w,
         return true;
     }
     if (key_eq(w, key_idx, "ping_pong")) {
-        want_u8(w, val_idx, 1, &env.ping_pong);
+        // The envelope starts zero-initialized, so the bits merge into flags.
+        decode_envelope_flag(w, val_idx, Synth::envelope_ping_pong, &env.flags);
+        return true;
+    }
+    if (key_eq(w, key_idx, "quick_release")) {
+        decode_envelope_flag(w, val_idx, Synth::envelope_quick_release, &env.flags);
         return true;
     }
     if (key_eq(w, key_idx, "min_value")) {
@@ -2219,7 +2236,7 @@ static void decode_envelope(Walker& w, uint32_t obj, Synth::EnvelopeDescriptor& 
     // construction: the span's last point value is forced to the first
     // point's value.  An unset span stays a single-point span (defaults 0),
     // so nothing is forced there.
-    if (! env.ping_pong && env.sustain_last_point > env.sustain_first_point) {
+    if ((env.flags & Synth::envelope_ping_pong) == 0 && env.sustain_last_point > env.sustain_first_point) {
         env.points[env.sustain_last_point].value = env.points[env.sustain_first_point].value;
     }
 }
@@ -2961,9 +2978,9 @@ static void canonicalize_param(Synth::ParamDescriptor& param)
             fresh.kind                     = param.kind;
             fresh.envelope                 = param.envelope;
             Synth::EnvelopeDescriptor& env = fresh.envelope;
-            // The decoded ping_pong flag is 0/1; clamp so union-arm rebuilds stay
-            // arm-independent.
-            env.ping_pong     = env.ping_pong ? 1 : 0;
+            // The decoded flags carry only the two known bits; the mask keeps
+            // union-arm rebuilds arm-independent.
+            env.flags &= Synth::envelope_ping_pong | Synth::envelope_quick_release;
             env.min_value     = canonical_float(env.min_value);
             env.min_max_delta = canonical_float(env.min_max_delta);
             memset(&env.points[env.num_points],
@@ -3025,7 +3042,7 @@ static void canonicalize_editor_bank(Synth::InstrumentEditorBank* editor_bank)
 
     for (uint32_t i = 0; i < bank.envelopes.num_allocated; i++) {
         Synth::EnvelopeDescriptor& env = bank.envelopes.entries[i];
-        env.ping_pong                  = env.ping_pong ? 1 : 0;
+        env.flags                      = env.flags & (Synth::envelope_ping_pong | Synth::envelope_quick_release);
         env.min_value                  = canonical_float(env.min_value);
         env.min_max_delta              = canonical_float(env.min_max_delta);
         memset(&env.points[env.num_points], 0, (Synth::max_envelope_points - env.num_points) * sizeof(env.points[0]));
@@ -3145,7 +3162,7 @@ static void decode_envelope_doc(Walker&                    w,
     float    depth                                 = 1.0f;
     bool     sustain_start_set                     = false;
     bool     sustain_end_set                       = false;
-    uint8_t  ping_pong                             = 0;
+    uint8_t  flags                                 = 0;
 
     walk_object(w, obj, [&](uint32_t key_idx, uint32_t val_idx) {
         if (key_eq(w, key_idx, "points")) {
@@ -3181,9 +3198,10 @@ static void decode_envelope_doc(Walker&                    w,
             want_uint(w, val_idx, Synth::max_envelope_points - 1, &sustain_end);
             sustain_end_set = true;
         }
-        else if (key_eq(w, key_idx, "ping_pong")) {
-            want_u8(w, val_idx, 1, &ping_pong);
-        }
+        else if (key_eq(w, key_idx, "ping_pong"))
+            decode_envelope_flag(w, val_idx, Synth::envelope_ping_pong, &flags);
+        else if (key_eq(w, key_idx, "quick_release"))
+            decode_envelope_flag(w, val_idx, Synth::envelope_quick_release, &flags);
         else if (key_eq(w, key_idx, "depth"))
             want_float(w, val_idx, &depth);
         else
@@ -3219,7 +3237,7 @@ static void decode_envelope_doc(Walker&                    w,
     // decode that later fails validation is harmless.
     const uint32_t start_eff = sustain_start_set ? sustain_start : num_points - 1;
     const uint32_t end_eff   = sustain_end_set ? sustain_end : num_points - 1;
-    if (ping_pong == 0 && end_eff > start_eff) {
+    if ((flags & Synth::envelope_ping_pong) == 0 && end_eff > start_eff) {
         levels[end_eff] = levels[start_eff];
     }
 
@@ -3253,7 +3271,7 @@ static void decode_envelope_doc(Walker&                    w,
     }
     env.num_points          = static_cast<uint8_t>(num_points);
     env.sustain_first_point = static_cast<uint8_t>(sustain_start);
-    env.ping_pong           = ping_pong;
+    env.flags               = flags;
     env.sustain_last_point  = static_cast<uint8_t>(sustain_end);
 
     // A flat envelope (delta 0) is the constant min: every quantized value 0.
@@ -4245,7 +4263,8 @@ static uint32_t encode_instrument_json_for_domain(char*                         
                 o.uint_value(env.sustain_first_point);
                 o.key("sustain_end");
                 o.uint_value(env.sustain_last_point);
-                key_uint_nonzero(o, "ping_pong", env.ping_pong);
+                key_uint_nonzero(o, "ping_pong", (env.flags & Synth::envelope_ping_pong) != 0);
+                key_uint_nonzero(o, "quick_release", (env.flags & Synth::envelope_quick_release) != 0);
                 // The depth rides beside the shape; 1 is the default and omits the key.
                 if (gen.envelope_depth != 1.0f) {
                     o.key("depth");

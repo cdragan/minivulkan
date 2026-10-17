@@ -135,8 +135,9 @@ float eval_envelope(const EnvelopeDescriptor& envelope, EnvelopeState* state, bo
 
     // Ping-pong sustain span: the direction reverses at both span ends
     // instead of looping back to the span start.  Single-point spans (and
-    // ping_pong off) keep the legacy loop below.
-    if (sustain && envelope.ping_pong && envelope.sustain_last_point > envelope.sustain_first_point) {
+    // the ping_pong flag off) keep the legacy loop below.
+    if (sustain && (envelope.flags & envelope_ping_pong) &&
+        envelope.sustain_last_point > envelope.sustain_first_point) {
         if (! state->reverse) {
             if (env_point < envelope.sustain_last_point) {
                 // Ordinary forward advance through the span, as without ping-pong.
@@ -323,6 +324,44 @@ uint32_t get_ringbuf_contig_tail(const uint64_t pos, const uint32_t capacity)
 }
 
 } // namespace Synth
+
+uint16_t Synth::quick_release_target(const EnvelopeDescriptor& envelope, const EnvelopeState& state)
+{
+    // Defensive: num_points == 0 (hand-built malformed JSON) must not underflow
+    // the scan bound.
+    const uint32_t last_point = envelope.num_points ? envelope.num_points - 1 : 0;
+    // Bank-envelope decode does not validate sustain_last_point < num_points,
+    // so the scan start clamps defensively.
+    const uint32_t scan_start = envelope.sustain_last_point < last_point ? envelope.sustain_last_point : last_point;
+    const float    current    = envelope_value_at(envelope, state);
+
+    for (uint32_t point_idx = scan_start; point_idx < last_point; point_idx++) {
+        const float point_value =
+            envelope.min_value + static_cast<float>(envelope.points[point_idx].value) * envelope.min_max_delta;
+        if (point_value <= current) {
+            return static_cast<uint16_t>(point_idx);
+        }
+    }
+    return static_cast<uint16_t>(last_point);
+}
+
+bool Synth::apply_quick_release(const EnvelopeDescriptor& envelope, EnvelopeState* state)
+{
+    const uint16_t target = quick_release_target(envelope, *state);
+
+    // Strictly ahead in (point, tick) order; the point positions are sorted,
+    // so a same-point target is ahead only when its position is past the tick.
+    const bool ahead =
+        target > state->point || (target == state->point && envelope.points[target].position > state->tick);
+    if (! ahead) {
+        return false;
+    }
+
+    state->point   = target;
+    state->tick    = envelope.points[target].position;
+    state->reverse = 0;
+    return true;
+}
 
 uint32_t Synth::sustain_decay_ticks(const float release_seconds)
 {

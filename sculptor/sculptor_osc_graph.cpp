@@ -806,7 +806,8 @@ static uint32_t create_env_node(Sculptor::Graph*                 graph,
     graph->add_slot(node, output_slot("Value"));
     graph->add_slot(node, real_slot("Value (min)", env.min_value));
     graph->add_slot(node, real_slot("Value (max)", env.min_value + 65535.0f * env.min_max_delta));
-    graph->add_slot(node, Sculptor::toggle_slot("Ping-Pong", env.ping_pong != 0));
+    graph->add_slot(node, Sculptor::toggle_slot("Ping-Pong", (env.flags & Synth::envelope_ping_pong) != 0));
+    graph->add_slot(node, Sculptor::toggle_slot("Quick Release", (env.flags & Synth::envelope_quick_release) != 0));
     // Point and sustain editing lives in the curve state widget; property
     // slots for those fields would be a second stale UI over the same data.
     return node;
@@ -1975,10 +1976,27 @@ bool Sculptor::apply_osc_graph_descriptor_edit(const Graph&           graph,
             // the span start immediately (same rule as decode,
             // sculptor_bank_json.cpp).  Events carry no old value, so the
             // previous flag state comes from the descriptor itself.
-            if (env.ping_pong && ! value.toggle && env.sustain_last_point > env.sustain_first_point) {
+            if ((env.flags & Synth::envelope_ping_pong) != 0 && ! value.toggle &&
+                env.sustain_last_point > env.sustain_first_point) {
                 env.points[env.sustain_last_point].value = env.points[env.sustain_first_point].value;
             }
-            env.ping_pong = value.toggle ? 1 : 0;
+            if (value.toggle) {
+                env.flags |= Synth::envelope_ping_pong;
+            }
+            else {
+                env.flags &= ~Synth::envelope_ping_pong;
+            }
+            return true;
+        }
+        if (slot.property_type == PropertyType::toggle && strncmp(slot.name, "Quick Release", sizeof(slot.name)) == 0) {
+            // Sibling of the Ping-Pong bit; no cross-field forcing, so the
+            // descriptor stays symmetric with its JSON decode.
+            if (value.toggle) {
+                env.flags |= Synth::envelope_quick_release;
+            }
+            else {
+                env.flags &= ~Synth::envelope_quick_release;
+            }
             return true;
         }
         return false;

@@ -44,9 +44,16 @@ struct LFODescriptor {
     float    min_max_delta; // Delta between minimum and maximum value produced
 };
 
+// Per-envelope behavior bits, stored in EnvelopeDescriptor::flags.
+enum : uint8_t {
+    envelope_ping_pong     = 1 << 0, // Sustain span bounces between its ends (multi-point spans only)
+    envelope_quick_release = 1 << 1, // Note-off jumps forward to the first release-tail point at or below the current
+                                     // level; the final point is the fallback
+};
+
 struct EnvelopeDescriptor {
     uint8_t num_points;
-    uint8_t ping_pong;           // Sustain span bounces between its ends instead of looping (multi-point spans only)
+    uint8_t flags;               // Bitfield of envelope_ping_pong / envelope_quick_release
     uint8_t sustain_first_point; // Index of sustain loop start point
     uint8_t sustain_last_point;  // Index of last point of sustain loop (can be same as first point)
     float   min_value;           // Minimum value produced by the envelope
@@ -140,6 +147,25 @@ float eval_envelope(const EnvelopeDescriptor& envelope, EnvelopeState* state, bo
 
 // Evaluates the envelope at the given state's position without modifying the state.
 float eval_envelope_at(const EnvelopeDescriptor& envelope, const EnvelopeState& state);
+
+// Quick-release target: the first point index >= sustain_last_point
+// (clamped into [0, num_points-1]) whose effective value is <= the envelope's
+// current effective value at the given state (effective = min_value + raw *
+// min_max_delta, the same arithmetic as eval_envelope_at).  The comparison is
+// on effective values because min_max_delta is not guaranteed nonnegative (a
+// negative delta reverses the effective-value order, a zero delta makes every
+// effective value equal, so the scan start wins).  The final point when no
+// point qualifies.  Pure: mutates nothing.
+uint16_t quick_release_target(const EnvelopeDescriptor& envelope, const EnvelopeState& state);
+
+// Applies the quick-release note-off jump in place: moves the state to
+// quick_release_target when that location is strictly ahead of the current
+// position ((point, tick) compared; already at the end -> no move), sets
+// the tick to the target point's position, and clears the reverse flag (the
+// state direction is forward after the jump).  The parked state is
+// exactly what the next eval_envelope step with sustain == false expects.
+// Returns true when moved.
+bool apply_quick_release(const EnvelopeDescriptor& envelope, EnvelopeState* state);
 
 // Converts a MIDI note to frequency in Hz.
 // - midi_note       - input MIDI note (69 = A4 = 440 Hz when freq_mult is 1)

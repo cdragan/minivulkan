@@ -339,8 +339,14 @@
 					"maximum": 1,
 					"default": 0,
 					"description": "Multi-point sustain spans bounce between their ends instead of looping back to the span start; requires more than one point in the span.  0 keeps the legacy loop."
-				}
-			,
+				},
+				"quick_release": {
+					"type": "integer",
+					"minimum": 0,
+					"maximum": 1,
+					"default": 0,
+					"description": "Note-off jumps forward to the first release-tail point at or below the current level; the final point is the fallback.  0 plays through the sustain span to the end."
+				},
 				"depth": {"type": "number", "default": 1, "description": "Multiplier on this envelope's contribution into its target. Lets several targets reuse one envelope shape at different amounts. 0 silences the contribution."}},
 			"required": ["points"],
 			"additionalProperties": false
