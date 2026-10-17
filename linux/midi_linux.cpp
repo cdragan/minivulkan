@@ -167,7 +167,7 @@ static void* midi_input_main(void*)
 
         for (uint32_t idx = 0; idx < count; idx++) {
             if (Synth::midi_decode_byte(&decoder, bytes[idx], &event)) {
-                Synth::submit_external_midi_event(event);
+                Synth::submit_device_midi_event(event);
             }
         }
     }

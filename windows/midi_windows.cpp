@@ -34,16 +34,19 @@ static void CALLBACK midi_in_proc(HMIDIIN, UINT message, DWORD_PTR, DWORD_PTR pa
     const uint8_t      data_1 = static_cast<uint8_t>(param1 >> 8);
     const uint8_t      data_2 = static_cast<uint8_t>(param1 >> 16);
 
-    if (Synth::midi_decode_byte(&decoder, status, &event))
-        Synth::submit_external_midi_event(event);
-    if (Synth::midi_decode_byte(&decoder, data_1, &event))
-        Synth::submit_external_midi_event(event);
+    if (Synth::midi_decode_byte(&decoder, status, &event)) {
+        Synth::submit_device_midi_event(event);
+    }
+    if (Synth::midi_decode_byte(&decoder, data_1, &event)) {
+        Synth::submit_device_midi_event(event);
+    }
     // Program change and channel pressure carry one data byte; all other
     // channel messages carry two.  The decoder ignores realtime and system
     // common bytes, so trailing data bytes of such messages are harmless.
     if ((status & 0xF0) != 0xC0 && (status & 0xF0) != 0xD0) {
-        if (Synth::midi_decode_byte(&decoder, data_2, &event))
-            Synth::submit_external_midi_event(event);
+        if (Synth::midi_decode_byte(&decoder, data_2, &event)) {
+            Synth::submit_device_midi_event(event);
+        }
     }
 }
 

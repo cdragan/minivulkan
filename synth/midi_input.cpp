@@ -25,6 +25,10 @@ std::atomic_flag      submit_lock = ATOMIC_FLAG_INIT;
 // update them with relaxed atomics; the synth editor keyboard reads them.
 static std::atomic<uint32_t> external_held_notes[Synth::max_channels][4];
 
+// Channel device MIDI is routed to, -1 = passthrough.  The GUI thread stores
+// it once per frame, OS MIDI producer threads load it per event.
+static std::atomic<int32_t> midi_route_target = -1;
+
 // Drains queued events on the audio producer thread; the engine calls it once per render step.
 void Synth::pump_live_midi()
 {
@@ -79,6 +83,25 @@ bool Synth::submit_external_midi_event(const Synth::MidiEvent& event)
     submit_lock.clear(std::memory_order_release);
 
     return queued;
+}
+
+void Synth::set_midi_route_target(int32_t target_channel)
+{
+    midi_route_target.store(target_channel, std::memory_order_relaxed);
+}
+
+void Synth::submit_device_midi_event(const Synth::MidiEvent& event)
+{
+    Synth::MidiEvent routed = event;
+
+    // Out-of-range targets are ignored, not clamped: the target is a selected
+    // editor slot and must never become a channel of its own.
+    const int32_t target = midi_route_target.load(std::memory_order_relaxed);
+    if (target >= 0 && target < static_cast<int32_t>(Synth::max_channels)) {
+        routed.channel = static_cast<uint8_t>(target);
+    }
+
+    submit_external_midi_event(routed);
 }
 
 void Synth::get_external_held_notes(uint32_t channel, uint32_t* held_mask)

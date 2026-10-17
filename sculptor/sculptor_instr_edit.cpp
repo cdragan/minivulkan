@@ -364,6 +364,12 @@ float              info_bins[spectrum_display_bins];
 Synth::WaveType    info_osc_types[Synth::max_oscillators];
 SynthInfoLingerMin info_linger;
 
+// Device-MIDI routing published to the synth every GUI frame: the target
+// follows the channel selection, remembering the last channel while
+// Master Effects is selected.
+bool     route_to_current_channel = false;
+uint32_t last_selected_channel    = 0;
+
 } // namespace
 
 // Pressing a keyboard key submits plain note events through the synth's live-MIDI
@@ -1964,7 +1970,12 @@ bool Sculptor::SynthEditor::create_gui_frame(uint32_t image_idx, bool* need_real
     ImGui::TableNextRow();
     ImGui::TableSetColumnIndex(0);
     gui_channel_list();
-    gui_synth_info_panel();
+    // Remember the last channel selection so routing can keep targeting it
+    // while Master Effects is selected; every selection change runs here.
+    if (selected_target != target_master) {
+        last_selected_channel = selected_target;
+    }
+    gui_synth_info_panel(selected_target != target_master ? selected_target : last_selected_channel);
     ImGui::TableSetColumnIndex(1);
     if (selected_target == target_master) {
         const float pane_h = ImGui::GetContentRegionAvail().y - ImGui::GetStyle().CellPadding.y;
@@ -4156,7 +4167,7 @@ static void gui_fill_bar(const Synth::AudioRingStatus& ring)
     ImGui::Dummy(ImVec2(width, height));
 }
 
-void Sculptor::gui_synth_info_panel()
+void Sculptor::gui_synth_info_panel(uint32_t current_channel)
 {
     ImGui::Separator();
 
@@ -4193,4 +4204,9 @@ void Sculptor::gui_synth_info_panel()
                          0.0f,
                          ImVec2(ImGui::GetContentRegionAvail().x, spectrum_plot_height));
     }
+
+    // Publishing every frame keeps retargeting within one frame of a checkbox
+    // or selection change; the checkbox state is not persisted.
+    ImGui::Checkbox("Route to Current Channel", &route_to_current_channel);
+    Synth::set_midi_route_target(route_to_current_channel ? static_cast<int32_t>(current_channel) : -1);
 }

@@ -37,7 +37,7 @@ void read_callback(const MIDIPacketList* packet_list, void*, void*)
 
             Synth::MidiEvent event;
             if (Synth::midi_decode_byte(&midi_decoder, packet->data[byte_idx], &event)) {
-                Synth::submit_external_midi_event(event);
+                Synth::submit_device_midi_event(event);
             }
         }
 

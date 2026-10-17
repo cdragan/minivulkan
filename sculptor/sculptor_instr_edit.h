@@ -149,7 +149,9 @@ private:
 
 // Info panel under the synth channel list: underrun count, fill bar with a
 // lingering bottom marker, playing oscillator count, and a mono log-axis
-// frequency spectrum.  Reads raw data from the synth runtime only.
-void gui_synth_info_panel();
+// frequency spectrum.  Displays live synth runtime status, and each frame it
+// publishes the device-MIDI routing target from the "Route to Current
+// Channel" checkbox via Synth::set_midi_route_target.
+void gui_synth_info_panel(uint32_t current_channel);
 
 } // namespace Sculptor

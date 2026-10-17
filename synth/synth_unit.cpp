@@ -10583,7 +10583,7 @@ static void osc_instrument_node_layout_regressions()
 // drained events.
 void Synth::apply_midi_event(const Synth::MidiEvent&) {}
 
-static bool submit_test_midi_event(Synth::EvType type, uint32_t channel, uint32_t note, uint32_t data)
+static Synth::MidiEvent make_test_midi_event(Synth::EvType type, uint32_t channel, uint32_t note, uint32_t data)
 {
     Synth::MidiEvent event;
     memset(static_cast<void*>(&event), 0, sizeof(event));
@@ -10593,7 +10593,17 @@ static bool submit_test_midi_event(Synth::EvType type, uint32_t channel, uint32_
     event.note      = static_cast<uint8_t>(note);
     event.note_data = static_cast<uint8_t>(data);
 
-    return Synth::submit_external_midi_event(event);
+    return event;
+}
+
+static bool submit_test_midi_event(Synth::EvType type, uint32_t channel, uint32_t note, uint32_t data)
+{
+    return Synth::submit_external_midi_event(make_test_midi_event(type, channel, note, data));
+}
+
+static void submit_test_device_midi_event(Synth::EvType type, uint32_t channel, uint32_t note, uint32_t data)
+{
+    Synth::submit_device_midi_event(make_test_midi_event(type, channel, note, data));
 }
 
 static bool external_note_held(uint32_t channel, uint32_t note)
@@ -10667,6 +10677,69 @@ static void external_held_notes_regressions()
     // Clear the remaining notes, then check that every channel is clear.
     TEST(submit_test_midi_event(EvType::note_off, 2, 127, 0));
     TEST(submit_test_midi_event(EvType::note_off, 2, 0, 0));
+    for (uint32_t channel = 0; channel < Synth::max_channels; channel++) {
+        TEST(external_channel_clear(channel));
+    }
+
+    // Drain the ring.  The stub above swallows the events.
+    Synth::pump_live_midi();
+}
+
+// Device-entry routing (set_midi_route_target + submit_device_midi_event):
+// with no route set the event passes through with its encoded channel, with a
+// route set the channel is rewritten before submission.  A route target
+// beyond the last channel must not become a channel of its own.
+static void device_midi_route_regressions()
+{
+    using Synth::EvType;
+
+    // Default route (-1) passes the encoded channel through unchanged.
+    submit_test_device_midi_event(EvType::note_on, 2, 70, 100);
+    TEST(external_note_held(2, 70));
+    TEST(! external_note_held(7, 70));
+    TEST(external_channel_clear(7));
+
+    // Routing rewrites the channel: a note_on encoded on channel 2 is held
+    // on channel 7 only.  Release the passthrough note first so the assert
+    // below checks that the routed event no longer touches channel 2.
+    submit_test_device_midi_event(EvType::note_off, 2, 70, 0);
+    Synth::set_midi_route_target(7);
+    submit_test_device_midi_event(EvType::note_on, 2, 70, 100);
+    TEST(external_note_held(7, 70));
+    TEST(! external_note_held(2, 70));
+
+    // The matching note_off, routed the same way, clears the held bit.
+    submit_test_device_midi_event(EvType::note_off, 2, 70, 0);
+    TEST(! external_note_held(7, 70));
+
+    // A controller event under routing does not mark notes held.  Note 71 is
+    // held on channel 7 through the routed wrapper; a controller on channel
+    // 2 whose controller byte aliases note 71 must leave channel 7's bit set
+    // and channel 2's bit clear.
+    submit_test_device_midi_event(EvType::note_on, 2, 71, 100);
+    TEST(external_note_held(7, 71));
+    submit_test_device_midi_event(EvType::controller, 2, 71, 100);
+    submit_test_device_midi_event(EvType::controller, 2, 71, 0);
+    TEST(external_note_held(7, 71));
+    TEST(! external_note_held(2, 71));
+    submit_test_device_midi_event(EvType::note_off, 2, 71, 0);
+    TEST(! external_note_held(7, 71));
+
+    // An out-of-range route target is not applied as a channel, so the note
+    // keeps its encoded channel.
+    Synth::set_midi_route_target(Synth::max_channels);
+    submit_test_device_midi_event(EvType::note_on, 2, 72, 100);
+    TEST(external_note_held(2, 72));
+    submit_test_device_midi_event(EvType::note_off, 2, 72, 0);
+    TEST(! external_note_held(2, 72));
+
+    // Disabling routing restores the passthrough.
+    Synth::set_midi_route_target(-1);
+    submit_test_device_midi_event(EvType::note_on, 2, 73, 100);
+    TEST(external_note_held(2, 73));
+    TEST(! external_note_held(7, 73));
+    submit_test_device_midi_event(EvType::note_off, 2, 73, 0);
+
     for (uint32_t channel = 0; channel < Synth::max_channels; channel++) {
         TEST(external_channel_clear(channel));
     }
@@ -10903,6 +10976,7 @@ static void check_pad_tilt_json_codec()
 int main()
 {
     external_held_notes_regressions();
+    device_midi_route_regressions();
     effects_paste_pin_regressions();
     effects_layout_classification_regressions();
     effects_structural_regressions();
