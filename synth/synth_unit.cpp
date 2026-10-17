@@ -1726,6 +1726,9 @@ static void check_named_fm_projection(const Synth::InstrumentEditorBank& bank, u
         graph.set_slot_value(node_index, mode_slot, wave);
         TEST(Sculptor::oscillator_slot_waveform_mode_disabled(graph.node(node_index), fm_depth_slot) == (mode != 1));
         TEST(Sculptor::oscillator_slot_waveform_mode_disabled(graph.node(node_index), fm_ratio_slot) == (mode == 0));
+        TEST(Sculptor::oscillator_slot_waveform_mode_disabled(graph.node(node_index),
+                                                              Sculptor::osc_target_row(Synth::mod_osc_mix)) ==
+             (mode == 1 || mode == 2));
         wave.list_index = 0;
         graph.set_slot_value(node_index, wave_b_slot, wave);
         // With waveform b off, exactly the duty b / mix mode / waveform mix /
@@ -1770,12 +1773,14 @@ static void check_named_fm_projection(const Synth::InstrumentEditorBank& bank, u
     }
     // Wave b at pad (5) enables tone b and un-gates the whole duty b family.
     // The spread family stays gated: the fixture keeps the fir_off default.
+    // The mix row stays gated because the fixture mode is FM.
     wave.list_index = 5;
     graph.set_slot_value(node_index, wave_b_slot, wave);
     {
         const uint32_t spread_row = Sculptor::osc_target_row(Synth::mod_fir_spread);
         for (uint32_t row = 0; row < Sculptor::osc_slot_count + 12 * Synth::num_mod_targets; ++row) {
-            const bool gated = row >= spread_row && row <= spread_row + 13;
+            const bool gated = (row >= spread_row && row <= spread_row + 13) ||
+                               row == Sculptor::osc_target_row(Synth::mod_osc_mix);
             TEST(Sculptor::oscillator_slot_waveform_mode_disabled(graph.node(node_index), row) == gated);
         }
     }
@@ -6988,12 +6993,11 @@ static void osc_direct_modulator_regressions()
             const uint32_t mode_slot      = 55; // mix mode, layout contract
             const uint32_t fm_depth_slot  = Sculptor::osc_target_row(Synth::mod_fm_index);
             const uint32_t fm_ratio_slot  = 82; // fm ratio, layout contract
-            const uint32_t gated_slots[5] = { Sculptor::osc_target_row(Synth::mod_duty1),
+            const uint32_t gated_slots[4] = { Sculptor::osc_target_row(Synth::mod_duty1),
                                               mode_slot,
-                                              Sculptor::osc_target_row(Synth::mod_osc_mix),
                                               fm_depth_slot,
                                               fm_ratio_slot };
-            for (uint32_t g = 0; g < 5; g++) {
+            for (uint32_t g = 0; g < 4; g++) {
                 TEST(Sculptor::oscillator_slot_waveform_mode_disabled(osc, gated_slots[g]));
             }
             TEST(! Sculptor::oscillator_slot_waveform_mode_disabled(osc, 1));
@@ -7005,13 +7009,16 @@ static void osc_direct_modulator_regressions()
             graph.set_slot_value(mapping.osc_nodes[0], wave_b_slot, selection); // Waveform B
             selection.list_index = 1;
             graph.set_slot_value(mapping.osc_nodes[0], mode_slot, selection); // Mix Mode: FM
-            for (uint32_t g = 0; g < 5; g++) {
+            for (uint32_t g = 0; g < 4; g++) {
                 TEST(! Sculptor::oscillator_slot_waveform_mode_disabled(osc, gated_slots[g]));
             }
+            // Waveform mix drives blend and ring mod only, so it stays gated in FM mode.
+            TEST(Sculptor::oscillator_slot_waveform_mode_disabled(osc, Sculptor::osc_target_row(Synth::mod_osc_mix)));
             selection.list_index = 0;
             graph.set_slot_value(mapping.osc_nodes[0], mode_slot, selection); // blend again
             TEST(Sculptor::oscillator_slot_waveform_mode_disabled(osc, fm_depth_slot));
             TEST(Sculptor::oscillator_slot_waveform_mode_disabled(osc, fm_ratio_slot));
+            TEST(! Sculptor::oscillator_slot_waveform_mode_disabled(osc, Sculptor::osc_target_row(Synth::mod_osc_mix)));
             TEST(! Sculptor::oscillator_slot_waveform_mode_disabled(osc, 4));
         }
     }

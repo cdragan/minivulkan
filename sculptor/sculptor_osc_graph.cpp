@@ -244,6 +244,9 @@ bool Sculptor::oscillator_slot_waveform_mode_disabled(const Sculptor::Node& node
     if (slot_idx == fm && mode != 1) {
         return true; // fm depth only drives the fm mix mode
     }
+    if (slot_idx == mix && (mode == 1 || mode == 2)) {
+        return true; // waveform mix drives the blend and ring mod modes only
+    }
     if (slot_idx == osc_fm_ratio_prop && mode == 0) {
         return true; // fm ratio drives fm, hard sync and ring mod, not blend
     }
