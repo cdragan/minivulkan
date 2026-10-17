@@ -448,6 +448,11 @@ void Sculptor::Graph::clear()
             delete_node_unvetoed(i);
         }
     }
+    // Pool entries keep their bytes after deletion.  clear() resets the
+    // retained pool storage so freed node bytes never survive a rebuild.
+    // Normal creation is safe regardless: create_node() value-initializes
+    // each entry.
+    nodes = Pool<Node, max_nodes>();
     // The canvas popup and the error overlay describe pre-clear state: a
     // stale popup must not delete a reused connection index, and no stale
     // error text survives a rebuild.
@@ -690,6 +695,14 @@ void Sculptor::Graph::set_node_renamable(uint32_t node_idx, bool renamable)
         return;
     }
     nodes.entries[node_idx].renamable = renamable;
+}
+
+void Sculptor::Graph::set_node_oscillator(uint32_t node_idx, bool oscillator)
+{
+    if (node_idx >= max_nodes || ! nodes.is_occupied(node_idx)) {
+        return;
+    }
+    nodes.entries[node_idx].oscillator = oscillator;
 }
 
 // Eventless property write: the shared-routing fan-out updates sibling

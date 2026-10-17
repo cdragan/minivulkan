@@ -120,6 +120,7 @@ struct Node {
     float                      content_height_override; // 0 = auto (content height)
     bool                       ghost;                   // ghost marker, see set_ghost
     bool                       renamable;    // title rename allowed even when node_state_edits_enabled is off
+    bool                       oscillator;   // oscillator layer nodes only.  The disable rule must not hit other nodes.
     Pool<Slot, max_node_slots> slots;        // num_allocated = slot count
     StateWidgetCallback        state_widget; // optional, may be null
     void*                      state_widget_data;
@@ -451,6 +452,13 @@ public:
     // graph-wide, so nodes opt in one by one. Projection state: clear()
     // wipes it and the projection re-installs it.
     void set_node_renamable(uint32_t node_idx, bool renamable);
+
+    // Per-node oscillator stamp: the waveform/mode slot-disable rule in
+    // sculptor_osc_graph.cpp applies to oscillator layer nodes only, so
+    // every other projection must leave the stamp false.  Projection
+    // state: clear() zeroes the node pool and the projection re-stamps
+    // the layer nodes.
+    void set_node_oscillator(uint32_t node_idx, bool oscillator);
 
     // Eventless property write: sets a property slot's value WITHOUT
     // pushing a change event, used by the shared-routing fan-out so a shared

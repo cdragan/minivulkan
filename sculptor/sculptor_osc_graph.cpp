@@ -217,6 +217,9 @@ constexpr uint32_t canonical_node_count = Synth::graph_canonical_node_count;
 // cutoff row, its block and the fir slope need a filter type other than off).
 bool Sculptor::oscillator_slot_waveform_mode_disabled(const Sculptor::Node& node, uint32_t slot_idx)
 {
+    if (! node.oscillator) {
+        return false; // the disable rule applies to oscillator layer nodes only
+    }
     if (node.slots.num_allocated < osc_slot_count) {
         return false;
     }
@@ -697,6 +700,7 @@ static void project_osc_node(Sculptor::Graph*           graph,
     if (node == Sculptor::pool_no_slot) {
         return;
     }
+    graph->set_node_oscillator(node, true);
     mapping->osc_nodes[layer] = node;
 
     mapping->osc_output_slot = graph->add_slot(node, output_slot("Output"));

@@ -11615,6 +11615,142 @@ static void check_quick_release_regressions()
     }
 }
 
+// The oscillator-only slot-disable stamp: a five-parameter effect
+// projects 53 slots, well past osc_slot_count = 18, so a slot-count
+// guard alone cannot exclude effect nodes.  The disable function must
+// refuse non-oscillator nodes outright instead of reading oscillator
+// slot indices out of them.
+static void fx_slot_disable_stamp_regressions()
+{
+    static Synth::InstrumentEditorBank  source;
+    static Synth::Instrument            instrument = {};
+    static Sculptor::Graph              graph;
+    static Sculptor::EffectGraphMapping fx_mapping;
+    build_zone_fixture(&source, &instrument);
+    Synth::EffectChainBinding& chain = add_cc_chain_fixture(&source, 0);
+    Sculptor::fx_init_slot(&chain, 0, Synth::EffectType::compressor);
+    chain.effects[0].enabled = true;
+    TEST(Sculptor::project_effect_chain_to_graph(source, 0, &graph, &fx_mapping));
+
+    const uint32_t fx_node = fx_mapping.effect_nodes[0];
+    TEST(fx_node != Sculptor::pool_no_slot);
+    const Sculptor::Node& fx = graph.node(fx_node);
+    TEST(fx.slots.num_allocated == 3 + 5 * Sculptor::fx_param_stride);
+    // The disable function reads waveform list values at the oscillator
+    // contract indices (slot 1 and 28).  The fx rows there are
+    // value-initialized zeros: slot 1 is the Out dot, whose zero value
+    // reads as sine (the wave a list starts at sine), and slot 28 reads
+    // as off (the wave b list starts at off).  The write below pins slot
+    // 28 to list 0 explicitly.
+    Sculptor::PropertyValue sine = {};
+    sine.list_index              = 0;
+    graph.set_slot_value(fx_node, 28, sine); // waveform b contract index
+    for (uint32_t slot = 0; slot < fx.slots.num_allocated; ++slot) {
+        TEST(! Sculptor::oscillator_slot_waveform_mode_disabled(fx, slot));
+    }
+
+    // Small non-oscillator nodes stay unstamped, so the disable function
+    // returns false for every slot regardless of slot count.
+    const uint32_t small_nodes[] = { fx_mapping.input_node, fx_mapping.output_node, fx_mapping.midi_node };
+    for (uint32_t node_idx : small_nodes) {
+        TEST(node_idx != Sculptor::pool_no_slot);
+        const Sculptor::Node& small = graph.node(node_idx);
+        TEST(small.slots.num_allocated < Sculptor::osc_slot_count);
+        for (uint32_t slot = 0; slot < small.slots.num_allocated; ++slot) {
+            TEST(! Sculptor::oscillator_slot_waveform_mode_disabled(small, slot));
+        }
+    }
+}
+
+// A stamped oscillator node keeps the existing disable rules unchanged:
+// the stamp only decides who the rules apply to, not the rules.
+static void osc_slot_disable_stamped_rules_regressions()
+{
+    static Synth::InstrumentEditorBank source;
+    static Synth::Instrument           instrument = {};
+    static Sculptor::Graph             graph;
+    static Sculptor::OscGraphMapping   mapping;
+    build_zone_fixture(&source, &instrument);
+    TEST(Sculptor::project_editor_to_graph(source, &graph, &mapping));
+
+    const uint32_t osc_node = mapping.osc_nodes[0];
+    TEST(osc_node != Sculptor::pool_no_slot);
+    const Sculptor::Node& osc = graph.node(osc_node);
+    // The projection stamps oscillator layer nodes and nothing else.
+    TEST(osc.oscillator);
+    TEST(! graph.node(mapping.input_node).oscillator);
+    TEST(! graph.node(mapping.instrument_node).oscillator);
+    TEST(! graph.node(mapping.output_node).oscillator);
+
+    const uint32_t duty1       = Sculptor::osc_target_row(Synth::mod_duty1);
+    const uint32_t mix         = Sculptor::osc_target_row(Synth::mod_osc_mix);
+    const uint32_t fm          = Sculptor::osc_target_row(Synth::mod_fm_index);
+    const uint32_t fm_ratio    = Sculptor::osc_target_row(Synth::mod_fm_ratio);
+    const uint32_t tone0       = Sculptor::osc_target_row(Synth::mod_pad_tilt0);
+    const uint32_t tone1       = Sculptor::osc_target_row(Synth::mod_pad_tilt1);
+    const uint32_t volume      = Sculptor::osc_target_row(Synth::mod_volume);
+    const uint32_t wave_a_slot = 1;  // waveform a, layout contract
+    const uint32_t wave_b_slot = 28; // waveform b, layout contract
+    const uint32_t mode_slot   = 55; // mix mode, layout contract
+
+    Sculptor::PropertyValue wave = {};
+    // Sine wave a (list 0; the wave a list starts at sine), waveform b
+    // off (the wave b list starts at off): the pad-tone windows and
+    // every wave-b-dependent row are disabled.
+    wave.list_index = 0;
+    graph.set_slot_value(osc_node, wave_b_slot, wave);
+    TEST(Sculptor::oscillator_slot_waveform_mode_disabled(osc, duty1));
+    TEST(Sculptor::oscillator_slot_waveform_mode_disabled(osc, mode_slot));
+    TEST(Sculptor::oscillator_slot_waveform_mode_disabled(osc, mix));
+    TEST(Sculptor::oscillator_slot_waveform_mode_disabled(osc, fm));
+    TEST(Sculptor::oscillator_slot_waveform_mode_disabled(osc, fm_ratio));
+    TEST(Sculptor::oscillator_slot_waveform_mode_disabled(osc, tone0));
+    TEST(Sculptor::oscillator_slot_waveform_mode_disabled(osc, tone0 + Sculptor::osc_target_block_stride));
+    TEST(Sculptor::oscillator_slot_waveform_mode_disabled(osc, tone1));
+    TEST(Sculptor::oscillator_slot_waveform_mode_disabled(osc, tone1 + Sculptor::osc_target_block_stride));
+    TEST(! Sculptor::oscillator_slot_waveform_mode_disabled(osc, 2)); // duty a row
+    TEST(! Sculptor::oscillator_slot_waveform_mode_disabled(osc, volume));
+    TEST(! Sculptor::oscillator_slot_waveform_mode_disabled(osc, Sculptor::osc_target_row(Synth::mod_pitch)));
+
+    // Pad on both waveforms re-enables both tone windows and the
+    // wave-b-dependent rows; the fixture's blend mode still gates fm
+    // depth and fm ratio.
+    wave.list_index = 4; // pad (the wave a list has no off entry)
+    graph.set_slot_value(osc_node, wave_a_slot, wave);
+    wave.list_index = 5; // pad
+    graph.set_slot_value(osc_node, wave_b_slot, wave);
+    TEST(! Sculptor::oscillator_slot_waveform_mode_disabled(osc, tone0));
+    TEST(! Sculptor::oscillator_slot_waveform_mode_disabled(osc, tone0 + Sculptor::osc_target_block_stride));
+    TEST(! Sculptor::oscillator_slot_waveform_mode_disabled(osc, tone1));
+    TEST(! Sculptor::oscillator_slot_waveform_mode_disabled(osc, tone1 + Sculptor::osc_target_block_stride));
+    TEST(! Sculptor::oscillator_slot_waveform_mode_disabled(osc, duty1));
+    TEST(! Sculptor::oscillator_slot_waveform_mode_disabled(osc, mix));
+    TEST(Sculptor::oscillator_slot_waveform_mode_disabled(osc, fm)); // blend mode
+    TEST(Sculptor::oscillator_slot_waveform_mode_disabled(osc, fm_ratio));
+}
+
+// Stamp isolation: clear() resets the retained pool storage, so a node
+// recreated after clear() is value-initialized and carries no stamp.
+static void osc_stamp_pool_clear_regressions()
+{
+    static Synth::InstrumentEditorBank source;
+    static Synth::Instrument           instrument = {};
+    static Sculptor::Graph             graph;
+    static Sculptor::OscGraphMapping   mapping;
+    build_zone_fixture(&source, &instrument);
+    TEST(Sculptor::project_editor_to_graph(source, &graph, &mapping));
+    TEST(graph.node(mapping.osc_nodes[0]).oscillator);
+    const uint32_t stamped_slot = mapping.osc_nodes[0];
+    graph.clear();
+    // Pool allocation is first-free order, so allocating past the old
+    // oscillator's slot index covers its recycled slot.
+    for (uint32_t i = 0; i <= stamped_slot; ++i) {
+        const uint32_t fresh = graph.create_node("Fresh", vmath::vec2(0.0f, 0.0f));
+        TEST(fresh != Sculptor::pool_no_slot);
+        TEST(! graph.node(fresh).oscillator);
+    }
+}
+
 int main()
 {
     external_held_notes_regressions();
@@ -11636,6 +11772,9 @@ int main()
     fx_swap_effect_audio_regressions();
     fx_adjacent_projected_slots_regressions();
     fx_exchange_effect_slots_regressions();
+    fx_slot_disable_stamp_regressions();
+    osc_slot_disable_stamped_rules_regressions();
+    osc_stamp_pool_clear_regressions();
     child_row_projection_regressions();
     osc_inherit_source_regressions();
     osc_direct_modulator_regressions();
