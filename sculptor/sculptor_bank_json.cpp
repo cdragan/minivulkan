@@ -508,7 +508,6 @@ static void enc_oscillator(Out& o, const Synth::Oscillator& osc)
     key_enum(o, "wave_b", wave_names, num_waves, static_cast<uint32_t>(osc.osc_type[1]));
     key_enum(o, "mode", osc_mode_names, num_osc_modes, osc.osc_mode);
     key_float_nonzero(o, "mod_ratio", osc.mod_ratio);
-    key_float_nonzero(o, "pitch_offset", osc.pitch_offset);
     key_float_nonzero(o, "octave_offset", static_cast<float>(osc.octave_offset));
 
     // The default slope omits the key, matching the nonzero-key omission
@@ -1998,6 +1997,7 @@ static void decode_oscillator(Walker& w, uint32_t obj, Synth::Oscillator& osc)
     bool                    fm_ratio_routed = false;
     int32_t                 octave_offset   = 0;
     int32_t                 fir_slope       = 100;
+    float                   pitch_offset    = 0.0f;
     const Synth::FilterType fir_type        = prescan_fir_type(w, obj);
     walk_object(w, obj, [&](uint32_t key_idx, uint32_t val_idx) {
         uint32_t value = 0;
@@ -2016,7 +2016,7 @@ static void decode_oscillator(Walker& w, uint32_t obj, Synth::Oscillator& osc)
         else if (key_eq(w, key_idx, "mod_ratio"))
             want_float(w, val_idx, &osc.mod_ratio);
         else if (key_eq(w, key_idx, "pitch_offset"))
-            want_float(w, val_idx, &osc.pitch_offset);
+            want_float(w, val_idx, &pitch_offset);
         else if (key_eq(w, key_idx, "octave_offset"))
             want_int(w, val_idx, Sculptor::osc_octave_offset_min, Sculptor::osc_octave_offset_max, &octave_offset);
         else if (key_eq(w, key_idx, "fir_slope"))
@@ -2065,11 +2065,17 @@ static void decode_oscillator(Walker& w, uint32_t obj, Synth::Oscillator& osc)
     osc.fir_slope_percent = static_cast<uint8_t>(fir_slope);
     osc.fir_type          = fir_type;
 
-    // Pitch offsets are bounded in every domain: a bank holding an
-    // out-of-range offset could never round-trip through the editor.
+    // Legacy pitch_offset folds into the pitch target's base value; the
+    // combined static trim must stay inside the pitch editing range.
     if (! w.failed &&
-        (osc.pitch_offset < Sculptor::osc_pitch_offset_min || osc.pitch_offset > Sculptor::osc_pitch_offset_max)) {
+        (pitch_offset < Sculptor::osc_pitch_offset_min || pitch_offset > Sculptor::osc_pitch_offset_max)) {
         w.failed = true;
+    }
+    if (! w.failed) {
+        const Sculptor::OscTargetView pitch_view = Sculptor::osc_target_view(Synth::mod_pitch, fir_type);
+        osc.targets[Synth::mod_pitch].base_value = vmath::clamp(osc.targets[Synth::mod_pitch].base_value + pitch_offset,
+                                                                pitch_view.min_value,
+                                                                pitch_view.max_value);
     }
 
     // Legacy banks state only the scalar mod_ratio; when no routing block
@@ -3043,7 +3049,6 @@ static void canonicalize_editor_bank(Synth::InstrumentEditorBank* editor_bank)
         for (uint32_t l = 0; l < instr.layer_count; l++) {
             Synth::Oscillator& osc = instr.layers[l];
             osc.mod_ratio          = canonical_float(osc.mod_ratio);
-            osc.pitch_offset       = canonical_float(osc.pitch_offset);
             for (uint32_t t = 0; t < Synth::num_mod_targets; t++) {
                 Synth::TargetBinding& binding = osc.targets[t];
                 binding.lfo_depth             = canonical_float(binding.lfo_depth);
@@ -3549,8 +3554,13 @@ static void decode_layer_doc(Walker&                     w,
     if (! fm_ratio_set) {
         osc.targets[Synth::mod_fm_ratio].base_value = clamp_legacy_mod_ratio(mod_ratio);
     }
-    osc.pitch_offset  = pitch_offset;
-    osc.octave_offset = static_cast<int8_t>(octave_offset);
+    // Legacy pitch offset folds into the pitch target's base value;
+    // the combined static trim stays inside the pitch editing range.
+    const Sculptor::OscTargetView pitch_view = Sculptor::osc_target_view(Synth::mod_pitch);
+    osc.targets[Synth::mod_pitch].base_value = vmath::clamp(osc.targets[Synth::mod_pitch].base_value + pitch_offset,
+                                                            pitch_view.min_value,
+                                                            pitch_view.max_value);
+    osc.octave_offset                        = static_cast<int8_t>(octave_offset);
     // want_int rejects out-of-range magnitudes outright; a negative spelling
     // whose magnitude fits the maximum still needs this explicit range check.
     if (fir_slope < 1 || fir_slope > 100) {
@@ -4158,8 +4168,6 @@ static uint32_t encode_instrument_json_for_domain(char*                         
         // Omitted ratios decode as one, including dormant blend ratios.
         o.key("mod_ratio");
         o.float_value(osc.mod_ratio);
-        o.key("pitch_offset_semitones");
-        o.float_value(osc.pitch_offset);
         o.key("octave_offset");
         o.float_value(static_cast<float>(osc.octave_offset));
         o.key("fir_slope");

@@ -146,12 +146,11 @@ const char* const fir_spread_names[Synth::num_filter_types] = { "Filter Off",
 // 109..120 pan's 12-slot modulation block
 // 121 pitch (per-layer base value)
 // 122..133 pitch's 12-slot modulation block
-// 134 pitch offset (per oscillator)
-// 135 octave offset (per oscillator, [-12, +12] whole octaves)
+// 134 octave offset (per oscillator, [-12, +12] whole octaves)
 // 136 filter type (per oscillator, list)
-// 137 fir pitch spread (per-layer base value; band-pass: [0, 36] semitones, low-pass/high-pass: cutoff in Hz)
+// 136 fir pitch spread (per-layer base value; band-pass: [0, 36] semitones, low-pass/high-pass: cutoff in Hz)
 // 138..149 fir pitch spread's 12-slot modulation block
-// 150 fir slope (per oscillator, [1, 100] percent)
+// 149 fir slope (per oscillator, [1, 100] percent)
 // Every target value row (2, 15, 29, 42, 56, 69, 82, 95, 108, 121, 137) is
 // connectable: all eleven targets are uniformly modulate-able, so each
 // row's 12-slot block follows its value row (see the block helpers in
@@ -162,10 +161,9 @@ constexpr uint32_t osc_waveform_a_prop    = 1;
 constexpr uint32_t osc_waveform_b_prop    = 28;
 constexpr uint32_t osc_mode_prop          = 55;
 constexpr uint32_t osc_fm_ratio_prop      = 82;
-constexpr uint32_t osc_pitch_offset_prop  = 134;
-constexpr uint32_t osc_octave_offset_prop = 135;
-constexpr uint32_t osc_fir_slope_prop     = 150;
-constexpr uint32_t osc_fir_type_prop      = 136;
+constexpr uint32_t osc_octave_offset_prop = 134;
+constexpr uint32_t osc_fir_slope_prop     = 149;
+constexpr uint32_t osc_fir_type_prop      = 135;
 // Per-target presentation views: the single source of truth for value
 // bounds, bank-unit scaling and slider curve.  Oscillator rows and
 // parameter base values show display units; the bank stores scaled
@@ -759,19 +757,15 @@ static void project_osc_node(Sculptor::Graph*           graph,
     graph->add_slot(node,
                     osc_view_connectable_slot("Pan", osc.targets[Synth::mod_panning].base_value, Synth::mod_panning));
     append_target_block(graph, node, Synth::mod_panning, osc.targets[Synth::mod_panning]);
-    graph->add_slot(node,
-                    osc_view_connectable_slot("Pitch", osc.targets[Synth::mod_pitch].base_value, Synth::mod_pitch));
+    // The Pitch base value is a bounded bare input box: populated min/max
+    // on an unbounded real slot (real_bounded false) means clamp-on-edit;
+    // the renderer's guard is min < max. The removed Pitch Offset row
+    // was a narrower static subset of this same value.
+    Sculptor::Slot pitch_slot =
+        osc_view_connectable_slot("Pitch", osc.targets[Synth::mod_pitch].base_value, Synth::mod_pitch);
+    pitch_slot.real_bounded = false;
+    graph->add_slot(node, pitch_slot);
     append_target_block(graph, node, Synth::mod_pitch, osc.targets[Synth::mod_pitch]);
-    // A bounded bare input box: the renderer clamps edits to the stored
-    // range without rendering a slider (the saved-bank decode rejects
-    // out-of-range values, so the GUI must never produce one).  Convention:
-    // populated min/max on an unbounded real slot (real_bounded false) means
-    // clamp-on-edit; the renderer's guard is min < max.
-    Sculptor::Slot pitch_offset_slot = Sculptor::real_slot("Pitch Offset", osc.pitch_offset);
-    pitch_offset_slot.real_min       = Sculptor::osc_pitch_offset_min;
-    pitch_offset_slot.real_max       = Sculptor::osc_pitch_offset_max;
-    pitch_offset_slot.child_row      = true;
-    graph->add_slot(node, pitch_offset_slot);
     Sculptor::Slot octave_offset_slot = Sculptor::bounded_int_slot("Octave Offset",
                                                                    osc.octave_offset,
                                                                    Sculptor::osc_octave_offset_min,
@@ -1456,7 +1450,6 @@ static bool read_oscillator_layer(const Sculptor::Graph&           graph,
         return false;
     }
     osc.osc_mode         = static_cast<Synth::OscMode>(index);
-    osc.pitch_offset     = slots[osc_pitch_offset_prop].value.real;
     const int32_t octave = slots[osc_octave_offset_prop].value.integer;
     if (octave < Sculptor::osc_octave_offset_min || octave > Sculptor::osc_octave_offset_max) {
         return false;

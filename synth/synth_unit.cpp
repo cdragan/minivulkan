@@ -135,7 +135,7 @@ constexpr uint32_t t7_target_row_slots[Synth::num_mod_targets] = {
     29,  // duty b
     56,  // waveform mix
     69,  // fm depth
-    137, // fir pitch spread
+    136, // fir pitch spread
     82,  // fm ratio
     15,  // pad tone a
     42,  // pad tone b
@@ -416,7 +416,6 @@ static void build_osc_graph_max_fixture(Synth::InstrumentBank* bank,
         osc.osc_type[1]        = static_cast<Synth::WaveType>(1 + ((layer + 2) % 4));
         osc.osc_mode           = static_cast<Synth::OscMode>(layer % 3);
         osc.mod_ratio          = 1.0f + 0.25f * static_cast<float>(layer);
-        osc.pitch_offset       = 0.5f * static_cast<float>(layer) - 1.5f;
         for (uint32_t t = 0; t < Synth::num_mod_targets; t++) {
             if (! osc_graph_target(static_cast<Synth::ModTarget>(t))) {
                 continue; // duty A/B, osc mix and FM depth keep base-only bindings here
@@ -543,7 +542,6 @@ static void build_osc_graph_small_fixture(Synth::InstrumentBank* bank,
     osc.osc_type[1]         = Synth::WaveType::pulse_wave;
     osc.osc_mode            = Synth::osc_mode_blend;
     osc.mod_ratio           = 2.0f;
-    osc.pitch_offset        = 3.5f;
 
     osc.targets[Synth::mod_volume].envelope_desc_id = *volume_env_id;
     osc.targets[Synth::mod_volume].lfo_desc_id      = *lfo_id;
@@ -808,8 +806,7 @@ static void build_binding_fixture(Synth::InstrumentEditorBank* bank, Synth::Inst
 
     instrument->layer_count = 3;
     for (uint32_t layer = 0; layer < 3; layer++) {
-        instrument->layers[layer].osc_type[0]  = Synth::WaveType::sawtooth_wave;
-        instrument->layers[layer].pitch_offset = -2.0f;
+        instrument->layers[layer].osc_type[0] = Synth::WaveType::sawtooth_wave;
     }
     Synth::TargetBinding volume_tuple                                = {};
     volume_tuple.envelope_desc_id                                    = 1;
@@ -954,7 +951,6 @@ static void build_clipboard_zone_fixture(Synth::InstrumentEditorBank* bank, Synt
     osc.osc_type[1]                                  = Synth::WaveType::sawtooth_wave;
     osc.osc_mode                                     = Synth::osc_mode_fm;
     osc.mod_ratio                                    = 2.0f;
-    osc.pitch_offset                                 = 1.5f;
     osc.targets[Synth::mod_volume].envelope_desc_id  = 1;
     osc.targets[Synth::mod_volume].lfo_desc_id       = 1;
     osc.targets[Synth::mod_volume].lfo_op            = Synth::SourceOp::add;
@@ -1022,7 +1018,6 @@ static uint32_t build_clipboard_max_fixture(Synth::InstrumentBank*        bank,
         osc.osc_type[1]        = Synth::WaveType::sawtooth_wave;
         osc.osc_mode           = static_cast<Synth::OscMode>(layer % 3);
         osc.mod_ratio          = 1.0f + 0.25f * static_cast<float>(layer);
-        osc.pitch_offset       = 0.5f * static_cast<float>(layer) - 1.5f;
         for (uint32_t cell = 0; cell < Synth::num_mod_targets; cell++) {
             const Synth::ModTarget target = static_cast<Synth::ModTarget>(cell);
 
@@ -2458,7 +2453,7 @@ static void check_legacy_library_numeric_domains()
                 source.graph_layout_count = 0;
             }
             Synth::Oscillator& osc = source.bank.instruments.entries[0].layers[0];
-            osc.pitch_offset       = values & 1 ? 13.0f : 0;
+            osc.octave_offset      = values & 1 ? 13 : 0;
             osc.mod_ratio          = values & 2 ? 9.0f : 2;
             TEST(Synth::validate_instrument_bank(&source.bank));
             const uint32_t len =
@@ -2480,11 +2475,11 @@ static void check_legacy_library_numeric_domains()
             TEST(Synth::read_library_index(path, &legacy_entry, 1) == 1);
             memset(static_cast<void*>(&destination), 0, sizeof(destination));
             uint16_t legacy_slot = 0xBEEF;
-            // Out-of-range pitch offsets reject the saved-bank load.
+            // Out-of-range octave offsets reject the saved-bank load.
             TEST(Synth::load_library_instrument(path, &legacy_entry, &destination, 2, &legacy_slot) == ! (values & 1));
             TEST(legacy_slot == (values & 1 ? 0xBEEF : 0));
             if (! (values & 1)) {
-                TEST(destination.bank.instruments.entries[0].layers[0].pitch_offset == osc.pitch_offset);
+                TEST(destination.bank.instruments.entries[0].layers[0].octave_offset == osc.octave_offset);
                 TEST(destination.bank.instruments.entries[0].layers[0].mod_ratio == osc.mod_ratio);
                 if (metadata) {
                     TEST(destination.graph_layout_count == source.graph_layout_count);
@@ -2502,7 +2497,7 @@ static void check_legacy_library_numeric_domains()
                 uint16_t output_slot = 0xBEEF;
                 TEST(Synth::load_library_instrument(path, &entry, &destination, 2, &output_slot));
                 TEST(output_slot == 0);
-                TEST(destination.bank.instruments.entries[0].layers[0].pitch_offset == osc.pitch_offset);
+                TEST(destination.bank.instruments.entries[0].layers[0].octave_offset == osc.octave_offset);
                 TEST(destination.bank.instruments.entries[0].layers[0].mod_ratio == osc.mod_ratio);
                 if (metadata) {
                     TEST(destination.graph_layout_count == source.graph_layout_count);
@@ -2604,20 +2599,20 @@ static void check_shared_instrument_json_domains()
     build_named_fm_fixture(&source);
     remove(title_path);
 
-    // Out-of-range pitch offsets refuse the editor encode: the encoder
+    // Out-of-range pitch base values refuse the editor encode: the encoder
     // verifies its own encode-decode round trip against the shared decode
     // validation.
-    source.bank.instruments.entries[0].layers[0].pitch_offset = 13;
-    source.bank.instruments.entries[0].layers[0].mod_ratio    = 9;
+    source.bank.instruments.entries[0].layers[0].targets[Synth::mod_pitch].base_value = 25;
+    source.bank.instruments.entries[0].layers[0].mod_ratio                            = 9;
     for (Synth::InstrumentJsonDomain domain : domains) {
         TEST(Sculptor::encode_editor_instrument_json(source, 0, 0, text, sizeof(text), domain) == 0);
     }
 
     // The octave range rejects the encode the same way, with every other
     // control value in range.
-    source.bank.instruments.entries[0].layers[0].pitch_offset  = 2.0f;
-    source.bank.instruments.entries[0].layers[0].mod_ratio     = 2.0f;
-    source.bank.instruments.entries[0].layers[0].octave_offset = 13;
+    source.bank.instruments.entries[0].layers[0].targets[Synth::mod_pitch].base_value = 2.0f;
+    source.bank.instruments.entries[0].layers[0].mod_ratio                            = 2.0f;
+    source.bank.instruments.entries[0].layers[0].octave_offset                        = 13;
     for (Synth::InstrumentJsonDomain domain : domains) {
         TEST(Sculptor::encode_editor_instrument_json(source, 0, 0, text, sizeof(text), domain) == 0);
     }
@@ -2645,7 +2640,8 @@ static void check_shared_instrument_json_domains()
                                                   max_portable_records,
                                                   &decoded.layout_count,
                                                   Synth::InstrumentJsonDomain::validated_bank));
-    TEST(decoded.instr.layers[0].pitch_offset == 2.0f && decoded.instr.layers[0].mod_ratio == 9.0f);
+    TEST(decoded.instr.layers[0].targets[Synth::mod_pitch].base_value == 2.0f &&
+         decoded.instr.layers[0].mod_ratio == 9.0f);
     TEST(! decode_clipboard(&decoded, text, max_portable_records));
 
     // The octave range rejects alone: an out-of-range octave fails decode
@@ -6673,7 +6669,7 @@ static void child_row_projection_regressions()
             child_row_expected = child_row_expected || s == Sculptor::osc_target_row(t);
         }
         // Pitch offset, octave offset and fir slope nest under their parents.
-        child_row_expected = child_row_expected || s == 134 || s == 135 || s == 150;
+        child_row_expected = child_row_expected || s == 134 || s == 149;
         TEST(osc.slots.entries[s].child_row == child_row_expected);
     }
 
@@ -6742,7 +6738,6 @@ static void osc_inherit_source_regressions()
     instrument.layers[2].osc_type[1]                                 = Synth::WaveType::pulse_wave;
     instrument.layers[2].osc_mode                                    = Synth::osc_mode_fm;
     instrument.layers[2].mod_ratio                                   = 3.0f;
-    instrument.layers[2].pitch_offset                                = -1.5f;
     instrument.layers[2].targets[Synth::mod_volume].envelope_desc_id = 2;
     instrument.layers[2].targets[Synth::mod_volume].lfo_desc_id      = 1;
     instrument.layers[2].targets[Synth::mod_volume].lfo_depth        = 0.25f;
@@ -8714,10 +8709,10 @@ static void check_osc_pitch_gating()
 {
     // Absolute pitch composition and conversion: the octave shift doubles
     // the frequency, and no consumer adds the base note a second time.
-    TEST(approx(Synth::pitch_to_frequency(Synth::oscillator_final_pitch(69, 0, 0, 0), 1), 440.0f, 0.001f));
-    TEST(approx(Synth::pitch_to_frequency(Synth::oscillator_final_pitch(69, 1, 0, 0), 1), 880.0f, 0.001f));
-    TEST(approx(Synth::pitch_to_frequency(Synth::oscillator_final_pitch(69, 0, 0, 0), 3), 1320.0f, 0.001f));
-    TEST(Synth::oscillator_final_pitch(60, -1, 3.5f, -2.25f) == 49.25f);
+    TEST(approx(Synth::pitch_to_frequency(Synth::oscillator_final_pitch(69, 0, 0), 1), 440.0f, 0.001f));
+    TEST(approx(Synth::pitch_to_frequency(Synth::oscillator_final_pitch(69, 1, 0), 1), 880.0f, 0.001f));
+    TEST(approx(Synth::pitch_to_frequency(Synth::oscillator_final_pitch(69, 0, 0), 3), 1320.0f, 0.001f));
+    TEST(Synth::oscillator_final_pitch(60, -1, 1.25f) == 49.25f);
 
     // Gate predicate: inclusive bounds, no rounding.
     TEST(Synth::oscillator_pitch_in_gate(0.0f));
@@ -8726,8 +8721,8 @@ static void check_osc_pitch_gating()
     TEST(! Synth::oscillator_pitch_in_gate(127.5f));
     TEST(! Synth::oscillator_pitch_in_gate(-12.0f));
     TEST(! Synth::oscillator_pitch_in_gate(139.0f));
-    TEST(Synth::oscillator_final_pitch(60, 12, 0, 0) == 204.0f);
-    TEST(! Synth::oscillator_pitch_in_gate(Synth::oscillator_final_pitch(60, 12, 0, 0)));
+    TEST(Synth::oscillator_final_pitch(60, 12, 0) == 204.0f);
+    TEST(! Synth::oscillator_pitch_in_gate(Synth::oscillator_final_pitch(60, 12, 0)));
 
     // param_onset_value: read-only trigger-time evaluation of a configured
     // parameter node.
@@ -8838,11 +8833,11 @@ static void check_osc_pitch_gating()
         // Later-leaf-write ordering: the verdict is computed once from the
         // onset state; a same-batch write after it cannot change the verdict.
         const bool verdict = Synth::oscillator_pitch_in_gate(
-            Synth::oscillator_final_pitch(69, 0, 0, Synth::param_onset_value(params, descs, 2)));
+            Synth::oscillator_final_pitch(69, 0, Synth::param_onset_value(params, descs, 2)));
         TEST(verdict);
         Synth::write_external_leaf(900.0f, Synth::ExternalLeaf{ &params[1].value, &params[1].prev_value });
         TEST(! Synth::oscillator_pitch_in_gate(
-            Synth::oscillator_final_pitch(69, 0, 0, Synth::param_onset_value(params, descs, 2))));
+            Synth::oscillator_final_pitch(69, 0, Synth::param_onset_value(params, descs, 2))));
         // Documentation, not a state check: the runtime consumes the verdict captured
         // at the event, never a re-read against later leaf writes.
         TEST(verdict);
@@ -8911,8 +8906,8 @@ static void check_osc_pitch_gating()
 
         // The verdicts come from the same helpers the runtime calls: one
         // accepted layer (note 69) and one rejected layer (octave +12 -> 204).
-        const bool in_gate     = Synth::oscillator_pitch_in_gate(Synth::oscillator_final_pitch(69, 0, 0, 0));
-        const bool out_of_gate = ! Synth::oscillator_pitch_in_gate(Synth::oscillator_final_pitch(69, 12, 0, 0));
+        const bool in_gate     = Synth::oscillator_pitch_in_gate(Synth::oscillator_final_pitch(69, 0, 0));
+        const bool out_of_gate = ! Synth::oscillator_pitch_in_gate(Synth::oscillator_final_pitch(69, 12, 0));
         TEST(in_gate && out_of_gate);
 
         // (a) One accepted + one rejected layer: the rejected slot frees on
@@ -9220,9 +9215,10 @@ static void check_osc_pitch_gating()
         }
     }
 
-    // Projection and compile path: the Pitch Offset row is a bounded bare
-    // input (no slider), the Octave Offset row is a bounded integer slider at
-    // slot 135, and the compile path validates the octave before narrowing.
+    // Projection and compile path: the Pitch row is a bounded bare input
+    // box (no slider) at its target slot, the Octave Offset row is a
+    // bounded integer slider, and the compile path validates the octave
+    // before narrowing.
     {
         static Synth::InstrumentEditorBank source;
         static Synth::Instrument           instrument = {};
@@ -9236,16 +9232,16 @@ static void check_osc_pitch_gating()
 
         uint32_t pitch_slot  = Sculptor::pool_no_slot;
         uint32_t octave_slot = Sculptor::pool_no_slot;
-        TEST(find_graph_slot(graph, mapping.osc_nodes[0], "Pitch Offset", &pitch_slot));
+        TEST(find_graph_slot(graph, mapping.osc_nodes[0], "Pitch", &pitch_slot));
         TEST(find_graph_slot(graph, mapping.osc_nodes[0], "Octave Offset", &octave_slot));
-        TEST(pitch_slot == 134);
-        TEST(octave_slot == 135);
+        TEST(pitch_slot == Sculptor::osc_target_row(Synth::mod_pitch));
+        TEST(octave_slot == 134);
         const Sculptor::Slot& pitch_row = graph.node(mapping.osc_nodes[0]).slots.entries[pitch_slot];
         TEST(pitch_row.property_type == Sculptor::PropertyType::real);
         TEST(! pitch_row.real_bounded); // a bare input box, not a slider
-        TEST(pitch_row.real_min == Sculptor::osc_pitch_offset_min);
-        TEST(pitch_row.real_max == Sculptor::osc_pitch_offset_max);
-        TEST(pitch_row.value.real == instrument.layers[0].pitch_offset);
+        TEST(pitch_row.real_min == Sculptor::osc_target_view(Synth::mod_pitch).min_value);
+        TEST(pitch_row.real_max == Sculptor::osc_target_view(Synth::mod_pitch).max_value);
+        TEST(pitch_row.value.real == instrument.layers[0].targets[Synth::mod_pitch].base_value);
         const Sculptor::Slot& octave_row = graph.node(mapping.osc_nodes[0]).slots.entries[octave_slot];
         TEST(octave_row.property_type == Sculptor::PropertyType::integer);
         TEST(octave_row.int_bounded);
@@ -9255,7 +9251,7 @@ static void check_osc_pitch_gating()
         const Sculptor::OscTargetView spread_view = Sculptor::osc_target_view(Synth::mod_fir_spread);
         TEST(spread_view.min_value == 0.0f && spread_view.max_value == 36.0f);
         TEST(spread_view.bank_scale == 1.0f && ! spread_view.logarithmic);
-        TEST(Sculptor::osc_target_row(Synth::mod_fir_spread) == 137);
+        TEST(Sculptor::osc_target_row(Synth::mod_fir_spread) == 136);
 
         // Round-trip: an octave edit applies through the value_changed path,
         // lands in the bank and reprojection shows it again.
@@ -9280,6 +9276,19 @@ static void check_osc_pitch_gating()
         static Synth::Instrument compiled;
         TEST(Sculptor::compile_graph_to_instrument(graph, mapping, &compiled));
         TEST(compiled.layers[0].octave_offset == -3);
+        // Round-trip: a pitch edit applies into the pitch target's base
+        // value and reprojection shows it again.
+        Sculptor::PropertyValue pitch_edit = {};
+        pitch_edit.real                    = 7.5f;
+        graph.set_slot_value(mapping.osc_nodes[0], pitch_slot, pitch_edit);
+        Sculptor::GraphChange pitch_change = {};
+        pitch_change.kind                  = Sculptor::ChangeKind::value_changed;
+        pitch_change.node_idx              = mapping.osc_nodes[0];
+        pitch_change.slot_idx              = pitch_slot;
+        TEST(Sculptor::apply_osc_graph_change(&source, &graph, &mapping, pitch_change));
+        TEST(source.bank.instruments.entries[0].layers[0].targets[Synth::mod_pitch].base_value == 7.5f);
+        TEST(Sculptor::compile_graph_to_instrument(graph, mapping, &compiled));
+        TEST(compiled.layers[0].targets[Synth::mod_pitch].base_value == 7.5f);
         const int32_t octave_endpoints[2] = { -12, 12 };
         for (const int32_t endpoint : octave_endpoints) {
             octave_edit.integer = endpoint;
@@ -9311,7 +9320,7 @@ static void check_osc_pitch_gating()
         graph.take_changes(discarded, Sculptor::max_pending_changes);
         uint32_t slope_slot = Sculptor::pool_no_slot;
         TEST(find_graph_slot(graph, mapping.osc_nodes[0], "FIR Slope", &slope_slot));
-        TEST(slope_slot == 150);
+        TEST(slope_slot == 149);
         const Sculptor::Slot& slope_row = graph.node(mapping.osc_nodes[0]).slots.entries[slope_slot];
         TEST(slope_row.property_type == Sculptor::PropertyType::integer);
         TEST(slope_row.int_bounded);
@@ -14966,7 +14975,6 @@ int main()
         // Stale bytes inside live entries: a layer beyond layer_count, a routing
         // input beyond num_inputs, envelope points beyond num_points, a name tail
         // after shortening, and a negative zero
-        bank.bank.instruments.entries[0].layers[2].pitch_offset                                = 3.5f;
         bank.bank.instruments.entries[0].layers[2].octave_offset                               = 5;
         bank.bank.instruments.entries[0].layers[0].targets[Synth::mod_panning].num_inputs      = 1;
         bank.bank.instruments.entries[0].layers[0].targets[Synth::mod_panning].inputs[1].scale = 7.0f;
@@ -14989,7 +14997,6 @@ int main()
         TEST(round1.bank.envelopes.entries[1].num_points == 0);
         TEST(round1.bank.envelopes.entries[1].points[1].position == 0);
         TEST(round1.bank.lfos.entries[1].period_ms == 0);
-        TEST(round1.bank.instruments.entries[0].layers[2].pitch_offset == 0.0f);
         TEST(round1.bank.instruments.entries[0].layers[2].octave_offset == 0);
         TEST(round1.bank.instruments.entries[0].layers[0].targets[Synth::mod_panning].inputs[1].scale == 0.0f);
         TEST(round1.bank.envelopes.entries[0].points[7].position == 0);
@@ -17912,8 +17919,8 @@ int main()
         bank.phantoms[0].layer                   = 0;
         bank.phantom_count                       = 1;
         static Synth::InstrumentEditorBank second;
-        second                              = bank;
-        second.phantoms[0].osc.pitch_offset = -9.5f;
+        second                               = bank;
+        second.phantoms[0].osc.octave_offset = -9;
         static char    doc_a[1 << 16];
         static char    doc_b[1 << 16];
         const uint32_t len_a = Synth::encode_editor_bank_json(&bank, doc_a, sizeof(doc_a));
@@ -17963,7 +17970,7 @@ int main()
         TEST(Synth::decode_editor_bank_json(composed, composed_len, &restored));
         TEST(restored.phantom_count == 1);
         TEST(restored.phantoms[0].layer == 0);
-        TEST(restored.phantoms[0].osc.pitch_offset == -9.5f);
+        TEST(restored.phantoms[0].osc.octave_offset == -9);
     }
     // Layer compaction shifts missing-sum bits together with layers.
     {
@@ -18233,43 +18240,43 @@ int main()
         static Synth::InstrumentEditorBank bank;
         memset(static_cast<void*>(&bank), 0, sizeof(bank));
         Synth::Oscillator payload = {};
-        payload.pitch_offset      = 1.0f;
+        payload.octave_offset     = 1;
         TEST(Sculptor::set_phantom_entry(&bank, 3, 1, 1, payload));
-        payload.pitch_offset = 3.0f;
+        payload.octave_offset = 3;
         TEST(Sculptor::set_phantom_entry(&bank, 3, 1, 3, payload));
-        payload.pitch_offset = 5.0f;
+        payload.octave_offset = 5;
         TEST(Sculptor::set_phantom_entry(&bank, 3, 1, 5, payload));
-        payload.pitch_offset = 9.0f;
+        payload.octave_offset = 9;
         TEST(Sculptor::set_phantom_entry(&bank, 0, 0, 0, payload));
         TEST(bank.phantom_count == 4);
         Sculptor::compact_missing_sum_bits(&bank, 3, 1, 1);
         TEST(bank.phantom_count == 3);
         TEST(Sculptor::find_phantom_entry(bank, 3, 1, 1) < 0);
         int32_t at = Sculptor::find_phantom_entry(bank, 3, 1, 2);
-        TEST(at >= 0 && bank.phantoms[at].osc.pitch_offset == 3.0f);
+        TEST(at >= 0 && bank.phantoms[at].osc.octave_offset == 3);
         at = Sculptor::find_phantom_entry(bank, 3, 1, 4);
-        TEST(at >= 0 && bank.phantoms[at].osc.pitch_offset == 5.0f);
+        TEST(at >= 0 && bank.phantoms[at].osc.octave_offset == 5);
         at = Sculptor::find_phantom_entry(bank, 0, 0, 0);
-        TEST(at >= 0 && bank.phantoms[at].osc.pitch_offset == 9.0f);
+        TEST(at >= 0 && bank.phantoms[at].osc.octave_offset == 9);
         // A zone split clones the source zone's entries under the clone's
         // zone key.
         static Synth::InstrumentEditorBank split;
         memset(static_cast<void*>(&split), 0, sizeof(split));
-        payload.pitch_offset = 7.0f;
+        payload.octave_offset = 7;
         TEST(Sculptor::set_phantom_entry(&split, 0, 0, 0, payload));
         split.graph_missing_sum[0][0] = 1u;
         Sculptor::zone_records_split_copy(&split, 0, 0);
         TEST(split.phantom_count == 2);
         at = Sculptor::find_phantom_entry(split, 0, 0, 0);
-        TEST(at >= 0 && split.phantoms[at].osc.pitch_offset == 7.0f);
+        TEST(at >= 0 && split.phantoms[at].osc.octave_offset == 7);
         at = Sculptor::find_phantom_entry(split, 0, 1, 0);
-        TEST(at >= 0 && split.phantoms[at].osc.pitch_offset == 7.0f);
+        TEST(at >= 0 && split.phantoms[at].osc.octave_offset == 7);
         // A zone drop removes the zone's entries and shifts the later
         // zones' keys down.
         Sculptor::zone_records_drop_zone(&split, 0, 0);
         TEST(split.phantom_count == 1);
         at = Sculptor::find_phantom_entry(split, 0, 0, 0);
-        TEST(at >= 0 && split.phantoms[at].osc.pitch_offset == 7.0f);
+        TEST(at >= 0 && split.phantoms[at].osc.octave_offset == 7);
     }
     // A pool-full capture refuses the whole apply batch: the committed bank
     // stays byte-identical (bits, store payloads, records and wiring) and
@@ -18296,7 +18303,8 @@ int main()
                 zone_bank.graph_missing_sum[channel][zone]             = 1u;
                 Synth::Oscillator payload                              = {};
                 payload.osc_type[0]                                    = Synth::WaveType::sine_wave;
-                payload.pitch_offset = static_cast<float>(channel * Synth::max_instr_per_channel + zone);
+                payload.targets[Synth::mod_volume].base_value =
+                    static_cast<float>(channel * Synth::max_instr_per_channel + zone);
                 TEST(Sculptor::set_phantom_entry(&zone_bank, channel, zone, 0, payload));
             }
         }
@@ -20751,7 +20759,8 @@ int main()
         TEST(osc.osc_type[1] == Synth::WaveType::sawtooth_wave);
         TEST(osc.osc_mode == Synth::osc_mode_fm);
         TEST(osc.mod_ratio == 2.0f);
-        TEST(osc.pitch_offset == -12.0f);
+        // The legacy key folds into the pitch base: 1.0 + (-12.0).
+        TEST(osc.targets[Synth::mod_pitch].base_value == -11.0f);
         TEST(osc.octave_offset == 5);
         // Untouched targets keep neutral defaults.
         TEST(instr.layers[0].targets[Synth::mod_osc_mix].base_value == 0.0f);
@@ -20763,7 +20772,8 @@ int main()
         TEST(instr.layers[0].targets[Synth::mod_volume].inputs[0].source == Synth::ModSource::velocity);
         TEST(instr.layers[0].targets[Synth::mod_volume].inputs[0].op == Synth::SourceOp::add);
         TEST(instr.layers[0].targets[Synth::mod_volume].inputs[0].scale == 0.5f);
-        TEST(instr.layers[0].targets[Synth::mod_pitch].base_value == 1.0f);
+        // The pitch block base plus the folded legacy key: 1.0 + (-12.0).
+        TEST(instr.layers[0].targets[Synth::mod_pitch].base_value == -11.0f);
         TEST(instr.layers[0].targets[Synth::mod_panning].base_value == 0.5f);
         TEST(instr.layers[0].targets[Synth::mod_duty1].base_value == 0.5f);
         // fm_index is 0..1 in the document, 0..2*pi radians in the bank.
@@ -20828,7 +20838,7 @@ int main()
         TEST(decoded_osc.osc_type[1] == Synth::WaveType::sawtooth_wave);
         TEST(decoded_osc.osc_mode == Synth::osc_mode_fm);
         TEST(decoded_osc.mod_ratio == 2.0f);
-        TEST(decoded_osc.pitch_offset == -12.0f);
+        TEST(decoded_osc.targets[Synth::mod_pitch].base_value == -11.0f);
         TEST(decoded_osc.octave_offset == 5);
         TEST(decoded.layers[0].targets[Synth::mod_volume].base_value == 0.8f);
         TEST(decoded.layers[0].targets[Synth::mod_volume].num_inputs == 2);
@@ -20899,7 +20909,7 @@ int main()
                                                    plain_lfos,
                                                    &plain_lfo_count));
                 TEST(plain_instr.layers[0].octave_offset == 0);
-                TEST(plain_instr.layers[0].pitch_offset == 2.0f);
+                TEST(plain_instr.layers[0].targets[Synth::mod_pitch].base_value == 2.0f);
             }
 
             // Saved-bank dialect: encode and decode preserve the octave; a zero
@@ -21045,7 +21055,7 @@ int main()
                                                    plain_lfos,
                                                    &plain_lfo_count));
                 TEST(plain_instr.layers[0].fir_slope_percent == 100);
-                TEST(plain_instr.layers[0].pitch_offset == 2.0f);
+                TEST(plain_instr.layers[0].targets[Synth::mod_pitch].base_value == 2.0f);
                 // fir_type: absent = band-pass; the key may follow the target blocks, and a
                 // low-pass spread base is a Hz value up to 22050 while band-pass stays 0..36.
                 TEST(plain_instr.layers[0].fir_type == Synth::fir_bandpass);

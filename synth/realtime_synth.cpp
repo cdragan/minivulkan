@@ -470,20 +470,19 @@ template <typename T> T& get_param(uint32_t offset)
 
 struct RunningOscillator {
     // Constants which don't change for this oscillator's instance's life time
-    uint32_t midi_channel;      // MIDI channel on which this note was played
-    uint32_t output_channel;    // Output (mixing) channel for this MIDI channel/note
-    uint32_t note;              // MIDI note
-    uint32_t freq_mult;         // Frequency multiplier for component frequencies (1 for base frequency)
-    WaveType osc_type[2];       // Two oscillator types
-    uint32_t osc_output_offs;   // Oscillator data output offset
-    uint32_t fir_memory_offs;   // FIR filter memory offset
-    uint32_t fir_taps_offs;     // FIR filter taps offset
-    uint32_t osc_mode;          // osc_mode_blend, osc_mode_fm or osc_mode_hard_sync
-    float    mod_ratio;         // FM: modulator/carrier freq ratio.  Hard sync: slave cycles per master cycle
-    float    pitch_offset;      // Per-oscillator pitch offset in semitones (instrument constant for this note's layers)
-    int8_t   octave_offset;     // Whole-octave pitch shift: 12 * octave_offset semitones are added to the pitch
-                                // (instrument constant for this note's layer)
-    uint8_t  fir_slope_percent; // FIR window slope percent 1..100; 100 = the full tap span (sharpest)
+    uint32_t          midi_channel;    // MIDI channel on which this note was played
+    uint32_t          output_channel;  // Output (mixing) channel for this MIDI channel/note
+    uint32_t          note;            // MIDI note
+    uint32_t          freq_mult;       // Frequency multiplier for component frequencies (1 for base frequency)
+    WaveType          osc_type[2];     // Two oscillator types
+    uint32_t          osc_output_offs; // Oscillator data output offset
+    uint32_t          fir_memory_offs; // FIR filter memory offset
+    uint32_t          fir_taps_offs;   // FIR filter taps offset
+    uint32_t          osc_mode;        // osc_mode_blend, osc_mode_fm or osc_mode_hard_sync
+    float             mod_ratio;       // FM: modulator/carrier freq ratio.  Hard sync: slave cycles per master cycle
+    int8_t            octave_offset;   // Whole-octave pitch shift: 12 * octave_offset semitones are added to the pitch
+                                       // (instrument constant for this note's layer)
+    uint8_t           fir_slope_percent; // FIR window slope percent 1..100; 100 = the full tap span (sharpest)
     Synth::FilterType fir_type; // Band-pass: spread in semitones.  Low-pass/high-pass: spread is a fixed cutoff in Hz
 
     // Current phase state
@@ -1160,7 +1159,8 @@ static void configure_target_modulation(const Instrument& instrument,
                                         uint32_t          osc_slot,
                                         uint32_t          channel,
                                         uint32_t          voice_idx,
-                                        uint32_t          layer_idx)
+                                        uint32_t          layer_idx,
+                                        float             base_extra)
 {
     const TargetBinding& binding = instrument.layers[layer_idx].targets[target];
 
@@ -1201,7 +1201,7 @@ static void configure_target_modulation(const Instrument& instrument,
     }
 
     Synth::configure_plain(&param_descs[osc_param(osc_slot, dest_role)],
-                           binding.base_value,
+                           binding.base_value + base_extra,
                            binding.envelope_desc_id ? static_cast<uint16_t>(env_node) : uint16_t(0),
                            binding.envelope_depth,
                            binding.lfo_desc_id ? static_cast<uint16_t>(lfo_node) : uint16_t(0),
@@ -1311,11 +1311,12 @@ static void process_note_on(uint32_t delta_samples, const DispatchedMidiEvent& e
         osc.octave_offset       = layer.octave_offset;
         osc.fir_slope_percent   = layer.fir_slope_percent;
         osc.fir_type            = layer.fir_type;
-        osc.pitch_offset =
-            layer.pitch_offset + note_skew + Synth::random_pitch_skew(&note_skew_rng, instrument.layer_skew_semitones);
-        osc.phase      = 0.0f;
-        osc.mod_phase  = 0.0f;
-        osc.old_volume = 0.0f; // ramp up from silence to avoid a click
+        // The per-note pitch skew rides on the pitch target: it joins the
+        // binding's base value in the dest parameter's initial state.
+        const float layer_skew = Synth::random_pitch_skew(&note_skew_rng, instrument.layer_skew_semitones);
+        osc.phase              = 0.0f;
+        osc.mod_phase          = 0.0f;
+        osc.old_volume         = 0.0f; // ramp up from silence to avoid a click
         // old_panning keeps its base-value seed: the dest node is stale until the first advance.
         osc.old_panning  = layer.targets[mod_panning].base_value;
         osc.terminating  = false;
@@ -1337,7 +1338,8 @@ static void process_note_on(uint32_t delta_samples, const DispatchedMidiEvent& e
                                         osc_slot,
                                         channel,
                                         voice_idx,
-                                        layer_idx);
+                                        layer_idx,
+                                        node.target == Synth::mod_pitch ? note_skew + layer_skew : 0.0f);
         }
 
         // Trigger-time gate: the oscillator only sounds when its final
@@ -1346,7 +1348,6 @@ static void process_note_on(uint32_t delta_samples, const DispatchedMidiEvent& e
         const float onset_pitch = Synth::oscillator_final_pitch(
             static_cast<int>(osc.note),
             osc.octave_offset,
-            osc.pitch_offset,
             Synth::param_onset_value(parameters,
                                      param_descs,
                                      static_cast<uint16_t>(osc_param(osc_slot, osc_pitch_dest))));
@@ -1814,7 +1815,6 @@ static void update_modulation()
 
         osc.pitch              = Synth::oscillator_final_pitch(static_cast<int>(osc.note),
                                                                osc.octave_offset,
-                                                               osc.pitch_offset,
                                                                parameters[osc_param(osc_idx, osc_pitch_dest)].value);
         const float new_spread = parameters[osc_param(osc_idx, osc_spread_dest)].value;
         if (osc.fir_taps_offs && osc.spread <= 0.0f && new_spread > 0.0f) {

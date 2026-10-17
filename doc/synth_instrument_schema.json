@@ -233,13 +233,6 @@
 					"default": 1,
 					"description": "The FM ratio (fm) or hard-sync cycle ratio (sync); 0 is a legal bank value, any nonzero value is 0.125..8; ignored by blend. For ring_mod it is the carrier ratio. The static value mirrors the fm_ratio target base for compatibility."
 				},
-				"pitch_offset_semitones": {
-					"type": "number",
-					"minimum": -12,
-					"maximum": 12,
-					"default": 0,
-					"description": "This oscillator's pitch offset in semitones."
-				},
 				"octave_offset": {
 					"type": "integer",
 					"minimum": -12,

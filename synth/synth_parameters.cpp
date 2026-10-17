@@ -362,12 +362,9 @@ bool Synth::sustain_decay_owns_termination(const bool decaying, const float dest
     return decaying && dest_value != 0.0f;
 }
 
-float Synth::oscillator_final_pitch(const int   midi_note,
-                                    const int   octave_offset,
-                                    const float pitch_offset,
-                                    const float pitch_value)
+float Synth::oscillator_final_pitch(const int midi_note, const int octave_offset, const float pitch_value)
 {
-    return static_cast<float>(midi_note) + 12.0f * static_cast<float>(octave_offset) + pitch_offset + pitch_value;
+    return static_cast<float>(midi_note) + 12.0f * static_cast<float>(octave_offset) + pitch_value;
 }
 
 bool Synth::oscillator_pitch_in_gate(const float final_pitch)

@@ -78,7 +78,7 @@ static_assert(Synth::graph_canonical_input_node_count + 2 + Synth::max_layers +
 // LFO instance key up to two source edges into its depth/rate inputs.
 static_assert(Synth::max_layers + 6 * Synth::max_layers * Synth::num_mod_targets <= max_connections);
 
-// Oscillator node slot grammar: 19 fixed slots (oscillator properties,
+// Oscillator node slot grammar: 18 fixed slots (oscillator properties,
 // the FIR slope and filter type properties and target value rows, order pinned by
 // osc_target_row_slot below),
 // and every ModTarget owns one 12-slot modulation block directly after
@@ -88,10 +88,10 @@ static_assert(Synth::max_layers + 6 * Synth::max_layers * Synth::num_mod_targets
 // (target, row): the LFO row groups 3*t + 1, the source rows 3*t + 2 and 3*t + 3, the envelope row 3*t + 4; the fixed
 // slots own their lines (group 0). Four value rows nest as children of a
 // parent row: duty and pad tone under their waveform rows, waveform mix /
-// fm depth / fm ratio under mix mode, pitch offset / octave offset under
+// fm depth / fm ratio under mix mode, octave offset under
 // pitch, and the fir pitch spread / fir slope rows under filter type. A
 // nested row's whole modulation block shifts one tree level deeper.
-constexpr uint32_t osc_slot_count          = 19;
+constexpr uint32_t osc_slot_count = 18;
 constexpr uint32_t osc_target_block_stride = 12;
 
 // The value row of each ModTarget on an oscillator node.  The rows are
@@ -106,7 +106,7 @@ constexpr uint32_t osc_target_row_slot[Synth::num_mod_targets] = {
     29,  // duty b
     56,  // waveform mix
     69,  // fm depth
-    137, // fir pitch spread
+    136, // fir pitch spread
     82,  // fm ratio
     15,  // pad tone a
     42,  // pad tone b

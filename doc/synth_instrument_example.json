@@ -8,7 +8,6 @@
 			"wave_b": "sawtooth",
 			"mode": "fm",
 			"mod_ratio": 2.0,
-			"pitch_offset_semitones": -12.0,
 			"volume": {
 				"base": 0.8,
 				"envelope": {
@@ -51,7 +50,6 @@
 			"wave_a": "pulse",
 			"wave_b": "none",
 			"mode": "blend",
-			"pitch_offset_semitones": 0.0,
 			"volume": {
 				"envelope": {
 					"points": [

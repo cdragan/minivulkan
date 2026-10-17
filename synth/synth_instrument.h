@@ -102,12 +102,11 @@ enum OscMode : uint32_t {
 struct Oscillator {
     WaveType osc_type[2];
     OscMode  osc_mode;
-    float    mod_ratio;    // FM ratio, hard-sync cycle ratio or ring-mod carrier ratio; note-on seeds the
-                           // running oscillator from this scalar (layer.mod_ratio), and target
-                           // configuration independently reads the mod_fm_ratio binding's base_value
-    float    pitch_offset; // This oscillator's pitch offset in semitones
-    int8_t octave_offset;  // Whole-octave pitch shift, counted in whole octaves: 12 * octave_offset semitones are added
-                           // to the pitch
+    float    mod_ratio;   // FM ratio, hard-sync cycle ratio or ring-mod carrier ratio; note-on seeds the
+                          // running oscillator from this scalar (layer.mod_ratio), and target
+                          // configuration independently reads the mod_fm_ratio binding's base_value
+    int8_t octave_offset; // Whole-octave pitch shift, counted in whole octaves: 12 * octave_offset semitones are added
+                          // to the pitch
     // FIR window slope percent 1..100; 100 = the full 1025-tap span (sharpest).
     // The member default seeds every value-initialized construction path.
     uint8_t       fir_slope_percent = 100;

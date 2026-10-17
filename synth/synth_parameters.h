@@ -150,7 +150,7 @@ float note_to_frequency(int midi_note, float pitch_semitones, uint32_t freq_mult
 // Final equivalent MIDI pitch of an oscillator: base note + 12 * octave_offset +
 // per-oscillator pitch offset (including random skews) + modulated pitch target value.
 // The result is an ABSOLUTE equivalent MIDI pitch (69 = A4).
-float oscillator_final_pitch(int midi_note, int octave_offset, float pitch_offset, float pitch_value);
+float oscillator_final_pitch(int midi_note, int octave_offset, float pitch_value);
 
 // Note-on trigger gate: an oscillator only sounds when its final equivalent
 // MIDI pitch lies within [0, 127] inclusive.
