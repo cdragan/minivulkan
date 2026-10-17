@@ -15,6 +15,10 @@ const uint32_t* get_window_events()
     return events;
 }
 
+void set_dpi_scale(void* void_conn, unsigned int root)
+{
+}
+
 bool install_keyboard_events(void* void_conn)
 {
     return true;

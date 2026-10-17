@@ -186,6 +186,7 @@ static bool create_gui_frame(uint32_t image_idx)
     ImGuiIO& io      = ImGui::GetIO();
     io.DisplaySize.x = static_cast<float>(vk_surface_caps.currentExtent.width) / vk_surface_scale;
     io.DisplaySize.y = static_cast<float>(vk_surface_caps.currentExtent.height) / vk_surface_scale;
+    io.DisplayFramebufferScale = ImVec2(vk_surface_scale, vk_surface_scale);
 
     ImGui_ImplVulkan_NewFrame();
     ImGui::NewFrame();

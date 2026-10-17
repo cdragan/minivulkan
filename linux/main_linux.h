@@ -4,6 +4,7 @@
 #include <stdint.h>
 
 const uint32_t* get_window_events();
+void set_dpi_scale(void* void_conn, unsigned int root);
 bool install_keyboard_events(void* void_conn);
 
 void handle_key_press(void* event);

@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2021-2026 Chris Dragan
 
 #include "../core/d_printf.h"
+#include "../core/gui.h"
 #include "main_linux.h"
 
 #include "../thirdparty/imgui/src/imgui.h"
@@ -26,6 +27,52 @@ const uint32_t* get_window_events()
     };
 
     return events;
+}
+
+void set_dpi_scale(void* void_conn, unsigned int root)
+{
+    xcb_connection_t* const conn = static_cast<xcb_connection_t*>(void_conn);
+
+    const xcb_get_property_cookie_t cookie =
+        xcb_get_property(conn,
+                         false,
+                         static_cast<xcb_window_t>(root),
+                         XCB_ATOM_RESOURCE_MANAGER,
+                         XCB_ATOM_ANY,
+                         0,
+                         16384);
+
+    xcb_get_property_reply_t* const reply = xcb_get_property_reply(conn, cookie, nullptr);
+    if ( ! reply)
+        return;
+
+    const char* const data   = static_cast<const char*>(xcb_get_property_value(reply));
+    const int         length = static_cast<int>(xcb_get_property_value_length(reply));
+    const char* const end    = data + length;
+
+    float scale = 1.0f;
+
+    for (const char* entry = data; entry + 8 <= end; ++entry) {
+        if (strncmp(entry, "Xft.dpi:", 8) != 0)
+            continue;
+
+        const char* value = entry + 8;
+        while (value < end && (*value == ' ' || *value == '\t'))
+            ++value;
+
+        int dpi = 0;
+        while (value < end && *value >= '0' && *value <= '9')
+            dpi = dpi * 10 + (*value++ - '0');
+
+        if (dpi > 0)
+            scale = static_cast<float>(dpi) / 96.0f;
+
+        break;
+    }
+
+    free(reply);
+
+    vk_surface_scale = scale;
 }
 
 static bool window_needs_update = false;
@@ -276,8 +323,9 @@ static void handle_button_release(xcb_button_release_event_t* event)
 
 static void handle_mouse_motion(xcb_motion_notify_event_t* event)
 {
-    ImGui::GetIO().AddMousePosEvent(static_cast<float>(event->event_x),
-                                    static_cast<float>(event->event_y));
+    // X11 reports coordinates in physical pixels, ImGui needs logical coordinates
+    ImGui::GetIO().AddMousePosEvent(static_cast<float>(event->event_x) / vk_surface_scale,
+                                    static_cast<float>(event->event_y) / vk_surface_scale);
 }
 
 void handle_gui_event(void* event)

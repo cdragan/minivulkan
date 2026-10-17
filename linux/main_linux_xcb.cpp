@@ -102,6 +102,8 @@ static bool create_window(Window* w)
 
     xcb_screen_t* const screen = xcb_setup_roots_iterator(xcb_get_setup(w->connection)).data;
 
+    set_dpi_scale(w->connection, screen->root);
+
     w->window = xcb_generate_id(w->connection);
 
     const uint16_t width  = full_screen ? screen->width_in_pixels  : static_cast<uint16_t>(get_main_window_width());
