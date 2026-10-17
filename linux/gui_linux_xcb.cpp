@@ -4,6 +4,7 @@
 #include "../core/d_printf.h"
 #include "../core/gui.h"
 #include "main_linux.h"
+#include "main_linux_xcb.h"
 
 #include "../thirdparty/imgui/src/imgui.h"
 
@@ -73,6 +74,12 @@ void set_dpi_scale(void* void_conn, unsigned int root)
     free(reply);
 
     vk_surface_scale = scale;
+}
+
+uint16_t get_scaled_dim(uint32_t value)
+{
+    const float scaled = static_cast<float>(value) * vk_surface_scale;
+    return static_cast<uint16_t>(scaled);
 }
 
 static bool window_needs_update = false;

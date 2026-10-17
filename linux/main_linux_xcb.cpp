@@ -4,6 +4,7 @@
 #include "../core/d_printf.h"
 #include "../core/gui.h"
 #include "main_linux.h"
+#include "main_linux_xcb.h"
 #include "../core/minivulkan.h"
 
 #include <string.h>
@@ -106,8 +107,8 @@ static bool create_window(Window* w)
 
     w->window = xcb_generate_id(w->connection);
 
-    const uint16_t width  = full_screen ? screen->width_in_pixels  : static_cast<uint16_t>(get_main_window_width());
-    const uint16_t height = full_screen ? screen->height_in_pixels : static_cast<uint16_t>(get_main_window_height());
+    const uint16_t width  = full_screen ? screen->width_in_pixels  : get_scaled_dim(get_main_window_width());
+    const uint16_t height = full_screen ? screen->height_in_pixels : get_scaled_dim(get_main_window_height());
 
     xcb_create_window(w->connection,
                       XCB_COPY_FROM_PARENT,

@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2021-2026 Chris Dragan
 
 #include "main_linux.h"
+#include "main_linux_xcb.h"
 #include <stdlib.h>
 #include <xcb/xcb.h>
 
@@ -17,6 +18,11 @@ const uint32_t* get_window_events()
 
 void set_dpi_scale(void* void_conn, unsigned int root)
 {
+}
+
+uint16_t get_scaled_dim(uint32_t value)
+{
+    return static_cast<uint16_t>(value);
 }
 
 bool install_keyboard_events(void* void_conn)
