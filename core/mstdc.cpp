@@ -71,3 +71,10 @@ float mstd::exp2(float x)
 
     return convert.f;
 }
+
+#if !defined(_WIN32) || !defined(NOSTDLIB)
+float mstd::floorf(float x)
+{
+    return floorf(x);
+}
+#endif

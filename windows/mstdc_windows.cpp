@@ -20,6 +20,12 @@ int __stdcall WinMainCRTStartup()
     ExitProcess(WinMain(nullptr, nullptr, nullptr, 0));
 }
 
+float mstd::floorf(float value)
+{
+    const __m128 val = _mm_set_ss(value);
+    return _mm_cvtss_f32(_mm_round_ss(val, val, _MM_FROUND_TO_NEG_INF | _MM_FROUND_NO_EXC));
+}
+
 extern "C" {
 
     int _fltused;
@@ -57,12 +63,6 @@ extern "C" {
     {
         const __m128 val = _mm_set_ss(value);
         return _mm_cvtss_f32(_mm_round_ss(val, val, _MM_FROUND_TO_ZERO | _MM_FROUND_NO_EXC));
-    }
-
-    float floorf(float value)
-    {
-        const __m128 val = _mm_set_ss(value);
-        return _mm_cvtss_f32(_mm_round_ss(val, val, _MM_FROUND_TO_NEG_INF | _MM_FROUND_NO_EXC));
     }
 
     int atexit(void (__cdecl *func )(void))

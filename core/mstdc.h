@@ -33,6 +33,7 @@ constexpr T align_up(T value, T alignment)
 }
 
 float exp2(float x);
+float floorf(float x);
 
 template<typename F>
 class Deferred {
