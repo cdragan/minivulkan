@@ -75,6 +75,6 @@ float mstd::exp2(float x)
 #if !defined(_WIN32) || !defined(NOSTDLIB)
 float mstd::floorf(float x)
 {
-    return floorf(x);
+    return ::floorf(x);
 }
 #endif
