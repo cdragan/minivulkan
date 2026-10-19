@@ -44,9 +44,17 @@
 #endif
 #include <cmath>
 #include <float.h>
+#include <memory>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+// Heap storage for test scratch arrays. sizeof() and array decay keep working
+// on the elements member, and make_unique value-initializes the array like the
+// zero-initialized static it replaces.
+template <typename Element, uint32_t count> struct FixedArray {
+    Element elements[count];
+};
 
 #define TEST(test)                         \
     if (! (test)) {                        \
@@ -59,7 +67,9 @@ static bool project_legacy_effects(const Synth::InstrumentBank&  bank,
                                    Sculptor::EffectGraphMapping* mapping,
                                    const bool*                   pins = nullptr)
 {
-    static Synth::InstrumentEditorBank authored;
+    const std::unique_ptr<Synth::InstrumentEditorBank> authored_storage =
+        std::make_unique<Synth::InstrumentEditorBank>();
+    Synth::InstrumentEditorBank& authored = *authored_storage;
     memset(static_cast<void*>(&authored), 0, sizeof(authored));
     authored.bank = bank;
     return Sculptor::project_effect_chain_to_graph(authored, owner, graph, mapping, pins);
@@ -143,8 +153,9 @@ constexpr uint32_t t7_target_row_slots[Synth::num_mod_targets] = {
 };
 // Shared graph and mapping for the direct-row blocks; every block
 // re-projects, which rebuilds both from scratch.
-Sculptor::Graph           t7_graph;
-Sculptor::OscGraphMapping t7_mapping;
+const std::unique_ptr<Sculptor::Graph> t7_graph_storage = std::make_unique<Sculptor::Graph>();
+Sculptor::Graph&                       t7_graph         = *t7_graph_storage;
+Sculptor::OscGraphMapping              t7_mapping;
 } // namespace
 
 // Every output of one clipboard decode, so a rejected document can be shown to
@@ -761,7 +772,8 @@ static bool decode_bank_with_editor_section(const Synth::InstrumentEditorBank& b
                                             const char*                        editor_json,
                                             Synth::InstrumentEditorBank*       out)
 {
-    static char    doc[512 * 1024];
+    const std::unique_ptr<FixedArray<char, 512 * 1024>> doc_storage = std::make_unique<FixedArray<char, 512 * 1024>>();
+    char (&doc)[512 * 1024]                                         = doc_storage->elements;
     const uint32_t base_len = Synth::encode_editor_bank_json(&bank, doc, sizeof(doc));
     TEST(base_len > 0 && base_len < sizeof(doc));
     uint32_t close = base_len;
@@ -852,8 +864,10 @@ static void build_binding_fixture(Synth::InstrumentEditorBank* bank, Synth::Inst
 // partial count.
 static int32_t count_clipboard_tokens(const char* text, uint32_t len)
 {
-    static jsmntok_t tokens[clipboard_token_bound];
-    jsmn_parser      parser;
+    const std::unique_ptr<FixedArray<jsmntok_t, clipboard_token_bound>> tokens_storage =
+        std::make_unique<FixedArray<jsmntok_t, clipboard_token_bound>>();
+    jsmntok_t(&tokens)[clipboard_token_bound] = tokens_storage->elements;
+    jsmn_parser parser;
     jsmn_init(&parser);
     const int parsed = jsmn_parse(&parser, text, len, tokens, clipboard_token_bound);
     return parsed < 0 ? -1 : static_cast<int32_t>(parsed);
@@ -985,7 +999,8 @@ static bool validate_standalone_model(const Synth::Instrument&         instrumen
                                       const Synth::LFODescriptor*      lfos,
                                       uint32_t                         lfo_count)
 {
-    static Synth::InstrumentBank probe_bank;
+    const std::unique_ptr<Synth::InstrumentBank> probe_bank_storage = std::make_unique<Synth::InstrumentBank>();
+    Synth::InstrumentBank&                       probe_bank         = *probe_bank_storage;
     memset(static_cast<void*>(&probe_bank), 0, sizeof(probe_bank));
     for (uint32_t e = 0; e < envelope_count; e++) {
         const uint32_t env_slot = probe_bank.envelopes.allocate();
@@ -1288,14 +1303,18 @@ static void check_zone_paste_source_guard_self_tests()
     TEST(! zone_paste_body_has_failure_guard(inverted, inverted + strlen(inverted)));
 }
 
-// Loads a whole source file into a shared static buffer (the 256 KiB
-// bound), NUL-terminated.  Returns nullptr when the load fails (TEST
-// already fired).  The checks run sequentially, so the buffer never
-// serves two live reads at once.
+// Loads a whole source file into a shared reusable buffer (the 256 KiB
+// bound), NUL-terminated. Returns nullptr when the load fails (TEST
+// already fired). The checks run sequentially, so the buffer never
+// serves two live reads at once. The storage stays resident between
+// calls: the returned pointer is valid until the next load.
+const std::unique_ptr<FixedArray<char, 256 * 1024>> source_file_storage =
+    std::make_unique<FixedArray<char, 256 * 1024>>();
+
 static const char* load_source_file(const char* path)
 {
-    static char src[256 * 1024];
-    FILE* const file = fopen(path, "rb");
+    char (&src)[256 * 1024] = source_file_storage->elements;
+    FILE* const file        = fopen(path, "rb");
     TEST(file != nullptr);
     if (! file) {
         return nullptr;
@@ -1618,8 +1637,9 @@ static void build_named_fm_fixture(Synth::InstrumentEditorBank* bank)
     bank->bank.instruments.entries[0] = instrument;
     strcpy(bank->instrument_names[0], "Named FM");
     strcpy(bank->channel_names[0], "Source");
-    static Sculptor::Graph           graph;
-    static Sculptor::OscGraphMapping mapping;
+    const std::unique_ptr<Sculptor::Graph> graph_storage = std::make_unique<Sculptor::Graph>();
+    Sculptor::Graph&                       graph         = *graph_storage;
+    Sculptor::OscGraphMapping              mapping       = {};
     TEST(Sculptor::project_editor_to_graph(*bank, &graph, &mapping));
     add_detached_record(bank, 0, 0, 0, 2, 77, 88, Synth::ModSource::none, Synth::ModSource::none, 0);
     bank->graph_layout[0].width_override  = 321;
@@ -1657,8 +1677,9 @@ static bool fm_widget_enabled(const Sculptor::Graph& graph, uint32_t node_index)
 
 static void check_named_fm_projection(const Synth::InstrumentEditorBank& bank, uint32_t channel, uint32_t zone)
 {
-    static Sculptor::Graph           graph;
-    static Sculptor::OscGraphMapping mapping;
+    const std::unique_ptr<Sculptor::Graph> graph_storage = std::make_unique<Sculptor::Graph>();
+    Sculptor::Graph&                       graph         = *graph_storage;
+    Sculptor::OscGraphMapping              mapping       = {};
     const bool projected = Sculptor::project_editor_to_graph(bank, &graph, &mapping, channel, zone);
     TEST(projected);
     if (! projected) {
@@ -1821,18 +1842,26 @@ static void check_named_fm_projection(const Synth::InstrumentEditorBank& bank, u
 
 static void check_editor_instrument_round_trips()
 {
-    static Synth::InstrumentEditorBank source;
-    static Synth::InstrumentEditorBank source_before;
+    const std::unique_ptr<Synth::InstrumentEditorBank> source_storage = std::make_unique<Synth::InstrumentEditorBank>();
+    Synth::InstrumentEditorBank&                       source         = *source_storage;
+    const std::unique_ptr<Synth::InstrumentEditorBank> source_before_storage =
+        std::make_unique<Synth::InstrumentEditorBank>();
+    Synth::InstrumentEditorBank& source_before = *source_before_storage;
     build_named_fm_fixture(&source);
     check_named_fm_projection(source, 0, 0);
-    static char text[clipboard_capacity];
-    source_before = source;
+    const std::unique_ptr<FixedArray<char, clipboard_capacity>> text_storage =
+        std::make_unique<FixedArray<char, clipboard_capacity>>();
+    char (&text)[clipboard_capacity] = text_storage->elements;
+    source_before                    = source;
     TEST(export_clipboard_fixture(source, text, sizeof(text)));
     TEST(memcmp(&source, &source_before, sizeof(source)) == 0);
-    static ClipboardDecode decoded;
+    const std::unique_ptr<ClipboardDecode> decoded_storage = std::make_unique<ClipboardDecode>();
+    ClipboardDecode&                       decoded         = *decoded_storage;
     TEST(decode_clipboard(&decoded, text, max_portable_records));
-    static Synth::InstrumentEditorBank destination;
-    Synth::Instrument                  occupied;
+    const std::unique_ptr<Synth::InstrumentEditorBank> destination_storage =
+        std::make_unique<Synth::InstrumentEditorBank>();
+    Synth::InstrumentEditorBank& destination = *destination_storage;
+    Synth::Instrument            occupied;
     build_clipboard_zone_fixture(&destination, &occupied);
     destination.bank.channel_enabled[2]             = 1;
     destination.bank.channel_zones[2][0].start_note = 1;
@@ -1852,19 +1881,21 @@ static void check_editor_instrument_round_trips()
                         Synth::ModSource::none,
                         0);
     strcpy(destination.graph_layout[0].name, "Delay");
-    const Synth::GraphNodeLayout       unrelated_effect = destination.graph_layout[0];
-    static Synth::InstrumentEditorBank candidate;
-    const bool                         replaced = Sculptor::replace_zone_instrument_candidate(destination,
-                                                                                              2,
-                                                                                              0,
-                                                                                              decoded.instr,
-                                                                                              decoded.envs,
-                                                                                              decoded.env_count,
-                                                                                              decoded.lfos,
-                                                                                              decoded.lfo_count,
-                                                                                              decoded.layout,
-                                                                                              decoded.layout_count,
-                                                                                              &candidate);
+    const Synth::GraphNodeLayout                       unrelated_effect = destination.graph_layout[0];
+    const std::unique_ptr<Synth::InstrumentEditorBank> candidate_storage =
+        std::make_unique<Synth::InstrumentEditorBank>();
+    Synth::InstrumentEditorBank& candidate = *candidate_storage;
+    const bool                   replaced  = Sculptor::replace_zone_instrument_candidate(destination,
+                                                                                         2,
+                                                                                         0,
+                                                                                         decoded.instr,
+                                                                                         decoded.envs,
+                                                                                         decoded.env_count,
+                                                                                         decoded.lfos,
+                                                                                         decoded.lfo_count,
+                                                                                         decoded.layout,
+                                                                                         decoded.layout_count,
+                                                                                         &candidate);
     TEST(replaced);
     if (replaced) {
         TEST(memcmp(candidate.effect_audio, destination.effect_audio, sizeof(destination.effect_audio)) == 0);
@@ -1964,8 +1995,11 @@ static void check_editor_instrument_round_trips()
 
 static void check_new_zone_metadata_clone()
 {
-    static Synth::InstrumentEditorBank source;
-    static Synth::InstrumentEditorBank candidate;
+    const std::unique_ptr<Synth::InstrumentEditorBank> source_storage = std::make_unique<Synth::InstrumentEditorBank>();
+    Synth::InstrumentEditorBank&                       source         = *source_storage;
+    const std::unique_ptr<Synth::InstrumentEditorBank> candidate_storage =
+        std::make_unique<Synth::InstrumentEditorBank>();
+    Synth::InstrumentEditorBank& candidate = *candidate_storage;
     build_named_fm_fixture(&source);
     source.graph_layout[3].width_override  = 280;
     source.graph_layout[3].height_override = 180;
@@ -1987,11 +2021,13 @@ static void check_new_zone_metadata_clone()
             TEST(memcmp(&expected, &candidate.graph_layout[cloned], sizeof(expected)) == 0);
         }
     }
-    static Sculptor::Graph           graph;
-    static Sculptor::OscGraphMapping mapping;
+    const std::unique_ptr<Sculptor::Graph> graph_storage = std::make_unique<Sculptor::Graph>();
+    Sculptor::Graph&                       graph         = *graph_storage;
+    Sculptor::OscGraphMapping              mapping       = {};
     TEST(Sculptor::project_editor_to_graph(candidate, &graph, &mapping, 0, 1));
-    static Sculptor::Graph           original_graph;
-    static Sculptor::OscGraphMapping original_mapping;
+    const std::unique_ptr<Sculptor::Graph> original_graph_storage = std::make_unique<Sculptor::Graph>();
+    Sculptor::Graph&                       original_graph         = *original_graph_storage;
+    Sculptor::OscGraphMapping              original_mapping       = {};
     TEST(Sculptor::project_editor_to_graph(source, &original_graph, &original_mapping, 0, 0));
     for (uint32_t n = 0; n < Sculptor::max_nodes; ++n) {
         if (! original_graph.node_occupied(n))
@@ -2026,22 +2062,31 @@ static void check_new_zone_metadata_clone()
     TEST(candidate.graph_layout_count == 2 * records + 1);
     TEST(memcmp(&candidate.graph_layout[records], &effect, sizeof(effect)) == 0);
     // The metadata helper must refuse before shifting records or missing-sum rows.
-    candidate                    = source;
-    candidate.graph_layout_count = Synth::max_graph_records - 3;
-    static Synth::InstrumentEditorBank before;
-    before = candidate;
+    candidate                                                         = source;
+    candidate.graph_layout_count                                      = Synth::max_graph_records - 3;
+    const std::unique_ptr<Synth::InstrumentEditorBank> before_storage = std::make_unique<Synth::InstrumentEditorBank>();
+    Synth::InstrumentEditorBank&                       before         = *before_storage;
+    before                                                            = candidate;
     TEST(! Sculptor::zone_records_split_copy(&candidate, 0, 0));
     TEST(memcmp(&candidate, &before, sizeof(candidate)) == 0);
 }
 
 static void check_zero_fm_clipboard_library_round_trips()
 {
-    static Synth::InstrumentEditorBank source;
-    static Synth::InstrumentEditorBank destination;
-    static Synth::InstrumentEditorBank installed;
-    static ClipboardDecode             decoded;
-    static char                        text[clipboard_capacity];
-    const char* const                  path = "synth_zero_fm_roundtrip.tmp";
+    const std::unique_ptr<Synth::InstrumentEditorBank> source_storage = std::make_unique<Synth::InstrumentEditorBank>();
+    Synth::InstrumentEditorBank&                       source         = *source_storage;
+    const std::unique_ptr<Synth::InstrumentEditorBank> destination_storage =
+        std::make_unique<Synth::InstrumentEditorBank>();
+    Synth::InstrumentEditorBank&                       destination = *destination_storage;
+    const std::unique_ptr<Synth::InstrumentEditorBank> installed_storage =
+        std::make_unique<Synth::InstrumentEditorBank>();
+    Synth::InstrumentEditorBank&                                installed       = *installed_storage;
+    const std::unique_ptr<ClipboardDecode>                      decoded_storage = std::make_unique<ClipboardDecode>();
+    ClipboardDecode&                                            decoded         = *decoded_storage;
+    const std::unique_ptr<FixedArray<char, clipboard_capacity>> text_storage =
+        std::make_unique<FixedArray<char, clipboard_capacity>>();
+    char (&text)[clipboard_capacity] = text_storage->elements;
+    const char* const path           = "synth_zero_fm_roundtrip.tmp";
     for (uint32_t active = 0; active < 2; ++active) {
         for (uint32_t nonzero = 0; nonzero < 2; ++nonzero) {
             build_named_fm_fixture(&source);
@@ -2091,8 +2136,9 @@ static void check_zero_fm_clipboard_library_round_trips()
                 const Synth::Instrument& instr =
                     installed.bank.instruments.entries[installed.bank.channel_zones[channel][0].instrument];
                 TEST(instr.layers[0].targets[Synth::mod_fm_index].base_value == depth * 6.2831853f);
-                static Sculptor::Graph           graph;
-                static Sculptor::OscGraphMapping mapping;
+                const std::unique_ptr<Sculptor::Graph> graph_storage = std::make_unique<Sculptor::Graph>();
+                Sculptor::Graph&                       graph         = *graph_storage;
+                Sculptor::OscGraphMapping              mapping       = {};
                 TEST(Sculptor::project_editor_to_graph(installed, &graph, &mapping, channel, 0));
                 for (uint32_t l = 0; l < instr.layer_count; ++l) {
                     TEST(instr.layers[l].mod_ratio == ratio);
@@ -2158,28 +2204,39 @@ static void check_library_metadata_transactions()
         b.x = 123;
         TEST(Sculptor::graph_layout_record_identity_equal(a, b));
     }
-    static Synth::InstrumentEditorBank identity_bank;
-    identity_bank.graph_layout_count = 2;
-    identity_bank.graph_layout[0]    = a;
-    identity_bank.graph_layout[1]    = a;
+    const std::unique_ptr<Synth::InstrumentEditorBank> identity_bank_storage =
+        std::make_unique<Synth::InstrumentEditorBank>();
+    Synth::InstrumentEditorBank& identity_bank = *identity_bank_storage;
+    identity_bank.graph_layout_count           = 2;
+    identity_bank.graph_layout[0]              = a;
+    identity_bank.graph_layout[1]              = a;
     TEST(! Sculptor::validate_editor_metadata(identity_bank));
     strcpy(identity_bank.graph_layout[1].name, "Other");
     TEST(Sculptor::validate_editor_metadata(identity_bank));
-    static Synth::InstrumentEditorBank source;
+    const std::unique_ptr<Synth::InstrumentEditorBank> source_storage = std::make_unique<Synth::InstrumentEditorBank>();
+    Synth::InstrumentEditorBank&                       source         = *source_storage;
     build_named_fm_fixture(&source);
     source.bank.channel_enabled[0] = 0;
-    static char payload[Synth::library_payload_max];
-    uint32_t    length = Synth::encode_editor_bank_json(&source, payload, sizeof(payload));
+    const std::unique_ptr<FixedArray<char, Synth::library_payload_max>> payload_storage =
+        std::make_unique<FixedArray<char, Synth::library_payload_max>>();
+    char (&payload)[Synth::library_payload_max] = payload_storage->elements;
+    uint32_t length                             = Synth::encode_editor_bank_json(&source, payload, sizeof(payload));
     TEST(length > 0);
     const char* const path = "synth_metadata_transaction.tmp";
     write_library_fixture(path, payload, length);
     Synth::LibraryEntry control_entry;
     TEST(Synth::read_library_index(path, &control_entry, 1) == 1);
-    static Synth::InstrumentEditorBank control_destination;
-    uint16_t                           control_slot = 0xBEEF;
+    const std::unique_ptr<Synth::InstrumentEditorBank> control_destination_storage =
+        std::make_unique<Synth::InstrumentEditorBank>();
+    Synth::InstrumentEditorBank& control_destination = *control_destination_storage;
+    uint16_t                     control_slot        = 0xBEEF;
     TEST(Synth::load_library_instrument(path, &control_entry, &control_destination, 2, &control_slot));
-    static char before[Synth::library_payload_max + 128];
-    static char after[Synth::library_payload_max + 128];
+    const std::unique_ptr<FixedArray<char, Synth::library_payload_max + 128>> before_storage =
+        std::make_unique<FixedArray<char, Synth::library_payload_max + 128>>();
+    char (&before)[Synth::library_payload_max + 128] = before_storage->elements;
+    const std::unique_ptr<FixedArray<char, Synth::library_payload_max + 128>> after_storage =
+        std::make_unique<FixedArray<char, Synth::library_payload_max + 128>>();
+    char (&after)[Synth::library_payload_max + 128] = after_storage->elements;
     // A duplicate locator with a conflicting position must reach strict
     // library validation before the compatible bank reader discards it.
     char* const layouts = strstr(payload, "\"layouts\":[");
@@ -2191,16 +2248,22 @@ static void check_library_metadata_transactions()
         memmove(insert + sizeof(duplicate) - 1, insert, length - offset + 1);
         memcpy(insert, duplicate, sizeof(duplicate) - 1);
         length += sizeof(duplicate) - 1;
-        static Synth::InstrumentEditorBank legacy;
+        const std::unique_ptr<Synth::InstrumentEditorBank> legacy_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& legacy = *legacy_storage;
         TEST(Synth::decode_editor_bank_json(payload, length, &legacy));
         TEST(legacy.graph_layout_count == source.graph_layout_count);
         write_library_fixture(path, payload, length);
         const uint32_t      file_size = read_library_fixture(path, before, sizeof(before));
         Synth::LibraryEntry entry;
         TEST(Synth::read_library_index(path, &entry, 1) == 1);
-        static Synth::InstrumentEditorBank destination;
-        static Synth::InstrumentEditorBank snapshot;
-        Synth::Instrument                  occupied;
+        const std::unique_ptr<Synth::InstrumentEditorBank> destination_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank&                       destination = *destination_storage;
+        const std::unique_ptr<Synth::InstrumentEditorBank> snapshot_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& snapshot = *snapshot_storage;
+        Synth::Instrument            occupied;
         build_clipboard_zone_fixture(&destination, &occupied);
         snapshot             = destination;
         uint16_t output_slot = 0xBEEF;
@@ -2224,16 +2287,22 @@ static void check_library_metadata_transactions()
         memmove(insert + sizeof(unknown) - 1, insert, length - offset + 1);
         memcpy(insert, unknown, sizeof(unknown) - 1);
         length += sizeof(unknown) - 1;
-        static Synth::InstrumentEditorBank legacy_unknown;
+        const std::unique_ptr<Synth::InstrumentEditorBank> legacy_unknown_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& legacy_unknown = *legacy_unknown_storage;
         TEST(Synth::decode_editor_bank_json(payload, length, &legacy_unknown));
         write_library_fixture(path, payload, length);
         const uint32_t      file_size = read_library_fixture(path, before, sizeof(before));
         Synth::LibraryEntry entry;
         TEST(Synth::read_library_index(path, &entry, 1) == 1);
-        static Synth::InstrumentEditorBank unknown_destination;
-        static Synth::InstrumentEditorBank unknown_snapshot;
-        unknown_snapshot     = unknown_destination;
-        uint16_t output_slot = 0xBEEF;
+        const std::unique_ptr<Synth::InstrumentEditorBank> unknown_destination_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank&                       unknown_destination = *unknown_destination_storage;
+        const std::unique_ptr<Synth::InstrumentEditorBank> unknown_snapshot_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& unknown_snapshot = *unknown_snapshot_storage;
+        unknown_snapshot                              = unknown_destination;
+        uint16_t output_slot                          = 0xBEEF;
         TEST(! Synth::load_library_instrument(path, &entry, &unknown_destination, 2, &output_slot));
         TEST(memcmp(&unknown_destination, &unknown_snapshot, sizeof(unknown_destination)) == 0);
         TEST(output_slot == 0xBEEF);
@@ -2249,9 +2318,11 @@ static void check_library_metadata_transactions()
     const uint32_t      missing_sum_size = read_library_fixture(path, before, sizeof(before));
     Synth::LibraryEntry missing_sum_entry;
     TEST(Synth::read_library_index(path, &missing_sum_entry, 1) == 1);
-    static Synth::InstrumentEditorBank missing_sum_snapshot;
-    missing_sum_snapshot      = control_destination;
-    uint16_t missing_sum_slot = 0xBEEF;
+    const std::unique_ptr<Synth::InstrumentEditorBank> missing_sum_snapshot_storage =
+        std::make_unique<Synth::InstrumentEditorBank>();
+    Synth::InstrumentEditorBank& missing_sum_snapshot = *missing_sum_snapshot_storage;
+    missing_sum_snapshot                              = control_destination;
+    uint16_t missing_sum_slot                         = 0xBEEF;
     TEST(! Synth::load_library_instrument(path, &missing_sum_entry, &control_destination, 2, &missing_sum_slot));
     TEST(missing_sum_slot == 0xBEEF);
     TEST(memcmp(&control_destination, &missing_sum_snapshot, sizeof(control_destination)) == 0);
@@ -2263,8 +2334,10 @@ static void check_library_metadata_transactions()
     TEST(Synth::save_library_record(path, "Regression", "FM", &source, 0) == 0);
     const uint32_t file_size = read_library_fixture(path, before, sizeof(before));
     memset(static_cast<void*>(source.graph_layout[0].name), 'x', sizeof(source.graph_layout[0].name));
-    static Synth::InstrumentEditorBank snapshot;
-    snapshot = source;
+    const std::unique_ptr<Synth::InstrumentEditorBank> snapshot_storage =
+        std::make_unique<Synth::InstrumentEditorBank>();
+    Synth::InstrumentEditorBank& snapshot = *snapshot_storage;
+    snapshot                              = source;
     TEST(! export_clipboard_fixture(source, payload, sizeof(payload)));
     TEST(Synth::save_library_record(path, "Regression", "FM", &source, 0) != 0);
     TEST(memcmp(&source, &snapshot, sizeof(source)) == 0);
@@ -2275,21 +2348,36 @@ static void check_library_metadata_transactions()
 
 static void check_editor_round_trip_capacity_failures()
 {
-    static Synth::InstrumentEditorBank source;
-    static Synth::InstrumentEditorBank source_before;
-    static Synth::InstrumentEditorBank destination;
-    static Synth::InstrumentEditorBank destination_before;
-    static Synth::InstrumentEditorBank candidate;
-    static Synth::InstrumentEditorBank candidate_before;
+    const std::unique_ptr<Synth::InstrumentEditorBank> source_storage = std::make_unique<Synth::InstrumentEditorBank>();
+    Synth::InstrumentEditorBank&                       source         = *source_storage;
+    const std::unique_ptr<Synth::InstrumentEditorBank> source_before_storage =
+        std::make_unique<Synth::InstrumentEditorBank>();
+    Synth::InstrumentEditorBank&                       source_before = *source_before_storage;
+    const std::unique_ptr<Synth::InstrumentEditorBank> destination_storage =
+        std::make_unique<Synth::InstrumentEditorBank>();
+    Synth::InstrumentEditorBank&                       destination = *destination_storage;
+    const std::unique_ptr<Synth::InstrumentEditorBank> destination_before_storage =
+        std::make_unique<Synth::InstrumentEditorBank>();
+    Synth::InstrumentEditorBank&                       destination_before = *destination_before_storage;
+    const std::unique_ptr<Synth::InstrumentEditorBank> candidate_storage =
+        std::make_unique<Synth::InstrumentEditorBank>();
+    Synth::InstrumentEditorBank&                       candidate = *candidate_storage;
+    const std::unique_ptr<Synth::InstrumentEditorBank> candidate_before_storage =
+        std::make_unique<Synth::InstrumentEditorBank>();
+    Synth::InstrumentEditorBank& candidate_before = *candidate_before_storage;
     build_named_fm_fixture(&source);
     source_before = source;
     char tiny[16];
     TEST(! export_clipboard_fixture(source, tiny, sizeof(tiny)));
     TEST(memcmp(&source, &source_before, sizeof(source)) == 0);
-    static char document[clipboard_capacity];
+    const std::unique_ptr<FixedArray<char, clipboard_capacity>> document_storage =
+        std::make_unique<FixedArray<char, clipboard_capacity>>();
+    char (&document)[clipboard_capacity] = document_storage->elements;
     TEST(export_clipboard_fixture(source, document, sizeof(document)));
-    static ClipboardDecode decoded;
-    static ClipboardDecode sentinel;
+    const std::unique_ptr<ClipboardDecode> decoded_storage  = std::make_unique<ClipboardDecode>();
+    ClipboardDecode&                       decoded          = *decoded_storage;
+    const std::unique_ptr<ClipboardDecode> sentinel_storage = std::make_unique<ClipboardDecode>();
+    ClipboardDecode&                       sentinel         = *sentinel_storage;
     fill_clipboard_sentinels(&decoded);
     fill_clipboard_sentinels(&sentinel);
     TEST(! decode_clipboard(&decoded, document, 1));
@@ -2335,10 +2423,14 @@ static void check_editor_round_trip_capacity_failures()
     TEST(Synth::save_library_record(path, "Regression", "FM", &source, 0) == 0);
     Synth::LibraryEntry entry;
     TEST(Synth::read_library_index(path, &entry, 1) == 1);
-    static char    before[Synth::library_payload_max + 128];
-    static char    after[Synth::library_payload_max + 128];
-    const uint32_t bytes       = read_library_fixture(path, before, sizeof(before));
-    uint16_t       output_slot = 0xBEEF;
+    const std::unique_ptr<FixedArray<char, Synth::library_payload_max + 128>> before_storage =
+        std::make_unique<FixedArray<char, Synth::library_payload_max + 128>>();
+    char (&before)[Synth::library_payload_max + 128] = before_storage->elements;
+    const std::unique_ptr<FixedArray<char, Synth::library_payload_max + 128>> after_storage =
+        std::make_unique<FixedArray<char, Synth::library_payload_max + 128>>();
+    char (&after)[Synth::library_payload_max + 128] = after_storage->elements;
+    const uint32_t bytes                            = read_library_fixture(path, before, sizeof(before));
+    uint16_t       output_slot                      = 0xBEEF;
     TEST(! Synth::load_library_instrument(path, &entry, &destination, 0, &output_slot));
     TEST(output_slot == 0xBEEF);
     TEST(memcmp(&destination, &destination_before, sizeof(destination)) == 0);
@@ -2356,8 +2448,9 @@ static void check_editor_round_trip_capacity_failures()
 // binding.
 static void check_decoded_fm_lfo_binding_survives_compile()
 {
-    static Synth::InstrumentEditorBank bank;
-    static Synth::Instrument           instrument = {};
+    const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage = std::make_unique<Synth::InstrumentEditorBank>();
+    Synth::InstrumentEditorBank&                       bank         = *bank_storage;
+    Synth::Instrument                                  instrument   = {};
     build_binding_fixture(&bank, &instrument);
     Synth::TargetBinding& fm         = instrument.layers[0].targets[Synth::mod_fm_index];
     fm.lfo_desc_id                   = 1;
@@ -2367,16 +2460,21 @@ static void check_decoded_fm_lfo_binding_survives_compile()
     TEST(Synth::validate_instrument_bank(&bank.bank));
     TEST(Sculptor::validate_editor_metadata(bank));
     // Decode: the bank round trips through its own JSON form.
-    static char    payload[Synth::library_payload_max];
-    const uint32_t length = Synth::encode_editor_bank_json(&bank, payload, sizeof(payload));
+    const std::unique_ptr<FixedArray<char, Synth::library_payload_max>> payload_storage =
+        std::make_unique<FixedArray<char, Synth::library_payload_max>>();
+    char (&payload)[Synth::library_payload_max] = payload_storage->elements;
+    const uint32_t length                       = Synth::encode_editor_bank_json(&bank, payload, sizeof(payload));
     TEST(length > 0);
-    static Synth::InstrumentEditorBank decoded;
+    const std::unique_ptr<Synth::InstrumentEditorBank> decoded_storage =
+        std::make_unique<Synth::InstrumentEditorBank>();
+    Synth::InstrumentEditorBank& decoded = *decoded_storage;
     memset(static_cast<void*>(&decoded), 0, sizeof(decoded));
     TEST(Synth::decode_editor_bank_json(payload, length, &decoded));
     // Project and recompile: the FM depth row is wired and the LFO binding
     // lands back in the compiled instrument.
-    static Sculptor::Graph           graph;
-    static Sculptor::OscGraphMapping mapping;
+    const std::unique_ptr<Sculptor::Graph> graph_storage = std::make_unique<Sculptor::Graph>();
+    Sculptor::Graph&                       graph         = *graph_storage;
+    Sculptor::OscGraphMapping              mapping       = {};
     TEST(Sculptor::project_editor_to_graph(decoded, &graph, &mapping, 0, 0));
     TEST(
         find_osc_graph_connection(graph, { mapping.osc_nodes[0], Sculptor::osc_target_lfo_dot(Synth::mod_fm_index) }) !=
@@ -2392,12 +2490,21 @@ static void check_decoded_fm_lfo_binding_survives_compile()
 
 static void check_unrepresented_layout_refusal()
 {
-    static Synth::InstrumentEditorBank source;
-    static Synth::InstrumentEditorBank snapshot;
-    static char                        document[clipboard_capacity];
-    const char* const                  path = "synth_unrepresented_layout.tmp";
-    static char                        before[Synth::library_payload_max + 128];
-    static char                        after[Synth::library_payload_max + 128];
+    const std::unique_ptr<Synth::InstrumentEditorBank> source_storage = std::make_unique<Synth::InstrumentEditorBank>();
+    Synth::InstrumentEditorBank&                       source         = *source_storage;
+    const std::unique_ptr<Synth::InstrumentEditorBank> snapshot_storage =
+        std::make_unique<Synth::InstrumentEditorBank>();
+    Synth::InstrumentEditorBank&                                snapshot = *snapshot_storage;
+    const std::unique_ptr<FixedArray<char, clipboard_capacity>> document_storage =
+        std::make_unique<FixedArray<char, clipboard_capacity>>();
+    char (&document)[clipboard_capacity]                                           = document_storage->elements;
+    const char* const                                                         path = "synth_unrepresented_layout.tmp";
+    const std::unique_ptr<FixedArray<char, Synth::library_payload_max + 128>> before_storage =
+        std::make_unique<FixedArray<char, Synth::library_payload_max + 128>>();
+    char (&before)[Synth::library_payload_max + 128] = before_storage->elements;
+    const std::unique_ptr<FixedArray<char, Synth::library_payload_max + 128>> after_storage =
+        std::make_unique<FixedArray<char, Synth::library_payload_max + 128>>();
+    char (&after)[Synth::library_payload_max + 128] = after_storage->elements;
     for (uint32_t shape = 0; shape < 3; ++shape) {
         build_named_fm_fixture(&source);
         remove(path);
@@ -2436,7 +2543,8 @@ static void check_unrepresented_layout_refusal()
             TEST(export_clipboard_fixture(source, document, sizeof(document)));
             // The exported portable layout carries no record for the
             // dropped detached node.
-            static ClipboardDecode drop_decode;
+            const std::unique_ptr<ClipboardDecode> drop_decode_storage = std::make_unique<ClipboardDecode>();
+            ClipboardDecode&                       drop_decode         = *drop_decode_storage;
             TEST(decode_clipboard(&drop_decode, document, max_portable_records));
             bool dropped_record_gone = true;
             for (uint32_t i = 0; i < drop_decode.layout_count; i++) {
@@ -2458,10 +2566,15 @@ static void check_unrepresented_layout_refusal()
 
 static void check_legacy_library_numeric_domains()
 {
-    static Synth::InstrumentEditorBank source;
-    static Synth::InstrumentEditorBank destination;
-    static char                        text[clipboard_capacity];
-    const char* const                  path = "synth_legacy_numeric.tmp";
+    const std::unique_ptr<Synth::InstrumentEditorBank> source_storage = std::make_unique<Synth::InstrumentEditorBank>();
+    Synth::InstrumentEditorBank&                       source         = *source_storage;
+    const std::unique_ptr<Synth::InstrumentEditorBank> destination_storage =
+        std::make_unique<Synth::InstrumentEditorBank>();
+    Synth::InstrumentEditorBank&                                destination = *destination_storage;
+    const std::unique_ptr<FixedArray<char, clipboard_capacity>> text_storage =
+        std::make_unique<FixedArray<char, clipboard_capacity>>();
+    char (&text)[clipboard_capacity] = text_storage->elements;
+    const char* const path           = "synth_legacy_numeric.tmp";
     for (uint32_t values = 1; values <= 3; ++values) {
         for (uint32_t metadata = 0; metadata < 2; ++metadata) {
             build_named_fm_fixture(&source);
@@ -2475,14 +2588,18 @@ static void check_legacy_library_numeric_domains()
             const uint32_t len =
                 Synth::encode_instrument_json(text, sizeof(text), &source.bank.instruments.entries[0], &source.bank);
             TEST(len > 0);
-            static ClipboardDecode attempted;
-            static ClipboardDecode sentinel;
+            const std::unique_ptr<ClipboardDecode> attempted_storage = std::make_unique<ClipboardDecode>();
+            ClipboardDecode&                       attempted         = *attempted_storage;
+            const std::unique_ptr<ClipboardDecode> sentinel_storage  = std::make_unique<ClipboardDecode>();
+            ClipboardDecode&                       sentinel          = *sentinel_storage;
             fill_clipboard_sentinels(&attempted);
             fill_clipboard_sentinels(&sentinel);
             TEST(! decode_clipboard(&attempted, text, max_portable_records));
             TEST(clipboard_sentinels_intact(&attempted, &sentinel));
-            static char legacy_payload[Synth::library_payload_max];
-            source.bank.channel_enabled[0] = 0;
+            const std::unique_ptr<FixedArray<char, Synth::library_payload_max>> legacy_payload_storage =
+                std::make_unique<FixedArray<char, Synth::library_payload_max>>();
+            char (&legacy_payload)[Synth::library_payload_max] = legacy_payload_storage->elements;
+            source.bank.channel_enabled[0]                     = 0;
             const uint32_t legacy_length =
                 Synth::encode_editor_bank_json(&source, legacy_payload, sizeof(legacy_payload));
             TEST(legacy_length > 0);
@@ -2526,12 +2643,19 @@ static void check_legacy_library_numeric_domains()
 
 static void check_shared_instrument_json_domains()
 {
-    static Synth::InstrumentEditorBank source;
-    static Synth::InstrumentEditorBank snapshot;
-    static ClipboardDecode             decoded;
-    static ClipboardDecode             sentinel;
-    static char                        text[clipboard_capacity];
-    const char*                        invalid[] = {
+    const std::unique_ptr<Synth::InstrumentEditorBank> source_storage = std::make_unique<Synth::InstrumentEditorBank>();
+    Synth::InstrumentEditorBank&                       source         = *source_storage;
+    const std::unique_ptr<Synth::InstrumentEditorBank> snapshot_storage =
+        std::make_unique<Synth::InstrumentEditorBank>();
+    Synth::InstrumentEditorBank&                                snapshot         = *snapshot_storage;
+    const std::unique_ptr<ClipboardDecode>                      decoded_storage  = std::make_unique<ClipboardDecode>();
+    ClipboardDecode&                                            decoded          = *decoded_storage;
+    const std::unique_ptr<ClipboardDecode>                      sentinel_storage = std::make_unique<ClipboardDecode>();
+    ClipboardDecode&                                            sentinel         = *sentinel_storage;
+    const std::unique_ptr<FixedArray<char, clipboard_capacity>> text_storage =
+        std::make_unique<FixedArray<char, clipboard_capacity>>();
+    char (&text)[clipboard_capacity] = text_storage->elements;
+    const char* invalid[]            = {
         "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\",\"mod_ratio\":1e999}]}",
         "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"bad\"}]}",
         "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\",\"volume\":{\"sources\":[{\"source\":\"bad\"}]}}]}"
@@ -2681,7 +2805,9 @@ static void check_shared_instrument_json_domains()
         TEST(clipboard_sentinels_intact(&decoded, &sentinel));
     }
 
-    static char exhausted_text[Synth::library_payload_max + 1];
+    const std::unique_ptr<FixedArray<char, Synth::library_payload_max + 1>> exhausted_text_storage =
+        std::make_unique<FixedArray<char, Synth::library_payload_max + 1>>();
+    char (&exhausted_text)[Synth::library_payload_max + 1] = exhausted_text_storage->elements;
     memset(static_cast<void*>(exhausted_text), ' ', sizeof(exhausted_text));
     memcpy(exhausted_text, "{}", 2);
     for (Synth::InstrumentJsonDomain domain : domains) {
@@ -2722,12 +2848,14 @@ static void check_shared_instrument_json_domains()
 
     // A private graph mapping can detach a pending move and refresh without touching live state.
     build_named_fm_fixture(&source);
-    source.graph_layout_count = 0;
-    static Sculptor::Graph           graph;
-    static Sculptor::OscGraphMapping mapping;
-    static Sculptor::OscGraphMapping live_before;
-    static Sculptor::OscGraphMapping private_mapping;
-    static Sculptor::Graph           graph_before;
+    source.graph_layout_count                                   = 0;
+    const std::unique_ptr<Sculptor::Graph> graph_storage        = std::make_unique<Sculptor::Graph>();
+    Sculptor::Graph&                       graph                = *graph_storage;
+    Sculptor::OscGraphMapping              mapping              = {};
+    Sculptor::OscGraphMapping              live_before          = {};
+    Sculptor::OscGraphMapping              private_mapping      = {};
+    const std::unique_ptr<Sculptor::Graph> graph_before_storage = std::make_unique<Sculptor::Graph>();
+    Sculptor::Graph&                       graph_before         = *graph_before_storage;
     TEST(Sculptor::project_editor_to_graph(source, &graph, &mapping, 0, 0));
     TEST(source.graph_layout_count == 0);
     const uint32_t unchanged_length = Sculptor::encode_editor_instrument_json(source,
@@ -2751,8 +2879,10 @@ static void check_shared_instrument_json_domains()
     live_before     = mapping;
     private_mapping = mapping;
     snapshot        = source;
-    static Synth::InstrumentEditorBank private_source;
-    private_source = source;
+    const std::unique_ptr<Synth::InstrumentEditorBank> private_source_storage =
+        std::make_unique<Synth::InstrumentEditorBank>();
+    Synth::InstrumentEditorBank& private_source = *private_source_storage;
+    private_source                              = source;
     TEST(private_mapping.detached_count > 0);
     const uint32_t node     = private_mapping.detached[0].node_idx;
     vmath::vec2    position = graph.node(node).position;
@@ -2862,8 +2992,10 @@ static void check_shared_instrument_json_domains()
             source.graph_layout[source.graph_layout_count++] = record;
         }
     }
-    static char    payload[Synth::library_payload_max];
-    const uint32_t payload_length = Synth::encode_editor_bank_json(&source, payload, sizeof(payload));
+    const std::unique_ptr<FixedArray<char, Synth::library_payload_max>> payload_storage =
+        std::make_unique<FixedArray<char, Synth::library_payload_max>>();
+    char (&payload)[Synth::library_payload_max] = payload_storage->elements;
+    const uint32_t payload_length               = Synth::encode_editor_bank_json(&source, payload, sizeof(payload));
     TEST(payload_length > 0);
     const char* capacity_path = "synth_multizone_capacity.tmp";
     write_library_fixture(capacity_path, payload, payload_length);
@@ -3170,12 +3302,14 @@ static void effects_input_gesture_regressions(Synth::InstrumentEditorBank*  sour
 // saved-bank dialect round-trips a scaled binding.
 static void envelope_depth_serialization_regressions()
 {
-    static Synth::Instrument         instr;
-    static Synth::EnvelopeDescriptor envs[Synth::instrument_max_envelopes];
-    static Synth::LFODescriptor      lfos[Synth::instrument_max_lfos];
-    static char                      text[clipboard_capacity];
-    uint32_t                         env_count = 999;
-    uint32_t                         lfo_count = 999;
+    Synth::Instrument                                           instr                                 = {};
+    Synth::EnvelopeDescriptor                                   envs[Synth::instrument_max_envelopes] = {};
+    Synth::LFODescriptor                                        lfos[Synth::instrument_max_lfos]      = {};
+    const std::unique_ptr<FixedArray<char, clipboard_capacity>> text_storage =
+        std::make_unique<FixedArray<char, clipboard_capacity>>();
+    char (&text)[clipboard_capacity] = text_storage->elements;
+    uint32_t env_count               = 999;
+    uint32_t lfo_count               = 999;
 
     const char* const no_depth_doc = "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\","
                                      "\"panning\":{\"envelope\":{\"points\":[{\"time_seconds\":0,\"level\":0},"
@@ -3193,7 +3327,8 @@ static void envelope_depth_serialization_regressions()
 
     // The scaled shape re-encodes with the key and decodes back. The encoder
     // resolves descriptor ids against a bank, so stage the decoded envelope in.
-    static Synth::InstrumentBank rt_bank;
+    const std::unique_ptr<Synth::InstrumentBank> rt_bank_storage = std::make_unique<Synth::InstrumentBank>();
+    Synth::InstrumentBank&                       rt_bank         = *rt_bank_storage;
     memset(static_cast<void*>(&rt_bank), 0, sizeof(rt_bank));
     rt_bank.envelopes.entries[0]    = envs[0];
     rt_bank.envelopes.num_allocated = 1;
@@ -3230,14 +3365,19 @@ static void envelope_depth_serialization_regressions()
 
     // Saved-bank dialect: a scaled binding round-trips through the
     // library payload, the default omits the key.
-    static Synth::InstrumentEditorBank source;
+    const std::unique_ptr<Synth::InstrumentEditorBank> source_storage = std::make_unique<Synth::InstrumentEditorBank>();
+    Synth::InstrumentEditorBank&                       source         = *source_storage;
     build_named_fm_fixture(&source);
     source.bank.instruments.entries[0].layers[0].targets[Synth::mod_volume].envelope_depth = 0.25f;
-    static char    payload[Synth::library_payload_max];
-    const uint32_t length = Synth::encode_editor_bank_json(&source, payload, sizeof(payload));
+    const std::unique_ptr<FixedArray<char, Synth::library_payload_max>> payload_storage =
+        std::make_unique<FixedArray<char, Synth::library_payload_max>>();
+    char (&payload)[Synth::library_payload_max] = payload_storage->elements;
+    const uint32_t length                       = Synth::encode_editor_bank_json(&source, payload, sizeof(payload));
     TEST(length > 0);
     TEST(strstr(payload, "\"envelope_depth\":0.25") != nullptr);
-    static Synth::InstrumentEditorBank bank_decoded;
+    const std::unique_ptr<Synth::InstrumentEditorBank> bank_decoded_storage =
+        std::make_unique<Synth::InstrumentEditorBank>();
+    Synth::InstrumentEditorBank& bank_decoded = *bank_decoded_storage;
     memset(static_cast<void*>(&bank_decoded), 0, sizeof(bank_decoded));
     TEST(Synth::decode_editor_bank_json(payload, length, &bank_decoded));
     TEST(bank_decoded.bank.instruments.entries[0].layers[0].targets[Synth::mod_volume].envelope_depth == 0.25f);
@@ -3256,10 +3396,17 @@ static void envelope_depth_serialization_regressions()
 
 static void effects_literal_topology_regressions()
 {
-    static Synth::InstrumentEditorBank  source, candidate, before;
-    static Sculptor::Graph              graph;
-    static Sculptor::EffectGraphMapping mapping;
-    const uint32_t                      owners[] = { 0u, Sculptor::fx_master_chain };
+    const std::unique_ptr<Synth::InstrumentEditorBank> source_storage = std::make_unique<Synth::InstrumentEditorBank>();
+    Synth::InstrumentEditorBank&                       source         = *source_storage;
+    const std::unique_ptr<Synth::InstrumentEditorBank> candidate_storage =
+        std::make_unique<Synth::InstrumentEditorBank>();
+    Synth::InstrumentEditorBank&                       candidate      = *candidate_storage;
+    const std::unique_ptr<Synth::InstrumentEditorBank> before_storage = std::make_unique<Synth::InstrumentEditorBank>();
+    Synth::InstrumentEditorBank&                       before         = *before_storage;
+    const std::unique_ptr<Sculptor::Graph>             graph_storage  = std::make_unique<Sculptor::Graph>();
+    Sculptor::Graph&                                   graph          = *graph_storage;
+    Sculptor::EffectGraphMapping                       mapping        = {};
+    const uint32_t                                     owners[]       = { 0u, Sculptor::fx_master_chain };
     for (uint32_t owner : owners) {
         for (uint32_t endpoint = 0; endpoint < 2; ++endpoint) {
             memset(static_cast<void*>(&source), 0, sizeof(source));
@@ -3319,10 +3466,15 @@ static void effects_literal_topology_regressions()
             bool roots[Synth::max_lfos] = {};
             TEST(Sculptor::collect_effect_lfos(&candidate, owner, roots));
             TEST(roots[0] && roots[1]);
-            static uint8_t                     undo_bytes[10 * sizeof(Synth::InstrumentEditorBank) + 512];
-            static Synth::InstrumentEditorBank states[5];
-            states[0] = before;
-            states[1] = candidate;
+            const std::unique_ptr<FixedArray<uint8_t, 10 * sizeof(Synth::InstrumentEditorBank) + 512>>
+                undo_bytes_storage =
+                    std::make_unique<FixedArray<uint8_t, 10 * sizeof(Synth::InstrumentEditorBank) + 512>>();
+            uint8_t (&undo_bytes)[10 * sizeof(Synth::InstrumentEditorBank) + 512] = undo_bytes_storage->elements;
+            const std::unique_ptr<FixedArray<Synth::InstrumentEditorBank, 5>> states_storage =
+                std::make_unique<FixedArray<Synth::InstrumentEditorBank, 5>>();
+            Synth::InstrumentEditorBank(&states)[5] = states_storage->elements;
+            states[0]                               = before;
+            states[1]                               = candidate;
             Sculptor::UndoRedo undo;
             undo.init(undo_bytes);
             undo.init_undo_push();
@@ -3381,12 +3533,18 @@ static void effects_literal_topology_regressions()
 
 static void effects_structural_regressions()
 {
-    static Synth::InstrumentEditorBank  source;
-    static Synth::InstrumentEditorBank  candidate;
-    static Synth::InstrumentEditorBank  loaded;
-    static Sculptor::Graph              graph;
-    static Sculptor::EffectGraphMapping mapping;
-    static char                         text[262144];
+    const std::unique_ptr<Synth::InstrumentEditorBank> source_storage = std::make_unique<Synth::InstrumentEditorBank>();
+    Synth::InstrumentEditorBank&                       source         = *source_storage;
+    const std::unique_ptr<Synth::InstrumentEditorBank> candidate_storage =
+        std::make_unique<Synth::InstrumentEditorBank>();
+    Synth::InstrumentEditorBank&                       candidate      = *candidate_storage;
+    const std::unique_ptr<Synth::InstrumentEditorBank> loaded_storage = std::make_unique<Synth::InstrumentEditorBank>();
+    Synth::InstrumentEditorBank&                       loaded         = *loaded_storage;
+    const std::unique_ptr<Sculptor::Graph>             graph_storage  = std::make_unique<Sculptor::Graph>();
+    Sculptor::Graph&                                   graph          = *graph_storage;
+    Sculptor::EffectGraphMapping                       mapping        = {};
+    const std::unique_ptr<FixedArray<char, 262144>>    text_storage   = std::make_unique<FixedArray<char, 262144>>();
+    char (&text)[262144]                                              = text_storage->elements;
     effects_literal_topology_regressions();
     // Literal routing preserves independent payload, capacity and layout invariants.
     effects_input_gesture_regressions(&source, &candidate, &loaded, &graph, &mapping);
@@ -3476,7 +3634,9 @@ static void effects_structural_regressions()
     // compiles and is editable.  Legacy-only rebuilds must not carry stale
     // CC numbers into the new validator.
     {
-        static Synth::InstrumentEditorBank cc_source;
+        const std::unique_ptr<Synth::InstrumentEditorBank> cc_source_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& cc_source = *cc_source_storage;
         memset(static_cast<void*>(&cc_source), 0, sizeof(cc_source));
         Synth::init_default_bank(&cc_source.bank);
         Synth::EffectChainBinding& cc_chain = cc_source.bank.channel_chains[0];
@@ -3527,7 +3687,9 @@ static void effects_structural_regressions()
         // An undotted CC input stays unwired and refuses recompilation; a
         // dotted CC input, added via the editor, compiles and is editable.
         {
-            static Synth::InstrumentEditorBank retarget_source;
+            const std::unique_ptr<Synth::InstrumentEditorBank> retarget_source_storage =
+                std::make_unique<Synth::InstrumentEditorBank>();
+            Synth::InstrumentEditorBank& retarget_source = *retarget_source_storage;
             memset(static_cast<void*>(&retarget_source), 0, sizeof(retarget_source));
             Synth::init_default_bank(&retarget_source.bank);
             Synth::EffectChainBinding& retarget_chain = retarget_source.bank.channel_chains[0];
@@ -3567,7 +3729,9 @@ static void effects_structural_regressions()
 
         // A legacy-only binding rebuild zeroes the CC number on reconstructed
         // inputs so a reused slot cannot carry stale state.
-        static Synth::InstrumentEditorBank legacy_source;
+        const std::unique_ptr<Synth::InstrumentEditorBank> legacy_source_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& legacy_source = *legacy_source_storage;
         memset(static_cast<void*>(&legacy_source), 0, sizeof(legacy_source));
         Synth::init_default_bank(&legacy_source.bank);
         Synth::EffectChainBinding& legacy_chain = legacy_source.bank.channel_chains[0];
@@ -3682,7 +3846,7 @@ static void effects_structural_regressions()
     TEST(retained_geometry);
     memset(static_cast<void*>(&source), 0, sizeof(source));
     Synth::init_default_bank(&source.bank);
-    static Synth::EffectsDocument sparse_document;
+    Synth::EffectsDocument sparse_document = {};
     effects_clipboard_fixture(&sparse_document, true);
     TEST(Sculptor::replace_effect_chain_candidate(&source, 0, &sparse_document, &source));
     TEST(Sculptor::change_effect_type_candidate(&source, 0, 0, Synth::EffectType::chorus, &candidate));
@@ -3719,7 +3883,7 @@ static void effects_structural_regressions()
     TEST(keep[0]);
     TEST(Sculptor::project_effect_chain_to_graph(source, 1, &graph, &mapping, keep));
     TEST(mapping.lfo_nodes[0] != Sculptor::pool_no_slot);
-    static Synth::EffectsDocument document;
+    Synth::EffectsDocument document = {};
     TEST(Sculptor::extract_effect_chain_document(&source, 1, nullptr, nullptr, &document));
     TEST(document.lfo_count == 1 && document.chain.num_effects == 0);
     TEST(Synth::save_editor_bank_file(bank_path, &source) == 0);
@@ -3751,8 +3915,10 @@ static void effects_structural_regressions()
     TEST(Sculptor::project_effect_chain_to_graph(candidate, 1, &graph, &mapping, legacy_pins));
     TEST(mapping.lfo_nodes[0] != Sculptor::pool_no_slot && legacy_pins[0]);
     // New roots restore to the same default lane as their projected nodes.
-    static Synth::InstrumentEditorBank snapshot;
-    const uint32_t                     root_owners[] = { 0, Sculptor::fx_master_chain };
+    const std::unique_ptr<Synth::InstrumentEditorBank> snapshot_storage =
+        std::make_unique<Synth::InstrumentEditorBank>();
+    Synth::InstrumentEditorBank& snapshot      = *snapshot_storage;
+    const uint32_t               root_owners[] = { 0, Sculptor::fx_master_chain };
     for (uint32_t owner : root_owners) {
         memset(static_cast<void*>(&source), 0, sizeof(source));
         Synth::init_default_bank(&source.bank);
@@ -3892,15 +4058,24 @@ static void effects_structural_regressions()
 
 static void effects_paste_pin_regressions()
 {
-    static Synth::InstrumentEditorBank  source;
-    static Synth::InstrumentEditorBank  saved_source;
-    static Synth::InstrumentEditorBank  candidate;
-    static Synth::InstrumentEditorBank  saved_candidate;
-    static Synth::EffectsDocument       document;
-    static Sculptor::Graph              graph;
-    static Sculptor::Graph              saved_graph;
-    static Sculptor::EffectGraphMapping mapping;
-    const uint32_t                      owners[] = { 0, Sculptor::fx_master_chain };
+    const std::unique_ptr<Synth::InstrumentEditorBank> source_storage = std::make_unique<Synth::InstrumentEditorBank>();
+    Synth::InstrumentEditorBank&                       source         = *source_storage;
+    const std::unique_ptr<Synth::InstrumentEditorBank> saved_source_storage =
+        std::make_unique<Synth::InstrumentEditorBank>();
+    Synth::InstrumentEditorBank&                       saved_source = *saved_source_storage;
+    const std::unique_ptr<Synth::InstrumentEditorBank> candidate_storage =
+        std::make_unique<Synth::InstrumentEditorBank>();
+    Synth::InstrumentEditorBank&                       candidate = *candidate_storage;
+    const std::unique_ptr<Synth::InstrumentEditorBank> saved_candidate_storage =
+        std::make_unique<Synth::InstrumentEditorBank>();
+    Synth::InstrumentEditorBank&           saved_candidate     = *saved_candidate_storage;
+    Synth::EffectsDocument                 document            = {};
+    const std::unique_ptr<Sculptor::Graph> graph_storage       = std::make_unique<Sculptor::Graph>();
+    Sculptor::Graph&                       graph               = *graph_storage;
+    const std::unique_ptr<Sculptor::Graph> saved_graph_storage = std::make_unique<Sculptor::Graph>();
+    Sculptor::Graph&                       saved_graph         = *saved_graph_storage;
+    Sculptor::EffectGraphMapping           mapping             = {};
+    const uint32_t                         owners[]            = { 0, Sculptor::fx_master_chain };
     for (uint32_t owner : owners) {
         memset(static_cast<void*>(&source), 0, sizeof(source));
         Synth::init_default_bank(&source.bank);
@@ -4000,12 +4175,20 @@ static void effects_paste_pin_regressions()
 
 static void effects_layout_classification_regressions()
 {
-    static Synth::InstrumentEditorBank  source;
-    static Synth::InstrumentEditorBank  snapshot;
-    static Synth::InstrumentEditorBank  candidate;
-    static Synth::InstrumentEditorBank  saved_candidate;
-    static Sculptor::Graph              graph;
-    static Sculptor::EffectGraphMapping mapping;
+    const std::unique_ptr<Synth::InstrumentEditorBank> source_storage = std::make_unique<Synth::InstrumentEditorBank>();
+    Synth::InstrumentEditorBank&                       source         = *source_storage;
+    const std::unique_ptr<Synth::InstrumentEditorBank> snapshot_storage =
+        std::make_unique<Synth::InstrumentEditorBank>();
+    Synth::InstrumentEditorBank&                       snapshot = *snapshot_storage;
+    const std::unique_ptr<Synth::InstrumentEditorBank> candidate_storage =
+        std::make_unique<Synth::InstrumentEditorBank>();
+    Synth::InstrumentEditorBank&                       candidate = *candidate_storage;
+    const std::unique_ptr<Synth::InstrumentEditorBank> saved_candidate_storage =
+        std::make_unique<Synth::InstrumentEditorBank>();
+    Synth::InstrumentEditorBank&           saved_candidate = *saved_candidate_storage;
+    const std::unique_ptr<Sculptor::Graph> graph_storage   = std::make_unique<Sculptor::Graph>();
+    Sculptor::Graph&                       graph           = *graph_storage;
+    Sculptor::EffectGraphMapping           mapping         = {};
     memset(static_cast<void*>(&source), 0, sizeof(source));
     Synth::init_default_bank(&source.bank);
     uint16_t descriptor = 0;
@@ -4048,10 +4231,10 @@ static void effects_layout_classification_regressions()
     TEST(Sculptor::change_effect_type_candidate(&source, 0, 0, Synth::EffectType::chorus, &candidate));
     TEST(candidate.graph_layout_count == 4 && strcmp(candidate.graph_layout[2].name, "Chorus") == 0);
     TEST(memcmp(&source, &snapshot, sizeof(source)) == 0);
-    static Synth::EffectsDocument portable_document;
-    portable_document                      = {};
-    portable_document.graph_layout_count   = 1;
-    portable_document.graph_layout[0].kind = Synth::effects_graph_layout_effect;
+    Synth::EffectsDocument portable_document = {};
+    portable_document                        = {};
+    portable_document.graph_layout_count     = 1;
+    portable_document.graph_layout[0].kind   = Synth::effects_graph_layout_effect;
     TEST(! Synth::validate_effects_document(&portable_document));
 
     const char* invalid_titles[] = { "LFO 2", "Unknown", "Chorus 5" };
@@ -4089,13 +4272,38 @@ static uint32_t splice_single_occurrence(const char* payload,
 
 static void effects_clipboard_regressions()
 {
-    static Synth::EffectsDocument       doc, decoded, saved_doc, extracted;
-    static Synth::InstrumentEditorBank  source, saved_source, candidate, saved_candidate, loaded;
-    static char                         text[65536], bank_text[65536], saved_text[65536];
-    static Sculptor::Graph              graph, saved_graph;
-    static Sculptor::EffectGraphMapping mapping;
-    static uint8_t                      undo_storage[sizeof(source) * 4 + 256];
-    Sculptor::UndoRedo                  undo;
+    Synth::EffectsDocument                             doc            = {};
+    Synth::EffectsDocument                             decoded        = {};
+    Synth::EffectsDocument                             saved_doc      = {};
+    Synth::EffectsDocument                             extracted      = {};
+    const std::unique_ptr<Synth::InstrumentEditorBank> source_storage = std::make_unique<Synth::InstrumentEditorBank>();
+    Synth::InstrumentEditorBank&                       source         = *source_storage;
+    const std::unique_ptr<Synth::InstrumentEditorBank> saved_source_storage =
+        std::make_unique<Synth::InstrumentEditorBank>();
+    Synth::InstrumentEditorBank&                       saved_source = *saved_source_storage;
+    const std::unique_ptr<Synth::InstrumentEditorBank> candidate_storage =
+        std::make_unique<Synth::InstrumentEditorBank>();
+    Synth::InstrumentEditorBank&                       candidate = *candidate_storage;
+    const std::unique_ptr<Synth::InstrumentEditorBank> saved_candidate_storage =
+        std::make_unique<Synth::InstrumentEditorBank>();
+    Synth::InstrumentEditorBank&                       saved_candidate = *saved_candidate_storage;
+    const std::unique_ptr<Synth::InstrumentEditorBank> loaded_storage = std::make_unique<Synth::InstrumentEditorBank>();
+    Synth::InstrumentEditorBank&                       loaded         = *loaded_storage;
+    const std::unique_ptr<FixedArray<char, 65536>>     text_storage   = std::make_unique<FixedArray<char, 65536>>();
+    char (&text)[65536]                                               = text_storage->elements;
+    const std::unique_ptr<FixedArray<char, 65536>> bank_text_storage  = std::make_unique<FixedArray<char, 65536>>();
+    char (&bank_text)[65536]                                          = bank_text_storage->elements;
+    const std::unique_ptr<FixedArray<char, 65536>> saved_text_storage = std::make_unique<FixedArray<char, 65536>>();
+    char (&saved_text)[65536]                                         = saved_text_storage->elements;
+    const std::unique_ptr<Sculptor::Graph> graph_storage              = std::make_unique<Sculptor::Graph>();
+    Sculptor::Graph&                       graph                      = *graph_storage;
+    const std::unique_ptr<Sculptor::Graph> saved_graph_storage        = std::make_unique<Sculptor::Graph>();
+    Sculptor::Graph&                       saved_graph                = *saved_graph_storage;
+    Sculptor::EffectGraphMapping           mapping                    = {};
+    const std::unique_ptr<FixedArray<uint8_t, sizeof(source) * 4 + 256>> undo_storage_storage =
+        std::make_unique<FixedArray<uint8_t, sizeof(source) * 4 + 256>>();
+    uint8_t (&undo_storage)[sizeof(source) * 4 + 256] = undo_storage_storage->elements;
+    Sculptor::UndoRedo undo;
     undo.init(undo_storage);
 
     // All four directions, same-chain replacement, local aliases, equal-distinct
@@ -4267,7 +4475,7 @@ static void effects_clipboard_regressions()
         // The canonical re-encode of an absent base writes the explicit
         // default: a spliced-out third base decodes as 100 and round-trips.
         auto decode_with_effect_slope = [](const char* third_binding_json) {
-            static Synth::EffectsDocument slope_doc;
+            Synth::EffectsDocument slope_doc = {};
             effects_clipboard_fixture(&slope_doc, true);
             slope_doc.chain.effects[0].type                   = Synth::EffectType::fir;
             slope_doc.chain.effects[0].bindings[0]            = {};
@@ -4275,18 +4483,22 @@ static void effects_clipboard_regressions()
             slope_doc.chain.effects[0].bindings[2]            = {};
             slope_doc.chain.effects[0].bindings[0].base_value = 8000.0f;
             slope_doc.chain.effects[0].bindings[2].base_value = 37.0f;
-            static char    encoded[65536];
-            const uint32_t len = Synth::encode_effects_json(&slope_doc, encoded, sizeof(encoded));
+            const std::unique_ptr<FixedArray<char, 65536>> encoded_storage =
+                std::make_unique<FixedArray<char, 65536>>();
+            char (&encoded)[65536] = encoded_storage->elements;
+            const uint32_t len     = Synth::encode_effects_json(&slope_doc, encoded, sizeof(encoded));
             TEST(len > 0);
-            const char* const obj = "{\"base_value\":37}";
-            static char       spliced[65536];
-            const uint32_t    spliced_len =
+            const char* const                              obj = "{\"base_value\":37}";
+            const std::unique_ptr<FixedArray<char, 65536>> spliced_storage =
+                std::make_unique<FixedArray<char, 65536>>();
+            char (&spliced)[65536] = spliced_storage->elements;
+            const uint32_t spliced_len =
                 splice_single_occurrence(encoded, len, obj, third_binding_json, spliced, sizeof(spliced));
             TEST(spliced_len > 0);
             if (! spliced_len) {
                 return false;
             }
-            static Synth::EffectsDocument out;
+            Synth::EffectsDocument out = {};
             return Synth::decode_effects_json(spliced, spliced_len, &out);
         };
         TEST(decode_with_effect_slope("{\"base_value\":37}")); // the splice itself decodes
@@ -4297,7 +4509,7 @@ static void effects_clipboard_regressions()
         // An absent base value is a success row: the third binding decodes
         // as the 100 default and the canonical re-encode emits it.
         {
-            static Synth::EffectsDocument absent;
+            Synth::EffectsDocument absent = {};
             effects_clipboard_fixture(&absent, true);
             absent.chain.effects[0].type                   = Synth::EffectType::fir;
             absent.chain.effects[0].bindings[0]            = {};
@@ -4305,14 +4517,18 @@ static void effects_clipboard_regressions()
             absent.chain.effects[0].bindings[2]            = {};
             absent.chain.effects[0].bindings[0].base_value = 8000.0f;
             absent.chain.effects[0].bindings[2].base_value = 37.0f;
-            static char    encoded[65536];
-            const uint32_t len = Synth::encode_effects_json(&absent, encoded, sizeof(encoded));
+            const std::unique_ptr<FixedArray<char, 65536>> encoded_storage =
+                std::make_unique<FixedArray<char, 65536>>();
+            char (&encoded)[65536] = encoded_storage->elements;
+            const uint32_t len     = Synth::encode_effects_json(&absent, encoded, sizeof(encoded));
             TEST(len > 0);
-            const char* const obj = "{\"base_value\":37}";
-            static char       spliced[65536];
-            const uint32_t    spliced_len = splice_single_occurrence(encoded, len, obj, "{}", spliced, sizeof(spliced));
+            const char* const                              obj = "{\"base_value\":37}";
+            const std::unique_ptr<FixedArray<char, 65536>> spliced_storage =
+                std::make_unique<FixedArray<char, 65536>>();
+            char (&spliced)[65536]     = spliced_storage->elements;
+            const uint32_t spliced_len = splice_single_occurrence(encoded, len, obj, "{}", spliced, sizeof(spliced));
             TEST(spliced_len > 0);
-            static Synth::EffectsDocument out;
+            Synth::EffectsDocument out = {};
             TEST(Synth::decode_effects_json(spliced, spliced_len, &out));
             TEST(out.chain.effects[0].bindings[2].base_value == 100.0f);
             TEST(Synth::encode_effects_json(&out, text, sizeof(text)) > 0);
@@ -4321,7 +4537,7 @@ static void effects_clipboard_regressions()
         // A modulation-only third binding keeps the default base and the
         // supplied modulation fields.
         {
-            static Synth::EffectsDocument modulated;
+            Synth::EffectsDocument modulated = {};
             effects_clipboard_fixture(&modulated, true);
             modulated.chain.effects[0].type                   = Synth::EffectType::fir;
             modulated.chain.effects[0].bindings[0]            = {};
@@ -4329,15 +4545,19 @@ static void effects_clipboard_regressions()
             modulated.chain.effects[0].bindings[2]            = {};
             modulated.chain.effects[0].bindings[0].base_value = 8000.0f;
             modulated.chain.effects[0].bindings[2].base_value = 37.0f;
-            static char    encoded[65536];
-            const uint32_t len = Synth::encode_effects_json(&modulated, encoded, sizeof(encoded));
+            const std::unique_ptr<FixedArray<char, 65536>> encoded_storage =
+                std::make_unique<FixedArray<char, 65536>>();
+            char (&encoded)[65536] = encoded_storage->elements;
+            const uint32_t len     = Synth::encode_effects_json(&modulated, encoded, sizeof(encoded));
             TEST(len > 0);
-            const char* const obj  = "{\"base_value\":37}";
-            const char* const repl = "{\"lfo_desc_id\":1,\"lfo_depth\":0.5}";
-            static char       spliced[65536];
-            const uint32_t    spliced_len = splice_single_occurrence(encoded, len, obj, repl, spliced, sizeof(spliced));
+            const char* const                              obj  = "{\"base_value\":37}";
+            const char* const                              repl = "{\"lfo_desc_id\":1,\"lfo_depth\":0.5}";
+            const std::unique_ptr<FixedArray<char, 65536>> spliced_storage =
+                std::make_unique<FixedArray<char, 65536>>();
+            char (&spliced)[65536]     = spliced_storage->elements;
+            const uint32_t spliced_len = splice_single_occurrence(encoded, len, obj, repl, spliced, sizeof(spliced));
             TEST(spliced_len > 0);
-            static Synth::EffectsDocument out;
+            Synth::EffectsDocument out = {};
             TEST(Synth::decode_effects_json(spliced, spliced_len, &out));
             TEST(out.chain.effects[0].bindings[2].base_value == 100.0f);
             TEST(out.chain.effects[0].bindings[2].lfo_desc_id == 1);
@@ -4346,7 +4566,7 @@ static void effects_clipboard_regressions()
         // A 2-param FIR effect document fails decode: the params array must
         // cover exactly the fields the effect type reads.
         {
-            static Synth::EffectsDocument two_param;
+            Synth::EffectsDocument two_param = {};
             effects_clipboard_fixture(&two_param, true);
             two_param.chain.effects[0].type                   = Synth::EffectType::fir;
             two_param.chain.effects[0].bindings[0]            = {};
@@ -4354,55 +4574,73 @@ static void effects_clipboard_regressions()
             two_param.chain.effects[0].bindings[2]            = {};
             two_param.chain.effects[0].bindings[0].base_value = 8000.0f;
             two_param.chain.effects[0].bindings[2].base_value = 37.0f;
-            static char    encoded[65536];
-            const uint32_t len = Synth::encode_effects_json(&two_param, encoded, sizeof(encoded));
+            const std::unique_ptr<FixedArray<char, 65536>> encoded_storage =
+                std::make_unique<FixedArray<char, 65536>>();
+            char (&encoded)[65536] = encoded_storage->elements;
+            const uint32_t len     = Synth::encode_effects_json(&two_param, encoded, sizeof(encoded));
             TEST(len > 0);
-            const char* const first_binding = "{\"base_value\":8000},";
-            static char       spliced[65536];
-            const uint32_t    spliced_len =
+            const char* const                              first_binding = "{\"base_value\":8000},";
+            const std::unique_ptr<FixedArray<char, 65536>> spliced_storage =
+                std::make_unique<FixedArray<char, 65536>>();
+            char (&spliced)[65536] = spliced_storage->elements;
+            const uint32_t spliced_len =
                 splice_single_occurrence(encoded, len, first_binding, "", spliced, sizeof(spliced));
             TEST(spliced_len > 0);
-            static Synth::EffectsDocument out;
+            Synth::EffectsDocument out = {};
             TEST(! Synth::decode_effects_json(spliced, spliced_len, &out));
         }
         // The editor bank dialect carrier: a FIR effect with a nondefault
         // slope round-trips, bad slope spellings refuse the whole bank, and
         // a 2-param FIR effect refuses the bank too.
         {
-            static Synth::InstrumentEditorBank bank;
+            const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage =
+                std::make_unique<Synth::InstrumentEditorBank>();
+            Synth::InstrumentEditorBank& bank = *bank_storage;
             Synth::init_default_bank(&bank.bank);
             enabled_effect(bank.bank, 0, 0, Synth::EffectType::fir);
             bank.bank.channel_chains[0].effects[0].bindings[0].base_value = 8000.0f;
             bank.bank.channel_chains[0].effects[0].bindings[2].base_value = 37.0f;
             TEST(Synth::validate_instrument_bank(&bank.bank));
-            static char    payload[Synth::library_payload_max];
+            const std::unique_ptr<FixedArray<char, Synth::library_payload_max>> payload_storage =
+                std::make_unique<FixedArray<char, Synth::library_payload_max>>();
+            char (&payload)[Synth::library_payload_max] = payload_storage->elements;
             const uint32_t payload_len = Synth::encode_editor_bank_json(&bank, payload, sizeof(payload));
             TEST(payload_len > 0);
             TEST(strstr(payload, "{\"base_value\":37}") != nullptr);
-            static Synth::InstrumentEditorBank decoded_bank;
+            const std::unique_ptr<Synth::InstrumentEditorBank> decoded_bank_storage =
+                std::make_unique<Synth::InstrumentEditorBank>();
+            Synth::InstrumentEditorBank& decoded_bank = *decoded_bank_storage;
             memset(static_cast<void*>(&decoded_bank), 0, sizeof(decoded_bank));
             TEST(Synth::decode_editor_bank_json(payload, payload_len, &decoded_bank));
             TEST(decoded_bank.bank.channel_chains[0].effects[0].type == Synth::EffectType::fir);
             TEST(decoded_bank.bank.channel_chains[0].effects[0].bindings[2].base_value == 37.0f);
             auto decode_with_bank_slope = [](const char* third_binding_json) {
-                static Synth::InstrumentEditorBank slope_bank;
+                const std::unique_ptr<Synth::InstrumentEditorBank> slope_bank_storage =
+                    std::make_unique<Synth::InstrumentEditorBank>();
+                Synth::InstrumentEditorBank& slope_bank = *slope_bank_storage;
                 Synth::init_default_bank(&slope_bank.bank);
                 enabled_effect(slope_bank.bank, 0, 0, Synth::EffectType::fir);
                 slope_bank.bank.channel_chains[0].effects[0].bindings[0].base_value = 8000.0f;
                 slope_bank.bank.channel_chains[0].effects[0].bindings[2].base_value = 37.0f;
-                static char    bank_payload[Synth::library_payload_max];
+                const std::unique_ptr<FixedArray<char, Synth::library_payload_max>> bank_payload_storage =
+                    std::make_unique<FixedArray<char, Synth::library_payload_max>>();
+                char (&bank_payload)[Synth::library_payload_max] = bank_payload_storage->elements;
                 const uint32_t bank_len =
                     Synth::encode_editor_bank_json(&slope_bank, bank_payload, sizeof(bank_payload));
                 TEST(bank_len > 0);
-                const char* const obj = "{\"base_value\":37}";
-                static char       spliced[Synth::library_payload_max];
-                const uint32_t    spliced_len =
+                const char* const                                                   obj = "{\"base_value\":37}";
+                const std::unique_ptr<FixedArray<char, Synth::library_payload_max>> spliced_storage =
+                    std::make_unique<FixedArray<char, Synth::library_payload_max>>();
+                char (&spliced)[Synth::library_payload_max] = spliced_storage->elements;
+                const uint32_t spliced_len =
                     splice_single_occurrence(bank_payload, bank_len, obj, third_binding_json, spliced, sizeof(spliced));
                 TEST(spliced_len > 0);
                 if (! spliced_len) {
                     return false;
                 }
-                static Synth::InstrumentEditorBank out;
+                const std::unique_ptr<Synth::InstrumentEditorBank> out_storage =
+                    std::make_unique<Synth::InstrumentEditorBank>();
+                Synth::InstrumentEditorBank& out = *out_storage;
                 memset(static_cast<void*>(&out), 0, sizeof(out));
                 return Synth::decode_editor_bank_json(spliced, spliced_len, &out);
             };
@@ -4414,15 +4652,21 @@ static void effects_clipboard_regressions()
             TEST(decode_with_bank_slope("{}"));
             // Dropping the first binding leaves a 2-param FIR effect: refuse.
             {
-                static char    bank_payload[Synth::library_payload_max];
+                const std::unique_ptr<FixedArray<char, Synth::library_payload_max>> bank_payload_storage =
+                    std::make_unique<FixedArray<char, Synth::library_payload_max>>();
+                char (&bank_payload)[Synth::library_payload_max] = bank_payload_storage->elements;
                 const uint32_t bank_len = Synth::encode_editor_bank_json(&bank, bank_payload, sizeof(bank_payload));
                 TEST(bank_len > 0);
                 const char* const first_binding = "{\"base_value\":8000},";
-                static char       spliced[Synth::library_payload_max];
-                const uint32_t    spliced_len =
+                const std::unique_ptr<FixedArray<char, Synth::library_payload_max>> spliced_storage =
+                    std::make_unique<FixedArray<char, Synth::library_payload_max>>();
+                char (&spliced)[Synth::library_payload_max] = spliced_storage->elements;
+                const uint32_t spliced_len =
                     splice_single_occurrence(bank_payload, bank_len, first_binding, "", spliced, sizeof(spliced));
                 TEST(spliced_len > 0);
-                static Synth::InstrumentEditorBank out;
+                const std::unique_ptr<Synth::InstrumentEditorBank> out_storage =
+                    std::make_unique<Synth::InstrumentEditorBank>();
+                Synth::InstrumentEditorBank& out = *out_storage;
                 memset(static_cast<void*>(&out), 0, sizeof(out));
                 TEST(! Synth::decode_editor_bank_json(spliced, spliced_len, &out));
             }
@@ -4430,17 +4674,23 @@ static void effects_clipboard_regressions()
         // ring_mod: distinctive rate/mix values must survive the bank codec
         // round-trip, and the encoded type name must appear verbatim.
         {
-            static Synth::InstrumentEditorBank bank;
+            const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage =
+                std::make_unique<Synth::InstrumentEditorBank>();
+            Synth::InstrumentEditorBank& bank = *bank_storage;
             Synth::init_default_bank(&bank.bank);
             enabled_effect(bank.bank, 0, 0, Synth::EffectType::ring_mod);
             bank.bank.channel_chains[0].effects[0].bindings[0].base_value = 234.5f;
             bank.bank.channel_chains[0].effects[0].bindings[1].base_value = 0.75f;
             TEST(Synth::validate_instrument_bank(&bank.bank));
-            static char    payload[Synth::library_payload_max];
+            const std::unique_ptr<FixedArray<char, Synth::library_payload_max>> payload_storage =
+                std::make_unique<FixedArray<char, Synth::library_payload_max>>();
+            char (&payload)[Synth::library_payload_max] = payload_storage->elements;
             const uint32_t payload_len = Synth::encode_editor_bank_json(&bank, payload, sizeof(payload));
             TEST(payload_len > 0);
             TEST(strstr(payload, "\"ring_mod\"") != nullptr);
-            static Synth::InstrumentEditorBank decoded_bank;
+            const std::unique_ptr<Synth::InstrumentEditorBank> decoded_bank_storage =
+                std::make_unique<Synth::InstrumentEditorBank>();
+            Synth::InstrumentEditorBank& decoded_bank = *decoded_bank_storage;
             memset(static_cast<void*>(&decoded_bank), 0, sizeof(decoded_bank));
             TEST(Synth::decode_editor_bank_json(payload, payload_len, &decoded_bank));
             TEST(decoded_bank.bank.channel_chains[0].effects[0].type == Synth::EffectType::ring_mod);
@@ -4451,7 +4701,9 @@ static void effects_clipboard_regressions()
         // bank codec and the clipboard instrument codec round-trip, and a
         // keys-reordered document must decode identically.
         {
-            static Synth::InstrumentEditorBank mode_bank;
+            const std::unique_ptr<Synth::InstrumentEditorBank> mode_bank_storage =
+                std::make_unique<Synth::InstrumentEditorBank>();
+            Synth::InstrumentEditorBank& mode_bank = *mode_bank_storage;
             Synth::init_default_bank(&mode_bank.bank);
             Synth::Oscillator& mode_osc                     = mode_bank.bank.instruments.entries[0].layers[0];
             mode_osc.osc_mode                               = Synth::osc_mode_ring_mod;
@@ -4463,12 +4715,16 @@ static void effects_clipboard_regressions()
 
             // Bank codec: the encoded mode name must appear verbatim and
             // every distinctive value must survive the round-trip.
-            static char    mode_payload[Synth::library_payload_max];
+            const std::unique_ptr<FixedArray<char, Synth::library_payload_max>> mode_payload_storage =
+                std::make_unique<FixedArray<char, Synth::library_payload_max>>();
+            char (&mode_payload)[Synth::library_payload_max] = mode_payload_storage->elements;
             const uint32_t mode_payload_len =
                 Synth::encode_editor_bank_json(&mode_bank, mode_payload, sizeof(mode_payload));
             TEST(mode_payload_len > 0);
             TEST(strstr(mode_payload, "\"ring_mod\"") != nullptr);
-            static Synth::InstrumentEditorBank mode_decoded;
+            const std::unique_ptr<Synth::InstrumentEditorBank> mode_decoded_storage =
+                std::make_unique<Synth::InstrumentEditorBank>();
+            Synth::InstrumentEditorBank& mode_decoded = *mode_decoded_storage;
             memset(static_cast<void*>(&mode_decoded), 0, sizeof(mode_decoded));
             TEST(Synth::decode_editor_bank_json(mode_payload, mode_payload_len, &mode_decoded));
             const Synth::Oscillator& mode_back = mode_decoded.bank.instruments.entries[0].layers[0];
@@ -4480,9 +4736,12 @@ static void effects_clipboard_regressions()
 
             // Clipboard codec: the same fixture through the instrument
             // document codec.
-            static char clip_text[clipboard_capacity];
+            const std::unique_ptr<FixedArray<char, clipboard_capacity>> clip_text_storage =
+                std::make_unique<FixedArray<char, clipboard_capacity>>();
+            char (&clip_text)[clipboard_capacity] = clip_text_storage->elements;
             TEST(export_clipboard_fixture(mode_bank, clip_text, sizeof(clip_text)));
-            static ClipboardDecode clip;
+            const std::unique_ptr<ClipboardDecode> clip_storage = std::make_unique<ClipboardDecode>();
+            ClipboardDecode&                       clip         = *clip_storage;
             memset(static_cast<void*>(&clip), 0, sizeof(clip));
             TEST(decode_clipboard(&clip, clip_text, max_portable_records));
             TEST(clip.instr.layers[0].osc_mode == Synth::osc_mode_ring_mod);
@@ -4496,7 +4755,8 @@ static void effects_clipboard_regressions()
             const char* const reordered_doc =
                 "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\",\"duty_b\":{\"base\":0.25},"
                 "\"osc_mix\":{\"base\":0.75},\"mode\":\"ring_mod\",\"wave_b\":\"sawtooth\",\"mod_ratio\":1.5}]}";
-            static ClipboardDecode reordered;
+            const std::unique_ptr<ClipboardDecode> reordered_storage = std::make_unique<ClipboardDecode>();
+            ClipboardDecode&                       reordered         = *reordered_storage;
             memset(static_cast<void*>(&reordered), 0, sizeof(reordered));
             TEST(decode_clipboard(&reordered, reordered_doc, max_portable_records));
             TEST(reordered.instr.layers[0].osc_mode == Synth::osc_mode_ring_mod);
@@ -4511,7 +4771,9 @@ static void effects_clipboard_regressions()
         // both decode paths (the layer and the phantom shell), and key
         // order does not matter.
         {
-            static Synth::InstrumentEditorBank ratio_bank;
+            const std::unique_ptr<Synth::InstrumentEditorBank> ratio_bank_storage =
+                std::make_unique<Synth::InstrumentEditorBank>();
+            Synth::InstrumentEditorBank& ratio_bank = *ratio_bank_storage;
             Synth::init_default_bank(&ratio_bank.bank);
             const uint32_t ratio_lfo_slot = ratio_bank.bank.lfos.allocate();
             TEST(ratio_lfo_slot != pool_no_slot);
@@ -4531,12 +4793,16 @@ static void effects_clipboard_regressions()
             TEST(Synth::validate_instrument_bank(&ratio_bank.bank));
             // Bank codec: the encoded target name must appear verbatim and
             // the whole binding survives the round-trip.
-            static char    ratio_payload[Synth::library_payload_max];
+            const std::unique_ptr<FixedArray<char, Synth::library_payload_max>> ratio_payload_storage =
+                std::make_unique<FixedArray<char, Synth::library_payload_max>>();
+            char (&ratio_payload)[Synth::library_payload_max] = ratio_payload_storage->elements;
             const uint32_t ratio_payload_len =
                 Synth::encode_editor_bank_json(&ratio_bank, ratio_payload, sizeof(ratio_payload));
             TEST(ratio_payload_len > 0);
             TEST(strstr(ratio_payload, "\"fm_ratio\"") != nullptr);
-            static Synth::InstrumentEditorBank ratio_decoded;
+            const std::unique_ptr<Synth::InstrumentEditorBank> ratio_decoded_storage =
+                std::make_unique<Synth::InstrumentEditorBank>();
+            Synth::InstrumentEditorBank& ratio_decoded = *ratio_decoded_storage;
             memset(static_cast<void*>(&ratio_decoded), 0, sizeof(ratio_decoded));
             TEST(Synth::decode_editor_bank_json(ratio_payload, ratio_payload_len, &ratio_decoded));
             const Synth::Oscillator& ratio_back = ratio_decoded.bank.instruments.entries[0].layers[0];
@@ -4545,9 +4811,12 @@ static void effects_clipboard_regressions()
             TEST(ratio_back.targets[Synth::mod_fm_ratio].lfo_depth == 0.5f);
             // Clipboard codec: the same fixture through the instrument
             // document codec.
-            static char ratio_clip[clipboard_capacity];
+            const std::unique_ptr<FixedArray<char, clipboard_capacity>> ratio_clip_storage =
+                std::make_unique<FixedArray<char, clipboard_capacity>>();
+            char (&ratio_clip)[clipboard_capacity] = ratio_clip_storage->elements;
             TEST(export_clipboard_fixture(ratio_bank, ratio_clip, sizeof(ratio_clip)));
-            static ClipboardDecode ratio_clip_decoded;
+            const std::unique_ptr<ClipboardDecode> ratio_clip_decoded_storage = std::make_unique<ClipboardDecode>();
+            ClipboardDecode&                       ratio_clip_decoded         = *ratio_clip_decoded_storage;
             memset(static_cast<void*>(&ratio_clip_decoded), 0, sizeof(ratio_clip_decoded));
             TEST(decode_clipboard(&ratio_clip_decoded, ratio_clip, max_portable_records));
             TEST(ratio_clip_decoded.lfo_count == 1);
@@ -4561,12 +4830,14 @@ static void effects_clipboard_regressions()
                 // Hand-written legacy payloads state no fm_ratio routing at all, so
                 // the decode genuinely takes the backfill branch (the encoder always
                 // emits the entry, which would mask the branch).
-                const char* const                  legacy_doc = "{\"instrument_editor_bank\":{\"instruments\":"
-                                                                "[{\"layer_count\":1,\"layers\":[{\"wave_a\":\"sine\",\"mod_ratio\":2,"
-                                                                "\"routing\":{}}]}],"
-                                                                "\"channels\":[{},{},{},{\"zones\":[{\"start\":0,\"instrument\":0}]}]}}";
-                const uint32_t                     legacy_len = static_cast<uint32_t>(strlen(legacy_doc));
-                static Synth::InstrumentEditorBank legacy_decoded;
+                const char* const legacy_doc = "{\"instrument_editor_bank\":{\"instruments\":"
+                                               "[{\"layer_count\":1,\"layers\":[{\"wave_a\":\"sine\",\"mod_ratio\":2,"
+                                               "\"routing\":{}}]}],"
+                                               "\"channels\":[{},{},{},{\"zones\":[{\"start\":0,\"instrument\":0}]}]}}";
+                const uint32_t    legacy_len = static_cast<uint32_t>(strlen(legacy_doc));
+                const std::unique_ptr<Synth::InstrumentEditorBank> legacy_decoded_storage =
+                    std::make_unique<Synth::InstrumentEditorBank>();
+                Synth::InstrumentEditorBank& legacy_decoded = *legacy_decoded_storage;
                 memset(static_cast<void*>(&legacy_decoded), 0, sizeof(legacy_decoded));
                 TEST(Synth::decode_editor_bank_json(legacy_doc, legacy_len, &legacy_decoded));
                 const Synth::Oscillator& legacy_back = legacy_decoded.bank.instruments.entries[0].layers[0];
@@ -4580,8 +4851,10 @@ static void effects_clipboard_regressions()
                     "\"editor\":{\"missing_sum\":[[1]],"
                     "\"phantoms\":[{\"channel\":0,\"zone\":0,\"layer\":0,"
                     "\"oscillator\":{\"wave_a\":\"sine\",\"mod_ratio\":2,\"routing\":{}}}]}}}";
-                const uint32_t                     phantom_len = static_cast<uint32_t>(strlen(phantom_doc));
-                static Synth::InstrumentEditorBank phantom_decoded;
+                const uint32_t phantom_len = static_cast<uint32_t>(strlen(phantom_doc));
+                const std::unique_ptr<Synth::InstrumentEditorBank> phantom_decoded_storage =
+                    std::make_unique<Synth::InstrumentEditorBank>();
+                Synth::InstrumentEditorBank& phantom_decoded = *phantom_decoded_storage;
                 memset(static_cast<void*>(&phantom_decoded), 0, sizeof(phantom_decoded));
                 TEST(Synth::decode_editor_bank_json(phantom_doc, phantom_len, &phantom_decoded));
                 TEST(phantom_decoded.phantom_count == 1);
@@ -4598,21 +4871,24 @@ static void effects_clipboard_regressions()
             {
                 const char* const ratio_absent_doc =
                     "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\"}]}";
-                static ClipboardDecode ratio_absent;
+                const std::unique_ptr<ClipboardDecode> ratio_absent_storage = std::make_unique<ClipboardDecode>();
+                ClipboardDecode&                       ratio_absent         = *ratio_absent_storage;
                 memset(static_cast<void*>(&ratio_absent), 0, sizeof(ratio_absent));
                 TEST(decode_clipboard(&ratio_absent, ratio_absent_doc, max_portable_records));
                 TEST(ratio_absent.instr.layers[0].mod_ratio == 1.0f);
                 TEST(ratio_absent.instr.layers[0].targets[Synth::mod_fm_ratio].base_value == 1.0f);
                 const char* const ratio_three_doc =
                     "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\",\"mod_ratio\":3}]}";
-                static ClipboardDecode ratio_three;
+                const std::unique_ptr<ClipboardDecode> ratio_three_storage = std::make_unique<ClipboardDecode>();
+                ClipboardDecode&                       ratio_three         = *ratio_three_storage;
                 memset(static_cast<void*>(&ratio_three), 0, sizeof(ratio_three));
                 TEST(decode_clipboard(&ratio_three, ratio_three_doc, max_portable_records));
                 TEST(ratio_three.instr.layers[0].mod_ratio == 3.0f);
                 TEST(ratio_three.instr.layers[0].targets[Synth::mod_fm_ratio].base_value == 3.0f);
                 const char* const ratio_zero_doc =
                     "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\",\"mod_ratio\":0}]}";
-                static ClipboardDecode ratio_zero;
+                const std::unique_ptr<ClipboardDecode> ratio_zero_storage = std::make_unique<ClipboardDecode>();
+                ClipboardDecode&                       ratio_zero         = *ratio_zero_storage;
                 memset(static_cast<void*>(&ratio_zero), 0, sizeof(ratio_zero));
                 TEST(decode_clipboard(&ratio_zero, ratio_zero_doc, max_portable_records));
                 TEST(ratio_zero.instr.layers[0].mod_ratio == 0.0f);
@@ -4620,7 +4896,8 @@ static void effects_clipboard_regressions()
                 const char* const ratio_reordered_doc =
                     "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\",\"fm_ratio\":{\"base\":1.5},"
                     "\"mode\":\"fm\",\"mod_ratio\":1.5}]}";
-                static ClipboardDecode ratio_reordered;
+                const std::unique_ptr<ClipboardDecode> ratio_reordered_storage = std::make_unique<ClipboardDecode>();
+                ClipboardDecode&                       ratio_reordered         = *ratio_reordered_storage;
                 memset(static_cast<void*>(&ratio_reordered), 0, sizeof(ratio_reordered));
                 TEST(decode_clipboard(&ratio_reordered, ratio_reordered_doc, max_portable_records));
                 TEST(ratio_reordered.instr.layers[0].mod_ratio == 1.5f);
@@ -4631,7 +4908,8 @@ static void effects_clipboard_regressions()
                 const char* const ratio_after_target_doc =
                     "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\","
                     "\"mod_ratio\":3,\"fm_ratio\":{\"base\":1.5},\"volume\":{\"base\":1.0}}]}";
-                static ClipboardDecode ratio_after_target;
+                const std::unique_ptr<ClipboardDecode> ratio_after_target_storage = std::make_unique<ClipboardDecode>();
+                ClipboardDecode&                       ratio_after_target         = *ratio_after_target_storage;
                 memset(static_cast<void*>(&ratio_after_target), 0, sizeof(ratio_after_target));
                 TEST(decode_clipboard(&ratio_after_target, ratio_after_target_doc, max_portable_records));
                 TEST(ratio_after_target.instr.layers[0].mod_ratio == 3.0f);
@@ -4972,14 +5250,23 @@ static Synth::EffectChainBinding& add_cc_chain_fixture(Synth::InstrumentEditorBa
 // a ModSource::cc input with the dot's CC number.
 static void effects_add_cc_regressions()
 {
-    static Synth::InstrumentEditorBank  source;
-    static Synth::InstrumentEditorBank  candidate;
-    static Synth::InstrumentEditorBank  loaded;
-    static Sculptor::Graph              graph;
-    static Sculptor::EffectGraphMapping mapping;
-    static Sculptor::GraphChange        discarded[Sculptor::max_pending_changes];
-    static char                         payload[Synth::library_payload_max];
-    static char                         reencoded[Synth::library_payload_max];
+    const std::unique_ptr<Synth::InstrumentEditorBank> source_storage = std::make_unique<Synth::InstrumentEditorBank>();
+    Synth::InstrumentEditorBank&                       source         = *source_storage;
+    const std::unique_ptr<Synth::InstrumentEditorBank> candidate_storage =
+        std::make_unique<Synth::InstrumentEditorBank>();
+    Synth::InstrumentEditorBank&                       candidate      = *candidate_storage;
+    const std::unique_ptr<Synth::InstrumentEditorBank> loaded_storage = std::make_unique<Synth::InstrumentEditorBank>();
+    Synth::InstrumentEditorBank&                       loaded         = *loaded_storage;
+    const std::unique_ptr<Sculptor::Graph>             graph_storage  = std::make_unique<Sculptor::Graph>();
+    Sculptor::Graph&                                   graph          = *graph_storage;
+    Sculptor::EffectGraphMapping                       mapping        = {};
+    Sculptor::GraphChange                              discarded[Sculptor::max_pending_changes] = {};
+    const std::unique_ptr<FixedArray<char, Synth::library_payload_max>> payload_storage =
+        std::make_unique<FixedArray<char, Synth::library_payload_max>>();
+    char (&payload)[Synth::library_payload_max] = payload_storage->elements;
+    const std::unique_ptr<FixedArray<char, Synth::library_payload_max>> reencoded_storage =
+        std::make_unique<FixedArray<char, Synth::library_payload_max>>();
+    char (&reencoded)[Synth::library_payload_max] = reencoded_storage->elements;
 
     // Registry bits project MIDI-node output dots; absent bits project none.
     add_cc_chain_fixture(&source, 0);
@@ -5168,7 +5455,7 @@ static void effects_add_cc_regressions()
     loaded.added_cc_mask[0] = 1u << 6; // a pre-existing addition on the receiving chain
     loaded.added_cc_mask[1] = 1u << 4; // a pre-existing addition on another chain
 
-    static Synth::EffectsDocument document;
+    Synth::EffectsDocument document = {};
     TEST(Sculptor::extract_effect_chain_document(&source, 0, nullptr, nullptr, &document));
     TEST(Sculptor::replace_effect_chain_candidate(&loaded, 0, &document, &candidate));
     TEST(candidate.added_cc_mask[0] == ((1u << 1) | (1u << 6))); // CC 17 adopted, existing bit survives
@@ -5216,7 +5503,7 @@ static void effects_add_cc_regressions()
     TEST(v2_again == v2_length && memcmp(payload, reencoded, v2_length) == 0);
 
     // Strict v2 refusal: an unknown key inside the editor object fails.
-    static char v2_document[sizeof(payload) + 64];
+    char v2_document[sizeof(payload) + 64] = {};
     memcpy(v2_document, payload, v2_length);
     char* const editor = strstr(v2_document, "\"editor\":{");
     TEST(editor != nullptr);
@@ -5412,13 +5699,21 @@ static void effects_add_cc_regressions()
 // synth_effect_expansion, the wiring in sculptor_effect_graph.
 static void effects_enable_regressions()
 {
-    static Synth::InstrumentEditorBank  source;
-    static Synth::InstrumentEditorBank  candidate;
-    static Synth::InstrumentEditorBank  decoded;
-    static Sculptor::Graph              graph;
-    static Sculptor::EffectGraphMapping mapping;
-    static Sculptor::GraphChange        discarded[Sculptor::max_pending_changes];
-    static char                         payload[Synth::library_payload_max];
+    const std::unique_ptr<Synth::InstrumentEditorBank> source_storage = std::make_unique<Synth::InstrumentEditorBank>();
+    Synth::InstrumentEditorBank&                       source         = *source_storage;
+    const std::unique_ptr<Synth::InstrumentEditorBank> candidate_storage =
+        std::make_unique<Synth::InstrumentEditorBank>();
+    Synth::InstrumentEditorBank&                       candidate = *candidate_storage;
+    const std::unique_ptr<Synth::InstrumentEditorBank> decoded_storage =
+        std::make_unique<Synth::InstrumentEditorBank>();
+    Synth::InstrumentEditorBank&           decoded       = *decoded_storage;
+    const std::unique_ptr<Sculptor::Graph> graph_storage = std::make_unique<Sculptor::Graph>();
+    Sculptor::Graph&                       graph         = *graph_storage;
+    Sculptor::EffectGraphMapping           mapping       = {};
+    Sculptor::GraphChange                  discarded[Sculptor::max_pending_changes] = {};
+    const std::unique_ptr<FixedArray<char, Synth::library_payload_max>> payload_storage =
+        std::make_unique<FixedArray<char, Synth::library_payload_max>>();
+    char (&payload)[Synth::library_payload_max] = payload_storage->elements;
 
     const Synth::ModInput zero_input = {};
 
@@ -5465,21 +5760,22 @@ static void effects_enable_regressions()
         TEST(candidate.bank.channel_chains[0].effects[0].enabled == false);
         TEST(memcmp(&candidate.bank.channel_chains[0].effects[0].enable_input, &zero_input, sizeof(zero_input)) == 0);
 
-        static Synth::InstrumentBank bank;
+        const std::unique_ptr<Synth::InstrumentBank> bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       bank         = *bank_storage;
         Synth::init_default_bank(&bank);
         bank.channel_chains[0].num_effects        = 1;
         bank.channel_chains[0].effects[0].type    = Synth::EffectType::delay;
         bank.channel_chains[0].effects[0].enabled = false;
 
         Synth::init_effect_state_region(fake_region_base);
-        static Synth::EffectExpansionPlan plan;
-        const char*                       error = nullptr;
+        Synth::EffectExpansionPlan plan  = {};
+        const char*                error = nullptr;
         TEST(Synth::preflight_effect_expansion(bank, &plan, &error));
         TEST(plan.slots[0][0].state_offs == 0); // an unwired saved-off slot stays stateless
 
-        static Synth::EffectChain chains[Synth::max_channels];
-        static Synth::EffectChain master;
-        FakeWriter                writer = { 1, 0, 0, 0, 0 };
+        Synth::EffectChain chains[Synth::max_channels] = {};
+        Synth::EffectChain master                      = {};
+        FakeWriter         writer                      = { 1, 0, 0, 0, 0 };
         Synth::commit_effect_expansion(bank, plan, chains, &master, fake_writer_binding(writer));
         TEST(chains[0].effects[0].enabled == false);
         TEST(chains[0].effects[0].enable_param_id == 0);
@@ -5490,7 +5786,8 @@ static void effects_enable_regressions()
     // T-M5-3: a wired enable overrides the saved checkbox in both directions,
     // and the commit resolves the routing so the runtime can ignore the bit.
     {
-        static Synth::InstrumentBank bank;
+        const std::unique_ptr<Synth::InstrumentBank> bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       bank         = *bank_storage;
         Synth::init_default_bank(&bank);
         bank.channel_chains[1].num_effects                       = 1;
         bank.channel_chains[1].effects[0].type                   = Synth::EffectType::delay;
@@ -5501,13 +5798,13 @@ static void effects_enable_regressions()
         bank.channel_chains[1].effects[0].enable_input.scale     = 1.0f;
 
         Synth::init_effect_state_region(fake_region_base);
-        static Synth::EffectExpansionPlan plan;
-        const char*                       error = nullptr;
+        Synth::EffectExpansionPlan plan  = {};
+        const char*                error = nullptr;
         TEST(Synth::preflight_effect_expansion(bank, &plan, &error));
 
-        static Synth::EffectChain chains[Synth::max_channels];
-        static Synth::EffectChain master;
-        FakeWriter                writer = { 1, 0, 0, 0, 0 };
+        Synth::EffectChain chains[Synth::max_channels] = {};
+        Synth::EffectChain master                      = {};
+        FakeWriter         writer                      = { 1, 0, 0, 0, 0 };
         Synth::commit_effect_expansion(bank, plan, chains, &master, fake_writer_binding(writer));
         TEST(writer.num_resolved == 1);
         TEST(writer.resolved[0].source == Synth::ModSource::cc);
@@ -5559,7 +5856,8 @@ static void effects_enable_regressions()
     // budget like a saved-on one; the budget-exhaustion refusal keeps its
     // existing error path.
     {
-        static Synth::InstrumentBank bank;
+        const std::unique_ptr<Synth::InstrumentBank> bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       bank         = *bank_storage;
         Synth::init_default_bank(&bank);
 
         // Three saved-on master delays plus one saved-off, enable-routed delay
@@ -5578,8 +5876,8 @@ static void effects_enable_regressions()
         bank.channel_chains[0].effects[0].enable_input.scale     = 1.0f;
 
         Synth::init_effect_state_region(fake_region_base);
-        static Synth::EffectExpansionPlan plan;
-        const char*                       error = nullptr;
+        Synth::EffectExpansionPlan plan  = {};
+        const char*                error = nullptr;
         TEST(Synth::preflight_effect_expansion(bank, &plan, &error));
         TEST(plan.slots[0][0].state_offs != 0); // routed-but-bypassed still reserves state
         TEST(plan.slots[0][0].needs_clear);
@@ -5690,7 +5988,8 @@ static void effects_enable_regressions()
     // T-M5-8: the master chain resolves its enable routing through the
     // master->0 chokepoint, so the same threshold governs master effects.
     {
-        static Synth::InstrumentBank bank;
+        const std::unique_ptr<Synth::InstrumentBank> bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       bank         = *bank_storage;
         Synth::init_default_bank(&bank);
         bank.master_chain.num_effects                       = 1;
         bank.master_chain.effects[0].type                   = Synth::EffectType::delay;
@@ -5701,13 +6000,13 @@ static void effects_enable_regressions()
         bank.master_chain.effects[0].enable_input.scale     = 1.0f;
 
         Synth::init_effect_state_region(fake_region_base);
-        static Synth::EffectExpansionPlan plan;
-        const char*                       error = nullptr;
+        Synth::EffectExpansionPlan plan  = {};
+        const char*                error = nullptr;
         TEST(Synth::preflight_effect_expansion(bank, &plan, &error));
 
-        static Synth::EffectChain chains[Synth::max_channels];
-        static Synth::EffectChain master;
-        FakeWriter                writer = { 1, 0, 0, 0, 0 };
+        Synth::EffectChain chains[Synth::max_channels] = {};
+        Synth::EffectChain master                      = {};
+        FakeWriter         writer                      = { 1, 0, 0, 0, 0 };
         Synth::commit_effect_expansion(bank, plan, chains, &master, fake_writer_binding(writer));
         TEST(writer.num_resolved == 1);
         TEST(writer.resolved[0].source == Synth::ModSource::cc);
@@ -5753,15 +6052,16 @@ static void effects_enable_regressions()
 
         // The runtime keeps honoring the routing: the commit resolves it and
         // the CC threshold governs, whatever the saved checkbox says.
-        static Synth::InstrumentBank bank;
-        bank = source.bank;
+        const std::unique_ptr<Synth::InstrumentBank> bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       bank         = *bank_storage;
+        bank                                                      = source.bank;
         Synth::init_effect_state_region(fake_region_base);
-        static Synth::EffectExpansionPlan plan;
-        const char*                       error = nullptr;
+        Synth::EffectExpansionPlan plan  = {};
+        const char*                error = nullptr;
         TEST(Synth::preflight_effect_expansion(bank, &plan, &error));
-        static Synth::EffectChain chains[Synth::max_channels];
-        static Synth::EffectChain master;
-        FakeWriter                writer = { 1, 0, 0, 0, 0 };
+        Synth::EffectChain chains[Synth::max_channels] = {};
+        Synth::EffectChain master                      = {};
+        FakeWriter         writer                      = { 1, 0, 0, 0, 0 };
         Synth::commit_effect_expansion(bank, plan, chains, &master, fake_writer_binding(writer));
         TEST(chains[0].effects[0].enable_param_id == 77);
         TEST(! Synth::effect_live_enabled(77, 8191.0f / 16383.0f, true)); // routed low beats saved-on
@@ -5786,7 +6086,8 @@ static void effects_enable_regressions()
     // while a genuine off->on transition still clears - through the routing
     // and through a saved-checkbox toggle on a retained slot.
     {
-        static Synth::InstrumentBank bank;
+        const std::unique_ptr<Synth::InstrumentBank> bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       bank         = *bank_storage;
         Synth::init_default_bank(&bank);
         bank.channel_chains[0].num_effects                       = 1;
         bank.channel_chains[0].effects[0].type                   = Synth::EffectType::delay;
@@ -5797,13 +6098,13 @@ static void effects_enable_regressions()
         bank.channel_chains[0].effects[0].enable_input.scale     = 1.0f;
 
         Synth::init_effect_state_region(fake_region_base);
-        static Synth::EffectExpansionPlan plan;
-        const char*                       error = nullptr;
+        Synth::EffectExpansionPlan plan  = {};
+        const char*                error = nullptr;
         TEST(Synth::preflight_effect_expansion(bank, &plan, &error));
 
-        static Synth::EffectChain chains[Synth::max_channels];
-        static Synth::EffectChain master;
-        FakeWriter                writer = { 1, 0, 0, 0, 0 };
+        Synth::EffectChain chains[Synth::max_channels] = {};
+        Synth::EffectChain master                      = {};
+        FakeWriter         writer                      = { 1, 0, 0, 0, 0 };
         Synth::commit_effect_expansion(bank, plan, chains, &master, fake_writer_binding(writer));
         (void)Synth::take_effect_clear_ranges();
 
@@ -5881,20 +6182,21 @@ static void effects_enable_regressions()
     // T-M5-10's unwiring handoff covers), and the fresh instance seeds live
     // from the saved checkbox bit.
     {
-        static Synth::InstrumentBank bank;
+        const std::unique_ptr<Synth::InstrumentBank> bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       bank         = *bank_storage;
         Synth::init_default_bank(&bank);
         bank.channel_chains[0].num_effects        = 1;
         bank.channel_chains[0].effects[0].type    = Synth::EffectType::delay;
         bank.channel_chains[0].effects[0].enabled = true; // saved on, unwired
 
         Synth::init_effect_state_region(fake_region_base);
-        static Synth::EffectExpansionPlan plan;
-        const char*                       error = nullptr;
+        Synth::EffectExpansionPlan plan  = {};
+        const char*                error = nullptr;
         TEST(Synth::preflight_effect_expansion(bank, &plan, &error));
 
-        static Synth::EffectChain chains[Synth::max_channels];
-        static Synth::EffectChain master;
-        FakeWriter                writer = { 1, 0, 0, 0, 0 };
+        Synth::EffectChain chains[Synth::max_channels] = {};
+        Synth::EffectChain master                      = {};
+        FakeWriter         writer                      = { 1, 0, 0, 0, 0 };
         Synth::commit_effect_expansion(bank, plan, chains, &master, fake_writer_binding(writer));
         TEST(chains[0].effects[0].state_offs != 0); // stateful while saved on
         TEST(chains[0].effects[0].enable_param_id == 0);
@@ -5987,11 +6289,15 @@ static void effects_enable_regressions()
 // modulator input through the same dot apply paths.
 static void effects_inline_modulator_regressions()
 {
-    static Synth::InstrumentEditorBank  source;
-    static Synth::InstrumentEditorBank  candidate;
-    static Sculptor::Graph              graph;
-    static Sculptor::EffectGraphMapping mapping;
-    static Sculptor::GraphChange        discarded[Sculptor::max_pending_changes];
+    const std::unique_ptr<Synth::InstrumentEditorBank> source_storage = std::make_unique<Synth::InstrumentEditorBank>();
+    Synth::InstrumentEditorBank&                       source         = *source_storage;
+    const std::unique_ptr<Synth::InstrumentEditorBank> candidate_storage =
+        std::make_unique<Synth::InstrumentEditorBank>();
+    Synth::InstrumentEditorBank&           candidate     = *candidate_storage;
+    const std::unique_ptr<Sculptor::Graph> graph_storage = std::make_unique<Sculptor::Graph>();
+    Sculptor::Graph&                       graph         = *graph_storage;
+    Sculptor::EffectGraphMapping           mapping       = {};
+    Sculptor::GraphChange                  discarded[Sculptor::max_pending_changes] = {};
 
     // T-P4-1: the bare base-value row admits wires; the inline dot stays
     // connectable while any family still has a free input.  It closes only
@@ -6275,13 +6581,16 @@ static void effects_inline_modulator_regressions()
 // the moved position must survive that re-projection.
 static void osc_inputs_move_reprojection_regressions()
 {
-    static Synth::InstrumentEditorBank source;
-    static Synth::Instrument           instrument = {};
-    static Sculptor::Graph             graph;
-    static Sculptor::Graph             regraph;
-    static Sculptor::OscGraphMapping   mapping;
-    static Sculptor::OscGraphMapping   remapping;
-    static Sculptor::GraphChange       discarded[Sculptor::max_pending_changes];
+    const std::unique_ptr<Synth::InstrumentEditorBank> source_storage = std::make_unique<Synth::InstrumentEditorBank>();
+    Synth::InstrumentEditorBank&                       source         = *source_storage;
+    Synth::Instrument                                  instrument     = {};
+    const std::unique_ptr<Sculptor::Graph>             graph_storage  = std::make_unique<Sculptor::Graph>();
+    Sculptor::Graph&                                   graph          = *graph_storage;
+    const std::unique_ptr<Sculptor::Graph>             regraph_storage = std::make_unique<Sculptor::Graph>();
+    Sculptor::Graph&                                   regraph         = *regraph_storage;
+    Sculptor::OscGraphMapping                          mapping         = {};
+    Sculptor::OscGraphMapping                          remapping       = {};
+    Sculptor::GraphChange                              discarded[Sculptor::max_pending_changes] = {};
     build_zone_fixture(&source, &instrument);
     TEST(Sculptor::project_editor_to_graph(source, &graph, &mapping));
     graph.take_changes(discarded, Sculptor::max_pending_changes);
@@ -6315,13 +6624,18 @@ static void osc_inputs_move_reprojection_regressions()
 // Add CC triggers: the move commits a kind-4 record keyed by the node name.
 static void fx_inputs_move_reprojection_regressions()
 {
-    static Synth::InstrumentEditorBank  source;
-    static Synth::InstrumentEditorBank  candidate;
-    static Sculptor::Graph              graph;
-    static Sculptor::Graph              regraph;
-    static Sculptor::EffectGraphMapping mapping;
-    static Sculptor::EffectGraphMapping remapping;
-    static Sculptor::GraphChange        discarded[Sculptor::max_pending_changes];
+    const std::unique_ptr<Synth::InstrumentEditorBank> source_storage = std::make_unique<Synth::InstrumentEditorBank>();
+    Synth::InstrumentEditorBank&                       source         = *source_storage;
+    const std::unique_ptr<Synth::InstrumentEditorBank> candidate_storage =
+        std::make_unique<Synth::InstrumentEditorBank>();
+    Synth::InstrumentEditorBank&           candidate       = *candidate_storage;
+    const std::unique_ptr<Sculptor::Graph> graph_storage   = std::make_unique<Sculptor::Graph>();
+    Sculptor::Graph&                       graph           = *graph_storage;
+    const std::unique_ptr<Sculptor::Graph> regraph_storage = std::make_unique<Sculptor::Graph>();
+    Sculptor::Graph&                       regraph         = *regraph_storage;
+    Sculptor::EffectGraphMapping           mapping         = {};
+    Sculptor::EffectGraphMapping           remapping       = {};
+    Sculptor::GraphChange                  discarded[Sculptor::max_pending_changes] = {};
     add_cc_chain_fixture(&source, 0);
     TEST(Sculptor::project_effect_chain_to_graph(source, 0, &graph, &mapping));
     graph.take_changes(discarded, Sculptor::max_pending_changes);
@@ -6353,8 +6667,9 @@ static void fx_inputs_move_reprojection_regressions()
     TEST(restored->y == moved.y);
     // A kind-4 record keyed "MIDI" predates the node's retitle to
     // "MIDI Inputs"; normalization drops it instead of refusing the bank.
-    static Synth::InstrumentEditorBank legacy;
-    legacy                        = source;
+    const std::unique_ptr<Synth::InstrumentEditorBank> legacy_storage = std::make_unique<Synth::InstrumentEditorBank>();
+    Synth::InstrumentEditorBank&                       legacy         = *legacy_storage;
+    legacy                                                            = source;
     Synth::GraphNodeLayout& stale = legacy.graph_layout[legacy.graph_layout_count++];
     stale                         = {};
     stale.kind                    = 4;
@@ -6379,14 +6694,16 @@ static void fx_inputs_move_reprojection_regressions()
 static void fx_output_node_placement_regressions()
 {
     // fx_node_x's shared lane stride: first_node_x 320, node_step 560.
-    constexpr float                     first_node_x = 320.0f;
-    constexpr float                     node_step    = 560.0f;
-    static Synth::InstrumentEditorBank  source;
-    static Sculptor::Graph              graph;
-    static Sculptor::EffectGraphMapping mapping;
-    static Sculptor::GraphChange        discarded[Sculptor::max_pending_changes];
-    const uint32_t                      owners[] = { 0u, Sculptor::fx_master_chain };
-    const uint32_t                      counts[] = { 0u, 1u, Synth::max_chain_effects };
+    constexpr float                                    first_node_x   = 320.0f;
+    constexpr float                                    node_step      = 560.0f;
+    const std::unique_ptr<Synth::InstrumentEditorBank> source_storage = std::make_unique<Synth::InstrumentEditorBank>();
+    Synth::InstrumentEditorBank&                       source         = *source_storage;
+    const std::unique_ptr<Sculptor::Graph>             graph_storage  = std::make_unique<Sculptor::Graph>();
+    Sculptor::Graph&                                   graph          = *graph_storage;
+    Sculptor::EffectGraphMapping                       mapping        = {};
+    Sculptor::GraphChange                              discarded[Sculptor::max_pending_changes] = {};
+    const uint32_t                                     owners[] = { 0u, Sculptor::fx_master_chain };
+    const uint32_t                                     counts[] = { 0u, 1u, Synth::max_chain_effects };
     for (const uint32_t owner : owners) {
         for (const uint32_t count : counts) {
             add_cc_chain_fixture(&source, owner);
@@ -6479,10 +6796,12 @@ static uint32_t count_drop_menu_slots(const Sculptor::Graph& graph)
 // row does (the fx projection never flags an oscillator-pane shape).
 static void fx_drop_anchor_flag_regressions()
 {
-    static Synth::InstrumentEditorBank  source;
-    static Sculptor::Graph              graph;
-    static Sculptor::EffectGraphMapping mapping;
-    static Sculptor::GraphChange        discarded[Sculptor::max_pending_changes];
+    const std::unique_ptr<Synth::InstrumentEditorBank> source_storage = std::make_unique<Synth::InstrumentEditorBank>();
+    Synth::InstrumentEditorBank&                       source         = *source_storage;
+    const std::unique_ptr<Sculptor::Graph>             graph_storage  = std::make_unique<Sculptor::Graph>();
+    Sculptor::Graph&                                   graph          = *graph_storage;
+    Sculptor::EffectGraphMapping                       mapping        = {};
+    Sculptor::GraphChange                              discarded[Sculptor::max_pending_changes] = {};
     add_cc_chain_fixture(&source, 0);
     // One fresh descriptor for the LFO-wired parameter.
     uint16_t descriptor = 0;
@@ -6561,13 +6880,21 @@ static void fx_drop_anchor_flag_regressions()
 // parameter's LFO dot, with the Op and Depth rows live.
 static void fx_add_lfo_modeled_regressions()
 {
-    static Synth::InstrumentEditorBank  source;
-    static Synth::InstrumentEditorBank  candidate;
-    static Synth::InstrumentEditorBank  refused;
-    static Synth::InstrumentEditorBank  refused_sentinel;
-    static Sculptor::Graph              graph;
-    static Sculptor::EffectGraphMapping mapping;
-    static Sculptor::GraphChange        discarded[Sculptor::max_pending_changes];
+    const std::unique_ptr<Synth::InstrumentEditorBank> source_storage = std::make_unique<Synth::InstrumentEditorBank>();
+    Synth::InstrumentEditorBank&                       source         = *source_storage;
+    const std::unique_ptr<Synth::InstrumentEditorBank> candidate_storage =
+        std::make_unique<Synth::InstrumentEditorBank>();
+    Synth::InstrumentEditorBank&                       candidate = *candidate_storage;
+    const std::unique_ptr<Synth::InstrumentEditorBank> refused_storage =
+        std::make_unique<Synth::InstrumentEditorBank>();
+    Synth::InstrumentEditorBank&                       refused = *refused_storage;
+    const std::unique_ptr<Synth::InstrumentEditorBank> refused_sentinel_storage =
+        std::make_unique<Synth::InstrumentEditorBank>();
+    Synth::InstrumentEditorBank&           refused_sentinel = *refused_sentinel_storage;
+    const std::unique_ptr<Sculptor::Graph> graph_storage    = std::make_unique<Sculptor::Graph>();
+    Sculptor::Graph&                       graph            = *graph_storage;
+    Sculptor::EffectGraphMapping           mapping          = {};
+    Sculptor::GraphChange                  discarded[Sculptor::max_pending_changes] = {};
     add_cc_chain_fixture(&source, 0);
     // The allocation: the next descriptor id with the family defaults,
     // plus the owner-scoped kind-4 record at the fx LFO lane.
@@ -6592,7 +6919,8 @@ static void fx_add_lfo_modeled_regressions()
     TEST(Sculptor::validate_editor_metadata(candidate));
     // The LFO pool full: the allocation refuses and the candidate stays
     // untouched (the consumer turns the refusal into the notification).
-    static Synth::InstrumentEditorBank full;
+    const std::unique_ptr<Synth::InstrumentEditorBank> full_storage = std::make_unique<Synth::InstrumentEditorBank>();
+    Synth::InstrumentEditorBank&                       full         = *full_storage;
     add_cc_chain_fixture(&full, 0);
     for (uint32_t i = 0; i < Synth::max_lfos; ++i) {
         TEST(Sculptor::allocate_default_lfo(&full.bank, &descriptor));
@@ -6728,7 +7056,9 @@ static void fx_swap_effect_audio_regressions()
     {
         // The chain payloads are exchanged to match the swapped routing;
         // the swapped bank passes topology validation.
-        static Synth::InstrumentEditorBank bank;
+        const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& bank = *bank_storage;
         memset(static_cast<void*>(&bank), 0, sizeof(bank));
         Synth::init_default_bank(&bank.bank);
         Synth::EffectChainBinding& chain = bank.bank.channel_chains[0];
@@ -6752,7 +7082,9 @@ static void fx_swap_effect_audio_regressions()
         // Bypassed middle slot: input->slot0->slot2 with slot1 absent.
         // After swapping slots 0 and 1 the path is input->slot1->slot2 with
         // slot0 bypassed, and validation still passes.
-        static Synth::InstrumentEditorBank bank;
+        const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& bank = *bank_storage;
         memset(static_cast<void*>(&bank), 0, sizeof(bank));
         Synth::init_default_bank(&bank.bank);
         Synth::EffectChainBinding& chain = bank.bank.channel_chains[0];
@@ -6777,7 +7109,7 @@ static void fx_swap_effect_audio_regressions()
         Sculptor::EffectAudioTopology audio = {};
         Sculptor::fx_swap_effect_audio(&audio, 0, 1);
         TEST(audio.explicit_edges == 0);
-        static const uint8_t zero[Synth::max_chain_effects + 1] = {};
+        uint8_t zero[Synth::max_chain_effects + 1] = {};
         TEST(memcmp(audio.next, zero, sizeof(zero)) == 0);
     }
 }
@@ -6880,7 +7212,9 @@ static void fx_exchange_effect_slots_regressions()
         // Serial routing input->A(slot 0)->B(slot 2)->output, with the
         // dormant slot 1 bypassed; after the exchange the path is
         // input->A(slot 2)->B(slot 0)->output and validation passes.
-        static Synth::InstrumentEditorBank bank;
+        const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& bank = *bank_storage;
         memset(static_cast<void*>(&bank), 0, sizeof(bank));
         Synth::init_default_bank(&bank.bank);
         Synth::EffectChainBinding& bank_chain = bank.bank.channel_chains[0];
@@ -6904,10 +7238,12 @@ static void fx_exchange_effect_slots_regressions()
 // non-oscillator / non-effect node slots at child_row = false.
 static void child_row_projection_regressions()
 {
-    static Synth::InstrumentEditorBank source;
-    static Synth::Instrument           instrument = {};
-    static Sculptor::Graph             graph;
-    static Sculptor::OscGraphMapping   mapping;
+    const std::unique_ptr<Synth::InstrumentEditorBank> source_storage = std::make_unique<Synth::InstrumentEditorBank>();
+    Synth::InstrumentEditorBank&                       source         = *source_storage;
+    Synth::Instrument                                  instrument     = {};
+    const std::unique_ptr<Sculptor::Graph>             graph_storage  = std::make_unique<Sculptor::Graph>();
+    Sculptor::Graph&                                   graph          = *graph_storage;
+    Sculptor::OscGraphMapping                          mapping        = {};
     build_zone_fixture(&source, &instrument);
     TEST(Sculptor::project_editor_to_graph(source, &graph, &mapping));
 
@@ -6960,8 +7296,8 @@ static void child_row_projection_regressions()
         }
     }
 
-    static Sculptor::EffectGraphMapping fx_mapping;
-    Synth::EffectChainBinding&          chain = add_cc_chain_fixture(&source, 0);
+    Sculptor::EffectGraphMapping fx_mapping = {};
+    Synth::EffectChainBinding&   chain      = add_cc_chain_fixture(&source, 0);
     Sculptor::fx_init_slot(&chain, 0, Synth::EffectType::compressor);
     chain.effects[0].enabled = true;
     TEST(Sculptor::project_effect_chain_to_graph(source, 0, &graph, &fx_mapping));
@@ -6995,8 +7331,9 @@ static void child_row_projection_regressions()
 // inherited layer.
 static void osc_inherit_source_regressions()
 {
-    static Synth::InstrumentEditorBank source;
-    static Synth::Instrument           instrument = {};
+    const std::unique_ptr<Synth::InstrumentEditorBank> source_storage = std::make_unique<Synth::InstrumentEditorBank>();
+    Synth::InstrumentEditorBank&                       source         = *source_storage;
+    Synth::Instrument                                  instrument     = {};
     build_zone_fixture(&source, &instrument);
     TEST(instrument.layer_count == 1);
     // The only layer is enabled, so it is the inheritance source.
@@ -7028,8 +7365,9 @@ static void osc_inherit_source_regressions()
     entry.layers[3]                   = inherited;
     entry.layer_count                 = 4;
     TEST(Synth::validate_instrument_bank(&source.bank));
-    static Sculptor::Graph           graph;
-    static Sculptor::OscGraphMapping mapping;
+    const std::unique_ptr<Sculptor::Graph> graph_storage = std::make_unique<Sculptor::Graph>();
+    Sculptor::Graph&                       graph         = *graph_storage;
+    Sculptor::OscGraphMapping              mapping       = {};
     TEST(Sculptor::project_editor_to_graph(source, &graph, &mapping));
     TEST(mapping.osc_nodes[3] != Sculptor::pool_no_slot);
     TEST(memcmp(&entry.layers[3], &inherited, sizeof(Synth::Oscillator)) == 0);
@@ -7215,7 +7553,7 @@ static bool begin_small_graph(Synth::InstrumentEditorBank* bank,
                               Sculptor::Graph*             graph,
                               Sculptor::OscGraphMapping*   mapping)
 {
-    static Synth::Instrument instrument;
+    Synth::Instrument instrument = {};
     build_zone_fixture(bank, &instrument);
     if (! Sculptor::project_editor_to_graph(*bank, graph, mapping)) {
         return false;
@@ -7227,18 +7565,20 @@ static bool begin_small_graph(Synth::InstrumentEditorBank* bank,
 
 static void osc_direct_modulator_regressions()
 {
-    static Sculptor::GraphChange discarded[Sculptor::max_pending_changes];
+    Sculptor::GraphChange discarded[Sculptor::max_pending_changes] = {};
 
     // T-M7-1 (O4/O9): the per-target block grammar on one oscillator with
     // all twelve targets fully bound; every family row carries its seeded
     // binding values, and the waveform/mode guard keeps working on the
     // widened node.
     {
-        static Synth::InstrumentBank bank;
-        static Synth::Instrument     instrument;
+        const std::unique_ptr<Synth::InstrumentBank> bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       bank         = *bank_storage;
+        Synth::Instrument                            instrument   = {};
         build_full_block_fixture(&bank, &instrument);
-        static Sculptor::Graph           graph;
-        static Sculptor::OscGraphMapping mapping;
+        const std::unique_ptr<Sculptor::Graph> graph_storage = std::make_unique<Sculptor::Graph>();
+        Sculptor::Graph&                       graph         = *graph_storage;
+        Sculptor::OscGraphMapping              mapping       = {};
         TEST(Sculptor::project_instrument_to_graph(instrument, bank, &graph, &mapping));
         check_no_param_nodes(graph);
         TEST(mapping.osc_nodes[0] != Sculptor::pool_no_slot);
@@ -7292,8 +7632,12 @@ static void osc_direct_modulator_regressions()
     // bindings carry the connected generators; re-projection reproduces the
     // family wiring; the relocation is eventless (second drain empty).
     {
-        static Synth::InstrumentEditorBank source;
-        static Synth::InstrumentEditorBank candidate;
+        const std::unique_ptr<Synth::InstrumentEditorBank> source_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank&                       source = *source_storage;
+        const std::unique_ptr<Synth::InstrumentEditorBank> candidate_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& candidate = *candidate_storage;
         if (begin_small_graph(&source, &t7_graph, &t7_mapping)) {
             // A CC dot for the fourth family.
             source.added_cc_mask[0] = 1u << 0;
@@ -7363,7 +7707,7 @@ static void osc_direct_modulator_regressions()
 
                 // The compiled bindings carry the connected generators and
                 // the seeded neutral row values.
-                static Synth::Instrument compiled;
+                Synth::Instrument compiled = {};
                 TEST(Sculptor::compile_graph_to_instrument(t7_graph, t7_mapping, &compiled));
                 TEST(compiled.layers[0].targets[Synth::mod_fir_spread].envelope_desc_id == 1);
                 // The first envelope wire seeded the legacy unscaled amount.
@@ -7422,8 +7766,12 @@ static void osc_direct_modulator_regressions()
     // never hides, and deleting the wire hides the row again with the
     // compiled binding zeroed.
     {
-        static Synth::InstrumentEditorBank source;
-        static Synth::InstrumentEditorBank candidate;
+        const std::unique_ptr<Synth::InstrumentEditorBank> source_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank&                       source = *source_storage;
+        const std::unique_ptr<Synth::InstrumentEditorBank> candidate_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& candidate = *candidate_storage;
         if (begin_small_graph(&source, &t7_graph, &t7_mapping)) {
             // Bind the FIR spread LFO so the projection wires the block's LFO
             // dot.
@@ -7497,7 +7845,7 @@ static void osc_direct_modulator_regressions()
                         TEST(count == 1);
                         candidate = source;
                         TEST(Sculptor::apply_osc_graph_change(&candidate, &t7_graph, &t7_mapping, changes[0]));
-                        static Synth::Instrument compiled;
+                        Synth::Instrument compiled = {};
                         TEST(Sculptor::compile_graph_to_instrument(t7_graph, t7_mapping, &compiled));
                         TEST(compiled.layers[0].targets[Synth::mod_fir_spread].lfo_desc_id == 0);
                         TEST(approx(compiled.layers[0].targets[Synth::mod_fir_spread].lfo_depth, 0.0f, 1.0e-6f));
@@ -7521,11 +7869,12 @@ static void osc_direct_modulator_regressions()
 
     // T-M7-4 (O1): zero parameter nodes across every fixture shape.
     {
-        static Synth::InstrumentBank bank;
-        static Synth::Instrument     instrument;
-        uint16_t                     shared_env_id = 0;
-        uint16_t                     lfo_id        = 0;
-        uint16_t                     volume_env_id = 0;
+        const std::unique_ptr<Synth::InstrumentBank> bank_storage  = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       bank          = *bank_storage;
+        Synth::Instrument                            instrument    = {};
+        uint16_t                                     shared_env_id = 0;
+        uint16_t                                     lfo_id        = 0;
+        uint16_t                                     volume_env_id = 0;
         build_osc_graph_small_fixture(&bank, &instrument, &shared_env_id, &lfo_id, &volume_env_id);
         TEST(Sculptor::project_instrument_to_graph(instrument, bank, &t7_graph, &t7_mapping));
         check_no_param_nodes(t7_graph);
@@ -7534,13 +7883,17 @@ static void osc_direct_modulator_regressions()
         TEST(Sculptor::project_instrument_to_graph(instrument, bank, &t7_graph, &t7_mapping));
         check_no_param_nodes(t7_graph);
 
-        static Synth::InstrumentEditorBank editor_bank;
+        const std::unique_ptr<Synth::InstrumentEditorBank> editor_bank_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& editor_bank = *editor_bank_storage;
         if (begin_small_graph(&editor_bank, &t7_graph, &t7_mapping)) {
             check_no_param_nodes(t7_graph);
         }
 
-        static Synth::InstrumentEditorBank binding_bank;
-        static Synth::Instrument           binding_instrument;
+        const std::unique_ptr<Synth::InstrumentEditorBank> binding_bank_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& binding_bank       = *binding_bank_storage;
+        Synth::Instrument            binding_instrument = {};
         build_binding_fixture(&binding_bank, &binding_instrument);
         TEST(Sculptor::project_editor_to_graph(binding_bank, &t7_graph, &t7_mapping));
         (void)t7_graph.take_changes(discarded, Sculptor::max_pending_changes);
@@ -7558,12 +7911,14 @@ static void osc_direct_modulator_regressions()
     // whose cells carry per-layer binding tuples, and an envelope alias
     // shared across cells and layers.
     {
-        static Synth::InstrumentBank bank;
-        static Synth::Instrument     instrument;
-        static Synth::InstrumentBank bank_image;
-        static Synth::Instrument     compiled;
-        uint16_t                     env_ids[Synth::max_layers][Synth::num_mod_targets];
-        uint16_t                     lfo_ids[Synth::max_layers][Synth::num_mod_targets];
+        const std::unique_ptr<Synth::InstrumentBank> bank_storage       = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       bank               = *bank_storage;
+        Synth::Instrument                            instrument         = {};
+        const std::unique_ptr<Synth::InstrumentBank> bank_image_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       bank_image         = *bank_image_storage;
+        Synth::Instrument                            compiled           = {};
+        uint16_t                                     env_ids[Synth::max_layers][Synth::num_mod_targets];
+        uint16_t                                     lfo_ids[Synth::max_layers][Synth::num_mod_targets];
         build_osc_graph_max_fixture(&bank, &instrument, env_ids, lfo_ids);
         bank_image = bank;
         TEST(Sculptor::project_instrument_to_graph(instrument, bank, &t7_graph, &t7_mapping));
@@ -7654,8 +8009,9 @@ static void osc_direct_modulator_regressions()
     // sources at once, each on its own row, and the compiled binding
     // carries all four.
     {
-        static Synth::InstrumentBank bank;
-        static Synth::Instrument     instrument;
+        const std::unique_ptr<Synth::InstrumentBank> bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       bank         = *bank_storage;
+        Synth::Instrument                            instrument   = {};
         build_full_block_fixture(&bank, &instrument);
         TEST(Sculptor::project_instrument_to_graph(instrument, bank, &t7_graph, &t7_mapping));
         check_no_param_nodes(t7_graph);
@@ -7687,7 +8043,7 @@ static void osc_direct_modulator_regressions()
                     TEST(t7_graph.get_connection(src1_wire).output.slot_idx ==
                          t7_mapping.input_source_slots[static_cast<uint32_t>(Synth::ModSource::mod_wheel) - 1]);
                 }
-                static Synth::Instrument compiled;
+                Synth::Instrument compiled = {};
                 TEST(Sculptor::compile_graph_to_instrument(t7_graph, t7_mapping, &compiled));
                 const Synth::TargetBinding& gen = compiled.layers[0].targets[Synth::mod_volume];
                 TEST(gen.envelope_desc_id == 1 && gen.lfo_desc_id == 1);
@@ -7712,10 +8068,16 @@ static void osc_direct_modulator_regressions()
     // connection types (envelope, LFO, standard MIDI and CC) and a
     // family-field edit.
     {
-        static Synth::InstrumentEditorBank source;
-        static Synth::InstrumentEditorBank candidate;
-        static Synth::InstrumentEditorBank wired;
-        static Synth::Instrument           compiled;
+        const std::unique_ptr<Synth::InstrumentEditorBank> source_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank&                       source = *source_storage;
+        const std::unique_ptr<Synth::InstrumentEditorBank> candidate_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank&                       candidate = *candidate_storage;
+        const std::unique_ptr<Synth::InstrumentEditorBank> wired_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& wired    = *wired_storage;
+        Synth::Instrument            compiled = {};
         if (begin_small_graph(&source, &t7_graph, &t7_mapping)) {
             // One assignable CC dot so the MIDI and CC wires ride the
             // same undo/redo snapshots (I5).
@@ -7753,7 +8115,10 @@ static void osc_direct_modulator_regressions()
 
                 // Whole-bank undo: the pre-wire bank restores bit-identically
                 // and re-projects with no family wiring.
-                static uint8_t     undo_storage[sizeof(Synth::InstrumentEditorBank) * 4 + 256];
+                const std::unique_ptr<FixedArray<uint8_t, sizeof(Synth::InstrumentEditorBank) * 4 + 256>>
+                    undo_storage_storage =
+                        std::make_unique<FixedArray<uint8_t, sizeof(Synth::InstrumentEditorBank) * 4 + 256>>();
+                uint8_t (&undo_storage)[sizeof(Synth::InstrumentEditorBank) * 4 + 256] = undo_storage_storage->elements;
                 Sculptor::UndoRedo undo;
                 undo.init(undo_storage);
                 undo.init_undo_push();
@@ -7826,8 +8191,12 @@ static void osc_direct_modulator_regressions()
     // refused, and every projected instance sharing the descriptor stays
     // in step (wave value, duty value, and Duty editability).
     {
-        static Synth::InstrumentEditorBank source;
-        static Synth::InstrumentEditorBank candidate;
+        const std::unique_ptr<Synth::InstrumentEditorBank> source_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank&                       source = *source_storage;
+        const std::unique_ptr<Synth::InstrumentEditorBank> candidate_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& candidate = *candidate_storage;
         if (begin_small_graph(&source, &t7_graph, &t7_mapping)) {
             candidate = source;
 
@@ -7917,8 +8286,12 @@ static void osc_direct_modulator_regressions()
     // input-end target moves, the base-row delete refusal, the per-cell
     // source order and the stray-connection compile refusal.
     {
-        static Synth::InstrumentEditorBank source;
-        static Synth::InstrumentEditorBank candidate;
+        const std::unique_ptr<Synth::InstrumentEditorBank> source_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank&                       source = *source_storage;
+        const std::unique_ptr<Synth::InstrumentEditorBank> candidate_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& candidate = *candidate_storage;
         if (begin_small_graph(&source, &t7_graph, &t7_mapping)) {
             Synth::Instrument& instr = source.bank.instruments.entries[0];
             // Bindings that pre-wire the dots the capacity refusals need:
@@ -8156,7 +8529,7 @@ static void osc_direct_modulator_regressions()
                 // still ending on a base target row is an invariant
                 // violation.
                 TEST(t7_graph.add_connection(velocity_out, spread_row) != Sculptor::pool_no_slot);
-                static Synth::Instrument compiled;
+                Synth::Instrument compiled = {};
                 TEST(! Sculptor::compile_graph_to_instrument(t7_graph, t7_mapping, &compiled));
             }
             t7_graph.set_validator(nullptr, nullptr);
@@ -8167,10 +8540,11 @@ static void osc_direct_modulator_regressions()
     // envelope + 28 LFO instances) and gains the per-target block grammar
     // on every layer; the parameter counts leave the mapping checks.
     {
-        static Synth::InstrumentBank bank;
-        static Synth::Instrument     instrument;
-        uint16_t                     env_ids[Synth::max_layers][Synth::num_mod_targets];
-        uint16_t                     lfo_ids[Synth::max_layers][Synth::num_mod_targets];
+        const std::unique_ptr<Synth::InstrumentBank> bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       bank         = *bank_storage;
+        Synth::Instrument                            instrument   = {};
+        uint16_t                                     env_ids[Synth::max_layers][Synth::num_mod_targets];
+        uint16_t                                     lfo_ids[Synth::max_layers][Synth::num_mod_targets];
         build_osc_graph_max_fixture(&bank, &instrument, env_ids, lfo_ids);
         TEST(Sculptor::project_instrument_to_graph(instrument, bank, &t7_graph, &t7_mapping));
         check_no_param_nodes(t7_graph);
@@ -8191,19 +8565,21 @@ static void osc_direct_modulator_regressions()
     // Compile refuses a corrupted mapping whose oscillator node run has a
     // gap: the projected layer run must stay contiguous.
     {
-        static Synth::InstrumentBank bank;
-        static Synth::Instrument     instrument;
-        uint16_t                     env_ids[Synth::max_layers][Synth::num_mod_targets];
-        uint16_t                     lfo_ids[Synth::max_layers][Synth::num_mod_targets];
+        const std::unique_ptr<Synth::InstrumentBank> bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       bank         = *bank_storage;
+        Synth::Instrument                            instrument   = {};
+        uint16_t                                     env_ids[Synth::max_layers][Synth::num_mod_targets];
+        uint16_t                                     lfo_ids[Synth::max_layers][Synth::num_mod_targets];
         build_osc_graph_max_fixture(&bank, &instrument, env_ids, lfo_ids);
-        static Sculptor::Graph           graph;
-        static Sculptor::OscGraphMapping mapping;
+        const std::unique_ptr<Sculptor::Graph> graph_storage = std::make_unique<Sculptor::Graph>();
+        Sculptor::Graph&                       graph         = *graph_storage;
+        Sculptor::OscGraphMapping              mapping       = {};
         TEST(Sculptor::project_instrument_to_graph(instrument, bank, &graph, &mapping));
         TEST(mapping.osc_nodes[0] != Sculptor::pool_no_slot);
         TEST(mapping.osc_nodes[Synth::max_layers - 1] != Sculptor::pool_no_slot);
-        const uint32_t saved = mapping.osc_nodes[3];
-        mapping.osc_nodes[3] = Sculptor::pool_no_slot;
-        static Synth::Instrument compiled;
+        const uint32_t saved       = mapping.osc_nodes[3];
+        mapping.osc_nodes[3]       = Sculptor::pool_no_slot;
+        Synth::Instrument compiled = {};
         TEST(! Sculptor::compile_graph_to_instrument(graph, mapping, &compiled));
         mapping.osc_nodes[3] = saved;
         TEST(Sculptor::compile_graph_to_instrument(graph, mapping, &compiled));
@@ -8215,8 +8591,9 @@ static void osc_direct_modulator_regressions()
     // than the detached-record cap - so the registry is sized for the node
     // pool, not for the record cap.
     {
-        static Synth::InstrumentBank bank;
-        static Synth::Instrument     instrument;
+        const std::unique_ptr<Synth::InstrumentBank> bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       bank         = *bank_storage;
+        Synth::Instrument                            instrument   = {};
         Synth::init_default_bank(&bank);
         instrument             = Synth::Instrument{};
         instrument.layer_count = Synth::max_layers;
@@ -8245,8 +8622,9 @@ static void osc_direct_modulator_regressions()
             instrument.layers[layer].targets[target].envelope_desc_id = static_cast<uint16_t>(env_slot + 1);
             instrument.layers[layer].targets[target].lfo_desc_id      = static_cast<uint16_t>(lfo_slot + 1);
         }
-        static Sculptor::Graph           graph;
-        static Sculptor::OscGraphMapping mapping;
+        const std::unique_ptr<Sculptor::Graph> graph_storage = std::make_unique<Sculptor::Graph>();
+        Sculptor::Graph&                       graph         = *graph_storage;
+        Sculptor::OscGraphMapping              mapping       = {};
         TEST(Sculptor::project_instrument_to_graph(instrument, bank, &graph, &mapping));
         TEST(mapping.detached_count == 2 * Synth::max_layers * Synth::num_mod_targets);
         check_no_param_nodes(graph);
@@ -8257,8 +8635,10 @@ static void osc_direct_modulator_regressions()
     // node pool but past any layer-count-sized registry.  Metadata
     // validation accepts the shape and the projection succeeds.
     {
-        static Synth::InstrumentEditorBank low_bank;
-        static Synth::Instrument           instrument;
+        const std::unique_ptr<Synth::InstrumentEditorBank> low_bank_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& low_bank   = *low_bank_storage;
+        Synth::Instrument            instrument = {};
         memset(static_cast<void*>(&low_bank), 0, sizeof(low_bank));
         instrument             = Synth::Instrument{};
         instrument.layer_count = 1;
@@ -8308,8 +8688,9 @@ static void osc_direct_modulator_regressions()
                                 static_cast<uint8_t>(i + 1));
         }
         TEST(Sculptor::validate_editor_metadata(low_bank));
-        static Sculptor::Graph           low_graph;
-        static Sculptor::OscGraphMapping low_mapping;
+        const std::unique_ptr<Sculptor::Graph> low_graph_storage = std::make_unique<Sculptor::Graph>();
+        Sculptor::Graph&                       low_graph         = *low_graph_storage;
+        Sculptor::OscGraphMapping              low_mapping       = {};
         TEST(Sculptor::project_editor_to_graph(low_bank, &low_graph, &low_mapping));
         TEST(low_mapping.detached_count == 2 * Synth::num_mod_targets + Synth::max_detached_per_zone);
         check_no_param_nodes(low_graph);
@@ -8318,7 +8699,9 @@ static void osc_direct_modulator_regressions()
     // C1 persistence: deleting a generator's last wire keeps the generator
     // projected with a layout record across re-projection.
     {
-        static Synth::InstrumentEditorBank source;
+        const std::unique_ptr<Synth::InstrumentEditorBank> source_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& source = *source_storage;
         if (begin_small_graph(&source, &t7_graph, &t7_mapping)) {
             TEST(source.graph_layout_count == 0); // record-less derived instances
             const int32_t lfo_inst = find_detached_by_desc(t7_mapping, 2, 1);
@@ -8361,8 +8744,10 @@ static void osc_direct_modulator_regressions()
     // C1 persistence: a free-standing LFO's depth/rate source records
     // follow the live edges across re-projection and undo/redo.
     {
-        static Synth::InstrumentEditorBank source;
-        static Synth::Instrument           instrument;
+        const std::unique_ptr<Synth::InstrumentEditorBank> source_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& source     = *source_storage;
+        Synth::Instrument            instrument = {};
         build_zone_fixture(&source, &instrument);
         const uint16_t free_lfo = add_detached_lfo_descriptor(&source);
         add_detached_record(&source,
@@ -8398,10 +8783,13 @@ static void osc_direct_modulator_regressions()
                                               velocity_out,
                                               { node, t7_mapping.lfo_rate_input_slot }));
             {
-                static Sculptor::Graph             cc_graph;
-                static Sculptor::OscGraphMapping   cc_mapping;
-                static Synth::InstrumentEditorBank cc_probe;
-                static Synth::Instrument           cc_instr = {};
+                const std::unique_ptr<Sculptor::Graph> cc_graph_storage = std::make_unique<Sculptor::Graph>();
+                Sculptor::Graph&                       cc_graph         = *cc_graph_storage;
+                Sculptor::OscGraphMapping              cc_mapping       = {};
+                const std::unique_ptr<Synth::InstrumentEditorBank> cc_probe_storage =
+                    std::make_unique<Synth::InstrumentEditorBank>();
+                Synth::InstrumentEditorBank& cc_probe = *cc_probe_storage;
+                Synth::Instrument            cc_instr = {};
                 build_zone_fixture(&cc_probe, &cc_instr);
                 cc_probe.added_cc_mask[0] = 1u << 0;
                 const uint16_t probe_lfo  = add_detached_lfo_descriptor(&cc_probe);
@@ -8439,7 +8827,10 @@ static void osc_direct_modulator_regressions()
             const uint32_t        count      = t7_graph.take_changes(changes, 8);
             TEST(count == 1);
             // Whole-bank undo around the rewire.
-            static uint8_t     undo_storage[sizeof(Synth::InstrumentEditorBank) * 4 + 256];
+            const std::unique_ptr<FixedArray<uint8_t, sizeof(Synth::InstrumentEditorBank) * 4 + 256>>
+                undo_storage_storage =
+                    std::make_unique<FixedArray<uint8_t, sizeof(Synth::InstrumentEditorBank) * 4 + 256>>();
+            uint8_t (&undo_storage)[sizeof(Synth::InstrumentEditorBank) * 4 + 256] = undo_storage_storage->elements;
             Sculptor::UndoRedo undo;
             undo.init(undo_storage);
             undo.init_undo_push();
@@ -8457,8 +8848,10 @@ static void osc_direct_modulator_regressions()
             if (record) {
                 TEST(record->depth_source == static_cast<uint8_t>(Synth::ModSource::velocity));
             }
-            static Synth::InstrumentEditorBank wired;
-            wired = source;
+            const std::unique_ptr<Synth::InstrumentEditorBank> wired_storage =
+                std::make_unique<Synth::InstrumentEditorBank>();
+            Synth::InstrumentEditorBank& wired = *wired_storage;
+            wired                              = source;
             undo.init_redo_push();
             undo.push(&wired, sizeof(wired));
             TEST(undo.finish_redo_push());
@@ -8554,17 +8947,20 @@ static uint32_t splice_single_occurrence(const char* payload,
 // registry tests use.
 static void osc_cc_regressions()
 {
-    static Sculptor::GraphChange discarded[Sculptor::max_pending_changes];
+    Sculptor::GraphChange discarded[Sculptor::max_pending_changes] = {};
 
     // T-M6-1: the editor CC mask projects one CC output dot per set bit
     // (labeled like the fx pane's pairs), the wired cell compiles the cc
     // input, and clearing the mask bit drops the dot so the re-projection
     // leaves the cell unwired and the compile drops the input.
     {
-        static Synth::InstrumentEditorBank source;
-        static Synth::Instrument           instrument = {};
-        static Sculptor::Graph             graph;
-        static Sculptor::OscGraphMapping   mapping;
+        const std::unique_ptr<Synth::InstrumentEditorBank> source_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank&           source        = *source_storage;
+        Synth::Instrument                      instrument    = {};
+        const std::unique_ptr<Sculptor::Graph> graph_storage = std::make_unique<Sculptor::Graph>();
+        Sculptor::Graph&                       graph         = *graph_storage;
+        Sculptor::OscGraphMapping              mapping       = {};
         build_zone_fixture(&source, &instrument);
         Synth::TargetBinding& routing = source.bank.instruments.entries[0].layers[0].targets[Synth::mod_volume];
         routing.num_inputs            = 1;
@@ -8604,7 +9000,7 @@ static void osc_cc_regressions()
         detune_change.slot_idx = mapping.instrument_slots[1];
         TEST(Sculptor::apply_osc_graph_change(&source, &graph, &mapping, detune_change));
         TEST(source.bank.instruments.entries[0].layer_skew_semitones == 0.9f);
-        static Synth::Instrument compiled;
+        Synth::Instrument compiled = {};
         TEST(Sculptor::compile_graph_to_instrument(graph, mapping, &compiled));
         TEST(compiled.layers[0].targets[Synth::mod_volume].num_inputs == 1);
         TEST(compiled.layers[0].targets[Synth::mod_volume].inputs[0].source == Synth::ModSource::cc);
@@ -8627,10 +9023,13 @@ static void osc_cc_regressions()
     // the bank keeps carrying it. This pins the
     // decode-never-synthesizes-registry-bits rule (T-M4-9 analogue).
     {
-        static Synth::InstrumentEditorBank source;
-        static Synth::Instrument           instrument = {};
-        static Sculptor::Graph             graph;
-        static Sculptor::OscGraphMapping   mapping;
+        const std::unique_ptr<Synth::InstrumentEditorBank> source_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank&           source        = *source_storage;
+        Synth::Instrument                      instrument    = {};
+        const std::unique_ptr<Sculptor::Graph> graph_storage = std::make_unique<Sculptor::Graph>();
+        Sculptor::Graph&                       graph         = *graph_storage;
+        Sculptor::OscGraphMapping              mapping       = {};
         build_zone_fixture(&source, &instrument);
         Synth::TargetBinding& legacy_routing = source.bank.instruments.entries[0].layers[0].targets[Synth::mod_volume];
         legacy_routing.num_inputs            = 1;
@@ -8647,7 +9046,7 @@ static void osc_cc_regressions()
                  Sculptor::pool_no_slot);
             TEST(find_osc_graph_connection(graph, { osc, Sculptor::osc_target_src_dot(Synth::mod_volume, 1) }) ==
                  Sculptor::pool_no_slot);
-            static Synth::Instrument compiled;
+            Synth::Instrument compiled = {};
             TEST(Sculptor::compile_graph_to_instrument(graph, mapping, &compiled));
             for (uint32_t layer = 0; layer < compiled.layer_count; ++layer) {
                 TEST(compiled.layers[layer].targets[Synth::mod_volume].num_inputs == 0);
@@ -8667,8 +9066,10 @@ static void osc_cc_regressions()
     // bindings) is pinned below: it fires for the zone osc wiring and for
     // the channel's own fx chain, not for master-chain wiring.
     {
-        static Synth::InstrumentEditorBank source;
-        static Synth::Instrument           instrument = {};
+        const std::unique_ptr<Synth::InstrumentEditorBank> source_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& source     = *source_storage;
+        Synth::Instrument            instrument = {};
         build_zone_fixture(&source, &instrument);
         Synth::TargetBinding& routing = source.bank.instruments.entries[0].layers[0].targets[Synth::mod_volume];
         routing.num_inputs            = 1;
@@ -8712,12 +9113,22 @@ static void osc_cc_regressions()
     // 16..31 and a non-cc input carrying a stale cc_number; a legacy bank
     // without osc cc decodes unchanged.
     {
-        static Synth::InstrumentEditorBank source;
-        static Synth::Instrument           instrument = {};
-        static Synth::InstrumentEditorBank decoded;
-        static char                        payload[Synth::library_payload_max];
-        static char                        reencoded[Synth::library_payload_max];
-        static char                        patched[Synth::library_payload_max];
+        const std::unique_ptr<Synth::InstrumentEditorBank> source_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank&                       source     = *source_storage;
+        Synth::Instrument                                  instrument = {};
+        const std::unique_ptr<Synth::InstrumentEditorBank> decoded_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank&                                        decoded = *decoded_storage;
+        const std::unique_ptr<FixedArray<char, Synth::library_payload_max>> payload_storage =
+            std::make_unique<FixedArray<char, Synth::library_payload_max>>();
+        char (&payload)[Synth::library_payload_max] = payload_storage->elements;
+        const std::unique_ptr<FixedArray<char, Synth::library_payload_max>> reencoded_storage =
+            std::make_unique<FixedArray<char, Synth::library_payload_max>>();
+        char (&reencoded)[Synth::library_payload_max] = reencoded_storage->elements;
+        const std::unique_ptr<FixedArray<char, Synth::library_payload_max>> patched_storage =
+            std::make_unique<FixedArray<char, Synth::library_payload_max>>();
+        char (&patched)[Synth::library_payload_max] = patched_storage->elements;
         build_zone_fixture(&source, &instrument);
         Synth::TargetBinding& routing = source.bank.instruments.entries[0].layers[0].targets[Synth::mod_volume];
         routing.num_inputs            = 1;
@@ -8806,7 +9217,8 @@ static void osc_cc_regressions()
     // production-shape replica of their cc case, built only from exported
     // primitives and constants and mirroring realtime_synth.cpp:1039-1171.
     {
-        static Synth::InstrumentBank runtime_bank;
+        const std::unique_ptr<Synth::InstrumentBank> runtime_bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       runtime_bank         = *runtime_bank_storage;
         memset(static_cast<void*>(&runtime_bank), 0, sizeof(runtime_bank));
         const uint32_t instr_slot = runtime_bank.instruments.allocate();
         TEST(instr_slot == 0);
@@ -8828,13 +9240,13 @@ static void osc_cc_regressions()
             // Leaf ids mirror the runtime layout: the sentinel occupies id 0
             // and the channel CC leaves start at 1, one per assignable slot
             // (channel_param(channel, chan_param_cc_0 + slot)).
-            constexpr uint32_t            cc_leaf_base          = 1;
-            constexpr uint32_t            replica_count         = cc_leaf_base + Synth::num_assignable_ccs + 1;
-            static Synth::ParamDescriptor descs[replica_count]  = {};
-            static Synth::Parameter       params[replica_count] = {};
+            constexpr uint32_t     cc_leaf_base          = 1;
+            constexpr uint32_t     replica_count         = cc_leaf_base + Synth::num_assignable_ccs + 1;
+            Synth::ParamDescriptor descs[replica_count]  = {};
+            Synth::Parameter       params[replica_count] = {};
             memset(static_cast<void*>(descs), 0, sizeof(descs));
             memset(static_cast<void*>(params), 0, sizeof(params));
-            static Synth::ChannelCcState cc_state;
+            Synth::ChannelCcState cc_state = {};
             memset(static_cast<void*>(&cc_state), 0, sizeof(cc_state));
             const Synth::TargetBinding& volume_binding =
                 runtime_bank.instruments.entries[instr_slot].layers[0].targets[Synth::mod_volume];
@@ -8883,11 +9295,19 @@ static void osc_cc_regressions()
     // T-M6-9: a target LFO cc source fails decode - LFO depth/rate sources
     // carry no cc_number, so bank validation refuses cc there.
     {
-        static Synth::InstrumentEditorBank source;
-        static Synth::Instrument           instrument = {};
-        static Synth::InstrumentEditorBank decoded;
-        static char                        payload[Synth::library_payload_max];
-        static char                        patched[Synth::library_payload_max];
+        const std::unique_ptr<Synth::InstrumentEditorBank> source_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank&                       source     = *source_storage;
+        Synth::Instrument                                  instrument = {};
+        const std::unique_ptr<Synth::InstrumentEditorBank> decoded_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank&                                        decoded = *decoded_storage;
+        const std::unique_ptr<FixedArray<char, Synth::library_payload_max>> payload_storage =
+            std::make_unique<FixedArray<char, Synth::library_payload_max>>();
+        char (&payload)[Synth::library_payload_max] = payload_storage->elements;
+        const std::unique_ptr<FixedArray<char, Synth::library_payload_max>> patched_storage =
+            std::make_unique<FixedArray<char, Synth::library_payload_max>>();
+        char (&patched)[Synth::library_payload_max] = patched_storage->elements;
         build_zone_fixture(&source, &instrument);
         source.bank.instruments.entries[0].layers[0].targets[Synth::mod_volume].lfo_depth_source =
             Synth::ModSource::velocity;
@@ -9002,11 +9422,13 @@ static void osc_fir_slope_projection_regressions()
     // Three-layer fixture: layer 0 band-pass with a spread base, a routed
     // slope base and a detached envelope; layer 1 filter-off with the scalar
     // slope; layer 2 band-pass with a routed slope input.
-    static Synth::InstrumentBank     model_bank;
-    static Synth::Instrument         instrument;
-    static Sculptor::Graph           graph;
-    static Sculptor::OscGraphMapping mapping;
-    static Sculptor::GraphChange     discarded[Sculptor::max_pending_changes];
+    const std::unique_ptr<Synth::InstrumentBank> model_bank_storage = std::make_unique<Synth::InstrumentBank>();
+    Synth::InstrumentBank&                       model_bank         = *model_bank_storage;
+    Synth::Instrument                            instrument         = {};
+    const std::unique_ptr<Sculptor::Graph>       graph_storage      = std::make_unique<Sculptor::Graph>();
+    Sculptor::Graph&                             graph              = *graph_storage;
+    Sculptor::OscGraphMapping                    mapping            = {};
+    Sculptor::GraphChange                        discarded[Sculptor::max_pending_changes] = {};
     memset(static_cast<void*>(&model_bank), 0, sizeof(model_bank));
     instrument = {};
     TEST(model_bank.envelopes.allocate() == 0);
@@ -9121,7 +9543,7 @@ static void osc_fir_slope_projection_regressions()
                                                    Sculptor::osc_target_env_dot(Synth::mod_fir_slope) };
         TEST(Sculptor::osc_graph_validate(&mapping, graph, env_out, slope_env_dot));
         TEST(graph.add_connection(env_out, slope_env_dot) != Sculptor::pool_no_slot);
-        static Synth::Instrument compiled;
+        Synth::Instrument compiled = {};
         TEST(Sculptor::compile_graph_to_instrument(graph, mapping, &compiled));
         TEST(compiled.layers[0].targets[Synth::mod_fir_slope].envelope_desc_id == 1);
         TEST(compiled.layers[0].targets[Synth::mod_fir_slope].base_value == 64.0f);
@@ -9132,12 +9554,14 @@ static void osc_fir_slope_projection_regressions()
     // hit the exact node, instance and connection budgets (equality, so an
     // off-by-one in any budget assert fails here first).
     {
-        static Synth::InstrumentBank     max_bank;
-        static Synth::Instrument         max_instrument;
-        static uint16_t                  env_ids[Synth::max_layers][Synth::num_mod_targets];
-        static uint16_t                  lfo_ids[Synth::max_layers][Synth::num_mod_targets];
-        static Sculptor::Graph           max_graph;
-        static Sculptor::OscGraphMapping max_mapping;
+        const std::unique_ptr<Synth::InstrumentBank> max_bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       max_bank         = *max_bank_storage;
+        Synth::Instrument                            max_instrument   = {};
+        uint16_t                                     env_ids[Synth::max_layers][Synth::num_mod_targets] = {};
+        uint16_t                                     lfo_ids[Synth::max_layers][Synth::num_mod_targets] = {};
+        const std::unique_ptr<Sculptor::Graph>       max_graph_storage = std::make_unique<Sculptor::Graph>();
+        Sculptor::Graph&                             max_graph         = *max_graph_storage;
+        Sculptor::OscGraphMapping                    max_mapping       = {};
         build_fir_slope_max_fixture(&max_bank, &max_instrument, env_ids, lfo_ids);
         TEST(Sculptor::project_instrument_to_graph(max_instrument, max_bank, &max_graph, &max_mapping));
         check_osc_graph_mapping(max_graph,
@@ -9158,8 +9582,9 @@ static void osc_fir_slope_projection_regressions()
 // tests above.  Not proof of the runtime behavior itself.
 static void check_realtime_source_pins()
 {
-    static char src[256 * 1024];
-    FILE* const file = fopen("synth/realtime_synth.cpp", "rb");
+    const std::unique_ptr<FixedArray<char, 256 * 1024>> src_storage = std::make_unique<FixedArray<char, 256 * 1024>>();
+    char (&src)[256 * 1024]                                         = src_storage->elements;
+    FILE* const file                                                = fopen("synth/realtime_synth.cpp", "rb");
     TEST(file != nullptr);
     if (! file) {
         return;
@@ -9232,8 +9657,8 @@ static void check_osc_pitch_gating()
     // param_onset_value: read-only trigger-time evaluation of a configured
     // parameter node.
     {
-        static Synth::Parameter       params[8];
-        static Synth::ParamDescriptor descs[8];
+        Synth::Parameter       params[8] = {};
+        Synth::ParamDescriptor descs[8]  = {};
         memset(static_cast<void*>(params), 0, sizeof(params));
         memset(static_cast<void*>(descs), 0, sizeof(descs));
 
@@ -9325,8 +9750,8 @@ static void check_osc_pitch_gating()
                     1.0e-6f));
 
         // No mutation: a full snapshot before and after every call above.
-        static Synth::Parameter       params_snapshot[8];
-        static Synth::ParamDescriptor descs_snapshot[8];
+        Synth::Parameter       params_snapshot[8] = {};
+        Synth::ParamDescriptor descs_snapshot[8]  = {};
         memcpy(params_snapshot, params, sizeof(params));
         memcpy(descs_snapshot, descs, sizeof(descs));
         (void)Synth::param_onset_value(params, descs, 2);
@@ -9495,8 +9920,10 @@ static void check_osc_pitch_gating()
 
     // Runtime wiring source pins.
     {
-        static char src[256 * 1024];
-        FILE* const file = fopen("synth/realtime_synth.cpp", "rb");
+        const std::unique_ptr<FixedArray<char, 256 * 1024>> src_storage =
+            std::make_unique<FixedArray<char, 256 * 1024>>();
+        char (&src)[256 * 1024] = src_storage->elements;
+        FILE* const file        = fopen("synth/realtime_synth.cpp", "rb");
         TEST(file != nullptr);
         if (! file) {
             return;
@@ -9705,8 +10132,10 @@ static void check_osc_pitch_gating()
             // pure lowpass, so the coefficient shader's highpass stage must key
             // on the positive-edge test.
             {
-                static char shader_src[64 * 1024];
-                FILE* const shader_file = fopen("synth/synth_fir_coeff.comp.glsl", "rb");
+                const std::unique_ptr<FixedArray<char, 64 * 1024>> shader_src_storage =
+                    std::make_unique<FixedArray<char, 64 * 1024>>();
+                char (&shader_src)[64 * 1024] = shader_src_storage->elements;
+                FILE* const shader_file       = fopen("synth/synth_fir_coeff.comp.glsl", "rb");
                 TEST(shader_file != nullptr);
                 if (shader_file) {
                     const size_t shader_got = fread(shader_src, 1, sizeof(shader_src) - 1, shader_file);
@@ -9725,11 +10154,14 @@ static void check_osc_pitch_gating()
     // bounded integer slider, and the compile path validates the octave
     // before narrowing.
     {
-        static Synth::InstrumentEditorBank source;
-        static Synth::Instrument           instrument = {};
-        static Sculptor::Graph             graph;
-        static Sculptor::OscGraphMapping   mapping;
-        static Sculptor::GraphChange       discarded[Sculptor::max_pending_changes];
+        const std::unique_ptr<Synth::InstrumentEditorBank> source_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank&           source        = *source_storage;
+        Synth::Instrument                      instrument    = {};
+        const std::unique_ptr<Sculptor::Graph> graph_storage = std::make_unique<Sculptor::Graph>();
+        Sculptor::Graph&                       graph         = *graph_storage;
+        Sculptor::OscGraphMapping              mapping       = {};
+        Sculptor::GraphChange                  discarded[Sculptor::max_pending_changes] = {};
 
         build_zone_fixture(&source, &instrument);
         TEST(Sculptor::project_editor_to_graph(source, &graph, &mapping));
@@ -9770,15 +10202,18 @@ static void check_osc_pitch_gating()
         TEST(Sculptor::apply_osc_graph_change(&source, &graph, &mapping, octave_change));
         TEST(source.bank.instruments.entries[0].layers[0].octave_offset == -3);
 
-        static Synth::InstrumentEditorBank reprojected_source = source;
-        static Sculptor::Graph             reprojected_graph;
-        static Sculptor::OscGraphMapping   reprojected_mapping;
+        const std::unique_ptr<Synth::InstrumentEditorBank> reprojected_source_storage =
+            std::make_unique<Synth::InstrumentEditorBank>(source);
+        Synth::InstrumentEditorBank&           reprojected_source        = *reprojected_source_storage;
+        const std::unique_ptr<Sculptor::Graph> reprojected_graph_storage = std::make_unique<Sculptor::Graph>();
+        Sculptor::Graph&                       reprojected_graph         = *reprojected_graph_storage;
+        Sculptor::OscGraphMapping              reprojected_mapping       = {};
         TEST(Sculptor::project_editor_to_graph(reprojected_source, &reprojected_graph, &reprojected_mapping));
         TEST(find_graph_slot(reprojected_graph, reprojected_mapping.osc_nodes[0], "Octave Offset", &octave_slot));
         TEST(reprojected_graph.node(reprojected_mapping.osc_nodes[0]).slots.entries[octave_slot].value.integer == -3);
 
         // Endpoint values compile; an out-of-range edit refuses the projection.
-        static Synth::Instrument compiled;
+        Synth::Instrument compiled = {};
         TEST(Sculptor::compile_graph_to_instrument(graph, mapping, &compiled));
         TEST(compiled.layers[0].octave_offset == -3);
         // Round-trip: a pitch edit applies into the pitch target's base
@@ -9814,11 +10249,14 @@ static void check_osc_pitch_gating()
     // from the bank field, round-tripping through the value_changed apply
     // path, and refusing out-of-range compile reads.
     {
-        static Synth::InstrumentEditorBank source;
-        static Synth::Instrument           instrument = {};
-        static Sculptor::Graph             graph;
-        static Sculptor::OscGraphMapping   mapping;
-        static Sculptor::GraphChange       discarded[Sculptor::max_pending_changes];
+        const std::unique_ptr<Synth::InstrumentEditorBank> source_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank&           source        = *source_storage;
+        Synth::Instrument                      instrument    = {};
+        const std::unique_ptr<Sculptor::Graph> graph_storage = std::make_unique<Sculptor::Graph>();
+        Sculptor::Graph&                       graph         = *graph_storage;
+        Sculptor::OscGraphMapping              mapping       = {};
+        Sculptor::GraphChange                  discarded[Sculptor::max_pending_changes] = {};
         build_zone_fixture(&source, &instrument);
         source.bank.instruments.entries[0].layers[0].fir_slope_percent = 37;
         TEST(Sculptor::project_editor_to_graph(source, &graph, &mapping));
@@ -9841,7 +10279,7 @@ static void check_osc_pitch_gating()
         slope_change.slot_idx              = slope_slot;
         TEST(Sculptor::apply_osc_graph_change(&source, &graph, &mapping, slope_change));
         TEST(source.bank.instruments.entries[0].layers[0].fir_slope_percent == 64);
-        static Synth::Instrument compiled;
+        Synth::Instrument compiled = {};
         TEST(Sculptor::compile_graph_to_instrument(graph, mapping, &compiled));
         TEST(compiled.layers[0].fir_slope_percent == 64);
         // A stale slot value outside 1..100 refuses the apply and the
@@ -9859,11 +10297,14 @@ static void check_osc_pitch_gating()
     // A type switch from low-pass to band-pass caps the carried cutoff at
     // the spread maximum, so the shared value never escapes the new range.
     {
-        static Synth::InstrumentEditorBank source;
-        static Synth::Instrument           instrument = {};
-        static Sculptor::Graph             graph;
-        static Sculptor::OscGraphMapping   mapping;
-        static Sculptor::GraphChange       discarded[Sculptor::max_pending_changes];
+        const std::unique_ptr<Synth::InstrumentEditorBank> source_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank&           source        = *source_storage;
+        Synth::Instrument                      instrument    = {};
+        const std::unique_ptr<Sculptor::Graph> graph_storage = std::make_unique<Sculptor::Graph>();
+        Sculptor::Graph&                       graph         = *graph_storage;
+        Sculptor::OscGraphMapping              mapping       = {};
+        Sculptor::GraphChange                  discarded[Sculptor::max_pending_changes] = {};
         build_zone_fixture(&source, &instrument);
         source.bank.instruments.entries[0].layers[0].fir_type                                  = Synth::fir_lowpass;
         source.bank.instruments.entries[0].layers[0].targets[Synth::mod_fir_spread].base_value = 440.0f;
@@ -9881,8 +10322,9 @@ static void check_osc_pitch_gating()
         type_change.slot_idx              = type_slot;
         TEST(Sculptor::apply_osc_graph_change(&source, &graph, &mapping, type_change));
         TEST(source.bank.instruments.entries[0].layers[0].targets[Synth::mod_fir_spread].base_value == 36.0f);
-        static Sculptor::Graph           regraph;
-        static Sculptor::OscGraphMapping remapping;
+        const std::unique_ptr<Sculptor::Graph> regraph_storage = std::make_unique<Sculptor::Graph>();
+        Sculptor::Graph&                       regraph         = *regraph_storage;
+        Sculptor::OscGraphMapping              remapping       = {};
         TEST(Sculptor::project_editor_to_graph(source, &regraph, &remapping));
         const uint32_t spread_row = Sculptor::osc_target_row(Synth::mod_fir_spread);
         TEST(regraph.node(remapping.osc_nodes[0]).slots.entries[spread_row].value.real == 36.0f);
@@ -9890,10 +10332,13 @@ static void check_osc_pitch_gating()
 
     // With the filter off, the cutoff row, its block and the slope gray out.
     {
-        static Synth::InstrumentEditorBank source;
-        static Synth::Instrument           instrument = {};
-        static Sculptor::Graph             graph;
-        static Sculptor::OscGraphMapping   mapping;
+        const std::unique_ptr<Synth::InstrumentEditorBank> source_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank&           source        = *source_storage;
+        Synth::Instrument                      instrument    = {};
+        const std::unique_ptr<Sculptor::Graph> graph_storage = std::make_unique<Sculptor::Graph>();
+        Sculptor::Graph&                       graph         = *graph_storage;
+        Sculptor::OscGraphMapping              mapping       = {};
         build_zone_fixture(&source, &instrument);
         source.bank.instruments.entries[0].layers[0].fir_type = Synth::fir_off;
         TEST(Sculptor::project_editor_to_graph(source, &graph, &mapping));
@@ -9906,9 +10351,10 @@ static void check_osc_pitch_gating()
         TEST(Sculptor::oscillator_slot_waveform_mode_disabled(node, fir_slope_row));
         TEST(! Sculptor::oscillator_slot_waveform_mode_disabled(node, fir_type_row));
         TEST(! Sculptor::oscillator_slot_waveform_mode_disabled(node, Sculptor::osc_target_row(Synth::mod_volume)));
-        source.bank.instruments.entries[0].layers[0].fir_type = Synth::fir_bandpass;
-        static Sculptor::Graph           bandpass_graph;
-        static Sculptor::OscGraphMapping bandpass_mapping;
+        source.bank.instruments.entries[0].layers[0].fir_type         = Synth::fir_bandpass;
+        const std::unique_ptr<Sculptor::Graph> bandpass_graph_storage = std::make_unique<Sculptor::Graph>();
+        Sculptor::Graph&                       bandpass_graph         = *bandpass_graph_storage;
+        Sculptor::OscGraphMapping              bandpass_mapping       = {};
         TEST(Sculptor::project_editor_to_graph(source, &bandpass_graph, &bandpass_mapping));
         const Sculptor::Node& bandpass_node = bandpass_graph.node(bandpass_mapping.osc_nodes[0]);
         TEST(! Sculptor::oscillator_slot_waveform_mode_disabled(bandpass_node,
@@ -9918,10 +10364,13 @@ static void check_osc_pitch_gating()
 
     // The cutoff row label follows the selected filter type.
     {
-        static Synth::InstrumentEditorBank source;
-        static Synth::Instrument           instrument = {};
-        static Sculptor::Graph             graph;
-        static Sculptor::OscGraphMapping   mapping;
+        const std::unique_ptr<Synth::InstrumentEditorBank> source_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank&           source        = *source_storage;
+        Synth::Instrument                      instrument    = {};
+        const std::unique_ptr<Sculptor::Graph> graph_storage = std::make_unique<Sculptor::Graph>();
+        Sculptor::Graph&                       graph         = *graph_storage;
+        Sculptor::OscGraphMapping              mapping       = {};
         build_zone_fixture(&source, &instrument);
         const uint32_t           spread                            = Sculptor::osc_target_row(Synth::mod_fir_spread);
         static const char* const expected[Synth::num_filter_types] = { "Filter Off",
@@ -9941,15 +10390,18 @@ static void check_osc_pitch_gating()
     // zero-cutoff "off" state, which stays reserved for the two cutoff
     // rows at their slider extremes.
     {
-        static Synth::InstrumentEditorBank authored;
+        const std::unique_ptr<Synth::InstrumentEditorBank> authored_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& authored = *authored_storage;
         Synth::init_default_bank(&authored.bank);
         enabled_effect(authored.bank, 0, 0, Synth::EffectType::fir);
         authored.bank.channel_chains[0].effects[0].bindings[0].base_value = 8000.0f;
         authored.bank.channel_chains[0].effects[0].bindings[1].base_value = 0.0f;
         authored.bank.channel_chains[0].effects[0].bindings[2].base_value = 37.0f;
         TEST(Synth::validate_instrument_bank(&authored.bank));
-        static Sculptor::Graph              graph;
-        static Sculptor::EffectGraphMapping mapping;
+        const std::unique_ptr<Sculptor::Graph> graph_storage = std::make_unique<Sculptor::Graph>();
+        Sculptor::Graph&                       graph         = *graph_storage;
+        Sculptor::EffectGraphMapping           mapping       = {};
         TEST(Sculptor::project_effect_chain_to_graph(authored, 0, &graph, &mapping));
         TEST(graph.node(mapping.effect_nodes[0]).slots.num_allocated == 3 + 3 * Sculptor::fx_param_stride);
         uint32_t lowpass_row   = Sculptor::pool_no_slot;
@@ -9970,13 +10422,15 @@ static void check_osc_pitch_gating()
         TEST(slope_row2.value.integer == 37);
         // The slope commit lands as an integer base; its slider extremes
         // are valid values, never the zero-cutoff off state.
-        Sculptor::GraphChange change                      = {};
-        change.kind                                       = Sculptor::ChangeKind::value_changed;
-        change.node_idx                                   = mapping.effect_nodes[0];
-        change.slot_idx                                   = slope_row_idx;
-        Sculptor::PropertyValue            value          = {};
-        static Synth::InstrumentEditorBank candidate      = authored;
-        const int32_t                      slope_values[] = { 55, 1, 100 };
+        Sculptor::GraphChange change                             = {};
+        change.kind                                              = Sculptor::ChangeKind::value_changed;
+        change.node_idx                                          = mapping.effect_nodes[0];
+        change.slot_idx                                          = slope_row_idx;
+        Sculptor::PropertyValue                            value = {};
+        const std::unique_ptr<Synth::InstrumentEditorBank> candidate_storage =
+            std::make_unique<Synth::InstrumentEditorBank>(authored);
+        Synth::InstrumentEditorBank& candidate      = *candidate_storage;
+        const int32_t                slope_values[] = { 55, 1, 100 };
         for (const int32_t slope : slope_values) {
             value.integer = slope;
             graph.set_slot_value(mapping.effect_nodes[0], slope_row_idx, value);
@@ -10056,11 +10510,11 @@ static void check_fir_slope_helpers()
     // reproduces the old fixed (num_taps - 1) spelling bit for bit, with
     // the same float association order.
     {
-        constexpr uint32_t taps   = Synth::num_fir_taps;
-        constexpr uint32_t center = taps / 2;
-        constexpr float    pi     = 3.141592653589793f;
-        static float       old_windows[taps];
-        static float       new_windows[taps];
+        constexpr uint32_t taps              = Synth::num_fir_taps;
+        constexpr uint32_t center            = taps / 2;
+        constexpr float    pi                = 3.141592653589793f;
+        float              old_windows[taps] = {};
+        float              new_windows[taps] = {};
         for (uint32_t tap = 0; tap < taps; tap++) {
             const float x         = static_cast<float>(tap) - static_cast<float>(center);
             old_windows[tap]      = 0.42f -
@@ -10081,14 +10535,14 @@ static void check_fir_slope_helpers()
     // the in-span window sum stays positive. The sum is only a window-sum sanity check; it says nothing about the
     // shader's normalization denominator.
     {
-        constexpr uint32_t taps      = Synth::num_fir_taps;
-        constexpr uint32_t center    = taps / 2;
-        constexpr uint32_t span      = 103;
-        constexpr float    pi        = 3.141592653589793f;
-        const float        half_span = static_cast<float>(span) * 0.5f - 0.5f;
-        const float        span_m1   = static_cast<float>(span - 1);
-        static float       windows[Synth::num_fir_taps];
-        float              window_sum = 0.0f;
+        constexpr uint32_t taps                         = Synth::num_fir_taps;
+        constexpr uint32_t center                       = taps / 2;
+        constexpr uint32_t span                         = 103;
+        constexpr float    pi                           = 3.141592653589793f;
+        const float        half_span                    = static_cast<float>(span) * 0.5f - 0.5f;
+        const float        span_m1                      = static_cast<float>(span - 1);
+        float              windows[Synth::num_fir_taps] = {};
+        float              window_sum                   = 0.0f;
         for (uint32_t tap = 0; tap < taps; tap++) {
             const float x       = static_cast<float>(tap) - static_cast<float>(center);
             const float wpos    = x + half_span;
@@ -10116,8 +10570,10 @@ static void check_fir_slope_helpers()
     // oscillator loop and the effect chain walk), the trigger copy, the
     // RunningOscillator field, and no editor-facing "FIR Slope" string.
     {
-        static char src[256 * 1024];
-        FILE* const file = fopen("synth/realtime_synth.cpp", "rb");
+        const std::unique_ptr<FixedArray<char, 256 * 1024>> src_storage =
+            std::make_unique<FixedArray<char, 256 * 1024>>();
+        char (&src)[256 * 1024] = src_storage->elements;
+        FILE* const file        = fopen("synth/realtime_synth.cpp", "rb");
         TEST(file != nullptr);
         if (! file) {
             return;
@@ -10545,10 +11001,11 @@ static uint32_t fir_test_quantize_cutoff(float value)
 // an independent double precision response evaluation.
 static void check_fir_bandpass_gain()
 {
-    constexpr uint32_t    taps   = Synth::num_fir_taps;
-    constexpr uint32_t    center = (taps - 1) / 2;
-    static FirCoeffMirror mirror;
-    static float          stored[Synth::num_fir_taps];
+    constexpr uint32_t                    taps                        = Synth::num_fir_taps;
+    constexpr uint32_t                    center                      = (taps - 1) / 2;
+    const std::unique_ptr<FirCoeffMirror> mirror_storage              = std::make_unique<FirCoeffMirror>();
+    FirCoeffMirror&                       mirror                      = *mirror_storage;
+    float                                 stored[Synth::num_fir_taps] = {};
 
     // Spot pairs from the measured host response table: the pre-change center
     // gains are pinned to show the regression fails on the old denominator,
@@ -10574,7 +11031,7 @@ static void check_fir_bandpass_gain()
         // Reduction shapes the production shader can actually consume: its
         // second stage runs only in subgroup 0, whose lanes load one partial
         // each, so the subgroup count must not exceed the subgroup size.
-        static const uint32_t shapes[][2] = { { 256, 32 }, { 256, 16 } };
+        uint32_t shapes[][2] = { { 256, 32 }, { 256, 16 } };
         for (const auto& shape : shapes) {
             TEST(shape[0] / shape[1] <= shape[1]);
             for (const auto& spot : spots) {
@@ -10607,7 +11064,7 @@ static void check_fir_bandpass_gain()
             uint32_t highpass_hz;
         } pairs[] = { { 880, 220 }, { 441, 440 }, { 22049, 22048 }, { 2, 1 }, { 466, 415 } };
 
-        static const float fractional_slopes[] = { 1.5f, 37.25f };
+        float fractional_slopes[] = { 1.5f, 37.25f };
         for (const auto& pair : pairs) {
             for (uint32_t slope = 1; slope <= 100; slope++) {
                 const uint32_t span = Synth::fir_effective_span(static_cast<float>(slope));
@@ -10635,7 +11092,7 @@ static void check_fir_bandpass_gain()
         TEST(highpass_edge == 0.0f);
         const uint32_t lowpass = fir_test_quantize_cutoff(lowpass_edge);
         TEST(lowpass > 0);
-        static const uint32_t spans[] = { 11, taps };
+        uint32_t spans[] = { 11, taps };
         for (const uint32_t span : spans) {
             fir_test_mirror(lowpass, 0, span, 256, 32, &mirror);
             const double dc = fir_test_stored_response(mirror, 0.0, stored);
@@ -10647,9 +11104,9 @@ static void check_fir_bandpass_gain()
     // and span helpers: unity at the band center for every valid band-pass
     // case; floor-killed pure lowpass cases classify into the DC check.
     {
-        static const float    pitches[] = { 0.0f, 36.0f, 69.0f, 96.0f, 127.0f };
-        static const float    spreads[] = { 1e-9f, 0.1f, 1.0f, 12.0f, 36.0f };
-        static const uint32_t mults[]   = { 1, 3 };
+        float    pitches[] = { 0.0f, 36.0f, 69.0f, 96.0f, 127.0f };
+        float    spreads[] = { 1e-9f, 0.1f, 1.0f, 12.0f, 36.0f };
+        uint32_t mults[]   = { 1, 3 };
         for (const float pitch : pitches) {
             for (const float spread : spreads) {
                 for (const uint32_t mult : mults) {
@@ -10691,7 +11148,7 @@ static void check_fir_bandpass_gain()
     // and band-stop cases fail the pinned band-pass predicate, so they stay on
     // the old paths by construction.
     {
-        static const uint32_t spans[] = { 11, taps };
+        uint32_t spans[] = { 11, taps };
         for (const uint32_t span : spans) {
             fir_test_mirror(880, 0, span, 256, 32, &mirror);
             const double dc = fir_test_stored_response(mirror, 0.0, stored);
@@ -10731,8 +11188,10 @@ static void check_fir_bandpass_gain()
     // normalizes band-pass coefficients by the old denominator.  The
     // quantizer mirror mirrors the exact production helper.
     {
-        static char shader_src[64 * 1024];
-        FILE* const shader_file = fopen("synth/synth_fir_coeff.comp.glsl", "rb");
+        const std::unique_ptr<FixedArray<char, 64 * 1024>> shader_src_storage =
+            std::make_unique<FixedArray<char, 64 * 1024>>();
+        char (&shader_src)[64 * 1024] = shader_src_storage->elements;
+        FILE* const shader_file       = fopen("synth/synth_fir_coeff.comp.glsl", "rb");
         TEST(shader_file != nullptr);
         if (shader_file) {
             const size_t shader_got = fread(shader_src, 1, sizeof(shader_src) - 1, shader_file);
@@ -10767,8 +11226,10 @@ static void check_fir_bandpass_gain()
             TEST(strstr(shader_src, "norm_sum[0] = coeff_sum;") != nullptr);
         }
 
-        static char runtime_src[256 * 1024];
-        FILE* const runtime_file = fopen("synth/realtime_synth.cpp", "rb");
+        const std::unique_ptr<FixedArray<char, 256 * 1024>> runtime_src_storage =
+            std::make_unique<FixedArray<char, 256 * 1024>>();
+        char (&runtime_src)[256 * 1024] = runtime_src_storage->elements;
+        FILE* const runtime_file        = fopen("synth/realtime_synth.cpp", "rb");
         TEST(runtime_file != nullptr);
         if (runtime_file) {
             const size_t runtime_got = fread(runtime_src, 1, sizeof(runtime_src) - 1, runtime_file);
@@ -10902,8 +11363,10 @@ static void check_fir_spread_helpers()
     // no removed cutoff spellings, so a future schema edit cannot
     // silently reintroduce them.
     {
-        static char schema_src[32 * 1024];
-        FILE* const schema_file = fopen("doc/synth_instrument_schema.json", "rb");
+        const std::unique_ptr<FixedArray<char, 32 * 1024>> schema_src_storage =
+            std::make_unique<FixedArray<char, 32 * 1024>>();
+        char (&schema_src)[32 * 1024] = schema_src_storage->elements;
+        FILE* const schema_file       = fopen("doc/synth_instrument_schema.json", "rb");
         TEST(schema_file != nullptr);
         if (schema_file) {
             const size_t schema_got = fread(schema_src, 1, sizeof(schema_src) - 1, schema_file);
@@ -10935,11 +11398,14 @@ static void osc_instrument_node_regressions()
     // with values seeded from the instrument fields; MIDI Inputs contains
     // only source-output slots.
     {
-        static Synth::InstrumentEditorBank source;
-        static Synth::Instrument           instrument = {};
-        static Sculptor::Graph             graph;
-        static Sculptor::OscGraphMapping   mapping;
-        static Sculptor::GraphChange       discarded[Sculptor::max_pending_changes];
+        const std::unique_ptr<Synth::InstrumentEditorBank> source_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank&           source        = *source_storage;
+        Synth::Instrument                      instrument    = {};
+        const std::unique_ptr<Sculptor::Graph> graph_storage = std::make_unique<Sculptor::Graph>();
+        Sculptor::Graph&                       graph         = *graph_storage;
+        Sculptor::OscGraphMapping              mapping       = {};
+        Sculptor::GraphChange                  discarded[Sculptor::max_pending_changes] = {};
 
         build_zone_fixture(&source, &instrument);
         TEST(Sculptor::project_editor_to_graph(source, &graph, &mapping));
@@ -10966,11 +11432,14 @@ static void osc_instrument_node_regressions()
     // direct compile call here would bypass the node_role routing).  A
     // zero seed compiles back as zero.
     {
-        static Synth::InstrumentEditorBank source;
-        static Synth::Instrument           instrument = {};
-        static Sculptor::Graph             graph;
-        static Sculptor::OscGraphMapping   mapping;
-        static Sculptor::GraphChange       discarded[Sculptor::max_pending_changes];
+        const std::unique_ptr<Synth::InstrumentEditorBank> source_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank&           source        = *source_storage;
+        Synth::Instrument                      instrument    = {};
+        const std::unique_ptr<Sculptor::Graph> graph_storage = std::make_unique<Sculptor::Graph>();
+        Sculptor::Graph&                       graph         = *graph_storage;
+        Sculptor::OscGraphMapping              mapping       = {};
+        Sculptor::GraphChange                  discarded[Sculptor::max_pending_changes] = {};
 
         build_zone_fixture(&source, &instrument);
         TEST(Sculptor::project_editor_to_graph(source, &graph, &mapping));
@@ -10993,11 +11462,14 @@ static void osc_instrument_node_regressions()
     // instrument node) compiles with the three fields at the
     // Instrument{} zero-init instead of failing or reading wild slots.
     {
-        static Synth::InstrumentEditorBank source;
-        static Synth::Instrument           instrument = {};
-        static Sculptor::Graph             graph;
-        static Sculptor::OscGraphMapping   mapping;
-        static Sculptor::GraphChange       discarded[Sculptor::max_pending_changes];
+        const std::unique_ptr<Synth::InstrumentEditorBank> source_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank&           source        = *source_storage;
+        Synth::Instrument                      instrument    = {};
+        const std::unique_ptr<Sculptor::Graph> graph_storage = std::make_unique<Sculptor::Graph>();
+        Sculptor::Graph&                       graph         = *graph_storage;
+        Sculptor::OscGraphMapping              mapping       = {};
+        Sculptor::GraphChange                  discarded[Sculptor::max_pending_changes] = {};
 
         build_zone_fixture(&source, &instrument);
         TEST(Sculptor::project_editor_to_graph(source, &graph, &mapping));
@@ -11006,7 +11478,7 @@ static void osc_instrument_node_regressions()
         for (uint32_t i = 0; i < 3; ++i) {
             mapping.instrument_slots[i] = Sculptor::pool_no_slot;
         }
-        static Synth::Instrument compiled;
+        Synth::Instrument compiled = {};
         TEST(Sculptor::compile_graph_to_instrument(graph, mapping, &compiled));
         TEST(compiled.note_skew_semitones == 0.0f);
         TEST(compiled.layer_skew_semitones == 0.0f);
@@ -11017,11 +11489,14 @@ static void osc_instrument_node_regressions()
     // span end to the span start immediately (no reload); toggling on moves
     // no points; a single-point span toggles off without a point write.
     {
-        static Synth::InstrumentEditorBank source;
-        static Synth::Instrument           instrument = {};
-        static Sculptor::Graph             graph;
-        static Sculptor::OscGraphMapping   mapping;
-        static Sculptor::GraphChange       discarded[Sculptor::max_pending_changes];
+        const std::unique_ptr<Synth::InstrumentEditorBank> source_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank&           source        = *source_storage;
+        Synth::Instrument                      instrument    = {};
+        const std::unique_ptr<Sculptor::Graph> graph_storage = std::make_unique<Sculptor::Graph>();
+        Sculptor::Graph&                       graph         = *graph_storage;
+        Sculptor::OscGraphMapping              mapping       = {};
+        Sculptor::GraphChange                  discarded[Sculptor::max_pending_changes] = {};
 
         build_zone_fixture(&source, &instrument);
         // The volume envelope's descriptor gets a multi-point sustain span
@@ -11117,11 +11592,13 @@ static void osc_instrument_node_regressions()
 // the saved position, and a bank without the record keeps the default.
 static void osc_instrument_node_layout_regressions()
 {
-    static Synth::InstrumentEditorBank source;
-    static Synth::Instrument           instrument = {};
-    static Sculptor::Graph             graph;
-    static Sculptor::OscGraphMapping   mapping;
-    static Sculptor::GraphChange       discarded[Sculptor::max_pending_changes];
+    const std::unique_ptr<Synth::InstrumentEditorBank> source_storage = std::make_unique<Synth::InstrumentEditorBank>();
+    Synth::InstrumentEditorBank&                       source         = *source_storage;
+    Synth::Instrument                                  instrument     = {};
+    const std::unique_ptr<Sculptor::Graph>             graph_storage  = std::make_unique<Sculptor::Graph>();
+    Sculptor::Graph&                                   graph          = *graph_storage;
+    Sculptor::OscGraphMapping                          mapping        = {};
+    Sculptor::GraphChange                              discarded[Sculptor::max_pending_changes] = {};
 
     build_zone_fixture(&source, &instrument);
     TEST(Sculptor::project_editor_to_graph(source, &graph, &mapping));
@@ -11140,22 +11617,26 @@ static void osc_instrument_node_layout_regressions()
     source.graph_layout[source.graph_layout_count++] = record;
     TEST(Sculptor::validate_editor_metadata(source));
 
-    static Sculptor::Graph           moved_graph;
-    static Sculptor::OscGraphMapping moved_mapping;
+    const std::unique_ptr<Sculptor::Graph> moved_graph_storage = std::make_unique<Sculptor::Graph>();
+    Sculptor::Graph&                       moved_graph         = *moved_graph_storage;
+    Sculptor::OscGraphMapping              moved_mapping       = {};
     TEST(Sculptor::project_editor_to_graph(source, &moved_graph, &moved_mapping));
     TEST(moved_graph.node(moved_mapping.instrument_node).position.x == 304.0f);
     TEST(moved_graph.node(moved_mapping.instrument_node).position.y == 192.0f);
     TEST(moved_graph.node(moved_mapping.instrument_node).content_width_override == 96.0f);
 
     // The record round-trips through the editor JSON section unchanged.
-    static Synth::InstrumentEditorBank decoded;
-    char                               doc[16 * 1024];
-    const uint32_t                     written = Synth::encode_editor_bank_json(&source, doc, sizeof(doc));
+    const std::unique_ptr<Synth::InstrumentEditorBank> decoded_storage =
+        std::make_unique<Synth::InstrumentEditorBank>();
+    Synth::InstrumentEditorBank& decoded = *decoded_storage;
+    char                         doc[16 * 1024];
+    const uint32_t               written = Synth::encode_editor_bank_json(&source, doc, sizeof(doc));
     TEST(written > 0);
     TEST(Synth::decode_editor_bank_json(doc, written, &decoded));
     TEST(Sculptor::validate_editor_metadata(decoded));
-    static Sculptor::Graph           regraph;
-    static Sculptor::OscGraphMapping remapping;
+    const std::unique_ptr<Sculptor::Graph> regraph_storage = std::make_unique<Sculptor::Graph>();
+    Sculptor::Graph&                       regraph         = *regraph_storage;
+    Sculptor::OscGraphMapping              remapping       = {};
     TEST(Sculptor::project_editor_to_graph(decoded, &regraph, &remapping));
     TEST(regraph.node(remapping.instrument_node).position.x == 304.0f);
     TEST(regraph.node(remapping.instrument_node).position.y == 192.0f);
@@ -11166,16 +11647,19 @@ static void osc_instrument_node_layout_regressions()
     const Synth::InstrumentJsonDomain domains[] = { Synth::InstrumentJsonDomain::clipboard,
                                                     Synth::InstrumentJsonDomain::validated_bank };
     for (Synth::InstrumentJsonDomain domain : domains) {
-        static char text[clipboard_capacity];
+        const std::unique_ptr<FixedArray<char, clipboard_capacity>> text_storage =
+            std::make_unique<FixedArray<char, clipboard_capacity>>();
+        char (&text)[clipboard_capacity] = text_storage->elements;
         TEST(Sculptor::encode_editor_instrument_json(source, 0, 0, text, sizeof(text), domain) != 0);
         TEST(! strstr(text, "\"kind\":5"));
     }
 
     // Legacy record set: without the kind-5 record the node keeps its
     // deterministic default position.
-    source.graph_layout_count = 0;
-    static Sculptor::Graph           legacy_graph;
-    static Sculptor::OscGraphMapping legacy_mapping;
+    source.graph_layout_count                                   = 0;
+    const std::unique_ptr<Sculptor::Graph> legacy_graph_storage = std::make_unique<Sculptor::Graph>();
+    Sculptor::Graph&                       legacy_graph         = *legacy_graph_storage;
+    Sculptor::OscGraphMapping              legacy_mapping       = {};
     TEST(Sculptor::project_editor_to_graph(source, &legacy_graph, &legacy_mapping));
     TEST(legacy_graph.node(legacy_mapping.instrument_node).position.x == default_position.x);
     TEST(legacy_graph.node(legacy_mapping.instrument_node).position.y == default_position.y);
@@ -11185,7 +11669,9 @@ static void osc_instrument_node_layout_regressions()
     // LFO wiring-source fields are reserved for detached instances and
     // refuse on kind 5 in both passes.
     {
-        static Synth::InstrumentEditorBank bad = {};
+        const std::unique_ptr<Synth::InstrumentEditorBank> bad_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& bad = *bad_storage;
         build_zone_fixture(&bad, &instrument);
         Synth::GraphNodeLayout malformed           = {};
         malformed.channel                          = 0;
@@ -11197,7 +11683,9 @@ static void osc_instrument_node_layout_regressions()
         bad.graph_layout[bad.graph_layout_count++] = malformed;
         TEST(! Sculptor::validate_editor_metadata(bad));
 
-        static Synth::InstrumentEditorBank indexed = {};
+        const std::unique_ptr<Synth::InstrumentEditorBank> indexed_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& indexed = *indexed_storage;
         build_zone_fixture(&indexed, &instrument);
         Synth::GraphNodeLayout with_index                  = malformed;
         with_index.uid                                     = 0;
@@ -11205,7 +11693,9 @@ static void osc_instrument_node_layout_regressions()
         indexed.graph_layout[indexed.graph_layout_count++] = with_index;
         TEST(! Sculptor::validate_editor_metadata(indexed));
 
-        static Synth::InstrumentEditorBank kind6_bank = {};
+        const std::unique_ptr<Synth::InstrumentEditorBank> kind6_bank_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& kind6_bank = *kind6_bank_storage;
         build_zone_fixture(&kind6_bank, &instrument);
         Synth::GraphNodeLayout kind6                             = malformed;
         kind6.uid                                                = 0;
@@ -11214,7 +11704,9 @@ static void osc_instrument_node_layout_regressions()
         kind6_bank.graph_layout[kind6_bank.graph_layout_count++] = kind6;
         TEST(! Sculptor::validate_editor_metadata(kind6_bank));
 
-        static Synth::InstrumentEditorBank depth_wired = {};
+        const std::unique_ptr<Synth::InstrumentEditorBank> depth_wired_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& depth_wired = *depth_wired_storage;
         build_zone_fixture(&depth_wired, &instrument);
         Synth::GraphNodeLayout depth_record                        = malformed;
         depth_record.uid                                           = 0;
@@ -11223,7 +11715,9 @@ static void osc_instrument_node_layout_regressions()
         depth_wired.graph_layout[depth_wired.graph_layout_count++] = depth_record;
         TEST(! Sculptor::validate_editor_metadata(depth_wired));
 
-        static Synth::InstrumentEditorBank rate_wired = {};
+        const std::unique_ptr<Synth::InstrumentEditorBank> rate_wired_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& rate_wired = *rate_wired_storage;
         build_zone_fixture(&rate_wired, &instrument);
         Synth::GraphNodeLayout rate_record                       = malformed;
         rate_record.uid                                          = 0;
@@ -11238,7 +11732,9 @@ static void osc_instrument_node_layout_regressions()
                                      "{\"layouts\":[{\"channel\":0,\"zone\":0,\"kind\":6,"
                                      "\"x\":1.0,\"y\":2.0,\"width\":0.0,\"height\":0.0}]}");
         TEST(printed > 0);
-        static Synth::InstrumentEditorBank refused;
+        const std::unique_ptr<Synth::InstrumentEditorBank> refused_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& refused = *refused_storage;
         TEST(! decode_bank_with_editor_section(source, overkind, &refused));
 
         // A kind-5 record with a nonzero uid refuses in the decode too.
@@ -11283,10 +11779,13 @@ static void osc_instrument_node_layout_regressions()
                                           "{\"layouts\":[{\"channel\":0,\"zone\":0,\"kind\":5,"
                                           "\"x\":304.0,\"y\":192.0,\"width\":0.0,\"height\":0.0}]}");
         TEST(good_printed > 0);
-        static Synth::InstrumentEditorBank applied;
+        const std::unique_ptr<Synth::InstrumentEditorBank> applied_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& applied = *applied_storage;
         TEST(decode_bank_with_editor_section(source, good, &applied));
-        static Sculptor::Graph           applied_graph;
-        static Sculptor::OscGraphMapping applied_mapping;
+        const std::unique_ptr<Sculptor::Graph> applied_graph_storage = std::make_unique<Sculptor::Graph>();
+        Sculptor::Graph&                       applied_graph         = *applied_graph_storage;
+        Sculptor::OscGraphMapping              applied_mapping       = {};
         TEST(Sculptor::project_editor_to_graph(applied, &applied_graph, &applied_mapping));
         TEST(applied_graph.node(applied_mapping.instrument_node).position.x == 304.0f);
         TEST(applied_graph.node(applied_mapping.instrument_node).position.y == 192.0f);
@@ -11469,7 +11968,8 @@ static void device_midi_route_regressions()
 // frozen enum value.
 static void check_pad_json_codec()
 {
-    static ClipboardDecode decoded;
+    const std::unique_ptr<ClipboardDecode> decoded_storage = std::make_unique<ClipboardDecode>();
+    ClipboardDecode&                       decoded         = *decoded_storage;
 
     // "pad" decodes in the oscillator A position, with the duty_a base.
     {
@@ -11495,11 +11995,11 @@ static void check_pad_json_codec()
     {
         static const char pad_rt_doc[] =
             "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"pad\",\"wave_b\":\"pad\",\"duty_a\":{\"base\":0.5}}]}";
-        static Synth::Instrument         rt_instr;
-        static Synth::EnvelopeDescriptor rt_envs[Synth::instrument_max_envelopes];
-        static Synth::LFODescriptor      rt_lfos[Synth::instrument_max_lfos];
-        uint32_t                         rt_env_count = 0;
-        uint32_t                         rt_lfo_count = 0;
+        Synth::Instrument         rt_instr                                 = {};
+        Synth::EnvelopeDescriptor rt_envs[Synth::instrument_max_envelopes] = {};
+        Synth::LFODescriptor      rt_lfos[Synth::instrument_max_lfos]      = {};
+        uint32_t                  rt_env_count                             = 0;
+        uint32_t                  rt_lfo_count                             = 0;
         TEST(Synth::decode_instrument_json(pad_rt_doc,
                                            static_cast<uint32_t>(strlen(pad_rt_doc)),
                                            &rt_instr,
@@ -11507,19 +12007,23 @@ static void check_pad_json_codec()
                                            &rt_env_count,
                                            rt_lfos,
                                            &rt_lfo_count));
-        static Synth::InstrumentEditorBank rt_bank;
+        const std::unique_ptr<Synth::InstrumentEditorBank> rt_bank_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& rt_bank = *rt_bank_storage;
         memset(static_cast<void*>(&rt_bank), 0, sizeof(rt_bank));
         const uint32_t rt_slot = rt_bank.bank.instruments.allocate();
         TEST(rt_slot != pool_no_slot);
         rt_bank.bank.instruments.entries[rt_slot] = rt_instr;
-        static char    rt_text[clipboard_capacity];
+        const std::unique_ptr<FixedArray<char, clipboard_capacity>> rt_text_storage =
+            std::make_unique<FixedArray<char, clipboard_capacity>>();
+        char (&rt_text)[clipboard_capacity] = rt_text_storage->elements;
         const uint32_t rt_len = Synth::encode_instrument_json(rt_text, sizeof(rt_text), &rt_instr, &rt_bank.bank);
         TEST(rt_len > 0);
-        static Synth::Instrument         rt_back;
-        static Synth::EnvelopeDescriptor rt_back_envs[Synth::instrument_max_envelopes];
-        static Synth::LFODescriptor      rt_back_lfos[Synth::instrument_max_lfos];
-        uint32_t                         rt_back_env_count = 0;
-        uint32_t                         rt_back_lfo_count = 0;
+        Synth::Instrument         rt_back                                       = {};
+        Synth::EnvelopeDescriptor rt_back_envs[Synth::instrument_max_envelopes] = {};
+        Synth::LFODescriptor      rt_back_lfos[Synth::instrument_max_lfos]      = {};
+        uint32_t                  rt_back_env_count                             = 0;
+        uint32_t                  rt_back_lfo_count                             = 0;
         TEST(Synth::decode_instrument_json(rt_text,
                                            rt_len,
                                            &rt_back,
@@ -11536,10 +12040,12 @@ static void check_pad_json_codec()
     // whitelists sine and sawtooth explicitly, so "pad" must keep failing
     // decode.
     {
-        static const char      pad_lfo_doc[] = "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\","
-                                               "\"volume\":{\"lfo\":{\"wave\":\"pad\",\"frequency_hz\":4}}}]}";
-        static ClipboardDecode guarded;
-        static ClipboardDecode guard_sentinel;
+        static const char pad_lfo_doc[] = "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\","
+                                          "\"volume\":{\"lfo\":{\"wave\":\"pad\",\"frequency_hz\":4}}}]}";
+        const std::unique_ptr<ClipboardDecode> guarded_storage        = std::make_unique<ClipboardDecode>();
+        ClipboardDecode&                       guarded                = *guarded_storage;
+        const std::unique_ptr<ClipboardDecode> guard_sentinel_storage = std::make_unique<ClipboardDecode>();
+        ClipboardDecode&                       guard_sentinel         = *guard_sentinel_storage;
         fill_clipboard_sentinels(&guarded);
         fill_clipboard_sentinels(&guard_sentinel);
         TEST(! decode_clipboard(&guarded, pad_lfo_doc, max_portable_records));
@@ -11551,7 +12057,9 @@ static void check_pad_json_codec()
     {
         static const char pad_bank_lfo_doc[] =
             "{\"instrument_editor_bank\":{\"lfos\":[{\"wave\":\"pad\",\"period_ms\":100}]}}";
-        static Synth::InstrumentEditorBank bank_guarded;
+        const std::unique_ptr<Synth::InstrumentEditorBank> bank_guarded_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& bank_guarded = *bank_guarded_storage;
         memset(static_cast<void*>(&bank_guarded), 0, sizeof(bank_guarded));
         TEST(! Synth::decode_editor_bank_json(pad_bank_lfo_doc,
                                               static_cast<uint32_t>(strlen(pad_bank_lfo_doc)),
@@ -11566,7 +12074,7 @@ static void check_pad_json_codec()
                                                       Synth::WaveType::sawtooth_wave,
                                                       Synth::WaveType::pulse_wave,
                                                       Synth::WaveType::noise_wave };
-        static char              legacy_doc[128];
+        char                     legacy_doc[128]  = {};
         for (uint32_t w = 0; w < 5; ++w) {
             const int written = snprintf(legacy_doc,
                                          sizeof(legacy_doc),
@@ -11586,13 +12094,14 @@ static void check_pad_json_codec()
 // decode.
 static void check_pad_tilt_json_codec()
 {
-    static ClipboardDecode decoded;
+    const std::unique_ptr<ClipboardDecode> decoded_storage = std::make_unique<ClipboardDecode>();
+    ClipboardDecode&                       decoded         = *decoded_storage;
 
     // Both tilt target names decode in one layer.  The same layer without
     // the tilt keys decodes today, so a tilt-key refusal can only come
     // from the unknown target names, not from the layer shape.
     {
-        static const char control_doc[] = "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"pad\"}]}";
+        char control_doc[] = "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"pad\"}]}";
         fill_clipboard_sentinels(&decoded);
         TEST(decode_clipboard(&decoded, control_doc, max_portable_records));
         static const char tilt_doc[] = "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"pad\","
@@ -11614,13 +12123,13 @@ static void check_pad_tilt_json_codec()
     // Full round trip: decode, encode with the shared encoder, decode again;
     // both hops must succeed.
     {
-        static const char        tilt_rt_doc[] = "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"pad\","
-                                                 "\"pad_tone_a\":{\"base\":0.5},\"pad_tone_b\":{\"base\":-1}}]}";
-        static Synth::Instrument rt_instr;
-        static Synth::EnvelopeDescriptor rt_envs[Synth::instrument_max_envelopes];
-        static Synth::LFODescriptor      rt_lfos[Synth::instrument_max_lfos];
-        uint32_t                         rt_env_count = 0;
-        uint32_t                         rt_lfo_count = 0;
+        static const char         tilt_rt_doc[] = "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"pad\","
+                                                  "\"pad_tone_a\":{\"base\":0.5},\"pad_tone_b\":{\"base\":-1}}]}";
+        Synth::Instrument         rt_instr      = {};
+        Synth::EnvelopeDescriptor rt_envs[Synth::instrument_max_envelopes] = {};
+        Synth::LFODescriptor      rt_lfos[Synth::instrument_max_lfos]      = {};
+        uint32_t                  rt_env_count                             = 0;
+        uint32_t                  rt_lfo_count                             = 0;
         TEST(Synth::decode_instrument_json(tilt_rt_doc,
                                            static_cast<uint32_t>(strlen(tilt_rt_doc)),
                                            &rt_instr,
@@ -11628,19 +12137,23 @@ static void check_pad_tilt_json_codec()
                                            &rt_env_count,
                                            rt_lfos,
                                            &rt_lfo_count));
-        static Synth::InstrumentEditorBank rt_bank;
+        const std::unique_ptr<Synth::InstrumentEditorBank> rt_bank_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& rt_bank = *rt_bank_storage;
         memset(static_cast<void*>(&rt_bank), 0, sizeof(rt_bank));
         const uint32_t rt_slot = rt_bank.bank.instruments.allocate();
         TEST(rt_slot != pool_no_slot);
         rt_bank.bank.instruments.entries[rt_slot] = rt_instr;
-        static char    rt_text[clipboard_capacity];
+        const std::unique_ptr<FixedArray<char, clipboard_capacity>> rt_text_storage =
+            std::make_unique<FixedArray<char, clipboard_capacity>>();
+        char (&rt_text)[clipboard_capacity] = rt_text_storage->elements;
         const uint32_t rt_len = Synth::encode_instrument_json(rt_text, sizeof(rt_text), &rt_instr, &rt_bank.bank);
         TEST(rt_len > 0);
-        static Synth::Instrument         rt_back;
-        static Synth::EnvelopeDescriptor rt_back_envs[Synth::instrument_max_envelopes];
-        static Synth::LFODescriptor      rt_back_lfos[Synth::instrument_max_lfos];
-        uint32_t                         rt_back_env_count = 0;
-        uint32_t                         rt_back_lfo_count = 0;
+        Synth::Instrument         rt_back                                       = {};
+        Synth::EnvelopeDescriptor rt_back_envs[Synth::instrument_max_envelopes] = {};
+        Synth::LFODescriptor      rt_back_lfos[Synth::instrument_max_lfos]      = {};
+        uint32_t                  rt_back_env_count                             = 0;
+        uint32_t                  rt_back_lfo_count                             = 0;
         TEST(Synth::decode_instrument_json(rt_text,
                                            rt_len,
                                            &rt_back,
@@ -11657,7 +12170,7 @@ static void check_pad_tilt_json_codec()
     {
         static const char* const legacy_names[8] = { "volume", "pitch",   "panning",  "duty_a",
                                                      "duty_b", "osc_mix", "fm_index", "fir_pitch_spread" };
-        static char              legacy_doc[192];
+        char                     legacy_doc[192] = {};
         for (uint32_t t = 0; t < 8; ++t) {
             const int written = snprintf(legacy_doc,
                                          sizeof(legacy_doc),
@@ -11677,10 +12190,12 @@ static void check_pad_tilt_json_codec()
     // An unknown target name still fails decode: only the two spelled tilt
     // names may join the table.
     {
-        static const char      unknown_doc[] = "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"pad\","
-                                               "\"pad_tone\":{\"base\":0}}]}";
-        static ClipboardDecode guarded;
-        static ClipboardDecode guard_sentinel;
+        static const char unknown_doc[] = "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"pad\","
+                                          "\"pad_tone\":{\"base\":0}}]}";
+        const std::unique_ptr<ClipboardDecode> guarded_storage        = std::make_unique<ClipboardDecode>();
+        ClipboardDecode&                       guarded                = *guarded_storage;
+        const std::unique_ptr<ClipboardDecode> guard_sentinel_storage = std::make_unique<ClipboardDecode>();
+        ClipboardDecode&                       guard_sentinel         = *guard_sentinel_storage;
         fill_clipboard_sentinels(&guarded);
         fill_clipboard_sentinels(&guard_sentinel);
         TEST(! decode_clipboard(&guarded, unknown_doc, max_portable_records));
@@ -11931,15 +12446,21 @@ static void check_quick_release_regressions()
     // The quick_release flag survives a bank round-trip, and a document
     // without the key decodes with the flag off (a zero flag emits no key).
     {
-        static Synth::InstrumentEditorBank source;
-        static Synth::Instrument           instrument = {};
+        const std::unique_ptr<Synth::InstrumentEditorBank> source_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& source     = *source_storage;
+        Synth::Instrument            instrument = {};
         build_zone_fixture(&source, &instrument);
         source.bank.envelopes.entries[1].flags = Synth::envelope_ping_pong | Synth::envelope_quick_release;
-        static char    payload[Synth::library_payload_max];
-        const uint32_t length = Synth::encode_editor_bank_json(&source, payload, sizeof(payload));
+        const std::unique_ptr<FixedArray<char, Synth::library_payload_max>> payload_storage =
+            std::make_unique<FixedArray<char, Synth::library_payload_max>>();
+        char (&payload)[Synth::library_payload_max] = payload_storage->elements;
+        const uint32_t length                       = Synth::encode_editor_bank_json(&source, payload, sizeof(payload));
         TEST(length > 0);
         TEST(strstr(payload, "\"quick_release\":1") != nullptr);
-        static Synth::InstrumentEditorBank loaded;
+        const std::unique_ptr<Synth::InstrumentEditorBank> loaded_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& loaded = *loaded_storage;
         memset(static_cast<void*>(&loaded), 0, sizeof(loaded));
         TEST(Synth::decode_editor_bank_json(payload, length, &loaded));
         TEST((loaded.bank.envelopes.entries[1].flags & Synth::envelope_quick_release) != 0);
@@ -11980,14 +12501,15 @@ static void check_quick_release_regressions()
         TEST((envs[0].flags & Synth::envelope_ping_pong) != 0);
 
         // Round-trip through the encoder keeps both bits.
-        static Synth::InstrumentBank desc_bank = {};
-        desc_bank                              = {};
-        desc_bank.envelopes.num_allocated      = env_count;
+        const std::unique_ptr<Synth::InstrumentBank> desc_bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       desc_bank         = *desc_bank_storage;
+        desc_bank                                                      = {};
+        desc_bank.envelopes.num_allocated                              = env_count;
         for (uint32_t i = 0; i < env_count; i++) {
             desc_bank.envelopes.entries[i] = envs[i];
         }
-        static char    doc_text[8192]; // static: 8 KB is too much stack
-        const uint32_t doc_len = Synth::encode_instrument_json(doc_text, sizeof(doc_text), &instr, &desc_bank);
+        char           doc_text[8192] = {}; // static: 8 KB is too much stack
+        const uint32_t doc_len        = Synth::encode_instrument_json(doc_text, sizeof(doc_text), &instr, &desc_bank);
         TEST(doc_len > 0);
         TEST(strstr(doc_text, "\"quick_release\":1") != nullptr);
         TEST(Synth::decode_instrument_json(doc_text, doc_len, &instr, envs, &env_count, lfos, &lfo_count));
@@ -12015,11 +12537,14 @@ static void check_quick_release_regressions()
     // flag bit in the bank descriptor, mirroring the Ping-Pong toggle, and
     // leaves the ping-pong bit alone.
     {
-        static Synth::InstrumentEditorBank source;
-        static Synth::Instrument           instrument = {};
-        static Sculptor::Graph             graph;
-        static Sculptor::OscGraphMapping   mapping;
-        static Sculptor::GraphChange       discarded[Sculptor::max_pending_changes];
+        const std::unique_ptr<Synth::InstrumentEditorBank> source_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank&           source        = *source_storage;
+        Synth::Instrument                      instrument    = {};
+        const std::unique_ptr<Sculptor::Graph> graph_storage = std::make_unique<Sculptor::Graph>();
+        Sculptor::Graph&                       graph         = *graph_storage;
+        Sculptor::OscGraphMapping              mapping       = {};
+        Sculptor::GraphChange                  discarded[Sculptor::max_pending_changes] = {};
 
         build_zone_fixture(&source, &instrument);
         source.bank.envelopes.entries[1].sustain_first_point = 1;
@@ -12077,10 +12602,12 @@ static void check_quick_release_regressions()
 // slot indices out of them.
 static void fx_slot_disable_stamp_regressions()
 {
-    static Synth::InstrumentEditorBank  source;
-    static Synth::Instrument            instrument = {};
-    static Sculptor::Graph              graph;
-    static Sculptor::EffectGraphMapping fx_mapping;
+    const std::unique_ptr<Synth::InstrumentEditorBank> source_storage = std::make_unique<Synth::InstrumentEditorBank>();
+    Synth::InstrumentEditorBank&                       source         = *source_storage;
+    Synth::Instrument                                  instrument     = {};
+    const std::unique_ptr<Sculptor::Graph>             graph_storage  = std::make_unique<Sculptor::Graph>();
+    Sculptor::Graph&                                   graph          = *graph_storage;
+    Sculptor::EffectGraphMapping                       fx_mapping     = {};
     build_zone_fixture(&source, &instrument);
     Synth::EffectChainBinding& chain = add_cc_chain_fixture(&source, 0);
     Sculptor::fx_init_slot(&chain, 0, Synth::EffectType::compressor);
@@ -12121,10 +12648,12 @@ static void fx_slot_disable_stamp_regressions()
 // the stamp only decides who the rules apply to, not the rules.
 static void osc_slot_disable_stamped_rules_regressions()
 {
-    static Synth::InstrumentEditorBank source;
-    static Synth::Instrument           instrument = {};
-    static Sculptor::Graph             graph;
-    static Sculptor::OscGraphMapping   mapping;
+    const std::unique_ptr<Synth::InstrumentEditorBank> source_storage = std::make_unique<Synth::InstrumentEditorBank>();
+    Synth::InstrumentEditorBank&                       source         = *source_storage;
+    Synth::Instrument                                  instrument     = {};
+    const std::unique_ptr<Sculptor::Graph>             graph_storage  = std::make_unique<Sculptor::Graph>();
+    Sculptor::Graph&                                   graph          = *graph_storage;
+    Sculptor::OscGraphMapping                          mapping        = {};
     build_zone_fixture(&source, &instrument);
     TEST(Sculptor::project_editor_to_graph(source, &graph, &mapping));
 
@@ -12188,10 +12717,12 @@ static void osc_slot_disable_stamped_rules_regressions()
 // recreated after clear() is value-initialized and carries no stamp.
 static void osc_stamp_pool_clear_regressions()
 {
-    static Synth::InstrumentEditorBank source;
-    static Synth::Instrument           instrument = {};
-    static Sculptor::Graph             graph;
-    static Sculptor::OscGraphMapping   mapping;
+    const std::unique_ptr<Synth::InstrumentEditorBank> source_storage = std::make_unique<Synth::InstrumentEditorBank>();
+    Synth::InstrumentEditorBank&                       source         = *source_storage;
+    Synth::Instrument                                  instrument     = {};
+    const std::unique_ptr<Sculptor::Graph>             graph_storage  = std::make_unique<Sculptor::Graph>();
+    Sculptor::Graph&                                   graph          = *graph_storage;
+    Sculptor::OscGraphMapping                          mapping        = {};
     build_zone_fixture(&source, &instrument);
     TEST(Sculptor::project_editor_to_graph(source, &graph, &mapping));
     TEST(graph.node(mapping.osc_nodes[0]).oscillator);
@@ -13004,7 +13535,8 @@ int main()
                     sizeof(Synth::TargetBinding)) != 0);
 
         // The validator accepts divergent per-layer routing.
-        static Synth::InstrumentBank probe_bank;
+        const std::unique_ptr<Synth::InstrumentBank> probe_bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       probe_bank         = *probe_bank_storage;
         memset(static_cast<void*>(&probe_bank), 0, sizeof(probe_bank));
         const uint32_t slot = probe_bank.instruments.allocate();
         TEST(slot != pool_no_slot);
@@ -13055,7 +13587,8 @@ int main()
     // defrag-remap (envelopes): a fragmented pool [used,free,used,free,used] compacts to the
     // front preserving order, and an instrument's 1-based envelope reference is rewritten.
     {
-        static Synth::InstrumentBank bank = {};
+        const std::unique_ptr<Synth::InstrumentBank> bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       bank         = *bank_storage;
         for (uint32_t idx = 0; idx < 5; idx++) {
             TEST(bank.envelopes.allocate() == idx);
         }
@@ -13084,7 +13617,8 @@ int main()
     // defrag-remap (LFOs): same mechanism as envelopes -- a layer's 1-based lfo_desc_id is
     // rewritten to the referenced LFO entry's new slot.
     {
-        static Synth::InstrumentBank bank = {};
+        const std::unique_ptr<Synth::InstrumentBank> bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       bank         = *bank_storage;
         for (uint32_t idx = 0; idx < 5; idx++) {
             TEST(bank.lfos.allocate() == idx);
         }
@@ -13105,7 +13639,8 @@ int main()
     // defrag-remap (instruments): an instrument pool compacts and a channel split-table entry
     // that references an instrument (0-based) is rewritten to the new slot.
     {
-        static Synth::InstrumentBank bank = {};
+        const std::unique_ptr<Synth::InstrumentBank> bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       bank         = *bank_storage;
         for (uint32_t idx = 0; idx < 5; idx++) {
             TEST(bank.instruments.allocate() == idx);
         }
@@ -13122,13 +13657,15 @@ int main()
     // snapshot-roundtrip: a byte copy of the container, then a byte restore after mutation,
     // reproduces identical state -- the property the undo stack and save/load rely on.
     {
-        static Synth::InstrumentBank bank           = {};
-        const uint32_t               instr          = bank.instruments.allocate();
-        bank.instruments.entries[instr].layer_count = 3;
-        const uint32_t env                          = bank.envelopes.allocate();
-        bank.envelopes.entries[env].num_points      = 7;
+        const std::unique_ptr<Synth::InstrumentBank> bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       bank         = *bank_storage;
+        const uint32_t                               instr        = bank.instruments.allocate();
+        bank.instruments.entries[instr].layer_count               = 3;
+        const uint32_t env                                        = bank.envelopes.allocate();
+        bank.envelopes.entries[env].num_points                    = 7;
 
-        static Synth::InstrumentBank snapshot;
+        const std::unique_ptr<Synth::InstrumentBank> snapshot_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       snapshot         = *snapshot_storage;
         memcpy(&snapshot, &bank, sizeof(bank));
 
         bank.instruments.entries[instr].layer_count = 99;
@@ -13233,7 +13770,7 @@ int main()
         // Empty buffer.
         TEST(Synth::parse_midi_file(nullptr, 0, events, 8, 44100) == 0);
         // Bad magic.
-        static const uint8_t bad_magic[] = { 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07 };
+        uint8_t bad_magic[] = { 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07 };
         TEST(Synth::parse_midi_file(bad_magic, sizeof(bad_magic), events, 8, 44100) == 0);
         // Truncated valid header (track length claims more bytes than present).
         static const uint8_t truncated[] = {
@@ -13463,7 +14000,8 @@ int main()
 
     // A valid bank passes validation.
     {
-        static Synth::InstrumentBank bank;
+        const std::unique_ptr<Synth::InstrumentBank> bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       bank         = *bank_storage;
         make_valid_bank(bank);
         TEST(Synth::validate_instrument_bank(&bank));
     }
@@ -13471,7 +14009,8 @@ int main()
     // Default bank: init_default_bank builds the first-run bank; every
     // structural invariant the editor and runtime rely on holds out of the box.
     {
-        static Synth::InstrumentBank bank;
+        const std::unique_ptr<Synth::InstrumentBank> bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       bank         = *bank_storage;
         Synth::init_default_bank(&bank);
         TEST(Synth::validate_instrument_bank(&bank));
         TEST(bank.channel_enabled[0] == 1);
@@ -13513,26 +14052,34 @@ int main()
     // path seeds the 100 default, so a factory-fresh bank projects,
     // validates and compiles without an out-of-range slot refusal.
     {
-        static Synth::InstrumentBank bank;
+        const std::unique_ptr<Synth::InstrumentBank> bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       bank         = *bank_storage;
         Synth::init_default_bank(&bank);
         TEST(bank.instruments.num_allocated == 1);
         for (uint32_t layer = 0; layer < bank.instruments.entries[0].layer_count; layer++) {
             TEST(bank.instruments.entries[0].layers[layer].fir_slope_percent == 100);
         }
-        static Synth::Oscillator fresh_osc = {};
+        Synth::Oscillator fresh_osc = {};
         TEST(fresh_osc.fir_slope_percent == 100);
-        static Synth::InstrumentEditorBank editor_bank;
+        const std::unique_ptr<Synth::InstrumentEditorBank> editor_bank_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& editor_bank = *editor_bank_storage;
         Synth::init_default_bank(&editor_bank.bank);
         TEST(Synth::validate_instrument_bank(&editor_bank.bank));
-        static Sculptor::Graph           factory_graph;
-        static Sculptor::OscGraphMapping factory_mapping;
+        const std::unique_ptr<Sculptor::Graph> factory_graph_storage = std::make_unique<Sculptor::Graph>();
+        Sculptor::Graph&                       factory_graph         = *factory_graph_storage;
+        Sculptor::OscGraphMapping              factory_mapping       = {};
         TEST(Sculptor::project_editor_to_graph(editor_bank, &factory_graph, &factory_mapping));
-        static Synth::InstrumentBank factory_playback;
+        const std::unique_ptr<Synth::InstrumentBank> factory_playback_storage =
+            std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank& factory_playback = *factory_playback_storage;
         TEST(Sculptor::compile_editor_playback_bank(editor_bank, &factory_playback));
         TEST(factory_playback.instruments.entries[factory_playback.channel_zones[0][0].instrument]
                  .layers[0]
                  .fir_slope_percent == 100);
-        static Synth::InstrumentEditorBank channel_bank;
+        const std::unique_ptr<Synth::InstrumentEditorBank> channel_bank_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& channel_bank = *channel_bank_storage;
         Synth::init_default_bank(&channel_bank.bank);
         TEST(Synth::init_default_channel(&channel_bank.bank, 3));
         const uint32_t fresh_slot = channel_bank.bank.channel_zones[3][0].instrument;
@@ -13543,9 +14090,12 @@ int main()
     // its own slope, and the vacated tail slot resets to the 100 default,
     // which is what a re-added layer starts from when it is not inherited.
     {
-        static Synth::InstrumentEditorBank rm_bank;
-        static Sculptor::Graph             rm_graph;
-        static Sculptor::OscGraphMapping   rm_mapping;
+        const std::unique_ptr<Synth::InstrumentEditorBank> rm_bank_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank&           rm_bank          = *rm_bank_storage;
+        const std::unique_ptr<Sculptor::Graph> rm_graph_storage = std::make_unique<Sculptor::Graph>();
+        Sculptor::Graph&                       rm_graph         = *rm_graph_storage;
+        Sculptor::OscGraphMapping              rm_mapping       = {};
         Synth::init_default_bank(&rm_bank.bank);
         Synth::Instrument& rm_entry = rm_bank.bank.instruments.entries[rm_bank.bank.channel_zones[0][0].instrument];
         rm_entry.layers[1]          = rm_entry.layers[0];
@@ -13568,7 +14118,8 @@ int main()
     // init_default_channel into a populated bank appends a bare instrument and
     // allocates no descriptors and no channel effect chain.
     {
-        static Synth::InstrumentBank bank;
+        const std::unique_ptr<Synth::InstrumentBank> bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       bank         = *bank_storage;
         memset(static_cast<void*>(&bank), 0, sizeof(bank));
         TEST(bank.envelopes.allocate() == 0);
         bank.envelopes.entries[0].num_points         = 2;
@@ -13602,13 +14153,15 @@ int main()
     // init_default_channel fails cleanly when the instruments pool lacks
     // space, leaving the bank byte-for-byte untouched.
     {
-        static Synth::InstrumentBank bank;
+        const std::unique_ptr<Synth::InstrumentBank> bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       bank         = *bank_storage;
         memset(static_cast<void*>(&bank), 0, sizeof(bank));
         bank.instruments.entries[0].layer_count = 1;
         for (uint32_t i = 0; i < Synth::max_instruments; i++) {
             TEST(bank.instruments.allocate() == i);
         }
-        static Synth::InstrumentBank before;
+        const std::unique_ptr<Synth::InstrumentBank> before_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       before         = *before_storage;
         memcpy(&before, &bank, sizeof(bank));
         TEST(! Synth::init_default_channel(&bank, 2));
         TEST(memcmp(&bank, &before, sizeof(bank)) == 0);
@@ -13618,7 +14171,9 @@ int main()
     // descriptors no surviving instrument or effect chain references, compacting the pools and
     // remapping zones, names, and references in one pass.
     {
-        static Synth::InstrumentEditorBank bank;
+        const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& bank = *bank_storage;
         make_valid_bank(bank.bank); // instrument 0 (env 1, lfo 1) on ch0; ch0 and ch1 enabled
 
         TEST(bank.bank.instruments.allocate() == 1);
@@ -13656,7 +14211,9 @@ int main()
     // Effect chains root LFOs: with every channel disabled the chain's LFO survives while the
     // instrument's LFO is reclaimed, and the chain's reference is remapped to the compacted id.
     {
-        static Synth::InstrumentEditorBank bank;
+        const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& bank = *bank_storage;
         make_valid_bank(bank.bank); // lfo 1 referenced by instrument 0
         TEST(bank.bank.lfos.allocate() == 1);
         bank.bank.lfos.entries[1].wave                            = Synth::WaveType::sawtooth_wave;
@@ -13681,9 +14238,13 @@ int main()
 
     // A clean bank reclaims nothing: the bank comes back byte-for-byte identical.
     {
-        static Synth::InstrumentEditorBank bank;
+        const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& bank = *bank_storage;
         make_valid_bank(bank.bank);
-        static Synth::InstrumentEditorBank before;
+        const std::unique_ptr<Synth::InstrumentEditorBank> before_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& before = *before_storage;
         memcpy(&before, &bank, sizeof(bank));
         Synth::reclaim_unused_slots(&bank);
         TEST(memcmp(&bank, &before, sizeof(bank)) == 0);
@@ -13692,7 +14253,9 @@ int main()
     // Disabled channels may hold stale zone bytes; reclaim clears references to removed
     // instruments and remaps the rest without touching the (skipped) zone structure.
     {
-        static Synth::InstrumentEditorBank bank;
+        const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& bank = *bank_storage;
         make_valid_bank(bank.bank); // instr 0 on ch0
         TEST(bank.bank.instruments.allocate() == 1);
         bank.bank.instruments.entries[1].layer_count = 1;
@@ -13717,25 +14280,29 @@ int main()
     // Validation negatives: each mutation makes exactly the targeted rule reject the bank.
     auto expect_invalid = [](Synth::InstrumentBank& bank) { TEST(! Synth::validate_instrument_bank(&bank)); };
     {
-        static Synth::InstrumentBank bank;
+        const std::unique_ptr<Synth::InstrumentBank> bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       bank         = *bank_storage;
         make_valid_bank(bank);
         bank.instruments.num_allocated = Synth::max_instruments + 1; // over capacity
         expect_invalid(bank);
     }
     {
-        static Synth::InstrumentBank bank;
+        const std::unique_ptr<Synth::InstrumentBank> bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       bank         = *bank_storage;
         make_valid_bank(bank);
         bank.instruments.num_allocated = 2; // count mismatch: only 1 occupied
         expect_invalid(bank);
     }
     {
-        static Synth::InstrumentBank bank;
+        const std::unique_ptr<Synth::InstrumentBank> bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       bank         = *bank_storage;
         make_valid_bank(bank);
         bank.instruments.free(0); // hole below num_allocated: count/occupied mismatch
         expect_invalid(bank);
     }
     {
-        static Synth::InstrumentBank bank;
+        const std::unique_ptr<Synth::InstrumentBank> bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       bank         = *bank_storage;
         make_valid_bank(bank);
         bank.channel_zones[1][0] = { 1, 0 };
         bank.channel_zones[1][1] = { 11, 0 };
@@ -13743,7 +14310,8 @@ int main()
         expect_invalid(bank);
     }
     {
-        static Synth::InstrumentBank bank;
+        const std::unique_ptr<Synth::InstrumentBank> bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       bank         = *bank_storage;
         make_valid_bank(bank);
         bank.channel_zones[1][0] = { 1, 0 };
         bank.channel_zones[1][1] = { 0, 0 };
@@ -13751,13 +14319,15 @@ int main()
         expect_invalid(bank);
     }
     {
-        static Synth::InstrumentBank bank;
+        const std::unique_ptr<Synth::InstrumentBank> bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       bank         = *bank_storage;
         make_valid_bank(bank);
         bank.channel_zones[1][0] = { 1, 200 }; // slot 0 instrument unoccupied (dangling)
         expect_invalid(bank);
     }
     {
-        static Synth::InstrumentBank bank;
+        const std::unique_ptr<Synth::InstrumentBank> bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       bank         = *bank_storage;
         make_valid_bank(bank);
         bank.channel_zones[1][0] = { 1, 0 };
         bank.channel_zones[1][1] = { 20, 1 }; // reachable entry references an unoccupied instrument
@@ -13765,7 +14335,8 @@ int main()
     }
     // Slot 0 must start at note 0 (stored start 1); any other first start is invalid.
     {
-        static Synth::InstrumentBank bank;
+        const std::unique_ptr<Synth::InstrumentBank> bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       bank         = *bank_storage;
         make_valid_bank(bank);
         bank.channel_zones[1][0] = { 5, 0 };
         expect_invalid(bank);
@@ -13773,7 +14344,8 @@ int main()
     // Disabled channels keep arbitrary zone bytes: garbage zones pass while disabled and
     // fail once the channel is enabled.
     {
-        static Synth::InstrumentBank bank;
+        const std::unique_ptr<Synth::InstrumentBank> bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       bank         = *bank_storage;
         make_valid_bank(bank);
         bank.channel_zones[3][0] = { 9, 7 };
         bank.channel_zones[3][1] = { 2, 80 }; // out of order
@@ -13784,14 +14356,16 @@ int main()
     }
     // channel_enabled bytes must be 0/1.
     {
-        static Synth::InstrumentBank bank;
+        const std::unique_ptr<Synth::InstrumentBank> bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       bank         = *bank_storage;
         make_valid_bank(bank);
         bank.channel_enabled[2] = 2;
         expect_invalid(bank);
     }
     // A full zone table with no terminator is valid (route_instrument semantics unchanged).
     {
-        static Synth::InstrumentBank bank;
+        const std::unique_ptr<Synth::InstrumentBank> bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       bank         = *bank_storage;
         make_valid_bank(bank);
         for (uint32_t e = 0; e < Synth::max_instr_per_channel; e++) {
             bank.channel_zones[1][e] = { static_cast<uint8_t>(e + 1), 0 };
@@ -13799,31 +14373,36 @@ int main()
         TEST(Synth::validate_instrument_bank(&bank));
     }
     {
-        static Synth::InstrumentBank bank;
+        const std::unique_ptr<Synth::InstrumentBank> bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       bank         = *bank_storage;
         make_valid_bank(bank);
         bank.instruments.entries[0].layers[0].targets[Synth::mod_volume].envelope_desc_id = 5; // dangling
         expect_invalid(bank);
     }
     {
-        static Synth::InstrumentBank bank;
+        const std::unique_ptr<Synth::InstrumentBank> bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       bank         = *bank_storage;
         make_valid_bank(bank);
         bank.instruments.entries[0].layers[0].targets[Synth::mod_pitch].lfo_desc_id = 9; // dangling
         expect_invalid(bank);
     }
     {
-        static Synth::InstrumentBank bank;
+        const std::unique_ptr<Synth::InstrumentBank> bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       bank         = *bank_storage;
         make_valid_bank(bank);
         bank.envelopes.entries[0].num_points = 0;
         expect_invalid(bank);
     }
     {
-        static Synth::InstrumentBank bank;
+        const std::unique_ptr<Synth::InstrumentBank> bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       bank         = *bank_storage;
         make_valid_bank(bank);
         bank.envelopes.entries[0].num_points = Synth::max_envelope_points + 1;
         expect_invalid(bank);
     }
     {
-        static Synth::InstrumentBank bank;
+        const std::unique_ptr<Synth::InstrumentBank> bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       bank         = *bank_storage;
         make_valid_bank(bank);
         Synth::EnvelopeDescriptor& env = bank.envelopes.entries[0];
         env.num_points                 = 3;
@@ -13831,7 +14410,8 @@ int main()
         expect_invalid(bank);
     }
     {
-        static Synth::InstrumentBank bank;
+        const std::unique_ptr<Synth::InstrumentBank> bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       bank         = *bank_storage;
         make_valid_bank(bank);
         Synth::EnvelopeDescriptor& env = bank.envelopes.entries[0];
         env.num_points                 = 3;
@@ -13839,56 +14419,65 @@ int main()
         expect_invalid(bank);
     }
     {
-        static Synth::InstrumentBank bank;
+        const std::unique_ptr<Synth::InstrumentBank> bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       bank         = *bank_storage;
         make_valid_bank(bank);
         Synth::EnvelopeDescriptor& env = bank.envelopes.entries[0];
         env.sustain_first_point        = 2; // sustain_first > sustain_last
         expect_invalid(bank);
     }
     {
-        static Synth::InstrumentBank bank;
+        const std::unique_ptr<Synth::InstrumentBank> bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       bank         = *bank_storage;
         make_valid_bank(bank);
         bank.envelopes.entries[0].sustain_last_point = Synth::max_envelope_points;
         expect_invalid(bank);
     }
     {
-        static Synth::InstrumentBank bank;
+        const std::unique_ptr<Synth::InstrumentBank> bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       bank         = *bank_storage;
         make_valid_bank(bank);
         bank.lfos.entries[0].period_ms = 0;
         expect_invalid(bank);
     }
     {
-        static Synth::InstrumentBank bank;
+        const std::unique_ptr<Synth::InstrumentBank> bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       bank         = *bank_storage;
         make_valid_bank(bank);
         bank.lfos.entries[0].wave = Synth::WaveType::no_wave; // not runtime-supported
         expect_invalid(bank);
     }
     {
-        static Synth::InstrumentBank bank;
+        const std::unique_ptr<Synth::InstrumentBank> bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       bank         = *bank_storage;
         make_valid_bank(bank);
         bank.lfos.entries[0].wave = Synth::WaveType::pulse_wave;
         expect_invalid(bank);
     }
     {
-        static Synth::InstrumentBank bank;
+        const std::unique_ptr<Synth::InstrumentBank> bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       bank         = *bank_storage;
         make_valid_bank(bank);
         bank.lfos.entries[0].wave = Synth::WaveType::noise_wave;
         expect_invalid(bank);
     }
     {
-        static Synth::InstrumentBank bank;
+        const std::unique_ptr<Synth::InstrumentBank> bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       bank         = *bank_storage;
         make_valid_bank(bank);
         bank.instruments.entries[0].layers[0].osc_type[0] = static_cast<Synth::WaveType>(99);
         expect_invalid(bank);
     }
     {
-        static Synth::InstrumentBank bank;
+        const std::unique_ptr<Synth::InstrumentBank> bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       bank         = *bank_storage;
         make_valid_bank(bank);
         bank.instruments.entries[0].layers[0].osc_type[1] = static_cast<Synth::WaveType>(200);
         expect_invalid(bank);
     }
     {
-        static Synth::InstrumentBank bank;
+        const std::unique_ptr<Synth::InstrumentBank> bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       bank         = *bank_storage;
         make_valid_bank(bank);
         bank.instruments.entries[0].layers[0].osc_mode = static_cast<Synth::OscMode>(4);
         expect_invalid(bank);
@@ -13898,31 +14487,36 @@ int main()
     // runtime never renders it.  Only a count above the layer maximum
     // still refuses.
     {
-        static Synth::InstrumentBank bank;
+        const std::unique_ptr<Synth::InstrumentBank> bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       bank         = *bank_storage;
         make_valid_bank(bank);
         bank.instruments.entries[0].layer_count = Synth::max_layers + 1;
         expect_invalid(bank);
     }
     {
-        static Synth::InstrumentBank bank;
+        const std::unique_ptr<Synth::InstrumentBank> bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       bank         = *bank_storage;
         make_valid_bank(bank);
         bank.instruments.entries[0].layers[0].targets[0].lfo_depth_source = static_cast<Synth::ModSource>(77);
         expect_invalid(bank);
     }
     {
-        static Synth::InstrumentBank bank;
+        const std::unique_ptr<Synth::InstrumentBank> bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       bank         = *bank_storage;
         make_valid_bank(bank);
         bank.instruments.entries[0].layers[0].targets[0].lfo_op = static_cast<Synth::SourceOp>(9);
         expect_invalid(bank);
     }
     {
-        static Synth::InstrumentBank bank;
+        const std::unique_ptr<Synth::InstrumentBank> bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       bank         = *bank_storage;
         make_valid_bank(bank);
         bank.instruments.entries[0].layers[0].targets[0].num_inputs = Synth::max_mod_inputs + 1;
         expect_invalid(bank);
     }
     {
-        static Synth::InstrumentBank bank;
+        const std::unique_ptr<Synth::InstrumentBank> bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       bank         = *bank_storage;
         make_valid_bank(bank);
         bank.instruments.entries[0].layers[0].targets[0].num_inputs   = 1;
         bank.instruments.entries[0].layers[0].targets[0].inputs[0].op = static_cast<Synth::SourceOp>(7);
@@ -13935,7 +14529,8 @@ int main()
 
     // A chain with one enabled delay and an LFO-driven param passes validation.
     {
-        static Synth::InstrumentBank bank;
+        const std::unique_ptr<Synth::InstrumentBank> bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       bank         = *bank_storage;
         make_valid_bank(bank);
         Synth::EffectChainBinding& chain         = bank.channel_chains[0];
         chain.num_effects                        = 1;
@@ -13948,20 +14543,23 @@ int main()
         TEST(Synth::validate_instrument_bank(&bank));
     }
     {
-        static Synth::InstrumentBank bank;
+        const std::unique_ptr<Synth::InstrumentBank> bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       bank         = *bank_storage;
         make_valid_bank(bank);
         bank.channel_chains[0].num_effects     = 1;
         bank.channel_chains[0].effects[0].type = Synth::EffectType::num_types; // invalid type
         expect_invalid(bank);
     }
     {
-        static Synth::InstrumentBank bank;
+        const std::unique_ptr<Synth::InstrumentBank> bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       bank         = *bank_storage;
         make_valid_bank(bank);
         bank.channel_chains[0].num_effects = Synth::max_chain_effects + 1; // over capacity
         expect_invalid(bank);
     }
     {
-        static Synth::InstrumentBank bank;
+        const std::unique_ptr<Synth::InstrumentBank> bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       bank         = *bank_storage;
         make_valid_bank(bank);
         bank.channel_chains[0].num_effects                        = 1;
         bank.channel_chains[0].effects[0].type                    = Synth::EffectType::delay;
@@ -13969,7 +14567,8 @@ int main()
         expect_invalid(bank);
     }
     {
-        static Synth::InstrumentBank bank;
+        const std::unique_ptr<Synth::InstrumentBank> bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       bank         = *bank_storage;
         make_valid_bank(bank);
         bank.master_chain.num_effects                       = 1;
         bank.master_chain.effects[0].type                   = Synth::EffectType::delay;
@@ -13980,7 +14579,8 @@ int main()
     }
 
     {
-        static Synth::InstrumentBank bank;
+        const std::unique_ptr<Synth::InstrumentBank> bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       bank         = *bank_storage;
         make_valid_bank(bank);
         bank.channel_chains[0].num_effects                             = 1;
         bank.channel_chains[0].effects[0].type                         = Synth::EffectType::delay;
@@ -13989,7 +14589,8 @@ int main()
         expect_invalid(bank);
     }
     {
-        static Synth::InstrumentBank bank;
+        const std::unique_ptr<Synth::InstrumentBank> bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       bank         = *bank_storage;
         make_valid_bank(bank);
         bank.channel_chains[0].num_effects                       = 1;
         bank.channel_chains[0].effects[0].type                   = Synth::EffectType::delay;
@@ -13997,7 +14598,8 @@ int main()
         expect_invalid(bank);
     }
     {
-        static Synth::InstrumentBank bank;
+        const std::unique_ptr<Synth::InstrumentBank> bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       bank         = *bank_storage;
         make_valid_bank(bank);
         bank.channel_chains[0].num_effects                       = 1;
         bank.channel_chains[0].effects[0].type                   = Synth::EffectType::delay;
@@ -14005,7 +14607,8 @@ int main()
         expect_invalid(bank);
     }
     {
-        static Synth::InstrumentBank bank;
+        const std::unique_ptr<Synth::InstrumentBank> bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       bank         = *bank_storage;
         make_valid_bank(bank);
         bank.channel_chains[0].num_effects                             = 1;
         bank.channel_chains[0].effects[0].type                         = Synth::EffectType::delay;
@@ -14015,7 +14618,8 @@ int main()
         expect_invalid(bank);
     }
     {
-        static Synth::InstrumentBank bank;
+        const std::unique_ptr<Synth::InstrumentBank> bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       bank         = *bank_storage;
         make_valid_bank(bank);
         bank.master_chain.num_effects = Synth::max_chain_effects; // 4 delays: exactly the state budget
         for (uint32_t slot = 0; slot < Synth::max_chain_effects; slot++) {
@@ -14025,7 +14629,8 @@ int main()
         TEST(Synth::validate_instrument_bank(&bank));
     }
     {
-        static Synth::InstrumentBank bank;
+        const std::unique_ptr<Synth::InstrumentBank> bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       bank         = *bank_storage;
         make_valid_bank(bank);
         bank.master_chain.num_effects = Synth::max_chain_effects;
         for (uint32_t slot = 0; slot < Synth::max_chain_effects; slot++) {
@@ -14039,7 +14644,8 @@ int main()
     }
     {
         // Exactly 32 modulated effect params pass; one more is rejected.
-        static Synth::InstrumentBank bank;
+        const std::unique_ptr<Synth::InstrumentBank> bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       bank         = *bank_storage;
         make_valid_bank(bank);
         uint32_t num_modulated = 0;
         for (uint32_t channel = 0; channel < Synth::max_channels && num_modulated < 32; channel++) {
@@ -14065,7 +14671,8 @@ int main()
 
     // A stateful chain expands onto pool nodes with state at the region base, one clear range.
     {
-        static Synth::InstrumentBank bank;
+        const std::unique_ptr<Synth::InstrumentBank> bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       bank         = *bank_storage;
         make_valid_bank(bank);
         Synth::EffectSlotBinding* const delay = enabled_effect(bank, 0, 0, Synth::EffectType::delay);
         delay->bindings[0].base_value         = 300.0f;
@@ -14073,8 +14680,8 @@ int main()
         delay->bindings[0].lfo_depth          = 50.0f;
 
         Synth::init_effect_state_region(fake_region_base);
-        static Synth::EffectExpansionPlan plan;
-        const char*                       error = nullptr;
+        Synth::EffectExpansionPlan plan  = {};
+        const char*                error = nullptr;
         TEST(Synth::preflight_effect_expansion(bank, &plan, &error));
         TEST(plan.slots[0][0].state_offs == fake_region_base);
         TEST(plan.slots[0][0].needs_clear);
@@ -14082,9 +14689,9 @@ int main()
         TEST(plan.num_nodes == 2); // dest + LFO leaf
         TEST(plan.consumed_bytes == Synth::get_effect_state_bytes(Synth::EffectType::delay));
 
-        static Synth::EffectChain chains[Synth::max_channels];
-        static Synth::EffectChain master;
-        FakeWriter                writer = { 50, 0, 0, 0, 0 };
+        Synth::EffectChain chains[Synth::max_channels] = {};
+        Synth::EffectChain master                      = {};
+        FakeWriter         writer                      = { 50, 0, 0, 0, 0 };
         Synth::commit_effect_expansion(bank, plan, chains, &master, fake_writer_binding(writer));
         TEST(chains[0].num_effects == 1);
         TEST(chains[0].effects[0].type == Synth::EffectType::delay);
@@ -14104,7 +14711,8 @@ int main()
     // parameter - the preflight consumes one mod-param entry and the
     // commit fills params[2] from the bank's base value.
     {
-        static Synth::InstrumentBank bank;
+        const std::unique_ptr<Synth::InstrumentBank> bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       bank         = *bank_storage;
         make_valid_bank(bank);
         Synth::EffectSlotBinding* const fir = enabled_effect(bank, 0, 0, Synth::EffectType::fir);
         fir->bindings[2].base_value         = 37.0f;
@@ -14112,12 +14720,12 @@ int main()
         fir->bindings[2].lfo_depth          = 0.5f;
         TEST(Synth::validate_instrument_bank(&bank));
         Synth::init_effect_state_region(fake_region_base);
-        static Synth::EffectExpansionPlan plan;
-        const char*                       error = nullptr;
+        Synth::EffectExpansionPlan plan  = {};
+        const char*                error = nullptr;
         TEST(Synth::preflight_effect_expansion(bank, &plan, &error));
-        static Synth::EffectChain chains[Synth::max_channels];
-        static Synth::EffectChain master;
-        FakeWriter                writer = { 50, 0, 0, 0, 0 };
+        Synth::EffectChain chains[Synth::max_channels] = {};
+        Synth::EffectChain master                      = {};
+        FakeWriter         writer                      = { 50, 0, 0, 0, 0 };
         Synth::commit_effect_expansion(bank, plan, chains, &master, fake_writer_binding(writer));
         TEST(chains[0].num_effects == 1);
         TEST(chains[0].effects[0].type == Synth::EffectType::fir);
@@ -14128,17 +14736,18 @@ int main()
 
     // An unchanged slot keeps its state offset and emits no clear; a type change re-allocates.
     {
-        static Synth::InstrumentBank bank;
+        const std::unique_ptr<Synth::InstrumentBank> bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       bank         = *bank_storage;
         make_valid_bank(bank);
         enabled_effect(bank, 0, 0, Synth::EffectType::delay);
 
         Synth::init_effect_state_region(fake_region_base);
-        static Synth::EffectExpansionPlan plan;
-        const char*                       error = nullptr;
+        Synth::EffectExpansionPlan plan  = {};
+        const char*                error = nullptr;
         TEST(Synth::preflight_effect_expansion(bank, &plan, &error));
-        static Synth::EffectChain chains[Synth::max_channels];
-        static Synth::EffectChain master;
-        FakeWriter                writer = { 1, 0, 0, 0, 0 };
+        Synth::EffectChain chains[Synth::max_channels] = {};
+        Synth::EffectChain master                      = {};
+        FakeWriter         writer                      = { 1, 0, 0, 0, 0 };
         Synth::commit_effect_expansion(bank, plan, chains, &master, fake_writer_binding(writer));
         (void)Synth::take_effect_clear_ranges();
 
@@ -14159,20 +14768,21 @@ int main()
     }
     // Over-budget and over-pool preflights fail without touching committed state.
     {
-        static Synth::InstrumentBank bank;
+        const std::unique_ptr<Synth::InstrumentBank> bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       bank         = *bank_storage;
         make_valid_bank(bank);
         Synth::init_effect_state_region(fake_region_base);
-        static Synth::EffectExpansionPlan plan;
-        const char*                       error = nullptr;
+        Synth::EffectExpansionPlan plan  = {};
+        const char*                error = nullptr;
 
         // Master: 4 delays - exactly the worst chain, fits the budget.
         for (uint32_t slot = 0; slot < Synth::max_chain_effects; slot++) {
             enabled_effect(bank, Synth::max_channels, slot, Synth::EffectType::delay);
         }
         TEST(Synth::preflight_effect_expansion(bank, &plan, &error));
-        static Synth::EffectChain chains[Synth::max_channels];
-        static Synth::EffectChain master;
-        FakeWriter                writer = { 1, 0, 0, 0, 0 };
+        Synth::EffectChain chains[Synth::max_channels] = {};
+        Synth::EffectChain master                      = {};
+        FakeWriter         writer                      = { 1, 0, 0, 0, 0 };
         Synth::commit_effect_expansion(bank, plan, chains, &master, fake_writer_binding(writer));
         (void)Synth::take_effect_clear_ranges();
         const uint32_t committed_consumed = plan.consumed_bytes;
@@ -14191,7 +14801,8 @@ int main()
 
         // 33 modulated params exceed the modulation pool: rejected wherever they sit.
         Synth::init_effect_state_region(fake_region_base);
-        static Synth::InstrumentBank pool_bank;
+        const std::unique_ptr<Synth::InstrumentBank> pool_bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       pool_bank         = *pool_bank_storage;
         make_valid_bank(pool_bank);
         uint32_t num_modulated = 0;
         for (uint32_t channel = 0; channel < Synth::max_channels && num_modulated < 33; channel++) {
@@ -14210,7 +14821,8 @@ int main()
 
         // An input-only binding (no LFO) costs one node, not two.
         Synth::init_effect_state_region(fake_region_base);
-        static Synth::InstrumentBank input_bank;
+        const std::unique_ptr<Synth::InstrumentBank> input_bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       input_bank         = *input_bank_storage;
         make_valid_bank(input_bank);
         Synth::EffectSlotBinding* const delay = enabled_effect(input_bank, 0, 0, Synth::EffectType::delay);
         delay->bindings[0].num_inputs         = 1;
@@ -14220,18 +14832,19 @@ int main()
     }
     // A shrinking chain leaves no stale instances behind.
     {
-        static Synth::InstrumentBank bank;
+        const std::unique_ptr<Synth::InstrumentBank> bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       bank         = *bank_storage;
         make_valid_bank(bank);
         enabled_effect(bank, 0, 0, Synth::EffectType::delay);
         enabled_effect(bank, 0, 1, Synth::EffectType::chorus);
 
         Synth::init_effect_state_region(fake_region_base);
-        static Synth::EffectExpansionPlan plan;
-        const char*                       error = nullptr;
+        Synth::EffectExpansionPlan plan  = {};
+        const char*                error = nullptr;
         TEST(Synth::preflight_effect_expansion(bank, &plan, &error));
-        static Synth::EffectChain chains[Synth::max_channels];
-        static Synth::EffectChain master;
-        FakeWriter                writer = { 1, 0, 0, 0, 0 };
+        Synth::EffectChain chains[Synth::max_channels] = {};
+        Synth::EffectChain master                      = {};
+        FakeWriter         writer                      = { 1, 0, 0, 0, 0 };
         Synth::commit_effect_expansion(bank, plan, chains, &master, fake_writer_binding(writer));
         TEST(chains[0].num_effects == 2);
 
@@ -14247,22 +14860,23 @@ int main()
 
     // Stateless effects (distortion) claim no state, no offset and no clear range.
     {
-        static Synth::InstrumentBank bank;
+        const std::unique_ptr<Synth::InstrumentBank> bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       bank         = *bank_storage;
         make_valid_bank(bank);
         Synth::EffectSlotBinding* const distortion = enabled_effect(bank, 0, 0, Synth::EffectType::distortion);
         distortion->bindings[0].base_value         = 5.0f;
 
         Synth::init_effect_state_region(fake_region_base);
-        static Synth::EffectExpansionPlan plan;
-        const char*                       error = nullptr;
+        Synth::EffectExpansionPlan plan  = {};
+        const char*                error = nullptr;
         TEST(Synth::preflight_effect_expansion(bank, &plan, &error));
         TEST(plan.slots[0][0].state_offs == 0);
         TEST(! plan.slots[0][0].needs_clear);
         TEST(plan.consumed_bytes == 0);
 
-        static Synth::EffectChain chains[Synth::max_channels];
-        static Synth::EffectChain master;
-        FakeWriter                writer = { 1, 0, 0, 0, 0 };
+        Synth::EffectChain chains[Synth::max_channels] = {};
+        Synth::EffectChain master                      = {};
+        FakeWriter         writer                      = { 1, 0, 0, 0, 0 };
         Synth::commit_effect_expansion(bank, plan, chains, &master, fake_writer_binding(writer));
         TEST(chains[0].effects[0].enabled);
         TEST(chains[0].effects[0].state_offs == 0);
@@ -14272,25 +14886,27 @@ int main()
     // is only reachable after a passing preflight (set_current_bank returns early on
     // failure), so a rejected bank can never reach the writer or the chains.
     {
-        static Synth::InstrumentBank bank;
+        const std::unique_ptr<Synth::InstrumentBank> bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       bank         = *bank_storage;
         make_valid_bank(bank);
         Synth::EffectSlotBinding* const delay = enabled_effect(bank, 0, 0, Synth::EffectType::delay);
         delay->bindings[0].num_inputs         = Synth::max_mod_inputs + 1; // over the input bound
 
         Synth::init_effect_state_region(fake_region_base);
-        static Synth::EffectExpansionPlan plan;
-        plan.consumed_bytes = 0xABCD;
-        const char* error   = nullptr;
+        Synth::EffectExpansionPlan plan = {};
+        plan.consumed_bytes             = 0xABCD;
+        const char* error               = nullptr;
         TEST(! Synth::preflight_effect_expansion(bank, &plan, &error));
         TEST(plan.consumed_bytes == 0xABCD);                // untouched by the failed run
         TEST(Synth::take_effect_clear_ranges().count == 0); // nothing recorded either
     }
     // Each commit-safety rule the writer relies on is checked by the preflight.
     {
-        static Synth::InstrumentBank bank;
+        const std::unique_ptr<Synth::InstrumentBank> bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       bank         = *bank_storage;
         make_valid_bank(bank);
-        const char*                       error = nullptr;
-        static Synth::EffectExpansionPlan plan;
+        const char*                error = nullptr;
+        Synth::EffectExpansionPlan plan  = {};
 
         Synth::init_effect_state_region(fake_region_base);
 
@@ -14320,17 +14936,18 @@ int main()
     }
     // Only final-plan allocations require clearing after several undrained publishes.
     {
-        static Synth::InstrumentBank bank;
+        const std::unique_ptr<Synth::InstrumentBank> bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       bank         = *bank_storage;
         make_valid_bank(bank);
         enabled_effect(bank, 0, 0, Synth::EffectType::chorus);
         enabled_effect(bank, 1, 0, Synth::EffectType::chorus);
 
         Synth::init_effect_state_region(fake_region_base);
-        static Synth::EffectExpansionPlan plan;
-        const char*                       error = nullptr;
-        static Synth::EffectChain         chains[Synth::max_channels];
-        static Synth::EffectChain         master;
-        FakeWriter                        writer = { 1, 0, 0, 0, 0 };
+        Synth::EffectExpansionPlan plan                        = {};
+        const char*                error                       = nullptr;
+        Synth::EffectChain         chains[Synth::max_channels] = {};
+        Synth::EffectChain         master                      = {};
+        FakeWriter                 writer                      = { 1, 0, 0, 0, 0 };
 
         TEST(Synth::preflight_effect_expansion(bank, &plan, &error));
         Synth::commit_effect_expansion(bank, plan, chains, &master, fake_writer_binding(writer));
@@ -14353,7 +14970,8 @@ int main()
     }
     // Channel 15 and the master chain expand like any other chain.
     {
-        static Synth::InstrumentBank bank;
+        const std::unique_ptr<Synth::InstrumentBank> bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       bank         = *bank_storage;
         make_valid_bank(bank);
         Synth::EffectSlotBinding* const ch15 =
             enabled_effect(bank, Synth::max_channels - 1, 0, Synth::EffectType::delay);
@@ -14362,16 +14980,16 @@ int main()
         rev->bindings[0].base_value         = 0.7f;
 
         Synth::init_effect_state_region(fake_region_base);
-        static Synth::EffectExpansionPlan plan;
-        const char*                       error = nullptr;
+        Synth::EffectExpansionPlan plan  = {};
+        const char*                error = nullptr;
         TEST(Synth::preflight_effect_expansion(bank, &plan, &error));
         TEST(plan.slots[Synth::max_channels - 1][0].state_offs == fake_region_base);
         const uint32_t delay_bytes = Synth::get_effect_state_bytes(Synth::EffectType::delay);
         TEST(plan.slots[Synth::max_channels][0].state_offs == fake_region_base + delay_bytes);
 
-        static Synth::EffectChain chains[Synth::max_channels];
-        static Synth::EffectChain master;
-        FakeWriter                writer = { 1, 0, 0, 0, 0 };
+        Synth::EffectChain chains[Synth::max_channels] = {};
+        Synth::EffectChain master                      = {};
+        FakeWriter         writer                      = { 1, 0, 0, 0, 0 };
         Synth::commit_effect_expansion(bank, plan, chains, &master, fake_writer_binding(writer));
         TEST(chains[Synth::max_channels - 1].effects[0].params[0] == 100.0f);
         TEST(master.effects[0].type == Synth::EffectType::reverb);
@@ -14380,17 +14998,18 @@ int main()
     }
     // Init and two drained publishes clear only the last live allocation.
     {
-        static Synth::InstrumentBank bank;
+        const std::unique_ptr<Synth::InstrumentBank> bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       bank         = *bank_storage;
         make_valid_bank(bank);
         Synth::EffectSlotBinding* const chorus = enabled_effect(bank, 0, 0, Synth::EffectType::chorus);
         chorus->bindings[0].base_value         = 1.5f;
 
         Synth::init_effect_state_region(fake_region_base);
-        static Synth::EffectExpansionPlan plan;
-        const char*                       error = nullptr;
-        static Synth::EffectChain         chains[Synth::max_channels];
-        static Synth::EffectChain         master;
-        FakeWriter                        writer = { 1, 0, 0, 0, 0 };
+        Synth::EffectExpansionPlan plan                        = {};
+        const char*                error                       = nullptr;
+        Synth::EffectChain         chains[Synth::max_channels] = {};
+        Synth::EffectChain         master                      = {};
+        FakeWriter                 writer                      = { 1, 0, 0, 0, 0 };
 
         TEST(Synth::preflight_effect_expansion(bank, &plan, &error));
         Synth::commit_effect_expansion(bank, plan, chains, &master, fake_writer_binding(writer));
@@ -14411,15 +15030,16 @@ int main()
 
     // Live ranges are reserved before newly introduced earlier slots are placed.
     {
-        static Synth::InstrumentBank bank;
+        const std::unique_ptr<Synth::InstrumentBank> bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       bank         = *bank_storage;
         make_valid_bank(bank);
         enabled_effect(bank, Synth::max_channels, 0, Synth::EffectType::delay);
         Synth::init_effect_state_region(fake_region_base);
-        Synth::EffectExpansionPlan plan  = {};
-        const char*                error = nullptr;
-        static Synth::EffectChain  chains[Synth::max_channels];
-        static Synth::EffectChain  master;
-        FakeWriter                 writer = { 1, 0, 0, 0, 0 };
+        Synth::EffectExpansionPlan plan                        = {};
+        const char*                error                       = nullptr;
+        Synth::EffectChain         chains[Synth::max_channels] = {};
+        Synth::EffectChain         master                      = {};
+        FakeWriter                 writer                      = { 1, 0, 0, 0, 0 };
         TEST(Synth::preflight_effect_expansion(bank, &plan, &error));
         Synth::commit_effect_expansion(bank, plan, chains, &master, fake_writer_binding(writer));
         (void)Synth::take_effect_clear_ranges();
@@ -14435,15 +15055,16 @@ int main()
     }
     // Unrendered lineage survives compatible publishes exactly once.
     {
-        static Synth::InstrumentBank bank;
+        const std::unique_ptr<Synth::InstrumentBank> bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       bank         = *bank_storage;
         make_valid_bank(bank);
         enabled_effect(bank, 0, 0, Synth::EffectType::delay);
         Synth::init_effect_state_region(fake_region_base);
-        Synth::EffectExpansionPlan plan  = {};
-        const char*                error = nullptr;
-        static Synth::EffectChain  chains[Synth::max_channels];
-        static Synth::EffectChain  master;
-        FakeWriter                 writer = { 1, 0, 0, 0, 0 };
+        Synth::EffectExpansionPlan plan                        = {};
+        const char*                error                       = nullptr;
+        Synth::EffectChain         chains[Synth::max_channels] = {};
+        Synth::EffectChain         master                      = {};
+        FakeWriter                 writer                      = { 1, 0, 0, 0, 0 };
         for (uint32_t publish = 0; publish < 3; ++publish) {
             TEST(Synth::preflight_effect_expansion(bank, &plan, &error));
             TEST(plan.slots[0][0].needs_clear);
@@ -14459,15 +15080,16 @@ int main()
     }
     // Repeated full bypass, enable churn and type churn have bounded live state.
     {
-        static Synth::InstrumentBank bank;
+        const std::unique_ptr<Synth::InstrumentBank> bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       bank         = *bank_storage;
         make_valid_bank(bank);
         Synth::init_effect_state_region(fake_region_base);
-        Synth::EffectExpansionPlan plan  = {};
-        const char*                error = nullptr;
-        static Synth::EffectChain  chains[Synth::max_channels];
-        static Synth::EffectChain  master;
-        FakeWriter                 writer                 = { 1, 0, 0, 0, 0 };
-        uint32_t                   successful_transitions = 0;
+        Synth::EffectExpansionPlan plan                        = {};
+        const char*                error                       = nullptr;
+        Synth::EffectChain         chains[Synth::max_channels] = {};
+        Synth::EffectChain         master                      = {};
+        FakeWriter                 writer                      = { 1, 0, 0, 0, 0 };
+        uint32_t                   successful_transitions      = 0;
         for (uint32_t cycle = 0; cycle < 100; ++cycle) {
             for (uint32_t phase = 0; phase < 4; ++phase) {
                 bank.master_chain = {};
@@ -14506,17 +15128,18 @@ int main()
     }
     // Fragmented within-budget refusal preserves the caller, writer, live chains and pending clears.
     {
-        static Synth::InstrumentBank bank;
+        const std::unique_ptr<Synth::InstrumentBank> bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       bank         = *bank_storage;
         make_valid_bank(bank);
         for (uint32_t i = 0; i < 14; ++i) {
             enabled_effect(bank, i / 4, i % 4, Synth::EffectType::reverb);
         }
         Synth::init_effect_state_region(fake_region_base);
-        Synth::EffectExpansionPlan plan  = {};
-        const char*                error = nullptr;
-        static Synth::EffectChain  chains[Synth::max_channels];
-        static Synth::EffectChain  master;
-        FakeWriter                 writer = { 1, 0, 0, 0, 0 };
+        Synth::EffectExpansionPlan plan                        = {};
+        const char*                error                       = nullptr;
+        Synth::EffectChain         chains[Synth::max_channels] = {};
+        Synth::EffectChain         master                      = {};
+        FakeWriter                 writer                      = { 1, 0, 0, 0, 0 };
         TEST(Synth::preflight_effect_expansion(bank, &plan, &error));
         Synth::commit_effect_expansion(bank, plan, chains, &master, fake_writer_binding(writer));
         (void)Synth::take_effect_clear_ranges();
@@ -14532,9 +15155,9 @@ int main()
         TEST(7 * Synth::get_effect_state_bytes(Synth::EffectType::reverb) +
                  Synth::get_effect_state_bytes(Synth::EffectType::delay) <
              Synth::effect_state_budget);
-        const Synth::EffectExpansionPlan before        = plan;
-        const FakeWriter                 writer_before = writer;
-        static Synth::EffectChain        chains_before[Synth::max_channels];
+        const Synth::EffectExpansionPlan before                             = plan;
+        const FakeWriter                 writer_before                      = writer;
+        Synth::EffectChain               chains_before[Synth::max_channels] = {};
         memcpy(chains_before, chains, sizeof(chains));
         TEST(! Synth::preflight_effect_expansion(bank, &plan, &error));
         TEST(error && strcmp(error, "effect state has no contiguous free range") == 0);
@@ -14545,13 +15168,16 @@ int main()
     }
     // Proposed audio capture and gesture preflight share validation without mutating the old wire.
     {
-        static Synth::InstrumentEditorBank authored;
+        const std::unique_ptr<Synth::InstrumentEditorBank> authored_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& authored = *authored_storage;
         memset(static_cast<void*>(&authored), 0, sizeof(authored));
         make_valid_bank(authored.bank);
         enabled_effect(authored.bank, 0, 0, Synth::EffectType::delay);
         enabled_effect(authored.bank, 0, 1, Synth::EffectType::chorus);
-        static Sculptor::Graph       graph;
-        Sculptor::EffectGraphMapping mapping = {};
+        const std::unique_ptr<Sculptor::Graph> graph_storage = std::make_unique<Sculptor::Graph>();
+        Sculptor::Graph&                       graph         = *graph_storage;
+        Sculptor::EffectGraphMapping           mapping       = {};
         TEST(Sculptor::project_effect_chain_to_graph(authored, 0, &graph, &mapping));
 
         struct CaptureContext {
@@ -14610,15 +15236,20 @@ int main()
     }
     // Authoring slots stay stable; only complete topology is compiled for playback.
     {
-        static Synth::InstrumentEditorBank restored;
-        static Synth::InstrumentEditorBank authored;
+        const std::unique_ptr<Synth::InstrumentEditorBank> restored_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank&                       restored = *restored_storage;
+        const std::unique_ptr<Synth::InstrumentEditorBank> authored_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& authored = *authored_storage;
         memset(static_cast<void*>(&authored), 0, sizeof(authored));
         make_valid_bank(authored.bank);
         enabled_effect(authored.bank, 0, 0, Synth::EffectType::delay)->bindings[0].base_value  = 217.0f;
         enabled_effect(authored.bank, 0, 1, Synth::EffectType::chorus)->bindings[0].base_value = 3.25f;
         authored.bank.channel_chains[0].effects[0].bindings[0].lfo_desc_id                     = 1;
         authored.bank.channel_chains[0].effects[1].bindings[0].lfo_desc_id                     = 1;
-        static Synth::InstrumentBank playback;
+        const std::unique_ptr<Synth::InstrumentBank> playback_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       playback         = *playback_storage;
         TEST(Sculptor::compile_editor_playback_bank(authored, &playback));
         TEST(memcmp(&playback.channel_chains[0],
                     &authored.bank.channel_chains[0],
@@ -14666,14 +15297,16 @@ int main()
             authored.effect_audio[0] = audio;
             TEST(! Sculptor::validate_effect_audio_topology(retained, audio));
             memset(static_cast<void*>(&playback), 0xA5, sizeof(playback));
-            static Synth::InstrumentBank before;
+            const std::unique_ptr<Synth::InstrumentBank> before_storage = std::make_unique<Synth::InstrumentBank>();
+            Synth::InstrumentBank&                       before         = *before_storage;
             memcpy(&before, &playback, sizeof(before));
             TEST(! Sculptor::compile_editor_playback_bank(authored, &playback));
             TEST(memcmp(&playback, &before, sizeof(playback)) == 0);
         }
-        authored.effect_audio[0] = valid[1];
-        static Sculptor::Graph              graph;
-        static Sculptor::EffectGraphMapping mapping;
+        authored.effect_audio[0]                             = valid[1];
+        const std::unique_ptr<Sculptor::Graph> graph_storage = std::make_unique<Sculptor::Graph>();
+        Sculptor::Graph&                       graph         = *graph_storage;
+        Sculptor::EffectGraphMapping           mapping       = {};
         TEST(Sculptor::project_effect_chain_to_graph(authored, 0, &graph, &mapping));
         TEST(graph.node_occupied(mapping.effect_nodes[0]));
         TEST(graph.node_occupied(mapping.effect_nodes[1]));
@@ -14691,11 +15324,15 @@ int main()
         Synth::EffectsDocument decoded = {};
         TEST(Synth::decode_effects_json(text, length, &decoded));
         TEST(memcmp(&decoded.audio, &document.audio, sizeof(document.audio)) == 0);
-        static Synth::InstrumentEditorBank pasted;
+        const std::unique_ptr<Synth::InstrumentEditorBank> pasted_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& pasted = *pasted_storage;
         TEST(Sculptor::replace_effect_chain_candidate(&authored, 1, &decoded, &pasted));
         TEST(memcmp(&pasted.effect_audio[1], &valid[1], sizeof(document.audio)) == 0);
-        static char    bank_text[1024 * 1024];
-        const uint32_t bank_length = Synth::encode_editor_bank_json(&authored, bank_text, sizeof(bank_text));
+        const std::unique_ptr<FixedArray<char, 1024 * 1024>> bank_text_storage =
+            std::make_unique<FixedArray<char, 1024 * 1024>>();
+        char (&bank_text)[1024 * 1024] = bank_text_storage->elements;
+        const uint32_t bank_length     = Synth::encode_editor_bank_json(&authored, bank_text, sizeof(bank_text));
         TEST(bank_length != 0);
         TEST(strstr(bank_text, "\"instrument_editor_bank\":null") != nullptr);
         TEST(strstr(bank_text, "instrument_editor_bank_v2") != nullptr);
@@ -14742,7 +15379,9 @@ int main()
         for (const char* envelope : envelopes) {
             // A v2 payload without the required owner metadata must refuse, not default serial.
             memset(static_cast<void*>(&restored), 0xA5, sizeof(restored));
-            static Synth::InstrumentEditorBank unchanged;
+            const std::unique_ptr<Synth::InstrumentEditorBank> unchanged_storage =
+                std::make_unique<Synth::InstrumentEditorBank>();
+            Synth::InstrumentEditorBank& unchanged = *unchanged_storage;
             memcpy(&unchanged, &restored, sizeof(restored));
             TEST(! Synth::decode_editor_bank_json(envelope, static_cast<uint32_t>(strlen(envelope)), &restored));
             TEST(memcmp(&restored, &unchanged, sizeof(restored)) == 0);
@@ -14761,15 +15400,20 @@ int main()
 
     // The queued image is playable, never the retained authoring collection.
     {
-        static Synth::InstrumentEditorBank source;
+        const std::unique_ptr<Synth::InstrumentEditorBank> source_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& source = *source_storage;
         memset(static_cast<void*>(&source), 0, sizeof(source));
         make_valid_bank(source.bank);
         enabled_effect(source.bank, 0, 0, Synth::EffectType::delay)->bindings[0].base_value  = 231.0f;
         enabled_effect(source.bank, 0, 1, Synth::EffectType::chorus)->bindings[0].base_value = 4.5f;
         source.effect_audio[0]                                                               = { 1, { 0, 5, 0, 0, 2 } };
         enabled_effect(source.bank, Synth::max_channels, 0, Synth::EffectType::reverb);
-        source.effect_audio[Synth::max_channels] = { 1, { 0, 0, 0, 0, 1 } };
-        static Synth::InstrumentBank packet, installed;
+        source.effect_audio[Synth::max_channels]                       = { 1, { 0, 0, 0, 0, 1 } };
+        const std::unique_ptr<Synth::InstrumentBank> packet_storage    = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       packet            = *packet_storage;
+        const std::unique_ptr<Synth::InstrumentBank> installed_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       installed         = *installed_storage;
         memset(static_cast<void*>(&packet), 0, sizeof(packet));
         installed           = source.bank;
         const bool compiled = Sculptor::compile_editor_playback_bank(source, &packet);
@@ -14778,7 +15422,8 @@ int main()
             TEST(packet.channel_chains[0].num_effects == 1);
             TEST(packet.channel_chains[0].effects[0].type == Synth::EffectType::chorus);
             TEST(packet.master_chain.num_effects == 0);
-            static Synth::BankUpdateQueue queue;
+            const std::unique_ptr<Synth::BankUpdateQueue> queue_storage = std::make_unique<Synth::BankUpdateQueue>();
+            Synth::BankUpdateQueue&                       queue         = *queue_storage;
             queue.head.store(0);
             queue.tail.store(0);
             TEST(Synth::push_bank_update(&queue, packet));
@@ -14790,9 +15435,9 @@ int main()
                 Synth::EffectExpansionPlan plan  = {};
                 const char*                error = nullptr;
                 TEST(Synth::preflight_effect_expansion(*queued, &plan, &error));
-                static Synth::EffectChain chains[Synth::max_channels];
-                static Synth::EffectChain master;
-                FakeWriter                writer = { 1, 0, 0, 0, 0 };
+                Synth::EffectChain chains[Synth::max_channels] = {};
+                Synth::EffectChain master                      = {};
+                FakeWriter         writer                      = { 1, 0, 0, 0, 0 };
                 Synth::commit_effect_expansion(*queued, plan, chains, &master, fake_writer_binding(writer));
                 installed = *queued;
                 Synth::consume_bank_update(&queue);
@@ -14817,17 +15462,18 @@ int main()
     }
     // True exhaustion leaves prior live chains and still-pending initialization untouched.
     {
-        static Synth::InstrumentBank bank;
+        const std::unique_ptr<Synth::InstrumentBank> bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       bank         = *bank_storage;
         make_valid_bank(bank);
         for (uint32_t slot = 0; slot < 4; ++slot) {
             enabled_effect(bank, Synth::max_channels, slot, Synth::EffectType::delay);
         }
         Synth::init_effect_state_region(fake_region_base);
-        Synth::EffectExpansionPlan plan  = {};
-        const char*                error = nullptr;
-        static Synth::EffectChain  chains[Synth::max_channels];
-        static Synth::EffectChain  master;
-        FakeWriter                 writer = { 1, 0, 0, 0, 0 };
+        Synth::EffectExpansionPlan plan                        = {};
+        const char*                error                       = nullptr;
+        Synth::EffectChain         chains[Synth::max_channels] = {};
+        Synth::EffectChain         master                      = {};
+        FakeWriter                 writer                      = { 1, 0, 0, 0, 0 };
         TEST(Synth::preflight_effect_expansion(bank, &plan, &error));
         Synth::commit_effect_expansion(bank, plan, chains, &master, fake_writer_binding(writer));
         const Synth::EffectExpansionPlan before        = plan;
@@ -14848,10 +15494,12 @@ int main()
     // Queue mechanics: room condition, wraparound, ordering, two-phase consume.
     // Packets are whole banks; instruments.entries[0].layer_count marks each one.
     {
-        static Synth::BankUpdateQueue queue;
+        const std::unique_ptr<Synth::BankUpdateQueue> queue_storage = std::make_unique<Synth::BankUpdateQueue>();
+        Synth::BankUpdateQueue&                       queue         = *queue_storage;
         memset(static_cast<void*>(&queue), 0, sizeof(queue));
 
-        static Synth::InstrumentBank bank = {};
+        const std::unique_ptr<Synth::InstrumentBank> bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       bank         = *bank_storage;
         bank.instruments.allocate();
 
         // Fill the queue (capacity 2).
@@ -14877,7 +15525,9 @@ int main()
     }
     // get_zone_name: named instrument and the "Zone X" fallback.
     {
-        static Synth::InstrumentEditorBank bank;
+        const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& bank = *bank_storage;
         make_valid_bank(bank.bank);
         memcpy(bank.instrument_names[0], "Lead", 5);
         char name[Synth::max_name_len];
@@ -14896,7 +15546,8 @@ int main()
     // Capture semantics: a configured generator node holds its descriptor BY VALUE; mutating
     // (or replacing) the bank afterwards cannot change the node's sound.
     {
-        static Synth::InstrumentBank bank;
+        const std::unique_ptr<Synth::InstrumentBank> bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       bank         = *bank_storage;
         make_valid_bank(bank);
 
         Synth::ParamDescriptor env_node              = {};
@@ -14916,9 +15567,13 @@ int main()
     // Full-bank publish flow: two complete banks queued (coalesced upstream), drained in
     // order; the runtime bank ends at the newest and the queue is empty.
     {
-        static Synth::InstrumentBank  banks[2];
-        static Synth::InstrumentBank  runtime;
-        static Synth::BankUpdateQueue queue;
+        const std::unique_ptr<FixedArray<Synth::InstrumentBank, 2>> banks_storage =
+            std::make_unique<FixedArray<Synth::InstrumentBank, 2>>();
+        Synth::InstrumentBank(&banks)[2]                              = banks_storage->elements;
+        const std::unique_ptr<Synth::InstrumentBank>  runtime_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                        runtime         = *runtime_storage;
+        const std::unique_ptr<Synth::BankUpdateQueue> queue_storage   = std::make_unique<Synth::BankUpdateQueue>();
+        Synth::BankUpdateQueue&                       queue           = *queue_storage;
         memset(static_cast<void*>(&queue), 0, sizeof(queue));
         make_valid_bank(banks[0]);
         make_valid_bank(banks[1]);
@@ -14941,7 +15596,9 @@ int main()
 
     // ---- Zone table helpers: lookup, boundary moves, splits ----
     {
-        static Synth::InstrumentEditorBank bank;
+        const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& bank = *bank_storage;
         Synth::init_default_bank(&bank.bank);
         Synth::Zone* zones = bank.bank.channel_zones[0];
 
@@ -15051,7 +15708,7 @@ int main()
 
         // A full 16-entry table has no terminator; removal must stop at the table
         // edge and never shift entries into an adjacent populated channel's table.
-        static Synth::Zone tables[2][Synth::max_instr_per_channel];
+        Synth::Zone tables[2][Synth::max_instr_per_channel] = {};
         for (uint32_t slot = 0; slot < Synth::max_instr_per_channel; slot++) {
             tables[0][slot] = Synth::Zone{ static_cast<uint8_t>(slot + 1), 0 };
             tables[1][slot] = Synth::Zone{ static_cast<uint8_t>(slot + 1), 1 };
@@ -15100,7 +15757,9 @@ int main()
 
         // A full 16-zone table cannot split in the middle; splitting at a zone's first
         // note needs no new entry and stays allowed.
-        static Synth::InstrumentEditorBank bank_full_table;
+        const std::unique_ptr<Synth::InstrumentEditorBank> bank_full_table_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& bank_full_table = *bank_full_table_storage;
         Synth::init_default_bank(&bank_full_table.bank);
         Synth::Zone* f = bank_full_table.bank.channel_zones[0];
         for (uint32_t e = 0; e < Synth::max_instr_per_channel; e++) {
@@ -15115,7 +15774,9 @@ int main()
         TEST(bank_full_table.bank.instruments.num_allocated == pool_before + 1);
 
         // A full instrument pool refuses the clone with the bank untouched.
-        static Synth::InstrumentEditorBank bank_full_pool;
+        const std::unique_ptr<Synth::InstrumentEditorBank> bank_full_pool_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& bank_full_pool = *bank_full_pool_storage;
         Synth::init_default_bank(&bank_full_pool.bank);
         while (bank_full_pool.bank.instruments.allocate() != pool_no_slot)
             ;
@@ -15126,7 +15787,9 @@ int main()
         // Repeated split/reclaim cycles keep the instrument pool bounded: each split
         // at the zone's first note clones the instrument and leaves the old one
         // unreferenced, so reclaim returns it to the pool.
-        static Synth::InstrumentEditorBank bank_cycles;
+        const std::unique_ptr<Synth::InstrumentEditorBank> bank_cycles_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& bank_cycles = *bank_cycles_storage;
         Synth::init_default_bank(&bank_cycles.bank);
         const uint32_t pool_start = bank_cycles.bank.instruments.num_allocated;
         for (uint32_t cycle = 0; cycle < 50; cycle++) {
@@ -15139,7 +15802,9 @@ int main()
     // Instrument library: records, the validation ladder, and reclaim on load.
     // ------------------------------------------------------------------
     {
-        static Synth::InstrumentEditorBank bank;
+        const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& bank = *bank_storage;
         make_valid_bank(bank.bank);
         // Instrument 1 references env 2 and lfo 2 while unrelated descriptors exist,
         // so the record's dense renumbering is visible.
@@ -15173,7 +15838,9 @@ int main()
         TEST(strcmp(entries[0].name, "Saved") == 0);
         TEST(entries[0].payload_size > 0 && entries[0].payload_size <= Synth::library_payload_max);
 
-        static Synth::InstrumentEditorBank record;
+        const std::unique_ptr<Synth::InstrumentEditorBank> record_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& record = *record_storage;
         memset(static_cast<void*>(&record), 0, sizeof(record));
         uint16_t load_slot = 0;
         TEST(Synth::load_library_instrument(path, &entries[0], &record, 0, &load_slot));
@@ -15208,7 +15875,9 @@ int main()
     // A whole-channel record carries the channel's effect chain; chain-referenced
     // LFOs survive even when no instrument uses them.
     {
-        static Synth::InstrumentEditorBank bank;
+        const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& bank = *bank_storage;
         make_valid_bank(bank.bank);
         TEST(bank.bank.lfos.allocate() == 1);
         bank.bank.lfos.entries[1].wave                                 = Synth::WaveType::sawtooth_wave;
@@ -15228,7 +15897,9 @@ int main()
         TEST(Synth::save_library_record(path, "Fx", "Chained", &bank, 1) == 0);
         Synth::LibraryEntry entries[Synth::library_max_records];
         TEST(Synth::read_library_index(path, entries, Synth::library_max_records) == 1);
-        static Synth::InstrumentEditorBank record;
+        const std::unique_ptr<Synth::InstrumentEditorBank> record_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& record = *record_storage;
         memset(static_cast<void*>(&record), 0, sizeof(record));
         uint16_t load_slot = 0;
         TEST(Synth::load_library_instrument(path, &entries[0], &record, 0, &load_slot));
@@ -15247,7 +15918,9 @@ int main()
     // Loading replaces the target channel's effect chain; the reclaim afterwards
     // frees the replaced chain's exclusive descriptors with the old instruments.
     {
-        static Synth::InstrumentEditorBank src;
+        const std::unique_ptr<Synth::InstrumentEditorBank> src_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& src = *src_storage;
         memset(static_cast<void*>(&src), 0, sizeof(src));
         src.bank.instruments.allocate();
         src.bank.instruments.entries[0].layer_count = 1;
@@ -15268,7 +15941,9 @@ int main()
         Synth::LibraryEntry entries[1];
         TEST(Synth::read_library_index(path, entries, 1) == 1);
 
-        static Synth::InstrumentEditorBank bank;
+        const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& bank = *bank_storage;
         Synth::init_default_bank(&bank.bank);
         bank.bank.channel_enabled[2]                                   = 1;
         bank.bank.channel_zones[2][0].start_note                       = 1;
@@ -15302,23 +15977,29 @@ int main()
     // zone table must be nonempty, anchored, ordered, and orphan-free.  A valid
     // record loads; each rejection case introduces exactly one invalid condition.
     {
-        static Synth::InstrumentEditorBank src;
+        const std::unique_ptr<Synth::InstrumentEditorBank> src_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& src = *src_storage;
         make_valid_bank(src.bank);
-        src.bank.channel_enabled[0]                                   = 0;
-        src.bank.channel_enabled[1]                                   = 0;
-        src.bank.channel_chains[0].num_effects                        = 1;
-        src.bank.channel_chains[0].effects[0].type                    = Synth::EffectType::delay;
-        src.bank.channel_chains[0].effects[0].bindings[0].lfo_desc_id = 1;
-        constexpr uint32_t bank_json_text_size                        = 1024 * 1024;
-        static char        text[bank_json_text_size];
-        const char* const  path         = "synth_library_shape.tmp";
-        auto               attempt_load = [&](bool expect_load) {
+        src.bank.channel_enabled[0]                                                      = 0;
+        src.bank.channel_enabled[1]                                                      = 0;
+        src.bank.channel_chains[0].num_effects                                           = 1;
+        src.bank.channel_chains[0].effects[0].type                                       = Synth::EffectType::delay;
+        src.bank.channel_chains[0].effects[0].bindings[0].lfo_desc_id                    = 1;
+        constexpr uint32_t                                           bank_json_text_size = 1024 * 1024;
+        const std::unique_ptr<FixedArray<char, bank_json_text_size>> text_storage =
+            std::make_unique<FixedArray<char, bank_json_text_size>>();
+        char (&text)[bank_json_text_size] = text_storage->elements;
+        const char* const path            = "synth_library_shape.tmp";
+        auto              attempt_load    = [&](bool expect_load) {
             const uint32_t payload_len = Synth::encode_editor_bank_json(&src, text, bank_json_text_size);
             TEST(payload_len > 0 && payload_len <= Synth::library_payload_max);
             write_library_fixture(path, text, payload_len, "Cat", "Bad");
             Synth::LibraryEntry entries[1];
             TEST(Synth::read_library_index(path, entries, 1) == 1);
-            static Synth::InstrumentEditorBank scratch;
+            const std::unique_ptr<Synth::InstrumentEditorBank> scratch_storage =
+                std::make_unique<Synth::InstrumentEditorBank>();
+            Synth::InstrumentEditorBank& scratch = *scratch_storage;
             memset(static_cast<void*>(&scratch), 0, sizeof(scratch));
             uint16_t load_slot = 0;
             TEST(Synth::load_library_instrument(path, &entries[0], &scratch, 0, &load_slot) == expect_load);
@@ -15356,7 +16037,9 @@ int main()
     // Load appends the record's instrument into a populated bank with remapped ids;
     // repeated load/delete cycles keep the pool bounded through reclaim.
     {
-        static Synth::InstrumentEditorBank src;
+        const std::unique_ptr<Synth::InstrumentEditorBank> src_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& src = *src_storage;
         memset(static_cast<void*>(&src), 0, sizeof(src));
         src.bank.instruments.allocate();
         src.bank.instruments.entries[0].layer_count = 1;
@@ -15370,7 +16053,9 @@ int main()
         TEST(Synth::save_library_record(load_path, "Cat", "Inst", &src, 0) == 0);
         Synth::LibraryEntry load_entries[1];
         TEST(Synth::read_library_index(load_path, load_entries, 1) == 1);
-        static Synth::InstrumentEditorBank bank;
+        const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& bank = *bank_storage;
         Synth::init_default_bank(&bank.bank);
         const uint32_t pool_start = bank.bank.instruments.num_allocated;
         uint16_t       slot       = 0;
@@ -15398,7 +16083,9 @@ int main()
 
     // A pool without space refuses the load with the bank unmodified.
     {
-        static Synth::InstrumentEditorBank src;
+        const std::unique_ptr<Synth::InstrumentEditorBank> src_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& src = *src_storage;
         memset(static_cast<void*>(&src), 0, sizeof(src));
         src.bank.envelopes.allocate();
         Synth::EnvelopeDescriptor env = {};
@@ -15422,7 +16109,9 @@ int main()
         TEST(Synth::save_library_record(full_path, "Cat", "Inst", &src, 0) == 0);
         Synth::LibraryEntry full_entries[1];
         TEST(Synth::read_library_index(full_path, full_entries, 1) == 1);
-        static Synth::InstrumentEditorBank bank;
+        const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& bank = *bank_storage;
         Synth::init_default_bank(&bank.bank);
         while (bank.bank.envelopes.allocate() != pool_no_slot)
             ;
@@ -15440,7 +16129,9 @@ int main()
     // The validation ladder refuses records at the step that first fails: framing,
     // then decode, then record shape.
     {
-        static Synth::InstrumentEditorBank fat;
+        const std::unique_ptr<Synth::InstrumentEditorBank> fat_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& fat = *fat_storage;
         Synth::init_default_bank(&fat.bank); // a valid bank, but not a valid record shape
 
         const char* const path = "synth_library_ladder.tmp";
@@ -15448,7 +16139,9 @@ int main()
         // if the codec's real bound grows past this, the too-large test catches it.
         constexpr uint32_t bank_json_text_size = 1024 * 1024;
 
-        static char text[bank_json_text_size];
+        const std::unique_ptr<FixedArray<char, bank_json_text_size>> text_storage =
+            std::make_unique<FixedArray<char, bank_json_text_size>>();
+        char (&text)[bank_json_text_size] = text_storage->elements;
 
         const uint32_t payload_len = Synth::encode_editor_bank_json(&fat, text, bank_json_text_size);
         TEST(payload_len > 0 && payload_len <= Synth::library_payload_max);
@@ -15463,7 +16156,9 @@ int main()
             Synth::LibraryEntry entries[4];
             TEST(Synth::read_library_index(path, entries, 4) == 1);
 
-            static Synth::InstrumentEditorBank scratch;
+            const std::unique_ptr<Synth::InstrumentEditorBank> scratch_storage =
+                std::make_unique<Synth::InstrumentEditorBank>();
+            Synth::InstrumentEditorBank& scratch = *scratch_storage;
             memset(static_cast<void*>(&scratch), 0, sizeof(scratch));
 
             uint16_t load_slot = 0;
@@ -15496,7 +16191,9 @@ int main()
     // A corrupt or truncated library is never rebuilt over: the save fails and the
     // original bytes stay untouched.
     {
-        static Synth::InstrumentEditorBank bank;
+        const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& bank = *bank_storage;
         make_valid_bank(bank.bank);
 
         const char* const junk_path = "synth_library_corrupt_save.tmp";
@@ -15544,7 +16241,9 @@ int main()
         memcpy(rec + 48, &huge, 4);
         fwrite(rec, sizeof(rec), 1, file);
 
-        static uint8_t junk[64 * 1024];
+        const std::unique_ptr<FixedArray<uint8_t, 64 * 1024>> junk_storage =
+            std::make_unique<FixedArray<uint8_t, 64 * 1024>>();
+        uint8_t (&junk)[64 * 1024] = junk_storage->elements;
         memset(static_cast<void*>(junk), 0x5a, sizeof(junk));
         for (uint32_t written = 0; written < huge; written += static_cast<uint32_t>(sizeof(junk))) {
             const uint32_t chunk = huge - written < static_cast<uint32_t>(sizeof(junk))
@@ -15560,7 +16259,9 @@ int main()
         TEST(status == Synth::library_oversized);
         TEST(entries[0].payload_size == huge);
 
-        static Synth::InstrumentEditorBank bank;
+        const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& bank = *bank_storage;
         make_valid_bank(bank.bank);
 
         Synth::LibraryScanStatus save_status = Synth::library_valid;
@@ -15675,7 +16376,9 @@ int main()
         Synth::LibraryEntry entries[4];
         TEST(Synth::read_library_index(path, entries, 4) == 1);
 
-        static Synth::InstrumentEditorBank scratch;
+        const std::unique_ptr<Synth::InstrumentEditorBank> scratch_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& scratch = *scratch_storage;
         memset(static_cast<void*>(&scratch), 0, sizeof(scratch));
         uint16_t load_slot = 0;
         TEST(! Synth::load_library_instrument(path, &entries[0], &scratch, 0, &load_slot));
@@ -15746,7 +16449,9 @@ int main()
 
     // Overwriting a record preserves its siblings; the rebuilt file keeps the rest.
     {
-        static Synth::InstrumentEditorBank bank;
+        const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& bank = *bank_storage;
         make_valid_bank(bank.bank);
         const char* const path = "synth_library_overwrite.tmp";
         TEST(Synth::save_library_record(path, "C1", "N1", &bank, 0) == 0);
@@ -15764,7 +16469,9 @@ int main()
     // A library declaring more records than the index can hold is never rebuilt
     // over: the save refuses instead of silently dropping the tail.
     {
-        static Synth::InstrumentEditorBank bank;
+        const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& bank = *bank_storage;
         make_valid_bank(bank.bank);
 
         const char* const path = "synth_library_overcap.tmp";
@@ -15792,7 +16499,9 @@ int main()
 
     // The editor bank JSON codec round-trips a populated bank byte-for-byte.
     {
-        static Synth::InstrumentEditorBank bank;
+        const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& bank = *bank_storage;
         Synth::init_default_bank(&bank.bank);
         // The phantom store's Oscillator members carry the slope default on
         // construction.  Decode canonicalizes the unused store to zero, so the
@@ -15808,18 +16517,24 @@ int main()
 
         TEST(Synth::validate_instrument_bank(&bank.bank));
 
-        static char    doc[128 * 1024];
-        const uint32_t len = Synth::encode_editor_bank_json(&bank, doc, sizeof(doc));
+        const std::unique_ptr<FixedArray<char, 128 * 1024>> doc_storage =
+            std::make_unique<FixedArray<char, 128 * 1024>>();
+        char (&doc)[128 * 1024] = doc_storage->elements;
+        const uint32_t len      = Synth::encode_editor_bank_json(&bank, doc, sizeof(doc));
         TEST(len > 0 && len < sizeof(doc));
         TEST(doc[0] == '{');
 
-        static Synth::InstrumentEditorBank restored;
+        const std::unique_ptr<Synth::InstrumentEditorBank> restored_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& restored = *restored_storage;
         TEST(Synth::decode_editor_bank_json(doc, len, &restored));
         TEST(memcmp(&bank, &restored, sizeof(bank)) == 0);
 
         // A file round-trip through the reader/writer is equally faithful
-        static Synth::InstrumentEditorBank from_file;
-        const char* const                  path = "synth_bank_json.tmp";
+        const std::unique_ptr<Synth::InstrumentEditorBank> from_file_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& from_file = *from_file_storage;
+        const char* const            path      = "synth_bank_json.tmp";
         TEST(Synth::save_editor_bank_file(path, &bank) == 0);
         TEST(Synth::load_editor_bank_file(path, &from_file) == Synth::BankFileStatus::ok);
         TEST(memcmp(&bank, &from_file, sizeof(bank)) == 0);
@@ -15829,7 +16544,9 @@ int main()
         // separately and decode no longer fans out, so divergent layers survive
         // a save/load byte-for-byte.
         {
-            static Synth::InstrumentEditorBank routed;
+            const std::unique_ptr<Synth::InstrumentEditorBank> routed_storage =
+                std::make_unique<Synth::InstrumentEditorBank>();
+            Synth::InstrumentEditorBank& routed = *routed_storage;
             memset(static_cast<void*>(&routed), 0, sizeof(routed));
             routed.bank.channel_enabled[0] = 1;
             TEST(routed.bank.instruments.allocate() == 0);
@@ -15865,10 +16582,14 @@ int main()
             routed.bank.channel_zones[0][0] = { 1, 0 };
             TEST(Synth::validate_instrument_bank(&routed.bank));
 
-            static char    routed_doc[64 * 1024];
-            const uint32_t routed_len = Synth::encode_editor_bank_json(&routed, routed_doc, sizeof(routed_doc));
+            const std::unique_ptr<FixedArray<char, 64 * 1024>> routed_doc_storage =
+                std::make_unique<FixedArray<char, 64 * 1024>>();
+            char (&routed_doc)[64 * 1024] = routed_doc_storage->elements;
+            const uint32_t routed_len     = Synth::encode_editor_bank_json(&routed, routed_doc, sizeof(routed_doc));
             TEST(routed_len > 0);
-            static Synth::InstrumentEditorBank routed_decoded;
+            const std::unique_ptr<Synth::InstrumentEditorBank> routed_decoded_storage =
+                std::make_unique<Synth::InstrumentEditorBank>();
+            Synth::InstrumentEditorBank& routed_decoded = *routed_decoded_storage;
             TEST(Synth::decode_editor_bank_json(routed_doc, routed_len, &routed_decoded));
             const Synth::Instrument& dec = routed_decoded.bank.instruments.entries[0];
             TEST(dec.layers[0].targets[Synth::mod_volume].base_value == 0.8f);
@@ -15894,12 +16615,16 @@ int main()
         }
 
         // Absent means a fresh project, not a failure
-        static Synth::InstrumentEditorBank scratch;
+        const std::unique_ptr<Synth::InstrumentEditorBank> scratch_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& scratch = *scratch_storage;
         TEST(Synth::load_editor_bank_file("synth_bank_missing.tmp", &scratch) == Synth::BankFileStatus::absent);
         // A name array without its terminator cannot be read safely: the encoder
         // refuses instead of scanning past the fixed array.
         {
-            static Synth::InstrumentEditorBank unterminated;
+            const std::unique_ptr<Synth::InstrumentEditorBank> unterminated_storage =
+                std::make_unique<Synth::InstrumentEditorBank>();
+            Synth::InstrumentEditorBank& unterminated = *unterminated_storage;
             make_valid_bank(unterminated.bank);
             unterminated.bank.instruments.num_allocated = 1;
             memset(static_cast<void*>(unterminated.instrument_names[0]), 'x', Synth::max_name_len);
@@ -15912,7 +16637,9 @@ int main()
             // 3.40282347e+38 sits just past the exact float32 maximum read as a double,
             // yet converts back to the same finite float.
             {
-                static Synth::InstrumentEditorBank extreme;
+                const std::unique_ptr<Synth::InstrumentEditorBank> extreme_storage =
+                    std::make_unique<Synth::InstrumentEditorBank>();
+                Synth::InstrumentEditorBank& extreme = *extreme_storage;
                 make_valid_bank(extreme.bank);
                 extreme.bank.envelopes.entries[0].min_value     = -FLT_MAX;
                 extreme.bank.envelopes.entries[0].min_max_delta = FLT_MAX;
@@ -15920,7 +16647,9 @@ int main()
                 const uint32_t extreme_len =
                     Synth::encode_editor_bank_json(&extreme, extreme_text, sizeof(extreme_text));
                 TEST(extreme_len != 0);
-                static Synth::InstrumentEditorBank extreme_back;
+                const std::unique_ptr<Synth::InstrumentEditorBank> extreme_back_storage =
+                    std::make_unique<Synth::InstrumentEditorBank>();
+                Synth::InstrumentEditorBank& extreme_back = *extreme_back_storage;
                 TEST(Synth::decode_editor_bank_json(extreme_text, extreme_len, &extreme_back));
                 TEST(extreme_back.bank.envelopes.entries[0].min_value == -FLT_MAX);
                 TEST(extreme_back.bank.envelopes.entries[0].min_max_delta == FLT_MAX);
@@ -15932,11 +16661,15 @@ int main()
                 // The direct memory decoder enforces the same document bound as the
                 // file reader; an oversized input is refused and leaves the bank
                 // untouched.
-                static char oversized[1024 * 1024 + 16];
+                const std::unique_ptr<FixedArray<char, 1024 * 1024 + 16>> oversized_storage =
+                    std::make_unique<FixedArray<char, 1024 * 1024 + 16>>();
+                char (&oversized)[1024 * 1024 + 16] = oversized_storage->elements;
                 memset(static_cast<void*>(oversized), ' ', sizeof(oversized));
                 oversized[0] = '{';
                 oversized[1] = '}';
-                static Synth::InstrumentEditorBank untouched;
+                const std::unique_ptr<Synth::InstrumentEditorBank> untouched_storage =
+                    std::make_unique<Synth::InstrumentEditorBank>();
+                Synth::InstrumentEditorBank& untouched = *untouched_storage;
                 memset(static_cast<void*>(&untouched), 0x3C, sizeof(untouched));
                 TEST(! Synth::decode_editor_bank_json(oversized, sizeof(oversized), &untouched));
                 TEST(static_cast<unsigned char>(untouched.channel_names[0][0]) == 0x3C);
@@ -15944,9 +16677,13 @@ int main()
                 // spelling, so both forms of a name are interchangeable and the
                 // re-encoded document stays valid JSON.
                 {
-                    static Synth::InstrumentEditorBank from_literal;
-                    static Synth::InstrumentEditorBank from_escape;
-                    const char* const                  literal_doc =
+                    const std::unique_ptr<Synth::InstrumentEditorBank> from_literal_storage =
+                        std::make_unique<Synth::InstrumentEditorBank>();
+                    Synth::InstrumentEditorBank&                       from_literal = *from_literal_storage;
+                    const std::unique_ptr<Synth::InstrumentEditorBank> from_escape_storage =
+                        std::make_unique<Synth::InstrumentEditorBank>();
+                    Synth::InstrumentEditorBank& from_escape = *from_escape_storage;
+                    const char* const            literal_doc =
                         "{\"instrument_editor_bank\":{\"channel_names\":[\"Channel 01\",\"\xc3\xa9\"]}}";
                     const char* const escape_doc =
                         "{\"instrument_editor_bank\":{\"channel_names\":[\"Channel 01\",\"\\u00e9\"]}}";
@@ -16015,7 +16752,9 @@ int main()
             TEST(binary != nullptr);
             fwrite("SYIB\4\0\0\0stale-bytes", 1, 20, binary);
             fclose(binary);
-            static Synth::InstrumentEditorBank binary_bank;
+            const std::unique_ptr<Synth::InstrumentEditorBank> binary_bank_storage =
+                std::make_unique<Synth::InstrumentEditorBank>();
+            Synth::InstrumentEditorBank& binary_bank = *binary_bank_storage;
             memset(static_cast<void*>(&binary_bank), 0x3C, sizeof(binary_bank));
             TEST(Synth::load_editor_bank_file(binary_path, &binary_bank) == Synth::BankFileStatus::invalid);
             const uint8_t* const sentinel  = reinterpret_cast<const uint8_t*>(&binary_bank);
@@ -16028,7 +16767,9 @@ int main()
 
         // Defaults fill: an empty bank document keeps the factory defaults and
         // still validates
-        static Synth::InstrumentEditorBank defaults;
+        const std::unique_ptr<Synth::InstrumentEditorBank> defaults_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& defaults = *defaults_storage;
         TEST(Synth::decode_editor_bank_json("{\"instrument_editor_bank\":{}}",
                                             static_cast<uint32_t>(strlen("{\"instrument_editor_bank\":{}}")),
                                             &defaults));
@@ -16040,14 +16781,18 @@ int main()
     // Unknown fields are skipped and logged in debug builds; the decode still
     // succeeds.
     {
-        static Synth::InstrumentEditorBank bank;
+        const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& bank = *bank_storage;
 
         const char* const doc = "{\"bogus\":1,\"instrument_editor_bank\":{\"future_thing\":[3]},\"toplevel\":true}";
         TEST(Synth::decode_editor_bank_json(doc, static_cast<uint32_t>(strlen(doc)), &bank));
         TEST(Synth::validate_instrument_bank(&bank.bank)); // the default bank
 
         // A record payload with unknown fields loads cleanly
-        static Synth::InstrumentEditorBank src;
+        const std::unique_ptr<Synth::InstrumentEditorBank> src_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& src = *src_storage;
         make_valid_bank(src.bank);
         memcpy(src.instrument_names[0], "Rec", 4);
         const char* const lib_path = "synth_library_report.tmp";
@@ -16055,8 +16800,10 @@ int main()
 
         Synth::LibraryEntry entries[4];
         TEST(Synth::read_library_index(lib_path, entries, 4) == 1);
-        static Synth::InstrumentEditorBank dst;
-        uint16_t                           slot = 0;
+        const std::unique_ptr<Synth::InstrumentEditorBank> dst_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& dst  = *dst_storage;
+        uint16_t                     slot = 0;
         TEST(Synth::load_library_instrument(lib_path, &entries[0], &dst, 1, &slot));
         remove(lib_path);
     }
@@ -16064,7 +16811,9 @@ int main()
     // Malformed documents are rejected; a rejected decode never commits: the
     // destination keeps its bytes on syntax, schema and semantic failures alike.
     {
-        static Synth::InstrumentEditorBank bank;
+        const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& bank = *bank_storage;
 
         const char* const bad[] = { "{",
                                     "{\"instrument_editor_bank\":}",
@@ -16100,7 +16849,9 @@ int main()
     // are enforced document-wide - including inside unknown subtrees the schema
     // decoder never visits.
     {
-        static Synth::InstrumentEditorBank bank;
+        const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& bank = *bank_storage;
 
         const char* const bad[] = {
             ",{}",                                                            // separator before the root object
@@ -16142,9 +16893,11 @@ int main()
     // escapes of one code point apart.  A long but unique key stays legal - it is
     // logged by its decoded prefix, never rejected for its length.
     {
-        static Synth::InstrumentEditorBank bank;
+        const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& bank = *bank_storage;
 
-        static char doc[2048];
+        char doc[2048] = {};
 
         // 256 literal 'a's vs "\u0061" + 255 'a's: both decode to 256 'a's
         uint32_t len = 0;
@@ -16179,7 +16932,9 @@ int main()
     // rejected by the grammar pass.  Unknown non-ASCII names report their
     // decoded UTF-8 prefix, truncated cleanly at the report slot boundary.
     {
-        static Synth::InstrumentEditorBank bank;
+        const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& bank = *bank_storage;
 
         // Literal UTF-8 vs its escape: one name, rejected as a duplicate
         const char* const literal_dup = "{\"future\":{\"\xC4\x8A\":1,\"\\u010a\":2}}";
@@ -16223,8 +16978,8 @@ int main()
         // One long escaped name: the debug log shows the decoded UTF-8 prefix, cut
         // where the next code point no longer fits the slot - 23 two-byte code
         // points fill 46 of the 48 bytes, then the terminator
-        static char doc[1024];
-        uint32_t    len = 0;
+        char     doc[1024] = {};
+        uint32_t len       = 0;
         len += static_cast<uint32_t>(snprintf(doc + len, sizeof(doc) - len, "{\""));
         for (uint32_t i = 0; i < 100; i++)
             len += static_cast<uint32_t>(snprintf(doc + len, sizeof(doc) - len, "\\u010a"));
@@ -16236,12 +16991,16 @@ int main()
     // Pool capacity: a document repeating pool arrays or the root bank object
     // exhausts a pool and is rejected - never written past the pool's entries.
     {
-        static Synth::InstrumentEditorBank bank;
+        const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& bank = *bank_storage;
 
         // A full instruments pool followed by a repeated array overflows without
         // the allocation checks
-        static char doc[256 * 1024];
-        uint32_t    len = 0;
+        const std::unique_ptr<FixedArray<char, 256 * 1024>> doc_storage =
+            std::make_unique<FixedArray<char, 256 * 1024>>();
+        char (&doc)[256 * 1024] = doc_storage->elements;
+        uint32_t len            = 0;
         len += static_cast<uint32_t>(
             snprintf(doc + len, sizeof(doc) - len, "{\"instrument_editor_bank\":{\"instruments\":["));
         for (uint32_t i = 0; i < Synth::max_instruments; i++) {
@@ -16254,8 +17013,10 @@ int main()
         TEST(! Synth::decode_editor_bank_json(doc, len, &bank)); // pool exhaustion
 
         // Repeated root bank objects also fill the pool cumulatively
-        static char doc2[256 * 1024];
-        uint32_t    len2 = 0;
+        const std::unique_ptr<FixedArray<char, 256 * 1024>> doc2_storage =
+            std::make_unique<FixedArray<char, 256 * 1024>>();
+        char (&doc2)[256 * 1024] = doc2_storage->elements;
+        uint32_t len2            = 0;
         len2 += static_cast<uint32_t>(snprintf(doc2 + len2, sizeof(doc2) - len2, "{"));
         for (uint32_t i = 0; i < Synth::max_instruments + 1; i++) {
             len2 += static_cast<uint32_t>(snprintf(doc2 + len2, sizeof(doc2) - len2, i ? "," : ""));
@@ -16274,7 +17035,9 @@ int main()
     // loaded bank is canonical, so save(load(save(bank))) == save(bank) and a
     // second full save/load cycle reproduces the same bytes.
     {
-        static Synth::InstrumentEditorBank bank;
+        const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& bank = *bank_storage;
         make_valid_bank(bank.bank);
 
         // Stale pool bytes: unreferenced descriptors are reclaimed and compacted,
@@ -16301,12 +17064,18 @@ int main()
         memcpy(bank.instrument_names[0], "Rec", 4);
         TEST(Synth::validate_instrument_bank(&bank.bank));
 
-        static char    text1[128 * 1024];
-        static char    text2[128 * 1024];
-        const uint32_t len1 = Synth::encode_editor_bank_json(&bank, text1, sizeof(text1));
+        const std::unique_ptr<FixedArray<char, 128 * 1024>> text1_storage =
+            std::make_unique<FixedArray<char, 128 * 1024>>();
+        char (&text1)[128 * 1024] = text1_storage->elements;
+        const std::unique_ptr<FixedArray<char, 128 * 1024>> text2_storage =
+            std::make_unique<FixedArray<char, 128 * 1024>>();
+        char (&text2)[128 * 1024] = text2_storage->elements;
+        const uint32_t len1       = Synth::encode_editor_bank_json(&bank, text1, sizeof(text1));
         TEST(len1 > 0 && len1 < sizeof(text1));
 
-        static Synth::InstrumentEditorBank round1;
+        const std::unique_ptr<Synth::InstrumentEditorBank> round1_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& round1 = *round1_storage;
         TEST(Synth::decode_editor_bank_json(text1, len1, &round1));
 
         // The canonical form: negative zero normalized, stale bytes gone
@@ -16326,7 +17095,9 @@ int main()
         TEST(len1 == len2);
         TEST(memcmp(text1, text2, len1) == 0); // save(load(save(bank))) == save(bank)
 
-        static Synth::InstrumentEditorBank round2;
+        const std::unique_ptr<Synth::InstrumentEditorBank> round2_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& round2 = *round2_storage;
         TEST(Synth::decode_editor_bank_json(text2, len2, &round2));
         TEST(memcmp(&round1, &round2, sizeof(round1)) == 0);
     }
@@ -16334,7 +17105,9 @@ int main()
     // Reload guarantee: a valid bank whose document exceeds the bounded token pool
     // is refused by the save instead of writing an unloadable file.
     {
-        static Synth::InstrumentEditorBank bank;
+        const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& bank = *bank_storage;
         memset(static_cast<void*>(&bank), 0, sizeof(bank));
 
         // Dense instruments: every layer binds every target to both descriptors,
@@ -16394,7 +17167,9 @@ int main()
     // bank can carry a malformed parameter.  Encoding it must fail cleanly (no
     // read past the arrays, no file written) instead of trusting the count.
     {
-        static Synth::InstrumentEditorBank bank;
+        const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& bank = *bank_storage;
         make_valid_bank(bank.bank);
 
         const uint32_t param = bank.bank.parameters.allocate();
@@ -16405,7 +17180,9 @@ int main()
 
         TEST(Synth::validate_instrument_bank(&bank.bank)); // metadata valid, contents unchecked
 
-        static char text[64 * 1024];
+        const std::unique_ptr<FixedArray<char, 64 * 1024>> text_storage =
+            std::make_unique<FixedArray<char, 64 * 1024>>();
+        char (&text)[64 * 1024] = text_storage->elements;
         TEST(Synth::encode_editor_bank_json(&bank, text, sizeof(text)) == 0);
 
         const char* const bad_path = "synth_bank_badparam.tmp";
@@ -16420,21 +17197,27 @@ int main()
     // A document beyond the token pool and a bank file beyond the parse buffer are
     // both visibly rejected through their bounded staging.
     {
-        static char doc[128 * 1024];
-        uint32_t    len = 0;
+        const std::unique_ptr<FixedArray<char, 128 * 1024>> doc_storage =
+            std::make_unique<FixedArray<char, 128 * 1024>>();
+        char (&doc)[128 * 1024] = doc_storage->elements;
+        uint32_t len            = 0;
         len += static_cast<uint32_t>(snprintf(doc + len, sizeof(doc) - len, "{\"instrument_editor_bank\":{"));
         for (uint32_t i = 0; i < 12000; i++)
             len += static_cast<uint32_t>(snprintf(doc + len, sizeof(doc) - len, "\"k%u\":1,", i));
         len += static_cast<uint32_t>(snprintf(doc + len, sizeof(doc) - len, "\"x\":1}}"));
         TEST(len < sizeof(doc));
 
-        static Synth::InstrumentEditorBank bank;
+        const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& bank = *bank_storage;
         TEST(! Synth::decode_editor_bank_json(doc, len, &bank)); // token pool exhaustion
 
         const char* const big_path = "synth_bank_toobig.tmp";
         FILE* const       big      = fopen(big_path, "wb");
         TEST(big != nullptr);
-        static uint8_t chunk[64 * 1024];
+        const std::unique_ptr<FixedArray<uint8_t, 64 * 1024>> chunk_storage =
+            std::make_unique<FixedArray<uint8_t, 64 * 1024>>();
+        uint8_t (&chunk)[64 * 1024] = chunk_storage->elements;
         // The codec's document bound, duplicated because the codec keeps it internal.
         constexpr uint32_t bank_json_text_size = 1024 * 1024;
         memset(static_cast<void*>(chunk), 0x61, sizeof(chunk));
@@ -16443,7 +17226,9 @@ int main()
         fclose(big);
         // The loader refuses documents past the parse buffer and leaves the
         // destination untouched.
-        static Synth::InstrumentEditorBank toobig_bank;
+        const std::unique_ptr<Synth::InstrumentEditorBank> toobig_bank_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& toobig_bank = *toobig_bank_storage;
         memset(static_cast<void*>(&toobig_bank), 0x5A, sizeof(toobig_bank));
         TEST(Synth::load_editor_bank_file(big_path, &toobig_bank) == Synth::BankFileStatus::too_large);
         const uint8_t* const sentinel  = reinterpret_cast<const uint8_t*>(&toobig_bank);
@@ -16457,7 +17242,9 @@ int main()
     // A library container from another version is an invalid file: rejected
     // like any other malformed input, and never rebuilt over.
     {
-        static Synth::InstrumentEditorBank bank;
+        const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& bank = *bank_storage;
         make_valid_bank(bank.bank);
 
         const char* const path = "synth_library_v1.tmp";
@@ -16502,15 +17289,18 @@ int main()
     // bit-identically, with the descriptor pools untouched (no dedup or
     // duplication) and the aliasing pattern preserved.
     {
-        static Synth::InstrumentBank bank;
-        static Synth::InstrumentBank bank_image;
-        static Synth::Instrument     instrument;
-        uint16_t                     env_ids[Synth::max_layers][Synth::num_mod_targets];
-        uint16_t                     lfo_ids[Synth::max_layers][Synth::num_mod_targets];
+        const std::unique_ptr<Synth::InstrumentBank> bank_storage       = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       bank               = *bank_storage;
+        const std::unique_ptr<Synth::InstrumentBank> bank_image_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       bank_image         = *bank_image_storage;
+        Synth::Instrument                            instrument         = {};
+        uint16_t                                     env_ids[Synth::max_layers][Synth::num_mod_targets];
+        uint16_t                                     lfo_ids[Synth::max_layers][Synth::num_mod_targets];
         build_osc_graph_max_fixture(&bank, &instrument, env_ids, lfo_ids);
-        bank_image = bank;
-        static Sculptor::Graph           graph;
-        static Sculptor::OscGraphMapping mapping;
+        bank_image                                           = bank;
+        const std::unique_ptr<Sculptor::Graph> graph_storage = std::make_unique<Sculptor::Graph>();
+        Sculptor::Graph&                       graph         = *graph_storage;
+        Sculptor::OscGraphMapping              mapping       = {};
         TEST(Sculptor::project_instrument_to_graph(instrument, bank, &graph, &mapping));
         check_osc_graph_mapping(graph, mapping, Synth::max_layers, 28, 28);
         TEST(graph.connection_count() == 175);
@@ -16520,7 +17310,7 @@ int main()
         check_osc_graph_mapping(graph, mapping, Synth::max_layers, 28, 28);
         TEST(graph.connection_count() == 175);
 
-        static Synth::Instrument compiled;
+        Synth::Instrument compiled = {};
         TEST(Sculptor::compile_graph_to_instrument(graph, mapping, &compiled));
         TEST(memcmp(&instrument, &compiled, sizeof(Synth::Instrument)) == 0);
         TEST(memcmp(&bank_image, &bank, sizeof(Synth::InstrumentBank)) == 0);
@@ -16541,16 +17331,18 @@ int main()
     // nodes plus one oscillator (4 nodes, one hard connection) and compiles
     // back bit-identically.
     {
-        static Synth::InstrumentBank bank;
-        static Synth::Instrument     instrument = {};
-        instrument.layer_count                  = 1;
-        instrument.layers[0].osc_type[0]        = Synth::WaveType::sine_wave;
-        static Sculptor::Graph           graph;
-        static Sculptor::OscGraphMapping mapping;
+        const std::unique_ptr<Synth::InstrumentBank> bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       bank         = *bank_storage;
+        Synth::Instrument                            instrument   = {};
+        instrument.layer_count                                    = 1;
+        instrument.layers[0].osc_type[0]                          = Synth::WaveType::sine_wave;
+        const std::unique_ptr<Sculptor::Graph> graph_storage      = std::make_unique<Sculptor::Graph>();
+        Sculptor::Graph&                       graph              = *graph_storage;
+        Sculptor::OscGraphMapping              mapping            = {};
         TEST(Sculptor::project_instrument_to_graph(instrument, bank, &graph, &mapping));
         check_osc_graph_mapping(graph, mapping, 1, 0, 0);
         TEST(graph.connection_count() == 1);
-        static Synth::Instrument compiled;
+        Synth::Instrument compiled = {};
         TEST(Sculptor::compile_graph_to_instrument(graph, mapping, &compiled));
         TEST(memcmp(&instrument, &compiled, sizeof(Synth::Instrument)) == 0);
         // Waveform A has no off option: the list starts at sine and compile
@@ -16570,22 +17362,25 @@ int main()
     // (the eval multiplies by the zero sentinel), so the refusal is visible
     // and leaves the graph, mapping and bank untouched.
     {
-        static Synth::InstrumentBank bank;
-        static Synth::InstrumentBank bank_image;
-        static Synth::Instrument     good                    = {};
-        good.layer_count                                     = 1;
-        good.layers[0].targets[Synth::mod_volume].num_inputs = 1;
-        good.layers[0].targets[Synth::mod_volume].inputs[0]  = { Synth::ModSource::velocity,
-                                                                 Synth::SourceOp::multiply,
-                                                                 0,
-                                                                 0.5f };
+        const std::unique_ptr<Synth::InstrumentBank> bank_storage       = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       bank               = *bank_storage;
+        const std::unique_ptr<Synth::InstrumentBank> bank_image_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       bank_image         = *bank_image_storage;
+        Synth::Instrument                            good               = {};
+        good.layer_count                                                = 1;
+        good.layers[0].targets[Synth::mod_volume].num_inputs            = 1;
+        good.layers[0].targets[Synth::mod_volume].inputs[0]             = { Synth::ModSource::velocity,
+                                                                            Synth::SourceOp::multiply,
+                                                                            0,
+                                                                            0.5f };
 
-        static Sculptor::Graph           graph;
-        static Sculptor::OscGraphMapping mapping;
+        const std::unique_ptr<Sculptor::Graph> graph_storage = std::make_unique<Sculptor::Graph>();
+        Sculptor::Graph&                       graph         = *graph_storage;
+        Sculptor::OscGraphMapping              mapping       = {};
         TEST(Sculptor::project_instrument_to_graph(good, bank, &graph, &mapping));
         TEST(mapping.output_node != Sculptor::pool_no_slot);
 
-        static Synth::Instrument bad                              = good;
+        Synth::Instrument bad                                     = good;
         bad.layers[0].targets[Synth::mod_volume].inputs[0].source = Synth::ModSource::none;
         bank_image                                                = bank;
         const uint32_t connections_before                         = graph.connection_count();
@@ -16601,7 +17396,9 @@ int main()
     // Reclamation remaps kind-1/2 records' descriptor ids together
     // with the pool compaction, so detached nodes keep editing their content.
     {
-        static Synth::InstrumentEditorBank bank;
+        const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& bank = *bank_storage;
         memset(static_cast<void*>(&bank), 0, sizeof(bank));
         bank.bank.channel_enabled[0] = 1;
         bank.bank.instruments.allocate();
@@ -16639,19 +17436,22 @@ int main()
     // Applying the drained connection events maintains the zone's
     // missing-sum mask (osc->sum deleted sets the layer's bit, added clears it).
     {
-        static Synth::InstrumentEditorBank bank;
-        static Synth::Instrument           instrument = {};
+        const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& bank       = *bank_storage;
+        Synth::Instrument            instrument = {};
         build_zone_fixture(&bank, &instrument);
-        static Sculptor::Graph           graph;
-        static Sculptor::OscGraphMapping mapping;
+        const std::unique_ptr<Sculptor::Graph> graph_storage = std::make_unique<Sculptor::Graph>();
+        Sculptor::Graph&                       graph         = *graph_storage;
+        Sculptor::OscGraphMapping              mapping       = {};
         TEST(Sculptor::project_instrument_to_graph(instrument, bank.bank, &graph, &mapping));
         const uint32_t sum_conn =
             find_osc_graph_connection(graph, { mapping.output_node, mapping.output_layer_input_slot[0] });
         TEST(sum_conn != Sculptor::pool_no_slot);
 
-        static Sculptor::GraphChange change = {};
-        change.kind                         = Sculptor::ChangeKind::connection_deleted;
-        change.connection_idx               = sum_conn;
+        Sculptor::GraphChange change = {};
+        change.kind                  = Sculptor::ChangeKind::connection_deleted;
+        change.connection_idx        = sum_conn;
         // The event carries its endpoint pair: the pool slot may already be
         // freed or reused when the change is applied.
         change.connection_output = graph.get_connection(sum_conn).output;
@@ -16677,11 +17477,14 @@ int main()
     // pool slot before the event is drained, so the drained deletion must set
     // the layer's missing-sum bit from the event's endpoint pair alone.
     {
-        static Synth::InstrumentEditorBank bank;
-        static Synth::Instrument           instrument = {};
+        const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& bank       = *bank_storage;
+        Synth::Instrument            instrument = {};
         build_zone_fixture(&bank, &instrument);
-        static Sculptor::Graph           graph;
-        static Sculptor::OscGraphMapping mapping;
+        const std::unique_ptr<Sculptor::Graph> graph_storage = std::make_unique<Sculptor::Graph>();
+        Sculptor::Graph&                       graph         = *graph_storage;
+        Sculptor::OscGraphMapping              mapping       = {};
         TEST(Sculptor::project_instrument_to_graph(instrument, bank.bank, &graph, &mapping));
         Sculptor::GraphChange discard[8] = {};
         (void)graph.take_changes(discard, 8);
@@ -16706,11 +17509,14 @@ int main()
     // Re-projection reproduces the broken state: the masked layer's sum
     // edge stays deleted and its input slot carries the missing (red) flag.
     {
-        static Synth::InstrumentBank       model_bank;
-        static Synth::InstrumentEditorBank bank;
-        static Synth::Instrument           instrument = {};
-        uint16_t                           env_ids[Synth::max_layers][Synth::num_mod_targets];
-        uint16_t                           lfo_ids[Synth::max_layers][Synth::num_mod_targets];
+        const std::unique_ptr<Synth::InstrumentBank> model_bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       model_bank         = *model_bank_storage;
+        const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& bank       = *bank_storage;
+        Synth::Instrument            instrument = {};
+        uint16_t                     env_ids[Synth::max_layers][Synth::num_mod_targets];
+        uint16_t                     lfo_ids[Synth::max_layers][Synth::num_mod_targets];
         build_osc_graph_max_fixture(&model_bank, &instrument, env_ids, lfo_ids);
         bank.bank                    = model_bank;
         bank.bank.channel_enabled[0] = 1;
@@ -16729,15 +17535,16 @@ int main()
         // projection of the instrument with the masked layer duplicated
         // (connected at its compacted row and again as the shell), minus the
         // shell's deleted sum edge.
-        static Synth::Instrument dup = bank.bank.instruments.entries[0];
-        dup.layer_count              = 7;
-        dup.layers[6]                = dup.layers[5];
-        dup.layers[5]                = dup.layers[4];
-        dup.layers[4]                = dup.layers[3];
-        dup.layers[3]                = dup.layers[2];
-        static Sculptor::Graph           dup_graph;
-        static Sculptor::OscGraphMapping dup_mapping;
-        bank.bank.instruments.entries[0] = dup;
+        Synth::Instrument dup                                    = bank.bank.instruments.entries[0];
+        dup.layer_count                                          = 7;
+        dup.layers[6]                                            = dup.layers[5];
+        dup.layers[5]                                            = dup.layers[4];
+        dup.layers[4]                                            = dup.layers[3];
+        dup.layers[3]                                            = dup.layers[2];
+        const std::unique_ptr<Sculptor::Graph> dup_graph_storage = std::make_unique<Sculptor::Graph>();
+        Sculptor::Graph&                       dup_graph         = *dup_graph_storage;
+        Sculptor::OscGraphMapping              dup_mapping       = {};
+        bank.bank.instruments.entries[0]                         = dup;
         TEST(Sculptor::project_editor_to_graph(bank, &dup_graph, &dup_mapping));
         const uint32_t dup_edges = dup_graph.connection_count();
         TEST(dup_edges > 0);
@@ -16758,9 +17565,10 @@ int main()
         // The masked input itself is metadata-valid before the projection.
         TEST(Sculptor::validate_editor_metadata(bank));
 
-        static Sculptor::Graph           graph;
-        static Sculptor::OscGraphMapping mapping;
-        const bool                       projected = Sculptor::project_editor_to_graph(bank, &graph, &mapping);
+        const std::unique_ptr<Sculptor::Graph> graph_storage = std::make_unique<Sculptor::Graph>();
+        Sculptor::Graph&                       graph         = *graph_storage;
+        Sculptor::OscGraphMapping              mapping       = {};
+        const bool                             projected = Sculptor::project_editor_to_graph(bank, &graph, &mapping);
         TEST(projected);
         if (projected) {
             TEST(find_osc_graph_connection(graph, { mapping.output_node, mapping.output_layer_input_slot[2] }) ==
@@ -16777,11 +17585,14 @@ int main()
     // rows (waveforms, mode, FM ratio, pitch offset), the output dot, the
     // block fields, the MIDI inputs and the generator nodes do not.
     {
-        static Synth::InstrumentBank       model_bank;
-        static Synth::InstrumentEditorBank bank;
-        static Synth::Instrument           instrument = {};
-        uint16_t                           env_ids[Synth::max_layers][Synth::num_mod_targets];
-        uint16_t                           lfo_ids[Synth::max_layers][Synth::num_mod_targets];
+        const std::unique_ptr<Synth::InstrumentBank> model_bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       model_bank         = *model_bank_storage;
+        const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& bank       = *bank_storage;
+        Synth::Instrument            instrument = {};
+        uint16_t                     env_ids[Synth::max_layers][Synth::num_mod_targets];
+        uint16_t                     lfo_ids[Synth::max_layers][Synth::num_mod_targets];
         build_osc_graph_max_fixture(&model_bank, &instrument, env_ids, lfo_ids);
         bank.bank                    = model_bank;
         bank.bank.channel_enabled[0] = 1;
@@ -16790,8 +17601,9 @@ int main()
         bank.bank.channel_zones[0][0].start_note = 1;
         bank.bank.channel_zones[0][0].instrument = 0;
 
-        static Sculptor::Graph           graph;
-        static Sculptor::OscGraphMapping mapping;
+        const std::unique_ptr<Sculptor::Graph> graph_storage = std::make_unique<Sculptor::Graph>();
+        Sculptor::Graph&                       graph         = *graph_storage;
+        Sculptor::OscGraphMapping              mapping       = {};
         TEST(Sculptor::project_editor_to_graph(bank, &graph, &mapping));
 
         const uint32_t osc_slots =
@@ -16836,11 +17648,14 @@ int main()
     // The free layer row (layer == layer_count) is flagged while
     // layer_count < 7; occupied rows are not.
     {
-        static Synth::InstrumentEditorBank bank;
-        static Synth::Instrument           instrument = {};
+        const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& bank       = *bank_storage;
+        Synth::Instrument            instrument = {};
         build_zone_fixture(&bank, &instrument);
-        static Sculptor::Graph           graph;
-        static Sculptor::OscGraphMapping mapping;
+        const std::unique_ptr<Sculptor::Graph> graph_storage = std::make_unique<Sculptor::Graph>();
+        Sculptor::Graph&                       graph         = *graph_storage;
+        Sculptor::OscGraphMapping              mapping       = {};
         TEST(Sculptor::project_editor_to_graph(bank, &graph, &mapping));
         TEST(instrument.layer_count == 1);
         TEST(! graph.node(mapping.output_node).slots.entries[mapping.output_layer_input_slot[0]].drop_menu);
@@ -16860,11 +17675,14 @@ int main()
     // A red-marked inner layer (missing-sum bit set) is flagged for its own
     // row drop, on top of the red mark.
     {
-        static Synth::InstrumentBank       model_bank;
-        static Synth::InstrumentEditorBank bank;
-        static Synth::Instrument           instrument = {};
-        uint16_t                           env_ids[Synth::max_layers][Synth::num_mod_targets];
-        uint16_t                           lfo_ids[Synth::max_layers][Synth::num_mod_targets];
+        const std::unique_ptr<Synth::InstrumentBank> model_bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       model_bank         = *model_bank_storage;
+        const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& bank       = *bank_storage;
+        Synth::Instrument            instrument = {};
+        uint16_t                     env_ids[Synth::max_layers][Synth::num_mod_targets];
+        uint16_t                     lfo_ids[Synth::max_layers][Synth::num_mod_targets];
         build_osc_graph_max_fixture(&model_bank, &instrument, env_ids, lfo_ids);
         bank.bank                    = model_bank;
         bank.bank.channel_enabled[0] = 1;
@@ -16874,8 +17692,9 @@ int main()
         bank.bank.channel_zones[0][0].instrument = 0;
         bank.graph_missing_sum[0][0]             = static_cast<uint8_t>(1u << 2);
 
-        static Sculptor::Graph           graph;
-        static Sculptor::OscGraphMapping mapping;
+        const std::unique_ptr<Sculptor::Graph> graph_storage = std::make_unique<Sculptor::Graph>();
+        Sculptor::Graph&                       graph         = *graph_storage;
+        Sculptor::OscGraphMapping              mapping       = {};
         TEST(Sculptor::project_editor_to_graph(bank, &graph, &mapping));
         for (uint32_t layer = 0; layer < Synth::max_layers; ++layer) {
             const bool flagged = layer == 2; // inner layer: no free row at seven
@@ -16894,21 +17713,25 @@ int main()
     // Zero red rows: the free row alone carries the add flag -
     // flagged on the run's free row and nowhere else.
     {
-        static Synth::InstrumentBank       model_bank;
-        static Synth::InstrumentEditorBank bank;
-        static Synth::Instrument           instrument = {};
-        uint16_t                           env_ids[Synth::max_layers][Synth::num_mod_targets];
-        uint16_t                           lfo_ids[Synth::max_layers][Synth::num_mod_targets];
+        const std::unique_ptr<Synth::InstrumentBank> model_bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       model_bank         = *model_bank_storage;
+        const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& bank       = *bank_storage;
+        Synth::Instrument            instrument = {};
+        uint16_t                     env_ids[Synth::max_layers][Synth::num_mod_targets];
+        uint16_t                     lfo_ids[Synth::max_layers][Synth::num_mod_targets];
         build_osc_graph_max_fixture(&model_bank, &instrument, env_ids, lfo_ids);
         bank.bank                    = model_bank;
         bank.bank.channel_enabled[0] = 1;
         TEST(bank.bank.instruments.allocate() == 0);
-        bank.bank.instruments.entries[0]             = instrument;
-        bank.bank.instruments.entries[0].layer_count = 3;
-        bank.bank.channel_zones[0][0].start_note     = 1;
-        bank.bank.channel_zones[0][0].instrument     = 0;
-        static Sculptor::Graph           graph;
-        static Sculptor::OscGraphMapping mapping;
+        bank.bank.instruments.entries[0]                     = instrument;
+        bank.bank.instruments.entries[0].layer_count         = 3;
+        bank.bank.channel_zones[0][0].start_note             = 1;
+        bank.bank.channel_zones[0][0].instrument             = 0;
+        const std::unique_ptr<Sculptor::Graph> graph_storage = std::make_unique<Sculptor::Graph>();
+        Sculptor::Graph&                       graph         = *graph_storage;
+        Sculptor::OscGraphMapping              mapping       = {};
         TEST(Sculptor::project_editor_to_graph(bank, &graph, &mapping));
         for (uint32_t layer = 0; layer < Synth::max_layers; ++layer) {
             const bool flagged = layer == 3; // the free row behind three layers
@@ -16927,22 +17750,26 @@ int main()
     // renders behind the last visible row.  The last connected row is
     // row 3, so the gray dot sits on row 4, the run's free row.
     {
-        static Synth::InstrumentBank       model_bank;
-        static Synth::InstrumentEditorBank bank;
-        static Synth::Instrument           instrument = {};
-        uint16_t                           env_ids[Synth::max_layers][Synth::num_mod_targets];
-        uint16_t                           lfo_ids[Synth::max_layers][Synth::num_mod_targets];
+        const std::unique_ptr<Synth::InstrumentBank> model_bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       model_bank         = *model_bank_storage;
+        const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& bank       = *bank_storage;
+        Synth::Instrument            instrument = {};
+        uint16_t                     env_ids[Synth::max_layers][Synth::num_mod_targets];
+        uint16_t                     lfo_ids[Synth::max_layers][Synth::num_mod_targets];
         build_osc_graph_max_fixture(&model_bank, &instrument, env_ids, lfo_ids);
         bank.bank                    = model_bank;
         bank.bank.channel_enabled[0] = 1;
         TEST(bank.bank.instruments.allocate() == 0);
-        bank.bank.instruments.entries[0]             = instrument;
-        bank.bank.instruments.entries[0].layer_count = 3;
-        bank.bank.channel_zones[0][0].start_note     = 1;
-        bank.bank.channel_zones[0][0].instrument     = 0;
-        bank.graph_missing_sum[0][0]                 = static_cast<uint8_t>(1u << 1);
-        static Sculptor::Graph           graph;
-        static Sculptor::OscGraphMapping mapping;
+        bank.bank.instruments.entries[0]                     = instrument;
+        bank.bank.instruments.entries[0].layer_count         = 3;
+        bank.bank.channel_zones[0][0].start_note             = 1;
+        bank.bank.channel_zones[0][0].instrument             = 0;
+        bank.graph_missing_sum[0][0]                         = static_cast<uint8_t>(1u << 1);
+        const std::unique_ptr<Sculptor::Graph> graph_storage = std::make_unique<Sculptor::Graph>();
+        Sculptor::Graph&                       graph         = *graph_storage;
+        Sculptor::OscGraphMapping              mapping       = {};
         TEST(Sculptor::project_editor_to_graph(bank, &graph, &mapping));
         // The run is rows 0, 2, 3 connected plus the shell at row 1; the red
         // dot keeps its menu and the gray dot joins it on row 4.
@@ -16966,22 +17793,26 @@ int main()
     // gray dot renders behind the last visible row.  The last connected
     // row is row 4, so the gray dot sits on row 5.
     {
-        static Synth::InstrumentBank       model_bank;
-        static Synth::InstrumentEditorBank bank;
-        static Synth::Instrument           instrument = {};
-        uint16_t                           env_ids[Synth::max_layers][Synth::num_mod_targets];
-        uint16_t                           lfo_ids[Synth::max_layers][Synth::num_mod_targets];
+        const std::unique_ptr<Synth::InstrumentBank> model_bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       model_bank         = *model_bank_storage;
+        const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& bank       = *bank_storage;
+        Synth::Instrument            instrument = {};
+        uint16_t                     env_ids[Synth::max_layers][Synth::num_mod_targets];
+        uint16_t                     lfo_ids[Synth::max_layers][Synth::num_mod_targets];
         build_osc_graph_max_fixture(&model_bank, &instrument, env_ids, lfo_ids);
         bank.bank                    = model_bank;
         bank.bank.channel_enabled[0] = 1;
         TEST(bank.bank.instruments.allocate() == 0);
-        bank.bank.instruments.entries[0]             = instrument;
-        bank.bank.instruments.entries[0].layer_count = 3;
-        bank.bank.channel_zones[0][0].start_note     = 1;
-        bank.bank.channel_zones[0][0].instrument     = 0;
-        bank.graph_missing_sum[0][0]                 = static_cast<uint8_t>((1u << 1) | (1u << 2));
-        static Sculptor::Graph           graph;
-        static Sculptor::OscGraphMapping mapping;
+        bank.bank.instruments.entries[0]                     = instrument;
+        bank.bank.instruments.entries[0].layer_count         = 3;
+        bank.bank.channel_zones[0][0].start_note             = 1;
+        bank.bank.channel_zones[0][0].instrument             = 0;
+        bank.graph_missing_sum[0][0]                         = static_cast<uint8_t>((1u << 1) | (1u << 2));
+        const std::unique_ptr<Sculptor::Graph> graph_storage = std::make_unique<Sculptor::Graph>();
+        Sculptor::Graph&                       graph         = *graph_storage;
+        Sculptor::OscGraphMapping              mapping       = {};
         TEST(Sculptor::project_editor_to_graph(bank, &graph, &mapping));
         // The run is row 0 plus rows 3, 4 connected around two shell holes;
         // the gray dot renders on row 5 behind the last connected row.
@@ -17003,7 +17834,9 @@ int main()
     // renders red and exactly one gray dot renders behind the run, on
     // the row after the last visible row.
     {
-        static Synth::InstrumentEditorBank bank;
+        const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& bank = *bank_storage;
         memset(static_cast<void*>(&bank), 0, sizeof(bank));
         bank.bank.channel_enabled[0] = 1;
         TEST(bank.bank.instruments.allocate() == 0);
@@ -17019,8 +17852,9 @@ int main()
         }
         bank.phantom_count = 1;
         TEST(Sculptor::validate_editor_metadata(bank));
-        static Sculptor::Graph           graph;
-        static Sculptor::OscGraphMapping mapping;
+        const std::unique_ptr<Sculptor::Graph> graph_storage = std::make_unique<Sculptor::Graph>();
+        Sculptor::Graph&                       graph         = *graph_storage;
+        Sculptor::OscGraphMapping              mapping       = {};
         TEST(Sculptor::project_editor_to_graph(bank, &graph, &mapping));
         TEST(Sculptor::osc_row_run_length(0, bank.graph_missing_sum[0][0]) == 1);
         for (uint32_t layer = 0; layer < Synth::max_layers; ++layer) {
@@ -17039,7 +17873,9 @@ int main()
     // Zero-connected multiple shells: every run row renders red and the
     // single gray dot renders on the row behind the run.
     {
-        static Synth::InstrumentEditorBank bank;
+        const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& bank = *bank_storage;
         memset(static_cast<void*>(&bank), 0, sizeof(bank));
         bank.bank.channel_enabled[0] = 1;
         TEST(bank.bank.instruments.allocate() == 0);
@@ -17055,8 +17891,9 @@ int main()
         }
         bank.phantom_count = 3;
         TEST(Sculptor::validate_editor_metadata(bank));
-        static Sculptor::Graph           graph;
-        static Sculptor::OscGraphMapping mapping;
+        const std::unique_ptr<Sculptor::Graph> graph_storage = std::make_unique<Sculptor::Graph>();
+        Sculptor::Graph&                       graph         = *graph_storage;
+        Sculptor::OscGraphMapping              mapping       = {};
         TEST(Sculptor::project_editor_to_graph(bank, &graph, &mapping));
         TEST(Sculptor::osc_row_run_length(0, bank.graph_missing_sum[0][0]) == 3);
         for (uint32_t layer = 0; layer < Synth::max_layers; ++layer) {
@@ -17077,20 +17914,24 @@ int main()
     // renders (no hole sits at or above the last connected row), and the
     // run fills every row, so the add consumer refuses on this dot too.
     {
-        static Synth::InstrumentBank       model_bank;
-        static Synth::InstrumentEditorBank bank;
-        static Synth::Instrument           instrument = {};
-        uint16_t                           env_ids[Synth::max_layers][Synth::num_mod_targets];
-        uint16_t                           lfo_ids[Synth::max_layers][Synth::num_mod_targets];
+        const std::unique_ptr<Synth::InstrumentBank> model_bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       model_bank         = *model_bank_storage;
+        const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& bank       = *bank_storage;
+        Synth::Instrument            instrument = {};
+        uint16_t                     env_ids[Synth::max_layers][Synth::num_mod_targets];
+        uint16_t                     lfo_ids[Synth::max_layers][Synth::num_mod_targets];
         build_osc_graph_max_fixture(&model_bank, &instrument, env_ids, lfo_ids);
         bank.bank                    = model_bank;
         bank.bank.channel_enabled[0] = 1;
         TEST(bank.bank.instruments.allocate() == 0);
-        bank.bank.instruments.entries[0]         = instrument;
-        bank.bank.channel_zones[0][0].start_note = 1;
-        bank.bank.channel_zones[0][0].instrument = 0;
-        static Sculptor::Graph           graph;
-        static Sculptor::OscGraphMapping mapping;
+        bank.bank.instruments.entries[0]                     = instrument;
+        bank.bank.channel_zones[0][0].start_note             = 1;
+        bank.bank.channel_zones[0][0].instrument             = 0;
+        const std::unique_ptr<Sculptor::Graph> graph_storage = std::make_unique<Sculptor::Graph>();
+        Sculptor::Graph&                       graph         = *graph_storage;
+        Sculptor::OscGraphMapping              mapping       = {};
         TEST(Sculptor::project_editor_to_graph(bank, &graph, &mapping));
         Sculptor::GraphChange discard[Sculptor::max_pending_changes];
         const uint32_t        trailing = 6;
@@ -17129,20 +17970,24 @@ int main()
     // the second trailing shell renders no dot of its own - it hides
     // from the renderer and the dot hit-test.
     {
-        static Synth::InstrumentBank       model_bank;
-        static Synth::InstrumentEditorBank bank;
-        static Synth::Instrument           instrument = {};
-        uint16_t                           env_ids[Synth::max_layers][Synth::num_mod_targets];
-        uint16_t                           lfo_ids[Synth::max_layers][Synth::num_mod_targets];
+        const std::unique_ptr<Synth::InstrumentBank> model_bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       model_bank         = *model_bank_storage;
+        const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& bank       = *bank_storage;
+        Synth::Instrument            instrument = {};
+        uint16_t                     env_ids[Synth::max_layers][Synth::num_mod_targets];
+        uint16_t                     lfo_ids[Synth::max_layers][Synth::num_mod_targets];
         build_osc_graph_max_fixture(&model_bank, &instrument, env_ids, lfo_ids);
         bank.bank                    = model_bank;
         bank.bank.channel_enabled[0] = 1;
         TEST(bank.bank.instruments.allocate() == 0);
-        bank.bank.instruments.entries[0]         = instrument;
-        bank.bank.channel_zones[0][0].start_note = 1;
-        bank.bank.channel_zones[0][0].instrument = 0;
-        static Sculptor::Graph           graph;
-        static Sculptor::OscGraphMapping mapping;
+        bank.bank.instruments.entries[0]                     = instrument;
+        bank.bank.channel_zones[0][0].start_note             = 1;
+        bank.bank.channel_zones[0][0].instrument             = 0;
+        const std::unique_ptr<Sculptor::Graph> graph_storage = std::make_unique<Sculptor::Graph>();
+        Sculptor::Graph&                       graph         = *graph_storage;
+        Sculptor::OscGraphMapping              mapping       = {};
         TEST(Sculptor::project_editor_to_graph(bank, &graph, &mapping));
         Sculptor::GraphChange discard[Sculptor::max_pending_changes];
         for (uint32_t trailing = 5; trailing <= 6; ++trailing) {
@@ -17211,22 +18056,26 @@ int main()
     // one shell the run fills every row - the red dot keeps its menu (the
     // entry renders disabled there) and no free-row dot exists.
     {
-        static Synth::InstrumentBank       model_bank;
-        static Synth::InstrumentEditorBank bank;
-        static Synth::Instrument           instrument = {};
-        uint16_t                           env_ids[Synth::max_layers][Synth::num_mod_targets];
-        uint16_t                           lfo_ids[Synth::max_layers][Synth::num_mod_targets];
+        const std::unique_ptr<Synth::InstrumentBank> model_bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       model_bank         = *model_bank_storage;
+        const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& bank       = *bank_storage;
+        Synth::Instrument            instrument = {};
+        uint16_t                     env_ids[Synth::max_layers][Synth::num_mod_targets];
+        uint16_t                     lfo_ids[Synth::max_layers][Synth::num_mod_targets];
         build_osc_graph_max_fixture(&model_bank, &instrument, env_ids, lfo_ids);
         bank.bank                    = model_bank;
         bank.bank.channel_enabled[0] = 1;
         TEST(bank.bank.instruments.allocate() == 0);
-        bank.bank.instruments.entries[0]             = instrument;
-        bank.bank.instruments.entries[0].layer_count = Synth::max_layers - 1;
-        bank.bank.channel_zones[0][0].start_note     = 1;
-        bank.bank.channel_zones[0][0].instrument     = 0;
-        bank.graph_missing_sum[0][0]                 = static_cast<uint8_t>(1u << 5);
-        static Sculptor::Graph           graph;
-        static Sculptor::OscGraphMapping mapping;
+        bank.bank.instruments.entries[0]                     = instrument;
+        bank.bank.instruments.entries[0].layer_count         = Synth::max_layers - 1;
+        bank.bank.channel_zones[0][0].start_note             = 1;
+        bank.bank.channel_zones[0][0].instrument             = 0;
+        bank.graph_missing_sum[0][0]                         = static_cast<uint8_t>(1u << 5);
+        const std::unique_ptr<Sculptor::Graph> graph_storage = std::make_unique<Sculptor::Graph>();
+        Sculptor::Graph&                       graph         = *graph_storage;
+        Sculptor::OscGraphMapping              mapping       = {};
         TEST(Sculptor::project_editor_to_graph(bank, &graph, &mapping));
         TEST(Sculptor::osc_row_run_length(Synth::max_layers - 1, bank.graph_missing_sum[0][0]) == Synth::max_layers);
         for (uint32_t layer = 0; layer < Synth::max_layers; ++layer) {
@@ -17244,7 +18093,9 @@ int main()
     // At the cap, all shells: seven red rows fill the run;
     // every dot keeps its (disabled-entry) menu and none is a free dot.
     {
-        static Synth::InstrumentEditorBank bank;
+        const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& bank = *bank_storage;
         memset(static_cast<void*>(&bank), 0, sizeof(bank));
         bank.bank.channel_enabled[0] = 1;
         TEST(bank.bank.instruments.allocate() == 0);
@@ -17260,8 +18111,9 @@ int main()
         }
         bank.phantom_count = Synth::max_layers;
         TEST(Sculptor::validate_editor_metadata(bank));
-        static Sculptor::Graph           graph;
-        static Sculptor::OscGraphMapping mapping;
+        const std::unique_ptr<Sculptor::Graph> graph_storage = std::make_unique<Sculptor::Graph>();
+        Sculptor::Graph&                       graph         = *graph_storage;
+        Sculptor::OscGraphMapping              mapping       = {};
         TEST(Sculptor::project_editor_to_graph(bank, &graph, &mapping));
         TEST(Sculptor::osc_row_run_length(0, bank.graph_missing_sum[0][0]) == Synth::max_layers);
         for (uint32_t layer = 0; layer < Synth::max_layers; ++layer) {
@@ -17279,16 +18131,18 @@ int main()
     // rows), and the output node keeps all seven layer slots allocated
     // (rows hide, nothing is removed).
     for (uint32_t layer_count = 0; layer_count <= Synth::max_layers; ++layer_count) {
-        static Synth::InstrumentBank bank;
-        static Synth::Instrument     instrument = {};
+        const std::unique_ptr<Synth::InstrumentBank> bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       bank         = *bank_storage;
+        Synth::Instrument                            instrument   = {};
         memset(static_cast<void*>(&bank), 0, sizeof(bank));
         instrument             = {};
         instrument.layer_count = layer_count;
         for (uint32_t layer = 0; layer < layer_count; ++layer) {
             instrument.layers[layer].osc_type[0] = Synth::WaveType::sine_wave;
         }
-        static Sculptor::Graph           graph;
-        static Sculptor::OscGraphMapping mapping;
+        const std::unique_ptr<Sculptor::Graph> graph_storage = std::make_unique<Sculptor::Graph>();
+        Sculptor::Graph&                       graph         = *graph_storage;
+        Sculptor::OscGraphMapping              mapping       = {};
         TEST(Sculptor::project_instrument_to_graph(instrument, bank, &graph, &mapping));
         for (uint32_t layer = 0; layer < Synth::max_layers; ++layer) {
             const uint32_t slot = mapping.output_layer_input_slot[layer];
@@ -17308,8 +18162,9 @@ int main()
     // keeps the family row visible; the same bipolar default on a
     // non-volume target keeps the bipolar shape and still derives its wire.
     {
-        static Synth::InstrumentBank bank;
-        static Synth::Instrument     instrument = {};
+        const std::unique_ptr<Synth::InstrumentBank> bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       bank         = *bank_storage;
+        Synth::Instrument                            instrument   = {};
         memset(static_cast<void*>(&bank), 0, sizeof(bank));
         // The canvas command's bipolar default: three points, sustain over
         // the middle, -1..+1 span, attack to full and a release tail to
@@ -17348,8 +18203,9 @@ int main()
         instrument.layer_count                                           = 1;
         instrument.layers[0].osc_type[0]                                 = Synth::WaveType::sine_wave;
         instrument.layers[0].targets[Synth::mod_volume].envelope_desc_id = static_cast<uint16_t>(env_slot + 1);
-        static Sculptor::Graph           graph;
-        static Sculptor::OscGraphMapping mapping;
+        const std::unique_ptr<Sculptor::Graph> graph_storage             = std::make_unique<Sculptor::Graph>();
+        Sculptor::Graph&                       graph                     = *graph_storage;
+        Sculptor::OscGraphMapping              mapping                   = {};
         TEST(Sculptor::project_instrument_to_graph(instrument, bank, &graph, &mapping));
         const uint32_t osc_node = mapping.osc_nodes[0];
         TEST(find_osc_graph_connection(graph, { osc_node, Sculptor::osc_target_env_dot(Synth::mod_volume) }) !=
@@ -17361,8 +18217,9 @@ int main()
         // Sibling: the bipolar default on a non-volume target stays bipolar
         // (the volume shape cannot serve a non-volume target) and still
         // derives its wire and its visible row.
-        static Synth::InstrumentBank pitch_bank;
-        static Synth::Instrument     pitch_instrument = {};
+        const std::unique_ptr<Synth::InstrumentBank> pitch_bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       pitch_bank         = *pitch_bank_storage;
+        Synth::Instrument                            pitch_instrument   = {};
         memset(static_cast<void*>(&pitch_bank), 0, sizeof(pitch_bank));
         const uint32_t pitch_env_slot = pitch_bank.envelopes.allocate();
         TEST(pitch_env_slot == 0);
@@ -17372,8 +18229,9 @@ int main()
         pitch_instrument.layers[0].osc_type[0] = Synth::WaveType::sine_wave;
         pitch_instrument.layers[0].targets[Synth::mod_pitch].envelope_desc_id =
             static_cast<uint16_t>(pitch_env_slot + 1);
-        static Sculptor::Graph           pitch_graph;
-        static Sculptor::OscGraphMapping pitch_mapping;
+        const std::unique_ptr<Sculptor::Graph> pitch_graph_storage = std::make_unique<Sculptor::Graph>();
+        Sculptor::Graph&                       pitch_graph         = *pitch_graph_storage;
+        Sculptor::OscGraphMapping              pitch_mapping       = {};
         TEST(Sculptor::project_instrument_to_graph(pitch_instrument, pitch_bank, &pitch_graph, &pitch_mapping));
         const uint32_t pitch_node = pitch_mapping.osc_nodes[0];
         TEST(find_osc_graph_connection(pitch_graph, { pitch_node, Sculptor::osc_target_env_dot(Synth::mod_pitch) }) !=
@@ -17423,9 +18281,12 @@ int main()
     // siblings stay untouched, and undo and redo restore the bank, the
     // bits, the store and the records.
     {
-        static Synth::InstrumentBank       model_bank;
-        static Synth::InstrumentEditorBank bank;
-        static Synth::Instrument           instrument = {};
+        const std::unique_ptr<Synth::InstrumentBank> model_bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       model_bank         = *model_bank_storage;
+        const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& bank       = *bank_storage;
+        Synth::Instrument            instrument = {};
         memset(static_cast<void*>(&model_bank), 0, sizeof(model_bank));
         instrument.layer_count = 6;
         for (uint32_t layer = 0; layer < 6; ++layer) {
@@ -17465,8 +18326,9 @@ int main()
         stale_record.x                               = 55.0f;
         stale_record.y                               = 66.0f;
         bank.graph_layout[bank.graph_layout_count++] = stale_record;
-        static Sculptor::Graph           graph;
-        static Sculptor::OscGraphMapping mapping;
+        const std::unique_ptr<Sculptor::Graph> graph_storage = std::make_unique<Sculptor::Graph>();
+        Sculptor::Graph&                       graph         = *graph_storage;
+        Sculptor::OscGraphMapping              mapping       = {};
         TEST(Sculptor::project_editor_to_graph(bank, &graph, &mapping));
         // The precondition: a real deletion event disconnects row 5, so the
         // zone holds five connected layers plus one shell and validates.
@@ -17502,16 +18364,21 @@ int main()
         TEST(Sculptor::osc_row_run_length(shell_zone.layer_count, bank.graph_missing_sum[0][0]) == 6);
         // One undo entry captures the pre-swap state (bank, bits, store and
         // records ride one InstrumentEditorBank snapshot).
-        static Sculptor::UndoRedo undo;
-        static uint8_t            undo_buf[sizeof(Synth::InstrumentEditorBank) + 2 * sizeof(uint32_t)];
+        Sculptor::UndoRedo undo = {};
+        const std::unique_ptr<FixedArray<uint8_t, sizeof(Synth::InstrumentEditorBank) + 2 * sizeof(uint32_t)>>
+            undo_buf_storage =
+                std::make_unique<FixedArray<uint8_t, sizeof(Synth::InstrumentEditorBank) + 2 * sizeof(uint32_t)>>();
+        uint8_t (&undo_buf)[sizeof(Synth::InstrumentEditorBank) + 2 * sizeof(uint32_t)] = undo_buf_storage->elements;
         undo.init(undo_buf);
         TEST(undo.undo_empty());
         undo.init_undo_push();
         undo.push(&bank, sizeof(bank));
         undo.push(7u);
         TEST(undo.finish_undo_push());
-        static Synth::InstrumentEditorBank before_swap;
-        before_swap = bank;
+        const std::unique_ptr<Synth::InstrumentEditorBank> before_swap_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& before_swap = *before_swap_storage;
+        before_swap                              = bank;
         // The modeled swap: the type comes from the highest-index connected
         // oscillator via the inheritance helper, every
         // non-type field inherits from the last enabled layer as before, and
@@ -17614,8 +18481,10 @@ int main()
         for (uint32_t c = 0; c < 5; ++c) {
             TEST(memcmp(&compiled.layers[c], &instrument.layers[c], sizeof(Synth::Oscillator)) == 0);
         }
-        static Synth::InstrumentEditorBank after_swap;
-        after_swap = bank;
+        const std::unique_ptr<Synth::InstrumentEditorBank> after_swap_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& after_swap = *after_swap_storage;
+        after_swap                              = bank;
         // Undo restores the pre-swap state exactly.
         TEST(! undo.undo_empty());
         TEST(undo.init_undo());
@@ -17636,7 +18505,9 @@ int main()
         // The regression the resolution removes: without deleting the
         // stale destination record, the re-key leaves two records on one
         // key and metadata validation refuses the whole add.
-        static Synth::InstrumentEditorBank refused;
+        const std::unique_ptr<Synth::InstrumentEditorBank> refused_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& refused            = *refused_storage;
         refused                                         = before_swap;
         refused.bank.instruments.entries[0].layers[row] = fresh;
         refused.bank.instruments.entries[0].layer_count = shell_zone.layer_count + 1;
@@ -17649,11 +18520,14 @@ int main()
     // omits it and counts connected layers only - the shell's parameters
     // live in the phantom store, not in the compiled layer list.
     {
-        static Synth::InstrumentBank       model_bank;
-        static Synth::InstrumentEditorBank bank;
-        static Synth::Instrument           instrument = {};
-        uint16_t                           env_ids[Synth::max_layers][Synth::num_mod_targets];
-        uint16_t                           lfo_ids[Synth::max_layers][Synth::num_mod_targets];
+        const std::unique_ptr<Synth::InstrumentBank> model_bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       model_bank         = *model_bank_storage;
+        const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& bank       = *bank_storage;
+        Synth::Instrument            instrument = {};
+        uint16_t                     env_ids[Synth::max_layers][Synth::num_mod_targets];
+        uint16_t                     lfo_ids[Synth::max_layers][Synth::num_mod_targets];
         build_osc_graph_max_fixture(&model_bank, &instrument, env_ids, lfo_ids);
         bank.bank                    = model_bank;
         bank.bank.channel_enabled[0] = 1;
@@ -17662,8 +18536,9 @@ int main()
         bank.bank.channel_zones[0][0].start_note = 1;
         bank.bank.channel_zones[0][0].instrument = 0;
 
-        static Sculptor::Graph           graph;
-        static Sculptor::OscGraphMapping mapping;
+        const std::unique_ptr<Sculptor::Graph> graph_storage = std::make_unique<Sculptor::Graph>();
+        Sculptor::Graph&                       graph         = *graph_storage;
+        Sculptor::OscGraphMapping              mapping       = {};
         TEST(Sculptor::project_editor_to_graph(bank, &graph, &mapping));
         const uint32_t wire =
             find_osc_graph_connection(graph, { mapping.output_node, mapping.output_layer_input_slot[2] });
@@ -17693,11 +18568,14 @@ int main()
     // survive re-projection and a document round trip, and re-wiring the
     // shell restores the original layer byte-identically.
     {
-        static Synth::InstrumentBank       model_bank;
-        static Synth::InstrumentEditorBank bank;
-        static Synth::Instrument           instrument = {};
-        uint16_t                           env_ids[Synth::max_layers][Synth::num_mod_targets];
-        uint16_t                           lfo_ids[Synth::max_layers][Synth::num_mod_targets];
+        const std::unique_ptr<Synth::InstrumentBank> model_bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       model_bank         = *model_bank_storage;
+        const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& bank       = *bank_storage;
+        Synth::Instrument            instrument = {};
+        uint16_t                     env_ids[Synth::max_layers][Synth::num_mod_targets];
+        uint16_t                     lfo_ids[Synth::max_layers][Synth::num_mod_targets];
         build_osc_graph_max_fixture(&model_bank, &instrument, env_ids, lfo_ids);
         bank.bank                    = model_bank;
         bank.bank.channel_enabled[0] = 1;
@@ -17706,8 +18584,9 @@ int main()
         bank.bank.channel_zones[0][0].start_note = 1;
         bank.bank.channel_zones[0][0].instrument = 0;
 
-        static Sculptor::Graph           graph;
-        static Sculptor::OscGraphMapping mapping;
+        const std::unique_ptr<Sculptor::Graph> graph_storage = std::make_unique<Sculptor::Graph>();
+        Sculptor::Graph&                       graph         = *graph_storage;
+        Sculptor::OscGraphMapping              mapping       = {};
         TEST(Sculptor::project_editor_to_graph(bank, &graph, &mapping));
         const uint32_t wire =
             find_osc_graph_connection(graph, { mapping.output_node, mapping.output_layer_input_slot[2] });
@@ -17735,7 +18614,9 @@ int main()
             uint32_t written = 0;
             TEST(Synth::write_editor_bank_json(stream, &bank, sizeof(bank), &written) == 0);
             rewind(stream);
-            static Synth::InstrumentEditorBank restored;
+            const std::unique_ptr<Synth::InstrumentEditorBank> restored_storage =
+                std::make_unique<Synth::InstrumentEditorBank>();
+            Synth::InstrumentEditorBank& restored = *restored_storage;
             TEST(Synth::read_editor_bank_json(stream, written, &restored));
             TEST(restored.graph_missing_sum[0][0] == static_cast<uint8_t>(1u << 2));
             TEST(restored.phantom_count == 1);
@@ -17744,8 +18625,9 @@ int main()
             // Re-wiring the shell on the decoded bank restores the original
             // layer byte-identically (the compiled instrument equals the
             // pre-disconnection fixture).
-            static Sculptor::Graph           regraph;
-            static Sculptor::OscGraphMapping remapping;
+            const std::unique_ptr<Sculptor::Graph> regraph_storage = std::make_unique<Sculptor::Graph>();
+            Sculptor::Graph&                       regraph         = *regraph_storage;
+            Sculptor::OscGraphMapping              remapping       = {};
             TEST(Sculptor::project_editor_to_graph(restored, &regraph, &remapping));
             const uint32_t rewired =
                 regraph.add_connection({ remapping.osc_nodes[2], remapping.osc_output_slot },
@@ -17773,11 +18655,14 @@ int main()
     // projection materializes the shells), and the channel publishes
     // disabled.
     {
-        static Synth::InstrumentBank       model_bank;
-        static Synth::InstrumentEditorBank bank;
-        static Synth::Instrument           instrument = {};
-        uint16_t                           env_ids[Synth::max_layers][Synth::num_mod_targets];
-        uint16_t                           lfo_ids[Synth::max_layers][Synth::num_mod_targets];
+        const std::unique_ptr<Synth::InstrumentBank> model_bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       model_bank         = *model_bank_storage;
+        const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& bank       = *bank_storage;
+        Synth::Instrument            instrument = {};
+        uint16_t                     env_ids[Synth::max_layers][Synth::num_mod_targets];
+        uint16_t                     lfo_ids[Synth::max_layers][Synth::num_mod_targets];
         build_osc_graph_max_fixture(&model_bank, &instrument, env_ids, lfo_ids);
         bank.bank                    = model_bank;
         bank.bank.channel_enabled[0] = 1;
@@ -17786,8 +18671,9 @@ int main()
         bank.bank.channel_zones[0][0].start_note = 1;
         bank.bank.channel_zones[0][0].instrument = 0;
 
-        static Sculptor::Graph           graph;
-        static Sculptor::OscGraphMapping mapping;
+        const std::unique_ptr<Sculptor::Graph> graph_storage = std::make_unique<Sculptor::Graph>();
+        Sculptor::Graph&                       graph         = *graph_storage;
+        Sculptor::OscGraphMapping              mapping       = {};
         TEST(Sculptor::project_editor_to_graph(bank, &graph, &mapping));
 
         // Disconnect every layer through the normal connection-deleted
@@ -17835,20 +18721,24 @@ int main()
     // includes the shell.  Connected-before-shell: rows 0 connected, 1 red,
     // 2 connected; deleting row 0 compiles the survivors in order.
     {
-        static Synth::InstrumentBank       model_bank;
-        static Synth::InstrumentEditorBank bank;
-        static Synth::Instrument           instrument = {};
-        uint16_t                           env_ids[Synth::max_layers][Synth::num_mod_targets];
-        uint16_t                           lfo_ids[Synth::max_layers][Synth::num_mod_targets];
+        const std::unique_ptr<Synth::InstrumentBank> model_bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       model_bank         = *model_bank_storage;
+        const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& bank       = *bank_storage;
+        Synth::Instrument            instrument = {};
+        uint16_t                     env_ids[Synth::max_layers][Synth::num_mod_targets];
+        uint16_t                     lfo_ids[Synth::max_layers][Synth::num_mod_targets];
         build_osc_graph_max_fixture(&model_bank, &instrument, env_ids, lfo_ids);
         bank.bank                    = model_bank;
         bank.bank.channel_enabled[0] = 1;
         TEST(bank.bank.instruments.allocate() == 0);
-        bank.bank.instruments.entries[0]         = instrument;
-        bank.bank.channel_zones[0][0].start_note = 1;
-        bank.bank.channel_zones[0][0].instrument = 0;
-        static Sculptor::Graph           graph;
-        static Sculptor::OscGraphMapping mapping;
+        bank.bank.instruments.entries[0]                     = instrument;
+        bank.bank.channel_zones[0][0].start_note             = 1;
+        bank.bank.channel_zones[0][0].instrument             = 0;
+        const std::unique_ptr<Sculptor::Graph> graph_storage = std::make_unique<Sculptor::Graph>();
+        Sculptor::Graph&                       graph         = *graph_storage;
+        Sculptor::OscGraphMapping              mapping       = {};
         TEST(Sculptor::project_editor_to_graph(bank, &graph, &mapping));
         const uint32_t gone =
             find_osc_graph_connection(graph, { mapping.output_node, mapping.output_layer_input_slot[1] });
@@ -17895,20 +18785,24 @@ int main()
     // connected row keeps the shell's bit, entry and red mark while
     // the survivors compact in order.
     {
-        static Synth::InstrumentBank       model_bank;
-        static Synth::InstrumentEditorBank bank;
-        static Synth::Instrument           instrument = {};
-        uint16_t                           env_ids[Synth::max_layers][Synth::num_mod_targets];
-        uint16_t                           lfo_ids[Synth::max_layers][Synth::num_mod_targets];
+        const std::unique_ptr<Synth::InstrumentBank> model_bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       model_bank         = *model_bank_storage;
+        const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& bank       = *bank_storage;
+        Synth::Instrument            instrument = {};
+        uint16_t                     env_ids[Synth::max_layers][Synth::num_mod_targets];
+        uint16_t                     lfo_ids[Synth::max_layers][Synth::num_mod_targets];
         build_osc_graph_max_fixture(&model_bank, &instrument, env_ids, lfo_ids);
         bank.bank                    = model_bank;
         bank.bank.channel_enabled[0] = 1;
         TEST(bank.bank.instruments.allocate() == 0);
-        bank.bank.instruments.entries[0]         = instrument;
-        bank.bank.channel_zones[0][0].start_note = 1;
-        bank.bank.channel_zones[0][0].instrument = 0;
-        static Sculptor::Graph           graph;
-        static Sculptor::OscGraphMapping mapping;
+        bank.bank.instruments.entries[0]                     = instrument;
+        bank.bank.channel_zones[0][0].start_note             = 1;
+        bank.bank.channel_zones[0][0].instrument             = 0;
+        const std::unique_ptr<Sculptor::Graph> graph_storage = std::make_unique<Sculptor::Graph>();
+        Sculptor::Graph&                       graph         = *graph_storage;
+        Sculptor::OscGraphMapping              mapping       = {};
         TEST(Sculptor::project_editor_to_graph(bank, &graph, &mapping));
         const uint32_t gone =
             find_osc_graph_connection(graph, { mapping.output_node, mapping.output_layer_input_slot[0] });
@@ -17950,21 +18844,25 @@ int main()
     // connected rows around the shell the type comes from the
     // highest-index connected row, not from the shell.
     {
-        static Synth::InstrumentBank       model_bank;
-        static Synth::InstrumentEditorBank bank;
-        static Synth::Instrument           instrument    = {};
-        uint16_t                           shared_env_id = 0;
-        uint16_t                           lfo_id        = 0;
-        uint16_t                           volume_env_id = 0;
+        const std::unique_ptr<Synth::InstrumentBank> model_bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       model_bank         = *model_bank_storage;
+        const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& bank          = *bank_storage;
+        Synth::Instrument            instrument    = {};
+        uint16_t                     shared_env_id = 0;
+        uint16_t                     lfo_id        = 0;
+        uint16_t                     volume_env_id = 0;
         build_osc_graph_small_fixture(&model_bank, &instrument, &shared_env_id, &lfo_id, &volume_env_id);
         bank.bank                    = model_bank;
         bank.bank.channel_enabled[0] = 1;
         TEST(bank.bank.instruments.allocate() == 0);
-        bank.bank.instruments.entries[0]         = instrument;
-        bank.bank.channel_zones[0][0].start_note = 1;
-        bank.bank.channel_zones[0][0].instrument = 0;
-        static Sculptor::Graph           graph;
-        static Sculptor::OscGraphMapping mapping;
+        bank.bank.instruments.entries[0]                     = instrument;
+        bank.bank.channel_zones[0][0].start_note             = 1;
+        bank.bank.channel_zones[0][0].instrument             = 0;
+        const std::unique_ptr<Sculptor::Graph> graph_storage = std::make_unique<Sculptor::Graph>();
+        Sculptor::Graph&                       graph         = *graph_storage;
+        Sculptor::OscGraphMapping              mapping       = {};
         TEST(Sculptor::project_editor_to_graph(bank, &graph, &mapping));
         // Disconnect row 0 (red first) and model the drop on its row.
         const uint32_t row = 0;
@@ -17985,8 +18883,10 @@ int main()
         TEST(bank.bank.instruments.entries[0].layer_count == 0);
         TEST(bank.phantom_count == 1);
         TEST(bank.phantoms[0].layer == 0);
-        static Synth::InstrumentEditorBank red_first_before;
-        red_first_before = bank;
+        const std::unique_ptr<Synth::InstrumentEditorBank> red_first_before_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& red_first_before = *red_first_before_storage;
+        red_first_before                              = bank;
         TEST(bank.phantoms[0].osc.osc_type[0] == instrument.layers[0].osc_type[0]);
         TEST(bank.phantoms[0].osc.osc_type[1] == instrument.layers[0].osc_type[1]);
         // The modeled swap from the red dot on row 0: no connected oscillator
@@ -18064,9 +18964,12 @@ int main()
     // modeled destination resolution compacts the shell record's array
     // index down before the re-key lookup.
     {
-        static Synth::InstrumentBank       model_bank;
-        static Synth::InstrumentEditorBank bank;
-        static Synth::Instrument           instrument = {};
+        const std::unique_ptr<Synth::InstrumentBank> model_bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       model_bank         = *model_bank_storage;
+        const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& bank       = *bank_storage;
+        Synth::Instrument            instrument = {};
         memset(static_cast<void*>(&model_bank), 0, sizeof(model_bank));
         instrument.layer_count = 4;
         for (uint32_t layer = 0; layer < 4; ++layer) {
@@ -18076,11 +18979,12 @@ int main()
         bank.bank                    = model_bank;
         bank.bank.channel_enabled[0] = 1;
         TEST(bank.bank.instruments.allocate() == 0);
-        bank.bank.instruments.entries[0]         = instrument;
-        bank.bank.channel_zones[0][0].start_note = 1;
-        bank.bank.channel_zones[0][0].instrument = 0;
-        static Sculptor::Graph           graph;
-        static Sculptor::OscGraphMapping mapping;
+        bank.bank.instruments.entries[0]                     = instrument;
+        bank.bank.channel_zones[0][0].start_note             = 1;
+        bank.bank.channel_zones[0][0].instrument             = 0;
+        const std::unique_ptr<Sculptor::Graph> graph_storage = std::make_unique<Sculptor::Graph>();
+        Sculptor::Graph&                       graph         = *graph_storage;
+        Sculptor::OscGraphMapping              mapping       = {};
         TEST(Sculptor::project_editor_to_graph(bank, &graph, &mapping));
         // Disconnect row 1 through the real deletion event.
         const uint32_t row = 1;
@@ -18139,16 +19043,21 @@ int main()
         TEST(Sculptor::find_record(bank, 0, 0, 0, shell_canonical, 0) == 1);
         // One undo entry captures the pre-swap state (bank, bits, store
         // and records ride one InstrumentEditorBank snapshot).
-        static Sculptor::UndoRedo undo;
-        static uint8_t            undo_buf[sizeof(Synth::InstrumentEditorBank) + 2 * sizeof(uint32_t)];
+        Sculptor::UndoRedo undo = {};
+        const std::unique_ptr<FixedArray<uint8_t, sizeof(Synth::InstrumentEditorBank) + 2 * sizeof(uint32_t)>>
+            undo_buf_storage =
+                std::make_unique<FixedArray<uint8_t, sizeof(Synth::InstrumentEditorBank) + 2 * sizeof(uint32_t)>>();
+        uint8_t (&undo_buf)[sizeof(Synth::InstrumentEditorBank) + 2 * sizeof(uint32_t)] = undo_buf_storage->elements;
         undo.init(undo_buf);
         TEST(undo.undo_empty());
         undo.init_undo_push();
         undo.push(&bank, sizeof(bank));
         undo.push(5u);
         TEST(undo.finish_undo_push());
-        static Synth::InstrumentEditorBank before_swap;
-        before_swap = bank;
+        const std::unique_ptr<Synth::InstrumentEditorBank> before_swap_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& before_swap = *before_swap_storage;
+        before_swap                              = bank;
         // The modeled swap from the red dot on row 1: the highest-index
         // connected row is row 3, whose compiled layer is 2 (original
         // layer 3); the shell's saw type is not the source.  The fresh
@@ -18241,8 +19150,10 @@ int main()
         TEST(memcmp(&compiled.layers[0], &instrument.layers[0], sizeof(Synth::Oscillator)) == 0);
         TEST(memcmp(&compiled.layers[2], &instrument.layers[2], sizeof(Synth::Oscillator)) == 0);
         TEST(memcmp(&compiled.layers[3], &instrument.layers[3], sizeof(Synth::Oscillator)) == 0);
-        static Synth::InstrumentEditorBank after_swap;
-        after_swap = bank;
+        const std::unique_ptr<Synth::InstrumentEditorBank> after_swap_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& after_swap = *after_swap_storage;
+        after_swap                              = bank;
         // Undo restores the pre-swap state exactly.
         TEST(! undo.undo_empty());
         TEST(undo.init_undo());
@@ -18268,9 +19179,12 @@ int main()
     // become {1<<1 | 1<<4} and both phantom entries stay paired to their
     // shells' new rows.
     {
-        static Synth::InstrumentBank       model_bank;
-        static Synth::InstrumentEditorBank bank;
-        static Synth::Instrument           instrument = {};
+        const std::unique_ptr<Synth::InstrumentBank> model_bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       model_bank         = *model_bank_storage;
+        const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& bank       = *bank_storage;
+        Synth::Instrument            instrument = {};
         memset(static_cast<void*>(&model_bank), 0, sizeof(model_bank));
         instrument.layer_count = 4;
         for (uint32_t layer = 0; layer < 4; ++layer) {
@@ -18295,14 +19209,21 @@ int main()
         bank.phantoms[1].osc                         = instrument.layers[2];
         TEST(Synth::validate_instrument_bank(&bank.bank, false));
         TEST(Sculptor::validate_editor_metadata(bank));
-        static Sculptor::Graph           graph;
-        static Sculptor::OscGraphMapping mapping;
+        const std::unique_ptr<Sculptor::Graph> graph_storage = std::make_unique<Sculptor::Graph>();
+        Sculptor::Graph&                       graph         = *graph_storage;
+        Sculptor::OscGraphMapping              mapping       = {};
         TEST(Sculptor::project_editor_to_graph(bank, &graph, &mapping));
         TEST(Sculptor::osc_row_run_length(2, bank.graph_missing_sum[0][0]) == 4);
-        static Synth::InstrumentEditorBank multi_before;
-        multi_before = bank;
-        static Sculptor::UndoRedo multi_undo;
-        static uint8_t            multi_undo_buf[sizeof(Synth::InstrumentEditorBank) + 2 * sizeof(uint32_t)];
+        const std::unique_ptr<Synth::InstrumentEditorBank> multi_before_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& multi_before = *multi_before_storage;
+        multi_before                              = bank;
+        Sculptor::UndoRedo multi_undo             = {};
+        const std::unique_ptr<FixedArray<uint8_t, sizeof(Synth::InstrumentEditorBank) + 2 * sizeof(uint32_t)>>
+            multi_undo_buf_storage =
+                std::make_unique<FixedArray<uint8_t, sizeof(Synth::InstrumentEditorBank) + 2 * sizeof(uint32_t)>>();
+        uint8_t (&multi_undo_buf)[sizeof(Synth::InstrumentEditorBank) + 2 * sizeof(uint32_t)] =
+            multi_undo_buf_storage->elements;
         multi_undo.init(multi_undo_buf);
         TEST(multi_undo.undo_empty());
         multi_undo.init_undo_push();
@@ -18347,8 +19268,10 @@ int main()
         TEST(memcmp(&compiled.layers[1], &fresh, sizeof(Synth::Oscillator)) == 0);
         TEST(memcmp(&compiled.layers[0], &instrument.layers[0], sizeof(Synth::Oscillator)) == 0);
         TEST(memcmp(&compiled.layers[2], &instrument.layers[3], sizeof(Synth::Oscillator)) == 0);
-        static Synth::InstrumentEditorBank multi_after;
-        multi_after = bank;
+        const std::unique_ptr<Synth::InstrumentEditorBank> multi_after_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& multi_after = *multi_after_storage;
+        multi_after                              = bank;
         TEST(multi_undo.init_undo());
         TEST(multi_undo.pop_u32() == 9u);
         multi_undo.pop(&bank, sizeof(bank));
@@ -18374,7 +19297,9 @@ int main()
         // connected layers plus a shell at row 3.  An appended row would
         // land after the shell, but the type still comes from the
         // highest-index connected row (row 2), not from the shell.
-        static Synth::InstrumentEditorBank bank;
+        const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& bank = *bank_storage;
         memset(static_cast<void*>(&bank), 0, sizeof(bank));
         bank.bank.channel_enabled[0] = 1;
         TEST(bank.bank.instruments.allocate() == 0);
@@ -18402,7 +19327,9 @@ int main()
         }
         // Branch 1, mid shell: the shell sits between connected rows; the
         // highest-index connected row (row 3, compiled layer 2) still wins.
-        static Synth::InstrumentEditorBank mid_bank;
+        const std::unique_ptr<Synth::InstrumentEditorBank> mid_bank_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& mid_bank = *mid_bank_storage;
         memset(static_cast<void*>(&mid_bank), 0, sizeof(mid_bank));
         mid_bank.bank.channel_enabled[0] = 1;
         TEST(mid_bank.bank.instruments.allocate() == 0);
@@ -18430,7 +19357,9 @@ int main()
         }
         // Branch 2, no connected row: seven shells fill the run and the last
         // row's shell (layer 6) supplies the type.
-        static Synth::InstrumentEditorBank shells_bank;
+        const std::unique_ptr<Synth::InstrumentEditorBank> shells_bank_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& shells_bank = *shells_bank_storage;
         memset(static_cast<void*>(&shells_bank), 0, sizeof(shells_bank));
         shells_bank.bank.channel_enabled[0] = 1;
         TEST(shells_bank.bank.instruments.allocate() == 0);
@@ -18455,7 +19384,9 @@ int main()
         }
         // Branch 3, empty run: no connected row and no shell keeps the fresh
         // default type (sine with B off).
-        static Synth::InstrumentEditorBank empty_bank;
+        const std::unique_ptr<Synth::InstrumentEditorBank> empty_bank_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& empty_bank = *empty_bank_storage;
         memset(static_cast<void*>(&empty_bank), 0, sizeof(empty_bank));
         empty_bank.bank.channel_enabled[0] = 1;
         TEST(empty_bank.bank.instruments.allocate() == 0);
@@ -18472,20 +19403,24 @@ int main()
         // Branch 1 from a real post-disconnection state: the max fixture
         // loses row 5, the shell holds the cut layer's type, and the helper
         // names the last compiled layer (original row 6) as the source.
-        static Synth::InstrumentBank       model_bank;
-        static Synth::InstrumentEditorBank bank_after_cut;
-        static Synth::Instrument           instrument = {};
-        uint16_t                           env_ids[Synth::max_layers][Synth::num_mod_targets];
-        uint16_t                           lfo_ids[Synth::max_layers][Synth::num_mod_targets];
+        const std::unique_ptr<Synth::InstrumentBank> model_bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       model_bank         = *model_bank_storage;
+        const std::unique_ptr<Synth::InstrumentEditorBank> bank_after_cut_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& bank_after_cut = *bank_after_cut_storage;
+        Synth::Instrument            instrument     = {};
+        uint16_t                     env_ids[Synth::max_layers][Synth::num_mod_targets];
+        uint16_t                     lfo_ids[Synth::max_layers][Synth::num_mod_targets];
         build_osc_graph_max_fixture(&model_bank, &instrument, env_ids, lfo_ids);
         bank_after_cut.bank                    = model_bank;
         bank_after_cut.bank.channel_enabled[0] = 1;
         TEST(bank_after_cut.bank.instruments.allocate() == 0);
-        bank_after_cut.bank.instruments.entries[0]         = instrument;
-        bank_after_cut.bank.channel_zones[0][0].start_note = 1;
-        bank_after_cut.bank.channel_zones[0][0].instrument = 0;
-        static Sculptor::Graph           graph;
-        static Sculptor::OscGraphMapping mapping;
+        bank_after_cut.bank.instruments.entries[0]           = instrument;
+        bank_after_cut.bank.channel_zones[0][0].start_note   = 1;
+        bank_after_cut.bank.channel_zones[0][0].instrument   = 0;
+        const std::unique_ptr<Sculptor::Graph> graph_storage = std::make_unique<Sculptor::Graph>();
+        Sculptor::Graph&                       graph         = *graph_storage;
+        Sculptor::OscGraphMapping              mapping       = {};
         TEST(Sculptor::project_editor_to_graph(bank_after_cut, &graph, &mapping));
         const uint32_t gone =
             find_osc_graph_connection(graph, { mapping.output_node, mapping.output_layer_input_slot[5] });
@@ -18509,21 +19444,25 @@ int main()
         }
         // Branch 2 from a real red-first state: the small fixture loses its
         // only layer; the shell itself supplies the type.
-        static Synth::InstrumentBank       small_bank;
-        static Synth::InstrumentEditorBank bank_red_first;
-        static Synth::Instrument           small_instrument = {};
-        uint16_t                           shared_env_id    = 0;
-        uint16_t                           lfo_id           = 0;
-        uint16_t                           volume_env_id    = 0;
+        const std::unique_ptr<Synth::InstrumentBank> small_bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       small_bank         = *small_bank_storage;
+        const std::unique_ptr<Synth::InstrumentEditorBank> bank_red_first_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& bank_red_first   = *bank_red_first_storage;
+        Synth::Instrument            small_instrument = {};
+        uint16_t                     shared_env_id    = 0;
+        uint16_t                     lfo_id           = 0;
+        uint16_t                     volume_env_id    = 0;
         build_osc_graph_small_fixture(&small_bank, &small_instrument, &shared_env_id, &lfo_id, &volume_env_id);
         bank_red_first.bank                    = small_bank;
         bank_red_first.bank.channel_enabled[0] = 1;
         TEST(bank_red_first.bank.instruments.allocate() == 0);
-        bank_red_first.bank.instruments.entries[0]         = small_instrument;
-        bank_red_first.bank.channel_zones[0][0].start_note = 1;
-        bank_red_first.bank.channel_zones[0][0].instrument = 0;
-        static Sculptor::Graph           red_first_graph;
-        static Sculptor::OscGraphMapping red_first_mapping;
+        bank_red_first.bank.instruments.entries[0]                     = small_instrument;
+        bank_red_first.bank.channel_zones[0][0].start_note             = 1;
+        bank_red_first.bank.channel_zones[0][0].instrument             = 0;
+        const std::unique_ptr<Sculptor::Graph> red_first_graph_storage = std::make_unique<Sculptor::Graph>();
+        Sculptor::Graph&                       red_first_graph         = *red_first_graph_storage;
+        Sculptor::OscGraphMapping              red_first_mapping       = {};
         TEST(Sculptor::project_editor_to_graph(bank_red_first, &red_first_graph, &red_first_mapping));
         const uint32_t red_first_gone =
             find_osc_graph_connection(red_first_graph,
@@ -18553,21 +19492,25 @@ int main()
     // layer), and the re-projection places the new node on the row behind
     // the shell.
     {
-        static Synth::InstrumentBank       model_bank;
-        static Synth::InstrumentEditorBank bank;
-        static Synth::Instrument           instrument    = {};
-        uint16_t                           shared_env_id = 0;
-        uint16_t                           lfo_id        = 0;
-        uint16_t                           volume_env_id = 0;
+        const std::unique_ptr<Synth::InstrumentBank> model_bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       model_bank         = *model_bank_storage;
+        const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& bank          = *bank_storage;
+        Synth::Instrument            instrument    = {};
+        uint16_t                     shared_env_id = 0;
+        uint16_t                     lfo_id        = 0;
+        uint16_t                     volume_env_id = 0;
         build_osc_graph_small_fixture(&model_bank, &instrument, &shared_env_id, &lfo_id, &volume_env_id);
         bank.bank                    = model_bank;
         bank.bank.channel_enabled[0] = 1;
         TEST(bank.bank.instruments.allocate() == 0);
-        bank.bank.instruments.entries[0]         = instrument;
-        bank.bank.channel_zones[0][0].start_note = 1;
-        bank.bank.channel_zones[0][0].instrument = 0;
-        static Sculptor::Graph           graph;
-        static Sculptor::OscGraphMapping mapping;
+        bank.bank.instruments.entries[0]                     = instrument;
+        bank.bank.channel_zones[0][0].start_note             = 1;
+        bank.bank.channel_zones[0][0].instrument             = 0;
+        const std::unique_ptr<Sculptor::Graph> graph_storage = std::make_unique<Sculptor::Graph>();
+        Sculptor::Graph&                       graph         = *graph_storage;
+        Sculptor::OscGraphMapping              mapping       = {};
         TEST(Sculptor::project_editor_to_graph(bank, &graph, &mapping));
         const uint32_t gone =
             find_osc_graph_connection(graph, { mapping.output_node, mapping.output_layer_input_slot[0] });
@@ -18604,21 +19547,25 @@ int main()
     // the run end (row 1), the shell row's kind-0 record keeps its
     // position, and the new node's record lands at its own canonical index.
     {
-        static Synth::InstrumentBank       model_bank;
-        static Synth::InstrumentEditorBank bank;
-        static Synth::Instrument           instrument    = {};
-        uint16_t                           shared_env_id = 0;
-        uint16_t                           lfo_id        = 0;
-        uint16_t                           volume_env_id = 0;
+        const std::unique_ptr<Synth::InstrumentBank> model_bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       model_bank         = *model_bank_storage;
+        const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& bank          = *bank_storage;
+        Synth::Instrument            instrument    = {};
+        uint16_t                     shared_env_id = 0;
+        uint16_t                     lfo_id        = 0;
+        uint16_t                     volume_env_id = 0;
         build_osc_graph_small_fixture(&model_bank, &instrument, &shared_env_id, &lfo_id, &volume_env_id);
         bank.bank                    = model_bank;
         bank.bank.channel_enabled[0] = 1;
         TEST(bank.bank.instruments.allocate() == 0);
-        bank.bank.instruments.entries[0]         = instrument;
-        bank.bank.channel_zones[0][0].start_note = 1;
-        bank.bank.channel_zones[0][0].instrument = 0;
-        static Sculptor::Graph           graph;
-        static Sculptor::OscGraphMapping mapping;
+        bank.bank.instruments.entries[0]                     = instrument;
+        bank.bank.channel_zones[0][0].start_note             = 1;
+        bank.bank.channel_zones[0][0].instrument             = 0;
+        const std::unique_ptr<Sculptor::Graph> graph_storage = std::make_unique<Sculptor::Graph>();
+        Sculptor::Graph&                       graph         = *graph_storage;
+        Sculptor::OscGraphMapping              mapping       = {};
         TEST(Sculptor::project_editor_to_graph(bank, &graph, &mapping));
         const uint32_t gone =
             find_osc_graph_connection(graph, { mapping.output_node, mapping.output_layer_input_slot[0] });
@@ -18672,20 +19619,24 @@ int main()
     // binding.  The drop-created LFO seeds an audible depth of 0.5 on a
     // zero-depth cell.
     {
-        static Synth::InstrumentBank       model_bank;
-        static Synth::InstrumentEditorBank bank;
-        static Synth::Instrument           instrument = {};
-        uint16_t                           env_ids[Synth::max_layers][Synth::num_mod_targets];
-        uint16_t                           lfo_ids[Synth::max_layers][Synth::num_mod_targets];
+        const std::unique_ptr<Synth::InstrumentBank> model_bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       model_bank         = *model_bank_storage;
+        const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& bank       = *bank_storage;
+        Synth::Instrument            instrument = {};
+        uint16_t                     env_ids[Synth::max_layers][Synth::num_mod_targets];
+        uint16_t                     lfo_ids[Synth::max_layers][Synth::num_mod_targets];
         build_osc_graph_max_fixture(&model_bank, &instrument, env_ids, lfo_ids);
         bank.bank                    = model_bank;
         bank.bank.channel_enabled[0] = 1;
         TEST(bank.bank.instruments.allocate() == 0);
-        bank.bank.instruments.entries[0]         = instrument;
-        bank.bank.channel_zones[0][0].start_note = 1;
-        bank.bank.channel_zones[0][0].instrument = 0;
-        static Sculptor::Graph           graph;
-        static Sculptor::OscGraphMapping mapping;
+        bank.bank.instruments.entries[0]                     = instrument;
+        bank.bank.channel_zones[0][0].start_note             = 1;
+        bank.bank.channel_zones[0][0].instrument             = 0;
+        const std::unique_ptr<Sculptor::Graph> graph_storage = std::make_unique<Sculptor::Graph>();
+        Sculptor::Graph&                       graph         = *graph_storage;
+        Sculptor::OscGraphMapping              mapping       = {};
         TEST(Sculptor::project_editor_to_graph(bank, &graph, &mapping));
         // Without shells: one fresh LFO per row, bound through the modeled
         // consumer's resolved compiled layer.
@@ -18773,11 +19724,14 @@ int main()
     // The seven-layers-plus-one-bit case (refused before the compaction)
     // loads again.
     {
-        static Synth::InstrumentBank       model_bank;
-        static Synth::InstrumentEditorBank bank;
-        static Synth::Instrument           instrument = {};
-        uint16_t                           env_ids[Synth::max_layers][Synth::num_mod_targets];
-        uint16_t                           lfo_ids[Synth::max_layers][Synth::num_mod_targets];
+        const std::unique_ptr<Synth::InstrumentBank> model_bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       model_bank         = *model_bank_storage;
+        const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& bank       = *bank_storage;
+        Synth::Instrument            instrument = {};
+        uint16_t                     env_ids[Synth::max_layers][Synth::num_mod_targets];
+        uint16_t                     lfo_ids[Synth::max_layers][Synth::num_mod_targets];
         build_osc_graph_max_fixture(&model_bank, &instrument, env_ids, lfo_ids);
         bank.bank                    = model_bank;
         bank.bank.channel_enabled[0] = 1;
@@ -18795,7 +19749,9 @@ int main()
             uint32_t written = 0;
             TEST(Synth::write_editor_bank_json(stream, &bank, sizeof(bank), &written) == 0);
             rewind(stream);
-            static Synth::InstrumentEditorBank restored;
+            const std::unique_ptr<Synth::InstrumentEditorBank> restored_storage =
+                std::make_unique<Synth::InstrumentEditorBank>();
+            Synth::InstrumentEditorBank& restored = *restored_storage;
             TEST(Synth::read_editor_bank_json(stream, written, &restored));
             fclose(stream);
             // The shell capture and the compaction both happened.
@@ -18805,7 +19761,7 @@ int main()
             TEST(memcmp(&restored.phantoms[0].osc, &instrument.layers[2], sizeof(Synth::Oscillator)) == 0);
             const Synth::Instrument& compacted = restored.bank.instruments.entries[0];
             TEST(compacted.layer_count == Synth::max_layers - 1);
-            static const uint32_t source_of[Synth::max_layers] = { 0, 1, 3, 4, 5, 6, 7 };
+            uint32_t source_of[Synth::max_layers] = { 0, 1, 3, 4, 5, 6, 7 };
             for (uint32_t c = 0; c < Synth::max_layers - 1; ++c) {
                 TEST(memcmp(&compacted.layers[c], &instrument.layers[source_of[c]], sizeof(Synth::Oscillator)) == 0);
             }
@@ -18817,12 +19773,15 @@ int main()
     // per-zone shells, so a red-marked zone's mask must not compact a
     // clean sibling's shared instrument.  Red plus clean:
     {
-        static Synth::InstrumentBank       model_bank;
-        static Synth::InstrumentEditorBank bank;
-        static Synth::Instrument           instrument    = {};
-        uint16_t                           shared_env_id = 0;
-        uint16_t                           lfo_id        = 0;
-        uint16_t                           volume_env_id = 0;
+        const std::unique_ptr<Synth::InstrumentBank> model_bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       model_bank         = *model_bank_storage;
+        const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& bank          = *bank_storage;
+        Synth::Instrument            instrument    = {};
+        uint16_t                     shared_env_id = 0;
+        uint16_t                     lfo_id        = 0;
+        uint16_t                     volume_env_id = 0;
         build_osc_graph_small_fixture(&model_bank, &instrument, &shared_env_id, &lfo_id, &volume_env_id);
         instrument.layer_count       = 3;
         instrument.layers[1]         = instrument.layers[0];
@@ -18839,20 +19798,27 @@ int main()
         // Zone 1 stays clean: the legacy loader must not compact the shared
         // instrument behind the red zone's mask.
         bank.phantom_count = 0;
-        static char    doc[64 * 1024];
-        const uint32_t len = Synth::encode_editor_bank_json(&bank, doc, sizeof(doc));
+        const std::unique_ptr<FixedArray<char, 64 * 1024>> doc_storage =
+            std::make_unique<FixedArray<char, 64 * 1024>>();
+        char (&doc)[64 * 1024] = doc_storage->elements;
+        const uint32_t len     = Synth::encode_editor_bank_json(&bank, doc, sizeof(doc));
         TEST(len > 0 && len < sizeof(doc));
-        static Synth::InstrumentEditorBank refused;
+        const std::unique_ptr<Synth::InstrumentEditorBank> refused_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& refused = *refused_storage;
         TEST(! Synth::decode_editor_bank_json(doc, len, &refused));
     }
     // Two differing nonzero masks refuse the same way, at the full
     // seven-layer legacy shape:
     {
-        static Synth::InstrumentBank       model_bank;
-        static Synth::InstrumentEditorBank bank;
-        static Synth::Instrument           instrument = {};
-        uint16_t                           env_ids[Synth::max_layers][Synth::num_mod_targets];
-        uint16_t                           lfo_ids[Synth::max_layers][Synth::num_mod_targets];
+        const std::unique_ptr<Synth::InstrumentBank> model_bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       model_bank         = *model_bank_storage;
+        const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& bank       = *bank_storage;
+        Synth::Instrument            instrument = {};
+        uint16_t                     env_ids[Synth::max_layers][Synth::num_mod_targets];
+        uint16_t                     lfo_ids[Synth::max_layers][Synth::num_mod_targets];
         build_osc_graph_max_fixture(&model_bank, &instrument, env_ids, lfo_ids);
         bank.bank                    = model_bank;
         bank.bank.channel_enabled[0] = 1;
@@ -18865,21 +19831,28 @@ int main()
         bank.graph_missing_sum[0][0]             = 1u;
         bank.graph_missing_sum[0][1]             = 2u;
         bank.phantom_count                       = 0;
-        static char    doc[64 * 1024];
-        const uint32_t len = Synth::encode_editor_bank_json(&bank, doc, sizeof(doc));
+        const std::unique_ptr<FixedArray<char, 64 * 1024>> doc_storage =
+            std::make_unique<FixedArray<char, 64 * 1024>>();
+        char (&doc)[64 * 1024] = doc_storage->elements;
+        const uint32_t len     = Synth::encode_editor_bank_json(&bank, doc, sizeof(doc));
         TEST(len > 0 && len < sizeof(doc));
-        static Synth::InstrumentEditorBank refused;
+        const std::unique_ptr<Synth::InstrumentEditorBank> refused_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& refused = *refused_storage;
         TEST(! Synth::decode_editor_bank_json(doc, len, &refused));
     }
     // One shared nonzero mask still loads: both zones of one captured
     // instrument carry the same mask, so a single compaction represents
     // every live reference and the reload guard must not refuse it.
     {
-        static Synth::InstrumentBank       model_bank;
-        static Synth::InstrumentEditorBank bank;
-        static Synth::Instrument           instrument = {};
-        uint16_t                           env_ids[Synth::max_layers][Synth::num_mod_targets];
-        uint16_t                           lfo_ids[Synth::max_layers][Synth::num_mod_targets];
+        const std::unique_ptr<Synth::InstrumentBank> model_bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       model_bank         = *model_bank_storage;
+        const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& bank       = *bank_storage;
+        Synth::Instrument            instrument = {};
+        uint16_t                     env_ids[Synth::max_layers][Synth::num_mod_targets];
+        uint16_t                     lfo_ids[Synth::max_layers][Synth::num_mod_targets];
         build_osc_graph_max_fixture(&model_bank, &instrument, env_ids, lfo_ids);
         instrument.layer_count       = 3;
         bank.bank                    = model_bank;
@@ -18895,10 +19868,14 @@ int main()
         bank.graph_missing_sum[0][0] = 1u;
         bank.graph_missing_sum[0][1] = 1u;
         bank.phantom_count           = 0;
-        static char    doc[64 * 1024];
-        const uint32_t len = Synth::encode_editor_bank_json(&bank, doc, sizeof(doc));
+        const std::unique_ptr<FixedArray<char, 64 * 1024>> doc_storage =
+            std::make_unique<FixedArray<char, 64 * 1024>>();
+        char (&doc)[64 * 1024] = doc_storage->elements;
+        const uint32_t len     = Synth::encode_editor_bank_json(&bank, doc, sizeof(doc));
         TEST(len > 0 && len < sizeof(doc));
-        static Synth::InstrumentEditorBank restored;
+        const std::unique_ptr<Synth::InstrumentEditorBank> restored_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& restored = *restored_storage;
         TEST(Synth::decode_editor_bank_json(doc, len, &restored));
         // Both zones capture their own shell for the shared red row.
         TEST(restored.phantom_count == 2);
@@ -18919,7 +19896,9 @@ int main()
             uint32_t written = 0;
             TEST(Synth::write_editor_bank_json(stream, &bank, sizeof(bank), &written) == 0);
             rewind(stream);
-            static Synth::InstrumentEditorBank reloaded;
+            const std::unique_ptr<Synth::InstrumentEditorBank> reloaded_storage =
+                std::make_unique<Synth::InstrumentEditorBank>();
+            Synth::InstrumentEditorBank& reloaded = *reloaded_storage;
             TEST(Synth::read_editor_bank_json(stream, written, &reloaded));
             fclose(stream);
             const Synth::Instrument& reloaded_instr = reloaded.bank.instruments.entries[0];
@@ -18934,11 +19913,14 @@ int main()
     // never compacts it: a six-connected-layer zone with one red row and
     // its entry round-trips with the compacted layer list untouched.
     {
-        static Synth::InstrumentBank       model_bank;
-        static Synth::InstrumentEditorBank bank;
-        static Synth::Instrument           instrument = {};
-        uint16_t                           env_ids[Synth::max_layers][Synth::num_mod_targets];
-        uint16_t                           lfo_ids[Synth::max_layers][Synth::num_mod_targets];
+        const std::unique_ptr<Synth::InstrumentBank> model_bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       model_bank         = *model_bank_storage;
+        const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& bank       = *bank_storage;
+        Synth::Instrument            instrument = {};
+        uint16_t                     env_ids[Synth::max_layers][Synth::num_mod_targets];
+        uint16_t                     lfo_ids[Synth::max_layers][Synth::num_mod_targets];
         build_osc_graph_max_fixture(&model_bank, &instrument, env_ids, lfo_ids);
         bank.bank                    = model_bank;
         bank.bank.channel_enabled[0] = 1;
@@ -18965,7 +19947,9 @@ int main()
             uint32_t written = 0;
             TEST(Synth::write_editor_bank_json(stream, &bank, sizeof(bank), &written) == 0);
             rewind(stream);
-            static Synth::InstrumentEditorBank restored;
+            const std::unique_ptr<Synth::InstrumentEditorBank> restored_storage =
+                std::make_unique<Synth::InstrumentEditorBank>();
+            Synth::InstrumentEditorBank& restored = *restored_storage;
             TEST(Synth::read_editor_bank_json(stream, written, &restored));
             fclose(stream);
             TEST(restored.bank.instruments.entries[0].layer_count == Synth::max_layers - 1);
@@ -18980,12 +19964,14 @@ int main()
     // carries an illegal mode, a CC LFO source, or an unavailable
     // descriptor id.
     {
-        static Synth::InstrumentEditorBank bank;
+        const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& bank = *bank_storage;
         memset(static_cast<void*>(&bank), 0, sizeof(bank));
-        bank.bank.channel_enabled[0]        = 1;
-        static Synth::Instrument instrument = {};
-        instrument.layer_count              = 1;
-        instrument.layers[0].osc_type[0]    = Synth::WaveType::sine_wave;
+        bank.bank.channel_enabled[0]     = 1;
+        Synth::Instrument instrument     = {};
+        instrument.layer_count           = 1;
+        instrument.layers[0].osc_type[0] = Synth::WaveType::sine_wave;
         TEST(bank.bank.instruments.allocate() == 0);
         bank.bank.instruments.entries[0]         = instrument;
         bank.bank.channel_zones[0][0].start_note = 1;
@@ -19014,11 +20000,14 @@ int main()
     // The phantom entry's oscillator body is required: a document whose
     // entry carries keys but no oscillator body is malformed input.
     {
-        static Synth::InstrumentBank       model_bank;
-        static Synth::InstrumentEditorBank bank;
-        static Synth::Instrument           instrument = {};
-        uint16_t                           env_ids[Synth::max_layers][Synth::num_mod_targets];
-        uint16_t                           lfo_ids[Synth::max_layers][Synth::num_mod_targets];
+        const std::unique_ptr<Synth::InstrumentBank> model_bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       model_bank         = *model_bank_storage;
+        const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& bank       = *bank_storage;
+        Synth::Instrument            instrument = {};
+        uint16_t                     env_ids[Synth::max_layers][Synth::num_mod_targets];
+        uint16_t                     lfo_ids[Synth::max_layers][Synth::num_mod_targets];
         build_osc_graph_max_fixture(&model_bank, &instrument, env_ids, lfo_ids);
         bank.bank                    = model_bank;
         bank.bank.channel_enabled[0] = 1;
@@ -19043,7 +20032,9 @@ int main()
             uint32_t written = 0;
             TEST(Synth::write_editor_bank_json(stream, &bank, sizeof(bank), &written) == 0);
             rewind(stream);
-            static char doc[1 << 20];
+            const std::unique_ptr<FixedArray<char, 1 << 20>> doc_storage =
+                std::make_unique<FixedArray<char, 1 << 20>>();
+            char (&doc)[1 << 20] = doc_storage->elements;
             TEST(written < sizeof(doc));
             TEST(fread(doc, 1, written, stream) == written);
             fclose(stream);
@@ -19058,7 +20049,9 @@ int main()
             TEST(body != nullptr && body < entry_end);
             const uint32_t tail_len = static_cast<uint32_t>(entry_end - body);
             memmove(body, entry_end, strlen(entry_end) + 1);
-            static Synth::InstrumentEditorBank refused;
+            const std::unique_ptr<Synth::InstrumentEditorBank> refused_storage =
+                std::make_unique<Synth::InstrumentEditorBank>();
+            Synth::InstrumentEditorBank& refused = *refused_storage;
             TEST(! Synth::decode_editor_bank_json(doc, written - tail_len, &refused));
         }
     }
@@ -19066,10 +20059,12 @@ int main()
     // state, but its channel publishes disabled: the runtime refuses to
     // voice a zero-layer instrument, so publication must never enable it.
     {
-        static Synth::InstrumentEditorBank bank;
+        const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& bank = *bank_storage;
         memset(static_cast<void*>(&bank), 0, sizeof(bank));
-        bank.bank.channel_enabled[0]        = 1;
-        static Synth::Instrument instrument = {};
+        bank.bank.channel_enabled[0] = 1;
+        Synth::Instrument instrument = {};
         TEST(bank.bank.instruments.allocate() == 0);
         bank.bank.instruments.entries[0]         = instrument;
         bank.bank.channel_zones[0][0].start_note = 1;
@@ -19087,7 +20082,9 @@ int main()
             uint32_t written = 0;
             TEST(Synth::write_editor_bank_json(stream, &bank, sizeof(bank), &written) == 0);
             rewind(stream);
-            static Synth::InstrumentEditorBank restored;
+            const std::unique_ptr<Synth::InstrumentEditorBank> restored_storage =
+                std::make_unique<Synth::InstrumentEditorBank>();
+            Synth::InstrumentEditorBank& restored = *restored_storage;
             TEST(Synth::read_editor_bank_json(stream, written, &restored));
             fclose(stream);
             Sculptor::compute_publish_channel_enabled(restored, enabled);
@@ -19101,12 +20098,15 @@ int main()
     // editor's zone operations run the reclaim; the caller itself is
     // editor-TU, so the model-level contract is pinned here).
     {
-        static Synth::InstrumentBank       model_bank;
-        static Synth::InstrumentEditorBank bank;
-        static Synth::Instrument           instrument    = {};
-        uint16_t                           shared_env_id = 0;
-        uint16_t                           lfo_id        = 0;
-        uint16_t                           volume_env_id = 0;
+        const std::unique_ptr<Synth::InstrumentBank> model_bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       model_bank         = *model_bank_storage;
+        const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& bank          = *bank_storage;
+        Synth::Instrument            instrument    = {};
+        uint16_t                     shared_env_id = 0;
+        uint16_t                     lfo_id        = 0;
+        uint16_t                     volume_env_id = 0;
         build_osc_graph_small_fixture(&model_bank, &instrument, &shared_env_id, &lfo_id, &volume_env_id);
         bank.bank                    = model_bank;
         bank.bank.channel_enabled[0] = 1;
@@ -19127,8 +20127,9 @@ int main()
         instrument.layers[0].targets[Synth::mod_volume].envelope_desc_id = static_cast<uint16_t>(spare_env_slot + 1);
         instrument.layers[0].targets[Synth::mod_volume].lfo_desc_id      = static_cast<uint16_t>(spare_lfo_slot + 1);
         bank.bank.instruments.entries[0]                                 = instrument;
-        static Sculptor::Graph           graph;
-        static Sculptor::OscGraphMapping mapping;
+        const std::unique_ptr<Sculptor::Graph> graph_storage             = std::make_unique<Sculptor::Graph>();
+        Sculptor::Graph&                       graph                     = *graph_storage;
+        Sculptor::OscGraphMapping              mapping                   = {};
         TEST(Sculptor::project_editor_to_graph(bank, &graph, &mapping));
         // Disconnect the layer through a real connection-deleted event: the
         // shell captures the rebound bindings.
@@ -19187,12 +20188,14 @@ int main()
     // zone's bit, so the validator refusal cannot ride a successful
     // early lookup.
     {
-        static Synth::InstrumentEditorBank bank;
+        const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& bank = *bank_storage;
         memset(static_cast<void*>(&bank), 0, sizeof(bank));
-        bank.bank.channel_enabled[0]        = 1;
-        static Synth::Instrument instrument = {};
-        instrument.layer_count              = 1;
-        instrument.layers[0].osc_type[0]    = Synth::WaveType::sine_wave;
+        bank.bank.channel_enabled[0]     = 1;
+        Synth::Instrument instrument     = {};
+        instrument.layer_count           = 1;
+        instrument.layers[0].osc_type[0] = Synth::WaveType::sine_wave;
         TEST(bank.bank.instruments.allocate() == 0);
         bank.bank.instruments.entries[0]         = instrument;
         bank.bank.channel_zones[0][0].start_note = 1;
@@ -19216,12 +20219,15 @@ int main()
     // entries for one key compose into one store entry holding the later
     // oscillator.
     {
-        static Synth::InstrumentBank       model_bank;
-        static Synth::InstrumentEditorBank bank;
-        static Synth::Instrument           instrument    = {};
-        uint16_t                           shared_env_id = 0;
-        uint16_t                           lfo_id        = 0;
-        uint16_t                           volume_env_id = 0;
+        const std::unique_ptr<Synth::InstrumentBank> model_bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       model_bank         = *model_bank_storage;
+        const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& bank          = *bank_storage;
+        Synth::Instrument            instrument    = {};
+        uint16_t                     shared_env_id = 0;
+        uint16_t                     lfo_id        = 0;
+        uint16_t                     volume_env_id = 0;
         build_osc_graph_small_fixture(&model_bank, &instrument, &shared_env_id, &lfo_id, &volume_env_id);
         bank.bank                    = model_bank;
         bank.bank.channel_enabled[0] = 1;
@@ -19235,11 +20241,15 @@ int main()
         bank.phantoms[0].zone                    = 0;
         bank.phantoms[0].layer                   = 0;
         bank.phantom_count                       = 1;
-        static Synth::InstrumentEditorBank second;
-        second                               = bank;
-        second.phantoms[0].osc.octave_offset = -9;
-        static char    doc_a[1 << 16];
-        static char    doc_b[1 << 16];
+        const std::unique_ptr<Synth::InstrumentEditorBank> second_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& second                            = *second_storage;
+        second                                                         = bank;
+        second.phantoms[0].osc.octave_offset                           = -9;
+        const std::unique_ptr<FixedArray<char, 1 << 16>> doc_a_storage = std::make_unique<FixedArray<char, 1 << 16>>();
+        char (&doc_a)[1 << 16]                                         = doc_a_storage->elements;
+        const std::unique_ptr<FixedArray<char, 1 << 16>> doc_b_storage = std::make_unique<FixedArray<char, 1 << 16>>();
+        char (&doc_b)[1 << 16]                                         = doc_b_storage->elements;
         const uint32_t len_a = Synth::encode_editor_bank_json(&bank, doc_a, sizeof(doc_a));
         TEST(len_a > 0 && len_a < sizeof(doc_a));
         doc_a[len_a]         = 0;
@@ -19258,7 +20268,9 @@ int main()
         TEST(open_a != nullptr && close_a != nullptr && open_b != nullptr && close_b != nullptr);
         TEST(close_a - open_a > 2 && close_b - open_b > 2);
         {
-            static Synth::InstrumentEditorBank pa;
+            const std::unique_ptr<Synth::InstrumentEditorBank> pa_storage =
+                std::make_unique<Synth::InstrumentEditorBank>();
+            Synth::InstrumentEditorBank& pa = *pa_storage;
             TEST(Synth::decode_editor_bank_json(doc_a, len_a, &pa));
             TEST(pa.phantom_count == 1);
         }
@@ -19271,7 +20283,9 @@ int main()
             close_b = next;
         }
         TEST(close_a > key_a && close_b > key_b);
-        static char    composed[1 << 16];
+        const std::unique_ptr<FixedArray<char, 1 << 16>> composed_storage =
+            std::make_unique<FixedArray<char, 1 << 16>>();
+        char (&composed)[1 << 16]  = composed_storage->elements;
         const uint32_t prefix_len  = static_cast<uint32_t>(open_a - doc_a + 1);
         const uint32_t entry_a_len = static_cast<uint32_t>(close_a - open_a);
         const uint32_t entry_b_len = static_cast<uint32_t>(close_b - open_b);
@@ -19282,8 +20296,10 @@ int main()
         const char*    suffix_a   = close_a + 1;
         const uint32_t suffix_len = len_a - static_cast<uint32_t>(suffix_a - doc_a);
         memcpy(composed + prefix_len + entry_a_len + 1 + entry_b_len, suffix_a, suffix_len);
-        const uint32_t                     composed_len = prefix_len + entry_a_len + 1 + entry_b_len + suffix_len;
-        static Synth::InstrumentEditorBank restored;
+        const uint32_t composed_len = prefix_len + entry_a_len + 1 + entry_b_len + suffix_len;
+        const std::unique_ptr<Synth::InstrumentEditorBank> restored_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& restored = *restored_storage;
         TEST(Synth::decode_editor_bank_json(composed, composed_len, &restored));
         TEST(restored.phantom_count == 1);
         TEST(restored.phantoms[0].layer == 0);
@@ -19291,7 +20307,9 @@ int main()
     }
     // Layer compaction shifts missing-sum bits together with layers.
     {
-        static Synth::InstrumentEditorBank bank;
+        const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& bank = *bank_storage;
         memset(static_cast<void*>(&bank), 0, sizeof(bank));
         bank.graph_missing_sum[3][1] = static_cast<uint8_t>((1u << 1) | (1u << 3) | (1u << 5));
         Sculptor::compact_missing_sum_bits(&bank, 3, 1, 1);
@@ -19304,11 +20322,13 @@ int main()
     // without an entry (or an entry without its bit) breaks the pairing
     // the projection relies on.
     {
-        static Synth::InstrumentEditorBank bank;
+        const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& bank = *bank_storage;
         memset(static_cast<void*>(&bank), 0, sizeof(bank));
-        bank.bank.channel_enabled[0]        = 1;
-        static Synth::Instrument instrument = {};
-        instrument.layer_count              = 2;
+        bank.bank.channel_enabled[0] = 1;
+        Synth::Instrument instrument = {};
+        instrument.layer_count       = 2;
         TEST(bank.bank.instruments.allocate() == 0);
         bank.bank.instruments.entries[0]         = instrument;
         bank.bank.channel_zones[0][0].start_note = 1;
@@ -19367,7 +20387,9 @@ int main()
         bank.phantom_count = 0;
         TEST(Sculptor::validate_editor_metadata(bank));
         // A zone without an instrument has no rows to mark.
-        static Synth::InstrumentEditorBank dead;
+        const std::unique_ptr<Synth::InstrumentEditorBank> dead_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& dead = *dead_storage;
         memset(static_cast<void*>(&dead), 0, sizeof(dead));
         dead.bank.channel_enabled[0] = 1;
         dead.graph_missing_sum[0][0] = 1;
@@ -19377,7 +20399,9 @@ int main()
     // bit; the stored channel_enabled value stays 1 and the channel re-enables
     // once every zone is complete again.
     {
-        static Synth::InstrumentEditorBank bank;
+        const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& bank = *bank_storage;
         memset(static_cast<void*>(&bank), 0, sizeof(bank));
         bank.bank.channel_enabled[0]         = 1;
         bank.bank.channel_enabled[1]         = 1;
@@ -19395,7 +20419,9 @@ int main()
     // Zone-table metadata rules copy zone records and the mask row after
     // shifting later zones; drop and reset remove.
     {
-        static Synth::InstrumentEditorBank bank;
+        const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& bank = *bank_storage;
         memset(static_cast<void*>(&bank), 0, sizeof(bank));
         add_detached_record(&bank, 0, 0, 0, 5, 1.0f, 2.0f, Synth::ModSource::none, Synth::ModSource::none, 0);
         add_detached_record(&bank, 0, 0, 2, 9, 3.0f, 4.0f, Synth::ModSource::velocity, Synth::ModSource::none, 1);
@@ -19453,7 +20479,9 @@ int main()
     // Preflight arithmetic: the record-list capacity and detached-count
     // accounting the record-creating operations preflight against.
     {
-        static Synth::InstrumentEditorBank bank;
+        const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& bank = *bank_storage;
         memset(static_cast<void*>(&bank), 0, sizeof(bank));
         TEST(Sculptor::graph_records_have_capacity(bank, 1));
         bank.graph_layout_count = Synth::max_graph_records;
@@ -19479,11 +20507,14 @@ int main()
     // Node-capacity arithmetic: the implied projected node count the
     // Add Oscillator preflight and the JSON decode's overfull check use.
     {
-        static Synth::InstrumentBank       model_bank;
-        static Synth::InstrumentEditorBank bank;
-        static Synth::Instrument           instrument = {};
-        uint16_t                           env_ids[Synth::max_layers][Synth::num_mod_targets];
-        uint16_t                           lfo_ids[Synth::max_layers][Synth::num_mod_targets];
+        const std::unique_ptr<Synth::InstrumentBank> model_bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       model_bank         = *model_bank_storage;
+        const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& bank       = *bank_storage;
+        Synth::Instrument            instrument = {};
+        uint16_t                     env_ids[Synth::max_layers][Synth::num_mod_targets];
+        uint16_t                     lfo_ids[Synth::max_layers][Synth::num_mod_targets];
         build_osc_graph_max_fixture(&model_bank, &instrument, env_ids, lfo_ids);
         bank.bank                    = model_bank;
         bank.bank.channel_enabled[0] = 1;
@@ -19493,8 +20524,10 @@ int main()
         bank.bank.channel_zones[0][0].instrument = 0;
         TEST(Sculptor::count_projected_nodes(bank, 0, 0) == 66);
 
-        static Synth::InstrumentEditorBank minimal;
-        static Synth::Instrument           minimal_instrument = {};
+        const std::unique_ptr<Synth::InstrumentEditorBank> minimal_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& minimal            = *minimal_storage;
+        Synth::Instrument            minimal_instrument = {};
         build_zone_fixture(&minimal, &minimal_instrument);
         TEST(Sculptor::count_projected_nodes(minimal, 0, 0) == 7);
     }
@@ -19513,8 +20546,10 @@ int main()
 
     // The editor state round-trips through the bank JSON codec.
     {
-        static Synth::InstrumentEditorBank bank;
-        static Synth::Instrument           instrument = {};
+        const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& bank       = *bank_storage;
+        Synth::Instrument            instrument = {};
         build_zone_fixture(&bank, &instrument);
         add_detached_record(&bank, 0, 0, 0, 0, 5.0f, 6.0f, Synth::ModSource::none, Synth::ModSource::none, 0);
         add_detached_record(&bank, 0, 0, 1, 1, 7.0f, 8.0f, Synth::ModSource::none, Synth::ModSource::none, 1);
@@ -19539,10 +20574,14 @@ int main()
         bank.bank.channel_zones[1][0].instrument     = 1;
         bank.graph_missing_sum[1][0]                 = 0x3;
 
-        static char    doc[256 * 1024];
-        const uint32_t len = Synth::encode_editor_bank_json(&bank, doc, sizeof(doc));
+        const std::unique_ptr<FixedArray<char, 256 * 1024>> doc_storage =
+            std::make_unique<FixedArray<char, 256 * 1024>>();
+        char (&doc)[256 * 1024] = doc_storage->elements;
+        const uint32_t len      = Synth::encode_editor_bank_json(&bank, doc, sizeof(doc));
         TEST(len > 0 && len < sizeof(doc));
-        static Synth::InstrumentEditorBank restored;
+        const std::unique_ptr<Synth::InstrumentEditorBank> restored_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& restored = *restored_storage;
         TEST(Synth::decode_editor_bank_json(doc, len, &restored));
         TEST(restored.graph_layout_count == 3);
         TEST(memcmp(restored.graph_layout, bank.graph_layout, sizeof(bank.graph_layout)) == 0);
@@ -19554,7 +20593,9 @@ int main()
     // zone drop removes them and shifts the later zones' keys, and entries
     // outside the operated zone stay untouched.
     {
-        static Synth::InstrumentEditorBank bank;
+        const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& bank = *bank_storage;
         memset(static_cast<void*>(&bank), 0, sizeof(bank));
         Synth::Oscillator payload = {};
         payload.octave_offset     = 1;
@@ -19577,7 +20618,9 @@ int main()
         TEST(at >= 0 && bank.phantoms[at].osc.octave_offset == 9);
         // A zone split clones the source zone's entries under the clone's
         // zone key.
-        static Synth::InstrumentEditorBank split;
+        const std::unique_ptr<Synth::InstrumentEditorBank> split_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& split = *split_storage;
         memset(static_cast<void*>(&split), 0, sizeof(split));
         payload.octave_offset = 7;
         TEST(Sculptor::set_phantom_entry(&split, 0, 0, 0, payload));
@@ -19600,12 +20643,15 @@ int main()
     // the re-projection restores the wire, so the disconnection simply does
     // not happen until the store has room.
     {
-        static Synth::InstrumentBank       model_bank;
-        static Synth::InstrumentEditorBank zone_bank;
-        static Synth::Instrument           instrument    = {};
-        uint16_t                           shared_env_id = 0;
-        uint16_t                           lfo_id        = 0;
-        uint16_t                           volume_env_id = 0;
+        const std::unique_ptr<Synth::InstrumentBank> model_bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       model_bank         = *model_bank_storage;
+        const std::unique_ptr<Synth::InstrumentEditorBank> zone_bank_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& zone_bank     = *zone_bank_storage;
+        Synth::Instrument            instrument    = {};
+        uint16_t                     shared_env_id = 0;
+        uint16_t                     lfo_id        = 0;
+        uint16_t                     volume_env_id = 0;
         build_osc_graph_small_fixture(&model_bank, &instrument, &shared_env_id, &lfo_id, &volume_env_id);
         zone_bank.bank                    = model_bank;
         zone_bank.bank.channel_enabled[0] = 1;
@@ -19630,12 +20676,17 @@ int main()
         TEST(Sculptor::validate_editor_metadata(zone_bank));
         // Snapshot the entire editor bank; the apply batch runs on a copy,
         // the way the editor's candidate does.
-        static Synth::InstrumentEditorBank committed;
-        committed = zone_bank;
-        static Synth::InstrumentEditorBank candidate;
-        candidate = committed;
-        static Sculptor::Graph           graph;
-        static Sculptor::OscGraphMapping mapping;
+        const std::unique_ptr<Synth::InstrumentEditorBank> committed_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& committed = *committed_storage;
+        committed                              = zone_bank;
+        const std::unique_ptr<Synth::InstrumentEditorBank> candidate_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& candidate               = *candidate_storage;
+        candidate                                            = committed;
+        const std::unique_ptr<Sculptor::Graph> graph_storage = std::make_unique<Sculptor::Graph>();
+        Sculptor::Graph&                       graph         = *graph_storage;
+        Sculptor::OscGraphMapping              mapping       = {};
         TEST(Sculptor::project_editor_to_graph(candidate, &graph, &mapping, 0, 0));
         // One more capture (zone 0's second layer) needs one more store
         // entry: the store is full.
@@ -19655,9 +20706,11 @@ int main()
         // The refused candidate's only divergence is the transient missing-sum
         // bit the re-projection overwrites; every other byte - store payloads,
         // records, wiring state - matches the committed bank.
-        static Synth::InstrumentEditorBank diverged;
-        diverged                         = committed;
-        diverged.graph_missing_sum[0][0] = static_cast<uint8_t>(1u | (1u << 1));
+        const std::unique_ptr<Synth::InstrumentEditorBank> diverged_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& diverged = *diverged_storage;
+        diverged                              = committed;
+        diverged.graph_missing_sum[0][0]      = static_cast<uint8_t>(1u | (1u << 1));
         TEST(memcmp(&candidate, &diverged, sizeof(diverged)) == 0);
         // The committed bank is byte-identical - bits, payloads, records and
         // wiring included - and a fresh projection from it restores the
@@ -19670,24 +20723,31 @@ int main()
     // Disconnection undo and redo restore the phantom store together with
     // the bits and the compiled instrument (redo included).
     {
-        static Synth::InstrumentBank       model_bank;
-        static Synth::InstrumentEditorBank bank;
-        static Synth::Instrument           instrument    = {};
-        uint16_t                           shared_env_id = 0;
-        uint16_t                           lfo_id        = 0;
-        uint16_t                           volume_env_id = 0;
+        const std::unique_ptr<Synth::InstrumentBank> model_bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       model_bank         = *model_bank_storage;
+        const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& bank          = *bank_storage;
+        Synth::Instrument            instrument    = {};
+        uint16_t                     shared_env_id = 0;
+        uint16_t                     lfo_id        = 0;
+        uint16_t                     volume_env_id = 0;
         build_osc_graph_small_fixture(&model_bank, &instrument, &shared_env_id, &lfo_id, &volume_env_id);
         bank.bank                    = model_bank;
         bank.bank.channel_enabled[0] = 1;
         TEST(bank.bank.instruments.allocate() == 0);
-        bank.bank.instruments.entries[0]         = instrument;
-        bank.bank.channel_zones[0][0].start_note = 1;
-        bank.bank.channel_zones[0][0].instrument = 0;
-        static Sculptor::Graph           graph;
-        static Sculptor::OscGraphMapping mapping;
+        bank.bank.instruments.entries[0]                     = instrument;
+        bank.bank.channel_zones[0][0].start_note             = 1;
+        bank.bank.channel_zones[0][0].instrument             = 0;
+        const std::unique_ptr<Sculptor::Graph> graph_storage = std::make_unique<Sculptor::Graph>();
+        Sculptor::Graph&                       graph         = *graph_storage;
+        Sculptor::OscGraphMapping              mapping       = {};
         TEST(Sculptor::project_editor_to_graph(bank, &graph, &mapping));
-        static Sculptor::UndoRedo undo;
-        static uint8_t            undo_buf[sizeof(Synth::InstrumentEditorBank) + 2 * sizeof(uint32_t)];
+        Sculptor::UndoRedo undo = {};
+        const std::unique_ptr<FixedArray<uint8_t, sizeof(Synth::InstrumentEditorBank) + 2 * sizeof(uint32_t)>>
+            undo_buf_storage =
+                std::make_unique<FixedArray<uint8_t, sizeof(Synth::InstrumentEditorBank) + 2 * sizeof(uint32_t)>>();
+        uint8_t (&undo_buf)[sizeof(Synth::InstrumentEditorBank) + 2 * sizeof(uint32_t)] = undo_buf_storage->elements;
         undo.init(undo_buf);
         Synth::Instrument pre_disconnection = {};
         TEST(Sculptor::compile_graph_to_instrument(graph, mapping, &pre_disconnection));
@@ -19711,8 +20771,10 @@ int main()
         TEST(bank.graph_missing_sum[0][0] == 1u);
         TEST(bank.phantom_count == 1 && bank.phantoms[0].layer == 0);
         TEST(memcmp(&bank.phantoms[0].osc, &pre_disconnection.layers[0], sizeof(Synth::Oscillator)) == 0);
-        static Synth::InstrumentEditorBank after;
-        after = bank;
+        const std::unique_ptr<Synth::InstrumentEditorBank> after_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& after = *after_storage;
+        after                              = bank;
         TEST(undo.init_undo());
         TEST(undo.pop_u32() == 9u);
         undo.pop(&bank, sizeof(bank));
@@ -19734,15 +20796,21 @@ int main()
     // out-of-range bytes, over-cap counts, overfull implied projections) and
     // drops duplicate record keys.
     {
-        static Synth::InstrumentEditorBank bank;
+        const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& bank = *bank_storage;
         Synth::init_default_bank(&bank.bank);
         // The detached-layout bounds tests need one descriptor in the pool:
         // ids at the allocated bound decode, one past it refuse.
         TEST(bank.bank.lfos.allocate() == 0);
         bank.bank.lfos.entries[0].wave      = Synth::WaveType::sine_wave;
         bank.bank.lfos.entries[0].period_ms = 50;
-        static Synth::InstrumentEditorBank restored;
-        static char                        editor_json[256 * 1024];
+        const std::unique_ptr<Synth::InstrumentEditorBank> restored_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank&                        restored = *restored_storage;
+        const std::unique_ptr<FixedArray<char, 256 * 1024>> editor_json_storage =
+            std::make_unique<FixedArray<char, 256 * 1024>>();
+        char (&editor_json)[256 * 1024] = editor_json_storage->elements;
 
         // Kind byte past the four record kinds.
         build_detached_layouts_json(editor_json, sizeof(editor_json), 1, 1, 4, 1, 0, 0);
@@ -19780,7 +20848,7 @@ int main()
 
         // Duplicate record keys drop the later record.
         {
-            static char two_records[1024];
+            char two_records[1024] = {};
             snprintf(
                 two_records,
                 sizeof(two_records),
@@ -19797,11 +20865,14 @@ int main()
 
         // Overfull implied node projection: the max fixture implies 66 nodes;
         // 113 detached records push it past 178, 112 land exactly on 178.
-        static Synth::InstrumentBank       model_bank;
-        static Synth::InstrumentEditorBank max_bank;
-        static Synth::Instrument           instrument = {};
-        uint16_t                           env_ids[Synth::max_layers][Synth::num_mod_targets];
-        uint16_t                           lfo_ids[Synth::max_layers][Synth::num_mod_targets];
+        const std::unique_ptr<Synth::InstrumentBank> model_bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       model_bank         = *model_bank_storage;
+        const std::unique_ptr<Synth::InstrumentEditorBank> max_bank_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& max_bank   = *max_bank_storage;
+        Synth::Instrument            instrument = {};
+        uint16_t                     env_ids[Synth::max_layers][Synth::num_mod_targets];
+        uint16_t                     lfo_ids[Synth::max_layers][Synth::num_mod_targets];
         build_osc_graph_max_fixture(&model_bank, &instrument, env_ids, lfo_ids);
         max_bank.bank                    = model_bank;
         max_bank.bank.channel_enabled[0] = 1;
@@ -19815,8 +20886,9 @@ int main()
         TEST(decode_bank_with_editor_section(max_bank, editor_json, &restored));
         // The accepted boundary fills the node pool exactly: the projection
         // still succeeds at 66 + 112 = 178 nodes.
-        static Sculptor::Graph           boundary_graph;
-        static Sculptor::OscGraphMapping boundary_mapping;
+        const std::unique_ptr<Sculptor::Graph> boundary_graph_storage = std::make_unique<Sculptor::Graph>();
+        Sculptor::Graph&                       boundary_graph         = *boundary_graph_storage;
+        Sculptor::OscGraphMapping              boundary_mapping       = {};
         TEST(Sculptor::project_editor_to_graph(restored, &boundary_graph, &boundary_mapping));
     }
 
@@ -19826,7 +20898,9 @@ int main()
     // per-65535 point units and the attack spans about 30 ms (positions are
     // control ticks, 256/44100 s each).
     {
-        static Synth::InstrumentEditorBank bank;
+        const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& bank = *bank_storage;
         memset(static_cast<void*>(&bank), 0, sizeof(bank));
         const uint32_t slot = bank.bank.envelopes.allocate();
         TEST(slot != pool_no_slot);
@@ -19868,8 +20942,10 @@ int main()
     // every chain including the master, refusing wrong-kind key fields,
     // duplicates and empty names, and round-tripping through the bank file.
     {
-        static Synth::InstrumentEditorBank bank;
-        static Synth::Instrument           instrument = {};
+        const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& bank       = *bank_storage;
+        Synth::Instrument            instrument = {};
         build_binding_fixture(&bank, &instrument);
         Synth::GraphNodeLayout& fx = bank.graph_layout[bank.graph_layout_count++];
         fx                         = {};
@@ -19884,9 +20960,13 @@ int main()
 
         bank.bank.master_chain.num_effects = 1;
         Sculptor::fx_init_slot(&bank.bank.master_chain, 0, Synth::EffectType::delay);
-        static char                        doc[512 * 1024];
-        static Synth::InstrumentEditorBank decoded;
-        const uint32_t                     written = Synth::encode_editor_bank_json(&bank, doc, sizeof(doc));
+        const std::unique_ptr<FixedArray<char, 512 * 1024>> doc_storage =
+            std::make_unique<FixedArray<char, 512 * 1024>>();
+        char (&doc)[512 * 1024] = doc_storage->elements;
+        const std::unique_ptr<Synth::InstrumentEditorBank> decoded_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& decoded = *decoded_storage;
+        const uint32_t               written = Synth::encode_editor_bank_json(&bank, doc, sizeof(doc));
         TEST(written > 0);
         TEST(Synth::decode_editor_bank_json(doc, written, &decoded));
         TEST(decoded.graph_layout_count == bank.graph_layout_count);
@@ -19922,17 +21002,17 @@ int main()
     // adjacent position-0 points never advance, so the interpolation must
     // not divide by a zero duration.
     {
-        static Synth::EnvelopeDescriptor env = {};
-        env.num_points                       = 2;
-        env.sustain_first_point              = 0;
-        env.sustain_last_point               = 1;
-        env.min_value                        = 0.0f;
-        env.min_max_delta                    = 2.0f;
-        env.points[0].position               = 0;
-        env.points[0].value                  = 0x2000;
-        env.points[1].position               = 0;
-        env.points[1].value                  = 0x4000;
-        static Synth::EnvelopeState state    = {};
+        Synth::EnvelopeDescriptor env = {};
+        env.num_points                = 2;
+        env.sustain_first_point       = 0;
+        env.sustain_last_point        = 1;
+        env.min_value                 = 0.0f;
+        env.min_max_delta             = 2.0f;
+        env.points[0].position        = 0;
+        env.points[0].value           = 0x2000;
+        env.points[1].position        = 0;
+        env.points[1].value           = 0x4000;
+        Synth::EnvelopeState state    = {};
         for (uint32_t i = 0; i < 8; i++) {
             const float value = Synth::eval_envelope(env, &state, true);
             TEST(value == 0x2000 * 2.0f);
@@ -19942,11 +21022,15 @@ int main()
     // The decoder rejects objects in key position: the grammar admits only
     // comma-separated string keys, at the root and in unknown subtrees.
     {
-        static Synth::InstrumentEditorBank bank;
-        static Synth::InstrumentEditorBank decoded;
-        static Synth::Instrument           instrument = {};
+        const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank&                       bank = *bank_storage;
+        const std::unique_ptr<Synth::InstrumentEditorBank> decoded_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& decoded    = *decoded_storage;
+        Synth::Instrument            instrument = {};
         build_binding_fixture(&bank, &instrument);
-        static char doc[512];
+        char doc[512] = {};
         snprintf(doc, sizeof(doc), "{\"instrument_editor_bank\":{}{\"editor\":{}}}");
         TEST(! Synth::decode_editor_bank_json(doc, static_cast<uint32_t>(strlen(doc)), &decoded));
         snprintf(doc, sizeof(doc), "{\"instrument_editor_bank\":{},\"x\":{\"a\":1}{\"b\":2}}");
@@ -20230,7 +21314,9 @@ int main()
     // A widget-style edit sequence on a real bank stays valid and survives
     // the JSON round trip byte for byte.
     {
-        static Synth::InstrumentEditorBank bank;
+        const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& bank = *bank_storage;
         make_valid_bank(bank.bank); // instrument 0 (env 1, lfo 1) on ch0
 
         Synth::EnvelopeDescriptor env = bank.bank.envelopes.entries[0];
@@ -20250,15 +21336,21 @@ int main()
         bank.bank.envelopes.entries[0] = env;
         TEST(Synth::validate_instrument_bank(&bank.bank));
 
-        static char    doc[128 * 1024];
-        const uint32_t len = Synth::encode_editor_bank_json(&bank, doc, sizeof(doc));
+        const std::unique_ptr<FixedArray<char, 128 * 1024>> doc_storage =
+            std::make_unique<FixedArray<char, 128 * 1024>>();
+        char (&doc)[128 * 1024] = doc_storage->elements;
+        const uint32_t len      = Synth::encode_editor_bank_json(&bank, doc, sizeof(doc));
         TEST(len > 0);
-        static Synth::InstrumentEditorBank decoded;
+        const std::unique_ptr<Synth::InstrumentEditorBank> decoded_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& decoded = *decoded_storage;
         TEST(Synth::decode_editor_bank_json(doc, len, &decoded));
         TEST(decoded.bank.envelopes.num_allocated == bank.bank.envelopes.num_allocated);
         TEST(memcmp(&decoded.bank.envelopes.entries[0], &bank.bank.envelopes.entries[0], sizeof(env)) == 0);
-        static char    doc2[128 * 1024];
-        const uint32_t len2 = Synth::encode_editor_bank_json(&decoded, doc2, sizeof(doc2));
+        const std::unique_ptr<FixedArray<char, 128 * 1024>> doc2_storage =
+            std::make_unique<FixedArray<char, 128 * 1024>>();
+        char (&doc2)[128 * 1024] = doc2_storage->elements;
+        const uint32_t len2      = Synth::encode_editor_bank_json(&decoded, doc2, sizeof(doc2));
         TEST(len2 == len && memcmp(doc, doc2, len) == 0);
     }
 
@@ -20267,7 +21359,8 @@ int main()
     // Projection mirrors one channel chain; value edits, structural deletes,
     // move/retype and fresh-LFO semantics all hold on a validated bank.
     {
-        static Synth::InstrumentBank bank;
+        const std::unique_ptr<Synth::InstrumentBank> bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       bank         = *bank_storage;
         make_valid_bank(bank);
         Synth::EffectChainBinding& chain = bank.channel_chains[0];
         chain.num_effects                = 2;
@@ -20289,8 +21382,9 @@ int main()
         chain.effects[0].bindings[1].inputs[0].scale  = 0.5f;
         TEST(Synth::validate_instrument_bank(&bank));
 
-        static Sculptor::Graph              graph;
-        static Sculptor::EffectGraphMapping mapping;
+        const std::unique_ptr<Sculptor::Graph> graph_storage = std::make_unique<Sculptor::Graph>();
+        Sculptor::Graph&                       graph         = *graph_storage;
+        Sculptor::EffectGraphMapping           mapping       = {};
         TEST(project_legacy_effects(bank, 0, &graph, &mapping));
         TEST(mapping.chain == 0);
         TEST(mapping.effect_nodes[0] != Sculptor::pool_no_slot);
@@ -20484,14 +21578,16 @@ int main()
     // apply path no-ops those byproducts (the freed node carried the wire) and
     // the node event alone removes the slot.
     {
-        static Synth::InstrumentBank bank;
+        const std::unique_ptr<Synth::InstrumentBank> bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       bank         = *bank_storage;
         make_valid_bank(bank);
         enabled_effect(bank, 0, 0, Synth::EffectType::distortion);
         enabled_effect(bank, 0, 1, Synth::EffectType::delay);
         TEST(Synth::validate_instrument_bank(&bank));
 
-        static Sculptor::Graph              widget_graph;
-        static Sculptor::EffectGraphMapping widget_mapping;
+        const std::unique_ptr<Sculptor::Graph> widget_graph_storage = std::make_unique<Sculptor::Graph>();
+        Sculptor::Graph&                       widget_graph         = *widget_graph_storage;
+        Sculptor::EffectGraphMapping           widget_mapping       = {};
         TEST(project_legacy_effects(bank, 0, &widget_graph, &widget_mapping));
         // Projection quiets event reporting until the first drain re-arms
         // the ring; drain once first, as the per-frame GUI flow does.
@@ -20524,7 +21620,8 @@ int main()
     // reorders the chain, and a serial-wire disconnect is refused (the
     // wire carries the chain's audio).
     {
-        static Synth::InstrumentBank bank;
+        const std::unique_ptr<Synth::InstrumentBank> bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       bank         = *bank_storage;
         make_valid_bank(bank);
         enabled_effect(bank, 0, 0, Synth::EffectType::chorus);
         enabled_effect(bank, 0, 1, Synth::EffectType::distortion);
@@ -20536,8 +21633,9 @@ int main()
         bool pinned[Synth::max_lfos] = {};
         pinned[0]                    = true;
 
-        static Sculptor::Graph              wire_graph;
-        static Sculptor::EffectGraphMapping wire_mapping;
+        const std::unique_ptr<Sculptor::Graph> wire_graph_storage = std::make_unique<Sculptor::Graph>();
+        Sculptor::Graph&                       wire_graph         = *wire_graph_storage;
+        Sculptor::EffectGraphMapping           wire_mapping       = {};
         TEST(project_legacy_effects(bank, 0, &wire_graph, &wire_mapping, pinned));
         TEST(wire_mapping.lfo_count == 1);
         Sculptor::GraphChange wire_changes[Sculptor::max_pending_changes];
@@ -20686,7 +21784,8 @@ int main()
     // Master chain: LFO modulation and channel-wide MIDI sources are legal;
     // they resolve from channel index 0.
     {
-        static Synth::InstrumentBank bank;
+        const std::unique_ptr<Synth::InstrumentBank> bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       bank         = *bank_storage;
         make_valid_bank(bank);
         Synth::EffectChainBinding& master = bank.master_chain;
         master.num_effects                = 1;
@@ -20696,8 +21795,9 @@ int main()
         master.effects[0].bindings[0].lfo_depth   = 0.25f;
         TEST(Synth::validate_instrument_bank(&bank));
 
-        static Sculptor::Graph              graph;
-        static Sculptor::EffectGraphMapping mapping;
+        const std::unique_ptr<Sculptor::Graph> graph_storage = std::make_unique<Sculptor::Graph>();
+        Sculptor::Graph&                       graph         = *graph_storage;
+        Sculptor::EffectGraphMapping           mapping       = {};
         TEST(project_legacy_effects(bank, Sculptor::fx_master_chain, &graph, &mapping));
         TEST(mapping.chain == Sculptor::fx_master_chain);
         TEST(mapping.lfo_count == 1);
@@ -20723,7 +21823,8 @@ int main()
     // Widest projection: 4 effects, every parameter modulated by a distinct
     // descriptor; 19 nodes and 18 wires stay far under the widget's pools.
     {
-        static Synth::InstrumentBank bank;
+        const std::unique_ptr<Synth::InstrumentBank> bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       bank         = *bank_storage;
         make_valid_bank(bank);
         Synth::EffectChainBinding& chain = bank.channel_chains[0];
         chain.num_effects                = 4;
@@ -20747,8 +21848,9 @@ int main()
         }
         TEST(Synth::validate_instrument_bank(&bank));
 
-        static Sculptor::Graph              graph;
-        static Sculptor::EffectGraphMapping mapping;
+        const std::unique_ptr<Sculptor::Graph> graph_storage = std::make_unique<Sculptor::Graph>();
+        Sculptor::Graph&                       graph         = *graph_storage;
+        Sculptor::EffectGraphMapping           mapping       = {};
         TEST(project_legacy_effects(bank, 0, &graph, &mapping));
         TEST(mapping.lfo_count == max_desc);
 
@@ -20771,18 +21873,19 @@ int main()
 
     // Disabled allocations release reservations; re-enable starts fresh DSP history.
     {
-        static Synth::InstrumentBank bank;
+        const std::unique_ptr<Synth::InstrumentBank> bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       bank         = *bank_storage;
         make_valid_bank(bank);
         for (uint32_t slot = 0; slot < Synth::max_chain_effects; ++slot) {
             enabled_effect(bank, Synth::max_channels, slot, Synth::EffectType::delay);
         }
         Synth::init_effect_state_region(fake_region_base);
-        static Synth::EffectExpansionPlan plan;
-        const char*                       error = nullptr;
+        Synth::EffectExpansionPlan plan  = {};
+        const char*                error = nullptr;
         TEST(Synth::preflight_effect_expansion(bank, &plan, &error));
-        static Synth::EffectChain chains[Synth::max_channels];
-        static Synth::EffectChain master;
-        FakeWriter                writer = { 1, 0, 0, 0, 0 };
+        Synth::EffectChain chains[Synth::max_channels] = {};
+        Synth::EffectChain master                      = {};
+        FakeWriter         writer                      = { 1, 0, 0, 0, 0 };
         Synth::commit_effect_expansion(bank, plan, chains, &master, fake_writer_binding(writer));
         (void)Synth::take_effect_clear_ranges();
 
@@ -20859,7 +21962,7 @@ int main()
         state = make_cc_state();
         (void)Synth::apply_channel_cc(&state, 16, 100);
         const Synth::ChannelCcState untouched = state;
-        static const uint32_t       foreign[] = { 1, 15, 32, 33, 47, 64, 119 };
+        uint32_t                    foreign[] = { 1, 15, 32, 33, 47, 64, 119 };
         for (uint32_t i = 0; i < sizeof(foreign) / sizeof(foreign[0]); ++i) {
             (void)Synth::apply_channel_cc(&state, foreign[i], 64);
             TEST(memcmp(&state, &untouched, sizeof(state)) == 0);
@@ -20908,7 +22011,8 @@ int main()
     // T3: the runtime validator admits assignable CC inputs (16..31) on channel
     // chains and the commit hands source, CC number and chain to the writer.
     {
-        static Synth::InstrumentBank bank;
+        const std::unique_ptr<Synth::InstrumentBank> bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       bank         = *bank_storage;
         make_valid_bank(bank);
         Synth::EffectSlotBinding* const slot  = enabled_effect(bank, 3, 0, Synth::EffectType::delay);
         slot->bindings[0].num_inputs          = 2;
@@ -20923,12 +22027,12 @@ int main()
         static_assert(sizeof(Synth::ModInput) == 8); // INV2: the packed input stays 8 bytes
 
         Synth::init_effect_state_region(fake_region_base);
-        static Synth::EffectExpansionPlan plan;
-        const char*                       error = nullptr;
+        Synth::EffectExpansionPlan plan  = {};
+        const char*                error = nullptr;
         TEST(Synth::preflight_effect_expansion(bank, &plan, &error));
-        static Synth::EffectChain chains[Synth::max_channels];
-        static Synth::EffectChain master;
-        FakeWriter                writer = { 1, 0, 0, 0, 0 };
+        Synth::EffectChain chains[Synth::max_channels] = {};
+        Synth::EffectChain master                      = {};
+        FakeWriter         writer                      = { 1, 0, 0, 0, 0 };
         Synth::commit_effect_expansion(bank, plan, chains, &master, fake_writer_binding(writer));
         TEST(writer.num_resolved == 2);
         TEST(writer.resolved[0].source == Synth::ModSource::cc);
@@ -20944,11 +22048,12 @@ int main()
         // The same rules reject out-of-range or misplaced CC state.
         auto expect_preflight_reject = [](Synth::InstrumentBank& rejected) {
             Synth::init_effect_state_region(fake_region_base);
-            static Synth::EffectExpansionPlan reject_plan;
-            const char*                       reject_error = nullptr;
+            Synth::EffectExpansionPlan reject_plan  = {};
+            const char*                reject_error = nullptr;
             TEST(! Synth::preflight_effect_expansion(rejected, &reject_plan, &reject_error));
         };
-        static Synth::InstrumentBank reject_bank;
+        const std::unique_ptr<Synth::InstrumentBank> reject_bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       reject_bank         = *reject_bank_storage;
         make_cc_input_bank(reject_bank, 3, Synth::ModSource::cc, 15);
         expect_preflight_reject(reject_bank);
         make_cc_input_bank(reject_bank, 3, Synth::ModSource::cc, 32);
@@ -20980,7 +22085,9 @@ int main()
     // T4: the bank JSON codec round-trips CC inputs; defaults stay omitted and
     // the decoder refuses invalid cc_number values.
     {
-        static Synth::InstrumentEditorBank source;
+        const std::unique_ptr<Synth::InstrumentEditorBank> source_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& source = *source_storage;
         memset(static_cast<void*>(&source), 0, sizeof(source));
         Synth::init_default_bank(&source.bank);
         Synth::EffectChainBinding& chain = source.bank.channel_chains[0];
@@ -20993,11 +22100,15 @@ int main()
         chain.effects[0].bindings[0].inputs[0].op        = Synth::SourceOp::add;
         chain.effects[0].bindings[0].inputs[0].scale     = 0.5f;
 
-        static char    text[64 * 1024];
-        const uint32_t len = Synth::encode_editor_bank_json(&source, text, sizeof(text));
+        const std::unique_ptr<FixedArray<char, 64 * 1024>> text_storage =
+            std::make_unique<FixedArray<char, 64 * 1024>>();
+        char (&text)[64 * 1024] = text_storage->elements;
+        const uint32_t len      = Synth::encode_editor_bank_json(&source, text, sizeof(text));
         TEST(len > 0);
         text[len] = '\0';
-        static Synth::InstrumentEditorBank decoded;
+        const std::unique_ptr<Synth::InstrumentEditorBank> decoded_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& decoded = *decoded_storage;
         TEST(Synth::decode_editor_bank_json(text, len, &decoded));
         const Synth::ModInput& round_tripped = decoded.bank.channel_chains[0].effects[0].bindings[0].inputs[0];
         TEST(round_tripped.source == Synth::ModSource::cc);
@@ -21007,7 +22118,9 @@ int main()
         TEST(Synth::validate_instrument_bank(&decoded.bank));
 
         // A legacy pitch_bend input encodes without any cc_number key.
-        static Synth::InstrumentEditorBank legacy;
+        const std::unique_ptr<Synth::InstrumentEditorBank> legacy_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& legacy = *legacy_storage;
         memset(static_cast<void*>(&legacy), 0, sizeof(legacy));
         Synth::init_default_bank(&legacy.bank);
         Synth::EffectChainBinding& legacy_chain = legacy.bank.channel_chains[0];
@@ -21029,7 +22142,9 @@ int main()
         // An out-of-range cc_number: decode implies validation, so the editor
         // bank decoder itself refuses the rogue bank during its internal
         // validate pass; the validator refuses it by any other route too.
-        static Synth::InstrumentEditorBank rogue;
+        const std::unique_ptr<Synth::InstrumentEditorBank> rogue_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& rogue                                      = *rogue_storage;
         rogue                                                                   = legacy;
         rogue.bank.channel_chains[0].effects[0].bindings[0].inputs[0].source    = Synth::ModSource::cc;
         rogue.bank.channel_chains[0].effects[0].bindings[0].inputs[0].cc_number = 40;
@@ -21049,13 +22164,15 @@ int main()
         TEST(wrap_len > 0);
         text[wrap_len]                                  = '\0';
         static const char* const malformed_cc_numbers[] = { "-1", "16.5", "128", "281", "65536", "65552" };
-        static const char        cc_number_key[]        = "\"cc_number\":16";
+        char                     cc_number_key[]        = "\"cc_number\":16";
         for (uint32_t cc_value = 0; cc_value < sizeof(malformed_cc_numbers) / sizeof(malformed_cc_numbers[0]);
              ++cc_value) {
             const char* const field = strstr(text, cc_number_key);
             TEST(field != nullptr);
-            static char    spliced[64 * 1024];
-            const uint32_t prefix_len = static_cast<uint32_t>(field - text);
+            const std::unique_ptr<FixedArray<char, 64 * 1024>> spliced_storage =
+                std::make_unique<FixedArray<char, 64 * 1024>>();
+            char (&spliced)[64 * 1024] = spliced_storage->elements;
+            const uint32_t prefix_len  = static_cast<uint32_t>(field - text);
             memcpy(spliced, text, prefix_len);
             const int written = snprintf(spliced + prefix_len,
                                          sizeof(spliced) - prefix_len,
@@ -21064,9 +22181,11 @@ int main()
             TEST(written > 0);
             const uint32_t tail_len = wrap_len - prefix_len - static_cast<uint32_t>(sizeof(cc_number_key)) + 1;
             memcpy(spliced + prefix_len + written, field + sizeof(cc_number_key) - 1, tail_len);
-            const uint32_t                     spliced_len = prefix_len + static_cast<uint32_t>(written) + tail_len;
-            static Synth::InstrumentEditorBank prior;
-            prior = decoded;
+            const uint32_t spliced_len = prefix_len + static_cast<uint32_t>(written) + tail_len;
+            const std::unique_ptr<Synth::InstrumentEditorBank> prior_storage =
+                std::make_unique<Synth::InstrumentEditorBank>();
+            Synth::InstrumentEditorBank& prior = *prior_storage;
+            prior                              = decoded;
             TEST(! Synth::decode_editor_bank_json(spliced, spliced_len, &decoded));
             TEST(memcmp(&decoded, &prior, sizeof(decoded)) == 0);
         }
@@ -21166,21 +22285,22 @@ int main()
                                            lfos,
                                            &lfo_count));
         // Static storage: an InstrumentBank is far too large for the stack.
-        static Synth::InstrumentBank desc_bank = {};
-        desc_bank                              = {};
-        desc_bank.envelopes.num_allocated      = env_count;
+        const std::unique_ptr<Synth::InstrumentBank> desc_bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       desc_bank         = *desc_bank_storage;
+        desc_bank                                                      = {};
+        desc_bank.envelopes.num_allocated                              = env_count;
         for (uint32_t i = 0; i < env_count; i++) {
             desc_bank.envelopes.entries[i] = envs[i];
         }
-        static char    doc_text[8192]; // static: 8 KB is too much stack
-        const uint32_t doc_len = Synth::encode_instrument_json(doc_text, sizeof(doc_text), &instr, &desc_bank);
+        char           doc_text[8192] = {}; // static: 8 KB is too much stack
+        const uint32_t doc_len        = Synth::encode_instrument_json(doc_text, sizeof(doc_text), &instr, &desc_bank);
         TEST(doc_len > 0);
         TEST(Synth::decode_instrument_json(doc_text, doc_len, &instr, envs, &env_count, lfos, &lfo_count));
         TEST(envs[0].points[3].value == envs[0].points[1].value);
 
         // The release and ping-pong fields round-trip; absent fields
         // decode as 0; invalid values are refused.
-        static const char defaults_doc[] = "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\"}]}";
+        char defaults_doc[] = "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\"}]}";
         TEST(Synth::decode_instrument_json(defaults_doc,
                                            sizeof(defaults_doc) - 1,
                                            &instr,
@@ -21268,14 +22388,20 @@ int main()
 
         // Pool (editor bank) form: the fields round-trip and the absent
         // defaults stay 0.
-        static Synth::InstrumentEditorBank pool_source;
+        const std::unique_ptr<Synth::InstrumentEditorBank> pool_source_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& pool_source = *pool_source_storage;
         build_named_fm_fixture(&pool_source);
         pool_source.bank.instruments.entries[0].release_seconds = 3.5f;
         pool_source.bank.envelopes.entries[0].flags             = Synth::envelope_ping_pong;
-        static char pool_payload[Synth::library_payload_max];
-        uint32_t    pool_len = Synth::encode_editor_bank_json(&pool_source, pool_payload, sizeof(pool_payload));
+        const std::unique_ptr<FixedArray<char, Synth::library_payload_max>> pool_payload_storage =
+            std::make_unique<FixedArray<char, Synth::library_payload_max>>();
+        char (&pool_payload)[Synth::library_payload_max] = pool_payload_storage->elements;
+        uint32_t pool_len = Synth::encode_editor_bank_json(&pool_source, pool_payload, sizeof(pool_payload));
         TEST(pool_len > 0);
-        static Synth::InstrumentEditorBank pool_decoded;
+        const std::unique_ptr<Synth::InstrumentEditorBank> pool_decoded_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& pool_decoded = *pool_decoded_storage;
         TEST(Synth::decode_editor_bank_json(pool_payload, pool_len, &pool_decoded));
         TEST(pool_decoded.bank.instruments.entries[0].release_seconds == 3.5f);
         TEST((pool_decoded.bank.envelopes.entries[0].flags & Synth::envelope_ping_pong) != 0);
@@ -21341,7 +22467,9 @@ int main()
             TEST(pool_decoded.bank.instruments.entries[0].release_seconds == 0.0f);
             TEST(! std::signbit(pool_decoded.bank.instruments.entries[0].release_seconds));
         }
-        static char    pool_reencoded[Synth::library_payload_max];
+        const std::unique_ptr<FixedArray<char, Synth::library_payload_max>> pool_reencoded_storage =
+            std::make_unique<FixedArray<char, Synth::library_payload_max>>();
+        char (&pool_reencoded)[Synth::library_payload_max] = pool_reencoded_storage->elements;
         const uint32_t reencoded_len =
             Synth::encode_editor_bank_json(&pool_decoded, pool_reencoded, sizeof(pool_reencoded));
         TEST(reencoded_len > 0);
@@ -21353,7 +22481,9 @@ int main()
     // and round-trip byte-identically. Regression: the decoder once applied the
     // 7-bit cc_number bound here, rejecting old banks whose ids exceeded 127.
     {
-        static Synth::InstrumentEditorBank source;
+        const std::unique_ptr<Synth::InstrumentEditorBank> source_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& source = *source_storage;
         memset(static_cast<void*>(&source), 0, sizeof(source));
         Synth::init_default_bank(&source.bank);
         const uint32_t param = source.bank.parameters.allocate();
@@ -21363,20 +22493,26 @@ int main()
         lfo.period_ms            = 50;
         Synth::configure_lfo(&source.bank.parameters.entries[param], lfo, Synth::SourceOp::add, 0.5f, 200, 300, 0.0f);
         TEST(Synth::validate_instrument_bank(&source.bank));
-        static char    text[64 * 1024];
-        const uint32_t len = Synth::encode_editor_bank_json(&source, text, sizeof(text));
+        const std::unique_ptr<FixedArray<char, 64 * 1024>> text_storage =
+            std::make_unique<FixedArray<char, 64 * 1024>>();
+        char (&text)[64 * 1024] = text_storage->elements;
+        const uint32_t len      = Synth::encode_editor_bank_json(&source, text, sizeof(text));
         TEST(len > 0);
         text[len] = '\0';
         TEST(strstr(text, "\"depth_param_id\":200") != nullptr);
         TEST(strstr(text, "\"rate_param_id\":300") != nullptr);
-        static Synth::InstrumentEditorBank decoded;
+        const std::unique_ptr<Synth::InstrumentEditorBank> decoded_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& decoded = *decoded_storage;
         TEST(Synth::decode_editor_bank_json(text, len, &decoded));
         const Synth::ParamDescriptor& decoded_param = decoded.bank.parameters.entries[param];
         TEST(decoded_param.kind == Synth::ParamKind::lfo);
         TEST(decoded_param.lfo.depth_param_id == 200);
         TEST(decoded_param.lfo.rate_param_id == 300);
         TEST(Synth::validate_instrument_bank(&decoded.bank));
-        static char    again[64 * 1024];
+        const std::unique_ptr<FixedArray<char, 64 * 1024>> again_storage =
+            std::make_unique<FixedArray<char, 64 * 1024>>();
+        char (&again)[64 * 1024]  = again_storage->elements;
         const uint32_t second_len = Synth::encode_editor_bank_json(&decoded, again, sizeof(again));
         TEST(second_len == len);
         TEST(memcmp(text, again, len) == 0);
@@ -21384,7 +22520,9 @@ int main()
     // T5: banks saved before the feature load identically and re-encode
     // byte-identically (the cc_number field stays omitted for zero).
     {
-        static Synth::InstrumentEditorBank source;
+        const std::unique_ptr<Synth::InstrumentEditorBank> source_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& source = *source_storage;
         memset(static_cast<void*>(&source), 0, sizeof(source));
         Synth::init_default_bank(&source.bank);
         Synth::EffectChainBinding& chain = source.bank.channel_chains[0];
@@ -21396,10 +22534,14 @@ int main()
         chain.effects[0].bindings[0].inputs[0].op     = Synth::SourceOp::multiply;
         chain.effects[0].bindings[0].inputs[0].scale  = 0.25f;
 
-        static char    text[64 * 1024];
+        const std::unique_ptr<FixedArray<char, 64 * 1024>> text_storage =
+            std::make_unique<FixedArray<char, 64 * 1024>>();
+        char (&text)[64 * 1024]  = text_storage->elements;
         const uint32_t first_len = Synth::encode_editor_bank_json(&source, text, sizeof(text));
         TEST(first_len > 0);
-        static Synth::InstrumentEditorBank decoded;
+        const std::unique_ptr<Synth::InstrumentEditorBank> decoded_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& decoded = *decoded_storage;
         TEST(Synth::decode_editor_bank_json(text, first_len, &decoded));
         const Synth::ModInput& input = decoded.bank.channel_chains[0].effects[0].bindings[0].inputs[0];
         TEST(input.source == Synth::ModSource::pitch_bend);
@@ -21408,7 +22550,9 @@ int main()
         TEST(input.scale == 0.25f);
         TEST(Synth::validate_instrument_bank(&decoded.bank));
 
-        static char    again[64 * 1024];
+        const std::unique_ptr<FixedArray<char, 64 * 1024>> again_storage =
+            std::make_unique<FixedArray<char, 64 * 1024>>();
+        char (&again)[64 * 1024]  = again_storage->elements;
         const uint32_t second_len = Synth::encode_editor_bank_json(&decoded, again, sizeof(again));
         TEST(second_len == first_len);
         TEST(memcmp(text, again, first_len) == 0);
@@ -21426,7 +22570,8 @@ int main()
             cc_slot->bindings[0].inputs[0].op        = Synth::SourceOp::add;
             cc_slot->bindings[0].inputs[0].scale     = 0.5f;
         };
-        static Synth::InstrumentBank bank;
+        const std::unique_ptr<Synth::InstrumentBank> bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       bank         = *bank_storage;
         make_cc_bank(bank, 15, false);
         TEST(! Synth::validate_instrument_bank(&bank));
         make_cc_bank(bank, 32, false);
@@ -21470,23 +22615,23 @@ int main()
 
         // Instrument routing refuses stale CC numbers on non-CC inputs, and the
         // instrument document encoder never emits cc_number for a non-CC input.
-        const char* const                stale_doc = "{"
-                                                     "\"format\":\"synth-instrument-v1\","
-                                                     "\"layers\":["
-                                                     "{"
-                                                     "\"wave_a\":\"sine\","
-                                                     "\"volume\":{"
-                                                     "\"base\":0.8,"
-                                                     "\"sources\":[{\"source\":\"velocity\",\"op\":\"add\",\"scale\":0.5,"
-                                                     "\"cc_number\":17}]"
-                                                     "}"
-                                                     "}"
-                                                     "]}";
-        static Synth::Instrument         stale_instr;
-        static Synth::EnvelopeDescriptor stale_envs[Synth::instrument_max_envelopes];
-        static Synth::LFODescriptor      stale_lfos[Synth::instrument_max_lfos];
-        uint32_t                         stale_env_count = 0;
-        uint32_t                         stale_lfo_count = 0;
+        const char* const         stale_doc                                   = "{"
+                                                                                "\"format\":\"synth-instrument-v1\","
+                                                                                "\"layers\":["
+                                                                                "{"
+                                                                                "\"wave_a\":\"sine\","
+                                                                                "\"volume\":{"
+                                                                                "\"base\":0.8,"
+                                                                                "\"sources\":[{\"source\":\"velocity\",\"op\":\"add\",\"scale\":0.5,"
+                                                                                "\"cc_number\":17}]"
+                                                                                "}"
+                                                                                "}"
+                                                                                "]}";
+        Synth::Instrument         stale_instr                                 = {};
+        Synth::EnvelopeDescriptor stale_envs[Synth::instrument_max_envelopes] = {};
+        Synth::LFODescriptor      stale_lfos[Synth::instrument_max_lfos]      = {};
+        uint32_t                  stale_env_count                             = 0;
+        uint32_t                  stale_lfo_count                             = 0;
         // Decode implies validation: the instrument document decoder refuses the
         // stale CC state during its internal validate pass
         // (map_instrument_graph_layout runs validate_instrument_bank), so the
@@ -21508,10 +22653,11 @@ int main()
         stale_instr.layers[0].targets[Synth::mod_volume].inputs[0].cc_number = 17;
         stale_instr.layers[0].targets[Synth::mod_volume].inputs[0].op        = Synth::SourceOp::add;
         stale_instr.layers[0].targets[Synth::mod_volume].inputs[0].scale     = 0.5f;
-        static Synth::InstrumentBank stale_bank;
+        const std::unique_ptr<Synth::InstrumentBank> stale_bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       stale_bank         = *stale_bank_storage;
         memset(static_cast<void*>(&stale_bank), 0, sizeof(stale_bank));
-        static uint16_t stale_env_ids[Synth::instrument_max_envelopes];
-        static uint16_t stale_lfo_ids[Synth::instrument_max_lfos];
+        uint16_t stale_env_ids[Synth::instrument_max_envelopes] = {};
+        uint16_t stale_lfo_ids[Synth::instrument_max_lfos]      = {};
         TEST(Synth::remap_envelopes(&stale_bank, stale_envs, stale_env_count, stale_env_ids));
         TEST(Synth::remap_lfos(&stale_bank, stale_lfos, stale_lfo_count, stale_lfo_ids));
         Synth::Instrument stale_installed;
@@ -21525,7 +22671,7 @@ int main()
 
         // The document encoder refuses (or at least never emits) a stale CC
         // number on a non-CC instrument input.
-        static char    stale_encoded[16 * 1024];
+        char           stale_encoded[16 * 1024] = {};
         const uint32_t stale_len =
             Synth::encode_instrument_json(stale_encoded, sizeof(stale_encoded), &stale_installed, &stale_bank);
         TEST(stale_len == 0 || strstr(stale_encoded, "cc_number") == nullptr);
@@ -21540,7 +22686,8 @@ int main()
     // T-M2-1: the commit resolves master standard sources from channel index 0
     // (RC4): the recorded chain is 0, not the master chain index.
     {
-        static Synth::InstrumentBank bank;
+        const std::unique_ptr<Synth::InstrumentBank> bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       bank         = *bank_storage;
         make_valid_bank(bank);
         Synth::EffectSlotBinding* const slot = enabled_effect(bank, Synth::max_channels, 0, Synth::EffectType::reverb);
         slot->bindings[0].num_inputs         = 1;
@@ -21556,14 +22703,14 @@ int main()
         slot->bindings[1].inputs[1].scale    = 0.25f;
 
         Synth::init_effect_state_region(fake_region_base);
-        static Synth::EffectExpansionPlan plan;
-        const char*                       error    = nullptr;
-        const bool                        accepted = Synth::preflight_effect_expansion(bank, &plan, &error);
+        Synth::EffectExpansionPlan plan     = {};
+        const char*                error    = nullptr;
+        const bool                 accepted = Synth::preflight_effect_expansion(bank, &plan, &error);
         TEST(accepted);
         if (accepted) {
-            static Synth::EffectChain chains[Synth::max_channels];
-            static Synth::EffectChain master;
-            FakeWriter                writer = { 1, 0, 0, 0, 0 };
+            Synth::EffectChain chains[Synth::max_channels] = {};
+            Synth::EffectChain master                      = {};
+            FakeWriter         writer                      = { 1, 0, 0, 0, 0 };
             Synth::commit_effect_expansion(bank, plan, chains, &master, fake_writer_binding(writer));
             TEST(writer.num_resolved == 3);
             TEST(writer.resolved[0].source == Synth::ModSource::mod_wheel);
@@ -21582,7 +22729,8 @@ int main()
     // T-M2-2: master CC inputs resolve from channel index 0 while a channel
     // chain in the same bank keeps resolving from its own channel.
     {
-        static Synth::InstrumentBank bank;
+        const std::unique_ptr<Synth::InstrumentBank> bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       bank         = *bank_storage;
         make_valid_bank(bank);
         Synth::EffectSlotBinding* const master_slot =
             enabled_effect(bank, Synth::max_channels, 0, Synth::EffectType::delay);
@@ -21604,14 +22752,14 @@ int main()
         channel_slot->bindings[0].inputs[0].scale     = 0.5f;
 
         Synth::init_effect_state_region(fake_region_base);
-        static Synth::EffectExpansionPlan plan;
-        const char*                       error    = nullptr;
-        const bool                        accepted = Synth::preflight_effect_expansion(bank, &plan, &error);
+        Synth::EffectExpansionPlan plan     = {};
+        const char*                error    = nullptr;
+        const bool                 accepted = Synth::preflight_effect_expansion(bank, &plan, &error);
         TEST(accepted);
         if (accepted) {
-            static Synth::EffectChain chains[Synth::max_channels];
-            static Synth::EffectChain master;
-            FakeWriter                writer = { 1, 0, 0, 0, 0 };
+            Synth::EffectChain chains[Synth::max_channels] = {};
+            Synth::EffectChain master                      = {};
+            FakeWriter         writer                      = { 1, 0, 0, 0, 0 };
             Synth::commit_effect_expansion(bank, plan, chains, &master, fake_writer_binding(writer));
             TEST(writer.num_resolved == 3);
             TEST(writer.resolved[0].source == Synth::ModSource::cc); // channel 3 commits first
@@ -21631,7 +22779,8 @@ int main()
     // (full relaxation): both validators admit them and the commit resolves
     // them from channel index 0.
     {
-        static Synth::InstrumentBank bank;
+        const std::unique_ptr<Synth::InstrumentBank> bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       bank         = *bank_storage;
         make_valid_bank(bank);
         Synth::EffectSlotBinding* const slot = enabled_effect(bank, Synth::max_channels, 0, Synth::EffectType::delay);
         slot->bindings[0].lfo_desc_id        = 1;
@@ -21641,14 +22790,14 @@ int main()
         slot->bindings[0].lfo_rate_source    = Synth::ModSource::none;
         TEST(Synth::validate_instrument_bank(&bank));
         Synth::init_effect_state_region(fake_region_base);
-        static Synth::EffectExpansionPlan plan;
-        const char*                       error    = nullptr;
-        const bool                        accepted = Synth::preflight_effect_expansion(bank, &plan, &error);
+        Synth::EffectExpansionPlan plan     = {};
+        const char*                error    = nullptr;
+        const bool                 accepted = Synth::preflight_effect_expansion(bank, &plan, &error);
         TEST(accepted);
         if (accepted) {
-            static Synth::EffectChain chains[Synth::max_channels];
-            static Synth::EffectChain master;
-            FakeWriter                writer = { 1, 0, 0, 0, 0 };
+            Synth::EffectChain chains[Synth::max_channels] = {};
+            Synth::EffectChain master                      = {};
+            FakeWriter         writer                      = { 1, 0, 0, 0, 0 };
             Synth::commit_effect_expansion(bank, plan, chains, &master, fake_writer_binding(writer));
             TEST(writer.num_resolved == 2);
             TEST(writer.resolved[0].source == Synth::ModSource::mod_wheel); // depth
@@ -21680,22 +22829,23 @@ int main()
             };
         auto expect_master_refused = [&](Synth::InstrumentBank& refused) {
             Synth::init_effect_state_region(fake_region_base);
-            static Synth::EffectExpansionPlan plan;
-            const char*                       error = nullptr;
+            Synth::EffectExpansionPlan plan  = {};
+            const char*                error = nullptr;
             TEST(! Synth::preflight_effect_expansion(refused, &plan, &error));
             TEST(! Synth::validate_instrument_bank(&refused));
         };
-        static Synth::InstrumentBank  bank;
-        static const Synth::ModSource per_note[] = { Synth::ModSource::velocity,
-                                                     Synth::ModSource::aftertouch,
-                                                     Synth::ModSource::pressure_combine };
+        const std::unique_ptr<Synth::InstrumentBank> bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       bank         = *bank_storage;
+        static const Synth::ModSource                per_note[]   = { Synth::ModSource::velocity,
+                                                                      Synth::ModSource::aftertouch,
+                                                                      Synth::ModSource::pressure_combine };
         for (uint32_t i = 0; i < sizeof(per_note) / sizeof(per_note[0]); ++i) {
             make_master_case(bank, true, 0, per_note[i]);
             expect_master_refused(bank);
             make_master_case(bank, false, 0, per_note[i]);
             expect_master_refused(bank);
         }
-        static const uint8_t bad_numbers[] = { 0, 15, 32 };
+        uint8_t bad_numbers[] = { 0, 15, 32 };
         for (uint32_t i = 0; i < sizeof(bad_numbers) / sizeof(bad_numbers[0]); ++i) {
             make_master_case(bank, true, bad_numbers[i], Synth::ModSource::cc);
             expect_master_refused(bank);
@@ -21709,7 +22859,8 @@ int main()
     // and bad CC numbers stay refused, and cc stays inadmissible as an LFO
     // depth/rate source there.
     {
-        static Synth::InstrumentBank bank;
+        const std::unique_ptr<Synth::InstrumentBank> bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       bank         = *bank_storage;
         make_cc_input_bank(bank, Synth::max_channels, Synth::ModSource::mod_wheel, 0);
         TEST(Synth::validate_instrument_bank(&bank));
         make_cc_input_bank(bank, Synth::max_channels, Synth::ModSource::cc, 16);
@@ -21753,7 +22904,8 @@ int main()
     // editor half): three output dots, the same node count as an identical
     // channel chain, and a graph node named "MIDI Inputs" like on channel chains.
     {
-        static Synth::InstrumentBank bank;
+        const std::unique_ptr<Synth::InstrumentBank> bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       bank         = *bank_storage;
         make_valid_bank(bank);
         Synth::EffectSlotBinding* const master =
             enabled_effect(bank, Synth::max_channels, 0, Synth::EffectType::reverb);
@@ -21767,8 +22919,9 @@ int main()
         pins[0]                    = true;
         TEST(Sculptor::fx_projected_node_count(bank, Sculptor::fx_master_chain, pins) ==
              Sculptor::fx_projected_node_count(bank, 0, pins));
-        static Sculptor::Graph              graph;
-        static Sculptor::EffectGraphMapping mapping;
+        const std::unique_ptr<Sculptor::Graph> graph_storage = std::make_unique<Sculptor::Graph>();
+        Sculptor::Graph&                       graph         = *graph_storage;
+        Sculptor::EffectGraphMapping           mapping       = {};
         TEST(project_legacy_effects(bank, Sculptor::fx_master_chain, &graph, &mapping));
         TEST(mapping.midi_node != Sculptor::pool_no_slot);
         if (mapping.midi_node != Sculptor::pool_no_slot) {
@@ -21782,7 +22935,8 @@ int main()
     // A hand-authored CC input on master still projects with its row unwired,
     // and a source-row edit on that row refuses atomically.
     {
-        static Synth::InstrumentBank bank;
+        const std::unique_ptr<Synth::InstrumentBank> bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       bank         = *bank_storage;
         make_valid_bank(bank);
         Synth::EffectSlotBinding* const slot  = enabled_effect(bank, Synth::max_channels, 0, Synth::EffectType::delay);
         slot->bindings[0].num_inputs          = 1;
@@ -21790,8 +22944,9 @@ int main()
         slot->bindings[0].inputs[0].cc_number = 16;
         slot->bindings[0].inputs[0].op        = Synth::SourceOp::add;
         slot->bindings[0].inputs[0].scale     = 0.5f;
-        static Sculptor::Graph              cc_graph;
-        static Sculptor::EffectGraphMapping cc_mapping;
+        const std::unique_ptr<Sculptor::Graph> cc_graph_storage = std::make_unique<Sculptor::Graph>();
+        Sculptor::Graph&                       cc_graph         = *cc_graph_storage;
+        Sculptor::EffectGraphMapping           cc_mapping       = {};
         TEST(project_legacy_effects(bank, Sculptor::fx_master_chain, &cc_graph, &cc_mapping));
         if (cc_mapping.midi_node != Sculptor::pool_no_slot) {
             Sculptor::GraphChange cc_discard[Sculptor::max_pending_changes];
@@ -21803,9 +22958,10 @@ int main()
             auto cc_value                = cc_graph.node(cc_row.node_idx).slots.entries[cc_row.slot_idx].value;
             cc_value.real                = 0.75f;
             cc_graph.set_slot_value(cc_row.node_idx, cc_row.slot_idx, cc_value);
-            static Synth::InstrumentBank candidate;
-            candidate                              = bank;
-            const Synth::EffectParamBinding before = bank.master_chain.effects[0].bindings[0];
+            const std::unique_ptr<Synth::InstrumentBank> candidate_storage = std::make_unique<Synth::InstrumentBank>();
+            Synth::InstrumentBank&                       candidate         = *candidate_storage;
+            candidate                                                      = bank;
+            const Synth::EffectParamBinding before                         = bank.master_chain.effects[0].bindings[0];
             TEST(! Sculptor::apply_fx_graph_change(&candidate, cc_graph, cc_mapping, cc_row));
             TEST(memcmp(&candidate.master_chain.effects[0].bindings[0], &before, sizeof(before)) == 0);
         }
@@ -21815,8 +22971,15 @@ int main()
     // routing: inputs, LFO sources and the midi layout record survive,
     // and the adopted master chain round-trips back out.
     {
-        static Synth::EffectsDocument      doc, extracted, rogue;
-        static Synth::InstrumentEditorBank source, candidate;
+        Synth::EffectsDocument                             doc       = {};
+        Synth::EffectsDocument                             extracted = {};
+        Synth::EffectsDocument                             rogue     = {};
+        const std::unique_ptr<Synth::InstrumentEditorBank> source_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank&                       source = *source_storage;
+        const std::unique_ptr<Synth::InstrumentEditorBank> candidate_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& candidate = *candidate_storage;
         effects_clipboard_fixture(&doc, true);
         memset(static_cast<void*>(&source), 0, sizeof(source));
         Synth::init_default_bank(&source.bank);
@@ -21856,11 +23019,13 @@ int main()
     // T-M2-8: master wire edits through the graph (ED2): the MIDI node's dots
     // route onto master parameter rows like on any channel chain.
     {
-        static Synth::InstrumentBank bank;
+        const std::unique_ptr<Synth::InstrumentBank> bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       bank         = *bank_storage;
         make_valid_bank(bank);
         (void)enabled_effect(bank, Synth::max_channels, 0, Synth::EffectType::delay);
-        static Sculptor::Graph              graph;
-        static Sculptor::EffectGraphMapping mapping;
+        const std::unique_ptr<Sculptor::Graph> graph_storage = std::make_unique<Sculptor::Graph>();
+        Sculptor::Graph&                       graph         = *graph_storage;
+        Sculptor::EffectGraphMapping           mapping       = {};
         TEST(project_legacy_effects(bank, Sculptor::fx_master_chain, &graph, &mapping));
         TEST(mapping.midi_node != Sculptor::pool_no_slot);
         Sculptor::GraphChange changes[Sculptor::max_pending_changes];
@@ -21894,20 +23059,28 @@ int main()
     // pane already at the node limit refuses cleanly because projection
     // includes the MIDI node; a pane one node below the limit keeps loading.
     {
-        static Synth::InstrumentEditorBank source;
+        const std::unique_ptr<Synth::InstrumentEditorBank> source_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& source = *source_storage;
         memset(static_cast<void*>(&source), 0, sizeof(source));
         Synth::init_default_bank(&source.bank);
         Synth::EffectChainBinding& chain = source.bank.master_chain;
         chain.num_effects                = 1;
         Sculptor::fx_init_slot(&chain, 0, Synth::EffectType::delay);
         chain.effects[0].enabled = true;
-        static char    text[64 * 1024];
-        const uint32_t len = Synth::encode_editor_bank_json(&source, text, sizeof(text));
+        const std::unique_ptr<FixedArray<char, 64 * 1024>> text_storage =
+            std::make_unique<FixedArray<char, 64 * 1024>>();
+        char (&text)[64 * 1024] = text_storage->elements;
+        const uint32_t len      = Synth::encode_editor_bank_json(&source, text, sizeof(text));
         TEST(len > 0);
-        static Synth::InstrumentEditorBank decoded;
+        const std::unique_ptr<Synth::InstrumentEditorBank> decoded_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& decoded = *decoded_storage;
         TEST(Synth::decode_editor_bank_json(text, len, &decoded));
         TEST(Synth::validate_instrument_bank(&decoded.bank));
-        static char    again[64 * 1024];
+        const std::unique_ptr<FixedArray<char, 64 * 1024>> again_storage =
+            std::make_unique<FixedArray<char, 64 * 1024>>();
+        char (&again)[64 * 1024]  = again_storage->elements;
         const uint32_t second_len = Synth::encode_editor_bank_json(&decoded, again, sizeof(again));
         TEST(second_len == len);
         TEST(memcmp(text, again, len) == 0);
@@ -21916,7 +23089,9 @@ int main()
         // The node ceiling (150) sits above every reachable fx projection
         // (3 fixed nodes + 4 effects + 128 pinned LFOs = 135), so a master
         // pane pinning the full LFO pool validates and projects.
-        static Synth::InstrumentEditorBank at_ceiling;
+        const std::unique_ptr<Synth::InstrumentEditorBank> at_ceiling_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& at_ceiling = *at_ceiling_storage;
         memset(static_cast<void*>(&at_ceiling), 0, sizeof(at_ceiling));
         Synth::init_default_bank(&at_ceiling.bank);
         at_ceiling.bank.master_chain.num_effects = Synth::max_chain_effects;
@@ -21936,8 +23111,9 @@ int main()
         }
         TEST(Synth::validate_instrument_bank(&at_ceiling.bank));
         TEST(Sculptor::validate_editor_metadata(at_ceiling));
-        static Sculptor::Graph              graph;
-        static Sculptor::EffectGraphMapping mapping;
+        const std::unique_ptr<Sculptor::Graph> graph_storage = std::make_unique<Sculptor::Graph>();
+        Sculptor::Graph&                       graph         = *graph_storage;
+        Sculptor::EffectGraphMapping           mapping       = {};
         TEST(Sculptor::project_effect_chain_to_graph(at_ceiling, Sculptor::fx_master_chain, &graph, &mapping, pins));
     }
 
@@ -21952,7 +23128,7 @@ int main()
     {
         TEST(Synth::mix_cc_role(7) == Synth::MixRole::volume);
         TEST(Synth::mix_cc_role(10) == Synth::MixRole::panning);
-        static const uint32_t unmapped[] = { 1, 6, 11, 16, 48, 63, 119 };
+        uint32_t unmapped[] = { 1, 6, 11, 16, 48, 63, 119 };
         for (uint32_t i = 0; i < sizeof(unmapped) / sizeof(unmapped[0]); ++i) {
             TEST(Synth::mix_cc_role(unmapped[i]) == Synth::MixRole::none);
         }
@@ -22067,11 +23243,11 @@ int main()
                                 "]"
                                 "}";
 
-        static Synth::Instrument         instr;
-        static Synth::EnvelopeDescriptor envs[Synth::instrument_max_envelopes];
-        static Synth::LFODescriptor      lfos[Synth::instrument_max_lfos];
-        uint32_t                         env_count = 999;
-        uint32_t                         lfo_count = 999;
+        Synth::Instrument         instr                                 = {};
+        Synth::EnvelopeDescriptor envs[Synth::instrument_max_envelopes] = {};
+        Synth::LFODescriptor      lfos[Synth::instrument_max_lfos]      = {};
+        uint32_t                  env_count                             = 999;
+        uint32_t                  lfo_count                             = 999;
         TEST(Synth::decode_instrument_json(doc,
                                            static_cast<uint32_t>(strlen(doc)),
                                            &instr,
@@ -22130,7 +23306,8 @@ int main()
 
         // Install into a bank through the remap helpers, then encode: the
         // document must decode back to the same instrument content.
-        static Synth::InstrumentBank bank;
+        const std::unique_ptr<Synth::InstrumentBank> bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       bank         = *bank_storage;
         memset(static_cast<void*>(&bank), 0, sizeof(bank));
         uint16_t env_ids[Synth::instrument_max_envelopes];
         uint16_t lfo_ids[Synth::instrument_max_lfos];
@@ -22145,14 +23322,16 @@ int main()
         bank.channel_zones[0][0].instrument = static_cast<uint8_t>(slot);
         TEST(Synth::validate_instrument_bank(&bank));
 
-        static char    encoded[64 * 1024];
+        const std::unique_ptr<FixedArray<char, 64 * 1024>> encoded_storage =
+            std::make_unique<FixedArray<char, 64 * 1024>>();
+        char (&encoded)[64 * 1024] = encoded_storage->elements;
         const uint32_t encoded_len = Synth::encode_instrument_json(encoded, sizeof(encoded), &installed, &bank);
         TEST(encoded_len > 0);
-        static Synth::Instrument         decoded;
-        static Synth::EnvelopeDescriptor decoded_envs[Synth::instrument_max_envelopes];
-        static Synth::LFODescriptor      decoded_lfos[Synth::instrument_max_lfos];
-        uint32_t                         decoded_env_count = 999;
-        uint32_t                         decoded_lfo_count = 999;
+        Synth::Instrument         decoded                                       = {};
+        Synth::EnvelopeDescriptor decoded_envs[Synth::instrument_max_envelopes] = {};
+        Synth::LFODescriptor      decoded_lfos[Synth::instrument_max_lfos]      = {};
+        uint32_t                  decoded_env_count                             = 999;
+        uint32_t                  decoded_lfo_count                             = 999;
         TEST(Synth::decode_instrument_json(encoded,
                                            encoded_len,
                                            &decoded,
@@ -22192,10 +23371,16 @@ int main()
         // Offset validates in every domain too.
         // -------------------------------------------------------------------
         {
-            static Synth::InstrumentEditorBank octave_source;
-            static ClipboardDecode             octave_decoded;
-            static ClipboardDecode             octave_sentinel;
-            static char                        text[clipboard_capacity];
+            const std::unique_ptr<Synth::InstrumentEditorBank> octave_source_storage =
+                std::make_unique<Synth::InstrumentEditorBank>();
+            Synth::InstrumentEditorBank&           octave_source           = *octave_source_storage;
+            const std::unique_ptr<ClipboardDecode> octave_decoded_storage  = std::make_unique<ClipboardDecode>();
+            ClipboardDecode&                       octave_decoded          = *octave_decoded_storage;
+            const std::unique_ptr<ClipboardDecode> octave_sentinel_storage = std::make_unique<ClipboardDecode>();
+            ClipboardDecode&                       octave_sentinel         = *octave_sentinel_storage;
+            const std::unique_ptr<FixedArray<char, clipboard_capacity>> text_storage =
+                std::make_unique<FixedArray<char, clipboard_capacity>>();
+            char (&text)[clipboard_capacity] = text_storage->elements;
 
             // Both instrument domains preserve the octave.
             const Synth::InstrumentJsonDomain both_domains[2] = { Synth::InstrumentJsonDomain::clipboard,
@@ -22224,11 +23409,11 @@ int main()
             const char* const no_octave_doc = "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\","
                                               "\"pitch_offset_semitones\":2.0}]}";
             {
-                static Synth::Instrument         plain_instr;
-                static Synth::EnvelopeDescriptor plain_envs[Synth::instrument_max_envelopes];
-                static Synth::LFODescriptor      plain_lfos[Synth::instrument_max_lfos];
-                uint32_t                         plain_env_count = 999;
-                uint32_t                         plain_lfo_count = 999;
+                Synth::Instrument         plain_instr                                 = {};
+                Synth::EnvelopeDescriptor plain_envs[Synth::instrument_max_envelopes] = {};
+                Synth::LFODescriptor      plain_lfos[Synth::instrument_max_lfos]      = {};
+                uint32_t                  plain_env_count                             = 999;
+                uint32_t                  plain_lfo_count                             = 999;
                 TEST(Synth::decode_instrument_json(no_octave_doc,
                                                    static_cast<uint32_t>(strlen(no_octave_doc)),
                                                    &plain_instr,
@@ -22242,10 +23427,14 @@ int main()
 
             // Saved-bank dialect: encode and decode preserve the octave; a zero
             // octave omits the key and decodes back to 0.
-            static char    payload[Synth::library_payload_max];
+            const std::unique_ptr<FixedArray<char, Synth::library_payload_max>> payload_storage =
+                std::make_unique<FixedArray<char, Synth::library_payload_max>>();
+            char (&payload)[Synth::library_payload_max] = payload_storage->elements;
             const uint32_t octave_length = Synth::encode_editor_bank_json(&octave_source, payload, sizeof(payload));
             TEST(octave_length > 0);
-            static Synth::InstrumentEditorBank bank_decoded;
+            const std::unique_ptr<Synth::InstrumentEditorBank> bank_decoded_storage =
+                std::make_unique<Synth::InstrumentEditorBank>();
+            Synth::InstrumentEditorBank& bank_decoded = *bank_decoded_storage;
             memset(static_cast<void*>(&bank_decoded), 0, sizeof(bank_decoded));
             TEST(Synth::decode_editor_bank_json(payload, octave_length, &bank_decoded));
             TEST(bank_decoded.bank.instruments.entries[0].layers[0].octave_offset == -3);
@@ -22261,10 +23450,14 @@ int main()
             // Out-of-range and non-integer spellings fail the bank decode: each
             // one is spliced over the encoded value of a bank holding -3.
             auto decode_with_octave_spelling = [](const char* spelling) {
-                static Synth::InstrumentEditorBank spelling_source;
+                const std::unique_ptr<Synth::InstrumentEditorBank> spelling_source_storage =
+                    std::make_unique<Synth::InstrumentEditorBank>();
+                Synth::InstrumentEditorBank& spelling_source = *spelling_source_storage;
                 build_named_fm_fixture(&spelling_source);
                 spelling_source.bank.instruments.entries[0].layers[0].octave_offset = -3;
-                static char    spelling_payload[Synth::library_payload_max];
+                const std::unique_ptr<FixedArray<char, Synth::library_payload_max>> spelling_payload_storage =
+                    std::make_unique<FixedArray<char, Synth::library_payload_max>>();
+                char (&spelling_payload)[Synth::library_payload_max] = spelling_payload_storage->elements;
                 const uint32_t spelling_length =
                     Synth::encode_editor_bank_json(&spelling_source, spelling_payload, sizeof(spelling_payload));
                 TEST(spelling_length > 0);
@@ -22278,12 +23471,16 @@ int main()
                 const uint32_t prefix       = static_cast<uint32_t>(hit - spelling_payload);
                 const uint32_t suffix       = spelling_length - prefix - key_len;
                 const uint32_t spelling_len = static_cast<uint32_t>(strlen(spelling));
-                static char    spelling_doc[Synth::library_payload_max];
+                const std::unique_ptr<FixedArray<char, Synth::library_payload_max>> spelling_doc_storage =
+                    std::make_unique<FixedArray<char, Synth::library_payload_max>>();
+                char (&spelling_doc)[Synth::library_payload_max] = spelling_doc_storage->elements;
                 memcpy(spelling_doc, spelling_payload, prefix);
                 memcpy(spelling_doc + prefix, key, 16); // the key text without the value
                 memcpy(spelling_doc + prefix + 16, spelling, spelling_len);
                 memcpy(spelling_doc + prefix + 16 + spelling_len, hit + key_len, suffix);
-                static Synth::InstrumentEditorBank spelling_decoded;
+                const std::unique_ptr<Synth::InstrumentEditorBank> spelling_decoded_storage =
+                    std::make_unique<Synth::InstrumentEditorBank>();
+                Synth::InstrumentEditorBank& spelling_decoded = *spelling_decoded_storage;
                 memset(static_cast<void*>(&spelling_decoded), 0, sizeof(spelling_decoded));
                 return Synth::decode_editor_bank_json(spelling_doc,
                                                       prefix + 16 + spelling_len + suffix,
@@ -22332,12 +23529,18 @@ int main()
         // decode before any binary32 narrowing.
         // -----------------------------------------------------------------
         {
-            static Synth::InstrumentEditorBank slope_source;
-            static ClipboardDecode             slope_decoded;
-            static ClipboardDecode             slope_sentinel;
-            static char                        text[clipboard_capacity];
-            const Synth::InstrumentJsonDomain  both_domains[2] = { Synth::InstrumentJsonDomain::clipboard,
-                                                                   Synth::InstrumentJsonDomain::validated_bank };
+            const std::unique_ptr<Synth::InstrumentEditorBank> slope_source_storage =
+                std::make_unique<Synth::InstrumentEditorBank>();
+            Synth::InstrumentEditorBank&           slope_source           = *slope_source_storage;
+            const std::unique_ptr<ClipboardDecode> slope_decoded_storage  = std::make_unique<ClipboardDecode>();
+            ClipboardDecode&                       slope_decoded          = *slope_decoded_storage;
+            const std::unique_ptr<ClipboardDecode> slope_sentinel_storage = std::make_unique<ClipboardDecode>();
+            ClipboardDecode&                       slope_sentinel         = *slope_sentinel_storage;
+            const std::unique_ptr<FixedArray<char, clipboard_capacity>> text_storage =
+                std::make_unique<FixedArray<char, clipboard_capacity>>();
+            char (&text)[clipboard_capacity]                  = text_storage->elements;
+            const Synth::InstrumentJsonDomain both_domains[2] = { Synth::InstrumentJsonDomain::clipboard,
+                                                                  Synth::InstrumentJsonDomain::validated_bank };
             build_named_fm_fixture(&slope_source);
             slope_source.bank.instruments.entries[0].layers[0].fir_slope_percent = 37;
             for (const Synth::InstrumentJsonDomain domain : both_domains) {
@@ -22370,11 +23573,11 @@ int main()
             const char* const no_slope_doc = "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\","
                                              "\"pitch_offset_semitones\":2.0}]}";
             {
-                static Synth::Instrument         plain_instr;
-                static Synth::EnvelopeDescriptor plain_envs[Synth::instrument_max_envelopes];
-                static Synth::LFODescriptor      plain_lfos[Synth::instrument_max_lfos];
-                uint32_t                         plain_env_count = 999;
-                uint32_t                         plain_lfo_count = 999;
+                Synth::Instrument         plain_instr                                 = {};
+                Synth::EnvelopeDescriptor plain_envs[Synth::instrument_max_envelopes] = {};
+                Synth::LFODescriptor      plain_lfos[Synth::instrument_max_lfos]      = {};
+                uint32_t                  plain_env_count                             = 999;
+                uint32_t                  plain_lfo_count                             = 999;
                 TEST(Synth::decode_instrument_json(no_slope_doc,
                                                    static_cast<uint32_t>(strlen(no_slope_doc)),
                                                    &plain_instr,
@@ -22420,11 +23623,15 @@ int main()
             }
             // Saved-bank dialect: encode and decode preserve the slope; the
             // default omits the key and decodes back to 100.
-            static char    payload[Synth::library_payload_max];
+            const std::unique_ptr<FixedArray<char, Synth::library_payload_max>> payload_storage =
+                std::make_unique<FixedArray<char, Synth::library_payload_max>>();
+            char (&payload)[Synth::library_payload_max] = payload_storage->elements;
             const uint32_t slope_length = Synth::encode_editor_bank_json(&slope_source, payload, sizeof(payload));
             TEST(slope_length > 0);
             TEST(strstr(payload, "\"fir_slope\":37") != nullptr);
-            static Synth::InstrumentEditorBank bank_decoded;
+            const std::unique_ptr<Synth::InstrumentEditorBank> bank_decoded_storage =
+                std::make_unique<Synth::InstrumentEditorBank>();
+            Synth::InstrumentEditorBank& bank_decoded = *bank_decoded_storage;
             memset(static_cast<void*>(&bank_decoded), 0, sizeof(bank_decoded));
             TEST(Synth::decode_editor_bank_json(payload, slope_length, &bank_decoded));
             TEST(bank_decoded.bank.instruments.entries[0].layers[0].fir_slope_percent == 37);
@@ -22439,30 +23646,38 @@ int main()
             // Out-of-range and non-integer spellings fail the bank decode:
             // each one is spliced over the encoded value of a bank holding 37.
             auto decode_with_slope_spelling = [](const char* spelling) {
-                static Synth::InstrumentEditorBank spelling_source;
+                const std::unique_ptr<Synth::InstrumentEditorBank> spelling_source_storage =
+                    std::make_unique<Synth::InstrumentEditorBank>();
+                Synth::InstrumentEditorBank& spelling_source = *spelling_source_storage;
                 build_named_fm_fixture(&spelling_source);
                 spelling_source.bank.instruments.entries[0].layers[0].fir_slope_percent = 37;
-                static char    spelling_payload[Synth::library_payload_max];
+                const std::unique_ptr<FixedArray<char, Synth::library_payload_max>> spelling_payload_storage =
+                    std::make_unique<FixedArray<char, Synth::library_payload_max>>();
+                char (&spelling_payload)[Synth::library_payload_max] = spelling_payload_storage->elements;
                 const uint32_t spelling_length =
                     Synth::encode_editor_bank_json(&spelling_source, spelling_payload, sizeof(spelling_payload));
                 TEST(spelling_length > 0);
-                const char* const key = "\"fir_slope\":37";
-                static char       repl[32];
+                const char* const key      = "\"fir_slope\":37";
+                char              repl[32] = {};
                 memcpy(repl, "\"fir_slope\":", 12);
                 memcpy(repl + 12, spelling, strlen(spelling));
                 repl[12 + strlen(spelling)] = 0;
-                static char    spelling_doc[Synth::library_payload_max];
-                const uint32_t spliced_len = splice_single_occurrence(spelling_payload,
-                                                                      spelling_length,
-                                                                      key,
-                                                                      repl,
-                                                                      spelling_doc,
-                                                                      sizeof(spelling_doc));
+                const std::unique_ptr<FixedArray<char, Synth::library_payload_max>> spelling_doc_storage =
+                    std::make_unique<FixedArray<char, Synth::library_payload_max>>();
+                char (&spelling_doc)[Synth::library_payload_max] = spelling_doc_storage->elements;
+                const uint32_t spliced_len                       = splice_single_occurrence(spelling_payload,
+                                                                                            spelling_length,
+                                                                                            key,
+                                                                                            repl,
+                                                                                            spelling_doc,
+                                                                                            sizeof(spelling_doc));
                 TEST(spliced_len > 0);
                 if (! spliced_len) {
                     return false;
                 }
-                static Synth::InstrumentEditorBank spelling_decoded;
+                const std::unique_ptr<Synth::InstrumentEditorBank> spelling_decoded_storage =
+                    std::make_unique<Synth::InstrumentEditorBank>();
+                Synth::InstrumentEditorBank& spelling_decoded = *spelling_decoded_storage;
                 memset(static_cast<void*>(&spelling_decoded), 0, sizeof(spelling_decoded));
                 return Synth::decode_editor_bank_json(spelling_doc, spliced_len, &spelling_decoded);
             };
@@ -22508,11 +23723,11 @@ int main()
                     "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\","
                     "\"routing\":{\"fir_slope\":{\"base_value\":37,"
                     "\"inputs\":[{\"source\":\"velocity\",\"op\":\"add\",\"scale\":1.0}]}}}]}";
-                static Synth::Instrument         routed_instr;
-                static Synth::EnvelopeDescriptor routed_envs[Synth::instrument_max_envelopes];
-                static Synth::LFODescriptor      routed_lfos[Synth::instrument_max_lfos];
-                uint32_t                         routed_env_count = 999;
-                uint32_t                         routed_lfo_count = 999;
+                Synth::Instrument         routed_instr                                 = {};
+                Synth::EnvelopeDescriptor routed_envs[Synth::instrument_max_envelopes] = {};
+                Synth::LFODescriptor      routed_lfos[Synth::instrument_max_lfos]      = {};
+                uint32_t                  routed_env_count                             = 999;
+                uint32_t                  routed_lfo_count                             = 999;
                 TEST(Synth::decode_instrument_json(slope_routing_doc,
                                                    static_cast<uint32_t>(strlen(slope_routing_doc)),
                                                    &routed_instr,
@@ -22527,7 +23742,9 @@ int main()
                 TEST(routed_instr.layers[0].targets[Synth::mod_fir_slope].inputs[0].op == Synth::SourceOp::add);
                 TEST(routed_instr.layers[0].targets[Synth::mod_fir_slope].inputs[0].scale == 1.0f);
 
-                static Synth::InstrumentEditorBank routed_source;
+                const std::unique_ptr<Synth::InstrumentEditorBank> routed_source_storage =
+                    std::make_unique<Synth::InstrumentEditorBank>();
+                Synth::InstrumentEditorBank& routed_source = *routed_source_storage;
                 build_named_fm_fixture(&routed_source);
                 routed_source.bank.instruments.entries[0].layers[0].targets[Synth::mod_fir_slope] =
                     routed_instr.layers[0].targets[Synth::mod_fir_slope];
@@ -22559,8 +23776,10 @@ int main()
             // out-of-range and fractional spellings are invalid state, so the
             // encoder can never emit a base its decoder rejects.
             {
-                static Synth::InstrumentEditorBank bad_bank;
-                const char* const                  bad_bases[] = { "0", "101", "-1", "37.5", "1e2", "-4294967295" };
+                const std::unique_ptr<Synth::InstrumentEditorBank> bad_bank_storage =
+                    std::make_unique<Synth::InstrumentEditorBank>();
+                Synth::InstrumentEditorBank& bad_bank    = *bad_bank_storage;
+                const char* const            bad_bases[] = { "0", "101", "-1", "37.5", "1e2", "-4294967295" };
                 for (const char* bad : bad_bases) {
                     char bad_doc[384];
                     // Document dialect target block.
@@ -22611,8 +23830,10 @@ int main()
                     // decodes, proving the rejections below fail on the slope
                     // grammar rather than on malformed JSON.
                     {
-                        static Synth::InstrumentEditorBank good_bank;
-                        char                               good_doc[384];
+                        const std::unique_ptr<Synth::InstrumentEditorBank> good_bank_storage =
+                            std::make_unique<Synth::InstrumentEditorBank>();
+                        Synth::InstrumentEditorBank& good_bank = *good_bank_storage;
+                        char                         good_doc[384];
                         TEST(snprintf(good_doc,
                                       sizeof(good_doc),
                                       "{\"instrument_editor_bank\":{\"instruments\":"
@@ -22643,7 +23864,9 @@ int main()
             // inputs, no bound descriptor) is not routed: the scalar key
             // survives the save/reload round-trip unchanged.
             {
-                static Synth::InstrumentEditorBank dormant_source;
+                const std::unique_ptr<Synth::InstrumentEditorBank> dormant_source_storage =
+                    std::make_unique<Synth::InstrumentEditorBank>();
+                Synth::InstrumentEditorBank& dormant_source = *dormant_source_storage;
                 build_named_fm_fixture(&dormant_source);
                 dormant_source.bank.instruments.entries[0].layers[0].fir_slope_percent                       = 37;
                 dormant_source.bank.instruments.entries[0].layers[0].targets[Synth::mod_fir_slope].lfo_depth = 0.5f;
@@ -22681,12 +23904,12 @@ int main()
             // Old banks: a scalar slope with no routing key decodes with
             // the 12th target zeroed and the scalar preserved.
             {
-                static Synth::Instrument         legacy_instr;
-                static Synth::EnvelopeDescriptor legacy_envs[Synth::instrument_max_envelopes];
-                static Synth::LFODescriptor      legacy_lfos[Synth::instrument_max_lfos];
-                uint32_t                         legacy_env_count = 999;
-                uint32_t                         legacy_lfo_count = 999;
-                const char* const                legacy_slope_doc =
+                Synth::Instrument         legacy_instr                                 = {};
+                Synth::EnvelopeDescriptor legacy_envs[Synth::instrument_max_envelopes] = {};
+                Synth::LFODescriptor      legacy_lfos[Synth::instrument_max_lfos]      = {};
+                uint32_t                  legacy_env_count                             = 999;
+                uint32_t                  legacy_lfo_count                             = 999;
+                const char* const         legacy_slope_doc =
                     "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\",\"fir_slope\":37}]}";
                 TEST(Synth::decode_instrument_json(legacy_slope_doc,
                                                    static_cast<uint32_t>(strlen(legacy_slope_doc)),
@@ -22706,7 +23929,9 @@ int main()
                     "[{\"layer_count\":1,\"layers\":[{\"wave_a\":\"sine\",\"fir_slope\":37,"
                     "\"routing\":{}}]}],"
                     "\"channels\":[{},{},{},{\"zones\":[{\"start\":0,\"instrument\":0}]}]}}";
-                static Synth::InstrumentEditorBank legacy_bank;
+                const std::unique_ptr<Synth::InstrumentEditorBank> legacy_bank_storage =
+                    std::make_unique<Synth::InstrumentEditorBank>();
+                Synth::InstrumentEditorBank& legacy_bank = *legacy_bank_storage;
                 memset(static_cast<void*>(&legacy_bank), 0, sizeof(legacy_bank));
                 TEST(Synth::decode_editor_bank_json(legacy_bank_doc,
                                                     static_cast<uint32_t>(strlen(legacy_bank_doc)),
@@ -22724,11 +23949,11 @@ int main()
                 const char* const sources_only_doc =
                     "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\","
                     "\"fir_slope\":{\"sources\":[{\"source\":\"velocity\"}]}}]}";
-                static Synth::Instrument         sources_instr;
-                static Synth::EnvelopeDescriptor sources_envs[Synth::instrument_max_envelopes];
-                static Synth::LFODescriptor      sources_lfos[Synth::instrument_max_lfos];
-                uint32_t                         sources_env_count = 999;
-                uint32_t                         sources_lfo_count = 999;
+                Synth::Instrument         sources_instr                                 = {};
+                Synth::EnvelopeDescriptor sources_envs[Synth::instrument_max_envelopes] = {};
+                Synth::LFODescriptor      sources_lfos[Synth::instrument_max_lfos]      = {};
+                uint32_t                  sources_env_count                             = 999;
+                uint32_t                  sources_lfo_count                             = 999;
                 TEST(Synth::decode_instrument_json(sources_only_doc,
                                                    static_cast<uint32_t>(strlen(sources_only_doc)),
                                                    &sources_instr,
@@ -22802,7 +24027,9 @@ int main()
             // Default omission: a zeroed binding with the scalar default
             // emits no fir_slope keys in either dialect.
             {
-                static Synth::InstrumentEditorBank default_source;
+                const std::unique_ptr<Synth::InstrumentEditorBank> default_source_storage =
+                    std::make_unique<Synth::InstrumentEditorBank>();
+                Synth::InstrumentEditorBank& default_source = *default_source_storage;
                 build_named_fm_fixture(&default_source);
                 default_source.bank.instruments.entries[0].layers[0].fir_slope_percent = 100;
                 TEST(Sculptor::encode_editor_instrument_json(default_source,
@@ -22836,11 +24063,11 @@ int main()
                 "\"envelope\":{\"points\":[{\"time_seconds\":0.0,\"level\":0.25},{\"time_seconds\":0.1,\"level\":0.75}]},"
                 "\"lfo\":{\"wave\":\"sine\",\"frequency_hz\":2.0,\"min_level\":0.25,\"max_level\":0.5,\"depth\":0.1}"
                 "}}]}";
-            static Synth::Instrument         fm_instr;
-            static Synth::EnvelopeDescriptor fm_envs[Synth::instrument_max_envelopes];
-            static Synth::LFODescriptor      fm_lfos[Synth::instrument_max_lfos];
-            uint32_t                         fm_env_count = 999;
-            uint32_t                         fm_lfo_count = 999;
+            Synth::Instrument         fm_instr                                 = {};
+            Synth::EnvelopeDescriptor fm_envs[Synth::instrument_max_envelopes] = {};
+            Synth::LFODescriptor      fm_lfos[Synth::instrument_max_lfos]      = {};
+            uint32_t                  fm_env_count                             = 999;
+            uint32_t                  fm_lfo_count                             = 999;
             TEST(Synth::decode_instrument_json(fm_doc,
                                                static_cast<uint32_t>(strlen(fm_doc)),
                                                &fm_instr,
@@ -22858,7 +24085,9 @@ int main()
             TEST(fm_lfos[0].min_max_delta == 0.25f * fm_scale);
             // The encoder must emit document units, or the editor's own copy cannot
             // paste back: install into a bank, encode, decode, compare bank values.
-            static Synth::InstrumentEditorBank fm_bank;
+            const std::unique_ptr<Synth::InstrumentEditorBank> fm_bank_storage =
+                std::make_unique<Synth::InstrumentEditorBank>();
+            Synth::InstrumentEditorBank& fm_bank = *fm_bank_storage;
             memset(static_cast<void*>(&fm_bank), 0, sizeof(fm_bank));
             uint16_t fm_env_ids[Synth::instrument_max_envelopes];
             uint16_t fm_lfo_ids[Synth::instrument_max_lfos];
@@ -22874,15 +24103,17 @@ int main()
             fm_bank.bank.channel_zones[0][0].instrument = static_cast<uint8_t>(fm_slot);
             TEST(Synth::validate_instrument_bank(&fm_bank.bank));
 
-            static char    fm_text[64 * 1024];
+            const std::unique_ptr<FixedArray<char, 64 * 1024>> fm_text_storage =
+                std::make_unique<FixedArray<char, 64 * 1024>>();
+            char (&fm_text)[64 * 1024] = fm_text_storage->elements;
             const uint32_t fm_text_len =
                 Synth::encode_instrument_json(fm_text, sizeof(fm_text), &fm_installed, &fm_bank.bank);
             TEST(fm_text_len > 0);
-            static Synth::Instrument         fm_back;
-            static Synth::EnvelopeDescriptor fm_back_envs[Synth::instrument_max_envelopes];
-            static Synth::LFODescriptor      fm_back_lfos[Synth::instrument_max_lfos];
-            uint32_t                         fm_back_env_count = 0;
-            uint32_t                         fm_back_lfo_count = 0;
+            Synth::Instrument         fm_back                                       = {};
+            Synth::EnvelopeDescriptor fm_back_envs[Synth::instrument_max_envelopes] = {};
+            Synth::LFODescriptor      fm_back_lfos[Synth::instrument_max_lfos]      = {};
+            uint32_t                  fm_back_env_count                             = 0;
+            uint32_t                  fm_back_lfo_count                             = 0;
             TEST(Synth::decode_instrument_json(fm_text,
                                                fm_text_len,
                                                &fm_back,
@@ -22909,11 +24140,11 @@ int main()
                 "{\"wave_a\":\"sine\",\"volume\":{\"envelope\":{\"points\":[{\"time_seconds\":0.1,\"level\":0.5}]}}},"
                 "{\"wave_a\":\"pulse\",\"volume\":{\"envelope\":{\"points\":[{\"time_seconds\":0.1,\"level\":0.5}]}}}"
                 "]}";
-            static Synth::Instrument         dup_instr;
-            static Synth::EnvelopeDescriptor dup_envs[Synth::instrument_max_envelopes];
-            static Synth::LFODescriptor      dup_lfos[Synth::instrument_max_lfos];
-            uint32_t                         dup_env_count = 999;
-            uint32_t                         dup_lfo_count = 999;
+            Synth::Instrument         dup_instr                                 = {};
+            Synth::EnvelopeDescriptor dup_envs[Synth::instrument_max_envelopes] = {};
+            Synth::LFODescriptor      dup_lfos[Synth::instrument_max_lfos]      = {};
+            uint32_t                  dup_env_count                             = 999;
+            uint32_t                  dup_lfo_count                             = 999;
             TEST(Synth::decode_instrument_json(dup_doc,
                                                static_cast<uint32_t>(strlen(dup_doc)),
                                                &dup_instr,
@@ -22941,11 +24172,11 @@ int main()
                 "\"osc_mix\":{\"base\":0.75,\"sources\":[{\"source\":\"channel_pressure\",\"op\":\"add\",\"scale\":0.1}]},"
                 "\"fm_index\":{\"base\":0.5,\"sources\":[{\"source\":\"aftertouch\",\"op\":\"add\",\"scale\":2.0}]}"
                 "}]}";
-            static Synth::Instrument         routed_instr;
-            static Synth::EnvelopeDescriptor routed_envs[Synth::instrument_max_envelopes];
-            static Synth::LFODescriptor      routed_lfos[Synth::instrument_max_lfos];
-            uint32_t                         routed_env_count = 999;
-            uint32_t                         routed_lfo_count = 999;
+            Synth::Instrument         routed_instr                                 = {};
+            Synth::EnvelopeDescriptor routed_envs[Synth::instrument_max_envelopes] = {};
+            Synth::LFODescriptor      routed_lfos[Synth::instrument_max_lfos]      = {};
+            uint32_t                  routed_env_count                             = 999;
+            uint32_t                  routed_lfo_count                             = 999;
             TEST(Synth::decode_instrument_json(routed_doc,
                                                static_cast<uint32_t>(strlen(routed_doc)),
                                                &routed_instr,
@@ -22985,7 +24216,9 @@ int main()
             check_routed_bindings(routed_instr);
 
             // Install into a bank through the remap helpers: the routed inputs must survive.
-            static Synth::InstrumentBank routed_bank;
+            const std::unique_ptr<Synth::InstrumentBank> routed_bank_storage =
+                std::make_unique<Synth::InstrumentBank>();
+            Synth::InstrumentBank& routed_bank = *routed_bank_storage;
             memset(static_cast<void*>(&routed_bank), 0, sizeof(routed_bank));
             uint16_t routed_env_ids[Synth::instrument_max_envelopes];
             uint16_t routed_lfo_ids[Synth::instrument_max_lfos];
@@ -23002,15 +24235,17 @@ int main()
             TEST(Synth::validate_instrument_bank(&routed_bank));
 
             // Round-trip through the document JSON: encode, decode, re-assert.
-            static char    routed_text[64 * 1024];
+            const std::unique_ptr<FixedArray<char, 64 * 1024>> routed_text_storage =
+                std::make_unique<FixedArray<char, 64 * 1024>>();
+            char (&routed_text)[64 * 1024] = routed_text_storage->elements;
             const uint32_t routed_text_len =
                 Synth::encode_instrument_json(routed_text, sizeof(routed_text), &routed_installed, &routed_bank);
             TEST(routed_text_len > 0);
-            static Synth::Instrument         routed_back;
-            static Synth::EnvelopeDescriptor routed_back_envs[Synth::instrument_max_envelopes];
-            static Synth::LFODescriptor      routed_back_lfos[Synth::instrument_max_lfos];
-            uint32_t                         routed_back_env_count = 0;
-            uint32_t                         routed_back_lfo_count = 0;
+            Synth::Instrument         routed_back                                       = {};
+            Synth::EnvelopeDescriptor routed_back_envs[Synth::instrument_max_envelopes] = {};
+            Synth::LFODescriptor      routed_back_lfos[Synth::instrument_max_lfos]      = {};
+            uint32_t                  routed_back_env_count                             = 0;
+            uint32_t                  routed_back_lfo_count                             = 0;
             TEST(Synth::decode_instrument_json(routed_text,
                                                routed_text_len,
                                                &routed_back,
@@ -23024,7 +24259,7 @@ int main()
         // Per-layer routing in the document format (AC4): later layers carry
         // their own base and sources, and decode preserves the divergence.
         {
-            static Synth::Instrument doc_instr;
+            Synth::Instrument doc_instr = {};
             memset(static_cast<void*>(&doc_instr), 0, sizeof(doc_instr));
             doc_instr.layer_count = 3;
             for (uint32_t layer = 0; layer < 3; layer++) {
@@ -23054,16 +24289,19 @@ int main()
             doc_instr.layers[1].targets[Synth::mod_duty1].base_value  = 0.25f;
             // Layer 2 carries no routing at all.
 
-            static Synth::InstrumentBank desc_bank;
+            const std::unique_ptr<Synth::InstrumentBank> desc_bank_storage = std::make_unique<Synth::InstrumentBank>();
+            Synth::InstrumentBank&                       desc_bank         = *desc_bank_storage;
             memset(static_cast<void*>(&desc_bank), 0, sizeof(desc_bank));
-            static char    doc_text[64 * 1024];
+            const std::unique_ptr<FixedArray<char, 64 * 1024>> doc_text_storage =
+                std::make_unique<FixedArray<char, 64 * 1024>>();
+            char (&doc_text)[64 * 1024] = doc_text_storage->elements;
             const uint32_t doc_len = Synth::encode_instrument_json(doc_text, sizeof(doc_text), &doc_instr, &desc_bank);
             TEST(doc_len > 0);
-            static Synth::Instrument         doc_back;
-            static Synth::EnvelopeDescriptor doc_back_envs[Synth::instrument_max_envelopes];
-            static Synth::LFODescriptor      doc_back_lfos[Synth::instrument_max_lfos];
-            uint32_t                         doc_back_env_count = 0;
-            uint32_t                         doc_back_lfo_count = 0;
+            Synth::Instrument         doc_back                                       = {};
+            Synth::EnvelopeDescriptor doc_back_envs[Synth::instrument_max_envelopes] = {};
+            Synth::LFODescriptor      doc_back_lfos[Synth::instrument_max_lfos]      = {};
+            uint32_t                  doc_back_env_count                             = 0;
+            uint32_t                  doc_back_lfo_count                             = 0;
             TEST(Synth::decode_instrument_json(doc_text,
                                                doc_len,
                                                &doc_back,
@@ -23096,7 +24334,9 @@ int main()
         // effect layouts (kind 4), master-chain records, and other zones stay
         // untouched, and the clear owns the zone's mask row.
         {
-            static Synth::InstrumentEditorBank clear_bank;
+            const std::unique_ptr<Synth::InstrumentEditorBank> clear_bank_storage =
+                std::make_unique<Synth::InstrumentEditorBank>();
+            Synth::InstrumentEditorBank& clear_bank = *clear_bank_storage;
             memset(static_cast<void*>(&clear_bank), 0, sizeof(clear_bank));
             add_detached_record(&clear_bank, 0, 0, 1, 1, 0.0f, 0.0f, Synth::ModSource::none, Synth::ModSource::none, 0);
             add_detached_record(&clear_bank, 0, 1, 1, 1, 0.0f, 0.0f, Synth::ModSource::none, Synth::ModSource::none, 0);
@@ -23211,17 +24451,17 @@ int main()
             // LFO span overflows the bank-unit conversion
             "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\",\"fm_index\":{\"lfo\":{\"wave\":\"sine\",\"frequency_hz\":5.0,\"max_level\":3e38,\"depth\":0.5}}}]}",
         };
-        static Synth::Instrument         reference_instr;
-        static Synth::EnvelopeDescriptor reference_envs[Synth::instrument_max_envelopes];
-        static Synth::LFODescriptor      reference_lfos[Synth::instrument_max_lfos];
+        Synth::Instrument         reference_instr                                 = {};
+        Synth::EnvelopeDescriptor reference_envs[Synth::instrument_max_envelopes] = {};
+        Synth::LFODescriptor      reference_lfos[Synth::instrument_max_lfos]      = {};
         memset(static_cast<void*>(&reference_instr), 0x5A, sizeof(reference_instr));
         memset(static_cast<void*>(reference_envs), 0x5A, sizeof(reference_envs));
         memset(static_cast<void*>(reference_lfos), 0x5A, sizeof(reference_lfos));
         for (uint32_t i = 0; i < sizeof(rejected_docs) / sizeof(rejected_docs[0]); i++) {
             Synth::Instrument sentinel_instr;
             memset(static_cast<void*>(&sentinel_instr), 0x5A, sizeof(sentinel_instr));
-            static Synth::EnvelopeDescriptor sentinel_envs[Synth::instrument_max_envelopes];
-            static Synth::LFODescriptor      sentinel_lfos[Synth::instrument_max_lfos];
+            Synth::EnvelopeDescriptor sentinel_envs[Synth::instrument_max_envelopes] = {};
+            Synth::LFODescriptor      sentinel_lfos[Synth::instrument_max_lfos]      = {};
             memset(static_cast<void*>(sentinel_envs), 0x5A, sizeof(sentinel_envs));
             memset(static_cast<void*>(sentinel_lfos), 0x5A, sizeof(sentinel_lfos));
             uint32_t sentinel_env_count = 999;
@@ -23247,11 +24487,11 @@ int main()
         {
             const char* const zero_ratio_doc =
                 "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\",\"mode\":\"fm\",\"mod_ratio\":0.0}]}";
-            static Synth::Instrument         zero_instr;
-            static Synth::EnvelopeDescriptor zero_envs[Synth::instrument_max_envelopes];
-            static Synth::LFODescriptor      zero_lfos[Synth::instrument_max_lfos];
-            uint32_t                         zero_env_count = 999;
-            uint32_t                         zero_lfo_count = 999;
+            Synth::Instrument         zero_instr                                 = {};
+            Synth::EnvelopeDescriptor zero_envs[Synth::instrument_max_envelopes] = {};
+            Synth::LFODescriptor      zero_lfos[Synth::instrument_max_lfos]      = {};
+            uint32_t                  zero_env_count                             = 999;
+            uint32_t                  zero_lfo_count                             = 999;
             TEST(Synth::decode_instrument_json(zero_ratio_doc,
                                                static_cast<uint32_t>(strlen(zero_ratio_doc)),
                                                &zero_instr,
@@ -23265,20 +24505,24 @@ int main()
             // The encoder must keep emitting the zero (restoring the omitted-key
             // default of 1 would change the sound), and an omitted ratio decodes to 1.
             {
-                static Synth::InstrumentEditorBank zero_bank;
+                const std::unique_ptr<Synth::InstrumentEditorBank> zero_bank_storage =
+                    std::make_unique<Synth::InstrumentEditorBank>();
+                Synth::InstrumentEditorBank& zero_bank = *zero_bank_storage;
                 memset(static_cast<void*>(&zero_bank), 0, sizeof(zero_bank));
                 const uint32_t zero_slot = zero_bank.bank.instruments.allocate();
                 TEST(zero_slot != pool_no_slot);
                 zero_bank.bank.instruments.entries[zero_slot] = zero_instr;
-                static char    zero_text[64 * 1024];
+                const std::unique_ptr<FixedArray<char, 64 * 1024>> zero_text_storage =
+                    std::make_unique<FixedArray<char, 64 * 1024>>();
+                char (&zero_text)[64 * 1024] = zero_text_storage->elements;
                 const uint32_t zero_text_len =
                     Synth::encode_instrument_json(zero_text, sizeof(zero_text), &zero_instr, &zero_bank.bank);
                 TEST(zero_text_len > 0);
-                static Synth::Instrument         zero_back;
-                static Synth::EnvelopeDescriptor zero_back_envs[Synth::instrument_max_envelopes];
-                static Synth::LFODescriptor      zero_back_lfos[Synth::instrument_max_lfos];
-                uint32_t                         zero_back_env_count = 0;
-                uint32_t                         zero_back_lfo_count = 0;
+                Synth::Instrument         zero_back                                       = {};
+                Synth::EnvelopeDescriptor zero_back_envs[Synth::instrument_max_envelopes] = {};
+                Synth::LFODescriptor      zero_back_lfos[Synth::instrument_max_lfos]      = {};
+                uint32_t                  zero_back_env_count                             = 0;
+                uint32_t                  zero_back_lfo_count                             = 0;
                 TEST(Synth::decode_instrument_json(zero_text,
                                                    zero_text_len,
                                                    &zero_back,
@@ -23341,10 +24585,10 @@ int main()
 
             const char* const spread_env_doc =
                 "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\",\"fir_pitch_spread\":{\"envelope\":{\"points\":[{\"time_seconds\":0.0,\"level\":0.0},{\"time_seconds\":0.1,\"level\":2.0},{\"time_seconds\":0.2,\"level\":30.0}]}}}]}";
-            static Synth::EnvelopeDescriptor spread_envs[Synth::instrument_max_envelopes];
-            static Synth::LFODescriptor      spread_lfos[Synth::instrument_max_lfos];
-            uint32_t                         spread_env_count = 999;
-            uint32_t                         spread_lfo_count = 999;
+            Synth::EnvelopeDescriptor spread_envs[Synth::instrument_max_envelopes] = {};
+            Synth::LFODescriptor      spread_lfos[Synth::instrument_max_lfos]      = {};
+            uint32_t                  spread_env_count                             = 999;
+            uint32_t                  spread_lfo_count                             = 999;
             TEST(Synth::decode_instrument_json(spread_env_doc,
                                                static_cast<uint32_t>(strlen(spread_env_doc)),
                                                &zero_instr,
@@ -23356,7 +24600,9 @@ int main()
             TEST(spread_envs[0].min_value == 0.0f);
             TEST(spread_envs[0].points[1].value == 4369); // the level-2 point's own quantization step
 
-            static Synth::InstrumentEditorBank spread_bank;
+            const std::unique_ptr<Synth::InstrumentEditorBank> spread_bank_storage =
+                std::make_unique<Synth::InstrumentEditorBank>();
+            Synth::InstrumentEditorBank& spread_bank = *spread_bank_storage;
             memset(static_cast<void*>(&spread_bank), 0, sizeof(spread_bank));
             uint16_t spread_env_ids[Synth::instrument_max_envelopes];
             uint16_t spread_lfo_ids[Synth::instrument_max_lfos];
@@ -23371,15 +24617,17 @@ int main()
             spread_bank.bank.channel_zones[0][0].start_note   = 1;
             spread_bank.bank.channel_zones[0][0].instrument   = static_cast<uint8_t>(spread_slot);
             TEST(Synth::validate_instrument_bank(&spread_bank.bank));
-            static char    spread_text[64 * 1024];
+            const std::unique_ptr<FixedArray<char, 64 * 1024>> spread_text_storage =
+                std::make_unique<FixedArray<char, 64 * 1024>>();
+            char (&spread_text)[64 * 1024] = spread_text_storage->elements;
             const uint32_t spread_text_len =
                 Synth::encode_instrument_json(spread_text, sizeof(spread_text), &spread_installed, &spread_bank.bank);
             TEST(spread_text_len > 0);
-            static Synth::Instrument         spread_back;
-            static Synth::EnvelopeDescriptor spread_back_envs[Synth::instrument_max_envelopes];
-            static Synth::LFODescriptor      spread_back_lfos[Synth::instrument_max_lfos];
-            uint32_t                         spread_back_env_count = 0;
-            uint32_t                         spread_back_lfo_count = 0;
+            Synth::Instrument         spread_back                                       = {};
+            Synth::EnvelopeDescriptor spread_back_envs[Synth::instrument_max_envelopes] = {};
+            Synth::LFODescriptor      spread_back_lfos[Synth::instrument_max_lfos]      = {};
+            uint32_t                  spread_back_env_count                             = 0;
+            uint32_t                  spread_back_lfo_count                             = 0;
             TEST(Synth::decode_instrument_json(spread_text,
                                                spread_text_len,
                                                &spread_back,
@@ -23399,11 +24647,11 @@ int main()
         const char* const no_spread_doc  = "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\"}]}";
         const char* const spread_docs[2] = { spread_half_doc, no_spread_doc };
         for (const char* const spread_doc : spread_docs) {
-            static Synth::Instrument         half_instr;
-            static Synth::EnvelopeDescriptor half_envs[Synth::instrument_max_envelopes];
-            static Synth::LFODescriptor      half_lfos[Synth::instrument_max_lfos];
-            uint32_t                         half_env_count = 999;
-            uint32_t                         half_lfo_count = 999;
+            Synth::Instrument         half_instr                                 = {};
+            Synth::EnvelopeDescriptor half_envs[Synth::instrument_max_envelopes] = {};
+            Synth::LFODescriptor      half_lfos[Synth::instrument_max_lfos]      = {};
+            uint32_t                  half_env_count                             = 999;
+            uint32_t                  half_lfo_count                             = 999;
             TEST(Synth::decode_instrument_json(spread_doc,
                                                static_cast<uint32_t>(strlen(spread_doc)),
                                                &half_instr,
@@ -23419,11 +24667,11 @@ int main()
         const char* const removed_keys_doc = "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\","
                                              "\"lowpass_cutoff\":{\"base\":2000},\"highpass_cutoff\":{\"base\":500}}]}";
         {
-            static Synth::Instrument         removed_instr;
-            static Synth::EnvelopeDescriptor removed_envs[Synth::instrument_max_envelopes];
-            static Synth::LFODescriptor      removed_lfos[Synth::instrument_max_lfos];
-            uint32_t                         removed_env_count = 999;
-            uint32_t                         removed_lfo_count = 999;
+            Synth::Instrument         removed_instr                                 = {};
+            Synth::EnvelopeDescriptor removed_envs[Synth::instrument_max_envelopes] = {};
+            Synth::LFODescriptor      removed_lfos[Synth::instrument_max_lfos]      = {};
+            uint32_t                  removed_env_count                             = 999;
+            uint32_t                  removed_lfo_count                             = 999;
             TEST(Synth::decode_instrument_json(removed_keys_doc,
                                                static_cast<uint32_t>(strlen(removed_keys_doc)),
                                                &removed_instr,
@@ -23437,11 +24685,15 @@ int main()
         // underflow spellings fail before narrowing, and an absent key
         // decodes 0.  The splice mirrors the octave-offset pattern above.
         {
-            static Synth::InstrumentEditorBank spread_splice_source;
+            const std::unique_ptr<Synth::InstrumentEditorBank> spread_splice_source_storage =
+                std::make_unique<Synth::InstrumentEditorBank>();
+            Synth::InstrumentEditorBank& spread_splice_source = *spread_splice_source_storage;
             build_named_fm_fixture(&spread_splice_source);
             spread_splice_source.bank.instruments.entries[0].layers[0].fir_type = Synth::fir_bandpass;
             spread_splice_source.bank.instruments.entries[0].layers[0].targets[Synth::mod_fir_spread].base_value = 3.0f;
-            static char    spread_payload[Synth::library_payload_max];
+            const std::unique_ptr<FixedArray<char, Synth::library_payload_max>> spread_payload_storage =
+                std::make_unique<FixedArray<char, Synth::library_payload_max>>();
+            char (&spread_payload)[Synth::library_payload_max] = spread_payload_storage->elements;
             const uint32_t spread_payload_len =
                 Synth::encode_editor_bank_json(&spread_splice_source, spread_payload, sizeof(spread_payload));
             TEST(spread_payload_len > 0);
@@ -23462,12 +24714,16 @@ int main()
                 const uint32_t spelling_len = static_cast<uint32_t>(strlen(spelling));
                 const uint32_t key_len      = static_cast<uint32_t>(strlen(key));
 
-                static char spelling_doc[Synth::library_payload_max];
+                const std::unique_ptr<FixedArray<char, Synth::library_payload_max>> spelling_doc_storage =
+                    std::make_unique<FixedArray<char, Synth::library_payload_max>>();
+                char (&spelling_doc)[Synth::library_payload_max] = spelling_doc_storage->elements;
                 memcpy(spelling_doc, spread_payload, prefix);
                 memcpy(spelling_doc + prefix, key, key_len);
                 memcpy(spelling_doc + prefix + key_len, spelling, spelling_len);
                 memcpy(spelling_doc + prefix + key_len + spelling_len, value_end, suffix);
-                static Synth::InstrumentEditorBank spelling_decoded;
+                const std::unique_ptr<Synth::InstrumentEditorBank> spelling_decoded_storage =
+                    std::make_unique<Synth::InstrumentEditorBank>();
+                Synth::InstrumentEditorBank& spelling_decoded = *spelling_decoded_storage;
                 memset(static_cast<void*>(&spelling_decoded), 0, sizeof(spelling_decoded));
                 return Synth::decode_editor_bank_json(spelling_doc,
                                                       prefix + key_len + spelling_len + suffix,
@@ -23486,7 +24742,9 @@ int main()
                 Synth::encode_editor_bank_json(&spread_splice_source, spread_payload, sizeof(spread_payload));
             TEST(zero_payload_len > 0);
             TEST(strstr(spread_payload, "fir_pitch_spread") == nullptr);
-            static Synth::InstrumentEditorBank zero_decoded;
+            const std::unique_ptr<Synth::InstrumentEditorBank> zero_decoded_storage =
+                std::make_unique<Synth::InstrumentEditorBank>();
+            Synth::InstrumentEditorBank& zero_decoded = *zero_decoded_storage;
             memset(static_cast<void*>(&zero_decoded), 0, sizeof(zero_decoded));
             TEST(Synth::decode_editor_bank_json(spread_payload, zero_payload_len, &zero_decoded));
             TEST(zero_decoded.bank.instruments.entries[0].layers[0].targets[Synth::mod_fir_spread].base_value == 0.0f);
@@ -23505,13 +24763,17 @@ int main()
                 const uint32_t routing_key_len = static_cast<uint32_t>(strlen(routing_key));
                 const uint32_t prefix          = static_cast<uint32_t>(routing_hit - spread_payload) + routing_key_len;
                 const uint32_t suffix          = routing_payload_len - prefix;
-                static char    routing_doc[Synth::library_payload_max];
+                const std::unique_ptr<FixedArray<char, Synth::library_payload_max>> routing_doc_storage =
+                    std::make_unique<FixedArray<char, Synth::library_payload_max>>();
+                char (&routing_doc)[Synth::library_payload_max] = routing_doc_storage->elements;
                 memcpy(routing_doc, spread_payload, prefix);
                 const int removed_len =
                     snprintf(routing_doc + prefix, sizeof(routing_doc) - prefix, "%s", removed_keys);
                 TEST(removed_len > 0);
                 memcpy(routing_doc + prefix + removed_len, spread_payload + prefix, suffix);
-                static Synth::InstrumentEditorBank routing_decoded;
+                const std::unique_ptr<Synth::InstrumentEditorBank> routing_decoded_storage =
+                    std::make_unique<Synth::InstrumentEditorBank>();
+                Synth::InstrumentEditorBank& routing_decoded = *routing_decoded_storage;
                 memset(static_cast<void*>(&routing_decoded), 0, sizeof(routing_decoded));
                 TEST(Synth::decode_editor_bank_json(routing_doc,
                                                     prefix + static_cast<uint32_t>(removed_len) + suffix,
@@ -23538,11 +24800,11 @@ int main()
                 "\"rate_scale_ms\":0}},\"duty_a\":{\"base\":0.172000006},\"duty_b\":{\"base\":0.156000003},"
                 "\"osc_mix\":{\"base\":0},\"fm_index\":{\"base\":0},"
                 "\"fir_pitch_spread\":{\"base\":3}}]}";
-            static Synth::Instrument         real_instr;
-            static Synth::EnvelopeDescriptor real_envs[Synth::instrument_max_envelopes];
-            static Synth::LFODescriptor      real_lfos[Synth::instrument_max_lfos];
-            uint32_t                         real_env_count = 999;
-            uint32_t                         real_lfo_count = 999;
+            Synth::Instrument         real_instr                                 = {};
+            Synth::EnvelopeDescriptor real_envs[Synth::instrument_max_envelopes] = {};
+            Synth::LFODescriptor      real_lfos[Synth::instrument_max_lfos]      = {};
+            uint32_t                  real_env_count                             = 999;
+            uint32_t                  real_lfo_count                             = 999;
             TEST(Synth::decode_instrument_json(real_zone_doc,
                                                static_cast<uint32_t>(strlen(real_zone_doc)),
                                                &real_instr,
@@ -23554,7 +24816,9 @@ int main()
             TEST(real_lfos[1].min_value == -1.0f); // panning LFO sweep below the slider range
             TEST(real_lfos[1].min_max_delta == 2.0f);
 
-            static Synth::InstrumentEditorBank real_bank;
+            const std::unique_ptr<Synth::InstrumentEditorBank> real_bank_storage =
+                std::make_unique<Synth::InstrumentEditorBank>();
+            Synth::InstrumentEditorBank& real_bank = *real_bank_storage;
             memset(static_cast<void*>(&real_bank), 0, sizeof(real_bank));
             uint16_t real_env_ids[Synth::instrument_max_envelopes];
             uint16_t real_lfo_ids[Synth::instrument_max_lfos];
@@ -23569,15 +24833,17 @@ int main()
             real_bank.bank.channel_zones[0][0].start_note = 1;
             real_bank.bank.channel_zones[0][0].instrument = static_cast<uint8_t>(real_slot);
             TEST(Synth::validate_instrument_bank(&real_bank.bank));
-            static char    real_text[64 * 1024];
+            const std::unique_ptr<FixedArray<char, 64 * 1024>> real_text_storage =
+                std::make_unique<FixedArray<char, 64 * 1024>>();
+            char (&real_text)[64 * 1024] = real_text_storage->elements;
             const uint32_t real_text_len =
                 Synth::encode_instrument_json(real_text, sizeof(real_text), &real_installed, &real_bank.bank);
             TEST(real_text_len > 0);
-            static Synth::Instrument         real_back;
-            static Synth::EnvelopeDescriptor real_back_envs[Synth::instrument_max_envelopes];
-            static Synth::LFODescriptor      real_back_lfos[Synth::instrument_max_lfos];
-            uint32_t                         real_back_env_count = 0;
-            uint32_t                         real_back_lfo_count = 0;
+            Synth::Instrument         real_back                                       = {};
+            Synth::EnvelopeDescriptor real_back_envs[Synth::instrument_max_envelopes] = {};
+            Synth::LFODescriptor      real_back_lfos[Synth::instrument_max_lfos]      = {};
+            uint32_t                  real_back_env_count                             = 0;
+            uint32_t                  real_back_lfo_count                             = 0;
             TEST(Synth::decode_instrument_json(real_text,
                                                real_text_len,
                                                &real_back,
@@ -23596,11 +24862,11 @@ int main()
         {
             const char* const swing_doc =
                 "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\",\"volume\":{\"envelope\":{\"points\":[{\"time_seconds\":0,\"level\":-1.0},{\"time_seconds\":0.1,\"level\":5.0}]}}}]}";
-            static Synth::Instrument         swing_instr;
-            static Synth::EnvelopeDescriptor swing_envs[Synth::instrument_max_envelopes];
-            static Synth::LFODescriptor      swing_lfos[Synth::instrument_max_lfos];
-            uint32_t                         swing_env_count = 999;
-            uint32_t                         swing_lfo_count = 999;
+            Synth::Instrument         swing_instr                                 = {};
+            Synth::EnvelopeDescriptor swing_envs[Synth::instrument_max_envelopes] = {};
+            Synth::LFODescriptor      swing_lfos[Synth::instrument_max_lfos]      = {};
+            uint32_t                  swing_env_count                             = 999;
+            uint32_t                  swing_lfo_count                             = 999;
             TEST(Synth::decode_instrument_json(swing_doc,
                                                static_cast<uint32_t>(strlen(swing_doc)),
                                                &swing_instr,
@@ -23613,7 +24879,9 @@ int main()
             TEST(swing_envs[0].min_max_delta == 6.0f / 65535.0f);
             TEST(swing_envs[0].points[0].value == 0);
             TEST(swing_envs[0].points[1].value == 0xFFFF);
-            static Synth::InstrumentEditorBank swing_bank;
+            const std::unique_ptr<Synth::InstrumentEditorBank> swing_bank_storage =
+                std::make_unique<Synth::InstrumentEditorBank>();
+            Synth::InstrumentEditorBank& swing_bank = *swing_bank_storage;
             memset(static_cast<void*>(&swing_bank), 0, sizeof(swing_bank));
             uint16_t swing_env_ids[Synth::instrument_max_envelopes];
             uint16_t swing_lfo_ids[Synth::instrument_max_lfos];
@@ -23642,12 +24910,16 @@ int main()
             // A moved canonical, envelope or LFO node survives export,
             // encode, decode and mapping, and lands back on the decoded node
             // identity rather than on a numeric descriptor id.
-            static Synth::InstrumentEditorBank  ex_bank;
-            static Synth::Instrument            ex_instr;
-            static Synth::InstrumentGraphLayout ex_portable[max_portable_records];
-            static Synth::GraphNodeLayout       ex_mapped[max_portable_records];
-            static Synth::GraphNodeLayout       ex_replay_mapped[max_portable_records];
-            static char                         ex_text[clipboard_capacity];
+            const std::unique_ptr<Synth::InstrumentEditorBank> ex_bank_storage =
+                std::make_unique<Synth::InstrumentEditorBank>();
+            Synth::InstrumentEditorBank&                                ex_bank  = *ex_bank_storage;
+            Synth::Instrument                                           ex_instr = {};
+            Synth::InstrumentGraphLayout                                ex_portable[max_portable_records]      = {};
+            Synth::GraphNodeLayout                                      ex_mapped[max_portable_records]        = {};
+            Synth::GraphNodeLayout                                      ex_replay_mapped[max_portable_records] = {};
+            const std::unique_ptr<FixedArray<char, clipboard_capacity>> ex_text_storage =
+                std::make_unique<FixedArray<char, clipboard_capacity>>();
+            char (&ex_text)[clipboard_capacity] = ex_text_storage->elements;
             build_clipboard_zone_fixture(&ex_bank, &ex_instr);
             TEST(Synth::validate_instrument_bank(&ex_bank.bank));
             TEST(Sculptor::validate_editor_metadata(ex_bank));
@@ -23715,8 +24987,8 @@ int main()
             // Exporter refusals leave the record sink and the count untouched: a
             // destination outside the zone table, and a capacity that cannot hold what
             // this zone exports.
-            static Synth::InstrumentGraphLayout ex_refuse[max_portable_records];
-            static Synth::InstrumentGraphLayout ex_refuse_sentinel[max_portable_records];
+            Synth::InstrumentGraphLayout ex_refuse[max_portable_records]          = {};
+            Synth::InstrumentGraphLayout ex_refuse_sentinel[max_portable_records] = {};
             memset(static_cast<void*>(ex_refuse), 0x5A, sizeof(ex_refuse));
             memset(static_cast<void*>(ex_refuse_sentinel), 0x5A, sizeof(ex_refuse_sentinel));
             constexpr uint32_t ex_refuse_capacity = sizeof(ex_refuse) / sizeof(ex_refuse[0]);
@@ -23796,8 +25068,8 @@ int main()
                                     Synth::ModSource::none,
                                     Synth::ModSource::none,
                                     1);
-                static Synth::InstrumentGraphLayout ex_alloc_out[max_portable_records];
-                uint32_t                            ex_alloc_count = max_portable_records;
+                Synth::InstrumentGraphLayout ex_alloc_out[max_portable_records] = {};
+                uint32_t                     ex_alloc_count                     = max_portable_records;
                 TEST(Sculptor::encode_instrument_graph_layout(ex_instr,
                                                               ex_alloc.bank,
                                                               ex_alloc,
@@ -23810,20 +25082,23 @@ int main()
                 TEST(memcmp(ex_alloc_out, ex_portable, ex_portable_count * sizeof(ex_portable[0])) == 0);
             }
 
-            static Synth::InstrumentEditorBank ex_before;
-            ex_before             = ex_bank;
-            const uint32_t ex_len = Synth::encode_instrument_json(ex_text,
-                                                                  sizeof(ex_text),
-                                                                  &ex_instr,
-                                                                  &ex_bank.bank,
-                                                                  ex_portable,
-                                                                  ex_portable_count);
+            const std::unique_ptr<Synth::InstrumentEditorBank> ex_before_storage =
+                std::make_unique<Synth::InstrumentEditorBank>();
+            Synth::InstrumentEditorBank& ex_before = *ex_before_storage;
+            ex_before                              = ex_bank;
+            const uint32_t ex_len                  = Synth::encode_instrument_json(ex_text,
+                                                                                   sizeof(ex_text),
+                                                                                   &ex_instr,
+                                                                                   &ex_bank.bank,
+                                                                                   ex_portable,
+                                                                                   ex_portable_count);
             TEST(ex_len > 0);
             TEST(ex_len + 1 <= clipboard_capacity);
             TEST(strstr(ex_text, "\"graph_layout\":[") != nullptr);
             TEST(memcmp(&ex_bank, &ex_before, sizeof(ex_bank)) == 0);
 
-            static ClipboardDecode ex_dec;
+            const std::unique_ptr<ClipboardDecode> ex_dec_storage = std::make_unique<ClipboardDecode>();
+            ClipboardDecode&                       ex_dec         = *ex_dec_storage;
             fill_clipboard_sentinels(&ex_dec);
             TEST(decode_clipboard(&ex_dec, ex_text, max_portable_records));
             TEST(ex_dec.layout_count == ex_portable_count);
@@ -23885,9 +25160,9 @@ int main()
             // a kind that is not clipboard data.  Both leave the mapped sink and the count
             // untouched; the same sink accepts the resolved records above, so only the
             // locator differs.
-            static Synth::InstrumentGraphLayout mp_records[1];
-            static Synth::GraphNodeLayout       mp_sink[4];
-            static Synth::GraphNodeLayout       mp_sink_sentinel[4];
+            Synth::InstrumentGraphLayout mp_records[1]       = {};
+            Synth::GraphNodeLayout       mp_sink[4]          = {};
+            Synth::GraphNodeLayout       mp_sink_sentinel[4] = {};
             memset(static_cast<void*>(mp_sink), 0x5A, sizeof(mp_sink));
             memset(static_cast<void*>(mp_sink_sentinel), 0x5A, sizeof(mp_sink_sentinel));
             constexpr uint32_t mp_capacity = sizeof(mp_sink) / sizeof(mp_sink[0]);
@@ -23924,7 +25199,9 @@ int main()
             // Re-encoding the decoded instrument with the decoded-relative records
             // and mapping the result again reproduces the same editor records: the
             // portable identity is stable across a second copy.
-            static Synth::InstrumentBank ex_replay_bank;
+            const std::unique_ptr<Synth::InstrumentBank> ex_replay_bank_storage =
+                std::make_unique<Synth::InstrumentBank>();
+            Synth::InstrumentBank& ex_replay_bank = *ex_replay_bank_storage;
             memset(static_cast<void*>(&ex_replay_bank), 0, sizeof(ex_replay_bank));
             uint16_t ex_env_ids[Synth::instrument_max_envelopes];
             uint16_t ex_lfo_ids[Synth::instrument_max_lfos];
@@ -23936,17 +25213,20 @@ int main()
             if (ex_decoded) {
                 TEST(Synth::remap_envelopes(&ex_replay_bank, ex_dec.envs, ex_dec.env_count, ex_env_ids));
                 TEST(Synth::remap_lfos(&ex_replay_bank, ex_dec.lfos, ex_dec.lfo_count, ex_lfo_ids));
-                static Synth::Instrument ex_replay_instr;
+                Synth::Instrument ex_replay_instr = {};
                 Synth::remap_instrument(ex_dec.instr, ex_env_ids, ex_lfo_ids, &ex_replay_instr);
-                static char    ex_replay_text[clipboard_capacity];
-                const uint32_t ex_replay_len = Synth::encode_instrument_json(ex_replay_text,
-                                                                             sizeof(ex_replay_text),
-                                                                             &ex_replay_instr,
-                                                                             &ex_replay_bank,
-                                                                             ex_dec.layout,
-                                                                             ex_dec.layout_count);
+                const std::unique_ptr<FixedArray<char, clipboard_capacity>> ex_replay_text_storage =
+                    std::make_unique<FixedArray<char, clipboard_capacity>>();
+                char (&ex_replay_text)[clipboard_capacity] = ex_replay_text_storage->elements;
+                const uint32_t ex_replay_len               = Synth::encode_instrument_json(ex_replay_text,
+                                                                                           sizeof(ex_replay_text),
+                                                                                           &ex_replay_instr,
+                                                                                           &ex_replay_bank,
+                                                                                           ex_dec.layout,
+                                                                                           ex_dec.layout_count);
                 TEST(ex_replay_len > 0);
-                static ClipboardDecode ex_replay_dec;
+                const std::unique_ptr<ClipboardDecode> ex_replay_dec_storage = std::make_unique<ClipboardDecode>();
+                ClipboardDecode&                       ex_replay_dec         = *ex_replay_dec_storage;
                 fill_clipboard_sentinels(&ex_replay_dec);
                 TEST(decode_clipboard(&ex_replay_dec, ex_replay_text, max_portable_records));
                 TEST(ex_replay_dec.layout_count == ex_dec.layout_count);
@@ -23972,9 +25252,13 @@ int main()
             // The reclaim map is capacity-wide and exact: one entry per LFO slot,
             // zeros for freed and never-occupied ids, one-based ids for survivors,
             // the same map the surviving bindings are remapped with.
-            static Synth::InstrumentEditorBank rm_bank;
-            static Synth::InstrumentEditorBank rm_parallel;
-            static uint16_t                    rm_map[Synth::max_lfos];
+            const std::unique_ptr<Synth::InstrumentEditorBank> rm_bank_storage =
+                std::make_unique<Synth::InstrumentEditorBank>();
+            Synth::InstrumentEditorBank&                       rm_bank = *rm_bank_storage;
+            const std::unique_ptr<Synth::InstrumentEditorBank> rm_parallel_storage =
+                std::make_unique<Synth::InstrumentEditorBank>();
+            Synth::InstrumentEditorBank& rm_parallel             = *rm_parallel_storage;
+            uint16_t                     rm_map[Synth::max_lfos] = {};
             make_valid_bank(rm_bank.bank); // instrument 0 owns envelope 1 and LFO 1
             for (uint32_t extra = 0; extra < 2; extra++) {
                 const uint32_t added = rm_bank.bank.lfos.allocate();
@@ -24018,11 +25302,14 @@ int main()
             // Descriptor identity, not descriptor id. Two byte-identical envelopes
             // intern into one decoded descriptor, so a record naming either source
             // cell addresses that one node.
-            static char       it_text[clipboard_capacity];
+            const std::unique_ptr<FixedArray<char, clipboard_capacity>> it_text_storage =
+                std::make_unique<FixedArray<char, clipboard_capacity>>();
+            char (&it_text)[clipboard_capacity] = it_text_storage->elements;
             const char* const it_records =
                 "{\"kind\":1,\"layer\":0,\"target\":1,\"x\":33.5,\"y\":4.5,\"width\":0,\"height\":0}";
             build_layout_doc(it_text, sizeof(it_text), clipboard_alias_head, it_records);
-            static ClipboardDecode it_dec;
+            const std::unique_ptr<ClipboardDecode> it_dec_storage = std::make_unique<ClipboardDecode>();
+            ClipboardDecode&                       it_dec         = *it_dec_storage;
             fill_clipboard_sentinels(&it_dec);
             TEST(decode_clipboard(&it_dec, it_text, max_portable_records));
             TEST(it_dec.env_count == 1); // interning really happened
@@ -24030,8 +25317,8 @@ int main()
             TEST(it_dec.instr.layers[0].targets[Synth::mod_pitch].envelope_desc_id == 1);
             TEST(it_dec.layout_count == 1);
 
-            static Synth::GraphNodeLayout it_mapped[max_portable_records];
-            uint32_t                      it_mapped_count = max_portable_records;
+            Synth::GraphNodeLayout it_mapped[max_portable_records] = {};
+            uint32_t               it_mapped_count                 = max_portable_records;
             TEST(Sculptor::map_instrument_graph_layout(it_dec.instr,
                                                        it_dec.envs,
                                                        it_dec.env_count,
@@ -24052,19 +25339,22 @@ int main()
                 "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\",\"duty_a\":"
                 "{\"envelope\":{\"points\":[{\"time_seconds\":0,\"level\":0.25},"
                 "{\"time_seconds\":0.5,\"level\":0.75}],\"sustain_start\":0,\"sustain_end\":1}}}],";
-            static char dm_text[clipboard_capacity];
+            const std::unique_ptr<FixedArray<char, clipboard_capacity>> dm_text_storage =
+                std::make_unique<FixedArray<char, clipboard_capacity>>();
+            char (&dm_text)[clipboard_capacity] = dm_text_storage->elements;
             build_layout_doc(dm_text,
                              sizeof(dm_text),
                              dm_head,
                              "{\"kind\":1,\"layer\":0,\"target\":3,\"x\":10,\"y\":10,\"width\":0,\"height\":0}");
-            static ClipboardDecode dm_attempt;
+            const std::unique_ptr<ClipboardDecode> dm_attempt_storage = std::make_unique<ClipboardDecode>();
+            ClipboardDecode&                       dm_attempt         = *dm_attempt_storage;
             fill_clipboard_sentinels(&dm_attempt);
             TEST(decode_clipboard(&dm_attempt, dm_text, max_portable_records));
             TEST(dm_attempt.env_count == 1);
             TEST(dm_attempt.instr.layers[0].targets[Synth::mod_duty0].envelope_desc_id == 1);
             TEST(dm_attempt.layout_count == 1);
-            static Synth::GraphNodeLayout dm_mapped[max_portable_records];
-            uint32_t                      dm_mapped_count = max_portable_records;
+            Synth::GraphNodeLayout dm_mapped[max_portable_records] = {};
+            uint32_t               dm_mapped_count                 = max_portable_records;
             TEST(Sculptor::map_instrument_graph_layout(dm_attempt.instr,
                                                        dm_attempt.envs,
                                                        dm_attempt.env_count,
@@ -24087,10 +25377,10 @@ int main()
             // pairs keep distinct instances and positions, capacity exactly
             // matching the resolved count succeeds, and every refusal leaves
             // the output array and count untouched.
-            static Synth::EnvelopeDescriptor nm_envs[3];
-            static Synth::EnvelopeDescriptor nm_dec_envs[2];
-            static Synth::Instrument         nm_src;
-            static Synth::Instrument         nm_dec;
+            Synth::EnvelopeDescriptor nm_envs[3]     = {};
+            Synth::EnvelopeDescriptor nm_dec_envs[2] = {};
+            Synth::Instrument         nm_src         = {};
+            Synth::Instrument         nm_dec         = {};
             memset(static_cast<void*>(nm_envs), 0, sizeof(nm_envs));
             for (uint32_t e = 0; e < 3; e++) {
                 Synth::EnvelopeDescriptor& source_env = nm_envs[e];
@@ -24122,18 +25412,18 @@ int main()
 
             // Envelope aliases with two saved source layouts cannot collapse losslessly:
             // both source records resolve to the one decoded envelope node.
-            static Synth::InstrumentGraphLayout nm_env_records[2];
+            Synth::InstrumentGraphLayout nm_env_records[2] = {};
             memset(static_cast<void*>(nm_env_records), 0, sizeof(nm_env_records));
-            nm_env_records[0].kind   = Synth::instrument_graph_layout_envelope;
-            nm_env_records[0].layer  = 1; // A'
-            nm_env_records[0].target = static_cast<uint8_t>(Synth::mod_volume);
-            nm_env_records[0].x      = 33.5f;
-            nm_env_records[1].kind   = Synth::instrument_graph_layout_envelope;
-            nm_env_records[1].layer  = 0; // A
-            nm_env_records[1].target = static_cast<uint8_t>(Synth::mod_volume);
-            nm_env_records[1].x      = 11.5f;
-            static Synth::InstrumentGraphLayout nm_env_out[4];
-            uint32_t                            nm_env_count = 4;
+            nm_env_records[0].kind                     = Synth::instrument_graph_layout_envelope;
+            nm_env_records[0].layer                    = 1; // A'
+            nm_env_records[0].target                   = static_cast<uint8_t>(Synth::mod_volume);
+            nm_env_records[0].x                        = 33.5f;
+            nm_env_records[1].kind                     = Synth::instrument_graph_layout_envelope;
+            nm_env_records[1].layer                    = 0; // A
+            nm_env_records[1].target                   = static_cast<uint8_t>(Synth::mod_volume);
+            nm_env_records[1].x                        = 11.5f;
+            Synth::InstrumentGraphLayout nm_env_out[4] = {};
+            uint32_t                     nm_env_count  = 4;
             TEST(! Sculptor::normalize_instrument_graph_layout(nm_src,
                                                                nm_envs,
                                                                3,
@@ -24177,7 +25467,7 @@ int main()
             // and its own source pair. Capacity exactly equal to the resolved count
             // succeeds; one slot less refuses with the record sink and the count
             // untouched.
-            static Synth::LFODescriptor na_lfos[1];
+            Synth::LFODescriptor na_lfos[1] = {};
             memset(static_cast<void*>(na_lfos), 0, sizeof(na_lfos));
             na_lfos[0].wave          = Synth::WaveType::sine_wave;
             na_lfos[0].duty          = 0x40;
@@ -24185,10 +25475,10 @@ int main()
             na_lfos[0].min_value     = -1.0f;
             na_lfos[0].min_max_delta = 2.0f;
 
-            static Synth::Instrument na_src;
-            static Synth::Instrument na_dec;
-            na_src.layer_count = 2;
-            na_dec.layer_count = 2;
+            Synth::Instrument na_src = {};
+            Synth::Instrument na_dec = {};
+            na_src.layer_count       = 2;
+            na_dec.layer_count       = 2;
             for (uint32_t layer = 0; layer < 2; layer++) {
                 na_src.layers[layer].osc_type[0] = Synth::WaveType::sine_wave;
                 na_dec.layers[layer].osc_type[0] = Synth::WaveType::sine_wave;
@@ -24212,7 +25502,7 @@ int main()
             TEST(validate_standalone_model(na_src, nullptr, 0, na_lfos, 1));
             TEST(validate_standalone_model(na_dec, nullptr, 0, na_lfos, 1));
 
-            static Synth::InstrumentGraphLayout na_pair_records[2];
+            Synth::InstrumentGraphLayout na_pair_records[2] = {};
             memset(static_cast<void*>(na_pair_records), 0, sizeof(na_pair_records));
             for (uint32_t i = 0; i < 2; i++) {
                 na_pair_records[i].kind   = Synth::instrument_graph_layout_lfo;
@@ -24225,9 +25515,9 @@ int main()
                 na_pair_records[i].x = 7.0f + static_cast<float>(i);
                 na_pair_records[i].y = -3.5f - static_cast<float>(i);
             }
-            static Synth::InstrumentGraphLayout na_pair_out[4];
-            constexpr uint32_t                  na_pair_capacity = sizeof(na_pair_out) / sizeof(na_pair_out[0]);
-            uint32_t                            na_pair_count    = na_pair_capacity;
+            Synth::InstrumentGraphLayout na_pair_out[4]   = {};
+            constexpr uint32_t           na_pair_capacity = sizeof(na_pair_out) / sizeof(na_pair_out[0]);
+            uint32_t                     na_pair_count    = na_pair_capacity;
             TEST(Sculptor::normalize_instrument_graph_layout(na_src,
                                                              nullptr,
                                                              0,
@@ -24260,9 +25550,9 @@ int main()
                 TEST(na_pair_out[record_index].depth_source == static_cast<uint8_t>(Synth::ModSource::aftertouch));
                 TEST(na_pair_out[record_index].rate_source == static_cast<uint8_t>(Synth::ModSource::pitch_bend));
             }
-            static Synth::InstrumentGraphLayout na_exact[2];
-            constexpr uint32_t                  na_exact_capacity = sizeof(na_exact) / sizeof(na_exact[0]);
-            uint32_t                            na_exact_count    = na_exact_capacity;
+            Synth::InstrumentGraphLayout na_exact[2]       = {};
+            constexpr uint32_t           na_exact_capacity = sizeof(na_exact) / sizeof(na_exact[0]);
+            uint32_t                     na_exact_count    = na_exact_capacity;
             TEST(Sculptor::normalize_instrument_graph_layout(na_src,
                                                              nullptr,
                                                              0,
@@ -24280,8 +25570,8 @@ int main()
                                                              &na_exact_count));
             TEST(na_exact_count == 2);
             TEST(memcmp(na_exact, na_pair_out, sizeof(na_exact)) == 0);
-            static Synth::InstrumentGraphLayout na_refuse[1];
-            static Synth::InstrumentGraphLayout na_refuse_sentinel;
+            Synth::InstrumentGraphLayout na_refuse[1]       = {};
+            Synth::InstrumentGraphLayout na_refuse_sentinel = {};
             memset(static_cast<void*>(na_refuse), 0x5A, sizeof(na_refuse));
             memset(static_cast<void*>(&na_refuse_sentinel), 0x5A, sizeof(na_refuse_sentinel));
             uint32_t na_refuse_count = 1;
@@ -24309,8 +25599,8 @@ int main()
             // leak a partially translated record into the clipboard.  A
             // kind-1/2 locator the model cannot resolve is dropped instead
             // (the removed cutoff targets), pinned by the drop tests below.
-            static Synth::InstrumentGraphLayout nr_out[2];
-            static Synth::InstrumentGraphLayout nr_out_sentinel[2];
+            Synth::InstrumentGraphLayout nr_out[2]          = {};
+            Synth::InstrumentGraphLayout nr_out_sentinel[2] = {};
             memset(static_cast<void*>(nr_out), 0x5A, sizeof(nr_out));
             memset(static_cast<void*>(nr_out_sentinel), 0x5A, sizeof(nr_out_sentinel));
             constexpr uint32_t nr_capacity = sizeof(nr_out) / sizeof(nr_out[0]);
@@ -24352,8 +25642,8 @@ int main()
             // An output array smaller than the normalized records refuses the whole
             // normalization instead of truncating it: these two records normalize into
             // two slots when there is room for them.
-            static Synth::InstrumentGraphLayout nr_tight[1];
-            static Synth::InstrumentGraphLayout nr_tight_sentinel[1];
+            Synth::InstrumentGraphLayout nr_tight[1]          = {};
+            Synth::InstrumentGraphLayout nr_tight_sentinel[1] = {};
             memset(static_cast<void*>(nr_tight), 0x5A, sizeof(nr_tight));
             memset(static_cast<void*>(nr_tight_sentinel), 0x5A, sizeof(nr_tight_sentinel));
             uint32_t nr_tight_count = 1;
@@ -24380,12 +25670,17 @@ int main()
             // Every malformed portable record and every locator the model cannot
             // resolve refuses the whole document with all outputs intact. The
             // baseline document decodes, so each refusal is the record's doing.
-            static char            ml_text[clipboard_capacity];
-            static ClipboardDecode ml_attempt;
-            static ClipboardDecode ml_sentinel;
+            const std::unique_ptr<FixedArray<char, clipboard_capacity>> ml_text_storage =
+                std::make_unique<FixedArray<char, clipboard_capacity>>();
+            char (&ml_text)[clipboard_capacity]                        = ml_text_storage->elements;
+            const std::unique_ptr<ClipboardDecode> ml_attempt_storage  = std::make_unique<ClipboardDecode>();
+            ClipboardDecode&                       ml_attempt          = *ml_attempt_storage;
+            const std::unique_ptr<ClipboardDecode> ml_sentinel_storage = std::make_unique<ClipboardDecode>();
+            ClipboardDecode&                       ml_sentinel         = *ml_sentinel_storage;
             fill_clipboard_sentinels(&ml_sentinel);
             build_layout_doc(ml_text, sizeof(ml_text), clipboard_doc_head, clipboard_doc_records);
-            static ClipboardDecode ml_baseline;
+            const std::unique_ptr<ClipboardDecode> ml_baseline_storage = std::make_unique<ClipboardDecode>();
+            ClipboardDecode&                       ml_baseline         = *ml_baseline_storage;
             fill_clipboard_sentinels(&ml_baseline);
             TEST(decode_clipboard(&ml_baseline, ml_text, max_portable_records));
             TEST(ml_baseline.layout_count == 3);
@@ -24416,7 +25711,9 @@ int main()
                   "duplicate portable locator" },
             };
             for (uint32_t i = 0; i < sizeof(rejections) / sizeof(rejections[0]); i++) {
-                static char ml_bad[clipboard_capacity];
+                const std::unique_ptr<FixedArray<char, clipboard_capacity>> ml_bad_storage =
+                    std::make_unique<FixedArray<char, clipboard_capacity>>();
+                char (&ml_bad)[clipboard_capacity] = ml_bad_storage->elements;
                 build_layout_doc(ml_bad, sizeof(ml_bad), clipboard_doc_head, rejections[i].records);
                 fill_clipboard_sentinels(&ml_attempt);
                 if (decode_clipboard(&ml_attempt, ml_bad, max_portable_records)) {
@@ -24438,7 +25735,9 @@ int main()
                   "dropped source out of range" },
             };
             for (uint32_t i = 0; i < sizeof(drops) / sizeof(drops[0]); i++) {
-                static char ml_bad[clipboard_capacity];
+                const std::unique_ptr<FixedArray<char, clipboard_capacity>> ml_bad_storage =
+                    std::make_unique<FixedArray<char, clipboard_capacity>>();
+                char (&ml_bad)[clipboard_capacity] = ml_bad_storage->elements;
                 build_layout_doc(ml_bad, sizeof(ml_bad), clipboard_doc_head, drops[i].records);
                 fill_clipboard_sentinels(&ml_attempt);
                 TEST(decode_clipboard(&ml_attempt, ml_bad, max_portable_records));
@@ -24449,8 +25748,11 @@ int main()
             // An unregistered record kind is skipped by the generic decode path:
             // it neither refuses the document nor counts toward the portable
             // capacity.
-            static char            ml_skip[clipboard_capacity];
-            static ClipboardDecode ml_skip_attempt;
+            const std::unique_ptr<FixedArray<char, clipboard_capacity>> ml_skip_storage =
+                std::make_unique<FixedArray<char, clipboard_capacity>>();
+            char (&ml_skip)[clipboard_capacity]                            = ml_skip_storage->elements;
+            const std::unique_ptr<ClipboardDecode> ml_skip_attempt_storage = std::make_unique<ClipboardDecode>();
+            ClipboardDecode&                       ml_skip_attempt         = *ml_skip_attempt_storage;
             fill_clipboard_sentinels(&ml_skip_attempt);
             build_layout_doc(ml_skip,
                              sizeof(ml_skip),
@@ -24461,12 +25763,15 @@ int main()
             // Two distinct locators resolve to one interned descriptor: refused.
             // The one-record form of the same document decodes, so the refusal
             // is the second locator's.
-            static char ml_alias[clipboard_capacity];
+            const std::unique_ptr<FixedArray<char, clipboard_capacity>> ml_alias_storage =
+                std::make_unique<FixedArray<char, clipboard_capacity>>();
+            char (&ml_alias)[clipboard_capacity] = ml_alias_storage->elements;
             build_layout_doc(ml_alias,
                              sizeof(ml_alias),
                              clipboard_alias_head,
                              "{\"kind\":1,\"layer\":0,\"target\":0,\"x\":1,\"y\":1,\"width\":0,\"height\":0}");
-            static ClipboardDecode ml_alias_baseline;
+            const std::unique_ptr<ClipboardDecode> ml_alias_baseline_storage = std::make_unique<ClipboardDecode>();
+            ClipboardDecode&                       ml_alias_baseline         = *ml_alias_baseline_storage;
             fill_clipboard_sentinels(&ml_alias_baseline);
             TEST(decode_clipboard(&ml_alias_baseline, ml_alias, max_portable_records));
             TEST(ml_alias_baseline.env_count == 1);
@@ -24483,8 +25788,10 @@ int main()
             // model can express, so any extra record also repeats a locator: what this
             // pins is the refusal and the untouched outputs, not which check ran first.
             {
-                static char ml_over[clipboard_capacity];
-                uint32_t    ml_over_pos = 0;
+                const std::unique_ptr<FixedArray<char, clipboard_capacity>> ml_over_storage =
+                    std::make_unique<FixedArray<char, clipboard_capacity>>();
+                char (&ml_over)[clipboard_capacity] = ml_over_storage->elements;
+                uint32_t ml_over_pos                = 0;
                 ml_over_pos += static_cast<uint32_t>(snprintf(ml_over + ml_over_pos,
                                                               sizeof(ml_over) - ml_over_pos,
                                                               "%s\"graph_layout\":[",
@@ -24512,14 +25819,18 @@ int main()
 
         {
             // Codec compatibility in both directions.
-            static char    cc_doc[clipboard_capacity];
+            const std::unique_ptr<FixedArray<char, clipboard_capacity>> cc_doc_storage =
+                std::make_unique<FixedArray<char, clipboard_capacity>>();
+            char (&cc_doc)[clipboard_capacity] = cc_doc_storage->elements;
             const uint32_t cc_len = build_layout_doc(cc_doc, sizeof(cc_doc), clipboard_doc_head, clipboard_doc_records);
             TEST(cc_len > 0);
 
             // A valid nonempty layout is refused by the legacy decoder rather than
             // silently dropped, with every legacy output left at its sentinel.
-            static ClipboardDecode cc_legacy_attempt;
-            static ClipboardDecode cc_legacy_sentinel;
+            const std::unique_ptr<ClipboardDecode> cc_legacy_attempt_storage  = std::make_unique<ClipboardDecode>();
+            ClipboardDecode&                       cc_legacy_attempt          = *cc_legacy_attempt_storage;
+            const std::unique_ptr<ClipboardDecode> cc_legacy_sentinel_storage = std::make_unique<ClipboardDecode>();
+            ClipboardDecode&                       cc_legacy_sentinel         = *cc_legacy_sentinel_storage;
             fill_clipboard_sentinels(&cc_legacy_attempt);
             fill_clipboard_sentinels(&cc_legacy_sentinel);
             TEST(! Synth::decode_instrument_json(cc_doc,
@@ -24534,20 +25845,23 @@ int main()
             // An absent or empty field decodes; the new decoder accepts both and
             // reports a zero layout count through a null layout output while the
             // descriptor counts stay actual.
-            static char cc_empty[clipboard_capacity];
+            const std::unique_ptr<FixedArray<char, clipboard_capacity>> cc_empty_storage =
+                std::make_unique<FixedArray<char, clipboard_capacity>>();
+            char (&cc_empty)[clipboard_capacity] = cc_empty_storage->elements;
             build_layout_doc(cc_empty, sizeof(cc_empty), clipboard_doc_head, "");
-            static ClipboardDecode cc_empty_dec;
+            const std::unique_ptr<ClipboardDecode> cc_empty_dec_storage = std::make_unique<ClipboardDecode>();
+            ClipboardDecode&                       cc_empty_dec         = *cc_empty_dec_storage;
             fill_clipboard_sentinels(&cc_empty_dec);
             TEST(decode_clipboard(&cc_empty_dec, cc_empty, max_portable_records));
             TEST(cc_empty_dec.layout_count == 0);
             TEST(cc_empty_dec.env_count == 2);
             TEST(cc_empty_dec.lfo_count == 1);
-            uint32_t                         cc_null_env  = 999;
-            uint32_t                         cc_null_lfo  = 999;
-            uint32_t                         cc_null_rows = 999;
-            static Synth::Instrument         cc_null_instr;
-            static Synth::EnvelopeDescriptor cc_null_envs[Synth::instrument_max_envelopes];
-            static Synth::LFODescriptor      cc_null_lfos[Synth::instrument_max_lfos];
+            uint32_t                  cc_null_env                                   = 999;
+            uint32_t                  cc_null_lfo                                   = 999;
+            uint32_t                  cc_null_rows                                  = 999;
+            Synth::Instrument         cc_null_instr                                 = {};
+            Synth::EnvelopeDescriptor cc_null_envs[Synth::instrument_max_envelopes] = {};
+            Synth::LFODescriptor      cc_null_lfos[Synth::instrument_max_lfos]      = {};
             TEST(Synth::decode_instrument_json(cc_empty,
                                                static_cast<uint32_t>(strlen(cc_empty)),
                                                &cc_null_instr,
@@ -24564,7 +25878,9 @@ int main()
 
             // The same with a descriptorless instrument.
             const char* const cc_bare = "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\"}],";
-            static char       cc_bare_doc[clipboard_capacity];
+            const std::unique_ptr<FixedArray<char, clipboard_capacity>> cc_bare_doc_storage =
+                std::make_unique<FixedArray<char, clipboard_capacity>>();
+            char (&cc_bare_doc)[clipboard_capacity] = cc_bare_doc_storage->elements;
             build_layout_doc(cc_bare_doc, sizeof(cc_bare_doc), cc_bare, "");
             uint32_t cc_bare_env  = 999;
             uint32_t cc_bare_lfo  = 999;
@@ -24585,13 +25901,13 @@ int main()
 
             // Exact layout capacity succeeds; one slot short fails with every output
             // untouched, as does a nonempty layout with no output at all.
-            static Synth::InstrumentGraphLayout cc_out[max_portable_records];
-            static Synth::Instrument            cc_out_instr;
-            static Synth::EnvelopeDescriptor    cc_out_envs[Synth::instrument_max_envelopes];
-            static Synth::LFODescriptor         cc_out_lfos[Synth::instrument_max_lfos];
-            uint32_t                            cc_out_env  = 999;
-            uint32_t                            cc_out_lfo  = 999;
-            uint32_t                            cc_out_rows = 999;
+            Synth::InstrumentGraphLayout cc_out[max_portable_records]                 = {};
+            Synth::Instrument            cc_out_instr                                 = {};
+            Synth::EnvelopeDescriptor    cc_out_envs[Synth::instrument_max_envelopes] = {};
+            Synth::LFODescriptor         cc_out_lfos[Synth::instrument_max_lfos]      = {};
+            uint32_t                     cc_out_env                                   = 999;
+            uint32_t                     cc_out_lfo                                   = 999;
+            uint32_t                     cc_out_rows                                  = 999;
             TEST(Synth::decode_instrument_json(cc_doc,
                                                cc_len,
                                                &cc_out_instr,
@@ -24606,8 +25922,10 @@ int main()
             TEST(cc_out_env == 2);
             TEST(cc_out_lfo == 1);
 
-            static ClipboardDecode cc_short;
-            static ClipboardDecode cc_short_sentinel;
+            const std::unique_ptr<ClipboardDecode> cc_short_storage          = std::make_unique<ClipboardDecode>();
+            ClipboardDecode&                       cc_short                  = *cc_short_storage;
+            const std::unique_ptr<ClipboardDecode> cc_short_sentinel_storage = std::make_unique<ClipboardDecode>();
+            ClipboardDecode&                       cc_short_sentinel         = *cc_short_sentinel_storage;
             fill_clipboard_sentinels(&cc_short);
             fill_clipboard_sentinels(&cc_short_sentinel);
             TEST(! Synth::decode_instrument_json(cc_doc,
@@ -24639,13 +25957,16 @@ int main()
             // capacity and the parser token bound, never assumed. Seven layers, an
             // eight-point envelope and a distinct LFO on every projected target, and
             // the full portable record set.
-            static Synth::InstrumentBank        mf_bank;
-            static Synth::Instrument            mf_instr;
-            static Synth::InstrumentGraphLayout mf_records[max_portable_records];
-            static Synth::GraphNodeLayout       mf_mapped[max_portable_records];
-            static char                         mf_text[clipboard_capacity];
-            const uint32_t                      mf_count = build_clipboard_max_fixture(&mf_bank, &mf_instr, mf_records);
-            const uint32_t                      mf_slot  = mf_bank.instruments.allocate();
+            const std::unique_ptr<Synth::InstrumentBank> mf_bank_storage = std::make_unique<Synth::InstrumentBank>();
+            Synth::InstrumentBank&                       mf_bank         = *mf_bank_storage;
+            Synth::Instrument                            mf_instr        = {};
+            Synth::InstrumentGraphLayout                 mf_records[max_portable_records] = {};
+            Synth::GraphNodeLayout                       mf_mapped[max_portable_records]  = {};
+            const std::unique_ptr<FixedArray<char, clipboard_capacity>> mf_text_storage =
+                std::make_unique<FixedArray<char, clipboard_capacity>>();
+            char (&mf_text)[clipboard_capacity] = mf_text_storage->elements;
+            const uint32_t mf_count             = build_clipboard_max_fixture(&mf_bank, &mf_instr, mf_records);
+            const uint32_t mf_slot              = mf_bank.instruments.allocate();
             TEST(mf_slot != pool_no_slot);
             mf_bank.instruments.entries[mf_slot]   = mf_instr;
             mf_bank.channel_enabled[0]             = 1;
@@ -24678,15 +25999,20 @@ int main()
             // unspecified on failure, so only the return value is asserted; the identical
             // call at the exact capacity then succeeds with the measured length, which is
             // what shows the short call is the capacity and not the document.
-            static char mf_short_text[clipboard_capacity];
+            const std::unique_ptr<FixedArray<char, clipboard_capacity>> mf_short_text_storage =
+                std::make_unique<FixedArray<char, clipboard_capacity>>();
+            char (&mf_short_text)[clipboard_capacity] = mf_short_text_storage->elements;
             TEST(Synth::encode_instrument_json(mf_short_text, mf_len, &mf_instr, &mf_bank, mf_records, mf_count) == 0);
-            static char mf_exact_text[clipboard_capacity];
+            const std::unique_ptr<FixedArray<char, clipboard_capacity>> mf_exact_text_storage =
+                std::make_unique<FixedArray<char, clipboard_capacity>>();
+            char (&mf_exact_text)[clipboard_capacity] = mf_exact_text_storage->elements;
             TEST(Synth::encode_instrument_json(mf_exact_text, mf_len + 1, &mf_instr, &mf_bank, mf_records, mf_count) ==
                  mf_len);
             TEST(mf_tokens > 0);
             TEST(static_cast<uint32_t>(mf_tokens) <= clipboard_token_bound);
 
-            static ClipboardDecode mf_dec;
+            const std::unique_ptr<ClipboardDecode> mf_dec_storage = std::make_unique<ClipboardDecode>();
+            ClipboardDecode&                       mf_dec         = *mf_dec_storage;
             fill_clipboard_sentinels(&mf_dec);
             TEST(decode_clipboard(&mf_dec, mf_text, max_portable_records));
             TEST(mf_dec.layout_count == max_portable_records);
@@ -24714,8 +26040,10 @@ int main()
             }
 
             // One slot short of the record count refuses the whole document.
-            static ClipboardDecode mf_short;
-            static ClipboardDecode mf_sentinel;
+            const std::unique_ptr<ClipboardDecode> mf_short_storage    = std::make_unique<ClipboardDecode>();
+            ClipboardDecode&                       mf_short            = *mf_short_storage;
+            const std::unique_ptr<ClipboardDecode> mf_sentinel_storage = std::make_unique<ClipboardDecode>();
+            ClipboardDecode&                       mf_sentinel         = *mf_sentinel_storage;
             fill_clipboard_sentinels(&mf_short);
             fill_clipboard_sentinels(&mf_sentinel);
             TEST(decode_clipboard(&mf_short, mf_text, max_portable_records - 1) == false);
@@ -24724,7 +26052,9 @@ int main()
             // The same instrument through the legacy entry point is smaller by the
             // record array alone and carries an empty layout: the layout array is the
             // only addition to the document.
-            static char    mf_legacy[clipboard_capacity];
+            const std::unique_ptr<FixedArray<char, clipboard_capacity>> mf_legacy_storage =
+                std::make_unique<FixedArray<char, clipboard_capacity>>();
+            char (&mf_legacy)[clipboard_capacity] = mf_legacy_storage->elements;
             const uint32_t mf_legacy_len =
                 Synth::encode_instrument_json(mf_legacy, sizeof(mf_legacy), &mf_instr, &mf_bank);
             TEST(mf_legacy_len > 0);
@@ -24753,9 +26083,12 @@ int main()
         {
             // Import with no generator wiring at all: canonical records resolve, and
             // surplus records naming nodes the instrument does not have are refused.
-            const char* const      nw_head = "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\"}],";
-            static char            nw_text[clipboard_capacity];
-            static ClipboardDecode nw_dec;
+            const char* const nw_head = "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\"}],";
+            const std::unique_ptr<FixedArray<char, clipboard_capacity>> nw_text_storage =
+                std::make_unique<FixedArray<char, clipboard_capacity>>();
+            char (&nw_text)[clipboard_capacity]                   = nw_text_storage->elements;
+            const std::unique_ptr<ClipboardDecode> nw_dec_storage = std::make_unique<ClipboardDecode>();
+            ClipboardDecode&                       nw_dec         = *nw_dec_storage;
             fill_clipboard_sentinels(&nw_dec);
             build_layout_doc(nw_text,
                              sizeof(nw_text),
@@ -24766,8 +26099,8 @@ int main()
             TEST(nw_dec.layout_count == 2);
             TEST(nw_dec.env_count == 0);
             TEST(nw_dec.lfo_count == 0);
-            static Synth::GraphNodeLayout nw_mapped[8];
-            uint32_t                      nw_mapped_count = 8;
+            Synth::GraphNodeLayout nw_mapped[8]    = {};
+            uint32_t               nw_mapped_count = 8;
             TEST(Sculptor::map_instrument_graph_layout(nw_dec.instr,
                                                        nw_dec.envs,
                                                        nw_dec.env_count,
@@ -24788,10 +26121,14 @@ int main()
                 "{\"kind\":0,\"canonical_index\":99,\"x\":1,\"y\":2,\"width\":0,\"height\":0}", // past the bound
             };
             for (uint32_t i = 0; i < sizeof(surplus) / sizeof(surplus[0]); i++) {
-                static char nw_bad[clipboard_capacity];
+                const std::unique_ptr<FixedArray<char, clipboard_capacity>> nw_bad_storage =
+                    std::make_unique<FixedArray<char, clipboard_capacity>>();
+                char (&nw_bad)[clipboard_capacity] = nw_bad_storage->elements;
                 build_layout_doc(nw_bad, sizeof(nw_bad), nw_head, surplus[i]);
-                static ClipboardDecode nw_attempt;
-                static ClipboardDecode nw_sentinel;
+                const std::unique_ptr<ClipboardDecode> nw_attempt_storage  = std::make_unique<ClipboardDecode>();
+                ClipboardDecode&                       nw_attempt          = *nw_attempt_storage;
+                const std::unique_ptr<ClipboardDecode> nw_sentinel_storage = std::make_unique<ClipboardDecode>();
+                ClipboardDecode&                       nw_sentinel         = *nw_sentinel_storage;
                 fill_clipboard_sentinels(&nw_sentinel);
                 fill_clipboard_sentinels(&nw_attempt);
                 TEST(decode_clipboard(&nw_attempt, nw_bad, max_portable_records) == false);
@@ -24800,8 +26137,11 @@ int main()
             // A kind-1 locator the decoded model cannot resolve is dropped by the
             // mapping/normalization entry points, not by the decode: the record is
             // retained raw here and skipped (with a console note) later.
-            static char            nw_drop[clipboard_capacity];
-            static ClipboardDecode nw_drop_attempt;
+            const std::unique_ptr<FixedArray<char, clipboard_capacity>> nw_drop_storage =
+                std::make_unique<FixedArray<char, clipboard_capacity>>();
+            char (&nw_drop)[clipboard_capacity]                            = nw_drop_storage->elements;
+            const std::unique_ptr<ClipboardDecode> nw_drop_attempt_storage = std::make_unique<ClipboardDecode>();
+            ClipboardDecode&                       nw_drop_attempt         = *nw_drop_attempt_storage;
             build_layout_doc(nw_drop,
                              sizeof(nw_drop),
                              nw_head,
@@ -24817,8 +26157,10 @@ int main()
         // points (logged, never reinterpreted), and the recognized volume
         // record survives with its position and uid.
         {
-            static char old_doc[clipboard_capacity];
-            const int   old_written =
+            const std::unique_ptr<FixedArray<char, clipboard_capacity>> old_doc_storage =
+                std::make_unique<FixedArray<char, clipboard_capacity>>();
+            char (&old_doc)[clipboard_capacity] = old_doc_storage->elements;
+            const int old_written =
                 snprintf(old_doc,
                          sizeof(old_doc),
                          "{\"format\":\"synth-instrument-v1\",\"note_skew_semitones\":0,\"layer_skew_semitones\":0,"
@@ -24833,13 +26175,13 @@ int main()
                          "{\"kind\":1,\"layer\":0,\"target\":0,\"x\":14,\"y\":15,\"width\":0,\"height\":0}]}",
                          static_cast<unsigned>(Synth::ModSource::velocity));
             TEST(old_written > 0 && static_cast<uint32_t>(old_written) < sizeof(old_doc));
-            static Synth::Instrument            old_instr;
-            static Synth::EnvelopeDescriptor    old_envs[Synth::instrument_max_envelopes];
-            static Synth::LFODescriptor         old_lfos[Synth::instrument_max_lfos];
-            static Synth::InstrumentGraphLayout old_layout[max_portable_records];
-            uint32_t                            old_env_count    = 999;
-            uint32_t                            old_lfo_count    = 999;
-            uint32_t                            old_layout_count = 999;
+            Synth::Instrument            old_instr                                 = {};
+            Synth::EnvelopeDescriptor    old_envs[Synth::instrument_max_envelopes] = {};
+            Synth::LFODescriptor         old_lfos[Synth::instrument_max_lfos]      = {};
+            Synth::InstrumentGraphLayout old_layout[max_portable_records]          = {};
+            uint32_t                     old_env_count                             = 999;
+            uint32_t                     old_lfo_count                             = 999;
+            uint32_t                     old_layout_count                          = 999;
             TEST(Synth::decode_instrument_json_for_domain(old_doc,
                                                           static_cast<uint32_t>(old_written),
                                                           &old_instr,
@@ -24852,8 +26194,8 @@ int main()
                                                           &old_layout_count,
                                                           Synth::InstrumentJsonDomain::validated_bank));
             TEST(old_layout_count == 3); // the raw records survive the decode
-            static Synth::GraphNodeLayout old_mapped[4];
-            uint32_t                      old_mapped_count = 4;
+            Synth::GraphNodeLayout old_mapped[4]    = {};
+            uint32_t               old_mapped_count = 4;
             TEST(Sculptor::map_instrument_graph_layout(old_instr,
                                                        old_envs,
                                                        old_env_count,
@@ -24868,8 +26210,8 @@ int main()
             TEST(old_mapped[0].kind == 1);
             TEST(old_mapped[0].x == 14.0f && old_mapped[0].y == 15.0f);
             TEST(old_mapped[0].uid != 0);
-            static Synth::InstrumentGraphLayout old_normalized[4];
-            uint32_t                            old_normalized_count = 4;
+            Synth::InstrumentGraphLayout old_normalized[4]    = {};
+            uint32_t                     old_normalized_count = 4;
             TEST(Sculptor::normalize_instrument_graph_layout(old_instr,
                                                              old_envs,
                                                              old_env_count,
@@ -24889,8 +26231,10 @@ int main()
             TEST(old_normalized[0].x == 14.0f && old_normalized[0].y == 15.0f);
             // Control: a spread envelope makes target 7 live again, and the
             // same record now resolves onto the spread node.
-            static char new_doc[clipboard_capacity];
-            const int   new_written =
+            const std::unique_ptr<FixedArray<char, clipboard_capacity>> new_doc_storage =
+                std::make_unique<FixedArray<char, clipboard_capacity>>();
+            char (&new_doc)[clipboard_capacity] = new_doc_storage->elements;
+            const int new_written =
                 snprintf(new_doc,
                          sizeof(new_doc),
                          "{\"format\":\"synth-instrument-v1\",\"note_skew_semitones\":0,\"layer_skew_semitones\":0,"
@@ -24900,13 +26244,13 @@ int main()
                          "\"graph_layout\":["
                          "{\"kind\":1,\"layer\":0,\"target\":7,\"x\":21,\"y\":22,\"width\":0,\"height\":0}]}");
             TEST(new_written > 0 && static_cast<uint32_t>(new_written) < sizeof(new_doc));
-            static Synth::Instrument            new_instr;
-            static Synth::EnvelopeDescriptor    new_envs[Synth::instrument_max_envelopes];
-            static Synth::LFODescriptor         new_lfos[Synth::instrument_max_lfos];
-            static Synth::InstrumentGraphLayout new_layout[max_portable_records];
-            uint32_t                            new_env_count    = 999;
-            uint32_t                            new_lfo_count    = 999;
-            uint32_t                            new_layout_count = 999;
+            Synth::Instrument            new_instr                                 = {};
+            Synth::EnvelopeDescriptor    new_envs[Synth::instrument_max_envelopes] = {};
+            Synth::LFODescriptor         new_lfos[Synth::instrument_max_lfos]      = {};
+            Synth::InstrumentGraphLayout new_layout[max_portable_records]          = {};
+            uint32_t                     new_env_count                             = 999;
+            uint32_t                     new_lfo_count                             = 999;
+            uint32_t                     new_layout_count                          = 999;
             TEST(Synth::decode_instrument_json_for_domain(new_doc,
                                                           static_cast<uint32_t>(new_written),
                                                           &new_instr,
@@ -24919,8 +26263,8 @@ int main()
                                                           &new_layout_count,
                                                           Synth::InstrumentJsonDomain::validated_bank));
             TEST(new_env_count == 1 && new_layout_count == 1);
-            static Synth::GraphNodeLayout new_mapped[4];
-            uint32_t                      new_mapped_count = 4;
+            Synth::GraphNodeLayout new_mapped[4]    = {};
+            uint32_t               new_mapped_count = 4;
             TEST(Sculptor::map_instrument_graph_layout(new_instr,
                                                        new_envs,
                                                        new_env_count,
@@ -24937,9 +26281,9 @@ int main()
             TEST(new_mapped[0].uid != 0);
             // Direct-struct controls (JSON bypassed): an unknown kind and a
             // non-empty record name stay fatal through the direct API.
-            static Synth::GraphNodeLayout       control_out[4];
-            uint32_t                            control_count = 4;
-            static Synth::InstrumentGraphLayout control_records[1];
+            Synth::GraphNodeLayout       control_out[4]     = {};
+            uint32_t                     control_count      = 4;
+            Synth::InstrumentGraphLayout control_records[1] = {};
             memset(static_cast<void*>(control_records), 0, sizeof(control_records));
             control_records[0].kind   = 3;
             control_records[0].layer  = 0;
@@ -24987,8 +26331,10 @@ int main()
                                                                &old_normalized_count));
             // Source pin: the skip is logged by both mapping entry points.
             {
-                static char graph_src[256 * 1024];
-                FILE* const graph_file = fopen("sculptor/sculptor_osc_graph.cpp", "rb");
+                const std::unique_ptr<FixedArray<char, 256 * 1024>> graph_src_storage =
+                    std::make_unique<FixedArray<char, 256 * 1024>>();
+                char (&graph_src)[256 * 1024] = graph_src_storage->elements;
+                FILE* const graph_file        = fopen("sculptor/sculptor_osc_graph.cpp", "rb");
                 TEST(graph_file != nullptr);
                 if (graph_file) {
                     const size_t graph_got = fread(graph_src, 1, sizeof(graph_src) - 1, graph_file);
@@ -25011,8 +26357,10 @@ int main()
             // mask row: every other root, name, record, effect layout and channel
             // effect title survives, and surviving effect LFO titles follow the
             // actual descriptor renumbering.
-            static Synth::InstrumentEditorBank rp_bank;
-            static Synth::Instrument           rp_instr;
+            const std::unique_ptr<Synth::InstrumentEditorBank> rp_bank_storage =
+                std::make_unique<Synth::InstrumentEditorBank>();
+            Synth::InstrumentEditorBank& rp_bank  = *rp_bank_storage;
+            Synth::Instrument            rp_instr = {};
             build_clipboard_zone_fixture(&rp_bank, &rp_instr);
             TEST(rp_bank.bank.instruments.allocate() == 1);
             rp_bank.bank.instruments.entries[1]         = rp_instr;
@@ -25067,16 +26415,23 @@ int main()
             TEST(Synth::validate_instrument_bank(&rp_bank.bank));
             TEST(Sculptor::validate_editor_metadata(rp_bank));
 
-            static char            rp_doc[clipboard_capacity];
-            static ClipboardDecode rp_dec;
+            const std::unique_ptr<FixedArray<char, clipboard_capacity>> rp_doc_storage =
+                std::make_unique<FixedArray<char, clipboard_capacity>>();
+            char (&rp_doc)[clipboard_capacity]                    = rp_doc_storage->elements;
+            const std::unique_ptr<ClipboardDecode> rp_dec_storage = std::make_unique<ClipboardDecode>();
+            ClipboardDecode&                       rp_dec         = *rp_dec_storage;
             build_layout_doc(rp_doc, sizeof(rp_doc), clipboard_doc_head, clipboard_doc_records);
             fill_clipboard_sentinels(&rp_dec);
             TEST(decode_clipboard(&rp_dec, rp_doc, max_portable_records));
 
-            static Synth::InstrumentEditorBank rp_candidate;
+            const std::unique_ptr<Synth::InstrumentEditorBank> rp_candidate_storage =
+                std::make_unique<Synth::InstrumentEditorBank>();
+            Synth::InstrumentEditorBank& rp_candidate = *rp_candidate_storage;
             memset(static_cast<void*>(&rp_candidate), 0x5A, sizeof(rp_candidate));
-            static Synth::InstrumentEditorBank rp_source_before;
-            rp_source_before       = rp_bank;
+            const std::unique_ptr<Synth::InstrumentEditorBank> rp_source_before_storage =
+                std::make_unique<Synth::InstrumentEditorBank>();
+            Synth::InstrumentEditorBank& rp_source_before = *rp_source_before_storage;
+            rp_source_before                              = rp_bank;
             const bool rp_replaced = Sculptor::replace_zone_instrument_candidate(rp_bank,
                                                                                  0,
                                                                                  0,
@@ -25167,23 +26522,29 @@ int main()
         {
             // An editor bank whose own metadata is invalid is refused before any
             // candidate is written: the paste must not launder a broken source.
-            static Synth::InstrumentEditorBank md_bank;
-            static Synth::Instrument           md_instr;
+            const std::unique_ptr<Synth::InstrumentEditorBank> md_bank_storage =
+                std::make_unique<Synth::InstrumentEditorBank>();
+            Synth::InstrumentEditorBank& md_bank  = *md_bank_storage;
+            Synth::Instrument            md_instr = {};
             build_clipboard_zone_fixture(&md_bank, &md_instr);
             add_detached_record(&md_bank, 0, 0, 4, 0, 1.0f, 2.0f, Synth::ModSource::none, Synth::ModSource::none, 0);
             // An effect record without a node title cannot key its node.
             TEST(md_bank.graph_layout[md_bank.graph_layout_count - 1].name[0] == 0);
             TEST(! Sculptor::validate_editor_metadata(md_bank));
 
-            static Synth::Instrument md_bare;
+            Synth::Instrument md_bare     = {};
             md_bare                       = {};
             md_bare.layer_count           = 1;
             md_bare.layers[0].osc_type[0] = Synth::WaveType::sine_wave;
             md_bare.layers[0].osc_type[1] = Synth::WaveType::sine_wave;
             md_bare.layers[0].mod_ratio   = 1.0f;
 
-            static Synth::InstrumentEditorBank md_candidate;
-            static Synth::InstrumentEditorBank md_sentinel;
+            const std::unique_ptr<Synth::InstrumentEditorBank> md_candidate_storage =
+                std::make_unique<Synth::InstrumentEditorBank>();
+            Synth::InstrumentEditorBank&                       md_candidate = *md_candidate_storage;
+            const std::unique_ptr<Synth::InstrumentEditorBank> md_sentinel_storage =
+                std::make_unique<Synth::InstrumentEditorBank>();
+            Synth::InstrumentEditorBank& md_sentinel = *md_sentinel_storage;
             memset(static_cast<void*>(&md_candidate), 0x5A, sizeof(md_candidate));
             memset(static_cast<void*>(&md_sentinel), 0x5A, sizeof(md_sentinel));
             TEST(! Sculptor::replace_zone_instrument_candidate(md_bank,
@@ -25206,7 +26567,7 @@ int main()
             // A descriptorless instrument pasted over the sole zone of a channel is
             // valid with no descriptor at all, and the uniquely rooted destination
             // slot is reused in place.
-            static Synth::Instrument pl_bare;
+            Synth::Instrument pl_bare                                = {};
             pl_bare                                                  = {};
             pl_bare.layer_count                                      = 1;
             pl_bare.layers[0].osc_type[0]                            = Synth::WaveType::sine_wave;
@@ -25215,16 +26576,22 @@ int main()
             pl_bare.layers[0].mod_ratio                              = 1.0f;
             pl_bare.layers[0].targets[Synth::mod_panning].base_value = 0.5f;
 
-            static Synth::InstrumentEditorBank pl_bank;
-            static Synth::Instrument           pl_instr;
+            const std::unique_ptr<Synth::InstrumentEditorBank> pl_bank_storage =
+                std::make_unique<Synth::InstrumentEditorBank>();
+            Synth::InstrumentEditorBank& pl_bank  = *pl_bank_storage;
+            Synth::Instrument            pl_instr = {};
             build_clipboard_zone_fixture(&pl_bank, &pl_instr);
             TEST(Synth::validate_instrument_bank(&pl_bank.bank));
             TEST(Sculptor::validate_editor_metadata(pl_bank));
 
-            static Synth::InstrumentEditorBank pl_candidate;
+            const std::unique_ptr<Synth::InstrumentEditorBank> pl_candidate_storage =
+                std::make_unique<Synth::InstrumentEditorBank>();
+            Synth::InstrumentEditorBank& pl_candidate = *pl_candidate_storage;
             memset(static_cast<void*>(&pl_candidate), 0x5A, sizeof(pl_candidate));
-            static Synth::InstrumentEditorBank pl_before;
-            pl_before = pl_bank;
+            const std::unique_ptr<Synth::InstrumentEditorBank> pl_before_storage =
+                std::make_unique<Synth::InstrumentEditorBank>();
+            Synth::InstrumentEditorBank& pl_before = *pl_before_storage;
+            pl_before                              = pl_bank;
             TEST(Sculptor::replace_zone_instrument_candidate(pl_bank,
                                                              0,
                                                              0,
@@ -25248,7 +26615,9 @@ int main()
 
             // Destination arguments outside the bank refuse with the candidate
             // untouched.
-            static Synth::InstrumentEditorBank pl_sentinel;
+            const std::unique_ptr<Synth::InstrumentEditorBank> pl_sentinel_storage =
+                std::make_unique<Synth::InstrumentEditorBank>();
+            Synth::InstrumentEditorBank& pl_sentinel = *pl_sentinel_storage;
             memset(static_cast<void*>(&pl_sentinel), 0x5A, sizeof(pl_sentinel));
             memset(static_cast<void*>(&pl_candidate), 0x5A, sizeof(pl_candidate));
             TEST(! Sculptor::replace_zone_instrument_candidate(pl_bank,
@@ -25283,7 +26652,9 @@ int main()
             // uniquely rooted destination succeeds by reusing its own slot while a
             // shared destination must refuse: the pool is full before reclaim, and an
             // allocated-but-unrooted slot is not free.
-            static Synth::InstrumentEditorBank fp_bank;
+            const std::unique_ptr<Synth::InstrumentEditorBank> fp_bank_storage =
+                std::make_unique<Synth::InstrumentEditorBank>();
+            Synth::InstrumentEditorBank& fp_bank = *fp_bank_storage;
             memset(static_cast<void*>(&fp_bank), 0, sizeof(fp_bank));
             for (uint32_t i = 0; i < Synth::max_instruments; i++) {
                 TEST(fp_bank.bank.instruments.allocate() == i);
@@ -25296,14 +26667,16 @@ int main()
             fp_bank.bank.channel_zones[0][0].instrument = 7;
             TEST(Synth::validate_instrument_bank(&fp_bank.bank));
 
-            static Synth::Instrument fp_bare;
+            Synth::Instrument fp_bare     = {};
             fp_bare                       = {};
             fp_bare.layer_count           = 1;
             fp_bare.layers[0].osc_type[0] = Synth::WaveType::noise_wave;
             fp_bare.layers[0].osc_type[1] = Synth::WaveType::noise_wave;
             fp_bare.layers[0].mod_ratio   = 1.0f;
 
-            static Synth::InstrumentEditorBank fp_candidate;
+            const std::unique_ptr<Synth::InstrumentEditorBank> fp_candidate_storage =
+                std::make_unique<Synth::InstrumentEditorBank>();
+            Synth::InstrumentEditorBank& fp_candidate = *fp_candidate_storage;
             memset(static_cast<void*>(&fp_candidate), 0x5A, sizeof(fp_candidate));
             TEST(Sculptor::replace_zone_instrument_candidate(fp_bank,
                                                              0,
@@ -25325,14 +26698,20 @@ int main()
             // Same full pool, shared destination: no free or unallocated slot exists
             // before reclaim, so the transaction refuses even though reclaim would
             // later free unrooted slots.
-            static Synth::InstrumentEditorBank fs_bank;
+            const std::unique_ptr<Synth::InstrumentEditorBank> fs_bank_storage =
+                std::make_unique<Synth::InstrumentEditorBank>();
+            Synth::InstrumentEditorBank& fs_bank        = *fs_bank_storage;
             fs_bank                                     = fp_bank;
             fs_bank.bank.channel_zones[0][1].start_note = 65;
             fs_bank.bank.channel_zones[0][1].instrument = 7;
             TEST(Synth::validate_instrument_bank(&fs_bank.bank));
 
-            static Synth::InstrumentEditorBank fs_candidate;
-            static Synth::InstrumentEditorBank fs_sentinel;
+            const std::unique_ptr<Synth::InstrumentEditorBank> fs_candidate_storage =
+                std::make_unique<Synth::InstrumentEditorBank>();
+            Synth::InstrumentEditorBank&                       fs_candidate = *fs_candidate_storage;
+            const std::unique_ptr<Synth::InstrumentEditorBank> fs_sentinel_storage =
+                std::make_unique<Synth::InstrumentEditorBank>();
+            Synth::InstrumentEditorBank& fs_sentinel = *fs_sentinel_storage;
             memset(static_cast<void*>(&fs_candidate), 0x5A, sizeof(fs_candidate));
             memset(static_cast<void*>(&fs_sentinel), 0x5A, sizeof(fs_sentinel));
             TEST(! Sculptor::replace_zone_instrument_candidate(fs_bank,
@@ -25352,7 +26731,9 @@ int main()
         {
             // A shared destination with a free slot gets its own placeholder, so the
             // other zone keeps playing the instrument it always played.
-            static Synth::InstrumentEditorBank sh_bank;
+            const std::unique_ptr<Synth::InstrumentEditorBank> sh_bank_storage =
+                std::make_unique<Synth::InstrumentEditorBank>();
+            Synth::InstrumentEditorBank& sh_bank = *sh_bank_storage;
             memset(static_cast<void*>(&sh_bank), 0, sizeof(sh_bank));
             TEST(sh_bank.bank.instruments.allocate() == 0);
             TEST(sh_bank.bank.instruments.allocate() == 1);
@@ -25371,14 +26752,16 @@ int main()
             TEST(Synth::validate_instrument_bank(&sh_bank.bank));
             const Synth::Instrument sh_old = sh_bank.bank.instruments.entries[0];
 
-            static Synth::Instrument sh_bare;
+            Synth::Instrument sh_bare     = {};
             sh_bare                       = {};
             sh_bare.layer_count           = 1;
             sh_bare.layers[0].osc_type[0] = Synth::WaveType::noise_wave;
             sh_bare.layers[0].osc_type[1] = Synth::WaveType::noise_wave;
             sh_bare.layers[0].mod_ratio   = 1.0f;
 
-            static Synth::InstrumentEditorBank sh_candidate;
+            const std::unique_ptr<Synth::InstrumentEditorBank> sh_candidate_storage =
+                std::make_unique<Synth::InstrumentEditorBank>();
+            Synth::InstrumentEditorBank& sh_candidate = *sh_candidate_storage;
             memset(static_cast<void*>(&sh_candidate), 0x5A, sizeof(sh_candidate));
             TEST(Sculptor::replace_zone_instrument_candidate(sh_bank,
                                                              0,
@@ -25405,18 +26788,22 @@ int main()
                 // install is refused: the source bank keeps its bytes and the candidate keeps
                 // its sentinel. The same bank accepts a bare instrument with no references, so
                 // the refusal is the reference and not the bank.
-                static Synth::InstrumentEditorBank vr_bank;
-                static Synth::Instrument           vr_instr;
+                const std::unique_ptr<Synth::InstrumentEditorBank> vr_bank_storage =
+                    std::make_unique<Synth::InstrumentEditorBank>();
+                Synth::InstrumentEditorBank& vr_bank  = *vr_bank_storage;
+                Synth::Instrument            vr_instr = {};
                 build_clipboard_zone_fixture(&vr_bank, &vr_instr);
 
-                static Synth::Instrument vr_bare;
+                Synth::Instrument vr_bare     = {};
                 vr_bare                       = {};
                 vr_bare.layer_count           = 1;
                 vr_bare.layers[0].osc_type[0] = Synth::WaveType::noise_wave;
                 vr_bare.layers[0].mod_ratio   = 1.0f;
                 TEST(validate_standalone_model(vr_bare, nullptr, 0, nullptr, 0));
 
-                static Synth::InstrumentEditorBank vr_ok;
+                const std::unique_ptr<Synth::InstrumentEditorBank> vr_ok_storage =
+                    std::make_unique<Synth::InstrumentEditorBank>();
+                Synth::InstrumentEditorBank& vr_ok = *vr_ok_storage;
                 memset(static_cast<void*>(&vr_ok), 0x5A, sizeof(vr_ok));
                 TEST(Sculptor::replace_zone_instrument_candidate(vr_bank,
                                                                  0,
@@ -25430,16 +26817,22 @@ int main()
                                                                  0,
                                                                  &vr_ok));
 
-                static Synth::InstrumentEditorBank vr_candidate;
-                static Synth::InstrumentEditorBank vr_sentinel;
+                const std::unique_ptr<Synth::InstrumentEditorBank> vr_candidate_storage =
+                    std::make_unique<Synth::InstrumentEditorBank>();
+                Synth::InstrumentEditorBank&                       vr_candidate = *vr_candidate_storage;
+                const std::unique_ptr<Synth::InstrumentEditorBank> vr_sentinel_storage =
+                    std::make_unique<Synth::InstrumentEditorBank>();
+                Synth::InstrumentEditorBank& vr_sentinel = *vr_sentinel_storage;
                 memset(static_cast<void*>(&vr_candidate), 0x5A, sizeof(vr_candidate));
                 memset(static_cast<void*>(&vr_sentinel), 0x5A, sizeof(vr_sentinel));
-                static Synth::InstrumentEditorBank vr_before;
-                vr_before = vr_bank;
+                const std::unique_ptr<Synth::InstrumentEditorBank> vr_before_storage =
+                    std::make_unique<Synth::InstrumentEditorBank>();
+                Synth::InstrumentEditorBank& vr_before = *vr_before_storage;
+                vr_before                              = vr_bank;
 
                 // Envelope id past the descriptor pool, with no descriptors installed.
-                static Synth::Instrument vr_bad_env;
-                vr_bad_env = vr_bare;
+                Synth::Instrument vr_bad_env = {};
+                vr_bad_env                   = vr_bare;
                 vr_bad_env.layers[0].targets[Synth::mod_volume].envelope_desc_id =
                     static_cast<uint16_t>(Synth::instrument_max_envelopes + 1);
                 TEST(! validate_standalone_model(vr_bad_env, nullptr, 0, nullptr, 0));
@@ -25458,13 +26851,13 @@ int main()
                 TEST(memcmp(&vr_bank, &vr_before, sizeof(vr_before)) == 0);
 
                 // LFO id past the descriptors that come with the instrument.
-                static Synth::LFODescriptor vr_lfo;
-                vr_lfo               = {};
-                vr_lfo.wave          = Synth::WaveType::sine_wave;
-                vr_lfo.period_ms     = 500;
-                vr_lfo.min_value     = 0.0f;
-                vr_lfo.min_max_delta = 1.0f;
-                static Synth::Instrument vr_bad_lfo;
+                Synth::LFODescriptor vr_lfo                                 = {};
+                vr_lfo                                                      = {};
+                vr_lfo.wave                                                 = Synth::WaveType::sine_wave;
+                vr_lfo.period_ms                                            = 500;
+                vr_lfo.min_value                                            = 0.0f;
+                vr_lfo.min_max_delta                                        = 1.0f;
+                Synth::Instrument vr_bad_lfo                                = {};
                 vr_bad_lfo                                                  = vr_bare;
                 vr_bad_lfo.layers[0].targets[Synth::mod_volume].lfo_desc_id = 2;
                 TEST(! validate_standalone_model(vr_bad_lfo, nullptr, 0, &vr_lfo, 1));
@@ -25485,7 +26878,7 @@ int main()
                 // A layout record the decoded instrument cannot resolve at all (kind 0
                 // past the projection) still refuses the candidate: only kinds 1/2 are
                 // droppable removed-target debris.
-                static Synth::InstrumentGraphLayout vr_records[1];
+                Synth::InstrumentGraphLayout vr_records[1] = {};
                 memset(static_cast<void*>(vr_records), 0, sizeof(vr_records));
                 vr_records[0].kind            = Synth::instrument_graph_layout_canonical;
                 vr_records[0].canonical_index = 9;
@@ -25519,7 +26912,9 @@ int main()
             // original enabled flag is restored in the candidate. The replacement is
             // observably different from the shared instrument, and the other zone keeps
             // its own instrument bytes, name, layout records and missing-sum row.
-            static Synth::InstrumentEditorBank dc_bank;
+            const std::unique_ptr<Synth::InstrumentEditorBank> dc_bank_storage =
+                std::make_unique<Synth::InstrumentEditorBank>();
+            Synth::InstrumentEditorBank& dc_bank = *dc_bank_storage;
             memset(static_cast<void*>(&dc_bank), 0, sizeof(dc_bank));
             TEST(dc_bank.bank.instruments.allocate() == 0);
             TEST(dc_bank.bank.instruments.allocate() == 1);
@@ -25556,9 +26951,11 @@ int main()
             dc_bank.phantom_count                        = 1;
             const Synth::GraphNodeLayout dc_other_record = dc_bank.graph_layout[dc_bank.graph_layout_count - 1];
             // Validate the complete privately enabled state before disabling it.
-            static Synth::InstrumentEditorBank dc_enabled;
-            dc_enabled                         = dc_bank;
-            dc_enabled.bank.channel_enabled[0] = 1;
+            const std::unique_ptr<Synth::InstrumentEditorBank> dc_enabled_storage =
+                std::make_unique<Synth::InstrumentEditorBank>();
+            Synth::InstrumentEditorBank& dc_enabled = *dc_enabled_storage;
+            dc_enabled                              = dc_bank;
+            dc_enabled.bank.channel_enabled[0]      = 1;
             TEST(Synth::validate_instrument_bank(&dc_enabled.bank));
             TEST(Sculptor::validate_editor_metadata(dc_enabled));
             dc_bank.bank.channel_enabled[0] = 0;
@@ -25568,7 +26965,7 @@ int main()
             const uint32_t          dc_other_records = Sculptor::count_detached_records(dc_bank, 0, 1);
             const uint32_t          dc_record_count  = dc_bank.graph_layout_count;
 
-            static Synth::Instrument dc_bare;
+            Synth::Instrument dc_bare                               = {};
             dc_bare                                                 = {};
             dc_bare.layer_count                                     = 1;
             dc_bare.layers[0].osc_type[0]                           = Synth::WaveType::noise_wave;
@@ -25576,7 +26973,9 @@ int main()
             dc_bare.layers[0].mod_ratio                             = 1.0f;
             dc_bare.layers[0].targets[Synth::mod_volume].base_value = 0.75f;
 
-            static Synth::InstrumentEditorBank dc_candidate;
+            const std::unique_ptr<Synth::InstrumentEditorBank> dc_candidate_storage =
+                std::make_unique<Synth::InstrumentEditorBank>();
+            Synth::InstrumentEditorBank& dc_candidate = *dc_candidate_storage;
             memset(static_cast<void*>(&dc_candidate), 0x5A, sizeof(dc_candidate));
             const bool dc_replaced = Sculptor::replace_zone_instrument_candidate(dc_bank,
                                                                                  0,
@@ -25618,13 +27017,19 @@ int main()
             // A destination table that is only invalid once the channel is enabled
             // (a zone referencing an instrument the pool does not hold) refuses the
             // whole transaction.
-            static Synth::InstrumentEditorBank dt_bank;
+            const std::unique_ptr<Synth::InstrumentEditorBank> dt_bank_storage =
+                std::make_unique<Synth::InstrumentEditorBank>();
+            Synth::InstrumentEditorBank& dt_bank        = *dt_bank_storage;
             dt_bank                                     = dc_bank;
             dt_bank.bank.channel_zones[0][1].instrument = 200;
             TEST(Synth::validate_instrument_bank(&dt_bank.bank)); // disabled: the table is skipped
 
-            static Synth::InstrumentEditorBank dt_candidate;
-            static Synth::InstrumentEditorBank dt_sentinel;
+            const std::unique_ptr<Synth::InstrumentEditorBank> dt_candidate_storage =
+                std::make_unique<Synth::InstrumentEditorBank>();
+            Synth::InstrumentEditorBank&                       dt_candidate = *dt_candidate_storage;
+            const std::unique_ptr<Synth::InstrumentEditorBank> dt_sentinel_storage =
+                std::make_unique<Synth::InstrumentEditorBank>();
+            Synth::InstrumentEditorBank& dt_sentinel = *dt_sentinel_storage;
             memset(static_cast<void*>(&dt_candidate), 0x5A, sizeof(dt_candidate));
             memset(static_cast<void*>(&dt_sentinel), 0x5A, sizeof(dt_sentinel));
             TEST(! Sculptor::replace_zone_instrument_candidate(dt_bank,
@@ -25644,8 +27049,10 @@ int main()
         {
             // This exercises measurement-pool overflow, not production decoder
             // rejection order: a well-formed document exceeds the measurement bound.
-            static char ov_doc[clipboard_capacity];
-            uint32_t    ov_pos = 0;
+            const std::unique_ptr<FixedArray<char, clipboard_capacity>> ov_doc_storage =
+                std::make_unique<FixedArray<char, clipboard_capacity>>();
+            char (&ov_doc)[clipboard_capacity] = ov_doc_storage->elements;
+            uint32_t ov_pos                    = 0;
             ov_pos += static_cast<uint32_t>(snprintf(ov_doc + ov_pos, sizeof(ov_doc) - ov_pos, "{\"a\":["));
             for (uint32_t t = 0; t < clipboard_token_bound && ov_pos + 4 < sizeof(ov_doc); t++) {
                 ov_pos +=
@@ -25656,7 +27063,7 @@ int main()
             TEST(count_clipboard_tokens(ov_doc, ov_pos) == -1);
             // A document that fits the bound still measures, so the -1 above is a bound
             // result and not a truncation artifact of the generated prefix.
-            static const char ov_small_doc[] = "{\"a\":[0,1,2]}";
+            char ov_small_doc[] = "{\"a\":[0,1,2]}";
             TEST(count_clipboard_tokens(ov_small_doc, static_cast<uint32_t>(strlen(ov_small_doc))) > 0);
         }
 
@@ -25680,7 +27087,8 @@ int main()
         }
 
         // The default instrument round-trips too.
-        static Synth::InstrumentBank default_bank;
+        const std::unique_ptr<Synth::InstrumentBank> default_bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       default_bank         = *default_bank_storage;
         memset(static_cast<void*>(&default_bank), 0, sizeof(default_bank));
         TEST(Synth::init_default_channel(&default_bank, 0));
         const uint32_t default_encoded_len = Synth::encode_instrument_json(encoded,
@@ -25690,11 +27098,11 @@ int main()
         TEST(default_encoded_len > 0);
         // New clipboard output includes graph_layout even when no node moved.
         TEST(strstr(encoded, "\"graph_layout\":[]") != nullptr);
-        static Synth::Instrument         default_decoded;
-        static Synth::EnvelopeDescriptor default_envs[Synth::instrument_max_envelopes];
-        static Synth::LFODescriptor      default_lfos[Synth::instrument_max_lfos];
-        uint32_t                         default_env_count = 999;
-        uint32_t                         default_lfo_count = 999;
+        Synth::Instrument         default_decoded                               = {};
+        Synth::EnvelopeDescriptor default_envs[Synth::instrument_max_envelopes] = {};
+        Synth::LFODescriptor      default_lfos[Synth::instrument_max_lfos]      = {};
+        uint32_t                  default_env_count                             = 999;
+        uint32_t                  default_lfo_count                             = 999;
         TEST(Synth::decode_instrument_json(encoded,
                                            default_encoded_len,
                                            &default_decoded,
@@ -25708,11 +27116,11 @@ int main()
         // field is accepted by the same decoder.
         const char* const empty_layout_doc =
             "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\"}],\"graph_layout\":[]}";
-        static Synth::Instrument         empty_layout_instr;
-        static Synth::EnvelopeDescriptor empty_layout_envs[Synth::instrument_max_envelopes];
-        static Synth::LFODescriptor      empty_layout_lfos[Synth::instrument_max_lfos];
-        uint32_t                         empty_layout_env_count = 999;
-        uint32_t                         empty_layout_lfo_count = 999;
+        Synth::Instrument         empty_layout_instr                                 = {};
+        Synth::EnvelopeDescriptor empty_layout_envs[Synth::instrument_max_envelopes] = {};
+        Synth::LFODescriptor      empty_layout_lfos[Synth::instrument_max_lfos]      = {};
+        uint32_t                  empty_layout_env_count                             = 999;
+        uint32_t                  empty_layout_lfo_count                             = 999;
         TEST(Synth::decode_instrument_json(empty_layout_doc,
                                            static_cast<uint32_t>(strlen(empty_layout_doc)),
                                            &empty_layout_instr,
@@ -25724,19 +27132,21 @@ int main()
         // The shipped example document stays valid: it is what users and LLMs
         // copy from (doc/synth_instrument_example.json).
         {
-            static char example[64 * 1024];
-            FILE* const example_file = fopen("doc/synth_instrument_example.json", "rb");
+            const std::unique_ptr<FixedArray<char, 64 * 1024>> example_storage =
+                std::make_unique<FixedArray<char, 64 * 1024>>();
+            char (&example)[64 * 1024] = example_storage->elements;
+            FILE* const example_file   = fopen("doc/synth_instrument_example.json", "rb");
             TEST(example_file != nullptr);
             const size_t got = example_file ? fread(example, 1, sizeof(example) - 1, example_file) : 0;
             if (example_file) {
                 fclose(example_file);
             }
             TEST(got > 0 && got < sizeof(example) - 1);
-            static Synth::Instrument         example_instr;
-            static Synth::EnvelopeDescriptor example_envs[Synth::instrument_max_envelopes];
-            static Synth::LFODescriptor      example_lfos[Synth::instrument_max_lfos];
-            uint32_t                         example_env_count = 0;
-            uint32_t                         example_lfo_count = 0;
+            Synth::Instrument         example_instr                                 = {};
+            Synth::EnvelopeDescriptor example_envs[Synth::instrument_max_envelopes] = {};
+            Synth::LFODescriptor      example_lfos[Synth::instrument_max_lfos]      = {};
+            uint32_t                  example_env_count                             = 0;
+            uint32_t                  example_lfo_count                             = 0;
             if (got > 0) {
                 TEST(Synth::decode_instrument_json(example,
                                                    static_cast<uint32_t>(got),
