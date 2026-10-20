@@ -435,6 +435,54 @@ bool Synth::load_library_instrument(const char* const            path,
     return true;
 }
 
+// The delete target selects which records disappear: in record mode (name set)
+// the shared record identity decides, in category mode (name null) every
+// record of the category is a target.
+static bool record_is_delete_target(const Synth::LibraryEntry& entry,
+                                    const char* const          category,
+                                    const char* const          name)
+{
+    return name ? Synth::library_record_matches(entry, category, name)
+                : strncmp(entry.category, category, Synth::library_category_len) == 0;
+}
+
+// Copies every record whose identity does not match the skip target from the
+// old library into the staging file, in bounded 64 KB chunks.  Record mode
+// (name set) reuses the shared record identity so writer and delete agree; in
+// category mode (name null) every record of the category is skipped.
+static bool copy_library_records(FILE* const                      old,
+                                 FILE* const                      file,
+                                 const Synth::LibraryEntry* const entries,
+                                 uint32_t const                   num_entries,
+                                 const char* const                category,
+                                 const char* const                name)
+{
+    constexpr uint32_t copy_chunk_size = 64 * 1024;
+    static uint8_t     record_copy[copy_chunk_size];
+
+    bool ok = true;
+    for (uint32_t i = 0; ok && i < num_entries; i++) {
+        const bool skip = record_is_delete_target(entries[i], category, name);
+        if (skip)
+            continue;
+
+        const uint32_t header_offset = entries[i].payload_offset - static_cast<uint32_t>(sizeof(RecordHeader));
+        const uint32_t record_size   = sizeof(RecordHeader) + entries[i].payload_size;
+
+        ok = fseek(old, static_cast<long>(header_offset), SEEK_SET) == 0;
+
+        // Records pass through in bounded chunks: a payload up to the capacity
+        // needs no second full-size staging buffer.
+        for (uint32_t remaining = record_size; ok && remaining;) {
+            const uint32_t chunk = remaining < copy_chunk_size ? remaining : copy_chunk_size;
+
+            ok = fread(record_copy, chunk, 1, old) == 1 && fwrite(record_copy, chunk, 1, file) == 1;
+            remaining -= chunk;
+        }
+    }
+    return ok;
+}
+
 static int write_library_file(const char* const                        path,
                               const char* const                        category,
                               const char* const                        name,
@@ -490,27 +538,7 @@ static int write_library_file(const char* const                        path,
         ok = false;
 
     if (old) {
-        constexpr uint32_t copy_chunk_size = 64 * 1024;
-        static uint8_t     record_copy[copy_chunk_size];
-
-        for (uint32_t i = 0; ok && i < num_entries; i++) {
-            if (Synth::library_record_matches(entries[i], category, name))
-                continue;
-
-            const uint32_t header_offset = entries[i].payload_offset - static_cast<uint32_t>(sizeof(RecordHeader));
-            const uint32_t record_size   = sizeof(RecordHeader) + entries[i].payload_size;
-
-            ok = fseek(old, static_cast<long>(header_offset), SEEK_SET) == 0;
-
-            // Records pass through in bounded chunks: a payload up to the capacity
-            // needs no second full-size staging buffer.
-            for (uint32_t remaining = record_size; ok && remaining;) {
-                const uint32_t chunk = remaining < copy_chunk_size ? remaining : copy_chunk_size;
-
-                ok = fread(record_copy, chunk, 1, old) == 1 && fwrite(record_copy, chunk, 1, file) == 1;
-                remaining -= chunk;
-            }
-        }
+        ok = copy_library_records(old, file, entries, num_entries, category, name);
 
         fclose(old);
     }
@@ -544,6 +572,119 @@ static int write_library_file(const char* const                        path,
     if (out_status)
         *out_status = Synth::library_valid;
     return atomic_write_commit(path, tmp_path, file);
+}
+
+// Rewrites the library without the matching records.  In record mode the name
+// also matches; in category mode (`name == nullptr`) every record of the
+// category goes.
+//
+// - path - path to instrument library file
+// - category - category whose records disappear, never null
+// - name - name of the deleted record, or null to delete the whole category
+// - out_status - (output) why a refused delete failed
+//
+// Returns 0 on success, otherwise an errno value (the refused-delete reason
+// also lands in out_status).  A scan that cannot guarantee a faithful index
+// refuses before the file is opened for writing, so the original bytes stay
+// untouched.  A no-match delete rewrites nothing and reports success.
+static int delete_library_records(const char* const               path,
+                                  const char* const               category,
+                                  const char* const               name,
+                                  Synth::LibraryScanStatus* const out_status)
+{
+    if (out_status)
+        *out_status = Synth::library_invalid;
+
+    static Synth::LibraryEntry entries[Synth::library_max_records];
+
+    Synth::LibraryScanStatus status          = Synth::library_invalid;
+    bool                     index_truncated = false;
+
+    const uint32_t num_entries =
+        Synth::read_library_index(path, entries, Synth::library_max_records, &status, &index_truncated);
+
+    // Only a fully loadable index may be rebuilt: an oversized record (flagged
+    // by the scan even when its names are unusable) can never be kept.
+    if (status == Synth::library_absent) {
+        if (out_status)
+            *out_status = status;
+        return ENOENT;
+    }
+    if (status != Synth::library_valid || index_truncated)
+        return EINVAL;
+
+    uint32_t num_kept = 0;
+    for (uint32_t i = 0; i < num_entries; i++) {
+        const bool matches = record_is_delete_target(entries[i], category, name);
+        if (! matches)
+            num_kept++;
+    }
+
+    // Nothing matches: the delete is idempotent and the file stays untouched.
+    if (num_kept == num_entries) {
+        if (out_status)
+            *out_status = Synth::library_valid;
+        return 0;
+    }
+
+    char                           tmp_path[512];
+    const std::variant<FILE*, int> staged = atomic_write_begin(path, tmp_path, sizeof(tmp_path));
+    if (std::holds_alternative<int>(staged))
+        return std::get<int>(staged);
+    FILE* const file = std::get<FILE*>(staged);
+
+    const uint32_t header[3] = { library_file_magic, Synth::library_version, num_kept };
+    bool           ok        = fwrite(header, sizeof(header), 1, file) == 1;
+
+    FILE* const old = ok ? fopen(path, "rb") : nullptr;
+    if (! old)
+        ok = false;
+
+    if (old) {
+        ok = copy_library_records(old, file, entries, num_entries, category, name);
+
+        fclose(old);
+    }
+
+    if (! ok) {
+        fclose(file);
+        remove(tmp_path);
+        return EIO;
+    }
+
+    // Flush + rename inside the commit makes the replacement crash-atomic:
+    // readers see either the complete previous library or the complete new one.
+    if (out_status)
+        *out_status = Synth::library_valid;
+    return atomic_write_commit(path, tmp_path, file);
+}
+
+int Synth::delete_library_record(const char* const               path,
+                                 const char* const               category,
+                                 const char* const               name,
+                                 Synth::LibraryScanStatus* const out_status)
+{
+    if (out_status)
+        *out_status = Synth::library_invalid;
+
+    // A null name would silently turn the record delete into a category delete.
+    if (! category || ! name)
+        return EINVAL;
+
+    return delete_library_records(path, category, name, out_status);
+}
+
+int Synth::delete_library_category(const char* const               path,
+                                   const char* const               category,
+                                   Synth::LibraryScanStatus* const out_status)
+{
+    if (out_status)
+        *out_status = Synth::library_invalid;
+
+    if (! category)
+        return EINVAL;
+
+    return delete_library_records(path, category, nullptr, out_status);
 }
 
 int Synth::save_library_record(const char* const                        path,

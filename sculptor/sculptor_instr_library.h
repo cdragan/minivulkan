@@ -94,4 +94,34 @@ int save_library_record(const char*                 path,
                         uint32_t                    channel,
                         LibraryScanStatus*          out_status = nullptr);
 
+// Deletes one record from the library and rewrites the file atomically; the
+// remaining records pass through byte-for-byte.
+//
+// - path - path to instrument library file
+// - category - category of the deleted record, never null
+// - name - name of the deleted record, never null
+// - out_status - (output) why a refused delete failed
+//
+// Returns 0 on success, otherwise an errno value.  A scan that cannot
+// guarantee a faithful index refuses before the file is opened for writing,
+// so the original bytes stay untouched.  A no-match delete rewrites nothing
+// and reports success.
+int delete_library_record(const char*        path,
+                          const char*        category,
+                          const char*        name,
+                          LibraryScanStatus* out_status = nullptr);
+
+// Deletes every record of one category from the library and rewrites the file
+// atomically; the remaining records pass through byte-for-byte.
+//
+// - path - path to instrument library file
+// - category - category whose records disappear, never null
+// - out_status - (output) why a refused delete failed
+//
+// Returns 0 on success, otherwise an errno value.  A scan that cannot
+// guarantee a faithful index refuses before the file is opened for writing,
+// so the original bytes stay untouched.  A no-match delete rewrites nothing
+// and reports success.
+int delete_library_category(const char* path, const char* category, LibraryScanStatus* out_status = nullptr);
+
 } // namespace Synth

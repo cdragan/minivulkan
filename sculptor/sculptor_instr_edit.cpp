@@ -92,9 +92,10 @@ namespace {
 
 // The scan-refusal messages are shared by the save path and the browser so the
 // wording cannot drift between them.
-const char* const library_oversized_refusal    = "Synth: %s holds a record too large to rebuild; saving is refused";
-const char* const library_invalid_save_refusal = "Synth: %s is not a valid instrument library; saving is refused";
-const char* const library_invalid_open_refusal = "Synth: %s is invalid or unreadable";
+const char* const library_oversized_refusal      = "Synth: %s holds a record too large to rebuild; saving is refused";
+const char* const library_invalid_save_refusal   = "Synth: %s is not a valid instrument library; saving is refused";
+const char* const library_invalid_open_refusal   = "Synth: %s is invalid or unreadable";
+const char* const library_invalid_delete_refusal = "Synth: %s is unreadable, corrupt or oversized; deleting is refused";
 
 Synth::InstrumentEditorBank instr_bank; // GUI-thread-owned editable bank (names included).
 Sculptor::UndoRedo          undo_redo;
@@ -3881,11 +3882,18 @@ void Sculptor::SynthEditor::gui_library_popups()
         library_open                    = false;
         Synth::LibraryScanStatus status = Synth::library_valid;
 
-        library_num_entries =
-            Synth::read_library_index(library_path, library_entries, Synth::library_max_records, &status);
+        bool index_truncated = false;
+
+        library_num_entries = Synth::read_library_index(library_path,
+                                                        library_entries,
+                                                        Synth::library_max_records,
+                                                        &status,
+                                                        &index_truncated);
         library_scan_status = status;
 
-        if (status == Synth::library_invalid || status == Synth::library_oversized) {
+        // An overcapacity file scans as valid but the index is truncated: the
+        // browser never opens on a list it cannot fully see.
+        if (status == Synth::library_invalid || status == Synth::library_oversized || index_truncated) {
             Sculptor::notify_error(status == Synth::library_oversized ? library_oversized_refusal
                                                                       : library_invalid_open_refusal,
                                    library_path);
@@ -3904,7 +3912,10 @@ void Sculptor::SynthEditor::gui_library_popups()
             }
         }
         library_category = library_num_categories ? 0 : -1;
-        ImGui::OpenPopup("##synth_library");
+        // Re-opening an already-open popup repositions it to the trigger; skip
+        // when the browser is already on screen (delete handlers re-trigger this).
+        if (! ImGui::IsPopupOpen("##synth_library", ImGuiPopupFlags_None))
+            ImGui::OpenPopup("##synth_library");
     }
 
     gui_library_browser();
@@ -3957,6 +3968,26 @@ void Sculptor::SynthEditor::gui_library_browser()
                      c);
             if (ImGui::Selectable(label, library_category == static_cast<int32_t>(c)))
                 library_category = static_cast<int32_t>(c);
+            if (ImGui::BeginPopupContextItem()) {
+                if (ImGui::MenuItem("Delete category")) {
+                    char category[Synth::library_category_len];
+                    snprintf(category, sizeof(category), "%s", library_categories[c]);
+
+                    if (Synth::delete_library_category(library_path, category, nullptr)) {
+                        Sculptor::notify_error(library_invalid_delete_refusal, library_path);
+                    }
+                    else {
+                        // The next quick Save must not silently recreate the deleted category;
+                        // the decision reads the pre-delete browser snapshot.
+                        if (strcmp(save_category, category) == 0)
+                            save_category[0] = 0;
+                        Sculptor::notify_info("Synth: library category deleted: %s", category);
+                        library_open = true; // the reopen rescans the index before the browser draws
+                    }
+                    ImGui::CloseCurrentPopup();
+                }
+                ImGui::EndPopup();
+            }
         }
         ImGui::EndChild();
 
@@ -3972,6 +4003,36 @@ void Sculptor::SynthEditor::gui_library_browser()
                 if (ImGui::Selectable(label)) {
                     if (do_library_load(library_entries[i]))
                         ImGui::CloseCurrentPopup();
+                }
+                if (ImGui::BeginPopupContextItem()) {
+                    if (ImGui::MenuItem("Delete")) {
+                        char record_category[Synth::library_category_len];
+                        char record_name[Synth::library_name_len];
+                        snprintf(record_category, sizeof(record_category), "%s", library_entries[i].category);
+                        snprintf(record_name, sizeof(record_name), "%s", library_entries[i].name);
+
+                        if (Synth::delete_library_record(library_path, record_category, record_name, nullptr)) {
+                            Sculptor::notify_error(library_invalid_delete_refusal, library_path);
+                        }
+                        else {
+                            // The next quick Save must not silently recreate the deleted category;
+                            // the decision reads the pre-delete browser snapshot.
+                            uint32_t num_other_in_category = 0;
+                            for (uint32_t j = 0; j < library_num_entries; j++) {
+                                if (strncmp(library_entries[j].category,
+                                            record_category,
+                                            Synth::library_category_len) == 0 &&
+                                    strncmp(library_entries[j].name, record_name, Synth::library_name_len) != 0)
+                                    num_other_in_category++;
+                            }
+                            if (strcmp(save_category, record_category) == 0 && num_other_in_category == 0)
+                                save_category[0] = 0;
+                            Sculptor::notify_info("Synth: instrument deleted from library: %s", record_name);
+                            library_open = true; // the reopen rescans the index before the browser draws
+                        }
+                        ImGui::CloseCurrentPopup();
+                    }
+                    ImGui::EndPopup();
                 }
             }
         }

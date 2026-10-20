@@ -1620,6 +1620,63 @@ static uint32_t read_library_fixture(const char* path, char* bytes, uint32_t cap
     return static_cast<uint32_t>(count);
 }
 
+// Captures a whole library file in bounded 64 KB chunks into a heap buffer and
+// returns its exact size.  Refusal tests compare this snapshot with the file
+// after the refused call, so any change anywhere in the file is caught.
+static uint64_t snapshot_library_file(const char* path, std::unique_ptr<uint8_t[]>& snapshot)
+{
+    FILE* const file = fopen(path, "rb");
+    TEST(file != nullptr);
+    if (! file) {
+        return 0;
+    }
+    TEST(fseek(file, 0, SEEK_END) == 0);
+    const long size = ftell(file);
+    TEST(size > 0);
+    TEST(fseek(file, 0, SEEK_SET) == 0);
+    snapshot            = std::make_unique<uint8_t[]>(static_cast<uint64_t>(size));
+    uint64_t read_total = 0;
+    while (read_total < static_cast<uint64_t>(size)) {
+        const uint32_t chunk = static_cast<uint64_t>(size) - read_total < 64 * 1024
+                                   ? static_cast<uint32_t>(static_cast<uint64_t>(size) - read_total)
+                                   : 64 * 1024;
+        TEST(fread(snapshot.get() + read_total, 1, chunk, file) == chunk);
+        read_total += chunk;
+    }
+    TEST(fgetc(file) == EOF); // the read stopped exactly at the end of the file
+    TEST(! ferror(file));
+    TEST(fclose(file) == 0);
+    return static_cast<uint64_t>(size);
+}
+
+// Compares a file with a snapshot byte-for-byte in bounded 64 KB chunks; the
+// exact final size must match too.
+static bool library_file_matches_snapshot(const char*                       path,
+                                          const std::unique_ptr<uint8_t[]>& snapshot,
+                                          uint64_t                          snapshot_size)
+{
+    const std::unique_ptr<uint8_t[]> chunk = std::make_unique<uint8_t[]>(64 * 1024);
+    FILE* const                      file  = fopen(path, "rb");
+    TEST(file != nullptr);
+    if (! file) {
+        return false;
+    }
+    uint64_t compared = 0;
+    while (true) {
+        const size_t got = fread(chunk.get(), 1, 64 * 1024, file);
+        if (compared + got > snapshot_size || (got && memcmp(snapshot.get() + compared, chunk.get(), got) != 0)) {
+            TEST(fclose(file) == 0);
+            return false;
+        }
+        compared += got;
+        if (got < 64 * 1024)
+            break;
+    }
+    TEST(feof(file) && ! ferror(file));
+    TEST(fclose(file) == 0);
+    return compared == snapshot_size;
+}
+
 static void build_named_fm_fixture(Synth::InstrumentEditorBank* bank)
 {
     Synth::Instrument instrument;
@@ -16495,6 +16552,292 @@ int main()
         TEST(status == Synth::library_valid);
         TEST(Synth::save_library_record(path, "C0", "N", &bank, 0) != 0);
         remove(path);
+    }
+
+    // Deleting one record keeps every survivor's payload faithful, including
+    // records in the empty category.
+    {
+        const std::unique_ptr<Synth::InstrumentEditorBank> src_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& src  = *src_storage;
+        const char* const            path = "synth_library_delete_record.tmp";
+        auto                         save_fixture =
+            [&](const char* category, const char* name, uint16_t point, Synth::WaveType wave, uint16_t period) {
+                make_valid_bank(src.bank);
+                src.bank.envelopes.entries[0].points[1].position = point;
+                src.bank.lfos.entries[0].wave                    = wave;
+                src.bank.lfos.entries[0].period_ms               = period;
+                snprintf(src.instrument_names[0], sizeof(src.instrument_names[0]), "%s", name);
+                TEST(Synth::validate_instrument_bank(&src.bank));
+                TEST(Synth::save_library_record(path, category, name, &src, 0) == 0);
+            };
+
+        save_fixture("Drums", "Kick", 25, Synth::WaveType::sine_wave, 30);
+        save_fixture("Drums", "Snare", 50, Synth::WaveType::sawtooth_wave, 60);
+        save_fixture("", "Free", 75, Synth::WaveType::sine_wave, 90);
+
+        Synth::LibraryScanStatus delete_status = Synth::library_valid;
+        TEST(Synth::delete_library_record(path, "Drums", "Snare", &delete_status) == 0);
+        TEST(delete_status == Synth::library_valid);
+
+        Synth::LibraryEntry entries[Synth::library_max_records];
+        delete_status = Synth::library_invalid;
+        TEST(Synth::read_library_index(path, entries, Synth::library_max_records, &delete_status) == 2);
+        TEST(delete_status == Synth::library_valid);
+        TEST(strcmp(entries[0].category, "Drums") == 0 && strcmp(entries[0].name, "Kick") == 0);
+        TEST(strcmp(entries[1].category, "") == 0 && strcmp(entries[1].name, "Free") == 0);
+
+        const std::unique_ptr<Synth::InstrumentEditorBank> record_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& record    = *record_storage;
+        uint16_t                     load_slot = 0;
+        memset(static_cast<void*>(&record), 0, sizeof(record));
+        TEST(Synth::load_library_instrument(path, &entries[0], &record, 0, &load_slot));
+        TEST(load_slot == 0);
+        TEST(Synth::validate_instrument_bank(&record.bank));
+        TEST(record.bank.instruments.num_allocated == 1);
+        TEST(record.bank.envelopes.num_allocated == 1);
+        TEST(record.bank.lfos.num_allocated == 1);
+        TEST(record.bank.channel_zones[0][0].start_note == 1);
+        TEST(record.bank.channel_zones[0][0].instrument == 0);
+        TEST(record.bank.instruments.entries[0].layers[0].targets[Synth::mod_volume].envelope_desc_id == 1);
+        TEST(record.bank.instruments.entries[0].layers[0].targets[Synth::mod_pitch].lfo_desc_id == 1);
+        TEST(record.bank.envelopes.entries[0].points[1].position == 25);
+        TEST(record.bank.lfos.entries[0].wave == Synth::WaveType::sine_wave);
+        TEST(record.bank.lfos.entries[0].period_ms == 30);
+        TEST(strcmp(record.instrument_names[0], "Kick") == 0);
+        memset(static_cast<void*>(&record), 0, sizeof(record));
+        TEST(Synth::load_library_instrument(path, &entries[1], &record, 0, &load_slot));
+        TEST(Synth::validate_instrument_bank(&record.bank));
+        TEST(record.bank.envelopes.entries[0].points[1].position == 75);
+        TEST(record.bank.lfos.entries[0].wave == Synth::WaveType::sine_wave);
+        TEST(record.bank.lfos.entries[0].period_ms == 90);
+        TEST(strcmp(record.instrument_names[0], "Free") == 0);
+
+        remove(path);
+    }
+
+    // Deleting a category removes exactly its records; the other categories and
+    // the empty category survive intact.
+    {
+        const std::unique_ptr<Synth::InstrumentEditorBank> src_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& src          = *src_storage;
+        const char* const            path         = "synth_library_delete_category.tmp";
+        auto                         save_fixture = [&](const char* category, const char* name, uint16_t point) {
+            make_valid_bank(src.bank);
+            src.bank.envelopes.entries[0].points[1].position = point;
+            snprintf(src.instrument_names[0], sizeof(src.instrument_names[0]), "%s", name);
+            TEST(Synth::validate_instrument_bank(&src.bank));
+            TEST(Synth::save_library_record(path, category, name, &src, 0) == 0);
+        };
+
+        save_fixture("Drums", "Kick", 20);
+        save_fixture("Drums", "Snare", 40);
+        save_fixture("Bass", "Sub", 60);
+        save_fixture("", "Free", 80);
+
+        Synth::LibraryScanStatus delete_status = Synth::library_valid;
+        TEST(Synth::delete_library_category(path, "Drums", &delete_status) == 0);
+        TEST(delete_status == Synth::library_valid);
+
+        Synth::LibraryEntry entries[Synth::library_max_records];
+        TEST(Synth::read_library_index(path, entries, Synth::library_max_records) == 2);
+        TEST(strcmp(entries[0].category, "Bass") == 0 && strcmp(entries[0].name, "Sub") == 0);
+        TEST(strcmp(entries[1].category, "") == 0 && strcmp(entries[1].name, "Free") == 0);
+
+        // The empty category is legal data: deleting it removes only its records.
+        TEST(Synth::delete_library_category(path, "", &delete_status) == 0);
+        TEST(delete_status == Synth::library_valid);
+        TEST(Synth::read_library_index(path, entries, Synth::library_max_records) == 1);
+        TEST(strcmp(entries[0].category, "Bass") == 0 && strcmp(entries[0].name, "Sub") == 0);
+
+        const std::unique_ptr<Synth::InstrumentEditorBank> record_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& record    = *record_storage;
+        uint16_t                     load_slot = 0;
+        memset(static_cast<void*>(&record), 0, sizeof(record));
+        TEST(Synth::load_library_instrument(path, &entries[0], &record, 0, &load_slot));
+        TEST(Synth::validate_instrument_bank(&record.bank));
+        TEST(record.bank.envelopes.entries[0].points[1].position == 60);
+        TEST(strcmp(record.instrument_names[0], "Sub") == 0);
+
+        remove(path);
+    }
+
+    // A no-match delete is idempotent: success, no rewrite, untouched bytes.
+    {
+        const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& bank = *bank_storage;
+        make_valid_bank(bank.bank);
+        const char* const path = "synth_library_delete_nomatch.tmp";
+        TEST(Synth::save_library_record(path, "C1", "N1", &bank, 0) == 0);
+
+        char           before[4096] = {};
+        const uint32_t file_size    = read_library_fixture(path, before, sizeof(before));
+
+        Synth::LibraryScanStatus delete_status = Synth::library_absent;
+        TEST(Synth::delete_library_record(path, "Missing", "Nope", &delete_status) == 0);
+        TEST(delete_status == Synth::library_valid);
+        delete_status = Synth::library_absent;
+        TEST(Synth::delete_library_category(path, "Missing", &delete_status) == 0);
+        TEST(delete_status == Synth::library_valid);
+
+        char after[4096] = {};
+        TEST(read_library_fixture(path, after, sizeof(after)) == file_size);
+        TEST(memcmp(before, after, file_size) == 0);
+        remove(path);
+    }
+
+    // A null record name is refused before anything is opened; the file stays
+    // byte-identical (the null sentinel would silently delete a category).
+    {
+        const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& bank = *bank_storage;
+        make_valid_bank(bank.bank);
+        const char* const path = "synth_library_delete_nullname.tmp";
+        TEST(Synth::save_library_record(path, "C1", "N1", &bank, 0) == 0);
+
+        char           before[4096] = {};
+        const uint32_t file_size    = read_library_fixture(path, before, sizeof(before));
+
+        Synth::LibraryScanStatus delete_status = Synth::library_valid;
+        TEST(Synth::delete_library_record(path, "C1", nullptr, &delete_status) == EINVAL);
+        TEST(delete_status == Synth::library_invalid);
+
+        char after[4096] = {};
+        TEST(read_library_fixture(path, after, sizeof(after)) == file_size);
+        TEST(memcmp(before, after, file_size) == 0);
+        remove(path);
+    }
+
+    // A corrupt, oversized or overcapacity library is never rebuilt by a delete:
+    // both wrappers return EINVAL with library_invalid (the scanner keeps its own
+    // status), and the original bytes and scan result stay untouched.
+    {
+        Synth::LibraryScanStatus delete_status = Synth::library_valid;
+
+        const char* const junk_path = "synth_library_delete_corrupt.tmp";
+        FILE* const       junk      = fopen(junk_path, "wb");
+        fwrite("not a library at all", 20, 1, junk);
+        fclose(junk);
+        char           junk_before[32] = {};
+        const uint32_t junk_size       = read_library_fixture(junk_path, junk_before, sizeof(junk_before));
+        TEST(Synth::delete_library_record(junk_path, "C", "N", &delete_status) == EINVAL);
+        TEST(delete_status == Synth::library_invalid);
+        delete_status = Synth::library_valid;
+        TEST(Synth::delete_library_category(junk_path, "C", &delete_status) == EINVAL);
+        TEST(delete_status == Synth::library_invalid);
+        char junk_after[32] = {};
+        TEST(read_library_fixture(junk_path, junk_after, sizeof(junk_after)) == junk_size);
+        TEST(memcmp(junk_before, junk_after, junk_size) == 0);
+        remove(junk_path);
+
+        // A record past the payload capacity flags the scan oversized.
+        const char* const over_path = "synth_library_delete_oversize.tmp";
+        FILE* const       over      = fopen(over_path, "wb");
+        TEST(over != nullptr);
+        const uint32_t over_header[3] = { 0x42494c49, Synth::library_version, 1 };
+        fwrite(over_header, sizeof(over_header), 1, over);
+        char rec[52] = {};
+        memcpy(rec, "Cat", 3);
+        memcpy(rec + 24, "Huge", 4);
+        const uint32_t huge = Synth::library_payload_max + 2048;
+        memcpy(rec + 48, &huge, 4);
+        fwrite(rec, sizeof(rec), 1, over);
+        const std::unique_ptr<FixedArray<uint8_t, 64 * 1024>> pattern_storage =
+            std::make_unique<FixedArray<uint8_t, 64 * 1024>>();
+        uint8_t (&pattern)[64 * 1024] = pattern_storage->elements;
+        memset(static_cast<void*>(pattern), 0x5a, sizeof(pattern));
+        for (uint32_t written = 0; written < huge; written += static_cast<uint32_t>(sizeof(pattern))) {
+            const uint32_t chunk = huge - written < static_cast<uint32_t>(sizeof(pattern))
+                                       ? huge - written
+                                       : static_cast<uint32_t>(sizeof(pattern));
+            fwrite(pattern, chunk, 1, over);
+        }
+        fclose(over);
+
+        Synth::LibraryScanStatus scan_status = Synth::library_valid;
+        Synth::LibraryEntry      over_entries[8];
+        TEST(Synth::read_library_index(over_path, over_entries, 8, &scan_status) == 1);
+        TEST(scan_status == Synth::library_oversized);
+        std::unique_ptr<uint8_t[]> over_snapshot;
+        const uint64_t             over_size = snapshot_library_file(over_path, over_snapshot);
+        delete_status                        = Synth::library_valid;
+        TEST(Synth::delete_library_record(over_path, "Cat", "Huge", &delete_status) == EINVAL);
+        TEST(delete_status == Synth::library_invalid);
+        delete_status = Synth::library_valid;
+        TEST(Synth::delete_library_category(over_path, "Cat", &delete_status) == EINVAL);
+        TEST(delete_status == Synth::library_invalid);
+        TEST(library_file_matches_snapshot(over_path, over_snapshot, over_size));
+        scan_status = Synth::library_valid;
+        TEST(Synth::read_library_index(over_path, over_entries, 8, &scan_status) == 1);
+        TEST(scan_status == Synth::library_oversized);
+        remove(over_path);
+
+        // More records than the index can carry: the delete refuses like the save.
+        const char* const many_path = "synth_library_delete_many.tmp";
+        FILE* const       many      = fopen(many_path, "wb");
+        TEST(many != nullptr);
+        const uint32_t many_header[3] = { 0x42494C49, Synth::library_version, Synth::library_max_records + 1 };
+        TEST(fwrite(many_header, sizeof(many_header), 1, many) == 1);
+        for (uint32_t r = 0; r <= Synth::library_max_records; r++) {
+            // The record header layout is internal to the library writer; the test
+            // spells it out with the public field sizes.
+            struct {
+                char     category[Synth::library_category_len];
+                char     name[Synth::library_name_len];
+                uint32_t payload_size;
+            } record = {};
+
+            snprintf(record.category, sizeof(record.category), "Cat");
+            snprintf(record.name, sizeof(record.name), "N%03u", r);
+            record.payload_size = 2;
+            TEST(fwrite(&record, sizeof(record), 1, many) == 1);
+            TEST(fwrite("{}", 1, 2, many) == 2);
+        }
+        fclose(many);
+        // The scan stays valid but reports the truncated index before and after
+        // the refused delete.
+        Synth::LibraryScanStatus many_status    = Synth::library_valid;
+        bool                     many_truncated = false;
+        Synth::LibraryEntry      many_entries[Synth::library_max_records];
+        TEST(Synth::read_library_index(many_path,
+                                       many_entries,
+                                       Synth::library_max_records,
+                                       &many_status,
+                                       &many_truncated) == Synth::library_max_records);
+        TEST(many_status == Synth::library_valid && many_truncated);
+        std::unique_ptr<uint8_t[]> many_snapshot;
+        const uint64_t             many_size = snapshot_library_file(many_path, many_snapshot);
+        delete_status                        = Synth::library_valid;
+        TEST(Synth::delete_library_record(many_path, "Cat", "N000", &delete_status) == EINVAL);
+        TEST(delete_status == Synth::library_invalid);
+        delete_status = Synth::library_valid;
+        TEST(Synth::delete_library_category(many_path, "Cat", &delete_status) == EINVAL);
+        TEST(delete_status == Synth::library_invalid);
+        TEST(library_file_matches_snapshot(many_path, many_snapshot, many_size));
+        many_status    = Synth::library_valid;
+        many_truncated = false;
+        TEST(Synth::read_library_index(many_path,
+                                       many_entries,
+                                       Synth::library_max_records,
+                                       &many_status,
+                                       &many_truncated) == Synth::library_max_records);
+        TEST(many_status == Synth::library_valid && many_truncated);
+        remove(many_path);
+    }
+
+    // An absent library reports absence for both wrappers.
+    {
+        Synth::LibraryScanStatus delete_status = Synth::library_valid;
+        TEST(Synth::delete_library_record("synth_library_missing.tmp", "C", "N", &delete_status) == ENOENT);
+        TEST(delete_status == Synth::library_absent);
+        delete_status = Synth::library_valid;
+        TEST(Synth::delete_library_category("synth_library_missing.tmp", "C", &delete_status) == ENOENT);
+        TEST(delete_status == Synth::library_absent);
     }
 
     // The editor bank JSON codec round-trips a populated bank byte-for-byte.
