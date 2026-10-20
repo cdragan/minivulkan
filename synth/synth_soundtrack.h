@@ -15,6 +15,10 @@ namespace Synth {
 // tempo-independent.  Storing ticks (not samples) and splitting each field into its own
 // per-channel plane is what compresses smallest under the project compressor.
 //
+// Tempo events ride the stream like any other event (captured from FF 51 at encode time); when
+// the player pops one it updates samples_per_midi_tick, so all subsequently scheduled deltas
+// scale with the new tempo.
+//
 // Note duration model: a note is one note_on carrying the tick count until its note_off, so
 // note_off events are never stored.  encode pairs each note_on with the next note_off on the same
 // channel and note; decode reconstructs the note_off at start + duration.
@@ -48,6 +52,13 @@ inline uint32_t decode_vlq(const uint8_t** ptr)
     return value;
 }
 
+// Single runtime tempo in BPM.  samples_per_midi_tick is derived from it; set_runtime_tempo_bpm
+// is the only writer of the pair, so the tempo value and the tick rate can never disagree.
+// Tempo events riding the soundtrack stream and the editor tempo box both call the setter.
+extern uint32_t samples_per_midi_tick;    // Player tick rate: rt_sampling_rate * 60 / (BPM * 192)
+void set_runtime_tempo_bpm(uint16_t bpm); // Recomputes samples_per_midi_tick; ignores 0
+uint16_t get_runtime_tempo_bpm();         // Effective tempo, for beat_div and the editor tempo box
+
 // Per-channel plane pointers into a caller-owned byte buffer.  Mirrors the player's extern arrays
 // so the build-time converter can emit these planes verbatim.
 struct Soundtrack {
@@ -61,6 +72,7 @@ struct Soundtrack {
     const uint8_t* ctrl_data[max_channels];      // controller value, paired with ctrl
     const uint8_t* pitch_bend_lo[max_channels];  // pitch bend LSB (7 bits), one per pitch_bend event
     const uint8_t* pitch_bend_hi[max_channels];  // pitch bend MSB (7 bits), paired with lo
+    const uint16_t* tempo_bpm[max_channels];     // BPM value, one per tempo event
 };
 
 // Encodes a tick-domain, time-ordered MidiEvent stream into dest, filling *out with plane pointers

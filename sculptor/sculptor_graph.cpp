@@ -17,6 +17,9 @@ const char* const Sculptor::source_op_names[2] = { "+", "x" };
 // pulse and noise would trip the runtime's palette assert, and bank
 // validation rejects them.
 const char* const Sculptor::lfo_wave_names[2] = { "Sine", "Sawtooth" };
+const char* const Sculptor::lfo_sync_names[6] = { "absolute (ms)", "1 note", "1/2 note", "1/4 note",
+                                                  "1/8 note", "1/16 note" };
+const char* const Sculptor::lfo_start_names[3] = { "middle", "lowest", "highest" };
 
 const char* const Sculptor::mod_source_names[6] = { "Pitch bend", "Mod wheel",  "Channel press.",
                                                     "Velocity",   "Aftertouch", "Pressure (max)" };

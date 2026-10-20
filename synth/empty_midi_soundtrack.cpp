@@ -15,4 +15,5 @@ namespace Synth {
     const uint8_t* midi_ctrl_data[]      = { nullptr, nullptr };
     const uint8_t* midi_pitch_bend_lo[]  = { nullptr, nullptr };
     const uint8_t* midi_pitch_bend_hi[]  = { nullptr, nullptr };
+    const uint16_t* midi_tempo_bpm[]     = { nullptr, nullptr };
 }

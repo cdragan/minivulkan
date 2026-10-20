@@ -92,6 +92,8 @@ void append_lfo_row(Graph*    graph,
 extern const char* const source_op_names[2];
 // Option labels of the two-way LFO wave list (sine, sawtooth).
 extern const char* const lfo_wave_names[2];
+extern const char* const lfo_sync_names[6];
+extern const char* const lfo_start_names[3];
 
 // Sized for the widest projected node - the oscillator: 18 fixed slots
 // plus one 12-slot modulation block per ModTarget after its row.

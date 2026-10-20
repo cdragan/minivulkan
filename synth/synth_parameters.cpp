@@ -7,6 +7,7 @@
 #include "../core/vecfloat.h"
 #include "../core/vmath.h"
 #include "synth_instrument.h"
+#include "synth_soundtrack.h"
 #include <assert.h>
 
 namespace Synth {
@@ -35,6 +36,33 @@ float random_pitch_skew(RNG* rng, float amount_semitones)
     return (normalized * 2.0f - 1.0f) * amount_semitones;
 }
 
+// Pulse waveshaper: morphs the normalized wave toward a pulse (step) shape.
+// mix 0 returns the wave bit-exactly; mix 255 returns the hard step, the min or
+// max of the normalized range switching at the mid value (inclusive on the high
+// side).  In between, half_width = mix / 510 narrows the linear middle band
+// [half_width, 1 - half_width] and grows the flat regions toward 0 and 1; the
+// output stays within [0, 1] and is monotonic in both wave_value and mix.
+static float pulse_shaper(float wave_value, uint8_t pulse_mix)
+{
+    if (! pulse_mix) {
+        return wave_value; // mix 0: bit-exact identity
+    }
+
+    if (pulse_mix == 255) {
+        return (wave_value >= 0.5f) ? 1.0f : 0.0f; // mix 255: step, no division
+    }
+
+    const float half_width = static_cast<float>(pulse_mix) / 510.0f;
+    if (wave_value < half_width) {
+        return 0.0f; // flat floor: the exact minimum
+    }
+    if (wave_value > 1.0f - half_width) {
+        return 1.0f; // flat ceiling: the exact maximum (the division alone can round an ulp short)
+    }
+    const float shaped = (wave_value - half_width) / (1.0f - 2.0f * half_width);
+    return (shaped > 1.0f) ? 1.0f : shaped; // ponytail: clamps the one-ulp overshoot on the upper boundary
+}
+
 // Normalized LFO wave in [0, 1] at the given tick, using period_ms for the rate.
 static float eval_lfo_normalized(const LFODescriptor& lfo,
                                  uint32_t             lfo_tick,
@@ -42,23 +70,58 @@ static float eval_lfo_normalized(const LFODescriptor& lfo,
                                  uint32_t             sampling_rate,
                                  uint32_t             period_ms)
 {
+    // Absolute descriptors may carry period_ms == 0 (editor slot, decoded
+    // banks); mirror the >= 1 ms clamp used for resolved divisions so the
+    // phase division can never see 0.
+    if (period_ms == 0) {
+        period_ms = 1;
+    }
     const float phase = static_cast<float>(lfo_tick) * static_cast<float>(step_samples * 1000u) /
-                        static_cast<float>(period_ms * sampling_rate);
+                        static_cast<float>(static_cast<uint64_t>(period_ms) * sampling_rate);
+
+    float wave;
 
     switch (lfo.wave) {
-        case WaveType::sine_wave:
-            return (vmath::sincos(phase * vmath::two_pi).sin + 1.0f) * 0.5f;
+        case WaveType::sine_wave: {
+            // Start point: the cycle position p the wave shows at phase 0
+            // (middle 0, lowest 3/4, highest 1/4); see the offset note at the
+            // sawtooth case.
+            assert(lfo.start_point <= 2);
+            const float offset = (lfo.start_point == 1) ? 0.75f : ((lfo.start_point == 2) ? 0.25f : 0.0f);
+
+            wave = (vmath::sincos((phase + offset) * vmath::two_pi).sin + 1.0f) * 0.5f;
+            break;
+        }
 
         case WaveType::sawtooth_wave: {
-            const float frac_phase = phase - static_cast<float>(static_cast<int>(phase));
-            const float duty       = static_cast<float>(lfo.duty) / 255.0f;
+            const float duty = static_cast<float>(lfo.duty) / 255.0f;
+            float       frac_phase = phase - static_cast<float>(static_cast<int>(phase));
 
-            if (frac_phase <= duty) {
-                return (duty > 0.0f) ? frac_phase / duty : 0.0f;
+            // Start point: the cycle position p the wave shows at phase 0
+            // (middle duty/2, lowest 0, highest duty).  The direct form
+            // frac - (1 - p) can go negative and the frac wrap truncates toward
+            // zero, so the equivalent positive form frac + p is used, computed
+            // as p itself (never as 1 - (1 - p), whose double rounding shifts
+            // the exact phase-0 values by an ulp).
+            assert(lfo.start_point <= 2);
+            if (lfo.start_point == 2) {
+                frac_phase += duty;
+            }
+            else if (lfo.start_point == 0) {
+                frac_phase += duty * 0.5f;
+            }
+            if (frac_phase >= 1.0f) {
+                frac_phase -= 1.0f;
             }
 
-            const float fall = 1.0f - duty;
-            return (fall > 0.0f) ? (1.0f - frac_phase) / fall : 0.0f;
+            if (frac_phase <= duty) {
+                wave = (duty > 0.0f) ? frac_phase / duty : 0.0f;
+            }
+            else {
+                const float fall = 1.0f - duty;
+                wave = (fall > 0.0f) ? (1.0f - frac_phase) / fall : 0.0f;
+            }
+            break;
         }
 
         default:
@@ -66,11 +129,57 @@ static float eval_lfo_normalized(const LFODescriptor& lfo,
             assert(lfo.wave == WaveType::sine_wave || lfo.wave == WaveType::sawtooth_wave);
             return 0.0f;
     }
+
+    // The pulse morph composes with the duty shape and the start-point offset.
+    return pulse_shaper(wave, lfo.pulse_mix);
+}
+
+float lfo_beat_div_period_ms(uint8_t beat_div)
+{
+    assert(beat_div <= 5);
+
+    float beats;
+    switch (beat_div) {
+        case 1:
+            beats = 4.0f;   // 1 note
+            break;
+        case 2:
+            beats = 2.0f;   // 1/2 note
+            break;
+        case 3:
+            beats = 1.0f;   // 1/4 note
+            break;
+        case 4:
+            beats = 0.5f;   // 1/8 note
+            break;
+        case 5:
+            beats = 0.25f;  // 1/16 note
+            break;
+        default:
+            return 0.0f;    // div 0 (and invalid values): absolute period applies
+    }
+
+    return beats * 60000.0f / static_cast<float>(get_runtime_tempo_bpm());
+}
+
+// Resolves an LFO's evaluation period in ms: a set beat_div resolves against the
+// runtime tempo (rounded to the nearest ms, clamped to at least 1 ms so the phase
+// division can never see 0); div 0 keeps the descriptor's absolute period.
+static uint32_t resolved_lfo_period_ms(const LFODescriptor& lfo)
+{
+    const float resolved_ms = lfo_beat_div_period_ms(lfo.beat_div);
+    if (resolved_ms == 0.0f) {
+        return lfo.period_ms;
+    }
+
+    const uint32_t period = static_cast<uint32_t>(resolved_ms + 0.5f);
+    return period ? period : 1;
 }
 
 float eval_lfo(const LFODescriptor& lfo, uint32_t lfo_tick, uint32_t step_samples, uint32_t sampling_rate)
 {
-    const float wave = eval_lfo_normalized(lfo, lfo_tick, step_samples, sampling_rate, lfo.period_ms);
+    const uint32_t period_ms = resolved_lfo_period_ms(lfo);
+    const float    wave      = eval_lfo_normalized(lfo, lfo_tick, step_samples, sampling_rate, period_ms);
 
     return lfo.min_value + wave * lfo.min_max_delta;
 }
@@ -524,13 +633,16 @@ float Synth::eval_sourced_lfo(const ParamDescriptor::LFOParam& gen,
                               const uint32_t                   lfo_tick)
 {
     const float depth = gen.depth_param_id ? depth_source_value * gen.depth : gen.depth;
-    // A rate source offsets the LFO's own period (ms) by source * rate_scale_ms; without one,
-    // period 0 tells eval_lfo_mod to use the descriptor period unchanged.  Clamp the offset
-    // result to at least 1 ms so an editor-supplied scale can never drive the period negative
-    // (unsigned underflow) or to zero (a divide-by-zero in the LFO phase).
-    const float    base_ms   = static_cast<float>(gen.lfo.period_ms);
-    const float    offset_ms = base_ms + rate_source_value * gen.rate_scale_ms;
-    const uint32_t period    = gen.rate_param_id ? static_cast<uint32_t>(offset_ms > 1.0f ? offset_ms : 1.0f) : 0;
+    // The base period is the beat_div resolution against the runtime tempo when
+    // beat_div is set, otherwise the descriptor period (ms).  A rate source offsets
+    // that base by source * rate_scale_ms; the offset result clamps to at least 1 ms
+    // so an editor-supplied scale can never drive the period negative (unsigned
+    // underflow) or to zero (a divide-by-zero in the LFO phase).
+    const float    base_ms   = static_cast<float>(resolved_lfo_period_ms(gen.lfo));
+    // The rate source only offsets the base when one is configured; its value is
+    // ignored otherwise (the caller still passes the leaf snapshot).
+    const float    offset_ms = base_ms + (gen.rate_param_id ? rate_source_value * gen.rate_scale_ms : 0.0f);
+    const uint32_t period    = static_cast<uint32_t>(offset_ms > 1.0f ? offset_ms : 1.0f);
     return eval_lfo_mod(gen.lfo, lfo_tick, rt_step_samples, rt_sampling_rate, period, depth, gen.op);
 }
 

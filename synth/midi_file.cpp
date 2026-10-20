@@ -135,22 +135,28 @@ static bool parse_track(const uint8_t* data,
 
             if (meta_type == 0x51u && meta_len == 3) {
 
-                if (*out_size >= max_merge_events) {
-                    return false;
+                // A zero tempo is malformed (it cannot produce a tick rate); the
+                // event is skipped entirely in both modes.
+                const uint32_t us_per_quarter = read_be(&data[pos], 3);
+                if (us_per_quarter != 0) {
+
+                    if (*out_size >= max_merge_events) {
+                        return false;
+                    }
+
+                    MergedEvent* event = &merge_buffer[*out_size];
+
+                    event->abs_tick       = abs_tick;
+                    event->order          = *order;
+                    event->is_tempo       = true;
+                    event->us_per_quarter = us_per_quarter;
+                    event->status         = 0;
+                    event->data0          = 0;
+                    event->data1          = 0;
+
+                    (*out_size)++;
+                    (*order)++;
                 }
-
-                MergedEvent* event = &merge_buffer[*out_size];
-
-                event->abs_tick       = abs_tick;
-                event->order          = *order;
-                event->is_tempo       = true;
-                event->us_per_quarter = read_be(&data[pos], 3);
-                event->status         = 0;
-                event->data0          = 0;
-                event->data1          = 0;
-
-                (*out_size)++;
-                (*order)++;
             }
 
             pos += meta_len;
@@ -337,6 +343,29 @@ uint32_t parse_midi_file(const uint8_t* data,
         prev_tick       =  merged->abs_tick;
 
         if (merged->is_tempo) {
+            if (emit_ticks) {
+                if (out_count >= max_events) {
+                    break;
+                }
+
+                // Capture the tempo change into the output stream; the value is
+                // the integer BPM rounded to nearest, the same resolution the
+                // editor tempo box works at.  A tempo so fast the BPM exceeds
+                // the 16-bit field is skipped (the event is dropped, the tempo
+                // still updates for the sample-time conversion below).
+                const uint32_t tempo_bpm =
+                    (60000000u + merged->us_per_quarter / 2u) / merged->us_per_quarter;
+                if (tempo_bpm <= 65535u) {
+                    MidiEvent& tempo_event = events[out_count];
+                    tempo_event          = MidiEvent { };
+                    tempo_event.time     = merged->abs_tick;
+                    tempo_event.channel  = 0;
+                    tempo_event.event    = EvType::tempo;
+                    tempo_event.tempo_bpm = static_cast<uint16_t>(tempo_bpm);
+                    out_count++;
+                }
+            }
+
             us_per_quarter = merged->us_per_quarter;
             continue;
         }

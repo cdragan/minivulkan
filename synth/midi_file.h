@@ -16,8 +16,9 @@ namespace Synth {
 // max_events events; returns the number written, or 0 on a malformed file.
 //
 // With emit_ticks false, event times are samples computed from the file's division (ticks/quarter)
-// and tempo (FF 51 03) meta events.  With emit_ticks true, event times are raw MIDI ticks and
-// sampling_rate is ignored.
+// and tempo (FF 51 03) meta events.  With emit_ticks true, event times are raw MIDI ticks, and
+// each FF 51 event is additionally emitted as an EvType::tempo event with channel 0 (sample mode
+// stays unchanged: tempo events are consumed for the conversion and not emitted).
 uint32_t parse_midi_file(const uint8_t* data,
                          uint32_t       size,
                          MidiEvent*     events,

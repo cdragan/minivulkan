@@ -39,9 +39,12 @@ enum class WaveType : uint8_t {
 struct LFODescriptor {
     WaveType wave;          // LFO wave type
     uint8_t  duty;          // Duty for sawtooth wave (0=left, 0x7F=triangle, 0xFF=right)
-    uint16_t period_ms;     // Period of the LFO, in milliseconds
+    uint16_t period_ms;     // Period of the LFO, in milliseconds (absolute mode)
     float    min_value;     // Minimum value produced by the LFO
     float    min_max_delta; // Delta between minimum and maximum value produced
+    uint8_t  pulse_mix;     // Pulse morph mix: 0 = off (wave unchanged), 255 = full pulse step
+    uint8_t  beat_div;      // 0 = absolute period_ms, 1..5 = 1 note, 1/2, 1/4, 1/8, 1/16 note
+    uint8_t  start_point;   // 0 = middle (default), 1 = lowest, 2 = highest
 };
 
 // Per-envelope behavior bits, stored in EnvelopeDescriptor::flags.
@@ -292,11 +295,19 @@ float sustain_decay_per_tick(uint32_t total_ticks);
 // Exists as a pure predicate so the termination gating is unit-testable.
 bool sustain_decay_owns_termination(bool decaying, float dest_value);
 
+// Resolves an LFO beat division to a period in ms at the current runtime tempo.
+// div 0 returns 0 (the descriptor's absolute period_ms applies unchanged).
+// div 1..5 is 1 note, 1/2, 1/4, 1/8, 1/16: 4, 2, 1, 0.5, 0.25 beats.
+float lfo_beat_div_period_ms(uint8_t beat_div);
+
 // Evaluates a Low Frequency Oscillator
 // - lfo           - the LFO descriptor
 // - lfo_tick      - current LFO position, in ticks
 // - step_samples  - LFO update granularity
 // - sampling_rate - audio sampling rate
+// A set beat_div resolves the period against the runtime tempo before use, and
+// the start_point offsets the wave phase so both waves begin at the chosen
+// value (middle, lowest or highest).
 float eval_lfo(const LFODescriptor& lfo, uint32_t lfo_tick, uint32_t step_samples, uint32_t sampling_rate);
 
 // Evaluates a Low Frequency Oscillator with sourced rate and depth.
@@ -317,10 +328,12 @@ float eval_lfo_mod(const LFODescriptor& lfo,
                    SourceOp             op);
 
 // Evaluates one sourced LFO node: the descriptor depth scales the depth source's
-// value, the rate source's value offsets the LFO's own period (ms) by rate_scale_ms,
-// and the offset result clamps to at least 1 ms (0 = use the descriptor period
-// unchanged; the clamp keeps an editor-supplied scale from driving the period
-// negative (unsigned underflow) or to zero (a divide-by-zero in the LFO phase)).
+// value, and the rate source's value offsets the node's base period by rate_scale_ms.
+// The base period is the beat_div resolution against the runtime tempo when beat_div
+// is set, otherwise the descriptor period_ms; the rate offset result clamps to at
+// least 1 ms in both cases (the clamp keeps an editor-supplied scale from driving
+// the period negative (unsigned underflow) or to zero (a divide-by-zero in the LFO
+// phase)).
 // - gen                - the node's LFO generator descriptor
 // - depth_source_value - depth source leaf value (the advancing caller's previous
 //                        step value, the note-on onset value in the trigger caller)

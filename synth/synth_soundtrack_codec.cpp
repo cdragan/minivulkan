@@ -18,6 +18,8 @@ static uint32_t event_duration[max_soundtrack_events];
 // Some MIDI events are not stored in the soundtrack, specifically:
 // - note_off is folded into a note_on duration
 // - program_change and channel_pressure are not supported, so dropped.
+// FF 51 tempo events are not dropped either: they are captured as EvType::tempo
+// events and ride the stream.
 static bool is_stored_event(EvType event)
 {
     switch (event) {
@@ -25,6 +27,7 @@ static bool is_stored_event(EvType event)
         case EvType::aftertouch:
         case EvType::controller:
         case EvType::pitch_bend:
+        case EvType::tempo:
             return true;
 
         default:
@@ -131,7 +134,6 @@ uint32_t encode_soundtrack(const MidiEvent*  events,
                 return 0;
             }
         }
-
         if (event.channel + 1u > used_channels) {
             used_channels = event.channel + 1u;
         }
@@ -281,6 +283,27 @@ uint32_t encode_soundtrack(const MidiEvent*  events,
         }
     }
 
+    // Tempo plane: one BPM value per tempo event, low byte first.
+    for (uint32_t channel = 0; channel < used_channels; channel++) {
+
+        out->tempo_bpm[channel] = reinterpret_cast<const uint16_t*>(dest + pos);
+
+        for (uint32_t index = 0; index < num_events; index++) {
+
+            if (events[index].channel != channel || events[index].event != EvType::tempo) {
+                continue;
+            }
+
+            const uint32_t bpm = events[index].tempo_bpm;
+            if ( ! write_byte(dest, dest_size, &pos, static_cast<uint8_t>(bpm & 0xFFu))) {
+                return 0;
+            }
+            if ( ! write_byte(dest, dest_size, &pos, static_cast<uint8_t>((bpm >> 8) & 0xFFu))) {
+                return 0;
+            }
+        }
+    }
+
     return pos;
 }
 
@@ -318,6 +341,7 @@ uint32_t decode_soundtrack(const Soundtrack& soundtrack, MidiEvent* events, uint
         const uint8_t* ctrl_data_ptr = soundtrack.ctrl_data[channel];
         const uint8_t* bend_lo_ptr   = soundtrack.pitch_bend_lo[channel];
         const uint8_t* bend_hi_ptr   = soundtrack.pitch_bend_hi[channel];
+        const uint8_t* tempo_ptr     = reinterpret_cast<const uint8_t*>(soundtrack.tempo_bpm[channel]);
         const uint8_t* event_ptr     = soundtrack.events[channel];
 
         uint32_t event_index = 0;
@@ -358,6 +382,12 @@ uint32_t decode_soundtrack(const Soundtrack& soundtrack, MidiEvent* events, uint
                 const int hi = *(bend_hi_ptr++);
 
                 decoded.pitch_bend = static_cast<int16_t>((hi << 7) + lo - soundtrack_pitch_bend_center);
+            }
+            else if (static_cast<EvType>(code) == EvType::tempo) {
+                const int lo = *(tempo_ptr++);
+                const int hi = *(tempo_ptr++);
+
+                decoded.tempo_bpm = static_cast<uint16_t>(lo + (hi << 8));
             }
             else {
                 decoded.note      = *(note_ptr++);

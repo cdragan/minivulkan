@@ -15,6 +15,8 @@
 using Sculptor::bounded_real_slot;
 using Sculptor::input_slot;
 using Sculptor::int_slot;
+using Sculptor::lfo_start_names;
+using Sculptor::lfo_sync_names;
 using Sculptor::lfo_wave_names;
 using Sculptor::list_slot;
 using Sculptor::make_slot;
@@ -856,7 +858,13 @@ static uint32_t create_lfo_node(Sculptor::Graph*            graph,
     const uint32_t duty_idx =
         graph->add_slot(node, bounded_real_slot("Duty", static_cast<float>(lfo.duty) / 255.0f, 0.0f, 1.0f));
     graph->set_slot_edit_disabled(node, duty_idx, lfo.wave == Synth::WaveType::sine_wave);
-    graph->add_slot(node, int_slot("Period (ms)", lfo.period_ms));
+    const uint32_t period_idx = graph->add_slot(node, int_slot("Period (ms)", lfo.period_ms));
+    graph->set_slot_edit_disabled(node, period_idx, lfo.beat_div != 0);
+    // Shared slot order with the effect-graph LFO projection
+    // (sculptor_effect_graph.cpp): the fx apply dispatch is index-based.
+    graph->add_slot(node, bounded_real_slot("Pulse", static_cast<float>(lfo.pulse_mix) / 255.0f, 0.0f, 1.0f));
+    graph->add_slot(node, list_slot("Sync", lfo_sync_names, 6, lfo.beat_div <= 5 ? lfo.beat_div : 0));
+    graph->add_slot(node, list_slot("Start", lfo_start_names, 3, lfo.start_point <= 2 ? lfo.start_point : 0));
     return node;
 }
 
@@ -2058,21 +2066,34 @@ bool Sculptor::apply_osc_graph_descriptor_edit(const Graph&           graph,
     }
     Synth::LFODescriptor& lfo = bank->lfos.entries[desc_id - 1];
     if (slot.property_type == PropertyType::real) {
-        if (strncmp(slot.name, "Duty", sizeof(slot.name)) != 0 || ! (value.real >= 0.0f && value.real <= 1.0f)) {
+        if (! (value.real >= 0.0f && value.real <= 1.0f)) {
             return false;
         }
-
-        lfo.duty = static_cast<uint8_t>(value.real * 255.0f + 0.5f);
-        return true;
+        if (strncmp(slot.name, "Duty", sizeof(slot.name)) == 0) {
+            lfo.duty = static_cast<uint8_t>(value.real * 255.0f + 0.5f);
+            return true;
+        }
+        if (strncmp(slot.name, "Pulse", sizeof(slot.name)) == 0) {
+            lfo.pulse_mix = static_cast<uint8_t>(value.real * 255.0f + 0.5f);
+            return true;
+        }
+        return false;
     }
-    if (slot.property_type == PropertyType::list) {
-        if (strncmp(slot.name, "Waveform", sizeof(slot.name)) != 0 || value.list_index >= slot.num_list_options) {
-            return false;
+    if (slot.property_type == PropertyType::list && value.list_index < slot.num_list_options) {
+        if (strncmp(slot.name, "Waveform", sizeof(slot.name)) == 0) {
+            // The two-option wave list keeps the descriptor inside the runtime's
+            // sine/sawtooth palette.
+            lfo.wave = value.list_index == 0 ? Synth::WaveType::sine_wave : Synth::WaveType::sawtooth_wave;
+            return true;
         }
-        // The two-option wave list keeps the descriptor inside the runtime's
-        // sine/sawtooth palette.
-        lfo.wave = value.list_index == 0 ? Synth::WaveType::sine_wave : Synth::WaveType::sawtooth_wave;
-        return true;
+        if (strncmp(slot.name, "Sync", sizeof(slot.name)) == 0) {
+            lfo.beat_div = static_cast<uint8_t>(value.list_index);
+            return true;
+        }
+        if (strncmp(slot.name, "Start", sizeof(slot.name)) == 0) {
+            lfo.start_point = static_cast<uint8_t>(value.list_index);
+            return true;
+        }
     }
     if (slot.property_type == PropertyType::integer && value.integer >= 0) {
         if (strncmp(slot.name, "Period (ms)", sizeof(slot.name)) == 0 && value.integer <= 65535) {
@@ -2270,9 +2291,24 @@ static void sync_lfo_descriptor_views(Synth::InstrumentEditorBank*     bank,
                 value.integer = lfo.period_ms;
                 graph->set_slot_value(entry.node_idx, slot, value);
             }
+
+            if (strncmp(slot_ref.name, "Pulse", sizeof(slot_ref.name)) == 0) {
+                value.real = static_cast<float>(lfo.pulse_mix) / 255.0f;
+                graph->set_slot_value(entry.node_idx, slot, value);
+            }
+
+            if (strncmp(slot_ref.name, "Sync", sizeof(slot_ref.name)) == 0) {
+                value.list_index = lfo.beat_div <= 5 ? lfo.beat_div : 0;
+                graph->set_slot_value(entry.node_idx, slot, value);
+            }
+
+            if (strncmp(slot_ref.name, "Start", sizeof(slot_ref.name)) == 0) {
+                value.list_index = lfo.start_point <= 2 ? lfo.start_point : 0;
+                graph->set_slot_value(entry.node_idx, slot, value);
+            }
         }
 
-        refresh_lfo_duty_disabled(*graph, entry.node_idx);
+        refresh_lfo_edit_disabled(*graph, entry.node_idx);
     }
 }
 

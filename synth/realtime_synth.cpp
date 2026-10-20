@@ -46,11 +46,6 @@ using Synth::num_fir_taps;
 // Number of samples which have been rendered since playback started.
 uint32_t rendered_samples;
 
-constexpr uint32_t default_midi_tempo_bpm         = 120;
-constexpr uint32_t default_midi_ticks_per_quarter = 192;
-uint32_t           samples_per_midi_tick =
-    (Synth::rt_sampling_rate * 60u) / (default_midi_tempo_bpm * default_midi_ticks_per_quarter);
-
 // Stores current per-channel time measured in samples
 uint32_t channel_samples[Synth::max_channels];
 
@@ -637,6 +632,9 @@ bool                   fir_taps_cleared     = false;
 
 } // namespace
 
+// Player tick rate, owned by synth_soundtrack.cpp (set_runtime_tempo_bpm).
+using Synth::samples_per_midi_tick;
+
 // A layer carries a filter iff its spread target can modulate at all: a
 // nonzero base, an envelope, an LFO, or any routed input.  Spread is the
 // only oscillator filter, and a base-0 LFO/MIDI routing still produces
@@ -1015,6 +1013,9 @@ static bool get_next_midi_event(DispatchedMidiEvent* event, uint32_t end_samples
     else if (static_cast<Synth::EvType>(event_code) == Synth::EvType::controller) {
         event->controller      = *(Synth::midi_ctrl[channel]++);
         event->controller_data = *(Synth::midi_ctrl_data[channel]++);
+    }
+    else if (static_cast<Synth::EvType>(event_code) == Synth::EvType::tempo) {
+        event->tempo_bpm = *(Synth::midi_tempo_bpm[channel]++);
     }
     else {
         assert(event_code == static_cast<uint8_t>(Synth::EvType::pitch_bend));
@@ -1489,6 +1490,12 @@ static void process_channel_pressure(uint32_t delta_samples, const DispatchedMid
     // Drive the per-channel pressure leaf (value and prev_value) so the combine reads it with zero lag.
     const uint32_t pressure_node = channel_param(event.channel, chan_param_pressure);
     Synth::write_external_leaf(static_cast<float>(event.note_data) / 127.0f, leaf(pressure_node));
+}
+
+static void process_tempo(uint32_t, const DispatchedMidiEvent& event)
+{
+    // The delta argument is unused: the new tick rate applies from the next event on.
+    Synth::set_runtime_tempo_bpm(event.tempo_bpm);
 }
 
 using EventHandler = void (*)(uint32_t delta_samples, const DispatchedMidiEvent& event);

@@ -20,6 +20,7 @@ extern const uint8_t* midi_ctrl[];           // Per-channel controllers for cont
 extern const uint8_t* midi_ctrl_data[];      // Per-channel controller data for controller events
 extern const uint8_t* midi_pitch_bend_lo[];  // Per-channel pitch bend LSB values
 extern const uint8_t* midi_pitch_bend_hi[];  // Per-channel pitch bend MSB values
+extern const uint16_t* midi_tempo_bpm[];     // Per-channel tempo BPM values, one per tempo event
 
 #define MIDI_EVENT_TYPES(X) \
     X(note_off)             \
@@ -28,7 +29,8 @@ extern const uint8_t* midi_pitch_bend_hi[];  // Per-channel pitch bend MSB value
     X(controller)           \
     X(program_change)       \
     X(channel_pressure)     \
-    X(pitch_bend)
+    X(pitch_bend)           \
+    X(tempo)
 
 enum class EvType : uint8_t {
 #define X(name) name,
@@ -50,7 +52,8 @@ struct MidiEvent {
             uint8_t controller;
             uint8_t controller_data;
         };
-        int16_t pitch_bend; // Used by pitch_bend events
+        int16_t  pitch_bend; // Used by pitch_bend events
+        uint16_t tempo_bpm;  // Used by tempo events
     };
 };
 

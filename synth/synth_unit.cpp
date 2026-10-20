@@ -6,6 +6,7 @@
 #endif
 
 #include "../core/rng.h"
+#include "../core/vecfloat.h" // vmath::sincos for the LFO reference formula below
 #include "../sculptor/sculptor_bank_json.h"
 #include "../sculptor/sculptor_effect_graph.h"
 #include "../sculptor/sculptor_graph.h"
@@ -8410,6 +8411,26 @@ static void osc_direct_modulator_regressions()
                                 1.0e-6f));
                     TEST(! t7_graph.slot_edit_disabled(entry.node_idx, alias_duty));
                 }
+
+                // Sync and Start edits apply through the same list dispatch
+                // as the Waveform edit above: beat_div and start_point write
+                // through to the descriptor.
+                uint32_t sync_slot  = Sculptor::pool_no_slot;
+                uint32_t start_slot = Sculptor::pool_no_slot;
+                TEST(find_graph_slot(t7_graph, node, "Sync", &sync_slot));
+                TEST(find_graph_slot(t7_graph, node, "Start", &start_slot));
+                edit.slot_idx = sync_slot;
+                Sculptor::PropertyValue sync_value = {};
+                sync_value.list_index = 3;
+                t7_graph.set_slot_value(node, sync_slot, sync_value);
+                TEST(Sculptor::apply_osc_graph_change(&candidate, &t7_graph, &t7_mapping, edit));
+                TEST(candidate.bank.lfos.entries[aliased_desc - 1].beat_div == 3);
+                edit.slot_idx = start_slot;
+                Sculptor::PropertyValue start_value = {};
+                start_value.list_index = 2;
+                t7_graph.set_slot_value(node, start_slot, start_value);
+                TEST(Sculptor::apply_osc_graph_change(&candidate, &t7_graph, &t7_mapping, edit));
+                TEST(candidate.bank.lfos.entries[aliased_desc - 1].start_point == 2);
             }
         }
     }
@@ -12870,6 +12891,26 @@ static void osc_stamp_pool_clear_regressions()
     }
 }
 
+// R1/R3 reference: the normalized LFO formula (eval_lfo_normalized in
+// synth_parameters.cpp, without the pulse shaper).  The pulse_mix identity and
+// mix-shape tests compare against it so the unshaped behavior stays pinned
+// bit-exactly; the phase formula and the sine/saw switch replicate the
+// production code one to one.
+static float lfo_reference_normalized(const Synth::WaveType wave, const uint8_t duty8, const uint32_t tick, const uint32_t period_ms)
+{
+    const float phase = static_cast<float>(tick) * static_cast<float>(256u * 1000u) / static_cast<float>(period_ms * 44100u);
+    if (wave == Synth::WaveType::sine_wave) {
+        return (vmath::sincos(phase * vmath::two_pi).sin + 1.0f) * 0.5f;
+    }
+    const float frac_phase = phase - static_cast<float>(static_cast<int>(phase));
+    const float duty       = static_cast<float>(duty8) / 255.0f;
+    if (frac_phase <= duty) {
+        return (duty > 0.0f) ? frac_phase / duty : 0.0f;
+    }
+    const float fall = 1.0f - duty;
+    return (fall > 0.0f) ? (1.0f - frac_phase) / fall : 0.0f;
+}
+
 int main()
 {
     external_held_notes_regressions();
@@ -13567,6 +13608,531 @@ int main()
         const float defaulted     = Synth::eval_lfo_mod(lfo, 1, 256, 1024, 0, 0.5f, Synth::SourceOp::add);
         const float explicit_same = Synth::eval_lfo_mod(lfo, 1, 256, 1024, 1000, 0.5f, Synth::SourceOp::add);
         TEST(approx(defaulted, explicit_same, 0.001f));
+    }
+
+    // R8: lfo_beat_div_period_ms resolves a beat division to a period in ms at
+    // the runtime tempo.  Div 0 returns 0 (the descriptor's absolute period
+    // applies); divs 1..5 are 1, 1/2, 1/4, 1/8, 1/16 note, which at the 120 BPM
+    // default resolve to 2000, 1000, 500, 250, 125 ms (exact).
+    {
+        TEST(Synth::lfo_beat_div_period_ms(0) == 0.0f);
+        TEST(Synth::lfo_beat_div_period_ms(1) == 2000.0f);
+        TEST(Synth::lfo_beat_div_period_ms(2) == 1000.0f);
+        TEST(Synth::lfo_beat_div_period_ms(3) == 500.0f);
+        TEST(Synth::lfo_beat_div_period_ms(4) == 250.0f);
+        TEST(Synth::lfo_beat_div_period_ms(5) == 125.0f);
+    }
+
+    // R9: the asset-less default is 120 BPM with the historical tick rate 114
+    // (44100 * 60 / (120 * 192), integer division).  R8/R9: the setter
+    // recomputes the tick rate, the beat_div periods scale with the tempo, and
+    // one quarter (192 ticks) spans 21888 samples at 120 and 29376 at 90, so
+    // deltas scheduled after a tempo change scale with the new rate.  The test
+    // resets the tempo to 120 at the end (state hygiene for later tests).
+    {
+        TEST(Synth::get_runtime_tempo_bpm() == 120);
+        TEST(Synth::samples_per_midi_tick == 114);
+        TEST(Synth::samples_per_midi_tick * 192u == 21888u);
+
+        Synth::set_runtime_tempo_bpm(90);
+        TEST(Synth::get_runtime_tempo_bpm() == 90);
+        TEST(Synth::samples_per_midi_tick == 153);
+        TEST(Synth::samples_per_midi_tick * 192u == 29376u);
+        // Div 3 is a quarter note: 60000 / 90 = 666.67 ms; div 1 is 4 beats.
+        TEST(approx(Synth::lfo_beat_div_period_ms(3), 666.667f, 1.0f));
+        TEST(approx(Synth::lfo_beat_div_period_ms(1), 2666.667f, 1.0f));
+
+        // A beat_div 3 LFO with no rate source evaluates with the resolved
+        // period (rounded to the nearest ms), matching eval_lfo_mod driven
+        // with that period.  A quarter period in, the sine sits at its peak.
+        Synth::LFODescriptor synced_lfo = { Synth::WaveType::sine_wave, 0, 1000, 0.0f, 1.0f };
+        synced_lfo.beat_div = 3;
+        Synth::ParamDescriptor::LFOParam synced_gen = {};
+        synced_gen.lfo   = synced_lfo;
+        synced_gen.op    = Synth::SourceOp::add;
+        synced_gen.depth = 0.5f;
+        const uint32_t resolved_ms = static_cast<uint32_t>(Synth::lfo_beat_div_period_ms(3) + 0.5f);
+        for (uint32_t tick = 0; tick < 16; tick++) {
+            TEST(Synth::eval_sourced_lfo(synced_gen, 0.0f, 0.0f, tick) ==
+                 Synth::eval_lfo_mod(synced_lfo, tick, Synth::rt_step_samples, Synth::rt_sampling_rate, resolved_ms, 0.5f, Synth::SourceOp::add));
+        }
+        const float quarter_in = Synth::eval_sourced_lfo(synced_gen, 0.0f, 0.0f, 29);
+        // The sine sits at its peak; the add-modulated peak value with depth
+        // 0.5 is exactly the depth (the wave contribution 2w - 1 reaches 1).
+        TEST(approx(quarter_in, 0.5f, 0.01f));
+
+        Synth::set_runtime_tempo_bpm(120);
+        TEST(Synth::get_runtime_tempo_bpm() == 120);
+        TEST(Synth::samples_per_midi_tick == 114);
+        TEST(Synth::samples_per_midi_tick * 192u == 21888u);
+    }
+
+    // R8/T1: a tempo change does not reset the LFO phase.  The cycle position
+    // is recomputed from the absolute tick, so after the change the wave shows
+    // the value at the same absolute tick under the new period; it does not
+    // restart at phase 0.  The test resets the tempo to 120 at the end.
+    {
+        Synth::ParamDescriptor::LFOParam gen = {};
+        gen.lfo = { Synth::WaveType::sine_wave, 0, 1000, 0.0f, 1.0f };
+        gen.lfo.beat_div = 3; // 500 ms at the 120 BPM default
+        gen.op    = Synth::SourceOp::add;
+        gen.depth = 1.0f;
+        const uint32_t tick   = 200;
+        const float    before = Synth::eval_sourced_lfo(gen, 0.0f, 0.0f, tick);
+        Synth::set_runtime_tempo_bpm(90);
+        const float after = Synth::eval_sourced_lfo(gen, 0.0f, 0.0f, tick + 1);
+        const uint32_t resolved_ms = static_cast<uint32_t>(Synth::lfo_beat_div_period_ms(3) + 0.5f);
+        TEST(after == Synth::eval_lfo_mod(gen.lfo, tick + 1, Synth::rt_step_samples, Synth::rt_sampling_rate, resolved_ms, 1.0f, Synth::SourceOp::add));
+        // Tick 201 sits deep in the cycle under the new period; a phase reset
+        // would read the mid value 0.5 instead.
+        TEST(! approx(after, 0.5f, 0.1f));
+        TEST(! approx(before, after, 0.05f));
+        Synth::set_runtime_tempo_bpm(120);
+        TEST(Synth::get_runtime_tempo_bpm() == 120);
+        TEST(Synth::samples_per_midi_tick == 114);
+    }
+
+    // R9/R11: a mid-song FF 51 tempo event is captured.  With emit_ticks true
+    // the parser emits it between the voice events at its tick (channel 0,
+    // bpm 90); with emit_ticks false it is consumed for the conversion and not
+    // emitted, and the later deltas scale with the new tempo.  The soundtrack
+    // codec round-trips the tempo event (code, tick, value) exactly.
+    {
+        static const uint8_t midi[] = {
+            0x4D, 0x54, 0x68, 0x64, 0x00, 0x00, 0x00, 0x06,
+            0x00, 0x00, 0x00, 0x01, 0x00, 0x60, // division 96
+            0x4D, 0x54, 0x72, 0x6B, 0x00, 0x00, 0x00, 0x13, // track length 19
+            0x00, 0x90, 0x3C, 0x64, // delta 0, note_on ch0 note 60 vel 100
+            0x60, 0xFF, 0x51, 0x03, 0x0A, 0x2C, 0x2B, // delta 96, tempo 666667 us/quarter (90 BPM)
+            0x60, 0x80, 0x3C, 0x40, // delta 96, note_off ch0 note 60 vel 64
+            0x00, 0xFF, 0x2F, 0x00, // end of track
+        };
+        Synth::MidiEvent    events[8];
+        const uint32_t count = Synth::parse_midi_file(midi, sizeof(midi), events, 8, 44100, true);
+        TEST(count == 3);
+        TEST(events[0].event == Synth::EvType::note_on);
+        TEST(events[0].time == 0);
+        TEST(events[1].event == Synth::EvType::tempo);
+        TEST(events[1].channel == 0);
+        TEST(events[1].time == 96); // absolute tick
+        TEST(events[1].tempo_bpm == 90);
+        TEST(events[2].event == Synth::EvType::note_off);
+        TEST(events[2].time == 192);
+
+        // Sample mode: no tempo event, but the conversion consumes it, so the
+        // note_off lands at 96 ticks at 120 BPM plus 96 at 90 BPM (div 96).
+        Synth::MidiEvent sampled[8];
+        TEST(Synth::parse_midi_file(midi, sizeof(midi), sampled, 8, 44100) == 2);
+        TEST(sampled[0].event == Synth::EvType::note_on && sampled[0].time == 0);
+        TEST(sampled[1].event == Synth::EvType::note_off && sampled[1].time == 51450);
+
+        // Codec round-trip: encode stores the tempo event like any stored
+        // event; decode emits it with the same code, tick and value.
+        Synth::MidiEvent stored[3] = {};
+        stored[0].time      = 0;
+        stored[0].event     = Synth::EvType::note_on;
+        stored[0].channel   = 0;
+        stored[0].note      = 60;
+        stored[0].note_data = 100;
+        stored[1].time      = 96;
+        stored[1].event     = Synth::EvType::tempo;
+        stored[1].channel   = 0;
+        stored[1].tempo_bpm = 90;
+        stored[2].time      = 192;
+        stored[2].event     = Synth::EvType::note_off;
+        stored[2].channel   = 0;
+        stored[2].note      = 60;
+        stored[2].note_data = 64;
+        uint8_t           dest[64];
+        Synth::Soundtrack soundtrack = {};
+        TEST(Synth::encode_soundtrack(stored, 3, dest, sizeof(dest), &soundtrack) > 0);
+        Synth::MidiEvent decoded[8]    = {};
+        const uint32_t   decoded_count = Synth::decode_soundtrack(soundtrack, decoded, 8);
+        TEST(decoded_count == 3);
+        uint32_t tempo_index = decoded_count;
+        for (uint32_t i = 0; i < decoded_count; i++) {
+            if (decoded[i].event == Synth::EvType::tempo) {
+                tempo_index = i;
+            }
+        }
+        TEST(tempo_index < decoded_count);
+        TEST(decoded[tempo_index].time == 96);
+        TEST(decoded[tempo_index].channel == 0);
+        TEST(decoded[tempo_index].tempo_bpm == 90);
+        for (uint32_t i = 0; i < decoded_count; i++) {
+            if (i == tempo_index) {
+                continue;
+            }
+            if (decoded[i].event == Synth::EvType::note_on) {
+                TEST(decoded[i].time == 0 && decoded[i].note == 60);
+            }
+            else {
+                TEST(decoded[i].event == Synth::EvType::note_off && decoded[i].time == 192 && decoded[i].note == 60);
+            }
+        }
+
+        // A tempo-only stream still encodes (the event counts toward
+        // used_channels) and decodes to the single tempo event.
+        Synth::MidiEvent tempo_only[1] = {};
+        tempo_only[0].time      = 5;
+        tempo_only[0].event     = Synth::EvType::tempo;
+        tempo_only[0].channel   = 0;
+        tempo_only[0].tempo_bpm = 120;
+        Synth::Soundtrack tempo_track = {};
+        TEST(Synth::encode_soundtrack(tempo_only, 1, dest, sizeof(dest), &tempo_track) > 0);
+        Synth::MidiEvent tempo_decoded[4] = {};
+        TEST(Synth::decode_soundtrack(tempo_track, tempo_decoded, 4) == 1);
+        TEST(tempo_decoded[0].event == Synth::EvType::tempo);
+        TEST(tempo_decoded[0].time == 5 && tempo_decoded[0].tempo_bpm == 120);
+    }
+
+    // R1: pulse_mix 0 is a bit-exact identity.  eval_lfo (min 0, delta 1) must
+    // equal the normalized formula reference with exact equality for sine over
+    // a full period and for sawtooth duties 0, 0x40, 0x7F, 0x80, 0xFF over
+    // sampled phases.  The saw descriptors pin start_point 1 (lowest,
+    // offset 0): the default middle start offsets the saw by duty/2, which
+    // would break the identity for every duty above 0.  The sine needs no
+    // pinning: its middle offset is 0.
+    {
+        Synth::LFODescriptor identity_sine_lfo = { Synth::WaveType::sine_wave, 0, 997, 0.0f, 1.0f };
+        identity_sine_lfo.pulse_mix = 0;
+        for (uint32_t tick = 0; tick < 996; tick++) {
+            TEST(Synth::eval_lfo(identity_sine_lfo, tick, 256, 44100) == lfo_reference_normalized(Synth::WaveType::sine_wave, 0, tick, 997));
+        }
+        const uint8_t duties[5] = { 0, 0x40, 0x7F, 0x80, 0xFF };
+        for (uint32_t duty_index = 0; duty_index < 5; duty_index++) {
+            Synth::LFODescriptor saw_lfo = { Synth::WaveType::sawtooth_wave, duties[duty_index], 997, 0.0f, 1.0f };
+            saw_lfo.pulse_mix   = 0;
+            saw_lfo.start_point = 1; // lowest: offset 0
+            for (uint32_t tick = 0; tick < 996; tick++) {
+                TEST(Synth::eval_lfo(saw_lfo, tick, 256, 44100) == lfo_reference_normalized(Synth::WaveType::sawtooth_wave, duties[duty_index], tick, 997));
+            }
+        }
+    }
+
+    // R2: pulse_mix 255 is the step.  Saw duty 0x80 (128/255, slightly above
+    // 0.5), start_point 1 (lowest, offset 0), step 256 / rate 1024 / period
+    // 1000: one tick is a quarter phase.  Phases 0, 1/4, 1/2, 3/4 give outputs
+    // 0, 0, 1, 1; the exact w = 0.5 crossings sit slightly above the sampled
+    // phases (at 64/255 on the rise, 383/510 on the fall), so the 1/4 sample
+    // reads just below mid and the 3/4 sample reads just above mid while still
+    // descending.  A sub-crossing phase (1/8 -> w 0.25) reads 0.  A sine sweep
+    // over full periods produces only 0 or 1.
+    {
+        Synth::LFODescriptor saw_lfo = { Synth::WaveType::sawtooth_wave, 0x80, 1000, 0.0f, 1.0f };
+        saw_lfo.pulse_mix   = 255;
+        saw_lfo.start_point = 1;
+        TEST(Synth::eval_lfo(saw_lfo, 0, 256, 1024) == 0.0f);
+        TEST(Synth::eval_lfo(saw_lfo, 1, 256, 1024) == 0.0f);
+        TEST(Synth::eval_lfo(saw_lfo, 2, 256, 1024) == 1.0f);
+        TEST(Synth::eval_lfo(saw_lfo, 3, 256, 1024) == 1.0f);
+        // Phase 1/8: w = (1/8) / (128/255) = 0.249..., below the crossing.
+        Synth::LFODescriptor slow_saw = saw_lfo;
+        slow_saw.period_ms = 2000;
+        TEST(Synth::eval_lfo(slow_saw, 1, 256, 1024) == 0.0f);
+        // Inclusive-rule pin: sine at phase 0 has w = (sin(0) + 1) * 0.5 = 0.5
+        // exactly, and the step reads the max there (w >= 0.5 rule).  Sine
+        // phase 1/2 is deliberately not a second pin: sincos(pi) is not exactly
+        // zero in floating point, so w there is 0.5 only up to rounding and
+        // reads min.
+        Synth::LFODescriptor step_sine_lfo = { Synth::WaveType::sine_wave, 0, 1000, 0.0f, 1.0f };
+        step_sine_lfo.pulse_mix = 255;
+        TEST(Synth::eval_lfo(step_sine_lfo, 0, 256, 1024) == 1.0f);
+        for (uint32_t tick = 0; tick < 512; tick++) {
+            const float value = Synth::eval_lfo(step_sine_lfo, tick, 256, 44100);
+            TEST(value == 0.0f || value == 1.0f);
+        }
+    }
+
+    // R3: intermediate mixes stay within [0, 1]; the output is a non-decreasing
+    // function of the unshaped wave w; the exact-min and exact-max flat regions
+    // grow with the mix; and w = 0.5 maps to 0.5 for every mix below 255.
+    {
+        const uint8_t mixes[4] = { 1, 64, 128, 254 };
+        static float  w_values[512];
+        static float  out_values[512];
+        static uint32_t order[512];
+        uint32_t zero_counts[4] = {};
+        uint32_t one_counts[4]  = {};
+        for (uint32_t mix_index = 0; mix_index < 4; mix_index++) {
+            Synth::LFODescriptor lfo = { Synth::WaveType::sine_wave, 0, 997, 0.0f, 1.0f };
+            lfo.pulse_mix = mixes[mix_index];
+            for (uint32_t tick = 0; tick < 512; tick++) {
+                w_values[tick]   = lfo_reference_normalized(Synth::WaveType::sine_wave, 0, tick, 997);
+                out_values[tick] = Synth::eval_lfo(lfo, tick, 256, 44100);
+                TEST(out_values[tick] >= 0.0f && out_values[tick] <= 1.0f);
+                if (out_values[tick] == 0.0f) {
+                    zero_counts[mix_index]++;
+                }
+                if (out_values[tick] == 1.0f) {
+                    one_counts[mix_index]++;
+                }
+                order[tick] = tick;
+            }
+            // Sort the tick indices by w (insertion sort) and require the
+            // shaped output to be non-decreasing in w.
+            for (uint32_t i = 1; i < 512; i++) {
+                const uint32_t current = order[i];
+                uint32_t       j       = i;
+                while (j > 0 && w_values[order[j - 1]] > w_values[current]) {
+                    order[j] = order[j - 1];
+                    j--;
+                }
+                order[j] = current;
+            }
+            for (uint32_t i = 0; i + 1 < 512; i++) {
+                TEST(out_values[order[i]] <= out_values[order[i + 1]] + 1.0e-6f);
+            }
+            // Sine at phase 0 has w = 0.5 exactly; every mix below 255 keeps
+            // the mid value there.
+            TEST(approx(Synth::eval_lfo(lfo, 0, 256, 1024), 0.5f, 1.0e-4f));
+        }
+        for (uint32_t mix_index = 1; mix_index < 4; mix_index++) {
+            TEST(zero_counts[mix_index] >= zero_counts[mix_index - 1]);
+            TEST(one_counts[mix_index] >= one_counts[mix_index - 1]);
+        }
+        TEST(zero_counts[3] > zero_counts[0]);
+        TEST(one_counts[3] > one_counts[0]);
+    }
+
+    // R2b: start points.  Both waves start at the middle value, rising; the
+    // start point is a constant phase offset of one cycle.  At phase 0:
+    // middle = 0.5 for both waves, sine lowest = 0.0 (cycle position 3/4),
+    // sine highest = 1.0 (1/4), saw lowest = 0.0 (position 0), saw highest =
+    // 1.0 at position duty (duty 0x80).  Composition with the morph: a start
+    // point with pulse_mix 255 keeps the step shape and shifts the transition
+    // to the offset phase.
+    {
+        Synth::LFODescriptor start_sine_lfo = { Synth::WaveType::sine_wave, 0, 1000, 0.0f, 1.0f };
+        Synth::LFODescriptor saw_lfo        = { Synth::WaveType::sawtooth_wave, 0x80, 1000, 0.0f, 1.0f };
+        start_sine_lfo.start_point = 0;
+        saw_lfo.start_point        = 0;
+        TEST(Synth::eval_lfo(start_sine_lfo, 0, 256, 1024) == 0.5f);
+        TEST(Synth::eval_lfo(saw_lfo, 0, 256, 1024) == 0.5f);
+        start_sine_lfo.start_point = 1;
+        saw_lfo.start_point        = 1;
+        TEST(approx(Synth::eval_lfo(start_sine_lfo, 0, 256, 1024), 0.0f, 0.001f));
+        TEST(Synth::eval_lfo(saw_lfo, 0, 256, 1024) == 0.0f);
+        start_sine_lfo.start_point = 2;
+        saw_lfo.start_point        = 2;
+        TEST(approx(Synth::eval_lfo(start_sine_lfo, 0, 256, 1024), 1.0f, 0.001f));
+        TEST(Synth::eval_lfo(saw_lfo, 0, 256, 1024) == 1.0f);
+        // Lowest start plus full mix: phase 0 sits at cycle position 3/4
+        // (min); a quarter period in the position wraps to 0, where
+        // w = 0.5 exactly and the step reads the max.
+        start_sine_lfo.start_point = 1;
+        start_sine_lfo.pulse_mix   = 255;
+        TEST(Synth::eval_lfo(start_sine_lfo, 0, 256, 1024) == 0.0f);
+        TEST(Synth::eval_lfo(start_sine_lfo, 1, 256, 1024) == 1.0f);
+    }
+
+    // R10: the rate source offset and the >= 1 ms clamp compose with the
+    // resolved beat_div base.  Beat_div 3 at 120 BPM resolves to 500 ms.
+    {
+        Synth::ParamDescriptor::LFOParam gen = {};
+        gen.lfo = { Synth::WaveType::sine_wave, 0, 1000, 0.0f, 1.0f };
+        gen.lfo.beat_div = 3;
+        gen.op    = Synth::SourceOp::add;
+        gen.depth = 0.5f;
+        gen.rate_param_id = 7;
+        gen.rate_scale_ms = 100.0f;
+        // Rate source 1 offsets the resolved base: 500 + 100 = 600 ms.
+        TEST(Synth::eval_sourced_lfo(gen, 0.0f, 1.0f, 3) ==
+             Synth::eval_lfo_mod(gen.lfo, 3, Synth::rt_step_samples, Synth::rt_sampling_rate, 600, 0.5f, Synth::SourceOp::add));
+        // Scale -1000 drives the offset to -500 ms; the clamp keeps 1 ms.
+        gen.rate_scale_ms = -1000.0f;
+        TEST(Synth::eval_sourced_lfo(gen, 0.0f, 1.0f, 3) ==
+             Synth::eval_lfo_mod(gen.lfo, 3, Synth::rt_step_samples, Synth::rt_sampling_rate, 1, 0.5f, Synth::SourceOp::add));
+        // With no rate source the resolved division period wins over the
+        // descriptor's own absolute period_ms.
+        gen.rate_param_id  = 0;
+        gen.lfo.period_ms  = 12345;
+        TEST(Synth::eval_sourced_lfo(gen, 0.0f, 0.0f, 3) ==
+             Synth::eval_lfo_mod(gen.lfo, 3, Synth::rt_step_samples, Synth::rt_sampling_rate, 500, 0.5f, Synth::SourceOp::add));
+    }
+
+    // R12: depth 0 is the neutral contribution: add contributes exactly 0 and
+    // multiply exactly 1 (the pulse shaper leaves these op semantics unchanged).
+    {
+        const Synth::LFODescriptor lfo = { Synth::WaveType::sine_wave, 0, 1000, 0.0f, 1.0f };
+        TEST(Synth::eval_lfo_mod(lfo, 3, 256, 1024, 1000, 0.0f, Synth::SourceOp::add) == 0.0f);
+        TEST(Synth::eval_lfo_mod(lfo, 3, 256, 1024, 1000, 0.0f, Synth::SourceOp::multiply) == 1.0f);
+        TEST(Synth::eval_lfo_mod(lfo, 1, 256, 1024, 1000, 0.0f, Synth::SourceOp::add) == 0.0f);
+        TEST(Synth::eval_lfo_mod(lfo, 1, 256, 1024, 1000, 0.0f, Synth::SourceOp::multiply) == 1.0f);
+    }
+
+    // T2 (E6/E7): the LFO descriptor's pulse_mix, beat_div, and start_point
+    // survive the bank JSON roundtrip under their planned key names, are
+    // omitted at the defaults (key_uint_nonzero style), and old documents
+    // without the keys decode with the zero defaults. The library document
+    // format (frequency_hz dialect) carries the same three keys through its
+    // own encode and decode sites; the effects document shares enc_lfo and
+    // decode_lfo with the bank format, so the bank roundtrip covers it.
+    {
+        const std::unique_ptr<Synth::InstrumentEditorBank> t2_bank_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& t2_bank = *t2_bank_storage;
+        Synth::init_default_bank(&t2_bank.bank);
+        const uint32_t t2_lfo_slot = t2_bank.bank.lfos.allocate();
+        TEST(t2_lfo_slot != pool_no_slot);
+        Synth::LFODescriptor& t2_lfo = t2_bank.bank.lfos.entries[t2_lfo_slot];
+        t2_lfo.wave          = Synth::WaveType::sine_wave;
+        t2_lfo.period_ms     = 300;
+        t2_lfo.min_value     = -1.0f;
+        t2_lfo.min_max_delta = 2.0f;
+        t2_lfo.pulse_mix     = 200;
+        t2_lfo.beat_div      = 3;
+        t2_lfo.start_point   = 2;
+        TEST(Synth::validate_instrument_bank(&t2_bank.bank));
+        const std::unique_ptr<FixedArray<char, Synth::library_payload_max>> t2_payload_storage =
+            std::make_unique<FixedArray<char, Synth::library_payload_max>>();
+        char (&t2_payload)[Synth::library_payload_max] = t2_payload_storage->elements;
+        const uint32_t t2_len = Synth::encode_editor_bank_json(&t2_bank, t2_payload, sizeof(t2_payload));
+        TEST(t2_len > 0);
+        // E6 roundtrip: the nonzero fields encode verbatim and survive a decode
+        // into a zeroed bank.
+        TEST(strstr(t2_payload, "\"pulse_mix\":200") != nullptr);
+        TEST(strstr(t2_payload, "\"beat_div\":3") != nullptr);
+        TEST(strstr(t2_payload, "\"start_point\":2") != nullptr);
+        const std::unique_ptr<Synth::InstrumentEditorBank> t2_decoded_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& t2_decoded = *t2_decoded_storage;
+        memset(static_cast<void*>(&t2_decoded), 0, sizeof(t2_decoded));
+        TEST(Synth::decode_editor_bank_json(t2_payload, t2_len, &t2_decoded));
+        TEST(t2_decoded.bank.lfos.entries[t2_lfo_slot].pulse_mix == 200);
+        TEST(t2_decoded.bank.lfos.entries[t2_lfo_slot].beat_div == 3);
+        TEST(t2_decoded.bank.lfos.entries[t2_lfo_slot].start_point == 2);
+        TEST(Synth::validate_instrument_bank(&t2_decoded.bank));
+        // E6 omission: the defaults 0/0/0 leave the document free of all three
+        // keys, and that document decodes back to the defaults.
+        t2_lfo.pulse_mix   = 0;
+        t2_lfo.beat_div    = 0;
+        t2_lfo.start_point = 0;
+        const uint32_t t2_default_len =
+            Synth::encode_editor_bank_json(&t2_bank, t2_payload, sizeof(t2_payload));
+        TEST(t2_default_len > 0);
+        TEST(strstr(t2_payload, "\"pulse_mix\"") == nullptr);
+        TEST(strstr(t2_payload, "\"beat_div\"") == nullptr);
+        TEST(strstr(t2_payload, "\"start_point\"") == nullptr);
+        memset(static_cast<void*>(&t2_decoded), 0, sizeof(t2_decoded));
+        TEST(Synth::decode_editor_bank_json(t2_payload, t2_default_len, &t2_decoded));
+        TEST(t2_decoded.bank.lfos.entries[t2_lfo_slot].pulse_mix == 0);
+        TEST(t2_decoded.bank.lfos.entries[t2_lfo_slot].beat_div == 0);
+        TEST(t2_decoded.bank.lfos.entries[t2_lfo_slot].start_point == 0);
+        // E7 old bank: an LFO object without the three keys (the hand-written
+        // document stands in for a pre-M2 bank) decodes with the defaults.
+        {
+            static const char t2_old_doc[] =
+                "{\"instrument_editor_bank\":{\"lfos\":[{\"wave\":\"sine\",\"period_ms\":100}]}}";
+            const std::unique_ptr<Synth::InstrumentEditorBank> t2_old_storage =
+                std::make_unique<Synth::InstrumentEditorBank>();
+            Synth::InstrumentEditorBank& t2_old = *t2_old_storage;
+            memset(static_cast<void*>(&t2_old), 0, sizeof(t2_old));
+            TEST(Synth::decode_editor_bank_json(t2_old_doc,
+                                                static_cast<uint32_t>(sizeof(t2_old_doc) - 1),
+                                                &t2_old));
+            TEST(t2_old.bank.lfos.entries[0].pulse_mix == 0);
+            TEST(t2_old.bank.lfos.entries[0].beat_div == 0);
+            TEST(t2_old.bank.lfos.entries[0].start_point == 0);
+        }
+        // T2 item 4 (out-of-range): splicing beat_div 6 and start_point 7 into
+        // an LFO object still decodes, each field reads 0, and the bank passes
+        // validate_instrument_bank (garbage-tolerant decode, section 17.2).
+        {
+            static const char t2_oor_doc[] =
+                "{\"instrument_editor_bank\":{\"lfos\":[{\"wave\":\"sine\",\"period_ms\":100}]}}";
+            char t2_oor_spliced[256];
+            const uint32_t t2_oor_base_len = static_cast<uint32_t>(sizeof(t2_oor_doc) - 1);
+            const uint32_t t2_beat_len = splice_single_occurrence(t2_oor_doc,
+                                                                  t2_oor_base_len,
+                                                                  "\"period_ms\":100",
+                                                                  "\"period_ms\":100,\"beat_div\":6",
+                                                                  t2_oor_spliced,
+                                                                  sizeof(t2_oor_spliced));
+            TEST(t2_beat_len > 0);
+            const std::unique_ptr<Synth::InstrumentEditorBank> t2_beat_storage =
+                std::make_unique<Synth::InstrumentEditorBank>();
+            Synth::InstrumentEditorBank& t2_beat = *t2_beat_storage;
+            memset(static_cast<void*>(&t2_beat), 0, sizeof(t2_beat));
+            TEST(Synth::decode_editor_bank_json(t2_oor_spliced, t2_beat_len, &t2_beat));
+            TEST(t2_beat.bank.lfos.entries[0].beat_div == 0);
+            TEST(t2_beat.bank.lfos.entries[0].start_point == 0);
+            TEST(Synth::validate_instrument_bank(&t2_beat.bank));
+            const uint32_t t2_start_len = splice_single_occurrence(t2_oor_doc,
+                                                                   t2_oor_base_len,
+                                                                   "\"period_ms\":100",
+                                                                   "\"period_ms\":100,\"start_point\":7",
+                                                                   t2_oor_spliced,
+                                                                   sizeof(t2_oor_spliced));
+            TEST(t2_start_len > 0);
+            const std::unique_ptr<Synth::InstrumentEditorBank> t2_start_storage =
+                std::make_unique<Synth::InstrumentEditorBank>();
+            Synth::InstrumentEditorBank& t2_start = *t2_start_storage;
+            memset(static_cast<void*>(&t2_start), 0, sizeof(t2_start));
+            TEST(Synth::decode_editor_bank_json(t2_oor_spliced, t2_start_len, &t2_start));
+            TEST(t2_start.bank.lfos.entries[0].beat_div == 0);
+            TEST(t2_start.bank.lfos.entries[0].start_point == 0);
+            TEST(Synth::validate_instrument_bank(&t2_start.bank));
+        }
+        // T2c: the library document format carries the three keys too. The
+        // decode refuses unknown fields today, so a keyed document must decode
+        // and land the values in the instrument's LFO table; the absence form
+        // decodes to the defaults on old documents.
+        {
+            static const char t2_doc_keys[] =
+                "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\","
+                "\"volume\":{\"lfo\":{\"wave\":\"sine\",\"frequency_hz\":4,\"duty\":0.25,"
+                "\"pulse_mix\":200,\"beat_div\":3,\"start_point\":2,\"depth\":0.5}}}]}";
+            static const char t2_doc_plain[] =
+                "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\","
+                "\"volume\":{\"lfo\":{\"wave\":\"sine\",\"frequency_hz\":4,\"duty\":0.25,"
+                "\"depth\":0.5}}}]}";
+            const std::unique_ptr<Synth::Instrument> t2_instr_storage =
+                std::make_unique<Synth::Instrument>();
+            Synth::Instrument& t2_instr = *t2_instr_storage;
+            Synth::EnvelopeDescriptor t2_envs[Synth::instrument_max_envelopes] = {};
+            Synth::LFODescriptor       t2_doc_lfos[Synth::instrument_max_lfos] = {};
+            uint32_t t2_env_count = Synth::instrument_max_envelopes;
+            uint32_t t2_lfo_count = Synth::instrument_max_lfos;
+            TEST(Synth::decode_instrument_json(t2_doc_keys,
+                                               static_cast<uint32_t>(sizeof(t2_doc_keys) - 1),
+                                               &t2_instr,
+                                               t2_envs,
+                                               &t2_env_count,
+                                               t2_doc_lfos,
+                                               &t2_lfo_count));
+            TEST(t2_lfo_count == 1);
+            TEST(t2_doc_lfos[0].pulse_mix == 200);
+            TEST(t2_doc_lfos[0].beat_div == 3);
+            TEST(t2_doc_lfos[0].start_point == 2);
+            // The keyed descriptor re-encodes with the three keys: stage the
+            // decoded LFO in the descriptor bank the encoder resolves ids
+            // against.  Staged before the plain-document decode below, whose
+            // descriptor reset zeroes the slot.
+            const std::unique_ptr<Synth::InstrumentBank> t2_rt_bank_storage =
+                std::make_unique<Synth::InstrumentBank>();
+            Synth::InstrumentBank& t2_rt_bank = *t2_rt_bank_storage;
+            memset(static_cast<void*>(&t2_rt_bank), 0, sizeof(t2_rt_bank));
+            t2_rt_bank.lfos.entries[0]    = t2_doc_lfos[0];
+            t2_rt_bank.lfos.num_allocated = 1;
+            const std::unique_ptr<FixedArray<char, clipboard_capacity>> t2_text_storage =
+                std::make_unique<FixedArray<char, clipboard_capacity>>();
+            char (&t2_text)[clipboard_capacity] = t2_text_storage->elements;
+            TEST(Synth::encode_instrument_json(t2_text, sizeof(t2_text), &t2_instr, &t2_rt_bank) > 0);
+            TEST(strstr(t2_text, "\"pulse_mix\":200") != nullptr);
+            TEST(strstr(t2_text, "\"beat_div\":3") != nullptr);
+            TEST(strstr(t2_text, "\"start_point\":2") != nullptr);
+            TEST(Synth::decode_instrument_json(t2_doc_plain,
+                                               static_cast<uint32_t>(sizeof(t2_doc_plain) - 1),
+                                               &t2_instr,
+                                               t2_envs,
+                                               &t2_env_count,
+                                               t2_doc_lfos,
+                                               &t2_lfo_count));
+            TEST(t2_doc_lfos[0].pulse_mix == 0);
+            TEST(t2_doc_lfos[0].beat_div == 0);
+            TEST(t2_doc_lfos[0].start_point == 0);
+        }
     }
 
     // random_pitch_skew: a nonzero amount stays within [-amount, amount] and spans most of it;
@@ -21812,7 +22378,7 @@ int main()
         TEST(mapping.lfo_count == 1 && mapping.lfo_nodes[0] != Sculptor::pool_no_slot);
         TEST(mapping.lfo_nodes[1] == Sculptor::pool_no_slot);
         TEST(graph.node(mapping.effect_nodes[0]).slots.num_allocated == 3 + Sculptor::fx_param_stride * 2);
-        TEST(graph.node(mapping.lfo_nodes[0]).slots.num_allocated == 4);
+        TEST(graph.node(mapping.lfo_nodes[0]).slots.num_allocated == 7);
         TEST(mapping.midi_node != Sculptor::pool_no_slot); // channel chain: MIDI routes in
         TEST(graph.node(mapping.midi_node).slots.num_allocated == Sculptor::fx_num_input_sources);
 
@@ -21934,6 +22500,27 @@ int main()
         graph.set_slot_value(mapping.lfo_nodes[0], 3, period);
         TEST(! Sculptor::apply_fx_graph_change(&bank, graph, mapping, change));
         TEST(bank.lfos.entries[0].period_ms == 500);
+
+        // Slots 4/5/6 are Pulse/Sync/Start: pinned here so a future slot
+        // insertion cannot silently shift the fx apply dispatch indices.
+        change.slot_idx = 4;
+        Sculptor::PropertyValue pulse = {};
+        pulse.real = 1.0f;
+        graph.set_slot_value(mapping.lfo_nodes[0], 4, pulse);
+        TEST(Sculptor::apply_fx_graph_change(&bank, graph, mapping, change));
+        TEST(bank.lfos.entries[0].pulse_mix == 255);
+        change.slot_idx = 5;
+        Sculptor::PropertyValue sync = {};
+        sync.list_index = 2;
+        graph.set_slot_value(mapping.lfo_nodes[0], 5, sync);
+        TEST(Sculptor::apply_fx_graph_change(&bank, graph, mapping, change));
+        TEST(bank.lfos.entries[0].beat_div == 2);
+        change.slot_idx = 6;
+        Sculptor::PropertyValue start = {};
+        start.list_index = 2;
+        graph.set_slot_value(mapping.lfo_nodes[0], 6, start);
+        TEST(Sculptor::apply_fx_graph_change(&bank, graph, mapping, change));
+        TEST(bank.lfos.entries[0].start_point == 2);
 
         // Deleting the LFO node clears only this chain's references.
         change.kind = Sculptor::ChangeKind::node_deleted;

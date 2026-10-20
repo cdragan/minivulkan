@@ -13,6 +13,7 @@
 #include "../synth/midi_input.h"
 #include "../synth/realtime_synth.h"
 #include "../synth/synth_effect_expansion.h"
+#include "../synth/synth_soundtrack.h"
 #include "sculptor_undo.h"
 
 #include "../core/d_printf.h"
@@ -39,6 +40,13 @@ struct EnvelopeWidgetContext {
     Sculptor::UndoGroupTag       gesture_tag     = {};
     bool                         gesture_active  = false;
     Sculptor::EnvelopeCurveState ui;
+};
+
+// Per-LFO-node state-widget contexts, indexed by graph node index and
+// rebound on every projection.  The preview is read-only: no gesture, undo,
+// or editor state rides the context, only the node it draws.
+struct LfoWidgetContext {
+    uint32_t node_idx = Sculptor::pool_no_slot;
 };
 
 // Canvas popup commands are only queued during render; the add commands run
@@ -141,6 +149,7 @@ bool                         fx_graph_reproject = false;
 bool fx_lfo_pinned[Synth::max_lfos] = {};
 
 EnvelopeWidgetContext envelope_widget_contexts[Sculptor::max_nodes];
+LfoWidgetContext lfo_widget_contexts[Sculptor::max_nodes];
 uint32_t              osc_graph_generation = 0;
 
 // The drop menu's resolved payload: classified once at click time against
@@ -254,7 +263,7 @@ constexpr size_t editor_resident_state_bytes =
     Synth::library_max_records * sizeof(Synth::LibraryEntry) + // library rewrite index
     64 * 1024 +                                                // library record-copy chunk
     sizeof(undo_redo) + 2 * undo_depth * sizeof(uint32_t) + sizeof(osc_graph) + sizeof(osc_mapping) +
-    sizeof(fx_mapping) + sizeof(envelope_widget_contexts) + sizeof(fx_lfo_pinned) + sizeof(projected_position) +
+    sizeof(fx_mapping) + sizeof(envelope_widget_contexts) + sizeof(lfo_widget_contexts) + sizeof(fx_lfo_pinned) + sizeof(projected_position) +
     sizeof(projected_width) + sizeof(projected_height) + sizeof(zone_clipboard_text) +
     sizeof(clipboard_decoded_instrument) + sizeof(clipboard_decoded_envelopes) + sizeof(clipboard_decoded_lfos) +
     sizeof(serialization_mapping) + sizeof(clipboard_decoded_layout) + sizeof(osc_canvas_zone_channel) +
@@ -989,6 +998,213 @@ static const Synth::EnvelopeDescriptor* envelope_widget_descriptor(uint32_t node
     return nullptr;
 }
 
+// Resolves a graph node to its LFO descriptor in the committed bank,
+// nullptr when the node is not a live projected LFO.  The two projections
+// share the one widget, so the walk is gated on the currently projected
+// pane; re-resolved every frame so descriptor compaction cannot leave the
+// widget pointing at a recycled entry.
+static const Synth::LFODescriptor* lfo_widget_descriptor(uint32_t node_idx)
+{
+    if (osc_graph_projected) {
+        for (uint32_t i = 0; i < osc_mapping.detached_count; ++i) {
+            const Sculptor::DetachedNode& detached = osc_mapping.detached[i];
+            if (detached.node_idx != node_idx || detached.kind != 2 || detached.desc_id == 0 ||
+                detached.desc_id > instr_bank.bank.lfos.num_allocated) {
+                continue;
+            }
+            return &instr_bank.bank.lfos.entries[detached.desc_id - 1];
+        }
+    }
+    if (fx_graph_projected) {
+        const uint32_t desc_id = Sculptor::fx_lfo_desc_of(fx_mapping, node_idx);
+        if (desc_id != 0 && desc_id <= instr_bank.bank.lfos.num_allocated) {
+            return &instr_bank.bank.lfos.entries[desc_id - 1];
+        }
+    }
+    return nullptr;
+}
+
+constexpr ImU32 lfo_chart_bg_color = IM_COL32(0, 0, 0, 96);
+constexpr ImU32 lfo_guide_color    = IM_COL32(255, 255, 255, 70);
+constexpr ImU32 lfo_curve_color    = IM_COL32(210, 210, 210, 255);
+constexpr ImU32 lfo_level_color    = IM_COL32(255, 255, 255, 110);
+
+// Vertical dotted guide, the twin of draw_dotted_line in the envelope
+// editor's TU (that one is file-local there).
+static void lfo_dotted_line(ImDrawList* draw_list, float x, float y0, float height, ImU32 color)
+{
+    for (float y = 0.0f; y < height; y += 6.0f) {
+        const float y1 = y0 + y + 3.0f;
+        draw_list->AddLine(ImVec2(x, y0 + y), ImVec2(x, y1 < y0 + height ? y1 : y0 + height), color);
+    }
+}
+
+// Fixed preview height: the 48 px chart, with the spacing pattern of
+// envelope_widget_height.
+static int lfo_widget_height(float render_scale = 1.0f)
+{
+    const ImGuiStyle& style = ImGui::GetStyle();
+    return static_cast<int>(48.0f * render_scale + 2.0f * style.ItemSpacing.y + 0.5f);
+}
+
+// Draws one LFO's shape over one period: the chart with dotted phase
+// guides and min/max reference lines.  Read-only, no interaction and no
+// undo.
+static int draw_lfo_preview(const Synth::LFODescriptor& lfo, float render_scale)
+{
+    // The period the runtime resolves: the beat division's value or the
+    // descriptor's own absolute period (also the fallback when beat_div is
+    // invalid or resolves to 0, matching resolved_lfo_period_ms), rounded and
+    // clamped to at least 1 ms.
+    float resolved_ms = 0.0f;
+    if (lfo.beat_div <= 5) {
+        resolved_ms = Synth::lfo_beat_div_period_ms(lfo.beat_div);
+    }
+    if (resolved_ms == 0.0f) {
+        resolved_ms = static_cast<float>(lfo.period_ms);
+    }
+    uint32_t period_ms = static_cast<uint32_t>(resolved_ms + 0.5f);
+    if (period_ms < 1) {
+        period_ms = 1;
+    }
+
+    const ImVec2    origin    = ImGui::GetCursorScreenPos();
+    ImDrawList*     draw_list = ImGui::GetWindowDrawList();
+    const float     width     = ImGui::CalcItemWidth() > 0.0f ? ImGui::CalcItemWidth() : 1.0f;
+    const float     chart_h   = 48.0f * render_scale;
+    const float     chart_y   = origin.y;
+
+    // Display value range: the descriptor's own min and max; a degenerate
+    // span gets a small display range so the flat wave stays a visible line.
+    const float value_min = lfo.min_value;
+    const float value_max = lfo.min_value + lfo.min_max_delta;
+    float value_lo = value_min < value_max ? value_min : value_max;
+    float value_hi = value_min < value_max ? value_max : value_min;
+    if (value_hi - value_lo < 0.000001f) {
+        value_lo -= 0.5f;
+        value_hi += 0.5f;
+    }
+    const float value_span = value_hi - value_lo;
+
+    draw_list->AddRectFilled(ImVec2(origin.x, chart_y), ImVec2(origin.x + width, chart_y + chart_h), lfo_chart_bg_color);
+
+    draw_list->PushClipRect(ImVec2(origin.x, chart_y), ImVec2(origin.x + width, chart_y + chart_h), true);
+
+    // Dotted phase guides at 0, 1/4, 1/2 and 3/4 of the cycle.
+    for (uint32_t quarter = 0; quarter < 4; ++quarter) {
+        const float x = origin.x + static_cast<float>(quarter) * 0.25f * width;
+        lfo_dotted_line(draw_list, x, chart_y, chart_h, lfo_guide_color);
+    }
+
+    // Min and max reference lines; a zero delta degenerates the mapping, so
+    // one centered flat line replaces the scale math there.
+    if (lfo.min_max_delta != 0.0f) {
+        const float max_y = chart_y + chart_h - (value_max - value_lo) / value_span * chart_h;
+        const float min_y = chart_y + chart_h - (value_min - value_lo) / value_span * chart_h;
+        draw_list->AddLine(ImVec2(origin.x, max_y), ImVec2(origin.x + width, max_y), lfo_level_color);
+        draw_list->AddLine(ImVec2(origin.x, min_y), ImVec2(origin.x + width, min_y), lfo_level_color);
+    }
+    else {
+        const float flat_y = chart_y + chart_h * 0.5f;
+        draw_list->AddLine(ImVec2(origin.x, flat_y), ImVec2(origin.x + width, flat_y), lfo_level_color);
+    }
+
+    // One period, 64 samples through the runtime's own evaluator so duty,
+    // pulse mix, start point and the synced period all shape the curve.
+    // Microsecond ticks with a 1 MHz sampling rate make the phase exactly
+    // i / 64, which keeps periods shorter than 64 samples drawable.
+    constexpr uint32_t preview_samples = 64;
+    ImVec2             points[preview_samples];
+    for (uint32_t i = 0; i < preview_samples; ++i) {
+        const uint64_t tick_us  = static_cast<uint64_t>(i) * period_ms * 1000u / preview_samples;
+        const float    value    = Synth::eval_lfo(lfo, static_cast<uint32_t>(tick_us), 1u, 1000000u);
+        float          fraction = (value - value_lo) / value_span;
+        if (fraction < 0.0f) {
+            fraction = 0.0f;
+        }
+        if (fraction > 1.0f) {
+            fraction = 1.0f;
+        }
+        points[i].x = origin.x + static_cast<float>(i) / static_cast<float>(preview_samples - 1) * width;
+        points[i].y = chart_y + chart_h - fraction * chart_h;
+    }
+    draw_list->AddPolyline(points, preview_samples, lfo_curve_color, 1.5f);
+
+    draw_list->PopClipRect();
+
+    ImGui::Dummy(ImVec2(width, chart_h));
+    return lfo_widget_height(render_scale);
+}
+
+// State-widget entry for LFO nodes: resolves the descriptor and draws the
+// shape preview.  Read-only, so the entry needs no editor state.
+static int lfo_state_widget_entry(void* user_data, float render_scale)
+{
+    LfoWidgetContext* ctx = static_cast<LfoWidgetContext*>(user_data);
+    const Synth::LFODescriptor* lfo = lfo_widget_descriptor(ctx->node_idx);
+    if (lfo == nullptr) {
+        return 0;
+    }
+    return draw_lfo_preview(*lfo, render_scale);
+}
+
+// Binds the state widgets for the current projection: the envelope curve
+// and the LFO preview on the oscillator projection, the LFO preview on the
+// effects projection.  Called after every projection; the reset also
+// aborts gestures and selections, which cannot outlive the graph they were
+// made in.
+static void bind_graph_state_widgets(Sculptor::SynthEditor* editor, Sculptor::StateWidgetCallback envelope_entry)
+{
+    for (uint32_t node = 0; node < Sculptor::max_nodes; ++node) {
+        EnvelopeWidgetContext& ctx = envelope_widget_contexts[node];
+        ctx                        = {};
+        ctx.node_idx               = node;
+        ctx.editor                 = editor;
+        ctx.generation             = osc_graph_generation;
+    }
+    for (uint32_t node = 0; node < Sculptor::max_nodes; ++node) {
+        LfoWidgetContext& ctx = lfo_widget_contexts[node];
+        ctx                   = {};
+        ctx.node_idx          = node;
+    }
+    if (osc_graph_projected) {
+        for (uint32_t i = 0; i < osc_mapping.detached_count; ++i) {
+            const Sculptor::DetachedNode& detached = osc_mapping.detached[i];
+            if (detached.node_idx == Sculptor::pool_no_slot) {
+                continue;
+            }
+            if (detached.kind == 1 && detached.desc_id != 0) {
+                envelope_widget_contexts[detached.node_idx].node_idx        = detached.node_idx;
+                envelope_widget_contexts[detached.node_idx].gesture_desc_id = detached.desc_id;
+                osc_graph.set_state_widget(detached.node_idx,
+                                           envelope_entry,
+                                           &envelope_widget_contexts[detached.node_idx],
+                                           static_cast<float>(Sculptor::envelope_widget_height()));
+            }
+            if (detached.kind == 2 && detached.desc_id != 0) {
+                lfo_widget_contexts[detached.node_idx].node_idx = detached.node_idx;
+                osc_graph.set_state_widget(detached.node_idx,
+                                           &lfo_state_widget_entry,
+                                           &lfo_widget_contexts[detached.node_idx],
+                                           static_cast<float>(lfo_widget_height()));
+            }
+        }
+    }
+    if (fx_graph_projected) {
+        for (uint32_t desc = 1; desc <= Synth::max_lfos; ++desc) {
+            const uint32_t node = fx_mapping.lfo_nodes[desc - 1];
+            if (node == Sculptor::pool_no_slot) {
+                continue;
+            }
+            lfo_widget_contexts[node].node_idx = node;
+            osc_graph.set_state_widget(node,
+                                       &lfo_state_widget_entry,
+                                       &lfo_widget_contexts[node],
+                                       static_cast<float>(lfo_widget_height()));
+        }
+    }
+}
+
 static void init_osc_graph_widget()
 {
     static bool inited = false;
@@ -1509,27 +1725,10 @@ void Sculptor::SynthEditor::reproject_osc_graph(uint32_t channel, uint32_t zone)
     osc_graph.set_slot_gray_callback(&osc_slot_gray_dot, nullptr);
     osc_graph.set_drop_menu_callback(&osc_drop_menu_entry, this);
     fx_graph_projected = false;
-    // Rebind envelope state widgets from scratch: gestures and point
-    // selections cannot outlive the graph they were made in.
-    for (uint32_t node = 0; node < Sculptor::max_nodes; ++node) {
-        EnvelopeWidgetContext& ctx = envelope_widget_contexts[node];
-        ctx                        = {};
-        ctx.node_idx               = node;
-        ctx.editor                 = this;
-        ctx.generation             = osc_graph_generation;
-    }
+    // Rebind the state widgets from scratch: gestures and point selections
+    // cannot outlive the graph they were made in.
+    bind_graph_state_widgets(this, &Sculptor::SynthEditor::envelope_state_widget_entry);
     if (osc_graph_projected) {
-        for (uint32_t i = 0; i < osc_mapping.detached_count; ++i) {
-            const Sculptor::DetachedNode& detached = osc_mapping.detached[i];
-            if (detached.kind == 1 && detached.node_idx != Sculptor::pool_no_slot && detached.desc_id != 0) {
-                envelope_widget_contexts[detached.node_idx].node_idx        = detached.node_idx;
-                envelope_widget_contexts[detached.node_idx].gesture_desc_id = detached.desc_id;
-                osc_graph.set_state_widget(detached.node_idx,
-                                           &envelope_state_widget_entry,
-                                           &envelope_widget_contexts[detached.node_idx],
-                                           static_cast<float>(Sculptor::envelope_widget_height()));
-            }
-        }
         for (uint32_t node = 0; node < Sculptor::max_nodes; ++node) {
             if (osc_graph.node_occupied(node)) {
                 snapshot_node_layout(node);
@@ -2452,6 +2651,7 @@ void Sculptor::SynthEditor::reproject_fx_graph(uint32_t chain)
     // Both panes share the one graph: each pane installs its own drop
     // menu, so the oscillator pane's menu cannot fire on effect nodes.
     osc_graph.set_drop_menu_callback(&fx_drop_menu, this);
+    bind_graph_state_widgets(this, &Sculptor::SynthEditor::envelope_state_widget_entry);
     drain_projection_ring();
 }
 
@@ -2531,7 +2731,7 @@ void Sculptor::SynthEditor::drain_fx_graph()
         for (uint32_t desc = 1; desc <= Synth::max_lfos; ++desc) {
             const uint32_t lfo_node = fx_mapping.lfo_nodes[desc - 1];
             if (lfo_node != Sculptor::pool_no_slot) {
-                Sculptor::refresh_lfo_duty_disabled(osc_graph, lfo_node);
+                Sculptor::refresh_lfo_edit_disabled(osc_graph, lfo_node);
             }
         }
     }
@@ -4296,6 +4496,24 @@ void Sculptor::gui_synth_info_panel(uint32_t current_channel)
     ImGui::Separator();
 
     const Synth::AudioRingStatus ring = Synth::get_audio_ring_status();
+
+    // Tempo box: re-reads the runtime value every frame, so a popped FF 51
+    // tempo event shows up on the next frame with no extra plumbing.
+    // LiveEdit commits per keystroke, so a typed intermediate value applies
+    // for one frame; the clamp keeps the box inside the meaningful range.
+    int bpm_edit = static_cast<int>(Synth::get_runtime_tempo_bpm());
+    ImGui::PushItemFlag(ImGuiItemFlags_LiveEditOnInputScalar, true);
+    const bool bpm_changed = ImGui::InputInt("Tempo (BPM)", &bpm_edit);
+    ImGui::PopItemFlag();
+    if (bpm_changed) {
+        if (bpm_edit < 1) {
+            bpm_edit = 1;
+        }
+        if (bpm_edit > 10000) {
+            bpm_edit = 10000;
+        }
+        Synth::set_runtime_tempo_bpm(static_cast<uint16_t>(bpm_edit));
+    }
 
     ImGui::TextWrapped("Underruns %u", ring.underrun_count);
 

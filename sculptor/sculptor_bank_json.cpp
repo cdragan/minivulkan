@@ -632,6 +632,9 @@ static void enc_lfo(Out& o, const Synth::LFODescriptor& lfo)
     key_uint_nonzero(o, "period_ms", lfo.period_ms);
     key_float_nonzero(o, "min_value", lfo.min_value);
     key_float_nonzero(o, "min_max_delta", lfo.min_max_delta);
+    key_uint_nonzero(o, "pulse_mix", lfo.pulse_mix);
+    key_uint_nonzero(o, "beat_div", lfo.beat_div);
+    key_uint_nonzero(o, "start_point", lfo.start_point);
     o.ch('}');
 }
 
@@ -2314,6 +2317,20 @@ static void decode_lfo(Walker& w, uint32_t obj, Synth::LFODescriptor& lfo)
             want_float(w, val_idx, &lfo.min_value);
         else if (key_eq(w, key_idx, "min_max_delta"))
             want_float(w, val_idx, &lfo.min_max_delta);
+        else if (key_eq(w, key_idx, "pulse_mix")) {
+            // Garbage-tolerant like its siblings: accept a wider bound, then
+            // clamp instead of failing the whole decode.
+            want_uint(w, val_idx, 0xFFFF, &value);
+            lfo.pulse_mix = static_cast<uint8_t>(value > 255 ? 255 : value);
+        }
+        else if (key_eq(w, key_idx, "beat_div")) {
+            want_uint(w, val_idx, 0xFF, &value);
+            lfo.beat_div = (value <= 5) ? static_cast<uint8_t>(value) : 0;
+        }
+        else if (key_eq(w, key_idx, "start_point")) {
+            want_uint(w, val_idx, 0xFF, &value);
+            lfo.start_point = (value <= 2) ? static_cast<uint8_t>(value) : 0;
+        }
         else
             unknown_field(w, key_idx);
     });
@@ -3366,6 +3383,7 @@ static void decode_lfo_doc(Walker&               w,
                            uint16_t*             group_id)
 {
     const Sculptor::OscTargetView view          = Sculptor::osc_target_view(target, fir_type);
+    uint32_t                      value         = 0;
     float                         frequency_hz  = 0.0f;
     bool                          frequency_set = false;
     bool                          wave_set      = false;
@@ -3412,6 +3430,20 @@ static void decode_lfo_doc(Walker&               w,
             want_float(w, val_idx, &rate_scale_ms);
         else if (key_eq(w, key_idx, "lfo_id"))
             want_uint(w, val_idx, 0xFFFFu, &encoded_id);
+        else if (key_eq(w, key_idx, "pulse_mix")) {
+            // Garbage-tolerant like its siblings: accept a wider bound, then
+            // clamp instead of failing the whole decode.
+            want_uint(w, val_idx, 0xFFFF, &value);
+            lfo.pulse_mix = static_cast<uint8_t>(value > 255 ? 255 : value);
+        }
+        else if (key_eq(w, key_idx, "beat_div")) {
+            want_uint(w, val_idx, 0xFF, &value);
+            lfo.beat_div = (value <= 5) ? static_cast<uint8_t>(value) : 0;
+        }
+        else if (key_eq(w, key_idx, "start_point")) {
+            want_uint(w, val_idx, 0xFF, &value);
+            lfo.start_point = (value <= 2) ? static_cast<uint8_t>(value) : 0;
+        }
         else
             doc_unknown_field(w, key_idx);
     });
@@ -4466,6 +4498,9 @@ static uint32_t encode_instrument_json_for_domain(char*                         
                 o.float_value(lfo.min_value / view.bank_scale);
                 o.key("max_level");
                 o.float_value((lfo.min_value + lfo.min_max_delta) / view.bank_scale);
+                key_uint_nonzero(o, "pulse_mix", lfo.pulse_mix);
+                key_uint_nonzero(o, "beat_div", lfo.beat_div);
+                key_uint_nonzero(o, "start_point", lfo.start_point);
                 key_enum(o, "op", source_op_names, num_source_ops, static_cast<uint32_t>(gen.lfo_op));
                 o.key("depth");
                 o.float_value(gen.lfo_depth);

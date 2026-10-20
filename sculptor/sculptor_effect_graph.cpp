@@ -15,6 +15,8 @@ using Sculptor::connection_into;
 using Sculptor::fx_param_src_dot;
 using Sculptor::input_slot;
 using Sculptor::int_slot;
+using Sculptor::lfo_start_names;
+using Sculptor::lfo_sync_names;
 using Sculptor::lfo_wave_names;
 using Sculptor::list_slot;
 using Sculptor::make_slot;
@@ -819,7 +821,13 @@ bool Sculptor::project_effect_chain_to_graph(const Synth::InstrumentEditorBank& 
         const uint32_t duty_idx =
             graph->add_slot(node, bounded_real_slot("Duty", static_cast<float>(lfo.duty) / 255.0f, 0.0f, 1.0f, false));
         graph->set_slot_edit_disabled(node, duty_idx, lfo.wave == Synth::WaveType::sine_wave);
-        graph->add_slot(node, int_slot("Period (ms)", lfo.period_ms));
+        const uint32_t period_idx = graph->add_slot(node, int_slot("Period (ms)", lfo.period_ms));
+        graph->set_slot_edit_disabled(node, period_idx, lfo.beat_div != 0);
+        // Shared slot order with the oscillator graph's LFO node
+        // (sculptor_osc_graph.cpp); the dispatch below is index-based.
+        graph->add_slot(node, bounded_real_slot("Pulse", static_cast<float>(lfo.pulse_mix) / 255.0f, 0.0f, 1.0f, false));
+        graph->add_slot(node, list_slot("Sync", lfo_sync_names, 6, lfo.beat_div <= 5 ? lfo.beat_div : 0));
+        graph->add_slot(node, list_slot("Start", lfo_start_names, 3, lfo.start_point <= 2 ? lfo.start_point : 0));
     }
 
     // Reference wires: one per meaningful binding that names the descriptor,
@@ -1107,6 +1115,27 @@ static bool apply_fx_graph_change_internal(Synth::InstrumentBank*              b
                         return false;
                     }
                     lfo.period_ms = static_cast<uint16_t>(live_slot.value.integer);
+                    return true;
+                }
+                if (change.slot_idx == 4) {
+                    if (! (live_slot.value.real >= 0.0f && live_slot.value.real <= 1.0f)) {
+                        return false;
+                    }
+                    lfo.pulse_mix = static_cast<uint8_t>(live_slot.value.real * 255.0f + 0.5f);
+                    return true;
+                }
+                if (change.slot_idx == 5) {
+                    if (live_slot.value.list_index >= 6) {
+                        return false;
+                    }
+                    lfo.beat_div = static_cast<uint8_t>(live_slot.value.list_index);
+                    return true;
+                }
+                if (change.slot_idx == 6) {
+                    if (live_slot.value.list_index >= 3) {
+                        return false;
+                    }
+                    lfo.start_point = static_cast<uint8_t>(live_slot.value.list_index);
                     return true;
                 }
                 return false;
@@ -1987,9 +2016,10 @@ bool Sculptor::capture_effect_audio(const Graph&                     graph,
     return true;
 }
 
-// Sets one projected LFO node's Duty editability from its wave list: duty
-// shapes sawtooth only, and plain value edits never reproject the node.
-void Sculptor::refresh_lfo_duty_disabled(Sculptor::Graph& graph, uint32_t node)
+// Sets one projected LFO node's Duty and Period editability: duty shapes
+// sawtooth only, and the period freezes while a beat division resolves it.
+// Plain value edits never reproject the node.
+void Sculptor::refresh_lfo_edit_disabled(Sculptor::Graph& graph, uint32_t node)
 {
     if (node >= Sculptor::max_nodes || ! graph.node_occupied(node)) {
         return;
@@ -1998,6 +2028,8 @@ void Sculptor::refresh_lfo_duty_disabled(Sculptor::Graph& graph, uint32_t node)
     const Sculptor::Node& node_ref = graph.node(node);
     uint32_t              wave_idx = Sculptor::pool_no_slot;
     uint32_t              duty_idx = Sculptor::pool_no_slot;
+    uint32_t              sync_idx = Sculptor::pool_no_slot;
+    uint32_t              period_idx = Sculptor::pool_no_slot;
     for (uint32_t slot = 0; slot < node_ref.slots.num_allocated; ++slot) {
         const Sculptor::Slot& slot_ref = node_ref.slots.entries[slot];
         if (strncmp(slot_ref.name, "Waveform", sizeof(slot_ref.name)) == 0) {
@@ -2007,14 +2039,27 @@ void Sculptor::refresh_lfo_duty_disabled(Sculptor::Graph& graph, uint32_t node)
         if (strncmp(slot_ref.name, "Duty", sizeof(slot_ref.name)) == 0) {
             duty_idx = slot;
         }
+
+        if (strncmp(slot_ref.name, "Sync", sizeof(slot_ref.name)) == 0) {
+            sync_idx = slot;
+        }
+
+        if (strncmp(slot_ref.name, "Period (ms)", sizeof(slot_ref.name)) == 0) {
+            period_idx = slot;
+        }
     }
 
-    if (wave_idx == Sculptor::pool_no_slot || duty_idx == Sculptor::pool_no_slot) {
-        return;
+    // Each lock is evaluated independently: a missing slot leaves only that
+    // one lock unchanged.
+    if (wave_idx != Sculptor::pool_no_slot && duty_idx != Sculptor::pool_no_slot) {
+        const bool sine = node_ref.slots.entries[wave_idx].value.list_index == 0;
+        graph.set_slot_edit_disabled(node, duty_idx, sine);
     }
 
-    const bool sine = node_ref.slots.entries[wave_idx].value.list_index == 0;
-    graph.set_slot_edit_disabled(node, duty_idx, sine);
+    if (sync_idx != Sculptor::pool_no_slot && period_idx != Sculptor::pool_no_slot) {
+        const bool synced = node_ref.slots.entries[sync_idx].value.list_index != 0;
+        graph.set_slot_edit_disabled(node, period_idx, synced);
+    }
 }
 
 bool Sculptor::apply_effect_graph_batch(const Synth::InstrumentEditorBank* source,
