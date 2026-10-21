@@ -231,12 +231,12 @@ struct GraphChange {
 // slots, indices, connections and snapshots stay untouched.  May be null.
 using SlotHiddenCallback = bool (*)(void* user_data, const Graph& graph, uint32_t node_idx, uint32_t slot_idx);
 
-// Caller gray-dot override for projected slots: return true to render the
-// slot's unconnected dot in the neutral color even while its missing mark
-// stays set (the Oscillator Output's gray add dot on a trailing shell's
-// slot, whose mark feeds the compile skip).  A renderer read-only hook.
-// May be null.
-using SlotGrayCallback = bool (*)(void* user_data, const Graph& graph, uint32_t node_idx, uint32_t slot_idx);
+// Caller color override for unconnected dots: return true and write the
+// packed 0xRRGGBBAA dot color when the slot's unconnected dot should
+// render in a custom color (the Oscillator Output's red holes, painted by
+// the osc editor's callback).  A renderer read-only hook.  May be null.
+using SlotColorCallback =
+    bool (*)(void* user_data, const Graph& graph, uint32_t node_idx, uint32_t slot_idx, uint32_t* color_out);
 
 constexpr uint32_t max_pending_changes = 256;
 
@@ -260,7 +260,6 @@ struct GraphColors { // packed 0xRRGGBBAA, converted to ImU32 at draw time
     uint32_t connector; // unfilled dot
     uint32_t connector_hover;
     uint32_t connector_connected; // filled dot
-    uint32_t connector_missing;   // unconnected dot flagged missing (zero = no red mark)
     uint32_t connection;
     uint32_t ghost_node;
     uint32_t property_value;           // editable value text
@@ -324,8 +323,9 @@ public:
     uint32_t moving_connection = pool_no_slot;
     // Installs the caller's slot display filter (see SlotHiddenCallback).
     void set_slot_hidden_callback(SlotHiddenCallback callback, void* user_data);
-    // Installs the caller's gray-dot override (see SlotGrayCallback).
-    void set_slot_gray_callback(SlotGrayCallback callback, void* user_data);
+    // Installs the caller's unconnected-dot color override (see
+    // SlotColorCallback).
+    void set_slot_color_callback(SlotColorCallback callback, void* user_data);
     // True means deleted or handled cancellation; false means invalid/stale index.
     bool user_delete_connection(uint32_t connection_idx);
 
@@ -439,13 +439,6 @@ public:
     // this guard instead of assuming a dense 0..connection_count()-1 range.
     bool connection_occupied(uint32_t connection_idx) const;
 
-    // Per-slot "missing" render state: the editor marks the sum input
-    // slot of a layer whose oscillator->sum edge was deleted, so the renderer
-    // draws unconnected endpoints red.  Kept out of graph snapshots and
-    // re-applied after re-projection.
-    void set_slot_missing(uint32_t node_idx, uint32_t slot_idx, bool missing);
-    bool slot_missing(uint32_t node_idx, uint32_t slot_idx) const;
-
     // A row's knobs are inert while the row's input is unconnected.
     void set_slot_edit_disabled(uint32_t node_idx, uint32_t slot_idx, bool disabled);
     bool slot_edit_disabled(uint32_t node_idx, uint32_t slot_idx) const;
@@ -546,8 +539,8 @@ private:
     void*              validator_user_data   = nullptr;
     SlotHiddenCallback slot_hidden_callback  = nullptr;
     void*              slot_hidden_user_data = nullptr;
-    SlotGrayCallback   slot_gray_callback    = nullptr;
-    void*              slot_gray_user_data   = nullptr;
+    SlotColorCallback  slot_color_callback   = nullptr;
+    void*              slot_color_user_data  = nullptr;
 
     // Caller veto for delete_node and items for the canvas popup.
     NodeDeleteVeto     delete_veto           = nullptr;
@@ -611,11 +604,6 @@ private:
     // check, the anchor-deletion guards and clear().
     EndPoint    drop_menu_from  = EndPoint{ ::pool_no_slot, ::pool_no_slot };
     vmath::vec2 drop_menu_point = {};
-
-    // Per-slot "missing" render state (red unconnected dot), editor-settable.
-    // Kept out of graph snapshots: the editor re-applies the marks after every
-    // re-projection.  One bit per (node, slot); zero-filled state = no marks.
-    uint8_t slot_missing_bits[(max_nodes * max_node_slots + 7) / 8] = {};
 
     uint8_t slot_edit_disabled_flags[max_nodes * max_node_slots] = {};
 

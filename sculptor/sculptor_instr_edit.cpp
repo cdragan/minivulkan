@@ -247,6 +247,7 @@ Synth::InstrumentEditorBank candidate;
 static char                         zone_clipboard_text[128 * 1024];
 static Synth::EffectsDocument       effects_clipboard_document;
 static Synth::Instrument            clipboard_decoded_instrument;
+static uint8_t                      clipboard_decoded_osc_source[Synth::max_layers];
 static Synth::EnvelopeDescriptor    clipboard_decoded_envelopes[Synth::instrument_max_envelopes];
 static Synth::LFODescriptor         clipboard_decoded_lfos[Synth::instrument_max_lfos];
 static Sculptor::OscGraphMapping    serialization_mapping;
@@ -286,14 +287,13 @@ constexpr size_t editor_resident_state_bytes =
     4 * Synth::instrument_graph_layout_capacity * sizeof(Synth::InstrumentGraphLayout) +
     4096; // remaining editor scalar flags, constants and alignment
 static_assert(editor_resident_state_bytes <=
-              48 * 1024 * 1024); // // per-bank driver: the oscillator graph pre-provisions twelve
+              48 * 1024 * 1024); // per-bank driver: the oscillator graph pre-provisions twelve
                                  // 12-slot target blocks per node (max_node_slots 163), which
-                                 // grows sizeof(Graph); the resident total stays far
-// below the 48 MiB assert.  The phantom-shell pool
-// contributes 20 live InstrumentEditorBank copies x (256 x
-// sizeof(PhantomOscillator) = 97,280 bytes + a 4-byte count) =
-// 1,945,680 bytes; the assert tracks it through
-// sizeof(InstrumentEditorBank).
+                                 // grows sizeof(Graph); the resident total stays far below the
+                                 // 48 MiB assert.  The per-zone source rows contribute 20 live
+                                 // InstrumentEditorBank copies x max_channels x
+                                 // max_instr_per_channel x Synth::max_layers bytes; the assert
+                                 // tracks it through sizeof(InstrumentEditorBank).
 
 // Synth info panel data. The declaration in sculptor_instr_edit.h describes
 // what the panel shows; the synth runtime only exposes raw data.
@@ -486,18 +486,20 @@ static bool osc_node_delete_veto(void* user_data, uint32_t node_idx)
     return false;
 }
 
-// Whether the zone's run is at the seven-node cap, shells included: the
-// disabled state both menus' Add Oscillator entries share.  A zone entry
-// that is gone or unassigned stays disabled - refuse over allow.
+// Whether Add Oscillator is disabled: no free input slot remains, or the
+// zone's node ordinal cap is reached.  A zone entry that is gone or
+// unassigned stays disabled - refuse over allow.
 static bool osc_add_oscillator_at_cap(uint32_t channel, uint32_t zone)
 {
     const Synth::Zone& zone_entry = instr_bank.bank.channel_zones[channel][zone];
     if (zone_entry.start_note == 0 || zone_entry.instrument >= instr_bank.bank.instruments.num_allocated) {
         return true;
     }
+
     const Synth::Instrument& instrument = instr_bank.bank.instruments.entries[zone_entry.instrument];
-    return Sculptor::osc_row_run_length(instrument.layer_count, instr_bank.graph_missing_sum[channel][zone]) >=
-           Synth::max_layers;
+
+    return instrument.layer_count >= Synth::max_layers ||
+           Sculptor::osc_lowest_free_slot(instr_bank.graph_osc_source[channel][zone]) == pool_no_slot;
 }
 
 // The canvas menu is fully caller-provided; these items cover every node
@@ -541,8 +543,8 @@ static void stash_osc_drop_command(uint32_t layer, uint32_t target, OscCanvasCom
 }
 
 // The drop menu's items, classified once at click time against the live
-// mapping: a layer row on the Oscillator Output node (the free row or a
-// red-marked row) offers Add Oscillator; a target value row on an
+// mapping: a layer row on the Oscillator Output node (a red hole or the
+// gray add slot) offers Add Oscillator; a target value row on an
 // oscillator node offers Add Envelope and Add LFO, disabled while that
 // cell's family dot already carries a wire (the base-row dot of a bound
 // cell is unconnected - the apply path relocates wires to the family dot -
@@ -559,12 +561,11 @@ static void osc_drop_menu_entry(void* user_data)
             if (osc_mapping.output_layer_input_slot[layer] != anchor.slot_idx) {
                 continue;
             }
-            // The slot anchors one layer row: a red-marked row and the
-            // gray slot (free row or trailing shell) anchor the same add,
-            // and the consumer connects the fresh oscillator at the pulled
-            // row (the shell relocates to the run end).  The entry is
-            // disabled whenever the run is at the seven-node cap, shells
-            // included.
+            // The slot anchors one layer row: a red hole and the gray
+            // add slot anchor the same add, and the consumer wires the
+            // fresh oscillator into the pulled slot.  The entry is
+            // disabled whenever no free slot remains or the node ordinal
+            // cap is reached.
             const bool cap_disabled = osc_add_oscillator_at_cap(osc_mapping.channel, osc_mapping.zone);
             ImGui::BeginDisabled(cap_disabled);
             if (ImGui::MenuItem("Add Oscillator")) {
@@ -737,31 +738,41 @@ static bool fx_slot_hidden(void* user_data, const Sculptor::Graph& graph, uint32
     return Sculptor::fx_param_field_hidden(graph, node_idx, param, field);
 }
 
-// The Oscillator Output's gray add dot: the free slot renders in the
-// neutral color even while its missing mark stays set for the compile
-// skip (a trailing shell hosts the slot whenever the gray dot lies
-// inside the run).  Derived from the same projection state as the drop
-// flags; every other node renders from its marks alone.
-static bool osc_slot_gray_dot(void* user_data, const Sculptor::Graph& graph, uint32_t node_idx, uint32_t slot_idx)
+// The Oscillator Output's unconnected-dot color override: a red hole (an
+// unwired slot inside the run) renders in the red an unconnected dot
+// carries; the gray add slot and wired slots render from the default
+// colors.  Derived from the zone's source row, the same projection state
+// as the drop flags; every other node renders from the default colors.
+static bool osc_slot_color(void*                  user_data,
+                           const Sculptor::Graph& graph,
+                           uint32_t               node_idx,
+                           uint32_t               slot_idx,
+                           uint32_t*              color_out)
 {
     (void)user_data;
     (void)graph;
-    if (node_idx != osc_mapping.output_node) {
+    if (! color_out || node_idx != osc_mapping.output_node) {
         return false;
     }
+
     const Synth::Zone& zone_entry = instr_bank.bank.channel_zones[osc_mapping.channel][osc_mapping.zone];
     if (zone_entry.start_note == 0 || zone_entry.instrument >= instr_bank.bank.instruments.num_allocated) {
         return false;
     }
-    const Synth::Instrument& instrument   = instr_bank.bank.instruments.entries[zone_entry.instrument];
-    const uint8_t            missing_bits = instr_bank.graph_missing_sum[osc_mapping.channel][osc_mapping.zone];
-    const uint32_t           run_length   = Sculptor::osc_row_run_length(instrument.layer_count, missing_bits);
-    const uint32_t           gray_row     = Sculptor::osc_row_gray_slot(run_length, missing_bits);
+
+    const uint8_t* source_row = instr_bank.graph_osc_source[osc_mapping.channel][osc_mapping.zone];
     for (uint32_t layer = 0; layer < Synth::max_layers; ++layer) {
         if (osc_mapping.output_layer_input_slot[layer] == slot_idx) {
-            return layer == gray_row;
+            if (! Sculptor::osc_row_is_red(source_row, layer)) {
+                return false;
+            }
+            // The red the shared palette's missing-wire dot carried; the
+            // editor-local constant moved out of the shared palette.
+            *color_out = 0xFF4040FFu;
+            return true;
         }
     }
+
     return false;
 }
 
@@ -773,13 +784,12 @@ static bool osc_slot_hidden(void* user_data, const Sculptor::Graph& graph, uint3
 {
     (void)user_data;
     // Progressive layer visibility on the Oscillator Output node: the
-    // visible rows extend to the gray add slot (one row behind the last
-    // connected row, or the run's length when nothing is connected); the
-    // trailing shells past it and every row above hide (the pure
-    // predicate keeps the rule testable; all seven slots stay allocated).
+    // visible rows extend to the gray add slot (the slot after the wired
+    // run's length); rows above the gray slot hide (the pure predicate
+    // keeps the rule testable; all seven slots stay allocated).
     if (node_idx == osc_mapping.output_node) {
-        const uint8_t missing_bits = instr_bank.graph_missing_sum[osc_mapping.channel][osc_mapping.zone];
-        return Sculptor::osc_layer_slot_hidden(slot_idx, osc_mapping, missing_bits);
+        return Sculptor::osc_layer_slot_hidden(slot_idx,
+                                               instr_bank.graph_osc_source[osc_mapping.channel][osc_mapping.zone]);
     }
     bool is_osc = false;
     for (uint32_t layer = 0; layer < Synth::max_layers && ! is_osc; ++layer) {
@@ -1621,6 +1631,11 @@ static void init_editor()
 
     Synth::init_default_bank(&instr_bank.bank);
 
+    // Fresh startup: the default zones install identity wiring.
+    for (uint32_t zone = 0; zone < Synth::max_instr_per_channel; ++zone) {
+        Sculptor::set_identity_osc_sources(&instr_bank, 0, zone);
+    }
+
     for (uint32_t channel = 0; channel < Synth::max_channels; channel++)
         Synth::get_default_channel_name(channel, instr_bank.channel_names[channel], Synth::max_name_len);
 
@@ -1781,7 +1796,7 @@ void Sculptor::SynthEditor::reproject_osc_graph(uint32_t channel, uint32_t zone)
     osc_graph.set_canvas_menu_callback(&osc_canvas_menu_entry, this);
     osc_graph.set_node_menu_callback(&osc_node_menu, nullptr);
     osc_graph.set_slot_hidden_callback(&osc_slot_hidden, nullptr);
-    osc_graph.set_slot_gray_callback(&osc_slot_gray_dot, nullptr);
+    osc_graph.set_slot_color_callback(&osc_slot_color, nullptr);
     osc_graph.set_drop_menu_callback(&osc_drop_menu_entry, this);
     fx_graph_projected = false;
     // Rebind the state widgets from scratch: gestures and point selections
@@ -2132,6 +2147,10 @@ void Sculptor::SynthEditor::do_initialize(uint32_t channel)
     Synth::reclaim_unused_slots(&candidate);
     // The channel's graph state is replaced together with its zone tables.
     Sculptor::channel_records_reset(&candidate, channel);
+    // Fresh zones install identity wiring.
+    for (uint32_t zone = 0; zone < Synth::max_instr_per_channel; ++zone) {
+        Sculptor::set_identity_osc_sources(&candidate, channel, zone);
+    }
 
     selected_target = channel;
     Sculptor::undo_group_reset(&osc_undo_group);
@@ -2565,18 +2584,10 @@ void Sculptor::SynthEditor::run_osc_canvas_command()
     osc_canvas_command             = osc_cmd_none;
     switch (command) {
         case osc_cmd_add_oscillator: {
-            // The canvas menu's Add Oscillator always appends: the target
-            // row is the projected run's end (the connected layers plus
-            // the red-marked rows), and the position stays unsnapped
-            // (today's canvas behavior).
-            const Synth::Zone& zone_entry = instr_bank.bank.channel_zones[osc_graph_zone_channel][osc_graph_zone_index];
-            uint32_t           layer      = 0;
-            if (zone_entry.start_note != 0 && zone_entry.instrument < instr_bank.bank.instruments.num_allocated) {
-                const Synth::Instrument& instrument = instr_bank.bank.instruments.entries[zone_entry.instrument];
-                const uint8_t run_bits = instr_bank.graph_missing_sum[osc_graph_zone_channel][osc_graph_zone_index];
-                layer                  = Sculptor::osc_row_run_length(instrument.layer_count, run_bits);
-            }
-            do_osc_add_oscillator(osc_graph.canvas_popup_pos(), layer);
+            // The canvas menu's Add Oscillator wires into the lowest free
+            // input slot (red holes first), and the position stays
+            // unsnapped (today's canvas behavior).
+            do_osc_add_oscillator(osc_graph.canvas_popup_pos(), pool_no_slot);
             break;
         }
         case osc_cmd_add_envelope:
@@ -3134,31 +3145,19 @@ void Sculptor::SynthEditor::do_fx_swap(uint32_t node_idx, int32_t direction)
     fx_graph_reproject = true;
 }
 
-// Canvas menu and drop "Add Oscillator": one fresh oscillator layer.
-// The new layer inherits every non-type parameter value from the last
-// enabled oscillator and its waveform pair from the zone's highest-index
-// connected oscillator; with no enabled layer the non-type fields start
-// from the model's fresh-Oscillator defaults, and an empty run keeps the
-// fresh default type (sine with B off).  Node capacity is checked
-// against the actual projected node count: a full node pool refuses even
-// below the seven-layer limit, and the run itself caps at seven rows
-// including shells.
-// The drop variants pass the snapped release position and the dragged
-// row; the drops converge on this one routine.  A pull from a red dot
-// (or from the gray dot while a trailing shell occupies its slot)
-// connects the fresh oscillator AT that row: the wire endpoint and the
-// pulled dot coincide, and the shell that occupied the row relocates to
-// the run end - its oscillator payload, node identity, kind-0 record,
-// missing bit and phantom store entry follow it byte-identically apart
-// from the row binding, and the shell is never deleted or modified
-// beyond its row binding.  A pull from the gray dot on the run's free
-// row appends there without touching any shell.  Every add grows
-// layer_count by one (the shell needs its new row).  The consumer itself
-// rejects stale graph anchors: the dragged row, the run bounds and the
-// pulled row's wire state are checked against the live projection here, so
-// a stash from an older projection refuses without mutation;
-// commit_candidate's bank and metadata validation is the final backstop.
-void Sculptor::SynthEditor::do_osc_add_oscillator(vmath::vec2 position, uint32_t dragged_row)
+// Canvas menu and drop "Add Oscillator": one fresh oscillator layer with
+// default parameters, appended at the next editor ordinal.  The
+// disconnected oscillator keeps its own node and parameters (a disconnect
+// is a wire gone, nothing more), so no inheritance survives: every add
+// starts from the model's fresh defaults.  Canvas Add (pool_no_slot)
+// wires into the lowest free input slot, red holes first; a pull from a
+// red or gray slot wires into that slot.  Every add grows layer_count by
+// one.  The consumer itself rejects stale graph anchors: the pulled
+// slot's run bounds and wire state are checked against the live
+// projection here, so a stash from an older projection refuses without
+// mutation; commit_candidate's bank and metadata validation is the final
+// backstop.
+void Sculptor::SynthEditor::do_osc_add_oscillator(vmath::vec2 position, uint32_t dragged_slot)
 {
     const uint32_t channel        = osc_graph_zone_channel;
     const uint32_t zone           = osc_graph_zone_index;
@@ -3168,46 +3167,30 @@ void Sculptor::SynthEditor::do_osc_add_oscillator(vmath::vec2 position, uint32_t
         return;
     }
     Synth::Instrument& instrument = candidate.bank.instruments.entries[zone_entry.instrument];
-    // The cap counts the run's rows, shells included: the
-    // run length is resolved before the refusal so the seventh node -
-    // connected or a shell - closes the zone's run.
-    const uint8_t  run_bits   = candidate.graph_missing_sum[channel][zone];
-    const uint32_t run_length = Sculptor::osc_row_run_length(instrument.layer_count, run_bits);
-    if (run_length >= Synth::max_layers) {
+    if (instrument.layer_count >= Synth::max_layers) {
         Sculptor::notify_error("Synth: cannot add an oscillator: the run is full");
         return;
     }
-    // The dragged row names a projected row of the zone's run: a red dot
-    // (or the gray dot while a trailing shell occupies its slot) swaps
-    // at the pulled row, the gray dot on the run's free row appends.
-    if (dragged_row > run_length) {
+    uint8_t*       source_row = candidate.graph_osc_source[channel][zone];
+    const uint32_t target_slot =
+        dragged_slot == pool_no_slot ? Sculptor::osc_lowest_free_slot(source_row) : dragged_slot;
+    if (target_slot == pool_no_slot || target_slot >= Synth::max_layers) {
+        Sculptor::notify_error("Synth: cannot add an oscillator: the run is full");
+        return;
+    }
+    // The pulled slot anchors on the run's dots: a red hole or the gray
+    // add slot.  A slot beyond the gray dot is hidden, so a stash naming
+    // it is stale.
+    if (target_slot > Sculptor::osc_row_run_length(source_row)) {
         Sculptor::notify_error("Synth: cannot add an oscillator: the layer row is gone");
         return;
     }
-    const bool swap        = dragged_row < run_length;
-    int32_t    shell_entry = -1;
-    if (swap) {
-        // Only a disconnected shell hosts a drop dot inside the run; a
-        // connected row here means a stale stash.
-        if (! Sculptor::osc_row_is_red(run_bits, dragged_row)) {
-            Sculptor::notify_error("Synth: cannot add an oscillator: the layer row is gone");
-            return;
-        }
-        // The relocated shell's store entry: every red-marked row carries
-        // one (the validator pairs bit and entry), so a missing entry is
-        // a stale stash.
-        shell_entry = Sculptor::find_phantom_entry(candidate, channel, zone, dragged_row);
-        if (shell_entry < 0) {
-            Sculptor::notify_error("Synth: cannot add an oscillator: the layer row is gone");
-            return;
-        }
-    }
-    // The pulled row's input dot must be free: a red row and a trailing
-    // shell project unwired and the free row hosts no node, so a wire
-    // here means a stale stash against a fresher projection.
-    if (Sculptor::connection_into(osc_graph,
+    // The pulled slot must be free in the candidate: a wired slot here
+    // means a stale stash against a fresher projection.
+    if (source_row[target_slot] != 0 ||
+        Sculptor::connection_into(osc_graph,
                                   osc_mapping.output_node,
-                                  osc_mapping.output_layer_input_slot[dragged_row]) != Sculptor::pool_no_slot) {
+                                  osc_mapping.output_layer_input_slot[target_slot]) != Sculptor::pool_no_slot) {
         Sculptor::notify_error("Synth: cannot add an oscillator: the layer is already wired");
         return;
     }
@@ -3216,85 +3199,21 @@ void Sculptor::SynthEditor::do_osc_add_oscillator(vmath::vec2 position, uint32_t
         return;
     }
 
-    const uint32_t    source_layer = Sculptor::osc_inherit_source_layer(instrument);
-    Synth::Oscillator fresh_osc;
-    if (source_layer != Sculptor::pool_no_slot) {
-        // A new oscillator inherits every parameter value of the last
-        // enabled oscillator: mode, mod ratio, pitch offset and all
-        // generator bindings.  Shared routing base values are
-        // instrument-wide, not per layer, so the layer struct alone
-        // carries everything to inherit.
-        fresh_osc = instrument.layers[source_layer];
-    }
-    else {
-        fresh_osc = Synth::Oscillator{};
-    }
-    // The waveform pair is copied from the zone's highest-index
-    // connected oscillator, or from the run's last row (a shell) when
-    // nothing is connected; an empty run keeps the fresh default (sine
-    // with B off).
-    const Sculptor::OscInheritedType inherited = Sculptor::osc_inherited_type(candidate, channel, zone);
-    fresh_osc.osc_type[0]                      = inherited.wave_a;
-    fresh_osc.osc_type[1]                      = inherited.wave_b;
-    uint32_t target_row                        = run_length;
-    if (swap) {
-        // The fresh oscillator takes the pulled row's compiled slot: the
-        // number of connected rows strictly below it, with the compiled
-        // layers above shifted up one.  The shell relocates to the run
-        // end (the pre-swap run length): its missing bit and its phantom
-        // store entry follow it, and its kind-0 record re-keys with its
-        // position bytes preserved.  The shell is never deleted or
-        // modified beyond its row binding.
-        const uint32_t compiled = Sculptor::osc_row_connected_below(run_bits, dragged_row);
-        for (uint32_t l = instrument.layer_count; l > compiled; --l) {
-            instrument.layers[l] = instrument.layers[l - 1];
-        }
-        instrument.layers[compiled] = fresh_osc;
-        instrument.layer_count++;
-        const uint8_t pulled_mask = static_cast<uint8_t>(1u << dragged_row);
-        const uint8_t shell_mask  = static_cast<uint8_t>(1u << run_length);
-        candidate.graph_missing_sum[channel][zone] =
-            static_cast<uint8_t>((run_bits & static_cast<uint8_t>(~pulled_mask)) | shell_mask);
-        candidate.phantoms[shell_entry].layer = static_cast<uint8_t>(run_length);
-        // The relocation key may already carry a stale kind-0 record from
-        // an earlier state: kind-0 validation checks bounds and key
-        // uniqueness, not oscillator existence, so an unmapped record at
-        // the run end is valid pre-swap metadata.  Remove it before the
-        // shell's record re-keys, or the duplicate key would make
-        // commit_candidate refuse the whole add.
-        const int32_t stale_record =
-            Sculptor::find_record(candidate, channel, zone, 0, Synth::graph_canonical_first_osc + run_length, 0);
-        if (stale_record >= 0) {
-            for (uint32_t i = static_cast<uint32_t>(stale_record); i + 1 < candidate.graph_layout_count; ++i) {
-                candidate.graph_layout[i] = candidate.graph_layout[i + 1];
-            }
-            candidate.graph_layout_count--;
-        }
-        const int32_t shell_record =
-            Sculptor::find_record(candidate, channel, zone, 0, Synth::graph_canonical_first_osc + dragged_row, 0);
-        if (shell_record >= 0) {
-            candidate.graph_layout[shell_record].index =
-                static_cast<uint8_t>(Synth::graph_canonical_first_osc + run_length);
-        }
-        target_row = dragged_row;
-    }
-    else {
-        // The plain append lands at the compiled count, not at a pulled
-        // row: the free row hosted no compiled layer, so the new
-        // oscillator takes the first free compiled slot and the count
-        // grows by one.  No shell is touched.
-        instrument.layers[instrument.layer_count] = fresh_osc;
-        instrument.layer_count++;
-    }
-    // The new layer's node lands on its row, at the release or menu
-    // position via its layout record (the drop position arrives
-    // grid-snapped).  On the swap path the fresh oscillator takes the
-    // pulled row's layout key after the shell's key has moved to the run
-    // end, so its record is appended; on the plain append the row hosted
-    // no node.  A stale duplicate is updated in place, like
-    // sync_osc_graph_layout, so the one-record-per-node invariant holds
-    // and a later drag cannot be overridden by a stale duplicate.
-    const uint32_t canonical  = Synth::graph_canonical_first_osc + target_row;
+    // Fresh default parameters: no inheritance.  Waveform A cannot be
+    // off, so a fresh oscillator starts on sine.
+    Synth::Oscillator fresh_osc = Synth::Oscillator{};
+    fresh_osc.osc_type[0]       = Synth::WaveType::sine_wave;
+
+    const uint32_t ordinal     = instrument.layer_count;
+    instrument.layers[ordinal] = fresh_osc;
+    instrument.layer_count++;
+    source_row[target_slot] = static_cast<uint8_t>(ordinal + 1);
+    // The new layer's node lands at the release or menu position via its
+    // layout record (the drop position arrives grid-snapped).  A stale
+    // duplicate is updated in place, like sync_osc_graph_layout, so the
+    // one-record-per-node invariant holds and a later drag cannot be
+    // overridden by a stale duplicate.
+    const uint32_t canonical  = Synth::graph_canonical_first_osc + ordinal;
     const int32_t  record_idx = Sculptor::find_record(candidate, channel, zone, 0, canonical, 0);
     if (record_idx >= 0) {
         candidate.graph_layout[record_idx].x = position.x;
@@ -3344,8 +3263,7 @@ void Sculptor::SynthEditor::do_osc_add_generator(bool        is_env,
     // in from run_osc_canvas_command); the drop variants preset the cell
     // binding and must resolve it against the candidate before any
     // allocation.
-    Synth::Instrument* instrument     = nullptr;
-    uint32_t           compiled_layer = 0;
+    Synth::Instrument* instrument = nullptr;
     if (bind_target < Synth::num_mod_targets) {
         const Synth::Zone& zone_entry = candidate.bank.channel_zones[channel][zone];
         if (zone_entry.start_note == 0 || zone_entry.instrument >= candidate.bank.instruments.num_allocated) {
@@ -3353,29 +3271,19 @@ void Sculptor::SynthEditor::do_osc_add_generator(bool        is_env,
             return;
         }
         instrument = &candidate.bank.instruments.entries[zone_entry.instrument];
-        // bind_layer is a graph row; red-marked rows host phantom shells
-        // (not the compiled layer the binding must land on), and the
-        // connected layers compact around them.  The compiled index of a
-        // connected row is the number of connected rows strictly below it.
-        bool row_red = false;
-        {
-            const uint8_t bits = candidate.graph_missing_sum[channel][zone];
-            if (bind_layer >= Synth::max_layers) {
-                Sculptor::notify_error("Synth: cannot add: the target row is gone");
-                return;
-            }
-            row_red        = Sculptor::osc_row_is_red(bits, bind_layer);
-            compiled_layer = Sculptor::osc_row_connected_below(bits, bind_layer);
-        }
-        if (row_red) {
-            Sculptor::notify_error("Synth: cannot add: the row is a disconnected shell");
-            return;
-        }
-        if (compiled_layer >= instrument->layer_count) {
+        // bind_layer is the target oscillator's editor ordinal (the drop
+        // menu anchors on a projected node's row, which names the node's
+        // editor ordinal); unwired nodes keep their ordinals, so no
+        // compaction applies.
+        if (bind_layer >= Synth::max_layers) {
             Sculptor::notify_error("Synth: cannot add: the target row is gone");
             return;
         }
-        const Synth::TargetBinding& binding = instrument->layers[compiled_layer].targets[bind_target];
+        if (bind_layer >= instrument->layer_count) {
+            Sculptor::notify_error("Synth: cannot add: the target row is gone");
+            return;
+        }
+        const Synth::TargetBinding& binding = instrument->layers[bind_layer].targets[bind_target];
         if (is_env ? binding.envelope_desc_id != 0 : binding.lfo_desc_id != 0) {
             Sculptor::notify_error("Synth: cannot add: the target already has a modulator");
             return;
@@ -3431,7 +3339,7 @@ void Sculptor::SynthEditor::do_osc_add_generator(bool        is_env,
             return;
         }
         if (instrument) {
-            Synth::TargetBinding& cell = instrument->layers[compiled_layer].targets[bind_target];
+            Synth::TargetBinding& cell = instrument->layers[bind_layer].targets[bind_target];
             cell.envelope_desc_id      = static_cast<uint16_t>(slot + 1);
             // Drop-created envelopes seed the legacy unscaled amount,
             // mirroring the drag pathway: a zero depth silences the
@@ -3449,7 +3357,7 @@ void Sculptor::SynthEditor::do_osc_add_generator(bool        is_env,
             return;
         }
         if (instrument) {
-            Synth::TargetBinding& cell = instrument->layers[compiled_layer].targets[bind_target];
+            Synth::TargetBinding& cell = instrument->layers[bind_layer].targets[bind_target];
             cell.lfo_desc_id           = lfo_desc_id;
             // Drop-created LFOs seed an audible depth, mirroring the drag
             // pathway: a zero depth silences the LFO entirely, while a
@@ -3721,16 +3629,18 @@ void Sculptor::SynthEditor::do_zone_paste_instrument(uint32_t channel, uint32_t 
     uint32_t envelope_count = 0;
     uint32_t lfo_count      = 0;
     uint32_t layout_count   = 0;
-    if (! Synth::decode_instrument_json(text,
-                                        static_cast<uint32_t>(strlen(text)),
-                                        &clipboard_decoded_instrument,
-                                        clipboard_decoded_envelopes,
-                                        &envelope_count,
-                                        clipboard_decoded_lfos,
-                                        &lfo_count,
-                                        clipboard_decoded_layout,
-                                        Synth::instrument_graph_layout_capacity,
-                                        &layout_count)) {
+    if (! Synth::decode_instrument_json_for_domain(text,
+                                                   static_cast<uint32_t>(strlen(text)),
+                                                   &clipboard_decoded_instrument,
+                                                   clipboard_decoded_envelopes,
+                                                   &envelope_count,
+                                                   clipboard_decoded_lfos,
+                                                   &lfo_count,
+                                                   clipboard_decoded_layout,
+                                                   Synth::instrument_graph_layout_capacity,
+                                                   &layout_count,
+                                                   Synth::InstrumentJsonDomain::clipboard,
+                                                   clipboard_decoded_osc_source)) {
         Sculptor::notify_error("Synth: cannot paste: not a valid instrument document");
         return;
     }
@@ -3744,6 +3654,7 @@ void Sculptor::SynthEditor::do_zone_paste_instrument(uint32_t channel, uint32_t 
                                                       lfo_count,
                                                       clipboard_decoded_layout,
                                                       layout_count,
+                                                      clipboard_decoded_osc_source,
                                                       &candidate)) {
         Sculptor::notify_error("Synth: cannot paste: the instrument replacement was refused");
         return;
@@ -3911,9 +3822,15 @@ void Sculptor::SynthEditor::do_zone_split_new(uint32_t channel, uint32_t note)
     if (! Synth::zone_split_new(candidate.bank.channel_zones[channel], static_cast<uint32_t>(entry), note, &candidate))
         return; // pool or table full: the menu item is grayed, but stay safe
 
-    if (! first_note && ! Sculptor::zone_records_split_copy(&candidate, channel, static_cast<uint32_t>(entry))) {
-        Sculptor::notify_error("Synth: cannot split: the graph state is full");
-        return;
+    if (! first_note) {
+        if (! Sculptor::zone_records_split_copy(&candidate, channel, static_cast<uint32_t>(entry))) {
+            Sculptor::notify_error("Synth: cannot split: the graph state is full");
+            return;
+        }
+        if (! Sculptor::clone_split_generators(&candidate, channel, static_cast<uint32_t>(entry))) {
+            Sculptor::notify_error("Synth: cannot split: the envelope or LFO pool is full");
+            return;
+        }
     }
 
     // Splitting at the zone's first note orphans its old instrument.

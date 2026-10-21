@@ -50,26 +50,6 @@ struct GraphNodeLayout {
 
 static_assert(sizeof(GraphNodeLayout) == 56);
 
-// One stored phantom shell: the oscillator parameters of a red-marked
-// (missing-sum) layer, keyed by (channel, zone, layer).  The compiled
-// instrument omits red-marked layers, so this is the only home the
-// disconnected layer's parameters have while its wire is gone.
-struct PhantomOscillator {
-    Synth::Oscillator osc;
-    uint8_t           channel; // 0..15
-    uint8_t           zone;    // 0..15
-    uint8_t           layer;   // 0..6
-};
-
-// Fixed phantom-store capacity: it covers every zone of the bank carrying
-// one red-marked layer (256 zones).  A capture that would
-// exceed the capacity refuses the disconnection - the apply path's batch
-// refusal re-projects the wire back - like every other capacity refusal,
-// so exhaustion loses nothing silently.
-constexpr uint32_t max_phantom_entries = 256;
-
-// The record kinds the editor model holds; any other kind in decoded
-// metadata is an unknown record and is rejected like any malformed field.
 inline bool editor_record_kind_valid(uint8_t kind)
 {
     return kind == 0 || kind == 1 || kind == 2 || kind == 4 || kind == 5;
@@ -100,21 +80,13 @@ struct InstrumentEditorBank {
     Sculptor::EffectAudioTopology effect_audio[max_channels + 1];
     char                          instrument_names[max_instruments][max_name_len];
     char                          channel_names[max_channels][max_name_len];
-    // Editor-side per-zone graph state, sparse with a global cap.
+    // Editor-side per-zone wiring state, sparse with a global cap.
     GraphNodeLayout graph_layout[max_graph_records];
     uint32_t        graph_layout_count;
-    uint8_t graph_missing_sum[max_channels][max_instr_per_channel]; // [channel][zone], one bit per oscillator layer
-    // Phantom shells: a red-marked (missing-sum) layer keeps its oscillator
-    // parameters here, because the compiled instrument omits red-marked
-    // layers and would otherwise lose them.  Entries are keyed by
-    // (channel, zone, layer), one layer index per entry, aligned with the
-    // graph_missing_sum bits: an entry exists only while its row's bit is
-    // set, and every set bit carries its entry (validate_editor_metadata
-    // enforces the pairing; the load path migrates banks saved before the
-    // store existed).  Editor-side only: phantoms never cross a library or
-    // runtime boundary.
-    PhantomOscillator phantoms[max_phantom_entries];
-    uint32_t          phantom_count;
+    // Per-zone oscillator wiring: output input slot s of zone (channel, zone)
+    // is fed by oscillator node ordinal (entry - 1); 0 = unwired.  The rows
+    // drive projection, the red-run rendering and the playback compile.
+    uint8_t graph_osc_source[max_channels][max_instr_per_channel][Synth::max_layers];
     // Added-CC output dots per effect chain, bit i = CC (16 + i) is added on
     // the chain (channel index, or max_channels for the master chain).  A dot
     // exists only when its bit is set; wiring a CC never sets or clears bits.
@@ -262,7 +234,7 @@ bool compile_editor_playback_bank(const Synth::InstrumentEditorBank& source, Syn
 // flag is restored. Exactly one root reuses its own instrument slot; a shared
 // destination needs a separate free or unallocated slot obtainable BEFORE reclaim
 // (an allocated-but-unrooted slot is not free). Only the destination zone's
-// non-effect layout records and its missing-sum row are replaced; effect records,
+// non-effect layout records and its source row are replaced; effect records,
 // other zones and every other root are preserved. Invalid source metadata, an
 // invalid destination table or an unobtainable placeholder returns false with
 // `out_candidate` untouched.
@@ -276,6 +248,7 @@ bool replace_zone_instrument_candidate(const Synth::InstrumentEditorBank&  sourc
                                        uint32_t                            decoded_lfo_count,
                                        const Synth::InstrumentGraphLayout* decoded_layout,
                                        uint32_t                            decoded_layout_count,
+                                       const uint8_t*                      decoded_osc_source,
                                        Synth::InstrumentEditorBank*        out_candidate);
 
 // Record names must be terminated.  Only kind-4 names participate in identity.
@@ -285,9 +258,9 @@ bool graph_layout_record_identity_equal(const Synth::GraphNodeLayout& a, const S
 // codec and the editor's candidate commit.  Defined in sculptor_instr_bank.cpp
 // so every binary that links the editor bank links its validation too.
 // validate_editor_metadata: record bounds, descriptor ids within their pools,
-// per-zone and global record caps, duplicate record keys, missing-sum bits
-// within each zone's projected row run, and the implied projected node
-// count per zone within the node pool.
+// per-zone and global record caps, duplicate record keys, per-zone source-row
+// values (wired ordinals unique and within the instrument's layer count),
+// and the implied projected node count per zone within the node pool.
 bool validate_editor_metadata(const Synth::InstrumentEditorBank& bank);
 // Number of detached (kind 1/2) records stored for one zone.
 uint32_t count_detached_records(const Synth::InstrumentEditorBank& bank, uint32_t channel, uint32_t zone);

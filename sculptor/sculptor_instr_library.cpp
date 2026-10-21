@@ -21,7 +21,6 @@ Synth::Instrument            library_transfer_decoded;
 Synth::EnvelopeDescriptor    library_transfer_envs[Synth::instrument_max_envelopes];
 Synth::LFODescriptor         library_transfer_lfos[Synth::instrument_max_lfos];
 Synth::InstrumentGraphLayout library_transfer_layout[Synth::instrument_graph_layout_capacity];
-Synth::InstrumentGraphLayout library_transfer_original_layout[Synth::instrument_graph_layout_capacity];
 
 Synth::InstrumentEditorBank library_load_candidate;
 } // namespace
@@ -218,12 +217,6 @@ static bool validate_record(const Synth::InstrumentEditorBank* const editor_bank
         if (record.channel != 0 || (record.kind != 4 && ! bank->channel_zones[0][record.zone].start_note))
             return false;
     }
-    for (uint32_t channel = 0; channel < Synth::max_channels; ++channel) {
-        for (uint32_t zone = 0; zone < Synth::max_instr_per_channel; ++zone) {
-            if (editor_bank->graph_missing_sum[channel][zone])
-                return false;
-        }
-    }
 
     // Instrument names come from file bytes; a run without NUL would make name
     // readers run past the buffer.
@@ -257,13 +250,15 @@ static bool transfer_zone_layout(const Synth::InstrumentEditorBank& source,
                                  uint32_t                           dst_channel,
                                  Synth::InstrumentEditorBank*       candidate)
 {
-    uint32_t       env_count = 0, lfo_count = 0, count = 0, original_count = 0;
+    uint32_t env_count = 0, lfo_count = 0, count = 0;
+
     const uint32_t length = Sculptor::encode_editor_instrument_json(source,
                                                                     channel,
                                                                     zone,
                                                                     library_transfer_text,
                                                                     sizeof(library_transfer_text),
                                                                     Synth::InstrumentJsonDomain::validated_bank);
+
     if (! length || ! Synth::decode_instrument_json_for_domain(library_transfer_text,
                                                                length,
                                                                &library_transfer_decoded,
@@ -276,30 +271,21 @@ static bool transfer_zone_layout(const Synth::InstrumentEditorBank& source,
                                                                &count,
                                                                Synth::InstrumentJsonDomain::validated_bank))
         return false;
-    const Synth::Instrument& original =
-        source.bank.instruments.entries[source.bank.channel_zones[channel][zone].instrument];
-    return Sculptor::normalize_instrument_graph_layout(library_transfer_decoded,
-                                                       library_transfer_envs,
-                                                       env_count,
-                                                       library_transfer_lfos,
-                                                       lfo_count,
-                                                       library_transfer_layout,
-                                                       count,
-                                                       original,
-                                                       source.bank.envelopes.entries,
-                                                       source.bank.envelopes.num_allocated,
-                                                       source.bank.lfos.entries,
-                                                       source.bank.lfos.num_allocated,
-                                                       library_transfer_original_layout,
-                                                       Synth::instrument_graph_layout_capacity,
-                                                       &original_count) &&
-           Sculptor::append_instrument_graph_layout(original,
-                                                    source.bank.envelopes.entries,
-                                                    source.bank.envelopes.num_allocated,
-                                                    source.bank.lfos.entries,
-                                                    source.bank.lfos.num_allocated,
-                                                    library_transfer_original_layout,
-                                                    original_count,
+
+    // The decoded layout names the decoded document's playback-form
+    // instrument -- exactly the form the destination zone stores (save
+    // compiles the record's playback form; load installs the decoded
+    // instrument with identity source rows).  Mapping against the source
+    // zone's authoring instrument would mispair nodes when the source
+    // row reorders the wired oscillators, so map directly against the
+    // decoded model and remap the descriptor ids while appending.
+    return Sculptor::append_instrument_graph_layout(library_transfer_decoded,
+                                                    library_transfer_envs,
+                                                    env_count,
+                                                    library_transfer_lfos,
+                                                    lfo_count,
+                                                    library_transfer_layout,
+                                                    count,
                                                     env_ids,
                                                     lfo_ids,
                                                     dst_channel,
@@ -425,6 +411,9 @@ bool Synth::load_library_instrument(const char* const            path,
          ++zone) {
         if (! transfer_zone_layout(record_bank, 0, zone, env_ids, lfo_ids, channel, &library_load_candidate))
             return false;
+        // The record's instruments are playback forms wired in slot order:
+        // identity source rows reproduce that wiring in the editor.
+        Sculptor::set_identity_osc_sources(&library_load_candidate, channel, zone);
     }
     if (! Sculptor::transfer_effect_layout(&record_bank, 0, lfo_ids, channel, &library_load_candidate) ||
         ! Synth::validate_instrument_bank(&library_load_candidate.bank) ||
@@ -724,22 +713,33 @@ int Synth::save_library_record(const char* const                        path,
     bool keep_env[Synth::max_envelopes] = {};
     bool keep_lfo[Synth::max_lfos]      = {};
 
+    // The record stores the playback form: only wired layers survive, and
+    // only the descriptors those layers reference are collected.
     for (uint32_t id = 0; id < src_bank->instruments.num_allocated; id++) {
         if (! keep_instr[id])
             continue;
+        for (uint32_t zone = 0; zone < num_zones; zone++) {
+            if (src_bank->channel_zones[channel][zone].instrument != id) {
+                continue;
+            }
+            Synth::Instrument playback;
+            if (! Sculptor::compile_playback_instrument(src_bank->instruments.entries[id],
+                                                        src_editor_bank->graph_osc_source[channel][zone],
+                                                        &playback))
+                return EINVAL;
+            for (uint32_t layer = 0; layer < playback.layer_count; layer++) {
+                for (uint32_t target = 0; target < num_mod_targets; target++) {
 
-        const Instrument& src_instrument = src_bank->instruments.entries[id];
+                    const TargetBinding& gen = playback.layers[layer].targets[target];
 
-        for (uint32_t layer = 0; layer < src_instrument.layer_count; layer++) {
-            for (uint32_t target = 0; target < num_mod_targets; target++) {
+                    if (gen.envelope_desc_id && gen.envelope_desc_id <= Synth::max_envelopes) {
+                        keep_env[gen.envelope_desc_id - 1] = true;
+                    }
 
-                const TargetBinding& gen = src_instrument.layers[layer].targets[target];
-
-                if (gen.envelope_desc_id && gen.envelope_desc_id <= Synth::max_envelopes)
-                    keep_env[gen.envelope_desc_id - 1] = true;
-
-                if (gen.lfo_desc_id && gen.lfo_desc_id <= Synth::max_lfos)
-                    keep_lfo[gen.lfo_desc_id - 1] = true;
+                    if (gen.lfo_desc_id && gen.lfo_desc_id <= Synth::max_lfos) {
+                        keep_lfo[gen.lfo_desc_id - 1] = true;
+                    }
+                }
             }
         }
     }
@@ -781,9 +781,26 @@ int Synth::save_library_record(const char* const                        path,
         if (! keep_instr[id])
             continue;
 
+        // First zone referencing the slot wins: its playback form is what
+        // the record stores (shared slots with differing wiring collapse to
+        // the first zone's form).
+        const Synth::Instrument* form = &src_bank->instruments.entries[id];
+        Synth::Instrument        playback;
+        for (uint32_t zone = 0; zone < num_zones; zone++) {
+            if (src_bank->channel_zones[channel][zone].instrument != id) {
+                continue;
+            }
+            if (! Sculptor::compile_playback_instrument(src_bank->instruments.entries[id],
+                                                        src_editor_bank->graph_osc_source[channel][zone],
+                                                        &playback))
+                return EINVAL;
+            form = &playback;
+            break;
+        }
+
         const uint32_t slot = reduced.bank.instruments.allocate();
 
-        remap_instrument(src_bank->instruments.entries[id], env_ids, lfo_ids, &reduced.bank.instruments.entries[slot]);
+        remap_instrument(*form, env_ids, lfo_ids, &reduced.bank.instruments.entries[slot]);
 
         memcpy(reduced.instrument_names[slot], src_editor_bank->instrument_names[id], Synth::max_name_len);
         instr_ids[id] = static_cast<uint16_t>(slot);
@@ -800,6 +817,9 @@ int Synth::save_library_record(const char* const                        path,
         reduced.bank.channel_zones[0][zone] = src_bank->channel_zones[channel][zone];
         reduced.bank.channel_zones[0][zone].instrument =
             static_cast<uint8_t>(instr_ids[src_bank->channel_zones[channel][zone].instrument]);
+        // The record's instruments are playback forms, wired in slot order:
+        // identity source rows reproduce that wiring on load.
+        Sculptor::set_identity_osc_sources(&reduced, 0, zone);
     }
 
     for (uint32_t zone = 0; zone < num_zones; ++zone) {

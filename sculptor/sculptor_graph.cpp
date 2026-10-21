@@ -16,9 +16,9 @@ const char* const Sculptor::source_op_names[2] = { "+", "x" };
 // Effect and oscillator LFO waves the runtime can evaluate (eval_lfo_mod);
 // pulse and noise would trip the runtime's palette assert, and bank
 // validation rejects them.
-const char* const Sculptor::lfo_wave_names[2] = { "Sine", "Sawtooth" };
-const char* const Sculptor::lfo_sync_names[6] = { "absolute (ms)", "1 note", "1/2 note", "1/4 note",
-                                                  "1/8 note", "1/16 note" };
+const char* const Sculptor::lfo_wave_names[2]  = { "Sine", "Sawtooth" };
+const char* const Sculptor::lfo_sync_names[6]  = { "absolute (ms)", "1 note",   "1/2 note",
+                                                   "1/4 note",      "1/8 note", "1/16 note" };
 const char* const Sculptor::lfo_start_names[3] = { "middle", "lowest", "highest" };
 
 const char* const Sculptor::mod_source_names[6] = { "Pitch bend", "Mod wheel",  "Channel press.",
@@ -187,7 +187,6 @@ Sculptor::GraphColors Sculptor::default_graph_colors()
     colors.connector                = 0x909090FFu;
     colors.connector_hover          = 0xFFFFFFE0u;
     colors.connector_connected      = 0xE0E0E0FFu;
-    colors.connector_missing        = 0xFF4040FFu;
     colors.connection               = 0xC0C0C0FFu;
     colors.ghost_node               = 0x4A4A4A80u;
     colors.property_value           = 0xD0D0D0FFu;
@@ -477,9 +476,6 @@ void Sculptor::Graph::clear()
     connecting_from     = EndPoint{ pool_no_slot, pool_no_slot };
     drop_menu_from      = EndPoint{ pool_no_slot, pool_no_slot };
     drop_menu_point     = {};
-    // Missing marks belong to the pre-rebuild projection; stale bits would
-    // hand red dots to reused (node, slot) indices.
-    memset(slot_missing_bits, 0, sizeof(slot_missing_bits));
     // Rebuild traffic must not echo into the edit pipeline: reset the ring
     // with the graph and suppress events until the next drain re-arms it.
     changes_head            = 0;
@@ -607,10 +603,10 @@ void Sculptor::Graph::set_slot_hidden_callback(SlotHiddenCallback callback, void
     slot_hidden_user_data = user_data;
 }
 
-void Sculptor::Graph::set_slot_gray_callback(SlotGrayCallback callback, void* user_data)
+void Sculptor::Graph::set_slot_color_callback(SlotColorCallback callback, void* user_data)
 {
-    slot_gray_callback  = callback;
-    slot_gray_user_data = user_data;
+    slot_color_callback  = callback;
+    slot_color_user_data = user_data;
 }
 
 bool Sculptor::Graph::user_delete_connection(uint32_t connection_idx)
@@ -644,42 +640,6 @@ void Sculptor::Graph::set_node_menu_callback(NodeMenuCallback callback, void* us
 {
     node_menu_callback  = callback;
     node_menu_user_data = user_data;
-}
-
-// Per-slot "missing" render bits: live only while the editor marks them, so
-// they never enter graph snapshots and the zero-filled state marks nothing.
-void Sculptor::Graph::set_slot_missing(uint32_t node_idx, uint32_t slot_idx, bool missing)
-{
-    if (node_idx >= nodes.num_allocated || ! nodes.is_occupied(node_idx)) {
-        return;
-    }
-    const Node& node = nodes.entries[node_idx];
-    if (slot_idx >= node.slots.num_allocated) {
-        return;
-    }
-    const uint32_t bit  = node_idx * max_node_slots + slot_idx;
-    const uint8_t  mask = static_cast<uint8_t>(1u << (bit % 8u));
-    if (missing) {
-        slot_missing_bits[bit / 8u] |= mask;
-    }
-    else {
-        slot_missing_bits[bit / 8u] &= static_cast<uint8_t>(~mask);
-    }
-}
-
-bool Sculptor::Graph::slot_missing(uint32_t node_idx, uint32_t slot_idx) const
-{
-    // The bits carry no occupancy state of their own: clear() wipes them,
-    // so between rebuilds only the node-occupancy and slot-range guards
-    // keep a stale or out-of-range bit from surfacing through the getter.
-    if (node_idx >= nodes.num_allocated || ! nodes.is_occupied(node_idx)) {
-        return false;
-    }
-    if (slot_idx >= nodes.entries[node_idx].slots.num_allocated) {
-        return false;
-    }
-    const uint32_t bit = node_idx * max_node_slots + slot_idx;
-    return (slot_missing_bits[bit / 8u] & (1u << (bit % 8u))) != 0;
 }
 
 void Sculptor::Graph::set_slot_edit_disabled(uint32_t node_idx, uint32_t slot_idx, bool disabled)

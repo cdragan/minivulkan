@@ -75,15 +75,16 @@ private:
     void gui_osc_graph(uint32_t channel);
     void drain_osc_graph(uint32_t channel, uint32_t zone);
     void run_osc_canvas_command();
-    // The canvas menu passes the unsnapped popup position and appends at the
-    // compiled layer count (a storage index, not a projected row); the drop
-    // variants pass the snapped release position and the dragged row - both
-    // converge on one append routine that lands the fresh oscillator after
-    // the last existing row (the shell at the dragged red row is never
-    // modified).  A generator drop also passes the binding cell to preset;
-    // the detached-canvas variants pass the sentinels (max_layers /
+    // The canvas menu passes the unsnapped popup position and pool_no_slot
+    // (canvas Add wires into the lowest free input slot, red holes first);
+    // the drop variants pass the snapped release position and the dragged
+    // slot (a red hole or the gray add slot) - both converge on one add
+    // routine that appends the fresh oscillator at the next editor ordinal
+    // with default parameters.  A generator drop also passes the binding
+    // cell to preset (the target oscillator's editor ordinal); the
+    // detached-canvas variants pass the sentinels (max_layers /
     // num_mod_targets) and create a free-standing node only.
-    void do_osc_add_oscillator(vmath::vec2 position, uint32_t dragged_row);
+    void do_osc_add_oscillator(vmath::vec2 position, uint32_t dragged_slot);
     void do_osc_add_generator(bool is_env, vmath::vec2 position, uint32_t bind_layer, uint32_t bind_target);
     void do_osc_add_cc(uint32_t cc_number);
     void do_osc_remove_cc(uint32_t cc_number);

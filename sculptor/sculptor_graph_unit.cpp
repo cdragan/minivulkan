@@ -1059,31 +1059,113 @@ static void test_connection_capacity_raised_to_512()
     TEST(g.connection_count() == 512);
 }
 
-// Per-slot "missing" render state, editor-settable so the renderer draws
-// unconnected sum endpoints red after the oscillator-sum edge is deleted.
-static void test_slot_missing_flag_api()
+// Render harness shared by the renderer-side tests: one full window frame
+// with the graph rendered, returning the window draw list for vertex-color
+// scans.  The renderer context comes from create_renderer_context(),
+// defined below and called by each renderer-driven test.
+static void create_renderer_context();
+
+static const ImDrawList* begin_rendered_graph_frame(Graph& graph)
 {
+    ImGui::NewFrame();
+    ImGui::SetNextWindowPos(ImVec2(0, 0));
+    ImGui::SetNextWindowSize(ImVec2(1024, 768));
+    ImGui::Begin("graph mouse regression",
+                 nullptr,
+                 ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove);
+
+    graph.render(vmath::vec2(1000, 740), nullptr);
+    return ImGui::GetWindowDrawList();
+}
+
+static void end_rendered_graph_frame()
+{
+    ImGui::End();
+    ImGui::Render();
+}
+
+// Per-slot render color, editor-settable through one callback: unconnected
+// sum endpoints draw red from the zone's source row instead of the default
+// connector color.  Rendered with one unconnected input dot and one
+// connected dot: the callback runs for the unconnected dot (its override
+// color is drawn); the connected dot keeps the connected connector color
+// and never consults the callback.
+static void test_slot_color_callback_api()
+{
+    create_renderer_context();
     Graph& g = reset_unit_graph(0);
     g.clear();
-    const uint32_t node = g.create_node("sum", vmath::vec2(0.0f, 0.0f));
-    TEST(node != Sculptor::pool_no_slot);
-    Slot in                   = {};
-    in.kind                   = SlotKind::input;
-    const uint32_t slot       = g.add_slot(node, in);
-    const uint32_t other_slot = g.add_slot(node, in);
-    TEST(slot != Sculptor::pool_no_slot && other_slot != Sculptor::pool_no_slot);
-    TEST(! g.slot_missing(node, slot)); // default: not missing
-    g.set_slot_missing(node, slot, true);
-    TEST(g.slot_missing(node, slot));
-    TEST(! g.slot_missing(node, other_slot)); // per-slot, not per-node
-    g.set_slot_missing(node, slot, false);
-    TEST(! g.slot_missing(node, slot));
-    // Missing marks never survive a wholesale rebuild: a reused (node, slot)
-    // index must not inherit a stale red dot.
-    g.set_slot_missing(node, slot, true);
-    g.clear();
-    TEST(! g.slot_missing(node, slot));
-    TEST(! g.slot_missing(node, other_slot));
+    GraphColors colors         = Sculptor::default_graph_colors();
+    colors.connection          = 0x111D2BFF;
+    colors.connector           = 0x222324FF;
+    colors.connector_connected = 0x252627FF;
+    g.set_colors(colors);
+    const uint32_t node_a = g.create_node("A", vmath::vec2(64.0f, 64.0f));
+    const uint32_t node_b = g.create_node("B", vmath::vec2(320.0f, 64.0f));
+    TEST(node_a != Sculptor::pool_no_slot && node_b != Sculptor::pool_no_slot);
+    Slot in      = {};
+    in.kind      = SlotKind::input;
+    in.row_group = 1;
+    strcpy(in.name, "In");
+    Slot out      = {};
+    out.kind      = SlotKind::output;
+    out.row_group = 1;
+    strcpy(out.name, "Out");
+    TEST(g.add_slot(node_a, in) == 0);
+    TEST(g.add_slot(node_a, out) == 1);
+    TEST(g.add_slot(node_b, in) == 0);
+    // Node A slot 1 wires into node B slot 0: A slot 0 renders as the
+    // unconnected dot, A slot 1 and B slot 0 as connected dots.
+    TEST(g.add_connection({ node_a, 1 }, { node_b, 0 }) != Sculptor::pool_no_slot);
+    GraphChange discard[Sculptor::max_pending_changes] = {};
+    (void)g.take_changes(discard, Sculptor::max_pending_changes);
+
+    static uint32_t calls = 0;
+    calls                 = 0;
+    const auto callback   = [](void*, const Graph&, uint32_t node_idx, uint32_t slot_idx, uint32_t* color_out) {
+        (void)node_idx;
+        calls++;
+        if (slot_idx == 0) {
+            *color_out = 0xFF4040FF;
+            return true;
+        }
+        return false;
+    };
+    g.set_slot_color_callback(callback, nullptr);
+
+    const ImU32       custom             = IM_COL32(0xFF, 0x40, 0x40, 0xFF); // 0xFF4040FF, packed 0xRRGGBBAA
+    const ImU32       connected_color    = IM_COL32(0x25, 0x26, 0x27, 0xFF);
+    uint32_t          custom_vertices    = 0;
+    uint32_t          connected_vertices = 0;
+    const ImDrawList* draw               = begin_rendered_graph_frame(g);
+    for (const ImDrawVert& vertex : draw->VtxBuffer) {
+        if (vertex.col == custom) {
+            ++custom_vertices;
+        }
+        else if (vertex.col == connected_color) {
+            ++connected_vertices;
+        }
+    }
+    end_rendered_graph_frame();
+    // Only the unconnected dot consults the callback; the override color
+    // is drawn and the connected dot keeps its default color.
+    TEST(calls == 1);
+    TEST(custom_vertices > 0);
+    TEST(connected_vertices > 0);
+
+    // Unregistering returns the dot to the default connector color: no
+    // custom-color vertices on a second frame.
+    g.set_slot_color_callback(nullptr, nullptr);
+    custom_vertices = 0;
+    draw            = begin_rendered_graph_frame(g);
+    for (const ImDrawVert& vertex : draw->VtxBuffer) {
+        if (vertex.col == custom) {
+            ++custom_vertices;
+        }
+    }
+    end_rendered_graph_frame();
+    TEST(calls == 1); // no further consultations without the callback
+    TEST(custom_vertices == 0);
 }
 
 // Eventless property write for the shared-routing fan-out - sets the
@@ -1466,24 +1548,6 @@ static void test_user_disconnect_and_intent_capacity()
     TEST(graph.take_changes(changes, max_pending_changes) == 0);
 }
 
-static const ImDrawList* begin_rendered_graph_frame(Graph& graph)
-{
-    ImGui::NewFrame();
-    ImGui::SetNextWindowPos(ImVec2(0, 0));
-    ImGui::SetNextWindowSize(ImVec2(1024, 768));
-    ImGui::Begin("graph mouse regression",
-                 nullptr,
-                 ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove);
-    graph.render(vmath::vec2(1000, 740), nullptr);
-    return ImGui::GetWindowDrawList();
-}
-
-static void end_rendered_graph_frame()
-{
-    ImGui::End();
-    ImGui::Render();
-}
-
 static uint32_t render_frame(Graph&        graph,
                              ImVec2        mouse,
                              bool          down,
@@ -1534,6 +1598,7 @@ static ImVec2 audio_dot(const Graph& graph, uint32_t node, bool output)
 static void create_renderer_context()
 {
     ImGui::CreateContext();
+
     ImGuiIO& io                     = ImGui::GetIO();
     io.IniFilename                  = nullptr;
     io.LogFilename                  = nullptr;
@@ -1541,8 +1606,10 @@ static void create_renderer_context()
     io.DeltaTime                    = 1.0f / 60.0f;
     io.ConfigInputTrickleEventQueue = false;
     io.BackendFlags |= ImGuiBackendFlags_RendererHasTextures; // the test does not use a real renderer backend
+
     ImGui::NewFrame();
     ImGui::EndFrame();
+
     ImTextureData* tex = io.Fonts->TexData;
     TEST(tex && tex->Pixels && tex->Width > 0 && tex->Height > 0);
 }
@@ -2737,7 +2804,7 @@ int main()
     test_add_delete_connection_basics();
     test_clear_resets_popup_and_error();
     test_connection_capacity_raised_to_512();
-    test_slot_missing_flag_api();
+    test_slot_color_callback_api();
     test_eventless_slot_value_write();
     test_eventless_slot_input_write();
     test_canvas_menu_contract_caller_provided();

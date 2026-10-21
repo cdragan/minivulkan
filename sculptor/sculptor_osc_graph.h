@@ -18,6 +18,7 @@
 
 #include "../synth/synth_instrument.h"
 #include "../synth/synth_midi_cc.h"
+#include "sculptor_bank_json.h"
 #include "sculptor_graph.h"
 #include "sculptor_instr_bank.h"
 
@@ -219,27 +220,22 @@ bool project_instrument_to_graph(const Synth::Instrument&     instrument,
                                  // between the standard dots and the detune
                                  // rows.  Direct callers pass nothing.
                                  const uint16_t* added_cc_mask = nullptr,
-                                 // Optional editor-only input: the zone's
-                                 // missing-sum bits (graph_missing_sum), so a
-                                 // red-marked layer row is flagged as a
-                                 // drop-menu anchor at projection time.  Direct
+                                 // Optional editor-only input: the zone's source row
+                                 // (graph_osc_source[channel][zone]): slot s fed by oscillator
+                                 // ordinal (entry - 1), 0 = unwired.  Null means identity wiring:
+                                 // slot s is fed by oscillator s for s < layer_count.  Direct
                                  // callers pass nothing.
-                                 const uint8_t* missing_sum_mask = nullptr,
-                                 // Optional editor-only input: one phantom
-                                 // shell per row, indexed like
-                                 // missing_sum_mask.  A red-marked row
-                                 // projects its entry; with no pointer (or an
-                                 // entry the caller left at the fresh
-                                 // default), the row projects a fresh-default
-                                 // shell.  Direct callers pass nothing.
-                                 const Synth::Oscillator* phantom_layers = nullptr);
+                                 const uint8_t* osc_source = nullptr);
 
-// Exports one zone's saved editor positions as portable records relative to the
-// zone's own instrument: every registered record of (channel,zone) that resolves
-// to a projected node of `instr` is converted, effect (kind 4) records are never
-// clipboard data.  Unrepresented selected records and missing-sum state are refused.
-// Records are all-or-nothing and *out_count is the actual count
-// only on success; capacity must hold every record or the call fails.
+// Exports one zone's saved editor positions as portable records relative to
+// the zone's own instrument: every registered record of (channel,zone) that
+// resolves to a projected node of `instr` is converted, effect (kind 4)
+// records are never clipboard data.  Unrepresented selected records are
+// refused.  The clipboard domain encodes the authoring form directly; the
+// portable domains translate kind-0 records onto the playback ranks of the
+// zone's source row and drop records of unwired ordinals.  Records are
+// all-or-nothing and *out_count is the actual count only on success;
+// capacity must hold every record or the call fails.
 bool encode_instrument_graph_layout(const Synth::Instrument&           instr,
                                     const Synth::InstrumentBank&       bank,
                                     const Synth::InstrumentEditorBank& editor_bank,
@@ -247,7 +243,8 @@ bool encode_instrument_graph_layout(const Synth::Instrument&           instr,
                                     uint32_t                           zone,
                                     Synth::InstrumentGraphLayout*      out_records,
                                     uint32_t                           capacity,
-                                    uint32_t*                          out_count);
+                                    uint32_t*                          out_count,
+                                    Synth::InstrumentJsonDomain        domain);
 // Resolves normalized decoded-relative portable records into editor layout
 // records for the decoded instrument, assigning the instance uids the projection
 // pairs records by. Unknown kinds, unresolved canonical (kind 0) locators,
@@ -316,14 +313,16 @@ bool normalize_instrument_graph_layout(const Synth::Instrument&            sourc
                                        Synth::InstrumentGraphLayout*       out_layout,
                                        uint32_t                            capacity,
                                        uint32_t*                           out_count);
-
-// Rebuilds the instrument from the graph.  Writes every field of *out
-// (including zeroing what the graph does not express), so the result is
-// directly comparable with the projected model.  Bindings resolve from the
-// live graph edges, not from projection-time state.  Returns false on any
-// inconsistency the validator should have made impossible; *out is still
-// fully written.
-bool compile_graph_to_instrument(const Graph& graph, const OscGraphMapping& mapping, Synth::Instrument* out);
+// Compile the projected graph into the playback instrument for one zone:
+// the projected model is the compile's input, so the output is directly
+// comparable with it.  Bindings resolve from the live graph edges, not
+// from projection-time state.  Returns false on any inconsistency the
+// validator should have made impossible; *out is still fully written.
+// osc_source_out, when given, receives the derived per-zone source row.
+bool compile_graph_to_instrument(const Graph&           graph,
+                                 const OscGraphMapping& mapping,
+                                 Synth::Instrument*     out,
+                                 uint8_t*               osc_source_out = nullptr);
 
 // Grammar validator, installable with Graph::set_validator.  The allowed
 // edge set is exactly: envelope -> a target block's envelope dot (base
@@ -343,44 +342,21 @@ bool osc_graph_validate(void* user_data, Graph& graph, EndPoint output, EndPoint
 // record-keyed, never canonical).
 uint32_t osc_graph_canonical_index(const OscGraphMapping& mapping, uint32_t node_idx);
 
-// The layer a new oscillator inherits its parameters from:  the highest
-// enabled layer, that is, the last one whose waveform A is on.  Returns
-// pool_no_slot when the instrument has no enabled layer.
-uint32_t osc_inherit_source_layer(const Synth::Instrument& instrument);
-
-// The waveform pair a newly added oscillator starts with: copied from the
-// highest-index connected oscillator of the zone's run; when the run has
-// no connected row, from the run's last row (a phantom shell); an empty
-// run keeps the existing fresh default (sine with B off).  Test seam: the
-// add consumer lives in the editor TU, so the unit suite needs the
-// callable inheritance query.
-struct OscInheritedType {
-    Synth::WaveType wave_a;
-    Synth::WaveType wave_b;
-};
-
-OscInheritedType osc_inherited_type(const Synth::InstrumentEditorBank& bank, uint32_t channel, uint32_t zone);
-
 // The zone's projected row-run policy, shared by the projection, the
-// node-count walk, the metadata validator and the editor consumers: a
-// red-marked (missing-sum) row hosts its phantom shell, the connected
-// layers compact around the red rows in order, and the run ends at the
-// first row that is neither red-marked nor carrying a remaining
-// connected layer (the free row).
-// The run's length: the free row that ends it, or max_layers when the
-// run fills every row.
-uint32_t osc_row_run_length(uint32_t layer_count, uint8_t missing_bits);
-// Whether the row is red-marked (hosts a phantom shell, no compiled layer).
-bool osc_row_is_red(uint8_t missing_bits, uint32_t row);
-// The number of connected (non-red) rows strictly below the row: the
-// compiled index a connected row compacts to.
-uint32_t osc_row_connected_below(uint8_t missing_bits, uint32_t row);
-// The gray add dot's row on the Oscillator Output node: one row
-// behind the last connected row of the run, or the run's length when
-// nothing is connected (every run row renders red).  The visibility
-// predicate, the projection's drop flags and the gray-dot color seam
-// share this one row.
-uint32_t osc_row_gray_slot(uint32_t run_length, uint8_t missing_bits);
+// node-count walk, the metadata validator and the editor consumers, all
+// derived from the zone's source row alone: the run spans slots 0..k
+// where k is the highest wired slot, a slot with entry 0 inside the run
+// renders red (an unwired hole), and the gray add slot follows the run.
+// The run's length: the number of slots up to and including the highest
+// wired slot, 0 when nothing is wired.
+uint32_t osc_row_run_length(const uint8_t source_row[Synth::max_layers]);
+// Whether the slot renders red inside the run: an unwired hole.
+bool osc_row_is_red(const uint8_t source_row[Synth::max_layers], uint32_t slot);
+// The gray add dot's slot on the Oscillator Output node: the slot after
+// the run (the run's length).  The visibility predicate, the projection's
+// drop flags and the gray-dot color seam share this one slot.
+uint32_t osc_row_gray_slot(const uint8_t source_row[Synth::max_layers]);
+uint32_t osc_lowest_free_slot(const uint8_t source_row[Synth::max_layers]);
 
 // Writes one descriptor-content property edit through to the bank pool entry
 // named by the node's desc id.  Nodes sharing a desc id edit the same entry,
@@ -398,8 +374,8 @@ bool apply_osc_graph_descriptor_edit(const Graph&           graph,
 // Full projection from the editor bank: rebuilds the graph from the zone's
 // instrument plus the bank's editor-side state - kind-1/2 records attach to
 // derived generator instances (or materialize surplus free-standing nodes),
-// masked oscillator->sum edges stay deleted, and the surviving missing-sum
-// bits re-apply the per-slot missing flags.  The bank is only read.
+// and the source row decides which oscillator nodes wire into the output.
+// The bank is only read.
 // Returns false when the zone has no instrument or the instrument is not
 // expressible; mid-walk failures can leave the graph partially rebuilt, so
 // the caller re-projects on false and must not keep the graph or mapping
@@ -418,8 +394,8 @@ bool channel_uses_cc(const Synth::InstrumentEditorBank& bank, uint32_t channel, 
 
 // Applies one drained Graph change to the editor bank through the mapping
 // (per-frame apply): property edits via apply_osc_graph_descriptor_edit,
-// oscillator->sum connection_added/deleted via the zone's missing-sum
-// bits, base-target-row drops via the eventless family-dot relocation,
+// oscillator->sum connection_added/deleted with the auto-move wire
+// cleanup, base-target-row drops via the eventless family-dot relocation,
 // and generator wiring via the detach reconciliation.
 // Returns false when the change cannot be applied (e.g.
 // record-list capacity); application up to that point may already have
@@ -488,15 +464,14 @@ bool osc_target_block_field(uint32_t slot_idx, uint32_t* target, uint32_t* field
 // TU, so the unit suite needs this callable render-visibility query.
 bool osc_target_field_hidden(const Graph& graph, uint32_t node_idx, uint32_t target, uint32_t field);
 
-// Progressive layer visibility on the Oscillator Output node: the
-// visible rows extend to the gray add slot (one row behind the last
-// connected row, or the run's length when nothing is connected); the
-// trailing shells past the gray slot and every row above it hide - a
-// hidden slot renders no connector and no dot hit target.  A non-layer
-// slot index - including the no-slot sentinel - never hides.
+// Progressive layer visibility on the Oscillator Output node: the visible
+// rows extend to the gray add slot (the slot after the wired run's
+// length); every row above the gray slot hides - a hidden slot renders
+// no connector and no dot hit target.  A non-layer slot index - including
+// the no-slot sentinel - never hides.
 // Pure render-state predicate: all seven slots stay allocated, only the
 // filter hides rows.
-bool osc_layer_slot_hidden(uint32_t slot_idx, const OscGraphMapping& mapping, uint8_t missing_bits);
+bool osc_layer_slot_hidden(uint32_t slot_idx, const uint8_t source_row[Synth::max_layers]);
 // Volume envelope keeps a nonnegative range (tail and first-point values remain authored).
 bool env_volume_shape_ok(const Synth::EnvelopeDescriptor& env);
 
@@ -589,42 +564,44 @@ bool detach_osc_graph_instance(Synth::InstrumentEditorBank* bank,
                                uint32_t                     zone,
                                uint32_t                     registry_idx);
 
-// Index of the (channel, zone, layer) phantom entry, or -1 when none.
-int32_t find_phantom_entry(const Synth::InstrumentEditorBank& bank, uint32_t channel, uint32_t zone, uint32_t layer);
-// Drops one zone-layer's phantom entry; a no-op when the row has none.
-void clear_phantom_entry(Synth::InstrumentEditorBank* bank, uint32_t channel, uint32_t zone, uint32_t layer);
-// Writes one zone-layer's entry (updates in place, otherwise appends);
-// false when appending would exceed the store's fixed capacity.
-bool set_phantom_entry(Synth::InstrumentEditorBank* bank,
-                       uint32_t                     channel,
-                       uint32_t                     zone,
-                       uint32_t                     layer,
-                       const Synth::Oscillator&     osc);
-
-// Shifts the zone's missing-sum bits together with an oscillator layer
-// compaction: bits above `removed_layer` move down by one.
-void compact_missing_sum_bits(Synth::InstrumentEditorBank* bank,
-                              uint32_t                     channel,
-                              uint32_t                     zone,
-                              uint32_t                     removed_layer);
-// Publish-time channel_enabled mask: a channel publishes enabled only when no
-// zone of the channel has a missing-sum bit and no zone's instrument has
-// zero layers (a zero-layer instrument never publishes audibly).  The
+// Publishes one zone's playback form: the layers the zone's source row
+// wires, in slot order, with the instrument-level fields preserved.
+// layer_count 0 is legal output (the caller refuses it where required).
+bool compile_playback_instrument(const Synth::Instrument& editor_instr,
+                                 const uint8_t            source_row[Synth::max_layers],
+                                 Synth::Instrument*       out);
+// Identity wiring for one zone: slot s is fed by oscillator s for
+// s < layer_count, every later slot is unwired.  Every site that installs
+// a playback-form instrument writes identity wiring through this helper.
+void set_identity_osc_sources(Synth::InstrumentEditorBank* bank, uint32_t channel, uint32_t zone);
+// Publish-time channel_enabled mask: a channel publishes enabled only when
+// no zone's source row is all zero (nothing wired) and no zone's instrument
+// has zero layers (a zero-layer instrument never publishes audibly).  The
 // bank's stored channel_enabled values are left untouched (they stay 1).
 void compute_publish_channel_enabled(const Synth::InstrumentEditorBank& bank, uint8_t out_enabled[Synth::max_channels]);
 
-// Zone-table metadata mutation rules.  Records and mask rows move together.
+// Zone-table metadata mutation rules.  Records move together.
 // zone_split_new non-first-note case: shifts zones > `zone` by +1, then copies
-// zone `zone`'s instrument records and mask row into zone `zone` + 1.
+// zone `zone`'s instrument records into zone `zone` + 1.
 // Channel-wide effect records are neither copied nor shifted.  Returns false
 // without mutating anything when the copied records would overflow the
 // global record list.
 bool zone_records_split_copy(Synth::InstrumentEditorBank* bank, uint32_t channel, uint32_t zone);
-// Drops zone `zone`'s records and mask row and shifts later zones down by one
+// Clones the generator descriptors the split's new zone references.
+// zone_split_new copies the instrument struct, so the new zone's target
+// bindings still name the source zone's envelope and LFO descriptor ids and
+// an edit in either zone would rewrite the other zone's sound.  Every
+// referenced descriptor gains a fresh pool slot and the new zone's target
+// bindings and kind-1/2 layout records re-point at the copies.  Several
+// targets naming one descriptor still share the clone, so intra-zone
+// sharing stays intact.  Returns false when a pool lacks capacity; the
+// caller refuses the whole split, so no state leaks.
+bool clone_split_generators(Synth::InstrumentEditorBank* bank, uint32_t channel, uint32_t zone);
+// Drops zone `zone`'s records and shifts later zones down by one
 // (zone_delete, and joins that remove an entry).
 void zone_records_drop_zone(Synth::InstrumentEditorBank* bank, uint32_t channel, uint32_t zone);
 void zone_records_clear_zone(Synth::InstrumentEditorBank* bank, uint32_t channel, uint32_t zone);
-// Drops ALL records and mask rows of every zone of the channel (library load,
+// Drops ALL records of every zone of the channel (library load,
 // channel init, channel delete).
 void channel_records_reset(Synth::InstrumentEditorBank* bank, uint32_t channel);
 

@@ -544,17 +544,16 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
                 const float dot_x     = slot.kind == SlotKind::output
                                             ? rect_max.x - static_cast<float>(right_dots++) * dot_space * render_scale
                                             : rect_min.x + static_cast<float>(left_dots++) * dot_space * render_scale;
-                bool        missing   = slot_missing(node_idx, elem_slot);
-                // The gray add dot renders in the neutral color even while
-                // its missing mark stays set for the compile skip (the
-                // Oscillator Output's gray slot on a trailing shell).
-                if (missing && slot_gray_callback &&
-                    slot_gray_callback(slot_gray_user_data, *this, node_idx, elem_slot)) {
-                    missing = false;
-                }
+                // Unconnected dots take the caller's color override when one
+                // applies (the osc editor paints the red holes), else the
+                // default connector color.
+                uint32_t   override_color = 0;
+                const bool overridden =
+                    ! connected && slot_color_callback &&
+                    slot_color_callback(slot_color_user_data, *this, node_idx, elem_slot, &override_color);
                 const ImU32 dot_color                                = to_imgui(connected ? colors_.connector_connected
-                                                                                : missing ? colors_.connector_missing
-                                                                                          : colors_.connector);
+                                                                                : overridden ? override_color
+                                                                                             : colors_.connector);
                 dot_positions[node_idx * max_node_slots + elem_slot] = vmath::vec2(dot_x, y_center);
                 if (connected) {
                     draw_list->AddCircleFilled(ImVec2(dot_x, y_center), dot_radius * render_scale, dot_color);

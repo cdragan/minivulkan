@@ -210,7 +210,11 @@ bool decode_instrument_json_for_domain(const char*            text,
                                        InstrumentGraphLayout* out_layout,
                                        uint32_t               layout_capacity,
                                        uint32_t*              out_layout_count,
-                                       InstrumentJsonDomain   domain);
+                                       InstrumentJsonDomain   domain,
+                                       // The zone's source row the document carries (osc_sources):
+                                       // filled for clipboard documents; identity when the key
+                                       // is absent (older builds).  May be null.
+                                       uint8_t* osc_source_out = nullptr);
 
 } // namespace Synth
 
