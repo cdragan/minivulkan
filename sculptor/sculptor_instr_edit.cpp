@@ -4100,6 +4100,14 @@ void Sculptor::SynthEditor::gui_library_popups()
             return; // failed scans never open the browser: the notification reports why
         }
 
+        // A rescan triggered by a delete must keep the selected category;
+        // only a vanished category falls back to the fresh-open selection.
+        char selected_category[Synth::library_category_len];
+        const bool had_selection = library_category >= 0 &&
+                                   static_cast<uint32_t>(library_category) < library_num_categories;
+        if (had_selection)
+            memcpy(selected_category, library_categories[library_category], Synth::library_category_len);
+
         library_num_categories = 0;
         for (uint32_t i = 0; i < library_num_entries && library_num_categories < Synth::library_max_records; i++) {
             uint32_t c = 0;
@@ -4112,6 +4120,14 @@ void Sculptor::SynthEditor::gui_library_popups()
             }
         }
         library_category = library_num_categories ? 0 : -1;
+        if (had_selection) {
+            for (uint32_t c = 0; c < library_num_categories; c++) {
+                if (strncmp(library_categories[c], selected_category, Synth::library_category_len) == 0) {
+                    library_category = static_cast<int32_t>(c);
+                    break;
+                }
+            }
+        }
         // Re-opening an already-open popup repositions it to the trigger; skip
         // when the browser is already on screen (delete handlers re-trigger this).
         if (! ImGui::IsPopupOpen("##synth_library", ImGuiPopupFlags_None))
