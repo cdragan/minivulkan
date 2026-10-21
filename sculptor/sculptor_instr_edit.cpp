@@ -19,7 +19,9 @@
 #include "../core/d_printf.h"
 #include "../core/gui_imgui.h"
 #include "../core/vmath.h"
+#include "../thirdparty/imgui/src/imgui_internal.h"
 #include <math.h>
+#include <stdio.h>
 #include <string.h>
 #include <type_traits>
 
@@ -149,7 +151,7 @@ bool                         fx_graph_reproject = false;
 bool fx_lfo_pinned[Synth::max_lfos] = {};
 
 EnvelopeWidgetContext envelope_widget_contexts[Sculptor::max_nodes];
-LfoWidgetContext lfo_widget_contexts[Sculptor::max_nodes];
+LfoWidgetContext      lfo_widget_contexts[Sculptor::max_nodes];
 uint32_t              osc_graph_generation = 0;
 
 // The drop menu's resolved payload: classified once at click time against
@@ -263,8 +265,8 @@ constexpr size_t editor_resident_state_bytes =
     Synth::library_max_records * sizeof(Synth::LibraryEntry) + // library rewrite index
     64 * 1024 +                                                // library record-copy chunk
     sizeof(undo_redo) + 2 * undo_depth * sizeof(uint32_t) + sizeof(osc_graph) + sizeof(osc_mapping) +
-    sizeof(fx_mapping) + sizeof(envelope_widget_contexts) + sizeof(lfo_widget_contexts) + sizeof(fx_lfo_pinned) + sizeof(projected_position) +
-    sizeof(projected_width) + sizeof(projected_height) + sizeof(zone_clipboard_text) +
+    sizeof(fx_mapping) + sizeof(envelope_widget_contexts) + sizeof(lfo_widget_contexts) + sizeof(fx_lfo_pinned) +
+    sizeof(projected_position) + sizeof(projected_width) + sizeof(projected_height) + sizeof(zone_clipboard_text) +
     sizeof(clipboard_decoded_instrument) + sizeof(clipboard_decoded_envelopes) + sizeof(clipboard_decoded_lfos) +
     sizeof(serialization_mapping) + sizeof(clipboard_decoded_layout) + sizeof(osc_canvas_zone_channel) +
     sizeof(osc_canvas_zone_note) + sizeof(Synth::Instrument) + // codec document model
@@ -380,10 +382,65 @@ SynthInfoLingerMin info_linger;
 // Device-MIDI routing published to the synth every GUI frame: the target
 // follows the channel selection, remembering the last channel while
 // Master Effects is selected.
-bool     route_to_current_channel = false;
-uint32_t last_selected_channel    = 0;
+bool     route_to_current_channel  = false;
+bool     synth_settings_registered = false;
+uint32_t last_selected_channel     = 0;
 
 } // namespace
+
+// The route checkbox persists in the imgui.ini "Synth" section, so the
+// choice survives restarts.  The settings handler writes the section on
+// save.  It registers on the first panel draw, after ImGui already loaded
+// the file, so the stored value is read back directly from the file here.
+static void* synth_settings_read_open(ImGuiContext*, ImGuiSettingsHandler*, const char* name)
+{
+    // One unnamed section holds every synth info setting.
+    return name[0] ? nullptr : &route_to_current_channel;
+}
+
+static void synth_settings_read_line(ImGuiContext*, ImGuiSettingsHandler*, void* entry, const char* line)
+{
+    int value = 0;
+    if (sscanf(line, "RouteToCurrentChannel=%d", &value) == 1)
+        *static_cast<bool*>(entry) = (value != 0);
+}
+
+static void synth_settings_write_all(ImGuiContext*, ImGuiSettingsHandler* handler, ImGuiTextBuffer* buf)
+{
+    buf->appendf("[%s][]\nRouteToCurrentChannel=%d\n\n", handler->TypeName, route_to_current_channel ? 1 : 0);
+}
+
+static void register_synth_settings_handler()
+{
+    ImGuiSettingsHandler handler = {};
+    handler.TypeName             = "Synth";
+    handler.TypeHash             = ImHashStr(handler.TypeName);
+    handler.ReadOpenFn           = synth_settings_read_open;
+    handler.ReadLineFn           = synth_settings_read_line;
+    handler.WriteAllFn           = synth_settings_write_all;
+    ImGui::AddSettingsHandler(&handler);
+}
+
+static void load_route_setting_from_ini()
+{
+    FILE* const file = fopen("assets/imgui.ini", "rb");
+    if (file == nullptr)
+        return;
+
+    char line[128];
+    bool in_synth_section = false;
+    while (fgets(line, sizeof(line), file) != nullptr) {
+        if (line[0] == '[')
+            in_synth_section = strncmp(line, "[Synth]", 7) == 0;
+        else if (in_synth_section) {
+            int value = 0;
+            if (sscanf(line, "RouteToCurrentChannel=%d", &value) == 1)
+                route_to_current_channel = (value != 0);
+        }
+    }
+
+    fclose(file);
+}
 
 // Pressing a keyboard key submits plain note events through the synth's live-MIDI
 // input, like any external keyboard; the synth knows nothing about the editor.
@@ -1068,25 +1125,27 @@ static int draw_lfo_preview(const Synth::LFODescriptor& lfo, float render_scale)
         period_ms = 1;
     }
 
-    const ImVec2    origin    = ImGui::GetCursorScreenPos();
-    ImDrawList*     draw_list = ImGui::GetWindowDrawList();
-    const float     width     = ImGui::CalcItemWidth() > 0.0f ? ImGui::CalcItemWidth() : 1.0f;
-    const float     chart_h   = 48.0f * render_scale;
-    const float     chart_y   = origin.y;
+    const ImVec2 origin    = ImGui::GetCursorScreenPos();
+    ImDrawList*  draw_list = ImGui::GetWindowDrawList();
+    const float  width     = ImGui::CalcItemWidth() > 0.0f ? ImGui::CalcItemWidth() : 1.0f;
+    const float  chart_h   = 48.0f * render_scale;
+    const float  chart_y   = origin.y;
 
     // Display value range: the descriptor's own min and max; a degenerate
     // span gets a small display range so the flat wave stays a visible line.
     const float value_min = lfo.min_value;
     const float value_max = lfo.min_value + lfo.min_max_delta;
-    float value_lo = value_min < value_max ? value_min : value_max;
-    float value_hi = value_min < value_max ? value_max : value_min;
+    float       value_lo  = value_min < value_max ? value_min : value_max;
+    float       value_hi  = value_min < value_max ? value_max : value_min;
     if (value_hi - value_lo < 0.000001f) {
         value_lo -= 0.5f;
         value_hi += 0.5f;
     }
     const float value_span = value_hi - value_lo;
 
-    draw_list->AddRectFilled(ImVec2(origin.x, chart_y), ImVec2(origin.x + width, chart_y + chart_h), lfo_chart_bg_color);
+    draw_list->AddRectFilled(ImVec2(origin.x, chart_y),
+                             ImVec2(origin.x + width, chart_y + chart_h),
+                             lfo_chart_bg_color);
 
     draw_list->PushClipRect(ImVec2(origin.x, chart_y), ImVec2(origin.x + width, chart_y + chart_h), true);
 
@@ -1140,7 +1199,7 @@ static int draw_lfo_preview(const Synth::LFODescriptor& lfo, float render_scale)
 // shape preview.  Read-only, so the entry needs no editor state.
 static int lfo_state_widget_entry(void* user_data, float render_scale)
 {
-    LfoWidgetContext* ctx = static_cast<LfoWidgetContext*>(user_data);
+    LfoWidgetContext*           ctx = static_cast<LfoWidgetContext*>(user_data);
     const Synth::LFODescriptor* lfo = lfo_widget_descriptor(ctx->node_idx);
     if (lfo == nullptr) {
         return 0;
@@ -4102,9 +4161,9 @@ void Sculptor::SynthEditor::gui_library_popups()
 
         // A rescan triggered by a delete must keep the selected category;
         // only a vanished category falls back to the fresh-open selection.
-        char selected_category[Synth::library_category_len];
-        const bool had_selection = library_category >= 0 &&
-                                   static_cast<uint32_t>(library_category) < library_num_categories;
+        char       selected_category[Synth::library_category_len];
+        const bool had_selection =
+            library_category >= 0 && static_cast<uint32_t>(library_category) < library_num_categories;
         if (had_selection)
             memcpy(selected_category, library_categories[library_category], Synth::library_category_len);
 
@@ -4509,6 +4568,12 @@ static void gui_fill_bar(const Synth::AudioRingStatus& ring)
 
 void Sculptor::gui_synth_info_panel(uint32_t current_channel)
 {
+    if (! synth_settings_registered) {
+        synth_settings_registered = true;
+        register_synth_settings_handler();
+        load_route_setting_from_ini();
+    }
+
     ImGui::Separator();
 
     const Synth::AudioRingStatus ring = Synth::get_audio_ring_status();
@@ -4531,9 +4596,15 @@ void Sculptor::gui_synth_info_panel(uint32_t current_channel)
         Synth::set_runtime_tempo_bpm(static_cast<uint16_t>(bpm_edit));
     }
 
-    ImGui::TextWrapped("Underruns %u", ring.underrun_count);
-
-    gui_fill_bar(ring);
+    // Publishing every frame keeps retargeting within one frame of a
+    // checkbox or selection change; the checkbox state persists in the
+    // imgui.ini "Synth" section.  Save at once instead of waiting for the
+    // debounce timer, so quitting right after toggling keeps the state.
+    const bool route_prev = route_to_current_channel;
+    ImGui::Checkbox("Route to Current Channel", &route_to_current_channel);
+    if (route_to_current_channel != route_prev)
+        ImGui::SaveIniSettingsToDisk(ImGui::GetIO().IniFilename);
+    Synth::set_midi_route_target(route_to_current_channel ? static_cast<int32_t>(current_channel) : -1);
 
     ImGui::Separator();
 
@@ -4546,6 +4617,10 @@ void Sculptor::gui_synth_info_panel(uint32_t current_channel)
     }
 
     ImGui::Text("Oscillators playing: %u", playing);
+
+    ImGui::TextWrapped("Underruns %u", ring.underrun_count);
+
+    gui_fill_bar(ring);
 
     if (Synth::peek_recent_audio(spectrum_frames, info_peek_l, info_peek_r) == spectrum_frames) {
         for (uint32_t i = 0; i < spectrum_frames; i++)
@@ -4562,9 +4637,4 @@ void Sculptor::gui_synth_info_panel(uint32_t current_channel)
                          0.0f,
                          ImVec2(ImGui::GetContentRegionAvail().x, spectrum_plot_height));
     }
-
-    // Publishing every frame keeps retargeting within one frame of a checkbox
-    // or selection change; the checkbox state is not persisted.
-    ImGui::Checkbox("Route to Current Channel", &route_to_current_channel);
-    Synth::set_midi_route_target(route_to_current_channel ? static_cast<int32_t>(current_channel) : -1);
 }

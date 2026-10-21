@@ -216,10 +216,12 @@ constexpr uint32_t canonical_node_count = Synth::graph_canonical_node_count;
 
 // Oscillator-node rows whose widgets only make sense for the current
 // waveform/mode selection.  Slot indices follow the projection layout
-// contract in sculptor_osc_graph.cpp (waveform b, mix mode and fm ratio,
-// plus the duty b, waveform mix and fm depth rows, need waveform b; the
-// pad tone rows and their blocks need the pad waveform; the
-// cutoff row, its block and the fir slope need a filter type other than off).
+// contract in sculptor_osc_graph.cpp (the duty rows and their blocks need
+// a sawtooth, pulse or pad wave on their side; waveform b, mix mode and
+// fm ratio, plus the duty b, waveform mix and fm depth rows, need
+// waveform b; the pad tone rows and their blocks need the pad waveform;
+// the cutoff row, its block and the fir slope need a filter type other
+// than off).
 bool Sculptor::oscillator_slot_waveform_mode_disabled(const Sculptor::Node& node, uint32_t slot_idx)
 {
     if (! node.oscillator) {
@@ -230,6 +232,7 @@ bool Sculptor::oscillator_slot_waveform_mode_disabled(const Sculptor::Node& node
     }
     const uint32_t wave_b = node.slots.entries[osc_waveform_b_prop].value.list_index;
     const uint32_t mode   = node.slots.entries[osc_mode_prop].value.list_index;
+    const uint32_t duty0  = osc_target_row_slot[static_cast<uint32_t>(Synth::mod_duty0)];
     const uint32_t duty1  = osc_target_row_slot[static_cast<uint32_t>(Synth::mod_duty1)];
     const uint32_t mix    = osc_target_row_slot[static_cast<uint32_t>(Synth::mod_osc_mix)];
     const uint32_t fm     = osc_target_row_slot[static_cast<uint32_t>(Synth::mod_fm_index)];
@@ -240,6 +243,16 @@ bool Sculptor::oscillator_slot_waveform_mode_disabled(const Sculptor::Node& node
     if (wave_a != static_cast<uint32_t>(Synth::WaveType::pad_wave) - 1u && slot_idx >= tone0 &&
         slot_idx <= tone0 + osc_target_block_stride) {
         return true; // pad tone a and its block only apply to the pad waveform
+    }
+    if (slot_idx >= duty0 && slot_idx <= duty0 + osc_target_block_stride &&
+        (wave_a == static_cast<uint32_t>(Synth::WaveType::sine_wave) - 1u ||
+         wave_a == static_cast<uint32_t>(Synth::WaveType::noise_wave) - 1u)) {
+        return true; // duty a shapes sawtooth and pulse and scales pad wander; sine and noise ignore it
+    }
+    if (slot_idx >= duty1 && slot_idx <= duty1 + osc_target_block_stride &&
+        (wave_b == static_cast<uint32_t>(Synth::WaveType::sine_wave) ||
+         wave_b == static_cast<uint32_t>(Synth::WaveType::noise_wave))) {
+        return true; // duty b is unused with sine and noise waveforms b
     }
     if (wave_b != static_cast<uint32_t>(Synth::WaveType::pad_wave) && slot_idx >= tone1 &&
         slot_idx <= tone1 + osc_target_block_stride) {
