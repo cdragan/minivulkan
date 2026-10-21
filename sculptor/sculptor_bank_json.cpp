@@ -277,6 +277,8 @@ struct InstrumentDocState {
     Synth::EnvelopeDescriptor envelopes[Synth::instrument_max_envelopes];
     Synth::LFODescriptor      lfos[Synth::instrument_max_lfos];
     uint32_t                  envelope_count;
+    uint16_t                  envelope_ids[Synth::instrument_max_envelopes];
+    uint16_t                  lfo_ids[Synth::instrument_max_lfos];
     uint32_t                  lfo_count;
 };
 
@@ -3199,7 +3201,8 @@ static void decode_envelope_doc(Walker&                    w,
                                 Synth::ModTarget           target,
                                 Synth::FilterType          fir_type,
                                 Synth::EnvelopeDescriptor& env,
-                                float*                     amount)
+                                float*                     amount,
+                                uint16_t*                  group_id)
 {
     const Sculptor::OscTargetView view = Sculptor::osc_target_view(target, fir_type);
 
@@ -3213,6 +3216,7 @@ static void decode_envelope_doc(Walker&                    w,
     bool     sustain_start_set                     = false;
     bool     sustain_end_set                       = false;
     uint8_t  flags                                 = 0;
+    uint32_t encoded_id                            = 0;
 
     walk_object(w, obj, [&](uint32_t key_idx, uint32_t val_idx) {
         if (key_eq(w, key_idx, "points")) {
@@ -3254,6 +3258,8 @@ static void decode_envelope_doc(Walker&                    w,
             decode_envelope_flag(w, val_idx, Synth::envelope_quick_release, &flags);
         else if (key_eq(w, key_idx, "depth"))
             want_float(w, val_idx, &depth);
+        else if (key_eq(w, key_idx, "envelope_id"))
+            want_uint(w, val_idx, 0xFFFFu, &encoded_id);
         else
             doc_unknown_field(w, key_idx);
     });
@@ -3334,6 +3340,9 @@ static void decode_envelope_doc(Walker&                    w,
     if (amount) {
         *amount = depth;
     }
+    if (group_id) {
+        *group_id = static_cast<uint16_t>(encoded_id);
+    }
 }
 
 // The versioned instrument document refuses unknown fields inside a mod
@@ -3353,7 +3362,8 @@ static void decode_lfo_doc(Walker&               w,
                            Synth::ModTarget      target,
                            Synth::FilterType     fir_type,
                            Synth::LFODescriptor& lfo,
-                           Synth::TargetBinding& gen)
+                           Synth::TargetBinding& gen,
+                           uint16_t*             group_id)
 {
     const Sculptor::OscTargetView view          = Sculptor::osc_target_view(target, fir_type);
     float                         frequency_hz  = 0.0f;
@@ -3367,6 +3377,7 @@ static void decode_lfo_doc(Walker&               w,
     uint32_t                      depth_source  = 0;
     uint32_t                      rate_source   = 0;
     float                         rate_scale_ms = 0.0f;
+    uint32_t                      encoded_id    = 0;
 
     walk_object(w, obj, [&](uint32_t key_idx, uint32_t val_idx) {
         if (key_eq(w, key_idx, "wave")) {
@@ -3399,6 +3410,8 @@ static void decode_lfo_doc(Walker&               w,
             want_enum(w, val_idx, mod_source_names, num_mod_sources, &rate_source);
         else if (key_eq(w, key_idx, "rate_scale_ms"))
             want_float(w, val_idx, &rate_scale_ms);
+        else if (key_eq(w, key_idx, "lfo_id"))
+            want_uint(w, val_idx, 0xFFFFu, &encoded_id);
         else
             doc_unknown_field(w, key_idx);
     });
@@ -3432,6 +3445,9 @@ static void decode_lfo_doc(Walker&               w,
     gen.lfo_depth_source  = static_cast<Synth::ModSource>(depth_source);
     gen.lfo_rate_source   = static_cast<Synth::ModSource>(rate_source);
     gen.lfo_rate_scale_ms = rate_scale_ms;
+    if (group_id) {
+        *group_id = static_cast<uint16_t>(encoded_id);
+    }
 }
 
 // An instrument's layers rarely need many distinct descriptors; reusing the
@@ -3494,15 +3510,42 @@ static void decode_target_doc(Walker&             w,
             }
             Synth::EnvelopeDescriptor& env = doc.envelopes[doc.envelope_count];
             env                            = Synth::EnvelopeDescriptor{};
-            float env_depth                = 1.0f;
-            decode_envelope_doc(w, val_idx, target, fir_type, env, &env_depth);
+            float    env_depth             = 1.0f;
+            uint16_t group_id              = 0;
+            decode_envelope_doc(w, val_idx, target, fir_type, env, &env_depth, &group_id);
             if (! w.failed) {
-                const uint16_t match = find_matching_descriptor(doc.envelopes, doc.envelope_count, env);
-                osc.targets[target].envelope_desc_id =
-                    match != 0 ? match : static_cast<uint16_t>(doc.envelope_count + 1);
-                osc.targets[target].envelope_depth = env_depth;
-                if (match == 0)
-                    ++doc.envelope_count;
+                uint16_t desc_id = 0;
+                if (group_id != 0) {
+                    // The encoded pool id is authoritative: bindings carrying the
+                    // same id share one descriptor even when another descriptor
+                    // holds identical content. Legacy text carries no ids and
+                    // keeps the content-equality grouping below.
+                    uint32_t found = doc.envelope_count;
+                    for (uint32_t i = 0; i < doc.envelope_count; i++) {
+                        if (doc.envelope_ids[i] == group_id) {
+                            found = i;
+                            break;
+                        }
+                    }
+                    if (found == doc.envelope_count) {
+                        doc.envelope_ids[doc.envelope_count] = group_id;
+                        ++doc.envelope_count;
+                    }
+                    desc_id = static_cast<uint16_t>(found + 1);
+                }
+                else {
+                    const uint16_t match = find_matching_descriptor(doc.envelopes, doc.envelope_count, env);
+                    if (match == 0) {
+                        doc.envelope_ids[doc.envelope_count] = 0;
+                        ++doc.envelope_count;
+                        desc_id = static_cast<uint16_t>(doc.envelope_count);
+                    }
+                    else {
+                        desc_id = match;
+                    }
+                }
+                osc.targets[target].envelope_desc_id = desc_id;
+                osc.targets[target].envelope_depth   = env_depth;
             }
         }
         else if (key_eq(w, key_idx, "lfo")) {
@@ -3512,12 +3555,38 @@ static void decode_target_doc(Walker&             w,
             }
             Synth::LFODescriptor& lfo = doc.lfos[doc.lfo_count];
             lfo                       = Synth::LFODescriptor{};
-            decode_lfo_doc(w, val_idx, target, fir_type, lfo, osc.targets[target]);
+            uint16_t group_id         = 0;
+            decode_lfo_doc(w, val_idx, target, fir_type, lfo, osc.targets[target], &group_id);
             if (! w.failed) {
-                const uint16_t match            = find_matching_descriptor(doc.lfos, doc.lfo_count, lfo);
-                osc.targets[target].lfo_desc_id = match != 0 ? match : static_cast<uint16_t>(doc.lfo_count + 1);
-                if (match == 0)
-                    ++doc.lfo_count;
+                uint16_t desc_id = 0;
+                if (group_id != 0) {
+                    // The encoded pool id is authoritative, like the envelope id
+                    // above: identical content alone cannot decide the grouping.
+                    uint32_t found = doc.lfo_count;
+                    for (uint32_t i = 0; i < doc.lfo_count; i++) {
+                        if (doc.lfo_ids[i] == group_id) {
+                            found = i;
+                            break;
+                        }
+                    }
+                    if (found == doc.lfo_count) {
+                        doc.lfo_ids[doc.lfo_count] = group_id;
+                        ++doc.lfo_count;
+                    }
+                    desc_id = static_cast<uint16_t>(found + 1);
+                }
+                else {
+                    const uint16_t match = find_matching_descriptor(doc.lfos, doc.lfo_count, lfo);
+                    if (match == 0) {
+                        doc.lfo_ids[doc.lfo_count] = 0;
+                        ++doc.lfo_count;
+                        desc_id = static_cast<uint16_t>(doc.lfo_count);
+                    }
+                    else {
+                        desc_id = match;
+                    }
+                }
+                osc.targets[target].lfo_desc_id = desc_id;
             }
         }
         else if (key_eq(w, key_idx, "sources")) {
@@ -4344,6 +4413,10 @@ static uint32_t encode_instrument_json_for_domain(char*                         
                     return 0;
                 o.key("envelope");
                 o.ch('{');
+                // The pool id groups bindings that share one descriptor; identical
+                // content alone cannot: two distinct envelopes may hold the same
+                // points, and the distinction must survive the round trip.
+                key_uint_nonzero(o, "envelope_id", env_id);
                 o.key("points");
                 o.ch('[');
                 for (uint32_t point = 0; point < env.num_points; point++) {
@@ -4383,6 +4456,7 @@ static uint32_t encode_instrument_json_for_domain(char*                         
                     return 0;
                 o.key("lfo");
                 o.ch('{');
+                key_uint_nonzero(o, "lfo_id", lfo_id);
                 key_enum(o, "wave", wave_names, num_waves, static_cast<uint32_t>(lfo.wave));
                 o.key("frequency_hz");
                 o.float_value(1000.0f / static_cast<float>(lfo.period_ms));

@@ -2128,6 +2128,82 @@ static void check_new_zone_metadata_clone()
     TEST(memcmp(&candidate, &before, sizeof(candidate)) == 0);
 }
 
+// Regression: two distinct envelope descriptors with identical content,
+// one per layer, must survive the library JSON round trip unmerged. The
+// document groups bindings by encoded descriptor id; content equality
+// alone cannot, and a merged descriptor would change later edits.
+static void check_identical_envelopes_library_round_trips()
+{
+    const std::unique_ptr<Synth::InstrumentEditorBank> source_storage = std::make_unique<Synth::InstrumentEditorBank>();
+    Synth::InstrumentEditorBank&                       source         = *source_storage;
+    const std::unique_ptr<Synth::InstrumentEditorBank> destination_storage =
+        std::make_unique<Synth::InstrumentEditorBank>();
+    Synth::InstrumentEditorBank& destination = *destination_storage;
+
+    memset(static_cast<void*>(&source), 0, sizeof(source));
+    source.bank.channel_enabled[0] = 1;
+    TEST(source.bank.instruments.allocate() == 0);
+    source.bank.channel_zones[0][0].start_note = 1;
+    source.bank.channel_zones[0][0].instrument = 0;
+
+    const uint32_t first_env = source.bank.envelopes.allocate();
+    TEST(first_env != pool_no_slot);
+    Synth::EnvelopeDescriptor& env = source.bank.envelopes.entries[first_env];
+    env.num_points                 = 2;
+    env.sustain_first_point        = 1;
+    env.sustain_last_point         = 1;
+    env.min_value                  = -1.0f;
+    env.min_max_delta              = 2.0f;
+    env.points[0].position         = 0;
+    env.points[0].value            = 0;
+    env.points[1].position         = 100;
+    env.points[1].value            = 0xFFFF;
+    const uint32_t second_env      = source.bank.envelopes.allocate();
+    TEST(second_env != pool_no_slot);
+    source.bank.envelopes.entries[second_env] = env;
+
+    Synth::Instrument instrument                                     = {};
+    instrument.layer_count                                           = 2;
+    instrument.layers[0].osc_type[0]                                 = Synth::WaveType::sawtooth_wave;
+    instrument.layers[1].osc_type[0]                                 = Synth::WaveType::sawtooth_wave;
+    instrument.layers[0].targets[Synth::mod_volume].envelope_desc_id = 1;
+    instrument.layers[1].targets[Synth::mod_volume].envelope_desc_id = 2;
+    source.bank.instruments.entries[0]                               = instrument;
+    strcpy(source.instrument_names[0], "Twin Envelopes");
+    strcpy(source.channel_names[0], "Source");
+    TEST(Synth::validate_instrument_bank(&source.bank));
+    TEST(Sculptor::validate_editor_metadata(source));
+
+    const char* const path = "synth_twin_envelopes_roundtrip.tmp";
+    remove(path);
+    TEST(Synth::save_library_record(path, "Regression", "Twin Envelopes", &source, 0) == 0);
+    Synth::LibraryEntry entry;
+    TEST(Synth::read_library_index(path, &entry, 1) == 1);
+    uint16_t slot = 0xBEEF;
+    TEST(Synth::load_library_instrument(path, &entry, &destination, 2, &slot));
+    TEST(destination.bank.envelopes.num_allocated == 2);
+    const Synth::Instrument& loaded = destination.bank.instruments.entries[slot];
+    // Each layer keeps its own envelope binding: the two descriptors may
+    // hold identical content but must not merge into one shared slot.
+    TEST(loaded.layers[0].targets[Synth::mod_volume].envelope_desc_id != 0);
+    TEST(loaded.layers[1].targets[Synth::mod_volume].envelope_desc_id != 0);
+    TEST(loaded.layers[0].targets[Synth::mod_volume].envelope_desc_id !=
+         loaded.layers[1].targets[Synth::mod_volume].envelope_desc_id);
+    const Synth::EnvelopeDescriptor& loaded_first =
+        destination.bank.envelopes.entries[loaded.layers[0].targets[Synth::mod_volume].envelope_desc_id - 1];
+    const Synth::EnvelopeDescriptor& loaded_second =
+        destination.bank.envelopes.entries[loaded.layers[1].targets[Synth::mod_volume].envelope_desc_id - 1];
+    TEST(memcmp(&loaded_first, &loaded_second, sizeof(loaded_first)) == 0);
+    TEST(loaded_first.num_points == 2);
+    TEST(loaded_first.sustain_first_point == 1 && loaded_first.sustain_last_point == 1);
+    for (uint32_t point = 0; point < 2; ++point) {
+        TEST(approx(loaded_first.min_value + loaded_first.points[point].value * loaded_first.min_max_delta,
+                    env.min_value + env.points[point].value * env.min_max_delta,
+                    0.01f));
+    }
+    remove(path);
+}
+
 static void check_zero_fm_clipboard_library_round_trips()
 {
     const std::unique_ptr<Synth::InstrumentEditorBank> source_storage = std::make_unique<Synth::InstrumentEditorBank>();
@@ -27414,6 +27490,7 @@ int main()
             check_editor_instrument_round_trips();
             check_new_zone_metadata_clone();
             check_zero_fm_clipboard_library_round_trips();
+            check_identical_envelopes_library_round_trips();
             check_library_metadata_transactions();
             check_editor_round_trip_capacity_failures();
             check_unrepresented_layout_refusal();
