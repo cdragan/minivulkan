@@ -30,7 +30,6 @@
 #    pragma GCC diagnostic pop
 #endif
 
-#include <bit>
 #include <cmath>
 #include <errno.h>
 #include <stdint.h>
@@ -382,27 +381,6 @@ Synth::LFODescriptor         editor_export_lfos[Synth::instrument_max_lfos];
 Synth::InstrumentGraphLayout editor_export_source_layout[Synth::instrument_graph_layout_capacity];
 Synth::InstrumentGraphLayout editor_export_normalized[Synth::instrument_graph_layout_capacity];
 uint8_t                      editor_export_osc_source[Synth::max_layers];
-
-// Legacy decode inputs for the one-time osc_sources conversion (see
-// convert_legacy_osc_sources); discarded after the decode.
-struct LegacyPhantomEntry {
-    uint8_t           channel;
-    uint8_t           zone;
-    uint8_t           layer;
-    Synth::Oscillator osc;
-};
-
-LegacyPhantomEntry legacy_phantoms[Synth::max_channels * Synth::max_instr_per_channel * Synth::max_layers];
-uint32_t           legacy_phantom_count;
-bool               legacy_phantoms_present;
-uint8_t            legacy_missing_sum[Synth::max_channels][Synth::max_instr_per_channel];
-bool               osc_sources_present[Synth::max_channels][Synth::max_instr_per_channel];
-
-// Byte-deterministic default oscillator: a static's bytes (padding
-// included) are fully defined, unlike a temporary's padding, and the
-// legacy conversion output is compared byte-for-byte by undo and the
-// unit tests.
-const Synth::Oscillator default_oscillator{};
 } // namespace
 
 static void key_uint(Out& o, const char* name, uint32_t v)
@@ -962,9 +940,7 @@ uint32_t Synth::encode_editor_bank_json(const InstrumentEditorBank* bank, char* 
     o.ch(']');
     // The per-zone source rows ride the editor section: one 7-entry array
     // per (channel, zone), each entry naming the slot's wired oscillator
-    // (1-based editor ordinal) or 0 for an unwired slot.  The legacy
-    // missing_sum and phantoms keys are gone; old documents decode
-    // through the one-time conversion below.
+    // (1-based editor ordinal) or 0 for an unwired slot.
     o.key("osc_sources");
     o.ch('[');
     for (uint32_t c = 0; c < Synth::max_channels; c++) {
@@ -2779,215 +2755,6 @@ static void decode_effect_audio(Walker& walker, uint32_t token, Sculptor::Effect
     });
 }
 
-// One phantom-shell entry: key fields plus the oscillator body.  The
-// last entry for a key wins (later duplicate keys overwrite earlier
-// ones in the conversion lookup), and an entry without an oscillator
-// body is malformed input.
-// The legacy decode's temporary inputs to the one-time conversion: the
-// missing-sum rows and phantom bodies of an old document, plus which
-// zones carried an explicit osc_sources row.  Everything here is
-// discarded after the conversion; no phantom field exists in memory.
-static void reset_legacy_osc_state()
-{
-    legacy_phantom_count    = 0;
-    legacy_phantoms_present = false;
-    memset(static_cast<void*>(legacy_missing_sum), 0, sizeof(legacy_missing_sum));
-    memset(static_cast<void*>(osc_sources_present), 0, sizeof(osc_sources_present));
-}
-
-// Index of the legacy phantom entry for (channel, zone, layer), or -1
-// when the row has none.  Duplicate keys keep the last entry
-// (last-entry-wins, the long-standing decode policy).
-static int32_t find_legacy_phantom_entry(uint32_t channel, uint32_t zone, uint32_t layer)
-{
-    for (uint32_t i = legacy_phantom_count; i-- > 0;) {
-        const LegacyPhantomEntry& entry = legacy_phantoms[i];
-        if (entry.channel == channel && entry.zone == zone && entry.layer == layer) {
-            return static_cast<int32_t>(i);
-        }
-    }
-
-    return -1;
-}
-
-// The one-time conversion of legacy missing_sum/phantoms documents into
-// per-zone source rows: never refuses, never splits.
-//
-// A zone whose document supplied osc_sources is never converted: the
-// explicit row wins independently of key order; a mixed document
-// converts only the other zones.
-//
-// Pre-phantom documents (no phantoms key) kept every row's layer in the
-// instrument: marked rows become unwired, unmarked rows keep their
-// identity wiring, and the kind-0 records are unchanged (ordinal = row).
-//
-// Phantom-era documents kept only the connected layers: the run rebuilds
-// as rows 0..run-1 with run = layer_count + popcount(mask); a marked row
-// takes its phantom entry (a default shell when absent), an unmarked row
-// takes the next stored layer, and the run rows become the editor
-// layers in order; source[row] = row + 1 for connected rows and 0 for
-// marked rows.
-//
-// Shared instruments: zones process in channel/zone order.  The first
-// zone referencing a slot rebuilds it; later zones keep their own source
-// rows rebuilt from their own masks, with values naming ordinals beyond
-// the instrument's layer_count cleared to 0.  Disagreeing phantom bodies
-// from later zones are discarded silently.  The result is deterministic,
-// with no error.
-static void convert_legacy_osc_sources(Synth::InstrumentEditorBank* bank)
-{
-    bool rebuilt[Synth::max_instruments] = {};
-
-    for (uint32_t channel = 0; channel < Synth::max_channels; ++channel) {
-        for (uint32_t zone = 0; zone < Synth::max_instr_per_channel; ++zone) {
-            if (osc_sources_present[channel][zone]) {
-                // An explicit row owns its zone's wiring; the referenced
-                // instrument is already correct as decoded, so a later
-                // legacy zone sharing the slot must not rebuild it (it
-                // only derives its own row).
-                const Synth::Zone& owned = bank->bank.channel_zones[channel][zone];
-                if (owned.start_note != 0 && owned.instrument < bank->bank.instruments.num_allocated) {
-                    rebuilt[owned.instrument] = true;
-                }
-                continue;
-            }
-
-            const Synth::Zone& zone_entry = bank->bank.channel_zones[channel][zone];
-            if (zone_entry.start_note == 0 || zone_entry.instrument >= bank->bank.instruments.num_allocated) {
-                continue; // no instrument, no rows
-            }
-
-            const uint8_t      bits       = legacy_missing_sum[channel][zone];
-            Synth::Instrument& instrument = bank->bank.instruments.entries[zone_entry.instrument];
-            uint8_t*           source     = bank->graph_osc_source[channel][zone];
-            const uint32_t     layer_count =
-                instrument.layer_count <= Synth::max_layers ? instrument.layer_count : Synth::max_layers;
-
-            if (! legacy_phantoms_present) {
-                // Pre-phantom: identity wiring clipped to the instrument's
-                // stored rows, minus the zone's marked rows; the
-                // instrument already holds every row's layer.
-                for (uint32_t slot = 0; slot < Synth::max_layers; ++slot) {
-                    source[slot] =
-                        (slot < layer_count && (bits & (1u << slot)) == 0) ? static_cast<uint8_t>(slot + 1) : 0;
-                }
-                continue;
-            }
-
-            if (bits == 0) {
-                // Phantom-era with no marked rows: the stored instrument
-                // already holds the run rows; identity wiring only.
-                for (uint32_t slot = 0; slot < Synth::max_layers; ++slot) {
-                    source[slot] = slot < layer_count ? static_cast<uint8_t>(slot + 1) : 0;
-                }
-                rebuilt[zone_entry.instrument] = true;
-                continue;
-            }
-
-            if (rebuilt[zone_entry.instrument]) {
-                // A later zone sharing an already rebuilt instrument:
-                // identity wiring clipped to the instrument's rows, minus
-                // the zone's marked rows; values naming ordinals beyond
-                // the instrument's layer_count clear to 0.
-                for (uint32_t slot = 0; slot < Synth::max_layers; ++slot) {
-                    source[slot] =
-                        (slot < layer_count && (bits & (1u << slot)) == 0) ? static_cast<uint8_t>(slot + 1) : 0;
-                }
-                continue;
-            }
-
-            // Phantom-era rebuild, first zone in order for this slot.
-            rebuilt[zone_entry.instrument] = true;
-            const uint32_t    run = layer_count + static_cast<uint32_t>(std::popcount(bits)) <= Synth::max_layers
-                                        ? layer_count + static_cast<uint32_t>(std::popcount(bits))
-                                        : Synth::max_layers;
-            Synth::Oscillator run_rows[Synth::max_layers] = {};
-            uint32_t          connected                   = 0;
-
-            for (uint32_t row = 0; row < run; ++row) {
-                if ((bits & (1u << row)) != 0) {
-                    // A marked row takes its phantom entry, or a default
-                    // shell when the store has none.
-                    const int32_t entry = find_legacy_phantom_entry(channel, zone, row);
-                    // The default comes from the static default_oscillator,
-                    // not a temporary: a temporary's padding bytes are
-                    // unspecified and the bank is compared byte-for-byte.
-                    run_rows[row] = entry >= 0 ? legacy_phantoms[entry].osc : default_oscillator;
-                    // Waveform A cannot be off, so an empty shell starts
-                    // on sine.
-                    if (run_rows[row].osc_type[0] == Synth::WaveType::no_wave) {
-                        run_rows[row].osc_type[0] = Synth::WaveType::sine_wave;
-                    }
-                    continue;
-                }
-                run_rows[row] = instrument.layers[connected++];
-            }
-
-            for (uint32_t row = 0; row < run; ++row) {
-                instrument.layers[row] = run_rows[row];
-                source[row]            = (bits & (1u << row)) == 0 ? static_cast<uint8_t>(row + 1) : 0;
-            }
-
-            for (uint32_t row = run; row < Synth::max_layers; ++row) {
-                instrument.layers[row] = default_oscillator;
-                source[row]            = 0;
-            }
-
-            instrument.layer_count = static_cast<uint8_t>(run);
-        }
-    }
-}
-
-static void decode_phantom_entry(Walker& w, uint32_t obj)
-{
-    uint8_t channel      = 0;
-    uint8_t zone         = 0;
-    uint8_t layer        = 0;
-    bool    have_channel = false;
-    bool    have_zone    = false;
-    bool    have_layer   = false;
-    bool    have_osc     = false;
-
-    Synth::Oscillator osc;
-    memset(static_cast<void*>(&osc), 0, sizeof(osc));
-
-    walk_object(w, obj, [&](uint32_t key_idx, uint32_t val_idx) {
-        if (key_eq(w, key_idx, "channel")) {
-            want_u8(w, val_idx, Synth::max_channels - 1, &channel);
-            have_channel = true;
-        }
-        else if (key_eq(w, key_idx, "zone")) {
-            want_u8(w, val_idx, Synth::max_instr_per_channel - 1, &zone);
-            have_zone = true;
-        }
-        else if (key_eq(w, key_idx, "layer")) {
-            want_u8(w, val_idx, Synth::max_layers - 1, &layer);
-            have_layer = true;
-        }
-        else if (key_eq(w, key_idx, "oscillator")) {
-            decode_oscillator(w, val_idx, osc);
-            have_osc = true;
-        }
-        else {
-            unknown_field(w, key_idx);
-        }
-    });
-    if (w.failed || ! have_channel || ! have_zone || ! have_layer || ! have_osc) {
-        w.failed = true;
-        return;
-    }
-    // The legacy entries feed the one-time conversion below; they are
-    // never stored in the bank (no phantom field exists in memory).
-    if (legacy_phantom_count < sizeof(legacy_phantoms) / sizeof(legacy_phantoms[0])) {
-        LegacyPhantomEntry& entry = legacy_phantoms[legacy_phantom_count++];
-        entry.channel             = channel;
-        entry.zone                = zone;
-        entry.layer               = layer;
-        entry.osc                 = osc;
-        legacy_phantoms_present   = true;
-    }
-}
-
 static void decode_editor_state(Walker& w, uint32_t val_idx, Synth::InstrumentEditorBank* out, bool v2 = false)
 {
     bool audio_present = false;
@@ -3039,42 +2806,15 @@ static void decode_editor_state(Walker& w, uint32_t val_idx, Synth::InstrumentEd
                 out->graph_layout[out->graph_layout_count++] = record;
             });
         }
-        else if (key_eq(w, key_idx, "missing_sum")) {
-            // Legacy input to the one-time conversion below; never stored.
-            walk_array(w, inner_idx, Synth::max_channels, [&](uint32_t row_elem, uint32_t channel) {
-                walk_array(w, row_elem, Synth::max_instr_per_channel, [&](uint32_t elem, uint32_t zone) {
-                    want_u8(w, elem, 0x7F, &legacy_missing_sum[channel][zone]);
-                    if (w.failed)
-                        return;
-                });
-            });
-        }
-        else if (key_eq(w, key_idx, "phantoms")) {
-            // The key's presence alone marks a phantom-era document: an
-            // empty store is still phantom-era (its zones rebuild with
-            // default shells for marked rows).
-            legacy_phantoms_present = true;
-            walk_array(w, inner_idx, w.num_toks, [&](uint32_t elem, uint32_t) {
-                if (w.toks[elem].type != JSMN_OBJECT) {
-                    w.failed = true;
-                    return;
-                }
-                decode_phantom_entry(w, elem);
-            });
-        }
         else if (key_eq(w, key_idx, "osc_sources")) {
             // One 7-entry row per (channel, zone); each entry names the
             // slot's wired oscillator (1-based editor ordinal) or 0 for an
-            // unwired slot.  The row lands in the bank and marks the zone
-            // converted, so the legacy fields never override it,
-            // independently of key order.
+            // unwired slot.  The row lands in the bank verbatim.
             walk_array(w, inner_idx, Synth::max_channels, [&](uint32_t row_elem, uint32_t channel) {
                 walk_array(w, row_elem, Synth::max_instr_per_channel, [&](uint32_t elem, uint32_t zone) {
                     if (w.toks[elem].type == JSMN_ARRAY && w.toks[elem].size == 0) {
                         return;
                     }
-
-                    osc_sources_present[channel][zone] = true;
                     walk_array(w, elem, Synth::max_layers, [&](uint32_t slot_elem, uint32_t slot) {
                         want_u8(w, slot_elem, Synth::max_layers, &out->graph_osc_source[channel][zone][slot]);
                         if (w.failed) {
@@ -4032,7 +3772,6 @@ static bool decode_document_into_scratch(const char* text, uint32_t len, bool st
 
     w.strict_editor_metadata = strict_editor_metadata;
     fill_default_editor_bank(&decode_scratch);
-    reset_legacy_osc_state();
 
     bool      guard = false, v2 = false;
     uint32_t  idx   = 1;
@@ -4071,11 +3810,6 @@ static bool decode_document_into_scratch(const char* text, uint32_t len, bool st
     if (w.failed || guard != v2) {
         return false;
     }
-    // The one-time conversion: legacy missing_sum/phantoms documents
-    // rebuild their per-zone source rows here; zones that decoded an
-    // explicit osc_sources row keep it.  The legacy inputs are discarded
-    // with the conversion; no phantom field exists in memory.
-    convert_legacy_osc_sources(&decode_scratch);
     if (! Synth::validate_instrument_bank(&decode_scratch.bank, false)) {
         return false;
     }
@@ -4191,7 +3925,9 @@ bool Synth::decode_instrument_json_for_domain(const char*            text,
                                               uint32_t               layout_capacity,
                                               uint32_t*              out_layout_count,
                                               InstrumentJsonDomain   domain,
-                                              uint8_t*               osc_source_out)
+                                              uint8_t*               osc_source_out,
+                                              uint16_t*              envelope_ids_out,
+                                              uint16_t*              lfo_ids_out)
 {
     if (! text || ! out_instr || ! out_envelopes || ! out_envelope_count || ! out_lfos || ! out_lfo_count ||
         ! out_layout_count)
@@ -4430,6 +4166,16 @@ bool Synth::decode_instrument_json_for_domain(const char*            text,
     *out_layout_count = layout_count;
     if (osc_source_out) {
         memcpy(osc_source_out, decoded_sources, Synth::max_layers);
+    }
+    // The document's descriptor id per decoded position (0 for legacy
+    // content-dedup text): callers whose id maps are keyed by pool id need
+    // the translation these ids provide when pool ids and document positions
+    // no longer coincide.
+    if (envelope_ids_out) {
+        memcpy(envelope_ids_out, doc.envelope_ids, doc.envelope_count * sizeof(*envelope_ids_out));
+    }
+    if (lfo_ids_out) {
+        memcpy(lfo_ids_out, doc.lfo_ids, doc.lfo_count * sizeof(*lfo_ids_out));
     }
     return true;
 }

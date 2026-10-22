@@ -214,7 +214,13 @@ bool decode_instrument_json_for_domain(const char*            text,
                                        // The zone's source row the document carries (osc_sources):
                                        // filled for clipboard documents; identity when the key
                                        // is absent (older builds).  May be null.
-                                       uint8_t* osc_source_out = nullptr);
+                                       uint8_t* osc_source_out = nullptr,
+                                       // Per decoded descriptor position (1-based into
+                                       // out_envelopes / out_lfos), the document's pool id
+                                       // (envelope_id / lfo_id keys): 0 when the text carries
+                                       // no id (legacy content-dedup documents).  May be null.
+                                       uint16_t* envelope_ids_out = nullptr,
+                                       uint16_t* lfo_ids_out      = nullptr);
 
 } // namespace Synth
 

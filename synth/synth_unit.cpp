@@ -1405,9 +1405,9 @@ static int32_t find_mapped(const Synth::GraphNodeLayout* records, uint32_t count
 // default parameters (no inheritance), and its wiring slot resolves
 // through the pure lowest-free-slot helper, so red holes fill before
 // the gray add slot and a full run refuses.  The consumer must not
-// consult the dragged row beyond the slot bounds check and must not
-// touch the phantom store: a disconnect leaves the oscillator on the
-// canvas and any free slot accepts any oscillator.  Both menus must
+// consult the dragged row beyond the slot bounds check: a disconnect
+// leaves the oscillator on the canvas and any free slot accepts any
+// oscillator.  Both menus must
 // disable the Add Oscillator entry when no slot is free (the
 // occupied-cell disabled style) instead of offering it unguarded.
 static void check_osc_add_source_contract()
@@ -1435,10 +1435,6 @@ static void check_osc_add_source_contract()
     // Row identity is not frozen: the dragged slot is only a bounds
     // check, never a compiled slot to take over.
     TEST(find_in_range(body_open, body_close, "dragged_row") == nullptr);
-
-    // The phantom store is gone: a disconnected oscillator keeps its
-    // parameters in the editor instrument itself.
-    TEST(find_in_range(body_open, body_close, "phantoms") == nullptr);
 
     // The add path must never write an existing node: appending a
     // fresh editor layer writes no projected node.
@@ -1703,63 +1699,6 @@ static void check_osc_wire_auto_move()
 #if OSC_SOURCE_TESTS
 // The source-row tests.  See the block comment at the top of this section.
 
-// Removes one JSON key (from `"key"` through its matching value bracket or
-// scalar) from a document written by the encoder; returns the new length.
-static uint32_t remove_json_key(char* doc, uint32_t len, const char* key)
-{
-    char needle[64] = {};
-    snprintf(needle, sizeof(needle), "\"%s\"", key);
-    char* hit = strstr(doc, needle);
-    TEST(hit != nullptr);
-    if (! hit) {
-        return len;
-    }
-
-    char* value = strchr(hit, ':');
-    TEST(value != nullptr);
-    if (! value) {
-        return len;
-    }
-
-    ++value;
-    while (*value == ' ') {
-        ++value;
-    }
-
-    char* end = value;
-    if (*value == '[' || *value == '{') {
-        const char open  = *value;
-        const char close = open == '[' ? ']' : '}';
-        int        depth = 0;
-        do {
-            if (*end == open) {
-                ++depth;
-            }
-            else if (*end == close) {
-                --depth;
-            }
-            ++end;
-        } while (depth > 0 && *end);
-    }
-    else {
-        while (*end && *end != ',' && *end != '}') {
-            ++end;
-        }
-    }
-
-    char* start = hit;
-    if (*end == ',') {
-        ++end;
-    }
-    else if (start > doc && *(start - 1) == ',' && (*end == '}' || *end == ']')) {
-        // The key sat last in its object: drop the preceding comma too.
-        --start;
-    }
-
-    memmove(start, end, len - static_cast<uint32_t>(end - doc) + 1);
-    return len - static_cast<uint32_t>(end - start);
-}
-
 static void check_osc_red_run_derivation()
 {
     // {o0, none, o2}: the run ends after the highest wired slot, the hole
@@ -1973,8 +1912,8 @@ static void check_osc_add_lowest_free_slot()
     }
 }
 
-// Identity initialization: the helper, the library load and the JSON decode
-// install identity wiring directly; startup and do_initialize are covered by
+// Identity initialization: the helper and the library load install
+// identity wiring directly; startup and do_initialize are covered by
 // the source-inspection check at the end.
 static void check_osc_source_identity_install()
 {
@@ -2021,33 +1960,6 @@ static void check_osc_source_identity_install()
             TEST(destination.graph_osc_source[2][0][s] == (s < 3 ? static_cast<uint8_t>(s + 1) : 0));
         }
         remove(path);
-    }
-
-    // A bank document without the zone's osc_sources row installs identity
-    // (an older build's document); an explicit row is covered by the legacy
-    // conversion test's mixed fixture.
-    {
-        const std::unique_ptr<Synth::InstrumentEditorBank> source_storage =
-            std::make_unique<Synth::InstrumentEditorBank>();
-        Synth::InstrumentEditorBank& source     = *source_storage;
-        Synth::Instrument            instrument = {};
-        build_binding_fixture(&source, &instrument);
-        const std::unique_ptr<FixedArray<char, 128 * 1024>> doc_storage =
-            std::make_unique<FixedArray<char, 128 * 1024>>();
-        char (&doc)[128 * 1024] = doc_storage->elements;
-        const uint32_t len      = Synth::encode_editor_bank_json(&source, doc, sizeof(doc));
-        TEST(len > 0);
-        TEST(strstr(doc, "\"osc_sources\"") != nullptr);
-        // An older build wrote no osc_sources key at all.
-        const uint32_t cut = remove_json_key(doc, len, "osc_sources");
-        TEST(cut > 0 && cut < len);
-        const std::unique_ptr<Synth::InstrumentEditorBank> decoded_storage =
-            std::make_unique<Synth::InstrumentEditorBank>();
-        Synth::InstrumentEditorBank& decoded = *decoded_storage;
-        TEST(Synth::decode_editor_bank_json(doc, cut, &decoded));
-        for (uint32_t s = 0; s < Synth::max_layers; ++s) {
-            TEST(decoded.graph_osc_source[0][0][s] == (s < 3 ? static_cast<uint8_t>(s + 1) : 0));
-        }
     }
 
     // Startup and do_initialize write identity rows (source inspection: the
@@ -2592,716 +2504,6 @@ static void check_osc_export_zero_wired_refused()
                                                  text,
                                                  sizeof(text),
                                                  Synth::InstrumentJsonDomain::clipboard) != 0);
-}
-
-// Criterion 5: loading old banks converts once - marked layers and phantom
-// bodies become silent unwired nodes, the first zone wins for shared
-// instruments, an explicit osc_sources row wins over legacy fields - never
-// refuses, and a re-save carries no legacy keys.  The osc_sources key
-// carries the nested [channel][zone][slot] row table; a hand-edited
-// document may omit a zone's row ([]) to leave that zone legacy.
-// The one-time legacy conversion runs on documents the encoder no longer
-// produces, so the fixtures compose the legacy editor keys textually.
-// One oscillator as an instrument-layer document; returns the span of the
-// layer object within dest.
-
-// Quote-aware matching bracket search from an opening bracket.
-static const char* find_matching_bracket(const char* open)
-{
-    int  depth  = 0;
-    bool in_str = false;
-
-    for (const char* q = open; *q; ++q) {
-        if (in_str) {
-            if (*q == '\\') {
-                ++q;
-            }
-            else if (*q == '"') {
-                in_str = false;
-            }
-            continue;
-        }
-
-        if (*q == '"') {
-            in_str = true;
-        }
-        else if (*q == '[' || *q == '{') {
-            ++depth;
-        }
-        else if (*q == ']' || *q == '}') {
-            --depth;
-            if (depth == 0) {
-                return q;
-            }
-        }
-    }
-
-    return nullptr;
-}
-
-static bool build_oscillator_layer_json(const Synth::InstrumentEditorBank& bank,
-                                        uint32_t                           channel,
-                                        uint32_t                           zone,
-                                        const Synth::Oscillator&           osc,
-                                        char*                              dest,
-                                        uint32_t                           cap,
-                                        const char**                       out_begin,
-                                        uint32_t*                          out_len)
-{
-    // The legacy phantom store serialized its bodies with the bank
-    // encoder's oscillator form, so the fixture wraps a single-layer
-    // instrument in a copy of the fixture bank and slices the first
-    // layer object out of the encoded document.
-    Synth::Instrument single                                        = {};
-    single.layer_count                                              = 1;
-    single.layers[0]                                                = osc;
-    const std::unique_ptr<Synth::InstrumentEditorBank> temp_storage = std::make_unique<Synth::InstrumentEditorBank>();
-    Synth::InstrumentEditorBank&                       temp         = *temp_storage;
-    memcpy(&temp, &bank, sizeof(temp));
-    const uint32_t instrument = bank.bank.channel_zones[channel][zone].instrument;
-    if (instrument >= Synth::max_instruments) {
-        return false;
-    }
-    temp.bank.instruments.entries[instrument] = single;
-    Sculptor::set_identity_osc_sources(&temp, channel, zone);
-    const uint32_t doc_len = Synth::encode_editor_bank_json(&temp, dest, cap);
-    if (! doc_len) {
-        return false;
-    }
-    dest[doc_len]           = 0;
-    const char* instruments = strstr(dest, "\"instruments\":[");
-    if (! instruments) {
-        return false;
-    }
-    const char* p = instruments + strlen("\"instruments\":[");
-    while (*p && (*p == ' ' || *p == '\n' || *p == '\r' || *p == '\t')) {
-        ++p;
-    }
-    // Advance to the zone's instrument object.
-    for (uint32_t i = 0; i < instrument; ++i) {
-        if (*p != '{') {
-            return false;
-        }
-        p = find_matching_bracket(p);
-        if (! p) {
-            return false;
-        }
-        ++p;
-        while (*p && (*p == ',' || *p == ' ' || *p == '\n' || *p == '\r' || *p == '\t')) {
-            ++p;
-        }
-    }
-    const char* layers = strstr(p, "\"layers\":[");
-    if (! layers) {
-        return false;
-    }
-    p = layers + strlen("\"layers\":[");
-    while (*p && (*p == ' ' || *p == '\n' || *p == '\r' || *p == '\t')) {
-        ++p;
-    }
-    if (*p != '{') {
-        return false;
-    }
-    *out_begin        = p;
-    const char* close = find_matching_bracket(p);
-    if (! close) {
-        return false;
-    }
-    *out_len = static_cast<uint32_t>(close - *out_begin + 1);
-    return true;
-}
-
-struct LegacyPhantomFixture {
-    uint32_t          channel;
-    uint32_t          zone;
-    uint32_t          layer;
-    Synth::Oscillator osc;
-};
-
-// The legacy phantoms array for a fixture's entries.
-static bool build_phantoms_json(const Synth::InstrumentEditorBank& bank,
-                                const LegacyPhantomFixture*        entries,
-                                uint32_t                           count,
-                                char*                              dest,
-                                uint32_t                           cap)
-{
-    uint32_t used = static_cast<uint32_t>(snprintf(dest, cap, "["));
-    for (uint32_t i = 0; i < count; ++i) {
-        const char* osc_begin = nullptr;
-        uint32_t    osc_len   = 0;
-        char        osc_buf[16 * 1024];
-        if (! build_oscillator_layer_json(bank,
-                                          entries[i].channel,
-                                          entries[i].zone,
-                                          entries[i].osc,
-                                          osc_buf,
-                                          sizeof(osc_buf),
-                                          &osc_begin,
-                                          &osc_len))
-            return false;
-
-        used += static_cast<uint32_t>(snprintf(dest + used,
-                                               cap - used,
-                                               "%s{\"channel\":%u,\"zone\":%u,\"layer\":%u,\"oscillator\":%.*s}",
-                                               i ? "," : "",
-                                               entries[i].channel,
-                                               entries[i].zone,
-                                               entries[i].layer,
-                                               osc_len,
-                                               osc_begin));
-        if (used >= cap) {
-            return false;
-        }
-    }
-
-    used += static_cast<uint32_t>(snprintf(dest + used, cap - used, "]"));
-    return used < cap;
-}
-
-// Inserts one member right after the bank document's editor object opens.
-static bool insert_after_editor_open(char* doc, uint32_t len, uint32_t cap, const char* text, uint32_t* out_len)
-{
-    const char* editor = strstr(doc, "\"editor\":{");
-    if (! editor) {
-        return false;
-    }
-    const uint32_t at = static_cast<uint32_t>(editor - doc) + static_cast<uint32_t>(strlen("\"editor\":{"));
-    const uint32_t t  = static_cast<uint32_t>(strlen(text));
-    if (len + t + 1 > cap) {
-        return false;
-    }
-    memmove(doc + at + t, doc + at, len - at + 1);
-    memcpy(doc + at, text, t);
-    *out_len = len + t;
-    return true;
-}
-
-// The bank document with the new osc_sources key removed and the legacy
-// editor keys inserted; a null phantoms_json inserts no phantoms member.
-static bool build_legacy_bank_doc(const Synth::InstrumentEditorBank& bank,
-                                  const char*                        missing_sum_json,
-                                  const char*                        phantoms_json,
-                                  char*                              doc,
-                                  uint32_t                           cap,
-                                  uint32_t*                          out_len)
-{
-    uint32_t len = Synth::encode_editor_bank_json(&bank, doc, cap);
-    if (! len) {
-        return false;
-    }
-
-    const uint32_t cut = remove_json_key(doc, len, "osc_sources");
-    if (! cut) {
-        return false;
-    }
-
-    len = cut;
-    char member[24 * 1024];
-    snprintf(member, sizeof(member), "\"missing_sum\":%s,", missing_sum_json);
-    if (! insert_after_editor_open(doc, len, cap, member, &len)) {
-        return false;
-    }
-
-    if (phantoms_json) {
-        snprintf(member, sizeof(member), "\"phantoms\":%s,", phantoms_json);
-        if (! insert_after_editor_open(doc, len, cap, member, &len)) {
-            return false;
-        }
-    }
-
-    *out_len = len;
-    return true;
-}
-
-static void check_legacy_osc_conversion()
-{
-    // Fixture 1: pre-phantom - a marked layer becomes an unwired node, the
-    // connected slots are unchanged, and the kind-0 records keep their row
-    // keys (ordinal = row).
-    {
-        const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage =
-            std::make_unique<Synth::InstrumentEditorBank>();
-        Synth::InstrumentEditorBank& bank       = *bank_storage;
-        Synth::Instrument            instrument = {};
-        build_binding_fixture(&bank, &instrument);
-        Sculptor::set_identity_osc_sources(&bank, 0, 0);
-        add_detached_record(&bank,
-                            0,
-                            0,
-                            0,
-                            Synth::graph_canonical_first_osc + 0,
-                            10,
-                            11,
-                            Synth::ModSource::none,
-                            Synth::ModSource::none,
-                            0);
-        add_detached_record(&bank,
-                            0,
-                            0,
-                            0,
-                            Synth::graph_canonical_first_osc + 1,
-                            21,
-                            22,
-                            Synth::ModSource::none,
-                            Synth::ModSource::none,
-                            0);
-        add_detached_record(&bank,
-                            0,
-                            0,
-                            0,
-                            Synth::graph_canonical_first_osc + 2,
-                            31,
-                            32,
-                            Synth::ModSource::none,
-                            Synth::ModSource::none,
-                            0);
-        const std::unique_ptr<FixedArray<char, 128 * 1024>> doc_storage =
-            std::make_unique<FixedArray<char, 128 * 1024>>();
-        char (&doc)[128 * 1024] = doc_storage->elements;
-        uint32_t len            = 0;
-        // A pre-phantom document carries the missing-sum mask and no
-        // phantom store at all.
-        TEST(build_legacy_bank_doc(bank, "[[2]]", nullptr, doc, sizeof(doc), &len));
-        TEST(len > 0);
-        TEST(strstr(doc, "\"missing_sum\":[[2]]") != nullptr);
-        TEST(strstr(doc, "\"phantoms\"") == nullptr);
-        const std::unique_ptr<Synth::InstrumentEditorBank> decoded_storage =
-            std::make_unique<Synth::InstrumentEditorBank>();
-        Synth::InstrumentEditorBank& decoded = *decoded_storage;
-        TEST(Synth::decode_editor_bank_json(doc, len, &decoded));
-        const Synth::Instrument& loaded = decoded.bank.instruments.entries[0];
-        // The marked layer survives as an unwired node with its parameters.
-        TEST(loaded.layer_count == 3);
-        TEST(loaded.layers[1].targets[Synth::mod_volume].envelope_desc_id == 2);
-        TEST(decoded.graph_osc_source[0][0][0] == 1);
-        TEST(decoded.graph_osc_source[0][0][1] == 0);
-        TEST(decoded.graph_osc_source[0][0][2] == 3);
-        TEST(count_records_matching(decoded, 0, 0, 0, Synth::graph_canonical_first_osc + 1) == 1);
-        // A re-save carries no legacy keys.
-        const uint32_t resaved = Synth::encode_editor_bank_json(&decoded, doc, sizeof(doc));
-        TEST(resaved > 0);
-        TEST(strstr(doc, "\"missing_sum\"") == nullptr);
-        TEST(strstr(doc, "\"phantoms\"") == nullptr);
-        TEST(strstr(doc, "\"osc_sources\"") != nullptr);
-    }
-
-    // Fixture 2: phantom era - the phantom body becomes an unwired node at
-    // its row and the connected slots keep their parameters.
-    {
-        const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage =
-            std::make_unique<Synth::InstrumentEditorBank>();
-        Synth::InstrumentEditorBank& bank       = *bank_storage;
-        Synth::Instrument            instrument = {};
-        build_binding_fixture(&bank, &instrument);
-        Sculptor::set_identity_osc_sources(&bank, 0, 0);
-        // The legacy compiled form: two connected layers, row 1 red-marked
-        // (compiled rows 0 and 2), with a distinct phantom body at row 1.
-        Synth::Instrument compiled                                     = {};
-        compiled.layer_count                                           = 2;
-        compiled.layers[0]                                             = instrument.layers[0];
-        compiled.layers[1]                                             = instrument.layers[2];
-        compiled.note_skew_semitones                                   = instrument.note_skew_semitones;
-        bank.bank.instruments.entries[0]                               = compiled;
-        Synth::Oscillator phantom_body                                 = compiled.layers[1];
-        phantom_body.osc_type[0]                                       = Synth::WaveType::pulse_wave;
-        const LegacyPhantomFixture                          phantoms[] = { { 0, 0, 1, phantom_body } };
-        const std::unique_ptr<FixedArray<char, 128 * 1024>> doc_storage =
-            std::make_unique<FixedArray<char, 128 * 1024>>();
-        char (&doc)[128 * 1024] = doc_storage->elements;
-        uint32_t len            = 0;
-        char     phantoms_json[24 * 1024];
-        TEST(build_phantoms_json(bank, phantoms, 1, phantoms_json, sizeof(phantoms_json)));
-        TEST(build_legacy_bank_doc(bank, "[[2]]", phantoms_json, doc, sizeof(doc), &len));
-        const std::unique_ptr<Synth::InstrumentEditorBank> decoded_storage =
-            std::make_unique<Synth::InstrumentEditorBank>();
-        Synth::InstrumentEditorBank& decoded = *decoded_storage;
-        TEST(Synth::decode_editor_bank_json(doc, len, &decoded));
-        // The run's rows become the editor layers: A, phantom body, B.
-        const Synth::Instrument& loaded = decoded.bank.instruments.entries[0];
-        TEST(loaded.layer_count == 3);
-        TEST(memcmp(&loaded.layers[0], &compiled.layers[0], sizeof(Synth::Oscillator)) == 0);
-        TEST(memcmp(&loaded.layers[1], &phantom_body, sizeof(Synth::Oscillator)) == 0);
-        TEST(memcmp(&loaded.layers[2], &compiled.layers[1], sizeof(Synth::Oscillator)) == 0);
-        TEST(decoded.graph_osc_source[0][0][0] == 1);
-        TEST(decoded.graph_osc_source[0][0][1] == 0);
-        TEST(decoded.graph_osc_source[0][0][2] == 3);
-    }
-
-    // Fixture 3: shared instrument - the first zone in channel/zone order
-    // reconstructs the authoring instrument, later zones keep their own
-    // rebuilt rows, and disagreeing phantom bodies are discarded silently.
-    {
-        const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage =
-            std::make_unique<Synth::InstrumentEditorBank>();
-        Synth::InstrumentEditorBank& bank       = *bank_storage;
-        Synth::Instrument            instrument = {};
-        build_binding_fixture(&bank, &instrument);
-        Sculptor::set_identity_osc_sources(&bank, 0, 0);
-        Synth::Instrument shared                 = {};
-        shared.layer_count                       = 2;
-        shared.layers[0]                         = instrument.layers[0];
-        shared.layers[1]                         = instrument.layers[2];
-        bank.bank.instruments.entries[0]         = shared;
-        bank.bank.channel_zones[0][1].start_note = 61;
-        bank.bank.channel_zones[0][1].instrument = 0;
-        Synth::Oscillator first_body             = shared.layers[1];
-        first_body.osc_type[0]                   = Synth::WaveType::pulse_wave;
-        Synth::Oscillator later_body             = first_body;
-        later_body.osc_type[0]                   = Synth::WaveType::noise_wave;
-        const LegacyPhantomFixture phantoms[]    = { { 0, 0, 0, first_body }, { 0, 1, 1, later_body } };
-        const std::unique_ptr<FixedArray<char, 128 * 1024>> doc_storage =
-            std::make_unique<FixedArray<char, 128 * 1024>>();
-        char (&doc)[128 * 1024] = doc_storage->elements;
-        uint32_t len            = 0;
-        char     phantoms_json[24 * 1024];
-        TEST(build_phantoms_json(bank, phantoms, 2, phantoms_json, sizeof(phantoms_json)));
-        TEST(build_legacy_bank_doc(bank, "[[1,2]]", phantoms_json, doc, sizeof(doc), &len));
-        const std::unique_ptr<Synth::InstrumentEditorBank> decoded_storage =
-            std::make_unique<Synth::InstrumentEditorBank>();
-        Synth::InstrumentEditorBank& decoded = *decoded_storage;
-        // The load never refuses.
-        TEST(Synth::decode_editor_bank_json(doc, len, &decoded));
-        // The first zone's rows reconstruct the instrument: P0, B, C.
-        const Synth::Instrument& loaded = decoded.bank.instruments.entries[0];
-        TEST(loaded.layer_count == 3);
-        TEST(memcmp(&loaded.layers[0], &first_body, sizeof(Synth::Oscillator)) == 0);
-        TEST(memcmp(&loaded.layers[1], &shared.layers[0], sizeof(Synth::Oscillator)) == 0);
-        TEST(memcmp(&loaded.layers[2], &shared.layers[1], sizeof(Synth::Oscillator)) == 0);
-        TEST(decoded.graph_osc_source[0][0][0] == 0);
-        TEST(decoded.graph_osc_source[0][0][1] == 2);
-        TEST(decoded.graph_osc_source[0][0][2] == 3);
-        // The later zone keeps its own rebuilt rows; its phantom body was
-        // discarded, not merged into the shared instrument.
-        TEST(decoded.graph_osc_source[0][1][0] == 1);
-        TEST(decoded.graph_osc_source[0][1][1] == 0);
-        TEST(decoded.graph_osc_source[0][1][2] == 3);
-        TEST(memcmp(&loaded.layers[1], &later_body, sizeof(Synth::Oscillator)) != 0);
-    }
-
-    // Fixture 4: an explicit osc_sources row wins over legacy fields,
-    // independently of key order; the zone whose row is absent ([]) still
-    // converts from its legacy mask.
-    {
-        const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage =
-            std::make_unique<Synth::InstrumentEditorBank>();
-        Synth::InstrumentEditorBank& bank       = *bank_storage;
-        Synth::Instrument            instrument = {};
-        build_binding_fixture(&bank, &instrument);
-        Sculptor::set_identity_osc_sources(&bank, 0, 0);
-        bank.bank.channel_zones[0][1].start_note = 61;
-        bank.bank.channel_zones[0][1].instrument = 0;
-        const std::unique_ptr<FixedArray<char, 128 * 1024>> doc_storage =
-            std::make_unique<FixedArray<char, 128 * 1024>>();
-        char (&doc)[128 * 1024] = doc_storage->elements;
-        const std::unique_ptr<FixedArray<char, 128 * 1024>> pristine_storage =
-            std::make_unique<FixedArray<char, 128 * 1024>>();
-        char (&pristine)[128 * 1024] = pristine_storage->elements;
-        {
-            uint32_t len = Synth::encode_editor_bank_json(&bank, doc, sizeof(doc));
-            TEST(len > 0);
-            // Zone 0's explicit row contradicts the legacy identity shape
-            // (the encoder wrote all-zero rows); zone 1's row becomes
-            // absent ([]), so only zone 1 converts from the legacy mask.
-            const char* const explicit_row = "[1,0,3,0,0,0,0]";
-            const char*       rows         = strstr(doc, "\"osc_sources\":[");
-            TEST(rows != nullptr);
-            const char* z0 = strchr(rows + strlen("\"osc_sources\":") + 2, '[');
-            TEST(z0 != nullptr);
-            const char* z0_close = find_matching_bracket(z0);
-            TEST(z0_close != nullptr);
-            const char* z1 = strchr(z0_close + 1, '[');
-            TEST(z1 != nullptr);
-            const char* z1_close = find_matching_bracket(z1);
-            TEST(z1_close != nullptr);
-            // Zone 0's encoded row is the same length as its replacement, so it is
-            // overwritten in place; zone 1's row shrinks to [].
-            TEST(static_cast<uint32_t>(z0_close - z0 + 1) == strlen(explicit_row));
-            memcpy(const_cast<char*>(z0), explicit_row, strlen(explicit_row));
-            const uint32_t z1_at  = static_cast<uint32_t>(z1 - doc);
-            const uint32_t z1_len = static_cast<uint32_t>(z1_close - z1 + 1);
-            memmove(doc + z1_at + 2, doc + z1_at + z1_len, len - (z1_at + z1_len) + 1);
-            memcpy(doc + z1_at, "[]", 2);
-            len -= z1_len - 2;
-            memcpy(pristine, doc, len + 1);
-        }
-        const char* const legacy_member = "\"missing_sum\":[[0,1]],";
-        for (uint32_t variant = 0; variant < 2; ++variant) {
-            memcpy(doc, pristine, strlen(pristine) + 1);
-            uint32_t len = static_cast<uint32_t>(strlen(doc));
-            if (variant == 0) {
-                // The legacy key precedes the explicit rows.
-                TEST(insert_after_editor_open(doc, len, sizeof(doc), legacy_member, &len));
-            }
-            else {
-                // The legacy key follows the explicit rows: insert inside the
-                // editor object, right after the osc_sources value's closing
-                // bracket (osc_sources is the editor section's last member, so
-                // the inserted member carries the leading comma itself).
-                const char* key = strstr(doc, "\"osc_sources\":");
-                TEST(key != nullptr);
-                const char* value = strchr(key + 1, '[');
-                TEST(value != nullptr);
-                const char* close = find_matching_bracket(value);
-                TEST(close != nullptr);
-                const char* const legacy_member_after = ",\"missing_sum\":[[0,1]]";
-                const uint32_t    at                  = static_cast<uint32_t>(close - doc) + 1;
-                const uint32_t    t                   = static_cast<uint32_t>(strlen(legacy_member_after));
-                TEST(len + t + 1 < sizeof(doc));
-                memmove(doc + at + t, doc + at, len - at + 1);
-                memcpy(doc + at, legacy_member_after, t);
-                len += t;
-            }
-            const std::unique_ptr<Synth::InstrumentEditorBank> decoded_storage =
-                std::make_unique<Synth::InstrumentEditorBank>();
-            Synth::InstrumentEditorBank& decoded = *decoded_storage;
-            TEST(Synth::decode_editor_bank_json(doc, len, &decoded));
-            // The explicit row wins over the legacy identity shape.
-            TEST(decoded.graph_osc_source[0][0][0] == 1);
-            TEST(decoded.graph_osc_source[0][0][1] == 0);
-            TEST(decoded.graph_osc_source[0][0][2] == 3);
-            // The zone without a row still converts from its legacy mask.
-            TEST(decoded.graph_osc_source[0][1][0] == 0);
-            TEST(decoded.graph_osc_source[0][1][1] == 2);
-            TEST(decoded.graph_osc_source[0][1][2] == 3);
-        }
-    }
-
-    // Fixture 5: a phantom-era document whose phantom store is EMPTY.
-    // The "phantoms" key's presence alone marks the phantom era: the
-    // marked row becomes a default unwired shell (sine) and the
-    // connected rows keep their bodies.
-    {
-        const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage =
-            std::make_unique<Synth::InstrumentEditorBank>();
-        Synth::InstrumentEditorBank& bank       = *bank_storage;
-        Synth::Instrument            instrument = {};
-        build_binding_fixture(&bank, &instrument);
-        Sculptor::set_identity_osc_sources(&bank, 0, 0);
-        Synth::Instrument compiled       = {};
-        compiled.layer_count             = 2;
-        compiled.layers[0]               = instrument.layers[0];
-        compiled.layers[1]               = instrument.layers[2];
-        compiled.note_skew_semitones     = instrument.note_skew_semitones;
-        bank.bank.instruments.entries[0] = compiled;
-        const std::unique_ptr<FixedArray<char, 128 * 1024>> doc_storage =
-            std::make_unique<FixedArray<char, 128 * 1024>>();
-        char (&doc)[128 * 1024] = doc_storage->elements;
-        uint32_t len            = 0;
-        TEST(build_legacy_bank_doc(bank, "[[2]]", "[]", doc, sizeof(doc), &len));
-        const std::unique_ptr<Synth::InstrumentEditorBank> decoded_storage =
-            std::make_unique<Synth::InstrumentEditorBank>();
-        Synth::InstrumentEditorBank& decoded = *decoded_storage;
-        TEST(Synth::decode_editor_bank_json(doc, len, &decoded));
-        // Three authoring nodes: A, the default shell, B.
-        const Synth::Instrument& loaded = decoded.bank.instruments.entries[0];
-        TEST(loaded.layer_count == 3);
-        TEST(memcmp(&loaded.layers[0], &compiled.layers[0], sizeof(Synth::Oscillator)) == 0);
-        Synth::Oscillator shell = {};
-        shell.osc_type[0]       = Synth::WaveType::sine_wave;
-        TEST(memcmp(&loaded.layers[1], &shell, sizeof(Synth::Oscillator)) == 0);
-        TEST(memcmp(&loaded.layers[2], &compiled.layers[1], sizeof(Synth::Oscillator)) == 0);
-        TEST(decoded.graph_osc_source[0][0][0] == 1);
-        TEST(decoded.graph_osc_source[0][0][1] == 0);
-        TEST(decoded.graph_osc_source[0][0][2] == 3);
-    }
-
-    // Fixture 6: an explicit-source zone owns its shared instrument.  A
-    // later legacy zone sharing the slot derives its own row but must
-    // not rebuild the instrument the explicit zone already decoded.
-    {
-        const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage =
-            std::make_unique<Synth::InstrumentEditorBank>();
-        Synth::InstrumentEditorBank& bank       = *bank_storage;
-        Synth::Instrument            instrument = {};
-        build_binding_fixture(&bank, &instrument);
-        Synth::Oscillator body_a                 = instrument.layers[0];
-        Synth::Oscillator body_b                 = instrument.layers[2];
-        body_b.osc_type[0]                       = Synth::WaveType::pulse_wave;
-        Synth::Instrument authoring              = {};
-        authoring.layer_count                    = 2;
-        authoring.layers[0]                      = body_a;
-        authoring.layers[1]                      = body_b;
-        bank.bank.instruments.entries[0]         = authoring;
-        bank.bank.channel_zones[0][1].start_note = 61;
-        bank.bank.channel_zones[0][1].instrument = 0;
-        // Zone 0's explicit row survives the encode verbatim; zone 1's
-        // row shrinks to [] so only the legacy fields speak for it.
-        bank.graph_osc_source[0][0][0]                                 = 1;
-        bank.graph_osc_source[0][0][1]                                 = 2;
-        bank.graph_osc_source[0][1][0]                                 = 1;
-        bank.graph_osc_source[0][1][1]                                 = 2;
-        Synth::Oscillator phantom_body                                 = body_b;
-        phantom_body.osc_type[0]                                       = Synth::WaveType::noise_wave;
-        const LegacyPhantomFixture                          phantoms[] = { { 0, 1, 1, phantom_body } };
-        const std::unique_ptr<FixedArray<char, 128 * 1024>> doc_storage =
-            std::make_unique<FixedArray<char, 128 * 1024>>();
-        char (&doc)[128 * 1024] = doc_storage->elements;
-        char phantoms_json[24 * 1024];
-        TEST(build_phantoms_json(bank, phantoms, 1, phantoms_json, sizeof(phantoms_json)));
-        // The document keeps its osc_sources table (zone 0 explicit,
-        // zone 1 edited to [] below); the legacy members ride beside it.
-        uint32_t len = Synth::encode_editor_bank_json(&bank, doc, sizeof(doc));
-        TEST(len > 0);
-        char member[24 * 1024];
-        snprintf(member, sizeof(member), "\"missing_sum\":[[0,2]],");
-        TEST(insert_after_editor_open(doc, len, sizeof(doc), member, &len));
-        snprintf(member, sizeof(member), "\"phantoms\":%s,", phantoms_json);
-        TEST(insert_after_editor_open(doc, len, sizeof(doc), member, &len));
-        {
-            const char* rows = strstr(doc, "\"osc_sources\":[");
-            TEST(rows != nullptr);
-            const char* z0 = strchr(rows + strlen("\"osc_sources\":") + 2, '[');
-            TEST(z0 != nullptr);
-            const char* z0_close = find_matching_bracket(z0);
-            TEST(z0_close != nullptr);
-            const char* z1 = strchr(z0_close + 1, '[');
-            TEST(z1 != nullptr);
-            const char* z1_close = find_matching_bracket(z1);
-            TEST(z1_close != nullptr);
-            const char* const explicit_row = "[1,2,0,0,0,0,0]";
-            TEST(static_cast<uint32_t>(z0_close - z0 + 1) == strlen(explicit_row));
-            memcpy(const_cast<char*>(z0), explicit_row, strlen(explicit_row));
-            const uint32_t z1_at  = static_cast<uint32_t>(z1 - doc);
-            const uint32_t z1_len = static_cast<uint32_t>(z1_close - z1 + 1);
-            memmove(doc + z1_at + 2, doc + z1_at + z1_len, len - (z1_at + z1_len) + 1);
-            memcpy(doc + z1_at, "[]", 2);
-            len -= z1_len - 2;
-        }
-        const std::unique_ptr<Synth::InstrumentEditorBank> decoded_storage =
-            std::make_unique<Synth::InstrumentEditorBank>();
-        Synth::InstrumentEditorBank& decoded = *decoded_storage;
-        TEST(Synth::decode_editor_bank_json(doc, len, &decoded));
-        // Zone 0 keeps its explicit row and the instrument stays A/B:
-        // the legacy zone's phantom body never enters the shared slot.
-        const Synth::Instrument& loaded = decoded.bank.instruments.entries[0];
-        TEST(loaded.layer_count == 2);
-        TEST(memcmp(&loaded.layers[0], &body_a, sizeof(Synth::Oscillator)) == 0);
-        TEST(memcmp(&loaded.layers[1], &body_b, sizeof(Synth::Oscillator)) == 0);
-        TEST(decoded.graph_osc_source[0][0][0] == 1);
-        TEST(decoded.graph_osc_source[0][0][1] == 2);
-        TEST(decoded.graph_osc_source[0][0][2] == 0);
-        // Zone 1 derives its own row from its mask; the marked row
-        // stays unwired and rows beyond the shared layer_count clear.
-        TEST(decoded.graph_osc_source[0][1][0] == 1);
-        TEST(decoded.graph_osc_source[0][1][1] == 0);
-        TEST(decoded.graph_osc_source[0][1][2] == 0);
-    }
-
-    // Fixture 7: duplicate legacy phantom entries keep the last one
-    // (last-entry-wins, the decode policy for repeated keys).
-    {
-        const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage =
-            std::make_unique<Synth::InstrumentEditorBank>();
-        Synth::InstrumentEditorBank& bank       = *bank_storage;
-        Synth::Instrument            instrument = {};
-        build_binding_fixture(&bank, &instrument);
-        Sculptor::set_identity_osc_sources(&bank, 0, 0);
-        Synth::Instrument compiled            = {};
-        compiled.layer_count                  = 2;
-        compiled.layers[0]                    = instrument.layers[0];
-        compiled.layers[1]                    = instrument.layers[2];
-        compiled.note_skew_semitones          = instrument.note_skew_semitones;
-        bank.bank.instruments.entries[0]      = compiled;
-        Synth::Oscillator first_body          = compiled.layers[1];
-        first_body.osc_type[0]                = Synth::WaveType::pulse_wave;
-        Synth::Oscillator last_body           = compiled.layers[1];
-        last_body.osc_type[0]                 = Synth::WaveType::noise_wave;
-        const LegacyPhantomFixture phantoms[] = { { 0, 0, 1, first_body }, { 0, 0, 1, last_body } };
-        const std::unique_ptr<FixedArray<char, 128 * 1024>> doc_storage =
-            std::make_unique<FixedArray<char, 128 * 1024>>();
-        char (&doc)[128 * 1024] = doc_storage->elements;
-        uint32_t len            = 0;
-        char     phantoms_json[24 * 1024];
-        TEST(build_phantoms_json(bank, phantoms, 2, phantoms_json, sizeof(phantoms_json)));
-        TEST(build_legacy_bank_doc(bank, "[[2]]", phantoms_json, doc, sizeof(doc), &len));
-        const std::unique_ptr<Synth::InstrumentEditorBank> decoded_storage =
-            std::make_unique<Synth::InstrumentEditorBank>();
-        Synth::InstrumentEditorBank& decoded = *decoded_storage;
-        TEST(Synth::decode_editor_bank_json(doc, len, &decoded));
-        const Synth::Instrument& loaded = decoded.bank.instruments.entries[0];
-        TEST(loaded.layer_count == 3);
-        TEST(memcmp(&loaded.layers[1], &last_body, sizeof(Synth::Oscillator)) == 0);
-        TEST(decoded.graph_osc_source[0][0][1] == 0);
-    }
-
-    // Fixture 8: an explicit all-zero row wins over contradictory nonzero
-    // legacy wiring.  The zone's osc_sources row is all zeros (nothing
-    // wired) while missing_sum marks layer 1 and the phantom store
-    // carries a body for it: the legacy fields are ignored entirely -
-    // the stored instrument keeps its two layers and the row stays zero.
-    // Both key orders are exercised.
-    {
-        const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage =
-            std::make_unique<Synth::InstrumentEditorBank>();
-        Synth::InstrumentEditorBank& bank       = *bank_storage;
-        Synth::Instrument            instrument = {};
-        build_binding_fixture(&bank, &instrument);
-        // The bank's row stays all zero: the encoder writes the explicit
-        // zero row and no set_identity call runs.
-        Synth::Instrument compiled                                     = {};
-        compiled.layer_count                                           = 2;
-        compiled.layers[0]                                             = instrument.layers[0];
-        compiled.layers[1]                                             = instrument.layers[2];
-        compiled.note_skew_semitones                                   = instrument.note_skew_semitones;
-        bank.bank.instruments.entries[0]                               = compiled;
-        Synth::Oscillator phantom_body                                 = compiled.layers[1];
-        phantom_body.osc_type[0]                                       = Synth::WaveType::pulse_wave;
-        const LegacyPhantomFixture                          phantoms[] = { { 0, 0, 1, phantom_body } };
-        const std::unique_ptr<FixedArray<char, 128 * 1024>> doc_storage =
-            std::make_unique<FixedArray<char, 128 * 1024>>();
-        char (&doc)[128 * 1024] = doc_storage->elements;
-        const std::unique_ptr<FixedArray<char, 128 * 1024>> pristine_storage =
-            std::make_unique<FixedArray<char, 128 * 1024>>();
-        char (&pristine)[128 * 1024] = pristine_storage->elements;
-        char phantoms_json[24 * 1024];
-        TEST(build_phantoms_json(bank, phantoms, 1, phantoms_json, sizeof(phantoms_json)));
-        uint32_t len = Synth::encode_editor_bank_json(&bank, doc, sizeof(doc));
-        TEST(len > 0);
-        TEST(strstr(doc, "\"osc_sources\":[[[0,0,0,0,0,0,0]") != nullptr);
-        memcpy(pristine, doc, len + 1);
-        for (uint32_t variant = 0; variant < 2; ++variant) {
-            memcpy(doc, pristine, strlen(pristine) + 1);
-            len = static_cast<uint32_t>(strlen(doc));
-            char member[24 * 1024];
-            if (variant == 0) {
-                // The legacy keys precede the explicit zero row.
-                snprintf(member, sizeof(member), "\"missing_sum\":[[2]],\"phantoms\":%s,", phantoms_json);
-                TEST(insert_after_editor_open(doc, len, sizeof(doc), member, &len));
-            }
-            else {
-                // The legacy keys follow the explicit zero row: inserted
-                // inside the editor object, right after the osc_sources
-                // value's closing bracket (the editor section's last
-                // member), carrying the leading comma itself.
-                snprintf(member, sizeof(member), ",\"missing_sum\":[[2]],\"phantoms\":%s", phantoms_json);
-                const char* key = strstr(doc, "\"osc_sources\":");
-                TEST(key != nullptr);
-                const char* value = strchr(key + 1, '[');
-                TEST(value != nullptr);
-                const char* close = find_matching_bracket(value);
-                TEST(close != nullptr);
-                const uint32_t at = static_cast<uint32_t>(close - doc) + 1;
-                const uint32_t t  = static_cast<uint32_t>(strlen(member));
-                TEST(len + t + 1 < sizeof(doc));
-                memmove(doc + at + t, doc + at, len - at + 1);
-                memcpy(doc + at, member, t);
-                len += t;
-            }
-            const std::unique_ptr<Synth::InstrumentEditorBank> decoded_storage =
-                std::make_unique<Synth::InstrumentEditorBank>();
-            Synth::InstrumentEditorBank& decoded = *decoded_storage;
-            TEST(Synth::decode_editor_bank_json(doc, len, &decoded));
-            // The explicit zero row wins: no legacy conversion ran.
-            TEST(decoded.graph_osc_source[0][0][0] == 0);
-            TEST(decoded.graph_osc_source[0][0][1] == 0);
-            TEST(decoded.graph_osc_source[0][0][2] == 0);
-            // The instrument was not rebuilt: no phantom shell, no body.
-            const Synth::Instrument& loaded = decoded.bank.instruments.entries[0];
-            TEST(loaded.layer_count == 2);
-            TEST(memcmp(&loaded.layers[0], &compiled.layers[0], sizeof(Synth::Oscillator)) == 0);
-            TEST(memcmp(&loaded.layers[1], &compiled.layers[1], sizeof(Synth::Oscillator)) == 0);
-        }
-    }
 }
 
 static void check_osc_undo_source_rows()
@@ -4315,6 +3517,162 @@ static void check_identical_envelopes_library_round_trips()
                     env.min_value + env.points[point].value * env.min_max_delta,
                     0.01f));
     }
+    remove(path);
+}
+
+// Regression: a channel whose envelope and LFO pool ids no longer coincide
+// with the decoded document's positions (fragmented pool allocation, dummies
+// allocated first) must still save to the library.  The save path's id maps are
+// keyed by source pool id while the decoded layout records index descriptors by
+// document position, so both the kind-1 (envelope) and kind-2 (LFO) remaps must
+// translate through the document's ids instead of missing and refusing the save.
+static void check_fragmented_pool_ids_library_round_trips()
+{
+    const std::unique_ptr<Synth::InstrumentEditorBank> source_storage = std::make_unique<Synth::InstrumentEditorBank>();
+    Synth::InstrumentEditorBank&                       source         = *source_storage;
+    const std::unique_ptr<Synth::InstrumentEditorBank> destination_storage =
+        std::make_unique<Synth::InstrumentEditorBank>();
+    Synth::InstrumentEditorBank& destination = *destination_storage;
+
+    memset(static_cast<void*>(&source), 0, sizeof(source));
+    source.bank.channel_enabled[0] = 1;
+
+    // Push the real descriptors' pool ids high: the channel never references
+    // the dummy slots, so the kept envelopes land at ids 4 and 5 and the LFO
+    // at id 3 while every document position starts at 1.
+    for (uint32_t i = 0; i < 3; ++i) {
+        const uint32_t slot = source.bank.envelopes.allocate();
+        TEST(slot != pool_no_slot);
+        source.bank.envelopes.entries[slot].num_points = 1;
+    }
+    for (uint32_t i = 0; i < 2; ++i) {
+        const uint32_t slot = source.bank.lfos.allocate();
+        TEST(slot != pool_no_slot);
+        source.bank.lfos.entries[slot].wave      = Synth::WaveType::sine_wave;
+        source.bank.lfos.entries[slot].period_ms = 300;
+    }
+
+    Synth::EnvelopeDescriptor env = {};
+    env.num_points                = 2;
+    env.sustain_first_point       = 1;
+    env.sustain_last_point        = 1;
+    env.min_value                 = -1.0f;
+    env.min_max_delta             = 2.0f;
+    env.points[0].position        = 0;
+    env.points[0].value           = 0;
+    env.points[1].position        = 100;
+    env.points[1].value           = 0x8000;
+
+    const uint32_t first_env = source.bank.envelopes.allocate();
+    TEST(first_env == 3); // id 4
+    source.bank.envelopes.entries[first_env]          = env;
+    const Synth::EnvelopeDescriptor first_env_content = source.bank.envelopes.entries[first_env];
+
+    env.points[1].value = 0x4000;
+
+    const uint32_t second_env = source.bank.envelopes.allocate();
+    TEST(second_env == 4); // id 5
+    source.bank.envelopes.entries[second_env]          = env;
+    const Synth::EnvelopeDescriptor second_env_content = source.bank.envelopes.entries[second_env];
+
+    const uint32_t lfo_slot = source.bank.lfos.allocate();
+    TEST(lfo_slot == 2); // id 3
+    source.bank.lfos.entries[lfo_slot].wave          = Synth::WaveType::sine_wave;
+    source.bank.lfos.entries[lfo_slot].period_ms     = 300;
+    source.bank.lfos.entries[lfo_slot].min_value     = -1.0f;
+    source.bank.lfos.entries[lfo_slot].min_max_delta = 2.0f;
+
+    // Two zones with two instruments: each zone's volume target carries its
+    // own envelope plus the shared LFO, and one detached record per generator
+    // rides along so the save must remap both kind-1 and kind-2 records.
+    Synth::Instrument instrument                                     = {};
+    instrument.layer_count                                           = 1;
+    instrument.layers[0].osc_type[0]                                 = Synth::WaveType::sawtooth_wave;
+    instrument.layers[0].targets[Synth::mod_volume].envelope_desc_id = 4;
+    instrument.layers[0].targets[Synth::mod_volume].lfo_desc_id      = 3;
+
+    for (uint32_t zone = 0; zone < 2; ++zone) {
+
+        const uint32_t slot = source.bank.instruments.allocate();
+        TEST(slot != pool_no_slot);
+
+        instrument.layers[0].targets[Synth::mod_volume].envelope_desc_id = static_cast<uint16_t>(4 + zone);
+        source.bank.instruments.entries[slot]                            = instrument;
+        source.bank.channel_zones[0][zone].start_note                    = static_cast<uint8_t>(zone ? 60 : 1);
+        source.bank.channel_zones[0][zone].instrument                    = static_cast<uint8_t>(slot);
+        Sculptor::set_identity_osc_sources(&source, 0, zone);
+        strcpy(source.instrument_names[slot], zone ? "Fragmented B" : "Fragmented A");
+
+        add_detached_record(&source,
+                            0,
+                            zone,
+                            1,
+                            4 + zone,
+                            44.0f + 10.0f * static_cast<float>(zone),
+                            55.0f,
+                            Synth::ModSource::none,
+                            Synth::ModSource::none,
+                            1);
+        add_detached_record(&source,
+                            0,
+                            zone,
+                            2,
+                            3,
+                            66.0f + 10.0f * static_cast<float>(zone),
+                            77.0f,
+                            Synth::ModSource::none,
+                            Synth::ModSource::none,
+                            1);
+    }
+
+    strcpy(source.channel_names[0], "Fragmented");
+    TEST(Synth::validate_instrument_bank(&source.bank));
+    TEST(Sculptor::validate_editor_metadata(source));
+
+    const char* const path = "synth_fragmented_pool_roundtrip.tmp";
+    remove(path);
+    TEST(Synth::save_library_record(path, "Regression", "Fragmented", &source, 0) == 0);
+
+    Synth::LibraryEntry entry;
+    TEST(Synth::read_library_index(path, &entry, 1) == 1);
+    uint16_t load_slot = 0xBEEF;
+    TEST(Synth::load_library_instrument(path, &entry, &destination, 2, &load_slot));
+
+    // The dummies never travel: the record holds one envelope per zone and
+    // the one shared LFO, installed densely in the destination.
+    TEST(destination.bank.envelopes.num_allocated == 2);
+    TEST(destination.bank.lfos.num_allocated == 1);
+    TEST(destination.bank.instruments.num_allocated == 2);
+
+    for (uint32_t zone = 0; zone < 2; ++zone) {
+
+        const uint8_t               instr = destination.bank.channel_zones[2][zone].instrument;
+        const Synth::TargetBinding& gen =
+            destination.bank.instruments.entries[instr].layers[0].targets[Synth::mod_volume];
+
+        TEST(gen.envelope_desc_id == zone + 1);
+        TEST(gen.lfo_desc_id == 1);
+
+        // The detached records survive with positions remapped to the dense
+        // destination pool: one kind-1 record at the zone's envelope and one
+        // kind-2 record at the shared LFO.
+        TEST(count_records_matching(destination, 2, zone, 1, zone + 1) == 1);
+        TEST(count_records_matching(destination, 2, zone, 2, 1) == 1);
+
+        const Synth::EnvelopeDescriptor& loaded_env = destination.bank.envelopes.entries[gen.envelope_desc_id - 1];
+        const Synth::EnvelopeDescriptor& src_env    = zone ? second_env_content : first_env_content;
+        TEST(loaded_env.num_points == 2);
+        TEST(loaded_env.sustain_first_point == 1 && loaded_env.sustain_last_point == 1);
+        // The second point's level survives the document round trip, and the
+        // two zones' envelopes stay distinct instead of merging.
+        const float loaded_level = loaded_env.min_value + loaded_env.points[1].value * loaded_env.min_max_delta;
+        TEST(approx(loaded_level, src_env.min_value + src_env.points[1].value * src_env.min_max_delta, 0.01f));
+        const Synth::EnvelopeDescriptor& other_env = destination.bank.envelopes.entries[2 - gen.envelope_desc_id];
+        const float other_level = other_env.min_value + other_env.points[1].value * other_env.min_max_delta;
+        TEST(! approx(loaded_level, other_level, 0.01f));
+        TEST(destination.bank.lfos.entries[gen.lfo_desc_id - 1].period_ms == 300);
+    }
+
     remove(path);
 }
 
@@ -7116,8 +6474,7 @@ static void effects_clipboard_regressions()
             TEST(ratio_clip_decoded.instr.layers[0].targets[Synth::mod_fm_ratio].lfo_desc_id == ratio_lfo_id);
             TEST(ratio_clip_decoded.instr.layers[0].targets[Synth::mod_fm_ratio].lfo_depth == 0.5f);
             // Legacy backfill, bank codec: a layer that only states the
-            // scalar ratio decodes with the fm_ratio base seeded from it,
-            // and the phantom-shell decode path backfills the same way.
+            // scalar ratio decodes with the fm_ratio base seeded from it.
             {
                 // Hand-written legacy payloads state no fm_ratio routing at all, so
                 // the decode genuinely takes the backfill branch (the encoder always
@@ -7131,31 +6488,19 @@ static void effects_clipboard_regressions()
                     std::make_unique<Synth::InstrumentEditorBank>();
                 Synth::InstrumentEditorBank& legacy_decoded = *legacy_decoded_storage;
                 memset(static_cast<void*>(&legacy_decoded), 0, sizeof(legacy_decoded));
+                // Absent source row: the document carries no osc_sources, so
+                // the decode replaces a pre-filled destination row with an
+                // all-zero row.
+                for (uint32_t slot = 0; slot < Synth::max_layers; ++slot) {
+                    legacy_decoded.graph_osc_source[3][0][slot] = static_cast<uint8_t>(slot + 1);
+                }
                 TEST(Synth::decode_editor_bank_json(legacy_doc, legacy_len, &legacy_decoded));
                 const Synth::Oscillator& legacy_back = legacy_decoded.bank.instruments.entries[0].layers[0];
                 TEST(legacy_back.mod_ratio == 2.0f);
                 TEST(legacy_back.targets[Synth::mod_fm_ratio].base_value == 2.0f);
-                const char* const phantom_doc =
-                    "{\"instrument_editor_bank\":{\"instruments\":"
-                    "[{\"layer_count\":1,\"layers\":[{\"wave_a\":\"sine\","
-                    "\"mod_ratio\":2,\"routing\":{}}]}],"
-                    "\"channels\":[{\"zones\":[{\"start\":60,\"instrument\":0}]}],"
-                    "\"editor\":{\"missing_sum\":[[1]],"
-                    "\"phantoms\":[{\"channel\":0,\"zone\":0,\"layer\":0,"
-                    "\"oscillator\":{\"wave_a\":\"sine\",\"mod_ratio\":2,\"routing\":{}}}]}}}";
-                const uint32_t phantom_len = static_cast<uint32_t>(strlen(phantom_doc));
-                const std::unique_ptr<Synth::InstrumentEditorBank> phantom_decoded_storage =
-                    std::make_unique<Synth::InstrumentEditorBank>();
-                Synth::InstrumentEditorBank& phantom_decoded = *phantom_decoded_storage;
-                memset(static_cast<void*>(&phantom_decoded), 0, sizeof(phantom_decoded));
-                TEST(Synth::decode_editor_bank_json(phantom_doc, phantom_len, &phantom_decoded));
-                // The phantom-era row converts: the marked slot's store entry becomes the
-                // stored layer for slot 0, and the trailing slot unwires.
-                TEST(phantom_decoded.graph_osc_source[0][0][0] == 0);
-                TEST(phantom_decoded.graph_osc_source[0][0][1] == 2);
-                const Synth::Oscillator& phantom_layer = phantom_decoded.bank.instruments.entries[0].layers[0];
-                TEST(phantom_layer.mod_ratio == 2.0f);
-                TEST(phantom_layer.targets[Synth::mod_fm_ratio].base_value == 2.0f);
+                for (uint32_t slot = 0; slot < Synth::max_layers; ++slot) {
+                    TEST(legacy_decoded.graph_osc_source[3][0][slot] == 0);
+                }
             }
             // Legacy backfill, clipboard dialect: a hand-written layer
             // without an fm_ratio target decodes with the fm_ratio base
@@ -27516,6 +26861,7 @@ int main()
             check_new_zone_metadata_clone();
             check_zero_fm_clipboard_library_round_trips();
             check_identical_envelopes_library_round_trips();
+            check_fragmented_pool_ids_library_round_trips();
             check_library_metadata_transactions();
             check_editor_round_trip_capacity_failures();
             check_unrepresented_layout_refusal();
@@ -27545,7 +26891,6 @@ int main()
             check_osc_clipboard_preserves_unwired();
             check_osc_export_drops_unwired();
             check_osc_export_zero_wired_refused();
-            check_legacy_osc_conversion();
             check_osc_undo_source_rows();
 #endif
         }

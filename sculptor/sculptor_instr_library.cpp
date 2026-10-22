@@ -252,6 +252,15 @@ static bool transfer_zone_layout(const Synth::InstrumentEditorBank& source,
 {
     uint32_t env_count = 0, lfo_count = 0, count = 0;
 
+    // The decoded layout's records index descriptors by document position, but
+    // the caller's id maps are keyed by the source bank's pool id.  The decoder
+    // reports each position's document pool id, so translate the maps here: a
+    // bank whose envelope or LFO pool allocation is fragmented no longer has
+    // pool ids coinciding with document positions, and the untranslated lookup
+    // would miss (a zero map entry refuses the kind-1/2 remap in append).
+    uint16_t env_doc_ids[Synth::instrument_max_envelopes] = {};
+    uint16_t lfo_doc_ids[Synth::instrument_max_lfos]      = {};
+
     const uint32_t length = Sculptor::encode_editor_instrument_json(source,
                                                                     channel,
                                                                     zone,
@@ -269,8 +278,33 @@ static bool transfer_zone_layout(const Synth::InstrumentEditorBank& source,
                                                                library_transfer_layout,
                                                                Synth::instrument_graph_layout_capacity,
                                                                &count,
-                                                               Synth::InstrumentJsonDomain::validated_bank))
+                                                               Synth::InstrumentJsonDomain::validated_bank,
+                                                               nullptr,
+                                                               env_doc_ids,
+                                                               lfo_doc_ids))
         return false;
+
+    uint16_t env_pos_slots[Synth::max_envelopes] = {};
+    uint16_t lfo_pos_slots[Synth::max_lfos]      = {};
+
+    for (uint32_t position = 0; position < env_count; position++) {
+
+        const uint16_t doc_id = env_doc_ids[position];
+
+        // A bound keeps a corrupt document id from indexing past the map;
+        // a missed or legacy id-less position stays 0 and append refuses a
+        // record referencing it.
+        if (doc_id && doc_id <= Synth::max_envelopes)
+            env_pos_slots[position] = env_ids[doc_id - 1];
+    }
+
+    for (uint32_t position = 0; position < lfo_count; position++) {
+
+        const uint16_t doc_id = lfo_doc_ids[position];
+
+        if (doc_id && doc_id <= Synth::max_lfos)
+            lfo_pos_slots[position] = lfo_ids[doc_id - 1];
+    }
 
     // The decoded layout names the decoded document's playback-form
     // instrument -- exactly the form the destination zone stores (save
@@ -286,8 +320,8 @@ static bool transfer_zone_layout(const Synth::InstrumentEditorBank& source,
                                                     lfo_count,
                                                     library_transfer_layout,
                                                     count,
-                                                    env_ids,
-                                                    lfo_ids,
+                                                    env_pos_slots,
+                                                    lfo_pos_slots,
                                                     dst_channel,
                                                     zone,
                                                     candidate);
