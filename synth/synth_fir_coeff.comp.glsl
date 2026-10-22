@@ -57,7 +57,7 @@ void main()
     // Calculate sinc function and apply hamming window
     const float lowpass_norm_cutoff  = float(param.lowpass_cutoff_freq)  / float(sampling_freq);
     const float highpass_norm_cutoff = float(param.highpass_cutoff_freq) / float(sampling_freq);
-    const uint  center               = (num_taps - 1) / 2;
+    const uint  center               = (param.window_span - 1u) / 2u;
     const bool  passthrough          = param.lowpass_cutoff_freq == 0 && param.highpass_cutoff_freq == 0;
     const bool  bandpass             = param.highpass_cutoff_freq > 0 && param.highpass_cutoff_freq < param.lowpass_cutoff_freq;
     const float center_freq          = (float(param.highpass_cutoff_freq) + float(param.lowpass_cutoff_freq)) * 0.5;

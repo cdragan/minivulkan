@@ -12867,6 +12867,7 @@ static void check_fir_slope_helpers()
             TEST(Synth::fir_effective_span(row.percent) == row.span);
         }
     }
+
     // Monotonic non-decreasing over the integer sweep, every result odd.
     {
         uint32_t previous = 0;
@@ -12886,6 +12887,7 @@ static void check_fir_slope_helpers()
             previous = span;
         }
     }
+
     // Out-of-range clamps: 0, negatives and NaN read as the 1 percent
     // minimum; values above 100 (including +inf) read as the full span.
     {
@@ -12895,6 +12897,7 @@ static void check_fir_slope_helpers()
         TEST(Synth::fir_effective_span(101.0f) == Synth::num_fir_taps);
         TEST(Synth::fir_effective_span(INFINITY) == Synth::num_fir_taps);
     }
+
     // Byte-identity mirror: at the full span the span-parameterized window
     // reproduces the old fixed (num_taps - 1) spelling bit for bit, with
     // the same float association order.
@@ -12919,14 +12922,17 @@ static void check_fir_slope_helpers()
         }
         TEST(memcmp(old_windows, new_windows, sizeof(old_windows)) == 0);
     }
+
     // Narrow-span mirror at 103 taps (the span of FIR Slope 50 under the exponential law): taps outside the span are
     // exactly zero, in-span taps match an independent direct Blackman evaluation of a standalone 103-tap window, and
     // the in-span window sum stays positive.  The sum is only a window-sum sanity check; it says nothing about the
     // shader's normalization denominator.
     {
-        constexpr uint32_t taps                         = Synth::num_fir_taps;
-        constexpr uint32_t center                       = taps / 2;
-        constexpr uint32_t span                         = 103;
+        constexpr uint32_t taps = Synth::num_fir_taps;
+        constexpr uint32_t span = 103;
+        // The kernel centers at (span - 1) / 2 (C1.1); the direct window
+        // then starts at index center - span / 2 == 0.
+        constexpr uint32_t center                       = (span - 1) / 2;
         constexpr float    pi                           = 3.141592653589793f;
         const float        half_span                    = static_cast<float>(span) * 0.5f - 0.5f;
         const float        span_m1                      = static_cast<float>(span - 1);
@@ -12955,6 +12961,7 @@ static void check_fir_slope_helpers()
         }
         TEST(window_sum > 0.0f);
     }
+
     // Runtime source pins: exactly two window_span dispatch fills (the
     // oscillator loop and the effect chain walk), the trigger copy, the
     // RunningOscillator field, and no editor-facing "FIR Slope" string.
@@ -13259,10 +13266,12 @@ static void fir_test_mirror(uint32_t        lowpass_hz,
                             uint32_t        subgroup,
                             FirCoeffMirror* out)
 {
-    constexpr uint32_t taps   = Synth::num_fir_taps;
-    constexpr uint32_t center = (taps - 1) / 2;
-    constexpr float    pi     = 3.141592653589793f;
-    const float        fs     = static_cast<float>(Synth::rt_sampling_rate);
+    constexpr uint32_t taps = Synth::num_fir_taps;
+    // The mirrored shader centers the kernel at (window_span - 1) / 2, so the
+    // non-zero support lands in tap indices [0, span - 1] (C1.1).
+    const uint32_t  center = (span - 1) / 2;
+    constexpr float pi     = 3.141592653589793f;
+    const float     fs     = static_cast<float>(Synth::rt_sampling_rate);
 
     const float lowpass_norm  = static_cast<float>(lowpass_hz) / fs;
     const float highpass_norm = static_cast<float>(highpass_hz) / fs;
@@ -13368,6 +13377,33 @@ static double fir_test_unity_tolerance(uint32_t lowpass_hz, uint32_t highpass_hz
     return near_nyquist_narrow ? 1e-3 : 1e-4;
 }
 
+// Per-span kernel-shape assertions (C1.1) over the mirror coefficients
+// fir_test_mirror already computed: with the kernel centered at
+// (window_span - 1) / 2, the non-zero support lies in [0, window_span - 1],
+// every tail tap is exactly 0.0f, and the kernel is symmetric around the
+// center.
+static void fir_test_check_span_shape(const FirCoeffMirror& mirror, uint32_t span)
+{
+    constexpr uint32_t taps        = Synth::num_fir_taps;
+    const uint32_t     span_center = (span - 1) / 2;
+
+    for (uint32_t tap = 0; tap < taps; tap++) {
+        TEST(std::isfinite(mirror.coefficients[tap]));
+        if (tap >= span) {
+            TEST(mirror.coefficients[tap] == 0.0f);
+        }
+    }
+
+    for (uint32_t d = 0; d <= span_center; d++) {
+        const float left  = mirror.coefficients[span_center - d];
+        const float right = mirror.coefficients[span_center + d];
+        // Window-tap symmetry survives binary32 argument rounding only
+        // within a last-ulp slack; a wrong center breaks it by orders of
+        // magnitude.
+        TEST(fabs(left - right) <= 2e-6f * fmaxf(1.0f, fmaxf(fabsf(left), fabsf(right))));
+    }
+}
+
 // Host quantizer mirror of cutoff_hz_to_int in realtime_synth.cpp (the
 // production helper is pinned by a source check below).
 static uint32_t fir_test_quantize_cutoff(float value)
@@ -13391,7 +13427,6 @@ static uint32_t fir_test_quantize_cutoff(float value)
 static void check_fir_bandpass_gain()
 {
     constexpr uint32_t                    taps                        = Synth::num_fir_taps;
-    constexpr uint32_t                    center                      = (taps - 1) / 2;
     const std::unique_ptr<FirCoeffMirror> mirror_storage              = std::make_unique<FirCoeffMirror>();
     FirCoeffMirror&                       mirror                      = *mirror_storage;
     float                                 stored[Synth::num_fir_taps] = {};
@@ -13425,14 +13460,9 @@ static void check_fir_bandpass_gain()
             TEST(shape[0] / shape[1] <= shape[1]);
             for (const auto& spot : spots) {
                 fir_test_mirror(spot.lowpass_hz, spot.highpass_hz, spot.span, shape[0], shape[1], &mirror);
-                // Taps outside the span are exactly zero and every stored
-                // coefficient is finite.
-                for (uint32_t tap = 0; tap < taps; tap++) {
-                    TEST(std::isfinite(mirror.coefficients[tap]));
-                    if (tap < center - (spot.span - 1) / 2 || tap > center + (spot.span - 1) / 2) {
-                        TEST(mirror.coefficients[tap] == 0.0f);
-                    }
-                }
+                // Taps outside the span are exactly zero, the support lies
+                // in [0, span - 1], and every stored coefficient is finite.
+                fir_test_check_span_shape(mirror, spot.span);
                 const double magnitude =
                     fir_test_response(mirror.coefficients, static_cast<double>(mirror.center_freq));
                 TEST(std::isfinite(magnitude));
@@ -13445,8 +13475,9 @@ static void check_fir_bandpass_gain()
         }
     }
 
-    // Slope sweep over direct effect pairs: unity at the band center for every
-    // integer slope and for fractional effect slopes.
+    // Direct effect pairs: unity at the band center for every odd span the
+    // shader can produce and for fractional effect slopes.  The oscillator
+    // grid below covers the slope-to-span mapping.
     {
         static const struct {
             uint32_t lowpass_hz;
@@ -13455,9 +13486,9 @@ static void check_fir_bandpass_gain()
 
         float fractional_slopes[] = { 1.5f, 37.25f };
         for (const auto& pair : pairs) {
-            for (uint32_t slope = 1; slope <= 100; slope++) {
-                const uint32_t span = Synth::fir_effective_span(static_cast<float>(slope));
+            for (uint32_t span = 11; span <= taps; span += 2) {
                 fir_test_mirror(pair.lowpass_hz, pair.highpass_hz, span, 256, 32, &mirror);
+                fir_test_check_span_shape(mirror, span);
                 const double magnitude =
                     fir_test_stored_response(mirror, static_cast<double>(mirror.center_freq), stored);
                 TEST(fabs(magnitude - 1.0) <= fir_test_unity_tolerance(pair.lowpass_hz, pair.highpass_hz));
@@ -13465,6 +13496,7 @@ static void check_fir_bandpass_gain()
             for (const float slope : fractional_slopes) {
                 const uint32_t span = Synth::fir_effective_span(slope);
                 fir_test_mirror(pair.lowpass_hz, pair.highpass_hz, span, 256, 32, &mirror);
+                fir_test_check_span_shape(mirror, span);
                 const double magnitude =
                     fir_test_stored_response(mirror, static_cast<double>(mirror.center_freq), stored);
                 TEST(fabs(magnitude - 1.0) <= fir_test_unity_tolerance(pair.lowpass_hz, pair.highpass_hz));
@@ -13481,9 +13513,11 @@ static void check_fir_bandpass_gain()
         TEST(highpass_edge == 0.0f);
         const uint32_t lowpass = fir_test_quantize_cutoff(lowpass_edge);
         TEST(lowpass > 0);
-        uint32_t spans[] = { 11, taps };
-        for (const uint32_t span : spans) {
+        // Low-pass DC gain at unity for every odd span the shader can
+        // produce, with the kernel shape asserted per span.
+        for (uint32_t span = 11; span <= taps; span += 2) {
             fir_test_mirror(lowpass, 0, span, 256, 32, &mirror);
+            fir_test_check_span_shape(mirror, span);
             const double dc = fir_test_stored_response(mirror, 0.0, stored);
             TEST(fabs(dc - 1.0) <= 1e-4);
         }
@@ -13516,12 +13550,14 @@ static void check_fir_bandpass_gain()
                         const uint32_t span = Synth::fir_effective_span(static_cast<float>(slope));
                         if (highpass == 0) {
                             fir_test_mirror(lowpass, 0, span, 256, 32, &mirror);
+                            fir_test_check_span_shape(mirror, span);
                             const double dc = fir_test_stored_response(mirror, 0.0, stored);
                             TEST(fabs(dc - 1.0) <= 1e-4);
                             continue;
                         }
                         TEST(highpass < lowpass);
                         fir_test_mirror(lowpass, highpass, span, 256, 32, &mirror);
+                        fir_test_check_span_shape(mirror, span);
                         const double magnitude =
                             fir_test_stored_response(mirror, static_cast<double>(mirror.center_freq), stored);
                         TEST(fabs(magnitude - 1.0) <= fir_test_unity_tolerance(lowpass, highpass));
@@ -13537,13 +13573,14 @@ static void check_fir_bandpass_gain()
     // and band-stop cases fail the pinned band-pass predicate, so they stay on
     // the old paths by construction.
     {
-        uint32_t spans[] = { 11, taps };
-        for (const uint32_t span : spans) {
+        for (uint32_t span = 11; span <= taps; span += 2) {
             fir_test_mirror(880, 0, span, 256, 32, &mirror);
+            fir_test_check_span_shape(mirror, span);
             const double dc = fir_test_stored_response(mirror, 0.0, stored);
             TEST(fabs(dc - 1.0) <= 1e-4);
 
             fir_test_mirror(0, 880, span, 256, 32, &mirror);
+            fir_test_check_span_shape(mirror, span);
             const float half_span     = static_cast<float>(span) * 0.5f - 0.5f;
             const float span_m1       = static_cast<float>(span - 1);
             const float center_window = 0.42f - 0.5f * cosf((2.0f * pi * half_span) / span_m1) +
@@ -13613,6 +13650,9 @@ static void check_fir_bandpass_gain()
             TEST(strstr(shader_src, "if (param.highpass_cutoff_freq > 0)") != nullptr);
             TEST(strstr(shader_src, "param.highpass_cutoff_freq == 0") != nullptr);
             TEST(strstr(shader_src, "norm_sum[0] = coeff_sum;") != nullptr);
+            // C1.1: the kernel center comes from the window span, so the
+            // non-zero support lies in [0, window_span - 1].
+            TEST(strstr(shader_src, "param.window_span - 1u) / 2u") != nullptr);
         }
 
         const std::unique_ptr<FixedArray<char, 256 * 1024>> runtime_src_storage =
@@ -13628,6 +13668,132 @@ static void check_fir_bandpass_gain()
             TEST(strstr(runtime_src, "static uint32_t cutoff_hz_to_int(float value)") != nullptr);
         }
     }
+}
+
+// Host mirror of the from-silence volume ramp in
+// synth_chan_combine.comp.glsl (C1.3): the 32-sample attack (step =
+// (x + 1) / volume_adjustment_samples) when the previous volume gain is
+// zero, the full-step interpolation for mid-note transitions, the
+// 5th-order fade-out to zero, zero-to-zero and consecutive-step cases,
+// and continuity across step boundaries.  Also pins the shipped shader's
+// constant, gating predicate and ramp formula alongside the full-step,
+// fade-out and panning expressions.
+static void check_chan_combine_volume_ramp()
+{
+    constexpr uint32_t work_group_size           = 256; // rt_step_samples (spec constant id 0)
+    constexpr uint32_t volume_adjustment_samples = 32;  // spec constant id 3
+    const float        target                    = 0.8f;
+
+    // GLSL mix in the spec's spelling, exact at a = 0 and a = 1.
+    const auto mixf = [](float x, float y, float a) { return x * (1.0f - a) + y * a; };
+    // The full-step variable.
+    const auto full_step = [](uint32_t x) { return static_cast<float>(x) / static_cast<float>(work_group_size - 1u); };
+    // The 5th-order fade-out.
+    const auto fade_out = [](float step) { return step * step * step * (step * (step * 6.0f - 15.0f) + 10.0f); };
+    // The from-silence branch: the 32-sample attack, then hold.
+    const auto attack_fade = [](uint32_t x) {
+        return x < volume_adjustment_samples
+                   ? (static_cast<float>(x) + 1.0f) / static_cast<float>(volume_adjustment_samples)
+                   : 1.0f;
+    };
+
+    // From silence (note-on): sample 0 plays 1/32 of the target (the
+    // historical step = (x + 1) / 32 formula), the target is reached
+    // exactly at sample 31 and held through sample 255.
+    {
+        const float old_volume = 0.0f;
+        for (uint32_t x = 0; x < work_group_size; x++) {
+            const float multiplier = mixf(old_volume, target, attack_fade(x));
+            if (x == 0) {
+                TEST(multiplier == target * (1.0f / static_cast<float>(volume_adjustment_samples)));
+            }
+            else if (x < volume_adjustment_samples - 1) {
+                TEST(multiplier < target);
+            }
+            else {
+                TEST(multiplier == target);
+            }
+            TEST(multiplier > 0.0f && multiplier <= target);
+        }
+    }
+
+    // Zero to zero (silence restarted): the else branch multiplies a
+    // zero-valued interpolation, so the whole step stays at exact zero.
+    for (uint32_t x = 0; x < work_group_size; x++) {
+        TEST(mixf(0.0f, 0.0f, fade_out(full_step(x))) == 0.0f);
+    }
+
+    // Mid-note nonzero -> nonzero: the full-step interpolation.
+    // Endpoints are exact; the interior stays strictly between them.
+    {
+        const float old_volume = 0.5f;
+        for (uint32_t x = 0; x < work_group_size; x++) {
+            const float multiplier = mixf(old_volume, target, full_step(x));
+            if (x == 0) {
+                TEST(multiplier == old_volume);
+            }
+            else if (x == work_group_size - 1) {
+                TEST(multiplier == target);
+            }
+            else {
+                TEST(multiplier > old_volume && multiplier < target);
+            }
+        }
+    }
+
+    // Fade-out to zero: the 5th-order polynomial, non-increasing
+    // across the step, exact endpoints.
+    {
+        float previous = 2.0f;
+        for (uint32_t x = 0; x < work_group_size; x++) {
+            const float multiplier = mixf(target, 0.0f, fade_out(full_step(x)));
+            if (x == 0) {
+                TEST(multiplier == target);
+            }
+            else if (x == work_group_size - 1) {
+                TEST(multiplier == 0.0f);
+            }
+            TEST(multiplier <= previous);
+            previous = multiplier;
+        }
+    }
+
+    // Consecutive steps: the attack step ends at the target; the next step
+    // holds the target when the volume is unchanged; a mid-note change
+    // starts exactly at the previous step's end value; the change ends at
+    // its own target and the following held step stays there.
+    {
+        TEST(mixf(0.0f, target, attack_fade(work_group_size - 1)) == target);
+        // A degenerate mix(v, v, a) may wobble by a last ulp in binary32,
+        // so the held steps assert continuity within an ulp-scale slack.
+        for (uint32_t x = 0; x < work_group_size; x++) {
+            TEST(fabs(mixf(target, target, full_step(x)) - target) <= 1e-6f); // held note
+        }
+        const float next_target = 0.4f;
+        TEST(mixf(target, next_target, full_step(0)) == target);
+        TEST(mixf(target, next_target, full_step(work_group_size - 1)) == next_target);
+        for (uint32_t x = 0; x < work_group_size; x++) {
+            TEST(fabs(mixf(next_target, next_target, full_step(x)) - next_target) <= 1e-6f);
+        }
+    }
+
+    // Production source pins: the from-silence constant, gating predicate,
+    // attack guard and ramp formula, and the full-step, fade-out and
+    // panning expressions.
+    const char* const shader_src = load_source_file("synth/synth_chan_combine.comp.glsl");
+    TEST(shader_src != nullptr);
+    if (! shader_src) {
+        return;
+    }
+    TEST(strstr(shader_src, "layout(constant_id = 3) const uint volume_adjustment_samples = 32;") != nullptr);
+    TEST(strstr(shader_src, "input_param.old_volume == 0.0") != nullptr);
+    TEST(strstr(shader_src, "input_param.volume != 0.0") != nullptr);
+    TEST(strstr(shader_src, "gl_LocalInvocationID.x < volume_adjustment_samples") != nullptr);
+    TEST(strstr(shader_src, "float(gl_LocalInvocationID.x + 1) / float(volume_adjustment_samples)") != nullptr);
+    TEST(strstr(shader_src, "const float step = float(gl_LocalInvocationID.x) / float(work_group_size - 1u);") !=
+         nullptr);
+    TEST(strstr(shader_src, "step * step * step * (step * (step * 6.0 - 15.0) + 10.0)") != nullptr);
+    TEST(strstr(shader_src, "mix(input_param.old_panning, input_param.panning, step)") != nullptr);
 }
 
 // FIR pitch spread helpers: the band-pass edge composition, the sub-1-Hz
@@ -15529,6 +15695,7 @@ int main()
     fir_coeff_cache_action_regressions();
     osc_fir_slope_projection_regressions();
     check_fir_bandpass_gain();
+    check_chan_combine_volume_ramp();
 
     // pitch bend -> semitones: centered 14-bit value scaled by the bend range.
     // center (0) -> no bend; full deflection -> +/- range; half -> ~half range.

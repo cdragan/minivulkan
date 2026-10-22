@@ -7,6 +7,9 @@ layout(local_size_x_id = 0) in;
 
 layout(constant_id = 0) const uint work_group_size = 1;
 
+// Smooth volume adjustment to avoid glitches
+layout(constant_id = 3) const uint volume_adjustment_samples = 32;
+
 struct InputParams {
     uint  in_sound_offs;
     float old_volume;
@@ -43,10 +46,19 @@ void main()
         // Calculate multipliers with smooth adjustment
         const float step = float(gl_LocalInvocationID.x) / float(work_group_size - 1u);
 
-        // Ease volume ramp down to 0 to avoid audible clicks
-        const float fade = input_param.volume == 0.0
-            ? step * step * step * (step * (step * 6.0 - 15.0) + 10.0)
-            : step;
+        float fade;
+        if (input_param.old_volume == 0.0 && input_param.volume != 0.0) {
+            fade = gl_LocalInvocationID.x < volume_adjustment_samples
+                ? float(gl_LocalInvocationID.x + 1) / float(volume_adjustment_samples)
+                : 1.0;
+        }
+        else {
+            // Zero target: ease the volume ramp down to 0 to avoid audible
+            // clicks; the other arm keeps the full-step interpolation.
+            fade = input_param.volume == 0.0
+                ? step * step * step * (step * (step * 6.0 - 15.0) + 10.0)
+                : step;
+        }
 
         const float multiplier = mix(input_param.old_volume,  input_param.volume,  fade);
         const float panning    = mix(input_param.old_panning, input_param.panning, step);
