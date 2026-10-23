@@ -964,10 +964,16 @@ bool Sculptor::validate_editor_metadata(const Synth::InstrumentEditorBank& bank)
             const Synth::GraphNodeLayout& record     = bank.graph_layout[index];
             uint16_t                      descriptor = 0;
             if (record.kind == 4 && record.channel == owner && parse_effect_lfo_title(record.name, &descriptor)) {
-                if (! descriptor || descriptor > bank.bank.lfos.num_allocated) {
-                    return false;
+                // "LFO 0" residue parses with a zero descriptor that pins
+                // nothing: ignored, not refused.  A nonzero descriptor must
+                // name a live LFO.
+                if (descriptor) {
+                    if (descriptor > bank.bank.lfos.num_allocated) {
+                        return false;
+                    }
+
+                    represented[descriptor - 1] = true;
                 }
-                represented[descriptor - 1] = true;
             }
         }
 
@@ -990,8 +996,8 @@ bool Sculptor::validate_editor_metadata(const Synth::InstrumentEditorBank& bank)
         // ("Delay", "LFO 3", "Channel input"), and the master chain (chain
         // index max_channels) keeps its own records.
         if (record.kind == 4) {
-            if (record.channel > Synth::max_channels || record.zone != 0 || record.index != 0 || record.uid != 0 ||
-                record.depth_source != 0 || record.rate_source != 0 || record.name[0] == 0) {
+            if (record.zone != 0 || record.index != 0 || record.uid != 0 || record.name[0] == 0 ||
+                ! memchr(record.name, 0, sizeof(record.name))) {
                 return false;
             }
         }
@@ -1000,12 +1006,6 @@ bool Sculptor::validate_editor_metadata(const Synth::InstrumentEditorBank& bank)
         // alias the derived (record-less) projection state.  Kind 5 is a
         // bound-node analog and carries uid 0 by definition.
         if (record.kind != 0 && record.kind != 4 && record.kind != 5 && record.uid == 0) {
-            return false;
-        }
-
-        // Bound and generator records carry no title override: a kind-4 record
-        // keys by name, everything else keys by index.
-        if (record.kind != 4 && record.name[0] != 0) {
             return false;
         }
 
@@ -1020,10 +1020,9 @@ bool Sculptor::validate_editor_metadata(const Synth::InstrumentEditorBank& bank)
             }
         }
         else if (record.kind == 5) {
-            // The Instrument Parameters node's record keys the zone alone;
-            // index and uid are unused and must stay 0, and the LFO
-            // wiring-source fields are reserved for kinds 1/2.
-            if (record.index != 0 || record.uid != 0 || record.depth_source != 0 || record.rate_source != 0) {
+            // The Instrument Parameters node's record keys the zone alone:
+            // index and uid are unused and must stay 0.
+            if (record.index != 0 || record.uid != 0) {
                 return false;
             }
         }
@@ -1070,9 +1069,10 @@ bool Sculptor::validate_editor_metadata(const Synth::InstrumentEditorBank& bank)
             }
 
             // Per-zone source-row checks: every value names a layer of the
-            // referenced instrument (1-based ordinal), and nonzero values
-            // are unique per row (one wire per oscillator).  There is no
-            // cross-zone equality rule.
+            // referenced instrument (1-based ordinal).  A repeated value is
+            // accepted: the compile copies the referenced layer into every
+            // wired slot in slot order, so duplicates stay deterministic.
+            // There is no cross-zone equality rule.
             const Synth::Zone& zone_entry = bank.bank.channel_zones[channel][zone];
             uint32_t           layers     = 0;
             if (zone_entry.start_note != 0 && zone_entry.instrument < bank.bank.instruments.num_allocated) {
@@ -1080,19 +1080,11 @@ bool Sculptor::validate_editor_metadata(const Synth::InstrumentEditorBank& bank)
                 layers = instrument.layer_count <= Synth::max_layers ? instrument.layer_count : Synth::max_layers;
             }
 
-            bool seen_nonzero[Synth::max_layers] = {};
             for (uint32_t slot = 0; slot < Synth::max_layers; ++slot) {
                 const uint8_t value = bank.graph_osc_source[channel][zone][slot];
-                if (value == 0) {
-                    continue;
-                }
-                if (value > layers) {
+                if (value != 0 && value > layers) {
                     return false;
                 }
-                if (seen_nonzero[value - 1]) {
-                    return false;
-                }
-                seen_nonzero[value - 1] = true;
             }
         }
     }

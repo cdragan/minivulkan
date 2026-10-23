@@ -238,6 +238,14 @@ using SlotHiddenCallback = bool (*)(void* user_data, const Graph& graph, uint32_
 using SlotColorCallback =
     bool (*)(void* user_data, const Graph& graph, uint32_t node_idx, uint32_t slot_idx, uint32_t* color_out);
 
+// Caller title override for one node: return true and write the title to
+// render into title_out (NUL-terminated, truncated to capacity).  A
+// renderer read-only hook, like SlotColorCallback: the callback leaves
+// the stored model name unchanged, so identity and serialization still
+// work on node.name (which may be a custom name).  May be null.
+using NodeTitleCallback =
+    bool (*)(void* user_data, const Graph& graph, uint32_t node_idx, char* title_out, uint32_t capacity);
+
 constexpr uint32_t max_pending_changes = 256;
 
 // Shared between the data model and the renderer.
@@ -262,9 +270,10 @@ struct GraphColors { // packed 0xRRGGBBAA, converted to ImU32 at draw time
     uint32_t connector_connected; // filled dot
     uint32_t connection;
     uint32_t ghost_node;
-    uint32_t property_value;           // editable value text
-    uint32_t property_connected_value; // greyed value text
-    uint32_t error_background;         // error overlay
+    uint32_t property_value;             // editable value text
+    uint32_t property_connected_value;   // greyed value text
+    uint32_t property_highlighted_value; // value text fed by a selected source
+    uint32_t error_background;           // error overlay
     uint32_t error_text;
     uint32_t selection_outline; // outline around selected nodes
     uint32_t selection_band;    // rubber band fill/outline
@@ -326,6 +335,8 @@ public:
     // Installs the caller's unconnected-dot color override (see
     // SlotColorCallback).
     void set_slot_color_callback(SlotColorCallback callback, void* user_data);
+    // Installs the caller's node-title override (see NodeTitleCallback).
+    void set_node_title_callback(NodeTitleCallback callback, void* user_data);
     // True means deleted or handled cancellation; false means invalid/stale index.
     bool user_delete_connection(uint32_t connection_idx);
 
@@ -452,6 +463,11 @@ public:
     // wipes it and the projection re-installs it.
     void set_node_renamable(uint32_t node_idx, bool renamable);
 
+    // Opens the inline title editor for one node.  Refuses unoccupied or
+    // ghost nodes.  The menu callbacks need this because the Interaction
+    // state is private to the widget.
+    void begin_rename(uint32_t node_idx);
+
     // Per-node oscillator stamp: the waveform/mode slot-disable rule in
     // sculptor_osc_graph.cpp applies to oscillator layer nodes only, so
     // every other projection must leave the stamp false.  Projection
@@ -504,6 +520,13 @@ public:
     // the interactions stay hidden.
     bool node_state_edits_enabled;
 
+    // InputText buffer size while renaming, including the terminator
+    // InputText requires.  A caller whose persisted name field is smaller
+    // than Node::name sets it to the record capacity + 1, so every accepted
+    // name fits the record; the renderer clamps the value to the node
+    // buffer capacity.  0 keeps the node capacity.
+    uint32_t rename_buffer_size = 64;
+
 private:
     EndPoint find_hovered_connector(vmath::vec2 mouse_screen) const;
 
@@ -541,6 +564,8 @@ private:
     void*              slot_hidden_user_data = nullptr;
     SlotColorCallback  slot_color_callback   = nullptr;
     void*              slot_color_user_data  = nullptr;
+    NodeTitleCallback  node_title_callback   = nullptr;
+    void*              node_title_user_data  = nullptr;
 
     // Caller veto for delete_node and items for the canvas popup.
     NodeDeleteVeto     delete_veto           = nullptr;
@@ -632,4 +657,8 @@ constexpr uint32_t pool_no_slot = ::pool_no_slot;
 
 // The live connection terminating at an input connector, or pool_no_slot.
 uint32_t connection_into(const Graph& graph, uint32_t node_idx, uint32_t slot_idx);
+
+// Marks every input slot of one node that receives a connection from a
+// selected node.  slot_flags has room for max_node_slots entries.
+void collect_selected_source_inputs(const Graph& graph, uint32_t node_idx, bool* slot_flags);
 } // namespace Sculptor

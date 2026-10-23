@@ -41,6 +41,25 @@
 // Writer (compact JSON)
 // ---------------------------------------------------------------------------
 
+// Copies the staged record name back into the 32-byte field after the
+// object walk, when the record kind is known.  Kind 0 (oscillator) names
+// are counted bytes: a full 32-byte name without a terminator is valid.
+// Any other kind requires termination within 32 bytes.
+static bool stage_record_name(char*       record_name,
+                              uint32_t    record_name_size,
+                              const char* staged,
+                              uint32_t    staged_size,
+                              uint8_t     kind)
+{
+    if (kind != 0 && ! memchr(staged, 0, record_name_size)) {
+        return false;
+    }
+
+    memset(record_name, 0, record_name_size);
+    Sculptor::copy_name_bounded(record_name, record_name_size, staged, staged_size);
+    return true;
+}
+
 static bool string_content_ok(const char* s, uint32_t len);
 
 struct Out {
@@ -934,7 +953,11 @@ uint32_t Synth::encode_editor_bank_json(const InstrumentEditorBank* bank, char* 
         key_uint(o, "rate_source", record.rate_source);
         key_uint(o, "uid", record.uid);
         o.key("name");
-        o.text_value(record.name, sizeof(record.name));
+        // text_value requires an in-buffer terminator, so a full 32-byte
+        // counted name stages through a zeroed 33-byte buffer first.
+        char staged_name[sizeof(record.name) + 1] = {};
+        Sculptor::copy_name_bounded(staged_name, sizeof(staged_name), record.name, sizeof(record.name));
+        o.text_value(staged_name, sizeof(staged_name));
         o.ch('}');
     }
     o.ch(']');
@@ -2667,6 +2690,10 @@ static void decode_parameters(Walker& w, uint32_t arr, Synth::InstrumentEditorBa
 // checks run after the whole document decoded (decode order is free).
 static void decode_editor_record(Walker& w, uint32_t obj, Synth::GraphNodeLayout* record)
 {
+    // unescape_string needs one spare terminator byte, so the name stages
+    // into a 33-byte buffer; the kind-gated copy back runs after the object
+    // walk, when record->kind is known.
+    char staged_name[sizeof(record->name) + 1] = {};
     walk_object(w, obj, [&](uint32_t key_idx, uint32_t val_idx) {
         if (key_eq(w, key_idx, "channel")) {
             want_u8(w, val_idx, 0xFF, &record->channel);
@@ -2697,8 +2724,9 @@ static void decode_editor_record(Walker& w, uint32_t obj, Synth::GraphNodeLayout
         else if (key_eq(w, key_idx, "uid")) {
             want_u8(w, val_idx, 0xFF, &record->uid);
         }
-        else if (key_eq(w, key_idx, "name"))
-            want_text(w, val_idx, record->name, sizeof(record->name));
+        else if (key_eq(w, key_idx, "name")) {
+            want_text(w, val_idx, staged_name, sizeof(staged_name));
+        }
         else if (w.strict_editor_metadata) {
             w.failed = true;
         }
@@ -2707,6 +2735,11 @@ static void decode_editor_record(Walker& w, uint32_t obj, Synth::GraphNodeLayout
     });
     if (w.failed)
         return;
+
+    if (! stage_record_name(record->name, sizeof(record->name), staged_name, sizeof(staged_name), record->kind)) {
+        w.failed = true;
+        return;
+    }
 
     if ((record->channel >= Synth::max_channels && ! (record->kind == 4 && record->channel == Synth::max_channels)) ||
         record->zone >= Synth::max_instr_per_channel || ! Synth::editor_record_kind_valid(record->kind)) {
@@ -2728,16 +2761,10 @@ static void decode_editor_record(Walker& w, uint32_t obj, Synth::GraphNodeLayout
         return;
     }
 
-    // Kind 5 is not a detached instance: the LFO wiring-source fields are
-    // reserved for kinds 1/2 and must stay zero.
-    if (record->kind == 5 && (record->depth_source != 0 || record->rate_source != 0)) {
-        w.failed = true;
-        return;
-    }
-
-    // Source bytes name ModSource values; none (0) is valid.
-    if (record->depth_source > static_cast<uint8_t>(Synth::ModSource::pressure_combine) ||
-        record->rate_source > static_cast<uint8_t>(Synth::ModSource::pressure_combine)) {
+    // Kind 2 reads the source bytes as ModSource values; none (0) is
+    // valid.  Other kinds never read them.
+    if (record->kind == 2 && (record->depth_source > static_cast<uint8_t>(Synth::ModSource::pressure_combine) ||
+                              record->rate_source > static_cast<uint8_t>(Synth::ModSource::pressure_combine))) {
         w.failed = true;
         return;
     }
@@ -3773,7 +3800,8 @@ static bool decode_document_into_scratch(const char* text, uint32_t len, bool st
     w.strict_editor_metadata = strict_editor_metadata;
     fill_default_editor_bank(&decode_scratch);
 
-    bool      guard = false, v2 = false;
+    bool      guard = false;
+    bool      v2    = false;
     uint32_t  idx   = 1;
     const int pairs = w.toks[0].size; // the root object counts its key-value pairs
 
@@ -4004,8 +4032,11 @@ bool Synth::decode_instrument_json_for_domain(const char*            text,
                         break;
                     }
 
-                    InstrumentGraphLayout record  = {};
-                    uint32_t              present = 0;
+                    // The staged name outlives the walk lambda: the
+                    // kind-gated copy back runs after the object walk.
+                    InstrumentGraphLayout record                               = {};
+                    char                  staged_name[sizeof(record.name) + 1] = {};
+                    uint32_t              present                              = 0;
                     walk_object(w, elem, [&](uint32_t field, uint32_t value) {
                         const char* const keys[] = { "kind",        "x",      "y",
                                                      "width",       "height", "canonical_index",
@@ -4022,7 +4053,7 @@ bool Synth::decode_instrument_json_for_domain(const char*            text,
 
                         present |= 1u << key;
                         if (key == 10) {
-                            want_text(w, value, record.name, sizeof(record.name));
+                            want_text(w, value, staged_name, sizeof(staged_name));
                         }
                         else if (key >= 1 && key <= 4) {
                             float number = 0;
@@ -4064,6 +4095,15 @@ bool Synth::decode_instrument_json_for_domain(const char*            text,
                         }
                     });
                     if (w.failed) {
+                        break;
+                    }
+
+                    if (! stage_record_name(record.name,
+                                            sizeof(record.name),
+                                            staged_name,
+                                            sizeof(staged_name),
+                                            record.kind)) {
+                        w.failed = true;
                         break;
                     }
 
@@ -4123,16 +4163,14 @@ bool Synth::decode_instrument_json_for_domain(const char*            text,
     doc.instr.layer_count = layer_count;
 
     if (sources_seen) {
-        bool seen_nonzero[Synth::max_layers] = {};
+        // A repeated ordinal is accepted: the compile copies the referenced
+        // layer into every wired slot in slot order, so duplicates stay
+        // deterministic.  Values above the layer count still refuse.
         for (uint32_t slot = 0; slot < Synth::max_layers; ++slot) {
             const uint8_t value = decoded_sources[slot];
-            if (value == 0) {
-                continue;
-            }
-            if (value > layer_count || seen_nonzero[value - 1]) {
+            if (value != 0 && value > layer_count) {
                 return false;
             }
-            seen_nonzero[value - 1] = true;
         }
     }
     else {
@@ -4592,8 +4630,11 @@ uint32_t Sculptor::encode_editor_instrument_json(const Synth::InstrumentEditorBa
         instrument = &playback_form;
     }
 
-    uint32_t       env_count = 0, lfo_count = 0, source_count = 0, count = 0;
-    const uint32_t length = encode_instrument_json_for_domain(
+    uint32_t       env_count    = 0;
+    uint32_t       lfo_count    = 0;
+    uint32_t       source_count = 0;
+    uint32_t       count        = 0;
+    const uint32_t length       = encode_instrument_json_for_domain(
         editor_export_text,
         sizeof(editor_export_text),
         instrument,

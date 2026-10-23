@@ -177,24 +177,25 @@ void Sculptor::append_lfo_row(Sculptor::Graph* graph,
 Sculptor::GraphColors Sculptor::default_graph_colors()
 {
 
-    Sculptor::GraphColors colors    = {};
-    colors.node_background          = 0x2B2B2BFFu;
-    colors.node_border              = 0x5A5A5AFFu;
-    colors.node_selected_border     = 0xFFFFFFFFu;
-    colors.node_title               = 0xE0E0E0FFu;
-    colors.grid_line                = 0x353535FFu;
-    colors.grid_axis                = 0x404040FFu;
-    colors.connector                = 0x909090FFu;
-    colors.connector_hover          = 0xFFFFFFE0u;
-    colors.connector_connected      = 0xE0E0E0FFu;
-    colors.connection               = 0xC0C0C0FFu;
-    colors.ghost_node               = 0x4A4A4A80u;
-    colors.property_value           = 0xD0D0D0FFu;
-    colors.property_connected_value = 0x808080FFu;
-    colors.error_background         = 0x602020E0u;
-    colors.error_text               = 0xFFE0E0FFu;
-    colors.selection_outline        = 0xFFFFFFFFu;
-    colors.selection_band           = 0xFFFFFF30u;
+    Sculptor::GraphColors colors      = {};
+    colors.node_background            = 0x2B2B2BFFu;
+    colors.node_border                = 0x5A5A5AFFu;
+    colors.node_selected_border       = 0xFFFFFFFFu;
+    colors.node_title                 = 0xE0E0E0FFu;
+    colors.grid_line                  = 0x353535FFu;
+    colors.grid_axis                  = 0x404040FFu;
+    colors.connector                  = 0x909090FFu;
+    colors.connector_hover            = 0xFFFFFFE0u;
+    colors.connector_connected        = 0xE0E0E0FFu;
+    colors.connection                 = 0xC0C0C0FFu;
+    colors.ghost_node                 = 0x4A4A4A80u;
+    colors.property_value             = 0xD0D0D0FFu;
+    colors.property_connected_value   = 0x808080FFu;
+    colors.property_highlighted_value = 0xFFFF64FFu;
+    colors.error_background           = 0x602020E0u;
+    colors.error_text                 = 0xFFE0E0FFu;
+    colors.selection_outline          = 0xFFFFFFFFu;
+    colors.selection_band             = 0xFFFFFF30u;
 
     return colors;
 }
@@ -609,6 +610,12 @@ void Sculptor::Graph::set_slot_color_callback(SlotColorCallback callback, void* 
     slot_color_user_data = user_data;
 }
 
+void Sculptor::Graph::set_node_title_callback(NodeTitleCallback callback, void* user_data)
+{
+    node_title_callback  = callback;
+    node_title_user_data = user_data;
+}
+
 bool Sculptor::Graph::user_delete_connection(uint32_t connection_idx)
 {
     if (connection_idx >= max_connections || ! connections.is_occupied(connection_idx)) {
@@ -670,6 +677,18 @@ void Sculptor::Graph::set_node_oscillator(uint32_t node_idx, bool oscillator)
         return;
     }
     nodes.entries[node_idx].oscillator = oscillator;
+}
+
+void Sculptor::Graph::begin_rename(uint32_t node_idx)
+{
+    // Refuses unoccupied or ghost nodes.
+    if (node_idx >= max_nodes || ! nodes.is_occupied(node_idx) || nodes.entries[node_idx].ghost) {
+        return;
+    }
+
+    interaction    = Interaction::renaming;
+    renaming_node  = node_idx;
+    renaming_focus = true;
 }
 
 // Eventless property write: the shared-routing fan-out updates sibling
@@ -1114,4 +1133,32 @@ uint32_t Sculptor::connection_into(const Graph& graph, uint32_t node_idx, uint32
         }
     }
     return Sculptor::pool_no_slot;
+}
+
+// Marks every input slot of one node that receives a connection from a
+// selected node.  slot_flags has room for max_node_slots entries.
+void Sculptor::collect_selected_source_inputs(const Graph& graph, uint32_t node_idx, bool* slot_flags)
+{
+    if (slot_flags == nullptr) {
+        return;
+    }
+
+    memset(slot_flags, 0, sizeof(*slot_flags) * Sculptor::max_node_slots);
+
+    if (node_idx >= Sculptor::max_nodes) {
+        return;
+    }
+
+    // Sparse scan only: the pool contract lets indices exceed the occupied
+    // count once connections have been deleted.
+    for (uint32_t c = 0; c < Sculptor::max_connections; ++c) {
+        if (! graph.connection_occupied(c)) {
+            continue;
+        }
+
+        const Sculptor::Connection& connection = graph.get_connection(c);
+        if (connection.input.node_idx == node_idx && graph.is_selected(connection.output.node_idx)) {
+            slot_flags[connection.input.slot_idx] = true;
+        }
+    }
 }

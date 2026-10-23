@@ -549,6 +549,19 @@ void undo_group_reset(UndoGroupState* state);
 
 // True when `additional` net new records fit in the global record list.
 bool graph_records_have_capacity(const Synth::InstrumentEditorBank& bank, uint32_t additional);
+
+// Updates or appends the layout record keyed by (channel, zone, kind,
+// index) with uid 0: the lookup selects bound records whose uid is 0, and
+// records with another uid are not selected.  The record's position and
+// size overrides follow the node, and a missing record appends zeroed when
+// the array has capacity.  Returns the existing-or-appended record, or null
+// on capacity refusal.
+Synth::GraphNodeLayout* upsert_graph_layout_record(Synth::InstrumentEditorBank* bank,
+                                                   uint32_t                     channel,
+                                                   uint32_t                     zone,
+                                                   uint8_t                      kind,
+                                                   uint8_t                      index,
+                                                   const Sculptor::Node&        node_ref);
 // Lowest per-(zone, kind) instance id not in use by a live record; the
 // caller enforces the per-zone detached cap, so a free id always exists.
 uint8_t allocate_detached_uid(const Synth::InstrumentEditorBank& bank, uint32_t channel, uint32_t zone, uint32_t kind);

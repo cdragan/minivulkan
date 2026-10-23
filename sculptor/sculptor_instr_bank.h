@@ -219,6 +219,19 @@ bool push_bank_update(BankUpdateQueue* queue, const InstrumentBank& bank);
 
 namespace Sculptor {
 
+// Copies at most min(source_bound, destination_bound) bytes from source,
+// stopping at the first NUL in the source; no terminator is written.  A
+// source that fills its bound without a NUL is never read past the bound,
+// so a full 32-byte record name copies safely.
+inline void copy_name_bounded(char* destination, uint32_t destination_bound, const char* source, uint32_t source_bound)
+{
+    const uint32_t bound = source_bound < destination_bound ? source_bound : destination_bound;
+
+    for (uint32_t i = 0; i < bound && source[i] != 0; ++i) {
+        destination[i] = source[i];
+    }
+}
+
 // Validates every fragment, including detached cycles and endpoint occupancy.
 bool validate_effect_audio_topology(const Synth::EffectChainBinding& chain, const EffectAudioTopology& audio);
 // Success-only output: complete paths compile in traversal order; incomplete
@@ -251,7 +264,7 @@ bool replace_zone_instrument_candidate(const Synth::InstrumentEditorBank&  sourc
                                        const uint8_t*                      decoded_osc_source,
                                        Synth::InstrumentEditorBank*        out_candidate);
 
-// Record names must be terminated.  Only kind-4 names participate in identity.
+// Kind-4 names must be terminated; only kind-4 names participate in identity.
 bool graph_layout_record_identity_equal(const Synth::GraphNodeLayout& a, const Synth::GraphNodeLayout& b);
 
 // Editor graph metadata: record accounting and validation shared by the JSON
@@ -259,8 +272,10 @@ bool graph_layout_record_identity_equal(const Synth::GraphNodeLayout& a, const S
 // so every binary that links the editor bank links its validation too.
 // validate_editor_metadata: record bounds, descriptor ids within their pools,
 // per-zone and global record caps, duplicate record keys, per-zone source-row
-// values (wired ordinals unique and within the instrument's layer count),
-// and the implied projected node count per zone within the node pool.
+// values (each within the instrument's layer count; a repeated value is
+// accepted and the compile copies the referenced layer into every wired slot
+// in slot order), and the implied projected node count per zone within the
+// node pool.
 bool validate_editor_metadata(const Synth::InstrumentEditorBank& bank);
 // Number of detached (kind 1/2) records stored for one zone.
 uint32_t count_detached_records(const Synth::InstrumentEditorBank& bank, uint32_t channel, uint32_t zone);

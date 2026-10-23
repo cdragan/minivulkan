@@ -2779,6 +2779,172 @@ static void test_drop_menu_eligible_model_rule()
     TEST(! graph.drop_menu_eligible(EndPoint{ node, max_node_slots - 1 })); // unallocated slot
 }
 
+// C5 pinning test: the connection pool never compacts, so a deleted
+// lower-index connection leaves a hole and survivors keep their stable
+// indices.  Connection-derived features must enumerate the whole pool with
+// connection_occupied, never a dense 0..connection_count()-1 range.
+static void check_connection_pool_sparse_scan()
+{
+    Graph& g = reset_unit_graph(4);
+
+    const uint32_t node_a = g.create_node("a", vmath::vec2(0.0f, 0.0f));
+    const uint32_t node_b = g.create_node("b", vmath::vec2(0.0f, 0.0f));
+    const uint32_t node_c = g.create_node("c", vmath::vec2(0.0f, 0.0f));
+    TEST(node_a != Sculptor::pool_no_slot);
+    TEST(node_b != Sculptor::pool_no_slot);
+    TEST(node_c != Sculptor::pool_no_slot);
+
+    Slot output_slot        = {};
+    output_slot.kind        = SlotKind::output;
+    Slot input_slot         = {};
+    input_slot.kind         = SlotKind::input;
+    const uint32_t out_idx  = g.add_slot(node_a, output_slot);
+    const uint32_t in_b_idx = g.add_slot(node_b, input_slot);
+    const uint32_t in_c_idx = g.add_slot(node_c, input_slot);
+    TEST(out_idx != Sculptor::pool_no_slot);
+    TEST(in_b_idx != Sculptor::pool_no_slot);
+    TEST(in_c_idx != Sculptor::pool_no_slot);
+
+    const uint32_t first  = g.add_connection(EndPoint{ node_a, out_idx }, EndPoint{ node_b, in_b_idx });
+    const uint32_t second = g.add_connection(EndPoint{ node_a, out_idx }, EndPoint{ node_c, in_c_idx });
+    TEST(first != Sculptor::pool_no_slot);
+    TEST(second != Sculptor::pool_no_slot);
+    // First-fit allocation gives adjacent indices, so deleting the lower
+    // one really opens a hole in the middle of the occupied range.
+    TEST(first < second);
+
+    GraphChange discard[8] = {};
+    drain_changes(g, discard, 8);
+
+    g.delete_connection(first);
+    drain_changes(g, discard, 8);
+
+    TEST(! g.connection_occupied(first));
+    TEST(g.connection_occupied(second));
+    TEST(g.connection_count() == 1);
+
+    // The documented sparse scan finds exactly one survivor: the
+    // higher-index connection, with its endpoints intact.  A dense
+    // 0..connection_count()-1 scan would read the freed hole instead.
+    uint32_t found = Sculptor::pool_no_slot;
+    for (uint32_t i = 0; i < max_connections; ++i) {
+        if (! g.connection_occupied(i)) {
+            continue;
+        }
+        TEST(found == Sculptor::pool_no_slot); // exactly one survivor
+        found = i;
+    }
+    TEST(found == second);
+    TEST(g.get_connection(found).output.node_idx == node_a);
+    TEST(g.get_connection(found).output.slot_idx == out_idx);
+    TEST(g.get_connection(found).input.node_idx == node_c);
+    TEST(g.get_connection(found).input.slot_idx == in_c_idx);
+}
+
+// C6 model check: collect_selected_source_inputs marks exactly the input
+// slots of one node that receive a connection from a selected node, unions
+// across multiple selected sources, and walks the connection pool with
+// connection_occupied so a deleted lower-index hole cannot break it.
+static void check_collect_selected_source_inputs_marks_fed_inputs()
+{
+    Graph& g = reset_unit_graph(0);
+
+    const uint32_t source_a = g.create_node("a", vmath::vec2(0.0f, 0.0f));
+    const uint32_t source_b = g.create_node("b", vmath::vec2(0.0f, 0.0f));
+    const uint32_t receiver = g.create_node("receiver", vmath::vec2(0.0f, 0.0f));
+    TEST(source_a != Sculptor::pool_no_slot);
+    TEST(source_b != Sculptor::pool_no_slot);
+    TEST(receiver != Sculptor::pool_no_slot);
+
+    Slot output_slot         = {};
+    output_slot.kind         = SlotKind::output;
+    Slot input_slot          = {};
+    input_slot.kind          = SlotKind::input;
+    const uint32_t out_a     = g.add_slot(source_a, output_slot);
+    const uint32_t out_b     = g.add_slot(source_b, output_slot);
+    const uint32_t in_slot_0 = g.add_slot(receiver, input_slot);
+    const uint32_t in_slot_1 = g.add_slot(receiver, input_slot);
+    const uint32_t in_slot_2 = g.add_slot(receiver, input_slot);
+    TEST(out_a != Sculptor::pool_no_slot);
+    TEST(out_b != Sculptor::pool_no_slot);
+    TEST(in_slot_0 != Sculptor::pool_no_slot);
+    TEST(in_slot_1 != Sculptor::pool_no_slot);
+    TEST(in_slot_2 != Sculptor::pool_no_slot);
+
+    const uint32_t conn_a_0 = g.add_connection(EndPoint{ source_a, out_a }, EndPoint{ receiver, in_slot_0 });
+    const uint32_t conn_a_1 = g.add_connection(EndPoint{ source_a, out_a }, EndPoint{ receiver, in_slot_1 });
+    const uint32_t conn_b_2 = g.add_connection(EndPoint{ source_b, out_b }, EndPoint{ receiver, in_slot_2 });
+    TEST(conn_a_0 != Sculptor::pool_no_slot);
+    TEST(conn_a_1 != Sculptor::pool_no_slot);
+    TEST(conn_b_2 != Sculptor::pool_no_slot);
+
+    GraphChange discard[8] = {};
+    drain_changes(g, discard, 8);
+
+    // Two sentinel entries tail the flag array: the helper must never
+    // write past the max_node_slots entries it is given.
+    bool flags[max_node_slots + 2] = {};
+
+    // One selected source feeding two inputs: exactly those two entries
+    // are set, every other entry stays false.
+    g.set_selected(source_a, true);
+    Sculptor::collect_selected_source_inputs(g, receiver, flags);
+    for (uint32_t i = 0; i < max_node_slots; ++i) {
+        TEST(flags[i] == (i == in_slot_0 || i == in_slot_1));
+    }
+    TEST(! flags[max_node_slots]);
+    TEST(! flags[max_node_slots + 1]);
+
+    // No selection: every entry, sentinels included, stays false.
+    g.select_none();
+    memset(flags, 0, sizeof(flags));
+    Sculptor::collect_selected_source_inputs(g, receiver, flags);
+    for (uint32_t i = 0; i < max_node_slots + 2; ++i) {
+        TEST(! flags[i]);
+    }
+
+    // Two selected sources feeding different inputs: the union is marked.
+    g.set_selected(source_a, true);
+    g.set_selected(source_b, true);
+    memset(flags, 0, sizeof(flags));
+    Sculptor::collect_selected_source_inputs(g, receiver, flags);
+    for (uint32_t i = 0; i < max_node_slots; ++i) {
+        TEST(flags[i] == (i == in_slot_0 || i == in_slot_1 || i == in_slot_2));
+    }
+    TEST(! flags[max_node_slots]);
+    TEST(! flags[max_node_slots + 1]);
+
+    // First-fit allocation gives adjacent indices, so deleting conn_a_0
+    // (the lower of the source_a pair) opens a hole in the middle of the
+    // occupied range.  The surviving connection must still be found, so
+    // the helper has to scan the pool sparsely with connection_occupied.
+    g.delete_connection(conn_a_0);
+    drain_changes(g, discard, 8);
+    TEST(! g.connection_occupied(conn_a_0));
+    TEST(g.connection_occupied(conn_a_1));
+
+    g.select_none();
+    g.set_selected(source_a, true);
+    memset(flags, 0, sizeof(flags));
+    Sculptor::collect_selected_source_inputs(g, receiver, flags);
+    for (uint32_t i = 0; i < max_node_slots; ++i) {
+        TEST(flags[i] == (i == in_slot_1));
+    }
+    TEST(! flags[max_node_slots]);
+    TEST(! flags[max_node_slots + 1]);
+
+    // The other source still marks its own slot across the hole.
+    g.select_none();
+    g.set_selected(source_b, true);
+    memset(flags, 0, sizeof(flags));
+    Sculptor::collect_selected_source_inputs(g, receiver, flags);
+    for (uint32_t i = 0; i < max_node_slots; ++i) {
+        TEST(flags[i] == (i == in_slot_2));
+    }
+    TEST(! flags[max_node_slots]);
+    TEST(! flags[max_node_slots + 1]);
+}
+
 int main()
 {
     test_renderer_audio_endpoint_mouse_frames();
@@ -2834,6 +3000,8 @@ int main()
     test_canvas_menu_callback_api();
     test_row_group_layout_inputs();
     test_connectable_dynamic_value_row();
+    check_connection_pool_sparse_scan();
+    check_collect_selected_source_inputs_marks_fed_inputs();
 
     return exit_code;
 }

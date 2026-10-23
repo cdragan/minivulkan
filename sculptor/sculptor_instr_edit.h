@@ -8,6 +8,7 @@
 #include "sculptor_instr_library.h"
 
 #include <stdint.h>
+#include <string.h>
 
 namespace Sculptor {
 
@@ -150,6 +151,85 @@ private:
     char confirm_category[Synth::max_name_len] = {};
     char confirm_name[Synth::max_name_len]     = {};
 };
+
+// Shared note naming for the keyboard and zone-tab tooltips.
+// The octave is floor(midi / 12) - 2.  Pitch classes are sharps only, so
+// MIDI 51 is "D#2".  The octave is signed so MIDI 0..23 does not wrap.
+inline void note_name(uint32_t midi, char* out, uint32_t capacity)
+{
+    static const char* const pitch_classes[12] = { "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B" };
+    const int32_t            octave            = static_cast<int32_t>(midi / 12) - 2;
+
+    snprintf(out, capacity, "%s%d", pitch_classes[midi % 12], octave);
+}
+
+// First-seen label membership: true when name matches an earlier label
+// in the list.  Shared by the deriving callback and the title helper so
+// the first-seen policy lives in one place.
+inline bool label_seen(const char* const* labels, uint32_t count, const char* name)
+{
+    for (uint32_t label_index = 0; label_index < count; ++label_index) {
+        if (strcmp(labels[label_index], name) == 0) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+// Builds a derived generator title: deduplicated parameter row labels
+// in first-seen order, joined with ", ", plus " (<host>)" when host_title
+// is non-null and non-empty.  Returns false when there are no labels (a
+// null entry is a refused label too): the caller keeps the default
+// "Envelope N" / "LFO N" title and out stays untouched.  Pure string
+// logic; the text truncates to capacity.
+inline bool derive_generator_title(const char* const* labels,
+                                   uint32_t           count,
+                                   const char*        host_title,
+                                   char*              out,
+                                   uint32_t           capacity)
+{
+    if (count == 0 || labels == nullptr || out == nullptr || capacity == 0) {
+        return false;
+    }
+
+    // A null entry has no label to append; refuse before any write so a
+    // false return leaves out untouched.
+    for (uint32_t label_index = 0; label_index < count; ++label_index) {
+        if (labels[label_index] == nullptr) {
+            return false;
+        }
+    }
+
+    // Bounded append: every fragment stops before the reserved terminator.
+    uint32_t used = 0;
+    for (uint32_t label_index = 0; label_index < count; ++label_index) {
+        if (label_seen(labels, label_index, labels[label_index])) {
+            continue;
+        }
+
+        // The separator precedes every label but the first.
+        const char* pieces[2] = { used == 0 ? "" : ", ", labels[label_index] };
+        for (uint32_t fragment_index = 0; fragment_index < 2; ++fragment_index) {
+            for (const char* cursor = pieces[fragment_index]; *cursor != 0 && used + 1 < capacity; ++cursor) {
+                out[used++] = *cursor;
+            }
+        }
+    }
+
+    // Single-host parenthetical: an empty host is no host.
+    if (host_title != nullptr && host_title[0] != 0) {
+        const char* pieces[3] = { " (", host_title, ")" };
+        for (uint32_t fragment_index = 0; fragment_index < 3; ++fragment_index) {
+            for (const char* cursor = pieces[fragment_index]; *cursor != 0 && used + 1 < capacity; ++cursor) {
+                out[used++] = *cursor;
+            }
+        }
+    }
+
+    out[used] = 0;
+    return true;
+}
 
 // Info panel under the synth channel list: tempo, route-to-channel
 // checkbox, playing oscillator count, underrun count, fill bar with a

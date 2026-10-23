@@ -250,7 +250,9 @@ static bool transfer_zone_layout(const Synth::InstrumentEditorBank& source,
                                  uint32_t                           dst_channel,
                                  Synth::InstrumentEditorBank*       candidate)
 {
-    uint32_t env_count = 0, lfo_count = 0, count = 0;
+    uint32_t env_count = 0;
+    uint32_t lfo_count = 0;
+    uint32_t count     = 0;
 
     // The decoded layout's records index descriptors by document position, but
     // the caller's id maps are keyed by the source bank's pool id.  The decoder

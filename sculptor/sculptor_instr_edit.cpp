@@ -672,6 +672,17 @@ static bool osc_node_menu(void* user_data, uint32_t node_idx)
     if (node_idx >= Sculptor::max_nodes || ! osc_graph.node_occupied(node_idx)) {
         return false;
     }
+    // The rename is menu-invoked only, and the menu item is gated on the
+    // oscillator stamp: no other node type gains the item.  The menu path
+    // deliberately does not check node_state_edits_enabled: it is false in
+    // every projection, and its regenerating-title purpose does not apply
+    // to kind-0 record-backed oscillator names.
+    if (osc_graph.node(node_idx).oscillator) {
+        if (ImGui::MenuItem("Rename oscillator...")) {
+            osc_graph.begin_rename(node_idx);
+        }
+        return true;
+    }
     if (node_idx == osc_mapping.input_node) {
         // The MIDI Inputs node's menu authors the channel's added-CC output
         // dots, the same registry mask the fx pane's MIDI node uses.  An
@@ -736,6 +747,151 @@ static bool fx_slot_hidden(void* user_data, const Sculptor::Graph& graph, uint32
     }
 
     return Sculptor::fx_param_field_hidden(graph, node_idx, param, field);
+}
+
+// The fed-row label for one generator wire landing on an oscillator node's
+// target block (the parent row's own name, e.g. "Cutoff (Hz)"), or on a
+// detached LFO's Depth/Rate inputs (that slot's own name).  Null when the
+// endpoint is not a generator-fed row.
+static const char* osc_derived_title_label(const Sculptor::Graph& graph, const Sculptor::EndPoint& input)
+{
+    bool is_osc = false;
+    for (uint32_t layer = 0; layer < Synth::max_layers && ! is_osc; ++layer) {
+        is_osc = osc_mapping.osc_nodes[layer] == input.node_idx;
+    }
+
+    const Sculptor::Node& node = graph.node(input.node_idx);
+    if (is_osc) {
+        for (uint32_t target = 0; target < Synth::num_mod_targets; ++target) {
+            if (input.slot_idx != Sculptor::osc_target_env_dot(target) &&
+                input.slot_idx != Sculptor::osc_target_lfo_dot(target)) {
+                continue;
+            }
+
+            const uint32_t row = Sculptor::osc_target_row_slot[target];
+            return row < node.slots.num_allocated ? node.slots.entries[row].name : nullptr;
+        }
+        return nullptr;
+    }
+
+    // A detached LFO's Depth/Rate inputs: the validator routes these inputs
+    // to MIDI sources, so this branch only fires on hand-built states.
+    for (uint32_t instance_index = 0; instance_index < osc_mapping.detached_count; ++instance_index) {
+        if (osc_mapping.detached[instance_index].node_idx != input.node_idx ||
+            osc_mapping.detached[instance_index].kind != 2) {
+            continue;
+        }
+
+        if ((input.slot_idx == osc_mapping.lfo_depth_input_slot || input.slot_idx == osc_mapping.lfo_rate_input_slot) &&
+            input.slot_idx < node.slots.num_allocated) {
+            return node.slots.entries[input.slot_idx].name;
+        }
+    }
+
+    return nullptr;
+}
+
+// The fed-row label for one generator wire landing on an effect node: the
+// Enabled row's own name, or the parameter row's projected name
+// (param_info, e.g. "Cutoff (Hz)").  Null when the endpoint is not a
+// modulated row.
+static const char* fx_derived_title_label(const Sculptor::Graph& graph, const Sculptor::EndPoint& input)
+{
+    if (Sculptor::fx_effect_slot_of(fx_mapping, input.node_idx) < 0) {
+        return nullptr;
+    }
+
+    const Sculptor::Node& node = graph.node(input.node_idx);
+    uint32_t              base = Sculptor::pool_no_slot;
+    if (input.slot_idx == Sculptor::fx_enabled_row) {
+        base = Sculptor::fx_enabled_row;
+    }
+    else if (input.slot_idx >= Sculptor::fx_param_row(0)) {
+        base = Sculptor::fx_param_row((input.slot_idx - Sculptor::fx_param_row(0)) / Sculptor::fx_param_stride);
+    }
+
+    if (base == Sculptor::pool_no_slot || base >= node.slots.num_allocated) {
+        return nullptr;
+    }
+
+    return node.slots.entries[base].name;
+}
+
+// The derived generator title, one callback for both panes: a
+// connected envelope or LFO instance node shows the names of the parameter
+// rows its Value output feeds (dedup + ", " join, single-host
+// parenthetical, see derive_generator_title).  Recomputed from live
+// connection state every frame, so titles track wire edits without a
+// re-projection; an unconnected generator returns false and keeps the
+// default title.  Read-only over projection state.
+static bool derive_generator_node_title(void*                  user_data,
+                                        const Sculptor::Graph& graph,
+                                        uint32_t               node_idx,
+                                        char*                  title_out,
+                                        uint32_t               capacity)
+{
+    (void)user_data;
+    // The generator registries are per pane; the node must be one of theirs.
+    bool osc_pane = false;
+    bool fx_pane  = false;
+    if (osc_graph_projected) {
+        for (uint32_t instance_index = 0; instance_index < osc_mapping.detached_count && ! osc_pane; ++instance_index) {
+            osc_pane = osc_mapping.detached[instance_index].node_idx == node_idx;
+        }
+    }
+    else if (fx_graph_projected) {
+        for (uint32_t desc = 0; desc < Synth::max_lfos && ! fx_pane; ++desc) {
+            fx_pane = fx_mapping.lfo_nodes[desc] == node_idx;
+        }
+    }
+
+    if (! osc_pane && ! fx_pane) {
+        return false;
+    }
+
+    // Distinct fed-row labels: the row-name vocabulary is far smaller than
+    // the connection pool, so the dedup below cannot exhaust the table.
+    const char* labels[32]  = {};
+    uint32_t    label_count = 0;
+    uint32_t    host_node   = Sculptor::pool_no_slot;
+    bool        multi_host  = false;
+
+    // Sparse scan: pool indices are stable but sparse after deletions, so
+    // the live count is never an index bound.
+    for (uint32_t connection_index = 0; connection_index < Sculptor::max_connections; ++connection_index) {
+        if (! graph.connection_occupied(connection_index)) {
+            continue;
+        }
+
+        const Sculptor::Connection& connection = graph.get_connection(connection_index);
+        // Both projections put a generator's "Value" output at slot 0
+        // (env_output_slot / lfo_output_slot, and the fx LFO projection).
+        if (connection.output.node_idx != node_idx || connection.output.slot_idx != 0) {
+            continue;
+        }
+
+        const char* label = osc_pane ? osc_derived_title_label(graph, connection.input)
+                                     : fx_derived_title_label(graph, connection.input);
+        if (label == nullptr) {
+            continue;
+        }
+
+        if (! Sculptor::label_seen(labels, label_count, label) && label_count < 32) {
+            labels[label_count++] = label;
+        }
+
+        if (host_node == Sculptor::pool_no_slot) {
+            host_node = connection.input.node_idx;
+        }
+        multi_host = multi_host || connection.input.node_idx != host_node;
+    }
+
+    if (label_count == 0) {
+        return false;
+    }
+
+    const char* host_title = multi_host ? nullptr : graph.node(host_node).name;
+    return Sculptor::derive_generator_title(labels, label_count, host_title, title_out, capacity);
 }
 
 // The Oscillator Output's unconnected-dot color override: a red hole (an
@@ -1342,25 +1498,7 @@ static bool store_bound_layout(Synth::InstrumentEditorBank* bank,
                                const uint8_t                index,
                                const Sculptor::Node&        node_ref)
 {
-    const int32_t record_idx = Sculptor::find_record(*bank, channel, zone, kind, index, 0);
-    if (record_idx >= 0) {
-        write_record_position(bank, record_idx, node_ref);
-        return true;
-    }
-    if (! Sculptor::graph_records_have_capacity(*bank, 1)) {
-        return false;
-    }
-    Synth::GraphNodeLayout record                  = {};
-    record.channel                                 = static_cast<uint8_t>(channel);
-    record.zone                                    = static_cast<uint8_t>(zone);
-    record.kind                                    = kind;
-    record.index                                   = index;
-    record.x                                       = node_ref.position.x;
-    record.y                                       = node_ref.position.y;
-    record.width_override                          = node_ref.content_width_override;
-    record.height_override                         = node_ref.content_height_override;
-    bank->graph_layout[bank->graph_layout_count++] = record;
-    return true;
+    return Sculptor::upsert_graph_layout_record(bank, channel, zone, kind, index, node_ref) != nullptr;
 }
 
 // Writes every mapped node's current layout into the bank's records: bound
@@ -1797,6 +1935,7 @@ void Sculptor::SynthEditor::reproject_osc_graph(uint32_t channel, uint32_t zone)
     osc_graph.set_node_menu_callback(&osc_node_menu, nullptr);
     osc_graph.set_slot_hidden_callback(&osc_slot_hidden, nullptr);
     osc_graph.set_slot_color_callback(&osc_slot_color, nullptr);
+    osc_graph.set_node_title_callback(&derive_generator_node_title, nullptr);
     osc_graph.set_drop_menu_callback(&osc_drop_menu_entry, this);
     fx_graph_projected = false;
     // Rebind the state widgets from scratch: gestures and point selections
@@ -2369,10 +2508,14 @@ void Sculptor::SynthEditor::gui_channel_pane(uint32_t channel)
                 show_effects_mode      = false;
                 ImGui::EndTabItem();
             }
-            if (tab_hovered)
-                ImGui::SetTooltip("%s\nfrom note %u",
-                                  name,
-                                  static_cast<uint32_t>(bank.channel_zones[channel][entry].start_note) - 1);
+            if (tab_hovered) {
+                const uint32_t note = static_cast<uint32_t>(bank.channel_zones[channel][entry].start_note) - 1u;
+                char           note_name_text[8];
+
+                note_name(note, note_name_text, sizeof(note_name_text));
+
+                ImGui::SetTooltip("%s\nfrom %s (note %u)", name, note_name_text, note);
+            }
         }
         const ImGuiTabItemFlags fx_flags = effects_tab_pend == 1 ? ImGuiTabItemFlags_SetSelected : 0;
         if (ImGui::BeginTabItem("Effects", nullptr, fx_flags)) {
@@ -2718,6 +2861,7 @@ void Sculptor::SynthEditor::reproject_fx_graph(uint32_t chain)
     osc_graph.set_canvas_menu_callback(&fx_canvas_menu, nullptr);
     osc_graph.set_node_menu_callback(&fx_node_menu, nullptr);
     osc_graph.set_slot_hidden_callback(&fx_slot_hidden, nullptr);
+    osc_graph.set_node_title_callback(&derive_generator_node_title, nullptr);
     // Both panes share the one graph: each pane installs its own drop
     // menu, so the oscillator pane's menu cannot fire on effect nodes.
     osc_graph.set_drop_menu_callback(&fx_drop_menu, this);
@@ -3524,6 +3668,16 @@ void Sculptor::SynthEditor::gui_keyboard()
             if (wk < keyboard_white_count)
                 hit = static_cast<int32_t>(note_at_white(keyboard_white_base + wk));
         }
+    }
+
+    // The tooltip names the hovered note.  The IsWindowHovered gate keeps it
+    // off occluded windows.  It shows on every key regardless of channel state.
+    if (over && hit >= 0 && ImGui::IsWindowHovered()) {
+        char name[8];
+
+        note_name(static_cast<uint32_t>(hit), name, sizeof(name));
+
+        ImGui::SetTooltip("%s (note %d)", name, hit);
     }
 
     // The hover gate keeps clicks from occluding windows from triggering keys;

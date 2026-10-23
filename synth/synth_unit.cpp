@@ -11,6 +11,7 @@
 #include "../sculptor/sculptor_effect_graph.h"
 #include "../sculptor/sculptor_graph.h"
 #include "../sculptor/sculptor_instr_bank.h"
+#include "../sculptor/sculptor_instr_edit.h"
 #include "../sculptor/sculptor_instr_envelope_edit.h"
 #include "../sculptor/sculptor_instr_library.h"
 #include "../sculptor/sculptor_osc_graph.h"
@@ -1521,6 +1522,35 @@ static void check_osc_lowest_free_slot()
     TEST(Sculptor::osc_lowest_free_slot(row) == pool_no_slot);
 }
 
+// The keyboard tooltip note name is floor(midi / 12) - 2 with sharps only.
+// MIDI 21..23 must render with the signed octave -1.  The 88-note keyboard
+// spans 21..108.
+static void check_note_name_formats_midi_notes()
+{
+    char name[8] = {};
+
+    Sculptor::note_name(0, name, sizeof(name));
+    TEST(strcmp(name, "C-2") == 0);
+
+    Sculptor::note_name(21, name, sizeof(name));
+    TEST(strcmp(name, "A-1") == 0);
+
+    Sculptor::note_name(23, name, sizeof(name));
+    TEST(strcmp(name, "B-1") == 0);
+
+    Sculptor::note_name(24, name, sizeof(name));
+    TEST(strcmp(name, "C0") == 0);
+
+    Sculptor::note_name(51, name, sizeof(name));
+    TEST(strcmp(name, "D#2") == 0);
+
+    Sculptor::note_name(60, name, sizeof(name));
+    TEST(strcmp(name, "C3") == 0);
+
+    Sculptor::note_name(108, name, sizeof(name));
+    TEST(strcmp(name, "C7") == 0);
+}
+
 // Criterion 1: disconnect = wire gone, nothing more.  The stored editor
 // instrument keeps every oscillator with its parameters, and any oscillator
 // may wire into any free output input slot.
@@ -1596,8 +1626,9 @@ static void check_osc_slot_color_callback_contract()
 // Criterion 1 (auto-move): an oscillator output carries at most one wire.
 // Wiring an already-wired oscillator into a free slot auto-moves its old
 // wire; retargeting a wire's output end to an already-wired oscillator does
-// the same.  A hand-built graph with two wires out of one oscillator refuses
-// to compile.
+// the same.  A hand-built fan-out graph compiles: the repeated source
+// ordinal is accepted, and the compile copies the referenced layer into
+// every wired slot in slot order.
 static void check_osc_wire_auto_move()
 {
     // (i) A new wire moves the oscillator's existing wire.
@@ -1669,8 +1700,9 @@ static void check_osc_wire_auto_move()
              Sculptor::pool_no_slot);
     }
 
-    // (iii) A hand-built graph with two wires out of one oscillator refuses
-    // to compile; the GUI cannot produce the state.
+    // (iii) A hand-built graph with two wires out of one oscillator still
+    // compiles: both slots name the same layer, and the derived row keeps
+    // the ordinal of each slot's source in slot order.
     {
         const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage =
             std::make_unique<Synth::InstrumentEditorBank>();
@@ -1690,8 +1722,19 @@ static void check_osc_wire_auto_move()
         const Sculptor::EndPoint slot2_in = { mapping.output_node, mapping.output_layer_input_slot[2] };
         TEST(graph.add_connection(osc2_out, slot1_in) != Sculptor::pool_no_slot);
         TEST(graph.add_connection(osc2_out, slot2_in) != Sculptor::pool_no_slot);
-        Synth::Instrument compiled = {};
-        TEST(! Sculptor::compile_graph_to_instrument(graph, mapping, &compiled));
+        Synth::Instrument compiled                       = {};
+        uint8_t           derived_row[Synth::max_layers] = {};
+        TEST(Sculptor::compile_graph_to_instrument(graph, mapping, &compiled, derived_row));
+
+        const uint8_t expected_row[Synth::max_layers] = { 1, 3, 3 };
+        TEST(memcmp(derived_row, expected_row, sizeof(expected_row)) == 0);
+
+        // The retained refusal: a raw connection from a second oscillator
+        // into an already-occupied sum input refuses to compile.
+        const Sculptor::EndPoint osc1_out = { mapping.osc_nodes[1], mapping.osc_output_slot };
+        TEST(graph.add_connection(osc1_out, slot1_in) != Sculptor::pool_no_slot);
+        Synth::Instrument refused = {};
+        TEST(! Sculptor::compile_graph_to_instrument(graph, mapping, &refused, derived_row));
     }
 }
 
@@ -3928,7 +3971,15 @@ static void check_library_metadata_transactions()
     remove(path);
     TEST(Synth::save_library_record(path, "Regression", "FM", &source, 0) == 0);
     const uint32_t file_size = read_library_fixture(path, before, sizeof(before));
-    memset(static_cast<void*>(source.graph_layout[0].name), 'x', sizeof(source.graph_layout[0].name));
+    // The poison uses a kind-4 record whose name fills all 32 counted
+    // bytes with no terminator: a still-genuine refusal.
+    Synth::GraphNodeLayout& poison = source.graph_layout[1];
+    poison.kind                    = 4;
+    poison.channel                 = static_cast<uint8_t>(Synth::max_channels);
+    poison.zone                    = 0;
+    poison.index                   = 0;
+    poison.uid                     = 0;
+    memset(poison.name, 'x', sizeof(poison.name));
     const std::unique_ptr<Synth::InstrumentEditorBank> snapshot_storage =
         std::make_unique<Synth::InstrumentEditorBank>();
     Synth::InstrumentEditorBank& snapshot = *snapshot_storage;
@@ -4093,6 +4144,667 @@ static void check_decoded_fm_lfo_binding_survives_compile()
     TEST(compiled.lfo_desc_id == 1);
     TEST(compiled.lfo_op == Synth::SourceOp::add);
     TEST(compiled.lfo_depth == 0.5f);
+}
+
+// C3/C4 rename fixtures commit through the event ring the way the editor
+// drain does: rename_node fills the node title and pushes name_changed,
+// and apply_osc_graph_change is the drain's apply step.  The candidate
+// commit and its structural re-projection stay outside these checks; the
+// re-projections here stand in for the drain's own rebuild.
+static void check_renamed_oscillator_persists_through_save_load_and_reprojection()
+{
+    const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage = std::make_unique<Synth::InstrumentEditorBank>();
+    Synth::InstrumentEditorBank&                       bank         = *bank_storage;
+    build_named_fm_fixture(&bank);
+    const std::unique_ptr<Sculptor::Graph> graph_storage = std::make_unique<Sculptor::Graph>();
+    Sculptor::Graph&                       graph         = *graph_storage;
+    Sculptor::OscGraphMapping              mapping       = {};
+    TEST(Sculptor::project_editor_to_graph(bank, &graph, &mapping, 0, 0));
+    Sculptor::GraphChange discard[Sculptor::max_pending_changes] = {};
+    (void)graph.take_changes(discard, Sculptor::max_pending_changes);
+
+    const uint32_t osc0 = mapping.osc_nodes[0];
+    // Backward-compat baseline: the seeded kind-0 record has no name and
+    // the projection shows the default title.
+    const int32_t seeded = Sculptor::find_record(bank, 0, 0, 0, Synth::graph_canonical_first_osc, 0);
+    TEST(seeded >= 0);
+    if (seeded >= 0) {
+        TEST(bank.graph_layout[seeded].name[0] == 0);
+    }
+    TEST(strcmp(graph.node(osc0).name, "Oscillator 1") == 0);
+
+    graph.rename_node(osc0, "Lead Saw");
+    Sculptor::GraphChange changed[Sculptor::max_pending_changes] = {};
+    TEST(graph.take_changes(changed, Sculptor::max_pending_changes) == 1);
+    TEST(changed[0].kind == Sculptor::ChangeKind::name_changed);
+    TEST(changed[0].node_idx == osc0);
+    TEST(Sculptor::apply_osc_graph_change(&bank, &graph, &mapping, changed[0]));
+
+    // The committed rename upserts the zone's kind-0 record.
+    const int32_t saved = Sculptor::find_record(bank, 0, 0, 0, Synth::graph_canonical_first_osc, 0);
+    TEST(saved >= 0);
+    if (saved >= 0) {
+        TEST(strcmp(bank.graph_layout[saved].name, "Lead Saw") == 0);
+    }
+
+    // Re-projection restores the stored title (C4, re-projection half).
+    TEST(Sculptor::project_editor_to_graph(bank, &graph, &mapping, 0, 0));
+    (void)graph.take_changes(discard, Sculptor::max_pending_changes);
+    TEST(strcmp(graph.node(mapping.osc_nodes[0]).name, "Lead Saw") == 0);
+    // The un-renamed oscillator keeps its default title.
+    TEST(strcmp(graph.node(mapping.osc_nodes[1]).name, "Oscillator 2") == 0);
+
+    // Save + load round trip (C4, document half).
+    const std::unique_ptr<FixedArray<char, Synth::library_payload_max>> payload_storage =
+        std::make_unique<FixedArray<char, Synth::library_payload_max>>();
+    char (&payload)[Synth::library_payload_max] = payload_storage->elements;
+    const uint32_t length                       = Synth::encode_editor_bank_json(&bank, payload, sizeof(payload));
+    TEST(length > 0);
+    const std::unique_ptr<Synth::InstrumentEditorBank> decoded_storage =
+        std::make_unique<Synth::InstrumentEditorBank>();
+    Synth::InstrumentEditorBank& decoded = *decoded_storage;
+    memset(static_cast<void*>(&decoded), 0, sizeof(decoded));
+    TEST(Synth::decode_editor_bank_json(payload, length, &decoded));
+    TEST(Sculptor::validate_editor_metadata(decoded));
+    TEST(Sculptor::project_editor_to_graph(decoded, &graph, &mapping, 0, 0));
+    (void)graph.take_changes(discard, Sculptor::max_pending_changes);
+    TEST(strcmp(graph.node(mapping.osc_nodes[0]).name, "Lead Saw") == 0);
+    TEST(strcmp(graph.node(mapping.osc_nodes[1]).name, "Oscillator 2") == 0);
+}
+
+// C3/C4 boundary: a name filling all 32 counted bytes of the record field
+// stores with no terminator; encode, decode, validation and re-projection
+// must handle the full field without reading past byte 32.
+static void check_exactly_32_byte_oscillator_name_round_trips()
+{
+    const char* const full_name = "abcdefghijklmnopqrstuvwxyz012345"; // exactly 32 counted bytes
+    const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage = std::make_unique<Synth::InstrumentEditorBank>();
+    Synth::InstrumentEditorBank&                       bank         = *bank_storage;
+    build_named_fm_fixture(&bank);
+    const std::unique_ptr<Sculptor::Graph> graph_storage = std::make_unique<Sculptor::Graph>();
+    Sculptor::Graph&                       graph         = *graph_storage;
+    Sculptor::OscGraphMapping              mapping       = {};
+    TEST(Sculptor::project_editor_to_graph(bank, &graph, &mapping, 0, 0));
+    Sculptor::GraphChange discard[Sculptor::max_pending_changes] = {};
+    (void)graph.take_changes(discard, Sculptor::max_pending_changes);
+
+    const uint32_t osc0 = mapping.osc_nodes[0];
+    graph.rename_node(osc0, full_name);
+    Sculptor::GraphChange changed[Sculptor::max_pending_changes] = {};
+    TEST(graph.take_changes(changed, Sculptor::max_pending_changes) == 1);
+    TEST(changed[0].kind == Sculptor::ChangeKind::name_changed);
+    TEST(Sculptor::apply_osc_graph_change(&bank, &graph, &mapping, changed[0]));
+
+    // The record field holds all 32 counted bytes; no terminator exists,
+    // so only a bounded compare is legal here.
+    const int32_t saved = Sculptor::find_record(bank, 0, 0, 0, Synth::graph_canonical_first_osc, 0);
+    TEST(saved >= 0);
+    if (saved >= 0) {
+        TEST(memcmp(bank.graph_layout[saved].name, full_name, 32) == 0);
+    }
+
+    TEST(Sculptor::project_editor_to_graph(bank, &graph, &mapping, 0, 0));
+    (void)graph.take_changes(discard, Sculptor::max_pending_changes);
+    TEST(strcmp(graph.node(mapping.osc_nodes[0]).name, full_name) == 0);
+
+    const std::unique_ptr<FixedArray<char, Synth::library_payload_max>> payload_storage =
+        std::make_unique<FixedArray<char, Synth::library_payload_max>>();
+    char (&payload)[Synth::library_payload_max] = payload_storage->elements;
+    const uint32_t length                       = Synth::encode_editor_bank_json(&bank, payload, sizeof(payload));
+    TEST(length > 0);
+    const std::unique_ptr<Synth::InstrumentEditorBank> decoded_storage =
+        std::make_unique<Synth::InstrumentEditorBank>();
+    Synth::InstrumentEditorBank& decoded = *decoded_storage;
+    memset(static_cast<void*>(&decoded), 0, sizeof(decoded));
+    TEST(Synth::decode_editor_bank_json(payload, length, &decoded));
+    TEST(Sculptor::validate_editor_metadata(decoded));
+    TEST(Sculptor::project_editor_to_graph(decoded, &graph, &mapping, 0, 0));
+    (void)graph.take_changes(discard, Sculptor::max_pending_changes);
+    TEST(strcmp(graph.node(mapping.osc_nodes[0]).name, full_name) == 0);
+}
+
+// C3: committing an empty name is a no-op: the apply step skips the
+// kind-0 record write, so the structural re-projection restores the
+// default title and no name is stored.
+static void check_empty_rename_is_a_no_op()
+{
+    const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage = std::make_unique<Synth::InstrumentEditorBank>();
+    Synth::InstrumentEditorBank&                       bank         = *bank_storage;
+    build_named_fm_fixture(&bank);
+    const uint32_t                         records_before = bank.graph_layout_count;
+    const std::unique_ptr<Sculptor::Graph> graph_storage  = std::make_unique<Sculptor::Graph>();
+    Sculptor::Graph&                       graph          = *graph_storage;
+    Sculptor::OscGraphMapping              mapping        = {};
+    TEST(Sculptor::project_editor_to_graph(bank, &graph, &mapping, 0, 0));
+    Sculptor::GraphChange discard[Sculptor::max_pending_changes] = {};
+    (void)graph.take_changes(discard, Sculptor::max_pending_changes);
+
+    const uint32_t osc0 = mapping.osc_nodes[0];
+    graph.rename_node(osc0, "");
+    Sculptor::GraphChange changed[Sculptor::max_pending_changes] = {};
+    TEST(graph.take_changes(changed, Sculptor::max_pending_changes) == 1);
+    TEST(changed[0].kind == Sculptor::ChangeKind::name_changed);
+    // The no-op commit still applies cleanly: it writes nothing.
+    TEST(Sculptor::apply_osc_graph_change(&bank, &graph, &mapping, changed[0]));
+    TEST(bank.graph_layout_count == records_before);
+    const int32_t saved = Sculptor::find_record(bank, 0, 0, 0, Synth::graph_canonical_first_osc, 0);
+    TEST(saved >= 0);
+    if (saved >= 0) {
+        TEST(bank.graph_layout[saved].name[0] == 0);
+    }
+
+    TEST(Sculptor::project_editor_to_graph(bank, &graph, &mapping, 0, 0));
+    (void)graph.take_changes(discard, Sculptor::max_pending_changes);
+    TEST(strcmp(graph.node(mapping.osc_nodes[0]).name, "Oscillator 1") == 0);
+}
+
+// The derived-title helper joins deduplicated parameter
+// row labels with ", " and appends " (<host>)" when every label belongs to
+// one host node.  False (no labels) means the caller keeps the default
+// "Envelope N" / "LFO N" title.
+static void check_derive_generator_title_builds_titles()
+{
+    char title[64] = {};
+
+    const char* const volume[] = { "Volume" };
+    TEST(Sculptor::derive_generator_title(volume, 1, "Oscillator 1", title, sizeof(title)));
+    TEST(strcmp(title, "Volume (Oscillator 1)") == 0);
+
+    const char* const pan_pitch[] = { "Pan", "Pitch" };
+    TEST(Sculptor::derive_generator_title(pan_pitch, 2, "Oscillator 1", title, sizeof(title)));
+    TEST(strcmp(title, "Pan, Pitch (Oscillator 1)") == 0);
+
+    // Connections spanning several host nodes: no parenthetical.
+    TEST(Sculptor::derive_generator_title(pan_pitch, 2, nullptr, title, sizeof(title)));
+    TEST(strcmp(title, "Pan, Pitch") == 0);
+
+    // Duplicate labels dedup by string compare, preserving first-seen order.
+    const char* const pan_pan_pitch[] = { "Pan", "Pan", "Pitch" };
+    TEST(Sculptor::derive_generator_title(pan_pan_pitch, 3, nullptr, title, sizeof(title)));
+    TEST(strcmp(title, "Pan, Pitch") == 0);
+
+    const char* const volume_volume[] = { "Volume", "Volume" };
+    TEST(Sculptor::derive_generator_title(volume_volume, 2, "Oscillator 2", title, sizeof(title)));
+    TEST(strcmp(title, "Volume (Oscillator 2)") == 0);
+
+    // No labels: false means the caller keeps the default title, and the
+    // output buffer stays untouched (a null label list must not be read).
+    memset(static_cast<void*>(title), 'z', sizeof(title));
+    TEST(! Sculptor::derive_generator_title(nullptr, 0, "Oscillator 1", title, sizeof(title)));
+    TEST(title[0] == 'z');
+    TEST(title[sizeof(title) - 1] == 'z');
+
+    // An empty host title is no host: the result carries no parenthetical.
+    TEST(Sculptor::derive_generator_title(volume, 1, "", title, sizeof(title)));
+    TEST(strcmp(title, "Volume") == 0);
+
+    // A null label entry is refused before any write: the caller keeps the
+    // default title and the buffer stays untouched.
+    const char* const null_label[] = { nullptr };
+    memset(static_cast<void*>(title), 'z', sizeof(title));
+    TEST(! Sculptor::derive_generator_title(null_label, 1, nullptr, title, sizeof(title)));
+    TEST(title[0] == 'z');
+    TEST(title[sizeof(title) - 1] == 'z');
+
+    // A null entry after a valid label is refused too: refusal still
+    // happens before any write, so the whole buffer keeps its bytes.
+    const char* const valid_then_null[] = { "Pan", nullptr };
+    memset(static_cast<void*>(title), 'z', sizeof(title));
+    char before_null_entry[sizeof(title)] = {};
+    memcpy(before_null_entry, title, sizeof(before_null_entry));
+    TEST(! Sculptor::derive_generator_title(valid_then_null, 2, nullptr, title, sizeof(title)));
+    TEST(memcmp(title, before_null_entry, sizeof(title)) == 0);
+
+    // Capacity truncation: the title truncates into the buffer and stays
+    // NUL-terminated; at 8 bytes the joined labels keep a 7-character
+    // prefix and the host parenthetical is dropped entirely.
+    char tiny[8] = {};
+    TEST(Sculptor::derive_generator_title(pan_pitch, 2, "Oscillator 1", tiny, sizeof(tiny)));
+    TEST(strcmp(tiny, "Pan, Pi") == 0);
+    TEST(tiny[sizeof(tiny) - 1] == 0);
+}
+
+// C4 decode-side kind gate: a kind-4 (effect node) name must terminate
+// within its 32-byte field.  Bounded encode tolerates the unterminated
+// bytes by design, but decode refuses before the name can reach any
+// strcmp identity comparison.
+static void check_terminated_kind4_name_still_refused_to_decode()
+{
+    const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage = std::make_unique<Synth::InstrumentEditorBank>();
+    Synth::InstrumentEditorBank&                       bank         = *bank_storage;
+    build_named_fm_fixture(&bank);
+
+    // Append one kind-4 effect-node record whose name fills all 32
+    // counted bytes with no terminator.
+    TEST(bank.graph_layout_count < Synth::max_graph_records);
+    Synth::GraphNodeLayout& record = bank.graph_layout[bank.graph_layout_count++];
+    record                         = {};
+    record.channel                 = static_cast<uint8_t>(Synth::max_channels);
+    record.zone                    = 0;
+    record.kind                    = 4;
+    record.x                       = 10.0f;
+    record.y                       = 20.0f;
+    memset(record.name, 'x', sizeof(record.name));
+
+    const std::unique_ptr<FixedArray<char, Synth::library_payload_max>> payload_storage =
+        std::make_unique<FixedArray<char, Synth::library_payload_max>>();
+    char (&payload)[Synth::library_payload_max] = payload_storage->elements;
+    const uint32_t length                       = Synth::encode_editor_bank_json(&bank, payload, sizeof(payload));
+    TEST(length > 0);
+
+    const std::unique_ptr<Synth::InstrumentEditorBank> decoded_storage =
+        std::make_unique<Synth::InstrumentEditorBank>();
+    Synth::InstrumentEditorBank& decoded = *decoded_storage;
+    memset(static_cast<void*>(&decoded), 0, sizeof(decoded));
+    TEST(! Synth::decode_editor_bank_json(payload, length, &decoded));
+}
+
+// ---------------------------------------------------------------------------
+// Stale-but-harmless record data that no encoder ever writes decodes instead
+// of refusing the whole document.
+// ---------------------------------------------------------------------------
+
+// The splice helper is defined near its main users below; the validator
+// tests and the FIR slope splice tests need it before that point.
+static uint32_t splice_single_occurrence(const char* payload,
+                                         uint32_t    len,
+                                         const char* needle,
+                                         const char* replacement,
+                                         char*       out,
+                                         uint32_t    capacity);
+
+// A7: only kind-0 (oscillator title) and kind-4 (name-keyed fx node) records
+// carry names.  Stale non-empty name bytes on kinds 1/2/5 are ignored: a bank
+// carrying a named record of every such kind still decodes.
+static void check_validator_ignores_stale_kind125_names()
+{
+    const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage = std::make_unique<Synth::InstrumentEditorBank>();
+    Synth::InstrumentEditorBank&                       bank         = *bank_storage;
+    build_named_fm_fixture(&bank);
+
+    add_detached_record(&bank, 0, 0, 1, 2, 12, 13, Synth::ModSource::none, Synth::ModSource::none, 2);
+    strcpy(bank.graph_layout[bank.graph_layout_count - 1].name, "Stale envelope");
+
+    const uint16_t lfo = add_detached_lfo_descriptor(&bank);
+    add_detached_record(&bank, 0, 0, 2, lfo, 14, 15, Synth::ModSource::none, Synth::ModSource::none, 3);
+    strcpy(bank.graph_layout[bank.graph_layout_count - 1].name, "Stale LFO");
+
+    add_detached_record(&bank, 0, 0, 5, 0, 16, 17, Synth::ModSource::none, Synth::ModSource::none, 0);
+    strcpy(bank.graph_layout[bank.graph_layout_count - 1].name, "Stale parameters");
+
+    const std::unique_ptr<FixedArray<char, Synth::library_payload_max>> payload_storage =
+        std::make_unique<FixedArray<char, Synth::library_payload_max>>();
+    char (&payload)[Synth::library_payload_max] = payload_storage->elements;
+
+    const uint32_t length = Synth::encode_editor_bank_json(&bank, payload, sizeof(payload));
+    TEST(length > 0);
+
+    const std::unique_ptr<Synth::InstrumentEditorBank> decoded_storage =
+        std::make_unique<Synth::InstrumentEditorBank>();
+    Synth::InstrumentEditorBank& decoded = *decoded_storage;
+    memset(static_cast<void*>(&decoded), 0, sizeof(decoded));
+
+    TEST(Synth::decode_editor_bank_json(payload, length, &decoded));
+}
+
+// A2b: "LFO 0" parses as a well-formed effect-LFO title whose zero descriptor
+// names no LFO; the record drops as debris instead of refusing the document,
+// and the retained records around it keep their order.
+static void check_validator_accepts_lfo0_title()
+{
+    const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage = std::make_unique<Synth::InstrumentEditorBank>();
+    Synth::InstrumentEditorBank&                       bank         = *bank_storage;
+    build_named_fm_fixture(&bank);
+
+    const uint32_t base = bank.graph_layout_count;
+    add_detached_record(&bank, 0, 0, 1, 2, 30, 40, Synth::ModSource::none, Synth::ModSource::none, 2);
+
+    add_detached_record(&bank, 0, 0, 4, 0, 60, 70, Synth::ModSource::none, Synth::ModSource::none, 0);
+    strcpy(bank.graph_layout[bank.graph_layout_count - 1].name, "LFO 0");
+
+    add_detached_record(&bank, 0, 0, 1, 2, 80, 90, Synth::ModSource::none, Synth::ModSource::none, 3);
+
+    const std::unique_ptr<FixedArray<char, Synth::library_payload_max>> payload_storage =
+        std::make_unique<FixedArray<char, Synth::library_payload_max>>();
+    char (&payload)[Synth::library_payload_max] = payload_storage->elements;
+
+    const uint32_t length = Synth::encode_editor_bank_json(&bank, payload, sizeof(payload));
+    TEST(length > 0);
+
+    const std::unique_ptr<Synth::InstrumentEditorBank> decoded_storage =
+        std::make_unique<Synth::InstrumentEditorBank>();
+    Synth::InstrumentEditorBank& decoded = *decoded_storage;
+    memset(static_cast<void*>(&decoded), 0, sizeof(decoded));
+
+    TEST(Synth::decode_editor_bank_json(payload, length, &decoded));
+
+    TEST(decoded.graph_layout_count == base + 2);
+    TEST(decoded.graph_layout[base].kind == 1 && decoded.graph_layout[base].uid == 2);
+    TEST(decoded.graph_layout[base + 1].kind == 1 && decoded.graph_layout[base + 1].uid == 3);
+    for (uint32_t index = 0; index < decoded.graph_layout_count; ++index) {
+        TEST(strcmp(decoded.graph_layout[index].name, "LFO 0") != 0);
+    }
+}
+
+// A5/A9: the depth/rate wiring-source fields are reserved for kinds 1/2;
+// kind-4 and kind-5 records never read them, so non-zero residue is ignored
+// instead of refusing the document.
+static void check_validator_ignores_kind45_reserved_fields()
+{
+    const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage = std::make_unique<Synth::InstrumentEditorBank>();
+    Synth::InstrumentEditorBank&                       bank         = *bank_storage;
+    build_named_fm_fixture(&bank);
+
+    add_detached_record(&bank, 0, 0, 4, 0, 60, 70, Synth::ModSource::none, Synth::ModSource::none, 0);
+    strcpy(bank.graph_layout[bank.graph_layout_count - 1].name, "Delay");
+    bank.graph_layout[bank.graph_layout_count - 1].depth_source = 1;
+    bank.graph_layout[bank.graph_layout_count - 1].rate_source  = 2;
+
+    add_detached_record(&bank, 0, 0, 5, 0, 80, 90, Synth::ModSource::none, Synth::ModSource::none, 0);
+    bank.graph_layout[bank.graph_layout_count - 1].depth_source = 1;
+    bank.graph_layout[bank.graph_layout_count - 1].rate_source  = 2;
+
+    const std::unique_ptr<FixedArray<char, Synth::library_payload_max>> payload_storage =
+        std::make_unique<FixedArray<char, Synth::library_payload_max>>();
+    char (&payload)[Synth::library_payload_max] = payload_storage->elements;
+
+    const uint32_t length = Synth::encode_editor_bank_json(&bank, payload, sizeof(payload));
+    TEST(length > 0);
+
+    const std::unique_ptr<Synth::InstrumentEditorBank> decoded_storage =
+        std::make_unique<Synth::InstrumentEditorBank>();
+    Synth::InstrumentEditorBank& decoded = *decoded_storage;
+    memset(static_cast<void*>(&decoded), 0, sizeof(decoded));
+
+    TEST(Synth::decode_editor_bank_json(payload, length, &decoded));
+}
+
+// B2: only kind-2 LFO records read depth_source/rate_source, so the
+// decode-stage ModSource range bound applies to kind 2 alone.  The
+// counterpart below pins that rule.
+static void check_validator_skips_depth_rate_for_unused_kinds()
+{
+    const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage = std::make_unique<Synth::InstrumentEditorBank>();
+    Synth::InstrumentEditorBank&                       bank         = *bank_storage;
+    build_named_fm_fixture(&bank);
+
+    // Kind 0 keys a bound node and never reads the source bytes: an
+    // out-of-range residue on the third oscillator node decodes.
+    add_detached_record(&bank, 0, 0, 0, 3, 20, 21, Synth::ModSource::none, Synth::ModSource::none, 0);
+    bank.graph_layout[bank.graph_layout_count - 1].depth_source = 200;
+    bank.graph_layout[bank.graph_layout_count - 1].rate_source  = 200;
+
+    const std::unique_ptr<FixedArray<char, Synth::library_payload_max>> payload_storage =
+        std::make_unique<FixedArray<char, Synth::library_payload_max>>();
+    char (&payload)[Synth::library_payload_max] = payload_storage->elements;
+
+    const uint32_t length = Synth::encode_editor_bank_json(&bank, payload, sizeof(payload));
+    TEST(length > 0);
+
+    const std::unique_ptr<Synth::InstrumentEditorBank> decoded_storage =
+        std::make_unique<Synth::InstrumentEditorBank>();
+    Synth::InstrumentEditorBank& decoded = *decoded_storage;
+    memset(static_cast<void*>(&decoded), 0, sizeof(decoded));
+
+    TEST(Synth::decode_editor_bank_json(payload, length, &decoded));
+
+    // Counterpart: a kind-2 record reads its sources, so out-of-range bytes
+    // keep refusing the document.
+    const std::unique_ptr<Synth::InstrumentEditorBank> lfo_bank_storage =
+        std::make_unique<Synth::InstrumentEditorBank>();
+    Synth::InstrumentEditorBank& lfo_bank = *lfo_bank_storage;
+    build_named_fm_fixture(&lfo_bank);
+
+    const uint16_t lfo = add_detached_lfo_descriptor(&lfo_bank);
+    add_detached_record(&lfo_bank, 0, 0, 2, lfo, 22, 23, Synth::ModSource::none, Synth::ModSource::none, 1);
+    lfo_bank.graph_layout[lfo_bank.graph_layout_count - 1].depth_source = 200;
+    lfo_bank.graph_layout[lfo_bank.graph_layout_count - 1].rate_source  = 200;
+
+    const std::unique_ptr<FixedArray<char, Synth::library_payload_max>> lfo_payload_storage =
+        std::make_unique<FixedArray<char, Synth::library_payload_max>>();
+    char (&lfo_payload)[Synth::library_payload_max] = lfo_payload_storage->elements;
+
+    const uint32_t lfo_length = Synth::encode_editor_bank_json(&lfo_bank, lfo_payload, sizeof(lfo_payload));
+    TEST(lfo_length > 0);
+
+    const std::unique_ptr<Synth::InstrumentEditorBank> lfo_decoded_storage =
+        std::make_unique<Synth::InstrumentEditorBank>();
+    Synth::InstrumentEditorBank& lfo_decoded = *lfo_decoded_storage;
+    memset(static_cast<void*>(&lfo_decoded), 0, sizeof(lfo_decoded));
+
+    TEST(! Synth::decode_editor_bank_json(lfo_payload, lfo_length, &lfo_decoded));
+}
+
+// A17: a doubled oscillator (the same layer named by two sum-input slots)
+// is a compilable configuration.  The bank decodes; the deterministic compile
+// keeps a copy of the referenced layer in every wired slot, in slot order;
+// the clipboard round trip and the graph compile keep the doubled row.
+static void check_validator_accepts_duplicate_osc_in_row()
+{
+    const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage = std::make_unique<Synth::InstrumentEditorBank>();
+    Synth::InstrumentEditorBank&                       bank         = *bank_storage;
+    build_named_fm_fixture(&bank);
+
+    // The fixture's identity row is {1, 2, 3}; slot 1 doubles slot 0's layer.
+    bank.graph_osc_source[0][0][1] = 1;
+
+    const std::unique_ptr<FixedArray<char, Synth::library_payload_max>> payload_storage =
+        std::make_unique<FixedArray<char, Synth::library_payload_max>>();
+    char (&payload)[Synth::library_payload_max] = payload_storage->elements;
+
+    const uint32_t length = Synth::encode_editor_bank_json(&bank, payload, sizeof(payload));
+    TEST(length > 0);
+
+    const std::unique_ptr<Synth::InstrumentEditorBank> decoded_storage =
+        std::make_unique<Synth::InstrumentEditorBank>();
+    Synth::InstrumentEditorBank& decoded = *decoded_storage;
+    memset(static_cast<void*>(&decoded), 0, sizeof(decoded));
+
+    const bool decoded_ok = Synth::decode_editor_bank_json(payload, length, &decoded);
+    TEST(decoded_ok);
+    if (! decoded_ok) {
+        return;
+    }
+
+    Synth::Instrument playback = {};
+    TEST(Sculptor::compile_playback_instrument(decoded.bank.instruments.entries[0],
+                                               decoded.graph_osc_source[0][0],
+                                               &playback));
+    TEST(playback.layer_count == 3);
+    TEST(memcmp(&playback.layers[0], &decoded.bank.instruments.entries[0].layers[0], sizeof(Synth::Oscillator)) == 0);
+    TEST(memcmp(&playback.layers[1], &decoded.bank.instruments.entries[0].layers[0], sizeof(Synth::Oscillator)) == 0);
+    TEST(memcmp(&playback.layers[2], &decoded.bank.instruments.entries[0].layers[2], sizeof(Synth::Oscillator)) == 0);
+
+    // Clipboard round trip: the encode writes the doubled row unchanged and
+    // the decode accepts it, so the row survives the round trip.
+    const std::unique_ptr<FixedArray<char, 128 * 1024>> clipboard_storage =
+        std::make_unique<FixedArray<char, 128 * 1024>>();
+    char (&clipboard)[128 * 1024] = clipboard_storage->elements;
+
+    const uint32_t clipboard_len = Sculptor::encode_editor_instrument_json(decoded,
+                                                                           0,
+                                                                           0,
+                                                                           clipboard,
+                                                                           sizeof(clipboard),
+                                                                           Synth::InstrumentJsonDomain::clipboard);
+    TEST(clipboard_len > 0);
+
+    const std::unique_ptr<ClipboardDecode> round_storage = std::make_unique<ClipboardDecode>();
+    ClipboardDecode&                       round         = *round_storage;
+    fill_clipboard_sentinels(&round);
+    uint8_t clipboard_row[Synth::max_layers] = {};
+    TEST(Synth::decode_instrument_json_for_domain(clipboard,
+                                                  clipboard_len,
+                                                  &round.instr,
+                                                  round.envs,
+                                                  &round.env_count,
+                                                  round.lfos,
+                                                  &round.lfo_count,
+                                                  round.layout,
+                                                  max_portable_records,
+                                                  &round.layout_count,
+                                                  Synth::InstrumentJsonDomain::clipboard,
+                                                  clipboard_row));
+
+    const uint8_t expected_row[Synth::max_layers] = { 1, 1, 3 };
+    TEST(memcmp(clipboard_row, expected_row, sizeof(expected_row)) == 0);
+
+    // Projection and graph compilation keep accepting the doubled row: the
+    // derived row matches the stored one.
+    const std::unique_ptr<Sculptor::Graph> graph_storage = std::make_unique<Sculptor::Graph>();
+    Sculptor::Graph&                       graph         = *graph_storage;
+    Sculptor::OscGraphMapping              mapping       = {};
+    TEST(Sculptor::project_editor_to_graph(decoded, &graph, &mapping));
+
+    Synth::Instrument compiled                       = {};
+    uint8_t           derived_row[Synth::max_layers] = {};
+    TEST(Sculptor::compile_graph_to_instrument(graph, mapping, &compiled, derived_row));
+    TEST(memcmp(derived_row, expected_row, sizeof(expected_row)) == 0);
+}
+
+// C1/C2: portable layout records never carry a name or a negative size
+// override because the encoders never write one.  A direct-API record name
+// is accepted but not copied: the mapping and normalization outputs keep the
+// name bytes zero.  A negative size override is accepted and copied through,
+// and rendering selects the default sizes when an override is not positive.
+static void check_validator_accepts_portable_name_and_override()
+{
+    const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage = std::make_unique<Synth::InstrumentEditorBank>();
+    Synth::InstrumentEditorBank&                       bank         = *bank_storage;
+    Synth::Instrument                                  instrument   = {};
+    build_clipboard_zone_fixture(&bank, &instrument);
+    Sculptor::set_identity_osc_sources(&bank, 0, 0); // portable domains carry the wired (playback) form
+
+    // C2 rides a real document: the record's width and height serialize as
+    // "5", and the splices flip each sign to -5 behind the decoder's back.
+    add_detached_record(&bank,
+                        0,
+                        0,
+                        0,
+                        Synth::graph_canonical_first_osc,
+                        10,
+                        11,
+                        Synth::ModSource::none,
+                        Synth::ModSource::none,
+                        0);
+    bank.graph_layout[bank.graph_layout_count - 1].width_override  = 5;
+    bank.graph_layout[bank.graph_layout_count - 1].height_override = 5;
+
+    const std::unique_ptr<FixedArray<char, 128 * 1024>> text_storage = std::make_unique<FixedArray<char, 128 * 1024>>();
+    char (&text)[128 * 1024]                                         = text_storage->elements;
+
+    const uint32_t len = Sculptor::encode_editor_instrument_json(bank,
+                                                                 0,
+                                                                 0,
+                                                                 text,
+                                                                 sizeof(text),
+                                                                 Synth::InstrumentJsonDomain::validated_bank);
+    TEST(len > 0);
+
+    const std::unique_ptr<ClipboardDecode> decoded_storage = std::make_unique<ClipboardDecode>();
+    ClipboardDecode&                       decoded         = *decoded_storage;
+    fill_clipboard_sentinels(&decoded);
+    TEST(Synth::decode_instrument_json_for_domain(text,
+                                                  len,
+                                                  &decoded.instr,
+                                                  decoded.envs,
+                                                  &decoded.env_count,
+                                                  decoded.lfos,
+                                                  &decoded.lfo_count,
+                                                  decoded.layout,
+                                                  max_portable_records,
+                                                  &decoded.layout_count,
+                                                  Synth::InstrumentJsonDomain::validated_bank,
+                                                  nullptr));
+    TEST(decoded.layout_count == 1);
+
+    const std::unique_ptr<FixedArray<char, 128 * 1024>> spliced_storage =
+        std::make_unique<FixedArray<char, 128 * 1024>>();
+    char (&spliced)[128 * 1024] = spliced_storage->elements;
+
+    const uint32_t spliced_len =
+        splice_single_occurrence(text, len, "\"width\":", "\"width\":-", spliced, sizeof(spliced));
+    TEST(spliced_len > 0);
+    const uint32_t both_len =
+        splice_single_occurrence(spliced, spliced_len, "\"height\":", "\"height\":-", text, sizeof(text));
+    TEST(both_len > 0);
+
+    fill_clipboard_sentinels(&decoded);
+    TEST(Synth::decode_instrument_json_for_domain(text,
+                                                  both_len,
+                                                  &decoded.instr,
+                                                  decoded.envs,
+                                                  &decoded.env_count,
+                                                  decoded.lfos,
+                                                  &decoded.lfo_count,
+                                                  decoded.layout,
+                                                  max_portable_records,
+                                                  &decoded.layout_count,
+                                                  Synth::InstrumentJsonDomain::validated_bank,
+                                                  nullptr));
+
+    // The negative override bytes survive decode unchanged; rendering picks
+    // the default sizes when an override is not positive.
+    TEST(decoded.layout_count == 1);
+    TEST(decoded.layout[0].width_override == -5.0f && decoded.layout[0].height_override == -5.0f);
+
+    // C1 through the record-structure rule directly: the portable document
+    // grammar refuses a name key before record_structure_ok runs, so the
+    // stale-name record is exercised in memory against the mapping and
+    // normalization walks.
+    const std::unique_ptr<Synth::InstrumentEditorBank> named_bank_storage =
+        std::make_unique<Synth::InstrumentEditorBank>();
+    Synth::InstrumentEditorBank& named_bank       = *named_bank_storage;
+    Synth::Instrument            named_instrument = {};
+    build_clipboard_zone_fixture(&named_bank, &named_instrument);
+
+    Synth::InstrumentGraphLayout named_record = {};
+    named_record.kind                         = 0;
+    named_record.canonical_index              = Synth::graph_canonical_first_osc;
+    named_record.x                            = 1;
+    named_record.y                            = 2;
+    strcpy(named_record.name, "Stale");
+
+    Synth::GraphNodeLayout mapped[1]    = {};
+    uint32_t               mapped_count = 0;
+
+    const bool mapped_ok = Sculptor::map_instrument_graph_layout(named_instrument,
+                                                                 named_bank.bank.envelopes.entries,
+                                                                 named_bank.bank.envelopes.num_allocated,
+                                                                 named_bank.bank.lfos.entries,
+                                                                 named_bank.bank.lfos.num_allocated,
+                                                                 &named_record,
+                                                                 1,
+                                                                 mapped,
+                                                                 1,
+                                                                 &mapped_count);
+    TEST(mapped_ok);
+    TEST(! mapped_ok || mapped_count == 1);
+    TEST(mapped[0].name[0] == 0);
+
+    // Normalization ignores the stale name the same way: the output record's
+    // name bytes stay zero.
+    Synth::InstrumentGraphLayout old_normalized[1] = {};
+    uint32_t                     normalized_count  = 0;
+
+    const bool normalized_ok = Sculptor::normalize_instrument_graph_layout(named_instrument,
+                                                                           named_bank.bank.envelopes.entries,
+                                                                           named_bank.bank.envelopes.num_allocated,
+                                                                           named_bank.bank.lfos.entries,
+                                                                           named_bank.bank.lfos.num_allocated,
+                                                                           &named_record,
+                                                                           1,
+                                                                           named_instrument,
+                                                                           named_bank.bank.envelopes.entries,
+                                                                           named_bank.bank.envelopes.num_allocated,
+                                                                           named_bank.bank.lfos.entries,
+                                                                           named_bank.bank.lfos.num_allocated,
+                                                                           old_normalized,
+                                                                           1,
+                                                                           &normalized_count);
+    TEST(normalized_ok);
+    TEST(! normalized_ok || normalized_count == 1);
+    TEST(old_normalized[0].name[0] == 0);
 }
 
 static void check_unrepresented_layout_refusal()
@@ -4325,13 +5037,16 @@ static void check_shared_instrument_json_domains()
                 memset(static_cast<void*>(title), 'a', 30);
                 title[30] = static_cast<char>(0xc3);
             }
-            memcpy(source.graph_layout[0].name, title, sizeof(title));
+            // A kind-1 record name is stale residue: the portable document
+            // ignores it, so the encode and the re-saved record stay
+            // byte-identical to the unpoisoned ones.
+            memcpy(source.graph_layout[1].name, title, sizeof(title));
             snapshot = source;
             memcpy(text_before, text, sizeof(text));
-            TEST(Sculptor::encode_editor_instrument_json(source, 0, 0, text, sizeof(text), domain) == 0);
+            TEST(Sculptor::encode_editor_instrument_json(source, 0, 0, text, sizeof(text), domain) == valid_length);
             TEST(memcmp(text, text_before, sizeof(text)) == 0);
             TEST(memcmp(&source, &snapshot, sizeof(source)) == 0);
-            TEST(Synth::save_library_record(title_path, "Regression", "Titles", &source, 0) != 0);
+            TEST(Synth::save_library_record(title_path, "Regression", "Titles", &source, 0) == 0);
             TEST(memcmp(&source, &snapshot, sizeof(source)) == 0);
             TEST(read_library_fixture(title_path, file_after, sizeof(file_after)) == file_length);
             TEST(memcmp(file_before, file_after, file_length) == 0);
@@ -5903,15 +6618,6 @@ static void effects_layout_classification_regressions()
         TEST(memcmp(&candidate, &saved_candidate, sizeof(candidate)) == 0);
     }
 }
-
-// The splice helper is defined near its main users below; the FIR slope
-// splice tests need it before that point.
-static uint32_t splice_single_occurrence(const char* payload,
-                                         uint32_t    len,
-                                         const char* needle,
-                                         const char* replacement,
-                                         char*       out,
-                                         uint32_t    capacity);
 
 static void effects_clipboard_regressions()
 {
@@ -13349,9 +14055,7 @@ static void osc_instrument_node_layout_regressions()
     TEST(legacy_graph.node(legacy_mapping.instrument_node).position.y == default_position.y);
 
     // Kind-5 sanity: a nonzero uid or index refuses in the validate pass,
-    // and both the decode and the validate pass still refuse kind 6.  The
-    // LFO wiring-source fields are reserved for detached instances and
-    // refuse on kind 5 in both passes.
+    // and both the decode and the validate pass still refuse kind 6.
     {
         const std::unique_ptr<Synth::InstrumentEditorBank> bad_storage =
             std::make_unique<Synth::InstrumentEditorBank>();
@@ -13388,28 +14092,6 @@ static void osc_instrument_node_layout_regressions()
         kind6_bank.graph_layout[kind6_bank.graph_layout_count++] = kind6;
         TEST(! Sculptor::validate_editor_metadata(kind6_bank));
 
-        const std::unique_ptr<Synth::InstrumentEditorBank> depth_wired_storage =
-            std::make_unique<Synth::InstrumentEditorBank>();
-        Synth::InstrumentEditorBank& depth_wired = *depth_wired_storage;
-        build_zone_fixture(&depth_wired, &instrument);
-        Synth::GraphNodeLayout depth_record                        = malformed;
-        depth_record.uid                                           = 0;
-        depth_record.index                                         = 0;
-        depth_record.depth_source                                  = 1;
-        depth_wired.graph_layout[depth_wired.graph_layout_count++] = depth_record;
-        TEST(! Sculptor::validate_editor_metadata(depth_wired));
-
-        const std::unique_ptr<Synth::InstrumentEditorBank> rate_wired_storage =
-            std::make_unique<Synth::InstrumentEditorBank>();
-        Synth::InstrumentEditorBank& rate_wired = *rate_wired_storage;
-        build_zone_fixture(&rate_wired, &instrument);
-        Synth::GraphNodeLayout rate_record                       = malformed;
-        rate_record.uid                                          = 0;
-        rate_record.index                                        = 0;
-        rate_record.rate_source                                  = 1;
-        rate_wired.graph_layout[rate_wired.graph_layout_count++] = rate_record;
-        TEST(! Sculptor::validate_editor_metadata(rate_wired));
-
         char      overkind[256];
         const int printed = snprintf(overkind,
                                      sizeof(overkind),
@@ -13438,23 +14120,6 @@ static void osc_instrument_node_layout_regressions()
                                            "\"x\":1.0,\"y\":2.0,\"width\":0.0,\"height\":0.0}]}");
         TEST(index_printed > 0);
         TEST(! decode_bank_with_editor_section(source, badindex, &refused));
-
-        // A kind-5 record with a wiring source refuses in the decode too.
-        char      wired_json[256];
-        const int wired_printed = snprintf(wired_json,
-                                           sizeof(wired_json),
-                                           "{\"layouts\":[{\"channel\":0,\"zone\":0,\"kind\":5,\"depth_source\":1,"
-                                           "\"x\":1.0,\"y\":2.0,\"width\":0.0,\"height\":0.0}]}");
-        TEST(wired_printed > 0);
-        TEST(! decode_bank_with_editor_section(source, wired_json, &refused));
-
-        char      rate_json[256];
-        const int rate_printed = snprintf(rate_json,
-                                          sizeof(rate_json),
-                                          "{\"layouts\":[{\"channel\":0,\"zone\":0,\"kind\":5,\"rate_source\":1,"
-                                          "\"x\":1.0,\"y\":2.0,\"width\":0.0,\"height\":0.0}]}");
-        TEST(rate_printed > 0);
-        TEST(! decode_bank_with_editor_section(source, rate_json, &refused));
 
         // A plain kind-5 record decodes and applies through the editor JSON.
         char      good[256];
@@ -25497,7 +26162,6 @@ int main()
                   "\"height\":0}",
                   "unrelated locator key" },
                 { "{\"kind\":1,\"layer\":0,\"x\":0,\"y\":0,\"width\":0,\"height\":0}", "missing locator field" },
-                { "{\"kind\":1,\"layer\":0,\"target\":0,\"x\":0,\"y\":0,\"width\":-1,\"height\":0}", "negative width" },
                 { "{\"kind\":1,\"layer\":0,\"target\":0,\"x\":1e400,\"y\":0,\"width\":0,\"height\":0}",
                   "overflowed number" },
                 { "{\"kind\":0,\"canonical_index\":9,\"x\":0,\"y\":0,\"width\":0,\"height\":0}",
@@ -26075,8 +26739,9 @@ int main()
             TEST(new_mapped[0].kind == 1);
             TEST(new_mapped[0].x == 21.0f && new_mapped[0].y == 22.0f);
             TEST(new_mapped[0].uid != 0);
-            // Direct-struct controls (JSON bypassed): an unknown kind and a
-            // non-empty record name stay fatal through the direct API.
+            // Direct-struct controls (JSON bypassed): an unknown kind stays
+            // fatal through the direct API; a stale record name is ignored
+            // and never copied into the mapping.
             Synth::GraphNodeLayout       control_out[4]     = {};
             uint32_t                     control_count      = 4;
             Synth::InstrumentGraphLayout control_records[1] = {};
@@ -26097,34 +26762,41 @@ int main()
                                                          4,
                                                          &control_count));
             TEST(control_count == 4);
-            control_records[0].kind = Synth::instrument_graph_layout_envelope;
+
+            control_records[0].kind   = Synth::instrument_graph_layout_envelope;
+            control_records[0].layer  = new_layout[0].layer;
+            control_records[0].target = new_layout[0].target;
             strcpy(control_records[0].name, "Stale");
-            TEST(! Sculptor::map_instrument_graph_layout(new_instr,
-                                                         new_envs,
-                                                         new_env_count,
-                                                         new_lfos,
-                                                         new_lfo_count,
-                                                         control_records,
-                                                         1,
-                                                         control_out,
-                                                         4,
-                                                         &control_count));
-            TEST(control_count == 4);
-            TEST(! Sculptor::normalize_instrument_graph_layout(new_instr,
-                                                               new_envs,
-                                                               new_env_count,
-                                                               new_lfos,
-                                                               new_lfo_count,
-                                                               control_records,
-                                                               1,
-                                                               new_instr,
-                                                               new_envs,
-                                                               new_env_count,
-                                                               new_lfos,
-                                                               new_lfo_count,
-                                                               old_normalized,
-                                                               4,
-                                                               &old_normalized_count));
+            TEST(Sculptor::map_instrument_graph_layout(new_instr,
+                                                       new_envs,
+                                                       new_env_count,
+                                                       new_lfos,
+                                                       new_lfo_count,
+                                                       control_records,
+                                                       1,
+                                                       control_out,
+                                                       4,
+                                                       &control_count));
+            TEST(control_count == 1);
+            TEST(control_out[0].name[0] == 0);
+
+            TEST(Sculptor::normalize_instrument_graph_layout(new_instr,
+                                                             new_envs,
+                                                             new_env_count,
+                                                             new_lfos,
+                                                             new_lfo_count,
+                                                             control_records,
+                                                             1,
+                                                             new_instr,
+                                                             new_envs,
+                                                             new_env_count,
+                                                             new_lfos,
+                                                             new_lfo_count,
+                                                             old_normalized,
+                                                             4,
+                                                             &old_normalized_count));
+            TEST(old_normalized_count == 1);
+            TEST(old_normalized[0].name[0] == 0);
             // Source pin: the skip is logged by both mapping entry points.
             {
                 const std::unique_ptr<FixedArray<char, 256 * 1024>> graph_src_storage =
@@ -26866,6 +27538,16 @@ int main()
             check_editor_round_trip_capacity_failures();
             check_unrepresented_layout_refusal();
             check_decoded_fm_lfo_binding_survives_compile();
+            check_renamed_oscillator_persists_through_save_load_and_reprojection();
+            check_exactly_32_byte_oscillator_name_round_trips();
+            check_empty_rename_is_a_no_op();
+            check_terminated_kind4_name_still_refused_to_decode();
+            check_validator_ignores_stale_kind125_names();
+            check_validator_accepts_lfo0_title();
+            check_validator_ignores_kind45_reserved_fields();
+            check_validator_skips_depth_rate_for_unused_kinds();
+            check_validator_accepts_duplicate_osc_in_row();
+            check_validator_accepts_portable_name_and_override();
             check_legacy_library_numeric_domains();
             check_shared_instrument_json_domains();
             check_pad_json_codec();
@@ -26876,9 +27558,11 @@ int main()
             check_osc_add_source_contract();
             check_fx_drop_menu_source_contract();
             check_osc_lowest_free_slot();
+            check_note_name_formats_midi_notes();
             check_osc_wire_any_free_slot();
             check_osc_wire_auto_move();
             check_osc_slot_color_callback_contract();
+            check_derive_generator_title_builds_titles();
 #if OSC_SOURCE_TESTS
             check_osc_red_run_derivation();
             check_osc_playback_gaps();

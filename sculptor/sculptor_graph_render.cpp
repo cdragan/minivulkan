@@ -10,6 +10,7 @@
 #include "sculptor_graph.h"
 #include "sculptor_osc_graph.h"
 #include <stdio.h>
+#include <string.h>
 
 #include <float.h>
 #include <math.h>
@@ -56,6 +57,15 @@ constexpr float zoom_wheel_factor  = 1.2f;              // zoom step per wheel t
 constexpr float click_max_distance = 5.0f;              // press-release distance still a click
 constexpr float dot_pick_radius    = dot_radius + 4.0f; // dot hit-test radius
 constexpr float curve_min_reach    = 30.0f;             // bezier control point reach, px
+
+// Rename edit buffer, shared by every graph: at most one rename is active
+// at a time (renaming_node holds a single index).  Sized for Node::name
+// plus the terminator InputText requires.
+static char rename_edit_buffer[sizeof(Sculptor::Node::name) + 1] = {};
+
+// Marks of input slots fed by a selected source; the helper zeroes and
+// refills the buffer per receiver node.  One buffer serves the whole draw pass.
+static bool selected_source_marks[Sculptor::max_node_slots] = {};
 
 ImU32 to_imgui(uint32_t packed)
 {
@@ -299,6 +309,15 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
     const float line_h  = ImGui::GetTextLineHeightWithSpacing();
     const float frame_h = ImGui::GetFrameHeight();
 
+    // One pass over the pool decides the whole frame's highlight work.
+    bool any_node_selected = false;
+    for (uint32_t i = 0; i < max_nodes; ++i) {
+        if (is_selected(i)) {
+            any_node_selected = true;
+            break;
+        }
+    }
+
     for (uint32_t node_idx = 0; node_idx < max_nodes; ++node_idx) {
         if (! nodes.is_occupied(node_idx)) {
             state_widget_hovered[node_idx] = false;
@@ -307,11 +326,21 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
         Node&      node     = nodes.entries[node_idx];
         const bool is_ghost = node.ghost;
 
+        // Caller title override (the editor's derived generator titles);
+        // false keeps the model name.  Display-only: rename and identity
+        // still work on node.name.
+        char       title_override[128] = {};
+        const bool has_title_override =
+            node_title_callback &&
+            node_title_callback(node_title_user_data, *this, node_idx, title_override, sizeof(title_override));
+
+        const char* title_text = has_title_override ? title_override : node.name;
+
         // Layout: measure content (graph space, zoom applied when drawing).
         const float pad        = node_padding;
         const float title_h    = line_h * render_scale;
         float       content_h  = pad + title_h + title_row_spacing;
-        float       max_line_w = ImGui::CalcTextSize(node.name).x;
+        float       max_line_w = ImGui::CalcTextSize(title_text).x;
 
         // Lines: every slot belongs to the line of its row_group (0 = own
         // line).  Same-group slots pack onto one line in slot order, so a
@@ -492,27 +521,36 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
                         title_pos,
                         render_scale,
                         to_imgui(is_ghost ? colors_.ghost_node : colors_.node_title),
-                        node.name);
+                        title_text);
         draw_list->AddLine(ImVec2(rect_min.x, rect_min.y + title_h + pad * render_scale),
                            ImVec2(rect_max.x, rect_min.y + title_h + pad * render_scale),
                            to_imgui(colors_.node_border));
 
-        // Rename editor replaces the title text while active.
+        // Rename editor replaces the title text while active.  The editor
+        // works on a temporary buffer, and only a non-empty, changed title
+        // applies: Escape and an empty commit change nothing.
         if (renaming_node == node_idx && ! is_ghost) {
             if (renaming_focus) {
                 ImGui::SetKeyboardFocusHere();
+                snprintf(rename_edit_buffer, sizeof(rename_edit_buffer), "%s", node.name);
                 renaming_focus = false;
             }
             ImGui::SetCursorScreenPos(ImVec2(title_pos.x, title_pos.y));
             const float previous_font_scale = push_zoom_font(render_scale);
             ImGui::PushItemWidth((rect_max.x - rect_min.x) - 2.0f * pad * render_scale);
             ImGui::PushID(static_cast<int>(node_idx));
-            ImGui::InputText("##name", node.name, sizeof(node.name));
+            // Callers cap the accepted name with rename_buffer_size; the
+            // clamp keeps a larger value from overrunning the node buffer.
+            const uint32_t input_buffer_size = rename_buffer_size == 0 || rename_buffer_size > sizeof(node.name) + 1
+                                                   ? static_cast<uint32_t>(sizeof(node.name) + 1)
+                                                   : rename_buffer_size;
+            ImGui::InputText("##name", rename_edit_buffer, input_buffer_size);
             if (ImGui::IsItemDeactivated()) {
                 // Enter and focus loss commit; Esc reverts the text in ImGui,
-                // so the event fires only for actual edits.
-                if (ImGui::IsItemDeactivatedAfterEdit()) {
-                    push_change(ChangeKind::name_changed, node_idx, pool_no_slot, pool_no_slot);
+                // which equals the seeded title and so applies nothing.
+                if (ImGui::IsItemDeactivatedAfterEdit() && rename_edit_buffer[0] != 0 &&
+                    strcmp(rename_edit_buffer, node.name) != 0) {
+                    rename_node(node_idx, rename_edit_buffer);
                 }
                 interaction   = Interaction::idle;
                 renaming_node = pool_no_slot;
@@ -527,6 +565,10 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
         // and value widgets then run left to right.  A missing mark paints
         // the free dot red: the editor flags inputs whose expected
         // connection is absent (a broken oscillator sum edge).
+        if (any_node_selected) {
+            collect_selected_source_inputs(*this, node_idx, selected_source_marks);
+        }
+
         for (uint32_t line_idx = 0; line_idx < num_lines; ++line_idx) {
             const Line& line      = lines[line_idx];
             const float line_span = frame_h + 0.5f * node_padding;
@@ -640,10 +682,15 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
                 const bool  disabled =
                     slot.kind == SlotKind::property &&
                     (oscillator_slot_waveform_mode_disabled(node, slot_idx) || slot_edit_disabled(node_idx, slot_idx));
+                // Selection highlight wins over disabled: the label names the
+                // wire the user is tracing; the widget itself stays disabled.
+                const bool fed_by_selected = any_node_selected && selected_source_marks[slot_idx];
                 add_text_scaled(draw_list,
                                 vmath::vec2(cursor, y_center - line_h * render_scale * 0.5f),
                                 render_scale,
-                                to_imgui(disabled ? colors_.property_connected_value : colors_.property_value),
+                                to_imgui(fed_by_selected ? colors_.property_highlighted_value
+                                         : disabled      ? colors_.property_connected_value
+                                                         : colors_.property_value),
                                 slot.name);
                 if (slot.kind != SlotKind::property) {
                     cursor += name_w + 8.0f * render_scale;

@@ -1700,21 +1700,8 @@ bool Sculptor::compile_graph_to_instrument(const Graph&           graph,
             }
         }
     }
-    // One oscillator feeds at most one sum input: a wire's output end
-    // cannot fan out through the GUI (the validator refuses occupied slots
-    // and the applier moves existing wires), so two slots naming one
-    // oscillator mean a hand-built graph.  Refuse instead of picking one
-    // wire silently.
-    bool wired[Synth::max_layers] = {};
-    for (uint32_t slot = 0; slot < Synth::max_layers; ++slot) {
-        if (derived[slot] == 0) {
-            continue;
-        }
-        if (wired[derived[slot] - 1]) {
-            return false;
-        }
-        wired[derived[slot] - 1] = true;
-    }
+    // A repeated ordinal is accepted: both slots name the same layer, and
+    // the compile copies that layer into every wired slot in slot order.
     if (osc_source_out != nullptr) {
         memcpy(osc_source_out, derived, sizeof(derived));
     }
@@ -2831,6 +2818,43 @@ uint8_t Sculptor::allocate_detached_uid(const Synth::InstrumentEditorBank& bank,
     return 0;
 }
 
+// Applies one oscillator rename to the zone's kind-0 layout record: the
+// bounded node title rides the existing bound-node record, and a missing
+// record appends with the node's live position and size.  An empty node
+// title writes nothing, so an empty rename commit stays a no-op and the
+// re-projection restores the stored (or default) title.
+static bool upsert_osc_name_record(Synth::InstrumentEditorBank*     bank,
+                                   const Sculptor::Graph&           graph,
+                                   const Sculptor::OscGraphMapping& mapping,
+                                   uint32_t                         node_idx,
+                                   uint32_t                         channel,
+                                   uint32_t                         zone)
+{
+    if (node_idx >= Sculptor::max_nodes || ! graph.node_occupied(node_idx)) {
+        return true;
+    }
+
+    const uint32_t canonical = Sculptor::osc_graph_canonical_index(mapping, node_idx);
+    if (canonical == Sculptor::pool_no_slot) {
+        return true;
+    }
+
+    const Sculptor::Node& node = graph.node(node_idx);
+    if (node.name[0] == 0) {
+        return true;
+    }
+
+    Synth::GraphNodeLayout* record =
+        Sculptor::upsert_graph_layout_record(bank, channel, zone, 0, static_cast<uint8_t>(canonical), node);
+    if (! record) {
+        return false;
+    }
+
+    memset(record->name, 0, sizeof(record->name));
+    Sculptor::copy_name_bounded(record->name, sizeof(record->name), node.name, sizeof(node.name));
+    return true;
+}
+
 bool Sculptor::apply_osc_graph_change(Synth::InstrumentEditorBank* bank,
                                       Graph*                       graph,
                                       OscGraphMapping*             mapping,
@@ -2848,7 +2872,7 @@ bool Sculptor::apply_osc_graph_change(Synth::InstrumentEditorBank* bank,
         case ChangeKind::node_deleted:
             return apply_node_deleted(bank, graph, mapping, change, channel, zone);
         case ChangeKind::name_changed:
-            return true; // node names carry no model state in this graph
+            return upsert_osc_name_record(bank, *graph, *mapping, change.node_idx, channel, zone);
         default:
             return true; // node/slot additions and colors carry no model state
     }
@@ -2987,6 +3011,11 @@ bool Sculptor::project_editor_to_graph(const Synth::InstrumentEditorBank& bank,
     mapping->channel = channel;
     mapping->zone    = zone;
 
+    // Oscillator titles persist in the 32-byte kind-0 record field, so the
+    // rename editor accepts at most 32 counted bytes (33 with the
+    // terminator InputText requires).
+    graph->rename_buffer_size = sizeof(Synth::GraphNodeLayout::name) + 1;
+
     // Records attach to derived nodes: kind-1/2 records to the first
     // unclaimed instance with a matching key (records visited in array
     // order; attachment consumes one instance per record).  Surplus
@@ -3006,6 +3035,14 @@ bool Sculptor::project_editor_to_graph(const Synth::InstrumentEditorBank& bank,
                                    vmath::vec2(record.x, record.y),
                                    record.width_override,
                                    record.height_override);
+            if (record.name[0] != 0) {
+                // rename_node reads its argument to the first NUL, so the
+                // record field is staged first: a full 32-byte name has no
+                // terminator, and the zeroed buffer keeps one reserved.
+                char staged[sizeof(record.name) + 1] = {};
+                Sculptor::copy_name_bounded(staged, sizeof(staged), record.name, sizeof(record.name));
+                graph->rename_node(node, staged);
+            }
             continue;
         }
         if (record.kind == 5) {
@@ -3118,6 +3155,46 @@ void Sculptor::undo_group_reset(UndoGroupState* state)
 bool Sculptor::graph_records_have_capacity(const Synth::InstrumentEditorBank& bank, uint32_t additional)
 {
     return bank.graph_layout_count + additional <= Synth::max_graph_records;
+}
+
+// Updates or appends the layout record keyed by (channel, zone, kind,
+// index) with uid 0: the lookup selects bound records whose uid is 0, and
+// records with another uid are not selected.  The record's position and
+// size overrides follow the node, and a missing record appends zeroed when
+// the array has capacity.  Returns the existing-or-appended record, or null
+// on capacity refusal.
+Synth::GraphNodeLayout* Sculptor::upsert_graph_layout_record(Synth::InstrumentEditorBank* bank,
+                                                             uint32_t                     channel,
+                                                             uint32_t                     zone,
+                                                             uint8_t                      kind,
+                                                             uint8_t                      index,
+                                                             const Sculptor::Node&        node_ref)
+{
+    const int32_t record_idx = Sculptor::find_record(*bank, channel, zone, kind, index, 0);
+    if (record_idx >= 0) {
+        Synth::GraphNodeLayout& record = bank->graph_layout[record_idx];
+        record.x                       = node_ref.position.x;
+        record.y                       = node_ref.position.y;
+        record.width_override          = node_ref.content_width_override;
+        record.height_override         = node_ref.content_height_override;
+        return &record;
+    }
+
+    if (! Sculptor::graph_records_have_capacity(*bank, 1)) {
+        return nullptr;
+    }
+
+    Synth::GraphNodeLayout record                  = {};
+    record.channel                                 = static_cast<uint8_t>(channel);
+    record.zone                                    = static_cast<uint8_t>(zone);
+    record.kind                                    = kind;
+    record.index                                   = index;
+    record.x                                       = node_ref.position.x;
+    record.y                                       = node_ref.position.y;
+    record.width_override                          = node_ref.content_width_override;
+    record.height_override                         = node_ref.content_height_override;
+    bank->graph_layout[bank->graph_layout_count++] = record;
+    return &bank->graph_layout[bank->graph_layout_count - 1];
 }
 
 void Sculptor::compute_publish_channel_enabled(const Synth::InstrumentEditorBank& bank,
@@ -3466,16 +3543,15 @@ static uint32_t derive_portable_nodes(const Synth::Instrument& instrument, Porta
     return count;
 }
 
-// Structural validity of a portable layout record: a NUL-terminated EMPTY
-// name (the portable encoder deliberately leaves names empty), finite
-// position and non-negative size overrides.  A record failing this is
-// document corruption; only a structurally valid record that resolves to no
-// node may be dropped as removable-target debris.
+// Structural validity of a portable layout record: a NUL-terminated name
+// (stale title bytes are accepted and never copied into the mapping), finite
+// position and size overrides.  A record failing this is document
+// corruption; only a structurally valid record that resolves to no node may
+// be dropped as removable-target debris.
 static bool record_structure_ok(const Synth::InstrumentGraphLayout& record)
 {
-    return memchr(record.name, 0, sizeof(record.name)) && record.name[0] == 0 && std::isfinite(record.x) &&
-           std::isfinite(record.y) && std::isfinite(record.width_override) && std::isfinite(record.height_override) &&
-           record.width_override >= 0 && record.height_override >= 0;
+    return memchr(record.name, 0, sizeof(record.name)) && std::isfinite(record.x) && std::isfinite(record.y) &&
+           std::isfinite(record.width_override) && std::isfinite(record.height_override);
 }
 
 static uint32_t resolve_portable_node(const Synth::InstrumentGraphLayout& record,
@@ -3528,7 +3604,6 @@ static void copy_portable_position(Synth::InstrumentGraphLayout*       destinati
     destination->y               = source.y;
     destination->width_override  = source.width_override;
     destination->height_override = source.height_override;
-    memcpy(destination->name, source.name, sizeof(destination->name));
 }
 
 // Shared per-record drop policy for the layout mapping and normalization
@@ -3619,7 +3694,6 @@ bool Sculptor::map_instrument_graph_layout(const Synth::Instrument&            i
         record.y                       = layout[index].y;
         record.width_override          = layout[index].width_override;
         record.height_override         = layout[index].height_override;
-        memcpy(record.name, layout[index].name, sizeof(record.name));
     }
 
     if (count)

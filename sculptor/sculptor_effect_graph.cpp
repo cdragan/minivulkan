@@ -825,7 +825,8 @@ bool Sculptor::project_effect_chain_to_graph(const Synth::InstrumentEditorBank& 
         graph->set_slot_edit_disabled(node, period_idx, lfo.beat_div != 0);
         // Shared slot order with the oscillator graph's LFO node
         // (sculptor_osc_graph.cpp); the dispatch below is index-based.
-        graph->add_slot(node, bounded_real_slot("Pulse", static_cast<float>(lfo.pulse_mix) / 255.0f, 0.0f, 1.0f, false));
+        graph->add_slot(node,
+                        bounded_real_slot("Pulse", static_cast<float>(lfo.pulse_mix) / 255.0f, 0.0f, 1.0f, false));
         graph->add_slot(node, list_slot("Sync", lfo_sync_names, 6, lfo.beat_div <= 5 ? lfo.beat_div : 0));
         graph->add_slot(node, list_slot("Start", lfo_start_names, 3, lfo.start_point <= 2 ? lfo.start_point : 0));
     }
@@ -1706,10 +1707,11 @@ static bool effect_layout_identity(const Synth::InstrumentBank& bank,
     return false;
 }
 
-// Generated effect titles and the legacy "MIDI" key can be obsolete
-// presentation.  Descriptor titles
-// remain references and must resolve, even when no parameter uses the node.
-static bool obsolete_effect_title(const char* name)
+// Generated effect titles, the legacy "MIDI" key, and parseable LFO
+// titles with a zero descriptor can be obsolete presentation.  Nonzero
+// descriptor titles remain references and must resolve, even when no
+// parameter uses the node.
+static bool obsolete_effect_title(const char (&name)[32])
 {
     // "MIDI" keyed the MIDI node's layout record before the node was
     // retitled "MIDI Inputs"; old saved records drop instead of refusing
@@ -1717,6 +1719,15 @@ static bool obsolete_effect_title(const char* name)
     if (strcmp(name, "MIDI") == 0) {
         return true;
     }
+
+    // A parseable LFO title with a zero descriptor ("LFO 0" residue)
+    // references no live LFO: dropped like other obsolete titles instead
+    // of refusing the load.
+    uint16_t descriptor = 0;
+    if (Sculptor::parse_effect_lfo_title(name, &descriptor) && descriptor == 0) {
+        return true;
+    }
+
     for (uint32_t type = 1; type < Synth::num_effect_types; ++type) {
         const char* title = Sculptor::effect_type_info(static_cast<Synth::EffectType>(type)).name;
         if (strcmp(name, title) == 0) {
@@ -1741,9 +1752,9 @@ enum class EffectLayoutClassification {
 
 static EffectLayoutClassification classify_effect_layout(const Synth::InstrumentBank& bank,
                                                          uint32_t                     owner,
-                                                         const char*                  name,
-                                                         uint8_t*                     kind,
-                                                         uint16_t*                    identity)
+                                                         const char (&name)[32],
+                                                         uint8_t*  kind,
+                                                         uint16_t* identity)
 {
     if (effect_layout_identity(bank, owner, name, kind, identity)) {
         return EffectLayoutClassification::resolved;
@@ -2025,10 +2036,10 @@ void Sculptor::refresh_lfo_edit_disabled(Sculptor::Graph& graph, uint32_t node)
         return;
     }
 
-    const Sculptor::Node& node_ref = graph.node(node);
-    uint32_t              wave_idx = Sculptor::pool_no_slot;
-    uint32_t              duty_idx = Sculptor::pool_no_slot;
-    uint32_t              sync_idx = Sculptor::pool_no_slot;
+    const Sculptor::Node& node_ref   = graph.node(node);
+    uint32_t              wave_idx   = Sculptor::pool_no_slot;
+    uint32_t              duty_idx   = Sculptor::pool_no_slot;
+    uint32_t              sync_idx   = Sculptor::pool_no_slot;
     uint32_t              period_idx = Sculptor::pool_no_slot;
     for (uint32_t slot = 0; slot < node_ref.slots.num_allocated; ++slot) {
         const Sculptor::Slot& slot_ref = node_ref.slots.entries[slot];
