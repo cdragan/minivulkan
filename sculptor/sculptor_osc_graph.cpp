@@ -109,11 +109,12 @@ static_assert(static_cast<uint32_t>(Synth::mod_pad_tilt0) == 9);
 static_assert(Synth::max_mod_inputs == 2);
 
 const char* const target_names[Synth::num_mod_targets] = {
-    "volume",     "pitch",      "panning",   "Duty A", "Duty B", "Waveform Mix", "FM Depth", "Band spread", "FM Ratio",
-    "Pad Tone A", "Pad Tone B", "FIR Slope", "Offset", "Gain",   "Offset",       "Spread",   "Gain",        "Slope",
-    "Offset",     "Spread",     "Gain",      "Slope",  "Offset", "Spread",       "Gain",     "Slope"
+    "volume",      "pitch",    "panning",    "Duty A",     "Duty B",    "Waveform Mix", "FM Depth",
+    "Band spread", "FM Ratio", "Pad Tone A", "Pad Tone B", "FIR Slope", "Offset",       "Gain",
+    "Offset",      "Spread",   "Gain",       "FIR Slope",  "Offset",    "Spread",       "Gain",
+    "FIR Slope",   "Offset",   "Spread",     "Gain",       "FIR Slope"
 };
-const char* const wave_names[6]     = { "off", "sine", "saw", "pulse", "noise", "pad" };
+const char* const wave_names[6]     = { "off", "sine", "sawtooth", "pulse", "noise", "pad" };
 const char* const osc_mode_names[4] = { "blend", "frequency modulation", "hard sync", "ring modulation" };
 const char* const filter_type_names[Synth::num_filter_types] = { "off", "bandpass", "lowpass", "highpass" };
 
@@ -228,9 +229,10 @@ constexpr uint32_t lfo_rate_input  = 2;
 constexpr uint32_t canonical_first_osc  = Synth::graph_canonical_first_osc;
 constexpr uint32_t canonical_first_env  = Synth::graph_canonical_first_env;
 constexpr uint32_t canonical_node_count = Synth::graph_canonical_node_count;
-// Band rows nest two levels under the band header rows, so their modulation
-// blocks shift the same distance deeper than the legacy nested rows.
-constexpr uint8_t osc_band_block_level = 4;
+// Band rows nest one level under the band header rows, which themselves
+// nest one level under the Filter Type row: header at 1, value rows at
+// 2, blocks at 3, rate/amount rows at 4.
+constexpr uint8_t osc_band_block_level = 3;
 } // namespace
 
 // Oscillator-node rows whose widgets only make sense for the current
@@ -408,7 +410,11 @@ static Sculptor::Slot osc_view_connectable_slot(const char*       name,
 }
 
 // Band block grammar: one renderer line per band packs the band header
-// label and its two click slots, nested two levels under Filter Type.
+// label and its two click slots, as a child row of the Filter Type row
+// (the legacy Cutoff row's depth), so the band tree reads one level
+// shallower than the wave-5 depths while keeping the parent-child
+// relation to Filter Type: header at 1, rows at 2, blocks at 3, rate
+// and amount rows at 4.
 // (The row-group ids live in the header; the renderer keys on the range;
 // the block level sits in the anonymous namespace.)
 
@@ -424,12 +430,6 @@ static constexpr Synth::ModTarget band_target(const uint32_t band, const uint32_
         Synth::mod_fir_slope,
     };
     return band == 0 ? band0_targets[param] : static_cast<Synth::ModTarget>(14u + 4u * (band - 1u) + param);
-}
-
-// The slope row label: generic under bandpass, legacy label otherwise.
-static const char* bandpass_slope_name(Synth::FilterType type)
-{
-    return type == Synth::fir_bandpass ? "Slope" : "FIR Slope";
 }
 
 // The band index (0..3) of a band-parameter target, or -1 when the target
@@ -537,14 +537,14 @@ static void append_band_row(Graph* graph, uint32_t node, Synth::ModTarget target
                                                          1,
                                                          100);
         slot.child_row      = true;
-        slot.child_level    = 3;
+        slot.child_level    = 2;
         slot.connectable    = true;
         slot.drop_menu      = true;
         graph->add_slot(node, slot);
     }
     else {
         Sculptor::Slot slot = osc_view_connectable_slot(target_names[t], osc.targets[target].base_value, target, true);
-        slot.child_level    = 3;
+        slot.child_level    = 2;
         graph->add_slot(node, slot);
     }
     append_target_block(graph, node, target, osc.targets[target], osc_band_block_level);
@@ -905,30 +905,29 @@ static void project_osc_node(Sculptor::Graph*           graph,
         node,
         list_slot("Filter Type", filter_type_names, Synth::num_filter_types, static_cast<uint32_t>(osc.fir_type)));
 
-    // One uniform block per existing band, directly under Filter Type:
-    // the "Band N" header label row with its [-]/[+] click slots, then
-    // the band's four parameter rows, each followed by its 12-slot
-    // modulation block. Every existing band is always visible - there is
-    // no band selection. [-] on band N removes band N (later bands shift
-    // up); [+] inserts a copy of band N after it. The click slots' toggle
-    // values stay untouched (a press is an action, never a state); the
-    // edit-disabled flags gray them at the count bounds.
+    // One uniform block per existing band, nested under Filter Type:
+    // the "Band N" header label row with its [-]/[+] click slots one
+    // level under the Filter Type row, then the band's four parameter
+    // rows, each followed by its 12-slot modulation block. Every existing
+    // band is always visible - there is no band selection. [-] on band N
+    // removes band N (later bands shift up); [+] inserts a copy of band N
+    // after it. The click slots' toggle values stay untouched (a press is
+    // an action, never a state); the edit-disabled flags gray them at the
+    // count bounds.
     const uint32_t band_count = osc_band_model_count(osc);
     for (uint32_t band = 0; band < band_count; ++band) {
         const uint8_t  row_group = static_cast<uint8_t>(Sculptor::osc_band_row_group + band);
         Sculptor::Slot header    = Sculptor::make_slot(band_header_names[band], Sculptor::SlotKind::property);
-        header.child_row         = true;
-        header.child_level       = 2;
         header.row_group         = row_group;
+        // The header line anchors the row group's nesting: one level under
+        // Filter Type, like the legacy Cutoff row.
+        header.child_row   = true;
+        header.child_level = 1;
         graph->add_slot(node, header);
         Sculptor::Slot band_minus_slot = Sculptor::toggle_slot("-", false);
-        band_minus_slot.child_row      = true;
-        band_minus_slot.child_level    = 2;
         band_minus_slot.row_group      = row_group;
         graph->add_slot(node, band_minus_slot);
         Sculptor::Slot band_plus_slot = Sculptor::toggle_slot("+", false);
-        band_plus_slot.child_row      = true;
-        band_plus_slot.child_level    = 2;
         band_plus_slot.row_group      = row_group;
         graph->add_slot(node, band_plus_slot);
 
@@ -936,7 +935,13 @@ static void project_osc_node(Sculptor::Graph*           graph,
         // Spread/Slope rows keep their legacy targets (7/11) so saved banks stay
         // bit-compatible; only their slots moved.  Every band row nests
         // one level under the band header row, so its modulation block
-        // shifts with it.
+        // shifts with it.  Band 0's Spread/Slope slots double as the legacy
+        // single-edge rows (Cutoff (Hz) / FIR Slope) under low-pass and
+        // high-pass: those keep the legacy depths (row 1, block 2), while
+        // the bandpass band block sits one level deeper (rows 2, blocks 3).
+        const bool    bandpass_layout   = osc.fir_type == Synth::fir_bandpass;
+        const uint8_t band0_row_level   = bandpass_layout ? 2 : 1;
+        const uint8_t band0_block_level = bandpass_layout ? osc_band_block_level : 2;
         if (band == 0) {
             append_band_row(graph, node, Synth::mod_fir_band0_offset, osc);
             {
@@ -945,14 +950,14 @@ static void project_osc_node(Sculptor::Graph*           graph,
                                                                       Synth::mod_fir_spread,
                                                                       true,
                                                                       osc.fir_type);
-                spread_row.child_level    = 3;
+                spread_row.child_level    = band0_row_level;
                 graph->add_slot(node, spread_row);
             }
             append_target_block(graph,
                                 node,
                                 Synth::mod_fir_spread,
                                 osc.targets[Synth::mod_fir_spread],
-                                osc_band_block_level);
+                                band0_block_level);
             append_band_row(graph, node, Synth::mod_fir_band0_gain, osc);
             // The FIR Slope row stays an integer-percent slot: it displays the effective slope (the routed
             // base when the binding is present, the layer's fir_slope scalar otherwise, per the shared
@@ -961,21 +966,19 @@ static void project_osc_node(Sculptor::Graph*           graph,
             // the scalar carries the value.
             const float slope_seed =
                 Synth::osc_fir_slope_seed_value(osc.targets[Synth::mod_fir_slope], osc.fir_slope_percent);
-            const float    slope_display  = slope_seed < 1.0f ? 1.0f : slope_seed > 100.0f ? 100.0f : slope_seed;
-            Sculptor::Slot fir_slope_slot = Sculptor::bounded_int_slot(bandpass_slope_name(osc.fir_type),
-                                                                       static_cast<int32_t>(slope_display + 0.5f),
-                                                                       1,
-                                                                       100);
-            fir_slope_slot.child_row      = true;
-            fir_slope_slot.child_level    = 3;
-            fir_slope_slot.connectable    = true;
-            fir_slope_slot.drop_menu      = true;
+            const float    slope_display = slope_seed < 1.0f ? 1.0f : slope_seed > 100.0f ? 100.0f : slope_seed;
+            Sculptor::Slot fir_slope_slot =
+                Sculptor::bounded_int_slot("FIR Slope", static_cast<int32_t>(slope_display + 0.5f), 1, 100);
+            fir_slope_slot.child_row   = true;
+            fir_slope_slot.child_level = band0_row_level;
+            fir_slope_slot.connectable = true;
+            fir_slope_slot.drop_menu   = true;
             graph->add_slot(node, fir_slope_slot);
             append_target_block(graph,
                                 node,
                                 Synth::mod_fir_slope,
                                 osc.targets[Synth::mod_fir_slope],
-                                osc_band_block_level);
+                                band0_block_level);
         }
         else {
             append_band_row(graph, node, band_target(band, 0), osc);

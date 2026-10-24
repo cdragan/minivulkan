@@ -209,6 +209,32 @@ bool Synth::preflight_effect_expansion(const InstrumentBank& bank, EffectExpansi
                 }
             }
 
+            // FIR band bindings ride the same acceptance and node-counting rules as the scalar
+            // params.  Dormant bands (beyond the count, or band 0's gain on the legacy single-band
+            // form, whose staging ignores it) validate but count nothing.
+            if (binding.type == EffectType::fir) {
+                if (binding.fir_bands.band_count > max_fir_effect_bands) {
+                    *error = "fir effect names too many bands";
+                    return false;
+                }
+                // Active band params: band 0's gain plus each band 1..count-1's four values.
+                const uint32_t active_band_params =
+                    binding.fir_bands.band_count <= 1 ? 0 : 1 + 4 * (binding.fir_bands.band_count - 1);
+                // Dormant band bindings are ignored like the params tail; remap and
+                // canonicalize zero them.
+                for (uint32_t band_param = 0; band_param < active_band_params; band_param++) {
+                    const EffectParamBinding& band_binding = binding.fir_bands.bands[band_param];
+                    if (! validate_effect_param_binding(band_binding, bank.lfos.num_allocated)) {
+                        *error = "fir effect carries an invalid band binding";
+                        return false;
+                    }
+                    if (band_binding.lfo_desc_id || band_binding.num_inputs) {
+                        ++num_modulated;
+                        plan.num_nodes += 1 + (band_binding.lfo_desc_id ? 1u : 0u);
+                    }
+                }
+            }
+
             if (! state_bytes) {
                 continue; // stateless or disabled: state_offs stays 0, nothing to clear
             }
@@ -250,6 +276,78 @@ bool Synth::preflight_effect_expansion(const InstrumentBank& bank, EffectExpansi
     }
     *out_plan = plan;
     return true;
+}
+
+// Seeds one effect parameter's live value and wires its modulation through the writer:
+// a dest node plus an optional LFO leaf.  Returns the dest node id, 0 for an unmodulated
+// parameter.  A passing preflight guarantees every assert here holds.
+static uint16_t commit_effect_param(const Synth::EffectParamBinding& param_binding,
+                                    const Synth::InstrumentBank&     bank,
+                                    const Synth::EffectNodeWriter&   writer,
+                                    const uint32_t                   midi_channel,
+                                    float*                           value_out)
+{
+    // Every value commit consumes is asserted, including for unmodulated params.
+    assert(finite_value(param_binding.base_value) && finite_value(param_binding.lfo_depth) &&
+           finite_value(param_binding.lfo_rate_scale));
+    assert(param_binding.num_inputs <= Synth::max_mod_inputs);
+
+    *value_out = param_binding.base_value;
+
+    if (! param_binding.lfo_desc_id && ! param_binding.num_inputs) {
+        return 0;
+    }
+
+    assert(param_binding.lfo_op == Synth::SourceOp::add || param_binding.lfo_op == Synth::SourceOp::multiply);
+    assert(param_binding.lfo_desc_id <= bank.lfos.num_allocated);
+    for (uint32_t input = 0; input < param_binding.num_inputs; input++) {
+        assert(is_valid_effect_input(param_binding.inputs[input]));
+        assert(param_binding.inputs[input].op == Synth::SourceOp::add ||
+               param_binding.inputs[input].op == Synth::SourceOp::multiply);
+        assert(finite_value(param_binding.inputs[input].scale));
+    }
+
+    const uint32_t dest_node = writer.alloc_node(writer.ctx);
+    assert(dest_node); // the preflight counted this node
+
+    uint32_t lfo_node = 0;
+    if (param_binding.lfo_desc_id) {
+        lfo_node = writer.alloc_node(writer.ctx);
+        assert(lfo_node);
+        // Resolve the sources into locals before the configure call.  The
+        // writer records the resolve order, and argument evaluation order is
+        // unspecified in C++, so compilers may disagree.  The depth source
+        // must resolve first.
+        const uint16_t depth_source =
+            writer.resolve_source(writer.ctx, param_binding.lfo_depth_source, 0, midi_channel);
+        const uint16_t rate_source = writer.resolve_source(writer.ctx, param_binding.lfo_rate_source, 0, midi_channel);
+        writer.configure_lfo(writer.ctx,
+                             lfo_node,
+                             param_binding.lfo_desc_id,
+                             param_binding.lfo_op,
+                             param_binding.lfo_depth,
+                             depth_source,
+                             rate_source,
+                             param_binding.lfo_rate_scale);
+    }
+
+    Synth::SourceParam sources[Synth::max_mod_inputs];
+    for (uint32_t input = 0; input < param_binding.num_inputs; input++) {
+        const Synth::ModInput& mod_input = param_binding.inputs[input];
+        sources[input] = { writer.resolve_source(writer.ctx, mod_input.source, mod_input.cc_number, midi_channel),
+                           mod_input.scale,
+                           mod_input.op };
+    }
+
+    writer.configure_dest(writer.ctx,
+                          dest_node,
+                          static_cast<uint16_t>(lfo_node),
+                          param_binding.base_value,
+                          param_binding.lfo_op,
+                          sources,
+                          param_binding.num_inputs);
+
+    return static_cast<uint16_t>(dest_node);
 }
 
 void Synth::commit_effect_expansion(const InstrumentBank&      bank,
@@ -313,72 +411,27 @@ void Synth::commit_effect_expansion(const InstrumentBank&      bank,
             const uint32_t state_bytes = get_effect_state_bytes(slot_binding.type);
             const uint32_t num_params  = get_effect_param_floats(slot_binding.type);
             for (uint32_t param = 0; param < num_params; param++) {
-                const EffectParamBinding& param_binding = slot_binding.bindings[param];
+                instance.src_param_id[param] = commit_effect_param(slot_binding.bindings[param],
+                                                                   bank,
+                                                                   writer,
+                                                                   midi_channel,
+                                                                   &instance.params[param]);
+            }
 
-                // Every value commit consumes is asserted, including for unmodulated params.
-                assert(finite_value(param_binding.base_value) && finite_value(param_binding.lfo_depth) &&
-                       finite_value(param_binding.lfo_rate_scale));
-                assert(param_binding.num_inputs <= max_mod_inputs);
-
-                instance.params[param] = param_binding.base_value;
-
-                if (! param_binding.lfo_desc_id && ! param_binding.num_inputs) {
-                    continue;
+            // FIR band values commit through the same wiring; the preflight counted a node per
+            // modulated active-band parameter.
+            if (slot_binding.type == EffectType::fir && slot_binding.fir_bands.band_count > 1) {
+                assert(slot_binding.fir_bands.band_count <= max_fir_effect_bands);
+                instance.fir_bands.band_count     = slot_binding.fir_bands.band_count;
+                const uint32_t active_band_params = 1 + 4 * (slot_binding.fir_bands.band_count - 1);
+                for (uint32_t band_param = 0; band_param < active_band_params; band_param++) {
+                    instance.fir_bands.src_param_id[band_param] =
+                        commit_effect_param(slot_binding.fir_bands.bands[band_param],
+                                            bank,
+                                            writer,
+                                            midi_channel,
+                                            &instance.fir_bands.params[band_param]);
                 }
-
-                assert(param_binding.lfo_op == SourceOp::add || param_binding.lfo_op == SourceOp::multiply);
-                assert(param_binding.lfo_desc_id <= bank.lfos.num_allocated);
-                for (uint32_t input = 0; input < param_binding.num_inputs; input++) {
-                    assert(is_valid_effect_input(param_binding.inputs[input]));
-                    assert(param_binding.inputs[input].op == SourceOp::add ||
-                           param_binding.inputs[input].op == SourceOp::multiply);
-                    assert(finite_value(param_binding.inputs[input].scale));
-                }
-
-                const uint32_t dest_node = writer.alloc_node(writer.ctx);
-                assert(dest_node); // the preflight counted this node
-
-                uint32_t lfo_node = 0;
-                if (param_binding.lfo_desc_id) {
-                    lfo_node = writer.alloc_node(writer.ctx);
-                    assert(lfo_node);
-                    // Resolve the sources into locals before the configure call.
-                    // The writer records the resolve order, and argument
-                    // evaluation order is unspecified in C++, so compilers may
-                    // disagree.  The depth source must resolve first.
-                    const uint16_t depth_source =
-                        writer.resolve_source(writer.ctx, param_binding.lfo_depth_source, 0, midi_channel);
-                    const uint16_t rate_source =
-                        writer.resolve_source(writer.ctx, param_binding.lfo_rate_source, 0, midi_channel);
-                    writer.configure_lfo(writer.ctx,
-                                         lfo_node,
-                                         param_binding.lfo_desc_id,
-                                         param_binding.lfo_op,
-                                         param_binding.lfo_depth,
-                                         depth_source,
-                                         rate_source,
-                                         param_binding.lfo_rate_scale);
-                }
-
-                SourceParam sources[max_mod_inputs];
-                for (uint32_t input = 0; input < param_binding.num_inputs; input++) {
-                    const ModInput& mod_input = param_binding.inputs[input];
-                    sources[input]            = {
-                        writer.resolve_source(writer.ctx, mod_input.source, mod_input.cc_number, midi_channel),
-                        mod_input.scale,
-                        mod_input.op
-                    };
-                }
-
-                writer.configure_dest(writer.ctx,
-                                      dest_node,
-                                      static_cast<uint16_t>(lfo_node),
-                                      param_binding.base_value,
-                                      param_binding.lfo_op,
-                                      sources,
-                                      param_binding.num_inputs);
-
-                instance.src_param_id[param] = static_cast<uint16_t>(dest_node);
             }
 
             if (plan.slots[chain_idx][slot].needs_clear) {

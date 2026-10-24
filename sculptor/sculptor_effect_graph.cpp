@@ -83,6 +83,11 @@ static const float effect_default_params[Synth::num_effect_types][Synth::max_eff
     { 8000.0f, 0.0f, 100.0f, 0.0f, 0.0f }, // fir: full 1025-tap window slope
     { 100.0f, 1.0f, 0.0f, 0.0f, 0.0f },    // ring_mod: 100 Hz, full mix
 };
+
+// The FIR band Gain row's editing metadata (every band, band 0 included):
+// the oscillator Band Gain bounds.  A zeroed gain stays explicit state the
+// slider cannot reach (min 0.01), mirroring the oscillator's row.
+static const Sculptor::EffectParamInfo fx_band_gain_info = { "Gain", 0.01f, 1.0f, false };
 } // anonymous namespace
 
 static void effect_layout_name(const Synth::EffectChainBinding& chain,
@@ -218,11 +223,11 @@ static Sculptor::EndPoint fx_input_endpoint(const Sculptor::EffectGraphMapping& 
 static bool rebuild_param_inputs(const Sculptor::Graph&              graph,
                                  const Sculptor::EffectGraphMapping& mapping,
                                  uint32_t                            node_idx,
-                                 uint32_t                            param,
+                                 uint32_t                            row_base,
                                  Synth::EffectParamBinding*          binding)
 {
     const Sculptor::Node& node = graph.node(node_idx);
-    if (node.slots.num_allocated <= fx_param_src_dot(param, 1) + 2) {
+    if (node.slots.num_allocated <= row_base + 4u + 3u + 2u) {
         return false;
     }
     // A CC input refuses the edit while its dot does not exist: a loaded
@@ -241,7 +246,7 @@ static bool rebuild_param_inputs(const Sculptor::Graph&              graph,
     }
     uint32_t num_inputs = 0;
     for (uint32_t input = 0; input < Synth::max_mod_inputs; ++input) {
-        const uint32_t conn = connection_into(graph, node_idx, fx_param_src_dot(param, input));
+        const uint32_t conn = connection_into(graph, node_idx, row_base + 4u + 3u * input);
         if (conn == Sculptor::pool_no_slot) {
             continue;
         }
@@ -255,7 +260,7 @@ static bool rebuild_param_inputs(const Sculptor::Graph&              graph,
         if (source == 0) {
             return false;
         }
-        const Sculptor::Slot& op_slot = node.slots.entries[fx_param_src_dot(param, input) + 1];
+        const Sculptor::Slot& op_slot = node.slots.entries[row_base + 4u + 3u * input + 1];
         if (op_slot.property_type != Sculptor::PropertyType::list || op_slot.value.list_index >= 2) {
             return false;
         }
@@ -265,7 +270,7 @@ static bool rebuild_param_inputs(const Sculptor::Graph&              graph,
                                          ? static_cast<uint8_t>(Synth::cc_msb_base + cc_index)
                                          : 0; // a reused slot must not carry stale CC state
         mod_input.op               = op_slot.value.list_index == 1 ? Synth::SourceOp::multiply : Synth::SourceOp::add;
-        mod_input.scale            = node.slots.entries[fx_param_src_dot(param, input) + 2].value.real;
+        mod_input.scale            = node.slots.entries[row_base + 4u + 3u * input + 2].value.real;
     }
     binding->num_inputs = static_cast<uint16_t>(num_inputs);
     return true;
@@ -277,12 +282,12 @@ static bool rebuild_param_inputs(const Sculptor::Graph&              graph,
 static bool rebuild_param_binding(const Sculptor::Graph&              graph,
                                   const Sculptor::EffectGraphMapping& mapping,
                                   uint32_t                            node_idx,
-                                  uint32_t                            param,
+                                  uint32_t                            row_base,
                                   Synth::EffectParamBinding*          binding)
 {
     Synth::EffectParamBinding rebuilt = *binding;
 
-    if (! rebuild_param_inputs(graph, mapping, node_idx, param, &rebuilt)) {
+    if (! rebuild_param_inputs(graph, mapping, node_idx, row_base, &rebuilt)) {
         return false;
     }
 
@@ -391,6 +396,12 @@ bool Sculptor::effect_chain_uses_lfo(const Synth::EffectChainBinding& chain, uin
                 return true;
             }
         }
+        // The FIR band bindings ride the same reference rule.
+        for (uint32_t band_param = 0; band_param < Synth::num_fir_effect_band_params; ++band_param) {
+            if (chain.effects[slot].fir_bands.bands[band_param].lfo_desc_id == desc) {
+                return true;
+            }
+        }
     }
     return false;
 }
@@ -425,6 +436,13 @@ uint16_t Sculptor::fx_chain_wired_cc_mask(const Synth::EffectChainBinding& chain
         const uint32_t num_params = Synth::get_effect_param_floats(chain.effects[slot].type);
         for (uint32_t param = 0; param < num_params; ++param) {
             const Synth::EffectParamBinding& binding = chain.effects[slot].bindings[param];
+            for (uint32_t input = 0; input < binding.num_inputs; ++input) {
+                mask = static_cast<uint16_t>(mask | fx_cc_mask_bit(binding.inputs[input]));
+            }
+        }
+        // The FIR band bindings ride the same registry rule.
+        for (uint32_t band_param = 0; band_param < Synth::num_fir_effect_band_params; ++band_param) {
+            const Synth::EffectParamBinding& binding = chain.effects[slot].fir_bands.bands[band_param];
             for (uint32_t input = 0; input < binding.num_inputs; ++input) {
                 mask = static_cast<uint16_t>(mask | fx_cc_mask_bit(binding.inputs[input]));
             }
@@ -546,24 +564,252 @@ bool Sculptor::fx_param_is_collapsed(const Graph& graph, const uint32_t node_idx
            ! graph.slot_is_connected(node_idx, fx_param_src_dot(param, 1));
 }
 
-bool Sculptor::fx_param_field_hidden(const Graph&   graph,
-                                     const uint32_t node_idx,
-                                     const uint32_t param,
-                                     const uint32_t field)
+// The row_base spellings of the two per-parameter helpers, shared with the
+// FIR band rows whose blocks follow the same ten-slot grammar.
+static bool fx_row_field_hidden(const Sculptor::Graph& graph,
+                                const uint32_t         node_idx,
+                                const uint32_t         row_base,
+                                const uint32_t         field)
 {
     if (field == 0) {
         return false;
     }
 
     if (field <= 3) {
-        return ! graph.slot_is_connected(node_idx, fx_param_lfo_dot(param));
+        return ! graph.slot_is_connected(node_idx, row_base + 1u);
     }
 
     if (field <= 6) {
-        return ! graph.slot_is_connected(node_idx, fx_param_src_dot(param, 0));
+        return ! graph.slot_is_connected(node_idx, row_base + 4u);
     }
 
-    return ! graph.slot_is_connected(node_idx, fx_param_src_dot(param, 1));
+    return ! graph.slot_is_connected(node_idx, row_base + 7u);
+}
+
+static uint32_t fx_row_free_input(const Sculptor::Graph& graph,
+                                  const uint32_t         node_idx,
+                                  const uint32_t         row_base,
+                                  const bool             lfo_source)
+{
+    if (lfo_source) {
+        return graph.slot_is_connected(node_idx, row_base + 1u) ? pool_no_slot : row_base + 1u;
+    }
+
+    for (uint32_t input = 0; input < Synth::max_mod_inputs; ++input) {
+        const uint32_t dot = row_base + 4u + 3u * input;
+        if (! graph.slot_is_connected(node_idx, dot)) {
+            return dot;
+        }
+    }
+
+    return pool_no_slot;
+}
+
+// Decodes one projected effect-node slot into the parameter row it edits.
+// Legacy parameter rows read bindings[]; a FIR effect's band region
+// (sculptor_effect_graph.h) reads the slot's FirEffectBands bindings, band
+// 0's Gain row first and bands 1..3's Lowpass/Highpass/Gain/Slope rows
+// after.  Returns false for slots that edit no binding: the Enabled row,
+// the band headers and their [-]/[+] click slots, and slots past the
+// projected rows.  *fir_row names the row's FIR parameter (0 lowpass,
+// 1 highpass, 2 gain, 3 slope); non-FIR rows reuse the parameter index.
+// The decode is slot arithmetic against the effect type: whether a band
+// row is currently projected is the caller's guard. Public seam: the
+// wiring validator, the drop-command consumer and the derived generator
+// title classify endpoints through this decoder instead of legacy modulo
+// arithmetic.
+bool Sculptor::fx_decode_row_slot(Synth::EffectSlotBinding&   effect,
+                                  uint32_t                    slot_idx,
+                                  Synth::EffectParamBinding** binding,
+                                  uint32_t*                   row_base,
+                                  uint32_t*                   field,
+                                  uint32_t*                   fir_row)
+{
+    if (slot_idx < Sculptor::fx_param_row(0)) {
+        return false;
+    }
+
+    const uint32_t num_params = Synth::get_effect_param_floats(effect.type);
+    if (slot_idx < Sculptor::fx_param_row(num_params)) {
+        const uint32_t param = (slot_idx - Sculptor::fx_param_row(0)) / Sculptor::fx_param_stride;
+        *binding             = &effect.bindings[param];
+        *row_base            = Sculptor::fx_param_row(param);
+        *field               = slot_idx - *row_base;
+        // The FIR slope row reports the band grammar's slope kind (3), not
+        // the parameter index, so every FIR row shares one kind space
+        // (0 lowpass, 1 highpass, 2 gain, 3 slope).
+        *fir_row = (effect.type == Synth::EffectType::fir && param == 2) ? 3u : param;
+        return true;
+    }
+
+    if (effect.type != Synth::EffectType::fir || slot_idx < Sculptor::fx_band_first_slot) {
+        return false;
+    }
+
+    uint32_t band = 0;
+    uint32_t row  = 0;
+    if (! Sculptor::fx_band_slot_row(slot_idx, &band, &row, field)) {
+        return false;
+    }
+    *row_base = slot_idx - *field;
+    *fir_row  = band == 0 ? 2u : row;
+    *binding  = band == 0 ? &effect.fir_bands.bands[0] : &effect.fir_bands.bands[1u + 4u * (band - 1u) + row];
+    return true;
+}
+
+// One projected FIR band row's location facts, shared by the wire loops and
+// the edit-disabled stamping so both walk the same rows.
+struct FxBandRowLocation {
+    uint32_t band;     // 0-based band index
+    uint32_t row;      // row inside the band; band 0 carries only row 0 (Gain)
+    uint32_t row_slot; // base-value slot of the row
+};
+
+// The FIR band region's single visibility gate. Dormant for now: no
+// current effect type projects band rows, so every effect node renders its
+// legacy rows only. The future Multi-band FIR effect node will own this
+// region (fx_band_first_slot) and turn the gate back on for its type.
+static bool fx_band_region_projected(const Synth::EffectSlotBinding& effect)
+{
+    (void)effect;
+    return false;
+}
+
+// Lists the FIR band rows a projection shows, in slot order.  Returns 0
+// when the band region is hidden (fx_band_region_projected): no current
+// effect type projects band rows.
+static uint32_t fx_projected_band_rows(const Synth::EffectSlotBinding& effect, FxBandRowLocation* out)
+{
+    if (! fx_band_region_projected(effect)) {
+        return 0;
+    }
+
+    uint32_t band_count = effect.fir_bands.band_count;
+    if (band_count < 1) {
+        band_count = 1;
+    }
+    if (band_count > Synth::max_fir_effect_bands) {
+        band_count = Synth::max_fir_effect_bands;
+    }
+
+    uint32_t num_rows = 0;
+    for (uint32_t band = 0; band < band_count; ++band) {
+        const uint32_t rows = band == 0 ? 1u : 4u;
+        for (uint32_t row = 0; row < rows; ++row) {
+            out[num_rows].band     = band;
+            out[num_rows].row      = row;
+            out[num_rows].row_slot = Sculptor::fx_band_row_slot(band, row);
+            ++num_rows;
+        }
+    }
+    return num_rows;
+}
+
+// Renderer line ids of a FIR band row's LFO and MIDI source lines.  Band
+// 0's Gain row continues the legacy parameter numbering as param 3; bands
+// 1..3 use a fresh range between the legacy ids and the band header range
+// (fx_band_row_group_base).
+static uint8_t fx_band_lfo_row_group(const uint32_t band, const uint32_t row)
+{
+    if (band == 0) {
+        return 5;
+    }
+    return static_cast<uint8_t>(16 + 12 * (band - 1) + 3 * row);
+}
+
+// Projects one effect parameter's row block: the base-value row (bounded
+// real, or the FIR slope's bounded integer grammar), then the LFO row and
+// the two MIDI source rows.  Shared by the legacy parameter loop and the
+// FIR band rows, so the two grammars cannot drift.  The caller picks the
+// renderer line ids and the nesting level of the nested rows.
+static void append_fx_param_block(Sculptor::Graph*                 graph,
+                                  uint32_t                         node,
+                                  const Sculptor::EffectParamInfo& param_info,
+                                  float                            display_value,
+                                  bool                             integer_row,
+                                  const Synth::EffectParamBinding& binding,
+                                  uint8_t                          lfo_row_group,
+                                  uint8_t                          src_row_group,
+                                  uint8_t                          level_base,
+                                  bool                             base_child_row,
+                                  uint8_t                          base_child_level)
+{
+    Slot row;
+    if (integer_row) {
+        // The FIR slope percent is an integer 1..100: the bounded integer
+        // slider, not a bounded real row.  The editor never writes a zero
+        // slope base, so no zero-cutoff display special case applies here.
+        int32_t slope = static_cast<int32_t>(display_value);
+        if (slope < 1) {
+            slope = 1;
+        }
+        if (slope > 100) {
+            slope = 100;
+        }
+        row = Sculptor::bounded_int_slot(param_info.name, slope, 1, 100);
+    }
+    else {
+        row = bounded_real_slot(param_info.name,
+                                display_value,
+                                param_info.min_value,
+                                param_info.max_value,
+                                param_info.logarithmic);
+    }
+    row.child_row   = base_child_row;
+    row.child_level = base_child_level;
+
+    row.connectable = binding.lfo_desc_id == 0 || binding.num_inputs < Synth::max_mod_inputs;
+    // The drop-menu anchor: the always-visible base row opens the
+    // Add LFO menu while the parameter carries no wire at all and
+    // modulator capacity remains.  Projection state only; the seam
+    // re-checks the unconnected half at click time.
+    row.drop_menu = binding.lfo_desc_id == 0 && binding.num_inputs == 0 && binding.num_inputs < Synth::max_mod_inputs;
+    graph->add_slot(node, row);
+
+    // The modulation row, the oscillator editor's LFO row grammar:
+    // the LFO wire lands on the dot, Op picks how the wave combines
+    // with the base, Depth sets the strength.  The knobs stay inert
+    // until a wire arrives, so an unmodulated row never reads as
+    // broken controls.
+    uint32_t op_slot_idx    = 0;
+    uint32_t depth_slot_idx = 0;
+    Sculptor::append_lfo_row(graph,
+                             node,
+                             lfo_row_group,
+                             binding.lfo_op == Synth::SourceOp::multiply ? 1u : 0u,
+                             binding.lfo_depth,
+                             &op_slot_idx,
+                             &depth_slot_idx,
+                             level_base);
+    if (binding.lfo_desc_id == 0) {
+        graph->set_slot_edit_disabled(node, op_slot_idx, true);
+        graph->set_slot_edit_disabled(node, depth_slot_idx, true);
+    }
+
+    // The MIDI source rows, the oscillator editor's Source A/B
+    // grammar: a source wire lands on the dot, Op picks how the
+    // source's value combines with the base, Amount scales it.
+    // Rows past num_inputs show neutral defaults; the knobs stay
+    // inert until a wire arrives.
+    for (uint32_t input = 0; input < Synth::max_mod_inputs; ++input) {
+        const Synth::SourceOp src_op    = input < binding.num_inputs ? binding.inputs[input].op : Synth::SourceOp::add;
+        const float           src_scale = input < binding.num_inputs ? binding.inputs[input].scale : 1.0f;
+        Sculptor::append_mod_source_row(graph,
+                                        node,
+                                        input,
+                                        static_cast<uint8_t>(src_row_group + input),
+                                        src_op == Synth::SourceOp::multiply ? 1u : 0u,
+                                        src_scale,
+                                        level_base);
+    }
+}
+
+bool Sculptor::fx_param_field_hidden(const Graph&   graph,
+                                     const uint32_t node_idx,
+                                     const uint32_t param,
+                                     const uint32_t field)
+{
+    return fx_row_field_hidden(graph, node_idx, fx_param_row(param), field);
 }
 
 uint32_t Sculptor::fx_param_free_input(const Graph&   graph,
@@ -571,18 +817,61 @@ uint32_t Sculptor::fx_param_free_input(const Graph&   graph,
                                        const uint32_t param,
                                        const bool     lfo_source)
 {
-    if (lfo_source) {
-        return graph.slot_is_connected(node_idx, fx_param_lfo_dot(param)) ? pool_no_slot : fx_param_lfo_dot(param);
-    }
-    for (uint32_t input = 0; input < Synth::max_mod_inputs; ++input) {
-        const uint32_t dot = fx_param_src_dot(param, input);
-        if (! graph.slot_is_connected(node_idx, dot)) {
-            return dot;
-        }
-    }
-    return pool_no_slot;
+    return fx_row_free_input(graph, node_idx, fx_param_row(param), lfo_source);
 }
 
+bool Sculptor::fx_band_field_hidden(const Graph&   graph,
+                                    const uint32_t node_idx,
+                                    const uint32_t band,
+                                    const uint32_t row,
+                                    const uint32_t field)
+{
+    return fx_row_field_hidden(graph, node_idx, fx_band_row_slot(band, row), field);
+}
+
+// The full effect-node slot display filter: only a parameter's connected
+// modulator rows render.  A param with no modulator collapses to its
+// base-value row, whose inline dot (connectable in the projection) stands
+// in for the row's first free modulator input.  The filter hides only the
+// param's unconnected modulator rows; slot indices, slots and connections
+// stay untouched, so snapshots, undo bytes and every slot-arithmetic
+// decoder are unaffected.  Visibility derives from live connection state
+// at render time, never stored state; the FIR band rows' fields use the
+// same rule (fx_band_field_hidden), and a band region's headers and click
+// slots always render.
+bool Sculptor::fx_effect_slot_hidden(const Synth::EffectSlotBinding& effect,
+                                     const Graph&                    graph,
+                                     const uint32_t                  node_idx,
+                                     const uint32_t                  slot_idx)
+{
+    // The band region belongs to FIR effects only: a five-parameter
+    // effect's rows share the slot range, so the legacy decode below
+    // answers for them.
+    if (effect.type == Synth::EffectType::fir && slot_idx >= Sculptor::fx_band_first_slot) {
+        // FIR band rows: the headers and their click slots always render,
+        // and a band row's unconnected modulator fields hide like the
+        // legacy parameter rows'.
+        uint32_t band   = 0;
+        uint32_t offset = 0;
+        if (! Sculptor::fx_band_block_of_slot(slot_idx, &band, &offset) || offset < 3) {
+            return false;
+        }
+        return Sculptor::fx_band_field_hidden(graph,
+                                              node_idx,
+                                              band,
+                                              (offset - 3u) / Sculptor::fx_param_stride,
+                                              (offset - 3u) % Sculptor::fx_param_stride);
+    }
+    const uint32_t param = (slot_idx - Sculptor::fx_param_row(0)) / Sculptor::fx_param_stride;
+    const uint32_t field = (slot_idx - Sculptor::fx_param_row(0)) % Sculptor::fx_param_stride;
+    if (field == 0) {
+        return false; // the base-value row always renders (it carries the inline dot)
+    }
+    if (param >= Synth::get_effect_param_floats(effect.type)) {
+        return false;
+    }
+    return Sculptor::fx_param_field_hidden(graph, node_idx, param, field);
+}
 // Number of nodes the chain's projection needs: fixed endpoints, one per
 // projected effect slot, and one per pinned-or-referenced LFO descriptor.
 // Editors preflight node-adding commands against Sculptor::max_nodes with
@@ -702,78 +991,96 @@ bool Sculptor::project_effect_chain_to_graph(const Synth::InstrumentEditorBank& 
         graph->add_slot(node, out_slot);
         graph->add_slot(node, enabled_slot(effect.enabled));
         for (uint32_t param = 0; param < info.num_params; ++param) {
-            const EffectParamInfo&           param_info = info.params[param];
-            const Synth::EffectParamBinding& binding    = effect.bindings[param];
-            const uint8_t                    row_group  = static_cast<uint8_t>(2 + param);
+            const EffectParamInfo& param_info = info.params[param];
 
-            float display_value = binding.base_value;
-            if (effect.type == Synth::EffectType::fir && param <= 1 && binding.base_value == 0.0f) {
+            float display_value = effect.bindings[param].base_value;
+            if (effect.type == Synth::EffectType::fir && param <= 1 && display_value == 0.0f) {
                 display_value = (param == 0) ? param_info.max_value : param_info.min_value;
             }
 
-            Slot row;
-            if (effect.type == Synth::EffectType::fir && param == 2) {
-                // The FIR slope percent is an integer 1..100: the bounded integer
-                // slider, not a bounded real row.  The editor never writes a zero
-                // slope base, so no zero-cutoff display special case applies here.
-                int32_t slope = static_cast<int32_t>(binding.base_value);
-                if (slope < 1) {
-                    slope = 1;
-                }
-                if (slope > 100) {
-                    slope = 100;
-                }
-                row = Sculptor::bounded_int_slot(param_info.name, slope, 1, 100);
+            append_fx_param_block(graph,
+                                  node,
+                                  param_info,
+                                  display_value,
+                                  effect.type == Synth::EffectType::fir && param == 2,
+                                  effect.bindings[param],
+                                  static_cast<uint8_t>(2 + param),
+                                  static_cast<uint8_t>(8 + 2 * param),
+                                  1,
+                                  false,
+                                  0);
+        }
+
+        // The FIR band region, gated by fx_band_region_projected: dormant
+        // until the Multi-band FIR effect type lands.
+        if (fx_band_region_projected(effect)) {
+            uint32_t band_count = effect.fir_bands.band_count;
+            if (band_count < 1) {
+                band_count = 1;
             }
-            else {
-                row = bounded_real_slot(param_info.name,
-                                        display_value,
-                                        param_info.min_value,
-                                        param_info.max_value,
-                                        param_info.logarithmic);
+            if (band_count > Synth::max_fir_effect_bands) {
+                band_count = Synth::max_fir_effect_bands;
             }
 
-            row.connectable = binding.lfo_desc_id == 0 || binding.num_inputs < Synth::max_mod_inputs;
-            // The drop-menu anchor: the always-visible base row opens the
-            // Add LFO menu while the parameter carries no wire at all and
-            // modulator capacity remains.  Projection state only; the seam
-            // re-checks the unconnected half at click time.
-            row.drop_menu =
-                binding.lfo_desc_id == 0 && binding.num_inputs == 0 && binding.num_inputs < Synth::max_mod_inputs;
-            graph->add_slot(node, row);
-            // The modulation row, the oscillator editor's LFO row grammar:
-            // the LFO wire lands on the dot, Op picks how the wave combines
-            // with the base, Depth sets the strength.  The knobs stay inert
-            // until a wire arrives, so an unmodulated row never reads as
-            // broken controls.
-            uint32_t op_slot_idx    = 0;
-            uint32_t depth_slot_idx = 0;
-            Sculptor::append_lfo_row(graph,
-                                     node,
-                                     row_group,
-                                     binding.lfo_op == Synth::SourceOp::multiply ? 1u : 0u,
-                                     binding.lfo_depth,
-                                     &op_slot_idx,
-                                     &depth_slot_idx);
-            if (binding.lfo_desc_id == 0) {
-                graph->set_slot_edit_disabled(node, op_slot_idx, true);
-                graph->set_slot_edit_disabled(node, depth_slot_idx, true);
-            }
-            // The MIDI source rows, the oscillator editor's Source A/B
-            // grammar: a source wire lands on the dot, Op picks how the
-            // source's value combines with the base, Amount scales it.
-            // Rows past num_inputs show neutral defaults; the knobs stay
-            // inert until a wire arrives.
-            for (uint32_t input = 0; input < Synth::max_mod_inputs; ++input) {
-                const Synth::SourceOp src_op =
-                    input < binding.num_inputs ? binding.inputs[input].op : Synth::SourceOp::add;
-                const float src_scale = input < binding.num_inputs ? binding.inputs[input].scale : 1.0f;
-                Sculptor::append_mod_source_row(graph,
-                                                node,
-                                                input,
-                                                static_cast<uint8_t>(8 + 2 * param + input),
-                                                src_op == Synth::SourceOp::multiply ? 1u : 0u,
-                                                src_scale);
+            const EffectTypeInfo& fir_info = effect_type_info(Synth::EffectType::fir);
+            for (uint32_t band = 0; band < band_count; ++band) {
+                // One uniform band header: a bare label line whose [-]/[+]
+                // click slots share the line, the oscillator band blocks'
+                // grammar.  The click slots' toggle values stay untouched (a
+                // press is an action, never a state); the edit-disabled
+                // flags below gray them at the count bounds.
+                const uint8_t header_group = static_cast<uint8_t>(fx_band_row_group_base + band);
+                Slot          header       = Sculptor::make_slot("", SlotKind::property);
+                header.row_group           = header_group;
+                graph->add_slot(node, header);
+                Slot band_minus_slot      = Sculptor::toggle_slot("-", false);
+                band_minus_slot.row_group = header_group;
+                graph->add_slot(node, band_minus_slot);
+                Slot band_plus_slot      = Sculptor::toggle_slot("+", false);
+                band_plus_slot.row_group = header_group;
+                graph->add_slot(node, band_plus_slot);
+
+                // One full parameter block per band row: band 0 carries only
+                // its Gain row; bands 1..3 carry Lowpass Hz, Highpass Hz,
+                // Gain, Slope in FirEffectBands order.  Band rows nest one
+                // level under the header, their modulation rows one further.
+                const uint32_t rows = band == 0 ? 1u : 4u;
+                for (uint32_t row = 0; row < rows; ++row) {
+                    const uint32_t                   ordinal = band == 0 ? 0u : 1u + 4u * (band - 1u) + row;
+                    const Synth::EffectParamBinding& binding = effect.fir_bands.bands[ordinal];
+                    const uint32_t                   kind    = band == 0 ? 2u : row;
+
+                    const Sculptor::EffectParamInfo* row_info      = &fx_band_gain_info;
+                    bool                             integer_row   = false;
+                    float                            display_value = binding.base_value;
+                    if (kind <= 1) {
+                        row_info = &fir_info.params[kind];
+                        if (binding.base_value == 0.0f) {
+                            display_value = kind == 0 ? row_info->max_value : row_info->min_value;
+                        }
+                    }
+                    else if (kind == 3) {
+                        row_info    = &fir_info.params[2];
+                        integer_row = true;
+                    }
+
+                    append_fx_param_block(graph,
+                                          node,
+                                          *row_info,
+                                          display_value,
+                                          integer_row,
+                                          binding,
+                                          fx_band_lfo_row_group(band, row),
+                                          static_cast<uint8_t>(fx_band_lfo_row_group(band, row) + 1),
+                                          2,
+                                          true,
+                                          1);
+                }
+
+                graph->set_slot_edit_disabled(node, Sculptor::fx_band_header_slot(band) + 1u, band_count <= 1u);
+                graph->set_slot_edit_disabled(node,
+                                              Sculptor::fx_band_header_slot(band) + 2u,
+                                              band_count >= Synth::max_fir_effect_bands);
             }
         }
     }
@@ -860,6 +1167,18 @@ bool Sculptor::project_effect_chain_to_graph(const Synth::InstrumentEditorBank& 
                 graph->add_connection(EndPoint{ mapping->lfo_nodes[desc - 1], 0 },
                                       EndPoint{ mapping->effect_nodes[slot], fx_param_lfo_dot(param) });
             }
+
+            FxBandRowLocation band_rows[Synth::num_fir_effect_band_params];
+            const uint32_t    num_band_rows = fx_projected_band_rows(chain_ref.effects[slot], band_rows);
+            for (uint32_t band_row = 0; band_row < num_band_rows; ++band_row) {
+                const FxBandRowLocation& location = band_rows[band_row];
+                const uint32_t ordinal = location.band == 0 ? 0u : 1u + 4u * (location.band - 1u) + location.row;
+                if (chain_ref.effects[slot].fir_bands.bands[ordinal].lfo_desc_id != desc) {
+                    continue;
+                }
+                graph->add_connection(EndPoint{ mapping->lfo_nodes[desc - 1], 0 },
+                                      EndPoint{ mapping->effect_nodes[slot], location.row_slot + 1u });
+            }
         }
     }
 
@@ -880,6 +1199,25 @@ bool Sculptor::project_effect_chain_to_graph(const Synth::InstrumentEditorBank& 
                     }
                     graph->add_connection(from,
                                           EndPoint{ mapping->effect_nodes[slot], fx_param_src_dot(param, input) });
+                }
+            }
+
+            FxBandRowLocation band_rows[Synth::num_fir_effect_band_params];
+            const uint32_t    num_band_rows = fx_projected_band_rows(chain_ref.effects[slot], band_rows);
+            for (uint32_t band_row = 0; band_row < num_band_rows; ++band_row) {
+                const FxBandRowLocation& location = band_rows[band_row];
+                const uint32_t ordinal = location.band == 0 ? 0u : 1u + 4u * (location.band - 1u) + location.row;
+                const Synth::EffectParamBinding& binding = chain_ref.effects[slot].fir_bands.bands[ordinal];
+                for (uint32_t input = 0; input < binding.num_inputs; ++input) {
+                    const Sculptor::EndPoint from =
+                        fx_input_endpoint(*mapping,
+                                          static_cast<uint32_t>(binding.inputs[input].source),
+                                          binding.inputs[input].cc_number);
+                    if (from.slot_idx == pool_no_slot) {
+                        continue;
+                    }
+                    graph->add_connection(from,
+                                          EndPoint{ mapping->effect_nodes[slot], location.row_slot + 4u + 3u * input });
                 }
             }
         }
@@ -907,6 +1245,18 @@ bool Sculptor::project_effect_chain_to_graph(const Synth::InstrumentEditorBank& 
         for (uint32_t param = 0; param < num_params; ++param) {
             for (uint32_t input = 0; input < Synth::max_mod_inputs; ++input) {
                 const uint32_t dot_idx = fx_param_src_dot(param, input);
+                const bool     wired   = graph->slot_is_connected(mapping->effect_nodes[slot], dot_idx);
+                graph->set_slot_edit_disabled(mapping->effect_nodes[slot], dot_idx + 1, ! wired);
+                graph->set_slot_edit_disabled(mapping->effect_nodes[slot], dot_idx + 2, ! wired);
+            }
+        }
+
+        FxBandRowLocation band_rows[Synth::num_fir_effect_band_params];
+        const uint32_t    num_band_rows = fx_projected_band_rows(chain_ref.effects[slot], band_rows);
+        for (uint32_t band_row = 0; band_row < num_band_rows; ++band_row) {
+            const FxBandRowLocation& location = band_rows[band_row];
+            for (uint32_t input = 0; input < Synth::max_mod_inputs; ++input) {
+                const uint32_t dot_idx = location.row_slot + 4u + 3u * input;
                 const bool     wired   = graph->slot_is_connected(mapping->effect_nodes[slot], dot_idx);
                 graph->set_slot_edit_disabled(mapping->effect_nodes[slot], dot_idx + 1, ! wired);
                 graph->set_slot_edit_disabled(mapping->effect_nodes[slot], dot_idx + 2, ! wired);
@@ -1117,25 +1467,253 @@ static bool fx_release_prev_source(const Sculptor::Graph&              graph,
 {
     *released = false;
 
-    const uint32_t prev_field = prev.slot_idx >= Sculptor::fx_param_row(0)
-                                    ? (prev.slot_idx - Sculptor::fx_param_row(0)) % Sculptor::fx_param_stride
-                                    : Sculptor::fx_param_stride;
-    if (prev_field != 4 && prev_field != 7) {
+    const int32_t prev_slot = Sculptor::fx_effect_slot_of(mapping, prev.node_idx);
+    if (prev_slot < 0) {
         return true;
     }
 
-    const uint32_t prev_param = (prev.slot_idx - Sculptor::fx_param_row(0)) / Sculptor::fx_param_stride;
-    const int32_t  prev_slot  = Sculptor::fx_effect_slot_of(mapping, prev.node_idx);
-    if (prev_slot < 0 || prev_param >= Synth::get_effect_param_floats(chain.effects[prev_slot].type)) {
+    Synth::EffectParamBinding* prev_row = nullptr;
+    uint32_t                   row_base = 0;
+    uint32_t                   field    = 0;
+    uint32_t                   fir_row  = 0;
+    if (! Sculptor::fx_decode_row_slot(chain.effects[prev_slot],
+                                       prev.slot_idx,
+                                       &prev_row,
+                                       &row_base,
+                                       &field,
+                                       &fir_row) ||
+        (field != 4 && field != 7)) {
         return true;
     }
 
-    Synth::EffectParamBinding prev_binding = chain.effects[prev_slot].bindings[prev_param];
-    if (! rebuild_param_inputs(graph, mapping, prev.node_idx, prev_param, &prev_binding)) {
+    Synth::EffectParamBinding prev_binding = *prev_row;
+    if (! rebuild_param_inputs(graph, mapping, prev.node_idx, row_base, &prev_binding)) {
         return false;
     }
-    chain.effects[prev_slot].bindings[prev_param] = prev_binding;
-    *released                                     = true;
+    *prev_row = prev_binding;
+    *released = true;
+    return true;
+}
+
+// A retarget pulled a wire off a previous input endpoint and it landed on a
+// parameter's LFO dot: a projected row's LFO dot (FIR band rows included)
+// drops its descriptor reference, an Enabled row drops its routing.  Other
+// endpoints release nothing here.
+static void fx_drop_prev_lfo_input(Synth::EffectChainBinding&          chain,
+                                   const Sculptor::EffectGraphMapping& mapping,
+                                   const Sculptor::EndPoint&           prev)
+{
+    const int32_t prev_slot = Sculptor::fx_effect_slot_of(mapping, prev.node_idx);
+
+    Synth::EffectParamBinding* prev_row = nullptr;
+    uint32_t                   row_base = 0;
+    uint32_t                   field    = 0;
+    uint32_t                   fir_row  = 0;
+    if (prev_slot >= 0 &&
+        Sculptor::fx_decode_row_slot(chain.effects[prev_slot], prev.slot_idx, &prev_row, &row_base, &field, &fir_row) &&
+        field == 1) {
+        prev_row->lfo_desc_id = 0;
+        return;
+    }
+
+    if (prev.slot_idx == Sculptor::fx_enabled_row) {
+        fx_drop_enabled_routing(chain, prev_slot);
+    }
+}
+
+// The inline value-row dot's variant: a source-dot previous endpoint also
+// releases its packed input.  Returns false when the release rebuild
+// refuses; nothing mutated then.
+static bool fx_drop_prev_modulator_wire(const Sculptor::Graph&              graph,
+                                        Synth::EffectChainBinding&          chain,
+                                        const Sculptor::EffectGraphMapping& mapping,
+                                        const Sculptor::EndPoint&           prev)
+{
+    const int32_t prev_slot = Sculptor::fx_effect_slot_of(mapping, prev.node_idx);
+
+    Synth::EffectParamBinding* prev_row = nullptr;
+    uint32_t                   row_base = 0;
+    uint32_t                   field    = 0;
+    uint32_t                   fir_row  = 0;
+    if (prev_slot >= 0 &&
+        Sculptor::fx_decode_row_slot(chain.effects[prev_slot], prev.slot_idx, &prev_row, &row_base, &field, &fir_row)) {
+        if (field == 1) {
+            prev_row->lfo_desc_id = 0;
+            return true;
+        }
+        if (field == 4 || field == 7) {
+            bool released = false;
+            return fx_release_prev_source(graph, mapping, chain, prev, &released);
+        }
+        return true;
+    }
+
+    if (prev.slot_idx == Sculptor::fx_enabled_row) {
+        fx_drop_enabled_routing(chain, prev_slot);
+    }
+    return true;
+}
+
+// The FirEffectBands binding of band `band`'s parameter `kind` (0 lowpass,
+// 1 highpass, 2 gain, 3 slope).  Band 0 keeps its edges and slope in the
+// slot's legacy bindings and its gain in FirEffectBands index 0, so the
+// legacy single-band form stays byte-identical.
+static Synth::EffectParamBinding* fx_band_param(Synth::EffectSlotBinding& effect, uint32_t band, uint32_t kind)
+{
+    if (band == 0) {
+        switch (kind) {
+            case 0:
+                return &effect.bindings[0]; // Lowpass Hz
+            case 1:
+                return &effect.bindings[1]; // Highpass Hz
+            case 2:
+                return &effect.fir_bands.bands[0]; // Gain
+            default:
+                return &effect.bindings[2]; // Slope
+        }
+    }
+    return &effect.fir_bands.bands[1u + 4u * (band - 1u) + kind];
+}
+
+// Copies band `from`'s four bindings into band `to` (values and full
+// modulation state).
+static void copy_fx_band(Synth::EffectSlotBinding& effect, uint32_t from, uint32_t to)
+{
+    for (uint32_t kind = 0; kind < 4; ++kind) {
+        *fx_band_param(effect, to, kind) = *fx_band_param(effect, from, kind);
+    }
+}
+
+// Zeroes band `band`'s four bindings.
+static void zero_fx_band(Synth::EffectSlotBinding& effect, uint32_t band)
+{
+    for (uint32_t kind = 0; kind < 4; ++kind) {
+        *fx_band_param(effect, band, kind) = Synth::EffectParamBinding{};
+    }
+}
+
+// The band header rows' [-]/[+] click edits.  [-] on band N removes band N:
+// bands N+1..  shift up into the hole and the last band zeroes.  [+] on band
+// N inserts a copy of band N after it: bands above N shift up and the
+// vacated block receives band N's bindings (values and full modulation
+// state).  Both rewrite the stored effect slot in place; the graph is
+// stale until the structural re-projection rebuilds it, so the caller must
+// not expand the graph over the rewritten bands.  The count-bound clicks
+// are no-ops: the buttons gray at the bounds, so a GUI press there cannot
+// occur, and a stray headless edit still changes nothing.  Returns true
+// when the change was a band click; false falls through to the ordinary
+// value-change store.
+static bool apply_fx_band_edit(Synth::InstrumentBank*              bank,
+                               const Sculptor::EffectGraphMapping& mapping,
+                               const Sculptor::GraphChange&        change)
+{
+    if (! Sculptor::is_fx_band_button_slot(change.slot_idx)) {
+        return false;
+    }
+
+    const int32_t slot = Sculptor::fx_effect_slot_of(mapping, change.node_idx);
+    if (slot < 0) {
+        return false;
+    }
+
+    Synth::EffectSlotBinding& effect = Sculptor::fx_graph_chain(bank, mapping.chain).effects[slot];
+    if (effect.type != Synth::EffectType::fir) {
+        return false;
+    }
+
+    uint32_t block  = 0;
+    uint32_t offset = 0;
+    if (! Sculptor::fx_band_block_of_slot(change.slot_idx, &block, &offset)) {
+        return true; // past the last band block: not projected, nothing to edit
+    }
+    const uint32_t band = block;
+
+    uint32_t count = effect.fir_bands.band_count;
+    if (count < 1) {
+        count = 1;
+    }
+    if (count > Synth::max_fir_effect_bands) {
+        count = Synth::max_fir_effect_bands;
+    }
+    if (band >= count) {
+        return true; // a block beyond the count is not projected; nothing to edit
+    }
+
+    if (offset == 2u) {
+        // [+]: insert a copy of band `band` after it.
+        if (count >= Synth::max_fir_effect_bands) {
+            return true;
+        }
+        for (uint32_t b = count; b > band + 1u; --b) {
+            copy_fx_band(effect, b - 1u, b);
+        }
+        copy_fx_band(effect, band, band + 1u);
+        if (band == 0) {
+            // A copy out of band 0 seeds the copy's gain when band 0's gain
+            // is unwired and zero (the loaded legacy form keeps a zeroed
+            // gain binding): the copy must not stage a silent band.
+            Synth::EffectParamBinding* copy_gain = fx_band_param(effect, 1, 2);
+            if (copy_gain->lfo_desc_id == 0 && copy_gain->num_inputs == 0 && copy_gain->base_value == 0.0f) {
+                copy_gain->base_value = 1.0f;
+            }
+        }
+        effect.fir_bands.band_count = static_cast<uint8_t>(count + 1u);
+        return true;
+    }
+
+    // [-]: remove band `band`.
+    if (count <= 1) {
+        return true;
+    }
+    for (uint32_t b = band; b + 1u < count; ++b) {
+        copy_fx_band(effect, b + 1u, b);
+    }
+    zero_fx_band(effect, count - 1u);
+    effect.fir_bands.band_count = static_cast<uint8_t>(count - 1u);
+    return true;
+}
+
+// True when the slot is one of the band header rows' [-]/[+] click slots
+// (header slot + 1 and + 2 in every band block).  See the header contract:
+// callers gate on the effect being a FIR node before acting on the answer.
+bool Sculptor::is_fx_band_button_slot(const uint32_t slot_idx)
+{
+    if (slot_idx < Sculptor::fx_band_first_slot) {
+        return false;
+    }
+
+    uint32_t block  = 0;
+    uint32_t offset = 0;
+    if (! fx_band_block_of_slot(slot_idx, &block, &offset)) {
+        return false;
+    }
+    return offset == 1u || offset == 2u;
+}
+
+bool Sculptor::fx_band_block_of_slot(const uint32_t slot_idx, uint32_t* block, uint32_t* offset)
+{
+    if (slot_idx < Sculptor::fx_band_header_slot(1)) {
+        *block  = 0;
+        *offset = slot_idx - Sculptor::fx_band_first_slot;
+        return true;
+    }
+
+    *block = 1u + (slot_idx - Sculptor::fx_band_header_slot(1)) / Sculptor::fx_band_block_stride;
+    if (*block >= Synth::max_fir_effect_bands) {
+        return false;
+    }
+    *offset = (slot_idx - Sculptor::fx_band_header_slot(1)) % Sculptor::fx_band_block_stride;
+    return true;
+}
+
+bool Sculptor::fx_band_slot_row(const uint32_t slot_idx, uint32_t* block, uint32_t* row, uint32_t* field)
+{
+    uint32_t offset = 0;
+    if (! fx_band_block_of_slot(slot_idx, block, &offset) || offset < 3) {
+        return false;
+    }
+    *row   = (offset - 3u) / Sculptor::fx_param_stride;
+    *field = (offset - 3u) % Sculptor::fx_param_stride;
     return true;
 }
 
@@ -1169,13 +1747,27 @@ static bool apply_fx_graph_change_internal(Synth::InstrumentBank*              b
                 if (change.slot_idx < Sculptor::fx_param_row(0)) {
                     return false;
                 }
-                const uint32_t num_params = Synth::get_effect_param_floats(chain.effects[slot].type);
-                const uint32_t param      = (change.slot_idx - Sculptor::fx_param_row(0)) / Sculptor::fx_param_stride;
-                const uint32_t field      = (change.slot_idx - Sculptor::fx_param_row(0)) % Sculptor::fx_param_stride;
-                if (param >= num_params) {
+                if (Sculptor::is_fx_band_button_slot(change.slot_idx) &&
+                    chain.effects[slot].type == Synth::EffectType::fir) {
+                    // The band headers' click edits rewrite the stored bands
+                    // in place (insert a copy after band N, or remove band N
+                    // with later bands shifting up); the graph is stale until
+                    // the structural re-projection rebuilds it, so no
+                    // expansion runs here.
+                    return apply_fx_band_edit(bank, mapping, change);
+                }
+                Synth::EffectParamBinding* binding  = nullptr;
+                uint32_t                   row_base = 0;
+                uint32_t                   field    = 0;
+                uint32_t                   fir_row  = 0;
+                if (! Sculptor::fx_decode_row_slot(chain.effects[slot],
+                                                   change.slot_idx,
+                                                   &binding,
+                                                   &row_base,
+                                                   &field,
+                                                   &fir_row)) {
                     return false;
                 }
-                Synth::EffectParamBinding& binding = chain.effects[slot].bindings[param];
                 switch (field) {
                     case 0: {
                         // FIR edges turn off at their slider extremes: at the 20 Hz
@@ -1186,7 +1778,7 @@ static bool apply_fx_graph_change_internal(Synth::InstrumentBank*              b
                         // The synth keeps the raw Hz values untouched.
                         float base_value = live_slot.value.real;
                         if (chain.effects[slot].type == Synth::EffectType::fir) {
-                            if (param == 2) {
+                            if (fir_row == 3) {
                                 // The FIR slope percent is an integer 1..100; its slider
                                 // extremes are valid values, not an "off" state, so the
                                 // zero-writing rule below never fires for it.
@@ -1197,27 +1789,29 @@ static bool apply_fx_graph_change_internal(Synth::InstrumentBank*              b
                                 if (slope > 100) {
                                     slope = 100;
                                 }
-                                binding.base_value = static_cast<float>(slope);
+                                binding->base_value = static_cast<float>(slope);
                                 return true;
                             }
-                            const Sculptor::EffectTypeInfo& fir_info =
-                                Sculptor::effect_type_info(Synth::EffectType::fir);
-                            const Sculptor::EffectParamInfo& fir_param = fir_info.params[param];
-                            const bool                       at_extreme =
-                                base_value <= fir_param.min_value || base_value >= fir_param.max_value;
-                            if (param <= 1 && at_extreme) {
-                                base_value = 0.0f;
+                            if (fir_row <= 1) {
+                                const Sculptor::EffectTypeInfo& fir_info =
+                                    Sculptor::effect_type_info(Synth::EffectType::fir);
+                                const Sculptor::EffectParamInfo& fir_param = fir_info.params[fir_row];
+                                const bool                       at_extreme =
+                                    base_value <= fir_param.min_value || base_value >= fir_param.max_value;
+                                if (at_extreme) {
+                                    base_value = 0.0f;
+                                }
                             }
                         }
-                        binding.base_value = base_value;
+                        binding->base_value = base_value;
                         return true;
                     }
                     case 2:
-                        binding.lfo_op =
+                        binding->lfo_op =
                             live_slot.value.list_index == 1 ? Synth::SourceOp::multiply : Synth::SourceOp::add;
                         return true;
                     case 3:
-                        binding.lfo_depth = live_slot.value.real;
+                        binding->lfo_depth = live_slot.value.real;
                         return true;
                     case 5:
                     case 6:
@@ -1226,7 +1820,7 @@ static bool apply_fx_graph_change_internal(Synth::InstrumentBank*              b
                         // A MIDI source row edit: the wired rows compile
                         // back into the binding's packed input list from
                         // the graph.
-                        return rebuild_param_binding(graph, mapping, change.node_idx, param, &binding);
+                        return rebuild_param_binding(graph, mapping, change.node_idx, row_base, binding);
                     default:
                         // Fields 1, 4 and 7 are input dots: an input slot
                         // never produces value events.
@@ -1314,21 +1908,26 @@ static bool apply_fx_graph_change_internal(Synth::InstrumentBank*              b
             // binding.  A retarget clears the dot it left before binding
             // the dot it landed on, so a wire pulled between parameters (or
             // between LFO nodes) moves the binding with it.
-            const uint32_t param_field =
-                in_point.slot_idx >= Sculptor::fx_param_row(0)
-                    ? (in_point.slot_idx - Sculptor::fx_param_row(0)) % Sculptor::fx_param_stride
-                    : Sculptor::fx_param_stride;
-            if (in_slot >= 0 && param_field == 1) {
+            // One band-aware decode of the destination row drives the parameter
+            // dispatch below: the legacy modulo scan cannot classify a FIR band
+            // region slot, so the decoder is the single seam
+            // (sculptor_effect_graph.h).
+            Synth::EffectParamBinding* row_binding = nullptr;
+            uint32_t                   row_base    = 0;
+            uint32_t                   row_field   = 0;
+            uint32_t                   fir_row     = 0;
+            const bool row_decoded = in_slot >= 0 && Sculptor::fx_decode_row_slot(chain.effects[in_slot],
+                                                                                  in_point.slot_idx,
+                                                                                  &row_binding,
+                                                                                  &row_base,
+                                                                                  &row_field,
+                                                                                  &fir_row);
+            if (row_decoded && row_field == 1) {
                 if (in_point.slot_idx >= graph.node(in_point.node_idx).slots.num_allocated) {
                     return false;
                 }
-                const uint32_t num_params = Synth::get_effect_param_floats(chain.effects[in_slot].type);
-                const uint32_t param = (in_point.slot_idx - Sculptor::fx_param_lfo_dot(0)) / Sculptor::fx_param_stride;
-                if (param >= num_params) {
-                    return false;
-                }
                 if (change.kind == Sculptor::ChangeKind::connection_deleted) {
-                    chain.effects[in_slot].bindings[param].lfo_desc_id = 0;
+                    row_binding->lfo_desc_id = 0;
                     return true;
                 }
                 const uint32_t desc_id = Sculptor::fx_lfo_desc_of(mapping, out_point.node_idx);
@@ -1339,27 +1938,10 @@ static bool apply_fx_graph_change_internal(Synth::InstrumentBank*              b
                     const Sculptor::EndPoint prev = change.connection_prev_input;
                     if (graph.node_occupied(prev.node_idx) &&
                         (prev.node_idx != in_point.node_idx || prev.slot_idx != in_point.slot_idx)) {
-                        const int32_t  prev_slot = Sculptor::fx_effect_slot_of(mapping, prev.node_idx);
-                        const uint32_t prev_field =
-                            prev.slot_idx >= Sculptor::fx_param_row(0)
-                                ? (prev.slot_idx - Sculptor::fx_param_row(0)) % Sculptor::fx_param_stride
-                                : Sculptor::fx_param_stride;
-                        if (prev_slot >= 0 && prev_field == 1) {
-                            const uint32_t prev_param =
-                                (prev.slot_idx - Sculptor::fx_param_lfo_dot(0)) / Sculptor::fx_param_stride;
-                            if (prev_param < Synth::get_effect_param_floats(chain.effects[prev_slot].type)) {
-                                chain.effects[prev_slot].bindings[prev_param].lfo_desc_id = 0;
-                            }
-                        }
-                        else if (prev.slot_idx == Sculptor::fx_enabled_row) {
-                            // The wire left another effect's Enabled row; its
-                            // routing drops with it.
-                            fx_drop_enabled_routing(chain, prev_slot);
-                        }
+                        fx_drop_prev_lfo_input(chain, mapping, prev);
                     }
                 }
-                Synth::EffectParamBinding& binding = chain.effects[in_slot].bindings[param];
-                Sculptor::fx_seed_effect_lfo_binding(&binding, desc_id);
+                Sculptor::fx_seed_effect_lfo_binding(row_binding, desc_id);
                 return true;
             }
 
@@ -1368,12 +1950,8 @@ static bool apply_fx_graph_change_internal(Synth::InstrumentBank*              b
             // binding's packed input list.  Connect, retarget and disconnect
             // all rebuild from the graph, so the list can never desync from
             // the wires.
-            if (in_slot >= 0 && (param_field == 4 || param_field == 7)) {
+            if (row_decoded && (row_field == 4 || row_field == 7)) {
                 if (in_point.slot_idx >= graph.node(in_point.node_idx).slots.num_allocated) {
-                    return false;
-                }
-                const uint32_t param = (in_point.slot_idx - Sculptor::fx_param_row(0)) / Sculptor::fx_param_stride;
-                if (param >= Synth::get_effect_param_floats(chain.effects[in_slot].type)) {
                     return false;
                 }
                 if (mapping.midi_node == Sculptor::pool_no_slot) {
@@ -1389,14 +1967,18 @@ static bool apply_fx_graph_change_internal(Synth::InstrumentBank*              b
                         if (prev.slot_idx == Sculptor::fx_enabled_row) {
                             const int32_t prev_slot = Sculptor::fx_effect_slot_of(mapping, prev.node_idx);
                             if (prev_slot >= 0) {
-                                Synth::EffectParamBinding dest_binding = chain.effects[in_slot].bindings[param];
-                                if (! rebuild_param_inputs(graph, mapping, in_point.node_idx, param, &dest_binding)) {
+                                Synth::EffectParamBinding dest_binding = *row_binding;
+                                if (! rebuild_param_inputs(graph,
+                                                           mapping,
+                                                           in_point.node_idx,
+                                                           row_base,
+                                                           &dest_binding)) {
                                     return false;
                                 }
                                 // The wire left the Enabled row; its routing
                                 // drops with it.
                                 fx_drop_enabled_routing(chain, prev_slot);
-                                chain.effects[in_slot].bindings[param] = dest_binding;
+                                *row_binding = dest_binding;
                                 return true;
                             }
                         }
@@ -1405,8 +1987,8 @@ static bool apply_fx_graph_change_internal(Synth::InstrumentBank*              b
                             // release below commits the previous row: both
                             // sides rebuild before either commits, so a
                             // refusal leaves the bank unchanged.
-                            Synth::EffectParamBinding dest_binding = chain.effects[in_slot].bindings[param];
-                            if (! rebuild_param_inputs(graph, mapping, in_point.node_idx, param, &dest_binding)) {
+                            Synth::EffectParamBinding dest_binding = *row_binding;
+                            if (! rebuild_param_inputs(graph, mapping, in_point.node_idx, row_base, &dest_binding)) {
                                 return false;
                             }
                             bool released = false;
@@ -1414,14 +1996,13 @@ static bool apply_fx_graph_change_internal(Synth::InstrumentBank*              b
                                 return false;
                             }
                             if (released) {
-                                chain.effects[in_slot].bindings[param] = dest_binding;
+                                *row_binding = dest_binding;
                                 return true;
                             }
                         }
                     }
                 }
-                Synth::EffectParamBinding& dest = chain.effects[in_slot].bindings[param];
-                return rebuild_param_binding(graph, mapping, in_point.node_idx, param, &dest);
+                return rebuild_param_binding(graph, mapping, in_point.node_idx, row_base, row_binding);
             }
 
             // The Enabled row's wire is the enable routing: connect, retarget
@@ -1475,13 +2056,8 @@ static bool apply_fx_graph_change_internal(Synth::InstrumentBank*              b
             // the packed input list.  A disconnect never observes a value-row
             // endpoint (the apply-side bind and the re-projection that
             // re-lands the wire land in the same drain), so deletes refuse.
-            if (in_slot >= 0 && param_field == 0) {
+            if (row_decoded && row_field == 0) {
                 if (in_point.slot_idx >= graph.node(in_point.node_idx).slots.num_allocated) {
-                    return false;
-                }
-                const uint32_t num_params = Synth::get_effect_param_floats(chain.effects[in_slot].type);
-                const uint32_t param      = (in_point.slot_idx - Sculptor::fx_param_row(0)) / Sculptor::fx_param_stride;
-                if (param >= num_params) {
                     return false;
                 }
                 if (change.kind == Sculptor::ChangeKind::connection_deleted) {
@@ -1493,8 +2069,7 @@ static bool apply_fx_graph_change_internal(Synth::InstrumentBank*              b
                     (mapping.midi_node == Sculptor::pool_no_slot || out_point.node_idx != mapping.midi_node)) {
                     return false;
                 }
-                if (Sculptor::fx_param_free_input(graph, in_point.node_idx, param, lfo_wire) ==
-                    Sculptor::pool_no_slot) {
+                if (fx_row_free_input(graph, in_point.node_idx, row_base, lfo_wire) == Sculptor::pool_no_slot) {
                     return false;
                 }
                 if (change.kind == Sculptor::ChangeKind::connection_changed) {
@@ -1504,38 +2079,19 @@ static bool apply_fx_graph_change_internal(Synth::InstrumentBank*              b
                     const Sculptor::EndPoint prev = change.connection_prev_input;
                     if (graph.node_occupied(prev.node_idx) &&
                         (prev.node_idx != in_point.node_idx || prev.slot_idx != in_point.slot_idx)) {
-                        const uint32_t prev_field =
-                            prev.slot_idx >= Sculptor::fx_param_row(0)
-                                ? (prev.slot_idx - Sculptor::fx_param_row(0)) % Sculptor::fx_param_stride
-                                : Sculptor::fx_param_stride;
-                        const int32_t prev_slot = Sculptor::fx_effect_slot_of(mapping, prev.node_idx);
-                        if (prev_slot >= 0 && prev_field == 1) {
-                            const uint32_t prev_param =
-                                (prev.slot_idx - Sculptor::fx_param_lfo_dot(0)) / Sculptor::fx_param_stride;
-                            if (prev_param < Synth::get_effect_param_floats(chain.effects[prev_slot].type)) {
-                                chain.effects[prev_slot].bindings[prev_param].lfo_desc_id = 0;
-                            }
-                        }
-                        else if (prev.slot_idx == Sculptor::fx_enabled_row) {
-                            fx_drop_enabled_routing(chain, prev_slot);
-                        }
-                        else {
-                            bool released = false;
-                            if (! fx_release_prev_source(graph, mapping, chain, prev, &released)) {
-                                return false;
-                            }
+                        if (! fx_drop_prev_modulator_wire(graph, chain, mapping, prev)) {
+                            return false;
                         }
                     }
                 }
-                Synth::EffectParamBinding& binding = chain.effects[in_slot].bindings[param];
                 if (lfo_wire) {
                     if (desc_id > bank->lfos.num_allocated) {
                         return false;
                     }
-                    Sculptor::fx_seed_effect_lfo_binding(&binding, desc_id);
+                    Sculptor::fx_seed_effect_lfo_binding(row_binding, desc_id);
                     return true;
                 }
-                if (binding.num_inputs >= Synth::max_mod_inputs) {
+                if (row_binding->num_inputs >= Synth::max_mod_inputs) {
                     return false;
                 }
                 uint32_t source   = 0;
@@ -1544,7 +2100,7 @@ static bool apply_fx_graph_change_internal(Synth::InstrumentBank*              b
                 if (source == 0) {
                     return false;
                 }
-                Synth::ModInput& added = binding.inputs[binding.num_inputs++];
+                Synth::ModInput& added = row_binding->inputs[row_binding->num_inputs++];
                 added.source           = static_cast<Synth::ModSource>(source);
                 added.cc_number        = source == static_cast<uint32_t>(Synth::ModSource::cc)
                                              ? static_cast<uint8_t>(Synth::cc_msb_base + cc_index)
@@ -1723,6 +2279,12 @@ void Sculptor::fx_clear_lfo_references(Synth::EffectChainBinding* chain, uint16_
         for (uint32_t param = 0; param < num_params; ++param) {
             if (chain->effects[slot].bindings[param].lfo_desc_id == desc_id) {
                 chain->effects[slot].bindings[param].lfo_desc_id = 0;
+            }
+        }
+        // The FIR band bindings ride the same reference rule.
+        for (uint32_t band_param = 0; band_param < Synth::num_fir_effect_band_params; ++band_param) {
+            if (chain->effects[slot].fir_bands.bands[band_param].lfo_desc_id == desc_id) {
+                chain->effects[slot].fir_bands.bands[band_param].lfo_desc_id = 0;
             }
         }
     }
@@ -2625,6 +3187,36 @@ void Sculptor::refresh_lfo_edit_disabled(Sculptor::Graph& graph, uint32_t node)
     }
 }
 
+// The batch boundary for drain: the number of leading changes to apply
+// before the first FIR band-header click, and whether the truncation fired.
+// The band click rewrites the stored bands and leaves the graph stale on
+// purpose, so later events in the same batch would apply against the old
+// slot map and undo the insertion/removal.  Stateless: the caller owns the
+// queue, the mapping and the bank.
+uint32_t Sculptor::fx_band_click_boundary(const GraphChange*           changes,
+                                          uint32_t                     count,
+                                          const EffectGraphMapping&    mapping,
+                                          const Synth::InstrumentBank& bank,
+                                          bool*                        band_click)
+{
+    uint32_t apply_count = count;
+    *band_click          = false;
+    for (uint32_t index = 0; index < count; ++index) {
+        const GraphChange& change = changes[index];
+        if (change.kind != ChangeKind::value_changed || ! is_fx_band_button_slot(change.slot_idx)) {
+            continue;
+        }
+        const int32_t effect_slot = fx_effect_slot_of(mapping, change.node_idx);
+        if (effect_slot < 0 || bank.channel_chains[mapping.chain].effects[effect_slot].type != Synth::EffectType::fir) {
+            continue;
+        }
+        apply_count = index + 1;
+        *band_click = true;
+        break;
+    }
+    return apply_count;
+}
+
 bool Sculptor::apply_effect_graph_batch(const Synth::InstrumentEditorBank* source,
                                         const Graph*                       graph,
                                         const EffectGraphMapping*          mapping,
@@ -2650,6 +3242,7 @@ bool Sculptor::apply_effect_graph_batch(const Synth::InstrumentEditorBank* sourc
     // candidate owns the pointer's lifetime for the whole batch.
     Sculptor::EffectChainRouting* routing = &effects_candidate.effect_routing[mapping->chain];
 
+    const Synth::EffectChainBinding& sweep_chain = fx_graph_chain(&effects_candidate.bank, mapping->chain);
     if (! capture_nodes) {
         for (uint32_t node_index = 0; node_index < max_nodes; ++node_index) {
             if (! graph->node_occupied(node_index)) {
@@ -2663,6 +3256,16 @@ bool Sculptor::apply_effect_graph_batch(const Synth::InstrumentEditorBank* sourc
                     continue;
                 }
                 if (effect_slot >= 0 && slot >= fx_param_row(0)) {
+                    // The FIR band region is model state the graph only
+                    // views: the click slots must never replay as band
+                    // edits, and the rows cannot drift from the bindings
+                    // they project.  The gate is FIR-only: a five-parameter
+                    // effect's rows share the slot range and replay like
+                    // any legacy row.
+                    if (sweep_chain.effects[effect_slot].type == Synth::EffectType::fir &&
+                        slot >= Sculptor::fx_band_first_slot) {
+                        continue;
+                    }
                     const uint32_t field = (slot - fx_param_row(0)) % fx_param_stride;
                     if (field == 5 || field == 6 || field == 8 || field == 9) {
                         continue;

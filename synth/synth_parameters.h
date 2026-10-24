@@ -256,6 +256,10 @@ void oscillator_fir_band_guard(uint32_t* lowpass_cutoff_freq, uint32_t* highpass
 // band center).  Monotonically non-decreasing in the slope.
 uint32_t fir_effective_span(float slope_percent);
 
+// Rounds a cutoff in Hz to the int the coeff shader wants; <= 0 disables the edge, else clamped to
+// [1, Nyquist - 1].  Shared by the oscillator and the effect FIR staging.
+uint32_t cutoff_hz_to_int(float value);
+
 // What to do with the cached FIR coefficient param block this step.
 enum FirCoeffCacheAction {
     fir_coeff_skip,       // The previously dispatched coefficients still match: no dispatch.

@@ -332,6 +332,30 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
         }
     }
 
+    // A connection whose destination slot is display-hidden or disabled is
+    // inert: the routing survives in the model (leaving bandpass hides the
+    // oscillator's band rows but keeps their MIDI bindings), yet it drives
+    // nothing now. Such a wire grays, and a source endpoint whose every
+    // wire is dead grays with it, so a dead routing reads like the grayed
+    // rows it would have fed. A hidden destination still hides the wire
+    // (its dot draws no position), so the grayed source is the only trace
+    // left.
+    const auto input_dead = [&](const EndPoint& input) {
+        if (input.node_idx >= max_nodes || ! nodes.is_occupied(input.node_idx)) {
+            return false;
+        }
+        const Node& dest_node = nodes.entries[input.node_idx];
+        if (input.slot_idx >= max_node_slots || ! dest_node.slots.is_occupied(input.slot_idx)) {
+            return false;
+        }
+        if (slot_hidden_callback &&
+            slot_hidden_callback(slot_hidden_user_data, *this, input.node_idx, input.slot_idx)) {
+            return true;
+        }
+        const Slot& slot = dest_node.slots.entries[input.slot_idx];
+        return slot_edit_disabled(input.node_idx, input.slot_idx) ||
+               (slot.kind == SlotKind::property && oscillator_slot_waveform_mode_disabled(dest_node, input.slot_idx));
+    };
     for (uint32_t node_idx = 0; node_idx < max_nodes; ++node_idx) {
         if (! nodes.is_occupied(node_idx)) {
             state_widget_hovered[node_idx] = false;
@@ -600,9 +624,30 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
                 }
                 const Slot& slot      = node.slots.entries[elem_slot];
                 const bool  connected = slot_is_connected(node_idx, elem_slot);
-                const float dot_x     = slot.kind == SlotKind::output
-                                            ? rect_max.x - static_cast<float>(right_dots++) * dot_space * render_scale
-                                            : rect_min.x + static_cast<float>(left_dots++) * dot_space * render_scale;
+                // A connected output whose every wire lands on a dead destination
+                // grays: dot and label, like the rows it cannot drive.
+                bool source_dead = false;
+                if (slot.kind == SlotKind::output && connected) {
+                    uint32_t total = 0;
+                    uint32_t dead  = 0;
+                    for (uint32_t c = 0; c < max_connections; ++c) {
+                        if (! connections.is_occupied(c)) {
+                            continue;
+                        }
+                        const Connection& outgoing = connections.entries[c];
+                        if (outgoing.output.node_idx != node_idx || outgoing.output.slot_idx != elem_slot) {
+                            continue;
+                        }
+                        ++total;
+                        if (input_dead(outgoing.input)) {
+                            ++dead;
+                        }
+                    }
+                    source_dead = total > 0 && dead == total;
+                }
+                const float dot_x = slot.kind == SlotKind::output
+                                        ? rect_max.x - static_cast<float>(right_dots++) * dot_space * render_scale
+                                        : rect_min.x + static_cast<float>(left_dots++) * dot_space * render_scale;
                 // Unconnected dots take the caller's color override when one
                 // applies (the osc editor paints the red holes), else the
                 // default connector color.
@@ -610,9 +655,10 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
                 const bool overridden =
                     ! connected && slot_color_callback &&
                     slot_color_callback(slot_color_user_data, *this, node_idx, elem_slot, &override_color);
-                const ImU32 dot_color                                = to_imgui(connected ? colors_.connector_connected
-                                                                                : overridden ? override_color
-                                                                                             : colors_.connector);
+                const ImU32 dot_color =
+                    to_imgui(connected ? (source_dead ? colors_.property_connected_value : colors_.connector_connected)
+                             : overridden ? override_color
+                                          : colors_.connector);
                 dot_positions[node_idx * max_node_slots + elem_slot] = vmath::vec2(dot_x, y_center);
                 if (connected) {
                     draw_list->AddCircleFilled(ImVec2(dot_x, y_center), dot_radius * render_scale, dot_color);
@@ -629,7 +675,7 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
                         draw_list,
                         vmath::vec2(dot_x - pad * render_scale - name_w, y_center - line_h * render_scale * 0.5f),
                         render_scale,
-                        to_imgui(colors_.property_value),
+                        to_imgui(source_dead ? colors_.property_connected_value : colors_.property_value),
                         slot.name);
                 }
             }
@@ -1400,7 +1446,9 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
         const float mid_dy = mouse_screen.y - mid.y;
         const bool  mid_hovered =
             mouse_in_widget && mid_dx * mid_dx + mid_dy * mid_dy <= dot_pick_radius * dot_pick_radius;
-        const ImU32 line_color = to_imgui(mid_hovered ? colors_.connector_hover : colors_.connection);
+        const bool dead = input_dead(connection.input);
+        const ImU32 line_color =
+            to_imgui(mid_hovered ? colors_.connector_hover : dead ? colors_.property_connected_value : colors_.connection);
         draw_list->AddBezierCubic(ImVec2(p0.x, p0.y),
                                   ImVec2(p1.x, p1.y),
                                   ImVec2(p2.x, p2.y),

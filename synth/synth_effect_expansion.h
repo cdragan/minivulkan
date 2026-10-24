@@ -10,6 +10,15 @@
 
 namespace Synth {
 
+// Per-band live values for a FIR effect instance, in FirEffectBands index order: index 0
+// is band 0's gain, then bands 1..3 each carry lowpass, highpass, gain and slope.
+// src_param_id is the resolved modulation node (0 = unmodulated constant).
+struct FirEffectBandValues {
+    uint8_t  band_count;
+    float    params[num_fir_effect_band_params];
+    uint16_t src_param_id[num_fir_effect_band_params];
+};
+
 // One runtime effect instance: the working copy the render path reads. Base values come
 // from the bank's bindings at commit; modulated params are overwritten each step from the
 // graph node recorded in src_param_id (0 = unmodulated constant).
@@ -27,6 +36,7 @@ struct EffectInstance {
     float    params[max_effect_param_floats];
     uint32_t state_offs; // byte offset into the device data buffer; 0 when stateless
     uint16_t src_param_id[max_effect_param_floats];
+    FirEffectBandValues fir_bands; // FIR effect only; refreshed like params
     // Resolved leaf parameter id of the slot's wired enable routing (0 =
     // unwired, the saved checkbox alone decides).  Filled at commit through
     // the same per-chain channel the param sources resolve from.

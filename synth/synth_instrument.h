@@ -162,6 +162,16 @@ struct EffectParamBinding {
     ModInput  inputs[max_mod_inputs]; // channel MIDI sources (master chain resolves from channel index 0)
 };
 
+// A FIR effect's per-band bindings.  Band 0's lowpass, highpass and slope stay in the
+// slot's legacy bindings[0..2]; this structure carries band 0's gain plus the full
+// parameter set of bands 1..3, so every band parameter reuses the effect modulation
+// machinery (LFO + channel MIDI, no envelopes).  Index 0 is band 0's gain; band b >= 1
+// lives at 1 + 4 * (b - 1) + (0 = lowpass, 1 = highpass, 2 = gain, 3 = slope).
+struct FirEffectBands {
+    uint8_t            band_count; // Active bands 1..max_fir_effect_bands; 0 = the legacy single band
+    EffectParamBinding bands[num_fir_effect_band_params];
+};
+
 // One effect slot in a chain; only bindings[0..get_effect_param_floats(type)) are
 // meaningful for the slot's type.
 struct EffectSlotBinding {
@@ -173,6 +183,7 @@ struct EffectSlotBinding {
     // (raw 14-bit >= 8192).
     ModInput           enable_input;
     EffectParamBinding bindings[max_effect_param_floats];
+    FirEffectBands     fir_bands; // FIR effect only; band 0 keeps bindings[0..2]
 };
 
 struct EffectChainBinding {

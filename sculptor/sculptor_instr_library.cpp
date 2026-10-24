@@ -225,12 +225,27 @@ static bool validate_record(const Synth::InstrumentEditorBank* const editor_bank
     if (chain.num_effects > Synth::max_chain_effects)
         return false;
     for (uint32_t slot = 0; slot < chain.num_effects; slot++) {
-        if (static_cast<uint32_t>(chain.effects[slot].type) >= Synth::num_effect_types)
+        if (static_cast<uint32_t>(chain.effects[slot].type) >= Synth::num_effect_types) {
             return false;
+        }
         const uint32_t num_params = Synth::get_effect_param_floats(chain.effects[slot].type);
         for (uint32_t param = 0; param < num_params; param++) {
-            if (chain.effects[slot].bindings[param].lfo_desc_id > bank->lfos.num_allocated)
+            if (chain.effects[slot].bindings[param].lfo_desc_id > bank->lfos.num_allocated) {
                 return false;
+            }
+        }
+        // FIR band bindings carry LFO references too; the validation walks the active
+        // bands only, so a modulated dormant band is not refused here.
+        if (chain.effects[slot].type == Synth::EffectType::fir &&
+            chain.effects[slot].fir_bands.band_count > Synth::max_fir_effect_bands) {
+            return false;
+        }
+        const uint32_t active_band_params =
+            chain.effects[slot].fir_bands.band_count > 1 ? 1 + 4 * (chain.effects[slot].fir_bands.band_count - 1) : 0;
+        for (uint32_t band_param = 0; band_param < active_band_params; band_param++) {
+            if (chain.effects[slot].fir_bands.bands[band_param].lfo_desc_id > bank->lfos.num_allocated) {
+                return false;
+            }
         }
     }
     return true;

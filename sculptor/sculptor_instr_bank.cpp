@@ -241,6 +241,27 @@ static bool validate_effect_chain(const Synth::EffectChainBinding& chain,
             }
         }
 
+        // FIR band bindings ride the same acceptance and node-counting rules as
+        // the scalar params, so load-time and expansion-time acceptance stay
+        // identical.  Dormant bands (beyond the count, or band 0's gain on the
+        // legacy single-band form, whose staging ignores it) validate but count
+        // nothing.
+        if (effect.type == Synth::EffectType::fir) {
+            if (effect.fir_bands.band_count > Synth::max_fir_effect_bands) {
+                return false;
+            }
+            const uint32_t active_band_params =
+                effect.fir_bands.band_count <= 1 ? 0 : 1 + 4 * (effect.fir_bands.band_count - 1);
+            for (uint32_t band_param = 0; band_param < Synth::num_fir_effect_band_params; band_param++) {
+                const Synth::EffectParamBinding& band_binding = effect.fir_bands.bands[band_param];
+                if (! validate_effect_param_binding(band_binding, num_lfos)) {
+                    return false;
+                }
+                if (band_param < active_band_params && (band_binding.lfo_desc_id || band_binding.num_inputs)) {
+                    (*num_modulated)++;
+                }
+            }
+        }
         // Routed-but-saved-off slots consume state too: the routing can flip
         // them live mid-run.
         if (effect.type != Synth::EffectType::none &&

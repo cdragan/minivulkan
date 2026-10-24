@@ -715,6 +715,7 @@ std::atomic<ActiveRingFormat> active_ring_format{ ActiveRingFormat::none };
 constexpr uint32_t max_fir_coeff_entries =
     (Synth::max_oscillators - 1) + (Synth::max_channels + 1) * Synth::max_chain_effects;
 static_assert(sizeof(ShaderParams::FIRCoeff) == Synth::fir_coeff_entry_words * sizeof(uint32_t));
+static_assert(sizeof(Synth::FirEffectCoeffEntry) == sizeof(ShaderParams::FIRCoeff));
 static_assert(max_fir_coeff_entries * sizeof(ShaderParams::FIRCoeff) <= ShaderParams::max_param_range);
 ShaderParams::FIRCoeff fir_coeff_stage[max_fir_coeff_entries];
 ShaderParams::FIRCoeff fir_coeff_prev[max_fir_coeff_entries];
@@ -1908,6 +1909,16 @@ static void pull_effect_param_chain(EffectChain* chain, bool* reset_barrier_need
                 instance.params[param_idx] = parameters[instance.src_param_id[param_idx]].value;
             }
         }
+        // FIR band values refresh through the same graph-leaf mechanism; the commit records one
+        // node per modulated active-band parameter.
+        if (instance.type == Synth::EffectType::fir) {
+            for (uint32_t band_param = 0; band_param < Synth::num_fir_effect_band_params; band_param++) {
+                if (instance.fir_bands.src_param_id[band_param]) {
+                    instance.fir_bands.params[band_param] =
+                        parameters[instance.fir_bands.src_param_id[band_param]].value;
+                }
+            }
+        }
     }
 }
 
@@ -2131,31 +2142,33 @@ static void update_modulation()
     }
 }
 
-// Rounds a cutoff in Hz to the int the coeff shader wants; <=0 disables the edge, else clamped to [1, Nyquist-1].
-static uint32_t cutoff_hz_to_int(float value)
+// Stages one FIR effect's coefficient entry.  The count predicate calls the same helper, so the
+// count condition and the staging compaction rule stay identical by construction (the
+// invariant compute_fir_coefficients asserts).
+static bool stage_effect_fir_entry(const EffectInstance& instance, Synth::FirEffectCoeffEntry* entry)
 {
-    if (! (value > 0.0f)) {
-        return 0;
-    }
-
-    constexpr uint32_t min_cutoff_hz = 1;
-
-    if (value <= static_cast<float>(min_cutoff_hz)) {
-        return min_cutoff_hz;
-    }
-    if (value >= static_cast<float>(Synth::max_cutoff_hz)) {
-        return Synth::max_cutoff_hz;
-    }
-
-    return static_cast<uint32_t>(value + 0.5f);
+    return Synth::stage_fir_effect_coeff_entry(instance.state_offs / 4,
+                                               instance.fir_bands.band_count,
+                                               instance.params[0],
+                                               instance.params[1],
+                                               instance.params[2],
+                                               instance.fir_bands.params,
+                                               entry);
 }
 
+// A FIR effect contributes a coefficient entry iff its staging produces one: a single-band
+// effect always stages the legacy entry (byte-identical legacy staging), a multi-band effect
+// stages when at least one band is active (the oscillator fir_active analog).
 static uint32_t count_effect_fir(const EffectChain& chain)
 {
     uint32_t count = 0;
     for (uint32_t effect_idx = 0; effect_idx < chain.num_effects; effect_idx++) {
         const EffectInstance& instance = chain.effects[effect_idx];
-        if (instance.enabled && instance.type == Synth::EffectType::fir) {
+        if (! instance.enabled || instance.type != Synth::EffectType::fir) {
+            continue;
+        }
+        Synth::FirEffectCoeffEntry entry;
+        if (stage_effect_fir_entry(instance, &entry)) {
             ++count;
         }
     }
@@ -2256,8 +2269,8 @@ static void compute_fir_coefficients()
                                                          &band_span)) {
                     continue; // Spread <= 0 or NaN: an inactive band.
                 }
-                uint32_t lowpass  = cutoff_hz_to_int(lowpass_hz);
-                uint32_t highpass = cutoff_hz_to_int(highpass_hz);
+                uint32_t lowpass  = Synth::cutoff_hz_to_int(lowpass_hz);
+                uint32_t highpass = Synth::cutoff_hz_to_int(highpass_hz);
                 Synth::oscillator_fir_band_guard(&lowpass, &highpass);
                 ShaderParams::FIRCoeff::Band* out = &param.bands[num_bands++];
                 out->highpass_cutoff_freq         = highpass;
@@ -2273,8 +2286,8 @@ static void compute_fir_coefficients()
             continue;
         }
 
-        uint32_t lowpass  = cutoff_hz_to_int(lowpass_hz);
-        uint32_t highpass = cutoff_hz_to_int(highpass_hz); // 0 when the helper floor-killed the edge.
+        uint32_t lowpass  = Synth::cutoff_hz_to_int(lowpass_hz);
+        uint32_t highpass = Synth::cutoff_hz_to_int(highpass_hz); // 0 when the helper floor-killed the edge.
 
         ShaderParams::FIRCoeff& param = fir_coeff_stage[staged++];
         memset(&param, 0, sizeof(param)); // the unused band words carry no stale bytes into the cache
@@ -2294,14 +2307,13 @@ static void compute_fir_coefficients()
                 continue;
             }
 
-            ShaderParams::FIRCoeff& param = fir_coeff_stage[(*cur_entry)++];
-            memset(&param, 0, sizeof(param));
-            param.taps_offs                     = instance.state_offs / 4;
-            param.band_count                    = 1; // Effect FIR stays the single-band form.
-            param.bands[0].lowpass_cutoff_freq  = cutoff_hz_to_int(instance.params[0]);
-            param.bands[0].highpass_cutoff_freq = cutoff_hz_to_int(instance.params[1]);
-            param.bands[0].window_span          = Synth::fir_effective_span(instance.params[2]);
-            param.bands[0].gain                 = 1.0f;
+            // The helper drops the entry when no band is active; the memcpy is layout-identical
+            // to the oscillator path's direct param writes (the static_assert pins the sizes).
+            Synth::FirEffectCoeffEntry entry;
+            if (! stage_effect_fir_entry(instance, &entry)) {
+                continue;
+            }
+            memcpy(&fir_coeff_stage[(*cur_entry)++], &entry, sizeof(entry));
         }
     };
     for (uint32_t chan_idx = 0; chan_idx < max_mix_channels; chan_idx++) {

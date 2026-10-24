@@ -9,6 +9,7 @@
 #include "../synth/synth_instrument.h"
 #include "../synth/synth_midi_cc.h"
 #include "sculptor_graph.h"
+#include "sculptor_osc_graph.h"
 
 #include <stdint.h>
 
@@ -197,6 +198,48 @@ bool fx_param_field_hidden(const Graph& graph, uint32_t node_idx, uint32_t param
 // free input. Pure connection-state query; the inline value-row dot of a
 // collapsed parameter resolves its wire through this choice.
 uint32_t fx_param_free_input(const Graph& graph, uint32_t node_idx, uint32_t param, bool lfo_source);
+
+// The same display filter for a FIR effect's band row `row` of band `band`
+// (sculptor_effect_graph.h band constants): a band row's unconnected
+// modulator fields hide like the legacy parameter rows'.
+bool fx_band_field_hidden(const Graph& graph, uint32_t node_idx, uint32_t band, uint32_t row, uint32_t field);
+
+// The full effect-node slot display filter: only a parameter's connected
+// modulator rows render.  A param with no modulator collapses to its
+// base-value row, whose inline dot (connectable in the projection) stands
+// in for the row's first free modulator input.  The FIR band region
+// (fx_band_first_slot) decodes only for FIR effects; a five-parameter
+// effect's rows share the slot range and take the legacy decode, so the
+// compressor's rows keep their answers.  Public seam: the render filter
+// lives here so the unit suite can reach it; the editor callback passes
+// the effect's binding.
+bool fx_effect_slot_hidden(const Synth::EffectSlotBinding& effect,
+                           const Graph&                    graph,
+                           uint32_t                        node_idx,
+                           uint32_t                        slot_idx);
+
+// Decodes one projected effect-node slot into the parameter row it edits.
+// Legacy parameter rows read bindings[]; a FIR effect's band region
+// (fx_band_first_slot) reads the slot's FirEffectBands bindings, band 0's
+// Gain row first and bands 1..3's Lowpass/Highpass/Gain/Slope rows after.
+// Returns false for slots that edit no binding: the Enabled row, the band
+// headers and their [-]/[+] click slots, and slots past the projected
+// rows. *binding points into the passed effect; *row_base is the row's
+// base-value slot; *field the ten-slot field inside the row; *fir_row
+// names the row's FIR parameter (0 lowpass, 1 highpass, 2 gain, 3 slope);
+// non-FIR rows reuse the parameter index.  The decode is slot arithmetic
+// against the effect type: whether a band row is currently projected
+// (dormant gate) is the caller's guard. Public seam: the
+// wiring validator, the drop-command consumer and the derived generator
+// title classify endpoints through this decoder instead of legacy modulo
+// arithmetic.
+bool fx_decode_row_slot(Synth::EffectSlotBinding&   effect,
+                        uint32_t                    slot_idx,
+                        Synth::EffectParamBinding** binding,
+                        uint32_t*                   row_base,
+                        uint32_t*                   field,
+                        uint32_t*                   fir_row);
+
 // Budget for one additional represented node, including owner roots and legacy pins.
 bool fx_can_add_node(const Synth::InstrumentEditorBank* source, uint32_t owner, const bool* pinned_lfos = nullptr);
 // Number of nodes the chain's projection needs: fixed endpoints, one per
@@ -369,5 +412,86 @@ constexpr uint32_t fx_param_src_dot(uint32_t param, uint32_t input)
 {
     return fx_param_row(param) + 4u + 3u * input;
 }
+
+// FIR effect band rows. Dormant region: no current effect type projects
+// band rows (the visibility gate lives in sculptor_effect_graph.cpp and is
+// false for every type), so every effect node renders its legacy rows only.
+// The future Multi-band FIR effect node will own this region: a bandpass
+// node projects one block per existing band after the legacy parameter
+// rows - band 0 keeps its legacy Lowpass/Highpass/Slope rows and gains a
+// header row with [-]/[+] click slots plus a Gain row; bands 1..3 project a
+// header, the two click slots, then Lowpass Hz, Highpass Hz, Gain and Slope
+// rows. Only the stored band count's bands project, so the projected slot
+// count encodes the band count. Slots are dense, so the region starts right
+// after FIR's three legacy parameter blocks.
+constexpr uint32_t fx_band_first_slot = fx_param_row(3);
+
+// Band 0's block: the header, the [-] and [+] click slots, then band 0's
+// Gain row (the FirEffectBands index 0 binding).
+constexpr uint32_t fx_band0_block_slots = 3u + fx_param_stride;
+
+// Bands 1..3 project one uniform block: the header, the [-] and [+] click
+// slots, then four parameter rows (Lowpass Hz, Highpass Hz, Gain, Slope),
+// each a full ten-slot parameter block.
+constexpr uint32_t fx_band_block_stride = 3u + 4u * fx_param_stride;
+
+// First slot of band `band`'s block (0-based): the header row; the [-] and
+// [+] click slots follow at +1 and +2.
+constexpr uint32_t fx_band_header_slot(uint32_t band)
+{
+    return band == 0 ? fx_band_first_slot
+                     : fx_band_first_slot + fx_band0_block_slots + fx_band_block_stride * (band - 1u);
+}
+
+// First (base-value slider) slot index of band `band`'s parameter row `row`.
+// Band 0 projects only its Gain row, so its row 0 is the Gain row; bands 1..3
+// number rows 0..3 as Lowpass Hz, Highpass Hz, Gain, Slope.
+constexpr uint32_t fx_band_row_slot(uint32_t band, uint32_t row)
+{
+    return fx_band_header_slot(band) + 3u + fx_param_stride * row;
+}
+
+// The band header rows' renderer line ids: a header's label and its two
+// click slots share one line.  The ids reuse the oscillator band range
+// (sculptor_osc_graph.h), which the renderer's band-click grammar keys on;
+// row-group ids only need uniqueness inside one node.
+constexpr uint8_t fx_band_row_group_base = Sculptor::osc_band_row_group;
+
+// The full band region stays inside one node's slot budget.
+static_assert(fx_band_first_slot + fx_band0_block_slots + 3u * fx_band_block_stride <= max_node_slots);
+
+// True when the slot is one of the band header rows' [-]/[+] click slots
+// (header slot + 1 and + 2 in every band block).  Such an edit rewrites the
+// stored bands and leaves the graph stale until the structural
+// re-projection rebuilds it.  Slot arithmetic alone: callers gate on the
+// effect actually being a FIR node, because a five-parameter effect's rows
+// share the slot range.
+bool is_fx_band_button_slot(uint32_t slot_idx);
+
+// The batch boundary for drain: the number of leading changes to apply
+// before the first FIR band-header click, and whether the truncation fired.
+// The band click rewrites the stored bands and leaves the graph stale on
+// purpose, so later events in the same batch would apply against the old
+// slot map and undo the insertion/removal.  Stateless: the caller owns the
+// queue, the mapping and the bank.
+uint32_t fx_band_click_boundary(const GraphChange*           changes,
+                                uint32_t                     count,
+                                const EffectGraphMapping&    mapping,
+                                const Synth::InstrumentBank& bank,
+                                bool*                        band_click);
+
+// The band block a FIR band-region slot belongs to: *block is the 0-based
+// band index and *offset the slot's position inside the block (0 the
+// header, 1 [-], 2 [+], 3.. the parameter rows' ten-slot blocks).  Returns
+// false past the last band block.  Pure slot arithmetic; callers gate on
+// the effect being a FIR node.
+bool fx_band_block_of_slot(uint32_t slot_idx, uint32_t* block, uint32_t* offset);
+
+// The band row a FIR band-region slot edits: *block the 0-based band index,
+// *row the row inside the band (band 0 carries only row 0, its Gain row;
+// bands 1..3 number rows 0..3 Lowpass/Highpass/Gain/Slope), *field the
+// ten-slot field inside the row.  Returns false for the header and its
+// click slots.
+bool fx_band_slot_row(uint32_t slot_idx, uint32_t* block, uint32_t* row, uint32_t* field);
 
 } // namespace Sculptor

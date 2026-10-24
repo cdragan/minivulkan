@@ -178,7 +178,7 @@ OscDropCommand osc_drop_command = {};
 // drain.  No heap allocations.
 struct FxDropCommand {
     uint32_t    slot;     // the dragged effect's chain slot
-    uint32_t    param;    // the dragged parameter index on the effect node
+    uint32_t    anchor_slot; // the dragged row's slot index; the consumer decodes it band-aware
     vmath::vec2 position; // the release point, snapped to the grid at click time
 };
 
@@ -734,7 +734,9 @@ static bool fx_node_delete_veto(void* user_data, uint32_t node_idx)
 // param's unconnected modulator rows; slot indices, slots and connections
 // stay untouched, so snapshots, undo bytes and every slot-arithmetic
 // decoder are unaffected.  Visibility derives from live connection state
-// at render time (Sculptor::fx_param_field_hidden), never stored state.
+// at render time, never stored state; the FIR band rows' fields use the
+// same rule (Sculptor::fx_band_field_hidden), and a band region's headers
+// and click slots always render.
 static bool fx_slot_hidden(void* user_data, const Sculptor::Graph& graph, uint32_t node_idx, uint32_t slot_idx)
 {
     (void)user_data;
@@ -742,19 +744,10 @@ static bool fx_slot_hidden(void* user_data, const Sculptor::Graph& graph, uint32
     if (effect < 0 || slot_idx < Sculptor::fx_param_row(0)) {
         return false;
     }
-
-    const uint32_t param = (slot_idx - Sculptor::fx_param_row(0)) / Sculptor::fx_param_stride;
-    const uint32_t field = (slot_idx - Sculptor::fx_param_row(0)) % Sculptor::fx_param_stride;
-    if (field == 0) {
-        return false; // the base-value row always renders (it carries the inline dot)
-    }
-
-    const Synth::EffectChainBinding& chain = Sculptor::fx_graph_chain(&instr_bank.bank, fx_mapping.chain);
-    if (param >= Synth::get_effect_param_floats(chain.effects[effect].type)) {
-        return false;
-    }
-
-    return Sculptor::fx_param_field_hidden(graph, node_idx, param, field);
+    return Sculptor::fx_effect_slot_hidden(Sculptor::fx_graph_chain(&instr_bank.bank, fx_mapping.chain).effects[effect],
+                                           graph,
+                                           node_idx,
+                                           slot_idx);
 }
 
 // The fed-row label for one generator wire landing on an oscillator node's
@@ -815,7 +808,22 @@ static const char* fx_derived_title_label(const Sculptor::Graph& graph, const Sc
         base = Sculptor::fx_enabled_row;
     }
     else if (input.slot_idx >= Sculptor::fx_param_row(0)) {
-        base = Sculptor::fx_param_row((input.slot_idx - Sculptor::fx_param_row(0)) / Sculptor::fx_param_stride);
+        // Band-aware decode: a FIR band row's base is its band header,
+        // not a legacy stride row.
+        const int32_t              slot      = Sculptor::fx_effect_slot_of(fx_mapping, input.node_idx);
+        Synth::EffectChainBinding& chain     = Sculptor::fx_graph_chain(&instr_bank.bank, fx_mapping.chain);
+        uint32_t                   row_base  = 0;
+        uint32_t                   row_field      = 0;
+        uint32_t                   fir_row        = 0;
+        Synth::EffectParamBinding* unused_binding = nullptr; // The title needs only the row facts.
+        if (slot >= 0 && Sculptor::fx_decode_row_slot(chain.effects[slot],
+                                                      input.slot_idx,
+                                                      &unused_binding,
+                                                      &row_base,
+                                                      &row_field,
+                                                      &fir_row)) {
+            base = row_base;
+        }
     }
 
     if (base == Sculptor::pool_no_slot || base >= node.slots.num_allocated) {
@@ -1025,20 +1033,33 @@ static bool fx_connection_validator(void*              user_data,
         return false;
     }
     const int32_t in_slot = Sculptor::fx_effect_slot_of(fx_mapping, input.node_idx);
-    if (in_slot >= 0 && input.slot_idx >= Sculptor::fx_param_lfo_dot(0) &&
-        (input.slot_idx - Sculptor::fx_param_lfo_dot(0)) % Sculptor::fx_param_stride == 0) {
+    // One band-aware decode of the destination row drives the wire
+    // classification below: the legacy modulo scan cannot classify a FIR
+    // band region slot, so the decoder is the single seam
+    // (sculptor_effect_graph.h).
+    Synth::EffectParamBinding* row_binding = nullptr;
+    uint32_t                   row_base    = 0;
+    uint32_t                   row_field   = 0;
+    uint32_t                   fir_row     = 0;
+    Synth::EffectChainBinding& chain       = Sculptor::fx_graph_chain(&instr_bank.bank, fx_mapping.chain);
+    const bool                 row_decoded = in_slot >= 0 && Sculptor::fx_decode_row_slot(chain.effects[in_slot],
+                                                                                          input.slot_idx,
+                                                                                          &row_binding,
+                                                                                          &row_base,
+                                                                                          &row_field,
+                                                                                          &fir_row);
+    // A parameter's LFO dot takes an LFO's Value wire: the wire is the
+    // binding.
+    if (row_decoded && row_field == 1) {
         if (Sculptor::fx_lfo_desc_of(fx_mapping, output.node_idx) == 0) {
             graph.set_error("Only an LFO can modulate a parameter");
             return false;
         }
         return true;
     }
-    const uint32_t param_field = input.slot_idx >= Sculptor::fx_param_row(0)
-                                     ? (input.slot_idx - Sculptor::fx_param_row(0)) % Sculptor::fx_param_stride
-                                     : Sculptor::fx_param_stride;
     // A param source row takes channel-wide MIDI sources only: bend, mod
     // wheel, channel pressure, and the chain's added-CC dots.
-    if (in_slot >= 0 && (param_field == 4 || param_field == 7)) {
+    if (row_decoded && (row_field == 4 || row_field == 7)) {
         if (output.node_idx != fx_mapping.midi_node) {
             graph.set_error("Effects take channel-wide MIDI sources only");
             return false;
@@ -1051,8 +1072,7 @@ static bool fx_connection_validator(void*              user_data,
     // the LFO input, a channel-wide MIDI source or added CC binds the
     // first free source row (the apply path resolves the landing).
     // Everything else refuses.
-    if (in_slot >= 0 && input.slot_idx >= Sculptor::fx_param_row(0) &&
-        (input.slot_idx - Sculptor::fx_param_row(0)) % Sculptor::fx_param_stride == 0) {
+    if (row_decoded && row_field == 0) {
         if (Sculptor::fx_lfo_desc_of(fx_mapping, output.node_idx) != 0) {
             return true;
         }
@@ -1128,7 +1148,7 @@ static bool fx_connection_validator(void*              user_data,
 static void fx_canvas_menu(void* user_data)
 {
     (void)user_data;
-    const Synth::EffectChainBinding& chain = Sculptor::fx_graph_chain(&instr_bank.bank, fx_mapping.chain);
+    Synth::EffectChainBinding& chain = Sculptor::fx_graph_chain(&instr_bank.bank, fx_mapping.chain);
     ImGui::BeginDisabled(chain.num_effects >= Synth::max_chain_effects);
     for (uint32_t type = 1; type < Synth::num_effect_types; ++type) {
         const Sculptor::EffectTypeInfo& info = Sculptor::effect_type_info(static_cast<Synth::EffectType>(type));
@@ -1210,7 +1230,7 @@ static bool fx_node_menu(void* user_data, uint32_t node_idx)
     if (slot < 0) {
         return drew_rejoin;
     }
-    const Synth::EffectChainBinding& chain = Sculptor::fx_graph_chain(&instr_bank.bank, fx_mapping.chain);
+    Synth::EffectChainBinding& chain = Sculptor::fx_graph_chain(&instr_bank.bank, fx_mapping.chain);
     if (ImGui::BeginMenu("Change Type")) {
         for (uint32_t type = 1; type < Synth::num_effect_types; ++type) {
             const bool is_current = chain.effects[slot].type == static_cast<Synth::EffectType>(type);
@@ -2863,10 +2883,10 @@ void Sculptor::SynthEditor::run_osc_canvas_command()
 // run_fx_canvas_command consumes the command after render and drain, with
 // no model mutation here.  The release position is snapped once, at click
 // time, so the landing is grid-aligned.
-static void stash_fx_drop_command(uint32_t slot, uint32_t param)
+static void stash_fx_drop_command(uint32_t slot, uint32_t anchor_slot)
 {
     fx_drop_command.slot     = slot;
-    fx_drop_command.param    = param;
+    fx_drop_command.anchor_slot = anchor_slot;
     const vmath::vec2 pos    = osc_graph.drop_menu_pos();
     fx_drop_command.position = vmath::vec2(Sculptor::snap_to_grid(pos.x), Sculptor::snap_to_grid(pos.y));
     fx_canvas_command        = fx_cmd_drop_add_lfo;
@@ -2874,8 +2894,10 @@ static void stash_fx_drop_command(uint32_t slot, uint32_t param)
 
 // The drop menu's items, classified once at click time against the live
 // mapping: a base-value row on a projected effect node offers Add LFO.
-// Anything else draws nothing: unreachable while the projection's flag
-// discipline holds, mirroring the stale-anchor guard in osc_drop_menu_entry.
+// Legacy and FIR band base rows both qualify; the consumer decodes the
+// stashed anchor slot band-aware.  Anything else draws nothing:
+// unreachable while the projection's flag discipline holds, mirroring
+// the stale-anchor guard in osc_drop_menu_entry.
 static void fx_drop_menu(void* user_data)
 {
     (void)user_data;
@@ -2890,9 +2912,8 @@ static void fx_drop_menu(void* user_data)
     if (anchor.slot_idx < Sculptor::fx_param_row(0)) {
         return;
     }
-    const uint32_t param = (anchor.slot_idx - Sculptor::fx_param_row(0)) / Sculptor::fx_param_stride;
     if (ImGui::MenuItem("Add LFO")) {
-        stash_fx_drop_command(static_cast<uint32_t>(slot), param);
+        stash_fx_drop_command(static_cast<uint32_t>(slot), anchor.slot_idx);
     }
 }
 
@@ -3019,7 +3040,21 @@ void Sculptor::SynthEditor::drain_fx_graph()
         return;
     }
 
-    for (uint32_t index = 0; index < count; ++index) {
+    // The FIR band headers' [-]/[+] clicks are value events that rewrite the
+    // stored bands and leave the graph stale on purpose.  Any later event in
+    // the same batch would apply against the old slot map and undo the
+    // insertion/removal, so the batch ends at the first band click: the
+    // remaining queued events are discarded, and the structural
+    // re-projection below rebuilds the graph from the committed model before
+    // more edits can apply.  Disclosed policy: a discarded value edit is
+    // dropped, and its slider snaps back on the re-projection.  Slot
+    // arithmetic alone is not enough here (a five-parameter effect's rows
+    // share the range), so the scan checks the node is an FIR effect.
+    bool           band_click = false;
+    const uint32_t apply_count =
+        Sculptor::fx_band_click_boundary(changes, count, fx_mapping, instr_bank.bank, &band_click);
+
+    for (uint32_t index = 0; index < apply_count; ++index) {
         if (changes[index].kind == Sculptor::ChangeKind::node_deleted) {
             const uint32_t descriptor = Sculptor::fx_lfo_desc_of(fx_mapping, changes[index].node_idx);
             if (descriptor) {
@@ -3032,7 +3067,7 @@ void Sculptor::SynthEditor::drain_fx_graph()
         capture_nodes[node] = osc_graph.node_occupied(node) && node_layout_moved(node);
     }
     bool structural = false;
-    for (uint32_t index = 0; index < count; ++index) {
+    for (uint32_t index = 0; index < apply_count; ++index) {
         structural = structural || changes[index].kind != Sculptor::ChangeKind::value_changed;
     }
     candidate     = instr_bank;
@@ -3040,9 +3075,10 @@ void Sculptor::SynthEditor::drain_fx_graph()
                                                        &osc_graph,
                                                        &fx_mapping,
                                                        changes,
-                                                       count,
+                                                       apply_count,
                                                        capture_nodes,
                                                        &candidate);
+    structural    = structural || band_click;
     if (ok) {
         for (uint32_t desc = 1; desc <= Synth::max_lfos; ++desc) {
             const uint32_t lfo_node = fx_mapping.lfo_nodes[desc - 1];
@@ -3056,14 +3092,14 @@ void Sculptor::SynthEditor::drain_fx_graph()
     // unique tag (a wire edit is one discrete undo step).
     const Sculptor::GraphChange& first = changes[0];
     bool                         mixed = false;
-    for (uint32_t i = 1; i < count; ++i) {
+    for (uint32_t i = 1; i < apply_count; ++i) {
         if (changes[i].kind != first.kind || changes[i].node_idx != first.node_idx ||
             changes[i].slot_idx != first.slot_idx) {
             mixed = true;
             break;
         }
     }
-    for (uint32_t i = 0; i < count && ! mixed; ++i) {
+    for (uint32_t i = 0; i < apply_count && ! mixed; ++i) {
         const auto kind = changes[i].kind;
         mixed = kind == Sculptor::ChangeKind::connection_added || kind == Sculptor::ChangeKind::connection_deleted ||
                 kind == Sculptor::ChangeKind::connection_changed;
@@ -3258,21 +3294,39 @@ void Sculptor::SynthEditor::do_fx_add_lfo(bool from_drop)
     }
     if (from_drop) {
         // The anchor was classified at click time; the candidate re-check
-        // is the model guard (the menu's eligibility is view state).
+        // is the model guard (the menu's eligibility is view state).  The
+        // row decode is band-aware (sculptor_effect_graph.h), so a FIR
+        // band row's Add-LFO seeds the band binding the row projects.
         Synth::EffectChainBinding& chain = Sculptor::fx_graph_chain(&candidate.bank, fx_mapping.chain);
-        const uint32_t             slot  = fx_drop_command.slot;
-        const uint32_t             param = fx_drop_command.param;
-        if (slot >= chain.num_effects || param >= Synth::get_effect_param_floats(chain.effects[slot].type)) {
+        const uint32_t             slot        = fx_drop_command.slot;
+        const uint32_t             anchor_node = fx_mapping.effect_nodes[slot];
+        Synth::EffectParamBinding* binding     = nullptr;
+        uint32_t                   row_base    = 0;
+        uint32_t                   row_field   = 0;
+        uint32_t                   fir_row     = 0;
+        if (slot >= chain.num_effects || anchor_node == Sculptor::pool_no_slot ||
+            ! osc_graph.node_occupied(anchor_node) ||
+            fx_drop_command.anchor_slot >= osc_graph.node(anchor_node).slots.num_allocated ||
+            ! Sculptor::fx_decode_row_slot(chain.effects[slot],
+                                           fx_drop_command.anchor_slot,
+                                           &binding,
+                                           &row_base,
+                                           &row_field,
+                                           &fir_row)) {
             Sculptor::notify_error("Synth: cannot add an LFO: the parameter row is gone");
             return;
         }
-        Synth::EffectParamBinding& binding = chain.effects[slot].bindings[param];
-        if (binding.lfo_desc_id != 0 || binding.num_inputs != 0) {
+        if (binding->lfo_desc_id != 0 || binding->num_inputs != 0) {
             Sculptor::notify_error("Synth: cannot add an LFO: the parameter already carries a wire");
             return;
         }
-        Sculptor::fx_seed_effect_lfo_binding(&binding, descriptor);
-        binding.lfo_op = Synth::SourceOp::add;
+        Sculptor::fx_seed_effect_lfo_binding(binding, descriptor);
+        binding->lfo_op = Synth::SourceOp::add;
+        // The drop lands the LFO node at the release point instead of the
+        // deterministic lane; the allocation appended the record.
+        Synth::GraphNodeLayout& record = candidate.graph_layout[candidate.graph_layout_count - 1];
+        record.x                       = fx_drop_command.position.x;
+        record.y                       = fx_drop_command.position.y;
     }
     // The dedicated undo tag keeps the add out of any neighboring
     // batch's undo entry (fx_tag_add_lfo).

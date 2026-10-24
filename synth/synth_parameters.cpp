@@ -597,6 +597,26 @@ void Synth::oscillator_fir_band_guard(uint32_t* lowpass_cutoff_freq, uint32_t* h
     }
 }
 
+// Rounds a cutoff in Hz to the int the coeff shader wants; <= 0 disables the edge, else
+// clamped to [1, Nyquist - 1].  Shared by the oscillator and the effect FIR staging.
+uint32_t Synth::cutoff_hz_to_int(const float value)
+{
+    if (! (value > 0.0f)) {
+        return 0;
+    }
+
+    constexpr uint32_t min_cutoff_hz = 1;
+
+    if (value <= static_cast<float>(min_cutoff_hz)) {
+        return min_cutoff_hz;
+    }
+    if (value >= static_cast<float>(Synth::max_cutoff_hz)) {
+        return Synth::max_cutoff_hz;
+    }
+
+    return static_cast<uint32_t>(value + 0.5f);
+}
+
 uint32_t Synth::fir_effective_span(const float slope_percent)
 {
     // NaN-safe clamp: NaN fails both comparisons and reads as the minimum.

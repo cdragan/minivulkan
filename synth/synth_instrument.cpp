@@ -123,5 +123,27 @@ void Synth::remap_effect_chain(const EffectChainBinding& src, const uint16_t* lf
         memset(dst->effects[effect].bindings + num_params,
                0,
                sizeof(EffectParamBinding) * (max_effect_param_floats - num_params));
+
+        // FIR band bindings remap through the same lookup.  Dormant bands (beyond
+        // the active count, or all of them on the legacy single-band form) zero
+        // like the params tail rather than trust stale bytes.
+        EffectSlotBinding& slot = dst->effects[effect];
+        // The count byte travels unvalidated between banks, so the clamp
+        // precedes every use: an out-of-bound count indexes past
+        // bands[max_fir_effect_bands] (ASAN-visible corruption).
+        uint32_t band_count = slot.fir_bands.band_count;
+        if (band_count > max_fir_effect_bands)
+            band_count = max_fir_effect_bands;
+        const uint32_t active_band_params =
+            slot.type == EffectType::fir && band_count > 1 ? 1 + 4 * (band_count - 1) : 0;
+        for (uint32_t band_param = 0; band_param < active_band_params; band_param++) {
+            EffectParamBinding& band_binding = slot.fir_bands.bands[band_param];
+            if (band_binding.lfo_desc_id) {
+                band_binding.lfo_desc_id = lfo_ids[band_binding.lfo_desc_id - 1];
+            }
+        }
+        memset(slot.fir_bands.bands + active_band_params,
+               0,
+               sizeof(EffectParamBinding) * (num_fir_effect_band_params - active_band_params));
     }
 }
