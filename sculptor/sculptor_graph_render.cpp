@@ -1132,20 +1132,7 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
                 break;
             }
             if (dragged_node != pool_no_slot && nodes.is_occupied(dragged_node)) {
-                Node&             node = nodes.entries[dragged_node];
-                const vmath::vec2 target(snap_to_grid(mouse_point.x - drag_offset.x),
-                                         snap_to_grid(mouse_point.y - drag_offset.y));
-                const vmath::vec2 delta = (target - node.position);
-                node.position           = target;
-                // Multi-selection: the dragged node leads; the rest follow
-                // with the same delta so relative layout is preserved.
-                if (delta.x != 0.0f || delta.y != 0.0f) {
-                    for (uint32_t i = 0; i < max_nodes; ++i) {
-                        if (i != dragged_node && nodes.is_occupied(i) && selected[i] && ! nodes.entries[i].ghost) {
-                            nodes.entries[i].position = (nodes.entries[i].position + delta);
-                        }
-                    }
-                }
+                apply_node_drag(mouse_point);
             }
             break;
         }
@@ -1372,9 +1359,8 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
                         select_none();
                         set_selected(hit_node, true);
                     }
-                    interaction   = Interaction::dragging_node;
-                    dragged_node  = hit_node;
-                    drag_offset   = (mouse_point - nodes.entries[hit_node].position);
+                    interaction = Interaction::dragging_node;
+                    begin_node_drag(hit_node, mouse_point);
                     title_pressed = title_hit;
                 }
             }

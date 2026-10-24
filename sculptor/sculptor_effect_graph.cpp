@@ -92,6 +92,18 @@ static void effect_layout_name(const Synth::EffectChainBinding& chain,
                                char*                            name,
                                uint32_t                         capacity);
 
+static bool fx_slot_occupied(const Synth::EffectChainBinding& chain, uint32_t slot);
+static void fx_delete_effect_routing(Synth::EffectChainBinding*    chain,
+                                     Sculptor::EffectChainRouting* routing,
+                                     uint32_t                      slot);
+static bool fx_splice_effect_run(Synth::EffectChainBinding*    chain,
+                                 Sculptor::EffectChainRouting* routing,
+                                 uint32_t                      moved,
+                                 uint32_t                      run_length,
+                                 int32_t                       after_slot,
+                                 Sculptor::EffectGraphMapping* mapping        = nullptr,
+                                 uint32_t*                     after_slot_new = nullptr);
+
 static Slot enabled_slot(bool enabled)
 {
     // The Enabled row is a checkbox that doubles as the enable wire's input:
@@ -117,25 +129,6 @@ static const Synth::EffectChainBinding& chain_at(const Synth::InstrumentBank& ba
 }
 
 // Chain slots the projection turns into nodes (skipping none-type slots).
-// X position of projected node `i`; shared by effect, LFO and output nodes
-// so every lane keeps the same no-overlap stride.
-static float fx_node_x(uint32_t i)
-{
-    constexpr float first_node_x = 320.0f;
-    constexpr float node_step    = 560.0f;
-    return first_node_x + node_step * static_cast<float>(i);
-}
-
-static vmath::vec2 fx_lfo_position(uint32_t ordinal)
-{
-    return vmath::vec2(fx_node_x(ordinal), 320.0f);
-}
-
-void Sculptor::fx_cc_pair_label(uint32_t cc_number, char* name, size_t capacity)
-{
-    snprintf(name, capacity, "CC %u (+%u)", cc_number, cc_number + Synth::cc_lsb_base - Synth::cc_msb_base);
-}
-
 static uint32_t projected_slots(const Synth::EffectChainBinding& chain, uint32_t* out_slots)
 {
     uint32_t count = 0;
@@ -145,6 +138,11 @@ static uint32_t projected_slots(const Synth::EffectChainBinding& chain, uint32_t
         }
     }
     return count;
+}
+
+void Sculptor::fx_cc_pair_label(uint32_t cc_number, char* name, size_t capacity)
+{
+    snprintf(name, capacity, "CC %u (+%u)", cc_number, cc_number + Synth::cc_lsb_base - Synth::cc_msb_base);
 }
 
 // Compiles one parameter's MIDI source rows back into the binding's packed
@@ -604,7 +602,7 @@ bool Sculptor::project_effect_chain_to_graph(const Synth::InstrumentEditorBank& 
 {
     assert(chain <= Synth::max_channels);
     const Synth::InstrumentBank& bank = authored.bank;
-    if (! validate_effect_audio_topology(chain_at(bank, chain), authored.effect_audio[chain])) {
+    if (! validate_effect_routing(chain_at(bank, chain), authored.effect_routing[chain])) {
         return false;
     }
     *mapping       = EffectGraphMapping{};
@@ -636,15 +634,16 @@ bool Sculptor::project_effect_chain_to_graph(const Synth::InstrumentEditorBank& 
     graph->clear();
     graph->node_state_edits_enabled = false;
     // Fixed endpoints: the channel's combined output (all of the channel's
-    // zones) or every channel's output for the master chain.  The output
-    // node sits one step right of the last projected effect, so the lane
-    // never overlaps a projected effect node.
-    mapping->input_node = graph->create_node(is_master ? "All channels" : "Channel input", vmath::vec2(0.0f, 0.0f));
-    mapping->output_node =
-        graph->create_node(is_master ? "Master output" : "Channel output", vmath::vec2(fx_node_x(num_projected), 0.0f));
+    // zones) or every channel's output for the master chain.  Default nodes
+    // start on their lane at grid x 0; the arrangement pass after the render
+    // measures spreads them 32 px edge to edge.
+    mapping->input_node  = graph->create_node(is_master ? "All channels" : "Channel input", vmath::vec2(0.0f, 0.0f));
+    mapping->output_node = graph->create_node(is_master ? "Master output" : "Channel output", vmath::vec2(0.0f, 0.0f));
     if (mapping->input_node == pool_no_slot || mapping->output_node == pool_no_slot) {
         return false;
     }
+    graph->set_node_auto_lane(mapping->input_node, true);
+    graph->set_node_auto_lane(mapping->output_node, true);
     graph->add_slot(mapping->input_node, output_slot("Out"));
     graph->add_slot(mapping->output_node, input_slot("In"));
 
@@ -681,10 +680,11 @@ bool Sculptor::project_effect_chain_to_graph(const Synth::InstrumentEditorBank& 
 
         char name[64];
         effect_layout_name(chain_ref, chain, Synth::effects_graph_layout_effect, slot, name, sizeof(name));
-        const uint32_t node = graph->create_node(name, vmath::vec2(fx_node_x(i), 0.0f));
+        const uint32_t node = graph->create_node(name, vmath::vec2(0.0f, 0.0f));
         if (node == pool_no_slot) {
             return false;
         }
+        graph->set_node_auto_lane(node, true);
         mapping->effect_nodes[slot] = node;
 
         // In and Out share one line: the audio flows left to right through
@@ -772,31 +772,29 @@ bool Sculptor::project_effect_chain_to_graph(const Synth::InstrumentEditorBank& 
         }
     }
 
-    if (authored.effect_audio[chain].explicit_edges) {
-        for (uint32_t source = 0; source <= Synth::max_chain_effects; ++source) {
-            const uint32_t next = authored.effect_audio[chain].next[source];
-            if (! next) {
+    // Wires derive from the routing flags plus slot order.
+    {
+        const Sculptor::EffectChainRouting& routing = authored.effect_routing[chain];
+        if (routing.in == effect_in_first_slot && mapping->effect_nodes[0] != pool_no_slot) {
+            graph->add_connection(EndPoint{ mapping->input_node, 0 }, EndPoint{ mapping->effect_nodes[0], 0 });
+        }
+        if (routing.in == effect_in_output) {
+            graph->add_connection(EndPoint{ mapping->input_node, 0 }, EndPoint{ mapping->output_node, 0 });
+        }
+        for (uint32_t slot = 0; slot < chain_ref.num_effects && slot < Synth::max_chain_effects; ++slot) {
+            if (mapping->effect_nodes[slot] == pool_no_slot ||
+                chain_ref.effects[slot].type == Synth::EffectType::none) {
                 continue;
             }
-            const EndPoint from = source == Synth::max_chain_effects ? EndPoint{ mapping->input_node, 0 }
-                                                                     : EndPoint{ mapping->effect_nodes[source], 1 };
-            const EndPoint to   = next == Synth::max_chain_effects + 1 ? EndPoint{ mapping->output_node, 0 }
-                                                                       : EndPoint{ mapping->effect_nodes[next - 1], 0 };
-            if (graph->add_connection(from, to) == pool_no_slot) {
-                return false;
+            if (routing.out[slot] == effect_out_next && slot + 1 < Synth::max_chain_effects &&
+                mapping->effect_nodes[slot + 1] != pool_no_slot) {
+                graph->add_connection(EndPoint{ mapping->effect_nodes[slot], 1 },
+                                      EndPoint{ mapping->effect_nodes[slot + 1], 0 });
+            }
+            else if (routing.out[slot] == effect_out_output) {
+                graph->add_connection(EndPoint{ mapping->effect_nodes[slot], 1 }, EndPoint{ mapping->output_node, 0 });
             }
         }
-    }
-    else {
-        uint32_t wire_from = mapping->input_node;
-        uint32_t wire_slot = 0;
-        for (uint32_t i = 0; i < num_projected; ++i) {
-            const uint32_t slot = slots[i];
-            graph->add_connection(EndPoint{ wire_from, wire_slot }, EndPoint{ mapping->effect_nodes[slot], 0 });
-            wire_from = mapping->effect_nodes[slot];
-            wire_slot = 1;
-        }
-        graph->add_connection(EndPoint{ wire_from, wire_slot }, EndPoint{ mapping->output_node, 0 });
     }
 
     // One LFO node per descriptor the chain's meaningful bindings reference
@@ -809,11 +807,17 @@ bool Sculptor::project_effect_chain_to_graph(const Synth::InstrumentEditorBank& 
         const Synth::LFODescriptor& lfo = bank.lfos.entries[desc - 1];
         char                        name[64];
         snprintf(name, sizeof(name), "LFO %u", desc);
-        const vmath::vec2 lfo_pos = fx_lfo_position(mapping->lfo_count);
-        const uint32_t    node    = graph->create_node(name, lfo_pos);
+        // Creation place: the LFO lane y with a placeholder x; the node is
+        // auto-lane, so the arrangement pass (same frame, once the renderer
+        // has measured widths) or a restored layout record owns its x.  A
+        // fresh default node with no record is auto-lane and the
+        // arrangement sets its x after the renderer measures it; the MIDI
+        // node stays a fixed anchor.
+        const uint32_t node = graph->create_node(name, vmath::vec2(0.0f, 320.0f));
         if (node == pool_no_slot) {
             return false;
         }
+        graph->set_node_auto_lane(node, true);
         mapping->lfo_nodes[desc - 1] = node;
         ++mapping->lfo_count;
 
@@ -907,52 +911,180 @@ bool Sculptor::project_effect_chain_to_graph(const Synth::InstrumentEditorBank& 
     return true;
 }
 
-static constexpr int32_t fx_not_serial     = -3;
-static constexpr int32_t fx_serial_refused = -2;
-static constexpr int32_t fx_serial_noop    = -1;
+// The auto-lane layout computed without touching the graph: the arranged x
+// of every effects-lane node, the LFO lane's arranged x per LFO ordinal, and
+// the x one further LFO would take.  The arrangement pass applies the plan;
+// the canvas add path freezes a new LFO's record at next_lfo_x.
+struct FxLanePlan {
+    uint32_t lane_count; // effects-lane nodes, in walk order
+    uint32_t lane_nodes[Synth::max_chain_effects + 2];
+    float    lane_x[Synth::max_chain_effects + 2];
+    uint32_t effect_count; // effects on the lane (LFO column anchors)
+    uint32_t lfo_count;    // projected LFOs, in descriptor order
+    uint32_t lfo_nodes[Synth::max_lfos];
+    float    lfo_x[Synth::max_lfos];
+    float    next_lfo_x; // one further LFO's arranged x
+};
 
-static int32_t fx_serial_placement(const Sculptor::Graph&              graph,
-                                   const Sculptor::EffectGraphMapping& mapping,
-                                   const Sculptor::GraphChange&        change,
-                                   uint32_t                            effect_count,
-                                   int32_t*                            after)
+// Effects lane (y 0): the input node, the effects by slot order, the
+// output node.  Each arranged node sits exactly 32 px (two grid squares)
+// right of the right edge of everything before it on the lane, with no
+// grid snapping: a node whose measured width is not a grid multiple
+// lands between grid lines (the exact 32 px edge-to-edge gaps win over
+// grid snapping).  The first lane node keeps the projection's place.  A
+// non-auto node (a restored layout record) keeps its place and anchors
+// the chain, so a user-moved box is never auto-arranged again.  LFO lane
+// (y 320): LFO i takes effect i's arranged x so the two lanes stay
+// column-aligned; LFOs past the effect count keep stepping 32 px past
+// the previous LFO, and the fixed MIDI node anchors the first.
+static bool plan_fx_auto_lane(const Sculptor::Graph&              graph,
+                              const Sculptor::EffectGraphMapping& mapping,
+                              const float*                        widths,
+                              FxLanePlan*                         plan)
 {
-    if (change.kind != Sculptor::ChangeKind::connection_added &&
-        change.kind != Sculptor::ChangeKind::connection_changed &&
-        change.kind != Sculptor::ChangeKind::connection_deleted) {
-        return fx_not_serial;
+    constexpr float fx_lane_gap = 2.0f * Sculptor::graph_grid_spacing; // 32 px edge to edge
+
+    if (! widths || ! plan || mapping.input_node == Sculptor::pool_no_slot ||
+        mapping.output_node == Sculptor::pool_no_slot) {
+        return false;
     }
-    const Sculptor::EndPoint input  = change.connection_input;
-    const Sculptor::EndPoint output = change.connection_output;
-    if (! graph.node_occupied(input.node_idx) || ! graph.node_occupied(output.node_idx)) {
-        return fx_serial_noop;
-    }
-    const int32_t input_slot  = Sculptor::fx_effect_slot_of(mapping, input.node_idx);
-    const int32_t output_slot = Sculptor::fx_effect_slot_of(mapping, output.node_idx);
-    if (input.node_idx == mapping.output_node) {
-        if (output_slot < 0) {
-            return output.node_idx == mapping.input_node ? fx_serial_noop : fx_serial_refused;
+    *plan                     = FxLanePlan{};
+    uint32_t count            = 0;
+    plan->lane_nodes[count++] = mapping.input_node;
+    for (uint32_t slot = 0; slot < Synth::max_chain_effects; ++slot) {
+        const uint32_t node = mapping.effect_nodes[slot];
+        if (node != Sculptor::pool_no_slot && graph.node_occupied(node)) {
+            plan->lane_nodes[count++] = node;
         }
-        if (change.kind == Sculptor::ChangeKind::connection_deleted) {
-            return fx_serial_refused;
+    }
+    plan->lane_nodes[count++] = mapping.output_node;
+    plan->lane_count          = count;
+    plan->effect_count        = count - 2;
+
+    bool  have_right = false;
+    float right_edge = 0.0f;
+    for (uint32_t i = 0; i < count; ++i) {
+        const uint32_t node_idx = plan->lane_nodes[i];
+        const float    width    = widths[node_idx];
+        if (! graph.node_auto_lane(node_idx)) {
+            // A saved layout wins; its right edge anchors the next arranged
+            // node, so the walk stays monotone even across a left-moved box.
+            const float node_x     = graph.node(node_idx).position.x;
+            const float node_right = node_x + width;
+            if (! have_right || node_right > right_edge) {
+                right_edge = node_right;
+            }
+            have_right      = true;
+            plan->lane_x[i] = node_x;
+            continue;
         }
-        *after = static_cast<int32_t>(effect_count) - 1;
-        return output_slot == *after ? fx_serial_noop : output_slot;
+        if (! have_right) {
+            // The first lane node keeps the projection's place and anchors
+            // the walk; every later node steps exactly 32 px past the right
+            // edge of everything before it.
+            const float node_x = graph.node(node_idx).position.x;
+            right_edge         = node_x + width;
+            have_right         = true;
+            plan->lane_x[i]    = node_x;
+            continue;
+        }
+        const float x   = right_edge + fx_lane_gap;
+        right_edge      = x + width;
+        plan->lane_x[i] = x;
     }
-    if (input_slot < 0 || input.slot_idx != 0) {
-        return fx_not_serial;
+
+    bool  lfo_prev  = false;
+    float lfo_right = 0.0f;
+    if (mapping.midi_node != Sculptor::pool_no_slot && graph.node_occupied(mapping.midi_node)) {
+        lfo_right = graph.node(mapping.midi_node).position.x + widths[mapping.midi_node];
+        lfo_prev  = true;
     }
-    if (change.kind == Sculptor::ChangeKind::connection_deleted) {
-        return fx_serial_refused;
+    uint32_t lfo_ord = 0;
+    for (uint32_t desc = 0; desc < Synth::max_lfos; ++desc) {
+        const uint32_t node_idx = mapping.lfo_nodes[desc];
+        if (node_idx == Sculptor::pool_no_slot || ! graph.node_occupied(node_idx)) {
+            continue;
+        }
+        const float width = widths[node_idx];
+        if (! graph.node_auto_lane(node_idx)) {
+            const float node_x     = graph.node(node_idx).position.x;
+            const float node_right = node_x + width;
+            if (! lfo_prev || node_right > lfo_right) {
+                lfo_right = node_right;
+            }
+            plan->lfo_nodes[lfo_ord] = node_idx;
+            plan->lfo_x[lfo_ord]     = node_x;
+            lfo_prev                 = true;
+            ++lfo_ord;
+            continue;
+        }
+        const float x            = lfo_ord < plan->effect_count ? plan->lane_x[lfo_ord + 1] : lfo_right + fx_lane_gap;
+        plan->lfo_nodes[lfo_ord] = node_idx;
+        plan->lfo_x[lfo_ord]     = x;
+        lfo_right                = x + width;
+        lfo_prev                 = true;
+        ++lfo_ord;
     }
-    *after = output_slot < 0 ? -1 : output_slot;
-    return input_slot == output_slot ? fx_serial_noop : input_slot;
+    plan->lfo_count  = lfo_ord;
+    plan->next_lfo_x = lfo_ord < plan->effect_count ? plan->lane_x[lfo_ord + 1] : lfo_right + fx_lane_gap;
+    return true;
 }
 
-static bool splice_effect(Synth::EffectChainBinding*    chain,
-                          uint32_t                      moved_slot,
-                          int32_t                       after_slot,
-                          Sculptor::EffectGraphMapping* mapping);
+// Applies the planned default arrangement to the graph's auto-lane nodes.
+// `widths` is indexed by node idx so unit tests drive the pass headless
+// with synthetic widths; the pane passes the sizes the renderer just
+// measured.  Returns true when any node moved.
+bool Sculptor::fx_arrange_auto_lane(Graph* graph, const Sculptor::EffectGraphMapping& mapping, const float* widths)
+{
+    if (! graph) {
+        return false;
+    }
+    FxLanePlan plan;
+    if (! plan_fx_auto_lane(*graph, mapping, widths, &plan)) {
+        return false;
+    }
+    bool moved = false;
+    for (uint32_t i = 0; i < plan.lane_count; ++i) {
+        const uint32_t node_idx = plan.lane_nodes[i];
+        const Node&    node     = graph->node(node_idx);
+        if (! graph->node_auto_lane(node_idx) || plan.lane_x[i] == node.position.x) {
+            continue;
+        }
+        graph->place_auto_lane_node(node_idx, vmath::vec2(plan.lane_x[i], node.position.y));
+        moved = true;
+    }
+    for (uint32_t i = 0; i < plan.lfo_count; ++i) {
+        const uint32_t node_idx = plan.lfo_nodes[i];
+        const Node&    node     = graph->node(node_idx);
+        if (! graph->node_auto_lane(node_idx) || plan.lfo_x[i] == node.position.x) {
+            continue;
+        }
+        graph->place_auto_lane_node(node_idx, vmath::vec2(plan.lfo_x[i], node.position.y));
+        moved = true;
+    }
+    return moved;
+}
+
+// The measured default x one further LFO node would take on the chain's
+// LFO lane (the arrangement rule above): the canvas add freezes a new
+// LFO's record at that measured add-time place, so the added box lands
+// in the measured lane.  Widths contract matches
+// fx_arrange_auto_lane; false when the lane cannot be laid out.
+bool Sculptor::fx_next_lfo_lane_x(const Graph&              graph,
+                                  const EffectGraphMapping& mapping,
+                                  const float*              widths,
+                                  float*                    out_x)
+{
+    if (! out_x) {
+        return false;
+    }
+    FxLanePlan plan;
+    if (! plan_fx_auto_lane(graph, mapping, widths, &plan)) {
+        return false;
+    }
+    *out_x = plan.next_lfo_x;
+    return true;
+}
 
 // A retarget that pulled a wire off an effect's Enabled row drops that
 // effect's enable routing: the move must not leave a copy behind.
@@ -1005,7 +1137,8 @@ static bool apply_fx_graph_change_internal(Synth::InstrumentBank*              b
                                            const Sculptor::Graph&              graph,
                                            const Sculptor::EffectGraphMapping& mapping,
                                            const Sculptor::GraphChange&        change,
-                                           Sculptor::EffectGraphMapping*       reordered_mapping)
+                                           Sculptor::EffectGraphMapping*       reordered_mapping,
+                                           Sculptor::EffectChainRouting*       routing)
 {
     Synth::EffectChainBinding& chain = Sculptor::fx_graph_chain(bank, mapping.chain);
     const int32_t              slot =
@@ -1147,7 +1280,11 @@ static bool apply_fx_graph_change_internal(Synth::InstrumentBank*              b
         }
         case Sculptor::ChangeKind::node_deleted:
             if (slot >= 0) {
-                Sculptor::fx_remove_effect(&chain, static_cast<uint32_t>(slot));
+                if (! routing) {
+                    return false;
+                }
+                // Delete heal plus flag compaction; the batch shifts the mapping.
+                fx_delete_effect_routing(&chain, routing, static_cast<uint32_t>(slot));
                 return true;
             }
             if (desc != 0) {
@@ -1160,16 +1297,12 @@ static bool apply_fx_graph_change_internal(Synth::InstrumentBank*              b
         case Sculptor::ChangeKind::connection_deleted: {
             // Wire edits are the editor's reordering and binding gestures.
             // A wire with a freed endpoint is a byproduct of node deletion
-            // (applied separately) and must not mutate anything.
-            int32_t       after = -1;
-            const int32_t moved = fx_serial_placement(graph, mapping, change, chain.num_effects, &after);
-            if (moved != fx_not_serial) {
-                return moved == fx_serial_noop ||
-                       (moved >= 0 && splice_effect(&chain, static_cast<uint32_t>(moved), after, reordered_mapping));
-            }
+            // (applied separately) and must not mutate anything; the batch
+            // pre-filter drops those.
             const Sculptor::EndPoint in_point  = change.connection_input;
             const Sculptor::EndPoint out_point = change.connection_output;
             const int32_t            in_slot   = Sculptor::fx_effect_slot_of(mapping, in_point.node_idx);
+            const int32_t            out_slot  = Sculptor::fx_effect_slot_of(mapping, out_point.node_idx);
 
             // A parameter dot takes an LFO's Value wire: the wire is the
             // binding.  A retarget clears the dot it left before binding
@@ -1415,6 +1548,140 @@ static bool apply_fx_graph_change_internal(Synth::InstrumentBank*              b
                 return true;
             }
 
+            // Audio wires: the flag-routing gestures.  The raw
+            // public seam carries no routing state, so it refuses them.
+            {
+                const bool out_input_node = out_point.node_idx == mapping.input_node && out_point.slot_idx == 0;
+                const bool out_effect_out = out_slot >= 0 && out_point.slot_idx == 1;
+                const bool in_output_node = in_point.node_idx == mapping.output_node && in_point.slot_idx == 0;
+                const bool in_effect_in   = in_slot >= 0 && in_point.slot_idx == 0;
+                if (! (out_input_node || out_effect_out) || ! (in_output_node || in_effect_in) || ! routing) {
+                    return false;
+                }
+
+                if (change.kind == Sculptor::ChangeKind::connection_deleted) {
+                    // Clear the flag on the wire's earlier endpoint.
+                    if (out_input_node) {
+                        routing->in = Sculptor::effect_in_disconnected;
+                    }
+                    else {
+                        routing->out[out_slot] = Sculptor::effect_out_disconnected;
+                    }
+                    Sculptor::fx_sanitize_routing(&chain, routing);
+                    return true;
+                }
+
+                // A retarget clears the removed wire's earlier endpoint
+                // first, so the old wire never survives as a ghost (rewire
+                // overwrite).  Exactly one end moved; the unchanged end is
+                // the old wire's earlier endpoint when the input end moved,
+                // and derivable from the routing when the output end moved.
+                if (change.kind == Sculptor::ChangeKind::connection_changed) {
+                    const Sculptor::EndPoint prev = change.connection_prev_input;
+                    const bool               input_end_moved =
+                        prev.node_idx != in_point.node_idx || prev.slot_idx != in_point.slot_idx;
+                    if (! input_end_moved) {
+                        // The output end moved: whoever fed this input held
+                        // the old wire.
+                        int32_t old_source = -3; // -3 = none, -2 = input node
+                        if (in_output_node) {
+                            old_source = Sculptor::fx_output_holder(chain, *routing);
+                        }
+                        else if (Sculptor::fx_slot_input_fed(chain, *routing, static_cast<uint32_t>(in_slot))) {
+                            old_source = in_slot == 0 ? -2 : in_slot - 1;
+                        }
+                        const int32_t new_source = out_input_node ? -2 : out_slot;
+                        if (old_source == new_source) {
+                            return true; // the same wire re-landed: nothing moved
+                        }
+                        if (old_source == -2) {
+                            routing->in = Sculptor::effect_in_disconnected;
+                        }
+                        else if (old_source >= 0) {
+                            routing->out[old_source] = Sculptor::effect_out_disconnected;
+                        }
+                    }
+                    else if (out_input_node) {
+                        routing->in = Sculptor::effect_in_disconnected;
+                    }
+                    else {
+                        routing->out[out_slot] = Sculptor::effect_out_disconnected;
+                    }
+                }
+
+                if (in_output_node) {
+                    // Only an effect can feed the output; a new
+                    // holder demotes the old one.
+                    if (out_input_node) {
+                        // The channel input node feeds the output node directly:
+                        // the bypass wire. The stored effect wiring stays underneath.
+                        const int32_t holder = Sculptor::fx_output_holder(chain, *routing);
+                        if (holder >= 0) {
+                            routing->out[holder] = Sculptor::effect_out_disconnected;
+                        }
+                        routing->in = Sculptor::effect_in_output;
+                        fx_sanitize_routing(&chain, routing);
+                        return true;
+                    }
+                    if (out_slot < 0) {
+                        return false;
+                    }
+                    const int32_t holder = Sculptor::fx_output_holder(chain, *routing);
+                    if (holder >= 0 && holder != out_slot) {
+                        routing->out[holder] = Sculptor::effect_out_disconnected;
+                    }
+                    // One output feed: the bypass yields to the effect wire.
+                    if (routing->in == Sculptor::effect_in_output) {
+                        routing->in = Sculptor::effect_in_disconnected;
+                    }
+                    routing->out[out_slot] = Sculptor::effect_out_output;
+                    Sculptor::fx_sanitize_routing(&chain, routing);
+                    return true;
+                }
+
+                // A connect lands on an unfed segment start; fed
+                // targets refuse like the canvas does.
+                if (in_slot < 0 || in_slot == out_slot ||
+                    Sculptor::fx_slot_input_fed(chain, *routing, static_cast<uint32_t>(in_slot))) {
+                    return false;
+                }
+                if (out_input_node) {
+                    // The target's run moves to the front.
+                    const uint32_t run = fx_run_length(chain, *routing, static_cast<uint32_t>(in_slot));
+                    if (! fx_splice_effect_run(&chain,
+                                               routing,
+                                               static_cast<uint32_t>(in_slot),
+                                               run,
+                                               -1,
+                                               reordered_mapping)) {
+                        return false;
+                    }
+                    routing->in = Sculptor::effect_in_first_slot;
+                }
+                else {
+                    // The target's run moves directly after the
+                    // source, and a source inside the target's run refuses
+                    // (the cycle rotation case).
+                    const uint32_t run = fx_run_length(chain, *routing, static_cast<uint32_t>(in_slot));
+                    if (out_slot > in_slot && out_slot < in_slot + static_cast<int32_t>(run)) {
+                        return false;
+                    }
+                    uint32_t out_slot_new = static_cast<uint32_t>(out_slot);
+                    if (! fx_splice_effect_run(&chain,
+                                               routing,
+                                               static_cast<uint32_t>(in_slot),
+                                               run,
+                                               out_slot,
+                                               reordered_mapping,
+                                               &out_slot_new)) {
+                        return false;
+                    }
+                    routing->out[out_slot_new] = Sculptor::effect_out_next; // the splice may have moved the source
+                }
+                Sculptor::fx_sanitize_routing(&chain, routing);
+                return true;
+            }
+
             return false;
         }
         default:
@@ -1428,7 +1695,7 @@ bool Sculptor::apply_fx_graph_change(Synth::InstrumentBank*    bank,
                                      const EffectGraphMapping& mapping,
                                      const GraphChange&        change)
 {
-    return apply_fx_graph_change_internal(bank, graph, mapping, change, nullptr);
+    return apply_fx_graph_change_internal(bank, graph, mapping, change, nullptr, nullptr);
 }
 
 void Sculptor::fx_remove_effect(Synth::EffectChainBinding* chain, uint32_t slot)
@@ -1441,165 +1708,11 @@ void Sculptor::fx_remove_effect(Synth::EffectChainBinding* chain, uint32_t slot)
     --chain->num_effects;
 }
 
-// Deleting an effect node removes the two wires that touched it, so the
-// live-edge capture below would tear the audio path open.  Rebuild the
-// routing from the pre-deletion topology with the deleted slots bypassed:
-// the deleted node's predecessor reconnects to its successor.  A node that
-// was already bypassed in the routing contributes no seam and stays gone.
-static bool deleted_slots_contains(const uint32_t* deleted_slots, uint32_t num_deleted, uint32_t slot)
-{
-    for (uint32_t index = 0; index < num_deleted; ++index) {
-        if (deleted_slots[index] == slot) {
-            return true;
-        }
-    }
-    return false;
-}
-
-// How many deleted slots sit below a source or target index: the compaction
-// shift that the index loses when the chain closes over the deletions.
-static uint32_t deleted_slots_below(const uint32_t* deleted_slots, uint32_t num_deleted, uint32_t value)
-{
-    uint32_t shifted = 0;
-    for (uint32_t index = 0; index < num_deleted; ++index) {
-        shifted += deleted_slots[index] < value ? 1u : 0u;
-    }
-    return shifted;
-}
-
-static void heal_deleted_effect_audio(const Sculptor::EffectAudioTopology& source_audio,
-                                      const Synth::EffectChainBinding&     original_chain,
-                                      const uint32_t*                      deleted_slots,
-                                      uint32_t                             num_deleted,
-                                      Sculptor::EffectAudioTopology*       healed)
-{
-    uint8_t working[Synth::max_chain_effects + 1] = {};
-    if (source_audio.explicit_edges) {
-        for (uint32_t source = 0; source <= Synth::max_chain_effects; ++source) {
-            working[source] = source_audio.next[source];
-        }
-    }
-    else {
-        // No explicit routing yet: the projection wires the non-none slots
-        // serially, so the pre-deletion path is input -> first effect ->
-        // ... -> Output.
-        uint32_t previous = Synth::max_chain_effects;
-        for (uint32_t slot = 0; slot < original_chain.num_effects && slot < Synth::max_chain_effects; ++slot) {
-            if (original_chain.effects[slot].type == Synth::EffectType::none) {
-                continue;
-            }
-            working[previous] = static_cast<uint8_t>(slot + 1);
-            previous          = slot;
-        }
-        if (previous != Synth::max_chain_effects) {
-            working[previous] = static_cast<uint8_t>(Synth::max_chain_effects + 1);
-        }
-    }
-
-    // Splice every deleted slot out of the list, ascending so consecutive
-    // deletions chain through the updated pointers.
-    for (uint32_t index = 0; index < num_deleted; ++index) {
-        const uint32_t deleted = deleted_slots[index];
-        for (uint32_t source = 0; source <= Synth::max_chain_effects; ++source) {
-            if (working[source] == deleted + 1) {
-                working[source] = working[deleted];
-            }
-        }
-        working[deleted] = 0;
-    }
-
-    healed->explicit_edges = 1;
-    for (uint32_t source = 0; source <= Synth::max_chain_effects; ++source) {
-        const uint32_t target = working[source];
-        if (! target ||
-            (source < Synth::max_chain_effects && deleted_slots_contains(deleted_slots, num_deleted, source))) {
-            continue;
-        }
-        const uint32_t final_source = source == Synth::max_chain_effects
-                                          ? source
-                                          : source - deleted_slots_below(deleted_slots, num_deleted, source);
-        const uint32_t final_target = target == Synth::max_chain_effects + 1
-                                          ? target
-                                          : target - deleted_slots_below(deleted_slots, num_deleted, target);
-        healed->next[final_source]  = static_cast<uint8_t>(final_target);
-    }
-}
-
-static bool effect_splice_order(uint32_t count, uint32_t moved_slot, int32_t after_slot, uint32_t* order)
-{
-    if (moved_slot >= count || after_slot >= static_cast<int32_t>(count) || after_slot < -1 ||
-        after_slot == static_cast<int32_t>(moved_slot)) {
-        return false;
-    }
-    uint32_t retained = 0;
-    for (uint32_t slot = 0; slot < count; ++slot) {
-        if (slot != moved_slot) {
-            order[retained++] = slot;
-        }
-    }
-    uint32_t insert = 0;
-    if (after_slot >= 0) {
-        while (order[insert] != static_cast<uint32_t>(after_slot)) {
-            ++insert;
-        }
-        ++insert;
-    }
-    for (uint32_t slot = retained; slot > insert; --slot) {
-        order[slot] = order[slot - 1];
-    }
-    order[insert] = moved_slot;
-    return true;
-}
-
-static bool splice_effect(Synth::EffectChainBinding*    chain,
-                          uint32_t                      moved_slot,
-                          int32_t                       after_slot,
-                          Sculptor::EffectGraphMapping* mapping)
-{
-    uint32_t order[Synth::max_chain_effects];
-    if (! effect_splice_order(chain->num_effects, moved_slot, after_slot, order)) {
-        return false;
-    }
-    const Synth::EffectChainBinding snapshot = *chain;
-    for (uint32_t slot = 0; slot < chain->num_effects; ++slot) {
-        chain->effects[slot] = snapshot.effects[order[slot]];
-    }
-    if (mapping) {
-        const Sculptor::EffectGraphMapping previous = *mapping;
-        for (uint32_t slot = 0; slot < chain->num_effects; ++slot) {
-            mapping->effect_nodes[slot] = previous.effect_nodes[order[slot]];
-        }
-    }
-    return true;
-}
-
-bool Sculptor::fx_splice_effect(Synth::EffectChainBinding* chain, uint32_t moved_slot, int32_t after_slot)
-{
-    return splice_effect(chain, moved_slot, after_slot, nullptr);
-}
-
 void Sculptor::fx_exchange_effect_slots(Synth::EffectChainBinding* chain, uint32_t slot_a, uint32_t slot_b)
 {
     const Synth::EffectSlotBinding temporary = chain->effects[slot_a];
     chain->effects[slot_a]                   = chain->effects[slot_b];
     chain->effects[slot_b]                   = temporary;
-}
-
-void Sculptor::fx_swap_effect_audio(EffectAudioTopology* audio, uint32_t slot_a, uint32_t slot_b)
-{
-    uint8_t swapped[Synth::max_chain_effects + 1];
-    for (uint32_t row = 0; row <= Synth::max_chain_effects; ++row) {
-        uint32_t value = audio->next[row];
-        if (value >= 1 && value <= Synth::max_chain_effects) {
-            const uint32_t successor = value - 1;
-            value                    = (successor == slot_a ? slot_b : successor == slot_b ? slot_a : successor) + 1;
-        }
-        // Absent edges (0) and the output marker (max_chain_effects + 1)
-        // pass through unchanged; the input row's index sits above every
-        // slot, so only slot rows relocate.
-        swapped[row == slot_a ? slot_b : row == slot_b ? slot_a : row] = static_cast<uint8_t>(value);
-    }
-    memcpy(audio->next, swapped, sizeof(swapped));
 }
 
 void Sculptor::fx_init_slot(Synth::EffectChainBinding* chain, uint32_t slot, Synth::EffectType type)
@@ -1888,6 +2001,490 @@ static Synth::InstrumentEditorBank effects_candidate;
 static Synth::EffectsDocument      effects_document;
 static Synth::InstrumentEditorBank layout_source;
 
+// True when the slot holds a live effect payload.
+static bool fx_slot_occupied(const Synth::EffectChainBinding& chain, uint32_t slot)
+{
+    return slot < chain.num_effects && slot < Synth::max_chain_effects &&
+           chain.effects[slot].type != Synth::EffectType::none;
+}
+
+bool Sculptor::fx_slot_input_fed(const Synth::EffectChainBinding& chain,
+                                 const EffectChainRouting&        routing,
+                                 uint32_t                         slot)
+{
+    if (! fx_slot_occupied(chain, slot)) {
+        return false;
+    }
+    if (slot == 0) {
+        return routing.in == effect_in_first_slot;
+    }
+    return routing.out[slot - 1] == effect_out_next;
+}
+
+int32_t Sculptor::fx_output_holder(const Synth::EffectChainBinding& chain, const EffectChainRouting& routing)
+{
+    for (uint32_t slot = 0; slot < chain.num_effects && slot < Synth::max_chain_effects; ++slot) {
+        if (chain.effects[slot].type != Synth::EffectType::none && routing.out[slot] == effect_out_output) {
+            return static_cast<int32_t>(slot);
+        }
+    }
+    return -1;
+}
+
+bool Sculptor::fx_connector_red(const Synth::EffectChainBinding& chain,
+                                const EffectChainRouting&        routing,
+                                FxConnector                      kind,
+                                int32_t                          slot)
+{
+    switch (kind) {
+        case fx_connector_global_input:
+            return routing.in == effect_in_disconnected;
+        case fx_connector_global_output:
+            return fx_output_holder(chain, routing) < 0 && routing.in != effect_in_output;
+        case fx_connector_effect_input:
+            return ! fx_slot_input_fed(chain, routing, slot < 0 ? 0 : static_cast<uint32_t>(slot));
+        case fx_connector_effect_output: {
+            if (slot < 0 || ! fx_slot_occupied(chain, static_cast<uint32_t>(slot))) {
+                return true;
+            }
+            const uint8_t out = routing.out[slot];
+            if (out == effect_out_output) {
+                return false;
+            }
+            // A next flag stays unred while its successor slot exists and is
+            // occupied; the sanitizer makes the dangling case unreachable.
+            return out == effect_out_disconnected || ! fx_slot_occupied(chain, static_cast<uint32_t>(slot) + 1);
+        }
+    }
+    return true;
+}
+
+void Sculptor::fx_sanitize_routing(Synth::EffectChainBinding* chain, EffectChainRouting* routing)
+{
+    for (uint32_t slot = 0; slot < Synth::max_chain_effects; ++slot) {
+        if (routing->out[slot] == effect_out_next && ! fx_slot_occupied(*chain, slot + 1)) {
+            routing->out[slot] = effect_out_disconnected;
+        }
+    }
+}
+
+void Sculptor::fx_compact_chain(Synth::EffectChainBinding*    chain,
+                                Sculptor::EffectChainRouting* routing,
+                                uint32_t                      order[Synth::max_chain_effects])
+{
+    // order, when given, receives the old -> new slot permutation; removed
+    // dormant slots are marked by max_chain_effects.
+    for (uint32_t slot = 0; slot < Synth::max_chain_effects; ++slot) {
+        if (order) {
+            order[slot] = Synth::max_chain_effects;
+        }
+    }
+    const Synth::EffectChainBinding snapshot = *chain;
+    uint8_t                         out_snapshot[Synth::max_chain_effects];
+    memcpy(out_snapshot, routing->out, sizeof(out_snapshot));
+    uint32_t kept = 0;
+    for (uint32_t slot = 0; slot < chain->num_effects && slot < Synth::max_chain_effects; ++slot) {
+        if (snapshot.effects[slot].type == Synth::EffectType::none) {
+            continue;
+        }
+        chain->effects[kept] = snapshot.effects[slot];
+        routing->out[kept]   = out_snapshot[slot];
+        if (order) {
+            order[slot] = kept;
+        }
+        ++kept;
+    }
+    for (uint32_t slot = kept; slot < Synth::max_chain_effects; ++slot) {
+        chain->effects[slot] = {};
+        routing->out[slot]   = Sculptor::effect_out_disconnected;
+    }
+    chain->num_effects = static_cast<uint8_t>(kept);
+    if (! kept) {
+        routing->in = effect_in_disconnected;
+    }
+    fx_sanitize_routing(chain, routing);
+}
+
+// Length of the connected run a slot heads: the slot plus every following
+// slot its effect_out_next run reaches.
+uint32_t Sculptor::fx_run_length(const Synth::EffectChainBinding& chain,
+                                 const EffectChainRouting&        routing,
+                                 uint32_t                         slot)
+{
+    uint32_t length = 1;
+    while (slot + length < Synth::max_chain_effects && routing.out[slot + length - 1] == Sculptor::effect_out_next &&
+           fx_slot_occupied(chain, slot + length)) {
+        ++length;
+    }
+    return length;
+}
+
+// Moves the raw contiguous block [moved, moved + run_length) directly after
+// after_slot (-1 = the front), permuting payloads and flags together.  The
+// block is a contiguous occupied run, so no gap can appear.
+static bool fx_splice_effect_run(Synth::EffectChainBinding*    chain,
+                                 Sculptor::EffectChainRouting* routing,
+                                 uint32_t                      moved,
+                                 uint32_t                      run_length,
+                                 int32_t                       after_slot,
+                                 Sculptor::EffectGraphMapping* mapping,
+                                 uint32_t*                     after_slot_new)
+{
+    const uint32_t count     = chain->num_effects;
+    const uint32_t block_end = moved + run_length;
+    if (moved >= count || block_end > count || after_slot >= static_cast<int32_t>(count) ||
+        (after_slot >= 0 && static_cast<uint32_t>(after_slot) >= moved &&
+         static_cast<uint32_t>(after_slot) < block_end)) {
+        return false;
+    }
+    uint32_t order[Synth::max_chain_effects];
+    uint32_t position = 0;
+    bool     inserted = false;
+    for (uint32_t slot = 0; slot < count; ++slot) {
+        if (slot >= moved && slot < block_end) {
+            continue;
+        }
+        if (! inserted && (after_slot < 0 || static_cast<int32_t>(slot) > after_slot)) {
+            for (uint32_t i = 0; i < run_length; ++i) {
+                order[position++] = moved + i;
+            }
+            inserted = true;
+        }
+        order[position++] = slot;
+    }
+    if (! inserted) {
+        for (uint32_t i = 0; i < run_length; ++i) {
+            order[position++] = moved + i;
+        }
+    }
+
+    const Synth::EffectChainBinding snapshot = *chain;
+    uint8_t                         out_snapshot[Synth::max_chain_effects];
+    memcpy(out_snapshot, routing->out, sizeof(out_snapshot));
+    const Sculptor::EffectGraphMapping previous = mapping ? *mapping : Sculptor::EffectGraphMapping{};
+    for (uint32_t slot = 0; slot < count; ++slot) {
+        chain->effects[slot] = snapshot.effects[order[slot]];
+        routing->out[slot]   = out_snapshot[order[slot]];
+        if (after_slot >= 0 && order[slot] == static_cast<uint32_t>(after_slot) && after_slot_new) {
+            *after_slot_new = slot; // the anchor's own new index, for flag writes
+        }
+        if (mapping) {
+            mapping->effect_nodes[slot] = previous.effect_nodes[order[slot]];
+        }
+    }
+    return true;
+}
+
+// Stages the source into the shared candidate; refusals leave the caller's
+// out untouched.  Source and out may alias.
+static bool fx_begin_candidate(const Synth::InstrumentEditorBank* source, uint32_t chain)
+{
+    if (! source || chain > Sculptor::fx_master_chain) {
+        return false;
+    }
+    effects_candidate = *source;
+    return true;
+}
+
+bool Sculptor::fx_connect_input_candidate(const Synth::InstrumentEditorBank* source,
+                                          uint32_t                           chain,
+                                          uint32_t                           target_slot,
+                                          Synth::InstrumentEditorBank*       out)
+{
+    if (! out || ! fx_begin_candidate(source, chain)) {
+        return false;
+    }
+    Synth::EffectChainBinding& bind    = fx_graph_chain(&effects_candidate.bank, chain);
+    EffectChainRouting&        routing = effects_candidate.effect_routing[chain];
+    if (! fx_slot_occupied(bind, target_slot) || fx_slot_input_fed(bind, routing, target_slot)) {
+        return false;
+    }
+    const uint32_t run = fx_run_length(bind, routing, target_slot);
+    if (! fx_splice_effect_run(&bind, &routing, target_slot, run, -1)) {
+        return false;
+    }
+    routing.in = effect_in_first_slot;
+    fx_sanitize_routing(&bind, &routing);
+    if (! validate_effect_routing(bind, routing)) {
+        return false;
+    }
+    *out = effects_candidate;
+    return true;
+}
+
+bool Sculptor::fx_connect_slots_candidate(const Synth::InstrumentEditorBank* source,
+                                          uint32_t                           chain,
+                                          uint32_t                           source_slot,
+                                          uint32_t                           target_slot,
+                                          Synth::InstrumentEditorBank*       out)
+{
+    if (! out || ! fx_begin_candidate(source, chain)) {
+        return false;
+    }
+    Synth::EffectChainBinding& bind    = fx_graph_chain(&effects_candidate.bank, chain);
+    EffectChainRouting&        routing = effects_candidate.effect_routing[chain];
+    if (! fx_slot_occupied(bind, source_slot) || ! fx_slot_occupied(bind, target_slot) || source_slot == target_slot ||
+        fx_slot_input_fed(bind, routing, target_slot)) {
+        return false;
+    }
+    // Cycle refusal: a source inside the target's run would rotate the run.
+    const uint32_t run = fx_run_length(bind, routing, target_slot);
+    if (source_slot > target_slot && source_slot < target_slot + run) {
+        return false;
+    }
+    uint32_t source_slot_new = source_slot;
+    if (! fx_splice_effect_run(&bind,
+                               &routing,
+                               target_slot,
+                               run,
+                               static_cast<int32_t>(source_slot),
+                               nullptr,
+                               &source_slot_new)) {
+        return false;
+    }
+    routing.out[source_slot_new] = effect_out_next; // the splice may have moved the source
+    fx_sanitize_routing(&bind, &routing);
+    if (! validate_effect_routing(bind, routing)) {
+        return false;
+    }
+    *out = effects_candidate;
+    return true;
+}
+
+bool Sculptor::fx_connect_output_candidate(const Synth::InstrumentEditorBank* source,
+                                           uint32_t                           chain,
+                                           uint32_t                           source_slot,
+                                           Synth::InstrumentEditorBank*       out)
+{
+    if (! out || ! fx_begin_candidate(source, chain)) {
+        return false;
+    }
+    Synth::EffectChainBinding& bind    = fx_graph_chain(&effects_candidate.bank, chain);
+    EffectChainRouting&        routing = effects_candidate.effect_routing[chain];
+    if (! fx_slot_occupied(bind, source_slot)) {
+        return false;
+    }
+    const int32_t holder = fx_output_holder(bind, routing);
+    if (holder >= 0 && holder != static_cast<int32_t>(source_slot)) {
+        routing.out[holder] = effect_out_disconnected;
+    }
+    // One output feed: the bypass yields to the effect wire.
+    if (routing.in == effect_in_output) {
+        routing.in = effect_in_disconnected;
+    }
+    routing.out[source_slot] = effect_out_output;
+    fx_sanitize_routing(&bind, &routing);
+    if (! validate_effect_routing(bind, routing)) {
+        return false;
+    }
+    *out = effects_candidate;
+    return true;
+}
+
+bool Sculptor::fx_disconnect_candidate(const Synth::InstrumentEditorBank* source,
+                                       uint32_t                           chain,
+                                       FxConnector                        kind,
+                                       int32_t                            slot,
+                                       Synth::InstrumentEditorBank*       out)
+{
+    if (! out || ! fx_begin_candidate(source, chain)) {
+        return false;
+    }
+    Synth::EffectChainBinding& bind    = fx_graph_chain(&effects_candidate.bank, chain);
+    EffectChainRouting&        routing = effects_candidate.effect_routing[chain];
+    switch (kind) {
+        case fx_connector_global_input:
+            routing.in = effect_in_disconnected;
+            break;
+        case fx_connector_global_output: {
+            const int32_t holder = fx_output_holder(bind, routing);
+            if (holder >= 0) {
+                routing.out[holder] = effect_out_disconnected;
+            }
+            break;
+        }
+        case fx_connector_effect_input:
+            if (slot < 0 || ! fx_slot_occupied(bind, static_cast<uint32_t>(slot))) {
+                return false;
+            }
+            if (slot == 0) {
+                if (routing.in == effect_in_first_slot) {
+                    routing.in = effect_in_disconnected;
+                }
+            }
+            else {
+                routing.out[slot - 1] = effect_out_disconnected;
+            }
+            break;
+        case fx_connector_effect_output:
+            if (slot < 0 || ! fx_slot_occupied(bind, static_cast<uint32_t>(slot))) {
+                return false;
+            }
+            routing.out[slot] = effect_out_disconnected;
+            break;
+    }
+    fx_sanitize_routing(&bind, &routing);
+    if (! validate_effect_routing(bind, routing)) {
+        return false;
+    }
+    *out = effects_candidate;
+    return true;
+}
+
+// Removes one slot and repairs the routing: flags shift down with the
+// payloads, a doubly connected slot hands its downstream connection to
+// its predecessor (the global input keeps feeding slot 0), and an
+// emptied chain loses its input wire.  Deleting slot 0 keeps the input
+// feed only when the deleted slot fed its successor: a disconnected or
+// output-flagged slot 0 must not wire the global input onto the next
+// remaining slot, which nothing fed before.  The trailing sanitize also
+// repairs the fed-slot-disconnected-output case, whose flag shift would
+// otherwise leave a dangling effect_out_next (the canvas batch seam and
+// the candidate path both run this one transform).
+static void fx_delete_effect_routing(Synth::EffectChainBinding*    chain,
+                                     Sculptor::EffectChainRouting* routing,
+                                     uint32_t                      slot)
+{
+    const bool    fed        = Sculptor::fx_slot_input_fed(*chain, *routing, slot);
+    const uint8_t downstream = routing->out[slot];
+    Sculptor::fx_remove_effect(chain, slot);
+    for (uint32_t i = slot; i + 1 < Synth::max_chain_effects; ++i) {
+        routing->out[i] = routing->out[i + 1];
+    }
+    routing->out[Synth::max_chain_effects - 1] = Sculptor::effect_out_disconnected;
+    if (fed && downstream != Sculptor::effect_out_disconnected && slot > 0) {
+        routing->out[slot - 1] = downstream;
+    }
+    if (chain->num_effects == 0) {
+        routing->in = Sculptor::effect_in_disconnected;
+    }
+    else if (slot == 0 && downstream != Sculptor::effect_out_next) {
+        routing->in = Sculptor::effect_in_disconnected;
+    }
+    Sculptor::fx_sanitize_routing(chain, routing);
+}
+
+bool Sculptor::fx_delete_effect_candidate(const Synth::InstrumentEditorBank* source,
+                                          uint32_t                           chain,
+                                          uint32_t                           slot,
+                                          Synth::InstrumentEditorBank*       out)
+{
+    if (! out || ! fx_begin_candidate(source, chain)) {
+        return false;
+    }
+    Synth::EffectChainBinding& bind    = fx_graph_chain(&effects_candidate.bank, chain);
+    EffectChainRouting&        routing = effects_candidate.effect_routing[chain];
+    if (! fx_slot_occupied(bind, slot)) {
+        return false;
+    }
+    fx_delete_effect_routing(&bind, &routing, slot);
+    fx_compact_chain(&bind, &routing);
+    if (! validate_effect_routing(bind, routing)) {
+        return false;
+    }
+    *out = effects_candidate;
+    return true;
+}
+
+bool Sculptor::fx_add_effect_candidate(const Synth::InstrumentEditorBank* source,
+                                       uint32_t                           chain,
+                                       Synth::EffectType                  type,
+                                       Synth::InstrumentEditorBank*       out)
+{
+    if (! out || ! fx_begin_candidate(source, chain)) {
+        return false;
+    }
+    Synth::EffectChainBinding& bind    = fx_graph_chain(&effects_candidate.bank, chain);
+    EffectChainRouting&        routing = effects_candidate.effect_routing[chain];
+    if (bind.num_effects >= Synth::max_chain_effects || type == Synth::EffectType::none ||
+        static_cast<uint32_t>(type) >= Synth::num_effect_types) {
+        return false;
+    }
+    // Insert immediately after the output holder; with no holder append
+    // after the last occupied slot.
+    const int32_t  holder = fx_output_holder(bind, routing);
+    const uint32_t insert = holder >= 0 ? static_cast<uint32_t>(holder) + 1 : bind.num_effects;
+    for (uint32_t slot = bind.num_effects; slot > insert; --slot) {
+        bind.effects[slot] = bind.effects[slot - 1];
+        routing.out[slot]  = routing.out[slot - 1];
+    }
+    fx_init_slot(&bind, insert, type);
+    bind.effects[insert].enabled = true;
+    ++bind.num_effects;
+    if (holder >= 0) {
+        routing.out[holder] = effect_out_next;
+    }
+    // The bypass owns the output feed: a new effect stays unwired while
+    // the input node feeds the output node directly.
+    if (routing.in != effect_in_output) {
+        routing.out[insert] = effect_out_output;
+        if (bind.num_effects == 1) {
+            routing.in = effect_in_first_slot;
+        }
+    }
+    fx_sanitize_routing(&bind, &routing);
+    if (! validate_effect_routing(bind, routing)) {
+        return false;
+    }
+    *out = effects_candidate;
+    return true;
+}
+
+void Sculptor::fx_swap_effect_layout_records(Synth::InstrumentEditorBank* bank,
+                                             uint32_t                     chain,
+                                             uint32_t                     slot_a,
+                                             uint32_t                     slot_b)
+{
+    if (! bank || chain > Synth::max_channels || slot_a >= Synth::max_chain_effects ||
+        slot_b >= Synth::max_chain_effects || slot_a == slot_b) {
+        return;
+    }
+    // Only the named chain's records: another chain may hold occupied slots
+    // at the same indices, and its saved layout must never move.
+    Synth::EffectChainBinding& bind = fx_graph_chain(&bank->bank, chain);
+    if (! fx_slot_occupied(bind, slot_a) || ! fx_slot_occupied(bind, slot_b)) {
+        return;
+    }
+    // Post-exchange titles: slot_a carries slot_b's old payload and vice
+    // versa, so exchanging the two records' names exchanges their bodies
+    // between the titles and the two boxes physically trade places.  A
+    // missing record means the default position: the present record
+    // re-keys to the other title.
+    char title_a[32];
+    char title_b[32];
+    effect_layout_name(bind, chain, Synth::effects_graph_layout_effect, slot_a, title_a, sizeof(title_a));
+    effect_layout_name(bind, chain, Synth::effects_graph_layout_effect, slot_b, title_b, sizeof(title_b));
+    int32_t record_a = -1;
+    int32_t record_b = -1;
+    for (uint32_t index = 0; index < bank->graph_layout_count; ++index) {
+        Synth::GraphNodeLayout& record = bank->graph_layout[index];
+        if (record.kind != 4 || record.channel != chain) {
+            continue;
+        }
+        if (strcmp(record.name, title_a) == 0) {
+            record_a = static_cast<int32_t>(index);
+        }
+        if (strcmp(record.name, title_b) == 0) {
+            record_b = static_cast<int32_t>(index);
+        }
+    }
+    if (record_a < 0 && record_b < 0) {
+        return;
+    }
+    if (record_a >= 0 && record_b >= 0) {
+        char name[32];
+        memcpy(name, bank->graph_layout[record_a].name, sizeof(name));
+        memcpy(bank->graph_layout[record_a].name, bank->graph_layout[record_b].name, sizeof(name));
+        memcpy(bank->graph_layout[record_b].name, name, sizeof(name));
+    }
+    else if (record_a >= 0) {
+        snprintf(bank->graph_layout[record_a].name, sizeof(bank->graph_layout[record_a].name), "%s", title_b);
+    }
+    else {
+        snprintf(bank->graph_layout[record_b].name, sizeof(bank->graph_layout[record_b].name), "%s", title_a);
+    }
+}
+
 static bool capture_effect_layout(const Synth::InstrumentEditorBank&  source,
                                   const Sculptor::Graph&              graph,
                                   const Sculptor::EffectGraphMapping& original,
@@ -1976,59 +2573,6 @@ static bool capture_effect_layout(const Synth::InstrumentEditorBank&  source,
     return true;
 }
 
-bool Sculptor::capture_effect_audio(const Graph&                     graph,
-                                    const EffectGraphMapping&        mapping,
-                                    const Synth::EffectChainBinding& chain,
-                                    EffectAudioTopology*             out,
-                                    const Connection*                proposed_connection,
-                                    uint32_t                         excluded_connection)
-{
-    if (! out || ! graph.node_occupied(mapping.input_node) || ! graph.node_occupied(mapping.output_node)) {
-        return false;
-    }
-    Sculptor::EffectAudioTopology audio         = {};
-    audio.explicit_edges                        = 1;
-    bool incoming[Synth::max_chain_effects + 1] = {};
-    for (uint32_t index = 0; index <= Sculptor::max_connections; ++index) {
-        if (index == max_connections ? ! proposed_connection
-                                     : (! graph.connection_occupied(index) || index == excluded_connection)) {
-            continue;
-        }
-        const Connection& edge = index == max_connections ? *proposed_connection : graph.get_connection(index);
-        if (! graph.node_occupied(edge.output.node_idx) || ! graph.node_occupied(edge.input.node_idx) ||
-            edge.output.slot_idx >= graph.node(edge.output.node_idx).slots.num_allocated ||
-            edge.input.slot_idx >= graph.node(edge.input.node_idx).slots.num_allocated) {
-            return false;
-        }
-        const int32_t source_slot = Sculptor::fx_effect_slot_of(mapping, edge.output.node_idx);
-        const int32_t target_slot = Sculptor::fx_effect_slot_of(mapping, edge.input.node_idx);
-        const bool    audio_source =
-            edge.output.node_idx == mapping.input_node || (source_slot >= 0 && edge.output.slot_idx == 1);
-        const bool audio_target =
-            edge.input.node_idx == mapping.output_node || (target_slot >= 0 && edge.input.slot_idx == 0);
-        if (! audio_source && ! audio_target) {
-            continue;
-        }
-        if (! audio_source || ! audio_target || edge.output.slot_idx != (source_slot >= 0 ? 1u : 0u) ||
-            edge.input.slot_idx != 0) {
-            return false;
-        }
-        const uint32_t source = source_slot >= 0 ? static_cast<uint32_t>(source_slot) : Synth::max_chain_effects;
-        const uint32_t target =
-            target_slot >= 0 ? static_cast<uint32_t>(target_slot) + 1 : Synth::max_chain_effects + 1;
-        if (audio.next[source] || incoming[target - 1]) {
-            return false;
-        }
-        audio.next[source]   = static_cast<uint8_t>(target);
-        incoming[target - 1] = true;
-    }
-    if (! Sculptor::validate_effect_audio_topology(chain, audio)) {
-        return false;
-    }
-    *out = audio;
-    return true;
-}
-
 // Sets one projected LFO node's Duty and Period editability: duty shapes
 // sawtooth only, and the period freezes while a beat division resolves it.
 // Plain value edits never reproject the node.
@@ -2096,20 +2640,9 @@ bool Sculptor::apply_effect_graph_batch(const Synth::InstrumentEditorBank* sourc
     source                     = &layout_source;
     effects_candidate          = *source;
     EffectGraphMapping current = *mapping;
-
-    // Deleted effect slots in the original mapping, for the routing heal
-    // that runs after the live-edge capture.
-    uint32_t deleted_slots[Synth::max_chain_effects] = {};
-    uint32_t num_deleted_slots                       = 0;
-    for (uint32_t index = 0; index < count; ++index) {
-        if (changes[index].kind != ChangeKind::node_deleted) {
-            continue;
-        }
-        const int32_t slot = fx_effect_slot_of(*mapping, changes[index].node_idx);
-        if (slot >= 0 && num_deleted_slots < Synth::max_chain_effects) {
-            deleted_slots[num_deleted_slots++] = static_cast<uint32_t>(slot);
-        }
-    }
+    // Wire gestures edit the candidate's routing flags directly; the
+    // candidate owns the pointer's lifetime for the whole batch.
+    Sculptor::EffectChainRouting* routing = &effects_candidate.effect_routing[mapping->chain];
 
     if (! capture_nodes) {
         for (uint32_t node_index = 0; node_index < max_nodes; ++node_index) {
@@ -2133,7 +2666,12 @@ bool Sculptor::apply_effect_graph_batch(const Synth::InstrumentEditorBank* sourc
                 change.kind        = ChangeKind::value_changed;
                 change.node_idx    = node_index;
                 change.slot_idx    = slot;
-                if (! apply_fx_graph_change(&effects_candidate.bank, *graph, current, change)) {
+                if (! apply_fx_graph_change_internal(&effects_candidate.bank,
+                                                     *graph,
+                                                     current,
+                                                     change,
+                                                     nullptr,
+                                                     routing)) {
                     return false;
                 }
             }
@@ -2152,13 +2690,14 @@ bool Sculptor::apply_effect_graph_batch(const Synth::InstrumentEditorBank* sourc
         }
         if (change.kind == ChangeKind::connection_added || change.kind == ChangeKind::connection_deleted ||
             change.kind == ChangeKind::connection_changed) {
-            const int32_t effect = fx_effect_slot_of(current, change.connection_input.node_idx);
-            if (change.connection_input.node_idx == current.output_node ||
-                (effect >= 0 && change.connection_input.slot_idx == 0)) {
+            // A wire whose endpoint node is gone is a deletion byproduct;
+            // the delete branch owns the routing repair.
+            if (! graph->node_occupied(change.connection_input.node_idx) ||
+                ! graph->node_occupied(change.connection_output.node_idx)) {
                 continue;
             }
         }
-        if (! apply_fx_graph_change_internal(&effects_candidate.bank, *graph, current, change, &current)) {
+        if (! apply_fx_graph_change_internal(&effects_candidate.bank, *graph, current, change, &current, routing)) {
             return false;
         }
     }
@@ -2170,7 +2709,7 @@ bool Sculptor::apply_effect_graph_batch(const Synth::InstrumentEditorBank* sourc
                 fx_effect_slot_of(current, change.node_idx) != static_cast<int32_t>(slot - 1)) {
                 continue;
             }
-            if (! apply_fx_graph_change(&effects_candidate.bank, *graph, current, change)) {
+            if (! apply_fx_graph_change_internal(&effects_candidate.bank, *graph, current, change, nullptr, routing)) {
                 return false;
             }
             for (uint32_t moved = slot; moved < Synth::max_chain_effects; ++moved) {
@@ -2179,51 +2718,8 @@ bool Sculptor::apply_effect_graph_batch(const Synth::InstrumentEditorBank* sourc
             current.effect_nodes[Synth::max_chain_effects - 1] = pool_no_slot;
         }
     }
-    // Capture the live final edges after descending payload/mapping compaction.
-    Sculptor::EffectAudioTopology audio = {};
-    if (! capture_effect_audio(*graph, current, fx_graph_chain(&effects_candidate.bank, mapping->chain), &audio)) {
+    if (! Sculptor::validate_effect_routing(chain_at(effects_candidate.bank, mapping->chain), *routing)) {
         return false;
-    }
-    if (num_deleted_slots) {
-        // A deleted effect node drops its two wires in the graph, so the
-        // capture holds a hole where the node sat.  Reconnect the hole from
-        // the pre-deletion routing: the predecessor feeds the successor.
-        Sculptor::EffectAudioTopology healed = {};
-        heal_deleted_effect_audio(source->effect_audio[mapping->chain],
-                                  chain_at(source->bank, mapping->chain),
-                                  deleted_slots,
-                                  num_deleted_slots,
-                                  &healed);
-        bool incoming[Synth::max_chain_effects + 1] = {};
-        for (uint32_t source_node = 0; source_node <= Synth::max_chain_effects; ++source_node) {
-            if (audio.next[source_node]) {
-                incoming[audio.next[source_node] - 1] = true;
-            }
-        }
-        for (uint32_t source_node = 0; source_node <= Synth::max_chain_effects; ++source_node) {
-            const uint32_t healed_target = healed.next[source_node];
-            if (healed_target && ! audio.next[source_node] && ! incoming[healed_target - 1]) {
-                audio.next[source_node]     = static_cast<uint8_t>(healed_target);
-                incoming[healed_target - 1] = true;
-            }
-        }
-    }
-    bool structural_audio = source->effect_audio[mapping->chain].explicit_edges != 0;
-    for (uint32_t index = 0; index < count; ++index) {
-        const GraphChange& change = changes[index];
-        if (change.kind == ChangeKind::node_deleted && fx_effect_slot_of(*mapping, change.node_idx) >= 0) {
-            structural_audio = true;
-        }
-        if ((change.kind == ChangeKind::connection_added || change.kind == ChangeKind::connection_deleted ||
-             change.kind == ChangeKind::connection_changed) &&
-            (change.connection_input.node_idx == mapping->output_node ||
-             (fx_effect_slot_of(*mapping, change.connection_input.node_idx) >= 0 &&
-              change.connection_input.slot_idx == 0))) {
-            structural_audio = true;
-        }
-    }
-    if (structural_audio) {
-        effects_candidate.effect_audio[mapping->chain] = audio;
     }
     // Source metadata is read while the private candidate's chain has its new identities.
     if (! capture_effect_layout(*source, *graph, *mapping, current, capture_nodes, &effects_candidate) ||
@@ -2331,6 +2827,7 @@ bool Sculptor::add_effect_lfo_candidate(const Synth::InstrumentEditorBank* sourc
                                         uint32_t                           owner,
                                         Synth::InstrumentEditorBank*       out,
                                         uint16_t*                          out_descriptor,
+                                        vmath::vec2                        position,
                                         const bool*                        pinned_lfos)
 {
     if (! source || ! out || ! out_descriptor || owner > fx_master_chain ||
@@ -2349,17 +2846,14 @@ bool Sculptor::add_effect_lfo_candidate(const Synth::InstrumentEditorBank* sourc
     }
     Synth::GraphNodeLayout& record = effects_candidate.graph_layout[effects_candidate.graph_layout_count++];
     record                         = {};
-    uint32_t ordinal               = 0;
-    for (uint32_t identity = 1; identity < descriptor; ++identity) {
-        if (represented[identity - 1]) {
-            ++ordinal;
-        }
-    }
-    const vmath::vec2 position = fx_lfo_position(ordinal);
-    record.x                   = position.x;
-    record.y                   = position.y;
-    record.kind                = 4;
-    record.channel             = static_cast<uint8_t>(owner);
+    // Measured add-time placement: the caller passes the place the new box
+    // lands at (the release point for the drop, the measured lane x for
+    // the canvas add); the record freezes it so the unwired descriptor
+    // stays represented and persistent, chain-scoped.
+    record.x       = position.x;
+    record.y       = position.y;
+    record.kind    = 4;
+    record.channel = static_cast<uint8_t>(owner);
     effect_layout_name(chain_at(effects_candidate.bank, owner),
                        owner,
                        Synth::effects_graph_layout_lfo,
@@ -2417,7 +2911,7 @@ bool Sculptor::extract_effect_chain_document(const Synth::InstrumentEditorBank* 
         }
     }
     Synth::remap_effect_chain(fx_graph_chain(&effects_candidate.bank, chain), lfo_ids, &document.chain);
-    document.audio = effects_candidate.effect_audio[chain];
+    document.routing = effects_candidate.effect_routing[chain];
     for (uint32_t record_index = 0; record_index < effects_candidate.graph_layout_count; ++record_index) {
         const Synth::GraphNodeLayout& record = effects_candidate.graph_layout[record_index];
         if (record.kind != 4 || record.channel != chain) {
@@ -2453,8 +2947,13 @@ bool Sculptor::replace_effect_chain_candidate(const Synth::InstrumentEditorBank*
                                               Synth::InstrumentEditorBank*       out_candidate,
                                               const bool*                        pinned_lfos)
 {
-    if (! source || ! out_candidate || chain > fx_master_chain || ! Synth::validate_effects_document(document) ||
-        ! Synth::validate_instrument_bank(&source->bank) || ! validate_editor_metadata(*source) ||
+    if (! source || ! out_candidate || chain > fx_master_chain) {
+        return false;
+    }
+    if (! Synth::validate_effects_document(document)) {
+        return false;
+    }
+    if (! Synth::validate_instrument_bank(&source->bank) || ! validate_editor_metadata(*source) ||
         source->bank.lfos.num_allocated > Synth::max_lfos - document->lfo_count) {
         return false;
     }
@@ -2471,8 +2970,8 @@ bool Sculptor::replace_effect_chain_candidate(const Synth::InstrumentEditorBank*
     effects_candidate.added_cc_mask[chain] =
         static_cast<uint16_t>(effects_candidate.added_cc_mask[chain] | fx_chain_wired_cc_mask(destination));
 
-    effects_candidate.effect_audio[chain] = document->audio;
-    uint32_t retained                     = 0;
+    effects_candidate.effect_routing[chain] = document->routing;
+    uint32_t retained                       = 0;
     for (uint32_t index = 0; index < effects_candidate.graph_layout_count; ++index) {
         const Synth::GraphNodeLayout& record = effects_candidate.graph_layout[index];
         if (record.kind != 4 || record.channel != chain) {
@@ -2494,8 +2993,13 @@ bool Sculptor::replace_effect_chain_candidate(const Synth::InstrumentEditorBank*
         record.height_override                  = layout.height_override;
         effect_layout_name(document->chain, 0, layout.kind, layout.index, record.name, sizeof(record.name));
     }
-    if (! transfer_effect_layout(&layout_source, 0, lfo_ids, chain, &effects_candidate) ||
-        ! Synth::validate_instrument_bank(&effects_candidate.bank) || ! validate_editor_metadata(effects_candidate)) {
+    if (! transfer_effect_layout(&layout_source, 0, lfo_ids, chain, &effects_candidate)) {
+        return false;
+    }
+    if (! Synth::validate_instrument_bank(&effects_candidate.bank)) {
+        return false;
+    }
+    if (! validate_editor_metadata(effects_candidate)) {
         return false;
     }
     memset(effects_candidate.graph_layout + effects_candidate.graph_layout_count,

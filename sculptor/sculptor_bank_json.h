@@ -71,16 +71,18 @@ struct EffectsGraphLayout {
 
 // Local LFO ids preserve aliases, including descriptors represented only by layout.
 struct EffectsDocument {
-    EffectChainBinding            chain;
-    Sculptor::EffectAudioTopology audio;
-    LFODescriptor                 lfos[max_lfos];
-    uint32_t                      lfo_count;
-    EffectsGraphLayout            graph_layout[effects_graph_layout_capacity];
-    uint32_t                      graph_layout_count;
+    EffectChainBinding           chain;
+    Sculptor::EffectChainRouting routing; // v3 routing flags
+    LFODescriptor                lfos[max_lfos];
+    uint32_t                     lfo_count;
+    EffectsGraphLayout           graph_layout[effects_graph_layout_capacity];
+    uint32_t                     graph_layout_count;
 };
 
-// Strict synth-effects-v1 documents; failure leaves destination bytes untouched.
-// GUI-thread-only shared staging is non-reentrant, like the bank codec.
+// Effects documents: the writer emits synth-effects-v3 with flag routing;
+// the decoder also accepts legacy v1 and v2 documents.  Failure leaves
+// destination bytes untouched.  GUI-thread-only shared staging is
+// non-reentrant, like the bank codec.
 bool     validate_effects_document(const EffectsDocument* document);
 uint32_t encode_effects_json(const EffectsDocument* document, char* dest, uint32_t dest_size);
 bool     decode_effects_json(const char* text, uint32_t len, EffectsDocument* out);

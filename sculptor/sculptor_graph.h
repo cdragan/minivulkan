@@ -123,9 +123,10 @@ struct Node {
     float                      content_width_override;  // 0 = auto (content width)
     float                      content_height_override; // 0 = auto (content height)
     bool                       ghost;                   // ghost marker, see set_ghost
-    bool                       renamable;    // title rename allowed even when node_state_edits_enabled is off
-    bool                       oscillator;   // oscillator layer nodes only.  The disable rule must not hit other nodes.
-    Pool<Slot, max_node_slots> slots;        // num_allocated = slot count
+    bool                       renamable;  // title rename allowed even when node_state_edits_enabled is off
+    bool                       oscillator; // oscillator layer nodes only.  The disable rule must not hit other nodes.
+    bool                       auto_lane;  // default placement: the caller's arrangement pass owns x until a user move
+    Pool<Slot, max_node_slots> slots;      // num_allocated = slot count
     StateWidgetCallback        state_widget; // optional, may be null
     void*                      state_widget_data;
 };
@@ -425,6 +426,18 @@ public:
     // changes of one interaction into a single undo entry.
     bool interaction_active() const;
 
+    // Node drag seam: the renderer and the unit tests drive the same move
+    // logic.  begin_node_drag anchors a drag on an occupied node (it stores
+    // the node under the press, the mouse offset within it, and the
+    // pre-drag placement of that node plus its selected companions; the
+    // renderer pairs it with its dragging interaction); apply_node_drag
+    // applies one frame.  A stationary hold moves nothing.  Any mouse
+    // movement that changes the snapped target is a drag: the node snaps,
+    // and auto-arrangement is opted out.  Returning to the exact press
+    // point restores the pre-drag placement and stamps.
+    void begin_node_drag(uint32_t node_idx, vmath::vec2 mouse_point);
+    void apply_node_drag(vmath::vec2 mouse_point);
+
     // Change notification: every mutation pushes an event.  take_changes
     // drains events in order; the caller reacts incrementally (e.g. the synth
     // applies smooth ramps for value_changed).  Node moves push nothing.
@@ -476,6 +489,19 @@ public:
     // state: clear() zeroes the node pool and the projection re-stamps
     // the layer nodes.
     void set_node_oscillator(uint32_t node_idx, bool oscillator);
+
+    // Per-node auto-lane stamp: an auto-lane node joins the caller's
+    // width-aware default arrangement; drag, resize, set_node_layout and
+    // align_selected clear it, so a user-placed node is never auto-arranged
+    // again.  Projection state: clear() zeroes the node pool and the
+    // projection re-stamps its default nodes.
+    void set_node_auto_lane(uint32_t node_idx, bool auto_lane);
+    bool node_auto_lane(uint32_t node_idx) const;
+
+    // Positions one auto-lane node during the arrangement pass.  Keeps the
+    // auto_lane flag (set_node_layout clears it) and pushes no events, like
+    // every node move.
+    void place_auto_lane_node(uint32_t node_idx, vmath::vec2 position);
 
     // Eventless property write: sets a property slot's value WITHOUT
     // pushing a change event, used by the shared-routing fan-out so a shared
@@ -613,10 +639,18 @@ private:
     Interaction interaction = Interaction::idle;
     uint32_t    dragged_node;
     uint32_t    renaming_node;
-    bool        renaming_focus = false; //  first frame of rename: set keyboard focus
-    bool        title_pressed  = false; //  drag started on title: click (no move) yet
-    vmath::vec2 drag_offset    = {};    //  mouse offset within node at drag start
-    vmath::vec2 band_start     = {};    //  rubber band start corner (graph space)
+    bool        renaming_focus   = false; //  first frame of rename: set keyboard focus
+    bool        title_pressed    = false; //  drag started on title: click (no move) yet
+    vmath::vec2 drag_offset      = {};    //  mouse offset within node at drag start
+    vmath::vec2 drag_start_point = {};    //  graph-space mouse point at drag start
+    bool        drag_applied     = false; //  a drag frame moved nodes since begin
+    // Pre-drag placement of the dragged node and the selected companions it
+    // moves; drag_applied gates the restore in apply_node_drag, so returning
+    // the mouse to the exact press point makes the whole drag a no-op.
+    bool        drag_restore_active[max_nodes]    = {};
+    vmath::vec2 drag_restore_position[max_nodes]  = {};
+    bool        drag_restore_auto_lane[max_nodes] = {};
+    vmath::vec2 band_start                        = {}; //  rubber band start corner (graph space)
 
     // Connection dragging: anchor endpoint and, when retargeting, which
     // connection end is being moved.

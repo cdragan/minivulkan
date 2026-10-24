@@ -12,12 +12,29 @@
 
 namespace Sculptor {
 
-// Implicit mode requires zero successors and derives legacy serial order.
-// Explicit successors: 0 = absent, 1..4 = payload slot + 1, 5 = Output;
-// source entry 4 is Input. No runtime connectivity is stored in the payload bank.
-struct EffectAudioTopology {
-    uint8_t explicit_edges;
-    uint8_t next[Synth::max_chain_effects + 1];
+// Per-slot output connection flags plus the per-chain input routing, the
+// editor-side routing model: an effect's output is disconnected, feeds the
+// next occupied slot (the wire derives from adjacency) or feeds the graph
+// output node. The channel input node's Out lands nowhere, on the first
+// effect slot, or straight on the graph output node (the bypass wire: it
+// overrides the effect wiring audibly while set, and severing it restores
+// the wiring). Wires derive from these flags plus slot order at projection
+// time; nothing is stored in the synth runtime.
+enum EffectOut : uint8_t {
+    effect_out_disconnected,
+    effect_out_next,
+    effect_out_output
+};
+
+enum EffectIn : uint8_t {
+    effect_in_disconnected,
+    effect_in_first_slot,
+    effect_in_output
+};
+
+struct EffectChainRouting {
+    uint8_t out[Synth::max_chain_effects]; // per-slot EffectOut
+    uint8_t in;                            // channel input node, an EffectIn value
 };
 
 } // namespace Sculptor
@@ -76,10 +93,10 @@ static_assert(graph_canonical_node_count == 9);
 // Instrument bank editable in GUI
 struct InstrumentEditorBank {
     // Authoring payload collections, not playable chains: compile before publish.
-    InstrumentBank                bank;
-    Sculptor::EffectAudioTopology effect_audio[max_channels + 1];
-    char                          instrument_names[max_instruments][max_name_len];
-    char                          channel_names[max_channels][max_name_len];
+    InstrumentBank               bank;
+    Sculptor::EffectChainRouting effect_routing[max_channels + 1];
+    char                         instrument_names[max_instruments][max_name_len];
+    char                         channel_names[max_channels][max_name_len];
     // Editor-side per-zone wiring state, sparse with a global cap.
     GraphNodeLayout graph_layout[max_graph_records];
     uint32_t        graph_layout_count;
@@ -232,10 +249,19 @@ inline void copy_name_bounded(char* destination, uint32_t destination_bound, con
     }
 }
 
-// Validates every fragment, including detached cycles and endpoint occupancy.
-bool validate_effect_audio_topology(const Synth::EffectChainBinding& chain, const EffectAudioTopology& audio);
+// Routing-flag validation: occupied slots contiguous from slot 0,
+// empty slots carry effect_out_disconnected, effect_out_next only feeds an
+// occupied successor, at most one effect_out_output holder, and
+// in is effect_in_first_slot only on a chain with occupied slots; the
+// effect_in_output bypass is legal on any chain, empty or wired.
+bool validate_effect_routing(const Synth::EffectChainBinding& chain, const EffectChainRouting& routing);
+
+// Terminal slot of the complete input-led path, or -1 when no complete
+// input-led path exists (the input bypassed straight to the output node, no
+// input wire, a broken run, or no output holder on the run's end).
+int32_t effect_path_terminal(const Synth::EffectChainBinding& chain, const EffectChainRouting& routing);
 // Success-only output: complete paths compile in traversal order; incomplete
-// paths bypass dry. Detached payloads and topology never enter runtime chains.
+// paths bypass dry. Off-path payloads never enter runtime chains.
 bool compile_editor_playback_bank(const Synth::InstrumentEditorBank& source, Synth::InstrumentBank* out);
 
 // One GUI-free paste transaction: installs a decoded clipboard instrument and its

@@ -62,6 +62,7 @@ private:
     // Exchanges the node's effect with its adjacent projected neighbor
     // (direction -1 = previous, +1 = next); a missing neighbor does nothing.
     void do_fx_swap(uint32_t node_idx, int32_t direction);
+    void do_fx_rejoin_lane(uint32_t node_idx);
     // One added-CC registry-bit edit shared by both panes' handlers.
     void edit_added_cc_mask(uint32_t mask_idx, uint32_t cc_number, bool add, uint32_t undo_tag, bool* reproject);
     void do_fx_add_cc(uint32_t cc_number);

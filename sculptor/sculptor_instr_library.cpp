@@ -146,9 +146,6 @@ static bool validate_record(const Synth::InstrumentEditorBank* const editor_bank
     if (bank->parameters.num_allocated != 0)
         return false;
 
-    if (editor_bank->effect_audio[Synth::max_channels].explicit_edges) {
-        return false;
-    }
     if (bank->master_chain.num_effects != 0)
         return false;
 
@@ -166,9 +163,6 @@ static bool validate_record(const Synth::InstrumentEditorBank* const editor_bank
             return false;
 
         // The whole-channel record carries the effect chain only on channel 0.
-        if (channel != 0 && editor_bank->effect_audio[channel].explicit_edges) {
-            return false;
-        }
         if (channel != 0 && bank->channel_chains[channel].num_effects != 0)
             return false;
 
@@ -441,7 +435,7 @@ bool Synth::load_library_instrument(const char* const            path,
     library_load_candidate.added_cc_mask[channel] =
         static_cast<uint16_t>(library_load_candidate.added_cc_mask[channel] | chain_cc_mask);
 
-    library_load_candidate.effect_audio[channel] = record_bank.effect_audio[0];
+    library_load_candidate.effect_routing[channel] = record_bank.effect_routing[0];
 
     for (uint32_t zone = 0; zone < Synth::max_instr_per_channel && record_bank.bank.channel_zones[0][zone].start_note;
          ++zone) {
@@ -845,7 +839,7 @@ int Synth::save_library_record(const char* const                        path,
     // The chain rides along with its LFO references remapped; the zero-initialized
     // map sends an out-of-range reference to none so it cannot survive the record.
     Synth::remap_effect_chain(src_chain, lfo_ids, &reduced.bank.channel_chains[0]);
-    reduced.effect_audio[0] = src_editor_bank->effect_audio[channel];
+    reduced.effect_routing[0] = src_editor_bank->effect_routing[channel];
     // The selected source channel's CC additions travel with the record.
     reduced.added_cc_mask[0] = src_editor_bank->added_cc_mask[channel];
 

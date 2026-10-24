@@ -836,52 +836,69 @@ bool Sculptor::graph_layout_record_identity_equal(const Synth::GraphNodeLayout& 
            (a.kind != 4 || strcmp(a.name, b.name) == 0);
 }
 
-bool Sculptor::validate_effect_audio_topology(const Synth::EffectChainBinding&     chain,
-                                              const Sculptor::EffectAudioTopology& audio)
+bool Sculptor::validate_effect_routing(const Synth::EffectChainBinding& chain, const EffectChainRouting& routing)
 {
-    if (chain.num_effects > Synth::max_chain_effects || audio.explicit_edges > 1) {
+    if (chain.num_effects > Synth::max_chain_effects) {
         return false;
     }
-    bool incoming[Synth::max_chain_effects + 1] = {};
-    for (uint32_t source = 0; source <= Synth::max_chain_effects; ++source) {
-        const uint32_t destination = audio.next[source];
-        if (! audio.explicit_edges) {
-            if (destination) {
-                return false;
-            }
-            continue;
-        }
-        if (destination > Synth::max_chain_effects + 1 ||
-            (destination && source < Synth::max_chain_effects &&
-             (source >= chain.num_effects || chain.effects[source].type == Synth::EffectType::none))) {
-            return false;
-        }
-        if (! destination) {
-            continue;
-        }
-        if (incoming[destination - 1] ||
-            (destination <= Synth::max_chain_effects &&
-             (destination > chain.num_effects || chain.effects[destination - 1].type == Synth::EffectType::none))) {
-            return false;
-        }
-        incoming[destination - 1] = true;
+    if (routing.in > effect_in_output) {
+        return false;
     }
-    for (uint32_t start = 0; start < Synth::max_chain_effects; ++start) {
-        uint32_t visited = 0;
-        uint32_t node    = start;
-        while (node < Synth::max_chain_effects) {
-            if (visited & (1u << node)) {
+
+    uint32_t holders    = 0;
+    bool     seen_empty = false;
+    bool     occupied   = false;
+    for (uint32_t slot = 0; slot < Synth::max_chain_effects; ++slot) {
+        if (slot >= chain.num_effects || chain.effects[slot].type == Synth::EffectType::none) {
+            // Empty slots trail: every flag on one stays disconnected, and
+            // no occupied slot may follow an empty slot.
+            if (routing.out[slot] != effect_out_disconnected) {
                 return false;
             }
-            visited |= 1u << node;
-            const uint32_t next = audio.next[node];
-            if (! next) {
-                break;
-            }
-            node = next - 1;
+            seen_empty = true;
+            continue;
         }
+        if (seen_empty) {
+            return false; // occupied slots must not follow a gap
+        }
+        occupied = true;
+        if (routing.out[slot] == effect_out_output) {
+            ++holders;
+        }
+        else if (routing.out[slot] == effect_out_next) {
+            if (slot + 1 >= chain.num_effects || chain.effects[slot + 1].type == Synth::EffectType::none) {
+                return false;
+            }
+        }
+        else if (routing.out[slot] != effect_out_disconnected) {
+            return false;
+        }
+    }
+
+    if (holders > 1) {
+        return false;
+    }
+    if (! occupied && routing.in == effect_in_first_slot) {
+        return false;
+    }
+    if (routing.in == effect_in_output && holders > 0) {
+        return false; // one output feed: a slot or the bypass, never both
     }
     return true;
+}
+
+int32_t Sculptor::effect_path_terminal(const Synth::EffectChainBinding& chain, const EffectChainRouting& routing)
+{
+    if (chain.num_effects == 0 || chain.effects[0].type == Synth::EffectType::none ||
+        routing.in != effect_in_first_slot) {
+        return -1;
+    }
+    uint32_t slot = 0;
+    while (slot + 1 < chain.num_effects && chain.effects[slot + 1].type != Synth::EffectType::none &&
+           routing.out[slot] == effect_out_next) {
+        ++slot;
+    }
+    return routing.out[slot] == effect_out_output ? static_cast<int32_t>(slot) : -1;
 }
 
 bool Sculptor::compile_editor_playback_bank(const Synth::InstrumentEditorBank& source, Synth::InstrumentBank* out)
@@ -889,27 +906,32 @@ bool Sculptor::compile_editor_playback_bank(const Synth::InstrumentEditorBank& s
     if (! out || ! Synth::validate_instrument_bank(&source.bank) || ! validate_editor_metadata(source)) {
         return false;
     }
+    // The routing flags decide playback, so every chain validates before
+    // anything is written; a refusal leaves out untouched.
+    for (uint32_t owner = 0; owner <= Synth::max_channels; ++owner) {
+        const Synth::EffectChainBinding& chain =
+            owner < Synth::max_channels ? source.bank.channel_chains[owner] : source.bank.master_chain;
+        if (! Sculptor::validate_effect_routing(chain, source.effect_routing[owner])) {
+            return false;
+        }
+    }
     Synth::EffectChainBinding compiled[Synth::max_channels + 1] = {};
     for (uint32_t owner = 0; owner <= Synth::max_channels; ++owner) {
         const Synth::EffectChainBinding& chain =
             owner < Synth::max_channels ? source.bank.channel_chains[owner] : source.bank.master_chain;
-        const Sculptor::EffectAudioTopology& audio  = source.effect_audio[owner];
-        Synth::EffectChainBinding&           result = compiled[owner];
-        if (! audio.explicit_edges) {
-            for (uint32_t slot = 0; slot < chain.num_effects; ++slot) {
-                if (chain.effects[slot].type != Synth::EffectType::none) {
-                    result.effects[result.num_effects++] = chain.effects[slot];
-                }
+        const Sculptor::EffectChainRouting& routing = source.effect_routing[owner];
+        Synth::EffectChainBinding&          result  = compiled[owner];
+        // Slots 0..terminal in index order.  No complete path means
+        // an empty chain: dry bypass, not silence.
+        const int32_t terminal = Sculptor::effect_path_terminal(chain, routing);
+        for (int32_t slot = 0; slot <= terminal; ++slot) {
+            const Synth::EffectSlotBinding& effect = chain.effects[slot];
+            // A wired Enabled row overrides the saved flag; an
+            // unwired saved-off slot is bypassed, not a path breaker.
+            if (! effect.enabled && effect.enable_input.source == Synth::ModSource::none) {
+                continue;
             }
-            continue;
-        }
-        uint32_t next = audio.next[Synth::max_chain_effects];
-        while (next && next <= Synth::max_chain_effects) {
-            result.effects[result.num_effects++] = chain.effects[next - 1];
-            next                                 = audio.next[next - 1];
-        }
-        if (! next) {
-            result = {};
+            result.effects[result.num_effects++] = effect;
         }
     }
     *out = source.bank;
@@ -977,7 +999,7 @@ bool Sculptor::validate_editor_metadata(const Synth::InstrumentEditorBank& bank)
             }
         }
 
-        if (! validate_effect_audio_topology(chain, bank.effect_audio[owner]) ||
+        if (! validate_effect_routing(chain, bank.effect_routing[owner]) ||
             fx_projected_node_count(bank.bank, owner, represented) > max_nodes) {
             return false;
         }

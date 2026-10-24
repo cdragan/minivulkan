@@ -403,6 +403,17 @@ Synth::LFODescriptor         editor_export_lfos[Synth::instrument_max_lfos];
 Synth::InstrumentGraphLayout editor_export_source_layout[Synth::instrument_graph_layout_capacity];
 Synth::InstrumentGraphLayout editor_export_normalized[Synth::instrument_graph_layout_capacity];
 uint8_t                      editor_export_osc_source[Synth::max_layers];
+
+// Marker for an explicitly supplied routing null: no out-array length was
+// decoded to compare against the decoded effect count.
+constexpr uint32_t routing_len_null = 0xFFFFFFFFu;
+
+// Legacy v2 effect_audio staging: per-chain successor arrays plus the
+// explicit-entry marks, and the v3 routing out-array lengths.  The decode
+// walk consumes them; none of it enters the decoded bank.
+uint8_t  decode_audio_next[Synth::max_channels + 1][Synth::max_chain_effects + 1];
+bool     decode_audio_explicit[Synth::max_channels + 1];
+uint32_t decode_routing_out_len[Synth::max_channels + 1];
 } // namespace
 
 static void key_uint(Out& o, const char* name, uint32_t v)
@@ -863,14 +874,28 @@ static void enc_channel(Out& o, const Synth::InstrumentEditorBank& bank, uint32_
     o.ch('}');
 }
 
-static void enc_effect_audio(Out& output, const Sculptor::EffectAudioTopology& audio)
+// One chain's routing flags: null for an empty chain (which encodes
+// in = Sculptor::effect_in_disconnected), otherwise the input value plus one out
+// flag per occupied slot.
+static void enc_effect_routing(Out&                                output,
+                               const Synth::EffectChainBinding&    chain,
+                               const Sculptor::EffectChainRouting& routing)
 {
+    if (! chain.num_effects) {
+        output.str("null");
+        return;
+    }
+    output.ch('{');
+    output.key("in");
+    output.uint_value(routing.in);
+    output.key("out");
     output.ch('[');
-    for (uint32_t index = 0; index <= Synth::max_chain_effects; ++index) {
+    for (uint32_t slot = 0; slot < chain.num_effects && slot < Synth::max_chain_effects; ++slot) {
         output.sep();
-        output.uint_value(audio.next[index]);
+        output.uint_value(routing.out[slot]);
     }
     output.ch(']');
+    output.ch('}');
 }
 
 uint32_t Synth::encode_editor_bank_json(const InstrumentEditorBank* bank, char* dest, uint32_t dest_size)
@@ -886,17 +911,12 @@ uint32_t Synth::encode_editor_bank_json(const InstrumentEditorBank* bank, char* 
     for (uint32_t owner = 0; owner <= max_channels; ++owner) {
         const EffectChainBinding& chain =
             owner < max_channels ? bank->bank.channel_chains[owner] : bank->bank.master_chain;
-        if (! Sculptor::validate_effect_audio_topology(chain, bank->effect_audio[owner])) {
+        if (! Sculptor::validate_effect_routing(chain, bank->effect_routing[owner])) {
             return 0;
         }
     }
-    bool explicit_audio = false;
-    for (uint32_t owner = 0; owner <= max_channels; ++owner) {
-        explicit_audio |= bank->effect_audio[owner].explicit_edges != 0;
-    }
     Out o = { dest, dest_size, 0, false, false };
-    o.str(explicit_audio ? "{\"instrument_editor_bank\":null,\"instrument_editor_bank_v2\":{"
-                         : "{\"instrument_editor_bank\":{");
+    o.str("{\"instrument_editor_bank\":{");
 
     o.key("instrument_names");
     o.ch('[');
@@ -960,20 +980,15 @@ uint32_t Synth::encode_editor_bank_json(const InstrumentEditorBank* bank, char* 
     // oscillator-sum masks).
     o.key("editor");
     o.ch('{');
-    if (explicit_audio) {
-        o.key("effect_audio");
-        o.ch('[');
-        for (uint32_t owner = 0; owner <= max_channels; ++owner) {
-            o.sep();
-            if (bank->effect_audio[owner].explicit_edges) {
-                enc_effect_audio(o, bank->effect_audio[owner]);
-            }
-            else {
-                o.str("null");
-            }
-        }
-        o.ch(']');
+    o.key("effect_routing");
+    o.ch('[');
+    for (uint32_t owner = 0; owner <= max_channels; ++owner) {
+        o.sep();
+        const EffectChainBinding& chain =
+            owner < max_channels ? bank->bank.channel_chains[owner] : bank->bank.master_chain;
+        enc_effect_routing(o, chain, bank->effect_routing[owner]);
     }
+    o.ch(']');
     o.key("layouts");
     o.ch('[');
     for (uint32_t i = 0; i < bank->graph_layout_count; i++) {
@@ -2938,23 +2953,276 @@ static void decode_editor_record(Walker& w, uint32_t obj, Synth::GraphNodeLayout
     }
 }
 
-static void decode_effect_audio(Walker& walker, uint32_t token, Sculptor::EffectAudioTopology* out)
+// Legacy v2 successor array: 5 uints, entry 4 = the input row.  The arrays
+// never enter the decoded bank; the migration walk consumes them.
+static void decode_effect_audio(Walker& walker, uint32_t token, uint8_t (&next)[Synth::max_chain_effects + 1])
 {
     if (walker.toks[token].type != JSMN_ARRAY || walker.toks[token].size != Synth::max_chain_effects + 1) {
         walker.failed = true;
         return;
     }
-    out->explicit_edges = 1;
     walk_array(walker, token, Synth::max_chain_effects + 1, [&](uint32_t element, uint32_t position) {
-        want_u8(walker, element, Synth::max_chain_effects + 1, &out->next[position]);
+        want_u8(walker, element, Synth::max_chain_effects + 1, &next[position]);
     });
 }
 
-static void decode_editor_state(Walker& w, uint32_t val_idx, Synth::InstrumentEditorBank* out, bool v2 = false)
+// v3 routing flags: {"in":0|1,"out":[one flag per slot]}, or null for
+// an empty chain.  The decoded out-array length is retained in *out_len
+// (routing_len_null for an explicit null) and compared with the decoded
+// effect count after the walk, when the chain's slot count is final:
+// missing or surplus entries refuse the document.
+static void decode_effect_routing(Walker& walker, uint32_t token, Sculptor::EffectChainRouting* out, uint32_t* out_len)
+{
+    *out     = Sculptor::EffectChainRouting{};
+    *out_len = routing_len_null;
+    if (walker.toks[token].type == JSMN_PRIMITIVE && tok_text_eq(walker, token, "null")) {
+        return;
+    }
+    if (walker.toks[token].type != JSMN_OBJECT) {
+        walker.failed = true;
+        return;
+    }
+    uint32_t present = 0;
+    walk_object(walker, token, [&](uint32_t key_idx, uint32_t val_idx) {
+        if (key_eq(walker, key_idx, "in")) {
+            present |= 1;
+            want_u8(walker, val_idx, 2, &out->in);
+        }
+        else if (key_eq(walker, key_idx, "out")) {
+            present |= 2;
+            // The array may precede the effects key in document order, so
+            // only the capacity bound is checked here; the retained length
+            // is compared with the decoded effect count after the walk.
+            if (walker.toks[val_idx].type != JSMN_ARRAY || walker.toks[val_idx].size > Synth::max_chain_effects) {
+                walker.failed = true;
+                return;
+            }
+            *out_len = walker.toks[val_idx].size;
+            walk_array(walker, val_idx, Synth::max_chain_effects, [&](uint32_t element, uint32_t slot) {
+                want_u8(walker, element, Sculptor::effect_out_output, &out->out[slot]);
+            });
+        }
+        else {
+            walker.failed = true;
+        }
+    });
+    if (present != 3) {
+        walker.failed = true;
+    }
+    // Banks saved before the one-output-feed invariant may carry a bypass
+    // wire and an output holder together. The bypass overrode the run
+    // audibly at save time, so the normalization keeps the bypass and
+    // unwires the holder slot instead of refusing the whole bank.
+    if (out->in == Sculptor::effect_in_output) {
+        for (uint32_t slot = 0; slot < Synth::max_chain_effects; ++slot) {
+            if (out->out[slot] == Sculptor::effect_out_output) {
+                out->out[slot] = Sculptor::effect_out_disconnected;
+            }
+        }
+    }
+}
+
+// v1 implicit serial wiring: input feeds slot 0, every occupied slot feeds
+// the next, the last feeds the output.
+static void implicit_serial_routing(Synth::EffectChainBinding* chain, Sculptor::EffectChainRouting* routing)
+{
+    Sculptor::fx_compact_chain(chain, routing);
+    if (! chain->num_effects) {
+        return;
+    }
+    *routing    = Sculptor::EffectChainRouting{};
+    routing->in = Sculptor::effect_in_first_slot;
+    for (uint32_t slot = 0; slot < chain->num_effects && slot < Synth::max_chain_effects; ++slot) {
+        routing->out[slot] = slot + 1 < chain->num_effects ? Sculptor::effect_out_next : Sculptor::effect_out_output;
+    }
+}
+
+// The legacy successor array is validated before the migration walk,
+// exactly what the old topology validator enforced: both endpoints of
+// every edge occupied, at most one incoming edge per destination (the
+// Output row included), and no cycles.  An invalid legacy document refuses
+// the whole decode with the destination untouched.
+static bool legacy_effect_audio_valid(const Synth::EffectChainBinding& chain,
+                                      const uint8_t (&next)[Synth::max_chain_effects + 1])
+{
+    if (chain.num_effects > Synth::max_chain_effects) {
+        return false;
+    }
+    bool incoming[Synth::max_chain_effects + 1] = {};
+    for (uint32_t source = 0; source <= Synth::max_chain_effects; ++source) {
+        const uint32_t destination = next[source];
+        if (destination > Synth::max_chain_effects + 1) {
+            return false;
+        }
+        if (! destination) {
+            continue;
+        }
+        if (source < Synth::max_chain_effects &&
+            (source >= chain.num_effects || chain.effects[source].type == Synth::EffectType::none)) {
+            return false;
+        }
+        if (incoming[destination - 1] ||
+            (destination <= Synth::max_chain_effects &&
+             (destination > chain.num_effects || chain.effects[destination - 1].type == Synth::EffectType::none))) {
+            return false;
+        }
+        incoming[destination - 1] = true;
+    }
+    for (uint32_t start = 0; start < Synth::max_chain_effects; ++start) {
+        uint32_t visited = 0;
+        uint32_t node    = start;
+        while (node < Synth::max_chain_effects) {
+            if (visited & (1u << node)) {
+                return false;
+            }
+            visited |= 1u << node;
+            const uint32_t target = next[node];
+            if (! target) {
+                break;
+            }
+            node = target - 1;
+        }
+    }
+    return true;
+}
+
+// Decomposes the old successor array into simple paths and
+// lays them contiguously from slot 0, payloads moving with their paths.
+// The input-led path leads, remaining paths follow by first slot index,
+// isolated zero-edge slots append last.  Every path member but its last
+// gets effect_out_next; a path ending at Output keeps effect_out_output on
+// its last slot; every other end is disconnected.  Returns the slot
+// permutation (new slot i holds old slot order[i]) for layout remaps, or
+// false on an edge an occupied slot does not justify (the caller validates
+// the legacy array first, so the walk never sees one).
+static bool migrate_effect_audio_chain(Synth::EffectChainBinding*    chain,
+                                       Sculptor::EffectChainRouting* routing,
+                                       const uint8_t (&next)[Synth::max_chain_effects + 1],
+                                       uint32_t* order)
+{
+    const uint32_t count                  = Synth::max_chain_effects;
+    bool           occupied[count]        = {};
+    bool           has_successor[count]   = {};
+    bool           has_predecessor[count] = {};
+    bool           visited[count]         = {};
+    uint32_t       successor[count]       = {};
+    uint32_t       order_count            = 0;
+    for (uint32_t slot = 0; slot < count; ++slot) {
+        occupied[slot] = slot < chain->num_effects && chain->effects[slot].type != Synth::EffectType::none;
+    }
+    for (uint32_t slot = 0; slot < count; ++slot) {
+        if (! occupied[slot]) {
+            continue;
+        }
+        const uint32_t target = next[slot];
+        if (! target) {
+            continue;
+        }
+        if (target > count) {
+            continue; // Output edge: the routing flag below carries it.
+        }
+        if (! occupied[target - 1]) {
+            return false;
+        }
+        successor[slot]             = target - 1;
+        has_successor[slot]         = true;
+        has_predecessor[target - 1] = true;
+    }
+    const uint32_t input_target = next[count];
+
+    // The input row may only feed a path start; the old in-degree rule
+    // guarantees no other wire lands there.
+    uint32_t input_start = count;
+    if (input_target >= 1 && input_target <= count && occupied[input_target - 1]) {
+        input_start = input_target - 1;
+    }
+
+    // One walk per path; visited slots terminate a walk defensively.
+    auto walk_path = [&](uint32_t start) {
+        uint32_t slot = start;
+        for (;;) {
+            if (visited[slot] || order_count == count) {
+                break;
+            }
+            order[order_count++] = slot;
+            visited[slot]        = true;
+            if (! has_successor[slot]) {
+                break;
+            }
+            slot = successor[slot];
+        }
+    };
+
+    if (input_start < count) {
+        walk_path(input_start);
+    }
+    // Paths with at least one outgoing edge, ordered by their first slot.
+    for (uint32_t slot = 0; slot < count; ++slot) {
+        if (! occupied[slot] || visited[slot] || has_predecessor[slot] || next[slot] == 0) {
+            continue;
+        }
+        walk_path(slot);
+    }
+    // Isolated zero-edge slots, in slot order.
+    for (uint32_t slot = 0; slot < count; ++slot) {
+        if (! occupied[slot] || visited[slot]) {
+            continue;
+        }
+        walk_path(slot);
+    }
+
+    Synth::EffectSlotBinding snapshot[count];
+    memcpy(snapshot, chain->effects, sizeof(snapshot));
+    *routing = Sculptor::EffectChainRouting{};
+    for (uint32_t slot = 0; slot < order_count; ++slot) {
+        chain->effects[slot]  = snapshot[order[slot]];
+        const uint32_t target = next[order[slot]];
+        if (target == count + 1) {
+            routing->out[slot] = Sculptor::effect_out_output;
+        }
+        else if (slot + 1 < order_count && target == order[slot + 1] + 1) {
+            routing->out[slot] = Sculptor::effect_out_next;
+        }
+        else {
+            routing->out[slot] = Sculptor::effect_out_disconnected;
+        }
+    }
+    chain->num_effects = static_cast<uint8_t>(order_count);
+    for (uint32_t slot = order_count; slot < count; ++slot) {
+        chain->effects[slot] = Synth::EffectSlotBinding{};
+    }
+    routing->in = input_start < count ? Sculptor::effect_in_first_slot : Sculptor::effect_in_disconnected;
+    return true;
+}
+
+// Legacy v2 effect_audio staging: per-chain successor arrays plus the
+// explicit-entry marks; the migration walk consumes them, so the old
+// successor wiring never enters the decoded bank.
+static void decode_editor_state(Walker&                      w,
+                                uint32_t                     val_idx,
+                                Synth::InstrumentEditorBank* out,
+                                bool                         v2              = false,
+                                bool*                        routing_present = nullptr,
+                                bool*                        editor_seen     = nullptr)
 {
     bool audio_present = false;
     walk_object(w, val_idx, [&](uint32_t key_idx, uint32_t inner_idx) {
-        if (key_eq(w, key_idx, "effect_audio")) {
+        if (editor_seen) {
+            *editor_seen = true;
+        }
+        if (key_eq(w, key_idx, "effect_routing")) {
+            if (routing_present) {
+                *routing_present = true;
+            }
+            if (w.toks[inner_idx].type != JSMN_ARRAY || w.toks[inner_idx].size != Synth::max_channels + 1) {
+                w.failed = true;
+                return;
+            }
+            walk_array(w, inner_idx, Synth::max_channels + 1, [&](uint32_t element, uint32_t owner) {
+                decode_effect_routing(w, element, &out->effect_routing[owner], &decode_routing_out_len[owner]);
+            });
+        }
+        else if (key_eq(w, key_idx, "effect_audio")) {
             audio_present = true;
             if (! v2 || w.toks[inner_idx].type != JSMN_ARRAY || w.toks[inner_idx].size != Synth::max_channels + 1) {
                 w.failed = true;
@@ -2964,7 +3232,8 @@ static void decode_editor_state(Walker& w, uint32_t val_idx, Synth::InstrumentEd
                 if (w.toks[element].type == JSMN_PRIMITIVE && tok_text_eq(w, element, "null")) {
                     return;
                 }
-                decode_effect_audio(w, element, &out->effect_audio[owner]);
+                decode_audio_explicit[owner] = true;
+                decode_effect_audio(w, element, decode_audio_next[owner]);
             });
         }
         else if (key_eq(w, key_idx, "layouts")) {
@@ -3049,9 +3318,13 @@ static void decode_editor_state(Walker& w, uint32_t val_idx, Synth::InstrumentEd
     }
 }
 
-static void decode_bank(Walker& w, uint32_t obj, Synth::InstrumentEditorBank* out, bool v2 = false)
+static void decode_bank(Walker&                      w,
+                        uint32_t                     obj,
+                        Synth::InstrumentEditorBank* out,
+                        bool                         v2              = false,
+                        bool*                        routing_present = nullptr,
+                        bool*                        editor_seen     = nullptr)
 {
-    bool editor_present = false;
     walk_object(w, obj, [&](uint32_t key_idx, uint32_t val_idx) {
         if (key_eq(w, key_idx, "instruments"))
             decode_instruments(w, val_idx, out);
@@ -3072,8 +3345,7 @@ static void decode_bank(Walker& w, uint32_t obj, Synth::InstrumentEditorBank* ou
         else if (key_eq(w, key_idx, "channel_names"))
             decode_names(w, val_idx, Synth::max_channels, out->channel_names);
         else if (key_eq(w, key_idx, "editor")) {
-            editor_present = true;
-            decode_editor_state(w, val_idx, out, v2);
+            decode_editor_state(w, val_idx, out, v2, routing_present, editor_seen);
         }
         else if (v2) {
             w.failed = true;
@@ -3081,9 +3353,6 @@ static void decode_bank(Walker& w, uint32_t obj, Synth::InstrumentEditorBank* ou
         else
             unknown_field(w, key_idx);
     });
-    if (v2 && ! editor_present) {
-        w.failed = true;
-    }
 }
 
 // The bank every absent field defaults to: an empty, all-disabled bank with the
@@ -4018,11 +4287,18 @@ static bool decode_document_into_scratch(const char* text, uint32_t len, bool st
 
     w.strict_editor_metadata = strict_editor_metadata;
     fill_default_editor_bank(&decode_scratch);
+    memset(decode_audio_next, 0, sizeof(decode_audio_next));
+    memset(decode_audio_explicit, 0, sizeof(decode_audio_explicit));
+    for (uint32_t owner = 0; owner <= Synth::max_channels; ++owner) {
+        decode_routing_out_len[owner] = routing_len_null;
+    }
 
-    bool      guard = false;
-    bool      v2    = false;
-    uint32_t  idx   = 1;
-    const int pairs = w.toks[0].size; // the root object counts its key-value pairs
+    bool      guard           = false;
+    bool      v2              = false;
+    bool      routing_present = false;
+    bool      editor_seen     = false;
+    uint32_t  idx             = 1;
+    const int pairs           = w.toks[0].size; // the root object counts its key-value pairs
 
     for (int p = 0; p < pairs && ! w.failed; p++) {
         const uint32_t key_idx = idx;
@@ -4037,26 +4313,62 @@ static bool decode_document_into_scratch(const char* text, uint32_t len, bool st
                 guard = true;
             }
             else {
-                decode_bank(w, val_idx, &decode_scratch);
+                decode_bank(w, val_idx, &decode_scratch, false, &routing_present, &editor_seen);
             }
         }
         else if (key_eq(w, key_idx, "instrument_editor_bank_v2")) {
             v2                       = true;
             const bool strict        = w.strict_editor_metadata;
             w.strict_editor_metadata = true;
-            decode_bank(w, val_idx, &decode_scratch, true);
+            decode_bank(w, val_idx, &decode_scratch, true, &routing_present, &editor_seen);
             w.strict_editor_metadata = strict;
         }
         else if (key_eq(w, key_idx, "editor")) {
-            decode_editor_state(w, val_idx, &decode_scratch);
+            decode_editor_state(w, val_idx, &decode_scratch, v2, &routing_present, &editor_seen);
         }
         else
             unknown_field(w, key_idx);
     }
 
-    if (w.failed || guard != v2) {
+    if (w.failed || guard != v2 || (v2 && ! editor_seen)) {
         return false;
     }
+
+    // Derive the flag-routing model from the decoded legacy shape.
+    // A v2 document migrates its per-chain successor arrays; a plain
+    // v1 document without routing state defaults to implicit serial
+    // wiring; a v3 document keeps its stored flags and only compacts
+    // gaps away.
+    for (uint32_t owner = 0; owner <= Synth::max_channels; ++owner) {
+        Synth::EffectChainBinding& chain =
+            owner < Synth::max_channels ? decode_scratch.bank.channel_chains[owner] : decode_scratch.bank.master_chain;
+        Sculptor::EffectChainRouting& routing = decode_scratch.effect_routing[owner];
+        // An explicitly supplied routing value must match the chain: the
+        // out-array length must equal the decoded effect count, and null is
+        // reserved for an empty chain, so an explicit null with a decoded
+        // chain refuses the document.
+        if (routing_present && decode_routing_out_len[owner] != routing_len_null &&
+            decode_routing_out_len[owner] != chain.num_effects) {
+            return false;
+        }
+        if (routing_present && decode_routing_out_len[owner] == routing_len_null && chain.num_effects != 0) {
+            return false;
+        }
+        if (v2 && decode_audio_explicit[owner]) {
+            uint32_t order[Synth::max_chain_effects];
+            if (! legacy_effect_audio_valid(chain, decode_audio_next[owner]) ||
+                ! migrate_effect_audio_chain(&chain, &routing, decode_audio_next[owner], order)) {
+                return false;
+            }
+        }
+        else if (v2 || ! routing_present) {
+            implicit_serial_routing(&chain, &routing);
+        }
+        else {
+            Sculptor::fx_compact_chain(&chain, &routing);
+        }
+    }
+
     if (! Synth::validate_instrument_bank(&decode_scratch.bank, false)) {
         return false;
     }
@@ -4794,6 +5106,13 @@ static uint32_t encode_instrument_json_for_domain(char*                         
 
 int Synth::save_editor_bank_file(const char* path, const InstrumentEditorBank* bank)
 {
+    // Rotate the previous file to .bak before writing: a save must never
+    // destroy the last good bank, even when the caller saves a wrong or
+    // default state after a failed load.
+    char bak_path[512];
+    if (snprintf(bak_path, sizeof(bak_path), "%s.bak", path) > 0 && rename(path, bak_path) != 0 && errno != ENOENT) {
+        return errno;
+    }
     char                           tmp_path[512];
     const std::variant<FILE*, int> staged = atomic_write_begin(path, tmp_path, sizeof(tmp_path));
 
@@ -4833,8 +5152,19 @@ Synth::BankFileStatus Synth::load_editor_bank_file(const char* path, InstrumentE
 
     // Any non-JSON document, or one whose root is not an object, is rejected by
     // the decoder below.
-    if (decode_editor_bank_json(json_text, len, out))
-        return BankFileStatus::ok;
+    if (! decode_editor_bank_json(json_text, len, out))
+        return BankFileStatus::invalid;
+
+    // A bank saved by a buggy build may carry routing shapes that no longer
+    // validate (the one-output-feed invariant, dangling runs). Sanitize the
+    // routing instead of refusing: a refusal would push the editor to the
+    // default bank, and the next auto-save would overwrite the file.
+    for (uint32_t owner = 0; owner <= Synth::max_channels; ++owner) {
+        Synth::EffectChainBinding& chain =
+            owner < Synth::max_channels ? out->bank.channel_chains[owner] : out->bank.master_chain;
+        Sculptor::fx_sanitize_routing(&chain, &out->effect_routing[owner]);
+    }
+    return BankFileStatus::ok;
     return BankFileStatus::invalid;
 }
 
@@ -4954,8 +5284,10 @@ bool Synth::validate_effects_document(const EffectsDocument* document)
     }
     memcpy(decode_scratch.bank.lfos.entries, document->lfos, document->lfo_count * sizeof(document->lfos[0]));
     decode_scratch.bank.channel_chains[0] = document->chain;
-    if (! validate_instrument_bank(&decode_scratch.bank) ||
-        ! Sculptor::validate_effect_audio_topology(document->chain, document->audio)) {
+    if (! validate_instrument_bank(&decode_scratch.bank)) {
+        return false;
+    }
+    if (! Sculptor::validate_effect_routing(document->chain, document->routing)) {
         return false;
     }
     for (uint32_t index = 0; index < document->graph_layout_count; ++index) {
@@ -5000,12 +5332,9 @@ uint32_t Synth::encode_effects_json(const EffectsDocument* document, char* dest,
     Out output = { json_text, 65535, 0, false, false };
     output.ch('{');
     output.key("format");
-    output.text_value(document->audio.explicit_edges ? "synth-effects-v2" : "synth-effects-v1",
-                      sizeof("synth-effects-v1"));
-    if (document->audio.explicit_edges) {
-        output.key("audio_next");
-        enc_effect_audio(output, document->audio);
-    }
+    output.text_value("synth-effects-v3", sizeof("synth-effects-v3"));
+    output.key("routing");
+    enc_effect_routing(output, document->chain, document->routing);
     output.key("lfos");
     output.ch('[');
     for (uint32_t index = 0; index < document->lfo_count; ++index) {
@@ -5036,8 +5365,10 @@ uint32_t Synth::encode_effects_json(const EffectsDocument* document, char* dest,
     }
     output.ch(']');
     output.ch('}');
-    if (output.overflow || output.invalid || output.pos >= dest_size ||
-        ! decode_effects_json(json_text, output.pos, &effects_json_scratch)) {
+    if (output.overflow || output.invalid || output.pos >= dest_size) {
+        return 0;
+    }
+    if (! decode_effects_json(json_text, output.pos, &effects_json_scratch)) {
         return 0;
     }
     memcpy(dest, json_text, output.pos);
@@ -5057,20 +5388,28 @@ bool Synth::decode_effects_json(const char* text, uint32_t len, EffectsDocument*
     walker.strict_effects     = true;
     EffectsDocument& document = effects_json_scratch;
     memset(&document, 0, sizeof(document));
-    uint32_t fields = 0;
-    bool     v2     = false;
+    uint8_t  audio_next[Synth::max_chain_effects + 1] = {};
+    uint32_t routing_out_len                          = routing_len_null;
+    uint32_t fields                                   = 0;
+    bool     v2                                       = false;
+    bool     v3                                       = false;
     walk_object(walker, 0, [&](uint32_t key_index, uint32_t value_index) {
         if (key_eq(walker, key_index, "format")) {
             fields |= 1;
             v2 = tok_text_eq(walker, value_index, "synth-effects-v2");
+            v3 = tok_text_eq(walker, value_index, "synth-effects-v3");
             if (walker.toks[value_index].type != JSMN_STRING ||
-                (! v2 && ! tok_text_eq(walker, value_index, "synth-effects-v1"))) {
+                (! v2 && ! v3 && ! tok_text_eq(walker, value_index, "synth-effects-v1"))) {
                 walker.failed = true;
             }
         }
         else if (key_eq(walker, key_index, "audio_next")) {
             fields |= 16;
-            decode_effect_audio(walker, value_index, &document.audio);
+            decode_effect_audio(walker, value_index, audio_next);
+        }
+        else if (key_eq(walker, key_index, "routing")) {
+            fields |= 32;
+            decode_effect_routing(walker, value_index, &document.routing, &routing_out_len);
         }
         else if (key_eq(walker, key_index, "lfos")) {
             fields |= 2;
@@ -5139,7 +5478,57 @@ bool Synth::decode_effects_json(const char* text, uint32_t len, EffectsDocument*
             walker.failed = true;
         }
     });
-    if (walker.failed || fields != (v2 ? 31u : 15u) || ! validate_effects_document(&document)) {
+    if (walker.failed || fields != (v2 ? 31u : v3 ? 47u : 15u)) {
+        return false;
+    }
+    // An explicitly supplied routing value must match the chain: the
+    // out-array length must equal the decoded effect count, and null is
+    // reserved for an empty chain, so an explicit null with a decoded
+    // chain refuses the document.
+    if (routing_out_len != routing_len_null && routing_out_len != document.chain.num_effects) {
+        return false;
+    }
+    if ((fields & 32) && routing_out_len == routing_len_null && document.chain.num_effects != 0) {
+        return false;
+    }
+    // Derive the flag-routing model from the legacy clipboard shape.
+    // A v2 document reorders its payloads through the migration walk and
+    // remaps its slot-keyed layout records along with them; a v1
+    // document defaults to implicit serial wiring; a v3 document keeps its
+    // stored flags.  All three compact the decoded chain.
+    uint32_t old_to_new[max_chain_effects] = {};
+    if (v2) {
+        // order[new] = old from the migration walk; invert into old -> new.
+        uint32_t order[max_chain_effects] = {};
+        if (! legacy_effect_audio_valid(document.chain, audio_next) ||
+            ! migrate_effect_audio_chain(&document.chain, &document.routing, audio_next, order)) {
+            return false;
+        }
+        for (uint32_t slot = 0; slot < document.chain.num_effects; ++slot) {
+            old_to_new[order[slot]] = slot;
+        }
+    }
+    else {
+        // A v1 document defaults to implicit serial wiring; a v3 document keeps
+        // its stored flags. Both compact dormant gaps away first.
+        Sculptor::fx_compact_chain(&document.chain, &document.routing, old_to_new);
+        if (! v3) {
+            implicit_serial_routing(&document.chain, &document.routing);
+        }
+    }
+    // Slot-keyed effect records follow the permuted payloads; a record
+    // pointing at a compacted-away dormant slot refuses.
+    for (uint32_t index = 0; index < document.graph_layout_count; ++index) {
+        EffectsGraphLayout& record = document.graph_layout[index];
+        if (record.kind != effects_graph_layout_effect) {
+            continue;
+        }
+        if (record.index >= max_chain_effects || old_to_new[record.index] >= max_chain_effects) {
+            return false;
+        }
+        record.index = static_cast<uint16_t>(old_to_new[record.index]);
+    }
+    if (! validate_effects_document(&document)) {
         return false;
     }
     canonicalize_chain(document.chain);

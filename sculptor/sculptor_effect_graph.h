@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 // SPDX-FileCopyrightText: Copyright (c) 2021-2026 Chris Dragan
 
-// Projection of retained editor effect payloads and audio topology into the
+// Projection of retained editor effect payloads and flag routing into the
 // shared graph widget. Structural edits re-project; no ImGui dependency.
 
 #pragma once
@@ -19,7 +19,7 @@ struct InstrumentEditorBank;
 
 namespace Sculptor {
 
-struct EffectAudioTopology;
+struct EffectChainRouting;
 
 // One scalar effect parameter's editing metadata, in shader param order.
 struct EffectParamInfo {
@@ -101,16 +101,6 @@ struct EffectGraphMapping {
     uint32_t chain;                                    // channel index or fx_master_chain
 };
 
-// Captures validated serial audio topology; out is unchanged on refusal.
-// proposed_connection is a non-mutating optional edge appended after live edges.
-// excluded_connection omits a live wire being moved; pool_no_slot excludes none.
-bool capture_effect_audio(const Graph&                     graph,
-                          const EffectGraphMapping&        mapping,
-                          const Synth::EffectChainBinding& chain,
-                          EffectAudioTopology*             out,
-                          const Connection*                proposed_connection = nullptr,
-                          uint32_t                         excluded_connection = pool_no_slot);
-
 // Applies a bounded snapshot without consuming events.  A null capture mask records
 // all represented nodes; otherwise only selected or already persisted nodes are saved.
 // Outputs are unchanged on failure; source and output may alias.
@@ -138,11 +128,16 @@ bool change_effect_type_candidate(const Synth::InstrumentEditorBank* source,
                                   uint32_t                           slot,
                                   Synth::EffectType                  type,
                                   Synth::InstrumentEditorBank*       out);
-// Allocates an owner-scoped represented root.  Both outputs are success-only.
+// Allocates an owner-scoped represented root at the caller's add-time
+// place: the candidate freezes the chain-scoped kind-4 record at
+// `position` (the drop passes the release point, the canvas add the
+// measured lane x), so the unwired descriptor stays represented and
+// persistent.  Both outputs are success-only.
 bool add_effect_lfo_candidate(const Synth::InstrumentEditorBank* source,
                               uint32_t                           owner,
                               Synth::InstrumentEditorBank*       out,
                               uint16_t*                          out_descriptor,
+                              vmath::vec2                        position,
                               const bool*                        pinned_lfos = nullptr);
 // Extends an initialized descriptor keep-set with bindings and owner-scoped roots.
 bool collect_effect_lfos(const Synth::InstrumentEditorBank* source, uint32_t chain, bool* keep_lfos);
@@ -218,7 +213,7 @@ bool project_effect_chain_to_graph(const Synth::InstrumentEditorBank& bank,
 
 // Payload-only single-event seam for parameter/modulation edits and legacy raw
 // chain helper checks. Editor audio structure is captured transactionally by
-// apply_effect_graph_batch; this raw-bank seam cannot represent detached topology.
+// apply_effect_graph_batch; this raw-bank seam carries no routing state.
 bool apply_fx_graph_change(Synth::InstrumentBank*    bank,
                            const Graph&              graph,
                            const EffectGraphMapping& mapping,
@@ -228,21 +223,106 @@ bool apply_fx_graph_change(Synth::InstrumentBank*    bank,
 // tail slot so no dormant binding survives the reclaim.
 void fx_remove_effect(Synth::EffectChainBinding* chain, uint32_t slot);
 
-// Reorders the chain: the moved slot is spliced to the front when
-// after_slot is negative, right after after_slot otherwise.  False when a
-// slot is out of range; caller guards the no-op (moved == after).
-bool fx_splice_effect(Synth::EffectChainBinding* chain, uint32_t moved_slot, int32_t after_slot);
-
 // Exchanges two slots' complete bindings. Callers guard range and
 // occupancy; the helper asserts nothing beyond that.
 void fx_exchange_effect_slots(Synth::EffectChainBinding* chain, uint32_t slot_a, uint32_t slot_b);
 
-// Remaps explicit-edge audio routing through the exchange of two slots:
-// successor rows and successor values both permute through the swap, so
-// each effect keeps its wiring, while the input row keeps its index and
-// the output marker keeps its value.  Only meaningful when explicit_edges is
-// set; a zeroed next[] stays zero.
-void fx_swap_effect_audio(EffectAudioTopology* audio, uint32_t slot_a, uint32_t slot_b);
+// Width-aware default arrangement of the projection's auto-lane nodes
+// (32 px edge-to-edge gaps).  See the definition for the full layout
+// rule; widths are indexed by node idx so the pass runs headless.
+bool fx_arrange_auto_lane(Graph* graph, const EffectGraphMapping& mapping, const float* widths);
+
+// The measured default x one further LFO node would take on the chain's
+// LFO lane (same layout rule and widths contract as
+// fx_arrange_auto_lane): the canvas add freezes a new LFO's record there
+// so the added box lands in the measured lane.  False when the lane
+// cannot be laid out.
+bool fx_next_lfo_lane_x(const Graph& graph, const EffectGraphMapping& mapping, const float* widths, float* out_x);
+
+// ---- Flag-routing model ----
+// Wire edits reorder slots instead of storing edges; these helpers drive
+// the same code paths the canvas gestures use.  Every candidate copies
+// `source` and writes `out` only on success (refusals leave `out`
+// untouched); source and out may alias.
+
+enum FxConnector {
+    fx_connector_global_input,
+    fx_connector_global_output,
+    fx_connector_effect_input,
+    fx_connector_effect_output
+};
+
+// Connecting the input node to a slot moves the target slot's connected run
+// to the front and sets in to effect_in_first_slot; refuses a fed target.
+bool fx_connect_input_candidate(const Synth::InstrumentEditorBank* source,
+                                uint32_t                           chain,
+                                uint32_t                           target_slot,
+                                Synth::InstrumentEditorBank*       out);
+// Connects the source's output to the target slot: moves the target
+// (with its connected run) directly after the source slot and sets the
+// source's effect_out_next.  Refuses self connects, fed
+// targets (occupied inputs) and a source inside the target's run (cycle).
+bool fx_connect_slots_candidate(const Synth::InstrumentEditorBank* source,
+                                uint32_t                           chain,
+                                uint32_t                           source_slot,
+                                uint32_t                           target_slot,
+                                Synth::InstrumentEditorBank*       out);
+// Connects a slot's output to the global output; the previous holder,
+// if any, demotes to disconnected.
+bool fx_connect_output_candidate(const Synth::InstrumentEditorBank* source,
+                                 uint32_t                           chain,
+                                 uint32_t                           source_slot,
+                                 Synth::InstrumentEditorBank*       out);
+// Clears one endpoint's connection flag: the global input, the global
+// output, or a slot's input or output (slot ignored for the global kinds).
+bool fx_disconnect_candidate(const Synth::InstrumentEditorBank* source,
+                             uint32_t                           chain,
+                             FxConnector                        kind,
+                             int32_t                            slot,
+                             Synth::InstrumentEditorBank*       out);
+// Removes a slot and compacts the chain, repairing a
+// doubly connected slot by handing its downstream connection to its
+// predecessor (or the global input).
+bool fx_delete_effect_candidate(const Synth::InstrumentEditorBank* source,
+                                uint32_t                           chain,
+                                uint32_t                           slot,
+                                Synth::InstrumentEditorBank*       out);
+// Adds an effect connected to the global output, inserted immediately
+// after the current holder (the new effect takes the flag, the old holder
+// demotes to next); with no holder it appends after the last occupied
+// slot. A fresh empty chain also gets in = effect_in_first_slot. Refuses a
+// full chain.
+bool fx_add_effect_candidate(const Synth::InstrumentEditorBank* source,
+                             uint32_t                           chain,
+                             Synth::EffectType                  type,
+                             Synth::InstrumentEditorBank*       out);
+// Every effect_out_next without an occupied successor
+// becomes disconnected.
+void fx_sanitize_routing(Synth::EffectChainBinding* chain, EffectChainRouting* routing);
+// Compacts the chain's occupied slots to the front so the
+// occupied prefix stays contiguous, then sanitizes.
+void fx_compact_chain(Synth::EffectChainBinding* chain,
+                      EffectChainRouting*        routing,
+                      uint32_t                   order[Synth::max_chain_effects] = nullptr);
+// True when a wire feeds the slot: slot 0 through in == effect_in_first_slot, slot i
+// through the predecessor's effect_out_next.
+bool fx_slot_input_fed(const Synth::EffectChainBinding& chain, const EffectChainRouting& routing, uint32_t slot);
+// The one slot holding effect_out_output, or -1 when no occupied slot feeds
+// the output.
+int32_t fx_output_holder(const Synth::EffectChainBinding& chain, const EffectChainRouting& routing);
+// True when the endpoint's connector dot is red (unconnected); slot
+// is ignored for the global kinds.
+bool fx_connector_red(const Synth::EffectChainBinding& chain,
+                      const EffectChainRouting&        routing,
+                      FxConnector                      kind,
+                      int32_t                          slot);
+// Length of the connected run a slot heads: the slot plus every following
+// slot its effect_out_next run reaches.
+uint32_t fx_run_length(const Synth::EffectChainBinding& chain, const EffectChainRouting& routing, uint32_t slot);
+// Exchanges two slots' saved layout records so the two boxes physically
+// trade places; a missing record means the default position.  Only the
+// named chain's records are touched.
+void fx_swap_effect_layout_records(Synth::InstrumentEditorBank* bank, uint32_t chain, uint32_t slot_a, uint32_t slot_b);
 
 // Re-initializes a slot to a new type with neutral base values and every
 // modulation field cleared, so a retyped slot never carries dormant

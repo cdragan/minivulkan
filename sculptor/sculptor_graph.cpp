@@ -679,6 +679,103 @@ void Sculptor::Graph::set_node_oscillator(uint32_t node_idx, bool oscillator)
     nodes.entries[node_idx].oscillator = oscillator;
 }
 
+void Sculptor::Graph::set_node_auto_lane(uint32_t node_idx, bool auto_lane)
+{
+    if (node_idx >= max_nodes || ! nodes.is_occupied(node_idx)) {
+        return;
+    }
+    nodes.entries[node_idx].auto_lane = auto_lane;
+}
+
+bool Sculptor::Graph::node_auto_lane(uint32_t node_idx) const
+{
+    if (node_idx >= max_nodes || ! nodes.is_occupied(node_idx)) {
+        return false;
+    }
+    return nodes.entries[node_idx].auto_lane;
+}
+
+void Sculptor::Graph::place_auto_lane_node(uint32_t node_idx, vmath::vec2 position)
+{
+    if (node_idx >= max_nodes || ! nodes.is_occupied(node_idx)) {
+        return;
+    }
+    nodes.entries[node_idx].position = position;
+}
+
+// Node drag seam (see sculptor_graph.h): begin anchors the drag, apply
+// moves one frame.  Actual mouse motion is checked UNSNAPPED before any
+// snapping or position write: drag reconstruction is exact for a
+// stationary hold, and snapping that reconstructed place would walk a
+// between-grid node (exact 32 px lane gaps) sideways while the mouse
+// never moved.  The unsnapped delta since the drag began also survives
+// nodes whose position is not grid-aligned, so grid snapping applies only
+// to real drags. A stationary hold moves nothing. Any mouse movement
+// that changes the snapped target is a drag: the node snaps, and
+// auto-arrangement is opted out. Returning to the exact press point
+// restores the pre-drag placement and stamps.
+void Sculptor::Graph::begin_node_drag(uint32_t node_idx, vmath::vec2 mouse_point)
+{
+    if (node_idx >= max_nodes || ! nodes.is_occupied(node_idx)) {
+        return;
+    }
+    dragged_node     = node_idx;
+    drag_offset      = (mouse_point - nodes.entries[node_idx].position);
+    drag_start_point = mouse_point;
+    drag_applied     = false;
+    // Remember the pre-drag placement of the dragged node and the selected
+    // companions it moves, so a return to the exact press point can restore
+    // them (apply_node_drag).
+    for (uint32_t i = 0; i < max_nodes; ++i) {
+        const bool moves_with_drag =
+            (i == node_idx) || (nodes.is_occupied(i) && selected[i] && ! nodes.entries[i].ghost);
+        drag_restore_active[i]    = moves_with_drag;
+        drag_restore_position[i]  = moves_with_drag ? nodes.entries[i].position : vmath::vec2{};
+        drag_restore_auto_lane[i] = moves_with_drag ? nodes.entries[i].auto_lane : false;
+    }
+}
+
+void Sculptor::Graph::apply_node_drag(vmath::vec2 mouse_point)
+{
+    if (dragged_node == pool_no_slot || ! nodes.is_occupied(dragged_node)) {
+        return;
+    }
+    const vmath::vec2 moved = (mouse_point - drag_start_point);
+    if (moved.x == 0.0f && moved.y == 0.0f) {
+        if (drag_applied) {
+            // The mouse returned to the exact press point after a real
+            // drag: put the pre-drag placement and stamps back, making the
+            // whole drag a no-op.
+            for (uint32_t i = 0; i < max_nodes; ++i) {
+                if (drag_restore_active[i] && nodes.is_occupied(i)) {
+                    nodes.entries[i].position  = drag_restore_position[i];
+                    nodes.entries[i].auto_lane = drag_restore_auto_lane[i];
+                }
+            }
+            drag_applied = false;
+        }
+        return; // at the press point: nothing moves, stamps stay
+    }
+    Node&             node = nodes.entries[dragged_node];
+    const vmath::vec2 target(snap_to_grid(mouse_point.x - drag_offset.x), snap_to_grid(mouse_point.y - drag_offset.y));
+    const vmath::vec2 delta = (target - node.position);
+    // A real drag opts the node out of the default arrangement; the write
+    // happens only when the snapped target differs. Multi-selection: the
+    // dragged node leads; the rest follow with the same delta so relative
+    // layout is preserved.
+    if (delta.x != 0.0f || delta.y != 0.0f) {
+        node.position  = target;
+        node.auto_lane = false;
+        for (uint32_t i = 0; i < max_nodes; ++i) {
+            if (i != dragged_node && nodes.is_occupied(i) && selected[i] && ! nodes.entries[i].ghost) {
+                nodes.entries[i].position  = (nodes.entries[i].position + delta);
+                nodes.entries[i].auto_lane = false;
+            }
+        }
+        drag_applied = true;
+    }
+}
+
 void Sculptor::Graph::begin_rename(uint32_t node_idx)
 {
     // Refuses unoccupied or ghost nodes.
@@ -951,7 +1048,8 @@ void Sculptor::Graph::align_selected(AlignKind kind)
     }
 
     // Second pass: apply.  Node moves are pure view state: no change events,
-    // same rule as dragging.
+    // same rule as dragging.  Aligning opts every touched node out of the
+    // default arrangement.
     for (uint32_t i = 0; i < max_nodes; ++i) {
         if (! nodes.is_occupied(i) || ! selected[i] || nodes.entries[i].ghost) {
             continue;
@@ -959,6 +1057,7 @@ void Sculptor::Graph::align_selected(AlignKind kind)
         Node&       node   = nodes.entries[i];
         const float width  = node.content_width_override > 0.0f ? node.content_width_override : content_sizes[i].x;
         const float height = node.content_height_override > 0.0f ? node.content_height_override : content_sizes[i].y;
+        node.auto_lane     = false;
         switch (kind) {
             case AlignKind::left:
                 node.position.x = min_x;
@@ -1060,6 +1159,9 @@ void Sculptor::Graph::set_node_layout(uint32_t    node_idx,
     node.position                = position;
     node.content_width_override  = width_override;
     node.content_height_override = height_override;
+    // A restored or user-applied layout opts the node out of the default
+    // arrangement for good.
+    node.auto_lane = false;
 }
 
 const Sculptor::Connection& Sculptor::Graph::get_connection(uint32_t connection_idx) const
