@@ -122,6 +122,20 @@ static bool in_rect(vmath::vec2 pos, vmath::vec2 rect_min, vmath::vec2 rect_max)
     return pos.x >= rect_min.x && pos.y >= rect_min.y && pos.x <= rect_max.x && pos.y <= rect_max.y;
 }
 
+// Records a hovered row's tooltip when the mouse rests inside the row's
+// rectangle.  Ghost nodes and tooltip-free rows never hover.
+static void mark_hovered_tooltip(vmath::vec2           mouse_screen,
+                                 vmath::vec2           rect_min,
+                                 vmath::vec2           rect_max,
+                                 const Sculptor::Slot& slot,
+                                 bool                  is_ghost,
+                                 const char**          hovered_tooltip)
+{
+    if (! is_ghost && slot.tooltip != nullptr && in_rect(mouse_screen, rect_min, rect_max)) {
+        *hovered_tooltip = slot.tooltip;
+    }
+}
+
 Sculptor::EndPoint Sculptor::Graph::find_hovered_connector(vmath::vec2 mouse_screen) const
 {
     EndPoint result       = { pool_no_slot, pool_no_slot };
@@ -316,6 +330,10 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
     uint32_t hit_node  = pool_no_slot;
     bool     title_hit = false;
 
+    // Hover text of the slot under the mouse, recorded while the node draw
+    // loop runs and shown once after the pop; null shows nothing.
+    const char* frame_tooltip = nullptr;
+
     // Two draw channels: connections go on channel 0 (background), nodes and
     // their widgets on channel 1, so lines never paint over node bodies.
     draw_list->ChannelsSplit(2);
@@ -469,7 +487,7 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
                         cursor += ImGui::CalcTextSize(slot.name).x + 8.0f;
                         continue;
                     }
-                    const float x        = cursor + ImGui::CalcTextSize(slot.name).x + 8.0f;
+                    const float x = cursor + (slot.name[0] != '\0' ? ImGui::CalcTextSize(slot.name).x + 8.0f : 0.0f);
                     float       widget_x = x;
                     // Band [-]/[+] buttons are placed by the draw pass at the parameter column's right edge
                     if (! is_band_click_slot(slot)) {
@@ -660,6 +678,14 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
                              : overridden ? override_color
                                           : colors_.connector);
                 dot_positions[node_idx * max_node_slots + elem_slot] = vmath::vec2(dot_x, y_center);
+                if (! is_ghost && slot.tooltip != nullptr) {
+                    const float pick_radius = dot_pick_radius * render_scale;
+                    const float delta_x     = mouse_screen.x - dot_x;
+                    const float delta_y     = mouse_screen.y - y_center;
+                    if (delta_x * delta_x + delta_y * delta_y <= pick_radius * pick_radius) {
+                        frame_tooltip = slot.tooltip;
+                    }
+                }
                 if (connected) {
                     draw_list->AddCircleFilled(ImVec2(dot_x, y_center), dot_radius * render_scale, dot_color);
                 }
@@ -671,6 +697,13 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
                     // Output names right-align against their dot so the
                     // label sits inside the node next to the connector.
                     const float name_w = ImGui::CalcTextSize(slot.name).x * render_scale;
+                    mark_hovered_tooltip(
+                        mouse_screen,
+                        vmath::vec2(dot_x - pad * render_scale - name_w, y_center - line_h * render_scale * 0.5f),
+                        vmath::vec2(dot_x - pad * render_scale, y_center + line_h * render_scale * 0.5f),
+                        slot,
+                        is_ghost,
+                        &frame_tooltip);
                     add_text_scaled(
                         draw_list,
                         vmath::vec2(dot_x - pad * render_scale - name_w, y_center - line_h * render_scale * 0.5f),
@@ -753,6 +786,14 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
                 const bool band_button = slot.kind == SlotKind::property && is_band_click_slot(slot);
                 if (! band_button) {
                     const bool fed_by_selected = any_node_selected && selected_source_marks[slot_idx];
+                    if (slot.name[0] != '\0') {
+                        mark_hovered_tooltip(mouse_screen,
+                                             vmath::vec2(cursor, y_center - line_h * render_scale * 0.5f),
+                                             vmath::vec2(cursor + name_w, y_center + line_h * render_scale * 0.5f),
+                                             slot,
+                                             is_ghost,
+                                             &frame_tooltip);
+                    }
                     add_text_scaled(draw_list,
                                     vmath::vec2(cursor, y_center - line_h * render_scale * 0.5f),
                                     render_scale,
@@ -765,8 +806,9 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
                     cursor += name_w + 8.0f * render_scale;
                     continue;
                 }
-                const float min_widget_x = cursor + (band_button ? 0.0f : name_w + 8.0f * render_scale);
-                float       widget_x     = 0.0f;
+                const float min_widget_x =
+                    cursor + (band_button || slot.name[0] == '\0' ? 0.0f : name_w + 8.0f * render_scale);
+                float widget_x = 0.0f;
                 if (band_button) {
                     const bool  is_plus     = slot.name[0] == '+';
                     const float button_size = slot_widget_w(slot) * render_scale;
@@ -780,7 +822,17 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
                     }
                 }
                 const float widget_y = y_center - frame_h * render_scale * 0.5f;
-                cursor               = widget_x + slot_widget_w(slot) * render_scale;
+                // Every property slot owns the same widget rectangle: labels
+                // may be empty (the unlabeled envelope-depth slider, the Op
+                // lists), so the widget itself must carry the hover text.
+                mark_hovered_tooltip(
+                    mouse_screen,
+                    vmath::vec2(widget_x, widget_y),
+                    vmath::vec2(widget_x + slot_widget_w(slot) * render_scale, widget_y + frame_h * render_scale),
+                    slot,
+                    is_ghost,
+                    &frame_tooltip);
+                cursor = widget_x + slot_widget_w(slot) * render_scale;
                 ++line_prop;
                 {
                     const bool connected = slot_is_connected(node_idx, slot_idx);
@@ -1495,6 +1547,24 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
 
     draw_list->PopClipRect();
     ImGui::PopID();
+
+    // Show the hovered slot's hover text, only while the graph is idle:
+    // drags and popups suppress tooltips.  Uses ImGui's own hover-delay
+    // mechanism (the same one ImGui::SetItemTooltip uses), so the delay
+    // follows HoverStationaryDelay/HoverDelayShort like the geometry
+    // editor toolbar tooltips.
+    const bool can_show_tooltip = frame_tooltip != nullptr && interaction == Interaction::idle &&
+                                  ImGui::IsWindowHovered() && mouse_in_widget &&
+                                  ! ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId | ImGuiPopupFlags_AnyPopupLevel);
+
+    if (can_show_tooltip) {
+        ImGuiContext& g              = *GImGui;
+        const ImGuiID hover_delay_id = g.CurrentWindow->GetID(frame_tooltip);
+        g.HoverItemDelayId           = hover_delay_id;
+        if (g.HoverItemUnlockedStationaryId == hover_delay_id && g.HoverItemDelayTimer >= g.Style.HoverDelayShort) {
+            ImGui::SetTooltip("%s", frame_tooltip);
+        }
+    }
 
     // Restore the window cursor past the widget so caller code after
     // render() (labels, event readouts) does not draw inside the graph.

@@ -372,6 +372,96 @@ static bool find_graph_slot(const Sculptor::Graph& graph, uint32_t node_idx, con
     return false;
 }
 
+// Tooltip sweep: walks every occupied node and slot of one projected
+// graph and counts violations.  Exempt rows must carry nullptr; every
+// other slot must carry a non-empty string.  Every shared row (including
+// the unlabeled Op lists and envelope-depth slider) carries its own
+// tooltip, so only node-specific rows go through the caller predicate.
+using TooltipExempt = bool (*)(uint32_t node_idx, const Sculptor::Slot& slot, void* user_data);
+
+static void sweep_tooltips(const Sculptor::Graph& graph,
+                           TooltipExempt          exempt_slot,
+                           void*                  user_data,
+                           uint32_t*              required_missing,
+                           uint32_t*              exempt_nonnull)
+{
+    *required_missing = 0;
+    *exempt_nonnull   = 0;
+    for (uint32_t node_idx = 0; node_idx < Sculptor::max_nodes; ++node_idx) {
+        if (! graph.node_occupied(node_idx)) {
+            continue;
+        }
+
+        const Sculptor::Node& node = graph.node(node_idx);
+        for (uint32_t slot_idx = 0; slot_idx < node.slots.num_allocated; ++slot_idx) {
+            const Sculptor::Slot& slot   = node.slots.entries[slot_idx];
+            bool                  exempt = false;
+            if (exempt_slot != nullptr) {
+                exempt = exempt_slot(node_idx, slot, user_data);
+            }
+            if (exempt) {
+                if (slot.tooltip != nullptr) {
+                    ++*exempt_nonnull;
+                }
+            }
+            else if (slot.tooltip == nullptr || slot.tooltip[0] == '\0') {
+                ++*required_missing;
+            }
+        }
+    }
+}
+
+// Oscillator-pane exemptions: the sum node Layer rows, the Band N header
+// label rows and the band rows that the descriptors leave without text
+// under the off/lowpass/highpass filter types.
+static bool osc_tooltip_exempt(uint32_t node_idx, const Sculptor::Slot& slot, void* user_data)
+{
+    const Sculptor::OscGraphMapping& mapping = *static_cast<const Sculptor::OscGraphMapping*>(user_data);
+    if (node_idx == mapping.output_node && strncmp(slot.name, "Layer ", 6) == 0) {
+        return true;
+    }
+
+    if (strncmp(slot.name, "Band ", 5) == 0) {
+        return true;
+    }
+
+    if (node_idx == mapping.osc_nodes[0] &&
+        (strcmp(slot.name, "Filter Off") == 0 || strcmp(slot.name, "FIR Slope") == 0 ||
+         strcmp(slot.name, "Offset") == 0 || strcmp(slot.name, "Gain") == 0)) {
+        return true;
+    }
+
+    if ((node_idx == mapping.osc_nodes[2] || node_idx == mapping.osc_nodes[3]) &&
+        (strcmp(slot.name, "Offset") == 0 || strcmp(slot.name, "Gain") == 0)) {
+        return true;
+    }
+
+    return false;
+}
+
+// Effect-pane exemptions: the In/Out dots of the effect nodes themselves;
+// the chain endpoint nodes dots stay required. The FIR effect node's
+// unlabeled band-header spacer slot (only projected once the
+// fx_band_region_projected gate opens for the Multi-band FIR effect)
+// stays exempt too: an empty name at fx_band_row_group_base row groups
+// exists only inside that region.
+static bool fx_tooltip_exempt(uint32_t node_idx, const Sculptor::Slot& slot, void* user_data)
+{
+    const Sculptor::EffectGraphMapping& mapping = *static_cast<const Sculptor::EffectGraphMapping*>(user_data);
+    for (uint32_t chain_slot = 0; chain_slot < Synth::max_chain_effects; ++chain_slot) {
+        if (mapping.effect_nodes[chain_slot] == node_idx &&
+            (strcmp(slot.name, "In") == 0 || strcmp(slot.name, "Out") == 0)) {
+            return true;
+        }
+    }
+
+    if (slot.name[0] == '\0' && slot.row_group >= Sculptor::fx_band_row_group_base) {
+        return true;
+    }
+
+    return false;
+}
+
 // The connection terminating at an input endpoint, or pool_no_slot.
 static uint32_t find_osc_graph_connection(const Sculptor::Graph& graph, const Sculptor::EndPoint& input)
 {
@@ -11901,11 +11991,9 @@ static void check_target_block_grammar(const Sculptor::Node&       osc,
 
     const Sculptor::Slot& lfo_dot = osc.slots.entries[base + 2];
     TEST(lfo_dot.kind == Sculptor::SlotKind::input);
-    TEST(strncmp(lfo_dot.name, "LFO", sizeof(lfo_dot.name)) == 0);
+    TEST(strncmp(lfo_dot.name, "LFO Op", sizeof(lfo_dot.name)) == 0);
     const uint8_t lfo_group = static_cast<uint8_t>(4 * target + 1);
-    TEST(strncmp(osc.slots.entries[base + t7_lfo_op_field].name,
-                 "Op",
-                 sizeof(osc.slots.entries[base + t7_lfo_op_field].name)) == 0);
+    TEST(osc.slots.entries[base + t7_lfo_op_field].name[0] == '\0'); // unlabeled: the dot's label names the line
     TEST(osc.slots.entries[base + t7_lfo_op_field].property_type == Sculptor::PropertyType::list);
     TEST(osc.slots.entries[base + t7_lfo_op_field].num_list_options == 2);
     TEST(strncmp(osc.slots.entries[base + t7_lfo_depth_field].name,
@@ -11930,7 +12018,7 @@ static void check_target_block_grammar(const Sculptor::Node&       osc,
         const uint32_t        dot     = Sculptor::osc_target_src_dot(target, i);
         const Sculptor::Slot& src_dot = osc.slots.entries[dot];
         TEST(src_dot.kind == Sculptor::SlotKind::input);
-        TEST(strncmp(src_dot.name, i == 0 ? "Source A" : "Source B", sizeof(src_dot.name)) == 0);
+        TEST(strncmp(src_dot.name, i == 0 ? "Source A Op" : "Source B Op", sizeof(src_dot.name)) == 0);
         const uint8_t src_group = static_cast<uint8_t>(4 * target + 2 + i);
         for (uint32_t f = 0; f <= 1; f++) {
             TEST(osc.slots.entries[dot + f].row_group == src_group);
@@ -13957,10 +14045,10 @@ static void osc_fir_slope_projection_regressions()
         TEST(strncmp(env_dot.name, "Envelope", sizeof(env_dot.name)) == 0);
         const Sculptor::Slot& src_a = osc.slots.entries[185];
         TEST(src_a.kind == Sculptor::SlotKind::input);
-        TEST(strncmp(src_a.name, "Source A", sizeof(src_a.name)) == 0);
+        TEST(strncmp(src_a.name, "Source A Op", sizeof(src_a.name)) == 0);
         const Sculptor::Slot& src_b = osc.slots.entries[188];
         TEST(src_b.kind == Sculptor::SlotKind::input);
-        TEST(strncmp(src_b.name, "Source B", sizeof(src_b.name)) == 0);
+        TEST(strncmp(src_b.name, "Source B Op", sizeof(src_b.name)) == 0);
     }
     // No existing row shifted.
     TEST(Sculptor::osc_target_row_slot[Synth::mod_volume] == 95);
@@ -18920,7 +19008,7 @@ static void m2_fix2_wave_regressions()
         TEST(render_src != nullptr);
         if (render_src) {
             TEST(strstr(render_src, "const bool band_button =") != nullptr);
-            TEST(strstr(render_src, "band_button ? 0.0f : name_w") != nullptr);
+            TEST(strstr(render_src, "band_button || slot.name[0] == '\0' ? 0.0f : name_w") != nullptr);
         }
     }
     // The Band row's +/- click slots render as square push buttons (the
@@ -33613,6 +33701,101 @@ int main()
                 TEST(example_lfo_count == 2);
             }
         }
+    }
+
+    // ---------------------------------------------------------------------
+    // Tooltips: every projected slot carries its descriptor text and the
+    // exempt rows stay null.
+    // ---------------------------------------------------------------------
+    {
+        const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& bank = *bank_storage;
+        memset(static_cast<void*>(&bank), 0, sizeof(bank));
+        Synth::init_default_bank(&bank.bank);
+
+        Synth::Instrument& instrument = bank.bank.instruments.entries[0];
+        instrument.layer_count        = 4;
+        for (uint32_t layer = 1; layer < 4; ++layer) {
+            instrument.layers[layer].osc_type[0]                            = Synth::WaveType::sine_wave;
+            instrument.layers[layer].osc_type[1]                            = Synth::WaveType::no_wave;
+            instrument.layers[layer].osc_mode                               = Synth::osc_mode_blend;
+            instrument.layers[layer].targets[Synth::mod_volume].base_value  = 1.0f;
+            instrument.layers[layer].targets[Synth::mod_panning].base_value = 0.5f;
+        }
+        instrument.layers[0].fir_type       = Synth::fir_off;
+        instrument.layers[0].fir_band_count = 1;
+        instrument.layers[1].fir_type       = Synth::fir_bandpass;
+        instrument.layers[1].fir_band_count = 4;
+        instrument.layers[2].fir_type       = Synth::fir_lowpass;
+        instrument.layers[2].fir_band_count = 1;
+        instrument.layers[3].fir_type       = Synth::fir_highpass;
+        instrument.layers[3].fir_band_count = 1;
+
+        // One envelope and one LFO descriptor, both bound to layer 0 volume.
+        const uint32_t env_slot = bank.bank.envelopes.allocate();
+        TEST(env_slot != pool_no_slot);
+        Synth::EnvelopeDescriptor& env = bank.bank.envelopes.entries[env_slot];
+        env                            = Synth::EnvelopeDescriptor{};
+        env.num_points                 = 3;
+        env.sustain_first_point        = 1;
+        env.sustain_last_point         = 1;
+        env.min_value                  = -1.0f;
+        env.min_max_delta              = 2.0f / 65535.0f;
+        env.points[0].position         = 0;
+        env.points[0].value            = 0x0000;
+        env.points[1].position         = 5;
+        env.points[1].value            = 0xFFFF;
+        env.points[2].position         = 91;
+        env.points[2].value            = 0x8000;
+
+        uint16_t lfo_desc_id = 0;
+        TEST(Sculptor::allocate_default_lfo(&bank.bank, &lfo_desc_id));
+
+        Synth::TargetBinding& volume = instrument.layers[0].targets[Synth::mod_volume];
+        volume.envelope_desc_id      = static_cast<uint16_t>(env_slot + 1);
+        volume.lfo_desc_id           = lfo_desc_id;
+
+        bank.added_cc_mask[0] = 1u;
+        Sculptor::set_identity_osc_sources(&bank, 0, 0);
+        TEST(Synth::validate_instrument_bank(&bank.bank));
+
+        const std::unique_ptr<Sculptor::Graph> graph_storage = std::make_unique<Sculptor::Graph>();
+        Sculptor::Graph&                       graph         = *graph_storage;
+        Sculptor::OscGraphMapping              osc_mapping   = {};
+        TEST(Sculptor::project_editor_to_graph(bank, &graph, &osc_mapping));
+        TEST(osc_mapping.osc_nodes[0] != Sculptor::pool_no_slot && osc_mapping.osc_nodes[1] != Sculptor::pool_no_slot);
+        TEST(osc_mapping.osc_nodes[2] != Sculptor::pool_no_slot && osc_mapping.osc_nodes[3] != Sculptor::pool_no_slot);
+
+        uint32_t required_missing;
+        uint32_t exempt_nonnull;
+        sweep_tooltips(graph, osc_tooltip_exempt, &osc_mapping, &required_missing, &exempt_nonnull);
+        TEST(required_missing == 0 && exempt_nonnull == 0);
+
+        // The effect panes reuse the same graph (each projection clears it), so
+        // the oscillator sweep must finish first.
+        Synth::EffectChainBinding& chain = bank.bank.channel_chains[0];
+        chain.num_effects                = 4;
+        Sculptor::fx_init_slot(&chain, 0, Synth::EffectType::distortion);
+        Sculptor::fx_init_slot(&chain, 1, Synth::EffectType::delay);
+        Sculptor::fx_init_slot(&chain, 2, Synth::EffectType::chorus);
+        Sculptor::fx_init_slot(&chain, 3, Synth::EffectType::reverb);
+        chain.effects[0].bindings[0].lfo_desc_id = lfo_desc_id;
+
+        Synth::EffectChainBinding& master = bank.bank.master_chain;
+        master.num_effects                = 3;
+        Sculptor::fx_init_slot(&master, 0, Synth::EffectType::compressor);
+        Sculptor::fx_init_slot(&master, 1, Synth::EffectType::fir);
+        Sculptor::fx_init_slot(&master, 2, Synth::EffectType::ring_mod);
+
+        Sculptor::EffectGraphMapping fx_mapping = {};
+        TEST(Sculptor::project_effect_chain_to_graph(bank, 0, &graph, &fx_mapping));
+        sweep_tooltips(graph, fx_tooltip_exempt, &fx_mapping, &required_missing, &exempt_nonnull);
+        TEST(required_missing == 0 && exempt_nonnull == 0);
+
+        TEST(Sculptor::project_effect_chain_to_graph(bank, Sculptor::fx_master_chain, &graph, &fx_mapping));
+        sweep_tooltips(graph, fx_tooltip_exempt, &fx_mapping, &required_missing, &exempt_nonnull);
+        TEST(required_missing == 0 && exempt_nonnull == 0);
     }
 
     return exit_code;

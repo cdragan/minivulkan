@@ -69,10 +69,10 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT umsg, WPARAM wparam, LPARAM 
         }
 
         case WM_PAINT:
-            gui_new_frame();
-
             if (skip_frame(w) && ! need_redraw(w))
                 return 0;
+
+            gui_new_frame();
 
             if ( ! draw_frame())
                 break;

@@ -24,10 +24,11 @@ struct EffectChainRouting;
 
 // One scalar effect parameter's editing metadata, in shader param order.
 struct EffectParamInfo {
-    char  name[24];
-    float min_value;
-    float max_value;
-    bool  logarithmic;
+    char        name[24];
+    float       min_value;
+    float       max_value;
+    bool        logarithmic;
+    const char* tooltip; // hover text of the parameter row; null = no tooltip
 };
 
 // One effect type's node rows.  Slots of type none project no node at all,

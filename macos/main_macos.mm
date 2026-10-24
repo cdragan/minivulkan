@@ -103,10 +103,10 @@ uint64_t get_current_time_ms()
 
     static bool draw_callback(NSView *view)
     {
-        init_os_gui_frame(view);
-
         if ( ! need_redraw(nullptr) && skip_frame(nullptr))
             return true;
+
+        init_os_gui_frame(view);
 
         if ( ! draw_frame()) {
             [NSApp terminate: nil];

@@ -53,11 +53,13 @@ struct Slot {
     bool          real_logarithmic; // bounded slider uses a logarithmic curve
     bool          drop_menu;        // release-over-empty-canvas opens the caller creation menu (projection state)
     char          list_options[8][32];
+    const char*   tooltip; // hover text of the row; null = no tooltip
 };
 
-// The drop-menu and child-level fields consume spare padding capacity, keeping
-// sizeof(Slot) at 312.
-static_assert(sizeof(Slot) == 312, "Slot size drifted; the drop_menu flag must stay within the 312-byte size budget");
+// The drop-menu flag, the child-level field and the tooltip pointer consume
+// spare padding capacity, keeping sizeof(Slot) at 320.
+static_assert(sizeof(Slot) == 320,
+              "Slot size drifted; the drop_menu flag and tooltip pointer must stay within the 320-byte size budget");
 
 class Graph;
 
@@ -72,6 +74,9 @@ Slot int_slot(const char* name, int32_t value);
 Slot bounded_int_slot(const char* name, int32_t value, int32_t min_value, int32_t max_value);
 Slot list_slot(const char* name, const char* const* option_names, uint32_t num_options, uint32_t index);
 Slot toggle_slot(const char* name, bool value);
+
+// One slot with its hover text attached.
+Slot with_tooltip(Slot slot, const char* tooltip);
 void append_mod_source_row(Graph*   graph,
                            uint32_t node,
                            uint32_t input_idx,
@@ -105,9 +110,15 @@ extern const char* const lfo_start_names[3];
 // balloon every Node allocation.
 constexpr uint32_t max_node_slots = 356;
 
-// Labels of the channel/note modulation source roles, indexed by
-// ModSource - 1 (pitch_bend first).
-extern const char* const mod_source_names[6];
+// One row label together with its hover text; the tooltip may be null.
+struct LabelTooltip {
+    const char* name;
+    const char* tooltip;
+};
+
+// Labels and hover texts of the channel/note modulation source roles,
+// indexed by ModSource - 1 (pitch_bend first).
+extern const LabelTooltip mod_source_descs[6];
 
 // Draws the optional caller state widget at the bottom of a node.
 // Returns the widget height in drawn pixels at render_scale (cached one
@@ -158,9 +169,9 @@ struct Connection {
 constexpr uint32_t max_connections = 1152;
 
 // Static size cap for one editor-resident Graph instance.  The editor state
-// budget in sculptor_instr_bank.cpp reserves exactly this much per graph;
-// a capacity raise that outgrows it must fail the build instead of silently
-// busting that reserve.
+// budget reserves the symbolic sizeof(osc_graph) per graph (the static
+// instance in sculptor_instr_edit.cpp); a capacity raise that outgrows it
+// must fail the build instead of silently busting that reserve.
 constexpr uint32_t max_graph_bytes = 48 * 1024 * 1024;
 
 // Caller validation for connection attempts.  Runs after the widget's

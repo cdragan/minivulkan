@@ -31,10 +31,10 @@ bool need_redraw(struct Window* w)
 
 static void CALLBACK redraw_timer_proc(HWND, UINT, UINT_PTR, DWORD)
 {
-    gui_new_frame();
-
     if (skip_frame(nullptr))
         return;
+
+    gui_new_frame();
 
     draw_frame();
 }

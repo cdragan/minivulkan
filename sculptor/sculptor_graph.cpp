@@ -21,8 +21,16 @@ const char* const Sculptor::lfo_sync_names[6]  = { "absolute (ms)", "1 note",   
                                                    "1/4 note",      "1/8 note", "1/16 note" };
 const char* const Sculptor::lfo_start_names[3] = { "middle", "lowest", "highest" };
 
-const char* const Sculptor::mod_source_names[6] = { "Pitch bend", "Mod wheel",  "Channel press.",
-                                                    "Velocity",   "Aftertouch", "Pressure (max)" };
+// Labels and hover texts of the channel/note modulation source roles,
+// indexed by ModSource - 1 (pitch_bend first).
+const Sculptor::LabelTooltip Sculptor::mod_source_descs[6] = {
+    { "Pitch bend", "Pitch bend wheel (-1..1)" },
+    { "Mod wheel", "Modulation wheel (0..1)" },
+    { "Channel press.", "Channel aftertouch pressure (0..1)" },
+    { "Velocity", "Note key strike velocity (0..1)" },
+    { "Aftertouch", "Polyphonic key aftertouch pressure (0..1)" },
+    { "Pressure (max)", "Greater of channel pressure and key aftertouch (0..1)" }
+};
 
 // Pure floor-to-grid math, shared by the renderer and the drop-menu
 // consumers; the negative direction snaps toward negative infinity, not
@@ -50,6 +58,12 @@ Sculptor::Slot Sculptor::output_slot(const char* name)
 Sculptor::Slot Sculptor::input_slot(const char* name)
 {
     return make_slot(name, Sculptor::SlotKind::input);
+}
+
+Sculptor::Slot Sculptor::with_tooltip(Sculptor::Slot slot, const char* tooltip)
+{
+    slot.tooltip = tooltip;
+    return slot;
 }
 
 Sculptor::Slot Sculptor::real_slot(const char* name, float value)
@@ -117,21 +131,24 @@ void Sculptor::append_mod_source_row(Sculptor::Graph* graph,
                                      float            amount,
                                      uint8_t          level_base)
 {
-    Sculptor::Slot src_dot = input_slot(input_idx == 0 ? "Source A" : "Source B");
+    Sculptor::Slot src_dot = input_slot(input_idx == 0 ? "Source A Op" : "Source B Op");
     src_dot.row_group      = row_group;
     src_dot.child_row      = true;
     src_dot.child_level    = level_base;
+    src_dot.tooltip        = "How MIDI input parameter is combined with parameter value (after envelope and LFO)";
     graph->add_slot(node, src_dot);
 
-    Sculptor::Slot src_op = list_slot("Op", source_op_names, 2, op_index);
+    Sculptor::Slot src_op = list_slot("", source_op_names, 2, op_index);
     src_op.row_group      = row_group;
     src_op.child_row      = true;
     src_op.child_level    = level_base;
+    src_op.tooltip        = src_dot.tooltip;
     graph->add_slot(node, src_op);
 
     Sculptor::Slot src_amount = real_slot("Amount", amount);
     src_amount.child_row      = true;
     src_amount.child_level    = static_cast<uint8_t>(level_base + 1);
+    src_amount.tooltip        = "Pre-multiplier for MIDI input parameter applied to this parameter's value";
     graph->add_slot(node, src_amount);
 }
 
@@ -148,21 +165,24 @@ void Sculptor::append_lfo_row(Sculptor::Graph* graph,
                               uint32_t*        depth_slot,
                               uint8_t          level_base)
 {
-    Sculptor::Slot lfo_dot = input_slot("LFO");
+    Sculptor::Slot lfo_dot = input_slot("LFO Op");
     lfo_dot.row_group      = row_group;
     lfo_dot.child_row      = true;
     lfo_dot.child_level    = level_base;
+    lfo_dot.tooltip        = "How LFO value is combined with parameter value";
     graph->add_slot(node, lfo_dot);
 
-    Sculptor::Slot lfo_op = list_slot("Op", source_op_names, 2, op_index);
+    Sculptor::Slot lfo_op = list_slot("", source_op_names, 2, op_index);
     lfo_op.row_group      = row_group;
     lfo_op.child_row      = true;
     lfo_op.child_level    = level_base;
+    lfo_op.tooltip        = lfo_dot.tooltip;
     const uint32_t op_idx = graph->add_slot(node, lfo_op);
 
     Sculptor::Slot lfo_depth = real_slot("Depth", depth);
     lfo_depth.child_row      = true;
     lfo_depth.child_level    = static_cast<uint8_t>(level_base + 1);
+    lfo_depth.tooltip = "Pre-multiplier for LFO value before it's combined with parameter value (after envelope)";
     const uint32_t depth_idx = graph->add_slot(node, lfo_depth);
 
     if (op_slot != nullptr) {

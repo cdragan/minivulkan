@@ -26,8 +26,12 @@ using Sculptor::real_slot;
 using Sculptor::PropertyType;
 using Sculptor::Slot;
 using Sculptor::SlotKind;
+using Sculptor::with_tooltip;
 
 namespace {
+// Shared hover text of the five Mix/Wet rows.
+constexpr const char* mix_tooltip = "Dry/wet balance (0 = original dry input, 1 = fully processed)";
+
 // The seven real effect types' node rows, in shader param order.  Slider
 // bounds are editing aids only: the shaders clamp delay samples, chorus
 // depth and FIR cutoffs themselves, so out-of-range values stay audible and
@@ -38,36 +42,54 @@ namespace {
 static const Sculptor::EffectTypeInfo effect_type_table[Synth::num_effect_types] = {
     { "None", { {} }, 0 },
     { "Distortion",
-      { { "Drive", 1.0f, 100.0f, true }, { "Mix", 0.0f, 1.0f, false }, { "Output Gain", 0.0f, 4.0f, false }, {}, {} },
+      { { "Drive", 1.0f, 100.0f, true, "Input multiplier before soft-clipping (1..100)" },
+        { "Mix", 0.0f, 1.0f, false, mix_tooltip },
+        { "Output Gain", 0.0f, 4.0f, false, "Post-distortion amplitude multiplier (0..4)" },
+        {},
+        {} },
       3 },
     { "Delay",
-      { { "Samples", 256.0f, 44100.0f, true },
-        { "Feedback", 0.0f, 0.95f, false },
-        { "Mix", 0.0f, 1.0f, false },
+      { { "Samples", 256.0f, 44100.0f, true, "Echo delay length in samples (44100 = 1 second at 44.1 kHz)" },
+        { "Feedback", 0.0f, 0.95f, false, "Fraction of delayed output fed back into the delay line (0..0.95)" },
+        { "Mix", 0.0f, 1.0f, false, mix_tooltip },
         {},
         {} },
       3 },
     { "Chorus",
-      { { "Rate Hz", 0.1f, 10.0f, true }, { "Depth", 0.0f, 64.0f, false }, { "Mix", 0.0f, 1.0f, false }, {}, {} },
-      3 },
-    { "Reverb",
-      { { "Room", 0.0f, 1.0f, false }, { "Damping", 0.0f, 1.0f, false }, { "Wet", 0.0f, 1.0f, false }, {}, {} },
-      3 },
-    { "Compressor",
-      { { "Threshold", 0.001f, 1.0f, true },
-        { "Ratio", 1.0f, 20.0f, true },
-        { "Attack", 0.0f, 1.0f, false },
-        { "Release", 0.0f, 1.0f, false },
-        { "Makeup", 0.0f, 4.0f, false } },
-      5 },
-    { "FIR",
-      { { "Lowpass Hz", 20.0f, 22050.0f, true },
-        { "Highpass Hz", 20.0f, 22050.0f, true },
-        { "FIR Slope", 1.0f, 100.0f, false },
+      { { "Rate Hz", 0.1f, 10.0f, true, "LFO frequency modulating the chorus delay time (in Hz)" },
+        { "Depth", 0.0f, 64.0f, false, "Chorus delay range (in samples)" },
+        { "Mix", 0.0f, 1.0f, false, mix_tooltip },
         {},
         {} },
       3 },
-    { "Ring Modulator", { { "Rate Hz", 0.1f, 10000.0f, true }, { "Mix", 0.0f, 1.0f, false }, {}, {}, {} }, 2 },
+    { "Reverb",
+      { { "Room", 0.0f, 1.0f, false, "Reverb duration (0 = short, 1 = long)" },
+        { "Damping", 0.0f, 1.0f, false, "Lowpass filtering on reverb background (0 = no damping, 1 = full damping)" },
+        { "Wet", 0.0f, 1.0f, false, mix_tooltip },
+        {},
+        {} },
+      3 },
+    { "Compressor",
+      { { "Threshold", 0.001f, 1.0f, true, "Peak level above which gain reduction starts (0.001..1)" },
+        { "Ratio", 1.0f, 20.0f, true, "Compression ratio above threshold (1 = none, 20 = 20:1)" },
+        { "Attack", 0.0f, 1.0f, false, "Envelope smoothing on rising peaks (0 = instant, higher = slower attack)" },
+        { "Release", 0.0f, 1.0f, false, "Envelope smoothing on falling peaks (0 = instant, 0.999 = slow release)" },
+        { "Output Gain", 0.0f, 4.0f, false, "Post-compression amplitude multiplier (0..4)" } },
+      5 },
+    { "FIR",
+      { { "Lowpass Hz", 20.0f, 22050.0f, true, "Lowpass cutoff frequency (in Hz, 22050 = off)" },
+        { "Highpass Hz", 20.0f, 22050.0f, true, "Highpass cutoff frequency (in Hz, 20 = off)" },
+        { "FIR Slope", 1.0f, 100.0f, false, "Filter edge sharpness (in percent of FIR taps used, 1..100%)" },
+        {},
+        {} },
+      3 },
+    { "Ring Modulator",
+      { { "Rate Hz", 0.1f, 10000.0f, true, "Sine carrier frequency multiplied with the signal (in Hz)" },
+        { "Mix", 0.0f, 1.0f, false, mix_tooltip },
+        {},
+        {},
+        {} },
+      2 },
 };
 
 // Neutral, audible defaults: a freshly added effect must change the sound
@@ -87,7 +109,9 @@ static const float effect_default_params[Synth::num_effect_types][Synth::max_eff
 // The FIR band Gain row's editing metadata (every band, band 0 included):
 // the oscillator Band Gain bounds.  A zeroed gain stays explicit state the
 // slider cannot reach (min 0.01), mirroring the oscillator's row.
-static const Sculptor::EffectParamInfo fx_band_gain_info = { "Gain", 0.01f, 1.0f, false };
+static const Sculptor::EffectParamInfo fx_band_gain_info = {
+    "Gain", 0.01f, 1.0f, false, "Band's output amplitude"
+};
 } // anonymous namespace
 
 static void effect_layout_name(const Synth::EffectChainBinding& chain,
@@ -121,6 +145,7 @@ static Slot enabled_slot(bool enabled)
     // a connected row greys out and prints "wired" instead of editing.
     Slot slot        = Sculptor::toggle_slot("Enabled", enabled);
     slot.connectable = true;
+    slot.tooltip     = "Enables or bypasses the effect (when driven by MIDI input: active above 0.5)";
     return slot;
 }
 
@@ -757,6 +782,7 @@ static void append_fx_param_block(Sculptor::Graph*                 graph,
     }
     row.child_row   = base_child_row;
     row.child_level = base_child_level;
+    row.tooltip = param_info.tooltip;
 
     row.connectable = binding.lfo_desc_id == 0 || binding.num_inputs < Synth::max_mod_inputs;
     // The drop-menu anchor: the always-visible base row opens the
@@ -939,8 +965,12 @@ bool Sculptor::project_effect_chain_to_graph(const Synth::InstrumentEditorBank& 
     }
     graph->set_node_auto_lane(mapping->input_node, true);
     graph->set_node_auto_lane(mapping->output_node, true);
-    graph->add_slot(mapping->input_node, output_slot("Out"));
-    graph->add_slot(mapping->output_node, input_slot("In"));
+    Sculptor::Slot chain_out = output_slot("Out");
+    chain_out.tooltip        = "Dry audio entering the effect chain";
+    graph->add_slot(mapping->input_node, chain_out);
+    Sculptor::Slot chain_in = input_slot("In");
+    chain_in.tooltip        = "Processed audio leaving the effect chain";
+    graph->add_slot(mapping->output_node, chain_in);
 
     // The MIDI routing node: one per chain, master included (the master
     // chain's sources resolve from channel index 0).  One output dot per
@@ -953,7 +983,9 @@ bool Sculptor::project_effect_chain_to_graph(const Synth::InstrumentEditorBank& 
         mapping->midi_node = midi_node;
         for (uint32_t source = 1; source <= fx_num_input_sources; ++source) {
             mapping->midi_source_slots[source - 1] =
-                graph->add_slot(midi_node, output_slot(Sculptor::mod_source_names[source - 1]));
+                graph->add_slot(midi_node,
+                                with_tooltip(output_slot(Sculptor::mod_source_descs[source - 1].name),
+                                             Sculptor::mod_source_descs[source - 1].tooltip));
         }
 
         // One output dot per added CC of the chain, ascending CC order after
@@ -964,7 +996,8 @@ bool Sculptor::project_effect_chain_to_graph(const Synth::InstrumentEditorBank& 
             }
             char label[32];
             Sculptor::fx_cc_pair_label(Synth::cc_msb_base + i, label, sizeof(label));
-            mapping->midi_cc_slots[i] = graph->add_slot(midi_node, output_slot(label));
+            mapping->midi_cc_slots[i] =
+                graph->add_slot(midi_node, with_tooltip(output_slot(label), "MIDI continuous controller value (0..1)"));
         }
     }
 
@@ -1035,9 +1068,11 @@ bool Sculptor::project_effect_chain_to_graph(const Synth::InstrumentEditorBank& 
                 graph->add_slot(node, header);
                 Slot band_minus_slot      = Sculptor::toggle_slot("-", false);
                 band_minus_slot.row_group = header_group;
+                band_minus_slot.tooltip   = "Delete this band";
                 graph->add_slot(node, band_minus_slot);
                 Slot band_plus_slot      = Sculptor::toggle_slot("+", false);
                 band_plus_slot.row_group = header_group;
+                band_plus_slot.tooltip   = "Add a new band";
                 graph->add_slot(node, band_plus_slot);
 
                 // One full parameter block per band row: band 0 carries only
@@ -1134,20 +1169,31 @@ bool Sculptor::project_effect_chain_to_graph(const Synth::InstrumentEditorBank& 
         mapping->lfo_nodes[desc - 1] = node;
         ++mapping->lfo_count;
 
-        graph->add_slot(node, output_slot("Value"));
-        graph->add_slot(node, wave_slot(lfo.wave));
+        graph->add_slot(node, with_tooltip(output_slot("Value"), "LFO output"));
+        graph->add_slot(node, with_tooltip(wave_slot(lfo.wave), "LFO wave shape"));
         // Duty shapes sawtooth only: sine has no phase to widen.
-        const uint32_t duty_idx =
-            graph->add_slot(node, bounded_real_slot("Duty", static_cast<float>(lfo.duty) / 255.0f, 0.0f, 1.0f, false));
+        const uint32_t duty_idx = graph->add_slot(
+            node,
+            with_tooltip(bounded_real_slot("Duty", static_cast<float>(lfo.duty) / 255.0f, 0.0f, 1.0f, false),
+                         "Sawtooth peak position (0 = falling ramp, 0.5 = triangle, 1 = rising ramp)"));
         graph->set_slot_edit_disabled(node, duty_idx, lfo.wave == Synth::WaveType::sine_wave);
-        const uint32_t period_idx = graph->add_slot(node, int_slot("Period (ms)", lfo.period_ms));
+        const uint32_t period_idx =
+            graph->add_slot(node,
+                            with_tooltip(int_slot("Period (ms)", lfo.period_ms), "LFO wave length (period in ms)"));
         graph->set_slot_edit_disabled(node, period_idx, lfo.beat_div != 0);
         // Shared slot order with the oscillator graph's LFO node
         // (sculptor_osc_graph.cpp); the dispatch below is index-based.
+        graph->add_slot(
+            node,
+            with_tooltip(bounded_real_slot("Pulse", static_cast<float>(lfo.pulse_mix) / 255.0f, 0.0f, 1.0f, false),
+                         "Clips the LFO wave toward a square pulse (0 = smooth, 1 = square)"));
+        graph->add_slot(
+            node,
+            with_tooltip(list_slot("Sync", lfo_sync_names, 6, lfo.beat_div <= 5 ? lfo.beat_div : 0),
+                         "Synchronize LFO wave length with tempo (in note durations), instead of Period (ms)"));
         graph->add_slot(node,
-                        bounded_real_slot("Pulse", static_cast<float>(lfo.pulse_mix) / 255.0f, 0.0f, 1.0f, false));
-        graph->add_slot(node, list_slot("Sync", lfo_sync_names, 6, lfo.beat_div <= 5 ? lfo.beat_div : 0));
-        graph->add_slot(node, list_slot("Start", lfo_start_names, 3, lfo.start_point <= 2 ? lfo.start_point : 0));
+                        with_tooltip(list_slot("Start", lfo_start_names, 3, lfo.start_point <= 2 ? lfo.start_point : 0),
+                                     "Initial value of the LFO wave at note start"));
     }
 
     // Reference wires: one per meaningful binding that names the descriptor,

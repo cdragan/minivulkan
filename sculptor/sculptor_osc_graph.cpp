@@ -15,15 +15,17 @@
 using Sculptor::bounded_real_slot;
 using Sculptor::input_slot;
 using Sculptor::int_slot;
+using Sculptor::LabelTooltip;
 using Sculptor::lfo_start_names;
 using Sculptor::lfo_sync_names;
 using Sculptor::lfo_wave_names;
 using Sculptor::list_slot;
 using Sculptor::make_slot;
-using Sculptor::mod_source_names;
+using Sculptor::mod_source_descs;
 using Sculptor::output_slot;
 using Sculptor::real_slot;
 using Sculptor::source_op_names;
+using Sculptor::with_tooltip;
 
 using Sculptor::connection_into;
 using Sculptor::Graph;
@@ -108,11 +110,36 @@ static_assert(static_cast<uint32_t>(Synth::mod_fm_ratio) == 8);
 static_assert(static_cast<uint32_t>(Synth::mod_pad_tilt0) == 9);
 static_assert(Synth::max_mod_inputs == 2);
 
-const char* const target_names[Synth::num_mod_targets] = {
-    "volume",      "pitch",    "panning",    "Duty A",     "Duty B",    "Waveform Mix", "FM Depth",
-    "Band spread", "FM Ratio", "Pad Tone A", "Pad Tone B", "FIR Slope", "Offset",       "Gain",
-    "Offset",      "Spread",   "Gain",       "FIR Slope",  "Offset",    "Spread",       "Gain",
-    "FIR Slope",   "Offset",   "Spread",     "Gain",       "FIR Slope"
+// One target row's label and hover text, indexed by ModTarget.  The labels
+// are display-only: serialization keys live in sculptor_bank_json.cpp
+// (mod_target_names), so label text is free to change.
+const LabelTooltip target_descs[Synth::num_mod_targets] = {
+    { "Volume", "Amplitude of the output oscillator wave" },
+    { "Pitch", "Tuning of the oscillator waves (in semitones, -24..24)" },
+    { "Pan", "Stereo position of the output (0 = left, 0.5 = center, 1 = right)" },
+    { "Duty A", "Shape adjustment of oscillator wave (sawtooth ramp point, pulse width, pad wander)" },
+    { "Duty B", "Shape adjustment of oscillator wave (sawtooth ramp point, pulse width, pad wander)" },
+    { "Waveform Mix", "Balance between primary and secondary oscillator wave (0 = waveform A, 1 = Waveform B)" },
+    { "FM Depth", "Amount of frequency modulation applied by secondary wave to primary wave" },
+    { "Band spread", "Band width around its center (in semitones)" },
+    { "FM Ratio", "Secondary oscillator wave frequency ratio to the note pitch" },
+    { "Pad Tone A", "Pad wave harmonic tilt (-1 flat, +1 mellow)" },
+    { "Pad Tone B", "Pad wave harmonic tilt (-1 flat, +1 mellow)" },
+    { "FIR Slope", "Filter edge sharpness" },
+    { "Offset", "Band center offset from the note pitch, in semitones" },
+    { "Gain", "Band's output amplitude" },
+    { "Offset", "Band center offset from the note pitch, in semitones" },
+    { "Spread", "Band width around its center (in semitones)" },
+    { "Gain", "Band's output amplitude" },
+    { "FIR Slope", "Filter edge sharpness" },
+    { "Offset", "Band center offset from the note pitch, in semitones" },
+    { "Spread", "Band width around its center (in semitones)" },
+    { "Gain", "Band's output amplitude" },
+    { "FIR Slope", "Filter edge sharpness" },
+    { "Offset", "Band center offset from the note pitch, in semitones" },
+    { "Spread", "Band width around its center (in semitones)" },
+    { "Gain", "Band's output amplitude" },
+    { "FIR Slope", "Filter edge sharpness" },
 };
 const char* const wave_names[6]     = { "off", "sine", "sawtooth", "pulse", "noise", "pad" };
 const char* const osc_mode_names[4] = { "blend", "frequency modulation", "hard sync", "ring modulation" };
@@ -120,9 +147,14 @@ const char* const filter_type_names[Synth::num_filter_types] = { "off", "bandpas
 
 // Dropdown order puts "off" first.  The stored enum order is fixed: zero must
 
-// The FIR spread row's label, indexed by the stored FilterType value.
-
-const char* const fir_spread_names[Synth::num_filter_types] = { "Filter Off", "Spread", "Cutoff (Hz)", "Cutoff (Hz)" };
+// The FIR spread row's label and hover text, indexed by the stored
+// FilterType value.  The off row is a dead variant: under that filter
+// type the row shows no tooltip.
+const LabelTooltip fir_spread_descs[Synth::num_filter_types] = { { "Filter Off", nullptr },
+                                                                 { "Spread",
+                                                                   "Band width around its center (in semitones)" },
+                                                                 { "Cutoff (Hz)", "Cutoff frequency (in Hz)" },
+                                                                 { "Cutoff (Hz)", "Cutoff frequency (in Hz)" } };
 
 // Oscillator node slot layout. The order is fixed: project fills slots in
 // exactly this order and compile reads properties back by index, so the two
@@ -402,6 +434,7 @@ static Sculptor::Slot osc_view_connectable_slot(const char*       name,
     Sculptor::Slot slot = osc_view_display_slot(name, display_value, target, fir_type);
     slot.connectable    = true;
     slot.child_row      = child_row;
+    slot.tooltip        = target_descs[target].tooltip;
     // The drop-menu anchor: exactly the ten target value rows take
     // creation menus when a drag from the row's dot releases over empty
     // canvas.
@@ -490,13 +523,13 @@ static void append_target_block(Graph*                      graph,
     env_dot.child_row      = true;
     env_dot.child_level    = level_base;
     env_dot.row_group      = static_cast<uint8_t>(4 * t + 4);
-    ;
+    env_dot.tooltip        = "Pre-multiplier for envelope value before it's added to base parameter value";
     graph->add_slot(node, env_dot);
     Sculptor::Slot env_depth = bounded_real_slot("", gen.envelope_depth, 0.0f, 1.0f, false);
     env_depth.child_row      = true;
     env_depth.child_level    = level_base;
     env_depth.row_group      = static_cast<uint8_t>(4 * t + 4);
-    ;
+    env_depth.tooltip        = env_dot.tooltip;
     graph->add_slot(node, env_depth);
     Sculptor::append_lfo_row(graph,
                              node,
@@ -509,6 +542,8 @@ static void append_target_block(Graph*                      graph,
     Sculptor::Slot rate_scale = real_slot("Rate x", gen.lfo_rate_scale_ms);
     rate_scale.child_row      = true;
     rate_scale.child_level    = static_cast<uint8_t>(level_base + 1);
+    rate_scale.tooltip =
+        "Pre-multiplier for MIDI input parameter connected to LFO Rate, applied to LFO wave length (period in ms), affects LFO speed";
     graph->add_slot(node, rate_scale);
     for (uint32_t i = 0; i < Synth::max_mod_inputs; ++i) {
         const Synth::SourceOp op    = i < gen.num_inputs ? gen.inputs[i].op : Synth::SourceOp::add;
@@ -531,8 +566,13 @@ static void append_band_row(Graph* graph, uint32_t node, Synth::ModTarget target
     const uint32_t t        = static_cast<uint32_t>(target);
     const uint32_t slope_t  = static_cast<uint32_t>(Synth::mod_fir_band1_slope);
     const bool     is_slope = (t - slope_t) % 4u == 0u && t >= slope_t;
+    // Band 1's Offset and Gain rows are inactive under the off, lowpass
+    // and highpass filter types: their rows stay visible but carry no
+    // tooltip.
+    const bool band0_inactive = (target == Synth::mod_fir_band0_offset || target == Synth::mod_fir_band0_gain) &&
+                                osc.fir_type != Synth::fir_bandpass;
     if (is_slope) {
-        Sculptor::Slot slot = Sculptor::bounded_int_slot(target_names[t],
+        Sculptor::Slot slot = Sculptor::bounded_int_slot(target_descs[t].name,
                                                          static_cast<int32_t>(osc.targets[target].base_value + 0.5f),
                                                          1,
                                                          100);
@@ -540,11 +580,16 @@ static void append_band_row(Graph* graph, uint32_t node, Synth::ModTarget target
         slot.child_level    = 2;
         slot.connectable    = true;
         slot.drop_menu      = true;
+        slot.tooltip        = band0_inactive ? nullptr : target_descs[t].tooltip;
         graph->add_slot(node, slot);
     }
     else {
-        Sculptor::Slot slot = osc_view_connectable_slot(target_names[t], osc.targets[target].base_value, target, true);
+        Sculptor::Slot slot =
+            osc_view_connectable_slot(target_descs[t].name, osc.targets[target].base_value, target, true);
         slot.child_level    = 2;
+        if (band0_inactive) {
+            slot.tooltip = nullptr;
+        }
         graph->add_slot(node, slot);
     }
     append_target_block(graph, node, target, osc.targets[target], osc_band_block_level);
@@ -825,85 +870,103 @@ static void project_osc_node(Sculptor::Graph*           graph,
     graph->set_node_oscillator(node, true);
     mapping->osc_nodes[layer] = node;
 
-    mapping->osc_output_slot = graph->add_slot(node, output_slot("Output"));
+    mapping->osc_output_slot = graph->add_slot(node, with_tooltip(output_slot("Output"), "Oscillator output"));
 
     // Waveform A cannot be off: the list starts at sine and compile adds
     // one back onto the wave type.  Old banks storing off clamp to sine.
     graph->add_slot(
         node,
-        list_slot("Waveform A",
-                  wave_names + 1,
-                  5,
-                  osc.osc_type[0] == Synth::WaveType::no_wave ? 0 : static_cast<uint32_t>(osc.osc_type[0]) - 1));
-    graph->add_slot(
-        node,
-        osc_view_connectable_slot(target_names[3], osc.targets[Synth::mod_duty0].base_value, Synth::mod_duty0, true));
+        with_tooltip(
+            list_slot("Waveform A",
+                      wave_names + 1,
+                      5,
+                      osc.osc_type[0] == Synth::WaveType::no_wave ? 0 : static_cast<uint32_t>(osc.osc_type[0]) - 1),
+            "Primary oscillator wave shape"));
+    graph->add_slot(node,
+                    osc_view_connectable_slot(target_descs[3].name,
+                                              osc.targets[Synth::mod_duty0].base_value,
+                                              Synth::mod_duty0,
+                                              true));
     // One 12-slot modulation block per ModTarget, directly after the
     // target's value row, seeded from the layer's own binding
     // (display-unit fields carry the raw values; only the base rows are
     // scaled).
     append_target_block(graph, node, Synth::mod_duty0, osc.targets[Synth::mod_duty0], 2);
     graph->add_slot(node,
-                    osc_view_connectable_slot(target_names[9],
+                    osc_view_connectable_slot(target_descs[9].name,
                                               osc.targets[Synth::mod_pad_tilt0].base_value,
                                               Synth::mod_pad_tilt0,
                                               true));
     append_target_block(graph, node, Synth::mod_pad_tilt0, osc.targets[Synth::mod_pad_tilt0], 2);
-    graph->add_slot(node, list_slot("Waveform B", wave_names, 6, static_cast<uint32_t>(osc.osc_type[1])));
-    graph->add_slot(
-        node,
-        osc_view_connectable_slot(target_names[4], osc.targets[Synth::mod_duty1].base_value, Synth::mod_duty1, true));
+    graph->add_slot(node,
+                    with_tooltip(list_slot("Waveform B", wave_names, 6, static_cast<uint32_t>(osc.osc_type[1])),
+                                 "Secondary oscillator wave shape"));
+    graph->add_slot(node,
+                    osc_view_connectable_slot(target_descs[4].name,
+                                              osc.targets[Synth::mod_duty1].base_value,
+                                              Synth::mod_duty1,
+                                              true));
     append_target_block(graph, node, Synth::mod_duty1, osc.targets[Synth::mod_duty1], 2);
     graph->add_slot(node,
-                    osc_view_connectable_slot(target_names[10],
+                    osc_view_connectable_slot(target_descs[10].name,
                                               osc.targets[Synth::mod_pad_tilt1].base_value,
                                               Synth::mod_pad_tilt1,
                                               true));
     append_target_block(graph, node, Synth::mod_pad_tilt1, osc.targets[Synth::mod_pad_tilt1], 2);
-    graph->add_slot(node, list_slot("Mix Mode", osc_mode_names, 4, static_cast<uint32_t>(osc.osc_mode)));
     graph->add_slot(node,
-                    osc_view_connectable_slot(target_names[5],
+                    with_tooltip(list_slot("Mix Mode", osc_mode_names, 4, static_cast<uint32_t>(osc.osc_mode)),
+                                 "How the two oscillator waves are combined"));
+    graph->add_slot(node,
+                    osc_view_connectable_slot(target_descs[5].name,
                                               osc.targets[Synth::mod_osc_mix].base_value,
                                               Synth::mod_osc_mix,
                                               true));
     append_target_block(graph, node, Synth::mod_osc_mix, osc.targets[Synth::mod_osc_mix], 2);
     graph->add_slot(node,
-                    osc_view_connectable_slot(target_names[6],
+                    osc_view_connectable_slot(target_descs[6].name,
                                               osc.targets[Synth::mod_fm_index].base_value /
                                                   osc_target_views[Synth::mod_fm_index].bank_scale,
                                               Synth::mod_fm_index,
                                               true));
     append_target_block(graph, node, Synth::mod_fm_index, osc.targets[Synth::mod_fm_index], 2);
     graph->add_slot(node,
-                    osc_view_connectable_slot(target_names[8],
+                    osc_view_connectable_slot(target_descs[8].name,
                                               osc.targets[Synth::mod_fm_ratio].base_value,
                                               Synth::mod_fm_ratio,
                                               true));
     append_target_block(graph, node, Synth::mod_fm_ratio, osc.targets[Synth::mod_fm_ratio], 2);
     graph->add_slot(node,
-                    osc_view_connectable_slot("Volume", osc.targets[Synth::mod_volume].base_value, Synth::mod_volume));
+                    osc_view_connectable_slot(target_descs[Synth::mod_volume].name,
+                                              osc.targets[Synth::mod_volume].base_value,
+                                              Synth::mod_volume));
     append_target_block(graph, node, Synth::mod_volume, osc.targets[Synth::mod_volume]);
     graph->add_slot(node,
-                    osc_view_connectable_slot("Pan", osc.targets[Synth::mod_panning].base_value, Synth::mod_panning));
+                    osc_view_connectable_slot(target_descs[Synth::mod_panning].name,
+                                              osc.targets[Synth::mod_panning].base_value,
+                                              Synth::mod_panning));
     append_target_block(graph, node, Synth::mod_panning, osc.targets[Synth::mod_panning]);
     // The Pitch base value is a bounded bare input box: populated min/max
     // on an unbounded real slot (real_bounded false) means clamp-on-edit;
     // the renderer's guard is min < max. The removed Pitch Offset row
     // was a narrower static subset of this same value.
-    Sculptor::Slot pitch_slot =
-        osc_view_connectable_slot("Pitch", osc.targets[Synth::mod_pitch].base_value, Synth::mod_pitch);
-    pitch_slot.real_bounded = false;
+    Sculptor::Slot pitch_slot = osc_view_connectable_slot(target_descs[Synth::mod_pitch].name,
+                                                          osc.targets[Synth::mod_pitch].base_value,
+                                                          Synth::mod_pitch);
+    pitch_slot.real_bounded   = false;
     graph->add_slot(node, pitch_slot);
     append_target_block(graph, node, Synth::mod_pitch, osc.targets[Synth::mod_pitch]);
-    Sculptor::Slot octave_offset_slot = Sculptor::bounded_int_slot("Octave Offset",
-                                                                   osc.octave_offset,
-                                                                   Sculptor::osc_octave_offset_min,
-                                                                   Sculptor::osc_octave_offset_max);
+    Sculptor::Slot octave_offset_slot = with_tooltip(Sculptor::bounded_int_slot("Octave Offset",
+                                                                                osc.octave_offset,
+                                                                                Sculptor::osc_octave_offset_min,
+                                                                                Sculptor::osc_octave_offset_max),
+                                                     "Octave shift applied to pitch (-12..12)");
     octave_offset_slot.child_row      = true;
     graph->add_slot(node, octave_offset_slot);
     graph->add_slot(
         node,
-        list_slot("Filter Type", filter_type_names, Synth::num_filter_types, static_cast<uint32_t>(osc.fir_type)));
+        with_tooltip(
+            list_slot("Filter Type", filter_type_names, Synth::num_filter_types, static_cast<uint32_t>(osc.fir_type)),
+            "Filter applied to oscillator output"));
 
     // One uniform block per existing band, nested under Filter Type:
     // the "Band N" header label row with its [-]/[+] click slots one
@@ -926,9 +989,11 @@ static void project_osc_node(Sculptor::Graph*           graph,
         graph->add_slot(node, header);
         Sculptor::Slot band_minus_slot = Sculptor::toggle_slot("-", false);
         band_minus_slot.row_group      = row_group;
+        band_minus_slot.tooltip        = "Delete this band";
         graph->add_slot(node, band_minus_slot);
         Sculptor::Slot band_plus_slot = Sculptor::toggle_slot("+", false);
         band_plus_slot.row_group      = row_group;
+        band_plus_slot.tooltip        = "Add a new band";
         graph->add_slot(node, band_plus_slot);
 
         // One uniform row group per band: Offset, Spread, Gain, Slope.  Band 0's
@@ -945,11 +1010,15 @@ static void project_osc_node(Sculptor::Graph*           graph,
         if (band == 0) {
             append_band_row(graph, node, Synth::mod_fir_band0_offset, osc);
             {
-                Sculptor::Slot spread_row = osc_view_connectable_slot(fir_spread_names[osc.fir_type],
+                Sculptor::Slot spread_row = osc_view_connectable_slot(fir_spread_descs[osc.fir_type].name,
                                                                       fir_spread_display_value(osc),
                                                                       Synth::mod_fir_spread,
                                                                       true,
                                                                       osc.fir_type);
+                // The Spread row's text follows the filter type, not the
+                // Band spread target: under lowpass and highpass the row
+                // shows the cutoff text, and under off it stays exempt.
+                spread_row.tooltip     = fir_spread_descs[osc.fir_type].tooltip;
                 spread_row.child_level    = band0_row_level;
                 graph->add_slot(node, spread_row);
             }
@@ -973,6 +1042,10 @@ static void project_osc_node(Sculptor::Graph*           graph,
             fir_slope_slot.child_level = band0_row_level;
             fir_slope_slot.connectable = true;
             fir_slope_slot.drop_menu   = true;
+            // Under the off filter type the slope row is a dead variant:
+            // visible but exempt from tooltips.
+            fir_slope_slot.tooltip =
+                osc.fir_type == Synth::fir_off ? nullptr : target_descs[Synth::mod_fir_slope].tooltip;
             graph->add_slot(node, fir_slope_slot);
             append_target_block(graph,
                                 node,
@@ -1005,11 +1078,19 @@ static uint32_t create_env_node(Sculptor::Graph*                 graph,
     // position overrides create_node's grid snap.  Envelope nodes are wider
     // so the curve widget has room to work.
     graph->set_node_layout(node, position, Sculptor::envelope_node_content_width, 0.0f);
-    graph->add_slot(node, output_slot("Value"));
-    graph->add_slot(node, real_slot("Value (min)", env.min_value));
-    graph->add_slot(node, real_slot("Value (max)", env.min_value + 65535.0f * env.min_max_delta));
-    graph->add_slot(node, Sculptor::toggle_slot("Ping-Pong", (env.flags & Synth::envelope_ping_pong) != 0));
-    graph->add_slot(node, Sculptor::toggle_slot("Quick Release", (env.flags & Synth::envelope_quick_release) != 0));
+    graph->add_slot(node, with_tooltip(output_slot("Value"), "Envelope output"));
+    graph->add_slot(node,
+                    with_tooltip(real_slot("Value (min)", env.min_value), "Lowest value produced by the envelope"));
+    graph->add_slot(node,
+                    with_tooltip(real_slot("Value (max)", env.min_value + 65535.0f * env.min_max_delta),
+                                 "Highest value produced by the envelope"));
+    graph->add_slot(node,
+                    with_tooltip(Sculptor::toggle_slot("Ping-Pong", (env.flags & Synth::envelope_ping_pong) != 0),
+                                 "Bounces the sustain loop back and forth instead of looping it"));
+    graph->add_slot(
+        node,
+        with_tooltip(Sculptor::toggle_slot("Quick Release", (env.flags & Synth::envelope_quick_release) != 0),
+                     "On note off, jumps behind sustain loop end"));
     // Point and sustain editing lives in the curve state widget; property
     // slots for those fields would be a second stale UI over the same data.
     return node;
@@ -1027,21 +1108,36 @@ static uint32_t create_lfo_node(Sculptor::Graph*            graph,
     // Records carry arbitrary (unsnapped) editor positions; the exact
     // position overrides create_node's grid snap.
     graph->set_node_layout(node, position, 0.0f, 0.0f);
-    graph->add_slot(node, output_slot("Value"));
-    graph->add_slot(node, input_slot("Depth"));
-    graph->add_slot(node, input_slot("Rate"));
-    graph->add_slot(node, list_slot("Waveform", lfo_wave_names, 2, lfo.wave == Synth::WaveType::sine_wave ? 0 : 1));
+    graph->add_slot(node, with_tooltip(output_slot("Value"), "LFO output"));
+    graph->add_slot(node, with_tooltip(input_slot("Depth"), "MIDI input parameter multiplier for LFO value"));
+    graph->add_slot(node,
+                    with_tooltip(input_slot("Rate"),
+                                 "MIDI input parameter applied to LFO wave length (period in ms), multiplied by Rate x "
+                                 "from the target"));
+    graph->add_slot(
+        node,
+        with_tooltip(list_slot("Waveform", lfo_wave_names, 2, lfo.wave == Synth::WaveType::sine_wave ? 0 : 1),
+                     "LFO wave shape"));
     // Duty shapes sawtooth only: sine has no phase to widen.
     const uint32_t duty_idx =
-        graph->add_slot(node, bounded_real_slot("Duty", static_cast<float>(lfo.duty) / 255.0f, 0.0f, 1.0f));
+        graph->add_slot(node,
+                        with_tooltip(bounded_real_slot("Duty", static_cast<float>(lfo.duty) / 255.0f, 0.0f, 1.0f),
+                                     "Sawtooth peak position (0 = falling ramp, 0.5 = triangle, 1 = rising ramp)"));
     graph->set_slot_edit_disabled(node, duty_idx, lfo.wave == Synth::WaveType::sine_wave);
-    const uint32_t period_idx = graph->add_slot(node, int_slot("Period (ms)", lfo.period_ms));
+    const uint32_t period_idx =
+        graph->add_slot(node, with_tooltip(int_slot("Period (ms)", lfo.period_ms), "LFO wave length (period in ms)"));
     graph->set_slot_edit_disabled(node, period_idx, lfo.beat_div != 0);
     // Shared slot order with the effect-graph LFO projection
     // (sculptor_effect_graph.cpp): the fx apply dispatch is index-based.
-    graph->add_slot(node, bounded_real_slot("Pulse", static_cast<float>(lfo.pulse_mix) / 255.0f, 0.0f, 1.0f));
-    graph->add_slot(node, list_slot("Sync", lfo_sync_names, 6, lfo.beat_div <= 5 ? lfo.beat_div : 0));
-    graph->add_slot(node, list_slot("Start", lfo_start_names, 3, lfo.start_point <= 2 ? lfo.start_point : 0));
+    graph->add_slot(node,
+                    with_tooltip(bounded_real_slot("Pulse", static_cast<float>(lfo.pulse_mix) / 255.0f, 0.0f, 1.0f),
+                                 "Clips the LFO wave toward a square pulse (0 = smooth, 1 = square)"));
+    graph->add_slot(node,
+                    with_tooltip(list_slot("Sync", lfo_sync_names, 6, lfo.beat_div <= 5 ? lfo.beat_div : 0),
+                                 "Synchronize LFO wave length with tempo (in note durations), instead of Period (ms)"));
+    graph->add_slot(node,
+                    with_tooltip(list_slot("Start", lfo_start_names, 3, lfo.start_point <= 2 ? lfo.start_point : 0),
+                                 "Initial value of the LFO wave at note start"));
     return node;
 }
 
@@ -1507,9 +1603,10 @@ bool Sculptor::project_instrument_to_graph(const Synth::Instrument&     instrume
         Synth::ModSource::pressure_combine, Synth::ModSource::pitch_bend, Synth::ModSource::mod_wheel,
     };
     for (uint32_t i = 0; i < num_osc_graph_inputs; ++i) {
-        const uint32_t source = static_cast<uint32_t>(input_display_order[i]);
-        mapping->input_source_slots[source - 1] =
-            graph->add_slot(input_node, output_slot(mod_source_names[source - 1]));
+        const uint32_t source                   = static_cast<uint32_t>(input_display_order[i]);
+        mapping->input_source_slots[source - 1] = graph->add_slot(
+            input_node,
+            with_tooltip(output_slot(mod_source_descs[source - 1].name), mod_source_descs[source - 1].tooltip));
     }
     if (added_cc_mask) {
         for (uint32_t i = 0; i < Synth::num_assignable_ccs; ++i) {
@@ -1518,7 +1615,9 @@ bool Sculptor::project_instrument_to_graph(const Synth::Instrument&     instrume
             }
             char label[32];
             Sculptor::fx_cc_pair_label(Synth::cc_msb_base + i, label, sizeof(label));
-            mapping->input_cc_slots[i] = graph->add_slot(input_node, output_slot(label));
+            mapping->input_cc_slots[i] =
+                graph->add_slot(input_node,
+                                with_tooltip(output_slot(label), "MIDI continuous controller value (0..1)"));
         }
     }
     // The note/layer detune and release rows live on a dedicated node
@@ -1531,15 +1630,19 @@ bool Sculptor::project_instrument_to_graph(const Synth::Instrument&     instrume
     }
     mapping->instrument_node = instrument_node;
     // Random pitch offset drawn once per note for every layer, in semitones.
-    mapping->instrument_slots[0] =
-        graph->add_slot(instrument_node,
-                        bounded_real_slot("Random Note Detune", instrument.note_skew_semitones, 0.0f, 1.0f));
+    mapping->instrument_slots[0] = graph->add_slot(
+        instrument_node,
+        with_tooltip(bounded_real_slot("Random Note Detune", instrument.note_skew_semitones, 0.0f, 1.0f),
+                     "Max random pitch offset per note, shared by all oscillators (in semitones)"));
     // Independent random pitch offset drawn per layer per note, in semitones.
-    mapping->instrument_slots[1] =
-        graph->add_slot(instrument_node,
-                        bounded_real_slot("Random Oscillator Detune", instrument.layer_skew_semitones, 0.0f, 1.0f));
+    mapping->instrument_slots[1] = graph->add_slot(
+        instrument_node,
+        with_tooltip(bounded_real_slot("Random Oscillator Detune", instrument.layer_skew_semitones, 0.0f, 1.0f),
+                     "Max random pitch offset per note, separate for each oscillator (in semitones)"));
     mapping->instrument_slots[2] =
-        graph->add_slot(instrument_node, bounded_real_slot("Release (s)", instrument.release_seconds, 0.0f, 30.0f));
+        graph->add_slot(instrument_node,
+                        with_tooltip(bounded_real_slot("Release (s)", instrument.release_seconds, 0.0f, 30.0f),
+                                     "Sustain volume decay time in seconds (0 = no decay)"));
 
     // One node per editor layer, in order: mapping.osc_nodes[o] names node
     // o, whether or not a slot names it.  The source row (slot -> editor
