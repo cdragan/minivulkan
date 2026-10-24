@@ -9185,14 +9185,14 @@ static void build_routing_fixture(Synth::InstrumentEditorBank* bank, uint32_t ow
 // with the auto-lane stamp cleared.
 static void fx_output_node_move_regressions()
 {
-    std::unique_ptr<Synth::InstrumentEditorBank> bank_storage = std::make_unique<Synth::InstrumentEditorBank>();
-    Synth::InstrumentEditorBank& bank = *bank_storage;
-    std::unique_ptr<Sculptor::Graph> graph_storage = std::make_unique<Sculptor::Graph>();
-    Sculptor::Graph& graph = *graph_storage;
-    Sculptor::EffectGraphMapping mapping = {};
-    Sculptor::GraphChange discarded[Sculptor::max_pending_changes] = {};
+    std::unique_ptr<Synth::InstrumentEditorBank> bank_storage  = std::make_unique<Synth::InstrumentEditorBank>();
+    Synth::InstrumentEditorBank&                 bank          = *bank_storage;
+    std::unique_ptr<Sculptor::Graph>             graph_storage = std::make_unique<Sculptor::Graph>();
+    Sculptor::Graph&                             graph         = *graph_storage;
+    Sculptor::EffectGraphMapping                 mapping       = {};
+    Sculptor::GraphChange                        discarded[Sculptor::max_pending_changes] = {};
     build_routing_fixture(&bank, 0, 3);
-    bank.effect_routing[0].in = Sculptor::effect_in_first_slot;
+    bank.effect_routing[0].in     = Sculptor::effect_in_first_slot;
     bank.effect_routing[0].out[0] = Sculptor::effect_out_next;
     bank.effect_routing[0].out[1] = Sculptor::effect_out_next;
     bank.effect_routing[0].out[2] = Sculptor::effect_out_output;
@@ -9200,16 +9200,16 @@ static void fx_output_node_move_regressions()
     TEST(Sculptor::project_effect_chain_to_graph(bank, 0, &graph, &mapping));
     graph.take_changes(discarded, Sculptor::max_pending_changes);
     float widths[Sculptor::max_nodes] = {};
-    widths[mapping.input_node] = 64.0f;
-    widths[mapping.effect_nodes[0]] = 96.0f;
-    widths[mapping.effect_nodes[1]] = 96.0f;
-    widths[mapping.effect_nodes[2]] = 96.0f;
-    widths[mapping.output_node] = 64.0f;
+    widths[mapping.input_node]        = 64.0f;
+    widths[mapping.effect_nodes[0]]   = 96.0f;
+    widths[mapping.effect_nodes[1]]   = 96.0f;
+    widths[mapping.effect_nodes[2]]   = 96.0f;
+    widths[mapping.output_node]       = 64.0f;
     TEST(Sculptor::fx_arrange_auto_lane(&graph, mapping, widths));
     // The user grabs the arranged output node and drags it left of the
     // rightmost effect. The snapped drag target is a full grid step left.
     const Sculptor::Node& output = graph.node(mapping.output_node);
-    const vmath::vec2 grab(output.position.x + 8.0f, output.position.y + 8.0f);
+    const vmath::vec2     grab(output.position.x + 8.0f, output.position.y + 8.0f);
     graph.begin_node_drag(mapping.output_node, grab);
     const vmath::vec2 target(output.position.x - 16.0f, output.position.y);
     graph.apply_node_drag(grab + vmath::vec2(-16.0f, 0.0f));
@@ -9217,22 +9217,23 @@ static void fx_output_node_move_regressions()
     TEST(graph.node(mapping.output_node).position.x == target.x);
     // The pane's release commit: capture the moved node into a kind-4
     // record the way node_layout_moved marks it.
-    bool capture_nodes[Sculptor::max_nodes] = {};
-    capture_nodes[mapping.output_node] = true;
+    bool capture_nodes[Sculptor::max_nodes]                        = {};
+    capture_nodes[mapping.output_node]                             = true;
     std::unique_ptr<Synth::InstrumentEditorBank> candidate_storage = std::make_unique<Synth::InstrumentEditorBank>();
-    Synth::InstrumentEditorBank& candidate = *candidate_storage;
+    Synth::InstrumentEditorBank&                 candidate         = *candidate_storage;
     TEST(Sculptor::apply_effect_graph_batch(&bank, &graph, &mapping, nullptr, 0, capture_nodes, &candidate));
     // The next projection restores the record and the arrangement must
     // leave the moved output where the user put it.
     TEST(Sculptor::project_effect_chain_to_graph(candidate, 0, &graph, &mapping));
     graph.take_changes(discarded, Sculptor::max_pending_changes);
     bool restored = false;
-    for (uint32_t i = 0; i < candidate.graph_layout_count; ++i)
-    {
+    for (uint32_t i = 0; i < candidate.graph_layout_count; ++i) {
         const Synth::GraphNodeLayout& record = candidate.graph_layout[i];
-        if (record.kind == 4 && strcmp(record.name, "Channel output") == 0)
-        {
-            graph.set_node_layout(mapping.output_node, vmath::vec2(record.x, record.y), record.width_override, record.height_override);
+        if (record.kind == 4 && strcmp(record.name, "Channel output") == 0) {
+            graph.set_node_layout(mapping.output_node,
+                                  vmath::vec2(record.x, record.y),
+                                  record.width_override,
+                                  record.height_override);
             restored = true;
         }
     }
@@ -9527,12 +9528,72 @@ static uint32_t count_drop_menu_slots(const Sculptor::Graph& graph)
     return flagged;
 }
 
+// A fresh drag session fully re-snapshots the restore arrays: a
+// return-to-press in session two must never restore session one's
+// placements, and a later session restores its own press point.
+static void fx_drag_session_reset_regressions()
+{
+    std::unique_ptr<Synth::InstrumentEditorBank> bank_storage  = std::make_unique<Synth::InstrumentEditorBank>();
+    Synth::InstrumentEditorBank&                 bank          = *bank_storage;
+    std::unique_ptr<Sculptor::Graph>             graph_storage = std::make_unique<Sculptor::Graph>();
+    Sculptor::Graph&                             graph         = *graph_storage;
+    Sculptor::EffectGraphMapping                 mapping       = {};
+    Sculptor::GraphChange                        discarded[Sculptor::max_pending_changes] = {};
+    build_routing_fixture(&bank, 0, 3);
+    bank.effect_routing[0].in     = Sculptor::effect_in_first_slot;
+    bank.effect_routing[0].out[0] = Sculptor::effect_out_next;
+    bank.effect_routing[0].out[1] = Sculptor::effect_out_next;
+    bank.effect_routing[0].out[2] = Sculptor::effect_out_output;
+    TEST(Synth::validate_instrument_bank(&bank.bank));
+    TEST(Sculptor::project_effect_chain_to_graph(bank, 0, &graph, &mapping));
+    graph.take_changes(discarded, Sculptor::max_pending_changes);
+    float widths[Sculptor::max_nodes] = {};
+    widths[mapping.input_node]        = 64.0f;
+    widths[mapping.effect_nodes[0]]   = 64.0f;
+    widths[mapping.effect_nodes[1]]   = 64.0f;
+    widths[mapping.effect_nodes[2]]   = 64.0f;
+    widths[mapping.output_node]       = 64.0f;
+    TEST(Sculptor::fx_arrange_auto_lane(&graph, mapping, widths));
+    const uint32_t    node_a  = mapping.effect_nodes[0];
+    const uint32_t    node_b  = mapping.effect_nodes[1];
+    const vmath::vec2 place_a = graph.node(node_a).position;
+    const vmath::vec2 place_b = graph.node(node_b).position;
+    // Session one: node A opts out of the arrangement by one step.
+    graph.begin_node_drag(node_a, place_a + vmath::vec2(8.0f, 8.0f));
+    graph.apply_node_drag(place_a + vmath::vec2(8.0f + 32.0f, 8.0f));
+    TEST(graph.node(node_a).position.x == place_a.x + 32.0f);
+    TEST(! graph.node_auto_lane(node_a));
+    // Session two on node B: a return to B's own press point restores
+    // only B's session-two state. A keeps its moved place and its
+    // cleared stamp: no stale session-one restore may fire.
+    graph.begin_node_drag(node_b, place_b + vmath::vec2(8.0f, 8.0f));
+    graph.apply_node_drag(place_b + vmath::vec2(8.0f + 32.0f, 8.0f));
+    TEST(graph.node(node_b).position.x == place_b.x + 32.0f);
+    graph.apply_node_drag(place_b + vmath::vec2(8.0f, 8.0f));
+    TEST(graph.node(node_b).position.x == place_b.x);
+    TEST(graph.node_auto_lane(node_b));
+    TEST(graph.node(node_a).position.x == place_a.x + 32.0f);
+    TEST(! graph.node_auto_lane(node_a));
+    // Session three on A from its moved place: returning to that
+    // press point restores the moved place and the cleared stamp,
+    // not the original auto-lane placement from session one.
+    const vmath::vec2 place_a2 = graph.node(node_a).position;
+    graph.begin_node_drag(node_a, place_a2 + vmath::vec2(8.0f, 8.0f));
+    graph.apply_node_drag(place_a2 + vmath::vec2(8.0f + 32.0f, 8.0f));
+    TEST(graph.node(node_a).position.x == place_a2.x + 32.0f);
+    graph.apply_node_drag(place_a2 + vmath::vec2(8.0f, 8.0f));
+    TEST(graph.node(node_a).position.x == place_a2.x);
+    TEST(graph.node(node_a).position.y == place_a2.y);
+    TEST(! graph.node_auto_lane(node_a));
+}
+
 // T-M3-1.3: the fx projection flags the M1 drop-menu anchor on every
 // projected effect's base-value row while that parameter is unconnected
 // (no LFO wire, no source wire) and modulator capacity remains; wired
 // parameters and an exhausted modulator capacity leave the flag off,
 // fields 1-9 never carry it, and no fx node other than an eligible base
 // row does (the fx projection never flags an oscillator-pane shape).
+
 static void fx_drop_anchor_flag_regressions()
 {
     const std::unique_ptr<Synth::InstrumentEditorBank> source_storage = std::make_unique<Synth::InstrumentEditorBank>();
@@ -19788,6 +19849,7 @@ int main()
     fx_inputs_move_reprojection_regressions();
     fx_auto_lane_spacing_regressions();
     fx_output_node_move_regressions();
+    fx_drag_session_reset_regressions();
     fx_drop_anchor_flag_regressions();
     fx_add_lfo_modeled_regressions();
     fx_lfo_binding_seed_regressions();

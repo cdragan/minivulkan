@@ -103,6 +103,12 @@ static bool fx_splice_effect_run(Synth::EffectChainBinding*    chain,
                                  int32_t                       after_slot,
                                  Sculptor::EffectGraphMapping* mapping        = nullptr,
                                  uint32_t*                     after_slot_new = nullptr);
+static bool fx_connect_run(Synth::EffectChainBinding*    chain,
+                           Sculptor::EffectChainRouting*           routing,
+                           bool                          to_front,
+                           uint32_t                      target_slot,
+                           uint32_t                      source_slot,
+                           Sculptor::EffectGraphMapping* mapping);
 
 static Slot enabled_slot(bool enabled)
 {
@@ -1641,44 +1647,29 @@ static bool apply_fx_graph_change_internal(Synth::InstrumentBank*              b
 
                 // A connect lands on an unfed segment start; fed
                 // targets refuse like the canvas does.
-                if (in_slot < 0 || in_slot == out_slot ||
-                    Sculptor::fx_slot_input_fed(chain, *routing, static_cast<uint32_t>(in_slot))) {
+                if (in_slot < 0 || in_slot == out_slot) {
                     return false;
                 }
                 if (out_input_node) {
                     // The target's run moves to the front.
-                    const uint32_t run = fx_run_length(chain, *routing, static_cast<uint32_t>(in_slot));
-                    if (! fx_splice_effect_run(&chain,
-                                               routing,
-                                               static_cast<uint32_t>(in_slot),
-                                               run,
-                                               -1,
-                                               reordered_mapping)) {
+                    if (! fx_connect_run(&chain, routing, true, static_cast<uint32_t>(in_slot), 0, reordered_mapping)) {
                         return false;
                     }
-                    routing->in = Sculptor::effect_in_first_slot;
+                    return true;
                 }
-                else {
-                    // The target's run moves directly after the
-                    // source, and a source inside the target's run refuses
-                    // (the cycle rotation case).
-                    const uint32_t run = fx_run_length(chain, *routing, static_cast<uint32_t>(in_slot));
-                    if (out_slot > in_slot && out_slot < in_slot + static_cast<int32_t>(run)) {
-                        return false;
-                    }
-                    uint32_t out_slot_new = static_cast<uint32_t>(out_slot);
-                    if (! fx_splice_effect_run(&chain,
-                                               routing,
-                                               static_cast<uint32_t>(in_slot),
-                                               run,
-                                               out_slot,
-                                               reordered_mapping,
-                                               &out_slot_new)) {
-                        return false;
-                    }
-                    routing->out[out_slot_new] = Sculptor::effect_out_next; // the splice may have moved the source
+                // The target's run moves directly after the source. A
+                // wire source is always a lane node, so the slot is valid.
+                if (out_slot < 0) {
+                    return false;
                 }
-                Sculptor::fx_sanitize_routing(&chain, routing);
+                if (! fx_connect_run(&chain,
+                                     routing,
+                                     false,
+                                     static_cast<uint32_t>(in_slot),
+                                     static_cast<uint32_t>(out_slot),
+                                     reordered_mapping)) {
+                    return false;
+                }
                 return true;
             }
 
@@ -2175,6 +2166,48 @@ static bool fx_splice_effect_run(Synth::EffectChainBinding*    chain,
     return true;
 }
 
+// Shared wiring-run move behind the connect gesture (change events) and
+// the candidate API: splice the target slot's run to the chain front or
+// right after the source slot, then write the connection flag. Refusals
+// leave the chain untouched.
+static bool fx_connect_run(Synth::EffectChainBinding*    chain,
+                           Sculptor::EffectChainRouting*           routing,
+                           bool                          to_front,
+                           uint32_t                      target_slot,
+                           uint32_t                      source_slot,
+                           Sculptor::EffectGraphMapping* mapping)
+{
+    if (! fx_slot_occupied(*chain, target_slot) ||
+        fx_slot_input_fed(*chain, *routing, target_slot)) {
+        return false;
+    }
+    const uint32_t run = fx_run_length(*chain, *routing, target_slot);
+    if (! to_front) {
+        // A source inside the target's run would rotate the run.
+        if (source_slot == target_slot || (source_slot > target_slot && source_slot < target_slot + run)) {
+            return false;
+        }
+    }
+    uint32_t anchor_new = 0;
+    if (! fx_splice_effect_run(chain,
+                               routing,
+                               target_slot,
+                               run,
+                               to_front ? -1 : static_cast<int32_t>(source_slot),
+                               mapping,
+                               &anchor_new)) {
+        return false;
+    }
+    if (to_front) {
+        routing->in = Sculptor::effect_in_first_slot;
+    }
+    else {
+        routing->out[anchor_new] = Sculptor::effect_out_next;
+    }
+    Sculptor::fx_sanitize_routing(chain, routing);
+    return true;
+}
+
 // Stages the source into the shared candidate; refusals leave the caller's
 // out untouched.  Source and out may alias.
 static bool fx_begin_candidate(const Synth::InstrumentEditorBank* source, uint32_t chain)
@@ -2196,16 +2229,7 @@ bool Sculptor::fx_connect_input_candidate(const Synth::InstrumentEditorBank* sou
     }
     Synth::EffectChainBinding& bind    = fx_graph_chain(&effects_candidate.bank, chain);
     EffectChainRouting&        routing = effects_candidate.effect_routing[chain];
-    if (! fx_slot_occupied(bind, target_slot) || fx_slot_input_fed(bind, routing, target_slot)) {
-        return false;
-    }
-    const uint32_t run = fx_run_length(bind, routing, target_slot);
-    if (! fx_splice_effect_run(&bind, &routing, target_slot, run, -1)) {
-        return false;
-    }
-    routing.in = effect_in_first_slot;
-    fx_sanitize_routing(&bind, &routing);
-    if (! validate_effect_routing(bind, routing)) {
+    if (! fx_connect_run(&bind, &routing, true, target_slot, 0, nullptr)) {
         return false;
     }
     *out = effects_candidate;
@@ -2223,28 +2247,10 @@ bool Sculptor::fx_connect_slots_candidate(const Synth::InstrumentEditorBank* sou
     }
     Synth::EffectChainBinding& bind    = fx_graph_chain(&effects_candidate.bank, chain);
     EffectChainRouting&        routing = effects_candidate.effect_routing[chain];
-    if (! fx_slot_occupied(bind, source_slot) || ! fx_slot_occupied(bind, target_slot) || source_slot == target_slot ||
-        fx_slot_input_fed(bind, routing, target_slot)) {
+    if (! fx_slot_occupied(bind, source_slot)) {
         return false;
     }
-    // Cycle refusal: a source inside the target's run would rotate the run.
-    const uint32_t run = fx_run_length(bind, routing, target_slot);
-    if (source_slot > target_slot && source_slot < target_slot + run) {
-        return false;
-    }
-    uint32_t source_slot_new = source_slot;
-    if (! fx_splice_effect_run(&bind,
-                               &routing,
-                               target_slot,
-                               run,
-                               static_cast<int32_t>(source_slot),
-                               nullptr,
-                               &source_slot_new)) {
-        return false;
-    }
-    routing.out[source_slot_new] = effect_out_next; // the splice may have moved the source
-    fx_sanitize_routing(&bind, &routing);
-    if (! validate_effect_routing(bind, routing)) {
+    if (! fx_connect_run(&bind, &routing, false, target_slot, source_slot, nullptr)) {
         return false;
     }
     *out = effects_candidate;
