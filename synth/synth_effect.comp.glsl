@@ -45,16 +45,54 @@ layout(constant_id = 6) const uint sampling_rate = 1;
 shared float samples_left[work_group_size];
 shared float samples_right[work_group_size];
 
-// tanh waveshaper with a dry/wet mix.  drive sets the overdrive amount.
+// tanh waveshaper with a dry/wet mix and an output gain. drive sets the
+// overdrive amount. The wet path is first-order antiderivative anti-aliased:
+// it averages tanh between the previous and the current input sample, which
+// cuts the aliasing of the hard-driven signal. state[0..1] hold the previous
+// raw input of the left and right channel.
 vec2 apply_distortion(in EffectParams eff)
 {
-    const float drive      = eff.params[0];
+    const float drive = eff.params[0];
     const float mix_amount = eff.params[1];
-    const float in_left    = samples_left[gl_LocalInvocationID.x];
-    const float in_right   = samples_right[gl_LocalInvocationID.x];
+    const float gain = eff.params[2];
 
-    return vec2(mix(in_left,  tanh(in_left  * drive), mix_amount),
-                mix(in_right, tanh(in_right * drive), mix_amount));
+    const float in_left = samples_left[gl_LocalInvocationID.x];
+    const float in_right = samples_right[gl_LocalInvocationID.x];
+
+    // Lane 0 continues from the previous step; other lanes read their neighbor.
+    float prev_left = data[eff.state_offs];
+    float prev_right = data[eff.state_offs + 1u];
+    if (gl_LocalInvocationID.x != 0u) {
+        prev_left = samples_left[gl_LocalInvocationID.x - 1u];
+        prev_right = samples_right[gl_LocalInvocationID.x - 1u];
+    }
+
+    // x is (left, right); u0 is the previous and u1 the current driven input.
+    const vec2 x = vec2(in_left, in_right);
+    const vec2 u0 = vec2(prev_left, prev_right) * drive;
+    const vec2 u1 = x * drive;
+    const vec2 du = u1 - u0;
+
+    // F(u) = log(cosh(u)), the antiderivative of tanh, in an overflow-safe form.
+    const vec2 a0 = abs(u0);
+    const vec2 a1 = abs(u1);
+    const vec2 f0 = a0 + log(1.0 + exp(-2.0 * a0)) - 0.69314718;
+    const vec2 f1 = a1 + log(1.0 + exp(-2.0 * a1)) - 0.69314718;
+
+    // Tiny steps would divide noise by noise; tanh at the midpoint is exact enough.
+    const vec2 wet = mix((f1 - f0) / du, tanh(0.5 * (u0 + u1)), lessThan(abs(du), vec2(1e-2)));
+
+    const vec2 result = (x * (1.0 - mix_amount) + wet * mix_amount) * gain;
+
+    barrier();
+
+    // Every lane has read the state; the last lane stores its input for the next step.
+    if (gl_LocalInvocationID.x == work_group_size - 1u) {
+        data[eff.state_offs] = in_left;
+        data[eff.state_offs + 1u] = in_right;
+    }
+
+    return result;
 }
 
 // Feedback delay line.  Each lane reads a prior frame, mixes it in, and writes the

@@ -16,6 +16,9 @@ static constexpr uint32_t align_effect_state_bytes(uint32_t bytes)
 static constexpr uint32_t effect_state_floats(Synth::EffectType type)
 {
     switch (type) {
+        case Synth::EffectType::distortion:
+            // The previous raw input sample of each channel (ADAA).
+            return 2;
         case Synth::EffectType::delay:
             // One write-position counter plus a stereo (x2) ring buffer
             // of effect_delay_max_samples samples per channel.
@@ -77,7 +80,7 @@ uint32_t Synth::get_effect_param_floats(Synth::EffectType type)
 {
     switch (type) {
         case Synth::EffectType::distortion:
-            return 2;
+            return 3; // drive, mix, output gain
         case Synth::EffectType::delay:
             return 3;
         case Synth::EffectType::chorus:

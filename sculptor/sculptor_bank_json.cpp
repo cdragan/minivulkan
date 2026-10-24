@@ -2712,12 +2712,21 @@ static void decode_effect(Walker& w, uint32_t obj, Synth::EffectSlotBinding& slo
     if (w.failed)
         return;
 
-    // Params must cover exactly the fields the effect type reads.
+    // Strict effects documents carry exactly the params the type reads. Bank
+    // slots may omit trailing params (all of them when the key is absent); they
+    // take the type's defaults, so banks written before a parameter was appended
+    // load without per-type compat code. Extra params are corruption.
     if (w.strict_effects && (! have_type || (slot.type != Synth::EffectType::none && ! have_params))) {
         w.failed = true;
     }
-    if (have_params && num_params != Synth::get_effect_param_floats(slot.type))
+    const uint32_t expected_count = Synth::get_effect_param_floats(slot.type);
+    if (num_params > expected_count || (w.strict_effects && num_params != expected_count)) {
         w.failed = true;
+    }
+    for (uint32_t param = num_params; ! w.failed && param < expected_count; ++param) {
+        slot.bindings[param]            = Synth::EffectParamBinding{};
+        slot.bindings[param].base_value = Sculptor::effect_param_default(slot.type, param);
+    }
     if (! w.failed && have_params && slot.type == Synth::EffectType::fir)
         decode_fir_slope(w, params_token, slot);
 }

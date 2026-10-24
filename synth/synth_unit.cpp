@@ -7059,7 +7059,8 @@ static void effects_clipboard_regressions()
             TEST(! decode_with_bank_slope("{\"base_value\":50.5}"));
             TEST(! decode_with_bank_slope("{\"base_value\":1e2}"));
             TEST(decode_with_bank_slope("{}"));
-            // Dropping the first binding leaves a 2-param FIR effect: refuse.
+            // Dropping the first binding leaves a 2-param FIR effect; the lenient bank
+            // path default-fills the missing trailing slope and accepts it.
             {
                 const std::unique_ptr<FixedArray<char, Synth::library_payload_max>> bank_payload_storage =
                     std::make_unique<FixedArray<char, Synth::library_payload_max>>();
@@ -7077,7 +7078,7 @@ static void effects_clipboard_regressions()
                     std::make_unique<Synth::InstrumentEditorBank>();
                 Synth::InstrumentEditorBank& out = *out_storage;
                 memset(static_cast<void*>(&out), 0, sizeof(out));
-                TEST(! Synth::decode_editor_bank_json(spliced, spliced_len, &out));
+                TEST(Synth::decode_editor_bank_json(spliced, spliced_len, &out));
             }
         }
         // ring_mod: distinctive rate/mix values must survive the bank codec
@@ -9258,7 +9259,7 @@ static void fx_drop_anchor_flag_regressions()
     TEST(chorus_node != Sculptor::pool_no_slot);
     // The eligible anchors: every base-value row of an unconnected
     // parameter with modulator capacity left.
-    for (uint32_t param = 0; param < 2; ++param) {
+    for (uint32_t param = 0; param < 3; ++param) {
         TEST(graph.node(distortion_node).slots.entries[Sculptor::fx_param_row(param)].drop_menu);
     }
     // A wired parameter leaves the flag off: the LFO wire, the source
@@ -9271,7 +9272,7 @@ static void fx_drop_anchor_flag_regressions()
     }
     // Fields 1-9 of every parameter block never carry the flag.
     const uint32_t effect_nodes[]  = { distortion_node, delay_node, chorus_node };
-    const uint32_t effect_params[] = { 2u, 3u, 3u };
+    const uint32_t effect_params[] = { 3u, 3u, 3u };
     for (uint32_t effect = 0; effect < 3; ++effect) {
         for (uint32_t param = 0; param < effect_params[effect]; ++param) {
             for (uint32_t field = 1; field < Sculptor::fx_param_stride; ++field) {
@@ -9279,9 +9280,9 @@ static void fx_drop_anchor_flag_regressions()
             }
         }
     }
-    // The whole graph: exactly the five eligible base rows carry the flag,
+    // The whole graph: exactly the six eligible base rows carry the flag,
     // so the input, output, MIDI and LFO nodes carry none.
-    TEST(count_drop_menu_slots(graph) == 5);
+    TEST(count_drop_menu_slots(graph) == 6);
 
     // With no effect projected, no fx node carries the flag.
     add_cc_chain_fixture(&source, 0);
@@ -17506,6 +17507,392 @@ static float lfo_reference_normalized(const Synth::WaveType wave,
     return (fall > 0.0f) ? (1.0f - frac_phase) / fall : 0.0f;
 }
 
+// ---- Distortion: output gain + first-order ADAA ----
+// distortion_adaa_reference is a float32 CPU mirror of apply_distortion in
+// synth_effect.comp.glsl, in the same order of operations: raw previous input
+// x0, u = x * drive, F(u) = |u| + log(1 + exp(-2|u|)) - ln2,
+// wet = (F(u1) - F(u0)) / (u1 - u0), with tanh(0.5 * (u0 + u1)) when
+// |u1 - u0| < 1e-2, result = mix(x, wet, mix) * gain. The CPU mirror and the
+// source-form pins do not establish GPU equivalence; listening to production
+// audio covers that. distortion_tanh_reference is the older stateless formula.
+static float distortion_log_cosh(float u)
+{
+    const float a = fabsf(u);
+    return a + logf(1.0f + expf(-2.0f * a)) - 0.69314718f;
+}
+
+static void distortion_adaa_reference(const float* in,
+                                      uint32_t     count,
+                                      float        drive,
+                                      float        mix,
+                                      float        gain,
+                                      float*       prev,
+                                      float*       out)
+{
+    for (uint32_t i = 0; i < count; ++i) {
+        const float u0 = *prev * drive;
+        const float u1 = in[i] * drive;
+        const float du = u1 - u0;
+        float       wet;
+        if (fabsf(du) < 1e-2f) {
+            wet = tanhf(0.5f * (u0 + u1));
+        }
+        else {
+            wet = (distortion_log_cosh(u1) - distortion_log_cosh(u0)) / du;
+        }
+        out[i] = (in[i] * (1.0f - mix) + wet * mix) * gain;
+        *prev  = in[i];
+    }
+}
+
+static void distortion_tanh_reference(const float* in, uint32_t count, float drive, float mix, float* out)
+{
+    for (uint32_t i = 0; i < count; ++i) {
+        out[i] = in[i] * (1.0f - mix) + tanhf(in[i] * drive) * mix;
+    }
+}
+
+// Bin-centered sine: `bin` whole cycles per `count` samples, so the DFT below
+// has no leakage. Element -1 (the carried previous input) is *first_prev.
+static void distortion_make_sine(float* out, uint32_t count, uint32_t bin, float amplitude, float* first_prev)
+{
+    constexpr double two_pi = 6.283185307179586;
+    for (uint32_t i = 0; i < count; ++i) {
+        out[i] = static_cast<float>(static_cast<double>(amplitude) * sin(two_pi * bin * i / count));
+    }
+    *first_prev = static_cast<float>(static_cast<double>(amplitude) * sin(-two_pi * bin / count));
+}
+
+// 10*log10(non-harmonic / total) over DFT bins 1..count/2-1; harmonic bins are
+// multiples of `bin`. Lower is cleaner.
+static double distortion_non_harmonic_db(const float* signal, uint32_t count, uint32_t bin)
+{
+    const std::unique_ptr<FixedArray<double, 4096>> cos_storage = std::make_unique<FixedArray<double, 4096>>();
+    const std::unique_ptr<FixedArray<double, 4096>> sin_storage = std::make_unique<FixedArray<double, 4096>>();
+    TEST(count == 4096);
+    constexpr double two_pi = 6.283185307179586;
+    for (uint32_t i = 0; i < count; ++i) {
+        cos_storage->elements[i] = cos(two_pi * i / count);
+        sin_storage->elements[i] = sin(two_pi * i / count);
+    }
+    double harmonic     = 0.0;
+    double non_harmonic = 0.0;
+    for (uint32_t k = 1; k < count / 2; ++k) {
+        double re = 0.0;
+        double im = 0.0;
+        for (uint32_t i = 0; i < count; ++i) {
+            const uint32_t phase = static_cast<uint32_t>((static_cast<uint64_t>(k) * i) % count);
+            re += static_cast<double>(signal[i]) * cos_storage->elements[phase];
+            im -= static_cast<double>(signal[i]) * sin_storage->elements[phase];
+        }
+        (k % bin == 0 ? harmonic : non_harmonic) += re * re + im * im;
+    }
+    return 10.0 * log10(non_harmonic / (harmonic + non_harmonic) + 1e-30);
+}
+
+static double distortion_rms(const float* signal, uint32_t count)
+{
+    double sum = 0.0;
+    for (uint32_t i = 0; i < count; ++i) {
+        sum += static_cast<double>(signal[i]) * static_cast<double>(signal[i]);
+    }
+    return sqrt(sum / count);
+}
+
+// Param and state layout the distortion shader and editor depend on.
+static void check_distortion_param_layout()
+{
+    TEST(Synth::get_effect_param_floats(Synth::EffectType::distortion) == 3);
+    TEST(Synth::get_effect_state_floats(Synth::EffectType::distortion) == 2); // previous raw input, left and right
+    const Sculptor::EffectTypeInfo& info = Sculptor::effect_type_info(Synth::EffectType::distortion);
+    TEST(info.num_params == 3);
+    TEST(strcmp(info.params[2].name, "Output Gain") == 0);
+    TEST(info.params[2].min_value == 0.0f);
+    TEST(info.params[2].max_value == 4.0f);
+    TEST(! info.params[2].logarithmic);
+    TEST(Sculptor::effect_param_default(Synth::EffectType::distortion, 0) == 1.0f);
+    TEST(Sculptor::effect_param_default(Synth::EffectType::distortion, 1) == 1.0f);
+    TEST(Sculptor::effect_param_default(Synth::EffectType::distortion, 2) == 1.0f);
+
+    Synth::EffectChainBinding chain = {};
+    chain.num_effects               = 1;
+    Sculptor::fx_init_slot(&chain, 0, Synth::EffectType::distortion);
+    TEST(chain.effects[0].bindings[0].base_value == 1.0f);
+    TEST(chain.effects[0].bindings[1].base_value == 1.0f);
+    TEST(chain.effects[0].bindings[2].base_value == 1.0f);
+}
+
+// C4: output level follows the output gain exactly (post-mix multiply).
+static void check_distortion_output_gain_level()
+{
+    constexpr uint32_t                              count        = 1024;
+    const std::unique_ptr<FixedArray<float, count>> in_storage   = std::make_unique<FixedArray<float, count>>();
+    const std::unique_ptr<FixedArray<float, count>> full_storage = std::make_unique<FixedArray<float, count>>();
+    const std::unique_ptr<FixedArray<float, count>> half_storage = std::make_unique<FixedArray<float, count>>();
+    const std::unique_ptr<FixedArray<float, count>> zero_storage = std::make_unique<FixedArray<float, count>>();
+    float                                           first_prev   = 0.0f;
+    distortion_make_sine(in_storage->elements, count, 20, 0.5f, &first_prev);
+
+    float prev = first_prev;
+    distortion_adaa_reference(in_storage->elements, count, 8.0f, 1.0f, 1.0f, &prev, full_storage->elements);
+    prev = first_prev;
+    distortion_adaa_reference(in_storage->elements, count, 8.0f, 1.0f, 0.5f, &prev, half_storage->elements);
+    prev = first_prev;
+    distortion_adaa_reference(in_storage->elements, count, 8.0f, 1.0f, 0.0f, &prev, zero_storage->elements);
+
+    const double full_rms = distortion_rms(full_storage->elements, count);
+    const double half_rms = distortion_rms(half_storage->elements, count);
+    TEST(full_rms > 0.1);
+    TEST(fabs(20.0 * log10(half_rms / full_rms) - 20.0 * log10(0.5)) < 1e-3);
+    TEST(distortion_rms(zero_storage->elements, count) == 0.0);
+    for (uint32_t i = 0; i < count; ++i) {
+        TEST(half_storage->elements[i] == 0.5f * full_storage->elements[i]); // power of two: exact
+    }
+}
+
+// C5: ADAA1 measures less non-harmonic energy than the pinned tanh baseline.
+static void check_distortion_adaa_reduces_aliasing()
+{
+    constexpr uint32_t                              count       = 4096;
+    const std::unique_ptr<FixedArray<float, count>> in_storage  = std::make_unique<FixedArray<float, count>>();
+    const std::unique_ptr<FixedArray<float, count>> out_storage = std::make_unique<FixedArray<float, count>>();
+
+    struct Case {
+        uint32_t bin; // 186 = 2 kHz, 372 = 4 kHz at 44.1 kHz
+        float    drive;
+        double   tanh_db;  // tanh baseline at this bin and drive, amplitude 0.8
+        double   adaa1_db; // ADAA1 at the same bin and drive
+    };
+
+    const Case cases[] = { { 186, 16.0f, -22.4, -30.4 }, { 372, 4.0f, -29.0, -37.2 } };
+    for (const Case& test_case : cases) {
+        float first_prev = 0.0f;
+        distortion_make_sine(in_storage->elements, count, test_case.bin, 0.8f, &first_prev);
+
+        // The metric must reproduce the pinned baseline before it can judge ADAA.
+        distortion_tanh_reference(in_storage->elements, count, test_case.drive, 1.0f, out_storage->elements);
+        const double tanh_db = distortion_non_harmonic_db(out_storage->elements, count, test_case.bin);
+        TEST(fabs(tanh_db - test_case.tanh_db) < 0.5);
+
+        float prev = first_prev;
+        distortion_adaa_reference(in_storage->elements,
+                                  count,
+                                  test_case.drive,
+                                  1.0f,
+                                  1.0f,
+                                  &prev,
+                                  out_storage->elements);
+        const double adaa_db = distortion_non_harmonic_db(out_storage->elements, count, test_case.bin);
+        TEST(adaa_db <= test_case.tanh_db - 6.0);
+        TEST(fabs(adaa_db - test_case.adaa1_db) < 1.0);
+    }
+}
+
+// Two 256-sample blocks with the carried previous input equal one 512 pass.
+static void check_distortion_block_continuity()
+{
+    constexpr uint32_t block = 256;
+    float              in[2 * block];
+    float              whole[2 * block];
+    float              split[2 * block];
+    float              first_prev = 0.0f;
+    distortion_make_sine(in, 2 * block, 7, 0.8f, &first_prev);
+
+    float prev = first_prev;
+    distortion_adaa_reference(in, 2 * block, 12.0f, 0.75f, 0.9f, &prev, whole);
+    prev = first_prev;
+    distortion_adaa_reference(in, block, 12.0f, 0.75f, 0.9f, &prev, split);
+    distortion_adaa_reference(in + block, block, 12.0f, 0.75f, 0.9f, &prev, split + block);
+    TEST(memcmp(whole, split, sizeof(whole)) == 0);
+    TEST(prev == in[2 * block - 1]);
+}
+
+// Source-form sanity check: the apply_distortion body still contains the ADAA1
+// tokens, the gain parameter, the final gain multiply and the state seam.
+static void check_distortion_shader_source_pins()
+{
+    const char* const src = load_source_file("synth/synth_effect.comp.glsl");
+    TEST(src != nullptr);
+    if (! src) {
+        return;
+    }
+    const char* const decl = find_in_range(src, src + strlen(src), "vec2 apply_distortion(");
+    TEST(decl != nullptr);
+    const char* open  = nullptr;
+    const char* close = nullptr;
+    if (! decl || ! source_body_range(decl, &open, &close)) {
+        return;
+    }
+    TEST(find_in_range(open, close, "eff.params[2]") != nullptr);             // output gain
+    TEST(find_in_range(open, close, "log(1.0 + exp(") != nullptr);            // overflow-safe log-cosh
+    TEST(find_in_range(open, close, "tanh(0.5 *") != nullptr);                // small-step fallback
+    TEST(find_in_range(open, close, "1e-2") != nullptr);                      // fallback threshold
+    TEST(find_in_range(open, close, "data[eff.state_offs]") != nullptr);      // left previous input
+    TEST(find_in_range(open, close, "data[eff.state_offs + 1u]") != nullptr); // right previous input
+    TEST(find_in_range(open, close, "* gain;") != nullptr);                   // final multiply by gain
+    TEST(find_in_range(open, close, "barrier();") != nullptr);                // read, barrier, write
+    TEST(find_in_range(open, close, "tanh(in_left * drive)") == nullptr);     // old stateless form gone
+}
+
+// Missing-trailing-params rule: decode_effect default-fills params omitted
+// from a lenient bank slot (all of them when the key is absent) for any
+// effect type; distortion's later-added output gain and a cut delay slot are
+// the cases here. A full array round-trips, extra entries are refused, and
+// the strict effects document still requires the exact count.
+static void check_effect_missing_params_compat()
+{
+    const std::unique_ptr<Synth::EffectsDocument> doc_storage = std::make_unique<Synth::EffectsDocument>();
+    Synth::EffectsDocument&                       decoded     = *doc_storage;
+
+    // Strict documents keep the exact count: short arrays are refused.
+    const char two_entry[] = "{\"format\":\"synth-effects-v1\",\"lfos\":[],\"effects\":[{\"type\":\"distortion\","
+                             "\"params\":[{\"base_value\":4},{\"base_value\":0.75}]}],\"graph_layout\":[]}";
+    TEST(! Synth::decode_effects_json(two_entry, static_cast<uint32_t>(sizeof(two_entry) - 1), &decoded));
+
+    const char one_entry[] = "{\"format\":\"synth-effects-v1\",\"lfos\":[],\"effects\":[{\"type\":\"distortion\","
+                             "\"params\":[{\"base_value\":4}]}],\"graph_layout\":[]}";
+    TEST(! Synth::decode_effects_json(one_entry, static_cast<uint32_t>(sizeof(one_entry) - 1), &decoded));
+
+    // Three entries round-trip through the strict effects document.
+    memset(static_cast<void*>(&decoded), 0, sizeof(decoded));
+    decoded.chain.num_effects                                   = 1;
+    decoded.chain.effects[0].type                               = Synth::EffectType::distortion;
+    decoded.chain.effects[0].enabled                            = true;
+    decoded.chain.effects[0].bindings[0].base_value             = 4.5f;
+    decoded.chain.effects[0].bindings[1].base_value             = 0.75f;
+    decoded.chain.effects[0].bindings[2].base_value             = 0.25f;
+    const std::unique_ptr<FixedArray<char, 65536>> text_storage = std::make_unique<FixedArray<char, 65536>>();
+    char (&text)[65536]                                         = text_storage->elements;
+    const uint32_t length = Synth::encode_effects_json(&decoded, text, sizeof(text));
+    TEST(length > 0);
+    TEST(strstr(text, "{\"base_value\":0.25}") != nullptr);
+    Synth::EffectsDocument round_trip = {};
+    TEST(Synth::decode_effects_json(text, length, &round_trip));
+    TEST(round_trip.chain.effects[0].bindings[0].base_value == 4.5f);
+    TEST(round_trip.chain.effects[0].bindings[1].base_value == 0.75f);
+    TEST(round_trip.chain.effects[0].bindings[2].base_value == 0.25f);
+
+    // The editor bank carrier: a saved 3-entry slot round-trips and validates,
+    // and the same slot cut back to the old 2-entry shape loads with gain 1.0.
+    const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage = std::make_unique<Synth::InstrumentEditorBank>();
+    Synth::InstrumentEditorBank&                       bank         = *bank_storage;
+    Synth::init_default_bank(&bank.bank);
+    Sculptor::set_identity_osc_sources(&bank, 0, 0);
+    Synth::EffectSlotBinding* const slot = enabled_effect(bank.bank, 0, 0, Synth::EffectType::distortion);
+    slot->bindings[0].base_value         = 4.5f;
+    slot->bindings[1].base_value         = 0.75f;
+    slot->bindings[2].base_value         = 0.25f;
+    TEST(Synth::validate_instrument_bank(&bank.bank));
+    const std::unique_ptr<FixedArray<char, Synth::library_payload_max>> payload_storage =
+        std::make_unique<FixedArray<char, Synth::library_payload_max>>();
+    char (&payload)[Synth::library_payload_max] = payload_storage->elements;
+    const uint32_t payload_length               = Synth::encode_editor_bank_json(&bank, payload, sizeof(payload));
+    TEST(payload_length > 0);
+    const std::unique_ptr<Synth::InstrumentEditorBank> loaded_storage = std::make_unique<Synth::InstrumentEditorBank>();
+    Synth::InstrumentEditorBank&                       loaded         = *loaded_storage;
+    memset(static_cast<void*>(&loaded), 0, sizeof(loaded));
+    TEST(Synth::decode_editor_bank_json(payload, payload_length, &loaded));
+    TEST(loaded.bank.channel_chains[0].effects[0].bindings[2].base_value == 0.25f);
+    TEST(Synth::validate_instrument_bank(&loaded.bank));
+
+    const std::unique_ptr<FixedArray<char, Synth::library_payload_max>> cut_storage =
+        std::make_unique<FixedArray<char, Synth::library_payload_max>>();
+    char (&cut)[Synth::library_payload_max] = cut_storage->elements;
+    const uint32_t cut_length               = splice_single_occurrence(payload,
+                                                                       payload_length,
+                                                                       "{\"base_value\":0.75},{\"base_value\":0.25}]",
+                                                                       "{\"base_value\":0.75}]",
+                                                                       cut,
+                                                                       sizeof(cut));
+    TEST(cut_length > 0);
+    if (cut_length > 0) {
+        memset(static_cast<void*>(&loaded), 0, sizeof(loaded));
+        TEST(Synth::decode_editor_bank_json(cut, cut_length, &loaded));
+        TEST(loaded.bank.channel_chains[0].effects[0].bindings[0].base_value == 4.5f);
+        TEST(loaded.bank.channel_chains[0].effects[0].bindings[1].base_value == 0.75f);
+        TEST(loaded.bank.channel_chains[0].effects[0].bindings[2].base_value == 1.0f);
+        TEST(Synth::validate_instrument_bank(&loaded.bank));
+    }
+    // A lenient bank slot with no params key still decodes, gain 1.0.
+    const std::unique_ptr<FixedArray<char, Synth::library_payload_max>> bare_storage =
+        std::make_unique<FixedArray<char, Synth::library_payload_max>>();
+    char (&bare)[Synth::library_payload_max] = bare_storage->elements;
+    const uint32_t bare_length =
+        splice_single_occurrence(payload,
+                                 payload_length,
+                                 ",\"params\":[{\"base_value\":4.5},{\"base_value\":0.75},{\"base_value\":0.25}]",
+                                 "",
+                                 bare,
+                                 sizeof(bare));
+    TEST(bare_length > 0);
+    if (bare_length > 0) {
+        memset(static_cast<void*>(&loaded), 0, sizeof(loaded));
+        TEST(Synth::decode_editor_bank_json(bare, bare_length, &loaded));
+        TEST(loaded.bank.channel_chains[0].effects[0].type == Synth::EffectType::distortion);
+        TEST(loaded.bank.channel_chains[0].effects[0].bindings[2].base_value == 1.0f);
+        TEST(Synth::validate_instrument_bank(&loaded.bank));
+    }
+
+    // Four entries are refused.
+    const uint32_t four_length = splice_single_occurrence(payload,
+                                                          payload_length,
+                                                          "{\"base_value\":0.25}]",
+                                                          "{\"base_value\":0.25},{\"base_value\":0.5}]",
+                                                          cut,
+                                                          sizeof(cut));
+    TEST(four_length > 0);
+    if (four_length > 0) {
+        memset(static_cast<void*>(&loaded), 0, sizeof(loaded));
+        TEST(! Synth::decode_editor_bank_json(cut, four_length, &loaded));
+    }
+    // Another type follows the same rule: a delay slot cut to one entry takes
+    // the delay defaults for the rest.
+    Synth::init_default_bank(&bank.bank);
+    Sculptor::set_identity_osc_sources(&bank, 0, 0);
+    Synth::EffectSlotBinding* const delay = enabled_effect(bank.bank, 0, 0, Synth::EffectType::delay);
+    delay->bindings[0].base_value         = 3000.0f;
+    delay->bindings[1].base_value         = 0.5f;
+    delay->bindings[2].base_value         = 0.25f;
+    const uint32_t delay_length           = Synth::encode_editor_bank_json(&bank, payload, sizeof(payload));
+    TEST(delay_length > 0);
+    const uint32_t delay_cut_length = splice_single_occurrence(payload,
+                                                               delay_length,
+                                                               ",{\"base_value\":0.5},{\"base_value\":0.25}]",
+                                                               "]",
+                                                               cut,
+                                                               sizeof(cut));
+    TEST(delay_cut_length > 0);
+    if (delay_cut_length > 0) {
+        memset(static_cast<void*>(&loaded), 0, sizeof(loaded));
+        TEST(Synth::decode_editor_bank_json(cut, delay_cut_length, &loaded));
+        const Synth::EffectSlotBinding& cut_delay = loaded.bank.channel_chains[0].effects[0];
+        TEST(cut_delay.type == Synth::EffectType::delay);
+        TEST(cut_delay.bindings[0].base_value == 3000.0f);
+        TEST(cut_delay.bindings[1].base_value == Sculptor::effect_param_default(Synth::EffectType::delay, 1));
+        TEST(cut_delay.bindings[2].base_value == Sculptor::effect_param_default(Synth::EffectType::delay, 2));
+        TEST(Synth::validate_instrument_bank(&loaded.bank));
+    }
+
+    // The strict effects document still requires params on a typed slot, and
+    // the exact count (the generic rule is for lenient bank slots only).
+    const char strict_missing[] =
+        "{\"format\":\"synth-effects-v1\",\"lfos\":[],\"effects\":[{\"type\":\"distortion\"}],\"graph_layout\":[]}";
+    TEST(! Synth::decode_effects_json(strict_missing, static_cast<uint32_t>(sizeof(strict_missing) - 1), &decoded));
+    const char strict_short[] = "{\"format\":\"synth-effects-v1\",\"lfos\":[],\"effects\":[{\"type\":\"delay\","
+                                "\"params\":[{\"base_value\":3000}]}],\"graph_layout\":[]}";
+    TEST(! Synth::decode_effects_json(strict_short, static_cast<uint32_t>(sizeof(strict_short) - 1), &decoded));
+}
+
+static void distortion_m1_regressions()
+{
+    check_distortion_param_layout();
+    check_distortion_output_gain_level();
+    check_distortion_adaa_reduces_aliasing();
+    check_distortion_block_continuity();
+    check_distortion_shader_source_pins();
+    check_effect_missing_params_compat();
+}
+
 int main()
 {
     external_held_notes_regressions();
@@ -17530,6 +17917,7 @@ int main()
     fx_slot_disable_stamp_regressions();
     osc_slot_disable_stamped_rules_regressions();
     osc_stamp_pool_clear_regressions();
+    distortion_m1_regressions();
     child_row_projection_regressions();
     osc_layer_projection_regressions();
     osc_direct_modulator_regressions();
@@ -17951,14 +18339,14 @@ int main()
     // range scales linearly
     TEST(approx(Synth::pitch_bend_to_semitones(8191, 12.0f), 12.0f, 0.01f));
 
-    TEST(Synth::get_effect_param_floats(Synth::EffectType::distortion) == 2);
+    TEST(Synth::get_effect_param_floats(Synth::EffectType::distortion) == 3);
     TEST(Synth::get_effect_param_floats(Synth::EffectType::delay) == 3);
     TEST(Synth::get_effect_param_floats(Synth::EffectType::chorus) == 3);
     TEST(Synth::get_effect_param_floats(Synth::EffectType::reverb) == 3);
     TEST(Synth::get_effect_param_floats(Synth::EffectType::compressor) == 5);
     TEST(Synth::get_effect_param_floats(Synth::EffectType::fir) == 3);
     TEST(Synth::get_effect_param_floats(Synth::EffectType::ring_mod) == 2);
-    TEST(Synth::get_effect_state_floats(Synth::EffectType::distortion) == 0);
+    TEST(Synth::get_effect_state_floats(Synth::EffectType::distortion) == 2);
     TEST(Synth::get_effect_state_floats(Synth::EffectType::delay) == 88201);
     TEST(Synth::get_effect_state_floats(Synth::EffectType::chorus) == 4412);
     TEST(Synth::get_effect_state_floats(Synth::EffectType::reverb) == 25191);
@@ -19988,7 +20376,7 @@ int main()
             Synth::EffectChainBinding& chain = bank.channel_chains[channel];
             for (uint32_t slot = 0; slot < Synth::max_chain_effects && num_modulated < 32; slot++) {
                 chain.num_effects        = static_cast<uint8_t>(slot + 1);
-                chain.effects[slot].type = Synth::EffectType::distortion; // 2 params, no state
+                chain.effects[slot].type = Synth::EffectType::distortion; // 3 params; disabled, so it claims no state
                 for (uint32_t param = 0; param < 2 && num_modulated < 32; param++) {
                     chain.effects[slot].bindings[param].lfo_desc_id = 1;
                     num_modulated++;
@@ -20145,7 +20533,7 @@ int main()
             Synth::EffectChainBinding& chain = pool_bank.channel_chains[channel];
             chain.num_effects                = 4;
             for (uint32_t slot = 0; slot < 4 && num_modulated < 33; slot++) {
-                chain.effects[slot].type = Synth::EffectType::distortion; // 2 params, no state
+                chain.effects[slot].type = Synth::EffectType::distortion; // 3 params; disabled, so it claims no state
                 for (uint32_t param = 0; param < 2 && num_modulated < 33; param++) {
                     chain.effects[slot].bindings[param].lfo_desc_id = 1;
                     num_modulated++;
@@ -20194,7 +20582,7 @@ int main()
         TEST(chains[0].effects[1].src_param_id[0] == 0);
     }
 
-    // Stateless effects (distortion) claim no state, no offset and no clear range.
+    // Distortion claims its two-float state: an aligned region, an offset and a clear range.
     {
         const std::unique_ptr<Synth::InstrumentBank> bank_storage = std::make_unique<Synth::InstrumentBank>();
         Synth::InstrumentBank&                       bank         = *bank_storage;
@@ -20206,17 +20594,17 @@ int main()
         Synth::EffectExpansionPlan plan  = {};
         const char*                error = nullptr;
         TEST(Synth::preflight_effect_expansion(bank, &plan, &error));
-        TEST(plan.slots[0][0].state_offs == 0);
-        TEST(! plan.slots[0][0].needs_clear);
-        TEST(plan.consumed_bytes == 0);
+        TEST(plan.slots[0][0].state_offs == fake_region_base);
+        TEST(plan.slots[0][0].needs_clear);
+        TEST(plan.consumed_bytes == Synth::get_effect_state_bytes(Synth::EffectType::distortion));
 
         Synth::EffectChain chains[Synth::max_channels] = {};
         Synth::EffectChain master                      = {};
         FakeWriter         writer                      = { 1, 0, 0, 0, 0 };
         Synth::commit_effect_expansion(bank, plan, chains, &master, fake_writer_binding(writer));
         TEST(chains[0].effects[0].enabled);
-        TEST(chains[0].effects[0].state_offs == 0);
-        TEST(Synth::take_effect_clear_ranges().count == 0);
+        TEST(chains[0].effects[0].state_offs == fake_region_base);
+        TEST(Synth::take_effect_clear_ranges().count == 1);
     }
     // A preflight that fails validation leaves the caller's plan byte-identical.  The commit
     // is only reachable after a passing preflight (set_current_bank returns early on
@@ -24311,7 +24699,7 @@ int main()
         TEST(mapping.effect_nodes[2] == Sculptor::pool_no_slot);
         TEST(mapping.lfo_count == 1 && mapping.lfo_nodes[0] != Sculptor::pool_no_slot);
         TEST(mapping.lfo_nodes[1] == Sculptor::pool_no_slot);
-        TEST(graph.node(mapping.effect_nodes[0]).slots.num_allocated == 3 + Sculptor::fx_param_stride * 2);
+        TEST(graph.node(mapping.effect_nodes[0]).slots.num_allocated == 3 + Sculptor::fx_param_stride * 3);
         TEST(graph.node(mapping.lfo_nodes[0]).slots.num_allocated == 7);
         TEST(mapping.midi_node != Sculptor::pool_no_slot); // channel chain: MIDI routes in
         TEST(graph.node(mapping.midi_node).slots.num_allocated == Sculptor::fx_num_input_sources);
@@ -24761,7 +25149,7 @@ int main()
     }
 
     // Widest projection: 4 effects, every parameter modulated by a distinct
-    // descriptor; 19 nodes and 18 wires stay far under the widget's pools.
+    // descriptor; 21 nodes stay far under the widget's pools.
     {
         const std::unique_ptr<Synth::InstrumentBank> bank_storage = std::make_unique<Synth::InstrumentBank>();
         Synth::InstrumentBank&                       bank         = *bank_storage;
@@ -24773,7 +25161,7 @@ int main()
         Sculptor::fx_init_slot(&chain, 2, Synth::EffectType::compressor);
         Sculptor::fx_init_slot(&chain, 3, Synth::EffectType::fir);
         uint16_t       next_desc = 1;
-        const uint32_t max_desc  = 2 + 3 + 5 + 3;
+        const uint32_t max_desc  = 3 + 3 + 5 + 3;
         while (bank.lfos.num_allocated < max_desc) {
             const uint32_t slot               = bank.lfos.allocate();
             bank.lfos.entries[slot].wave      = Synth::WaveType::sine_wave;
@@ -24803,7 +25191,7 @@ int main()
                 ++node_count;
             }
         }
-        TEST(node_count == 20); // input, output, MIDI, 4 effects, 13 LFOs
+        TEST(node_count == 21); // input, output, MIDI, 4 effects, 14 LFOs
 
         uint32_t num_modulated = 0;
         uint32_t state_bytes   = 0;

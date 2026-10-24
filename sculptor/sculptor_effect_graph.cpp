@@ -37,7 +37,9 @@ namespace {
 // (JSON only) disables that edge too.
 static const Sculptor::EffectTypeInfo effect_type_table[Synth::num_effect_types] = {
     { "None", { {} }, 0 },
-    { "Distortion", { { "Drive", 1.0f, 16.0f, true }, { "Mix", 0.0f, 1.0f, false }, {}, {}, {} }, 2 },
+    { "Distortion",
+      { { "Drive", 1.0f, 100.0f, true }, { "Mix", 0.0f, 1.0f, false }, { "Output Gain", 0.0f, 4.0f, false }, {}, {} },
+      3 },
     { "Delay",
       { { "Samples", 256.0f, 44100.0f, true },
         { "Feedback", 0.0f, 0.95f, false },
@@ -73,7 +75,7 @@ static const Sculptor::EffectTypeInfo effect_type_table[Synth::num_effect_types]
 // ratio at or above one, FIR highpass disabled).
 static const float effect_default_params[Synth::num_effect_types][Synth::max_effect_param_floats] = {
     { 0.0f, 0.0f, 0.0f, 0.0f, 0.0f },      // none
-    { 1.0f, 1.0f, 0.0f, 0.0f, 0.0f },      // distortion
+    { 1.0f, 1.0f, 1.0f, 0.0f, 0.0f },      // distortion
     { 4410.0f, 0.35f, 0.35f, 0.0f, 0.0f }, // delay: 100 ms
     { 0.6f, 6.0f, 0.5f, 0.0f, 0.0f },      // chorus
     { 0.84f, 0.5f, 0.3f, 0.0f, 0.0f },     // reverb: freeverb room
