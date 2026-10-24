@@ -14981,7 +14981,7 @@ static void m2_fir_kernel_mirror_regressions()
         for (const BandSpec& spec : specs) {
             uint32_t lowpass    = 0;
             uint32_t highpass   = 0;
-            centers[band_index] = band_edges(spec.offset, spec.spread, 1, &lowpass, &highpass);
+            centers[band_index] = static_cast<double>(band_edges(spec.offset, spec.spread, 1, &lowpass, &highpass));
             const uint32_t span = Synth::fir_effective_span(spec.slope);
             fir_test_mirror(lowpass, highpass, span, 256, 32, &band);
             fir_test_check_span_shape(band, span);
@@ -15015,10 +15015,10 @@ static void m2_fir_kernel_mirror_regressions()
     {
         uint32_t       lowpass0  = 0;
         uint32_t       highpass0 = 0;
-        const double   center0   = band_edges(0.0f, 6.0f, 1, &lowpass0, &highpass0);
+        const double   center0   = static_cast<double>(band_edges(0.0f, 6.0f, 1, &lowpass0, &highpass0));
         uint32_t       lowpass1  = 0;
         uint32_t       highpass1 = 0;
-        const double   center1   = band_edges(2.0f, 6.0f, 1, &lowpass1, &highpass1);
+        const double   center1   = static_cast<double>(band_edges(2.0f, 6.0f, 1, &lowpass1, &highpass1));
         const uint32_t span0     = Synth::fir_effective_span(100.0f);
         const uint32_t span1     = Synth::fir_effective_span(1.0f);
         fir_test_mirror(lowpass0, highpass0, span0, 256, 32, &band);
@@ -15188,7 +15188,7 @@ static uint32_t build_m2_multiband_document(char* text, const uint32_t capacity)
                 p > 0 ? "," : "",
                 keys[p],
                 base_text,
-                0.25f + 0.05f * static_cast<float>(band),
+                static_cast<double>(0.25f + 0.05f * static_cast<float>(band)),
                 4u + band);
             TEST(written > 0 && written < static_cast<int>(sizeof(fragment)));
             if (written <= 0 || written >= static_cast<int>(sizeof(fragment)) || ! append(fragment)) {
@@ -23697,9 +23697,9 @@ int main()
                 Synth::GraphNodeLayout& record = cap_bank.graph_layout[i];
                 record.kind                    = 2;
                 record.index                   = 1;
-                record.channel                 = (i / pair_span) / Synth::max_instr_per_channel;
-                record.zone                    = (i / pair_span) % Synth::max_instr_per_channel;
-                record.uid                     = static_cast<uint16_t>((i % pair_span) + 1);
+                record.channel                 = static_cast<uint8_t>((i / pair_span) / Synth::max_instr_per_channel);
+                record.zone                    = static_cast<uint8_t>((i / pair_span) % Synth::max_instr_per_channel);
+                record.uid                     = static_cast<uint8_t>((i % pair_span) + 1);
             }
             cap_bank.graph_layout_count = Synth::max_graph_records;
             TEST(Sculptor::validate_editor_metadata(cap_bank));
