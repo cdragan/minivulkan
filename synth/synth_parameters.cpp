@@ -560,6 +560,30 @@ bool Synth::oscillator_fir_cutoffs(const float      effective_pitch,
     return true;
 }
 
+bool Synth::oscillator_fir_band_cutoffs(const float    effective_pitch,
+                                        const float    offset_semitones,
+                                        const float    spread_semitones,
+                                        const uint32_t freq_mult,
+                                        const float    slope_percent,
+                                        float*         lowpass_hz,
+                                        float*         highpass_hz,
+                                        uint32_t*      window_span)
+{
+    // The bandpass edges reuse the shared cutoff conversion: the NaN-safe
+    // spread refusal and the highpass floor policy live there.
+    if (! oscillator_fir_cutoffs(effective_pitch + offset_semitones,
+                                 spread_semitones,
+                                 freq_mult,
+                                 fir_bandpass,
+                                 lowpass_hz,
+                                 highpass_hz)) {
+        return false;
+    }
+
+    *window_span = fir_effective_span(slope_percent);
+    return true;
+}
+
 void Synth::oscillator_fir_band_guard(uint32_t* lowpass_cutoff_freq, uint32_t* highpass_cutoff_freq)
 {
     if (*highpass_cutoff_freq == 0 || *highpass_cutoff_freq < *lowpass_cutoff_freq) {

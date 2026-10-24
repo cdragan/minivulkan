@@ -39,18 +39,6 @@ constexpr float tree_elbow_x         = 5.0f;                     // elbow vertic
 constexpr float tree_elbow_end       = 11.0f;                    // elbow horizontal arm end x offset from parent label
 constexpr float tree_line_width      = 1.0f;                     // stroke width of child-row elbow lines
 
-// A two-option list renders as a label+radio pair, wider than the fixed
-// property widget column: reserve its measured width so the pair never
-// overlaps the element that follows it on the line.
-static float slot_widget_w(const Sculptor::Slot& slot)
-{
-    if (slot.property_type == Sculptor::PropertyType::list && slot.num_list_options == 2) {
-        return ImGui::CalcTextSize(slot.list_options[0]).x + ImGui::CalcTextSize(slot.list_options[1]).x +
-               2.0f * ImGui::GetFrameHeight() + 3.0f * ImGui::GetStyle().ItemSpacing.x;
-    }
-    return property_widget_w;
-}
-
 constexpr float fit_view_margin = 32.0f; // empty margin around Home fit
 
 constexpr float zoom_wheel_factor  = 1.2f;              // zoom step per wheel tick
@@ -102,6 +90,32 @@ void add_text_scaled(ImDrawList* draw_list, vmath::vec2 pos, float scale, ImU32 
 }
 
 } // namespace
+
+// A two-option list renders as a label+radio pair, wider than the fixed
+// property widget column: reserve its measured width so the pair never
+// overlaps the element that follows it on the line.
+// A band header row's [-]/[+] click slots: toggle-kind slots in a
+// band row group.
+static bool is_band_click_slot(const Sculptor::Slot& slot)
+{
+    return slot.row_group >= Sculptor::osc_band_row_group && slot.row_group <= Sculptor::osc_band_row_group + 3u &&
+           slot.property_type == Sculptor::PropertyType::toggle;
+}
+
+static float slot_widget_w(const Sculptor::Slot& slot)
+{
+    // A band header row packs the header label and its two click slots
+    // into one widget column: the square buttons take their frame height,
+    // every other slot the standard width.
+    if (is_band_click_slot(slot)) {
+        return ImGui::GetFrameHeight();
+    }
+    if (slot.property_type == Sculptor::PropertyType::list && slot.num_list_options == 2) {
+        return ImGui::CalcTextSize(slot.list_options[0]).x + ImGui::CalcTextSize(slot.list_options[1]).x +
+               2.0f * ImGui::GetFrameHeight() + 3.0f * ImGui::GetStyle().ItemSpacing.x;
+    }
+    return property_widget_w;
+}
 
 static bool in_rect(vmath::vec2 pos, vmath::vec2 rect_min, vmath::vec2 rect_max)
 {
@@ -431,23 +445,26 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
                         cursor += ImGui::CalcTextSize(slot.name).x + 8.0f;
                         continue;
                     }
-                    const float x = cursor + ImGui::CalcTextSize(slot.name).x + 8.0f;
-                    // Chain from the aligned column exactly like the draw pass, so
-                    // no widget covers its label and the measured widths agree
-                    // with what is drawn.
-                    float widget_x = x;
-                    if (prop < 8) {
-                        if (value_col[prop] < x) {
-                            widget_x        = x;
-                            columns_changed = true;
+                    const float x        = cursor + ImGui::CalcTextSize(slot.name).x + 8.0f;
+                    float       widget_x = x;
+                    // Band [-]/[+] buttons are placed by the draw pass at the parameter column's right edge
+                    if (! is_band_click_slot(slot)) {
+                        // Chain from the aligned column exactly like the draw pass, so
+                        // no widget covers its label and the measured widths agree
+                        // with what is drawn.
+                        if (prop < 8) {
+                            if (value_col[prop] < x) {
+                                widget_x        = x;
+                                columns_changed = true;
+                            }
+                            else {
+                                widget_x = value_col[prop];
+                            }
+                            value_col[prop] = widget_x;
                         }
-                        else {
-                            widget_x = value_col[prop];
-                        }
-                        value_col[prop] = widget_x;
+                        const float col_end = widget_x + slot_widget_w(slot);
+                        max_col_end         = col_end > max_col_end ? col_end : max_col_end;
                     }
-                    const float col_end = widget_x + slot_widget_w(slot);
-                    max_col_end         = col_end > max_col_end ? col_end : max_col_end;
                     ++prop;
                     cursor = widget_x + slot_widget_w(slot);
                 }
@@ -684,22 +701,37 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
                     (oscillator_slot_waveform_mode_disabled(node, slot_idx) || slot_edit_disabled(node_idx, slot_idx));
                 // Selection highlight wins over disabled: the label names the
                 // wire the user is tracing; the widget itself stays disabled.
-                const bool fed_by_selected = any_node_selected && selected_source_marks[slot_idx];
-                add_text_scaled(draw_list,
-                                vmath::vec2(cursor, y_center - line_h * render_scale * 0.5f),
-                                render_scale,
-                                to_imgui(fed_by_selected ? colors_.property_highlighted_value
-                                         : disabled      ? colors_.property_connected_value
-                                                         : colors_.property_value),
-                                slot.name);
+                // A band header row's [-]/[+] click slots draw no name text:
+                // the glyphs sit on the buttons, so a label beside each square
+                // button would be redundant.
+                const bool band_button = slot.kind == SlotKind::property && is_band_click_slot(slot);
+                if (! band_button) {
+                    const bool fed_by_selected = any_node_selected && selected_source_marks[slot_idx];
+                    add_text_scaled(draw_list,
+                                    vmath::vec2(cursor, y_center - line_h * render_scale * 0.5f),
+                                    render_scale,
+                                    to_imgui(fed_by_selected ? colors_.property_highlighted_value
+                                             : disabled      ? colors_.property_connected_value
+                                                             : colors_.property_value),
+                                    slot.name);
+                }
                 if (slot.kind != SlotKind::property) {
                     cursor += name_w + 8.0f * render_scale;
                     continue;
                 }
-                const float min_widget_x = cursor + name_w + 8.0f * render_scale;
-                float       widget_x = line_prop < 8 ? rect_min.x + value_col[line_prop] * render_scale : min_widget_x;
-                if (widget_x < min_widget_x) {
-                    widget_x = min_widget_x;
+                const float min_widget_x = cursor + (band_button ? 0.0f : name_w + 8.0f * render_scale);
+                float       widget_x     = 0.0f;
+                if (band_button) {
+                    const bool  is_plus     = slot.name[0] == '+';
+                    const float button_size = slot_widget_w(slot) * render_scale;
+                    const float col_right   = rect_min.x + (value_col[0] + property_widget_w) * render_scale;
+                    widget_x = is_plus ? col_right - button_size : col_right - 2.0f * button_size - 4.0f * render_scale;
+                }
+                else {
+                    widget_x = line_prop < 8 ? rect_min.x + value_col[line_prop] * render_scale : min_widget_x;
+                    if (widget_x < min_widget_x) {
+                        widget_x = min_widget_x;
+                    }
                 }
                 const float widget_y = y_center - frame_h * render_scale * 0.5f;
                 cursor               = widget_x + slot_widget_w(slot) * render_scale;
@@ -707,6 +739,11 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
                 {
                     const bool connected = slot_is_connected(node_idx, slot_idx);
                     if (connected || is_ghost) {
+                        if (band_button) {
+                            // A band click slot never carries a wire, and a
+                            // ghost renders no live widgets: draw nothing.
+                            continue;
+                        }
                         // Greyed-out value text: the connection drives the value,
                         // and ghosts submit no live widgets at all.
                         char value_text[32] = {};
@@ -830,7 +867,18 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
                             break;
                         }
                         case PropertyType::toggle:
-                            value_edited   = ImGui::Checkbox("##value", &node.slots.entries[slot_idx].value.toggle);
+                            if (is_band_click_slot(slot)) {
+                                // A band header row's [-]/[+] click slots render
+                                // as square push buttons (the Period (ms) row's
+                                // InputInt step buttons pattern), not checkboxes:
+                                // a press is an action, never a held state, so
+                                // the slot's toggle value stays untouched.
+                                const float button_size = ImGui::GetFrameHeight();
+                                value_edited            = ImGui::Button(slot.name, ImVec2(button_size, button_size));
+                            }
+                            else {
+                                value_edited = ImGui::Checkbox("##value", &node.slots.entries[slot_idx].value.toggle);
+                            }
                             item_submitted = true;
                             break;
                         case PropertyType::unused:
@@ -886,6 +934,21 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
         }
     }
 
+    // A connection whose either endpoint slot is display-hidden draws
+    // nothing and takes no wire-menu pick: the hidden endpoint's dot never
+    // rendered, so its recorded dot position is stale (band rows hide live
+    // with the selection while their connections stay projected).
+    const auto endpoint_hidden = [this](const Connection& connection) {
+        if (! slot_hidden_callback) {
+            return false;
+        }
+        return slot_hidden_callback(slot_hidden_user_data,
+                                    *this,
+                                    connection.output.node_idx,
+                                    connection.output.slot_idx) ||
+               slot_hidden_callback(slot_hidden_user_data, *this, connection.input.node_idx, connection.input.slot_idx);
+    };
+
     bool wire_menu_hit = false;
     if (interaction == Interaction::idle && ! node_hit && mouse_in_widget && ImGui::IsMouseClicked(1)) {
         for (uint32_t index = 0; index < max_connections; ++index) {
@@ -893,6 +956,9 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
                 continue;
             }
             const Connection& edge = connections.entries[index];
+            if (endpoint_hidden(edge)) {
+                continue;
+            }
             const vmath::vec2 from = dot_positions[edge.output.node_idx * max_node_slots + edge.output.slot_idx];
             const vmath::vec2 to   = dot_positions[edge.input.node_idx * max_node_slots + edge.input.slot_idx];
             const vmath::vec2 mid  = (from + to) * 0.5f;
@@ -1331,6 +1397,9 @@ void Sculptor::Graph::render(vmath::vec2 size, void* user_data)
             continue;
         }
         const Connection& connection = connections.entries[c];
+        if (endpoint_hidden(connection)) {
+            continue;
+        }
         const vmath::vec2 p0 = dot_positions[connection.output.node_idx * max_node_slots + connection.output.slot_idx];
         const vmath::vec2 p3 = dot_positions[connection.input.node_idx * max_node_slots + connection.input.slot_idx];
         const float dx = fabsf(p3.x - p0.x) * 0.5f > curve_min_reach ? fabsf(p3.x - p0.x) * 0.5f : curve_min_reach;

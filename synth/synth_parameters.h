@@ -215,6 +215,24 @@ bool oscillator_fir_cutoffs(float      effective_pitch,
                             float*     lowpass_hz,
                             float*     highpass_hz);
 
+// Effective FIR cutoffs for one band of a multi-band band-pass oscillator.
+// The band center sits `offset_semitones` above the absolute equivalent MIDI
+// pitch, and its two edges sit `spread_semitones` either side of that center,
+// both converted to Hz at the oscillator's frequency multiplier.  Same 1 Hz
+// highpass floor rule and same NaN-safe refusal as the single-band cutoffs.
+// Returns false when the band is inactive (non-positive or NaN spread);
+// the caller omits that band from the staged entry.  The band's effective
+// window span rides along in `*window_span` so the runtime's band loop
+// stages the span without a second span rule site.
+bool oscillator_fir_band_cutoffs(float     effective_pitch,
+                                 float     offset_semitones,
+                                 float     spread_semitones,
+                                 uint32_t  freq_mult,
+                                 float     slope_percent,
+                                 float*    lowpass_hz,
+                                 float*    highpass_hz,
+                                 uint32_t* window_span);
+
 // Highpass edges under this Hz are heard as no highpass at all; at or above
 // it the edge stays a (quantized) band-pass edge.
 constexpr float oscillator_fir_highpass_floor_hz = 1.0f;
@@ -245,9 +263,11 @@ enum FirCoeffCacheAction {
     fir_coeff_invalidate, // No active filters: drop the snapshot, dispatch nothing.
 };
 
-// Words per FIRCoeff entry: taps_offs, highpass, lowpass, window_span (four uint32_t members,
-// no padding, so a byte compare over the entry covers every member).
-constexpr uint32_t fir_coeff_entry_words = 4;
+// Words per FIRCoeff entry: taps_offs and band_count, then four words per
+// band (highpass, lowpass, window_span, gain), 2 + 4 * 4 = 18 words (three
+// uint32_t members and one float per band, no padding inside, so a byte
+// compare over the entry covers every member).
+constexpr uint32_t fir_coeff_entry_words = 18;
 
 // Decide what to do with the FIR coefficient cache this step.  prev_entries and cur_entries point
 // at fir_coeff_entry_words-word entries (the FIRCoeff param records, compared bytewise);

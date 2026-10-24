@@ -26,6 +26,20 @@ enum ModTarget : uint8_t {
     mod_pad_tilt0,
     mod_pad_tilt1,
     mod_fir_slope,
+    mod_fir_band0_offset,
+    mod_fir_band0_gain,
+    mod_fir_band1_offset,
+    mod_fir_band1_spread,
+    mod_fir_band1_gain,
+    mod_fir_band1_slope,
+    mod_fir_band2_offset,
+    mod_fir_band2_spread,
+    mod_fir_band2_gain,
+    mod_fir_band2_slope,
+    mod_fir_band3_offset,
+    mod_fir_band3_spread,
+    mod_fir_band3_gain,
+    mod_fir_band3_slope,
     num_mod_targets
 };
 
@@ -112,6 +126,7 @@ struct Oscillator {
     // The member default seeds every value-initialized construction path.
     uint8_t       fir_slope_percent = 100;
     FilterType    fir_type          = fir_off;
+    uint8_t       fir_band_count    = 1;    // Bandpass bands 1..4; band 0 reuses mod_fir_spread/slope.
     TargetBinding targets[num_mod_targets]; // One binding per modulated quantity (volume/panning/etc.)
 };
 

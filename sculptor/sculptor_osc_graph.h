@@ -79,21 +79,45 @@ static_assert(Synth::graph_canonical_input_node_count + 2 + Synth::max_layers +
 // LFO instance key up to two source edges into its depth/rate inputs.
 static_assert(Synth::max_layers + 6 * Synth::max_layers * Synth::num_mod_targets <= max_connections);
 
-// Oscillator node slot grammar: 18 fixed slots (oscillator properties,
-// the FIR slope and filter type properties and target value rows, order pinned by
-// osc_target_row_slot below),
+// Oscillator node slot grammar: 35 fixed slots (oscillator properties,
+// the FIR slope and filter type properties, and target value rows, order
+// pinned by osc_target_row_slot below),
 // and every ModTarget owns one 12-slot modulation block directly after
-// its value row.  Block field 0 is the envelope input dot, field 1 the
+// its value row.  After the target blocks, each existing band projects
+// one uniform block: a "Band N" header row whose bare [-]/[+] push-button
+// click slots insert a copy after / remove that band (the block constants
+// below pin the layout).  Block field 0 is the envelope input dot, field 1 the
 // unlabeled envelope depth sharing the dot's renderer line, fields 2..5 the LFO row (dot, op, depth, rate scale),
 // fields 6..8 the Source A row and fields 9..11 the Source B row (dot, op, amount each).  Row-group ids are per
 // (target, row): the LFO row groups 3*t + 1, the source rows 3*t + 2 and 3*t + 3, the envelope row 3*t + 4; the fixed
 // slots own their lines (group 0). Four value rows nest as children of a
 // parent row: duty and pad tone under their waveform rows, waveform mix /
 // fm depth / fm ratio under mix mode, octave offset under
-// pitch, and the fir pitch spread / fir slope rows under filter type. A
-// nested row's whole modulation block shifts one tree level deeper.
-constexpr uint32_t osc_slot_count          = 18;
+// pitch, and the band header rows and the band parameter rows under
+// filter type. A nested row's whole modulation block shifts one tree
+// level deeper.
+constexpr uint32_t osc_slot_count          = 35;
 constexpr uint32_t osc_target_block_stride = 12;
+// One uniform block per existing band, directly after Filter Type (slot
+// 135; osc_slot_count is the legacy fixed-row additive constant, not the
+// fixed slot count): the "Band N" header label row, its [-] and [+] click
+// slots, then the band's four parameter rows each followed by a 12-slot
+// modulation block. Only the stored band count's blocks are projected, so
+// the projected slot count encodes the band count.
+constexpr uint32_t osc_band_first_slot   = 136;
+constexpr uint32_t osc_band_max_bands    = 4;
+constexpr uint32_t osc_band_block_stride = 3u + 4u * (osc_target_block_stride + 1u);
+
+// First slot of band `band`'s block (0-based): the header label; the
+// [-] and [+] click slots follow at +1 and +2.
+constexpr uint32_t osc_band_header_slot(uint32_t band)
+{
+    return osc_band_first_slot + osc_band_block_stride * band;
+}
+
+// The band header rows' renderer line ids: a header's label and its two
+// click slots share one widget column (the renderer keys on this range).
+constexpr uint8_t osc_band_row_group = 105;
 
 // The value row of each ModTarget on an oscillator node.  The rows are
 // not contiguous: the duty rows interleave with the oscillator
@@ -107,11 +131,25 @@ constexpr uint32_t osc_target_row_slot[Synth::num_mod_targets] = {
     29,  // duty b
     56,  // waveform mix
     69,  // fm depth
-    136, // fir pitch spread
+    152, // fir pitch spread (band 0 Spread row)
     82,  // fm ratio
     15,  // pad tone a
     42,  // pad tone b
-    149, // fir slope
+    178, // fir slope
+    139, // fir band 0 offset
+    165, // fir band 0 gain
+    194, // fir band 1 offset
+    207, // fir band 1 spread
+    220, // fir band 1 gain
+    233, // fir band 1 slope
+    249, // fir band 2 offset
+    262, // fir band 2 spread
+    275, // fir band 2 gain
+    288, // fir band 2 slope
+    304, // fir band 3 offset
+    317, // fir band 3 spread
+    330, // fir band 3 gain
+    343, // fir band 3 slope
 };
 
 // First slot of target `target`'s modulation block on an oscillator
@@ -152,15 +190,22 @@ constexpr uint32_t osc_target_src_dot(uint32_t target, uint32_t input)
 // Last block end fits the slot pool; the twelve row slots are spaced far
 // enough apart that no block reaches the next row (smallest base-row
 // gap 13, between duty a row 2 and pad tone a row 15; every block
-// ends one slot before the next row).  The
-// pinned target is the appended FIR slope block, the current highest row;
-// extend the pin when a later append raises the high-water mark.
-static_assert(osc_target_row_slot[Synth::mod_fir_slope] + osc_target_block_stride <= max_node_slots);
-static_assert(osc_target_row_slot[Synth::mod_fir_spread] + osc_target_block_stride <= max_node_slots);
+// ends one slot before the next row).  The pinned targets are the
+// appended band 3 rows, the current highest rows; extend the pins when a
+// later append raises the high-water mark.
+static_assert(osc_target_row_slot[Synth::mod_fir_band3_slope] + osc_target_block_stride <= max_node_slots);
+static_assert(osc_target_row_slot[Synth::mod_fir_band3_offset] + osc_target_block_stride <= max_node_slots);
+static_assert(osc_band_header_slot(osc_band_max_bands - 1u) + osc_band_block_stride <= max_node_slots);
 static_assert(osc_target_row_slot[Synth::mod_pad_tilt1] + osc_target_block_stride <
               osc_target_row_slot[Synth::mod_osc_mix]);
 static_assert(osc_target_row_slot[Synth::mod_fm_ratio] + osc_target_block_stride <
               osc_target_row_slot[Synth::mod_volume]);
+
+// The band region's legacy rows: for the single-edge filter types these
+// two slots are the cutoff and FIR Slope rows and keep showing, with
+// their modulation blocks, exactly as before the band UI.
+constexpr uint32_t osc_filter_cutoff_slot = osc_target_row_slot[Synth::mod_fir_spread];
+constexpr uint32_t osc_filter_slope_slot  = osc_target_row_slot[Synth::mod_fir_slope];
 
 // Where every projected piece of the model landed in the graph.  Slot and
 // node indices are stable across property edits; structural edits re-project
@@ -319,10 +364,14 @@ bool normalize_instrument_graph_layout(const Synth::Instrument&            sourc
 // from projection-time state.  Returns false on any inconsistency the
 // validator should have made impossible; *out is still fully written.
 // osc_source_out, when given, receives the derived per-zone source row.
-bool compile_graph_to_instrument(const Graph&           graph,
-                                 const OscGraphMapping& mapping,
-                                 Synth::Instrument*     out,
-                                 uint8_t*               osc_source_out = nullptr);
+// previous, when given, donates the bindings of bands beyond the
+// projected count: those bands project no rows, so the graph cannot
+// express their state (the band edits zero them on removal).
+bool compile_graph_to_instrument(const Graph&             graph,
+                                 const OscGraphMapping&   mapping,
+                                 Synth::Instrument*       out,
+                                 uint8_t*                 osc_source_out = nullptr,
+                                 const Synth::Instrument* previous       = nullptr);
 
 // Grammar validator, installable with Graph::set_validator.  The allowed
 // edge set is exactly: envelope -> a target block's envelope dot (base
@@ -446,6 +495,11 @@ OscTargetView osc_target_view(Synth::ModTarget target, Synth::FilterType fir_typ
 // True when a value change needs a wholesale reprojection.  The filter type changes the spread
 // row's label and range.
 bool osc_change_restructures(const OscGraphMapping& mapping, const GraphChange& change);
+// True when the slot is one of the band header rows' [-]/[+] click slots
+// (header slot + 1 and + 2 in every band block).  Such an edit rewrites
+// the stored bands and leaves the graph stale until the structural
+// re-projection rebuilds it.
+bool is_band_button_slot(uint32_t slot_idx);
 // Slot index on an oscillator node holding row of ModTarget
 // `target` (0..10); rows are not contiguous.
 uint32_t osc_target_row(uint32_t target);
@@ -463,6 +517,21 @@ bool osc_target_block_field(uint32_t slot_idx, uint32_t* target, uint32_t* field
 // Public seam: the render filter osc_slot_hidden is static in the editor
 // TU, so the unit suite needs this callable render-visibility query.
 bool osc_target_field_hidden(const Graph& graph, uint32_t node_idx, uint32_t target, uint32_t field);
+
+// Band-derived render visibility: true when the slot is a Band row, a
+// band-parameter row/block slot, or a read-only band display row that
+// the filter type, the band selection and the wiring hide right now,
+// false for every other slot.  Derived live from the projected Filter
+// Type and Band slots and the connections, never stored.
+bool osc_band_slot_hidden(const Graph& graph, uint32_t node_idx, uint32_t slot_idx);
+
+// The composed oscillator-node render visibility: the band-derived hiding
+// with the legacy cutoff and FIR Slope carve-out for the single-edge
+// filter types, plus the per-target block field rule on whatever
+// remains.  Public seam: the editor's slot-hidden callback delegates
+// here, so the composed decision stays unit-testable the way
+// osc_band_slot_hidden is.
+bool osc_node_slot_hidden(const Graph& graph, uint32_t node_idx, uint32_t slot_idx);
 
 // Progressive layer visibility on the Oscillator Output node: the visible
 // rows extend to the gray add slot (the slot after the wired run's

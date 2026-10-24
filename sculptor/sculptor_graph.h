@@ -95,13 +95,15 @@ extern const char* const lfo_wave_names[2];
 extern const char* const lfo_sync_names[6];
 extern const char* const lfo_start_names[3];
 
-// Sized for the widest projected node - the oscillator: 18 fixed slots
-// plus one 12-slot modulation block per ModTarget after its row.
-// The high-water mark is the fir slope block end at slot 161, so 163 slots
-// (one slot of headroom).  The widest effect (a 5-param effect's
-// 3 + 5*10 = 53 slots) is well under it.  Slot carries list_options[8][32],
-// so a larger cap would balloon every Node allocation.
-constexpr uint32_t max_node_slots = 163;
+// Sized for the widest projected node - the oscillator: 35 fixed slots
+// plus Filter Type, then one uniform block per existing band (the "Band N"
+// header label, its [-]/[+] click slots, and four parameter rows each
+// followed by a 12-slot modulation block; 55 slots per band, up to four
+// bands). The high-water mark is band 4's last block slot at 355, so 356
+// slots. The widest effect (a 5-param effect's 3 + 5*10 = 53 slots) is
+// well under it. Slot carries list_options[8][32], so a larger cap would
+// balloon every Node allocation.
+constexpr uint32_t max_node_slots = 356;
 
 // Labels of the channel/note modulation source roles, indexed by
 // ModSource - 1 (pitch_bend first).
@@ -131,8 +133,8 @@ struct Node {
 // Worst-case bound node population: one input node for six MIDI source
 // roles, the instrument-parameters node and sum, one oscillator per layer
 // (7), and per (layer, target) cell one envelope and one LFO instance
-// (2 * 7 * 12 = 168 with twelve targets).
-constexpr uint32_t max_nodes = 178;
+// (2 * 7 * 26 = 364 with 26 targets).
+constexpr uint32_t max_nodes = 384;
 
 struct EndPoint {
     uint32_t node_idx;
@@ -147,18 +149,18 @@ struct Connection {
 // Connection budget: the reachable worst case is one oscillator->sum edge
 // per layer, four direct modulator edges per (layer, target) cell
 // (envelope, LFO and two MIDI sources) and up to two source edges per
-// distinct LFO instance key - 511 at seven layers with every target cell
+// distinct LFO instance key - 1099 at seven layers with every target cell
 // wired, the bound pinned in sculptor_osc_graph.h; the effects graph adds
 // one enable edge per projected effect node (at most 4 per chain).  The
 // pool holds headroom above it, so no connection-budget refusal path exists.
 // sizeof(Connection) = 16 B, absorbed by the fixed max_graph_bytes reserve.
-constexpr uint32_t max_connections = 512;
+constexpr uint32_t max_connections = 1152;
 
 // Static size cap for one editor-resident Graph instance.  The editor state
 // budget in sculptor_instr_bank.cpp reserves exactly this much per graph;
 // a capacity raise that outgrows it must fail the build instead of silently
 // busting that reserve.
-constexpr uint32_t max_graph_bytes = 9 * 1024 * 1024;
+constexpr uint32_t max_graph_bytes = 48 * 1024 * 1024;
 
 // Caller validation for connection attempts.  Runs after the widget's
 // structural checks (endpoint kinds, bounds, single connection per input);

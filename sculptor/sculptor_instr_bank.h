@@ -55,7 +55,7 @@ inline bool editor_record_kind_valid(uint8_t kind)
     return kind == 0 || kind == 1 || kind == 2 || kind == 4 || kind == 5;
 }
 
-constexpr uint32_t max_graph_records     = 1280; // global record cap
+constexpr uint32_t max_graph_records     = 2560; // global record cap
 constexpr uint32_t max_detached_per_zone = 120;  // per-(channel, zone) detached cap
 
 // Canonical bound-node numbering for kind-0 layout records, shared by the

@@ -32,10 +32,12 @@ constexpr uint32_t max_param_sources = 4;
 // Maximum input parameters a single target binding declares (beyond its envelope and LFO).
 constexpr uint32_t max_mod_inputs = 2;
 
-// Editor-side pool capacities.
+// Editor-side pool capacities. The envelope/LFO pools stay capped at 255:
+// descriptor ids ride in one-byte editor fields (layout record index, the
+// graph's detached-node registry), so 256 would silently truncate.
 constexpr uint32_t max_instruments = max_channels * max_instr_per_channel;
-constexpr uint32_t max_envelopes   = 128;
-constexpr uint32_t max_lfos        = 128;
+constexpr uint32_t max_envelopes   = 255;
+constexpr uint32_t max_lfos        = 255;
 constexpr uint32_t max_parameters  = 64;
 
 // Maximum length of an instrument or channel name, including the terminator.

@@ -1,36 +1,43 @@
 // SPDX-License-Identifier: MIT
 // SPDX-FileCopyrightText: Copyright (c) 2021-2026 Chris Dragan
-
 #version 460 core
 
-#extension GL_KHR_shader_subgroup_basic: require
+#extension GL_KHR_shader_subgroup_basic     : require
 #extension GL_KHR_shader_subgroup_arithmetic: require
 
 layout(local_size_x_id = 0) in;
 
 layout(constant_id = 0) const uint work_group_size = 1;
+layout(constant_id = 1) const uint subgroup_size   = 32;
+layout(constant_id = 2) const uint num_taps        = 1025;
 
-layout(constant_id = 1) const uint subgroup_size = 32;
-
-layout(constant_id = 2) const uint num_taps = 1025;
-
-struct FIRParams {
-    uint taps_offs;             // Offset of FIR filter's taps
-
-    uint highpass_cutoff_freq;  // High pass frequency (if 0, it's a pure low pass)
-    uint lowpass_cutoff_freq;   // Low pass frequency (if 0, it's a pure high pass)
-    uint window_span;           // Effective odd window span in taps, 11..num_taps (num_taps = full sharpness)
+struct FIRBand {
+    uint  highpass_cutoff_freq; // High pass frequency (if 0, it's a pure low pass)
+    uint  lowpass_cutoff_freq;  // Low pass frequency (if 0, it's a pure high pass)
+    uint  window_span;          // Effective odd window span in taps, 11..num_taps (num_taps = full sharpness)
+    float gain;                 // The band's normalized kernel scales with this
 };
 
-layout(binding = 0) writeonly buffer data_buf { float data[]; };
+struct FIRParams {
+    uint     taps_offs;  // Offset of FIR filter's taps
+    uint     band_count; // Bands staged in bands[0..band_count-1], 1..4
+    FIRBand  bands[4];   // Inactive bands arrive zeroed and contribute nothing
+};
 
-layout(binding = 1, std430) readonly buffer param_buf { FIRParams params[]; };
+layout(binding = 0) writeonly buffer data_buf {
+    float data[];
+};
+
+layout(binding = 1, std430) readonly buffer param_buf {
+    FIRParams params[];
+};
 
 layout(push_constant) uniform global_param_buf {
     uint sampling_freq;
 };
 
 shared float coefficients[num_taps];
+shared float accumulated[num_taps];
 shared float norm_sum[work_group_size / subgroup_size];
 shared float norm_cos[work_group_size / subgroup_size];
 shared float norm_sin[work_group_size / subgroup_size];
@@ -52,131 +59,154 @@ float sinc_lowpass(float x, float norm_cutoff)
 
 void main()
 {
-    FIRParams param = params[gl_WorkGroupID.x];
+    FIRParams staged = params[gl_WorkGroupID.x];
 
-    // Calculate sinc function and apply hamming window
-    const float lowpass_norm_cutoff  = float(param.lowpass_cutoff_freq)  / float(sampling_freq);
-    const float highpass_norm_cutoff = float(param.highpass_cutoff_freq) / float(sampling_freq);
-    const uint  center               = (param.window_span - 1u) / 2u;
-    const bool  passthrough          = param.lowpass_cutoff_freq == 0 && param.highpass_cutoff_freq == 0;
-    const bool  bandpass             = param.highpass_cutoff_freq > 0 && param.highpass_cutoff_freq < param.lowpass_cutoff_freq;
-    const float center_freq          = (float(param.highpass_cutoff_freq) + float(param.lowpass_cutoff_freq)) * 0.5;
-    const float center_w             = 2.0 * pi * center_freq / float(sampling_freq);
-    float       coeff_sum            = 0;
-    float       cos_sum              = 0;
-    float       sin_sum              = 0;
-
+    // The accumulator starts clear: inactive bands and bands dropped by the
+    // runtime contribute nothing, and the final store writes the sum.
     for (uint tap = gl_LocalInvocationID.x; tap < num_taps; tap += work_group_size) {
-
-        const float x = float(tap) - float(center);
-
-        // Low pass coefficient
-        float value = (x == 0.0 && passthrough) ? 1.0 : 0.0;
-        if (param.lowpass_cutoff_freq > 0) {
-            value = sinc_lowpass(x, lowpass_norm_cutoff);
-        }
-
-        float norm_value = value;
-
-        // High pass, band pass or band stop coefficient
-        if (param.highpass_cutoff_freq > 0) {
-            const float hp_value = sinc_lowpass(x, highpass_norm_cutoff);
-            value -= hp_value;
-
-            // Band pass
-            if (param.highpass_cutoff_freq < param.lowpass_cutoff_freq) {
-                value      = -value;
-                norm_value = hp_value;
-            }
-            // High pass or band stop
-            else if (x == 0.0) {
-                value += 1.0;
-
-                if (param.lowpass_cutoff_freq == 0) {
-                    norm_value += 1.0;
-                }
-            }
-        }
-
-        //const float window = 0.54 - 0.46 * cos((2 * pi * tap) / (num_taps - 1)); // Hamming
-
-        // Blackman over the effective span: taps outside the span are exactly
-        // zero, and at the full span (window_span == num_taps) this is the
-        // fixed-window expression bit for bit.
-        const float half_span = float(param.window_span) * 0.5 - 0.5;  // (window_span - 1) / 2
-        const float wpos      = x + half_span;                         // 0..window_span - 1 inside the span
-        const float span_m1   = float(param.window_span - 1u);
-        const bool  in_span   = wpos >= 0.0 && wpos <= span_m1;
-        const float window    = in_span
-            ? (0.42 - 0.5 * cos((2 * pi * wpos) / span_m1) + 0.08 * cos((4 * pi * wpos) / span_m1))
-            : 0.0;
-        value *= window;
-
-        coefficients[tap] = value;
-
-        coeff_sum += norm_value * window;
-
-        if (bandpass && in_span) {
-            cos_sum += value * cos(center_w * x);
-            sin_sum += value * sin(center_w * x);
-        }
-    }
-
-    // Normalize coefficients
-    coeff_sum = subgroupAdd(coeff_sum);
-    if (subgroupElect()) {
-        norm_sum[gl_SubgroupID] = coeff_sum;
-    }
-    if (bandpass) {
-        cos_sum = subgroupAdd(cos_sum);
-        sin_sum = subgroupAdd(sin_sum);
-        if (subgroupElect()) {
-            norm_cos[gl_SubgroupID] = cos_sum;
-            norm_sin[gl_SubgroupID] = sin_sum;
-        }
+        accumulated[tap] = 0.0;
     }
 
     barrier();
 
-    if (gl_SubgroupID == 0) {
-        coeff_sum = 0;
-        if (gl_SubgroupInvocationID < (work_group_size / gl_SubgroupSize)) {
-            coeff_sum = norm_sum[gl_SubgroupInvocationID];
-        }
+    // One kernel computation and reduction per band; the band's own
+    // denominator normalizes its kernel before the gain-weighted accumulation,
+    // so overlapping bands interfere as complex sums.
+    for (uint band_idx = 0; band_idx < staged.band_count; band_idx++) {
+        const FIRBand param          = staged.bands[band_idx];
+        const uint   highpass_cutoff_freq = param.highpass_cutoff_freq;
+        const uint   lowpass_cutoff_freq  = param.lowpass_cutoff_freq;
+        const uint   window_span          = param.window_span;
+        const float  gain                 = param.gain;
 
-        coeff_sum = subgroupAdd(coeff_sum);
+        const float lowpass_norm_cutoff  = float(lowpass_cutoff_freq)  / float(sampling_freq);
+        const float highpass_norm_cutoff = float(highpass_cutoff_freq) / float(sampling_freq);
+        const uint  center               = (param.window_span - 1u) / 2u;
+        const bool  passthrough          = param.lowpass_cutoff_freq == 0 && param.highpass_cutoff_freq == 0;
+        const bool  bandpass             = param.highpass_cutoff_freq > 0 && param.highpass_cutoff_freq < param.lowpass_cutoff_freq;
+        const float center_freq          = (float(highpass_cutoff_freq) + float(lowpass_cutoff_freq)) * 0.5;
+        const float center_w             = 2.0 * pi * center_freq / float(sampling_freq);
+        float       coeff_sum            = 0;
+        float       cos_sum              = 0;
+        float       sin_sum              = 0;
 
-        if (bandpass) {
-            cos_sum = 0;
-            sin_sum = 0;
-            if (gl_SubgroupInvocationID < (work_group_size / gl_SubgroupSize)) {
-                cos_sum = norm_cos[gl_SubgroupInvocationID];
-                sin_sum = norm_sin[gl_SubgroupInvocationID];
+        for (uint tap = gl_LocalInvocationID.x; tap < num_taps; tap += work_group_size) {
+
+            const float x = float(tap) - float(center);
+
+            // Low pass coefficient
+            float value = (x == 0.0 && passthrough) ? 1.0 : 0.0;
+            if (lowpass_cutoff_freq > 0) {
+                value = sinc_lowpass(x, lowpass_norm_cutoff);
             }
 
+            float norm_value = value;
+
+            // High pass, band pass or band stop coefficient
+            if (param.highpass_cutoff_freq > 0) {
+                const float hp_value = sinc_lowpass(x, highpass_norm_cutoff);
+                value -= hp_value;
+
+                // Band pass
+                if (highpass_cutoff_freq < lowpass_cutoff_freq) {
+                    value      = -value;
+                    norm_value = hp_value;
+                }
+                // High pass or band stop
+                else if (x == 0.0) {
+                    value += 1.0;
+
+                    if (lowpass_cutoff_freq == 0) {
+                        norm_value += 1.0;
+                    }
+                }
+            }
+
+            // Blackman over the effective span: taps outside the span are exactly
+            // zero, and at the full span (window_span == num_taps) this is the
+            // fixed-window expression bit for bit.
+            const float half_span = float(window_span) * 0.5 - 0.5;  // (window_span - 1) / 2
+            const float wpos      = x + half_span;                   // 0..window_span - 1 inside the span
+            const float span_m1   = float(window_span - 1u);
+            const bool  in_span   = wpos >= 0.0 && wpos <= span_m1;
+            const float window    = in_span
+                ? (0.42 - 0.5 * cos((2 * pi * wpos) / span_m1) + 0.08 * cos((4 * pi * wpos) / span_m1))
+                : 0.0;
+            value *= window;
+
+            coefficients[tap] = value;
+
+            coeff_sum += norm_value * window;
+
+            if (bandpass && in_span) {
+                cos_sum += value * cos(center_w * x);
+                sin_sum += value * sin(center_w * x);
+            }
+        }
+
+        // Normalize coefficients
+        coeff_sum = subgroupAdd(coeff_sum);
+        if (subgroupElect()) {
+            norm_sum[gl_SubgroupID] = coeff_sum;
+        }
+        if (bandpass) {
             cos_sum = subgroupAdd(cos_sum);
             sin_sum = subgroupAdd(sin_sum);
-
             if (subgroupElect()) {
-                const float q           = cos_sum * cos_sum + sin_sum * sin_sum;
-                const float m           = sqrt(q);
-                float       denominator = m;
-                if (m == 0.0 || isnan(cos_sum) || isnan(sin_sum) || isinf(cos_sum) || isinf(sin_sum) || isnan(q) || isinf(q) || isnan(m)) {
-                    denominator = coeff_sum;
-                }
-                if (denominator == 0.0 || isnan(denominator) || isinf(denominator)) {
-                    denominator = 1.0;
-                }
-                norm_sum[0] = denominator;
+                norm_cos[gl_SubgroupID] = cos_sum;
+                norm_sin[gl_SubgroupID] = sin_sum;
             }
-        } else if (subgroupElect()) {
-            norm_sum[0] = coeff_sum;
         }
+
+        barrier();
+
+        if (gl_SubgroupID == 0) {
+            coeff_sum = 0;
+            if (gl_SubgroupInvocationID < (work_group_size / gl_SubgroupSize)) {
+                coeff_sum = norm_sum[gl_SubgroupInvocationID];
+            }
+
+            coeff_sum = subgroupAdd(coeff_sum);
+
+            if (bandpass) {
+                cos_sum = 0;
+                sin_sum = 0;
+                if (gl_SubgroupInvocationID < (work_group_size / gl_SubgroupSize)) {
+                    cos_sum = norm_cos[gl_SubgroupInvocationID];
+                    sin_sum = norm_sin[gl_SubgroupInvocationID];
+                }
+
+                cos_sum = subgroupAdd(cos_sum);
+                sin_sum = subgroupAdd(sin_sum);
+
+                if (subgroupElect()) {
+                    const float q           = cos_sum * cos_sum + sin_sum * sin_sum;
+                    const float m           = sqrt(q);
+                    float       denominator = m;
+                    if (m == 0.0 || isnan(cos_sum) || isnan(sin_sum) || isinf(cos_sum) || isinf(sin_sum) || isnan(q) || isinf(q) || isnan(m)) {
+                        denominator = coeff_sum;
+                    }
+                    if (denominator == 0.0 || isnan(denominator) || isinf(denominator)) {
+                        denominator = 1.0;
+                    }
+                    norm_sum[0] = denominator;
+                }
+            } else if (subgroupElect()) {
+                norm_sum[0] = coeff_sum;
+            }
+        }
+
+        barrier();
+
+        for (uint tap = gl_LocalInvocationID.x; tap < num_taps; tap += work_group_size) {
+            accumulated[tap] += gain * coefficients[tap] / norm_sum[0];
+        }
+
+        // The next band reuses coefficients[] and the norm staging arrays.
+        barrier();
     }
 
-    barrier();
-
     for (uint tap = gl_LocalInvocationID.x; tap < num_taps; tap += work_group_size) {
-        data[param.taps_offs + tap] = coefficients[tap] / norm_sum[0];
+        data[staged.taps_offs + tap] = accumulated[tap];
     }
 }

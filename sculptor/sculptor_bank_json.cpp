@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: MIT
 // SPDX-FileCopyrightText: Copyright (c) 2021-2026 Chris Dragan
-
 #include "sculptor_bank_json.h"
 #include "../core/d_printf.h"
 #include "../core/vmath.h"
@@ -332,8 +331,12 @@ constexpr uint32_t    num_param_kinds                   = 4;
 constexpr const char* param_kind_names[num_param_kinds] = { "external", "envelope", "lfo", "plain" };
 
 constexpr const char* mod_target_names[Synth::num_mod_targets] = {
-    "volume",           "pitch",    "panning",    "duty_a",     "duty_b",   "osc_mix", "fm_index",
-    "fir_pitch_spread", "fm_ratio", "pad_tone_a", "pad_tone_b", "fir_slope"
+    "volume",           "pitch",           "panning",          "duty_a",           "duty_b",
+    "osc_mix",          "fm_index",        "fir_pitch_spread", "fm_ratio",         "pad_tone_a",
+    "pad_tone_b",       "fir_slope",       "fir_band0_offset", "fir_band0_gain",   "fir_band1_offset",
+    "fir_band1_spread", "fir_band1_gain",  "fir_band1_slope",  "fir_band2_offset", "fir_band2_spread",
+    "fir_band2_gain",   "fir_band2_slope", "fir_band3_offset", "fir_band3_spread", "fir_band3_gain",
+    "fir_band3_slope"
 };
 
 static_assert(static_cast<uint32_t>(Synth::WaveType::pad_wave) == num_waves - 1);
@@ -353,7 +356,7 @@ static_assert(Synth::osc_mode_ring_mod == num_osc_modes - 1);
 constexpr uint32_t bank_json_text_size = 1024 * 1024;
 // One token index per parser token; the decoder pins the vendored parser's
 // 16-byte token size so the key-index scratch stays a fixed fraction of the pool.
-constexpr uint32_t json_token_count = 16384;
+constexpr uint32_t json_token_count = 32768;
 char               json_text[bank_json_text_size];
 jsmntok_t          json_tokens[json_token_count];
 
@@ -475,6 +478,16 @@ static bool routing_is_default(const Synth::TargetBinding& routing)
     return routing.base_value == 0.0f && routing.num_inputs == 0;
 }
 
+// The band family a target belongs to: the legacy spread/slope pair and the
+// band-0 offset/gain keys are band 0; the appended keys are bands 1..3.
+static uint32_t band_of_target(uint32_t t)
+{
+    if (t <= static_cast<uint32_t>(Synth::mod_fir_band0_gain)) {
+        return 0;
+    }
+    return 1u + (t - static_cast<uint32_t>(Synth::mod_fir_band1_offset)) / 4u;
+}
+
 static void enc_mod_input(Out& o, const Synth::ModInput& in)
 {
     o.ch('{');
@@ -539,12 +552,20 @@ static void enc_oscillator(Out& o, const Synth::Oscillator& osc)
         o.uint_value(osc.fir_slope_percent);
     }
     key_fir_type(o, osc);
+    // The count key rides only multi-band layers: a single-band instrument
+    // keeps the document short and the absent count decodes as 1.
+    if (osc.fir_band_count > 1) {
+        o.key("fir_bands");
+        o.uint_value(osc.fir_band_count);
+    }
 
     o.key("generators");
     o.ch('{');
     for (uint32_t t = 0; t < Synth::num_mod_targets; t++) {
-        if (gen_is_default(osc.targets[t]))
-            continue;
+        if (gen_is_default(osc.targets[t]) ||
+            band_of_target(t) >= (osc.fir_band_count < 1u ? 1u : osc.fir_band_count)) {
+            continue; // default generator, or a band beyond the active count
+        }
         o.sep();
         o.ch('"');
         o.str(mod_target_names[t]);
@@ -564,8 +585,26 @@ static void enc_oscillator(Out& o, const Synth::Oscillator& osc)
     o.key("routing");
     o.ch('{');
     for (uint32_t t = 0; t < Synth::num_mod_targets; t++) {
-        const bool fm_ratio = t == static_cast<uint32_t>(Synth::mod_fm_ratio);
-        if (routing_is_default(osc.targets[t]) && (! fm_ratio || osc.mod_ratio == 0.0f)) {
+        const bool fm_ratio  = t == static_cast<uint32_t>(Synth::mod_fm_ratio);
+        const bool band_gain = t == static_cast<uint32_t>(Synth::mod_fir_band0_gain) ||
+                               t == static_cast<uint32_t>(Synth::mod_fir_band1_gain) ||
+                               t == static_cast<uint32_t>(Synth::mod_fir_band2_gain) ||
+                               t == static_cast<uint32_t>(Synth::mod_fir_band3_gain);
+        if (band_of_target(t) >= (osc.fir_band_count < 1u ? 1u : osc.fir_band_count)) {
+            continue; // a band beyond the active count never leaks into the document
+        }
+        // A base-0 unwired gain in a multi-band bandpass layer encodes as
+        // the empty block, which decodes as the gain-0 band: the explicit
+        // inactive band survives the round trip instead of reloading as the
+        // 1.0 absent default.  A single-band layer keeps the legacy
+        // omission: its absent key decodes the legacy audible 1.0, the
+        // pre-band-UI convention for the zeroed single-band gain binding.
+        // A non-bandpass layer keeps the legacy omission too: its band
+        // count is a retained legacy/hand-edited state, and its absent
+        // band gain decodes the zeroed default.
+        const bool band_gain_zero = band_gain && routing_is_default(osc.targets[t]) &&
+                                    osc.fir_type == Synth::fir_bandpass && osc.fir_band_count > 1u;
+        if (routing_is_default(osc.targets[t]) && (! fm_ratio || osc.mod_ratio == 0.0f) && ! band_gain_zero) {
             continue;
         }
         o.sep();
@@ -1942,8 +1981,10 @@ static void decode_mod_input(Walker& w, uint32_t obj, Synth::ModInput& in)
     decode_mod_input_fields(w, obj, in, &source_set, unknown_field);
 }
 
-static void decode_gen(Walker& w, uint32_t obj, Synth::TargetBinding& gen)
+static void decode_gen(Walker& w, uint32_t obj, Synth::TargetBinding& gen, bool* touched)
 {
+    // Only caller passes &bank_touched[t]; no portable (nullable) path.
+    *touched = true;
     // Absent key = the legacy unscaled contribution; the pre-set survives
     // memset-zeroed decode targets.
     gen.envelope_depth = 1.0f;
@@ -2000,18 +2041,38 @@ static void decode_routing(Walker&               w,
                            uint32_t              obj,
                            Synth::ModTarget      target,
                            Synth::FilterType     fir_type,
-                           Synth::TargetBinding& routing)
+                           Synth::TargetBinding& routing,
+                           bool*                 touched)
 {
+    if (touched) {
+        *touched = true;
+    }
     walk_object(w, obj, [&](uint32_t key_idx, uint32_t val_idx) {
-        if (key_eq(w, key_idx, "base_value")) {
+        if (key_eq(w, key_idx, "base_value") || key_eq(w, key_idx, "base")) {
             // The spread base is slider-bounded (semitones or Hz by filter type),
             // validated before the binary32 narrowing; the FIR slope base is an
-            // integer percent 1..100 like the layer scalar; every other target
-            // keeps the generic free-level parsing.
+            // integer percent 1..100 like the layer scalar; the higher bands'
+            // offset/spread/gain bases carry their osc_target_view bounds
+            // (a zero gain base stays decodable as an inactive band); every
+            // other target keeps the generic free-level parsing.
             if (target == Synth::mod_fir_spread)
                 want_bounded_real(w,
                                   val_idx,
                                   0.0,
+                                  static_cast<double>(Sculptor::osc_target_view(target, fir_type).max_value),
+                                  &routing.base_value);
+            else if (target == Synth::mod_fir_band1_offset || target == Synth::mod_fir_band2_offset ||
+                     target == Synth::mod_fir_band3_offset || target == Synth::mod_fir_band1_spread ||
+                     target == Synth::mod_fir_band2_spread || target == Synth::mod_fir_band3_spread ||
+                     target == Synth::mod_fir_band1_gain || target == Synth::mod_fir_band2_gain ||
+                     target == Synth::mod_fir_band3_gain)
+                want_bounded_real(w,
+                                  val_idx,
+                                  static_cast<double>(target == Synth::mod_fir_band1_gain ||
+                                                              target == Synth::mod_fir_band2_gain ||
+                                                              target == Synth::mod_fir_band3_gain
+                                                          ? 0.0f
+                                                          : Sculptor::osc_target_view(target, fir_type).min_value),
                                   static_cast<double>(Sculptor::osc_target_view(target, fir_type).max_value),
                                   &routing.base_value);
             else if (target == Synth::mod_fir_slope) {
@@ -2048,6 +2109,8 @@ static void decode_routing_object(Walker&            w,
                                   Synth::FilterType  fir_type,
                                   Synth::Oscillator& osc,
                                   bool&              fm_ratio_routed,
+                                  bool&              slope_routed,
+                                  bool*              touched_targets,
                                   void (*unknown_target)(Walker&, uint32_t))
 {
     walk_object(w, val_idx, [&](uint32_t r_key, uint32_t r_val) {
@@ -2055,7 +2118,14 @@ static void decode_routing_object(Walker&            w,
             if (key_eq(w, r_key, mod_target_names[t])) {
                 if (t == static_cast<uint32_t>(Synth::mod_fm_ratio))
                     fm_ratio_routed = true;
-                decode_routing(w, r_val, static_cast<Synth::ModTarget>(t), fir_type, osc.targets[t]);
+                if (t == static_cast<uint32_t>(Synth::mod_fir_slope))
+                    slope_routed = true;
+                decode_routing(w,
+                               r_val,
+                               static_cast<Synth::ModTarget>(t),
+                               fir_type,
+                               osc.targets[t],
+                               touched_targets ? &touched_targets[t] : nullptr);
                 return;
             }
         }
@@ -2071,13 +2141,47 @@ static float clamp_legacy_mod_ratio(float ratio)
     return ratio != 0.0f ? vmath::clamp(ratio, Synth::osc_mod_ratio_min, Synth::osc_mod_ratio_max) : 0.0f;
 }
 
+// Per-band absent-key defaults shared by the bank and portable document
+// decoders: within the decoded band count an untouched gain decodes 1.0
+// and bands 1-3 slopes decode 100, so a band added by count without
+// stating every key still routes audibly. Keys that are present decode as
+// stated, including an explicit zero gain (an inactive band).
+static void apply_fir_band_absent_defaults(Synth::Oscillator&      osc,
+                                           const bool*             touched_targets,
+                                           const Synth::FilterType fir_type)
+{
+    for (uint32_t band = 0; band < 4; band++) {
+        if (band >= osc.fir_band_count)
+            break;
+        const uint32_t gain_t = band == 0 ? static_cast<uint32_t>(Synth::mod_fir_band0_gain)
+                                          : static_cast<uint32_t>(Synth::mod_fir_band1_offset) + 4u * (band - 1) + 2u;
+        if (! touched_targets[gain_t]) {
+            const Sculptor::OscTargetView gain_view =
+                Sculptor::osc_target_view(static_cast<Synth::ModTarget>(gain_t), fir_type);
+            osc.targets[gain_t].base_value = 1.0f * gain_view.bank_scale;
+        }
+        if (band > 0) {
+            const uint32_t slope_t = static_cast<uint32_t>(Synth::mod_fir_band1_offset) + 4u * (band - 1) + 3u;
+            if (! touched_targets[slope_t]) {
+                const Sculptor::OscTargetView slope_view =
+                    Sculptor::osc_target_view(static_cast<Synth::ModTarget>(slope_t), fir_type);
+                osc.targets[slope_t].base_value = 100.0f * slope_view.bank_scale;
+            }
+        }
+    }
+}
+
 static void decode_oscillator(Walker& w, uint32_t obj, Synth::Oscillator& osc)
 {
-    bool                    fm_ratio_routed = false;
-    int32_t                 octave_offset   = 0;
-    int32_t                 fir_slope       = 100;
-    float                   pitch_offset    = 0.0f;
-    const Synth::FilterType fir_type        = prescan_fir_type(w, obj);
+    bool                    fm_ratio_routed                      = false;
+    bool                    slope_routed                         = false;
+    uint32_t                band_count                           = 1;
+    bool                    fir_bands_stated                     = false;
+    bool                    bank_touched[Synth::num_mod_targets] = {};
+    int32_t                 octave_offset                        = 0;
+    int32_t                 fir_slope                            = 100;
+    float                   pitch_offset                         = 0.0f;
+    const Synth::FilterType fir_type                             = prescan_fir_type(w, obj);
     walk_object(w, obj, [&](uint32_t key_idx, uint32_t val_idx) {
         uint32_t value = 0;
         if (key_eq(w, key_idx, "wave_a")) {
@@ -2107,7 +2211,7 @@ static void decode_oscillator(Walker& w, uint32_t obj, Synth::Oscillator& osc)
             walk_object(w, val_idx, [&](uint32_t gen_key, uint32_t gen_val) {
                 for (uint32_t t = 0; t < Synth::num_mod_targets; t++) {
                     if (key_eq(w, gen_key, mod_target_names[t])) {
-                        decode_gen(w, gen_val, osc.targets[t]);
+                        decode_gen(w, gen_val, osc.targets[t], &bank_touched[t]);
                         return;
                     }
                 }
@@ -2117,9 +2221,47 @@ static void decode_oscillator(Walker& w, uint32_t obj, Synth::Oscillator& osc)
             // This layer's own routing decodes straight into its bindings; a
             // target the object omits keeps the zeroed binding (fm_ratio is
             // backfilled from the scalar below when no block names it).
-            decode_routing_object(w, val_idx, fir_type, osc, fm_ratio_routed, unknown_field);
-        else
-            unknown_field(w, key_idx);
+            decode_routing_object(w,
+                                  val_idx,
+                                  fir_type,
+                                  osc,
+                                  fm_ratio_routed,
+                                  slope_routed,
+                                  bank_touched,
+                                  unknown_field);
+        else if (key_eq(w, key_idx, "fir_bands")) {
+            // Multi-band bank documents state the active band count; band keys
+            // beyond the count decode but stay dormant (the count gates the runtime
+            // and the re-encode skips them).
+            want_uint(w, val_idx, 4, &band_count);
+            if (band_count < 1) {
+                w.failed = true;
+            }
+            fir_bands_stated = true;
+        }
+        else {
+            uint32_t t = 0;
+            while (t < Synth::num_mod_targets && ! key_eq(w, key_idx, mod_target_names[t])) {
+                t++;
+            }
+            if (t < Synth::num_mod_targets) {
+                if (t == static_cast<uint32_t>(Synth::mod_fm_ratio)) {
+                    fm_ratio_routed = true;
+                }
+                if (t == static_cast<uint32_t>(Synth::mod_fir_slope)) {
+                    slope_routed = true;
+                }
+                decode_routing(w,
+                               val_idx,
+                               static_cast<Synth::ModTarget>(t),
+                               fir_type,
+                               osc.targets[t],
+                               &bank_touched[t]);
+            }
+            else {
+                unknown_field(w, key_idx);
+            }
+        }
     });
 
     if (w.failed)
@@ -2133,6 +2275,23 @@ static void decode_oscillator(Walker& w, uint32_t obj, Synth::Oscillator& osc)
     }
     osc.fir_slope_percent = static_cast<uint8_t>(fir_slope);
     osc.fir_type          = fir_type;
+    osc.fir_band_count    = static_cast<uint8_t>(band_count);
+    // Per-band absent-key defaults, mirroring the portable document
+    // decoder, apply to a legacy single-band bandpass bank (no fir_bands,
+    // no band keys) too. Band 0's offset decodes the neutral 0.
+    // Non-bandpass layers keep the legacy zeroed gain binding: the gain row
+    // means nothing there, and a backfilled key would change the re-encoded
+    // bytes of every pre-existing document.
+    if (fir_type == Synth::fir_bandpass)
+        apply_fir_band_absent_defaults(osc, bank_touched, fir_type);
+    // Multi-band banks treat band 0's slope as a real band parameter: when the
+    // count key is stated and no block names fir_slope, the unrouted binding's
+    // base seeds from the scalar so the band row and the compiled base agree
+    // (legacy documents without the count key keep the zeroed binding, the
+    // M1 scalar convention).
+    if (fir_bands_stated && ! slope_routed) {
+        osc.targets[Synth::mod_fir_slope].base_value = static_cast<float>(fir_slope);
+    }
 
     // Legacy pitch_offset folds into the pitch target's base value; the
     // combined static trim must stay inside the pitch editing range.
@@ -3482,13 +3641,17 @@ static void decode_target_doc(Walker&             w,
                               Synth::ModTarget    target,
                               Synth::FilterType   fir_type,
                               Synth::Oscillator&  osc,
-                              InstrumentDocState& doc)
+                              InstrumentDocState& doc,
+                              bool*               touched)
 {
     const Sculptor::OscTargetView view = Sculptor::osc_target_view(target, fir_type);
 
     float base        = doc_base_default(target);
     bool  base_set    = false;
     bool  sources_set = false;
+    if (touched) {
+        *touched = true;
+    }
 
     walk_object(w, obj, [&](uint32_t key_idx, uint32_t val_idx) {
         if (key_eq(w, key_idx, "base")) {
@@ -3622,6 +3785,13 @@ static void decode_target_doc(Walker&             w,
     if (base_set || sources_set) {
         osc.targets[target].base_value = base * view.bank_scale;
     }
+    if (! base_set && ! sources_set &&
+        (target == Synth::mod_fir_band0_gain || target == Synth::mod_fir_band1_gain ||
+         target == Synth::mod_fir_band2_gain || target == Synth::mod_fir_band3_gain)) {
+        // The explicit-empty-block convention: a present gain block with an
+        // omitted base states the gain-0 band, overriding the 1.0 absent default.
+        osc.targets[target].base_value = 0.0f;
+    }
 }
 
 // One oscillator layer.  wave_a is the one required field.
@@ -3631,16 +3801,19 @@ static void decode_layer_doc(Walker&                     w,
                              InstrumentDocState&         doc,
                              Synth::InstrumentJsonDomain domain)
 {
-    uint32_t                wave_a        = 0;
-    bool                    wave_a_set    = false;
-    uint32_t                wave_b        = 0;
-    uint32_t                mode          = 0;
-    float                   mod_ratio     = 1.0f;
-    bool                    fm_ratio_set  = false;
-    float                   pitch_offset  = 0.0f;
-    int32_t                 octave_offset = 0;
-    int32_t                 fir_slope     = 100;
-    const Synth::FilterType fir_type      = prescan_fir_type(w, obj);
+    uint32_t                wave_a                              = 0;
+    bool                    wave_a_set                          = false;
+    uint32_t                wave_b                              = 0;
+    uint32_t                mode                                = 0;
+    float                   mod_ratio                           = 1.0f;
+    bool                    fm_ratio_set                        = false;
+    bool                    doc_slope_routed                    = false;
+    uint32_t                doc_band_count                      = 1;
+    bool                    doc_touched[Synth::num_mod_targets] = {};
+    float                   pitch_offset                        = 0.0f;
+    int32_t                 octave_offset                       = 0;
+    int32_t                 fir_slope                           = 100;
+    const Synth::FilterType fir_type                            = prescan_fir_type(w, obj);
     walk_object(w, obj, [&](uint32_t key_idx, uint32_t val_idx) {
         if (key_eq(w, key_idx, "wave_a")) {
             want_enum(w, val_idx, wave_names, num_waves, &wave_a);
@@ -3661,7 +3834,13 @@ static void decode_layer_doc(Walker&                     w,
             // kind disambiguates (an object is the routing block, a number the
             // legacy scalar).
             if (w.toks[val_idx].type == JSMN_OBJECT) {
-                decode_target_doc(w, val_idx, Synth::mod_fir_slope, fir_type, osc, doc);
+                decode_target_doc(w,
+                                  val_idx,
+                                  Synth::mod_fir_slope,
+                                  fir_type,
+                                  osc,
+                                  doc,
+                                  &doc_touched[static_cast<uint32_t>(Synth::mod_fir_slope)]);
             }
             else {
                 want_int(w, val_idx, 1, 100, &fir_slope);
@@ -3669,6 +3848,14 @@ static void decode_layer_doc(Walker&                     w,
         }
         else if (key_eq(w, key_idx, "fir_type")) {
             // Read by prescan_fir_type before the target blocks.
+        }
+        else if (key_eq(w, key_idx, "fir_bands")) {
+            // The multi-band count: absent decodes as the legacy single band; bands
+            // beyond the count decode but stay dormant (the re-encode skips them).
+            want_uint(w, val_idx, 4, &doc_band_count);
+            if (doc_band_count < 1) {
+                w.failed = true;
+            }
         }
         else {
             uint32_t target = 0;
@@ -3680,12 +3867,25 @@ static void decode_layer_doc(Walker&                     w,
                 // target keys follow it.
                 if (target == static_cast<uint32_t>(Synth::mod_fm_ratio))
                     fm_ratio_set = true;
-                decode_target_doc(w, val_idx, static_cast<Synth::ModTarget>(target), fir_type, osc, doc);
+                decode_target_doc(w,
+                                  val_idx,
+                                  static_cast<Synth::ModTarget>(target),
+                                  fir_type,
+                                  osc,
+                                  doc,
+                                  &doc_touched[target]);
             }
             else if (key_eq(w, key_idx, "routing")) {
                 // Bank-style routing object, accepted as a portable alias so a routing block can
                 // share a layer with the fir_slope scalar key without colliding.
-                decode_routing_object(w, val_idx, fir_type, osc, fm_ratio_set, doc_unknown_field);
+                decode_routing_object(w,
+                                      val_idx,
+                                      fir_type,
+                                      osc,
+                                      fm_ratio_set,
+                                      doc_slope_routed,
+                                      doc_touched,
+                                      doc_unknown_field);
             }
             else if (key_eq(w, key_idx, "lowpass_cutoff") || key_eq(w, key_idx, "highpass_cutoff")) {
                 // Removed cutoff targets: old clipboard/library documents
@@ -3741,13 +3941,21 @@ static void decode_layer_doc(Walker&                     w,
     }
     osc.fir_slope_percent = static_cast<uint8_t>(fir_slope);
     osc.fir_type          = fir_type;
+    osc.fir_band_count    = static_cast<uint8_t>(doc_band_count < 1u ? 1u : doc_band_count);
+
+    // Per-band absent defaults apply to every layer, band 0's gain
+    // included: the routing alias and the generator keys mark their
+    // targets, so a stated gain or slope survives and the absent ones
+    // decode the audible defaults.
+    apply_fir_band_absent_defaults(osc, doc_touched, fir_type);
 }
 
 // One root object, nothing before or after it, grammar-clean everywhere.
 static bool parse_document(const char* text, uint32_t len, Walker& w)
 {
-    if (len > bank_json_text_size)
+    if (len > bank_json_text_size) {
         return false;
+    }
 
     jsmn_parser parser;
     jsmn_init(&parser);
@@ -3777,12 +3985,14 @@ static bool parse_document(const char* text, uint32_t len, Walker& w)
 
     // Nothing may precede the root object: jsmn consumes separators without a
     // root, so ",{}" would otherwise pass as an empty document.
-    if (! gap_is_ws(text, 0, static_cast<uint32_t>(w.toks[0].start)))
+    if (! gap_is_ws(text, 0, static_cast<uint32_t>(w.toks[0].start))) {
         return false;
-
-    for (uint32_t i = static_cast<uint32_t>(w.toks[0].end); i < len; i++)
-        if (! is_ws(text[i]))
-            return false; // one root object, nothing trailing
+    }
+    for (uint32_t i = static_cast<uint32_t>(w.toks[0].end); i < len; i++) {
+        if (! is_ws(text[i])) {
+            return false;
+        }
+    }
 
     return true;
 }
@@ -4157,8 +4367,9 @@ bool Synth::decode_instrument_json_for_domain(const char*            text,
     if (! layers_seen) {
         return false;
     }
-    if (layer_count == 0)
+    if (layer_count == 0) {
         return false;
+    }
 
     doc.instr.layer_count = layer_count;
 
@@ -4190,8 +4401,9 @@ bool Synth::decode_instrument_json_for_domain(const char*            text,
                                                 layout_count,
                                                 instrument_mapped_staging,
                                                 Synth::instrument_graph_layout_capacity,
-                                                &mapped_count))
+                                                &mapped_count)) {
         return false;
+    }
     // Only now, with the whole document proven valid, do the caller's outputs
     // change: every failure path above leaves them untouched.
     memcpy(out_instr, &doc.instr, sizeof(*out_instr));
@@ -4348,10 +4560,20 @@ static uint32_t encode_instrument_json_for_domain(char*                         
             o.uint_value(osc.fir_slope_percent);
         }
         key_fir_type(o, osc);
+        // The count key rides only multi-band layers (the absent count decodes
+        // as the legacy single band).
+        if (osc.fir_band_count > 1) {
+            o.key("fir_bands");
+            o.uint_value(osc.fir_band_count);
+        }
 
         for (uint32_t target = 0; target < Synth::num_mod_targets; target++) {
             const Synth::ModTarget        mod_target = static_cast<Synth::ModTarget>(target);
             const Sculptor::OscTargetView view       = Sculptor::osc_target_view(mod_target);
+
+            if (band_of_target(target) >= (osc.fir_band_count < 1u ? 1u : osc.fir_band_count)) {
+                continue; // a band beyond the active count never leaks into the document
+            }
 
             if (mod_target == Synth::mod_fir_slope && ! slope_routed) {
                 // Zeroed slope binding: the scalar key above carries the value, and
@@ -4373,7 +4595,14 @@ static uint32_t encode_instrument_json_for_domain(char*                         
             // the key and reloads with the same zero instead of stating a
             // base its integer grammar rejects.
             if (layer == 0 || routing.base_value != 0.0f || routing.num_inputs != 0) {
-                if (mod_target != Synth::mod_fir_slope || routing.base_value != 0.0f) {
+                // A gain-0 band must survive the round trip as an inactive band: the
+                // empty block marks "present, base omitted" and decodes 0, so the
+                // zero base is never stated for a gain key.
+                const bool band_gain_zero =
+                    routing.base_value == 0.0f &&
+                    (mod_target == Synth::mod_fir_band0_gain || mod_target == Synth::mod_fir_band1_gain ||
+                     mod_target == Synth::mod_fir_band2_gain || mod_target == Synth::mod_fir_band3_gain);
+                if ((mod_target != Synth::mod_fir_slope || routing.base_value != 0.0f) && ! band_gain_zero) {
                     o.key("base");
                     o.float_value(routing.base_value / view.bank_scale);
                 }
@@ -4625,7 +4854,7 @@ uint32_t Sculptor::encode_editor_instrument_json(const Synth::InstrumentEditorBa
             return 0;
         }
         if (playback_form.layer_count == 0) {
-            return 0; // zero-wired: the caller reports the refusal
+            return 0;
         }
         instrument = &playback_form;
     }

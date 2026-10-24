@@ -50,6 +50,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <type_traits>
+#include <utility>
 
 // Heap storage for test scratch arrays. sizeof() and array decay keep working
 // on the elements member, and make_unique value-initializes the array like the
@@ -84,8 +86,8 @@ namespace {
 constexpr uint32_t max_portable_records =
     Synth::graph_canonical_node_count + 2u * Synth::max_layers * Synth::num_mod_targets;
 static_assert(max_portable_records == Synth::instrument_graph_layout_capacity);
-static_assert(max_portable_records == 177, "9 canonical + 84 envelopes + 84 LFOs");
-constexpr uint32_t clipboard_token_bound = 16384;
+static_assert(max_portable_records == 373, "9 canonical + 182 envelopes + 182 LFOs");
+constexpr uint32_t clipboard_token_bound = 32768;
 constexpr uint32_t fake_region_base      = 8192;
 
 // The editor's clipboard staging capacity. The copy path encodes into
@@ -93,7 +95,7 @@ constexpr uint32_t fake_region_base      = 8192;
 // bytes needs capacity >= L + 1. This mirrors the editor's staging buffer in
 // sculptor_instr_edit.cpp; a larger document must raise that buffer, never
 // truncate the document.
-constexpr uint32_t clipboard_capacity = 128 * 1024;
+constexpr uint32_t clipboard_capacity = 192 * 1024;
 
 // One instrument document with one saved position per node kind, assembled from
 // a fixed body and a caller-supplied record list, so a rejection test changes
@@ -147,11 +149,25 @@ constexpr uint32_t t7_target_row_slots[Synth::num_mod_targets] = {
     29,  // duty b
     56,  // waveform mix
     69,  // fm depth
-    136, // fir pitch spread
+    152, // fir pitch spread
     82,  // fm ratio
     15,  // pad tone a
     42,  // pad tone b
-    149, // fir slope
+    178, // fir slope
+    139, // fir band 0 offset
+    165, // fir band 0 gain
+    194, // fir band 1 offset
+    207, // fir band 1 spread
+    220, // fir band 1 gain
+    233, // fir band 1 slope
+    249, // fir band 2 offset
+    262, // fir band 2 spread
+    275, // fir band 2 gain
+    288, // fir band 2 slope
+    304, // fir band 3 offset
+    317, // fir band 3 spread
+    330, // fir band 3 gain
+    343, // fir band 3 slope
 };
 // Shared graph and mapping for the direct-row blocks; every block
 // re-projects, which rebuilds both from scratch.
@@ -231,6 +247,20 @@ static bool osc_graph_mark_node(bool* seen, uint32_t node_idx, uint32_t* count)
 
 static uint32_t find_osc_graph_connection(const Sculptor::Graph& graph, const Sculptor::EndPoint& input);
 
+// The band index (0..3) of a band-parameter target, -1 otherwise: the
+// test-side mirror of the production band_target mapping (band 0 keeps
+// the legacy spread/slope targets 7 and 11).
+static int32_t osc_target_band_of_target(const uint32_t target)
+{
+    if (target >= 14u) {
+        return static_cast<int32_t>((target - 14u) / 4u) + 1;
+    }
+    if (target == 7u || target == 11u || target == 12u || target == 13u) {
+        return 0;
+    }
+    return -1;
+}
+
 // Checks via TEST that a projection filled the mapping consistently: every
 // fixed node exists and is distinct, each occupied layer's oscillator has
 // exactly 15 rows plus its target blocks, and the instance registry
@@ -242,7 +272,8 @@ static void check_osc_graph_mapping(const Sculptor::Graph&           graph,
                                     const Sculptor::OscGraphMapping& mapping,
                                     uint32_t                         layer_count,
                                     uint32_t                         env_instances,
-                                    uint32_t                         lfo_instances)
+                                    uint32_t                         lfo_instances,
+                                    uint32_t                         band_count = 1)
 {
     bool     seen[Sculptor::max_nodes] = {};
     uint32_t count                     = 0;
@@ -264,13 +295,21 @@ static void check_osc_graph_mapping(const Sculptor::Graph&           graph,
         if (layer < layer_count) {
             TEST(mapping.osc_nodes[layer] != Sculptor::pool_no_slot);
             TEST(osc_graph_mark_node(seen, mapping.osc_nodes[layer], &count));
-            // 18 fixed rows plus one 12-slot block per ModTarget after its row.
+            // 35 fixed rows plus Filter Type, then one uniform band block
+            // per existing band: the "Band N" header label, its [-]/[+]
+            // click slots, and four parameter rows each followed by a
+            // 12-slot block.
             const uint32_t osc_node = mapping.osc_nodes[layer];
             TEST(graph.node(osc_node).slots.num_allocated ==
-                 Sculptor::osc_slot_count + Sculptor::osc_target_block_stride * Synth::num_mod_targets);
+                 Sculptor::osc_band_first_slot + Sculptor::osc_band_block_stride * band_count);
             for (uint32_t t = 0; t < Synth::num_mod_targets; ++t) {
                 // The family dots stay connectable whether or not they carry
-                // a wire; the base row never hides.
+                // a wire; the base row never hides.  Bands beyond the count
+                // project no rows at all.
+                if (osc_target_band_of_target(t) >= 0 &&
+                    static_cast<uint32_t>(osc_target_band_of_target(t)) >= band_count) {
+                    continue;
+                }
                 TEST(Sculptor::osc_target_env_dot(t) < graph.node(osc_node).slots.num_allocated);
                 TEST(Sculptor::osc_target_lfo_dot(t) < graph.node(osc_node).slots.num_allocated);
                 for (uint32_t i = 0; i < Synth::max_mod_inputs; ++i) {
@@ -430,6 +469,8 @@ static void build_osc_graph_max_fixture(Synth::InstrumentBank* bank,
         osc.osc_type[1]        = static_cast<Synth::WaveType>(1 + ((layer + 2) % 4));
         osc.osc_mode           = static_cast<Synth::OscMode>(layer % 3);
         osc.mod_ratio          = 1.0f + 0.25f * static_cast<float>(layer);
+        // Four bands: every band block projects and round-trips.
+        osc.fir_band_count = 4;
         for (uint32_t t = 0; t < Synth::num_mod_targets; t++) {
             if (! osc_graph_target(static_cast<Synth::ModTarget>(t))) {
                 continue; // duty A/B, osc mix and FM depth keep base-only bindings here
@@ -482,10 +523,11 @@ static void build_osc_graph_max_fixture(Synth::InstrumentBank* bank,
 
     for (uint32_t t = 0; t < Synth::num_mod_targets; t++) {
         Synth::TargetBinding& routing = instrument->layers[0].targets[t];
-        if (t == Synth::mod_fir_slope) {
-            // The FIR slope base is an integer percent 1..100; this fixture's
-            // formula would produce a fractional base, so the binding stays
-            // zeroed here (the scalar carries the value).
+        if (t == Synth::mod_fir_slope || t == Synth::mod_fir_band1_slope || t == Synth::mod_fir_band2_slope ||
+            t == Synth::mod_fir_band3_slope) {
+            // The FIR slope bases are integer percents 1..100; this fixture's
+            // formula would produce fractional bases, so those bindings stay
+            // zeroed here (the scalar / row carries the value).
             continue;
         }
         routing.base_value = -1.0f + 0.25f * static_cast<float>(t);
@@ -660,16 +702,16 @@ static void add_detached_record(Synth::InstrumentEditorBank* bank,
 {
     TEST(bank->graph_layout_count < Synth::max_graph_records);
     Synth::GraphNodeLayout& record = bank->graph_layout[bank->graph_layout_count++];
-    record                         = {};
-    record.channel                 = static_cast<uint8_t>(channel);
-    record.zone                    = static_cast<uint8_t>(zone);
-    record.kind                    = static_cast<uint8_t>(kind);
-    record.index                   = static_cast<uint8_t>(desc_id);
-    record.x                       = x;
-    record.y                       = y;
-    record.depth_source            = static_cast<uint8_t>(depth_source);
-    record.rate_source             = static_cast<uint8_t>(rate_source);
-    record.uid                     = uid;
+    memset(static_cast<void*>(&record), 0, sizeof(record));
+    record.channel      = static_cast<uint8_t>(channel);
+    record.zone         = static_cast<uint8_t>(zone);
+    record.kind         = static_cast<uint8_t>(kind);
+    record.index        = static_cast<uint8_t>(desc_id);
+    record.x            = x;
+    record.y            = y;
+    record.depth_source = static_cast<uint8_t>(depth_source);
+    record.rate_source  = static_cast<uint8_t>(rate_source);
+    record.uid          = uid;
 }
 
 // Builds an editor bank whose channel 0 zone 0 holds the small projection
@@ -1042,6 +1084,9 @@ static uint32_t build_clipboard_max_fixture(Synth::InstrumentBank*        bank,
         osc.osc_type[1]        = Synth::WaveType::sawtooth_wave;
         osc.osc_mode           = static_cast<Synth::OscMode>(layer % 3);
         osc.mod_ratio          = 1.0f + 0.25f * static_cast<float>(layer);
+        // All 26 targets carry live bindings, so the full band count keeps the
+        // band rows out of the dormant-skip path.
+        osc.fir_band_count = 4;
         for (uint32_t cell = 0; cell < Synth::num_mod_targets; cell++) {
             const Synth::ModTarget target = static_cast<Synth::ModTarget>(cell);
 
@@ -1080,20 +1125,29 @@ static uint32_t build_clipboard_max_fixture(Synth::InstrumentBank*        bank,
     for (uint32_t cell = 0; cell < Synth::num_mod_targets; cell++) {
         const Synth::ModTarget target  = static_cast<Synth::ModTarget>(cell);
         Synth::TargetBinding&  routing = instrument->layers[0].targets[target];
-        routing.base_value             = target == Synth::mod_volume       ? 0.75f
-                                         : target == Synth::mod_pitch      ? 0.0f
-                                         : target == Synth::mod_panning    ? 0.5f
-                                         : target == Synth::mod_fm_ratio   ? 1.5f
-                                         : target == Synth::mod_fir_spread ? 3.0f
-                                         : target == Synth::mod_fir_slope  ? 37.0f
-                                                                           : 2000.0f;
-        routing.num_inputs             = 2;
-        routing.inputs[0].source       = Synth::ModSource::velocity;
-        routing.inputs[0].op           = Synth::SourceOp::add;
-        routing.inputs[0].scale        = 0.5f;
-        routing.inputs[1].source       = Synth::ModSource::mod_wheel;
-        routing.inputs[1].op           = Synth::SourceOp::multiply;
-        routing.inputs[1].scale        = -0.25f;
+        routing.base_value = target == Synth::mod_volume       ? 0.75f
+                             : target == Synth::mod_pitch      ? 0.0f
+                             : target == Synth::mod_panning    ? 0.5f
+                             : target == Synth::mod_fm_ratio   ? 1.5f
+                             : target == Synth::mod_fir_spread ? 3.0f
+                             : target == Synth::mod_fir_slope  ? 37.0f
+                             : (target == Synth::mod_fir_band0_gain || target == Synth::mod_fir_band1_gain ||
+                                target == Synth::mod_fir_band2_gain || target == Synth::mod_fir_band3_gain)
+                                 ? 0.4f + 0.1f * static_cast<float>((target - Synth::mod_fir_band0_gain) / 4)
+                             : (target == Synth::mod_fir_band1_slope || target == Synth::mod_fir_band2_slope ||
+                                target == Synth::mod_fir_band3_slope)
+                                 ? 90.0f - 10.0f * static_cast<float>((target - Synth::mod_fir_band1_slope) / 4)
+                             : (target == Synth::mod_fir_band1_spread || target == Synth::mod_fir_band2_spread ||
+                                target == Synth::mod_fir_band3_spread)
+                                 ? 4.0f + static_cast<float>((target - Synth::mod_fir_band1_spread) / 4)
+                                 : 2.0f + static_cast<float>(target); // band offsets stay within their -36..36 view
+        routing.num_inputs = 2;
+        routing.inputs[0].source = Synth::ModSource::velocity;
+        routing.inputs[0].op     = Synth::SourceOp::add;
+        routing.inputs[0].scale  = 0.5f;
+        routing.inputs[1].source = Synth::ModSource::mod_wheel;
+        routing.inputs[1].op     = Synth::SourceOp::multiply;
+        routing.inputs[1].scale  = -0.25f;
     }
     instrument->layers[0].targets[Synth::mod_duty0].base_value     = 0.25f;
     instrument->layers[0].targets[Synth::mod_duty1].base_value     = 0.5f;
@@ -5005,10 +5059,16 @@ static void check_shared_instrument_json_domains()
         TEST(Sculptor::encode_editor_instrument_json(source, 0, 0, text, sizeof(text), domain) == 0);
     }
     // Titles are bounded UTF-8 strings in both transport domains.
-    const char* title_path = "synth_invalid_title.tmp";
-    char        text_before[clipboard_capacity];
-    char        file_before[clipboard_capacity];
-    char        file_after[clipboard_capacity];
+    const char*                                                 title_path = "synth_invalid_title.tmp";
+    const std::unique_ptr<FixedArray<char, clipboard_capacity>> text_before_storage =
+        std::make_unique<FixedArray<char, clipboard_capacity>>();
+    const std::unique_ptr<FixedArray<char, clipboard_capacity>> file_before_storage =
+        std::make_unique<FixedArray<char, clipboard_capacity>>();
+    const std::unique_ptr<FixedArray<char, clipboard_capacity>> file_after_storage =
+        std::make_unique<FixedArray<char, clipboard_capacity>>();
+    char (&text_before)[clipboard_capacity] = text_before_storage->elements;
+    char (&file_before)[clipboard_capacity] = file_before_storage->elements;
+    char (&file_after)[clipboard_capacity]  = file_after_storage->elements;
     for (Synth::InstrumentJsonDomain domain : domains) {
         for (uint32_t malformed = 0; malformed < 2; ++malformed) {
             build_named_fm_fixture(&source);
@@ -5227,17 +5287,13 @@ static void check_shared_instrument_json_domains()
     TEST(source.graph_layout[0].x == graph.node(node).position.x);
 
     // Exact effect identities distinguish canonical spelling from custom titles.
-    const char     titles[][32] = { "LFO 1",
-                                    "LFO 128",
-                                    "LFO 0",
-                                    "LFO 129",
-                                    "LFO 1280",
-                                    "LFO 01",
-                                    "LFO +1",
-                                    "LFO 1x",
-                                    "LFO ",
-                                    "Delay",
-                                    "LFO 99999999999999999999999" };
+    const char titles[][32] = {
+        "LFO 1",
+        "LFO 255", // the 255 descriptor-id bound: the exact maximum id parses canonically
+        "LFO 0",
+        "LFO 256", // one past the bound maps to the 0 id
+        "LFO 1280", "LFO 01", "LFO +1", "LFO 1x", "LFO ", "Delay", "LFO 99999999999999999999999"
+    };
     const bool     recognized[] = { true, true, true, true, true, false, false, false, false, false, false };
     const uint16_t ids[]        = { 1, Synth::max_lfos, 0, 0, 0 };
     for (uint32_t index = 0; index < sizeof(titles) / sizeof(titles[0]); ++index) {
@@ -5268,7 +5324,7 @@ static void check_shared_instrument_json_domains()
     TEST(! Sculptor::translate_effect_lfo_title(translated_title, lfo_ids, &mapped_id));
     TEST(mapped_id == 0xBEEF);
     TEST(memcmp(translated_title, unterminated_title, sizeof(translated_title)) == 0);
-    strcpy(translated_title, "LFO 128");
+    strcpy(translated_title, "LFO 255");
     lfo_ids[Synth::max_lfos - 1] = 2;
     TEST(Sculptor::translate_effect_lfo_title(translated_title, lfo_ids, &mapped_id));
     TEST(mapped_id == 2 && strcmp(translated_title, "LFO 2") == 0);
@@ -5286,9 +5342,9 @@ static void check_shared_instrument_json_domains()
     Synth::EffectSlotBinding* high_effect = enabled_effect(source.bank, 0, 0, Synth::EffectType::delay);
     high_effect->bindings[0].lfo_desc_id  = Synth::max_lfos;
     add_detached_record(&source, 0, 0, 4, 0, 57, 59, Synth::ModSource::none, Synth::ModSource::none, 0);
-    strcpy(source.graph_layout[source.graph_layout_count - 1].name, "LFO 128");
+    strcpy(source.graph_layout[source.graph_layout_count - 1].name, "LFO 255");
     add_detached_record(&source, 0, 0, 4, 0, 61, 63, Synth::ModSource::none, Synth::ModSource::none, 0);
-    strcpy(source.graph_layout[source.graph_layout_count - 1].name, "LFO 127");
+    strcpy(source.graph_layout[source.graph_layout_count - 1].name, "LFO 254");
     TEST(Synth::validate_instrument_bank(&source.bank));
     Synth::reclaim_unused_slots(&source);
     TEST(source.bank.lfos.num_allocated == 3);
@@ -6301,9 +6357,9 @@ static void effects_structural_regressions()
             uint16_t allocated = 0;
             TEST(Sculptor::allocate_default_lfo(&source.bank, &allocated));
             Synth::GraphNodeLayout& record = source.graph_layout[source.graph_layout_count++];
-            record                         = {};
-            record.kind                    = 4;
-            record.channel                 = static_cast<uint8_t>(owner);
+            memset(static_cast<void*>(&record), 0, sizeof(record));
+            record.kind    = 4;
+            record.channel = static_cast<uint8_t>(owner);
             snprintf(record.name, sizeof(record.name), "LFO %u", allocated);
         }
         snapshot = source;
@@ -6395,8 +6451,8 @@ static void effects_structural_regressions()
     source.graph_layout_count = 0;
     for (uint32_t index = 0; index < Sculptor::max_nodes - 3; ++index) {
         Synth::GraphNodeLayout& record = source.graph_layout[source.graph_layout_count++];
-        record                         = {};
-        record.kind                    = 4;
+        memset(static_cast<void*>(&record), 0, sizeof(record));
+        record.kind = 4;
         snprintf(record.name, sizeof(record.name), "LFO %u", index + 1);
     }
     source.bank.lfos.num_allocated = Synth::max_lfos - 1;
@@ -6551,9 +6607,9 @@ static void effects_layout_classification_regressions()
     const char* titles[] = { "Channel input", "Chorus 4", "LFO 1", "Delay", "Channel output" };
     for (const char* title : titles) {
         Synth::GraphNodeLayout& record = source.graph_layout[source.graph_layout_count++];
-        record                         = {};
-        record.kind                    = 4;
-        record.x                       = static_cast<float>(source.graph_layout_count);
+        memset(static_cast<void*>(&record), 0, sizeof(record));
+        record.kind = 4;
+        record.x    = static_cast<float>(source.graph_layout_count);
         snprintf(record.name, sizeof(record.name), "%s", title);
     }
 
@@ -7860,9 +7916,12 @@ static void effects_add_cc_regressions()
     TEST(v2_again == v2_length && memcmp(payload, reencoded, v2_length) == 0);
 
     // Strict v2 refusal: an unknown key inside the editor object fails.
-    char v2_document[sizeof(payload) + 64] = {};
+    const std::unique_ptr<FixedArray<char, sizeof(payload) + 64>> v2_document_storage =
+        std::make_unique<FixedArray<char, sizeof(payload) + 64>>();
+    char (&v2_document)[sizeof(payload) + 64] = v2_document_storage->elements;
     memcpy(v2_document, payload, v2_length);
-    char* const editor = strstr(v2_document, "\"editor\":{");
+    v2_document[v2_length] = 0;
+    char* const editor     = strstr(v2_document, "\"editor\":{");
     TEST(editor != nullptr);
     if (editor) {
         const char   unknown[]   = "\"future\":1,";
@@ -8963,13 +9022,13 @@ static void osc_inputs_move_reprojection_regressions()
     TEST(Sculptor::find_record(source, 0, 0, 0, 0, 0) < 0);
     TEST(source.graph_layout_count < Synth::max_graph_records);
     Synth::GraphNodeLayout& record = source.graph_layout[source.graph_layout_count++];
-    record                         = {};
-    record.channel                 = 0;
-    record.zone                    = 0;
-    record.kind                    = 0;
-    record.index                   = 0;
-    record.x                       = moved.x;
-    record.y                       = moved.y;
+    memset(static_cast<void*>(&record), 0, sizeof(record));
+    record.channel = 0;
+    record.zone    = 0;
+    record.kind    = 0;
+    record.index   = 0;
+    record.x       = moved.x;
+    record.y       = moved.y;
     TEST(Synth::validate_instrument_bank(&source.bank));
     TEST(Sculptor::validate_editor_metadata(source));
     // Adding CC 16 commits the mask bit and re-projects the graph.
@@ -9109,9 +9168,9 @@ static void fx_output_node_placement_regressions()
     const vmath::vec2 moved(2400.0f, 96.0f);
     graph.set_node_layout(mapping.output_node, moved, 0, 0);
     Synth::GraphNodeLayout& record = source.graph_layout[source.graph_layout_count++];
-    record                         = {};
-    record.channel                 = 0;
-    record.kind                    = 4;
+    memset(static_cast<void*>(&record), 0, sizeof(record));
+    record.channel = 0;
+    record.kind    = 4;
     strcpy(record.name, graph.node(mapping.output_node).name);
     record.x = moved.x;
     record.y = moved.y;
@@ -9627,6 +9686,10 @@ static void child_row_projection_regressions()
     for (uint32_t t = 0; t < Synth::num_mod_targets; ++t) {
         // Duty, pad tone, mix, fm and filter-spread rows nest under
         // their parent rows; volume, pan and pitch stay at the top level.
+        // Bands beyond the count project no rows at all.
+        if (osc_target_band_of_target(t) > 0) {
+            continue;
+        }
         TEST(osc.slots.entries[Sculptor::osc_target_row(t)].child_row == (t >= 3));
         TEST(osc.slots.entries[Sculptor::osc_target_env_dot(t)].child_row);
         for (uint32_t f = 0; f <= 3; ++f) {
@@ -9647,8 +9710,12 @@ static void child_row_projection_regressions()
         for (uint32_t t = 3; t < Synth::num_mod_targets; ++t) {
             child_row_expected = child_row_expected || s == Sculptor::osc_target_row(t);
         }
-        // Pitch offset, octave offset and fir slope nest under their parents.
-        child_row_expected = child_row_expected || s == 134 || s == 149;
+        // Pitch offset, octave offset, the band-1 header block (the header
+        // label plus its two click slots) and the fir slope row nest under
+        // their parents.
+        child_row_expected =
+            child_row_expected || s == 134 || s == 178 ||
+            (s >= Sculptor::osc_band_first_slot && s < Sculptor::osc_band_first_slot + Sculptor::osc_band_block_stride);
         TEST(osc.slots.entries[s].child_row == child_row_expected);
     }
 
@@ -9826,9 +9893,13 @@ static void check_target_block_grammar(const Sculptor::Node& osc, uint32_t targe
 {
 
     // Targets from duty a on nest under their parent rows (volume, pan and
-    // pitch stay at the top level), so their whole block shifts one deeper.
-    const uint8_t  level_base = target >= 3 ? 2 : 1;
-    const uint32_t base       = Sculptor::osc_target_block_base(target);
+    // pitch stay at the top level), so their whole block shifts one deeper;
+    // the band rows (spread, slope and all appended band targets) nest
+    // under the Band row, one level deeper again.
+    const bool     is_band_row = target == static_cast<uint32_t>(Synth::mod_fir_spread) ||
+                                 target == static_cast<uint32_t>(Synth::mod_fir_slope) || target >= 12;
+    const uint8_t  level_base  = is_band_row ? 4u : target >= 3 ? 2u : 1u;
+    const uint32_t base        = Sculptor::osc_target_block_base(target);
     TEST(Sculptor::osc_target_row(target) == t7_target_row_slots[target]);
     TEST(base == t7_target_row_slots[target] + 1); // the block follows its row
     TEST(osc.slots.entries[base - 1].connectable); // the row slot itself
@@ -9949,9 +10020,14 @@ static void osc_direct_modulator_regressions()
         TEST(mapping.osc_nodes[0] != Sculptor::pool_no_slot);
         if (mapping.osc_nodes[0] != Sculptor::pool_no_slot) {
             const Sculptor::Node& osc = graph.node(mapping.osc_nodes[0]);
-            // 18 fixed slots plus twelve 12-slot target blocks.
-            TEST(osc.slots.num_allocated == Sculptor::osc_slot_count + 12 * Synth::num_mod_targets);
+            // 35 fixed slots plus Filter Type and one band block (the
+            // fixture keeps one band), then twelve 12-slot target blocks.
+            TEST(osc.slots.num_allocated ==
+                 Sculptor::osc_band_first_slot + Sculptor::osc_band_block_stride * instrument.layers[0].fir_band_count);
             for (uint32_t t = 0; t < Synth::num_mod_targets; t++) {
+                if (osc_target_band_of_target(t) >= static_cast<int32_t>(instrument.layers[0].fir_band_count)) {
+                    continue;
+                }
                 check_target_block_grammar(osc, t, instrument.layers[0].targets[t]);
             }
             // Regression: the waveform/mode guard must not early-out on
@@ -10291,7 +10367,7 @@ static void osc_direct_modulator_regressions()
         TEST(Sculptor::project_instrument_to_graph(instrument, bank, &t7_graph, &t7_mapping));
         // The instance registry keeps its 28 + 28 generator instances.
         TEST(t7_mapping.detached_count == 56);
-        TEST(Sculptor::compile_graph_to_instrument(t7_graph, t7_mapping, &compiled));
+        TEST(Sculptor::compile_graph_to_instrument(t7_graph, t7_mapping, &compiled, nullptr, &instrument));
         TEST(memcmp(&instrument, &compiled, sizeof(Synth::Instrument)) == 0);
         TEST(memcmp(&bank_image, &bank, sizeof(Synth::InstrumentBank)) == 0);
 
@@ -10341,7 +10417,7 @@ static void osc_direct_modulator_regressions()
         check_no_param_nodes(t7_graph);
         // Two envelope instances (desc 1 and desc 2) and one LFO instance.
         TEST(t7_mapping.detached_count == 3);
-        TEST(Sculptor::compile_graph_to_instrument(t7_graph, t7_mapping, &compiled));
+        TEST(Sculptor::compile_graph_to_instrument(t7_graph, t7_mapping, &compiled, nullptr, &instrument));
         TEST(memcmp(&instrument, &compiled, sizeof(Synth::Instrument)) == 0);
         // Each served cell carries its own block rows with the tuple
         // values; the base values stay per layer.
@@ -10942,8 +11018,13 @@ static void osc_direct_modulator_regressions()
                 continue;
             }
             const Sculptor::Node& osc = t7_graph.node(t7_mapping.osc_nodes[layer]);
-            TEST(osc.slots.num_allocated == Sculptor::osc_slot_count + 12 * Synth::num_mod_targets);
+            TEST(osc.slots.num_allocated ==
+                 Sculptor::osc_band_first_slot +
+                     Sculptor::osc_band_block_stride * instrument.layers[layer].fir_band_count);
             for (uint32_t t = 0; t < Synth::num_mod_targets; t++) {
+                if (osc_target_band_of_target(t) >= static_cast<int32_t>(instrument.layers[layer].fir_band_count)) {
+                    continue;
+                }
                 check_target_block_grammar(osc, t, instrument.layers[layer].targets[t]);
             }
         }
@@ -11754,6 +11835,9 @@ static void build_fir_slope_max_fixture(Synth::InstrumentBank* bank,
         osc.osc_type[1]        = static_cast<Synth::WaveType>(1 + ((layer + 2) % 4));
         osc.osc_mode           = static_cast<Synth::OscMode>(layer % 3);
         osc.mod_ratio          = 1.0f + 0.25f * static_cast<float>(layer);
+        // The max population projects every band block, so the slot,
+        // instance and connection budgets stay at their maxima.
+        osc.fir_band_count = 4;
         for (uint32_t t = 0; t < Synth::num_mod_targets; t++) {
             const uint32_t env_slot = bank->envelopes.allocate();
             TEST(env_slot != pool_no_slot);
@@ -11864,50 +11948,51 @@ static void osc_fir_slope_projection_regressions()
     TEST(mapping.osc_nodes[0] != Sculptor::pool_no_slot);
     const Sculptor::Node& osc = graph.node(mapping.osc_nodes[0]);
 
-    // The block is appended: 18 fixed rows plus one 12-slot block per
-    // target, pinned against the literal 162.
+    // The blocks are appended: 35 fixed rows plus Filter Type and one
+    // band block per existing band (the fixture keeps one), pinned against
+    // the literal 191.
     const uint32_t expected_slots =
-        Sculptor::osc_slot_count + Synth::num_mod_targets * Sculptor::osc_target_block_stride;
+        Sculptor::osc_band_first_slot + Sculptor::osc_band_block_stride * instrument.layers[0].fir_band_count;
     TEST(osc.slots.num_allocated == expected_slots);
-    TEST(expected_slots == 162);
+    TEST(expected_slots == 191);
 
-    // Slot 149 stays the FIR Slope row and becomes connectable.
-    TEST(Sculptor::osc_target_row_slot[Synth::mod_fir_slope] == 149);
-    TEST(Sculptor::osc_target_row(Synth::mod_fir_slope) == 149);
+    // Slot 178 stays the FIR Slope row and becomes connectable.
+    TEST(Sculptor::osc_target_row_slot[Synth::mod_fir_slope] == 178);
+    TEST(Sculptor::osc_target_row(Synth::mod_fir_slope) == 178);
     {
-        const Sculptor::Slot& row = osc.slots.entries[149];
+        const Sculptor::Slot& row = osc.slots.entries[178];
         TEST(row.connectable);
         TEST(row.drop_menu);
-        TEST(strncmp(row.name, "FIR Slope", sizeof(row.name)) == 0);
+        TEST(strncmp(row.name, "Slope", sizeof(row.name)) == 0);
         TEST(row.property_type == Sculptor::PropertyType::integer);
     }
-    // The block follows the row: the env dot at 150 and the source dots at
-    // 156/159, all twelve slots allocated.
-    TEST(Sculptor::osc_target_env_dot(Synth::mod_fir_slope) == 150);
-    TEST(Sculptor::osc_target_src_dot(Synth::mod_fir_slope, 0) == 156);
-    TEST(Sculptor::osc_target_src_dot(Synth::mod_fir_slope, 1) == 159);
+    // The block follows the row: the env dot at 179 and the source dots at
+    // 185/188, all twelve slots allocated.
+    TEST(Sculptor::osc_target_env_dot(Synth::mod_fir_slope) == 179);
+    TEST(Sculptor::osc_target_src_dot(Synth::mod_fir_slope, 0) == 185);
+    TEST(Sculptor::osc_target_src_dot(Synth::mod_fir_slope, 1) == 188);
     {
-        const Sculptor::Slot& env_dot = osc.slots.entries[150];
+        const Sculptor::Slot& env_dot = osc.slots.entries[179];
         TEST(env_dot.kind == Sculptor::SlotKind::input);
         TEST(strncmp(env_dot.name, "Envelope", sizeof(env_dot.name)) == 0);
-        const Sculptor::Slot& src_a = osc.slots.entries[156];
+        const Sculptor::Slot& src_a = osc.slots.entries[185];
         TEST(src_a.kind == Sculptor::SlotKind::input);
         TEST(strncmp(src_a.name, "Source A", sizeof(src_a.name)) == 0);
-        const Sculptor::Slot& src_b = osc.slots.entries[159];
+        const Sculptor::Slot& src_b = osc.slots.entries[188];
         TEST(src_b.kind == Sculptor::SlotKind::input);
         TEST(strncmp(src_b.name, "Source B", sizeof(src_b.name)) == 0);
     }
     // No existing row shifted.
     TEST(Sculptor::osc_target_row_slot[Synth::mod_volume] == 95);
-    TEST(Sculptor::osc_target_row_slot[Synth::mod_fir_spread] == 136);
+    TEST(Sculptor::osc_target_row_slot[Synth::mod_fir_spread] == 152);
     // Literal budget pins: a future drift cannot pass silently.
-    TEST(Sculptor::max_nodes == 178);
-    TEST(Sculptor::max_node_slots == 163);
+    TEST(Sculptor::max_nodes == 384);
+    TEST(Sculptor::max_node_slots == 356);
 
     // Disabled state matches the filter-off predicate: the fir-off layer
-    // grays the whole 136..161 range; the band-pass layers keep every slot
+    // grays the whole 152..190 range; the band-pass layers keep every slot
     // of the range active.
-    for (uint32_t s = 136; s <= 161; s++) {
+    for (uint32_t s = 152; s <= 190; s++) {
         TEST(Sculptor::oscillator_slot_waveform_mode_disabled(graph.node(mapping.osc_nodes[1]), s));
         TEST(! Sculptor::oscillator_slot_waveform_mode_disabled(osc, s));
         TEST(! Sculptor::oscillator_slot_waveform_mode_disabled(graph.node(mapping.osc_nodes[2]), s));
@@ -11916,9 +12001,9 @@ static void osc_fir_slope_projection_regressions()
     // Display: a routed base wins over the scalar; a wired base of zero
     // clamps to 1 at the display boundary (the integer percent domain); a
     // zeroed binding shows the scalar, even with the filter off.
-    TEST(osc.slots.entries[149].value.integer == 64);
-    TEST(graph.node(mapping.osc_nodes[2]).slots.entries[149].value.integer == 1);
-    TEST(graph.node(mapping.osc_nodes[1]).slots.entries[149].value.integer == 37);
+    TEST(osc.slots.entries[178].value.integer == 64);
+    TEST(graph.node(mapping.osc_nodes[2]).slots.entries[178].value.integer == 1);
+    TEST(graph.node(mapping.osc_nodes[1]).slots.entries[178].value.integer == 37);
 
     // An envelope wired into the slope block's env dot compiles onto the
     // slope binding; the wired row is the binding's base, so the routed
@@ -11956,11 +12041,12 @@ static void osc_fir_slope_projection_regressions()
                                 max_mapping,
                                 Synth::max_layers,
                                 Synth::max_layers * Synth::num_mod_targets,
-                                Synth::max_layers * Synth::num_mod_targets);
+                                Synth::max_layers * Synth::num_mod_targets,
+                                4);
         TEST(max_mapping.detached_count == 2 * Synth::max_layers * Synth::num_mod_targets);
-        TEST(max_mapping.detached_count == 168);
+        TEST(max_mapping.detached_count == 364);
         TEST(max_mapping.detached_count <= Sculptor::max_osc_instances);
-        TEST(max_graph.connection_count() == 511);
+        TEST(max_graph.connection_count() == 1099);
         TEST(max_graph.connection_count() <= Sculptor::max_connections);
     }
 }
@@ -12464,12 +12550,20 @@ static void check_osc_pitch_gating()
         // history clearing, and the coefficient pipeline consumes the
         // spread-scaled cutoffs.  The removed cutoff spellings appear
         // nowhere in the runtime.
-        const char* const spread_write = find_in_range(update, update_end, "osc.spread  = new_spread;");
+        const char* const spread_write = find_in_range(update, update_end, "osc.spread             = new_spread;");
         TEST(spread_write != nullptr);
-        TEST(count_in_range(update, update_end, "osc.spread  = new_spread;") == 1);
-        const char* const spread_guard = find_in_range(update, update_end, "osc.spread <= 0.0f && new_spread > 0.0f");
-        TEST(spread_guard != nullptr && spread_guard < spread_write);
-        TEST(find_in_range(update, update_end, "osc.clear_fir_hist = true;") != nullptr);
+        TEST(count_in_range(update, update_end, "osc.spread             = new_spread;") == 1);
+        // The re-engagement edge rides the single-source activity predicate,
+        // not the band-0-only spread compare; the clear flag is set right
+        // after the refreshed activity verdict, and the old spread compare
+        // spelling appears nowhere in update_modulation.
+        TEST(find_in_range(update, update_end, "const bool prev_fir_active = osc.fir_active;") != nullptr);
+        const char* const active_refresh =
+            find_in_range(update, update_end, "osc.fir_active             = oscillator_fir_active(osc);");
+        TEST(active_refresh != nullptr);
+        TEST(find_in_range(active_refresh, update_end, "osc.clear_fir_hist = true;") != nullptr);
+        TEST(count_in_range(update, update_end, "osc.clear_fir_hist = true;") == 1);
+        TEST(find_in_range(update, update_end, "osc.spread <= 0.0f && new_spread > 0.0f") == nullptr);
         TEST(find_in_range(update,
                            update_end,
                            "const float new_spread = parameters[osc_param(osc_idx, osc_spread_dest)].value;") !=
@@ -12488,13 +12582,11 @@ static void check_osc_pitch_gating()
                                fir_guard,
                                "continue; // Effective spread <= 0: passthrough, no coefficient dispatch.") != nullptr);
         }
-        TEST(find_in_range(src, src + got, "oscillators[osc_idx].spread > 0.0f) {") != nullptr);
-        TEST(
-            find_in_range(
-                src,
-                src + got,
-                "param.taps_offs            = (oscillator.spread > 0.0f && oscillator.fir_type != Synth::fir_off) ? oscillator.fir_taps_offs / 4 : 0;") !=
-            nullptr);
+        TEST(find_in_range(src, src + got, "if (oscillators[osc_idx].fir_active) {") != nullptr);
+        TEST(find_in_range(src,
+                           src + got,
+                           "param.taps_offs            = oscillator.fir_active ? oscillator.fir_taps_offs / 4 : 0;") !=
+             nullptr);
         TEST(strstr(src, "osc_lowpass_dest") == nullptr);
         TEST(strstr(src, "osc_highpass_dest") == nullptr);
         TEST(strstr(src, "mod_lowpass_cutoff") == nullptr);
@@ -12576,7 +12668,7 @@ static void check_osc_pitch_gating()
         const Sculptor::OscTargetView spread_view = Sculptor::osc_target_view(Synth::mod_fir_spread);
         TEST(spread_view.min_value == 0.0f && spread_view.max_value == 36.0f);
         TEST(spread_view.bank_scale == 1.0f && ! spread_view.logarithmic);
-        TEST(Sculptor::osc_target_row(Synth::mod_fir_spread) == 136);
+        TEST(Sculptor::osc_target_row(Synth::mod_fir_spread) == 152);
 
         // Round-trip: an octave edit applies through the value_changed path,
         // lands in the bank and reprojection shows it again.
@@ -12651,7 +12743,7 @@ static void check_osc_pitch_gating()
         graph.take_changes(discarded, Sculptor::max_pending_changes);
         uint32_t slope_slot = Sculptor::pool_no_slot;
         TEST(find_graph_slot(graph, mapping.osc_nodes[0], "FIR Slope", &slope_slot));
-        TEST(slope_slot == 149);
+        TEST(slope_slot == 178);
         const Sculptor::Slot& slope_row = graph.node(mapping.osc_nodes[0]).slots.entries[slope_slot];
         TEST(slope_row.property_type == Sculptor::PropertyType::integer);
         TEST(slope_row.int_bounded);
@@ -12762,7 +12854,7 @@ static void check_osc_pitch_gating()
         build_zone_fixture(&source, &instrument);
         const uint32_t           spread                            = Sculptor::osc_target_row(Synth::mod_fir_spread);
         static const char* const expected[Synth::num_filter_types] = { "Filter Off",
-                                                                       "Band Spread",
+                                                                       "Spread",
                                                                        "Cutoff (Hz)",
                                                                        "Cutoff (Hz)" };
         for (uint32_t type = 0; type < Synth::num_filter_types; type++) {
@@ -12930,8 +13022,8 @@ static void check_fir_slope_helpers()
     {
         constexpr uint32_t taps = Synth::num_fir_taps;
         constexpr uint32_t span = 103;
-        // The kernel centers at (span - 1) / 2 (C1.1); the direct window
-        // then starts at index center - span / 2 == 0.
+        // The kernel centers at (span - 1) / 2, so the direct window
+        // starts at index center - span / 2 == 0.
         constexpr uint32_t center                       = (span - 1) / 2;
         constexpr float    pi                           = 3.141592653589793f;
         const float        half_span                    = static_cast<float>(span) * 0.5f - 0.5f;
@@ -13138,21 +13230,21 @@ static void osc_fir_slope_seed_regressions()
     }
 }
 
-// The pure FIR coefficient cache decision.  Entries are 4-word
-// records (taps_offs, highpass, lowpass, window_span); a prev_entry_count
-// of 0 means "no valid snapshot".
+// The pure FIR coefficient cache decision.  Entries are 18-word
+// records (taps_offs, band_count, then four words per band); a
+// prev_entry_count of 0 means "no valid snapshot".
 static void fir_coeff_cache_action_regressions()
 {
-    uint32_t prev[8] = {};
-    uint32_t cur[8]  = {};
-    prev[0]          = 1000;
-    prev[1]          = 220;
-    prev[2]          = 880;
-    prev[3]          = 513;
-    prev[4]          = 2000;
-    prev[5]          = 330;
-    prev[6]          = 990;
-    prev[7]          = 257;
+    static uint32_t prev[Synth::fir_coeff_entry_words * 2] = {};
+    static uint32_t cur[Synth::fir_coeff_entry_words * 2]  = {};
+    prev[0]                                                = 1000;
+    prev[1]                                                = 220;
+    prev[2]                                                = 880;
+    prev[3]                                                = 513;
+    prev[4]                                                = 2000;
+    prev[5]                                                = 330;
+    prev[6]                                                = 990;
+    prev[7]                                                = 257;
     memcpy(cur, prev, sizeof(cur));
 
     // Unchanged consecutive snapshots skip the dispatch.
@@ -13183,25 +13275,35 @@ static void fir_coeff_cache_action_regressions()
     // Cleared taps with no active filters still only invalidate.
     TEST(Synth::fir_coeff_cache_action(prev, 2, cur, 0, true) == Synth::fir_coeff_invalidate);
 
-    // The same decision over the production record layout: four-member
-    // coefficient structs, compared bytewise (the runtime passes FIRCoeff
-    // arrays, never a reinterpreted word array).
+    // The same decision over the production record layout: 18-word
+    // coefficient structs (taps_offs, band_count, then four words per band:
+    // highpass, lowpass, window_span, gain), compared bytewise (the runtime
+    // passes FIRCoeff arrays, never a reinterpreted word array).
     struct CoeffRecord {
         uint32_t taps_offs;
-        uint32_t highpass_cutoff_freq;
-        uint32_t lowpass_cutoff_freq;
-        uint32_t window_span;
+        uint32_t band_count;
+
+        struct Band {
+            uint32_t highpass_cutoff_freq;
+            uint32_t lowpass_cutoff_freq;
+            uint32_t window_span;
+            float    gain;
+        };
+
+        Band bands[4];
     };
 
     static_assert(sizeof(CoeffRecord) == Synth::fir_coeff_entry_words * sizeof(uint32_t));
-    CoeffRecord rec_prev[2] = { { 1000, 220, 880, 513 }, { 2000, 330, 990, 257 } };
-    CoeffRecord rec_cur[2]  = { { 1000, 220, 880, 513 }, { 2000, 330, 990, 257 } };
-    TEST(Synth::fir_coeff_cache_action(rec_prev, 2, rec_cur, 2, false) == Synth::fir_coeff_skip);
-    rec_cur[1].window_span = 103;
-    TEST(Synth::fir_coeff_cache_action(rec_prev, 2, rec_cur, 2, false) == Synth::fir_coeff_dispatch);
-    rec_cur[1]           = rec_prev[1];
-    rec_cur[0].taps_offs = 2100;
-    TEST(Synth::fir_coeff_cache_action(rec_prev, 2, rec_cur, 2, false) == Synth::fir_coeff_dispatch);
+    const CoeffRecord::Band base_band = { 220, 880, 513, 0 };
+    CoeffRecord             rec_prev  = { 1000, 2, { { base_band }, { base_band }, { base_band }, { base_band } } };
+    CoeffRecord             rec_cur   = rec_prev;
+    TEST(Synth::fir_coeff_cache_action(&rec_prev, 1, &rec_cur, 1, false) == Synth::fir_coeff_skip);
+    rec_cur.bands[0].window_span = 103;
+    TEST(Synth::fir_coeff_cache_action(&rec_prev, 1, &rec_cur, 1, false) == Synth::fir_coeff_dispatch);
+    rec_cur.bands[1]  = rec_prev.bands[1];
+    rec_cur.bands[0]  = rec_prev.bands[0];
+    rec_cur.taps_offs = 2100;
+    TEST(Synth::fir_coeff_cache_action(&rec_prev, 1, &rec_cur, 1, false) == Synth::fir_coeff_dispatch);
 }
 
 // Host mirror of the FIR coefficient shader's binary32 arithmetic for one
@@ -13268,7 +13370,7 @@ static void fir_test_mirror(uint32_t        lowpass_hz,
 {
     constexpr uint32_t taps = Synth::num_fir_taps;
     // The mirrored shader centers the kernel at (window_span - 1) / 2, so the
-    // non-zero support lands in tap indices [0, span - 1] (C1.1).
+    // non-zero support lands in tap indices [0, span - 1].
     const uint32_t  center = (span - 1) / 2;
     constexpr float pi     = 3.141592653589793f;
     const float     fs     = static_cast<float>(Synth::rt_sampling_rate);
@@ -13377,11 +13479,8 @@ static double fir_test_unity_tolerance(uint32_t lowpass_hz, uint32_t highpass_hz
     return near_nyquist_narrow ? 1e-3 : 1e-4;
 }
 
-// Per-span kernel-shape assertions (C1.1) over the mirror coefficients
-// fir_test_mirror already computed: with the kernel centered at
-// (window_span - 1) / 2, the non-zero support lies in [0, window_span - 1],
-// every tail tap is exactly 0.0f, and the kernel is symmetric around the
-// center.
+// Kernel-shape assertions over the coefficients fir_test_mirror already computed: with the kernel
+// centered at (window_span - 1) / 2, the non-zero support, zero tail, and symmetry hold per span.
 static void fir_test_check_span_shape(const FirCoeffMirror& mirror, uint32_t span)
 {
     constexpr uint32_t taps        = Synth::num_fir_taps;
@@ -13650,7 +13749,7 @@ static void check_fir_bandpass_gain()
             TEST(strstr(shader_src, "if (param.highpass_cutoff_freq > 0)") != nullptr);
             TEST(strstr(shader_src, "param.highpass_cutoff_freq == 0") != nullptr);
             TEST(strstr(shader_src, "norm_sum[0] = coeff_sum;") != nullptr);
-            // C1.1: the kernel center comes from the window span, so the
+            // The kernel center comes from the window span, so the
             // non-zero support lies in [0, window_span - 1].
             TEST(strstr(shader_src, "param.window_span - 1u) / 2u") != nullptr);
         }
@@ -13670,14 +13769,9 @@ static void check_fir_bandpass_gain()
     }
 }
 
-// Host mirror of the from-silence volume ramp in
-// synth_chan_combine.comp.glsl (C1.3): the 32-sample attack (step =
-// (x + 1) / volume_adjustment_samples) when the previous volume gain is
-// zero, the full-step interpolation for mid-note transitions, the
-// 5th-order fade-out to zero, zero-to-zero and consecutive-step cases,
-// and continuity across step boundaries.  Also pins the shipped shader's
-// constant, gating predicate and ramp formula alongside the full-step,
-// fade-out and panning expressions.
+// Host mirror of the from-silence volume ramp in synth_chan_combine.comp.glsl: the 32-sample attack when
+// the previous volume gain is zero, the full-step interpolation and 5th-order fade-out fallbacks, and
+// continuity across step boundaries.  Also pins the shipped shader's ramp-related source strings.
 static void check_chan_combine_volume_ramp()
 {
     constexpr uint32_t work_group_size           = 256; // rt_step_samples (spec constant id 0)
@@ -13796,6 +13890,2123 @@ static void check_chan_combine_volume_ramp()
     TEST(strstr(shader_src, "mix(input_param.old_panning, input_param.panning, step)") != nullptr);
 }
 
+// Multi-band bandpass filter regressions: the fixture's band state rides
+// a template parameter, and the visibility body rides the graph parameter
+// the seam call's ADL resolves from.
+
+// The band state rides one change: the fir_band_count member and the 14
+// appended band targets appear together, so the member's existence gates
+// the fixture's band seeding.
+template <typename OscT, typename = void> struct m2_has_band_count : std::false_type {};
+
+template <typename OscT>
+struct m2_has_band_count<OscT, std::void_t<decltype(std::declval<OscT&>().fir_band_count)>> : std::true_type {};
+
+constexpr bool m2_band_state_present = m2_has_band_count<Synth::Oscillator>::value;
+
+// The band-derived render-visibility seam, callable from the suite the way
+// osc_target_field_hidden is for the block fields: true when the slot is a
+// Band row or band-parameter row/block slot the filter hides right now
+// (Filter Type not bandpass, or the slot belongs to a band other than the
+// selected one), false for every other slot and for band-derived visibility.
+template <typename GraphT, typename = void> struct m2_has_band_seam : std::false_type {};
+
+template <typename GraphT>
+struct m2_has_band_seam<GraphT,
+                        std::void_t<decltype(osc_band_slot_hidden(std::declval<const GraphT&>(),
+                                                                  std::declval<uint32_t>(),
+                                                                  std::declval<uint32_t>()))>> : std::true_type {};
+
+constexpr bool m2_band_seam_present = m2_has_band_seam<Sculptor::Graph>::value;
+
+constexpr bool m2_band_rows_present = Synth::num_mod_targets == 26;
+
+// The band parameter target indices: band 0 reuses the legacy spread (7) and
+// slope (11) targets; the 14 appended targets follow at 12..25 in the order
+// band 0 offset/gain, then per band 1..3 offset/spread/gain/slope.
+constexpr uint32_t m2_band0_targets[4]   = { 12, 7, 13, 11 };
+constexpr uint32_t m2_band_targets[4][4] = {
+    { 12, 7, 13, 11 },
+    { 14, 15, 16, 17 },
+    { 18, 19, 20, 21 },
+    { 22, 23, 24, 25 },
+};
+
+// One bandpass layer with the legacy spread/slope state and, when the band
+// state exists, a band count plus per-band bases and bindings: bands 1..3
+// carry distinct values and the offset row a full binding, and rich_band0
+// binds band 0's offset and gain rows, so the copy, remove and serialization
+// paths move non-default state.
+template <bool M2, typename OscT>
+static void build_m2_bandpass_fixture(Synth::InstrumentEditorBank* bank,
+                                      OscT&                        osc,
+                                      const bool                   seed_higher_bands,
+                                      const bool                   rich_band0)
+{
+    memset(static_cast<void*>(bank), 0, sizeof(*bank));
+    TEST(bank->bank.envelopes.allocate() == 0);
+    TEST(bank->bank.lfos.allocate() == 0);
+    Synth::EnvelopeDescriptor& volume_env = bank->bank.envelopes.entries[0];
+    volume_env.num_points                 = 2;
+    volume_env.sustain_first_point        = 0;
+    volume_env.sustain_last_point         = 1;
+    volume_env.min_value                  = 0.0f;
+    volume_env.min_max_delta              = 1.0f;
+    volume_env.points[0]                  = { 0, 0x4000 };
+    volume_env.points[1]                  = { 300, 0xC000 };
+    TEST(bank->bank.envelopes.allocate() == 1);
+    Synth::EnvelopeDescriptor& shared_env           = bank->bank.envelopes.entries[1];
+    shared_env                                      = volume_env;
+    shared_env.min_value                            = -1.0f;
+    shared_env.min_max_delta                        = 2.0f;
+    Synth::LFODescriptor& lfo                       = bank->bank.lfos.entries[0];
+    lfo.wave                                        = Synth::WaveType::sine_wave;
+    lfo.period_ms                                   = 250;
+    lfo.min_value                                   = -1.0f;
+    lfo.min_max_delta                               = 2.0f;
+    osc.osc_type[0]                                 = Synth::WaveType::sine_wave;
+    osc.osc_type[1]                                 = Synth::WaveType::pulse_wave;
+    osc.osc_mode                                    = Synth::osc_mode_blend;
+    osc.fir_type                                    = Synth::fir_bandpass;
+    osc.fir_slope_percent                           = 50;
+    osc.targets[Synth::mod_volume].base_value       = 0.8f;
+    osc.targets[Synth::mod_volume].envelope_desc_id = 1;
+    osc.targets[Synth::mod_volume].lfo_desc_id      = 1;
+    osc.targets[Synth::mod_volume].lfo_op           = Synth::SourceOp::add;
+    osc.targets[Synth::mod_volume].lfo_depth        = 0.5f;
+    osc.targets[Synth::mod_pitch].envelope_desc_id  = 2;
+    osc.targets[Synth::mod_fir_spread].base_value   = 3.0f;
+    if constexpr (M2) {
+        osc.fir_band_count                          = seed_higher_bands ? 4 : 1;
+        osc.targets[m2_band0_targets[0]].base_value = 5.0f;
+        osc.targets[m2_band0_targets[2]].base_value = 0.5f;
+        if (rich_band0) {
+            Synth::TargetBinding& offset = osc.targets[m2_band0_targets[0]];
+            offset.envelope_desc_id      = 2;
+            offset.lfo_desc_id           = 1;
+            offset.lfo_op                = Synth::SourceOp::add;
+            offset.lfo_depth             = 0.5f;
+            offset.lfo_depth_source      = Synth::ModSource::velocity;
+            offset.lfo_rate_source       = Synth::ModSource::mod_wheel;
+            offset.lfo_rate_scale_ms     = 25.0f;
+            offset.num_inputs            = 2;
+            offset.inputs[0]             = { Synth::ModSource::velocity, Synth::SourceOp::add, 0, 0.5f };
+            offset.inputs[1]             = { Synth::ModSource::mod_wheel, Synth::SourceOp::multiply, 0, 0.25f };
+            Synth::TargetBinding& gain   = osc.targets[m2_band0_targets[2]];
+            gain.lfo_desc_id             = 1;
+            gain.lfo_op                  = Synth::SourceOp::multiply;
+            gain.lfo_depth               = 0.25f;
+        }
+        if (seed_higher_bands) {
+            for (uint32_t band = 1; band < 4; band++) {
+                const float seed                                 = static_cast<float>(band);
+                osc.targets[m2_band_targets[band][0]].base_value = 5.0f + 2.0f * seed;
+                osc.targets[m2_band_targets[band][1]].base_value = 3.0f + seed;
+                osc.targets[m2_band_targets[band][2]].base_value = 0.9f - 0.1f * seed;
+                osc.targets[m2_band_targets[band][3]].base_value = 100.0f - 10.0f * seed;
+                Synth::TargetBinding& gen                        = osc.targets[m2_band_targets[band][0]];
+                gen.envelope_desc_id                             = 2;
+                gen.lfo_desc_id                                  = 1;
+                gen.lfo_op                                       = Synth::SourceOp::multiply;
+                gen.lfo_depth                                    = 0.25f * seed;
+                gen.lfo_depth_source                             = Synth::ModSource::velocity;
+                gen.lfo_rate_source                              = Synth::ModSource::mod_wheel;
+                gen.lfo_rate_scale_ms                            = 10.0f * seed;
+                gen.num_inputs                                   = 2;
+                gen.inputs[0] = { Synth::ModSource::velocity, Synth::SourceOp::add, 0, 0.5f * seed };
+                gen.inputs[1] = { Synth::ModSource::mod_wheel, Synth::SourceOp::multiply, 0, 0.125f * seed };
+            }
+        }
+    }
+}
+
+// Projects the bandpass fixture as channel 0 zone 0 and drains the initial
+// projection changes; false skips the caller's block.
+template <bool M2>
+static bool begin_m2_band_graph(Synth::InstrumentEditorBank* bank,
+                                Sculptor::Graph*             graph,
+                                Sculptor::OscGraphMapping*   mapping,
+                                const bool                   seed_higher_bands,
+                                const bool                   rich_band0)
+{
+    Synth::Instrument instrument = {};
+    build_m2_bandpass_fixture<M2>(bank, instrument.layers[0], seed_higher_bands, rich_band0);
+    instrument.layer_count        = 1;
+    bank->bank.channel_enabled[0] = 1;
+    TEST(bank->bank.instruments.allocate() == 0);
+    bank->bank.instruments.entries[0]         = instrument;
+    bank->bank.channel_zones[0][0].start_note = 1;
+    bank->bank.channel_zones[0][0].instrument = 0;
+    if (! Sculptor::project_editor_to_graph(*bank, graph, mapping)) {
+        TEST(false);
+        return false;
+    }
+    Sculptor::GraphChange discarded[Sculptor::max_pending_changes] = {};
+    (void)graph->take_changes(discarded, Sculptor::max_pending_changes);
+    return true;
+}
+
+// Rebuilds the graph from the bank's current state and drains the projection
+// changes; false skips the caller's block.
+static bool reproject_m2_band_graph(Synth::InstrumentEditorBank* bank,
+                                    Sculptor::Graph*             graph,
+                                    Sculptor::OscGraphMapping*   mapping)
+{
+    if (! Sculptor::project_editor_to_graph(*bank, graph, mapping)) {
+        TEST(false);
+        return false;
+    }
+    Sculptor::GraphChange discarded[Sculptor::max_pending_changes] = {};
+    (void)graph->take_changes(discarded, Sculptor::max_pending_changes);
+    return true;
+}
+
+// Stages one oscillator slot edit on the graph, drains it and applies the
+// value change to the bank; the click-style band slots ride this path.
+static bool apply_m2_slot_edit(Synth::InstrumentEditorBank*  bank,
+                               Sculptor::Graph*              graph,
+                               Sculptor::OscGraphMapping*    mapping,
+                               const uint32_t                node_idx,
+                               const uint32_t                slot_idx,
+                               const Sculptor::PropertyValue value)
+{
+    graph->set_slot_value(node_idx, slot_idx, value);
+    // Graph::set_slot_value is deliberately eventless (the shared-routing
+    // fan-out relies on no echo, pinned in sculptor_graph_unit.cpp), so the
+    // staged value rides the established direct-change pattern when the
+    // setter staged nothing.
+    Sculptor::GraphChange changes[Sculptor::max_pending_changes] = {};
+    uint32_t              count = graph->take_changes(changes, Sculptor::max_pending_changes);
+    if (count == 0) {
+        changes[0].kind     = Sculptor::ChangeKind::value_changed;
+        changes[0].node_idx = node_idx;
+        changes[0].slot_idx = slot_idx;
+        count               = 1;
+    }
+    TEST(count >= 1);
+    bool applied = count >= 1;
+    for (uint32_t i = 0; i < count; i++) {
+        if (changes[i].node_idx != node_idx || changes[i].slot_idx != slot_idx ||
+            changes[i].kind != Sculptor::ChangeKind::value_changed) {
+            continue;
+        }
+        applied = Sculptor::apply_osc_graph_change(bank, graph, mapping, changes[i]) && applied;
+    }
+    TEST(applied);
+    return applied;
+}
+
+// The occurrence-th slot with `name` (0-based), or pool_no_slot.
+static uint32_t find_nth_osc_slot(const Sculptor::Node& node, const char* name, const uint32_t occurrence)
+{
+    uint32_t seen = 0;
+    for (uint32_t idx = 0; idx < node.slots.num_allocated; idx++) {
+        if (strncmp(node.slots.entries[idx].name, name, sizeof(node.slots.entries[0].name)) == 0) {
+            if (seen == occurrence) {
+                return idx;
+            }
+            seen++;
+        }
+    }
+    return Sculptor::pool_no_slot;
+}
+
+// Registry index of the detached instance of `kind` (1 envelope, 2 LFO) bound
+// to descriptor `desc_id`, or -1.
+static int32_t find_m2_detached_desc(const Sculptor::OscGraphMapping& mapping,
+                                     const uint32_t                   kind,
+                                     const uint32_t                   desc_id)
+{
+    for (uint32_t i = 0; i < mapping.detached_count; i++) {
+        if (mapping.detached[i].kind == kind && mapping.detached[i].desc_id == desc_id &&
+            mapping.detached[i].node_idx != Sculptor::pool_no_slot) {
+            return static_cast<int32_t>(i);
+        }
+    }
+    return -1;
+}
+
+// Wires the shared envelope and LFO instances plus both MIDI source rows onto
+// `target`'s block dots through the editor change path.
+static bool wire_m2_target(Synth::InstrumentEditorBank* bank,
+                           Sculptor::Graph*             graph,
+                           Sculptor::OscGraphMapping*   mapping,
+                           const uint32_t               osc_node,
+                           const uint32_t               target)
+{
+    const int32_t env_inst = find_m2_detached_desc(*mapping, 1, 2);
+    const int32_t lfo_inst = find_m2_detached_desc(*mapping, 2, 1);
+    TEST(env_inst >= 0 && lfo_inst >= 0);
+    if (env_inst < 0 || lfo_inst < 0) {
+        return false;
+    }
+    const Sculptor::EndPoint env_out      = { mapping->detached[env_inst].node_idx, mapping->env_output_slot };
+    const Sculptor::EndPoint lfo_out      = { mapping->detached[lfo_inst].node_idx, mapping->lfo_output_slot };
+    const uint32_t           velocity_idx = static_cast<uint32_t>(Synth::ModSource::velocity) - 1;
+    const uint32_t           wheel_idx    = static_cast<uint32_t>(Synth::ModSource::mod_wheel) - 1;
+    const Sculptor::EndPoint velocity_out = { mapping->input_node, mapping->input_source_slots[velocity_idx] };
+    const Sculptor::EndPoint wheel_out    = { mapping->input_node, mapping->input_source_slots[wheel_idx] };
+    const Sculptor::EndPoint dots[4]      = {
+        { osc_node, Sculptor::osc_target_env_dot(target) },
+        { osc_node, Sculptor::osc_target_lfo_dot(target) },
+        { osc_node, Sculptor::osc_target_src_dot(target, 0) },
+        { osc_node, Sculptor::osc_target_src_dot(target, 1) },
+    };
+    const Sculptor::EndPoint outs[4] = { env_out, lfo_out, velocity_out, wheel_out };
+    for (uint32_t i = 0; i < 4; i++) {
+        if (find_osc_graph_connection(*graph, dots[i]) != Sculptor::pool_no_slot) {
+            continue;
+        }
+        if (graph->add_connection(outs[i], dots[i]) == Sculptor::pool_no_slot) {
+            TEST(false);
+            return false;
+        }
+        Sculptor::GraphChange changes[Sculptor::max_pending_changes] = {};
+        const uint32_t        count = graph->take_changes(changes, Sculptor::max_pending_changes);
+        TEST(count >= 1);
+        bool applied = count >= 1;
+        for (uint32_t c = 0; c < count; c++) {
+            if (changes[c].kind != Sculptor::ChangeKind::connection_added) {
+                continue;
+            }
+            applied = Sculptor::apply_osc_graph_change(bank, graph, mapping, changes[c]) && applied;
+        }
+        TEST(applied);
+        if (! applied) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// Mirrors Sculptor::SynthEditor::drain_osc_graph's apply loop for one
+// queued batch: applies the events in order and stops after a band [-]/[+]
+// structural event, discarding the remaining queued events (the graph is
+// stale until the re-projection rebuilds it from the model). Returns the
+// number of discarded events.
+static uint32_t m2_drain_osc_batch(Synth::InstrumentEditorBank* bank,
+                                   Sculptor::Graph*             graph,
+                                   Sculptor::OscGraphMapping*   mapping,
+                                   const Sculptor::GraphChange* changes,
+                                   const uint32_t               count)
+{
+    bool     ok      = true;
+    uint32_t applied = 0;
+    for (uint32_t i = 0; i < count && ok; ++i) {
+        ok = Sculptor::apply_osc_graph_change(bank, graph, mapping, changes[i]);
+        if (ok) {
+            applied = i + 1;
+        }
+        if (ok && changes[i].kind == Sculptor::ChangeKind::value_changed &&
+            Sculptor::is_band_button_slot(changes[i].slot_idx)) {
+            break;
+        }
+    }
+    return count - applied;
+}
+
+// The band header labels, indexed by band (the test-side copy of the
+// production header labels).
+static const char* const band_header_names_m2[4] = { "Band 1", "Band 2", "Band 3", "Band 4" };
+
+// Band 1's header row (label plus its [-]/[+] click slots) sits directly
+// below Filter Type, every existing band projects one uniform 55-slot
+// block with generic parameter labels, and only existing bands project.
+// Low-pass keeps the cutoff and FIR Slope labels.
+static void m2_band_layout_regressions()
+{
+    TEST(Synth::num_mod_targets == 26);
+    TEST(Synth::instrument_graph_layout_capacity == 373);
+    TEST(Synth::fir_coeff_entry_words == 18);
+
+    const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage  = std::make_unique<Synth::InstrumentEditorBank>();
+    Synth::InstrumentEditorBank&                       bank          = *bank_storage;
+    const std::unique_ptr<Sculptor::Graph>             graph_storage = std::make_unique<Sculptor::Graph>();
+    Sculptor::Graph&                                   graph         = *graph_storage;
+    Sculptor::OscGraphMapping                          mapping       = {};
+    if (! begin_m2_band_graph<m2_band_state_present>(&bank, &graph, &mapping, false, false)) {
+        return;
+    }
+    TEST(mapping.osc_nodes[0] != Sculptor::pool_no_slot);
+    if (mapping.osc_nodes[0] == Sculptor::pool_no_slot) {
+        return;
+    }
+    const Sculptor::Node& osc = graph.node(mapping.osc_nodes[0]);
+    // One band block: 136 + 55 slots.
+    TEST(osc.slots.num_allocated == Sculptor::osc_band_first_slot + Sculptor::osc_band_block_stride);
+    TEST(find_nth_osc_slot(osc, "Band 1", 0) == Sculptor::osc_band_header_slot(0));
+    TEST(find_nth_osc_slot(osc, "Filter Type", 0) == 135);
+    const uint32_t        header_slot = Sculptor::osc_band_header_slot(0);
+    const Sculptor::Slot& header      = osc.slots.entries[header_slot];
+    TEST(strncmp(header.name, "Band 1", sizeof(header.name)) == 0);
+    TEST(header.property_type == Sculptor::PropertyType::unused);
+    TEST(! header.connectable);
+    TEST(header.child_row && header.child_level == 2);
+    TEST(header.row_group == Sculptor::osc_band_row_group);
+    const Sculptor::Slot& minus = osc.slots.entries[header_slot + 1];
+    const Sculptor::Slot& plus  = osc.slots.entries[header_slot + 2];
+    TEST(minus.property_type == Sculptor::PropertyType::toggle && plus.property_type == Sculptor::PropertyType::toggle);
+    TEST(minus.row_group == header.row_group && plus.row_group == header.row_group);
+    TEST(minus.child_row && minus.child_level == 2);
+    TEST(plus.child_row && plus.child_level == 2);
+
+    // Four bands: band 0's rows keep their slots (139/152/165/178) and
+    // bands 1..3 shift by 3 slots per earlier band.
+    static const struct {
+        uint32_t    slot;
+        const char* name;
+        uint32_t    target;
+    } band_rows[16] = {
+        { 139, "Offset", 12 }, { 152, "Spread", 7 },  { 165, "Gain", 13 }, { 178, "Slope", 11 },
+        { 194, "Offset", 14 }, { 207, "Spread", 15 }, { 220, "Gain", 16 }, { 233, "Slope", 17 },
+        { 249, "Offset", 18 }, { 262, "Spread", 19 }, { 275, "Gain", 20 }, { 288, "Slope", 21 },
+        { 304, "Offset", 22 }, { 317, "Spread", 23 }, { 330, "Gain", 24 }, { 343, "Slope", 25 },
+    };
+
+    bank.bank.instruments.entries[0].layers[0].fir_band_count = 4;
+    if (reproject_m2_band_graph(&bank, &graph, &mapping)) {
+        const Sculptor::Node& four = graph.node(mapping.osc_nodes[0]);
+        TEST(four.slots.num_allocated == Sculptor::osc_band_first_slot + 4u * Sculptor::osc_band_block_stride);
+        for (uint32_t b = 0; b < 4; b++) {
+            const Sculptor::Slot& band_header = four.slots.entries[Sculptor::osc_band_header_slot(b)];
+            TEST(strncmp(band_header.name, band_header_names_m2[b], sizeof(band_header.name)) == 0);
+            TEST(band_header.child_row && band_header.child_level == 2);
+        }
+        for (const auto& row : band_rows) {
+            TEST(strncmp(four.slots.entries[row.slot].name, row.name, sizeof(four.slots.entries[0].name)) == 0);
+            TEST(Sculptor::osc_target_row(row.target) == row.slot);
+            TEST(Sculptor::osc_target_block_base(row.target) == row.slot + 1);
+            TEST(strncmp(four.slots.entries[row.slot + 1].name, "Envelope", sizeof(four.slots.entries[0].name)) == 0);
+            TEST(four.slots.entries[row.slot].child_row && four.slots.entries[row.slot].child_level == 3);
+        }
+        bank.bank.instruments.entries[0].layers[0].fir_band_count = 1;
+    }
+    TEST(reproject_m2_band_graph(&bank, &graph, &mapping));
+
+    // Low-pass keeps the cutoff and legacy FIR Slope labels at their slots.
+    bank.bank.instruments.entries[0].layers[0].fir_type = Synth::fir_lowpass;
+    if (reproject_m2_band_graph(&bank, &graph, &mapping)) {
+        const Sculptor::Node& lowpass_osc = graph.node(mapping.osc_nodes[0]);
+        const uint32_t        cutoff_slot = find_nth_osc_slot(lowpass_osc, "Cutoff (Hz)", 0);
+        const uint32_t        slope_slot  = find_nth_osc_slot(lowpass_osc, "FIR Slope", 0);
+        TEST(cutoff_slot == 152);
+        TEST(slope_slot == 178);
+        // The whole band UI hides for the single-edge filter types (the
+        // legacy cutoff/slope carve-out lives in the composed seam).
+        for (uint32_t slot = Sculptor::osc_band_first_slot; slot < lowpass_osc.slots.num_allocated; slot++) {
+            TEST(Sculptor::osc_band_slot_hidden(graph, mapping.osc_nodes[0], slot));
+        }
+        bank.bank.instruments.entries[0].layers[0].fir_type = Synth::fir_bandpass;
+    }
+    TEST(reproject_m2_band_graph(&bank, &graph, &mapping));
+
+    // Under bandpass every existing band is always visible: nothing in
+    // the band region hides, wired or not (the selection concept is gone).
+    bank.bank.instruments.entries[0].layers[0].targets[Synth::mod_fir_spread].envelope_desc_id = 2;
+    TEST(reproject_m2_band_graph(&bank, &graph, &mapping));
+    for (uint32_t slot = Sculptor::osc_band_first_slot; slot < osc.slots.num_allocated; slot++) {
+        TEST(! Sculptor::osc_band_slot_hidden(graph, mapping.osc_nodes[0], slot));
+    }
+}
+
+// C2.1: every existing band is always visible under bandpass (headers,
+// buttons, rows, blocks - no selection concept); the single-edge filter
+// types hide the whole band region, whose legacy carve-out lives in the
+// composed seam.
+template <bool Seam, typename GraphT>
+static void m2_band_visibility_body(GraphT& graph, const uint32_t osc_node, const uint32_t filter_slot)
+{
+    if constexpr (Seam) {
+        const auto     hidden = [&](const uint32_t slot) { return osc_band_slot_hidden(graph, osc_node, slot); };
+        const uint32_t first  = Sculptor::osc_band_first_slot;
+        const uint32_t last   = Sculptor::osc_band_header_slot(3) + Sculptor::osc_band_block_stride;
+        for (uint32_t slot = first; slot < last; slot++) {
+            TEST(! hidden(slot));
+        }
+        // Off, lowpass and highpass hide every band slot.
+        for (uint32_t type = 0; type < Synth::num_filter_types; type++) {
+            if (type == static_cast<uint32_t>(Synth::fir_bandpass)) {
+                continue;
+            }
+            Sculptor::PropertyValue select_type = {};
+            select_type.list_index              = static_cast<uint8_t>(type);
+            graph.set_slot_value(osc_node, filter_slot, select_type);
+            for (uint32_t slot = first; slot < last; slot++) {
+                TEST(hidden(slot));
+            }
+        }
+        // Back to bandpass for the caller.
+        Sculptor::PropertyValue bandpass = {};
+        bandpass.list_index              = static_cast<uint8_t>(Synth::fir_bandpass);
+        graph.set_slot_value(osc_node, filter_slot, bandpass);
+    }
+    else {
+        TEST(false);
+    }
+}
+
+static void m2_band_visibility_regressions()
+{
+    TEST(m2_band_rows_present && m2_band_seam_present);
+    if (! (m2_band_rows_present && m2_band_seam_present)) {
+        return;
+    }
+    const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage  = std::make_unique<Synth::InstrumentEditorBank>();
+    Synth::InstrumentEditorBank&                       bank          = *bank_storage;
+    const std::unique_ptr<Sculptor::Graph>             graph_storage = std::make_unique<Sculptor::Graph>();
+    Sculptor::Graph&                                   graph         = *graph_storage;
+    Sculptor::OscGraphMapping                          mapping       = {};
+    if (! begin_m2_band_graph<m2_band_state_present>(&bank, &graph, &mapping, true, false)) {
+        return;
+    }
+    TEST(mapping.osc_nodes[0] != Sculptor::pool_no_slot);
+    if (mapping.osc_nodes[0] == Sculptor::pool_no_slot) {
+        return;
+    }
+    const Sculptor::Node& osc         = graph.node(mapping.osc_nodes[0]);
+    const uint32_t        header_slot = find_nth_osc_slot(osc, "Band 1", 0);
+    const uint32_t        filter_slot = find_nth_osc_slot(osc, "Filter Type", 0);
+    TEST(header_slot == Sculptor::osc_band_header_slot(0) && filter_slot == 135);
+    if (header_slot != Sculptor::osc_band_header_slot(0) || filter_slot != 135) {
+        return;
+    }
+    m2_band_visibility_body<m2_band_seam_present>(graph, mapping.osc_nodes[0], filter_slot);
+}
+
+// A13/A15: [-] on band N removes band N (later bands shift up and the
+// vacated tail zeroes); [+] on band N inserts a copy of band N after it
+// (values and full modulation bindings). Counts stay within 1..4 and a
+// removed band leaks nowhere into the exported document.
+static void m2_band_add_remove_regressions()
+{
+    TEST(Synth::num_mod_targets == 26);
+    if (Synth::num_mod_targets != 26) {
+        return;
+    }
+    const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage  = std::make_unique<Synth::InstrumentEditorBank>();
+    Synth::InstrumentEditorBank&                       bank          = *bank_storage;
+    const std::unique_ptr<Sculptor::Graph>             graph_storage = std::make_unique<Sculptor::Graph>();
+    Sculptor::Graph&                                   graph         = *graph_storage;
+    Sculptor::OscGraphMapping                          mapping       = {};
+    if (! begin_m2_band_graph<m2_band_state_present>(&bank, &graph, &mapping, false, true)) {
+        return;
+    }
+    TEST(mapping.osc_nodes[0] != Sculptor::pool_no_slot);
+    if (mapping.osc_nodes[0] == Sculptor::pool_no_slot) {
+        return;
+    }
+    const uint32_t osc_node  = mapping.osc_nodes[0];
+    const uint32_t header0   = Sculptor::osc_band_header_slot(0);
+    const uint32_t plus_slot = header0 + 2;
+    const auto     click     = [&](const uint32_t slot) {
+        Sculptor::PropertyValue press = {};
+        press.toggle                  = true;
+        return apply_m2_slot_edit(&bank, &graph, &mapping, osc_node, slot, press);
+    };
+    const auto layer       = [&]() -> Synth::Oscillator& { return bank.bank.instruments.entries[0].layers[0]; };
+    const auto bands_match = [&](const uint32_t added, const uint32_t previous) {
+        bool matched = true;
+        for (uint32_t p = 0; p < 4; p++) {
+            const uint32_t added_target    = m2_band_targets[added][p];
+            const uint32_t previous_target = m2_band_targets[previous][p];
+            matched                        = memcmp(&layer().targets[added_target],
+                                                    &layer().targets[previous_target],
+                                                    sizeof(Synth::TargetBinding)) == 0 &&
+                                             matched;
+        }
+        return matched;
+    };
+    const auto projected_count = [&](const uint32_t expect) {
+        TEST(graph.node(osc_node).slots.num_allocated ==
+             Sculptor::osc_band_first_slot + expect * Sculptor::osc_band_block_stride);
+    };
+
+    // Appends: [+] on the last band copies it wholesale.  Band 0's
+    // unrouted slope binding keeps the zeroed sentinel while the layer
+    // scalar carries its value, so the first add's slope copy carries the
+    // displayed scalar (A13 value-copy semantics), not band 0's bytes;
+    // every other binding byte-equals the copied band's.
+    TEST(click(plus_slot));
+    TEST(layer().fir_band_count == 2);
+    for (uint32_t p = 0; p < 4; p++) {
+        const Synth::TargetBinding& added    = layer().targets[m2_band_targets[1][p]];
+        const Synth::TargetBinding& previous = layer().targets[m2_band_targets[0][p]];
+        if (p == 3) {
+            TEST(added.base_value == 50.0f);   // the fixture's fir_slope_percent scalar
+            TEST(previous.base_value == 0.0f); // the unrouted sentinel
+        }
+        else {
+            TEST(memcmp(&added, &previous, sizeof(Synth::TargetBinding)) == 0);
+        }
+    }
+    TEST(reproject_m2_band_graph(&bank, &graph, &mapping));
+    projected_count(2);
+    TEST(find_nth_osc_slot(graph.node(osc_node), "Band 2", 0) == Sculptor::osc_band_header_slot(1));
+
+    TEST(click(Sculptor::osc_band_header_slot(1) + 2));
+    TEST(layer().fir_band_count == 3);
+    TEST(bands_match(2, 1));
+    TEST(reproject_m2_band_graph(&bank, &graph, &mapping)); // the next click needs the rebuilt slots
+    TEST(click(Sculptor::osc_band_header_slot(2) + 2));
+    TEST(layer().fir_band_count == 4);
+    TEST(bands_match(3, 2));
+    TEST(reproject_m2_band_graph(&bank, &graph, &mapping));
+    projected_count(4);
+
+    // The fifth add is a no-op.
+    TEST(click(plus_slot));
+    TEST(layer().fir_band_count == 4);
+
+    // Band 3 carries distinct state with a full binding tuple.
+    for (uint32_t p = 0; p < 4; p++) {
+        Synth::TargetBinding& gen = layer().targets[m2_band_targets[3][p]];
+        gen                       = {};
+        gen.base_value            = p == 2 ? 0.2f + 0.2f * static_cast<float>(p)
+                                           : 1.0f + static_cast<float>(p); // gain stays within its 0.01..1 view
+        gen.envelope_desc_id      = 2;
+        gen.lfo_desc_id           = 1;
+        gen.num_inputs            = 1;
+        gen.inputs[0]             = { Synth::ModSource::aftertouch, Synth::SourceOp::add, 0, 0.75f };
+    }
+    TEST(reproject_m2_band_graph(&bank, &graph, &mapping));
+
+    // [-] on band 2 removes band 2: band 3 shifts up into band 2 (bindings
+    // and wires follow) and the last block zeroes.
+    Synth::TargetBinding old_b1[4];
+    Synth::TargetBinding old_b2[4];
+    Synth::TargetBinding old_b3[4];
+    for (uint32_t p = 0; p < 4; p++) {
+        old_b1[p] = layer().targets[m2_band_targets[1][p]];
+        old_b2[p] = layer().targets[m2_band_targets[2][p]];
+        old_b3[p] = layer().targets[m2_band_targets[3][p]];
+    }
+    TEST(click(Sculptor::osc_band_header_slot(1) + 1));
+    TEST(layer().fir_band_count == 3);
+    for (uint32_t p = 0; p < 4; p++) {
+        TEST(memcmp(&layer().targets[m2_band_targets[1][p]], &old_b2[p], sizeof(Synth::TargetBinding)) == 0);
+        TEST(memcmp(&layer().targets[m2_band_targets[2][p]], &old_b3[p], sizeof(Synth::TargetBinding)) == 0);
+    }
+    const Synth::TargetBinding zero = {};
+    for (uint32_t p = 0; p < 4; p++) {
+        TEST(memcmp(&layer().targets[m2_band_targets[3][p]], &zero, sizeof(zero)) == 0);
+    }
+    TEST(reproject_m2_band_graph(&bank, &graph, &mapping));
+    projected_count(3);
+    // The shifted band's family wires re-appear on the new block.
+    TEST(find_osc_graph_connection(graph, { osc_node, Sculptor::osc_target_env_dot(m2_band_targets[2][0]) }) !=
+         Sculptor::pool_no_slot);
+    TEST(find_osc_graph_connection(graph, { osc_node, Sculptor::osc_target_src_dot(m2_band_targets[2][0], 0) }) !=
+         Sculptor::pool_no_slot);
+
+    // [+] on band 1 inserts a copy of band 1 after it; the old bands 1
+    // and 2 shift up to 2 and 3.
+    TEST(click(plus_slot));
+    TEST(layer().fir_band_count == 4);
+    for (uint32_t p = 0; p < 4; p++) {
+        TEST(memcmp(&layer().targets[m2_band_targets[1][p]], &old_b1[p], sizeof(Synth::TargetBinding)) == 0);
+        TEST(memcmp(&layer().targets[m2_band_targets[2][p]], &old_b2[p], sizeof(Synth::TargetBinding)) == 0);
+        TEST(memcmp(&layer().targets[m2_band_targets[3][p]], &old_b3[p], sizeof(Synth::TargetBinding)) == 0);
+    }
+    TEST(reproject_m2_band_graph(&bank, &graph, &mapping));
+    projected_count(4);
+
+    // Removing band 2 shifts band 3 up into it and zeroes the vacated
+    // tail; the exported document carries no removed-band keys.
+    TEST(click(Sculptor::osc_band_header_slot(2) + 1));
+    TEST(layer().fir_band_count == 3);
+    for (uint32_t p = 0; p < 4; p++) {
+        TEST(memcmp(&layer().targets[m2_band_targets[3][p]], &zero, sizeof(zero)) == 0);
+    }
+    const std::unique_ptr<FixedArray<char, clipboard_capacity>> text_storage =
+        std::make_unique<FixedArray<char, clipboard_capacity>>();
+    char (&text)[clipboard_capacity] = text_storage->elements;
+    TEST(export_clipboard_fixture(bank, text, sizeof(text)));
+    TEST(strstr(text, "fir_band3_") == nullptr);
+}
+
+// Removing band 0 shifts bands 1..3 up into 0..2: the stored bindings move
+// wholesale, the re-projected wires follow the shifted blocks with their
+// source identity intact, rows without bindings stay unwired, and the
+// vacated band 3 block stops projecting.
+static void m2_band_remove_first_regressions()
+{
+    TEST(Synth::num_mod_targets == 26);
+    if (Synth::num_mod_targets != 26) {
+        return;
+    }
+    const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage  = std::make_unique<Synth::InstrumentEditorBank>();
+    Synth::InstrumentEditorBank&                       bank          = *bank_storage;
+    const std::unique_ptr<Sculptor::Graph>             graph_storage = std::make_unique<Sculptor::Graph>();
+    Sculptor::Graph&                                   graph         = *graph_storage;
+    Sculptor::OscGraphMapping                          mapping       = {};
+    if (! begin_m2_band_graph<m2_band_state_present>(&bank, &graph, &mapping, true, true)) {
+        return;
+    }
+    TEST(mapping.osc_nodes[0] != Sculptor::pool_no_slot);
+    if (mapping.osc_nodes[0] == Sculptor::pool_no_slot) {
+        return;
+    }
+    const uint32_t osc_node = mapping.osc_nodes[0];
+    const auto     layer    = [&]() -> Synth::Oscillator& { return bank.bank.instruments.entries[0].layers[0]; };
+
+    // Snapshot band 1's bindings, then remove band 0.
+    Synth::TargetBinding old_b1[4];
+    for (uint32_t p = 0; p < 4; p++) {
+        old_b1[p] = layer().targets[m2_band_targets[1][p]];
+    }
+    Sculptor::PropertyValue press = {};
+    press.toggle                  = true;
+    TEST(apply_m2_slot_edit(&bank, &graph, &mapping, osc_node, Sculptor::osc_band_header_slot(0) + 1, press));
+    TEST(layer().fir_band_count == 3);
+    for (uint32_t p = 0; p < 4; p++) {
+        TEST(memcmp(&layer().targets[m2_band_targets[0][p]], &old_b1[p], sizeof(Synth::TargetBinding)) == 0);
+    }
+    TEST(reproject_m2_band_graph(&bank, &graph, &mapping));
+    TEST(graph.node(osc_node).slots.num_allocated ==
+         Sculptor::osc_band_first_slot + 3 * Sculptor::osc_band_block_stride);
+
+    // The shifted wires keep their source identity: the shared envelope,
+    // the shared LFO and the two MIDI sources that fed old band 1's offset
+    // row now feed band 0's offset row.
+    const int32_t env_inst = find_m2_detached_desc(mapping, 1, 2);
+    const int32_t lfo_inst = find_m2_detached_desc(mapping, 2, 1);
+    TEST(env_inst >= 0 && lfo_inst >= 0);
+    if (env_inst < 0 || lfo_inst < 0) {
+        return;
+    }
+    const uint32_t offset0   = m2_band_targets[0][0];
+    const uint32_t env_wire  = find_osc_graph_connection(graph, { osc_node, Sculptor::osc_target_env_dot(offset0) });
+    const uint32_t lfo_wire  = find_osc_graph_connection(graph, { osc_node, Sculptor::osc_target_lfo_dot(offset0) });
+    const uint32_t src0_wire = find_osc_graph_connection(graph, { osc_node, Sculptor::osc_target_src_dot(offset0, 0) });
+    const uint32_t src1_wire = find_osc_graph_connection(graph, { osc_node, Sculptor::osc_target_src_dot(offset0, 1) });
+    TEST(env_wire != Sculptor::pool_no_slot && lfo_wire != Sculptor::pool_no_slot);
+    TEST(src0_wire != Sculptor::pool_no_slot && src1_wire != Sculptor::pool_no_slot);
+    if (env_wire != Sculptor::pool_no_slot && lfo_wire != Sculptor::pool_no_slot &&
+        src0_wire != Sculptor::pool_no_slot && src1_wire != Sculptor::pool_no_slot) {
+        // The wire's source must be a detached instance of the binding's
+        // descriptors; multiple instances can share a descriptor id, so
+        // the identity is checked through the wire's own source node.
+        const int32_t env_of_wire = find_instance_by_node(mapping, graph.get_connection(env_wire).output.node_idx);
+        const int32_t lfo_of_wire = find_instance_by_node(mapping, graph.get_connection(lfo_wire).output.node_idx);
+        TEST(env_of_wire >= 0 && mapping.detached[env_of_wire].kind == 1 && mapping.detached[env_of_wire].desc_id == 2);
+        TEST(lfo_of_wire >= 0 && mapping.detached[lfo_of_wire].kind == 2 && mapping.detached[lfo_of_wire].desc_id == 1);
+        TEST(graph.get_connection(env_wire).output.slot_idx == mapping.env_output_slot);
+        TEST(graph.get_connection(lfo_wire).output.slot_idx == mapping.lfo_output_slot);
+        TEST(graph.get_connection(src0_wire).output.node_idx == mapping.input_node);
+        TEST(graph.get_connection(src0_wire).output.slot_idx ==
+             mapping.input_source_slots[static_cast<uint32_t>(Synth::ModSource::velocity) - 1]);
+        TEST(graph.get_connection(src1_wire).output.node_idx == mapping.input_node);
+        TEST(graph.get_connection(src1_wire).output.slot_idx ==
+             mapping.input_source_slots[static_cast<uint32_t>(Synth::ModSource::mod_wheel) - 1]);
+    }
+
+    // Family and parameter coverage on the shifted blocks: only the offset
+    // rows of the surviving bands carry bindings (all four families), the
+    // other parameter rows show no wires, and the vacated band 3 block
+    // leaves no obsolete endpoints behind.
+    const auto wires_into = [&](const uint32_t target) {
+        const Sculptor::EndPoint dots[4] = {
+            { osc_node, Sculptor::osc_target_env_dot(target) },
+            { osc_node, Sculptor::osc_target_lfo_dot(target) },
+            { osc_node, Sculptor::osc_target_src_dot(target, 0) },
+            { osc_node, Sculptor::osc_target_src_dot(target, 1) },
+        };
+        uint32_t hits = 0;
+        for (const Sculptor::EndPoint& dot : dots) {
+            hits += find_osc_graph_connection(graph, dot) != Sculptor::pool_no_slot ? 1u : 0u;
+        }
+        return hits;
+    };
+    for (uint32_t band = 0; band < 4; band++) {
+        for (uint32_t p = 0; p < 4; p++) {
+            TEST(wires_into(m2_band_targets[band][p]) == (band < 3 && p == 0 ? 4u : 0u));
+        }
+    }
+}
+
+// The donation transition: add a band, give it distinct state through the
+// real edit path, remove it, and re-add it in one session. The removed
+// band's bindings are zeroed on removal, so the round-trip compile with
+// the previous-binding donation must not resurrect them, and the re-added
+// band is a fresh copy of the surviving band rather than the removed state.
+static void m2_band_donation_regressions()
+{
+    TEST(Synth::num_mod_targets == 26);
+    if (Synth::num_mod_targets != 26) {
+        return;
+    }
+    const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage  = std::make_unique<Synth::InstrumentEditorBank>();
+    Synth::InstrumentEditorBank&                       bank          = *bank_storage;
+    const std::unique_ptr<Sculptor::Graph>             graph_storage = std::make_unique<Sculptor::Graph>();
+    Sculptor::Graph&                                   graph         = *graph_storage;
+    Sculptor::OscGraphMapping                          mapping       = {};
+    if (! begin_m2_band_graph<m2_band_state_present>(&bank, &graph, &mapping, false, true)) {
+        return;
+    }
+    TEST(mapping.osc_nodes[0] != Sculptor::pool_no_slot);
+    if (mapping.osc_nodes[0] == Sculptor::pool_no_slot) {
+        return;
+    }
+    const uint32_t osc_node = mapping.osc_nodes[0];
+    const auto     layer    = [&]() -> Synth::Oscillator& { return bank.bank.instruments.entries[0].layers[0]; };
+    const uint32_t b1_gain  = m2_band_targets[1][2];
+
+    Sculptor::PropertyValue press = {};
+    press.toggle                  = true;
+    TEST(apply_m2_slot_edit(&bank, &graph, &mapping, osc_node, Sculptor::osc_band_header_slot(0) + 2, press));
+    TEST(layer().fir_band_count == 2);
+    TEST(reproject_m2_band_graph(&bank, &graph, &mapping));
+
+    // Give the added band a distinct gain through the real edit path.
+    Sculptor::PropertyValue gain_edit = {};
+    gain_edit.real                    = 0.7f;
+    TEST(apply_m2_slot_edit(&bank,
+                            &graph,
+                            &mapping,
+                            osc_node,
+                            Sculptor::osc_target_row(Synth::mod_fir_band1_gain),
+                            gain_edit));
+    TEST(layer().targets[b1_gain].base_value == 0.7f);
+    TEST(reproject_m2_band_graph(&bank, &graph, &mapping));
+
+    // Remove the added band: its bindings zero.
+    TEST(apply_m2_slot_edit(&bank, &graph, &mapping, osc_node, Sculptor::osc_band_header_slot(1) + 1, press));
+    TEST(layer().fir_band_count == 1);
+    const Synth::TargetBinding zero = {};
+    TEST(memcmp(&layer().targets[b1_gain], &zero, sizeof(zero)) == 0);
+    TEST(reproject_m2_band_graph(&bank, &graph, &mapping));
+
+    // The round-trip compile donates the previous bindings of bands beyond
+    // the projected count: the zeroed tail must stay zeroed.
+    Synth::Instrument compiled = {};
+    TEST(Sculptor::compile_graph_to_instrument(graph, mapping, &compiled, nullptr, &bank.bank.instruments.entries[0]));
+    TEST(memcmp(&compiled, &bank.bank.instruments.entries[0], sizeof(Synth::Instrument)) == 0);
+
+    // Re-add in the same session: a fresh copy of band 0, and the removed
+    // gain (0.7) must not leak back through the donation.
+    TEST(apply_m2_slot_edit(&bank, &graph, &mapping, osc_node, Sculptor::osc_band_header_slot(0) + 2, press));
+    TEST(layer().fir_band_count == 2);
+    TEST(layer().targets[b1_gain].base_value == 0.5f);
+    TEST(reproject_m2_band_graph(&bank, &graph, &mapping));
+    Synth::Instrument recompiled = {};
+    TEST(
+        Sculptor::compile_graph_to_instrument(graph, mapping, &recompiled, nullptr, &bank.bank.instruments.entries[0]));
+    TEST(memcmp(&recompiled, &bank.bank.instruments.entries[0], sizeof(Synth::Instrument)) == 0);
+}
+
+// The queued-batch structural boundary: a band [-]/[+] click and a later
+// ordinary value event queued in one drain batch. The band event rewrites
+// the stored oscillator and leaves the graph stale, so the drain stops at
+// it and discards the remaining events (their GUI values snap back on the
+// re-projection); the count change survives.
+static void m2_band_batch_boundary_regressions()
+{
+    TEST(Synth::num_mod_targets == 26);
+    if (Synth::num_mod_targets != 26) {
+        return;
+    }
+    const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage  = std::make_unique<Synth::InstrumentEditorBank>();
+    Synth::InstrumentEditorBank&                       bank          = *bank_storage;
+    const std::unique_ptr<Sculptor::Graph>             graph_storage = std::make_unique<Sculptor::Graph>();
+    Sculptor::Graph&                                   graph         = *graph_storage;
+    Sculptor::OscGraphMapping                          mapping       = {};
+    if (! begin_m2_band_graph<m2_band_state_present>(&bank, &graph, &mapping, false, true)) {
+        return;
+    }
+    TEST(mapping.osc_nodes[0] != Sculptor::pool_no_slot);
+    if (mapping.osc_nodes[0] == Sculptor::pool_no_slot) {
+        return;
+    }
+    const uint32_t osc_node = mapping.osc_nodes[0];
+    const auto     layer    = [&]() -> Synth::Oscillator& { return bank.bank.instruments.entries[0].layers[0]; };
+    const uint32_t b0_gain  = m2_band0_targets[2];
+
+    // Grow to two bands so the batch carries [+] on band 0 followed by a
+    // band 0 Gain edit.
+    Sculptor::PropertyValue press = {};
+    press.toggle                  = true;
+    TEST(apply_m2_slot_edit(&bank, &graph, &mapping, osc_node, Sculptor::osc_band_header_slot(0) + 2, press));
+    TEST(layer().fir_band_count == 2);
+    TEST(reproject_m2_band_graph(&bank, &graph, &mapping));
+
+    Sculptor::PropertyValue gain_edit = {};
+    gain_edit.real                    = 0.6f;
+    graph.set_slot_value(osc_node, Sculptor::osc_band_header_slot(0) + 2, press);
+    graph.set_slot_value(osc_node, Sculptor::osc_target_row(Synth::mod_fir_band0_gain), gain_edit);
+    Sculptor::GraphChange batch[2] = {};
+    batch[0].kind                  = Sculptor::ChangeKind::value_changed;
+    batch[0].node_idx              = osc_node;
+    batch[0].slot_idx              = Sculptor::osc_band_header_slot(0) + 2;
+    batch[1]                       = batch[0];
+    batch[1].slot_idx              = Sculptor::osc_target_row(Synth::mod_fir_band0_gain);
+    TEST(m2_drain_osc_batch(&bank, &graph, &mapping, batch, 2) == 1);
+    // The insertion survives and the discarded Gain edit did not apply.
+    TEST(layer().fir_band_count == 3);
+    TEST(layer().targets[b0_gain].base_value == 0.5f);
+    TEST(reproject_m2_band_graph(&bank, &graph, &mapping));
+    TEST(graph.node(osc_node).slots.num_allocated ==
+         Sculptor::osc_band_first_slot + 3 * Sculptor::osc_band_block_stride);
+    TEST(layer().targets[m2_band_targets[1][2]].base_value == 0.5f);
+
+    // The same boundary for removal: [-] on band 0 then a band 0 Gain edit.
+    graph.set_slot_value(osc_node, Sculptor::osc_band_header_slot(0) + 1, press);
+    graph.set_slot_value(osc_node, Sculptor::osc_target_row(Synth::mod_fir_band0_gain), gain_edit);
+    batch[0].slot_idx = Sculptor::osc_band_header_slot(0) + 1;
+    batch[1].slot_idx = Sculptor::osc_target_row(Synth::mod_fir_band0_gain);
+    TEST(m2_drain_osc_batch(&bank, &graph, &mapping, batch, 2) == 1);
+    TEST(layer().fir_band_count == 2);
+    // Band 0 now holds the old band 1 (the copy): the discarded edit did
+    // not apply against the stale graph.
+    TEST(layer().targets[b0_gain].base_value == 0.5f);
+    TEST(reproject_m2_band_graph(&bank, &graph, &mapping));
+    TEST(graph.node(osc_node).slots.num_allocated ==
+         Sculptor::osc_band_first_slot + 2 * Sculptor::osc_band_block_stride);
+}
+
+// Every band header carries [-]/[+] push buttons that stay visible while
+// their band exists and gray at the count bounds: all [-] disable at one
+// band, all [+] at four, both editable in between.
+static void m2_band_button_gray_regressions()
+{
+    TEST(Synth::num_mod_targets == 26);
+    if (Synth::num_mod_targets != 26) {
+        return;
+    }
+    const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage  = std::make_unique<Synth::InstrumentEditorBank>();
+    Synth::InstrumentEditorBank&                       bank          = *bank_storage;
+    const std::unique_ptr<Sculptor::Graph>             graph_storage = std::make_unique<Sculptor::Graph>();
+    Sculptor::Graph&                                   graph         = *graph_storage;
+    Sculptor::OscGraphMapping                          mapping       = {};
+    if (! begin_m2_band_graph<m2_band_state_present>(&bank, &graph, &mapping, false, false)) {
+        return;
+    }
+    const uint32_t osc_node = mapping.osc_nodes[0];
+    const auto     click    = [&](const uint32_t slot) {
+        Sculptor::PropertyValue press = {};
+        press.toggle                  = true;
+        return apply_m2_slot_edit(&bank, &graph, &mapping, osc_node, slot, press);
+    };
+    const auto gray = [&](const bool plus_disabled, const bool minus_disabled, const uint32_t count) {
+        for (uint32_t band = 0; band < count; band++) {
+            const uint32_t header = Sculptor::osc_band_header_slot(band);
+            TEST(graph.slot_edit_disabled(osc_node, header + 2) == plus_disabled);
+            TEST(graph.slot_edit_disabled(osc_node, header + 1) == minus_disabled);
+            TEST(! Sculptor::osc_band_slot_hidden(graph, osc_node, header + 1));
+            TEST(! Sculptor::osc_band_slot_hidden(graph, osc_node, header + 2));
+        }
+    };
+    // One band: every [-] grays, [+] stays live.
+    gray(false, true, 1);
+    // Three appends reach the four-band cap: every [+] grays there.
+    for (uint32_t count = 2; count <= 4; count++) {
+        TEST(click(Sculptor::osc_band_header_slot(count - 2) + 2));
+        TEST(bank.bank.instruments.entries[0].layers[0].fir_band_count == count);
+        // The edit-disabled flags restamp on the structural re-projection.
+        TEST(reproject_m2_band_graph(&bank, &graph, &mapping));
+        gray(count == 4, false, count);
+    }
+    // One remove re-enables [+] and keeps [-] live.
+    TEST(click(Sculptor::osc_band_header_slot(3) + 1));
+    TEST(bank.bank.instruments.entries[0].layers[0].fir_band_count == 3);
+    TEST(reproject_m2_band_graph(&bank, &graph, &mapping));
+    gray(false, false, 3);
+}
+
+// Every band parameter of every band carries the standard four modulator
+// rows, the row bounds follow the per-parameter ranges (offset -36..36,
+// spread 0..36, gain 0.01..1, slope 1..100), and the compiled bindings
+// carry base and wiring per band.
+static void m2_per_band_modulation_regressions()
+{
+    TEST(Synth::num_mod_targets == 26);
+    if (Synth::num_mod_targets != 26) {
+        return;
+    }
+    const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage  = std::make_unique<Synth::InstrumentEditorBank>();
+    Synth::InstrumentEditorBank&                       bank          = *bank_storage;
+    const std::unique_ptr<Sculptor::Graph>             graph_storage = std::make_unique<Sculptor::Graph>();
+    Sculptor::Graph&                                   graph         = *graph_storage;
+    Sculptor::OscGraphMapping                          mapping       = {};
+    if (! begin_m2_band_graph<m2_band_state_present>(&bank, &graph, &mapping, true, false)) {
+        return;
+    }
+    TEST(mapping.osc_nodes[0] != Sculptor::pool_no_slot);
+    if (mapping.osc_nodes[0] == Sculptor::pool_no_slot) {
+        return;
+    }
+    const uint32_t     osc_node    = mapping.osc_nodes[0];
+    static const float bases[4][4] = {
+        { 1.0f, 6.0f, 0.9f, 40.0f },
+        { 4.0f, 9.0f, 0.7f, 50.0f },
+        { 7.0f, 12.0f, 0.5f, 60.0f },
+        { 10.0f, 15.0f, 0.3f, 70.0f },
+    };
+
+    static const struct {
+        float min_value;
+        float max_value;
+    } bounds[4] = {
+        { -36.0f, 36.0f },
+        { 0.0f, 36.0f },
+        { 0.01f, 1.0f },
+        { 1.0f, 100.0f },
+    };
+
+    for (uint32_t band = 0; band < 4; band++) {
+        for (uint32_t p = 0; p < 4; p++) {
+            const uint32_t                target = m2_band_targets[band][p];
+            const Sculptor::OscTargetView view   = Sculptor::osc_target_view(static_cast<Synth::ModTarget>(target));
+            TEST(view.min_value == bounds[p].min_value && view.max_value == bounds[p].max_value);
+            const uint32_t row = Sculptor::osc_target_row(target);
+            TEST(graph.node(osc_node).slots.entries[row].property_type ==
+                 (p == 3 ? Sculptor::PropertyType::integer : Sculptor::PropertyType::real));
+            Sculptor::PropertyValue base = {};
+            if (p == 3) {
+                base.integer = static_cast<int32_t>(bases[band][p]);
+            }
+            else {
+                base.real = bases[band][p];
+            }
+            TEST(apply_m2_slot_edit(&bank, &graph, &mapping, osc_node, row, base));
+            TEST(wire_m2_target(&bank, &graph, &mapping, osc_node, target));
+            TEST(Sculptor::refresh_osc_graph_compilation(&bank, graph, mapping, 0, 0));
+            const Synth::TargetBinding& gen = bank.bank.instruments.entries[0].layers[0].targets[target];
+            TEST(gen.base_value == bases[band][p]);
+            TEST(gen.envelope_desc_id == 2);
+            TEST(gen.lfo_desc_id == 1);
+            TEST(gen.num_inputs == 2);
+            TEST(gen.inputs[0].source == Synth::ModSource::velocity);
+            TEST(gen.inputs[1].source == Synth::ModSource::mod_wheel);
+        }
+    }
+
+    // The wiring survives the reprojection for every band.
+    TEST(reproject_m2_band_graph(&bank, &graph, &mapping));
+    for (uint32_t band = 0; band < 4; band++) {
+        const uint32_t              target = m2_band_targets[band][3];
+        const Synth::TargetBinding& gen    = bank.bank.instruments.entries[0].layers[0].targets[target];
+        TEST(gen.envelope_desc_id == 2 && gen.lfo_desc_id == 1 && gen.num_inputs == 2);
+        TEST(gen.base_value == bases[band][3]);
+    }
+}
+
+// Complex response of a binary32 kernel at freq (causal tap phase), the
+// complex counterpart of fir_test_response.
+static void fir_test_complex_response(const float* coefficients, const double freq, double* real, double* imag)
+{
+    constexpr uint32_t taps = Synth::num_fir_taps;
+    const double       w    = 2.0 * 3.141592653589793 * freq / static_cast<double>(Synth::rt_sampling_rate);
+    double             re   = 0.0;
+    double             im   = 0.0;
+    for (uint32_t tap = 0; tap < taps; tap++) {
+        const double c = static_cast<double>(coefficients[tap]);
+        if (c == 0.0) {
+            continue;
+        }
+        const double phase = w * static_cast<double>(tap);
+        re += c * cos(phase);
+        im -= c * sin(phase);
+    }
+    *real = re;
+    *imag = im;
+}
+
+// C2.3: the multi-band kernel accumulation.  Each band's kernel is the
+// single-band mirror scaled by the band gain and normalized by the band's own
+// denominator; the staged taps hold the complex sum, so overlapping bands
+// with unequal slopes interfere instead of adding in magnitude.
+static void m2_fir_kernel_mirror_regressions()
+{
+    constexpr uint32_t                    taps              = Synth::num_fir_taps;
+    const std::unique_ptr<FirCoeffMirror> band_storage      = std::make_unique<FirCoeffMirror>();
+    FirCoeffMirror&                       band              = *band_storage;
+    const std::unique_ptr<FirCoeffMirror> other_storage     = std::make_unique<FirCoeffMirror>();
+    FirCoeffMirror&                       other             = *other_storage;
+    float                                 stored[taps]      = {};
+    float                                 band_stored[taps] = {};
+
+    // Per-band staging math mirror: the edges come from the production edge
+    // composition (center pitch + offset, +/- spread, the 1 Hz highpass floor
+    // and the shared guard) so a single band at gain 1 reduces to the
+    // single-band kernel.
+    const auto band_edges = [](const float    offset_semitones,
+                               const float    spread,
+                               const uint32_t mult,
+                               uint32_t*      lowpass,
+                               uint32_t*      highpass) {
+        float lowpass_edge  = 0.0f;
+        float highpass_edge = 0.0f;
+        TEST(Synth::oscillator_fir_cutoffs(69.0f + offset_semitones,
+                                           spread,
+                                           mult,
+                                           Synth::fir_bandpass,
+                                           &lowpass_edge,
+                                           &highpass_edge));
+        *lowpass  = fir_test_quantize_cutoff(lowpass_edge);
+        *highpass = fir_test_quantize_cutoff(highpass_edge);
+        Synth::oscillator_fir_band_guard(lowpass, highpass);
+        return Synth::pitch_to_frequency(69.0f + offset_semitones, mult);
+    };
+
+    // Single-band equivalence: one band at offset 0 with gain 1 keeps the
+    // single-band stored response across spans.
+    for (const uint32_t span : { 11u, 513u, Synth::num_fir_taps }) {
+        uint32_t lowpass  = 0;
+        uint32_t highpass = 0;
+        (void)band_edges(0.0f, 6.0f, 1, &lowpass, &highpass);
+        fir_test_mirror(lowpass, highpass, span, 256, 32, &band);
+        const double magnitude = fir_test_stored_response(band, static_cast<double>(band.center_freq), stored);
+        TEST(fabs(magnitude - 1.0) <= fir_test_unity_tolerance(lowpass, highpass));
+    }
+
+    // Three separated bands peak at each band's center frequency, scaled by
+    // that band's gain.
+    {
+        struct BandSpec {
+            float offset;
+            float spread;
+            float slope;
+            float gain;
+        };
+
+        static const BandSpec specs[3] = {
+            { -36.0f, 6.0f, 100.0f, 1.0f },
+            { 0.0f, 6.0f, 100.0f, 0.5f },
+            { 36.0f, 6.0f, 100.0f, 0.25f },
+        };
+        static float band_kernels[3][taps];
+        uint32_t     band_index = 0;
+        double       centers[3] = {};
+        memset(static_cast<void*>(stored), 0, sizeof(stored));
+        for (const BandSpec& spec : specs) {
+            uint32_t lowpass    = 0;
+            uint32_t highpass   = 0;
+            centers[band_index] = band_edges(spec.offset, spec.spread, 1, &lowpass, &highpass);
+            const uint32_t span = Synth::fir_effective_span(spec.slope);
+            fir_test_mirror(lowpass, highpass, span, 256, 32, &band);
+            fir_test_check_span_shape(band, span);
+            const double own = fir_test_stored_response(band, static_cast<double>(band.center_freq), band_stored);
+            TEST(fabs(own - 1.0) <= fir_test_unity_tolerance(lowpass, highpass));
+            memcpy(band_kernels[band_index], band_stored, sizeof(band_kernels[0]));
+            for (uint32_t tap = 0; tap < taps; tap++) {
+                stored[tap] = stored[tap] + band_stored[tap] * spec.gain;
+            }
+            band_index++;
+        }
+        for (uint32_t probe = 0; probe < 3; probe++) {
+            double expected_re = 0.0;
+            double expected_im = 0.0;
+            for (uint32_t j = 0; j < 3; j++) {
+                double re = 0.0;
+                double im = 0.0;
+                fir_test_complex_response(band_kernels[j], centers[probe], &re, &im);
+                expected_re += re * static_cast<double>(specs[j].gain);
+                expected_im += im * static_cast<double>(specs[j].gain);
+            }
+            const double expected = sqrt(expected_re * expected_re + expected_im * expected_im);
+            const double measured = fir_test_response(stored, centers[probe]);
+            TEST(fabs(measured - expected) <= 1e-3 * expected + 1e-3);
+        }
+    }
+
+    // Overlapping bands with unequal slopes sum as complex responses: the
+    // staged kernel equals the complex sum of the per-band kernels, and the
+    // magnitude does not add.
+    {
+        uint32_t       lowpass0  = 0;
+        uint32_t       highpass0 = 0;
+        const double   center0   = band_edges(0.0f, 6.0f, 1, &lowpass0, &highpass0);
+        uint32_t       lowpass1  = 0;
+        uint32_t       highpass1 = 0;
+        const double   center1   = band_edges(2.0f, 6.0f, 1, &lowpass1, &highpass1);
+        const uint32_t span0     = Synth::fir_effective_span(100.0f);
+        const uint32_t span1     = Synth::fir_effective_span(1.0f);
+        fir_test_mirror(lowpass0, highpass0, span0, 256, 32, &band);
+        fir_test_check_span_shape(band, span0);
+        fir_test_stored_response(band, center0, band_stored);
+        float kernel0[taps] = {};
+        memcpy(kernel0, band_stored, sizeof(kernel0));
+        fir_test_mirror(lowpass1, highpass1, span1, 256, 32, &other);
+        fir_test_check_span_shape(other, span1);
+        fir_test_stored_response(other, center1, band_stored);
+        for (uint32_t tap = 0; tap < taps; tap++) {
+            stored[tap] = kernel0[tap] + band_stored[tap];
+            TEST(std::isfinite(stored[tap]));
+        }
+        const double probe_freqs[3] = { 500.0, 550.0, 600.0 };
+        for (const double freq : probe_freqs) {
+            double re0 = 0.0;
+            double im0 = 0.0;
+            double re1 = 0.0;
+            double im1 = 0.0;
+            fir_test_complex_response(kernel0, freq, &re0, &im0);
+            fir_test_complex_response(band_stored, freq, &re1, &im1);
+            const double expected_re        = re0 + re1;
+            const double expected_im        = im0 + im1;
+            const double expected_magnitude = sqrt(expected_re * expected_re + expected_im * expected_im);
+            const double measured           = fir_test_response(stored, freq);
+            TEST(fabs(measured - expected_magnitude) <= 1e-3 * expected_magnitude + 1e-6);
+            const double magnitude_sum = sqrt(re0 * re0 + im0 * im0) + sqrt(re1 * re1 + im1 * im1);
+            TEST(fabs(magnitude_sum - expected_magnitude) > 1e-3);
+        }
+    }
+
+    // Production pins: the shader consumes the per-entry band count, loops the
+    // band kernels behind explicit workgroup barriers, and the band count stays
+    // per-entry data (no new specialization constant).
+    const char* const shader = load_source_file("synth/synth_fir_coeff.comp.glsl");
+    TEST(shader != nullptr);
+    if (shader) {
+        TEST(strstr(shader, "band_count;") != nullptr);
+        TEST(strstr(shader, "bands[4]") != nullptr);
+        uint32_t barriers = 0;
+        for (const char* hit = strstr(shader, "barrier();"); hit; hit = strstr(hit + 1, "barrier();")) {
+            barriers++;
+        }
+        TEST(barriers >= 4);
+        uint32_t spec_constants = 0;
+        for (const char* hit = strstr(shader, "constant_id"); hit; hit = strstr(hit + 1, "constant_id")) {
+            spec_constants++;
+        }
+        TEST(spec_constants == 3);
+    }
+}
+
+// C2.3 staging pins: the runtime's band staging, role wiring and clamp policy,
+// plus the schema and example documents.
+static void m2_runtime_source_pins_regressions()
+{
+    const char* const params_h = load_source_file("synth/synth_parameters.h");
+    TEST(params_h != nullptr && strstr(params_h, "fir_coeff_entry_words = 18") != nullptr);
+    const char* const params_cpp = load_source_file("synth/synth_parameters.cpp");
+    TEST(params_cpp != nullptr && strstr(params_cpp, "oscillator_fir_band_cutoffs") != nullptr);
+    TEST(params_cpp != nullptr && strstr(params_cpp, "oscillator_fir_band_guard") != nullptr);
+    const char* const runtime = load_source_file("synth/realtime_synth.cpp");
+    TEST(runtime != nullptr);
+    if (runtime) {
+        TEST(strstr(runtime, "band_count;") != nullptr);
+        TEST(strstr(runtime, "bands[4]") != nullptr);
+        TEST(strstr(runtime, "static_assert(num_osc_roles == 78)") != nullptr);
+        TEST(strstr(runtime, "{ mod_fir_band0_offset, osc_fir_band0_offset_dest }") != nullptr);
+        TEST(strstr(runtime, "osc_fir_band3_slope_dest, osc_fir_band3_slope_env, osc_fir_band3_slope_lfo") != nullptr);
+        TEST(strstr(runtime, "fir_band_count") != nullptr);
+        // Staging hygiene: the full entry is zero-initialized, inactive bands
+        // included, and a band with a nonpositive gain contributes nothing.
+        TEST(strstr(runtime, "memset(&param") != nullptr);
+        TEST(strstr(runtime, "gain > 0.0f") != nullptr);
+        // Modulated gain clamps to [0, 1] and offset to
+        // +/-36 semitones at staging.
+        TEST(strstr(runtime, "gain > 1.0f") != nullptr);
+        TEST(strstr(runtime, "36.0f") != nullptr);
+        // The count-vs-staged consistency assert stays.
+        TEST(strstr(runtime, "assert(staged == num_active_filters)") != nullptr);
+    }
+    const char* const schema = load_source_file("doc/synth_instrument_schema.json");
+    TEST(schema != nullptr && strstr(schema, "fir_bands") != nullptr);
+    TEST(schema != nullptr && strstr(schema, "fir_band1_offset") != nullptr);
+    const char* const example = load_source_file("doc/synth_instrument_example.json");
+    TEST(example != nullptr && strstr(example, "fir_bands") != nullptr);
+}
+
+// Assembles the portable multi-band document: one bandpass layer, fir_bands 4,
+// and all sixteen band parameters bound (base + envelope + LFO + two MIDI
+// sources), with per-band envelope and LFO contents so the decoder interns
+// four of each.  Returns the document length, or 0 when it does not fit.
+static uint32_t build_m2_multiband_document(char* text, const uint32_t capacity)
+{
+    const char* const head =
+        "{\"format\":\"synth-instrument-v1\",\"note_skew_semitones\":0,\"layer_skew_semitones\":0,"
+        "\"layers\":[{\"wave_a\":\"sine\",\"mode\":\"blend\",\"fir_type\":\"bandpass\",\"fir_bands\":4,";
+
+    static const struct {
+        const char* offset_key;
+        const char* spread_key;
+        const char* gain_key;
+        const char* slope_key;
+    } band_keys[4] = {
+        { "fir_band0_offset", "fir_pitch_spread", "fir_band0_gain", "fir_slope" },
+        { "fir_band1_offset", "fir_band1_spread", "fir_band1_gain", "fir_band1_slope" },
+        { "fir_band2_offset", "fir_band2_spread", "fir_band2_gain", "fir_band2_slope" },
+        { "fir_band3_offset", "fir_band3_spread", "fir_band3_gain", "fir_band3_slope" },
+    };
+
+    static const struct {
+        float   offset;
+        float   spread;
+        float   gain;
+        int32_t slope;
+    } band_bases[4] = {
+        { -6.0f, 4.0f, 0.9f, 90 },
+        { -3.0f, 5.0f, 0.8f, 80 },
+        { 3.0f, 6.0f, 0.7f, 70 },
+        { 6.0f, 7.0f, 0.6f, 60 },
+    };
+
+    uint32_t   len    = 0;
+    const auto append = [&](const char* fragment) {
+        const size_t fragment_len = strlen(fragment);
+        if (len + fragment_len + 1 > capacity) {
+            return false;
+        }
+        memcpy(text + len, fragment, fragment_len);
+        len += static_cast<uint32_t>(fragment_len);
+        text[len] = 0;
+        return true;
+    };
+    if (! append(head)) {
+        return 0;
+    }
+    for (uint32_t band = 0; band < 4; band++) {
+        if (band > 0 && ! append(",")) {
+            return 0;
+        }
+        const char* const keys[4] = { band_keys[band].offset_key,
+                                      band_keys[band].spread_key,
+                                      band_keys[band].gain_key,
+                                      band_keys[band].slope_key };
+        for (uint32_t p = 0; p < 4; p++) {
+            char base_text[24] = {};
+            if (p == 3) {
+                snprintf(base_text, sizeof(base_text), "%d", band_bases[band].slope);
+            }
+            else {
+                const float base = p == 0   ? band_bases[band].offset
+                                   : p == 1 ? band_bases[band].spread
+                                            : band_bases[band].gain;
+                snprintf(base_text, sizeof(base_text), "%.1f", static_cast<double>(base));
+            }
+            char      fragment[640] = {};
+            const int written       = snprintf(
+                fragment,
+                sizeof(fragment),
+                "%s\"%s\":{\"base\":%s,\"envelope\":{\"points\":[{\"time_seconds\":0,\"level\":0.25},"
+                "{\"time_seconds\":0.5,\"level\":%.3f}],\"sustain_start\":0,\"sustain_end\":1,\"ping_pong\":1},"
+                "\"lfo\":{\"wave\":\"sine\",\"frequency_hz\":%u,\"duty\":0.25,\"depth\":0.5,\"min_level\":0,\"max_level\":1,"
+                "\"depth_source\":\"velocity\",\"rate_source\":\"mod_wheel\",\"rate_scale_ms\":20},"
+                "\"sources\":[{\"source\":\"velocity\",\"op\":\"add\",\"scale\":0.5},"
+                "{\"source\":\"mod_wheel\",\"op\":\"multiply\",\"scale\":0.25}]}",
+                p > 0 ? "," : "",
+                keys[p],
+                base_text,
+                0.25f + 0.05f * static_cast<float>(band),
+                4u + band);
+            TEST(written > 0 && written < static_cast<int>(sizeof(fragment)));
+            if (written <= 0 || written >= static_cast<int>(sizeof(fragment)) || ! append(fragment)) {
+                return 0;
+            }
+        }
+    }
+    if (! append("}]}")) {
+        return 0;
+    }
+    return len;
+}
+
+// Installs a decoded document into a fresh editor bank as channel 0 zone 0 so
+// the portable encoder can re-export it.
+static void install_m2_decoded_instrument(Synth::InstrumentEditorBank* bank, const ClipboardDecode& decoded)
+{
+    memset(static_cast<void*>(bank), 0, sizeof(*bank));
+    bank->bank.channel_enabled[0] = 1;
+    TEST(bank->bank.instruments.allocate() == 0);
+    bank->bank.instruments.entries[0] = decoded.instr;
+    for (uint32_t i = 0; i < decoded.env_count; i++) {
+        TEST(bank->bank.envelopes.allocate() == i);
+        bank->bank.envelopes.entries[i] = decoded.envs[i];
+    }
+    for (uint32_t i = 0; i < decoded.lfo_count; i++) {
+        TEST(bank->bank.lfos.allocate() == i);
+        bank->bank.lfos.entries[i] = decoded.lfos[i];
+    }
+    bank->bank.channel_zones[0][0].start_note = 1;
+    bank->bank.channel_zones[0][0].instrument = 0;
+}
+
+// Legacy backfill expectations ride the decoded-object template parameter so
+// the band member access defers with the band state.
+template <bool M2, typename DecodedT> static void m2_check_legacy_backfill(DecodedT& decoded)
+{
+    if constexpr (M2) {
+        TEST(decoded.instr.layer_count == 2);
+        for (uint32_t layer = 0; layer < 2 && layer < decoded.instr.layer_count; layer++) {
+            const auto& layer_osc = decoded.instr.layers[layer];
+            TEST(layer_osc.fir_band_count == 1);
+            const uint32_t offset_target = m2_band0_targets[0];
+            const uint32_t gain_target   = m2_band0_targets[2];
+            TEST(layer_osc.targets[offset_target].base_value == 0.0f);
+            TEST(layer_osc.targets[gain_target].base_value == 1.0f);
+        }
+    }
+    else {
+        TEST(false);
+    }
+}
+
+// C2.4: the portable document codec round-trips multi-band state, backfills
+// legacy single-band documents, and keeps the gain-0 and slope conventions.
+static void m2_document_json_regressions()
+{
+    {
+        const std::unique_ptr<FixedArray<char, 8 * 1024>> doc_storage = std::make_unique<FixedArray<char, 8 * 1024>>();
+        char (&doc)[8 * 1024]                                         = doc_storage->elements;
+        const uint32_t doc_len                                        = build_m2_multiband_document(doc, sizeof(doc));
+        TEST(doc_len > 0);
+        const std::unique_ptr<ClipboardDecode> decoded_storage = std::make_unique<ClipboardDecode>();
+        ClipboardDecode&                       decoded         = *decoded_storage;
+        const bool                             ok              = decode_clipboard(&decoded, doc, max_portable_records);
+        TEST(ok);
+        if (! ok) {
+            return;
+        }
+        TEST(decoded.instr.layer_count == 1);
+        static const float bases[4][4] = {
+            { -6.0f, 4.0f, 0.9f, 90.0f },
+            { -3.0f, 5.0f, 0.8f, 80.0f },
+            { 3.0f, 6.0f, 0.7f, 70.0f },
+            { 6.0f, 7.0f, 0.6f, 60.0f },
+        };
+        for (uint32_t band = 0; band < 4; band++) {
+            for (uint32_t p = 0; p < 4; p++) {
+                const uint32_t              target = m2_band_targets[band][p];
+                const Synth::TargetBinding& gen    = decoded.instr.layers[0].targets[target];
+                TEST(gen.base_value == bases[band][p]);
+                TEST(gen.envelope_desc_id != 0);
+                TEST(gen.lfo_desc_id != 0);
+                TEST(gen.num_inputs == 2);
+                TEST(gen.inputs[0].source == Synth::ModSource::velocity);
+                TEST(gen.inputs[1].source == Synth::ModSource::mod_wheel);
+            }
+        }
+        TEST(decoded.env_count == 4);
+        TEST(decoded.lfo_count == 4);
+        // The re-exported document decodes back to the same band state and
+        // carries the count key.
+        const std::unique_ptr<Synth::InstrumentEditorBank> installed_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& installed = *installed_storage;
+        install_m2_decoded_instrument(&installed, decoded);
+        const std::unique_ptr<FixedArray<char, clipboard_capacity>> text_storage =
+            std::make_unique<FixedArray<char, clipboard_capacity>>();
+        char (&text)[clipboard_capacity] = text_storage->elements;
+        TEST(export_clipboard_fixture(installed, text, sizeof(text)));
+        TEST(strstr(text, "\"fir_bands\":4") != nullptr);
+        const std::unique_ptr<ClipboardDecode> redecoded_storage = std::make_unique<ClipboardDecode>();
+        ClipboardDecode&                       redecoded         = *redecoded_storage;
+        TEST(decode_clipboard(&redecoded, text, max_portable_records));
+        TEST(redecoded.instr.layers[0].targets[m2_band_targets[1][0]].base_value == -3.0f);
+        TEST(redecoded.instr.layers[0].targets[m2_band_targets[1][2]].envelope_desc_id != 0);
+    }
+
+    // Legacy single-band documents backfill one band with Offset 0 and Gain 1
+    // on every layer.
+    {
+        const char* const legacy =
+            "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\",\"volume\":{\"base\":0.5}},"
+            "{\"wave_a\":\"sawtooth\",\"fir_type\":\"bandpass\",\"fir_pitch_spread\":{\"base\":3}}]}";
+        const std::unique_ptr<ClipboardDecode> decoded_storage = std::make_unique<ClipboardDecode>();
+        ClipboardDecode&                       decoded         = *decoded_storage;
+        TEST(decode_clipboard(&decoded, legacy, max_portable_records));
+        m2_check_legacy_backfill<m2_band_state_present>(decoded);
+    }
+
+    // An explicitly saved gain-0 band stays gain 0 through the round trip (the
+    // explicit-empty-block convention): decode treats it as an inactive band and
+    // the encoder re-emits it instead of reloading it as the 1.0 default.
+    {
+        const char* const gain0_doc =
+            "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\",\"fir_type\":\"bandpass\","
+            "\"fir_bands\":2,\"fir_band0_gain\":{}}]}";
+        const std::unique_ptr<ClipboardDecode> decoded_storage = std::make_unique<ClipboardDecode>();
+        ClipboardDecode&                       decoded         = *decoded_storage;
+        const bool                             ok = decode_clipboard(&decoded, gain0_doc, max_portable_records);
+        TEST(ok);
+        if (! ok) {
+            return;
+        }
+        TEST(decoded.instr.layers[0].targets[m2_band0_targets[2]].base_value == 0.0f);
+        const std::unique_ptr<Synth::InstrumentEditorBank> installed_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& installed = *installed_storage;
+        install_m2_decoded_instrument(&installed, decoded);
+        const std::unique_ptr<FixedArray<char, clipboard_capacity>> text_storage =
+            std::make_unique<FixedArray<char, clipboard_capacity>>();
+        char (&text)[clipboard_capacity] = text_storage->elements;
+        TEST(export_clipboard_fixture(installed, text, sizeof(text)));
+        TEST(strstr(text, "\"fir_band0_gain\":{}") != nullptr);
+    }
+
+    // A later layer's explicit gain 0 survives too: the gain default is seeded
+    // for every layer, and the nonzero default is not lossy for a zero base.
+    {
+        const char* const later_gain0_doc =
+            "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\"},"
+            "{\"wave_a\":\"sawtooth\",\"fir_type\":\"bandpass\",\"fir_bands\":2,\"fir_band0_gain\":{}}]}";
+        const std::unique_ptr<ClipboardDecode> decoded_storage = std::make_unique<ClipboardDecode>();
+        ClipboardDecode&                       decoded         = *decoded_storage;
+        const bool                             ok = decode_clipboard(&decoded, later_gain0_doc, max_portable_records);
+        TEST(ok);
+        if (! ok) {
+            return;
+        }
+        TEST(decoded.instr.layers[0].targets[m2_band0_targets[2]].base_value == 1.0f);
+        TEST(decoded.instr.layers[1].targets[m2_band0_targets[2]].base_value == 0.0f);
+        const std::unique_ptr<Synth::InstrumentEditorBank> installed_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& installed = *installed_storage;
+        install_m2_decoded_instrument(&installed, decoded);
+        const std::unique_ptr<FixedArray<char, clipboard_capacity>> text_storage =
+            std::make_unique<FixedArray<char, clipboard_capacity>>();
+        char (&text)[clipboard_capacity] = text_storage->elements;
+        TEST(export_clipboard_fixture(installed, text, sizeof(text)));
+        TEST(strstr(text, "\"fir_band0_gain\":{}") != nullptr);
+    }
+
+    // A present band-slope block with an omitted base decodes the
+    // routed-to-zero state; an absent block decodes the 100 default.
+    {
+        const char* const slope0_doc =
+            "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\",\"fir_type\":\"bandpass\","
+            "\"fir_bands\":2,\"fir_band1_slope\":{}}]}";
+        const std::unique_ptr<ClipboardDecode> decoded_storage = std::make_unique<ClipboardDecode>();
+        ClipboardDecode&                       decoded         = *decoded_storage;
+        const bool                             ok = decode_clipboard(&decoded, slope0_doc, max_portable_records);
+        TEST(ok);
+        if (! ok) {
+            return;
+        }
+        TEST(decoded.instr.layers[0].targets[m2_band_targets[1][3]].base_value == 0.0f);
+    }
+    {
+        const char* const absent_doc =
+            "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\",\"fir_type\":\"bandpass\","
+            "\"fir_bands\":2,\"fir_band1_offset\":{\"base\":2}}]}";
+        const std::unique_ptr<ClipboardDecode> decoded_storage = std::make_unique<ClipboardDecode>();
+        ClipboardDecode&                       decoded         = *decoded_storage;
+        const bool                             ok = decode_clipboard(&decoded, absent_doc, max_portable_records);
+        TEST(ok);
+        if (! ok) {
+            return;
+        }
+        TEST(decoded.instr.layers[0].targets[m2_band_targets[1][0]].base_value == 2.0f);
+        TEST(decoded.instr.layers[0].targets[m2_band_targets[1][1]].base_value == 0.0f);
+        TEST(decoded.instr.layers[0].targets[m2_band_targets[1][2]].base_value == 1.0f);
+        TEST(decoded.instr.layers[0].targets[m2_band_targets[1][3]].base_value == 100.0f);
+    }
+}
+
+// C2.4: the bank JSON embeds multi-band state for every layer; a single-band
+// instrument omits the count key, and the decode side installs the band state
+// on top of existing bank content without disturbing it.
+static void m2_bank_json_round_trip_regressions()
+{
+    TEST(Synth::num_mod_targets == 26);
+    if (Synth::num_mod_targets != 26) {
+        return;
+    }
+    const std::unique_ptr<Synth::InstrumentEditorBank> source_storage = std::make_unique<Synth::InstrumentEditorBank>();
+    Synth::InstrumentEditorBank&                       source         = *source_storage;
+    Synth::Instrument                                  instrument     = {};
+    build_m2_bandpass_fixture<m2_band_state_present>(&source, instrument.layers[0], false, false);
+    // The fixture fills layer 0 only; the encoder needs the count set.
+    instrument.layer_count         = 1;
+    source.bank.channel_enabled[0] = 1;
+    TEST(source.bank.instruments.allocate() == 0);
+    source.bank.instruments.entries[0]         = instrument;
+    source.bank.channel_zones[0][0].start_note = 1;
+    source.bank.channel_zones[0][0].instrument = 0;
+    const std::unique_ptr<FixedArray<char, clipboard_capacity>> doc_storage =
+        std::make_unique<FixedArray<char, clipboard_capacity>>();
+    char (&doc)[clipboard_capacity] = doc_storage->elements;
+    const uint32_t doc_len          = Synth::encode_editor_bank_json(&source, doc, sizeof(doc));
+    TEST(doc_len > 0);
+    const char* const anchor = strstr(doc, "\"wave_a\":\"sine\"");
+    TEST(anchor != nullptr);
+    if (! anchor) {
+        return;
+    }
+    static const char                                           band_keys[] = ",\"fir_bands\":4,"
+                                                                              "\"fir_band0_offset\":{\"base\":5},"
+                                                                              "\"fir_band0_gain\":{\"base\":0.5},"
+                                                                              "\"fir_band1_offset\":{\"base\":7},"
+                                                                              "\"fir_band1_spread\":{\"base\":4},"
+                                                                              "\"fir_band1_gain\":{\"base\":0.8},"
+                                                                              "\"fir_band1_slope\":{\"base\":90},"
+                                                                              "\"fir_band2_offset\":{\"base\":9},"
+                                                                              "\"fir_band2_spread\":{\"base\":5},"
+                                                                              "\"fir_band2_gain\":{\"base\":0.7},"
+                                                                              "\"fir_band2_slope\":{\"base\":80},"
+                                                                              "\"fir_band3_offset\":{\"base\":11},"
+                                                                              "\"fir_band3_spread\":{\"base\":6},"
+                                                                              "\"fir_band3_gain\":{\"base\":0.6},"
+                                                                              "\"fir_band3_slope\":{\"base\":70}";
+    const std::unique_ptr<FixedArray<char, clipboard_capacity>> combined_storage =
+        std::make_unique<FixedArray<char, clipboard_capacity>>();
+    char (&combined)[clipboard_capacity] = combined_storage->elements;
+    {
+        const size_t insert_at = static_cast<size_t>(anchor + strlen("\"wave_a\":\"sine\"") - doc);
+        const size_t keys_len  = sizeof(band_keys) - 1;
+        TEST(doc_len + keys_len + 1 <= sizeof(combined));
+        if (doc_len + keys_len + 1 > sizeof(combined)) {
+            return;
+        }
+        memcpy(combined, doc, insert_at);
+        memcpy(combined + insert_at, band_keys, keys_len);
+        memcpy(combined + insert_at + keys_len, doc + insert_at, doc_len - insert_at);
+        combined[doc_len + keys_len] = 0;
+    }
+    const std::unique_ptr<Synth::InstrumentEditorBank> target_storage = std::make_unique<Synth::InstrumentEditorBank>();
+    Synth::InstrumentEditorBank&                       target         = *target_storage;
+    target.bank.channel_enabled[0]                                    = 1;
+    TEST(Synth::decode_editor_bank_json(combined, doc_len + sizeof(band_keys) - 1, &target));
+    static const float band_bases[4][4] = {
+        { 5.0f, 3.0f, 0.5f, 50.0f },
+        { 7.0f, 4.0f, 0.8f, 90.0f },
+        { 9.0f, 5.0f, 0.7f, 80.0f },
+        { 11.0f, 6.0f, 0.6f, 70.0f },
+    };
+    for (uint32_t band = 0; band < 4; band++) {
+        for (uint32_t p = 0; p < 4; p++) {
+            const uint32_t              target_index = m2_band_targets[band][p];
+            const Synth::TargetBinding& gen = target.bank.instruments.entries[0].layers[0].targets[target_index];
+            TEST(gen.base_value == band_bases[band][p]);
+        }
+    }
+
+    // The decode side installs band state over existing bank content, and the
+    // re-encoded bank carries the keys again while keeping pre-existing state.
+    target.bank.instruments.entries[0].layers[0].targets[Synth::mod_volume].base_value = 0.25f;
+    const std::unique_ptr<FixedArray<char, clipboard_capacity>> text_storage =
+        std::make_unique<FixedArray<char, clipboard_capacity>>();
+    char (&text)[clipboard_capacity] = text_storage->elements;
+    TEST(Synth::encode_editor_bank_json(&target, text, sizeof(text)) > 0);
+    TEST(strstr(text, "\"fir_bands\":4") != nullptr);
+    TEST(strstr(text, "\"fir_band1_slope\"") != nullptr);
+    TEST(strstr(text, "\"volume\":{\"base_value\":0.25") != nullptr);
+
+    // A single-band instrument omits the count key: the default keeps the
+    // document short.
+    {
+        const std::unique_ptr<Synth::InstrumentEditorBank> single_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& single            = *single_storage;
+        Synth::Instrument            single_instrument = {};
+        build_m2_bandpass_fixture<m2_band_state_present>(&single, single_instrument.layers[0], false, false);
+        // The fixture fills layer 0 only; the encoder needs the count set.
+        single_instrument.layer_count  = 1;
+        single.bank.channel_enabled[0] = 1;
+        TEST(single.bank.instruments.allocate() == 0);
+        single.bank.instruments.entries[0]         = single_instrument;
+        single.bank.channel_zones[0][0].start_note = 1;
+        single.bank.channel_zones[0][0].instrument = 0;
+        const std::unique_ptr<FixedArray<char, clipboard_capacity>> single_doc_storage =
+            std::make_unique<FixedArray<char, clipboard_capacity>>();
+        char (&single_doc)[clipboard_capacity] = single_doc_storage->elements;
+        TEST(Synth::encode_editor_bank_json(&single, single_doc, sizeof(single_doc)) > 0);
+        TEST(strstr(single_doc, "fir_bands") == nullptr);
+    }
+}
+
+// C2.4: library records round-trip multi-band state end to end, and zone
+// splits carry the per-band generator bindings to the cloned zone.
+static void m2_library_zone_regressions()
+{
+    TEST(Synth::num_mod_targets == 26);
+    if (Synth::num_mod_targets != 26) {
+        return;
+    }
+    const std::unique_ptr<Synth::InstrumentEditorBank> source_storage = std::make_unique<Synth::InstrumentEditorBank>();
+    Synth::InstrumentEditorBank&                       source         = *source_storage;
+    Synth::Instrument                                  instrument     = {};
+    build_m2_bandpass_fixture<m2_band_state_present>(&source, instrument.layers[0], true, false);
+    // The fixture fills layer 0 only; the encoder needs the count set.
+    instrument.layer_count         = 1;
+    source.bank.channel_enabled[0] = 1;
+    TEST(source.bank.instruments.allocate() == 0);
+    source.bank.instruments.entries[0]         = instrument;
+    source.bank.channel_zones[0][0].start_note = 1;
+    source.bank.channel_zones[0][0].instrument = 0;
+    // The record stores the playback form: wire layer 0 (identity row),
+    // like every other library save fixture.
+    Sculptor::set_identity_osc_sources(&source, 0, 0);
+    const char* const path = "synth_m2_multiband_roundtrip.tmp";
+    remove(path);
+    TEST(Synth::save_library_record(path, "Regression", "Multi Band", &source, 0) == 0);
+    Synth::LibraryEntry entry;
+    TEST(Synth::read_library_index(path, &entry, 1) == 1);
+    const std::unique_ptr<Synth::InstrumentEditorBank> destination_storage =
+        std::make_unique<Synth::InstrumentEditorBank>();
+    Synth::InstrumentEditorBank& destination = *destination_storage;
+    uint16_t                     output_slot = 0;
+    TEST(Synth::load_library_instrument(path, &entry, &destination, 2, &output_slot));
+
+    // The loaded record projects all four band blocks, so the count and
+    // the band state round-tripped through the bank JSON inside the record.
+    {
+        const std::unique_ptr<Sculptor::Graph> graph_storage = std::make_unique<Sculptor::Graph>();
+        Sculptor::Graph&                       graph         = *graph_storage;
+        Sculptor::OscGraphMapping              mapping       = {};
+        TEST(Sculptor::project_editor_to_graph(destination, &graph, &mapping, 2, 0));
+        TEST(mapping.osc_nodes[0] != Sculptor::pool_no_slot);
+        if (mapping.osc_nodes[0] != Sculptor::pool_no_slot) {
+            const Sculptor::Node& osc = graph.node(mapping.osc_nodes[0]);
+            TEST(osc.slots.num_allocated == Sculptor::osc_band_first_slot + 4u * Sculptor::osc_band_block_stride);
+            for (uint32_t band = 0; band < 4; band++) {
+                TEST(find_nth_osc_slot(osc, band_header_names_m2[band], 0) == Sculptor::osc_band_header_slot(band));
+            }
+        }
+    }
+
+    // Zone split: the cloned zone carries the band generators with fresh
+    // envelope/LFO pool slots and identical contents.
+    {
+        const std::unique_ptr<Synth::InstrumentEditorBank> before_split_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& before_split = *before_split_storage;
+        before_split                              = destination;
+        TEST(Synth::zone_split_new(destination.bank.channel_zones[2], 0, 60, &destination));
+        TEST(Sculptor::zone_records_split_copy(&destination, 2, 0));
+        TEST(Sculptor::clone_split_generators(&destination, 2, 0));
+        const Synth::Instrument& source_instrument =
+            before_split.bank.instruments.entries[before_split.bank.channel_zones[2][0].instrument];
+        const Synth::Instrument& cloned_instrument =
+            destination.bank.instruments.entries[destination.bank.channel_zones[2][1].instrument];
+        for (uint32_t band = 0; band < 4; band++) {
+            for (uint32_t p = 0; p < 4; p++) {
+                const uint32_t              target         = m2_band_targets[band][p];
+                const Synth::TargetBinding& source_binding = source_instrument.layers[0].targets[target];
+                const Synth::TargetBinding& cloned_binding = cloned_instrument.layers[0].targets[target];
+                if (source_binding.envelope_desc_id != 0) {
+                    TEST(cloned_binding.envelope_desc_id != source_binding.envelope_desc_id);
+                    TEST(memcmp(&before_split.bank.envelopes.entries[source_binding.envelope_desc_id - 1],
+                                &destination.bank.envelopes.entries[cloned_binding.envelope_desc_id - 1],
+                                sizeof(Synth::EnvelopeDescriptor)) == 0);
+                }
+                if (source_binding.lfo_desc_id != 0) {
+                    TEST(cloned_binding.lfo_desc_id != source_binding.lfo_desc_id);
+                    TEST(memcmp(&before_split.bank.lfos.entries[source_binding.lfo_desc_id - 1],
+                                &destination.bank.lfos.entries[cloned_binding.lfo_desc_id - 1],
+                                sizeof(Synth::LFODescriptor)) == 0);
+                }
+            }
+        }
+    }
+    remove(path);
+}
+
+// Fix-wave regressions: legacy bank backfill, the bandpass engagement gate,
+// the fresh bandpass default, the 255 descriptor-id bound, the slope copy on
+// [+] and the always-visible count-bound buttons.
+static void m2_fix_wave_regressions()
+{
+    // A legacy single-band bandpass bank document (no fir_bands, no band
+    // keys) decodes with band 0 gain 1.0 and offset 0, and re-saving keeps
+    // the audible state; a non-bandpass layer keeps the zeroed gain binding.
+    {
+        const std::unique_ptr<Synth::InstrumentEditorBank> source_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& source = *source_storage;
+        Synth::init_default_bank(&source.bank);
+        source.bank.channel_enabled[0]                  = 1;
+        Synth::Oscillator& layer                        = source.bank.instruments.entries[0].layers[0];
+        layer.fir_type                                  = Synth::fir_bandpass;
+        layer.targets[Synth::mod_fir_spread].base_value = 3.0f;
+        const std::unique_ptr<FixedArray<char, Synth::library_payload_max>> legacy_storage =
+            std::make_unique<FixedArray<char, Synth::library_payload_max>>();
+        char (&legacy)[Synth::library_payload_max] = legacy_storage->elements;
+        const uint32_t legacy_len                  = Synth::encode_editor_bank_json(&source, legacy, sizeof(legacy));
+        TEST(legacy_len > 0);
+        TEST(strstr(legacy, "fir_band0_gain") == nullptr); // the legacy document carries no band keys
+        const std::unique_ptr<Synth::InstrumentEditorBank> loaded_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& loaded = *loaded_storage;
+        TEST(Synth::decode_editor_bank_json(legacy, legacy_len, &loaded));
+        const Synth::Oscillator& decoded = loaded.bank.instruments.entries[0].layers[0];
+        TEST(decoded.fir_band_count == 1);
+        TEST(decoded.targets[Synth::mod_fir_band0_gain].base_value == 1.0f);
+        TEST(decoded.targets[Synth::mod_fir_band0_offset].base_value == 0.0f);
+        const std::unique_ptr<FixedArray<char, Synth::library_payload_max>> text_storage =
+            std::make_unique<FixedArray<char, Synth::library_payload_max>>();
+        char (&text)[Synth::library_payload_max] = text_storage->elements;
+        TEST(Synth::encode_editor_bank_json(&loaded, text, sizeof(text)) > 0);
+        TEST(strstr(text, "\"fir_band0_gain\":{\"base_value\":1") != nullptr);
+    }
+    {
+        const std::unique_ptr<Synth::InstrumentEditorBank> source_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& source = *source_storage;
+        Synth::init_default_bank(&source.bank);
+        source.bank.channel_enabled[0] = 1;
+        const std::unique_ptr<FixedArray<char, Synth::library_payload_max>> legacy_off_storage =
+            std::make_unique<FixedArray<char, Synth::library_payload_max>>();
+        char (&legacy_off)[Synth::library_payload_max] = legacy_off_storage->elements;
+        const uint32_t legacy_off_len = Synth::encode_editor_bank_json(&source, legacy_off, sizeof(legacy_off));
+        TEST(legacy_off_len > 0);
+        const std::unique_ptr<Synth::InstrumentEditorBank> loaded_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& loaded = *loaded_storage;
+        TEST(Synth::decode_editor_bank_json(legacy_off, legacy_off_len, &loaded));
+        TEST(loaded.bank.instruments.entries[0].layers[0].targets[Synth::mod_fir_band0_gain].base_value == 0.0f);
+    }
+    // Staging mirror of the engagement rules: any band with positive
+    // spread stages an entry whose gain word is the production clamp
+    // result, so a zero-gain bandpass stages a zeroed kernel (every
+    // staged gain word zero: silence) while all spreads zero stay
+    // passthrough.
+    {
+        const uint32_t count      = 4;
+        const float    spreads[4] = { 6.0f, 6.0f, 6.0f, 6.0f };
+        const float    gains[4]   = { 0.5f, 1.5f, 0.0f, -0.25f };
+        bool           any_staged = false;
+        for (uint32_t band = 0; band < count; band++) {
+            float    lowpass_hz  = 0.0f;
+            float    highpass_hz = 0.0f;
+            uint32_t span        = 0;
+            if (Synth::oscillator_fir_band_cutoffs(69.0f,
+                                                   0.0f,
+                                                   spreads[band],
+                                                   1,
+                                                   100.0f,
+                                                   &lowpass_hz,
+                                                   &highpass_hz,
+                                                   &span)) {
+                any_staged = true;
+                // The staged gain word is the clamp result: above 1 clamps
+                // to 1, a nonpositive or NaN gain clamps to 0, so a band
+                // whose gain clamps to zero contributes nothing to the
+                // accumulation (gain * kernel / norm stays zero).
+                float gain = gains[band];
+                if (gain > 1.0f) {
+                    gain = 1.0f;
+                }
+                if (! (gain > 0.0f)) {
+                    gain = 0.0f;
+                }
+                const float want[4] = { 0.5f, 1.0f, 0.0f, 0.0f };
+                TEST(gain == want[band]);
+            }
+        }
+        TEST(any_staged); // every spread positive: the filter stages
+    }
+    {
+        // All-zero gains with positive spreads: the entry still stages and
+        // every staged gain word is zero, so the kernel is the zero kernel.
+        const uint32_t count          = 2;
+        const float    spreads[2]     = { 6.0f, 6.0f };
+        const float    gains[2]       = { 0.0f, 0.0f };
+        bool           any_staged     = false;
+        bool           all_gains_zero = true;
+        for (uint32_t band = 0; band < count; band++) {
+            float    lowpass_hz  = 0.0f;
+            float    highpass_hz = 0.0f;
+            uint32_t span        = 0;
+            if (Synth::oscillator_fir_band_cutoffs(69.0f,
+                                                   0.0f,
+                                                   spreads[band],
+                                                   1,
+                                                   100.0f,
+                                                   &lowpass_hz,
+                                                   &highpass_hz,
+                                                   &span)) {
+                any_staged = true;
+                float gain = gains[band];
+                if (gain > 1.0f) {
+                    gain = 1.0f;
+                }
+                if (! (gain > 0.0f)) {
+                    gain = 0.0f;
+                }
+                if (gain != 0.0f) {
+                    all_gains_zero = false;
+                }
+            }
+        }
+        TEST(any_staged);     // positive spreads stage the entry
+        TEST(all_gains_zero); // every staged gain word zero: the zeroed kernel
+    }
+    {
+        bool        all_inactive    = true;
+        const float zero_spreads[2] = { 0.0f, 0.0f };
+        for (uint32_t band = 0; band < 2u; band++) {
+            float    lowpass_hz  = 0.0f;
+            float    highpass_hz = 0.0f;
+            uint32_t span        = 0;
+            if (Synth::oscillator_fir_band_cutoffs(69.0f,
+                                                   0.0f,
+                                                   zero_spreads[band],
+                                                   1,
+                                                   100.0f,
+                                                   &lowpass_hz,
+                                                   &highpass_hz,
+                                                   &span)) {
+                all_inactive = false;
+            }
+        }
+        TEST(all_inactive); // every spread zero: passthrough, no entry
+    }
+    // The 255 descriptor-id bound: a binding to the last existing envelope
+    // descriptor validates, a binding past the pool refuses.
+    {
+        const std::unique_ptr<Synth::InstrumentBank> bank_storage = std::make_unique<Synth::InstrumentBank>();
+        Synth::InstrumentBank&                       bank         = *bank_storage;
+        Synth::init_default_bank(&bank);
+        while (bank.envelopes.num_allocated < 254) {
+            const uint32_t             slot = bank.envelopes.allocate();
+            Synth::EnvelopeDescriptor& env  = bank.envelopes.entries[slot];
+            env.num_points                  = 1;
+            env.sustain_first_point         = 0;
+            env.sustain_last_point          = 0;
+            env.min_value                   = 0.0f;
+            env.min_max_delta               = 1.0f;
+            env.points[0]                   = { 0, 0x4000 };
+        }
+        Synth::Instrument& instrument = bank.instruments.entries[bank.channel_zones[0][0].instrument];
+        instrument.layers[0].targets[Synth::mod_volume].envelope_desc_id = 254;
+        TEST(Synth::validate_instrument_bank(&bank));
+        instrument.layers[0].targets[Synth::mod_volume].envelope_desc_id = 255;
+        TEST(! Synth::validate_instrument_bank(&bank));
+    }
+    // Editor: [+] copies the previous band's displayed slope (37% stays 37%),
+    // and switching to bandpass seeds an audible gain default.
+    {
+        const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank&           bank          = *bank_storage;
+        const std::unique_ptr<Sculptor::Graph> graph_storage = std::make_unique<Sculptor::Graph>();
+        Sculptor::Graph&                       graph         = *graph_storage;
+        Sculptor::OscGraphMapping              mapping       = {};
+        if (begin_m2_band_graph<m2_band_state_present>(&bank, &graph, &mapping, false, false)) {
+            bank.bank.instruments.entries[0].layers[0].fir_slope_percent = 37;
+            TEST(reproject_m2_band_graph(&bank, &graph, &mapping));
+            const uint32_t          osc_node  = mapping.osc_nodes[0];
+            const uint32_t          band_slot = find_nth_osc_slot(graph.node(osc_node), "Band 1", 0);
+            const uint32_t          plus_slot = band_slot + 2; // the header's [-] sits at +1, [+] at +2
+            Sculptor::PropertyValue press     = {};
+            press.toggle                      = true;
+            TEST(apply_m2_slot_edit(&bank, &graph, &mapping, osc_node, plus_slot, press));
+            TEST(bank.bank.instruments.entries[0].layers[0].targets[Synth::mod_fir_band1_slope].base_value == 37.0f);
+            TEST(bank.bank.instruments.entries[0].layers[0].fir_band_count == 2);
+            TEST(reproject_m2_band_graph(&bank, &graph, &mapping));
+            // The band 2 block is projected after the insert and both
+            // buttons stay live at two bands.
+            TEST(find_nth_osc_slot(graph.node(osc_node), "Band 2", 0) == band_slot + Sculptor::osc_band_block_stride);
+            TEST(! graph.slot_edit_disabled(osc_node, plus_slot - 1));
+            TEST(! graph.slot_edit_disabled(osc_node, plus_slot));
+        }
+    }
+}
+
+// Regressions for the multi-band bandpass behavior: the composed
+// oscillator slot-visibility seam, the explicit zero band gain's bank
+// round trip, the band-aware FIR re-engagement edge, the band block's
+// composed visibility (header and buttons included), the band 3 slope
+// block's last slot, the filter-type switch seed through the real apply
+// path, and the staging loop's source pins.
+static void m2_fix2_wave_regressions()
+{
+    // The composed render-visibility seam.  Under the single-edge filter
+    // types the legacy cutoff and FIR Slope rows keep showing while the
+    // band UI hides wholesale; under bandpass they are band 0's rows and
+    // every existing band's block shows alongside them.
+    {
+        const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank&           bank          = *bank_storage;
+        const std::unique_ptr<Sculptor::Graph> graph_storage = std::make_unique<Sculptor::Graph>();
+        Sculptor::Graph&                       graph         = *graph_storage;
+        Sculptor::OscGraphMapping              mapping       = {};
+        if (begin_m2_band_graph<m2_band_state_present>(&bank, &graph, &mapping, false, false)) {
+            const uint32_t osc_node    = mapping.osc_nodes[0];
+            const uint32_t filter_slot = find_nth_osc_slot(graph.node(osc_node), "Filter Type", 0);
+            const uint32_t band_slot   = find_nth_osc_slot(graph.node(osc_node), "Band 1", 0);
+            TEST(filter_slot != Sculptor::pool_no_slot && band_slot != Sculptor::pool_no_slot);
+            const auto hidden = [&](const uint32_t slot) {
+                return Sculptor::osc_node_slot_hidden(graph, osc_node, slot);
+            };
+            // Bandpass: band 1's whole block shows, header and buttons included.
+            TEST(! hidden(136) && ! hidden(137) && ! hidden(138));
+            TEST(! hidden(139) && ! hidden(152) && ! hidden(165) && ! hidden(178));
+            // The single-edge filter types keep the legacy cutoff and FIR
+            // Slope rows visible while the band UI hides wholesale.
+            for (uint32_t type = 0; type < Synth::num_filter_types; type++) {
+                if (type == static_cast<uint32_t>(Synth::fir_bandpass)) {
+                    continue;
+                }
+                Sculptor::PropertyValue select_type = {};
+                select_type.list_index              = static_cast<uint8_t>(type);
+                graph.set_slot_value(osc_node, filter_slot, select_type);
+                TEST(! hidden(152) && ! hidden(178));
+                TEST(hidden(136) && hidden(137) && hidden(138) && hidden(139) && hidden(165));
+            }
+        }
+    }
+    // An explicit zero band gain survives the bank round trip: the
+    // encoder emits the empty routing block for a base-0 unwired gain,
+    // the decode keeps it at 0 (no absent-default backfill), and a
+    // re-encode is byte-stable.
+    {
+        const std::unique_ptr<Synth::InstrumentEditorBank> source_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& source = *source_storage;
+        Synth::init_default_bank(&source.bank);
+        source.bank.channel_enabled[0]                        = 1;
+        Synth::Oscillator& layer                              = source.bank.instruments.entries[0].layers[0];
+        layer.fir_type                                        = Synth::fir_bandpass;
+        layer.fir_band_count                                  = 2;
+        layer.targets[Synth::mod_fir_spread].base_value       = 3.0f;
+        layer.targets[Synth::mod_fir_slope].base_value        = 100.0f;
+        layer.targets[Synth::mod_fir_band0_gain].base_value   = 0.0f; // band 0: the inactive band
+        layer.targets[Synth::mod_fir_band1_spread].base_value = 6.0f;
+        layer.targets[Synth::mod_fir_band1_gain].base_value   = 0.5f;
+        layer.targets[Synth::mod_fir_band1_slope].base_value  = 80.0f;
+        const std::unique_ptr<FixedArray<char, Synth::library_payload_max>> text_storage =
+            std::make_unique<FixedArray<char, Synth::library_payload_max>>();
+        char (&text)[Synth::library_payload_max] = text_storage->elements;
+        const uint32_t text_len                  = Synth::encode_editor_bank_json(&source, text, sizeof(text));
+        TEST(text_len > 0);
+        TEST(strstr(text, "\"fir_band0_gain\":{}") != nullptr); // the empty block states the gain-0 band
+        TEST(strstr(text, "\"fir_band1_gain\":{\"base_value\":0.5") != nullptr);
+        const std::unique_ptr<Synth::InstrumentEditorBank> loaded_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& loaded = *loaded_storage;
+        TEST(Synth::decode_editor_bank_json(text, text_len, &loaded));
+        TEST(loaded.bank.instruments.entries[0].layers[0].targets[Synth::mod_fir_band0_gain].base_value == 0.0f);
+        TEST(loaded.bank.instruments.entries[0].layers[0].targets[Synth::mod_fir_band1_gain].base_value == 0.5f);
+        const std::unique_ptr<FixedArray<char, Synth::library_payload_max>> again_storage =
+            std::make_unique<FixedArray<char, Synth::library_payload_max>>();
+        char (&again)[Synth::library_payload_max] = again_storage->elements;
+        const uint32_t again_len                  = Synth::encode_editor_bank_json(&loaded, again, sizeof(again));
+        TEST(again_len == text_len);
+        TEST(memcmp(text, again, text_len) == 0);
+    }
+    // The empty-block emission is a bandpass-only policy: a non-bandpass
+    // layer with a retained fir_band_count > 1 (legacy or hand-edited)
+    // keeps the legacy serialization, so its zeroed unwired band gain
+    // stays omitted and the document round trips byte-stable.
+    {
+        const std::unique_ptr<Synth::InstrumentEditorBank> source_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& source = *source_storage;
+        Synth::init_default_bank(&source.bank);
+        source.bank.channel_enabled[0]                      = 1;
+        Synth::Oscillator& layer                            = source.bank.instruments.entries[0].layers[0];
+        layer.fir_type                                      = Synth::fir_lowpass;
+        layer.fir_band_count                                = 2;
+        layer.targets[Synth::mod_fir_spread].base_value     = 1000.0f;
+        layer.targets[Synth::mod_fir_slope].base_value      = 100.0f; // routed, so the decode keeps it
+        layer.targets[Synth::mod_fir_band0_gain].base_value = 0.0f;   // zeroed unwired band gain
+        const std::unique_ptr<FixedArray<char, Synth::library_payload_max>> text_storage =
+            std::make_unique<FixedArray<char, Synth::library_payload_max>>();
+        char (&text)[Synth::library_payload_max] = text_storage->elements;
+        const uint32_t text_len                  = Synth::encode_editor_bank_json(&source, text, sizeof(text));
+        TEST(text_len > 0);
+        TEST(strstr(text, "fir_band0_gain") == nullptr); // no empty gain block for a non-bandpass layer
+        const std::unique_ptr<Synth::InstrumentEditorBank> loaded_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank& loaded = *loaded_storage;
+        TEST(Synth::decode_editor_bank_json(text, text_len, &loaded));
+        TEST(loaded.bank.instruments.entries[0].layers[0].targets[Synth::mod_fir_band0_gain].base_value == 0.0f);
+        const std::unique_ptr<FixedArray<char, Synth::library_payload_max>> again_storage =
+            std::make_unique<FixedArray<char, Synth::library_payload_max>>();
+        char (&again)[Synth::library_payload_max] = again_storage->elements;
+        const uint32_t again_len                  = Synth::encode_editor_bank_json(&loaded, again, sizeof(again));
+        TEST(again_len == text_len);
+        TEST(memcmp(text, again, text_len) == 0);
+    }
+    // The filter-type switch seeds an unwired Band Gain row at 1.0
+    // through the real editor apply path, and a fresh oscillator's
+    // default band state is one band with offset 0, spread 0 and the
+    // seeded gain; re-selecting the already-stored bandpass type must
+    // not reset a hand-set unwired gain.
+    {
+        const std::unique_ptr<Synth::InstrumentEditorBank> bank_storage =
+            std::make_unique<Synth::InstrumentEditorBank>();
+        Synth::InstrumentEditorBank&           bank          = *bank_storage;
+        const std::unique_ptr<Sculptor::Graph> graph_storage = std::make_unique<Sculptor::Graph>();
+        Sculptor::Graph&                       graph         = *graph_storage;
+        Sculptor::OscGraphMapping              mapping       = {};
+        if (begin_m2_band_graph<m2_band_state_present>(&bank, &graph, &mapping, false, false)) {
+            Synth::Oscillator fresh                    = Synth::Oscillator{};
+            fresh.osc_type[0]                          = Synth::WaveType::sine_wave;
+            bank.bank.instruments.entries[0].layers[0] = fresh;
+            TEST(reproject_m2_band_graph(&bank, &graph, &mapping));
+            const uint32_t osc_node    = mapping.osc_nodes[0];
+            const uint32_t filter_slot = find_nth_osc_slot(graph.node(osc_node), "Filter Type", 0);
+            TEST(filter_slot != Sculptor::pool_no_slot);
+            if (filter_slot == Sculptor::pool_no_slot) {
+                return;
+            }
+            TEST(bank.bank.instruments.entries[0].layers[0].fir_band_count == 1);
+            TEST(bank.bank.instruments.entries[0].layers[0].targets[Synth::mod_fir_band0_gain].base_value == 0.0f);
+            Sculptor::PropertyValue select = {};
+            select.list_index              = static_cast<uint8_t>(Synth::fir_bandpass);
+            TEST(apply_m2_slot_edit(&bank, &graph, &mapping, osc_node, filter_slot, select));
+            const Synth::Oscillator& switched = bank.bank.instruments.entries[0].layers[0];
+            TEST(switched.fir_type == Synth::fir_bandpass);
+            TEST(switched.fir_band_count == 1);
+            TEST(switched.targets[Synth::mod_fir_band0_gain].base_value == 1.0f); // seeded audible default
+            TEST(switched.targets[Synth::mod_fir_band0_offset].base_value == 0.0f);
+            TEST(switched.targets[Synth::mod_fir_spread].base_value == 0.0f);
+            // A hand-set unwired gain survives re-selecting bandpass.
+            Sculptor::PropertyValue hand = {};
+            hand.real                    = 0.25f;
+            const uint32_t gain_row      = Sculptor::osc_target_row_slot[Synth::mod_fir_band0_gain];
+            TEST(apply_m2_slot_edit(&bank, &graph, &mapping, osc_node, gain_row, hand));
+            TEST(bank.bank.instruments.entries[0].layers[0].targets[Synth::mod_fir_band0_gain].base_value == 0.25f);
+            TEST(apply_m2_slot_edit(&bank, &graph, &mapping, osc_node, filter_slot, select));
+            TEST(bank.bank.instruments.entries[0].layers[0].targets[Synth::mod_fir_band0_gain].base_value == 0.25f);
+        }
+    }
+    // The band buttons carry no name label (the [-]/[+] glyphs render on
+    // the buttons themselves): the label branch skips band-button slots.
+    {
+        const char* const render_src = load_source_file("sculptor/sculptor_graph_render.cpp");
+        TEST(render_src != nullptr);
+        if (render_src) {
+            TEST(strstr(render_src, "const bool band_button =") != nullptr);
+            TEST(strstr(render_src, "band_button ? 0.0f : name_w") != nullptr);
+        }
+    }
+    // The Band row's +/- click slots render as square push buttons (the
+    // LFO Period (ms) row's step-button pattern), not checkboxes, and a
+    // wire with a display-hidden endpoint draws nothing (the dangling-wire
+    // fix applies in both connection loops).
+    {
+        const char* const render_src = load_source_file("sculptor/sculptor_graph_render.cpp");
+        TEST(render_src != nullptr);
+        if (render_src) {
+            TEST(strstr(render_src, "ImGui::Button(slot.name, ImVec2(button_size, button_size))") != nullptr);
+            TEST(strstr(render_src, "endpoint_hidden(connection)") != nullptr);
+            TEST(strstr(render_src, "endpoint_hidden(edge)") != nullptr);
+        }
+    }
+    // The projection carries no marker stamper and no "Band*" label
+    // anywhere.
+    {
+        const char* const osc_src = load_source_file("sculptor/sculptor_osc_graph.cpp");
+        TEST(osc_src != nullptr);
+        if (osc_src) {
+            TEST(strstr(osc_src, "stamp_band_marker") == nullptr);
+            TEST(strstr(osc_src, "\"Band*\"") == nullptr);
+        }
+    }
+    // The staging loop's production gates, pinned at the source: the
+    // bandpass entry stages while some band's spread is positive, a
+    // nonpositive gain still stages (a zeroed kernel: silence) instead of
+    // dropping the entry, and the count predicate matches the staging
+    // compaction rule.
+    {
+        const char* const rt_src = load_source_file("synth/realtime_synth.cpp");
+        TEST(rt_src != nullptr);
+        if (rt_src) {
+            TEST(strstr(rt_src, "gain = 0.0f; // Gain <= 0 or NaN: the band stages a zero-gain contribution.") !=
+                 nullptr);
+            TEST(strstr(rt_src, "matching the count predicate above") != nullptr);
+            TEST(strstr(rt_src, "memset(&param, 0, sizeof(param))") != nullptr);
+            TEST(strstr(rt_src, "The cached engagement flag matches the staging compaction rule") != nullptr);
+        }
+    }
+}
+
 // FIR pitch spread helpers: the band-pass edge composition, the sub-1-Hz
 // highpass floor transport, the integer bandwidth guard and the
 // spread-driven monotonicity contract.
@@ -13898,21 +16109,36 @@ static void check_fir_spread_helpers()
         mirror_instr.layers[0].targets[Synth::mod_fir_spread].num_inputs       = 0;
         mirror_instr.layers[0].targets[Synth::mod_fir_spread].envelope_desc_id = 1;
         TEST(has_filter(mirror_instr, 0));
-        // The engage transition: passthrough while the dest value stays
-        // <= 0, engaged on the first positive step, and re-engaged after
-        // every return to passthrough.
-        const bool  fir_taps_offs = true;
-        float       spread        = 0.0f;
-        const float dest_values[] = { -1.0f, 0.0f, 0.5f, 0.5f, 0.0f, 2.0f };
-        uint32_t    engage_count  = 0;
-        for (const float new_spread : dest_values) {
-            if (fir_taps_offs && spread <= 0.0f && new_spread > 0.0f) {
+        // The engage transition mirrors the single-source activity
+        // predicate: passthrough while no staged band's spread is positive,
+        // engaged on the first positive step, and re-engaged after every
+        // return to passthrough.  Band 1's spread drives the edge while
+        // band 0 stays zero, so a multi-band bandpass re-engages without a
+        // band-0 spread transition.
+        const bool     fir_taps_offs   = true;
+        const uint32_t band_count      = 2;
+        float          band_spreads[2] = { 0.0f, 0.0f };
+        const auto     band_active     = [&]() {
+            for (uint32_t band = 0; band < band_count; band++) {
+                if (band_spreads[band] > 0.0f) {
+                    return true;
+                }
+            }
+            return false;
+        };
+        bool        active         = false;
+        uint32_t    engage_count   = 0;
+        const float band1_values[] = { -1.0f, 0.0f, 0.5f, 0.5f, 0.0f, 2.0f };
+        for (const float new_spread : band1_values) {
+            const bool prev_active = active;
+            band_spreads[1]        = new_spread;
+            active                 = band_active();
+            if (fir_taps_offs && ! prev_active && active) {
                 ++engage_count; // clear_fir_hist: the frozen history holds stale audio
             }
-            spread = new_spread;
         }
         TEST(engage_count == 2);
-        TEST(spread == 2.0f);
+        TEST(active);
     }
     // Schema identity: the mod_target enum carries the spread target and
     // no removed cutoff spellings, so a future schema edit cannot
@@ -13931,7 +16157,10 @@ static void check_fir_spread_helpers()
             TEST(strstr(schema_src,
                         "\"enum\": [\"volume\", \"pitch\", \"panning\", \"duty_a\", \"duty_b\", \"osc_mix\", "
                         "\"fm_index\", \"fir_pitch_spread\", \"fm_ratio\", \"pad_tone_a\", \"pad_tone_b\", "
-                        "\"fir_slope\"]") != nullptr);
+                        "\"fir_slope\", \"fir_band0_offset\", \"fir_band0_gain\", \"fir_band1_offset\", "
+                        "\"fir_band1_spread\", \"fir_band1_gain\", \"fir_band1_slope\", \"fir_band2_offset\", "
+                        "\"fir_band2_spread\", \"fir_band2_gain\", \"fir_band2_slope\", \"fir_band3_offset\", "
+                        "\"fir_band3_spread\", \"fir_band3_gain\", \"fir_band3_slope\"]") != nullptr);
             TEST(strstr(schema_src, "lowpass_cutoff") == nullptr);
             TEST(strstr(schema_src, "highpass_cutoff") == nullptr);
             // Both generator-layout target enums admit the appended slope
@@ -15018,8 +17247,8 @@ static void check_quick_release_regressions()
         // Round-trip through the encoder keeps both bits.
         const std::unique_ptr<Synth::InstrumentBank> desc_bank_storage = std::make_unique<Synth::InstrumentBank>();
         Synth::InstrumentBank&                       desc_bank         = *desc_bank_storage;
-        desc_bank                                                      = {};
-        desc_bank.envelopes.num_allocated                              = env_count;
+        memset(static_cast<void*>(&desc_bank), 0, sizeof(desc_bank));
+        desc_bank.envelopes.num_allocated = env_count;
         for (uint32_t i = 0; i < env_count; i++) {
             desc_bank.envelopes.entries[i] = envs[i];
         }
@@ -15696,6 +17925,22 @@ int main()
     osc_fir_slope_projection_regressions();
     check_fir_bandpass_gain();
     check_chan_combine_volume_ramp();
+
+    m2_band_layout_regressions();
+    m2_band_visibility_regressions();
+    m2_band_add_remove_regressions();
+    m2_band_remove_first_regressions();
+    m2_band_donation_regressions();
+    m2_band_batch_boundary_regressions();
+    m2_band_button_gray_regressions();
+    m2_per_band_modulation_regressions();
+    m2_fir_kernel_mirror_regressions();
+    m2_runtime_source_pins_regressions();
+    m2_document_json_regressions();
+    m2_bank_json_round_trip_regressions();
+    m2_library_zone_regressions();
+    m2_fix_wave_regressions();
+    m2_fix2_wave_regressions();
 
     // pitch bend -> semitones: centered 14-bit value scaled by the bend range.
     // center (0) -> no bend; full deflection -> +/- range; half -> ~half range.
@@ -18409,7 +20654,8 @@ int main()
         TEST(memcmp(&document.audio, &valid[1], sizeof(document.audio)) == 0);
         TEST(document.chain.num_effects == 2);
         TEST(document.chain.effects[0].bindings[0].lfo_desc_id == document.chain.effects[1].bindings[0].lfo_desc_id);
-        char           text[65536];
+        const std::unique_ptr<FixedArray<char, 65536>> text_storage = std::make_unique<FixedArray<char, 65536>>();
+        char (&text)[65536]                                         = text_storage->elements;
         const uint32_t length = Synth::encode_effects_json(&document, text, sizeof(text));
         TEST(length != 0);
         TEST(strstr(text, "synth-effects-v2") != nullptr);
@@ -20034,7 +22280,9 @@ int main()
             Sculptor::set_identity_osc_sources(&unterminated, 0, 0);
             unterminated.bank.instruments.num_allocated = 1;
             memset(static_cast<void*>(unterminated.instrument_names[0]), 'x', Synth::max_name_len);
-            char small_buffer[64 * 1024];
+            const std::unique_ptr<FixedArray<char, 64 * 1024>> small_buffer_storage =
+                std::make_unique<FixedArray<char, 64 * 1024>>();
+            char (&small_buffer)[64 * 1024] = small_buffer_storage->elements;
             TEST(Synth::encode_editor_bank_json(&unterminated, small_buffer, sizeof(small_buffer)) == 0);
             memset(static_cast<void*>(unterminated.instrument_names[0]), 0, Synth::max_name_len);
             memset(static_cast<void*>(unterminated.channel_names[0]), 'y', Synth::max_name_len);
@@ -20050,7 +22298,9 @@ int main()
                 Sculptor::set_identity_osc_sources(&extreme, 0, 0);
                 extreme.bank.envelopes.entries[0].min_value     = -FLT_MAX;
                 extreme.bank.envelopes.entries[0].min_max_delta = FLT_MAX;
-                char           extreme_text[64 * 1024];
+                const std::unique_ptr<FixedArray<char, 64 * 1024>> extreme_text_storage =
+                    std::make_unique<FixedArray<char, 64 * 1024>>();
+                char (&extreme_text)[64 * 1024] = extreme_text_storage->elements;
                 const uint32_t extreme_len =
                     Synth::encode_editor_bank_json(&extreme, extreme_text, sizeof(extreme_text));
                 TEST(extreme_len != 0);
@@ -20611,12 +22861,12 @@ int main()
     // A document beyond the token pool and a bank file beyond the parse buffer are
     // both visibly rejected through their bounded staging.
     {
-        const std::unique_ptr<FixedArray<char, 128 * 1024>> doc_storage =
-            std::make_unique<FixedArray<char, 128 * 1024>>();
-        char (&doc)[128 * 1024] = doc_storage->elements;
+        const std::unique_ptr<FixedArray<char, 256 * 1024>> doc_storage =
+            std::make_unique<FixedArray<char, 256 * 1024>>();
+        char (&doc)[256 * 1024] = doc_storage->elements;
         uint32_t len            = 0;
         len += static_cast<uint32_t>(snprintf(doc + len, sizeof(doc) - len, "{\"instrument_editor_bank\":{"));
-        for (uint32_t i = 0; i < 12000; i++) {
+        for (uint32_t i = 0; i < 16500; i++) {
             len += static_cast<uint32_t>(snprintf(doc + len, sizeof(doc) - len, "\"k%u\":1,", i));
         }
         len += static_cast<uint32_t>(snprintf(doc + len, sizeof(doc) - len, "\"x\":1}}"));
@@ -20720,12 +22970,12 @@ int main()
         Sculptor::Graph&                       graph         = *graph_storage;
         Sculptor::OscGraphMapping              mapping       = {};
         TEST(Sculptor::project_instrument_to_graph(instrument, bank, &graph, &mapping));
-        check_osc_graph_mapping(graph, mapping, Synth::max_layers, 28, 28);
+        check_osc_graph_mapping(graph, mapping, Synth::max_layers, 28, 28, 4);
         TEST(graph.connection_count() == 175);
 
         // Re-projection onto a populated graph resets it deterministically.
         TEST(Sculptor::project_instrument_to_graph(instrument, bank, &graph, &mapping));
-        check_osc_graph_mapping(graph, mapping, Synth::max_layers, 28, 28);
+        check_osc_graph_mapping(graph, mapping, Synth::max_layers, 28, 28, 4);
         TEST(graph.connection_count() == 175);
 
         Synth::Instrument compiled = {};
@@ -20879,7 +23129,7 @@ int main()
         TEST(Sculptor::project_editor_to_graph(bank, &graph, &mapping));
 
         const uint32_t osc_slots =
-            Sculptor::osc_slot_count + Synth::num_mod_targets * Sculptor::osc_target_block_stride;
+            Sculptor::osc_band_first_slot + Sculptor::osc_band_block_stride * instrument.layers[0].fir_band_count;
         for (uint32_t layer = 0; layer < Synth::max_layers; ++layer) {
             const Sculptor::Node& osc = graph.node(mapping.osc_nodes[layer]);
             TEST(osc.slots.num_allocated == osc_slots);
@@ -21396,9 +23646,9 @@ int main()
         const std::unique_ptr<Synth::InstrumentEditorBank> restored_storage =
             std::make_unique<Synth::InstrumentEditorBank>();
         Synth::InstrumentEditorBank&                        restored = *restored_storage;
-        const std::unique_ptr<FixedArray<char, 256 * 1024>> editor_json_storage =
-            std::make_unique<FixedArray<char, 256 * 1024>>();
-        char (&editor_json)[256 * 1024] = editor_json_storage->elements;
+        const std::unique_ptr<FixedArray<char, 512 * 1024>> editor_json_storage =
+            std::make_unique<FixedArray<char, 512 * 1024>>();
+        char (&editor_json)[512 * 1024] = editor_json_storage->elements;
 
         // Kind byte past the four record kinds.
         build_detached_layouts_json(editor_json, sizeof(editor_json), 1, 1, 4, 1, 0, 0);
@@ -21428,11 +23678,34 @@ int main()
         TEST(! decode_bank_with_editor_section(bank, editor_json, &restored));
 
         // Over-cap counts: 121 detached records in one zone (per-zone cap 120)
-        // and 1320 records over 11 zones (global cap 1280).
+        // and 2561 records over 16 channels x 16 zones (global cap 2560).
         build_detached_layouts_json(editor_json, sizeof(editor_json), 1, 121, 2, 1, 0, 0);
         TEST(! decode_bank_with_editor_section(bank, editor_json, &restored));
-        build_detached_layouts_json(editor_json, sizeof(editor_json), 11, 1320, 2, 1, 0, 0);
-        TEST(! decode_bank_with_editor_section(bank, editor_json, &restored));
+        // The global record cap: a single editor-section document cannot reach
+        // the 2560/2561 boundary anymore (the raised json_token_count of 32768
+        // parses roughly 1550 records), so the cap is pinned directly on the
+        // validator the decoder runs.
+        {
+            const std::unique_ptr<Synth::InstrumentEditorBank> cap_bank_storage =
+                std::make_unique<Synth::InstrumentEditorBank>();
+            Synth::InstrumentEditorBank& cap_bank = *cap_bank_storage;
+            Synth::init_default_bank(&cap_bank.bank);
+            TEST(cap_bank.bank.lfos.allocate() != pool_no_slot);
+            const uint32_t over_cap  = Synth::max_graph_records + 1;
+            const uint32_t pair_span = (over_cap + 255) / 256;
+            for (uint32_t i = 0; i < Synth::max_graph_records; i++) {
+                Synth::GraphNodeLayout& record = cap_bank.graph_layout[i];
+                record.kind                    = 2;
+                record.index                   = 1;
+                record.channel                 = (i / pair_span) / Synth::max_instr_per_channel;
+                record.zone                    = (i / pair_span) % Synth::max_instr_per_channel;
+                record.uid                     = static_cast<uint16_t>((i % pair_span) + 1);
+            }
+            cap_bank.graph_layout_count = Synth::max_graph_records;
+            TEST(Sculptor::validate_editor_metadata(cap_bank));
+            cap_bank.graph_layout_count = over_cap;
+            TEST(! Sculptor::validate_editor_metadata(cap_bank));
+        }
 
         // Duplicate record keys drop the later record.
         {
@@ -21451,8 +23724,8 @@ int main()
             }
         }
 
-        // Overfull implied node projection: the max fixture implies 66 nodes;
-        // 113 detached records push it past 178, 112 land exactly on 178.
+        // Overfull implied node projection: the fully-wired fixture implies 276 nodes;
+        // 109 detached records push it past 384, 108 land exactly on 384.
         const std::unique_ptr<Synth::InstrumentBank> model_bank_storage = std::make_unique<Synth::InstrumentBank>();
         Synth::InstrumentBank&                       model_bank         = *model_bank_storage;
         const std::unique_ptr<Synth::InstrumentEditorBank> max_bank_storage =
@@ -21462,18 +23735,75 @@ int main()
         uint16_t                     env_ids[Synth::max_layers][Synth::num_mod_targets];
         uint16_t                     lfo_ids[Synth::max_layers][Synth::num_mod_targets];
         build_osc_graph_max_fixture(&model_bank, &instrument, env_ids, lfo_ids);
+        // The raised max_nodes (178 -> 384) leaves the four-target fixture's 66
+        // implied nodes too far below the pool for the 120-record detached cap to
+        // reach the per-zone node-pool refusal, so this test alone wires fifteen
+        // more targets (FM ratio and the fourteen band targets) with full
+        // envelope + LFO bindings.
+        for (uint32_t layer = 0; layer < Synth::max_layers; layer++) {
+            Synth::Oscillator& osc                       = instrument.layers[layer];
+            osc.fir_type                                 = Synth::fir_bandpass;
+            osc.fir_band_count                           = 4;
+            osc.targets[Synth::mod_fir_slope].base_value = 50.0f;
+            for (uint32_t target = 0; target < Synth::num_mod_targets; target++) {
+                const bool extra = target == Synth::mod_fm_ratio ||
+                                   (target >= Synth::mod_fir_band0_offset && target <= Synth::mod_fir_band3_slope);
+                if (osc_graph_target(static_cast<Synth::ModTarget>(target)) || ! extra) {
+                    continue;
+                }
+
+                const uint32_t env_slot = model_bank.envelopes.allocate();
+                TEST(env_slot != pool_no_slot);
+                Synth::EnvelopeDescriptor& env = model_bank.envelopes.entries[env_slot];
+                env.num_points                 = 2;
+                env.sustain_first_point        = 0;
+                env.sustain_last_point         = 1;
+                env.min_value                  = -1.0f;
+                env.min_max_delta              = 1.0f;
+                env.points[0].position         = 100;
+                env.points[0].value            = 0x2000;
+                env.points[1].position         = 200;
+                env.points[1].value            = 0x4000;
+
+                const uint32_t lfo_slot = model_bank.lfos.allocate();
+                TEST(lfo_slot != pool_no_slot);
+                Synth::LFODescriptor& lfo = model_bank.lfos.entries[lfo_slot];
+                lfo.wave                  = Synth::WaveType::sawtooth_wave;
+                lfo.duty                  = 0x40;
+                lfo.period_ms             = 137;
+                lfo.min_value             = -0.5f;
+                lfo.min_max_delta         = 0.5f;
+
+                Synth::TargetBinding& gen = osc.targets[target];
+                gen.base_value = target == Synth::mod_fir_band0_gain                                            ? 0.25f
+                                 : target >= Synth::mod_fir_band1_offset && target <= Synth::mod_fir_band1_gain ? 0.25f
+                                 : target >= Synth::mod_fir_band2_offset && target <= Synth::mod_fir_band2_gain ? 0.25f
+                                 : target >= Synth::mod_fir_band3_offset && target <= Synth::mod_fir_band3_gain ? 0.25f
+                                 : (target == Synth::mod_fir_band1_slope || target == Synth::mod_fir_band2_slope ||
+                                    target == Synth::mod_fir_band3_slope)
+                                     ? 50.0f
+                                     : 0.0f;
+                gen.envelope_desc_id  = static_cast<uint16_t>(env_slot + 1);
+                gen.lfo_desc_id       = static_cast<uint16_t>(lfo_slot + 1);
+                gen.lfo_op            = Synth::SourceOp::add;
+                gen.lfo_depth         = 0.25f;
+                gen.lfo_depth_source  = static_cast<Synth::ModSource>(1 + ((layer + target) % 6));
+                gen.lfo_rate_source   = static_cast<Synth::ModSource>(1 + ((layer + 2 * target + 1) % 6));
+                gen.lfo_rate_scale_ms = 10.0f * static_cast<float>(layer + 1) + static_cast<float>(target);
+            }
+        }
         max_bank.bank                    = model_bank;
         max_bank.bank.channel_enabled[0] = 1;
         TEST(max_bank.bank.instruments.allocate() == 0);
         max_bank.bank.instruments.entries[0]         = instrument;
         max_bank.bank.channel_zones[0][0].start_note = 1;
         max_bank.bank.channel_zones[0][0].instrument = 0;
-        build_detached_layouts_json(editor_json, sizeof(editor_json), 1, 113, 2, 1, 0, 0);
+        build_detached_layouts_json(editor_json, sizeof(editor_json), 1, 109, 2, 1, 0, 0);
         TEST(! decode_bank_with_editor_section(max_bank, editor_json, &restored));
-        build_detached_layouts_json(editor_json, sizeof(editor_json), 1, 112, 2, 1, 0, 0);
+        build_detached_layouts_json(editor_json, sizeof(editor_json), 1, 108, 2, 1, 0, 0);
         TEST(decode_bank_with_editor_section(max_bank, editor_json, &restored));
         // The accepted boundary fills the node pool exactly: the projection
-        // still succeeds at 66 + 112 = 178 nodes.
+        // still succeeds at 276 + 108 = 384 nodes.
         const std::unique_ptr<Sculptor::Graph> boundary_graph_storage = std::make_unique<Sculptor::Graph>();
         Sculptor::Graph&                       boundary_graph         = *boundary_graph_storage;
         Sculptor::OscGraphMapping              boundary_mapping       = {};
@@ -22896,11 +25226,11 @@ int main()
                                            &env_count,
                                            lfos,
                                            &lfo_count));
-        // Static storage: an InstrumentBank is far too large for the stack.
+        // Heap storage: an InstrumentBank is far too large for the stack.
         const std::unique_ptr<Synth::InstrumentBank> desc_bank_storage = std::make_unique<Synth::InstrumentBank>();
         Synth::InstrumentBank&                       desc_bank         = *desc_bank_storage;
-        desc_bank                                                      = {};
-        desc_bank.envelopes.num_allocated                              = env_count;
+        memset(static_cast<void*>(&desc_bank), 0, sizeof(desc_bank));
+        desc_bank.envelopes.num_allocated = env_count;
         for (uint32_t i = 0; i < env_count; i++) {
             desc_bank.envelopes.entries[i] = envs[i];
         }
@@ -23721,9 +26051,9 @@ int main()
             uint16_t allocated = 0;
             TEST(Sculptor::allocate_default_lfo(&at_ceiling.bank, &allocated));
             Synth::GraphNodeLayout& record = at_ceiling.graph_layout[at_ceiling.graph_layout_count++];
-            record                         = {};
-            record.kind                    = 4;
-            record.channel                 = static_cast<uint8_t>(Sculptor::fx_master_chain);
+            memset(static_cast<void*>(&record), 0, sizeof(record));
+            record.kind    = 4;
+            record.channel = static_cast<uint8_t>(Sculptor::fx_master_chain);
             snprintf(record.name, sizeof(record.name), "LFO %u", allocated);
         }
         TEST(Synth::validate_instrument_bank(&at_ceiling.bank));
@@ -24391,6 +26721,64 @@ int main()
                          Synth::SourceOp::add);
                     TEST(slope_decoded.instr.layers[0].targets[Synth::mod_fir_slope].inputs[0].scale == 1.0f);
                 }
+            }
+            // The bank-style "routing" alias marks its targets as touched:
+            // alias-supplied band values survive the portable absent-default
+            // pass, and an explicitly empty gain block still decodes 0.
+            // Without the alias, the absent keys decode their defaults, so
+            // the two paths stay distinguishable.
+            {
+                const char* const alias_doc =
+                    "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\",\"fir_type\":\"bandpass\","
+                    "\"fir_bands\":2,\"routing\":{\"fir_band0_gain\":{\"base_value\":0.25},"
+                    "\"fir_band1_slope\":{\"base_value\":37}}}]}";
+                Synth::Instrument         alias_instr                                 = {};
+                Synth::EnvelopeDescriptor alias_envs[Synth::instrument_max_envelopes] = {};
+                Synth::LFODescriptor      alias_lfos[Synth::instrument_max_lfos]      = {};
+                uint32_t                  alias_env_count                             = 999;
+                uint32_t                  alias_lfo_count                             = 999;
+                TEST(Synth::decode_instrument_json(alias_doc,
+                                                   static_cast<uint32_t>(strlen(alias_doc)),
+                                                   &alias_instr,
+                                                   alias_envs,
+                                                   &alias_env_count,
+                                                   alias_lfos,
+                                                   &alias_lfo_count));
+                TEST(alias_instr.layers[0].targets[Synth::mod_fir_band0_gain].base_value == 0.25f);
+                TEST(alias_instr.layers[0].targets[Synth::mod_fir_band1_slope].base_value == 37.0f);
+                const char* const zero_gain_doc =
+                    "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\",\"fir_type\":\"bandpass\","
+                    "\"fir_bands\":2,\"routing\":{\"fir_band0_gain\":{}}}]}";
+                Synth::Instrument         zero_gain_instr                                 = {};
+                Synth::EnvelopeDescriptor zero_gain_envs[Synth::instrument_max_envelopes] = {};
+                Synth::LFODescriptor      zero_gain_lfos[Synth::instrument_max_lfos]      = {};
+                uint32_t                  zero_gain_env_count                             = 999;
+                uint32_t                  zero_gain_lfo_count                             = 999;
+                TEST(Synth::decode_instrument_json(zero_gain_doc,
+                                                   static_cast<uint32_t>(strlen(zero_gain_doc)),
+                                                   &zero_gain_instr,
+                                                   zero_gain_envs,
+                                                   &zero_gain_env_count,
+                                                   zero_gain_lfos,
+                                                   &zero_gain_lfo_count));
+                TEST(zero_gain_instr.layers[0].targets[Synth::mod_fir_band0_gain].base_value == 0.0f);
+                const char* const absent_doc =
+                    "{\"format\":\"synth-instrument-v1\",\"layers\":[{\"wave_a\":\"sine\",\"fir_type\":\"bandpass\","
+                    "\"fir_bands\":2}]}";
+                Synth::Instrument         absent_instr                                 = {};
+                Synth::EnvelopeDescriptor absent_envs[Synth::instrument_max_envelopes] = {};
+                Synth::LFODescriptor      absent_lfos[Synth::instrument_max_lfos]      = {};
+                uint32_t                  absent_env_count                             = 999;
+                uint32_t                  absent_lfo_count                             = 999;
+                TEST(Synth::decode_instrument_json(absent_doc,
+                                                   static_cast<uint32_t>(strlen(absent_doc)),
+                                                   &absent_instr,
+                                                   absent_envs,
+                                                   &absent_env_count,
+                                                   absent_lfos,
+                                                   &absent_lfo_count));
+                TEST(absent_instr.layers[0].targets[Synth::mod_fir_band0_gain].base_value == 1.0f);
+                TEST(absent_instr.layers[0].targets[Synth::mod_fir_band1_slope].base_value == 100.0f);
             }
             // The slope base is an integer percent 1..100 in both dialects:
             // out-of-range and fractional spellings are invalid state, so the
@@ -25657,7 +28045,10 @@ int main()
                 // envelope pool's allocation is refused by the encoder: the bound
                 // sits in its metadata precondition and again at the exemption
                 // itself.
-                Synth::InstrumentEditorBank ex_over = ex_bank;
+                const std::unique_ptr<Synth::InstrumentEditorBank> ex_over_storage =
+                    std::make_unique<Synth::InstrumentEditorBank>();
+                Synth::InstrumentEditorBank& ex_over = *ex_over_storage;
+                ex_over                              = ex_bank;
                 add_detached_record(&ex_over,
                                     0,
                                     0,
@@ -25682,7 +28073,10 @@ int main()
                 // An unrepresented kind-1 record with a validly allocated
                 // descriptor id takes the exemption: the export succeeds and the
                 // dropped record produces no output.
-                Synth::InstrumentEditorBank ex_alloc = ex_bank;
+                const std::unique_ptr<Synth::InstrumentEditorBank> ex_alloc_storage =
+                    std::make_unique<Synth::InstrumentEditorBank>();
+                Synth::InstrumentEditorBank& ex_alloc = *ex_alloc_storage;
+                ex_alloc                              = ex_bank;
                 TEST(ex_alloc.bank.envelopes.allocate() == 2);
                 ex_alloc.bank.envelopes.entries[2] = ex_alloc.bank.envelopes.entries[0];
                 add_detached_record(&ex_alloc,
@@ -26600,8 +28994,8 @@ int main()
             mf_bank.channel_zones[0][0].start_note = 1;
             mf_bank.channel_zones[0][0].instrument = static_cast<uint8_t>(mf_slot);
             TEST(Synth::validate_instrument_bank(&mf_bank));
-            TEST(mf_bank.envelopes.num_allocated == 84);
-            TEST(mf_bank.lfos.num_allocated == 84);
+            TEST(mf_bank.envelopes.num_allocated == Synth::max_layers * Synth::num_mod_targets);
+            TEST(mf_bank.lfos.num_allocated == Synth::max_layers * Synth::num_mod_targets);
             TEST(mf_count == max_portable_records);
 
             const uint32_t mf_len =
@@ -26643,8 +29037,8 @@ int main()
             fill_clipboard_sentinels(&mf_dec);
             TEST(decode_clipboard(&mf_dec, mf_text, max_portable_records));
             TEST(mf_dec.layout_count == max_portable_records);
-            TEST(mf_dec.env_count == 84);
-            TEST(mf_dec.lfo_count == 84);
+            TEST(mf_dec.env_count == Synth::max_layers * Synth::num_mod_targets);
+            TEST(mf_dec.lfo_count == Synth::max_layers * Synth::num_mod_targets);
             TEST(mf_dec.instr.layer_count == Synth::max_layers);
 
             uint32_t mf_mapped_count = max_portable_records;

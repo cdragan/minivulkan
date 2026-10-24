@@ -244,7 +244,9 @@ static_assert(sizeof(Synth::BankUpdateQueue) <= 2 * sizeof(Synth::InstrumentBank
 Synth::InstrumentEditorBank candidate;
 
 // One clipboard document: copy encodes into it, paste decodes out of it.
-static char                         zone_clipboard_text[128 * 1024];
+// 192 KiB matches the unit-suite staging capacity: a fully-wired 4-band
+// multi-band document no longer fits 128 KiB.
+static char                         zone_clipboard_text[192 * 1024];
 static Synth::EffectsDocument       effects_clipboard_document;
 static Synth::Instrument            clipboard_decoded_instrument;
 static uint8_t                      clipboard_decoded_osc_source[Synth::max_layers];
@@ -287,13 +289,13 @@ constexpr size_t editor_resident_state_bytes =
     4 * Synth::instrument_graph_layout_capacity * sizeof(Synth::InstrumentGraphLayout) +
     4096; // remaining editor scalar flags, constants and alignment
 static_assert(editor_resident_state_bytes <=
-              48 * 1024 * 1024); // per-bank driver: the oscillator graph pre-provisions twelve
-                                 // 12-slot target blocks per node (max_node_slots 163), which
-                                 // grows sizeof(Graph); the resident total stays far below the
-                                 // 48 MiB assert.  The per-zone source rows contribute 20 live
-                                 // InstrumentEditorBank copies x max_channels x
-                                 // max_instr_per_channel x Synth::max_layers bytes; the assert
-                                 // tracks it through sizeof(InstrumentEditorBank).
+              128 * 1024 * 1024); // per-bank driver: the oscillator graph pre-provisions twenty-six
+                                  // 12-slot target blocks per node (max_node_slots 356), which
+                                  // grows sizeof(Graph); the resident total stays below the
+                                  // 128 MiB assert.  The per-zone source rows contribute 20 live
+                                  // InstrumentEditorBank copies x max_channels x
+                                  // max_instr_per_channel x Synth::max_layers bytes; the assert
+                                  // tracks it through sizeof(InstrumentEditorBank).
 
 // Synth info panel data. The declaration in sculptor_instr_edit.h describes
 // what the panel shows; the synth runtime only exposes raw data.
@@ -956,13 +958,7 @@ static bool osc_slot_hidden(void* user_data, const Sculptor::Graph& graph, uint3
         return false;
     }
 
-    uint32_t target = 0;
-    uint32_t field  = 0;
-    if (! Sculptor::osc_target_block_field(slot_idx, &target, &field)) {
-        return false;
-    }
-
-    return Sculptor::osc_target_field_hidden(graph, node_idx, target, field);
+    return Sculptor::osc_node_slot_hidden(graph, node_idx, slot_idx);
 }
 
 // Connection grammar for the effects graph: a parameter dot takes an LFO's
@@ -2674,14 +2670,29 @@ void Sculptor::SynthEditor::drain_osc_graph(uint32_t channel, uint32_t zone)
         return;
     }
 
-    candidate       = instr_bank;
-    bool ok         = true;
-    bool structural = false;
+    candidate           = instr_bank;
+    bool     ok         = true;
+    bool     structural = false;
+    uint32_t applied    = 0;
     for (uint32_t i = 0; i < count && ok; ++i) {
         const Sculptor::GraphChange& change = changes[i];
         structural                          = structural || change.kind != Sculptor::ChangeKind::value_changed ||
                                               Sculptor::osc_change_restructures(osc_mapping, change);
         ok = Sculptor::apply_osc_graph_change(&candidate, &osc_graph, &osc_mapping, change, channel, zone);
+        if (ok) {
+            applied = i + 1;
+        }
+        if (ok && change.kind == Sculptor::ChangeKind::value_changed &&
+            Sculptor::is_band_button_slot(change.slot_idx)) {
+            // A band [-]/[+] click rewrote the stored oscillator and left
+            // the graph stale on purpose. Any later event in this batch
+            // would compile against the old slot map and undo the
+            // insertion/removal, so the batch ends here: the remaining
+            // queued events are discarded, and the structural
+            // re-projection below rebuilds the graph from the committed
+            // model before more edits can apply.
+            break;
+        }
     }
     if (ok) {
         ok = sync_osc_graph_layout(&candidate);
@@ -2692,7 +2703,7 @@ void Sculptor::SynthEditor::drain_osc_graph(uint32_t channel, uint32_t zone)
     const Sculptor::GraphChange& first = changes[0];
     const uint32_t first_id0 = first.node_idx != Sculptor::pool_no_slot ? first.node_idx : first.connection_idx;
     bool           mixed     = false;
-    for (uint32_t i = 1; i < count; ++i) {
+    for (uint32_t i = 1; i < applied; ++i) {
         const Sculptor::GraphChange& other = changes[i];
         const uint32_t other_id0 = other.node_idx != Sculptor::pool_no_slot ? other.node_idx : other.connection_idx;
         if (other.kind != first.kind || other_id0 != first_id0 || other.slot_idx != first.slot_idx) {
@@ -3347,6 +3358,10 @@ void Sculptor::SynthEditor::do_osc_add_oscillator(vmath::vec2 position, uint32_t
     // off, so a fresh oscillator starts on sine.
     Synth::Oscillator fresh_osc = Synth::Oscillator{};
     fresh_osc.osc_type[0]       = Synth::WaveType::sine_wave;
+    // An audible bandpass default: a fresh (or filter-type-switched)
+    // oscillator's Band Gain starts at 1.0, so selecting bandpass does not
+    // produce silence until the gain is raised.
+    fresh_osc.targets[Synth::mod_fir_band0_gain].base_value = 1.0f;
 
     const uint32_t ordinal     = instrument.layer_count;
     instrument.layers[ordinal] = fresh_osc;

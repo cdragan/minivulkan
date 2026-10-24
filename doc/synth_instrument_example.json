@@ -58,6 +58,10 @@
 					]
 				}
 			},
+			"fir_type": "bandpass", "fir_bands": 2,
+			"fir_band0_offset": { "base": -3.0 }, "fir_band0_gain": { "base": 0.8 },
+			"fir_band1_offset": { "base": 4.0 }, "fir_band1_spread": { "base": 5.0 },
+			"fir_band1_gain": { "base": 0.6 }, "fir_band1_slope": { "base": 80 },
 			"duty_a": { "base": 0.25 }
 		}
 	],

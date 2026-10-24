@@ -175,10 +175,52 @@ enum OscParamRole : uint32_t {
     osc_fir_slope_dest,
     osc_fir_slope_env,
     osc_fir_slope_lfo,
+    osc_fir_band0_offset_dest,
+    osc_fir_band0_offset_env,
+    osc_fir_band0_offset_lfo,
+    osc_fir_band0_gain_dest,
+    osc_fir_band0_gain_env,
+    osc_fir_band0_gain_lfo,
+    osc_fir_band1_offset_dest,
+    osc_fir_band1_offset_env,
+    osc_fir_band1_offset_lfo,
+    osc_fir_band1_spread_dest,
+    osc_fir_band1_spread_env,
+    osc_fir_band1_spread_lfo,
+    osc_fir_band1_gain_dest,
+    osc_fir_band1_gain_env,
+    osc_fir_band1_gain_lfo,
+    osc_fir_band1_slope_dest,
+    osc_fir_band1_slope_env,
+    osc_fir_band1_slope_lfo,
+    osc_fir_band2_offset_dest,
+    osc_fir_band2_offset_env,
+    osc_fir_band2_offset_lfo,
+    osc_fir_band2_spread_dest,
+    osc_fir_band2_spread_env,
+    osc_fir_band2_spread_lfo,
+    osc_fir_band2_gain_dest,
+    osc_fir_band2_gain_env,
+    osc_fir_band2_gain_lfo,
+    osc_fir_band2_slope_dest,
+    osc_fir_band2_slope_env,
+    osc_fir_band2_slope_lfo,
+    osc_fir_band3_offset_dest,
+    osc_fir_band3_offset_env,
+    osc_fir_band3_offset_lfo,
+    osc_fir_band3_spread_dest,
+    osc_fir_band3_spread_env,
+    osc_fir_band3_spread_lfo,
+    osc_fir_band3_gain_dest,
+    osc_fir_band3_gain_env,
+    osc_fir_band3_gain_lfo,
+    // clang-format off
+    osc_fir_band3_slope_dest, osc_fir_band3_slope_env, osc_fir_band3_slope_lfo,
+    // clang-format on
     num_osc_roles
 };
 
-static_assert(num_osc_roles == 36);
+static_assert(num_osc_roles == 78);
 
 constexpr uint32_t channel_block_base = 1;
 constexpr uint32_t voice_block_base   = channel_block_base + Synth::max_channels * num_channel_roles;
@@ -215,13 +257,43 @@ struct ModTargetNode {
 };
 
 constexpr ModTargetNode mod_target_nodes[] = {
-    { mod_pitch, osc_pitch_dest },         { mod_volume, osc_volume_dest },       { mod_fir_spread, osc_spread_dest },
-    { mod_panning, osc_panning_dest },     { mod_duty0, osc_duty0_dest },         { mod_duty1, osc_duty1_dest },
-    { mod_osc_mix, osc_mix_dest },         { mod_fm_index, osc_fm_index_dest },   { mod_fm_ratio, osc_fm_ratio_dest },
-    { mod_pad_tilt0, osc_pad_tilt0_dest }, { mod_pad_tilt1, osc_pad_tilt1_dest }, { mod_fir_slope, osc_fir_slope_dest },
+    { mod_pitch, osc_pitch_dest },
+    { mod_volume, osc_volume_dest },
+    { mod_fir_spread, osc_spread_dest },
+    { mod_panning, osc_panning_dest },
+    { mod_duty0, osc_duty0_dest },
+    { mod_duty1, osc_duty1_dest },
+    { mod_osc_mix, osc_mix_dest },
+    { mod_fm_index, osc_fm_index_dest },
+    { mod_fm_ratio, osc_fm_ratio_dest },
+    { mod_pad_tilt0, osc_pad_tilt0_dest },
+    { mod_pad_tilt1, osc_pad_tilt1_dest },
+    { mod_fir_slope, osc_fir_slope_dest },
+    { mod_fir_band0_offset, osc_fir_band0_offset_dest },
+    { mod_fir_band0_gain, osc_fir_band0_gain_dest },
+    { mod_fir_band1_offset, osc_fir_band1_offset_dest },
+    { mod_fir_band1_spread, osc_fir_band1_spread_dest },
+    { mod_fir_band1_gain, osc_fir_band1_gain_dest },
+    { mod_fir_band1_slope, osc_fir_band1_slope_dest },
+    { mod_fir_band2_offset, osc_fir_band2_offset_dest },
+    { mod_fir_band2_spread, osc_fir_band2_spread_dest },
+    { mod_fir_band2_gain, osc_fir_band2_gain_dest },
+    { mod_fir_band2_slope, osc_fir_band2_slope_dest },
+    { mod_fir_band3_offset, osc_fir_band3_offset_dest },
+    { mod_fir_band3_spread, osc_fir_band3_spread_dest },
+    { mod_fir_band3_gain, osc_fir_band3_gain_dest },
+    { mod_fir_band3_slope, osc_fir_band3_slope_dest },
 };
 static_assert(sizeof(mod_target_nodes) / sizeof(mod_target_nodes[0]) == Synth::num_mod_targets,
               "mod target table must cover every ModTarget");
+
+// Dest roles of bands 1..3, indexed [band - 1][param] in the uniform
+// offset/spread/gain/slope order.
+constexpr uint32_t band_dest_roles[3][4] = {
+    { osc_fir_band1_offset_dest, osc_fir_band1_spread_dest, osc_fir_band1_gain_dest, osc_fir_band1_slope_dest },
+    { osc_fir_band2_offset_dest, osc_fir_band2_spread_dest, osc_fir_band2_gain_dest, osc_fir_band2_slope_dest },
+    { osc_fir_band3_offset_dest, osc_fir_band3_spread_dest, osc_fir_band3_gain_dest, osc_fir_band3_slope_dest },
+};
 
 Synth::Parameter       parameters[total_params];
 Synth::ParamDescriptor param_descs[total_params];
@@ -258,78 +330,83 @@ template <typename T> uint32_t allocate_unused_slot(T* pool, uint32_t count, boo
     return 0;
 }
 
-namespace ShaderParams {
-
+// File-local shader parameter types: one struct scope standing in for a
+// namespace (named namespace blocks are forbidden in implementation
+// files), so the ShaderParams::X references below keep compiling.
 // Note: These defintions must match the structs inside the shaders
+struct ShaderParams {
+    // synth_fir_coeff shader
+    struct FIRCoeff {
+        struct Band {
+            uint32_t highpass_cutoff_freq; // High pass frequency (if 0, it's a pure low pass)
+            uint32_t lowpass_cutoff_freq;  // Low pass frequency (if 0, it's a pure high pass)
+            uint32_t window_span; // Effective odd window span in taps, 11..num_taps (num_taps = full sharpness)
+            float    gain;        // Band gain; the shader scales the band's normalized kernel with it
+        };
 
-// synth_fir_coeff shader
-struct FIRCoeff {
-    uint32_t taps_offs;
-    uint32_t highpass_cutoff_freq;
-    uint32_t lowpass_cutoff_freq;
-    uint32_t window_span; // Effective odd window span in taps, 11..num_taps (num_taps = full sharpness)
+        uint32_t taps_offs;  // Offset of FIR filter's taps
+        uint32_t band_count; // Bands staged in bands[0..band_count-1], 1..4; band 0 covers the single-band form
+        Band     bands[4];
+    };
+
+    // synth_oscillator shader
+    struct Oscillator {
+        uint32_t out_sound_offs;
+        float    phase;
+        float    phase_step;
+        uint32_t osc_pack; // Bits 0-7: osc_type[0], 8-15: osc_type[1], 16-23: osc_mode, 24-31 spare (zero)
+        float    duty[2];
+        float    osc_mix;
+        float    mod_ratio; // FM: modulator/carrier freq ratio.  Hard sync: slave cycles per master cycle
+        float    fm_index;
+        float    mod_phase;
+        float    mod_phase_step;
+
+        // Optional filter parameters
+        uint32_t fir_memory_offs;
+        uint32_t taps_offs;
+        uint32_t noise_counter;
+        uint32_t note_seed;   // Per-note constant: the note-on noise counter, never advanced
+        float    pad_tilt[2]; // Pad spectral tilt; harmonic exponent is 1 + clamp(tilt, -1, 1).
+    };
+
+    // synth_chan_combine shader (binding 0); the master-mix pass reuses the
+    // same layout to describe each per-channel input it sums.
+    struct ChannelCombineInput {
+        uint32_t in_sound_offs;
+        float    old_volume;
+        float    volume;
+        float    old_panning;
+        float    panning;
+    };
+
+    // synth_chan_combine shader (binding 1); also describes the master-mix output.
+    struct ChannelCombine {
+        uint32_t out_sound_offs;
+        uint32_t input_params_offs;
+        uint32_t num_inputs;
+    };
+
+    // synth_effect shader (binding 1); one per effect instance in a wave, rebuilt
+    // and uploaded every step.  params[] holds the effect's tweakable values;
+    // state_offs points at its persistent state (delay lines etc.) in the device buffer.
+    struct EffectParams {
+        uint32_t type;
+        uint32_t sound_offs;
+        uint32_t state_offs;
+        uint32_t pad;
+        float    params[Synth::max_effect_param_floats];
+    };
+
+    // synth_output_* shaders
+    struct OutputPushConst {
+        uint32_t in_sound_offs;
+    };
+
+    static_assert(sizeof(Oscillator) == 68);
+
+    static constexpr uint32_t max_param_range = sizeof(Oscillator) * 256;
 };
-
-// synth_oscillator shader
-struct Oscillator {
-    uint32_t out_sound_offs;
-    float    phase;
-    float    phase_step;
-    uint32_t osc_pack; // Bits 0-7: osc_type[0], 8-15: osc_type[1], 16-23: osc_mode, 24-31 spare (zero)
-    float    duty[2];
-    float    osc_mix;
-    float    mod_ratio; // FM: modulator/carrier freq ratio.  Hard sync: slave cycles per master cycle
-    float    fm_index;
-    float    mod_phase;
-    float    mod_phase_step;
-
-    // Optional filter parameters
-    uint32_t fir_memory_offs;
-    uint32_t taps_offs;
-    uint32_t noise_counter;
-    uint32_t note_seed;   // Per-note constant: the note-on noise counter, never advanced
-    float    pad_tilt[2]; // Pad spectral tilt; harmonic exponent is 1 + clamp(tilt, -1, 1).
-};
-
-static_assert(sizeof(Oscillator) == 68);
-
-constexpr uint32_t max_param_range = sizeof(Oscillator) * 256;
-
-// synth_chan_combine shader (binding 0); the master-mix pass reuses the
-// same layout to describe each per-channel input it sums.
-struct ChannelCombineInput {
-    uint32_t in_sound_offs;
-    float    old_volume;
-    float    volume;
-    float    old_panning;
-    float    panning;
-};
-
-// synth_chan_combine shader (binding 1); also describes the master-mix output.
-struct ChannelCombine {
-    uint32_t out_sound_offs;
-    uint32_t input_params_offs;
-    uint32_t num_inputs;
-};
-
-// synth_effect shader (binding 1); one per effect instance in a wave, rebuilt
-// and uploaded every step.  params[] holds the effect's tweakable values;
-// state_offs points at its persistent state (delay lines etc.) in the device buffer.
-using Synth::max_effect_param_floats;
-
-struct EffectParams {
-    uint32_t type;
-    uint32_t sound_offs;
-    uint32_t state_offs;
-    uint32_t pad;
-    float    params[max_effect_param_floats];
-};
-
-// synth_output_* shaders
-struct OutputPushConst {
-    uint32_t in_sound_offs;
-};
-} // namespace ShaderParams
 
 enum SynthPipelines {
     fir_coeff_pipe,
@@ -481,6 +558,7 @@ struct RunningOscillator {
     int8_t            octave_offset;   // Whole-octave pitch shift: 12 * octave_offset semitones are added to the pitch
                                        // (instrument constant for this note's layer)
     Synth::FilterType fir_type; // Band-pass: spread in semitones.  Low-pass/high-pass: spread is a fixed cutoff in Hz
+    uint8_t           fir_band_count; // Active bandpass bands 1..4 (forced to 1 for other filter types)
 
     // Current phase state
     float    phase;         // Current position of the oscillator
@@ -503,6 +581,19 @@ struct RunningOscillator {
     float pad_tilt[2]; // Pad spectral tilt; harmonic exponent is 1 + clamp(tilt, -1, 1).
     float osc_mix;     // Mix between osc_type[0] and osc_type[1] (0..1)
     float fm_index;    // FM modulation depth
+
+    // Multi-band bandpass state, refreshed by update_modulation each step.
+    // Band 0 mirrors the legacy spread/slope fields above, so its kernel math
+    // stays bit-identical to the single-band form.
+    float band_offset[4]; // Offset of the band center above the pitch, semitones
+    float band_spread[4]; // Band width in semitones (band 0 = spread)
+    float band_gain[4];   // Band gain 0..1
+    float band_slope[4];  // Window slope percent (band 0 = fir_slope)
+    bool  fir_active;     // Current-step FIR engagement: some staged band has a
+                          // positive spread (bandpass), or the spread itself is
+                          // positive (single-edge). Gains only scale the kernel,
+                          // so an all-zero-gain oscillator still stages a zeroed
+                          // kernel (silence) instead of bypassing.
 
     uint8_t layer_idx;      // This oscillator's index in its voice's osc_ids list
     uint8_t voice_id;       // Voice which owns this oscillator (0 = none/free)
@@ -648,7 +739,54 @@ static bool osc_has_filter(const Synth::Instrument& instrument, uint32_t layer_i
         return false;
     }
 
+    // Multi-band bandpass: any higher band's bindings can modulate even with
+    // a zeroed band-0 spread, so the count alone reserves the slot.
+    if (layer.fir_type == Synth::fir_bandpass && layer.fir_band_count > 1) {
+        return true;
+    }
+
     return spread.base_value != 0.0f || spread.envelope_desc_id || spread.lfo_desc_id || spread.num_inputs;
+}
+
+// A layer engages its FIR at note-on iff some staged band has a positive
+// spread (bandpass) or the spread itself is positive (single-edge). Same
+// rule the modulation step re-evaluates on the running oscillator.
+static bool layer_fir_active(const Synth::Oscillator& layer)
+{
+    if (layer.fir_type == Synth::fir_bandpass) {
+        const float spreads[4] = {
+            layer.targets[Synth::mod_fir_spread].base_value,
+            layer.targets[Synth::mod_fir_band1_spread].base_value,
+            layer.targets[Synth::mod_fir_band2_spread].base_value,
+            layer.targets[Synth::mod_fir_band3_spread].base_value,
+        };
+        const uint32_t band_count = layer.fir_band_count < 1    ? 1u
+                                    : layer.fir_band_count > 4u ? 4u
+                                                                : layer.fir_band_count;
+        for (uint32_t band = 0; band < band_count; band++) {
+            if (spreads[band] > 0.0f) {
+                return true;
+            }
+        }
+        return false;
+    }
+    return layer.targets[Synth::mod_fir_spread].base_value > 0.0f;
+}
+
+// The same engagement rule on the running oscillator, from the modulation
+// step's refreshed band values. Single source of truth for the coefficient
+// count, the staging decision and the shader's taps gate.
+static bool oscillator_fir_active(const RunningOscillator& osc)
+{
+    if (osc.fir_type == Synth::fir_bandpass) {
+        for (uint32_t band = 0; band < osc.fir_band_count; band++) {
+            if (osc.band_spread[band] > 0.0f) {
+                return true;
+            }
+        }
+        return false;
+    }
+    return osc.spread > 0.0f;
 }
 
 static uint32_t writer_alloc_node(const void* ctx);
@@ -1351,6 +1489,10 @@ static void process_note_on(uint32_t delta_samples, const DispatchedMidiEvent& e
         osc.mod_ratio           = layer.mod_ratio;
         osc.octave_offset       = layer.octave_offset;
         osc.fir_type            = layer.fir_type;
+        osc.fir_band_count = layer.fir_type == Synth::fir_bandpass ? (layer.fir_band_count < 1   ? 1
+                                                                      : layer.fir_band_count > 4 ? 4
+                                                                                                 : layer.fir_band_count)
+                                                                   : 1;
         // The per-note pitch skew rides on the pitch target: it joins the
         // binding's base value in the dest parameter's initial state.
         const float layer_skew = Synth::random_pitch_skew(&note_skew_rng, instrument.layer_skew_semitones);
@@ -1428,6 +1570,9 @@ static void process_note_on(uint32_t delta_samples, const DispatchedMidiEvent& e
             osc.fir_memory_offs = 0;
             osc.clear_fir_hist  = false;
         }
+        // Note-on seed from the layer's own binding bases; the first
+        // modulation step re-evaluates it from the dest parameters.
+        osc.fir_active = layer_fir_active(instrument.layers[layer_idx]);
     }
 }
 
@@ -1758,7 +1903,7 @@ static void pull_effect_param_chain(EffectChain* chain, bool* reset_barrier_need
         if (! instance.enabled) {
             continue;
         }
-        for (uint32_t param_idx = 0; param_idx < ShaderParams::max_effect_param_floats; param_idx++) {
+        for (uint32_t param_idx = 0; param_idx < Synth::max_effect_param_floats; param_idx++) {
             if (instance.src_param_id[param_idx]) {
                 instance.params[param_idx] = parameters[instance.src_param_id[param_idx]].value;
             }
@@ -1877,11 +2022,8 @@ static void update_modulation()
                                                                osc.octave_offset,
                                                                parameters[osc_param(osc_idx, osc_pitch_dest)].value);
         const float new_spread = parameters[osc_param(osc_idx, osc_spread_dest)].value;
-        if (osc.fir_taps_offs && osc.spread <= 0.0f && new_spread > 0.0f) {
-            osc.clear_fir_hist = true; // Re-engaged filter: the frozen history holds stale audio.
-        }
-        osc.spread  = new_spread;
-        osc.panning = parameters[osc_param(osc_idx, osc_panning_dest)].value;
+        osc.spread             = new_spread;
+        osc.panning            = parameters[osc_param(osc_idx, osc_panning_dest)].value;
 
         const float    dest_value = parameters[osc_param(osc_idx, osc_volume_dest)].value;
         const uint32_t env_node   = osc_param(osc_idx, osc_volume_env);
@@ -1934,6 +2076,28 @@ static void update_modulation()
         // continues smoothly into fir_effective_span's 11-tap floor instead of jumping back to the
         // note-on scalar's span.
         osc.fir_slope = parameters[osc_param(osc_idx, osc_fir_slope_dest)].value;
+
+        // Multi-band bandpass state: every band's four leaves refresh like the
+        // other targets; band 0 mirrors the legacy spread/slope dests read
+        // above, so its kernel math stays bit-identical to the single-band form.
+        osc.band_offset[0] = parameters[osc_param(osc_idx, osc_fir_band0_offset_dest)].value;
+        osc.band_gain[0]   = parameters[osc_param(osc_idx, osc_fir_band0_gain_dest)].value;
+        osc.band_spread[0] = osc.spread;
+        osc.band_slope[0]  = osc.fir_slope;
+        for (uint32_t band = 1; band < osc.fir_band_count; band++) {
+            osc.band_offset[band] = parameters[osc_param(osc_idx, band_dest_roles[band - 1][0])].value;
+            osc.band_spread[band] = parameters[osc_param(osc_idx, band_dest_roles[band - 1][1])].value;
+            osc.band_gain[band]   = parameters[osc_param(osc_idx, band_dest_roles[band - 1][2])].value;
+            osc.band_slope[band]  = parameters[osc_param(osc_idx, band_dest_roles[band - 1][3])].value;
+        }
+        // The re-engagement edge rides the single-source activity predicate:
+        // a false -> true transition (band 1..3's spread modulating positive
+        // while band 0 stays zero included) clears the frozen history.
+        const bool prev_fir_active = osc.fir_active;
+        osc.fir_active             = oscillator_fir_active(osc);
+        if (osc.fir_taps_offs && ! prev_fir_active && osc.fir_active) {
+            osc.clear_fir_hist = true; // Re-engaged filter: the frozen history holds stale audio.
+        }
 
         bool free_now = osc.terminating;
         if (! free_now && (voice.note_finished || (voice.releasing && volume_termination_due(osc_idx)) ||
@@ -2003,9 +2167,14 @@ static void compute_fir_coefficients()
 {
     uint32_t num_active_filters = 0;
     for (uint32_t osc_idx = 1; osc_idx < Synth::max_oscillators; osc_idx++) {
-        if (oscillators[osc_idx].osc_type[0] != WaveType::no_wave && oscillators[osc_idx].fir_taps_offs &&
-            oscillators[osc_idx].spread > 0.0f) {
-            ++num_active_filters;
+        if (oscillators[osc_idx].osc_type[0] != WaveType::no_wave && oscillators[osc_idx].fir_taps_offs) {
+            // The cached engagement flag matches the staging compaction rule
+            // exactly: a bandpass counts when some band has positive spread
+            // (zero gains stage a zeroed kernel), a single-edge type when its
+            // spread is positive.
+            if (oscillators[osc_idx].fir_active) {
+                ++num_active_filters;
+            }
         }
     }
 
@@ -2036,26 +2205,85 @@ static void compute_fir_coefficients()
             continue;
         }
 
-        float lowpass_hz  = 0.0f;
-        float highpass_hz = 0.0f;
-        if (! Synth::oscillator_fir_cutoffs(osc.pitch,
-                                            osc.spread,
-                                            osc.freq_mult,
-                                            osc.fir_type,
-                                            &lowpass_hz,
-                                            &highpass_hz)) {
+        float      lowpass_hz  = 0.0f;
+        float      highpass_hz = 0.0f;
+        uint32_t   band_span   = 0;
+        const bool single_edge = Synth::oscillator_fir_cutoffs(osc.pitch,
+                                                               osc.spread,
+                                                               osc.freq_mult,
+                                                               osc.fir_type,
+                                                               &lowpass_hz,
+                                                               &highpass_hz);
+        // A bandpass with an inactive band 0 still stages its higher bands
+        // below, so only the single-edge types passthrough here.
+        if (! single_edge && osc.fir_type != Synth::fir_bandpass) {
             continue; // Effective spread <= 0: passthrough, no coefficient dispatch.
         }
+
+        if (osc.fir_type == Synth::fir_bandpass) {
+            // Multi-band bandpass: the full entry is zero-initialized, inactive
+            // bands included, so the shader's band loop never reads garbage.
+            // A band whose gain clamps to zero still stages (it contributes
+            // nothing to the accumulation), so an oscillator whose gains are
+            // all zero produces a zeroed kernel: silence, continuous with the
+            // approaching-zero sweep. An entry only exists while some band's
+            // spread is positive, matching the count predicate above.
+            ShaderParams::FIRCoeff param;
+            memset(&param, 0, sizeof(param));
+            param.taps_offs    = osc.fir_taps_offs / 4;
+            uint32_t num_bands = 0;
+            for (uint32_t band = 0; band < osc.fir_band_count; band++) {
+                // The modulated gain clamps to [0, 1] and the
+                // offset to +/-36 semitones; NaN reads as the neutral value.
+                float gain = osc.band_gain[band];
+                if (gain > 1.0f) {
+                    gain = 1.0f;
+                }
+                if (! (gain > 0.0f)) {
+                    gain = 0.0f; // Gain <= 0 or NaN: the band stages a zero-gain contribution.
+                }
+                float offset = osc.band_offset[band];
+                if (! (offset >= -36.0f && offset <= 36.0f)) {
+                    offset = offset > 0.0f ? 36.0f : offset < 0.0f ? -36.0f : 0.0f;
+                }
+                if (! Synth::oscillator_fir_band_cutoffs(osc.pitch,
+                                                         offset,
+                                                         osc.band_spread[band],
+                                                         osc.freq_mult,
+                                                         osc.band_slope[band],
+                                                         &lowpass_hz,
+                                                         &highpass_hz,
+                                                         &band_span)) {
+                    continue; // Spread <= 0 or NaN: an inactive band.
+                }
+                uint32_t lowpass  = cutoff_hz_to_int(lowpass_hz);
+                uint32_t highpass = cutoff_hz_to_int(highpass_hz);
+                Synth::oscillator_fir_band_guard(&lowpass, &highpass);
+                ShaderParams::FIRCoeff::Band* out = &param.bands[num_bands++];
+                out->highpass_cutoff_freq         = highpass;
+                out->lowpass_cutoff_freq          = lowpass;
+                out->window_span                  = band_span;
+                out->gain                         = gain;
+            }
+            if (! num_bands) {
+                continue; // Every band's spread <= 0: no entry, passthrough.
+            }
+            param.band_count          = num_bands;
+            fir_coeff_stage[staged++] = param;
+            continue;
+        }
+
         uint32_t lowpass  = cutoff_hz_to_int(lowpass_hz);
         uint32_t highpass = cutoff_hz_to_int(highpass_hz); // 0 when the helper floor-killed the edge.
-        if (osc.fir_type == Synth::fir_bandpass) {         // A single-edge type keeps its zero edge.
-            Synth::oscillator_fir_band_guard(&lowpass, &highpass);
-        }
+
         ShaderParams::FIRCoeff& param = fir_coeff_stage[staged++];
-        param.taps_offs               = osc.fir_taps_offs / 4;
-        param.lowpass_cutoff_freq     = lowpass;
-        param.highpass_cutoff_freq    = highpass;
-        param.window_span             = Synth::fir_effective_span(osc.fir_slope);
+        memset(&param, 0, sizeof(param)); // the unused band words carry no stale bytes into the cache
+        param.taps_offs                     = osc.fir_taps_offs / 4;
+        param.band_count                    = 1;
+        param.bands[0].lowpass_cutoff_freq  = lowpass;
+        param.bands[0].highpass_cutoff_freq = highpass;
+        param.bands[0].window_span          = Synth::fir_effective_span(osc.fir_slope);
+        param.bands[0].gain                 = 1.0f; // A single-edge band is unattenuated.
     }
 
     // Stages one effect chain's FIR entries into the staging array, after the oscillator entries.
@@ -2067,10 +2295,13 @@ static void compute_fir_coefficients()
             }
 
             ShaderParams::FIRCoeff& param = fir_coeff_stage[(*cur_entry)++];
-            param.taps_offs               = instance.state_offs / 4;
-            param.lowpass_cutoff_freq     = cutoff_hz_to_int(instance.params[0]);
-            param.highpass_cutoff_freq    = cutoff_hz_to_int(instance.params[1]);
-            param.window_span             = Synth::fir_effective_span(instance.params[2]);
+            memset(&param, 0, sizeof(param));
+            param.taps_offs                     = instance.state_offs / 4;
+            param.band_count                    = 1; // Effect FIR stays the single-band form.
+            param.bands[0].lowpass_cutoff_freq  = cutoff_hz_to_int(instance.params[0]);
+            param.bands[0].highpass_cutoff_freq = cutoff_hz_to_int(instance.params[1]);
+            param.bands[0].window_span          = Synth::fir_effective_span(instance.params[2]);
+            param.bands[0].gain                 = 1.0f;
         }
     };
     for (uint32_t chan_idx = 0; chan_idx < max_mix_channels; chan_idx++) {
@@ -2282,8 +2513,10 @@ static void render_audio_step()
         param.mod_phase            = oscillator.mod_phase;
         param.mod_phase_step       = mod_phase_step / static_cast<float>(Synth::rt_step_samples);
         param.fir_memory_offs      = oscillator.fir_memory_offs / 4;
-        param.taps_offs =
-            (oscillator.spread > 0.0f && oscillator.fir_type != Synth::fir_off) ? oscillator.fir_taps_offs / 4 : 0;
+        // The cached engagement flag gates the shader: an inactive filter
+        // passes through (taps offset 0), an all-zero-gain bandpass keeps
+        // reading its staged zeroed kernel (silence).
+        param.taps_offs     = oscillator.fir_active ? oscillator.fir_taps_offs / 4 : 0;
         param.noise_counter = oscillator.noise_counter;
         param.note_seed     = oscillator.note_seed;
         param.pad_tilt[0]   = oscillator.pad_tilt[0];
