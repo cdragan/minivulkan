@@ -22216,6 +22216,11 @@ static void check_string_shader_source_pins()
     const char* const damp = pick ? find_in_range(pick, end, "float string_damping;") : nullptr;
     const char* const rel  = damp ? find_in_range(damp, end, "float string_release_damping;") : nullptr;
     TEST(rel != nullptr);
+    TEST(find_in_range(shader, end, "const uint  src         = (i + delay_whole - pick_offset) % delay_whole;") !=
+         nullptr);
+    TEST(find_in_range(shader, end, "data[ring_offs + i]     = noise_here - noise_prior;") != nullptr);
+    TEST(find_in_range(shader, end, "sqrt(noise_energy / comb_energy)") != nullptr);
+    TEST(find_in_range(shader, end, "Truncated (non-circular)") == nullptr);
 }
 
 // TRAP 1/2: targets 26/27 must not map to band 4+ in the shared helper
@@ -22318,24 +22323,35 @@ static StringScalars string_mirror_scalars(float f0, float damping, float releas
     return s;
 }
 
-// Note-on init: noise, optional backward pick comb, then the mean pass.
+// Note-on init: noise, optional circular pick comb, mean pass, RMS match.
 static void string_mirror_init(StringMirror* m, float f0, float damping, float pick, uint32_t seed)
 {
     const StringScalars s = string_mirror_scalars(f0, damping, 0.0f);
     if (s.silent) {
         return;
     }
-    const uint32_t n = s.n;
-    for (uint32_t i = 0; i < n; ++i) {
-        m->ring[i] = static_cast<float>(string_pcg_hash(seed + i) & 0xFFFFu) / 32767.5f - 1.0f;
+    const uint32_t n   = s.n;
+    uint32_t       off = static_cast<uint32_t>(floorf(pick * static_cast<float>(n) + 0.5f));
+    off                = (pick > 0.0f && off < 1) ? 1 : off;
+    off                = off < n - 1 ? off : n - 1;
+    float noise_energy = 0.0f;
+    if (off > 0) {
+        for (uint32_t lane = 0; lane < 256; ++lane) {
+            float lane_energy = 0.0f;
+            for (uint32_t i = lane; i < n; i += 256) {
+                const uint32_t src        = (i + n - off) % n;
+                const float    noise_here = static_cast<float>(string_pcg_hash(seed + i) & 0xFFFFu) / 32767.5f - 1.0f;
+                const float noise_prior   = static_cast<float>(string_pcg_hash(seed + src) & 0xFFFFu) / 32767.5f - 1.0f;
+                m->ring[i]                = noise_here - noise_prior;
+                lane_energy += noise_here * noise_here;
+            }
+            noise_energy += lane_energy;
+        }
     }
-    uint32_t off = static_cast<uint32_t>(floorf(pick * static_cast<float>(n) + 0.5f));
-    off          = (pick > 0.0f && off < 1) ? 1 : off;
-    off          = off < n - 1 ? off : n - 1;
-    uint32_t i   = n;
-    while (i > off && off > 0) {
-        --i;
-        m->ring[i] -= m->ring[i - off];
+    else {
+        for (uint32_t i = 0; i < n; ++i) {
+            m->ring[i] = static_cast<float>(string_pcg_hash(seed + i) & 0xFFFFu) / 32767.5f - 1.0f;
+        }
     }
     float sum = 0.0f;
     for (uint32_t k = 0; k < n; ++k) {
@@ -22344,6 +22360,16 @@ static void string_mirror_init(StringMirror* m, float f0, float damping, float p
     const float mean = sum / static_cast<float>(n);
     for (uint32_t k = 0; k < n; ++k) {
         m->ring[k] -= mean;
+    }
+    if (off > 0) {
+        float comb_energy = 0.0f;
+        for (uint32_t k = 0; k < n; ++k) {
+            comb_energy += m->ring[k] * m->ring[k];
+        }
+        const float comb_gain = comb_energy > 0.0f ? sqrtf(noise_energy / comb_energy) : 1.0f;
+        for (uint32_t k = 0; k < n; ++k) {
+            m->ring[k] *= comb_gain;
+        }
     }
     m->wr     = n;
     m->t1     = 0.0f;
@@ -22790,7 +22816,7 @@ static void check_string_mirror_sustain_holds()
 }
 
 // Pick comb.  Reference excitation: the same noise as string_mirror_init,
-// out-of-place comb ref[i] = x[i] - x[i - off] (i >= off), then the mean pass.
+// out-of-place circular comb ref[i] = x[i] - x[(i - off) mod n], then the mean pass.
 // Note: a real retrigger receives a NEW seed (realtime_synth.cpp note-on), so
 // every comparison below seeds the mirror explicitly.
 static void string_pick_reference(float* ref, uint32_t n, uint32_t seed, uint32_t off, bool comb)
@@ -22800,7 +22826,7 @@ static void string_pick_reference(float* ref, uint32_t n, uint32_t seed, uint32_
         x[i] = static_cast<float>(string_pcg_hash(seed + i) & 0xFFFFu) / 32767.5f - 1.0f;
     }
     for (uint32_t i = 0; i < n; ++i) {
-        ref[i] = comb && off > 0 && i >= off ? x[i] - x[i - off] : x[i];
+        ref[i] = comb && off > 0 ? x[i] - x[i >= off ? i - off : i + n - off] : x[i];
     }
     float sum = 0.0f;
     for (uint32_t k = 0; k < n; ++k) {
@@ -22812,9 +22838,35 @@ static void string_pick_reference(float* ref, uint32_t n, uint32_t seed, uint32_
     }
 }
 
+// Reference RMS match for pick > 0: scales ref so its energy equals the raw noise energy (double math).
+static void string_pick_scale_to_noise(float* ref, uint32_t n, uint32_t seed)
+{
+    double noise_energy = 0.0;
+    double ref_energy   = 0.0;
+    for (uint32_t i = 0; i < n; ++i) {
+        const float x = static_cast<float>(string_pcg_hash(seed + i) & 0xFFFFu) / 32767.5f - 1.0f;
+        noise_energy += static_cast<double>(x) * static_cast<double>(x);
+        ref_energy += static_cast<double>(ref[i]) * static_cast<double>(ref[i]);
+    }
+    const float gain = ref_energy > 0.0 ? static_cast<float>(sqrt(noise_energy / ref_energy)) : 1.0f;
+    for (uint32_t k = 0; k < n; ++k) {
+        ref[k] *= gain;
+    }
+}
+
 static bool string_rings_equal(const float* a, const float* b, uint32_t n)
 {
     return memcmp(a, b, n * sizeof(float)) == 0;
+}
+
+static bool string_rings_close(const float* a, const float* b, uint32_t n)
+{
+    for (uint32_t i = 0; i < n; ++i) {
+        if (! approx(a[i], b[i], 1e-5f)) {
+            return false;
+        }
+    }
+    return true;
 }
 
 static void check_string_mirror_pick_comb()
@@ -22833,17 +22885,18 @@ static void check_string_mirror_pick_comb()
         string_mirror_init(&m, f0, 0.5f, 0.0f, 55);
         string_pick_reference(ref, n, 55, 0, false);
         TEST(string_rings_equal(m.ring, ref, n));
-        // p = 0.5: bit-identical to the out-of-place reference.  Odd N rounds
-        // half up: off = floor(0.5 * N + 0.5).
+        // p = 0.5: matches the out-of-place circular + RMS-scaled reference.
+        // Odd N rounds half up: off = floor(0.5 * N + 0.5).
         uint32_t off = static_cast<uint32_t>(floorf(0.5f * static_cast<float>(n) + 0.5f));
         off          = off < n - 1 ? off : n - 1;
         TEST(off == (n + 1) / 2);
         memset(&m, 0, sizeof(m));
         string_mirror_init(&m, f0, 0.5f, 0.5f, 55);
         string_pick_reference(ref, n, 55, off, true);
-        TEST(string_rings_equal(m.ring, ref, n));
-        // Ordering: mean pass after the comb leaves zero mean (before-comb
-        // order would not, since the comb removes the head from the tail).
+        string_pick_scale_to_noise(ref, n, 55);
+        TEST(string_rings_close(m.ring, ref, n));
+        // The circular comb is zero-sum and the mean pass cleans up float
+        // rounding residue (while remaining required for p = 0).
         double sum = 0.0;
         for (uint32_t k = 0; k < n; ++k) {
             sum += static_cast<double>(m.ring[k]);
@@ -23153,7 +23206,8 @@ static void check_string_mirror_pick_tiny()
     memset(&m, 0, sizeof(m));
     string_mirror_init(&m, 441.0f, 0.5f, 0.001f, 12);
     string_pick_reference(ref, n, 12, 1, true);
-    TEST(string_rings_equal(m.ring, ref, n));
+    string_pick_scale_to_noise(ref, n, 12);
+    TEST(string_rings_close(m.ring, ref, n));
     string_pick_reference(ref, n, 12, 0, false);
     TEST(! string_rings_equal(m.ring, ref, n));
     double energy = 0.0;
@@ -23167,6 +23221,158 @@ static void check_string_mirror_pick_tiny()
     TEST(string_rings_equal(m.ring, ref, n));
 }
 
+static double string_ring_dft_mag(const float* ring, uint32_t n, uint32_t harmonic)
+{
+    constexpr double two_pi = 6.283185307179586;
+    double           re     = 0.0;
+    double           im     = 0.0;
+    for (uint32_t i = 0; i < n; ++i) {
+        const double ph = two_pi * static_cast<double>(harmonic * i) / static_cast<double>(n);
+        re += static_cast<double>(ring[i]) * cos(ph);
+        im += static_cast<double>(ring[i]) * sin(ph);
+    }
+    return sqrt(re * re + im * im);
+}
+
+static void check_string_mirror_pick_circular()
+{
+    static StringMirror m;
+    static StringMirror m_half;
+    static float        ref[string_ring_size];
+    static float        tiled[16 * string_ring_size];
+
+    // (a) Circularity / spectral nulls at multiples of fs / (pick * period).
+    const uint32_t n98 = string_mirror_scalars(441.0f, 0.5f, 0.0f).n;
+    TEST(n98 == 98);
+
+    struct NullCase {
+        float    pick;
+        uint32_t off;
+        uint32_t null_step;
+    };
+
+    const NullCase cases[3] = {
+        { 0.5f, 49, 2 },
+        { 14.0f / 98.0f, 14, 7 },
+        { 0.357f, 35, 14 },
+    };
+    for (uint32_t ci = 0; ci < 3; ++ci) {
+        const NullCase& c   = cases[ci];
+        const uint32_t  off = static_cast<uint32_t>(floorf(c.pick * static_cast<float>(n98) + 0.5f));
+        TEST(off == c.off);
+        memset(&m, 0, sizeof(m));
+        string_mirror_init(&m, 441.0f, 0.5f, c.pick, 41);
+
+        // Tile the n98-sample excitation over 16 periods so the existing Hann
+        // DFT helper string_amp_at also measures exact periodic nulls.
+        const uint32_t tiled_len = 16 * n98;
+        for (uint32_t i = 0; i < tiled_len; ++i) {
+            tiled[i] = m.ring[i % n98];
+        }
+
+        double   mag_sq_sum   = 0.0;
+        double   null_sum     = 0.0;
+        double   non_null_sum = 0.0;
+        uint32_t count        = 0;
+        for (uint32_t h = 1; h <= n98 / 2; ++h) {
+            const double mag = string_ring_dft_mag(m.ring, n98, h);
+            mag_sq_sum += mag * mag;
+            ++count;
+            if (h % c.null_step == 0) {
+                null_sum += mag;
+            }
+            else {
+                non_null_sum += mag;
+            }
+        }
+        const double rms_bin = sqrt(mag_sq_sum / static_cast<double>(count));
+        TEST(rms_bin > 0.0);
+        for (uint32_t h = 1; h <= n98 / 2; ++h) {
+            if (h % c.null_step == 0) {
+                const double mag = string_ring_dft_mag(m.ring, n98, h);
+                const double freq_hz =
+                    static_cast<double>(h) * static_cast<double>(string_fs) / static_cast<double>(n98);
+                const double hann_mag = string_amp_at(tiled, 0, tiled_len, freq_hz);
+                TEST(mag < 1e-3 * rms_bin);
+                TEST(hann_mag < 1e-3 * rms_bin * 8.0);
+            }
+        }
+        TEST(non_null_sum > 100.0 * null_sum);
+    }
+
+    // Coprime / odd-n cases: f0 = 400 Hz with off = 1, and f0 = 420 Hz (odd prime n = 103).
+    {
+        const uint32_t n400 = string_mirror_scalars(400.0f, 0.5f, 0.0f).n;
+        TEST(n400 == 108);
+        memset(&m, 0, sizeof(m));
+        string_mirror_init(&m, 400.0f, 0.5f, 0.001f, 73);
+        double sum = 0.0;
+        for (uint32_t k = 0; k < n400; ++k) {
+            TEST(std::isfinite(m.ring[k]));
+            sum += static_cast<double>(m.ring[k]);
+        }
+        TEST(fabs(sum / n400) < 1e-6);
+
+        const uint32_t n420 = string_mirror_scalars(420.0f, 0.5f, 0.0f).n;
+        TEST(n420 == 103 && (n420 & 1u) == 1u);
+        memset(&m, 0, sizeof(m));
+        string_mirror_init(&m, 420.0f, 0.5f, 0.3f, 73);
+        sum = 0.0;
+        for (uint32_t k = 0; k < n420; ++k) {
+            TEST(std::isfinite(m.ring[k]));
+            sum += static_cast<double>(m.ring[k]);
+        }
+        TEST(fabs(sum / n420) < 1e-6);
+    }
+
+    // (b) Energy non-boost and (c) pick == 0 bit-exactness across pitch/seed/pick grid.
+    const float    freqs[2] = { 441.0f, 82.41f };
+    const uint32_t seeds[2] = { 3, 55 };
+    const float    picks[4] = { 0.05f, 0.12f, 0.5f, 0.9f };
+    for (uint32_t fi = 0; fi < 2; ++fi) {
+        const float    f0 = freqs[fi];
+        const uint32_t n  = string_mirror_scalars(f0, 0.5f, 0.0f).n;
+        for (uint32_t si = 0; si < 2; ++si) {
+            const uint32_t seed         = seeds[si];
+            double         noise_energy = 0.0;
+            for (uint32_t i = 0; i < n; ++i) {
+                const float x = static_cast<float>(string_pcg_hash(seed + i) & 0xFFFFu) / 32767.5f - 1.0f;
+                noise_energy += static_cast<double>(x) * static_cast<double>(x);
+            }
+            const double rms_noise = sqrt(noise_energy / static_cast<double>(n));
+            for (uint32_t pi = 0; pi < 4; ++pi) {
+                memset(&m, 0, sizeof(m));
+                string_mirror_init(&m, f0, 0.5f, picks[pi], seed);
+                double comb_energy = 0.0;
+                for (uint32_t k = 0; k < n; ++k) {
+                    comb_energy += static_cast<double>(m.ring[k]) * static_cast<double>(m.ring[k]);
+                }
+                const double rms_comb = sqrt(comb_energy / static_cast<double>(n));
+                TEST(rms_comb <= rms_noise * (1.0 + 1e-3));
+                TEST(rms_comb >= rms_noise * (1.0 - 1e-3));
+            }
+
+            // (c) pick == 0 bit-exactness and independence from pick == 0.5.
+            memset(&m, 0, sizeof(m));
+            string_mirror_init(&m, f0, 0.5f, 0.0f, seed);
+            string_pick_reference(ref, n, seed, 0, false);
+            TEST(string_rings_equal(m.ring, ref, n));
+
+            memset(&m_half, 0, sizeof(m_half));
+            string_mirror_init(&m_half, f0, 0.5f, 0.5f, seed);
+            const float scale = m_half.ring[0] != 0.0f ? m.ring[0] / m_half.ring[0] : 1.0f;
+            bool        same  = true;
+            for (uint32_t k = 0; k < n; ++k) {
+                if (! approx(m.ring[k], m_half.ring[k] * scale, 1e-4f)) {
+                    same = false;
+                    break;
+                }
+            }
+            TEST(! same);
+        }
+    }
+}
+
 static void string_mirror_m2_regressions_b()
 {
     check_string_mirror_release_click_free();
@@ -23174,6 +23380,7 @@ static void string_mirror_m2_regressions_b()
     check_string_mirror_release_lifetime();
     check_string_mirror_sustain_holds();
     check_string_mirror_pick_comb();
+    check_string_mirror_pick_circular();
     check_string_mirror_fm_ring_read();
     check_string_mirror_ring_read_edges();
     check_string_mirror_nan_guard();

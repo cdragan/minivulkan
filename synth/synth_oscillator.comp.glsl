@@ -237,8 +237,9 @@ float string_ring_read(uint ring_offs, float loop_phase)
     return s0 + read_frac * (s1 - s0);
 }
 
-// Karplus-Strong plucked string, run once per 256-sample block by lane 0.
-// The ring holds one loop of excitation: a noise burst, optionally combed by the pick position.
+// Karplus-Strong plucked string, run once per 256-sample block.
+// The ring holds one loop of excitation: a noise burst, optionally combed (circularly, around
+// the ring period) by the pick position and rescaled to the noise RMS.
 // Each sample is read delay_whole samples behind the write point, then damped by a one-pole
 // lowpass (string_damping_coeff) and tuned to the fractional delay by an allpass
 // (string_allpass_coeff).  string_loop_gain sets the decay to the target T60.
@@ -247,16 +248,17 @@ float string_ring_read(uint ring_offs, float loop_phase)
 // 5-6 seed tag, 7 unused.
 void string_pass(uint base, float f0, float damping, float release_damping, float pick, bool release, uint note_seed)
 {
+    const uint  lane        = gl_LocalInvocationID.x;
     const uint  ring_offs   = base + string_header_words;
     const float sample_rate = float(sampling_rate);
 
-    string_write_pos   = 0u;
-    string_loop_length = 0.0;
+    if (lane == 0u) {
+        string_write_pos   = 0u;
+        string_loop_length = 0.0;
+    }
     if (! (f0 >= string_min_freq)) {
         // Too low to tune: silence, state untouched.
-        for (uint i = 0u; i < 256u; i++) {
-            string_block_out[i] = 0.0;
-        }
+        string_block_out[lane] = 0.0;
         return;
     }
 
@@ -287,40 +289,83 @@ void string_pass(uint base, float f0, float damping, float release_damping, floa
     float       string_prev_allpass;
     float       string_release_gain;
     if (init) {
-        // Note-on or retrigger: noise burst, optional pick comb, then zero mean.
-        for (uint i = 0u; i < delay_whole; i++) {
-            data[ring_offs + i] = float(pcg_hash(note_seed + i) & 0xFFFFu) / 32767.5 - 1.0;
-        }
+        // Note-on or retrigger: noise burst, optional circular pick comb, zero mean, RMS match to the noise.
         uint pick_offset = uint(floor(pick * float(delay_whole) + 0.5));
         // Clamp to at least 1 so a tiny nonzero pick still combs (1 sample); only pick = 0 skips the comb.
         pick_offset = (pick > 0.0 && pick_offset < 1u) ? 1u : pick_offset;
         pick_offset = pick_offset < delay_whole - 1u ? pick_offset : delay_whole - 1u;
-        // Truncated (non-circular) comb, backward so each source is read before it is overwritten.
-        uint i = delay_whole;
-        while (i > pick_offset && pick_offset > 0u) {
-            --i;
-            data[ring_offs + i] -= data[ring_offs + i - pick_offset];
+        // Circular comb y[i] = h(i) - h((i - pick_offset) mod n) fused into the noise fill so
+        // all 256 lanes fill the ring in parallel without cross-lane dependencies.
+        if (pick_offset > 0u) {
+            float lane_energy = 0.0;
+            for (uint i = lane; i < delay_whole; i += 256u) {
+                const uint  src         = (i + delay_whole - pick_offset) % delay_whole;
+                const float noise_here  = float(pcg_hash(note_seed + i) & 0xFFFFu) / 32767.5 - 1.0;
+                const float noise_prior = float(pcg_hash(note_seed + src) & 0xFFFFu) / 32767.5 - 1.0;
+                data[ring_offs + i]     = noise_here - noise_prior;
+                lane_energy += noise_here * noise_here;
+            }
+            string_block_out[lane] = lane_energy;
         }
-        float sum = 0.0;
-        for (uint k = 0u; k < delay_whole; k++) {
-            sum += data[ring_offs + k];
+        else if (lane == 0u) {
+            for (uint i = 0u; i < delay_whole; i++) {
+                data[ring_offs + i] = float(pcg_hash(note_seed + i) & 0xFFFFu) / 32767.5 - 1.0;
+            }
         }
-        const float mean = sum / float(delay_whole);
-        for (uint k = 0u; k < delay_whole; k++) {
-            data[ring_offs + k] -= mean;
+        memoryBarrierBuffer();
+        memoryBarrierShared();
+        barrier();
+        if (lane == 0u) {
+            float sum = 0.0;
+            for (uint k = 0u; k < delay_whole; k++) {
+                sum += data[ring_offs + k];
+            }
+            const float mean = sum / float(delay_whole);
+            for (uint k = 0u; k < delay_whole; k++) {
+                data[ring_offs + k] -= mean;
+            }
+            if (pick_offset > 0u) {
+                float noise_energy = 0.0;
+                for (uint k = 0u; k < 256u; k++) {
+                    noise_energy += string_block_out[k];
+                }
+                float comb_energy = 0.0;
+                for (uint k = 0u; k < delay_whole; k++) {
+                    comb_energy += data[ring_offs + k] * data[ring_offs + k];
+                }
+                // The comb of near-white noise carries about twice the energy; match the noise RMS.
+                string_block_out[0] = comb_energy > 0.0 ? sqrt(noise_energy / comb_energy) : 1.0;
+            }
         }
-        data[base + 5u]     = string_seed_tag_lo;
-        data[base + 6u]     = string_seed_tag_hi;
-        write_pos           = delay_whole;
-        string_prev_lowpass = 0.0;
-        string_prev_allpass = 0.0;
-        string_release_gain = 1.0;
+        if (pick_offset > 0u) {
+            memoryBarrierBuffer();
+            memoryBarrierShared();
+            barrier();
+            const float comb_gain = string_block_out[0];
+            for (uint k = lane; k < delay_whole; k += 256u) {
+                data[ring_offs + k] *= comb_gain;
+            }
+            memoryBarrierBuffer();
+            barrier();
+        }
+        if (lane == 0u) {
+            data[base + 5u]     = string_seed_tag_lo;
+            data[base + 6u]     = string_seed_tag_hi;
+            write_pos           = delay_whole;
+            string_prev_lowpass = 0.0;
+            string_prev_allpass = 0.0;
+            string_release_gain = 1.0;
+        }
     }
-    else {
+    else if (lane == 0u) {
         write_pos           = floatBitsToUint(data[base]);
         string_prev_lowpass = data[base + 1u];
         string_prev_allpass = data[base + 2u];
         string_release_gain = data[base + 3u];
+    }
+
+    if (lane != 0u) {
+        return;
     }
 
     const float release_gain_target  = pow(10.0, -release_damping * 3.0 * loop_length / (sample_rate * 0.05));
@@ -387,15 +432,13 @@ void main()
 
     const bool is_string = type1 == string_wave;
     if (is_string && !(type2 != no_wave && osc_mode == osc_mode_hard_sync)) {
-        if (lane == 0u) {
-            string_pass(param.string_state_offs,
-                        param.phase_step * float(sampling_rate),
-                        param.string_damping,
-                        param.string_release_damping,
-                        param.string_pick,
-                        ((param.osc_pack >> 24) & 1u) != 0u,
-                        note_seed);
-        }
+        string_pass(param.string_state_offs,
+                    param.phase_step * float(sampling_rate),
+                    param.string_damping,
+                    param.string_release_damping,
+                    param.string_pick,
+                    ((param.osc_pack >> 24) & 1u) != 0u,
+                    note_seed);
         // barrier() alone does not publish the data[] ring writes.
         memoryBarrierBuffer();
         memoryBarrierShared();
